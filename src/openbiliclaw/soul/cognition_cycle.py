@@ -22,15 +22,19 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from openbiliclaw.soul.awareness_analyzer import AwarenessGenerationError
+from openbiliclaw.soul.confusion import ConfusionManager
+from openbiliclaw.soul.ledger import ProfileLedger
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Awaitable, Callable, Iterator
 
     from openbiliclaw.memory.manager import MemoryManager
     from openbiliclaw.soul.awareness_analyzer import AwarenessAnalyzer
@@ -94,6 +98,17 @@ _PROFILE_INSIGHT_WINDOW = 6
 # the cycle noticeably.
 _AWARENESS_RETRY_BACKOFF_SECONDS = 2.0
 
+# Early-trigger threshold (Phase 5): when this many events have accumulated
+# past the awareness watermark, run awareness ahead of the 12h throttle so a
+# heavy session doesn't wait half a day to be reflected on. Calibration
+# (first-round, pitfall #3): ~30 events is roughly a single active session;
+# re-tune after the first production month and after any event-schema change.
+_EARLY_TRIGGER_EVENT_COUNT = 30
+
+# Event types whose presence is a "strong signal" worth an early awareness
+# pass even below the count threshold (explicit user intent / authored text).
+_STRONG_EVENT_TYPES = frozenset({"comment", "danmaku", "reply", "feedback"})
+
 
 @dataclass
 class CognitionCycleResult:
@@ -128,11 +143,34 @@ class CognitionCycle:
         awareness_analyzer: AwarenessAnalyzer,
         insight_analyzer: InsightAnalyzer,
         min_interval_seconds: int = DEFAULT_MIN_INTERVAL_SECONDS,
+        pending_rebuild_hook: Callable[[], Awaitable[Any]] | None = None,
+        confusion_replay_hook: Callable[[], Awaitable[Any]] | None = None,
     ) -> None:
         self._memory = memory
         self._awareness_analyzer = awareness_analyzer
         self._insight_analyzer = insight_analyzer
         self._min_interval_seconds = int(min_interval_seconds)
+        # 12h-loop fallback trigger for the SoulEngine's debounced confirmed-
+        # hypotheses rebuild (spec invariant 4). Optional; best-effort.
+        self._pending_rebuild_hook = pending_rebuild_hook
+        # 12h crash-recovery fallback for completed confusion replies whose
+        # attribution did not reach the serial dialogue-learning owner.
+        self._confusion_replay_hook = confusion_replay_hook
+        # Single-flight guard (Phase 5): the due-check + watermark consumption
+        # must run under one lock so overlapping ticks (or an early trigger
+        # racing the 12h tick) never double-process the same events.
+        self._run_lock = asyncio.Lock()
+
+    def _profile_ledger(self) -> ProfileLedger:
+        """Best-effort audit ledger over the memory manager's database."""
+        return ProfileLedger(getattr(self._memory, "_database", None))
+
+    def _confusion_manager(self) -> ConfusionManager:
+        """Confusion state machine over the memory manager's database."""
+        return ConfusionManager(
+            getattr(self._memory, "_database", None),
+            ledger=self._profile_ledger(),
+        )
 
     # -- Public API -----------------------------------------------------------
 
@@ -142,6 +180,15 @@ class CognitionCycle:
         Returns a result describing what happened. On throttle skip, returns
         ``CognitionCycleResult(ran=False, throttled=True)``.
         """
+        # Single-flight: if a run is already in progress (long awareness call,
+        # or an overlapping tick), skip this invocation rather than block —
+        # exactly one runner consumes the watermark at a time.
+        if self._run_lock.locked():
+            return CognitionCycleResult(throttled=True)
+        async with self._run_lock:
+            return await self._run_if_due_locked(now=now)
+
+    async def _run_if_due_locked(self, *, now: datetime | None) -> CognitionCycleResult:
         current_time = now or datetime.now()
         state = self._load_state()
         result = CognitionCycleResult()
@@ -164,6 +211,12 @@ class CognitionCycle:
 
         awareness_due = self._is_due(last_awareness_at, current_time)
         insight_due = self._is_due(last_insight_at, current_time)
+
+        # Early trigger (Phase 5): a backlog of unrefined events or a strong
+        # signal (authored comment / explicit feedback) pulls the awareness pass
+        # ahead of the 12h throttle. The 12h fallback still fires via ``_is_due``.
+        if not awareness_due and self._should_early_trigger(state):
+            awareness_due = True
 
         if not awareness_due and not insight_due:
             result.throttled = True
@@ -211,6 +264,30 @@ class CognitionCycle:
         except Exception:
             logger.exception("Failed to sync cognition cycle output into profile")
 
+        # 4. Confusion TTL maintenance (Phase 2): expire wait-parked confusions
+        # past their TTL. Best-effort — never breaks the cognition cycle.
+        try:
+            self._confusion_manager().expire_due(now=current_time)
+        except Exception:
+            logger.debug("Confusion TTL sweep failed", exc_info=True)
+
+        # 5. Enumerate any completed clarifying reply that missed its durable
+        # attribution receipt. The hook only submits the dedicated typed replay
+        # command; analysis and mutation remain in the settlement worker.
+        if self._confusion_replay_hook is not None:
+            try:
+                await self._confusion_replay_hook()
+            except Exception:
+                logger.debug("Confusion attribution replay failed", exc_info=True)
+
+        # 6. 12h-loop fallback: trigger the debounced confirmed-hypotheses
+        # rebuild (spec invariant 4). Best-effort — never breaks the cycle.
+        if self._pending_rebuild_hook is not None:
+            try:
+                await self._pending_rebuild_hook()
+            except Exception:
+                logger.debug("Pending rebuild hook failed during cognition cycle", exc_info=True)
+
         self._save_state(state)
         return result
 
@@ -225,6 +302,26 @@ class CognitionCycle:
             return True
         elapsed = (now - last_run_at).total_seconds()
         return elapsed >= self._min_interval_seconds
+
+    def _should_early_trigger(self, state: dict[str, Any]) -> bool:
+        """True when unrefined events warrant an awareness pass before 12h.
+
+        Reads the newest events past the awareness watermark once (bounded by
+        the count threshold) and fires when either there are enough of them or
+        any is a strong signal. Best-effort — a query failure never triggers.
+        """
+        watermark = _coerce_int(state.get("last_awareness_event_id", 0))
+        try:
+            rows = self._memory.query_events(
+                after_event_id=watermark,
+                limit=_EARLY_TRIGGER_EVENT_COUNT,
+            )
+        except Exception:
+            logger.debug("early-trigger event probe failed", exc_info=True)
+            return False
+        if len(rows) >= _EARLY_TRIGGER_EVENT_COUNT:
+            return True
+        return any(_is_strong_signal_event(row) for row in rows)
 
     async def _run_awareness(self, state: dict[str, Any]) -> int:
         """Fold events newer than the watermark into awareness notes.
@@ -265,14 +362,23 @@ class CognitionCycle:
         total_added = 0
         for batch_index, batch in enumerate(_chunk(rows, _AWARENESS_EVENT_BATCH_SIZE)):
             events_for_call = (lookback + batch) if batch_index == 0 else batch
-            new_notes = await self._awareness_with_retry(
-                events_for_call, preference, soul_profile_data
+            # Evidence chain: attribute produced notes to THIS round's consumed
+            # events (the batch), not the read-only lookback context.
+            batch_event_ids = [_coerce_int(item.get("id", 0)) for item in batch]
+            batch_event_ids = [eid for eid in batch_event_ids if eid > 0]
+            new_notes, confusion_candidates = await self._awareness_with_retry(
+                events_for_call, preference, soul_profile_data, batch_event_ids
             )
             if new_notes:
                 existing = self._load_awareness_notes()
                 merged = self._awareness_analyzer.merge_notes(existing, new_notes)
                 total_added += max(0, len(merged) - len(existing))
                 self._save_awareness_notes(merged)
+            if confusion_candidates:
+                try:
+                    self._confusion_manager().create_from_awareness_candidates(confusion_candidates)
+                except Exception:
+                    logger.debug("Failed to persist confusion candidates", exc_info=True)
             # Advance the watermark past this chunk and persist immediately so a
             # failure in a later chunk doesn't reprocess this one next tick.
             batch_max_id = max(_coerce_int(item.get("id", 0)) for item in batch)
@@ -286,22 +392,30 @@ class CognitionCycle:
         events: list[dict[str, Any]],
         preference: dict[str, Any],
         soul_profile_data: dict[str, Any],
-    ) -> list[AwarenessNote]:
-        """One awareness analyze call with a single retry on structured failure."""
+        source_event_ids: list[int],
+    ) -> tuple[list[AwarenessNote], list[dict[str, Any]]]:
+        """One awareness+confusions call with a single retry on structured failure.
+
+        Switching to ``analyze_with_confusions`` (new independent builder) is an
+        intentional behaviour change vs the legacy ``analyze()`` path — recorded
+        via A/B in the PR (quality guardrail). Returns ``(notes, confusions)``.
+        """
         try:
-            return await self._awareness_analyzer.analyze(
+            return await self._awareness_analyzer.analyze_with_confusions(
                 events=events,
                 preference=preference,
                 soul_profile=soul_profile_data,
                 max_tokens=_COGNITION_MAX_TOKENS,
+                source_event_ids=source_event_ids,
             )
         except AwarenessGenerationError:
             await asyncio.sleep(_AWARENESS_RETRY_BACKOFF_SECONDS)
-            return await self._awareness_analyzer.analyze(
+            return await self._awareness_analyzer.analyze_with_confusions(
                 events=events,
                 preference=preference,
                 soul_profile=soul_profile_data,
                 max_tokens=_COGNITION_MAX_TOKENS,
+                source_event_ids=source_event_ids,
             )
 
     def _awareness_lookback(self, watermark: int) -> list[dict[str, Any]]:
@@ -406,9 +520,26 @@ class CognitionCycle:
         profile.active_insights = all_insights[-_PROFILE_INSIGHT_WINDOW:]
         profile.updated_at = datetime.now().isoformat()
 
-        soul_layer.data.clear()
-        soul_layer.data.update(profile.to_dict())
-        soul_layer.save()
+        # Ledger write point D5 #8: cognition sync (awareness/insight → soul).
+        with self._profile_ledger().action(
+            write_point="cognition_sync",
+            source="cognition_cycle",
+            before={
+                "awareness_generated": result.awareness_generated,
+                "insight_generated": result.insight_generated,
+            },
+            source_refs=[
+                f"awareness_generated:{result.awareness_generated}",
+                f"insight_generated:{result.insight_generated}",
+            ],
+        ) as _entry:
+            soul_layer.data.clear()
+            soul_layer.data.update(profile.to_dict())
+            soul_layer.save()
+            _entry.after = {
+                "awareness_after": len(all_notes),
+                "insight_after": len(all_insights),
+            }
 
         # Also sync the markdown/json files so the filesystem-visible profile
         # reflects the new awareness/insights.
@@ -476,11 +607,21 @@ class CognitionCycle:
         if path is None:
             return
         path.parent.mkdir(parents=True, exist_ok=True)
+        # Atomic write (Phase 5): serialize to a sibling temp file, then rename
+        # over the target. A crash mid-write leaves the previous state intact
+        # instead of a truncated/corrupt JSON that would reset the watermark.
+        tmp_path = path.with_name(f"{path.name}.tmp")
         try:
-            with open(path, "w", encoding="utf-8") as f:
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(state, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, path)
         except OSError:
             logger.debug("Failed to save cognition cycle state", exc_info=True)
+            with suppress(OSError):
+                if tmp_path.exists():
+                    tmp_path.unlink()
 
 
 def _parse_iso(value: Any) -> datetime | None:
@@ -490,6 +631,25 @@ def _parse_iso(value: Any) -> datetime | None:
         return datetime.fromisoformat(value)
     except ValueError:
         return None
+
+
+def _is_strong_signal_event(event: dict[str, Any]) -> bool:
+    """A single event carrying explicit intent worth an early awareness pass.
+
+    Strong = an authored comment/danmaku/reply with non-empty text, an explicit
+    feedback event, or any event the satisfaction classifier marked
+    positive/negative (an explicit like/dislike-shaped signal).
+    """
+    etype = str(event.get("event_type", "")).strip().lower()
+    if etype in _STRONG_EVENT_TYPES:
+        if etype in {"feedback", "reply"}:
+            return True
+        # comment / danmaku only count when they carry text (not an empty ping).
+        text = str(event.get("title", "") or event.get("comment_text", "") or "").strip()
+        if text:
+            return True
+    sat = str(event.get("inferred_satisfaction", "")).strip().lower()
+    return sat in {"positive", "negative"}
 
 
 def _coerce_int(value: Any) -> int:

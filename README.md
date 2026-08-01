@@ -209,11 +209,11 @@
 
 ## 最近更新
 
-📌 最新版本：**v0.3.186（2026-07-31）**
+📌 最新版本：**v0.3.191（2026-07-30）**
 
-- **视觉评分几何重设计** —— liked/disliked 封面在视觉空间重叠，改用 margin 评分：能分清的区域才 boost/suppress，分不清的 contested 区弃权，匹配你品味的 kigurumi / 角色展示 / MV 被正确抬升。
-- **冷启动门控** —— 反馈太少时不建质心，避免噪声主导的脆弱画像；攒够 8 个封面再启用，此前排序不变。
-- **跨平台公平** —— B 站独有的弹幕 / 关键帧信号不再结构性压低 bangumi / 小红书，各平台按自身池归一化，bangumi 重新回到榜单。
+- **保存配置不再打断长时间对话任务** —— 热重载会等待已有任务安全结束，并在超过前端等待预算时明确提示后台仍在处理。
+- **待聊卡片打开与“稍后”操作更可靠** —— worker 忙时会自动重试，延后当前话题后下一条待聊内容也能正常出现。
+- **Web 实时连接更稳定** —— 空闲心跳、短暂断线状态和自动重连均已补齐，不再把网络抖动误报为后端离线。
 
 完整变更详见 [docs/changelog.md](docs/changelog.md)。
 
@@ -331,7 +331,7 @@ openbiliclaw start
 - **桌面端**：浏览器直接访问 `http://127.0.0.1:8420/web`（或 `http://127.0.0.1:8420/`，自动跳转）。大屏两栏布局，推荐流、画像、聊天、消息和设置全在一页。
 - **移动端**：点击插件顶部的手机图标扫二维码，或手动输入 `http://<电脑局域网 IP>:8420/m/`。适合手机上刷推荐、看画像、和阿B聊天。
 
-> 首次运行 `openbiliclaw init` 时会询问是否允许局域网访问（默认 Y）。如果选了 N 或想改回来，编辑 `config.toml` 的 `[api].host`（`0.0.0.0` = 局域网可达，`127.0.0.1` = 仅本机）。
+> 首次运行 `openbiliclaw init` 时会询问是否允许局域网访问（默认 Y）。如果选了 N 或想改回来，编辑 `config.toml` 的 `[api].host`（`0.0.0.0` = 通过可用的 IPv4 / IPv6 局域网访问，`127.0.0.1` = 仅本机）。二维码优先使用 IPv4；仅有 IPv6 时会自动生成带方括号的 IPv6 地址。
 
 打开 `/m/` 后可以把手机页面保存成桌面快捷入口：iPhone / iPad 用 Safari 的「分享 → 添加到主屏幕」；Android Chrome / Chromium 浏览器用菜单里的「安装应用」或「添加到主屏幕」。局域网 HTTP 在部分 Android 浏览器上可能只生成快捷方式；如果想要更稳定的完整 PWA 安装提示，建议在可信环境里用 HTTPS 反代访问本机后端。
 
@@ -594,8 +594,21 @@ background ─ background admission (default 3) ──────┘
 引导初始化：信号 → 偏好 → 完整画像提交 → 发现 → 评估 → 推荐文案 → canonical 内容可用
                                                      └→ 终态后再调度可选探针
 
-配置草稿 → /api/config/discover-models → 精确实例 GET /models（不写配置）
-         → 可编辑模型下拉 + 本地 Effort 建议（协议不提供能力枚举）
+配置恢复草稿（正常或降级；业务 API 仍阻断）
+         ├→ /api/config/probe-service → 临时 registry → 总并发 gate
+         └→ /api/config/discover-models → 精确实例 GET /models（不写配置）
+                                      → 可编辑模型下拉 + 本地 Effort 建议
+持久对话回复：固定时间/payload → queued mode → 11-kind typed 结算单队列 → actual worker + guard
+确认入口（待聊列表/卡片）→ 单锚(kind+ref+generation) → 全入口 frozen admission / 归属矩阵
+                       ├→ 待聊≤3 · 主动零冷却 / 系统12h+对象72h · 确认先于用户附着
+                       ├→ worker忙：dialogue_busy + Retry-After → 两端等待态自动重试
+                       ├→ 已澄清疑惑：只展示当前持有者；当前 session 已有 turn 则隐藏
+                       ├→ frozen kind/ref/generation → worker-only apply → event/object/derived/marker → applied
+                       │                                                └→ publication-only retry → 跨 session 投影 / 精确解锚
+                       ├→ action 本地≤1s：完成 200 / 阻塞 202 → popup/桌面 1/2/5s 轮询≤30s
+                       └→ 疑惑 FIFO≤5 / 队头 fencing / 12h 补扫
+配置热重载：保持接单并排空旧 worker → 原子暂停/revoke → 新 worker；安全窗25分钟
+实时连接：runtime-stream 20s idle 心跳 → 短暂 close 显示重连中并自动续连
 ```
 
 ```
@@ -604,9 +617,10 @@ background ─ background admission (default 3) ──────┘
 │   行为采集 · MAIN-world tap（评论/弹幕·xhs强信号）│
 │   Cookie 同步 · 平台任务 · 侧边栏推荐             │
 └──────────────────────┬─────────────────────────┘
-                       │ REST API / WebSocket
+                       │ HTTP 默认：IPv4 0.0.0.0 + IPv6 [::] → REST / WebSocket
+                       │ HTTPS 可选：TLS Proxy :8443 → loopback/Compose HTTP → 同一 API
                        │ + 桌面 Web (/web) · 移动 Web (/m) · QR LAN-IP
-                       │ + ping 预检降级 → /web · /setup · /m → 配置后重启
+                       │ + ping 预检降级 → /web · /setup · /m → 配置后原地恢复
 ┌──────────────────────▼─────────────────────────┐
 │                  Agent 编排层                    │
 │ Skill · 对话 · Runtime · 反馈 10s 可撤销提交屏障    │
@@ -614,14 +628,19 @@ background ─ background admission (default 3) ──────┘
 │  Soul   │  Memory  │ Discovery │ Recommendation │
 │ 灵魂画像 │ 五层记忆  │多源发现+准入│   推荐与表达     │
 ├─────────┴──────────┴───────────┴───────────────┤
+│ 兴趣：事件/对话/反馈(priority) → 统一管线      │
+│       ProfileUpdatePipeline → INTEREST         │
+│ 旧反馈批：unified_interest_line=false 时启用   │
 │ 初始化屏障：完整画像落盘 → 发现/评估/表达 → 可浏览推荐 │
+│ Soul 认知纪律：待聊双轨冷却 · 单对话锚 · worker-only 结算 · 轻量 winner receipt · 疑惑 FIFO · 台账 · 深层门控 │
+│   LLM 适配层 · 多平台源适配（SourceAdapter）        │
 │   模块路由 → LLM 实例链 → Provider 适配 · 多平台源适配（SourceAdapter） │
-│   配置草稿 → 精确实例 /models → 可编辑选择（不写盘）      │
+│   配置恢复草稿（正常/降级）→ 临时探测 / 精确实例 /models（不写盘）│
 │  来源族注册表：alias · strategy · URL host             │
 │             → pool 统计 · seen_items 持久化已看账本     │
 │ Bangumi 官方匿名 API → search/ranked/latest producer → shared eval │
 │ API projected 库存 → 3×30 worker → 串行入池；OpenClaw 首批≤4 → copy≤4/不拆分重试 → 四端 │
-│ 惊喜就绪门：正式推荐词/主题就绪 → 打分并原子快照 → 四端 │
+│ 惊喜就绪门：正式推荐词/主题就绪 + seen_items 硬过滤 → 打分并原子快照 → 四端 × 写回已看账本 │
 │ API/OpenClaw 启动钩子 → 历史恢复/原子维护 → 再暴露 LLM │
 │ 换屏快路：当前卡硬排除 → PoolServeSnapshot/seen_items → recommendation+shown 短事务 → 单条 reshuffle 事件 │
 │ 平台定向（仅 PC Web Tab）：source_platform → 平台候选（不跨平台补位）→ 同一排序/文案/持久化 │
@@ -630,6 +649,7 @@ background ─ background admission (default 3) ──────┘
 │ /api/saved/* · 保存 Router · B 站原生保存 Adapter      │
 │ 六平台 Adapter → ExtensionNativeSaveBroker → extension_native_save_jobs │
 │ 六平台 source task multiplex：xhs / dy / yt / x / zhihu / reddit       │
+│ XHS 自动任务：来源/调度领取门 → SQLite 节流/风控冷却 → 关闭或限流时不开新 tab │
 │ extension_native_save_jobs -> /api/sources/<slug>/next-task -> installed extension │
 │ exact OpenBiliClaw / YouTube Watch Later 目标 → 安全 task-result          │
 │ trusted-local E2E 精确授权 → 单 item saved sync → 六字段安全 callback      │
@@ -638,16 +658,25 @@ background ─ background admission (default 3) ──────┘
 │ 六平台 adapter → broker → shared MV3 recovery barrier → Reddit/X/YT/XHS/DY/Zhihu executor（6/6 fixture + real-account）│
 └────────────────────────────────────────────────┘
 
-Web / CLI / OpenClaw → SocraticDialogue → 成功：user+agent 历史 → 后台学习（绕过后台门禁，保留总并发）
-                                      │                      └新避雷：共享清池 → content_cache
-                                      └失败/超时：回滚临时历史 → 安全错因 / failed turn
+Web/API durable → SocraticDialogue(queued) → user+agent 历史 → typed queue[全部 declared entries] → 单 worker 在线内学习/结算
+CLI/OpenClaw → SocraticDialogue(legacy_direct) → user+agent 历史 → 队列/guard 外 direct learning
+学习 → 绕过后台门禁、保留总并发 ── 新避雷：共享清池 → content_cache
+失败/超时 → 回滚临时历史 → 安全错因 / failed turn
+durable turn → 固定时间/payload → 确认入口（待聊列表/卡片） → frozen anchor admission → relation matrix
+                                                   └→ 卡片/锚/chat/probe/confusion/replay/legacy 全部 worker-only
+卡片 action → 同步 200（空队列快路）| 202 processing → popup/桌面轮询；移动/CLI 无 action
 
 桌面首屏：推荐 hydration │ runtime hydration │ health/profile/activity/config 次级 hydration（三分支独立）
 
 海外请求：设置页 `[network].mode` → 系统代理（默认）/ 直连 / 自定义代理 → LLM、YouTube、X/Reddit CLI、Bangumi、更新；国内平台保持独立直连
+手动抖音发现：CLI discover → daemon 同款 producer → 统一关键词终态 → 插件 search/hot/feed → 待评估池
 ```
 
 远程扩展连接采用显式、默认关闭的设备认证：`ext-key generate` → 配置仅存摘要 → `/api/auth/extension-token` 换短会话；HTTP 使用 Bearer Header，WebSocket / 图片代理仅携带短会话 query。
+
+可信局域网 / 自管环境可额外启用默认关闭的 [TLS Proxy](docs/https-deployment.md)：精确校验
+HTTPS Origin/Host、转发 WebSocket，并为本地 CA 证书管理显式 SAN。无远程 SAN 时证书只适合
+localhost；该轻量组件不定位为公网生产网关，默认 HTTP 路径完全不变。
 
 > 完整架构细节（runtime 状态机、候选池计数、画像覆盖层等）见 [架构设计](docs/architecture.md) 与 [可视化架构图](docs/index.md#可视化架构图)。
 
@@ -659,7 +688,7 @@ Web / CLI / OpenClaw → SocraticDialogue → 成功：user+agent 历史 → 后
 |------|----------|------|
 | **B 站** | 搜索 · 趋势 · 关联链 · 跨域探索 | 后端 WBI 签名 API 直连，降级时插件真实搜索页兜底 |
 | **小红书** | 被动收集 · 搜索 · 创作者订阅 · 初始化导入 | 插件在已登录页面读取，零后端爬取 |
-| **抖音** | 初始化导入 · 搜索 · 热点 · 推荐流 | 插件后台 tab 模拟 DOM 操作，不抢用户焦点 |
+| **抖音** | 初始化导入 · 搜索 · 热点 · 推荐流 | CLI/daemon 共用正式 producer，插件后台 tab 模拟 DOM 操作，候选统一进入待评估池 |
 | **YouTube** | 初始化导入 · Takeout 离线导入 · 搜索 / 热门 / 频道 | 插件读画像信号，日常发现后端直连补池 |
 | **X（Twitter）** | 初始化导入 · 搜索 · For-You · 关注作者 | discovery 使用服务端只读 cookie 重放；原生书签 executor 已接入但未实号验证 |
 | **知乎** | 初始化导入 · 搜索 · 热榜 · 推荐 · 作者 · 相关 | 插件在已登录 tab 内读取，返回文字卡片 |
@@ -707,7 +736,8 @@ OpenBiliClaw/
 │   │   └── web_adapter        # 通用 Web (Playwright + LLM)
 │   ├── youtube/               # YouTube Takeout 离线导入解析
 │   ├── api/                   # 本地 FastAPI (配置回滚 / 降级模式 / popup API)
-│   ├── runtime/               # 后台刷新、feedback 合并、presence gate、autostart/Ollama、降级 RuntimeContext
+│   ├── tls_proxy.py           # 默认关闭的 LAN/self-managed HTTPS 入口
+│   ├── runtime/               # 后台刷新、feedback 合并、presence gate、CLI/桌面共享 autostart 对账、Ollama、降级 RuntimeContext
 │   ├── bilibili/              # B 站接入层 (WBI 签名 · 速率控制)
 │   ├── llm/                   # 多模型 LLM 适配 + 结构化 JSON 容错
 │   └── storage/               # 数据存储层
@@ -732,6 +762,7 @@ OpenBiliClaw/
 | 知乎交互 | 扩展任务调度在已登录浏览器内读取事件 smoke / 初始化画像信号和 search / hot / feed / creator / related 候选；回答 / 文章 / 问题为纯文本卡片 |
 | Reddit 交互 | 默认安装内置 rdt-cli，读取 search / hot / subreddit / related 候选；插件自动同步 `reddit_session` 到 rdt credential，`rdt login` 仅作手动 fallback；rdt 未登录 / 不可用或显式选择 extension 时，扩展任务调度在已登录浏览器内读取 discovery；bootstrap saved/upvoted/subscribed 始终走插件；帖子 / 评论为纯文本卡片 |
 | Bangumi 交互 | 官方匿名只读 v0 API；search / ranked / 按日期浏览进入统一候选池，可选公开用户名读取公开收藏用于初始化；不收 Cookie/token，不做站内写回 |
+| 可选 TLS | Python 标准库 HTTP/TLS 转发 + `[tls]` extra 的 cryptography 证书生成；仅 LAN/self-managed，默认关闭 |
 | 存储 | SQLite + Embedding 向量索引 |
 | 容器化 | Docker Compose (后端) |
 | Agent 框架 | 自研轻量框架 |

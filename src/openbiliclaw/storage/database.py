@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import hashlib
 import json
 import logging
 import math
@@ -19,9 +20,10 @@ import threading
 import time
 import unicodedata
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -78,18 +80,54 @@ from openbiliclaw.sources.platforms import (
 )
 
 if TYPE_CHECKING:
-    from datetime import datetime
-
     from openbiliclaw.saved_sync.extension_broker import ExtensionNativeSaveJob
 
 logger = logging.getLogger(__name__)
-
 
 # Cap the probe so a long legitimate blurb never costs a full parse. Real
 # copy is a sentence or two; a serialized batch payload is far longer than
 # this, but the prefix alone is enough to identify one.
 _LLM_PAYLOAD_PROBE_MAX_CHARS = 512
 _LLM_PAYLOAD_MARKERS = ("expression", "topic_label", "reason", "topic_group")
+_CARD_SETTLEMENT_REF_MAX_CHARS = 1024
+_CARD_SETTLEMENT_EFFECT_NAMES = frozenset({"event"})
+_CARD_SETTLEMENT_EFFECT_KEY_RE = re.compile(r"\Adialogue:[0-9a-f]{64}:[a-z_]+\Z")
+_PROFILE_LEDGER_EFFECT_KEY_RE = re.compile(
+    r"\Adialogue:[0-9a-f]{64}:(?:ledger|derived:[0-9a-f]{64})\Z"
+)
+
+
+def _validated_card_settlement_ref(ref: object) -> str:
+    """Return a bounded, non-control settlement ref for stable-key derivation."""
+    normalized = str(ref).strip()
+    if (
+        not normalized
+        or len(normalized) > _CARD_SETTLEMENT_REF_MAX_CHARS
+        or any(unicodedata.category(character).startswith("C") for character in normalized)
+    ):
+        raise ValueError("Card settlement ref is invalid")
+    return normalized
+
+
+def _card_settlement_effect_key(ref: object, effect: str) -> str:
+    """Build one fixed-shape effect key without exposing SQL identifiers."""
+    normalized_effect = effect.strip()
+    if normalized_effect not in _CARD_SETTLEMENT_EFFECT_NAMES:
+        raise ValueError(f"Unsupported card settlement effect: {effect!r}")
+    normalized_ref = _validated_card_settlement_ref(ref)
+    digest = hashlib.sha256(normalized_ref.encode("utf-8")).hexdigest()
+    key = f"dialogue:{digest}:{normalized_effect}"
+    if not _CARD_SETTLEMENT_EFFECT_KEY_RE.fullmatch(key):  # pragma: no cover - construction proof
+        raise RuntimeError("Card settlement effect key construction failed")
+    return key
+
+
+def _validated_profile_ledger_effect_key(effect_key: object) -> str:
+    """Accept only fixed-shape worker-generated keys; blank keeps legacy append mode."""
+    normalized = str(effect_key or "").strip()
+    if normalized and not _PROFILE_LEDGER_EFFECT_KEY_RE.fullmatch(normalized):
+        raise ValueError("Profile ledger effect key is invalid")
+    return normalized
 
 
 def _looks_like_serialized_llm_payload(value: str) -> bool:
@@ -307,6 +345,16 @@ _VIEW_CONTENT_ID_METADATA_KEYS = (
     "yt_video_id",
     "post_id",
 )
+# Event types that prove the user already consumed a piece of content, and so
+# feed the durable seen ledger. ``view`` was the only member until 2026-07-26,
+# which meant a video the user had explicitly favourited (or liked, or coined)
+# but whose view event predated the history window could come back as a "new"
+# recommendation. You cannot favourite something you never saw.
+_SEEN_ITEM_EVENT_TYPES = frozenset({"view", "favorite", "like", "coin"})
+_SEEN_ITEM_EVENT_TYPES_ORDERED = tuple(sorted(_SEEN_ITEM_EVENT_TYPES))
+# Bump whenever _SEEN_ITEM_EVENT_TYPES grows, so existing installs rewind the
+# backfill cursor once and pick up the newly eligible history.
+_SEEN_ITEM_EVENT_TYPES_VERSION = 1
 _KEYWORD_KIND_REGULAR = "regular"
 _KEYWORD_KIND_EXPLORE = "explore"
 _KEYWORD_KINDS = {_KEYWORD_KIND_REGULAR, _KEYWORD_KIND_EXPLORE}
@@ -708,6 +756,17 @@ def _delight_ready_copy_sql() -> str:
     """
 
 
+def _delight_unseen_guard_sql() -> str:
+    """Exclude canonical identities already present in the durable seen ledger."""
+    return """
+                      AND NOT EXISTS (
+                        SELECT 1
+                        FROM seen_items AS seen
+                        WHERE seen.item_key = content_cache.item_key
+                      )
+    """
+
+
 # Rows claimed by the surprise (delight) channel: already delivered as a
 # delight, or scored above the current threshold with its formal pool copy
 # synchronized into the delight snapshot. Requiring the exact snapshot keeps
@@ -945,6 +1004,21 @@ CREATE TABLE IF NOT EXISTS bangumi_discovery_state (
     updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Shared producer cadence ledger. Douyin / YouTube / X / Zhihu / Reddit used to
+-- keep "when did I last run" in a Python attribute, so a backend restart wiped
+-- the floor and the next tick fired immediately — measured on real data, 5 of
+-- 55 Reddit rounds landed 8-40 minutes apart under a 60-minute setting. Rows
+-- are written only for runs that actually produced candidates, which also stops
+-- an empty run from burning a whole interval it should have retried inside.
+CREATE TABLE IF NOT EXISTS source_producer_runs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    platform    TEXT NOT NULL,
+    discovered  INTEGER NOT NULL DEFAULT 0,
+    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_source_producer_runs_platform_created
+    ON source_producer_runs(platform, created_at);
+
 -- Recommendation history
 CREATE TABLE IF NOT EXISTS recommendations (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -975,6 +1049,7 @@ CREATE TABLE IF NOT EXISTS chat_turns (
     status        TEXT NOT NULL DEFAULT 'pending',
     reply         TEXT NOT NULL DEFAULT '',
     error         TEXT NOT NULL DEFAULT '',
+    payload       TEXT NOT NULL DEFAULT '{}',
     created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -982,6 +1057,20 @@ CREATE INDEX IF NOT EXISTS idx_chat_turns_session_created
     ON chat_turns(session, created_at, turn_id);
 CREATE INDEX IF NOT EXISTS idx_chat_turns_scope_subject
     ON chat_turns(scope, subject_id, created_at);
+
+-- Atomic winner receipt for durable dialogue-confirmation cards. Dialogue
+-- effects are serialized by the single in-process settlement worker.
+CREATE TABLE IF NOT EXISTS card_settlements (
+    ref        TEXT PRIMARY KEY,
+    verdict    TEXT NOT NULL,
+    turn_id    TEXT NOT NULL,
+    payload    TEXT NOT NULL DEFAULT '{}',
+    applied    INTEGER NOT NULL DEFAULT 0,
+    result     TEXT NOT NULL DEFAULT '{}',
+    event_id   TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 
 -- Schema version tracking
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -1009,6 +1098,69 @@ CREATE TABLE IF NOT EXISTS llm_usage (
 );
 CREATE INDEX IF NOT EXISTS idx_llm_usage_timestamp ON llm_usage(timestamp);
 CREATE INDEX IF NOT EXISTS idx_llm_usage_provider ON llm_usage(provider, model);
+
+-- v0.3.174+ (cognitive profile pipeline Phase 0): append-only audit ledger
+-- for profile write points. One row per profile-mutating action, recorded
+-- AFTER the action finishes with its ``outcome`` (success|failed). The ledger
+-- is a best-effort observer: a failed write here is logged at WARNING and
+-- never blocks the underlying profile update. ``gate_verdict`` / ``held_id``
+-- are reserved for later waves (posture gate shadow_* verdicts, confusion
+-- held-update replay) and default empty in Wave A.
+CREATE TABLE IF NOT EXISTS profile_update_ledger (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    effect_key     TEXT NOT NULL DEFAULT '',
+    write_point    TEXT NOT NULL,
+    source         TEXT NOT NULL DEFAULT '',
+    before_summary TEXT NOT NULL DEFAULT '',
+    after_summary  TEXT NOT NULL DEFAULT '',
+    diff           TEXT NOT NULL DEFAULT '',
+    source_refs    TEXT NOT NULL DEFAULT '',
+    outcome        TEXT NOT NULL DEFAULT 'success',
+    turn_id        TEXT NOT NULL DEFAULT '',
+    gate_verdict   TEXT NOT NULL DEFAULT '',
+    held_id        TEXT NOT NULL DEFAULT '',
+    error          TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_profile_ledger_timestamp
+    ON profile_update_ledger(timestamp);
+CREATE INDEX IF NOT EXISTS idx_profile_ledger_write_point
+    ON profile_update_ledger(write_point, timestamp);
+
+-- v0.3.175+ (cognitive profile pipeline Phase 2): "看不懂" (confusion) objects.
+-- A confusion is raised when a behaviour cannot be cleanly read (awareness
+-- source) or when a speculation expires in a stalemate (partial confirmation).
+-- It never writes the profile directly; it only drives downstream ask/probe/wait
+-- clarification and a topic-freeze reflex. The partial unique index enforces —
+-- across ALL connections — that at most ONE confusion is in the ``clarifying``
+-- state at any time (the durable ask budget), so the atomic claim is a single
+-- ``UPDATE ... WHERE status='open'`` that the index rejects if another row
+-- already holds the clarifying slot.
+CREATE TABLE IF NOT EXISTS confusions (
+    id                        INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at                TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at                TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    status                    TEXT NOT NULL DEFAULT 'open',
+    source                    TEXT NOT NULL DEFAULT '',
+    topic                     TEXT NOT NULL DEFAULT '',
+    observation               TEXT NOT NULL DEFAULT '',
+    interpretation            TEXT NOT NULL DEFAULT '',
+    interpretation_confidence REAL NOT NULL DEFAULT 0.0,
+    evidence_refs             TEXT NOT NULL DEFAULT '[]',
+    resolution                TEXT NOT NULL DEFAULT '',
+    resolution_note           TEXT NOT NULL DEFAULT '',
+    asked_at                  TIMESTAMP,
+    ask_turn_id               TEXT NOT NULL DEFAULT '',
+    defer_count               INTEGER NOT NULL DEFAULT 0,
+    expires_at                TIMESTAMP,
+    held_updates              TEXT NOT NULL DEFAULT '[]',
+    replay_queue              TEXT NOT NULL DEFAULT '[]',
+    resolved_at               TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_confusions_clarifying_unique
+    ON confusions(status) WHERE status = 'clarifying';
+CREATE INDEX IF NOT EXISTS idx_confusions_status
+    ON confusions(status, updated_at);
 """
 
 
@@ -1276,6 +1428,8 @@ class Database:
         self._normalize_legacy_style_keys()
         self._ensure_llm_usage_cache_columns()
         self._ensure_chat_turns_table()
+        self._ensure_profile_update_ledger_table()
+        self._ensure_confusions_table()
         self._ensure_watch_later_table()
         self._ensure_discovery_keywords_table()
         self._ensure_favorites_table()
@@ -1735,43 +1889,46 @@ class Database:
         """
         params = self._event_insert_params(event_type, kwargs)
         attempts = _LOCK_RETRY_ATTEMPTS
-        self._ensure_fresh_read()
-        while True:
-            try:
-                cursor = self.conn.execute(
-                    "INSERT INTO events "
-                    "(event_type, url, title, context, metadata, "
-                    " inferred_satisfaction, satisfaction_reason) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    params,
-                )
-                event_id = int(cursor.lastrowid or 0)
-                seen_changed = False
-                if event_type == "view" and event_id > 0:
-                    seen_changed = self._upsert_seen_items_from_view_event_on(
-                        self.conn,
-                        event_id=event_id,
-                        row={"url": params[1], "metadata": params[4]},
+        conn = self.open_connection()
+        try:
+            while True:
+                try:
+                    cursor = conn.execute(
+                        "INSERT INTO events "
+                        "(event_type, url, title, context, metadata, "
+                        " inferred_satisfaction, satisfaction_reason) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        params,
                     )
-                self._advance_seen_items_cursor_on(self.conn, event_id)
-                self.conn.commit()
-                if seen_changed:
-                    self._invalidate_seen_state_cache()
-                return event_id
-            except sqlite3.OperationalError as exc:
-                self.conn.rollback()
-                message = str(exc).lower()
-                if "database is locked" not in message or attempts <= 1:
+                    event_id = int(cursor.lastrowid or 0)
+                    seen_changed = False
+                    if event_type in _SEEN_ITEM_EVENT_TYPES and event_id > 0:
+                        seen_changed = self._upsert_seen_items_from_view_event_on(
+                            conn,
+                            event_id=event_id,
+                            row={"url": params[1], "metadata": params[4]},
+                        )
+                    self._advance_seen_items_cursor_on(conn, event_id)
+                    conn.commit()
+                    if seen_changed:
+                        self._invalidate_seen_state_cache()
+                    return event_id
+                except sqlite3.OperationalError as exc:
+                    conn.rollback()
+                    message = str(exc).lower()
+                    if "database is locked" not in message or attempts <= 1:
+                        raise
+                    attempts -= 1
+                    logger.warning(
+                        "SQLite event+seen write locked, retrying (%s attempts left)",
+                        attempts,
+                    )
+                    time.sleep(_LOCK_RETRY_SLEEP_SECONDS)
+                except Exception:
+                    conn.rollback()
                     raise
-                attempts -= 1
-                logger.warning(
-                    "SQLite event+seen write locked, retrying (%s attempts left)",
-                    attempts,
-                )
-                time.sleep(_LOCK_RETRY_SLEEP_SECONDS)
-            except Exception:
-                self.conn.rollback()
-                raise
+        finally:
+            conn.close()
 
     @staticmethod
     def _event_insert_params(event_type: str, kwargs: Mapping[str, Any]) -> tuple[Any, ...]:
@@ -1837,7 +1994,7 @@ class Database:
                     params,
                 )
                 last_event_id = int(cursor.lastrowid or last_event_id)
-                if params[0] == "view" and last_event_id > 0:
+                if params[0] in _SEEN_ITEM_EVENT_TYPES and last_event_id > 0:
                     seen_changed = (
                         self._upsert_seen_items_from_view_event_on(
                             conn,
@@ -1928,6 +2085,54 @@ class Database:
         finally:
             conn.close()
 
+    def discount_events_by_confusion(self, evidence_refs: Sequence[str]) -> int:
+        """Discount events a proxy-resolved confusion pointed at (Phase 2 exit).
+
+        When a confusion resolves as ``proxy_behavior`` / misread, the behaviours
+        it was raised over should stop driving preference weight. For every
+        ``evidence_ref`` that parses to a stored event id, mark
+        ``metadata.discounted_by_confusion=true`` and cap ``signal_strength``
+        (same ``apply_confusion_discount`` patch the offline rereads honour).
+        Non-integer refs (topics / note ids) are skipped. Rows are never
+        deleted and non-metadata columns are never rewritten. Returns the count
+        of rows patched.
+        """
+        from openbiliclaw.sources.event_format import apply_confusion_discount
+
+        event_ids: list[int] = []
+        for ref in evidence_refs:
+            try:
+                event_ids.append(int(str(ref).strip()))
+            except (TypeError, ValueError):
+                continue
+        if not event_ids:
+            return 0
+        conn = self.open_connection()
+        try:
+            placeholders = ", ".join("?" for _ in event_ids)
+            rows = conn.execute(
+                f"SELECT id, metadata FROM events WHERE id IN ({placeholders})",
+                event_ids,
+            ).fetchall()
+            marked = 0
+            for row in rows:
+                try:
+                    metadata = json.loads(row["metadata"]) if row["metadata"] else {}
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if not isinstance(metadata, dict):
+                    continue
+                patched = apply_confusion_discount(metadata)
+                conn.execute(
+                    "UPDATE events SET metadata = ? WHERE id = ?",
+                    (json.dumps(patched, ensure_ascii=False), row["id"]),
+                )
+                marked += 1
+            conn.commit()
+            return marked
+        finally:
+            conn.close()
+
     def latest_retraction_time_for(self, url: str, action: str) -> datetime | None:
         """Return the newest stored retraction time for this identity + action.
 
@@ -1996,14 +2201,16 @@ class Database:
         scope: str = "chat",
         subject_id: str = "",
         subject_title: str = "",
+        payload: Mapping[str, object] | None = None,
     ) -> dict[str, Any]:
         """Create a pending popup chat turn if it does not already exist."""
+        serialized_payload = json.dumps(dict(payload or {}), ensure_ascii=False, sort_keys=True)
         self._execute_write(
             """
             INSERT OR IGNORE INTO chat_turns (
-                turn_id, session, scope, subject_id, subject_title, message, status
+                turn_id, session, scope, subject_id, subject_title, message, status, payload
             )
-            VALUES (?, ?, ?, ?, ?, ?, 'pending')
+            VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
             """,
             (
                 turn_id,
@@ -2012,12 +2219,195 @@ class Database:
                 subject_id or "",
                 subject_title or "",
                 message,
+                serialized_payload,
             ),
         )
         row = self.get_chat_turn(turn_id)
         if row is None:
             raise RuntimeError(f"Failed to create chat turn {turn_id!r}")
         return row
+
+    def get_chat_confirmation_turn(
+        self,
+        *,
+        ref: str,
+        session: str,
+    ) -> dict[str, Any] | None:
+        """Return the active confirmation entry for one ``(ref, session)``."""
+        conn = self.open_connection()
+        try:
+            row = conn.execute(
+                """
+                SELECT turn_id, session, scope, subject_id, subject_title, message,
+                       status, reply, error, payload, created_at, updated_at
+                FROM chat_turns
+                WHERE session = ?
+                  AND subject_id = ?
+                  AND status = 'completed'
+                  AND json_valid(payload)
+                  AND json_extract(payload, '$.ref') = ?
+                  AND (
+                        (
+                            scope = 'hypothesis'
+                            AND json_extract(payload, '$.type') = 'card'
+                            AND json_extract(payload, '$.state') IN ('pending', 'discussing')
+                        )
+                        OR (
+                            scope = 'confusion'
+                            AND json_extract(payload, '$.type') = 'question'
+                        )
+                      )
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT 1
+                """,
+                (session or "popup", ref, ref),
+            ).fetchone()
+            return self._normalize_chat_turn_row(row) if row is not None else None
+        finally:
+            conn.close()
+
+    def get_chat_confirmation_attachment(
+        self,
+        *,
+        attached_to_turn_id: str,
+        session: str,
+    ) -> dict[str, Any] | None:
+        """Return a card/question already attached to one durable user turn."""
+        conn = self.open_connection()
+        try:
+            row = conn.execute(
+                """
+                SELECT turn_id, session, scope, subject_id, subject_title, message,
+                       status, reply, error, payload, created_at, updated_at
+                FROM chat_turns
+                WHERE session = ?
+                  AND status = 'completed'
+                  AND json_valid(payload)
+                  AND json_extract(payload, '$.attached_to_turn_id') = ?
+                ORDER BY created_at ASC, rowid ASC
+                LIMIT 1
+                """,
+                (session or "popup", attached_to_turn_id),
+            ).fetchone()
+            return self._normalize_chat_turn_row(row) if row is not None else None
+        finally:
+            conn.close()
+
+    def create_chat_confirmation_turn(
+        self,
+        *,
+        turn_id: str,
+        session: str,
+        scope: str,
+        ref: str,
+        title: str,
+        message: str,
+        reply: str,
+        payload: Mapping[str, object],
+    ) -> tuple[dict[str, Any], bool]:
+        """Atomically deduplicate ``(ref, session)`` and insert a completed entry.
+
+        ``BEGIN IMMEDIATE`` serializes the lookup and INSERT across API workers.
+        The optional ``attached_to_turn_id`` payload key is checked first so a
+        crash after the card INSERT but before its user turn can resume without
+        selecting or attaching a second object.
+        """
+        normalized_scope = scope.strip()
+        if normalized_scope not in {"hypothesis", "confusion"}:
+            raise ValueError(f"Unsupported confirmation scope: {scope!r}")
+        normalized_session = session.strip() or "popup"
+        normalized_ref = ref.strip()
+        if not normalized_ref:
+            raise ValueError("Confirmation ref is required")
+        serialized_payload = json.dumps(dict(payload), ensure_ascii=False, sort_keys=True)
+        attached_to_turn_id = str(payload.get("attached_to_turn_id", "")).strip()
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row: sqlite3.Row | None = None
+            if attached_to_turn_id:
+                row = conn.execute(
+                    """
+                    SELECT turn_id, session, scope, subject_id, subject_title, message,
+                           status, reply, error, payload, created_at, updated_at
+                    FROM chat_turns
+                    WHERE session = ?
+                      AND status = 'completed'
+                      AND json_valid(payload)
+                      AND json_extract(payload, '$.attached_to_turn_id') = ?
+                    ORDER BY created_at ASC, rowid ASC
+                    LIMIT 1
+                    """,
+                    (normalized_session, attached_to_turn_id),
+                ).fetchone()
+            if row is None:
+                row = conn.execute(
+                    """
+                    SELECT turn_id, session, scope, subject_id, subject_title, message,
+                           status, reply, error, payload, created_at, updated_at
+                    FROM chat_turns
+                    WHERE session = ?
+                      AND subject_id = ?
+                      AND status = 'completed'
+                      AND json_valid(payload)
+                      AND json_extract(payload, '$.ref') = ?
+                      AND (
+                            (
+                                scope = 'hypothesis'
+                                AND json_extract(payload, '$.type') = 'card'
+                                AND json_extract(payload, '$.state')
+                                    IN ('pending', 'discussing')
+                            )
+                            OR (
+                                scope = 'confusion'
+                                AND json_extract(payload, '$.type') = 'question'
+                            )
+                          )
+                    ORDER BY created_at DESC, rowid DESC
+                    LIMIT 1
+                    """,
+                    (normalized_session, normalized_ref, normalized_ref),
+                ).fetchone()
+            if row is not None:
+                conn.commit()
+                return self._normalize_chat_turn_row(row), False
+            conn.execute(
+                """
+                INSERT INTO chat_turns (
+                    turn_id, session, scope, subject_id, subject_title,
+                    message, status, reply, error, payload
+                )
+                VALUES (?, ?, ?, ?, ?, ?, 'completed', ?, '', ?)
+                """,
+                (
+                    turn_id,
+                    normalized_session,
+                    normalized_scope,
+                    normalized_ref,
+                    title.strip(),
+                    message,
+                    reply,
+                    serialized_payload,
+                ),
+            )
+            row = conn.execute(
+                """
+                SELECT turn_id, session, scope, subject_id, subject_title, message,
+                       status, reply, error, payload, created_at, updated_at
+                FROM chat_turns
+                WHERE turn_id = ?
+                """,
+                (turn_id,),
+            ).fetchone()
+            if row is None:  # pragma: no cover - guarded by the INSERT above
+                raise RuntimeError(f"Failed to create confirmation turn {turn_id!r}")
+            conn.commit()
+            return self._normalize_chat_turn_row(row), True
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def complete_chat_turn(self, turn_id: str, *, reply: str) -> None:
         """Mark a pending popup chat turn as completed."""
@@ -2053,14 +2443,14 @@ class Database:
         cursor = self.conn.execute(
             """
             SELECT turn_id, session, scope, subject_id, subject_title, message,
-                   status, reply, error, created_at, updated_at
+                   status, reply, error, payload, created_at, updated_at
             FROM chat_turns
             WHERE turn_id = ?
             """,
             (turn_id,),
         )
         row = cursor.fetchone()
-        return dict(row) if row else None
+        return self._normalize_chat_turn_row(row) if row else None
 
     def list_chat_turns(
         self,
@@ -2080,20 +2470,824 @@ class Database:
         cursor = self.conn.execute(
             f"""
             SELECT turn_id, session, scope, subject_id, subject_title, message,
-                   status, reply, error, created_at, updated_at
+                   status, reply, error, payload, created_at, updated_at
             FROM (
-                SELECT turn_id, session, scope, subject_id, subject_title, message,
-                       status, reply, error, created_at, updated_at
+                SELECT rowid AS insertion_rowid,
+                       turn_id, session, scope, subject_id, subject_title, message,
+                       status, reply, error, payload, created_at, updated_at
                 FROM chat_turns
                 WHERE {" AND ".join(clauses)}
-                ORDER BY created_at DESC, turn_id DESC
+                ORDER BY created_at DESC, rowid DESC
                 LIMIT ?
             )
-            ORDER BY created_at ASC, turn_id ASC
+            ORDER BY created_at ASC, insertion_rowid ASC
             """,
             params,
         )
-        return [dict(row) for row in cursor.fetchall()]
+        return [self._normalize_chat_turn_row(row) for row in cursor.fetchall()]
+
+    @staticmethod
+    def _normalize_chat_turn_row(row: sqlite3.Row) -> dict[str, Any]:
+        """Decode the additive chat payload while tolerating legacy/corrupt rows."""
+        normalized = dict(row)
+        raw_payload = normalized.get("payload", "{}")
+        try:
+            parsed = json.loads(str(raw_payload or "{}"))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            parsed = {}
+        normalized["payload"] = parsed if isinstance(parsed, dict) else {}
+        return normalized
+
+    def update_chat_turn_payload_state(
+        self,
+        turn_id: str,
+        *,
+        expected_state: str,
+        new_state: str,
+    ) -> bool:
+        """Atomically move a card payload through its declared state graph."""
+        allowed_transitions = {
+            "pending": frozenset({"confirmed", "rejected", "revised", "deferred", "discussing"}),
+            "discussing": frozenset({"confirmed", "rejected", "revised", "deferred", "pending"}),
+        }
+        if new_state not in allowed_transitions.get(expected_state, frozenset()):
+            raise ValueError(
+                f"Unsupported card payload transition: {expected_state!r} -> {new_state!r}"
+            )
+        cursor = self._execute_write(
+            """
+            UPDATE chat_turns
+            SET payload = json_set(payload, '$.state', ?),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE turn_id = ?
+              AND json_valid(payload)
+              AND json_extract(payload, '$.state') = ?
+            """,
+            (new_state, turn_id, expected_state),
+        )
+        return int(cursor.rowcount or 0) == 1
+
+    def store_chat_turn_effect_receipt(
+        self,
+        turn_id: str,
+        *,
+        receipt_key: str,
+        receipt: Mapping[str, object],
+    ) -> bool:
+        """Persist one dialogue side-effect checkpoint inside the turn payload."""
+        if receipt_key not in {"probe_reply_apply", "confusion_reply_apply"}:
+            raise ValueError(f"Unsupported chat-turn effect receipt: {receipt_key!r}")
+        serialized = json.dumps(dict(receipt), ensure_ascii=False, sort_keys=True)
+        cursor = self._execute_write(
+            """
+            UPDATE chat_turns
+            SET payload = json_set(
+                    CASE WHEN json_valid(payload) THEN payload ELSE '{}' END,
+                    ?,
+                    json(?)
+                ),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE turn_id = ?
+            """,
+            (f"$.{receipt_key}", serialized, turn_id),
+        )
+        return int(cursor.rowcount or 0) == 1
+
+    def try_create_card_settlement(
+        self,
+        *,
+        ref: str,
+        verdict: str,
+        turn_id: str,
+        payload: Mapping[str, Any] | None = None,
+    ) -> bool:
+        """Atomically reserve one object verdict with SQLite INSERT OR IGNORE."""
+        normalized_ref = _validated_card_settlement_ref(ref)
+        cursor = self._execute_write(
+            """
+            INSERT OR IGNORE INTO card_settlements (ref, verdict, turn_id, payload, applied)
+            VALUES (?, ?, ?, ?, 0)
+            """,
+            (
+                normalized_ref,
+                verdict,
+                turn_id,
+                json.dumps(dict(payload or {}), ensure_ascii=False, sort_keys=True),
+            ),
+        )
+        return int(cursor.rowcount or 0) == 1
+
+    def get_card_settlement(self, ref: str) -> dict[str, Any] | None:
+        """Return the durable settlement arbitration row for one object."""
+        normalized_ref = _validated_card_settlement_ref(ref)
+        self._ensure_fresh_read()
+        row = self.conn.execute(
+            """
+            SELECT ref, verdict, turn_id, payload, applied, result, event_id,
+                   created_at, updated_at
+            FROM card_settlements
+            WHERE ref = ?
+            """,
+            (normalized_ref,),
+        ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        for field in ("payload", "result"):
+            raw_payload = result.get(field)
+            try:
+                decoded = json.loads(raw_payload) if isinstance(raw_payload, str) else raw_payload
+            except (TypeError, ValueError):
+                decoded = {}
+            result[field] = decoded if isinstance(decoded, dict) else {}
+        return result
+
+    def record_card_settlement_event_once(
+        self,
+        *,
+        ref: str,
+        event: Mapping[str, Any],
+    ) -> bool:
+        """Atomically mark and insert the receipt's stable feedback event."""
+        normalized_ref = _validated_card_settlement_ref(ref)
+        event_id = _card_settlement_effect_key(normalized_ref, "event")
+        event_type = str(event.get("event_type") or event.get("type") or "").strip()
+        if not event_type:
+            raise ValueError("Settlement event type is required")
+        params = self._event_insert_params(event_type, event)
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """
+                SELECT event_id
+                FROM card_settlements
+                WHERE ref = ?
+                """,
+                (normalized_ref,),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("Dialogue settlement receipt disappeared")
+            if str(row["event_id"] or ""):
+                conn.commit()
+                return False
+            conn.execute(
+                """
+                INSERT INTO events (
+                    event_type, url, title, context, metadata,
+                    inferred_satisfaction, satisfaction_reason
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                params,
+            )
+            updated = conn.execute(
+                """
+                UPDATE card_settlements
+                SET event_id = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE ref = ? AND event_id = ''
+                """,
+                (event_id, normalized_ref),
+            )
+            if int(updated.rowcount or 0) != 1:  # pragma: no cover - BEGIN IMMEDIATE owns writer
+                raise RuntimeError("Dialogue settlement event marker was not recorded")
+            conn.commit()
+            return True
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def complete_card_settlement(
+        self,
+        *,
+        ref: str,
+        result: Mapping[str, Any] | None = None,
+    ) -> bool:
+        """Mark a receipt applied after mandatory worker effects complete."""
+        normalized_ref = _validated_card_settlement_ref(ref)
+        cursor = self._execute_write(
+            """
+            UPDATE card_settlements
+            SET applied = 1,
+                result = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE ref = ?
+              AND applied = 0
+              AND event_id <> ''
+            """,
+            (
+                json.dumps(dict(result or {}), ensure_ascii=False, sort_keys=True),
+                normalized_ref,
+            ),
+        )
+        return int(cursor.rowcount or 0) == 1
+
+    def project_applied_card_settlement(self, ref: str) -> int:
+        """Refresh every session's card projection from an applied receipt."""
+        row = self.get_card_settlement(ref)
+        if row is None or int(row.get("applied", 0)) != 1:
+            return 0
+        terminal = {
+            "confirm": "confirmed",
+            "confirmed": "confirmed",
+            "reject": "rejected",
+            "rejected": "rejected",
+            # A revise is not a plain rejection: the user replaced the wording
+            # and accepted the corrected version, and a derived hypothesis was
+            # written. Projecting it as "rejected" made the card read 已标记不准
+            # right after the user said 我认可修正版.
+            "revise": "revised",
+            "revised": "revised",
+        }.get(str(row.get("verdict", "")).strip().lower())
+        if terminal is None:
+            return 0
+        cursor = self._execute_write(
+            """
+            UPDATE chat_turns
+            SET payload = json_set(payload, '$.state', ?),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE json_valid(payload)
+              AND json_extract(payload, '$.type') = 'card'
+              AND json_extract(payload, '$.ref') = ?
+              AND json_extract(payload, '$.state') IN ('pending', 'discussing', 'deferred')
+            """,
+            (terminal, ref),
+        )
+        return int(cursor.rowcount or 0)
+
+    def list_dialogue_history(
+        self,
+        *,
+        scopes: Sequence[str],
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Return one cross-session completed cognition history."""
+        normalized_scopes = [str(scope).strip() for scope in scopes if str(scope).strip()]
+        if not normalized_scopes:
+            return []
+        self._ensure_fresh_read()
+        placeholders = ", ".join("?" for _ in normalized_scopes)
+        cursor = self.conn.execute(
+            f"""
+            SELECT turn_id, session, scope, subject_id, subject_title, message,
+                   status, reply, error, payload, created_at, updated_at
+            FROM (
+                SELECT rowid AS insertion_rowid,
+                       turn_id, session, scope, subject_id, subject_title, message,
+                       status, reply, error, payload, created_at, updated_at
+                FROM chat_turns
+                WHERE status = 'completed' AND scope IN ({placeholders})
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT ?
+            )
+            ORDER BY created_at ASC, insertion_rowid ASC
+            """,
+            [*normalized_scopes, max(1, int(limit))],
+        )
+        return [self._normalize_chat_turn_row(row) for row in cursor.fetchall()]
+
+    # ------------------------------------------------------------------
+    # Profile update ledger (append-only audit trail)
+    # ------------------------------------------------------------------
+
+    def insert_profile_ledger(
+        self,
+        *,
+        write_point: str,
+        source: str = "",
+        before_summary: str = "",
+        after_summary: str = "",
+        diff: str = "",
+        source_refs: Sequence[str] | None = None,
+        outcome: str = "success",
+        turn_id: str = "",
+        gate_verdict: str = "",
+        held_id: str = "",
+        error: str = "",
+        effect_key: str = "",
+    ) -> int:
+        """Append one profile write-point ledger row.
+
+        Recorded AFTER the profile-mutating action finishes, with
+        ``outcome`` = ``success`` | ``failed`` (r3/R2-6: a single INSERT
+        per action, never a separate ``attempted`` pre-write). ``diff`` is
+        truncated to 2000 chars by callers; ``source_refs`` is JSON-encoded
+        here. Callers wrap this in try/except and log at WARNING — the
+        ledger must never break the underlying write.
+        """
+        refs_json = json.dumps(list(source_refs or []), ensure_ascii=False, sort_keys=True)
+        normalized_effect_key = _validated_profile_ledger_effect_key(effect_key)
+        cursor = self._execute_write(
+            """INSERT OR IGNORE INTO profile_update_ledger
+               (effect_key, write_point, source, before_summary, after_summary,
+                diff, source_refs, outcome, turn_id, gate_verdict, held_id, error)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                normalized_effect_key,
+                str(write_point),
+                str(source or ""),
+                str(before_summary or ""),
+                str(after_summary or ""),
+                str(diff or ""),
+                refs_json,
+                str(outcome or "success"),
+                str(turn_id or ""),
+                str(gate_verdict or ""),
+                str(held_id or ""),
+                str(error or ""),
+            ),
+        )
+        return (cursor.lastrowid or 0) if cursor.rowcount else 0
+
+    def query_profile_ledger(
+        self,
+        *,
+        days: int = 30,
+        write_point: str = "",
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """Return recent profile-ledger rows (newest-first) for the CLI.
+
+        ``source_refs`` is returned decoded back into a list.
+        """
+        self._ensure_fresh_read()
+        clauses = ["timestamp >= datetime('now', '-' || ? || ' day', 'localtime')"]
+        params: list[Any] = [max(1, int(days))]
+        if write_point:
+            clauses.append("write_point = ?")
+            params.append(write_point)
+        params.append(max(1, int(limit)))
+        cursor = self.conn.execute(
+            f"""
+            SELECT id, timestamp, effect_key, write_point, source, before_summary,
+                   after_summary, diff, source_refs, outcome, turn_id,
+                   gate_verdict, held_id, error
+            FROM profile_update_ledger
+            WHERE {" AND ".join(clauses)}
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            params,
+        )
+        rows: list[dict[str, Any]] = []
+        for row in cursor.fetchall():
+            record = dict(row)
+            raw_refs = record.get("source_refs") or "[]"
+            try:
+                decoded = json.loads(raw_refs)
+            except (TypeError, ValueError):
+                decoded = []
+            record["source_refs"] = decoded if isinstance(decoded, list) else []
+            rows.append(record)
+        return rows
+
+    def posture_gate_shadow_stats(self) -> dict[str, Any]:
+        """Shadow-judgement statistics for the enforce save-time guard (Phase 3).
+
+        A *valid* shadow judgement is a ledger row whose ``gate_verdict`` is one
+        of ``shadow_accept`` / ``shadow_downgrade`` / ``shadow_reject`` (a
+        ``shadow_error`` row is a provider failure, not a judgement, and does
+        not count). Returns the earliest valid judgement timestamp plus valid
+        counts within the last 14 and 7 days.
+        """
+        self._ensure_fresh_read()
+        valid = ("shadow_accept", "shadow_downgrade", "shadow_reject")
+        placeholders = ", ".join("?" for _ in valid)
+        earliest_row = self.conn.execute(
+            f"""SELECT MIN(timestamp) AS earliest FROM profile_update_ledger
+                WHERE gate_verdict IN ({placeholders})""",
+            valid,
+        ).fetchone()
+        earliest = (earliest_row["earliest"] if earliest_row else None) or ""
+
+        def _count(days: int) -> int:
+            row = self.conn.execute(
+                f"""SELECT COUNT(*) AS c FROM profile_update_ledger
+                    WHERE gate_verdict IN ({placeholders})
+                      AND timestamp >= datetime('now', '-' || ? || ' day', 'localtime')""",
+                (*valid, int(days)),
+            ).fetchone()
+            return int(row["c"]) if row else 0
+
+        return {
+            "earliest_valid_at": str(earliest),
+            "valid_count_14d": _count(14),
+            "valid_count_7d": _count(7),
+        }
+
+    # ------------------------------------------------------------------
+    # Confusion objects (Phase 2)
+    # ------------------------------------------------------------------
+
+    def insert_confusion(
+        self,
+        *,
+        source: str = "",
+        topic: str = "",
+        observation: str = "",
+        interpretation: str = "",
+        interpretation_confidence: float = 0.0,
+        evidence_refs: Sequence[str] | None = None,
+        status: str = "open",
+        expires_at: str = "",
+    ) -> int:
+        """Insert a new confusion row (defaults to ``open``). Returns its id."""
+        refs_json = json.dumps(list(evidence_refs or []), ensure_ascii=False, sort_keys=True)
+        cursor = self._execute_write(
+            """INSERT INTO confusions
+               (status, source, topic, observation, interpretation,
+                interpretation_confidence, evidence_refs, expires_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                str(status or "open"),
+                str(source or ""),
+                str(topic or ""),
+                str(observation or ""),
+                str(interpretation or ""),
+                float(interpretation_confidence or 0.0),
+                refs_json,
+                str(expires_at or "") or None,
+            ),
+        )
+        return cursor.lastrowid or 0
+
+    def get_confusion(self, confusion_id: int) -> dict[str, Any] | None:
+        """Return one confusion row by id (or ``None``)."""
+        self._ensure_fresh_read()
+        cursor = self.conn.execute(
+            "SELECT * FROM confusions WHERE id = ?",
+            (int(confusion_id),),
+        )
+        row = cursor.fetchone()
+        return self._decode_confusion_row(dict(row)) if row is not None else None
+
+    def list_confusions(
+        self,
+        *,
+        statuses: Sequence[str] | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """Return confusions filtered by ``statuses`` (newest-first)."""
+        self._ensure_fresh_read()
+        params: list[Any] = []
+        clause = ""
+        status_list = [str(s) for s in (statuses or []) if str(s)]
+        if status_list:
+            placeholders = ", ".join("?" for _ in status_list)
+            clause = f"WHERE status IN ({placeholders})"
+            params.extend(status_list)
+        params.append(max(1, int(limit)))
+        cursor = self.conn.execute(
+            f"SELECT * FROM confusions {clause} ORDER BY id DESC LIMIT ?",
+            params,
+        )
+        return [self._decode_confusion_row(dict(row)) for row in cursor.fetchall()]
+
+    def claim_confusion_clarifying(
+        self,
+        confusion_id: int,
+        *,
+        ask_turn_id: str = "",
+        asked_at: str = "",
+    ) -> bool:
+        """Atomically move an ``open`` confusion into ``clarifying``.
+
+        The partial unique index ``idx_confusions_clarifying_unique`` allows at
+        most one ``clarifying`` row across ALL connections, so a concurrent
+        claim by another connection raises ``IntegrityError`` here and we return
+        ``False`` (lost the race). A ``False`` also results when the row is not
+        ``open`` (already claimed / resolved) — rowcount 0.
+        """
+        try:
+            cursor = self._execute_write(
+                """UPDATE confusions
+                   SET status = 'clarifying',
+                       ask_turn_id = ?,
+                       asked_at = ?,
+                       updated_at = CURRENT_TIMESTAMP
+                   WHERE id = ? AND status = 'open'""",
+                (str(ask_turn_id or ""), str(asked_at or "") or None, int(confusion_id)),
+            )
+        except sqlite3.IntegrityError:
+            return False
+        return cursor.rowcount > 0
+
+    def release_orphan_confusion_claim(
+        self,
+        confusion_id: int,
+        *,
+        expected_ask_turn_id: str,
+        minimum_age_seconds: float,
+    ) -> bool:
+        """Release an aged clarifying claim only when its turn still does not exist."""
+        normalized_turn_id = str(expected_ask_turn_id or "")
+        if (
+            isinstance(minimum_age_seconds, bool)
+            or not math.isfinite(minimum_age_seconds)
+            or minimum_age_seconds < 0
+        ):
+            raise ValueError("minimum_age_seconds must be finite and non-negative")
+        stale_modifier = f"-{minimum_age_seconds:.6f} seconds"
+        cursor = self._execute_write(
+            """
+            UPDATE confusions
+               SET status = 'open',
+                   ask_turn_id = '',
+                   asked_at = NULL,
+                   updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?
+               AND status = 'clarifying'
+               AND ask_turn_id = ?
+               AND julianday(updated_at) <= julianday('now', ?)
+               AND NOT EXISTS (
+                    SELECT 1
+                      FROM chat_turns
+                     WHERE turn_id = ?
+               )
+            """,
+            (
+                int(confusion_id),
+                normalized_turn_id,
+                stale_modifier,
+                normalized_turn_id,
+            ),
+        )
+        return cursor.rowcount > 0
+
+    def update_confusion(self, confusion_id: int, **fields: Any) -> None:
+        """Update mutable confusion columns (whitelist-guarded)."""
+        allowed = {
+            "status",
+            "topic",
+            "interpretation",
+            "interpretation_confidence",
+            "resolution",
+            "resolution_note",
+            "asked_at",
+            "ask_turn_id",
+            "defer_count",
+            "expires_at",
+            "held_updates",
+            "replay_queue",
+            "resolved_at",
+        }
+        assignments: list[str] = []
+        params: list[Any] = []
+        for key, value in fields.items():
+            if key not in allowed:
+                raise ValueError(f"Unknown confusion column: {key}")
+            assignments.append(f"{key} = ?")
+            if key in {"held_updates", "replay_queue"} and not isinstance(value, str):
+                params.append(json.dumps(value, ensure_ascii=False, sort_keys=True))
+            else:
+                params.append(value)
+        if not assignments:
+            return
+        assignments.append("updated_at = CURRENT_TIMESTAMP")
+        params.append(int(confusion_id))
+        self._execute_write(
+            f"UPDATE confusions SET {', '.join(assignments)} WHERE id = ?",
+            params,
+        )
+
+    @staticmethod
+    def _decode_confusion_row(record: dict[str, Any]) -> dict[str, Any]:
+        for json_key in ("evidence_refs", "held_updates", "replay_queue"):
+            raw = record.get(json_key)
+            if isinstance(raw, str) and raw.strip():
+                try:
+                    record[json_key] = json.loads(raw)
+                except (TypeError, ValueError):
+                    record[json_key] = []
+            elif not isinstance(raw, list):
+                record[json_key] = []
+        return record
+
+    def enqueue_confusion_replay(
+        self,
+        confusion_id: int,
+        item: Mapping[str, object],
+        *,
+        max_items: int = 5,
+    ) -> list[dict[str, Any]]:
+        """Atomically append one replay item and return any oldest-first evictions."""
+        limit = max(1, int(max_items))
+        queued_item = dict(item)
+        identity = str(queued_item.get("turn_id") or queued_item.get("replay_id") or "")
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT replay_queue FROM confusions WHERE id = ?",
+                (int(confusion_id),),
+            ).fetchone()
+            if row is None:
+                conn.rollback()
+                return []
+            queue = self._decode_confusion_replay_queue(row["replay_queue"])
+            if identity and any(
+                str(existing.get("turn_id") or existing.get("replay_id") or "") == identity
+                for existing in queue
+            ):
+                conn.commit()
+                return []
+            queue.append(queued_item)
+            dropped = queue[:-limit]
+            queue = queue[-limit:]
+            conn.execute(
+                """UPDATE confusions
+                   SET replay_queue = ?, updated_at = CURRENT_TIMESTAMP
+                   WHERE id = ?""",
+                (
+                    json.dumps(queue, ensure_ascii=False, sort_keys=True),
+                    int(confusion_id),
+                ),
+            )
+            conn.commit()
+            return dropped
+        except Exception:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def pop_confusion_replay_head(self, confusion_id: int, *, expected_id: str) -> bool:
+        """Pop exactly the expected FIFO head; mismatch is a fencing failure."""
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT replay_queue FROM confusions WHERE id = ?",
+                (int(confusion_id),),
+            ).fetchone()
+            if row is None:
+                conn.rollback()
+                return False
+            queue = self._decode_confusion_replay_queue(row["replay_queue"])
+            if not queue:
+                conn.commit()
+                return False
+            head = queue[0]
+            head_id = str(head.get("turn_id") or head.get("replay_id") or "")
+            if not expected_id or head_id != expected_id:
+                conn.commit()
+                return False
+            conn.execute(
+                """UPDATE confusions
+                   SET replay_queue = ?, updated_at = CURRENT_TIMESTAMP
+                   WHERE id = ?""",
+                (
+                    json.dumps(queue[1:], ensure_ascii=False, sort_keys=True),
+                    int(confusion_id),
+                ),
+            )
+            conn.commit()
+            return True
+        except Exception:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def clear_confusion_replay_queue(self, confusion_id: int) -> list[dict[str, Any]]:
+        """Atomically clear and return every queued attribution for release auditing."""
+        conn = self.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT replay_queue FROM confusions WHERE id = ?",
+                (int(confusion_id),),
+            ).fetchone()
+            if row is None:
+                conn.rollback()
+                return []
+            queue = self._decode_confusion_replay_queue(row["replay_queue"])
+            if queue:
+                conn.execute(
+                    """UPDATE confusions
+                       SET replay_queue = '[]', updated_at = CURRENT_TIMESTAMP
+                       WHERE id = ?""",
+                    (int(confusion_id),),
+                )
+            conn.commit()
+            return queue
+        except Exception:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def list_pending_confusion_dialogue_replays(
+        self,
+        *,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Return durable queue heads plus completed-turn attribution gaps.
+
+        A resolve commits before the historical, separate FIFO pop. If the
+        process dies in that window the confusion is already terminal, so a
+        ``status='clarifying'``-only scan can never see its non-empty queue.
+        Queue recovery therefore covers *every* status; the narrower completed
+        turn scan remains limited to clarifying rows with an empty queue.
+        """
+        self._ensure_fresh_read()
+        normalized_limit = max(1, int(limit))
+        queued_rows = self.conn.execute(
+            """
+            SELECT c.id AS confusion_id,
+                   c.ask_turn_id AS ask_turn_id,
+                   COALESCE(t.turn_id, json_extract(c.replay_queue, '$[0].turn_id'), '')
+                       AS turn_id,
+                   COALESCE(t.session, '') AS session,
+                   COALESCE(t.subject_id, CAST(c.id AS TEXT)) AS subject_id,
+                   COALESCE(t.subject_title, c.topic) AS subject_title,
+                   COALESCE(t.message, '') AS message,
+                   COALESCE(t.reply, '') AS reply,
+                   COALESCE(t.created_at, c.created_at) AS created_at,
+                   COALESCE(t.updated_at, c.updated_at) AS updated_at,
+                   1 AS has_replay_queue
+            FROM confusions AS c
+            LEFT JOIN chat_turns AS t
+              ON t.turn_id = json_extract(c.replay_queue, '$[0].turn_id')
+            WHERE json_valid(c.replay_queue)
+              AND json_array_length(c.replay_queue) > 0
+            ORDER BY c.updated_at ASC, c.id ASC
+            LIMIT ?
+            """,
+            (normalized_limit,),
+        ).fetchall()
+        remaining = max(0, normalized_limit - len(queued_rows))
+        gap_rows = self.conn.execute(
+            """
+            SELECT c.id AS confusion_id,
+                   c.ask_turn_id AS ask_turn_id,
+                   t.turn_id, t.session, t.subject_id, t.subject_title,
+                   t.message, t.reply, t.created_at, t.updated_at,
+                   0 AS has_replay_queue
+            FROM confusions AS c
+            JOIN chat_turns AS t
+              ON t.scope = 'confusion'
+             AND t.subject_id = CAST(c.id AS TEXT)
+            WHERE c.status = 'clarifying'
+              AND (
+                    NOT json_valid(c.replay_queue)
+                    OR json_array_length(c.replay_queue) = 0
+                  )
+              AND t.status = 'completed'
+              AND julianday(t.updated_at) > julianday(COALESCE(c.asked_at, c.created_at))
+              AND CASE
+                    WHEN json_valid(t.payload)
+                    THEN COALESCE(
+                        json_extract(t.payload, '$.confusion_anchor_processed'),
+                        0
+                    )
+                    ELSE 0
+                  END != 1
+            ORDER BY t.updated_at ASC, t.rowid ASC
+            LIMIT ?
+            """,
+            (remaining,),
+        ).fetchall()
+        rows = [dict(row) for row in queued_rows]
+        rows.extend(dict(row) for row in gap_rows)
+        rows.sort(key=lambda row: (str(row.get("updated_at", "")), str(row.get("turn_id", ""))))
+        return rows[:normalized_limit]
+
+    def mark_confusion_dialogue_replay_processed(self, turn_id: str) -> bool:
+        """Receipt attribution in the turn payload, including while it is pending."""
+        cursor = self._execute_write(
+            """
+            UPDATE chat_turns
+            SET payload = json_set(
+                    CASE WHEN json_valid(payload) THEN payload ELSE '{}' END,
+                    '$.confusion_anchor_processed',
+                    1
+                ),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE turn_id = ?
+              AND scope = 'confusion'
+            """,
+            (turn_id,),
+        )
+        return int(cursor.rowcount or 0) == 1
+
+    @staticmethod
+    def _decode_confusion_replay_queue(raw: object) -> list[dict[str, Any]]:
+        if isinstance(raw, str):
+            try:
+                decoded = json.loads(raw)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                return []
+        else:
+            decoded = raw
+        if not isinstance(decoded, list):
+            return []
+        return [dict(item) for item in decoded if isinstance(item, dict)]
 
     # ------------------------------------------------------------------
     # LLM usage ledger
@@ -5375,8 +6569,9 @@ class Database:
         The former implementation re-ran the full servability window after
         every restored row. A 300-row recovery therefore performed hundreds
         of window-function scans while holding ``BEGIN IMMEDIATE``. We model
-        the availability/source counters in memory and let a later bounded
-        maintenance batch pick up any topic-cap displacement edge case.
+        the availability/source counters in memory; the caller then validates
+        the batch against one canonical availability scan and reverts any
+        speculative rows that did not produce net-new inventory.
         """
         clean_deficit = max(0, int(deficit))
         clean_limit = max(0, int(max_restore))
@@ -5442,8 +6637,16 @@ class Database:
             and len(restored_ids) < clean_limit
             and simulated_available < desired_available
         ):
+            fillable_rows = [
+                row
+                for row in remaining_rows
+                if current_topic_count[str(row.get("topic_group", "") or "").strip().lower()]
+                < availability_topic_cap
+            ]
+            if not fillable_rows:
+                break
             row = min(
-                remaining_rows,
+                fillable_rows,
                 key=lambda candidate: (
                     0
                     if current_family_count[
@@ -5476,13 +6679,11 @@ class Database:
             if cursor.rowcount:
                 restored_ids.append(bvid)
                 topic = str(row.get("topic_group", "") or "").strip().lower()
-                if not topic or current_topic_count[topic] < availability_topic_cap:
-                    simulated_available += 1
-                    if topic:
-                        current_topic_count[topic] += 1
-                    current_family_count[
-                        _pool_source_family(row.get("source"), row.get("source_platform"))
-                    ] += 1
+                simulated_available += 1
+                current_topic_count[topic] += 1
+                current_family_count[
+                    _pool_source_family(row.get("source"), row.get("source_platform"))
+                ] += 1
         return restored_ids
 
     def maintain_pool_inventory(
@@ -5573,11 +6774,40 @@ class Database:
                     _viewed_content_keys=viewed_content_keys,
                 )
                 recovered_set = set(recovered_ids)
-                protected_ids.update(
+                visible_recovered = {
                     str(row["bvid"])
                     for row in recovered_available_rows
                     if str(row["bvid"]) in recovered_set
-                )
+                }
+                net_available_gain = max(0, len(recovered_available_rows) - available_before)
+                # The in-memory recovery planner deliberately avoids a full
+                # ranked-window scan per row. Its estimate can still be wrong
+                # when a viewed/unlinkable row occupies a higher SQL topic
+                # rank: restoring a lower-ranked suppressed row then changes
+                # no canonical availability at all. Never let that speculative
+                # write escape the transaction. A kept recovery must map
+                # one-for-one to net-new canonical inventory; ambiguous
+                # displacement is reverted as a batch and retried only after
+                # the external pool fingerprint changes.
+                if len(visible_recovered) != net_available_gain:
+                    reverted_ids = recovered_set
+                    visible_recovered = set()
+                    recovered_available_rows = before_rows
+                else:
+                    reverted_ids = recovered_set - visible_recovered
+                if reverted_ids:
+                    self._apply_content_status_on(
+                        conn,
+                        sorted(reverted_ids),
+                        status="suppressed",
+                    )
+                    logger.debug(
+                        "pool maintenance reverted %s speculative recovery row(s) "
+                        "that did not grow canonical availability",
+                        len(reverted_ids),
+                    )
+                recovered_ids = [bvid for bvid in recovered_ids if bvid in visible_recovered]
+                protected_ids.update(visible_recovered)
             initial_raw_rows = {
                 str(row["bvid"]): row
                 for row in self._load_pool_raw_material_rows_on(
@@ -6404,6 +7634,61 @@ class Database:
                 ),
             )
         return bool(canonical_rows)
+
+    def mark_items_seen(self, source_platform: str, content_ids: Iterable[str]) -> int:
+        """Record an account-snapshot's contents as already consumed.
+
+        Some evidence that the user has seen a piece of content arrives as a
+        *list*, not an event: the favourites folder account sync fetches every
+        6 hours is the whole set, and only newly-added entries ever become
+        events. Everything the user favourited before OpenBiliClaw existed
+        therefore had no event to derive from, and stayed recommendable forever.
+
+        Snapshot rows carry ``first_event_id = 0`` because no single event
+        produced them, and existing rows are left untouched — a real event's
+        provenance and timestamps outrank a snapshot's. Returns the number of
+        identities newly added.
+        """
+        platform = canonical_source_platform(source_platform)
+        if not platform:
+            return 0
+        rows: set[tuple[str, str]] = set()
+        for raw in content_ids:
+            content_id = str(raw or "").strip()
+            if not content_id:
+                continue
+            try:
+                rows.add((make_item_key(platform, content_id), content_id))
+            except ValueError:
+                continue
+        if not rows:
+            return 0
+        added = 0
+        for item_key, content_id in sorted(rows):
+            cursor = self.conn.execute(
+                """
+                INSERT INTO seen_items (
+                    item_key,
+                    source_platform,
+                    content_id,
+                    first_event_id,
+                    last_event_id,
+                    first_seen_at,
+                    last_seen_at
+                )
+                VALUES (?, ?, ?, 0, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT(item_key) DO NOTHING
+                """,
+                (item_key, platform, content_id),
+            )
+            added += int(cursor.rowcount or 0)
+        self.conn.commit()
+        if added:
+            # The seen-state cache is keyed on MAX(last_event_id), which
+            # snapshot rows deliberately leave at 0 — without this the new
+            # identities would stay invisible until the next real event.
+            self._invalidate_seen_state_cache()
+        return added
 
     def get_seen_bvids(self) -> set[str]:
         """Return every Bilibili identity recorded in the durable seen ledger."""
@@ -7691,22 +8976,48 @@ class Database:
             ) VALUES (1, 0);
             """
         )
+        # The scan cursor is type-set aware. When _SEEN_ITEM_EVENT_TYPES grows
+        # (2026-07-26: favourites / likes / coins joined views), every existing
+        # install still has its cursor parked at the newest event, so the newly
+        # eligible history would never be scanned. Bumping the recorded version
+        # rewinds the cursor exactly once per widening.
+        existing_columns = {
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(seen_items_backfill_state)").fetchall()
+        }
+        if "scanned_event_types_version" not in existing_columns:
+            self.conn.execute(
+                "ALTER TABLE seen_items_backfill_state "
+                "ADD COLUMN scanned_event_types_version INTEGER NOT NULL DEFAULT 0"
+            )
         state = self.conn.execute(
             """
-            SELECT last_scanned_event_id
+            SELECT last_scanned_event_id, scanned_event_types_version
             FROM seen_items_backfill_state
             WHERE singleton = 1
             """
         ).fetchone()
         last_scanned_event_id = int(state["last_scanned_event_id"] if state else 0)
+        scanned_version = int(state["scanned_event_types_version"] if state else 0)
+        if scanned_version < _SEEN_ITEM_EVENT_TYPES_VERSION:
+            last_scanned_event_id = 0
+            self.conn.execute(
+                """
+                UPDATE seen_items_backfill_state
+                SET last_scanned_event_id = 0, scanned_event_types_version = ?
+                WHERE singleton = 1
+                """,
+                (_SEEN_ITEM_EVENT_TYPES_VERSION,),
+            )
+        placeholders = ", ".join("?" for _ in _SEEN_ITEM_EVENT_TYPES_ORDERED)
         rows = self.conn.execute(
-            """
+            f"""
             SELECT id, url, metadata, created_at
             FROM events
-            WHERE event_type = 'view' AND id > ?
+            WHERE event_type IN ({placeholders}) AND id > ?
             ORDER BY id ASC
             """,
-            (last_scanned_event_id,),
+            (*_SEEN_ITEM_EVENT_TYPES_ORDERED, last_scanned_event_id),
         ).fetchall()
         backfilled = 0
         for row in rows:
@@ -7728,7 +9039,7 @@ class Database:
             self._invalidate_seen_state_cache()
         if backfilled:
             logger.info(
-                "Backfilled %d legacy view event(s) into the durable seen-item ledger",
+                "Backfilled %d legacy consumed-content event(s) into the seen-item ledger",
                 backfilled,
             )
 
@@ -7973,6 +9284,7 @@ class Database:
                 status        TEXT NOT NULL DEFAULT 'pending',
                 reply         TEXT NOT NULL DEFAULT '',
                 error         TEXT NOT NULL DEFAULT '',
+                payload       TEXT NOT NULL DEFAULT '{}',
                 created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
@@ -7980,7 +9292,196 @@ class Database:
                 ON chat_turns(session, created_at, turn_id);
             CREATE INDEX IF NOT EXISTS idx_chat_turns_scope_subject
                 ON chat_turns(scope, subject_id, created_at);
+            CREATE TABLE IF NOT EXISTS card_settlements (
+                ref        TEXT PRIMARY KEY,
+                verdict    TEXT NOT NULL,
+                turn_id    TEXT NOT NULL,
+                payload    TEXT NOT NULL DEFAULT '{}',
+                applied    INTEGER NOT NULL DEFAULT 0,
+                result     TEXT NOT NULL DEFAULT '{}',
+                event_id   TEXT NOT NULL DEFAULT '',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
         """)
+        columns = {
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(chat_turns)").fetchall()
+        }
+        if "payload" not in columns:
+            self.conn.execute(
+                "ALTER TABLE chat_turns ADD COLUMN payload TEXT NOT NULL DEFAULT '{}'"
+            )
+        self._migrate_card_settlements_to_wave_2()
+
+    def _migrate_card_settlements_to_wave_2(self) -> None:
+        """Rebuild legacy claim/segment receipts into the Wave 2 winner schema."""
+        settlement_columns = {
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(card_settlements)").fetchall()
+        }
+        target_columns = {
+            "ref",
+            "verdict",
+            "turn_id",
+            "payload",
+            "applied",
+            "result",
+            "event_id",
+            "created_at",
+            "updated_at",
+        }
+        legacy_columns = {
+            "apply_claim_at",
+            "apply_claim_token",
+            "seg_event",
+            "seg_object",
+            "seg_marker",
+        }
+        if settlement_columns == target_columns:
+            return
+
+        rows = [dict(row) for row in self.conn.execute("SELECT * FROM card_settlements")]
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            self.conn.execute("DROP TABLE IF EXISTS card_settlements_wave_2")
+            self.conn.execute(
+                """
+                CREATE TABLE card_settlements_wave_2 (
+                    ref        TEXT PRIMARY KEY,
+                    verdict    TEXT NOT NULL,
+                    turn_id    TEXT NOT NULL,
+                    payload    TEXT NOT NULL DEFAULT '{}',
+                    applied    INTEGER NOT NULL DEFAULT 0,
+                    result     TEXT NOT NULL DEFAULT '{}',
+                    event_id   TEXT NOT NULL DEFAULT '',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            for row in rows:
+                normalized_ref = _validated_card_settlement_ref(row.get("ref", ""))
+                applied = 1 if int(row.get("applied", 0) or 0) == 1 else 0
+                event_was_recorded = applied == 1 or (
+                    "seg_event" in settlement_columns and int(row.get("seg_event", 0) or 0) == 1
+                )
+                payload = row.get("payload", "{}")
+                result = row.get("result", "{}")
+                created_at = row.get("created_at") or datetime.now(UTC).isoformat()
+                updated_at = row.get("updated_at") or created_at
+                self.conn.execute(
+                    """
+                    INSERT INTO card_settlements_wave_2 (
+                        ref, verdict, turn_id, payload, applied, result, event_id,
+                        created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        normalized_ref,
+                        str(row.get("verdict", "")),
+                        str(row.get("turn_id", "")),
+                        payload if isinstance(payload, str) else "{}",
+                        applied,
+                        result if isinstance(result, str) else "{}",
+                        (
+                            _card_settlement_effect_key(normalized_ref, "event")
+                            if event_was_recorded
+                            else ""
+                        ),
+                        created_at,
+                        updated_at,
+                    ),
+                )
+            self.conn.execute("DROP TABLE card_settlements")
+            self.conn.execute("ALTER TABLE card_settlements_wave_2 RENAME TO card_settlements")
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+
+        if legacy_columns.intersection(
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(card_settlements)").fetchall()
+        ):
+            raise RuntimeError("Legacy card settlement columns survived Wave 2 migration")
+
+    def _ensure_profile_update_ledger_table(self) -> None:
+        """Create the append-only profile write-point ledger for existing DBs."""
+        self.conn.executescript("""
+            CREATE TABLE IF NOT EXISTS profile_update_ledger (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                effect_key     TEXT NOT NULL DEFAULT '',
+                write_point    TEXT NOT NULL,
+                source         TEXT NOT NULL DEFAULT '',
+                before_summary TEXT NOT NULL DEFAULT '',
+                after_summary  TEXT NOT NULL DEFAULT '',
+                diff           TEXT NOT NULL DEFAULT '',
+                source_refs    TEXT NOT NULL DEFAULT '',
+                outcome        TEXT NOT NULL DEFAULT 'success',
+                turn_id        TEXT NOT NULL DEFAULT '',
+                gate_verdict   TEXT NOT NULL DEFAULT '',
+                held_id        TEXT NOT NULL DEFAULT '',
+                error          TEXT NOT NULL DEFAULT ''
+            );
+        """)
+        columns = {
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(profile_update_ledger)").fetchall()
+        }
+        if "effect_key" not in columns:
+            self.conn.execute(
+                "ALTER TABLE profile_update_ledger ADD COLUMN effect_key TEXT NOT NULL DEFAULT ''"
+            )
+        self.conn.executescript("""
+            CREATE INDEX IF NOT EXISTS idx_profile_ledger_timestamp
+                ON profile_update_ledger(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_profile_ledger_write_point
+                ON profile_update_ledger(write_point, timestamp);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_profile_ledger_effect_key
+                ON profile_update_ledger(effect_key)
+                WHERE effect_key <> '';
+        """)
+
+    def _ensure_confusions_table(self) -> None:
+        """Create the confusion-object table (Phase 2) for existing databases."""
+        self.conn.executescript("""
+            CREATE TABLE IF NOT EXISTS confusions (
+                id                        INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at                TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at                TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                status                    TEXT NOT NULL DEFAULT 'open',
+                source                    TEXT NOT NULL DEFAULT '',
+                topic                     TEXT NOT NULL DEFAULT '',
+                observation               TEXT NOT NULL DEFAULT '',
+                interpretation            TEXT NOT NULL DEFAULT '',
+                interpretation_confidence REAL NOT NULL DEFAULT 0.0,
+                evidence_refs             TEXT NOT NULL DEFAULT '[]',
+                resolution                TEXT NOT NULL DEFAULT '',
+                resolution_note           TEXT NOT NULL DEFAULT '',
+                asked_at                  TIMESTAMP,
+                ask_turn_id               TEXT NOT NULL DEFAULT '',
+                defer_count               INTEGER NOT NULL DEFAULT 0,
+                expires_at                TIMESTAMP,
+                held_updates              TEXT NOT NULL DEFAULT '[]',
+                replay_queue              TEXT NOT NULL DEFAULT '[]',
+                resolved_at               TIMESTAMP
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_confusions_clarifying_unique
+                ON confusions(status) WHERE status = 'clarifying';
+            CREATE INDEX IF NOT EXISTS idx_confusions_status
+                ON confusions(status, updated_at);
+        """)
+        columns = {
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(confusions)").fetchall()
+        }
+        if "replay_queue" not in columns:
+            self.conn.execute(
+                "ALTER TABLE confusions ADD COLUMN replay_queue TEXT NOT NULL DEFAULT '[]'"
+            )
 
     def _ensure_watch_later_table(self) -> None:
         """Create the watch_later bookmarks table for existing databases."""
@@ -8292,6 +9793,45 @@ class Database:
         )
         return self.conn.total_changes - before
 
+    def record_source_producer_run(self, platform: str, discovered: int) -> None:
+        """Stamp one producer round on the shared cadence ledger.
+
+        Only productive rounds are worth recording: a round that came back
+        empty should be retried on the next tick, not blocked for a whole
+        ``min_interval_minutes``.
+        """
+        if int(discovered) <= 0:
+            return
+        key = str(platform or "").strip().lower()
+        if not key:
+            return
+        self.conn.execute(
+            "INSERT INTO source_producer_runs(platform, discovered) VALUES (?, ?)",
+            (key, max(0, int(discovered))),
+        )
+        self.conn.commit()
+
+    def source_producer_ran_within(self, platform: str, minutes: int) -> bool:
+        """True when this source produced candidates inside the last N minutes.
+
+        Survives a restart, unlike the in-process timestamp this replaced.
+        """
+        window = int(minutes)
+        if window <= 0:
+            return False
+        key = str(platform or "").strip().lower()
+        if not key:
+            return False
+        row = self.conn.execute(
+            """
+            SELECT 1 FROM source_producer_runs
+            WHERE platform = ? AND created_at >= datetime('now', ?)
+            LIMIT 1
+            """,
+            (key, f"-{window} minutes"),
+        ).fetchone()
+        return row is not None
+
     def count_pending_keywords(
         self,
         platform: str,
@@ -8438,6 +9978,26 @@ class Database:
             UPDATE discovery_keywords
             SET status = 'pending', claimed_at = NULL
             WHERE id = ? AND status = 'claimed'
+            """,
+            (int(keyword_id),),
+        )
+
+    def requeue_keyword_after_transient_failure(self, keyword_id: int) -> None:
+        """Return a claimed/executing keyword after a platform-wide transient.
+
+        Unlike :meth:`mark_keyword_failed`, this does not bump ``attempts``:
+        rate limiting says the platform is temporarily unavailable, not that
+        the keyword itself failed. Unlike the budget rollback, an async XHS
+        task has already reached ``executing``, so both in-flight states are
+        eligible here.
+        """
+        self._execute_write(
+            """
+            UPDATE discovery_keywords
+            SET status = 'pending',
+                claimed_at = NULL,
+                executing_at = NULL
+            WHERE id = ? AND status IN ('claimed', 'executing')
             """,
             (int(keyword_id),),
         )
@@ -13146,6 +14706,7 @@ class Database:
               AND COALESCE(feedback_type, '') != 'dislike'
               AND COALESCE(delight_score, 0.0) > 0.0
               {_delight_ready_copy_sql()}
+              {_delight_unseen_guard_sql()}
             ORDER BY score DESC
             """
         )
@@ -13229,6 +14790,7 @@ class Database:
                   TRIM(COALESCE(pool_topic_label, ''))
               AND {feedback_clause}
               AND COALESCE(pool_status, 'fresh') IN ('fresh', 'shown')
+              {_delight_unseen_guard_sql()}
             ORDER BY delight_score DESC, relevance_score DESC, discovered_at DESC
             LIMIT ?
             """,
@@ -13247,6 +14809,38 @@ class Database:
             """,
             (bvid,),
         )
+
+    def mark_delight_seen(self, bvid: str) -> bool:
+        """Permanently consume a delight and add its canonical identity to seen items.
+
+        The seen ledger is written first, so a process interruption between the
+        two writes still fails closed: every recommendation exit filters the
+        canonical identity even if the delight-specific notification bit has
+        not yet been updated.
+        """
+        row = self.conn.execute(
+            """
+            SELECT bvid, content_id, source, source_platform
+            FROM content_cache
+            WHERE bvid = ?
+            LIMIT 1
+            """,
+            (bvid,),
+        ).fetchone()
+        recorded = False
+        if row is not None:
+            platform = canonical_source_platform(str(row["source_platform"] or ""))
+            if not platform:
+                platform = _pool_source_family(
+                    str(row["source"] or ""),
+                    str(row["source_platform"] or ""),
+                )
+            content_id = str(row["content_id"] or row["bvid"] or "").strip()
+            if platform and platform != "unknown" and content_id:
+                self.mark_items_seen(platform, [content_id])
+                recorded = True
+        self.mark_delight_notified(bvid)
+        return recorded
 
     def update_delight_score(
         self,
@@ -13316,6 +14910,7 @@ class Database:
                   TRIM(COALESCE(pool_topic_label, ''))
               AND COALESCE(feedback_type, '') = ''
               AND COALESCE(pool_status, 'fresh') IN ('fresh', 'shown', 'suppressed')
+              {_delight_unseen_guard_sql()}
             """,
             (min_delight_score, *admission_params),
         )
@@ -13360,6 +14955,7 @@ class Database:
                   AND COALESCE(relevance_score, 0.0) >= ?
                   {_delight_ready_copy_sql()}
                   {guard_sql}
+                  {_delight_unseen_guard_sql()}
                 ORDER BY relevance_score DESC, discovered_at DESC
                 LIMIT ?
                 """,
@@ -13403,6 +14999,7 @@ class Database:
                     )
                   )
                   {guard_sql}
+                  {_delight_unseen_guard_sql()}
                 ORDER BY
                     relevance_score DESC,
                     delight_score DESC,

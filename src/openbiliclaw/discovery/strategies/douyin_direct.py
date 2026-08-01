@@ -20,12 +20,16 @@ from openbiliclaw.discovery.strategies._utils import build_profile_summary
 from openbiliclaw.llm.json_utils import parse_llm_json_tolerant
 from openbiliclaw.llm.task_options import without_core_memory_kwargs
 from openbiliclaw.sources.douyin_direct import normalize_aweme_item
+from openbiliclaw.sources.douyin_plugin_search import DouyinBudgetExhausted
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from openbiliclaw.soul.profile import SoulProfile
     from openbiliclaw.storage.database import Database
 
 logger = logging.getLogger(__name__)
+_DOUYIN_OUTCOMES = {"used", "empty", "timeout", "failed", "budget_exhausted"}
 
 
 class SupportsDouyinDirectClient(Protocol):
@@ -133,6 +137,8 @@ class DouyinDirectStrategy(DiscoveryStrategy):
         # Only search items get a non-None keyword id (P1.8 yield provenance);
         # hot / feed / creator items are attribution-free (None).
         raw_items: list[tuple[str, dict[str, object], int | None]] = []
+        keyword_outcomes: dict[str, str] = {}
+        source_outcomes: dict[str, str] = {}
         # Only synthesize / LLM-generate search keywords when the search source
         # is active. hot/feed/creator-only modes must NOT burn an LLM call (or
         # fall back to interest names) for keywords they will never search.
@@ -148,20 +154,48 @@ class DouyinDirectStrategy(DiscoveryStrategy):
                 getattr(self.client, "search_source_strategy", "dy-direct-search")
                 or "dy-direct-search"
             )
-            for keyword in keywords:
+            for index, keyword in enumerate(keywords):
                 keyword_id = self.seed_keyword_ids.get(keyword) if self.seed_keyword_ids else None
-                for item in await self.client.search_aweme(
-                    keyword,
-                    limit=min(self.per_source_limit, max(1, limit)),
-                ):
+                try:
+                    search_items = await self.client.search_aweme(
+                        keyword,
+                        limit=min(self.per_source_limit, max(1, limit)),
+                    )
+                except DouyinBudgetExhausted:
+                    for unexecuted in keywords[index:]:
+                        keyword_outcomes[unexecuted] = "budget_exhausted"
+                    break
+                except Exception as exc:
+                    logger.warning("douyin search branch failed for %r: %s", keyword, exc)
+                    keyword_outcomes[keyword] = "failed"
+                    continue
+                keyword_outcomes[keyword] = _client_outcome(
+                    self.client,
+                    "last_search_outcome",
+                    search_items,
+                )
+                for item in search_items:
                     raw_items.append((search_source_strategy, item, keyword_id))
+            source_outcomes["search"] = _aggregate_outcomes(keyword_outcomes.values())
 
         if "hot" in self.sources:
             hot_limit = min(self.per_source_limit, max(1, limit))
             hot_source_strategy = str(
                 getattr(self.client, "hot_source_strategy", "dy-direct-hot") or "dy-direct-hot"
             )
-            for item in await self.client.get_hot_board(limit=hot_limit):
+            try:
+                hot_items = await self.client.get_hot_board(limit=hot_limit)
+            except Exception as exc:
+                logger.warning("douyin hot branch failed: %s", exc)
+                hot_items = []
+                source_outcomes["hot"] = "failed"
+            else:
+                source_outcomes["hot"] = _client_outcome(
+                    self.client,
+                    "last_hot_outcome",
+                    hot_items,
+                )
+            for item in hot_items:
                 raw_items.append((hot_source_strategy, item, None))
 
         if "feed" in self.sources:
@@ -169,7 +203,19 @@ class DouyinDirectStrategy(DiscoveryStrategy):
             feed_source_strategy = str(
                 getattr(self.client, "feed_source_strategy", "dy-direct-feed") or "dy-direct-feed"
             )
-            for item in await self.client.get_recommend_feed(limit=feed_limit):
+            try:
+                feed_items = await self.client.get_recommend_feed(limit=feed_limit)
+            except Exception as exc:
+                logger.warning("douyin feed branch failed: %s", exc)
+                feed_items = []
+                source_outcomes["feed"] = "failed"
+            else:
+                source_outcomes["feed"] = _client_outcome(
+                    self.client,
+                    "last_feed_outcome",
+                    feed_items,
+                )
+            for item in feed_items:
                 raw_items.append((feed_source_strategy, item, None))
 
         if "creator" in self.sources:
@@ -180,6 +226,8 @@ class DouyinDirectStrategy(DiscoveryStrategy):
                 ):
                     raw_items.append(("dy-direct-creator", item, None))
 
+        self.last_intermediates["keyword_outcomes"] = keyword_outcomes
+        self.last_intermediates["source_outcomes"] = source_outcomes
         candidates = self._normalize_and_dedupe(raw_items)
         if not candidates:
             return []
@@ -277,3 +325,20 @@ class DouyinDirectStrategy(DiscoveryStrategy):
             seen.add(key)
             normalized.append(content)
         return normalized
+
+
+def _client_outcome(client: object, attr_name: str, items: list[dict[str, object]]) -> str:
+    outcome = str(getattr(client, attr_name, "") or "").strip().lower()
+    if outcome in _DOUYIN_OUTCOMES:
+        return outcome
+    return "used" if items else "empty"
+
+
+def _aggregate_outcomes(outcomes: Iterable[str]) -> str:
+    normalized = [str(value) for value in outcomes]
+    if "used" in normalized:
+        return "used"
+    for outcome in ("timeout", "failed", "budget_exhausted", "empty"):
+        if outcome in normalized:
+            return outcome
+    return "empty"

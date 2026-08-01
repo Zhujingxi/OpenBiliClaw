@@ -77,8 +77,8 @@ test("settings page exposes advanced config fields from backend schema", () => {
     "cfgExtensionDisconnectGrace",
     "cfgRefreshCheckInterval",
     "cfgSignalEventThreshold",
-    "cfgTrendingRefreshHours",
-    "cfgExploreRefreshHours",
+    "cfgTrendingRefreshMinutes",
+    "cfgExploreRefreshMinutes",
     "cfgDiscoveryLimit",
     "cfgMultimodalEvaluationEnabled",
     "cfgMultimodalBatchSize",
@@ -311,7 +311,7 @@ test("settings page round-trips YouTube source budgets", () => {
   assert.match(popupJs, /daily_trending_budget: getInt\("cfgYoutubeDailyTrendingBudget", 0\)/);
   assert.match(popupJs, /daily_channel_budget: getInt\("cfgYoutubeDailyChannelBudget", 0\)/);
   assert.match(popupJs, /request_interval_seconds: getInt\("cfgYoutubeRequestInterval", 2\)/);
-  assert.match(popupJs, /min_interval_minutes: getInt\("cfgYoutubeMinInterval", 60\)/);
+  assert.match(popupJs, /min_interval_minutes: getInt\("cfgYoutubeMinInterval", 3\)/);
 
   for (const id of [
     "cfgYoutubeDailySearchBudget",
@@ -772,7 +772,9 @@ test("settings page wires offline cache and degraded-mode banners", () => {
   assert.match(popupJs, /后端不可达且没有缓存配置/);
   assert.match(popupJs, /renderDegradedBanner\(cfg\)/);
   assert.match(popupJs, /restart_required/);
-  assert.match(popupJs, /保存并提示重启/);
+  assert.match(popupJs, /保存并恢复/);
+  assert.match(popupJs, /保存有效配置后会原地恢复，无需重启/);
+  assert.doesNotMatch(popupJs, /保存修复后需要重启后端/);
 });
 
 test("settings page shows the budget-semantics hint for every per-source budget group", () => {

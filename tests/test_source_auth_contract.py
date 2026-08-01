@@ -60,7 +60,7 @@ from openbiliclaw.runtime.init_prereqs import InitPrereqs
 from openbiliclaw.sources.douyin_auth import DouyinCookieManager
 from openbiliclaw.sources.douyin_direct import DouyinDirectError
 from openbiliclaw.sources.x_auth import XCookieManager
-from openbiliclaw.sources.x_client import XAuthError
+from openbiliclaw.sources.x_client import XAuthError, XClient
 from openbiliclaw.sources.zhihu_tasks import ZhihuTaskQueue
 from openbiliclaw.storage.database import Database
 from openbiliclaw.storage.x_health import XSourceHealthStore
@@ -1060,7 +1060,7 @@ _EXPECTED_VERIFY_METHODS = {
     "xiaohongshu": "browser_heartbeat",
     "douyin": "live_probe",
     "youtube": "none",
-    "twitter": "passive_health",
+    "twitter": "live_probe",
     "zhihu": "browser_heartbeat",
     "reddit": "local_file",
     # ``none`` here because this suite runs with *no credentials*: Bangumi's
@@ -1164,6 +1164,45 @@ def test_verify_returns_200_and_declared_method_for_every_platform(
     assert body["outcome"] == "indeterminate"
     assert body["message"]
     assert check_legacy_consistency(slug, contract) == []
+
+
+def test_x_verify_runs_read_only_account_probe_and_records_health(contract_env: _Env) -> None:
+    contract_env.cfg.sources.twitter.enabled = True
+    cookie = "auth_token=a; ct0=b"
+    XCookieManager(contract_env.cfg.data_path).set_cookie(cookie, source="test")
+    calls: list[str] = []
+
+    async def _probe(self: XClient) -> object:
+        calls.append(self._cookie)
+        return SimpleNamespace(screen_name="alice", id="42")
+
+    contract_env.monkeypatch.setattr(XClient, "probe", _probe)
+    body = _verify_post(contract_env, "twitter")
+
+    assert calls == [cookie]
+    assert body["outcome"] == "verified"
+    auth = SourceAuthContract.model_validate(body["auth"])
+    assert auth.verify_method == "live_probe"
+    assert auth.verification == "verified"
+    assert auth.detail == "X 来源正常，cookie 有效。"
+    assert XSourceHealthStore(contract_env.db).get()["last_success_at"]
+
+
+def test_x_verify_turns_auth_failure_into_expired_cookie(contract_env: _Env) -> None:
+    contract_env.cfg.sources.twitter.enabled = True
+    XCookieManager(contract_env.cfg.data_path).set_cookie("auth_token=a; ct0=b", source="test")
+
+    async def _probe(_self: XClient) -> object:
+        raise XAuthError("401 unauthorized")
+
+    contract_env.monkeypatch.setattr(XClient, "probe", _probe)
+    body = _verify_post(contract_env, "twitter")
+
+    assert body["outcome"] == "failed"
+    auth = SourceAuthContract.model_validate(body["auth"])
+    assert auth.verify_method == "live_probe"
+    assert auth.verification == "failed"
+    assert auth.legacy_state == "expired_cookie"
 
 
 def test_verify_rejects_unknown_slug(contract_env: _Env) -> None:
@@ -2566,19 +2605,18 @@ def test_rotating_a_non_identity_cookie_still_reuses_the_verdict(contract_env: _
     assert len(calls) == 1, f"a msToken rotation re-probed 抖音: {calls}"
 
 
-# ── 2. X may not claim a verdict it has no traffic for ────────────────
+# ── 2. X may not claim a verdict it has no verification for ──────────
 
 
 def test_x_is_unverified_until_real_traffic_has_actually_succeeded(contract_env: _Env) -> None:
-    """``passive_health`` means "inferred from real requests" — so there must be some.
+    """A stored X cookie stays unverified until a real check succeeds.
 
     Trigger: a brand-new database and a first-ever X cookie write. The health
     row is created with ``state='ok'`` as its *default*, so the status endpoint
-    reported ``verification="verified"`` + ``verify_method="passive_health"``
+    reported ``verification="verified"`` + ``verify_method="live_probe"``
     for a credential that had never been used for anything — including a cookie
     that expired months ago. Inventing a verification result is precisely what
-    invariant I3 forbids, and ``passive_health`` is the one method that cannot
-    be re-run on demand to correct itself.
+    invariant I3 forbids.
 
     The legacy fields are untouched by the fix: ``state`` stays ``ok`` because
     that is what Wave A froze, and the honesty lands in the orthogonal field.
@@ -2591,21 +2629,20 @@ def test_x_is_unverified_until_real_traffic_has_actually_succeeded(contract_env:
 
     assert item["state"] == "ok"  # legacy verdict deliberately unchanged
     assert contract.credential == "present"
-    assert contract.verify_method == "passive_health"
+    assert contract.verify_method == "live_probe"
     assert contract.verification == "unverified", (
-        "X claimed a passive verdict without a single real request behind it"
+        "X claimed a verdict without a single real request behind it"
     )
     assert contract.verified_at == ""
     assert check_legacy_consistency("twitter", contract) == []
 
-    # One genuine success, attributed to this cookie — exactly what the method
-    # claims to be based on.
+    # One genuine success, attributed to this cookie.
     XSourceHealthStore(
         contract_env.db, credential_fingerprint=_x_fingerprint("auth_token=a; ct0=b")
     ).record_success()
     after = SourceAuthContract.model_validate(_status_payload(contract_env)["twitter"]["auth"])
     assert after.verification == "verified"
-    assert after.verified_at, "a verified passive verdict must say when the traffic happened"
+    assert after.verified_at, "a verified X verdict must say when the check happened"
 
 
 def test_a_relogin_unblock_does_not_inherit_the_old_credential_verdict(

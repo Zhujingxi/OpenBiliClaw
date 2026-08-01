@@ -700,6 +700,53 @@ def _builder_test_inputs() -> list[tuple[str, dict, dict]]:
             ),
         ),
         (
+            "build_awareness_with_confusions_prompt",
+            dict(
+                events=[{"event_type": "view", "title": "A"}],
+                preference_summary={"a": 1},
+                soul_profile={"x": 1},
+            ),
+            dict(
+                events=[{"event_type": "like", "title": "B"}],
+                preference_summary={"a": 2},
+                soul_profile={"x": 2},
+            ),
+        ),
+        (
+            "build_posture_gate_prompt",
+            dict(
+                change={"kind": "value", "content": "追求效率"},
+                core_memory={"a": 1},
+                ledger_digest=[{"write_point": "values", "outcome": "success"}],
+            ),
+            dict(
+                change={"kind": "goal", "content": "想转行"},
+                core_memory={"a": 2},
+                ledger_digest=[{"write_point": "core", "outcome": "failed"}],
+            ),
+        ),
+        (
+            "build_dialogue_insight_prompt",
+            dict(
+                user_message="我最近在玩桌游",
+                assistant_reply="听起来不错",
+                core_memory={"a": 1},
+                active_list={"speculations": [{"domain": "桌游"}]},
+                anchor={
+                    "kind": "hypothesis",
+                    "ref": "abcd1234",
+                    "text": "用户喜欢桌游",
+                    "generation": 1,
+                },
+            ),
+            dict(
+                user_message="不想再看带货了",
+                assistant_reply="明白",
+                core_memory={"a": 2},
+                active_list={"insights": [{"hash": "abcd1234", "hypothesis": "H"}]},
+            ),
+        ),
+        (
             "build_batch_content_evaluation_prompt",
             dict(
                 profile_summary={"a": 1},
@@ -1738,3 +1785,43 @@ def test_inspiration_axis_system_prompt_requires_crossdomain_specific_on_explore
     # Bad (covered/same-domain) vs good (uncovered cross-domain) counter-example.
     assert "游戏新作" in prompt  # bad: stays in the covered domain
     assert "詹姆斯韦伯 深空图像" in prompt  # good: uncovered cross-domain anchor
+
+
+class TestPreferencePromptCognitionContext:
+    """第一条线的兴趣更新带认知语境；其它调用方字节不变。"""
+
+    def test_omitting_context_is_byte_identical_to_the_old_builder(self) -> None:
+        """init 分片 / 反馈批不传语境，prompt 必须一字不变（回放不变性）。"""
+        from openbiliclaw.llm.prompts import build_preference_analysis_prompt
+
+        events = [{"event_type": "view", "title": "标题"}]
+        preference = {"interests": []}
+        without = build_preference_analysis_prompt(events=events, existing_preference=preference)
+        explicit_none = build_preference_analysis_prompt(
+            events=events,
+            existing_preference=preference,
+            awareness_notes=None,
+            active_insights=None,
+        )
+
+        assert without == explicit_none
+        assert "<recent_awareness>" not in without[1]["content"]
+        assert "<active_insights>" not in without[1]["content"]
+
+    def test_context_sections_sit_between_preference_and_events(self) -> None:
+        """顺序 稳定→易变：偏好、认知语境、事件批，保住 provider 缓存前缀。"""
+        from openbiliclaw.llm.prompts import build_preference_analysis_prompt
+
+        messages = build_preference_analysis_prompt(
+            events=[{"event_type": "view", "title": "标题"}],
+            existing_preference={"interests": []},
+            awareness_notes=[{"observation": "最近在深挖 Rust 底层"}],
+            active_insights=[{"hypothesis": "可能是系统编程从业者", "confidence": 0.7}],
+        )
+        body = messages[1]["content"]
+
+        assert body.index("<existing_preference>") < body.index("<recent_awareness>")
+        assert body.index("<recent_awareness>") < body.index("<active_insights>")
+        assert body.index("<active_insights>") < body.index("<event_batch>")
+        assert "最近在深挖 Rust 底层" in body
+        assert "可能是系统编程从业者" in body

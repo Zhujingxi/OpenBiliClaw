@@ -87,6 +87,38 @@ test("initAutostartControl toggles immediately and reloads", async () => {
   assert.match(hint.textContent, /下次登录/);
 });
 
+test("initAutostartControl exposes and removes residual OS registration", async () => {
+  const checkbox = fakeEl({ checked: false, disabled: false });
+  const hint = fakeEl({ textContent: "" });
+  let registered = true;
+  const posts: any[] = [];
+  const fetchImpl = async (url: string, options: any = {}) => {
+    if (String(url).endsWith("/autostart-status")) {
+      return { ok: true, status: 200, async json() {
+        return { enabled: false, can_manage: true, registered };
+      } };
+    }
+    posts.push(JSON.parse(options.body));
+    registered = false;
+    return { ok: true, status: 200, async json() {
+      return { enabled: false, can_manage: true, registered: false };
+    } };
+  };
+  const ctl = initAutostartControl({ checkbox, hint }, { getBaseUrl, fetchImpl });
+
+  await ctl.reload();
+
+  assert.equal(checkbox.checked, true);
+  assert.match(hint.textContent, /残留项/);
+
+  checkbox.checked = false;
+  checkbox.fire("change");
+  await new Promise((resolve) => setTimeout(resolve, 5));
+
+  assert.deepEqual(posts[0], { enabled: false });
+  assert.equal(checkbox.checked, false);
+});
+
 test("popup wires the autostart control into the general settings panel", async () => {
   const { readFileSync } = await import("node:fs");
   const { resolve } = await import("node:path");

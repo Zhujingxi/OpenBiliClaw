@@ -15,7 +15,8 @@ data_dir = "data"
 
 [api]
 # 后端 API 监听地址。
-# "0.0.0.0" = 绑定所有网卡（默认），同局域网手机可通过 /m/ 访问移动端 Web。
+# "0.0.0.0" = 绑定所有网卡（默认）；会同时监听 IPv4 与可用的 IPv6，
+# 同局域网手机可通过 /m/ 访问移动端 Web。
 # "127.0.0.1" = 仅本机可访问，更安全但手机扫码打不开。
 host = "0.0.0.0"
 # 后端 API 监听端口。
@@ -60,8 +61,8 @@ default_chain = ["deepseek"]
 concurrency = 4
 # Global request timeout for all LLM providers (seconds).
 # Applies to OpenAI / Claude / Gemini / DeepSeek / Ollama / OpenRouter /
-# openai_compatible. Allowed range: 10..600. Default 300s.
-timeout = 300
+# openai_compatible. Allowed range: 10..1200. Default 1200s (20 minutes).
+timeout = 1200
 # 新实例请直接在桌面设置页创建。手工配置时复制下面的完整表，
 # 给每个渠道一个稳定且唯一的 ID，再把 ID 加进 default_chain：
 #
@@ -223,6 +224,9 @@ headed = false
 # pool_source_shares 中的 bilibili 配额会被丢弃。
 [sources.bilibili]
 enabled = true
+# 仅作用于「B 站 API 搜索被风控冷却」时接管的扩展搜索兜底 producer；
+# 主发现路径（search / trending / explore / related）的节奏在 [scheduler]。
+min_interval_minutes = 3                 # producer 两次入队之间的最小间隔
 
 # ── 小红书（xhs）专用配置 ──
 # 内容发现和元数据提取完全由浏览器扩展在真实登录态下完成：
@@ -238,8 +242,10 @@ enabled = false
 daily_search_budget = 0
 # 每天订阅创作者抓取任务上限；0 表示不设每日上限。
 daily_creator_budget = 0
-# 扩展分发器两次任务之间的最小间隔（秒），进一步降低风控风险
-task_interval_seconds = 45
+# 后端允许扩展领取两次搜索/创作者任务之间的最小间隔（秒）；
+# 状态持久化，重启扩展或同时使用多个浏览器配置也不会绕过
+task_interval_seconds = 300
+min_interval_minutes = 3                 # producer 两次入队之间的最小间隔
 
 # ── 抖音（Douyin）direct-cookie discovery 专用配置 ──
 # 初始化画像仍走浏览器扩展；这里仅控制可选的后台内容发现。
@@ -255,6 +261,7 @@ daily_search_budget = 0
 daily_hot_budget = 0
 daily_feed_budget = 0
 request_interval_seconds = 2
+min_interval_minutes = 3                 # producer 两次执行最小间隔
 
 # ── YouTube 专用配置 ──
 # enabled=false 时 pool_source_shares 中的 youtube 配额会被丢弃（避免池子卡在低于目标）。
@@ -269,7 +276,7 @@ daily_trending_budget = 0
 daily_channel_budget = 0
 request_interval_seconds = 2
 # YouTube producer 两次执行之间的最小间隔；0 表示每个 refresh tick 都允许检查执行。
-min_interval_minutes = 60
+min_interval_minutes = 3
 
 # ── X (Twitter) 专用配置 ──
 # 设为 false 后：后端不再生成 X 搜索/推荐流/账号订阅任务，
@@ -285,7 +292,7 @@ daily_search_budget = 0                 # 0 = 不设每日上限
 daily_feed_budget = 0                   # 推荐流(For You)每日拉取上限（高曝光，建议压低）
 daily_creator_budget = 0                # 账号订阅每日抓取上限
 request_interval_seconds = 3            # 两次请求最小间隔（抗检测）
-min_interval_minutes = 60               # producer 两次执行最小间隔
+min_interval_minutes = 3               # producer 两次执行最小间隔
 
 # ── 知乎（Zhihu）专用配置 ──
 # 事件拉取和 discovery 都走浏览器插件登录态任务：后端只入队 zhihu_tasks，
@@ -300,7 +307,7 @@ daily_feed_budget = 0                   # 首页推荐 discovery 每日任务上
 daily_creator_budget = 0                # 作者页 discovery 每日任务上限，0 = 不设每日上限
 daily_related_budget = 0                # 相关扩展 discovery 每日任务上限，0 = 不设每日上限
 request_interval_seconds = 3            # 后端等待任务时的轮询间隔 / 插件搜索节奏提示
-min_interval_minutes = 60               # ZhihuDiscoveryProducer 两次执行最小间隔
+min_interval_minutes = 3               # ZhihuDiscoveryProducer 两次执行最小间隔
 
 # ── Reddit 专用配置 ──
 # Reddit 当前没有稳定免登录 API；日常 discovery 默认走随 OpenBiliClaw 安装的 rdt-cli 登录态命令后端。
@@ -319,7 +326,7 @@ daily_hot_budget = 300                  # 热门 discovery 每日条目上限
 daily_subreddit_budget = 300            # subreddit discovery 每日条目上限
 daily_related_budget = 300              # 相关扩展 discovery 每日条目上限
 request_interval_seconds = 3            # 插件任务轮询间隔 / 命令 fallback 超时估算
-min_interval_minutes = 60               # RedditDiscoveryProducer 两次执行最小间隔
+min_interval_minutes = 3               # RedditDiscoveryProducer 两次执行最小间隔
 
 # ── Bangumi 官方公开 API（只读）──
 # 无需 Cookie 或 OAuth。username 留空时只参与后续内容发现；填写后，首次初始化可读取
@@ -340,7 +347,7 @@ daily_search_budget = 300
 daily_ranked_budget = 100
 daily_latest_budget = 100
 request_interval_seconds = 1
-min_interval_minutes = 60
+min_interval_minutes = 3
 bootstrap_limit = 300
 
 [scheduler]
@@ -365,12 +372,19 @@ account_sync_interval_hours = 6
 # --- Runtime refresh tuning ---
 refresh_check_interval_seconds = 60      # Main loop poll interval; values <15 fallback
 signal_event_threshold = 6               # New behavior events before search+related refresh
-trending_refresh_hours = 3               # Minimum interval for trending strategy
-explore_refresh_hours = 12               # Minimum interval for explore strategy
+trending_refresh_minutes = 3               # Minimum interval for trending strategy
+explore_refresh_minutes = 3               # Minimum interval for explore strategy
 discovery_limit = 30                     # Per discovery wave limit; allowed range 1..60
 delight_queue_limit = 20                 # Surprise queue load size for desktop/mobile/extension; 1..100
 proactive_push_interval_seconds = 120    # Delight/probe push loop interval; values <30 fallback
 speculator_idle_interval_minutes = 30    # Idle interval before checking speculation lifecycle
+feedback_batch_threshold = 3             # Recommendation feedbacks accumulated before preference re-analysis
+# --- 统一兴趣更新线（回退开关）---
+# true 时推荐反馈直接进认知流水线快线：反馈信号攒够 feedback_batch_threshold
+# （默认 3）就立即重算兴趣，不等 INTEREST 缓冲的最短间隔；并且
+# process_feedback_batch_if_needed() 变 shim（一次性迁移旧游标 + 触发 flush）。
+# 2026-07-28 经 A/B 三道门与 A/A 噪声控制后默认 true；false 仅用于回退旧反馈批。
+unified_interest_line = true
 # --- 画像整理（ProfileConsolidator）库存水位 ---
 profile_consolidation_enabled = true
 profile_consolidation_interval_hours = 12
@@ -554,3 +568,33 @@ unmanaged_max_age_days = 30
 # retained as disliked_topics evidence instead of being learned as a
 # positive interest.
 satisfaction_filter_enabled = true
+
+
+# ──────────────────────────────────────────────────────────────
+# TLS Proxy
+# ──────────────────────────────────────────────────────────────
+# Optional HTTPS reverse proxy for trusted LAN / self-managed access. When enabled
+# and ``cryptography`` is installed (``pip install "openbiliclaw[tls]"``),
+# ``openbiliclaw serve-api`` synchronously validates/binds TLS, then starts its
+# serving thread. Any TLS startup error makes serve-api fail; it never silently
+# claims HTTPS is available. This is not a public-Internet production proxy.
+#
+# Enable:  ``openbiliclaw tls-proxy enable``
+# Disable: ``openbiliclaw tls-proxy disable``
+# Status:  ``openbiliclaw tls-proxy status``
+#
+# See docs/https-deployment.md for Docker and non-Docker setups.
+[tls_proxy]
+enabled = false
+# HTTPS listen port (default 8443)
+port = 8443
+# Certificate directory (defaults to {data_dir}/certs; leave empty for default)
+# cert_dir = ""
+# Subject Alternative Names: hostnames/IPs clients use to access this server.
+# Collected interactively by `openbiliclaw tls-proxy enable`.
+# localhost and 127.0.0.1 are always included; add remote-access names here.
+# Without an explicit remote SAN, the generated certificate is localhost-only.
+# san_names = ["192.168.1.100", "mybili.lan"]
+# Explicit env overrides only: OPENBILICLAW_TLS_PROXY_ENABLED,
+# OPENBILICLAW_TLS_PROXY_PORT, OPENBILICLAW_TLS_PROXY_CERT_DIR, and the
+# comma-separated OPENBILICLAW_TLS_SAN_NAMES.

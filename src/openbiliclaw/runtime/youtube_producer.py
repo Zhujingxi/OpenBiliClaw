@@ -16,6 +16,11 @@ from typing import Any
 
 from openbiliclaw.runtime.keyword_fetch import PLATFORM_YOUTUBE as _PLATFORM_YOUTUBE
 from openbiliclaw.runtime.pool_gate import candidate_pool_full_for_source
+from openbiliclaw.runtime.producer_cadence import (
+    ledger_available,
+    producer_ran_within,
+    record_producer_run,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +53,7 @@ class YoutubeDiscoveryProducer:
     soul_engine: Any
     discover: YoutubeDiscoverCallable
     enabled: bool = True
-    min_interval_minutes: int = 60
+    min_interval_minutes: int = 3
     daily_search_budget: int = 0
     daily_trending_budget: int = 0
     daily_channel_budget: int = 0
@@ -179,7 +184,7 @@ class YoutubeDiscoveryProducer:
         elif claimed_search and self.keyword_fetch is not None:
             self.keyword_fetch.mark_failed(claimed_search)
 
-        self._last_run_at = datetime.now(UTC)
+        self._stamp_run(discovered_total)
         if discovered_total <= 0 and error_count >= len(runnable):
             return {"discovered": 0, "reason": "error"}
         payload: dict[str, object] = {
@@ -275,9 +280,23 @@ class YoutubeDiscoveryProducer:
         )
         self.database.conn.commit()
 
+    def _stamp_run(self, discovered: int) -> None:
+        """Record this round on the cadence floor.
+
+        Productive rounds go to the shared ledger so the floor survives a
+        restart; the in-process stamp stays as the fallback for producers
+        constructed without a database.
+        """
+        record_producer_run(getattr(self, "database", None), "youtube", int(discovered))
+        self._last_run_at = datetime.now(UTC)
+
     def _is_due(self) -> bool:
         if self.min_interval_minutes <= 0:
             return True
+        database = getattr(self, "database", None)
+        if ledger_available(database):
+            # Restart-surviving floor keyed on the last *productive* round.
+            return not producer_ran_within(database, "youtube", self.min_interval_minutes)
         if self._last_run_at is None:
             return True
         return datetime.now(UTC) - self._last_run_at >= timedelta(minutes=self.min_interval_minutes)

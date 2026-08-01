@@ -27,6 +27,7 @@ const REASON_TEXT = {
   profile_failed: "画像生成未完成。",
   discovery_timeout: "画像已生成，但首轮内容池整理超时。",
   discovery_partial: "画像已生成，但首轮内容池本次未完成。",
+  douyin_degraded: "抖音已采数据已用于画像，但至少一个账号范围的分页未完整完成。",
   internal_error: "初始化过程中出错了，请稍后重试。",
   interrupted: "上次初始化被打断（后端重启），可重试。",
   cancelled: "初始化已取消。",
@@ -54,6 +55,7 @@ export function describeInitStatusReason(status) {
     "profile_failed",
     "discovery_timeout",
     "discovery_partial",
+    "douyin_degraded",
   ];
   if (detail && (detailFirst.includes(reason) || detail.startsWith("画像分析失败："))) {
     return detail;
@@ -71,9 +73,13 @@ export function describeInitFailure(status, progress = null) {
   const reason = String((status && status.reason) || "");
   if (
     detail &&
-    (["analyze_failed", "profile_failed", "discovery_timeout", "discovery_partial"].includes(
-      reason,
-    ) || detail.startsWith("画像分析失败："))
+    ([
+      "analyze_failed",
+      "profile_failed",
+      "discovery_timeout",
+      "discovery_partial",
+      "douyin_degraded",
+    ].includes(reason) || detail.startsWith("画像分析失败："))
   ) {
     return detail;
   }
@@ -306,7 +312,7 @@ export function initStartButtonState(status, selected = null) {
   if (status.initialized) {
     return {
       enabled: false,
-      label: status.partial_success ? "画像已生成" : "已初始化",
+      label: status.partial_success ? "初始化部分完成" : "已初始化",
       reason: status.partial_success
         ? describeInitStatusReason(status)
         : "如需重建画像，请到设置页。",

@@ -32,11 +32,13 @@ async def main() -> None:
     parser.add_argument("--batch", type=int, default=2)
     parser.add_argument("--explore-rate", type=float, default=0.2)
     parser.add_argument(
-        "--reuse-personas", action="store_true",
+        "--reuse-personas",
+        action="store_true",
         help="Reuse cached personas from pool instead of generating new ones",
     )
     parser.add_argument(
-        "--skip-persona-judge", action="store_true",
+        "--skip-persona-judge",
+        action="store_true",
         help="Skip persona judge step (faster but less accurate)",
     )
     args = parser.parse_args()
@@ -50,8 +52,9 @@ async def main() -> None:
         run_optimizer_agent,
         run_speculation_event_agent,
     )
-    from openbiliclaw.eval.optimizer import MODIFIABLE_FILES, ParamChange, PromptOptimizer
+    from openbiliclaw.eval.optimizer import ParamChange, PromptOptimizer
     from openbiliclaw.eval.persona_judge import judge_speculations
+    from openbiliclaw.eval.persona_pool import PersonaPool
     from openbiliclaw.eval.report import render_speculation_training_summary
     from openbiliclaw.eval.run_logger import RunLogger, RunStep
     from openbiliclaw.eval.speculation_evaluator import SpeculationEvaluator
@@ -64,8 +67,6 @@ async def main() -> None:
         observe_events,
         promote_ready,
     )
-
-    from openbiliclaw.eval.persona_pool import PersonaPool
 
     rl = RunLogger(task="speculation_auto", data_dir=Path("data"))
     rl.setup_file_logging()
@@ -95,8 +96,12 @@ async def main() -> None:
 
     logger.info("=" * 60)
     logger.info("自动优化循环 — 推测兴趣生成")
-    logger.info("轮次: %d, 每轮 batch: %d, persona_judge: %s",
-                args.rounds, args.batch, "OFF" if args.skip_persona_judge else "ON")
+    logger.info(
+        "轮次: %d, 每轮 batch: %d, persona_judge: %s",
+        args.rounds,
+        args.batch,
+        "OFF" if args.skip_persona_judge else "ON",
+    )
     logger.info("=" * 60)
 
     for epoch in range(1, args.rounds + 1):
@@ -105,7 +110,8 @@ async def main() -> None:
         logger.info("━" * 60)
 
         batch_constraints = random.sample(
-            personas_pool, min(args.batch, len(personas_pool)),
+            personas_pool,
+            min(args.batch, len(personas_pool)),
         )
 
         train_reports = []
@@ -219,8 +225,7 @@ async def main() -> None:
                     persona_judgment = await judge_speculations(
                         persona_context=profile_ctx,
                         speculations=[
-                            {"domain": s.domain, "reason": s.reason}
-                            for s in speculations
+                            {"domain": s.domain, "reason": s.reason} for s in speculations
                         ],
                         max_retries=2,
                     )
@@ -229,20 +234,26 @@ async def main() -> None:
                         click = "Y" if v.would_click else "N"
                         logger.info(
                             "    [%s] %.2f %s — %s",
-                            click, v.resonance_score, v.domain, v.reasoning[:50],
+                            click,
+                            v.resonance_score,
+                            v.domain,
+                            v.reasoning[:50],
                         )
-                    ps.save_json("persona_judgment.json", {
-                        "mean_resonance": persona_judgment.mean_resonance,
-                        "verdicts": [
-                            {
-                                "domain": v.domain,
-                                "would_click": v.would_click,
-                                "resonance_score": v.resonance_score,
-                                "reasoning": v.reasoning,
-                            }
-                            for v in persona_judgment.verdicts
-                        ],
-                    })
+                    ps.save_json(
+                        "persona_judgment.json",
+                        {
+                            "mean_resonance": persona_judgment.mean_resonance,
+                            "verdicts": [
+                                {
+                                    "domain": v.domain,
+                                    "would_click": v.would_click,
+                                    "resonance_score": v.resonance_score,
+                                    "reasoning": v.reasoning,
+                                }
+                                for v in persona_judgment.verdicts
+                            ],
+                        },
+                    )
                 except Exception as exc:
                     logger.warning("  Persona judge failed: %s", exc)
 
@@ -251,14 +262,17 @@ async def main() -> None:
             try:
                 events_data = await run_speculation_event_agent(
                     speculations=[
-                        {"domain": s.domain, "category": s.category}
-                        for s in speculations
+                        {"domain": s.domain, "category": s.category} for s in speculations
                     ],
                     event_count=30,
                     matching_ratio=0.4,
                 )
-                matching = [e for e in events_data.get("matching_events", []) if isinstance(e, dict)]
-                non_matching = [e for e in events_data.get("non_matching_events", []) if isinstance(e, dict)]
+                matching = [
+                    e for e in events_data.get("matching_events", []) if isinstance(e, dict)
+                ]
+                non_matching = [
+                    e for e in events_data.get("non_matching_events", []) if isinstance(e, dict)
+                ]
                 all_events = matching + non_matching
                 logger.info("  Matching: %d, Non-matching: %d", len(matching), len(non_matching))
                 ps.save_json("matching_events.json", matching)
@@ -278,38 +292,47 @@ async def main() -> None:
             promoted, state = promote_ready(state)
             rejected, state = expire_stale(state, future_now, cooldown_days=30)
 
-            logger.info("  Promoted: %d, Rejected: %d, Active: %d",
-                        len(promoted), len(rejected), len(state.active))
-            ps.save_json("lifecycle_result.json", {
-                "promoted": [s.to_dict() for s in promoted],
-                "rejected": [s.to_dict() for s in rejected],
-                "remaining": [s.to_dict() for s in state.active],
-                "match_count": match_count,
-            })
+            logger.info(
+                "  Promoted: %d, Rejected: %d, Active: %d",
+                len(promoted),
+                len(rejected),
+                len(state.active),
+            )
+            ps.save_json(
+                "lifecycle_result.json",
+                {
+                    "promoted": [s.to_dict() for s in promoted],
+                    "rejected": [s.to_dict() for s in rejected],
+                    "remaining": [s.to_dict() for s in state.active],
+                    "match_count": match_count,
+                },
+            )
 
             # 6. Evaluate
             logger.info("  Evaluating...")
-            confirmation_results = {
-                s.domain: s.status == "promoted" for s in promoted
-            }
+            confirmation_results = {s.domain: s.status == "promoted" for s in promoted}
             for s in rejected:
                 confirmation_results[s.domain] = False
             for s in state.active:
                 confirmation_results[s.domain] = False
 
             report = await evaluator.evaluate(
-                speculations, profile, confirmation_results,
+                speculations,
+                profile,
+                confirmation_results,
                 persona_judgment=persona_judgment,
             )
             train_reports.append(report)
             ps.save_json("eval_report.json", report.to_dict())
             logger.info("  Score: %.3f", report.overall_score)
             logger.info(
-                "    plaus=%.2f novel=%.2f spec=%.2f conf=%.2f "
-                "no_hal=%.2f div=%.2f reson=%.2f",
-                report.mean_plausibility, report.mean_novelty,
-                report.mean_specificity, report.confirmation_rate,
-                report.mean_no_hallucination, report.diversity_score,
+                "    plaus=%.2f novel=%.2f spec=%.2f conf=%.2f no_hal=%.2f div=%.2f reson=%.2f",
+                report.mean_plausibility,
+                report.mean_novelty,
+                report.mean_specificity,
+                report.confirmation_rate,
+                report.mean_no_hallucination,
+                report.diversity_score,
                 report.mean_persona_resonance,
             )
 
@@ -324,7 +347,11 @@ async def main() -> None:
         avg_res = sum(r.mean_persona_resonance for r in train_reports) / len(train_reports)
         logger.info(
             "Epoch %d mean: %.3f, conf=%.3f, div=%.3f, resonance=%.3f",
-            epoch, train_mean, avg_conf, avg_div, avg_res,
+            epoch,
+            train_mean,
+            avg_conf,
+            avg_div,
+            avg_res,
         )
 
         # Collect worst dimensions
@@ -336,10 +363,7 @@ async def main() -> None:
                 dim_totals[key] = dim_totals.get(key, 0) + d["score"]
                 dim_counts[key] = dim_counts.get(key, 0) + 1
         worst_dims = sorted(
-            [
-                {"dimension": k, "score": dim_totals[k] / dim_counts[k]}
-                for k in dim_totals
-            ],
+            [{"dimension": k, "score": dim_totals[k] / dim_counts[k]} for k in dim_totals],
             key=lambda d: d["score"],
         )[:3]
 
@@ -378,8 +402,12 @@ async def main() -> None:
             "diversity_score": avg_div,
             "persona_resonance": avg_res,
             "worst_fields": [
-                {"layer": "speculation", "field": d["dimension"],
-                 "score": d["score"], "deviation": f"{d['dimension']} too low"}
+                {
+                    "layer": "speculation",
+                    "field": d["dimension"],
+                    "score": d["score"],
+                    "deviation": f"{d['dimension']} too low",
+                }
                 for d in worst_dims
             ],
             "action": action,
@@ -454,8 +482,9 @@ async def main() -> None:
             epoch_result["accepted"] = True
             if applied_count > 0:
                 optimizer.commit()
-                logger.info("ACCEPT + COMMIT (%d changes) — new best: %.3f",
-                            applied_count, best_score)
+                logger.info(
+                    "ACCEPT + COMMIT (%d changes) — new best: %.3f", applied_count, best_score
+                )
             else:
                 logger.info("ACCEPT (no effective changes) — new best: %.3f", best_score)
         else:
@@ -463,11 +492,17 @@ async def main() -> None:
             epoch_result["accepted"] = False
             if applied_count > 0:
                 optimizer.rollback()
-                logger.info("ROLLBACK (%d changes) — (%.3f <= %.3f), patience=%d/3",
-                            applied_count, train_mean, best_score, patience)
+                logger.info(
+                    "ROLLBACK (%d changes) — (%.3f <= %.3f), patience=%d/3",
+                    applied_count,
+                    train_mean,
+                    best_score,
+                    patience,
+                )
             else:
-                logger.info("No improvement (%.3f <= %.3f), patience=%d/3",
-                            train_mean, best_score, patience)
+                logger.info(
+                    "No improvement (%.3f <= %.3f), patience=%d/3", train_mean, best_score, patience
+                )
 
         history_log.append(epoch_result)
 

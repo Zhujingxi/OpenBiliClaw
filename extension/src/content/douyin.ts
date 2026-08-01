@@ -133,6 +133,13 @@ async function loadDomExtractor(): Promise<{
   return await import("./dy/dom-extractor.js");
 }
 
+async function loadBootstrapHelpers(): Promise<{
+  extractDouyinSecUidFromRenderData: typeof import("./dy/bootstrap.js").extractDouyinSecUidFromRenderData;
+  reconcileDouyinSelfIdentity: typeof import("./dy/bootstrap.js").reconcileDouyinSelfIdentity;
+}> {
+  return await import("./dy/bootstrap.js");
+}
+
 interface ScopeExecuteMessage {
   task_id: string;
   scope: DouyinScope;
@@ -147,7 +154,7 @@ interface ScopeResultPayload {
   scope: DouyinScope;
   items: DouyinBootstrapItem[];
   scope_count: number;
-  status: "ok" | "empty" | "failed";
+  status: "ok" | "empty" | "degraded" | "failed";
   error?: string;
   /**
    * Diagnostic counters surfaced through the dispatcher into the
@@ -165,6 +172,8 @@ interface ScopeResultPayload {
     api_pages_fetched?: number;
     api_error?: string;
     sec_uid?: string;
+    sec_uid_source?: DouyinSecUidSource;
+    identity_error?: string;
     end_of_feed?: string;
     inject_status?: string;
     page_url?: string;
@@ -259,6 +268,21 @@ interface FeedResultPayload {
 const SCROLL_DELAY_MS = 1_500;
 const POST_INSTALL_SETTLE_MS = 800;
 
+/**
+ * Accept only messages emitted by this page's top-level Window and origin.
+ *
+ * This is defense-in-depth against accidental cross-frame/page chatter, not
+ * an authorization boundary: any script running in the same page can still
+ * call window.postMessage. Sentinels, request IDs, and payload validation
+ * remain required for every bridge message.
+ */
+export function isSameWindowSameOriginDouyinMessage(
+  event: MessageEvent,
+  target: Window,
+): boolean {
+  return event.source === target && event.origin === target.location.origin;
+}
+
 // Module-level: track the last fetch-tap install ping. The MAIN-world
 // dy-fetch-tap.js posts one of:
 //   { type: "OPENBILICLAW_DOUYIN_FETCH_TAP_INSTALL", status: "installed" }
@@ -269,9 +293,20 @@ const POST_INSTALL_SETTLE_MS = 800;
 // fetch in this tab.
 let _lastFetchTapInstallStatus: "unknown" | "installed" | "skipped_no_sdk" = "unknown";
 let _installMessagesReceived = 0;
+type DouyinSecUidSource = "" | "profile_self";
 let _detectedSecUid = "";
+let _detectedSecUidSource: DouyinSecUidSource = "";
+
+function rememberAuthoritativeDouyinSecUid(secUid: string): void {
+  const normalized = secUid.trim();
+  if (!normalized) return;
+  _detectedSecUid = normalized;
+  _detectedSecUidSource = "profile_self";
+}
+
 if (typeof window !== "undefined") {
   window.addEventListener("message", (event: MessageEvent) => {
+    if (!isSameWindowSameOriginDouyinMessage(event, window)) return;
     const data = event?.data as { type?: unknown; status?: unknown } | null;
     if (!data || typeof data !== "object") return;
     if (data.type === "OPENBILICLAW_DOUYIN_FETCH_TAP_INSTALL") {
@@ -281,25 +316,6 @@ if (typeof window !== "undefined") {
         _lastFetchTapInstallStatus = s;
       }
       return;
-    }
-    if (data.type === "OPENBILICLAW_DOUYIN_SEC_UID") {
-      const secUid = String((data as { secUid?: unknown }).secUid ?? "");
-      if (secUid && secUid !== _detectedSecUid) {
-        _detectedSecUid = secUid;
-        debugLog("sec_uid_detected", { secUid });
-      }
-      return;
-    }
-    // TEMP DIAGNOSTIC (2026-05-08): relay every /aweme*/ URL the
-    // MAIN-world tap sees back to the daemon log so we can diagnose
-    // why aweme_messages_received stays at 0.
-    if (data.type === "OPENBILICLAW_DOUYIN_URL_PROBE") {
-      const probe = data as { transport?: unknown; url?: unknown; classified?: unknown };
-      debugLog("url_probe", {
-        transport: String(probe.transport ?? ""),
-        url: String(probe.url ?? ""),
-        classified: probe.classified ?? null,
-      });
     }
   });
 }
@@ -330,6 +346,7 @@ async function harvestScopeViaApiBridge(
       resolve({ items: [], pages: 0, error: "timeout" });
     }, timeoutMs);
     const onMessage = (event: MessageEvent): void => {
+      if (!isSameWindowSameOriginDouyinMessage(event, window)) return;
       const data = event?.data as Record<string, unknown> | null;
       if (!data || typeof data !== "object") return;
       if (data.type !== "OPENBILICLAW_DOUYIN_API_RESPONSE") return;
@@ -359,6 +376,97 @@ async function harvestScopeViaApiBridge(
   });
 }
 
+async function resolveDouyinSelfSecUidViaBridge(
+  timeoutMs: number = 15_000,
+): Promise<{ secUid: string; error?: string }> {
+  return new Promise((resolve) => {
+    const requestId = `obc_dy_identity_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      window.removeEventListener("message", onMessage);
+      resolve({ secUid: "", error: "timeout" });
+    }, timeoutMs);
+    const onMessage = (event: MessageEvent): void => {
+      if (!isSameWindowSameOriginDouyinMessage(event, window)) return;
+      const data = event?.data as Record<string, unknown> | null;
+      if (!data || typeof data !== "object") return;
+      if (data.type !== "OPENBILICLAW_DOUYIN_IDENTITY_RESPONSE") return;
+      if (data.requestId !== requestId || settled) return;
+      settled = true;
+      clearTimeout(timer);
+      window.removeEventListener("message", onMessage);
+      const secUid = typeof data.secUid === "string" ? data.secUid.trim() : "";
+      const error = typeof data.error === "string" ? data.error : undefined;
+      resolve({ secUid, error });
+    };
+    window.addEventListener("message", onMessage);
+    window.postMessage(
+      {
+        type: "OPENBILICLAW_DOUYIN_IDENTITY_REQUEST",
+        requestId,
+      },
+      window.location.origin,
+    );
+  });
+}
+
+async function resolveDouyinBootstrapSecUid(): Promise<{
+  secUid: string;
+  source: DouyinSecUidSource;
+  error?: string;
+}> {
+  if (_detectedSecUid && _detectedSecUidSource === "profile_self") {
+    return { secUid: _detectedSecUid, source: _detectedSecUidSource };
+  }
+  let renderDataSecUid = "";
+  let reconcileDouyinSelfIdentity:
+    | typeof import("./dy/bootstrap.js").reconcileDouyinSelfIdentity
+    | undefined;
+  try {
+    const helpers = await loadBootstrapHelpers();
+    reconcileDouyinSelfIdentity = helpers.reconcileDouyinSelfIdentity;
+    const raw = document.getElementById("RENDER_DATA")?.textContent ?? "";
+    renderDataSecUid = helpers.extractDouyinSecUidFromRenderData(raw);
+  } catch (err) {
+    debugLog("identity_render_data_failed", { error: String(err) });
+  }
+
+  const profileResult = await resolveDouyinSelfSecUidViaBridge();
+  const identity = reconcileDouyinSelfIdentity
+    ? reconcileDouyinSelfIdentity({
+        renderDataSecUid,
+        profileSelfSecUid: profileResult.secUid,
+        profileError: profileResult.error,
+      })
+    : {
+        secUid: profileResult.secUid,
+        source: profileResult.secUid ? ("profile_self" as const) : ("" as const),
+        conflict: false,
+        ...(!profileResult.secUid
+          ? { error: profileResult.error ?? "identity_unavailable" }
+          : {}),
+      };
+  if (identity.conflict) {
+    debugLog("identity_render_profile_conflict", {
+      render_data_sec_uid: renderDataSecUid,
+      profile_self_sec_uid: identity.secUid,
+    });
+  }
+  if (identity.secUid) {
+    // Cache only the identity positively confirmed by profile/self.
+    rememberAuthoritativeDouyinSecUid(identity.secUid);
+    return { secUid: _detectedSecUid, source: _detectedSecUidSource };
+  }
+
+  return {
+    secUid: "",
+    source: "",
+    error: identity.error ?? "identity_unavailable",
+  };
+}
+
 async function harvestSearchViaApiBridge(
   keyword: string,
   maxItems: number,
@@ -374,6 +482,7 @@ async function harvestSearchViaApiBridge(
       resolve({ items: [], pages: 0, error: "timeout" });
     }, timeoutMs);
     const onMessage = (event: MessageEvent): void => {
+      if (!isSameWindowSameOriginDouyinMessage(event, window)) return;
       const data = event?.data as Record<string, unknown> | null;
       if (!data || typeof data !== "object") return;
       if (data.type !== "OPENBILICLAW_DOUYIN_SEARCH_API_RESPONSE") return;
@@ -417,6 +526,7 @@ async function harvestHotRelatedViaApiBridge(
       resolve({ items: [], pages: 0, error: "timeout" });
     }, timeoutMs);
     const onMessage = (event: MessageEvent): void => {
+      if (!isSameWindowSameOriginDouyinMessage(event, window)) return;
       const data = event?.data as Record<string, unknown> | null;
       if (!data || typeof data !== "object") return;
       if (data.type !== "OPENBILICLAW_DOUYIN_HOT_API_RESPONSE") return;
@@ -459,6 +569,7 @@ async function harvestFeedViaApiBridge(
       resolve({ items: [], pages: 0, error: "timeout" });
     }, timeoutMs);
     const onMessage = (event: MessageEvent): void => {
+      if (!isSameWindowSameOriginDouyinMessage(event, window)) return;
       const data = event?.data as Record<string, unknown> | null;
       if (!data || typeof data !== "object") return;
       if (data.type !== "OPENBILICLAW_DOUYIN_FEED_API_RESPONSE") return;
@@ -568,6 +679,7 @@ function attachPassiveDiscoveryCollector(
 ): PassiveDiscoveryCollector {
   let passiveCount = 0;
   const onMessage = (event: MessageEvent): void => {
+    if (!isSameWindowSameOriginDouyinMessage(event, window)) return;
     const data = event?.data as Record<string, unknown> | null;
     if (!data || typeof data !== "object") return;
     if (data.type !== "OPENBILICLAW_DOUYIN_SEARCH_PAGE") return;
@@ -1146,6 +1258,24 @@ function detectEndOfFeed(): string {
   return "";
 }
 
+export function classifyDouyinScopeCompletion(input: {
+  itemCount: number;
+  secUid: string;
+  apiError: string;
+  identityError?: string;
+}): { status: ScopeResultPayload["status"]; error?: string } {
+  if (!input.secUid) {
+    return {
+      status: "degraded",
+      error: input.identityError || "no_sec_uid",
+    };
+  }
+  if (input.apiError) {
+    return { status: "degraded", error: input.apiError };
+  }
+  return { status: input.itemCount > 0 ? "ok" : "empty" };
+}
+
 async function runScope(msg: ScopeExecuteMessage): Promise<ScopeResultPayload> {
   debugLog("runScope:start", {
     scope: msg.scope,
@@ -1173,8 +1303,10 @@ async function runScope(msg: ScopeExecuteMessage): Promise<ScopeResultPayload> {
   let apiItemsHarvested = 0;
   let apiPagesFetched = 0;
   let apiError = "";
+  let identityError = "";
 
   const onMessage = (event: MessageEvent): void => {
+    if (!isSameWindowSameOriginDouyinMessage(event, window)) return;
     const data = event?.data as { type?: unknown } | null;
     if (data && typeof data === "object" && data.type === "OPENBILICLAW_DOUYIN_AWEME_PAGE") {
       awemeMessagesReceived += 1;
@@ -1235,20 +1367,16 @@ async function runScope(msg: ScopeExecuteMessage): Promise<ScopeResultPayload> {
     // gives our XHR tap a sec_uid to broadcast.
     harvestDomSnapshot();
 
-    // API-driven harvest — primary path. UI scrolling on Douyin's
-    // user-tab list does not reliably trigger lazy-load (verified
-    // 2026-05-08), so we directly call the page's own paged
-    // endpoints via window.fetch (already X-Bogus signed by
-    // webmssdk). Need a sec_uid first — wait up to 4s for the
-    // page-bundle's initial XHR to leak it (caught by the XHR tap
-    // and broadcast as OPENBILICLAW_DOUYIN_SEC_UID).
-    for (let waited = 0; waited < 4_000 && !_detectedSecUid; waited += 200) {
-      await sleep(200);
-    }
-    if (_detectedSecUid) {
+    // API-driven harvest — primary path. RENDER_DATA and passive
+    // sec_user_id values are diagnostic candidates only; the final identity
+    // must come from the authoritative profile/self MAIN-world fetch (or its
+    // same-tab confirmed cache), preserving live cookie/signing context.
+    const identity = await resolveDouyinBootstrapSecUid();
+    identityError = identity.error ?? "";
+    if (identity.secUid) {
       const apiResult = await harvestScopeViaApiBridge(
         msg.scope,
-        _detectedSecUid,
+        identity.secUid,
         msg.max_items_per_scope,
       );
       apiPagesFetched = apiResult.pages;
@@ -1268,7 +1396,11 @@ async function runScope(msg: ScopeExecuteMessage): Promise<ScopeResultPayload> {
         error: apiError,
       });
     } else {
-      debugLog("api_harvest_skipped", { scope: msg.scope, reason: "no_sec_uid" });
+      debugLog("api_harvest_skipped", {
+        scope: msg.scope,
+        reason: "no_sec_uid",
+        identity_error: identityError,
+      });
     }
 
     const anchorSelector =
@@ -1333,12 +1465,19 @@ async function runScope(msg: ScopeExecuteMessage): Promise<ScopeResultPayload> {
     // we'd otherwise miss because the loop broke before re-scanning.
     harvestDomSnapshot();
 
+    const completion = classifyDouyinScopeCompletion({
+      itemCount: allItems.length,
+      secUid: _detectedSecUid,
+      apiError,
+      identityError,
+    });
     return {
       task_id: msg.task_id,
       scope: msg.scope,
       items: allItems,
       scope_count: sink.scopeCounts()[msg.scope],
-      status: allItems.length > 0 ? "ok" : "empty",
+      status: completion.status,
+      error: completion.error,
       debug: {
         fetch_tap_install_status: _lastFetchTapInstallStatus,
         aweme_messages_received: awemeMessagesReceived,
@@ -1348,6 +1487,8 @@ async function runScope(msg: ScopeExecuteMessage): Promise<ScopeResultPayload> {
         api_pages_fetched: apiPagesFetched,
         api_error: apiError,
         sec_uid: _detectedSecUid,
+        sec_uid_source: _detectedSecUidSource,
+        identity_error: identityError,
         end_of_feed: endOfFeedPhrase,
         inject_status: msg.debug_inject_status,
         page_url: clickReport.page_url,
@@ -1372,6 +1513,8 @@ async function runScope(msg: ScopeExecuteMessage): Promise<ScopeResultPayload> {
         api_pages_fetched: apiPagesFetched,
         api_error: apiError,
         sec_uid: _detectedSecUid,
+        sec_uid_source: _detectedSecUidSource,
+        identity_error: identityError,
         end_of_feed: endOfFeedPhrase,
         inject_status: msg.debug_inject_status,
         page_url: clickReport.page_url,

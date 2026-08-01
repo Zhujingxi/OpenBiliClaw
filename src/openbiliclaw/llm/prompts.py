@@ -314,25 +314,50 @@ def build_preference_analysis_prompt(
     *,
     events: list[dict[str, object]],
     existing_preference: dict[str, object],
+    awareness_notes: list[dict[str, object]] | None = None,
+    active_insights: list[dict[str, object]] | None = None,
 ) -> list[dict[str, str]]:
-    """Build a structured prompt for extracting user preferences from events."""
+    """Build a structured prompt for extracting user preferences from events.
+
+    ``awareness_notes`` / ``active_insights`` are optional cognition context —
+    the incremental interest line passes its recent tail so a batch of events
+    is interpreted against what the system already believes about the user,
+    not in a vacuum. ``None`` keeps the prompt byte-identical to the
+    pre-context builder, which is what every other caller (init chunks,
+    feedback batch) still sends: their replay invariance is preserved by
+    construction. Sections are ordered stable → variable so the provider-side
+    prompt cache keeps its prefix.
+    """
     from openbiliclaw.sources.event_format import render_retraction_marked_events
 
     system_prompt = _PREFERENCE_ANALYSIS_SYSTEM_PROMPT
-    user_prompt = "\n\n".join(
-        [
-            "<existing_preference>",
-            json.dumps(existing_preference, ensure_ascii=False, indent=2),
-            "</existing_preference>",
-            "<event_batch>",
-            json.dumps(
-                render_retraction_marked_events(events),
-                ensure_ascii=False,
-                indent=2,
-            ),
-            "</event_batch>",
+    sections = [
+        "<existing_preference>",
+        json.dumps(existing_preference, ensure_ascii=False, indent=2),
+        "</existing_preference>",
+    ]
+    if awareness_notes:
+        sections += [
+            "<recent_awareness>",
+            json.dumps(awareness_notes, ensure_ascii=False, indent=2, sort_keys=True),
+            "</recent_awareness>",
         ]
-    )
+    if active_insights:
+        sections += [
+            "<active_insights>",
+            json.dumps(active_insights, ensure_ascii=False, indent=2, sort_keys=True),
+            "</active_insights>",
+        ]
+    sections += [
+        "<event_batch>",
+        json.dumps(
+            render_retraction_marked_events(events),
+            ensure_ascii=False,
+            indent=2,
+        ),
+        "</event_batch>",
+    ]
+    user_prompt = "\n\n".join(sections)
     return [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
@@ -747,6 +772,95 @@ def build_awareness_prompt(
     ]
 
 
+_AWARENESS_WITH_CONFUSIONS_SYSTEM_PROMPT = """
+<task>
+你要基于近期用户行为，做两件事：
+1. 生成少量谨慎的近期观察笔记（notes）。
+2. 标记出你「看不懂」的行为——那些证据不足、无法干净解读、可能存在多种矛盾解释的观察，作为疑惑（confusions）。
+</task>
+
+<rules>
+1. 输出必须是严格 JSON 对象：{"notes": [...], "confusions": [...]}，不要附带解释。
+2. notes 的每条字段：date / observation / trend / emotion_guess / source_event_ids；措辞保守，不下人格定论。
+   - source_event_ids：**这条观察实际依据的事件 id 数组**，只能从 recent_events 里各事件的 `id` 中选，
+     不要编造、不要把整批都塞进去；确实说不清是哪几条时给空数组（系统会退回整批归属并标记为近似）。
+3. confusions 只在你「真的不确定该怎么解读」时才产出，宁缺毋滥，最多 2 条。每条包含：
+   - topic：这个疑惑关联的话题/领域（简短，可为空）。
+   - observation：看到的、说不清的行为现象。
+   - interpretation：你此刻最可能但不确定的解读。
+   - interpretation_confidence：0~1，对上面解读的把握（低置信才该成为疑惑）。
+   - evidence_refs：相关的事件线索（可为空数组）。
+4. 每条事件自带 `context` 字段（跨源统一中文摘要），优先据此理解事件，配合 metadata.source_platform 区分平台；所有平台信号一视同仁。
+5. 如果没有真正看不懂的地方，confusions 返回空数组——不要为凑数制造疑惑。
+6. 详细输入（画像 / 偏好摘要 / 近期事件）见 user message 的 X / Y / Z 各段。
+</rules>
+
+<output_schema>
+{
+  "notes": [
+    {
+      "date": "2026-03-08",
+      "observation": "最近连续浏览高信息密度内容。",
+      "trend": "更偏向深度解释而非轻量消遣。",
+      "emotion_guess": "可能处于主动吸收和整理信息的阶段。",
+      "source_event_ids": [12, 15, 17]
+    }
+  ],
+  "confusions": [
+    {
+      "topic": "解压视频",
+      "observation": "连续点开解压视频但每条停留都很短。",
+      "interpretation": "可能只是当背景音，而不是真的对这个题材感兴趣。",
+      "interpretation_confidence": 0.35,
+      "evidence_refs": []
+    }
+  ]
+}
+</output_schema>
+""".strip()
+
+
+def build_awareness_with_confusions_prompt(
+    *,
+    events: list[dict[str, object]],
+    preference_summary: dict[str, object],
+    soul_profile: dict[str, object],
+) -> list[dict[str, str]]:
+    """Build the awareness+confusions prompt (Phase 2).
+
+    A NEW, independent builder — the legacy :func:`build_awareness_prompt`
+    stays byte-identical (its replay path is the one guarded by the invariance
+    test). ``cognition_cycle`` switches to this builder as an intentional
+    behaviour change (A/B recorded in the PR). System is a module-level
+    constant; per-call variables live in the user message with deterministic
+    ``sort_keys=True`` JSON so prompt-cache prefixes stay stable.
+    """
+    from openbiliclaw.sources.event_format import render_retraction_marked_events
+
+    user_prompt = "\n\n".join(
+        [
+            "<soul_profile>",
+            json.dumps(soul_profile, ensure_ascii=False, indent=2, sort_keys=True),
+            "</soul_profile>",
+            "<preference_summary>",
+            json.dumps(preference_summary, ensure_ascii=False, indent=2, sort_keys=True),
+            "</preference_summary>",
+            "<recent_events>",
+            json.dumps(
+                render_retraction_marked_events(events),
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ),
+            "</recent_events>",
+        ]
+    )
+    return [
+        {"role": "system", "content": _AWARENESS_WITH_CONFUSIONS_SYSTEM_PROMPT},
+        {"role": "user", "content": user_prompt},
+    ]
+
+
 def build_insight_prompt(
     *,
     awareness_notes: list[dict[str, object]],
@@ -925,24 +1039,32 @@ def build_search_queries_prompt(
     ]
 
 
-def build_dialogue_insight_prompt(
-    *,
-    user_message: str,
-    assistant_reply: str,
-    core_memory: dict[str, object],
-) -> list[dict[str, str]]:
-    """Build a structured prompt for extracting candidate insights from dialogue."""
-    system_prompt = """
+# 100% static system prompt for dialogue-insight extraction (v0.3.174+
+# prompt-cache compliance). All per-call data — core memory, the dialogue
+# turn, and the active-list to settle against — lives in the user message.
+_DIALOGUE_INSIGHT_SYSTEM_PROMPT = """
 <task>
-你要从一轮用户对话中提取少量高价值的候选理解，用于后续长期画像更新。
+你要从一轮用户对话中做两件事:
+1) 提取少量高价值的候选理解 (candidates),用于后续长期画像更新;
+2) 依据 user 消息里的 <active_list>,判断这轮对话是否结算 (settles) 了其中某些
+   活跃对象 (系统当前的推测兴趣 / 洞察假设 / 疑惑)。
+core_memory、这轮对话、以及 active_list 都在 user 消息里给出。
 </task>
 
 <rules>
-1. 输出必须是严格 JSON，不要附带解释。
-2. 只提取用户明确表达或高度暗示的稳定信号，不要记录瞬时情绪碎片。
-3. kind 只允许: interest, dislike, goal, value, state。
-4. confidence 保持保守，0~1。
+1. 输出必须是严格 JSON,不要附带解释。
+2. 只提取用户明确表达或高度暗示的稳定信号,不要记录瞬时情绪碎片。
+3. candidates 的 kind 只允许: interest, dislike, goal, value, state。
+4. confidence 保持保守,0~1。
 5. 最多返回 3 条 candidates。
+6. settles 只允许引用 <active_list> 中真实出现过的对象:
+   - kind 为 speculation 时,ref 必须是 active_list.speculations[].domain;
+   - kind 为 insight 时,ref 必须是 active_list.insights[].hash;
+   - kind 为 confusion 时,ref 必须是 active_list.confusions[].id。
+   不要凭空编造 ref;不确定就不要写进 settles。
+7. settles[].verdict 只允许: confirm (这轮明确印证), reject (这轮明确否定)。
+   只有用户明确表态才结算,含糊不清时不结算。
+8. 若没有可结算对象,settles 返回空数组。
 </rules>
 
 <output_schema>
@@ -954,15 +1076,81 @@ def build_dialogue_insight_prompt(
       "confidence": 0.84,
       "evidence": "用户明确说想把国际新闻看得更透。"
     }
+  ],
+  "settles": [
+    {
+      "kind": "speculation",
+      "ref": "桌游",
+      "verdict": "confirm",
+      "note": "用户说最近确实在玩。"
+    }
   ]
 }
 </output_schema>
 """.strip()
-    user_prompt = "\n\n".join(
+
+
+_DIALOGUE_ANCHOR_USER_CONTRACT = """
+<anchor_contract>
+这轮处于单一话题锚中。除原有 candidates / settles 外，还要返回 anchor 判断：
+- relation 只允许 support / contradict / revise / answer / ambiguous / unrelated；
+- hypothesis 锚只允许 support / contradict / revise / ambiguous / unrelated；
+- confusion 锚只允许 answer / ambiguous / unrelated；
+- confusion 的 answer 必须把 interpretation 写成 real_interest / proxy_behavior / dismissed 之一；
+- revise 可在 derived 中给出修正后的假设；其他 relation 的 derived 返回空数组；
+- 归锚内容禁止重复写进 candidates，也不要再用 settles 结算锚对象；
+- 不确定归属时返回 ambiguous，明确岔题才返回 unrelated。
+
+anchor 字段格式：
+{
+  "relation": "support",
+  "interpretation": "",
+  "derived": [
+    {
+      "content": "修正后的假设",
+      "confidence": 0.82,
+      "evidence": "用户本轮的明确修正"
+    }
+  ]
+}
+</anchor_contract>
+""".strip()
+
+
+def build_dialogue_insight_prompt(
+    *,
+    user_message: str,
+    assistant_reply: str,
+    core_memory: dict[str, object],
+    active_list: dict[str, object] | None = None,
+    anchor: dict[str, object] | None = None,
+) -> list[dict[str, str]]:
+    """Build a structured prompt for extracting candidate insights from dialogue.
+
+    ``active_list`` (v0.3.174+) carries the round's injected settle targets
+    (speculations by ``domain`` / insights by content ``hash`` / confusions by
+    ``id``). The system prompt is a module-level constant; all per-call data is
+    ordered most-stable-first in the user message (prompt-cache convention).
+    """
+    user_sections = [
+        "<core_memory>",
+        json.dumps(core_memory, ensure_ascii=False, indent=2, sort_keys=True),
+        "</core_memory>",
+        "<active_list>",
+        json.dumps(active_list or {}, ensure_ascii=False, indent=2, sort_keys=True),
+        "</active_list>",
+    ]
+    if anchor:
+        user_sections.extend(
+            [
+                "<current_anchor>",
+                json.dumps(anchor, ensure_ascii=False, indent=2, sort_keys=True),
+                "</current_anchor>",
+                _DIALOGUE_ANCHOR_USER_CONTRACT,
+            ]
+        )
+    user_sections.extend(
         [
-            "<core_memory>",
-            json.dumps(core_memory, ensure_ascii=False, indent=2),
-            "</core_memory>",
             "<dialogue_turn>",
             json.dumps(
                 {
@@ -971,12 +1159,80 @@ def build_dialogue_insight_prompt(
                 },
                 ensure_ascii=False,
                 indent=2,
+                sort_keys=True,
             ),
             "</dialogue_turn>",
         ]
     )
+    user_prompt = "\n\n".join(user_sections)
     return [
-        {"role": "system", "content": system_prompt},
+        {"role": "system", "content": _DIALOGUE_INSIGHT_SYSTEM_PROMPT},
+        {"role": "user", "content": user_prompt},
+    ]
+
+
+# 100% static system prompt for the posture gate (Phase 3). All per-call data
+# (the proposed deep-write change, core memory, and the 30-day ledger digest)
+# lives in the user message — see ``build_posture_gate_prompt``.
+_POSTURE_GATE_SYSTEM_PROMPT = """
+<task>
+你是画像深层写入的「态势门控」。系统准备把一条深层理解（目标 / 价值观 / 核心状态，
+或一次整份画像重建）写进长期画像。你要判断：以当前对这个人的既有理解为基准，这条改动
+是否站得住脚。深层理解稳定、代价高，不该被一两条噪声行为轻易改写。
+待判定的改动、core_memory、以及最近 30 天的画像写入台账摘要都在 user 消息里。
+</task>
+
+<judgement>
+只能返回三种判定之一：
+- accept：改动与既有理解一致、或有足够证据支撑，放行。
+- downgrade：改动方向可能成立但证据不足、或与既有理解有张力——不直接写深层，降级为
+  一个「待验证的假设」。这不是拒绝，而是把它放进假设池等更多证据。
+- reject：改动明显是噪声、自相矛盾、或与大量既有证据冲突，且没有新意，丢弃。
+</judgement>
+
+<principles>
+1. 冲突不是错误，而是一个新假设。当改动与既有画像冲突时，默认倾向 downgrade（生成假设）
+   而非 accept 或 reject——除非冲突方已有压倒性证据。
+2. 保守优先：把握不足时选 downgrade，而不是 accept。
+3. 参考台账：若最近同一方向已反复写入并稳定，可以更放心 accept；若台账显示这个方向近期
+   反复横跳，倾向 downgrade。
+4. 详细输入见 user 消息的 <proposed_change> / <core_memory> / <ledger_digest> 各段。
+</principles>
+
+<output_schema>
+{"verdict": "downgrade", "reason": "与既有的稳定价值观有张力，证据仅一轮对话，先作为假设观察。"}
+</output_schema>
+""".strip()
+
+
+def build_posture_gate_prompt(
+    *,
+    change: dict[str, object],
+    core_memory: dict[str, object],
+    ledger_digest: list[dict[str, object]] | None = None,
+) -> list[dict[str, str]]:
+    """Build the posture-gate judgement prompt (Phase 3).
+
+    The system prompt is a module-level constant (prompt-cache convention); all
+    per-call variables live in the user message ordered most-stable-first
+    (persona/core memory → this change → the recent ledger digest), each
+    serialized with deterministic ``sort_keys=True`` JSON.
+    """
+    user_prompt = "\n\n".join(
+        [
+            "<core_memory>",
+            json.dumps(core_memory, ensure_ascii=False, indent=2, sort_keys=True),
+            "</core_memory>",
+            "<proposed_change>",
+            json.dumps(change, ensure_ascii=False, indent=2, sort_keys=True),
+            "</proposed_change>",
+            "<ledger_digest>",
+            json.dumps(ledger_digest or [], ensure_ascii=False, indent=2, sort_keys=True),
+            "</ledger_digest>",
+        ]
+    )
+    return [
+        {"role": "system", "content": _POSTURE_GATE_SYSTEM_PROMPT},
         {"role": "user", "content": user_prompt},
     ]
 

@@ -189,11 +189,11 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.186 (2026-07-31)**
+📌 Latest: **v0.3.191 (2026-07-30)**
 
-- **Geometric redesign of visual scoring** — liked and disliked covers overlap in visual space, so scoring now uses a margin: boost/suppress only where the cover modality can separate them, abstain in contested regions; kigurumi / character-showcase / MV content matching your taste is correctly lifted.
-- **Cold-start gating** — no centroids are built from too little feedback, avoiding a noise-dominated fragile profile; it activates once 8 covers are collected, with ranking unchanged until then.
-- **Cross-platform fairness** — Bilibili-only danmaku / keyframe signals no longer structurally suppress bangumi / xiaohongshu; each platform is normalized within its own pool, and bangumi is back in the feed.
+- **Saving configuration no longer interrupts long-running dialogue work** — hot reload now waits for active jobs to finish safely and clearly reports when work continues beyond the frontend timeout.
+- **Pending-chat open and defer actions are more reliable** — busy workers trigger an automatic retry, and deferring one topic no longer blocks the next pending item.
+- **Web realtime connectivity is steadier** — idle heartbeats, transient-disconnect status, and automatic reconnection prevent brief network hiccups from looking like a backend outage.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
@@ -327,7 +327,7 @@ openbiliclaw start
 - **Desktop**: open `http://127.0.0.1:8420/web` (or `http://127.0.0.1:8420/`, auto-redirects). Two-column editorial layout with recommendations, profile, chat, messages, and settings all on one page.
 - **Mobile**: click the phone icon in the extension header to scan the QR code, or type `http://<your-LAN-IP>:8420/m/` manually. Best for browsing recommendations, profile, and chat on your phone.
 
-> During `openbiliclaw init`, you'll be asked whether to allow LAN access (default Y). If you chose N or want to change it later, edit `[api].host` in `config.toml` (`0.0.0.0` = LAN-reachable, `127.0.0.1` = local only).
+> During `openbiliclaw init`, you'll be asked whether to allow LAN access (default Y). If you chose N or want to change it later, edit `[api].host` in `config.toml` (`0.0.0.0` = LAN-reachable over available IPv4 and IPv6, `127.0.0.1` = local only). QR links prefer IPv4 and automatically use a bracketed IPv6 literal when IPv4 is unavailable.
 
 After opening `/m/`, save it as a home-screen shortcut: on iPhone / iPad, use Safari's Share menu and choose "Add to Home Screen"; on Android Chrome / Chromium browsers, use the menu item "Install app" or "Add to Home screen". LAN HTTP may only create a shortcut in some Android browsers; full PWA install prompts are more reliable behind HTTPS in a trusted local setup.
 
@@ -590,8 +590,21 @@ background ─ background admission (default 3) ──────┘
 guided init: signals → preferences → full profile commit → discover → evaluate → copy → canonical ready
                                                               └→ optional probes after terminal state
 
-config draft → /api/config/discover-models → exact instance GET /models (no write)
-             → editable model combobox + local effort advisory (not a protocol capability)
+config recovery draft (normal or degraded; business APIs remain gated)
+             ├→ /api/config/probe-service → temporary registry → total gate
+             └→ /api/config/discover-models → exact instance GET /models (no write)
+                                           → editable model list + local effort advisory
+durable reply: fixed time/payload → queued mode → one 11-kind typed settlement queue → actual worker + guard
+confirmation entry (pending list/cards) → one anchor(kind+ref+generation) → frozen admission / relation matrix
+                          ├→ pending≤3 · user no cooldown / system 12h+object 72h · confirmation-first attachment
+                          ├→ busy worker: dialogue_busy + Retry-After → waiting UI auto-retry
+                          ├→ active confusion: current holder only; hidden once this session has its turn
+                          ├→ frozen kind/ref/generation → worker-only apply → event/object/derived/marker → applied
+                          │                                                └→ publication-only retry → projection / exact release
+                          ├→ action local≤1s: completed 200 / blocked 202 → popup/desktop poll 1/2/5s, ≤30s
+                          └→ confusion FIFO≤5 / head fencing / 12h recovery
+config hot reload: accepting drain old worker → atomic pause/revoke → new worker; 25m safety window
+realtime: runtime-stream 20s idle heartbeat → transient close shows reconnecting and retries
 ```
 
 ```
@@ -600,9 +613,10 @@ config draft → /api/config/discover-models → exact instance GET /models (no 
 │  Behavior capture · MAIN-world taps (comment/  │
 │  danmaku, xhs strong signal) · Cookie · Tasks  │
 └──────────────────────┬─────────────────────────┘
-                       │ REST API / WebSocket
+                       │ HTTP default: IPv4 0.0.0.0 + IPv6 [::] → REST / WebSocket
+                       │ Optional HTTPS: TLS Proxy :8443 → loopback/Compose HTTP → same API
                        │ + Desktop Web (/web) · Mobile Web (/m) · QR LAN-IP
-                       │ + ping preflight → /web · /setup · /m → config + restart
+                       │ + ping preflight → /web · /setup · /m → config + in-process recovery
 ┌──────────────────────▼─────────────────────────┐
 │               Agent Orchestration               │
 │ Skills · Dialogue · Runtime · 10s undo barrier   │
@@ -611,14 +625,19 @@ config draft → /api/config/discover-models → exact instance GET /models (no 
 │ Engine  │  System  │Discovery +│     Engine     │
 │         │          │ Admission │                │
 ├─────────┴──────────┴───────────┴───────────────┤
+│ Interest: events/dialogue/feedback(priority) → │
+│ ProfileUpdatePipeline → single INTEREST line   │
+│ Legacy batch only when rollback flag=false     │
 │ Init barrier: profile commit → discover/evaluate/copy → ready │
+│ Soul cognition: dual pending cooldown · one anchor · worker-only settlement · winner receipt · confusion FIFO · ledger · deep gate │
+│   LLM adapters · Source adapters (SourceAdapter) │
 │ Module route → LLM instance chain → adapter · SourceAdapter │
-│ Config draft → exact-instance /models → editable selection (no write) │
+│ Config recovery draft (normal/degraded) → temp probe / exact /models (no write) │
 │ Source-family registry: alias · strategy · URL host │
 │             → pool accounting · durable seen_items ledger │
 │ Bangumi public API → search/ranked/date producer → shared eval │
 │ API projected stock → 3×30 workers → serial admit; OpenClaw first batch≤4 → copy≤4/no split retry → UI │
-│ Delight gate: formal copy/topic ready → score + atomic snapshot → UI │
+│ Delight gate: formal copy/topic ready + seen_items guard → score/snapshot → UI × writes seen ledger │
 │ API/OpenClaw startup hook → recover/maintain → expose LLM │
 │ Reshuffle: current-card exclusion → PoolServeSnapshot/seen_items → short rec+shown write → one batch event │
 │ Platform scope (PC Web tabs only): source_platform → scoped candidates, no cross-platform floor → same rank/copy/persist │
@@ -627,6 +646,7 @@ config draft → /api/config/discover-models → exact instance GET /models (no 
 │ /api/saved/* · router · Bilibili native save      │
 │ Six adapters → ExtensionNativeSaveBroker → extension_native_save_jobs │
 │ six-platform source task multiplex: xhs / dy / yt / x / zhihu / reddit │
+│ XHS auto tasks: source/scheduler gate → SQLite pacing/breaker → no new tab while off/limited │
 │ extension_native_save_jobs -> /api/sources/<slug>/next-task -> installed extension │
 │ exact OpenBiliClaw / YouTube Watch Later targets → safe task-result    │
 │ trusted-local E2E exact auth → one saved-sync item → six-field callback │
@@ -635,16 +655,27 @@ config draft → /api/config/discover-models → exact instance GET /models (no 
 │ Six adapters → broker → shared MV3 recovery barrier → Reddit/X/YT/XHS/DY/Zhihu executors (6/6 fixture + real-account)│
 └────────────────────────────────────────────────┘
 
-Web / CLI / OpenClaw → SocraticDialogue → success: user+agent history → background learning (bypass background admission; keep total gate)
-                                      │                      └new dislike: shared purge → content_cache
-                                      └failure/timeout: rollback provisional history → safe error / failed turn
+Web/API durable → SocraticDialogue(queued) → user+agent history → typed queue[all declared entries] → one in-line worker
+CLI/OpenClaw → SocraticDialogue(legacy_direct) → user+agent history → direct learning outside queue/guard
+learning → bypass background admission; keep total gate ── new dislike: shared purge → content_cache
+failure/timeout → rollback provisional history → safe error / failed turn
+durable turn → fixed time/payload → confirmation entry (pending list/cards) → frozen anchor admission → relation matrix
+                                                  └→ card/anchor/chat/probe/confusion/replay/legacy all worker-only
+card action → synchronous 200 fast path | 202 processing → popup/desktop poll; mobile/CLI have no action
 
 Desktop startup: recommendation hydration │ runtime hydration │ secondary health/profile/activity/config hydration (independent)
 
 Overseas traffic: `[network].mode` → system proxy (default) / direct / custom proxy → LLM, YouTube, X/Reddit CLIs, Bangumi, updater; CN clients remain isolated and direct
+Manual Douyin discovery: CLI discover → daemon-equivalent producer → per-keyword outcomes → extension search/hot/feed → pending-eval pool
 ```
 
 Remote extension access uses explicit, default-off device authentication: `ext-key generate` → digest-only backend config → `/api/auth/extension-token` short session. HTTP uses a Bearer header; only WebSocket and image proxy URLs carry the short session query.
+
+Trusted LAN and self-managed deployments may additionally enable the default-off
+[TLS Proxy](docs/https-deployment.md). It performs exact HTTPS Origin/Host validation, relays
+WebSockets, and manages explicit SANs for a local-CA certificate. With no remote SAN the generated
+certificate is localhost-only. This lightweight component is not a public-Internet production
+gateway, and the default HTTP path is unchanged.
 
 > Full architecture detail (runtime state machine, pool accounting, profile overrides, and more) lives in [Architecture](docs/architecture.md) and the [visual architecture diagrams](docs/index.md).
 
@@ -656,7 +687,7 @@ Remote extension access uses explicit, default-off device authentication: `ext-k
 |--------|-----------|---------------------|
 | **Bilibili** | search · trending · related chain · cross-domain explore | Backend-direct WBI-signed APIs, with a real rendered search-page fallback via the extension |
 | **Xiaohongshu** | passive collection · search · creator subscriptions · init import | Extension reads your logged-in pages; zero backend crawling |
-| **Douyin** | init import · search · hot · feed | Extension background tab with real DOM interactions; never steals focus |
+| **Douyin** | init import · search · hot · feed | CLI and daemon share the formal producer; extension background tabs fetch candidates for the unified eval pool |
 | **YouTube** | init import · Takeout offline import · search / trending / channel | Extension reads profile signals; steady-state refill is backend-direct |
 | **X (Twitter)** | init import · search · For-You · followed authors | Server-side read-only cookie replay for discovery; native bookmark executor's first real favorite finished `synced` |
 | **Zhihu** | init import · search · hot · feed · creator · related | Extension reads logged-in tabs; renders as text cards |
@@ -694,7 +725,8 @@ OpenBiliClaw/
 │   ├── sources/               # Source adapters, Bangumi API, and XHS/Douyin/YouTube/Zhihu/Reddit task bridges
 │   ├── youtube/               # Google Takeout import parser
 │   ├── api/                   # Local FastAPI (config rollback / degraded mode / popup API)
-│   ├── runtime/               # Refresh, feedback coalescing, presence gate, autostart/Ollama, degraded RuntimeContext
+│   ├── tls_proxy.py           # Default-off LAN/self-managed HTTPS edge
+│   ├── runtime/               # Refresh, feedback coalescing, presence gate, shared CLI/desktop autostart reconcile, Ollama, degraded RuntimeContext
 │   ├── bilibili/              # Bilibili API layer (WBI signing · rate control)
 │   ├── llm/                   # Multi-model LLM adapters + structured JSON tolerance
 │   └── storage/               # Data storage layer
@@ -719,6 +751,7 @@ OpenBiliClaw/
 | Zhihu | Extension task dispatch reads event-smoke and selected guided-init signals plus search / hot / feed / creator / related candidates in the logged-in browser; answers / articles / questions render as text cards |
 | Reddit | Default-installed rdt-cli reads search / hot / subreddit / related candidates by default; the extension syncs `reddit_session` into rdt credentials and `rdt login` is a manual fallback; extension task dispatch reads discovery when rdt is unavailable, unauthenticated, or explicitly selected, and always reads bootstrap saved / upvoted / subscribed signals in the logged-in browser; posts / comments render as text cards |
 | Bangumi | Official anonymous read-only v0 API; search / ranked / date browsing feed the shared candidate pool, while an optional public username enables public-collection profile init; no cookie, token, or native write-back |
+| Optional TLS | Python stdlib HTTP/TLS forwarding plus cryptography certificate generation from the `[tls]` extra; LAN/self-managed only and off by default |
 | Storage | SQLite + Embedding vector index |
 | Containerization | Docker Compose (backend) |
 | Agent Framework | Lightweight custom framework |

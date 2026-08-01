@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from openbiliclaw.sources import dy_tasks
 from openbiliclaw.sources.dy_tasks import DyTaskQueue, dy_bootstrap_videos_to_events
 from openbiliclaw.sources.event_format import SOURCE_DOUYIN
 from openbiliclaw.storage.database import Database
@@ -166,6 +167,23 @@ def test_dy_bootstrap_videos_to_events_follow_uses_creator_sec_uid() -> None:
     metadata = events[0]["metadata"]
     assert metadata["creator_sec_uid"] == "abc"
     assert events[0]["event_type"] == "follow"
+
+
+def test_dy_result_merge_preserves_existing_semantic_status() -> None:
+    """A metadata/count merge must not silently drop result_json.status."""
+    merged, added = dy_tasks._merge_dy_result_payload(
+        {
+            "status": "degraded",
+            "videos": [{"scope": "dy_collect", "aweme_id": "first"}],
+            "scope_counts": {"dy_collect": 1},
+        },
+        scope_counts={"dy_collect": 1},
+        debug={"retry": "late"},
+    )
+
+    assert added == []
+    assert merged["status"] == "degraded"
+    assert merged["debug"] == {"retry": "late"}
 
 
 def test_dy_task_queue_ignores_stale_pending_failures_for_daily_budget(

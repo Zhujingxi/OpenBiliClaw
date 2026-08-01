@@ -16,6 +16,8 @@ import uuid
 from pathlib import Path
 from typing import Any, cast
 
+from openbiliclaw.proc import no_window_kwargs
+
 logger = logging.getLogger(__name__)
 
 
@@ -81,6 +83,7 @@ class BilibiliBrowser:
                 text=True,
                 timeout=5,
                 check=False,
+                **no_window_kwargs(),
             )
         except (OSError, subprocess.SubprocessError):
             return False
@@ -116,6 +119,7 @@ class BilibiliBrowser:
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            **no_window_kwargs(),
         )
         stdout, stderr = await proc.communicate()
 

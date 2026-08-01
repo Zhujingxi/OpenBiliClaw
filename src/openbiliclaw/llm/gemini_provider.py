@@ -86,7 +86,7 @@ class GeminiProvider(LLMProvider):
         self,
         api_key: str,
         model: str = "gemini-2.5-flash",
-        timeout: float = 300.0,
+        timeout: float = 1200.0,
         base_url: str = "",
         embedding_output_dimensionality: int | None = None,
         proxy: str = "",

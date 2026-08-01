@@ -566,10 +566,13 @@ def stop_managed_ollama() -> bool:
         if os.name == "nt":
             # terminate() reaches only `ollama serve`; the model runner is a
             # child process, so use taskkill /T to take down the whole tree.
+            from openbiliclaw.proc import no_window_kwargs
+
             subprocess.run(  # noqa: S603
                 ["taskkill", "/PID", str(proc.pid), "/T", "/F"],  # noqa: S607
                 capture_output=True,
                 check=False,
+                **no_window_kwargs(),
             )
         else:
             # Started with start_new_session=True → it leads its own process

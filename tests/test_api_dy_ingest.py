@@ -273,6 +273,135 @@ class TestDyTaskResult:
         assert task is not None
         assert task["status"] == "pending"  # direct POST did not claim it first
 
+    def test_dy_degraded_result_is_terminal_and_preserves_partial_items(
+        self,
+        dy_task_client: tuple[TestClient, Database, RecordingMemoryManager],
+    ) -> None:
+        """A completed-but-incomplete bootstrap is terminal without being
+        mislabeled as a full success."""
+        import json
+
+        client, db, memory = dy_task_client
+        task_id = _enqueue_dy_bootstrap_task(db)
+
+        partial = client.post(
+            "/api/sources/dy/task-result",
+            json={
+                "task_id": task_id,
+                "status": "partial",
+                "videos": [
+                    {
+                        "scope": "dy_collect",
+                        "title": "首屏收藏",
+                        "url": "https://www.douyin.com/video/fav-first-page",
+                        "aweme_id": "fav-first-page",
+                    }
+                ],
+                "scope_counts": {"dy_collect": 1},
+            },
+        )
+        assert partial.status_code == 200
+
+        final = client.post(
+            "/api/sources/dy/task-result",
+            json={
+                "task_id": task_id,
+                "status": "degraded",
+                "videos": [],
+                "scope_counts": {"dy_collect": 1},
+                "debug": {
+                    "scope_statuses": {"dy_collect": "degraded"},
+                    "degraded_reasons": ["dy_collect:no_sec_uid"],
+                },
+            },
+        )
+        assert final.status_code == 200
+
+        from openbiliclaw.sources.dy_tasks import DyTaskQueue
+
+        task = DyTaskQueue(db).get(task_id)
+        assert task is not None
+        assert task["status"] == "completed"
+        result = json.loads(str(task["result_json"]))
+        assert result["status"] == "degraded"
+        assert result["videos"][0]["aweme_id"] == "fav-first-page"
+        assert result["debug"]["degraded_reasons"] == ["dy_collect:no_sec_uid"]
+        assert [event["event_type"] for event in memory.events] == ["favorite"]
+
+    def test_dy_terminal_degraded_result_ignores_late_out_of_order_callbacks(
+        self,
+        dy_task_client: tuple[TestClient, Database, RecordingMemoryManager],
+    ) -> None:
+        """A final degraded callback is immutable when an older partial (or a
+        stale success callback) arrives after it."""
+        import json
+
+        client, db, memory = dy_task_client
+        task_id = _enqueue_dy_bootstrap_task(db)
+
+        final = client.post(
+            "/api/sources/dy/task-result",
+            json={
+                "task_id": task_id,
+                "status": "degraded",
+                "videos": [
+                    {
+                        "scope": "dy_collect",
+                        "title": "终态保留的视频",
+                        "url": "https://www.douyin.com/video/final-only",
+                        "aweme_id": "final-only",
+                    }
+                ],
+                "scope_counts": {"dy_collect": 1},
+                "debug": {"degraded_reasons": ["dy_collect:pagination_incomplete"]},
+            },
+        )
+        assert final.status_code == 200
+
+        late_partial = client.post(
+            "/api/sources/dy/task-result",
+            json={
+                "task_id": task_id,
+                "status": "partial",
+                "videos": [
+                    {
+                        "scope": "dy_like",
+                        "title": "迟到 partial 不应写入",
+                        "url": "https://www.douyin.com/video/late-partial",
+                        "aweme_id": "late-partial",
+                    }
+                ],
+                "scope_counts": {"dy_collect": 1, "dy_like": 1},
+                "debug": {"late": True},
+            },
+        )
+        stale_ok = client.post(
+            "/api/sources/dy/task-result",
+            json={
+                "task_id": task_id,
+                "status": "ok",
+                "videos": [],
+                "scope_counts": {"dy_collect": 1, "dy_like": 1},
+            },
+        )
+
+        assert late_partial.status_code == 200
+        assert late_partial.json() == {"ok": True, "ignored": True}
+        assert stale_ok.status_code == 200
+        assert stale_ok.json() == {"ok": True, "ignored": True}
+
+        from openbiliclaw.sources.dy_tasks import DyTaskQueue
+
+        task = DyTaskQueue(db).get(task_id)
+        assert task is not None
+        assert task["status"] == "completed"
+        result = json.loads(str(task["result_json"]))
+        assert result["status"] == "degraded"
+        assert [video["aweme_id"] for video in result["videos"]] == ["final-only"]
+        assert result["scope_counts"] == {"dy_collect": 1}
+        assert result["debug"] == {"degraded_reasons": ["dy_collect:pagination_incomplete"]}
+        assert [event["title"] for event in memory.events] == ["终态保留的视频"]
+
     def test_dy_scope_partials_then_empty_final_preserve_videos_and_dedup_events(
         self,
         dy_task_client: tuple[TestClient, Database, RecordingMemoryManager],

@@ -80,9 +80,21 @@ export function extractDouyinSecUidFromState(state: unknown): string {
 }
 
 /**
+ * Resolve the logged-in user's sec_uid directly from the URL-encoded
+ * ``#RENDER_DATA`` payload. Keeping the decode + narrow-path lookup in one
+ * helper makes it usable by the live content executor as well as unit tests.
+ */
+export function extractDouyinSecUidFromRenderData(raw: string): string {
+  const state = decodeRenderData(raw);
+  if (!extractDouyinLoginState(state)) return "";
+  return extractDouyinSecUidFromState(state);
+}
+
+/**
  * Detect whether Douyin's RENDER_DATA represents a logged-in user.
- * Conservative: we require either an explicit `isLogin: true` field
- * OR a non-empty sec_uid. We never default to true on missing data.
+ * Conservative: only an explicit `isLogin: true` field is accepted.
+ * A sec_uid can also appear in logged-out/device-scoped state, so its
+ * presence is an observed identity claim, not login proof.
  *
  * Why conservative? If we hallucinate a logged-in state and run a
  * bootstrap that hits favorite/like endpoints, we'll just get empty
@@ -91,13 +103,55 @@ export function extractDouyinSecUidFromState(state: unknown): string {
  * mix calculation. Better to skip the bootstrap entirely.
  */
 export function extractDouyinLoginState(state: unknown): boolean {
-  const explicitLogin = getNestedBool(state, ["app", "user", "userInfo", "isLogin"]);
-  if (explicitLogin === true) return true;
-  if (explicitLogin === false) return false;
-  // Fall back to "do we have a sec_uid" as a secondary positive
-  // signal. Only positive — empty sec_uid does NOT prove logged-out
-  // because some Douyin states publish sec_uid lazily. But we still
-  // need something to anchor on, and sec_uid has been the most
-  // stable indicator across the variants we've seen.
-  return extractDouyinSecUidFromState(state) !== "";
+  const candidatePaths: string[][] = [
+    ["app", "user", "userInfo", "isLogin"],
+    ["app", "userStore", "user", "isLogin"],
+    ["app", "user", "isLogin"],
+  ];
+  let sawExplicitTrue = false;
+  for (const path of candidatePaths) {
+    const value = getNestedBool(state, path);
+    // Contradictory SSR state must fail closed. profile/self remains
+    // the authoritative source used by the live executor.
+    if (value === false) return false;
+    if (value === true) sawExplicitTrue = true;
+  }
+  return sawExplicitTrue;
+}
+
+export interface DouyinAuthoritativeIdentity {
+  secUid: string;
+  source: "" | "profile_self";
+  conflict: boolean;
+  error?: string;
+}
+
+/**
+ * Reconcile the SSR identity claim with `/profile/self`.
+ *
+ * RENDER_DATA is useful only for diagnostics and conflict detection.
+ * The returned identity is never populated unless profile/self positively
+ * confirms the current logged-in account. A profile response therefore wins
+ * every conflict, and callers may cache only a non-empty result from here.
+ */
+export function reconcileDouyinSelfIdentity(input: {
+  renderDataSecUid: string;
+  profileSelfSecUid: string;
+  profileError?: string;
+}): DouyinAuthoritativeIdentity {
+  const renderDataSecUid = input.renderDataSecUid.trim();
+  const profileSelfSecUid = input.profileSelfSecUid.trim();
+  if (!profileSelfSecUid) {
+    return {
+      secUid: "",
+      source: "",
+      conflict: false,
+      error: input.profileError ?? "identity_unavailable",
+    };
+  }
+  return {
+    secUid: profileSelfSecUid,
+    source: "profile_self",
+    conflict: Boolean(renderDataSecUid && renderDataSecUid !== profileSelfSecUid),
+  };
 }

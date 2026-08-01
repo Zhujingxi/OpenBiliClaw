@@ -90,6 +90,7 @@ def test_qr_generator_is_self_contained_global() -> None:
     for symbol in ("buildMobileWebUrl", "isLoopbackMobileHost", "createQrSvgMarkup"):
         assert symbol in _QR_JS
     assert "import " not in _QR_JS, "desktop web has no module build; keep it dependency-free"
+    assert "`[${safeHost}]`" in _QR_JS, "IPv6 URL literals must be enclosed in brackets"
 
 
 def test_desktop_settings_selects_survive_browser_page_translation() -> None:

@@ -235,10 +235,18 @@ class MemoryManager:
         append_changelog(entry, self._data_dir)
 
     def load_feedback_state(self) -> dict[str, object]:
-        """Load feedback-processing cursor state from disk."""
+        """Load feedback-processing cursor state from disk.
+
+        ``unified_interest_line_migrated_at`` is the one-shot marker for the
+        unified interest line's legacy-cursor migration (spec 2026-07-27
+        Phase 3). It lives in the SAME file as the cursor on purpose: one JSON
+        write persists both, so no crash can leave the marker set without the
+        cursor advanced (or the reverse).
+        """
         default_state = {
             "last_processed_feedback_event_id": 0,
             "last_feedback_reanalyzed_at": "",
+            "unified_interest_line_migrated_at": "",
         }
         if not self._feedback_state_path.exists():
             return default_state
@@ -251,16 +259,31 @@ class MemoryManager:
                 loaded.get("last_processed_feedback_event_id", 0)
             ),
             "last_feedback_reanalyzed_at": str(loaded.get("last_feedback_reanalyzed_at", "")),
+            "unified_interest_line_migrated_at": str(
+                loaded.get("unified_interest_line_migrated_at", "")
+            ),
         }
 
     def save_feedback_state(self, state: dict[str, object]) -> None:
-        """Persist feedback-processing cursor state to disk."""
+        """Persist feedback-processing cursor state to disk.
+
+        Callers that only touch the cursor (the legacy feedback batch) must not
+        clear the migration marker, so an absent key is read back off disk
+        rather than defaulted away.
+        """
         self._feedback_state_path.parent.mkdir(parents=True, exist_ok=True)
+        if "unified_interest_line_migrated_at" in state:
+            migrated_at = str(state.get("unified_interest_line_migrated_at", ""))
+        else:
+            migrated_at = str(
+                self.load_feedback_state().get("unified_interest_line_migrated_at", "")
+            )
         payload = {
             "last_processed_feedback_event_id": self._to_int(
                 state.get("last_processed_feedback_event_id", 0)
             ),
             "last_feedback_reanalyzed_at": str(state.get("last_feedback_reanalyzed_at", "")),
+            "unified_interest_line_migrated_at": migrated_at,
         }
         with open(self._feedback_state_path, "w", encoding="utf-8") as file:
             json.dump(payload, file, ensure_ascii=False, indent=2)
@@ -911,7 +934,8 @@ class MemoryManager:
                 event_type, str(event.get("url", "")), metadata
             )
 
-        self._database.insert_event(
+        await asyncio.to_thread(
+            self._database.insert_event,
             event_type,
             url=event.get("url", ""),
             title=event.get("title", ""),

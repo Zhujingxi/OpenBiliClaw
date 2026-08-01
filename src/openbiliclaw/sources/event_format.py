@@ -161,6 +161,35 @@ def apply_retraction_discount(metadata: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+# A behaviour attributed to a confusion that resolved as proxy / misread is
+# discounted the same way a retraction is — its evidence should no longer drive
+# preference weight. Calibrated to the retraction floor (0.2) for symmetry;
+# revisit if the retraction floor moves (pitfall #3).
+CONFUSION_DISCOUNTED_STRENGTH = RETRACTION_DISCOUNTED_STRENGTH
+
+
+def apply_confusion_discount(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of ``metadata`` flagged discounted-by-confusion.
+
+    Mirrors :func:`apply_retraction_discount`: idempotent, never re-inflates
+    ``signal_strength``. Marks ``discounted_by_confusion=true`` (distinct from
+    the retraction flag so the two provenances stay auditable).
+    """
+    result = dict(metadata)
+    result["discounted_by_confusion"] = True
+    raw = result.get("signal_strength")
+    try:
+        current = float(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        current = None
+    result["signal_strength"] = (
+        CONFUSION_DISCOUNTED_STRENGTH
+        if current is None
+        else min(current, CONFUSION_DISCOUNTED_STRENGTH)
+    )
+    return result
+
+
 def _metadata_is_retracted(metadata: Any) -> bool:
     """True when the event's metadata carries a truthy ``retracted`` flag.
 
@@ -263,6 +292,20 @@ _QUICK_EXIT_MAX_SECONDS = 5
 # neutral.
 _CONTENT_DWELL_POSITIVE_MIN_SECONDS = 30
 
+# `view` rows (Bilibili history, account sync) report where the user stopped, so
+# completion is real evidence of interest — but a *low* completion is not
+# evidence of dislike: autoplay, misclicks, trailers and rewatches with reset
+# progress all look identical to a bounce. So this rule is positive-only; a
+# short watch stays `unknown` rather than becoming a negative exemplar.
+#
+# Calibrated 2026-07-27 on a real 500-row history (461 rows carried completion):
+# median completion 0.071, 32% under five seconds. >= 0.8 marks 7% (30 rows) as
+# deliberate finishes; 0.7 would mark 11% and 0.5 fully 19%, which is too loose
+# against that median. 0.8 also matches ProfileBuilder._history_weight's
+# existing "finished" bound, so the codebase keeps one definition of 看完了.
+# Recalibrate if the source of watch_seconds changes.
+_FINISHED_WATCH_MIN_RATIO = 0.8
+
 # Explicit engagement event types (no dwell needed to read intent).
 _EXPLICIT_POSITIVE_EVENT_TYPES = frozenset({"like", "coin", "favorite", "comment"})
 
@@ -336,6 +379,9 @@ def classify_event_satisfaction(event: dict[str, Any]) -> tuple[SatisfactionCate
     if event_type == "click":
         return _classify_click_dwell(event, metadata)
 
+    if event_type == "view":
+        return _classify_view_completion(event, metadata)
+
     if event_type in _PASSIVE_BROWSE_EVENT_TYPES:
         return ("neutral", "passive_browse")
 
@@ -377,6 +423,34 @@ def _classify_click_dwell(
         return ("positive", "meaningful_dwell")
 
     return ("neutral", "shallow_view")
+
+
+def _classify_view_completion(
+    event: dict[str, Any],
+    metadata: dict[str, Any],
+) -> tuple[SatisfactionCategory, str]:
+    """Positive-only rule for history views: finishing something is evidence.
+
+    Only an actual finish upgrades the row. Everything else — no completion
+    data, a short watch, an unfinished one — stays ``unknown``, exactly as it
+    was before this rule existed. See ``_FINISHED_WATCH_MIN_RATIO`` for why a
+    low completion is deliberately not treated as a negative signal.
+    """
+    watch_seconds = _read_dwell_field(event, metadata, "watch_seconds")
+    if watch_seconds is None:
+        # Raw Bilibili history rows call it ``progress``.
+        watch_seconds = _read_dwell_field(event, metadata, "progress")
+    duration = _read_dwell_field(event, metadata, "video_duration_seconds")
+    if duration is None:
+        duration = _read_dwell_field(event, metadata, "duration")
+    if watch_seconds is None or duration is None or duration <= 0:
+        return ("unknown", "fallback")
+    if watch_seconds < _MEANINGFUL_DWELL_MIN_SECONDS:
+        # Guards clips so short that finishing one says nothing.
+        return ("unknown", "fallback")
+    if watch_seconds / duration >= _FINISHED_WATCH_MIN_RATIO:
+        return ("positive", "finished_watch")
+    return ("unknown", "fallback")
 
 
 def _read_dwell_field(

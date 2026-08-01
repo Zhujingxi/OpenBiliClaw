@@ -20,6 +20,11 @@ from urllib import error, request
 
 from openbiliclaw.runtime.keyword_fetch import PLATFORM_ZHIHU
 from openbiliclaw.runtime.pool_gate import candidate_pool_full_for_source
+from openbiliclaw.runtime.producer_cadence import (
+    ledger_available,
+    producer_ran_within,
+    record_producer_run,
+)
 from openbiliclaw.sources.zhihu_tasks import (
     ZhihuTaskQueue,
     recent_zhihu_creator_urls,
@@ -47,7 +52,7 @@ class ZhihuDiscoveryProducer:
     soul_engine: Any
     enabled: bool = True
     sources: tuple[str, ...] = ("search",)
-    min_interval_minutes: int = 60
+    min_interval_minutes: int = 3
     daily_search_budget: int = 0
     daily_hot_budget: int = 0
     daily_feed_budget: int = 0
@@ -66,6 +71,11 @@ class ZhihuDiscoveryProducer:
     creator_seed_loader: Any | None = None
     related_seed_loader: Any | None = None
     kick: Any | None = None
+    # Only used for the restart-surviving cadence floor. Zhihu reaches the
+    # database through ZhihuTaskQueue, so this field was easy to miss — and
+    # missing it silently downgraded the floor back to the in-process stamp
+    # this was meant to replace.
+    database: Any | None = None
     _last_run_at: datetime | None = field(default=None, init=False)
     _last_skip_reason: str = field(default="", init=False)
 
@@ -162,7 +172,7 @@ class ZhihuDiscoveryProducer:
             if source == "search" and coordinator is not None and claimed:
                 self._mark_search_keywords(coordinator, claimed, items)
 
-        self._last_run_at = datetime.now(UTC)
+        self._stamp_run(enqueued_task_count)
         if enqueued_task_count == 0:
             return self._skip(skipped_reasons[0] if skipped_reasons else "no_sources")
 
@@ -319,9 +329,23 @@ class ZhihuDiscoveryProducer:
         except Exception:
             logger.debug("zhihu producer: task dispatcher kick failed", exc_info=True)
 
+    def _stamp_run(self, discovered: int) -> None:
+        """Record this round on the cadence floor.
+
+        Productive rounds go to the shared ledger so the floor survives a
+        restart; the in-process stamp stays as the fallback for producers
+        constructed without a database.
+        """
+        record_producer_run(getattr(self, "database", None), "zhihu", int(discovered))
+        self._last_run_at = datetime.now(UTC)
+
     def _is_due(self) -> bool:
         if self.min_interval_minutes <= 0:
             return True
+        database = getattr(self, "database", None)
+        if ledger_available(database):
+            # Restart-surviving floor keyed on the last *productive* round.
+            return not producer_ran_within(database, "zhihu", self.min_interval_minutes)
         if self._last_run_at is None:
             return True
         return datetime.now(UTC) - self._last_run_at >= timedelta(minutes=self.min_interval_minutes)
@@ -361,10 +385,11 @@ def build_zhihu_discovery_producer(
     wait_seconds = float(getattr(zh_cfg, "wait_seconds", 0) or 180.0)
     return ZhihuDiscoveryProducer(
         task_queue=ZhihuTaskQueue(database),
+        database=database,
         soul_engine=soul_engine,
         enabled=True,
         sources=_normalize_sources(getattr(zh_cfg, "source_modes", ZHIHU_SOURCE_ORDER)),
-        min_interval_minutes=int(getattr(zh_cfg, "min_interval_minutes", 60)),
+        min_interval_minutes=int(getattr(zh_cfg, "min_interval_minutes", 3)),
         daily_search_budget=int(getattr(zh_cfg, "daily_search_budget", 0)),
         daily_hot_budget=int(getattr(zh_cfg, "daily_hot_budget", 0)),
         daily_feed_budget=int(getattr(zh_cfg, "daily_feed_budget", 0)),

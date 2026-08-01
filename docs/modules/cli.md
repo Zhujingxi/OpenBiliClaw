@@ -39,7 +39,10 @@ openbiliclaw [--log-level DEBUG|INFO|WARNING|ERROR] <命令>
 | `autostart disable` | 移除当前用户登录自启动并写入 `[autostart].enabled=false` | ✅ |
 | `db-repair` | 检查、备份并修复本地 SQLite 数据库 | ✅ |
 | `serve-api` | 启动容器友好的 API 服务 | ✅ |
-| `init` | 首次初始化 | ✅ |
+| `tls-proxy enable [--san HOST_OR_IP]...` | 持久开启可选 LAN/self-managed HTTPS 入口 | ✅ |
+| `tls-proxy disable` | 持久关闭 TLS 入口（不删除证书） | ✅ |
+| `tls-proxy status` | 显示开关、端口、证书目录与 SAN | ✅ |
+| `init` | 首次初始化 | ✅ | stage 1 的 B 站收藏事件补上 `bvid` / url / `fav_time`（2026-07-26+）：此前收藏没有身份，进不了 `seen_items`，收藏过的视频会被当新内容推回；历史事件同时补 `content_id` / 完播秒数 / 时长 / 分区，供偏好分析 prompt 与画像抽样权重区分满播与划走；2026-07-27 起 `view` 也参与满意度判定，但**只判正向**：完播 ≥80% 且观看 ≥15 秒 → `positive/finished_watch`，低完播保持 `unknown` 不判负。收藏还会带上播放量 / 发布时间 / 简介（截 200 字，仅入库不进 prompt），并按 `attr` 丢弃失效视频——它们的标题字面是「已失效视频」，占真实样本 6%，原样进画像等于凭空造出一个兴趣。导入前按 `(事件类型, 内容身份, 时间戳)` 跳过账本已有行：重跑 init 曾让账本 56% 变成重复行；键含时间戳让真实重看仍能落地，无身份的行一律保留 |
 | `fetch-douyin` | 单独触发抖音 bootstrap 拉取（不重建画像；默认复用近期任务） | ✅ |
 | `fetch-xhs` | 单独触发小红书 bootstrap 拉取（不重建画像；默认复用近期任务） | ✅ |
 | `fetch-youtube` | 单独触发 YouTube bootstrap 拉取（不重建画像；默认复用近期任务） | ✅ |
@@ -52,6 +55,7 @@ openbiliclaw [--log-level DEBUG|INFO|WARNING|ERROR] <命令>
 | `recommend` | 查看推荐 | ✅ |
 | `feedback <id> <like\|dislike\|comment\|dismiss>` | 对推荐提交反馈 | ✅ |
 | `profile` | 查看用户画像 | ✅ |
+| `questions` | 只读查看对话确认入口的待聊假设与疑惑 | ✅ |
 | `keyword-inspiration-dry-run` | 真实调用当前 LLM + inspiration 搜索 provider 链，预览关键词生成中间链路，不写关键词池；支持 `--persist-axes` | ✅ |
 | `keyword-inspiration-preview` | `keyword-inspiration-dry-run` 的等价别名；支持 `--persist-axes` | ✅ |
 | `keyword-inspiration-report` | 输出 inspiration / merged 关键词 cohort 对比和 replace 启用门禁判定 | ✅ |
@@ -72,6 +76,7 @@ openbiliclaw [--log-level DEBUG|INFO|WARNING|ERROR] <命令>
 | `discover-bangumi-latest` | 只读验证 Bangumi 按日期浏览（可能含未播条目） | ✅ |
 | `search-douyin` | 通过浏览器插件调试抖音搜索召回 | ✅ |
 | `chat` | 苏格拉底式对话 | ✅ |
+| `ledger` | 查看画像更新台账（`--line` 逐行 / `--days` / `--write-point` 过滤） | ✅ |
 | `delight` | 手动查看当前惊喜推荐候选 | ✅ |
 | `probe` | 手动查看并确认猜测兴趣方向 | ✅ |
 | `python -m openbiliclaw.integrations.openclaw.cli next-avoidance-probe` | OpenClaw JSON bridge：拉取下一条不喜欢领域探针 | ✅ |
@@ -302,6 +307,7 @@ $ openbiliclaw start --host 0.0.0.0 --port 9000
 - 如果当前 LLM / embedding 配置需要本机 Ollama、`[autostart].manage_ollama=true` 且 endpoint 是默认 `localhost:11434`，会探测 `/api/version`；未运行时尝试后台执行 `ollama serve`。远端或自定义 loopback 端口只探测，不强行拉起。
 - 如果 `[autostart].enabled=true` 但系统登录项缺失，会在没有环境变量管理风险时重新注册当前用户登录项；发现 `OPENBILICLAW_*` / provider API key 等环境变量覆盖时只告警并跳过，避免注册一个下次登录拿不到配置的启动项。
 - 如果 `[autostart].enabled=false` 但系统登录项仍残留，会尝试移除该当前用户登录项，让手动编辑配置后的下一次启动也能回到关闭状态。
+- 上述对账由 `runtime.autostart.reconcile()` 提供，冻结桌面包入口也调用同一实现；Windows 安装包不再因绕过 `openbiliclaw start` 而漏掉残留清理。
 
 如果引导初始化从未完成（soul 层为空的 best-effort 检查，检查失败时保持沉默），`start` 会在 uvicorn 启动前打印一个 WARN 面板，给出 `/setup/` 引导地址和无浏览器环境的 `openbiliclaw init` 替代命令；`serve-api` 打印容器版变体（`/setup/` 只做配置与前置检查 + `docker exec -it openbiliclaw-backend openbiliclaw init`）。
 
@@ -313,7 +319,7 @@ WARN extension presence required; backend will pause background LLM work after g
 
 这表示 daemon-owned 后台 LLM / embedding 工作需要浏览器插件保持 `runtime-stream` 在线，或仍处于断开后的宽限窗口内；手动 CLI/API 操作不受这个 WARN 影响。
 
-如果配置导致 LLM registry 无法构建，`start` 不会直接让 popup 完全失联，而是以降级模式启动本地 API，并在 uvicorn 启动前打印 `降级模式 / Degraded mode` 面板。面板会列出 `llm_registry_unavailable` 和 blocking issue，并提示打开扩展设置页保存修复配置后重启 daemon。
+如果配置导致 LLM registry 无法构建，`start` 不会直接让 popup 完全失联，而是以降级模式启动本地 API，并在 uvicorn 启动前打印 `降级模式 / Degraded mode` 面板。面板会列出 `llm_registry_unavailable` 和 blocking issue，并提示打开扩展设置页保存修复配置；校验通过后当前进程会原地构建完整 runtime，无需重启 daemon。
 
 如果数据库已损坏：
 
@@ -351,11 +357,47 @@ $ openbiliclaw start
 $ openbiliclaw serve-api
 
 $ openbiliclaw serve-api --host 0.0.0.0 --port 8420
+
+$ openbiliclaw serve-api --tls-port 9443   # 覆盖 config.toml 的 [tls_proxy].port
 ```
 
+`--tls-port` 覆盖 `[tls_proxy].port`（默认 8443），仅在 `enabled=true` 时生效。
+TLS enabled 时，证书检查、SSL context 和 socket bind 在 uvicorn 前同步完成；任一失败会打印
+原因并让 `serve-api` 非零退出，不会继续显示“HTTPS 已启动”。API wildcard host 会转换成
+可连接的 loopback（`0.0.0.0 → 127.0.0.1`、`:: → ::1`）供代理连接。
 推荐容器内使用该命令作为启动入口。
 当 `scheduler.pause_on_extension_disconnect=true` 时，`serve-api` 与 `start` 一样会在 uvicorn 启动前打印 extension presence WARN，提醒容器后端若没有插件客户端连接，后台 LLM 工作会在宽限期后暂停。
-当配置进入降级模式时，`serve-api` 也会打印同一张 `降级模式 / Degraded mode` 面板；容器或脚本可继续通过 `/api/config` 写入修复配置，再重启服务让新 registry 生效。
+当配置进入降级模式时，`serve-api` 也会打印同一张 `降级模式 / Degraded mode` 面板；容器或脚本可继续通过 `/api/config` 写入修复配置，成功响应会原地启用新 registry，不需要重启服务。
+
+### `openbiliclaw tls-proxy`
+
+管理默认关闭的局域网 / 自管 TLS 入口。它不是公网生产级反向代理，且只随 `serve-api`
+运行。第一次启用时，应把远程客户端实际使用的 hostname/IP 作为 SAN：
+
+```bash
+# --san 可重复；推荐显式给出，避免交互输入歧义
+$ openbiliclaw tls-proxy enable \
+    --san 192.168.1.20 \
+    --san openbiliclaw.lan
+
+# 不传 --san 且尚无已存 SAN 时，会交互询问；直接回车只生成 localhost 证书
+$ openbiliclaw tls-proxy enable
+
+$ openbiliclaw tls-proxy status
+TLS 反代配置
+状态:   开启
+端口:   8443
+证书目录: (data/certs)
+SAN:    192.168.1.20, openbiliclaw.lan
+
+# 仅关闭下次启动，不删除/重签任何证书
+$ openbiliclaw tls-proxy disable
+```
+
+`enable` / `disable` 通过 `save_config()` 持久化 `[tls_proxy]`。若开关由
+`OPENBILICLAW_TLS_PROXY_ENABLED` 或 `config.local.toml` 管理，命令会以非零状态拒绝假成功，
+应直接修改覆盖来源。SAN 变化不会自动覆盖旧证书；下一次启动会明确列出证书缺少的 SAN，
+按 [`HTTPS 部署指南`](../https-deployment.md) 备份并重签。
 
 ### `openbiliclaw set-password`
 
@@ -519,6 +561,32 @@ $ openbiliclaw profile
   被理解、持续成长
 ```
 
+### `openbiliclaw ledger`
+
+查看画像更新台账（`profile_update_ledger`，v0.3.174+）。每个画像写点（对话学习 / 反馈批 / 12h 整理 / init 建像 / 管线各层 / 推测确认 / 觉察同步 / 对话结算）在动作结束后追加一行，含 `outcome`（success/failed）、before/after 摘要与 `source_refs`。台账为只追加审计底座，写失败只 WARNING、不阻断画像写入；从 v0.3.174+ 开始记录，旧的画像更新不回填。
+
+```bash
+$ openbiliclaw ledger                    # 默认：近 30 天按写点聚合（成功/失败计数）
+$ openbiliclaw ledger --line             # 逐行明细（时间 / 写点 / 来源 / 结果 / turn_id / source_refs）
+$ openbiliclaw ledger --days 7           # 只看近 7 天
+$ openbiliclaw ledger --write-point dialogue_preference_overwrite   # 只看某个写点
+```
+
+选项：`--days N`（窗口，默认 30）/ `--line`（逐行，默认按写点聚合）/ `--write-point <name>`（过滤单个写点）/ `--limit N`（逐行最多行数，默认 200）。写点清单见 `docs/modules/soul.md`。shadow 门控采数（Phase 3 上线后）可直接查 `gate_verdict LIKE 'shadow_%'`。
+
+### `openbiliclaw questions`
+
+只读展示对话确认入口当前最多 3 条高优先级待聊对象。命令从配置中的 `[api].port` 连接本机 `127.0.0.1`，只调用 `GET /api/chat/pending-confirmations`，因此假设/疑惑阈值、未结算过滤、排序、上限和 `count` 与 popup、桌面 Web 完全同口径，不在 CLI 复制筛选规则。
+
+```bash
+$ openbiliclaw questions
+待聊确认
+  猜测  你可能更看重一手证据  83%  event-7、event-9  hyp-ref
+  疑惑  为什么最近跳过熟悉主题  61%  —                  42
+```
+
+输出只包含类型、话题、置信度、依据和 ref，不提供 confirm/reject/discuss/defer 动作，也不会写数据库；主动确认仍只能在插件或桌面端的对话卡片中完成。运行前需先启动本地 API 服务；连接失败会显示实际 loopback URL 和启动提示。
+
 ### `openbiliclaw profile-consolidate`
 
 用 LLM 整理合并画像里重复的喜欢 / 讨厌主题。兴趣标签和避雷主题会不断积累措辞变体（「智能体开发」vs「智能体开发与实现」），把进入 prompt 的 top-64 名额挤占掉；本命令按「规则合并 → embedding 聚类 → LLM 裁决 → 校验执行 → active 库存归档」流水线做同义合并，默认整理 likes 权重 top-512 + 全量避雷主题。后台默认每 12 小时自动跑一轮（见 `[scheduler].profile_consolidation_*`），本命令用于手动触发与预览。
@@ -616,7 +684,7 @@ $ openbiliclaw init
 
 小红书导入依赖浏览器插件在用户已登录的小红书网页里执行 `bootstrap_profile` 任务。后端只入队任务并短暂等待结果，不直接登录或爬取小红书。插件会先定位当前用户 profile，再读取 profile state 里的收藏 / 赞过分组；这里的“浏览记录”指小红书网页自己明确暴露的浏览记录/足迹 state，不是读取 Chrome 浏览器历史，也不会把普通推荐流当成浏览记录。如果后端任务显式设置 `max_scroll_rounds`，插件会按任务 payload 中的 `scroll_wait_ms` 和 `max_stagnant_scroll_rounds` 做有限滚动和停滞判断。如果插件未连接、未登录或页面没有暴露对应 scope，`init` 会继续使用已有 B 站数据完成初始化。
 
-抖音导入同样依赖浏览器插件在用户已登录的 `https://www.douyin.com` 页面里执行 `bootstrap_profile` 任务。后端入队 `dy_tasks`，插件依次访问 `dy_post / dy_collect / dy_like / dy_follow` 四个 scope，content script 结合 DOM、MAIN-world fetch tap 和 API harvester 采集发布 / 收藏 / 点赞 / 关注条目，以 `partial` 批次回写 `/api/sources/dy/task-result`。后端会转换为统一事件：发布 → `view`，收藏 → `favorite`，点赞 → `like`，关注 → `follow`，并带 `metadata.source_platform="douyin"`。`init --yes-douyin` 会把这些事件加入 `analyze_events()` 和 `build_initial_profile()`；插件未连接、未登录或抖音风控返回空数据时，初始化继续使用已有信号完成。后台会复用 6 小时内近期抖音 bootstrap 任务，并用 `source_bootstrap_state.json` 跳过跨任务旧视频 / 关注 identity key。
+抖音导入同样依赖浏览器插件在用户已登录的 `https://www.douyin.com` 页面里执行 `bootstrap_profile` 任务。后端入队 `dy_tasks`，插件依次访问 `dy_post / dy_collect / dy_like / dy_follow` 四个 scope，content script 结合 DOM、MAIN-world fetch tap 和 API harvester 采集发布 / 收藏 / 点赞 / 关注条目，以 `partial` 批次回写 `/api/sources/dy/task-result`。bootstrap 所需的当前账号 `sec_uid` 只接受同源只读 `/aweme/v1/web/user/profile/self/` 的正面确认或同一 tab 已确认缓存；页面 `#RENDER_DATA` 只有显式 `isLogin=true` 时才作未确认候选，避免把登出残留当成当前账号。常驻 fetch / XHR tap 不从被动请求 URL 提取或记录 `sec_user_id`，因此浏览推荐流或他人主页不会把作者 ID 送入后端诊断。后端会转换为统一事件：发布 → `view`，收藏 → `favorite`，点赞 → `like`，关注 → `follow`，并带 `metadata.source_platform="douyin"`。`init --yes-douyin` 会把这些事件加入 `analyze_events()` 和 `build_initial_profile()`；插件未连接、未登录或抖音风控返回空数据时，初始化继续使用已有信号完成。如果缺少权威 `sec_uid`、API 返回失败业务状态，或分页游标缺失 / 非法 / 停滞 / 成环 / 触顶，已采集的 `partial` 仍会保留，但任务终态会明确标记为 `degraded`。CLI 阶段提示、最终摘要和 API init 终态都会显示“部分完成”及 `dy_status=degraded`，已采事件仍参与画像建模；终态后的迟到回调不会覆盖该状态。后台会复用 6 小时内近期正常 / 在途抖音 bootstrap 任务，但不会复用已 `degraded` 的 completed 结果，下一次会重新入队补齐分页；`source_bootstrap_state.json` 继续跳过跨任务旧视频 / 关注 identity key。
 
 YouTube 导入依赖浏览器插件在用户已登录的 `https://www.youtube.com` 页面里执行 `bootstrap_profile` 任务。后端入队 `yt_tasks`，插件依次访问 `/feed/history`、`/feed/channels`、`/playlist?list=LL` 三个 scope，读取观看历史、订阅频道和点赞视频，以 `partial` 批次回写 `/api/sources/yt/task-result`。后端会转换为统一事件：观看历史 → `view`，订阅 → `follow`，点赞 → `like`，并带 `metadata.source_platform="youtube"`。`init --yes-youtube` 会把这些事件加入 `analyze_events()` 和 `build_initial_profile()`；非交互式终端默认跳过，`OPENBILICLAW_NO_YOUTUBE=1` 会压过 `--yes-youtube`，避免脚本环境误触发浏览器前台 tab。后台会复用 6 小时内近期 YouTube bootstrap 任务，并用 `source_bootstrap_state.json` 跳过跨任务旧条目。
 
@@ -643,7 +711,7 @@ X (Twitter) 与其它平台不同：init 阶段**没有 bootstrap 导入任务**
 - `--bilibili-favorite-limit N` / `--bilibili-follow-limit N`：覆盖 B 站收藏 / 关注初始化信号上限，默认各 `300`；`0` 表示跳过对应信号。
 - `OPENBILICLAW_NO_BILIBILI=1` / `OPENBILICLAW_NO_XHS=1` / `OPENBILICLAW_NO_DOUYIN=1` / `OPENBILICLAW_NO_YOUTUBE=1` / `OPENBILICLAW_NO_X=1` / `OPENBILICLAW_NO_ZHIHU=1` / `OPENBILICLAW_NO_REDDIT=1` / `OPENBILICLAW_NO_BANGUMI=1`：永久跳过对应源；作为持久禁用开关，它优先于同一来源的 `--yes-*`。
 - `OPENBILICLAW_XHS_BOOTSTRAP_DEDUPE_HOURS`：小红书 `bootstrap_profile` 近期任务复用窗口，默认 `6` 小时；设为 `0` 可关闭复用。
-- `OPENBILICLAW_DY_BOOTSTRAP_DEDUPE_HOURS` / `OPENBILICLAW_YT_BOOTSTRAP_DEDUPE_HOURS`：抖音 / YouTube `bootstrap_profile` 近期任务复用窗口，默认 `6` 小时；设为 `0` 可关闭复用。
+- `OPENBILICLAW_DY_BOOTSTRAP_DEDUPE_HOURS` / `OPENBILICLAW_YT_BOOTSTRAP_DEDUPE_HOURS`：抖音 / YouTube `bootstrap_profile` 近期任务复用窗口，默认 `6` 小时；抖音已 `degraded` 的 completed 结果不参与复用；设为 `0` 可关闭复用。
 - `OPENBILICLAW_ZHIHU_BOOTSTRAP_DEDUPE_HOURS`：知乎 `bootstrap_events` 近期任务复用窗口，默认 `6` 小时；设为 `0` 可关闭复用。
 - `OPENBILICLAW_ZHIHU_BOOTSTRAP_MAX_ITEMS` / `OPENBILICLAW_ZHIHU_BOOTSTRAP_MAX_COLLECTIONS`：控制 `fetch-zhihu` 每个数据分支最多读取的条目数和最多扫描收藏夹数，默认分别为 `300` / `20`。知乎当前分支是浏览历史、收藏夹条目、动态点赞、动态收藏；动态点赞和动态收藏各自独立使用 300 条上限，不共享额度。
 
@@ -837,7 +905,7 @@ $ openbiliclaw feedback 7 comment --note "方向对，但我想看更深一点�
 
 ### `openbiliclaw fetch-douyin`
 
-`fetch-douyin`、`fetch-xhs`、`fetch-youtube` 共用同一单源任务 runner：任务明确回报 `timeout` 或 `failed` 时会先打印平台专属原因/计数，再以退出码 `1` 结束，供脚本和真实 smoke 正确判失败；`ok` / `empty` 保持退出码 `0`。CLI 自身等待超时不会伪称已取消浏览器里的任务，后端若稍后收到扩展终态仍会按任务协议保存结果。
+`fetch-douyin`、`fetch-xhs`、`fetch-youtube` 共用同一单源任务 runner：任务明确回报 `timeout` 或 `failed` 时会先打印平台专属原因/计数，再以退出码 `1` 结束，供脚本和真实 smoke 正确判失败；`ok` / `empty` 保持退出码 `0`。抖音还可能返回 `degraded`：命令会保留并打印已经写入的事件，同时给出“结果不完整”警告；它属于完成但降级的部分成功，退出码仍为 `0`。CLI 自身等待超时不会伪称已取消浏览器里的任务，后端若稍后收到扩展终态仍会按任务协议保存结果。
 
 单独触发抖音 `bootstrap_profile` 拉取，适合 smoke 测试扩展和补拉抖音信号。它只执行“入队 → 唤醒扩展 → 等结果 → 打印 scope counts”，不跑 B 站认证检查、不跑 `analyze_events()` / `build_initial_profile()` / discovery。事件由 daemon 在接收 `/api/sources/dy/task-result` partial 时写入 memory，CLI 自身不会再传播一次，避免重复入库。
 
@@ -848,7 +916,7 @@ $ openbiliclaw fetch-douyin
   共 50 条事件已由 daemon 写入 memory。
 ```
 
-默认最多等待扩展回传 `180s`；需要更长排查窗口时可显式加 `--wait-seconds 240`。命令默认复用 6 小时内已有的 pending / in-progress / completed / failed 抖音 `bootstrap_profile` 任务，避免反复打开前台抖音 tab 全量拉发布 / 收藏 / 点赞 / 关注；需要重新拉取时可设 `OPENBILICLAW_DY_BOOTSTRAP_DEDUPE_HOURS=0`。
+默认最多等待扩展回传 `180s`；需要更长排查窗口时可显式加 `--wait-seconds 240`。命令默认复用 6 小时内已有的 pending / in-progress / 非降级 completed / failed 抖音 `bootstrap_profile` 任务，避免反复打开前台抖音 tab 全量拉发布 / 收藏 / 点赞 / 关注；已 `degraded` 的 completed 结果会自动重新入队补齐分页。需要无条件重新拉取时可设 `OPENBILICLAW_DY_BOOTSTRAP_DEDUPE_HOURS=0`。
 
 前提：
 
@@ -963,9 +1031,9 @@ $ openbiliclaw discover --source douyin --limit 20
 抖音内容发现
 发现摘要
   发现条数: 8
-  缓存状态: 已写入 content_cache
+  入池候选: 8
   来源: douyin
-  策略: dy-plugin-search, dy-plugin-hot-related, dy-plugin-feed
+  分支: search, hot
 
 # 触发知乎正式 discovery（使用设置页选中的 source_modes）
 $ openbiliclaw discover --source zhihu --limit 20
@@ -1007,11 +1075,11 @@ Bangumi 内容发现
 - `--limit, -n`：发现结果条数上限，默认 `30`
 - `--force`：xiaohongshu / Bangumi 可用；忽略本地最小调度间隔，但 Bangumi 仍遵循持久化 `429` cooldown
 
-抖音 discovery 需要 `[sources.douyin].enabled = true`。Cookie 解析顺序是：先读 `cookie_env` 指向的环境变量（默认 `OPENBILICLAW_DOUYIN_COOKIE`，适合调试覆盖），再读浏览器扩展同步的 `data/douyin_cookie.json`。初始化画像的 `init --yes-douyin` 不受这个配置影响，仍走浏览器扩展任务桥。知乎 discovery 需要 `[sources.zhihu].enabled = true`，并依赖已登录知乎的浏览器扩展；`discover --source zhihu` 会读取 `[sources.zhihu].source_modes`，不会使用 `--strategy`。Reddit discovery 需要 `[sources.reddit].enabled = true`；默认 `backend="rdt"`，优先使用 rdt-cli 登录态命令后端，不使用 CDP/临时浏览器；rdt / opencli 不可用时自动复用 OpenBiliClaw 插件所在浏览器的 Reddit 登录态，也可在配置页显式切到 `extension`。
+抖音 discovery 需要 `[sources.douyin].enabled = true`。`discover --source douyin` 现在直接调用与 daemon 相同的正式 `DouyinDiscoveryProducer`：统一关键词 claim、插件 search / hot / feed、`DiscoveryCandidatePipeline` 待评估入池和关键词终态都与后台一致；显式手动命令只绕过 `[scheduler].enabled` 这个后台总开关，来源开关、source mode、预算、候选池上限和 producer cadence 仍然生效。Cookie 解析顺序是：先读 `cookie_env` 指向的环境变量（默认 `OPENBILICLAW_DOUYIN_COOKIE`，适合调试覆盖），再读浏览器扩展同步的 `data/douyin_cookie.json`。初始化画像的 `init --yes-douyin` 不受这个配置影响，仍走浏览器扩展任务桥。知乎 discovery 需要 `[sources.zhihu].enabled = true`，并依赖已登录知乎的浏览器扩展；`discover --source zhihu` 会读取 `[sources.zhihu].source_modes`，不会使用 `--strategy`。Reddit discovery 需要 `[sources.reddit].enabled = true`；默认 `backend="rdt"`，优先使用 rdt-cli 登录态命令后端，不使用 CDP/临时浏览器；rdt / opencli 不可用时自动复用 OpenBiliClaw 插件所在浏览器的 Reddit 登录态，也可在配置页显式切到 `extension`。
 
-`search` 子来源走浏览器插件 DOM-first 链路：CLI 入队 `dy_tasks(type="search")`，扩展后台 tab 先打开抖音首页，再在已登录页面里模拟搜索框输入 / 提交，候选以 `dy-plugin-search` 进入 discovery；fetch tap 兼容 `/general/search/single/`、`/search/item/` 和新版 `/general/search/stream/` chunked JSON。`hot` 子来源同样走插件：后端取 hot board 的 `sentence_id`，并把可用的 `group_id` 作为 `seed_aweme_id` 透传给扩展；扩展从首页点击热榜 / 热点入口和目标热词，靠页面自身加载与被动响应监听回传 `dy_hot`，不足时用已登录页面的 related API bridge 按 seed 拉相关视频，候选以 `dy-plugin-hot-related` 进入 discovery；小批量 hot 请求会展开一个小窗口并优先执行带 seed 的 hot item，在累计达到 `--limit` 后提前结束，避免串行 DOM 点击和页面加载拖到 `task_timeout`。`feed` 子来源会入队 `dy_tasks(type="feed")`，扩展在首页推荐流滚动触发加载，候选以 `dy-plugin-feed` 进入 discovery。三条链路都不主动跳 `/search/...`、`/hot/...` 快捷 URL；插件任务空 / 超时 / 失败时默认返回 0 条，direct-cookie fallback 只保留给显式诊断路径。search 若真实响应为 `search_nil_info.search_nil_item="hit_shark"` 且没有 `data/aweme_list`，属于抖音反爬空结果，CLI 会显示 0 条。
+`search` 子来源走浏览器插件 DOM-first 链路：CLI 入队 `dy_tasks(type="search")`，扩展后台 tab 先打开抖音首页，再在已登录页面里模拟搜索框输入 / 提交，候选以 `dy-plugin-search` 进入 discovery；fetch tap 兼容 `/general/search/single/`、`/search/item/` 和新版 `/general/search/stream/` chunked JSON。`hot` 子来源同样走插件：后端取 hot board 的 `sentence_id`，并把可用的 `group_id` 作为 `seed_aweme_id` 透传给扩展；扩展从首页点击热榜 / 热点入口和目标热词，靠页面自身加载与被动响应监听回传 `dy_hot`，不足时用已登录页面的 related API bridge 按 seed 拉相关视频，候选以 `dy-plugin-hot-related` 进入 discovery；小批量 hot 请求会展开一个小窗口并优先执行带 seed 的 hot item，在累计达到 `--limit` 后提前结束。`feed` 子来源会入队 `dy_tasks(type="feed")`，扩展在首页推荐流滚动触发加载，候选以 `dy-plugin-feed` 进入 discovery。三条链路都不主动跳 `/search/...`、`/hot/...` 快捷 URL；终态区分真实空结果、超时、失败与预算耗尽，正式命令遇到后三者会返回非零退出码，direct-cookie fallback 只保留给显式诊断路径。search 若真实响应为 `search_nil_info.search_nil_item="hit_shark"` 且没有 `data/aweme_list`，属于抖音反爬空结果，CLI 会显示“完成但没有候选”，并保持成功退出。
 
-需要调试抖音 discovery 子来源时，优先使用独立命令 `openbiliclaw discover-douyin`。它和 `discover --source douyin` 共用同一个 `DouyinDiscoveryService`，但可以显式指定关键词、是否写缓存和是否跳过 LLM 评估：
+需要调试抖音 discovery 子来源时，使用独立命令 `openbiliclaw discover-douyin`。它直接调用 `DouyinDiscoveryService`，可以显式指定关键词、分支、是否写缓存和是否跳过 LLM 评估；它是源接口诊断，不 claim 统一关键词，也不经过正式 producer 的候选 pipeline。正式手动补池应使用 `discover --source douyin`：
 
 ```bash
 # 调试 search + feed，直接看源接口召回，不写 content_cache
@@ -1137,7 +1205,8 @@ $ openbiliclaw search-douyin -k 猫 --max-items-per-keyword 10 -w 180
 - CLI 入队 `dy_tasks(type="search")`，唤醒扩展 dispatcher，等待 `dy_tasks.result_json`。
 - 扩展会在已登录抖音浏览器会话的后台 tab 先打开首页，再模拟真实搜索框输入和提交；MAIN-world fetch tap 只被动收集页面自己发出的搜索响应，content script 同时解析已渲染 DOM，再把 `dy_search` 候选回传。
 - 默认等待窗口为 `180s`；如果调试机上搜索页首开很慢，可显式加 `--wait-seconds 240`。
-- 结果只作为搜索 discovery 候选保存在任务结果中；后端不会把它转换成 memory event，也不会重建画像。独立 `search-douyin` smoke 不写 `content_cache`；正式 `discover-douyin --source search` / `discover --source douyin` 会把同一插件搜索候选纳入 discovery 结果，并在 cache 模式下按 `dy-plugin-search` 写入 `content_cache`。
+- 结果只作为搜索 discovery 候选保存在任务结果中；后端不会把它转换成 memory event，也不会重建画像。独立 `search-douyin` smoke 不写 `content_cache`；`discover-douyin --source search` 可用 cache 模式直接写 `content_cache`，而正式 `discover --source douyin` 会把同一候选写入 `discovery_candidates(pending_eval)`。
+- smoke 的每日 search 预算读取 `[sources.douyin].daily_search_budget`，`0` 表示不设上限，不再使用硬编码 20。真实空结果保持退出码 0；插件 timeout / failed 或预算耗尽返回非零退出码，便于脚本和运维区分“确实没内容”与“任务没完成”。
 - 如果返回 0 条，优先检查是否有多个加载扩展的 Chrome 实例抢任务、当前浏览器是否登录抖音、页面搜索入口是否可见，以及 debug 中 `ui_triggered / api_items_harvested / dom_items_harvested`。若 direct / 页面响应的 `search_nil_info.search_nil_item` 为 `hit_shark`，说明当前 Cookie / 会话被抖音搜索风控空 200 拦截。
 
 如果画像尚未初始化，会提示先执行：
@@ -1148,7 +1217,14 @@ openbiliclaw init
 
 ### `openbiliclaw chat`
 
-进入持续对话模式，复用 `SocraticDialogue` 的多轮历史。输入 `exit`、`quit` 或空行可结束。聊天内容仅在得到真实回复后以受控方式积累到长期理解候选中，不会因为一句话立刻改写画像。单轮 LLM 失败会打印安全、可操作的错因（不显示上游异常原文），REPL 继续接受下一轮输入。
+进入持续对话模式，复用 `SocraticDialogue` 的多轮历史。CLI 构造点显式固定为
+`legacy_direct`：得到回复后仍按既有 detached direct learning 学习，既不提交 API
+runtime 的 `DialogueSettlementQueue`，也不持有 worker guard permit；因此行为不变，
+但不享受队列串行/receipt/guard 保证。Wave 3 的 HTTP `202 processing` 与 30 秒
+卡片轮询只服务 popup/桌面卡片，CLI 没有 action HTTP 入口，不新增 poll。输入
+`exit`、`quit` 或空行可结束。聊天内容
+仅在得到真实回复后以受控方式积累到长期理解候选中，不会因为一句话立刻改写画像。
+单轮 LLM 失败会打印安全、可操作的错因（不显示上游异常原文），REPL 继续接受下一轮输入。
 
 ```bash
 $ openbiliclaw chat

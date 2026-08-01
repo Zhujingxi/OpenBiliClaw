@@ -228,7 +228,25 @@ class SpeculatorTickResult:
     promoted: list[SpeculativeInterest] = field(default_factory=list)
     rejected: list[SpeculativeInterest] = field(default_factory=list)
     revived: list[SpeculativeInterest] = field(default_factory=list)
+    # Speculations that expired in a *stalemate* — partially confirmed but never
+    # reaching the threshold (0 < confirmation_count < confirmation_threshold).
+    # The ambiguity is a confusion candidate (Phase 2); the caller turns each
+    # into a confusion object. Subset of ``rejected`` (they still expire).
+    stalemate: list[SpeculativeInterest] = field(default_factory=list)
     observed_matches: int = 0
+
+
+def _stalemate_from_rejected(
+    rejected: list[SpeculativeInterest],
+) -> list[SpeculativeInterest]:
+    """Filter expired speculations that were *partially* confirmed.
+
+    Decidable-stalemate judgement (spec §Phase 2): uses only existing stored
+    fields — ``0 < confirmation_count < confirmation_threshold``. A zero-count
+    expiry is a clean "no interest" (no confusion); a threshold-reaching one
+    would have promoted, not expired.
+    """
+    return [spec for spec in rejected if 0 < spec.confirmation_count < spec.confirmation_threshold]
 
 
 @dataclass
@@ -808,6 +826,48 @@ class InterestSpeculator:
         #               candidates. Below 0.30 is "naming random
         #               domains" territory.
         self._min_confidence = min_confidence
+        # Phase 0 audit ledger (best-effort). Attached post-construction by the
+        # SoulEngine so speculation promote/confirm/reject write points (D5 #5)
+        # land in ``profile_update_ledger``. ``None`` until attached — a plain
+        # speculator constructed in isolation records nothing.
+        self._ledger: Any | None = None
+
+    def attach_ledger(self, ledger: Any) -> None:
+        """Attach the shared profile ledger (see SoulEngine.__init__)."""
+        self._ledger = ledger
+
+    def _record_ledger(
+        self,
+        *,
+        write_point: str,
+        before: object,
+        after: object,
+        source_refs: list[str],
+    ) -> None:
+        ledger = self._ledger
+        if ledger is None:
+            return
+        record = getattr(ledger, "record", None)
+        if callable(record):
+            record(
+                write_point=write_point,
+                source="speculation",
+                before=before,
+                after=after,
+                source_refs=source_refs,
+                outcome="success",
+            )
+
+    def _record_promotion_ledger(self, promoted: list[SpeculativeInterest]) -> None:
+        domains = [spec.domain for spec in promoted]
+        if not domains:
+            return
+        self._record_ledger(
+            write_point="speculation_promote",
+            before={"promoted": []},
+            after={"promoted": domains},
+            source_refs=domains,
+        )
 
     def _load_state(self) -> SpeculativeState:
         if self._data_dir:
@@ -917,6 +977,7 @@ class InterestSpeculator:
         def _prepare(state: SpeculativeState) -> SpeculativeState:
             rejected, next_state = expire_stale(state, now, self._cooldown_days)
             result.rejected = rejected
+            result.stalemate = _stalemate_from_rejected(rejected)
             promoted, next_state = promote_ready(next_state)
             result.promoted = promoted
             # Revive LAST (after promote) so a revived probe is never promoted
@@ -957,6 +1018,7 @@ class InterestSpeculator:
                 len(result.promoted),
                 [s.domain for s in result.promoted],
             )
+            self._record_promotion_ledger(result.promoted)
         if result.rejected:
             logger.info(
                 "Speculator rejected %d speculations: %s",
@@ -990,6 +1052,7 @@ class InterestSpeculator:
         def _prepare(state: SpeculativeState) -> SpeculativeState:
             rejected, next_state = expire_stale(state, now, self._cooldown_days)
             result.rejected = rejected
+            result.stalemate = _stalemate_from_rejected(rejected)
             promoted, next_state = promote_ready(next_state)
             result.promoted = promoted
             # Revive LAST (after promote) so a revived probe is never promoted
@@ -1045,6 +1108,8 @@ class InterestSpeculator:
             )
         # Only log at INFO when something meaningful happened, otherwise
         # demote to DEBUG so idle force_ticks don't pollute the log.
+        if result.promoted:
+            self._record_promotion_ledger(result.promoted)
         if result.generated or result.promoted or result.rejected:
             logger.info(
                 "Speculator force_tick: generated=%d, promoted=%d, rejected=%d",
@@ -1194,6 +1259,13 @@ class InterestSpeculator:
                     return
 
         self._update_state(_mutate)
+        if found:
+            self._record_ledger(
+                write_point="speculation_confirm",
+                before={"domain": domain, "status": "active"},
+                after={"domain": domain, "status": "confirmed"},
+                source_refs=[domain, confirmation_source],
+            )
         return found
 
     def user_reject_speculation(self, domain: str, cooldown_days: int = 30) -> bool:
@@ -1222,6 +1294,13 @@ class InterestSpeculator:
             state.active = remaining
 
         self._update_state(_mutate)
+        if found:
+            self._record_ledger(
+                write_point="speculation_reject",
+                before={"domain": domain, "status": "active"},
+                after={"domain": domain, "status": "rejected"},
+                source_refs=[domain],
+            )
         return found
 
     def user_defer_speculation(self, domain: str) -> DeferResult:

@@ -1,6 +1,5 @@
 """Regression tests for atomic, availability-safe pool maintenance."""
 
-import time
 from pathlib import Path
 from typing import Any
 
@@ -311,12 +310,25 @@ def test_bounded_maintenance_batches_release_lock_and_eventually_converge(
 
 def test_maintenance_defers_quickly_when_interactive_writer_owns_lock(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db = _database(tmp_path)
     _seed_ready(db, "BV_WRITER", topic_group="writer")
     writer = db.open_connection()
     writer.execute("BEGIN IMMEDIATE")
-    started = time.perf_counter()
+    statements: list[str] = []
+    open_connection = db.open_connection
+
+    def _open_traced_connection() -> database_module.sqlite3.Connection:
+        connection = open_connection()
+        connection.set_trace_callback(statements.append)
+        return connection
+
+    def _fail_on_retry_sleep(seconds: float) -> None:
+        pytest.fail(f"maintenance lock deferral retried with time.sleep({seconds})")
+
+    monkeypatch.setattr(db, "open_connection", _open_traced_connection)
+    monkeypatch.setattr(database_module.time, "sleep", _fail_on_retry_sleep)
     try:
         with pytest.raises(
             database_module.PoolMaintenanceDeferredError,
@@ -331,7 +343,17 @@ def test_maintenance_defers_quickly_when_interactive_writer_owns_lock(
         writer.rollback()
         writer.close()
 
-    assert (time.perf_counter() - started) < 0.5
+    assert (
+        statements.count(f"PRAGMA busy_timeout = {database_module._MAINTENANCE_DB_BUSY_TIMEOUT_MS}")
+        == 1
+    )
+    assert statements.count("BEGIN IMMEDIATE") == 1
+    # The budget constant IS the "quickly" contract now that the wall-clock
+    # assertion is gone. Without this pin, bumping the maintenance busy
+    # timeout to 60s would pass this test (slowly) and ship a 60s stall on
+    # every interactive-writer collision. 500ms is generous headroom over the
+    # current 75ms while still being an obvious "defer, don't wait" budget.
+    assert database_module._MAINTENANCE_DB_BUSY_TIMEOUT_MS <= 500
 
 
 def test_invariant_failure_rolls_back_every_victim_update(
@@ -660,3 +682,91 @@ def test_recover_suppressed_allows_over_quota_source_to_fill_global_gap(
         ]
         == "fresh"
     )
+
+
+def test_recover_suppressed_does_not_oscillate_on_topic_window_misses(
+    tmp_path: Path,
+) -> None:
+    """Recovery must only keep rows that actually grow canonical availability.
+
+    The production failure behind this case alternated forever between
+    restoring suppressed rows and trimming the same rows back out. Rows from a
+    topic already at the public three-item window can only displace an existing
+    item, while a low-ranked row from an apparently underfilled topic may still
+    miss the SQL top-three window because a viewed row occupies a higher rank.
+    Neither shape can fill the one-item global deficit.
+    """
+    db = _database(tmp_path)
+    for index, score in enumerate((0.93, 0.92, 0.91)):
+        _seed_ready(
+            db,
+            f"BV_SATURATED_FRESH_{index}",
+            topic_group="saturated",
+            relevance_score=score,
+        )
+    for index, score in enumerate((0.99, 0.98, 0.97)):
+        _seed_ready(
+            db,
+            f"BV_WINDOW_FRESH_{index}",
+            topic_group="windowed",
+            relevance_score=score,
+        )
+    db.insert_event(
+        "view",
+        url="https://www.bilibili.com/video/BV_WINDOW_FRESH_2",
+        metadata={"bvid": "BV_WINDOW_FRESH_2", "source_platform": "bilibili"},
+    )
+
+    suppressed_ids: list[str] = []
+    for index in range(10):
+        bvid = f"BV_SATURATED_SUPPRESSED_{index}"
+        suppressed_ids.append(bvid)
+        _seed_ready(
+            db,
+            bvid,
+            topic_group="saturated",
+            relevance_score=0.96 - index * 0.001,
+        )
+        _suppress(db, bvid)
+    suppressed_ids.append("BV_WINDOW_TOO_LOW")
+    _seed_ready(
+        db,
+        "BV_WINDOW_TOO_LOW",
+        topic_group="windowed",
+        relevance_score=0.70,
+    )
+    _suppress(db, "BV_WINDOW_TOO_LOW")
+
+    before_statuses = {
+        str(row["bvid"]): str(row["pool_status"])
+        for row in db.conn.execute(
+            "SELECT bvid, pool_status FROM content_cache ORDER BY bvid"
+        ).fetchall()
+    }
+    assert db.count_pool_candidates() == 5
+    assert db.count_pool_raw_material_candidates() == 5
+
+    results = [
+        db.maintain_pool_inventory(
+            target=6,
+            raw_ceiling=6,
+            source_share_quotas={"bilibili": 6},
+            raw_source_share_quotas={"bilibili": 6},
+            max_per_topic_group=3,
+        )
+        for _ in range(2)
+    ]
+
+    after_statuses = {
+        str(row["bvid"]): str(row["pool_status"])
+        for row in db.conn.execute(
+            "SELECT bvid, pool_status FROM content_cache ORDER BY bvid"
+        ).fetchall()
+    }
+    assert all(result.available_before == result.available_after == 5 for result in results)
+    assert all(result.raw_before == result.raw_after == 5 for result in results)
+    assert all(result.recovered_suppressed == 0 for result in results)
+    assert all(result.mutation_count == 0 for result in results)
+    assert all(result.has_more is False for result in results)
+    assert after_statuses == before_statuses
+    assert all(after_statuses[bvid] == "suppressed" for bvid in suppressed_ids)

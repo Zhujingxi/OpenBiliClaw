@@ -23,9 +23,9 @@
       events: "/events",
       click: "/recommendation-click",
       chatTurns: "/chat/turns",
+      pendingConfirmations: "/chat/pending-confirmations",
       interestProbeRespond: "/interest-probes/respond",
       avoidanceProbeRespond: "/avoidance-probes/respond",
-      insightFeedback: "/insights/feedback",
       sourceShareSuggestion: "/config/source-share-suggestion",
       sourceCredentials: "/sources/credentials",
       configProbe: "/config/probe-service",
@@ -40,6 +40,24 @@
       profileEdit: "/profile/edit",
       profileEditState: "/profile/edit-state"
     };
+    const SHARED_CHAT_SESSION = "popup";
+    const CHAT_HISTORY_REFRESH_INTERVAL_MS = 2500;
+    let chatHistoryRefreshTimer = null;
+    let chatHistoryRefreshInFlight = false;
+    let lastDialogueChatSignature = null;
+
+    const dialogueConfirmation = globalThis.OpenBiliClawDialogueConfirmation;
+    if (!dialogueConfirmation) throw new Error("dialogue-confirmation shared helper did not load");
+    const {
+      executeCardAction,
+      executePendingConfirmationOpen,
+      isCardTurn,
+      isQuestionTurn,
+      renderPendingListMarkup,
+      renderTurnMarkup,
+      selectDialogueTurns
+    } = dialogueConfirmation;
+    const dialogueCardActionAbortController = new AbortController();
 
     const state = {
       query: "",
@@ -91,10 +109,57 @@
       messageChatSubjectTitle: "",
       chat: [
         { role: "agent", text: "你可以直接告诉我最近想多看什么、少看什么，或者评价一条推荐为什么准/不准。" }
-      ]
+      ],
+      pendingConfirmations: { count: 0, items: [], expanded: false }
     };
 
     const $ = (selector) => document.querySelector(selector);
+
+    const BACK_TO_TOP_THRESHOLD = 240;
+
+    function initBackToTop() {
+      const button = $("#backToTop");
+      if (!(button instanceof HTMLButtonElement)) return;
+
+      const getScrollTargets = () => {
+        const chatPage = $("#chatPage");
+        const chatPageVisible = chatPage instanceof HTMLElement && !chatPage.hidden;
+        return [
+          chatPageVisible ? null : document.scrollingElement,
+          $("#chatLog"),
+          $("#messageChatLog"),
+        ].filter((target, index, targets) => {
+          if (!(target instanceof HTMLElement) || targets.indexOf(target) !== index) return false;
+          if (target.closest("[hidden]") || window.getComputedStyle(target).display === "none") return false;
+          return true;
+        });
+      };
+
+      const getScrollTopTarget = () => {
+        const targets = getScrollTargets();
+        return targets.reduce(
+          (current, target) => (target.scrollTop > (current?.scrollTop || 0) ? target : current),
+          targets[0] || null,
+        );
+      };
+
+      const sync = () => {
+        const target = getScrollTopTarget();
+        button.hidden = (target?.scrollTop || 0) < BACK_TO_TOP_THRESHOLD;
+      };
+
+      const scrollToTop = () => {
+        const target = getScrollTopTarget();
+        if (!target) return;
+        const behavior = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches ? "auto" : "smooth";
+        target.scrollTo({ top: 0, behavior });
+      };
+
+      document.addEventListener("scroll", sync, true);
+      window.addEventListener("resize", sync, { passive: true });
+      button.addEventListener("click", scrollToTop);
+      sync();
+    }
     const grid = $("#videoGrid");
     const sourceFilterDefinitions = [
       { key: "bilibili", label: "B 站" },
@@ -154,6 +219,7 @@
       profile_failed: "画像生成未完成。",
       discovery_timeout: "画像已生成，但首轮内容池整理超时。",
       discovery_partial: "画像已生成，但首轮内容池本次未完成。",
+      douyin_degraded: "抖音已采数据已用于画像，但至少一个账号范围的分页未完整完成。",
       internal_error: "初始化过程中出错了，请稍后重试。",
       interrupted: "上次初始化被打断（后端重启），可重试。",
       cancelled: "初始化已取消。",
@@ -223,6 +289,10 @@
     // 库存变化事件可能成串到达（补货一轮会连发多条），去抖 + 单飞（合并 pending
     // 调用）避免把只读快照接口打成风暴。debounceAsync 已实现这两点。
     const schedulePlatformAvailabilityRefresh = debounceAsync(() => refreshPlatformAvailability(), 600);
+    const scheduleDialogueConfirmationRefresh = debounceAsync(
+      () => refreshDialogueConfirmationSurface(),
+      300
+    );
 
     let platformAvailabilityRetryAttempt = 0;
     let platformAvailabilityRetryTimer = null;
@@ -1193,7 +1263,12 @@
         }
         return details;
       } catch (error) {
-        if (error?.name === "AbortError") throw new Error(`${path} 请求超时，请稍后刷新确认是否已写入。`);
+        if (error?.name === "AbortError") {
+          const timeoutError = new Error(`${path} 请求超时，请稍后刷新确认是否已写入。`);
+          timeoutError.name = "TimeoutError";
+          timeoutError.code = "request_timeout";
+          throw timeoutError;
+        }
         throw error;
       } finally {
         if (timeoutId) window.clearTimeout(timeoutId);
@@ -1216,7 +1291,7 @@
     function presentDegradedConfigRecovery(snapshot) {
       if (snapshot?.degraded !== true) return;
       state.degraded = true;
-      const guidance = "LLM 配置不可用：当前没有可用的模型 Provider。请补全默认 Provider 的 API Key、模型与所需 Base URL，保存后重启后端。";
+      const guidance = "LLM 配置不可用：当前没有可用的模型 Provider。请补全默认 Provider 的 API Key、模型与所需 Base URL；保存成功后后端会原地恢复。";
       const diagnostic = configErrorMessage(snapshot);
       const configStatus = $("#configStatus");
       if (configStatus) {
@@ -1224,7 +1299,7 @@
         configStatus.value = diagnostic ? `${guidance}\n诊断：${diagnostic}` : guidance;
       }
       $("#statusLabel").textContent = "模型配置待修复";
-      $("#runtimeSummary").textContent = "AI 服务配置有误，推荐功能暂停；请在模型设置修复后重启后端。";
+      $("#runtimeSummary").textContent = "AI 服务配置有误，推荐功能暂停；请在模型设置修复并保存。";
       if (degradedRecoveryPresented) return;
       degradedRecoveryPresented = true;
       openSettingsPage("models");
@@ -1370,7 +1445,8 @@
         "analyze_failed",
         "profile_failed",
         "discovery_timeout",
-        "discovery_partial"
+        "discovery_partial",
+        "douyin_degraded"
       ]);
       // account-sync keeps llm_not_ready while the live probe is still red,
       // but its detail contains the actual profile-analysis failure.
@@ -1672,7 +1748,13 @@
       const reason = String(status?.reason || "");
       if (
         detail &&
-        (["analyze_failed", "profile_failed", "discovery_timeout", "discovery_partial"].includes(reason) ||
+        ([
+          "analyze_failed",
+          "profile_failed",
+          "discovery_timeout",
+          "discovery_partial",
+          "douyin_degraded"
+        ].includes(reason) ||
           detail.startsWith("画像分析失败："))
       ) return detail;
       // Unmapped codes (empty_history / empty_signals / profile_failed …)
@@ -1834,10 +1916,10 @@
       const phase = initOnboardingPhase(status, displayProgress);
       const buttonLabel = state.initBusy
         ? "检查中…"
-        : isRunning
+          : isRunning
           ? "初始化进行中…"
           : alreadyInitialized
-            ? status?.partial_success ? "画像已就绪，后台补池中" : "已初始化"
+            ? status?.partial_success ? "初始化部分完成" : "已初始化"
             : displayProgress.failed
               ? "重试初始化"
               : "开始初始化";
@@ -1943,6 +2025,17 @@
       }, delayMs);
     }
 
+    // 初始化状态刷新会被 refresh.pool_updated 高频拽起来（见 handleRuntimeEvent），
+    // 补货一轮能打好几次。网格里已经是真实卡片、又不需要退回引导门时，这条路径
+    // 只刷新头部 / 库存 / 侧栏，不重绘推荐列表 —— 与 refreshPlatformAvailability
+    // 的约定保持一致：库存事件不许碰已加载的卡片。
+    function initStatusRenderOptions() {
+      if (shouldShowInitOnboarding(state.runtimeStatus)) return {};
+      if (grid.querySelector(".init-onboarding") || grid.querySelector(".empty-state")) return {};
+      if (!grid.querySelector(".video-card:not(.is-skeleton)")) return {};
+      return { preserveVideos: true };
+    }
+
     async function refreshInitStatus({ schedule = true } = {}) {
       if (initRefreshInFlight) {
         initRefreshPending = true;
@@ -1957,12 +2050,12 @@
         state.initStatus = status;
         state.initReason = "";
         if (status?.running) {
-          renderAll();
+          renderAll(initStatusRenderOptions());
           scheduleInitStatusRefresh(schedule ? INIT_STATUS_POLL_MS : INIT_STATUS_WATCHDOG_MS);
           return;
         }
         if (status?.initialized) {
-          renderAll();
+          renderAll(initStatusRenderOptions());
           clearInitPolling();
           initRefreshPending = false;
           // Stage 3 makes initialized=true while stage 4 still owns the run.
@@ -1973,13 +2066,14 @@
             scheduleBackendHydration();
             showToast(
               status?.partial_success
-                ? "完整画像已就绪；首轮推荐将在后台继续补齐"
+                ? initStatusReasonText(status) ||
+                  "初始化部分完成；已采数据已保留并使用，请按提示稍后补齐。你现在可以先进入应用。"
                 : "初始化完成，正在加载推荐"
             );
           }
           return;
         }
-        renderAll();
+        renderAll(initStatusRenderOptions());
         if (embeddingPullProgressView(status).active) {
           scheduleInitStatusRefresh(schedule ? INIT_STATUS_POLL_MS : INIT_STATUS_WATCHDOG_MS);
         } else if (!status?.running) {
@@ -1988,7 +2082,7 @@
       } catch (error) {
         scheduleInitStatusRefresh(INIT_STATUS_POLL_MS);
         state.initReason = `暂时无法连接初始化后台：${error?.message || "正在重试"}。已保留当前进度。`;
-        renderAll();
+        renderAll(initStatusRenderOptions());
       } finally {
         initRefreshInFlight = false;
         if (initRefreshPending) {
@@ -2206,6 +2300,7 @@
       document.querySelectorAll(".drawer.is-open, .overlay.is-open").forEach((panel) => closePanel(panel.id));
       showMainPage("chatPage");
       renderChat();
+      scheduleDialogueConfirmationRefresh();
       const input = document.getElementById("chatInput");
       window.scrollTo({ top: 0, behavior: "smooth" });
       window.setTimeout(() => input?.focus(), 100);
@@ -2301,6 +2396,7 @@
       void startDesktopBackendSession();
     });
     window.addEventListener("pagehide", () => {
+      dialogueCardActionAbortController.abort();
       pauseDesktopBackendSession();
       for (const runtime of Object.values(desktopSavedTaskRuntimes)) runtime.coordinator.dispose();
     }, { once: true });
@@ -3164,7 +3260,9 @@ ${savedCardFeedbackBarHtml(listKind)}
         const chips = Array.from(row.querySelectorAll(".chip"));
         const restored = chips.find((chip) => chip.dataset.filter === focusedFilter)
           || chips.find((chip) => chip.dataset.filter === state.filter);
-        restored?.focus();
+        // 鼠标 / 触控板滚动不会清掉 Tab 焦点。自动续页重绘库存徽标时，这个
+        // Tab 可能已经远在视口上方；普通 focus() 会把页面从列表底部拉回 Tab。
+        restored?.focus({ preventScroll: true });
       }
       const resetButton = $("#resetFiltersBtn");
       if (resetButton) resetButton.hidden = state.filter === "全部" && !String(state.query || "").trim();
@@ -3555,8 +3653,132 @@ ${savedCardFeedbackBarHtml(listKind)}
       ).then(() => setCrossState(desktopSavedMutations.isSaved(crossKind, savedItem.item_key)));
     }
 
+    // recommendation key -> { node, html }：上一轮渲染出来的卡片。只有 markup 真的
+    // 变了才会重建节点，其余情况原样复用 —— 见 syncRecommendationCards 的注释。
+    const renderedRecommendationCards = new Map();
+
+    function recommendationCardHtml(item, index) {
+      const url = contentUrl(item);
+      const durationBadge = item.content_type === "video" && item.duration > 0
+        ? `<span class="duration-badge">${escapeHtml(formatDuration(item.duration))}</span>`
+        : "";
+      const stats = recommendationStats(item);
+      return `
+          ${url
+          ? `<a class="cover${recommendationCoverClass(item)}" data-platform="${escapeHtml(item.platform)}" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" aria-label="打开 ${escapeHtml(item.title)}">
+            ${recommendationMediaHtml(item, index)}
+            <span class="platform" data-platform="${escapeHtml(item.platform || "bilibili")}">${escapeHtml(platformName(item.platform))}</span>
+            ${durationBadge}
+          </a>`
+          : `<button class="cover${recommendationCoverClass(item)}" data-platform="${escapeHtml(item.platform)}" type="button" aria-label="打开 ${escapeHtml(item.title)}">
+            ${recommendationMediaHtml(item, index)}
+            <span class="platform" data-platform="${escapeHtml(item.platform || "bilibili")}">${escapeHtml(platformName(item.platform))}</span>
+            ${durationBadge}
+          </button>`}
+          <div>
+            <p class="video-title">${escapeHtml(item.title)}</p>
+            <p class="video-meta">${recommendationMetaHtml(item)}</p>
+            ${stats ? `<p class="video-stats">${escapeHtml(stats)}</p>` : ""}
+          </div>
+          <p class="reason" role="button" tabindex="0" aria-expanded="false" title="${escapeHtml(item.reason)}"><span class="reason-text">${escapeHtml(item.reason)}</span></p>
+${cardFeedbackBarHtml()}`;
+    }
+
+    function createRecommendationCard(item, html) {
+      const card = document.createElement("article");
+      card.className = "video-card";
+      card.dataset.bvid = item.bvid || item.id;
+      card.innerHTML = html;
+      const reason = card.querySelector(".reason");
+      const toggleReason = () => {
+        const expanded = reason.classList.toggle("is-expanded");
+        reason.setAttribute("aria-expanded", expanded ? "true" : "false");
+      };
+      reason.addEventListener("click", toggleReason);
+      reason.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          toggleReason();
+        }
+      });
+      const cover = card.querySelector(".cover");
+      cover.addEventListener("click", () => openRecommendation(item, card));
+      cover.addEventListener("auxclick", (event) => {
+        if (event.button === 1) openRecommendation(item, card);
+      });
+      card.querySelectorAll("[data-action]").forEach((btn) => btn.addEventListener("click", () => handleCardAction(btn.dataset.action, item, card)));
+      card.querySelector(".comment-field input").addEventListener("keydown", (event) => {
+        if (event.key === "Enter") handleCardAction("send-comment", item, card);
+        if (event.key === "Escape") closeCardComposer(card);
+      });
+      card.querySelector(".comment-field input").addEventListener("blur", (event) => {
+        autoCollapseComposer(card.querySelector(".card-actions"), event, () => closeCardComposer(card));
+      });
+      // Lazy-load watch-later state
+      const wlBtn = card.querySelector('[data-action="watch-later"]');
+      if (wlBtn) {
+        const savedItem = desktopSavedItem(item);
+        void desktopSavedMutations.hydrate("watch_later", savedItem.item_key, () => watchLaterStatus(savedItem)).then(() => {
+          const saved = desktopSavedMutations.isSaved("watch_later", savedItem.item_key);
+          wlBtn.setAttribute("aria-pressed", saved ? "true" : "false");
+          wlBtn.title = saved ? "取消稍后再看" : "稍后再看";
+        });
+      }
+      // Lazy-load favorite state
+      const favBtn = card.querySelector('[data-action="favorite"]');
+      if (favBtn) {
+        const savedItem = desktopSavedItem(item);
+        void desktopSavedMutations.hydrate("favorite", savedItem.item_key, () => favoriteStatus(savedItem)).then(() => {
+          const saved = desktopSavedMutations.isSaved("favorite", savedItem.item_key);
+          favBtn.setAttribute("aria-pressed", saved ? "true" : "false");
+          favBtn.title = saved ? "取消收藏" : "收藏";
+        });
+      }
+      return card;
+    }
+
+    // 按 recommendation key 做增量对账，而不是 grid.replaceChildren(...)。整表重建
+    // 会把用户正在看的卡片全部销毁：浏览器丢掉滚动锚点（列表跳动）、首屏之外的
+    // 懒加载封面回落成占位、展开的推荐理由和收藏 / 稍后再看的 aria-pressed 复位。
+    // 补货期间 refresh.pool_updated 会高频打到这条路径，所以它必须是幂等的 ——
+    // 列表没变时一个 DOM 节点都不许动。
+    function syncRecommendationCards(items) {
+      const previous = renderedRecommendationCards;
+      const next = new Map();
+      // 骨架卡由 showAppendSkeletons / removeAppendSkeletons owns；这里只负责把它们
+      // 保持在真实卡片后面，加载中的占位不能被一次库存重绘顺手抹掉。
+      const skeletons = Array.from(grid.querySelectorAll(".video-card.is-skeleton"));
+      let cursor = null;
+      items.forEach((item, index) => {
+        const key = recommendationKey(item) || `#${index}`;
+        const html = recommendationCardHtml(item, index);
+        const cached = previous.get(key);
+        // 复用要求 markup 和 recommendation_id 都没变：卡片上的监听器闭包持有的是
+        // 建卡时那个 item 对象，而 /api/feedback 按 recommendation_id 定位。同一条
+        // 内容换了一行新推荐（换一批 / 手动刷新）时 id 会变，必须重建，否则反馈会
+        // 打到已经作废的那一行上。
+        const node =
+          cached && cached.html === html && cached.id === item.id && cached.node.parentNode === grid
+            ? cached.node
+            : createRecommendationCard(item, html);
+        next.set(key, { node, html, id: item.id });
+        const target = cursor ? cursor.nextSibling : grid.firstChild;
+        if (node !== target) grid.insertBefore(node, target);
+        cursor = node;
+      });
+      const keep = new Set(Array.from(next.values(), (entry) => entry.node));
+      for (const node of Array.from(grid.children)) {
+        if (keep.has(node) || skeletons.includes(node)) continue;
+        node.remove();
+      }
+      for (const skeleton of skeletons) grid.appendChild(skeleton);
+      previous.clear();
+      for (const [key, entry] of next) previous.set(key, entry);
+    }
+
     function renderVideos() {
       if (shouldShowInitOnboarding(state.runtimeStatus)) {
+        renderedRecommendationCards.clear();
         renderInitOnboarding();
         return;
       }
@@ -3590,85 +3812,12 @@ ${savedCardFeedbackBarHtml(listKind)}
         const retry = desktopRecommendationLoadState === "failed-exhausted"
           ? '<button class="small-btn" id="retryEmptyRecommendations" type="button">重新加载</button>'
           : "";
+        renderedRecommendationCards.clear();
         grid.innerHTML = `<div class="empty-state">${message}${retry}</div>`;
         $("#retryEmptyRecommendations")?.addEventListener("click", restartDesktopFailedRecoveries);
         return;
       }
-      grid.replaceChildren(...items.map((item, index) => {
-        const card = document.createElement("article");
-        const url = contentUrl(item);
-        const durationBadge = item.content_type === "video" && item.duration > 0
-          ? `<span class="duration-badge">${escapeHtml(formatDuration(item.duration))}</span>`
-          : "";
-        const stats = recommendationStats(item);
-        card.className = "video-card";
-        card.dataset.bvid = item.bvid || item.id;
-        card.innerHTML = `
-          ${url
-            ? `<a class="cover${recommendationCoverClass(item)}" data-platform="${escapeHtml(item.platform)}" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" aria-label="打开 ${escapeHtml(item.title)}">
-            ${recommendationMediaHtml(item, index)}
-            <span class="platform" data-platform="${escapeHtml(item.platform || "bilibili")}">${escapeHtml(platformName(item.platform))}</span>
-            ${durationBadge}
-          </a>`
-            : `<button class="cover${recommendationCoverClass(item)}" data-platform="${escapeHtml(item.platform)}" type="button" aria-label="打开 ${escapeHtml(item.title)}">
-            ${recommendationMediaHtml(item, index)}
-            <span class="platform" data-platform="${escapeHtml(item.platform || "bilibili")}">${escapeHtml(platformName(item.platform))}</span>
-            ${durationBadge}
-          </button>`}
-          <div>
-            <p class="video-title">${escapeHtml(item.title)}</p>
-            <p class="video-meta">${recommendationMetaHtml(item)}</p>
-            ${stats ? `<p class="video-stats">${escapeHtml(stats)}</p>` : ""}
-          </div>
-          <p class="reason" role="button" tabindex="0" aria-expanded="false" title="${escapeHtml(item.reason)}"><span class="reason-text">${escapeHtml(item.reason)}</span></p>
-${cardFeedbackBarHtml()}`;
-        const reason = card.querySelector(".reason");
-        const toggleReason = () => {
-          const expanded = reason.classList.toggle("is-expanded");
-          reason.setAttribute("aria-expanded", expanded ? "true" : "false");
-        };
-        reason.addEventListener("click", toggleReason);
-        reason.addEventListener("keydown", (event) => {
-          if (event.key === "Enter" || event.key === " ") {
-            event.preventDefault();
-            toggleReason();
-          }
-        });
-        const cover = card.querySelector(".cover");
-        cover.addEventListener("click", () => openRecommendation(item, card));
-        cover.addEventListener("auxclick", (event) => {
-          if (event.button === 1) openRecommendation(item, card);
-        });
-        card.querySelectorAll("[data-action]").forEach((btn) => btn.addEventListener("click", () => handleCardAction(btn.dataset.action, item, card)));
-        card.querySelector(".comment-field input").addEventListener("keydown", (event) => {
-          if (event.key === "Enter") handleCardAction("send-comment", item, card);
-          if (event.key === "Escape") closeCardComposer(card);
-        });
-        card.querySelector(".comment-field input").addEventListener("blur", (event) => {
-          autoCollapseComposer(card.querySelector(".card-actions"), event, () => closeCardComposer(card));
-        });
-        // Lazy-load watch-later state
-        const wlBtn = card.querySelector('[data-action="watch-later"]');
-        if (wlBtn) {
-          const savedItem = desktopSavedItem(item);
-          void desktopSavedMutations.hydrate("watch_later", savedItem.item_key, () => watchLaterStatus(savedItem)).then(() => {
-            const saved = desktopSavedMutations.isSaved("watch_later", savedItem.item_key);
-            wlBtn.setAttribute("aria-pressed", saved ? "true" : "false");
-            wlBtn.title = saved ? "\u53D6\u6D88\u7A0D\u540E\u518D\u770B" : "\u7A0D\u540E\u518D\u770B";
-          });
-        }
-        // Lazy-load favorite state
-        const favBtn = card.querySelector('[data-action="favorite"]');
-        if (favBtn) {
-          const savedItem = desktopSavedItem(item);
-          void desktopSavedMutations.hydrate("favorite", savedItem.item_key, () => favoriteStatus(savedItem)).then(() => {
-            const saved = desktopSavedMutations.isSaved("favorite", savedItem.item_key);
-            favBtn.setAttribute("aria-pressed", saved ? "true" : "false");
-            favBtn.title = saved ? "\u53D6\u6D88\u6536\u85CF" : "\u6536\u85CF";
-          });
-        }
-        return card;
-      }));
+      syncRecommendationCards(items);
     }
 
     function trackRecommendationClick(item) {
@@ -4309,15 +4458,12 @@ ${cardFeedbackBarHtml()}`;
     function insightsHtml(items) {
       const list = asArray(items);
       if (!list.length) return `<p class="video-meta">当前没有需要特别展示的活跃洞察。</p>`;
-      return `<div class="profile-card-list">${list.map((item, idx) => {
+      return `<div class="profile-card-list">${list.map((item) => {
         if (typeof item !== "object") return `<div class="profile-insight"><div class="profile-insight-head"><span class="profile-insight-title">${escapeHtml(item)}</span></div></div>`;
         const evidence = asArray(item.evidence).join("、");
         const hypothesis = item.hypothesis || "";
-        const actions = hypothesis
-          ? `<div class="insight-actions"><button class="pill-btn" type="button" data-insight-action="confirm" data-insight-idx="${idx}">准</button><button class="pill-btn" type="button" data-insight-action="reject" data-insight-idx="${idx}">不准</button></div>`
-          : "";
-        return `<div class="profile-insight" data-insight-idx="${idx}"><div class="profile-insight-head"><span class="profile-insight-title">${escapeHtml(hypothesis || item.observation || valueList(item))}</span><span class="profile-confidence">${formatPercent(item.confidence)}</span></div>${evidence ? `<p class="video-meta">证据：${escapeHtml(evidence)}</p>` : ""}${item.validated ? `<p class="video-meta">已验证</p>` : ""}${actions}</div>`;
-      }).join("")}</div>`;
+        return `<div class="profile-insight"><div class="profile-insight-head"><span class="profile-insight-title">${escapeHtml(hypothesis || item.observation || valueList(item))}</span><span class="profile-confidence">${formatPercent(item.confidence)}</span></div>${evidence ? `<p class="video-meta">证据：${escapeHtml(evidence)}</p>` : ""}${item.validated ? `<p class="video-meta">已验证</p>` : ""}</div>`;
+      }).join("")}</div><p class="video-meta insight-readonly-hint">洞察区只读；请在对话的待聊确认入口继续。</p>`;
     }
 
     function awarenessHtml(items) {
@@ -4395,36 +4541,7 @@ ${cardFeedbackBarHtml()}`;
       const profileEditBar = `<div class="profile-edit-bar"><button class="pill-btn" type="button" data-profile-edit-toggle="enter">✏️ 编辑画像</button></div>`;
       $("#profileDetails").innerHTML = profileEditBar + html;
       bindSpeculativeActions();
-      bindInsightActions();
       bindProfileEditToggle();
-    }
-
-    function bindInsightActions() {
-      document.querySelectorAll("[data-insight-action]").forEach((button) => {
-        button.addEventListener("click", () => respondInsightFeedback(button));
-      });
-    }
-
-    async function respondInsightFeedback(button) {
-      const signal = button.dataset.insightAction;
-      const idx = Number(button.dataset.insightIdx);
-      const insight = state.profile?.active_insights?.[idx];
-      const hypothesis = insight && insight.hypothesis;
-      if (!signal || !hypothesis) return;
-      const row = button.closest(".profile-insight");
-      row?.querySelectorAll("[data-insight-action]").forEach((btn) => { btn.disabled = true; });
-      try {
-        await requestJson(ENDPOINTS.insightFeedback, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ hypothesis, signal }),
-        });
-        showToast(signal === "confirm" ? "已确认这条洞察" : "已记下，会少推这类");
-        setTimeout(() => { void refreshProfile(); }, 1200);
-      } catch (error) {
-        row?.querySelectorAll("[data-insight-action]").forEach((btn) => { btn.disabled = false; });
-        showToast("没存上，稍后再试");
-      }
     }
 
     // ── Editable profile (Phase 3, desktop) ──────────────────────
@@ -5085,7 +5202,7 @@ ${cardFeedbackBarHtml()}`;
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               turn_id: turnId,
-              session: "webui",
+              session: SHARED_CHAT_SESSION,
               scope: isAvoidance ? "avoidance_probe" : "probe",
               subject_id: domain,
               subject_title: domain || (isAvoidance ? "这个避雷方向" : "这个兴趣方向"),
@@ -5573,7 +5690,7 @@ ${cardFeedbackBarHtml()}`;
           return;
         }
         const turnId = createClientTurnId("delight");
-        const pendingTurn = { turn_id: turnId, session: "webui", scope: "delight", subject_id: delight.bvid, subject_title: delight.title || "", message: note, reply: "", status: "pending", error: "" };
+        const pendingTurn = { turn_id: turnId, session: SHARED_CHAT_SESSION, scope: "delight", subject_id: delight.bvid, subject_title: delight.title || "", message: note, reply: "", status: "pending", error: "" };
         applyTurnToDelight(pendingTurn);
         if (input) input.value = "";
         closeDelightComposer();
@@ -5608,7 +5725,7 @@ ${cardFeedbackBarHtml()}`;
         showToast(url ? "已打开惊喜推荐" : "后端没有返回可打开链接");
         return;
       }
-      const feedbackToast = response === "like" ? "惊喜推荐已喜欢" : response === "dislike" ? "这类惊喜先少来点" : "已忽略这条惊喜推荐";
+      const feedbackToast = response === "like" ? "惊喜推荐已喜欢" : response === "dislike" ? "这类惊喜先少来点" : "已标为看过，不再推荐";
       const toastImmediately = response === "like" || response === "dislike";
       if (toastImmediately) showToast(feedbackToast);
       const feedbackResult = await requestJson(ENDPOINTS.delightRespond, {
@@ -5621,6 +5738,11 @@ ${cardFeedbackBarHtml()}`;
           message: ""
         })
       });
+      if (response === "dismiss" && feedbackResult == null) {
+        showToast("这次还没记上，请再试一次");
+        setActiveDelight(state.delightIndex);
+        return;
+      }
       if (response === "like" && feedbackResult == null) {
         showToast("这次喜欢还没记上，可以再试一次");
         setActiveDelight(state.delightIndex);
@@ -5688,23 +5810,266 @@ ${cardFeedbackBarHtml()}`;
     }
 
     function chatHtml(messages) {
-      return messages.map((msg) => `<div class="chat-bubble ${msg.role === "user" ? "user" : "agent"}">${escapeHtml(msg.text)}</div>`).join("");
+      return messages.map((msg) => {
+        if (msg?.turn) return renderTurnMarkup(msg.turn, { surface: "desktop" });
+        return `<div class="chat-bubble ${msg.role === "user" ? "user" : "agent"}">${escapeHtml(msg.text)}</div>`;
+      }).join("");
+    }
+
+    function renderDesktopPendingConfirmations() {
+      const pending = state.pendingConfirmations;
+      const count = Math.max(0, Number(pending.count) || 0);
+      updateSavedBadge("chatPendingCountBadge", count);
+      const toggle = $("#desktopPendingToggle");
+      const countLabel = $("#desktopPendingCount");
+      const list = $("#desktopPendingConfirmations");
+      if (countLabel) countLabel.textContent = count > 99 ? "99+" : String(count);
+      if (toggle) {
+        toggle.setAttribute("aria-expanded", String(Boolean(pending.expanded)));
+        toggle.classList.toggle("is-expanded", Boolean(pending.expanded));
+      }
+      if (list) {
+        list.hidden = !pending.expanded;
+        list.innerHTML = renderPendingListMarkup(pending.items);
+      }
+    }
+
+    function applyDialogueChatSnapshot(snapshot) {
+      const items = selectDialogueTurns(Array.isArray(snapshot) ? snapshot : asArray(snapshot?.items));
+      if (!items.length) return;
+      const signature = JSON.stringify(items);
+      if (signature === lastDialogueChatSignature) return;
+      lastDialogueChatSignature = signature;
+      state.chat = items.flatMap((turn) => {
+        if (isCardTurn(turn) || isQuestionTurn(turn)) return [{ turn }];
+        const failed = String(turn.status || "").toLowerCase() === "failed";
+        const agentText = failed
+          ? turn.error || "这句还没发出去，稍后再试。"
+          : turn.reply || turn.assistant_message || "等待后端回复中。";
+        return [
+          { role: "user", text: turn.message || turn.user_message || "" },
+          { role: "agent", text: agentText }
+        ].filter((item) => item.text);
+      });
+      renderChat();
+    }
+
+    async function refreshDialogueTurns() {
+      const snapshot = await requestJsonStrict(
+        `${ENDPOINTS.chatTurns}?session=${encodeURIComponent(SHARED_CHAT_SESSION)}&limit=100`,
+        { cache: "no-store" }
+      );
+      applyDialogueChatSnapshot(snapshot);
+    }
+
+    async function fetchDesktopDialogueTurn(turnId, { signal, timeoutMs = 10000 } = {}) {
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+      const forwardAbort = () => controller.abort(signal?.reason);
+      if (signal?.aborted) forwardAbort();
+      else signal?.addEventListener("abort", forwardAbort, { once: true });
+      try {
+        return await requestJsonStrict(
+          `${ENDPOINTS.chatTurns}/${encodeURIComponent(turnId)}`,
+          { cache: "no-store", signal: controller.signal }
+        );
+      } finally {
+        window.clearTimeout(timeoutId);
+        signal?.removeEventListener("abort", forwardAbort);
+      }
+    }
+
+    async function refreshDesktopPendingConfirmations() {
+      const payload = await requestJsonStrict(
+        `${ENDPOINTS.pendingConfirmations}?session=${encodeURIComponent(SHARED_CHAT_SESSION)}`,
+        { cache: "no-store" }
+      );
+      state.pendingConfirmations = {
+        ...state.pendingConfirmations,
+        count: Math.max(0, Number(payload?.count) || 0),
+        items: asArray(payload?.items)
+      };
+      renderDesktopPendingConfirmations();
+    }
+
+    async function refreshDialogueConfirmationSurface() {
+      await Promise.allSettled([refreshDialogueTurns(), refreshDesktopPendingConfirmations()]);
+    }
+
+    async function refreshSharedChatSurface() {
+      const chatPage = $("#chatPage");
+      if (
+        chatHistoryRefreshInFlight ||
+        document.hidden ||
+        !(chatPage instanceof HTMLElement) ||
+        chatPage.hidden
+      ) {
+        return;
+      }
+      chatHistoryRefreshInFlight = true;
+      try {
+        await refreshDialogueConfirmationSurface();
+      } finally {
+        chatHistoryRefreshInFlight = false;
+      }
+    }
+
+    function startSharedChatSurfaceSync() {
+      if (chatHistoryRefreshTimer !== null) return;
+      chatHistoryRefreshTimer = window.setInterval(() => {
+        void refreshSharedChatSurface();
+      }, CHAT_HISTORY_REFRESH_INTERVAL_MS);
+    }
+
+    function updateDesktopDialogueTurn(turn) {
+      const index = state.chat.findIndex((entry) => entry?.turn?.turn_id === turn?.turn_id);
+      const entry = { turn };
+      if (index >= 0) state.chat[index] = entry;
+      else state.chat.push(entry);
+      renderChat();
+    }
+
+    async function handleDesktopCardAction(button) {
+      const card = button.closest(".dialogue-card");
+      const turnId = card?.dataset.dialogueTurnId || "";
+      const action = button.dataset.cardAction || "";
+      const turn = state.chat.find((entry) => entry?.turn?.turn_id === turnId)?.turn;
+      if (!turn || !action || button.disabled) return;
+      button.disabled = true;
+      try {
+        const { response } = await executeCardAction(turn, action, {
+          request(path, body) {
+            return requestJsonStrict(path, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(body)
+            });
+          },
+          fetchTurn: fetchDesktopDialogueTurn,
+          signal: dialogueCardActionAbortController.signal,
+          onUpdate: updateDesktopDialogueTurn
+        });
+        if (response?.outcome === "retryable_error") {
+          const reason = String(response?.reason || "").toLowerCase();
+          if (reason === "stale_anchor" || reason === "anchor_dependency_failed") {
+            showToast("这条暂时结算不了：你正在聊另一条，先把那条聊完或结束再试");
+          } else {
+            showToast("后端结果暂未同步；可刷新确认，或直接重试这次操作");
+          }
+          return;
+        }
+        if (response?.outcome === "already_settled") showToast("这条已在另一个窗口结算，已同步最终状态");
+        else if (action === "discuss") {
+          showToast("好，沿着这条猜测继续聊");
+          $("#chatInput")?.focus();
+        } else if (action === "defer") showToast("先放一放，之后再聊");
+        else if (response?.state === "revised") showToast("已按你的修正记下这条");
+        else showToast(action === "confirm" ? "已确认这条猜测" : "已记下这条猜测不准");
+        await refreshDialogueConfirmationSurface();
+      } catch {
+        showToast("这次没有结算成功，卡片已恢复，可以重试");
+      }
+    }
+
+    async function handleDesktopPendingOpen(button) {
+      const ref = button.dataset.confirmationRef || "";
+      if (!ref || button.disabled) return;
+      button.disabled = true;
+      button.textContent = "打开中…";
+      try {
+        const turn = await executePendingConfirmationOpen(ref, {
+          session: SHARED_CHAT_SESSION,
+          signal: dialogueCardActionAbortController.signal,
+          request(path, body, { signal } = {}) {
+            return requestJsonStrict(path, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(body),
+              signal
+            });
+          },
+          onWaiting({ message }) {
+            button.textContent = "等待中…";
+            showToast(`${message}，空闲后会自动打开`, { duration: 4200 });
+          }
+        });
+        if (turn?.turn_id) updateDesktopDialogueTurn(turn);
+        await refreshDialogueConfirmationSurface();
+        showToast(isQuestionTurn(turn) ? "这条疑惑已经放进对话里" : "这张确认卡已经放进对话里");
+        $("#chatInput")?.focus();
+      } catch (error) {
+        button.disabled = false;
+        button.textContent = "打开";
+        if (Number(error?.status) === 409) {
+          await refreshDialogueConfirmationSurface();
+          showToast("另一条疑惑正在聊，待聊列表已经同步");
+        } else if (error?.name !== "AbortError") {
+          const detail = String(error?.details?.detail?.message || "").trim();
+          showToast(detail || "这条待聊内容暂时打不开，请稍后重试");
+        }
+      }
     }
 
     function renderChat() {
+      renderDesktopPendingConfirmations();
       const chatLog = $("#chatLog");
+      const messageChatLog = $("#messageChatLog");
+      const scrollState = (element) => {
+        if (!(element instanceof HTMLElement)) return null;
+        return {
+          top: element.scrollTop,
+          atBottom: element.scrollHeight - element.scrollTop - element.clientHeight <= 48,
+        };
+      };
+      const chatScrollState = scrollState(chatLog);
+      const messageChatScrollState = scrollState(messageChatLog);
+      const restoreScroll = (element, previous) => {
+        if (!(element instanceof HTMLElement) || !previous) return;
+        element.scrollTop = previous.atBottom
+          ? element.scrollHeight
+          : Math.min(previous.top, Math.max(0, element.scrollHeight - element.clientHeight));
+      };
       if (chatLog) {
         chatLog.innerHTML = chatHtml(state.chat);
-        chatLog.scrollTop = chatLog.scrollHeight;
+        restoreScroll(chatLog, chatScrollState);
       }
-      const messageChatLog = $("#messageChatLog");
       if (messageChatLog) {
         const baseMessages = state.messageChatPrompt
           ? state.chat.filter((msg) => msg.text !== "你可以直接告诉我最近想多看什么、少看什么，或者评价一条推荐为什么准/不准。")
           : state.chat;
         const messages = state.messageChatPrompt ? [{ role: "user", text: state.messageChatPrompt }, ...baseMessages] : baseMessages;
         messageChatLog.innerHTML = chatHtml(messages);
-        messageChatLog.scrollTop = messageChatLog.scrollHeight;
+        restoreScroll(messageChatLog, messageChatScrollState);
+      }
+    }
+
+    // Same backoff shape as the card-action helper, driven by the chat path.
+    // Only runs while an unsettled card is actually on screen. The budget
+    // matches CARD_ACTION_POLL_DEADLINE_MS (~30s) rather than a few seconds:
+    // an anchored settlement lands *after* the reply — the worker still has to
+    // run attribution and the queue job — and an 8s budget measurably missed it
+    // in browser E2E, leaving the card stuck on 正在聊这条 until a manual reload.
+    const DIALOGUE_CARD_TERMINAL_STATES = new Set([
+      "confirmed",
+      "rejected",
+      "revised",
+      "deferred",
+    ]);
+
+    function hasUnsettledDialogueCard() {
+      return state.chat.some((entry) => {
+        const payload = entry?.turn?.payload;
+        if (!payload || payload.type !== "card") return false;
+        return !DIALOGUE_CARD_TERMINAL_STATES.has(String(payload.state || "").toLowerCase());
+      });
+    }
+
+    async function refreshUntilDialogueCardsSettle() {
+      if (!hasUnsettledDialogueCard()) return;
+      for (const delay of [1000, 2000, 5000, 5000, 5000, 5000, 5000]) {
+        await new Promise((resolve) => window.setTimeout(resolve, delay));
+        await refreshDialogueTurns().catch(() => {});
+        if (!hasUnsettledDialogueCard()) return;
       }
     }
 
@@ -5714,7 +6079,7 @@ ${cardFeedbackBarHtml()}`;
       state.chat.push({ role: "agent", text: "正在提交给后端，并等待 durable chat turn 完成。" });
       renderChat();
       const payload = {
-        session: "webui",
+        session: SHARED_CHAT_SESSION,
         scope: options.scope || "chat",
         subject_id: options.subjectId || "",
         subject_title: options.subjectTitle || "",
@@ -5727,17 +6092,25 @@ ${cardFeedbackBarHtml()}`;
         showToast("聊天提交失败：后端不可用");
         return;
       }
+      await refreshDialogueTurns().catch(() => {});
+      void refreshDesktopPendingConfirmations().catch(() => {});
       const startedAt = Date.now();
       const poll = async () => {
         const latest = await requestJson(`${ENDPOINTS.chatTurns}/${encodeURIComponent(turn.turn_id)}`);
         if (latest?.status === "failed" || Date.now() - startedAt > 180000) {
-          state.chat[state.chat.length - 1] = { role: "agent", text: latest?.error || "聊天处理超时，稍后可以在历史里继续查看。" };
-          renderChat();
+          if (latest?.status === "failed") await refreshDialogueTurns().catch(() => {});
+          else {
+            state.chat.push({ role: "agent", text: "聊天处理超时，稍后可以在历史里继续查看。" });
+            renderChat();
+          }
           return;
         }
         if (latest?.status === "completed" || latest?.reply) {
-          state.chat[state.chat.length - 1] = { role: "agent", text: latest.reply || "后端已完成这轮聊天。" };
-          renderChat();
+          await refreshDialogueConfirmationSurface();
+          // 回复完成 ≠ 结算完成：锚归属（support/contradict/revise/answer）是在回复
+          // 之后由结算 worker 落库的，所以此刻卡片往往还停在 discussing。不补这一步，
+          // 用户说完「我认可修正版」后卡片会一直显示「正在聊这条」，直到手动刷新。
+          await refreshUntilDialogueCardsSettle();
           return;
         }
         window.setTimeout(poll, 1200);
@@ -5749,7 +6122,8 @@ ${cardFeedbackBarHtml()}`;
       const result = await requestJson(ENDPOINTS.refresh, { method: "POST" });
       if (result) {
         showToast("已请求后端开始补货");
-        await hydrateFromBackend();
+        // 用户手动点的刷新，是明确要求换掉当前列表。
+        await hydrateFromBackend({ replaceRecommendations: true });
       } else {
         showToast("刷新失败：请检查后端连接");
       }
@@ -6271,7 +6645,9 @@ ${cardFeedbackBarHtml()}`;
       if (!node) {
         node = document.createElement("p");
         node.className = "source-network-hint";
-        row.appendChild(node);
+        // The card face owns a dedicated slot so the hint lands under the
+        // status line instead of after the (collapsed) configuration body.
+        (row.querySelector(".source-card-hint-slot") || row).appendChild(node);
       }
       node.textContent = text;
     }
@@ -6377,7 +6753,9 @@ ${cardFeedbackBarHtml()}`;
     });
 
     function renderSourceCredentialRows(data) {
-      const list = $("#sourceCredentialList");
+      // Status and credentials now live on the same per-source card, so both
+      // renderers resolve their rows from one container.
+      const list = $("#sourceStatusList");
       if (!list) return;
       SOURCE_STATUS_KEYS.forEach((key) => {
         const row = list.querySelector(`[data-source-credential="${key}"]`);
@@ -6392,7 +6770,14 @@ ${cardFeedbackBarHtml()}`;
         row.dataset.available = view.available ? "true" : "false";
         row.dataset.formKind = view.form.kind;
         if (summary) summary.textContent = view.summary;
-        if (value) value.value = view.value;
+        if (value) {
+          value.value = view.value;
+          // The masked box used to sit inside a collapsed <details>; on the card
+          // it is always in view, so an empty preview — or one that just repeats
+          // the summary line above it — is noise rather than information.
+          const redundant = !view.value.trim() || view.value.trim() === view.summary.trim();
+          value.hidden = redundant;
+        }
       });
       // Not a display branch over the access enum: every other paste box gets
       // its "已保存/未保存" placeholder from the config snapshot in
@@ -6409,6 +6794,136 @@ ${cardFeedbackBarHtml()}`;
       state.sourceCredentials = data;
       renderSourceCredentialRows(data);
     }
+
+    // ---- 平台源卡片：展开/折叠、停用态、占比双向同步 ----------------------
+    const SOURCE_SHARE_INPUT_IDS = {
+      bilibili: "shareBilibili",
+      xiaohongshu: "shareXhs",
+      douyin: "shareDouyin",
+      youtube: "shareYoutube",
+      twitter: "shareTwitter",
+      zhihu: "shareZhihu",
+      reddit: "shareReddit",
+      bangumi: "shareBangumi"
+    };
+    const SOURCE_CARD_LABELS = {
+      bilibili: "Bilibili",
+      xiaohongshu: "小红书",
+      douyin: "抖音",
+      youtube: "YouTube",
+      twitter: "X (Twitter)",
+      zhihu: "知乎",
+      reddit: "Reddit",
+      bangumi: "Bangumi"
+    };
+
+    function sourceCardFor(key) {
+      return $("#sourceStatusList")?.querySelector(`[data-source-status="${key}"]`) || null;
+    }
+
+    function setSourceCardOpen(card, open) {
+      if (!card) return;
+      card.dataset.open = open ? "1" : "0";
+      card.querySelector(".source-card-face")?.setAttribute("aria-expanded", open ? "true" : "false");
+    }
+
+    // A card whose source is switched off keeps its inputs in the DOM (the save
+    // payload still reads them) but stops advertising them as actionable.
+    function syncSourceCardEnabledState() {
+      SOURCE_STATUS_KEYS.forEach((key) => {
+        const card = sourceCardFor(key);
+        if (!card) return;
+        const select = document.getElementById(SOURCE_ENABLE_SELECT_IDS[key]);
+        const on = select ? select.value === "on" : true;
+        card.dataset.sourceOff = on ? "false" : "true";
+        if (!on) setSourceCardOpen(card, false);
+      });
+    }
+
+    function renderShareOverview() {
+      const bar = $("#shareOverviewBar");
+      const legend = $("#shareOverviewLegend");
+      if (!bar || !legend) return;
+      const entries = SOURCE_STATUS_KEYS.map((key) => {
+        const input = document.getElementById(SOURCE_SHARE_INPUT_IDS[key]);
+        const select = document.getElementById(SOURCE_ENABLE_SELECT_IDS[key]);
+        return {
+          key,
+          label: SOURCE_CARD_LABELS[key] || key,
+          weight: Math.max(0, Number(input?.value) || 0),
+          enabled: select ? select.value === "on" : true
+        };
+      });
+      const active = entries.filter((item) => item.enabled && item.weight > 0);
+      const total = active.reduce((sum, item) => sum + item.weight, 0);
+      bar.textContent = "";
+      active.forEach((item) => {
+        const seg = document.createElement("i");
+        seg.dataset.sourceKey = item.key;
+        seg.style.width = `${(item.weight / total * 100).toFixed(2)}%`;
+        seg.title = `${item.label}：${item.weight} 份`;
+        bar.appendChild(seg);
+      });
+      bar.dataset.empty = active.length ? "false" : "true";
+      legend.textContent = "";
+      entries.forEach((item) => {
+        const cell = document.createElement("span");
+        cell.className = "share-overview-cell";
+        cell.dataset.sourceKey = item.key;
+        cell.dataset.off = item.enabled ? "false" : "true";
+        const swatch = document.createElement("em");
+        swatch.dataset.sourceKey = item.key;
+        const name = document.createElement("span");
+        name.textContent = item.label;
+        const value = document.createElement("b");
+        value.textContent = item.enabled
+          ? total > 0 && item.weight > 0 ? `${item.weight} · ${(item.weight / total * 100).toFixed(0)}%` : `${item.weight}`
+          : "停用";
+        cell.append(swatch, name, value);
+        legend.appendChild(cell);
+      });
+    }
+
+    function initSourceCards() {
+      const list = $("#sourceStatusList");
+      if (!list) return;
+
+      list.addEventListener("click", (event) => {
+        // Verify buttons keep their own handler; everything interactive inside
+        // the body must not toggle the card.
+        if (event.target.closest(".source-card-body, .source-card-right, .source-verify-btn")) return;
+        const face = event.target.closest(".source-card-face");
+        const card = face?.closest(".source-card");
+        if (!card || card.dataset.sourceOff === "true") return;
+        setSourceCardOpen(card, card.dataset.open !== "1");
+      });
+
+      list.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        const face = event.target.closest(".source-card-face");
+        if (!face || event.target !== face) return;
+        event.preventDefault();
+        const card = face.closest(".source-card");
+        if (!card || card.dataset.sourceOff === "true") return;
+        setSourceCardOpen(card, card.dataset.open !== "1");
+      });
+
+      list.addEventListener("change", (event) => {
+        if (event.target.matches(".source-card-enable select")) {
+          syncSourceCardEnabledState();
+          renderShareOverview();
+          renderSourcesStatusRows(state.sourceStatus);
+        }
+      });
+
+      list.addEventListener("input", (event) => {
+        if (event.target.closest(".source-card-share")) renderShareOverview();
+      });
+
+      syncSourceCardEnabledState();
+      renderShareOverview();
+    }
+    initSourceCards();
 
     // Login happens outside this page (user signs into a platform in another
     // tab), so a one-shot render on settings open goes stale — re-poll while
@@ -6510,12 +7025,13 @@ ${cardFeedbackBarHtml()}`;
       function activeHint(status) {
         if (!status) return "无法读取开机自启动状态。";
         if (!status.can_manage) return disabledHint(status);
+        if (!status.enabled && status.registered) return "检测到系统自启动残留项；关闭此开关即可清理，当前后端进程不受影响。";
         if (status.enabled) return enabledHint(status);
         return "已关闭：不会注册登录自启动；当前后端进程不受影响。";
       }
       function applyServerState() {
         const can = Boolean(current && current.can_manage);
-        checkbox.checked = Boolean(current && current.enabled);
+        checkbox.checked = Boolean(current && (current.enabled || current.registered));
         checkbox.disabled = busy || !can;
         setHint(activeHint(current));
       }
@@ -7146,8 +7662,8 @@ ${cardFeedbackBarHtml()}`;
       setInput("refreshCheckInterval", scheduler.refresh_check_interval_seconds);
       setInput("signalEventThreshold", scheduler.signal_event_threshold);
       setInput("feedbackBatchThreshold", scheduler.feedback_batch_threshold);
-      setInput("trendingRefreshHours", scheduler.trending_refresh_hours);
-      setInput("exploreRefreshHours", scheduler.explore_refresh_hours);
+      setInput("trendingRefreshMinutes", scheduler.trending_refresh_minutes);
+      setInput("exploreRefreshMinutes", scheduler.explore_refresh_minutes);
       setInput("discoveryLimit", scheduler.discovery_limit);
       setInput("proactivePushInterval", scheduler.proactive_push_interval_seconds);
       setInput("speculatorIdleInterval", scheduler.speculator_idle_interval_minutes);
@@ -7213,12 +7729,14 @@ ${cardFeedbackBarHtml()}`;
       setInput("biliBrowserExecutable", config.bilibili?.browser_executable);
       setSelect("biliBrowserHeaded", config.bilibili?.browser_headed === true ? "on" : "off");
       setSelect("bilibiliEnabled", config.sources?.bilibili?.enabled === false ? "off" : "on");
+      setInput("bilibiliMinInterval", config.sources?.bilibili?.min_interval_minutes);
       setInput("sourcesBrowserCdp", config.sources?.browser?.cdp_url);
       setSelect("sourcesBrowserHeaded", config.sources?.browser?.headed === true ? "on" : "off");
       setSelect("xhsEnabled", config.sources?.xiaohongshu?.enabled === true ? "on" : "off");
       setInput("xhsDailySearchBudget", config.sources?.xiaohongshu?.daily_search_budget);
       setInput("xhsDailyCreatorBudget", config.sources?.xiaohongshu?.daily_creator_budget);
       setInput("xhsTaskInterval", config.sources?.xiaohongshu?.task_interval_seconds);
+      setInput("xhsMinInterval", config.sources?.xiaohongshu?.min_interval_minutes);
       setSelect("douyinEnabled", config.sources?.douyin?.enabled === true ? "on" : "off");
       setCookieOverrideInput("douyinCookie", config.sources?.douyin?.cookie, "抖音");
       setInput("douyinCookieEnv", config.sources?.douyin?.cookie_env);
@@ -7226,6 +7744,7 @@ ${cardFeedbackBarHtml()}`;
       setInput("douyinDailyHotBudget", config.sources?.douyin?.daily_hot_budget);
       setInput("douyinDailyFeedBudget", config.sources?.douyin?.daily_feed_budget);
       setInput("douyinRequestInterval", config.sources?.douyin?.request_interval_seconds);
+      setInput("douyinMinInterval", config.sources?.douyin?.min_interval_minutes);
       setSelect("youtubeEnabled", config.sources?.youtube?.enabled === true ? "on" : "off");
       setInput("youtubeDailySearchBudget", config.sources?.youtube?.daily_search_budget);
       setInput("youtubeDailyTrendingBudget", config.sources?.youtube?.daily_trending_budget);
@@ -7294,6 +7813,11 @@ ${cardFeedbackBarHtml()}`;
         // empty field omits the username to keep the configured value.
         state.initBangumiUsernamePrefilled = true;
       }
+      // The enable selects and share weights were just repopulated from the
+      // snapshot, so the cards' collapsed/disabled state and the share bar have
+      // to be recomputed from the new values rather than the pre-apply ones.
+      syncSourceCardEnabledState();
+      renderShareOverview();
       if (!state.degraded) {
         void renderSourcesStatus();
         void renderSourceCredentials();
@@ -7311,6 +7835,9 @@ ${cardFeedbackBarHtml()}`;
       if ($("#configStatus")) $("#configStatus").value = "配置已从后端加载。";
       if (state.runtimeStatus) applyRuntimeStatus(state.runtimeStatus);
       restoreFrontendSettings();
+      // The form now mirrors the backend snapshot, so whatever was pending
+      // before this apply is no longer pending.
+      clearSettingsDirty();
     }
 
     function normalizeDelight(item) {
@@ -7924,7 +8451,7 @@ ${cardFeedbackBarHtml()}`;
         const socket = new WebSocket(getRuntimeStreamUrl());
         state.runtimeSocket = socket;
         socket.addEventListener("open", () => {
-          $("#statusLabel").textContent = "实时连接中";
+          $("#statusLabel").textContent = "实时连接正常";
           restartDesktopFailedRecoveries();
           // The page may load before the backend binds (frozen-entry launch
           // race): the boot hydrate then swallows every failure into nulls and
@@ -7940,17 +8467,35 @@ ${cardFeedbackBarHtml()}`;
           }
         });
         socket.addEventListener("message", (event) => {
-          try { handleRuntimeEvent(JSON.parse(event.data)); } catch {}
+          try {
+            const payload = JSON.parse(event.data);
+            if (payload?.type === "runtime.heartbeat") {
+              $("#statusLabel").textContent = "实时连接正常";
+              return;
+            }
+            handleRuntimeEvent(payload);
+          } catch {}
         });
-        socket.addEventListener("close", () => {
+        socket.addEventListener("close", (event) => {
           if (state.runtimeSocket === socket) {
             state.runtimeSocket = null;
+            $("#statusLabel").textContent = "实时流重连中";
+            console.info("runtime-stream closed; reconnect scheduled", {
+              code: event.code,
+              reason: event.reason || "",
+              clean: event.wasClean
+            });
             scheduleDesktopRuntimeReconnect();
           }
         });
-        socket.addEventListener("error", () => { $("#statusLabel").textContent = "实时流断开"; });
+        socket.addEventListener("error", () => {
+          if (state.runtimeSocket === socket) {
+            $("#statusLabel").textContent = "实时流重连中";
+          }
+        });
       } catch {
-        $("#statusLabel").textContent = "实时流不可用";
+        $("#statusLabel").textContent = "实时流重连中";
+        scheduleDesktopRuntimeReconnect();
       }
     }
 
@@ -7987,7 +8532,9 @@ ${cardFeedbackBarHtml()}`;
         await ensureAuthenticated();
         const stale = Date.now() - desktopLastHydratedAt >= DESKTOP_RESUME_HYDRATE_TTL_MS;
         if (forceHydrate || backendHydrationPending || !desktopLastHydratedAt || stale) {
-          await hydrateFromBackend();
+          // forceHydrate 只有首屏引导会传：那时列表本来就是空的。切回标签页触发的
+          // 再水合不带这个标志，列表原样保留。
+          await hydrateFromBackend({ replaceRecommendations: forceHydrate });
           desktopLastHydratedAt = Date.now();
           backendHydrationPending = false;
         }
@@ -8016,12 +8563,17 @@ ${cardFeedbackBarHtml()}`;
       }
     }
 
-    async function hydrateFromBackend() {
+    // replaceRecommendations 只留给「用户明确要求换一批列表」的调用方：首屏引导和
+    // 手动刷新。后台再水合（切回标签页、config_reloaded、保存配置、初始化完成）一律
+    // 保持 false —— /api/recommendations 只返回最新的 top 窗口，整表覆盖会把用户
+    // 滚动加载出来的卡片全部丢掉并按后端最新排序重排（群反馈的「重新排序」）。
+    // replace=false 时 applyDesktopRecommendationSnapshot 只在列表为空时装填。
+    async function hydrateFromBackend({ replaceRecommendations = false } = {}) {
       const firstRuntimeGeneration = desktopRuntimeGeneration;
       let runtimeReconciliationGeneration = null;
 
       function applyInitialRecommendations(items) {
-        applyDesktopRecommendationSnapshot(items, { replace: true });
+        applyDesktopRecommendationSnapshot(items, { replace: replaceRecommendations });
         renderFilters();
         renderVideos();
         scheduleAutoLoadCheck();
@@ -8216,8 +8768,8 @@ ${cardFeedbackBarHtml()}`;
         requestJson(ENDPOINTS.profile).then(applyProfileSnapshot),
         requestJson(ENDPOINTS.delightBatch).then(applyDelightSnapshot),
         requestJson(ENDPOINTS.notificationPending).then(applyNotificationSnapshot),
-        requestJson(`${ENDPOINTS.chatTurns}?session=webui&scope=chat&limit=20`).then(applyChatSnapshot),
-        requestJson(`${ENDPOINTS.chatTurns}?session=webui&scope=delight&limit=80`).then(applyDelightChatSnapshot),
+        requestJson(`${ENDPOINTS.chatTurns}?session=${encodeURIComponent(SHARED_CHAT_SESSION)}&scope=chat&limit=20`).then(applyChatSnapshot),
+        requestJson(`${ENDPOINTS.chatTurns}?session=${encodeURIComponent(SHARED_CHAT_SESSION)}&scope=delight&limit=80`).then(applyDelightChatSnapshot),
         requestJson(ENDPOINTS.config).then(applyConfigSnapshot),
         refreshPlatformAvailability(),
       ];
@@ -8232,9 +8784,12 @@ ${cardFeedbackBarHtml()}`;
       ]);
     }
 
-    function renderAll() {
+    // preserveVideos：跳过推荐网格这一步。给「高频后台事件顺手带起来的重绘」用，
+    // 它们只想刷新头部 / 库存 / 侧栏，不该碰用户正在浏览的列表。
+    function renderAll({ preserveVideos = false } = {}) {
       const steps = [renderFilters, renderVideos, syncSourceMetric, renderRail, renderProfileDetails, renderMessages, renderChat, renderPoolStatus];
       for (const step of steps) {
+        if (preserveVideos && step === renderVideos) continue;
         try { step(); } catch (error) { showFatal(error, step.name || "渲染"); }
       }
       scheduleActivityRailHeightSync();
@@ -8274,7 +8829,7 @@ ${cardFeedbackBarHtml()}`;
           ])
         ),
         concurrency: getIntInput("llmConcurrency", 4),
-        timeout: getIntInput("llmTimeout", 300),
+        timeout: getIntInput("llmTimeout", 1200),
         embedding: { ...(state.config?.llm?.embedding || {}), ...embedding }
       };
       return {
@@ -8293,13 +8848,15 @@ ${cardFeedbackBarHtml()}`;
             headed: $("#sourcesBrowserHeaded").value === "on"
           },
           bilibili: {
-            enabled: $("#bilibiliEnabled").value === "on"
+            enabled: $("#bilibiliEnabled").value === "on",
+            min_interval_minutes: getIntInput("bilibiliMinInterval", 3)
           },
           xiaohongshu: {
             enabled: $("#xhsEnabled").value === "on",
             daily_search_budget: getIntInput("xhsDailySearchBudget", 0),
             daily_creator_budget: getIntInput("xhsDailyCreatorBudget", 0),
-            task_interval_seconds: getIntInput("xhsTaskInterval", 45)
+            task_interval_seconds: getIntInput("xhsTaskInterval", 300),
+            min_interval_minutes: getIntInput("xhsMinInterval", 3)
           },
           douyin: {
             enabled: $("#douyinEnabled").value === "on",
@@ -8309,7 +8866,8 @@ ${cardFeedbackBarHtml()}`;
             daily_search_budget: getIntInput("douyinDailySearchBudget", 0),
             daily_hot_budget: getIntInput("douyinDailyHotBudget", 0),
             daily_feed_budget: getIntInput("douyinDailyFeedBudget", 0),
-            request_interval_seconds: getIntInput("douyinRequestInterval", 2)
+            request_interval_seconds: getIntInput("douyinRequestInterval", 2),
+            min_interval_minutes: getIntInput("douyinMinInterval", 3)
           },
           youtube: {
             enabled: $("#youtubeEnabled").value === "on",
@@ -8317,7 +8875,7 @@ ${cardFeedbackBarHtml()}`;
             daily_trending_budget: getIntInput("youtubeDailyTrendingBudget", 0),
             daily_channel_budget: getIntInput("youtubeDailyChannelBudget", 0),
             request_interval_seconds: getIntInput("youtubeRequestInterval", 2),
-            min_interval_minutes: getIntInput("youtubeMinInterval", 60)
+            min_interval_minutes: getIntInput("youtubeMinInterval", 3)
           },
           twitter: {
             enabled: $("#twitterEnabled").value === "on",
@@ -8328,7 +8886,7 @@ ${cardFeedbackBarHtml()}`;
             daily_feed_budget: getIntInput("twitterDailyFeedBudget", 0),
             daily_creator_budget: getIntInput("twitterDailyCreatorBudget", 0),
             request_interval_seconds: getIntInput("twitterRequestInterval", 3),
-            min_interval_minutes: getIntInput("twitterMinInterval", 60)
+            min_interval_minutes: getIntInput("twitterMinInterval", 3)
           },
           zhihu: {
             enabled: $("#zhihuEnabled").value === "on",
@@ -8339,7 +8897,7 @@ ${cardFeedbackBarHtml()}`;
             daily_creator_budget: getIntInput("zhihuDailyCreatorBudget", 0),
             daily_related_budget: getIntInput("zhihuDailyRelatedBudget", 0),
             request_interval_seconds: getIntInput("zhihuRequestInterval", 3),
-            min_interval_minutes: getIntInput("zhihuMinInterval", 60)
+            min_interval_minutes: getIntInput("zhihuMinInterval", 3)
           },
           reddit: {
             enabled: $("#redditEnabled").value === "on",
@@ -8351,7 +8909,7 @@ ${cardFeedbackBarHtml()}`;
             daily_subreddit_budget: getIntInput("redditDailySubredditBudget", 300),
             daily_related_budget: getIntInput("redditDailyRelatedBudget", 300),
             request_interval_seconds: getIntInput("redditRequestInterval", 3),
-            min_interval_minutes: getIntInput("redditMinInterval", 60)
+            min_interval_minutes: getIntInput("redditMinInterval", 3)
           },
           bangumi: {
             enabled: $("#bangumiEnabled").value === "on",
@@ -8372,7 +8930,7 @@ ${cardFeedbackBarHtml()}`;
             daily_ranked_budget: getIntInput("bangumiDailyRankedBudget", 100),
             daily_latest_budget: getIntInput("bangumiDailyLatestBudget", 100),
             request_interval_seconds: getIntInput("bangumiRequestInterval", 1),
-            min_interval_minutes: getIntInput("bangumiMinInterval", 60),
+            min_interval_minutes: getIntInput("bangumiMinInterval", 3),
             bootstrap_limit: getIntInput("bangumiBootstrapLimit", 300)
           }
         },
@@ -8385,8 +8943,8 @@ ${cardFeedbackBarHtml()}`;
           refresh_check_interval_seconds: getIntInput("refreshCheckInterval", 60),
           signal_event_threshold: getIntInput("signalEventThreshold", 6),
           feedback_batch_threshold: getIntInput("feedbackBatchThreshold", 3),
-          trending_refresh_hours: getIntInput("trendingRefreshHours", 3),
-          explore_refresh_hours: getIntInput("exploreRefreshHours", 12),
+          trending_refresh_minutes: getIntInput("trendingRefreshMinutes", 3),
+          explore_refresh_minutes: getIntInput("exploreRefreshMinutes", 3),
           discovery_limit: getIntInput("discoveryLimit", 30),
           delight_queue_limit: getDelightQueueLimit(),
           proactive_push_interval_seconds: getIntInput("proactivePushInterval", 120),
@@ -9015,6 +9573,23 @@ ${cardFeedbackBarHtml()}`;
     safeBind("#searchInput", "input", (event) => { state.query = event.target.value || ""; renderAll(); });
     safeBind("#searchForm", "submit", (event) => { event.preventDefault(); state.query = $("#searchInput")?.value || ""; renderAll(); });
     window.addEventListener("resize", scheduleActivityRailHeightSync);
+    safeBind("#desktopPendingToggle", "click", () => {
+      state.pendingConfirmations.expanded = !state.pendingConfirmations.expanded;
+      renderDesktopPendingConfirmations();
+      if (state.pendingConfirmations.expanded) void refreshDesktopPendingConfirmations();
+    });
+    $("#desktopPendingConfirmations")?.addEventListener("click", (event) => {
+      const button = event.target instanceof Element
+        ? event.target.closest("[data-confirmation-ref]")
+        : null;
+      if (button instanceof HTMLButtonElement) void handleDesktopPendingOpen(button);
+    });
+    $("#chatLog")?.addEventListener("click", (event) => {
+      const button = event.target instanceof Element
+        ? event.target.closest("[data-card-action]")
+        : null;
+      if (button instanceof HTMLButtonElement) void handleDesktopCardAction(button);
+    });
     safeBind("#chatForm", "submit", (event) => { event.preventDefault(); const input = $("#chatInput"); const text = input?.value?.trim() || ""; if (!text) return; input.value = ""; sendChat(text); });
     safeBind("#messageChatBackBtn", "click", returnToMessages);
     safeBind("#messageChatForm", "submit", (event) => {
@@ -9109,11 +9684,58 @@ ${cardFeedbackBarHtml()}`;
         if (shares.zhihu !== undefined) setInput("shareZhihu", shares.zhihu);
         if (shares.reddit !== undefined) setInput("shareReddit", shares.reddit);
         if (shares.bangumi !== undefined) setInput("shareBangumi", shares.bangumi);
+        renderShareOverview();
+        markSettingsDirty();
         showToast("已应用来源占比建议");
       } else {
         showToast("没有拿到占比建议");
       }
     });
+    // ---- 设置页吸底保存栏：未保存修改计数 --------------------------------
+    // Counts distinct touched fields, not events, so holding a key down or
+    // retyping the same input does not inflate the number.
+    const settingsDirtyFields = new Set();
+
+    function renderSettingsDirty() {
+      const bar = $("#settingsSaveBar");
+      const msg = $("#settingsSaveMsg");
+      const discard = $("#settingsDiscardBtn");
+      const count = settingsDirtyFields.size;
+      if (bar) bar.dataset.dirty = count > 0 ? "true" : "false";
+      if (msg) msg.textContent = count > 0 ? `已修改 ${count} 项，未保存` : "没有未保存的修改";
+      if (discard) discard.disabled = count === 0;
+    }
+
+    function markSettingsDirty(target) {
+      const el = target instanceof Element ? target : null;
+      settingsDirtyFields.add(el?.id || el?.name || `anon:${settingsDirtyFields.size}`);
+      renderSettingsDirty();
+    }
+
+    function clearSettingsDirty() {
+      settingsDirtyFields.clear();
+      renderSettingsDirty();
+    }
+
+    ["input", "change"].forEach((type) => {
+      $("#settingsForm")?.addEventListener(type, (event) => {
+        const el = event.target;
+        if (!(el instanceof Element)) return;
+        // Read-only status mirrors (配置状态 / 凭据脱敏预览) are written by the
+        // page itself and must never look like a user edit.
+        if (el.hasAttribute("readonly") || el.classList.contains("source-credential-value")) return;
+        markSettingsDirty(el);
+      });
+    });
+
+    safeBind("#settingsDiscardBtn", "click", () => {
+      if (!state.config) { clearSettingsDirty(); return; }
+      applyConfig(state.config);
+      restoreFrontendSettings(state.config);
+      clearSettingsDirty();
+      showToast("已放弃未保存的修改");
+    });
+
     safeBind("#settingsForm", "submit", async (event) => {
       event.preventDefault();
       const submitBtn = $("#settingsForm button[type='submit']");
@@ -9142,6 +9764,15 @@ ${cardFeedbackBarHtml()}`;
         void hydrateFromBackend();
         void refreshUpdateStatus();
       } catch (error) {
+        if (error?.code === "request_timeout") {
+          const pendingMessage = "保存请求仍可能在后台等待对话整理完成；期间后端功能可继续使用，完成后页面会自动收到热重载事件。";
+          if ($("#configStatus")) {
+            $("#configStatus").setAttribute("role", "status");
+            $("#configStatus").value = pendingMessage;
+          }
+          showToast("配置仍在后台安全热重载", { duration: 5200 });
+          return;
+        }
         const message = configErrorMessage(error.details) || error.message || "未知错误";
         if ($("#configStatus")) { $("#configStatus").setAttribute("role", "alert"); $("#configStatus").value = `保存失败：\n${message}`; }
         showToast("保存失败：请查看配置状态");
@@ -9179,6 +9810,8 @@ ${cardFeedbackBarHtml()}`;
     restoreBackendEndpoint();
     restoreFrontendSettings();
     setSideDrawerOpen(!isMobileViewport() && storageGet(SIDE_DRAWER_OPEN_KEY) !== "0", { persist: false });
+    initBackToTop();
+    startSharedChatSurfaceSync();
     startChatPlaceholderRotation();
     toastManager.init();
     setupThemeNotice();

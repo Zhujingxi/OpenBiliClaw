@@ -38,7 +38,7 @@ import logging
 import os
 import threading
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from openbiliclaw.network import outbound_cli_proxy_url
 
@@ -257,6 +257,10 @@ class XClient:
     def _raw_bookmarks(self, *, count: int) -> list[Tweet]:
         return list(self._client().fetch_bookmarks(count=count))
 
+    def _raw_me(self) -> Any:
+        """Read the authenticated account through twitter-cli's read-only API."""
+        return self._client().fetch_me()
+
     # -- public async API -------------------------------------------------
 
     async def search(self, query: str, *, limit: int, product: str = "Top") -> list[dict[str, Any]]:
@@ -292,9 +296,13 @@ class XClient:
         tweets = await self._run(self._raw_bookmarks, count=limit)
         return self._serialize(tweets, limit)
 
+    async def probe(self) -> Any:
+        """Run the read-only authenticated-account check used by source auth."""
+        return await self._run_value(self._raw_me)
+
     # -- plumbing ---------------------------------------------------------
 
-    async def _run(self, fn: Any, *args: Any, **kwargs: Any) -> list[Tweet]:
+    async def _run_value(self, fn: Any, *args: Any, **kwargs: Any) -> Any:
         """Run a sync seam off-thread, mapping twitter_cli errors to ours.
 
         ``XMissingCookieError`` propagates unchanged (raised before any import).
@@ -305,6 +313,9 @@ class XClient:
             raise
         except Exception as exc:  # noqa: BLE001 - normalize twitter_cli surface
             raise _map_exception(exc) from exc
+
+    async def _run(self, fn: Any, *args: Any, **kwargs: Any) -> list[Tweet]:
+        return cast("list[Any]", await self._run_value(fn, *args, **kwargs))
 
     @staticmethod
     def _serialize(tweets: list[Tweet], limit: int) -> list[dict[str, Any]]:

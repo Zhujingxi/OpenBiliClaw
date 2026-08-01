@@ -9,6 +9,7 @@ import pytest
 from openbiliclaw.discovery.strategies.douyin_direct import DouyinDirectStrategy
 from openbiliclaw.llm.base import LLMResponse
 from openbiliclaw.soul.profile import InterestTag, PreferenceLayer, SoulProfile
+from openbiliclaw.sources.douyin_plugin_search import DouyinBudgetExhausted
 
 
 @dataclass
@@ -322,3 +323,70 @@ async def test_strategy_seed_keywords_injected_to_search() -> None:
 
     assert client.keywords == ["露营装备测评", "和田玉鉴别教程"]
     assert strategy.last_intermediates["keywords"] == ["露营装备测评", "和田玉鉴别教程"]
+
+
+@pytest.mark.asyncio
+async def test_strategy_records_each_keyword_outcome_independently() -> None:
+    class OutcomeClient(_FakeDouyinClient):
+        last_search_outcome = "empty"
+
+        async def search_aweme(
+            self,
+            keyword: str,
+            *,
+            limit: int = 30,
+        ) -> list[dict[str, object]]:
+            self.last_search_outcome = "timeout" if keyword == "超时词" else "empty"
+            return []
+
+    strategy = DouyinDirectStrategy(
+        client=OutcomeClient(),
+        sources=("search",),
+        seed_keywords=("空词", "超时词"),
+        llm_evaluation=False,
+    )
+
+    await strategy.discover(_profile(), limit=10)
+
+    assert strategy.last_intermediates["keyword_outcomes"] == {
+        "空词": "empty",
+        "超时词": "timeout",
+    }
+    assert strategy.last_intermediates["source_outcomes"] == {"search": "timeout"}
+
+
+@pytest.mark.asyncio
+async def test_strategy_keeps_partial_search_and_hot_after_budget_exhaustion() -> None:
+    class PartialClient(_FakeDouyinClient):
+        last_search_outcome = "empty"
+
+        async def search_aweme(
+            self,
+            keyword: str,
+            *,
+            limit: int = 30,
+        ) -> list[dict[str, object]]:
+            if keyword == "预算词":
+                raise DouyinBudgetExhausted("budget")
+            self.last_search_outcome = "used"
+            return [{"aweme_id": "search-1", "desc": "已成功搜索"}]
+
+    strategy = DouyinDirectStrategy(
+        client=PartialClient(),
+        sources=("search", "hot"),
+        seed_keywords=("成功词", "预算词", "未执行词"),
+        llm_evaluation=False,
+    )
+
+    items = await strategy.discover(_profile(), limit=10)
+
+    assert [item.content_id for item in items] == ["search-1", "2"]
+    assert strategy.last_intermediates["keyword_outcomes"] == {
+        "成功词": "used",
+        "预算词": "budget_exhausted",
+        "未执行词": "budget_exhausted",
+    }
+    assert strategy.last_intermediates["source_outcomes"] == {
+        "search": "used",
+        "hot": "used",
+    }

@@ -17,6 +17,15 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TOTAL_LLM_CONCURRENCY = 4
 
+# How long an empty content pool may park maintenance traffic before it is
+# admitted anyway. Calibrated against the observed cost of the failure it
+# guards: with refill unable to run at all (all sources disabled), the profile
+# pipeline sat blocked indefinitely and produced no log line after startup.
+# 5 minutes is long enough that a normal refill burst (seconds to low minutes)
+# still gets its reserved slots first, and short enough that a stuck pool does
+# not silently freeze portrait updates for a whole session.
+MAINTENANCE_STARVATION_GRACE_SECONDS = 300.0
+
 
 def coerce_total_concurrency(value: object) -> int:
     """Normalize a positive total, preserving every explicit positive value."""
@@ -139,6 +148,8 @@ class RefillAdmissionSemaphore:
         self._inventory_state = InventoryPriorityState.HEALTHY
         self._waiters: list[tuple[int, int, LLMTrafficClass, asyncio.Future[None]]] = []
         self._counter = itertools.count()
+        self._starvation_relief = False
+        self._starvation_timer: asyncio.TimerHandle | None = None
 
     @property
     def capacity(self) -> int:
@@ -180,6 +191,7 @@ class RefillAdmissionSemaphore:
             (priority, next(self._counter), traffic, future),
         )
         self._increment_waiting(traffic)
+        self._arm_starvation_timer(traffic)
         self._drain_waiters()
         try:
             await asyncio.shield(future)
@@ -215,6 +227,60 @@ class RefillAdmissionSemaphore:
     def update_inventory(self, state: InventoryPriorityState) -> None:
         """Apply a canonical inventory state and reconsider parked waiters."""
         self._inventory_state = state
+        if state is not InventoryPriorityState.EMPTY:
+            # The pool recovered: drop the emergency relief and re-arm normal
+            # reservation semantics for the next empty spell.
+            self._starvation_relief = False
+            self._cancel_starvation_timer()
+        self._drain_waiters()
+
+    def _arm_starvation_timer(self, traffic: LLMTrafficClass) -> None:
+        """Bound how long an empty pool may park maintenance traffic.
+
+        An empty pool reserves slots for refill, which is correct while refill
+        is coming. When it never comes — every source disabled, or refill
+        failing persistently — maintenance used to stay parked forever. The
+        profile pipeline runs as ``soul.*`` (MAINTENANCE), so ordinary browsing
+        silently stopped updating the portrait, with nothing in the log beyond
+        a single "Background LLM work gate blocked" line. Maintenance cannot
+        refill the pool, so an unbounded park buys nothing.
+        """
+        if traffic is not LLMTrafficClass.MAINTENANCE:
+            return
+        if self._starvation_relief or self._starvation_timer is not None:
+            return
+        if self._inventory_state is not InventoryPriorityState.EMPTY:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._starvation_timer = loop.call_later(
+            MAINTENANCE_STARVATION_GRACE_SECONDS,
+            self._relieve_starvation,
+        )
+
+    def _cancel_starvation_timer(self) -> None:
+        if self._starvation_timer is not None:
+            self._starvation_timer.cancel()
+            self._starvation_timer = None
+
+    def _relieve_starvation(self) -> None:
+        """Admit parked maintenance after the grace period, loudly."""
+        self._starvation_timer = None
+        if self._inventory_state is not InventoryPriorityState.EMPTY:
+            return
+        if self._waiting_maintenance <= 0:
+            return
+        self._starvation_relief = True
+        logger.warning(
+            "LLM maintenance traffic parked %.0fs on an empty content pool with "
+            "no refill progress; admitting %d waiter(s) so profile updates are "
+            "not starved indefinitely. Check whether refill is failing "
+            "(sources disabled, credentials expired, or network blocked).",
+            MAINTENANCE_STARVATION_GRACE_SECONDS,
+            self._waiting_maintenance,
+        )
         self._drain_waiters()
 
     @asynccontextmanager
@@ -230,7 +296,7 @@ class RefillAdmissionSemaphore:
             return False
         if traffic is not LLMTrafficClass.MAINTENANCE:
             return True
-        if self._inventory_state is InventoryPriorityState.EMPTY:
+        if self._inventory_state is InventoryPriorityState.EMPTY and not self._starvation_relief:
             return False
         if self._waiting_refill > 0 and self._active_maintenance >= 1:  # noqa: SIM103
             return False

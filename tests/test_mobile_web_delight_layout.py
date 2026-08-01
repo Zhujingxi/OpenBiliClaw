@@ -24,7 +24,7 @@ def test_mobile_delight_tray_uses_featured_reason_wrap() -> None:
     assert 'class="delight-feature-copy"' in js
     assert 'class="delight-reason-label"' in js
     assert 'id="delight-later"' in js
-    assert "\\u7A0D\\u540E\\u770B" in js or "稍后看" in js
+    assert "\\u770B\\u8FC7\\u4E86\\uFF0C\\u4E0D\\u518D\\u63A8\\u8350" in js
     assert 'class="delight-result-state"' in js
 
     tray_block = _css_block(css, ".delight-tray")
@@ -98,3 +98,17 @@ def test_mobile_delight_status_and_actions_render_independently() -> None:
     assert "border-color: var(--accent)" in liked_block
     assert "background: color-mix" in liked_block
     assert "color: var(--accent-strong)" in liked_block
+
+
+def test_mobile_delight_close_is_accessible_and_persistently_marks_seen() -> None:
+    js = RECOMMEND_JS.read_text()
+    css = APP_CSS.read_text()
+
+    assert 'aria-label="\\u770B\\u8FC7\\u4E86\\uFF0C\\u4E0D\\u518D\\u63A8\\u8350"' in js
+    assert 'await respondToDelight(d.bvid, "dismiss", d.title)' in js
+    assert "skipDelightAt(idx);" in js
+
+    close_block = _css_block(css, ".delight-later-btn")
+    assert "width: 44px" in close_block
+    assert "height: 44px" in close_block
+    assert ".delight-later-btn:focus-visible" in css

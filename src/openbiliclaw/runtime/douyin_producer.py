@@ -18,6 +18,11 @@ from typing import Any
 from openbiliclaw.discovery.douyin import DouyinDiscoveryOptions, DouyinDiscoveryResult
 from openbiliclaw.runtime.keyword_fetch import PLATFORM_DOUYIN as _PLATFORM_DOUYIN
 from openbiliclaw.runtime.pool_gate import candidate_pool_full_for_source
+from openbiliclaw.runtime.producer_cadence import (
+    ledger_available,
+    producer_ran_within,
+    record_producer_run,
+)
 from openbiliclaw.sources.douyin_plugin_search import (
     DouyinBudgetExhausted as _DouyinBudgetExhausted,
 )
@@ -51,7 +56,7 @@ class DouyinDiscoveryProducer:
     soul_engine: Any
     discover: DouyinDiscoverCallable
     enabled: bool = True
-    min_interval_minutes: int = 15
+    min_interval_minutes: int = 3
     sources: tuple[str, ...] = ("search", "hot", "feed")
     # How many pending keywords to claim AND search per run. Must equal the
     # strategy's effective search count: the strategy truncates seed keywords to
@@ -68,11 +73,15 @@ class DouyinDiscoveryProducer:
     per_source_limit: int = 20
     # Unified keyword planner fetch coordinator (P1.7). When wired AND the flag
     # is on, the producer's search source claims words from the keyword store
-    # and walks them through the inline-admit lifecycle (used / failed /
-    # budget-rollback). ``None`` (default / tests / flag off) → legacy path.
+    # and walks each word through its own used / failed / transient-requeue /
+    # budget-rollback lifecycle. ``None`` (default / tests / flag off) → legacy path.
     keyword_fetch: Any | None = None
+    # Only used for the restart-surviving cadence floor; None falls back to
+    # the in-process stamp.
+    database: Any | None = None
     _last_run_at: datetime | None = field(default=None, init=False)
     _last_skip_reason: str = field(default="", init=False)
+    _non_search_rotation: int = field(default=0, init=False)
 
     async def produce_if_due(self, *, limit: int | None = None) -> dict[str, object]:
         """Run one Douyin discovery cycle if enabled and due."""
@@ -93,13 +102,6 @@ class DouyinDiscoveryProducer:
 
         requested_limit = max(1, int(limit or self.per_source_limit))
         selected_sources = self._sources_for_limit(requested_limit)
-        per_source_limit = max(
-            1,
-            min(
-                self.per_source_limit,
-                math.ceil(requested_limit / max(1, len(selected_sources))),
-            ),
-        )
         use_candidate_pipeline = self.candidate_pipeline is not None
 
         # Unified keyword planner fetch path (P1.7, flag-gated). Only when this
@@ -118,11 +120,16 @@ class DouyinDiscoveryProducer:
             # Claim exactly as many words as the strategy will search
             # (``keywords_per_run``) so none are burned unsearched.
             claimed = coordinator.claim(_PLATFORM_DOUYIN, n=self.keywords_per_run)
-            if not claimed:
-                # Flag on but the store has no claimable pending words → skip the
-                # search fetch this cycle (the planner will refill); don't run a
-                # legacy self-generated search behind the planner's back.
-                return self._skip("no_keywords")
+            # An empty unified store falls back to the strategy's profile-derived
+            # keywords. Independent hot/feed branches must keep running either way.
+
+        per_source_limit = max(
+            1,
+            min(
+                self.per_source_limit,
+                math.ceil(requested_limit / max(1, len(selected_sources))),
+            ),
+        )
 
         options = DouyinDiscoveryOptions(
             limit=requested_limit,
@@ -149,24 +156,26 @@ class DouyinDiscoveryProducer:
         except Exception as exc:
             logger.warning("douyin producer failed: %s", exc)
             if claimed and coordinator is not None:
-                coordinator.mark_failed(claimed)
+                self._requeue_claimed_transient(coordinator, claimed)
             return self._skip("error")
 
-        # Inline-admit lifecycle: a successful return that produced candidates
-        # marks every claimed word ``used``; an empty fetch marks them ``failed``
-        # (retry). yield backfill is P1.8, decoupled from ``used``.
         if claimed and coordinator is not None:
-            if result.items:
-                coordinator.mark_used(claimed)
-            else:
-                coordinator.mark_failed(claimed)
+            self._finalize_claimed_keywords(
+                coordinator,
+                claimed,
+                result.keyword_outcomes,
+            )
 
-        self._last_run_at = datetime.now(UTC)
+        self._stamp_run(len(result.items))
         payload: dict[str, object] = {
             "discovered": len(result.items),
             "source_counts": dict(result.source_counts),
-            "reason": "ok",
+            "reason": self._result_reason(result),
         }
+        if result.source_outcomes:
+            payload["source_outcomes"] = dict(result.source_outcomes)
+        if result.keyword_outcomes:
+            payload["keyword_outcomes"] = dict(result.keyword_outcomes)
         if self.candidate_pipeline is None:
             payload["cached"] = result.cached
             return payload
@@ -187,9 +196,23 @@ class DouyinDiscoveryProducer:
             payload.update(drain_result)
         return payload
 
+    def _stamp_run(self, discovered: int) -> None:
+        """Record this round on the cadence floor.
+
+        Productive rounds go to the shared ledger so the floor survives a
+        restart; the in-process stamp stays as the fallback for producers
+        constructed without a database.
+        """
+        record_producer_run(getattr(self, "database", None), "douyin", int(discovered))
+        self._last_run_at = datetime.now(UTC)
+
     def _is_due(self) -> bool:
         if self.min_interval_minutes <= 0:
             return True
+        database = getattr(self, "database", None)
+        if ledger_available(database):
+            # Restart-surviving floor keyed on the last *productive* round.
+            return not producer_ran_within(database, "douyin", self.min_interval_minutes)
         if self._last_run_at is None:
             return True
         return datetime.now(UTC) - self._last_run_at >= timedelta(minutes=self.min_interval_minutes)
@@ -197,9 +220,15 @@ class DouyinDiscoveryProducer:
     def _sources_for_limit(self, requested_limit: int) -> tuple[str, ...]:
         configured = tuple(source for source in self.sources if str(source).strip())
         if requested_limit >= 10:
-            prioritized = tuple(source for source in ("search", "hot") if source in configured)
-            if prioritized:
-                return prioritized
+            selected: list[str] = []
+            if "search" in configured:
+                selected.append("search")
+            non_search = tuple(source for source in ("hot", "feed") if source in configured)
+            if non_search:
+                selected.append(non_search[self._non_search_rotation % len(non_search)])
+                self._non_search_rotation += 1
+            if selected:
+                return tuple(selected)
             return configured[:1] or ("search",)
 
         preferred: tuple[str, ...] = ("feed",) if requested_limit <= 3 else ("hot", "feed")
@@ -207,15 +236,60 @@ class DouyinDiscoveryProducer:
         if preferred_configured:
             return preferred_configured
 
-        non_search = tuple(source for source in configured if source != "search")
-        if non_search:
-            return non_search[:1]
+        configured_non_search = tuple(source for source in configured if source != "search")
+        if configured_non_search:
+            return configured_non_search[:1]
         return configured[:1] or ("search",)
 
     def _candidate_pool_full(self) -> bool:
         return candidate_pool_full_for_source(
             self.candidate_pipeline, "douyin", logger=logger, label="douyin producer"
         )
+
+    @staticmethod
+    def _finalize_claimed_keywords(
+        coordinator: Any,
+        claimed: list[Any],
+        outcomes: dict[str, str],
+    ) -> None:
+        for item in claimed:
+            outcome = str(outcomes.get(str(item.keyword), "") or "").strip().lower()
+            if outcome == "used":
+                coordinator.mark_used([item])
+            elif outcome == "empty":
+                coordinator.mark_failed([item])
+            elif outcome in {"timeout", "failed"}:
+                requeue = getattr(coordinator, "requeue_transient", None)
+                if callable(requeue):
+                    requeue(item)
+                else:
+                    coordinator.rollback(item)
+            else:
+                # Budget rejection and missing outcome both mean the word was not
+                # proven delivered. Keep it claimable instead of burning it.
+                coordinator.rollback(item)
+
+    @staticmethod
+    def _requeue_claimed_transient(coordinator: Any, claimed: list[Any]) -> None:
+        requeue = getattr(coordinator, "requeue_transient", None)
+        for item in claimed:
+            if callable(requeue):
+                requeue(item)
+            else:
+                coordinator.rollback(item)
+
+    @staticmethod
+    def _result_reason(result: DouyinDiscoveryResult) -> str:
+        if result.items:
+            return "ok"
+        outcomes = set(result.source_outcomes.values())
+        if outcomes and outcomes <= {"budget_exhausted"}:
+            return "budget_exhausted"
+        if "timeout" in outcomes:
+            return "timeout"
+        if "failed" in outcomes:
+            return "error"
+        return "empty"
 
     def _stamp_candidate_score_thresholds(self, items: list[Any]) -> None:
         for item in items:
@@ -249,6 +323,7 @@ def build_douyin_discovery_producer(
     discovery_engine: Any,
     candidate_pipeline: Any | None = None,
     keyword_fetch: Any | None = None,
+    enabled_override: bool | None = None,
 ) -> DouyinDiscoveryProducer | None:
     """Build the runtime Douyin producer if Douyin discovery is enabled."""
     dy_cfg = getattr(getattr(config, "sources", None), "douyin", None)
@@ -305,11 +380,18 @@ def build_douyin_discovery_producer(
             return await service.discover(profile, options)
 
     scheduler = getattr(config, "scheduler", None)
+    dy_cfg = getattr(getattr(config, "sources", None), "douyin", None)
+    producer_enabled = (
+        bool(getattr(scheduler, "enabled", True))
+        if enabled_override is None
+        else bool(enabled_override)
+    )
     return DouyinDiscoveryProducer(
         soul_engine=soul_engine,
         discover=_discover,
-        enabled=bool(getattr(scheduler, "enabled", True)),
-        min_interval_minutes=15,
+        enabled=producer_enabled,
+        min_interval_minutes=int(getattr(dy_cfg, "min_interval_minutes", 3)),
+        database=database,
         sources=("search", "hot", "feed"),
         candidate_pipeline=candidate_pipeline,
         per_source_limit=20,

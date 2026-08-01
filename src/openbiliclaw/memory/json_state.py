@@ -126,3 +126,16 @@ def update_json_state(
         next_state = state if result is None else result
         _atomic_write_json(path, serialize(next_state))
         return next_state
+
+
+def read_json_state(
+    path: Path,
+    *,
+    default_factory: Callable[[], T],
+    normalize: Callable[[Any], T],
+) -> T:
+    """Read one normalized JSON state under the same locks as its writers."""
+    path = Path(path)
+    with _process_lock(path), _file_lock(path):
+        raw = _read_json(path)
+        return default_factory() if raw is _MISSING else normalize(raw)

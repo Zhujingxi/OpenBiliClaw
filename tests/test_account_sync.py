@@ -137,6 +137,27 @@ def _favorite_folder_with_items(folder_id: int, *bvids: str) -> FavoriteFolderWi
     )
 
 
+def test_account_sync_drops_dead_favorites_and_keeps_reach() -> None:
+    """失效视频不是信号；播放量 / 发布时间是判断冷门偏好的依据，别丢。"""
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    service = AccountSyncService(
+        memory_manager=_FakeMemoryManager(),
+        bilibili_client=_FakeClient(history_items=[], favorites=[], following=[]),
+        soul_engine=_FakeSoulEngine(),
+    )
+    folder = _favorite_folder_with_items(1, "BVALIVE")
+    folder.items[0].update({"cnt_info": {"play": 812}, "pubtime": 1_780_000_000, "duration": 300})
+    folder.items.append({"bvid": "BVDEAD", "title": "已失效视频", "attr": 1, "upper": {}})
+
+    events = service._favorite_events([folder])
+
+    assert [event["metadata"]["bvid"] for event in events] == ["BVALIVE"]
+    assert events[0]["metadata"]["play_count"] == 812
+    assert events[0]["metadata"]["pubtime"] == 1_780_000_000
+    assert events[0]["metadata"]["video_duration_seconds"] == 300
+
+
 def test_account_sync_event_builders_include_signal_strength() -> None:
     from openbiliclaw.runtime.account_sync import AccountSyncService
 
@@ -299,6 +320,92 @@ async def test_account_sync_imports_only_new_favorites_when_signature_changes() 
     assert soul.calls and len(soul.calls[0]) == 1
     assert memory.state["favorite_bvids"] == ["BVNEW", "BVOLD"]
     assert memory.state["favorite_signature"] == "7:BVNEW,BVOLD"
+
+
+class _SeenLedgerSpy:
+    """Minimal Database stand-in for the seen-ledger contract."""
+
+    def __init__(self) -> None:
+        self.marked: list[tuple[str, list[str]]] = []
+        self.seen: set[str] = set()
+
+    def recent_event_urls(self, event_types: list[str], **kwargs: Any) -> set[str]:
+        return set()
+
+    def mark_items_seen(self, source_platform: str, content_ids: Any) -> int:
+        ids = [str(value) for value in content_ids]
+        self.marked.append((source_platform, ids))
+        added = [item for item in ids if item not in self.seen]
+        self.seen.update(added)
+        return len(added)
+
+
+@pytest.mark.asyncio
+async def test_account_sync_marks_the_whole_favorites_snapshot_as_seen() -> None:
+    """收藏夹里的旧内容不会再变成事件，只能靠快照进去重账本。
+
+    只有「新增」收藏才产出事件，所以装 OpenBiliClaw 之前收藏的、以及旧版本收藏
+    事件没带身份的那些，永远不会进 seen_items——用户明确存过的视频会被当新内容推回。
+    """
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    memory = _FakeMemoryManager(
+        {
+            "last_history_view_at": 0,
+            "last_history_bvid": "",
+            "last_favorites_sync_at": "2026-03-14T12:00:00",
+            "favorite_signature": "7:BVOLD",
+            "favorite_bvids": ["BVOLD"],
+            "last_following_sync_at": "",
+            "following_signature": "",
+            "last_account_sync_at": "",
+            "last_sync_error": "",
+        }
+    )
+    database = _SeenLedgerSpy()
+    service = AccountSyncService(
+        memory_manager=memory,
+        bilibili_client=_FakeClient(
+            history_items=[],
+            favorites=[_favorite_folder_with_items(7, "BVNEW", "BVOLD")],
+            following=[],
+        ),
+        soul_engine=_FakeSoulEngine(),
+        database=database,
+    )
+
+    await service.sync_now()
+
+    assert database.marked, "每轮同步都要用完整收藏快照回补去重账本"
+    platform, marked = database.marked[0]
+    assert platform == "bilibili"
+    assert sorted(marked) == ["BVNEW", "BVOLD"], "旧收藏不产出事件，只能靠快照补进去"
+    # 事件仍然只认新增的那条，快照标记不会重复计入偏好信号。
+    assert [event["metadata"]["bvid"] for event in memory.events] == ["BVNEW"]
+
+
+@pytest.mark.asyncio
+async def test_account_sync_survives_a_seen_ledger_failure() -> None:
+    from openbiliclaw.runtime.account_sync import AccountSyncService
+
+    class _BrokenLedger(_SeenLedgerSpy):
+        def mark_items_seen(self, source_platform: str, content_ids: Any) -> int:
+            raise RuntimeError("ledger down")
+
+    service = AccountSyncService(
+        memory_manager=_FakeMemoryManager(),
+        bilibili_client=_FakeClient(
+            history_items=[],
+            favorites=[_favorite_folder_with_items(7, "BVNEW")],
+            following=[],
+        ),
+        soul_engine=_FakeSoulEngine(),
+        database=_BrokenLedger(),
+    )
+
+    result = await service.sync_now()
+
+    assert result["synced"] is True, "去重账本写失败不该拖垮整轮同步"
 
 
 @pytest.mark.asyncio
@@ -1999,9 +2106,11 @@ async def test_account_sync_favorites_budget_passes_max_total_items() -> None:
 
     await service.sync_now()
 
+    # 每文件夹上限与总预算一致（与 init 同口径）：50 时一个 800 条的默认收藏夹
+    # 有 750 条永远进不了去重账本，而 max_total_items 已经兜住了请求量。
     assert client.favorites_call_kwargs == {
         "max_folders": 200,
-        "max_items_per_folder": 50,
+        "max_items_per_folder": 500,
         "max_total_items": 500,
     }
 

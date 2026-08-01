@@ -162,6 +162,8 @@ class PreferenceAnalyzer:
         existing_preference: dict[str, object],
         event_chunk_size: int = 0,
         progress_callback: ProgressCallback | None = None,
+        awareness_notes: list[dict[str, object]] | None = None,
+        active_insights: list[dict[str, object]] | None = None,
     ) -> dict[str, object]:
         """Run structured extraction and merge the result with existing preference state.
 
@@ -182,11 +184,15 @@ class PreferenceAnalyzer:
                 existing_preference=existing_preference,
                 chunk_size=event_chunk_size,
                 progress_callback=progress_callback,
+                awareness_notes=awareness_notes,
+                active_insights=active_insights,
             )
 
         whole_batch_prompt = build_preference_analysis_prompt(
             events=events,
             existing_preference=existing_preference,
+            awareness_notes=awareness_notes,
+            active_insights=active_insights,
         )
         prompt_chars = self._prompt_char_count(whole_batch_prompt)
         should_chunk_by_budget = self.max_prompt_chars > 0 and prompt_chars > self.max_prompt_chars
@@ -204,10 +210,14 @@ class PreferenceAnalyzer:
                 existing_preference=existing_preference,
                 chunk_size=initial_chunk_size,
                 progress_callback=progress_callback,
+                awareness_notes=awareness_notes,
+                active_insights=active_insights,
             )
         result = await self._analyze_events_single(
             events=events,
             existing_preference=existing_preference,
+            awareness_notes=awareness_notes,
+            active_insights=active_insights,
         )
         # Un-chunked path has a single natural completion point.
         await self._emit_progress(progress_callback, 1, 1)
@@ -262,10 +272,14 @@ class PreferenceAnalyzer:
         *,
         events: list[dict[str, object]],
         existing_preference: dict[str, object],
+        awareness_notes: list[dict[str, object]] | None = None,
+        active_insights: list[dict[str, object]] | None = None,
     ) -> dict[str, object]:
         messages = build_preference_analysis_prompt(
             events=events,
             existing_preference=existing_preference,
+            awareness_notes=awareness_notes,
+            active_insights=active_insights,
         )
         try:
             response = await self._complete_cacheable_preference_task(
@@ -424,6 +438,8 @@ class PreferenceAnalyzer:
         existing_preference: dict[str, object],
         chunk_size: int,
         progress_callback: ProgressCallback | None = None,
+        awareness_notes: list[dict[str, object]] | None = None,
+        active_insights: list[dict[str, object]] | None = None,
     ) -> dict[str, object]:
         """Split events into bounded concurrent chunk batches, then fold."""
         import asyncio as _asyncio
@@ -449,6 +465,8 @@ class PreferenceAnalyzer:
             messages = build_preference_analysis_prompt(
                 events=chunk,
                 existing_preference={},
+                awareness_notes=awareness_notes,
+                active_insights=active_insights,
             )
             response: LLMResponse | None = None
             max_tokens = PREFERENCE_CHUNK_MAX_TOKENS
@@ -532,6 +550,8 @@ class PreferenceAnalyzer:
             safe_messages = build_preference_analysis_prompt(
                 events=[safe_event],
                 existing_preference={},
+                awareness_notes=awareness_notes,
+                active_insights=active_insights,
             )
             if not self._prompt_fits_budget(safe_messages):
                 logger.warning(
@@ -563,6 +583,8 @@ class PreferenceAnalyzer:
                 compact_messages = build_preference_analysis_prompt(
                     events=[compact],
                     existing_preference={},
+                    awareness_notes=awareness_notes,
+                    active_insights=active_insights,
                 )
                 if not self._prompt_fits_budget(compact_messages):
                     logger.warning(
@@ -588,7 +610,12 @@ class PreferenceAnalyzer:
         async def _run_chunk_resilient(
             chunk: list[dict[str, object]],
         ) -> list[tuple[dict[str, object], dict[str, object]]]:
-            messages = build_preference_analysis_prompt(events=chunk, existing_preference={})
+            messages = build_preference_analysis_prompt(
+                events=chunk,
+                existing_preference={},
+                awareness_notes=awareness_notes,
+                active_insights=active_insights,
+            )
             if not self._prompt_fits_budget(messages):
                 return await _split_or_compact_chunk(chunk)
             try:
@@ -779,37 +806,87 @@ class PreferenceAnalyzer:
         self,
         raw_preferences: Iterable[dict[str, object]],
     ) -> dict[str, object]:
-        awareness: list[dict[str, object]] = []
-        insights: list[dict[str, object]] = []
-        seen_awareness: set[str] = set()
-        seen_insights: set[str] = set()
+        """Merge per-chunk cognition drafts, giving every chunk a turn.
+
+        Chunks are ``events[i:i+N]`` over a newest-first fetch, so walking them
+        in order and stopping at the cap handed the whole quota to the most
+        recent one or two chunks — an account's earlier periods contributed
+        nothing at all. Round-robin instead: take one candidate from each chunk
+        per pass, so a 90-day history is represented across its span, and a
+        chunk that produced little simply drops out of later passes rather than
+        wasting its share.
+        """
+        per_chunk_awareness: list[list[dict[str, object]]] = []
+        per_chunk_insights: list[list[dict[str, object]]] = []
         for raw in raw_preferences:
             context = self._extract_init_cognition_context(raw)
-            for item in self._as_list(context.get("awareness")):
-                if not isinstance(item, dict):
-                    continue
-                key = self._normalize_context_text(str(item.get("observation", "")))
-                if not key or key in seen_awareness:
-                    continue
-                seen_awareness.add(key)
-                awareness.append(item)
-                if len(awareness) >= _INIT_AWARENESS_CANDIDATES_CAP:
+            per_chunk_awareness.append(
+                [item for item in self._as_list(context.get("awareness")) if isinstance(item, dict)]
+            )
+            per_chunk_insights.append(
+                [item for item in self._as_list(context.get("insights")) if isinstance(item, dict)]
+            )
+
+        def _alternate_ends(
+            groups: list[list[dict[str, object]]],
+        ) -> list[list[dict[str, object]]]:
+            """Newest, oldest, next-newest, next-oldest, ...
+
+            Plain round-robin still favours recent behaviour when the chunks
+            themselves are lopsided: a binge of 400 short videos owns most of
+            the chunks, so the first ``cap`` chunks visited are all binge and
+            the early periods never get a turn. Walking in from both ends of the
+            timeline guarantees the oldest chunks are reached within the budget.
+            """
+            ordered: list[list[dict[str, object]]] = []
+            low, high = 0, len(groups) - 1
+            while low <= high:
+                ordered.append(groups[low])
+                if low != high:
+                    ordered.append(groups[high])
+                low += 1
+                high -= 1
+            return ordered
+
+        def _round_robin(
+            groups: list[list[dict[str, object]]],
+            *,
+            key_field: str,
+            cap: int,
+        ) -> list[dict[str, object]]:
+            groups = _alternate_ends(groups)
+            picked: list[dict[str, object]] = []
+            seen: set[str] = set()
+            cursors = [0] * len(groups)
+            while len(picked) < cap:
+                progressed = False
+                for index, group in enumerate(groups):
+                    if len(picked) >= cap:
+                        break
+                    while cursors[index] < len(group):
+                        item = group[cursors[index]]
+                        cursors[index] += 1
+                        key = self._normalize_context_text(str(item.get(key_field, "")))
+                        if not key or key in seen:
+                            continue
+                        seen.add(key)
+                        picked.append(item)
+                        progressed = True
+                        break
+                if not progressed:
                     break
-            for item in self._as_list(context.get("insights")):
-                if not isinstance(item, dict):
-                    continue
-                key = self._normalize_context_text(str(item.get("hypothesis", "")))
-                if not key or key in seen_insights:
-                    continue
-                seen_insights.add(key)
-                insights.append(item)
-                if len(insights) >= _INIT_INSIGHT_CANDIDATES_CAP:
-                    break
-            if (
-                len(awareness) >= _INIT_AWARENESS_CANDIDATES_CAP
-                and len(insights) >= _INIT_INSIGHT_CANDIDATES_CAP
-            ):
-                break
+            return picked
+
+        awareness = _round_robin(
+            per_chunk_awareness,
+            key_field="observation",
+            cap=_INIT_AWARENESS_CANDIDATES_CAP,
+        )
+        insights = _round_robin(
+            per_chunk_insights,
+            key_field="hypothesis",
+            cap=_INIT_INSIGHT_CANDIDATES_CAP,
+        )
         result: dict[str, object] = {}
         if awareness:
             result["awareness"] = awareness

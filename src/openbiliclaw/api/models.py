@@ -676,7 +676,8 @@ class SourceStatusItem(BaseModel):
       does not prove that it currently works.
     - ``login_required`` / ``error`` — a local command credential is missing,
       or its saved credential file is invalid.
-    - ``expired`` / ``rate_limited`` / ``blocked`` — X live-health states.
+    - ``expired`` / ``blocked`` — X live-health states.
+    - ``rate_limited`` — X live-health or XHS persisted safety cooldown.
     - ``no_auth``    — source needs no login (YouTube, public).
     - ``disabled``   — source switched off in config (Bangumi only, and only
       until it moves onto ``auth``, where scheduling and credential state are
@@ -698,6 +699,8 @@ class SourceStatusItem(BaseModel):
     state: str = "missing"
     detail: str = ""
     logged_in: bool = False
+    # Discovery sub-feed/task execution is circuit-broken independently of the
+    # login verdict (currently X For-You and XHS platform safety cooldown).
     feed_paused: bool = False
     # ``None`` means "this source has no auth contract", the honest answer for a
     # backend older than the contract — not a missing value to be defaulted away
@@ -1764,6 +1767,7 @@ class ChatTurnIn(BaseModel):
     scope: str = "chat"
     subject_id: str = ""
     subject_title: str = ""
+    payload: dict[str, object] = Field(default_factory=dict)
 
 
 class ChatTurnOut(BaseModel):
@@ -1778,6 +1782,7 @@ class ChatTurnOut(BaseModel):
     reply: str = ""
     status: str = "pending"
     error: str = ""
+    payload: dict[str, object] = Field(default_factory=dict)
     created_at: str = ""
     updated_at: str = ""
 
@@ -1842,7 +1847,7 @@ class LLMConfigOut(BaseModel):
     routes: dict[str, ModuleLLMConfigOut] = Field(default_factory=dict)
     default_provider: str = "deepseek"
     concurrency: int = 4
-    timeout: int = 300
+    timeout: int = 1200
     # Non-empty fallback_provider = chat fallback on (the legacy
     # fallback_enabled bool was never consulted and is no longer echoed;
     # old clients still sending it are ignored on PUT).
@@ -1883,13 +1888,15 @@ class SourcesBrowserConfigOut(BaseModel):
 
 class BilibiliSourceConfigOut(BaseModel):
     enabled: bool = True
+    min_interval_minutes: int = 3
 
 
 class XiaohongshuSourceConfigOut(BaseModel):
     enabled: bool = False
     daily_search_budget: int = 0
     daily_creator_budget: int = 0
-    task_interval_seconds: int = 45
+    task_interval_seconds: int = 300
+    min_interval_minutes: int = 3
 
 
 class DouyinSourceConfigOut(BaseModel):
@@ -1904,6 +1911,7 @@ class DouyinSourceConfigOut(BaseModel):
     daily_hot_budget: int = 0
     daily_feed_budget: int = 0
     request_interval_seconds: int = 2
+    min_interval_minutes: int = 3
 
 
 class YoutubeSourceConfigOut(BaseModel):
@@ -1912,7 +1920,7 @@ class YoutubeSourceConfigOut(BaseModel):
     daily_trending_budget: int = 0
     daily_channel_budget: int = 0
     request_interval_seconds: int = 2
-    min_interval_minutes: int = 60
+    min_interval_minutes: int = 3
 
 
 class TwitterSourceConfigOut(BaseModel):
@@ -1927,7 +1935,7 @@ class TwitterSourceConfigOut(BaseModel):
     daily_feed_budget: int = 0
     daily_creator_budget: int = 0
     request_interval_seconds: int = 3
-    min_interval_minutes: int = 60
+    min_interval_minutes: int = 3
 
 
 class ZhihuSourceConfigOut(BaseModel):
@@ -1941,7 +1949,7 @@ class ZhihuSourceConfigOut(BaseModel):
     daily_creator_budget: int = 0
     daily_related_budget: int = 0
     request_interval_seconds: int = 3
-    min_interval_minutes: int = 60
+    min_interval_minutes: int = 3
 
 
 class RedditSourceConfigOut(BaseModel):
@@ -1955,7 +1963,7 @@ class RedditSourceConfigOut(BaseModel):
     daily_subreddit_budget: int = 300
     daily_related_budget: int = 300
     request_interval_seconds: int = 3
-    min_interval_minutes: int = 60
+    min_interval_minutes: int = 3
 
 
 class BangumiSourceConfigOut(BaseModel):
@@ -1971,7 +1979,7 @@ class BangumiSourceConfigOut(BaseModel):
     daily_ranked_budget: int = 100
     daily_latest_budget: int = 100
     request_interval_seconds: int = 1
-    min_interval_minutes: int = 60
+    min_interval_minutes: int = 3
     bootstrap_limit: int = 300
 
 
@@ -1998,8 +2006,8 @@ class SchedulerConfigOut(BaseModel):
     refresh_check_interval_seconds: int = 60
     signal_event_threshold: int = 6
     feedback_batch_threshold: int = 3
-    trending_refresh_hours: int = 3
-    explore_refresh_hours: int = 12
+    trending_refresh_minutes: int = 3
+    explore_refresh_minutes: int = 3
     discovery_limit: int = 30
     delight_queue_limit: int = 20
     proactive_push_interval_seconds: int = 120

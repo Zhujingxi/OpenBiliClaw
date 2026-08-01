@@ -77,7 +77,7 @@ class OpenAIProvider(LLMProvider):
         base_url: str = "",
         provider_name: str = "openai",
         token_provider: Callable[[bool], Awaitable[str]] | None = None,
-        timeout: float = 300.0,
+        timeout: float = 1200.0,
         embedding_output_dimensionality: int = 0,
         api_flavor: str = "",
         proxy: str = "",
@@ -194,6 +194,30 @@ class OpenAIProvider(LLMProvider):
                     kwargs["response_format"].get("type", "?"),
                 )
                 kwargs.pop("response_format")
+                response = await self._request_with_retry(**kwargs)
+                choice = response.choices[0]
+                content = choice.message.content or ""
+            if (
+                not content.strip()
+                and self._provider_name == "openai_compatible"
+                and reasoning_effort is not None
+                and not effective_reasoning_effort
+                and self._reasoning_like_content(getattr(choice, "message", None))
+            ):
+                # Generic OpenAI-compatible gateways do not share one
+                # portable switch for disabling thinking. Omitting
+                # ``reasoning_effort`` is wire-compatible, but some DeepSeek
+                # relays interpret omission as "use the model default" and
+                # can spend the whole output budget on reasoning. Only after
+                # observing that exact failure for an explicit no-reasoning
+                # call, retry once with DeepSeek's disable body.
+                logger.warning(
+                    "%s ignored explicit no-reasoning request; retrying with thinking disabled",
+                    self._provider_name,
+                )
+                retry_extra_body = dict(kwargs.get("extra_body") or {})
+                retry_extra_body["thinking"] = {"type": "disabled"}
+                kwargs["extra_body"] = retry_extra_body
                 response = await self._request_with_retry(**kwargs)
                 choice = response.choices[0]
                 content = choice.message.content or ""
@@ -751,7 +775,7 @@ class DeepSeekProvider(OpenAIProvider):
         *,
         base_url: str = "https://api.deepseek.com",
         reasoning_effort: str = DEFAULT_REASONING_EFFORT,
-        timeout: float = 300.0,
+        timeout: float = 1200.0,
         proxy: str = "",
         trust_env: bool = True,
     ) -> None:

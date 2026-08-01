@@ -155,6 +155,7 @@ def _merge_dy_result_payload(
     videos: list[dict[str, Any]] | None = None,
     scope_counts: dict[str, Any] | None = None,
     debug: dict[str, Any] | None = None,
+    completion_status: str | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Merge a partial result into the current row.
 
@@ -220,6 +221,15 @@ def _merge_dy_result_payload(
         if isinstance(debug, dict):
             merged_debug.update(debug)
         merged["debug"] = merged_debug
+
+    # A partial update must never erase a terminal semantic status that was
+    # already persisted in result_json.  The queue rejects late terminal-row
+    # updates below, but preserving the field here keeps the pure merge helper
+    # safe for callers that merge an in-flight snapshot carrying status
+    # metadata.
+    preserved_status = completion_status or current.get("status")
+    if isinstance(preserved_status, str) and preserved_status.strip():
+        merged["status"] = preserved_status.strip()
 
     return merged, added
 
@@ -513,6 +523,7 @@ class DyTaskQueue:
         videos: list[dict[str, Any]] | None = None,
         scope_counts: dict[str, Any] | None = None,
         debug: dict[str, Any] | None = None,
+        completion_status: str | None = None,
         complete: bool = False,
     ) -> list[dict[str, Any]]:
         """Merge a partial/final result and optionally mark complete.
@@ -520,37 +531,63 @@ class DyTaskQueue:
         Returns only the videos newly added by this merge so the caller
         can propagate exactly those to the soul pipeline (avoids
         duplicate events when the executor re-sends overlapping batches).
-        """
-        row = self.get(task_id)
-        current: dict[str, Any] = {}
-        if row and row.get("result_json"):
-            try:
-                parsed = json.loads(str(row["result_json"]))
-                if isinstance(parsed, dict):
-                    current = parsed
-            except json.JSONDecodeError:
-                current = {}
 
-        merged, added = _merge_dy_result_payload(
-            current,
-            videos=videos,
-            scope_counts=scope_counts,
-            debug=debug,
-        )
-        result = json.dumps(merged, ensure_ascii=False)
-        if complete:
-            self._db.conn.execute(
-                "UPDATE dy_tasks SET status = 'completed', result_json = ?, "
-                "completed_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (result, task_id),
+        Completed/failed rows are immutable.  Extension callbacks can arrive
+        out of order (for example a final ``degraded`` followed by an older
+        ``partial``); those callbacks are idempotently ignored so they cannot
+        erase the final result status or propagate late events.
+        """
+        conn = self._db.open_connection()
+        try:
+            # Serialize the read/merge/write transition across API workers.  A
+            # status check before this transaction is only an optimization:
+            # without the lock, a final callback could commit between that
+            # check and a late partial's write.
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT status, result_json FROM dy_tasks WHERE id = ?",
+                (task_id,),
+            ).fetchone()
+            if row is None or str(row["status"]) in {"completed", "failed"}:
+                conn.commit()
+                return []
+
+            current: dict[str, Any] = {}
+            if row["result_json"]:
+                try:
+                    parsed = json.loads(str(row["result_json"]))
+                    if isinstance(parsed, dict):
+                        current = parsed
+                except json.JSONDecodeError:
+                    current = {}
+
+            merged, added = _merge_dy_result_payload(
+                current,
+                videos=videos,
+                scope_counts=scope_counts,
+                debug=debug,
+                completion_status=completion_status,
             )
-        else:
-            self._db.conn.execute(
-                "UPDATE dy_tasks SET result_json = ? WHERE id = ?",
-                (result, task_id),
-            )
-        self._db.conn.commit()
-        return added
+            result = json.dumps(merged, ensure_ascii=False)
+            if complete:
+                conn.execute(
+                    "UPDATE dy_tasks SET status = 'completed', result_json = ?, "
+                    "completed_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (result, task_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE dy_tasks SET result_json = ? WHERE id = ?",
+                    (result, task_id),
+                )
+            conn.commit()
+            return added
+        except Exception:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def fail(
         self,
@@ -559,13 +596,15 @@ class DyTaskQueue:
         error: str = "",
         debug: dict[str, Any] | None = None,
     ) -> None:
+        """Mark an active task failed without overwriting a terminal result."""
         result_payload: dict[str, Any] = {"error": error}
         if debug is not None:
             result_payload["debug"] = debug
         result = json.dumps(result_payload, ensure_ascii=False)
         self._db.conn.execute(
             "UPDATE dy_tasks SET status = 'failed', result_json = ?, "
-            "completed_at = CURRENT_TIMESTAMP WHERE id = ?",
+            "completed_at = CURRENT_TIMESTAMP "
+            "WHERE id = ? AND status NOT IN ('completed', 'failed')",
             (result, task_id),
         )
         self._db.conn.commit()

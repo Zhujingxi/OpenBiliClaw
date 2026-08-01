@@ -845,8 +845,8 @@ async def test_refresh_controller_falls_back_to_full_plan_when_below_target() ->
         discovery_engine=_FakeDiscoveryEngine(),
         recommendation_engine=_FakeRecommendationEngine(),
         pool_target_count=30,
-        trending_refresh_hours=999,
-        explore_refresh_hours=999,
+        trending_refresh_minutes=999,
+        explore_refresh_minutes=999,
     )
 
     result = await controller.refresh_if_needed()
@@ -875,8 +875,8 @@ async def test_refresh_controller_publishes_refresh_lifecycle_events() -> None:
         recommendation_engine=_FakeRecommendationEngine(),
         event_hub=event_hub,
         pool_target_count=30,
-        trending_refresh_hours=999,
-        explore_refresh_hours=999,
+        trending_refresh_minutes=999,
+        explore_refresh_minutes=999,
     )
 
     await controller.refresh_if_needed()
@@ -907,8 +907,8 @@ async def test_refresh_controller_backfills_pool_copy_after_replenishment() -> N
         discovery_engine=_FakeDiscoveryEngine(),
         recommendation_engine=recommendations,
         pool_target_count=30,
-        trending_refresh_hours=999,
-        explore_refresh_hours=999,
+        trending_refresh_minutes=999,
+        explore_refresh_minutes=999,
     )
 
     await controller.refresh_if_needed()
@@ -954,8 +954,8 @@ async def test_refresh_controller_detaches_embedding_prewarm_from_refresh_comple
         discovery_engine=_FakeDiscoveryEngine(),
         recommendation_engine=recommendations,
         pool_target_count=30,
-        trending_refresh_hours=999,
-        explore_refresh_hours=999,
+        trending_refresh_minutes=999,
+        explore_refresh_minutes=999,
     )
 
     try:
@@ -1239,8 +1239,8 @@ async def test_refresh_controller_reports_zero_replenishment_without_false_posit
         recommendation_engine=_FakeRecommendationEngine(),
         event_hub=event_hub,
         pool_target_count=30,
-        trending_refresh_hours=999,
-        explore_refresh_hours=999,
+        trending_refresh_minutes=999,
+        explore_refresh_minutes=999,
     )
 
     await controller.force_refresh()
@@ -1277,8 +1277,8 @@ async def test_refresh_controller_tracks_discovered_count_when_net_pool_does_not
         discovery_engine=_FakeDiscoveryEngine(),
         recommendation_engine=_FakeRecommendationEngine(),
         pool_target_count=30,
-        trending_refresh_hours=999,
-        explore_refresh_hours=999,
+        trending_refresh_minutes=999,
+        explore_refresh_minutes=999,
     )
 
     await controller.force_refresh()
@@ -1312,8 +1312,8 @@ async def test_refresh_controller_skips_when_pool_at_cap() -> None:
         discovery_engine=discovery,
         recommendation_engine=recommendations,
         pool_target_count=30,
-        trending_refresh_hours=999,
-        explore_refresh_hours=999,
+        trending_refresh_minutes=999,
+        explore_refresh_minutes=999,
     )
 
     result = await controller.refresh_if_needed()
@@ -1349,8 +1349,8 @@ async def test_force_refresh_runs_even_when_threshold_not_met() -> None:
         discovery_engine=discovery,
         recommendation_engine=recommendations,
         pool_target_count=30,
-        trending_refresh_hours=999,
-        explore_refresh_hours=999,
+        trending_refresh_minutes=999,
+        explore_refresh_minutes=999,
     )
 
     result = await controller.force_refresh()
@@ -1455,8 +1455,8 @@ async def test_refresh_controller_requests_discovery_with_backfill_limit() -> No
         discovery_engine=discovery,
         recommendation_engine=_FakeRecommendationEngine(),
         pool_target_count=30,
-        trending_refresh_hours=999,
-        explore_refresh_hours=999,
+        trending_refresh_minutes=999,
+        explore_refresh_minutes=999,
     )
 
     await controller.refresh_if_needed()
@@ -2222,8 +2222,8 @@ async def test_refresh_controller_caps_single_discovery_backfill_request() -> No
         discovery_engine=discovery,
         recommendation_engine=_FakeRecommendationEngine(),
         pool_target_count=300,
-        trending_refresh_hours=999,
-        explore_refresh_hours=999,
+        trending_refresh_minutes=999,
+        explore_refresh_minutes=999,
     )
 
     await controller.refresh_if_needed()
@@ -2279,8 +2279,8 @@ async def test_refresh_controller_pool_aware_limit_scales_with_gap() -> None:
             discovery_engine=discovery,
             recommendation_engine=_FakeRecommendationEngine(),
             pool_target_count=pool_target,
-            trending_refresh_hours=999,
-            explore_refresh_hours=999,
+            trending_refresh_minutes=999,
+            explore_refresh_minutes=999,
         )
 
     # Tiny gap: 95/100, gap=5 → above low-watermark; don't spend discovery LLM.
@@ -2368,8 +2368,8 @@ async def test_refresh_controller_replenishes_until_pool_reaches_target() -> Non
         discovery_engine=discovery,
         recommendation_engine=_FakeRecommendationEngine(),
         pool_target_count=30,
-        trending_refresh_hours=999,
-        explore_refresh_hours=999,
+        trending_refresh_minutes=999,
+        explore_refresh_minutes=999,
     )
 
     result = await controller.refresh_if_needed()
@@ -2408,8 +2408,8 @@ async def test_refresh_controller_prioritizes_underfilled_sources() -> None:
         pool_target_count=30,
         pool_source_shares=_MULTI_SOURCE_SHARES,
         discovery_limit=4,
-        trending_refresh_hours=999,
-        explore_refresh_hours=999,
+        trending_refresh_minutes=999,
+        explore_refresh_minutes=999,
     )
 
     result = await controller.refresh_if_needed()
@@ -2450,8 +2450,8 @@ async def test_refresh_controller_skips_bilibili_when_only_small_sources_underfi
         pool_target_count=30,
         pool_source_shares=_MULTI_SOURCE_SHARES,
         discovery_limit=4,
-        trending_refresh_hours=999,
-        explore_refresh_hours=999,
+        trending_refresh_minutes=999,
+        explore_refresh_minutes=999,
     )
 
     result = await controller.refresh_if_needed()
@@ -2478,8 +2478,8 @@ async def test_trigger_manual_refresh_sets_running_state() -> None:
         discovery_engine=SlowDiscovery(),
         recommendation_engine=_FakeRecommendationEngine(),
         pool_target_count=30,
-        trending_refresh_hours=999,
-        explore_refresh_hours=999,
+        trending_refresh_minutes=999,
+        explore_refresh_minutes=999,
     )
 
     result = await controller.trigger_manual_refresh()
@@ -3425,7 +3425,7 @@ def test_keyword_planner_explore_due_soon_requires_bili_deficit() -> None:
         discovery_engine=_FakeDiscoveryEngine(),
         recommendation_engine=_FakeRecommendationEngine(),
         pool_target_count=300,
-        explore_refresh_hours=12,
+        explore_refresh_minutes=12,
         check_interval_seconds=60,
     )
 
@@ -3443,7 +3443,7 @@ def test_keyword_planner_explore_due_soon_requires_bili_deficit() -> None:
         discovery_engine=_FakeDiscoveryEngine(),
         recommendation_engine=_FakeRecommendationEngine(),
         pool_target_count=300,
-        explore_refresh_hours=12,
+        explore_refresh_minutes=12,
         check_interval_seconds=60,
     )
 
@@ -4848,8 +4848,8 @@ async def test_force_refresh_consumes_queued_replenishment_reasons() -> None:
         discovery_engine=_FakeDiscoveryEngine(),
         recommendation_engine=_FakeRecommendationEngine(),
         pool_target_count=30,
-        trending_refresh_hours=999,
-        explore_refresh_hours=999,
+        trending_refresh_minutes=999,
+        explore_refresh_minutes=999,
     )
 
     await controller.refresh_after_event_ingest()
@@ -4870,8 +4870,8 @@ async def test_refresh_after_init_triggers_replenishment_now() -> None:
         discovery_engine=_FakeDiscoveryEngine(),
         recommendation_engine=_FakeRecommendationEngine(),
         pool_target_count=30,
-        trending_refresh_hours=999,
-        explore_refresh_hours=999,
+        trending_refresh_minutes=999,
+        explore_refresh_minutes=999,
     )
 
     result = await controller.refresh_after_init()

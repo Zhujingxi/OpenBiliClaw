@@ -31,6 +31,7 @@ import httpx
 
 import openbiliclaw
 from openbiliclaw.docker_runtime import is_running_in_container
+from openbiliclaw.proc import no_window_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -1340,6 +1341,7 @@ class AutoUpdateService:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 env=env,
+                **no_window_kwargs(),
             )
         else:
             proc = await asyncio.create_subprocess_exec(
@@ -1347,6 +1349,7 @@ class AutoUpdateService:
                 cwd=root,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                **no_window_kwargs(),
             )
         try:
             stdout_data, stderr_data = await asyncio.wait_for(proc.communicate(), timeout=timeout)

@@ -28,7 +28,7 @@ class OpenRouterProvider(OpenAIProvider):
         base_url: str = "https://openrouter.ai/api/v1",
         http_referer: str = "",
         x_title: str = "",
-        timeout: float = 300.0,
+        timeout: float = 1200.0,
         proxy: str = "",
         trust_env: bool = True,
         reasoning_effort: str = DEFAULT_REASONING_EFFORT,

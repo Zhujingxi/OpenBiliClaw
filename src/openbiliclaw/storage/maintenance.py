@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
+from openbiliclaw.proc import no_window_kwargs
+
 _BACKUP_NAME_PREFIX = "openbiliclaw-"
 _BACKUP_TIMESTAMP_FORMAT = "%Y%m%d-%H%M%S"
 _RETENTION_DAYS = 7
@@ -223,6 +225,7 @@ def list_database_holders(db_path: Path) -> list[str]:
             check=False,
             capture_output=True,
             text=True,
+            **no_window_kwargs(),
         )
     except FileNotFoundError:
         return []
@@ -249,6 +252,7 @@ def recover_database_sql(db_path: Path) -> str | None:
             check=False,
             capture_output=True,
             text=True,
+            **no_window_kwargs(),
         )
     except FileNotFoundError:
         return None

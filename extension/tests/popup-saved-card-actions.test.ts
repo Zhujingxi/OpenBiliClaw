@@ -134,7 +134,7 @@ test("saved-card like dislike and comment use content events, never recommendati
   const behaviorApiSource = sourceBetween(
     popupApiSource,
     "export async function sendBehaviorEvents(",
-    "\n/**\n * Confirm or reject",
+    "\n/**\n * Report a click-through",
   );
 
   assert.match(postSavedFeedbackSource, /sendBehaviorEvents\(\[\{/);

@@ -147,4 +147,10 @@ async def test_service_can_run_without_cache_for_debug() -> None:
         "dy-direct-hot": 1,
         "dy-direct-feed": 1,
     }
+    assert result.keyword_outcomes == {"猫咪": "used"}
+    assert result.source_outcomes == {
+        "search": "used",
+        "hot": "used",
+        "feed": "used",
+    }
     assert [item.content_id for item in result.items] == ["1", "2", "4"]

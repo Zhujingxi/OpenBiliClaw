@@ -403,45 +403,7 @@ type FetchLike = (
   init?: RequestInit,
 ) => Promise<Response>;
 
-// TEMP DIAGNOSTIC (2026-05-08): post every observed /aweme*/ URL back
-// so we can see what Douyin actually fetches. Rate-limited to avoid
-// flooding the daemon log relay.
-const URL_PROBE_TYPE = "OPENBILICLAW_DOUYIN_URL_PROBE";
-const SEC_UID_DETECTED_TYPE = "OPENBILICLAW_DOUYIN_SEC_UID";
 const SEARCH_TAP_MESSAGE_TYPE = "OPENBILICLAW_DOUYIN_SEARCH_PAGE";
-let _probeCount = 0;
-let _detectedSecUid = "";
-function probeUrl(transport: "fetch" | "xhr", url: string): void {
-  if (!url) return;
-  if (!url.includes("/aweme") && !url.includes("/user/")) return;
-  if (_probeCount < 60) {
-    _probeCount += 1;
-    try {
-      window.postMessage(
-        { type: URL_PROBE_TYPE, transport, url, classified: classifyDouyinResponseUrl(url) },
-        window.location.origin,
-      );
-    } catch {
-      // best effort
-    }
-  }
-  // Whenever we see a sec_user_id in the URL, broadcast it. The
-  // isolated-world content script needs sec_uid to drive the
-  // API-driven scope harvester; we can't get it from /user/self
-  // (Douyin doesn't redirect that to the canonical sec_uid path).
-  const m = url.match(/[?&]sec_user_id=(MS4w[\w-]+)/);
-  if (m && m[1] && m[1] !== _detectedSecUid) {
-    _detectedSecUid = m[1];
-    try {
-      window.postMessage(
-        { type: SEC_UID_DETECTED_TYPE, secUid: m[1] },
-        window.location.origin,
-      );
-    } catch {
-      // best effort
-    }
-  }
-}
 
 function isSearchResponseUrl(url: string): boolean {
   if (!url) return false;
@@ -533,7 +495,6 @@ export function installFetchTap(
         : input instanceof URL
           ? input.toString()
           : (input as Request).url;
-    probeUrl("fetch", url);
     const resp = await originalFetch(input, init);
     const scope = classifyDouyinResponseUrl(url);
     if (scope) {
@@ -607,7 +568,6 @@ export function installXhrTap(
   ) {
     const urlString = typeof url === "string" ? url : url.toString();
     (this as unknown as { __obcUrl?: string }).__obcUrl = urlString;
-    probeUrl("xhr", urlString);
     this.addEventListener("readystatechange", () => {
       if (this.readyState !== 4) return;
       const u = (this as unknown as { __obcUrl?: string }).__obcUrl ?? urlString;
@@ -700,6 +660,8 @@ function replayInstallStatusPing(status: "installed" | "skipped_no_sdk"): void {
 
 const API_REQUEST_TYPE = "OPENBILICLAW_DOUYIN_API_REQUEST";
 const API_RESPONSE_TYPE = "OPENBILICLAW_DOUYIN_API_RESPONSE";
+const IDENTITY_REQUEST_TYPE = "OPENBILICLAW_DOUYIN_IDENTITY_REQUEST";
+const IDENTITY_RESPONSE_TYPE = "OPENBILICLAW_DOUYIN_IDENTITY_RESPONSE";
 const SEARCH_API_REQUEST_TYPE = "OPENBILICLAW_DOUYIN_SEARCH_API_REQUEST";
 const SEARCH_API_RESPONSE_TYPE = "OPENBILICLAW_DOUYIN_SEARCH_API_RESPONSE";
 const HOT_API_REQUEST_TYPE = "OPENBILICLAW_DOUYIN_HOT_API_REQUEST";
@@ -717,7 +679,7 @@ const SCOPE_ENDPOINT: Record<DouyinScope, string> = {
 function buildScopeApiUrl(
   scope: DouyinScope,
   secUid: string,
-  cursor: number,
+  cursor: string,
 ): string {
   const params = new URLSearchParams({
     device_platform: "webapp",
@@ -749,6 +711,7 @@ function buildScopeApiUrl(
 interface ScopeApiResult {
   items: DouyinBootstrapItem[];
   pages_fetched: number;
+  error?: string;
 }
 
 interface SearchApiResult {
@@ -756,20 +719,108 @@ interface SearchApiResult {
   pages_fetched: number;
 }
 
-async function harvestScopeViaApi(
+const SCOPE_API_MAX_PAGES = 50;
+const SCOPE_API_PAGE_DELAY_MS = 300;
+
+function normalizeScopeHasMore(value: unknown): boolean | null {
+  if (typeof value === "boolean") return value;
+  if (value === 0 || value === "0") return false;
+  if (value === 1 || value === "1") return true;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "0" || normalized === "false") return false;
+    if (normalized === "1" || normalized === "true") return true;
+  }
+  return null;
+}
+
+function scopeApiStatusError(root: Record<string, unknown>): string {
+  if (!Object.prototype.hasOwnProperty.call(root, "status_code")) return "";
+  const raw = root.status_code;
+  let normalized: string | null = null;
+  if (typeof raw === "number" && Number.isSafeInteger(raw)) {
+    normalized = String(raw);
+  } else if (typeof raw === "string" && /^-?\d+$/.test(raw.trim())) {
+    const trimmed = raw.trim();
+    normalized = /^-?0+$/.test(trimmed)
+      ? "0"
+      : trimmed.replace(/^(-?)0+(?=\d)/, "$1");
+  }
+  if (normalized === "0") return "";
+  return normalized === null ? "api_status_invalid" : `api_status_${normalized}`;
+}
+
+function normalizeScopeCursor(value: unknown): string | null {
+  if (typeof value === "number") {
+    if (!Number.isSafeInteger(value) || value < 0) return null;
+    return String(value);
+  }
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!/^\d+$/.test(trimmed)) return null;
+  return trimmed.replace(/^0+(?=\d)/, "");
+}
+
+function scopeCursorFields(scope: DouyinScope): readonly string[] {
+  // source_type=1 follow responses traditionally advance via min_time.
+  // Some page builds instead expose the same continuation as max_time or
+  // cursor, so accept those aliases without weakening validation.
+  return scope === "dy_follow"
+    ? ["min_time", "max_time", "cursor"]
+    : ["max_cursor", "cursor"];
+}
+
+function pickNextScopeCursor(
+  root: Record<string, unknown>,
+  scope: DouyinScope,
+  currentCursor: string,
+  requestedCursors: ReadonlySet<string>,
+): { cursor?: string; error?: string } {
+  let present = false;
+  let valid = false;
+  let repeatedCurrent = false;
+  let repeatedEarlier = false;
+
+  for (const field of scopeCursorFields(scope)) {
+    if (!Object.prototype.hasOwnProperty.call(root, field)) continue;
+    present = true;
+    const candidate = normalizeScopeCursor(root[field]);
+    if (candidate === null) continue;
+    valid = true;
+    if (candidate === currentCursor) {
+      repeatedCurrent = true;
+      continue;
+    }
+    if (requestedCursors.has(candidate)) {
+      repeatedEarlier = true;
+      continue;
+    }
+    return { cursor: candidate };
+  }
+
+  if (!present) return { error: "pagination_cursor_missing" };
+  if (!valid) return { error: "pagination_cursor_invalid" };
+  if (repeatedCurrent) return { error: "pagination_cursor_not_advanced" };
+  if (repeatedEarlier) return { error: "pagination_cursor_cycle" };
+  return { error: "pagination_cursor_invalid" };
+}
+
+export async function harvestScopeViaApi(
   target: Window,
   scope: DouyinScope,
   secUid: string,
   maxItems: number,
+  pageDelayMs: number = SCOPE_API_PAGE_DELAY_MS,
 ): Promise<ScopeApiResult> {
   const w = target as unknown as { fetch: FetchLike };
   const items: DouyinBootstrapItem[] = [];
   const seen = new Set<string>();
-  let cursor = 0;
+  let cursor = "0";
+  const requestedCursors = new Set<string>([cursor]);
   let pages = 0;
+  let error = "";
   const cap = Math.max(0, Math.floor(maxItems));
-  const MAX_PAGES = 50; // safety
-  for (let page = 0; page < MAX_PAGES && items.length < cap; page += 1) {
+  for (let page = 0; page < SCOPE_API_MAX_PAGES && items.length < cap; page += 1) {
     const url = buildScopeApiUrl(scope, secUid, cursor);
     let json: unknown;
     try {
@@ -778,9 +829,20 @@ async function harvestScopeViaApi(
       json = (await resp.json()) as unknown;
     } catch (err) {
       if (page === 0) throw err;
+      error = String(err instanceof Error ? err.message : err);
       break;
     }
     pages += 1;
+    if (!json || typeof json !== "object" || Array.isArray(json)) {
+      error = "api_response_invalid";
+      break;
+    }
+    const root = json as Record<string, unknown>;
+    const statusError = scopeApiStatusError(root);
+    if (statusError) {
+      error = statusError;
+      break;
+    }
     const batch =
       scope === "dy_follow"
         ? parseUserFollowListResponse(json)
@@ -792,18 +854,97 @@ async function harvestScopeViaApi(
       items.push(item);
       if (items.length >= cap) break;
     }
-    const root = json as Record<string, unknown>;
-    const hasMore = Boolean(root.has_more);
-    if (!hasMore) break;
-    const nextCursor =
-      scope === "dy_follow"
-        ? (typeof root.min_time === "number" ? root.min_time : 0)
-        : (typeof root.max_cursor === "number" ? root.max_cursor : 0);
-    if (!nextCursor || nextCursor === cursor) break;
-    cursor = nextCursor;
-    await new Promise((r) => setTimeout(r, 300));
+    if (!Object.prototype.hasOwnProperty.call(root, "has_more")) {
+      error = "pagination_has_more_missing";
+      break;
+    }
+    const hasMore = normalizeScopeHasMore(root.has_more);
+    if (hasMore === null) {
+      error = "pagination_has_more_invalid";
+      break;
+    }
+    if (!hasMore || items.length >= cap) break;
+    if (page + 1 >= SCOPE_API_MAX_PAGES) {
+      error = "pagination_page_limit_reached";
+      break;
+    }
+
+    const next = pickNextScopeCursor(root, scope, cursor, requestedCursors);
+    if (!next.cursor) {
+      error = next.error ?? "pagination_cursor_invalid";
+      break;
+    }
+    cursor = next.cursor;
+    requestedCursors.add(cursor);
+    if (pageDelayMs > 0) {
+      await new Promise((r) => setTimeout(r, pageDelayMs));
+    }
   }
-  return { items, pages_fetched: pages };
+  return {
+    items,
+    pages_fetched: pages,
+    ...(error ? { error } : {}),
+  };
+}
+
+/**
+ * Extract the account-scoped identifier from the verified
+ * ``/aweme/v1/web/user/profile/self/`` response.
+ *
+ * The status-code check is deliberate: guest sessions can still return HTTP
+ * 200, but Douyin answers them with ``status_code=8``. Only the authoritative
+ * success shape is accepted as the current account identity.
+ */
+export function extractDouyinSelfSecUid(payload: unknown): string {
+  if (!payload || typeof payload !== "object") return "";
+  const root = payload as Record<string, unknown>;
+  if (root.status_code !== 0) return "";
+  const user = root.user;
+  if (!user || typeof user !== "object") return "";
+  const record = user as Record<string, unknown>;
+  const value = record.sec_uid ?? record.secUid;
+  return typeof value === "string" ? value.trim() : "";
+}
+
+/**
+ * Resolve the current account identity through the page's MAIN-world fetch.
+ * This is the same read-only endpoint used by the backend login probe, but
+ * running here preserves the browser's live cookie and signing context.
+ */
+export async function fetchDouyinSelfSecUid(target: Window): Promise<string> {
+  const w = target as unknown as { fetch: FetchLike };
+  const url = `${target.location.origin}/aweme/v1/web/user/profile/self/`;
+  const resp = await w.fetch(url, { credentials: "include" });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  return extractDouyinSelfSecUid((await resp.json()) as unknown);
+}
+
+type DouyinIdentityWindow = Window & {
+  __openbiliclawDouyinSelfSecUid?: string;
+  __openbiliclawDouyinSelfSecUidPromise?: Promise<string>;
+};
+
+async function resolveDouyinSelfSecUid(target: Window): Promise<string> {
+  const shared = target as DouyinIdentityWindow;
+  if (shared.__openbiliclawDouyinSelfSecUid) {
+    return shared.__openbiliclawDouyinSelfSecUid;
+  }
+  if (shared.__openbiliclawDouyinSelfSecUidPromise) {
+    return await shared.__openbiliclawDouyinSelfSecUidPromise;
+  }
+
+  const pending = fetchDouyinSelfSecUid(target).then((secUid) => {
+    if (secUid) shared.__openbiliclawDouyinSelfSecUid = secUid;
+    return secUid;
+  });
+  shared.__openbiliclawDouyinSelfSecUidPromise = pending;
+  try {
+    return await pending;
+  } finally {
+    if (shared.__openbiliclawDouyinSelfSecUidPromise === pending) {
+      delete shared.__openbiliclawDouyinSelfSecUidPromise;
+    }
+  }
 }
 
 function pickCookieValue(cookieHeader: string, name: string): string {
@@ -1088,8 +1229,23 @@ async function harvestFeedViaApi(target: Window, maxItems: number): Promise<Sear
   };
 }
 
+/**
+ * Filter bridge traffic to this page's Window and origin.
+ *
+ * This only reduces accidental cross-frame/page message handling. It is not
+ * an authorization boundary because any same-page script can post a matching
+ * message; request shape and correlation checks remain mandatory below.
+ */
+export function isSameWindowSameOriginApiRequest(
+  event: MessageEvent,
+  target: Window,
+): boolean {
+  return event.source === target && event.origin === target.location.origin;
+}
+
 export function installApiHarvester(target: Window): void {
   target.addEventListener("message", (event: MessageEvent) => {
+    if (!isSameWindowSameOriginApiRequest(event, target)) return;
     const data = (event?.data ?? null) as Record<string, unknown> | null;
     if (!data || typeof data !== "object") return;
     if (data.type === SEARCH_API_REQUEST_TYPE) {
@@ -1193,6 +1349,35 @@ export function installApiHarvester(target: Window): void {
       })();
       return;
     }
+    if (data.type === IDENTITY_REQUEST_TYPE) {
+      const requestId = String(data.requestId ?? "");
+      if (!requestId) return;
+      void (async () => {
+        try {
+          const secUid = await resolveDouyinSelfSecUid(target);
+          target.postMessage(
+            {
+              type: IDENTITY_RESPONSE_TYPE,
+              requestId,
+              secUid,
+              ...(!secUid ? { error: "identity_unavailable" } : {}),
+            },
+            target.location.origin,
+          );
+        } catch (err) {
+          target.postMessage(
+            {
+              type: IDENTITY_RESPONSE_TYPE,
+              requestId,
+              secUid: "",
+              error: String(err instanceof Error ? err.message : err),
+            },
+            target.location.origin,
+          );
+        }
+      })();
+      return;
+    }
     if (data.type !== API_REQUEST_TYPE) return;
     const requestId = String(data.requestId ?? "");
     const scope = data.scope as DouyinScope;
@@ -1208,6 +1393,7 @@ export function installApiHarvester(target: Window): void {
             requestId,
             items: result.items,
             pages_fetched: result.pages_fetched,
+            ...(result.error ? { error: result.error } : {}),
           },
           target.location.origin,
         );

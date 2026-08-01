@@ -12,6 +12,7 @@ from openbiliclaw.api.app import create_app
 from openbiliclaw.saved_sync.extension_broker import ExtensionNativeSaveBroker
 from openbiliclaw.saved_sync.models import NativeSaveRoute, SavedItemInput
 from openbiliclaw.sources.reddit_tasks import RedditTaskQueue
+from openbiliclaw.sources.xhs_tasks import XhsTaskQueue
 from openbiliclaw.storage.database import Database
 
 _NATIVE_CASES = {
@@ -191,6 +192,33 @@ def test_native_result_round_trips_for_every_source(
     row = database.get_extension_native_save_job(job_id)
     assert row is not None
     assert row["status"] == "already_synced"
+
+
+def test_xhs_native_rate_limit_pauses_follow_up_platform_tasks(
+    client: TestClient,
+    broker: ExtensionNativeSaveBroker,
+    database: Database,
+) -> None:
+    job_id = enqueue_native_job(broker, "xhs")
+    claimed = client.get("/api/sources/xhs/next-task").json()
+
+    response = client.post(
+        "/api/sources/xhs/task-result",
+        json={
+            "task_id": job_id,
+            "item_key": claimed["item_key"],
+            "status": "rate_limited",
+            "error_code": "",
+            "error_message": "",
+        },
+    )
+
+    assert response.status_code == 200
+    assert XhsTaskQueue(database).runtime_state()["rate_limited"] is True
+    enqueue_native_job(broker, "xhs")
+    blocked = client.get("/api/sources/xhs/next-task")
+    assert blocked.status_code == 204
+    assert int(blocked.headers["retry-after"]) > 0
 
 
 def test_owned_native_result_never_falls_through_to_legacy_queue(

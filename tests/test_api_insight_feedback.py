@@ -184,3 +184,88 @@ def test_insight_feedback_requires_hypothesis(tmp_path: Path) -> None:
     )
 
     assert resp.status_code == 422
+
+
+def test_insight_feedback_anchor_refusal_returns_409_without_side_effects(
+    tmp_path: Path,
+) -> None:
+    """Active dialogue anchor on another card must not silently ok=true.
+
+    Real E2E: open card B (establishes anchor) then legacy-confirm card A.
+    Backend correctly returns stale_anchor and writes nothing; the legacy
+    endpoint used to wrap that as HTTP 200 ``{"ok":true,"matched":false}``,
+    so old clients thought the confirm worked. Deleting the 409 branch must
+    make this test fail.
+    """
+    from openbiliclaw.soul.identity import insight_hash8
+
+    client, memory = _build_client(tmp_path)
+    engine = client.app.state.runtime_context.soul_engine
+    assert engine is not None
+
+    blocker = "另一条正在聊的假设会占用对话锚"
+    blocker_ref = insight_hash8(blocker)
+    memory.get_layer("insight").data["hypotheses"].append(
+        {
+            "hypothesis": blocker,
+            "evidence": ["用于占用锚"],
+            "confidence": 0.7,
+            "validated": False,
+            "created_at": "2026-06-14",
+        }
+    )
+    memory.get_layer("insight").save()
+    memory._database.create_chat_turn(
+        turn_id="anchor-blocker-card",
+        message="聊聊这条",
+        scope="hypothesis",
+        subject_id=blocker_ref,
+        subject_title=blocker,
+        payload={
+            "type": "card",
+            "kind": "hypothesis",
+            "ref": blocker_ref,
+            "title": blocker,
+            "state": "pending",
+        },
+    )
+    # Establish the anchor through the production path (card discuss action)
+    # rather than calling the manager directly — anchor mutation is a
+    # worker-only protected operation, so a direct call would be refused.
+    discuss = client.post(
+        "/api/chat/cards/anchor-blocker-card/action",
+        json={"action": "discuss"},
+    )
+    assert discuss.status_code in (200, 202), discuss.text
+    anchor = engine._dialogue_anchor_manager.current()
+    assert anchor is not None, "blocker card must own the dialogue anchor"
+    assert anchor.ref == blocker_ref
+
+    target_ref = insight_hash8(_HYP)
+    settlements_before = memory._database.get_card_settlement(target_ref)
+    ledger_before = memory._database.query_profile_ledger(days=1, limit=50)
+
+    resp = client.post(
+        "/api/insights/feedback",
+        json={"hypothesis": _HYP, "signal": "confirm"},
+    )
+
+    assert resp.status_code == 409, resp.text
+    detail = str(resp.json().get("detail", ""))
+    assert "stale_anchor" in detail
+    assert "anchor" in detail.lower()
+    # Deprecated endpoint must still advertise its successor even on error.
+    assert resp.headers.get("deprecation") == "true"
+    assert "successor-version" in resp.headers.get("link", "")
+
+    assert memory._database.get_card_settlement(target_ref) is settlements_before
+    assert memory._database.get_card_settlement(target_ref) is None
+    ledger_after = memory._database.query_profile_ledger(days=1, limit=50)
+    assert len(ledger_after) == len(ledger_before)
+    stored = _stored_hypothesis(memory)
+    assert stored["validated"] is False
+    assert stored["confidence"] == 0.62
+    # Blocker anchor must still own the dialogue thread.
+    active = engine._dialogue_anchor_manager.current()
+    assert active is not None
+    assert active.ref == blocker_ref

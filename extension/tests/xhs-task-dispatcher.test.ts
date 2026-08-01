@@ -303,6 +303,28 @@ test("concurrent XHS poll triggers share one task claim", async () => {
   );
 });
 
+test("XHS poll does not claim a backend task while another source holds the mutex", async () => {
+  const state = installChromeMock();
+  const mutexState = globalThis as unknown as {
+    __OBC_DISPATCHER_MUTEX_HOLDER__?: string;
+    __OBC_DISPATCHER_MUTEX_HELD_SINCE__?: number;
+  };
+  mutexState.__OBC_DISPATCHER_MUTEX_HOLDER__ = "dy";
+  mutexState.__OBC_DISPATCHER_MUTEX_HELD_SINCE__ = Date.now();
+
+  try {
+    await pollXhsTaskOnce();
+    assert.equal(
+      state.fetchCalls.filter((call) => call.url.endsWith("/sources/xhs/next-task")).length,
+      0,
+      "the backend claim must happen only after the cross-source mutex is acquired",
+    );
+  } finally {
+    mutexState.__OBC_DISPATCHER_MUTEX_HOLDER__ = undefined;
+    mutexState.__OBC_DISPATCHER_MUTEX_HELD_SINCE__ = undefined;
+  }
+});
+
 test("executeTask sends XHS_TASK_EXECUTE once the tab finishes loading", async () => {
   const state = installChromeMock();
   const chrome = (globalThis as unknown as { chrome: ChromeMock }).chrome;
@@ -383,6 +405,48 @@ test("executeTask opens search tasks in a background tab", async () => {
 
   await handleTaskResult({ task_id: "t-search-bg", urls: [], status: "ok" });
   await flush();
+});
+
+test("rate-limited task result is reported and closes the task tab", async () => {
+  const state = installChromeMock();
+  const task: XhsTask = {
+    id: "t-search-rate-limited",
+    type: "search",
+    keyword: "demo",
+  };
+  await executeTask(task);
+
+  await handleTaskResult({
+    task_id: task.id,
+    urls: [],
+    notes: [],
+    status: "rate_limited",
+    error: "xhs_rate_limited",
+    debug: {
+      xhs_risk_control: {
+        reason: "security_verification",
+      },
+    },
+  });
+  await flush();
+
+  const resultPost = state.fetchCalls.find((call) =>
+    call.url.endsWith("/sources/xhs/task-result")
+  );
+  assert.ok(resultPost);
+  assert.deepEqual(resultPost.body, {
+    task_id: task.id,
+    urls: [],
+    notes: [],
+    status: "rate_limited",
+    error: "xhs_rate_limited",
+    debug: {
+      xhs_risk_control: {
+        reason: "security_verification",
+      },
+    },
+  });
+  assert.deepEqual(state.removedTabs, [42]);
 });
 
 test("executeTask opens explore active and waits after clicked profile navigation", async () => {

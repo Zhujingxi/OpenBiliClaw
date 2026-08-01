@@ -14,7 +14,14 @@ if TYPE_CHECKING:
 
 @dataclass
 class InterestTag:
-    """A weighted interest tag with time decay."""
+    """A weighted interest tag with time decay.
+
+    ``state`` / ``evidence_count`` / ``last_evidence_at`` / ``parent_topic``
+    are the topic-lifecycle fields (Phase 4). Legacy data without them loads as
+    a plain ``active`` topic (see ``interest_tag_from_dict``), and interests
+    still in the default ``active`` state serialize byte-identically to the
+    pre-lifecycle shape (see ``interest_tag_to_dict``).
+    """
 
     name: str
     category: str  # Top-level category (e.g., "科技", "游戏")
@@ -22,6 +29,10 @@ class InterestTag:
     first_seen: datetime | None = None
     last_seen: datetime | None = None
     source: str = ""  # How this tag was inferred
+    state: str = "active"  # trial | active | decaying | archived
+    evidence_count: int = 0
+    last_evidence_at: str = ""
+    parent_topic: str = ""
 
 
 @dataclass
@@ -60,12 +71,24 @@ class PreferenceLayer:
 
 @dataclass
 class AwarenessNote:
-    """A single awareness observation."""
+    """A single awareness observation.
+
+    ``note_id`` and ``source_event_ids`` (Phase 0 evidence chain) let later
+    waves (confusion ``evidence_refs``) trace an observation back to the raw
+    events that produced it. Both default empty for backward compatibility:
+    notes persisted before this field existed load with an empty id / no
+    source events. ``source_event_ids_approximate`` records that per-note
+    attribution was not available, so the whole consumed batch was attached
+    to every note of that round.
+    """
 
     date: str = ""
     observation: str = ""  # What was observed
     trend: str = ""  # What trend this suggests
     emotion_guess: str = ""  # Guessed emotional state
+    note_id: str = ""  # Short generative id (uuid4 hex prefix)
+    source_event_ids: list[int] = field(default_factory=list)
+    source_event_ids_approximate: bool = False
 
 
 @dataclass
@@ -77,6 +100,13 @@ class InsightHypothesis:
     confidence: float = 0.5  # 0.0 - 1.0
     validated: bool = False  # Has this been confirmed?
     created_at: str = ""
+    # "" (never judged) | "confirmed" | "rejected". Distinct from ``validated``:
+    # ``validated`` says "treat this as true", while ``user_verdict`` records
+    # that the *user* ruled on it at all. Without it a reject was only a low
+    # score, and the next insight pass — same model, same kind of evidence —
+    # could hand the hypothesis a high score again, silently undoing the user's
+    # 「不准」and putting it back in the 待聊 list. Legacy rows load as "".
+    user_verdict: str = ""
 
 
 @dataclass
@@ -252,8 +282,12 @@ def preference_layer_from_dict(raw_value: object) -> PreferenceLayer:
 
 
 def interest_tag_to_dict(tag: InterestTag) -> dict[str, object]:
-    """Serialize an interest tag."""
-    return {
+    """Serialize an interest tag.
+
+    Lifecycle fields are emitted only when non-default, so a plain ``active``
+    topic serializes byte-identically to the pre-lifecycle shape.
+    """
+    data: dict[str, object] = {
         "name": tag.name,
         "category": tag.category,
         "weight": tag.weight,
@@ -261,6 +295,14 @@ def interest_tag_to_dict(tag: InterestTag) -> dict[str, object]:
         "last_seen": tag.last_seen.isoformat() if tag.last_seen else "",
         "source": tag.source,
     }
+    _emit_lifecycle_fields(
+        data,
+        state=tag.state,
+        evidence_count=tag.evidence_count,
+        last_evidence_at=tag.last_evidence_at,
+        parent_topic=tag.parent_topic,
+    )
+    return data
 
 
 def interest_tag_from_dict(raw_data: dict[str, object]) -> InterestTag:
@@ -270,7 +312,43 @@ def interest_tag_from_dict(raw_data: dict[str, object]) -> InterestTag:
         category=str(raw_data.get("category", "")),
         weight=_as_float(raw_data.get("weight", 1.0), 1.0),
         source=str(raw_data.get("source", "")),
+        state=_as_lifecycle_state(raw_data.get("state")),
+        evidence_count=_as_int(raw_data.get("evidence_count", 0)),
+        last_evidence_at=str(raw_data.get("last_evidence_at", "")),
+        parent_topic=str(raw_data.get("parent_topic", "")),
     )
+
+
+_VALID_LIFECYCLE_STATES = frozenset({"trial", "active", "decaying", "archived"})
+
+
+def _as_lifecycle_state(raw_value: object) -> str:
+    """Whitelist the lifecycle state; legacy/invalid values default to active."""
+    state = str(raw_value or "").strip().lower()
+    return state if state in _VALID_LIFECYCLE_STATES else "active"
+
+
+def _emit_lifecycle_fields(
+    data: dict[str, object],
+    *,
+    state: str,
+    evidence_count: int,
+    last_evidence_at: str,
+    parent_topic: str,
+) -> None:
+    """Attach lifecycle fields to ``data`` only when they carry non-default signal.
+
+    Keeping defaults absent is what preserves byte-identical serialization for
+    the common all-active profile (回放门).
+    """
+    if state and state != "active":
+        data["state"] = state
+    if evidence_count:
+        data["evidence_count"] = evidence_count
+    if last_evidence_at:
+        data["last_evidence_at"] = last_evidence_at
+    if parent_topic:
+        data["parent_topic"] = parent_topic
 
 
 def style_preference_to_dict(style: StylePreference) -> dict[str, object]:
@@ -319,7 +397,24 @@ def awareness_note_to_dict(note: AwarenessNote) -> dict[str, object]:
         "observation": note.observation,
         "trend": note.trend,
         "emotion_guess": note.emotion_guess,
+        "note_id": note.note_id,
+        "source_event_ids": list(note.source_event_ids),
+        "source_event_ids_approximate": note.source_event_ids_approximate,
     }
+
+
+def _as_int_list(raw_value: object) -> list[int]:
+    if not isinstance(raw_value, list):
+        return []
+    result: list[int] = []
+    for item in raw_value:
+        if isinstance(item, bool) or not isinstance(item, int | str | float):
+            continue
+        try:
+            result.append(int(item))
+        except (TypeError, ValueError):
+            continue
+    return result
 
 
 def awareness_note_from_dict(raw_data: dict[str, object]) -> AwarenessNote:
@@ -328,6 +423,9 @@ def awareness_note_from_dict(raw_data: dict[str, object]) -> AwarenessNote:
         observation=str(raw_data.get("observation", "")),
         trend=str(raw_data.get("trend", "")),
         emotion_guess=str(raw_data.get("emotion_guess", "")),
+        note_id=str(raw_data.get("note_id", "")),
+        source_event_ids=_as_int_list(raw_data.get("source_event_ids")),
+        source_event_ids_approximate=bool(raw_data.get("source_event_ids_approximate", False)),
     )
 
 
@@ -338,6 +436,7 @@ def insight_hypothesis_to_dict(item: InsightHypothesis) -> dict[str, object]:
         "confidence": item.confidence,
         "validated": item.validated,
         "created_at": item.created_at,
+        "user_verdict": item.user_verdict,
     }
 
 
@@ -348,7 +447,14 @@ def insight_hypothesis_from_dict(raw_data: dict[str, object]) -> InsightHypothes
         confidence=_as_float(raw_data.get("confidence", 0.5), 0.5),
         validated=bool(raw_data.get("validated", False)),
         created_at=str(raw_data.get("created_at", "")),
+        user_verdict=_as_user_verdict(raw_data.get("user_verdict")),
     )
+
+
+def _as_user_verdict(raw_value: object) -> str:
+    """Whitelist the stored verdict; anything unexpected means 'never judged'."""
+    verdict = str(raw_value or "").strip().lower()
+    return verdict if verdict in {"confirmed", "rejected"} else ""
 
 
 def _as_list(raw_value: object) -> list[object]:
@@ -456,7 +562,12 @@ class InterestSpecific:
 
 @dataclass
 class InterestDomain:
-    """A broad interest domain containing narrow specifics."""
+    """A broad interest domain containing narrow specifics.
+
+    ``state`` mirrors the flat topic-lifecycle state of the domain-level tag so
+    the LLM-facing serialization can exclude archived domains (Phase 4). Legacy
+    data defaults to ``active``.
+    """
 
     domain: str = ""
     weight: float = 0.5
@@ -464,6 +575,10 @@ class InterestDomain:
     first_seen: str = ""
     last_seen: str = ""
     source: str = ""
+    state: str = "active"  # trial | active | decaying | archived
+    evidence_count: int = 0
+    last_evidence_at: str = ""
+    parent_topic: str = ""
 
 
 @dataclass
@@ -556,7 +671,15 @@ class OnionProfile:
         for dom in self.interest.likes:
             # Always include the domain itself as a top-level interest
             flat_interests.append(
-                InterestTag(name=dom.domain, category=dom.domain, weight=dom.weight)
+                InterestTag(
+                    name=dom.domain,
+                    category=dom.domain,
+                    weight=dom.weight,
+                    state=dom.state,
+                    evidence_count=dom.evidence_count,
+                    last_evidence_at=dom.last_evidence_at,
+                    parent_topic=dom.parent_topic,
+                )
             )
             for spec in dom.specifics:
                 flat_interests.append(
@@ -595,6 +718,12 @@ class OnionProfile:
             dom = domain_map[key]
             if tag.name != key:
                 dom.specifics.append(InterestSpecific(name=tag.name, weight=tag.weight))
+            else:
+                # Domain-level tag carries the topic-lifecycle state.
+                dom.state = tag.state
+                dom.evidence_count = tag.evidence_count
+                dom.last_evidence_at = tag.last_evidence_at
+                dom.parent_topic = tag.parent_topic
             if tag.weight > dom.weight:
                 dom.weight = tag.weight
         self.interest = InterestLayer(
@@ -671,6 +800,11 @@ class OnionProfile:
             dom = domain_map[key]
             if tag.name != key:
                 dom.specifics.append(InterestSpecific(name=tag.name, weight=tag.weight))
+            else:
+                dom.state = tag.state
+                dom.evidence_count = tag.evidence_count
+                dom.last_evidence_at = tag.last_evidence_at
+                dom.parent_topic = tag.parent_topic
             if tag.weight > dom.weight:
                 dom.weight = tag.weight
 
@@ -857,7 +991,7 @@ def _interest_specific_from_dict(raw: object) -> InterestSpecific:
 
 
 def _interest_domain_to_dict(dom: InterestDomain) -> dict[str, object]:
-    return {
+    data: dict[str, object] = {
         "domain": dom.domain,
         "weight": dom.weight,
         "specifics": [_interest_specific_to_dict(s) for s in dom.specifics],
@@ -865,6 +999,14 @@ def _interest_domain_to_dict(dom: InterestDomain) -> dict[str, object]:
         "last_seen": dom.last_seen,
         "source": dom.source,
     }
+    _emit_lifecycle_fields(
+        data,
+        state=dom.state,
+        evidence_count=dom.evidence_count,
+        last_evidence_at=dom.last_evidence_at,
+        parent_topic=dom.parent_topic,
+    )
+    return data
 
 
 def _interest_domain_from_dict(raw: object) -> InterestDomain:
@@ -880,6 +1022,10 @@ def _interest_domain_from_dict(raw: object) -> InterestDomain:
         first_seen=str(data.get("first_seen", "")),
         last_seen=str(data.get("last_seen", "")),
         source=str(data.get("source", "")),
+        state=_as_lifecycle_state(data.get("state")),
+        evidence_count=_as_int(data.get("evidence_count", 0)),
+        last_evidence_at=str(data.get("last_evidence_at", "")),
+        parent_topic=str(data.get("parent_topic", "")),
     )
 
 

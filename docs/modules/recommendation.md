@@ -36,6 +36,7 @@ runtime 使用公开 `drain_pending_expression_copy(profile, limit<=60, max_extr
 | M119 风格多样性与快速文案增强 | ✅ | `reshuffle` 现在会同时约束 `topic_key + style_key`，并把快速 fallback 文案润色成更自然的老B友短句 |
 | M120 来源上限与硬配比 | ✅ | `reshuffle` 现在会对 `topic_key + style_key + source` 同时加硬上限，小批次优先保留不同来源，10 条一批时单一来源最多 3 条 |
 | M121 推荐自动续页 | ✅ | popup 与移动 Web 滚到底附近时会调用 `append` 从 discovery pool 再续 10 条，不再只能整组“换一批”；插件 / side panel 与移动 Web 的自动续页都需要用户向下滚动 / 翻页先触发一次意图门闩，后台和推荐消费后的 `refresh.pool_updated` 只刷新池子状态与可换提示，不会重拉 `/api/recommendations` 覆盖已 append 的历史卡片，也不会在加载更多哨兵仍可见时空转消耗候选池；底部「加载更多」按钮仍作为兜底，并会在插入追加卡片前预热封面 |
+| PC Web 自动续页滚动稳定 | ✅ | 平台 Tab 即使在用户用滚轮 / 触控板浏览到列表底部后仍持有键盘焦点，续页完成重绘 Tab 库存徽标时也只恢复焦点、不把离屏 Tab 滚回视口；推荐卡增量追加、当前 `scrollY` 与键盘可达性同时保留。 |
 | Web 空失败态恢复 | ✅ | 移动与桌面 Web 会把推荐/库存读取失败与真实空结果分开：瞬时超时进入 1/2/4/8 秒、最多四次的单飞恢复；成功空数组终止推荐重试；`refresh.pool_updated` 只在当前列表仍为空且上次推荐读取失败时触发条件恢复，已有或追加卡片不会被覆盖。库存状态可由含 `pool_available_count` 的实时快照独立恢复，不再把未知状态渲染成零库存。 |
 | M122 来源优先补齐 | ✅ | 推荐选片时会先补齐不同 `source`，再限制重复 `style`，避免 `explore` 把 `search/trending` 挤出同一批结果 |
 | 平台定向推荐（PC Web） | ✅ | `serve / reshuffle / append`（含 `*_with_result`）新增默认空的 keyword-only `source_platform`。非空时只装载该 canonical 平台的候选、跳过跨平台保底补位，其余 curator 打分、amplification guard、embedding/MMR、topic/style/broad-topic 多样性、视觉加成、持久化与 shown 提交全部复用既有实现——平台作用域只缩小候选集合，绝不是"先生成混合批次再过滤结果"。返回前经 `_enforce_platform_scope()` 校验，发现跨平台行记 ERROR 并丢弃，不让泄漏进响应。省略该参数时调用形状与行为与引入前完全一致（对签名不确定的兼容对象也只在真的带平台时才传新关键字）。**仅 PC Web 有该交互**：移动 Web、扩展 popup / side panel 与 CLI 没有平台 Tab，继续走不带平台的兼容路径，行为不变 |
@@ -56,6 +57,7 @@ runtime 使用公开 `drain_pending_expression_copy(profile, limit<=60, max_extr
 | margin 几何重设计（P1/P3 有符号评分） | ✅ | v0.3.185 的「去 neg 惩罚、纯正向」是对 neg 抵消问题的第一刀——直接砍掉 neg，安全但浪费了 neg 能说话的区域。本轮用几何方法把 neg 安全请回来，**取代纯正向也取代被搁置的 C 方案**（dislike 理由字段）。三点设计：①**聚类前 cross-cleaning**（`cross_clean_labels`，kNN k=3、`drop_margin=0.08`）剔除落在敌方势力范围的封面（misclick/love-hate 矛盾），绝不翻转极性；②**聚类后 contested 检测**（`contested_pairs`，cosine ≥ 0.45）标记 love-hate 区；③**打分时 margin 判定**：`s_pos − s_neg ≥ margin → boost`、`s_neg − s_pos ≥ margin → suppress`（负值）、`|net| < margin → gray`。一个差值自标定（s_pos/s_neg 共享同一 embedding/管线，差值无需单独 τ，0.80 教训的一般化）。contested 区**不静默而是抬高门槛 2×**（raise-don't-mute）——"质心重叠就整对灰掉"会丢掉 ~40% 的 P3 信号（39 个 clear win 被误杀），改成提高说服力门槛但保留 clear win。校准全部来自实测（`scripts/measure_visual_profile_geometry.py`，1366 候选）：2/6 pos×neg 质心对 contested（0.674/0.576 vs 0.377-0.219 有干净断点）、margin 0.05（net p75/p90 间）、boost/suppress scale 从 net p5/p95。实测：vp +107/−280、kf +4/−3（过粗灰门下 kf 0/−1）；方向验证 boost 的是 kigurumi/角色展示/MV。suppress 偏多是诚实读数：用户视觉上 dislike 多于 like。根因（反馈语义不分视觉维度）由几何方案处理，C 方案降级为未来 soul 层（非视觉 dislike 理由→回避 UP/topic）的解耦增强 |
 | 跨平台公平性归一化 | ✅ | 四路 bonus 在 `serve()` 叠加成 `combined_bonus` 后、喂给 MMR 选择器前，经 `_normalize_bonus_per_platform` 按 `source_platform` 分组 min-max 归一化到 **`[−cap, +cap]`**（有符号；`_COMBINED_BONUS_CAP` = 四路 cap 之和 = 0.20）。修复 Bilibili-only 信号（P2 弹幕 / P3 关键帧）结构性抬高 Bilibili 候选、挤压 bangumi/xhs 的问题——缺信号的平台只丢**平台内**区分度，不丢**跨平台**高度。**有符号**是 v0.3.186 margin 评分引入负值 suppress 后的必要扩展：无符号 `[0, cap]` 会把 suppress 折叠掉，`[g_min, g_max] → [−cap, +cap]` 让 suppress（负）与 fairness leveling 共存。实测：三平台都 span −0.20~+0.20 追平，top-25 bangumi 持 5 席；信号方向不变。`combined_bonus` 为空（全信号关 / 无质心）时 no-op，排序逐字节一致；平台组 max=0 时保持 0（不 NaN）。`snapshot_ranking.py` 镜像同一归一化，保证离线快照与 `serve()` 一致 |
 | 惊喜推荐反馈保留 | ✅ | `POST /api/delight/respond` 中 `like / chat` 记录正向学习信号并保留候选；`view` 当场保留卡片但标记已读（对齐推荐池 `shown` 语义，下次重灌不再出现）；`dislike / dismiss` 消费候选并驱动三端立即移除。`pending-batch` 重灌以 `include_liked=True` 保留已喜欢候选并下发 `state="liked"`；移动 Web、桌面 Web 与插件统一保留结果提示和完整动作组，只把 like 标为 `aria-pressed="true"` 并禁用重复提交，其它动作继续可用 |
+| 惊喜推荐反馈保留与永久叉掉 | ✅ | `POST /api/delight/respond` 中 `like / chat` 记录正向学习信号并保留候选；`view` 当场保留卡片但标记已读（对齐推荐池 `shown` 语义，下次重灌不再出现）；`dislike` 消费候选并记录负偏好；`dismiss` 是三端统一的“× / 看过了，不再推荐”，同时写 `delight_notified` 与 canonical `seen_items`，立即移出当前队列并永久排除普通/惊喜两条推荐出口。`pending-batch` 重灌以 `include_liked=True` 保留已喜欢候选并下发 `state="liked"`；只把 like 标为 `aria-pressed="true"` 并禁用重复提交，用户仍可随后叉掉 |
 | 惊喜推送不打断输入（v0.3.157+） | ✅ | 桌面 Web：用户在惊喜卡聊天框互动中（composer 展开 / 输入框有焦点 / 有未发送草稿）时，`delight.candidate` 后台推送只静默入队并更新计数、不切当前卡（此前会 `setActiveDelight` 收起输入框，随后的发送还会把反馈串到换上来的新卡上）；`delight.refreshed` 队列刷新同样只同步数据，当前卡即使已被后端消费也保留引用，发送始终落在用户正对着的卡上；空闲时保持自动切到最新候选的原行为。无惊喜候选时 `renderDelightCover(null)` 只清空旧封面和背景后返回，不读取空候选或打断首页 hydration；有效但无封面的候选仍显示来源平台徽章。移动 Web：输入框聚焦时跳过推送触发的 DOM 重建（textarea 失焦 = 手机键盘收起），草稿本就实时存 state |
 | issue #79 桌面惊喜文字卡收尾 | ✅ | 桌面 Web 惊喜卡保留 `body_text` 并显示最多 5 行正文预览，仅在实际溢出时提供可访问的展开/收起；无封面或封面加载失败时，左侧媒体区以正文和来源徽章渲染毛玻璃文字卡。候选切换与空队列重置折叠态，不改变标题兜底、互动指标、聊天输入保护和反馈语义。 |
 | issue #126 移动惊喜卡整卡点击 | ✅ | 移动 Web 惊喜卡支持整卡点击打开内容，与下方信息流普通卡片一致；位移 <10px（`DELIGHT_DRAG_DEAD_ZONE`）视为点击，≥50px（`DELIGHT_SWIPE_THRESHOLD`）仍是左右切卡，中间区间不触发任何动作以防误触。反馈按钮 / 输入框在 `pointerdown` 阶段 stopPropagation，不会被整卡点击吸收；已反馈（`show_actions=false`）、聊天输入展开或无可用 URL 时不接管点击。桌面 Web 的普通卡片本就只有动作按钮、惊喜卡另有封面点击区，自身已一致，不在本次改动范围；插件无惊喜卡片，CLI 无此交互 |
@@ -205,6 +207,7 @@ items = await engine.append_recommendations(
 行为说明：
 
 - 用于 popup 和移动 Web 推荐流的续页，不会清空当前列表
+- PC Web 使用同一 `append` 契约并在续页完成后更新平台库存 Tab；若焦点仍停在已经离屏的 Tab，DOM 重绘只恢复键盘焦点而不改变当前滚动位置
 - 会先排除前端已经展示过的 `excluded_bvids`
 - 若 API 看到 `pool_available_count=0`，会立即返回 `items=[]` 并按 30 秒 debounce 触发一次后台补货；不会读取画像或进入推荐引擎
 - 若 `excluded_bvids` 或持久化已看账本把候选清空，引擎直接返回空数组，不执行 curator、MMR embedding 或推荐历史写入
@@ -380,9 +383,9 @@ Content-Type: application/json
 
 ### Delight Feedback
 
-`POST /api/delight/respond` 支持 `view / like / dislike / chat / dismiss`。`like / chat` 只记录喜欢或对话学习信号，候选保留在队列里；`view`（看看/点开浏览）保留当场卡片的「已打开」展示，但会把候选标记为已读（`delight_notified=1`，不重置 4 小时主动推送冷却）——语义对齐推荐池的 `pool_status='shown'`：浏览过的惊喜在下次队列重灌时不再出现；`dislike / dismiss` 才会立即驱动三端移除该候选。
+`POST /api/delight/respond` 支持 `view / like / dislike / chat / dismiss`。`like / chat` 只记录喜欢或对话学习信号，候选保留在队列里；`view`（看看/点开浏览）保留当场卡片的「已打开」展示，但会把候选标记为已读（`delight_notified=1`，不重置 4 小时主动推送冷却）——语义对齐推荐池的 `pool_status='shown'`：浏览过的惊喜在下次队列重灌时不再出现；`dislike` 立即移除并记录负偏好；`dismiss` 对应移动、桌面和扩展统一的“× / 看过了，不再推荐”，先把内容 canonical identity 写入 `seen_items`，再置 `delight_notified=1`，因此后续普通推荐与惊喜推荐都硬排除。
 
-正向保留跨重灌生效：`GET /api/delight/pending-batch` 以 `include_liked=True` 调用 `get_delight_candidates`，已点喜欢（`feedback_type='like'`）的候选在 popup 重开 / `delight.refreshed` 重灌后仍保留队列位置，并以 `state="liked"` 下发供三端恢复「已喜欢」展示；`view` / `dismiss` / `dislike`（置 `delight_notified=1`）会让候选退出重灌队列。WS 主动推送（`get_pending_delight`）、候选计数与 CLI 仍排除已喜欢项，避免把喜欢过的内容当新惊喜重复推送。
+正向保留跨重灌生效：`GET /api/delight/pending-batch` 以 `include_liked=True` 调用 `get_delight_candidates`，已点喜欢（`feedback_type='like'`）的候选在 popup 重开 / `delight.refreshed` 重灌后仍保留队列位置，并以 `state="liked"` 下发供三端恢复「已喜欢」展示；`view` / `dismiss` / `dislike`（置 `delight_notified=1`）会让候选退出重灌队列。所有 delight scoring、动态阈值、计数与 pending 查询还统一叠加 `seen_items` guard，外部浏览、点赞、收藏或投币已经进入已看账本的内容不会占据惊喜栏位。WS 主动推送（`get_pending_delight`）、候选计数与 CLI 仍排除已喜欢项，避免把喜欢过的内容当新惊喜重复推送。
 
 图形端把结果提示、动作组和 like 的可访问状态分开投影；`handled` 只保留为 `viewed / rejected` 的兼容终态标记，不再用来隐藏 liked 的动作组：
 

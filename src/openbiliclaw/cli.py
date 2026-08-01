@@ -22,6 +22,7 @@ import typer
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
 from openbiliclaw.llm.base import safe_llm_failure_message
 from openbiliclaw.llm.service import _background_admission_bypass
@@ -74,13 +75,12 @@ _INIT_X_COLLECTION_TIMEOUT_SECONDS = 480.0
 
 # ── Progress-aware deadlines (idle + absolute) ───────────────────────────
 #
-# IDLE: max seconds with NO new progress signal. Derived from the same
-# slow-gateway figure as ``_INIT_PROFILE_ANALYSIS_SECONDS_PER_WAVE`` — one
-# chunk on a slow real gateway ≈ 300s — doubled for slack, so a chunk that
-# takes twice the worst observed time still counts as alive. A genuinely
-# unreachable Base URL / wrong model name / dead proxy produces *zero* chunks
-# and therefore still fails fast (10 min), which is what users need diagnosed.
-_INIT_PROGRESS_IDLE_SECONDS = 600.0
+# IDLE: max seconds with NO completed preference chunk. A progress marker only
+# advances after the whole provider response has arrived, so this outer guard
+# must exceed the configured 20-minute per-request timeout. Twenty-five minutes
+# leaves five minutes for the analyzer's bounded 65s rate-limit cooldowns while
+# remaining below the 45-minute absolute ceiling.
+_INIT_PROGRESS_IDLE_SECONDS = 1500.0
 # Stage 4's progress reports are coarser (a handful per plan stage, each
 # covering a full discover+score+copy sweep), so it needs a wider idle window
 # than stage 2's per-chunk cadence.
@@ -334,11 +334,13 @@ login_app = typer.Typer(help="账号登录命令")
 browser_app = typer.Typer(help="agent-browser 浏览器命令")
 autostart_app = typer.Typer(help="开机自启动命令")
 ext_key_app = typer.Typer(help="浏览器扩展密钥管理命令")
+tls_proxy_app = typer.Typer(help="TLS 反代管理命令（远程设备 HTTPS 访问）")
 app.add_typer(auth_app, name="auth")
 app.add_typer(login_app, name="login")
 app.add_typer(browser_app, name="browser")
 app.add_typer(autostart_app, name="autostart")
 app.add_typer(ext_key_app, name="ext-key")
+app.add_typer(tls_proxy_app, name="tls-proxy")
 console = Console()
 _APP_CONTEXT: dict[str, Any] = {}
 _DISCOVER_STRATEGIES_OPTION = typer.Option(
@@ -520,6 +522,7 @@ _EXTENSION_PRESENCE_REQUIRED_WARNING = (
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Mapping
+    from http.server import ThreadingHTTPServer
 
 
 def _print_page_title(title: str, subtitle: str = "") -> None:
@@ -596,34 +599,9 @@ def _preflight_loopback_ollama(cfg: Any) -> None:
 def _self_heal_autostart_registration(cfg: Any) -> None:
     from openbiliclaw.runtime import autostart
 
-    state = autostart.status()
-    if not state.supported:
-        return
-
-    if not cfg.autostart.enabled:
-        if state.registered:
-            try:
-                autostart.unregister()
-            except Exception as exc:
-                console.print(f"[yellow]开机自启动残留项移除失败：{exc}[/yellow]")
-        return
-
-    if state.registered:
-        return
-
-    from openbiliclaw.runtime.autostart.guards import active_env_managed_inputs
-
-    managed = active_env_managed_inputs(cfg)
-    if managed:
-        console.print(
-            "[yellow]已开启开机自启动，但检测到环境变量配置，跳过自动补注册："
-            f"{', '.join(managed)}。请先写入 config.toml。[/yellow]"
-        )
-        return
-    try:
-        autostart.register(cfg)
-    except Exception as exc:
-        console.print(f"[yellow]开机自启动补注册失败：{exc}[/yellow]")
+    warning = autostart.reconcile(cfg)
+    if warning:
+        console.print(f"[yellow]{warning}[/yellow]")
 
 
 def _print_section_title(title: str) -> None:
@@ -903,6 +881,8 @@ def _build_soul_engine() -> Any:
         memory=memory,
         usage_recorder=_build_usage_recorder(),
         satisfaction_filter_enabled=cfg.soul.preference.satisfaction_filter_enabled,
+        posture_gate_mode=cfg.soul.posture_gate_mode,
+        posture_gate_force_enforce=cfg.soul.posture_gate_force_enforce,
         module_overrides=module_overrides_from_config(cfg),
         llm_concurrency=cfg.llm.concurrency,
         llm_concurrency_gate=_build_llm_concurrency_gate(),
@@ -930,6 +910,13 @@ def _build_soul_engine() -> Any:
         ),
         profile_consolidation_like_target_soft=cfg.scheduler.profile_consolidation_like_target_soft,
         profile_consolidation_archive_enabled=(cfg.scheduler.profile_consolidation_archive_enabled),
+        # Feedback line config, three-surface contract with
+        # ``api/runtime_context.py`` and the OpenClaw bootstrap: the CLI
+        # feedback command runs the same batch (and, once the unified interest
+        # line is on, the same pipeline fast line), so it must read the same
+        # knobs instead of falling back to the constructor defaults.
+        feedback_batch_threshold=cfg.scheduler.feedback_batch_threshold,
+        unified_interest_line=cfg.scheduler.unified_interest_line,
         database=_get_runtime_database(),
     )
 
@@ -993,9 +980,14 @@ def _build_recommendation_engine() -> Any:
 
 def _build_dialogue(soul_engine: Any) -> Any:
     """Build the Socratic dialogue helper for interactive chat."""
-    from openbiliclaw.soul.dialogue import SocraticDialogue
+    from openbiliclaw.soul.dialogue import DialogueLearningMode, SocraticDialogue
 
-    return SocraticDialogue(llm=_build_registry(), soul_engine=soul_engine, session="cli")
+    return SocraticDialogue(
+        llm=_build_registry(),
+        soul_engine=soul_engine,
+        session="cli",
+        learning_mode=DialogueLearningMode.LEGACY_DIRECT,
+    )
 
 
 def _run_api_server(*, host: str = "127.0.0.1", port: int = 8420) -> None:
@@ -1017,10 +1009,25 @@ def _run_api_server(*, host: str = "127.0.0.1", port: int = 8420) -> None:
             f"reason: {reason or 'unknown'}\n"
             + "\n".join(issues)
             + "\n\nOpen the extension popup settings to fix the LLM credentials, "
-            "then restart the daemon."
+            "then save; the daemon will recover in-process."
         )
         _print_status_panel("warning", "AI 服务配置有误 / Degraded mode", body)
-    uvicorn.run(api_app, host=host, port=port, log_level="info")
+    from openbiliclaw.runtime.api_server import (
+        close_listener_sockets,
+        create_wildcard_listener_sockets,
+    )
+
+    listeners = create_wildcard_listener_sockets(host, port)
+    if listeners is None:
+        uvicorn.run(api_app, host=host, port=port, log_level="info")
+        return
+
+    config = uvicorn.Config(api_app, host=host, port=port, log_level="info")
+    server = uvicorn.Server(config)
+    try:
+        server.run(sockets=listeners)
+    finally:
+        close_listener_sockets(listeners)
 
 
 def _build_memory_manager() -> Any:
@@ -1075,6 +1082,15 @@ def _build_discovery_engine() -> Any:
     from openbiliclaw.config import load_config
 
     cfg = load_config()
+    # Topic-lifecycle serialization switch (spec Phase 4); default off.
+    from openbiliclaw.discovery.strategies._utils import set_topic_lifecycle_serialization
+
+    set_topic_lifecycle_serialization(
+        str(getattr(getattr(cfg, "soul", None), "topic_lifecycle_serialization", "off"))
+        .strip()
+        .lower()
+        == "on"
+    )
     registry = _build_registry()
     llm_service = LLMService(
         registry=registry,
@@ -1243,16 +1259,33 @@ def _history_item_to_event(item: dict[str, Any]) -> dict[str, Any]:
     title = str(item.get("title", "")).strip()
     author = str(item.get("author_name", item.get("author", ""))).strip()
     view_at = history_meta.get("view_at", item.get("view_at", ""))
+    metadata: dict[str, Any] = {
+        "bvid": bvid,
+        "view_at": view_at,
+    }
+    if bvid:
+        metadata["content_id"] = bvid
+    # Watch metrics decide how ``classify_event_satisfaction`` reads this row.
+    # Without them every video the user ever watched lands in the ledger as
+    # "unknown satisfaction" — a 100%-watched video and a 3-second bounce look
+    # identical to everything downstream of init.
+    for source_field, target in (
+        ("progress", "watch_seconds"),
+        ("duration", "video_duration_seconds"),
+    ):
+        value = item.get(source_field)
+        if isinstance(value, (int, float)) and value > 0:
+            metadata[target] = float(value)
+    tag = str(item.get("tag_name", "") or "").strip()
+    if tag:
+        metadata["category"] = tag
     return build_event(
         event_type="view",
         source_platform=SOURCE_BILIBILI,
         title=title,
         url=f"https://www.bilibili.com/video/{bvid}" if bvid else "",
         author=author,
-        metadata={
-            "bvid": bvid,
-            "view_at": view_at,
-        },
+        metadata=metadata,
     )
 
 
@@ -3127,15 +3160,34 @@ def _enqueue_dy_bootstrap_task(*, kick: bool = True) -> str | None:
                 statuses=("pending", "in_progress", "completed", "failed"),
             )
             if recent is not None:
-                task_id = str(recent.get("id", "")).strip()
-                if task_id:
-                    status = str(recent.get("status", "unknown"))
+                raw_result = recent.get("result_json")
+                if isinstance(raw_result, dict):
+                    parsed_result = raw_result
+                elif isinstance(raw_result, (str, bytes, bytearray)):
+                    try:
+                        parsed_result = json.loads(raw_result)
+                    except (TypeError, ValueError):
+                        parsed_result = None
+                else:
+                    parsed_result = None
+                recent_is_degraded = (
+                    isinstance(parsed_result, dict)
+                    and str(parsed_result.get("status", "")).strip().lower() == "degraded"
+                )
+                if recent_is_degraded:
                     console.print(
-                        "  [dim]复用最近的抖音 bootstrap 任务"
-                        f"({status})；需要重新拉取可设 "
-                        "OPENBILICLAW_DY_BOOTSTRAP_DEDUPE_HOURS=0。[/dim]"
+                        "  [dim]最近的抖音 bootstrap 任务仅部分完成；本次重新入队以补齐分页。[/dim]"
                     )
-                    return task_id
+                else:
+                    task_id = str(recent.get("id", "")).strip()
+                    if task_id:
+                        status = str(recent.get("status", "unknown"))
+                        console.print(
+                            "  [dim]复用最近的抖音 bootstrap 任务"
+                            f"({status})；需要重新拉取可设 "
+                            "OPENBILICLAW_DY_BOOTSTRAP_DEDUPE_HOURS=0。[/dim]"
+                        )
+                        return task_id
         task_id = queue.enqueue_with_id(
             "bootstrap_profile",
             {
@@ -3167,6 +3219,8 @@ def _collect_dy_bootstrap_events(
     Returns ``(events, scope_counts, status_label)`` where
     ``status_label`` is one of:
       - ``"ok"``         — task completed with videos
+      - ``"degraded"``   — task completed with usable videos, but at least
+        one scope could not prove pagination completeness
       - ``"empty"``      — task completed but extension returned 0 videos
         (typical when the user is not logged in to douyin.com — the
         soft anti-bot returns HTTP 200 + empty body, see design-doc
@@ -3248,7 +3302,8 @@ def _collect_dy_bootstrap_events(
                 short = key.removeprefix("dy_") if key.startswith("dy_") else key
                 if source == f"dy_bootstrap_{short}":
                     scope_counts[key] += 1
-    status_label = "ok" if events else "empty"
+    result_status = str(result.get("status", "")).strip()
+    status_label = "degraded" if result_status == "degraded" else ("ok" if events else "empty")
     return events, scope_counts, status_label
 
 
@@ -4243,6 +4298,7 @@ def _enqueue_dy_search_task(
     max_items_per_keyword: int = 20,
 ) -> str | None:
     """Enqueue a Douyin plugin search task for the browser extension."""
+    from openbiliclaw.config import load_config
     from openbiliclaw.sources.dy_tasks import DyTaskQueue
 
     normalized_keywords = []
@@ -4266,6 +4322,12 @@ def _enqueue_dy_search_task(
         return None
 
     try:
+        cfg = load_config()
+        budget = int(getattr(getattr(cfg.sources, "douyin", None), "daily_search_budget", 0))
+    except Exception:
+        budget = 0
+
+    try:
         queue = DyTaskQueue(database)
         task_id = queue.enqueue_with_id(
             "search",
@@ -4273,7 +4335,7 @@ def _enqueue_dy_search_task(
                 "keywords": normalized_keywords,
                 "max_items_per_keyword": max(1, int(max_items_per_keyword)),
             },
-            daily_budget=20,
+            daily_budget=budget,
         )
     except Exception as exc:
         console.print(f"  [yellow]抖音搜索任务未入队: {exc}[/yellow]")
@@ -4364,6 +4426,205 @@ def _dy_events_to_history_items(events: list[dict[str, Any]]) -> list[dict[str, 
             }
         )
     return [row for row in rows if row.get("title") or row.get("url")]
+
+
+_INIT_IMPORT_IDENTITY_KEYS = (
+    "content_id",
+    "bvid",
+    "note_id",
+    "aweme_id",
+    "video_id",
+    "yt_video_id",
+    "post_id",
+    "up_name",
+)
+_INIT_IMPORT_TIMESTAMP_KEYS = ("timestamp", "view_at", "fav_time")
+
+
+def _init_import_key(event: dict[str, Any]) -> tuple[str, str, str] | None:
+    """Identify one imported account row: (event type, item, when it happened).
+
+    Returns ``None`` when the row carries no usable identity, which means it
+    cannot be recognised on a later import and must be kept.
+    """
+    event_type = str(event.get("event_type") or event.get("type") or "").strip()
+    raw_metadata = event.get("metadata")
+    metadata: dict[str, Any] = raw_metadata if isinstance(raw_metadata, dict) else {}
+    identity = ""
+    for key in _INIT_IMPORT_IDENTITY_KEYS:
+        candidate = str(metadata.get(key, "") or "").strip()
+        if candidate:
+            identity = candidate
+            break
+    if not identity:
+        identity = str(event.get("url", "") or "").strip()
+    if not identity:
+        return None
+    stamp = ""
+    for key in _INIT_IMPORT_TIMESTAMP_KEYS:
+        value = metadata.get(key)
+        if isinstance(value, (int, float)) and value > 0:
+            stamp = str(int(value))
+            break
+    return (event_type, identity, stamp)
+
+
+def _drop_events_already_imported(
+    database: Any,
+    events: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], int]:
+    """Filter init's import down to rows the ledger has not already recorded.
+
+    Re-running ``init`` re-fetches the same account snapshot and used to persist
+    all of it again: on a real re-run 56% of the ledger became duplicate rows,
+    699 of them keyed to the identical watch timestamp. That is not a second
+    view — it is the same behaviour counted twice, inflating every weight
+    derived from event counts.
+
+    The key includes the timestamp precisely so a genuine repeat still lands: a
+    rewatch has a different ``view_at``, a re-added favourite a different
+    ``fav_time``. Rows with no identity at all are kept — unrecognisable is not
+    the same as duplicate. Best-effort: if the ledger cannot be read, nothing is
+    dropped.
+    """
+    import logging
+
+    if database is None or not events:
+        return events, 0
+    logger = logging.getLogger("openbiliclaw.cli")
+    seen: set[tuple[str, str, str]] = set()
+    try:
+        for row in database.conn.execute("SELECT event_type, url, metadata FROM events"):
+            metadata = row["metadata"]
+            if isinstance(metadata, str):
+                with suppress(Exception):
+                    metadata = json.loads(metadata)
+            key = _init_import_key(
+                {
+                    "event_type": row["event_type"],
+                    "url": row["url"],
+                    "metadata": metadata if isinstance(metadata, dict) else {},
+                }
+            )
+            if key is not None:
+                seen.add(key)
+    except Exception:
+        logger.debug("init import dedup lookup failed; importing everything", exc_info=True)
+        return events, 0
+
+    kept: list[dict[str, Any]] = []
+    skipped = 0
+    for event in events:
+        key = _init_import_key(event)
+        if key is not None and key in seen:
+            skipped += 1
+            continue
+        if key is not None:
+            seen.add(key)
+        kept.append(event)
+    return kept, skipped
+
+
+def _favorites_to_history_rows(favorites: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Turn fetched favourites into individual profile-history rows.
+
+    ``event_type`` is the load-bearing field: it earns these rows the
+    strong-signal weight and the reserved share of ProfileBuilder's sample, and
+    makes their context line read "收藏了" instead of "看了".
+    """
+    from openbiliclaw.sources.event_format import SOURCE_BILIBILI
+
+    rows: list[dict[str, Any]] = []
+    for fav in favorites:
+        title = str(fav.get("title", "")).strip()
+        if not title:
+            continue
+        rows.append(
+            {
+                "title": title,
+                "author_name": str(fav.get("upper", "")).strip(),
+                "event_type": "favorite",
+                "source_platform": SOURCE_BILIBILI,
+                "fav_time": fav.get("fav_time"),
+                "duration": fav.get("duration"),
+            }
+        )
+    return rows
+
+
+def _build_bilibili_init_events(
+    *,
+    history: list[dict[str, Any]],
+    favorites_data: list[dict[str, Any]],
+    following_data: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Turn stage-1 Bilibili data into unified events for the ledger.
+
+    Extracted from ``run_guided_init`` so the identity and metadata each event
+    carries can be tested directly — that identity is what decides whether the
+    recommender knows the user already consumed this content.
+    """
+    from openbiliclaw.sources.event_format import SOURCE_BILIBILI, build_event
+
+    events = [_history_item_to_event(item) for item in history]
+    for fav in favorites_data:
+        folder = str(fav.get("folder", "")).strip()
+        upper = str(fav.get("upper", "")).strip()
+        # Identity is what makes a favourite deduplicable. Without a bvid these
+        # events carried no url and no content_id, so seen_items never learned
+        # about them and a video the user had explicitly saved could come back
+        # as a fresh recommendation.
+        fav_bvid = str(fav.get("bvid", "") or "").strip()
+        fav_metadata: dict[str, Any] = {
+            "folder": folder,
+            "upper": upper,
+        }
+        if fav_bvid:
+            fav_metadata["bvid"] = fav_bvid
+            fav_metadata["content_id"] = fav_bvid
+        for source_field, target in (
+            ("fav_time", "fav_time"),
+            ("pubtime", "pubtime"),
+            ("play_count", "play_count"),
+        ):
+            value = fav.get(source_field)
+            if isinstance(value, (int, float)) and value > 0:
+                fav_metadata[target] = int(value)
+        intro = str(fav.get("intro", "") or "").strip()
+        if intro and intro != "-":
+            fav_metadata["intro"] = intro[:200]
+        duration = fav.get("duration")
+        if isinstance(duration, (int, float)) and duration > 0:
+            fav_metadata["video_duration_seconds"] = float(duration)
+        events.append(
+            build_event(
+                event_type="favorite",
+                source_platform=SOURCE_BILIBILI,
+                title=str(fav.get("title", "")),
+                url=f"https://www.bilibili.com/video/{fav_bvid}" if fav_bvid else "",
+                author=upper,
+                metadata=fav_metadata,
+            )
+        )
+    for user in following_data:
+        sign = str(user.get("sign", "")).strip()
+        name = str(user.get("name", ""))
+        events.append(
+            build_event(
+                event_type="follow",
+                source_platform=SOURCE_BILIBILI,
+                title=name,
+                author=name,
+                context=(
+                    f"在 B 站关注了《{name}》,签名:{sign}" if sign else f"在 B 站关注了《{name}》"
+                ),
+                metadata={
+                    "up_name": name,
+                    "sign": sign,
+                },
+            )
+        )
+    return events
 
 
 def _xhs_events_to_history_items(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -4674,6 +4935,185 @@ def cost(
         "[dim]（费率为公开渠道估算,与 provider 实际账单可能差 ±20%。"
         "tail daemon 日志可以看每次调用的实时 [llm-cost] INFO 行,"
         "cache 命中率 < 30% 的 caller 在 by-caller 表里会标红。）[/dim]",
+    )
+
+
+def _fetch_pending_confirmation_snapshot() -> dict[str, Any]:
+    """Read the canonical pending-confirmation snapshot from the local API."""
+    import httpx
+
+    from openbiliclaw.config import load_config
+
+    port = load_config().api.port
+    url = f"http://127.0.0.1:{port}/api/chat/pending-confirmations"
+    try:
+        with httpx.Client(timeout=5.0, trust_env=False) as client:
+            response = client.get(url)
+            response.raise_for_status()
+            payload = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        raise RuntimeError(f"无法读取 {url}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("待聊确认端点返回了无效对象。")
+    raw_items = payload.get("items", [])
+    raw_count = payload.get("count", 0)
+    if (
+        not isinstance(raw_items, list)
+        or not isinstance(raw_count, int)
+        or isinstance(raw_count, bool)
+    ):
+        raise RuntimeError("待聊确认端点返回了无效列表。")
+    items = [item for item in raw_items if isinstance(item, dict)]
+    if len(items) != len(raw_items):
+        raise RuntimeError("待聊确认端点返回了无效条目。")
+    return {"count": raw_count, "items": items}
+
+
+@app.command()
+def questions() -> None:
+    """只读查看当前待聊的假设与疑惑。"""
+    _require_runtime_config()
+    try:
+        snapshot = _fetch_pending_confirmation_snapshot()
+    except RuntimeError as exc:
+        _print_status_panel(
+            "error",
+            "无法读取待聊确认",
+            f"{exc}\n请确认本地 API 服务已启动。",
+        )
+        raise typer.Exit(code=1) from exc
+
+    items = snapshot["items"]
+    _print_page_title("待聊确认", "只读列表 · 与本地 API 同步")
+    if not items:
+        _print_status_panel("info", "暂无待聊确认", "当前没有高优先级的假设或疑惑。")
+        return
+
+    table = Table(show_header=True, header_style="bold cyan", title="待确认的对话话题")
+    table.add_column("#", justify="right", no_wrap=True)
+    table.add_column("类型", no_wrap=True)
+    table.add_column("话题")
+    table.add_column("置信度", justify="right", no_wrap=True)
+    table.add_column("依据")
+    table.add_column("Ref", no_wrap=True)
+    for index, item in enumerate(items, start=1):
+        kind = "疑惑" if str(item.get("kind", "")) == "confusion" else "猜测"
+        try:
+            confidence = float(item.get("confidence", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        raw_evidence = item.get("evidence_refs", [])
+        evidence = (
+            "、".join(str(value) for value in raw_evidence)
+            if isinstance(raw_evidence, list)
+            else ""
+        )
+        table.add_row(
+            str(index),
+            kind,
+            Text(str(item.get("title", "") or "（未命名）")),
+            f"{confidence:.0%}",
+            Text(evidence or "—"),
+            Text(str(item.get("ref", ""))),
+        )
+    console.print(table)
+    _print_status_panel(
+        "info",
+        f"共 {snapshot['count']} 条",
+        "此命令只读；请在插件或桌面端的对话确认入口继续处理。",
+    )
+
+
+@app.command()
+def ledger(
+    days: int = typer.Option(30, "--days", min=1, max=365, help="统计窗口(天)"),
+    line: bool = typer.Option(False, "--line", help="逐行明细模式(默认按写点聚合计数)"),
+    write_point: str = typer.Option(
+        "", "--write-point", help="只看某个写点(如 dialogue_preference_overwrite)"
+    ),
+    limit: int = typer.Option(200, "--limit", min=1, max=2000, help="逐行模式最多返回行数"),
+) -> None:
+    """查看画像更新台账(profile_update_ledger)。
+
+    每个画像写点(对话学习 / 反馈批 / 12h 整理 / init 建像 / 管线各层 /
+    推测确认 / 觉察同步)在动作结束后追加一行,含 ``outcome``(success|failed)、
+    before/after 摘要与 source_refs。台账为只追加审计底座(v0.3.174+)。
+
+    默认按写点聚合显示条数与成功率;``--line`` 显示逐行明细。
+    """
+    _print_page_title("画像更新台账", f"最近 {days} 天")
+    _ensure_runtime_database_healthy()
+    db = _get_runtime_database()
+
+    rows = db.query_profile_ledger(days=days, write_point=write_point, limit=limit)
+    if not rows:
+        _print_status_panel(
+            "info",
+            "暂无数据",
+            "这台机器最近没有画像写入记录。\n台账从 v0.3.174+ 开始记录,旧的画像更新不会回填。",
+        )
+        return
+
+    if line:
+        line_table = Table(
+            show_header=True, header_style="bold cyan", title="逐行明细 (ledger --line)"
+        )
+        line_table.add_column("时间", no_wrap=True)
+        line_table.add_column("写点", no_wrap=True)
+        line_table.add_column("来源")
+        line_table.add_column("结果", justify="center")
+        line_table.add_column("turn_id", no_wrap=True)
+        line_table.add_column("source_refs")
+        for row in rows:
+            outcome = str(row["outcome"])
+            outcome_cell = (
+                f"[green]{outcome}[/green]" if outcome == "success" else f"[red]{outcome}[/red]"
+            )
+            refs = row.get("source_refs") or []
+            refs_text = ", ".join(str(ref) for ref in refs)[:60]
+            line_table.add_row(
+                str(row["timestamp"]),
+                str(row["write_point"]),
+                str(row["source"]),
+                outcome_cell,
+                str(row["turn_id"]) or "[dim]—[/dim]",
+                refs_text or "[dim]—[/dim]",
+            )
+        console.print(line_table)
+        console.print()
+        _print_status_panel(
+            "info",
+            f"近 {days} 天",
+            f"共 [bold]{len(rows)}[/bold] 行(最多显示 {limit})。",
+        )
+        return
+
+    # Aggregate mode: count per write_point with success/failed split.
+    agg: dict[str, dict[str, int]] = {}
+    for row in rows:
+        wp = str(row["write_point"])
+        bucket = agg.setdefault(wp, {"success": 0, "failed": 0})
+        outcome = str(row["outcome"])
+        bucket[outcome if outcome in bucket else "success"] += 1
+    agg_table = Table(show_header=True, header_style="bold green", title="按写点聚合 (ledger)")
+    agg_table.add_column("写点", no_wrap=True)
+    agg_table.add_column("成功", justify="right")
+    agg_table.add_column("失败", justify="right")
+    agg_table.add_column("合计", justify="right", style="bold yellow")
+    for wp in sorted(agg):
+        bucket = agg[wp]
+        total = bucket["success"] + bucket["failed"]
+        failed_cell = (
+            f"[red]{bucket['failed']}[/red]" if bucket["failed"] else str(bucket["failed"])
+        )
+        agg_table.add_row(wp, str(bucket["success"]), failed_cell, str(total))
+    console.print(agg_table)
+    console.print()
+    _print_status_panel(
+        "info",
+        f"近 {days} 天",
+        f"共 [bold]{len(rows)}[/bold] 行,{len(agg)} 个写点。"
+        "\n[dim]用 --line 看逐行明细,--write-point 过滤单个写点。[/dim]",
     )
 
 
@@ -5428,10 +5868,204 @@ def ext_key_revoke(
     )
 
 
+# ── tls-proxy ──────────────────────────────────────────────────────────────
+
+
+_TLS_PROXY_SAN_OPTION = typer.Option(
+    [],
+    "--san",
+    help="客户端访问时使用的 hostname 或 IP（可多次指定）。不指定则交互式输入。",
+)
+
+
+@tls_proxy_app.command("enable")
+def tls_proxy_enable(
+    san: list[str] = _TLS_PROXY_SAN_OPTION,
+) -> None:
+    """开启 TLS 反代（启动 API 时将自动监听 HTTPS 端口）。"""
+    from openbiliclaw.config import (
+        load_config,
+        save_config,
+        tls_proxy_enabled_override_source,
+    )
+
+    override = tls_proxy_enabled_override_source()
+    if override is not None:
+        _print_status_panel(
+            "error",
+            "无法持久化开启状态",
+            f"TLS 开关由 {override} 覆盖，请在该来源中修改 enabled。",
+        )
+        raise typer.Exit(code=1)
+
+    cfg = load_config()
+
+    # 交互式收集 SAN
+    if not san and not cfg.tls_proxy.san_names:
+        _print_status_panel(
+            "info",
+            "证书域名配置",
+            "其他设备用什么地址访问本服务？\n"
+            "输入 hostname 或 IP，多个用逗号分隔，直接回车跳过（仅本机可用）。\n"
+            "示例：192.168.1.100, mybili.lan",
+        )
+        raw = typer.prompt("SAN（hostname/IP）", default="", show_default=False)
+        san = [s.strip() for s in raw.split(",") if s.strip()]
+
+    if san:
+        cfg.tls_proxy.san_names = san
+
+    if cfg.tls_proxy.enabled and not san:
+        _print_status_panel("info", "已开启", "TLS 反代已是开启状态。")
+        return
+    cfg.tls_proxy.enabled = True
+    try:
+        save_config(cfg)
+    except Exception as exc:
+        _print_status_panel("error", "开启 TLS 反代失败", str(exc))
+        raise typer.Exit(code=1) from exc
+    san_hint = (
+        f"，SAN: {', '.join(cfg.tls_proxy.san_names)}" if cfg.tls_proxy.san_names else "（仅本机）"
+    )
+    _print_status_panel(
+        "success",
+        "已开启",
+        f"TLS 反代已开启（端口 {cfg.tls_proxy.port}{san_hint}）。下次启动 API 时将自动监听。",
+    )
+
+
+@tls_proxy_app.command("disable")
+def tls_proxy_disable() -> None:
+    """关闭 TLS 反代。"""
+    from openbiliclaw.config import (
+        load_config,
+        save_config,
+        tls_proxy_enabled_override_source,
+    )
+
+    override = tls_proxy_enabled_override_source()
+    if override is not None:
+        _print_status_panel(
+            "error",
+            "无法持久化关闭状态",
+            f"TLS 开关由 {override} 覆盖，请在该来源中修改 enabled。",
+        )
+        raise typer.Exit(code=1)
+
+    cfg = load_config()
+    if not cfg.tls_proxy.enabled:
+        _print_status_panel("info", "已关闭", "TLS 反代已是关闭状态。")
+        return
+    cfg.tls_proxy.enabled = False
+    try:
+        save_config(cfg)
+    except Exception as exc:
+        _print_status_panel("error", "关闭 TLS 反代失败", str(exc))
+        raise typer.Exit(code=1) from exc
+    _print_status_panel("success", "已关闭", "TLS 反代已关闭。")
+
+
+@tls_proxy_app.command("status")
+def tls_proxy_status() -> None:
+    """查看 TLS 反代配置状态。"""
+    from openbiliclaw.config import load_config
+
+    cfg = load_config()
+    status_text = "开启" if cfg.tls_proxy.enabled else "关闭"
+    lines = [
+        f"状态:   {status_text}",
+        f"端口:   {cfg.tls_proxy.port}",
+        f"证书目录: {cfg.tls_proxy.cert_dir or '(data/certs)'}",
+        f"SAN:    {', '.join(cfg.tls_proxy.san_names) if cfg.tls_proxy.san_names else '(仅本机 localhost)'}",  # noqa: E501
+    ]
+    extra = ""
+    if not cfg.tls_proxy.enabled:
+        extra = "（启用: openbiliclaw tls-proxy enable）"
+    _print_status_panel("info", "TLS 反代配置", "\n".join(lines) + extra)
+
+
+def _start_tls_proxy_if_enabled(
+    api_host: str, api_port: int, tls_port: int | None = None
+) -> ThreadingHTTPServer | None:
+    """Synchronously prepare TLS, then start its serving thread when enabled.
+
+    If ``tls_port`` is given (from ``serve-api --tls-port``), it overrides the
+    port in ``config.toml``. Any certificate, SSL-context, or bind failure is a
+    fatal startup error: an enabled HTTPS endpoint must never fail silently.
+    """
+    from openbiliclaw.config import load_config, resolve_tls_cert_dir
+
+    cfg = load_config()
+    if not cfg.tls_proxy.enabled:
+        if tls_port is not None:
+            _print_status_panel(
+                "warning",
+                "TLS 反代未启用",
+                "已指定 --tls-port 但 [tls_proxy].enabled 为 false。\n"
+                "执行 `openbiliclaw tls-proxy enable` 或在 config.toml"
+                " 中设置 enabled=true 后重试。",
+            )
+        return None
+    try:
+        from openbiliclaw.tls_proxy import backend_connect_host, create_tls_proxy_server
+    except ImportError as exc:
+        _print_status_panel(
+            "error",
+            "TLS 代理启动失败",
+            'cryptography 未安装。请安装 `pip install "openbiliclaw[tls]"` 后重试。',
+        )
+        raise typer.Exit(code=1) from exc
+    effective_port = tls_port if tls_port is not None else cfg.tls_proxy.port
+    if effective_port == api_port:
+        _print_status_panel(
+            "error",
+            "TLS 代理启动失败",
+            f"TLS 端口 {effective_port} 与 API 端口相同，请配置不同端口。",
+        )
+        raise typer.Exit(code=1)
+    cert_dir = str(resolve_tls_cert_dir(cfg))
+    try:
+        server = create_tls_proxy_server(
+            host="0.0.0.0",
+            port=effective_port,
+            backend_host=backend_connect_host(api_host),
+            backend_port=api_port,
+            cert_dir=cert_dir,
+            auto_gen_certs=True,
+            san_names=cfg.tls_proxy.san_names,
+        )
+    except Exception as exc:
+        _print_status_panel("error", "TLS 代理启动失败", str(exc))
+        raise typer.Exit(code=1) from exc
+    thread = threading.Thread(
+        target=server.serve_forever,
+        daemon=True,
+        name="tls-proxy",
+    )
+    thread.start()
+    _print_status_panel(
+        "info",
+        "TLS 反代已启动",
+        f"HTTPS 端口 {effective_port} → 后端 {api_port}。\n"
+        f"浏览器/插件可连接 https://<本机地址>:{effective_port}",
+    )
+    return server
+
+
+_SERVE_API_TLS_PORT_OPTION = typer.Option(
+    None,
+    "--tls-port",
+    min=1,
+    max=65535,
+    help="TLS 反代监听端口（覆盖 config.toml 的 [tls_proxy].port，不指定则用配置值）",
+)
+
+
 @app.command("serve-api")
 def serve_api(
     host: str = typer.Option("0.0.0.0", "--host", help="API 监听地址"),
     port: int = typer.Option(8420, "--port", min=1, max=65535, help="API 监听端口"),
+    tls_port: int | None = _SERVE_API_TLS_PORT_OPTION,
 ) -> None:
     """启动容器友好的 API 服务入口."""
     _print_page_title("启动 OpenBiliClaw", "容器 API 服务")
@@ -5450,6 +6084,7 @@ def serve_api(
             "（宿主机执行 `docker exec -it openbiliclaw-backend openbiliclaw init`）。",
         )
     _warn_if_pause_on_disconnect_requires_presence()
+    _start_tls_proxy_if_enabled(host, port, tls_port)
     _run_api_server(host=host, port=port)
 
 
@@ -6252,6 +6887,8 @@ async def _fetch_bilibili_init_data(
     Favorites/following limits are resolved by the caller; history uses
     ``_INIT_BILIBILI_HISTORY_LIMIT`` unless a caller passes an override.
     """
+    from openbiliclaw.bilibili.api import favorite_item_is_dead
+
     hist = await client.get_user_history(max_items=history_limit)
 
     favs: list[dict[str, Any]] = []
@@ -6273,11 +6910,38 @@ async def _fetch_bilibili_init_data(
                 upper = item.get("upper", {}) if isinstance(item, dict) else {}
                 if not isinstance(upper, dict):
                     upper = {}
+                raw = item if isinstance(item, dict) else {}
+                if favorite_item_is_dead(raw):
+                    # Taken-down videos come back with the literal title
+                    # "已失效视频" (6% of a real 200-item sample). Keeping them
+                    # told the analyzer the user is into "已失效视频" and put
+                    # that string in the ledger as a favourite signal. We know
+                    # nothing about what the video was, so it is not a signal.
+                    continue
+                raw_cnt = raw.get("cnt_info")
+                cnt_info: dict[str, Any] = raw_cnt if isinstance(raw_cnt, dict) else {}
                 favs.append(
                     {
-                        "title": item.get("title", "") if isinstance(item, dict) else str(item),
+                        "title": raw.get("title", "") if raw else str(item),
                         "upper": str(upper.get("name", "")).strip(),
                         "folder": folder_title,
+                        # Identity, time and reach: carried for the event
+                        # ledger, not for prompts (stripped before _favorites
+                        # below). A favourited video must never be recommended
+                        # back, dedup needs a bvid, and play count is what tells
+                        # a niche-digger apart from a trend-follower.
+                        "bvid": str(raw.get("bvid", "") or "").strip(),
+                        "fav_time": raw.get("fav_time"),
+                        "duration": raw.get("duration"),
+                        "pubtime": raw.get("pubtime"),
+                        "play_count": cnt_info.get("play"),
+                        # Kept in the ledger, deliberately out of prompts: on a
+                        # real 200-item sample 154 entries had an intro, median
+                        # 105 chars, but a large share is 充电 / 大会员 promo
+                        # boilerplate. Storing it means a later pass can use it
+                        # without re-fetching; feeding it to the portrait now
+                        # would spend ~20k chars per init to dilute the signal.
+                        "intro": str(raw.get("intro", "") or "").strip()[:200],
                     }
                 )
             if len(favs) >= favorite_limit:
@@ -6574,7 +7238,7 @@ async def run_guided_init(
     least one selected source must yield signals or stage 1 raises
     ``GuidedInitError("empty_signals")``. ``client`` may be ``None`` when
     ``include_bili`` is False. Stage 1 has one wall-clock budget shared by all
-    selected sources (10 minutes by default), with shorter Bilibili/X caps and
+    selected sources (30 minutes by default), with shorter Bilibili/X caps and
     cooperative cancellation for extension collectors. Collected events are
     committed in one SQLite transaction before preference analysis starts.
 
@@ -6987,6 +7651,11 @@ async def run_guided_init(
             f" / 点赞 [green]{dy_scope_counts.get('dy_like', 0)}[/green] 个"
             f" / 关注 [green]{dy_scope_counts.get('dy_follow', 0)}[/green] 人"
         )
+    elif dy_status == "degraded":
+        console.print(
+            "  [yellow]抖音已导入部分信号，但至少一个范围未完成 API 分页；"
+            "本次结果按不完整处理，请检查扩展日志后重试。[/yellow]"
+        )
     elif dy_status == "empty":
         console.print(
             "  [yellow]抖音任务跑通但 0 条 videos —— "
@@ -7170,42 +7839,11 @@ async def run_guided_init(
 
     # Build events from all data sources via the unified event_format
     # builder so B站 / 小红书 / future-source events share one shape.
-    from openbiliclaw.sources.event_format import SOURCE_BILIBILI, build_event
-
-    events = [_history_item_to_event(item) for item in history]
-    for fav in favorites_data:
-        folder = str(fav.get("folder", "")).strip()
-        upper = str(fav.get("upper", "")).strip()
-        events.append(
-            build_event(
-                event_type="favorite",
-                source_platform=SOURCE_BILIBILI,
-                title=str(fav.get("title", "")),
-                author=upper,
-                metadata={
-                    "folder": folder,
-                    "upper": upper,
-                },
-            )
-        )
-    for user in following_data:
-        sign = str(user.get("sign", "")).strip()
-        name = str(user.get("name", ""))
-        events.append(
-            build_event(
-                event_type="follow",
-                source_platform=SOURCE_BILIBILI,
-                title=name,
-                author=name,
-                context=(
-                    f"在 B 站关注了《{name}》,签名:{sign}" if sign else f"在 B 站关注了《{name}》"
-                ),
-                metadata={
-                    "up_name": name,
-                    "sign": sign,
-                },
-            )
-        )
+    events = _build_bilibili_init_events(
+        history=history,
+        favorites_data=favorites_data,
+        following_data=following_data,
+    )
     bilibili_event_count = len(events)
     # X likes/bookmarks are direct-fetched here (no extension task handler to
     # propagate them), so — like B站 — they must be persisted in this run.
@@ -7278,13 +7916,28 @@ async def run_guided_init(
                 "bangumi": len(bangumi_events),
             }
         )
+    # Re-running init re-fetches the same snapshot; without this the ledger
+    # counts every one of those rows a second time (measured: 56% duplicates).
+    events_to_persist, already_imported = _drop_events_already_imported(
+        getattr(memory, "_database", None),
+        events_to_persist,
+    )
+    if already_imported:
+        console.print(
+            f"  [dim]跳过账本里已有的 {already_imported} 条信号"
+            f"（重跑 init 不会把同一次行为记两遍）[/dim]"
+        )
     propagate_events = getattr(memory, "propagate_events", None)
     if callable(propagate_events):
         await propagate_events(events_to_persist)
     else:
         for event in events_to_persist:
             await memory.propagate_event(event)
-    await _stage_done(1)
+    await _stage_done(
+        1,
+        status="warning" if dy_status == "degraded" else "ok",
+        reason="douyin_degraded" if dy_status == "degraded" else None,
+    )
 
     # ── Stage 2: analyze preferences ──
     await _stage_started(2)
@@ -7430,10 +8083,23 @@ async def run_guided_init(
     )
     combined_history: list[dict[str, Any]] = list(history)
     if favorites_data:
+        # One favourite is one signal, so each becomes its own history row
+        # alongside the views. They used to be collapsed into a single
+        # "[收藏夹汇总]" item whose ``_favorites`` list nothing ever read — the
+        # portrait saw the sentence "共 200 个收藏，涵盖: 默认收藏夹" and not a
+        # single title. Deliberately choosing to save something is the
+        # strongest signal a user emits, and the whole of it was invisible.
+        #
+        # ``event_type`` is what earns them the strong-signal weight and the
+        # reserved share of the sample in ProfileBuilder, and what makes their
+        # context line read "收藏了" rather than "看了".
+        combined_history.extend(_favorites_to_history_rows(favorites_data))
+        # The folder names stay as one aggregate line: they are the user's own
+        # labels for what they save ("AI Agent", "学习"), which no per-item
+        # field carries.
         combined_history.append(
             {
                 "title": "[收藏夹汇总]",
-                "_favorites": favorites_data,
                 "_favorites_summary": f"共 {len(favorites_data)} 个收藏，"
                 + "涵盖: "
                 + ", ".join(
@@ -8098,6 +8764,7 @@ def init(
     xhs_status = result.xhs_status
     dy_events = result.dy_events
     dy_scope_counts = result.dy_scope_counts
+    dy_status = result.dy_status
     yt_events = result.yt_events
     yt_scope_counts = result.yt_scope_counts
     yt_status = result.yt_status
@@ -8112,6 +8779,8 @@ def init(
     bangumi_status = str(getattr(result, "bangumi_status", "skipped"))
     discovered_count = result.discovered_count
     discovery_error = result.discovery_error
+    dy_degraded = dy_status == "degraded"
+    partial_success = discovery_error or dy_degraded
 
     if result.discover_exc is not None:
         _print_status_panel(
@@ -8119,10 +8788,17 @@ def init(
             "部分完成",
             result.discovery_detail + " 也可稍后手动执行 `openbiliclaw discover`。",
         )
+    if dy_degraded:
+        _print_status_panel(
+            "warning",
+            "抖音采集部分完成",
+            "dy_status=degraded：已采到的抖音事件仍已用于画像建模，"
+            "但至少一个范围未能证明分页完整；请检查扩展日志后重试补齐。",
+        )
 
     _print_status_panel(
-        "success" if not discovery_error else "warning",
-        "初始化完成" if not discovery_error else "初始化部分完成",
+        "success" if not partial_success else "warning",
+        "初始化完成" if not partial_success else "初始化部分完成",
         "初始化摘要",
     )
 
@@ -8174,6 +8850,10 @@ def init(
         ("🎵 抖音 点赞", f"{dy_like} 个"),
         ("🎵 抖音 关注", f"{dy_follow} 人"),
         ("🌐 抖音 入库事件", f"{len(dy_events)} 条"),
+        (
+            "🎵 抖音 采集状态(dy_status)",
+            "部分完成 (degraded)" if dy_degraded else dy_status,
+        ),
         ("▶ YouTube 观看历史", f"{yt_history_count} 条"),
         ("▶ YouTube 订阅频道", f"{yt_subs_count} 个"),
         ("▶ YouTube 点赞", f"{yt_likes_count} 个"),
@@ -8733,6 +9413,12 @@ def fetch_douyin(
                 f" / 关注 [green]{scope_counts.get('dy_follow', 0)}[/green] 人"
             )
             console.print(f"  共 [green]{event_count}[/green] 条事件已由 daemon 写入 memory。")
+        elif status_label == "degraded":
+            console.print(
+                "  [yellow]抖音已导入部分信号，但至少一个范围未完成 API 分页；"
+                "任务已标记为不完整，请检查扩展日志后重试。[/yellow]"
+            )
+            console.print(f"  已保留 [yellow]{event_count}[/yellow] 条有效事件。")
         elif status_label == "empty":
             console.print(
                 "  [yellow]抖音任务跑通但 0 条 videos —— 未登录抖音(常见,"
@@ -8809,9 +9495,10 @@ def search_douyin(
         console.print(
             "  [dim]抖音搜索任务超时:扩展未连接 / 任务还在跑。可加 --wait-seconds 240 重试。[/dim]"
         )
-        return
+        raise typer.Exit(code=1)
     if status_label == "failed":
         console.print("  [yellow]抖音搜索任务失败 —— 检查扩展日志。[/yellow]")
+        raise typer.Exit(code=1)
 
 
 @app.command("fetch-xhs")
@@ -10676,7 +11363,7 @@ def _run_xhs_discovery(*, force: bool) -> None:
         llm_service=llm_service,
         enabled=True,
         daily_budget=int(getattr(xhs_cfg, "daily_search_budget", 0)),
-        min_interval_hours=0 if force else 4,
+        min_interval_minutes=0 if force else int(getattr(xhs_cfg, "min_interval_minutes", 3)),
     )
     result = asyncio.run(producer.produce_if_due())
 
@@ -10692,7 +11379,12 @@ def _run_xhs_discovery(*, force: bool) -> None:
                 ("入队关键词数", str(enqueued)),
                 ("尝试关键词数", str(attempted)),
                 ("今日预算", str(int(getattr(xhs_cfg, "daily_search_budget", 0)))),
-                ("节流开关", "已跳过（--force）" if force else "4 小时节流"),
+                (
+                    "节流开关",
+                    "已跳过（--force）"
+                    if force
+                    else f"{int(getattr(xhs_cfg, 'min_interval_minutes', 3))} 分钟节流",
+                ),
             ],
         )
         return
@@ -10705,7 +11397,7 @@ def _run_xhs_discovery(*, force: bool) -> None:
         ),
         "throttled": (
             "info",
-            "距离上次关键词生产不足 4 小时",
+            f"距离上次关键词生产不足 {int(getattr(xhs_cfg, 'min_interval_minutes', 3))} 分钟",
             "可使用 `--force` 忽略节流重新触发。",
         ),
         "no_profile": (
@@ -10889,10 +11581,33 @@ def _run_douyin_discovery(
     )
     _print_page_title("抖音内容发现", f"plugin/direct {' / '.join(normalized_sources)}")
     if not discovered:
+        outcomes = set(result.source_outcomes.values())
+        if "timeout" in outcomes:
+            _print_status_panel(
+                "warning",
+                "抖音插件任务等待超时",
+                "任务可能仍在浏览器后台执行；可提高 "
+                "OPENBILICLAW_DY_DISCOVERY_SEARCH_WAIT_SECONDS 后重试并检查任务状态。",
+            )
+            raise typer.Exit(code=1)
+        if "failed" in outcomes:
+            _print_status_panel(
+                "warning",
+                "抖音插件任务执行失败",
+                "任务已返回失败终态；请检查扩展日志和 dy_tasks 的结构化错误。",
+            )
+            raise typer.Exit(code=1)
+        if outcomes and outcomes <= {"budget_exhausted"}:
+            _print_status_panel(
+                "info",
+                "抖音 discovery 分支预算已耗尽",
+                "本轮没有执行抓取；请调整对应 daily_*_budget 或等待 UTC 日预算重置。",
+            )
+            raise typer.Exit(code=1)
         _print_status_panel(
             "info",
             "没有发现到新抖音内容",
-            "可能是 Cookie 失效、签名被拒绝，或本轮关键词没有结果。",
+            "插件任务已正常完成但没有候选；可能是关键词没有结果或页面触发了软风控。",
         )
         return
 
@@ -10932,6 +11647,152 @@ def _build_discovery_candidate_pipeline(
         pool_target_count=int(getattr(config.scheduler, "pool_target_count", 300)),
         admission_min_score=admission_min_score,
     )
+
+
+def _run_douyin_formal_discovery(*, limit: int) -> None:
+    """Run the formal Douyin producer without the daemon master switch."""
+    from openbiliclaw.config import load_config
+    from openbiliclaw.runtime.douyin_producer import build_douyin_discovery_producer
+    from openbiliclaw.runtime.keyword_fetch import KeywordFetchCoordinator
+    from openbiliclaw.soul.engine import SoulProfileNotInitializedError
+    from openbiliclaw.sources.douyin_auth import resolve_douyin_cookie
+
+    _require_runtime_config()
+    config = load_config()
+    dy_cfg = getattr(getattr(config, "sources", None), "douyin", None)
+    if dy_cfg is None or not bool(getattr(dy_cfg, "enabled", False)):
+        _print_status_panel(
+            "warning",
+            "抖音 discovery 未启用",
+            "请在配置页或 config.toml 中启用 [sources.douyin].enabled。",
+        )
+        raise typer.Exit(code=1)
+    mode = str(getattr(dy_cfg, "mode", "direct")).strip().lower()
+    if mode != "direct":
+        _print_status_panel(
+            "warning",
+            "抖音 discovery 模式暂不支持",
+            f"当前 mode={mode!r}；本版本仅支持 direct。",
+        )
+        raise typer.Exit(code=1)
+
+    cookie_env = str(getattr(dy_cfg, "cookie_env", "OPENBILICLAW_DOUYIN_COOKIE"))
+    if not resolve_douyin_cookie(data_dir=config.data_path, cookie_env=cookie_env):
+        _print_status_panel(
+            "warning",
+            "缺少抖音 Cookie",
+            f"请设置 {cookie_env}，或保持浏览器扩展在线以同步登录 Cookie。",
+        )
+        raise typer.Exit(code=1)
+
+    database = _get_runtime_database()
+    if not hasattr(database, "conn"):
+        _print_status_panel("warning", "抖音任务表不可用", "当前数据库不支持 dy_tasks。")
+        raise typer.Exit(code=1)
+
+    soul_engine = _build_soul_engine()
+    try:
+        asyncio.run(soul_engine.get_profile())
+    except SoulProfileNotInitializedError as exc:
+        _print_status_panel(
+            "warning",
+            "尚未初始化用户画像",
+            "请先执行 `openbiliclaw init` 拉取历史并生成初始画像。",
+        )
+        raise typer.Exit(code=1) from exc
+
+    discovery_engine = _build_discovery_engine()
+    candidate_pipeline = _build_discovery_candidate_pipeline(
+        config=config,
+        database=database,
+        discovery_engine=discovery_engine,
+    )
+    keyword_fetch = KeywordFetchCoordinator(
+        database=database,
+        discovery_config=config.discovery,
+    )
+    producer = build_douyin_discovery_producer(
+        config=config,
+        database=database,
+        soul_engine=soul_engine,
+        discovery_engine=discovery_engine,
+        candidate_pipeline=candidate_pipeline,
+        keyword_fetch=keyword_fetch,
+        # Manual discover is source-scoped and must not inherit the daemon's
+        # scheduler master switch.
+        enabled_override=True,
+    )
+    if producer is None:
+        _print_status_panel(
+            "warning",
+            "抖音 discovery producer 未启动",
+            "请确认抖音来源已启用、mode=direct 且任务数据库可用。",
+        )
+        raise typer.Exit(code=1)
+
+    result = asyncio.run(producer.produce_if_due(limit=limit))
+    reason = str(result.get("reason", ""))
+    discovered = int(cast("int | float | str | bool", result.get("discovered", 0)) or 0)
+    enqueued = int(cast("int | float | str | bool", result.get("enqueued", 0)) or 0)
+    source_counts_raw = result.get("source_counts", {})
+    source_counts = source_counts_raw if isinstance(source_counts_raw, dict) else {}
+    source_counts_text = ", ".join(
+        f"{source}:{count}" for source, count in sorted(source_counts.items())
+    )
+    source_outcomes_raw = result.get("source_outcomes", {})
+    source_outcomes = source_outcomes_raw if isinstance(source_outcomes_raw, dict) else {}
+    source_outcomes_text = ", ".join(
+        f"{source}:{outcome}" for source, outcome in sorted(source_outcomes.items())
+    )
+
+    _print_page_title("抖音内容发现", "正式 producer · unified keywords · candidate pipeline")
+    if reason in {"ok", "empty"}:
+        _print_key_value_table(
+            "发现摘要",
+            [
+                ("发现条数", str(discovered)),
+                ("入池候选", str(enqueued)),
+                ("来源", "douyin"),
+                ("来源分布", source_counts_text or "（无）"),
+                ("分支状态", source_outcomes_text or "（无）"),
+            ],
+        )
+        if reason == "empty":
+            console.print("  [dim]本轮分支正常完成，但没有产生新候选。[/dim]")
+            return
+        for index, item in enumerate(candidate_pipeline.last_admitted_items[:5], start=1):
+            _print_discovered_content_preview(item, index)
+        return
+
+    messages = {
+        "disabled": ("info", "抖音 discovery 已禁用", "请启用抖音来源后重试。"),
+        "throttled": (
+            "info",
+            "距离上次抖音 discovery 不足最小调度间隔",
+            "可在配置页调整抖音最小调度间隔分钟数。",
+        ),
+        "pool_full": ("info", "候选池已满", "当前无需继续补充抖音候选。"),
+        "no_profile": ("warning", "尚未初始化 Soul 画像", "请先执行 `openbiliclaw init`。"),
+        "budget_exhausted": (
+            "warning",
+            "抖音 discovery 分支预算已耗尽",
+            "请调整对应 daily_*_budget 或等待 UTC 日预算重置。",
+        ),
+        "timeout": (
+            "warning",
+            "抖音插件任务等待超时",
+            "任务可能仍在浏览器后台执行；请检查扩展连接和 dy_tasks 状态。",
+        ),
+        "error": (
+            "warning",
+            "抖音 discovery 执行失败",
+            "请检查后端及扩展日志中的结构化错误。",
+        ),
+    }
+    kind, title, body = messages.get(reason, ("warning", "未知状态", reason or "无详细信息"))
+    _print_status_panel(kind, title, body)
+    if reason not in {"throttled", "pool_full"}:
+        raise typer.Exit(code=1)
 
 
 def _run_zhihu_discovery(*, limit: int) -> None:
@@ -11442,9 +12303,9 @@ def discover(
             _print_status_panel(
                 "info",
                 "--strategy 仅对 Bilibili 生效",
-                "douyin 渠道走 direct-cookie discovery，已忽略策略过滤。",
+                "douyin 渠道走正式 producer，已忽略策略过滤。",
             )
-        _run_douyin_discovery(limit=limit)
+        _run_douyin_formal_discovery(limit=limit)
         return
 
     if source_normalized == "zhihu":

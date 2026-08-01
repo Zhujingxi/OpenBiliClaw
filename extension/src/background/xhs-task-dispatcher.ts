@@ -7,7 +7,9 @@
  *   2. Listens for ``XHS_TASK_RESULT`` from the content script.
  *   3. POSTs the result back to ``/api/sources/xhs/task-result``.
  *   4. Closes the tab.
- *   5. Waits ``task_interval_seconds`` before asking for the next task.
+ *   5. Polls locally on a 45 s alarm; the backend persistently enforces the
+ *      configured ``task_interval_seconds`` before handing out another
+ *      search/creator task.
  *
  * Only one task is in flight at a time (mutex). A hard 30s timeout per
  * task protects against hung pages. Cross-source mutex (see
@@ -87,7 +89,7 @@ export interface XhsTaskResult {
   urls: string[];
   notes?: unknown[];
   scope_counts?: Record<string, number>;
-  status: "ok" | "empty" | "partial" | "error";
+  status: "ok" | "empty" | "partial" | "error" | "rate_limited";
   error?: string;
   next_url?: string;
   debug?: Record<string, unknown>;
@@ -460,6 +462,7 @@ function armTaskLoadListener(task: XhsLegacyTask): void {
 export async function executeTask(
   task: XhsTask,
   nativeDependencies: XhsNativeSaveDispatchDependencies = XHS_NATIVE_SAVE_DISPATCH_DEPENDENCIES,
+  mutexAlreadyHeld = false,
 ): Promise<void> {
   if (task.type === "native_save") {
     if (taskInFlight) return;
@@ -472,10 +475,10 @@ export async function executeTask(
     return;
   }
   if (taskInFlight) return;
-  // Cross-source mutex — bail if Douyin dispatcher is currently
-  // running a task. The XHS task remains in the queue and the next
-  // alarm tick (60s) retries. See dispatcher-mutex.ts for rationale.
-  if (!tryAcquireDispatcherMutex("xhs")) return;
+  // Direct callers acquire here. pollXhsTaskOnce acquires before claiming
+  // from the backend so a busy Douyin dispatcher cannot strand an already
+  // claimed XHS task in ``in_progress``.
+  if (!mutexAlreadyHeld && !tryAcquireDispatcherMutex("xhs")) return;
   taskInFlight = true;
   currentTaskId = task.id;
   currentTask = task;
@@ -569,9 +572,30 @@ export function pollXhsTaskOnce(): Promise<void> {
   const running = (async () => {
     await ensureNativeSaveTaskRecovery();
     if (taskInFlight) return;
-    const task = await fetchNextTask();
-    if (!task) return;
-    await executeTask(task);
+    // Acquire the cross-source mutex before GET /next-task. That endpoint
+    // atomically changes a task from pending to in_progress, so claiming first
+    // and discovering a busy Douyin dispatcher afterwards would permanently
+    // strand the task without ever opening a tab or posting a result.
+    if (!tryAcquireDispatcherMutex("xhs")) return;
+    let releaseOnExit = true;
+    try {
+      const task = await fetchNextTask();
+      if (!task) return;
+      if (task.type === "native_save") {
+        // Native-save has its own durable runner/recovery path and historically
+        // does not hold the legacy discovery mutex while it executes.
+        releaseDispatcherMutex("xhs");
+        releaseOnExit = false;
+        await executeTask(task);
+        return;
+      }
+      await executeTask(task, XHS_NATIVE_SAVE_DISPATCH_DEPENDENCIES, true);
+      // The legacy task lifecycle now owns the mutex; cleanupTask releases it
+      // after a result, timeout, or tab/message failure.
+      releaseOnExit = false;
+    } finally {
+      if (releaseOnExit) releaseDispatcherMutex("xhs");
+    }
   })();
   pollInFlight = running;
   void running.finally(() => {

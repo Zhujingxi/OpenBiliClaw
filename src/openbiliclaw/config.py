@@ -6,6 +6,7 @@ SchedulerConfig.enabled is the authoritative gate for background LLM loops.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import os
 import re
@@ -13,6 +14,7 @@ import shutil
 import tomllib
 from copy import deepcopy
 from dataclasses import dataclass, field, fields
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
@@ -84,8 +86,8 @@ _DEFAULT_EXTENSION_DISCONNECT_GRACE_SECONDS = 90
 _DEFAULT_EXTENSION_TOKEN_TTL_HOURS = 24
 _DEFAULT_REFRESH_CHECK_INTERVAL_SECONDS = 60
 _DEFAULT_SIGNAL_EVENT_THRESHOLD = 6
-_DEFAULT_TRENDING_REFRESH_HOURS = 3
-_DEFAULT_EXPLORE_REFRESH_HOURS = 12
+_DEFAULT_TRENDING_REFRESH_MINUTES = 3
+_DEFAULT_EXPLORE_REFRESH_MINUTES = 3
 _DEFAULT_DISCOVERY_LIMIT = 30
 _DEFAULT_DELIGHT_QUEUE_LIMIT = 20
 _DEFAULT_PROACTIVE_PUSH_INTERVAL_SECONDS = 120
@@ -139,8 +141,11 @@ _DEFAULT_DANMAKU_MAX_CHARS = 500
 DEFAULT_LLM_CONCURRENCY = 4
 _MIN_LLM_CONCURRENCY = 1
 _MAX_LLM_CONCURRENCY = 16
-_DEFAULT_LLM_TIMEOUT = 300
+# Slow reasoning / OpenAI-compatible relays can legitimately take well over
+# five minutes for one long response; 20 minutes is the product request ceiling.
+_DEFAULT_LLM_TIMEOUT = 1200
 _MIN_LLM_TIMEOUT = 10
+_MAX_LLM_TIMEOUT = 1200
 _DEFAULT_POOL_SOURCE_SHARES = {
     "bilibili": 5,
     "xiaohongshu": 1,
@@ -901,8 +906,13 @@ class SchedulerConfig:
     account_sync_interval_hours: int = 6
     refresh_check_interval_seconds: int = _DEFAULT_REFRESH_CHECK_INTERVAL_SECONDS
     signal_event_threshold: int = _DEFAULT_SIGNAL_EVENT_THRESHOLD
-    trending_refresh_hours: int = _DEFAULT_TRENDING_REFRESH_HOURS
-    explore_refresh_hours: int = _DEFAULT_EXPLORE_REFRESH_HOURS
+    # 2026-07-26: unit changed hours → minutes and both aligned to 3, so the
+    # Bilibili main-discovery cadence matches every source producer's
+    # ``min_interval_minutes``. A pool deficit is still the gate in front of
+    # these; the interval is a floor, not a schedule. Legacy
+    # ``*_refresh_hours`` keys are still read and converted on load.
+    trending_refresh_minutes: int = _DEFAULT_TRENDING_REFRESH_MINUTES
+    explore_refresh_minutes: int = _DEFAULT_EXPLORE_REFRESH_MINUTES
     discovery_limit: int = _DEFAULT_DISCOVERY_LIMIT
     delight_queue_limit: int = _DEFAULT_DELIGHT_QUEUE_LIMIT
     proactive_push_interval_seconds: int = _DEFAULT_PROACTIVE_PUSH_INTERVAL_SECONDS
@@ -928,6 +938,12 @@ class SchedulerConfig:
     avoidance_speculation_confirmation_threshold: int = 3
     avoidance_speculation_max_active: int = 5
     feedback_batch_threshold: int = _DEFAULT_FEEDBACK_BATCH_THRESHOLD
+    # 统一兴趣更新线（docs/plans/2026-07-27-unified-interest-line-spec.md）。
+    # true 时 /api/feedback 把反馈喂进认知流水线快线，并让含 FEEDBACK 信号的
+    # INTEREST 缓冲在达到 ``feedback_batch_threshold`` 时绕过最短间隔立即消费。
+    # 2026-07-28 经真实 A/B 三道门与 A/A 噪声控制后默认开启；false 保留为
+    # 逐字节回退到旧反馈批线的紧急开关。
+    unified_interest_line: bool = True
     # Default off. The auto-updater pulls from GitHub releases and
     # restarts the backend when a newer version is detected, but it has
     # historically caused restart loops when the local
@@ -1051,8 +1067,15 @@ class XiaohongshuSourceConfig:
     daily_search_budget: int = 0
     # Max creator-subscription fetch tasks per day.
     daily_creator_budget: int = 0
-    # Seconds the extension dispatcher waits between tasks.
-    task_interval_seconds: int = 45
+    # Minimum seconds the backend permits between extension-dispatched
+    # search/creator task claims. Persisted centrally so MV3/browser restarts
+    # and multiple extension profiles cannot bypass the pacing floor.
+    task_interval_seconds: int = 300
+    # Minimum gap between two producer runs for this source. Aligned to 3
+    # minutes across every source (2026-07-26) so pool replenishment has one
+    # cadence instead of eight; the per-run size is still bounded by
+    # ``[scheduler].discovery_limit`` and each branch's daily budget.
+    min_interval_minutes: int = 3
 
 
 @dataclass
@@ -1071,6 +1094,11 @@ class DouyinSourceConfig:
     daily_hot_budget: int = 0
     daily_feed_budget: int = 0
     request_interval_seconds: int = 2
+    # Minimum gap between two producer runs for this source. Aligned to 3
+    # minutes across every source (2026-07-26) so pool replenishment has one
+    # cadence instead of eight; the per-run size is still bounded by
+    # ``[scheduler].discovery_limit`` and each branch's daily budget.
+    min_interval_minutes: int = 3
 
 
 @dataclass
@@ -1087,7 +1115,7 @@ class YoutubeSourceConfig:
     daily_trending_budget: int = 0
     daily_channel_budget: int = 0
     request_interval_seconds: int = 2
-    min_interval_minutes: int = 60
+    min_interval_minutes: int = 3
 
 
 @dataclass
@@ -1109,7 +1137,7 @@ class TwitterSourceConfig:
     daily_feed_budget: int = 0
     daily_creator_budget: int = 0
     request_interval_seconds: int = 3
-    min_interval_minutes: int = 60
+    min_interval_minutes: int = 3
 
 
 @dataclass
@@ -1129,7 +1157,7 @@ class ZhihuSourceConfig:
     daily_creator_budget: int = 0
     daily_related_budget: int = 0
     request_interval_seconds: int = 3
-    min_interval_minutes: int = 60
+    min_interval_minutes: int = 3
 
 
 @dataclass
@@ -1151,7 +1179,7 @@ class RedditSourceConfig:
     daily_subreddit_budget: int = 300
     daily_related_budget: int = 300
     request_interval_seconds: int = 3
-    min_interval_minutes: int = 60
+    min_interval_minutes: int = 3
 
 
 @dataclass
@@ -1171,7 +1199,7 @@ class BangumiSourceConfig:
     daily_ranked_budget: int = 100
     daily_latest_budget: int = 100
     request_interval_seconds: int = 1
-    min_interval_minutes: int = 60
+    min_interval_minutes: int = 3
     bootstrap_limit: int = 300
 
 
@@ -1180,6 +1208,11 @@ class BilibiliSourceConfig:
     """Bilibili discovery source switch."""
 
     enabled: bool = True
+    # Minimum gap between two producer runs for this source. Aligned to 3
+    # minutes across every source (2026-07-26) so pool replenishment has one
+    # cadence instead of eight; the per-run size is still bounded by
+    # ``[scheduler].discovery_limit`` and each branch's daily budget.
+    min_interval_minutes: int = 3
 
 
 @dataclass
@@ -1278,11 +1311,39 @@ class SoulPreferenceConfig:
     satisfaction_filter_enabled: bool = True
 
 
+# Posture-gate save-time enforce readiness thresholds (spec §Phase 3, r4/R3-3).
+# Calibrated to the single-user shadow cadence (~1-3 gate calls/day): 14 days of
+# observation, ≥10 valid judgements, and recent coverage in the last 7 days.
+# Revisit after any provider/model swap (pitfall #3).
+POSTURE_GATE_ENFORCE_MIN_OBSERVATION_DAYS = 14
+POSTURE_GATE_ENFORCE_MIN_VALID_JUDGEMENTS = 10
+# Recent-coverage gate: ≥1 valid judgement within the last 7 days.
+POSTURE_GATE_ENFORCE_RECENT_WINDOW_DAYS = 7
+POSTURE_GATE_ENFORCE_MIN_RECENT_COUNT = 1
+_POSTURE_GATE_MODES = frozenset({"shadow", "enforce", "off"})
+_TOPIC_LIFECYCLE_SERIALIZATION_MODES = frozenset({"off", "on"})
+
+
 @dataclass
 class SoulConfig:
-    """Soul engine knobs. Currently only the preference sub-section."""
+    """Soul engine knobs.
+
+    ``posture_gate_mode``: deep-write consistency gate (spec §Phase 3).
+    ``shadow`` (default) judges deep writes on an async side-channel without
+    blocking; ``enforce`` gates synchronously; ``off`` is a full bypass whose
+    behaviour is byte-identical to the pre-gate pipeline. ``enforce`` is only
+    savable once shadow data proves ≥14 days of observation (save-time guard),
+    unless ``posture_gate_force_enforce`` overrides it (documented risk).
+    """
 
     preference: SoulPreferenceConfig = field(default_factory=SoulPreferenceConfig)
+    posture_gate_mode: str = "shadow"
+    posture_gate_force_enforce: bool = False
+    # Topic-lifecycle serialization (spec §Phase 4). ``off`` (default) keeps the
+    # LLM-facing profile serialization byte-identical to the pre-lifecycle shape
+    # (回放门); ``on`` excludes archived topics from that serialization. This is
+    # the only "minimal consumption" of the topic state machine in this version.
+    topic_lifecycle_serialization: str = "off"
 
 
 @dataclass
@@ -1306,6 +1367,24 @@ class ApiAuthConfig:
     extension_access_enabled: bool = False
     extension_access_keys: list[str] = field(default_factory=list)
     extension_token_ttl_hours: int = _DEFAULT_EXTENSION_TOKEN_TTL_HOURS
+
+
+@dataclass
+class TlsProxyConfig:
+    """Optional TLS reverse proxy for LAN / self-managed access.
+
+    When ``enabled`` is true and ``cryptography`` is installed,
+    ``serve-api`` prepares a TLS listener synchronously, then serves it in a
+    background thread and forwards to the API.
+
+    ``cert_dir`` defaults to ``{data_dir}/certs`` at runtime;
+    leave empty to use the default.
+    """
+
+    enabled: bool = False
+    port: int = 8443
+    cert_dir: str = ""
+    san_names: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -1347,6 +1426,7 @@ class Config:
     # Top-level `[soul]` is distinct from `[llm.soul]` (per-module
     # provider override): this carries soul-engine behavior toggles.
     soul: SoulConfig = field(default_factory=SoulConfig)
+    tls_proxy: TlsProxyConfig = field(default_factory=TlsProxyConfig)
 
     @property
     def data_path(self) -> Path:
@@ -1438,7 +1518,7 @@ def _apply_env_overrides(raw: dict[str, Any]) -> dict[str, Any]:
         # TypeError when an on-disk plaintext `password` string is descended into.
         # `_build_api_auth` reads every API_AUTH_ENV_VARS var explicitly, so skip
         # them here entirely (review r7#1).
-        if env_key in API_AUTH_ENV_VARS:
+        if env_key in API_AUTH_ENV_VARS or env_key in TLS_PROXY_ENV_VARS:
             continue
         parts = env_key[len(prefix) :].lower().split("_")
         current = raw
@@ -1446,6 +1526,32 @@ def _apply_env_overrides(raw: dict[str, Any]) -> dict[str, Any]:
             current = current.setdefault(part, {})
         current[parts[-1]] = env_value
     return raw
+
+
+def _filter_dataclass_kwargs(
+    cls: type[Any],
+    raw: dict[str, Any],
+    *,
+    section: str,
+) -> dict[str, Any]:
+    """Drop unknown keys before ``cls(**kwargs)`` so a newer-branch field
+    (or a typo) cannot crash ``load_config`` with a bare TypeError.
+
+    Logs one WARNING per ignored key, naming the TOML section and key so
+    the user can clean up after a version rollback. Known fields keep their
+    raw values; callers still apply type coercion after this filter.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    known = {item.name for item in fields(cls)}
+    unknown = sorted(key for key in raw if key not in known)
+    for key in unknown:
+        logger.warning(
+            "config: [%s].%s ignored (unknown key for this version)",
+            section,
+            key,
+        )
+    return {key: value for key, value in raw.items() if key in known}
 
 
 def _warn_suspicious_budgets(sources: SourcesConfig) -> None:
@@ -1581,6 +1687,16 @@ def _build_config(raw: dict[str, Any]) -> Config:
     bili_raw = raw.get("bilibili", {})
     sources_raw = raw.get("sources", {})
     sched_raw = dict(raw.get("scheduler", {}))
+    # ``SchedulerConfig(**sched_raw)`` below splats the raw table, so a key the
+    # dataclass no longer declares is a hard TypeError at load time. The
+    # 2026-07-26 hours → minutes rename would therefore have bricked startup for
+    # every existing config.toml. Resolve the legacy keys first, then drop them.
+    _legacy_refresh_minutes = {
+        "trending_refresh": _legacy_hours_to_minutes(sched_raw, "trending_refresh"),
+        "explore_refresh": _legacy_hours_to_minutes(sched_raw, "explore_refresh"),
+    }
+    for _legacy_key in ("trending_refresh_hours", "explore_refresh_hours"):
+        sched_raw.pop(_legacy_key, None)
     discovery_raw = raw.get("discovery", {})
     if not isinstance(discovery_raw, dict):
         discovery_raw = {}
@@ -1711,7 +1827,16 @@ def _build_config(raw: dict[str, Any]) -> Config:
             # sending a new wire parameter merely because that package was
             # upgraded. Native v2 instances can opt in explicitly.
             values["reasoning_effort"] = ""
-        return LLMProviderConfig(**values)
+        # Unknown keys are dropped rather than splatted: a config.toml written
+        # by a newer build must not brick an older one (see
+        # ``_filter_dataclass_kwargs``).
+        return LLMProviderConfig(
+            **_filter_dataclass_kwargs(
+                LLMProviderConfig,
+                values,
+                section=f"llm.{provider_name}",
+            )
+        )
 
     llm = LLMConfig(
         default_provider=llm_raw.get("default_provider", "deepseek"),
@@ -1729,22 +1854,11 @@ def _build_config(raw: dict[str, Any]) -> Config:
         openrouter=_provider_config("openrouter"),
         openai_compatible=_provider_config("openai_compatible"),
         embedding=EmbeddingConfig(
-            **{
-                k: v
-                for k, v in embedding_raw.items()
-                if k
-                in (
-                    "provider",
-                    "model",
-                    "api_key",
-                    "base_url",
-                    "output_dimensionality",
-                    "similarity_threshold",
-                    "fallback_enabled",
-                    "fallback_provider",
-                    "multimodal_enabled",
-                )
-            }
+            **_filter_dataclass_kwargs(
+                EmbeddingConfig,
+                embedding_raw,
+                section="llm.embedding",
+            )
         ),
         soul=_module_config("soul"),
         discovery=_module_config("discovery"),
@@ -1807,12 +1921,14 @@ def _build_config(raw: dict[str, Any]) -> Config:
         browser_headed=sources_browser_raw.get("headed", False),
         bilibili=BilibiliSourceConfig(
             enabled=bool(bilibili_source_raw.get("enabled", True)),
+            min_interval_minutes=max(0, int(bilibili_source_raw.get("min_interval_minutes", 3))),
         ),
         xiaohongshu=XiaohongshuSourceConfig(
             enabled=bool(xhs_raw.get("enabled", False)),
             daily_search_budget=int(xhs_raw.get("daily_search_budget", 0)),
             daily_creator_budget=int(xhs_raw.get("daily_creator_budget", 0)),
-            task_interval_seconds=int(xhs_raw.get("task_interval_seconds", 45)),
+            task_interval_seconds=int(xhs_raw.get("task_interval_seconds", 300)),
+            min_interval_minutes=max(0, int(xhs_raw.get("min_interval_minutes", 3))),
         ),
         douyin=DouyinSourceConfig(
             enabled=bool(douyin_raw.get("enabled", False)),
@@ -1822,6 +1938,7 @@ def _build_config(raw: dict[str, Any]) -> Config:
             daily_hot_budget=int(douyin_raw.get("daily_hot_budget", 0)),
             daily_feed_budget=int(douyin_raw.get("daily_feed_budget", 0)),
             request_interval_seconds=int(douyin_raw.get("request_interval_seconds", 2)),
+            min_interval_minutes=max(0, int(douyin_raw.get("min_interval_minutes", 3))),
         ),
         youtube=YoutubeSourceConfig(
             enabled=bool(youtube_raw.get("enabled", False)),
@@ -1829,7 +1946,7 @@ def _build_config(raw: dict[str, Any]) -> Config:
             daily_trending_budget=int(youtube_raw.get("daily_trending_budget", 0)),
             daily_channel_budget=int(youtube_raw.get("daily_channel_budget", 0)),
             request_interval_seconds=int(youtube_raw.get("request_interval_seconds", 2)),
-            min_interval_minutes=max(0, int(youtube_raw.get("min_interval_minutes", 60))),
+            min_interval_minutes=max(0, int(youtube_raw.get("min_interval_minutes", 3))),
         ),
         twitter=TwitterSourceConfig(
             enabled=bool(twitter_raw.get("enabled", False)),
@@ -1839,7 +1956,7 @@ def _build_config(raw: dict[str, Any]) -> Config:
             daily_feed_budget=int(twitter_raw.get("daily_feed_budget", 0)),
             daily_creator_budget=int(twitter_raw.get("daily_creator_budget", 0)),
             request_interval_seconds=int(twitter_raw.get("request_interval_seconds", 3)),
-            min_interval_minutes=max(0, int(twitter_raw.get("min_interval_minutes", 60))),
+            min_interval_minutes=max(0, int(twitter_raw.get("min_interval_minutes", 3))),
         ),
         zhihu=ZhihuSourceConfig(
             enabled=bool(zhihu_raw.get("enabled", False)),
@@ -1857,7 +1974,7 @@ def _build_config(raw: dict[str, Any]) -> Config:
             daily_creator_budget=int(zhihu_raw.get("daily_creator_budget", 0)),
             daily_related_budget=int(zhihu_raw.get("daily_related_budget", 0)),
             request_interval_seconds=int(zhihu_raw.get("request_interval_seconds", 3)),
-            min_interval_minutes=max(0, int(zhihu_raw.get("min_interval_minutes", 60))),
+            min_interval_minutes=max(0, int(zhihu_raw.get("min_interval_minutes", 3))),
         ),
         reddit=RedditSourceConfig(
             enabled=bool(reddit_raw.get("enabled", False)),
@@ -1875,7 +1992,7 @@ def _build_config(raw: dict[str, Any]) -> Config:
             daily_subreddit_budget=int(reddit_raw.get("daily_subreddit_budget", 300)),
             daily_related_budget=int(reddit_raw.get("daily_related_budget", 300)),
             request_interval_seconds=int(reddit_raw.get("request_interval_seconds", 3)),
-            min_interval_minutes=max(0, int(reddit_raw.get("min_interval_minutes", 60))),
+            min_interval_minutes=max(0, int(reddit_raw.get("min_interval_minutes", 3))),
         ),
         bangumi=BangumiSourceConfig(
             enabled=bool(bangumi_raw.get("enabled", False)),
@@ -1901,7 +2018,7 @@ def _build_config(raw: dict[str, Any]) -> Config:
             daily_ranked_budget=max(0, int(bangumi_raw.get("daily_ranked_budget", 100))),
             daily_latest_budget=max(0, int(bangumi_raw.get("daily_latest_budget", 100))),
             request_interval_seconds=max(0, int(bangumi_raw.get("request_interval_seconds", 1))),
-            min_interval_minutes=max(0, int(bangumi_raw.get("min_interval_minutes", 60))),
+            min_interval_minutes=max(0, int(bangumi_raw.get("min_interval_minutes", 3))),
             bootstrap_limit=min(1000, max(1, int(bangumi_raw.get("bootstrap_limit", 300)))),
         ),
     )
@@ -1911,11 +2028,20 @@ def _build_config(raw: dict[str, Any]) -> Config:
     soul_preference_raw = (
         soul_raw.get("preference", {}) if isinstance(soul_raw.get("preference"), dict) else {}
     )
+    raw_gate_mode = str(soul_raw.get("posture_gate_mode", "shadow") or "shadow").strip().lower()
+    raw_lifecycle = (
+        str(soul_raw.get("topic_lifecycle_serialization", "off") or "off").strip().lower()
+    )
     soul = SoulConfig(
         preference=SoulPreferenceConfig(
             satisfaction_filter_enabled=bool(
                 soul_preference_raw.get("satisfaction_filter_enabled", True)
             ),
+        ),
+        posture_gate_mode=raw_gate_mode if raw_gate_mode in _POSTURE_GATE_MODES else "shadow",
+        posture_gate_force_enforce=bool(soul_raw.get("posture_gate_force_enforce", False)),
+        topic_lifecycle_serialization=(
+            raw_lifecycle if raw_lifecycle in _TOPIC_LIFECYCLE_SERIALIZATION_MODES else "off"
         ),
     )
 
@@ -1934,131 +2060,144 @@ def _build_config(raw: dict[str, Any]) -> Config:
         network=_build_network_config(raw),
         sources=sources,
         scheduler=SchedulerConfig(
-            **{
-                **sched_raw,
-                # Environment overrides arrive as strings. Leaving these raw
-                # made ``OPENBILICLAW_SCHEDULER_ENABLED=`` look false in the
-                # CLI while still being the string ``""``; the typed config
-                # API then rejected that same value. Normalize every scheduler
-                # boolean at the boundary so all consumers see a real bool.
-                "enabled": _coerce_bool(sched_raw.get("enabled"), default=True),
-                "pause_on_extension_disconnect": _coerce_bool(
-                    sched_raw.get("pause_on_extension_disconnect"),
-                    default=False,
-                ),
-                "profile_consolidation_enabled": _coerce_bool(
-                    sched_raw.get("profile_consolidation_enabled"),
-                    default=True,
-                ),
-                "extension_disconnect_grace_seconds": _normalize_extension_disconnect_grace(
-                    sched_raw.get("extension_disconnect_grace_seconds")
-                ),
-                "pool_source_shares": _normalize_pool_source_shares(
-                    sched_raw.get("pool_source_shares")
-                ),
-                "refresh_check_interval_seconds": _normalize_scheduler_int(
-                    sched_raw.get("refresh_check_interval_seconds"),
-                    default=_DEFAULT_REFRESH_CHECK_INTERVAL_SECONDS,
-                    min_value=15,
-                ),
-                "signal_event_threshold": _normalize_scheduler_int(
-                    sched_raw.get("signal_event_threshold"),
-                    default=_DEFAULT_SIGNAL_EVENT_THRESHOLD,
-                    min_value=1,
-                ),
-                "trending_refresh_hours": _normalize_scheduler_int(
-                    sched_raw.get("trending_refresh_hours"),
-                    default=_DEFAULT_TRENDING_REFRESH_HOURS,
-                    min_value=1,
-                ),
-                "explore_refresh_hours": _normalize_scheduler_int(
-                    sched_raw.get("explore_refresh_hours"),
-                    default=_DEFAULT_EXPLORE_REFRESH_HOURS,
-                    min_value=1,
-                ),
-                "discovery_limit": _normalize_scheduler_int(
-                    sched_raw.get("discovery_limit"),
-                    default=_DEFAULT_DISCOVERY_LIMIT,
-                    min_value=1,
-                    max_value=60,
-                ),
-                "delight_queue_limit": _normalize_scheduler_int(
-                    sched_raw.get("delight_queue_limit"),
-                    default=_DEFAULT_DELIGHT_QUEUE_LIMIT,
-                    min_value=1,
-                    max_value=100,
-                ),
-                "proactive_push_interval_seconds": _normalize_scheduler_int(
-                    sched_raw.get("proactive_push_interval_seconds"),
-                    default=_DEFAULT_PROACTIVE_PUSH_INTERVAL_SECONDS,
-                    min_value=30,
-                ),
-                "speculator_idle_interval_minutes": _normalize_scheduler_int(
-                    sched_raw.get("speculator_idle_interval_minutes"),
-                    default=_DEFAULT_SPECULATOR_IDLE_INTERVAL_MINUTES,
-                    min_value=5,
-                ),
-                "profile_consolidation_interval_hours": _normalize_scheduler_int(
-                    sched_raw.get("profile_consolidation_interval_hours"),
-                    default=12,
-                    min_value=1,
-                ),
-                "profile_consolidation_like_target_upper": _normalize_scheduler_int(
-                    sched_raw.get("profile_consolidation_like_target_upper"),
-                    default=512,
-                    min_value=1,
-                ),
-                "profile_consolidation_like_target_soft": _normalize_scheduler_int(
-                    sched_raw.get("profile_consolidation_like_target_soft"),
-                    default=450,
-                    min_value=1,
-                ),
-                "profile_consolidation_archive_enabled": _coerce_bool(
-                    sched_raw.get("profile_consolidation_archive_enabled"),
-                    default=True,
-                ),
-                "auto_update_enabled": _coerce_bool(
-                    sched_raw.get("auto_update_enabled"),
-                    default=False,
-                ),
-                "auto_update_allow_prerelease": _coerce_bool(
-                    sched_raw.get("auto_update_allow_prerelease"),
-                    default=False,
-                ),
-                "avoidance_speculation_interval_minutes": _normalize_scheduler_int(
-                    sched_raw.get("avoidance_speculation_interval_minutes"),
-                    default=10,
-                    min_value=1,
-                ),
-                "avoidance_speculation_ttl_days": _normalize_scheduler_int(
-                    sched_raw.get("avoidance_speculation_ttl_days"),
-                    default=3,
-                    min_value=1,
-                ),
-                "avoidance_speculation_cooldown_days": _normalize_scheduler_int(
-                    sched_raw.get("avoidance_speculation_cooldown_days"),
-                    default=7,
-                    min_value=1,
-                ),
-                "avoidance_speculation_confirmation_threshold": _normalize_scheduler_int(
-                    sched_raw.get("avoidance_speculation_confirmation_threshold"),
-                    default=3,
-                    min_value=1,
-                ),
-                "avoidance_speculation_max_active": _normalize_scheduler_int(
-                    sched_raw.get("avoidance_speculation_max_active"),
-                    default=5,
-                    min_value=1,
-                ),
-                "auto_update_check_interval_hours": _normalize_scheduler_int(
-                    sched_raw.get("auto_update_check_interval_hours"),
-                    default=_DEFAULT_AUTO_UPDATE_CHECK_INTERVAL_HOURS,
-                    min_value=_MIN_AUTO_UPDATE_CHECK_INTERVAL_HOURS,
-                ),
-                "auto_update_allowed_remotes": _normalize_auto_update_allowed_remotes(
-                    sched_raw.get("auto_update_allowed_remotes")
-                ),
-            }
+            **_filter_dataclass_kwargs(
+                SchedulerConfig,
+                {
+                    **sched_raw,
+                    # Environment overrides arrive as strings. Leaving these raw
+                    # made ``OPENBILICLAW_SCHEDULER_ENABLED=`` look false in the
+                    # CLI while still being the string ``""``; the typed config
+                    # API then rejected that same value. Normalize every scheduler
+                    # boolean at the boundary so all consumers see a real bool.
+                    "enabled": _coerce_bool(sched_raw.get("enabled"), default=True),
+                    "pause_on_extension_disconnect": _coerce_bool(
+                        sched_raw.get("pause_on_extension_disconnect"),
+                        default=False,
+                    ),
+                    "profile_consolidation_enabled": _coerce_bool(
+                        sched_raw.get("profile_consolidation_enabled"),
+                        default=True,
+                    ),
+                    "extension_disconnect_grace_seconds": _normalize_extension_disconnect_grace(
+                        sched_raw.get("extension_disconnect_grace_seconds")
+                    ),
+                    "pool_source_shares": _normalize_pool_source_shares(
+                        sched_raw.get("pool_source_shares")
+                    ),
+                    "refresh_check_interval_seconds": _normalize_scheduler_int(
+                        sched_raw.get("refresh_check_interval_seconds"),
+                        default=_DEFAULT_REFRESH_CHECK_INTERVAL_SECONDS,
+                        min_value=15,
+                    ),
+                    "signal_event_threshold": _normalize_scheduler_int(
+                        sched_raw.get("signal_event_threshold"),
+                        default=_DEFAULT_SIGNAL_EVENT_THRESHOLD,
+                        min_value=1,
+                    ),
+                    "trending_refresh_minutes": _normalize_scheduler_int(
+                        _legacy_refresh_minutes["trending_refresh"],
+                        default=_DEFAULT_TRENDING_REFRESH_MINUTES,
+                        min_value=1,
+                    ),
+                    "explore_refresh_minutes": _normalize_scheduler_int(
+                        _legacy_refresh_minutes["explore_refresh"],
+                        default=_DEFAULT_EXPLORE_REFRESH_MINUTES,
+                        min_value=1,
+                    ),
+                    "discovery_limit": _normalize_scheduler_int(
+                        sched_raw.get("discovery_limit"),
+                        default=_DEFAULT_DISCOVERY_LIMIT,
+                        min_value=1,
+                        max_value=60,
+                    ),
+                    "delight_queue_limit": _normalize_scheduler_int(
+                        sched_raw.get("delight_queue_limit"),
+                        default=_DEFAULT_DELIGHT_QUEUE_LIMIT,
+                        min_value=1,
+                        max_value=100,
+                    ),
+                    "proactive_push_interval_seconds": _normalize_scheduler_int(
+                        sched_raw.get("proactive_push_interval_seconds"),
+                        default=_DEFAULT_PROACTIVE_PUSH_INTERVAL_SECONDS,
+                        min_value=30,
+                    ),
+                    "speculator_idle_interval_minutes": _normalize_scheduler_int(
+                        sched_raw.get("speculator_idle_interval_minutes"),
+                        default=_DEFAULT_SPECULATOR_IDLE_INTERVAL_MINUTES,
+                        min_value=5,
+                    ),
+                    "profile_consolidation_interval_hours": _normalize_scheduler_int(
+                        sched_raw.get("profile_consolidation_interval_hours"),
+                        default=12,
+                        min_value=1,
+                    ),
+                    "profile_consolidation_like_target_upper": _normalize_scheduler_int(
+                        sched_raw.get("profile_consolidation_like_target_upper"),
+                        default=512,
+                        min_value=1,
+                    ),
+                    "profile_consolidation_like_target_soft": _normalize_scheduler_int(
+                        sched_raw.get("profile_consolidation_like_target_soft"),
+                        default=450,
+                        min_value=1,
+                    ),
+                    "profile_consolidation_archive_enabled": _coerce_bool(
+                        sched_raw.get("profile_consolidation_archive_enabled"),
+                        default=True,
+                    ),
+                    "auto_update_enabled": _coerce_bool(
+                        sched_raw.get("auto_update_enabled"),
+                        default=False,
+                    ),
+                    "auto_update_allow_prerelease": _coerce_bool(
+                        sched_raw.get("auto_update_allow_prerelease"),
+                        default=False,
+                    ),
+                    "avoidance_speculation_interval_minutes": _normalize_scheduler_int(
+                        sched_raw.get("avoidance_speculation_interval_minutes"),
+                        default=10,
+                        min_value=1,
+                    ),
+                    "avoidance_speculation_ttl_days": _normalize_scheduler_int(
+                        sched_raw.get("avoidance_speculation_ttl_days"),
+                        default=3,
+                        min_value=1,
+                    ),
+                    "avoidance_speculation_cooldown_days": _normalize_scheduler_int(
+                        sched_raw.get("avoidance_speculation_cooldown_days"),
+                        default=7,
+                        min_value=1,
+                    ),
+                    "avoidance_speculation_confirmation_threshold": _normalize_scheduler_int(
+                        sched_raw.get("avoidance_speculation_confirmation_threshold"),
+                        default=3,
+                        min_value=1,
+                    ),
+                    "avoidance_speculation_max_active": _normalize_scheduler_int(
+                        sched_raw.get("avoidance_speculation_max_active"),
+                        default=5,
+                        min_value=1,
+                    ),
+                    "auto_update_check_interval_hours": _normalize_scheduler_int(
+                        sched_raw.get("auto_update_check_interval_hours"),
+                        default=_DEFAULT_AUTO_UPDATE_CHECK_INTERVAL_HOURS,
+                        min_value=_MIN_AUTO_UPDATE_CHECK_INTERVAL_HOURS,
+                    ),
+                    "auto_update_allowed_remotes": _normalize_auto_update_allowed_remotes(
+                        sched_raw.get("auto_update_allowed_remotes")
+                    ),
+                    "unified_interest_line": _coerce_bool(
+                        sched_raw.get("unified_interest_line"),
+                        # Must match the dataclass default. The E2E on
+                        # 2026-07-28 caught them drifting: the dataclass said
+                        # True but every real config.toml (no key) loaded
+                        # through here and got False, so the unified line
+                        # never engaged on a live backend.
+                        default=True,
+                    ),
+                },
+                section="scheduler",
+            )
         ),
         discovery=_build_discovery(discovery_raw),
         autostart=AutostartConfig(
@@ -2068,9 +2207,22 @@ def _build_config(raw: dict[str, Any]) -> Config:
         saved_sync=SavedSyncConfig(
             auto_sync_enabled=_coerce_bool(saved_sync_raw.get("auto_sync_enabled"), default=False),
         ),
-        storage=StorageConfig(**store_raw),
-        logging=LoggingConfig(**logging_raw),
+        storage=StorageConfig(
+            **_filter_dataclass_kwargs(
+                StorageConfig,
+                store_raw if isinstance(store_raw, dict) else {},
+                section="storage",
+            )
+        ),
+        logging=LoggingConfig(
+            **_filter_dataclass_kwargs(
+                LoggingConfig,
+                logging_raw if isinstance(logging_raw, dict) else {},
+                section="logging",
+            )
+        ),
         soul=soul,
+        tls_proxy=_build_tls_proxy(raw),
     )
 
 
@@ -2387,6 +2539,25 @@ API_AUTH_ENV_VARS: tuple[str, ...] = (
     "OPENBILICLAW_API_AUTH_TRUST_LOOPBACK",
 )
 
+# Explicit TLS environment contract. Multi-word keys cannot safely pass through
+# ``_apply_env_overrides`` because its generic underscore splitter would turn
+# ``TLS_PROXY_PORT`` into ``[tls.proxy].port`` instead of ``[tls_proxy].port``.
+# Docker's standalone proxy uses the shorter ``SAN_NAMES`` variable; that entry
+# point does not load Config and is documented separately.
+TLS_PROXY_ENV_VARS: tuple[str, ...] = (
+    "OPENBILICLAW_TLS_PROXY_ENABLED",
+    "OPENBILICLAW_TLS_PROXY_PORT",
+    "OPENBILICLAW_TLS_PROXY_CERT_DIR",
+    "OPENBILICLAW_TLS_SAN_NAMES",
+)
+
+_TLS_PROXY_ENV_TO_FIELD: dict[str, str] = {
+    "OPENBILICLAW_TLS_PROXY_ENABLED": "enabled",
+    "OPENBILICLAW_TLS_PROXY_PORT": "port",
+    "OPENBILICLAW_TLS_PROXY_CERT_DIR": "cert_dir",
+    "OPENBILICLAW_TLS_SAN_NAMES": "san_names",
+}
+
 
 def _build_api_auth(api_raw: dict[str, Any]) -> ApiAuthConfig:
     """Assemble ``ApiAuthConfig`` from raw config + dedicated env vars.
@@ -2445,6 +2616,148 @@ def _build_api_auth(api_raw: dict[str, Any]) -> ApiAuthConfig:
         extension_access_keys=_coerce_str_list(auth_raw.get("extension_access_keys", [])),
         extension_token_ttl_hours=_coerce_extension_token_ttl_hours(
             auth_raw.get("extension_token_ttl_hours", _DEFAULT_EXTENSION_TOKEN_TTL_HOURS)
+        ),
+    )
+
+
+_TLS_DNS_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+
+
+def normalize_tls_proxy_port(value: object) -> int:
+    """Return a valid TCP port for the TLS listener, or raise ``ConfigError``."""
+    if isinstance(value, bool):
+        raise ConfigError("tls_proxy.port: 必须是 1..65535 的整数")
+    if isinstance(value, int):
+        port = value
+    elif isinstance(value, str):
+        try:
+            port = int(value.strip())
+        except ValueError as exc:
+            raise ConfigError("tls_proxy.port: 必须是 1..65535 的整数") from exc
+    else:
+        raise ConfigError("tls_proxy.port: 必须是 1..65535 的整数")
+    if not 1 <= port <= 65535:
+        raise ConfigError("tls_proxy.port: 必须是 1..65535 的整数")
+    return port
+
+
+def normalize_tls_cert_dir(value: object) -> str:
+    """Normalize a TLS certificate directory without resolving relative paths."""
+    if value is None:
+        return ""
+    if not isinstance(value, (str, os.PathLike)):
+        raise ConfigError("tls_proxy.cert_dir: 必须是路径字符串")
+    raw_path = os.fspath(value)
+    if not isinstance(raw_path, str):
+        raise ConfigError("tls_proxy.cert_dir: 必须是路径字符串")
+    text = raw_path.strip()
+    if not text:
+        return ""
+    if any(ord(char) < 32 for char in text):
+        raise ConfigError("tls_proxy.cert_dir: 不能包含控制字符")
+    return os.path.normpath(os.path.expanduser(text))
+
+
+def normalize_tls_san_names(value: object) -> list[str]:
+    """Normalize and validate configured certificate DNS/IP SAN entries."""
+    if value is None:
+        raw_names: list[str] = []
+    elif isinstance(value, str):
+        raw_names = [item.strip() for item in value.split(",") if item.strip()]
+    elif isinstance(value, (list, tuple)):
+        if any(not isinstance(item, str) for item in value):
+            raise ConfigError("tls_proxy.san_names: 必须是 hostname/IP 字符串列表")
+        raw_names = [item.strip() for item in value if item.strip()]
+    else:
+        raise ConfigError("tls_proxy.san_names: 必须是 hostname/IP 字符串列表")
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw_name in raw_names:
+        name = raw_name.strip()
+        if any(ord(char) < 33 for char in name) or any(char in name for char in "/\\@#"):
+            raise ConfigError(f"tls_proxy.san_names: 非法 hostname/IP: {raw_name!r}")
+        try:
+            canonical = str(ipaddress.ip_address(name))
+        except ValueError:
+            if ":" in name:
+                raise ConfigError(f"tls_proxy.san_names: 非法 hostname/IP: {raw_name!r}") from None
+            try:
+                canonical = name.rstrip(".").encode("idna").decode("ascii").lower()
+            except UnicodeError as exc:
+                raise ConfigError(f"tls_proxy.san_names: 非法 hostname/IP: {raw_name!r}") from exc
+            if (
+                not canonical
+                or len(canonical) > 253
+                or any(_TLS_DNS_LABEL_RE.fullmatch(label) is None for label in canonical.split("."))
+            ):
+                raise ConfigError(f"tls_proxy.san_names: 非法 hostname/IP: {raw_name!r}") from None
+        key = canonical.casefold()
+        if key not in seen:
+            seen.add(key)
+            normalized.append(canonical)
+    return normalized
+
+
+def normalize_tls_enabled(value: object) -> bool:
+    """Strictly normalize the TLS enable flag so typos cannot silently disable HTTPS."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        text = value.strip().casefold()
+        if text in ("1", "true", "yes", "on"):
+            return True
+        if text in ("0", "false", "no", "off"):
+            return False
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    raise ConfigError("tls_proxy.enabled: 必须是 true/false")
+
+
+def resolve_tls_cert_dir(config: Config) -> Path:
+    """Resolve the TLS certificate directory against the runtime project root."""
+    if not config.tls_proxy.cert_dir:
+        return config.data_path / "certs"
+    path = Path(config.tls_proxy.cert_dir).expanduser()
+    return path if path.is_absolute() else _project_root() / path
+
+
+def tls_proxy_enabled_override_source() -> str | None:
+    """Return the higher-precedence source controlling TLS enablement, if any."""
+    if (os.environ.get("OPENBILICLAW_TLS_PROXY_ENABLED") or "").strip():
+        return "OPENBILICLAW_TLS_PROXY_ENABLED"
+    local = _project_root() / "config.local.toml"
+    try:
+        with local.open("rb") as handle:
+            raw = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    table = raw.get("tls_proxy")
+    if isinstance(table, dict) and "enabled" in table:
+        return "config.local.toml [tls_proxy].enabled"
+    return None
+
+
+def _build_tls_proxy(raw: dict[str, Any]) -> TlsProxyConfig:
+    """Build ``TlsProxyConfig`` from TOML plus the explicit TLS env contract."""
+    tls_raw_val = raw.get("tls_proxy")
+    tls_raw: dict[str, Any] = tls_raw_val if isinstance(tls_raw_val, dict) else {}
+
+    def env_or_disk(name: str, key: str, default: object) -> object:
+        env_value = os.environ.get(name)
+        if env_value is not None and env_value.strip():
+            return env_value
+        return tls_raw.get(key, default)
+
+    return TlsProxyConfig(
+        enabled=normalize_tls_enabled(
+            env_or_disk("OPENBILICLAW_TLS_PROXY_ENABLED", "enabled", False)
+        ),
+        port=normalize_tls_proxy_port(env_or_disk("OPENBILICLAW_TLS_PROXY_PORT", "port", 8443)),
+        cert_dir=normalize_tls_cert_dir(
+            env_or_disk("OPENBILICLAW_TLS_PROXY_CERT_DIR", "cert_dir", "")
+        ),
+        san_names=normalize_tls_san_names(
+            env_or_disk("OPENBILICLAW_TLS_SAN_NAMES", "san_names", [])
         ),
     )
 
@@ -2537,7 +2850,7 @@ def _normalize_llm_timeout(value: object) -> int:
     else:
         return _DEFAULT_LLM_TIMEOUT
 
-    if normalized < _MIN_LLM_TIMEOUT:
+    if not (_MIN_LLM_TIMEOUT <= normalized <= _MAX_LLM_TIMEOUT):
         return _DEFAULT_LLM_TIMEOUT
     return normalized
 
@@ -2588,6 +2901,27 @@ def _normalize_extension_disconnect_grace(value: object) -> int:
     if grace <= 0:
         return _DEFAULT_EXTENSION_DISCONNECT_GRACE_SECONDS
     return grace
+
+
+def _legacy_hours_to_minutes(raw: dict[str, Any], prefix: str) -> Any:
+    """Read ``<prefix>_minutes``, falling back to the pre-2026-07-26 hour key.
+
+    The unit changed from hours to minutes when the Bilibili main-discovery
+    cadence was aligned with every source producer's ``min_interval_minutes``.
+    An existing ``config.toml`` still spelling ``trending_refresh_hours = 3``
+    must keep meaning three *hours*, not three minutes — reinterpreting it in
+    place would silently multiply that user's Bilibili traffic by sixty.
+    """
+    minutes = raw.get(f"{prefix}_minutes")
+    if minutes is not None:
+        return minutes
+    hours = raw.get(f"{prefix}_hours")
+    if hours is None:
+        return None
+    try:
+        return max(1, int(hours) * 60)
+    except (TypeError, ValueError):
+        return None
 
 
 def _normalize_scheduler_int(
@@ -2885,6 +3219,33 @@ def _collect_config_issues(config: Config) -> list[ConfigIssue]:
             )
         )
 
+    if str(config.soul.posture_gate_mode or "").strip().lower() not in _POSTURE_GATE_MODES:
+        issues.append(
+            ConfigIssue(
+                field="soul.posture_gate_mode",
+                message=(
+                    f"不支持的 posture_gate_mode: `{config.soul.posture_gate_mode}`。"
+                    "仅支持: shadow, enforce, off。"
+                ),
+                severity="blocking",
+            )
+        )
+
+    if (
+        str(config.soul.topic_lifecycle_serialization or "").strip().lower()
+        not in _TOPIC_LIFECYCLE_SERIALIZATION_MODES
+    ):
+        issues.append(
+            ConfigIssue(
+                field="soul.topic_lifecycle_serialization",
+                message=(
+                    "不支持的 topic_lifecycle_serialization: "
+                    f"`{config.soul.topic_lifecycle_serialization}`。仅支持: off, on。"
+                ),
+                severity="blocking",
+            )
+        )
+
     # Before the default-provider early return: embedding validation must run
     # even when default_provider itself is broken.
     for emb_field, emb_value in (
@@ -3154,6 +3515,64 @@ def _collect_config_issues(config: Config) -> list[ConfigIssue]:
     return issues
 
 
+def posture_gate_enforce_readiness_issue(
+    config: Config,
+    *,
+    earliest_valid_at: str,
+    valid_count_14d: int,
+    valid_count_7d: int,
+) -> ConfigIssue | None:
+    """Blocking save-time guard for switching ``posture_gate_mode`` to enforce.
+
+    Requires DB-side shadow statistics (computed by
+    ``Database.posture_gate_shadow_stats``) — hence it lives outside
+    :func:`_collect_config_issues` (which is DB-free) and is invoked by the
+    config PUT handler where a database handle is available.
+
+    Three conditions must ALL hold (spec §Phase 3, r4/R3-3): the earliest valid
+    shadow judgement is ≥14 days old, ≥10 valid judgements landed in the last 14
+    days, and ≥1 in the last 7. ``posture_gate_force_enforce`` bypasses the
+    guard (documented risk). Returns a blocking :class:`ConfigIssue` on failure,
+    else ``None``.
+    """
+    if str(config.soul.posture_gate_mode or "").strip().lower() != "enforce":
+        return None
+    if config.soul.posture_gate_force_enforce:
+        return None
+    now = datetime.now()
+    earliest = None
+    if earliest_valid_at.strip():
+        try:
+            earliest = datetime.fromisoformat(earliest_valid_at)
+        except ValueError:
+            earliest = None
+    observation_days = (now - earliest).days if earliest is not None else -1
+    reasons: list[str] = []
+    if observation_days < POSTURE_GATE_ENFORCE_MIN_OBSERVATION_DAYS:
+        reasons.append(
+            f"shadow 观察不足 {POSTURE_GATE_ENFORCE_MIN_OBSERVATION_DAYS} 天"
+            f"（当前 {max(0, observation_days)} 天）"
+        )
+    if valid_count_14d < POSTURE_GATE_ENFORCE_MIN_VALID_JUDGEMENTS:
+        reasons.append(
+            f"近 14 天有效判定不足 {POSTURE_GATE_ENFORCE_MIN_VALID_JUDGEMENTS} 条"
+            f"（当前 {valid_count_14d} 条）"
+        )
+    if valid_count_7d < POSTURE_GATE_ENFORCE_MIN_RECENT_COUNT:
+        reasons.append("近 7 天没有有效判定")
+    if not reasons:
+        return None
+    return ConfigIssue(
+        field="soul.posture_gate_mode",
+        message=(
+            "态势门控尚未积累足够的 shadow 观察数据，无法切换到 enforce："
+            + "；".join(reasons)
+            + "。请继续以 shadow 运行，或（有风险地）开启 posture_gate_force_enforce。"
+        ),
+        severity="blocking",
+    )
+
+
 def _is_openai_official_base_url(base_url: str) -> bool:
     raw = base_url.strip()
     if not raw:
@@ -3271,10 +3690,10 @@ def _auth_overridden_fields(*, consult_local: bool) -> set[str]:
 
     Env vars apply to EVERY load, so env-governed fields always count. But
     ``config.local.toml`` is merged ONLY when ``load_config`` runs with no explicit
-    path (the production / default-path case); ``load_config(explicit_path)`` reads
-    that file alone. So ``consult_local`` must be False for an explicit-path save to
-    an unrelated file, or we would preserve/omit fields based on a project-root
-    local layer that was never merged into the config being saved (review r11).
+    path (the production / default-path invocation); ``load_config(explicit_path)``
+    reads that file alone, even when the explicit path happens to equal the runtime
+    default. So ``consult_local`` must be False for every explicit-path save, or we
+    would preserve/omit fields based on a layer that was never merged (review r11).
     """
     fields = {field for field, on in _auth_env_field_overrides().items() if on}
     if consult_local:
@@ -3295,6 +3714,46 @@ def _read_on_disk_auth(path: Path) -> dict[str, Any]:
     api = data.get("api")
     auth = api.get("auth") if isinstance(api, dict) else None
     return auth if isinstance(auth, dict) else {}
+
+
+def _tls_proxy_env_overridden_fields() -> set[str]:
+    """Return ``[tls_proxy]`` fields currently governed by explicit env vars."""
+    return {
+        field
+        for env_name, field in _TLS_PROXY_ENV_TO_FIELD.items()
+        if (os.environ.get(env_name) or "").strip()
+    }
+
+
+def _config_local_tls_proxy_keys() -> set[str]:
+    """Return ``[tls_proxy]`` keys shadowed by project-root config.local.toml."""
+    local = _project_root() / "config.local.toml"
+    try:
+        with local.open("rb") as handle:
+            data = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError):
+        return set()
+    tls_proxy = data.get("tls_proxy")
+    return set(tls_proxy) if isinstance(tls_proxy, dict) else set()
+
+
+def _tls_proxy_overridden_fields(*, consult_local: bool) -> set[str]:
+    """Return TLS fields whose effective values come from an override layer."""
+    overridden = _tls_proxy_env_overridden_fields()
+    if consult_local:
+        overridden.update(_config_local_tls_proxy_keys())
+    return overridden
+
+
+def _read_on_disk_tls_proxy(path: Path) -> dict[str, Any]:
+    """Return the raw base-file ``[tls_proxy]`` table at ``path`` ({} if absent)."""
+    try:
+        with path.open("rb") as handle:
+            data = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError):
+        return {}
+    tls_proxy = data.get("tls_proxy")
+    return tls_proxy if isinstance(tls_proxy, dict) else {}
 
 
 def _read_on_disk_autostart(path: Path) -> dict[str, Any]:
@@ -3486,6 +3945,54 @@ def _api_auth_lines(
     return lines
 
 
+def _tls_proxy_lines(
+    config: Config,
+    on_disk_tls_proxy: dict[str, Any] | None,
+    *,
+    consult_local: bool,
+) -> list[str]:
+    """Render TLS config without baking env/config.local overrides into the base.
+
+    ``load_config`` returns effective values after higher-precedence layers are
+    merged. An unrelated whole-file save must preserve each shadowed field from
+    ``config.toml`` itself (or omit it when the base had no value), so deleting an
+    env var or ``config.local.toml`` restores the original base/default value.
+    """
+    tls_proxy = config.tls_proxy
+    overridden = _tls_proxy_overridden_fields(consult_local=consult_local)
+    disk = on_disk_tls_proxy or {}
+    lines = ["[tls_proxy]"]
+
+    def emit(field: str, memory_line: str, disk_repr: Callable[[Any], str]) -> None:
+        if field in overridden:
+            if field in disk:
+                lines.append(f"{field} = {disk_repr(disk[field])}")
+            return
+        lines.append(memory_line)
+
+    emit(
+        "enabled",
+        f"enabled = {_toml_bool(tls_proxy.enabled)}",
+        lambda value: _toml_bool(normalize_tls_enabled(value)),
+    )
+    emit(
+        "port",
+        f"port = {tls_proxy.port}",
+        lambda value: str(normalize_tls_proxy_port(value)),
+    )
+    emit(
+        "cert_dir",
+        f"cert_dir = {_toml_string(tls_proxy.cert_dir)}",
+        lambda value: _toml_string(normalize_tls_cert_dir(value)),
+    )
+    emit(
+        "san_names",
+        f"san_names = {_toml_str_list(tls_proxy.san_names)}",
+        lambda value: _toml_str_list(normalize_tls_san_names(value)),
+    )
+    return lines
+
+
 def _autostart_lines(
     config: Config,
     on_disk_autostart: dict[str, Any] | None,
@@ -3531,6 +4038,13 @@ def save_config(
     config.sources.bangumi.access_token = validate_bangumi_access_token(
         config.sources.bangumi.access_token
     )
+    # Reject invalid TLS writes at the persistence boundary. Keeping the
+    # normalized values in-memory also makes the rendered TOML and immediate
+    # runtime behavior agree (pitfall rule 7: fail with the real cause).
+    config.tls_proxy.port = normalize_tls_proxy_port(config.tls_proxy.port)
+    config.tls_proxy.enabled = normalize_tls_enabled(config.tls_proxy.enabled)
+    config.tls_proxy.cert_dir = normalize_tls_cert_dir(config.tls_proxy.cert_dir)
+    config.tls_proxy.san_names = normalize_tls_san_names(config.tls_proxy.san_names)
     path = Path(config_path) if config_path is not None else _default_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     # Capture the on-disk [api.auth] table so the renderer can preserve credential
@@ -3539,14 +4053,17 @@ def save_config(
     # env-managed) so a normal settings/cookie write can't drop a plaintext
     # password and flip the reconcile fingerprint basis.
     on_disk_auth = _read_on_disk_auth(path) if path.exists() else None
+    on_disk_tls_proxy = _read_on_disk_tls_proxy(path) if path.exists() else None
     on_disk_autostart = _read_on_disk_autostart(path) if path.exists() else None
-    # config.local.toml is merged ONLY when load_config runs with no explicit path
-    # (production / default path). For a save to any other explicit file it was
-    # never merged, so its overrides must not gate this render (review r11).
-    consult_local = config_path is None or path.resolve() == _default_config_path().resolve()
+    # config.local.toml is merged ONLY when load_config runs with no explicit
+    # path. Match that invocation contract exactly: even an explicit path that
+    # happens to equal the runtime default did not consult config.local.toml, so
+    # its save must not be provenance-gated by that file either.
+    consult_local = config_path is None
     rendered = _render_config_toml(
         config,
         on_disk_auth=on_disk_auth,
+        on_disk_tls_proxy=on_disk_tls_proxy,
         on_disk_autostart=on_disk_autostart,
         autostart_authoritative=autostart_authoritative,
         consult_local=consult_local,
@@ -3561,6 +4078,7 @@ def _render_config_toml(
     config: Config,
     *,
     on_disk_auth: dict[str, Any] | None = None,
+    on_disk_tls_proxy: dict[str, Any] | None = None,
     on_disk_autostart: dict[str, Any] | None = None,
     autostart_authoritative: bool = False,
     consult_local: bool = False,
@@ -3576,6 +4094,8 @@ def _render_config_toml(
         f"port = {config.api.port}",
         "",
         *_api_auth_lines(config, on_disk_auth, consult_local=consult_local),
+        "",
+        *_tls_proxy_lines(config, on_disk_tls_proxy, consult_local=consult_local),
         "",
     ]
     if config.llm.instance_routing:
@@ -3685,12 +4205,14 @@ def _render_config_toml(
             "",
             "[sources.bilibili]",
             f"enabled = {_toml_bool(config.sources.bilibili.enabled)}",
+            f"min_interval_minutes = {config.sources.bilibili.min_interval_minutes}",
             "",
             "[sources.xiaohongshu]",
             f"enabled = {_toml_bool(config.sources.xiaohongshu.enabled)}",
             f"daily_search_budget = {config.sources.xiaohongshu.daily_search_budget}",
             f"daily_creator_budget = {config.sources.xiaohongshu.daily_creator_budget}",
             f"task_interval_seconds = {config.sources.xiaohongshu.task_interval_seconds}",
+            f"min_interval_minutes = {config.sources.xiaohongshu.min_interval_minutes}",
             "",
             "[sources.douyin]",
             f"enabled = {_toml_bool(config.sources.douyin.enabled)}",
@@ -3700,6 +4222,7 @@ def _render_config_toml(
             f"daily_hot_budget = {config.sources.douyin.daily_hot_budget}",
             f"daily_feed_budget = {config.sources.douyin.daily_feed_budget}",
             f"request_interval_seconds = {config.sources.douyin.request_interval_seconds}",
+            f"min_interval_minutes = {config.sources.douyin.min_interval_minutes}",
             "",
             "[sources.youtube]",
             f"enabled = {_toml_bool(config.sources.youtube.enabled)}",
@@ -3765,8 +4288,8 @@ def _render_config_toml(
             f"account_sync_interval_hours = {config.scheduler.account_sync_interval_hours}",
             f"refresh_check_interval_seconds = {config.scheduler.refresh_check_interval_seconds}",
             f"signal_event_threshold = {config.scheduler.signal_event_threshold}",
-            f"trending_refresh_hours = {config.scheduler.trending_refresh_hours}",
-            f"explore_refresh_hours = {config.scheduler.explore_refresh_hours}",
+            f"trending_refresh_minutes = {config.scheduler.trending_refresh_minutes}",
+            f"explore_refresh_minutes = {config.scheduler.explore_refresh_minutes}",
             f"discovery_limit = {config.scheduler.discovery_limit}",
             f"delight_queue_limit = {config.scheduler.delight_queue_limit}",
             f"proactive_push_interval_seconds = {config.scheduler.proactive_push_interval_seconds}",
@@ -3791,6 +4314,22 @@ def _render_config_toml(
             f"{config.scheduler.avoidance_speculation_confirmation_threshold}",
             "avoidance_speculation_max_active = "
             f"{config.scheduler.avoidance_speculation_max_active}",
+            # User-tunable from the extension popup and the desktop settings
+            # page; omitting it here made those inputs write-only (every save
+            # silently reverted the value to the default 3). It doubles as the
+            # unified interest line's priority-flush threshold.
+            f"feedback_batch_threshold = {config.scheduler.feedback_batch_threshold}",
+            f"unified_interest_line = {_toml_bool(config.scheduler.unified_interest_line)}",
+            "profile_consolidation_enabled = "
+            f"{_toml_bool(config.scheduler.profile_consolidation_enabled)}",
+            "profile_consolidation_interval_hours = "
+            f"{config.scheduler.profile_consolidation_interval_hours}",
+            "profile_consolidation_like_target_upper = "
+            f"{config.scheduler.profile_consolidation_like_target_upper}",
+            "profile_consolidation_like_target_soft = "
+            f"{config.scheduler.profile_consolidation_like_target_soft}",
+            "profile_consolidation_archive_enabled = "
+            f"{_toml_bool(config.scheduler.profile_consolidation_archive_enabled)}",
             f"auto_update_enabled = {_toml_bool(config.scheduler.auto_update_enabled)}",
             "auto_update_check_interval_hours = "
             f"{config.scheduler.auto_update_check_interval_hours}",
@@ -3867,6 +4406,20 @@ def _render_config_toml(
             f"aggregate_budget_mb = {config.logging.aggregate_budget_mb}",
             f"unmanaged_truncate_mb = {config.logging.unmanaged_truncate_mb}",
             f"unmanaged_max_age_days = {config.logging.unmanaged_max_age_days}",
+            "",
+            "[soul]",
+            "# Deep-write consistency gate (spec Phase 3). shadow = async",
+            "# side-channel judging without blocking writes (default);",
+            "# enforce = synchronous gate (savable only after >=14 days of",
+            "# shadow data, unless force flag set); off = full bypass.",
+            f"posture_gate_mode = {_toml_string(config.soul.posture_gate_mode)}",
+            "# Escape hatch: allow saving enforce without the 14-day shadow",
+            "# observation gate. Risky — enables gating before it is calibrated.",
+            f"posture_gate_force_enforce = {_toml_bool(config.soul.posture_gate_force_enforce)}",
+            "# Topic-lifecycle serialization (spec Phase 4). off (default) keeps",
+            "# the LLM-facing profile byte-identical; on excludes archived topics.",
+            f"topic_lifecycle_serialization = "
+            f"{_toml_string(config.soul.topic_lifecycle_serialization)}",
             "",
             "[soul.preference]",
             "# v0.3.x event-satisfaction signal. When true, preference",

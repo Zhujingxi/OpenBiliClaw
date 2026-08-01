@@ -2,12 +2,15 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  BADGE_COLOR_PENDING,
   BADGE_COLOR_UNINITIALIZED,
   BADGE_COLOR_UNREACHABLE,
   BADGE_TITLE_DEFAULT,
+  BADGE_TITLE_PENDING,
   BADGE_TITLE_UNINITIALIZED,
   BADGE_TITLE_UNREACHABLE,
   computeActionBadge,
+  createPendingBadgeRefreshScheduler,
   flushResponseReportsUninitialized,
 } from "../src/background/badge.ts";
 
@@ -43,6 +46,53 @@ test("unknown reachability with no init signal stays clear", () => {
   const view = computeActionBadge(null, false);
   assert.equal(view.text, "");
   assert.equal(view.title, BADGE_TITLE_DEFAULT);
+});
+
+test("healthy initialized backend renders the pending confirmation count", () => {
+  const view = computeActionBadge(true, false, 3);
+  assert.equal(view.text, "3");
+  assert.equal(view.color, BADGE_COLOR_PENDING);
+  assert.equal(view.title, BADGE_TITLE_PENDING(3));
+});
+
+test("health and initialization badges take priority over pending confirmations", () => {
+  assert.equal(computeActionBadge(false, false, 7).title, BADGE_TITLE_UNREACHABLE);
+  assert.equal(computeActionBadge(true, true, 7).title, BADGE_TITLE_UNINITIALIZED);
+  assert.equal(computeActionBadge(null, false, 7).title, BADGE_TITLE_DEFAULT);
+});
+
+test("pending confirmation badge is clamped and ignores invalid counts", () => {
+  assert.equal(computeActionBadge(true, false, 120).text, "99+");
+  assert.equal(computeActionBadge(true, false, -1).text, "");
+  assert.equal(computeActionBadge(true, false, Number.NaN).text, "");
+});
+
+test("runtime-triggered pending refreshes debounce into one request", async () => {
+  const callbacks: Array<() => void> = [];
+  const cleared: number[] = [];
+  let refreshes = 0;
+  const scheduler = createPendingBadgeRefreshScheduler(
+    async () => {
+      refreshes += 1;
+    },
+    {
+      delayMs: 250,
+      setTimer(callback) {
+        callbacks.push(callback);
+        return callbacks.length;
+      },
+      clearTimer(timerId) {
+        cleared.push(Number(timerId));
+      },
+    },
+  );
+
+  scheduler.schedule();
+  scheduler.schedule();
+  scheduler.schedule();
+  assert.deepEqual(cleared, [1, 2]);
+  await callbacks.at(-1)?.();
+  assert.equal(refreshes, 1);
 });
 
 test("flush response with all events rejected as not_initialized is detected", () => {

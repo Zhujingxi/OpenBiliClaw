@@ -99,8 +99,22 @@ _PROBE_FAIL_TTL_SECONDS = PROBE_FAIL_TTL_SECONDS
 # freshness turns out shorter (CLAUDE.md pitfall #3).
 _VERIFIED_FRESH_SECONDS = 6 * 3600
 
-# rdt-cli's own credential lifetime (``reddit_tasks._RDT_CREDENTIAL_TTL_SECONDS``).
-_RDT_TTL_SECONDS = 7 * 24 * 3600
+
+def _rdt_ttl_seconds() -> int:
+    """The credential lifetime the Reddit gate actually enforces.
+
+    Read from ``reddit_tasks`` rather than duplicated: this used to be a
+    literal ``7 * 24 * 3600`` and silently kept advertising 7 days after the
+    gate moved 6h earlier (to stay clear of rdt-cli's own browser-refresh
+    subprocess), so the settings page showed a green "凭据就绪" badge for six
+    hours after the backend had already stopped calling rdt. Imported lazily —
+    ``reddit_tasks`` pulls in the discovery engine, which this module does not
+    want at import time.
+    """
+    from openbiliclaw.sources.reddit_tasks import RDT_CREDENTIAL_TTL_SECONDS
+
+    return RDT_CREDENTIAL_TTL_SECONDS
+
 
 # Human-readable detail for each X (twitter) health state.
 _X_STATE_DETAIL = {
@@ -598,11 +612,11 @@ def auth_youtube(ctx: SourceAuthContext) -> SourceAuthContract:
 
 
 def auth_twitter(ctx: SourceAuthContext) -> SourceAuthContract:
-    """X: the only platform whose verdict comes from real traffic.
+    """X: explicit verification uses a read-only authenticated-account probe.
 
-    ``passive_health`` reflects that nothing is probed on demand — the health
-    store records what genuine fetches ran into (401 / 403 / 429), so the
-    verdict is as fresh as the last real request and has no TTL of its own.
+    Discovery traffic still records 401 / 403 / 429 outcomes in the health
+    store, while the settings-page action can now refresh that verdict on
+    demand through ``twitter-cli``'s read-only ``fetch_me`` path.
     """
     cfg = ctx.cfg
     tw_cfg = ctx.source_cfg("twitter")
@@ -633,14 +647,13 @@ def auth_twitter(ctx: SourceAuthContext) -> SourceAuthContract:
         _X_HEALTH_VERIFICATION.get(state, "unverified") if credential == "present" else "unverified"
     )
 
-    # ``passive_health`` means "read off real traffic", so there has to have
-    # been some. The health row is *created* with ``state='ok'``, which made a
+    # ``ok`` means "a real request succeeded", so there has to have been some.
+    # The health row is *created* with ``state='ok'``, which made a
     # first-ever cookie — including one that expired months ago — report
-    # ``verified`` with ``verify_method="passive_health"`` before a single
-    # request had ever gone out. That is a fabricated verdict, and the one
-    # method that cannot correct itself on demand (invariant I3). ``ok`` is
-    # therefore only a verdict once ``record_success`` has stamped a real one;
-    # until then the honest answer is that we have not asked.
+    # ``verified`` before a single request had ever gone out. That is a
+    # fabricated verdict. ``ok`` is therefore only a verdict once
+    # ``record_success`` has stamped a real one; until then the honest answer
+    # is that we have not asked.
     #
     # The negative states need no such guard: they are only ever written by
     # ``record_error``, i.e. by traffic that genuinely happened.
@@ -689,7 +702,7 @@ def auth_twitter(ctx: SourceAuthContext) -> SourceAuthContract:
         credential=credential,
         credential_origin=origin,
         verification=verification,
-        verify_method="passive_health",
+        verify_method="live_probe",
         verified_at=verified_at,
         verify_ttl_seconds=None,
         can_verify_now=credential == "present",
@@ -883,7 +896,7 @@ def _reddit_extension(ctx: SourceAuthContext) -> SourceAuthContract:
             verification="verified",
             verify_method="local_file",
             verified_at=_rdt_saved_at(),
-            verify_ttl_seconds=_RDT_TTL_SECONDS,
+            verify_ttl_seconds=_rdt_ttl_seconds(),
             detail="已登录 Reddit（reddit_session 已同步）。",
             legacy_state="ready",
             legacy_logged_in=True,
@@ -895,7 +908,7 @@ def _reddit_extension(ctx: SourceAuthContext) -> SourceAuthContract:
         credential_origin="none",
         verification="unverified",
         verify_method="local_file",
-        verify_ttl_seconds=_RDT_TTL_SECONDS,
+        verify_ttl_seconds=_rdt_ttl_seconds(),
         detail="Reddit 使用 OpenBiliClaw 插件登录态；尚未看到成功任务结果。",
         legacy_state="unverified",
         legacy_logged_in=False,
@@ -1013,7 +1026,7 @@ def auth_reddit(ctx: SourceAuthContext) -> SourceAuthContract:
                 credential_origin="none",
                 verification="unverified",
                 verify_method="local_file",
-                verify_ttl_seconds=_RDT_TTL_SECONDS,
+                verify_ttl_seconds=_rdt_ttl_seconds(),
                 can_verify_now=False,
                 detail="Reddit 命令后端状态不可用，请检查 opencli / rdt 安装。",
                 legacy_state="missing",
@@ -1030,7 +1043,7 @@ def auth_reddit(ctx: SourceAuthContext) -> SourceAuthContract:
             verification=verification,
             verify_method="local_file",
             verified_at=_rdt_saved_at() if verification != "unverified" else "",
-            verify_ttl_seconds=_RDT_TTL_SECONDS,
+            verify_ttl_seconds=_rdt_ttl_seconds(),
             can_verify_now=credential != "none",
             detail=status.message,
             legacy_state=state,

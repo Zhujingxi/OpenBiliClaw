@@ -15,7 +15,7 @@ import json
 import logging
 import random
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -35,7 +35,6 @@ async def run_discovery_pipeline(
     Returns (strategy_results, intermediates).
     """
     from openbiliclaw.discovery.engine import (
-        ContentDiscoveryEngine,
         DiscoveryConcurrencyController,
     )
     from openbiliclaw.discovery.strategies.strategies import (
@@ -83,10 +82,16 @@ async def run_discovery_pipeline(
         profile = persona
     else:
         from openbiliclaw.soul.profile import SoulProfile
+
         profile = SoulProfile()
 
     strategy_results: dict[str, list[Any]] = {}
-    strategies = {"search": search, "trending": trending, "related_chain": related, "explore": explore}
+    strategies = {
+        "search": search,
+        "trending": trending,
+        "related_chain": related,
+        "explore": explore,
+    }
 
     for name, strategy in strategies.items():
         try:
@@ -139,7 +144,7 @@ async def main(args: argparse.Namespace) -> None:
     scenario_pool = ScenarioPool(PROJECT_ROOT / "data" / "eval" / "scenario_pool")
     persona_pool = PersonaPool(PROJECT_ROOT / "data" / "eval" / "persona_pool" / "discovery")
 
-    ts = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%S")
+    ts = datetime.now(tz=UTC).strftime("%Y%m%dT%H%M%S")
     run_logger = RunLogger(task="discovery_auto", data_dir=PROJECT_ROOT / "data", run_id=ts)
 
     best_score = 0.0
@@ -150,8 +155,13 @@ async def main(args: argparse.Namespace) -> None:
     strategies_to_eval = [s.strip() for s in args.strategies.split(",") if s.strip()]
 
     logger.info("=== Discovery Auto-Optimize ===")
-    logger.info("Rounds: %d | Batch: %d | Explore rate: %.2f | Strategies: %s",
-                args.rounds, args.batch, args.explore_rate, strategies_to_eval)
+    logger.info(
+        "Rounds: %d | Batch: %d | Explore rate: %.2f | Strategies: %s",
+        args.rounds,
+        args.batch,
+        args.explore_rate,
+        strategies_to_eval,
+    )
 
     for epoch in range(1, args.rounds + 1):
         logger.info("\n--- Epoch %d/%d ---", epoch, args.rounds)
@@ -161,7 +171,7 @@ async def main(args: argparse.Namespace) -> None:
             logger.info("[Epoch %d] Persona %d/%d", epoch, persona_idx + 1, args.batch)
 
             # 1. Generate or load persona
-            from openbiliclaw.soul.profile import OnionProfile, SoulProfile
+            from openbiliclaw.soul.profile import OnionProfile
 
             persona: OnionProfile | None = None
             persona_data = persona_pool.load_any("discovery")
@@ -174,8 +184,10 @@ async def main(args: argparse.Namespace) -> None:
 
             if persona is None:
                 logger.info("  Generating new persona via LLM...")
-                constraints = {"mbti": random.choice(["INTJ", "ENFP", "ISTP", "INFJ"]),
-                               "depth": random.choice(["hardcore", "casual", "moderate"])}
+                constraints = {
+                    "mbti": random.choice(["INTJ", "ENFP", "ISTP", "INFJ"]),
+                    "depth": random.choice(["hardcore", "casual", "moderate"]),
+                }
                 try:
                     response = await llm_service.complete_structured_task(
                         system_instruction=(
@@ -198,6 +210,7 @@ async def main(args: argparse.Namespace) -> None:
 
             # 2. Generate or load scenario
             from openbiliclaw.eval.discovery_scenario import _persona_signature
+
             pid = _persona_signature(persona)
             scenario = scenario_pool.load(pid)
             if scenario is None:
@@ -209,22 +222,25 @@ async def main(args: argparse.Namespace) -> None:
                     logger.warning("  Scenario generation returned empty pool, skipping")
                     continue
 
-            logger.info("  Scenario: %d videos, %d events",
-                        len(scenario.content_pool), len(scenario.mock_event_history))
+            logger.info(
+                "  Scenario: %d videos, %d events",
+                len(scenario.content_pool),
+                len(scenario.mock_event_history),
+            )
 
             # 3. Run discovery
             strategy_results, intermediates = await run_discovery_pipeline(
-                persona, scenario, llm_service,
+                persona,
+                scenario,
+                llm_service,
             )
 
             # Filter to requested strategies
             filtered_results = {
-                k: v for k, v in strategy_results.items()
-                if k in strategies_to_eval
+                k: v for k, v in strategy_results.items() if k in strategies_to_eval
             }
             filtered_intermediates = {
-                k: v for k, v in intermediates.items()
-                if k in strategies_to_eval
+                k: v for k, v in intermediates.items() if k in strategies_to_eval
             }
             # Inject scenario ground truth labels for filter_precision scoring
             for k in filtered_intermediates:
@@ -249,25 +265,32 @@ async def main(args: argparse.Namespace) -> None:
 
             # Save artifacts
             step = run_logger.step(f"epoch{epoch}_persona{persona_idx}")
-            step.save_json("strategy_results.json", {
-                k: [{"bvid": item.bvid, "title": item.title, "score": item.relevance_score}
-                    for item in v]
-                for k, v in filtered_results.items()
-            })
-            step.save_json("intermediates.json", {
-                k: _safe_serialize(v)
-                for k, v in filtered_intermediates.items()
-            })
-            step.save_json("eval_report.json", {
-                "overall_score": report.overall_score,
-                "strategy_scores": {
-                    k: v.overall_score for k, v in report.strategy_reports.items()
+            step.save_json(
+                "strategy_results.json",
+                {
+                    k: [
+                        {"bvid": item.bvid, "title": item.title, "score": item.relevance_score}
+                        for item in v
+                    ]
+                    for k, v in filtered_results.items()
                 },
-                "worst_dimensions": [
-                    {"dim": d.dimension, "score": d.score}
-                    for d in report.worst_dimensions
-                ],
-            })
+            )
+            step.save_json(
+                "intermediates.json",
+                {k: _safe_serialize(v) for k, v in filtered_intermediates.items()},
+            )
+            step.save_json(
+                "eval_report.json",
+                {
+                    "overall_score": report.overall_score,
+                    "strategy_scores": {
+                        k: v.overall_score for k, v in report.strategy_reports.items()
+                    },
+                    "worst_dimensions": [
+                        {"dim": d.dimension, "score": d.score} for d in report.worst_dimensions
+                    ],
+                },
+            )
 
         if not reports:
             logger.warning("No reports generated for epoch %d, skipping", epoch)
@@ -288,15 +311,21 @@ async def main(args: argparse.Namespace) -> None:
         if epoch == 1:
             best_score = train_mean
             best_epoch = epoch
-            epoch_history.append({
-                "epoch": epoch,
-                "train_mean": round(train_mean, 4),
-                "action": "BASELINE",
-                "changes_applied": 0,
-                "accepted": True,
-                "worst_3": [{"dim": d.dimension, "score": d.score} for d in worst_dims[:3]],
-            })
-            logger.info("[Epoch %d] 📊 BASELINE — score: %.4f (will optimize from epoch 2)", epoch, best_score)
+            epoch_history.append(
+                {
+                    "epoch": epoch,
+                    "train_mean": round(train_mean, 4),
+                    "action": "BASELINE",
+                    "changes_applied": 0,
+                    "accepted": True,
+                    "worst_3": [{"dim": d.dimension, "score": d.score} for d in worst_dims[:3]],
+                }
+            )
+            logger.info(
+                "[Epoch %d] 📊 BASELINE — score: %.4f (will optimize from epoch 2)",
+                epoch,
+                best_score,
+            )
             continue
 
         # 7. Exploit or Explore (epoch >= 2)
@@ -339,20 +368,27 @@ async def main(args: argparse.Namespace) -> None:
         elif applied > 0:
             optimizer.rollback()
             patience += 1
-            logger.info("[Epoch %d] ❌ ROLLED BACK (%.4f <= best %.4f, patience=%d)",
-                        epoch, train_mean, best_score, patience)
+            logger.info(
+                "[Epoch %d] ❌ ROLLED BACK (%.4f <= best %.4f, patience=%d)",
+                epoch,
+                train_mean,
+                best_score,
+                patience,
+            )
         else:
             patience += 1
             logger.info("[Epoch %d] No changes applied, patience=%d", epoch, patience)
 
-        epoch_history.append({
-            "epoch": epoch,
-            "train_mean": round(train_mean, 4),
-            "action": action,
-            "changes_applied": applied,
-            "accepted": accepted,
-            "worst_3": [{"dim": d.dimension, "score": d.score} for d in worst_dims[:3]],
-        })
+        epoch_history.append(
+            {
+                "epoch": epoch,
+                "train_mean": round(train_mean, 4),
+                "action": action,
+                "changes_applied": applied,
+                "accepted": accepted,
+                "worst_3": [{"dim": d.dimension, "score": d.score} for d in worst_dims[:3]],
+            }
+        )
 
         if patience >= args.patience:
             logger.info("Early stopping at epoch %d (patience=%d)", epoch, args.patience)
@@ -365,23 +401,33 @@ async def main(args: argparse.Namespace) -> None:
         mark = "✅" if entry["accepted"] else "❌"
         logger.info(
             "  Epoch %d: %.4f %s %s",
-            entry["epoch"], entry["train_mean"], mark, entry["action"],
+            entry["epoch"],
+            entry["train_mean"],
+            mark,
+            entry["action"],
         )
 
     # Save final report
     report_path = run_logger.run_dir / "summary.json"
-    report_path.write_text(json.dumps({
-        "best_score": best_score,
-        "best_epoch": best_epoch,
-        "epochs": epoch_history,
-        "strategies": strategies_to_eval,
-        "config": {
-            "rounds": args.rounds,
-            "batch": args.batch,
-            "explore_rate": args.explore_rate,
-            "patience": args.patience,
-        },
-    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    report_path.write_text(
+        json.dumps(
+            {
+                "best_score": best_score,
+                "best_epoch": best_epoch,
+                "epochs": epoch_history,
+                "strategies": strategies_to_eval,
+                "config": {
+                    "rounds": args.rounds,
+                    "batch": args.batch,
+                    "explore_rate": args.explore_rate,
+                    "patience": args.patience,
+                },
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
     logger.info("Report saved to %s", report_path)
 
 
@@ -402,12 +448,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch", type=int, default=3, help="Personas per epoch")
     parser.add_argument("--explore-rate", type=float, default=0.2, help="Exploration probability")
     parser.add_argument("--patience", type=int, default=3, help="Early stop patience")
-    parser.add_argument("--strategies", type=str, default="search,trending,explore,related_chain",
-                        help="Comma-separated strategy names to evaluate")
-    parser.add_argument("--use-agent", action="store_true", default=True,
-                        help="Use Claude Agent SDK for optimization")
-    parser.add_argument("--no-agent", action="store_false", dest="use_agent",
-                        help="Use direct LLM for optimization")
+    parser.add_argument(
+        "--strategies",
+        type=str,
+        default="search,trending,explore,related_chain",
+        help="Comma-separated strategy names to evaluate",
+    )
+    parser.add_argument(
+        "--use-agent",
+        action="store_true",
+        default=True,
+        help="Use Claude Agent SDK for optimization",
+    )
+    parser.add_argument(
+        "--no-agent", action="store_false", dest="use_agent", help="Use direct LLM for optimization"
+    )
     return parser.parse_args()
 
 

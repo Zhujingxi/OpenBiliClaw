@@ -67,7 +67,7 @@ def test_inno_installer_sets_numeric_file_version_resource() -> None:
 
     assert "#define MyAppVersionInfoVersion" in script
     assert "VersionInfoVersion={#MyAppVersionInfoVersion}" in script
-    assert "VersionInfoProductVersion={#MyAppVersion}" in script
+    assert "VersionInfoProductVersion={#MyAppVersionInfoVersion}" in script
 
 
 def test_inno_installer_always_restarts_freshly_installed_executable() -> None:

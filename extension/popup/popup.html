@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>OpenBiliClaw</title>
-  <link rel="icon" type="image/png" href="../icons/icon128.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="../icons/icon32.png?v=4">
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     /* The popup toggles visibility via the `hidden` property, but nearly every
@@ -172,7 +172,8 @@
       border-radius: 14px;
       display: block;
       object-fit: cover;
-      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8), 0 12px 24px rgba(251, 114, 153, 0.18);
+      background: var(--brand);
+      box-shadow: 0 12px 24px rgba(251, 114, 153, 0.18);
       flex-shrink: 0;
     }
 
@@ -358,6 +359,23 @@
       box-shadow: 0 10px 18px rgba(251, 114, 153, 0.14);
       transform: translateY(-1px);
     }
+
+    .tab-count-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 16px;
+      height: 16px;
+      margin-left: 3px;
+      padding: 0 4px;
+      border-radius: 999px;
+      background: var(--brand);
+      color: #fff;
+      font-size: 9px;
+      line-height: 1;
+    }
+
+    .tab-count-badge[hidden] { display: none; }
 
     .tab-button:focus-visible,
     .mobile-button:focus-visible,
@@ -892,7 +910,8 @@
     .delight-banner-dismiss {
       grid-column: 2;
       grid-row: 1;
-      width: 32px;
+      width: 44px;
+      min-height: 44px;
       border: 0;
       border-left: 1px solid rgba(237, 219, 233, 0.6);
       background: transparent;
@@ -900,11 +919,19 @@
       font-size: 18px;
       line-height: 1;
       cursor: pointer;
-      transition: background 0.15s ease;
+      transition: background 0.15s ease, color 0.15s ease;
     }
     .delight-banner-dismiss:hover {
       background: rgba(0, 0, 0, 0.04);
       color: var(--text-main);
+    }
+    .delight-banner-dismiss:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: -3px;
+    }
+    .delight-banner-dismiss:disabled {
+      cursor: wait;
+      opacity: 0.58;
     }
 
     .delight-banner-body {
@@ -2800,48 +2827,6 @@
       padding: 6px 0;
     }
 
-    .insight-actions {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      margin-top: 4px;
-    }
-
-    .insight-action-btn {
-      font-size: 11px;
-      font-weight: 600;
-      padding: 3px 12px;
-      border-radius: 999px;
-      cursor: pointer;
-      border: 1px solid rgba(210, 228, 248, 0.9);
-      background: rgba(255, 255, 255, 0.85);
-      color: var(--text-secondary);
-      transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
-    }
-
-    .insight-action-btn:disabled {
-      opacity: 0.5;
-      cursor: default;
-    }
-
-    .insight-action-btn.is-confirm:hover:not(:disabled) {
-      background: rgba(48, 185, 128, 0.12);
-      border-color: rgba(48, 185, 128, 0.4);
-      color: var(--success);
-    }
-
-    .insight-action-btn.is-reject:hover:not(:disabled) {
-      background: rgba(235, 110, 110, 0.12);
-      border-color: rgba(235, 110, 110, 0.4);
-      color: #d9534f;
-    }
-
-    .insight-action-status {
-      font-size: 10px;
-      color: var(--text-muted);
-      margin-left: 2px;
-    }
-
     /* ── Recent awareness ── */
     .awareness-list {
       display: flex;
@@ -3288,6 +3273,95 @@
       color: var(--text-secondary);
     }
 
+    .chat-pending {
+      flex-shrink: 0;
+      margin-bottom: 8px;
+      border: 1px solid rgba(239, 221, 233, 0.96);
+      border-radius: 16px;
+      background: linear-gradient(180deg, rgba(255, 248, 251, 0.98), rgba(249, 251, 255, 0.98));
+    }
+
+    .chat-pending-toggle {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 9px 11px;
+      border: 0;
+      border-radius: inherit;
+      background: transparent;
+      color: var(--text-main);
+      font-size: 12px;
+      font-weight: 800;
+      text-align: left;
+    }
+
+    .chat-pending-toggle::after {
+      content: "⌄";
+      color: var(--text-secondary);
+      transition: transform 160ms ease;
+    }
+
+    .chat-pending-toggle.is-expanded::after { transform: rotate(180deg); }
+
+    .chat-pending-toggle:focus-visible,
+    .dialogue-card-action:focus-visible,
+    .dialogue-pending-item button:focus-visible,
+    .dialogue-evidence summary:focus-visible {
+      outline: none;
+      box-shadow: var(--focus-ring);
+    }
+
+    .chat-pending-count {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 20px;
+      height: 20px;
+      margin-left: 5px;
+      padding: 0 6px;
+      border-radius: 999px;
+      background: var(--brand);
+      color: #fff;
+      font-size: 10px;
+    }
+
+    .chat-pending-list {
+      display: grid;
+      gap: 7px;
+      padding: 0 8px 8px;
+    }
+
+    .chat-pending-list[hidden] { display: none; }
+
+    .dialogue-pending-item {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 8px;
+      padding: 9px;
+      border: 1px solid rgba(231, 238, 248, 0.96);
+      border-radius: 13px;
+      background: rgba(255, 255, 255, 0.92);
+    }
+
+    .dialogue-pending-copy { min-width: 0; display: grid; gap: 2px; }
+    .dialogue-pending-copy strong { font-size: 11px; line-height: 1.45; }
+    .dialogue-pending-kind,
+    .dialogue-pending-confidence,
+    .dialogue-pending-empty { font-size: 10px; color: var(--text-secondary); }
+    .dialogue-pending-empty { padding: 8px; }
+    .dialogue-pending-item button {
+      border: 1px solid rgba(239, 189, 207, 0.8);
+      border-radius: 999px;
+      padding: 6px 9px;
+      background: rgba(255, 244, 248, 0.96);
+      color: var(--brand-strong);
+      font-size: 10px;
+      font-weight: 800;
+    }
+
     .chat-messages {
       display: flex;
       flex-direction: column;
@@ -3296,6 +3370,63 @@
       overflow-y: auto;
       padding-right: 4px;
     }
+
+    .dialogue-turn {
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .dialogue-card {
+      width: 100%;
+      padding: 13px;
+      border: 1px solid rgba(239, 189, 207, 0.72);
+      border-radius: 18px;
+      background: linear-gradient(145deg, rgba(255, 247, 250, 0.99), rgba(245, 250, 255, 0.99));
+      box-shadow: 0 10px 24px rgba(94, 79, 112, 0.08);
+    }
+
+    .dialogue-card[data-card-state="confirmed"] { border-color: rgba(99, 190, 137, 0.55); }
+    .dialogue-card[data-card-state="rejected"] { border-color: rgba(239, 122, 134, 0.55); }
+    .dialogue-card[data-card-state="deferred"] { border-color: rgba(156, 163, 175, 0.55); }
+    .dialogue-card-kicker {
+      color: var(--brand-strong);
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+    }
+    .dialogue-card-title { margin-top: 5px; font-size: 13px; line-height: 1.5; }
+    .dialogue-card-state {
+      margin-top: 9px;
+      color: var(--text-secondary);
+      font-size: 11px;
+      font-weight: 800;
+    }
+    .dialogue-evidence { margin-top: 9px; color: var(--text-secondary); font-size: 10px; }
+    .dialogue-evidence summary { width: fit-content; cursor: pointer; font-weight: 700; }
+    .dialogue-evidence ul { display: grid; gap: 4px; margin: 7px 0 0 16px; line-height: 1.5; }
+    .dialogue-card-actions {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 6px;
+      margin-top: 11px;
+    }
+    .dialogue-card-action {
+      min-width: 0;
+      padding: 7px 3px;
+      border: 1px solid rgba(226, 230, 239, 0.98);
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.94);
+      color: var(--text-main);
+      font-size: 10px;
+      font-weight: 800;
+    }
+    .dialogue-card-action.is-confirm { color: #278a55; }
+    .dialogue-card-action.is-reject { color: var(--danger); }
+    .dialogue-card-action.is-discuss { color: var(--brand-strong); }
+    .dialogue-card-action:disabled { opacity: 0.5; cursor: default; }
+    .dialogue-question-shell { display: grid; gap: 6px; }
 
     /* Collapse the conversation surface entirely when no messages
        have been added yet — otherwise the min-height + margin
@@ -4667,6 +4798,106 @@
       border-radius: 18px;
     }
 
+    /* 平台源卡片：卡面常驻（标题 / 启用 / 接入状态），配置按需展开。
+       侧栏宽度有限，8 个来源全展开会让这一页长到无法浏览。 */
+    .settings-source-card[data-open] {
+      padding-bottom: 0;
+    }
+
+    .source-card-face {
+      position: relative;
+      display: grid;
+      gap: 6px;
+      padding-right: 26px;
+      cursor: pointer;
+    }
+
+    .settings-source-card[data-source-off="true"] .source-card-face {
+      cursor: default;
+    }
+
+    .source-card-face:focus-visible {
+      outline: 2px solid var(--accent, #ff6b35);
+      outline-offset: 3px;
+      border-radius: 12px;
+    }
+
+    .source-card-chev {
+      position: absolute;
+      top: 0;
+      right: 0;
+      width: 22px;
+      height: 22px;
+      display: grid;
+      place-items: center;
+      color: var(--text-dim, #8b8b8b);
+      transition: transform 200ms cubic-bezier(0.2, 0, 0, 1);
+    }
+
+    .settings-source-card[data-open="1"] .source-card-chev {
+      transform: rotate(180deg);
+    }
+
+    .settings-source-card[data-source-off="true"] .source-card-chev {
+      visibility: hidden;
+    }
+
+    .settings-source-card[data-source-off="true"] h3,
+    .settings-source-card[data-source-off="true"] .src-detail {
+      opacity: 0.62;
+    }
+
+    .source-card-body {
+      display: none;
+      gap: 12px;
+      margin-top: 12px;
+      padding: 12px 0 14px;
+      border-top: 1px solid var(--border-soft, rgba(0, 0, 0, 0.08));
+    }
+
+    .settings-source-card[data-open="1"] .source-card-body {
+      display: grid;
+    }
+
+    /* 吸底保存栏：任何分类下都能就地看到未保存修改并保存 */
+    .settings-savebar {
+      position: sticky;
+      bottom: 0;
+      z-index: 12;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-top: 12px;
+      padding: 10px 0 12px;
+      /* --surface is translucent; the bar sits over scrolling fields, so it
+         needs an opaque backdrop plus a blur to stay readable. */
+      border-top: 1px solid var(--border-soft, rgba(0, 0, 0, 0.08));
+      background: var(--bg-sky, #eef2fb);
+      backdrop-filter: blur(14px);
+    }
+
+    .settings-savebar .settings-save {
+      flex: 0 1 auto;
+      min-width: 120px;
+      padding: 10px 18px;
+    }
+
+    .settings-savebar[data-dirty="true"] {
+      border-top-color: var(--accent, #ff6b35);
+    }
+
+    .settings-savebar-msg {
+      font-size: 12px;
+      color: var(--text-dim, #8b8b8b);
+    }
+
+    .settings-savebar[data-dirty="true"] .settings-savebar-msg {
+      color: var(--accent, #ff6b35);
+      font-weight: 700;
+    }
+
     .settings-section h3 {
       font-size: 14px;
       font-weight: 800;
@@ -5258,7 +5489,7 @@
         <button id="tabWatchLater" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="viewWatchLater">稍后</button>
         <button id="tabFavorites" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="viewFavorites">收藏</button>
         <button id="tabProfile" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="viewProfile">画像</button>
-        <button id="tabChat" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="viewChat">对话</button>
+        <button id="tabChat" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="viewChat">对话<span id="chatPendingTabCount" class="tab-count-badge" hidden>0</span></button>
       </div>
     </div>
 
@@ -5500,6 +5731,12 @@
 
       <section id="viewChat" class="view" role="tabpanel" aria-labelledby="tabChat" hidden>
         <div class="chat-shell">
+          <div class="chat-pending">
+            <button id="chatPendingToggle" class="chat-pending-toggle" type="button" aria-expanded="false" aria-controls="chatPendingList">
+              <span>待聊确认 <span id="chatPendingCount" class="chat-pending-count">0</span></span>
+            </button>
+            <div id="chatPendingList" class="chat-pending-list" hidden></div>
+          </div>
           <div id="chatMessages" class="chat-messages"></div>
           <form id="chatForm" class="chat-form">
             <label class="chat-input-shell">
@@ -5607,7 +5844,7 @@
         </div>
         <div class="settings-field">
           <label for="cfgLlmTimeoutV2">单实例超时（秒）</label>
-          <input id="cfgLlmTimeoutV2" type="number" min="10" max="600" step="10" placeholder="300">
+          <input id="cfgLlmTimeoutV2" type="number" min="10" max="1200" step="10" placeholder="1200">
         </div>
         <div class="settings-probe-row">
           <button id="cfgOpenDesktopModels" class="settings-secondary-btn" type="button">打开桌面配置页</button>
@@ -5635,7 +5872,7 @@
         </div>
         <div class="settings-field">
           <label for="cfgLlmTimeout">LLM 超时 (秒)</label>
-          <input id="cfgLlmTimeout" type="number" min="10" max="600" step="10" placeholder="300">
+          <input id="cfgLlmTimeout" type="number" min="10" max="1200" step="10" placeholder="1200">
         </div>
         <div class="settings-field">
           <label for="cfgLlmFallbackProvider">备选 Provider</label>
@@ -5916,13 +6153,17 @@
 
       <div id="settingsPanelSources" class="settings-panel" data-settings-panel="sources" role="tabpanel" aria-labelledby="settingsTabSources" hidden>
       <!-- Bilibili -->
-      <div class="settings-section settings-source-card" data-source-card="bilibili">
+      <div class="settings-section settings-source-card" data-source-card="bilibili" data-open="0">
+        <div class="source-card-face" role="button" tabindex="0" aria-expanded="false" aria-controls="sourceCardBody-bilibili">
         <h3><span class="section-icon">&#x1F4FA;</span> Bilibili</h3>
         <div class="settings-field-row">
           <input id="cfgBilibiliEnabled" type="checkbox">
           <label for="cfgBilibiliEnabled">启用 Bilibili discovery</label>
         </div>
         <p class="settings-hint source-status-row" id="cfgBilibiliStatus" data-source-status="bilibili"><span class="src-dot">●</span> <span class="src-detail">登录状态加载中…</span></p>
+          <span class="source-card-chev" aria-hidden="true">&#x25BE;</span>
+        </div>
+        <div class="source-card-body" id="sourceCardBody-bilibili">
         <div class="settings-probe-row source-verify-row">
           <button class="settings-secondary-btn source-verify-btn" type="button">测试连接</button>
           <span class="settings-probe-status source-verify-status" aria-live="polite"></span>
@@ -5940,6 +6181,10 @@
           <textarea id="cfgBiliCookie" placeholder="从浏览器复制 Cookie 字符串"></textarea>
         </div>
         <div class="settings-field">
+          <label for="cfgBilibiliMinInterval">B 站兜底搜索最小间隔分钟</label>
+          <input id="cfgBilibiliMinInterval" type="number" min="0" step="1" placeholder="3">
+        </div>
+        <div class="settings-field">
           <label for="cfgBiliBrowserExecutable">agent-browser 路径</label>
           <input id="cfgBiliBrowserExecutable" type="text" placeholder="留空使用全局安装">
         </div>
@@ -5948,14 +6193,19 @@
           <label for="cfgBiliBrowserHeaded">调试：B 站登录时显示浏览器窗口</label>
         </div>
       </div>
+      </div>
 
-      <div class="settings-section settings-source-card" data-source-card="xiaohongshu">
+      <div class="settings-section settings-source-card" data-source-card="xiaohongshu" data-open="0">
+        <div class="source-card-face" role="button" tabindex="0" aria-expanded="false" aria-controls="sourceCardBody-xiaohongshu">
         <h3><span class="section-icon">&#x1F4D5;</span> 小红书</h3>
         <div class="settings-field-row">
           <input id="cfgXhsEnabled" type="checkbox">
           <label for="cfgXhsEnabled">启用小红书 discovery</label>
         </div>
         <p class="settings-hint source-status-row" id="cfgXhsStatus" data-source-status="xiaohongshu"><span class="src-dot">●</span> <span class="src-detail">登录状态加载中…</span></p>
+          <span class="source-card-chev" aria-hidden="true">&#x25BE;</span>
+        </div>
+        <div class="source-card-body" id="sourceCardBody-xiaohongshu">
         <div class="settings-probe-row source-verify-row">
           <button class="settings-secondary-btn source-verify-btn" type="button">测试连接</button>
           <span class="settings-probe-status source-verify-status" aria-live="polite"></span>
@@ -5971,17 +6221,26 @@
         <p class="settings-hint" data-budget-note>预算 = 每日任务次数上限，不是开关；填 1 表示每天只允许 1 次。0 或留空 = 不限。</p>
         <div class="settings-field">
           <label for="cfgXhsTaskInterval">小红书任务间隔秒数</label>
-          <input id="cfgXhsTaskInterval" type="number" min="0" step="1" placeholder="45">
+          <input id="cfgXhsTaskInterval" type="number" min="0" step="1" placeholder="300">
+        </div>
+        <div class="settings-field">
+          <label for="cfgXhsMinInterval">小红书最小调度间隔分钟</label>
+          <input id="cfgXhsMinInterval" type="number" min="0" step="1" placeholder="3">
         </div>
       </div>
+      </div>
 
-      <div class="settings-section settings-source-card" data-source-card="douyin">
+      <div class="settings-section settings-source-card" data-source-card="douyin" data-open="0">
+        <div class="source-card-face" role="button" tabindex="0" aria-expanded="false" aria-controls="sourceCardBody-douyin">
         <h3><span class="section-icon">&#x1F3B5;</span> 抖音</h3>
         <div class="settings-field-row">
           <input id="cfgDouyinEnabled" type="checkbox">
           <label for="cfgDouyinEnabled">启用抖音 discovery</label>
         </div>
         <p class="settings-hint source-status-row" id="cfgDouyinStatus" data-source-status="douyin"><span class="src-dot">●</span> <span class="src-detail">登录状态加载中…</span></p>
+          <span class="source-card-chev" aria-hidden="true">&#x25BE;</span>
+        </div>
+        <div class="source-card-body" id="sourceCardBody-douyin">
         <div class="settings-probe-row source-verify-row">
           <button class="settings-secondary-btn source-verify-btn" type="button">测试连接</button>
           <span class="settings-probe-status source-verify-status" aria-live="polite"></span>
@@ -6011,15 +6270,24 @@
           <label for="cfgDouyinRequestInterval">抖音 direct 请求间隔秒数</label>
           <input id="cfgDouyinRequestInterval" type="number" min="0" step="1" placeholder="2">
         </div>
+        <div class="settings-field">
+          <label for="cfgDouyinMinInterval">抖音最小调度间隔分钟</label>
+          <input id="cfgDouyinMinInterval" type="number" min="0" step="1" placeholder="3">
+        </div>
+      </div>
       </div>
 
-      <div class="settings-section settings-source-card" data-source-card="youtube">
+      <div class="settings-section settings-source-card" data-source-card="youtube" data-open="0">
+        <div class="source-card-face" role="button" tabindex="0" aria-expanded="false" aria-controls="sourceCardBody-youtube">
         <h3><span class="section-icon">&#x25B6;</span> YouTube</h3>
         <div class="settings-field-row">
           <input id="cfgYoutubeEnabled" type="checkbox">
           <label for="cfgYoutubeEnabled">启用 YouTube discovery</label>
         </div>
         <p class="settings-hint source-status-row" id="cfgYoutubeStatus" data-source-status="youtube"><span class="src-dot">●</span> <span class="src-detail">登录状态加载中…</span></p>
+          <span class="source-card-chev" aria-hidden="true">&#x25BE;</span>
+        </div>
+        <div class="source-card-body" id="sourceCardBody-youtube">
         <div class="settings-probe-row source-verify-row">
           <button class="settings-secondary-btn source-verify-btn" type="button">测试连接</button>
           <span class="settings-probe-status source-verify-status" aria-live="polite"></span>
@@ -6043,18 +6311,23 @@
         </div>
         <div class="settings-field">
           <label for="cfgYoutubeMinInterval">YouTube 最小调度间隔分钟数</label>
-          <input id="cfgYoutubeMinInterval" type="number" min="0" step="1" placeholder="60">
+          <input id="cfgYoutubeMinInterval" type="number" min="0" step="1" placeholder="3">
         </div>
         <p class="settings-hint">YouTube 通过后端 producer 独立调度；预算按天限制 yt_search / yt_trending / yt_channel 的执行规模。</p>
       </div>
+      </div>
 
-      <div class="settings-section settings-source-card" data-source-card="twitter">
+      <div class="settings-section settings-source-card" data-source-card="twitter" data-open="0">
+        <div class="source-card-face" role="button" tabindex="0" aria-expanded="false" aria-controls="sourceCardBody-twitter">
         <h3><span class="section-icon">&#x1D54F;</span> X (Twitter)</h3>
         <div class="settings-field-row">
           <input id="cfgTwitterEnabled" type="checkbox">
           <label for="cfgTwitterEnabled">启用 X discovery</label>
         </div>
         <p class="settings-hint source-status-row" id="cfgTwitterStatus" data-source-status="twitter"><span class="src-dot">●</span> <span class="src-detail">X 来源状态加载中…</span></p>
+          <span class="source-card-chev" aria-hidden="true">&#x25BE;</span>
+        </div>
+        <div class="source-card-body" id="sourceCardBody-twitter">
         <div class="settings-probe-row source-verify-row">
           <button class="settings-secondary-btn source-verify-btn" type="button">测试连接</button>
           <span class="settings-probe-status source-verify-status" aria-live="polite"></span>
@@ -6086,18 +6359,23 @@
         </div>
         <div class="settings-field">
           <label for="cfgTwitterMinInterval">X 最小调度间隔分钟数</label>
-          <input id="cfgTwitterMinInterval" type="number" min="0" step="1" placeholder="60">
+          <input id="cfgTwitterMinInterval" type="number" min="0" step="1" placeholder="3">
         </div>
         <p class="settings-hint">X 通过后端 cookie 回放独立调度；登录 x.com 后扩展会自动同步 auth_token / ct0。</p>
       </div>
+      </div>
 
-      <div class="settings-section settings-source-card" data-source-card="zhihu">
+      <div class="settings-section settings-source-card" data-source-card="zhihu" data-open="0">
+        <div class="source-card-face" role="button" tabindex="0" aria-expanded="false" aria-controls="sourceCardBody-zhihu">
         <h3><span class="section-icon">&#x77E5;</span> 知乎</h3>
         <div class="settings-field-row">
           <input id="cfgZhihuEnabled" type="checkbox">
           <label for="cfgZhihuEnabled">启用知乎 discovery</label>
         </div>
         <p class="settings-hint source-status-row" id="cfgZhihuStatus" data-source-status="zhihu"><span class="src-dot">●</span> <span class="src-detail">知乎来源状态加载中…</span></p>
+          <span class="source-card-chev" aria-hidden="true">&#x25BE;</span>
+        </div>
+        <div class="source-card-body" id="sourceCardBody-zhihu">
         <div class="settings-probe-row source-verify-row">
           <button class="settings-secondary-btn source-verify-btn" type="button">测试连接</button>
           <span class="settings-probe-status source-verify-status" aria-live="polite"></span>
@@ -6152,18 +6430,23 @@
         </div>
         <div class="settings-field">
           <label for="cfgZhihuMinInterval">知乎最小调度间隔分钟数</label>
-          <input id="cfgZhihuMinInterval" type="number" min="0" step="1" placeholder="60">
+          <input id="cfgZhihuMinInterval" type="number" min="0" step="1" placeholder="3">
         </div>
         <p class="settings-hint">知乎通过已登录浏览器插件执行搜索 / 热榜 / 首页 / 作者 / 相关任务；后端只入队任务并接收结果。</p>
       </div>
+      </div>
 
-      <div class="settings-section settings-source-card" data-source-card="reddit">
+      <div class="settings-section settings-source-card" data-source-card="reddit" data-open="0">
+        <div class="source-card-face" role="button" tabindex="0" aria-expanded="false" aria-controls="sourceCardBody-reddit">
         <h3><span class="section-icon">R</span> Reddit</h3>
         <div class="settings-field-row">
           <input id="cfgRedditEnabled" type="checkbox">
           <label for="cfgRedditEnabled">启用 Reddit 来源</label>
         </div>
         <p class="settings-hint source-status-row" id="cfgRedditStatus" data-source-status="reddit"><span class="src-dot">●</span> <span class="src-detail">Reddit 来源状态加载中…</span></p>
+          <span class="source-card-chev" aria-hidden="true">&#x25BE;</span>
+        </div>
+        <div class="source-card-body" id="sourceCardBody-reddit">
         <div class="settings-probe-row source-verify-row">
           <button class="settings-secondary-btn source-verify-btn" type="button">测试连接</button>
           <span class="settings-probe-status source-verify-status" aria-live="polite"></span>
@@ -6223,9 +6506,10 @@
         </div>
         <div class="settings-field">
           <label for="cfgRedditMinInterval">Reddit 最小调度间隔分钟数</label>
-          <input id="cfgRedditMinInterval" type="number" min="0" step="1" placeholder="60">
+          <input id="cfgRedditMinInterval" type="number" min="0" step="1" placeholder="3">
         </div>
         <p class="settings-hint">Reddit 日常 discovery 默认使用 rdt-cli 登录态命令后端；rdt / opencli 不可用时自动 fallback 到 OpenBiliClaw 插件任务。初始化 saved/upvoted/subscribed 信号仍通过插件复用当前浏览器登录态。默认每个分支每日 300 条。</p>
+      </div>
       </div>
 
       <div class="settings-section settings-source-card" data-source-card="browser">
@@ -6240,13 +6524,17 @@
         </div>
       </div>
 
-      <div class="settings-section settings-source-card" data-source-card="bangumi">
+      <div class="settings-section settings-source-card" data-source-card="bangumi" data-open="0">
+        <div class="source-card-face" role="button" tabindex="0" aria-expanded="false" aria-controls="sourceCardBody-bangumi">
         <h3><span class="section-icon">B</span> Bangumi</h3>
         <div class="settings-field-row">
           <input id="cfgBangumiEnabled" type="checkbox">
           <label for="cfgBangumiEnabled">启用 Bangumi 来源</label>
         </div>
         <p class="settings-hint source-status-row" id="cfgBangumiStatus" data-source-status="bangumi"><span class="src-dot">●</span> <span class="src-detail">Bangumi 来源状态加载中…</span></p>
+          <span class="source-card-chev" aria-hidden="true">&#x25BE;</span>
+        </div>
+        <div class="source-card-body" id="sourceCardBody-bangumi">
         <div class="settings-field">
           <label for="cfgBangumiUsername">公开用户名（可留空）</label>
           <input id="cfgBangumiUsername" type="text" maxlength="128" autocomplete="off" placeholder="例如 sai">
@@ -6278,9 +6566,10 @@
         <div class="settings-field"><label for="cfgBangumiDailyRankedBudget">每日排名条目</label><input id="cfgBangumiDailyRankedBudget" type="number" min="0" step="1" placeholder="100"></div>
         <div class="settings-field"><label for="cfgBangumiDailyLatestBudget">每日日期条目</label><input id="cfgBangumiDailyLatestBudget" type="number" min="0" step="1" placeholder="100"></div>
         <div class="settings-field"><label for="cfgBangumiRequestInterval">请求间隔秒数</label><input id="cfgBangumiRequestInterval" type="number" min="0" step="1" placeholder="1"></div>
-        <div class="settings-field"><label for="cfgBangumiMinInterval">最小调度间隔分钟</label><input id="cfgBangumiMinInterval" type="number" min="0" step="1" placeholder="60"></div>
+        <div class="settings-field"><label for="cfgBangumiMinInterval">最小调度间隔分钟</label><input id="cfgBangumiMinInterval" type="number" min="0" step="1" placeholder="3"></div>
         <div class="settings-field"><label for="cfgBangumiBootstrapLimit">初始化公开收藏上限</label><input id="cfgBangumiBootstrapLimit" type="number" min="1" step="1" placeholder="300"></div>
         <p class="settings-hint">官方公开只读 API，无需 Cookie。用户名只用于导入主动公开的收藏；留空仍可使用内容发现。</p>
+      </div>
       </div>
 
       <div class="settings-section settings-source-card" data-source-card="pool">
@@ -6490,12 +6779,12 @@
           <input id="cfgFeedbackBatchThreshold" type="number" min="1" step="1" placeholder="3">
         </div>
         <div class="settings-field">
-          <label for="cfgTrendingRefreshHours">热门刷新小时</label>
-          <input id="cfgTrendingRefreshHours" type="number" min="1" step="1" placeholder="3">
+          <label for="cfgTrendingRefreshMinutes">热门刷新分钟</label>
+          <input id="cfgTrendingRefreshMinutes" type="number" min="1" step="1" placeholder="3">
         </div>
         <div class="settings-field">
-          <label for="cfgExploreRefreshHours">探索刷新小时</label>
-          <input id="cfgExploreRefreshHours" type="number" min="1" step="1" placeholder="12">
+          <label for="cfgExploreRefreshMinutes">探索刷新分钟</label>
+          <input id="cfgExploreRefreshMinutes" type="number" min="1" step="1" placeholder="3">
         </div>
         <div class="settings-field">
           <label for="cfgDiscoveryLimit">单轮发现上限</label>
@@ -6635,7 +6924,8 @@
 
       <p class="settings-note">保存后会尝试热重载；少数路径类设置仍建议重启后端确认。</p>
 
-      <div class="settings-actions">
+      <div class="settings-actions settings-savebar" id="settingsSaveBar" data-dirty="false">
+        <span class="settings-savebar-msg" id="settingsSaveMsg" aria-live="polite">没有未保存的修改</span>
         <button id="settingsSave" class="settings-save" type="button">保存配置</button>
       </div>
 
@@ -6763,10 +7053,11 @@
     </footer>
   </div>
 
-  <!-- Shared with the desktop page and the setup wizard; copied into the
-       package by scripts/build.mjs because MV3's CSP forbids loading it from
-       the backend. A classic script, so it runs before the deferred module
-       below and popup.js can read it as a global. -->
+  <!-- Frontend helpers shared with backend-served pages; copied into the
+       package by scripts/build.mjs because MV3's CSP forbids loading them from
+       the backend. Classic scripts run before the module below so popup.js can
+       read their globals. -->
+  <script src="shared/dialogue-confirmation.js"></script>
   <script src="shared/source-status.js"></script>
   <script type="module" src="popup.js"></script>
 </body>

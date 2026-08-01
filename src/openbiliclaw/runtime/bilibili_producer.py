@@ -66,7 +66,7 @@ class BilibiliExtensionSearchProducer:
     presence: Any
     enabled: bool = True
     daily_budget: int = 0
-    min_interval_minutes: int = 30
+    min_interval_minutes: int = 3
     keywords_per_cycle: int = 3
     page_size: int = 20
     presence_grace_seconds: int = 90

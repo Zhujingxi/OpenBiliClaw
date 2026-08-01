@@ -9,6 +9,7 @@ result back.
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
@@ -77,6 +78,88 @@ class TestXhsTaskQueue:
         assert task is not None
         payload = json.loads(task["payload_json"])
         assert payload["keyword"] == "first"
+
+    def test_search_claims_respect_persisted_task_interval(
+        self,
+        queue: XhsTaskQueue,
+    ) -> None:
+        now = datetime.now(UTC).replace(microsecond=0)
+        queue.enqueue("search", {"keyword": "first"})
+        queue.enqueue("search", {"keyword": "second"})
+
+        first = queue.next_pending(min_interval_seconds=60, now=now)
+        assert first is not None
+        queue.complete(str(first["id"]), urls=[])
+
+        assert (
+            queue.next_pending(
+                min_interval_seconds=60,
+                now=now + timedelta(seconds=59),
+            )
+            is None
+        )
+        second = queue.next_pending(
+            min_interval_seconds=60,
+            now=now + timedelta(seconds=60),
+        )
+        assert second is not None
+        assert json.loads(str(second["payload_json"]))["keyword"] == "second"
+
+    def test_search_pacing_does_not_hide_a_later_bootstrap(
+        self,
+        queue: XhsTaskQueue,
+        db: Database,
+    ) -> None:
+        now = datetime.now(UTC).replace(microsecond=0)
+        queue.enqueue("search", {"keyword": "paced"})
+        queue.enqueue("bootstrap_profile", {"scopes": ["saved"]})
+        db.conn.execute(
+            """
+            UPDATE xhs_task_runtime_state
+            SET next_claim_at = ?
+            WHERE singleton = 1
+            """,
+            ((now + timedelta(seconds=60)).strftime("%Y-%m-%d %H:%M:%S"),),
+        )
+        db.conn.commit()
+
+        task = queue.next_pending(min_interval_seconds=60, now=now)
+
+        assert task is not None
+        assert task["type"] == "bootstrap_profile"
+
+    def test_rate_limit_persists_and_blocks_all_task_claims(
+        self,
+        queue: XhsTaskQueue,
+        db: Database,
+    ) -> None:
+        now = datetime.now(UTC).replace(microsecond=0)
+        queue.enqueue("search", {"keyword": "first"})
+        queue.enqueue("bootstrap_profile", {"scopes": ["saved"]})
+        task = queue.next_pending(now=now)
+        assert task is not None
+
+        state = queue.record_rate_limit(
+            str(task["id"]),
+            error="xhs_rate_limited",
+            cooldown_seconds=3600,
+            now=now,
+        )
+        assert state["rate_limited"] is True
+        assert state["cooldown_remaining_seconds"] == 3600
+
+        restored_queue = XhsTaskQueue(db)
+        assert restored_queue.next_pending(now=now + timedelta(seconds=3599)) is None
+        resumed = restored_queue.next_pending(now=now + timedelta(seconds=3600))
+        assert resumed is not None
+        assert resumed["type"] == "bootstrap_profile"
+
+        stored = restored_queue.get(str(task["id"]))
+        assert stored is not None
+        assert stored["status"] == "failed"
+        result = json.loads(str(stored["result_json"]))
+        assert result["error"] == "xhs_rate_limited"
+        assert result["rate_limited"] is True
 
     def test_complete_marks_task_done(self, queue: XhsTaskQueue) -> None:
         queue.enqueue("search", {"keyword": "x"})
@@ -301,12 +384,17 @@ def api_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
             browser_cdp_url="",
             browser_headed=False,
             xiaohongshu=SimpleNamespace(
+                enabled=True,
                 daily_search_budget=20,
                 daily_creator_budget=10,
                 task_interval_seconds=45,
             ),
         ),
-        scheduler=SimpleNamespace(pool_target_count=300, account_sync_interval_hours=24),
+        scheduler=SimpleNamespace(
+            enabled=True,
+            pool_target_count=300,
+            account_sync_interval_hours=24,
+        ),
     )
     monkeypatch.setattr("openbiliclaw.config.load_config", lambda: fake_config)
     monkeypatch.setattr("openbiliclaw.llm.build_llm_registry", lambda config: "registry")
@@ -322,6 +410,140 @@ class TestXhsTaskApi:
     def test_next_task_returns_204_when_empty(self, api_client: TestClient) -> None:
         resp = api_client.get("/api/sources/xhs/next-task")
         assert resp.status_code == 204
+
+    def test_disabled_source_does_not_claim_queued_discovery_task(
+        self,
+        api_client: TestClient,
+    ) -> None:
+        ctx = api_client.app.state.runtime_context
+        queue = XhsTaskQueue(ctx.database)
+        task_id = queue.enqueue_with_id(
+            "search",
+            {"keyword": "must-stay-pending"},
+            daily_budget=0,
+        )
+        assert task_id is not None
+
+        ctx.config.sources.xiaohongshu.enabled = False
+        blocked = api_client.get("/api/sources/xhs/next-task")
+
+        assert blocked.status_code == 204
+        stored = queue.get(task_id)
+        assert stored is not None
+        assert stored["status"] == "pending"
+
+        ctx.config.sources.xiaohongshu.enabled = True
+        resumed = api_client.get("/api/sources/xhs/next-task")
+        assert resumed.status_code == 200
+        assert resumed.json()["id"] == task_id
+
+    def test_disabled_source_status_wins_over_persisted_cooldown(
+        self,
+        api_client: TestClient,
+    ) -> None:
+        ctx = api_client.app.state.runtime_context
+        XhsTaskQueue(ctx.database).record_rate_limit(cooldown_seconds=600)
+        ctx.config.sources.xiaohongshu.enabled = False
+
+        status = api_client.get("/api/sources/status")
+
+        assert status.status_code == 200
+        xhs_status = status.json()["xiaohongshu"]
+        assert xhs_status["enabled"] is False
+        assert xhs_status["state"] != "rate_limited"
+        assert xhs_status["feed_paused"] is False
+
+    def test_next_task_applies_configured_interval(self, api_client: TestClient) -> None:
+        db = api_client.app.state.runtime_context.database
+        queue = XhsTaskQueue(db)
+        assert queue.enqueue("search", {"keyword": "first"})
+        assert queue.enqueue("search", {"keyword": "second"})
+
+        first = api_client.get("/api/sources/xhs/next-task")
+        assert first.status_code == 200
+        completed = api_client.post(
+            "/api/sources/xhs/task-result",
+            json={
+                "task_id": first.json()["id"],
+                "status": "ok",
+                "urls": [],
+                "notes": [],
+            },
+        )
+        assert completed.status_code == 200
+
+        throttled = api_client.get("/api/sources/xhs/next-task")
+        assert throttled.status_code == 204
+        assert int(throttled.headers["retry-after"]) > 0
+
+        db.conn.execute(
+            """
+            UPDATE xhs_task_runtime_state
+            SET next_claim_at = datetime('now', '-1 second')
+            WHERE singleton = 1
+            """
+        )
+        db.conn.commit()
+        second = api_client.get("/api/sources/xhs/next-task")
+        assert second.status_code == 200
+        assert second.json()["keyword"] == "second"
+
+    def test_rate_limited_result_trips_persistent_cooldown(
+        self,
+        api_client: TestClient,
+    ) -> None:
+        db = api_client.app.state.runtime_context.database
+        queue = XhsTaskQueue(db)
+        db.insert_pending_keywords("xiaohongshu", ["first"], "digest")
+        keyword = db.claim_keywords("xiaohongshu", 1)[0]
+        db.mark_keyword_executing(int(keyword["id"]))
+        assert queue.enqueue(
+            "search",
+            {
+                "keyword": "first",
+                "source_keyword_id": int(keyword["id"]),
+            },
+        )
+        assert queue.enqueue("search", {"keyword": "second"})
+        claimed = api_client.get("/api/sources/xhs/next-task")
+        assert claimed.status_code == 200
+
+        limited = api_client.post(
+            "/api/sources/xhs/task-result",
+            json={
+                "task_id": claimed.json()["id"],
+                "status": "rate_limited",
+                "urls": [],
+                "notes": [],
+                "error": "xhs_rate_limited",
+                "debug": {
+                    "xhs_risk_control": {
+                        "reason": "security_verification",
+                    }
+                },
+            },
+        )
+        assert limited.status_code == 200
+        assert limited.json() == {"ok": True}
+
+        blocked = api_client.get("/api/sources/xhs/next-task")
+        assert blocked.status_code == 204
+        assert int(blocked.headers["retry-after"]) > 0
+        assert queue.runtime_state()["rate_limited"] is True
+        keyword_after = db.conn.execute(
+            "SELECT status, attempts FROM discovery_keywords WHERE id = ?",
+            (int(keyword["id"]),),
+        ).fetchone()
+        assert keyword_after is not None
+        assert keyword_after["status"] == "pending"
+        assert keyword_after["attempts"] == 0
+
+        status = api_client.get("/api/sources/status")
+        assert status.status_code == 200
+        xhs_status = status.json()["xiaohongshu"]
+        assert xhs_status["state"] == "rate_limited"
+        assert xhs_status["feed_paused"] is True
+        assert "后台任务已自动暂停" in xhs_status["detail"]
 
     def test_task_result_completes_task(self, api_client: TestClient) -> None:
         # Enqueue via internal queue (simulating scheduler)

@@ -28,13 +28,60 @@ const $app = document.getElementById("app");
 const $statusBar = document.getElementById("status-bar");
 const $tabBar = document.getElementById("tab-bar");
 
+const BACK_TO_TOP_THRESHOLD = 240;
+
+function initBackToTop() {
+  const button = document.getElementById("backToTop");
+  if (!(button instanceof HTMLButtonElement) || !($app instanceof HTMLElement)) return;
+
+  const getScrollTargets = () => {
+    const chatView = document.getElementById("view-chat");
+    const chatActive = chatView instanceof HTMLElement && chatView.classList.contains("active");
+    return [
+      chatActive ? null : $app,
+      chatActive ? document.getElementById("chat-messages") : null,
+    ].filter((target, index, targets) => {
+      if (!(target instanceof HTMLElement) || targets.indexOf(target) !== index) return false;
+      if (target.closest("[hidden]") || window.getComputedStyle(target).display === "none") return false;
+      return true;
+    });
+  };
+
+  const getScrollTopTarget = () => {
+    const targets = getScrollTargets();
+    return targets.reduce(
+      (current, target) => (target.scrollTop > (current?.scrollTop || 0) ? target : current),
+      targets[0] || null,
+    );
+  };
+
+  const sync = () => {
+    const target = getScrollTopTarget();
+    const scrollTop = target?.scrollTop || 0;
+    button.hidden = scrollTop < BACK_TO_TOP_THRESHOLD;
+  };
+
+  const scrollToTop = () => {
+    const target = getScrollTopTarget();
+    if (!target) return;
+    const behavior = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches ? "auto" : "smooth";
+    target.scrollTo({ top: 0, behavior });
+  };
+
+  $app.addEventListener("scroll", sync, { passive: true });
+  document.addEventListener("scroll", sync, true);
+  window.addEventListener("resize", sync, { passive: true });
+  button.addEventListener("click", scrollToTop);
+  sync();
+}
+
 // ── Status Bar ───────────────────────────────────────────────
 function renderStatusBar() {
   $statusBar.innerHTML = "";
 
   const title = document.createElement("span");
   title.className = "status-title";
-  title.innerHTML = '<img class="status-brand-icon" src="icon-192.png" alt="" aria-hidden="true"><span>OpenBiliClaw</span>';
+  title.innerHTML = '<img class="status-brand-icon" src="icon-maskable-192.png" alt="" aria-hidden="true"><span>OpenBiliClaw</span>';
 
   const right = document.createElement("div");
   right.className = "status-right";
@@ -91,7 +138,7 @@ function renderStatusBar() {
         "background:var(--warning-soft);color:#d97706;font-size:12px;padding:6px 16px;text-align:center";
       $statusBar.after(existing);
     }
-    existing.textContent = state.degradedReason || "AI 服务配置有误，修复并重启后端前大部分功能不可用";
+    existing.textContent = state.degradedReason || "AI 服务配置有误，修复并保存前大部分功能不可用";
   } else if (existing) {
     existing.remove();
   }
@@ -363,6 +410,7 @@ window.addEventListener("obc:auth-required", () => {
 });
 
 (async function boot() {
+  initBackToTop();
   const status = await fetchAuthStatus();
   const enabled = Boolean(status.enabled);
   const authenticated = status.authenticated !== false;

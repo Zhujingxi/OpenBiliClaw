@@ -11,10 +11,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import logging
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -64,6 +63,7 @@ async def run_with_mock(
     if persona is None:
         print("No cached personas found. Generating one...")
         from openbiliclaw.eval.agents import collect_json
+
         persona_data = await collect_json(
             prompt="生成一个完整的 B 站用户画像（OnionProfile 格式），包含所有层。",
             json_schema='{"personality_portrait": "...", "core": {...}, ...}',
@@ -72,6 +72,7 @@ async def run_with_mock(
         persona_pool.save(persona, constraints={})
 
     from openbiliclaw.eval.discovery_scenario import _persona_signature
+
     pid = _persona_signature(persona)
     scenario = scenario_pool.load(pid)
     if scenario is None:
@@ -86,7 +87,9 @@ async def run_with_mock(
     from run_discovery_auto_optimize import run_discovery_pipeline
 
     strategy_results, intermediates = await run_discovery_pipeline(
-        persona, scenario, llm_service,
+        persona,
+        scenario,
+        llm_service,
     )
     filtered = {k: v for k, v in strategy_results.items() if k in strategies_to_eval}
     filtered_inter = {k: v for k, v in intermediates.items() if k in strategies_to_eval}
@@ -103,9 +106,9 @@ def display_and_collect_feedback(
     feedback: dict[str, dict[str, object]] = {}
 
     for strategy_name, results in strategy_results.items():
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(f"  {strategy_name.upper()} ({len(results)} items)")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
 
         inter = intermediates.get(strategy_name, {})
         if "queries" in inter:
@@ -117,7 +120,9 @@ def display_and_collect_feedback(
             if isinstance(domains, list):
                 for d in domains[:3]:
                     if isinstance(d, dict):
-                        print(f"  域: {d.get('domain', '?')} (novelty={d.get('novelty_level', '?')})")
+                        print(
+                            f"  域: {d.get('domain', '?')} (novelty={d.get('novelty_level', '?')})"
+                        )
         if "seeds" in inter:
             seeds = inter["seeds"]
             if isinstance(seeds, list):
@@ -145,9 +150,9 @@ def display_and_collect_feedback(
             feedback[key] = {"score": score, "note": note}
 
     # Cross-strategy diversity
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("  跨策略多样性评估")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     cross_score = _prompt_score("cross.diversity", default=0.5)
     feedback["cross.diversity"] = {"score": cross_score, "note": ""}
 
@@ -157,7 +162,7 @@ def display_and_collect_feedback(
 async def main(args: argparse.Namespace) -> None:
     """Main human eval flow."""
     from openbiliclaw.config import load_config
-    from openbiliclaw.eval.discovery_evaluator import DiscoveryEvalReport, DiscoveryEvaluator
+    from openbiliclaw.eval.discovery_evaluator import DiscoveryEvaluator
     from openbiliclaw.eval.run_logger import RunLogger
     from openbiliclaw.llm.registry import build_llm_registry
 
@@ -178,7 +183,8 @@ async def main(args: argparse.Namespace) -> None:
 
     if args.mock:
         strategy_results, intermediates, persona = await run_with_mock(
-            llm_service, strategies,
+            llm_service,
+            strategies,
         )
     else:
         print("Live mode not yet implemented. Use --mock flag.")
@@ -192,9 +198,9 @@ async def main(args: argparse.Namespace) -> None:
     report = await evaluator.evaluate_with_human(strategy_results, feedback)
 
     # Display report
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("  评估报告")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print(f"  总分: {report.overall_score:.4f}")
     for name, strat_report in report.strategy_reports.items():
         print(f"\n  {name} ({strat_report.overall_score:.2f}):")
@@ -202,23 +208,29 @@ async def main(args: argparse.Namespace) -> None:
             mark = "✅" if d.score >= 0.8 else "⚠️" if d.score >= 0.5 else "❌"
             print(f"    {mark} {d.dimension}: {d.score:.2f} {d.details}")
 
-    print(f"\n  最差维度:")
+    print("\n  最差维度:")
     for d in report.worst_dimensions:
         param = "?"
         from openbiliclaw.eval.discovery_evaluator import DISCOVERY_FIELD_TO_PARAM
+
         param = DISCOVERY_FIELD_TO_PARAM.get(d.dimension, "unknown")
         print(f"    {d.dimension} = {d.score:.2f} → {param}")
 
     # Save
-    ts = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%S")
+    ts = datetime.now(tz=UTC).strftime("%Y%m%dT%H%M%S")
     run_logger = RunLogger(PROJECT_ROOT / "data" / "eval" / "runs" / f"discovery_human_{ts}")
     step = run_logger.step("eval")
     step.save_json("feedback.json", feedback)
-    step.save_json("report.json", {
-        "overall_score": report.overall_score,
-        "strategy_scores": {k: v.overall_score for k, v in report.strategy_reports.items()},
-        "worst_dimensions": [{"dim": d.dimension, "score": d.score} for d in report.worst_dimensions],
-    })
+    step.save_json(
+        "report.json",
+        {
+            "overall_score": report.overall_score,
+            "strategy_scores": {k: v.overall_score for k, v in report.strategy_reports.items()},
+            "worst_dimensions": [
+                {"dim": d.dimension, "score": d.score} for d in report.worst_dimensions
+            ],
+        },
+    )
     print(f"\n  报告已保存到 {run_logger.base_dir}")
 
     # Optionally trigger optimization
@@ -227,6 +239,7 @@ async def main(args: argparse.Namespace) -> None:
             create_discovery_optimizer,
             dimension_scores_to_field_scores,
         )
+
         optimizer = create_discovery_optimizer(
             project_root=PROJECT_ROOT,
             use_agent_sdk=True,
@@ -248,10 +261,15 @@ async def main(args: argparse.Namespace) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Discovery human evaluation")
-    parser.add_argument("--mock", action="store_true", default=False,
-                        help="Use mock Bilibili client")
-    parser.add_argument("--strategies", type=str, default="search,trending,explore,related_chain",
-                        help="Comma-separated strategy names")
+    parser.add_argument(
+        "--mock", action="store_true", default=False, help="Use mock Bilibili client"
+    )
+    parser.add_argument(
+        "--strategies",
+        type=str,
+        default="search,trending,explore,related_chain",
+        help="Comma-separated strategy names",
+    )
     return parser.parse_args()
 
 

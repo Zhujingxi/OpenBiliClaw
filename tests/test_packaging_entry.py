@@ -26,6 +26,27 @@ def _load_entry_module():
 
 
 entry = _load_entry_module()
+_real_reconcile_packaged_autostart = entry._reconcile_packaged_autostart
+
+
+@pytest.fixture(autouse=True)
+def _prevent_real_login_item_changes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Entry-point tests must never mutate the developer's real login items."""
+    monkeypatch.setattr(entry, "_reconcile_packaged_autostart", lambda _config: None)
+
+
+def test_reconcile_packaged_autostart_uses_shared_runtime_reconcile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.runtime import autostart
+
+    config = SimpleNamespace()
+    calls: list[object] = []
+    monkeypatch.setattr(autostart, "reconcile", lambda loaded: calls.append(loaded) or None)
+
+    _real_reconcile_packaged_autostart(config)
+
+    assert calls == [config]
 
 
 # --------------------------------------------------------------------------- #
@@ -565,8 +586,16 @@ def test_main_uses_configured_api_host_when_env_host_unset(
     import uvicorn
 
     import openbiliclaw.api.app as api_app
+    from openbiliclaw.runtime import api_server
 
     monkeypatch.setattr(api_app, "create_app", lambda: SimpleNamespace())
+    fake_listeners = [object(), object()]
+    monkeypatch.setattr(
+        api_server,
+        "create_wildcard_listener_sockets",
+        lambda host, port: fake_listeners,
+    )
+    monkeypatch.setattr(api_server, "close_listener_sockets", lambda listeners: None)
     seen: dict[str, object] = {}
 
     class _Config:
@@ -577,8 +606,9 @@ def test_main_uses_configured_api_host_when_env_host_unset(
         def __init__(self, config: object) -> None:
             seen["server_config"] = config
 
-        def run(self) -> None:
+        def run(self, **kwargs: object) -> None:
             seen["ran"] = True
+            seen.update(kwargs)
 
     monkeypatch.setattr(uvicorn, "Config", _Config)
     monkeypatch.setattr(uvicorn, "Server", _Server)
@@ -588,6 +618,7 @@ def test_main_uses_configured_api_host_when_env_host_unset(
     assert seen["host"] == "0.0.0.0"
     assert seen["port"] == 19090
     assert seen["ran"] is True
+    assert seen["sockets"] is fake_listeners
 
 
 def test_main_opens_setup_after_repairing_unloadable_config(
@@ -631,8 +662,16 @@ def test_main_opens_setup_after_repairing_unloadable_config(
     import uvicorn
 
     import openbiliclaw.api.app as api_app
+    from openbiliclaw.runtime import api_server
 
     monkeypatch.setattr(api_app, "create_app", lambda: SimpleNamespace())
+    fake_listeners = [object(), object()]
+    monkeypatch.setattr(
+        api_server,
+        "create_wildcard_listener_sockets",
+        lambda host, port: fake_listeners,
+    )
+    monkeypatch.setattr(api_server, "close_listener_sockets", lambda listeners: None)
 
     class _Config:
         def __init__(self, app: object, *, host: str, port: int, log_level: str) -> None:
@@ -645,7 +684,7 @@ def test_main_opens_setup_after_repairing_unloadable_config(
         def __init__(self, config: object) -> None:
             self.config = config
 
-        def run(self) -> None:
+        def run(self, **kwargs: object) -> None:
             pass
 
     monkeypatch.setattr(uvicorn, "Config", _Config)

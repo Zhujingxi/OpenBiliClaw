@@ -37,13 +37,23 @@ from openbiliclaw.runtime.source_policy import effective_pool_source_shares
 from openbiliclaw.runtime.task_registry import BackgroundTaskRegistry
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from fastapi import FastAPI
 
     from openbiliclaw.config import Config
+    from openbiliclaw.soul.dialogue_learn_queue import (
+        DialogueDispatcher,
+        DialogueJobKind,
+    )
     from openbiliclaw.storage.database import Database
 
 logger = logging.getLogger(__name__)
 _BACKGROUND_TASK_CANCEL_TIMEOUT_SECONDS = 1.5
+# Dialogue learning may legitimately spend up to the configured 20-minute LLM
+# timeout in one worker job.  Give it the same 25-minute no-progress envelope
+# as guided preference analysis instead of rolling config.toml back after 30s.
+_DIALOGUE_SETTLEMENT_DRAIN_TIMEOUT_SECONDS = 25 * 60.0
 
 
 def _pool_source_shares_from_config(config: Any) -> dict[str, int]:
@@ -131,6 +141,110 @@ def _build_yt_scraper_client() -> Any:
     from openbiliclaw.youtube.client import YtScraperClient
 
     return YtScraperClient()
+
+
+def _build_dialogue_settlement_dispatcher(
+    soul_engine: Any,
+    api_handlers: Mapping[DialogueJobKind, DialogueDispatcher] | None = None,
+) -> DialogueDispatcher:
+    """Build the one typed dispatcher installed by the API runtime.
+
+    Engine-owned settlement kinds are dispatched directly. API-owned card,
+    pending-open, and durable-reply effects are supplied through the stable
+    runtime handler façade so hot reload can replace the worker without
+    capturing an HTTP request object.
+    """
+    from types import MappingProxyType
+
+    from openbiliclaw.soul.dialogue_learn_queue import (
+        AnchorAdmissionSnapshot,
+        AnchorPersisted,
+        DialogueDispatchReturn,
+        DialogueJob,
+        DialogueJobKind,
+        DialogueJobResult,
+    )
+
+    async def _dispatch(job: DialogueJob) -> DialogueDispatchReturn:
+        if job.kind is DialogueJobKind.LEARN:
+            from openbiliclaw.llm.service import _background_admission_bypass
+
+            payload = dict(job.payload)
+            snapshot = job.effective_anchor_snapshot
+            if isinstance(snapshot, AnchorPersisted):
+                payload["anchor_ref"] = snapshot.ref
+                payload["anchor_generation"] = snapshot.generation
+            else:
+                payload["anchor_ref"] = ""
+                payload["anchor_generation"] = 0
+            with _background_admission_bypass():
+                await soul_engine.learn_from_dialogue(**payload)
+            return DialogueJobResult(outcome="completed")
+        if job.kind is DialogueJobKind.CARD_RECONCILE:
+            handler = api_handlers.get(job.kind) if api_handlers is not None else None
+            if handler is not None:
+                return await handler(job)
+            reconcile = getattr(soul_engine, "_apply_card_reconcile", None)
+            if not callable(reconcile):
+                raise RuntimeError("card.reconcile worker handler is not ready")
+            result = await reconcile(ref=str(job.payload.get("ref", "")))
+            if not isinstance(result, dict):
+                raise RuntimeError("card.reconcile returned an invalid result")
+            return DialogueJobResult(
+                outcome=str(result.get("outcome", "completed")),
+                settlement=MappingProxyType(dict(result)),
+            )
+        snapshot = cast("AnchorAdmissionSnapshot", job.effective_anchor_snapshot)
+        if job.kind is DialogueJobKind.SETTLE_HYPOTHESIS:
+            result = await soul_engine._apply_hypothesis_settlement(
+                ref=str(job.payload.get("ref", "")),
+                hypothesis=str(job.payload.get("hypothesis", "")),
+                requested_verdict=str(job.payload.get("requested_verdict", "")),
+                turn_id=str(job.payload.get("turn_id", "")),
+                source=str(job.payload.get("source", "")),
+                derived=[
+                    dict(item)
+                    for item in cast("list[dict[str, object]]", job.payload.get("derived", []))
+                ],
+                anchor_snapshot=snapshot,
+            )
+            return DialogueJobResult(
+                outcome=str(result.get("outcome", "completed")),
+                settlement=MappingProxyType(dict(result)),
+            )
+        if job.kind is DialogueJobKind.SETTLE_CONFUSION:
+            result = await soul_engine._apply_confusion_settlement(
+                ref=str(job.payload.get("ref", "")),
+                requested_verdict=str(job.payload.get("requested_verdict", "")),
+                note=str(job.payload.get("note", "")),
+                turn_id=str(job.payload.get("turn_id", "")),
+                source=str(job.payload.get("source", "")),
+                anchor_snapshot=snapshot,
+            )
+            return DialogueJobResult(
+                outcome=str(result.get("outcome", "completed")),
+                settlement=MappingProxyType(dict(result)),
+            )
+        if job.kind is DialogueJobKind.CONFUSION_ATTRIBUTION_REPLAY:
+            return cast(
+                "DialogueDispatchReturn",
+                await soul_engine._dispatch_confusion_attribution_replay(job),
+            )
+        handler = api_handlers.get(job.kind) if api_handlers is not None else None
+        if handler is not None:
+            return await handler(job)
+        if job.kind in {
+            DialogueJobKind.CARD_DEFER,
+            DialogueJobKind.CARD_DISCUSS,
+            DialogueJobKind.ANCHOR_ESTABLISH,
+            DialogueJobKind.PROBE_REPLY_APPLY,
+            DialogueJobKind.CONFUSION_REPLY_APPLY,
+            DialogueJobKind.CONFUSION_OPEN_SYNC,
+        }:
+            raise RuntimeError(f"{job.kind.value} runtime handler is not installed")
+        raise AssertionError(f"Unhandled dialogue settlement kind: {job.kind!r}")
+
+    return _dispatch
 
 
 def _build_account_sync_x_components(
@@ -273,7 +387,7 @@ def build_youtube_discovery_producer(
         soul_engine=soul_engine,
         discover=_discover,
         enabled=True,
-        min_interval_minutes=int(getattr(yt_cfg, "min_interval_minutes", 60)),
+        min_interval_minutes=int(getattr(yt_cfg, "min_interval_minutes", 3)),
         daily_search_budget=int(getattr(yt_cfg, "daily_search_budget", 0)),
         daily_trending_budget=int(getattr(yt_cfg, "daily_trending_budget", 0)),
         daily_channel_budget=int(getattr(yt_cfg, "daily_channel_budget", 0)),
@@ -328,6 +442,11 @@ class RuntimeContext:
     saved_sync_service: Any = None
     soul_engine: Any = None
     dialogue: Any = None
+    # Wave 1: the one self-owned typed dialogue settlement queue. It is not in
+    # cancel_all and uses pause/drain + exact permit handoff on hot reload.
+    dialogue_settlement_queue: Any = None
+    dialogue_settlement_handlers: dict[Any, Any] = field(default_factory=dict)
+    dialogue_settlement_guard: Any = None
     discovery_engine: Any = None
     recommendation_engine: Any = None
     runtime_controller: Any = None
@@ -337,6 +456,10 @@ class RuntimeContext:
     def __post_init__(self) -> None:
         """Initialize stable callbacks and local-only saved-list behavior."""
         self.pool_inventory_commit_callback = self._handle_pool_inventory_commit
+        if self.dialogue_settlement_guard is None:
+            from openbiliclaw.soul.dialogue_settlement_guard import DialogueSettlementGuard
+
+            self.dialogue_settlement_guard = DialogueSettlementGuard()
 
         if self.database is None:
             return
@@ -515,16 +638,61 @@ class RuntimeContext:
         so no endpoint handler can interleave during the attribute-
         assignment sweep.
         """
-        # Keep a running guided-init task alive across rebuild — config writes
-        # are gated during init, but this is the belt-and-suspenders exemption
-        # so an init in flight is never silently cancelled (gui-init spec §5c).
-        cancelled = await self.task_registry.cancel_all(exclude=frozenset({"guided_init"}))
-        if cancelled:
-            logger.info(
-                "Hot-reload: cancelled %d background task(s) before rebuild",
-                cancelled,
-            )
-        self._rebuild_components(new_config)
+        # Pause/drain the old self-owned queue, then revoke its exact permit
+        # before any new worker may register. Construction failure gives the
+        # drained old Task a fresh nonce before it resumes.
+        old_settlement_queue = self.dialogue_settlement_queue
+        old_permit_revoked = False
+        if old_settlement_queue is not None:
+            try:
+                await old_settlement_queue.pause_and_drain(
+                    timeout=_DIALOGUE_SETTLEMENT_DRAIN_TIMEOUT_SECONDS
+                )
+            except (Exception, asyncio.CancelledError):
+                with suppress(Exception):
+                    old_settlement_queue.resume()
+                logger.warning(
+                    "Hot-reload aborted: old dialogue settlement queue did not drain",
+                    exc_info=True,
+                )
+                raise
+            await old_settlement_queue.wait_until_started()
+            if not old_settlement_queue.revoke_worker_permit():
+                old_settlement_queue.resume()
+                raise RuntimeError("Failed to revoke old dialogue settlement worker permit")
+            old_permit_revoked = True
+
+        try:
+            # Keep a running guided-init task alive across rebuild — config
+            # writes are gated during init, but this exemption prevents an
+            # in-flight init from being silently cancelled.
+            cancelled = await self.task_registry.cancel_all(exclude=frozenset({"guided_init"}))
+            if cancelled:
+                logger.info(
+                    "Hot-reload: cancelled %d background task(s) before rebuild",
+                    cancelled,
+                )
+            self._rebuild_components(new_config)
+            new_settlement_queue = self.dialogue_settlement_queue
+            if new_settlement_queue is not None:
+                await new_settlement_queue.wait_until_started()
+        except (Exception, asyncio.CancelledError):
+            # Atomic component construction leaves the old runtime installed.
+            # Its permit was revoked, so rollback must allocate a fresh nonce.
+            if old_settlement_queue is not None:
+                with suppress(Exception):
+                    if old_permit_revoked:
+                        old_settlement_queue.reauthorize_worker()
+                    old_settlement_queue.resume()
+            raise
+        else:
+            # New permit is current. Old shutdown/finally can only compare and
+            # clear its revoked tuple, so it cannot revoke the new worker.
+            if old_settlement_queue is not None:
+                with suppress(Exception):
+                    await old_settlement_queue.shutdown(
+                        timeout=_DIALOGUE_SETTLEMENT_DRAIN_TIMEOUT_SECONDS
+                    )
 
     def _rebuild_components(self, new_config: Config) -> None:
         """Synchronous component construction shared by hot-reload and startup.
@@ -643,6 +811,8 @@ class RuntimeContext:
             memory=self.memory_manager,
             usage_recorder=new_usage_recorder,
             satisfaction_filter_enabled=satisfaction_filter_enabled,
+            posture_gate_mode=str(getattr(soul_cfg, "posture_gate_mode", "shadow")),
+            posture_gate_force_enforce=bool(getattr(soul_cfg, "posture_gate_force_enforce", False)),
             module_overrides=new_module_overrides,
             llm_concurrency=llm_concurrency,
             llm_concurrency_gate=new_llm_gate,
@@ -698,6 +868,9 @@ class RuntimeContext:
             ),
             feedback_batch_threshold=int(
                 getattr(new_config.scheduler, "feedback_batch_threshold", 3)
+            ),
+            unified_interest_line=bool(
+                getattr(new_config.scheduler, "unified_interest_line", False)
             ),
             database=self.database,
         )
@@ -928,7 +1101,7 @@ class RuntimeContext:
                 presence=self.presence,
                 enabled=bili_enabled,
                 daily_budget=int(getattr(bili_cfg, "daily_search_budget", 0)),
-                min_interval_minutes=int(getattr(bili_cfg, "min_interval_minutes", 30)),
+                min_interval_minutes=int(getattr(bili_cfg, "min_interval_minutes", 3)),
                 keywords_per_cycle=int(getattr(bili_cfg, "keywords_per_cycle", 3)),
                 page_size=int(getattr(bili_cfg, "page_size", 20)),
                 presence_grace_seconds=int(
@@ -944,6 +1117,7 @@ class RuntimeContext:
                 llm_service=new_llm_service,
                 enabled=xhs_enabled,
                 daily_budget=int(getattr(xhs_cfg, "daily_search_budget", 0)),
+                min_interval_minutes=int(getattr(xhs_cfg, "min_interval_minutes", 3)),
                 keyword_fetch=new_keyword_fetch,
             )
             from openbiliclaw.runtime.douyin_producer import build_douyin_discovery_producer
@@ -1024,7 +1198,7 @@ class RuntimeContext:
                     daily_search_budget=int(getattr(bangumi_cfg, "daily_search_budget", 300)),
                     daily_ranked_budget=int(getattr(bangumi_cfg, "daily_ranked_budget", 100)),
                     daily_latest_budget=int(getattr(bangumi_cfg, "daily_latest_budget", 100)),
-                    min_interval_minutes=int(getattr(bangumi_cfg, "min_interval_minutes", 60)),
+                    min_interval_minutes=int(getattr(bangumi_cfg, "min_interval_minutes", 3)),
                     candidate_pipeline=new_candidate_pipeline,
                     keyword_fetch=new_keyword_fetch,
                 )
@@ -1084,8 +1258,12 @@ class RuntimeContext:
             pool_target_count=new_config.scheduler.pool_target_count,
             pool_source_shares=_pool_source_shares_from_config(new_config),
             signal_event_threshold=int(getattr(new_config.scheduler, "signal_event_threshold", 6)),
-            trending_refresh_hours=int(getattr(new_config.scheduler, "trending_refresh_hours", 3)),
-            explore_refresh_hours=int(getattr(new_config.scheduler, "explore_refresh_hours", 12)),
+            trending_refresh_minutes=int(
+                getattr(new_config.scheduler, "trending_refresh_minutes", 3)
+            ),
+            explore_refresh_minutes=int(
+                getattr(new_config.scheduler, "explore_refresh_minutes", 3)
+            ),
             check_interval_seconds=int(
                 getattr(new_config.scheduler, "refresh_check_interval_seconds", 60)
             ),
@@ -1244,10 +1422,29 @@ class RuntimeContext:
             x_health_store=account_sync_x_health,
         )
 
-        # 10. Dialogue (with source management tools)
+        # 10. Dialogue (with source management tools) + one settlement queue
+        from openbiliclaw.soul.dialogue import DialogueLearningMode
+        from openbiliclaw.soul.dialogue_learn_queue import DialogueSettlementQueue
         from openbiliclaw.sources.tools import SOURCE_TOOLS, SourceToolDispatcher
 
         source_tool_dispatcher = SourceToolDispatcher(self.database)
+        anchor_manager = getattr(new_soul_engine, "_dialogue_anchor_manager", None)
+        anchor_provider = getattr(anchor_manager, "snapshot", None)
+        new_settlement_queue = DialogueSettlementQueue(
+            _build_dialogue_settlement_dispatcher(
+                new_soul_engine,
+                self.dialogue_settlement_handlers,
+            ),
+            anchor_provider=anchor_provider if callable(anchor_provider) else None,
+            guard=self.dialogue_settlement_guard,
+        )
+        bind_settlement_queue = getattr(
+            new_soul_engine,
+            "bind_dialogue_settlement_queue",
+            None,
+        )
+        if callable(bind_settlement_queue):
+            bind_settlement_queue(new_settlement_queue)
         new_dialogue = SocraticDialogue(
             llm=None,
             soul_engine=new_soul_engine,
@@ -1255,6 +1452,9 @@ class RuntimeContext:
             session="popup",
             tools=SOURCE_TOOLS,
             tool_dispatcher=source_tool_dispatcher,
+            database=self.database,
+            learning_mode=DialogueLearningMode.QUEUED,
+            settlement_queue=new_settlement_queue,
         )
 
         # 11. Auto-update service
@@ -1281,7 +1481,10 @@ class RuntimeContext:
                 new_auto_update.adopt_status_from(old_auto_update)
 
         # ── Atomic swap ─────────────────────────────────────────────
-        # All construction succeeded → assign attributes.
+        # All construction succeeded. In an active loop, start() creates the
+        # actual Task and synchronously registers its permit before any new
+        # runtime attribute is published.
+        new_settlement_queue.start()
         new_llm_gate.reconfigure(llm_concurrency)
         self.llm_concurrency_gate = new_llm_gate
         self.config = new_config
@@ -1293,6 +1496,7 @@ class RuntimeContext:
         self.saved_sync_service = new_saved_sync_service
         self.soul_engine = new_soul_engine
         self.dialogue = new_dialogue
+        self.dialogue_settlement_queue = new_settlement_queue
         self.discovery_engine = new_discovery_engine
         self.recommendation_engine = new_recommendation_engine
         self.runtime_controller = new_runtime_controller

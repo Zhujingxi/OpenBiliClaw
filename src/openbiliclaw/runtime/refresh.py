@@ -243,6 +243,7 @@ class SupportsEventDatabase(Protocol):
         limit: int = 20,
     ) -> list[dict[str, Any]]: ...
     def mark_delight_notified(self, bvid: str) -> None: ...
+    def mark_delight_seen(self, bvid: str) -> bool: ...
     def count_delight_candidates(
         self,
         *,
@@ -357,8 +358,8 @@ class ContinuousRefreshController:
     init_active_check: Callable[[], bool] | None = None
     signal_event_threshold: int = 6
     event_refresh_minutes: int = 0
-    trending_refresh_hours: int = 3
-    explore_refresh_hours: int = 12
+    trending_refresh_minutes: int = 3
+    explore_refresh_minutes: int = 3
     notification_cooldown_hours: int = 2
     delight_cooldown_hours: int = 4
     check_interval_seconds: int = 60
@@ -1292,6 +1293,18 @@ class ContinuousRefreshController:
             lambda state: state.update({"last_delight_notification_at": now})
         )
 
+    def mark_delight_seen(self, bvid: str) -> None:
+        """Permanently consume a delight as already handled by the user."""
+        marker = getattr(self.database, "mark_delight_seen", None)
+        if callable(marker):
+            marker(bvid)
+        else:
+            self.database.mark_delight_notified(bvid)
+        now = self._now().isoformat()
+        self._update_discovery_runtime_state(
+            lambda state: state.update({"last_delight_notification_at": now})
+        )
+
     async def prepare_delight_candidates(self) -> int:
         """Warm ready-to-push delight candidates even when no refresh runs."""
         if not self._is_initialized():
@@ -2116,12 +2129,12 @@ class ContinuousRefreshController:
             plan.append((["search", "related_chain"], self.discovery_limit))
         if self._is_due(
             str(state.get("last_trending_refresh_at", "")),
-            hours=self.trending_refresh_hours,
+            minutes=self.trending_refresh_minutes,
         ):
             plan.append((["trending"], self.discovery_limit))
         if self._is_due(
             str(state.get("last_explore_refresh_at", "")),
-            hours=self.explore_refresh_hours,
+            minutes=self.explore_refresh_minutes,
         ):
             plan.append((["explore"], self.discovery_limit))
         return plan
@@ -3287,7 +3300,7 @@ class ContinuousRefreshController:
         planner its own clock. The small lead window lets a planner pass that
         runs just before the refresh tick reuse the merged keyword LLM call for
         explore, avoiding the later standalone ``discovery.explore.queries``
-        call while still respecting ``explore_refresh_hours``.
+        call while still respecting ``explore_refresh_minutes``.
         """
         if "bilibili" not in self._normalized_pool_source_shares():
             return False
@@ -3300,7 +3313,7 @@ class ContinuousRefreshController:
             return False
         return self._is_due_soon(
             str(state.get("last_explore_refresh_at", "")),
-            hours=self.explore_refresh_hours,
+            minutes=self.explore_refresh_minutes,
             lead_seconds=max(0, int(self.check_interval_seconds)),
         )
 
@@ -3658,21 +3671,21 @@ class ContinuousRefreshController:
                 return int(value)
         return 0
 
-    def _is_due(self, value: str, *, hours: int) -> bool:
-        if hours <= 0:
+    def _is_due(self, value: str, *, minutes: int) -> bool:
+        if minutes <= 0:
             return True
         last_run = self._parse_iso_datetime(value)
         if last_run is None:
             return True
-        return self._now() - last_run >= timedelta(hours=hours)
+        return self._now() - last_run >= timedelta(minutes=minutes)
 
-    def _is_due_soon(self, value: str, *, hours: int, lead_seconds: int) -> bool:
-        if hours <= 0:
+    def _is_due_soon(self, value: str, *, minutes: int, lead_seconds: int) -> bool:
+        if minutes <= 0:
             return True
         last_run = self._parse_iso_datetime(value)
         if last_run is None:
             return True
-        due_at = last_run + timedelta(hours=hours)
+        due_at = last_run + timedelta(minutes=minutes)
         return self._now() >= due_at - timedelta(seconds=max(0, int(lead_seconds)))
 
     @staticmethod

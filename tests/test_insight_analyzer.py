@@ -269,3 +269,94 @@ def test_insight_analyzer_requires_core_memory_task_service() -> None:
 
     with pytest.raises(TypeError, match="complete_structured_task"):
         InsightAnalyzer(FakeRegistry("[]"))
+
+
+class TestUserVerdictSurvivesLaterAnalysis:
+    """A 「不准」must not be erased by the next 12h insight pass.
+
+    ``merge_insights`` took ``max(old, new)`` on confidence, and a reject only
+    capped the score at 0.35 without leaving any trace that the user had judged
+    it. So the next pass — the same model re-reading the same kind of behaviour
+    — could hand the hypothesis 0.8 again, `max(0.35, 0.8)` restored it, and it
+    reappeared in the 待聊 list (threshold 0.60) asking the user about something
+    they had already rejected. Confidence could also only ever climb: events
+    could raise it, never lower it.
+    """
+
+    def _analyzer(self):
+        from openbiliclaw.soul.insight_analyzer import InsightAnalyzer
+
+        class _Stub:
+            async def complete_structured_task(self, **_kwargs: object) -> object:
+                raise AssertionError("merge_insights must not call the LLM")
+
+        return InsightAnalyzer(registry=_Stub())
+
+    def test_reject_is_not_undone_by_a_later_high_confidence_pass(self) -> None:
+        from openbiliclaw.soul.profile import InsightHypothesis
+
+        rejected = InsightHypothesis(
+            hypothesis="用户只在意理论深度",
+            evidence=["旧证据"],
+            confidence=0.35,
+            validated=False,
+            user_verdict="rejected",
+        )
+        incoming = InsightHypothesis(
+            hypothesis="用户只在意理论深度",
+            evidence=["新一轮又提炼出同一条"],
+            confidence=0.80,
+            validated=False,
+        )
+
+        merged = self._analyzer().merge_insights([rejected], [incoming])
+
+        assert len(merged) == 1
+        item = merged[0]
+        assert item.user_verdict == "rejected", "用户的判断必须被保留"
+        assert item.confidence <= 0.35, f"被否定的假设不该被推回 {item.confidence}"
+        assert item.confidence < 0.60, "更不该重新进入待聊列表阈值"
+
+    def test_unjudged_hypothesis_tracks_the_latest_evidence_both_ways(self) -> None:
+        """未经用户评价的假设应当双向跟随最新证据，而不是只涨不跌。"""
+        from openbiliclaw.soul.profile import InsightHypothesis
+
+        analyzer = self._analyzer()
+        old = InsightHypothesis(hypothesis="用户偏好长视频", confidence=0.80)
+
+        weaker = analyzer.merge_insights(
+            [old], [InsightHypothesis(hypothesis="用户偏好长视频", confidence=0.45)]
+        )[0]
+        assert weaker.confidence == 0.45, "反向证据必须能把置信度拉低"
+
+        stronger = analyzer.merge_insights(
+            [weaker], [InsightHypothesis(hypothesis="用户偏好长视频", confidence=0.72)]
+        )[0]
+        assert stronger.confidence == 0.72, "正向证据仍然能推高"
+
+    def test_confirmed_hypothesis_keeps_its_validated_floor(self) -> None:
+        """用户点过「准」的假设不被后续一次弱分析降级。"""
+        from openbiliclaw.soul.profile import InsightHypothesis
+
+        confirmed = InsightHypothesis(
+            hypothesis="用户在自学木工",
+            confidence=0.85,
+            validated=True,
+            user_verdict="confirmed",
+        )
+        merged = self._analyzer().merge_insights(
+            [confirmed], [InsightHypothesis(hypothesis="用户在自学木工", confidence=0.40)]
+        )[0]
+
+        assert merged.validated is True
+        assert merged.user_verdict == "confirmed"
+        assert merged.confidence >= 0.75, "已确认的假设不该被一次弱分析打回"
+
+    def test_legacy_hypotheses_without_verdict_still_load(self) -> None:
+        """旧数据没有 user_verdict 字段，必须按「未评价」处理。"""
+        from openbiliclaw.soul.profile import insight_hypothesis_from_dict
+
+        item = insight_hypothesis_from_dict(
+            {"hypothesis": "旧假设", "confidence": 0.7, "validated": False}
+        )
+        assert item.user_verdict == ""

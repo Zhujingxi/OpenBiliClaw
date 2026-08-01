@@ -119,10 +119,21 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
 
     usage_recorder = UsageRecorder(sink=database)
 
+    # Defensive read matching the getattr(config.scheduler, ..., default)
+    # convention below: test doubles (SimpleNamespace configs) may omit the
+    # top-level [soul] section entirely.
+    soul_cfg = getattr(config, "soul", None)
+    preference_cfg = getattr(soul_cfg, "preference", None) if soul_cfg else None
     soul_engine = SoulEngine(
         llm=llm_registry,
         memory=memory_manager,
+        database=database,
         usage_recorder=usage_recorder,
+        satisfaction_filter_enabled=bool(
+            getattr(preference_cfg, "satisfaction_filter_enabled", True)
+        ),
+        posture_gate_mode=str(getattr(soul_cfg, "posture_gate_mode", "shadow")),
+        posture_gate_force_enforce=bool(getattr(soul_cfg, "posture_gate_force_enforce", False)),
         module_overrides=module_overrides,
         llm_concurrency=llm_concurrency,
         llm_concurrency_gate=llm_gate,
@@ -164,6 +175,12 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
         profile_consolidation_archive_enabled=bool(
             getattr(config.scheduler, "profile_consolidation_archive_enabled", True)
         ),
+        # Feedback line config, three-surface contract with
+        # ``api/runtime_context.py`` and ``cli._build_soul_engine``: the adapter
+        # calls ``process_feedback_batch_if_needed`` itself, so it must read the
+        # same knobs instead of falling back to the constructor defaults.
+        feedback_batch_threshold=int(getattr(config.scheduler, "feedback_batch_threshold", 3)),
+        unified_interest_line=bool(getattr(config.scheduler, "unified_interest_line", False)),
     )
     llm_service = LLMService(
         registry=llm_registry,
@@ -341,8 +358,8 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
         pool_target_count=config.scheduler.pool_target_count,
         pool_source_shares=effective_pool_source_shares(config),
         signal_event_threshold=int(getattr(config.scheduler, "signal_event_threshold", 6)),
-        trending_refresh_hours=int(getattr(config.scheduler, "trending_refresh_hours", 3)),
-        explore_refresh_hours=int(getattr(config.scheduler, "explore_refresh_hours", 12)),
+        trending_refresh_minutes=int(getattr(config.scheduler, "trending_refresh_minutes", 3)),
+        explore_refresh_minutes=int(getattr(config.scheduler, "explore_refresh_minutes", 3)),
         check_interval_seconds=int(getattr(config.scheduler, "refresh_check_interval_seconds", 60)),
         proactive_push_interval_seconds=int(
             getattr(config.scheduler, "proactive_push_interval_seconds", 120)

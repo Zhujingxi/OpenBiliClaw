@@ -25,6 +25,20 @@ def test_issue_98_e2e_treats_playwright_as_an_optional_test_dependency() -> None
     assert "from playwright.sync_api import" not in source
 
 
+def test_windows_installer_workflow_tests_the_installed_executable() -> None:
+    """The manual Windows build must cross the Inno install boundary before success."""
+    workflow = Path(".github/workflows/build-installers.yml").read_text(encoding="utf-8")
+
+    compile_step = workflow.index("- name: Compile installer")
+    install_step = workflow.index("- name: Install and test the actual Windows installer")
+    upload_step = workflow.index("uses: actions/upload-artifact@v7", install_step)
+
+    assert compile_step < install_step < upload_step
+    assert '"/VERYSILENT"' in workflow
+    assert '"$installDir\\OpenBiliClaw.exe"' in workflow
+    assert "-k real_frozen_bundle" in workflow
+
+
 def test_chrome_webstore_publish_can_explicitly_replace_a_pending_review() -> None:
     """A newer release can replace an older package that is still in review."""
     workflow = Path(".github/workflows/publish-chrome-webstore.yml").read_text(encoding="utf-8")

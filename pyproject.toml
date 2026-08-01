@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "openbiliclaw"
-version = "0.3.184"
+version = "0.3.191"
 description = "Your local-first, cross-platform AI discovery friend for Bilibili, Zhihu, and more."
 readme = "README.md"
 license = { text = "MIT" }
@@ -71,6 +71,9 @@ eval = [
 ]
 browser = [
     "playwright>=1.40",
+]
+tls = [
+    "cryptography>=41",
 ]
 packaging = [
     # Desktop installer builds (packaging/build.py). Bundles the backend into a

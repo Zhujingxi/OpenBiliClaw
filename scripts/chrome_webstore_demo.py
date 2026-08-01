@@ -330,6 +330,10 @@ class DemoServer:
                         / "src/openbiliclaw/web/desktop/assets"
                         / path.removeprefix("/web/assets/")
                     )
+                if path.startswith("/shared/"):
+                    return self._serve_file(
+                        ROOT / "src/openbiliclaw/web/shared" / path.removeprefix("/shared/")
+                    )
                 if path in {"/m", "/m/", "/m/index.html"}:
                     return self._serve_file(ROOT / "src/openbiliclaw/web/index.html")
                 if path.startswith("/m/"):

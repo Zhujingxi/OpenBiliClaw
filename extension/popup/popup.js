@@ -100,6 +100,7 @@ import {
 } from "./popup-embedding-banner.js";
 import {
   appendRecommendations,
+  actOnChatCard,
   checkBackendStatus,
   fetchActivityFeed,
   fetchUpdateStatus,
@@ -115,12 +116,14 @@ import {
   fetchInitStatus,
   fetchPendingDelight,
   fetchPendingDelightBatch,
+  fetchPendingConfirmations,
   fetchProfileSummary,
   fetchRecommendations,
   fetchRuntimeStatus,
   fetchSourceShareSuggestion,
   fetchSourcesStatus,
   markDelightSent,
+  openPendingConfirmation,
   probeConfigService,
   startEmbeddingRepair,
   startInit,
@@ -135,7 +138,6 @@ import {
   submitProfileEdit,
   startChatTurn,
   submitFeedback,
-  submitInsightFeedback,
   updateConfig,
   fetchSavedItems,
   pollSavedSyncTask,
@@ -146,6 +148,21 @@ import {
   syncSavedItems,
   verifySource,
 } from "./popup-api.js";
+
+const dialogueConfirmation = globalThis.OpenBiliClawDialogueConfirmation;
+if (!dialogueConfirmation) {
+  throw new Error("dialogue-confirmation shared helper did not load");
+}
+const {
+  executeCardAction,
+  executePendingConfirmationOpen,
+  isCardTurn,
+  isQuestionTurn,
+  renderPendingListMarkup,
+  renderTurnMarkup,
+  selectDialogueTurns,
+} = dialogueConfirmation;
+const dialogueCardActionAbortController = new AbortController();
 
 const state = {
   activeTab: "recommend",
@@ -194,6 +211,11 @@ const state = {
   pendingAvoidanceProbe: null,
   handledProbeKeys: new Set(),
   messages: [],
+  pendingConfirmations: {
+    count: 0,
+    items: [],
+    expanded: false,
+  },
 };
 
 let backendUpdateStatusRefresh = null;
@@ -206,6 +228,7 @@ let manualRefreshInFlight = false;
 let activityFeedRefreshTimer = null;
 let activityFeedRefreshInFlight = false;
 let activityFeedRefreshPending = false;
+let dialogueConfirmationRefreshTimer = null;
 
 const elements = {
   content: document.querySelector(".content"),
@@ -287,6 +310,10 @@ const elements = {
   profileActiveInsights: document.getElementById("profileActiveInsights"),
   profileRecentAwareness: document.getElementById("profileRecentAwareness"),
   chatMessages: document.getElementById("chatMessages"),
+  chatPendingToggle: document.getElementById("chatPendingToggle"),
+  chatPendingCount: document.getElementById("chatPendingCount"),
+  chatPendingList: document.getElementById("chatPendingList"),
+  chatPendingTabCount: document.getElementById("chatPendingTabCount"),
   chatForm: document.getElementById("chatForm"),
   chatInput: document.getElementById("chatInput"),
   chatSendButton: document.getElementById("chatSendButton"),
@@ -381,9 +408,13 @@ offlineBackendPoller = createOfflineBackendPoller({
   },
 });
 const CHAT_SESSION = "popup";
+const CHAT_HISTORY_REFRESH_INTERVAL_MS = 2500;
 const CHAT_POLL_INTERVAL_MS = 1200;
 const CHAT_POLL_DEADLINE_MS = 180_000;
 const activeChatPolls = new Map();
+let chatHistoryRefreshTimer = null;
+let chatHistoryHydrationInFlight = false;
+let lastChatHistorySignature = null;
 const watchLaterToggles = createSavedToggleRegistry({
   labels: {
     checkedTitle: "取消稍后再看",
@@ -621,6 +652,8 @@ function setActiveTab(tabName) {
   }
   if (tabName === "chat") {
     scrollChatMessagesToBottom();
+    void refreshPendingConfirmations();
+    void hydrateChatHistory();
   }
 }
 
@@ -710,6 +743,7 @@ document.addEventListener("visibilitychange", () => {
   }
 });
 window.addEventListener("pagehide", () => {
+  dialogueCardActionAbortController.abort();
   for (const runtime of Object.values(savedTaskRuntimes)) runtime.coordinator.dispose();
 }, { once: true });
 
@@ -1561,7 +1595,7 @@ function renderInitProgress(status) {
       elements.initProgressLabel.textContent = progress.failed
         ? `初始化未完成：${describeInitFailure(status, progress)}`
         : progress.partial
-          ? `部分完成：${describeInitStatusReason(status) || "画像已生成，但首轮内容池本次未完成。"}`
+          ? `部分完成：${describeInitStatusReason(status) || "初始化部分完成；已采数据已保留并使用，请按提示稍后补齐。你现在可以先进入应用。"}`
         : progress.active
           ? progress.indeterminate
             ? progress.stageLabel || "正在初始化"
@@ -1639,7 +1673,8 @@ async function pollInitProgress() {
     state.profileLoaded = false;
     setHint(
       status.partial_success
-        ? describeInitStatusReason(status) || "画像已生成，但首轮内容池本次未完成。"
+        ? describeInitStatusReason(status) ||
+          "初始化部分完成；已采数据已保留并使用，请按提示稍后补齐。你现在可以先进入应用。"
         : "初始化完成！正在加载画像和推荐…",
       status.partial_success ? "warning" : "success",
     );
@@ -1854,18 +1889,16 @@ function renderReadyRecommendationHint() {
 
 function rememberDismissedDelight(bvid) {
   if (!bvid) {
-    return;
+    return Promise.resolve();
   }
-  if (!state.dismissedDelightBvids.includes(bvid)) {
-    state.dismissedDelightBvids = [...state.dismissedDelightBvids, bvid];
-  }
-  // Persist on the backend so popup reloads + future
-  // /api/delight/pending-batch fetches honour the dismissal too.
-  // Otherwise an in-memory dismiss is lost the moment the popup
-  // closes, and the same bvid pops back up next time.
-  markDelightSent(bvid).catch(() => {
-    // Silent fail — the in-memory dismissal still works for this
-    // session even if the network ack doesn't go through.
+  // A user-driven × means "handled / already seen", not merely "hide this
+  // popup instance". The dismiss response writes both delight_notified and
+  // the canonical seen ledger. A failed write stays visible for retry.
+  return respondToDelight(bvid, "dismiss").then((result) => {
+    if (!state.dismissedDelightBvids.includes(bvid)) {
+      state.dismissedDelightBvids = [...state.dismissedDelightBvids, bvid];
+    }
+    return result;
   });
 }
 
@@ -2151,6 +2184,7 @@ function connectRuntimeStream() {
         elements.footer.dataset.tone = getHintBannerState(getRuntimeEventTone(event)).tone;
       }
       renderActivityCard();
+      scheduleDialogueConfirmationRefresh();
       // Hot-reload: re-fetch all data when backend config is reloaded
       if (event.type === "config_reloaded") {
         setHint("后端配置已热重载，正在刷新数据…", "success");
@@ -2254,7 +2288,10 @@ function connectRuntimeStream() {
         state.profileLoaded = false;
         setHint(
           event.partial_success
-            ? String(event.detail || "画像已生成，但首轮内容池本次未完成；系统会在后台继续补齐。")
+            ? String(
+                event.detail ||
+                  "初始化部分完成；已采数据已保留并使用，请按提示稍后补齐。你现在可以先进入应用。",
+              )
             : "初始化完成！正在加载画像和推荐…",
           event.partial_success ? "warning" : "success",
         );
@@ -2915,7 +2952,11 @@ async function renderMobileQrPanel() {
   let effectiveEndpoint = endpoint;
   if (isLoopbackMobileHost(endpoint.host)) {
     try {
-      const base = `http://${endpoint.host}:${endpoint.port}`;
+      const scheme = endpoint.scheme === "https" ? "https" : "http";
+      const urlHost = endpoint.host.includes(":") && !endpoint.host.startsWith("[")
+        ? `[${endpoint.host}]`
+        : endpoint.host;
+      const base = `${scheme}://${urlHost}:${endpoint.port}`;
       const resp = await fetch(`${base}/api/qr-info`, { signal: AbortSignal.timeout(2000) });
       if (resp.ok) {
         const data = await resp.json();
@@ -3217,8 +3258,18 @@ function buildDelightCard(delight) {
   const dismiss = document.createElement("button");
   dismiss.className = "message-dismiss";
   dismiss.textContent = "\u00D7";
-  dismiss.title = "\u5173\u95ED";
-  dismiss.addEventListener("click", () => dismissMessageByBvid(delight.bvid));
+  dismiss.title = "\u770B\u8FC7\u4E86\uFF0C\u4E0D\u518D\u63A8\u8350";
+  dismiss.setAttribute("aria-label", "\u770B\u8FC7\u4E86\uFF0C\u4E0D\u518D\u63A8\u8350");
+  dismiss.addEventListener("click", async () => {
+    dismiss.disabled = true;
+    try {
+      await dismissMessageByBvid(delight.bvid);
+    } catch {
+      dismiss.disabled = false;
+      dismiss.title = "操作失败，请重试";
+      dismiss.setAttribute("aria-label", "操作失败，请重试");
+    }
+  });
   item.append(dismiss);
 
   // Top row: thumbnail + (hook badge + title)
@@ -3355,7 +3406,7 @@ async function handleDelightResponse(delight, responseType) {
       }
     }
     if (responseType !== "like") {
-      dismissMessageByBvid(delight.bvid, false);
+      await dismissMessageByBvid(delight.bvid, false, false);
     }
   } catch (err) {
     console.error("Delight response failed:", err);
@@ -3457,12 +3508,10 @@ function expandDelightChat(itemEl, delight) {
   input.focus();
 }
 
-function dismissMessageByBvid(bvid, removeFromDom = true) {
+async function dismissMessageByBvid(bvid, removeFromDom = true, persist = true) {
+  if (persist) await rememberDismissedDelight(bvid);
   state.messages = state.messages.filter((m) => m.bvid !== bvid);
   updateMessageBadge();
-  // Mirror the dismiss on the backend so the same bvid doesn't
-  // re-surface via /api/delight/pending-batch on next popup reload.
-  rememberDismissedDelight(bvid);
   if (removeFromDom) {
     const item = elements.messagesList?.querySelector(`[data-bvid="${CSS.escape(bvid)}"]`);
     if (item) item.remove();
@@ -3790,54 +3839,12 @@ function renderActiveInsights(container, items) {
       row.append(timestampWrapper);
     }
 
-    const actions = document.createElement("div");
-    actions.className = "insight-actions";
-    const status = document.createElement("span");
-    status.className = "insight-action-status";
-    const confirmBtn = document.createElement("button");
-    confirmBtn.type = "button";
-    confirmBtn.className = "insight-action-btn is-confirm";
-    confirmBtn.textContent = "准"; // 准
-    confirmBtn.title = "这个猜测准";
-    const rejectBtn = document.createElement("button");
-    rejectBtn.type = "button";
-    rejectBtn.className = "insight-action-btn is-reject";
-    rejectBtn.textContent = "不准"; // 不准
-    rejectBtn.title = "这个猜测不准";
-    confirmBtn.addEventListener("click", () =>
-      handleInsightFeedback(item.hypothesis, "confirm", row, [confirmBtn, rejectBtn], status),
-    );
-    rejectBtn.addEventListener("click", () =>
-      handleInsightFeedback(item.hypothesis, "reject", row, [confirmBtn, rejectBtn], status),
-    );
-    actions.append(confirmBtn, rejectBtn, status);
-    row.append(actions);
-
     container.append(row);
   }
-}
-
-async function handleInsightFeedback(hypothesis, signal, row, buttons, statusEl) {
-  for (const b of buttons) b.disabled = true;
-  try {
-    const res = await submitInsightFeedback(hypothesis, signal);
-    if (res && res.matched) {
-      if (typeof res.confidence === "number") {
-        const pct = Math.round(res.confidence * 100);
-        const fill = row.querySelector(".insight-confidence-fill");
-        const label = row.querySelector(".insight-confidence-label");
-        if (fill instanceof HTMLElement) fill.style.width = `${pct}%`;
-        if (label) label.textContent = `${pct}%`;
-      }
-      row.classList.toggle("is-validated", Boolean(res.validated));
-    }
-    if (statusEl) {
-      statusEl.textContent = signal === "confirm" ? "已确认 ✓" : "已记下，会少推这类";
-    }
-  } catch {
-    for (const b of buttons) b.disabled = false;
-    if (statusEl) statusEl.textContent = "没存上，稍后再试";
-  }
+  const hint = document.createElement("p");
+  hint.className = "insight-readonly-hint";
+  hint.textContent = "洞察区只读；请在对话的待聊确认入口继续。";
+  container.append(hint);
 }
 
 function renderRecentAwareness(container, items) {
@@ -4824,6 +4831,84 @@ function renderEditPanel(container, editState) {
   }
 }
 
+const dialogueTurnsById = new Map();
+
+function renderPendingConfirmations() {
+  const { count, items, expanded } = state.pendingConfirmations;
+  const countText = count > 99 ? "99+" : String(Math.max(0, count));
+  if (elements.chatPendingCount instanceof HTMLElement) {
+    elements.chatPendingCount.textContent = countText;
+  }
+  if (elements.chatPendingTabCount instanceof HTMLElement) {
+    elements.chatPendingTabCount.textContent = countText;
+    elements.chatPendingTabCount.hidden = count <= 0;
+  }
+  if (elements.chatPendingToggle instanceof HTMLButtonElement) {
+    elements.chatPendingToggle.setAttribute("aria-expanded", String(expanded));
+    elements.chatPendingToggle.classList.toggle("is-expanded", expanded);
+  }
+  if (elements.chatPendingList instanceof HTMLElement) {
+    elements.chatPendingList.hidden = !expanded;
+    elements.chatPendingList.innerHTML = renderPendingListMarkup(items);
+  }
+}
+
+async function refreshPendingConfirmations() {
+  if (!state.online) {
+    state.pendingConfirmations = {
+      ...state.pendingConfirmations,
+      count: 0,
+      items: [],
+    };
+    renderPendingConfirmations();
+    return;
+  }
+  try {
+    const payload = await fetchPendingConfirmations({ session: CHAT_SESSION });
+    state.pendingConfirmations = {
+      ...state.pendingConfirmations,
+      count: Math.max(0, Number(payload?.count) || 0),
+      items: Array.isArray(payload?.items) ? payload.items : [],
+    };
+    renderPendingConfirmations();
+  } catch {
+    // Keep the last successful list in the open popup; the toolbar badge
+    // independently suppresses stale counts when backend health changes.
+  }
+}
+
+function scheduleDialogueConfirmationRefresh() {
+  if (dialogueConfirmationRefreshTimer !== null) {
+    window.clearTimeout(dialogueConfirmationRefreshTimer);
+  }
+  dialogueConfirmationRefreshTimer = window.setTimeout(() => {
+    dialogueConfirmationRefreshTimer = null;
+    void refreshPendingConfirmations();
+    if (state.activeTab === "chat") void hydrateChatHistory();
+  }, 300);
+}
+
+function renderStructuredDialogueTurn(turn) {
+  if (!(elements.chatMessages instanceof HTMLElement) || !turn?.turn_id) return;
+  dialogueTurnsById.set(turn.turn_id, turn);
+  const selector = `[data-dialogue-turn-container="${CSS.escape(turn.turn_id)}"]`;
+  let container = elements.chatMessages.querySelector(selector);
+  if (!(container instanceof HTMLElement)) {
+    container = document.createElement("div");
+    container.className = "dialogue-turn";
+    container.dataset.dialogueTurnContainer = turn.turn_id;
+    elements.chatMessages.append(container);
+  }
+  container.innerHTML = renderTurnMarkup(turn, { surface: "popup" });
+  scrollChatMessagesToBottom();
+}
+
+function updateDialogueTurn(turn) {
+  if (!turn?.turn_id) return;
+  dialogueTurnsById.set(turn.turn_id, turn);
+  renderStructuredDialogueTurn(turn);
+}
+
 function scrollChatMessagesToBottom() {
   if (!(elements.chatMessages instanceof HTMLElement)) {
     return;
@@ -4833,6 +4918,14 @@ function scrollChatMessagesToBottom() {
   };
   scroll();
   window.requestAnimationFrame(scroll);
+}
+
+function isChatMessagesNearBottom(messages) {
+  return messages.scrollHeight - messages.scrollTop - messages.clientHeight <= 48;
+}
+
+function chatHistorySignature(turns) {
+  return JSON.stringify(turns);
 }
 
 function appendChatMessage(role, content, { turnId = "", part = "" } = {}) {
@@ -4954,6 +5047,10 @@ function findChatTurnElement(turnId, part) {
 
 function renderChatTurn(turn) {
   if (!turn?.turn_id || !(elements.chatMessages instanceof HTMLElement)) {
+    return;
+  }
+  if (isCardTurn(turn) || isQuestionTurn(turn)) {
+    renderStructuredDialogueTurn(turn);
     return;
   }
   const userPart = findChatTurnElement(turn.turn_id, "user");
@@ -5115,22 +5212,52 @@ async function hydrateChatHistory() {
   if (!(elements.chatMessages instanceof HTMLElement) || !state.online) {
     return;
   }
+  if (chatHistoryHydrationInFlight) return;
+  chatHistoryHydrationInFlight = true;
+  const messages = elements.chatMessages;
+  const shouldStickToBottom = isChatMessagesNearBottom(messages);
+  const previousScrollTop = messages.scrollTop;
   try {
-    const payload = await fetchChatTurns({ session: CHAT_SESSION, scope: "chat", limit: 50 });
+    const payload = await fetchChatTurns({ session: CHAT_SESSION, limit: 100 });
+    const nextTurns = selectDialogueTurns(payload.items || []);
+    const signature = chatHistorySignature(nextTurns);
+    if (signature === lastChatHistorySignature) return;
+    lastChatHistorySignature = signature;
     elements.chatMessages.replaceChildren();
-    for (const turn of payload.items || []) {
+    dialogueTurnsById.clear();
+    for (const turn of nextTurns) {
       renderChatTurn(turn);
-      if (turn.status === "pending") {
+      if (turn.scope === "chat" && turn.status === "pending") {
         pollChatTurnUntilSettled(turn.turn_id, {
           onUpdate: renderChatTurn,
           onDone: refreshAfterChatTurn,
         });
       }
     }
-    scrollChatMessagesToBottom();
+    if (shouldStickToBottom) {
+      scrollChatMessagesToBottom();
+    } else {
+      window.requestAnimationFrame(() => {
+        messages.scrollTop = Math.min(
+          previousScrollTop,
+          Math.max(0, messages.scrollHeight - messages.clientHeight),
+        );
+      });
+    }
   } catch {
     // History is opportunistic; core panel loading should continue offline.
+  } finally {
+    chatHistoryHydrationInFlight = false;
   }
+}
+
+function startChatHistorySync() {
+  if (chatHistoryRefreshTimer !== null) return;
+  chatHistoryRefreshTimer = window.setInterval(() => {
+    if (state.activeTab !== "chat" || document.hidden || !state.online) return;
+    void hydrateChatHistory();
+    void refreshPendingConfirmations();
+  }, CHAT_HISTORY_REFRESH_INTERVAL_MS);
 }
 
 async function syncScopedChatTurns() {
@@ -5397,20 +5524,26 @@ function renderDelightSlot() {
   const dismiss = document.createElement("button");
   dismiss.type = "button";
   dismiss.className = "delight-banner-dismiss";
-  dismiss.title = "稍后看";
-  dismiss.setAttribute("aria-label", "关闭这条惊喜推荐");
+  dismiss.title = "看过了，不再推荐";
+  dismiss.setAttribute("aria-label", "看过了，不再推荐");
   dismiss.textContent = "×";
-  dismiss.addEventListener("click", (event) => {
+  dismiss.addEventListener("click", async (event) => {
     event.stopPropagation();
-    rememberDismissedDelight(delight.bvid);
-    shiftDelightQueue();
-    setHint(
-      state.activeDelights.length > 0
-        ? "这条收起了，下一条上。"
-        : "先给你收起来，回头想看再翻。",
-      "info",
-    );
-    renderDelightSlot();
+    dismiss.disabled = true;
+    try {
+      await rememberDismissedDelight(delight.bvid);
+      shiftDelightQueue();
+      setHint(
+        state.activeDelights.length > 0
+          ? "已标为看过，下一条上。"
+          : "已标为看过，不会再推荐。",
+        "success",
+      );
+      renderDelightSlot();
+    } catch {
+      dismiss.disabled = false;
+      setHint("这次还没记上，请再试一次。", "error");
+    }
   });
 
   banner.append(row, dismiss);
@@ -5521,8 +5654,10 @@ function renderDelightSlot() {
           await respondToDelight(delight.bvid, "dislike", delight.title);
         } catch (err) {
           console.error("Delight dislike failed:", err);
+          setHint("这次还没记上，请再试一次。", "error");
+          renderDelightSlot();
+          return;
         }
-        rememberDismissedDelight(delight.bvid);
         removeCurrentDelight();
         setHint("记下了，这类惊喜先少来点。", "success");
         renderDelightSlot();
@@ -5730,7 +5865,10 @@ function renderDelightSlot() {
               onTerminal: () => { void loadWatchLater(); },
             });
           }
-          rememberDismissedDelight(item.bvid || item.content_id);
+          void rememberDismissedDelight(item.bvid || item.content_id).catch(() => {
+            // The saved item remains available in watch later; a failed delight
+            // acknowledgement can be retried if it is surfaced again.
+          });
         });
         const saved = partition.savedCount;
         const failed = partition.failedCount;
@@ -6201,7 +6339,7 @@ function renderRecommendationState(stateShape) {
       elements.emptyAction.textContent = "去设置修复 →";
       elements.emptyAction.hidden = false;
     }
-    setHint("AI 服务配置有误：修好 LLM 配置并重启后端即可恢复。", "error");
+    setHint("AI 服务配置有误：修好 LLM 配置并保存后即可恢复。", "error");
     return;
   }
 
@@ -6215,7 +6353,7 @@ function renderRecommendationState(stateShape) {
     showRecommendationEmptyState(
       "还没完成初始化",
       stateShape.degraded
-        ? "先修好 AI 服务配置（下方检查项会说明原因），重启后端后回到这里点「开始初始化」。"
+        ? "先修好 AI 服务配置（下方检查项会说明原因）；保存成功后即可点「开始初始化」。"
         : "点「开始初始化」，会先检查前置条件，再依次保存完整画像并基于它生成首轮可用推荐。",
     );
     if (stateShape.degraded && elements.emptyAction instanceof HTMLElement) {
@@ -6226,7 +6364,7 @@ function renderRecommendationState(stateShape) {
     }
     setHint(
       stateShape.degraded
-        ? "AI 服务配置有误：修好 LLM 配置并重启后端后即可开始初始化。"
+        ? "AI 服务配置有误：修好 LLM 配置并保存后即可开始初始化。"
         : "先完成初始化，把画像和候选池攒起来。",
       stateShape.degraded ? "error" : "info",
     );
@@ -6631,6 +6769,122 @@ function bindActivityToggle() {
     state.activityExpanded = !state.activityExpanded;
     renderActivityCard();
   });
+}
+
+async function handleDialogueCardAction(button) {
+  const card = button.closest(".dialogue-card");
+  const turnId = card?.dataset.dialogueTurnId || "";
+  const action = button.dataset.cardAction || "";
+  const turn = dialogueTurnsById.get(turnId);
+  if (!turn || !action || button.disabled) return;
+  button.disabled = true;
+  try {
+    const { response } = await executeCardAction(turn, action, {
+      request(_path, body) {
+        return actOnChatCard(turnId, body.action, {
+          signal: dialogueCardActionAbortController.signal,
+        });
+      },
+      fetchTurn(id, options) {
+        return fetchChatTurn(id, options);
+      },
+      signal: dialogueCardActionAbortController.signal,
+      onUpdate: updateDialogueTurn,
+    });
+    if (response?.outcome === "retryable_error") {
+      const reason = String(response?.reason || "").toLowerCase();
+      if (reason === "stale_anchor" || reason === "anchor_dependency_failed") {
+        setHint("这条暂时结算不了：你正在聊另一条，先把那条聊完或结束再试。", "error");
+      } else {
+        setHint("后端结果暂未同步；可刷新确认，或直接重试这次操作。", "error");
+      }
+      return;
+    }
+    if (response?.outcome === "already_settled") {
+      setHint("这条已在另一个窗口结算，已同步最终状态。", "success");
+    } else if (action === "discuss") {
+      setHint("好，沿着这条猜测继续聊。", "success");
+      elements.chatInput?.focus();
+    } else if (action === "defer") {
+      setHint("先放一放，之后再聊。", "success");
+    } else {
+      setHint(
+        response?.state === "revised"
+          ? "已按你的修正记下这条。"
+          : action === "confirm"
+            ? "已确认这条猜测。"
+            : "已记下这条猜测不准。",
+        "success",
+      );
+    }
+    await Promise.all([hydrateChatHistory(), refreshPendingConfirmations()]);
+  } catch {
+    setHint("这次没有结算成功，卡片已恢复，可以重试。", "error");
+  }
+}
+
+async function handlePendingConfirmationOpen(button) {
+  const ref = button.dataset.confirmationRef || "";
+  if (!ref || button.disabled) return;
+  button.disabled = true;
+  button.textContent = "打开中…";
+  try {
+    const turn = await executePendingConfirmationOpen(ref, {
+      session: CHAT_SESSION,
+      signal: dialogueCardActionAbortController.signal,
+      request(_path, body, { signal } = {}) {
+        return openPendingConfirmation(ref, { session: body.session, signal });
+      },
+      onWaiting({ message }) {
+        button.textContent = "等待中…";
+        setHint(`${message}，空闲后会自动打开。`);
+      },
+    });
+    if (turn?.turn_id) renderChatTurn(turn);
+    await Promise.all([hydrateChatHistory(), refreshPendingConfirmations()]);
+    setHint(
+      isQuestionTurn(turn) ? "这条疑惑已经放进对话里。" : "这张确认卡已经放进对话里。",
+      "success",
+    );
+    elements.chatInput?.focus();
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = "打开";
+    if (Number(error?.status) === 409) {
+      await refreshPendingConfirmations();
+      setHint("另一条疑惑正在聊，待聊列表已经同步。", "warning");
+    } else if (error?.name !== "AbortError") {
+      const detail = String(error?.details?.detail?.message || "").trim();
+      setHint(detail || "这条待聊内容暂时打不开，请稍后重试。", "error");
+    }
+  }
+}
+
+function bindDialogueConfirmations() {
+  if (elements.chatPendingToggle instanceof HTMLButtonElement) {
+    elements.chatPendingToggle.addEventListener("click", () => {
+      state.pendingConfirmations.expanded = !state.pendingConfirmations.expanded;
+      renderPendingConfirmations();
+      if (state.pendingConfirmations.expanded) void refreshPendingConfirmations();
+    });
+  }
+  if (elements.chatPendingList instanceof HTMLElement) {
+    elements.chatPendingList.addEventListener("click", (event) => {
+      const button = event.target instanceof Element
+        ? event.target.closest("[data-confirmation-ref]")
+        : null;
+      if (button instanceof HTMLButtonElement) void handlePendingConfirmationOpen(button);
+    });
+  }
+  if (elements.chatMessages instanceof HTMLElement) {
+    elements.chatMessages.addEventListener("click", (event) => {
+      const button = event.target instanceof Element
+        ? event.target.closest("[data-card-action]")
+        : null;
+      if (button instanceof HTMLButtonElement) void handleDialogueCardAction(button);
+    });
+  }
+  renderPendingConfirmations();
 }
 
 function bindChat() {
@@ -7078,7 +7332,7 @@ function bindSettings() {
 
   function setSaveButtonMode(mode = "") {
     saveBtn.dataset.tone = mode === "warning" ? "warning" : "";
-    saveBtn.textContent = mode === "degraded" ? "保存并提示重启" : "保存配置";
+    saveBtn.textContent = mode === "degraded" ? "保存并恢复" : "保存配置";
   }
 
   function hideConfigBanners() {
@@ -7117,7 +7371,7 @@ function bindSettings() {
       .join("；");
     showConfigBanner(
       bannerDegraded,
-      `AI 服务配置有误（后端暂只保留修复入口），保存修复后需要重启后端。${issueText}`,
+      `AI 服务配置有误（后端暂只保留修复入口），保存有效配置后会原地恢复，无需重启。${issueText}`,
       "warning",
     );
     setSaveButtonMode("degraded");
@@ -8077,9 +8331,9 @@ function bindSettings() {
     providerSelect.value = cfg.llm?.default_provider || "openai";
     showProviderFields(providerSelect.value);
     setVal("cfgLlmConcurrency", cfg.llm?.concurrency ?? 4);
-    setVal("cfgLlmTimeout", cfg.llm?.timeout ?? 300);
+    setVal("cfgLlmTimeout", cfg.llm?.timeout ?? 1200);
     setVal("cfgLlmConcurrencyV2", cfg.llm?.concurrency ?? 4);
-    setVal("cfgLlmTimeoutV2", cfg.llm?.timeout ?? 300);
+    setVal("cfgLlmTimeoutV2", cfg.llm?.timeout ?? 1200);
     state.llmProbeResults.clear();
     renderLlmRoutingSummary(cfg.llm || {});
     setVal("cfgLlmFallbackProvider", cfg.llm?.fallback_provider);
@@ -8139,6 +8393,7 @@ function bindSettings() {
     if (biliBrowserHeaded) biliBrowserHeaded.checked = cfg.bilibili?.browser_headed === true;
     const bilibiliEnabled = document.getElementById("cfgBilibiliEnabled");
     if (bilibiliEnabled) bilibiliEnabled.checked = cfg.sources?.bilibili?.enabled !== false;
+    setVal("cfgBilibiliMinInterval", cfg.sources?.bilibili?.min_interval_minutes);
 
     // Sources
     setVal("cfgSourcesBrowserCdp", cfg.sources?.browser?.cdp_url);
@@ -8151,6 +8406,7 @@ function bindSettings() {
     setVal("cfgXhsDailySearchBudget", cfg.sources?.xiaohongshu?.daily_search_budget);
     setVal("cfgXhsDailyCreatorBudget", cfg.sources?.xiaohongshu?.daily_creator_budget);
     setVal("cfgXhsTaskInterval", cfg.sources?.xiaohongshu?.task_interval_seconds);
+    setVal("cfgXhsMinInterval", cfg.sources?.xiaohongshu?.min_interval_minutes);
     const douyinEnabled = document.getElementById("cfgDouyinEnabled");
     if (douyinEnabled) douyinEnabled.checked = cfg.sources?.douyin?.enabled === true;
     setVal("cfgDouyinCookie", cfg.sources?.douyin?.cookie);
@@ -8159,6 +8415,7 @@ function bindSettings() {
     setVal("cfgDouyinDailyHotBudget", cfg.sources?.douyin?.daily_hot_budget);
     setVal("cfgDouyinDailyFeedBudget", cfg.sources?.douyin?.daily_feed_budget);
     setVal("cfgDouyinRequestInterval", cfg.sources?.douyin?.request_interval_seconds);
+    setVal("cfgDouyinMinInterval", cfg.sources?.douyin?.min_interval_minutes);
     const youtubeEnabled = document.getElementById("cfgYoutubeEnabled");
     if (youtubeEnabled) youtubeEnabled.checked = cfg.sources?.youtube?.enabled === true;
     setVal("cfgYoutubeDailySearchBudget", cfg.sources?.youtube?.daily_search_budget);
@@ -8255,8 +8512,8 @@ function bindSettings() {
     setVal("cfgRefreshCheckInterval", cfg.scheduler?.refresh_check_interval_seconds);
     setVal("cfgSignalEventThreshold", cfg.scheduler?.signal_event_threshold);
     setVal("cfgFeedbackBatchThreshold", cfg.scheduler?.feedback_batch_threshold);
-    setVal("cfgTrendingRefreshHours", cfg.scheduler?.trending_refresh_hours);
-    setVal("cfgExploreRefreshHours", cfg.scheduler?.explore_refresh_hours);
+    setVal("cfgTrendingRefreshMinutes", cfg.scheduler?.trending_refresh_minutes);
+    setVal("cfgExploreRefreshMinutes", cfg.scheduler?.explore_refresh_minutes);
     setVal("cfgDiscoveryLimit", cfg.scheduler?.discovery_limit);
     setVal("cfgKeywordGenerationMode", cfg.discovery?.keyword_generation_mode || "legacy");
     setVal("cfgCandidateEvalConcurrency", cfg.discovery?.candidate_eval_concurrency);
@@ -8303,6 +8560,11 @@ function bindSettings() {
 
     renderIssues(cfg.issues);
     renderDegradedBanner(cfg);
+    // The enable checkboxes were just repopulated, so the cards' collapsed /
+    // disabled state has to be recomputed from the new values, and the form now
+    // mirrors the backend snapshot — nothing is pending.
+    syncSourceCardEnabledState();
+    clearSettingsDirty();
   }
 
   function collectForm() {
@@ -8326,7 +8588,7 @@ function bindSettings() {
           ]),
         ),
         concurrency: getInt("cfgLlmConcurrencyV2", 4),
-        timeout: getInt("cfgLlmTimeoutV2", 300),
+        timeout: getInt("cfgLlmTimeoutV2", 1200),
         embedding: {
           ...(state.runtimeConfig?.llm?.embedding || {}),
           provider: getVal("cfgEmbeddingProvider"),
@@ -8355,6 +8617,7 @@ function bindSettings() {
         },
         bilibili: {
           enabled: checked("cfgBilibiliEnabled", true),
+          min_interval_minutes: getInt("cfgBilibiliMinInterval", 3),
         },
         // Empty-field fallbacks mirror the backend dataclass defaults
         // (budgets: 0 = uncapped) so the popup and the web settings page
@@ -8363,7 +8626,8 @@ function bindSettings() {
           enabled: checked("cfgXhsEnabled"),
           daily_search_budget: getInt("cfgXhsDailySearchBudget", 0),
           daily_creator_budget: getInt("cfgXhsDailyCreatorBudget", 0),
-          task_interval_seconds: getInt("cfgXhsTaskInterval", 45),
+          task_interval_seconds: getInt("cfgXhsTaskInterval", 300),
+          min_interval_minutes: getInt("cfgXhsMinInterval", 3),
         },
         douyin: {
           enabled: checked("cfgDouyinEnabled"),
@@ -8374,6 +8638,7 @@ function bindSettings() {
           daily_hot_budget: getInt("cfgDouyinDailyHotBudget", 0),
           daily_feed_budget: getInt("cfgDouyinDailyFeedBudget", 0),
           request_interval_seconds: getInt("cfgDouyinRequestInterval", 2),
+          min_interval_minutes: getInt("cfgDouyinMinInterval", 3),
         },
         youtube: {
           enabled: checked("cfgYoutubeEnabled"),
@@ -8381,7 +8646,7 @@ function bindSettings() {
           daily_trending_budget: getInt("cfgYoutubeDailyTrendingBudget", 0),
           daily_channel_budget: getInt("cfgYoutubeDailyChannelBudget", 0),
           request_interval_seconds: getInt("cfgYoutubeRequestInterval", 2),
-          min_interval_minutes: getInt("cfgYoutubeMinInterval", 60),
+          min_interval_minutes: getInt("cfgYoutubeMinInterval", 3),
         },
         twitter: {
           enabled: checked("cfgTwitterEnabled"),
@@ -8392,7 +8657,7 @@ function bindSettings() {
           daily_feed_budget: getInt("cfgTwitterDailyFeedBudget", 0),
           daily_creator_budget: getInt("cfgTwitterDailyCreatorBudget", 0),
           request_interval_seconds: getInt("cfgTwitterRequestInterval", 3),
-          min_interval_minutes: getInt("cfgTwitterMinInterval", 60),
+          min_interval_minutes: getInt("cfgTwitterMinInterval", 3),
         },
         zhihu: {
           enabled: checked("cfgZhihuEnabled"),
@@ -8403,7 +8668,7 @@ function bindSettings() {
           daily_creator_budget: getInt("cfgZhihuDailyCreatorBudget", 0),
           daily_related_budget: getInt("cfgZhihuDailyRelatedBudget", 0),
           request_interval_seconds: getInt("cfgZhihuRequestInterval", 3),
-          min_interval_minutes: getInt("cfgZhihuMinInterval", 60),
+          min_interval_minutes: getInt("cfgZhihuMinInterval", 3),
         },
         reddit: {
           enabled: checked("cfgRedditEnabled"),
@@ -8415,7 +8680,7 @@ function bindSettings() {
           daily_subreddit_budget: getInt("cfgRedditDailySubredditBudget", 300),
           daily_related_budget: getInt("cfgRedditDailyRelatedBudget", 300),
           request_interval_seconds: getInt("cfgRedditRequestInterval", 3),
-          min_interval_minutes: getInt("cfgRedditMinInterval", 60),
+          min_interval_minutes: getInt("cfgRedditMinInterval", 3),
         },
         bangumi: {
           enabled: checked("cfgBangumiEnabled"),
@@ -8436,7 +8701,7 @@ function bindSettings() {
           daily_ranked_budget: getInt("cfgBangumiDailyRankedBudget", 100),
           daily_latest_budget: getInt("cfgBangumiDailyLatestBudget", 100),
           request_interval_seconds: getInt("cfgBangumiRequestInterval", 1),
-          min_interval_minutes: getInt("cfgBangumiMinInterval", 60),
+          min_interval_minutes: getInt("cfgBangumiMinInterval", 3),
           bootstrap_limit: getInt("cfgBangumiBootstrapLimit", 300),
         },
       },
@@ -8459,8 +8724,8 @@ function bindSettings() {
         refresh_check_interval_seconds: getInt("cfgRefreshCheckInterval", 60),
         signal_event_threshold: getInt("cfgSignalEventThreshold", 6),
         feedback_batch_threshold: getInt("cfgFeedbackBatchThreshold", 3),
-        trending_refresh_hours: getInt("cfgTrendingRefreshHours", 3),
-        explore_refresh_hours: getInt("cfgExploreRefreshHours", 12),
+        trending_refresh_minutes: getInt("cfgTrendingRefreshMinutes", 3),
+        explore_refresh_minutes: getInt("cfgExploreRefreshMinutes", 3),
         discovery_limit: getInt("cfgDiscoveryLimit", 30),
         proactive_push_interval_seconds: getInt("cfgProactivePushInterval", 120),
         speculator_idle_interval_minutes: getInt("cfgSpeculatorIdleInterval", 30),
@@ -8550,6 +8815,112 @@ function bindSettings() {
     const view = SourceStatus.describeVerifyResult(result);
     setProbeStatus(statusEl, view.tone, view.text);
   }
+
+  // ---- 平台源卡片：展开/折叠、停用态 --------------------------------------
+  const SOURCE_CARD_ENABLE_IDS = {
+    bilibili: "cfgBilibiliEnabled",
+    xiaohongshu: "cfgXhsEnabled",
+    douyin: "cfgDouyinEnabled",
+    youtube: "cfgYoutubeEnabled",
+    twitter: "cfgTwitterEnabled",
+    zhihu: "cfgZhihuEnabled",
+    reddit: "cfgRedditEnabled",
+    bangumi: "cfgBangumiEnabled"
+  };
+
+  function setSourceCardOpen(card, open) {
+    if (!card) return;
+    card.dataset.open = open ? "1" : "0";
+    card.querySelector(".source-card-face")?.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+
+  // A card whose source is switched off keeps its inputs in the DOM (the save
+  // payload still reads them) but stops advertising them as actionable.
+  function syncSourceCardEnabledState() {
+    Object.entries(SOURCE_CARD_ENABLE_IDS).forEach(([key, inputId]) => {
+      const card = document.querySelector(`[data-source-card="${key}"]`);
+      if (!card) return;
+      const input = document.getElementById(inputId);
+      const on = input ? input.checked : true;
+      card.dataset.sourceOff = on ? "false" : "true";
+      if (!on) setSourceCardOpen(card, false);
+    });
+  }
+
+  function initSourceCards() {
+    const panel = document.getElementById("settingsPanelSources");
+    if (!panel) return;
+
+    panel.addEventListener("click", (event) => {
+      // The enable checkbox and the verify button live on/inside the card but
+      // must not double as a toggle for the body.
+      if (event.target.closest(".source-card-body, input, label, button, select, textarea")) return;
+      const face = event.target.closest(".source-card-face");
+      const card = face?.closest("[data-source-card]");
+      if (!card || card.dataset.sourceOff === "true") return;
+      setSourceCardOpen(card, card.dataset.open !== "1");
+    });
+
+    panel.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      const face = event.target.closest(".source-card-face");
+      if (!face || event.target !== face) return;
+      event.preventDefault();
+      const card = face.closest("[data-source-card]");
+      if (!card || card.dataset.sourceOff === "true") return;
+      setSourceCardOpen(card, card.dataset.open !== "1");
+    });
+
+    panel.addEventListener("change", (event) => {
+      const id = event.target?.id;
+      if (id && Object.values(SOURCE_CARD_ENABLE_IDS).includes(id)) syncSourceCardEnabledState();
+    });
+
+    syncSourceCardEnabledState();
+  }
+
+  // ---- 设置页吸底保存栏：未保存修改计数 ------------------------------------
+  // Counts distinct touched fields, not events, so retyping one input does not
+  // inflate the number.
+  const settingsDirtyFields = new Set();
+
+  function renderSettingsDirty() {
+    const bar = document.getElementById("settingsSaveBar");
+    const msg = document.getElementById("settingsSaveMsg");
+    const count = settingsDirtyFields.size;
+    if (bar) bar.dataset.dirty = count > 0 ? "true" : "false";
+    if (msg) msg.textContent = count > 0 ? `已修改 ${count} 项，未保存` : "没有未保存的修改";
+  }
+
+  function markSettingsDirty(target) {
+    const el = target instanceof Element ? target : null;
+    settingsDirtyFields.add(el?.id || el?.name || `anon:${settingsDirtyFields.size}`);
+    renderSettingsDirty();
+  }
+
+  function clearSettingsDirty() {
+    settingsDirtyFields.clear();
+    renderSettingsDirty();
+  }
+
+  function initSettingsDirtyTracking() {
+    const root = document.getElementById("settingsOverlay") || document;
+    ["input", "change"].forEach((type) => {
+      root.addEventListener(type, (event) => {
+        const el = event.target;
+        if (!(el instanceof Element)) return;
+        if (!el.closest(".settings-panel")) return;
+        if (el.hasAttribute("readonly")) return;
+        markSettingsDirty(el);
+      });
+    });
+    renderSettingsDirty();
+  }
+
+  // popup.js is a deferred module script, so the settings markup is already
+  // parsed by the time this runs.
+  initSourceCards();
+  initSettingsDirtyTracking();
 
   const sourceVerifyInFlight = new Set();
 
@@ -9197,6 +9568,7 @@ async function initializePopup() {
   bindRefreshButton();
   bindActivityToggle();
   bindChat();
+  bindDialogueConfirmations();
   bindOpenWeb();
   bindMobileQr();
   bindSettings();
@@ -9216,6 +9588,8 @@ async function initializePopup() {
   // call above never re-runs while a side panel stays open.
   installEmbeddingBannerAutoRefresh(maybeShowEmbeddingBanner);
   await hydrateChatHistory();
+  await refreshPendingConfirmations();
+  startChatHistorySync();
   // Always fetch profile-summary on startup so the messages inbox is
   // populated regardless of which tab the user lands on.  Without this
   // the inbox stays empty until the user manually opens the profile

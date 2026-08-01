@@ -36,7 +36,7 @@ class ClaudeProvider(LLMProvider):
         self,
         api_key: str,
         model: str = "claude-sonnet-4-20250514",
-        timeout: float = 300.0,
+        timeout: float = 1200.0,
         base_url: str = "",
         proxy: str = "",
         trust_env: bool = True,

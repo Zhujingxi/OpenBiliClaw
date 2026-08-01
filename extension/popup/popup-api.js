@@ -500,25 +500,6 @@ export async function sendBehaviorEvents(events) {
 }
 
 /**
- * Confirm or reject a specific insight hypothesis. confirm → the hypothesis is
- * validated + its confidence raised; reject → unvalidated + confidence capped
- * low (soft-invalidated in recommendation scoring). Routes to
- * ``POST /api/insights/feedback``.
- *
- * @param {string} hypothesis
- * @param {"confirm" | "reject"} signal
- */
-export async function submitInsightFeedback(hypothesis, signal) {
-  return requestJson("/insights/feedback", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ hypothesis, signal }),
-  });
-}
-
-/**
  * Report a click-through on a recommendation card. Best-effort: errors are
  * swallowed so UI navigation is never blocked by a slow or offline backend.
  *
@@ -590,8 +571,12 @@ export async function startChatTurn({
   });
 }
 
-export async function fetchChatTurn(turnId) {
-  return requestJson(`/chat/turns/${encodeURIComponent(turnId)}`, { method: "GET" });
+export async function fetchChatTurn(turnId, { signal, timeoutMs = 10_000 } = {}) {
+  return requestJson(`/chat/turns/${encodeURIComponent(turnId)}`, {
+    method: "GET",
+    signal,
+    timeoutMs,
+  });
 }
 
 export async function fetchChatTurns({ session = "popup", scope = "", limit = 50 } = {}) {
@@ -602,6 +587,36 @@ export async function fetchChatTurns({ session = "popup", scope = "", limit = 50
     params.set("limit", String(Math.max(1, Math.floor(limit))));
   }
   return requestJson(`/chat/turns?${params.toString()}`, { method: "GET" });
+}
+
+export async function fetchPendingConfirmations({
+  countOnly = false,
+  session = "",
+} = {}) {
+  const params = new URLSearchParams();
+  if (countOnly) params.set("count_only", "1");
+  if (session) params.set("session", session);
+  const suffix = params.size ? `?${params.toString()}` : "";
+  return requestJson(`/chat/pending-confirmations${suffix}`, { method: "GET" });
+}
+
+export async function openPendingConfirmation(ref, { session = "popup", signal } = {}) {
+  return requestJson(`/chat/pending-confirmations/${encodeURIComponent(String(ref || ""))}/open`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session }),
+    signal,
+  });
+}
+
+export async function actOnChatCard(turnId, action, { signal } = {}) {
+  return requestJson(`/chat/cards/${encodeURIComponent(String(turnId || ""))}/action`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action }),
+    signal,
+    timeoutMs: 60_000,
+  });
 }
 
 export async function respondToInterestProbe(domain, responseType, message = "") {

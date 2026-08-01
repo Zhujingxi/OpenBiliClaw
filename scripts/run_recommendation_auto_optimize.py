@@ -15,7 +15,6 @@ import json
 import logging
 import random
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -31,9 +30,9 @@ async def generate_mock_pool(
     count: int = 20,
 ) -> list[dict[str, Any]]:
     """Generate a simulated discovery pool for a persona."""
-    from openbiliclaw.eval.agents import collect_json
-
     from claude_agent_sdk import ClaudeAgentOptions
+
+    from openbiliclaw.eval.agents import collect_json
 
     profile_ctx = persona.to_llm_context() if hasattr(persona, "to_llm_context") else str(persona)
 
@@ -69,15 +68,21 @@ async def evaluate_recommendations(
     llm_service: Any,
 ) -> dict[str, Any]:
     """Evaluate recommendation quality across multiple dimensions."""
-    from openbiliclaw.eval.agents import collect_json
-
     from claude_agent_sdk import ClaudeAgentOptions
+
+    from openbiliclaw.eval.agents import collect_json
 
     profile_ctx = persona.to_llm_context() if hasattr(persona, "to_llm_context") else str(persona)
     rec_text = json.dumps(recommendations, ensure_ascii=False, indent=2)[:3000]
     pool_text = json.dumps(
-        [{"title": p.get("title"), "topic_group": p.get("topic_group"), "style_key": p.get("style_key")}
-         for p in pool[:10]],
+        [
+            {
+                "title": p.get("title"),
+                "topic_group": p.get("topic_group"),
+                "style_key": p.get("style_key"),
+            }
+            for p in pool[:10]
+        ],
         ensure_ascii=False,
     )
 
@@ -116,12 +121,11 @@ async def main() -> None:
     from openbiliclaw.config import load_config
     from openbiliclaw.eval.agents import (
         ONION_PROFILE_SCHEMA,
-        PARAM_CHANGE_SCHEMA,
         PERSONA_SCHEMA_HINT,
         collect_json,
         run_optimizer_agent,
     )
-    from openbiliclaw.eval.optimizer import MODIFIABLE_FILES, PromptOptimizer
+    from openbiliclaw.eval.optimizer import PromptOptimizer
     from openbiliclaw.eval.persona_pool import PersonaPool
     from openbiliclaw.eval.run_logger import RunLogger
     from openbiliclaw.llm.registry import build_llm_registry
@@ -239,13 +243,15 @@ async def main() -> None:
 
             # Run diversified batch selection
             selected = RecommendationEngine._select_diversified_batch(
-                discovered_items, limit=5,
+                discovered_items,
+                limit=5,
             )
 
             # Generate expressions for selected items
             rec_results: list[dict[str, Any]] = []
             with tempfile.TemporaryDirectory() as tmpdir:
                 from openbiliclaw.storage.database import Database
+
                 db = Database(Path(tmpdir) / "rec.db")
                 db.initialize()
 
@@ -254,6 +260,7 @@ async def main() -> None:
                 try:
                     from openbiliclaw.llm.embedding import EmbeddingService
                     from openbiliclaw.llm.gemini_provider import GeminiProvider
+
                     g = registry.get("gemini")
                     if isinstance(g, GeminiProvider):
                         emb_service = EmbeddingService(g)
@@ -261,12 +268,17 @@ async def main() -> None:
                     pass
 
                 rec_engine = RecommendationEngine(
-                    llm=llm_service, database=db, embedding_service=emb_service,
+                    llm=llm_service,
+                    database=db,
+                    embedding_service=emb_service,
                 )
 
-                soul_profile = persona.to_soul_profile() if hasattr(persona, "to_soul_profile") else None
+                soul_profile = (
+                    persona.to_soul_profile() if hasattr(persona, "to_soul_profile") else None
+                )
                 if soul_profile is None:
                     from openbiliclaw.soul.profile import SoulProfile
+
                     soul_profile = SoulProfile(
                         personality_portrait=persona.personality_portrait,
                         core_traits=persona.core.core_traits,
@@ -279,16 +291,18 @@ async def main() -> None:
                     except Exception:
                         expr = ""
                         topic_label = ""
-                    rec_results.append({
-                        "title": item.title,
-                        "up_name": item.up_name,
-                        "topic_group": item.topic_group,
-                        "style_key": item.style_key,
-                        "source_strategy": item.source_strategy,
-                        "relevance_score": item.relevance_score,
-                        "expression": expr,
-                        "topic_label": topic_label,
-                    })
+                    rec_results.append(
+                        {
+                            "title": item.title,
+                            "up_name": item.up_name,
+                            "topic_group": item.topic_group,
+                            "style_key": item.style_key,
+                            "source_strategy": item.source_strategy,
+                            "relevance_score": item.relevance_score,
+                            "expression": expr,
+                            "topic_label": topic_label,
+                        }
+                    )
 
             logger.info("  ✅ 推荐 %d 条，含表达", len(rec_results))
 
@@ -296,12 +310,21 @@ async def main() -> None:
             logger.info("  → 评估推荐质量...")
             try:
                 report = await evaluate_recommendations(
-                    rec_results, persona, pool, llm_service,
+                    rec_results,
+                    persona,
+                    pool,
+                    llm_service,
                 )
                 overall = float(report.get("overall", 0.0))
                 train_reports.append(report)
                 logger.info("  📊 Score: %.3f", overall)
-                for dim in ["relevance", "diversity", "expression_quality", "dedup_quality", "serendipity"]:
+                for dim in [
+                    "relevance",
+                    "diversity",
+                    "expression_quality",
+                    "dedup_quality",
+                    "serendipity",
+                ]:
                     val = report.get(dim, 0.0)
                     icon = "✅" if val >= 0.8 else "⚠️" if val >= 0.5 else "❌"
                     logger.info("    %s %s: %.2f", icon, dim, val)
@@ -320,27 +343,37 @@ async def main() -> None:
         # 6. Collect worst dimensions
         worst_fields = []
         for r in train_reports:
-            for dim in ["relevance", "diversity", "expression_quality", "dedup_quality", "serendipity"]:
+            for dim in [
+                "relevance",
+                "diversity",
+                "expression_quality",
+                "dedup_quality",
+                "serendipity",
+            ]:
                 val = float(r.get(dim, 0))
                 if val < 0.8:
-                    worst_fields.append({
-                        "layer": "recommendation",
-                        "field": dim,
-                        "score": val,
-                        "deviation": str(r.get("feedback", "")),
-                    })
+                    worst_fields.append(
+                        {
+                            "layer": "recommendation",
+                            "field": dim,
+                            "score": val,
+                            "deviation": str(r.get("feedback", "")),
+                        }
+                    )
         worst_fields.sort(key=lambda f: f["score"])
         worst_fields = worst_fields[:5]
 
         # 7. Epoch 1 is baseline-only: record score without optimizing
         if epoch == 1:
             best_score = train_mean
-            history_log.append({
-                "epoch": epoch,
-                "train_mean": round(train_mean, 4),
-                "action": "BASELINE",
-                "changes_applied": 0,
-            })
+            history_log.append(
+                {
+                    "epoch": epoch,
+                    "train_mean": round(train_mean, 4),
+                    "action": "BASELINE",
+                    "changes_applied": 0,
+                }
+            )
             logger.info("📊 BASELINE — score: %.3f (will optimize from epoch 2)", best_score)
             continue
 
@@ -369,6 +402,7 @@ async def main() -> None:
 
         # 9. Apply
         from openbiliclaw.eval.optimizer import ParamChange
+
         param_changes = [
             ParamChange(
                 param_name=str(c.get("file_path", "")),
@@ -413,12 +447,14 @@ async def main() -> None:
             else:
                 logger.info("↩️ 未超越最佳 (%.3f <= %.3f)", train_mean, best_score)
 
-        history_log.append({
-            "epoch": epoch,
-            "train_mean": round(train_mean, 4),
-            "action": action,
-            "changes_applied": applied_count,
-        })
+        history_log.append(
+            {
+                "epoch": epoch,
+                "train_mean": round(train_mean, 4),
+                "action": action,
+                "changes_applied": applied_count,
+            }
+        )
 
         if patience >= 3:
             logger.info("⛔ Early stopping")
@@ -428,8 +464,13 @@ async def main() -> None:
     logger.info("=" * 60)
     logger.info("Best score: %.3f", best_score)
     for h in history_log:
-        logger.info("  Epoch %d: %.4f (%s, %d changes)",
-                     h["epoch"], h["train_mean"], h["action"], h["changes_applied"])
+        logger.info(
+            "  Epoch %d: %.4f (%s, %d changes)",
+            h["epoch"],
+            h["train_mean"],
+            h["action"],
+            h["changes_applied"],
+        )
 
     rl.finish(best_score=best_score, epochs_run=len(history_log))
     logger.info("完整日志: %s", rl.run_dir)

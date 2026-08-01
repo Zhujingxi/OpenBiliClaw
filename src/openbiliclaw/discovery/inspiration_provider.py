@@ -13,6 +13,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any, Protocol, cast
 
 from openbiliclaw.discovery.inspiration import ExaPreviewItem
+from openbiliclaw.proc import no_window_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -1460,6 +1461,7 @@ async def _run_command(args: list[str], timeout_seconds: float) -> str:
         *args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        **no_window_kwargs(),
     )
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_seconds)

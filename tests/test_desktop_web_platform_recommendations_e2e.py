@@ -124,6 +124,11 @@ def platform_server() -> Iterator[tuple[str, PlatformStub]]:
                     ROOT / "src/openbiliclaw/web/shared/source-status.js",
                     "application/javascript",
                 )
+            if path == "/shared/dialogue-confirmation.js":
+                return self._serve_file(
+                    ROOT / "src/openbiliclaw/web/shared/dialogue-confirmation.js",
+                    "application/javascript",
+                )
             if path == "/api/ping":
                 return _json_response(self, {"ok": True})
             if path == "/api/health":

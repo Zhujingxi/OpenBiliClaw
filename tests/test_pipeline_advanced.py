@@ -580,30 +580,33 @@ async def test_update_layer_exception_restores_signals(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_regenerate_portrait_exception_does_not_break_pipeline(tmp_path: Path) -> None:
-    """A failure in portrait regeneration should be swallowed silently."""
+async def test_feedback_no_longer_triggers_portrait_regen(tmp_path: Path) -> None:
+    """FEEDBACK no longer routes to VALUES, so portrait regen is never attempted (P1).
+
+    A patched-to-raise ``regenerate_portrait`` must never be called — the pipeline
+    completes normally and only the fast-line INTEREST layer updates.
+    """
     pipeline, svc, memory = _make_low_threshold_pipeline(tmp_path)
 
-    # Patch regenerate_portrait to raise
     from openbiliclaw.soul import layer_updaters as lu_mod
 
     original = lu_mod.regenerate_portrait
+    called = False
 
     async def boom(**kwargs: Any) -> str:
+        nonlocal called
+        called = True
         raise RuntimeError("portrait broken")
 
     lu_mod.regenerate_portrait = boom  # type: ignore[assignment]
     try:
-        # Trigger a values update — this should attempt portrait regen and fail gracefully
         result = await pipeline.ingest(signal_from_feedback("like", "测试", ""))
     finally:
         lu_mod.regenerate_portrait = original  # type: ignore[assignment]
 
-    # The values update itself should still be reported
     layers = {r.layer for r in result.layers_updated}
-    assert OnionLayer.VALUES in layers, (
-        "Values update must still succeed even if portrait regen fails"
-    )
+    assert OnionLayer.VALUES not in layers, "FEEDBACK must not update VALUES (P1 retired)"
+    assert called is False, "portrait regen must never fire from a FEEDBACK signal now"
 
 
 # ===========================================================================
@@ -612,19 +615,17 @@ async def test_regenerate_portrait_exception_does_not_break_pipeline(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_portrait_regenerated_when_values_change(tmp_path: Path) -> None:
-    """A Values change must trigger portrait regeneration via ProfileBuilder."""
+async def test_feedback_does_not_regenerate_portrait(tmp_path: Path) -> None:
+    """FEEDBACK no longer changes VALUES, so it must not regenerate the portrait (P1)."""
     pipeline, svc, _ = _make_low_threshold_pipeline(tmp_path)
 
-    # Snapshot how many portrait calls existed before
     portrait_calls_before = len(svc.portrait_calls)
 
-    # Feedback routes to values; values changes ⇒ portrait regen
     await pipeline.ingest(signal_from_feedback("like", "深度内容", "强反馈"))
 
     portrait_calls_after = len(svc.portrait_calls)
-    assert portrait_calls_after > portrait_calls_before, (
-        f"Portrait regen should have been called. "
+    assert portrait_calls_after == portrait_calls_before, (
+        "FEEDBACK routes only to the fast line now — no portrait regen. "
         f"Before={portrait_calls_before}, After={portrait_calls_after}"
     )
 
@@ -659,16 +660,21 @@ async def test_changelog_recorded_on_layer_change(tmp_path: Path) -> None:
     assert changelog_path.exists(), "Changelog file should be created"
     content = changelog_path.read_text(encoding="utf-8")
     assert "画像更新日志" in content
-    # Should mention values (FEEDBACK→VALUES)
-    assert "values" in content.lower() or "价值" in content, content
+    # FEEDBACK now routes to the fast line (INTEREST/SURFACE), not VALUES (P1).
+    assert "interest" in content.lower() or "兴趣" in content or "surface" in content.lower(), (
+        content
+    )
 
 
 @pytest.mark.asyncio
-async def test_core_changed_true_branch_applies_traits_and_mbti(tmp_path: Path) -> None:
-    """When LLM returns changed=True for Core, traits/needs/MBTI must be applied."""
+async def test_state_insight_no_longer_updates_core(tmp_path: Path) -> None:
+    """A state-kind DIALOGUE_INSIGHT is inert in the pipeline — CORE write retired (P1).
+
+    The deep CORE layer changes only via a gated soul rebuild; the pipeline
+    neither buffers nor updates it from a state self-report.
+    """
     pipeline, svc, memory = _make_low_threshold_pipeline(tmp_path)
 
-    # Seed an existing profile so we can detect diffs
     seed_profile = OnionProfile()
     seed_profile.core.core_traits = ["旧特质"]
     seed_profile.core.deep_needs = ["旧需求"]
@@ -676,28 +682,23 @@ async def test_core_changed_true_branch_applies_traits_and_mbti(tmp_path: Path) 
     soul_layer.data.update(seed_profile.to_dict())
     soul_layer.save()
 
-    # Trigger Core via DIALOGUE_INSIGHT kind=state
     insight_signals = signals_from_dialogue(
         [{"kind": "state", "content": "用户正在深度思考人生方向", "confidence": 0.9}]
     )
     result = await pipeline.ingest(insight_signals[0])
 
     core_results = [r for r in result.layers_updated if r.layer == OnionLayer.CORE]
-    assert core_results, "Core update should fire"
-    core_result = core_results[0]
-    assert core_result.changed, "Core should report changed=True (mock returns changed=True)"
+    assert core_results == [], "CORE must never fire from a pipeline state insight now"
 
-    # Reload profile and verify traits were applied
+    # The seeded core is untouched — no traits/MBTI applied.
     reloaded = OnionProfile.from_dict(memory.get_layer("soul").data)
-    assert "好奇心强" in reloaded.core.core_traits
-    assert "深度探索" in reloaded.core.core_traits
-    assert "对原理的深层理解" in reloaded.core.deep_needs
-    assert reloaded.core.mbti.type == "INTJ"
+    assert reloaded.core.core_traits == ["旧特质"]
+    assert reloaded.core.deep_needs == ["旧需求"]
 
 
 @pytest.mark.asyncio
-async def test_core_change_triggers_portrait_regen(tmp_path: Path) -> None:
-    """Core layer change must trigger portrait regeneration (Core is in trigger set)."""
+async def test_state_insight_does_not_regenerate_portrait(tmp_path: Path) -> None:
+    """A state-kind insight is inert — no portrait regen (deep CORE write retired, P1)."""
     pipeline, svc, _ = _make_low_threshold_pipeline(tmp_path)
 
     portrait_calls_before = len(svc.portrait_calls)
@@ -707,7 +708,9 @@ async def test_core_change_triggers_portrait_regen(tmp_path: Path) -> None:
     await pipeline.ingest(insight_signals[0])
 
     portrait_calls_after = len(svc.portrait_calls)
-    assert portrait_calls_after > portrait_calls_before, "Core change must trigger portrait regen"
+    assert portrait_calls_after == portrait_calls_before, (
+        "state insight must not trigger portrait regen (pipeline deep write retired)"
+    )
 
 
 # ===========================================================================
@@ -2945,22 +2948,24 @@ async def test_ingest_skips_layer_with_missing_buffer(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_portrait_regen_success_writes_new_portrait(tmp_path: Path) -> None:
-    """When regenerate_portrait returns a non-empty string, it must be saved."""
+async def test_regenerate_portrait_returns_builder_output(tmp_path: Path) -> None:
+    """regenerate_portrait still builds a portrait when called directly.
+
+    The pipeline no longer dispatches deep layers (P1 retired) so this helper is
+    only reachable directly / for rebuild tooling; verify it still works.
+    """
+    from openbiliclaw.soul.layer_updaters import regenerate_portrait
+
     pipeline, svc, memory = _make_low_threshold_pipeline(tmp_path)
+    profile = OnionProfile()
 
-    # Trigger Core change → Core is in _PORTRAIT_TRIGGER_LAYERS
-    insight_signals = signals_from_dialogue(
-        [{"kind": "state", "content": "深度思考状态", "confidence": 0.9}]
+    portrait = await regenerate_portrait(
+        profile=profile,
+        profile_builder=ProfileBuilder(registry=svc),
+        memory=memory,
     )
-    await pipeline.ingest(insight_signals[0])
-
-    # Reload profile from disk and verify the portrait was written
-    reloaded = OnionProfile.from_dict(memory.get_layer("soul").data)
-    assert reloaded.personality_portrait, (
-        "Portrait should have been regenerated and saved to soul layer"
-    )
-    assert "热爱技术探索" in reloaded.personality_portrait
+    assert portrait, "regenerate_portrait should return the builder's portrait text"
+    assert "热爱技术探索" in portrait
 
 
 @pytest.mark.asyncio
@@ -3079,3 +3084,652 @@ async def test_speculator_seed_ingestion_exception_is_swallowed(tmp_path: Path) 
     assert not any("猜测兴趣种子" in c for c in result.changes)
     # But other changes (like new interest) should still be there
     assert result.changed
+
+
+# ===========================================================================
+# P1 retirement — deep-buffer migration (deep-line consolidation)
+# ===========================================================================
+
+
+def _write_pipeline_state_with_deep_buffers(data_dir: Path) -> None:
+    """Persist a pipeline_state.json holding legacy VALUES/CORE buffer signals."""
+    memory_dir = data_dir / "memory"
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    state = {
+        "version": 1,
+        "buffers": {
+            "values": {
+                "layer": "values",
+                "signals": [
+                    {
+                        "id": "sig1",
+                        "signal_type": "feedback",
+                        "timestamp": "2026-07-01T10:00:00",
+                        "source": "feedback",
+                        "payload": {"event_type": "like", "title": "深度学习纪录片", "id": 42},
+                        "confidence": 0.9,
+                    }
+                ],
+                "last_updated_at": "",
+                "update_count": 0,
+            },
+            "core": {
+                "layer": "core",
+                "signals": [
+                    {
+                        "id": "sig2",
+                        "signal_type": "dialogue_insight",
+                        "timestamp": "2026-07-02T11:00:00",
+                        "source": "dialogue",
+                        "payload": {"content": "用户在反思人生方向"},
+                        "confidence": 0.85,
+                    }
+                ],
+                "last_updated_at": "",
+                "update_count": 0,
+            },
+            "interest": {
+                "layer": "interest",
+                "signals": [],
+                "last_updated_at": "",
+                "update_count": 0,
+            },
+        },
+        "last_saved_at": "2026-07-02T11:00:00",
+        "total_signals_ingested": 2,
+    }
+    with open(memory_dir / "pipeline_state.json", "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+
+
+class _FakeLedger:
+    def __init__(self) -> None:
+        self.rows: list[dict[str, Any]] = []
+
+    def record(self, **kwargs: Any) -> None:
+        self.rows.append(dict(kwargs))
+
+
+@pytest.mark.asyncio
+async def test_migrate_pipeline_deep_buffers_converts_and_clears(tmp_path: Path) -> None:
+    """Legacy VALUES/CORE buffer signals become awareness notes; keys cleared; ledger row."""
+    from openbiliclaw.soul.pipeline import (
+        _PIPELINE_DEEP_MIGRATION_MARKER,
+        _PIPELINE_DEEP_MIGRATION_PREFIX,
+        migrate_pipeline_deep_buffers,
+    )
+
+    data_dir = Path(tmp_path)
+    _write_pipeline_state_with_deep_buffers(data_dir)
+    memory = MemoryManager(data_dir)
+    memory.initialize()
+    ledger = _FakeLedger()
+
+    added = migrate_pipeline_deep_buffers(data_dir, memory, ledger)
+    assert added == 2
+
+    notes = memory.get_layer("awareness").data.get("notes", [])
+    observations = [str(n.get("observation", "")) for n in notes]
+    assert all(o.startswith(_PIPELINE_DEEP_MIGRATION_PREFIX) for o in observations)
+    assert any("深度学习纪录片" in o for o in observations)
+    assert any("反思人生方向" in o for o in observations)
+    # Best-effort source_event_id backfill: the values signal carried id=42.
+    assert any(42 in n.get("source_event_ids", []) for n in notes)
+
+    # State: deep keys cleared, marker set.
+    with open(data_dir / "memory" / "pipeline_state.json", encoding="utf-8") as f:
+        state = json.load(f)
+    assert state[_PIPELINE_DEEP_MIGRATION_MARKER] is True
+    assert state["buffers"]["values"]["signals"] == []
+    assert state["buffers"]["core"]["signals"] == []
+
+    # Ledger row recorded the migration.
+    assert ledger.rows and ledger.rows[0]["write_point"] == "pipeline_deep_migration"
+
+
+@pytest.mark.asyncio
+async def test_migrate_pipeline_deep_buffers_is_idempotent(tmp_path: Path) -> None:
+    """Re-running the migration (marker set) adds nothing and touches no notes."""
+    from openbiliclaw.soul.pipeline import migrate_pipeline_deep_buffers
+
+    data_dir = Path(tmp_path)
+    _write_pipeline_state_with_deep_buffers(data_dir)
+    memory = MemoryManager(data_dir)
+    memory.initialize()
+
+    first = migrate_pipeline_deep_buffers(data_dir, memory, None)
+    assert first == 2
+    notes_after_first = len(memory.get_layer("awareness").data.get("notes", []))
+
+    # Marker short-circuits the re-run.
+    second = migrate_pipeline_deep_buffers(data_dir, memory, None)
+    assert second == 0
+    assert len(memory.get_layer("awareness").data.get("notes", [])) == notes_after_first
+
+
+@pytest.mark.asyncio
+async def test_migrate_dedup_on_crash_rerun_without_marker(tmp_path: Path) -> None:
+    """A crash before the marker write is safe: re-run dedups by content hash."""
+    from openbiliclaw.soul.pipeline import (
+        _PIPELINE_DEEP_MIGRATION_MARKER,
+        migrate_pipeline_deep_buffers,
+    )
+
+    data_dir = Path(tmp_path)
+    _write_pipeline_state_with_deep_buffers(data_dir)
+    memory = MemoryManager(data_dir)
+    memory.initialize()
+
+    migrate_pipeline_deep_buffers(data_dir, memory, None)
+    notes_after_first = len(memory.get_layer("awareness").data.get("notes", []))
+
+    # Simulate a crash BEFORE the marker/clear persisted: restore the raw signals
+    # and drop the marker, keeping the already-written awareness notes.
+    _write_pipeline_state_with_deep_buffers(data_dir)
+    state_path = data_dir / "memory" / "pipeline_state.json"
+    with open(state_path, encoding="utf-8") as f:
+        state = json.load(f)
+    assert _PIPELINE_DEEP_MIGRATION_MARKER not in state
+
+    added = migrate_pipeline_deep_buffers(data_dir, memory, None)
+    assert added == 0, "content-hash dedup must prevent duplicate notes on re-run"
+    assert len(memory.get_layer("awareness").data.get("notes", [])) == notes_after_first
+
+
+def test_buffered_layers_excludes_deep(tmp_path: Path) -> None:
+    """Reverse assertion: the pipeline no longer buffers VALUES/CORE at all."""
+    assert OnionLayer.VALUES not in _BUFFERED_LAYERS
+    assert OnionLayer.CORE not in _BUFFERED_LAYERS
+    # classify_signal never yields a deep layer for feedback or value/state insights.
+    assert OnionLayer.VALUES not in classify_signal(SignalType.FEEDBACK, {})
+    assert classify_signal(SignalType.DIALOGUE_INSIGHT, {"kind": "value"}) == frozenset()
+    assert classify_signal(SignalType.DIALOGUE_INSIGHT, {"kind": "state"}) == frozenset()
+
+
+@pytest.mark.asyncio
+async def test_update_layer_seals_values_and_core(tmp_path: Path) -> None:
+    """update_layer(VALUES|CORE) is a defensive no-op (invariant 1, F3)."""
+    from openbiliclaw.soul.layer_updaters import update_layer
+
+    memory = MemoryManager(Path(tmp_path))
+    memory.initialize()
+    profile = OnionProfile()
+    signals = [{"payload": {"event_type": "view", "title": "t", "content": "深度"}}]
+    for layer in (OnionLayer.VALUES, OnionLayer.CORE):
+        result = await update_layer(
+            layer=layer,
+            signals=signals,
+            profile=profile,
+            memory=memory,
+            preference_analyzer=None,  # type: ignore[arg-type]
+            profile_builder=None,  # type: ignore[arg-type]
+        )
+        assert result.changed is False
+    assert profile.values_layer.values == []
+    assert profile.core.core_traits == []
+
+
+@pytest.mark.asyncio
+async def test_update_interest_passes_the_recent_cognition_tail(tmp_path: Path) -> None:
+    """快线的兴趣更新要带上近期觉察/洞察，让小批事件不在真空里被解读。"""
+    from openbiliclaw.soul.layer_updaters import _update_interest
+    from openbiliclaw.soul.profile import AwarenessNote, InsightHypothesis
+
+    memory = MemoryManager(Path(tmp_path))
+    memory.initialize()
+    profile = OnionProfile()
+    profile.recent_awareness = [AwarenessNote(observation="最近在深挖 Rust 底层")]
+    profile.active_insights = [InsightHypothesis(hypothesis="可能是系统编程从业者")]
+
+    captured: dict[str, object] = {}
+
+    class _CapturingAnalyzer:
+        async def analyze_events(self, **kwargs: object) -> dict[str, object]:
+            captured.update(kwargs)
+            return dict(memory.get_layer("preference").data)
+
+    result = await _update_interest(
+        signals=[{"payload": {"event_type": "view", "title": "Rust 异步运行时精读"}}],
+        profile=profile,
+        memory=memory,
+        preference_analyzer=_CapturingAnalyzer(),  # type: ignore[arg-type]
+        profile_builder=None,  # type: ignore[arg-type]
+    )
+
+    assert result.layer == OnionLayer.INTEREST
+    notes = captured.get("awareness_notes")
+    insights = captured.get("active_insights")
+    assert notes and notes[0]["observation"] == "最近在深挖 Rust 底层"
+    assert insights and insights[0]["hypothesis"] == "可能是系统编程从业者"
+
+
+async def test_preference_chunks_keep_the_recent_cognition_context() -> None:
+    """预算或显式分片不能把快线传入的认知语境静默丢掉。"""
+    service = _RichFakeService()
+    analyzer = PreferenceAnalyzer(registry=service, max_prompt_chars=0)
+
+    await analyzer.analyze_events(
+        events=[
+            {"event_type": "view", "title": "Rust 异步运行时（一）"},
+            {"event_type": "view", "title": "Rust 异步运行时（二）"},
+        ],
+        existing_preference={"interests": []},
+        event_chunk_size=1,
+        awareness_notes=[{"observation": "最近在深挖 Rust 底层"}],
+        active_insights=[{"hypothesis": "可能是系统编程从业者"}],
+    )
+
+    assert len(service.calls) == 2
+    for call in service.calls:
+        assert "<recent_awareness>" in call["user_input"]
+        assert "最近在深挖 Rust 底层" in call["user_input"]
+        assert "<active_insights>" in call["user_input"]
+        assert "可能是系统编程从业者" in call["user_input"]
+
+
+# ===========================================================================
+# 统一兴趣更新线 Phase 1 — 反馈优先级 flush（spec 不变量 1）
+#
+# 含 FEEDBACK 信号的 INTEREST 缓冲在信号数达 feedback_batch_threshold（默认 3，
+# 复用旧批线 config 键）时立即消费，绕过 min_interval_seconds；普通事件维持
+# 3 条 / 600s 不变。Wave A 默认关（scheduler.unified_interest_line=false）。
+# ===========================================================================
+
+
+def _feedback_buffer(count: int, *, now: datetime) -> LayerBuffer:
+    buf = LayerBuffer(layer=OnionLayer.INTEREST)
+    # 刚刚更新过 → min_interval 闸门是关着的
+    buf.last_updated_at = now.isoformat()
+    for index in range(count):
+        buf.signals.append(_serialize_signal(signal_from_feedback("dislike", f"卡片{index}", "")))
+    return buf
+
+
+def test_feedback_priority_bypasses_min_interval_without_clock_advance() -> None:
+    """3 条 FEEDBACK 信号在墙钟零推进下即 ready；关闭时维持今天的行为。"""
+    threshold = LayerThreshold(min_signals=3, min_interval_seconds=600, max_buffer_size=200)
+    now = datetime.now()
+    buf = _feedback_buffer(3, now=now)
+
+    assert buf.is_ready(threshold, now, has_strong_signal=True) is False
+    assert (
+        buf.is_ready(threshold, now, has_strong_signal=True, feedback_priority_threshold=3) is True
+    )
+
+
+def test_feedback_priority_needs_the_full_threshold() -> None:
+    """2 条反馈不够——优先级规则复用 feedback_batch_threshold 的计数语义。"""
+    threshold = LayerThreshold(min_signals=3, min_interval_seconds=600, max_buffer_size=200)
+    now = datetime.now()
+    buf = _feedback_buffer(2, now=now)
+
+    assert (
+        buf.is_ready(threshold, now, has_strong_signal=True, feedback_priority_threshold=3) is False
+    )
+
+
+def test_feedback_priority_does_not_speed_up_ordinary_events() -> None:
+    """普通浏览事件即使 3 条也不绕过 600s——只有 FEEDBACK 有优先级。"""
+    threshold = LayerThreshold(min_signals=3, min_interval_seconds=600, max_buffer_size=200)
+    now = datetime.now()
+    buf = LayerBuffer(layer=OnionLayer.INTEREST)
+    buf.last_updated_at = now.isoformat()
+    for index in range(3):
+        buf.signals.append(
+            _serialize_signal(
+                signals_from_events([{"event_type": "view", "title": f"v{index}"}])[0]
+            )
+        )
+
+    assert buf.is_ready(threshold, now, feedback_priority_threshold=3) is False
+
+
+@pytest.mark.asyncio
+async def test_pipeline_feedback_priority_flush_when_unified_line_on(tmp_path: Path) -> None:
+    """开关打开时，第 3 条反馈立刻触发 INTEREST 消费（不等 min_interval）。"""
+    svc = _RichFakeService()
+    memory = MemoryManager(Path(tmp_path))
+    memory.initialize()
+    thresholds = {
+        layer: LayerThreshold(min_signals=3, min_interval_seconds=3600, max_buffer_size=200)
+        for layer in _BUFFERED_LAYERS
+    }
+    pipeline = ProfileUpdatePipeline(
+        memory=memory,
+        preference_analyzer=PreferenceAnalyzer(registry=svc),
+        profile_builder=ProfileBuilder(registry=svc),
+        thresholds=thresholds,
+        unified_interest_line=True,
+        feedback_batch_threshold=3,
+    )
+    # 模拟「刚刚消费过一次」，把 600s/3600s 最短间隔闸门关上。
+    pipeline._buffers[OnionLayer.INTEREST.value].last_updated_at = datetime.now().isoformat()
+
+    updated: list[OnionLayer] = []
+    for index in range(3):
+        result = await pipeline.ingest(signal_from_feedback("dislike", f"卡片{index}", ""))
+        updated.extend(r.layer for r in result.layers_updated)
+
+    assert OnionLayer.INTEREST in updated
+
+
+@pytest.mark.asyncio
+async def test_pipeline_feedback_priority_off_by_default(tmp_path: Path) -> None:
+    """Wave A 默认关：反馈仍受 min_interval 约束，行为与今天逐字节一致。"""
+    svc = _RichFakeService()
+    memory = MemoryManager(Path(tmp_path))
+    memory.initialize()
+    thresholds = {
+        layer: LayerThreshold(min_signals=3, min_interval_seconds=3600, max_buffer_size=200)
+        for layer in _BUFFERED_LAYERS
+    }
+    pipeline = ProfileUpdatePipeline(
+        memory=memory,
+        preference_analyzer=PreferenceAnalyzer(registry=svc),
+        profile_builder=ProfileBuilder(registry=svc),
+        thresholds=thresholds,
+    )
+    pipeline._buffers[OnionLayer.INTEREST.value].last_updated_at = datetime.now().isoformat()
+
+    updated: list[OnionLayer] = []
+    for index in range(3):
+        result = await pipeline.ingest(signal_from_feedback("dislike", f"卡片{index}", ""))
+        updated.extend(r.layer for r in result.layers_updated)
+
+    assert OnionLayer.INTEREST not in updated
+    assert len(pipeline._buffers[OnionLayer.INTEREST.value].signals) == 3
+
+
+# ===========================================================================
+# 统一兴趣更新线 Phase 1 后半 — 消费侧继承批线特权（spec §Phase 1）
+#
+# 含 FEEDBACK 信号的那一批在 _update_interest 里额外获得：dislike 归档、显著
+# 变化 → 接入点③门控重建（trigger=feedback_batch）、批后 held-replay、台账
+# pipeline_layer_update(source="feedback")。不含反馈的批一律不受影响。
+# ===========================================================================
+
+
+class _StubGate:
+    """Deterministic posture-gate stand-in (mirrors tests/test_posture_gate.py)."""
+
+    def __init__(self, mode: str, decision: Any) -> None:
+        self._mode = mode
+        self._decision = decision
+        self.calls: list[dict[str, Any]] = []
+
+    @property
+    def enabled(self) -> bool:
+        return self._mode != "off"
+
+    async def evaluate(self, **kwargs: Any) -> Any:
+        self.calls.append(kwargs)
+        return self._decision
+
+
+_SIGNIFICANT_PREFERENCE: dict[str, Any] = {
+    "interests": [
+        {"name": "标题党", "category": "内容", "weight": 0.7, "source": "feedback"},
+        {"name": "城市建筑", "category": "文化", "weight": 0.86, "source": "feedback"},
+        {"name": "结构力学", "category": "知识", "weight": 0.81, "source": "feedback"},
+    ],
+    "style": {},
+    "context": {},
+    "exploration_openness": 0.5,
+    "disliked_topics": ["标题党"],
+    "favorite_up_users": [],
+}
+
+
+def _unified_engine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Any, MemoryManager]:
+    """SoulEngine with the unified interest line ON and a stubbed analyzer."""
+    from openbiliclaw.soul.engine import SoulEngine
+
+    memory = MemoryManager(Path(tmp_path))
+    memory.initialize()
+    engine = SoulEngine(
+        llm=_RichFakeService(),
+        memory=memory,
+        unified_interest_line=True,
+        database=memory._database,
+    )
+
+    async def fake_analyze_events(**kwargs: Any) -> dict[str, Any]:
+        del kwargs
+        import copy
+
+        return copy.deepcopy(_SIGNIFICANT_PREFERENCE)
+
+    monkeypatch.setattr(engine._preference_analyzer, "analyze_events", fake_analyze_events)
+    return engine, memory
+
+
+@pytest.mark.asyncio
+async def test_pipeline_feedback_batch_archives_new_dislikes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """含反馈的批必须继承批线的 dislike 归档（归档而非删除）。"""
+    engine, memory = _unified_engine(tmp_path, monkeypatch)
+
+    await engine.pipeline.ingest(signal_from_feedback("dislike", "标题党视频", "太浅了"))
+    await engine.wait_for_pending_edits()
+
+    interests = memory.get_layer("preference").data["interests"]
+    by_name = {str(item["name"]): item for item in interests}
+    assert by_name["标题党"].get("state") == "archived"
+    assert by_name["城市建筑"].get("state") != "archived"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_ordinary_batch_does_not_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """不含反馈的普通批不走归档路径（避免把浏览误当避雷证据）。"""
+    engine, memory = _unified_engine(tmp_path, monkeypatch)
+
+    await engine.pipeline.ingest_batch(
+        signals_from_events([{"event_type": "view", "title": f"视频{i}"} for i in range(3)])
+    )
+    await engine.wait_for_pending_edits()
+
+    interests = memory.get_layer("preference").data["interests"]
+    by_name = {str(item["name"]): item for item in interests}
+    assert by_name["标题党"].get("state") != "archived"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_feedback_batch_rebuild_goes_through_access_point_three(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """含反馈 + 显著变化 → 走接入点③（trigger=feedback_batch）；shadow 放行重建。"""
+    from openbiliclaw.soul.posture_gate import ACCEPT, GateDecision
+
+    engine, memory = _unified_engine(tmp_path, monkeypatch)
+    gate = _StubGate("shadow", GateDecision(verdict=ACCEPT, enforced=False))
+    engine._posture_gate = gate
+
+    built: list[bool] = []
+
+    async def fake_build(**kwargs: Any) -> Any:
+        del kwargs
+        from openbiliclaw.soul.profile import SoulProfile
+
+        built.append(True)
+        return SoulProfile(
+            personality_portrait="重建后的画像。" * 20,
+            core_traits=["理性"],
+            cognitive_style=["结构化"],
+            motivational_drivers=["把事情讲透"],
+            current_phase="持续校准",
+            values=["深度"],
+            life_stage="稳定期",
+            deep_needs=["被理解"],
+        )
+
+    monkeypatch.setattr(engine._profile_builder, "build", fake_build)
+
+    await engine.pipeline.ingest(signal_from_feedback("dislike", "标题党视频", "太浅了"))
+    await engine.wait_for_pending_edits()
+
+    assert gate.calls, "含反馈的显著变化必须咨询接入点③"
+    assert gate.calls[0]["write_point"] == "feedback_soul_rebuild"
+    assert gate.calls[0]["change"]["trigger"] == "feedback_batch"
+    assert built, "shadow/accept 必须放行重建"
+    assert memory.get_layer("soul").data["core"]["core_traits"] == ["理性"]
+
+
+@pytest.mark.asyncio
+async def test_pipeline_feedback_batch_enforce_downgrade_abandons_rebuild(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """enforce downgrade → 放弃重建，但偏好写入和缓冲消费不受影响。"""
+    from openbiliclaw.soul.posture_gate import DOWNGRADE, GateDecision
+
+    engine, memory = _unified_engine(tmp_path, monkeypatch)
+    engine._posture_gate = _StubGate("enforce", GateDecision(verdict=DOWNGRADE, enforced=True))
+
+    built: list[bool] = []
+
+    async def fake_build(**kwargs: Any) -> Any:
+        del kwargs
+        built.append(True)
+        raise AssertionError("enforce downgrade 必须在重建前拦下")
+
+    monkeypatch.setattr(engine._profile_builder, "build", fake_build)
+
+    await engine.pipeline.ingest(signal_from_feedback("dislike", "标题党视频", "太浅了"))
+    await engine.wait_for_pending_edits()
+
+    assert built == []
+    assert memory.get_layer("preference").data["disliked_topics"] == ["标题党"]
+    assert engine.pipeline._buffers[OnionLayer.INTEREST.value].signals == []
+
+
+@pytest.mark.asyncio
+async def test_pipeline_feedback_batch_ledger_source_is_feedback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """台账连续性：反馈触发的消费记 pipeline_layer_update 且 source=feedback。"""
+    engine, memory = _unified_engine(tmp_path, monkeypatch)
+
+    await engine.pipeline.ingest(signal_from_feedback("dislike", "标题党视频", "太浅了"))
+    await engine.wait_for_pending_edits()
+
+    rows = memory._database.query_profile_ledger(days=30, write_point="pipeline_layer_update")
+    sources = {str(row["source"]) for row in rows}
+    assert "feedback" in sources, f"反馈触发的兴趣消费必须记 source=feedback，实际 {sources}"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_ordinary_batch_keeps_pipeline_ledger_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """普通批的台账 source 不变（pipeline:interest）。"""
+    engine, memory = _unified_engine(tmp_path, monkeypatch)
+
+    await engine.pipeline.ingest_batch(
+        signals_from_events([{"event_type": "view", "title": f"视频{i}"} for i in range(3)])
+    )
+    await engine.wait_for_pending_edits()
+
+    rows = memory._database.query_profile_ledger(days=30, write_point="pipeline_layer_update")
+    sources = {str(row["source"]) for row in rows}
+    assert "feedback" not in sources
+    assert "pipeline:interest" in sources
+
+
+@pytest.mark.asyncio
+async def test_pipeline_feedback_batch_consumes_held_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """含反馈的批后必须消费 replaying 的搁置更新（批线 held-replay 钩子）。"""
+    from openbiliclaw.soul.confusion import ConfusionManager, HeldUpdate
+
+    engine, memory = _unified_engine(tmp_path, monkeypatch)
+    db = memory._database
+    manager = ConfusionManager(db)
+    confusion_id = db.insert_confusion(topic="桌游", observation="看不懂")
+    db.update_confusion(
+        confusion_id,
+        held_updates=[HeldUpdate(held_id="h1", topic="桌游", kind="upgrade", value=0.7).to_dict()],
+    )
+    manager.resolve(confusion_id, resolution="real_interest")
+    assert manager.get(confusion_id).held_updates[0].state == "replaying"
+
+    await engine.pipeline.ingest(signal_from_feedback("dislike", "标题党视频", "太浅了"))
+    await engine.wait_for_pending_edits()
+
+    assert manager.get(confusion_id).held_updates[0].state == "applied"
+
+
+# ===========================================================================
+# 统一兴趣更新线 — Task 1 契约在统一线上的对照
+#
+# tests/test_soul_engine.py::TestFeedbackBatchContract 钉的是旧批线的 6 条语义。
+# 它们在统一线上的去向：
+#   ① 阈值 3          → LayerBuffer 的反馈优先级规则（test_feedback_priority_*）
+#   ② retraction 排除 → **有意变更**：改走 pipeline 既有折价（下面第一条）
+#   ③ dislike 归档    → test_pipeline_feedback_batch_archives_new_dislikes
+#   ④ 门控重建        → test_pipeline_feedback_batch_rebuild_goes_through_...
+#   ⑤ held-replay     → test_pipeline_feedback_batch_consumes_held_replay
+#   ⑥ 游标幂等        → 缓冲 drain 幂等（下面第二条；游标本身 Wave B 才退役）
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_unified_line_retraction_is_discounted_not_a_feedback_privilege(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """契约②有意变更：retraction 不再被整条排除，但也拿不到反馈特权。
+
+    它走 BEHAVIOR_EVENT 通道（折价而非删除），因此不触发 dislike 归档，也不会
+    把 pipeline_layer_update 的 source 改成 feedback。
+    """
+    engine, memory = _unified_engine(tmp_path, monkeypatch)
+
+    signals = signals_from_events(
+        [
+            {
+                "event_type": "feedback",
+                "title": f"撤回 {index}",
+                "url": f"https://www.bilibili.com/video/BV{index}",
+                "metadata": {"feedback_type": "retraction", "retracted_action": "like"},
+            }
+            for index in range(3)
+        ]
+    )
+    assert all(sig.signal_type is SignalType.BEHAVIOR_EVENT for sig in signals)
+
+    await engine.pipeline.ingest_batch(signals)
+    await engine.wait_for_pending_edits()
+
+    interests = memory.get_layer("preference").data["interests"]
+    by_name = {str(item["name"]): item for item in interests}
+    assert by_name["标题党"].get("state") != "archived", "撤回不是避雷证据"
+    rows = memory._database.query_profile_ledger(days=30, write_point="pipeline_layer_update")
+    assert "feedback" not in {str(row["source"]) for row in rows}
+
+
+@pytest.mark.asyncio
+async def test_unified_line_consumed_batch_is_not_reconsumed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """契约⑥的统一线对应物：消费过的信号被 drain，二次 tick 不重算。"""
+    engine, memory = _unified_engine(tmp_path, monkeypatch)
+    del memory
+
+    calls: list[int] = []
+    original = engine._preference_analyzer.analyze_events
+
+    async def counting_analyze(**kwargs: Any) -> dict[str, Any]:
+        calls.append(1)
+        return await original(**kwargs)
+
+    monkeypatch.setattr(engine._preference_analyzer, "analyze_events", counting_analyze)
+
+    await engine.pipeline.ingest(signal_from_feedback("dislike", "标题党视频", "太浅了"))
+    assert engine.pipeline._buffers[OnionLayer.INTEREST.value].signals == []
+
+    await engine.pipeline.tick()
+    await engine.wait_for_pending_edits()
+
+    assert calls == [1], "已消费的反馈不得被第二轮重复分析"

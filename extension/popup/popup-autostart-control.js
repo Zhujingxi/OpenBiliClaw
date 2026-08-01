@@ -71,6 +71,9 @@ function enabledHint(status) {
 function activeHint(status) {
   if (!status) return "无法读取开机自启动状态。";
   if (!status.can_manage) return disabledHint(status);
+  if (!status.enabled && status.registered) {
+    return "检测到系统自启动残留项；关闭此开关即可清理，当前后端进程不受影响。";
+  }
   if (status.enabled) return enabledHint(status);
   return "已关闭：不会注册登录自启动；当前后端进程不受影响。";
 }
@@ -93,7 +96,7 @@ export function initAutostartControl(els = {}, opts = {}) {
   function applyServerState() {
     const can = Boolean(current && current.can_manage);
     if (els.checkbox) {
-      els.checkbox.checked = Boolean(current && current.enabled);
+      els.checkbox.checked = Boolean(current && (current.enabled || current.registered));
       els.checkbox.disabled = busy || !can;
     }
     setHint(activeHint(current));

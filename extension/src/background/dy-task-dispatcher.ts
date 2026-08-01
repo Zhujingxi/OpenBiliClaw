@@ -135,7 +135,7 @@ export interface DyHotTaskItem {
 
 export interface DyTaskResult {
   task_id: string;
-  status: "ok" | "empty" | "partial" | "failed";
+  status: "ok" | "empty" | "partial" | "degraded" | "failed";
   videos?: unknown[];
   scope_counts?: Record<string, number>;
   error?: string;
@@ -158,6 +158,8 @@ interface TaskProgress {
   scopes: DouyinScope[];
   current_scope_idx: number;
   accumulated_counts: Record<DouyinScope, number>;
+  scope_statuses: Partial<Record<DouyinScope, DyScopeResult["status"]>>;
+  degraded_reasons: string[];
   max_items_per_scope: number;
   max_scroll_rounds: number;
   max_stagnant_scroll_rounds: number;
@@ -332,6 +334,20 @@ export function shouldFinalizeHotTask({
 
 export function shouldOpenDyTaskActive(task: DyLegacyTask): boolean {
   return task.type === "bootstrap_profile";
+}
+
+export function finalizeDyBootstrapStatus(
+  scopeStatuses: Partial<Record<DouyinScope, DyScopeResult["status"]>>,
+): "ok" | "degraded" {
+  return Object.values(scopeStatuses).some(
+    (status) => status === "degraded" || status === "failed",
+  )
+    ? "degraded"
+    : "ok";
+}
+
+export function dyScopeDegradedReason(result: DyScopeResult): string {
+  return `${result.scope}:${result.error || result.status}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -920,6 +936,8 @@ export async function executeTask(
     scopes,
     current_scope_idx: 0,
     accumulated_counts: emptyScopeCounts(),
+    scope_statuses: {},
+    degraded_reasons: [],
     max_items_per_scope: task.max_items_per_scope ?? 300,
     max_scroll_rounds: task.max_scroll_rounds ?? 15,
     max_stagnant_scroll_rounds: task.max_stagnant_scroll_rounds ?? 5,
@@ -1000,6 +1018,10 @@ export async function handleDyScopeResult(result: DyScopeResult): Promise<void> 
   if (result.scope !== expectedScope) return;
 
   progress.accumulated_counts[result.scope] = result.scope_count;
+  progress.scope_statuses[result.scope] = result.status;
+  if (result.status === "degraded" || result.status === "failed") {
+    progress.degraded_reasons.push(dyScopeDegradedReason(result));
+  }
 
   // Post the per-scope items as a partial so the backend's
   // dy_bootstrap_videos_to_events helper propagates them through
@@ -1026,9 +1048,13 @@ export async function handleDyScopeResult(result: DyScopeResult): Promise<void> 
   // All scopes done — finalise.
   await postTaskResult({
     task_id: progress.task_id,
-    status: "ok",
+    status: finalizeDyBootstrapStatus(progress.scope_statuses),
     videos: [],
     scope_counts: { ...progress.accumulated_counts },
+    debug: {
+      scope_statuses: { ...progress.scope_statuses },
+      degraded_reasons: [...progress.degraded_reasons],
+    },
   });
   cleanupTask();
 }
@@ -1185,7 +1211,7 @@ export interface DyScopeResult {
   scope: DouyinScope;
   items: DouyinBootstrapItem[];
   scope_count: number;
-  status: "ok" | "empty" | "failed";
+  status: "ok" | "empty" | "degraded" | "failed";
   error?: string;
   debug?: Record<string, unknown>;
 }

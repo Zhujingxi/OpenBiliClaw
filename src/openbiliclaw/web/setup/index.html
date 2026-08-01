@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>OpenBiliClaw · 首次设置</title>
-  <link rel="icon" type="image/png" href="/favicon.ico">
+  <link rel="icon" type="image/png" sizes="32x32" href="/m/icon-32.png?v=4">
   <style>
     :root {
       --bg: #0f1115; --panel: #181b22; --panel-2: #20242e; --line: #2c313c;
@@ -25,6 +25,7 @@
     .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 17px; }
     .brand .mark {
       width: 30px; height: 30px; border-radius: 9px; display: block; object-fit: cover;
+      background: #fb7299;
     }
     .steps { display: flex; gap: 8px; margin-top: 18px; }
     .steps .dot { flex: 1; height: 4px; border-radius: 99px; background: var(--line); transition: .3s; }
@@ -123,7 +124,7 @@
 <body>
   <div class="card">
     <div class="head">
-      <div class="brand"><img class="mark" src="/m/icon-192.png" alt=""><span>OpenBiliClaw</span></div>
+      <div class="brand"><img class="mark" src="/m/icon-maskable-192.png" alt=""><span>OpenBiliClaw</span></div>
       <div class="steps">
         <div class="dot active" data-dot="0"></div>
         <div class="dot" data-dot="1"></div>
@@ -331,6 +332,7 @@
       profile_failed: "画像生成未完成。",
       discovery_timeout: "画像已生成，但首轮内容池整理超时。",
       discovery_partial: "画像已生成，但首轮内容池本次未完成。",
+      douyin_degraded: "抖音已采数据已用于画像，但至少一个账号范围的分页未完整完成。",
       internal_error: "初始化过程中出错了，请稍后重试。",
       interrupted: "上次初始化被打断（后端重启），可重试。",
       cancelled: "初始化已取消。",
@@ -343,7 +345,11 @@
     const BILI_POLL_MS = Number(window.__OBC_TEST_BILI_POLL_MS) || 3000;
     const INIT_START_POLL_MS = Number(window.__OBC_TEST_INIT_START_POLL_MS) || 1200;
     const INIT_STREAM_WATCHDOG_MS = Number(window.__OBC_TEST_INIT_WATCHDOG_MS) || 15000;
+    const SETUP_RESTART_MARKER = "openbiliclaw.setup.resume_after_restart";
+    const SETUP_RESTART_MARKER_TTL_MS = 24 * 60 * 60 * 1000;
+    const SETUP_RESTART_POLL_MS = Number(window.__OBC_TEST_RESTART_POLL_MS) || 2000;
     let step = 0, biliConnected = false, biliPoll = null, initPoll = null, initSocket = null;
+    let restartPoll = null;
     let initPollInFlight = false, initPollPending = false, initOffline = false;
     let initBangumiUsername = "", initBangumiUsernameTouched = false, initBangumiUsernamePrefilled = false;
     let initBangumiToken = "";
@@ -360,6 +366,7 @@
     let savedLlmInstances = {};
     let savedLlmDefaultChain = [];
     let savedLlmRoutes = {};
+    let savedBlockingLlmInstanceIds = new Set();
     let activeProvider = "";
 
     function setStep(n) {
@@ -482,6 +489,79 @@
       return instanceId;
     }
 
+    function configView(payload) {
+      return payload?.config && typeof payload.config === "object"
+        ? payload.config
+        : (payload && typeof payload === "object" ? payload : {});
+    }
+
+    function blockingConfigMessages(payload) {
+      const issues = configView(payload)?.issues;
+      if (!Array.isArray(issues)) return [];
+      return [...new Set(
+        issues
+          .filter((issue) => String(issue?.severity || "") === "blocking")
+          .map((issue) => String(issue?.message || "").trim())
+          .filter(Boolean),
+      )];
+    }
+
+    function blockingLlmInstanceIds(payload) {
+      const issues = configView(payload)?.issues;
+      if (!Array.isArray(issues)) return new Set();
+      const ids = new Set();
+      for (const issue of issues) {
+        if (String(issue?.severity || "") !== "blocking") continue;
+        const match = String(issue?.field || "").match(/^llm\.instances\.([^.]+)\./);
+        if (match) ids.add(match[1]);
+      }
+      return ids;
+    }
+
+    function customRouteReferences(instanceId) {
+      return Object.values(savedLlmRoutes).some((route) => (
+        route
+        && route.inherit === false
+        && Array.isArray(route.chain)
+        && route.chain.includes(instanceId)
+      ));
+    }
+
+    // The packaged first-run config deliberately contains an enabled DeepSeek
+    // placeholder with no key. If startup therefore entered degraded mode and
+    // the user selects another provider, carrying that known-broken placeholder
+    // into the replacement payload makes global validation reject the new,
+    // otherwise-valid endpoint. Demote only instances named by blocking config
+    // diagnostics, and never silently rewrite an explicit module route.
+    function buildSetupLlmRouting(instanceId, instance) {
+      const instances = { ...savedLlmInstances, [instanceId]: instance };
+      const demotedIds = new Set();
+      for (const blockedId of savedBlockingLlmInstanceIds) {
+        const blocked = instances[blockedId];
+        if (
+          !blocked
+          || blockedId === instanceId
+          || blocked.enabled === false
+          || customRouteReferences(blockedId)
+        ) {
+          continue;
+        }
+        instances[blockedId] = { ...blocked, enabled: false };
+        demotedIds.add(blockedId);
+      }
+      return {
+        instances,
+        default_chain: [
+          instanceId,
+          ...savedLlmDefaultChain.filter(
+            (id) => id !== instanceId && !demotedIds.has(id),
+          ),
+        ],
+        routes: savedLlmRoutes,
+        demotedIds,
+      };
+    }
+
     function buildSetupModelDiscoveryRequest() {
       const provider = $("#provider").value;
       const instanceId = providerInstanceId(provider);
@@ -498,14 +578,15 @@
         api_flavor: provider === "openai_compatible" ? $("#apiFlavor").value : "",
         reasoning_effort: $("#reasoningEffort").value.trim(),
       };
+      const routing = buildSetupLlmRouting(instanceId, instance);
       return {
         instanceId,
         config: {
           llm: {
             routing_version: 2,
-            instances: { ...savedLlmInstances, [instanceId]: instance },
-            default_chain: [...savedLlmDefaultChain],
-            routes: savedLlmRoutes,
+            instances: routing.instances,
+            default_chain: routing.default_chain,
+            routes: routing.routes,
           },
         },
       };
@@ -570,6 +651,93 @@
       el.innerHTML = text;
     }
 
+    function showTextMsg(id, text, kind) {
+      const el = $(id);
+      el.className = "msg show " + kind;
+      el.textContent = text;
+    }
+
+    function configSaveErrorMessage(response, result) {
+      const messages = [];
+      if (typeof result?.message === "string" && result.message.trim()) {
+        messages.push(result.message.trim());
+      }
+      messages.push(...blockingConfigMessages(result));
+      if (typeof result?.detail === "string" && result.detail.trim()) {
+        messages.push(result.detail.trim());
+      } else if (Array.isArray(result?.detail)) {
+        messages.push(
+          ...result.detail
+            .map((item) => String(item?.msg || "").trim())
+            .filter(Boolean),
+        );
+      }
+      return [...new Set(messages)].join("；") || `HTTP ${response.status}`;
+    }
+
+    function readSetupRestartMarker() {
+      try {
+        const raw = localStorage.getItem(SETUP_RESTART_MARKER);
+        if (!raw) return null;
+        const marker = JSON.parse(raw);
+        const savedAt = Number(marker?.saved_at || 0);
+        if (!savedAt || Date.now() - savedAt > SETUP_RESTART_MARKER_TTL_MS) {
+          localStorage.removeItem(SETUP_RESTART_MARKER);
+          return null;
+        }
+        return marker;
+      } catch {
+        return null;
+      }
+    }
+
+    function writeSetupRestartMarker(provider) {
+      try {
+        localStorage.setItem(
+          SETUP_RESTART_MARKER,
+          JSON.stringify({ saved_at: Date.now(), provider }),
+        );
+      } catch {}
+    }
+
+    function clearSetupRestartMarker() {
+      try {
+        localStorage.removeItem(SETUP_RESTART_MARKER);
+      } catch {}
+    }
+
+    function waitForBackendRestart(provider) {
+      const btn = $("#saveLlm");
+      btn.dataset.waitingRestart = "true";
+      btn.disabled = false;
+      btn.textContent = "重新保存配置";
+      showTextMsg(
+        "#msg0",
+        "配置已经写入。当前后端仍是启动失败时的旧进程，请重启 OpenBiliClaw 后端；" +
+          "不用重复填写 Key，本页会自动检测并在重启成功后继续下一步。",
+        "warn",
+      );
+      $("#doneLlm").textContent = "配置已保存 · 等待后端重启";
+      if (restartPoll) return;
+      const check = async () => {
+        try {
+          const response = await fetchWithTimeout(
+            "/api/ping",
+            { cache: "no-store" },
+            3000,
+          );
+          if (!response.ok) return;
+          const ping = await response.json();
+          if (ping?.degraded === true) return;
+          clearInterval(restartPoll);
+          restartPoll = null;
+          location.reload();
+        } catch {}
+      };
+      restartPoll = setInterval(check, SETUP_RESTART_POLL_MS);
+      void check();
+    }
+
     async function saveLlm() {
       const provider = $("#provider").value;
       const apiKey = $("#apiKey").value.trim();
@@ -597,20 +765,19 @@
         ...pcfg,
       };
       if (apiKey) instance.api_key = apiKey;
+      const routing = buildSetupLlmRouting(instanceId, instance);
       const payload = {
         suppress_background_llm_work: true,
         llm: {
           routing_version: 2,
-          instances: { ...savedLlmInstances, [instanceId]: instance },
-          default_chain: [
-            instanceId,
-            ...savedLlmDefaultChain.filter((id) => id !== instanceId),
-          ],
-          routes: savedLlmRoutes,
+          instances: routing.instances,
+          default_chain: routing.default_chain,
+          routes: routing.routes,
         },
       };
 
       const btn = $("#saveLlm");
+      delete btn.dataset.waitingRestart;
       btn.disabled = true; btn.innerHTML = '<span class="spin"></span>保存中…';
       clearMsg("#msg0");
       try {
@@ -624,22 +791,39 @@
           showMsg("#msg0", '后端开启了访问密码，当前浏览器还没登录。先打开 <a href="/web">/web</a> 输入访问密码登录，再回到本页重试；或直接在运行后端的电脑上完成设置。', "err");
           return;
         }
-        if (!r.ok) throw new Error("HTTP " + r.status + " " + (await r.text()).slice(0, 200));
+        const result = await r.json().catch(() => null);
+        if (!r.ok) throw new Error(configSaveErrorMessage(r, result));
         const savedFields = currentProviderFields();
         providerDrafts.set(provider, savedFields);
         savedProviderConfigs.set(provider, savedFields);
-        savedLlmInstances = { ...savedLlmInstances, [instanceId]: instance };
-        savedLlmDefaultChain = [
-          instanceId,
-          ...savedLlmDefaultChain.filter((id) => id !== instanceId),
-        ];
+        const savedConfig = configView(result);
+        const savedLlm = savedConfig?.llm;
+        savedLlmInstances = savedLlm?.instances
+          ? { ...savedLlm.instances }
+          : routing.instances;
+        savedLlmDefaultChain = Array.isArray(savedLlm?.default_chain)
+          ? [...savedLlm.default_chain]
+          : routing.default_chain;
+        savedLlmRoutes = savedLlm?.routes
+          ? { ...savedLlm.routes }
+          : routing.routes;
+        savedBlockingLlmInstanceIds = blockingLlmInstanceIds(result);
         if (apiKey) savedKeyProviders.add(provider);
         $("#doneLlm").textContent = "已连接 · " + provider;
+        if (result?.restart_required === true) {
+          writeSetupRestartMarker(provider);
+          waitForBackendRestart(provider);
+          return;
+        }
+        clearSetupRestartMarker();
         setStep(1);
       } catch (e) {
-        showMsg("#msg0", "保存失败：" + e.message, "err");
+        showTextMsg("#msg0", "保存失败：" + e.message, "err");
       } finally {
-        btn.disabled = false; btn.innerHTML = "保存并继续 →";
+        btn.disabled = false;
+        btn.innerHTML = btn.dataset.waitingRestart === "true"
+          ? "重新保存配置"
+          : "保存并继续 →";
       }
     }
 
@@ -678,6 +862,7 @@
         "profile_failed",
         "discovery_timeout",
         "discovery_partial",
+        "douyin_degraded",
       ];
       if (detail && (detailFirst.includes(reason) || detail.startsWith("画像分析失败："))) {
         return detail;
@@ -928,12 +1113,13 @@
 
     function showInitCompletion(status = null) {
       const partial = Boolean(status?.partial_success);
-      $("#doneTitle").textContent = partial ? "画像已就绪" : "就绪 🎉";
+      $("#doneTitle").textContent = partial ? "初始化部分完成" : "就绪 🎉";
       $("#doneSummary").textContent = partial
-        ? "完整画像已经保存；首轮可用推荐本次未能完成，后台会继续补齐，你现在可以先进入应用。"
+        ? "已采数据已经保留并用于本次初始化；请按下方提示稍后补齐未完成的来源或步骤。"
         : "基础配置、完整画像和首轮可用推荐均已完成，本地引擎可以开始为你工作了。";
       $("#doneInit").textContent = partial
-        ? initStatusReasonText(status) || "完整画像已就绪，首轮推荐将在后台继续补齐"
+        ? initStatusReasonText(status) ||
+          "初始化部分完成；已采数据已保留并使用，请按提示稍后补齐。你现在可以先进入应用。"
         : "完整画像和首轮可用推荐均已就绪";
       const row = $("#initDoneRow");
       row.classList.toggle("pending", partial);
@@ -951,7 +1137,13 @@
       const reason = String(status?.reason || "");
       if (
         detail &&
-        (["analyze_failed", "profile_failed", "discovery_timeout", "discovery_partial"].includes(reason) ||
+        ([
+          "analyze_failed",
+          "profile_failed",
+          "discovery_timeout",
+          "discovery_partial",
+          "douyin_degraded",
+        ].includes(reason) ||
           detail.startsWith("画像分析失败："))
       ) return detail;
       // Unmapped codes (empty_history / empty_signals / profile_failed …)
@@ -1483,15 +1675,22 @@
     // straight to done / first-pool waiting.
     (async function guard() {
       let unlistedProvider = "";
+      let configLoaded = false;
+      let backendDegraded = false;
+      const restartMarker = readSetupRestartMarker();
       try {
         const r = await fetch("/api/config");
         if (r.ok) {
           const data = await r.json();
-          const llm = (data.config || data)?.llm || {};
+          const currentConfig = configView(data);
+          const llm = currentConfig?.llm || {};
+          configLoaded = true;
+          backendDegraded = currentConfig?.degraded === true;
           savedLlmInstances = { ...(llm.instances || {}) };
           savedLlmDefaultChain = [...(llm.default_chain || [])];
           savedLlmRoutes = { ...(llm.routes || {}) };
-          const bangumiUsername = (data.config || data)?.sources?.bangumi?.username || "";
+          savedBlockingLlmInstanceIds = blockingLlmInstanceIds(data);
+          const bangumiUsername = currentConfig?.sources?.bangumi?.username || "";
           if (!initBangumiUsernameTouched) {
             initBangumiUsername = String(bangumiUsername);
             // A successful prefill populated the field; an explicit clear
@@ -1503,13 +1702,31 @@
           if (bangumiInput && !initBangumiUsernameTouched) {
             bangumiInput.value = initBangumiUsername;
           }
-          for (const [name, cfg] of Object.entries(llm)) {
+          // Read legacy projections for old configs, then let native instances
+          // (global-chain order first) override them. This keeps relaunch
+          // prefills correct after the settings pages have saved routing v2.
+          for (const provider of Object.keys(KEY_LINKS)) {
+            const cfg = llm[provider];
             if (cfg && typeof cfg === "object") {
-              savedProviderConfigs.set(name, { ...cfg });
-              if (String(cfg.api_key || "").trim()) savedKeyProviders.add(name);
+              savedProviderConfigs.set(provider, { ...cfg });
+              if (String(cfg.api_key || "").trim()) savedKeyProviders.add(provider);
             }
           }
-          const prov = llm.default_provider || "";
+          const remainingInstanceIds = Object.keys(savedLlmInstances).filter(
+            (id) => !savedLlmDefaultChain.includes(id),
+          );
+          for (const id of [
+            ...remainingInstanceIds,
+            ...[...savedLlmDefaultChain].reverse(),
+          ]) {
+            const cfg = savedLlmInstances[id];
+            const provider = String(cfg?.provider_type || "").trim();
+            if (!provider) continue;
+            savedProviderConfigs.set(provider, { ...cfg });
+            if (String(cfg.api_key || "").trim()) savedKeyProviders.add(provider);
+          }
+          const primaryInstance = savedLlmInstances[savedLlmDefaultChain[0]];
+          const prov = String(primaryInstance?.provider_type || llm.default_provider || "");
           const optionExists = Array.from($("#provider").options).some((option) => option.value === prov);
           if (prov && optionExists) {
             $("#provider").value = prov;
@@ -1524,13 +1741,19 @@
       } catch {}
       switchProvider();
       if (unlistedProvider) {
-        showMsg(
+        showTextMsg(
           "#msg0",
           "检测到已配置的 provider「" + unlistedProvider + "」不在推荐列表中（本地 Ollama 仅用于向量检索）；" +
             "如需继续使用请到设置页，或在这里重新选择一个聊天服务商。",
           "info",
         );
       }
+      if (restartMarker && configLoaded && backendDegraded) {
+        waitForBackendRestart(String(restartMarker.provider || ""));
+        return;
+      }
+      const resumeAfterRestart = Boolean(restartMarker && configLoaded && !backendDegraded);
+      if (resumeAfterRestart) clearSetupRestartMarker();
       try {
         const status = await fetchInitStatus();
         if (status.running) {
@@ -1545,6 +1768,11 @@
           return;
         }
       } catch {}
+      if (resumeAfterRestart) {
+        $("#doneLlm").textContent =
+          "已连接 · " + String(restartMarker.provider || $("#provider").value);
+        setStep(1);
+      }
     })();
 
     $("#provider").addEventListener("change", switchProvider);

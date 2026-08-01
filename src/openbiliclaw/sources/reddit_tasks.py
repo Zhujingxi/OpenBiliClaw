@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from openbiliclaw.discovery.engine import DiscoveredContent
 from openbiliclaw.network import outbound_cli_environment
+from openbiliclaw.proc import no_window_kwargs
 from openbiliclaw.published_time import normalize_published_time
 from openbiliclaw.sources.event_format import SOURCE_REDDIT, build_event
 
@@ -48,7 +49,18 @@ REDDIT_SOURCE_STRATEGIES = {
 }
 REDDIT_BOOTSTRAP_SCOPES = ("reddit_saved", "reddit_upvoted", "reddit_subscribed")
 REDDIT_REQUIRED_COOKIE_NAMES = ("reddit_session",)
-_RDT_CREDENTIAL_TTL_SECONDS = 7 * 24 * 60 * 60
+# rdt-cli refreshes a credential older than its own 7-day TTL by shelling out
+# to ``uv run --with browser-cookie3 …`` (rdt_cli/auth.py::extract_browser_
+# credential). That grandchild is spawned by rdt itself, so our
+# ``no_window_kwargs()`` cannot reach it — and because we start rdt with
+# CREATE_NO_WINDOW (i.e. console-less), Windows would allocate a *fresh*
+# console window for it: exactly the popup this whole path avoids, plus a
+# 30s package download. So we must declare the credential stale and stop
+# invoking rdt strictly *before* rdt's threshold; the 6h margin is arbitrary
+# but far larger than any plausible check→exec gap. Re-check both constants
+# when bumping the rdt-cli dependency.
+_RDT_CLI_BROWSER_REFRESH_TTL_SECONDS = 7 * 24 * 60 * 60
+RDT_CREDENTIAL_TTL_SECONDS = _RDT_CLI_BROWSER_REFRESH_TTL_SECONDS - 6 * 60 * 60
 _REDDIT_BOOTSTRAP_EVENT_BY_SCOPE: dict[str, tuple[str, float]] = {
     "reddit_saved": ("favorite", 0.90),
     "reddit_upvoted": ("like", 0.75),
@@ -155,7 +167,7 @@ def rdt_credential_saved_at() -> str:
 
     The source-auth contract needs a timestamp behind every TTL-bearing verdict
     (``verified_at``): "ready" for Reddit means "this file is younger than
-    ``_RDT_CREDENTIAL_TTL_SECONDS``", and a freshness claim the user cannot date
+    ``RDT_CREDENTIAL_TTL_SECONDS``", and a freshness claim the user cannot date
     is not checkable. Lives next to the other credential-file readers so the
     file keeps exactly one reading family (invariant I1).
     """
@@ -957,7 +969,7 @@ def _rdt_saved_credential_state() -> tuple[str, str]:
             "rdt credential 缺少 reddit_session，请在已连接插件的浏览器重新登录 Reddit。",
         )
     saved_at = _optional_float(data.get("saved_at"))
-    if saved_at is not None and time.time() - saved_at > _RDT_CREDENTIAL_TTL_SECONDS:
+    if saved_at is not None and time.time() - saved_at > RDT_CREDENTIAL_TTL_SECONDS:
         return "expired", "rdt credential 已过期，请等待插件重新同步或运行 `rdt login`。"
     return "present", "rdt credential 就绪。"
 
@@ -1008,6 +1020,7 @@ def _subprocess_run(args: list[str], *, timeout: float) -> subprocess.CompletedP
         timeout=timeout,
         check=False,
         env=outbound_cli_environment(),
+        **no_window_kwargs(),
     )
 
 

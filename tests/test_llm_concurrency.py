@@ -5,6 +5,7 @@ import logging
 
 import pytest
 
+from openbiliclaw.llm import concurrency as concurrency_module
 from openbiliclaw.llm.base import LLMResponse
 from openbiliclaw.llm.concurrency import (
     InventoryPriorityState,
@@ -577,3 +578,61 @@ async def test_scoped_bypass_unparks_maintenance_and_resets_after_exit() -> None
     parked.cancel()
     with pytest.raises(asyncio.CancelledError):
         await parked
+
+
+async def test_empty_pool_does_not_park_maintenance_forever_when_refill_never_comes(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An empty pool with no refill in sight must not freeze profile updates.
+
+    Reserving slots for refill is right while refill is coming. When every
+    source is disabled (or refill keeps failing) the pool stays EMPTY forever,
+    and `soul.*` profile work — classified MAINTENANCE — used to wait with no
+    timeout and no log line: ordinary browsing silently stopped updating the
+    portrait. Maintenance cannot refill the pool, so the park is bounded.
+    """
+    monkeypatch.setattr(concurrency_module, "MAINTENANCE_STARVATION_GRACE_SECONDS", 0.05)
+    gate = LLMConcurrencyGate(4)
+    gate.update_inventory(available=0, target=20)
+
+    entered = asyncio.Event()
+    task = asyncio.create_task(_enter_and_hold(gate, "soul.preference", entered))
+    await _wait_until(lambda: gate.status_payload()["llm_maintenance_waiting"] == 1)
+    assert not entered.is_set()  # parked at first, exactly as before
+
+    with caplog.at_level(logging.WARNING):
+        await asyncio.wait_for(entered.wait(), timeout=2)
+    await task
+
+    assert "parked" in caplog.text
+    assert "starved" in caplog.text
+
+
+async def test_starvation_relief_does_not_fire_when_refill_makes_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The grace timer must not hand slots to maintenance while refill runs."""
+    monkeypatch.setattr(concurrency_module, "MAINTENANCE_STARVATION_GRACE_SECONDS", 0.05)
+    gate = LLMConcurrencyGate(4)
+    gate.update_inventory(available=0, target=20)
+
+    maintenance_entered = asyncio.Event()
+    maintenance = asyncio.create_task(_enter_and_hold(gate, "soul.preference", maintenance_entered))
+    await _wait_until(lambda: gate.status_payload()["llm_maintenance_waiting"] == 1)
+
+    # Pool recovers before the grace elapses — reservation semantics stay intact
+    # and the relief flag is dropped rather than left armed for next time.
+    gate.update_inventory(available=20, target=20)
+    await asyncio.wait_for(maintenance_entered.wait(), timeout=1)
+    await maintenance
+
+    gate.update_inventory(available=0, target=20)
+    parked = asyncio.Event()
+    parked_task = asyncio.create_task(_enter_and_hold(gate, "soul.preference", parked))
+    await _wait_until(lambda: gate.status_payload()["llm_maintenance_waiting"] == 1)
+    assert not parked.is_set(), "relief must be re-armed, not sticky"
+
+    gate.update_inventory(available=20, target=20)
+    await asyncio.wait_for(parked.wait(), timeout=1)
+    await parked_task

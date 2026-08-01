@@ -15,6 +15,11 @@ from urllib import error, request
 
 from openbiliclaw.runtime.keyword_fetch import PLATFORM_REDDIT
 from openbiliclaw.runtime.pool_gate import candidate_pool_full_for_source
+from openbiliclaw.runtime.producer_cadence import (
+    ledger_available,
+    producer_ran_within,
+    record_producer_run,
+)
 from openbiliclaw.sources.reddit_tasks import (
     REDDIT_SOURCE_ORDER,
     REDDIT_SOURCE_STRATEGIES,
@@ -47,7 +52,7 @@ class RedditDiscoveryProducer:
     backend: str = "opencli"
     enabled: bool = True
     sources: tuple[str, ...] = ("search",)
-    min_interval_minutes: int = 60
+    min_interval_minutes: int = 3
     daily_search_budget: int = 300
     daily_hot_budget: int = 300
     daily_subreddit_budget: int = 300
@@ -199,7 +204,7 @@ class RedditDiscoveryProducer:
                 if source == "search" and claimed_keywords and self.keyword_fetch is not None:
                     self.keyword_fetch.mark_failed(claimed_keywords)
 
-        self._last_run_at = datetime.now(UTC)
+        self._stamp_run(len(all_items))
         if not all_items:
             reason = skipped_reasons[0] if skipped_reasons else "empty"
             return {"discovered": 0, "reason": reason}
@@ -354,7 +359,7 @@ class RedditDiscoveryProducer:
                 if source == "search" and claimed_keywords and self.keyword_fetch is not None:
                     self.keyword_fetch.mark_failed(claimed_keywords)
 
-        self._last_run_at = datetime.now(UTC)
+        self._stamp_run(enqueued_task_count)
         if enqueued_task_count == 0:
             return self._skip(skipped_reasons[0] if skipped_reasons else "no_sources")
         if not all_items:
@@ -645,13 +650,26 @@ class RedditDiscoveryProducer:
         )
         self.database.conn.commit()
 
+    def _stamp_run(self, discovered: int) -> None:
+        """Record this round on the cadence floor.
+
+        Productive rounds go to the shared ledger so the floor survives a
+        restart; the in-process stamp stays as the fallback for producers
+        constructed without a database.
+        """
+        record_producer_run(getattr(self, "database", None), "reddit", int(discovered))
+        self._last_run_at = datetime.now(UTC)
+
     def _is_due(self) -> bool:
+        if self.min_interval_minutes <= 0:
+            return True
+        database = getattr(self, "database", None)
+        if ledger_available(database):
+            # Restart-surviving floor keyed on the last *productive* round.
+            return not producer_ran_within(database, "reddit", self.min_interval_minutes)
         if self._last_run_at is None:
             return True
-        min_interval = max(0, int(self.min_interval_minutes))
-        if min_interval <= 0:
-            return True
-        return datetime.now(UTC) - self._last_run_at >= timedelta(minutes=min_interval)
+        return datetime.now(UTC) - self._last_run_at >= timedelta(minutes=self.min_interval_minutes)
 
     def _candidate_pool_full(self) -> bool:
         return candidate_pool_full_for_source(
@@ -689,7 +707,7 @@ def build_reddit_discovery_producer(
         task_queue=task_queue,
         backend=backend,
         sources=_normalize_sources(getattr(rd_cfg, "source_modes", REDDIT_SOURCE_ORDER)),
-        min_interval_minutes=int(getattr(rd_cfg, "min_interval_minutes", 60)),
+        min_interval_minutes=int(getattr(rd_cfg, "min_interval_minutes", 3)),
         daily_search_budget=int(getattr(rd_cfg, "daily_search_budget", 300)),
         daily_hot_budget=int(getattr(rd_cfg, "daily_hot_budget", 300)),
         daily_subreddit_budget=int(getattr(rd_cfg, "daily_subreddit_budget", 300)),
