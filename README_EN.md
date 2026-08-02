@@ -189,11 +189,12 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.191 (2026-07-30)**
+📌 Latest: **v0.3.192 (2026-08-03)**
 
-- **Saving configuration no longer interrupts long-running dialogue work** — hot reload now waits for active jobs to finish safely and clearly reports when work continues beyond the frontend timeout.
-- **Pending-chat open and defer actions are more reliable** — busy workers trigger an automatic retry, and deferring one topic no longer blocks the next pending item.
-- **Web realtime connectivity is steadier** — idle heartbeats, transient-disconnect status, and automatic reconnection prevent brief network hiccups from looking like a backend outage.
+- **Multimodal recommendation enhancements are independently controllable** — visual profiles, danmaku semantics, and keyframe weighting have separate switches, with visual features off by default.
+- **Feedback and dialogue submissions are more reliable** — likes, dislikes, chats, and pending-card settlement now use durable asynchronous processing across slow models and restarts.
+- **Advanced settings are easier to use** — the extension save bar stays at the bottom, keyword generation defaults to hybrid, and advanced controls are grouped together.
+- **Connectivity and remote deployment are steadier** — X sessions resync after runtime reconnects, and a Caddy HTTPS Compose entry point is now available.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 

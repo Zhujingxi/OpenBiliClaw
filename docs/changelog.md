@@ -4,7 +4,9 @@
 
 ---
 
-## 未发布：X 来源连接验证、跨平台视觉公平与多模态预热（2026-08-01)
+## v0.3.192：多模态推荐、可靠反馈与连接增强（2026-08-03）
+
+### 多模态推荐与高级配置
 
 - **完整视觉 embedding pipeline**：视觉画像（P1）与关键帧（P3）使用带 cross-clean、contested 区和冷启动门控的 margin 几何评分；关键帧单独开启时也会构建质心，P1 cover bonus 仍由 `visual_profile_enabled` 控制。
 - **失败可重试且缓存可追溯**：关键帧、弹幕和 embedding 的瞬时失败不再写永久完成戳；成功空结果与失败可区分，质心、关键帧、弹幕状态绑定 embedding fingerprint、维度和采样签名，模型切换会安全重建或重嵌入。
@@ -19,7 +21,7 @@
 - **补充 PR #135 贡献者致谢**：README 中英文与贡献指南正式记录 [@wuwafly3](https://github.com/wuwafly3) 对用户视觉画像（P1）、B 站弹幕语义（P2）、视频关键帧（P3）和跨平台视觉加权管线的贡献，并保留其此前在 [#100](https://github.com/whiteguo233/OpenBiliClaw/pull/100) 中完成的 DashScope 多模态 embedding 与封面 image-only 向量归属。
 - **原生保存批任务顺序固定为快照顺序**：显式 `item_keys` 的 caller order 继续写入 `native_save_task_items.ordinal`，执行查询也改为按该 ordinal 读取；不再受秒级 `saved_memberships.added_at` 影响，避免同一批次在不同机器上随机先处理后加入的项目，并让 heartbeat 失败时的取消/释放行为保持确定。
 
-## 未发布：连接与 HTTPS 部署（2026-08-01）
+### 连接、部署与界面
 
 - **README 与 GitHub Pages 首页恢复真实使用截图**：推荐、反馈、画像、对话、桌面端、移动端及首屏 Hero 全部换回真实运行记录，不再展示 Chrome Web Store 演示夹具生成的虚构内容；演示素材抓取脚本同时移除 `--refresh-docs` 入口，并拒绝把 demo capture 写入 `docs/images/`，避免再次覆盖真实截图。
 - **对话 turn 绑定安全性收口**：三端把卡片/疑惑作为 durable turn，通过 `reply_to_turn_id` 只声明目标；服务端在 user INSERT 前冻结 canonical context、digest 和 ordinary/detached mode，统一贯穿 prompt、event、学习与结算，A→B replacement 只会安全 stale-drop。新增只读 context preview、opaque evidence 过滤、独立长列表滚动、reply quote 与失败草稿保留；恢复长历史时首次进入会落到最新消息，后续实时刷新仍保留阅读位置。真实三端 E2E 补齐结算态收尾：卡片已确认/修正/拒绝/稍后时会静默清除旧 context，已知服务端错误优先显示中文；移动端固定回顶按钮按 360px 窄屏重新留距，不再与发送按钮相交。
@@ -30,7 +32,7 @@
 - **移除扩展临时调试日志中继**：抖音任务仍通过正常的 `task-result` 回传结构化诊断，但不再向 `/api/sources/_debug/log` 额外发起请求；废弃 helper 和后端 relay 路由同步删除。
 - **新增最简公网 HTTPS Compose overlay**：`docker-compose.https.yml` 可叠加到源码或预构建部署，使用固定版本 Caddy 自动申请 / 续期公网证书并转发 REST / WebSocket；Caddy 与后端共享 network namespace，宿主机 `8420` 收紧到 loopback，Uvicorn 仅信任 `127.0.0.1` 的 forwarded headers，证书数据使用 named volumes 持久化。Caddy 在 `/api/auth/status` 明确返回密码门禁已启用前不绑定公网端口，首次配置 fail closed；远程扩展仍使用独立设备密钥，现有 LAN/self-managed `tls` profile 保持独立、默认关闭。
 - **修复桌面 Web 的 HTTPS 手机二维码降级**：从非 loopback 的 HTTPS 页面打开「手机版」时，二维码现在保留当前 scheme、host 和端口，不再被 `/api/qr-info` 的后端私网 IP 覆盖或硬编码成 HTTP；IPv4、裸 IPv6 与 URL 方括号 IPv6 loopback 都继续实时探测 LAN IP，插件和桌面局域网扫码行为保持一致。
-## v0.3.192：反馈可靠性与工具栏信号修复（2026-08-01）
+### 反馈、对话与事件可靠性
 
 - **事件幂等 ID 采用严格字符串类型**：三个公开事件入口不会把数字、布尔或其它 JSON 类型自动
   转成字符串；这类输入与缺失、空白、超长值一样在 route 前 422 且零写入。
