@@ -13253,7 +13253,11 @@ def create_app(
         return await _kick_source_task("x")
 
     # ── YouTube bootstrap endpoints ────────────────────────────────
-    from openbiliclaw.sources.reddit_tasks import RedditTaskQueue
+    from openbiliclaw.sources.reddit_tasks import (
+        RedditTaskQueue,
+        reddit_bootstrap_item_key,
+        reddit_items_to_events,
+    )
     from openbiliclaw.sources.yt_tasks import (
         YtTaskQueue,
         yt_bootstrap_item_key,
@@ -13298,7 +13302,13 @@ def create_app(
 
     @app.post("/api/sources/reddit/task-result")
     async def reddit_task_result(payload: dict[str, Any]) -> dict[str, Any]:
-        """Accept a Reddit task result from the extension dispatcher."""
+        """Accept a Reddit task result from the extension dispatcher.
+
+        Plain Reddit fetch tasks only persist their canonical result. Bootstrap
+        tasks marked by the backend as ``profile_update`` or ``incremental``
+        additionally replay their accumulated rows through durable event
+        ingress before the staged terminal status is flipped.
+        """
         task_id = str(payload.get("task_id", "") or "").strip()
         if not task_id:
             raise HTTPException(status_code=422, detail="task_id is required")
@@ -13319,16 +13329,85 @@ def create_app(
         legacy_queue = _reddit_task_queue
         if legacy_queue is None:
             raise HTTPException(status_code=409, detail="task_result_conflict")
-        _require_legacy_task(legacy_queue, task_id)
+        task = _require_legacy_task(legacy_queue, task_id)
+        task_type = str(task.get("type", "")).strip()
+        if str(task.get("status", "")).strip() in {"completed", "failed"}:
+            return {"ok": True, "ignored": True}
 
-        if status in {"partial", "ok", "empty"}:
-            legacy_queue.merge_result(
-                task_id,
-                items=items if items else None,
-                scope_counts=scope_counts,
-                debug=debug,
-                complete=status in {"ok", "empty"},
-            )
+        task_payload: dict[str, Any] = {}
+        if task.get("payload_json"):
+            with suppress(Exception):
+                parsed_payload = json.loads(str(task.get("payload_json") or "{}"))
+                if isinstance(parsed_payload, dict):
+                    task_payload = parsed_payload
+        profile_update = bool(task_payload.get("profile_update"))
+        incremental = bool(task_payload.get("incremental"))
+
+        from openbiliclaw.sources.task_result_protocol import (
+            parse_task_result,
+            staged_terminal_status,
+        )
+
+        canonical_result = parse_task_result(task.get("result_json"))
+        staged_status = staged_terminal_status(canonical_result)
+        if staged_status or status in {"partial", "ok", "empty"}:
+            is_final = bool(staged_status) or status in {"ok", "empty"}
+            if staged_status:
+                # Repair exclusively from the first durable final payload;
+                # changed retry fields are intentionally ignored.
+                canonical_result = parse_task_result(task.get("result_json"))
+            elif is_final:
+                canonical_result = legacy_queue.stage_final_result(
+                    task_id,
+                    terminal_status=status,
+                    items=items if items else None,
+                    scope_counts=scope_counts,
+                    debug=debug,
+                )
+            else:
+                legacy_queue.merge_result(
+                    task_id,
+                    items=items if items else None,
+                    scope_counts=scope_counts,
+                    debug=debug,
+                    complete=False,
+                )
+                canonical_task = legacy_queue.get(task_id) or {}
+                canonical_result = parse_task_result(canonical_task.get("result_json"))
+
+            canonical_items = [
+                value for value in canonical_result.get("items", []) if isinstance(value, dict)
+            ]
+            _init_busy = _init_active_now()
+            _skip_profile = _init_busy and not _init_owns_task(task_id)
+            if (
+                task_type == "bootstrap_events"
+                and (profile_update or incremental)
+                and canonical_items
+                and not _skip_profile
+            ):
+                fresh_items, item_keys_by_index = _filter_new_source_bootstrap_items(
+                    "reddit",
+                    canonical_items,
+                    reddit_bootstrap_item_key,
+                )
+                events_with_keys: list[tuple[dict[str, Any], str]] = []
+                for index, item in enumerate(fresh_items):
+                    for event in reddit_items_to_events(
+                        [item],
+                        import_source="reddit_bootstrap_events",
+                    ):
+                        key = item_keys_by_index.get(index, "")
+                        events_with_keys.append((event, key))
+                accepted_keys = await _accept_source_profile_events(
+                    source="reddit",
+                    task_id=task_id,
+                    events_with_keys=events_with_keys,
+                    generic_owner=not _init_busy,
+                )
+                _mark_source_bootstrap_keys("reddit", sorted(accepted_keys))
+            if is_final:
+                legacy_queue.complete_staged_result(task_id)
         else:
             legacy_queue.fail(
                 task_id,
