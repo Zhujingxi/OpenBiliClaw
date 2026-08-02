@@ -93,6 +93,7 @@ Skill 文件描述该 Skill 的能力边界、CLI bridge 命令列表，以及�
 
 主干上的部分功能源自社区贡献者的实现，在此致谢：
 
+- **多模态视觉推荐管线** — [@wuwafly3](https://github.com/wuwafly3) 先在 [#100](https://github.com/whiteguo233/OpenBiliClaw/pull/100) 中贡献 DashScope 多模态 embedding provider 与封面 image-only 向量能力，随后在 [#135](https://github.com/whiteguo233/OpenBiliClaw/pull/135) 中实现用户视觉画像（P1）、B 站弹幕语义（P2）、视频关键帧（P3）及跨平台视觉加权管线；主干在其实现上完成契约加固、失败重试、配置界面和真实环境验收。
 - **远程扩展认证与可选 TLS 入口** — [@RayeLouis](https://github.com/RayeLouis) 在 [#132](https://github.com/whiteguo233/OpenBiliClaw/pull/132) 中修复扩展以服务端认证判决为唯一权威，并在 [#136](https://github.com/whiteguo233/OpenBiliClaw/pull/136) 中实现默认关闭的 TLS 反代初版；主干在其方案上补齐安全、配置、Docker、真实 HTTPS / WebSocket 与扩展二维码链路加固。
 - **全端品牌图标** — [@xiongguixg](https://github.com/xiongguixg) 在 [issue #127](https://github.com/whiteguo233/OpenBiliClaw/issues/127) 中主动提供了移动端图标方案；v0.3.184 在此基础上统一了浏览器扩展、PWA、桌面与移动 Web、官网、安装包及系统托盘的品牌图标。
 - **探针「暂时忽略」搁置状态** — [@15515151](https://github.com/15515151) 在 [#82](https://github.com/whiteguo233/OpenBiliClaw/pull/82) 中提出并实现了中立/忽略态。主干实现（`83654613`）在其基础上改写为跨会话持久化的状态机，PR 因实现路径差异未直接合入，但方案与代码均来自该贡献。

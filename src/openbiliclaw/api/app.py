@@ -14364,6 +14364,13 @@ def create_app(
                 admission_min_score=cfg.discovery.admission_min_score,
                 candidate_eval_concurrency=cfg.discovery.candidate_eval_concurrency,
                 multimodal_evaluation_enabled=cfg.discovery.multimodal_evaluation_enabled,
+                visual_profile_enabled=cfg.discovery.visual_profile_enabled,
+                keyframe_enabled=cfg.discovery.keyframe_enabled,
+                keyframe_max_frames=cfg.discovery.keyframe_max_frames,
+                keyframe_fetch_limit=cfg.discovery.keyframe_fetch_limit,
+                danmaku_enabled=cfg.discovery.danmaku_enabled,
+                danmaku_fetch_limit=cfg.discovery.danmaku_fetch_limit,
+                danmaku_max_chars=cfg.discovery.danmaku_max_chars,
                 multimodal_batch_size=cfg.discovery.multimodal_batch_size,
                 multimodal_image_max_px=cfg.discovery.multimodal_image_max_px,
                 multimodal_image_quality=cfg.discovery.multimodal_image_quality,
@@ -15320,10 +15327,14 @@ def create_app(
         from openbiliclaw.config import (
             _DEFAULT_ADMISSION_MIN_SCORE,
             _DEFAULT_CANDIDATE_EVAL_CONCURRENCY,
+            _DEFAULT_DANMAKU_FETCH_LIMIT,
+            _DEFAULT_DANMAKU_MAX_CHARS,
             _DEFAULT_DELIGHT_QUEUE_LIMIT,
             _DEFAULT_DISCOVERY_LIMIT,
             _DEFAULT_EXPLORE_REFRESH_MINUTES,
             _DEFAULT_FEEDBACK_BATCH_THRESHOLD,
+            _DEFAULT_KEYFRAME_FETCH_LIMIT,
+            _DEFAULT_KEYFRAME_MAX_FRAMES,
             _DEFAULT_MULTIMODAL_BATCH_SIZE,
             _DEFAULT_MULTIMODAL_IMAGE_MAX_PX,
             _DEFAULT_MULTIMODAL_IMAGE_QUALITY,
@@ -16022,11 +16033,21 @@ def create_app(
                         1,
                         20,
                     ),
+                    "keyframe_max_frames": (_DEFAULT_KEYFRAME_MAX_FRAMES, 1, 12),
+                    "keyframe_fetch_limit": (_DEFAULT_KEYFRAME_FETCH_LIMIT, 1, 200),
+                    "danmaku_fetch_limit": (_DEFAULT_DANMAKU_FETCH_LIMIT, 1, 200),
+                    "danmaku_max_chars": (_DEFAULT_DANMAKU_MAX_CHARS, 100, 2000),
                 }
                 if "multimodal_evaluation_enabled" in ddata:
                     cfg.discovery.multimodal_evaluation_enabled = _as_bool(
                         ddata["multimodal_evaluation_enabled"]
                     )
+                if "visual_profile_enabled" in ddata:
+                    cfg.discovery.visual_profile_enabled = _as_bool(ddata["visual_profile_enabled"])
+                if "keyframe_enabled" in ddata:
+                    cfg.discovery.keyframe_enabled = _as_bool(ddata["keyframe_enabled"])
+                if "danmaku_enabled" in ddata:
+                    cfg.discovery.danmaku_enabled = _as_bool(ddata["danmaku_enabled"])
                 if "admission_min_score" in ddata:
                     cfg.discovery.admission_min_score = _normalize_probability(
                         ddata["admission_min_score"],

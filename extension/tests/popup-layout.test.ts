@@ -231,6 +231,7 @@ test("init empty-state keeps full height so its start button stays scroll-reacha
 test("settings tabs use stable compact panels", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
   const tabsBlock = popupHtml.match(/\.settings-tabs\s*\{[\s\S]*?\}/)?.[0] ?? "";
+  const settingsOverlayBlock = popupHtml.match(/\.settings-overlay\s*\{[\s\S]*?\}/)?.[0] ?? "";
   const tabBlock = popupHtml.match(/\.settings-tab\s*\{[\s\S]*?\}/)?.[0] ?? "";
   const activeTabBlock = popupHtml.match(/\.settings-tab\.is-active\s*\{[\s\S]*?\}/)?.[0] ?? "";
   const panelBlock = popupHtml.match(/\.settings-panel\s*\{[\s\S]*?\}/)?.[0] ?? "";
@@ -238,7 +239,16 @@ test("settings tabs use stable compact panels", () => {
     popupHtml.match(/\.settings-panel\[hidden\]\s*\{[\s\S]*?\}/)?.[0] ?? "";
 
   assert.match(tabsBlock, /display:\s*grid;/);
-  assert.match(tabsBlock, /grid-template-columns:\s*repeat\(5,\s*minmax\(0,\s*1fr\)\);/);
+  assert.match(tabsBlock, /grid-template-columns:\s*repeat\(6,\s*minmax\(0,\s*1fr\)\);/);
+  // The overlay is a scrolling flex column. Without this, a long settings form
+  // collapses the tab strip and lets the following panel cover its buttons.
+  assert.match(tabsBlock, /flex-shrink:\s*0;/);
+  assert.match(tabsBlock, /overflow-x:\s*auto;/);
+  assert.match(settingsOverlayBlock, /overflow-x:\s*hidden;/);
+  assert.match(
+    popupHtml,
+    /@media \(max-width: 430px\) \{[\s\S]*?\.settings-tabs\s*\{[\s\S]*?grid-template-columns:\s*repeat\(6,\s*minmax\(92px,\s*1fr\)\);/,
+  );
   assert.match(tabBlock, /min-height:\s*36px;/);
   assert.match(tabBlock, /cursor:\s*pointer;/);
   assert.match(activeTabBlock, /background:/);

@@ -653,6 +653,41 @@ async def test_active_task_heartbeat_protects_later_sequential_pending_row(
     assert adapter.calls == [first.item_key, second.item_key]
 
 
+async def test_explicit_task_executes_snapshot_order_not_membership_time(
+    db: Database,
+) -> None:
+    adapter = FakeAdapter(NativeSaveCapability("bilibili", True, True, True))
+    service = SavedSyncService(db, NativeSaveRouter([adapter]))
+    first = SavedItemInput("bilibili", "BV1SNAPSHOTA")
+    second = SavedItemInput("bilibili", "BV1SNAPSHOTB")
+    service.save_local("favorite", first)
+    service.save_local("favorite", second)
+    db.conn.execute(
+        """
+        UPDATE saved_memberships
+        SET added_at = CASE item_key
+            WHEN ? THEN '2026-08-03 00:00:00'
+            WHEN ? THEN '2026-08-03 00:00:01'
+            ELSE added_at
+        END
+        WHERE list_kind = 'favorite' AND item_key IN (?, ?)
+        """,
+        (first.item_key, second.item_key, first.item_key, second.item_key),
+    )
+    db.conn.commit()
+    task = service.create_sync_task(
+        "favorite",
+        [first.item_key, second.item_key],
+        "manual_batch",
+    )
+
+    result = await service.run_sync_task(task.task_id)
+
+    assert adapter.calls == [first.item_key, second.item_key]
+    assert [item.item_key for item in result.items] == [first.item_key, second.item_key]
+    assert {item.status for item in result.items} == {"synced"}
+
+
 async def test_cross_service_second_runner_cannot_execute_or_release_owner_pending(
     db: Database,
     monkeypatch: pytest.MonkeyPatch,

@@ -4,6 +4,21 @@
 
 ---
 
+## 未发布：X 来源连接验证、跨平台视觉公平与多模态预热（2026-08-01)
+
+- **完整视觉 embedding pipeline**：视觉画像（P1）与关键帧（P3）使用带 cross-clean、contested 区和冷启动门控的 margin 几何评分；关键帧单独开启时也会构建质心，P1 cover bonus 仍由 `visual_profile_enabled` 控制。
+- **失败可重试且缓存可追溯**：关键帧、弹幕和 embedding 的瞬时失败不再写永久完成戳；成功空结果与失败可区分，质心、关键帧、弹幕状态绑定 embedding fingerprint、维度和采样签名，模型切换会安全重建或重嵌入。
+- **跨平台公平保持零点与符号**：正负 bonus 以 0 为固定点按平台分段对齐，多平台只对齐到当前观测到的全局侧最大值并受组合 cap 限制，单平台不放大绝对幅度，弱正向不会变成负惩罚；关键帧/弹幕预热范围、fetch limit 和完整摘要长度均遵循当前候选池与配置。
+- **视觉结果不永久吞失败**：partial keyframe 结果携带 stable sampled-slot，成功槽位先入缓存但不落完成戳；只有 confirmed no-data 或完整采样且所有 embedding 成功才完成。Embedding provenance 同时隔离规范化 endpoint 的 fingerprint 与 L2 namespace；HTTP 200 的 HTML danmaku challenge 作为 transient failure 重试。
+- **配置与离线一致性**：`keyframe_max_frames`、`keyframe_fetch_limit`、`danmaku_fetch_limit`、`danmaku_max_chars` 由文件和 `PUT /api/config` 共同校验并 round-trip；`scripts/ab_visual_bonus.py` 与生产评分共享 signed suppression 和零点保持归一化。
+- **弹幕摘要严格遵守字符预算**：`condense_danmaku` 将 ` | ` 分隔符计入 `danmaku_max_chars`，保留完整弹幕，单条超限跳过，避免摘要实际长度超过配置预算。
+- **桌面 Web 与插件设置页新增统一的「高级功能」Tab**：桌面端 7 个 Tab、插件端 6 个 Tab 都固定提供「推荐增强 / 多模态处理 / 搜索词生成」三个 section；P1/P2/P3 依赖关系、关闭无副作用、七个 discovery 字段的 round-trip 和搜索词三档 option 契约保持一致，调度 Tab 只保留真正的调度项。
+- **设置页保存按钮只在有改动时启用**：桌面 Web 与插件 side panel 在配置无变化或保存请求进行中都会禁用保存，避免无操作的完整 `PUT /api/config` 和无意义热重载；输入、LLM 实例/调用链草稿及候选池建议比例等程序化修改都会进入脏状态。保存成功后按钮重新禁用，失败则保留改动并允许重试。
+- **插件配置保存栏固定在视口底部**：side panel 不再把位于长表单末尾的 sticky 保存栏留在页面底部；保存状态和按钮始终固定在扩展视口底边，滚动容器同步预留安全区与操作栏高度，最后一项配置仍可完整滚到按钮上方，不会被遮挡。
+- **高级功能默认值统一**：新配置的搜索词生成默认使用“混合”（经典 merged planner + search-backed 灵感轴），桌面 Web、插件和 API 缺省回退同步为 `hybrid`；图像 Embedding、候选封面 LLM 评估、P1 视觉画像和 P3 关键帧继续全部默认关闭，已有显式配置不被覆盖。
+- **补充 PR #135 贡献者致谢**：README 中英文与贡献指南正式记录 [@wuwafly3](https://github.com/wuwafly3) 对用户视觉画像（P1）、B 站弹幕语义（P2）、视频关键帧（P3）和跨平台视觉加权管线的贡献，并保留其此前在 [#100](https://github.com/whiteguo233/OpenBiliClaw/pull/100) 中完成的 DashScope 多模态 embedding 与封面 image-only 向量归属。
+- **原生保存批任务顺序固定为快照顺序**：显式 `item_keys` 的 caller order 继续写入 `native_save_task_items.ordinal`，执行查询也改为按该 ordinal 读取；不再受秒级 `saved_memberships.added_at` 影响，避免同一批次在不同机器上随机先处理后加入的项目，并让 heartbeat 失败时的取消/释放行为保持确定。
+
 ## 未发布：连接与 HTTPS 部署（2026-08-01）
 
 - **对话 turn 绑定安全性收口**：三端把卡片/疑惑作为 durable turn，通过 `reply_to_turn_id` 只声明目标；服务端在 user INSERT 前冻结 canonical context、digest 和 ordinary/detached mode，统一贯穿 prompt、event、学习与结算，A→B replacement 只会安全 stale-drop。新增只读 context preview、opaque evidence 过滤、独立长列表滚动、reply quote 与失败草稿保留；恢复长历史时首次进入会落到最新消息，后续实时刷新仍保留阅读位置。真实三端 E2E 补齐结算态收尾：卡片已确认/修正/拒绝/稍后时会静默清除旧 context，已知服务端错误优先显示中文；移动端固定回顶按钮按 360px 窄屏重新留距，不再与发送按钮相交。
@@ -99,6 +114,10 @@
 ## v0.3.184：全端品牌图标统一（2026-07-23）
 
 - **全产品品牌图标统一为新的粉色猫爪标记**：感谢 [@xiongguixg](https://github.com/xiongguixg) 在 [issue #127](https://github.com/whiteguo233/OpenBiliClaw/issues/127) 中主动提供移动端图标方案；项目以选定的方形源图固化 `assets/brand/openbiliclaw-icon.png`，重新派生浏览器扩展 16 / 48 / 128px、PWA / favicon 192 / 512px 与官网图标。side panel、移动 Web、桌面 Web、首次设置页和 GitHub Pages 首页都从旧字母 `B` / CSS 圆环占位切到正式图标。桌面包同时补齐多尺寸 Windows `.ico` 与 macOS `.icns` 并接入 PyInstaller，系统托盘 / 菜单栏也直接加载同一随包 Web 图标，不再单独绘制旧临时标记；社交分享图源同步切换，资产尺寸、桌面容器与各界面引用均有回归测试。
+- **弹幕文本加成（P2，补上"视频讲了什么"这一维）**：P1/P3 都在回答"视频**长什么样**"，P2 补正交的另一半——**观众在讨论什么**。B 站候选喂给推荐链路的语义此前只有 `title` + `description`，而 description 常是"求三连"之类的无信息文本、`body_text` 在 B 站路径恒为空，弹幕这个 B 站独有信号只存了计数（`danmaku_count`）、文本被完全浪费。抓取走 `comment.bilibili.com/{cid}.xml`（**无需鉴权、纯 XML**，标准库解析；`cid` 直接从已有的 `/x/web-interface/view` 响应读，**零额外请求**——该响应早就返回了它，只是解析器没读），复用 `BilibiliAPIClient` 的 `trust_env=False` CN 直连与共享限速，**不引入 `bilibili-api-python`**（虽在 pyproject 声明但项目从未使用，引入会带来 Credential 体系 + 两套网络栈并存）。**清洗策略被实测推翻重写**：原计划"按频次聚合，高频弹幕 = 内容共识"，但抓取 BV1LR336sEFX 的 3600 条真实弹幕后发现**恰恰相反**——高频全是社区梗（难说 613×、已取餐 350×、懂你意思 310×、666 9×）、语义价值为零，真正有信息量的是**只出现一次的长弹幕**（"这就是本地AI的优势，除了延迟低，还有绝对的隐私性"、"苹果上市后系统优化导致零售机强于媒体机"）。按频次取 top-N 会精准筛掉全部有用信息、只留噪声。改按长度后又发现刷屏会顶到最前（`保护`×30 = 76 字但只有一个词、重复句、长串标点），于是最终策略是**先压缩重复再按压缩后长度排序**；压缩规则还踩到一个坑：字符 run 压缩会把 "5000电池"/"10000mah" 压成 "500"/"100"，因此数字必须豁免。摘要存 `content_cache.danmaku_text` 新列，**严格不复用 `body_text`**（它渲染到插件/桌面/移动三端卡片正文并进 5 处 LLM prompt，弹幕塞进去会把卡片正文变成一堆"已取餐"）；`danmaku_fetched_at` **空结果也打戳**（否则无弹幕的视频每轮重抓）。嵌入沿用摘要文本本身为键（与其它文本嵌入一致，**不碰 `_mmr_embedding_text`**——它在两处重复实现且要求逐字节一致，改动会让整个 MMR 缓存静默失效）。新 flag `[discovery].danmaku_enabled` / `danmaku_fetch_limit` / `danmaku_max_chars`（默认关；**纯文本信号，无需多模态嵌入模型**，与 P1/P3 不同），关闭时加成恒 0、排序逐字节一致。至此 `serve()` 上共四路独立信号并行叠加。
+- **视频关键帧加成（P3，深度整合视觉信号第二步）**：封面是 UP 主手选的营销图、常常标题党，**不代表视频内容**——P1 用封面建的口味质心因此天然受限。P3 改用**真实视频画面**匹配同一套质心。原方案假设关键帧要"下载视频段 + ffmpeg 抽帧"（高成本，本排在最后），**实测推翻了这个假设**：B 站早已为每个视频预生成关键帧雪碧图（拖进度条时的预览缩略图），`GET https://api.bilibili.com/x/player/videoshot`（**无需 cookie / 无需 WBI 签名**）即可拿到——实测一张 61KB 雪碧图 = 100 帧，**不下载视频、不需要 ffmpeg**，成本与抓一张封面同级，比弹幕方案还便宜。30 个真实视频抽样（5 分区、时长 45s–5106s、含 2009 年老视频）**覆盖率 100%**，平均 277 帧/视频。两个只有实测才会发现的坑已处理：①长视频返回**多张**雪碧图（最多 11 张 = 1100 帧），采样必须跨全部雪碧图全局分布，只取 `image[0]` 会让长视频只覆盖开头；②单帧尺寸**不固定**（160×90 与 480×270 并存），必须从响应读 `img_x_size`/`img_y_size` 而非硬编码。帧向量 **max-pool** 后对 P1 质心算有界加成 − 惩罚，独立常量 `_KEYFRAME_*`（**未标定**，铁律 3），在 `serve()` 上与封面↔文本锚点、P1 视觉画像**三路并行叠加**。新 flag `[discovery].keyframe_enabled` / `keyframe_max_frames` / `keyframe_fetch_limit`（默认关，需叠加 `multimodal_enabled`），关闭时加成恒 0、排序逐字节一致。雪碧图下载复用 `runtime/image_cache`（`hdslb.com` 已在白名单且 CN 直连，铁律 1），预热挂 `prewarm_pool_mmr_embeddings` 并对**空结果也打时间戳**（否则无 videoshot 数据的视频每轮重抓）。
+- **修复 P1 遗留的后台任务失控**：`_maybe_rebuild_visual_profile` 此前探测 `hasattr(registry, "create_task")`，但 `BackgroundTaskRegistry` 的方法叫 **`track`**（无 `create_task`），因此该分支恒为 False、静默回退到裸 `loop.create_task` —— 视觉画像重建任务不被注册表跟踪，热重载时 `RuntimeContext.cancel_all()` 无法取消它，旧运行时的任务会残留到新运行时。改用 `track` 并加回归测试（同时断言注册表确实没有 `create_task` 方法，防止再次猜错 API）。
+- **用户视觉画像加成（P1，深度整合视觉信号第一步）**：在已有「封面↔文本兴趣锚点」跨模态加成之外，新增**独立并行**的视觉信号——把用户**点赞/踩过**的推荐封面聚成 k 个均值质心（`recommendation/visual_profile.py` 贪心凝聚，复用 `_normalize_topic_keys` 骨架但用均值质心表达多峰口味），候选封面↔质心同模态余弦映射为**有界加成（正向）− 有界惩罚（负向，即"标题党封面"降权，仅扣本信号、不跌破 0）**，独立常量 `_VISUAL_PROFILE_*`（floor/ceil 0.55/0.80，与跨模态 0.15/0.45 不同，**未标定**，换真实模型后按分布重标，铁律 3）。质心存新表 `user_visual_clusters`（主库，profile-scoped），由 `rebuild_visual_profile()` 在 `precompute_delight_scores` 同 tick **节流重建**（仅当 `recommendations.feedback_at` 比上次 `updated_at` 新才跑），`serve()` 热路径只读内存 + URL-keyed 封面缓存、零 API 零聚类；公平门同 `_VISUAL_COVER_MIN_COVERAGE`。新 flag `[discovery].visual_profile_enabled`（默认关，需叠加 `[llm.embedding].multimodal_enabled`），关闭/无反馈时加成恒 0、排序逐字节一致。**A/B 结论**：合成 fixture 下 +画像 vs 仅封面加成 nDCG 增量为 0（同向冗余，预期——合成数据里文本锚点与用户质心同向），真实增量需回放真实库验证（`scripts/ab_visual_bonus.py` 的 P1 variant + `data/ab_visual_bonus_report.json` 的 `visual_profile` 段）。
 
 ---
 

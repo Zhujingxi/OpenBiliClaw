@@ -2373,7 +2373,7 @@ class TestDiscoveryConfig:
         assert config.discovery.planner_poll_seconds == 120
         assert config.discovery.plan_ttl_hours == 12
         assert config.discovery.admission_min_score == 0.60
-        assert config.discovery.inspiration_search_enabled is False
+        assert config.discovery.inspiration_search_enabled is True
         assert config.discovery.inspiration_replace_merged_keywords is False
         assert config.discovery.inspiration_search_backends == (
             "local_cache",
@@ -2383,11 +2383,18 @@ class TestDiscoveryConfig:
         )
         assert config.discovery.inspiration_breadth == "high"
         assert config.discovery.multimodal_evaluation_enabled is False
+        assert config.discovery.visual_profile_enabled is False
+        assert config.discovery.keyframe_enabled is False
+        assert config.llm.embedding.multimodal_enabled is False
         assert config.discovery.candidate_eval_concurrency == 3
         assert config.discovery.multimodal_batch_size == 8
         assert config.discovery.multimodal_image_max_px == 384
         assert config.discovery.multimodal_image_quality == 72
         assert config.discovery.multimodal_image_timeout_seconds == 6
+        assert config.discovery.keyframe_max_frames == 4
+        assert config.discovery.keyframe_fetch_limit == 50
+        assert config.discovery.danmaku_fetch_limit == 50
+        assert config.discovery.danmaku_max_chars == 500
 
     def test_discovery_defaults_from_empty_dict(self) -> None:
         config = _build_config({})
@@ -2396,7 +2403,7 @@ class TestDiscoveryConfig:
         assert config.discovery.kw_cache_high == 30
         assert config.discovery.plan_ttl_hours == 12
         assert config.discovery.admission_min_score == 0.60
-        assert config.discovery.inspiration_search_enabled is False
+        assert config.discovery.inspiration_search_enabled is True
         assert config.discovery.inspiration_replace_merged_keywords is False
         assert config.discovery.inspiration_search_backends == (
             "local_cache",
@@ -2406,7 +2413,39 @@ class TestDiscoveryConfig:
         )
         assert config.discovery.inspiration_breadth == "high"
         assert config.discovery.multimodal_evaluation_enabled is False
+        assert config.discovery.visual_profile_enabled is False
+        assert config.discovery.keyframe_enabled is False
+        assert config.llm.embedding.multimodal_enabled is False
         assert config.discovery.multimodal_batch_size == 8
+
+    def test_example_config_defaults_to_hybrid_with_visual_features_off(self) -> None:
+        example_path = Path(__file__).parents[1] / "config.example.toml"
+
+        with example_path.open("rb") as handle:
+            example = tomllib.load(handle)
+
+        assert example["discovery"]["inspiration_search_enabled"] is True
+        assert example["discovery"]["inspiration_replace_merged_keywords"] is False
+        assert example["discovery"]["multimodal_evaluation_enabled"] is False
+        assert example["discovery"]["visual_profile_enabled"] is False
+        assert example["discovery"]["keyframe_enabled"] is False
+        assert example["llm"]["embedding"]["multimodal_enabled"] is False
+
+    def test_visual_enrichment_numeric_fields_round_trip(self, tmp_path: Path) -> None:
+        config_path = tmp_path / "config.toml"
+        config = Config()
+        config.discovery.keyframe_max_frames = 9
+        config.discovery.keyframe_fetch_limit = 17
+        config.discovery.danmaku_fetch_limit = 23
+        config.discovery.danmaku_max_chars = 1800
+
+        save_config(config, config_path)
+        loaded = load_config(config_path)
+
+        assert loaded.discovery.keyframe_max_frames == 9
+        assert loaded.discovery.keyframe_fetch_limit == 17
+        assert loaded.discovery.danmaku_fetch_limit == 23
+        assert loaded.discovery.danmaku_max_chars == 1800
 
     def test_top_level_discovery_is_distinct_from_llm_discovery(self) -> None:
         """`[discovery]` (planner knobs) must not collide with `[llm.discovery]`
@@ -2684,7 +2723,7 @@ admission_min_score = {literal}
         assert "kw_cache_high = 30" in rendered
         assert "plan_ttl_hours = 12" in rendered
         assert "admission_min_score = 0.6" in rendered
-        assert "inspiration_search_enabled = false" in rendered
+        assert "inspiration_search_enabled = true" in rendered
         assert "inspiration_replace_merged_keywords = false" in rendered
         assert (
             'inspiration_search_backends = ["local_cache", "platform_sources", "exa", "you"]'

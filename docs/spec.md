@@ -141,7 +141,7 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 | 策略 | 说明 |
 |------|------|
 | **兴趣关键词搜索** | 根据用户画像生成关键词组合搜索 |
-| **搜索灵感脑暴** | 可选地从 like 二级兴趣抽样；`OnionProfile.interest.likes` 会优先展开 specifics，一级 domain 只在缺少 specifics 时兜底，并按 parent 计数降权防止小窗口被同一领域占满；结合 recent interest selection count、关键词覆盖频次、raw candidate 数量 / 占比 / dominant content type 和最终候选池占比降权高频兴趣，coverage join 统一走 `_normalize_match_text()` 折叠大小写 / 空白漂移，画像整理会同步迁移 keyword 与 selection ledger 标签，完整 coverage 只在本地控制环使用，LLM payload 只携带 must-cover + 少量 cooldown 摘要；随后由 `discovery.keyword_brainstorm` 脑暴带 `kind_fit=regular|explore|both` 的搜索 probe branch，每兴趣最多 2 条，regular + explore 同轮触发时共用一次 brainstorm 和一次 grounding stage；按 `[discovery].inspiration_search_backends` 通过 search provider 链（默认已启用平台源 → Exa → You.com free MCP）grounding 具体实体 / 社区词 / 讨论点，stage 级搜索预算由 `inspiration_max_probe_searches_per_stage` 控制，平台源扇出由 `inspiration_platforms_per_probe` 控制，每 probe 翻页 / 扩量由 `inspiration_search_pages_per_probe` 控制，B 站 / 抖音 / X 等 risk-controlled 来源受 `inspiration_riskcontrolled_probe_budget` 与 cooldown / 限流约束；`platform_sources` 只把 B站 / YouTube / X / Reddit / Bangumi、抖音 direct client，以及小红书 / 知乎 bridge 可用时的搜索标题 / URL / 摘要作为灵感 evidence，不入候选池；泛词不是硬错误，会交给 curator 结合画像、平台 guide 和覆盖约束判断；再经 `discovery.keyword_inspiration` 做 Profile Curator / Detail Expander，优先生成按平台 keyed 的 `platform_keywords`；`platform_guides.query_style` 明确 B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Bangumi 的平台检索语法；写库前由系统侧执行 must-cover 排序、每平台二级兴趣 / lens family 上限、原样证据标题 / URL / 过长 query / 平台语言不匹配 / 平台检索语法不匹配过滤、grounding hint `source_interest` 校正、explore 横向 lens 校验，缺失 must-cover 兴趣时用 `discovery.keyword_inspiration.repair` 做一次 bounded repair，repair 仍缺词时用 deterministic platform-native backfill 补齐；默认关闭，开启后 admission yield 会回填 inspiration / expansion 反馈计数；实验开关可让 due 平台完全跳过旧 merged keyword planner，只用新流程产词，并在 B 站 explore 到期时写入 `keyword_kind="explore"` 的探索词池；`keyword-inspiration-dry-run` 可真实预览中间链路但不写关键词池，且使用独立 preview selection scope，`keyword-inspiration-report` 对比 inspiration / merged cohort、输出 production / preview 抽中分布并给出 replace 门禁 |
+| **搜索灵感脑暴** | 可选地从 like 二级兴趣抽样；`OnionProfile.interest.likes` 会优先展开 specifics，一级 domain 只在缺少 specifics 时兜底，并按 parent 计数降权防止小窗口被同一领域占满；结合 recent interest selection count、关键词覆盖频次、raw candidate 数量 / 占比 / dominant content type 和最终候选池占比降权高频兴趣，coverage join 统一走 `_normalize_match_text()` 折叠大小写 / 空白漂移，画像整理会同步迁移 keyword 与 selection ledger 标签，完整 coverage 只在本地控制环使用，LLM payload 只携带 must-cover + 少量 cooldown 摘要；随后由 `discovery.keyword_brainstorm` 脑暴带 `kind_fit=regular|explore|both` 的搜索 probe branch，每兴趣最多 2 条，regular + explore 同轮触发时共用一次 brainstorm 和一次 grounding stage；按 `[discovery].inspiration_search_backends` 通过 search provider 链（默认已启用平台源 → Exa → You.com free MCP）grounding 具体实体 / 社区词 / 讨论点，stage 级搜索预算由 `inspiration_max_probe_searches_per_stage` 控制，平台源扇出由 `inspiration_platforms_per_probe` 控制，每 probe 翻页 / 扩量由 `inspiration_search_pages_per_probe` 控制，B 站 / 抖音 / X 等 risk-controlled 来源受 `inspiration_riskcontrolled_probe_budget` 与 cooldown / 限流约束；`platform_sources` 只把 B站 / YouTube / X / Reddit / Bangumi、抖音 direct client，以及小红书 / 知乎 bridge 可用时的搜索标题 / URL / 摘要作为灵感 evidence，不入候选池；泛词不是硬错误，会交给 curator 结合画像、平台 guide 和覆盖约束判断；再经 `discovery.keyword_inspiration` 做 Profile Curator / Detail Expander，优先生成按平台 keyed 的 `platform_keywords`；`platform_guides.query_style` 明确 B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Bangumi 的平台检索语法；写库前由系统侧执行 must-cover 排序、每平台二级兴趣 / lens family 上限、原样证据标题 / URL / 过长 query / 平台语言不匹配 / 平台检索语法不匹配过滤、grounding hint `source_interest` 校正、explore 横向 lens 校验，缺失 must-cover 兴趣时用 `discovery.keyword_inspiration.repair` 做一次 bounded repair，repair 仍缺词时用 deterministic platform-native backfill 补齐；新配置默认以混合模式开启，与旧 merged keyword planner 并行，admission yield 会回填 inspiration / expansion 反馈计数；实验开关可让 due 平台完全跳过旧 merged keyword planner，只用新流程产词，并在 B 站 explore 到期时写入 `keyword_kind="explore"` 的探索词池；`keyword-inspiration-dry-run` 可真实预览中间链路但不写关键词池，且使用独立 preview selection scope，`keyword-inspiration-report` 对比 inspiration / merged cohort、输出 production / preview 抽中分布并给出 replace 门禁 |
 | **相关推荐链探索** | 从已知好内容出发，沿相关推荐不断深入 |
 | **分区热门/排行榜** | 固定全站榜，并按本地洗牌轮转覆盖非 0 分区榜，结合用户画像筛选 |
 | **UP 主追踪** | 追踪关注的和发现的优质 UP 主的新动态 |
@@ -498,6 +498,7 @@ trusted LAN ─ HTTPS（可选）──→ TLS Proxy :8443 ─ loopback/Compose 
 │  │ DeepSeek / Ollama /      │  │ L1 内存 + L2 SQLite    │   │
 │  │ OpenRouter + Codex OAuth │  │ Ollama bge-m3 兜底可选  │   │
 │  └──────────────────────────┘  └────────────────────────┘   │
+│  可选视觉 / 弹幕预热：质心、关键帧、完整 document embedding；endpoint provenance + stable slot retry │
 │  Desktop bundle: official Ollama.app runtime (ollama + runner dylibs/assets) │
 │  LLMService caller bucket → inherit global chain / custom chain │
 │  discovery evaluator: text + metrics + optional compressed cover image input │
@@ -518,6 +519,24 @@ trusted LAN ─ HTTPS（可选）──→ TLS Proxy :8443 ─ loopback/Compose 
 │          saved_items/memberships/native_save_states + durable task ledger │
 └──────────────────────────────────────────────────────────────┘
 ```
+
+### 3.1 视觉 embedding 与候选预热契约
+
+推荐的可选视觉链路由封面视觉加成（P1 cover）、用户视觉画像质心（P1 profile）和视频关键帧
+（P3）组成；弹幕是独立的纯文本 P2 信号。`keyframe_enabled` 单独开启时，只要多模态
+embedding 可用，仍会构建 P1/P3 共用的视觉质心；P1 cover bonus 仍只由
+`visual_profile_enabled` 控制。
+
+所有持久化向量都带 embedding provider / model fingerprint 与维度。质心命名空间、关键帧
+sampling signature（包含算法版本与 `keyframe_max_frames`）或维度变化时，旧行视为待重建；
+弹幕已有摘要时优先重嵌入，不重复抓取源数据。关键帧和弹幕 fetch / parse / embed 结果区分
+`success`、确认的 `no_data` 与 `transient_failure`，只有安全成功条件才写完成状态，瞬时失败
+保留下一轮重试资格。
+
+预热只处理当前 fresh、可服务候选池，并使用 `keyframe_fetch_limit` / `danmaku_fetch_limit`。
+`danmaku_max_chars` 控制完整摘要的 document embedding/cache 输入，不静默截断固定前缀。跨
+平台 bonus 以 0 为固定点，正负两侧分别按平台内极值缩放；0、缺失和全零保持 0，禁止凭空
+生成相反符号。离线视觉报告必须镜像生产评分。
 
 远程浏览器扩展认证独立于平台登录态：管理员通过 CLI 生成设备密钥，后端只保存摘要；扩展向 `/api/auth/extension-token` 换取短会话。普通 HTTP 使用 Bearer Header，WebSocket 与图片代理只携带短会话 query。该能力默认关闭，撤销设备密钥会使全部现有会话立即失效。
 

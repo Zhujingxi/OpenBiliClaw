@@ -4315,7 +4315,10 @@
       display: flex;
       flex-direction: column;
       overflow-y: auto;
-      padding: 16px;
+      overflow-x: hidden;
+      /* The fixed save bar is removed from normal flow. Reserve enough room
+         for it so the final setting can scroll fully above the action area. */
+      padding: 16px 16px calc(88px + env(safe-area-inset-bottom, 0px));
       gap: 12px;
     }
 
@@ -4355,10 +4358,13 @@
     }
 
     .settings-tabs {
+      min-width: 0;
+      flex-shrink: 0;
       display: grid;
-      grid-template-columns: repeat(5, minmax(0, 1fr));
+      grid-template-columns: repeat(6, minmax(0, 1fr));
       gap: 6px;
       padding: 4px;
+      overflow-x: auto;
       border: 1px solid var(--line);
       border-radius: 14px;
       background: rgba(255, 255, 255, 0.68);
@@ -4394,6 +4400,7 @@
     }
 
     .settings-panel {
+      min-width: 0;
       display: flex;
       flex-direction: column;
       gap: 12px;
@@ -4404,6 +4411,7 @@
     }
 
     .settings-section {
+      min-width: 0;
       background: var(--surface-strong);
       border: 1px solid var(--line);
       border-radius: 16px;
@@ -4865,6 +4873,10 @@
     }
 
     @media (max-width: 430px) {
+      .settings-tabs {
+        grid-template-columns: repeat(6, minmax(92px, 1fr));
+      }
+
       .settings-model-discovery-control {
         grid-template-columns: 1fr;
       }
@@ -4950,7 +4962,9 @@
 
     /* 吸底保存栏：任何分类下都能就地看到未保存修改并保存 */
     .settings-savebar {
-      position: sticky;
+      position: fixed;
+      left: 16px;
+      right: 16px;
       bottom: 0;
       z-index: 12;
       display: flex;
@@ -4958,13 +4972,14 @@
       justify-content: space-between;
       gap: 10px;
       flex-wrap: wrap;
-      margin-top: 12px;
-      padding: 10px 0 12px;
+      margin: 0;
+      padding: 10px 0 calc(12px + env(safe-area-inset-bottom, 0px));
       /* --surface is translucent; the bar sits over scrolling fields, so it
          needs an opaque backdrop plus a blur to stay readable. */
       border-top: 1px solid var(--border-soft, rgba(0, 0, 0, 0.08));
       background: var(--bg-sky, #eef2fb);
       backdrop-filter: blur(14px);
+      box-shadow: 0 -12px 28px rgba(28, 39, 58, 0.12);
     }
 
     .settings-savebar .settings-save {
@@ -5001,6 +5016,7 @@
     }
 
     .settings-field {
+      min-width: 0;
       display: flex;
       flex-direction: column;
       gap: 4px;
@@ -5017,6 +5033,7 @@
     .settings-field input,
     .settings-field select,
     .settings-field textarea {
+      min-width: 0;
       padding: 8px 10px;
       border: 1px solid var(--line);
       border-radius: 10px;
@@ -5190,6 +5207,8 @@
     }
 
     .settings-field-row label {
+      min-width: 0;
+      overflow-wrap: anywhere;
       text-transform: none;
       font-size: 13px;
       color: var(--text-main);
@@ -5884,11 +5903,12 @@
       <div id="settingsIssues" class="settings-issues"></div>
 
       <div class="settings-tabs" role="tablist" aria-label="后端设置分类">
-        <button id="settingsTabModels" class="settings-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="settingsPanelModels">模型</button>
-        <button id="settingsTabSources" class="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="settingsPanelSources">平台源</button>
-        <button id="settingsTabScheduler" class="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="settingsPanelScheduler">调度</button>
-        <button id="settingsTabGeneral" class="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="settingsPanelGeneral">通用</button>
-        <button id="settingsTabLogging" class="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="settingsPanelLogging">日志</button>
+        <button id="settingsTabModels" class="settings-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="settingsPanelModels" tabindex="0">模型</button>
+        <button id="settingsTabSources" class="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="settingsPanelSources" tabindex="-1">平台源</button>
+        <button id="settingsTabScheduler" class="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="settingsPanelScheduler" tabindex="-1">调度</button>
+        <button id="settingsTabAdvanced" class="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="settingsPanelAdvanced" tabindex="-1">高级功能</button>
+        <button id="settingsTabGeneral" class="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="settingsPanelGeneral" tabindex="-1">通用</button>
+        <button id="settingsTabLogging" class="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="settingsPanelLogging" tabindex="-1">日志</button>
       </div>
 
       <div id="settingsPanelModels" class="settings-panel" data-settings-panel="models" role="tabpanel" aria-labelledby="settingsTabModels">
@@ -6156,11 +6176,6 @@
           <label for="cfgEmbeddingSimilarity">相似度阈值 (0~1)</label>
           <input id="cfgEmbeddingSimilarity" type="number" min="0" max="1" step="0.01" placeholder="0.82">
         </div>
-        <div class="settings-field-row">
-          <input id="cfgEmbeddingMultimodalEnabled" type="checkbox">
-          <label for="cfgEmbeddingMultimodalEnabled">启用封面视觉加成 (image-only)</label>
-        </div>
-        <p class="settings-hint">需多模态 embedding 模型（Gemini <code>gemini-embedding-2</code> 或 DashScope <code>qwen3-vl-embedding</code>）。开启后封面图会单独编码为向量，为惊喜推荐的“封面对味度”加一点分；纯文本模型（如 bge-m3）自动跳过、零成本。默认关闭。</p>
       </div>
 
       <!-- Module LLM Overrides -->
@@ -6880,41 +6895,6 @@
           <input id="cfgDiscoveryLimit" type="number" min="1" max="60" step="1" placeholder="30">
         </div>
         <div class="settings-field">
-          <label for="cfgKeywordGenerationMode">搜索词生成模式</label>
-          <select id="cfgKeywordGenerationMode">
-            <option value="legacy">经典</option>
-            <option value="hybrid">混合</option>
-            <option value="inspiration">灵感</option>
-          </select>
-        </div>
-        <p class="settings-hint">经典：仅用合并关键词生成器；混合：在经典基础上再叠加 search-backed 灵感轴链路（最丰富，但同时跑两套，混合最贵）；灵感：完全用灵感轴链路替代经典。</p>
-        <div class="settings-field">
-          <label for="cfgCandidateEvalConcurrency">候选评估并发</label>
-          <input id="cfgCandidateEvalConcurrency" type="number" min="1" max="3" step="1" placeholder="3">
-        </div>
-        <p class="settings-hint">范围 1–3，默认 3（每批最多 30 条、最多 90 条在途）；后端会为聊天等交互保留一个全局 LLM 槽位，实际并发可能更低。</p>
-        <div class="settings-field-row">
-          <input id="cfgMultimodalEvaluationEnabled" type="checkbox">
-          <label for="cfgMultimodalEvaluationEnabled">启用封面图评估</label>
-        </div>
-        <p class="settings-hint">开启后，支持图像输入的评估模型会把候选封面随文本一起判断；图片会先压缩，图文 batch 默认更小。</p>
-        <div class="settings-field">
-          <label for="cfgMultimodalBatchSize">图文批量大小</label>
-          <input id="cfgMultimodalBatchSize" type="number" min="1" max="12" step="1" placeholder="8">
-        </div>
-        <div class="settings-field">
-          <label for="cfgMultimodalImageMaxPx">封面最大边 px</label>
-          <input id="cfgMultimodalImageMaxPx" type="number" min="128" max="768" step="1" placeholder="384">
-        </div>
-        <div class="settings-field">
-          <label for="cfgMultimodalImageQuality">JPEG 质量</label>
-          <input id="cfgMultimodalImageQuality" type="number" min="40" max="90" step="1" placeholder="72">
-        </div>
-        <div class="settings-field">
-          <label for="cfgMultimodalImageTimeout">封面超时秒数</label>
-          <input id="cfgMultimodalImageTimeout" type="number" min="1" max="20" step="1" placeholder="6">
-        </div>
-        <div class="settings-field">
           <label for="cfgProactivePushInterval">主动推送轮询秒数</label>
           <input id="cfgProactivePushInterval" type="number" min="30" step="1" placeholder="120">
         </div>
@@ -6959,6 +6939,90 @@
           <label for="cfgSpeculationMaxSecondary">次要兴趣项上限</label>
           <input id="cfgSpeculationMaxSecondary" type="number" min="1" step="1" placeholder="60">
         </div>
+      </div>
+      </div>
+
+      <div id="settingsPanelAdvanced" class="settings-panel" data-settings-panel="advanced" role="tabpanel" aria-labelledby="settingsTabAdvanced" hidden>
+      <div class="settings-section">
+        <h3>推荐增强</h3>
+        <p class="settings-hint">P1 用户视觉画像、P2 弹幕语义、P3 视频关键帧本质都是排序信号加权，不是过滤。P1/P3 依赖多模态 image embedding，P2 只需文本 embedding；P1 每个极性反馈不足 8 条时会安全 no-op。关闭开关会保留缓存与参数并回退到原排序，不影响现有主流程；关键帧和弹幕目前仅作用于 B 站。</p>
+        <div class="settings-field-row">
+          <input id="cfgVisualProfileEnabled" type="checkbox">
+          <label for="cfgVisualProfileEnabled">启用 P1 用户视觉画像</label>
+        </div>
+        <div class="settings-field-row">
+          <input id="cfgDanmakuEnabled" type="checkbox">
+          <label for="cfgDanmakuEnabled">启用 P2 弹幕语义</label>
+        </div>
+        <div class="settings-field-row">
+          <input id="cfgKeyframeEnabled" type="checkbox">
+          <label for="cfgKeyframeEnabled">启用 P3 视频关键帧</label>
+        </div>
+        <div class="settings-field">
+          <label for="cfgKeyframeMaxFrames">P3 每个视频采样关键帧数</label>
+          <input id="cfgKeyframeMaxFrames" type="number" min="1" max="12" step="1" placeholder="4">
+        </div>
+        <div class="settings-field">
+          <label for="cfgKeyframeFetchLimit">P3 关键帧预热视频数上限</label>
+          <input id="cfgKeyframeFetchLimit" type="number" min="1" max="200" step="1" placeholder="50">
+        </div>
+        <div class="settings-field">
+          <label for="cfgDanmakuFetchLimit">P2 弹幕预热视频数上限</label>
+          <input id="cfgDanmakuFetchLimit" type="number" min="1" max="200" step="1" placeholder="50">
+        </div>
+        <div class="settings-field">
+          <label for="cfgDanmakuMaxChars">P2 弹幕摘要字数上限</label>
+          <input id="cfgDanmakuMaxChars" type="number" min="100" max="2000" step="1" placeholder="500">
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <h3>多模态处理</h3>
+        <p class="settings-hint">“图像 Embedding 能力”与“候选封面参与 LLM 评估”相互独立：前者控制图像向量能力，供 P1/P3 使用；后者把候选封面送入 LLM 评估。P1/P3 依赖前者，不依赖后者。</p>
+        <div class="settings-field-row">
+          <input id="cfgEmbeddingMultimodalEnabled" type="checkbox">
+          <label for="cfgEmbeddingMultimodalEnabled">启用图像 Embedding 能力</label>
+        </div>
+        <p class="settings-hint">需多模态 embedding 模型（Gemini <code>gemini-embedding-2</code> 或 DashScope <code>qwen3-vl-embedding</code>）。开启后封面和关键帧可单独编码为向量；纯文本模型会自动跳过。默认关闭。</p>
+        <div class="settings-field-row">
+          <input id="cfgMultimodalEvaluationEnabled" type="checkbox">
+          <label for="cfgMultimodalEvaluationEnabled">候选封面参与 LLM 评估</label>
+        </div>
+        <p class="settings-hint">开启后，支持图像输入的评估模型会把候选封面随文本一起判断；图片会先压缩，图文 batch 默认更小。它不控制 P1/P3 的图像 Embedding。</p>
+        <div class="settings-field">
+          <label for="cfgCandidateEvalConcurrency">候选评估并发</label>
+          <input id="cfgCandidateEvalConcurrency" type="number" min="1" max="3" step="1" placeholder="3">
+        </div>
+        <p class="settings-hint">范围 1–3，默认 3（每批最多 30 条、最多 90 条在途）；后端会为聊天等交互保留一个全局 LLM 槽位，实际并发可能更低。</p>
+        <div class="settings-field">
+          <label for="cfgMultimodalBatchSize">图文评估批量大小</label>
+          <input id="cfgMultimodalBatchSize" type="number" min="1" max="12" step="1" placeholder="8">
+        </div>
+        <div class="settings-field">
+          <label for="cfgMultimodalImageMaxPx">评估封面最大边 px</label>
+          <input id="cfgMultimodalImageMaxPx" type="number" min="128" max="768" step="1" placeholder="384">
+        </div>
+        <div class="settings-field">
+          <label for="cfgMultimodalImageQuality">评估 JPEG 质量</label>
+          <input id="cfgMultimodalImageQuality" type="number" min="40" max="90" step="1" placeholder="72">
+        </div>
+        <div class="settings-field">
+          <label for="cfgMultimodalImageTimeout">评估封面超时秒数</label>
+          <input id="cfgMultimodalImageTimeout" type="number" min="1" max="20" step="1" placeholder="6">
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <h3>搜索词生成</h3>
+        <div class="settings-field">
+          <label for="cfgKeywordGenerationMode">搜索词生成模式</label>
+          <select id="cfgKeywordGenerationMode">
+            <option value="legacy">经典</option>
+            <option value="hybrid" selected>混合</option>
+            <option value="inspiration">灵感</option>
+          </select>
+        </div>
+        <p class="settings-hint">经典：仅用合并关键词生成器；混合：在经典基础上再叠加 search-backed 灵感轴链路（最丰富，但同时跑两套，混合最贵）；灵感：完全用灵感轴链路替代经典。</p>
       </div>
       </div>
 
@@ -7015,7 +7079,7 @@
 
       <div class="settings-actions settings-savebar" id="settingsSaveBar" data-dirty="false">
         <span class="settings-savebar-msg" id="settingsSaveMsg" aria-live="polite">没有未保存的修改</span>
-        <button id="settingsSave" class="settings-save" type="button">保存配置</button>
+        <button id="settingsSave" class="settings-save" type="button" disabled>保存配置</button>
       </div>
 
       <div id="cfgLlmInstanceDialog" class="settings-instance-dialog" role="dialog" aria-modal="true" aria-labelledby="cfgLlmInstanceDialogTitle" hidden>

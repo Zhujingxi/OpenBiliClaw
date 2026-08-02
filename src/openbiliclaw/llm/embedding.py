@@ -24,10 +24,103 @@ import threading
 from collections import OrderedDict
 from pathlib import Path
 from typing import Protocol
+from urllib.parse import SplitResult, urlsplit, urlunsplit
 
 logger = logging.getLogger(__name__)
 
 _IMAGE_CACHE_KEY_PREFIX = "img:"
+
+
+def normalize_embedding_endpoint(endpoint: str) -> str:
+    """Return a stable, non-secret endpoint identity for embedding provenance.
+
+    Endpoint query strings and fragments commonly contain API keys, signed
+    parameters, or UI-only state, so they are deliberately discarded. User
+    info is also removed before the host is rendered. The result retains only
+    the transport, host/port, and path that identify the actual service.
+    """
+    raw = str(endpoint or "").strip()
+    if not raw:
+        return ""
+
+    parsed = urlsplit(raw)
+    if not parsed.scheme or not parsed.netloc:
+        # Keep malformed/custom endpoint strings useful without ever carrying
+        # query or fragment material into the namespace.
+        redacted = raw.split("?", 1)[0].split("#", 1)[0]
+        # Scheme-less endpoint strings are accepted by a few compatible
+        # clients. They can still contain ``userinfo@host``; discard that
+        # prefix before retaining the deterministic custom identity.
+        return redacted.rsplit("@", 1)[-1].rstrip("/")
+
+    try:
+        hostname = parsed.hostname or ""
+        port = parsed.port
+    except ValueError:
+        # An invalid port is not a usable URL, but the redacted path still
+        # gives callers a deterministic namespace rather than leaking the raw
+        # user-info/query-bearing string.
+        hostname = (parsed.netloc.rsplit("@", 1)[-1]).split(":", 1)[0]
+        port = None
+
+    hostname = hostname.lower()
+    if ":" in hostname and not hostname.startswith("["):
+        hostname = f"[{hostname}]"
+    default_port = (parsed.scheme.lower() == "http" and port == 80) or (
+        parsed.scheme.lower() == "https" and port == 443
+    )
+    hostport = hostname
+    if port is not None and not default_port:
+        hostport = f"{hostport}:{port}"
+
+    path = parsed.path.rstrip("/")
+    redacted_url = SplitResult(parsed.scheme.lower(), hostport, path, "", "")
+    return urlunsplit(redacted_url)
+
+
+def build_embedding_provenance(
+    logical_provider: str,
+    endpoint: str,
+    model: str,
+    output_dimensionality: int = 0,
+) -> str:
+    """Build deterministic provenance without credentials or request data."""
+    payload = {
+        "provider": str(logical_provider or "").strip().lower(),
+        "endpoint": normalize_embedding_endpoint(endpoint),
+        "model": str(model or "").strip(),
+        "dimension": max(0, int(output_dimensionality or 0)),
+    }
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _provider_endpoint(provider: SupportsEmbed) -> str:
+    """Best-effort endpoint discovery for direct ``EmbeddingService`` users."""
+    for name in ("base_url", "_base_url"):
+        value = getattr(provider, name, "")
+        if value:
+            return str(value)
+    return ""
+
+
+def _provider_logical_name(provider: SupportsEmbed) -> str:
+    value = getattr(provider, "name", "")
+    if value:
+        return str(value).strip().lower()
+    provider_type = type(provider)
+    return f"{provider_type.__module__}.{provider_type.__qualname__}"
+
+
+def _provider_output_dimensionality(provider: SupportsEmbed) -> int:
+    for name in ("embedding_output_dimensionality", "_embedding_output_dimensionality"):
+        value = getattr(provider, name, 0)
+        try:
+            dimension = int(value or 0)
+        except (TypeError, ValueError):
+            continue
+        if dimension > 0:
+            return dimension
+    return 0
 
 
 class SupportsEmbed(Protocol):
@@ -45,8 +138,16 @@ class SupportsEmbeddingService(Protocol):
 
     async def embed(self, text: str) -> list[float]: ...
 
+    async def embed_document(self, text: str) -> list[float]:
+        """Embed full text without the bounded semantic-key contract."""
+        return []
+
     def lookup_cached(self, text: str) -> list[float]:
         """Cache-only lookup; default returns ``[]`` for protocol compatibility."""
+        return []
+
+    def lookup_cached_document(self, text: str) -> list[float]:
+        """Cache-only lookup for an untruncated document embedding."""
         return []
 
     def image_embedding_active(self) -> bool:
@@ -85,6 +186,32 @@ def image_embedding_cache_key_for_url(cover_url: str) -> str:
     """
     normalized = (cover_url or "").strip()
     digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:40]
+    return f"{_IMAGE_CACHE_KEY_PREFIX}{digest}"
+
+
+def keyframe_embedding_cache_key(
+    bvid: str,
+    frame_index: int,
+    sampling_signature: str = "global-even-midpoint-v1|max_frames=4|edge_skip=0.1",
+    embedding_fingerprint: str = "",
+) -> str:
+    """Stable L1/L2 key for one sampled video keyframe.
+
+    Keyed by ``(embedding_fingerprint, sampling_signature, bvid, frame_index)``
+    rather than frame bytes so the prewarm writer and ranking reader agree
+    without re-downloading and re-cropping
+    the sprite sheet just to hash the pixels — the same reason
+    :func:`image_embedding_cache_key_for_url` is URL-keyed.
+
+    Shares the ``img:`` namespace (keyframes ARE images, in the same vector
+    space as covers) but the ``kf|`` payload prefix keeps them from ever
+    colliding with a cover key.
+    """
+    normalized = (bvid or "").strip()
+    signature = (sampling_signature or "").strip() or "legacy"
+    fingerprint = (embedding_fingerprint or "").strip() or "legacy"
+    payload = f"kf|{fingerprint}|{signature}|{normalized}|{max(0, int(frame_index))}"
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:40]
     return f"{_IMAGE_CACHE_KEY_PREFIX}{digest}"
 
 
@@ -231,10 +358,49 @@ class EmbeddingService:
         persistent_cache: EmbeddingCache | None = None,
         max_concurrent_provider_calls: int = 2,
         multimodal_enabled: bool = False,
+        provenance: str | None = None,
+        logical_provider: str = "",
+        endpoint: str = "",
+        output_dimensionality: int = 0,
     ) -> None:
         self._provider = provider
         self._model = model
         self._cache_model = cache_model or model
+        explicit_provenance = str(provenance or "").strip()
+        provider_endpoint = endpoint or _provider_endpoint(provider)
+        provider_name = logical_provider or _provider_logical_name(provider)
+        requested_dimension = max(0, int(output_dimensionality or 0))
+        if not requested_dimension:
+            requested_dimension = _provider_output_dimensionality(provider)
+        if explicit_provenance:
+            self._embedding_provenance = explicit_provenance
+        elif logical_provider or endpoint or requested_dimension > 0 or provider_endpoint:
+            self._embedding_provenance = build_embedding_provenance(
+                provider_name,
+                provider_endpoint,
+                model,
+                requested_dimension,
+            )
+        else:
+            # Preserve the compact legacy cache namespace for small provider
+            # doubles and callers that do not expose endpoint provenance. The
+            # fingerprint still remains stable and includes provider/model.
+            self._embedding_provenance = ""
+        self._cache_namespace = (
+            hashlib.sha256(self._embedding_provenance.encode("utf-8")).hexdigest()[:32]
+            if self._embedding_provenance
+            else ""
+        )
+        # Keep ``_cache_model`` as the caller-visible model identity for
+        # compatibility, but use a provenance-qualified model in SQLite. This
+        # is the actual L2 namespace and prevents identical text/image keys
+        # from crossing endpoint/provider/model boundaries.
+        self._l2_cache_model = (
+            f"{self._cache_model}#namespace={self._cache_namespace}"
+            if self._cache_namespace
+            else self._cache_model
+        )
+        self._embedding_dimension = 0
         # OrderedDict + move_to_end on hit gives us proper LRU instead of
         # FIFO. With a 500-key cache and bursty access patterns (delight
         # scoring iterates the same like_texts repeatedly), FIFO would
@@ -256,6 +422,39 @@ class EmbeddingService:
         self._provider_semaphore = asyncio.Semaphore(max_concurrent_provider_calls)
         self.multimodal_enabled = bool(multimodal_enabled)
         self.supports_image_embedding = self._detect_image_embedding_support()
+
+    @property
+    def embedding_model(self) -> str:
+        """Configured provider model used for both text and image vectors."""
+        return self._model
+
+    @property
+    def embedding_provider(self) -> str:
+        """Stable provider implementation identifier for provenance records."""
+        provider_type = type(self._provider)
+        return f"{provider_type.__module__}.{provider_type.__qualname__}"
+
+    @property
+    def embedding_fingerprint(self) -> str:
+        """Stable provider/endpoint/model fingerprint, excluding runtime size."""
+        provenance = self._embedding_provenance or build_embedding_provenance(
+            self.embedding_provider,
+            "",
+            self._model,
+            0,
+        )
+        payload = f"{provenance}|{self.embedding_provider}|{self._model}|{self._cache_model}"
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
+
+    @property
+    def cache_model_namespace(self) -> str:
+        """The provenance-qualified model key used by the persistent cache."""
+        return self._l2_cache_model
+
+    @property
+    def embedding_dimension(self) -> int:
+        """Observed vector dimension, or zero before the first successful call."""
+        return self._embedding_dimension
 
     def image_embedding_active(self) -> bool:
         """True when config opts in and the provider/model can embed images."""
@@ -280,11 +479,15 @@ class EmbeddingService:
         cached = self._l1_cache.get(key)
         if cached is not None:
             self._l1_cache.move_to_end(key)
+            if cached:
+                self._embedding_dimension = len(cached)
             return cached
         if self._l2_cache is not None:
-            persisted = self._l2_cache.get(key, model=self._cache_model)
+            persisted = self._l2_cache.get(key, model=self._l2_cache_model)
             if persisted is not None:
                 self._l1_cache[key] = persisted
+                if persisted:
+                    self._embedding_dimension = len(persisted)
                 return persisted
         return []
 
@@ -292,9 +495,10 @@ class EmbeddingService:
         if len(self._l1_cache) >= self._cache_size and key not in self._l1_cache:
             self._l1_cache.popitem(last=False)
         self._l1_cache[key] = vector
+        self._embedding_dimension = len(vector)
         if self._l2_cache is not None:
             try:
-                self._l2_cache.put(key, vector, model=self._cache_model)
+                self._l2_cache.put(key, vector, model=self._l2_cache_model)
             except Exception:
                 logger.debug("L2 cache write failed", exc_info=True)
 
@@ -355,6 +559,45 @@ class EmbeddingService:
             )
             return []
 
+        self._store_vector(key, vector)
+        return vector
+
+    def lookup_cached_document(self, text: str) -> list[float]:
+        """Look up a full document key without the normal 200-char cap.
+
+        Recommendation/MMR text intentionally uses a bounded key.  Danmaku
+        summaries are a separate document contract: silently reducing them to
+        the same prefix would make distinct long summaries collide.
+        """
+        key = text.strip().lower()
+        return self._lookup_cache_key(key) if key else []
+
+    async def embed_document(self, text: str) -> list[float]:
+        """Embed and cache the complete normalized document text.
+
+        This mirrors :meth:`embed` but deliberately keeps the full summary in
+        both the provider request and cache key.  Empty provider results are
+        never cached, so a transient failure remains retryable.
+        """
+        key = text.strip().lower()
+        if not key:
+            return []
+        cached = self.lookup_cached_document(text)
+        if cached:
+            return cached
+        async with self._provider_semaphore:
+            try:
+                vector = await self._provider.embed(key, model=self._model)
+            except Exception:
+                logger.warning("Document embedding failed for: %s", key[:80], exc_info=True)
+                return []
+        if not vector:
+            logger.warning(
+                "Embedding service got empty document vector for key=%r — "
+                "skipping cache write so the next call retries.",
+                key[:80],
+            )
+            return []
         self._store_vector(key, vector)
         return vector
 

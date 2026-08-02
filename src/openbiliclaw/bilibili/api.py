@@ -11,9 +11,10 @@ import hashlib
 import logging
 import re
 import time
-from dataclasses import dataclass
-from typing import Any, ClassVar, cast
+from dataclasses import dataclass, field
+from typing import Any, ClassVar, Literal, cast
 from urllib.parse import quote, urlencode, urlparse
+from xml.etree import ElementTree
 
 import httpx
 
@@ -41,6 +42,19 @@ class BilibiliAPIError(RuntimeError):
     def __init__(self, message: str, *, code: int | None = None) -> None:
         super().__init__(message)
         self.code = code
+
+
+@dataclass(frozen=True)
+class DanmakuFetchResult:
+    """Raw danmaku fetch outcome with an explicit retryable failure state."""
+
+    status: Literal["success", "no_data", "transient_failure"]
+    texts: list[str] = field(default_factory=list)
+    reason: str = ""
+
+    @property
+    def definitive(self) -> bool:
+        return self.status in {"success", "no_data"}
 
 
 class BilibiliAuthExpiredError(BilibiliAPIError):
@@ -94,6 +108,10 @@ class VideoInfo:
     danmaku_count: int = 0
     tags: list[str] | None = None
     pub_date: str = ""
+    # Part ("P1") id — the key for danmaku / subtitle endpoints. Already
+    # present in the /x/web-interface/view payload, so reading it costs
+    # nothing extra.
+    cid: int = 0
 
 
 @dataclass
@@ -578,6 +596,7 @@ class BilibiliAPIClient:
             share_count=stat.get("share", 0),
             danmaku_count=stat.get("danmaku", 0),
             pub_date=data.get("pubdate", ""),
+            cid=int(data.get("cid", 0) or 0),
         )
 
     async def search(
@@ -996,6 +1015,64 @@ class BilibiliAPIClient:
             for reply in replies
         ]
         return comments[:limit]
+
+    async def get_danmaku_texts(self, cid: int, *, limit: int = 3000) -> list[str]:
+        """Fetch raw danmaku strings for one video part.
+
+        Uses the plain XML endpoint (``comment.bilibili.com/{cid}.xml``), which
+        needs no credentials and no WBI signing — unlike the protobuf segment
+        API. Goes through this client so it inherits the shared rate limit and
+        the ``trust_env=False`` CN-direct policy (pitfall rule 1).
+
+        This compatibility wrapper returns only the text list.  New callers
+        that persist enrichment state should use
+        :meth:`get_danmaku_texts_result` so an HTTP/parse failure is not
+        confused with a successful empty comment stream.
+        """
+        result = await self.get_danmaku_texts_result(cid, limit=limit)
+        return result.texts
+
+    async def get_danmaku_texts_result(
+        self,
+        cid: int,
+        *,
+        limit: int = 3000,
+    ) -> DanmakuFetchResult:
+        """Fetch danmaku and preserve successful-empty vs transient failure."""
+        part_id = int(cid or 0)
+        if part_id <= 0:
+            return DanmakuFetchResult("no_data", reason="invalid_cid")
+
+        try:
+            await self._respect_rate_limit()
+            response = await self._client.get(f"https://comment.bilibili.com/{part_id}.xml")
+            if response.status_code >= 400:
+                reason = f"http_{response.status_code}"
+                logger.warning("danmaku fetch failed for cid=%s: %s", part_id, reason)
+                return DanmakuFetchResult("transient_failure", reason=reason)
+            # httpx transparently inflates the deflate-encoded body.
+            root = ElementTree.fromstring(response.text)
+            root_name = str(root.tag).rsplit("}", 1)[-1].lower()
+            if root_name != "i":
+                # A 200 HTML challenge page is valid XML, but it is not a
+                # successful empty danmaku stream. Treating it as empty would
+                # permanently stamp this video as no-data.
+                reason = f"unexpected_root_{root_name or 'empty'}"
+                logger.warning("danmaku response invalid for cid=%s: %s", part_id, reason)
+                return DanmakuFetchResult("transient_failure", reason=reason)
+        except Exception as exc:
+            reason = f"{type(exc).__name__}"
+            logger.warning("danmaku fetch/parse failed for cid=%s: %s", part_id, reason)
+            return DanmakuFetchResult("transient_failure", reason=reason)
+
+        texts: list[str] = []
+        for node in root.iter("d"):
+            text = (node.text or "").strip()
+            if text:
+                texts.append(text)
+            if len(texts) >= max(1, int(limit)):
+                break
+        return DanmakuFetchResult("success", texts=texts)
 
     async def close(self) -> None:
         """Close the HTTP client."""

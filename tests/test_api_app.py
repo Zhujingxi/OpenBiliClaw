@@ -189,6 +189,17 @@ def test_discovery_config_response_caps_candidate_eval_concurrency_at_three() ->
         DiscoveryConfigOut(candidate_eval_concurrency=4)
 
 
+def test_discovery_config_response_defaults_to_hybrid_with_visual_features_off() -> None:
+    from openbiliclaw.api.models import DiscoveryConfigOut
+
+    config = DiscoveryConfigOut()
+
+    assert config.keyword_generation_mode == "hybrid"
+    assert config.multimodal_evaluation_enabled is False
+    assert config.visual_profile_enabled is False
+    assert config.keyframe_enabled is False
+
+
 def assert_publication(payload: dict[str, object]) -> None:
     assert payload["published_at"] == "2026-07-08T06:30:00Z"
     assert payload["published_label"] == "3 days ago"
@@ -2465,6 +2476,7 @@ class TestBackendAPI:
                 embedding_service: object = None,
                 task_registry: object = None,
                 xhs_self_info_provider: object = None,
+                **_extras: object,
             ) -> None:
                 self.llm = llm
                 self.database = database
@@ -14574,6 +14586,35 @@ class TestEmbeddingAndCompatProviderE2E:
         assert discovery["multimodal_image_quality"] == 80
         assert discovery["multimodal_image_timeout_seconds"] == 10
 
+    def test_put_config_round_trips_visual_enrichment_limits(self, monkeypatch, tmp_path) -> None:
+        from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig
+
+        cfg = Config(llm=LLMConfig(openai=LLMProviderConfig(api_key="sk-openai")))
+        client = self._make_client(monkeypatch, tmp_path, cfg)
+
+        response = client.put(
+            "/api/config",
+            json={
+                "discovery": {
+                    "keyframe_max_frames": 9,
+                    "keyframe_fetch_limit": 17,
+                    "danmaku_fetch_limit": 23,
+                    "danmaku_max_chars": 1800,
+                }
+            },
+        )
+
+        assert response.status_code == 200
+        assert cfg.discovery.keyframe_max_frames == 9
+        assert cfg.discovery.keyframe_fetch_limit == 17
+        assert cfg.discovery.danmaku_fetch_limit == 23
+        assert cfg.discovery.danmaku_max_chars == 1800
+        discovery = response.json()["config"]["discovery"]
+        assert discovery["keyframe_max_frames"] == 9
+        assert discovery["keyframe_fetch_limit"] == 17
+        assert discovery["danmaku_fetch_limit"] == 23
+        assert discovery["danmaku_max_chars"] == 1800
+
     def test_put_config_normalizes_bad_multimodal_discovery_settings(
         self, monkeypatch, tmp_path
     ) -> None:
@@ -18957,6 +18998,22 @@ class TestKeywordGenerationMode:
         from openbiliclaw.api.app import _derive_keyword_generation_mode
 
         assert _derive_keyword_generation_mode(enabled, replace) == expected
+
+    def test_default_config_derives_hybrid_mode(self) -> None:
+        from openbiliclaw.api.app import _derive_keyword_generation_mode
+        from openbiliclaw.config import Config
+
+        discovery = Config().discovery
+
+        assert discovery.inspiration_search_enabled is True
+        assert discovery.inspiration_replace_merged_keywords is False
+        assert (
+            _derive_keyword_generation_mode(
+                discovery.inspiration_search_enabled,
+                discovery.inspiration_replace_merged_keywords,
+            )
+            == "hybrid"
+        )
 
     @pytest.mark.parametrize(
         ("enabled", "replace", "expected"),

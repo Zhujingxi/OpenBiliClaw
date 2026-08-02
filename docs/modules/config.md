@@ -814,6 +814,20 @@ TOML 与显式环境变量覆盖在构造 `SchedulerConfig` 前统一归一为�
 
 > ✅ `unified_keyword_planner_enabled` **v0.3.124 起默认 `true`**：搜索词走统一规划器 + 关键词存储，本段其余字段随之生效。设为 `false` 可逐字回退到旧的逐平台搜索词生成路径（旧路径保留、回退无副作用）。
 
+#### Web 与插件设置页的「高级功能」
+
+桌面 Web 与浏览器插件 side panel 的设置页都提供独立的「高级功能」Tab：桌面端共 7 个 Tab，插件端共 6 个 Tab；两端固定使用同一套三个 section，字段语义、默认值和保存行为保持一致。
+
+- **推荐增强**：包含 P1 用户视觉画像、P2 弹幕语义、P3 视频关键帧的开关和预热参数。三者都是排序信号加权，不是过滤；P1/P3 依赖图像 Embedding，P2 只需文本 Embedding。P1 每个极性反馈不足 8 条时安全 no-op。关闭任一开关会保留缓存与参数并回退到原排序，不影响现有主流程；关键帧和弹幕目前仅作用于 B 站。
+- **多模态处理**：独立管理「图像 Embedding 能力」和「候选封面参与 LLM 评估」。前者是 P1/P3 的依赖，后者不会改变 P1/P3；Embedding provider、模型、凭据和探测仍在模型 Tab。
+- **搜索词生成**：集中管理经典、混合、灵感三档模式及成本提示；option value、顺序和文案与桌面端 / 插件端一致。
+
+两端保存按钮遵循同一状态机：配置无变化时禁用，有输入或程序化草稿修改时启用，请求进行中再次锁定。成功保存并以服务端配置重新回填后恢复禁用；请求失败会保留脏状态并重新允许保存，因此不会因无操作触发完整配置写入，也不会吞掉可重试的修改。
+
+两端加载时都会显式回填 `visual_profile_enabled`、`keyframe_enabled`、`keyframe_max_frames`、`keyframe_fetch_limit`、`danmaku_enabled`、`danmaku_fetch_limit`、`danmaku_max_chars`，保存时在已有 `discovery` 快照展开之后显式写入，数值范围分别为 `keyframe_max_frames=1..12`、两个 fetch limit 为 `1..200`、`danmaku_max_chars=100..2000`，默认值为 `4 / 50 / 50 / 500`。因此关闭开关不会因为保存设置而丢失预热参数或缓存。
+
+视觉相关能力保持显式 opt-in：`[llm.embedding].multimodal_enabled`、`multimodal_evaluation_enabled`、`visual_profile_enabled`、`keyframe_enabled` 的后端默认值、配置样例和两端初始控件均为 `false`。搜索词生成则默认使用“混合”，即 `inspiration_search_enabled=true`、`inspiration_replace_merged_keywords=false`；已有配置里显式保存的值保持不变。
+
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
 | `unified_keyword_planner_enabled` | bool | `true` | 统一关键词规划器总开关（v0.3.124 起默认 `true`）。`true` = 走 planner + 关键词存储；`false` = 回退旧逐平台搜索词生成。其余字段仅在 `true` 时生效 |
@@ -828,15 +842,29 @@ TOML 与显式环境变量覆盖在构造 `SchedulerConfig` 前统一归一为�
 | `plan_ttl_hours` | int | `12` | 兜底失效（小时）：即便画像 `profile_kw_digest` 未变，`pending` 关键词超过这个时长也会过期；同画像、同平台需求块、同池子避让提示的 merged keyword 生成结果也按这个 TTL 在进程内复用。小于 `1` 时回退默认值 |
 | `admission_min_score` | float | `0.60` | 普通推荐池统一入池最低分。候选行 / raw payload 显式 `score_threshold` 可作为策略阈值覆盖；来源标签如 `admission_policy="observed"` 不能绕过该分数门。探索类策略可略低于该值，但平台 / 插件来源不能获得特权。必须在 `(0, 1]` 内，非法值回退默认值 |
 | `candidate_eval_concurrency` | int | `3` | 候选 LLM 评估的期望 worker 数，合法范围 `1..3`；每个 worker 最多 30 条，因此总 raw 在途上限为 90。超出范围的手工 TOML / API 值按本段既有整型规则回退默认 `3`。有效值为 `min(本值, max(1, llm.concurrency-1))`，为聊天等交互保留一个全局 LLM 槽位；插件与桌面 Web 设置页可修改，CLI `config-show` 自动显示。移动 Web 没有配置面板，不适用。 |
-| `inspiration_search_enabled` | bool | `false` | 是否启用 query inspiration 脑暴阶段。开启后 `KeywordPlanner` 会通过本机 mcporter 搜索 provider 链获取搜索预览，再让 `discovery.keyword_inspiration` LLM caller 做 Profile Curator / Detail Expander，最终把带 `aspect_id/inspiration_id/expansion_id` 元数据的关键词写入 `discovery_keywords` |
+| `inspiration_search_enabled` | bool | `true` | 是否启用 query inspiration 脑暴阶段。默认与 merged keyword planner 并行组成“混合”模式；`KeywordPlanner` 会通过本机 mcporter 搜索 provider 链获取搜索预览，再让 `discovery.keyword_inspiration` LLM caller 做 Profile Curator / Detail Expander，最终把带 `aspect_id/inspiration_id/expansion_id` 元数据的关键词写入 `discovery_keywords` |
 | `inspiration_search_backends` | list[str] | `["local_cache", "platform_sources", "exa", "you"]` | query inspiration 搜索后端顺序。`local_cache` 会先从本地 `content_cache` 抽取相关标题 / URL / 摘要作为 evidence，本地命中不消耗外部 grounding 预算；证据不足时才 fallback。`platform_sources` 会从用户已启用且当前可同步/可注入 bridge 的平台源里抽样做 inspiration-only grounding（B站 / YouTube / X / Reddit；抖音 direct client；小红书 / 知乎 bridge 可用时），只把标题 / URL / 摘要作为灵感证据，不写候选池；`exa` 调用 `mcporter call exa.web_search_exa`；`you` 调用 `mcporter call you.you-search`（You.com Free MCP profile）。某个后端报错 / 限流 / 返回空结果时会继续尝试后面的后端。远端 MCP server 需要先写入本机 `config/mcporter.json` |
 | `inspiration_replace_merged_keywords` | bool | `false` | 实验性替换模式。仅在 `inspiration_search_enabled=true` 且 inspiration provider 可用时生效：due 平台跳过旧 `discovery.keyword_planner` merged call，只通过 search-backed inspiration flow 产词；当 B 站 explore 到期且有补货空间时，也会用同一轮共享 brainstorm / grounding stage 写入 `keyword_kind="explore"` 的探索词池。开 replace 前应先用 `keyword-inspiration-report` 跑 cohort 门禁，避免无质量数据直接替换 |
 | `inspiration_breadth` | str | `"high"` | 探索广度档位（Phase 2 config 收敛，13→4）：`low` / `medium` / `high`。旧的 10 个 `inspiration_*` 细粒度旋钮已删除，其派生成内部常量的有效值由本档位决定（见下表）。**默认 `high`（更宽的素材/轴/关键词产量）**；`medium` 逐项等于旧的 `_DEFAULT_INSPIRATION_*` 默认值，需与收敛前行为逐项对齐时显式设 `medium`。注意 `high` 会把每轮真实 probe 搜索与 LLM 用量放大（daemon 常驻），成本敏感可设 `medium`/`low`。非法档位（非 `low`/`medium`/`high`）→ 配置错误（`ConfigError`），未设置回退 `high` |
 | `multimodal_evaluation_enabled` | bool | `false` | 是否在 discovery batch evaluator 中加入候选封面图。默认关闭；开启后仅当当前 evaluation 路由支持图像输入且候选有 `cover_url` 时使用，否则自动退回纯文本评估 |
+| `danmaku_enabled` | bool | `false` | 是否启用**弹幕文本**加成（P2）：B 站候选喂给推荐的语义只有 `title` + `description`，而 description 常是"求三连"之类的无信息文本、`body_text` 在 B 站路径恒为空；弹幕是 B 站独有信号，反映观众实际在讨论什么。抓取走 `comment.bilibili.com/{cid}.xml`（**无需鉴权**，`cid` 直接从已有的 `/x/web-interface/view` 响应读，零额外请求），清洗后嵌入为独立排序信号。**纯文本信号，无需多模态嵌入模型**（与 P1/P3 不同）；仅对 B 站视频有效。默认关闭时加成恒 0，排序逐字节一致 |
+| `danmaku_fetch_limit` | int | `50` | 每轮预热处理的视频数上限。合法范围 `1..200` |
+| `danmaku_max_chars` | int | `500` | 弹幕摘要字数上限。合法范围 `100..2000`；摘要以完整配置长度走稳定 document-embedding/cache 路径，不会静默截成固定 200 字前缀 |
+| `keyframe_enabled` | bool | `false` | 是否启用**视频关键帧**加成（P3）：封面是 UP 主手选的营销图、常常标题党，不代表视频内容；B 站已为每个视频预生成关键帧雪碧图（进度条悬停预览），一次请求即可取到，**无需下载视频、无需 ffmpeg**。关键帧与共享视觉画像共用质心；因此即使只开 `keyframe_enabled`，也会在多模态 embedding 可用时构建质心，但 P1 封面 bonus 仍只由 `visual_profile_enabled` 控制。帧向量取 max-pool。需同时开 `[llm.embedding].multimodal_enabled` + 多模态嵌入模型；仅对 B 站视频有效（实测 30/30 覆盖率，时长 45s–5106s）。默认关闭时加成恒 0，排序与旧版逐字节一致 |
+| `keyframe_max_frames` | int | `4` | 每个视频采样的关键帧数。合法范围 `1..12`，超范围回退默认值。相邻关键帧高度冗余，4 帧已能覆盖正片（采样跨全部雪碧图均匀分布并跳过片头片尾） |
+| `keyframe_fetch_limit` | int | `50` | 每轮预热处理的视频数上限。合法范围 `1..200` |
+| `visual_profile_enabled` | bool | `false` | 是否启用**用户视觉画像**加成（P1）：把点赞/踩过的推荐封面聚成 k 个均值质心，候选封面↔质心同模态余弦经 **margin 评分**映射为**有符号**加成（能分清 like/dislike 的区域 boost/suppress，分不清的 contested 区弃权；聚类前 cross-clean 标签噪声、聚类后 contested 检测），在 `serve()` 排序上与封面↔文本锚点加成并行叠加。质心构建调度与 P1 bonus 开关分离：`visual_profile_enabled` 关闭时仍可为已开启的 P3 构建共享质心。**冷启动门控**：per-polarity 不足 8 个封面时不建质心（排序不变）。质心和反馈更新时间绑定当前 embedding fingerprint / 维度；切换模型会重建。需同时开 `[llm.embedding].multimodal_enabled` + 多模态嵌入模型；与 `multimodal_evaluation_enabled` 互相独立。默认关闭/无反馈数据时加成恒 0，排序与旧版逐字节一致 |
 | `multimodal_batch_size` | int | `8` | 图文评估 batch 上限。合法范围 `1..12`，超范围回退默认值；纯文本评估仍使用调用方原 batch size |
 | `multimodal_image_max_px` | int | `384` | 送入评估器前封面图压缩后的最大边。合法范围 `128..768`，超范围回退默认值 |
 | `multimodal_image_quality` | int | `72` | JPEG 压缩质量。合法范围 `40..90`，超范围回退默认值 |
 | `multimodal_image_timeout_seconds` | int | `6` | 单张封面抓取与压缩超时秒数。合法范围 `1..20`，超范围回退默认值 |
+
+视觉 / 弹幕预热的四个数量字段（`keyframe_max_frames`、`keyframe_fetch_limit`、
+`danmaku_fetch_limit`、`danmaku_max_chars`）由配置文件和 `PUT /api/config` 使用同一组范围
+校验，并在 load → save → load 后保持原值。预热只查询当前 fresh、可服务的候选池；网络、HTTP、
+解析或 embedding 的瞬时失败不写完成状态，确认无数据或成功产生向量后才会推进状态。关键帧状态还
+绑定采样算法签名；视觉质心、关键帧和弹幕 embedding 绑定 provider / model / dimension fingerprint，
+因此换模型或维度会重建 / 重嵌入，不会把旧向量与新向量比较。
 
 默认 `[llm].concurrency=4`、`[discovery].candidate_eval_concurrency=3`，因此有效候选 worker 为 3，并为对话等交互保留一个总槽。高吞吐本地 profile 还可配合 `[scheduler].pool_target_count=600`、`[scheduler].discovery_limit=60`；显式旧值 `[llm].concurrency=3` 会保留为 3，此时后台与有效候选 worker 为 2。该 profile 不改变任何平台 `request_interval_seconds` / `min_interval_minutes`、daily budget、来源 share、raw ceiling 公式或 `admission_min_score`。
 
@@ -869,6 +897,8 @@ TOML 与显式环境变量覆盖在构造 `SchedulerConfig` 前统一归一为�
 #### `keyword_generation_mode`（搜索词生成模式，UI/API 派生便利层）
 
 配置页（**桌面 Web `/web` 与插件 popup 设置区**）把 `inspiration_search_enabled` / `inspiration_replace_merged_keywords` 两个布尔收成**单一「搜索词生成模式」下拉**（经典 / 混合 / 灵感）。这**不是** `DiscoveryConfig` 新字段——`config.toml` 仍只存这两个布尔（单一真相源）；`keyword_generation_mode` 只是 API 层的派生便利：`DiscoveryConfigOut` 读出它、`PUT /api/config` 把它翻译回两布尔，两端 UI 只见一个下拉。
+
+新配置及缺少该字段的 UI/API 回退默认选择 **混合 / `hybrid`**；已有配置若显式保存为经典或灵感则继续尊重原值，不做迁移覆盖。
 
 三档 ↔ 两布尔映射：
 

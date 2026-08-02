@@ -92,6 +92,8 @@ server-owned binding、context preview 与卡片 action 不改变 CLI 的既有�
 
 显示当前加载的配置、已注册的 LLM 端点实例、全局调用链和最终生效的默认实例。旧格式仍显示等价结果；v2 会额外区分实例 ID 与 Provider 类型，因此两个同类型渠道不会被合并。
 配置概览会直接显示「停止后台 LLM 请求」是否启用、「浏览器断开后暂停」是否启用和当前宽限秒数、「开机自启动」配置 / 系统注册状态、海外网络模式与自定义代理地址，以及默认关闭的「收藏自动同步」解析状态，方便确认实际网络路由和 `[saved_sync].auto_sync_enabled` 是否已经写入后端配置。
+推荐引擎构造同样读取 `[discovery]` 的 `keyframe_max_frames`、`keyframe_fetch_limit`、
+`danmaku_fetch_limit` 和 `danmaku_max_chars`；手动 `recommend` 的预热范围与 daemon/API 使用同一配置。
 
 ```bash
 $ openbiliclaw config-show

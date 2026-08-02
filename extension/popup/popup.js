@@ -7229,6 +7229,7 @@ function bindSettings() {
     ["models", document.getElementById("settingsTabModels")],
     ["sources", document.getElementById("settingsTabSources")],
     ["scheduler", document.getElementById("settingsTabScheduler")],
+    ["advanced", document.getElementById("settingsTabAdvanced")],
     ["general", document.getElementById("settingsTabGeneral")],
     ["logging", document.getElementById("settingsTabLogging")],
   ];
@@ -7239,10 +7240,12 @@ function bindSettings() {
       if (tab instanceof HTMLButtonElement) {
         tab.classList.toggle("is-active", isActive);
         tab.setAttribute("aria-selected", isActive ? "true" : "false");
+        tab.tabIndex = isActive ? 0 : -1;
       }
       const panel = overlay.querySelector(`[data-settings-panel="${name}"]`);
       if (panel instanceof HTMLElement) {
         panel.hidden = !isActive;
+        panel.setAttribute("aria-hidden", isActive ? "false" : "true");
       }
     }
   }
@@ -7250,6 +7253,23 @@ function bindSettings() {
   for (const [name, tab] of settingsTabs) {
     if (tab instanceof HTMLButtonElement) {
       tab.addEventListener("click", () => setActiveSettingsPanel(name));
+      tab.addEventListener("keydown", (event) => {
+        if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+        const tabs = settingsTabs
+          .map(([, candidate]) => candidate)
+          .filter((candidate) => candidate instanceof HTMLButtonElement);
+        const currentIndex = tabs.indexOf(tab);
+        if (currentIndex < 0 || !tabs.length) return;
+        event.preventDefault();
+        const nextIndex = event.key === "Home"
+          ? 0
+          : event.key === "End"
+            ? tabs.length - 1
+            : (currentIndex + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+        const nextTab = tabs[nextIndex];
+        setActiveSettingsPanel(nextTab.dataset.settingsTab || settingsTabs[nextIndex][0]);
+        nextTab.focus();
+      });
     }
   }
 
@@ -8061,6 +8081,7 @@ function bindSettings() {
           state.llmDraft.default_chain = next;
           setProbeStatus(document.getElementById("cfgProbeLlmChainStatus"), "", "");
           renderLlmRoutingSummary();
+          markSettingsDirty();
         });
       }
       actions.append(up, down, remove);
@@ -8130,6 +8151,7 @@ function bindSettings() {
     state.llmDraft.default_chain.push(instanceId);
     setProbeStatus(document.getElementById("cfgProbeLlmChainStatus"), "", "");
     renderLlmRoutingSummary();
+    markSettingsDirty();
   }
 
   function renderLlmDatalist(id, values, currentValue = "") {
@@ -8455,6 +8477,7 @@ function bindSettings() {
     state.llmProbeResults.delete(instanceId);
     closeLlmInstanceDialog();
     renderLlmRoutingSummary();
+    markSettingsDirty();
     showToast("实例草稿已更新；点击底部“保存配置”后生效。", "success");
   }
 
@@ -8470,6 +8493,7 @@ function bindSettings() {
     delete state.llmDraft.instances[instanceId];
     state.llmProbeResults.delete(instanceId);
     renderLlmRoutingSummary();
+    markSettingsDirty();
     showToast("实例已从草稿删除；保存配置后生效。", "success");
   }
 
@@ -8679,16 +8703,26 @@ function bindSettings() {
     setVal("cfgTrendingRefreshMinutes", cfg.scheduler?.trending_refresh_minutes);
     setVal("cfgExploreRefreshMinutes", cfg.scheduler?.explore_refresh_minutes);
     setVal("cfgDiscoveryLimit", cfg.scheduler?.discovery_limit);
-    setVal("cfgKeywordGenerationMode", cfg.discovery?.keyword_generation_mode || "legacy");
-    setVal("cfgCandidateEvalConcurrency", cfg.discovery?.candidate_eval_concurrency);
+    setVal("cfgKeywordGenerationMode", cfg.discovery?.keyword_generation_mode || "hybrid");
+    const visualProfile = document.getElementById("cfgVisualProfileEnabled");
+    if (visualProfile) visualProfile.checked = cfg.discovery?.visual_profile_enabled === true;
+    const keyframe = document.getElementById("cfgKeyframeEnabled");
+    if (keyframe) keyframe.checked = cfg.discovery?.keyframe_enabled === true;
+    setVal("cfgKeyframeMaxFrames", cfg.discovery?.keyframe_max_frames ?? 4);
+    setVal("cfgKeyframeFetchLimit", cfg.discovery?.keyframe_fetch_limit ?? 50);
+    const danmaku = document.getElementById("cfgDanmakuEnabled");
+    if (danmaku) danmaku.checked = cfg.discovery?.danmaku_enabled === true;
+    setVal("cfgDanmakuFetchLimit", cfg.discovery?.danmaku_fetch_limit ?? 50);
+    setVal("cfgDanmakuMaxChars", cfg.discovery?.danmaku_max_chars ?? 500);
+    setVal("cfgCandidateEvalConcurrency", cfg.discovery?.candidate_eval_concurrency ?? 3);
     const multimodalEvaluation = document.getElementById("cfgMultimodalEvaluationEnabled");
     if (multimodalEvaluation) {
       multimodalEvaluation.checked = cfg.discovery?.multimodal_evaluation_enabled === true;
     }
-    setVal("cfgMultimodalBatchSize", cfg.discovery?.multimodal_batch_size);
-    setVal("cfgMultimodalImageMaxPx", cfg.discovery?.multimodal_image_max_px);
-    setVal("cfgMultimodalImageQuality", cfg.discovery?.multimodal_image_quality);
-    setVal("cfgMultimodalImageTimeout", cfg.discovery?.multimodal_image_timeout_seconds);
+    setVal("cfgMultimodalBatchSize", cfg.discovery?.multimodal_batch_size ?? 8);
+    setVal("cfgMultimodalImageMaxPx", cfg.discovery?.multimodal_image_max_px ?? 384);
+    setVal("cfgMultimodalImageQuality", cfg.discovery?.multimodal_image_quality ?? 72);
+    setVal("cfgMultimodalImageTimeout", cfg.discovery?.multimodal_image_timeout_seconds ?? 6);
     setVal("cfgProactivePushInterval", cfg.scheduler?.proactive_push_interval_seconds);
     setVal("cfgSpeculatorIdleInterval", cfg.scheduler?.speculator_idle_interval_minutes);
     const autoUpdate = document.getElementById("cfgAutoUpdate");
@@ -8878,6 +8912,13 @@ function bindSettings() {
         multimodal_image_max_px: getInt("cfgMultimodalImageMaxPx", 384),
         multimodal_image_quality: getInt("cfgMultimodalImageQuality", 72),
         multimodal_image_timeout_seconds: getInt("cfgMultimodalImageTimeout", 6),
+        visual_profile_enabled: checked("cfgVisualProfileEnabled"),
+        keyframe_enabled: checked("cfgKeyframeEnabled"),
+        keyframe_max_frames: getInt("cfgKeyframeMaxFrames", 4),
+        keyframe_fetch_limit: getInt("cfgKeyframeFetchLimit", 50),
+        danmaku_enabled: checked("cfgDanmakuEnabled"),
+        danmaku_fetch_limit: getInt("cfgDanmakuFetchLimit", 50),
+        danmaku_max_chars: getInt("cfgDanmakuMaxChars", 500),
       },
       scheduler: {
         enabled: !checked("cfgSchedulerEnabled"),
@@ -9047,6 +9088,7 @@ function bindSettings() {
   // Counts distinct touched fields, not events, so retyping one input does not
   // inflate the number.
   const settingsDirtyFields = new Set();
+  let settingsSaveInFlight = false;
 
   function renderSettingsDirty() {
     const bar = document.getElementById("settingsSaveBar");
@@ -9054,6 +9096,7 @@ function bindSettings() {
     const count = settingsDirtyFields.size;
     if (bar) bar.dataset.dirty = count > 0 ? "true" : "false";
     if (msg) msg.textContent = count > 0 ? `已修改 ${count} 项，未保存` : "没有未保存的修改";
+    saveBtn.disabled = settingsSaveInFlight || count === 0;
   }
 
   function markSettingsDirty(target) {
@@ -9461,6 +9504,7 @@ function bindSettings() {
         if (shares.zhihu !== undefined) setVal("cfgPoolShareZhihu", shares.zhihu);
         if (shares.reddit !== undefined) setVal("cfgPoolShareReddit", shares.reddit);
         if (shares.bangumi !== undefined) setVal("cfgPoolShareBangumi", shares.bangumi);
+        markSettingsDirty(suggestBtn);
         showToast("已按已有信号填入建议比例，保存后生效。", "success");
       } catch (err) {
         showToast(`生成建议失败: ${err.message}`, "error");
@@ -9471,7 +9515,12 @@ function bindSettings() {
   }
 
   saveBtn.addEventListener("click", async () => {
-    saveBtn.disabled = true;
+    if (settingsSaveInFlight || settingsDirtyFields.size === 0) {
+      renderSettingsDirty();
+      return;
+    }
+    settingsSaveInFlight = true;
+    renderSettingsDirty();
     saveBtn.textContent = "保存中...";
     toast.hidden = true;
     try {
@@ -9507,6 +9556,8 @@ function bindSettings() {
         const result = await updateConfig(data);
         if (result.config) {
           populateForm(result.config);
+        } else {
+          clearSettingsDirty();
         }
         const tone = result.restart_required ? "warning" : result.reloaded ? "success" : "warning";
         showToast(result.message || "配置已保存。", tone);
@@ -9563,8 +9614,9 @@ function bindSettings() {
         showToast(`保存失败: ${err.message}`, "error");
       }
     } finally {
-      saveBtn.disabled = false;
+      settingsSaveInFlight = false;
       setSaveButtonMode(state.runtimeConfig?.degraded ? "degraded" : "");
+      renderSettingsDirty();
     }
   });
 }

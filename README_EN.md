@@ -642,6 +642,8 @@ images: proxy foreground + refresh prefetch → app-stable lane (total 4 / bg 3,
 │ Soul cognition: dual pending cooldown · one anchor · worker-only settlement · winner receipt · confusion FIFO · ledger · deep gate │
 │   LLM adapters · Source adapters (SourceAdapter) │
 │ Module route → LLM instance chain → adapter · SourceAdapter │
+│ Optional visual prewarm: covers / profile centroids / keyframes + danmaku │
+│ provenance (provider/model/dim/sampling) → empty-success / retryable fail │
 │ Config recovery draft (normal/degraded) → temp probe / exact /models (no write) │
 │ Source-family registry: alias · strategy · URL host │
 │             → pool accounting · durable seen_items ledger │
@@ -680,6 +682,23 @@ Desktop startup: recommendation hydration │ runtime hydration │ secondary he
 Overseas traffic: `[network].mode` → system proxy (default) / direct / custom proxy → LLM, YouTube, X/Reddit CLIs, Bangumi, updater, GitHub project stats; CN clients remain isolated and direct
 Manual Douyin discovery: CLI discover → daemon-equivalent producer → per-keyword outcomes → extension search/hot/feed → pending-eval pool
 ```
+
+### Optional visual and danmaku prewarming
+
+When `[discovery].keyframe_enabled` is on and multimodal embedding is available, keyframes build the
+same visual centroids used by P1; the P1 cover bonus is still controlled only by
+`visual_profile_enabled`. Keyframe cache provenance includes the sampling algorithm,
+`keyframe_max_frames`, embedding fingerprint, and dimension, so a model or sampling change rebuilds
+safely. Partial keyframe results carry stable sampled slots: successful slots may enter cache first,
+but completion is recorded only for confirmed no-data or a complete sample whose every embedding
+succeeds. Failed slots remain eligible for the next cycle.
+
+`keyframe_fetch_limit`, `danmaku_fetch_limit`, and `danmaku_max_chars` are range-validated in both the
+config file and config API. Danmaku summaries use the full `danmaku_max_chars` value for document
+embedding rather than a silent fixed prefix. Cross-platform visual bonuses keep zero fixed; on
+multi-platform batches both signs align to the observed global side maximum under the combined cap,
+while single-platform batches retain absolute magnitude. Zero / missing values stay zero. See
+[`docs/modules/recommendation.md`](docs/modules/recommendation.md) and [`docs/architecture.md`](docs/architecture.md) for the full contract.
 
 Remote extension access uses explicit, default-off device authentication: `ext-key generate` → digest-only backend config → `/api/auth/extension-token` short session. HTTP uses a Bearer header; only WebSocket and image proxy URLs carry the short session query.
 
@@ -805,7 +824,7 @@ Contributions welcome! See the [Contributing Guide](docs/contributing.md) to get
 - Thanks to [@tangle111-design](https://github.com/tangle111-design) for exploring `style_key` viewing modes, recommendation tone, Bilibili initialization, and LLM / profile workflow improvements in [#69](https://github.com/whiteguo233/OpenBiliClaw/pull/69). The relevant ideas have been reviewed, split up, and selectively merged into main.
 - Thanks to [@DongLanQwQ0](https://github.com/DongLanQwQ0) for polishing desktop web interactions — side-drawer collapse animation, a delight-card drag dead zone, and a stacked toast notification system — in [#102](https://github.com/whiteguo233/OpenBiliClaw/pull/102). Merged into main.
 - Thanks to [@DongLanQwQ0](https://github.com/DongLanQwQ0) for the desktop web theme-engine rework to oklch in [#110](https://github.com/whiteguo233/OpenBiliClaw/pull/110) — a single `--hue-primary` control point with a 12-hue tunable color picker, a five-step accent ramp, and unified interaction states. Merged into main.
-- Thanks to [@wuwafly3](https://github.com/wuwafly3) for contributing the DashScope (Alibaba Model Studio) multimodal embedding provider and the image-only cover-embedding design in [#100](https://github.com/whiteguo233/OpenBiliClaw/pull/100). The capability was reviewed, fixed (network routing / save-time validation), and reworked into the live cover-visual pipeline (consumed consistently by both delight and the normal feed) before merging into main (see [#116](https://github.com/whiteguo233/OpenBiliClaw/pull/116)).
+- Thanks to [@wuwafly3](https://github.com/wuwafly3) for continued work on multimodal recommendations: [#100](https://github.com/whiteguo233/OpenBiliClaw/pull/100) introduced the DashScope (Alibaba Model Studio) multimodal embedding provider and image-only cover vectors, while [#135](https://github.com/whiteguo233/OpenBiliClaw/pull/135) added the user visual profile (P1), Bilibili danmaku semantics (P2), video keyframes (P3), and cross-platform visual weighting pipeline. Mainline follow-up hardened the contracts and retry behavior, added configuration surfaces, and completed real-environment validation.
 
 ## ⭐ Star History
 

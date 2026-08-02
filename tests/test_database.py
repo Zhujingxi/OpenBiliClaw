@@ -1278,3 +1278,225 @@ def test_update_confusion_rejects_unknown_column(tmp_path: Path) -> None:
     cid = db.insert_confusion(topic="a")
     with pytest.raises(ValueError, match="Unknown confusion column"):
         db.update_confusion(cid, bogus="x")
+
+
+def test_visual_enrichment_provenance_requeues_old_namespace_and_sampling(
+    tmp_path: Path,
+) -> None:
+    db = _db(tmp_path)
+    db.cache_content(
+        bvid="BVPROV",
+        title="视频",
+        cover_url="",
+        relevance_score=0.8,
+        source="search",
+        pool_expression="表达",
+        pool_topic_label="主题",
+        topic_group="组",
+        style_key="tutorial",
+    )
+    db.mark_keyframes_fetched(
+        "BVPROV",
+        keyframe_count=1,
+        embedding_fingerprint="old",
+        embedding_dimension=3,
+        sampling_signature="sample-v1|max_frames=4",
+    )
+    db.update_danmaku_text(
+        "BVPROV",
+        danmaku_text="已保存摘要",
+        embedding_fingerprint="old",
+        embedding_dimension=3,
+    )
+    assert (
+        db.get_candidates_needing_keyframes(
+            embedding_fingerprint="old",
+            embedding_dimension=3,
+            sampling_signature="sample-v1|max_frames=4",
+        )
+        == []
+    )
+    assert (
+        db.get_candidates_needing_danmaku(embedding_fingerprint="old", embedding_dimension=3) == []
+    )
+    assert db.get_candidates_needing_keyframes(
+        embedding_fingerprint="new",
+        embedding_dimension=3,
+        sampling_signature="sample-v1|max_frames=4",
+    )
+    assert db.get_candidates_needing_danmaku(embedding_fingerprint="new", embedding_dimension=3)
+
+    db.replace_user_visual_clusters(
+        [{"polarity": "pos", "centroid": [1.0, 0.0, 0.0], "member_count": 1}]
+    )
+    assert db.get_user_visual_clusters(embedding_fingerprint="new") == []
+    db.replace_user_visual_clusters(
+        [
+            {
+                "polarity": "pos",
+                "centroid": [1.0, 0.0, 0.0],
+                "member_count": 1,
+            }
+        ],
+        embedding_fingerprint="new",
+        embedding_dimension=3,
+    )
+    assert len(db.get_user_visual_clusters(embedding_fingerprint="new")) == 1
+    db.close()
+
+
+def test_visual_enrichment_ignores_history_and_keeps_confirmed_empty_idempotent(
+    tmp_path: Path,
+) -> None:
+    db = _db(tmp_path)
+    db.cache_content(
+        bvid="BVSHOWN",
+        title="已展示",
+        cover_url="",
+        relevance_score=0.8,
+        source="search",
+        pool_expression="表达",
+        pool_topic_label="主题",
+        topic_group="组",
+        style_key="tutorial",
+    )
+    db.conn.execute(
+        "UPDATE content_cache SET pool_status = 'shown' WHERE bvid = ?",
+        ("BVSHOWN",),
+    )
+    db.conn.commit()
+    db.mark_keyframes_fetched(
+        "BVSHOWN",
+        keyframe_count=1,
+        embedding_fingerprint="old",
+        embedding_dimension=3,
+        sampling_signature="old-sampling",
+    )
+    db.update_danmaku_text(
+        "BVSHOWN",
+        danmaku_text="历史摘要",
+        embedding_fingerprint="old",
+        embedding_dimension=3,
+    )
+    assert (
+        db.get_candidates_needing_keyframes(
+            embedding_fingerprint="new",
+            embedding_dimension=3,
+            sampling_signature="new-sampling",
+        )
+        == []
+    )
+    assert (
+        db.get_candidates_needing_danmaku(embedding_fingerprint="new", embedding_dimension=3) == []
+    )
+
+    db.cache_content(
+        bvid="BVEMPTY",
+        title="确认空结果",
+        cover_url="",
+        relevance_score=0.8,
+        source="search",
+        pool_expression="表达",
+        pool_topic_label="主题",
+        topic_group="组",
+        style_key="tutorial",
+    )
+    db.mark_keyframes_fetched(
+        "BVEMPTY",
+        keyframe_count=0,
+        embedding_fingerprint="same",
+        embedding_dimension=0,
+        sampling_signature="old-sampling",
+    )
+    db.update_danmaku_text(
+        "BVEMPTY",
+        danmaku_text="",
+        embedding_fingerprint="same",
+        embedding_dimension=0,
+    )
+    assert (
+        db.get_candidates_needing_keyframes(
+            embedding_fingerprint="same",
+            embedding_dimension=3,
+            sampling_signature="new-sampling",
+        )
+        == []
+    )
+    assert (
+        db.get_candidates_needing_danmaku(embedding_fingerprint="same", embedding_dimension=3) == []
+    )
+    db.close()
+
+
+def test_visual_enrichment_treats_unknown_dimension_as_unknown_until_observed(
+    tmp_path: Path,
+) -> None:
+    db = _db(tmp_path)
+    db.cache_content(
+        bvid="BVUNKNOWNDIM",
+        title="未知维度",
+        cover_url="",
+        relevance_score=0.8,
+        source="search",
+        pool_expression="表达",
+        pool_topic_label="主题",
+        topic_group="组",
+        style_key="tutorial",
+    )
+    db.mark_keyframes_fetched(
+        "BVUNKNOWNDIM",
+        keyframe_count=1,
+        embedding_fingerprint="same",
+        embedding_dimension=0,
+        sampling_signature="sample-v1",
+    )
+    db.update_danmaku_text(
+        "BVUNKNOWNDIM",
+        danmaku_text="已有摘要",
+        embedding_fingerprint="same",
+        embedding_dimension=0,
+    )
+
+    # A zero stored/current dimension means unknown, not incompatible.
+    assert (
+        db.get_candidates_needing_keyframes(
+            embedding_fingerprint="same",
+            embedding_dimension=0,
+            sampling_signature="sample-v1",
+        )
+        == []
+    )
+    assert (
+        db.get_candidates_needing_keyframes(
+            embedding_fingerprint="same",
+            embedding_dimension=3,
+            sampling_signature="sample-v1",
+        )
+        == []
+    )
+    assert (
+        db.get_candidates_needing_danmaku(embedding_fingerprint="same", embedding_dimension=3) == []
+    )
+
+    # Once a positive dimension has actually been stored, a later positive
+    # dimension change is a real vector-space mismatch. Dimension-only calls
+    # must also work when no fingerprint is available yet.
+    db.mark_keyframes_fetched(
+        "BVUNKNOWNDIM",
+        keyframe_count=1,
+        embedding_fingerprint="same",
+        embedding_dimension=3,
+        sampling_signature="sample-v1",
+    )
+    db.update_danmaku_text(
+        "BVUNKNOWNDIM",
+        danmaku_text="已有摘要",
+        embedding_fingerprint="same",
+        embedding_dimension=3,
+    )
+    assert db.get_candidates_needing_keyframes(
+        embedding_dimension=4,
+        sampling_signature="sample-v1",
+    )
+    assert db.get_candidates_needing_danmaku(embedding_dimension=4)
+    db.close()

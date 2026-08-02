@@ -645,6 +645,8 @@ background ─ background admission (default 3) ──────┘
 │ Soul 认知纪律：待聊双轨冷却 · 单对话锚 · worker-only 结算 · 轻量 winner receipt · 疑惑 FIFO · 台账 · 深层门控 │
 │   LLM 适配层 · 多平台源适配（SourceAdapter）        │
 │   模块路由 → LLM 实例链 → Provider 适配 · 多平台源适配（SourceAdapter） │
+│   可选视觉预热：封面 / 画像质心 / 关键帧 + 弹幕 document embedding     │
+│   provenance（provider/model/dim/采样）→ 成功空 / 瞬时失败 → 下轮重试   │
 │   配置恢复草稿（正常/降级）→ 临时探测 / 精确实例 /models（不写盘）│
 │  来源族注册表：alias · strategy · URL host             │
 │             → pool 统计 · seen_items 持久化已看账本     │
@@ -683,6 +685,19 @@ durable turn → 固定时间/payload → 确认入口（待聊列表/卡片） 
 海外请求：设置页 `[network].mode` → 系统代理（默认）/ 直连 / 自定义代理 → LLM、YouTube、X/Reddit CLI、Bangumi、更新、GitHub 项目统计；国内平台保持独立直连
 手动抖音发现：CLI discover → daemon 同款 producer → 统一关键词终态 → 插件 search/hot/feed → 待评估池
 ```
+
+### 可选视觉与弹幕预热
+
+开启 `[discovery].keyframe_enabled` 时，只要多模态 embedding 可用，系统也会构建关键帧与 P1
+共用的视觉质心；P1 封面 bonus 仍只由 `visual_profile_enabled` 控制。关键帧按全局采样并把
+采样算法、`keyframe_max_frames`、embedding fingerprint 和维度写入缓存 provenance；换模型或
+采样配置会安全重建。partial 关键帧结果携带稳定 sampled-slot，成功槽位可先入缓存但不落完成戳；
+只有确认 no-data 或完整采样且所有 embedding 成功才完成，失败槽位保留下轮重试资格。
+
+`keyframe_fetch_limit`、`danmaku_fetch_limit` 和 `danmaku_max_chars` 同时受配置文件与配置 API
+范围校验；弹幕摘要按完整 `danmaku_max_chars` 做 document embedding，不静默截成固定前缀。
+跨平台视觉 bonus 以 0 为固定点；多平台正负两侧对齐到当前全局观测极值并受组合 cap 限制，单平台不放大绝对幅度，0 / 缺失保持 0。完整契约见
+[`docs/modules/recommendation.md`](docs/modules/recommendation.md) 与 [`docs/architecture.md`](docs/architecture.md)。
 
 远程扩展连接采用显式、默认关闭的设备认证：`ext-key generate` → 配置仅存摘要 → `/api/auth/extension-token` 换短会话；HTTP 使用 Bearer Header，WebSocket / 图片代理仅携带短会话 query。
 
@@ -817,7 +832,7 @@ OpenBiliClaw 的目标是做你的**全网个性化内容入口**——从 B 站
 - 感谢 [@tangle111-design](https://github.com/tangle111-design) 在 [#69](https://github.com/whiteguo233/OpenBiliClaw/pull/69) 贡献 `style_key` 观看模式、推荐语气、B 站初始化和 LLM / 画像流程方面的功能探索；相关思路已拆分评审并选择性合入主线。
 - 感谢 [@DongLanQwQ0](https://github.com/DongLanQwQ0) 在 [#102](https://github.com/whiteguo233/OpenBiliClaw/pull/102) 贡献桌面 Web 侧栏折叠动画、delight 卡片拖拽死区、栈式 toast 通知等交互细节打磨，已合入主线。
 - 感谢 [@DongLanQwQ0](https://github.com/DongLanQwQ0) 在 [#110](https://github.com/whiteguo233/OpenBiliClaw/pull/110) 贡献桌面 Web 主题引擎 oklch 化重构，引入 `--hue-primary` 单一控制点与 12 色相可调拾色器、五级强调色阶与统一交互态，已合入主线。
-- 感谢 [@wuwafly3](https://github.com/wuwafly3) 在 [#100](https://github.com/whiteguo233/OpenBiliClaw/pull/100) 贡献 DashScope（阿里百炼）多模态 embedding provider 与「封面 image-only 向量」的设计与实现；相关能力经评审、修复（网络路由 / 保存校验）并重做为线上封面视觉链路（惊喜与正常推荐一致消费）后合入主线（见 [#116](https://github.com/whiteguo233/OpenBiliClaw/pull/116)）。
+- 感谢 [@wuwafly3](https://github.com/wuwafly3) 持续贡献多模态推荐能力：在 [#100](https://github.com/whiteguo233/OpenBiliClaw/pull/100) 中实现 DashScope（阿里百炼）多模态 embedding provider 与封面 image-only 向量，并在 [#135](https://github.com/whiteguo233/OpenBiliClaw/pull/135) 中进一步实现用户视觉画像（P1）、B 站弹幕语义（P2）、视频关键帧（P3）及跨平台视觉加权管线；主干在这些实现上完成契约加固、失败重试、配置界面与真实环境验收。
 
 ## ⭐ Star History
 
