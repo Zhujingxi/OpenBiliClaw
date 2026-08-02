@@ -90,6 +90,11 @@ test("Firefox AMO workflow submits a listed build with metadata and reviewer sou
   assert.match(workflow, /--upload-source-code=/);
   assert.match(workflow, /firefox-amo-privacy\.mjs/);
   assert.match(workflow, /firefox-amo-status\.mjs/);
+  assert.match(workflow, /id: privacy\n\s+continue-on-error: true/);
+  assert.ok(
+    workflow.indexOf("Submit listed package to AMO") <
+      workflow.indexOf("Synchronize AMO privacy policy"),
+  );
   assert.deepEqual(metadata.categories?.firefox, ["photos-music-videos"]);
   assert.deepEqual(metadata.categories?.android, ["photos-music-videos"]);
   assert.equal(metadata.version?.license, "MIT");

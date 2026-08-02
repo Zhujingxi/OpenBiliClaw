@@ -7,8 +7,8 @@
 ## extension v0.3.193：Firefox AMO 公开商店提审（2026-08-03）
 
 - **Firefox 首次公开上架不再复用 unlisted 签名链路**：新增手动 `Submit Firefox AMO Listed Package` workflow，以全局唯一的扩展版本构建 `dist-firefox/`，携带双语名称、摘要、描述、MIT license、合法 Firefox / Android 分类和审核说明提交 `web-ext sign --channel=listed`；0.3.192 已作为 unlisted 版本存在，故公开提审使用独立扩展版本 0.3.193，后端与桌面版本仍保持 0.3.192。
-- **审核所需源码与隐私资料和提交包同源**：workflow 从同一 Git commit 打包 `extension/`、共享 Web 模块、lockfile、构建说明和 `docs/privacy.md`，主动通过 `--upload-source-code` 附上可复现源码；提交前用 authenticated AMO API 精确同步隐私政策，提交后查询版本列表并要求 0.3.193 的 channel 真实为 `listed`，避免把上传成功误报成已提审。
-- **AMO 元数据请求显式遵守严格 JSON content negotiation，并避开 action 路由的 GUID 歧义**：首次真实提审在隐私政策 PATCH 阶段收到无响应体的 HTTP 406，且扩展包尚未上传；对照 `web-ext` 官方客户端后，统一增加 `Accept: application/json`、稳定 `User-Agent` 与写请求 `Content-Type: application/json`。第二次真实请求证明仅补请求头仍不足，因此隐私同步先用 Gecko GUID 读取 add-on detail、取得 canonical 数字 ID，再以数字 ID 访问 `eula_policy` action，避免含 `@` 和多段 `.` 的 GUID 落入 DRF action / format 路由歧义。
+- **审核所需源码与隐私资料和提交包同源**：workflow 从同一 Git commit 打包 `extension/`、共享 Web 模块、lockfile、构建说明和 `docs/privacy.md`，主动通过 `--upload-source-code` 附上可复现源码；提交后查询版本列表并要求 0.3.193 的 channel 真实为 `listed`，避免把上传成功误报成已提审。
+- **AMO 隐私字段故障不再反向阻断版本提审**：连续真实请求证明 `eula_policy` PATCH 无论补齐与 `web-ext` 一致的 JSON headers、使用 Gecko GUID 还是 canonical 数字 add-on ID，当前 developer JWT 都只收到无正文 HTTP 406；该非必需字段因此移动到 listed 版本已受理并核验之后 best-effort 同步，失败会在 workflow 留下显式 warning 和 Developer Hub 手动回填指引。manifest 数据类别、reviewer notes、双语 listing 描述、随 reviewer source 附带的 `docs/privacy.md` 仍随提审送达，不会把隐私披露静默省略。
 
 ## v0.3.192：多模态推荐、可靠反馈与连接增强（2026-08-03）
 

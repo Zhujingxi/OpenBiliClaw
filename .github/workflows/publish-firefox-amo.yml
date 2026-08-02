@@ -48,13 +48,6 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "Reviewer source archive: $(basename "$archive")"
 
-      - name: Synchronize AMO privacy policy
-        env:
-          AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
-          AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
-        run: node scripts/firefox-amo-privacy.mjs
-        working-directory: extension
-
       - name: Submit listed package to AMO
         env:
           AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
@@ -81,6 +74,20 @@ jobs:
           EXTENSION_VERSION: ${{ steps.source.outputs.version }}
         run: node scripts/firefox-amo-status.mjs --version "$EXTENSION_VERSION"
         working-directory: extension
+
+      - name: Synchronize AMO privacy policy
+        id: privacy
+        continue-on-error: true
+        env:
+          AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
+          AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+        run: node scripts/firefox-amo-privacy.mjs
+        working-directory: extension
+
+      - name: Report AMO privacy policy sync fallback
+        if: steps.privacy.outcome == 'failure'
+        run: |
+          echo "::warning::AMO accepted the listed version, but its eula_policy API returned HTTP 406. The manifest data-collection declaration, reviewer notes, bundled docs/privacy.md, and listing description remain the authoritative disclosures; update the Developer Hub privacy-policy field manually if AMO exposes it."
 
       - name: Retain reviewer source archive
         uses: actions/upload-artifact@v7
