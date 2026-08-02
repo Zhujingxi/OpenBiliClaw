@@ -94,6 +94,9 @@ PYTHONPATH=src .venv/bin/python scripts/capture_chrome_webstore_ui.py \
 .venv/bin/python scripts/build_chrome_webstore_assets.py
 ```
 
+该脚本使用脱敏的演示夹具，只用于 Chrome Web Store 素材。README 与 GitHub Pages
+首页引用的 `docs/images/` 截图必须来自真实运行中的 OpenBiliClaw，不得用该脚本覆盖。
+
 `build_chrome_webstore_demo_covers.py` 会确定性生成 8 张 640×360 本地插画封面，分别供七条推荐和一个惊喜推荐使用；它们不是任何平台或创作者的真实媒体。捕获脚本只连接临时 `127.0.0.1` 脱敏演示服务，封面也经真实 UI 的本机 `/api/image-proxy` 链路加载，并拦截所有非本机请求；不得用真实 `config.toml`、数据库、Cookie、账号名或画像文本生成商店素材。
 
 ## Metadata API bridge
