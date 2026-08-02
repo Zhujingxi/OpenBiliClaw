@@ -723,6 +723,7 @@ class RuntimeContext:
         from openbiliclaw.recommendation.engine import RecommendationEngine
         from openbiliclaw.runtime.account_sync import AccountSyncService
         from openbiliclaw.runtime.refresh import ContinuousRefreshController
+        from openbiliclaw.runtime.source_incremental_sync import SourceIncrementalSync
         from openbiliclaw.runtime.updater import AutoUpdateService
         from openbiliclaw.saved_sync.adapters.bilibili import BilibiliNativeSaveAdapter
         from openbiliclaw.saved_sync.adapters.extension import (
@@ -1252,6 +1253,33 @@ class RuntimeContext:
             inspiration_provider=inspiration_provider,
         )
 
+        async def _kick_source_incremental(source: str) -> None:
+            publish = getattr(self.event_hub, "publish", None)
+            if callable(publish):
+                await publish({"type": f"{source}_task_available"})
+
+        source_configs = getattr(new_config, "sources", None)
+
+        def _source_enabled(name: str) -> bool:
+            return bool(getattr(getattr(source_configs, name, None), "enabled", False))
+
+        new_source_incremental_sync = SourceIncrementalSync(
+            database=self.database,
+            memory_manager=self.memory_manager,
+            presence=self.presence,
+            source_enabled={
+                "xhs": _source_enabled("xiaohongshu"),
+                "dy": _source_enabled("douyin"),
+                "yt": _source_enabled("youtube"),
+                "zhihu": _source_enabled("zhihu"),
+                "reddit": _source_enabled("reddit"),
+            },
+            scheduler_config=new_config.scheduler,
+            profile_ready=lambda: bool(new_soul_engine.is_profile_ready()),
+            init_active=lambda: bool(self.init_coordinator.init_active()),
+            kick=_kick_source_incremental,
+        )
+
         new_runtime_controller = ContinuousRefreshController(
             memory_manager=self.memory_manager,
             database=self.database,
@@ -1261,6 +1289,7 @@ class RuntimeContext:
             discovery_candidate_pipeline=new_candidate_pipeline,
             keyword_planner=new_keyword_planner,
             keyword_fetch=new_keyword_fetch,
+            source_incremental_sync=new_source_incremental_sync,
             pool_target_count=new_config.scheduler.pool_target_count,
             pool_source_shares=_pool_source_shares_from_config(new_config),
             signal_event_threshold=int(getattr(new_config.scheduler, "signal_event_threshold", 6)),
@@ -1591,7 +1620,14 @@ class RuntimeContext:
         # Start new tasks from the freshly-built components.
         # v0.3.63+: route through ``self.task_registry.track`` so the
         # next hot-reload's ``cancel_all`` cleanly stops them too.
-        if run_post_reload_llm_work:
+        # The extension-account scheduler is independent of LLM work.  A
+        # real controller therefore still owns one ``run_forever`` task when
+        # post-reload LLM one-shots are suppressed (for example while guided
+        # init is active); its own init/profile gates keep collection paused.
+        controller_has_source_sync = (
+            getattr(self.runtime_controller, "source_incremental_sync", None) is not None
+        )
+        if run_post_reload_llm_work or controller_has_source_sync:
             run_forever = getattr(self.runtime_controller, "run_forever", None)
             if "refresh_task" not in stuck_tasks:
                 app.state.refresh_task = (

@@ -13451,9 +13451,9 @@ def create_app(
         """Accept a Zhihu task result from the extension dispatcher.
 
         Plain ``fetch-zhihu`` smoke tasks only record the task payload. Tasks
-        explicitly marked ``profile_update`` also propagate bootstrap events to
-        memory and, once a profile exists, into the incremental profile-update
-        pipeline.
+        explicitly marked ``profile_update`` or ``incremental`` also propagate
+        bootstrap events to memory and, once a profile exists, into the
+        incremental profile-update pipeline.
         """
         task_id = str(payload.get("task_id", "") or "").strip()
         if not task_id:
@@ -13486,6 +13486,7 @@ def create_app(
                 if isinstance(parsed_payload, dict):
                     task_payload = parsed_payload
         profile_update = bool(task_payload.get("profile_update"))
+        incremental = bool(task_payload.get("incremental"))
 
         from openbiliclaw.sources.task_result_protocol import (
             parse_task_result,
@@ -13524,7 +13525,7 @@ def create_app(
             _skip_profile = _init_busy and not _init_owns_task(task_id)
             if (
                 task_type == "bootstrap_events"
-                and profile_update
+                and (profile_update or incremental)
                 and canonical_items
                 and not _skip_profile
             ):
@@ -14366,6 +14367,12 @@ def create_app(
                     cfg.scheduler.pool_source_shares
                 ),
                 account_sync_interval_hours=cfg.scheduler.account_sync_interval_hours,
+                source_incremental_hours=getattr(cfg.scheduler, "source_incremental_hours", 24),
+                xhs_incremental_hours=getattr(cfg.scheduler, "xhs_incremental_hours", None),
+                douyin_incremental_hours=getattr(cfg.scheduler, "douyin_incremental_hours", None),
+                youtube_incremental_hours=getattr(cfg.scheduler, "youtube_incremental_hours", None),
+                zhihu_incremental_hours=getattr(cfg.scheduler, "zhihu_incremental_hours", None),
+                reddit_incremental_hours=getattr(cfg.scheduler, "reddit_incremental_hours", None),
                 refresh_check_interval_seconds=cfg.scheduler.refresh_check_interval_seconds,
                 signal_event_threshold=cfg.scheduler.signal_event_threshold,
                 feedback_batch_threshold=cfg.scheduler.feedback_batch_threshold,
@@ -15394,6 +15401,7 @@ def create_app(
             _DEFAULT_PROACTIVE_PUSH_INTERVAL_SECONDS,
             _DEFAULT_REFRESH_CHECK_INTERVAL_SECONDS,
             _DEFAULT_SIGNAL_EVENT_THRESHOLD,
+            _DEFAULT_SOURCE_INCREMENTAL_HOURS,
             _DEFAULT_SPECULATOR_IDLE_INTERVAL_MINUTES,
             _DEFAULT_TRENDING_REFRESH_MINUTES,
             _collect_config_issues,
@@ -15402,6 +15410,7 @@ def create_app(
             _normalize_pool_source_shares,
             _normalize_probability,
             _normalize_scheduler_int,
+            _normalize_source_incremental_hours,
             _validate_auto_update_check_interval,
             load_config,
             normalize_outbound_proxy,
@@ -15411,6 +15420,10 @@ def create_app(
 
         cfg = load_config()
         update = payload.model_dump(exclude_none=True)
+        # Preserve an explicit ``null`` for optional incremental overrides so
+        # the API can restore inheritance; omitted fields still remain absent.
+        if payload.scheduler is not None:
+            update["scheduler"] = dict(payload.scheduler)
         reset_fields = [str(field) for field in update.pop("reset_fields", [])]
         suppress_background_llm_work = bool(update.pop("suppress_background_llm_work", False))
         unknown_reset_fields = [
@@ -15988,6 +16001,12 @@ def create_app(
                 "discovery_cron",
                 "pool_target_count",
                 "account_sync_interval_hours",
+                "source_incremental_hours",
+                "xhs_incremental_hours",
+                "douyin_incremental_hours",
+                "youtube_incremental_hours",
+                "zhihu_incremental_hours",
+                "reddit_incremental_hours",
                 "refresh_check_interval_seconds",
                 "signal_event_threshold",
                 "trending_refresh_minutes",
@@ -16032,6 +16051,39 @@ def create_app(
                         except ValueError as exc:
                             raise HTTPException(status_code=400, detail=str(exc)) from exc
                         setattr(cfg.scheduler, key, interval)
+                    elif key in {
+                        "xhs_incremental_hours",
+                        "douyin_incremental_hours",
+                        "youtube_incremental_hours",
+                        "zhihu_incremental_hours",
+                        "reddit_incremental_hours",
+                    }:
+                        try:
+                            source_interval = _normalize_source_incremental_hours(
+                                sdata[key],
+                                default=None,
+                                allow_none=True,
+                                strict=True,
+                            )
+                        except ValueError as exc:
+                            raise HTTPException(status_code=400, detail=str(exc)) from exc
+                        setattr(cfg.scheduler, key, source_interval)
+                    elif key == "source_incremental_hours":
+                        try:
+                            global_interval = _normalize_source_incremental_hours(
+                                sdata[key],
+                                default=_DEFAULT_SOURCE_INCREMENTAL_HOURS,
+                                allow_none=False,
+                                strict=True,
+                            )
+                        except ValueError as exc:
+                            raise HTTPException(status_code=400, detail=str(exc)) from exc
+                        if global_interval is None:
+                            raise HTTPException(
+                                status_code=400,
+                                detail="source_incremental_hours must be an integer in 0..168",
+                            )
+                        setattr(cfg.scheduler, key, global_interval)
                     elif key in scheduler_int_limits:
                         default, min_value, max_value = scheduler_int_limits[key]
                         setattr(

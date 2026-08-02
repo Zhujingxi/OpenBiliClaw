@@ -13,6 +13,7 @@ import json
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 INIT_BOOTSTRAP_MAX_ITEMS_PER_SCOPE = 300
@@ -85,6 +86,61 @@ def _incremental_payload(payload: dict[str, Any], incremental: bool) -> dict[str
     if incremental:
         payload["incremental"] = True
     return payload
+
+
+def seed_guided_init_attempts(
+    memory_manager: Any,
+    statuses: dict[str, object],
+    *,
+    now: datetime | None = None,
+) -> tuple[str, ...]:
+    """Atomically seed scheduler timestamps for successful init collectors.
+
+    XHS, Douyin, YouTube, and Zhihu have ambiguous ``empty`` results: the
+    extension can complete the task while the site is logged out or blocked,
+    so only ``ok`` is evidence that a usable bootstrap pull completed. Reddit
+    is deliberately different: its bootstrap first positively resolves
+    ``/api/me`` and maps an unauthenticated response to ``login_required``;
+    therefore ``empty`` is a genuine successful-empty pull for Reddit.
+    """
+    eligible: list[str] = []
+    for source, status in (
+        ("xhs", statuses.get("xhs")),
+        ("dy", statuses.get("dy")),
+        ("yt", statuses.get("yt")),
+        ("zhihu", statuses.get("zhihu")),
+    ):
+        if str(status or "").strip().lower() == "ok":
+            eligible.append(source)
+    if str(statuses.get("reddit") or "").strip().lower() in {"ok", "empty"}:
+        # Reddit's ``empty`` is evidence-backed, unlike the four browser pages
+        # above; keep this distinction explicit so future status refactors do
+        # not turn a logged-out result into a successful schedule stamp.
+        eligible.append("reddit")
+    if not eligible:
+        return ()
+
+    current = now or datetime.now(UTC)
+    timestamp = (
+        current.replace(tzinfo=UTC) if current.tzinfo is None else current.astimezone(UTC)
+    ).isoformat()
+    update_state = getattr(memory_manager, "update_source_bootstrap_state", None)
+    if not callable(update_state):
+        raise RuntimeError("memory manager lacks atomic source bootstrap state updates")
+
+    def _mutate(state: dict[str, object]) -> dict[str, object]:
+        raw_incremental = state.get("source_incremental")
+        incremental = dict(raw_incremental) if isinstance(raw_incremental, dict) else {}
+        raw_attempts = incremental.get("last_attempt_at")
+        attempts = dict(raw_attempts) if isinstance(raw_attempts, dict) else {}
+        for source in eligible:
+            attempts[source] = timestamp
+        incremental["last_attempt_at"] = attempts
+        state["source_incremental"] = incremental
+        return state
+
+    update_state(_mutate)
+    return tuple(eligible)
 
 
 def enqueue_xhs_bootstrap(
@@ -442,4 +498,5 @@ __all__ = [
     "enqueue_xhs_bootstrap",
     "enqueue_yt_bootstrap",
     "enqueue_zhihu_bootstrap",
+    "seed_guided_init_attempts",
 ]

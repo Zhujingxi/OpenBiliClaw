@@ -375,3 +375,78 @@ def test_cli_wrapper_maps_created_result_and_respects_deferred_kick(
 
 def _repo_root() -> str:
     return str(__file__).rsplit("/tests/", 1)[0]
+
+
+@pytest.mark.parametrize("source", ("xhs", "dy", "yt", "zhihu"))
+def test_guided_init_seeds_only_ok_for_ambiguous_empty_sources(source: str) -> None:
+    from openbiliclaw.sources.source_bootstrap import seed_guided_init_attempts
+
+    memory = _SeedMemory()
+    statuses = {key: "skipped" for key in ("xhs", "dy", "yt", "zhihu", "reddit")}
+    statuses[source] = "empty"
+    assert seed_guided_init_attempts(memory, statuses) == ()
+    assert memory.update_calls == 0
+
+    statuses[source] = "ok"
+    assert seed_guided_init_attempts(memory, statuses) == (source,)
+    assert source in memory.state["source_incremental"]["last_attempt_at"]
+
+
+@pytest.mark.parametrize("status", ("ok", "empty"))
+def test_reddit_empty_is_seeded_because_login_is_resolved_before_bootstrap(status: str) -> None:
+    from openbiliclaw.sources.source_bootstrap import seed_guided_init_attempts
+
+    # Reddit's bootstrap resolves /api/me first and maps an unauthenticated
+    # response to login_required, so an empty authenticated result is real
+    # evidence of a completed pull. Other sources do not make that claim.
+    memory = _SeedMemory()
+    statuses = {key: "skipped" for key in ("xhs", "dy", "yt", "zhihu", "reddit")}
+    statuses["reddit"] = status
+
+    assert seed_guided_init_attempts(memory, statuses) == ("reddit",)
+    assert memory.update_calls == 1
+
+
+def test_guided_init_seeds_all_eligible_sources_with_one_atomic_update() -> None:
+    from openbiliclaw.sources.source_bootstrap import seed_guided_init_attempts
+
+    memory = _SeedMemory()
+    statuses = {key: "ok" for key in ("xhs", "dy", "yt", "zhihu", "reddit")}
+    statuses["reddit"] = "empty"
+
+    assert seed_guided_init_attempts(memory, statuses) == (
+        "xhs",
+        "dy",
+        "yt",
+        "zhihu",
+        "reddit",
+    )
+    assert memory.update_calls == 1
+    assert set(memory.state["source_incremental"]["last_attempt_at"]) == set(statuses)  # type: ignore[index]
+
+
+@pytest.mark.parametrize("source", ("xhs", "dy", "yt", "zhihu", "reddit"))
+@pytest.mark.parametrize("status", ("degraded", "failed", "login_required", "timeout", "skipped"))
+def test_guided_init_does_not_seed_non_success_statuses(source: str, status: str) -> None:
+    from openbiliclaw.sources.source_bootstrap import seed_guided_init_attempts
+
+    memory = _SeedMemory()
+    statuses = {key: "skipped" for key in ("xhs", "dy", "yt", "zhihu", "reddit")}
+    statuses[source] = status
+    assert seed_guided_init_attempts(memory, statuses) == ()
+    assert memory.update_calls == 0
+
+
+class _SeedMemory:
+    def __init__(self) -> None:
+        from openbiliclaw.sources.bootstrap_state import default_source_bootstrap_state
+
+        self.state = default_source_bootstrap_state()
+        self.update_calls = 0
+
+    def update_source_bootstrap_state(self, mutator: Any) -> dict[str, object]:
+        self.update_calls += 1
+        result = mutator(self.state)
+        if result is not None:
+            self.state = result
+        return self.state

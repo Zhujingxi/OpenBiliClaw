@@ -84,6 +84,9 @@ _MIN_POOL_TARGET_COUNT = 1
 _MAX_POOL_TARGET_COUNT = 600
 _DEFAULT_EXTENSION_DISCONNECT_GRACE_SECONDS = 90
 _DEFAULT_EXTENSION_TOKEN_TTL_HOURS = 24
+_DEFAULT_SOURCE_INCREMENTAL_HOURS = 24
+_MIN_SOURCE_INCREMENTAL_HOURS = 0
+_MAX_SOURCE_INCREMENTAL_HOURS = 168
 _DEFAULT_REFRESH_CHECK_INTERVAL_SECONDS = 60
 _DEFAULT_SIGNAL_EVENT_THRESHOLD = 6
 _DEFAULT_TRENDING_REFRESH_MINUTES = 3
@@ -155,6 +158,15 @@ _DEFAULT_POOL_SOURCE_SHARES = {
     "zhihu": 1,
     "reddit": 1,
     "bangumi": 1,
+}
+
+_SOURCE_INCREMENTAL_ENV_FIELDS = {
+    "OPENBILICLAW_SCHEDULER_SOURCE_INCREMENTAL_HOURS": "source_incremental_hours",
+    "OPENBILICLAW_SCHEDULER_XHS_INCREMENTAL_HOURS": "xhs_incremental_hours",
+    "OPENBILICLAW_SCHEDULER_DOUYIN_INCREMENTAL_HOURS": "douyin_incremental_hours",
+    "OPENBILICLAW_SCHEDULER_YOUTUBE_INCREMENTAL_HOURS": "youtube_incremental_hours",
+    "OPENBILICLAW_SCHEDULER_ZHIHU_INCREMENTAL_HOURS": "zhihu_incremental_hours",
+    "OPENBILICLAW_SCHEDULER_REDDIT_INCREMENTAL_HOURS": "reddit_incremental_hours",
 }
 _DEFAULT_AUTO_UPDATE_ALLOWED_REMOTES = [
     "https://github.com/whiteguo233/OpenBiliClaw.git",
@@ -904,6 +916,14 @@ class SchedulerConfig:
         default_factory=lambda: dict(_DEFAULT_POOL_SOURCE_SHARES)
     )
     account_sync_interval_hours: int = 6
+    # Extension-online periodic account bootstrap refresh.  Zero disables the
+    # global schedule; a source override of ``None`` inherits the global value.
+    source_incremental_hours: int = _DEFAULT_SOURCE_INCREMENTAL_HOURS
+    xhs_incremental_hours: int | None = None
+    douyin_incremental_hours: int | None = None
+    youtube_incremental_hours: int | None = None
+    zhihu_incremental_hours: int | None = None
+    reddit_incremental_hours: int | None = None
     refresh_check_interval_seconds: int = _DEFAULT_REFRESH_CHECK_INTERVAL_SECONDS
     signal_event_threshold: int = _DEFAULT_SIGNAL_EVENT_THRESHOLD
     # 2026-07-26: unit changed hours → minutes and both aligned to 3, so the
@@ -1520,6 +1540,12 @@ def _apply_env_overrides(raw: dict[str, Any]) -> dict[str, Any]:
         # them here entirely (review r7#1).
         if env_key in API_AUTH_ENV_VARS or env_key in TLS_PROXY_ENV_VARS:
             continue
+        incremental_field = _SOURCE_INCREMENTAL_ENV_FIELDS.get(env_key)
+        if incremental_field is not None:
+            scheduler = raw.setdefault("scheduler", {})
+            if isinstance(scheduler, dict):
+                scheduler[incremental_field] = env_value
+            continue
         parts = env_key[len(prefix) :].lower().split("_")
         current = raw
         for part in parts[:-1]:
@@ -2083,6 +2109,36 @@ def _build_config(raw: dict[str, Any]) -> Config:
                     ),
                     "pool_source_shares": _normalize_pool_source_shares(
                         sched_raw.get("pool_source_shares")
+                    ),
+                    "source_incremental_hours": _normalize_source_incremental_hours(
+                        sched_raw.get("source_incremental_hours"),
+                        default=_DEFAULT_SOURCE_INCREMENTAL_HOURS,
+                        allow_none=False,
+                    ),
+                    "xhs_incremental_hours": _normalize_source_incremental_hours(
+                        sched_raw.get("xhs_incremental_hours"),
+                        default=None,
+                        allow_none=True,
+                    ),
+                    "douyin_incremental_hours": _normalize_source_incremental_hours(
+                        sched_raw.get("douyin_incremental_hours"),
+                        default=None,
+                        allow_none=True,
+                    ),
+                    "youtube_incremental_hours": _normalize_source_incremental_hours(
+                        sched_raw.get("youtube_incremental_hours"),
+                        default=None,
+                        allow_none=True,
+                    ),
+                    "zhihu_incremental_hours": _normalize_source_incremental_hours(
+                        sched_raw.get("zhihu_incremental_hours"),
+                        default=None,
+                        allow_none=True,
+                    ),
+                    "reddit_incremental_hours": _normalize_source_incremental_hours(
+                        sched_raw.get("reddit_incremental_hours"),
+                        default=None,
+                        allow_none=True,
                     ),
                     "refresh_check_interval_seconds": _normalize_scheduler_int(
                         sched_raw.get("refresh_check_interval_seconds"),
@@ -2949,6 +3005,51 @@ def _normalize_scheduler_int(
     return normalized
 
 
+def _normalize_source_incremental_hours(
+    value: object,
+    *,
+    default: int | None,
+    allow_none: bool,
+    strict: bool = False,
+) -> int | None:
+    """Normalize an extension-bootstrap interval using one shared contract.
+
+    ``None`` is meaningful only for per-source overrides and means "inherit
+    the global interval".  Every concrete value is an integer in ``0..168``;
+    zero is the explicit disable value.  Config loading falls back to the
+    supplied default for malformed values, while save/API validation can ask
+    for the same function to raise instead.
+    """
+
+    if value is None:
+        if allow_none:
+            return None
+        if strict:
+            raise ValueError("source_incremental_hours 必须是 0..168 的整数")
+        return default
+
+    parsed: int | None = None
+    if isinstance(value, bool):
+        parsed = None
+    elif isinstance(value, int):
+        parsed = value
+    elif isinstance(value, str):
+        text = value.strip()
+        if text:
+            try:
+                parsed = int(text)
+            except ValueError:
+                parsed = None
+
+    if parsed is None or not (
+        _MIN_SOURCE_INCREMENTAL_HOURS <= parsed <= _MAX_SOURCE_INCREMENTAL_HOURS
+    ):
+        if strict:
+            raise ValueError("source incremental interval must be an integer in 0..168")
+        return default
+    return parsed
+
+
 def _normalize_inspiration_breadth(value: object) -> str:
     """Validate the breadth tier; unset → default, invalid → ConfigError."""
     if value is None:
@@ -3171,6 +3272,31 @@ def _collect_llm_instance_routing_issues(llm: LLMConfig) -> list[ConfigIssue]:
 def _collect_config_issues(config: Config) -> list[ConfigIssue]:
     """Collect non-fatal config issues to display as guidance."""
     issues: list[ConfigIssue] = []
+
+    incremental_intervals = (
+        ("source_incremental_hours", config.scheduler.source_incremental_hours, False),
+        ("xhs_incremental_hours", config.scheduler.xhs_incremental_hours, True),
+        ("douyin_incremental_hours", config.scheduler.douyin_incremental_hours, True),
+        ("youtube_incremental_hours", config.scheduler.youtube_incremental_hours, True),
+        ("zhihu_incremental_hours", config.scheduler.zhihu_incremental_hours, True),
+        ("reddit_incremental_hours", config.scheduler.reddit_incremental_hours, True),
+    )
+    for field_name, value, allow_none in incremental_intervals:
+        try:
+            _normalize_source_incremental_hours(
+                value,
+                default=None if allow_none else _DEFAULT_SOURCE_INCREMENTAL_HOURS,
+                allow_none=allow_none,
+                strict=True,
+            )
+        except ValueError as exc:
+            issues.append(
+                ConfigIssue(
+                    field=f"scheduler.{field_name}",
+                    message=str(exc),
+                    severity="blocking",
+                )
+            )
 
     try:
         from openbiliclaw.sources.bangumi_client import validate_bangumi_username
@@ -4034,6 +4160,20 @@ def save_config(
     )
 
     _validate_auto_update_check_interval(config.scheduler.auto_update_check_interval_hours)
+    for field_name, allow_none in (
+        ("source_incremental_hours", False),
+        ("xhs_incremental_hours", True),
+        ("douyin_incremental_hours", True),
+        ("youtube_incremental_hours", True),
+        ("zhihu_incremental_hours", True),
+        ("reddit_incremental_hours", True),
+    ):
+        _normalize_source_incremental_hours(
+            getattr(config.scheduler, field_name),
+            default=None if allow_none else _DEFAULT_SOURCE_INCREMENTAL_HOURS,
+            allow_none=allow_none,
+            strict=True,
+        )
     config.sources.bangumi.username = validate_bangumi_username(config.sources.bangumi.username)
     config.sources.bangumi.access_token = validate_bangumi_access_token(
         config.sources.bangumi.access_token
@@ -4286,6 +4426,32 @@ def _render_config_toml(
             f"discovery_cron = {_toml_string(config.scheduler.discovery_cron)}",
             f"pool_target_count = {config.scheduler.pool_target_count}",
             f"account_sync_interval_hours = {config.scheduler.account_sync_interval_hours}",
+            f"source_incremental_hours = {config.scheduler.source_incremental_hours}",
+            *(
+                [f"xhs_incremental_hours = {config.scheduler.xhs_incremental_hours}"]
+                if config.scheduler.xhs_incremental_hours is not None
+                else []
+            ),
+            *(
+                [f"douyin_incremental_hours = {config.scheduler.douyin_incremental_hours}"]
+                if config.scheduler.douyin_incremental_hours is not None
+                else []
+            ),
+            *(
+                [f"youtube_incremental_hours = {config.scheduler.youtube_incremental_hours}"]
+                if config.scheduler.youtube_incremental_hours is not None
+                else []
+            ),
+            *(
+                [f"zhihu_incremental_hours = {config.scheduler.zhihu_incremental_hours}"]
+                if config.scheduler.zhihu_incremental_hours is not None
+                else []
+            ),
+            *(
+                [f"reddit_incremental_hours = {config.scheduler.reddit_incremental_hours}"]
+                if config.scheduler.reddit_incremental_hours is not None
+                else []
+            ),
             f"refresh_check_interval_seconds = {config.scheduler.refresh_check_interval_seconds}",
             f"signal_event_threshold = {config.scheduler.signal_event_threshold}",
             f"trending_refresh_minutes = {config.scheduler.trending_refresh_minutes}",

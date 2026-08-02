@@ -6956,6 +6956,10 @@ async def run_guided_init(
     run lifecycle (mark_running / complete / fail) stays with the caller.
     """
 
+    import logging
+
+    logger = logging.getLogger("openbiliclaw.cli")
+
     async def _stage_started(n: int) -> None:
         if coordinator is not None and run_id is not None:
             await coordinator.stage_started(run_id, n)
@@ -7541,6 +7545,25 @@ async def run_guided_init(
         )
     elif reddit_status == "failed":
         console.print("  [yellow]Reddit 任务失败 —— 检查扩展日志,或重试 init。[/yellow]")
+
+    # Guided-init collection is a real bootstrap attempt even though profile
+    # analysis has not started yet. Seed only evidence-backed terminal states;
+    # this is scheduling state and must not change the event/output payload.
+    try:
+        from openbiliclaw.sources.source_bootstrap import seed_guided_init_attempts
+
+        seed_guided_init_attempts(
+            memory,
+            {
+                "xhs": xhs_status,
+                "dy": dy_status,
+                "yt": yt_status,
+                "zhihu": zhihu_status,
+                "reddit": reddit_status,
+            },
+        )
+    except Exception:
+        logger.warning("guided init source incremental state seed failed", exc_info=True)
 
     # Build events from all data sources via the unified event_format
     # builder so B站 / 小红书 / future-source events share one shape.
