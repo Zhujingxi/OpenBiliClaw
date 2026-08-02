@@ -4250,7 +4250,9 @@
       flex-direction: column;
       overflow-y: auto;
       overflow-x: hidden;
-      padding: 16px;
+      /* The fixed save bar is removed from normal flow. Reserve enough room
+         for it so the final setting can scroll fully above the action area. */
+      padding: 16px 16px calc(88px + env(safe-area-inset-bottom, 0px));
       gap: 12px;
     }
 
@@ -4894,7 +4896,9 @@
 
     /* 吸底保存栏：任何分类下都能就地看到未保存修改并保存 */
     .settings-savebar {
-      position: sticky;
+      position: fixed;
+      left: 16px;
+      right: 16px;
       bottom: 0;
       z-index: 12;
       display: flex;
@@ -4902,13 +4906,14 @@
       justify-content: space-between;
       gap: 10px;
       flex-wrap: wrap;
-      margin-top: 12px;
-      padding: 10px 0 12px;
+      margin: 0;
+      padding: 10px 0 calc(12px + env(safe-area-inset-bottom, 0px));
       /* --surface is translucent; the bar sits over scrolling fields, so it
          needs an opaque backdrop plus a blur to stay readable. */
       border-top: 1px solid var(--border-soft, rgba(0, 0, 0, 0.08));
       background: var(--bg-sky, #eef2fb);
       backdrop-filter: blur(14px);
+      box-shadow: 0 -12px 28px rgba(28, 39, 58, 0.12);
     }
 
     .settings-savebar .settings-save {

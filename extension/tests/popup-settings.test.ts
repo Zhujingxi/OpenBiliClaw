@@ -990,3 +990,20 @@ test("settings save only enables for dirty state and stays locked while saving",
   assert.ok((popupJs.match(/markSettingsDirty\(\);/g) ?? []).length >= 4);
   assert.match(popupJs, /markSettingsDirty\(suggestBtn\);/);
 });
+
+test("settings save bar stays pinned above scrolling content", () => {
+  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
+  const overlayCss = popupHtml.match(/\.settings-overlay \{[\s\S]*?\n    \}/)?.[0] ?? "";
+  const savebarCss = popupHtml.match(/\.settings-savebar \{[\s\S]*?\n    \}/)?.[0] ?? "";
+
+  assert.match(
+    overlayCss,
+    /padding: 16px 16px calc\(88px \+ env\(safe-area-inset-bottom, 0px\)\);/,
+  );
+  assert.match(savebarCss, /position: fixed;/);
+  assert.match(savebarCss, /left: 16px;/);
+  assert.match(savebarCss, /right: 16px;/);
+  assert.match(savebarCss, /bottom: 0;/);
+  assert.match(savebarCss, /box-shadow: 0 -12px 28px/);
+  assert.doesNotMatch(savebarCss, /position: sticky;/);
+});
