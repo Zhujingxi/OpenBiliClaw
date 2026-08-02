@@ -1301,6 +1301,103 @@ async def test_pipeline_accumulates_eval_batch_until_minimum_or_timeout(
     assert db.count_discovery_candidates_by_status()["cached"] == 3
 
 
+@pytest.mark.asyncio
+async def test_token_diet_e2e_coalesces_evaluates_caches_and_admits(
+    tmp_path: Path,
+) -> None:
+    db = Database(tmp_path / "token-diet-e2e.db")
+    db.initialize()
+    db.enqueue_discovery_candidates(
+        [
+            DiscoveryCandidateWrite(
+                candidate_key=f"bilibili:BVDIET{index}",
+                source_platform="bilibili",
+                source_strategy="search",
+                bvid=f"BVDIET{index}",
+                content_id=f"BVDIET{index}",
+                title=f"Diet candidate {index}",
+            )
+            for index in range(3)
+        ]
+    )
+    llm = _ScoringLLM(
+        [
+            {
+                "content_id": "BVDIET0",
+                "score": 0.82,
+                "reason": "  " + ("高分内部诊断" * 8),
+                "topic_group": "工程",
+                "style_key": "deep_focus",
+            },
+            {
+                "content_id": "BVDIET1",
+                "score": 0.71,
+                "reason": "有效高分诊断",
+                "topic_group": "工程",
+                "style_key": "hands_on",
+            },
+            {
+                "content_id": "BVDIET2",
+                "score": 0.40,
+                "reason": "模型错误生成的低分理由",
+                "topic_group": "噪声",
+                "style_key": "quick_scan",
+            },
+        ]
+    )
+    engine = ContentDiscoveryEngine(llm_service=llm, database=db, eval_prefilter_mode="off")
+    now = 1000.0
+    pipeline = DiscoveryCandidatePipeline(
+        database=db,
+        discovery_engine=engine,
+        pool_target_count=30,
+        min_eval_batch_size=8,
+        max_eval_wait_seconds=60,
+        time_fn=lambda: now,
+    )
+    profile = _build_profile()
+
+    waiting = await pipeline.drain_pending(profile=profile, batch_size=30)
+    assert waiting == {"evaluated": 0, "cached": 0, "rejected": 0, "waiting": 3}
+    assert llm.calls == []
+
+    now += 61
+    completed = await pipeline.drain_pending(profile=profile, batch_size=30)
+
+    assert completed == {"evaluated": 3, "cached": 2, "rejected": 1}
+    assert len(llm.calls) == 1
+    assert len(engine._eval_cache) == 3  # noqa: SLF001
+    rows = db.conn.execute(
+        "SELECT content_id, relevance_reason, status FROM discovery_candidates ORDER BY content_id"
+    ).fetchall()
+    assert len(str(rows[0]["relevance_reason"])) == 30
+    assert rows[1]["relevance_reason"] == "有效高分诊断"
+    assert rows[2]["relevance_reason"] == ""
+    assert [row["status"] for row in rows] == ["cached", "cached", "rejected_low_score"]
+    assert db.conn.execute("SELECT COUNT(*) FROM content_cache").fetchone()[0] == 2
+
+    # A semantically identical replay reaches the in-memory evaluator cache,
+    # including the already-normalized reason, without another provider call.
+    replay = [
+        DiscoveredContent(
+            bvid=f"BVDIET{index}",
+            content_id=f"BVDIET{index}",
+            title=f"Diet candidate {index}",
+            source_platform="bilibili",
+            source_strategy="search",
+        )
+        for index in range(3)
+    ]
+    assert await engine.evaluate_content_batch(
+        replay,
+        profile,
+        source_context="mixed",
+        batch_size=3,
+    ) == [0.82, 0.71, 0.4]
+    assert len(llm.calls) == 1
+    assert replay[2].relevance_reason == ""
+
+
 def test_claim_ready_batch_honors_minimum_or_timeout(tmp_path: Path) -> None:
     db = Database(tmp_path / "test.db")
     db.initialize()

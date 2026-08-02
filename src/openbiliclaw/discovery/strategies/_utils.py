@@ -38,6 +38,12 @@ from openbiliclaw.soul.profile_views import (
 from openbiliclaw.soul.profile_views import (
     normalize_match_text as normalize_match_text,
 )
+from openbiliclaw.soul.profile_views import (
+    set_topic_lifecycle_serialization as set_topic_lifecycle_serialization,
+)
+from openbiliclaw.soul.profile_views import (
+    topic_lifecycle_serialization_enabled as topic_lifecycle_serialization_enabled,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable

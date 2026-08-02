@@ -262,6 +262,7 @@ async def test_evaluator_propagates_llm_franchise_key_through_to_db(
         contents[0],
         profile_digest=engine._evaluation_profile_digest(profile),
         negative_digest=engine._negative_examples_digest(None),
+        source_context="test",
     )
     cached = engine._eval_cache[cache_key]
     assert len(cached) == 5

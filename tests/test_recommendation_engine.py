@@ -14,8 +14,8 @@ from typing import Any
 import pytest
 
 from openbiliclaw.discovery.engine import DiscoveredContent
-from openbiliclaw.llm.base import LLMFallbackError, LLMProviderError, LLMRateLimitError, LLMResponse
 from openbiliclaw.discovery.strategies._utils import build_profile_summary
+from openbiliclaw.llm.base import LLMFallbackError, LLMProviderError, LLMRateLimitError, LLMResponse
 from openbiliclaw.llm.prompts import build_batch_expression_prompt
 from openbiliclaw.llm.service import LLMProviderExecutionError
 from openbiliclaw.recommendation.engine import (
@@ -5590,12 +5590,8 @@ async def test_generate_expression_rejects_nested_batch_payload() -> None:
             assert not value.lstrip().startswith(("[", "{"))
 
 
-def test_evo_delight_reason_falls_through_empty_relevance_reason() -> None:
-    """Reason-diet (v0.3.171): an empty ``relevance_reason`` (what a diet'd
-    sub-0.5 item would carry) must not surface blank — the delight fallback
-    chain skips it via ``.strip()`` and falls through to the topic label, then
-    to the generic sentence. A present reason is still shown verbatim.
-    """
+def test_evo_delight_reason_uses_only_formal_user_facing_copy() -> None:
+    """Evaluator diagnostics must never leak into delight card copy."""
     # pool_expression wins first.
     assert (
         RecommendationEngine._evo_delight_reason(
@@ -5605,21 +5601,23 @@ def test_evo_delight_reason_falls_through_empty_relevance_reason() -> None:
         )
         == "现成文案"
     )
-    # empty pool_expression + non-empty relevance_reason → reason verbatim.
+    # Internal evaluator reason is deliberately not a user-facing fallback.
     assert (
         RecommendationEngine._evo_delight_reason(
             DiscoveredContent(bvid="BV2", title="x", relevance_reason="这条正合你的胃口。")
         )
-        == "这条正合你的胃口。"
+        == ""
     )
-    # empty pool_expression + empty relevance_reason → topic-label fallback.
-    topic_reason = RecommendationEngine._evo_delight_reason(
-        DiscoveredContent(bvid="BV3", title="x", relevance_reason="", topic_group="航天")
+    # Topic metadata and empty candidates likewise wait for formal copy.
+    assert (
+        RecommendationEngine._evo_delight_reason(
+            DiscoveredContent(bvid="BV3", title="x", relevance_reason="", topic_group="航天")
+        )
+        == ""
     )
-    assert topic_reason != ""
-    assert "航天" in topic_reason
-    # everything empty → generic sentence, never blank.
-    generic = RecommendationEngine._evo_delight_reason(
-        DiscoveredContent(bvid="BV4", title="x", relevance_reason="")
+    assert (
+        RecommendationEngine._evo_delight_reason(
+            DiscoveredContent(bvid="BV4", title="x", relevance_reason="")
+        )
+        == ""
     )
-    assert generic.strip() != ""

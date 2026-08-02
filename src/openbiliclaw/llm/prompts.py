@@ -1253,9 +1253,9 @@ def build_posture_gate_prompt(
 # (1) cache convention — the system prompt has to be byte-identical across
 # calls, so it cannot interpolate a per-call/config value; (2) safety margin —
 # 0.5 is strictly below every admission path (0.60 default, 0.58 explore per
-# ``discovery/admission.py``), so a reason-less item can never be admitted,
-# pooled, or reach the delight fallback. Reopen this only if an admission path
-# ever drops at/below 0.5.
+# ``discovery/admission.py``), so omitting low-score diagnostic text cannot
+# affect admission. Reopen this only if an admission path ever drops at/below
+# 0.5.
 _SINGLE_CONTENT_EVALUATION_SYSTEM_PROMPT = (
     "<task>\n"
     "你要评估一个候选内容与一个用户画像的匹配度。下面 user 消息会给出 "
@@ -1265,10 +1265,11 @@ _SINGLE_CONTENT_EVALUATION_SYSTEM_PROMPT = (
     "<rules>\n"
     "1. 输出必须是严格 JSON,不要附带解释。\n"
     "2. score 范围必须在 0 到 1 之间。\n"
-    "3. reason 写法(省 token):score 严格低于 0.5 的条目,reason 必须写成空串 "
+    "3. reason 仅供内部诊断,不是面向用户的推荐文案。写法(省 token):"
+    "score 严格低于 0.5 的条目,reason 必须写成空串 "
     '""(这些条目达不到准入门槛、会被直接丢弃,写理由是纯浪费);'
-    "score 大于等于 0.5 的条目,reason 写一句口语化、可直接展示给用户的中文,"
-    "不超过 30 个字,说明为什么这个人会喜欢或不喜欢这个内容。\n"
+    "score 大于等于 0.5 的条目,reason 写一句精炼中文,"
+    "不超过 30 个 Unicode 字符,说明内容与画像匹配或不匹配的依据。\n"
     '4. 不要只说"因为热门"或"因为看过类似的",要结合用户画像。\n'
     "5. 除 explore 外，发现路径和平台只提供上下文，不得影响评分标准:"
     "search、trending、hot、feed、related_chain、channel、creator 等所有非 explore 候选"
@@ -1303,7 +1304,7 @@ _SINGLE_CONTENT_EVALUATION_SYSTEM_PROMPT = (
     "<output_schema>\n"
     "{\n"
     '  "score": 0.78,\n'
-    '  "reason": "这个视频的选题角度新颖,节奏轻快,契合你对该领域的好奇心。",\n'
+    '  "reason": "主题契合画像中的长期兴趣,内容角度有增量",\n'
     '  "topic_group": "生活方式",\n'
     '  "style_key": "social_chat",\n'
     '  "franchise_key": ""\n'
@@ -1383,10 +1384,11 @@ _BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT = (
     "3. 每项必须原样带回输入里的 bvid 或 content_id,并包含 score(0-1)、"
     "reason、topic_group(2-4词粗分类)、style_key(13选1)、"
     "franchise_key(可空)。\n"
-    "3a. reason 写法(省 token):score 严格低于 0.5 的条目,reason 必须写成空串 "
+    "3a. reason 仅供内部诊断,不是面向用户的推荐文案。写法(省 token):"
+    "score 严格低于 0.5 的条目,reason 必须写成空串 "
     '""(这些条目达不到准入门槛、会被直接丢弃,写理由是纯浪费);'
-    "score 大于等于 0.5 的条目,reason 写一句口语化、可直接展示给用户的中文,"
-    "不超过 30 个字,说明为什么这个人会喜欢这个内容。\n"
+    "score 大于等于 0.5 的条目,reason 写一句精炼中文,"
+    "不超过 30 个 Unicode 字符,说明内容与画像匹配的依据。\n"
     "4. 除 explore 外，发现路径和平台只提供上下文，不得影响评分标准:"
     "search、trending、hot、feed、related_chain、channel、creator 等所有非 explore 候选"
     "都必须按内容与用户画像的真实匹配度统一评分;"

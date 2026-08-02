@@ -32,6 +32,7 @@ from openbiliclaw.soul.profile import (
     ValuesLayer,
 )
 
+
 @pytest.fixture(autouse=True)
 def _restore_cli_process_state() -> Iterator[None]:
     """Keep CLI-owned process globals from leaking into later tests."""
