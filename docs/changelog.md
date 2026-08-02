@@ -13,6 +13,7 @@
 - **配置与离线一致性**：`keyframe_max_frames`、`keyframe_fetch_limit`、`danmaku_fetch_limit`、`danmaku_max_chars` 由文件和 `PUT /api/config` 共同校验并 round-trip；`scripts/ab_visual_bonus.py` 与生产评分共享 signed suppression 和零点保持归一化。
 - **弹幕摘要严格遵守字符预算**：`condense_danmaku` 将 ` | ` 分隔符计入 `danmaku_max_chars`，保留完整弹幕，单条超限跳过，避免摘要实际长度超过配置预算。
 - **桌面 Web 与插件设置页新增统一的「高级功能」Tab**：桌面端 7 个 Tab、插件端 6 个 Tab 都固定提供「推荐增强 / 多模态处理 / 搜索词生成」三个 section；P1/P2/P3 依赖关系、关闭无副作用、七个 discovery 字段的 round-trip 和搜索词三档 option 契约保持一致，调度 Tab 只保留真正的调度项。
+- **设置页保存按钮只在有改动时启用**：桌面 Web 与插件 side panel 在配置无变化或保存请求进行中都会禁用保存，避免无操作的完整 `PUT /api/config` 和无意义热重载；输入、LLM 实例/调用链草稿及候选池建议比例等程序化修改都会进入脏状态。保存成功后按钮重新禁用，失败则保留改动并允许重试。
 
 ## 未发布：连接与 HTTPS 部署（2026-08-01）
 

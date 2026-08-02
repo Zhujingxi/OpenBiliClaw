@@ -7268,6 +7268,7 @@ ${cardFeedbackBarHtml()}`;
           next.splice(targetIndex, 0, sourceId);
           setLlmRouteChain(scope, next);
           renderLlmRouting();
+          markSettingsDirty();
         });
       });
       list.querySelectorAll("[data-chain-action]").forEach((button) => {
@@ -7283,6 +7284,7 @@ ${cardFeedbackBarHtml()}`;
           if (action === "remove") next.splice(index, 1);
           setLlmRouteChain(scope, next);
           renderLlmRouting();
+          markSettingsDirty();
         });
       });
     }
@@ -7349,7 +7351,10 @@ ${cardFeedbackBarHtml()}`;
       const instanceId = String(picker?.value || "").trim();
       if (!instanceId) return;
       const chain = llmRouteChain(scope);
-      if (!chain.includes(instanceId)) setLlmRouteChain(scope, [...chain, instanceId]);
+      if (!chain.includes(instanceId)) {
+        setLlmRouteChain(scope, [...chain, instanceId]);
+        markSettingsDirty();
+      }
       renderLlmRouting();
     }
 
@@ -7623,6 +7628,7 @@ ${cardFeedbackBarHtml()}`;
       };
       closeLlmInstanceDialog();
       renderLlmRouting();
+      markSettingsDirty();
     }
 
     function deleteLlmInstance(instanceId) {
@@ -7637,6 +7643,7 @@ ${cardFeedbackBarHtml()}`;
       delete state.llmDraft.instances[instanceId];
       state.llmProbeResults.delete(instanceId);
       renderLlmRouting();
+      markSettingsDirty();
     }
 
     function applyLlmProviderDefaults() {
@@ -9762,15 +9769,18 @@ ${cardFeedbackBarHtml()}`;
     // Counts distinct touched fields, not events, so holding a key down or
     // retyping the same input does not inflate the number.
     const settingsDirtyFields = new Set();
+    let settingsSaveInFlight = false;
 
     function renderSettingsDirty() {
       const bar = $("#settingsSaveBar");
       const msg = $("#settingsSaveMsg");
       const discard = $("#settingsDiscardBtn");
+      const save = $("#settingsSaveBtn");
       const count = settingsDirtyFields.size;
       if (bar) bar.dataset.dirty = count > 0 ? "true" : "false";
       if (msg) msg.textContent = count > 0 ? `已修改 ${count} 项，未保存` : "没有未保存的修改";
       if (discard) discard.disabled = count === 0;
+      if (save) save.disabled = settingsSaveInFlight || count === 0;
     }
 
     function markSettingsDirty(target) {
@@ -9805,10 +9815,15 @@ ${cardFeedbackBarHtml()}`;
 
     safeBind("#settingsForm", "submit", async (event) => {
       event.preventDefault();
-      const submitBtn = $("#settingsForm button[type='submit']");
+      const submitBtn = $("#settingsSaveBtn");
+      if (settingsSaveInFlight || settingsDirtyFields.size === 0) {
+        renderSettingsDirty();
+        return;
+      }
       const previousText = submitBtn?.textContent || "保存配置";
+      settingsSaveInFlight = true;
+      renderSettingsDirty();
       if (submitBtn) {
-        submitBtn.disabled = true;
         submitBtn.textContent = "保存中…";
       }
       $("#configStatus")?.removeAttribute("role");
@@ -9824,6 +9839,7 @@ ${cardFeedbackBarHtml()}`;
           body: JSON.stringify(payload)
         });
         if (result?.config) applyConfig(result.config);
+        else clearSettingsDirty();
         const message = result?.message || "配置已保存。";
         const suffix = result?.restart_required ? "\n当前配置需要重启后端后完全生效。" : result?.reloaded === false ? "\n后端返回未热重载，请检查运行状态。" : "";
         if ($("#configStatus")) $("#configStatus").value = `${message}${suffix}`;
@@ -9844,10 +9860,11 @@ ${cardFeedbackBarHtml()}`;
         if ($("#configStatus")) { $("#configStatus").setAttribute("role", "alert"); $("#configStatus").value = `保存失败：\n${message}`; }
         showToast("保存失败：请查看配置状态");
       } finally {
+        settingsSaveInFlight = false;
         if (submitBtn) {
-          submitBtn.disabled = false;
           submitBtn.textContent = previousText;
         }
+        renderSettingsDirty();
       }
     });
     const delightBanner = $("#delightBanner");

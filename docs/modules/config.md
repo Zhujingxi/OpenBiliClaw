@@ -822,6 +822,8 @@ TOML 与显式环境变量覆盖在构造 `SchedulerConfig` 前统一归一为�
 - **多模态处理**：独立管理「图像 Embedding 能力」和「候选封面参与 LLM 评估」。前者是 P1/P3 的依赖，后者不会改变 P1/P3；Embedding provider、模型、凭据和探测仍在模型 Tab。
 - **搜索词生成**：集中管理经典、混合、灵感三档模式及成本提示；option value、顺序和文案与桌面端 / 插件端一致。
 
+两端保存按钮遵循同一状态机：配置无变化时禁用，有输入或程序化草稿修改时启用，请求进行中再次锁定。成功保存并以服务端配置重新回填后恢复禁用；请求失败会保留脏状态并重新允许保存，因此不会因无操作触发完整配置写入，也不会吞掉可重试的修改。
+
 两端加载时都会显式回填 `visual_profile_enabled`、`keyframe_enabled`、`keyframe_max_frames`、`keyframe_fetch_limit`、`danmaku_enabled`、`danmaku_fetch_limit`、`danmaku_max_chars`，保存时在已有 `discovery` 快照展开之后显式写入，数值范围分别为 `keyframe_max_frames=1..12`、两个 fetch limit 为 `1..200`、`danmaku_max_chars=100..2000`，默认值为 `4 / 50 / 50 / 500`。因此关闭开关不会因为保存设置而丢失预热参数或缓存。
 
 | 键 | 类型 | 默认值 | 说明 |

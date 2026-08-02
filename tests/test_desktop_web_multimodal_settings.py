@@ -163,3 +163,23 @@ def test_desktop_advanced_discovery_fields_load_and_save_after_snapshot_spread()
     ):
         assert save_snippet in js
         assert spread_index < js.index(save_snippet)
+
+
+def test_desktop_settings_save_requires_dirty_state_and_guards_reentry() -> None:
+    html = (ROOT / "src/openbiliclaw/web/desktop/index.html").read_text(encoding="utf-8")
+    js = (ROOT / "src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
+
+    save_button = re.search(r'id="settingsSaveBtn"[^>]*>', html)
+    assert save_button is not None
+    assert 'type="submit"' in save_button.group(0)
+    assert "disabled" in save_button.group(0)
+
+    assert "let settingsSaveInFlight = false;" in js
+    assert 'if (save) save.disabled = settingsSaveInFlight || count === 0;' in js
+    assert "if (settingsSaveInFlight || settingsDirtyFields.size === 0)" in js
+    assert "settingsSaveInFlight = true;" in js
+    assert "settingsSaveInFlight = false;" in js
+    assert "submitBtn.disabled = false" not in js
+    # Chain reorder/add, instance draft save/delete and suggested shares mutate
+    # form state programmatically, so they must also unlock the save button.
+    assert js.count("markSettingsDirty();") >= 6

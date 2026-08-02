@@ -7950,6 +7950,7 @@ function bindSettings() {
           state.llmDraft.default_chain = next;
           setProbeStatus(document.getElementById("cfgProbeLlmChainStatus"), "", "");
           renderLlmRoutingSummary();
+          markSettingsDirty();
         });
       }
       actions.append(up, down, remove);
@@ -8019,6 +8020,7 @@ function bindSettings() {
     state.llmDraft.default_chain.push(instanceId);
     setProbeStatus(document.getElementById("cfgProbeLlmChainStatus"), "", "");
     renderLlmRoutingSummary();
+    markSettingsDirty();
   }
 
   function renderLlmDatalist(id, values, currentValue = "") {
@@ -8344,6 +8346,7 @@ function bindSettings() {
     state.llmProbeResults.delete(instanceId);
     closeLlmInstanceDialog();
     renderLlmRoutingSummary();
+    markSettingsDirty();
     showToast("实例草稿已更新；点击底部“保存配置”后生效。", "success");
   }
 
@@ -8359,6 +8362,7 @@ function bindSettings() {
     delete state.llmDraft.instances[instanceId];
     state.llmProbeResults.delete(instanceId);
     renderLlmRoutingSummary();
+    markSettingsDirty();
     showToast("实例已从草稿删除；保存配置后生效。", "success");
   }
 
@@ -8953,6 +8957,7 @@ function bindSettings() {
   // Counts distinct touched fields, not events, so retyping one input does not
   // inflate the number.
   const settingsDirtyFields = new Set();
+  let settingsSaveInFlight = false;
 
   function renderSettingsDirty() {
     const bar = document.getElementById("settingsSaveBar");
@@ -8960,6 +8965,7 @@ function bindSettings() {
     const count = settingsDirtyFields.size;
     if (bar) bar.dataset.dirty = count > 0 ? "true" : "false";
     if (msg) msg.textContent = count > 0 ? `已修改 ${count} 项，未保存` : "没有未保存的修改";
+    saveBtn.disabled = settingsSaveInFlight || count === 0;
   }
 
   function markSettingsDirty(target) {
@@ -9367,6 +9373,7 @@ function bindSettings() {
         if (shares.zhihu !== undefined) setVal("cfgPoolShareZhihu", shares.zhihu);
         if (shares.reddit !== undefined) setVal("cfgPoolShareReddit", shares.reddit);
         if (shares.bangumi !== undefined) setVal("cfgPoolShareBangumi", shares.bangumi);
+        markSettingsDirty(suggestBtn);
         showToast("已按已有信号填入建议比例，保存后生效。", "success");
       } catch (err) {
         showToast(`生成建议失败: ${err.message}`, "error");
@@ -9377,7 +9384,12 @@ function bindSettings() {
   }
 
   saveBtn.addEventListener("click", async () => {
-    saveBtn.disabled = true;
+    if (settingsSaveInFlight || settingsDirtyFields.size === 0) {
+      renderSettingsDirty();
+      return;
+    }
+    settingsSaveInFlight = true;
+    renderSettingsDirty();
     saveBtn.textContent = "保存中...";
     toast.hidden = true;
     try {
@@ -9413,6 +9425,8 @@ function bindSettings() {
         const result = await updateConfig(data);
         if (result.config) {
           populateForm(result.config);
+        } else {
+          clearSettingsDirty();
         }
         const tone = result.restart_required ? "warning" : result.reloaded ? "success" : "warning";
         showToast(result.message || "配置已保存。", tone);
@@ -9469,8 +9483,9 @@ function bindSettings() {
         showToast(`保存失败: ${err.message}`, "error");
       }
     } finally {
-      saveBtn.disabled = false;
+      settingsSaveInFlight = false;
       setSaveButtonMode(state.runtimeConfig?.degraded ? "degraded" : "");
+      renderSettingsDirty();
     }
   });
 }

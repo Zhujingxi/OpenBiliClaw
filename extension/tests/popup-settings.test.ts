@@ -857,8 +857,9 @@ test("settings save renders timeout warning before structured or generic errors"
   assert.ok(abortIndex < genericIndex, "AbortError should not fall through to generic error toast");
   assert.ok(abortIndex > successIndex, "AbortError branch should wrap the updateConfig call");
   assert.match(saveBlock, /return;/);
-  assert.match(saveBlock, /finally[\s\S]*saveBtn\.disabled = false/);
+  assert.match(saveBlock, /finally[\s\S]*settingsSaveInFlight = false/);
   assert.match(saveBlock, /finally[\s\S]*setSaveButtonMode/);
+  assert.match(saveBlock, /finally[\s\S]*renderSettingsDirty/);
 });
 
 test("settings page wires offline cache and degraded-mode banners", () => {
@@ -968,4 +969,24 @@ test("the side panel keeps no second copy of the source status table", () => {
   assert.doesNotMatch(popupJs, /const SOURCE_STATUS_LABEL\s*=/);
   assert.doesNotMatch(popupJs, /const VERIFY_OUTCOME_TONE\s*=/);
   assert.match(popupJs, /globalThis\.OpenBiliClawSourceStatus/);
+});
+
+test("settings save only enables for dirty state and stays locked while saving", () => {
+  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+
+  assert.match(
+    popupHtml,
+    /id="settingsSave" class="settings-save" type="button" disabled>保存配置<\/button>/,
+  );
+  assert.match(popupJs, /let settingsSaveInFlight = false;/);
+  assert.match(popupJs, /saveBtn\.disabled = settingsSaveInFlight \|\| count === 0;/);
+  assert.match(popupJs, /if \(settingsSaveInFlight \|\| settingsDirtyFields\.size === 0\)/);
+  assert.match(popupJs, /settingsSaveInFlight = true;/);
+  assert.match(popupJs, /settingsSaveInFlight = false;/);
+  assert.doesNotMatch(popupJs, /saveBtn\.disabled = false;/);
+  assert.match(popupJs, /if \(result\.config\)[\s\S]*?else \{\s*clearSettingsDirty\(\);/);
+  // Programmatic draft mutations do not emit input/change events themselves.
+  assert.ok((popupJs.match(/markSettingsDirty\(\);/g) ?? []).length >= 4);
+  assert.match(popupJs, /markSettingsDirty\(suggestBtn\);/);
 });
