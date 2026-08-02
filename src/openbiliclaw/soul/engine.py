@@ -12,13 +12,14 @@ import logging
 import os
 import re
 import unicodedata
+from collections.abc import Mapping
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping
+    from collections.abc import Awaitable, Callable
 
     from openbiliclaw.llm.service import ModuleOverride, SupportsComplete
     from openbiliclaw.memory.manager import MemoryManager
@@ -1364,6 +1365,7 @@ class SoulEngine:
         source: str,
         anchor_snapshot: AnchorAdmissionSnapshot,
         derived: list[dict[str, object]] | None = None,
+        provenance: Mapping[str, object] | None = None,
     ) -> dict[str, Any]:
         """Apply one admitted hypothesis settlement in the actual worker."""
         return await self._apply_dialogue_settlement(
@@ -1375,6 +1377,7 @@ class SoulEngine:
             source=source,
             derived=derived,
             anchor_snapshot=anchor_snapshot,
+            provenance=provenance,
         )
 
     async def _apply_confusion_answer_settlement(
@@ -1387,6 +1390,7 @@ class SoulEngine:
         turn_id: str,
         source: str,
         anchor_snapshot: AnchorAdmissionSnapshot,
+        provenance: Mapping[str, object] | None = None,
     ) -> dict[str, Any]:
         """Apply one admitted confusion answer in the actual worker."""
         return await self._apply_dialogue_settlement(
@@ -1400,6 +1404,7 @@ class SoulEngine:
             interpretation=interpretation,
             note=note,
             anchor_snapshot=anchor_snapshot,
+            provenance=provenance,
         )
 
     async def _apply_confusion_settlement(
@@ -1498,6 +1503,7 @@ class SoulEngine:
         interpretation: str = "",
         note: str = "",
         anchor_snapshot: AnchorAdmissionSnapshot,
+        provenance: Mapping[str, object] | None = None,
     ) -> dict[str, Any]:
         """Apply one frozen winner through idempotent effects in the worker."""
         self._require_dialogue_settlement_worker()
@@ -1596,6 +1602,17 @@ class SoulEngine:
         else:
             raise ValueError(f"Unsupported dialogue settlement kind: {kind!r}")
 
+        if provenance:
+            for key in (
+                "source_turn_id",
+                "source_reply_to_turn_id",
+                "source_context_digest",
+                "source_binding_mode",
+            ):
+                value = str(provenance.get(key, "")).strip()
+                if value:
+                    winning_payload[key] = value
+
         if settlement is None:
             database.try_create_card_settlement(
                 ref=normalized_ref,
@@ -1654,6 +1671,15 @@ class SoulEngine:
             "turn_id": str(settlement.get("turn_id", normalized_turn_id)),
             "source": stored_source,
         }
+        for payload_key, event_key in (
+            ("source_turn_id", "source_turn_id"),
+            ("source_reply_to_turn_id", "source_reply_to_turn_id"),
+            ("source_context_digest", "source_context_digest"),
+            ("source_binding_mode", "binding_mode"),
+        ):
+            value = str(payload.get(payload_key, "")).strip()
+            if value:
+                event_metadata[event_key] = value
         if stored_kind == "hypothesis":
             event_metadata.update(self._settlement_feedback(stored_title, stored_verdict))
         elif stored_kind == "confusion":
@@ -1963,12 +1989,17 @@ class SoulEngine:
         }.get(kind)
         if write_point is None:
             raise RuntimeError(f"Stored dialogue settlement kind is invalid: {kind!r}")
+        source_refs = [ref]
+        for key in ("source_turn_id", "source_reply_to_turn_id", "source_context_digest"):
+            value = str(payload.get(key, "")).strip()
+            if value:
+                source_refs.append(f"{key}:{value}")
         self._ledger.record(
             write_point=write_point,
             source=source,
             before={"title": title, "verdict": verdict},
             after={"matched": bool(result.get("matched", False))},
-            source_refs=[ref],
+            source_refs=source_refs,
             outcome="success" if bool(result.get("matched", False)) else "failed",
             turn_id=turn_id,
             effect_key=self._dialogue_settlement_ledger_effect_key(ref),
@@ -2238,6 +2269,7 @@ class SoulEngine:
         turn_id: str = "",
         anchor_ref: str = "",
         anchor_generation: int = 0,
+        dialogue_binding: Any | Mapping[str, object] | None = None,
     ) -> dict[str, object]:
         """Persist a chat turn and update long-term understanding when warranted.
 
@@ -2250,23 +2282,111 @@ class SoulEngine:
         timeouts; this mutation-bearing method intentionally has no whole-job
         timeout that could cancel it between local effects.
         """
-        await self._memory.propagate_event(
-            {
-                "event_type": "dialogue",
-                "title": user_message[:60],
-                "metadata": {
-                    "user_message": user_message,
-                    "assistant_reply": assistant_reply,
-                    "source": "chat",
-                    "session": session,
-                },
+        binding = None
+        binding_context = None
+        inventory_settles_allowed = True
+        if dialogue_binding is not None:
+            from openbiliclaw.soul.dialogue_turn_context import DialogueTurnBinding
+
+            if isinstance(dialogue_binding, DialogueTurnBinding):
+                binding = dialogue_binding
+            elif isinstance(dialogue_binding, Mapping):
+                binding = DialogueTurnBinding.from_mapping(dialogue_binding)
+            else:
+                raise TypeError("dialogue_binding must be DialogueTurnBinding or a mapping")
+            inventory_settles_allowed = binding.inventory_settles_allowed
+            binding_context = binding.context
+            if binding_context is not None:
+                if anchor_ref and anchor_ref != binding_context.ref:
+                    raise ValueError("learn anchor_ref conflicts with frozen dialogue context")
+                if anchor_generation and anchor_generation != binding_context.generation:
+                    raise ValueError(
+                        "learn anchor_generation conflicts with frozen dialogue context"
+                    )
+                anchor_ref = binding_context.ref
+                anchor_generation = binding_context.generation
+            else:
+                # New ordinary/detached API turns explicitly have no anchor.
+                anchor_ref = ""
+                anchor_generation = 0
+
+        def _dialogue_event(*, status: str) -> dict[str, object]:
+            metadata: dict[str, object] = {
+                "user_message": user_message,
+                "assistant_reply": assistant_reply,
+                "source": "chat",
+                "session": session,
             }
-        )
+            title = user_message[:60]
+            event: dict[str, object] = {
+                "event_type": "dialogue",
+                "title": title,
+                "metadata": metadata,
+            }
+            if binding is not None:
+                metadata.update(
+                    {
+                        "turn_id": turn_id,
+                        "reply_to_turn_id": (
+                            binding_context.reply_to_turn_id if binding_context is not None else ""
+                        ),
+                        "binding_mode": binding.mode.value,
+                        "binding_status": status,
+                        "context_digest": binding.context_digest,
+                        "anchor_kind": (
+                            binding_context.kind if binding_context is not None else ""
+                        ),
+                        "anchor_ref": binding_context.ref if binding_context is not None else "",
+                        "anchor_generation": (
+                            binding_context.generation if binding_context is not None else 0
+                        ),
+                        "context_title": (
+                            binding_context.title if binding_context is not None else ""
+                        ),
+                    }
+                )
+            if binding_context is not None:
+                label = "卡片" if binding_context.source_type == "card" else "疑惑问题"
+                title = f"回复{label}「{binding_context.title}」：{user_message[:60]}"
+                event["title"] = title
+                event["context"] = (
+                    f"用户在回复{label}「{binding_context.title}」时说：{user_message}\n"
+                    f"阿B 回复：{assistant_reply}"
+                )
+            return event
+
         active_list, insight_hash_map = self._build_dialogue_active_list()
         active_anchor: DialogueAnchor | None = None
         anchor_context: dict[str, object] | None = None
         anchor_texts: list[str] = []
-        if anchor_ref or anchor_generation:
+        if binding_context is not None:
+            self._dialogue_anchor_manager.expire()
+            active_anchor = self._dialogue_anchor_manager.validate_snapshot(
+                anchor_ref,
+                anchor_generation,
+            )
+            if active_anchor is None:
+                await self._memory.propagate_event(_dialogue_event(status="stale"))
+                return self._stale_anchor_drop_result(
+                    anchor_ref=anchor_ref,
+                    anchor_generation=anchor_generation,
+                    turn_id=turn_id,
+                    phase="pre_llm",
+                    context_digest=binding.context_digest if binding is not None else "",
+                )
+            anchor_texts = [binding_context.title, *binding_context.evidence_labels]
+            anchor_context = {
+                "kind": binding_context.kind,
+                "ref": binding_context.ref,
+                "generation": binding_context.generation,
+                "text": binding_context.title,
+                "object_texts": anchor_texts,
+                "ambiguous_count": active_anchor.ambiguous_count,
+                "context_digest": binding.context_digest if binding is not None else "",
+            }
+        elif anchor_ref or anchor_generation:
+            # Compatibility path for pre-binding callers (CLI/legacy direct).
+            await self._memory.propagate_event(_dialogue_event(status="active"))
             self._dialogue_anchor_manager.expire()
             active_anchor = self._dialogue_anchor_manager.validate_snapshot(
                 anchor_ref,
@@ -2280,6 +2400,8 @@ class SoulEngine:
                     phase="pre_llm",
                 )
             anchor_context, anchor_texts = self._build_dialogue_anchor_context(active_anchor)
+        else:
+            await self._memory.propagate_event(_dialogue_event(status="not_applicable"))
         anchor_decision: dict[str, object] | None = None
         try:
             if anchor_context is None:
@@ -2326,13 +2448,24 @@ class SoulEngine:
                 anchor_generation,
             )
             if revalidated_anchor is None:
+                if binding_context is not None:
+                    await self._memory.propagate_event(_dialogue_event(status="stale"))
                 return self._stale_anchor_drop_result(
                     anchor_ref=anchor_ref,
                     anchor_generation=anchor_generation,
                     turn_id=turn_id,
                     phase="post_llm",
+                    context_digest=binding.context_digest if binding is not None else "",
                 )
             active_anchor = revalidated_anchor
+
+        if binding_context is not None:
+            assert binding is not None
+            await self._memory.propagate_event(_dialogue_event(status="active"))
+            for candidate in extracted:
+                candidate.setdefault("source_turn_id", turn_id)
+                candidate.setdefault("source_reply_to_turn_id", binding_context.reply_to_turn_id)
+                candidate.setdefault("source_context_digest", binding.context_digest)
 
         anchor_outcome = ""
         if active_anchor is not None:
@@ -2349,6 +2482,16 @@ class SoulEngine:
                     anchor_texts=anchor_texts,
                     decision=anchor_decision,
                     turn_id=turn_id,
+                    binding_provenance=(
+                        {
+                            "source_turn_id": turn_id,
+                            "source_reply_to_turn_id": binding_context.reply_to_turn_id,
+                            "source_context_digest": binding.context_digest,
+                            "source_binding_mode": binding.mode.value,
+                        }
+                        if binding_context is not None and binding is not None
+                        else None
+                    ),
                 )
                 if anchor_outcome == "stale":
                     return self._stale_anchor_drop_result(
@@ -2356,12 +2499,13 @@ class SoulEngine:
                         anchor_generation=anchor_generation,
                         turn_id=turn_id,
                         phase="generation_cas",
+                        context_digest=binding.context_digest if binding is not None else "",
                     )
 
         # Process inventory settles (single ownership, spec §invariant 6): an
         # anchored turn belongs to the dialogue-anchor processor. Probe turns
         # retain their durable side effect, so both paths are excluded here.
-        if scope == "chat" and settles and active_anchor is None:
+        if scope == "chat" and settles and active_anchor is None and inventory_settles_allowed:
             await self._process_dialogue_settles(
                 settles=settles,
                 active_list=active_list,
@@ -2454,6 +2598,14 @@ class SoulEngine:
         }
         newly_added_dislikes = sorted(new_disliked - old_disliked)
         candidate_refs = self._candidate_ledger_refs(eligible_candidates)
+        if binding_context is not None and binding is not None:
+            candidate_refs.extend(
+                [
+                    f"source_turn_id:{turn_id}",
+                    f"source_reply_to_turn_id:{binding_context.reply_to_turn_id}",
+                    f"source_context_digest:{binding.context_digest}",
+                ]
+            )
         # Topic freeze (Phase 2): a topic under an unresolved confusion must not
         # be further reinforced. New/upgraded weights for frozen topics are held
         # back here (existing weights untouched); no-op when nothing is frozen,
@@ -4369,6 +4521,7 @@ class SoulEngine:
         anchor_texts: list[str],
         decision: dict[str, object],
         turn_id: str,
+        binding_provenance: Mapping[str, object] | None = None,
     ) -> str:
         """Apply one matrix-validated anchor relation without another LLM call."""
         raw_relation = decision.get("relation")
@@ -4474,37 +4627,43 @@ class SoulEngine:
                 logger.warning("dialogue hypothesis anchor has no resolvable object text")
                 return "kept_invalid"
             if relation in {"support", "contradict"}:
-                result = await self._apply_hypothesis_settlement(
-                    ref=anchor.ref,
-                    hypothesis=hypothesis,
-                    requested_verdict=relation,
-                    turn_id=turn_id,
-                    source="dialogue_anchor",
-                    anchor_snapshot=AnchorPersisted(
+                settlement_kwargs: dict[str, Any] = {
+                    "ref": anchor.ref,
+                    "hypothesis": hypothesis,
+                    "requested_verdict": relation,
+                    "turn_id": turn_id,
+                    "source": "dialogue_anchor",
+                    "anchor_snapshot": AnchorPersisted(
                         kind=anchor.kind,
                         ref=anchor.ref,
                         generation=anchor.generation,
                     ),
-                )
+                }
+                if binding_provenance is not None:
+                    settlement_kwargs["provenance"] = binding_provenance
+                result = await self._apply_hypothesis_settlement(**settlement_kwargs)
                 if result.get("outcome") == "processing":
                     return "queued_failed"
                 return str(result.get("state", "stale"))
             if relation == "revise":
                 raw_derived = decision.get("derived")
                 derived = _as_dict_list(raw_derived)
-                result = await self._apply_hypothesis_settlement(
-                    ref=anchor.ref,
-                    hypothesis=hypothesis,
-                    requested_verdict="revise",
-                    turn_id=turn_id,
-                    source="dialogue_anchor",
-                    derived=derived,
-                    anchor_snapshot=AnchorPersisted(
+                settlement_kwargs = {
+                    "ref": anchor.ref,
+                    "hypothesis": hypothesis,
+                    "requested_verdict": "revise",
+                    "turn_id": turn_id,
+                    "source": "dialogue_anchor",
+                    "derived": derived,
+                    "anchor_snapshot": AnchorPersisted(
                         kind=anchor.kind,
                         ref=anchor.ref,
                         generation=anchor.generation,
                     ),
-                )
+                }
+                if binding_provenance is not None:
+                    settlement_kwargs["provenance"] = binding_provenance
+                result = await self._apply_hypothesis_settlement(**settlement_kwargs)
                 if result.get("outcome") == "processing":
                     return "queued_failed"
                 if result.get("settlement_verdict") == "revised":
@@ -4524,19 +4683,22 @@ class SoulEngine:
         confusion_id = self._confusion_anchor_id(anchor)
         if not confusion_id:
             return "kept_invalid"
-        result = await self._apply_confusion_answer_settlement(
-            ref=anchor.ref,
-            confusion_id=confusion_id,
-            interpretation=interpretation,
-            note="dialogue_anchor",
-            turn_id=turn_id,
-            source="dialogue_anchor",
-            anchor_snapshot=AnchorPersisted(
+        settlement_kwargs = {
+            "ref": anchor.ref,
+            "confusion_id": confusion_id,
+            "interpretation": interpretation,
+            "note": "dialogue_anchor",
+            "turn_id": turn_id,
+            "source": "dialogue_anchor",
+            "anchor_snapshot": AnchorPersisted(
                 kind=anchor.kind,
                 ref=anchor.ref,
                 generation=anchor.generation,
             ),
-        )
+        }
+        if binding_provenance is not None:
+            settlement_kwargs["provenance"] = binding_provenance
+        result = await self._apply_confusion_answer_settlement(**settlement_kwargs)
         if result.get("outcome") == "processing":
             return "queued_failed"
         return "answered"
@@ -4616,6 +4778,7 @@ class SoulEngine:
         anchor_generation: int,
         turn_id: str,
         phase: str,
+        context_digest: str = "",
     ) -> dict[str, object]:
         """Warn and audit one stale queued anchor result without side effects."""
         logger.warning(
@@ -4634,13 +4797,17 @@ class SoulEngine:
             source_refs=[f"anchor:{anchor_ref}"],
             turn_id=turn_id,
         )
-        return {
+        result: dict[str, object] = {
             "event_logged": True,
             "candidate_count": 0,
             "preference_updated": False,
             "profile_rebuilt": False,
             "anchor_outcome": "stale",
         }
+        if context_digest:
+            result["binding_status"] = "stale"
+            result["context_digest"] = context_digest
+        return result
 
     def _merge_insight_candidates(
         self,

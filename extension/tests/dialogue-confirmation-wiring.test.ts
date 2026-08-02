@@ -17,6 +17,8 @@ test("popup wires pending list, card actions, and the shared renderer into the d
   assert.match(popup, /OpenBiliClawDialogueConfirmation/);
   assert.match(popup, /selectDialogueTurns/);
   assert.match(popup, /executeCardAction/);
+  assert.match(popup, /isTerminalCardTurn/);
+  assert.match(popup, /isTerminalCardTurn\(dialogueTurnsById\.get/);
   assert.match(popup, /fetchTurn[\s\S]*fetchChatTurn/);
   assert.match(popup, /dialogueCardActionAbortController\.signal/);
   assert.match(popup, /session:\s*CHAT_SESSION/);

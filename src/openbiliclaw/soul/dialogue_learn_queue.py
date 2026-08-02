@@ -12,6 +12,7 @@ import asyncio
 import contextlib
 import copy
 import logging
+from collections.abc import Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
@@ -26,7 +27,7 @@ from openbiliclaw.soul.dialogue_settlement_guard import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping
+    from collections.abc import Awaitable, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -484,6 +485,39 @@ class AnchorAdmissionRegistry:
         self._latest_head_key = key
         return active
 
+    def peek(
+        self,
+        *,
+        target_kind: str = "",
+        target_ref: str = "",
+    ) -> AnchorAdmissionSnapshot:
+        """Read the logical admission head without retaining or mutating it.
+
+        Context validation and refresh recovery use this method.  In
+        particular, a GET must not create a queue reference, tombstone, or
+        reservation merely by looking at the current target.
+        """
+        if bool(target_kind) != bool(target_ref):
+            raise AnchorAdmissionError(
+                "target_kind and target_ref must either both be present or both be absent"
+            )
+        if target_kind:
+            state = self._heads.get((target_kind, target_ref))
+            return (
+                state
+                if state is not None
+                else self.actual_state(
+                    target_kind=target_kind,
+                    target_ref=target_ref,
+                )
+            )
+        if self._latest_head_key is not None:
+            state = self._heads.get(self._latest_head_key)
+            if state is not None:
+                return state
+        active = self._read_provider_active()
+        return active if active is not None else ANCHOR_NOT_APPLICABLE
+
     def resolve_owned(
         self,
         *,
@@ -803,6 +837,15 @@ class DialogueSettlementQueue:
     def registry(self) -> AnchorAdmissionRegistry:
         return self._registry
 
+    def peek_anchor(
+        self,
+        *,
+        target_kind: str = "",
+        target_ref: str = "",
+    ) -> AnchorAdmissionSnapshot:
+        """Expose the registry's read-only context-validation peek."""
+        return self._registry.peek(target_kind=target_kind, target_ref=target_ref)
+
     @property
     def worker_alive(self) -> bool:
         return self._worker is not None and not self._worker.done()
@@ -873,6 +916,7 @@ class DialogueSettlementQueue:
         payload: Mapping[str, object],
         *,
         completion: bool = False,
+        _server_frozen_anchor_snapshot: AnchorAdmissionSnapshot | None = None,
     ) -> DialogueJob | None:
         """Atomically classify, snapshot, and enqueue one immutable envelope."""
         self._reject_worker_lineage_reentry()
@@ -894,7 +938,48 @@ class DialogueSettlementQueue:
         copied_payload = MappingProxyType(copy.deepcopy(dict(payload)))
         transition = _classify_anchor_transition(parsed_kind, copied_payload)
         owned_reservation_id: str | None = None
-        if transition.establishes_anchor:
+        anchor_snapshot: AnchorAdmissionSnapshot
+        if _server_frozen_anchor_snapshot is not None:
+            if parsed_kind is not DialogueJobKind.LEARN:
+                raise AnchorAdmissionError(
+                    "server frozen anchor snapshots are only valid for LEARN"
+                )
+            if not isinstance(
+                _server_frozen_anchor_snapshot,
+                (AnchorPersisted, AnchorNotApplicable),
+            ):
+                raise AnchorAdmissionError(
+                    "server frozen LEARN snapshot must be persisted or not applicable"
+                )
+            raw_binding = copied_payload.get("dialogue_binding")
+            if not isinstance(raw_binding, Mapping):
+                raise AnchorAdmissionError("server frozen LEARN requires a parsed dialogue binding")
+            from openbiliclaw.soul.dialogue_turn_context import DialogueTurnBinding
+
+            binding = DialogueTurnBinding.from_mapping(raw_binding)
+            if binding.mode.value == "bound":
+                context = binding.context
+                if context is None or not isinstance(
+                    _server_frozen_anchor_snapshot,
+                    AnchorPersisted,
+                ):
+                    raise AnchorAdmissionError(
+                        "bound LEARN binding requires a persisted anchor snapshot"
+                    )
+                if (
+                    _server_frozen_anchor_snapshot.kind != context.kind
+                    or _server_frozen_anchor_snapshot.ref != context.ref
+                    or _server_frozen_anchor_snapshot.generation != context.generation
+                ):
+                    raise AnchorAdmissionError(
+                        "frozen LEARN snapshot conflicts with dialogue binding"
+                    )
+            elif not isinstance(_server_frozen_anchor_snapshot, AnchorNotApplicable):
+                raise AnchorAdmissionError(
+                    "ordinary/detached LEARN bindings require not-applicable snapshot"
+                )
+            anchor_snapshot = _server_frozen_anchor_snapshot
+        elif transition.establishes_anchor:
             reservation = self._registry.reserve(
                 kind=transition.target_kind,
                 ref=transition.target_ref,

@@ -29,6 +29,8 @@ def test_mobile_wires_pending_confirmation_and_card_action_requests() -> None:
     assert "export async function actOnChatCard" in api
     assert "executePendingConfirmationOpen" in chat
     assert "executeCardAction" in chat
+    assert "isTerminalCardTurn" in chat
+    assert "if (isTerminalCardTurn(contextTarget))" in chat
     assert 'fetchChatTurns({ session: "popup", limit: 100 })' in chat
     assert 'renderTurnMarkup(turn, { surface: "desktop" })' in chat
     assert "selectDialogueTurns(turns)" in chat

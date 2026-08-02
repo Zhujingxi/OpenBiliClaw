@@ -303,6 +303,7 @@ export function navigateToTab(id) {
   if (!TABS.find((t) => t.id === id)) return;
   location.hash = `#/${id}`;
   patchState({ activeTab: id });
+  document.body.classList.toggle("chat-view-active", id === "chat");
   for (const [key, el] of Object.entries(views)) {
     el.classList.toggle("active", key === id);
   }

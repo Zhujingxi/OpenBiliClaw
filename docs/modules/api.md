@@ -69,9 +69,23 @@ ID 字段是严格 JSON string，不接受数字、布尔或其它类型的自�
 
 ## 对话确认端点
 
+### Turn 级上下文绑定（2026-08-01）
+
+`chat_turns.reply_to_turn_id` 是用户 turn 指向 durable card/question 的唯一显式关系。带关系的
+请求只提交 target ID；服务端在 user row INSERT 前读取 completed target 与 settlement queue 的
+exact admission snapshot，生成并冻结 `payload.dialogue_binding`（`bound`、canonical context、
+完整 `context_digest`）。`kind/ref/generation/title/evidence` 等客户端字段不被采信，冲突的
+scope/subject 返回错误；无关系请求继续区分 `ordinary` 与 `detached`。
+
+回复、历史关系前缀、raw dialogue event、learn envelope、engine provenance 与卡片结算都消费
+同一冻结 binding。绑定 target 在 POST 前已过期、被保留、失败或不存在时不会创建 fallback user
+row；相同 `turn_id` 的同一 normalized request 仍幂等，任何 relation/message 分歧返回
+`turn_id_conflict`。
+
 | 方法与路径 | 状态 | 契约 |
 |---|---|---|
-| `POST /api/chat/turns` | ✅ | 普通消息落成 `pending` 后立即返回，只向 app-owned `DurableChatReplyScheduler` 发 wake；单 worker 按 `chat_turns.rowid` 严格串行生成回复，启动会分页恢复全部 pending。provider、限流、配置、超时与取消都保持 pending 并原位有界退避，不能被后续 turn 越过；只有显式无效/空响应可终结为 failed。`scope="hypothesis"` 时服务端生成结构化卡片 payload（`type/kind/ref/title/evidence_refs/actions/state`），直接返回 `status="completed"`，不会调用 LLM worker。若双轨冷却允许，普通 durable 用户消息会先原子插入一条系统确认卡/问题，再写用户 turn；payload 的 `attached_to_turn_id` 负责重试与重启去重。 |
+| `POST /api/chat/turns` | ✅ | 普通消息在 user row INSERT 前解析可选 `reply_to_turn_id`，冻结 server-owned canonical `DialogueTurnBinding`（bound/ordinary/detached）和 context digest；随后落成 `pending` 并立即返回，只向 app-owned `DurableChatReplyScheduler` 发 wake；单 worker 按 `chat_turns.rowid` 严格串行生成回复，启动会分页恢复全部 pending。provider、限流、配置、超时与取消都保持 pending 并原位有界退避，不能被后续 turn 越过；只有显式无效/空响应可终结为 failed。`scope="hypothesis"` 时服务端生成结构化卡片 payload（`type/kind/ref/title/evidence_refs/actions/state`），直接返回 `status="completed"`，不会调用 LLM worker。若双轨冷却允许，普通 durable 用户消息会先原子插入一条系统确认卡/问题，再写用户 turn；payload 的 `attached_to_turn_id` 负责重试与重启去重。 |
+| `GET /api/chat/contexts/{reply_to_turn_id}` | ✅ | 只读返回 canonical context preview（target、kind/ref/generation、可读 evidence、digest）。不创建 queue job、anchor、event，也不修改 card；三端只持久化 target ID，并用 preview 校验恢复。 |
 | `GET /api/chat/turns?session=<label>` | ✅ | `session` 只过滤当前 UI 可见 turn；插件、移动 Web、桌面 Web 的主聊天统一使用 `session=popup` 并读取完整 `chat/hypothesis/confusion` 可见历史，因此三端共享普通消息、确认卡和澄清问题；其它 session 仍可用于隔离集成。不同 UI 仍共享一份认知 history。列表中的每个非终态卡片只 submit `card.reconcile` 到唯一结算队列并返回本次 durable 快照；request task 不直接写 card/object/anchor。 |
 | `GET /api/chat/turns/{turn_id}` | ✅ | 返回单个 durable turn。普通 turn 仍为 pending 时只幂等唤醒同一 reply worker，重复轮询不会复制 queued/in-flight/backoff 工作。若读到非终态卡片，只同步 admission `card.reconcile` 并立即返回快照。worker 会为 `applied=1` receipt 补 stable audit、跨 session projection 与 exact-generation 解锚，也会把没有对应 active anchor 的 orphan `discussing` 校正回 `pending`；因此 publication gap 的第一次 GET 可仍见旧态，queue 完成后的下一次 GET 见权威状态。 |
 | `GET /api/chat/pending-confirmations` | ✅ | 读取前在 settlement worker 空闲时扫描 orphan claim：只有 `clarifying` claim 已超过 30 秒创建安全窗、ask-turn identity 未变化、且 durable turn 仍不存在时才释放；worker 正忙时跳过该次修复并直接返回 durable 快照，避免只读 UI 被长 LLM job 卡住，下一次空闲读取/open 会继续修复。随后返回 `{"count":N,"items":[...]}`；只列未结算的高优先级对象且最多 3 条：未验证假设 `confidence>=0.60`、active 疑惑 `interpretation_confidence>=0.50`。无活跃澄清时疑惑固定预留 1 席；已有全局 `clarifying` 时只保留该持有者，隐藏必然无法 claim 的其它 open 疑惑。UI 传 `?session=popup|webui` 后，若该持有者已在本 session 有 turn，则不重复显示；其它 session 仍可打开同一 ref 并获得本地 turn。`?count_only=1` 保留轻量只读响应 `{"count":N}`，供兼容客户端/诊断使用；当前 service worker 明确不调用它，工具栏角标只表达后端不可达或未初始化，待聊数字只在 popup、移动 Web 与桌面 Web 的对话入口显示。`openbiliclaw questions` 读取完整响应且不复制筛选规则。用户主动列表不套用系统冷却。 |
@@ -102,7 +116,7 @@ durable reply 的可见终态使用 `WHERE status='pending'` compare-and-swap：
 
 对话内结算（锚归属 `support/contradict/revise/answer`）落库在**回复完成之后**——worker 还要跑归属判断和队列 job。因此桌面 Web 在回复完成后继续按 1/2/5/5/5/5/5 秒重读对话，直到卡片进入终态或用完 ~30 秒预算（与卡片 action 的 `CARD_ACTION_POLL_DEADLINE_MS` 同量级）；只在屏幕上确有未结算卡片时才轮询。少了这步，用户说完「我认可修正版」后卡片会一直停在「正在聊这条」直到手动刷新——真机浏览器 E2E 实测 8 秒预算会漏掉。
 
-队列本身是进程内、非 durable 的：若进程在 `202` 后重启，尚未执行的 job 可以丢失，但 durable card/receipt 不会伪终态。popup、移动 Web 与桌面 Web 对 `202 processing` 按 `1s/2s/5s`（之后保持 5s）读取 `GET /api/chat/turns/{turn_id}`，总截止 30 秒；终态立即停止，超时、读取持续失败或页面 abort 显示本地 `retryable_error`，允许刷新或重试 action。CLI/OpenClaw 不消费该 HTTP action 契约。
+队列本身是进程内、非 durable 的：若进程在 `202` 后重启，尚未执行的 job 可以丢失，但 durable card/receipt 不会伪终态。popup、移动 Web 与桌面 Web 对 `202 processing` 按 `1s/2s/5s`（之后保持 5s）读取 `GET /api/chat/turns/{turn_id}`，总截止 30 秒；终态立即停止，超时、读取持续失败或页面 abort 显示本地 `retryable_error`，允许刷新或重试 action。三端的 active insights/认知更新区保持只读；CLI/OpenClaw 也不消费该 HTTP action 契约。
 
 系统抛出的两个 gate 必须同时满足：距上次全局抛出至少 12 小时，且同 ref 的 `last_asked_at` / `deferred_until` 已超过 72 小时；两者持久化在 `memory/dialogue_confirmation_state.json`。用户主动 open 明确绕过这两个时间 gate，但疑惑仍受数据库 `clarifying <= 1` 约束。附着 turn 与用户 turn 同秒时，以 `(created_at,rowid)` 保证卡/问题在前；空消息校验与既有 `turn_id` 幂等检查均发生在附着前。
 

@@ -3893,6 +3893,74 @@ async def test_anchor_generation_is_revalidated_after_llm_before_any_side_effect
     assert "stale dialogue anchor result discarded before side effects" in caplog.text
 
 
+async def test_bound_context_stale_event_keeps_one_digest_and_drops_effects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A frozen bound snapshot records A/stale and cannot write B effects."""
+    from openbiliclaw.soul.dialogue_anchor import ENTRY_PENDING_OPEN
+    from openbiliclaw.soul.dialogue_turn_context import DialogueTurnBinding, DialogueTurnContext
+
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    old = _seed_dialogue_anchor_hypothesis(memory, engine, hypothesis="冻结 A")
+    context = DialogueTurnContext(
+        reply_to_turn_id="bound-stale-turn",
+        source_type="card",
+        kind="hypothesis",
+        ref=old.ref,
+        generation=old.generation,
+        anchor_origin_turn_id=old.origin_turn_id,
+        title="冻结 A",
+        evidence_labels=("可读依据",),
+        captured_at="2026-08-01T12:00:00+08:00",
+    )
+    binding = DialogueTurnBinding.from_context(context)
+
+    async def replace_before_return(**_kwargs: object) -> dict[str, object]:
+        assert (
+            engine._dialogue_anchor_manager.release(
+                reason="replaced",
+                expected_generation=old.generation,
+            )
+            is not None
+        )
+        engine._dialogue_anchor_manager.establish(
+            kind="hypothesis",
+            ref=old.ref,
+            origin_turn_id="replacement-card",
+            entry=ENTRY_PENDING_OPEN,
+        )
+        return {
+            "candidates": [{"kind": "interest", "content": "迟到 A 候选", "confidence": 0.99}],
+            "settles": [],
+            "anchor": {"relation": "support", "interpretation": "", "derived": []},
+        }
+
+    monkeypatch.setattr(engine._dialogue_insight_analyzer, "extract", replace_before_return)
+    result = await engine.learn_from_dialogue(
+        user_message="我支持 A",
+        assistant_reply="收到",
+        session="popup",
+        turn_id="bound-stale-turn",
+        dialogue_binding=binding,
+    )
+
+    assert result["anchor_outcome"] == "stale"
+    assert result["context_digest"] == context.context_digest
+    assert memory.load_insight_candidates() == []
+    events = memory.query_events(event_types=["dialogue"])
+    assert len(events) == 1
+    stale = events[-1]
+    metadata = json.loads(str(stale["metadata"]))
+    assert metadata["binding_status"] == "stale"
+    assert metadata["context_digest"] == context.context_digest
+    assert metadata["anchor_ref"] == old.ref
+    assert "冻结 A" in str(stale["context"])
+    assert old.ref not in str(stale["context"])
+
+
 def test_anchor_generation_cas_abandons_real_interleaving_before_first_side_effect(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

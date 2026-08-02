@@ -596,7 +596,7 @@ config recovery draft (normal or degraded; business APIs remain gated)
              ├→ /api/config/probe-service → temporary registry → total gate
              └→ /api/config/discover-models → exact instance GET /models (no write)
                                            → editable model list + local effort advisory
-durable reply: pending SQLite → rowid-serial reply worker → visible completion CAS (app-stable dialogue lease)
+durable reply: reply_to_turn_id + fixed time/payload → POST-time frozen binding → pending SQLite → rowid-serial reply worker → visible completion CAS (app-stable dialogue lease)
 post-reply learning/object settlement: independent 11-kind typed queue → actual worker + guard
 confirmation entry (pending list/cards) → one anchor(kind+ref+generation) → frozen admission / relation matrix
                           ├→ pending≤3 · user no cooldown / system 12h+object 72h · confirmation-first attachment
@@ -604,7 +604,8 @@ confirmation entry (pending list/cards) → one anchor(kind+ref+generation) → 
                           ├→ active confusion: current holder only; hidden once this session has its turn
                           ├→ frozen kind/ref/generation → worker-only apply → event/object/derived/marker → applied
                           │                                                └→ publication-only retry → projection / exact release
-                          ├→ action local≤1s: completed 200 / blocked 202 → popup/desktop poll 1/2/5s, ≤30s
+                          ├→ one context digest → prompt/history/event/learn/settlement provenance
+                          ├→ action local≤1s: completed 200 / blocked 202 → popup/mobile/desktop poll 1/2/5s, ≤30s
                           └→ confusion FIFO≤5 / head fencing / 12h recovery
 config hot reload: accepting drain old worker → atomic pause/revoke → new worker; 25m safety window
 realtime: runtime-stream 20s idle heartbeat → transient close shows reconnecting and retries
@@ -672,7 +673,7 @@ learning → bypass background admission; keep total gate ── new dislike: sh
 transient/provider/timeout/cancel → rollback provisional history → durable pending + head retry; explicit invalid/empty → failed CAS
 durable turn → fixed time/payload → confirmation entry (pending list/cards) → frozen anchor admission → relation matrix
                                                   └→ card/anchor/chat/probe/confusion/replay/legacy all worker-only
-card action → synchronous 200 fast path | 202 processing → popup/desktop poll; mobile/CLI have no action
+card action → synchronous 200 fast path | 202 processing → popup/mobile/desktop poll; CLI has no action
 
 Desktop startup: recommendation hydration │ runtime hydration │ secondary health/profile/activity/config hydration (independent)
 

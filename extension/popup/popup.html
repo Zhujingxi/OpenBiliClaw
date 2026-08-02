@@ -3451,6 +3451,72 @@
     .dialogue-card-action:disabled { opacity: 0.5; cursor: default; }
     .dialogue-question-shell { display: grid; gap: 6px; }
 
+    .dialogue-context-bar {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      min-width: 0;
+      padding: 8px 10px;
+      border: 1px solid rgba(239, 189, 207, 0.72);
+      border-radius: 13px;
+      background: rgba(255, 248, 251, 0.96);
+    }
+    .dialogue-context-copy {
+      min-width: 0;
+      display: grid;
+      gap: 2px;
+      overflow: hidden;
+    }
+    .dialogue-context-label {
+      color: var(--brand-strong);
+      font-size: 10px;
+      font-weight: 800;
+    }
+    .dialogue-context-copy strong,
+    .dialogue-reply-quote strong {
+      min-width: 0;
+      overflow: hidden;
+      display: -webkit-box;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 2;
+      line-clamp: 2;
+      text-overflow: ellipsis;
+      line-height: 1.4;
+    }
+    .dialogue-context-copy strong { font-size: 11px; }
+    .dialogue-context-clear {
+      flex: 0 0 auto;
+      min-height: 34px;
+      padding: 6px 10px;
+      border: 1px solid rgba(239, 189, 207, 0.8);
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.95);
+      color: var(--brand-strong);
+      font-size: 10px;
+      font-weight: 800;
+    }
+    .dialogue-reply-quote {
+      display: flex;
+      max-width: 92%;
+      margin: 0 0 2px auto;
+    }
+    .dialogue-reply-quote button {
+      display: grid;
+      gap: 2px;
+      min-width: 0;
+      padding: 6px 9px;
+      text-align: left;
+      border: 1px solid rgba(226, 230, 239, 0.98);
+      border-radius: 10px;
+      background: rgba(248, 251, 255, 0.98);
+      color: var(--text-secondary);
+      font-size: 10px;
+    }
+    .dialogue-reply-quote button span { color: var(--brand-strong); font-weight: 800; }
+    .dialogue-reply-quote button strong { color: var(--text-main); font-size: 10px; }
+    .dialogue-context-clear:focus-visible,
+    .dialogue-reply-quote button:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+
     /* Collapse the conversation surface entirely when no messages
        have been added yet — otherwise the min-height + margin
        leave an awkward blank slab above the input. */

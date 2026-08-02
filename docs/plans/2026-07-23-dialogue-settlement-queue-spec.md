@@ -6,6 +6,15 @@
 **Plan:** [`2026-07-23-dialogue-settlement-queue-plan.md`](./2026-07-23-dialogue-settlement-queue-plan.md)
 **Supersedes:** 已撤回的 `2026-07-23-settlement-serialization-{spec,plan}.md`
 
+## 2026-08-01 binding amendment
+
+`LEARN` 的 admission 不再定义为 interactive reply 完成后的 latest-anchor 读取。对带
+`reply_to_turn_id` 的 API user turn，binding 在 durable INSERT 前已冻结；queue 只接受 server-only
+`AnchorPersisted` 或 `AnchorNotApplicable` override，并按 exact kind/ref/generation 执行。普通
+请求保持 `ordinary` / `detached` 兼容语义，禁止 detached 旁路 object settlement；任何 stale
+bound job 只 drop，不升级为当前 anchor。上下文 binding spec 的 B1–B15 约束优先于本文件较早的
+“reply 后 submit LEARN”叙述。
+
 ## 1. Goal
 
 把**对话产生的 hypothesis、confusion 与 card 结算**收口到后端主进程内的一条

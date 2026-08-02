@@ -324,15 +324,25 @@ export async function fetchActivityFeed({ limit, before } = {}) {
 }
 
 // ── Chat ────────────────────────────────────────────────────
-export async function startChatTurn({ turnId = "", session = "popup", scope = "chat", subjectId = "", subjectTitle = "", message }) {
-  return requestJson("/chat/turns", json({
+export async function startChatTurn({
+  turnId = "",
+  session = "popup",
+  scope = "chat",
+  subjectId = "",
+  subjectTitle = "",
+  replyToTurnId = "",
+  message,
+}) {
+  const payload = {
     turn_id: turnId,
     session,
     scope,
     subject_id: subjectId,
     subject_title: subjectTitle,
     message,
-  }));
+  };
+  if (replyToTurnId) payload.reply_to_turn_id = replyToTurnId;
+  return requestJson("/chat/turns", json(payload));
 }
 
 export async function fetchChatTurn(turnId, { signal, timeoutMs = 10_000 } = {}) {
@@ -345,6 +355,10 @@ export async function fetchChatTurns({ session = "popup", scope = "", limit = 50
   if (scope) params.set("scope", scope);
   if (typeof limit === "number") params.set("limit", String(Math.max(1, Math.floor(limit))));
   return requestJson(`/chat/turns?${params.toString()}`);
+}
+
+export async function fetchChatContext(turnId, { signal, timeoutMs = QUICK_READ_TIMEOUT_MS } = {}) {
+  return requestJson(`/chat/contexts/${encodeURIComponent(turnId)}`, { signal, timeoutMs });
 }
 
 export async function fetchPendingConfirmations({ session = "popup" } = {}) {

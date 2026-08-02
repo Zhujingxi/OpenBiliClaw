@@ -35,6 +35,7 @@ def test_chat_turn_payload_schema_is_present_in_fresh_database(tmp_path: Path) -
     }
 
     assert columns["payload"] == "'{}'"
+    assert columns["reply_to_turn_id"] == "''"
     settlement_columns = {
         str(row["name"])
         for row in db.conn.execute("PRAGMA table_info(card_settlements)").fetchall()
@@ -82,7 +83,11 @@ def test_chat_turn_payload_schema_migrates_legacy_database(tmp_path: Path) -> No
     assert "payload" in {
         str(row["name"]) for row in db.conn.execute("PRAGMA table_info(chat_turns)").fetchall()
     }
+    assert "reply_to_turn_id" in {
+        str(row["name"]) for row in db.conn.execute("PRAGMA table_info(chat_turns)").fetchall()
+    }
     assert db.get_chat_turn("legacy-turn")["payload"] == {}
+    assert db.get_chat_turn("legacy-turn")["reply_to_turn_id"] == ""
 
 
 def test_card_settlement_schema_rebuilds_wave_a_table_without_claim_columns(

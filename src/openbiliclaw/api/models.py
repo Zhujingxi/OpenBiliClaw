@@ -1827,7 +1827,38 @@ class ChatTurnIn(BaseModel):
     scope: str = "chat"
     subject_id: str = ""
     subject_title: str = ""
+    # The only client-declared relation.  Canonical kind/ref/generation/title
+    # are resolved from this durable target by the server at POST time.
+    reply_to_turn_id: str = ""
     payload: dict[str, object] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def reject_reserved_binding_payload(self) -> Self:
+        """Do not accept client-supplied canonical binding facts."""
+        reserved = {
+            "dialogue_binding",
+            "source_type",
+            "kind",
+            "ref",
+            "generation",
+            "anchor_origin_turn_id",
+            "title",
+            "evidence",
+            "evidence_labels",
+            "context_digest",
+            "context",
+            "mode",
+            "inventory_settles_allowed",
+        }
+        # Card creation legitimately accepts ``evidence_refs`` as input. Once
+        # a request declares a reply relation, however, even evidence is
+        # server-owned and must come from the target row.
+        if self.reply_to_turn_id.strip():
+            reserved.update({"evidence_refs", "evidence_ref"})
+        forbidden = sorted(set(self.payload).intersection(reserved))
+        if forbidden:
+            raise ValueError(f"reserved_payload_key: {', '.join(forbidden)} is server-owned")
+        return self
 
 
 class ChatTurnOut(BaseModel):
@@ -1838,6 +1869,7 @@ class ChatTurnOut(BaseModel):
     scope: str = "chat"
     subject_id: str = ""
     subject_title: str = ""
+    reply_to_turn_id: str = ""
     message: str = ""
     reply: str = ""
     status: str = "pending"
@@ -1845,6 +1877,19 @@ class ChatTurnOut(BaseModel):
     payload: dict[str, object] = Field(default_factory=dict)
     created_at: str = ""
     updated_at: str = ""
+
+
+class DialogueContextPreview(BaseModel):
+    """Read-only canonical context returned before a bound send."""
+
+    active: bool = True
+    reply_to_turn_id: str
+    source_type: str
+    kind: str
+    generation: int
+    title: str
+    evidence_labels: list[str] = Field(default_factory=list)
+    context_digest: str
 
 
 class ChatTurnListResponse(BaseModel):

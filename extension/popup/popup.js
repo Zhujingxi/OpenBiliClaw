@@ -107,6 +107,7 @@ import {
   checkBackendUpdate,
   applyBackendUpdate,
   cancelInit,
+  fetchChatContext,
   fetchChatTurn,
   fetchChatTurns,
   fetchConfig,
@@ -155,13 +156,24 @@ if (!dialogueConfirmation) {
   throw new Error("dialogue-confirmation shared helper did not load");
 }
 const {
+  activateReplyQuote,
+  clearContextSelection,
+  contextBarMarkup,
+  contextErrorCode,
+  contextErrorMessage,
+  contextSelectionFromTurn,
   executeCardAction,
   executePendingConfirmationOpen,
   isCardTurn,
+  isTerminalCardTurn,
   isQuestionTurn,
+  normalizeContextPreview,
+  readContextSelection,
+  replyQuoteMarkup,
   renderPendingListMarkup,
   renderTurnMarkup,
   selectDialogueTurns,
+  writeContextSelection,
 } = dialogueConfirmation;
 const dialogueCardActionAbortController = new AbortController();
 
@@ -4832,6 +4844,70 @@ function renderEditPanel(container, editState) {
 }
 
 const dialogueTurnsById = new Map();
+let dialogueContextSelection = readContextSelection(
+  (() => {
+    try { return globalThis.localStorage; } catch { return null; }
+  })(),
+  "extension-popup",
+);
+let retainedChatDraft = "";
+
+function popupContextStorage() {
+  try { return globalThis.localStorage; } catch { return null; }
+}
+
+function storeDialogueContext(selection) {
+  dialogueContextSelection = writeContextSelection(
+    popupContextStorage(),
+    "extension-popup",
+    selection,
+  );
+  return dialogueContextSelection;
+}
+
+async function validateDialogueContext({ announce = false } = {}) {
+  const current = normalizeContextPreview(dialogueContextSelection);
+  if (!current) return null;
+  if (isTerminalCardTurn(dialogueTurnsById.get(current.reply_to_turn_id))) {
+    storeDialogueContext(clearContextSelection());
+    return null;
+  }
+  try {
+    const preview = normalizeContextPreview(await fetchChatContext(current.reply_to_turn_id));
+    if (!preview) throw new Error("invalid_context_preview");
+    return storeDialogueContext(preview);
+  } catch (error) {
+    const code = contextErrorCode(error);
+    if (["reply_target_not_found", "reply_target_inactive", "invalid_reply_target"].includes(code)) {
+      storeDialogueContext(clearContextSelection());
+      if (announce) setHint(contextErrorMessage(error), "error");
+    } else if (announce && code === "reply_target_processing") {
+      setHint(contextErrorMessage(error), "warning");
+    }
+    return code === "reply_target_processing" ? current : null;
+  }
+}
+
+async function selectDialogueContext(turnId, preview = null) {
+  const turn = dialogueTurnsById.get(turnId) || { turn_id: turnId };
+  const candidate = contextSelectionFromTurn(turn, preview);
+  if (candidate) {
+    storeDialogueContext(candidate);
+    renderStructuredDialogueTurn(turn, { forceBottom: false });
+    return candidate;
+  }
+  try {
+    const fetched = normalizeContextPreview(await fetchChatContext(turnId));
+    const fetchedCandidate = contextSelectionFromTurn(turn, fetched);
+    if (!fetchedCandidate) throw new Error("invalid_context_preview");
+    storeDialogueContext(fetchedCandidate);
+    renderStructuredDialogueTurn(turn, { forceBottom: false });
+    return fetchedCandidate;
+  } catch (error) {
+    setHint(contextErrorMessage(error), "error");
+    return null;
+  }
+}
 
 function renderPendingConfirmations() {
   const { count, items, expanded } = state.pendingConfirmations;
@@ -4856,6 +4932,26 @@ function renderPendingConfirmations() {
       Math.max(0, elements.chatPendingList.scrollHeight - elements.chatPendingList.clientHeight),
     );
   }
+}
+
+function renderDialogueContextBar() {
+  const existing = document.getElementById("chatContextBar");
+  const markup = contextBarMarkup(dialogueContextSelection);
+  if (!markup) {
+    existing?.remove();
+    return;
+  }
+  const bar = existing || document.createElement("div");
+  bar.id = "chatContextBar";
+  bar.innerHTML = markup;
+  if (!existing && elements.chatForm?.parentElement) {
+    elements.chatForm.parentElement.insertBefore(bar, elements.chatForm);
+  }
+  bar.querySelector("[data-context-clear]")?.addEventListener("click", () => {
+    storeDialogueContext(clearContextSelection());
+    setHint("已清除这条消息的对话上下文。", "info");
+    renderDialogueContextBar();
+  });
 }
 
 async function refreshPendingConfirmations() {
@@ -4911,7 +5007,6 @@ function openChatEvidenceTurnIds() {
       .filter(Boolean),
   );
 }
-
 function renderStructuredDialogueTurn(turn, { forceBottom = false } = {}) {
   if (!(elements.chatMessages instanceof HTMLElement) || !turn?.turn_id) return;
   const shouldStickToBottom = forceBottom || isChatMessagesNearBottom();
@@ -4926,7 +5021,7 @@ function renderStructuredDialogueTurn(turn, { forceBottom = false } = {}) {
     container.dataset.dialogueTurnContainer = turn.turn_id;
     elements.chatMessages.append(container);
   }
-  container.innerHTML = renderTurnMarkup(turn, { surface: "popup" });
+  container.innerHTML = replyQuoteMarkup(turn, [...dialogueTurnsById.values()]) + renderTurnMarkup(turn, { surface: "popup" });
   for (const details of container.querySelectorAll(".dialogue-evidence")) {
     const turnId = details.closest("[data-dialogue-turn-id]")?.dataset.dialogueTurnId || "";
     if (openEvidence.has(turnId)) details.open = true;
@@ -5077,16 +5172,29 @@ function renderChatTurn(turn) {
   if (!turn?.turn_id || !(elements.chatMessages instanceof HTMLElement)) {
     return;
   }
+  dialogueTurnsById.set(turn.turn_id, turn);
   if (isCardTurn(turn) || isQuestionTurn(turn)) {
     renderStructuredDialogueTurn(turn);
     return;
   }
-  const userPart = findChatTurnElement(turn.turn_id, "user");
+  let userPart = findChatTurnElement(turn.turn_id, "user");
   if (!userPart) {
     appendChatMessage("你", turn.message || "", {
       turnId: turn.turn_id,
       part: "user",
     });
+    userPart = findChatTurnElement(turn.turn_id, "user");
+  }
+  if (turn.reply_to_turn_id && !elements.chatMessages.querySelector(
+    `[data-reply-quote-for="${CSS.escape(turn.turn_id)}"]`,
+  )) {
+    const quoteHolder = document.createElement("div");
+    quoteHolder.innerHTML = replyQuoteMarkup(turn, [...dialogueTurnsById.values()]);
+    const quote = quoteHolder.firstElementChild;
+    if (quote instanceof HTMLElement) {
+      quote.dataset.replyQuoteFor = turn.turn_id;
+      elements.chatMessages.insertBefore(quote, userPart || null);
+    }
   }
 
   const assistantPart = findChatTurnElement(turn.turn_id, "assistant");
@@ -5243,7 +5351,7 @@ async function hydrateChatHistory() {
   if (chatHistoryHydrationInFlight) return;
   chatHistoryHydrationInFlight = true;
   const messages = elements.chatMessages;
-  const shouldStickToBottom = isChatMessagesNearBottom(messages);
+  const shouldStickToBottom = isChatMessagesNearBottom();
   const previousScrollTop = messages.scrollTop;
   try {
     const payload = await fetchChatTurns({ session: CHAT_SESSION, limit: 100 });
@@ -5265,6 +5373,8 @@ async function hydrateChatHistory() {
           });
         }
       }
+      await validateDialogueContext({ announce: true });
+      renderDialogueContextBar();
     } finally {
       suppressChatAutoScroll = false;
     }
@@ -6838,6 +6948,12 @@ async function handleDialogueCardAction(button) {
       }
       return;
     }
+    if (action === "discuss") {
+      await selectDialogueContext(turnId, response?.context_preview || null);
+    } else if (dialogueContextSelection?.reply_to_turn_id === turnId) {
+      storeDialogueContext(clearContextSelection());
+      renderDialogueContextBar();
+    }
     if (response?.outcome === "already_settled") {
       setHint("这条已在另一个窗口结算，已同步最终状态。", "success");
     } else if (action === "discuss") {
@@ -6878,7 +6994,10 @@ async function handlePendingConfirmationOpen(button) {
         setHint(`${message}，空闲后会自动打开。`);
       },
     });
-    if (turn?.turn_id) renderChatTurn(turn);
+    if (turn?.turn_id) {
+      renderChatTurn(turn);
+      await selectDialogueContext(turn.turn_id);
+    }
     await Promise.all([hydrateChatHistory(), refreshPendingConfirmations()]);
     setHint(
       isQuestionTurn(turn) ? "这条疑惑已经放进对话里。" : "这张确认卡已经放进对话里。",
@@ -6916,6 +7035,7 @@ function bindDialogueConfirmations() {
   }
   if (elements.chatMessages instanceof HTMLElement) {
     elements.chatMessages.addEventListener("click", (event) => {
+      activateReplyQuote(event, elements.chatMessages);
       const button = event.target instanceof Element
         ? event.target.closest("[data-card-action]")
         : null;
@@ -6923,6 +7043,7 @@ function bindDialogueConfirmations() {
     });
   }
   renderPendingConfirmations();
+  renderDialogueContextBar();
 }
 
 function bindChat() {
@@ -6996,6 +7117,8 @@ function bindChat() {
     }
 
     const turnId = createClientTurnId("chat");
+    const replyToTurnId = dialogueContextSelection?.reply_to_turn_id || "";
+    retainedChatDraft = "";
     appendChatMessage("你", message, { turnId, part: "user" });
     const thinkingPlaceholder = appendChatThinkingPlaceholder(turnId);
     elements.chatInput.value = "";
@@ -7014,6 +7137,7 @@ function bindChat() {
         turnId,
         session: CHAT_SESSION,
         scope: "chat",
+        replyToTurnId,
         message,
       });
       clearSlowStatusTimer();
@@ -7033,8 +7157,10 @@ function bindChat() {
         });
         setChatStatus(getSubmissionProgressMessage("chat", "waiting_reply"), "info");
       }
-    } catch {
+    } catch (error) {
       clearSlowStatusTimer();
+      retainedChatDraft = message;
+      elements.chatInput.value = message;
       if (thinkingPlaceholder) {
         replaceChatThinkingPlaceholder(thinkingPlaceholder, "刚刚没发出去，换个说法再试试。");
       } else {
@@ -7043,8 +7169,8 @@ function bindChat() {
           part: "assistant",
         });
       }
-      setChatStatus(getSubmissionProgressMessage("chat", "error"), "error");
-      setHint("聊天接口这会儿没接上，先看看本地后端是不是开着。", "error");
+      setChatStatus(contextErrorMessage(error), "error");
+      setHint(contextErrorMessage(error), "error");
     } finally {
       clearSlowStatusTimer();
       elements.chatSendButton.disabled = false;
