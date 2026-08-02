@@ -947,6 +947,11 @@ function bindSavedCardRemove(card, remove, { listKind, itemKey, requestRemove, t
 
 async function postSavedFeedback(item, feedbackType, note = "") {
   const contentId = item.content_id || item.bvid || "";
+  const retryKey = [
+    item.item_key || item.id || contentId,
+    feedbackType,
+    note,
+  ].join("|");
   const res = await sendBehaviorEvents([{
     type: "feedback",
     source_platform: item.source_platform || "bilibili",
@@ -960,7 +965,7 @@ async function postSavedFeedback(item, feedbackType, note = "") {
       feedback_note: note,
       saved_feedback: true,
     },
-  }]);
+  }], { retryKey });
   if (!res || !(res.accepted >= 1)) {
     const reason = res?.rejected?.[0]?.reason;
     throw new Error(reason === "not_initialized"

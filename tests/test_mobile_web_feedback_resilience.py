@@ -19,10 +19,12 @@ def test_mobile_submit_feedback_has_timeout() -> None:
     api_js = _API_JS.read_text(encoding="utf-8")
 
     assert "FEEDBACK_SUBMIT_TIMEOUT_MS = 30_000" in api_js
-    assert (
-        'return requestJson("/feedback", '
-        "{ ...json(payload), timeoutMs: FEEDBACK_SUBMIT_TIMEOUT_MS });"
-    ) in api_js
+    submit = api_js.split("export async function submitFeedback", 1)[1][:900]
+    assert "rememberPendingRequestId" in submit
+    assert "const body = { ...payload, request_id:" in submit
+    assert 'requestJson("/feedback", {' in submit
+    assert "...json(body)," in submit
+    assert "timeoutMs: FEEDBACK_SUBMIT_TIMEOUT_MS," in submit
 
 
 def test_mobile_delight_reject_failure_keeps_card() -> None:

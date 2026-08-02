@@ -466,6 +466,56 @@ export async function fetchEditState() {
   return requestJson("/profile/edit-state", { method: "GET" });
 }
 
+const PENDING_REQUEST_IDS_KEY = "obc_pending_request_ids";
+const pendingRequestIds = new Map();
+let pendingRequestIdsReady = null;
+
+function newRequestId() {
+  if (typeof globalThis.crypto?.randomUUID === "function") {
+    return globalThis.crypto.randomUUID();
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+async function loadPendingRequestIds() {
+  if (pendingRequestIdsReady) return pendingRequestIdsReady;
+  pendingRequestIdsReady = (async () => {
+    const items = await storageGet(PENDING_REQUEST_IDS_KEY);
+    const stored = items?.[PENDING_REQUEST_IDS_KEY];
+    if (!stored || typeof stored !== "object" || Array.isArray(stored)) return;
+    Object.entries(stored).forEach(([key, value]) => {
+      if (typeof value === "string" && value) pendingRequestIds.set(key, value);
+    });
+  })();
+  return pendingRequestIdsReady;
+}
+
+async function persistPendingRequestIds() {
+  await storageSet({ [PENDING_REQUEST_IDS_KEY]: Object.fromEntries(pendingRequestIds) });
+}
+
+async function rememberPendingId(namespace, key) {
+  await loadPendingRequestIds();
+  const storageKey = `${namespace}:${key}`;
+  const existing = pendingRequestIds.get(storageKey);
+  if (existing) return existing;
+  const requestId = newRequestId();
+  pendingRequestIds.set(storageKey, requestId);
+  if (pendingRequestIds.size > 200) pendingRequestIds.delete(pendingRequestIds.keys().next().value);
+  await persistPendingRequestIds();
+  return requestId;
+}
+
+async function forgetPendingId(namespace, key) {
+  await loadPendingRequestIds();
+  pendingRequestIds.delete(`${namespace}:${key}`);
+  await persistPendingRequestIds();
+}
+
+function feedbackRequestKey(payload) {
+  return [payload.recommendation_id, payload.feedback_type, payload.note || ""].join("|");
+}
+
 export async function submitProfileEdit({ target, op, value = null, parent = "", weight = null }) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 35_000);
@@ -482,21 +532,43 @@ export async function submitProfileEdit({ target, op, value = null, parent = "",
 }
 
 export async function submitFeedback(payload) {
-  return requestJson("/feedback", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
+  const key = feedbackRequestKey(payload);
+  const request_id = payload.request_id || await rememberPendingId("feedback", key);
+  try {
+    const response = await requestJson("/feedback", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ ...payload, request_id }),
+    });
+    await forgetPendingId("feedback", key);
+    return response;
+  } catch (error) {
+    throw error;
+  }
 }
 
-export async function sendBehaviorEvents(events) {
-  return requestJson("/events", {
+export async function sendBehaviorEvents(events, { retryKey = "" } = {}) {
+  // Identity belongs to the concrete event instance, never to a similarity
+  // key. Mutating the caller-owned object preserves it when the same network
+  // request is retried, while two identical-looking actions remain distinct.
+  if (retryKey && events.length === 1 && !String(events[0]?.event_id || "").trim()) {
+    events[0].event_id = await rememberPendingId("behavior-command", retryKey);
+  }
+  events.forEach((event) => {
+    const existing = String(event?.event_id || "").trim();
+    event.event_id = existing || newRequestId();
+  });
+  const response = await requestJson("/events", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ events }),
   });
+  if (retryKey && Number(response?.accepted || 0) >= 1) {
+    await forgetPendingId("behavior-command", retryKey);
+  }
+  return response;
 }
 
 /**
@@ -516,14 +588,36 @@ export async function sendBehaviorEvents(events) {
  * @returns {Promise<boolean>} true if the click was reported successfully
  */
 export async function reportRecommendationClick(payload) {
+  const stableRecommendationId = payload.recommendation_id || "";
+  const stableContentId = String(payload.content_id || payload.bvid || "").trim();
+  let fallbackUrl = "";
+  if (!stableRecommendationId && !stableContentId) {
+    const rawUrl = String(payload.content_url || "").trim();
+    try {
+      const normalizedUrl = new URL(rawUrl);
+      normalizedUrl.hash = "";
+      fallbackUrl = normalizedUrl.toString();
+    } catch {
+      fallbackUrl = rawUrl;
+    }
+  }
+  const key = [
+    stableRecommendationId,
+    stableContentId || fallbackUrl,
+  ].join("|");
+  const request_id = payload.request_id || await rememberPendingId("recommendation-click", key);
   try {
     await requestJson("/recommendation-click", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({
+        ...payload,
+        request_id,
+      }),
     });
+    await forgetPendingId("recommendation-click", key);
     return true;
   } catch (error) {
     // Best-effort reporting — do not disrupt the user's click.
@@ -652,13 +746,20 @@ export async function respondToAvoidanceProbe(domain, responseType, message = ""
 export async function respondToDelight(bvid, responseType, title = "", message = "") {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 35_000);
+  const durableReaction = ["like", "dislike", "dismiss"].includes(responseType);
+  const key = `${bvid}|${responseType}`;
+  const request_id = durableReaction
+    ? await rememberPendingId("delight-response", key)
+    : "";
   try {
-    return await requestJson("/delight/respond", {
+    const response = await requestJson("/delight/respond", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ bvid, response: responseType, title, message }),
+      body: JSON.stringify({ bvid, response: responseType, title, message, request_id }),
       signal: controller.signal,
     });
+    if (durableReaction) await forgetPendingId("delight-response", key);
+    return response;
   } finally {
     clearTimeout(timeout);
   }

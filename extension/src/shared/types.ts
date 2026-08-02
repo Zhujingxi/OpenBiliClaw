@@ -8,6 +8,8 @@ export interface BehaviorContext {
 }
 
 export interface BehaviorEvent {
+  /** Producer-owned identity retained across MV3 storage/retry/parking. */
+  event_id?: string;
   type: string;
   url: string;
   title: string;

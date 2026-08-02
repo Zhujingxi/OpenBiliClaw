@@ -1,9 +1,10 @@
-"""Profile Update Pipeline — single entry point for all profile-affecting signals.
+"""Profile Update Pipeline — single entry point for profile-affecting signals.
 
-All behavioral events, feedback, dialogue insights, and account sync data
-flow through `ProfileUpdatePipeline.ingest()`. The pipeline classifies each
-signal by target onion layer, buffers it, and triggers per-layer updates
-when thresholds are met.
+Ordinary behavioral, dialogue, and account-sync signals flow through
+``ingest()`` / ``ingest_batch()``. Durable content-feedback events use the
+buffer-only ``enqueue()`` boundary first, then their sole cursor owner calls
+``tick()``. Both paths share classification, buffering, persistence, and the
+same serialized per-layer consumption machinery.
 """
 
 from __future__ import annotations
@@ -11,6 +12,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
@@ -407,10 +410,77 @@ _STRONG_SIGNAL_TYPES: frozenset[SignalType] = frozenset(
 )
 _STRONG_TYPE_VALUES: frozenset[str] = frozenset(st.value for st in _STRONG_SIGNAL_TYPES)
 
+# Only direct user reactions to a piece of recommended/browser content belong
+# to the durable feedback cursor. ``event_type=feedback`` is also used by
+# hypothesis settlement and imported source snapshots (currently Bangumi),
+# which already have their own learning owner and must not be promoted into a
+# second FEEDBACK strong signal.
+CONTENT_FEEDBACK_TYPES: frozenset[str] = frozenset({"like", "dislike", "comment", "dismiss"})
+
 
 # ---------------------------------------------------------------------------
 # Signal factory helpers
 # ---------------------------------------------------------------------------
+
+
+def feedback_type_from_event(event: dict[str, Any]) -> str:
+    """Return normalized ``metadata.feedback_type`` from a raw or DB event."""
+    metadata = event.get("metadata")
+    if isinstance(metadata, str):
+        try:
+            parsed = json.loads(metadata)
+        except json.JSONDecodeError:
+            parsed = {}
+        metadata = parsed if isinstance(parsed, dict) else {}
+    if not isinstance(metadata, dict):
+        return ""
+    return str(metadata.get("feedback_type") or "").strip().lower()
+
+
+def is_content_feedback_event(
+    event: dict[str, Any],
+    *,
+    legacy_cutover_event_id: int | None = None,
+) -> bool:
+    """Whether the durable feedback cursor owns this explicit content reaction.
+
+    Imported snapshots are excluded even when they encode a low score as
+    ``feedback_type=dislike``: guided init already analyzes those rows in its
+    source batch, so cursor replay would double-learn them.
+    """
+    event_type = str(event.get("event_type") or event.get("type") or "").strip()
+    if event_type != "feedback" or feedback_type_from_event(event) not in CONTENT_FEEDBACK_TYPES:
+        return False
+    metadata = event.get("metadata")
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except json.JSONDecodeError:
+            metadata = {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+
+    # Explicit ownership is authoritative for every newly-written row.  The
+    # legacy predicate below exists only for rows already present when owner-v2
+    # cut over; otherwise a future producer that forgot the owner flag could be
+    # silently double-consumed by this lane.
+    owner = str(metadata.get("profile_update_owner") or "").strip().lower()
+    if owner:
+        return owner == "content_feedback"
+    namespace = str(metadata.get("event_namespace") or "").strip().lower()
+    if namespace in {"hypothesis", "probe", "import", "retraction"}:
+        return False
+    if str(metadata.get("import_source") or "").strip():
+        return False
+
+    if legacy_cutover_event_id is not None:
+        boundary = max(0, int(legacy_cutover_event_id))
+        try:
+            event_id = int(event.get("id", 0) or 0)
+        except (TypeError, ValueError):
+            event_id = 0
+        return 0 < event_id <= boundary
+    return True
 
 
 def _make_signal(
@@ -433,38 +503,61 @@ def _make_signal(
 
 def signals_from_events(events: list[dict[str, Any]]) -> list[ProfileSignal]:
     """Convert raw behavioral events into ProfileSignals."""
-    result: list[ProfileSignal] = []
-    for event in events:
-        event_type = str(event.get("event_type") or event.get("type") or "")
-        metadata = event.get("metadata")
-        feedback_type = (
-            str(metadata.get("feedback_type") or "").strip().lower()
-            if isinstance(metadata, dict)
-            else ""
-        )
-        if event_type == "feedback" and feedback_type == "retraction":
-            # A retraction (an X unlike/unbookmark) is a neutralization, not a
-            # strong preference signal — force the plain BEHAVIOR_EVENT path so
-            # it never gets the min_signals=1 bypass into VALUES/CORE.
-            sig_type = SignalType.BEHAVIOR_EVENT
-        elif event_type in _ENGAGEMENT_TYPES:
-            sig_type = SignalType.ENGAGEMENT_EVENT
-        else:
-            sig_type = SignalType.BEHAVIOR_EVENT
-        result.append(_make_signal(sig_type, "events", dict(event)))
-    return result
+    return [signal_from_event(event) for event in events]
+
+
+def signal_from_event(
+    event: dict[str, Any],
+    *,
+    signal_id: str = "",
+) -> ProfileSignal:
+    """Convert one event, optionally using a durable row-derived signal id."""
+    event_type = str(event.get("event_type") or event.get("type") or "")
+    feedback_type = feedback_type_from_event(event)
+    if event_type == "feedback" and feedback_type == "retraction":
+        # A retraction is a neutralization, never a strong FEEDBACK signal.
+        signal_type = SignalType.BEHAVIOR_EVENT
+    elif event_type in _ENGAGEMENT_TYPES:
+        signal_type = SignalType.ENGAGEMENT_EVENT
+    else:
+        signal_type = SignalType.BEHAVIOR_EVENT
+    signal = _make_signal(signal_type, "events", dict(event))
+    if not signal_id:
+        return signal
+    return ProfileSignal(
+        id=signal_id,
+        signal_type=signal.signal_type,
+        timestamp=signal.timestamp,
+        source=signal.source,
+        payload=signal.payload,
+        target_layers=signal.target_layers,
+        confidence=signal.confidence,
+    )
 
 
 def signal_from_feedback(
     feedback_type: str,
     title: str,
     note: str = "",
+    *,
+    signal_id: str = "",
 ) -> ProfileSignal:
     """Convert a recommendation feedback action into a ProfileSignal."""
-    return _make_signal(
+    signal = _make_signal(
         SignalType.FEEDBACK,
         "feedback",
         {"feedback_type": feedback_type, "title": title, "note": note},
+    )
+    if not signal_id:
+        return signal
+    return ProfileSignal(
+        id=signal_id,
+        signal_type=signal.signal_type,
+        timestamp=signal.timestamp,
+        source=signal.source,
+        payload=signal.payload,
+        target_layers=signal.target_layers,
+        confidence=signal.confidence,
     )
 
 
@@ -520,6 +613,7 @@ def signal_from_recommendation_click(
     content_id: str = "",
     content_url: str = "",
     source_platform: str = "",
+    signal_id: str = "",
 ) -> ProfileSignal:
     """Convert a recommendation click-through into a strong profile signal.
 
@@ -545,7 +639,18 @@ def signal_from_recommendation_click(
         payload["content_url"] = content_url
     if source_platform:
         payload["source_platform"] = source_platform
-    return _make_signal(SignalType.RECOMMENDATION_CLICK, "recommendation", payload)
+    signal = _make_signal(SignalType.RECOMMENDATION_CLICK, "recommendation", payload)
+    if not signal_id:
+        return signal
+    return ProfileSignal(
+        id=signal_id,
+        signal_type=signal.signal_type,
+        timestamp=signal.timestamp,
+        source=signal.source,
+        payload=signal.payload,
+        target_layers=signal.target_layers,
+        confidence=signal.confidence,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -565,51 +670,145 @@ def _serialize_signal(signal: ProfileSignal) -> dict[str, object]:
     }
 
 
-def load_pipeline_state(data_dir: Path) -> dict[str, LayerBuffer]:
-    """Load pipeline buffer state from disk."""
+@dataclass(frozen=True)
+class PipelinePersistedState:
+    """Backward-compatible buffers plus durable consumer ownership metadata."""
+
+    buffers: dict[str, LayerBuffer]
+    consumer_cursors: dict[str, int] = field(default_factory=dict)
+    consumer_owner_versions: dict[str, int] = field(default_factory=dict)
+    consumer_cutover_at: dict[str, str] = field(default_factory=dict)
+    consumer_cutover_event_ids: dict[str, int] = field(default_factory=dict)
+    total_signals_ingested: int = 0
+
+
+def load_pipeline_snapshot(data_dir: Path) -> PipelinePersistedState:
+    """Load buffers and additive consumer checkpoints from one JSON snapshot."""
     state_path = data_dir / "memory" / "pipeline_state.json"
     buffers: dict[str, LayerBuffer] = {}
     for layer in _BUFFERED_LAYERS:
         buffers[layer.value] = LayerBuffer(layer=layer)
 
     if not state_path.exists():
-        return buffers
+        return PipelinePersistedState(buffers=buffers)
 
     try:
         with open(state_path, encoding="utf-8") as f:
             data = json.load(f)
     except (json.JSONDecodeError, OSError):
-        return buffers
+        return PipelinePersistedState(buffers=buffers)
 
     raw_buffers = data.get("buffers")
     if not isinstance(raw_buffers, dict):
-        return buffers
+        raw_buffers = {}
 
     for key, raw_buf in raw_buffers.items():
         if isinstance(raw_buf, dict) and key in buffers:
             buffers[key] = LayerBuffer.from_dict(raw_buf)
 
-    return buffers
+    def _int_map(value: object) -> dict[str, int]:
+        if not isinstance(value, dict):
+            return {}
+        return {
+            str(key): max(0, _coerce_int(item)) for key, item in value.items() if str(key).strip()
+        }
+
+    def _str_map(value: object) -> dict[str, str]:
+        if not isinstance(value, dict):
+            return {}
+        return {str(key): str(item) for key, item in value.items() if str(key).strip()}
+
+    return PipelinePersistedState(
+        buffers=buffers,
+        consumer_cursors=_int_map(data.get("consumer_cursors")),
+        consumer_owner_versions=_int_map(data.get("consumer_owner_versions")),
+        consumer_cutover_at=_str_map(data.get("consumer_cutover_at")),
+        consumer_cutover_event_ids=_int_map(data.get("consumer_cutover_event_ids")),
+        total_signals_ingested=max(0, _coerce_int(data.get("total_signals_ingested", 0))),
+    )
+
+
+def load_pipeline_state(data_dir: Path) -> dict[str, LayerBuffer]:
+    """Load pipeline buffers while tolerating pre-checkpoint state files."""
+    return load_pipeline_snapshot(data_dir).buffers
 
 
 def save_pipeline_state(
     data_dir: Path,
     buffers: dict[str, LayerBuffer],
     total_ingested: int = 0,
+    *,
+    consumer_cursors: dict[str, int] | None = None,
+    consumer_owner_versions: dict[str, int] | None = None,
+    consumer_cutover_at: dict[str, str] | None = None,
+    consumer_cutover_event_ids: dict[str, int] | None = None,
 ) -> None:
-    """Persist pipeline buffer state to disk."""
+    """Atomically persist buffers and consumer checkpoints in one replace."""
     memory_dir = data_dir / "memory"
     memory_dir.mkdir(parents=True, exist_ok=True)
     state_path = memory_dir / "pipeline_state.json"
 
+    existing: dict[str, object] = {}
+    if state_path.exists():
+        try:
+            with open(state_path, encoding="utf-8") as file:
+                loaded = json.load(file)
+            if isinstance(loaded, dict):
+                existing = dict(loaded)
+        except (OSError, ValueError):
+            existing = {}
+    existing_cursors = existing.get("consumer_cursors")
+    if not isinstance(existing_cursors, dict):
+        existing_cursors = {}
+    existing_owner_versions = existing.get("consumer_owner_versions")
+    if not isinstance(existing_owner_versions, dict):
+        existing_owner_versions = {}
+    existing_cutover_at = existing.get("consumer_cutover_at")
+    if not isinstance(existing_cutover_at, dict):
+        existing_cutover_at = {}
+    existing_cutover_event_ids = existing.get("consumer_cutover_event_ids")
+    if not isinstance(existing_cutover_event_ids, dict):
+        existing_cutover_event_ids = {}
     payload = {
-        "version": 1,
+        **existing,
+        "version": 2,
         "buffers": {key: buf.to_dict() for key, buf in buffers.items()},
         "last_saved_at": datetime.now().isoformat(),
         "total_signals_ingested": total_ingested,
+        "consumer_cursors": (
+            dict(existing_cursors) if consumer_cursors is None else dict(consumer_cursors or {})
+        ),
+        "consumer_owner_versions": (
+            dict(existing_owner_versions)
+            if consumer_owner_versions is None
+            else dict(consumer_owner_versions or {})
+        ),
+        "consumer_cutover_at": (
+            dict(existing_cutover_at)
+            if consumer_cutover_at is None
+            else dict(consumer_cutover_at or {})
+        ),
+        "consumer_cutover_event_ids": (
+            dict(existing_cutover_event_ids)
+            if consumer_cutover_event_ids is None
+            else dict(consumer_cutover_event_ids or {})
+        ),
     }
-    with open(state_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=f".{state_path.name}.",
+        suffix=".tmp",
+        dir=memory_dir,
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as file:
+            json.dump(payload, file, ensure_ascii=False, indent=2)
+            file.write("\n")
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temporary_name, state_path)
+    finally:
+        if os.path.exists(temporary_name):
+            os.unlink(temporary_name)
 
 
 # ---------------------------------------------------------------------------
@@ -862,7 +1061,8 @@ class ProfileUpdatePipeline:
 
     Usage:
         pipeline = ProfileUpdatePipeline(memory=..., preference_analyzer=..., ...)
-        await pipeline.ingest(signal)       # Buffer a signal
+        await pipeline.enqueue(signal)      # Durably buffer without analysis
+        await pipeline.ingest(signal)       # Buffer and consume ready layers
         await pipeline.tick()               # Check and update ready layers
         await pipeline.flush()              # Force-update all layers (init)
     """
@@ -893,9 +1093,10 @@ class ProfileUpdatePipeline:
         self._cognition_cycle = cognition_cycle
         self._profile_consolidator = profile_consolidator
         data_dir = getattr(memory, "_data_dir", None)
+        persisted = load_pipeline_snapshot(data_dir) if data_dir else None
         self._buffers = (
-            load_pipeline_state(data_dir)
-            if data_dir
+            persisted.buffers
+            if persisted is not None
             else {layer.value: LayerBuffer(layer=layer) for layer in _BUFFERED_LAYERS}
         )
         # Serializes ingest/flush/tick layer updates so a burst of concurrent
@@ -903,7 +1104,17 @@ class ProfileUpdatePipeline:
         # drains overlapping buffers and runs parallel LLM analyses, and so
         # pipeline_state.json snapshots never interleave.
         self._ingest_lock = asyncio.Lock()
-        self._total_ingested = 0
+        self._total_ingested = persisted.total_signals_ingested if persisted is not None else 0
+        self._consumer_cursors = dict(persisted.consumer_cursors) if persisted is not None else {}
+        self._consumer_owner_versions = (
+            dict(persisted.consumer_owner_versions) if persisted is not None else {}
+        )
+        self._consumer_cutover_at = (
+            dict(persisted.consumer_cutover_at) if persisted is not None else {}
+        )
+        self._consumer_cutover_event_ids = (
+            dict(persisted.consumer_cutover_event_ids) if persisted is not None else {}
+        )
         # Out-of-order retraction tombstones: (identity_key, action) → retraction
         # event time. In-memory only — the events table is the durable tombstone
         # for cross-restart / late-backfill reconciliation (face 2b).
@@ -947,6 +1158,101 @@ class ProfileUpdatePipeline:
 
     # -- Public API -----------------------------------------------------------
 
+    async def enqueue(self, signal: ProfileSignal) -> IngestResult:
+        """Durably buffer one signal without running a layer update."""
+        return await self.enqueue_batch([signal])
+
+    async def enqueue_batch(self, signals: list[ProfileSignal]) -> IngestResult:
+        """Durably buffer signals without entering the LLM-backed consume path.
+
+        Signal IDs are idempotency keys while they remain in any persisted
+        buffer. This lets a durable event cursor retry the narrow
+        ``enqueue -> cursor`` crash window without adding the same evidence a
+        second time.
+        """
+        async with self._ingest_lock:
+            result, accepted = self._enqueue_batch_locked(signals)
+            self._save_state()
+            self._observe_signals(accepted)
+            return result
+
+    def consumer_checkpoint(self, consumer: str) -> dict[str, object]:
+        """Return one durable consumer's cursor and ownership fence."""
+        key = str(consumer).strip()
+        return {
+            "cursor": max(0, int(self._consumer_cursors.get(key, 0))),
+            "owner_version": max(0, int(self._consumer_owner_versions.get(key, 0))),
+            "cutover_at": str(self._consumer_cutover_at.get(key, "")),
+            "cutover_event_id": max(
+                0,
+                int(self._consumer_cutover_event_ids.get(key, 0)),
+            ),
+            "has_cutover_event_id": key in self._consumer_cutover_event_ids,
+        }
+
+    async def checkpointed_enqueue_batch(
+        self,
+        signals: list[ProfileSignal],
+        *,
+        consumer: str,
+        cursor: int,
+        owner_version: int | None = None,
+        cutover_at: str | None = None,
+        cutover_event_id: int | None = None,
+    ) -> IngestResult:
+        """Publish buffer and consumer cursor in one locked atomic snapshot.
+
+        External periodic ticks cannot consume these signals between enqueue
+        and cursor publication because both happen while ``_ingest_lock`` is
+        held. A failed state replace restores the in-memory pre-call snapshot
+        and propagates; callers must not proceed to ``tick()``.
+        """
+        key = str(consumer).strip()
+        if not key:
+            raise ValueError("consumer is required")
+        next_cursor = max(0, int(cursor))
+        async with self._ingest_lock:
+            buffer_snapshot = {
+                name: LayerBuffer.from_dict(buffer.to_dict())
+                for name, buffer in self._buffers.items()
+            }
+            cursor_snapshot = dict(self._consumer_cursors)
+            version_snapshot = dict(self._consumer_owner_versions)
+            cutover_snapshot = dict(self._consumer_cutover_at)
+            cutover_event_id_snapshot = dict(self._consumer_cutover_event_ids)
+            tombstone_snapshot = dict(self._retraction_tombstones)
+            total_snapshot = self._total_ingested
+            result, accepted = self._enqueue_batch_locked(signals)
+            self._consumer_cursors[key] = max(
+                int(self._consumer_cursors.get(key, 0)),
+                next_cursor,
+            )
+            if owner_version is not None:
+                self._consumer_owner_versions[key] = max(
+                    int(self._consumer_owner_versions.get(key, 0)),
+                    max(0, int(owner_version)),
+                )
+            if cutover_at is not None:
+                self._consumer_cutover_at[key] = str(cutover_at)
+            if cutover_event_id is not None:
+                self._consumer_cutover_event_ids[key] = max(
+                    int(self._consumer_cutover_event_ids.get(key, 0)),
+                    max(0, int(cutover_event_id)),
+                )
+            try:
+                self._save_state()
+            except Exception:
+                self._buffers = buffer_snapshot
+                self._consumer_cursors = cursor_snapshot
+                self._consumer_owner_versions = version_snapshot
+                self._consumer_cutover_at = cutover_snapshot
+                self._consumer_cutover_event_ids = cutover_event_id_snapshot
+                self._retraction_tombstones = tombstone_snapshot
+                self._total_ingested = total_snapshot
+                raise
+            self._observe_signals(accepted)
+            return result
+
     async def ingest(self, signal: ProfileSignal) -> IngestResult:
         """Ingest a single signal: classify, buffer, and check thresholds."""
         return await self.ingest_batch([signal])
@@ -960,20 +1266,43 @@ class ProfileUpdatePipeline:
         batch's analysis or racing ``_save_state`` snapshots.
         """
         async with self._ingest_lock:
-            return await self._ingest_batch_locked(signals)
+            result, accepted = self._enqueue_batch_locked(signals)
+            # Persist the enqueue boundary before entering an LLM call. If the
+            # process is interrupted while a ready layer is being analysed, a
+            # reconstructed pipeline can replay the still-buffered evidence.
+            self._save_state()
+            self._observe_signals(accepted)
+            await self._consume_ready_buffers_locked(result.layers_updated)
+            self._save_state()
+            return result
 
-    async def _ingest_batch_locked(self, signals: list[ProfileSignal]) -> IngestResult:
-        """Locked body of :meth:`ingest_batch` (see there for semantics)."""
+    def _enqueue_batch_locked(
+        self, signals: list[ProfileSignal]
+    ) -> tuple[IngestResult, list[ProfileSignal]]:
+        """Shared locked append path for :meth:`enqueue_batch` and ingest."""
+        known_ids = {
+            str(item.get("id", ""))
+            for buf in self._buffers.values()
+            for item in buf.signals
+            if isinstance(item, dict) and str(item.get("id", ""))
+        }
+        accepted: list[ProfileSignal] = []
+        for signal in signals:
+            if signal.id in known_ids:
+                continue
+            known_ids.add(signal.id)
+            accepted.append(signal)
+
         # Atomic retraction-discount preprocessing runs BEFORE any threshold
         # consumption (_update_layer) so a same-batch or out-of-order retraction
         # discounts the matching positive before it can be folded into a layer
         # (Phase 0 face 1/1b, invariant "atomic entry").
-        self._preprocess_retractions(signals)
+        self._preprocess_retractions(accepted)
 
         result = IngestResult()
         layers_touched: set[str] = set()
 
-        for signal in signals:
+        for signal in accepted:
             for layer in signal.target_layers:
                 if layer not in _BUFFERED_LAYERS:
                     continue
@@ -991,11 +1320,14 @@ class ProfileUpdatePipeline:
 
         result.layers_buffered = sorted(layers_touched)
 
-        # Speculator observation (lightweight keyword matching)
+        return result, accepted
+
+    def _observe_signals(self, accepted: list[ProfileSignal]) -> None:
+        """Publish lightweight speculation observations after durable enqueue."""
         if self._speculator or self._avoidance_speculator:
             raw_events = [
                 sig.get("payload", {}) if isinstance(sig.get("payload"), dict) else {}
-                for signal in signals
+                for signal in accepted
                 for sig in [{"payload": signal.payload}]
             ]
         else:
@@ -1005,22 +1337,27 @@ class ProfileUpdatePipeline:
         if self._avoidance_speculator:
             self._avoidance_speculator.observe(raw_events)
 
+    async def _consume_ready_buffers_locked(
+        self,
+        updates: list[LayerUpdateResult],
+        *,
+        now: datetime | None = None,
+    ) -> None:
+        """Consume every ready buffer while the caller holds ``_ingest_lock``."""
+
         # Check thresholds and update ready layers.
         # Strong-signal types (feedback, dialogue) bypass the min_signals gate.
-        now = datetime.now()
+        ready_at = now or datetime.now()
         for layer in _BUFFERED_LAYERS:
             buf = self._buffers.get(layer.value)
             threshold = self._thresholds.get(layer)
             has_strong = buf is not None and any(
                 s.get("signal_type") in _STRONG_TYPE_VALUES for s in buf.signals
             )
-            if buf and threshold and self._buffer_ready(buf, threshold, now, has_strong):
+            if buf and threshold and self._buffer_ready(buf, threshold, ready_at, has_strong):
                 update_result = await self._update_layer(layer, buf)
                 if update_result:
-                    result.layers_updated.append(update_result)
-
-        self._save_state()
-        return result
+                    updates.append(update_result)
 
     def _buffer_ready(
         self,
@@ -1123,21 +1460,41 @@ class ProfileUpdatePipeline:
                 del self._retraction_tombstones[marker]
 
     async def tick(self) -> FlushResult:
-        """Periodic check: update any layers whose buffers are ready."""
+        """Consume ready buffers under the lock, then run maintenance outside it."""
         result = FlushResult()
         now = datetime.now()
         async with self._ingest_lock:
-            for layer in _BUFFERED_LAYERS:
-                buf = self._buffers.get(layer.value)
-                threshold = self._thresholds.get(layer)
-                has_strong = buf is not None and any(
-                    s.get("signal_type") in _STRONG_TYPE_VALUES for s in buf.signals
-                )
-                if buf and threshold and self._buffer_ready(buf, threshold, now, has_strong):
-                    update_result = await self._update_layer(layer, buf)
-                    if update_result:
-                        result.layers_updated.append(update_result)
+            await self._consume_ready_buffers_locked(result.layers_updated, now=now)
+            # Commit a successful drain before optional maintenance. A later
+            # speculator/cognition failure must never make restart replay an
+            # already-applied layer update from the pre-drain snapshot.
             self._save_state()
+        await self._run_tick_maintenance(result, now)
+        return result
+
+    async def tick_if_buffered(self) -> FlushResult:
+        """Tick only when durable signal buffers contain recovery work.
+
+        Event-cursor owners use this after publishing their cursor and buffer in
+        one checkpoint.  The predicate is deliberately evaluated while holding
+        ``_ingest_lock``: a concurrent periodic tick cannot drain the buffer
+        between a separate check and this tick, causing an otherwise empty
+        recovery pass to run speculator/cognition maintenance.
+        """
+        result = FlushResult()
+        now = datetime.now()
+        async with self._ingest_lock:
+            if not any(buffer.signals for buffer in self._buffers.values()):
+                return result
+            await self._consume_ready_buffers_locked(result.layers_updated, now=now)
+            # Match tick(): persist a successful drain before optional
+            # maintenance so restart never replays an already-applied update.
+            self._save_state()
+        await self._run_tick_maintenance(result, now)
+        return result
+
+    async def _run_tick_maintenance(self, result: FlushResult, now: datetime) -> None:
+        """Run non-buffer periodic maintenance outside the ingest lock."""
 
         # Speculator tick: expire → promote → generate.
         # Pipeline.tick runs every minute, but the speculator doesn't
@@ -1209,8 +1566,6 @@ class ProfileUpdatePipeline:
                     result.layers_updated.append(cons_update)
             except Exception:
                 logger.exception("Profile consolidation failed during pipeline tick")
-
-        return result
 
     def _record_consolidation_cognition(self, report: Any) -> None:
         """Surface an applied consolidation run as a cognition update card."""
@@ -1533,4 +1888,12 @@ class ProfileUpdatePipeline:
         """Persist buffer state to disk."""
         data_dir = getattr(self._memory, "_data_dir", None)
         if data_dir:
-            save_pipeline_state(data_dir, self._buffers, self._total_ingested)
+            save_pipeline_state(
+                data_dir,
+                self._buffers,
+                self._total_ingested,
+                consumer_cursors=self._consumer_cursors,
+                consumer_owner_versions=self._consumer_owner_versions,
+                consumer_cutover_at=self._consumer_cutover_at,
+                consumer_cutover_event_ids=self._consumer_cutover_event_ids,
+            )

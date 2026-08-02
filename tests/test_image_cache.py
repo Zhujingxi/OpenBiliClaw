@@ -279,6 +279,22 @@ def test_is_cover_cached(cache_dir: Path) -> None:
     assert is_cover_cached(XHS) is False
 
 
+def test_atomic_save_failure_preserves_old_file_and_removes_temp(
+    cache_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert save_image_bytes(BILI, b"old", "image/jpeg") is True
+    target = next(cache_dir.glob(f"{image_cache_key(BILI)}.*"))
+
+    def fail_replace(_source: object, _target: object) -> None:
+        raise OSError("simulated replace failure")
+
+    monkeypatch.setattr(os, "replace", fail_replace)
+    assert save_image_bytes(BILI, b"partial-new", "image/jpeg") is False
+    assert target.read_bytes() == b"old"
+    assert not list(cache_dir.glob(".*.tmp"))
+
+
 def test_select_prefetch_targets_filters_dedups_and_prioritizes(cache_dir: Path) -> None:
     _write_cover(cache_dir, BILI_HTTP)  # already cached -> excluded
     candidates = [
@@ -297,11 +313,35 @@ def test_select_prefetch_targets_caps_at_max_fetch(cache_dir: Path) -> None:
     assert len(select_prefetch_targets(urls, max_fetch=3)) == 3
 
 
+def test_select_prefetch_targets_deduplicates_rotated_cache_key(cache_dir: Path) -> None:
+    assert select_prefetch_targets([XHS, XHS_ROTATED], max_fetch=10) == [XHS]
+
+
 async def test_fetch_cover_bytes_success(fake_httpx: _FakeHTTPX) -> None:
     fake_httpx.add(XHS, status_code=200, headers={"content-type": "image/webp"}, chunks=[b"webp"])
     data, content_type = await fetch_cover_bytes(XHS)
     assert data == b"webp"
     assert content_type == "image/webp"
+
+
+async def test_network_failure_log_never_contains_signed_url(
+    fake_httpx: _FakeHTTPX,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.runtime import image_cache
+
+    monkeypatch.setattr(image_cache, "_failure_log_state", {})
+    fake_httpx.timeouts.add(XHS)
+    caplog.set_level("WARNING", logger="openbiliclaw.runtime.image_cache")
+
+    with pytest.raises(CoverFetchError):
+        await fetch_cover_bytes(XHS)
+
+    assert "08ce340d7be55d7a8e30db2a22c173a3" not in caplog.text
+    assert XHS not in caplog.text
+    assert "host=sns-webpic-qc.xhscdn.com" in caplog.text
+    assert f"cache={image_cache_key(XHS)[:12]}" in caplog.text
 
 
 async def test_fetch_routes_cn_cdn_direct_and_overseas_via_env_proxy(

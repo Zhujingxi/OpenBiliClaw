@@ -24,6 +24,16 @@ from openbiliclaw.api.app import create_app
 from openbiliclaw.llm.service import LLMResponseContentError
 
 
+class _EventPersistenceSpy:
+    """Minimal pre-receipt persistence adapter for injected API tests."""
+
+    def __init__(self) -> None:
+        self.events: list[dict[str, object]] = []
+
+    async def propagate_event(self, event: dict[str, object]) -> None:
+        self.events.append(event)
+
+
 def _dialogue_entry_source(symbol: str, branch_predicate: str = "") -> str:
     """Return one current entry function without matching unrelated branches."""
     if symbol.startswith("SoulEngine."):
@@ -893,6 +903,147 @@ def _isolate_runtime_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
 class TestBackendAPI:
     """Route-level tests for the plugin backend API."""
 
+    @pytest.mark.parametrize(
+        ("endpoint", "id_field"),
+        (
+            ("/api/events", "event_id"),
+            ("/api/feedback", "request_id"),
+            ("/api/recommendation-click", "request_id"),
+        ),
+        ids=("events", "feedback", "recommendation-click"),
+    )
+    @pytest.mark.parametrize(
+        ("case", "invalid_id"),
+        (
+            ("omitted", None),
+            ("empty", ""),
+            ("whitespace", " \t "),
+            ("non-string", 123),
+            ("over-400", "x" * 401),
+        ),
+        ids=("omitted", "empty", "whitespace", "non-string", "over-400"),
+    )
+    def test_event_ingress_requires_bounded_nonblank_id_before_any_write(
+        self,
+        endpoint: str,
+        id_field: str,
+        case: str,
+        invalid_id: object | None,
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        class WriteSpyMemory:
+            def __init__(self) -> None:
+                self.events: list[dict[str, object]] = []
+
+            async def propagate_event(self, event: dict[str, object]) -> None:
+                self.events.append(event)
+
+        class ProjectionSpyDatabase:
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+
+            def get_recommendation_by_id(
+                self,
+                recommendation_id: int,
+            ) -> dict[str, object]:
+                self.calls.append(f"get:{recommendation_id}")
+                return {
+                    "id": recommendation_id,
+                    "bvid": "BV1VALIDATION",
+                    "title": "validation",
+                }
+
+            def update_recommendation_feedback(
+                self,
+                recommendation_id: int,
+                *,
+                feedback_type: str,
+                feedback_note: str = "",
+            ) -> None:
+                self.calls.append(f"update:{recommendation_id}:{feedback_type}:{feedback_note}")
+
+        if endpoint == "/api/events":
+            event = {
+                "type": "click",
+                "url": "https://www.bilibili.com/video/BV1VALIDATION",
+                "title": "validation",
+                "timestamp": 1710000000000,
+            }
+            if invalid_id is not None:
+                event[id_field] = invalid_id
+            payload: dict[str, object] = {"events": [event]}
+        elif endpoint == "/api/feedback":
+            payload = {
+                "recommendation_id": 7,
+                "feedback_type": "like",
+                "note": "",
+            }
+            if invalid_id is not None:
+                payload[id_field] = invalid_id
+        else:
+            payload = {"bvid": "BV1VALIDATION", "title": "validation"}
+            if invalid_id is not None:
+                payload[id_field] = invalid_id
+
+        memory = WriteSpyMemory()
+        database = ProjectionSpyDatabase()
+        client = TestClient(
+            create_app(
+                memory_manager=memory,
+                database=database,
+                soul_engine=object(),
+            )
+        )
+
+        response = client.post(endpoint, json=payload)
+
+        assert response.status_code == 422, (case, response.text)
+        assert memory.events == []
+        assert database.calls == []
+
+    @pytest.mark.parametrize(
+        ("model_name", "payload", "id_field"),
+        (
+            (
+                "BehaviorEventIn",
+                {
+                    "type": "click",
+                    "event_id": "  event-trimmed  ",
+                    "timestamp": 1710000000000,
+                },
+                "event_id",
+            ),
+            (
+                "FeedbackIn",
+                {
+                    "recommendation_id": 1,
+                    "feedback_type": "like",
+                    "request_id": "  feedback-trimmed  ",
+                },
+                "request_id",
+            ),
+            (
+                "RecommendationClickIn",
+                {"bvid": "BV1", "request_id": "  click-trimmed  "},
+                "request_id",
+            ),
+        ),
+        ids=("events", "feedback", "recommendation-click"),
+    )
+    def test_event_ingress_id_is_trimmed(
+        self,
+        model_name: str,
+        payload: dict[str, object],
+        id_field: str,
+    ) -> None:
+        from openbiliclaw.api import models
+
+        model_type = getattr(models, model_name)
+        parsed = model_type.model_validate(payload)
+
+        assert getattr(parsed, id_field) == str(payload[id_field]).strip()
+
     def test_recommendation_and_delight_models_default_publication_fields(self) -> None:
         from openbiliclaw.api.models import PendingDelightOut, RecommendationOut
 
@@ -963,11 +1114,17 @@ class TestBackendAPI:
                 "recommendation_id": 7,
                 "feedback_type": "comment",
                 "note": "方向对，但我想看更深一点。",
+                "request_id": "feedback-card-comment",
             },
         )
         dismiss = client.post(
             "/api/feedback",
-            json={"recommendation_id": 8, "feedback_type": "dismiss", "note": ""},
+            json={
+                "recommendation_id": 8,
+                "feedback_type": "dismiss",
+                "note": "",
+                "request_id": "feedback-card-dismiss",
+            },
         )
 
         assert comment.status_code == 200
@@ -1057,12 +1214,193 @@ class TestBackendAPI:
 
         response = client.post(
             "/api/feedback",
-            json={"recommendation_id": 7, "feedback_type": "like", "note": ""},
+            json={
+                "recommendation_id": 7,
+                "feedback_type": "like",
+                "note": "",
+                "request_id": "feedback-scheduler-like",
+            },
         )
 
         assert response.status_code == 200
         assert schedules == 1
         assert soul.batch_calls == 0
+
+    def test_feedback_request_id_replay_is_idempotent_on_production_database(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.memory.manager import MemoryManager
+        from openbiliclaw.storage.database import Database
+
+        database = Database(tmp_path / "feedback-idempotency.db")
+        memory = MemoryManager(tmp_path / "data", database=database)
+        memory.initialize()
+        recommendation_id = database.insert_recommendation(
+            "BV1FEEDBACK",
+            confidence=0.9,
+            topic="建筑",
+        )
+        client = TestClient(
+            create_app(
+                memory_manager=memory,
+                database=database,
+                soul_engine=object(),
+            )
+        )
+        payload = {
+            "recommendation_id": recommendation_id,
+            "feedback_type": "comment",
+            "note": "方向对，但希望更深入。",
+            "request_id": "feedback-production-replay",
+        }
+
+        first = client.post("/api/feedback", json=payload)
+        replay = client.post("/api/feedback", json=payload)
+
+        assert first.status_code == 200
+        assert replay.status_code == 200
+        assert first.json()["duplicate"] is False
+        assert replay.json()["duplicate"] is True
+        assert replay.json()["event_id"] == first.json()["event_id"]
+        events = memory.query_events(event_types=["feedback"], limit=10)
+        assert len(events) == 1
+        row = database.get_recommendation_by_id(recommendation_id)
+        assert row is not None
+        assert row["feedback_type"] == "comment"
+        assert row["feedback_note"] == payload["note"]
+
+    @pytest.mark.parametrize(
+        "conflict_kind",
+        ("recommendation", "feedback_type", "note"),
+        ids=("changed-recommendation", "changed-type", "changed-note"),
+    )
+    def test_feedback_request_id_conflict_is_rejected_on_production_database(
+        self,
+        tmp_path: Path,
+        conflict_kind: str,
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.memory.manager import MemoryManager
+        from openbiliclaw.storage.database import Database
+
+        database = Database(tmp_path / f"feedback-conflict-{conflict_kind}.db")
+        memory = MemoryManager(tmp_path / "data", database=database)
+        memory.initialize()
+        first_recommendation_id = database.insert_recommendation(
+            "BV1FIRST",
+            confidence=0.9,
+        )
+        other_recommendation_id = database.insert_recommendation(
+            "BV1OTHER",
+            confidence=0.8,
+        )
+        client = TestClient(
+            create_app(
+                memory_manager=memory,
+                database=database,
+                soul_engine=object(),
+            )
+        )
+        original = {
+            "recommendation_id": first_recommendation_id,
+            "feedback_type": "like",
+            "note": "首写备注",
+            "request_id": "feedback-production-conflict",
+        }
+        changed = dict(original)
+        if conflict_kind == "recommendation":
+            changed["recommendation_id"] = other_recommendation_id
+        elif conflict_kind == "feedback_type":
+            changed["feedback_type"] = "dislike"
+        else:
+            changed["note"] = "变化后的备注"
+
+        first = client.post("/api/feedback", json=original)
+        conflict = client.post("/api/feedback", json=changed)
+
+        assert first.status_code == 200
+        assert conflict.status_code == 409
+        assert len(memory.query_events(event_types=["feedback"], limit=10)) == 1
+        first_row = database.get_recommendation_by_id(first_recommendation_id)
+        other_row = database.get_recommendation_by_id(other_recommendation_id)
+        assert first_row is not None and first_row["feedback_type"] == "like"
+        assert first_row["feedback_note"] == "首写备注"
+        assert other_row is not None and other_row["feedback_type"] is None
+
+    def test_feedback_request_id_retry_repairs_projection_after_commit(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.memory.manager import MemoryManager
+        from openbiliclaw.storage.database import Database
+
+        database = Database(tmp_path / "feedback-projection-repair.db")
+        memory = MemoryManager(tmp_path / "data", database=database)
+        memory.initialize()
+        recommendation_id = database.insert_recommendation(
+            "BV1REPAIR",
+            confidence=0.9,
+        )
+        real_update = database.update_recommendation_feedback
+        attempts = 0
+
+        def fail_first_projection(
+            current_recommendation_id: int,
+            *,
+            feedback_type: str,
+            feedback_note: str = "",
+        ) -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("crash after event commit")
+            real_update(
+                current_recommendation_id,
+                feedback_type=feedback_type,
+                feedback_note=feedback_note,
+            )
+
+        monkeypatch.setattr(
+            database,
+            "update_recommendation_feedback",
+            fail_first_projection,
+        )
+        client = TestClient(
+            create_app(
+                memory_manager=memory,
+                database=database,
+                soul_engine=object(),
+            ),
+            raise_server_exceptions=False,
+        )
+        payload = {
+            "recommendation_id": recommendation_id,
+            "feedback_type": "comment",
+            "note": "首写必须用于修复",
+            "request_id": "feedback-production-repair",
+        }
+
+        failed = client.post("/api/feedback", json=payload)
+        row_after_failure = database.get_recommendation_by_id(recommendation_id)
+        repaired = client.post("/api/feedback", json=payload)
+
+        assert failed.status_code == 500
+        assert row_after_failure is not None and row_after_failure["feedback_type"] is None
+        assert repaired.status_code == 200
+        assert repaired.json()["duplicate"] is True
+        assert attempts == 2
+        assert len(memory.query_events(event_types=["feedback"], limit=10)) == 1
+        repaired_row = database.get_recommendation_by_id(recommendation_id)
+        assert repaired_row is not None
+        assert repaired_row["feedback_type"] == "comment"
+        assert repaired_row["feedback_note"] == payload["note"]
 
     def test_desktop_web_index_cache_busts_static_assets(self) -> None:
         from fastapi.testclient import TestClient
@@ -3825,6 +4163,7 @@ class TestBackendAPI:
             json={
                 "events": [
                     {
+                        "event_id": "events-persist-click",
                         "type": "click",
                         "url": "https://www.bilibili.com/video/BV1TEST",
                         "title": "测试标题",
@@ -3868,6 +4207,7 @@ class TestBackendAPI:
             json={
                 "events": [
                     {
+                        "event_id": "events-pre-init-click",
                         "type": "click",
                         "url": "https://www.bilibili.com/video/BV1PREINIT",
                         "title": "初始化前不该入库",
@@ -3880,6 +4220,8 @@ class TestBackendAPI:
         assert response.status_code == 200
         assert response.json() == {
             "accepted": 0,
+            "duplicates": 0,
+            "receipts": [],
             "rejected": [
                 {
                     "index": 0,
@@ -3909,6 +4251,7 @@ class TestBackendAPI:
             json={
                 "events": [
                     {
+                        "event_id": "events-source-xhs",
                         "type": "click",
                         "url": "https://www.xiaohongshu.com/explore/69dea966000000001a0280ad",
                         "title": "测试笔记",
@@ -3918,6 +4261,7 @@ class TestBackendAPI:
                         "metadata": {"note_id": "69dea966000000001a0280ad"},
                     },
                     {
+                        "event_id": "events-source-blank",
                         "type": "scroll",
                         "url": "https://www.xiaohongshu.com/explore",
                         "title": "",
@@ -3927,6 +4271,7 @@ class TestBackendAPI:
                         "metadata": {},
                     },
                     {
+                        "event_id": "events-source-reddit",
                         "type": "favorite",
                         "url": "https://www.reddit.com/r/LocalLLaMA/comments/abc123/title/",
                         "title": "Reddit post",
@@ -3971,6 +4316,7 @@ class TestBackendAPI:
             json={
                 "events": [
                     {
+                        "event_id": "events-top-level-dwell",
                         "type": "click",
                         "url": "https://www.bilibili.com/video/BVquick",
                         "title": "标题党",
@@ -4007,6 +4353,7 @@ class TestBackendAPI:
             json={
                 "events": [
                     {
+                        "event_id": "events-metadata-dwell",
                         "type": "click",
                         "url": "https://www.bilibili.com/video/BVdeep",
                         "title": "深度教程",
@@ -4041,6 +4388,7 @@ class TestBackendAPI:
             json={
                 "events": [
                     {
+                        "event_id": "events-normalize-dislike",
                         "type": "dislike",
                         "url": "https://www.bilibili.com/video/BV1TEST",
                         "title": "不想看",
@@ -4058,6 +4406,109 @@ class TestBackendAPI:
         assert memory.events[0]["event_type"] == "feedback"
         assert memory.events[0]["metadata"]["feedback_type"] == "dislike"
         assert memory.events[0]["metadata"]["reaction"] == "thumbs_down"
+
+    def test_unified_line_gives_extension_feedback_one_cursor_owner(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Every committed batch only wakes the durable owners; HTTP never ingests."""
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.api import app as api_app
+
+        schedules = 0
+
+        class FakeFeedbackBatchScheduler:
+            def __init__(self, *_args: object, **_kwargs: object) -> None:
+                pass
+
+            def schedule(self) -> None:
+                nonlocal schedules
+                schedules += 1
+
+            async def close(self) -> None:
+                return None
+
+        class FakeMemoryManager:
+            def __init__(self) -> None:
+                self.events: list[dict[str, object]] = []
+
+            async def propagate_event(self, event: dict[str, object]) -> None:
+                self.events.append(event)
+
+        class SpyPipeline:
+            def __init__(self) -> None:
+                self.batches: list[list[object]] = []
+
+            async def ingest_batch(self, signals: list[object]) -> object:
+                self.batches.append(signals)
+                return object()
+
+        class FakeSoulEngine:
+            unified_interest_line_enabled = True
+
+            def __init__(self) -> None:
+                self.pipeline = SpyPipeline()
+
+            def is_profile_ready(self) -> bool:
+                return True
+
+        monkeypatch.setattr(api_app, "FeedbackBatchScheduler", FakeFeedbackBatchScheduler)
+        memory = FakeMemoryManager()
+        soul = FakeSoulEngine()
+        client = TestClient(create_app(memory_manager=memory, soul_engine=soul))
+
+        dislike = client.post(
+            "/api/events",
+            json={
+                "events": [
+                    {
+                        "event_id": "events-owner-dislike",
+                        "type": "dislike",
+                        "url": "https://www.bilibili.com/video/BV1OWNER",
+                        "title": "交给 durable cursor",
+                        "timestamp": 1710000000000,
+                    }
+                ]
+            },
+        )
+        retraction = client.post(
+            "/api/events",
+            json={
+                "events": [
+                    {
+                        "event_id": "events-owner-retraction",
+                        "type": "feedback",
+                        "url": "https://www.bilibili.com/video/BV1OWNER",
+                        "title": "撤回仍走折价路径",
+                        "timestamp": 1710000000001,
+                        "metadata": {
+                            "feedback_type": "retraction",
+                            "retracted_action": "like",
+                        },
+                    }
+                ]
+            },
+        )
+        unrelated = client.post(
+            "/api/events",
+            json={
+                "events": [
+                    {
+                        "event_id": "events-owner-unrelated",
+                        "type": "feedback",
+                        "title": "假设结算不是内容反馈",
+                        "timestamp": 1710000000002,
+                        "metadata": {"hypothesis": "可能喜欢建筑", "signal": "like"},
+                    }
+                ]
+            },
+        )
+
+        assert dislike.status_code == 200
+        assert retraction.status_code == 200
+        assert unrelated.status_code == 200
+        assert schedules == 3
+        assert soul.pipeline.batches == []
 
     def test_events_endpoint_rejects_bad_event_without_failing_batch(self) -> None:
         from fastapi.testclient import TestClient
@@ -4080,12 +4531,14 @@ class TestBackendAPI:
             json={
                 "events": [
                     {
+                        "event_id": "events-partial-good",
                         "type": "click",
                         "url": "https://www.bilibili.com/video/BV1OK",
                         "title": "正常事件",
                         "timestamp": 1710000000000,
                     },
                     {
+                        "event_id": "events-partial-bad",
                         "type": "unsupported",
                         "url": "https://www.bilibili.com/video/BV1BAD",
                         "title": "未知事件",
@@ -4107,12 +4560,10 @@ class TestBackendAPI:
         ]
         assert [event["event_type"] for event in memory.events] == ["click"]
 
-    def test_events_endpoint_feeds_accepted_events_to_profile_pipeline_before_replenishment_request(
+    def test_events_endpoint_wakes_durable_owner_without_direct_pipeline_write(
         self,
     ) -> None:
         from fastapi.testclient import TestClient
-
-        from openbiliclaw.soul.pipeline import SignalType
 
         calls: list[str] = []
 
@@ -4169,12 +4620,14 @@ class TestBackendAPI:
             json={
                 "events": [
                     {
+                        "event_id": "events-durable-owner-good",
                         "type": "click",
                         "url": "https://www.bilibili.com/video/BV1OK",
                         "title": "正常事件",
                         "timestamp": 1710000000000,
                     },
                     {
+                        "event_id": "events-durable-owner-bad",
                         "type": "unsupported",
                         "url": "https://www.bilibili.com/video/BV1BAD",
                         "title": "未知事件",
@@ -4186,14 +4639,11 @@ class TestBackendAPI:
 
         assert response.status_code == 200
         assert response.json()["accepted"] == 1
-        assert calls == ["pipeline", "request:event_ingest:False"]
-        assert len(soul_engine.pipeline.batches) == 1
-        [signal] = soul_engine.pipeline.batches[0]
-        assert signal.signal_type == SignalType.BEHAVIOR_EVENT
-        assert signal.payload["event_type"] == "click"
-        assert signal.payload["title"] == "正常事件"
+        assert calls == ["request:event_ingest:False"]
+        assert soul_engine.pipeline.batches == []
+        assert app.state.feedback_batch_scheduler.status_payload()["event_lane_depth"] == 1
 
-    def test_events_endpoint_backfills_pending_discovery_events_to_profile_pipeline(
+    def test_events_endpoint_leaves_pending_history_to_durable_consumer(
         self,
     ) -> None:
         from fastapi.testclient import TestClient
@@ -4274,6 +4724,7 @@ class TestBackendAPI:
             json={
                 "events": [
                     {
+                        "event_id": "events-pending-history-current",
                         "type": "click",
                         "url": "https://www.bilibili.com/video/BV1NOW",
                         "title": "当前点击",
@@ -4285,11 +4736,11 @@ class TestBackendAPI:
 
         assert response.status_code == 200
         assert response.json()["accepted"] == 1
-        assert calls == ["pipeline", "pipeline", "refresh"]
-        assert soul_engine.pipeline.titles_by_batch == [["旧 pending 收藏"], ["当前点击"]]
-        assert memory.runtime_state["last_profile_pipeline_event_id"] == 11
+        assert calls == ["refresh"]
+        assert soul_engine.pipeline.titles_by_batch == []
+        assert memory.runtime_state == {"last_processed_event_id": 10}
 
-    def test_events_endpoint_backfill_uses_profile_cursor_when_discovery_advanced(
+    def test_events_endpoint_does_not_read_legacy_profile_cursor(
         self,
     ) -> None:
         from fastapi.testclient import TestClient
@@ -4368,6 +4819,7 @@ class TestBackendAPI:
             json={
                 "events": [
                     {
+                        "event_id": "events-no-legacy-cursor",
                         "type": "click",
                         "url": "https://www.bilibili.com/video/BV1NOW",
                         "title": "当前点击",
@@ -4378,67 +4830,27 @@ class TestBackendAPI:
         )
 
         assert response.status_code == 200
-        assert queried_after == [10]
-        assert "discovery 已推进但画像未补" in soul_engine.pipeline.titles
-        assert memory.runtime_state["last_profile_pipeline_event_id"] == 11
+        assert queried_after == []
+        assert soul_engine.pipeline.titles == []
+        assert memory.runtime_state["last_profile_pipeline_event_id"] == 10
 
     @pytest.mark.asyncio
-    async def test_events_endpoint_serializes_concurrent_profile_backfill_claims(self) -> None:
+    async def test_events_endpoint_concurrent_writes_do_not_claim_profile_owner(self) -> None:
         import httpx
 
-        started_backfill = asyncio.Event()
-        second_event_propagated = asyncio.Event()
-        release_backfill = asyncio.Event()
-        queried_after: list[int] = []
         batches: list[list[object]] = []
 
         class FakeMemoryManager:
             def __init__(self) -> None:
-                self.runtime_state: dict[str, object] = {
-                    "last_processed_event_id": 10,
-                    "last_profile_pipeline_event_id": 10,
-                }
-
-            def load_discovery_runtime_state(self) -> dict[str, object]:
-                return dict(self.runtime_state)
-
-            def update_discovery_runtime_state(self, mutator: object) -> dict[str, object]:
-                result = mutator(self.runtime_state)  # type: ignore[operator]
-                if isinstance(result, dict):
-                    self.runtime_state = result
-                return dict(self.runtime_state)
+                self.events: list[dict[str, object]] = []
 
             async def propagate_event(self, event: dict[str, object]) -> None:
-                if event.get("title") == "当前点击 2":
-                    second_event_propagated.set()
-
-        class FakeDatabase:
-            def get_latest_event_id(self) -> int:
-                return 11
-
-            def query_events_since(
-                self,
-                *,
-                after_event_id: int,
-                event_types: list[str],
-            ) -> list[dict[str, object]]:
-                del event_types
-                queried_after.append(after_event_id)
-                return [
-                    {
-                        "id": 11,
-                        "event_type": "favorite",
-                        "title": "旧 pending 收藏",
-                    }
-                ]
+                self.events.append(event)
 
         class SpyPipeline:
             async def ingest_batch(self, signals: list[object]) -> object:
                 titles = [signal.payload["title"] for signal in signals]
                 batches.append(titles)
-                if titles == ["旧 pending 收藏"]:
-                    started_backfill.set()
-                    await release_backfill.wait()
                 return object()
 
         class FakeSoulEngine:
@@ -4454,7 +4866,7 @@ class TestBackendAPI:
 
         app = create_app(
             memory_manager=FakeMemoryManager(),
-            database=FakeDatabase(),
+            database=object(),
             soul_engine=FakeSoulEngine(),
             runtime_controller=FakeRuntimeController(),
         )
@@ -4469,6 +4881,7 @@ class TestBackendAPI:
                     json={
                         "events": [
                             {
+                                "event_id": "events-concurrent-1",
                                 "type": "click",
                                 "url": "https://www.bilibili.com/video/BV1NOW",
                                 "title": "当前点击 1",
@@ -4478,14 +4891,13 @@ class TestBackendAPI:
                     },
                 )
             )
-            await started_backfill.wait()
-
             second = asyncio.create_task(
                 client.post(
                     "/api/events",
                     json={
                         "events": [
                             {
+                                "event_id": "events-concurrent-2",
                                 "type": "click",
                                 "url": "https://www.bilibili.com/video/BV2NOW",
                                 "title": "当前点击 2",
@@ -4495,16 +4907,11 @@ class TestBackendAPI:
                     },
                 )
             )
-            await second_event_propagated.wait()
-            await asyncio.sleep(0.05)
-            release_backfill.set()
             responses = await asyncio.gather(first, second)
 
         assert [response.status_code for response in responses] == [200, 200]
-        assert queried_after == [10]
-        assert batches.count(["旧 pending 收藏"]) == 1
-        assert ["当前点击 1"] in batches
-        assert ["当前点击 2"] in batches
+        assert [response.json()["accepted"] for response in responses] == [1, 1]
+        assert batches == []
 
     def test_extension_e2e_rejects_state_changing_action_without_opt_in(self) -> None:
         from fastapi.testclient import TestClient
@@ -5156,6 +5563,22 @@ class TestBackendAPI:
             # same sentence; the raw error above stays for diagnostics.
             "last_account_sync_message": "",
             "last_account_sync_severity": "",
+            "event_lane_depth": 0,
+            "event_lane_active": False,
+            "event_lane_paused": False,
+            "event_lane_last_error": "",
+            "event_lane_processed": 0,
+            "chat_reply_depth": 0,
+            "chat_reply_active": False,
+            "chat_reply_last_error": "",
+            "chat_reply_processed": 0,
+            "image_fetch_active": 0,
+            "image_fetch_waiting": 0,
+            "image_fetch_inflight_keys": 0,
+            "image_fetch_upstream_started": 0,
+            "image_fetch_singleflight_joins": 0,
+            "image_fetch_peak_active": 0,
+            "image_fetch_peak_background": 0,
             "auto_update_enabled": False,
             # The shared fixture points OPENBILICLAW_PROJECT_ROOT at a tmp dir
             # without .git, so the real AutoUpdateService reports unsupported.
@@ -5971,6 +6394,13 @@ class TestBackendAPI:
             async def get_profile(self) -> dict[str, object]:
                 return {"profile": "ok"}
 
+        class FakeMemoryManager:
+            def __init__(self) -> None:
+                self.events: list[dict[str, object]] = []
+
+            async def propagate_event(self, event: dict[str, object]) -> None:
+                self.events.append(event)
+
         class FakeRecommendationEngine:
             def __init__(self, runtime: FakeRuntimeController) -> None:
                 self.runtime = runtime
@@ -6026,8 +6456,9 @@ class TestBackendAPI:
 
         hub = FakeEventHub()
         runtime = FakeRuntimeController(hub)
+        memory = FakeMemoryManager()
         app = create_app(
-            memory_manager=object(),
+            memory_manager=memory,
             database=object(),
             soul_engine=FakeSoulEngine(),
             recommendation_engine=FakeRecommendationEngine(runtime),
@@ -6040,6 +6471,7 @@ class TestBackendAPI:
                 time.sleep(0.01)
 
         assert response.status_code == 200
+        assert [event["event_type"] for event in memory.events] == ["reshuffle"]
         assert response.json() == {
             "items": [
                 {
@@ -6503,7 +6935,7 @@ class TestBackendAPI:
 
         memory = FakeMemoryManager()
         database = FakeDatabase()
-        app = create_app(memory_manager=memory, database=database)
+        app = create_app(memory_manager=memory, database=database, soul_engine=object())
         client = TestClient(app)
 
         response = client.post(
@@ -6512,6 +6944,7 @@ class TestBackendAPI:
                 "recommendation_id": 7,
                 "feedback_type": "like",
                 "note": "这条确实对胃口",
+                "request_id": "feedback-route-like",
             },
         )
 
@@ -6520,6 +6953,9 @@ class TestBackendAPI:
             "ok": True,
             "recommendation_id": 7,
             "feedback_type": "like",
+            "event_id": 1,
+            "duplicate": False,
+            "processing": "queued",
         }
         assert database.updated == [(7, "like", "这条确实对胃口")]
         assert memory.events[0]["event_type"] == "feedback"
@@ -6556,7 +6992,7 @@ class TestBackendAPI:
 
         memory = FakeMemoryManager()
         database = FakeDatabase()
-        app = create_app(memory_manager=memory, database=database)
+        app = create_app(memory_manager=memory, database=database, soul_engine=object())
         client = TestClient(app)
 
         response = client.post(
@@ -6565,6 +7001,7 @@ class TestBackendAPI:
                 "recommendation_id": 7,
                 "feedback_type": "dismiss",
                 "note": "",
+                "request_id": "feedback-route-dismiss",
             },
         )
 
@@ -6573,6 +7010,9 @@ class TestBackendAPI:
             "ok": True,
             "recommendation_id": 7,
             "feedback_type": "dismiss",
+            "event_id": 1,
+            "duplicate": False,
+            "processing": "queued",
         }
         assert database.updated == [(7, "dismiss", "")]
         assert memory.events[0]["event_type"] == "feedback"
@@ -6608,7 +7048,13 @@ class TestBackendAPI:
                 return None
 
         memory = FakeMemoryManager()
-        client = TestClient(create_app(memory_manager=memory, database=FakeDatabase()))
+        client = TestClient(
+            create_app(
+                memory_manager=memory,
+                database=FakeDatabase(),
+                soul_engine=object(),
+            )
+        )
 
         response = client.post(
             "/api/feedback",
@@ -6616,6 +7062,7 @@ class TestBackendAPI:
                 "recommendation_id": 7,
                 "feedback_type": "dislike",
                 "note": "这个方向不适合我",
+                "request_id": "feedback-route-zhihu",
             },
         )
 
@@ -6650,10 +7097,21 @@ class TestBackendAPI:
                 return None
 
         memory = FakeMemoryManager()
-        client = TestClient(create_app(memory_manager=memory, database=FakeDatabase()))
+        client = TestClient(
+            create_app(
+                memory_manager=memory,
+                database=FakeDatabase(),
+                soul_engine=object(),
+            )
+        )
         response = client.post(
             "/api/feedback",
-            json={"recommendation_id": 8, "feedback_type": "dismiss", "note": ""},
+            json={
+                "recommendation_id": 8,
+                "feedback_type": "dismiss",
+                "note": "",
+                "request_id": "feedback-route-legacy",
+            },
         )
 
         assert response.status_code == 200
@@ -6694,10 +7152,21 @@ class TestBackendAPI:
 
         for feedback_type, verb in (("like", "点赞了"), ("dismiss", "忽略了")):
             memory = FakeMemoryManager()
-            client = TestClient(create_app(memory_manager=memory, database=FakeDatabase()))
+            client = TestClient(
+                create_app(
+                    memory_manager=memory,
+                    database=FakeDatabase(),
+                    soul_engine=object(),
+                )
+            )
             response = client.post(
                 "/api/feedback",
-                json={"recommendation_id": 11, "feedback_type": feedback_type, "note": ""},
+                json={
+                    "recommendation_id": 11,
+                    "feedback_type": feedback_type,
+                    "note": "",
+                    "request_id": f"feedback-route-bangumi-{feedback_type}",
+                },
             )
             assert response.status_code == 200, response.text
             event = memory.events[0]
@@ -6826,6 +7295,7 @@ class TestBackendAPI:
                 "recommendation_id": 7,
                 "feedback_type": "spam",
                 "note": "",
+                "request_id": "feedback-invalid-type",
             },
         )
 
@@ -6847,6 +7317,7 @@ class TestBackendAPI:
                 "recommendation_id": 7,
                 "feedback_type": "comment",
                 "note": "",
+                "request_id": "feedback-comment-without-note",
             },
         )
 
@@ -6868,6 +7339,7 @@ class TestBackendAPI:
                 "recommendation_id": 7,
                 "feedback_type": "dislike",
                 "note": "太浅了",
+                "request_id": "feedback-missing-recommendation",
             },
         )
 
@@ -6944,6 +7416,7 @@ class TestBackendAPI:
                 "recommendation_id": 7,
                 "feedback_type": "like",
                 "note": "",
+                "request_id": "feedback-profile-refresh",
             },
         )
 
@@ -7008,6 +7481,7 @@ class TestBackendAPI:
                 "recommendation_id": 7,
                 "feedback_type": "like",
                 "note": "",
+                "request_id": "feedback-nonblocking-refresh",
             },
         )
         elapsed = time.perf_counter() - started_at
@@ -9385,23 +9859,9 @@ class TestBackendAPI:
         ]
         assert feedback_mutations == [True]
 
-    @pytest.mark.parametrize(
-        ("failure", "expected_fragment"),
-        [
-            (RuntimeError("sk-live-secret"), "AI 服务暂时不可用"),
-            (TimeoutError("socket stalled"), "响应超时"),
-            pytest.param(
-                LLMResponseContentError("LLM returned an empty response"),
-                "空响应",
-                id="empty-response",
-            ),
-        ],
-    )
-    def test_failed_chat_turn_is_safe_terminal_and_same_id_is_idempotent(
+    def test_explicit_terminal_chat_turn_is_safe_and_same_id_is_idempotent(
         self,
         tmp_path: Path,
-        failure: Exception,
-        expected_fragment: str,
     ) -> None:
         import time
 
@@ -9417,7 +9877,7 @@ class TestBackendAPI:
                 self, _user_message: str, *, scope: str = "chat", turn_id: str = ""
             ) -> str:
                 self.calls += 1
-                raise failure
+                raise LLMResponseContentError("LLM returned an empty response")
 
         db = Database(tmp_path / "openbiliclaw.db")
         db.initialize()
@@ -9446,14 +9906,99 @@ class TestBackendAPI:
 
             assert turn["status"] == "failed"
             assert turn["reply"] == ""
-            assert expected_fragment in str(turn["error"])
-            assert "sk-live-secret" not in str(turn["error"])
+            assert "空响应" in str(turn["error"])
 
             retry = client.post("/api/chat/turns", json=payload)
             assert retry.status_code == 200
             assert retry.json() == turn
             time.sleep(0.05)
             assert dialogue.calls == 1
+
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            RuntimeError("provider configuration is temporarily unavailable"),
+            TimeoutError("socket stalled"),
+        ],
+    )
+    def test_transient_chat_failure_stays_pending_then_retries_to_completion(
+        self,
+        tmp_path: Path,
+        failure: Exception,
+    ) -> None:
+        import asyncio
+        import threading
+        import time
+
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.storage.database import Database
+
+        class FakeDialogue:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.first_failed = threading.Event()
+                self.retry_started = threading.Event()
+                self.release_retry: asyncio.Event | None = None
+
+            async def respond(
+                self, _user_message: str, *, scope: str = "chat", turn_id: str = ""
+            ) -> str:
+                del scope, turn_id
+                self.calls += 1
+                if self.calls == 1:
+                    self.first_failed.set()
+                    raise failure
+                self.release_retry = asyncio.Event()
+                self.retry_started.set()
+                await self.release_retry.wait()
+                return "重试后的真实回复"
+
+            async def unblock(self) -> None:
+                assert self.release_retry is not None
+                self.release_retry.set()
+
+        db = Database(tmp_path / "openbiliclaw.db")
+        db.initialize()
+        dialogue = FakeDialogue()
+        app = create_app(
+            memory_manager=object(),
+            database=db,
+            soul_engine=object(),
+            dialogue=dialogue,
+        )
+        app.state.chat_reply_scheduler.retry_base_seconds = 0.01
+        app.state.chat_reply_scheduler.retry_max_seconds = 0.01
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/chat/turns",
+                json={
+                    "turn_id": "turn-transient-1",
+                    "session": "popup",
+                    "scope": "chat",
+                    "message": "这轮先遇到瞬态失败",
+                },
+            )
+            assert response.status_code == 200
+            assert dialogue.first_failed.wait(timeout=1)
+            assert dialogue.retry_started.wait(timeout=1)
+
+            pending = db.get_chat_turn("turn-transient-1")
+            assert pending is not None
+            assert pending["status"] == "pending"
+            assert pending["error"] == ""
+
+            client.portal.call(dialogue.unblock)
+            for _ in range(50):
+                turn = client.get("/api/chat/turns/turn-transient-1").json()
+                if turn["status"] == "completed":
+                    break
+                time.sleep(0.01)
+
+        assert turn["status"] == "completed"
+        assert turn["reply"] == "重试后的真实回复"
+        assert dialogue.calls == 2
 
     def test_empty_chat_turn_reply_is_failed_instead_of_completed(self, tmp_path: Path) -> None:
         import time
@@ -9863,15 +10408,15 @@ class TestBackendAPI:
 
         response = client.post(
             "/api/recommendation-click",
-            json={"recommendation_id": 99},
+            json={"recommendation_id": 99, "request_id": "click-bilibili-99"},
         )
 
         assert response.status_code == 200
         body = response.json()
         assert body["ok"] is True
         assert body["bvid"] == "BV1REC99"
-        assert "interest" in body["layers_updated"]
-        assert "surface" in body["layers_updated"]
+        assert body["layers_updated"] == []
+        assert body["processing"] == "queued"
 
         # Click should have been persisted as an event and ingested as a signal.
         assert memory.events, "Click should be persisted as an event"
@@ -9879,16 +10424,69 @@ class TestBackendAPI:
         assert memory.events[0]["metadata"]["bvid"] == "BV1REC99"
         assert memory.events[0]["metadata"]["recommendation_id"] == 99
 
-        assert len(soul_engine.pipeline.ingested) == 1
-        ingested_signal = soul_engine.pipeline.ingested[0]
-        from openbiliclaw.soul.pipeline import SignalType
+        assert soul_engine.pipeline.ingested == []
 
-        assert ingested_signal.signal_type == SignalType.RECOMMENDATION_CLICK
-        assert ingested_signal.payload["bvid"] == "BV1REC99"
-        # Database lookup should have hydrated title/topic/up_name.
-        assert ingested_signal.payload["title"] == "深入理解Transformer"
-        assert ingested_signal.payload["topic_label"] == "AI技术"
-        assert ingested_signal.payload["up_name"] == "ML教程君"
+    def test_recommendation_click_request_id_ignores_rotating_url_after_db_hydration(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.memory.manager import MemoryManager
+        from openbiliclaw.storage.database import Database
+
+        database = Database(tmp_path / "click-idempotency.db")
+        memory = MemoryManager(tmp_path / "data", database=database)
+        memory.initialize()
+        recommendation_id = database.insert_recommendation(
+            "xhs-note-stable",
+            confidence=0.9,
+        )
+        client = TestClient(
+            create_app(
+                memory_manager=memory,
+                database=database,
+                soul_engine=object(),
+            )
+        )
+        request_id = "click-token-rotation"
+        first_payload = {
+            "recommendation_id": recommendation_id,
+            "source_platform": "xiaohongshu",
+            "content_url": ("https://www.xiaohongshu.com/explore/xhs-note-stable?xsec_token=old"),
+            "title": "首写标题",
+            "request_id": request_id,
+        }
+        rotated_payload = {
+            **first_payload,
+            "content_url": ("https://www.xiaohongshu.com/explore/xhs-note-stable?xsec_token=new"),
+            "title": "重渲染标题",
+        }
+
+        first = client.post("/api/recommendation-click", json=first_payload)
+        replay = client.post("/api/recommendation-click", json=rotated_payload)
+        conflict = client.post(
+            "/api/recommendation-click",
+            json={
+                **rotated_payload,
+                "bvid": "truly-different-content",
+                "content_id": "truly-different-content",
+            },
+        )
+
+        assert first.status_code == 200
+        assert replay.status_code == 200
+        assert first.json()["duplicate"] is False
+        assert replay.json()["duplicate"] is True
+        assert replay.json()["event_id"] == first.json()["event_id"]
+        assert conflict.status_code == 409
+        events = memory.query_events(event_types=["click"], limit=10)
+        assert len(events) == 1
+        assert events[0]["title"] == "首写标题"
+        assert events[0]["url"] == first_payload["content_url"]
+        metadata = json.loads(str(events[0]["metadata"]))
+        assert metadata["content_id"] == "xhs-note-stable"
+        assert metadata["content_url"] == first_payload["content_url"]
 
     def test_recommendation_click_endpoint_keeps_youtube_click_source_aware(self) -> None:
         """YouTube recommendation clicks must not be persisted as Bilibili URLs."""
@@ -9944,7 +10542,7 @@ class TestBackendAPI:
 
         response = client.post(
             "/api/recommendation-click",
-            json={"recommendation_id": 42},
+            json={"recommendation_id": 42, "request_id": "click-youtube-42"},
         )
 
         assert response.status_code == 200
@@ -9957,10 +10555,7 @@ class TestBackendAPI:
         assert event["metadata"]["content_id"] == "KPoJ7p9iy4Q"
         assert event["metadata"]["content_url"] == "https://www.youtube.com/watch?v=KPoJ7p9iy4Q"
 
-        signal = soul_engine.pipeline.ingested[0]
-        assert signal.payload["source_platform"] == "youtube"
-        assert signal.payload["content_id"] == "KPoJ7p9iy4Q"
-        assert signal.payload["content_url"] == "https://www.youtube.com/watch?v=KPoJ7p9iy4Q"
+        assert soul_engine.pipeline.ingested == []
 
     def test_recommendation_click_endpoint_infers_x_click_source_from_url(self) -> None:
         """X recommendation clicks with only a URL should persist as twitter."""
@@ -10009,6 +10604,7 @@ class TestBackendAPI:
                 "content_id": "1790000000000000001",
                 "content_url": "https://x.com/h/status/1790000000000000001",
                 "title": "A text tweet",
+                "request_id": "click-twitter-direct",
             },
         )
 
@@ -10018,9 +10614,7 @@ class TestBackendAPI:
         assert event["url"] == "https://x.com/h/status/1790000000000000001"
         assert "X" in event["context"]
         assert event["metadata"]["source_platform"] == "twitter"
-        signal = soul_engine.pipeline.ingested[0]
-        assert signal.payload["source_platform"] == "twitter"
-        assert signal.payload["content_url"] == "https://x.com/h/status/1790000000000000001"
+        assert soul_engine.pipeline.ingested == []
 
     def test_recommendation_click_endpoint_builds_reddit_fallback_url(self) -> None:
         """Reddit recommendation clicks should stay source-aware even without content_url."""
@@ -10069,6 +10663,7 @@ class TestBackendAPI:
                 "content_id": "t3_abc123",
                 "source_platform": "reddit",
                 "title": "A Reddit post",
+                "request_id": "click-reddit-direct",
             },
         )
 
@@ -10080,9 +10675,7 @@ class TestBackendAPI:
         assert event["metadata"]["source_platform"] == "reddit"
         assert event["metadata"]["content_id"] == "t3_abc123"
         assert event["metadata"]["content_url"] == "https://www.reddit.com/comments/abc123/"
-        signal = soul_engine.pipeline.ingested[0]
-        assert signal.payload["source_platform"] == "reddit"
-        assert signal.payload["content_url"] == "https://www.reddit.com/comments/abc123/"
+        assert soul_engine.pipeline.ingested == []
 
     def test_recommendation_click_builds_bangumi_fallback_url(self) -> None:
         """Bangumi subjects must never fall back to a Bilibili video URL."""
@@ -10142,6 +10735,7 @@ class TestBackendAPI:
                 "title": "深度教程",
                 "watch_seconds": 600,
                 "video_duration_seconds": 700,
+                "request_id": "click-with-dwell",
             },
         )
 
@@ -10193,7 +10787,11 @@ class TestBackendAPI:
 
         response = client.post(
             "/api/recommendation-click",
-            json={"bvid": "BVnoDwell", "title": "未知"},
+            json={
+                "bvid": "BVnoDwell",
+                "title": "未知",
+                "request_id": "click-without-dwell",
+            },
         )
 
         assert response.status_code == 200
@@ -10245,14 +10843,16 @@ class TestBackendAPI:
 
         response = client.post(
             "/api/recommendation-click",
-            json={"bvid": "BV1DIRECT", "title": "直接点击"},
+            json={
+                "bvid": "BV1DIRECT",
+                "title": "直接点击",
+                "request_id": "click-direct-bvid",
+            },
         )
 
         assert response.status_code == 200
         assert response.json()["bvid"] == "BV1DIRECT"
-        assert len(soul_engine.pipeline.ingested) == 1
-        assert soul_engine.pipeline.ingested[0].payload["bvid"] == "BV1DIRECT"
-        assert soul_engine.pipeline.ingested[0].payload["title"] == "直接点击"
+        assert soul_engine.pipeline.ingested == []
 
     def test_recommendation_click_endpoint_rejects_missing_bvid(self) -> None:
         """Without a bvid (either from payload or DB lookup), return 422."""
@@ -10278,7 +10878,7 @@ class TestBackendAPI:
 
         response = client.post(
             "/api/recommendation-click",
-            json={"recommendation_id": 999},
+            json={"recommendation_id": 999, "request_id": "click-missing-bvid"},
         )
 
         assert response.status_code == 422
@@ -10317,7 +10917,11 @@ class TestBackendAPI:
 
         response = client.post(
             "/api/recommendation-click",
-            json={"bvid": "BVresilient", "title": "即便后端出错也不应阻塞"},
+            json={
+                "bvid": "BVresilient",
+                "title": "即便后端出错也不应阻塞",
+                "request_id": "click-resilient",
+            },
         )
 
         assert response.status_code == 200
@@ -10343,7 +10947,8 @@ class TestBackendAPI:
                 self.notified.append(bvid)
 
         database = FakeDatabase()
-        app = create_app(memory_manager=object(), database=database, soul_engine=object())
+        memory = _EventPersistenceSpy()
+        app = create_app(memory_manager=memory, database=database, soul_engine=object())
         client = TestClient(app)
 
         response = client.post(
@@ -10353,6 +10958,7 @@ class TestBackendAPI:
 
         assert response.status_code == 200
         assert response.json()["action"] == "liked"
+        assert [event["event_type"] for event in memory.events] == ["feedback"]
         assert database.notified == []
         assert any("feedback_type='like'" in query for query, _params in database.writes)
 
@@ -10507,7 +11113,8 @@ class TestBackendAPI:
                 self.notified.append(bvid)
 
         database = FakeDatabase()
-        app = create_app(memory_manager=object(), database=database, soul_engine=object())
+        memory = _EventPersistenceSpy()
+        app = create_app(memory_manager=memory, database=database, soul_engine=object())
         client = TestClient(app)
 
         response = client.post(
@@ -10517,6 +11124,7 @@ class TestBackendAPI:
 
         assert response.status_code == 200
         assert response.json()["action"] == "disliked"
+        assert [event["event_type"] for event in memory.events] == ["feedback"]
         assert database.notified == ["BV1DL"]
         assert any("feedback_type='dislike'" in query for query, _params in database.writes)
 
@@ -10536,7 +11144,8 @@ class TestBackendAPI:
                 self.notified.append(bvid)
 
         database = FakeDatabase()
-        app = create_app(memory_manager=object(), database=database, soul_engine=object())
+        memory = _EventPersistenceSpy()
+        app = create_app(memory_manager=memory, database=database, soul_engine=object())
         client = TestClient(app)
 
         response = client.post(
@@ -10592,7 +11201,8 @@ class TestBackendAPI:
                 ]
 
         database = FakeDatabase()
-        app = create_app(memory_manager=object(), database=database, soul_engine=object())
+        memory = _EventPersistenceSpy()
+        app = create_app(memory_manager=memory, database=database, soul_engine=object())
         client = TestClient(app)
 
         response = client.get("/api/delight/pending-batch")
@@ -10879,7 +11489,8 @@ class TestBackendAPI:
                 return True
 
         database = FakeDatabase()
-        app = create_app(memory_manager=object(), database=database, soul_engine=object())
+        memory = _EventPersistenceSpy()
+        app = create_app(memory_manager=memory, database=database, soul_engine=object())
         client = TestClient(app)
 
         response = client.post(
@@ -10889,6 +11500,7 @@ class TestBackendAPI:
 
         assert response.status_code == 200
         assert response.json()["action"] == "dismissed"
+        assert [event["event_type"] for event in memory.events] == ["feedback"]
         assert database.seen == ["BV1DL"]
         assert database.notified == []
         assert database.writes == []
@@ -10900,7 +11512,12 @@ class TestBackendAPI:
             def mark_delight_seen(self, bvid: str) -> bool:
                 raise RuntimeError(f"write failed for {bvid}")
 
-        app = create_app(memory_manager=object(), database=FakeDatabase(), soul_engine=object())
+        memory = _EventPersistenceSpy()
+        app = create_app(
+            memory_manager=memory,
+            database=FakeDatabase(),
+            soul_engine=object(),
+        )
         client = TestClient(app)
 
         response = client.post(
@@ -10909,6 +11526,7 @@ class TestBackendAPI:
         )
 
         assert response.status_code == 500
+        assert [event["event_type"] for event in memory.events] == ["feedback"]
         assert response.json() == {
             "ok": False,
             "action": "dismiss",
@@ -14458,18 +15076,21 @@ def test_events_endpoint_emits_activity_added_runtime_event() -> None:
         json={
             "events": [
                 {
+                    "event_id": "events-activity-a",
                     "type": "click",
                     "url": "https://www.bilibili.com/video/BV1A",
                     "title": "A",
                     "timestamp": 1710000000000,
                 },
                 {
+                    "event_id": "events-activity-b",
                     "type": "view",
                     "url": "https://www.bilibili.com/video/BV1B",
                     "title": "B",
                     "timestamp": 1710000001000,
                 },
                 {
+                    "event_id": "events-activity-c",
                     "type": "click",
                     "url": "https://www.bilibili.com/video/BV1C",
                     "title": "C",
@@ -18811,6 +19432,8 @@ def test_successful_reshuffle_records_one_batch_event_and_empty_result_records_n
         "batch_size": 1,
         "source_platform": "web",
         "signal_strength": 0.1,
+        "event_namespace": "recommendation",
+        "profile_update_owner": "generic",
     }
 
 
@@ -19164,7 +19787,7 @@ class TestUnifiedInterestLineFeedbackIngestion:
         def __init__(self) -> None:
             self.signals: list[Any] = []
 
-        async def ingest(self, signal: Any) -> object:
+        async def enqueue(self, signal: Any) -> object:
             self.signals.append(signal)
             return object()
 
@@ -19196,7 +19819,7 @@ class TestUnifiedInterestLineFeedbackIngestion:
         tmp_path: Path,
         *,
         unified: bool,
-    ) -> tuple[Any, list[int], Any]:
+    ) -> tuple[Any, list[int], Any, Any]:
         from fastapi.testclient import TestClient
 
         from openbiliclaw.api import app as api_app
@@ -19210,6 +19833,15 @@ class TestUnifiedInterestLineFeedbackIngestion:
 
             def schedule(self) -> None:
                 schedules[0] += 1
+
+            async def resume(self, *, recover: bool = True) -> None:
+                del recover
+
+            async def pause_and_drain(self, *, timeout: float = 1500.0) -> None:
+                del timeout
+
+            def status_payload(self) -> dict[str, object]:
+                return {}
 
             async def close(self) -> None:
                 return None
@@ -19225,58 +19857,62 @@ class TestUnifiedInterestLineFeedbackIngestion:
                 soul_engine=soul,
             )
         )
-        return soul, schedules, client
-
-    def _wait_for_signals(self, soul: Any, timeout_seconds: float = 5.0) -> None:
-        """Wait for the background ingest task to append its pipeline signal."""
-        deadline = time.monotonic() + timeout_seconds
-        while not soul.pipeline.signals and time.monotonic() < deadline:
-            time.sleep(0.01)
+        return soul, schedules, client, memory
 
     def test_flag_off_leaves_feedback_behaviour_byte_identical(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        soul, schedules, client = self._make_feedback_client(monkeypatch, tmp_path, unified=False)
+        soul, schedules, client, _memory = self._make_feedback_client(
+            monkeypatch, tmp_path, unified=False
+        )
 
         with client:
+            startup_schedules = schedules[0]
             response = client.post(
                 "/api/feedback",
-                json={"recommendation_id": 7, "feedback_type": "dislike", "note": "太浅了"},
+                json={
+                    "recommendation_id": 7,
+                    "feedback_type": "dislike",
+                    "note": "太浅了",
+                    "request_id": "feedback-flag-off-dislike",
+                },
             )
             assert response.status_code == 200
-            self._wait_for_signals(soul)
+            assert schedules[0] == startup_schedules + 1
 
         assert soul.pipeline.signals == [], "开关关闭时反馈绝不能进 pipeline（否则与旧批线双计）"
-        assert schedules[0] == 1, "旧批线调度保持不变"
 
-    def test_flag_on_feeds_one_feedback_signal_into_the_pipeline(
+    def test_flag_on_persists_event_and_schedules_without_touching_pipeline(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        from openbiliclaw.soul.pipeline import OnionLayer, SignalType
-
-        soul, schedules, client = self._make_feedback_client(monkeypatch, tmp_path, unified=True)
+        soul, schedules, client, memory = self._make_feedback_client(
+            monkeypatch, tmp_path, unified=True
+        )
 
         with client:
+            startup_schedules = schedules[0]
             response = client.post(
                 "/api/feedback",
-                json={"recommendation_id": 7, "feedback_type": "dislike", "note": "太浅了"},
+                json={
+                    "recommendation_id": 7,
+                    "feedback_type": "dislike",
+                    "note": "太浅了",
+                    "request_id": "feedback-flag-on-dislike",
+                },
             )
             assert response.status_code == 200
-            self._wait_for_signals(soul)
+            assert schedules[0] == startup_schedules + 1, "一次 POST 只唤醒 scheduler 一次"
 
-        assert len(soul.pipeline.signals) == 1
-        signal = soul.pipeline.signals[0]
-        assert signal.signal_type is SignalType.FEEDBACK
-        assert signal.payload["feedback_type"] == "dislike"
-        assert signal.payload["title"] == "讲透城市与建筑"
-        assert signal.payload["note"] == "太浅了"
-        assert signal.target_layers == frozenset({OnionLayer.INTEREST, OnionLayer.SURFACE})
-        assert schedules[0] == 1, "Wave A 旧批线仍照常调度"
+        assert soul.pipeline.signals == [], "HTTP owner 不得直接碰 pipeline"
+        [event] = memory.query_events(event_types=["feedback"], limit=10)
+        metadata = json.loads(str(event["metadata"]))
+        assert metadata["feedback_type"] == "dislike"
+        assert metadata["feedback_note"] == "太浅了"
 
-    def test_flag_on_returns_before_background_ingest_completes(
+    def test_blocked_scheduler_tick_does_not_delay_consecutive_feedback_posts(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """POST /api/feedback must not wait for the (potentially slow) LLM ingest."""
+        """A running LLM/tick owner cannot put HTTP clicks behind its lock."""
         import threading
 
         from fastapi.testclient import TestClient
@@ -19284,20 +19920,14 @@ class TestUnifiedInterestLineFeedbackIngestion:
         from openbiliclaw.api import app as api_app
         from openbiliclaw.memory.manager import MemoryManager
 
-        ingest_started = threading.Event()
-        release_ingest = threading.Event()
-        ingest_finished = threading.Event()
-
-        class BlockingPipeline:
-            async def ingest(self, signal: Any) -> object:
-                ingest_started.set()
-                await asyncio.to_thread(release_ingest.wait, 15)
-                ingest_finished.set()
-                return object()
+        tick_started = threading.Event()
+        release_tick = threading.Event()
 
         class BlockingSoulEngine:
             unified_interest_line_enabled = True
-            pipeline = BlockingPipeline()
+
+            def __init__(self) -> None:
+                self.calls = 0
 
             def is_profile_ready(self) -> bool:
                 return True
@@ -19311,41 +19941,219 @@ class TestUnifiedInterestLineFeedbackIngestion:
             ) -> None:
                 return None
 
-        schedules: list[int] = [0]
+            async def process_feedback_batch_if_needed(self) -> dict[str, object]:
+                self.calls += 1
+                if self.calls == 1:
+                    tick_started.set()
+                    await asyncio.to_thread(release_tick.wait, 15)
+                return {"triggered": False}
 
-        class FakeFeedbackBatchScheduler:
-            def __init__(self, *args: object, **kwargs: object) -> None:
-                pass
-
-            def schedule(self) -> None:
-                schedules[0] += 1
-
-            async def close(self) -> None:
-                return None
-
-        monkeypatch.setattr(api_app, "FeedbackBatchScheduler", FakeFeedbackBatchScheduler)
+        monkeypatch.setattr(api_app, "_FEEDBACK_BATCH_DEBOUNCE_SECONDS", 0.0)
         memory = MemoryManager(tmp_path)
         memory.initialize()
+        soul = BlockingSoulEngine()
         client = TestClient(
             create_app(
                 memory_manager=memory,
                 database=self._FakeDatabase(),
-                soul_engine=BlockingSoulEngine(),
+                soul_engine=soul,
+            )
+        )
+
+        lifespan_started_at = time.monotonic()
+        with client:
+            startup_elapsed = time.monotonic() - lifespan_started_at
+            assert startup_elapsed < 1.0, (
+                f"blocked event recovery delayed TestClient startup by {startup_elapsed:.2f}s"
+            )
+            assert tick_started.wait(timeout=3), "startup recovery should wake the owner"
+            assert client.get("/api/health").status_code == 200
+            started_at = time.monotonic()
+            responses = [
+                client.post(
+                    "/api/feedback",
+                    json={
+                        "recommendation_id": 7,
+                        "feedback_type": feedback_type,
+                        "note": "",
+                        "request_id": f"blocked-feedback-{feedback_type}",
+                    },
+                )
+                for feedback_type in ("like", "dislike")
+            ]
+            elapsed = time.monotonic() - started_at
+            assert [response.status_code for response in responses] == [200, 200]
+            assert elapsed < 1.0, f"feedback posts waited behind tick for {elapsed:.2f}s"
+            assert len(memory.query_events(event_types=["feedback"], limit=10)) == 2
+            release_tick.set()
+
+    def test_startup_never_awaits_never_returning_event_recovery_and_shutdown_cleans_task(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The deferred owner may run first, but lifespan never joins it."""
+        import threading
+
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.api import app as api_app
+        from openbiliclaw.memory.manager import MemoryManager
+
+        tick_started = threading.Event()
+        tick_cancelled = threading.Event()
+
+        class NeverReturningSoulEngine:
+            unified_interest_line_enabled = True
+
+            def is_profile_ready(self) -> bool:
+                return True
+
+            async def process_feedback_batch_if_needed(self) -> None:
+                tick_started.set()
+                try:
+                    await asyncio.Future()
+                except asyncio.CancelledError:
+                    tick_cancelled.set()
+                    raise
+
+        monkeypatch.setattr(api_app, "_FEEDBACK_BATCH_DEBOUNCE_SECONDS", 0.0)
+        memory = MemoryManager(tmp_path)
+        memory.initialize()
+        app = create_app(
+            memory_manager=memory,
+            database=self._FakeDatabase(),
+            soul_engine=NeverReturningSoulEngine(),
+        )
+
+        async def restart_after_owner_gets_one_turn(
+            _app: object,
+            *,
+            run_post_reload_llm_work: bool = True,
+        ) -> None:
+            del _app, run_post_reload_llm_work
+            deadline = asyncio.get_running_loop().time() + 1.0
+            while not tick_started.is_set():
+                if asyncio.get_running_loop().time() >= deadline:
+                    raise AssertionError("deferred recovery never received an event-loop turn")
+                await asyncio.sleep(0)
+
+        app.state.runtime_context.restart_background_tasks = restart_after_owner_gets_one_turn
+        client = TestClient(app)
+        recovery_task: asyncio.Task[None] | None = None
+        lifespan_started_at = time.monotonic()
+        with client:
+            startup_elapsed = time.monotonic() - lifespan_started_at
+            assert startup_elapsed < 1.0, (
+                f"never-returning recovery delayed startup by {startup_elapsed:.2f}s"
+            )
+            assert tick_started.is_set()
+            recovery_task = app.state.event_recovery_task
+            assert recovery_task is not None
+            assert recovery_task.done() is False
+            assert client.get("/api/health").status_code == 200
+
+        assert recovery_task is not None
+        assert recovery_task.done() is True
+        assert tick_cancelled.wait(timeout=1)
+        assert app.state.event_recovery_task is None
+
+    def test_startup_provider_401_recovery_failure_does_not_delay_health(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A provider auth failure belongs to the background lane, not lifespan."""
+        import threading
+
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.api import app as api_app
+        from openbiliclaw.llm.base import LLMAuthError
+        from openbiliclaw.memory.manager import MemoryManager
+
+        attempted = threading.Event()
+
+        class UnauthorizedSoulEngine:
+            unified_interest_line_enabled = True
+
+            def is_profile_ready(self) -> bool:
+                return True
+
+            async def process_feedback_batch_if_needed(self) -> None:
+                attempted.set()
+                raise LLMAuthError("HTTP 401 Unauthorized", provider_name="test")
+
+        monkeypatch.setattr(api_app, "_FEEDBACK_BATCH_DEBOUNCE_SECONDS", 0.0)
+        memory = MemoryManager(tmp_path)
+        memory.initialize()
+        app = create_app(
+            memory_manager=memory,
+            database=self._FakeDatabase(),
+            soul_engine=UnauthorizedSoulEngine(),
+        )
+
+        started_at = time.monotonic()
+        with TestClient(app) as client:
+            assert time.monotonic() - started_at < 1.0
+            assert attempted.wait(timeout=3), "background recovery never reached the provider"
+            assert client.get("/api/health").status_code == 200
+            deadline = time.monotonic() + 1.0
+            status = app.state.feedback_batch_scheduler.status_payload()
+            while status["event_lane_last_error"] != "LLMAuthError":
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.01)
+                status = app.state.feedback_batch_scheduler.status_payload()
+            assert status["event_lane_last_error"] == "LLMAuthError"
+
+    def test_startup_claims_feedback_left_before_previous_shutdown(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Startup wakes the durable owner without requiring another user click."""
+        import threading
+
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.api import app as api_app
+        from openbiliclaw.memory.manager import MemoryManager
+        from openbiliclaw.soul.engine import SoulEngine
+        from openbiliclaw.soul.pipeline import FlushResult, OnionLayer
+
+        memory = MemoryManager(tmp_path)
+        memory.initialize()
+        asyncio.run(
+            memory.propagate_event(
+                {
+                    "event_type": "feedback",
+                    "title": "关机前留下的反馈",
+                    "metadata": {"feedback_type": "dislike", "feedback_note": "太浅"},
+                }
+            )
+        )
+        soul = SoulEngine(llm=object(), memory=memory, unified_interest_line=True)
+        ticked = threading.Event()
+
+        async def stop_before_analysis() -> FlushResult:
+            ticked.set()
+            return FlushResult()
+
+        monkeypatch.setattr(soul.pipeline, "tick_if_buffered", stop_before_analysis)
+        monkeypatch.setattr(api_app, "_FEEDBACK_BATCH_DEBOUNCE_SECONDS", 0.0)
+        client = TestClient(
+            create_app(
+                memory_manager=memory,
+                database=self._FakeDatabase(),
+                soul_engine=soul,
             )
         )
 
         with client:
-            response = client.post(
-                "/api/feedback",
-                json={"recommendation_id": 7, "feedback_type": "like", "note": ""},
-            )
-            assert response.status_code == 200
-            assert ingest_started.wait(timeout=3), "后台 ingest 任务应已被调度"
-            assert not ingest_finished.is_set(), "响应不能等待 ingest 完成"
-            release_ingest.set()
-            assert ingest_finished.wait(timeout=3), "放行后后台 ingest 应完成"
+            assert ticked.wait(timeout=3)
 
-        assert schedules[0] == 1
+        state = memory.load_feedback_state()
+        assert state["last_processed_feedback_event_id"] == 1
+        assert state["feedback_owner_version"] == 2
+        assert str(state["feedback_owner_cutover_at"]).strip()
+        for layer in (OnionLayer.INTEREST, OnionLayer.SURFACE):
+            [signal] = soul.pipeline._buffers[layer.value].signals
+            assert signal["id"] == "feedback-event-1"
 
 
 class TestSoulEngineFeedbackConfigPlumbing:

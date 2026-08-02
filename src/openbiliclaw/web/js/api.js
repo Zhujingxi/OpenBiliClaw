@@ -15,6 +15,50 @@ const SAVED_READ_TIMEOUT_MS = 10_000;
 const SAVED_MUTATION_TIMEOUT_MS = 10_000;
 const FEEDBACK_SUBMIT_TIMEOUT_MS = 30_000;
 const CSRF_HEADER = "X-OBC-Auth";
+const PENDING_REQUEST_IDS_KEY = "openbiliclaw.pending_request_ids";
+const pendingRequestIds = new Map();
+
+function newRequestId() {
+  if (typeof globalThis.crypto?.randomUUID === "function") return globalThis.crypto.randomUUID();
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+function loadPendingRequestIds() {
+  try {
+    const parsed = JSON.parse(globalThis.localStorage?.getItem(PENDING_REQUEST_IDS_KEY) || "{}");
+    if (parsed && typeof parsed === "object") {
+      for (const [key, value] of Object.entries(parsed)) {
+        if (typeof value === "string" && value) pendingRequestIds.set(key, value);
+      }
+    }
+  } catch { /* storage unavailable or corrupt */ }
+}
+
+function persistPendingRequestIds() {
+  try {
+    globalThis.localStorage?.setItem(
+      PENDING_REQUEST_IDS_KEY,
+      JSON.stringify(Object.fromEntries(pendingRequestIds)),
+    );
+  } catch { /* in-memory fallback still covers retries in this page */ }
+}
+
+function rememberPendingRequestId(namespace, identity) {
+  loadPendingRequestIds();
+  const key = `${namespace}:${identity}`;
+  const existing = pendingRequestIds.get(key);
+  if (existing) return { key, requestId: existing };
+  const requestId = newRequestId();
+  pendingRequestIds.set(key, requestId);
+  persistPendingRequestIds();
+  return { key, requestId };
+}
+
+function forgetPendingRequestId(key, requestId) {
+  if (pendingRequestIds.get(key) !== requestId) return;
+  pendingRequestIds.delete(key);
+  persistPendingRequestIds();
+}
 
 /** Notify the shell that the session is gone so it can show the login view. */
 function signalAuthRequired() {
@@ -161,8 +205,28 @@ export async function appendRecommendations(excludedBvids = []) {
 }
 
 export async function reportClick(payload) {
+  const stableRecommendationId = payload?.recommendation_id ?? null;
+  const stableContentId = String(payload?.content_id || payload?.bvid || "").trim();
+  let fallbackUrl = "";
+  if (stableRecommendationId == null && !stableContentId) {
+    const rawUrl = String(payload?.content_url || payload?.url || "").trim();
+    try {
+      const normalizedUrl = new URL(rawUrl, globalThis.location?.href);
+      normalizedUrl.hash = "";
+      fallbackUrl = normalizedUrl.toString();
+    } catch { fallbackUrl = rawUrl; }
+  }
+  const identity = JSON.stringify([
+    stableRecommendationId,
+    stableContentId || fallbackUrl,
+  ]);
+  const pending = payload?.request_id
+    ? null
+    : rememberPendingRequestId("recommendation-click", identity);
+  const body = { ...payload, request_id: payload?.request_id || pending?.requestId || "" };
   try {
-    await requestJson("/recommendation-click", json(payload));
+    await requestJson("/recommendation-click", json(body));
+    if (pending) forgetPendingRequestId(pending.key, pending.requestId);
     return true;
   } catch { return false; }
 }
@@ -184,10 +248,25 @@ export async function fetchDelightBatch(limit = null) {
 }
 
 export async function respondToDelight(bvid, responseType, title = "", message = "") {
-  return requestJson("/delight/respond", {
-    ...json({ bvid, response: responseType, title, message }),
+  const durableReaction = ["like", "dislike", "dismiss"].includes(responseType);
+  const pending = durableReaction
+    ? rememberPendingRequestId(
+      "delight-response",
+      JSON.stringify([bvid, responseType]),
+    )
+    : null;
+  const result = await requestJson("/delight/respond", {
+    ...json({
+      bvid,
+      response: responseType,
+      title,
+      message,
+      request_id: pending?.requestId || "",
+    }),
     timeoutMs: 35_000,
   });
+  if (pending) forgetPendingRequestId(pending.key, pending.requestId);
+  return result;
 }
 
 // ── Profile ─────────────────────────────────────────────────
@@ -270,12 +349,37 @@ export async function fetchChatTurns({ session = "mobile", scope = "", limit = 5
 
 // ── Feedback ───────────────────────────────────────────────
 export async function submitFeedback(payload) {
-  return requestJson("/feedback", { ...json(payload), timeoutMs: FEEDBACK_SUBMIT_TIMEOUT_MS });
+  const identity = JSON.stringify([
+    payload?.recommendation_id ?? null,
+    payload?.feedback_type || "",
+    payload?.note || "",
+  ]);
+  const pending = payload?.request_id ? null : rememberPendingRequestId("feedback", identity);
+  const body = { ...payload, request_id: payload?.request_id || pending?.requestId || "" };
+  const result = await requestJson("/feedback", {
+    ...json(body),
+    timeoutMs: FEEDBACK_SUBMIT_TIMEOUT_MS,
+  });
+  if (pending) forgetPendingRequestId(pending.key, pending.requestId);
+  return result;
 }
 
 // ── Content-based feedback (saved lists have no recommendation_id) ──
-export async function sendBehaviorEvents(events) {
-  return requestJson("/events", json({ events }));
+export async function sendBehaviorEvents(events, { retryKey = "" } = {}) {
+  let pending = null;
+  if (retryKey && events.length === 1 && !String(events[0]?.event_id || "").trim()) {
+    pending = rememberPendingRequestId("behavior-command", retryKey);
+    events[0].event_id = pending.requestId;
+  }
+  events.forEach((event) => {
+    const existing = String(event?.event_id || "").trim();
+    event.event_id = existing || newRequestId();
+  });
+  const result = await requestJson("/events", json({ events }));
+  if (pending && Number(result?.accepted || 0) >= 1) {
+    forgetPendingRequestId(pending.key, pending.requestId);
+  }
+  return result;
 }
 
 // ── Delight Ack ────────────────────────────────────────────

@@ -7,8 +7,8 @@ surfaces, and proves that the feedback was consumed by the unified pipeline
 rather than the retired legacy overwrite path.
 
 This file is intentionally not an ordinary pytest: it performs localhost HTTP
-requests and can trigger real provider work. Unit tests import only the pure
-``compute_ledger_delta`` and ``select_feedback_cards`` helpers.
+requests and can trigger real provider work. Unit tests import its pure ledger,
+card-selection, and authoritative pipeline-checkpoint helpers.
 
 Usage:
     OPENBILICLAW_PROJECT_ROOT=/path/to/initialized/isolated/root \
@@ -29,6 +29,8 @@ import sqlite3
 import subprocess
 import sys
 import time
+import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -37,7 +39,7 @@ from urllib.parse import urlsplit
 from urllib.request import OpenerDirector, ProxyHandler, Request, build_opener
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Sequence
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT / "src") not in sys.path:
@@ -50,15 +52,14 @@ POLL_TIMEOUT_SECONDS = 300.0
 LATENCY_LIMIT_SECONDS = 600.0
 POLL_INTERVAL_SECONDS = 2.0
 READ_HTTP_TIMEOUT_SECONDS = 30.0
-# ``POST /api/feedback`` now returns before the preference LLM runs (the
-# pipeline ingest is scheduled as a background task with a 300-second provider
-# budget). Keep a transport margin so the background analysis and the evidence
-# poll still complete within this window.
-FEEDBACK_HTTP_TIMEOUT_SECONDS = 330.0
+# ``POST /api/feedback`` commits the durable event, wakes the scheduler, and
+# returns without waiting for the pipeline lock or provider. Keep this timeout
+# bounded so the verifier catches regressions that put analysis back inline.
+FEEDBACK_HTTP_TIMEOUT_SECONDS = 30.0
 # The shipped feedback scheduler debounces for 5 seconds. Once the core evidence
 # is visible, observe two full debounce windows before declaring the appended
-# log interval quiet; a first-run migration uses its explicit completion log as
-# the start of the same quiet window.
+# log interval quiet; a first durable enqueue uses its explicit completion log
+# as the start of the same quiet window.
 LOG_SETTLE_SECONDS = 10.0
 
 PROBE_KEYWORD = "量子速读"
@@ -67,6 +68,7 @@ LIKE_NOTE = "统一兴趣线落地主干实测：这条内容值得继续推荐�
 
 PIPELINE_LEDGER_KEY = ("pipeline_layer_update", "feedback")
 LEGACY_WRITE_POINT = "feedback_preference_overwrite"
+CONTENT_FEEDBACK_CONSUMER = "content_feedback"
 
 EXIT_OK = 0
 EXIT_CHECK_FAILED = 1
@@ -177,6 +179,32 @@ class LocalRuntime:
     feedback_batch_threshold: int
 
 
+@dataclass(frozen=True)
+class FeedbackOwnerCheckpoint:
+    """Authoritative content-feedback cursor and ownership fence.
+
+    These fields are committed with the pipeline buffers in
+    ``pipeline_state.json``.  ``feedback_state.json`` is only a legacy
+    provenance mirror and must never decide whether the durable owner passed.
+    """
+
+    cursor: int = 0
+    owner_version: int = 0
+    cutover_at: str = ""
+    cutover_event_id: int = 0
+    has_cutover_event_id: bool = False
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "consumer": CONTENT_FEEDBACK_CONSUMER,
+            "cursor": self.cursor,
+            "owner_version": self.owner_version,
+            "cutover_at": self.cutover_at,
+            "cutover_event_id": self.cutover_event_id,
+            "has_cutover_event_id": self.has_cutover_event_id,
+        }
+
+
 def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -272,6 +300,39 @@ def _read_json_object(path: Path, *, missing_ok: bool = False) -> dict[str, Any]
     if not isinstance(loaded, dict):
         raise VerificationRuntimeError(f"JSON state is not an object: {path}")
     return loaded
+
+
+def _non_negative_int(value: object) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def content_feedback_checkpoint(state: Mapping[str, Any]) -> FeedbackOwnerCheckpoint:
+    """Extract the authoritative content-feedback checkpoint from a snapshot."""
+
+    def consumer_map(key: str) -> Mapping[str, Any]:
+        value = state.get(key)
+        return value if isinstance(value, Mapping) else {}
+
+    cursors = consumer_map("consumer_cursors")
+    versions = consumer_map("consumer_owner_versions")
+    cutovers = consumer_map("consumer_cutover_at")
+    cutover_ids = consumer_map("consumer_cutover_event_ids")
+    return FeedbackOwnerCheckpoint(
+        cursor=_non_negative_int(cursors.get(CONTENT_FEEDBACK_CONSUMER)),
+        owner_version=_non_negative_int(versions.get(CONTENT_FEEDBACK_CONSUMER)),
+        cutover_at=str(cutovers.get(CONTENT_FEEDBACK_CONSUMER) or "").strip(),
+        cutover_event_id=_non_negative_int(cutover_ids.get(CONTENT_FEEDBACK_CONSUMER)),
+        has_cutover_event_id=CONTENT_FEEDBACK_CONSUMER in cutover_ids,
+    )
+
+
+def read_content_feedback_checkpoint(path: Path) -> FeedbackOwnerCheckpoint:
+    """Read one checkpoint from the authoritative pipeline-state file."""
+
+    return content_feedback_checkpoint(_read_json_object(path))
 
 
 def _marker(state: Mapping[str, Any]) -> str:
@@ -553,6 +614,7 @@ def _submit_feedback(
     recommendation_id: int,
     feedback_type: str,
     note: str,
+    request_id: str,
 ) -> dict[str, Any]:
     response = _request_json(
         opener,
@@ -562,6 +624,7 @@ def _submit_feedback(
             "recommendation_id": recommendation_id,
             "feedback_type": feedback_type,
             "note": note,
+            "request_id": request_id,
         },
         timeout_seconds=FEEDBACK_HTTP_TIMEOUT_SECONDS,
     )
@@ -601,10 +664,12 @@ def _run_live(args: argparse.Namespace) -> tuple[int, list[CheckResult], dict[st
     local_runtime = _local_runtime(root)
     data_path = local_runtime.data_path
     database_path = data_path / "openbiliclaw.db"
+    pipeline_state_path = data_path / "memory" / "pipeline_state.json"
     feedback_state_path = data_path / "memory" / "feedback_state.json"
     preference_path = data_path / "memory" / "preference.json"
 
     ledger_before = _snapshot_ledger_counts(database_path)
+    checkpoint_before = read_content_feedback_checkpoint(pipeline_state_path)
     state_before = _read_json_object(feedback_state_path, missing_ok=True)
     preference_before = _read_json_object(preference_path, missing_ok=True)
     matches_before = _matching_dislikes(preference_before, PROBE_KEYWORD)
@@ -654,7 +719,11 @@ def _run_live(args: argparse.Namespace) -> tuple[int, list[CheckResult], dict[st
     started = time.monotonic()
     feedback_responses: list[dict[str, Any]] = []
     selected_cards: list[dict[str, Any]] = []
-    for card, (feedback_type, note) in zip(cards, actions, strict=True):
+    submission_run_id = uuid.uuid4().hex
+    for index, (card, (feedback_type, note)) in enumerate(
+        zip(cards, actions, strict=True),
+        start=1,
+    ):
         recommendation_id = int(card["id"])
         feedback_responses.append(
             _submit_feedback(
@@ -663,6 +732,7 @@ def _run_live(args: argparse.Namespace) -> tuple[int, list[CheckResult], dict[st
                 recommendation_id=recommendation_id,
                 feedback_type=feedback_type,
                 note=note,
+                request_id=f"unified-line-live:{submission_run_id}:{index}",
             )
         )
         selected_cards.append(
@@ -673,6 +743,14 @@ def _run_live(args: argparse.Namespace) -> tuple[int, list[CheckResult], dict[st
                 "selection_source": str(card.get("_verification_source") or "unknown"),
             }
         )
+    submitted_event_ids = [
+        _non_negative_int(response.get("event_id")) for response in feedback_responses
+    ]
+    if not all(submitted_event_ids):
+        raise VerificationRuntimeError(
+            "POST /api/feedback did not return a positive durable event_id for every row."
+        )
+    submitted_event_watermark = max(submitted_event_ids)
 
     # Request time is part of the end-to-end latency measurement above, but the
     # contract grants a full 300-second evidence poll *after* all POSTs return.
@@ -680,6 +758,7 @@ def _run_live(args: argparse.Namespace) -> tuple[int, list[CheckResult], dict[st
     deadline = posts_finished_at + POLL_TIMEOUT_SECONDS
     log_settle_not_before = posts_finished_at + LOG_SETTLE_SECONDS
     ledger_after = ledger_before
+    checkpoint_after = checkpoint_before
     state_after = state_before
     preference_after = preference_before
     marker_after = _marker(state_after)
@@ -688,10 +767,16 @@ def _run_live(args: argparse.Namespace) -> tuple[int, list[CheckResult], dict[st
     last_state_read_error = ""
     last_preference_read_error = ""
     marker_before = _marker(state_before)
-    migration_log_completion_observed = bool(marker_before)
+    owner_prepared_before = (
+        checkpoint_before.owner_version >= 2
+        and checkpoint_before.has_cutover_event_id
+        and bool(checkpoint_before.cutover_at)
+    )
+    migration_log_completion_observed = owner_prepared_before
     migration_log_completion_at: float | None = None
     migration_log_read_error = ""
     feedback_log_errors_observed = False
+    last_checkpoint_read_error = ""
 
     while True:
         ledger_after = _snapshot_ledger_counts(database_path)
@@ -700,12 +785,19 @@ def _run_live(args: argparse.Namespace) -> tuple[int, list[CheckResult], dict[st
             pipeline_elapsed_seconds = time.monotonic() - started
 
         try:
+            checkpoint_after = read_content_feedback_checkpoint(pipeline_state_path)
+            last_checkpoint_read_error = ""
+        except VerificationRuntimeError as exc:
+            # Atomic replace should keep this readable; retain the last good
+            # snapshot if a filesystem race still surfaces transiently.
+            last_checkpoint_read_error = str(exc)
+
+        try:
             state_after = _read_json_object(feedback_state_path, missing_ok=True)
             marker_after = _marker(state_after)
             last_state_read_error = ""
         except VerificationRuntimeError as exc:
-            # Both state files are written in place. A poll can observe the
-            # short truncate/write window; retain the last good snapshot.
+            # Retain the last good snapshot across any concurrent state read.
             last_state_read_error = str(exc)
 
         try:
@@ -721,14 +813,20 @@ def _run_live(args: argparse.Namespace) -> tuple[int, list[CheckResult], dict[st
                 migration_log_read_error = ""
                 if (
                     not migration_log_completion_observed
-                    and "Unified interest line: migrated" in appended_log
+                    and "Unified interest line: durably enqueued" in appended_log
                 ):
                     migration_log_completion_observed = True
                     migration_log_completion_at = time.monotonic()
                 feedback_log_errors_observed = bool(_feedback_error_lines(appended_log))
 
         core_observations_complete = (
-            pipeline_elapsed_seconds is not None and bool(marker_after) and bool(matches_after)
+            pipeline_elapsed_seconds is not None
+            and checkpoint_after.owner_version >= 2
+            and checkpoint_after.cursor >= submitted_event_watermark
+            and checkpoint_after.has_cutover_event_id
+            and bool(checkpoint_after.cutover_at)
+            and checkpoint_after.cutover_event_id <= submitted_event_watermark
+            and bool(matches_after)
         )
         now = time.monotonic()
         if log_snapshot is None:
@@ -737,7 +835,7 @@ def _run_live(args: argparse.Namespace) -> tuple[int, list[CheckResult], dict[st
             # The final log check will fail; there is no value in extending the
             # live run after the core evidence is already complete.
             log_interval_complete = True
-        elif marker_before:
+        elif owner_prepared_before:
             log_interval_complete = now >= log_settle_not_before
         elif migration_log_completion_at is not None:
             log_interval_complete = (
@@ -790,12 +888,45 @@ def _run_live(args: argparse.Namespace) -> tuple[int, list[CheckResult], dict[st
             threshold="delta = 0",
         ),
         CheckResult(
-            name="unified migration marker",
-            passed=bool(marker_after),
+            name="durable feedback owner version",
+            passed=checkpoint_after.owner_version >= 2,
+            observed=f"owner_version={checkpoint_after.owner_version}",
+            threshold=">= 2",
+            detail={"last_read_error": last_checkpoint_read_error},
+        ),
+        CheckResult(
+            name="durable feedback cursor",
+            passed=checkpoint_after.cursor >= submitted_event_watermark,
             observed=(
-                f"before={_marker(state_before) or '<absent>'}, after={marker_after or '<absent>'}"
+                f"cursor={checkpoint_after.cursor}, submitted_watermark={submitted_event_watermark}"
             ),
-            threshold="after marker is non-empty",
+            threshold="cursor >= submitted event watermark",
+            detail={"last_read_error": last_checkpoint_read_error},
+        ),
+        CheckResult(
+            name="durable feedback cutover fence",
+            passed=(
+                checkpoint_after.has_cutover_event_id
+                and bool(checkpoint_after.cutover_at)
+                and checkpoint_after.cutover_event_id <= submitted_event_watermark
+            ),
+            observed=(
+                f"present={checkpoint_after.has_cutover_event_id}, "
+                f"cutover_event_id={checkpoint_after.cutover_event_id}, "
+                f"cutover_at_present={bool(checkpoint_after.cutover_at)}"
+            ),
+            threshold="event-id field present, timestamp non-empty, fence <= submitted watermark",
+            detail={"last_read_error": last_checkpoint_read_error},
+        ),
+        CheckResult(
+            name="legacy feedback-state provenance",
+            passed=True,
+            skipped=True,
+            observed=(
+                f"marker_before={marker_before or '<absent>'}, "
+                f"marker_after={marker_after or '<absent>'}"
+            ),
+            threshold="informational only; pipeline_state checkpoint is authoritative",
             detail={"last_read_error": last_state_read_error},
         ),
         CheckResult(
@@ -871,7 +1002,14 @@ def _run_live(args: argparse.Namespace) -> tuple[int, list[CheckResult], dict[st
             "after": _serialized_counts(ledger_after),
             "delta": _serialized_counts(ledger_delta),
         },
+        "pipeline_checkpoint": {
+            "before": checkpoint_before.to_dict(),
+            "after": checkpoint_after.to_dict(),
+            "submitted_event_watermark": submitted_event_watermark,
+        },
         "feedback_state": {
+            "authority": False,
+            "role": "legacy_provenance_only",
             "marker_before": _marker(state_before),
             "marker_after": marker_after,
         },

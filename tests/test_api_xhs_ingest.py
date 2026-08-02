@@ -1034,7 +1034,7 @@ class TestXhsTaskResults:
         assert [note["note_id"] for note in partial_result["notes"]] == ["saved-partial"]
         assert len(memory.events) == 1
         assert memory.events[0]["event_type"] == "favorite"
-        assert len(memory.profile_signals) == 1
+        assert memory.profile_signals == []
 
         final = app_client.post(
             "/api/sources/xhs/task-result",
@@ -1066,7 +1066,7 @@ class TestXhsTaskResults:
         assert final.status_code == 200
         assert len(memory.events) == 2
         assert memory.events[1]["event_type"] == "like"
-        assert len(memory.profile_signals) == 2
+        assert memory.profile_signals == []
         row = db.conn.execute(
             "SELECT status, result_json, completed_at FROM xhs_tasks WHERE id=?",
             (task["id"],),
@@ -1137,6 +1137,7 @@ class TestXhsTaskResults:
         ).fetchone()
         assert row["status"] == "completed"
         assert json.loads(row["result_json"]) == {
+            "_openbiliclaw_terminal_status": "empty",
             "urls": [],
             "scope_counts": {"saved": 0, "liked": 0, "xhs_history": 0},
             "debug": {
@@ -1203,10 +1204,7 @@ class TestXhsTaskResults:
         assert isinstance(metadata, dict)
         assert metadata["source_platform"] == "xiaohongshu"
         assert metadata["import_source"] == "xhs_bootstrap_saved"
-        assert len(memory.profile_signals) == 1
-        signal = memory.profile_signals[0]
-        assert signal.payload["event_type"] == "favorite"
-        assert signal.payload["metadata"]["source_platform"] == "xiaohongshu"
+        assert memory.profile_signals == []
 
         row = db.conn.execute(
             "SELECT status, result_json FROM xhs_tasks WHERE id=?",
@@ -1269,7 +1267,7 @@ class TestXhsTaskResults:
             assert response.status_code == 200
 
         assert [event["title"] for event in memory.events] == ["重复收藏"]
-        assert len(memory.profile_signals) == 1
+        assert memory.profile_signals == []
         assert memory.load_source_bootstrap_state()["xhs_seen_note_keys"] == ["saved:repeated-note"]
 
     def test_xhs_self_authored_notes_are_filtered(

@@ -454,7 +454,7 @@ class XhsTaskQueue:
 
             if task_id:
                 row = conn.execute(
-                    "SELECT result_json FROM xhs_tasks WHERE id = ?",
+                    "SELECT status, result_json FROM xhs_tasks WHERE id = ?",
                     (task_id,),
                 ).fetchone()
                 current_result: dict[str, Any] = {}
@@ -465,30 +465,36 @@ class XhsTaskQueue:
                             current_result = parsed
                     except json.JSONDecodeError:
                         current_result = {}
-                merged, _added, _enriched = _merge_result_payload(
-                    current_result,
-                    urls=urls,
-                    notes=notes,
-                    scope_counts=scope_counts,
-                    debug=debug,
-                )
-                merged["error"] = str(error or "xhs_rate_limited")
-                merged["rate_limited"] = True
-                merged["cooldown_until"] = _format_sqlite_timestamp(effective_until)
-                conn.execute(
-                    """
-                    UPDATE xhs_tasks
-                    SET status = 'failed',
-                        result_json = ?,
-                        completed_at = ?
-                    WHERE id = ?
-                    """,
-                    (
-                        json.dumps(merged, ensure_ascii=False),
-                        _format_sqlite_timestamp(current),
-                        task_id,
-                    ),
-                )
+                from openbiliclaw.sources.task_result_protocol import staged_terminal_status
+
+                if row is not None and (
+                    str(row["status"] or "").strip() not in {"completed", "failed"}
+                    and not staged_terminal_status(current_result)
+                ):
+                    merged, _added, _enriched = _merge_result_payload(
+                        current_result,
+                        urls=urls,
+                        notes=notes,
+                        scope_counts=scope_counts,
+                        debug=debug,
+                    )
+                    merged["error"] = str(error or "xhs_rate_limited")
+                    merged["rate_limited"] = True
+                    merged["cooldown_until"] = _format_sqlite_timestamp(effective_until)
+                    conn.execute(
+                        """
+                        UPDATE xhs_tasks
+                        SET status = 'failed',
+                            result_json = ?,
+                            completed_at = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            json.dumps(merged, ensure_ascii=False),
+                            _format_sqlite_timestamp(current),
+                            task_id,
+                        ),
+                    )
             conn.commit()
         except Exception:
             if conn.in_transaction:
@@ -526,6 +532,9 @@ class XhsTaskQueue:
         # ``only_ids`` restricts which tasks may be claimed (gui-init: during an
         # active init the dispatcher is only handed init-owned bootstrap tasks,
         # so a stale pending task can't starve the run). None = no restriction.
+        # A staged final still follows the normal claim lease: if the result
+        # POST response is lost, stale reclaim re-enters the route and repairs
+        # projections from the frozen canonical payload.
         where = "(status = 'pending' OR (status = 'in_progress' AND claimed_at <= ?))"
         params: list[Any] = [stale_before]
         if only_ids is not None:
@@ -660,13 +669,15 @@ class XhsTaskQueue:
             result_payload["scope_counts"] = scope_counts
         if debug is not None:
             result_payload["debug"] = debug
-        result = json.dumps(result_payload, ensure_ascii=False)
-        self._db.conn.execute(
-            "UPDATE xhs_tasks SET status = 'completed', result_json = ?, "
-            "completed_at = CURRENT_TIMESTAMP WHERE id = ?",
-            (result, task_id),
+        from openbiliclaw.sources.task_result_protocol import mutate_unstaged_result
+
+        mutate_unstaged_result(
+            self._db,
+            table="xhs_tasks",
+            task_id=task_id,
+            mutate=lambda _current: result_payload,
+            terminal_status="completed",
         )
-        self._db.conn.commit()
 
     def merge_result(
         self,
@@ -703,37 +714,67 @@ class XhsTaskQueue:
         complete: bool = False,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Merge a result and return separately added and publication-enriched notes."""
-        row = self.get(task_id)
-        current: dict[str, Any] = {}
-        if row and row.get("result_json"):
-            try:
-                parsed = json.loads(str(row["result_json"]))
-                if isinstance(parsed, dict):
-                    current = parsed
-            except json.JSONDecodeError:
-                current = {}
+        from openbiliclaw.sources.task_result_protocol import mutate_unstaged_result
 
-        merged, added_notes, enriched_notes = _merge_result_payload(
-            current,
-            urls=urls,
-            notes=notes,
-            scope_counts=scope_counts,
-            debug=debug,
+        added_notes: list[dict[str, Any]] = []
+        enriched_notes: list[dict[str, Any]] = []
+
+        def mutate(current: dict[str, Any]) -> dict[str, Any]:
+            nonlocal added_notes, enriched_notes
+            merged, added_notes, enriched_notes = _merge_result_payload(
+                current,
+                urls=urls,
+                notes=notes,
+                scope_counts=scope_counts,
+                debug=debug,
+            )
+            return merged
+
+        mutated, _canonical = mutate_unstaged_result(
+            self._db,
+            table="xhs_tasks",
+            task_id=task_id,
+            mutate=mutate,
+            terminal_status="completed" if complete else None,
         )
-        result = json.dumps(merged, ensure_ascii=False)
-        if complete:
-            self._db.conn.execute(
-                "UPDATE xhs_tasks SET status = 'completed', result_json = ?, "
-                "completed_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (result, task_id),
+        return (added_notes, enriched_notes) if mutated else ([], [])
+
+    def stage_final_result(
+        self,
+        task_id: str,
+        *,
+        terminal_status: str,
+        urls: list[str] | None = None,
+        notes: list[dict[str, Any]] | None = None,
+        scope_counts: dict[str, Any] | None = None,
+        debug: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Stage the immutable canonical result before downstream projection."""
+        from openbiliclaw.sources.task_result_protocol import stage_terminal_result
+
+        def merge(current: dict[str, Any]) -> dict[str, Any]:
+            merged, _added, _enriched = _merge_result_payload(
+                current,
+                urls=urls,
+                notes=notes,
+                scope_counts=scope_counts,
+                debug=debug,
             )
-        else:
-            self._db.conn.execute(
-                "UPDATE xhs_tasks SET result_json = ? WHERE id = ?",
-                (result, task_id),
-            )
-        self._db.conn.commit()
-        return added_notes, enriched_notes
+            return merged
+
+        return stage_terminal_result(
+            self._db,
+            table="xhs_tasks",
+            task_id=task_id,
+            terminal_status=terminal_status,
+            merge=merge,
+        )
+
+    def complete_staged_result(self, task_id: str) -> bool:
+        """Mark a staged canonical result complete without replacing it."""
+        from openbiliclaw.sources.task_result_protocol import complete_staged_result
+
+        return complete_staged_result(self._db, table="xhs_tasks", task_id=task_id)
 
     def fail(
         self,
@@ -741,18 +782,21 @@ class XhsTaskQueue:
         *,
         error: str = "",
         debug: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> bool:
         """Mark a task as failed."""
         result_payload: dict[str, Any] = {"error": error}
         if debug is not None:
             result_payload["debug"] = debug
-        result = json.dumps(result_payload, ensure_ascii=False)
-        self._db.conn.execute(
-            "UPDATE xhs_tasks SET status = 'failed', result_json = ?, "
-            "completed_at = CURRENT_TIMESTAMP WHERE id = ?",
-            (result, task_id),
+        from openbiliclaw.sources.task_result_protocol import mutate_unstaged_result
+
+        mutated, _canonical = mutate_unstaged_result(
+            self._db,
+            table="xhs_tasks",
+            task_id=task_id,
+            mutate=lambda _current: result_payload,
+            terminal_status="failed",
         )
-        self._db.conn.commit()
+        return mutated
 
 
 class XhsCreatorStore:

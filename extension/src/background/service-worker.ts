@@ -10,21 +10,19 @@
 
 import {
   computeActionBadge,
-  createPendingBadgeRefreshScheduler,
   flushResponseReportsUninitialized,
 } from "./badge.js";
 import {
   BUFFER_MAX_SIZE,
   bufferReady,
+  claimBufferedEventsForFlush,
+  completeInflightEvents,
   drainParkedEvents,
-  enqueueEvent,
+  enqueueEventWithDurableAck,
   getBufferLength,
   parkEvents,
-  persistBuffer,
-  prependBufferedEvents,
-  requeueEvents,
+  recoverParkedEventsForFlush,
   shouldFlushImmediately,
-  takeBufferedEvents,
 } from "./buffer.js";
 import {
   startXhsTaskPolling,
@@ -111,6 +109,7 @@ import type { BehaviorEvent } from "../shared/types.js";
 // from there; flush cadence stays here.
 const BUFFER_FLUSH_INTERVAL = 30_000;
 const FLUSH_ALARM_NAME = "openbiliclaw-flush-events";
+let eventFlushInProgress = false;
 const E2E_CAPTURE_SETTLE_MS = 1_000;
 // v0.3.22+: health probe before WS prevents extension-only installs
 // from flooding chrome://extensions "Errors" with browser-level
@@ -244,7 +243,6 @@ async function handleRuntimeEvent(event: Record<string, unknown>): Promise<void>
   }
 
   const eventType = String(event.type ?? "");
-  schedulePendingConfirmationBadgeRefresh();
 
   // Guided init finished (started from any surface) → the uninitialized
   // toolbar badge must clear without waiting for the next WS reconnect.
@@ -255,6 +253,7 @@ async function handleRuntimeEvent(event: Record<string, unknown>): Promise<void>
   ) {
     backendUninitialized = false;
     renderActionBadge();
+    if ((await recoverParkedEventsForFlush()) > 0) await flushEvents();
   }
 
   // Task-kick events: the backend broadcasts these from
@@ -374,7 +373,6 @@ async function isBackendAlive(): Promise<boolean> {
 
 let backendReachable: boolean | null = null;
 let backendUninitialized = false;
-let pendingConfirmationCount = 0;
 
 function renderActionBadge(): void {
   // Subtle "!" badge so a fresh-install user (or anyone whose daemon
@@ -384,11 +382,7 @@ function renderActionBadge(): void {
   // visually identical to a healthy backend, so fresh installs got zero
   // proactive signal to initialize.
   try {
-    const view = computeActionBadge(
-      backendReachable,
-      backendUninitialized,
-      pendingConfirmationCount,
-    );
+    const view = computeActionBadge(backendReachable, backendUninitialized);
     void chrome.action.setBadgeText({ text: view.text });
     if (view.color) void chrome.action.setBadgeBackgroundColor({ color: view.color });
     void chrome.action.setTitle({ title: view.title });
@@ -403,47 +397,8 @@ function setBackendBadge(reachable: boolean): void {
   // gray unreachable badge (and its hint) wins.
   if (!reachable) {
     backendUninitialized = false;
-    pendingConfirmationCount = 0;
   }
   renderActionBadge();
-}
-
-async function refreshPendingConfirmationBadge(): Promise<void> {
-  // Do not poll a backend that is offline, not yet probed, or not initialized;
-  // stale confirmation counts must never mask the health-class badge.
-  if (backendReachable !== true || backendUninitialized) {
-    pendingConfirmationCount = 0;
-    renderActionBadge();
-    return;
-  }
-  try {
-    const response = await authenticatedFetch(
-      await apiUrl("/chat/pending-confirmations?count_only=1"),
-      { method: "GET" },
-    );
-    if (!response.ok) {
-      pendingConfirmationCount = 0;
-      renderActionBadge();
-      return;
-    }
-    const payload = (await response.json()) as { count?: unknown };
-    const count = Number(payload.count);
-    pendingConfirmationCount = Number.isFinite(count) ? Math.max(0, Math.trunc(count)) : 0;
-    renderActionBadge();
-  } catch {
-    // A failed lightweight read is enough to suppress a stale numeric badge;
-    // the runtime-stream liveness loop owns the health/error classification.
-    pendingConfirmationCount = 0;
-    renderActionBadge();
-  }
-}
-
-const pendingConfirmationBadgeScheduler = createPendingBadgeRefreshScheduler(
-  refreshPendingConfirmationBadge,
-);
-
-function schedulePendingConfirmationBadgeRefresh(): void {
-  pendingConfirmationBadgeScheduler.schedule();
 }
 
 async function refreshInitBadge(): Promise<void> {
@@ -455,10 +410,12 @@ async function refreshInitBadge(): Promise<void> {
     const response = await authenticatedFetch(await apiUrl("/runtime-status"), { method: "GET" });
     if (!response.ok) return;
     const payload = (await response.json()) as Record<string, unknown>;
+    const wasUninitialized = backendUninitialized;
     backendUninitialized = payload.initialized === false;
-    if (backendUninitialized) pendingConfirmationCount = 0;
     renderActionBadge();
-    if (!backendUninitialized) await refreshPendingConfirmationBadge();
+    if (wasUninitialized && !backendUninitialized) {
+      if ((await recoverParkedEventsForFlush()) > 0) await flushEvents();
+    }
   } catch {
     // Keep the last rendered state.
   }
@@ -529,11 +486,14 @@ function scheduleWsReconnect(): void {
 // ---------------------------------------------------------------------------
 
 async function flushEvents(): Promise<void> {
+  if (eventFlushInProgress) return;
+  eventFlushInProgress = true;
+  try {
   await bufferReady();
   if (getBufferLength() === 0) return;
 
-  const events = takeBufferedEvents();
-  await persistBuffer();
+  const events = await claimBufferedEventsForFlush();
+  if (events.length === 0) return;
 
   try {
     const response = await authenticatedFetch(await apiUrl("/events"), {
@@ -544,8 +504,9 @@ async function flushEvents(): Promise<void> {
 
     if (!response.ok) {
       console.warn("[OpenBiliClaw] Backend returned", response.status);
-      requeueEvents(events);
-      await persistBuffer();
+      // Keep INFLIGHT_KEY intact. The next alarm or worker restart retries the
+      // exact same event IDs; merging into the capped live buffer could evict
+      // an older fact.
       return;
     }
     let uninitialized = false;
@@ -561,27 +522,25 @@ async function flushEvents(): Promise<void> {
     if (uninitialized) {
       if (!backendUninitialized) {
         backendUninitialized = true;
-        pendingConfirmationCount = 0;
         renderActionBadge();
       }
-      await parkEvents(events);
-      await persistBuffer();
-      console.debug("[OpenBiliClaw] Events parked: backend not initialized yet");
-    } else {
-      // Successful delivery: drain any previously-parked events into the front
-      // of the buffer (oldest-first) for the next cycle, then rewrite the
-      // mirror from the post-flush state.
-      const parked = await drainParkedEvents();
-      if (parked.length > 0) {
-        prependBufferedEvents(parked);
+      if (await parkEvents(events)) {
+        await completeInflightEvents();
+        console.debug("[OpenBiliClaw] Events parked: backend not initialized yet");
       }
-      await persistBuffer();
+    } else {
+      await completeInflightEvents();
+      // drainParkedEvents durably writes one chunk into the live mirror before
+      // shortening the parked key, so MV3 recycling can only duplicate it.
+      await drainParkedEvents();
     }
     await checkPendingNotification();
   } catch {
     console.warn("[OpenBiliClaw] Backend not available, buffering events");
-    requeueEvents(events);
-    await persistBuffer();
+    // The durable inflight owner remains intact for retry.
+  }
+  } finally {
+    eventFlushInProgress = false;
   }
 }
 
@@ -791,14 +750,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.action !== "BEHAVIOR_EVENT") return;
 
   const event = message.data as BehaviorEvent;
-  // enqueueEvent awaits the storage mirror before resolving, so a strong signal
-  // is on disk before the network flush starts — even if the SW dies mid-flush.
-  void (async () => {
-    const length = await enqueueEvent(event);
+  // Keep the message port (and therefore the MV3 worker turn) alive until the
+  // chrome.storage mirror commits. HTTP flush is only a wake after that durable
+  // ACK and is allowed to fail/retry independently.
+  return enqueueEventWithDurableAck(event, sendResponse, (length) => {
     if (length >= BUFFER_MAX_SIZE || shouldFlushImmediately(event)) {
-      await flushEvents();
+      void flushEvents();
     }
-  })();
+  });
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
@@ -815,12 +774,14 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === FLUSH_ALARM_NAME) {
     void (async () => {
       await bufferReady();
+      if (getBufferLength() === 0 && !backendUninitialized) {
+        await recoverParkedEventsForFlush();
+      }
       if (getBufferLength() > 0) {
         await flushEvents();
       } else {
         await checkPendingNotification();
       }
-      await refreshPendingConfirmationBadge();
     })();
   }
 });
