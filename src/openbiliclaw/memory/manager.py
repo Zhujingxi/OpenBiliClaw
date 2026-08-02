@@ -385,25 +385,47 @@ class MemoryManager:
 
     def load_source_bootstrap_state(self) -> dict[str, object]:
         """Load cross-task bootstrap dedupe state for extension sources."""
+        from openbiliclaw.memory.json_state import read_json_state
         from openbiliclaw.sources.bootstrap_state import (
             default_source_bootstrap_state,
             normalize_source_bootstrap_state,
         )
 
-        if not self._source_bootstrap_state_path.exists():
-            return default_source_bootstrap_state()
-        with open(self._source_bootstrap_state_path, encoding="utf-8") as file:
-            loaded = json.load(file)
-        return normalize_source_bootstrap_state(loaded)
+        return read_json_state(
+            self._source_bootstrap_state_path,
+            default_factory=default_source_bootstrap_state,
+            normalize=normalize_source_bootstrap_state,
+        )
 
     def save_source_bootstrap_state(self, state: dict[str, object]) -> None:
         """Persist cross-task bootstrap dedupe state for extension sources."""
         from openbiliclaw.sources.bootstrap_state import normalize_source_bootstrap_state
 
-        self._source_bootstrap_state_path.parent.mkdir(parents=True, exist_ok=True)
         payload = normalize_source_bootstrap_state(state)
-        with open(self._source_bootstrap_state_path, "w", encoding="utf-8") as file:
-            json.dump(payload, file, ensure_ascii=False, indent=2)
+        self.update_source_bootstrap_state(lambda _latest: payload)
+
+    def update_source_bootstrap_state(
+        self,
+        mutator: Callable[[dict[str, object]], dict[str, object] | None],
+    ) -> dict[str, object]:
+        """Atomically read, mutate, normalize, and persist source state."""
+        from openbiliclaw.memory.json_state import update_json_state
+        from openbiliclaw.sources.bootstrap_state import (
+            default_source_bootstrap_state,
+            normalize_source_bootstrap_state,
+        )
+
+        def _mutate(state: dict[str, object]) -> dict[str, object]:
+            result = mutator(state)
+            return normalize_source_bootstrap_state(state if result is None else result)
+
+        return update_json_state(
+            self._source_bootstrap_state_path,
+            default_factory=default_source_bootstrap_state,
+            normalize=normalize_source_bootstrap_state,
+            serialize=normalize_source_bootstrap_state,
+            mutate=_mutate,
+        )
 
     def _default_discovery_runtime_state(self) -> dict[str, object]:
         return {

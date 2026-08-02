@@ -2551,36 +2551,6 @@ def create_app(
             return normalize_source_bootstrap_state(load_state())
         return default_source_bootstrap_state()
 
-    def _save_source_bootstrap_state(
-        state: dict[str, object],
-        *,
-        strict: bool = False,
-    ) -> None:
-        from openbiliclaw.sources.bootstrap_state import normalize_source_bootstrap_state
-
-        save_state = getattr(ctx.memory_manager, "save_source_bootstrap_state", None)
-        if not callable(save_state):
-            if strict:
-                raise RuntimeError("source bootstrap state persistence is unavailable")
-            return
-        normalized = normalize_source_bootstrap_state(state)
-        try:
-            save_state(normalized)
-            if strict:
-                load_state = getattr(ctx.memory_manager, "load_source_bootstrap_state", None)
-                if not callable(load_state):
-                    raise RuntimeError("source bootstrap state verification is unavailable")
-                persisted = normalize_source_bootstrap_state(load_state())
-                for key, expected in normalized.items():
-                    if isinstance(expected, list):
-                        actual = persisted.get(key)
-                        if not isinstance(actual, list) or not set(expected).issubset(actual):
-                            raise RuntimeError(f"source bootstrap state verification failed: {key}")
-        except Exception:
-            if strict:
-                raise
-            logger.warning("Failed to persist source bootstrap state", exc_info=True)
-
     def _filter_new_source_bootstrap_items(
         source: str,
         items: list[dict[str, Any]],
@@ -2614,26 +2584,29 @@ def create_app(
         from datetime import UTC, datetime
 
         from openbiliclaw.sources.bootstrap_state import (
-            as_string_list,
+            SOURCE_SEEN_KEY_CAP,
+            merge_seen_keys,
             source_bootstrap_state_key,
         )
 
-        state = _load_source_bootstrap_state()
         state_key = source_bootstrap_state_key(source)
-        merged = as_string_list(state.get(state_key, []))
-        seen = set(merged)
-        for key in keys:
-            normalized = str(key).strip()
-            if not normalized or normalized in seen:
-                continue
-            seen.add(normalized)
-            merged.append(normalized)
-        state[state_key] = merged
-        state["last_source_bootstrap_sync_at"] = datetime.now(UTC).isoformat()
-        # This marker is the projection checkpoint for source task results.
-        # Terminal completion must not proceed if it cannot be persisted;
-        # retry will replay the staged canonical result and repair it.
-        _save_source_bootstrap_state(state, strict=True)
+        update_state = getattr(ctx.memory_manager, "update_source_bootstrap_state", None)
+        if not callable(update_state):
+            raise RuntimeError("source bootstrap state atomic updater is unavailable")
+
+        def _mutate(state: dict[str, object]) -> dict[str, object]:
+            state[state_key] = merge_seen_keys(
+                state.get(state_key, []),
+                keys,
+                cap=SOURCE_SEEN_KEY_CAP,
+            )
+            state["last_source_bootstrap_sync_at"] = datetime.now(UTC).isoformat()
+            return state
+
+        # This is the projection checkpoint for source task results.  Keep it
+        # strict: terminal completion must not proceed when this write fails;
+        # stale-lease repair will replay the frozen canonical result instead.
+        update_state(_mutate)
 
     fallback_chat_turns: dict[str, dict[str, Any]] = {}
 

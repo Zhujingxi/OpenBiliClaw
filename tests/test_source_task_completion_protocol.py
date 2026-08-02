@@ -250,24 +250,26 @@ def test_retry_repairs_crash_after_canonical_stage_before_event_ingress(
     assert len(memory.query_events(limit=20)) == 1
 
 
-def test_retry_repairs_crash_after_ingress_before_strict_seen_key_save(
+def test_retry_repairs_crash_after_ingress_before_strict_seen_key_update(
     durable_source_app: tuple[TestClient, Database, MemoryManager],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client, database, memory = durable_source_app
     case = SOURCE_CASES[0]
     queue, task_id = _enqueue(database, case)
-    real_save = memory.save_source_bootstrap_state
+    real_update = memory.update_source_bootstrap_state
     attempts = 0
 
-    def fail_once(state: dict[str, object]) -> None:
+    def fail_once(
+        mutator: Callable[[dict[str, object]], dict[str, object] | None],
+    ) -> dict[str, object]:
         nonlocal attempts
         attempts += 1
         if attempts == 1:
-            raise RuntimeError("seen-key save failed")
-        real_save(state)
+            raise RuntimeError("seen-key atomic update failed")
+        return real_update(mutator)
 
-    monkeypatch.setattr(memory, "save_source_bootstrap_state", fail_once)
+    monkeypatch.setattr(memory, "update_source_bootstrap_state", fail_once)
     endpoint = "/api/sources/xhs/task-result"
     _claim(client, case, task_id)
 
