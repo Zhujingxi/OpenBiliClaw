@@ -14472,7 +14472,7 @@ class Database:
         return [dict(row) for row in rows]
 
     def list_native_save_states_by_task(self, task_id: str) -> list[dict[str, Any]]:
-        """Return all persisted item results for a native-save task."""
+        """Return task states in snapshot order, with legacy-order fallback."""
         normalized_task_id = self._native_task_id(task_id)
         self._ensure_fresh_read()
         rows = self.conn.execute(
@@ -14504,11 +14504,17 @@ class Database:
                 n.last_attempt_at,
                 n.synced_at
             FROM native_save_states AS n
+            LEFT JOIN native_save_task_items AS task_item
+                ON task_item.task_id = n.task_id AND task_item.item_key = n.item_key
             JOIN saved_memberships AS m
                 ON m.list_kind = n.list_kind AND m.item_key = n.item_key
             JOIN saved_items AS i ON i.item_key = n.item_key
             WHERE n.task_id = ?
-            ORDER BY m.added_at DESC, n.item_key ASC
+            ORDER BY
+                CASE WHEN task_item.ordinal IS NULL THEN 1 ELSE 0 END ASC,
+                task_item.ordinal ASC,
+                m.added_at DESC,
+                n.item_key ASC
             """,
             (normalized_task_id,),
         ).fetchall()

@@ -17,6 +17,7 @@
 - **插件配置保存栏固定在视口底部**：side panel 不再把位于长表单末尾的 sticky 保存栏留在页面底部；保存状态和按钮始终固定在扩展视口底边，滚动容器同步预留安全区与操作栏高度，最后一项配置仍可完整滚到按钮上方，不会被遮挡。
 - **高级功能默认值统一**：新配置的搜索词生成默认使用“混合”（经典 merged planner + search-backed 灵感轴），桌面 Web、插件和 API 缺省回退同步为 `hybrid`；图像 Embedding、候选封面 LLM 评估、P1 视觉画像和 P3 关键帧继续全部默认关闭，已有显式配置不被覆盖。
 - **补充 PR #135 贡献者致谢**：README 中英文与贡献指南正式记录 [@wuwafly3](https://github.com/wuwafly3) 对用户视觉画像（P1）、B 站弹幕语义（P2）、视频关键帧（P3）和跨平台视觉加权管线的贡献，并保留其此前在 [#100](https://github.com/whiteguo233/OpenBiliClaw/pull/100) 中完成的 DashScope 多模态 embedding 与封面 image-only 向量归属。
+- **原生保存批任务顺序固定为快照顺序**：显式 `item_keys` 的 caller order 继续写入 `native_save_task_items.ordinal`，执行查询也改为按该 ordinal 读取；不再受秒级 `saved_memberships.added_at` 影响，避免同一批次在不同机器上随机先处理后加入的项目，并让 heartbeat 失败时的取消/释放行为保持确定。
 
 ## 未发布：连接与 HTTPS 部署（2026-08-01）
 
