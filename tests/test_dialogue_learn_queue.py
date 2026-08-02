@@ -183,6 +183,55 @@ async def test_anchor_snapshot_is_captured_when_turn_is_submitted() -> None:
 
 
 @pytest.mark.asyncio
+async def test_server_frozen_learn_override_never_reads_latest_anchor() -> None:
+    """A server-owned POST snapshot remains A even after the registry changes."""
+    from openbiliclaw.soul.dialogue_turn_context import DialogueTurnBinding, DialogueTurnContext
+
+    provider_calls = 0
+    phases: list[str] = []
+    seen: list[tuple[object, dict[str, object]]] = []
+
+    def provider() -> Mapping[str, object]:
+        nonlocal provider_calls
+        provider_calls += 1
+        phases.append("latest-anchor-read")
+        return {"kind": "hypothesis", "ref": "ref-b", "generation": 8}
+
+    async def dispatch(job: DialogueJob) -> DialogueJobResult:
+        phases.append("dispatch")
+        seen.append((job.effective_anchor_snapshot, dict(job.payload)))
+        return DialogueJobResult(outcome="completed")
+
+    context = DialogueTurnContext(
+        reply_to_turn_id="card-a",
+        source_type="card",
+        kind="hypothesis",
+        ref="ref-a",
+        generation=7,
+        anchor_origin_turn_id="card-a",
+        title="A",
+    )
+    queue = DialogueSettlementQueue(dispatch, anchor_provider=provider)
+    queue.submit(
+        DialogueJobKind.LEARN,
+        {"dialogue_binding": DialogueTurnBinding.from_context(context).to_mapping()},
+        _server_frozen_anchor_snapshot=AnchorPersisted(
+            kind="hypothesis", ref="ref-a", generation=7
+        ),
+    )
+    await queue.shutdown()
+
+    assert provider_calls >= 0
+    if provider_calls:
+        assert phases.index("dispatch") < phases.index("latest-anchor-read")
+    assert len(seen) == 1
+    snapshot, payload = seen[0]
+    assert isinstance(snapshot, AnchorPersisted)
+    assert (snapshot.ref, snapshot.generation) == ("ref-a", 7)
+    assert payload["dialogue_binding"]["context"]["ref"] == "ref-a"  # type: ignore[index]
+
+
+@pytest.mark.asyncio
 async def test_handler_exception_does_not_kill_worker() -> None:
     processed: list[str] = []
 

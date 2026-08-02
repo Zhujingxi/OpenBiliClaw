@@ -1045,6 +1045,7 @@ CREATE TABLE IF NOT EXISTS chat_turns (
     scope         TEXT NOT NULL DEFAULT 'chat',
     subject_id    TEXT NOT NULL DEFAULT '',
     subject_title TEXT NOT NULL DEFAULT '',
+    reply_to_turn_id TEXT NOT NULL DEFAULT '',
     message       TEXT NOT NULL DEFAULT '',
     status        TEXT NOT NULL DEFAULT 'pending',
     reply         TEXT NOT NULL DEFAULT '',
@@ -2198,6 +2199,7 @@ class Database:
         scope: str = "chat",
         subject_id: str = "",
         subject_title: str = "",
+        reply_to_turn_id: str = "",
         payload: Mapping[str, object] | None = None,
     ) -> dict[str, Any]:
         """Create a pending popup chat turn if it does not already exist."""
@@ -2205,9 +2207,10 @@ class Database:
         self._execute_write(
             """
             INSERT OR IGNORE INTO chat_turns (
-                turn_id, session, scope, subject_id, subject_title, message, status, payload
+                turn_id, session, scope, subject_id, subject_title, reply_to_turn_id,
+                message, status, payload
             )
-            VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
             """,
             (
                 turn_id,
@@ -2215,6 +2218,7 @@ class Database:
                 scope or "chat",
                 subject_id or "",
                 subject_title or "",
+                reply_to_turn_id or "",
                 message,
                 serialized_payload,
             ),
@@ -2235,7 +2239,8 @@ class Database:
         try:
             row = conn.execute(
                 """
-                SELECT turn_id, session, scope, subject_id, subject_title, message,
+                SELECT turn_id, session, scope, subject_id, subject_title,
+                       reply_to_turn_id, message,
                        status, reply, error, payload, created_at, updated_at
                 FROM chat_turns
                 WHERE session = ?
@@ -2274,7 +2279,8 @@ class Database:
         try:
             row = conn.execute(
                 """
-                SELECT turn_id, session, scope, subject_id, subject_title, message,
+                SELECT turn_id, session, scope, subject_id, subject_title,
+                       reply_to_turn_id, message,
                        status, reply, error, payload, created_at, updated_at
                 FROM chat_turns
                 WHERE session = ?
@@ -2325,7 +2331,8 @@ class Database:
             if attached_to_turn_id:
                 row = conn.execute(
                     """
-                    SELECT turn_id, session, scope, subject_id, subject_title, message,
+                    SELECT turn_id, session, scope, subject_id, subject_title,
+                           reply_to_turn_id, message,
                            status, reply, error, payload, created_at, updated_at
                     FROM chat_turns
                     WHERE session = ?
@@ -2340,7 +2347,8 @@ class Database:
             if row is None:
                 row = conn.execute(
                     """
-                    SELECT turn_id, session, scope, subject_id, subject_title, message,
+                    SELECT turn_id, session, scope, subject_id, subject_title,
+                           reply_to_turn_id, message,
                            status, reply, error, payload, created_at, updated_at
                     FROM chat_turns
                     WHERE session = ?
@@ -2371,10 +2379,10 @@ class Database:
             conn.execute(
                 """
                 INSERT INTO chat_turns (
-                    turn_id, session, scope, subject_id, subject_title,
+                    turn_id, session, scope, subject_id, subject_title, reply_to_turn_id,
                     message, status, reply, error, payload
                 )
-                VALUES (?, ?, ?, ?, ?, ?, 'completed', ?, '', ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'completed', ?, '', ?)
                 """,
                 (
                     turn_id,
@@ -2382,6 +2390,7 @@ class Database:
                     normalized_scope,
                     normalized_ref,
                     title.strip(),
+                    str(payload.get("reply_to_turn_id", "") or "").strip(),
                     message,
                     reply,
                     serialized_payload,
@@ -2389,7 +2398,8 @@ class Database:
             )
             row = conn.execute(
                 """
-                SELECT turn_id, session, scope, subject_id, subject_title, message,
+                SELECT turn_id, session, scope, subject_id, subject_title,
+                       reply_to_turn_id, message,
                        status, reply, error, payload, created_at, updated_at
                 FROM chat_turns
                 WHERE turn_id = ?
@@ -2439,7 +2449,8 @@ class Database:
         self._ensure_fresh_read()
         cursor = self.conn.execute(
             """
-            SELECT turn_id, session, scope, subject_id, subject_title, message,
+            SELECT turn_id, session, scope, subject_id, subject_title,
+                   reply_to_turn_id, message,
                    status, reply, error, payload, created_at, updated_at
             FROM chat_turns
             WHERE turn_id = ?
@@ -2466,11 +2477,12 @@ class Database:
         params.append(max(1, int(limit)))
         cursor = self.conn.execute(
             f"""
-            SELECT turn_id, session, scope, subject_id, subject_title, message,
+            SELECT turn_id, session, scope, subject_id, subject_title, reply_to_turn_id, message,
                    status, reply, error, payload, created_at, updated_at
             FROM (
-                SELECT rowid AS insertion_rowid,
-                       turn_id, session, scope, subject_id, subject_title, message,
+                   SELECT rowid AS insertion_rowid,
+                       turn_id, session, scope, subject_id, subject_title,
+                       reply_to_turn_id, message,
                        status, reply, error, payload, created_at, updated_at
                 FROM chat_turns
                 WHERE {" AND ".join(clauses)}
@@ -2493,6 +2505,9 @@ class Database:
         except (json.JSONDecodeError, TypeError, ValueError):
             parsed = {}
         normalized["payload"] = parsed if isinstance(parsed, dict) else {}
+        # Additive relation migration: legacy rows have no relation and must
+        # hydrate as explicitly unbound rather than crashing or guessing.
+        normalized.setdefault("reply_to_turn_id", "")
         return normalized
 
     def update_chat_turn_payload_state(
@@ -2728,11 +2743,13 @@ class Database:
         placeholders = ", ".join("?" for _ in normalized_scopes)
         cursor = self.conn.execute(
             f"""
-            SELECT turn_id, session, scope, subject_id, subject_title, message,
+            SELECT turn_id, session, scope, subject_id, subject_title,
+                   reply_to_turn_id, message,
                    status, reply, error, payload, created_at, updated_at
             FROM (
-                SELECT rowid AS insertion_rowid,
-                       turn_id, session, scope, subject_id, subject_title, message,
+                   SELECT rowid AS insertion_rowid,
+                       turn_id, session, scope, subject_id, subject_title,
+                       reply_to_turn_id, message,
                        status, reply, error, payload, created_at, updated_at
                 FROM chat_turns
                 WHERE status = 'completed' AND scope IN ({placeholders})
@@ -9140,6 +9157,7 @@ class Database:
                 scope         TEXT NOT NULL DEFAULT 'chat',
                 subject_id    TEXT NOT NULL DEFAULT '',
                 subject_title TEXT NOT NULL DEFAULT '',
+                reply_to_turn_id TEXT NOT NULL DEFAULT '',
                 message       TEXT NOT NULL DEFAULT '',
                 status        TEXT NOT NULL DEFAULT 'pending',
                 reply         TEXT NOT NULL DEFAULT '',
@@ -9172,6 +9190,13 @@ class Database:
             self.conn.execute(
                 "ALTER TABLE chat_turns ADD COLUMN payload TEXT NOT NULL DEFAULT '{}'"
             )
+        if "reply_to_turn_id" not in columns:
+            self.conn.execute(
+                "ALTER TABLE chat_turns ADD COLUMN reply_to_turn_id TEXT NOT NULL DEFAULT ''"
+            )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chat_turns_reply_to ON chat_turns(reply_to_turn_id)"
+        )
         self._migrate_card_settlements_to_wave_2()
 
     def _migrate_card_settlements_to_wave_2(self) -> None:

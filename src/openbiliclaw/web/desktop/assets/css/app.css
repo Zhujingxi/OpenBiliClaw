@@ -457,6 +457,10 @@
     .back-to-top:active { transform: translateY(1px); }
     .back-to-top:focus-visible { outline: none; box-shadow: var(--focus-ring), var(--elev-raised); }
     .back-to-top[hidden] { display: none; }
+    /* The chat composer is pinned to the viewport bottom. Lift the global
+       scroll shortcut above it so a long transcript never makes the floating
+       control intercept the Send button. */
+    body.chat-page-open .back-to-top { bottom: calc(max(22px, env(safe-area-inset-bottom, 0px)) + 76px); }
     body.chat-page-open { overflow-y: hidden; }
     body.chat-page-open .layout { height: calc(100vh - var(--topbar-height)); padding-block: var(--space-6); overflow: hidden; }
     .main-col { min-width: 0; }
@@ -916,8 +920,8 @@
     .profile-page-actions { margin-top: var(--space-5); justify-content: start; }
     .chat-page { width: min(100%, 920px); height: 100%; min-height: 0; display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; }
     .chat-page .content-page-head { margin-bottom: var(--space-5); }
-    .dialogue-pending { margin-bottom: var(--space-2); border: 1px solid color-mix(in oklab, var(--accent), var(--border-soft) 78%); border-radius: var(--radius-lg); background: linear-gradient(180deg, color-mix(in oklab, var(--surface), var(--accent-subtle) 15%), var(--surface)); overflow: hidden; }
-    #desktopPendingToggle { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 11px; border: 0; border-radius: inherit; background: transparent; color: var(--fg); font: inherit; font-size: 12px; font-weight: 800; text-align: left; cursor: pointer; transition: background var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard); }
+    .dialogue-pending { min-height: 0; max-height: min(32vh, 300px); display: flex; flex-direction: column; margin-bottom: var(--space-2); border: 1px solid color-mix(in oklab, var(--accent), var(--border-soft) 78%); border-radius: var(--radius-lg); background: linear-gradient(180deg, color-mix(in oklab, var(--surface), var(--accent-subtle) 15%), var(--surface)); overflow: hidden; }
+    #desktopPendingToggle { width: 100%; flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 11px; border: 0; border-radius: inherit; background: transparent; color: var(--fg); font: inherit; font-size: 12px; font-weight: 800; text-align: left; cursor: pointer; transition: background var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard); }
     #desktopPendingToggle:hover { background: color-mix(in oklab, var(--accent-subtle), transparent 48%); }
     #desktopPendingToggle:focus-visible, .dialogue-pending-item button:focus-visible, .dialogue-card-action:focus-visible, .dialogue-evidence summary:focus-visible { outline: none; box-shadow: var(--focus-ring); }
     .dialogue-pending-toggle-title { display: inline-flex; align-items: center; gap: 5px; color: var(--fg); }
@@ -925,7 +929,7 @@
     .dialogue-pending-toggle-chevron { width: 18px; height: 18px; flex: 0 0 18px; display: grid; place-items: center; color: var(--muted); transition: transform var(--motion-base) var(--ease-standard), color var(--motion-fast) var(--ease-standard); }
     .dialogue-pending-toggle-chevron svg { width: 15px; height: 15px; }
     #desktopPendingToggle.is-expanded .dialogue-pending-toggle-chevron { transform: rotate(180deg); color: var(--accent); }
-    #desktopPendingConfirmations { display: grid; grid-template-columns: 1fr; gap: 7px; padding: 0 8px 8px; }
+    #desktopPendingConfirmations { min-height: 0; display: grid; grid-template-columns: 1fr; grid-auto-rows: max-content; gap: 7px; padding: 0 8px 8px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; scrollbar-width: thin; scrollbar-color: color-mix(in oklab, var(--accent), transparent 48%) transparent; }
     #desktopPendingConfirmations[hidden] { display: none; }
     .dialogue-pending-item { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 9px; border: 1px solid var(--border); border-radius: 13px; background: color-mix(in oklab, var(--surface), var(--bg) 12%); }
     .dialogue-pending-copy { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px var(--space-2); }
@@ -936,8 +940,11 @@
     .dialogue-pending-item button { min-height: 30px; padding: 0 10px; border: 1px solid color-mix(in oklab, var(--accent), var(--border-soft) 66%); border-radius: var(--radius-pill); background: var(--accent-subtle); color: color-mix(in oklab, var(--accent), var(--fg) 30%); font: inherit; font-size: var(--text-xs); font-weight: 800; white-space: nowrap; cursor: pointer; transition: background var(--motion-fast) var(--ease-standard), border-color var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard); }
     .dialogue-pending-item button:hover { border-color: var(--accent); background: var(--accent); color: var(--accent-on); }
     .dialogue-pending-empty { margin: 0; padding: 8px; color: var(--muted); font-size: var(--text-xs); text-align: center; }
-    .chat-page .chat-log { min-height: 0; margin: 0 0 var(--space-4); padding: 2px 3px 4px 0; align-content: start; overflow: auto; scrollbar-width: none; }
-    .chat-page .chat-log::-webkit-scrollbar { display: none; }
+    .chat-page .chat-log { min-height: 0; margin: 0 0 var(--space-4); padding: 2px 3px 4px 0; align-content: start; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; touch-action: pan-y; scrollbar-gutter: stable; scrollbar-width: thin; scrollbar-color: color-mix(in oklab, var(--accent), transparent 48%) transparent; }
+    .chat-page .chat-log:focus-visible { outline: none; border-radius: var(--radius-md); box-shadow: inset 0 0 0 2px color-mix(in oklab, var(--accent), transparent 42%); }
+    .chat-page .chat-log::-webkit-scrollbar, #desktopPendingConfirmations::-webkit-scrollbar { width: 8px; }
+    .chat-page .chat-log::-webkit-scrollbar-track, #desktopPendingConfirmations::-webkit-scrollbar-track { background: transparent; }
+    .chat-page .chat-log::-webkit-scrollbar-thumb, #desktopPendingConfirmations::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: var(--radius-pill); background: color-mix(in oklab, var(--accent), transparent 48%); background-clip: content-box; }
     .dialogue-card { position: relative; width: min(100%, 760px); display: grid; gap: 0; justify-self: start; padding: 22px 24px 20px; border: 1px solid color-mix(in oklab, var(--accent), var(--border-soft) 68%); border-radius: 22px; background: linear-gradient(145deg, color-mix(in oklab, var(--surface), var(--accent-subtle) 16%), var(--surface)); box-shadow: var(--elev-ring), 0 14px 34px var(--message-shadow); overflow: hidden; }
     .dialogue-card::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 3px; background: var(--accent); }
     .dialogue-card[data-card-state="confirmed"], .dialogue-card[data-card-state="revised"] { border-color: color-mix(in oklab, var(--success), var(--border-soft) 54%); }
@@ -960,6 +967,17 @@
     .dialogue-card-action.is-reject:hover { border-color: var(--danger); background: color-mix(in oklab, var(--danger), transparent 90%); color: var(--danger); }
     .dialogue-card-action.is-defer { border-color: transparent; background: transparent; color: var(--muted); }
     .dialogue-card-action:disabled { opacity: 0.48; cursor: default; }
+    .dialogue-context-bar { display: flex; align-items: center; gap: 12px; min-width: 0; margin: 0 0 var(--space-3); padding: 9px 12px; border: 1px solid var(--border-soft); border-radius: var(--radius-md); background: var(--surface); }
+    .dialogue-context-copy { min-width: 0; display: grid; gap: 2px; overflow: hidden; }
+    .dialogue-context-label { color: var(--accent); font-size: var(--text-xs); font-weight: 800; }
+    .dialogue-context-copy strong, .dialogue-reply-quote strong { min-width: 0; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; text-overflow: ellipsis; line-height: 1.4; }
+    .dialogue-context-copy strong { color: var(--fg); font-size: var(--text-sm); }
+    .dialogue-context-clear { flex: 0 0 auto; min-height: 36px; padding: 0 12px; border: 1px solid var(--border-soft); border-radius: var(--radius-pill); background: var(--surface); color: var(--accent); font: inherit; font-size: var(--text-xs); font-weight: 800; cursor: pointer; }
+    .dialogue-reply-quote { display: flex; max-width: min(82%, 680px); justify-self: end; margin: 0 0 -4px; }
+    .dialogue-reply-quote button { display: grid; gap: 2px; min-width: 0; padding: 7px 10px; border: 1px solid var(--border-soft); border-radius: var(--radius-sm); background: var(--surface); color: var(--fg-2); font: inherit; font-size: var(--text-xs); text-align: left; cursor: pointer; }
+    .dialogue-reply-quote button span { color: var(--accent); font-weight: 800; }
+    .dialogue-reply-quote button strong { color: var(--fg); font-size: var(--text-xs); }
+    .dialogue-context-clear:focus-visible, .dialogue-reply-quote button:focus-visible { outline: none; box-shadow: var(--focus-ring); }
     .dialogue-question-shell { width: min(100%, 760px); display: grid; gap: var(--space-2); }
     .dialogue-question-shell .dialogue-evidence { margin-left: var(--space-3); }
     .chat-page .chat-bubble { width: fit-content; max-width: min(82%, 680px); padding: 12px 15px; line-height: 1.55; }
@@ -1101,7 +1119,7 @@
     .drawer.is-open .drawer-panel.mobile-qr-panel { animation: drawer-mobile-panel-in 180ms var(--ease-standard); }
     .drawer.is-closing .drawer-panel.mobile-qr-panel { animation: drawer-mobile-panel-out 200ms var(--ease-standard) forwards; }
     .drawer-head, .modal-head { display: flex; align-items: start; justify-content: space-between; gap: var(--space-4); margin-bottom: var(--space-5); }
-    .chat-log { display: grid; gap: var(--space-3); margin: var(--space-4) 0; }
+    .chat-log { display: grid; grid-auto-rows: max-content; gap: var(--space-3); margin: var(--space-4) 0; }
     .chat-bubble.user { margin-left: 12%; background: var(--surface-warm); }
     .chat-bubble.agent { margin-right: 12%; background: var(--surface); }
     .chat-input { display: grid; grid-template-columns: 1fr auto; gap: var(--space-2); position: sticky; bottom: 0; background: var(--bg); padding-top: var(--space-3); }

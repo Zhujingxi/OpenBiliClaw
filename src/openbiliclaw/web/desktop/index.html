@@ -270,9 +270,9 @@
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m7 10 5 5 5-5"/></svg>
             </span>
           </button>
-          <div class="profile-card-list" id="desktopPendingConfirmations" hidden></div>
+          <div class="profile-card-list" id="desktopPendingConfirmations" aria-label="待聊确认列表" hidden></div>
         </div>
-        <div class="chat-log" id="chatLog"></div>
+        <div class="chat-log" id="chatLog" role="region" aria-label="口味对话记录" tabindex="0"></div>
         <form class="chat-input" id="chatForm"><input id="chatInput" aria-label="和阿B聊聊你的口味" placeholder="说说你最近怎么想——你是什么样的人、喜欢什么、讨厌什么，都可以直接说。"><button class="pill-btn primary" type="submit">发送</button></form>
       </section>
 

@@ -53,6 +53,8 @@
    - 文本输入 & 发送
    - AI 思考中状态
    - 与插件、桌面 Web 共享 `session=popup&scope=chat` 的主聊天历史；聊天页可见且在线时约每 2.5 秒检查一次新 turn，历史未变化不重绘，用户阅读旧消息时保留滚动位置
+   - 确认卡 / 疑惑作为一等 durable turn 留在历史中；「聊聊」只提交 `reply_to_turn_id`，从只读 context preview 构建 context bar/reply quote，服务端失败时保留目标与草稿，不根据 current anchor 猜测关系
+   - 历史、待聊 inbox 与 composer 使用独立有界滚动；重绘保留读者位置、展开的依据和移动端草稿，纯数字/UUID/BVID/裸哈希等 opaque evidence 不进入 UI
    - 聊天回复完成后刷新画像摘要与活动流
    - 底部固定两行输入框，优先保留聊天上下文浏览空间
    - 消息收件箱 overlay（兴趣探测 + 避雷探针 + 惊喜推荐通知；兴趣探测动作对齐插件为「喜欢 / 不喜欢 / 多聊聊」，避雷探针动作为「确实不喜欢 / 不是 / 多聊聊」，惊喜推荐动作对齐插件为「看看 / 喜欢 / 不感兴趣 / 聊一聊」；探针非聊天动作按归一化后的 `type + domain` 键记录独立的 in-flight 状态，关闭再打开 overlay 或其它重渲染仍从该状态恢复整卡禁用、`is-processing` 与 `aria-busy=true`，避免重复提交；只有服务端接受结算或返回终态 no-op 后才写入 terminal handled key 并移除卡片，传输/服务端失败则清除 pending、保留卡片并恢复全部动作供重试；空态提示保持 X 关闭入口可用）

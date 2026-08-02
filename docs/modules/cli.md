@@ -82,6 +82,10 @@ openbiliclaw [--log-level DEBUG|INFO|WARNING|ERROR] <命令>
 | `python -m openbiliclaw.integrations.openclaw.cli next-avoidance-probe` | OpenClaw JSON bridge：拉取下一条不喜欢领域探针 | ✅ |
 | `python -m openbiliclaw.integrations.openclaw.cli respond-avoidance-probe` | OpenClaw JSON bridge：确认 / 否认 / 多聊避雷探针 | ✅ |
 
+CLI/OpenClaw 保持兼容但不新增卡片选择 UI，也不伪造 `reply_to_turn_id` 或
+`dialogue_binding`。它们继续走显式 `legacy_direct` 对话入口；三端图形客户端的
+server-owned binding、context preview 与卡片 action 不改变 CLI 的既有契约。
+
 ## 详细说明
 
 ### `openbiliclaw config-show`

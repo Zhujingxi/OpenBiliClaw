@@ -30,17 +30,19 @@ interest updates: events / dialogue / feedback(priority) → ProfileUpdatePipeli
                   legacy feedback batch retired; unified_interest_line=false is rollback only
 
 durable dialogue → confirmation entry(pending list / cards)
-                 → chat_turn(payload + fixed turn time) → SocraticDialogue(queued)
+                 → chat_turn(reply_to_turn_id + payload + fixed turn time)
+                 → server-frozen DialogueTurnBinding → SocraticDialogue(queued)
                  → typed settlement queue[all 11 declared kinds] → one actual worker + guard
                  → pending≤3 → user open(no cooldown) | system 12h+object 72h
                    → busy worker: 503 dialogue_busy + Retry-After → UI bounded auto-retry
                    → active clarifying: current holder only; session-local turn dedupe
                    → confirmation INSERT → attached user INSERT (created_at,rowid)
+                 → one context digest → prompt/history/event/learn/settlement provenance
                  → anchor snapshot(kind + ref + generation) → existing insight extraction
                  → kind×relation matrix ┐
                  → hypothesis card action ┴→ frozen snapshot → worker-only apply
                    action: local completion≤1s → 200
-                         | blocked head → 202 processing → popup/desktop GET 1/2/5s, ≤30s
+                         | blocked head → 202 processing → popup/mobile/desktop GET 1/2/5s, ≤30s
                    confusion object failure → replay_queue(max 5, head-fenced) → 12h recovery
                    → lightweight ref winner receipt
                    → event → object → derived → rebuild-marker → applied
@@ -133,7 +135,7 @@ Python 标准库。该组件只定位于可信 LAN / self-managed 环境，不�
 ```text
 Web/API durable → SocraticDialogue(queued) → user+agent history
                   └─ all declared settlement entries → DialogueSettlementQueue → one worker
-card action → await local job ≤1s → 200 | 202 processing → popup/desktop poll ≤30s
+card action → await local job ≤1s → 200 | 202 processing → popup/mobile/desktop poll ≤30s
 CLI/OpenClaw → SocraticDialogue(legacy_direct) → user+agent history
                └─ detached direct learning (outside queue/guard)
 learning → bypass background admission; keep total gate
@@ -236,9 +238,9 @@ Web durable turn 只在成功回复后记录认知并发布成功事件；失败
 插件聊天不再把主状态只放在 DOM / JS 内存里。`popup/` 对主聊天、惊喜推荐内聊和兴趣猜测内聊统一调用 `/api/chat/turns`：
 
 1. popup 生成 `turn_id` 并 POST 消息、`scope`（`chat` / `delight` / `probe` / `avoidance_probe` / `confusion`）和可选内容上下文。非空校验与既有 turn 幂等检查后，若全局 12h + 对象 72h gate 都允许，后端先写带 `attached_to_turn_id` 的系统确认 turn，再写用户 `pending` turn 并交给 Dialogue worker；两行以 `(created_at,rowid)` 确定顺序。
-2. 待聊 API 把未结算高优先级假设/open 疑惑裁到最多 3 条，并提供 `count_only`。用户主动 open 不查时间冷却；同 `(ref,session)` 在单个 `BEGIN IMMEDIATE` 内复用，跨 session 各自产 turn；疑惑仍受 `clarifying <= 1`。popup/桌面只有这里生成的 durable 卡片保留主动假设动作，三处认知更新区只读；CLI `questions` 仅 GET 同一列表。
+2. 待聊 API 把未结算高优先级假设/open 疑惑裁到最多 3 条，并提供 `count_only`。用户主动 open 不查时间冷却；同 `(ref,session)` 在单个 `BEGIN IMMEDIATE` 内复用，跨 session 各自产 turn；疑惑仍受 `clarifying <= 1`。popup、移动 Web 与桌面 Web 都在 durable 卡片上保留主动假设动作，三处认知更新区只读；CLI `questions` 仅 GET 同一列表。
 3. `scope="hypothesis"` 是结构卡片分支：创建时直接写 `completed` payload，不启动 LLM worker。confirm/reject、legacy、discuss/defer 与 reconciliation 均只 submit frozen-snapshot worker executor；旧 discuss attempt-token/CAS/scanner 已删除。action 最多 shield 等本地 job 1 秒：完成保持 200，队头阻塞返回 202 且 job 继续。
-4. popup 与桌面 Web 对 202 才通过 `/api/chat/turns/{turn_id}` 按 1/2/5 秒轮询，30 秒截止后显示可刷新/重试；同步 200 不多发 GET。主聊天在插件、移动 Web、桌面 Web 统一使用 `session=popup&scope=chat`，初始化时按该 session hydrate；三个界面在聊天可见且在线时约每 2.5 秒检查共享历史，只有快照变化才重绘，并保留用户正在阅读的滚动位置。Dialogue prompt 统一回灌所有 session 的 completed `chat/hypothesis/confusion`，保持认知连续。移动 Web 没有卡片 action UI，保持只读。
+4. popup、移动 Web 与桌面 Web 对 202 才通过 `/api/chat/turns/{turn_id}` 按 1/2/5 秒轮询，30 秒截止后显示可刷新/重试；同步 200 不多发 GET。主聊天在插件、移动 Web、桌面 Web 统一使用 `session=popup&scope=chat`，初始化时按该 session hydrate；首次进入恢复历史时滚到最新消息，之后三个界面在聊天可见且在线时约每 2.5 秒检查共享历史，只有快照变化才重绘，并保留用户正在阅读的滚动位置。移动/桌面的全局回顶控件在聊天页避开 composer。Dialogue prompt 统一回灌所有 session 的 completed `chat/hypothesis/confusion`，保持认知连续。三端都可从聊天确认入口处理卡片 action，画像/认知更新区仍保持只读。
 
 历史消息在 prompt 中使用创建时固定的 `[MM-DD HH:mm]` 本地绝对时间，当前时间只进本轮 user 尾段。confusion 回复的 durable 完成观察者只写 cognition/runtime 展示信息，不结算对象；结算和失败重放均由带 generation 快照的串行学习锚处理器负责。
 

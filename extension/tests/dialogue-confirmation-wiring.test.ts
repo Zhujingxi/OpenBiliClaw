@@ -17,6 +17,8 @@ test("popup wires pending list, card actions, and the shared renderer into the d
   assert.match(popup, /OpenBiliClawDialogueConfirmation/);
   assert.match(popup, /selectDialogueTurns/);
   assert.match(popup, /executeCardAction/);
+  assert.match(popup, /isTerminalCardTurn/);
+  assert.match(popup, /isTerminalCardTurn\(dialogueTurnsById\.get/);
   assert.match(popup, /fetchTurn[\s\S]*fetchChatTurn/);
   assert.match(popup, /dialogueCardActionAbortController\.signal/);
   assert.match(popup, /session:\s*CHAT_SESSION/);
@@ -85,14 +87,14 @@ test("popup and desktop toast honestly when anchor refusal becomes retryable_err
   }
 });
 
-test("mobile active insights are read-only in Wave C", () => {
+test("mobile active insights stay read-only and point to the mobile dialogue entry", () => {
   const profile = projectFile("src/openbiliclaw/web/js/views/profile.js");
 
   assert.doesNotMatch(profile, /submitInsightFeedback/);
   assert.doesNotMatch(profile, /bindInsightActions/);
   assert.doesNotMatch(profile, /data-insight-idx/);
   assert.match(profile, /insight-readonly/);
-  assert.match(profile, /请在插件或桌面端的对话入口确认/);
+  assert.match(profile, /请在「聊聊口味」的待聊确认入口处理/);
 });
 
 test("popup and desktop cognition insights are read-only while the legacy endpoint remains", () => {

@@ -16,6 +16,7 @@ import subprocess
 import time
 import unicodedata
 import uuid
+from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -57,6 +58,7 @@ from openbiliclaw.api.models import (
     ConfigUpdateResponse,
     DelightAckIn,
     DelightAckResponse,
+    DialogueContextPreview,
     DiscoveryConfigOut,
     DouyinCookieIn,
     DouyinCookieResponse,
@@ -2887,6 +2889,7 @@ def create_app(
             scope=_normalize_chat_scope(str(row.get("scope", "chat"))),
             subject_id=str(row.get("subject_id", "") or ""),
             subject_title=str(row.get("subject_title", "") or ""),
+            reply_to_turn_id=str(row.get("reply_to_turn_id", "") or ""),
             message=str(row.get("message", "") or ""),
             reply=str(row.get("reply", "") or ""),
             status=str(row.get("status", "pending") or "pending"),
@@ -2911,6 +2914,260 @@ def create_app(
         queue = _dialogue_settlement_queue()
         ready = getattr(queue, "ready_for_interactive_submission", None)
         return True if ready is None else bool(ready)
+
+    def _dialogue_queue_peek_anchor(
+        *,
+        target_kind: str = "",
+        target_ref: str = "",
+    ) -> Any:
+        """Read the admission head without retaining a queue reference."""
+        queue = _dialogue_settlement_queue()
+        peek = getattr(queue, "peek_anchor", None)
+        if callable(peek):
+            return peek(target_kind=target_kind, target_ref=target_ref)
+        registry = getattr(queue, "registry", None)
+        peek_registry = getattr(registry, "peek", None)
+        if callable(peek_registry):
+            return peek_registry(target_kind=target_kind, target_ref=target_ref)
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "dialogue_busy",
+                "message": "Dialogue context validation is not ready.",
+            },
+        )
+
+    def _dialogue_context_error(
+        status_code: int,
+        code: str,
+        message: str,
+        *,
+        retry_after: str | None = None,
+    ) -> NoReturn:
+        headers = {"Retry-After": retry_after} if retry_after else None
+        raise HTTPException(
+            status_code=status_code,
+            detail={"code": code, "message": message},
+            headers=headers,
+        )
+
+    def _row_payload(row: Mapping[str, object]) -> dict[str, object]:
+        raw_payload = row.get("payload", {})
+        if isinstance(raw_payload, str):
+            try:
+                raw_payload = json.loads(raw_payload)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                raw_payload = {}
+        return dict(raw_payload) if isinstance(raw_payload, Mapping) else {}
+
+    def _stored_dialogue_binding(row: Mapping[str, object]) -> Any | None:
+        from openbiliclaw.soul.dialogue_turn_context import (
+            DialogueBindingError,
+            DialogueTurnBinding,
+        )
+
+        raw_binding = _row_payload(row).get("dialogue_binding")
+        if not isinstance(raw_binding, Mapping):
+            return None
+        try:
+            return DialogueTurnBinding.from_mapping(raw_binding)
+        except DialogueBindingError:
+            # Legacy/corrupt rows are intentionally readable as unbound. They
+            # never become evidence for a new target.
+            logger.warning(
+                "Ignoring invalid stored dialogue binding for turn=%r",
+                row.get("turn_id"),
+            )
+            return None
+
+    def _binding_from_turn(turn: ChatTurnOut) -> Any | None:
+        return _stored_dialogue_binding({"payload": turn.payload, "turn_id": turn.turn_id})
+
+    def _canonical_context_for_target(reply_to_turn_id: str) -> tuple[Any, str, str, str]:
+        """Resolve a target row plus exact admission generation synchronously."""
+        from openbiliclaw.soul.dialogue_learn_queue import (
+            AnchorAbsent,
+            AnchorFailed,
+            AnchorNotApplicable,
+            AnchorPersisted,
+            AnchorReserved,
+        )
+        from openbiliclaw.soul.dialogue_turn_context import DialogueTurnContext
+
+        normalized_target = reply_to_turn_id.strip()
+        target = _read_chat_turn_row(normalized_target)
+        if target is None:
+            _dialogue_context_error(
+                404,
+                "reply_target_not_found",
+                "The card or question you selected is no longer available.",
+            )
+        assert target is not None
+        if str(target.get("status", "")) != "completed":
+            _dialogue_context_error(
+                409,
+                "reply_target_inactive",
+                "That card or question is still processing.",
+            )
+        payload = _row_payload(target)
+        payload_type = str(payload.get("type", "")).strip().lower()
+        kind = str(payload.get("kind", "")).strip().lower()
+        ref = str(payload.get("ref", "") or target.get("subject_id", "")).strip()
+        title = str(payload.get("title", "") or target.get("subject_title", "")).strip()
+        state = str(payload.get("state", "")).strip().lower()
+        if payload_type == "card" and kind == "hypothesis":
+            if state != "discussing":
+                _dialogue_context_error(
+                    409,
+                    "reply_target_inactive",
+                    "Discuss the hypothesis card before replying to it.",
+                )
+            source_type = "card"
+            canonical_scope = "chat"
+            canonical_subject_id = ""
+            canonical_subject_title = ""
+        elif payload_type == "question" and kind == "confusion":
+            if state in {"resolved", "dismissed", "expired"}:
+                _dialogue_context_error(
+                    409,
+                    "reply_target_inactive",
+                    "That question has already been settled.",
+                )
+            source_type = "question"
+            canonical_scope = "confusion"
+            canonical_subject_id = ref
+            canonical_subject_title = title
+        else:
+            _dialogue_context_error(
+                422,
+                "invalid_reply_target",
+                "reply_to_turn_id must identify a completed card or question.",
+            )
+        if not ref or not title:
+            _dialogue_context_error(
+                422,
+                "invalid_reply_target",
+                "The selected dialogue target has no canonical identity.",
+            )
+
+        snapshot = _dialogue_queue_peek_anchor(target_kind=kind, target_ref=ref)
+        if isinstance(snapshot, AnchorReserved):
+            _dialogue_context_error(
+                409,
+                "reply_target_processing",
+                "That dialogue target is still being opened; try again shortly.",
+                retry_after="2",
+            )
+        if isinstance(snapshot, (AnchorAbsent, AnchorFailed, AnchorNotApplicable)):
+            _dialogue_context_error(
+                409,
+                "reply_target_inactive",
+                "That dialogue target is no longer active.",
+            )
+        if not isinstance(snapshot, AnchorPersisted):
+            _dialogue_context_error(
+                409,
+                "reply_target_inactive",
+                "That dialogue target is no longer active.",
+            )
+
+        anchor_manager = getattr(ctx.soul_engine, "_dialogue_anchor_manager", None)
+        active = anchor_manager.current() if anchor_manager is not None else None
+        if active is not None and (
+            active.kind != kind or active.ref != ref or active.generation != snapshot.generation
+        ):
+            _dialogue_context_error(
+                409,
+                "reply_target_inactive",
+                "That dialogue target was replaced before the reply was sent.",
+            )
+        origin_turn_id = (
+            str(active.origin_turn_id).strip()
+            if active is not None and active.kind == kind and active.ref == ref
+            else normalized_target
+        )
+        evidence_refs = payload.get("evidence_refs", [])
+        evidence_labels = evidence_refs if isinstance(evidence_refs, list) else []
+        try:
+            context = DialogueTurnContext(
+                reply_to_turn_id=normalized_target,
+                source_type=source_type,
+                kind=kind,
+                ref=ref,
+                generation=snapshot.generation,
+                anchor_origin_turn_id=origin_turn_id,
+                title=title,
+                evidence_labels=tuple(str(item) for item in evidence_labels),
+                captured_at=datetime.now(UTC).isoformat(),
+            )
+        except ValueError as exc:
+            _dialogue_context_error(422, "invalid_reply_target", str(exc))
+        return context, canonical_scope, canonical_subject_id, canonical_subject_title
+
+    def _unbound_dialogue_binding(*, attached_confirmation: bool) -> Any:
+        from openbiliclaw.soul.dialogue_learn_queue import (
+            AnchorAbsent,
+            AnchorFailed,
+            AnchorNotApplicable,
+            AnchorPersisted,
+            AnchorReserved,
+        )
+        from openbiliclaw.soul.dialogue_turn_context import DialogueTurnBinding
+
+        if attached_confirmation:
+            return DialogueTurnBinding.detached()
+        snapshot = _dialogue_queue_peek_anchor()
+        if isinstance(snapshot, (AnchorPersisted, AnchorReserved)):
+            return DialogueTurnBinding.detached()
+        if isinstance(snapshot, (AnchorAbsent, AnchorFailed, AnchorNotApplicable)):
+            return DialogueTurnBinding.ordinary()
+        return DialogueTurnBinding.ordinary()
+
+    def _stored_request_matches(row: Mapping[str, object], payload: ChatTurnIn) -> bool:
+        """Compare a retry with the immutable request/binding already stored."""
+        stored_binding = _stored_dialogue_binding(row)
+        if str(row.get("message", "")) != payload.message.strip():
+            return False
+        if str(row.get("session", "popup") or "popup") != (payload.session.strip() or "popup"):
+            return False
+        if str(row.get("reply_to_turn_id", "") or "") != payload.reply_to_turn_id.strip():
+            return False
+        if stored_binding is None or stored_binding.mode.value != "bound":
+            return (
+                _normalize_chat_scope(str(row.get("scope", "chat")))
+                == _normalize_chat_scope(payload.scope)
+                and str(row.get("subject_id", "") or "") == payload.subject_id.strip()
+                and str(row.get("subject_title", "") or "") == payload.subject_title.strip()
+            )
+        context = stored_binding.context
+        if context is None:
+            return False
+        if context.kind == "hypothesis":
+            return (
+                _normalize_chat_scope(payload.scope) == "chat"
+                and not payload.subject_id.strip()
+                and not payload.subject_title.strip()
+            )
+        return (
+            _normalize_chat_scope(payload.scope) in {"chat", "confusion"}
+            and payload.subject_id.strip() in {"", context.ref}
+            and payload.subject_title.strip() in {"", context.title}
+        )
+
+    def _context_preview(binding: Any) -> DialogueContextPreview:
+        context = binding.context
+        if context is None:
+            raise RuntimeError("Only bound bindings have context previews")
+        return DialogueContextPreview(
+            active=True,
+            reply_to_turn_id=context.reply_to_turn_id,
+            source_type=context.source_type,
+            kind=context.kind,
+            generation=context.generation,
+            title=context.title,
+            evidence_labels=list(context.evidence_labels),
+            context_digest=binding.context_digest,
+        )
 
     def _raise_dialogue_busy() -> NoReturn:
         raise HTTPException(
@@ -3108,6 +3365,7 @@ def create_app(
                     subject_id=payload.subject_id.strip(),
                     subject_title=payload.subject_title.strip(),
                     message=payload.message.strip(),
+                    reply_to_turn_id=payload.reply_to_turn_id.strip(),
                     payload=structured_payload or {},
                 ),
             )
@@ -3123,6 +3381,7 @@ def create_app(
                 "scope": _normalize_chat_scope(payload.scope),
                 "subject_id": payload.subject_id.strip(),
                 "subject_title": payload.subject_title.strip(),
+                "reply_to_turn_id": payload.reply_to_turn_id.strip(),
                 "message": payload.message.strip(),
                 "status": "pending",
                 "reply": "",
@@ -8114,6 +8373,12 @@ def create_app(
         return domain, specifics
 
     def _contextual_chat_message(turn: ChatTurnOut) -> str:
+        binding = _binding_from_turn(turn)
+        if binding is not None and binding.mode.value == "bound":
+            # Bound context supplies the sole readable wrapper.  Keeping the
+            # durable message raw prevents confusion replies from receiving a
+            # second legacy scope prefix.
+            return turn.message
         if turn.scope == "delight":
             label = turn.subject_title or turn.subject_id or "这条惊喜推荐"
             return f"[关于惊喜推荐「{label}」的反馈] {turn.message}"
@@ -8188,14 +8453,16 @@ def create_app(
                     "scope": turn.scope or "chat",
                     "turn_id": turn.turn_id,
                 }
+                binding = _binding_from_turn(turn)
+                respond_parameters: Mapping[str, inspect.Parameter] = {}
                 try:
-                    supports_session = (
-                        "session" in inspect.signature(ctx.dialogue.respond).parameters
-                    )
+                    respond_parameters = inspect.signature(ctx.dialogue.respond).parameters
                 except (TypeError, ValueError):
-                    supports_session = False
-                if supports_session:
+                    respond_parameters = {}
+                if "session" in respond_parameters:
                     respond_kwargs["session"] = turn.session
+                if binding is not None and "dialogue_binding" in respond_parameters:
+                    respond_kwargs["dialogue_binding"] = binding
                 reply = await asyncio.wait_for(
                     ctx.dialogue.respond(
                         _contextual_chat_message(turn),
@@ -8330,6 +8597,7 @@ def create_app(
         elif turn.scope == "confusion":
             from openbiliclaw.soul.dialogue_learn_queue import DialogueJobKind
 
+            binding = _binding_from_turn(turn)
             await _submit_dialogue_settlement_required(
                 DialogueJobKind.CONFUSION_REPLY_APPLY,
                 {
@@ -8338,6 +8606,7 @@ def create_app(
                     "subject_title": turn.subject_title,
                     "message": turn.message,
                     "reply": reply,
+                    "dialogue_binding": binding.to_mapping() if binding is not None else {},
                 },
             )
 
@@ -8898,6 +9167,10 @@ def create_app(
         label = str(job.payload.get("subject_title", "")).strip() or subject_id or "这个方向"
         message = str(job.payload.get("message", ""))
         reply = str(job.payload.get("reply", ""))
+        raw_binding = job.payload.get("dialogue_binding")
+        context_digest = ""
+        if isinstance(raw_binding, Mapping):
+            context_digest = str(raw_binding.get("context_digest", "")).strip()
         domain = subject_id or label
         receipt_key = "confusion_reply_apply"
         receipt = _chat_turn_effect_receipt(turn_id, receipt_key)
@@ -8905,6 +9178,7 @@ def create_app(
             receipt = {
                 "summary": f"关于「{label}」你说：{message}",
                 "effects": {"cognition": False, "event": False},
+                "context_digest": context_digest,
             }
             _store_chat_turn_effect_receipt(turn_id, receipt_key, receipt)
         summary = str(receipt.get("summary", f"关于「{label}」你说：{message}"))
@@ -8980,7 +9254,9 @@ def create_app(
             if turn.status != "pending":
                 return
             try:
-                await _ensure_confusion_dialogue_anchor(turn)
+                binding = _binding_from_turn(turn)
+                if binding is None or binding.mode.value != "bound":
+                    await _ensure_confusion_dialogue_anchor(turn)
                 reply = await _generate_durable_chat_reply(turn)
             except Exception as exc:
                 logger.exception("Failed to generate durable chat turn %s", turn_id)
@@ -9021,16 +9297,24 @@ def create_app(
         turn_id = raw_turn_id or f"turn-{uuid.uuid4().hex}"
         existing = _get_chat_turn_row(turn_id)
         if existing is not None:
+            if not _stored_request_matches(existing, payload):
+                _dialogue_context_error(
+                    409,
+                    "turn_id_conflict",
+                    "This turn id already belongs to a different request.",
+                )
             turn = _normalize_chat_turn(existing)
             if turn.status == "pending":
                 asyncio.create_task(_complete_durable_chat_turn(turn.turn_id))
             return turn
-        if normalized_scope in {"chat", "delight", "probe", "avoidance_probe"}:
-            # Deterministic attachment boundary: the confirmation row is
-            # committed before the user's durable row, so equal-second
-            # timestamps are still ordered by SQLite rowid.
-            await _maybe_attach_system_confirmation(payload, turn_id=turn_id)
+
         if normalized_scope == "hypothesis":
+            if payload.reply_to_turn_id.strip():
+                _dialogue_context_error(
+                    422,
+                    "invalid_reply_target",
+                    "A hypothesis card cannot itself reply to another turn.",
+                )
             row = _create_chat_turn_row(
                 payload,
                 turn_id=turn_id,
@@ -9041,7 +9325,75 @@ def create_app(
             if completed is None:
                 raise RuntimeError("Completed hypothesis card disappeared")
             return _normalize_chat_turn(completed)
-        row = _create_chat_turn_row(payload, turn_id=turn_id)
+
+        from openbiliclaw.soul.dialogue_turn_context import DialogueTurnBinding
+
+        binding: DialogueTurnBinding
+        canonical_scope = normalized_scope
+        canonical_subject_id = payload.subject_id.strip()
+        canonical_subject_title = payload.subject_title.strip()
+        if payload.reply_to_turn_id.strip():
+            context, canonical_scope, canonical_subject_id, canonical_subject_title = (
+                _canonical_context_for_target(payload.reply_to_turn_id)
+            )
+            requested_scope = normalized_scope
+            requested_subject_id = payload.subject_id.strip()
+            requested_subject_title = payload.subject_title.strip()
+            if context.source_type == "card":
+                valid_request = (
+                    requested_scope == "chat"
+                    and not requested_subject_id
+                    and not requested_subject_title
+                )
+            else:
+                # ``scope=confusion`` is retained for older clients only when
+                # they still point at the exact canonical question. New clients
+                # use the default chat/empty-subject request shape.
+                valid_request = (
+                    requested_scope in {"chat", "confusion"}
+                    and requested_subject_id in {"", context.ref}
+                    and requested_subject_title in {"", context.title}
+                )
+            if not valid_request:
+                _dialogue_context_error(
+                    422,
+                    "invalid_reply_target",
+                    "The selected target conflicts with the canonical reply context.",
+                )
+            binding = DialogueTurnBinding.from_context(context)
+        else:
+            attached_confirmation: ChatTurnOut | None = None
+            if normalized_scope in {"chat", "delight", "probe", "avoidance_probe"}:
+                # Deterministic attachment boundary: the confirmation row is
+                # committed before the user's durable row, so equal-second
+                # timestamps are still ordered by SQLite rowid.
+                attached_confirmation = await _maybe_attach_system_confirmation(
+                    payload,
+                    turn_id=turn_id,
+                )
+            binding = (
+                DialogueTurnBinding.detached()
+                if attached_confirmation is not None
+                else _unbound_dialogue_binding(attached_confirmation=False)
+            )
+
+        # Everything below this line is synchronous: the binding is already a
+        # canonical immutable value and must be durable before any reply task
+        # can observe it.  Do not add an await between capture and INSERT.
+        canonical_request = payload.model_copy(
+            update={
+                "scope": canonical_scope,
+                "subject_id": canonical_subject_id,
+                "subject_title": canonical_subject_title,
+            }
+        )
+        structured_payload = dict(payload.payload)
+        structured_payload["dialogue_binding"] = binding.to_mapping()
+        row = _create_chat_turn_row(
+            canonical_request,
+            turn_id=turn_id,
+            structured_payload=structured_payload,
+        )
         asyncio.create_task(_complete_durable_chat_turn(turn_id))
         return _normalize_chat_turn(row)
 
@@ -9124,13 +9476,29 @@ def create_app(
                         "settlement_ref": ref,
                     },
                 )
-            result = (
+            result: dict[str, Any] = (
                 dict(completion.settlement)
                 if completion.settlement is not None
                 else {"outcome": completion.outcome}
             )
             if result.get("outcome") == "processing":
                 return JSONResponse(status_code=202, content=result)
+            if action == "discuss" and result.get("outcome") == "discussing":
+                try:
+                    context, _scope, _subject_id, _subject_title = _canonical_context_for_target(
+                        turn.turn_id
+                    )
+                    from openbiliclaw.soul.dialogue_turn_context import DialogueTurnBinding
+
+                    result["context_preview"] = _context_preview(
+                        DialogueTurnBinding.from_context(context)
+                    ).model_dump()
+                except HTTPException:
+                    logger.warning(
+                        "card.discuss completed without a readable context preview: %s",
+                        turn.turn_id,
+                        exc_info=True,
+                    )
             return result
         result = await _settle_hypothesis(
             ref=str(turn.payload.get("ref", "")).strip(),
@@ -9142,6 +9510,19 @@ def create_app(
         if result.get("outcome") == "processing":
             return JSONResponse(status_code=202, content=result)
         return result
+
+    @app.get(
+        "/api/chat/contexts/{reply_to_turn_id}",
+        response_model=DialogueContextPreview,
+    )
+    async def get_chat_context(reply_to_turn_id: str) -> DialogueContextPreview:
+        """Return a canonical target preview without admitting any queue work."""
+        context, _scope, _subject_id, _subject_title = _canonical_context_for_target(
+            reply_to_turn_id
+        )
+        from openbiliclaw.soul.dialogue_turn_context import DialogueTurnBinding
+
+        return _context_preview(DialogueTurnBinding.from_context(context))
 
     @app.get("/api/chat/turns", response_model=ChatTurnListResponse)
     async def list_chat_turns(
@@ -15636,11 +16017,12 @@ def create_app(
             digest = hashlib.sha256()
             # Paths are relative to the desktop root except the shared modules,
             # which live outside it — an upgrade that only changed
-            # source-status.js would otherwise be served from cache forever.
+            # shared renderers would otherwise be served from cache forever.
             for relative, root in (
                 ("assets/css/app.css", _desktop_dir),
                 ("assets/css/classic.css", _desktop_dir),
                 ("assets/js/app.js", _desktop_dir),
+                ("dialogue-confirmation.js", _shared_web_dir),
                 ("source-status.js", _shared_web_dir),
             ):
                 path = root / relative
@@ -15668,6 +16050,10 @@ def create_app(
             html = html.replace(
                 'src="/web/assets/js/app.js"',
                 f'src="/web/assets/js/app.js?v={version}"',
+            )
+            html = html.replace(
+                'src="/shared/dialogue-confirmation.js"',
+                f'src="/shared/dialogue-confirmation.js?v={version}"',
             )
             html = html.replace(
                 'src="/shared/source-status.js"',

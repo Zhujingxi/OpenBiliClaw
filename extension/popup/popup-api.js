@@ -555,24 +555,35 @@ export async function startChatTurn({
   scope = "chat",
   subjectId = "",
   subjectTitle = "",
+  replyToTurnId = "",
   message,
 }) {
+  const payload = {
+    turn_id: turnId,
+    session,
+    scope,
+    subject_id: subjectId,
+    subject_title: subjectTitle,
+    message,
+  };
+  if (replyToTurnId) payload.reply_to_turn_id = replyToTurnId;
   return requestJson("/chat/turns", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      turn_id: turnId,
-      session,
-      scope,
-      subject_id: subjectId,
-      subject_title: subjectTitle,
-      message,
-    }),
+    body: JSON.stringify(payload),
   });
 }
 
 export async function fetchChatTurn(turnId, { signal, timeoutMs = 10_000 } = {}) {
   return requestJson(`/chat/turns/${encodeURIComponent(turnId)}`, {
+    method: "GET",
+    signal,
+    timeoutMs,
+  });
+}
+
+export async function fetchChatContext(turnId, { signal, timeoutMs = 5_000 } = {}) {
+  return requestJson(`/chat/contexts/${encodeURIComponent(turnId)}`, {
     method: "GET",
     signal,
     timeoutMs,

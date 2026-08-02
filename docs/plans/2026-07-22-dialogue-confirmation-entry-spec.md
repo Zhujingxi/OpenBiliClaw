@@ -4,6 +4,17 @@
 **Scope:** `soul/dialogue.py`、`soul/dialogue_anchor.py`(新)、`soul/dialogue_insight_analyzer.py`、`soul/dialogue_learn_queue.py`(锚快照)、`soul/engine.py`、`soul/confusion.py`、`llm/prompts.py`、`api/app.py`(durable chat 扩展/待聊端点/legacy 转发)、`api/models.py`(payload 模型)、`storage/database.py`(chat_turns payload 列迁移)、`cli.py`;前端三处:`extension/popup/` + `extension/src/background/`(角标决策表)、**桌面端 `src/openbiliclaw/web/desktop/assets/js/`**、移动端 `src/openbiliclaw/web/js/`(仅洞察按钮只读化,卡片跟进版)。基于分支 `feat/cognitive-profile-pipeline`。
 **Out of scope:** 探针迁移;系统推送;多锚;对话检索(v2);移动端卡片渲染(跟进版,但其洞察确认按钮只读化**在本版**,否则唯一入口不成立,r1/F11)。
 
+## 2026-08-01 binding amendment
+
+本 spec 的“用户消息接收处理内”现进一步收紧为：图形客户端只提交 top-level
+`reply_to_turn_id`，服务端在 user `chat_turns` INSERT 前 canonicalize target 与 queue
+admission snapshot，并冻结 `DialogueTurnBinding` / `context_digest`。后续回复、event、学习和
+结算不得回读 current anchor 猜测归属；A→B replacement 只能令已冻结 A 在 exact generation
+校验时 stale-drop。未引用请求显式区分 `ordinary` / `detached`，CLI/OpenClaw 继续走
+`legacy_direct` 兼容路径。详细数据模型和 B1–B15 验收以
+[`2026-08-01-dialogue-card-turn-binding-spec.md`](2026-08-01-dialogue-card-turn-binding-spec.md)
+为准。
+
 ## Goal
 
 (同 r1,产品方向不变:对话是唯一主动确认入口;假设卡片四按钮+多轮;疑惑纯聊;角标+待聊列表双轨节流;锚+归属判断零新增 LLM 调用;永续对话+时间事实化。)

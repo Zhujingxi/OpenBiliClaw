@@ -109,6 +109,11 @@ def mobile_web_server() -> tuple[str, MobileWebStub]:
             if path.startswith("/m/js/"):
                 relative = path.removeprefix("/m/js/")
                 return self._serve_file(ROOT / "src/openbiliclaw/web/js" / relative)
+            if path == "/shared/dialogue-confirmation.js":
+                return self._serve_file(
+                    ROOT / "src/openbiliclaw/web/shared/dialogue-confirmation.js",
+                    "text/javascript",
+                )
             if path == "/m/manifest.json":
                 return self._serve_file(
                     ROOT / "src/openbiliclaw/web/manifest.json",

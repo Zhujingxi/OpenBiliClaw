@@ -6,6 +6,7 @@
 
 ## 未发布：X 来源连接验证与 Cookie 同步（2026-08-01）
 
+- **对话 turn 绑定安全性收口**：三端把卡片/疑惑作为 durable turn，通过 `reply_to_turn_id` 只声明目标；服务端在 user INSERT 前冻结 canonical context、digest 和 ordinary/detached mode，统一贯穿 prompt、event、学习与结算，A→B replacement 只会安全 stale-drop。新增只读 context preview、opaque evidence 过滤、独立长列表滚动、reply quote 与失败草稿保留；恢复长历史时首次进入会落到最新消息，后续实时刷新仍保留阅读位置。真实三端 E2E 补齐结算态收尾：卡片已确认/修正/拒绝/稍后时会静默清除旧 context，已知服务端错误优先显示中文；移动端固定回顶按钮按 360px 窄屏重新留距，不再与发送按钮相交。
 - **修复 X「测试连接」只读旧健康记录的问题**：设置页现在通过 `twitter-cli` 的只读账户状态请求即时验证 `auth_token` / `ct0`，401、403、429 和传输失败分别保持失败或待判定语义，不把网络故障误报成 Cookie 失效。
 - **修复后端启动后 X Cookie 同步滞后**：启用 X 时，扩展每次新建 `/api/runtime-stream` 连接都会收到 `x_cookie_sync_requested`，立即把当前浏览器 Cookie 回传；原有启动、变更监听和小时 alarm 继续作为兜底。
 - **移除扩展临时调试日志中继**：抖音任务仍通过正常的 `task-result` 回传结构化诊断，但不再向 `/api/sources/_debug/log` 额外发起请求；废弃 helper 和后端 relay 路由同步删除。

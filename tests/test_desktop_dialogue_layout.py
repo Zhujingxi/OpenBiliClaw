@@ -1,6 +1,7 @@
 from pathlib import Path
 
 APP_CSS = Path("src/openbiliclaw/web/desktop/assets/css/app.css")
+APP_JS = Path("src/openbiliclaw/web/desktop/assets/js/app.js")
 INDEX_HTML = Path("src/openbiliclaw/web/desktop/index.html")
 
 
@@ -37,3 +38,22 @@ def test_desktop_dialogue_composer_has_an_accessible_name() -> None:
     html = INDEX_HTML.read_text(encoding="utf-8")
 
     assert 'id="chatInput" aria-label="和阿B聊聊你的口味"' in html
+
+
+def test_desktop_dialogue_first_open_scrolls_restored_history_to_latest() -> None:
+    source = APP_JS.read_text(encoding="utf-8")
+    start = source.index("    function openChatPage()")
+    end = source.index("    function openSettingsPage", start)
+    block = source[start:end]
+
+    assert "let hasOpenedDialogueChatPage = false;" in source
+    assert "const forceBottom = !hasOpenedDialogueChatPage;" in block
+    assert "renderChat({ forceBottom });" in block
+    assert "hasOpenedDialogueChatPage = true;" in block
+
+
+def test_desktop_silently_clears_a_context_after_its_card_settles() -> None:
+    source = APP_JS.read_text(encoding="utf-8")
+
+    assert "isTerminalCardTurn" in source
+    assert "if (isTerminalCardTurn(contextTarget))" in source

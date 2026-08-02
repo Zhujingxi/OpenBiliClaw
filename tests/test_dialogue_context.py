@@ -13,12 +13,21 @@ import inspect
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
+import pytest
+
 from openbiliclaw.api.models import ChatTurnOut
 from openbiliclaw.soul.dialogue import (
     DIALOGUE_WINDOW_TURNS,
     DialogueLearningMode,
     DialogueTurn,
     SocraticDialogue,
+)
+from openbiliclaw.soul.dialogue_turn_context import (
+    BindingMode,
+    DialogueBindingError,
+    DialogueTurnBinding,
+    DialogueTurnContext,
+    filter_evidence_labels,
 )
 from openbiliclaw.soul.identity import build_hash8_map, insight_hash8
 from openbiliclaw.storage.database import Database
@@ -29,6 +38,83 @@ if TYPE_CHECKING:
 
 _FIXED_TURN_TIMESTAMP = "2026-07-22T09:30:00+08:00"
 _UTC_PLUS_8 = timezone(timedelta(hours=8))
+
+
+def test_dialogue_context_digest_is_canonical_and_evidence_is_readable_only() -> None:
+    evidence = filter_evidence_labels(
+        [
+            "42",
+            "e3617163",
+            "550e8400-e29b-41d4-a716-446655440000",
+            "BV1abcdefghij",
+            "av123",
+            "event-7",
+            "turn:opaque",
+            "完整看完三条长视频",
+            "完整看完三条长视频",
+            "https://example.test/context",
+        ]
+    )
+    assert evidence == ("完整看完三条长视频", "https://example.test/context")
+    context = DialogueTurnContext(
+        reply_to_turn_id="turn-a",
+        source_type="card",
+        kind="hypothesis",
+        ref="ref-a",
+        generation=7,
+        anchor_origin_turn_id="turn-a",
+        title="A 的标题",
+        evidence_labels=evidence,
+        captured_at="2026-08-01T12:00:00+08:00",
+    )
+    retry_context = DialogueTurnContext.from_mapping(
+        {**context.to_mapping(), "captured_at": "2026-08-01T12:05:00+08:00"}
+    )
+    assert context.context_digest == retry_context.context_digest
+    assert len(context.context_digest) == 64
+    binding = DialogueTurnBinding.from_context(context)
+    assert binding.mode is BindingMode.BOUND
+    assert "ref-a" not in binding.render_user_prompt("这句话")
+    assert "A 的标题" in binding.render_user_prompt("这句话")
+
+
+def test_dialogue_context_rejects_unknown_or_mismatched_facts() -> None:
+    with pytest.raises(DialogueBindingError):
+        DialogueTurnContext.from_mapping(
+            {
+                "reply_to_turn_id": "turn-a",
+                "source_type": "card",
+                "kind": "confusion",
+                "ref": "ref-a",
+                "generation": 7,
+                "anchor_origin_turn_id": "turn-a",
+                "title": "错配",
+            }
+        )
+    with pytest.raises(DialogueBindingError):
+        DialogueTurnBinding.from_mapping(
+            {
+                "mode": "detached",
+                "context_digest": "forged",
+                "context": {},
+                "inventory_settles_allowed": False,
+            }
+        )
+    with pytest.raises(DialogueBindingError):
+        DialogueTurnBinding.from_mapping({"mode": "detached", "inventory_settles_allowed": "false"})
+    with pytest.raises(DialogueBindingError):
+        DialogueTurnContext.from_mapping(
+            {
+                "version": True,
+                "reply_to_turn_id": "turn-a",
+                "source_type": "card",
+                "kind": "hypothesis",
+                "ref": "ref-a",
+                "generation": 1,
+                "anchor_origin_turn_id": "turn-a",
+                "title": "标题",
+            }
+        )
 
 
 def _dialogue_with_history(exchanges: int) -> SocraticDialogue:

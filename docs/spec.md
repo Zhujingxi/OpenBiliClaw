@@ -229,15 +229,17 @@ config recovery control plane (normal or degraded; business APIs stay gated)
                 └─ draft → /api/config/discover-models → exact instance GET /models
                           → editable model list + local effort advisory (no config write)
 durable dialogue → confirmation entry(pending list / cards)
-                 → chat_turn(payload + fixed turn time) → SocraticDialogue(queued)
+                 → chat_turn(reply_to_turn_id + payload + fixed turn time)
+                 → server-frozen DialogueTurnBinding → SocraticDialogue(queued)
                  → typed settlement queue[all 11 declared kinds] → one actual worker + guard
                  → pending≤3 → user open(no cooldown) | system 12h+object 72h
                    → confirmation INSERT → attached user INSERT (created_at,rowid)
+                 → one context digest → prompt/history/event/learn/settlement provenance
                  → anchor snapshot(kind + ref + generation) → existing insight extraction
                  → kind×relation matrix ┐
                  → hypothesis card action ┴→ frozen snapshot → worker-only apply
                    action≤1s: completed → 200 | blocked → 202 processing
-                              └→ popup/desktop GET poll 1/2/5s, deadline 30s
+                              └→ popup/mobile/desktop GET poll 1/2/5s, deadline 30s
                    pending open busy → 503 dialogue_busy/Retry-After → UI auto-retry ≤25m
                    active clarifying → only current holder; hide in sessions already showing it
                    confusion object failure → replay_queue(max 5, head-fenced) → 12h recovery
@@ -273,10 +275,10 @@ GET reconcile 与 legacy façade 也已全部接入同一个 production dispatch
 protected mutation 只允许 actual worker Task；嵌套 settle 沿该 task 的调用栈直调
 `_apply_*`，不 submit、不 inline dispatcher，也不存在 child 临时授权。继承 context
 的 active/detached child 对 mutation 与递归 admission 均 fail closed。
-队列 job 不持久化：action 本地等待 1 秒后按需返回 202，popup/桌面在 30 秒内读取
+队列 job 不持久化：action 本地等待 1 秒后按需返回 202，popup/移动/桌面在 30 秒内读取
 durable turn，重启丢 job 时允许同 action 重新提交；不增加 job table 或恢复 scanner。
 pending-open 是更严格的 required local transaction：长 LLM job 占住 worker 时不先
-admission，而返回 `dialogue_busy` 让 popup/桌面带等待态自动重试；热重载保持 admission
+admission，而返回 `dialogue_busy` 让 popup/移动/桌面带等待态自动重试；热重载保持 admission
 直到队列 idle，再原子 pause/revoke，25 分钟安全窗覆盖 20 分钟 provider timeout。
 两条学习路径都使用 task-local bypass 跳过 background admission、保留 total gate，
 避免空库存反向阻塞纠偏。若学习真正新增长期避雷项，则在偏好落盘后立即复用共享

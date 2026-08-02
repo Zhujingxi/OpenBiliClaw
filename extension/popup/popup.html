@@ -3274,14 +3274,20 @@
     }
 
     .chat-pending {
-      flex-shrink: 0;
+      flex: 0 1 auto;
+      min-height: 0;
+      max-height: min(32vh, 240px);
+      display: flex;
+      flex-direction: column;
       margin-bottom: 8px;
+      overflow: hidden;
       border: 1px solid rgba(239, 221, 233, 0.96);
       border-radius: 16px;
       background: linear-gradient(180deg, rgba(255, 248, 251, 0.98), rgba(249, 251, 255, 0.98));
     }
 
     .chat-pending-toggle {
+      flex: 0 0 auto;
       width: 100%;
       display: flex;
       align-items: center;
@@ -3329,8 +3335,14 @@
 
     .chat-pending-list {
       display: grid;
+      grid-auto-rows: max-content;
       gap: 7px;
+      min-height: 0;
       padding: 0 8px 8px;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      scrollbar-width: thin;
+      scrollbar-gutter: stable;
     }
 
     .chat-pending-list[hidden] { display: none; }
@@ -3367,8 +3379,19 @@
       flex-direction: column;
       gap: 10px;
       flex: 1;
+      min-height: 0;
       overflow-y: auto;
+      overflow-x: hidden;
+      overscroll-behavior: contain;
+      touch-action: pan-y;
       padding-right: 4px;
+      scrollbar-width: thin;
+      scrollbar-gutter: stable;
+    }
+
+    .chat-messages:focus-visible {
+      outline: none;
+      box-shadow: var(--focus-ring);
     }
 
     .dialogue-turn {
@@ -3427,6 +3450,72 @@
     .dialogue-card-action.is-discuss { color: var(--brand-strong); }
     .dialogue-card-action:disabled { opacity: 0.5; cursor: default; }
     .dialogue-question-shell { display: grid; gap: 6px; }
+
+    .dialogue-context-bar {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      min-width: 0;
+      padding: 8px 10px;
+      border: 1px solid rgba(239, 189, 207, 0.72);
+      border-radius: 13px;
+      background: rgba(255, 248, 251, 0.96);
+    }
+    .dialogue-context-copy {
+      min-width: 0;
+      display: grid;
+      gap: 2px;
+      overflow: hidden;
+    }
+    .dialogue-context-label {
+      color: var(--brand-strong);
+      font-size: 10px;
+      font-weight: 800;
+    }
+    .dialogue-context-copy strong,
+    .dialogue-reply-quote strong {
+      min-width: 0;
+      overflow: hidden;
+      display: -webkit-box;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 2;
+      line-clamp: 2;
+      text-overflow: ellipsis;
+      line-height: 1.4;
+    }
+    .dialogue-context-copy strong { font-size: 11px; }
+    .dialogue-context-clear {
+      flex: 0 0 auto;
+      min-height: 34px;
+      padding: 6px 10px;
+      border: 1px solid rgba(239, 189, 207, 0.8);
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.95);
+      color: var(--brand-strong);
+      font-size: 10px;
+      font-weight: 800;
+    }
+    .dialogue-reply-quote {
+      display: flex;
+      max-width: 92%;
+      margin: 0 0 2px auto;
+    }
+    .dialogue-reply-quote button {
+      display: grid;
+      gap: 2px;
+      min-width: 0;
+      padding: 6px 9px;
+      text-align: left;
+      border: 1px solid rgba(226, 230, 239, 0.98);
+      border-radius: 10px;
+      background: rgba(248, 251, 255, 0.98);
+      color: var(--text-secondary);
+      font-size: 10px;
+    }
+    .dialogue-reply-quote button span { color: var(--brand-strong); font-weight: 800; }
+    .dialogue-reply-quote button strong { color: var(--text-main); font-size: 10px; }
+    .dialogue-context-clear:focus-visible,
+    .dialogue-reply-quote button:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 
     /* Collapse the conversation surface entirely when no messages
        have been added yet — otherwise the min-height + margin
@@ -5735,9 +5824,9 @@
             <button id="chatPendingToggle" class="chat-pending-toggle" type="button" aria-expanded="false" aria-controls="chatPendingList">
               <span>待聊确认 <span id="chatPendingCount" class="chat-pending-count">0</span></span>
             </button>
-            <div id="chatPendingList" class="chat-pending-list" hidden></div>
+            <div id="chatPendingList" class="chat-pending-list" aria-label="待聊确认列表" hidden></div>
           </div>
-          <div id="chatMessages" class="chat-messages"></div>
+          <div id="chatMessages" class="chat-messages" role="region" aria-label="口味对话记录" tabindex="0"></div>
           <form id="chatForm" class="chat-form">
             <label class="chat-input-shell">
               <span class="chat-input-label">写点你的想法和口味</span>

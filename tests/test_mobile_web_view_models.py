@@ -1548,14 +1548,14 @@ class TestMobileWebDialogueConfirmationIsReadOnly:
         """Read-only is only honest if the user is told where to act."""
         profile_js = self._profile_js()
         assert "insight-readonly" in profile_js
-        assert "请在插件或桌面端的对话入口确认" in profile_js
+        assert "请在「聊聊口味」的待聊确认入口处理" in profile_js
 
-    def test_mobile_web_ships_no_card_action_helper(self) -> None:
-        """The shared card helper belongs to popup/desktop only."""
+    def test_mobile_web_wires_the_shared_card_action_helper(self) -> None:
+        """The mobile dialogue is a first-class settlement surface."""
         mobile_dir = ROOT / "src/openbiliclaw/web/js"
-        offenders = [
+        consumers = [
             path.relative_to(ROOT)
             for path in mobile_dir.rglob("*.js")
             if "executeCardAction" in path.read_text(encoding="utf-8")
         ]
-        assert not offenders, f"mobile web must not wire card actions: {offenders}"
+        assert consumers == [Path("src/openbiliclaw/web/js/views/chat.js")]

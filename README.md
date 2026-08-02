@@ -598,14 +598,15 @@ background ─ background admission (default 3) ──────┘
          ├→ /api/config/probe-service → 临时 registry → 总并发 gate
          └→ /api/config/discover-models → 精确实例 GET /models（不写配置）
                                       → 可编辑模型下拉 + 本地 Effort 建议
-持久对话回复：固定时间/payload → queued mode → 11-kind typed 结算单队列 → actual worker + guard
+持久对话回复：reply_to_turn_id + 固定时间/payload → POST-time frozen binding → queued mode → 11-kind typed 结算单队列 → actual worker + guard
 确认入口（待聊列表/卡片）→ 单锚(kind+ref+generation) → 全入口 frozen admission / 归属矩阵
                        ├→ 待聊≤3 · 主动零冷却 / 系统12h+对象72h · 确认先于用户附着
-                       ├→ worker忙：dialogue_busy + Retry-After → 两端等待态自动重试
+                       ├→ worker忙：dialogue_busy + Retry-After → 三端等待态自动重试
                        ├→ 已澄清疑惑：只展示当前持有者；当前 session 已有 turn 则隐藏
                        ├→ frozen kind/ref/generation → worker-only apply → event/object/derived/marker → applied
                        │                                                └→ publication-only retry → 跨 session 投影 / 精确解锚
-                       ├→ action 本地≤1s：完成 200 / 阻塞 202 → popup/桌面 1/2/5s 轮询≤30s
+                       ├→ one context digest → prompt/history/event/learn/settlement provenance
+                       ├→ action 本地≤1s：完成 200 / 阻塞 202 → popup/移动/桌面 1/2/5s 轮询≤30s
                        └→ 疑惑 FIFO≤5 / 队头 fencing / 12h 补扫
 配置热重载：保持接单并排空旧 worker → 原子暂停/revoke → 新 worker；安全窗25分钟
 实时连接：runtime-stream 20s idle 心跳 → 短暂 close 显示重连中并自动续连
@@ -664,7 +665,7 @@ CLI/OpenClaw → SocraticDialogue(legacy_direct) → user+agent 历史 → 队�
 失败/超时 → 回滚临时历史 → 安全错因 / failed turn
 durable turn → 固定时间/payload → 确认入口（待聊列表/卡片） → frozen anchor admission → relation matrix
                                                    └→ 卡片/锚/chat/probe/confusion/replay/legacy 全部 worker-only
-卡片 action → 同步 200（空队列快路）| 202 processing → popup/桌面轮询；移动/CLI 无 action
+卡片 action → 同步 200（空队列快路）| 202 processing → popup/移动/桌面轮询；CLI 无 action
 
 桌面首屏：推荐 hydration │ runtime hydration │ health/profile/activity/config 次级 hydration（三分支独立）
 

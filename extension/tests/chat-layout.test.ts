@@ -34,6 +34,36 @@ test("chat tab layout pins a compact composer below a flexible history pane", ()
   assert.match(chatFooterBlock, /display:\s*none;/);
 });
 
+test("pending confirmations stay bounded and scroll independently from chat history", () => {
+  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
+  const pendingBlock = cssBlockWith(popupHtml, ".chat-pending", /max-height:/);
+  const listBlock = cssBlockWith(popupHtml, ".chat-pending-list", /overflow-y:\s*auto;/);
+  const messagesBlock = cssBlockWith(popupHtml, ".chat-messages", /overflow-y:\s*auto;/);
+
+  assert.match(pendingBlock, /max-height:\s*min\(32vh,\s*240px\);/);
+  assert.match(pendingBlock, /overflow:\s*hidden;/);
+  assert.match(listBlock, /grid-auto-rows:\s*max-content;/);
+  assert.match(listBlock, /overflow-y:\s*auto;/);
+  assert.match(listBlock, /overscroll-behavior:\s*contain;/);
+  assert.match(messagesBlock, /min-height:\s*0;/);
+  assert.match(messagesBlock, /scrollbar-width:\s*thin;/);
+  assert.match(
+    popupHtml,
+    /id="chatMessages"[^>]*role="region"[^>]*aria-label="口味对话记录"[^>]*tabindex="0"/,
+  );
+});
+
+test("chat refresh preserves reader position and expanded evidence", () => {
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+
+  assert.match(popupJs, /function isChatMessagesNearBottom\(\)/);
+  assert.match(popupJs, /function openChatEvidenceTurnIds\(\)/);
+  assert.match(popupJs, /const previousScrollTop = elements\.chatMessages\.scrollTop;/);
+  assert.match(popupJs, /if \(openEvidence\.has\(turnId\)\) details\.open = true;/);
+  assert.match(popupJs, /suppressChatAutoScroll = true;/);
+  assert.match(popupJs, /else elements\.chatMessages\.scrollTop = previousScrollTop;/);
+});
+
 test("chat composer stays compact so short side panels keep room for messages", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
   const chatFormBlock = cssBlockWith(popupHtml, ".chat-form", /margin-top:\s*auto;/);
