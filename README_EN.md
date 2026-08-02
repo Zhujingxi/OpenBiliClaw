@@ -312,6 +312,8 @@ The agent will clone the repo, install dependencies, start the backend with the 
 
 Chrome Web Store / AMO builds only declare local-backend permissions by default. When you select a protocol and enter another LAN or remote endpoint, the browser requests `scheme://host/*`; WebExtension host permissions cannot be port-scoped across browsers, while actual requests remain pinned to the configured port. Public hosts require HTTPS. Enable the default-off device flow first with `ext-key generate` and `ext-key enable`.
 
+With a public DNS name, the shortest path is the [`docker-compose.https.yml`](docker-compose.https.yml) overlay: Caddy obtains and renews the certificate automatically, and desktop, mobile, and the extension share `https://<domain>`. Commands and required access controls are in the [HTTPS deployment guide](docs/https-deployment.md).
+
 ### 3. Log in to content platforms in the same browser
 
 By default, log in to [Bilibili](https://www.bilibili.com) and keep Bilibili selected to build the first profile and recommendations. If you do not want Bilibili, deselect it during init and select another logged-in source such as [Xiaohongshu](https://www.xiaohongshu.com), [Douyin](https://www.douyin.com), [YouTube](https://www.youtube.com), [X](https://x.com), [Zhihu](https://www.zhihu.com), or [Reddit](https://www.reddit.com), or choose Bangumi and enter a public username. Keep at least one source that can return profile signals. Bangumi without a username still supports anonymous discovery, but cannot initialize a profile by itself.
@@ -524,7 +526,7 @@ OpenClaw is running `listen` in the background. After a refresh cycle, the syste
 >
 > **You**: "That one nailed it."
 >
-> **OpenClaw** (internally runs `submit-feedback --recommendation-id 4268 --feedback-type like`)
+> **OpenClaw** (internally runs `submit-feedback --recommendation-id 4268 --feedback-type like --request-id feedback-4268-like-1`, reusing that ID on retries)
 
 You never asked for a recommendation — the system surfaced it on its own.
 
@@ -594,7 +596,8 @@ config recovery draft (normal or degraded; business APIs remain gated)
              ├→ /api/config/probe-service → temporary registry → total gate
              └→ /api/config/discover-models → exact instance GET /models (no write)
                                            → editable model list + local effort advisory
-durable reply: reply_to_turn_id + fixed time/payload → POST-time frozen binding → queued mode → one 11-kind typed settlement queue → actual worker + guard
+durable reply: reply_to_turn_id + fixed time/payload → POST-time frozen binding → pending SQLite → rowid-serial reply worker → visible completion CAS (app-stable dialogue lease)
+post-reply learning/object settlement: independent 11-kind typed queue → actual worker + guard
 confirmation entry (pending list/cards) → one anchor(kind+ref+generation) → frozen admission / relation matrix
                           ├→ pending≤3 · user no cooldown / system 12h+object 72h · confirmation-first attachment
                           ├→ busy worker: dialogue_busy + Retry-After → waiting UI auto-retry
@@ -606,6 +609,8 @@ confirmation entry (pending list/cards) → one anchor(kind+ref+generation) → 
                           └→ confusion FIFO≤5 / head fencing / 12h recovery
 config hot reload: accepting drain old worker → atomic pause/revoke → new worker; 25m safety window
 realtime: runtime-stream 20s idle heartbeat → transient close shows reconnecting and retries
+images: proxy foreground + refresh prefetch → app-stable lane (total 4 / bg 3, fg priority)
+                                            → cache-key singleflight → whitelist fetch → atomic cache
 ```
 
 ```
@@ -615,7 +620,7 @@ realtime: runtime-stream 20s idle heartbeat → transient close shows reconnecti
 │  danmaku, xhs strong signal) · Cookie · Tasks  │
 └──────────────────────┬─────────────────────────┘
                        │ HTTP default: IPv4 0.0.0.0 + IPv6 [::] → REST / WebSocket
-                       │ Optional HTTPS: TLS Proxy :8443 → loopback/Compose HTTP → same API
+                       │ Optional HTTPS: public Caddy :443 / LAN TLS Proxy :8443 → loopback HTTP → same API
                        │ + Desktop Web (/web) · Mobile Web (/m) · QR LAN-IP
                        │ + ping preflight → /web · /setup · /m → config + in-process recovery
 ┌──────────────────────▼─────────────────────────┐
@@ -626,10 +631,14 @@ realtime: runtime-stream 20s idle heartbeat → transient close shows reconnecti
 │ Engine  │  System  │Discovery +│     Engine     │
 │         │          │ Admission │                │
 ├─────────┴──────────┴───────────┴───────────────┤
-│ Interest: events/dialogue/feedback(priority) → │
-│ ProfileUpdatePipeline → single INTEREST line   │
+│ Events/recommendation clicks → generic durable cursor ─┐ │
+│ Content feedback → content_feedback durable cursor ────┴→ atomic buffer+cursor checkpoint │
+│ cold start fence+task admission → listener; background recovery → tick_if_buffered │
+│ hot reload pause/drain/recover then rebind; periodic maintenance alone calls tick │
+│ Dialogue → typed settlement worker → learning       │
 │ Legacy batch only when rollback flag=false     │
 │ Init barrier: profile commit → discover/evaluate/copy → ready │
+│ Images: proxy fg + refresh prefetch → app-stable 4/3 lane → singleflight/atomic cache │
 │ Soul cognition: dual pending cooldown · one anchor · worker-only settlement · winner receipt · confusion FIFO · ledger · deep gate │
 │   LLM adapters · Source adapters (SourceAdapter) │
 │ Module route → LLM instance chain → adapter · SourceAdapter │
@@ -639,7 +648,7 @@ realtime: runtime-stream 20s idle heartbeat → transient close shows reconnecti
 │ Bangumi public API → search/ranked/date producer → shared eval │
 │ API projected stock → 3×30 workers → serial admit; OpenClaw first batch≤4 → copy≤4/no split retry → UI │
 │ Delight gate: formal copy/topic ready + seen_items guard → score/snapshot → UI × writes seen ledger │
-│ API/OpenClaw startup hook → recover/maintain → expose LLM │
+│ Inventory API/OpenClaw startup hook → recover/maintain → expose LLM │
 │ Reshuffle: current-card exclusion → PoolServeSnapshot/seen_items → short rec+shown write → one batch event │
 │ Platform scope (PC Web tabs only): source_platform → scoped candidates, no cross-platform floor → same rank/copy/persist │
 │ Platform inventory: platform-availability → same canonical servable set → total == Σ by_platform │
@@ -656,27 +665,30 @@ realtime: runtime-stream 20s idle heartbeat → transient close shows reconnecti
 │ Six adapters → broker → shared MV3 recovery barrier → Reddit/X/YT/XHS/DY/Zhihu executors (6/6 fixture + real-account)│
 └────────────────────────────────────────────────┘
 
-Web/API durable → SocraticDialogue(queued) → user+agent history → typed queue[all declared entries] → one in-line worker
+Web/API durable → rowid reply worker → app-stable dialogue lease(max active 1) → SocraticDialogue(queued) → visible CAS
+delight/legacy/interest-probe/avoidance chat ───────────────────────────────┘ (reply + required effects share the lease)
+post-reply 11-kind learning/settlement → independent typed settlement worker (not reply backlog)
 CLI/OpenClaw → SocraticDialogue(legacy_direct) → user+agent history → direct learning outside queue/guard
 learning → bypass background admission; keep total gate ── new dislike: shared purge → content_cache
-failure/timeout → rollback provisional history → safe error / failed turn
+transient/provider/timeout/cancel → rollback provisional history → durable pending + head retry; explicit invalid/empty → failed CAS
 durable turn → fixed time/payload → confirmation entry (pending list/cards) → frozen anchor admission → relation matrix
                                                   └→ card/anchor/chat/probe/confusion/replay/legacy all worker-only
 card action → synchronous 200 fast path | 202 processing → popup/mobile/desktop poll; CLI has no action
 
 Desktop startup: recommendation hydration │ runtime hydration │ secondary health/profile/activity/config hydration (independent)
 
-Overseas traffic: `[network].mode` → system proxy (default) / direct / custom proxy → LLM, YouTube, X/Reddit CLIs, Bangumi, updater; CN clients remain isolated and direct
+Overseas traffic: `[network].mode` → system proxy (default) / direct / custom proxy → LLM, YouTube, X/Reddit CLIs, Bangumi, updater, GitHub project stats; CN clients remain isolated and direct
 Manual Douyin discovery: CLI discover → daemon-equivalent producer → per-keyword outcomes → extension search/hot/feed → pending-eval pool
 ```
 
 Remote extension access uses explicit, default-off device authentication: `ext-key generate` → digest-only backend config → `/api/auth/extension-token` short session. HTTP uses a Bearer header; only WebSocket and image proxy URLs carry the short session query.
 
-Trusted LAN and self-managed deployments may additionally enable the default-off
-[TLS Proxy](docs/https-deployment.md). It performs exact HTTPS Origin/Host validation, relays
-WebSockets, and manages explicit SANs for a local-CA certificate. With no remote SAN the generated
-certificate is localhost-only. This lightweight component is not a public-Internet production
-gateway, and the default HTTP path is unchanged.
+Public-domain Docker deployments may add the default-off
+[Caddy HTTPS overlay](docs/https-deployment.md). It obtains and renews a trusted certificate,
+proxies REST and WebSockets through shared loopback, and restricts host port `8420` to loopback.
+Trusted LAN and self-managed deployments can instead use the built-in TLS Proxy for exact HTTPS
+Origin/Host checks and explicit local-CA SANs; with no remote SAN its generated certificate is
+localhost-only. The two edges are mutually exclusive, and the default HTTP path is unchanged.
 
 > Full architecture detail (runtime state machine, pool accounting, profile overrides, and more) lives in [Architecture](docs/architecture.md) and the [visual architecture diagrams](docs/index.md).
 
@@ -752,7 +764,7 @@ OpenBiliClaw/
 | Zhihu | Extension task dispatch reads event-smoke and selected guided-init signals plus search / hot / feed / creator / related candidates in the logged-in browser; answers / articles / questions render as text cards |
 | Reddit | Default-installed rdt-cli reads search / hot / subreddit / related candidates by default; the extension syncs `reddit_session` into rdt credentials and `rdt login` is a manual fallback; extension task dispatch reads discovery when rdt is unavailable, unauthenticated, or explicitly selected, and always reads bootstrap saved / upvoted / subscribed signals in the logged-in browser; posts / comments render as text cards |
 | Bangumi | Official anonymous read-only v0 API; search / ranked / date browsing feed the shared candidate pool, while an optional public username enables public-collection profile init; no cookie, token, or native write-back |
-| Optional TLS | Python stdlib HTTP/TLS forwarding plus cryptography certificate generation from the `[tls]` extra; LAN/self-managed only and off by default |
+| Optional HTTPS | Pinned Caddy Docker overlay with automatic certificates for public domains; Python TLS Proxy + `[tls]` extra and local CA/SAN for LAN/self-managed use; off by default and mutually exclusive |
 | Storage | SQLite + Embedding vector index |
 | Containerization | Docker Compose (backend) |
 | Agent Framework | Lightweight custom framework |

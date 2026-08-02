@@ -316,6 +316,8 @@ AI 助手会克隆仓库、安装依赖、用局域网可访问的默认绑定�
 
 Chrome Web Store / AMO 发布包默认只声明本机后端权限。让插件连接局域网另一台机器或远程域名时，在设置里选择协议并填写地址，浏览器会请求该 `scheme://host/*` 的可选权限；WebExtension host permission 无法跨浏览器限定端口，但实际请求仍固定到配置端口。公网地址强制 HTTPS。后端需先用 `ext-key generate` 和 `ext-key enable` 开启默认关闭的设备认证。
 
+有公网域名时，最短路径是叠加 [`docker-compose.https.yml`](docker-compose.https.yml)，由 Caddy 自动申请和续期证书；PC、手机和插件共用 `https://<域名>`。命令与安全门禁见 [HTTPS 部署指南](docs/https-deployment.md)。
+
 ### 3. 在同一个浏览器登录内容平台
 
 默认登录 [B 站](https://www.bilibili.com) 并勾选 B 站来源即可生成第一版画像和推荐；如果不想接 B 站，也可以在初始化来源选择里取消它，改勾已登录的 [小红书](https://www.xiaohongshu.com) / [抖音](https://www.douyin.com) / [YouTube](https://www.youtube.com) / [X](https://x.com) / [知乎](https://www.zhihu.com) / [Reddit](https://www.reddit.com)，或选择无需登录的 Bangumi 并填写公开用户名。至少保留一个能拉到画像信号的来源；未填用户名的 Bangumi 仍可做匿名 discovery，但不能单独完成画像初始化。
@@ -528,7 +530,7 @@ OpenClaw 在后台开着 `listen`，某次 refresh 后系统发现了一条高�
 >
 > **你**："这条非常到位。"
 >
-> **OpenClaw**（内部执行 `submit-feedback --recommendation-id 4268 --feedback-type like`）
+> **OpenClaw**（内部执行 `submit-feedback --recommendation-id 4268 --feedback-type like --request-id feedback-4268-like-1`，重试复用该 ID）
 
 你没有开口要推荐——是系统主动捅过来的。
 
@@ -598,7 +600,8 @@ background ─ background admission (default 3) ──────┘
          ├→ /api/config/probe-service → 临时 registry → 总并发 gate
          └→ /api/config/discover-models → 精确实例 GET /models（不写配置）
                                       → 可编辑模型下拉 + 本地 Effort 建议
-持久对话回复：reply_to_turn_id + 固定时间/payload → POST-time frozen binding → queued mode → 11-kind typed 结算单队列 → actual worker + guard
+持久对话回复：reply_to_turn_id + 固定时间/payload → POST-time frozen binding → pending SQLite → rowid 串行 reply worker → 可见 completion CAS（app-stable 对话 lease）
+回复后学习/对象结算：独立 11-kind typed 结算单队列 → actual worker + guard
 确认入口（待聊列表/卡片）→ 单锚(kind+ref+generation) → 全入口 frozen admission / 归属矩阵
                        ├→ 待聊≤3 · 主动零冷却 / 系统12h+对象72h · 确认先于用户附着
                        ├→ worker忙：dialogue_busy + Retry-After → 三端等待态自动重试
@@ -610,6 +613,8 @@ background ─ background admission (default 3) ──────┘
                        └→ 疑惑 FIFO≤5 / 队头 fencing / 12h 补扫
 配置热重载：保持接单并排空旧 worker → 原子暂停/revoke → 新 worker；安全窗25分钟
 实时连接：runtime-stream 20s idle 心跳 → 短暂 close 显示重连中并自动续连
+封面：proxy 前台 + refresh 预取 → app-stable lane（总4/后台3、前台优先）
+                               → cache-key singleflight → 白名单抓取 → 原子缓存
 ```
 
 ```
@@ -619,7 +624,7 @@ background ─ background admission (default 3) ──────┘
 │   Cookie 同步 · 平台任务 · 侧边栏推荐             │
 └──────────────────────┬─────────────────────────┘
                        │ HTTP 默认：IPv4 0.0.0.0 + IPv6 [::] → REST / WebSocket
-                       │ HTTPS 可选：TLS Proxy :8443 → loopback/Compose HTTP → 同一 API
+                       │ HTTPS 可选：公网 Caddy :443 / LAN TLS Proxy :8443 → loopback HTTP → 同一 API
                        │ + 桌面 Web (/web) · 移动 Web (/m) · QR LAN-IP
                        │ + ping 预检降级 → /web · /setup · /m → 配置后原地恢复
 ┌──────────────────────▼─────────────────────────┐
@@ -629,10 +634,14 @@ background ─ background admission (default 3) ──────┘
 │  Soul   │  Memory  │ Discovery │ Recommendation │
 │ 灵魂画像 │ 五层记忆  │多源发现+准入│   推荐与表达     │
 ├─────────┴──────────┴───────────┴───────────────┤
-│ 兴趣：事件/对话/反馈(priority) → 统一管线      │
-│       ProfileUpdatePipeline → INTEREST         │
+│ 普通事件/推荐点击 → generic durable cursor ─┐    │
+│ 内容反馈 → content_feedback durable cursor ─┴→ buffer+cursor 同一原子 checkpoint │
+│ 首启 fence+task admission → listener；后台 owner recovery → tick_if_buffered │
+│ 热重载 pause/drain/recover 后 rebind；周期画像维护才调用 tick │
+│ 对话 → typed settlement worker → learning          │
 │ 旧反馈批：unified_interest_line=false 时启用   │
 │ 初始化屏障：完整画像落盘 → 发现/评估/表达 → 可浏览推荐 │
+│ 封面：proxy前台 + refresh预取 → app-stable 4/3 lane → singleflight/原子缓存 │
 │ Soul 认知纪律：待聊双轨冷却 · 单对话锚 · worker-only 结算 · 轻量 winner receipt · 疑惑 FIFO · 台账 · 深层门控 │
 │   LLM 适配层 · 多平台源适配（SourceAdapter）        │
 │   模块路由 → LLM 实例链 → Provider 适配 · 多平台源适配（SourceAdapter） │
@@ -642,7 +651,7 @@ background ─ background admission (default 3) ──────┘
 │ Bangumi 官方匿名 API → search/ranked/latest producer → shared eval │
 │ API projected 库存 → 3×30 worker → 串行入池；OpenClaw 首批≤4 → copy≤4/不拆分重试 → 四端 │
 │ 惊喜就绪门：正式推荐词/主题就绪 + seen_items 硬过滤 → 打分并原子快照 → 四端 × 写回已看账本 │
-│ API/OpenClaw 启动钩子 → 历史恢复/原子维护 → 再暴露 LLM │
+│ 库存 API/OpenClaw 启动钩子 → 历史恢复/原子维护 → 再暴露 LLM │
 │ 换屏快路：当前卡硬排除 → PoolServeSnapshot/seen_items → recommendation+shown 短事务 → 单条 reshuffle 事件 │
 │ 平台定向（仅 PC Web Tab）：source_platform → 平台候选（不跨平台补位）→ 同一排序/文案/持久化 │
 │ 平台库存：platform-availability → 同一 canonical 可推集合 → total == Σ by_platform │
@@ -659,25 +668,29 @@ background ─ background admission (default 3) ──────┘
 │ 六平台 adapter → broker → shared MV3 recovery barrier → Reddit/X/YT/XHS/DY/Zhihu executor（6/6 fixture + real-account）│
 └────────────────────────────────────────────────┘
 
-Web/API durable → SocraticDialogue(queued) → user+agent 历史 → typed queue[全部 declared entries] → 单 worker 在线内学习/结算
+Web/API durable → rowid 顺序回复 worker → app-stable 对话 lease(max active 1) → SocraticDialogue(queued) → 可见 CAS
+惊喜/legacy/兴趣探针/避雷探针 chat ────────────────────────────────┘（回复与必要副作用同 lease）
+回复完成后的 11-kind learning/settlement → 独立 typed 结算单 worker（不属于 reply backlog）
 CLI/OpenClaw → SocraticDialogue(legacy_direct) → user+agent 历史 → 队列/guard 外 direct learning
 学习 → 绕过后台门禁、保留总并发 ── 新避雷：共享清池 → content_cache
-失败/超时 → 回滚临时历史 → 安全错因 / failed turn
+瞬态/provider/超时/取消 → 回滚临时历史 → durable pending + 队头有界重试；显式空/无效响应 → failed CAS
 durable turn → 固定时间/payload → 确认入口（待聊列表/卡片） → frozen anchor admission → relation matrix
                                                    └→ 卡片/锚/chat/probe/confusion/replay/legacy 全部 worker-only
 卡片 action → 同步 200（空队列快路）| 202 processing → popup/移动/桌面轮询；CLI 无 action
 
 桌面首屏：推荐 hydration │ runtime hydration │ health/profile/activity/config 次级 hydration（三分支独立）
 
-海外请求：设置页 `[network].mode` → 系统代理（默认）/ 直连 / 自定义代理 → LLM、YouTube、X/Reddit CLI、Bangumi、更新；国内平台保持独立直连
+海外请求：设置页 `[network].mode` → 系统代理（默认）/ 直连 / 自定义代理 → LLM、YouTube、X/Reddit CLI、Bangumi、更新、GitHub 项目统计；国内平台保持独立直连
 手动抖音发现：CLI discover → daemon 同款 producer → 统一关键词终态 → 插件 search/hot/feed → 待评估池
 ```
 
 远程扩展连接采用显式、默认关闭的设备认证：`ext-key generate` → 配置仅存摘要 → `/api/auth/extension-token` 换短会话；HTTP 使用 Bearer Header，WebSocket / 图片代理仅携带短会话 query。
 
-可信局域网 / 自管环境可额外启用默认关闭的 [TLS Proxy](docs/https-deployment.md)：精确校验
-HTTPS Origin/Host、转发 WebSocket，并为本地 CA 证书管理显式 SAN。无远程 SAN 时证书只适合
-localhost；该轻量组件不定位为公网生产网关，默认 HTTP 路径完全不变。
+公网域名的 Docker 部署可叠加默认关闭的 [Caddy HTTPS overlay](docs/https-deployment.md)：自动
+申请 / 续期受信证书，通过共享 loopback 代理 REST 与 WebSocket，并把宿主机 `8420` 收紧为
+仅本机可达。可信局域网 / 自管环境仍可选择内置 TLS Proxy：精确校验 HTTPS Origin/Host，
+并为本地 CA 证书管理显式 SAN；无远程 SAN 时证书只适合 localhost。两种入口互斥，默认 HTTP
+路径完全不变。
 
 > 完整架构细节（runtime 状态机、候选池计数、画像覆盖层等）见 [架构设计](docs/architecture.md) 与 [可视化架构图](docs/index.md#可视化架构图)。
 
@@ -763,7 +776,7 @@ OpenBiliClaw/
 | 知乎交互 | 扩展任务调度在已登录浏览器内读取事件 smoke / 初始化画像信号和 search / hot / feed / creator / related 候选；回答 / 文章 / 问题为纯文本卡片 |
 | Reddit 交互 | 默认安装内置 rdt-cli，读取 search / hot / subreddit / related 候选；插件自动同步 `reddit_session` 到 rdt credential，`rdt login` 仅作手动 fallback；rdt 未登录 / 不可用或显式选择 extension 时，扩展任务调度在已登录浏览器内读取 discovery；bootstrap saved/upvoted/subscribed 始终走插件；帖子 / 评论为纯文本卡片 |
 | Bangumi 交互 | 官方匿名只读 v0 API；search / ranked / 按日期浏览进入统一候选池，可选公开用户名读取公开收藏用于初始化；不收 Cookie/token，不做站内写回 |
-| 可选 TLS | Python 标准库 HTTP/TLS 转发 + `[tls]` extra 的 cryptography 证书生成；仅 LAN/self-managed，默认关闭 |
+| 可选 HTTPS | 公网域名使用固定版本 Caddy Docker overlay 自动管理证书；LAN/self-managed 使用 Python TLS Proxy + `[tls]` extra，本地 CA/SAN；默认关闭且两种入口互斥 |
 | 存储 | SQLite + Embedding 向量索引 |
 | 容器化 | Docker Compose (后端) |
 | Agent 框架 | 自研轻量框架 |

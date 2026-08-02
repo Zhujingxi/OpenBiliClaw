@@ -463,7 +463,7 @@ function chatHistorySignature(nextTurns) {
 }
 
 function trackPendingHistoryTurn(nextTurns) {
-  const last = nextTurns[nextTurns.length - 1];
+  const last = [...nextTurns].reverse().find((turn) => turn.scope === "chat");
   if (!last || (last.status !== "pending" && last.status !== "processing")) return;
   if (pendingTurnId === last.turn_id) return;
   pendingTurnId = last.turn_id;
@@ -884,42 +884,58 @@ async function loadHistory() {
     !(existingMessages instanceof HTMLElement) || isChatMessagesNearBottom(existingMessages);
   const previousScrollTop = existingMessages instanceof HTMLElement ? existingMessages.scrollTop : 0;
   try {
-    const [historyData, pendingData] = await Promise.all([
+    const [historyResult, pendingResult] = await Promise.allSettled([
       fetchChatTurns({ session: "popup", limit: 100 }),
       fetchPendingConfirmations({ session: "popup" }),
     ]);
-    const nextTurns = Array.isArray(historyData?.items || historyData?.turns)
-      ? (historyData.items || historyData.turns).map(normalizeChatTurn)
-      : [];
-    trackPendingHistoryTurn(nextTurns);
-    const signature = chatHistorySignature(nextTurns);
-    const changed = signature !== lastHistorySignature;
-    if (changed) {
-      lastHistorySignature = signature;
-      turns = nextTurns;
+    let changed = false;
+    if (historyResult.status === "fulfilled") {
+      const data = historyResult.value;
+      const nextTurns = Array.isArray(data?.items || data?.turns)
+        ? (data.items || data.turns).map(normalizeChatTurn)
+        : [];
+      trackPendingHistoryTurn(nextTurns);
+      const signature = chatHistorySignature(nextTurns);
+      if (signature !== lastHistorySignature) {
+        lastHistorySignature = signature;
+        turns = nextTurns;
+        changed = true;
+      }
     }
-    await validateDialogueContext({ announce: true });
-    if (pendingData && typeof pendingData === "object") {
-      pendingConfirmations = {
-        ...pendingConfirmations,
-        count: Math.max(0, Number(pendingData.count) || 0),
-        items: Array.isArray(pendingData.items) ? pendingData.items : [],
+    if (pendingResult.status === "fulfilled") {
+      const payload = pendingResult.value;
+      const nextPending = {
+        count: Math.max(0, Number(payload?.count) || 0),
+        items: Array.isArray(payload?.items) ? payload.items : [],
       };
+      if (
+        nextPending.count !== pendingConfirmations.count ||
+        JSON.stringify(nextPending.items) !== JSON.stringify(pendingConfirmations.items)
+      ) {
+        pendingConfirmations = { ...pendingConfirmations, ...nextPending };
+        changed = true;
+      }
     }
+    const contextBefore = dialogueContextSelection?.reply_to_turn_id || "";
+    await validateDialogueContext({ announce: true });
+    if ((dialogueContextSelection?.reply_to_turn_id || "") !== contextBefore) {
+      changed = true;
+    }
+    if (!changed) return;
     render();
     if (!shouldStickToBottom) {
-      const restoreScrollPosition = () => {
+      window.requestAnimationFrame(() => {
         const messages = document.getElementById("chat-messages");
         if (!(messages instanceof HTMLElement)) return;
         messages.scrollTop = Math.min(
           previousScrollTop,
           Math.max(0, messages.scrollHeight - messages.clientHeight),
         );
-      };
-      window.requestAnimationFrame(restoreScrollPosition);
+      });
     }
-  } catch { /* ignore */ }
-  finally {
+  } catch {
+    // Keep the last durable snapshot while offline.
+  } finally {
     historyRefreshInFlight = false;
   }
 }

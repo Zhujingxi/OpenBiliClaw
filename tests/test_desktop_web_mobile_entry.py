@@ -2,7 +2,8 @@
 
 The desktop web must keep a *labelled* 手机版 entry in the top bar (users
 missed icon-only entries) that opens a QR drawer pointing at the /m/ mobile
-web, built from the backend-reported LAN IP rather than the page host.
+web. A reachable page origin is preserved; only loopback pages are replaced
+with the backend-reported LAN IP so a phone can reach them.
 """
 
 from __future__ import annotations
@@ -40,7 +41,7 @@ def test_mobile_qr_drawer_contract() -> None:
     assert "/web/assets/js/mobile-qr.js" in _INDEX, "QR generator script must be loaded"
 
 
-def test_app_js_builds_url_from_backend_lan_ip() -> None:
+def test_app_js_keeps_loopback_lan_ip_fallback() -> None:
     wiring = _APP_JS.split("async function openMobileQrDrawer", 1)
     assert len(wiring) == 2, "app.js must define openMobileQrDrawer"
     body = wiring[1].split('safeBind("#profileBtn"', 1)[0]
@@ -50,6 +51,20 @@ def test_app_js_builds_url_from_backend_lan_ip() -> None:
     assert "isLoopbackMobileHost" in body, "must warn when only a loopback address is available"
     assert 'safeBind("#mobileQrBtn"' in _APP_JS
     assert 'safeBind("#mobileQrCopyBtn"' in _APP_JS
+
+
+def test_mobile_qr_preserves_https_public_origin() -> None:
+    assert 'scheme === "https" ? "https" : "http"' in _QR_JS
+    assert "`${safeScheme}://${urlHost}:${safePort}/m/`" in _QR_JS
+    assert 'value === "[::1]"' in _QR_JS
+
+    body = _APP_JS.split("async function openMobileQrDrawer", 1)[1].split(
+        'safeBind("#profileBtn"', 1
+    )[0]
+    assert "pageHostIsReachable" in body
+    assert 'window.location.protocol === "https:" ? "https" : "http"' in body
+    assert "pageHostIsReachable ? def.host" in body
+    assert "pageHostIsReachable ? def.port" in body
 
 
 def test_mobile_qr_drawer_requeries_lan_ip_on_every_open() -> None:

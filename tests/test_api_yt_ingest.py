@@ -137,5 +137,5 @@ def test_yt_bootstrap_skips_items_already_seen_in_previous_task(
         assert response.status_code == 200
 
     assert [event["title"] for event in memory.events] == ["重复 YouTube 历史"]
-    assert len(memory.profile_signals) == 1
+    assert memory.profile_signals == []
     assert memory.load_source_bootstrap_state()["yt_seen_item_keys"] == ["yt_history:repeated-yt"]

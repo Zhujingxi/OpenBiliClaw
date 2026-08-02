@@ -100,6 +100,7 @@ async def test_phase7_cross_source_pipeline_end_to_end(tmp_path: Path) -> None:
     bilibili_events = [
         {
             "type": "click",
+            "event_id": "phase7-bilibili-click-a",
             "url": "https://www.bilibili.com/video/BV1AAAAAAAAA",
             "title": "B 站视频 A",
             "timestamp": 1_710_000_000_000,
@@ -109,6 +110,7 @@ async def test_phase7_cross_source_pipeline_end_to_end(tmp_path: Path) -> None:
         },
         {
             "type": "like",
+            "event_id": "phase7-bilibili-like-b",
             "url": "https://www.bilibili.com/video/BV1BBBBBBBBB",
             "title": "B 站视频 B",
             "timestamp": 1_710_000_000_100,
@@ -118,6 +120,7 @@ async def test_phase7_cross_source_pipeline_end_to_end(tmp_path: Path) -> None:
         },
         {
             "type": "favorite",
+            "event_id": "phase7-bilibili-favorite-c",
             "url": "https://www.bilibili.com/video/BV1CCCCCCCCC",
             "title": "B 站视频 C",
             "timestamp": 1_710_000_000_200,
@@ -129,6 +132,7 @@ async def test_phase7_cross_source_pipeline_end_to_end(tmp_path: Path) -> None:
     xiaohongshu_events = [
         {
             "type": "click",
+            "event_id": "phase7-xiaohongshu-click-a",
             "url": "https://www.xiaohongshu.com/explore/69dea966000000001a0280ad",
             "title": "小红书笔记 A",
             "timestamp": 1_710_000_001_000,
@@ -138,6 +142,7 @@ async def test_phase7_cross_source_pipeline_end_to_end(tmp_path: Path) -> None:
         },
         {
             "type": "like",
+            "event_id": "phase7-xiaohongshu-like-b",
             "url": "https://www.xiaohongshu.com/explore/69dea966000000001a0280ae",
             "title": "小红书笔记 B",
             "timestamp": 1_710_000_001_100,

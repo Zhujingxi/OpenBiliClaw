@@ -1,0 +1,76 @@
+# Optional public-domain HTTPS gateway for either Docker deployment path.
+#
+# Usage (Docker Compose 2.24.4+):
+#   export OPENBILICLAW_DOMAIN=obc.example.com
+#   docker compose -f docker-compose.prebuilt.yml -f docker-compose.https.yml up -d
+#   docker exec -it openbiliclaw-backend openbiliclaw set-password
+#   docker restart openbiliclaw-backend openbiliclaw-caddy
+#
+# Caddy obtains and renews the public certificate automatically. It shares the
+# backend container's network namespace so the only trusted proxy hop is
+# loopback; :8420 is republished on host loopback while :80/:443 become the
+# public entrypoints. The default compose files remain HTTP/LAN-compatible when
+# this overlay is not selected.
+
+services:
+  openbiliclaw-backend:
+    environment:
+      # Uvicorn accepts forwarded scheme/client headers only from the Caddy
+      # process sharing this container's loopback interface. Never widen this
+      # while the backend is reachable from an untrusted network.
+      FORWARDED_ALLOW_IPS: "127.0.0.1"
+    ports: !override
+      - "127.0.0.1:8420:8420"
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+
+  openbiliclaw-caddy:
+    image: caddy:2.11.4-alpine
+    container_name: openbiliclaw-caddy
+    network_mode: "service:openbiliclaw-backend"
+    depends_on:
+      openbiliclaw-backend:
+        condition: service_healthy
+    environment:
+      OPENBILICLAW_DOMAIN: ${OPENBILICLAW_DOMAIN:?Set OPENBILICLAW_DOMAIN to a public DNS name, for example obc.example.com}
+    # Fail closed: publishing a public hostname must never create a window in
+    # which the API password gate is still disabled. The container waits on
+    # loopback without binding :80/:443; after set-password + backend restart,
+    # it automatically execs the production-ready Caddy reverse proxy.
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        if ! curl --fail --silent http://127.0.0.1:8420/api/auth/status |
+          grep -q '"enabled":true'; then
+          echo "Waiting for the OpenBiliClaw Web password gate to be enabled..."
+        fi
+        until curl --fail --silent http://127.0.0.1:8420/api/auth/status |
+          grep -q '"enabled":true'; do
+          sleep 5
+        done
+        exec caddy reverse-proxy \
+          --from "$${OPENBILICLAW_DOMAIN}" \
+          --to 127.0.0.1:8420
+    volumes:
+      - openbiliclaw_caddy_data:/data
+      - openbiliclaw_caddy_config:/config
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          curl --fail --silent --show-error
+          --resolve "$${OPENBILICLAW_DOMAIN}:443:127.0.0.1"
+          "https://$${OPENBILICLAW_DOMAIN}/api/health" >/dev/null
+      interval: 30s
+      timeout: 10s
+      start_period: 5m
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  openbiliclaw_caddy_data:
+    name: openbiliclaw_caddy_data
+  openbiliclaw_caddy_config:
+    name: openbiliclaw_caddy_config

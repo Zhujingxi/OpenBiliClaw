@@ -2218,6 +2218,11 @@ body.chat-view-active .back-to-top {
   color: var(--text-secondary);
 }
 
+.delight-result-state[data-tone="error"] {
+  background: rgba(239, 122, 134, 0.12);
+  color: var(--danger);
+}
+
 /* ── Delight Inline Chat ─────────────────────────────────────── */
 .delight-chat-area {
   display: flex;

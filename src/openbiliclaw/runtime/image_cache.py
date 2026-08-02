@@ -24,11 +24,14 @@ Cleanup rules (unioned), see :func:`cleanup_image_cache`:
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import hashlib
 import logging
+import os
 import re
+import tempfile
 import time
 from contextlib import suppress
 from dataclasses import dataclass
@@ -116,6 +119,19 @@ def normalize_cache_url(url: str) -> str:
 def image_cache_key(url: str) -> str:
     """SHA-256 of the normalized URL — the cache filename stem."""
     return hashlib.sha256(normalize_cache_url(url).encode()).hexdigest()
+
+
+def image_log_identity(url: str) -> tuple[str, str]:
+    """Return a safe ``(host, cache-hash-prefix)`` pair for diagnostics.
+
+    Signed cover URLs contain expiring bearer-like tokens.  Logs must never
+    include their path, query, or exception representations that echo them.
+    """
+    try:
+        host = str(httpx.URL(_https_normalize(url)).host or "") or "<unparseable>"
+    except Exception:  # noqa: BLE001 - logging helpers must never raise
+        host = "<unparseable>"
+    return host, image_cache_key(url)[:12]
 
 
 def is_refetchable(url: str) -> bool:
@@ -360,6 +376,11 @@ def _parse_image_url(raw_url: str) -> httpx.URL:
     return parsed
 
 
+def validate_image_url(url: str) -> None:
+    """Raise :class:`CoverFetchError` unless ``url`` passes the fetch boundary."""
+    _parse_image_url(url)
+
+
 def _validate_content_headers(headers: httpx.Headers) -> str:
     content_type = str(headers.get("content-type", "")).strip()
     if not content_type.lower().startswith("image/"):
@@ -419,17 +440,15 @@ _failure_log_state: dict[str, tuple[int, float]] = {}
 
 
 def _log_cover_fetch_failure(url: str, reason: str) -> None:
-    try:
-        host = str(httpx.URL(url).host or "") or "<unparseable>"
-    except Exception:  # noqa: BLE001 — logging must never raise
-        host = "<unparseable>"
+    host, cache_id = image_log_identity(url)
     count, last_log = _failure_log_state.get(host, (0, 0.0))
     count += 1
     now = time.monotonic()
     if last_log == 0.0 or now - last_log >= _FAILURE_LOG_INTERVAL_SECONDS:
         logger.warning(
-            "cover fetch failed for host %s: %s (%d failure(s) since last report)",
+            "cover fetch failed host=%s cache=%s kind=%s (%d failure(s) since last report)",
             host,
+            cache_id,
             reason,
             count,
         )
@@ -465,19 +484,54 @@ async def fetch_cover_bytes(url: str) -> tuple[bytes, str]:
             finally:
                 await response.aclose()
     except httpx.TimeoutException as exc:
-        _log_cover_fetch_failure(url, f"timeout: {exc!r}")
+        _log_cover_fetch_failure(url, "timeout")
         raise CoverFetchError(504, "Upstream request timed out") from exc
     except httpx.HTTPError as exc:
-        _log_cover_fetch_failure(url, f"network error: {exc!r}")
+        _log_cover_fetch_failure(url, type(exc).__name__)
         raise CoverFetchError(502, "Upstream request failed") from exc
     return data, content_type
 
 
-def save_image_bytes(url: str, data: bytes, content_type: str) -> None:
-    """Persist fetched cover bytes to the disk cache (best-effort)."""
-    path = image_cache_dir() / f"{image_cache_key(url)}.{image_cache_extension(content_type)}"
-    with suppress(OSError):
-        path.write_bytes(data)
+def save_image_bytes(url: str, data: bytes, content_type: str) -> bool:
+    """Atomically persist fetched cover bytes to the disk cache (best-effort)."""
+    directory = image_cache_dir()
+    key = image_cache_key(url)
+    path = directory / f"{key}.{image_cache_extension(content_type)}"
+    file_descriptor: int | None = None
+    temp_path: Path | None = None
+    try:
+        file_descriptor, temp_name = tempfile.mkstemp(
+            prefix=f".{key}.",
+            suffix=".tmp",
+            dir=directory,
+        )
+        temp_path = directory / temp_name.rsplit(os.sep, 1)[-1]
+        with os.fdopen(file_descriptor, "wb") as handle:
+            file_descriptor = None
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+        temp_path = None
+        # Persist the directory entry where the platform supports directory
+        # fsync. Windows and some filesystems reject it, without invalidating
+        # the already-atomic replace.
+        with suppress(OSError):
+            directory_fd = os.open(directory, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        return True
+    except OSError:
+        return False
+    finally:
+        if file_descriptor is not None:
+            with suppress(OSError):
+                os.close(file_descriptor)
+        if temp_path is not None:
+            with suppress(OSError):
+                temp_path.unlink()
 
 
 def is_cover_cached(url: str) -> bool:
@@ -489,7 +543,7 @@ def is_cover_cached(url: str) -> bool:
     return False
 
 
-def _cached_cover_bytes(url: str) -> tuple[bytes, str] | None:
+def cached_cover_bytes(url: str) -> tuple[bytes, str] | None:
     """Return cached cover bytes when a non-empty cached file exists."""
     for candidate in image_cache_dir().glob(f"{image_cache_key(url)}.*"):
         ext = candidate.suffix.lower().lstrip(".")
@@ -505,12 +559,12 @@ def _cached_cover_bytes(url: str) -> tuple[bytes, str] | None:
 async def get_or_fetch_cover_bytes(url: str) -> tuple[bytes, str]:
     """Return cover bytes from disk cache first, fetching and caching on miss."""
     _parse_image_url(url)
-    cached = _cached_cover_bytes(url)
+    cached = await asyncio.to_thread(cached_cover_bytes, url)
     if cached is not None:
         return cached
 
     data, content_type = await fetch_cover_bytes(url)
-    save_image_bytes(url, data, content_type)
+    await asyncio.to_thread(save_image_bytes, url, data, content_type)
     return data, content_type
 
 
@@ -524,9 +578,10 @@ def select_prefetch_targets(urls: Iterable[str], *, max_fetch: int) -> list[str]
     todo: list[str] = []
     seen: set[str] = set()
     for url in urls:
-        if url in seen:
+        key = image_cache_key(url)
+        if key in seen:
             continue
-        seen.add(url)
+        seen.add(key)
         if not is_allowed_image_url(url) or is_cover_cached(url):
             continue
         todo.append(url)
@@ -541,14 +596,13 @@ async def prefetch_cover(url: str) -> bool:
     Returns True only when a new cache entry was written. Never raises — prefetch
     is opportunistic, so any whitelist / network / upstream failure is swallowed.
     """
-    if not is_allowed_image_url(url) or is_cover_cached(url):
+    if not is_allowed_image_url(url) or await asyncio.to_thread(is_cover_cached, url):
         return False
     try:
         data, content_type = await fetch_cover_bytes(url)
     except Exception:
         return False
-    save_image_bytes(url, data, content_type)
-    return True
+    return await asyncio.to_thread(save_image_bytes, url, data, content_type)
 
 
 # Upload ceiling for extension-harvested covers. XHS covers are ~30-80KB webp;
@@ -576,25 +630,39 @@ def save_extension_cover(url: str, data_base64: str, content_type: str) -> bool:
     break note ingestion.
     """
     if not is_allowed_image_url(url):
-        logger.debug("extension cover rejected (host not allowed): %.100s", url)
+        logger.debug(
+            "extension cover rejected kind=host_not_allowed host=%s cache=%s",
+            *image_log_identity(url),
+        )
         return False
     normalized_type = content_type.split(";")[0].strip().lower()
     if not normalized_type.startswith("image/"):
-        logger.debug("extension cover rejected (content type %r): %.100s", content_type, url)
+        logger.debug(
+            "extension cover rejected kind=content_type host=%s cache=%s",
+            *image_log_identity(url),
+        )
         return False
     if is_cover_cached(url):
         return False
     # ~4/3 base64 expansion; cheap pre-check before decoding.
     if len(data_base64) > MAX_EXTENSION_COVER_BYTES * 4 // 3 + 8:
-        logger.debug("extension cover rejected (oversize payload): %.100s", url)
+        logger.debug(
+            "extension cover rejected kind=oversize host=%s cache=%s",
+            *image_log_identity(url),
+        )
         return False
     try:
         data = base64.b64decode(data_base64, validate=True)
     except (binascii.Error, ValueError):
-        logger.debug("extension cover rejected (invalid base64): %.100s", url)
+        logger.debug(
+            "extension cover rejected kind=invalid_base64 host=%s cache=%s",
+            *image_log_identity(url),
+        )
         return False
     if not data or len(data) > MAX_EXTENSION_COVER_BYTES:
-        logger.debug("extension cover rejected (empty or oversize): %.100s", url)
+        logger.debug(
+            "extension cover rejected kind=decoded_size host=%s cache=%s",
+            *image_log_identity(url),
+        )
         return False
-    save_image_bytes(url, data, normalized_type)
-    return True
+    return save_image_bytes(url, data, normalized_type)

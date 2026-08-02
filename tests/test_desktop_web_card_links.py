@@ -89,12 +89,24 @@ def test_delight_view_button_actually_opens_the_content() -> None:
 
 def test_delight_close_button_is_labeled_as_permanent_seen_action() -> None:
     app_js = APP_JS.read_text(encoding="utf-8")
+    app_css = APP_CSS.read_text(encoding="utf-8")
     index_html = INDEX_HTML.read_text(encoding="utf-8")
 
     assert (
-        'data-delight="dismiss" type="button" '
+        'class="delight-dismiss-btn" data-delight="dismiss" type="button" '
         'aria-label="看过了，不再推荐" title="看过了，不再推荐"'
     ) in index_html
+    delight_meta = index_html.index('<div class="delight-meta">')
+    delight_copy = index_html.index('<div class="delight-copy">', delight_meta)
+    delight_dismiss = index_html.index('class="delight-dismiss-btn"', delight_meta)
+    feedback_actions = index_html.index('<div class="delight-feedback-actions card-feedback-icons"')
+    status_line = index_html.index('<p class="status-line"', feedback_actions)
+    assert delight_meta < delight_dismiss < delight_copy
+    assert 'data-delight="dismiss"' not in index_html[feedback_actions:status_line]
+    assert ".delight-dismiss-btn {" in app_css
+    assert ".delight-dismiss-btn:focus-visible" in app_css
+    assert ".delight-dismiss-btn:disabled" in app_css
+    assert "flex-basis: 44px; width: 44px; height: 44px; min-height: 44px;" in app_css
     assert "已标为看过，不再推荐" in app_js
     assert 'if (response === "dismiss" && feedbackResult == null)' in app_js
     assert "这次还没记上，请再试一次" in app_js

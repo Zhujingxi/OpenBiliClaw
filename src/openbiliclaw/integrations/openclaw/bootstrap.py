@@ -27,6 +27,7 @@ from openbiliclaw.llm.usage_recorder import UsageRecorder
 from openbiliclaw.memory.manager import MemoryManager
 from openbiliclaw.recommendation.engine import RecommendationEngine
 from openbiliclaw.runtime.account_sync import AccountSyncService
+from openbiliclaw.runtime.event_ingress import EventIngressService
 from openbiliclaw.runtime.presence import PresenceTracker
 from openbiliclaw.runtime.refresh import ContinuousRefreshController
 from openbiliclaw.runtime.source_policy import effective_pool_source_shares
@@ -52,6 +53,7 @@ class OpenClawAdapterServices:
     recommendation_engine: RecommendationEngine | Any
     runtime_controller: ContinuousRefreshController | Any
     account_sync_service: AccountSyncService | Any
+    event_ingress: EventIngressService | Any
 
 
 def _build_account_sync_x_components(
@@ -400,6 +402,20 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
         x_health_store=account_sync_x_health,
     )
 
+    async def _prepare_event_owners() -> None:
+        prepare_profile = getattr(soul_engine, "prepare_profile_event_owner_cutover", None)
+        if callable(prepare_profile):
+            await prepare_profile()
+        prepare_feedback = getattr(soul_engine, "prepare_feedback_owner_cutover", None)
+        if callable(prepare_feedback):
+            await prepare_feedback()
+
+    event_ingress = EventIngressService(
+        memory_manager,
+        prepare_owner=_prepare_event_owners,
+    )
+    account_sync_service.event_ingress = event_ingress
+
     return OpenClawAdapterServices(
         config=config,
         database=database,
@@ -411,6 +427,7 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
         recommendation_engine=recommendation_engine,
         runtime_controller=runtime_controller,
         account_sync_service=account_sync_service,
+        event_ingress=event_ingress,
     )
 
 

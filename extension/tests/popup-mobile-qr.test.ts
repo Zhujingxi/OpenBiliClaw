@@ -43,6 +43,8 @@ test("mobile web QR URL brackets an IPv6 literal", () => {
 test("mobile web QR state warns when the configured host is loopback", () => {
   assert.equal(isLoopbackMobileHost("127.0.0.1"), true);
   assert.equal(isLoopbackMobileHost("localhost"), true);
+  assert.equal(isLoopbackMobileHost("::1"), true);
+  assert.equal(isLoopbackMobileHost("[::1]"), true);
   assert.equal(isLoopbackMobileHost("192.168.1.100"), false);
 
   const state = getMobileQrViewState({ host: "127.0.0.1", port: 8420 });

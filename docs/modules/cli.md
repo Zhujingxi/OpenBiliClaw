@@ -53,7 +53,7 @@ openbiliclaw [--log-level DEBUG|INFO|WARNING|ERROR] <命令>
 | `import-youtube <path>` | 从 Google Takeout 导入 YouTube 历史 / 订阅 / 点赞 | ✅ |
 | `setup-embedding` | 配置本地 Ollama 作为独立 embedding provider（可选） | ✅ |
 | `recommend` | 查看推荐 | ✅ |
-| `feedback <id> <like\|dislike\|comment\|dismiss>` | 对推荐提交反馈 | ✅ |
+| `feedback <id> <like\|dislike\|comment\|dismiss> [--request-id <stable-id>]` | 对推荐提交反馈；省略 ID 时生成并回显，跨命令重试必须复用 | ✅ |
 | `profile` | 查看用户画像 | ✅ |
 | `questions` | 只读查看对话确认入口的待聊假设与疑惑 | ✅ |
 | `keyword-inspiration-dry-run` | 真实调用当前 LLM + inspiration 搜索 provider 链，预览关键词生成中间链路，不写关键词池；支持 `--persist-axes` | ✅ |
@@ -589,7 +589,7 @@ $ openbiliclaw questions
   疑惑  为什么最近跳过熟悉主题  61%  —                  42
 ```
 
-输出只包含类型、话题、置信度、依据和 ref，不提供 confirm/reject/discuss/defer 动作，也不会写数据库；主动确认仍只能在插件或桌面端的对话卡片中完成。运行前需先启动本地 API 服务；连接失败会显示实际 loopback URL 和启动提示。
+输出只包含类型、话题、置信度、依据和 ref，不提供 confirm/reject/discuss/defer 动作，也不会写数据库；主动确认可在插件、移动 Web 或桌面 Web 的对话卡片中完成。运行前需先启动本地 API 服务；连接失败会显示实际 loopback URL 和启动提示。
 
 ### `openbiliclaw profile-consolidate`
 
@@ -897,15 +897,21 @@ $ openbiliclaw feedback 7 dislike --note "太浅了"
 反馈详情
   推荐ID: 7
   反馈: dislike
+  请求ID: 8f4...（实际输出为完整 ID）
   备注: 太浅了
 
-$ openbiliclaw feedback 7 comment --note "方向对，但我想看更深一点。"
+$ openbiliclaw feedback 7 comment --note "方向对，但我想看更深一点。" \
+  --request-id feedback-7-comment-20260802
 ```
+
+`--request-id` 会 trim，最长 400 字符。省略或只传空白时命令生成 UUID hex，并在「反馈详情」打印出来；如果终端在 durable commit 后丢失响应、或要在另一次命令中重试，必须把第一次输出的 ID 传回 `--request-id`。同一次进程内盲目再生成新 ID 会被视为新的反馈动作。显式 ID 超过 400 字符会在构造 runtime/写库前退出。
 
 每次反馈执行以下两个写入操作：
 
 - 更新 `recommendations` 表中的 `feedback_type` / `feedback_note` / `feedback_at`
 - 写入一条 `event_type="feedback"` 的事件，供后续记忆系统使用
+
+durable event 的首写与 recommendation 投影是命令成功边界；后续即时认知记录、owner drain 或摘要刷新属于可恢复的 follow-up。它们暂时失败时命令仍以退出码 `0` 返回，并明确提示「反馈已记录，画像处理稍后重试」，不会把已经提交的反馈误报为失败。相同 request identity 的重试读取首写 payload；若身份已被不同反馈占用则报冲突，不覆盖原记录。CLI 的 producer namespace 会把该 ID 持久化为 `cli:<request-id>`，用户仍只传/保存未加前缀的输出值。
 
 ### `openbiliclaw fetch-douyin`
 
@@ -1225,7 +1231,7 @@ openbiliclaw init
 `legacy_direct`：得到回复后仍按既有 detached direct learning 学习，既不提交 API
 runtime 的 `DialogueSettlementQueue`，也不持有 worker guard permit；因此行为不变，
 但不享受队列串行/receipt/guard 保证。Wave 3 的 HTTP `202 processing` 与 30 秒
-卡片轮询只服务 popup/桌面卡片，CLI 没有 action HTTP 入口，不新增 poll。输入
+卡片轮询只服务 popup、移动 Web 与桌面 Web 卡片，CLI 没有 action HTTP 入口，不新增 poll。输入
 `exit`、`quit` 或空行可结束。聊天内容
 仅在得到真实回复后以受控方式积累到长期理解候选中，不会因为一句话立刻改写画像。
 单轮 LLM 失败会打印安全、可操作的错因（不显示上游异常原文），REPL 继续接受下一轮输入。

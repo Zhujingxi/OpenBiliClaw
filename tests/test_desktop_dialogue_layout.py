@@ -16,7 +16,10 @@ def test_desktop_dialogue_has_a_structured_pending_inbox() -> None:
     assert ".dialogue-pending {" in css
     assert "#desktopPendingConfirmations {" in css
     assert "grid-template-columns: 1fr;" in css
+    assert "grid-auto-rows: max-content;" in css
     assert "padding: 0 8px 8px;" in css
+    assert "overflow-y: auto;" in css
+    assert "max-height: min(32vh, 300px);" in css
     assert "border-radius: 13px;" in css
     assert "#desktopPendingToggle:focus-visible" in css
 
@@ -57,3 +60,27 @@ def test_desktop_silently_clears_a_context_after_its_card_settles() -> None:
 
     assert "isTerminalCardTurn" in source
     assert "if (isTerminalCardTurn(contextTarget))" in source
+
+
+def test_desktop_dialogue_history_uses_natural_rows_and_visible_scroll_affordance() -> None:
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    css = APP_CSS.read_text(encoding="utf-8")
+
+    assert 'id="chatLog" role="region" aria-label="口味对话记录" tabindex="0"' in html
+    assert ".chat-log { display: grid; grid-auto-rows: max-content;" in css
+    assert ".chat-page .chat-log {" in css
+    assert "scrollbar-width: thin;" in css
+    assert "overscroll-behavior: contain;" in css
+    assert ".chat-page .chat-log::-webkit-scrollbar" in css
+    assert ".chat-page .chat-log::-webkit-scrollbar { display: none; }" not in css
+
+
+def test_desktop_dialogue_refresh_preserves_reader_scroll_and_open_evidence() -> None:
+    js = APP_JS.read_text(encoding="utf-8")
+
+    assert "function isNearScrollBottom(element)" in js
+    assert "function openDialogueEvidenceTurnIds(element)" in js
+    assert "function renderChatLogElement(element, markup" in js
+    assert "const previousScrollTop = element.scrollTop;" in js
+    assert "if (openEvidenceTurnIds.has(turnId)) details.open = true;" in js
+    assert "renderChat({ forceBottom });" in js

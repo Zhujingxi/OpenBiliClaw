@@ -6,7 +6,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 from typing import TYPE_CHECKING, cast
 
 import pytest
@@ -110,6 +110,156 @@ def test_soul_engine_wires_scheduler_speculation_config(tmp_path: Path) -> None:
     assert engine._avoidance_speculator._max_active == 5
     assert engine._pipeline._speculator_idle_min_interval == timedelta(minutes=11)
     assert engine._pipeline._avoidance_speculator is engine._avoidance_speculator
+
+
+@pytest.mark.asyncio
+async def test_prepared_owner_cutovers_use_nonblocking_fast_path_while_lanes_are_busy(
+    tmp_path: Path,
+) -> None:
+    """Ingress preparation must not wait behind an already-prepared owner."""
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    memory.get_layer("soul").data.update({"profile_ready": True})
+    engine = SoulEngine(
+        llm=FakeRegistry("{}"),
+        memory=memory,
+        unified_interest_line=True,
+    )
+
+    profile_cutover = await engine.prepare_profile_event_owner_cutover()
+    feedback_cutover = await engine.prepare_feedback_owner_cutover()
+    assert profile_cutover["profile_event_owner_version"] == 1
+    assert feedback_cutover["feedback_owner_version"] == 2
+
+    await engine._profile_event_lock.acquire()
+    await engine._feedback_batch_lock.acquire()
+    try:
+        profile_fast = await asyncio.wait_for(
+            engine.prepare_profile_event_owner_cutover(),
+            timeout=0.05,
+        )
+        feedback_fast = await asyncio.wait_for(
+            engine.prepare_feedback_owner_cutover(),
+            timeout=0.05,
+        )
+    finally:
+        engine._feedback_batch_lock.release()
+        engine._profile_event_lock.release()
+
+    assert profile_fast["prepared"] is False
+    assert profile_fast["profile_event_owner_version"] == 1
+    assert feedback_fast["prepared"] is False
+    assert feedback_fast["feedback_owner_version"] == 2
+
+
+@pytest.mark.asyncio
+async def test_generic_retraction_projection_failure_keeps_cursor_then_retry_repairs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Projection is part of the generic owner's cursor commit protocol."""
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    memory.get_layer("soul").data.update({"profile_ready": True})
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    await engine.prepare_profile_event_owner_cutover()
+    t0 = datetime(2026, 8, 1, 12, 0, 0)
+    first_ms = int(t0.timestamp() * 1000)
+    retract_ms = int((t0 + timedelta(hours=1)).timestamp() * 1000)
+    await memory.persist_events_with_receipts(
+        [
+            {
+                "event_type": "like",
+                "url": "https://x.com/i/status/123",
+                "title": "owned positive",
+                "metadata": {
+                    "profile_update_owner": "generic",
+                    "signal_strength": 0.85,
+                    "timestamp": first_ms,
+                },
+                "ingest_key": "test:generic-like",
+            },
+            {
+                "event_type": "view",
+                "url": "https://example.com/unowned",
+                "title": "strictly unowned",
+                "metadata": {"timestamp": first_ms},
+                "ingest_key": "test:unowned-view",
+            },
+            {
+                "event_type": "feedback",
+                "url": "https://x.com/user/status/123",
+                "title": "owned retraction",
+                "metadata": {
+                    "profile_update_owner": "generic",
+                    "feedback_type": "retraction",
+                    "retracted_action": "like",
+                    "timestamp": retract_ms,
+                },
+                "ingest_key": "test:generic-retraction",
+            },
+        ]
+    )
+    tick_calls = 0
+
+    async def fake_tick() -> object:
+        nonlocal tick_calls
+        tick_calls += 1
+        return SimpleNamespace(layers_updated=[])
+
+    monkeypatch.setattr(engine._pipeline, "tick_if_buffered", fake_tick)
+    real_projection = memory.apply_retraction_db_marks
+
+    def fail_projection(_events: list[dict[str, object]]) -> int:
+        raise RuntimeError("projection unavailable")
+
+    monkeypatch.setattr(memory, "apply_retraction_db_marks", fail_projection)
+    with pytest.raises(RuntimeError, match="projection unavailable"):
+        await engine.process_profile_events_if_needed()
+    assert engine._pipeline.consumer_checkpoint("profile_events")["cursor"] == 0
+    assert tick_calls == 0
+
+    monkeypatch.setattr(memory, "apply_retraction_db_marks", real_projection)
+    repaired = await engine.process_profile_events_if_needed()
+
+    assert repaired["scanned"] == 3
+    assert repaired["enqueued"] == 2
+    assert engine._pipeline.consumer_checkpoint("profile_events")["cursor"] == 3
+    assert tick_calls == 1
+    [positive] = memory.query_events(event_types=["like"], limit=10)
+    metadata = json.loads(str(positive["metadata"]))
+    assert metadata["retracted"] is True
+    assert float(metadata["signal_strength"]) <= 0.2
+
+
+@pytest.mark.asyncio
+async def test_generic_owner_empty_recovery_skips_tick_maintenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A no-op durable cursor scan must not start periodic LLM maintenance."""
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    memory.get_layer("soul").data.update({"profile_ready": True})
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    await engine.prepare_profile_event_owner_cutover()
+    maintenance_calls = 0
+
+    async def unexpected_maintenance(*_args: object, **_kwargs: object) -> None:
+        nonlocal maintenance_calls
+        maintenance_calls += 1
+
+    monkeypatch.setattr(
+        engine._pipeline,
+        "_run_tick_maintenance",
+        unexpected_maintenance,
+    )
+
+    result = await engine.process_profile_events_if_needed()
+
+    assert result["scanned"] == 0
+    assert result["enqueued"] == 0
+    assert maintenance_calls == 0
 
 
 @pytest.mark.asyncio
@@ -5577,13 +5727,21 @@ class TestUnifiedInterestLineShim:
     }
 
     @staticmethod
-    async def _seed_feedback(memory: MemoryManager, rows: list[tuple[str, str]]) -> None:
+    async def _seed_feedback(
+        memory: MemoryManager,
+        rows: list[tuple[str, str]],
+        *,
+        owner: str = "",
+    ) -> None:
         for feedback_type, title in rows:
+            metadata = {"feedback_type": feedback_type, "feedback_note": "备注"}
+            if owner:
+                metadata["profile_update_owner"] = owner
             await memory.propagate_event(
                 {
                     "event_type": "feedback",
                     "title": title,
-                    "metadata": {"feedback_type": feedback_type, "feedback_note": "备注"},
+                    "metadata": metadata,
                 }
             )
 
@@ -5609,15 +5767,94 @@ class TestUnifiedInterestLineShim:
         monkeypatch.setattr(engine._preference_analyzer, "analyze_events", fake_analyze_events)
 
     @staticmethod
-    def _spy_ingest(engine: SoulEngine, batches: list[list[object]]) -> None:
-        """Record every ingest_batch call, then delegate to the real pipeline."""
-        real = engine._pipeline.ingest_batch
+    def _spy_enqueue(engine: SoulEngine, batches: list[list[object]]) -> None:
+        """Record non-empty atomic checkpoint batches, then delegate."""
+        real = engine._pipeline.checkpointed_enqueue_batch
 
-        async def spy(signals: list[object]) -> object:
-            batches.append(list(signals))
-            return await real(signals)  # type: ignore[arg-type]
+        async def spy(signals: list[object], **kwargs: object) -> object:
+            if signals:
+                batches.append(list(signals))
+            return await real(signals, **kwargs)  # type: ignore[arg-type]
 
-        engine._pipeline.ingest_batch = spy  # type: ignore[method-assign, assignment]
+        engine._pipeline.checkpointed_enqueue_batch = spy  # type: ignore[method-assign, assignment]
+
+    def test_feedback_signal_requires_positive_durable_event_id(self) -> None:
+        with pytest.raises(ValueError, match="positive id"):
+            SoulEngine._feedback_event_to_signal(
+                {"id": 0, "event_type": "feedback", "metadata": {"feedback_type": "like"}}
+            )
+
+    @pytest.mark.asyncio
+    async def test_owner_v2_cutover_fences_v1_direct_owned_rows_then_claims_next_row(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Upgrade fence: old cursor 2 + direct-owned rows 3..5; v2 owns row 6+."""
+        memory = MemoryManager(tmp_path)
+        memory.initialize()
+        await self._seed_feedback(
+            memory,
+            [
+                ("like", "已在旧游标内 1"),
+                ("dislike", "已在旧游标内 2"),
+                ("like", "v1 direct-owned 3"),
+                ("dislike", "v1 direct-owned 4"),
+                ("comment", "v1 direct-owned 5"),
+            ],
+        )
+        # Ownership follows durable row id, not event time. Simulate a browser
+        # backfill whose newest inserted row carries the oldest created_at;
+        # query_events(limit=1) would incorrectly fence only through row 4.
+        memory._database.conn.execute(  # noqa: SLF001 - exact upgrade fixture
+            "UPDATE events SET created_at = ? WHERE id = ?",
+            ("2020-01-01 00:00:00", 5),
+        )
+        memory._database.conn.commit()  # noqa: SLF001 - exact upgrade fixture
+        memory.save_feedback_state(
+            {
+                "last_processed_feedback_event_id": 2,
+                "last_feedback_reanalyzed_at": "",
+                "unified_interest_line_migrated_at": "2026-07-28T00:00:00",
+            }
+        )
+        engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory, unified_interest_line=True)
+        analyzed: list[list[dict[str, object]]] = []
+        batches: list[list[object]] = []
+        self._stub_analyzer(monkeypatch, engine, analyzed)
+        self._spy_enqueue(engine, batches)
+
+        cutover = await engine.prepare_feedback_owner_cutover()
+
+        assert cutover["prepared"] is True
+        assert cutover["fenced_feedback_event_id"] == 5
+        state = memory.load_feedback_state()
+        assert state["last_processed_feedback_event_id"] == 5
+        assert state["feedback_owner_version"] == 2
+        assert str(state["feedback_owner_cutover_at"]).strip()
+        assert batches == [], "v1 direct-owned rows must not be enqueued again"
+
+        await self._seed_feedback(
+            memory,
+            [("dislike", "v2 cursor-owned 6")],
+            owner="content_feedback",
+        )
+        mirrored_writes: list[dict[str, object]] = []
+        real_save_feedback_state = memory.save_feedback_state
+
+        def capture_feedback_mirror(state: dict[str, object]) -> None:
+            mirrored_writes.append(dict(state))
+            real_save_feedback_state(state)
+
+        monkeypatch.setattr(memory, "save_feedback_state", capture_feedback_mirror)
+        result = await engine.process_feedback_batch_if_needed()
+
+        assert result["enqueued_feedback_events"] == 1
+        assert len(batches) == 1
+        [signal] = batches[0]
+        assert signal.id == "feedback-event-6"  # type: ignore[attr-defined]
+        assert signal.payload["title"] == "v2 cursor-owned 6"  # type: ignore[attr-defined]
+        assert memory.load_feedback_state()["last_processed_feedback_event_id"] == 6
+        assert mirrored_writes[-1]["feedback_owner_version"] == 2
+        assert str(mirrored_writes[-1]["feedback_owner_cutover_at"]).strip()
 
     @pytest.mark.asyncio
     async def test_cursor_behind_migrates_every_row_as_a_feedback_signal(
@@ -5636,7 +5873,7 @@ class TestUnifiedInterestLineShim:
         analyzed: list[list[dict[str, object]]] = []
         batches: list[list[object]] = []
         self._stub_analyzer(monkeypatch, engine, analyzed)
-        self._spy_ingest(engine, batches)
+        self._spy_enqueue(engine, batches)
 
         await self._seed_feedback(
             memory, [("dislike", "旧反馈 0"), ("like", "旧反馈 1"), ("dislike", "旧反馈 2")]
@@ -5679,7 +5916,7 @@ class TestUnifiedInterestLineShim:
         analyzed: list[list[dict[str, object]]] = []
         batches: list[list[object]] = []
         self._stub_analyzer(monkeypatch, engine, analyzed)
-        self._spy_ingest(engine, batches)
+        self._spy_enqueue(engine, batches)
 
         await self._seed_feedback(
             memory, [("dislike", "旧反馈 0"), ("like", "旧反馈 1"), ("dislike", "旧反馈 2")]
@@ -5693,35 +5930,65 @@ class TestUnifiedInterestLineShim:
         assert len(batches) == 1, "第二次不得再次入线"
 
     @pytest.mark.asyncio
-    async def test_marker_stops_live_feedback_from_being_migrated_again(
+    async def test_empty_feedback_owner_recovery_skips_tick_maintenance(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """迁移只跑一次——之后的实时反馈由 /api/feedback 直接入线，迁移绝不重扫。
+        """Empty startup/hot-reload recovery cannot trigger periodic LLM work."""
+        memory = MemoryManager(tmp_path)
+        memory.initialize()
+        engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory, unified_interest_line=True)
+        maintenance_calls = 0
 
-        游标本身挡不住这一条：迁移后新落账的反馈行 id 在游标之后，没有标记就会
-        被第二次 shim 调用当成「未消费」再入线一遍，而它们早已由端点喂过 pipeline
-        ——正是 Wave A 暗发所要防的双计。
-        """
+        async def unexpected_maintenance(*_args: object, **_kwargs: object) -> None:
+            nonlocal maintenance_calls
+            maintenance_calls += 1
+
+        monkeypatch.setattr(
+            engine._pipeline,
+            "_run_tick_maintenance",
+            unexpected_maintenance,
+        )
+
+        result = await engine.process_feedback_batch_if_needed()
+
+        assert result["migrated_feedback_events"] == 0
+        assert result["feedback_count"] == 0
+        assert maintenance_calls == 0
+
+    @pytest.mark.asyncio
+    async def test_cursor_continues_claiming_live_feedback_after_migration_marker(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """迁移 marker 只留作 provenance；新 durable 行继续由 cursor 领取。"""
         memory = MemoryManager(tmp_path)
         memory.initialize()
         engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory, unified_interest_line=True)
         analyzed: list[list[dict[str, object]]] = []
         batches: list[list[object]] = []
         self._stub_analyzer(monkeypatch, engine, analyzed)
-        self._spy_ingest(engine, batches)
+        self._spy_enqueue(engine, batches)
 
         await self._seed_feedback(memory, [("dislike", "旧反馈 0"), ("like", "旧反馈 1")])
         first = await engine.process_feedback_batch_if_needed()
         assert first["migrated_feedback_events"] == 2
-        migrated_batches = len(batches)
+        assert len(batches) == 1
 
-        # /api/feedback 落账 + 直接入线（这里只落账，入线由端点负责）。
-        await self._seed_feedback(memory, [("dislike", "实时反馈 0"), ("like", "实时反馈 1")])
+        # /api/feedback 只落账；同一个 cursor owner 领取之后的实时行。
+        await self._seed_feedback(
+            memory,
+            [("dislike", "实时反馈 0"), ("like", "实时反馈 1")],
+            owner="content_feedback",
+        )
 
         second = await engine.process_feedback_batch_if_needed()
 
-        assert second["migrated_feedback_events"] == 0
-        assert len(batches) == migrated_batches, "实时反馈绝不能被迁移路径二次入线"
+        assert second["migrated_feedback_events"] == 2
+        assert second["enqueued_feedback_events"] == 2
+        assert len(batches) == 2
+        assert [sig.payload["title"] for sig in batches[1]] == [  # type: ignore[attr-defined]
+            "实时反馈 0",
+            "实时反馈 1",
+        ]
 
     @pytest.mark.asyncio
     async def test_retractions_are_skipped_but_the_cursor_clears_them(
@@ -5739,7 +6006,7 @@ class TestUnifiedInterestLineShim:
         analyzed: list[list[dict[str, object]]] = []
         batches: list[list[object]] = []
         self._stub_analyzer(monkeypatch, engine, analyzed)
-        self._spy_ingest(engine, batches)
+        self._spy_enqueue(engine, batches)
 
         await self._seed_feedback(
             memory,
@@ -5753,16 +6020,61 @@ class TestUnifiedInterestLineShim:
         assert memory.load_feedback_state()["last_processed_feedback_event_id"] == 3
 
     @pytest.mark.asyncio
-    async def test_crash_mid_migration_does_not_double_ingest(
+    async def test_unrelated_feedback_namespaces_are_skipped_but_advance_cursor(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """选定顺序（先落游标+标记，后入线）在崩溃后不会双计。
+        """Hypothesis/Bangumi feedback already has another learning owner."""
+        memory = MemoryManager(tmp_path)
+        memory.initialize()
+        engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory, unified_interest_line=True)
+        analyzed: list[list[dict[str, object]]] = []
+        batches: list[list[object]] = []
+        self._stub_analyzer(monkeypatch, engine, analyzed)
+        self._spy_enqueue(engine, batches)
 
-        游标与标记同处一个 JSON 文件，一次写入原子落盘，所以「标记写了但游标没
-        推进」的分裂态在结构上不存在。剩下的窗口（状态已落盘、进程在缓冲持久化
-        前死掉）最多丢掉未迁移的尾巴——有界，且这些行永远留在事件账本里；反向
-        顺序则会在每次崩溃重启时把真实用户反馈重新计入偏好层，无界重复。
-        """
+        await memory.propagate_event(
+            {
+                "event_type": "feedback",
+                "title": "某条画像假设",
+                "metadata": {"hypothesis": "某条画像假设", "signal": "like"},
+            }
+        )
+        await memory.propagate_event(
+            {
+                "event_type": "feedback",
+                "title": "Bangumi 低分条目",
+                "metadata": {
+                    "feedback_type": "dislike",
+                    "source_platform": "bangumi",
+                    "import_source": "bangumi_public_collection",
+                },
+            }
+        )
+
+        result = await engine.process_feedback_batch_if_needed()
+
+        assert result["enqueued_feedback_events"] == 0
+        assert result["feedback_count"] == 0
+        assert batches == []
+        assert analyzed == []
+        assert memory.load_feedback_state()["last_processed_feedback_event_id"] == 2
+
+        await self._seed_feedback(
+            memory,
+            [("like", "下一条真实内容反馈")],
+            owner="content_feedback",
+        )
+        next_result = await engine.process_feedback_batch_if_needed()
+
+        assert next_result["enqueued_feedback_events"] == 1
+        [signal] = batches[0]
+        assert signal.id == "feedback-event-3"  # type: ignore[attr-defined]
+
+    @pytest.mark.asyncio
+    async def test_enqueue_cursor_crash_retries_without_duplicate_buffer_entries(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """enqueue 已落盘但 cursor 未推进时，stable IDs 让重试幂等。"""
         memory = MemoryManager(tmp_path)
         memory.initialize()
         engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory, unified_interest_line=True)
@@ -5772,28 +6084,90 @@ class TestUnifiedInterestLineShim:
         await self._seed_feedback(
             memory, [("dislike", "旧反馈 0"), ("like", "旧反馈 1"), ("dislike", "旧反馈 2")]
         )
+        await engine.prepare_feedback_owner_cutover()
 
-        async def boom(signals: list[object]) -> object:
-            raise RuntimeError("crash mid-migration")
+        real_save = memory.save_feedback_state
 
-        engine._pipeline.ingest_batch = boom  # type: ignore[method-assign, assignment]
-        with pytest.raises(RuntimeError, match="crash mid-migration"):
+        def crash_before_cursor(_state: dict[str, object]) -> None:
+            raise RuntimeError("crash before cursor")
+
+        monkeypatch.setattr(memory, "save_feedback_state", crash_before_cursor)
+        with pytest.raises(RuntimeError, match="crash before cursor"):
             await engine.process_feedback_batch_if_needed()
 
-        # 状态已原子落盘：标记与游标同时在位，没有半截态。
-        state = memory.load_feedback_state()
-        assert state["last_processed_feedback_event_id"] == 3
-        assert str(state["unified_interest_line_migrated_at"]).strip()
+        assert memory.load_feedback_state()["last_processed_feedback_event_id"] == 0
+        for layer in ("interest", "surface"):
+            assert [
+                item["id"]
+                for item in engine._pipeline._buffers[layer].signals  # noqa: SLF001
+            ] == ["feedback-event-1", "feedback-event-2", "feedback-event-3"]
 
-        batches: list[list[object]] = []
+        monkeypatch.setattr(memory, "save_feedback_state", real_save)
         engine2 = SoulEngine(llm=FakeRegistry("{}"), memory=memory, unified_interest_line=True)
         self._stub_analyzer(monkeypatch, engine2, analyzed)
-        self._spy_ingest(engine2, batches)
+        accepted: list[int] = []
+        real_enqueue = engine2._pipeline.checkpointed_enqueue_batch
 
-        replayed = await engine2.process_feedback_batch_if_needed()
+        async def spy(signals: list[object], **kwargs: object) -> object:
+            result = await real_enqueue(signals, **kwargs)  # type: ignore[arg-type]
+            accepted.append(result.signals_accepted)
+            return result
 
-        assert replayed["migrated_feedback_events"] == 0
-        assert batches == [], "重启后绝不能把同一批反馈二次入线"
+        engine2._pipeline.checkpointed_enqueue_batch = spy  # type: ignore[method-assign, assignment]
+
+        claimed, _ = await engine2._migrate_legacy_feedback_cursor_if_needed()
+
+        assert claimed == 0
+        assert accepted == [0]
+        assert memory.load_feedback_state()["last_processed_feedback_event_id"] == 3
+        for layer in ("interest", "surface"):
+            assert len(engine2._pipeline._buffers[layer].signals) == 3  # noqa: SLF001
+
+    @pytest.mark.asyncio
+    async def test_cursor_tick_crash_recovers_persisted_buffer(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """cursor 已推进但 tick 未消费时，重建 owner 会消费持久缓冲。"""
+        memory = MemoryManager(tmp_path)
+        memory.initialize()
+        engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory, unified_interest_line=True)
+        await self._seed_feedback(memory, [("dislike", "等待后台分析")])
+
+        async def crash_before_tick() -> object:
+            raise RuntimeError("crash before tick")
+
+        monkeypatch.setattr(engine._pipeline, "tick_if_buffered", crash_before_tick)
+        with pytest.raises(RuntimeError, match="crash before tick"):
+            await engine.process_feedback_batch_if_needed()
+
+        assert memory.load_feedback_state()["last_processed_feedback_event_id"] == 1
+        rebuilt = SoulEngine(
+            llm=FakeRegistry("{}"),
+            memory=memory,
+            unified_interest_line=True,
+        )
+        analyzed: list[list[dict[str, object]]] = []
+        self._stub_analyzer(monkeypatch, rebuilt, analyzed)
+
+        async def skip_optional_maintenance(*_args: object, **_kwargs: object) -> None:
+            return None
+
+        monkeypatch.setattr(
+            rebuilt._pipeline,
+            "_run_tick_maintenance",
+            skip_optional_maintenance,
+        )
+        for layer in ("interest", "surface"):
+            [signal] = rebuilt._pipeline._buffers[layer].signals  # noqa: SLF001
+            assert signal["id"] == "feedback-event-1"
+            assert signal["signal_type"] == "feedback"
+
+        recovered = await rebuilt.process_feedback_batch_if_needed()
+
+        assert recovered["enqueued_feedback_events"] == 0
+        assert analyzed, "persisted cursor→tick buffer must be consumed after restart"
+        for layer in ("interest", "surface"):
+            assert rebuilt._pipeline._buffers[layer].signals == []  # noqa: SLF001
 
     @pytest.mark.asyncio
     async def test_flag_off_runs_the_legacy_batch_and_writes_no_marker(
@@ -5806,7 +6180,7 @@ class TestUnifiedInterestLineShim:
         analyzed: list[list[dict[str, object]]] = []
         batches: list[list[object]] = []
         self._stub_analyzer(monkeypatch, engine, analyzed)
-        self._spy_ingest(engine, batches)
+        self._spy_enqueue(engine, batches)
 
         await self._seed_feedback(
             memory, [("dislike", "反馈 0"), ("dislike", "反馈 1"), ("dislike", "反馈 2")]

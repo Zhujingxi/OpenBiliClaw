@@ -2,7 +2,7 @@
 
 [← 返回 README](../README.md)
 
-> 🔒 **局域网访问安全（可选密码门禁）**：容器把后端暴露在 `8420`，同网段设备都能访问。需要为局域网 / 远程设备加登录密码时（本机与浏览器扩展仍免登录），设置环境变量 `OPENBILICLAW_API_AUTH_ENABLED=true` + `OPENBILICLAW_API_AUTH_PASSWORD=…`（或进容器跑 `openbiliclaw set-password`）。若前面再套同机反向代理，记得配 `[api.auth].trusted_proxies` 或让代理自行鉴权。详见 [`docs/modules/api-auth.md`](modules/api-auth.md)。
+> 🔒 **局域网访问安全（可选密码门禁）**：容器把后端暴露在 `8420`，同网段设备都能访问。需要为局域网 / 远程设备加登录密码时（本机与浏览器扩展仍免登录），设置环境变量 `OPENBILICLAW_API_AUTH_ENABLED=true` + `OPENBILICLAW_API_AUTH_PASSWORD=…`（或进容器跑 `openbiliclaw set-password`）。若手动套其他反向代理，记得配 `[api.auth].trusted_proxies` 或让代理自行鉴权；仓库自带的 Caddy HTTPS overlay 已把可信代理收紧到共享 loopback。详见 [`docs/modules/api-auth.md`](modules/api-auth.md)。
 
 ## 前置条件
 
@@ -139,6 +139,46 @@ AI agent 一句话部署时，`agent_bootstrap.py` 会在 auto-init 期间额外
 - **后端不再等 sidecar 拉完模型才启动**：`bge-m3` 首次下载（~568MB）期间后端已经可用，`/setup/` 的前置检查会显示 embedding 尚未就绪，拉取完成后自动通过。模型下载失败时 sidecar 守护进程仍在，重启 compose 会自动重试。
 - B 站登录态推荐用浏览器扩展：扩展装在**宿主机浏览器**里，不在容器里。你登录 bilibili.com 后，扩展会把 Cookie 自动 POST 到 `127.0.0.1:8420` 的后端接口。
 - 小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Bangumi 都默认关闭，只有你在 `/setup/` 或设置页明确开启才会进入初始化和日常发现；前六者启用时需在宿主机浏览器里装扩展并登录对应站点，Bangumi 则直接使用官方匿名只读 API。镜像通过 pip 安装项目，X 的 `twitter-cli` 和 Reddit 的 `rdt-cli` 已内置。
+
+### 可选公网域名自动 HTTPS（最简方案）
+
+有公网 DNS 名称时，叠加仓库的 `docker-compose.https.yml` 即可让 Caddy 自动申请和续期
+浏览器信任的证书，同时代理 REST、WebSocket、桌面 `/web` 和手机 `/m/`。需要 Docker
+Compose `2.24.4+`，DNS A/AAAA 已指向服务器，并在防火墙 / 云安全组放行 TCP `80/443`。
+
+预构建部署额外下载一次 overlay：
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docker-compose.https.yml
+export OPENBILICLAW_DOMAIN=obc.example.com  # 不带协议、端口或路径
+docker compose -f docker-compose.prebuilt.yml -f docker-compose.https.yml up -d
+```
+
+源码部署：
+
+```bash
+export OPENBILICLAW_DOMAIN=obc.example.com
+docker compose -f docker-compose.yml -f docker-compose.https.yml up -d --build
+```
+
+overlay 将宿主机 `8420` 收紧到 `127.0.0.1`，只公开 `80/443`；Caddy 与后端共享网络命名
+空间，后端仅信任来自 `127.0.0.1` 的转发头。Caddy 在后端报告密码门禁启用前只在 loopback
+等待，不会监听公网端口。设置 Web 密码；需要远程插件时再生成并开启设备密钥：
+
+```bash
+docker exec -it openbiliclaw-backend openbiliclaw set-password
+docker exec -it openbiliclaw-backend openbiliclaw ext-key generate
+docker exec -it openbiliclaw-backend openbiliclaw ext-key enable
+docker restart openbiliclaw-backend
+docker restart openbiliclaw-caddy
+```
+
+只用 PC / 手机 Web 时可省略 `ext-key` 两行，但不能省略 Web 密码和两次重启；CLI 写入的持久
+配置需要后端重启加载，Caddy 重启后会重新附着该后端的共享网络命名空间。
+
+PC 打开 `https://obc.example.com/web`，手机打开 `https://obc.example.com/m/`；插件选择
+HTTPS、主机 `obc.example.com`、端口 `443`。完整前置条件、证书状态和排错见
+[HTTPS 部署指南](https-deployment.md)。不要和下面的 `tls` profile 同时启用。
 
 ### 可选 LAN / self-managed HTTPS profile
 

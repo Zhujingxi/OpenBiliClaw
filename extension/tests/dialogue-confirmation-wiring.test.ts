@@ -27,19 +27,31 @@ test("popup wires pending list, card actions, and the shared renderer into the d
   assert.match(html, /shared\/dialogue-confirmation\.js/);
 });
 
-test("service worker reuses its 30s flush alarm for a debounced count-only badge refresh", () => {
+test("toolbar badge does not poll or count pending confirmations", () => {
   const serviceWorker = extensionFile("src/background/service-worker.ts");
+  const badge = extensionFile("src/background/badge.ts");
 
   assert.equal(
     (serviceWorker.match(/chrome\.alarms\.create\(/g) ?? []).length,
     1,
-    "pending confirmations must not add another periodic alarm",
+    "the existing event flush alarm remains the only alarm created here",
   );
   assert.match(serviceWorker, /BUFFER_FLUSH_INTERVAL\s*=\s*30_000/);
-  assert.match(serviceWorker, /pending-confirmations\?count_only=1/);
-  assert.match(serviceWorker, /schedulePendingConfirmationBadgeRefresh/);
-  assert.match(serviceWorker, /refreshPendingConfirmationBadge/);
-  assert.match(serviceWorker, /if \(backendReachable !== true \|\| backendUninitialized\)/);
+  assert.doesNotMatch(serviceWorker, /pending-confirmations/);
+  assert.doesNotMatch(serviceWorker, /pendingConfirmationCount/);
+  assert.doesNotMatch(serviceWorker, /PendingBadgeRefreshScheduler/);
+  assert.doesNotMatch(badge, /BADGE_TITLE_PENDING|BADGE_COLOR_PENDING/);
+  assert.match(badge, /computeActionBadge\([\s\S]*reachable[\s\S]*uninitialized/);
+});
+
+test("popup keeps its internal pending-confirmation count and list API", () => {
+  const api = extensionFile("popup/popup-api.js");
+  const popup = extensionFile("popup/popup.js");
+
+  assert.match(api, /fetchPendingConfirmations/);
+  assert.match(api, /chat\/pending-confirmations/);
+  assert.match(popup, /chatPendingTabCount/);
+  assert.match(popup, /pendingConfirmations/);
 });
 
 test("desktop mirrors popup semantics with the shared chat session and a visible pending count", () => {

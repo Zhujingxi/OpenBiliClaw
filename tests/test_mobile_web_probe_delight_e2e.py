@@ -7,6 +7,7 @@ from contextlib import suppress
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import pytest
 
@@ -109,11 +110,9 @@ def mobile_web_server() -> tuple[str, MobileWebStub]:
             if path.startswith("/m/js/"):
                 relative = path.removeprefix("/m/js/")
                 return self._serve_file(ROOT / "src/openbiliclaw/web/js" / relative)
-            if path == "/shared/dialogue-confirmation.js":
-                return self._serve_file(
-                    ROOT / "src/openbiliclaw/web/shared/dialogue-confirmation.js",
-                    "text/javascript",
-                )
+            if path.startswith("/shared/"):
+                relative = path.removeprefix("/shared/")
+                return self._serve_file(ROOT / "src/openbiliclaw/web/shared" / relative)
             if path == "/m/manifest.json":
                 return self._serve_file(
                     ROOT / "src/openbiliclaw/web/manifest.json",
@@ -408,14 +407,16 @@ def test_mobile_liked_delight_converges_after_click_reload_and_stream(
 
     like.click()
     assert stub.delight_post_received.wait(timeout=2)
-    assert stub.delight_posts == [
-        {
-            "bvid": "BV1DELIGHTLIKED",
-            "response": "like",
-            "title": "会让你意外喜欢的一条",
-            "message": "",
-        }
-    ]
+    assert len(stub.delight_posts) == 1
+    submitted = dict(stub.delight_posts[0])
+    request_id = submitted.pop("request_id", "")
+    assert str(UUID(str(request_id))) == request_id
+    assert submitted == {
+        "bvid": "BV1DELIGHTLIKED",
+        "response": "like",
+        "title": "会让你意外喜欢的一条",
+        "message": "",
+    }
     _assert_liked_delight(chromium_page)
 
     chromium_page.reload()

@@ -520,6 +520,7 @@ export function normalizeDelightCandidate(item) {
     body_text: normalizeText(item?.body_text),
     state: normalizeText(item?.state) || "pending",
     response_message: normalizeText(item?.response_message),
+    response_tone: normalizeText(item?.response_tone) || "info",
     chat_reply: normalizeText(item?.chat_reply),
     view_count: Number(item?.view_count ?? 0),
     like_count: Number(item?.like_count ?? 0),
@@ -562,7 +563,7 @@ export function getDelightUiState(delight, { highlightBvid = "" } = {}) {
     like_pressed: false,
     like_disabled: false,
     score_label: scoreLabel,
-    response_tone: "info",
+    response_tone: normalized.response_tone || "info",
     response_message: normalized.response_message,
   };
 

@@ -169,6 +169,31 @@ def _seed_bili_row(db: Database, bvid: str, *, up_name: str = "") -> None:
 class TestXhsSelfContentFilterE2E:
     """Full lifecycle: ingest → self_info arrival → purge → serve guard."""
 
+    def test_zero_row_token_backfill_releases_request_thread_writer(
+        self,
+        e2e_env: tuple[TestClient, Database, _RecordingMemoryManager],
+    ) -> None:
+        """A no-match request UPDATE must not lock the next facade thread."""
+        client, db, _ = e2e_env
+        # Keep a regression failure bounded: the production default remains
+        # 30 seconds, but the competing main-thread connection should not need
+        # to wait at all once the request-thread transaction is committed.
+        db.conn.execute("PRAGMA busy_timeout = 50")
+
+        response = client.post(
+            "/api/sources/xhs/observed-urls",
+            json={
+                "urls": ["https://www.xiaohongshu.com/explore/no_cached_row?xsec_token=TOKEN"],
+                "page_type": "explore",
+            },
+        )
+
+        assert response.status_code == 200
+        _seed_xhs_row(db, "after_zero_row_backfill", up_name="someone")
+        assert db.conn.execute(
+            "SELECT 1 FROM content_cache WHERE bvid = 'after_zero_row_backfill'"
+        ).fetchone()
+
     def test_full_lifecycle(
         self,
         e2e_env: tuple[TestClient, Database, _RecordingMemoryManager],

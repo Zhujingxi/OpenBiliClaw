@@ -4,6 +4,7 @@
       ping: "/ping",
       health: "/health",
       qrInfo: "/qr-info",
+      projectStats: "/project-stats",
       initStatus: "/init-status",
       startInit: "/init",
       cancelInit: "/init/cancel",
@@ -709,6 +710,45 @@
       try { window.localStorage?.setItem(key, value); } catch {}
     }
 
+    const PENDING_REQUEST_IDS_KEY = "openbiliclaw.webui.pendingRequestIds";
+    const pendingRequestIds = new Map();
+
+    function newRequestId() {
+      if (typeof globalThis.crypto?.randomUUID === "function") return globalThis.crypto.randomUUID();
+      return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    }
+
+    function loadPendingRequestIds() {
+      try {
+        const parsed = JSON.parse(storageGet(PENDING_REQUEST_IDS_KEY) || "{}");
+        if (!parsed || typeof parsed !== "object") return;
+        Object.entries(parsed).forEach(([key, value]) => {
+          if (typeof value === "string" && value) pendingRequestIds.set(key, value);
+        });
+      } catch {}
+    }
+
+    function persistPendingRequestIds() {
+      storageSet(PENDING_REQUEST_IDS_KEY, JSON.stringify(Object.fromEntries(pendingRequestIds)));
+    }
+
+    function rememberPendingRequestId(namespace, identity) {
+      loadPendingRequestIds();
+      const key = `${namespace}:${identity}`;
+      const existing = pendingRequestIds.get(key);
+      if (existing) return { key, requestId: existing };
+      const requestId = newRequestId();
+      pendingRequestIds.set(key, requestId);
+      persistPendingRequestIds();
+      return { key, requestId };
+    }
+
+    function forgetPendingRequestId(pending) {
+      if (!pending || pendingRequestIds.get(pending.key) !== pending.requestId) return;
+      pendingRequestIds.delete(pending.key);
+      persistPendingRequestIds();
+    }
+
     const AUTO_LOAD_ON_SCROLL_KEY = "openbiliclaw.webui.autoLoadOnScroll";
     const AUTO_LOAD_COOLDOWN_MS = 8000;
     // 校准：一行卡片(16:9 封面 + 文案)高约 250–350px，若预载边距接近一行高度，
@@ -745,7 +785,6 @@
     const SIDE_DRAWER_OPEN_KEY = "openbiliclaw.sideDrawerOpen";
     const DELIGHT_QUEUE_LIMIT_KEY = "openbiliclaw.webui.delightQueueLimit";
     const STAR_REPO_URL = "https://github.com/whiteguo233/OpenBiliClaw";
-    const STAR_REPO_SLUG = "whiteguo233/OpenBiliClaw";
     const STAR_COUNT_CACHE_KEY = "openbiliclaw.webui.starCount";
     const STAR_COUNT_TTL_MS = 12 * 60 * 60 * 1000;
     // 加载更多一次向后端请求的条数（后端 append 端点固定 limit=10）；
@@ -802,12 +841,8 @@
       }
       if (Date.now() - cachedTime < STAR_COUNT_TTL_MS) return;
       try {
-        const res = await fetch(`https://api.github.com/repos/${STAR_REPO_SLUG}`, {
-          headers: { Accept: "application/vnd.github+json" },
-        });
-        if (!res.ok) return;
-        const data = await res.json();
-        const n = data?.stargazers_count;
+        const data = await requestJson(ENDPOINTS.projectStats, { timeoutMs: 6000 });
+        const n = data?.github_stars;
         if (typeof n === "number") {
           showStarCount(n);
           storageSet(STAR_COUNT_CACHE_KEY, JSON.stringify({ n, t: Date.now() }));
@@ -1294,6 +1329,18 @@
       } finally {
         if (timeoutId) window.clearTimeout(timeoutId);
       }
+    }
+
+    async function requestJsonWithPendingId(path, namespace, identity, payload, options = {}) {
+      const pending = rememberPendingRequestId(namespace, identity);
+      const result = await requestJsonStrict(path, {
+        ...options,
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+        body: JSON.stringify({ ...payload, request_id: pending.requestId })
+      });
+      forgetPendingRequestId(pending);
+      return result;
     }
 
     function configErrorMessage(details) {
@@ -3540,6 +3587,10 @@ ${savedCardFeedbackBarHtml(listKind)}
     function postSavedContentFeedback(item, feedbackType, note = "") {
       const saved = desktopSavedItem(item);
       const contentId = saved.content_id || item.bvid || "";
+      const pending = rememberPendingRequestId(
+        "behavior-command",
+        JSON.stringify([saved.item_key || item.id || contentId, feedbackType, note])
+      );
       return requestJsonStrict(ENDPOINTS.events, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -3550,6 +3601,7 @@ ${savedCardFeedbackBarHtml(listKind)}
             title: saved.title || "",
             url: saved.content_url || "",
             timestamp: Date.now(),
+            event_id: pending.requestId,
             metadata: {
               feedback_type: feedbackType,
               bvid: contentId,
@@ -3567,6 +3619,7 @@ ${savedCardFeedbackBarHtml(listKind)}
             ? "画像尚未就绪，暂时无法记录反馈。"
             : "反馈未被接受，请稍后重试。");
         }
+        forgetPendingRequestId(pending);
         return res;
       });
     }
@@ -3845,10 +3898,7 @@ ${cardFeedbackBarHtml()}`;
 
     function trackRecommendationClick(item) {
       const url = contentUrl(item);
-      void requestJson(ENDPOINTS.click, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      const payload = {
           bvid: item.bvid,
           content_id: item.content_id || item.bvid,
           content_url: url || item.content_url,
@@ -3857,8 +3907,28 @@ ${cardFeedbackBarHtml()}`;
           recommendation_id: item.id,
           topic_label: item.topic,
           up_name: item.up || item.up_name
-        })
-      }).catch(() => {});
+      };
+      const stableRecommendationId = payload.recommendation_id ?? null;
+      const stableContentId = String(payload.content_id || payload.bvid || "").trim();
+      let fallbackUrl = "";
+      if (stableRecommendationId == null && !stableContentId) {
+        const rawUrl = String(payload.content_url || "").trim();
+        try {
+          const normalizedUrl = new URL(rawUrl, globalThis.location?.href);
+          normalizedUrl.hash = "";
+          fallbackUrl = normalizedUrl.toString();
+        } catch { fallbackUrl = rawUrl; }
+      }
+      const identity = JSON.stringify([
+        stableRecommendationId,
+        stableContentId || fallbackUrl
+      ]);
+      void requestJsonWithPendingId(
+        ENDPOINTS.click,
+        "recommendation-click",
+        identity,
+        payload
+      ).catch(() => {});
     }
 
     function openRecommendation(item, card) {
@@ -3869,13 +3939,17 @@ ${cardFeedbackBarHtml()}`;
     }
 
     function submitFeedback(item, feedback_type, note = "", { keepalive = false } = {}) {
-      return requestJsonStrict(ENDPOINTS.feedback, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ recommendation_id: item.id, feedback_type, note }),
+      const payload = { recommendation_id: item.id, feedback_type, note };
+      return requestJsonWithPendingId(
+        ENDPOINTS.feedback,
+        "feedback",
+        JSON.stringify([item.id, feedback_type, note]),
+        payload,
+        {
         timeoutMs: 30000,
         keepalive
-      });
+        }
+      );
     }
 
     function feedbackActionKey(item) {
@@ -5751,16 +5825,25 @@ ${cardFeedbackBarHtml()}`;
       const feedbackToast = response === "like" ? "惊喜推荐已喜欢" : response === "dislike" ? "这类惊喜先少来点" : "已标为看过，不再推荐";
       const toastImmediately = response === "like" || response === "dislike";
       if (toastImmediately) showToast(feedbackToast);
-      const feedbackResult = await requestJson(ENDPOINTS.delightRespond, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      let feedbackResult;
+      try {
+        const payload = {
           bvid: delight.bvid,
           response,
           title: delight.title,
           message: ""
-        })
-      });
+        };
+        feedbackResult = await requestJsonWithPendingId(
+          ENDPOINTS.delightRespond,
+          "delight-response",
+          JSON.stringify([delight.bvid, response]),
+          payload
+        );
+      } catch (error) {
+        // 失败不假装成功：保留当前卡片，下次可再试。
+        showToast(response === "like" ? "这次喜欢还没记上，可以再试一次" : "这次还没记上，请再试一次");
+        return;
+      }
       if (response === "dismiss" && feedbackResult == null) {
         showToast("这次还没记上，请再试一次");
         setActiveDelight(state.delightIndex);
@@ -5812,7 +5895,7 @@ ${cardFeedbackBarHtml()}`;
         input.value = "";
         input.placeholder = "继续写你想补充的问题、偏好或例子";
       }
-      renderChat();
+      renderChat({ forceBottom: true });
       if (panel) panel.scrollTop = 0;
       window.setTimeout(() => input?.focus(), 80);
     }
@@ -6174,8 +6257,8 @@ ${cardFeedbackBarHtml()}`;
       renderDialogueContextBar();
       renderDesktopPendingConfirmations();
       const chatLog = $("#chatLog");
-      const messageChatLog = $("#messageChatLog");
       renderChatLogElement(chatLog, chatHtml(state.chat), { forceBottom });
+      const messageChatLog = $("#messageChatLog");
       if (messageChatLog) {
         const baseMessages = state.messageChatPrompt
           ? state.chat.filter((msg) => msg.text !== "你可以直接告诉我最近想多看什么、少看什么，或者评价一条推荐为什么准/不准。")
@@ -9638,8 +9721,15 @@ ${cardFeedbackBarHtml()}`;
       const def = locationApiDefault();
       const typedHost = (storageGet("openbiliclaw.webui.backendHost") || "").trim();
       const typedPort = (storageGet("openbiliclaw.webui.backendPort") || "").trim();
-      const host = lanIp || typedHost || def.host;
-      const url = qr.buildMobileWebUrl({ host, port: typedPort || def.port });
+      // A non-loopback page origin is already the address that reached this
+      // backend (including a public HTTPS gateway). Keep that origin instead
+      // of replacing it with the backend's private LAN IP. Loopback pages still
+      // need the existing LAN-IP fallback so a phone can reach the machine.
+      const pageHostIsReachable = !qr.isLoopbackMobileHost(def.host);
+      const host = pageHostIsReachable ? def.host : (lanIp || typedHost || def.host);
+      const port = pageHostIsReachable ? def.port : (typedPort || def.port);
+      const scheme = window.location.protocol === "https:" ? "https" : "http";
+      const url = qr.buildMobileWebUrl({ scheme, host, port });
       urlEl.textContent = url;
       if (qr.isLoopbackMobileHost(host)) {
         hintEl.textContent =

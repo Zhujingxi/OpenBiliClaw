@@ -14,6 +14,7 @@ from pydantic import (
     Field,
     StrictBool,
     StrictStr,
+    StringConstraints,
     ValidationInfo,
     field_validator,
     model_validator,
@@ -38,6 +39,10 @@ NativeSaveActionOut = Literal["favorite", "watch_later"]
 _SAVED_PLATFORM_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 _URL_FALLBACK_ID_RE = re.compile(r"[0-9a-f]{24}")
 _ZHIHU_TYPED_CONTENT_ID_RE = re.compile(r"(?:question|answer|article):[0-9]+")
+IdempotencyKey = Annotated[
+    StrictStr,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=400),
+]
 
 
 def _has_unicode_control(value: str) -> bool:
@@ -97,6 +102,7 @@ class BehaviorEventIn(BaseModel):
     source_platform: str = "bilibili"
     context: dict[str, object] = Field(default_factory=dict)
     metadata: dict[str, object] = Field(default_factory=dict)
+    event_id: IdempotencyKey
     # v0.3.x event-satisfaction signal: dwell on video-page exit. Either
     # top-level or `metadata.watch_seconds` is accepted; the endpoint
     # folds top-level into metadata before persistence so the storage
@@ -123,6 +129,14 @@ class HealthResponse(BaseModel):
     # may repeat near-identical content under different ids) — the popup
     # turns this into a one-click "enable local Ollama" banner.
     embedding_ready: bool | None = None
+
+
+class ProjectStatsResponse(BaseModel):
+    """Public project metadata shown by local browser surfaces."""
+
+    github_stars: int | None = None
+    stale: bool = False
+    source: Literal["github", "cache", "unavailable"] = "unavailable"
 
 
 class InitStageProgressOut(BaseModel):
@@ -373,6 +387,22 @@ class RuntimeStatusResponse(BaseModel):
     last_account_sync_issues: list[dict[str, str]] = Field(default_factory=list)
     last_account_sync_message: str = ""
     last_account_sync_severity: str = ""
+    event_lane_depth: int = 0
+    event_lane_active: bool = False
+    event_lane_paused: bool = False
+    event_lane_last_error: str = ""
+    event_lane_processed: int = 0
+    chat_reply_depth: int = 0
+    chat_reply_active: bool = False
+    chat_reply_last_error: str = ""
+    chat_reply_processed: int = 0
+    image_fetch_active: int = 0
+    image_fetch_waiting: int = 0
+    image_fetch_inflight_keys: int = 0
+    image_fetch_upstream_started: int = 0
+    image_fetch_singleflight_joins: int = 0
+    image_fetch_peak_active: int = 0
+    image_fetch_peak_background: int = 0
     auto_update_enabled: bool = False
     install_mode: str = ""
     current_version: str = ""
@@ -480,6 +510,16 @@ class DelightAckResponse(BaseModel):
 
     ok: bool
     bvid: str
+
+
+class DelightResponseIn(BaseModel):
+    """One idempotent user action on a proactive delight card."""
+
+    bvid: str
+    response: str
+    title: str = ""
+    message: str = ""
+    request_id: str = Field(default="", max_length=400)
 
 
 class BilibiliCookieIn(BaseModel):
@@ -1105,11 +1145,23 @@ class EventRejectedOut(BaseModel):
     reason: str
 
 
+class EventReceiptOut(BaseModel):
+    """One accepted/duplicate event's stable durable receipt."""
+
+    index: int
+    event_id: int
+    event_type: str
+    inserted: bool
+    duplicate: bool
+
+
 class EventIngestResponse(BaseModel):
     """Response after accepting a batch of events."""
 
     accepted: int
+    duplicates: int = 0
     rejected: list[EventRejectedOut] = Field(default_factory=list)
+    receipts: list[EventReceiptOut] = Field(default_factory=list)
 
 
 ExtensionE2EPlatform = Literal["douyin", "xiaohongshu", "twitter", "reddit"]
@@ -1340,6 +1392,7 @@ class FeedbackIn(BaseModel):
     recommendation_id: int
     feedback_type: str
     note: str = ""
+    request_id: IdempotencyKey
 
 
 class FeedbackResponse(BaseModel):
@@ -1348,6 +1401,9 @@ class FeedbackResponse(BaseModel):
     ok: bool
     recommendation_id: int
     feedback_type: str
+    event_id: int = 0
+    duplicate: bool = False
+    processing: str = "queued"
 
 
 class InsightFeedbackIn(BaseModel):
@@ -1725,6 +1781,7 @@ class RecommendationClickIn(BaseModel):
     title: str = ""
     topic_label: str = ""
     up_name: str = ""
+    request_id: IdempotencyKey
     # v0.3.x event-satisfaction signal: optional dwell on the
     # recommendation click-through. When present, these flow into the
     # persisted click event's metadata so storage classification can
@@ -1738,7 +1795,10 @@ class RecommendationClickResponse(BaseModel):
 
     ok: bool
     bvid: str
-    layers_updated: list[str]
+    layers_updated: list[str] = Field(default_factory=list)
+    event_id: int = 0
+    duplicate: bool = False
+    processing: str = "queued"
 
 
 class ChatIn(BaseModel):

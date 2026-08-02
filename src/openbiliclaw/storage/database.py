@@ -84,6 +84,22 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+@dataclass(frozen=True)
+class EventInsertResult:
+    """One durable event insert/deduplication result."""
+
+    event_id: int
+    event_type: str
+    ingest_key: str
+    inserted: bool
+
+    @property
+    def duplicate(self) -> bool:
+        """Whether an existing producer-owned row satisfied this write."""
+        return not self.inserted
+
+
 # Cap the probe so a long legitimate blurb never costs a full parse. Real
 # copy is a sentence or two; a serialized batch payload is far longer than
 # this, but the prefix alone is enough to identify one.
@@ -843,6 +859,7 @@ CREATE TABLE IF NOT EXISTS events (
     -- pre-migration rows; consumers treat NULL as ``unknown``.
     inferred_satisfaction TEXT,                 -- "positive" | "neutral" | "negative" | "unknown"
     satisfaction_reason   TEXT,                 -- short snake_case reason; see event_format.py
+    ingest_key            TEXT NOT NULL DEFAULT '', -- producer-owned idempotency identity
     created_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -1380,6 +1397,15 @@ class Database:
     def __init__(self, db_path: str | Path) -> None:
         self._db_path = Path(db_path)
         self._conn: sqlite3.Connection | None = None
+        # ``check_same_thread=False`` permits a connection to move between
+        # threads; it does not make simultaneous ``execute`` / ``fetch`` calls
+        # safe.  FastAPI status reads and database-owned workers run outside the
+        # event-loop thread, so give every thread its own WAL connection instead
+        # of blocking the loop on one process-wide mutex.  Coroutines on the
+        # event-loop thread cannot interleave inside these synchronous methods.
+        self._connection_registry_lock = threading.RLock()
+        self._connection_owner_thread_id: int | None = None
+        self._connections_by_thread: dict[int, sqlite3.Connection] = {}
         self._admission_min_score = _DEFAULT_ADMISSION_MIN_SCORE
         self._preserve_read_transaction = False
         # The two queues must remain separate: a slow/background maintenance
@@ -1405,12 +1431,19 @@ class Database:
     def initialize(self) -> None:
         """Initialize the database and run migrations if needed."""
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(self._db_path), timeout=30.0, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
+        # Preserve the long-lived facade connection's legacy schema semantics:
+        # foreign-key enforcement has historically been enabled only for
+        # explicit transaction connections.  Turning it on here would
+        # make unrelated recommendation writes fail after this concurrency fix.
+        self._conn = self._new_connection(enforce_foreign_keys=False)
+        owner_thread_id = threading.get_ident()
+        with self._connection_registry_lock:
+            self._connection_owner_thread_id = owner_thread_id
+            self._connections_by_thread = {owner_thread_id: self._conn}
         self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA busy_timeout = 30000")
         self._conn.executescript(_SCHEMA_SQL)
         self._ensure_event_satisfaction_columns()
+        self._ensure_event_ingest_key_column()
         self._ensure_recommendation_feedback_columns()
         self._ensure_content_cache_runtime_columns()
         self._ensure_content_cache_relevance_columns()
@@ -1449,9 +1482,42 @@ class Database:
 
     @property
     def conn(self) -> sqlite3.Connection:
-        if self._conn is None:
+        primary = self._conn
+        if primary is None:
             raise RuntimeError("Database not initialized. Call initialize() first.")
-        return self._conn
+        thread_id = threading.get_ident()
+        with self._connection_registry_lock:
+            # Lightweight wrappers used by isolated reads and a few tests bind
+            # ``_conn`` directly instead of calling ``initialize``.  The first
+            # accessor becomes that connection's owning thread.
+            if self._connection_owner_thread_id is None:
+                self._connection_owner_thread_id = thread_id
+                self._connections_by_thread[thread_id] = primary
+                return primary
+            if thread_id == self._connection_owner_thread_id:
+                return primary
+            connection = self._connections_by_thread.get(thread_id)
+            if connection is None:
+                connection = self._new_connection(enforce_foreign_keys=False)
+                self._connections_by_thread[thread_id] = connection
+            return connection
+
+    def _new_connection(
+        self,
+        *,
+        enforce_foreign_keys: bool,
+    ) -> sqlite3.Connection:
+        """Open one configured connection for exactly one runtime thread."""
+        connection = sqlite3.connect(
+            str(self._db_path),
+            timeout=30.0,
+            check_same_thread=False,
+        )
+        connection.row_factory = sqlite3.Row
+        if enforce_foreign_keys:
+            connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA busy_timeout = 30000")
+        return connection
 
     def _pool_admission_min_score(self) -> float:
         return _normalize_admission_min_score(self._admission_min_score)
@@ -1497,11 +1563,7 @@ class Database:
         """
         if self._conn is None:
             raise RuntimeError("Database not initialized. Call initialize() first.")
-        conn = sqlite3.connect(str(self._db_path), timeout=30.0, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON")
-        conn.execute("PRAGMA busy_timeout = 30000")
-        return conn
+        return self._new_connection(enforce_foreign_keys=True)
 
     def _executor(self, *, maintenance: bool) -> ThreadPoolExecutor:
         """Return the lazily-created single-thread SQLite worker."""
@@ -1824,14 +1886,16 @@ class Database:
         params: tuple[Any, ...] | list[Any] = (),
     ) -> sqlite3.Cursor:
         """Execute a write with short retry on transient SQLite locks."""
+        connection = self.conn
         attempts = _LOCK_RETRY_ATTEMPTS
         while True:
             try:
-                cursor = self.conn.execute(sql, params)
-                self.conn.commit()
+                cursor = connection.execute(sql, params)
+                connection.commit()
                 return cursor
             except sqlite3.OperationalError as exc:
                 message = str(exc).lower()
+                self._rollback_failed_write(connection)
                 if "database is locked" not in message or attempts <= 1:
                     raise
                 attempts -= 1
@@ -1848,14 +1912,16 @@ class Database:
         seq_of_params: Sequence[tuple[Any, ...] | list[Any]],
     ) -> sqlite3.Cursor:
         """Batch-execute a write with the same transient-lock retry as ``_execute_write``."""
+        connection = self.conn
         attempts = _LOCK_RETRY_ATTEMPTS
         while True:
             try:
-                cursor = self.conn.executemany(sql, seq_of_params)
-                self.conn.commit()
+                cursor = connection.executemany(sql, seq_of_params)
+                connection.commit()
                 return cursor
             except sqlite3.OperationalError as exc:
                 message = str(exc).lower()
+                self._rollback_failed_write(connection)
                 if "database is locked" not in message or attempts <= 1:
                     raise
                 attempts -= 1
@@ -1865,6 +1931,19 @@ class Database:
                     sql.splitlines()[0].strip() if sql.strip() else "<empty-sql>",
                 )
                 time.sleep(_LOCK_RETRY_SLEEP_SECONDS)
+
+    @staticmethod
+    def _rollback_failed_write(connection: sqlite3.Connection) -> None:
+        """Reset an implicit transaction before retrying or surfacing failure.
+
+        A lock error may leave Python's connection inside an implicit
+        transaction. Retrying on that state can mix the next statement with
+        the failed one (and used to amplify cross-thread connection misuse).
+        Test doubles predating this boundary may not expose ``rollback``.
+        """
+        rollback = getattr(connection, "rollback", None)
+        if callable(rollback):
+            rollback()
 
     def insert_event(self, event_type: str, **kwargs: Any) -> int:
         """Insert a behavioral event.
@@ -1885,48 +1964,8 @@ class Database:
         Returns:
             Inserted row ID.
         """
-        params = self._event_insert_params(event_type, kwargs)
-        attempts = _LOCK_RETRY_ATTEMPTS
-        conn = self.open_connection()
-        try:
-            while True:
-                try:
-                    cursor = conn.execute(
-                        "INSERT INTO events "
-                        "(event_type, url, title, context, metadata, "
-                        " inferred_satisfaction, satisfaction_reason) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                        params,
-                    )
-                    event_id = int(cursor.lastrowid or 0)
-                    seen_changed = False
-                    if event_type in _SEEN_ITEM_EVENT_TYPES and event_id > 0:
-                        seen_changed = self._upsert_seen_items_from_view_event_on(
-                            conn,
-                            event_id=event_id,
-                            row={"url": params[1], "metadata": params[4]},
-                        )
-                    self._advance_seen_items_cursor_on(conn, event_id)
-                    conn.commit()
-                    if seen_changed:
-                        self._invalidate_seen_state_cache()
-                    return event_id
-                except sqlite3.OperationalError as exc:
-                    conn.rollback()
-                    message = str(exc).lower()
-                    if "database is locked" not in message or attempts <= 1:
-                        raise
-                    attempts -= 1
-                    logger.warning(
-                        "SQLite event+seen write locked, retrying (%s attempts left)",
-                        attempts,
-                    )
-                    time.sleep(_LOCK_RETRY_SLEEP_SECONDS)
-                except Exception:
-                    conn.rollback()
-                    raise
-        finally:
-            conn.close()
+        [result] = self.insert_events_with_receipts([{"event_type": event_type, **kwargs}])
+        return result.event_id
 
     @staticmethod
     def _event_insert_params(event_type: str, kwargs: Mapping[str, Any]) -> tuple[Any, ...]:
@@ -1953,6 +1992,9 @@ class Database:
             if top_level_key in kwargs and kwargs[top_level_key] is not None:
                 classifier_event[top_level_key] = kwargs[top_level_key]
         inferred_satisfaction, satisfaction_reason = classify_event_satisfaction(classifier_event)
+        ingest_key = str(kwargs.get("ingest_key", "") or "").strip()
+        if len(ingest_key) > 512:
+            raise ValueError("ingest_key exceeds 512 characters")
         return (
             event_type,
             kwargs.get("url", ""),
@@ -1961,14 +2003,18 @@ class Database:
             json.dumps(metadata_payload, ensure_ascii=False),
             inferred_satisfaction,
             satisfaction_reason,
+            ingest_key,
         )
 
-    def insert_events_batch(self, events: Sequence[Mapping[str, Any]]) -> int:
-        """Insert many normalized events in one isolated transaction.
+    def insert_events_with_receipts(
+        self,
+        events: Sequence[Mapping[str, Any]],
+    ) -> list[EventInsertResult]:
+        """Atomically insert valid events and return stable duplicate receipts.
 
-        Guided init can import hundreds of rows. Using an isolated connection
-        keeps SQLite's busy wait off the API event loop and one transaction
-        avoids hundreds of commit windows competing with background writers.
+        A non-empty ``ingest_key`` is a producer-owned identity. Replays return
+        the original row id without creating another event. Empty keys preserve
+        legacy append-only behaviour. All input rows share one transaction.
         """
         rows = [
             self._event_insert_params(
@@ -1978,39 +2024,100 @@ class Database:
             for event in events
         ]
         if not rows:
-            return 0
+            return []
+        attempts = _LOCK_RETRY_ATTEMPTS
         conn = self.open_connection()
-        seen_changed = False
-        last_event_id = 0
         try:
-            for params in rows:
-                cursor = conn.execute(
-                    "INSERT INTO events "
-                    "(event_type, url, title, context, metadata, "
-                    " inferred_satisfaction, satisfaction_reason) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    params,
-                )
-                last_event_id = int(cursor.lastrowid or last_event_id)
-                if params[0] in _SEEN_ITEM_EVENT_TYPES and last_event_id > 0:
-                    seen_changed = (
-                        self._upsert_seen_items_from_view_event_on(
-                            conn,
-                            event_id=last_event_id,
-                            row={"url": params[1], "metadata": params[4]},
+            while True:
+                try:
+                    results: list[EventInsertResult] = []
+                    seen_changed = False
+                    newest_inserted_id = 0
+                    for params in rows:
+                        ingest_key = str(params[7])
+                        if ingest_key:
+                            cursor = conn.execute(
+                                """
+                                INSERT INTO events (
+                                    event_type, url, title, context, metadata,
+                                    inferred_satisfaction, satisfaction_reason, ingest_key
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                ON CONFLICT(ingest_key) WHERE ingest_key <> '' DO NOTHING
+                                """,
+                                params,
+                            )
+                        else:
+                            cursor = conn.execute(
+                                """
+                                INSERT INTO events (
+                                    event_type, url, title, context, metadata,
+                                    inferred_satisfaction, satisfaction_reason, ingest_key
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                """,
+                                params,
+                            )
+                        inserted = int(cursor.rowcount or 0) == 1
+                        if inserted:
+                            event_id = int(cursor.lastrowid or 0)
+                            stored_event_type = str(params[0])
+                            newest_inserted_id = max(newest_inserted_id, event_id)
+                            if stored_event_type in _SEEN_ITEM_EVENT_TYPES and event_id > 0:
+                                seen_changed = (
+                                    self._upsert_seen_items_from_view_event_on(
+                                        conn,
+                                        event_id=event_id,
+                                        row={"url": params[1], "metadata": params[4]},
+                                    )
+                                    or seen_changed
+                                )
+                        else:
+                            existing = conn.execute(
+                                "SELECT id, event_type FROM events WHERE ingest_key = ?",
+                                (ingest_key,),
+                            ).fetchone()
+                            if existing is None:  # pragma: no cover - guarded by unique index
+                                raise RuntimeError("duplicate event row disappeared")
+                            event_id = int(existing["id"])
+                            stored_event_type = str(existing["event_type"])
+                        results.append(
+                            EventInsertResult(
+                                event_id=event_id,
+                                event_type=stored_event_type,
+                                ingest_key=ingest_key,
+                                inserted=inserted,
+                            )
                         )
-                        or seen_changed
+                    self._advance_seen_items_cursor_on(conn, newest_inserted_id)
+                    conn.commit()
+                    if seen_changed:
+                        self._invalidate_seen_state_cache()
+                    return results
+                except sqlite3.OperationalError as exc:
+                    conn.rollback()
+                    message = str(exc).lower()
+                    if "database is locked" not in message or attempts <= 1:
+                        raise
+                    attempts -= 1
+                    logger.warning(
+                        "SQLite event+seen write locked, retrying (%s attempts left)",
+                        attempts,
                     )
-            self._advance_seen_items_cursor_on(conn, last_event_id)
-            conn.commit()
-            if seen_changed:
-                self._invalidate_seen_state_cache()
-            return len(rows)
-        except Exception:
-            conn.rollback()
-            raise
+                    time.sleep(_LOCK_RETRY_SLEEP_SECONDS)
+                except Exception:
+                    conn.rollback()
+                    raise
         finally:
             conn.close()
+
+    def insert_events_batch(self, events: Sequence[Mapping[str, Any]]) -> int:
+        """Insert many normalized events in one isolated transaction.
+
+        Guided init can import hundreds of rows. Using an isolated connection
+        keeps SQLite's busy wait off the API event loop and one transaction
+        avoids hundreds of commit windows competing with background writers.
+        """
+        results = self.insert_events_with_receipts(events)
+        return sum(1 for result in results if result.inserted)
 
     def mark_positive_events_retracted(
         self,
@@ -2171,6 +2278,38 @@ class Database:
             if event_time is not None and (latest is None or event_time > latest):
                 latest = event_time
         return latest
+
+    def load_retraction_index(self) -> dict[tuple[str, str], datetime]:
+        """Load newest durable retraction times in one isolated table scan."""
+        from openbiliclaw.sources.event_format import RETRACTABLE_ACTIONS, parse_event_timestamp
+        from openbiliclaw.sources.identity_keys import dedup_key
+
+        conn = self.open_connection()
+        try:
+            rows = conn.execute(
+                "SELECT url, metadata FROM events WHERE event_type = 'feedback'"
+            ).fetchall()
+        finally:
+            conn.close()
+        index: dict[tuple[str, str], datetime] = {}
+        for row in rows:
+            try:
+                metadata = json.loads(row["metadata"]) if row["metadata"] else {}
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(metadata, dict):
+                continue
+            if str(metadata.get("feedback_type") or "").strip().lower() != "retraction":
+                continue
+            action = str(metadata.get("retracted_action") or "").strip().lower()
+            identity_key = dedup_key(str(row["url"] or ""))
+            if action not in RETRACTABLE_ACTIONS or not identity_key:
+                continue
+            event_time = parse_event_timestamp(metadata)
+            marker = (identity_key, action)
+            if event_time is not None and (marker not in index or event_time > index[marker]):
+                index[marker] = event_time
+        return index
 
     def get_recent_events(self, limit: int = 100) -> list[dict[str, Any]]:
         """Get recent events.
@@ -2416,9 +2555,9 @@ class Database:
         finally:
             conn.close()
 
-    def complete_chat_turn(self, turn_id: str, *, reply: str) -> None:
-        """Mark a pending popup chat turn as completed."""
-        self._execute_write(
+    def complete_chat_turn(self, turn_id: str, *, reply: str) -> bool:
+        """CAS a pending popup chat turn to completed exactly once."""
+        cursor = self._execute_write(
             """
             UPDATE chat_turns
             SET status = 'completed',
@@ -2426,13 +2565,15 @@ class Database:
                 error = '',
                 updated_at = CURRENT_TIMESTAMP
             WHERE turn_id = ?
+              AND status = 'pending'
             """,
             (reply, turn_id),
         )
+        return cursor.rowcount == 1
 
-    def fail_chat_turn(self, turn_id: str, *, error: str, reply: str = "") -> None:
-        """Mark a popup chat turn as failed while preserving visible copy."""
-        self._execute_write(
+    def fail_chat_turn(self, turn_id: str, *, error: str, reply: str = "") -> bool:
+        """CAS a pending popup chat turn to an explicit terminal failure."""
+        cursor = self._execute_write(
             """
             UPDATE chat_turns
             SET status = 'failed',
@@ -2440,9 +2581,11 @@ class Database:
                 error = ?,
                 updated_at = CURRENT_TIMESTAMP
             WHERE turn_id = ?
+              AND status = 'pending'
             """,
             (reply, error, turn_id),
         )
+        return cursor.rowcount == 1
 
     def get_chat_turn(self, turn_id: str) -> dict[str, Any] | None:
         """Return one durable popup chat turn by id."""
@@ -2494,6 +2637,54 @@ class Database:
             params,
         )
         return [self._normalize_chat_turn_row(row) for row in cursor.fetchall()]
+
+    def list_pending_chat_turn_ids(self, *, limit: int | None = None) -> list[str]:
+        """Return recoverable pending turns in durable insertion order."""
+        self._ensure_fresh_read()
+        query = """
+            SELECT turn_id
+            FROM chat_turns
+            WHERE status = 'pending'
+            ORDER BY created_at ASC, rowid ASC
+        """
+        params: tuple[int, ...] = ()
+        if limit is not None:
+            query += " LIMIT ?"
+            params = (max(1, int(limit)),)
+        cursor = self.conn.execute(query, params)
+        return [str(row["turn_id"]) for row in cursor.fetchall()]
+
+    def list_pending_chat_turn_page(
+        self,
+        *,
+        after_rowid: int = 0,
+        limit: int = 500,
+    ) -> list[dict[str, object]]:
+        """Page every recoverable pending turn by immutable insertion rowid."""
+        self._ensure_fresh_read()
+        cursor = self.conn.execute(
+            """
+            SELECT rowid, turn_id
+            FROM chat_turns
+            WHERE status = 'pending'
+              AND rowid > ?
+            ORDER BY rowid ASC
+            LIMIT ?
+            """,
+            (max(0, int(after_rowid)), max(1, int(limit))),
+        )
+        return [
+            {"rowid": int(row["rowid"]), "turn_id": str(row["turn_id"])}
+            for row in cursor.fetchall()
+        ]
+
+    def count_pending_chat_turns(self) -> int:
+        """Return the authoritative durable chat reply backlog depth."""
+        self._ensure_fresh_read()
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS count FROM chat_turns WHERE status = 'pending'"
+        ).fetchone()
+        return int(row["count"] if row is not None else 0)
 
     @staticmethod
     def _normalize_chat_turn_row(row: sqlite3.Row) -> dict[str, Any]:
@@ -2647,9 +2838,9 @@ class Database:
                 """
                 INSERT INTO events (
                     event_type, url, title, context, metadata,
-                    inferred_satisfaction, satisfaction_reason
+                    inferred_satisfaction, satisfaction_reason, ingest_key
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 params,
             )
@@ -8086,6 +8277,41 @@ class Database:
         )
         return [dict(row) for row in cursor.fetchall()]
 
+    def query_event_rows_after(
+        self,
+        *,
+        after_event_id: int,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """Scan the append-only event ledger in primary-key order.
+
+        Continuous consumers must advance across rows they do not own, so this
+        deliberately has no event-type filter.
+        """
+        cursor = self.conn.execute(
+            """
+            SELECT *
+            FROM events
+            WHERE id > ?
+            ORDER BY id ASC
+            LIMIT ?
+            """,
+            (max(0, int(after_event_id)), max(1, int(limit))),
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
+    def query_event_rows_by_ids(self, event_ids: Sequence[int]) -> list[dict[str, Any]]:
+        """Return durable event payloads for idempotent projection repair."""
+        normalized = sorted({max(0, int(event_id)) for event_id in event_ids if int(event_id) > 0})
+        if not normalized:
+            return []
+        placeholders = ", ".join("?" for _ in normalized)
+        cursor = self.conn.execute(
+            f"SELECT * FROM events WHERE id IN ({placeholders}) ORDER BY id ASC",
+            normalized,
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
     def insert_recommendation(
         self,
         bvid: str,
@@ -8543,16 +8769,24 @@ class Database:
         )
 
     def close(self) -> None:
-        """Close the database connection and owned SQLite workers."""
-        if self._conn:
-            self._conn.close()
-            self._conn = None
+        """Close owned workers, then every thread-affine SQLite connection."""
         for attribute in ("_maintenance_executor", "_serve_executor"):
             executor = getattr(self, attribute)
             if executor is None:
                 continue
             executor.shutdown(wait=True, cancel_futures=True)
             setattr(self, attribute, None)
+        with self._connection_registry_lock:
+            primary = self._conn
+            connections = list(self._connections_by_thread.values())
+            if primary is not None:
+                connections.append(primary)
+            self._connections_by_thread = {}
+            self._connection_owner_thread_id = None
+            self._conn = None
+        unique_connections = {id(connection): connection for connection in connections}
+        for connection in unique_connections.values():
+            connection.close()
 
     def _ensure_llm_usage_cache_columns(self) -> None:
         """Backfill v0.3.28+ prompt-cache columns on existing llm_usage tables."""
@@ -8584,6 +8818,20 @@ class Database:
             if column_name in existing_columns:
                 continue
             self.conn.execute(f"ALTER TABLE events ADD COLUMN {column_name} {column_type}")
+
+    def _ensure_event_ingest_key_column(self) -> None:
+        """Add the producer idempotency key and repeatable partial unique index."""
+        existing_columns = {
+            str(row["name"]) for row in self.conn.execute("PRAGMA table_info(events)").fetchall()
+        }
+        if "ingest_key" not in existing_columns:
+            self.conn.execute("ALTER TABLE events ADD COLUMN ingest_key TEXT NOT NULL DEFAULT ''")
+        self.conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_events_ingest_key_unique
+            ON events(ingest_key) WHERE ingest_key <> ''
+            """
+        )
 
     def _ensure_recommendation_feedback_columns(self) -> None:
         """Backfill recommendation feedback columns for existing databases."""

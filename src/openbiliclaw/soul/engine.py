@@ -66,8 +66,11 @@ from .pipeline import (
     ProfileSignal,
     ProfileUpdatePipeline,
     SignalType,
+    is_content_feedback_event,
     migrate_pipeline_deep_buffers,
+    signal_from_event,
     signal_from_feedback,
+    signal_from_recommendation_click,
 )
 from .posture_gate import ACCEPT, GateDecision, PostureGate
 from .preference_analyzer import (
@@ -281,6 +284,10 @@ _FEEDBACK_ANALYSIS_METADATA_KEYS = frozenset(
     }
 )
 
+_PROFILE_EVENT_CONSUMER = "profile_events"
+_CONTENT_FEEDBACK_CONSUMER = "content_feedback"
+_PROFILE_EVENT_BATCH_LIMIT = 200
+
 
 class SoulProfileNotInitializedError(Exception):
     """Raised when the soul layer has not been initialized yet."""
@@ -351,6 +358,7 @@ class SoulEngine:
         # back out through the pipeline's best-effort hook boundary.
         self._pipeline_feedback_rebuilds = 0
         self._feedback_batch_lock = asyncio.Lock()
+        self._profile_event_lock = asyncio.Lock()
         # Pending confirmed-hypotheses rebuild state machine (spec r3/F3). The
         # lock guards read-modify-write of the persisted marker; ``_rebuild_running``
         # prevents overlapping builds while the lock is released for the long
@@ -2734,6 +2742,160 @@ class SoulEngine:
             anchor_outcome,
         )
 
+    async def prepare_profile_event_owner_cutover(self) -> dict[str, object]:
+        """Fence legacy direct-ingested rows before the first event-only write."""
+        if not self.is_profile_ready():
+            return {
+                "prepared": False,
+                "profile_event_owner_version": 0,
+                "fenced_event_id": 0,
+                "reason": "profile_not_ready",
+            }
+        checkpoint = self._pipeline.consumer_checkpoint(_PROFILE_EVENT_CONSUMER)
+        owner_version = self._to_int(checkpoint.get("owner_version", 0))
+        if owner_version >= 1:
+            return {
+                "prepared": False,
+                "profile_event_owner_version": owner_version,
+                "fenced_event_id": self._to_int(checkpoint.get("cursor", 0)),
+            }
+        async with self._profile_event_lock:
+            return await self._prepare_profile_event_owner_cutover_locked()
+
+    async def _prepare_profile_event_owner_cutover_locked(self) -> dict[str, object]:
+        checkpoint = self._pipeline.consumer_checkpoint(_PROFILE_EVENT_CONSUMER)
+        owner_version = self._to_int(checkpoint.get("owner_version", 0))
+        cursor = self._to_int(checkpoint.get("cursor", 0))
+        if owner_version >= 1:
+            return {
+                "prepared": False,
+                "profile_event_owner_version": owner_version,
+                "fenced_event_id": cursor,
+            }
+        fence = max(cursor, self._to_int(self._memory.get_latest_event_id()))
+        cutover_at = datetime.now().isoformat()
+        await self._pipeline.checkpointed_enqueue_batch(
+            [],
+            consumer=_PROFILE_EVENT_CONSUMER,
+            cursor=fence,
+            owner_version=1,
+            cutover_at=cutover_at,
+            cutover_event_id=fence,
+        )
+        logger.info("Generic profile event owner cut over at event id %d", fence)
+        return {
+            "prepared": True,
+            "profile_event_owner_version": 1,
+            "fenced_event_id": fence,
+            "cutover_at": cutover_at,
+        }
+
+    async def process_profile_events_if_needed(self) -> dict[str, object]:
+        """Continuously claim explicitly generic-owned event rows."""
+        if not self.is_profile_ready():
+            return {
+                "triggered": False,
+                "scanned": 0,
+                "enqueued": 0,
+                "reason": "profile_not_ready",
+            }
+        if self._profile_event_lock.locked():
+            return {
+                "triggered": False,
+                "scanned": 0,
+                "enqueued": 0,
+                "reason": "profile_event_batch_in_progress",
+            }
+        scanned_count = 0
+        enqueued_count = 0
+        async with self._profile_event_lock:
+            await self._prepare_profile_event_owner_cutover_locked()
+            while True:
+                checkpoint = self._pipeline.consumer_checkpoint(_PROFILE_EVENT_CONSUMER)
+                cursor = self._to_int(checkpoint.get("cursor", 0))
+                rows = self._memory.query_event_rows_after(
+                    after_event_id=cursor,
+                    limit=_PROFILE_EVENT_BATCH_LIMIT,
+                )
+                if not rows:
+                    break
+                events = [self._deserialize_event(row) for row in rows]
+                last_scanned_id = max(
+                    (self._to_int(event.get("id", 0)) for event in events),
+                    default=cursor,
+                )
+                owned = [event for event in events if self._generic_owner_owns_event(event)]
+                project_retractions = getattr(
+                    self._memory,
+                    "apply_retraction_db_marks",
+                    None,
+                )
+                if callable(project_retractions) and owned:
+                    # Retraction projection is part of this durable owner's
+                    # claim protocol. It must finish before the cursor moves;
+                    # a failure therefore retries after restart and never
+                    # extends HTTP request latency.
+                    await asyncio.to_thread(project_retractions, owned)
+                signals = [self._profile_event_to_signal(event) for event in owned]
+                result = await self._pipeline.checkpointed_enqueue_batch(
+                    signals,
+                    consumer=_PROFILE_EVENT_CONSUMER,
+                    cursor=last_scanned_id,
+                    owner_version=1,
+                )
+                scanned_count += len(events)
+                enqueued_count += int(getattr(result, "signals_accepted", 0))
+                if len(rows) < _PROFILE_EVENT_BATCH_LIMIT:
+                    break
+            # Recovery for checkpoint->consume crashes also reaches this path when no
+            # new rows exist. A checkpoint failure above propagates and skips it.
+            flush = await self._pipeline.tick_if_buffered()
+        return {
+            "triggered": bool(getattr(flush, "layers_updated", [])),
+            "scanned": scanned_count,
+            "enqueued": enqueued_count,
+            "layers_updated": [
+                getattr(getattr(item, "layer", None), "value", "")
+                for item in getattr(flush, "layers_updated", [])
+            ],
+        }
+
+    @staticmethod
+    def _generic_owner_owns_event(event: dict[str, Any]) -> bool:
+        metadata = event.get("metadata")
+        return bool(
+            isinstance(metadata, dict)
+            and str(metadata.get("profile_update_owner") or "").strip().lower() == "generic"
+        )
+
+    @staticmethod
+    def _profile_event_to_signal(event: dict[str, Any]) -> ProfileSignal:
+        event_id = SoulEngine._to_int(event.get("id", 0))
+        if event_id <= 0:
+            raise ValueError("durable profile event row requires a positive id")
+        if not SoulEngine._generic_owner_owns_event(event):
+            raise ValueError("durable profile event is not owned by the generic consumer")
+        metadata = event.get("metadata")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        signal_id = f"event-row-{event_id}"
+        if (
+            str(metadata.get("event_namespace") or "").strip().lower() == "recommendation"
+            and str(metadata.get("source") or "").strip().lower() == "recommendation_click"
+        ):
+            recommendation_id = SoulEngine._to_int(metadata.get("recommendation_id", 0))
+            return signal_from_recommendation_click(
+                bvid=str(metadata.get("bvid") or metadata.get("content_id") or ""),
+                title=str(event.get("title") or ""),
+                recommendation_id=recommendation_id or None,
+                topic_label=str(metadata.get("topic_label") or ""),
+                up_name=str(metadata.get("up_name") or ""),
+                content_id=str(metadata.get("content_id") or ""),
+                content_url=str(metadata.get("content_url") or event.get("url") or ""),
+                source_platform=str(metadata.get("source_platform") or ""),
+                signal_id=signal_id,
+            )
+        return signal_from_event(event, signal_id=signal_id)
+
     async def process_feedback_batch_if_needed(self) -> dict[str, object]:
         """Reanalyze preference/profile after enough new feedback has accumulated.
 
@@ -2743,10 +2905,9 @@ class SoulEngine:
         they stay zero-change across the merge:
 
         - ``unified_interest_line`` OFF → the legacy feedback batch verbatim.
-        - ON → a one-shot idempotent migration of everything after the legacy
-          cursor into the pipeline, then a pipeline tick so a
-          threshold-satisfying INTEREST buffer consumes now instead of waiting
-          out ``min_interval_seconds``.
+        - ON → continuously claim durable feedback rows after the cursor,
+          atomically checkpoint stable-ID signals with that cursor, then consume
+          buffered recovery work outside the HTTP request.
 
         None of the three callers reads the returned dict (each awaits and
         discards it), but the legacy keys are preserved anyway so the shape
@@ -2755,6 +2916,135 @@ class SoulEngine:
         if self._unified_interest_line:
             return await self._process_feedback_via_unified_line()
         return await self._process_feedback_batch_legacy()
+
+    async def prepare_feedback_owner_cutover(self) -> dict[str, object]:
+        """Fence the v1 direct-ingest owner before accepting v2 event-only writes.
+
+        v0.3.191 wrote live feedback to both the event ledger and the pipeline,
+        while its one-shot feedback cursor stayed at the migration watermark.
+        On the first v2 run, rows above that old cursor therefore cannot be
+        claimed safely: replaying them would learn the same user action twice.
+
+        If the v1 migration marker exists, advance the cursor to the latest
+        feedback row visible *at this call boundary* and publish owner version
+        2 in the same state write. API startup and direct adapters call this
+        before writing a new event, so every later row belongs to the durable
+        cursor owner. A fresh install has no v1 marker; it records owner v2
+        without moving the cursor, preserving any unclaimed durable rows.
+        """
+        if not self._unified_interest_line:
+            return {
+                "prepared": False,
+                "feedback_owner_version": 0,
+                "fenced_feedback_event_id": 0,
+            }
+        checkpoint = self._pipeline.consumer_checkpoint(_CONTENT_FEEDBACK_CONSUMER)
+        owner_version = self._to_int(checkpoint.get("owner_version", 0))
+        if owner_version >= 2 and bool(checkpoint.get("has_cutover_event_id", False)):
+            return {
+                "prepared": False,
+                "feedback_owner_version": owner_version,
+                "fenced_feedback_event_id": self._to_int(checkpoint.get("cursor", 0)),
+                "legacy_cutover_event_id": self._to_int(checkpoint.get("cutover_event_id", 0)),
+            }
+        async with self._feedback_batch_lock:
+            return await self._prepare_feedback_owner_cutover_locked()
+
+    async def _prepare_feedback_owner_cutover_locked(self) -> dict[str, object]:
+        """Publish the owner-v2 fence while ``_feedback_batch_lock`` is held."""
+        state = self._memory.load_feedback_state()
+        checkpoint = self._pipeline.consumer_checkpoint(_CONTENT_FEEDBACK_CONSUMER)
+        owner_version = self._to_int(checkpoint.get("owner_version", 0))
+        pipeline_cursor = self._to_int(checkpoint.get("cursor", 0))
+        cutover_event_id = self._to_int(checkpoint.get("cutover_event_id", 0))
+        has_cutover_event_id = bool(checkpoint.get("has_cutover_event_id", False))
+        if owner_version >= 2:
+            if not has_cutover_event_id:
+                # Compatibility for an early owner-v2 snapshot written before
+                # the explicit legacy boundary field existed. The cursor is
+                # the only safe historical boundary; rows after it must carry
+                # an explicit owner marker.
+                await self._pipeline.checkpointed_enqueue_batch(
+                    [],
+                    consumer=_CONTENT_FEEDBACK_CONSUMER,
+                    cursor=pipeline_cursor,
+                    owner_version=2,
+                    cutover_event_id=pipeline_cursor,
+                )
+                cutover_event_id = pipeline_cursor
+            return {
+                "prepared": False,
+                "feedback_owner_version": owner_version,
+                "fenced_feedback_event_id": pipeline_cursor,
+                "legacy_cutover_event_id": cutover_event_id,
+            }
+
+        # The legacy feedback file is read exactly once as migration input.
+        # Once owner v2 is published, pipeline_state.json is authoritative and
+        # this file becomes a compatibility mirror/provenance record only.
+        cursor = max(
+            pipeline_cursor,
+            self._to_int(state.get("last_processed_feedback_event_id", 0)),
+        )
+        legacy_marker = str(state.get("unified_interest_line_migrated_at", "")).strip()
+        fence = cursor
+        if legacy_marker:
+            # Use the insertion-order cursor API, not query_events(limit=1):
+            # browser backfill may carry an old created_at, while ownership is
+            # defined by the durable SQLite row id.
+            rows_after_cursor = self._memory.query_events_since(
+                after_event_id=cursor,
+                event_types=["feedback"],
+            )
+            fence = max(
+                cursor,
+                max(
+                    (
+                        self._to_int(self._deserialize_event(row).get("id", 0))
+                        for row in rows_after_cursor
+                    ),
+                    default=0,
+                ),
+            )
+
+        # Rows at or below this append-only watermark may use the legacy
+        # predicate. Every later content-feedback row must name its owner.
+        legacy_cutover_event_id = max(
+            pipeline_cursor,
+            self._to_int(self._memory.get_latest_event_id()),
+        )
+        cutover_at = datetime.now().isoformat()
+        await self._pipeline.checkpointed_enqueue_batch(
+            [],
+            consumer=_CONTENT_FEEDBACK_CONSUMER,
+            cursor=fence,
+            owner_version=2,
+            cutover_at=cutover_at,
+            cutover_event_id=legacy_cutover_event_id,
+        )
+        self._memory.save_feedback_state(
+            {
+                "last_processed_feedback_event_id": fence,
+                "last_feedback_reanalyzed_at": str(state.get("last_feedback_reanalyzed_at", "")),
+                "unified_interest_line_migrated_at": legacy_marker,
+                "feedback_owner_version": 2,
+                "feedback_owner_cutover_at": cutover_at,
+                "feedback_owner_cutover_event_id": legacy_cutover_event_id,
+            }
+        )
+        logger.info(
+            "Unified interest line feedback owner cut over to v2 at event id %d "
+            "(legacy_direct_owner=%s)",
+            fence,
+            bool(legacy_marker),
+        )
+        return {
+            "prepared": True,
+            "feedback_owner_version": 2,
+            "fenced_feedback_event_id": fence,
+            "legacy_cutover_event_id": legacy_cutover_event_id,
+            "legacy_direct_owner": bool(legacy_marker),
+        }
 
     async def _process_feedback_batch_legacy(self) -> dict[str, object]:
         """The pre-unified-line feedback batch, unchanged.
@@ -2793,13 +3083,13 @@ class SoulEngine:
     async def _process_feedback_via_unified_line(self) -> dict[str, object]:
         """The unified interest line's replacement for the feedback batch.
 
-        Two steps, in order: (1) a one-shot migration of everything the legacy
-        cursor never consumed, (2) a pipeline tick so a buffer that already
-        satisfies the FEEDBACK priority threshold consumes NOW rather than
-        waiting out ``min_interval_seconds`` (spec invariant 1). Live feedback
-        is already ingested by ``/api/feedback``; this path exists so the
-        debounce scheduler still has something to drive and so restarts don't
-        strand a buffer that filled just before shutdown.
+        Claim every feedback event after the cursor, then publish the stable-ID
+        signals and cursor together in one atomic ``pipeline_state.json``
+        checkpoint.  ``tick_if_buffered()`` consumes recovery work without
+        running unrelated periodic maintenance on an empty owner pass.
+        ``/api/feedback`` and ``/api/events`` only persist rows and wake this
+        owner; neither endpoint waits for an LLM or contends on the pipeline
+        lock.
         """
         if self._feedback_batch_lock.locked():
             return {
@@ -2813,13 +3103,17 @@ class SoulEngine:
         rebuilds_before = self._pipeline_feedback_rebuilds
         updates: list[Any] = []
         async with self._feedback_batch_lock:
-            migrated, migration_updates = await self._migrate_legacy_feedback_cursor_if_needed()
-            updates.extend(migration_updates)
-            # Measured AFTER the migration ingest: the pre-existing strong-signal
-            # bypass means that ingest may already have consumed what it just
-            # buffered, and those rows are counted by ``migrated`` instead.
+            # Safety net for scheduler/third-party callers. Production HTTP,
+            # CLI, and OpenClaw prepare before writing their next event so the
+            # first v2 row is never mistaken for v1 direct-owned history.
+            await self._prepare_feedback_owner_cutover_locked()
+            claimed, enqueue_updates = await self._migrate_legacy_feedback_cursor_if_needed()
+            updates.extend(enqueue_updates)
+            # Measured after durable enqueue but before tick: this is the exact
+            # FEEDBACK evidence this pass puts in play, including a buffer
+            # recovered from a prior checkpoint->consume crash.
             buffered = self._buffered_feedback_signal_count()
-            flush = await self._pipeline.tick()
+            flush = await self._pipeline.tick_if_buffered()
             updates.extend(getattr(flush, "layers_updated", []))
         interest_updates = [
             update
@@ -2838,10 +3132,7 @@ class SoulEngine:
             logger.debug("pending rebuild trigger (unified line) failed", exc_info=True)
         return {
             "triggered": bool(interest_updates),
-            # FEEDBACK signals this call actually put in play: the migrated rows
-            # plus whatever the live buffer was still holding. Disjoint by
-            # construction — ``buffered`` is read after the migration ingest.
-            "feedback_count": migrated + buffered,
+            "feedback_count": buffered,
             # Legacy meaning: "the preference layer was rewritten", which the
             # batch reported unconditionally once it fired. A consumed INTEREST
             # batch is exactly that. Whether the rewrite produced visible changes
@@ -2850,7 +3141,10 @@ class SoulEngine:
             "preference_changed": any(getattr(u, "changed", False) for u in interest_updates),
             "profile_rebuilt": self._pipeline_feedback_rebuilds > rebuilds_before,
             "unified_interest_line": True,
-            "migrated_feedback_events": migrated,
+            # Compatibility key retained for callers/tests from the one-shot
+            # migration rollout; it now means rows claimed in this pass.
+            "migrated_feedback_events": claimed,
+            "enqueued_feedback_events": claimed,
         }
 
     def _buffered_feedback_signal_count(self) -> int:
@@ -2871,11 +3165,12 @@ class SoulEngine:
             return 0
 
     async def _migrate_legacy_feedback_cursor_if_needed(self) -> tuple[int, list[Any]]:
-        """One-shot: hand the pipeline every feedback row the legacy cursor left.
+        """Claim durable feedback rows into the pipeline, continuously.
 
-        Returns ``(migrated_count, layer_updates)`` — the ingest can consume the
-        buffer on the spot (the pre-existing strong-signal bypass), so the shim
-        needs those updates to report ``triggered`` honestly.
+        Returns ``(claimed_count, enqueue_updates)``. Enqueue-only currently
+        produces no layer updates; the second item preserves the rollout
+        helper's return shape while consumption happens exclusively in the
+        following ``pipeline.tick()``.
 
         Signals are built with ``signal_from_feedback``, NOT ``signals_from_events``:
         the latter never emits ``SignalType.FEEDBACK`` (it only ever produces
@@ -2893,19 +3188,24 @@ class SoulEngine:
         signals only, and the A/B gate 3 covers it there. The cursor still
         advances past them so they are never rescanned.
 
-        **Ordering: persist the cursor + marker FIRST, ingest second.** Both live
-        in one JSON file, so there is no window where the marker exists without
-        the advanced cursor. The remaining crash window (state written, process
-        dies before the buffer is durable) loses at most the un-migrated tail —
-        bounded, and those rows stay in the event ledger forever. The opposite
-        ordering would re-ingest real user feedback on every crashed restart,
-        double-counting it into the preference layer: exactly the harm the Wave A
-        dark launch existed to prevent, and unbounded in how often it can repeat.
+        **Atomic checkpoint:** each signal ID is derived from the event row ID,
+        and ``checkpointed_enqueue_batch`` publishes signals plus cursor in one
+        locked atomic snapshot. A failed replace restores both in-memory
+        values; a crash after the checkpoint but before consumption recovers
+        the buffered signal on restart.
+
+        ``unified_interest_line_migrated_at`` remains as rollout provenance but
+        is no longer a gate: live rows after the original migration must keep
+        flowing through this same cursor owner.
         """
         state = self._memory.load_feedback_state()
-        if str(state.get("unified_interest_line_migrated_at", "")).strip():
-            return 0, []
-        last_processed_id = self._to_int(state.get("last_processed_feedback_event_id", 0))
+        checkpoint = self._pipeline.consumer_checkpoint(_CONTENT_FEEDBACK_CONSUMER)
+        last_processed_id = self._to_int(checkpoint.get("cursor", 0))
+        legacy_cutover_event_id = (
+            self._to_int(checkpoint.get("cutover_event_id", 0))
+            if bool(checkpoint.get("has_cutover_event_id", False))
+            else None
+        )
         scanned = [
             self._deserialize_event(event)
             for event in self._memory.query_events_since(
@@ -2913,40 +3213,81 @@ class SoulEngine:
                 event_types=["feedback"],
             )
         ]
-        pending = [event for event in scanned if not self._is_retraction_feedback(event)]
+        # ``event_type=feedback`` is shared by direct content reactions,
+        # hypothesis settlement, retractions, and imported snapshots. Only the
+        # first category belongs to this owner; every scanned row still advances
+        # the cursor so unrelated rows are not revisited forever.
+        pending = [
+            event
+            for event in scanned
+            if is_content_feedback_event(
+                event,
+                legacy_cutover_event_id=legacy_cutover_event_id,
+            )
+        ]
         last_scanned_id = max(
             (self._to_int(event.get("id", 0)) for event in scanned),
             default=0,
         )
+        signals = [
+            self._feedback_event_to_signal(
+                event,
+                legacy_cutover_event_id=legacy_cutover_event_id,
+            )
+            for event in pending
+        ]
+        enqueue_result = await self._pipeline.checkpointed_enqueue_batch(
+            signals,
+            consumer=_CONTENT_FEEDBACK_CONSUMER,
+            cursor=max(last_scanned_id, last_processed_id),
+            owner_version=2,
+        )
+
+        migrated_at = str(state.get("unified_interest_line_migrated_at", "")).strip()
         self._memory.save_feedback_state(
             {
                 "last_processed_feedback_event_id": max(last_scanned_id, last_processed_id),
                 # Not a re-analysis — leave the legacy timestamp alone.
                 "last_feedback_reanalyzed_at": str(state.get("last_feedback_reanalyzed_at", "")),
-                "unified_interest_line_migrated_at": datetime.now().isoformat(),
+                "unified_interest_line_migrated_at": migrated_at or datetime.now().isoformat(),
+                # Compatibility mirror only.  pipeline_state.json remains the
+                # authority, but narrow storage adapters must not erase these
+                # provenance fields merely because they do not implement
+                # MemoryManager's read-before-write preservation.
+                "feedback_owner_version": self._to_int(checkpoint.get("owner_version", 0)),
+                "feedback_owner_cutover_at": str(checkpoint.get("cutover_at", "")),
             }
         )
-        if not pending:
-            return 0, []
-        signals = [self._feedback_event_to_signal(event) for event in pending]
-        ingest_result = await self._pipeline.ingest_batch(signals)
-        logger.info(
-            "Unified interest line: migrated %d unconsumed feedback event(s) "
-            "past legacy cursor %d into the pipeline",
-            len(signals),
-            last_processed_id,
-        )
-        return len(signals), list(getattr(ingest_result, "layers_updated", []))
+        if signals:
+            logger.info(
+                "Unified interest line: durably enqueued %d feedback event(s) past cursor %d",
+                len(signals),
+                last_processed_id,
+            )
+        return len(signals), list(getattr(enqueue_result, "layers_updated", []))
 
     @staticmethod
-    def _feedback_event_to_signal(event: dict[str, Any]) -> ProfileSignal:
+    def _feedback_event_to_signal(
+        event: dict[str, Any],
+        *,
+        legacy_cutover_event_id: int | None = None,
+    ) -> ProfileSignal:
         """Rebuild the FEEDBACK signal ``/api/feedback`` would have emitted."""
         metadata = event.get("metadata")
         metadata = metadata if isinstance(metadata, dict) else {}
+        event_id = SoulEngine._to_int(event.get("id", 0))
+        if event_id <= 0:
+            raise ValueError("durable feedback event row requires a positive id")
+        if not is_content_feedback_event(
+            event,
+            legacy_cutover_event_id=legacy_cutover_event_id,
+        ):
+            raise ValueError("durable feedback event is not a cursor-owned content reaction")
         return signal_from_feedback(
             str(metadata.get("feedback_type") or "").strip(),
             str(event.get("title") or ""),
             str(metadata.get("feedback_note") or ""),
+            signal_id=f"feedback-event-{event_id}",
         )
 
     async def _process_feedback_batch_if_needed_locked(self) -> dict[str, object]:

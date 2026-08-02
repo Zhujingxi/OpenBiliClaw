@@ -9,6 +9,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from openbiliclaw.api.app import create_app
+from openbiliclaw.runtime.image_cache import image_cache_key
+from openbiliclaw.runtime.image_fetch import ImageFetchResult
+from openbiliclaw.runtime.refresh import ContinuousRefreshController
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -276,3 +279,130 @@ def test_timeout_returns_504(client: TestClient, fake_httpx: FakeHTTPX) -> None:
     fake_httpx.timeout_urls.add("https://i1.hdslb.com/slow.jpg")
     resp = client.get("/api/image-proxy", params={"url": "https://i1.hdslb.com/slow.jpg"})
     assert resp.status_code == 504
+
+
+def test_proxy_failure_logs_use_host_and_cache_hash_not_signed_url(
+    client: TestClient,
+    fake_httpx: FakeHTTPX,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.runtime import image_cache
+
+    signed_url = (
+        "https://sns-webpic-qc.xhscdn.com/202608010101/"
+        "deadbeefdeadbeefdeadbeefdeadbeef/spectrum/log-cover!webp"
+    )
+    monkeypatch.setattr(image_cache, "_failure_log_state", {})
+    fake_httpx.timeout_urls.add(signed_url)
+    caplog.set_level("DEBUG", logger="openbiliclaw.api.app")
+    caplog.set_level("WARNING", logger="openbiliclaw.runtime.image_cache")
+
+    response = client.get("/api/image-proxy", params={"url": signed_url})
+
+    assert response.status_code == 504
+    relevant_logs = "\n".join(
+        record.getMessage()
+        for record in caplog.records
+        if record.name in {"openbiliclaw.api.app", "openbiliclaw.runtime.image_cache"}
+    )
+    assert signed_url not in relevant_logs
+    assert "deadbeefdeadbeefdeadbeefdeadbeef" not in relevant_logs
+    assert "host=sns-webpic-qc.xhscdn.com" in relevant_logs
+    assert f"cache={image_cache_key(signed_url)[:12]}" in relevant_logs
+
+
+async def test_api_proxy_and_refresh_prefetch_share_app_coordinator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api_url = "https://i1.hdslb.com/bfs/archive/shared-api.jpg"
+    prefetch_url = "https://i1.hdslb.com/bfs/archive/shared-prefetch.jpg"
+
+    class CoverDatabase:
+        def iter_servable_cover_urls(self, *, recent_hours: int, limit: int) -> list[str]:
+            assert recent_hours > 0
+            assert limit > 0
+            return [prefetch_url]
+
+    database = CoverDatabase()
+    runtime = ContinuousRefreshController(
+        memory_manager=object(),
+        database=database,
+        soul_engine=object(),
+        discovery_engine=object(),
+        recommendation_engine=object(),
+    )
+    app = create_app(
+        memory_manager=object(),
+        database=database,
+        soul_engine=object(),
+        runtime_controller=runtime,
+    )
+    coordinator = app.state.image_fetch_coordinator
+    assert runtime.image_fetch_coordinator is coordinator
+
+    calls: list[tuple[str, str]] = []
+
+    async def fake_fetch(url: str, *, priority: str = "foreground") -> ImageFetchResult:
+        calls.append(("fetch", url))
+        assert priority == "foreground"
+        return ImageFetchResult(b"api", "image/jpeg", cache_hit=False, stored=True)
+
+    async def fake_prefetch(url: str) -> bool:
+        calls.append(("prefetch", url))
+        return True
+
+    monkeypatch.setattr(coordinator, "fetch", fake_fetch)
+    monkeypatch.setattr(coordinator, "prefetch", fake_prefetch)
+
+    response = TestClient(app).get("/api/image-proxy", params={"url": api_url})
+    assert response.status_code == 200
+    assert response.headers["x-image-cache"] == "miss"
+    assert await runtime._prefetch_uncached_covers(max_fetch=1) == 1
+    assert calls == [("fetch", api_url), ("prefetch", prefetch_url)]
+
+
+async def test_hot_reload_rebinds_new_controller_to_same_app_coordinator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from openbiliclaw.api.runtime_context import RuntimeContext
+    from openbiliclaw.config import Config
+
+    old_controller = SimpleNamespace()
+    new_controller = SimpleNamespace()
+    app = create_app(
+        memory_manager=object(),
+        database=object(),
+        soul_engine=object(),
+        runtime_controller=old_controller,
+    )
+    coordinator = app.state.image_fetch_coordinator
+    assert old_controller.image_fetch_coordinator is coordinator
+
+    async def fake_rebuild(self: RuntimeContext, new_config: Config) -> None:
+        self.config = new_config
+        self.runtime_controller = new_controller
+
+    restart_bindings: list[object] = []
+
+    async def fake_restart(
+        self: RuntimeContext,
+        _app: object,
+        *,
+        run_post_reload_llm_work: bool = True,
+    ) -> None:
+        assert run_post_reload_llm_work is True
+        restart_bindings.append(self.runtime_controller.image_fetch_coordinator)
+
+    monkeypatch.setattr(RuntimeContext, "rebuild_from_config", fake_rebuild)
+    monkeypatch.setattr(RuntimeContext, "restart_background_tasks", fake_restart)
+
+    await app.state._rebuild_runtime_with_lane_handoff(
+        Config(),
+        resume_execution_lanes=False,
+    )
+
+    assert new_controller.image_fetch_coordinator is coordinator
+    assert restart_bindings == [coordinator]

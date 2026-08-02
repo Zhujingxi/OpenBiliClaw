@@ -119,6 +119,7 @@ import {
   fetchPendingDelightBatch,
   fetchPendingConfirmations,
   fetchProfileSummary,
+  fetchProjectStats,
   fetchRecommendations,
   fetchRuntimeStatus,
   fetchSourceShareSuggestion,
@@ -964,6 +965,11 @@ function bindSavedCardRemove(card, remove, { listKind, itemKey, requestRemove, t
 
 async function postSavedFeedback(item, feedbackType, note = "") {
   const contentId = item.content_id || item.bvid || "";
+  const retryKey = [
+    item.item_key || item.id || contentId,
+    feedbackType,
+    note,
+  ].join("|");
   const res = await sendBehaviorEvents([{
     type: "feedback",
     source_platform: item.source_platform || "bilibili",
@@ -977,7 +983,7 @@ async function postSavedFeedback(item, feedbackType, note = "") {
       feedback_note: note,
       saved_feedback: true,
     },
-  }]);
+  }], { retryKey });
   if (!res || !(res.accepted >= 1)) {
     const reason = res?.rejected?.[0]?.reason;
     throw new Error(reason === "not_initialized"
@@ -2874,7 +2880,6 @@ const STAR_REPO_URL = "https://github.com/whiteguo233/OpenBiliClaw";
 
 // Wire the persistent header Star button: always present, opens the repo so the
 // user can give a GitHub Star.
-const STAR_REPO_SLUG = "whiteguo233/OpenBiliClaw";
 const STAR_COUNT_CACHE_KEY = "obc:starCount";
 const STAR_COUNT_TTL_MS = 12 * 60 * 60 * 1000;
 
@@ -2900,9 +2905,9 @@ function _showStarCount(n) {
   }
 }
 
-// Fetch + cache the GitHub stargazers count for the count box (the GitHub-Buttons
-// look). api.github.com sends CORS `*`, so no host permission is needed; the
-// count is cached in localStorage so we don't hit the unauthenticated rate limit.
+// Fetch + cache the GitHub stargazers count through the local backend. The
+// backend owns GitHub ETag/rate-limit handling so the extension never emits a
+// failed cross-origin request in DevTools.
 async function loadStarCount() {
   if (!(elements.starCount instanceof HTMLElement)) {
     return;
@@ -2924,14 +2929,8 @@ async function loadStarCount() {
     return; // cached value is fresh enough
   }
   try {
-    const res = await fetch(`https://api.github.com/repos/${STAR_REPO_SLUG}`, {
-      headers: { Accept: "application/vnd.github+json" },
-    });
-    if (!res.ok) {
-      return;
-    }
-    const data = await res.json();
-    const n = data?.stargazers_count;
+    const data = await fetchProjectStats();
+    const n = data?.github_stars;
     if (typeof n === "number") {
       _showStarCount(n);
       try {
@@ -4990,14 +4989,16 @@ function scheduleDialogueConfirmationRefresh() {
   }, 300);
 }
 
-function isChatMessagesNearBottom() {
-  if (!(elements.chatMessages instanceof HTMLElement)) return true;
+function isChatMessagesNearBottom(messages = elements.chatMessages) {
+  if (!(messages instanceof HTMLElement)) return true;
   return (
-    elements.chatMessages.scrollHeight -
-      elements.chatMessages.clientHeight -
-      elements.chatMessages.scrollTop <= 40
+    messages.scrollHeight -
+      messages.clientHeight -
+      messages.scrollTop <=
+    40
   );
 }
+
 function openChatEvidenceTurnIds() {
   if (!(elements.chatMessages instanceof HTMLElement)) return new Set();
   return new Set(

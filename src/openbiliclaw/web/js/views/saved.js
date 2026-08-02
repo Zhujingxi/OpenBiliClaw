@@ -75,6 +75,11 @@ function setChipState(btn, pressed) {
 
 function postSavedFeedback(item, feedbackType, note = "") {
   const contentId = item.content_id || item.bvid || "";
+  const retryKey = [
+    item.item_key || item.id || contentId,
+    feedbackType,
+    note,
+  ].join("|");
   return sendBehaviorEvents([{
     type: "feedback",
     source_platform: item.source_platform || "bilibili",
@@ -88,7 +93,7 @@ function postSavedFeedback(item, feedbackType, note = "") {
       feedback_note: note,
       saved_feedback: true,
     },
-  }]).then((res) => {
+  }], { retryKey }).then((res) => {
     if (!res || res.accepted < 1) {
       const reason = res?.rejected?.[0]?.reason;
       throw new Error(reason === "not_initialized"

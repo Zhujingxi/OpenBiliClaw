@@ -583,7 +583,7 @@
     .delight > .status-line { grid-area: status; }
     .delight-meta { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
     .delight-meta .eyebrow { margin: 0; }
-    .delight-queue-tools { display: flex; flex-wrap: wrap; align-items: center; justify-content: end; gap: 6px; }
+    .delight-queue-tools { display: flex; flex-wrap: nowrap; align-items: center; justify-content: end; gap: 8px; }
     .delight-nav { display: inline-flex; align-items: center; gap: 5px; padding: 4px 8px; border-radius: var(--radius-pill); background: color-mix(in oklab, var(--accent-subtle), transparent 30%); border: 0; color: var(--accent); font-size: 12px; line-height: 1; transition: box-shadow var(--motion-fast) var(--ease-standard); }
     .delight-nav:hover { box-shadow: 0 0 8px 2px color-mix(in oklab, var(--accent), transparent 65%); }
     .delight-nav #delightCount { color: var(--accent); }
@@ -594,6 +594,12 @@
     .delight-nav .icon-btn:active { background: var(--accent-strong); color: var(--accent-on); border-color: var(--accent-strong); transform: scale(0.97); box-shadow: 0 0 5px 1px color-mix(in oklab, var(--accent), transparent 40%); }
     .delight-nav .icon-btn[data-delight]:hover { border-color: transparent; }
     .delight-nav .icon-btn:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+    .delight-dismiss-btn { flex: 0 0 32px; width: 32px; height: 32px; min-height: 32px; display: inline-grid; place-items: center; padding: 0; border: 1px solid color-mix(in oklab, var(--muted), transparent 72%); border-radius: var(--radius-pill); background: color-mix(in oklab, var(--surface), transparent 18%); color: var(--muted); cursor: pointer; transition: background var(--motion-fast) var(--ease-standard), border-color var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard), box-shadow var(--motion-fast) var(--ease-standard), transform var(--motion-fast) var(--ease-standard); }
+    .delight-dismiss-btn svg { width: 16px; height: 16px; }
+    .delight-dismiss-btn:hover { border-color: color-mix(in oklab, var(--accent), transparent 28%); background: var(--accent); color: var(--accent-on); box-shadow: 0 0 5px 1px color-mix(in oklab, var(--accent), transparent 48%); }
+    .delight-dismiss-btn:active { background: var(--accent-strong); border-color: var(--accent-strong); color: var(--accent-on); transform: scale(0.97); }
+    .delight-dismiss-btn:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+    .delight-dismiss-btn:disabled { cursor: wait; opacity: 0.58; }
     .delight-queue-tools .ghost-danger { height: 26px; min-height: 26px; padding: 0 9px; font-size: 12px; line-height: 1; }
     .thumb { aspect-ratio: 16 / 9; border-radius: var(--radius-lg); background: linear-gradient(135deg, var(--accent-strong), var(--fg)); position: relative; overflow: hidden; }
     .thumb::before { content: ""; position: absolute; inset: 18% 22%; border: 1px solid color-mix(in oklab, var(--surface), transparent 25%); border-radius: var(--radius-lg); }
@@ -1470,6 +1476,7 @@
       .delight-actions { flex-wrap: wrap; justify-content: stretch; }
       .delight-main-actions { flex: 1 1 212px; grid-template-columns: minmax(116px, 1fr) 88px; }
       .delight-feedback-actions.card-feedback-icons { flex: 0 0 128px; margin-left: auto; }
+      .delight-dismiss-btn { flex-basis: 44px; width: 44px; height: 44px; min-height: 44px; }
     }
     @container desktop-main (max-width: 430px) {
       .delight { padding: 20px; border-radius: 22px; }

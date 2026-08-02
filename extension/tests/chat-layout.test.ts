@@ -56,7 +56,10 @@ test("pending confirmations stay bounded and scroll independently from chat hist
 test("chat refresh preserves reader position and expanded evidence", () => {
   const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
 
-  assert.match(popupJs, /function isChatMessagesNearBottom\(\)/);
+  assert.match(
+    popupJs,
+    /function isChatMessagesNearBottom\(messages = elements\.chatMessages\)/,
+  );
   assert.match(popupJs, /function openChatEvidenceTurnIds\(\)/);
   assert.match(popupJs, /const previousScrollTop = elements\.chatMessages\.scrollTop;/);
   assert.match(popupJs, /if \(openEvidence\.has\(turnId\)\) details\.open = true;/);

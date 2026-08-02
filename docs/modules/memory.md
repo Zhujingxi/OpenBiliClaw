@@ -111,7 +111,7 @@
 | 插件聊天回合 | ✅ | SQLite `chat_turns` 持久化 side panel 主聊天、惊喜推荐内聊、兴趣猜测内聊和避雷探针内聊的 pending/completed/failed 状态 |
 | JSON 状态原子读写 | ✅ | `memory/json_state.py` 提供共享同一进程内锁/跨进程文件锁的 `read_json_state()` 与 `update_json_state()`，写侧再以 `os.replace` 发布；`discovery_runtime.json` 的 probe 反馈历史、冷却 map、短期探索 buffer 等运行态通过 mutator 更新并合并旧快照，避免安装包常驻进程/后台任务并发保存时丢掉用户点击反馈。对话锚在 LLM 返回后的 ref+generation 二次校验使用锁内读，因此不会观察到写到一半的代次。 |
 
-> `MemoryManager.propagate_event()` / `propagate_events()` 的职责边界是“落事实”：校验事件类型、补默认信号强度并写入 SQLite。storage 会在同一事务内把 `view` 的 canonical identity upsert 到 `seen_items`，这是推荐去重索引，不是画像推断。单条和批量版本都通过 `asyncio.to_thread` 进入 storage；前者每事件一条独立短连接事务，后者把整批初始化事件交给一条独立连接的单事务接口，二者都避免 SQLite busy wait 阻塞 API loop。初始化后的画像增量更新由 API/runtime 层显式调用 `signals_from_events()` → `ProfileUpdatePipeline.ingest_batch()`，不会在 memory 层隐式触发偏好、觉察、洞察或 Soul 刷新。
+> `MemoryManager.propagate_event()` / `propagate_events()` 的职责边界是“落事实”：校验事件类型、补默认信号强度并写入 SQLite。storage 会在同一事务内把 `view` 的 canonical identity upsert 到 `seen_items`，这是推荐去重索引，不是画像推断。单条和批量版本都通过 `asyncio.to_thread` 进入 storage；前者每事件一条独立短连接事务，后者把整批初始化事件交给一条独立连接的单事务接口，二者都避免 SQLite busy wait 阻塞 API loop。生产 HTTP/source 入口统一由 `EventIngressService` 写 durable receipt 并 wake；初始化后的画像增量由 app-owned `EventProcessingScheduler` 的 generic/content-feedback consumers 按各自 cursor 扫描，在 `ProfileUpdatePipeline.checkpointed_enqueue_batch()` 中把 buffer+cursor 原子发布到同一份 `pipeline_state.json`，再调用 `tick_if_buffered()`。独立周期画像维护才调用完整 `tick()`；memory 层仍不会隐式触发偏好、觉察、洞察或 Soul 刷新。
 
 ## 公开 API
 
@@ -159,8 +159,9 @@ stats = memory.get_event_stats()  # {"view": 42, "search": 7, ...}
 # feedback + metadata.feedback_type="dislike"；未知类型只进入响应的
 # rejected 明细，不再让整批 500。
 # X 的取消赞/取消收藏归一为 feedback + metadata.feedback_type="retraction"
-# （satisfaction 恒 neutral），但反馈批学习 process_feedback_batch_if_needed
-# 会把 retraction 行从阈值计数与 LLM 分析输入中剔除——撤销是"中和"不是负偏好。
+# （satisfaction 恒 neutral）。统一兴趣线 cursor 只学习显式、非 import 的内容
+# feedback；hypothesis/import feedback 与 retraction 都只越过。API generic
+# pipeline 仍消费 live retraction 做折价——撤销是"中和"，不是负偏好。
 
 # 插件 side panel 的 durable chat turn 由 Database 管理：
 from openbiliclaw.storage.database import Database
@@ -194,7 +195,10 @@ memory.save_all()
 feedback_state = memory.load_feedback_state()
 # {
 #   "last_processed_feedback_event_id": 0,
-#   "last_feedback_reanalyzed_at": ""
+#   "last_feedback_reanalyzed_at": "",
+#   "unified_interest_line_migrated_at": "",  # v1 rollout provenance
+#   "feedback_owner_version": 0,              # 2 = durable cursor owner
+#   "feedback_owner_cutover_at": ""           # v1→v2 fence publication time
 # }
 
 runtime_state = memory.load_discovery_runtime_state()
@@ -402,7 +406,7 @@ data/memory/
 ├── awareness.json              # 觉察层
 ├── insight.json                # 洞察层
 ├── soul.json                   # 灵魂层
-├── feedback_state.json         # 反馈处理游标
+├── feedback_state.json         # 反馈处理游标 + owner cutover fence
 ├── account_sync_state.json     # 账户同步游标
 ├── source_bootstrap_state.json # 多源 bootstrap 已见 identity key
 ├── discovery_runtime.json      # 候选池刷新游标
@@ -413,7 +417,7 @@ data/memory/
 
 | 文件 | 用途 | 主要消费者 |
 |------|------|-----------|
-| `feedback_state.json` | 记录反馈处理到了哪一条，避免重复分析 | SoulEngine |
+| `feedback_state.json` | 记录反馈处理游标、v1 rollout provenance 与 owner-v2 cutover fence，避免升级重放和稳态重复分析 | SoulEngine |
 | `account_sync_state.json` | 历史/收藏/关注的增量同步游标、同秒历史 bvid 集合、收藏 bvid 集合、关注 mid 集合、签名，以及有界的分阶段错误诊断 | AccountSyncService |
 | `source_bootstrap_state.json` | XHS / 抖音 / YouTube bootstrap 已传播 identity key，避免跨任务重复写入同一批画像信号 | FastAPI source task endpoints |
 | `discovery_runtime.json` | 候选池刷新时间、通知游标、最近话题、近期 probe domain / axis / distance 历史、显式 probe feedback 历史、短期探索 buffer | RefreshController / OpenClaw / FastAPI |
@@ -473,7 +477,7 @@ data_dir = "data"  # 记忆 JSON 文件存储在 data/memory/ 下
 6. **核心记忆裁剪**：`get_core_memory()` 只暴露稳定摘要，不把整层原始 JSON 直接塞进 prompt
 7. **统一 Prompt 注入**：`render_core_memory_prompt()` 和 `LLMService` 统一为画像、偏好、觉察、洞察链路注入用户上下文
 8. **插件事件兼容**：事件层白名单已扩到插件采集事件，避免 `/api/events` 在 `snapshot`、`scroll`、`hover`、`seek` 等行为上拒收
-9. **反馈状态独立持久化**：`feedback_state.json` 单独保存反馈处理游标，避免把运行状态塞进 `preference.json` 或 `soul.json`
+9. **反馈状态独立持久化**：`feedback_state.json` 单独保存反馈处理游标，以及 `feedback_owner_version` / `feedback_owner_cutover_at` 升级边界；写入使用 tmp + fsync + `os.replace`，让 cursor 与 owner fence 同时发布，避免把运行状态塞进 `preference.json` 或 `soul.json`
 10. **聊天候选与正式画像分层**：聊天提取出的 `insight_candidates.json` 先作为中间状态保留，不直接覆盖 `soul.json`
 11. **插件聊天回合独立持久化**：`chat_turns` 只保存 side panel durable turn 的请求、回复和状态，解决 Chrome side panel reload / discard 时 DOM 和 JS 内存丢失的问题；它不替代事件层学习，完成后的 dialogue/cognition 仍按后端流程受控进入画像链路
 12. **候选池运行状态分层**：`discovery_runtime.json` 只负责刷新与通知游标，不与 `feedback_state.json`、`insight_candidates.json` 或画像数据混存

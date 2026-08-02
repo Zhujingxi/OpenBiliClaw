@@ -37,7 +37,13 @@
 | 撤销 | ✅ | `ext-key revoke <key-id>` 删除摘要并 bump 全局 `auth_epoch`，所有 Web / 扩展会话立即失效；失败时回滚配置。 |
 | 远程 endpoint 权限 | ✅ | 扩展按 `scheme://host/*` 请求跨浏览器可用的最小 host 权限；权限 API 不能可移植地限定端口，实际请求仍固定配置端口。公网 host 强制 HTTPS，HTTPS 自动派生 WSS。 |
 
-真实 LAN 浏览器链路在物理网卡地址上验证；本机没有可用 Docker runtime，因此本次没有把 Docker bridge 作为通过项。容器部署仍必须显式配置 `trusted_proxies`，不会自动信任默认网关。
+真实 LAN 浏览器链路在物理网卡地址上验证。手动接入其他 Docker bridge / 外部反向代理时仍
+必须显式配置 `trusted_proxies`，后端不会自动信任默认网关。官方 `docker-compose.https.yml`
+不放宽该列表：Caddy 与后端共享 network namespace，Uvicorn 通过
+`FORWARDED_ALLOW_IPS=127.0.0.1` 只信任 loopback hop，并先把 scope client/scheme 归一化为
+公网客户端与 HTTPS；auth gate 因此继续按远程客户端执行密码门禁，登录 cookie 带 `Secure`。
+该路径已通过真实 Compose、Caddy TLS、浏览器登录、扩展设备令牌和 WSS 请求验证；公网 ACME
+签发仍需在具有真实 DNS 与入站 `80/443` 的部署主机上完成。
 
 ## 端点
 
