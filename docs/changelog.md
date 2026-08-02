@@ -8,7 +8,7 @@
 
 - **Firefox 首次公开上架不再复用 unlisted 签名链路**：新增手动 `Submit Firefox AMO Listed Package` workflow，以全局唯一的扩展版本构建 `dist-firefox/`，携带双语名称、摘要、描述、MIT license、合法 Firefox / Android 分类和审核说明提交 `web-ext sign --channel=listed`；0.3.192 已作为 unlisted 版本存在，故公开提审使用独立扩展版本 0.3.193，后端与桌面版本仍保持 0.3.192。
 - **审核所需源码与隐私资料和提交包同源**：workflow 从同一 Git commit 打包 `extension/`、共享 Web 模块、lockfile、构建说明和 `docs/privacy.md`，主动通过 `--upload-source-code` 附上可复现源码；提交前用 authenticated AMO API 精确同步隐私政策，提交后查询版本列表并要求 0.3.193 的 channel 真实为 `listed`，避免把上传成功误报成已提审。
-- **AMO 元数据请求显式遵守严格 JSON content negotiation**：首次真实提审在隐私政策 PATCH 阶段收到无响应体的 HTTP 406，且扩展包尚未上传；对照 `web-ext` 官方客户端后，统一为 AMO API 请求增加 `Accept: application/json` 与稳定 `User-Agent`，写请求继续明确 `Content-Type: application/json`，避免 Node fetch 的通配 Accept 被服务端拒绝。
+- **AMO 元数据请求显式遵守严格 JSON content negotiation，并避开 action 路由的 GUID 歧义**：首次真实提审在隐私政策 PATCH 阶段收到无响应体的 HTTP 406，且扩展包尚未上传；对照 `web-ext` 官方客户端后，统一增加 `Accept: application/json`、稳定 `User-Agent` 与写请求 `Content-Type: application/json`。第二次真实请求证明仅补请求头仍不足，因此隐私同步先用 Gecko GUID 读取 add-on detail、取得 canonical 数字 ID，再以数字 ID 访问 `eula_policy` action，避免含 `@` 和多段 `.` 的 GUID 落入 DRF action / format 路由歧义。
 
 ## v0.3.192：多模态推荐、可靠反馈与连接增强（2026-08-03）
 

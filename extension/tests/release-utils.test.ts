@@ -118,6 +118,21 @@ test("Firefox AMO API requests use explicit JSON content negotiation", () => {
   assert.match(api, /"User-Agent": "OpenBiliClaw Firefox AMO publisher"/);
 });
 
+test("Firefox AMO privacy sync resolves the numeric add-on ID before its action route", () => {
+  const privacy = readFileSync(
+    resolve("scripts", "firefox-amo-privacy.mjs"),
+    "utf8",
+  );
+
+  assert.match(privacy, /addons\/addon\/\$\{encodeURIComponent\(geckoId\)\}\//);
+  assert.match(privacy, /Number\.isInteger\(addon\?\.id\)/);
+  assert.match(privacy, /addons\/addon\/\$\{addon\.id\}\/eula_policy\//);
+  assert.doesNotMatch(
+    privacy,
+    /addons\/addon\/\$\{encodeURIComponent\(geckoId\)\}\/eula_policy\//,
+  );
+});
+
 test("aggregate release sync treats signed Firefox XPI as a package asset", () => {
   const script = readFileSync(
     resolve("..", ".github", "scripts", "sync-aggregate-release.sh"),

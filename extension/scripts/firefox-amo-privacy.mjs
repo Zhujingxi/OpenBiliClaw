@@ -14,7 +14,15 @@ if (!geckoId) {
   throw new Error("Firefox manifest is missing browser_specific_settings.gecko.id");
 }
 
-const path = `addons/addon/${encodeURIComponent(geckoId)}/eula_policy/`;
+// Resolve the canonical numeric add-on ID first. The AMO action route has
+// returned HTTP 406 for this Gecko GUID (it contains both `@` and dots), while
+// the ordinary detail route accepts it. A numeric path is unambiguous to
+// Django REST Framework's action/format routing.
+const addon = await amoRequest(`addons/addon/${encodeURIComponent(geckoId)}/`);
+if (!Number.isInteger(addon?.id) || addon.id <= 0) {
+  throw new Error("AMO add-on detail did not return a valid numeric id");
+}
+const path = `addons/addon/${addon.id}/eula_policy/`;
 await amoRequest(path, {
   method: "PATCH",
   body: JSON.stringify({ privacy_policy: { "zh-CN": privacyPolicy } }),
