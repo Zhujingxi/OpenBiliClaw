@@ -73,6 +73,71 @@ test("extension release workflow publishes signed Firefox XPI when enabled", () 
   assert.match(workflow, /release-artifacts\/openbiliclaw-extension-v\*\.(zip|xpi)/);
 });
 
+test("Firefox AMO workflow submits a listed build with metadata and reviewer source", () => {
+  const workflow = readFileSync(
+    resolve("..", ".github", "workflows", "publish-firefox-amo.yml"),
+    "utf8",
+  );
+  const metadata = JSON.parse(readFileSync(resolve("amo-metadata.json"), "utf8")) as {
+    categories?: Record<string, string[]>;
+    name?: Record<string, string>;
+    summary?: Record<string, string>;
+    version?: { approval_notes?: string; license?: string };
+  };
+
+  assert.match(workflow, /--channel=listed/);
+  assert.match(workflow, /--amo-metadata=amo-metadata\.json/);
+  assert.match(workflow, /--upload-source-code=/);
+  assert.match(workflow, /firefox-amo-privacy\.mjs/);
+  assert.match(workflow, /firefox-amo-status\.mjs/);
+  assert.match(workflow, /id: privacy\n\s+continue-on-error: true/);
+  assert.ok(
+    workflow.indexOf("Submit listed package to AMO") <
+      workflow.indexOf("Synchronize AMO privacy policy"),
+  );
+  assert.deepEqual(metadata.categories?.firefox, ["photos-music-videos"]);
+  assert.deepEqual(metadata.categories?.android, ["photos-music-videos"]);
+  assert.equal(metadata.version?.license, "MIT");
+  assert.ok(metadata.name?.["zh-CN"]);
+  assert.ok(metadata.summary?.["en-US"]);
+  assert.match(metadata.version?.approval_notes ?? "", /npm run build:firefox/);
+});
+
+test("Firefox AMO source instructions reproduce the reviewed directory", () => {
+  const instructions = readFileSync(
+    resolve("..", "docs", "firefox-amo-source-build.md"),
+    "utf8",
+  );
+
+  assert.match(instructions, /Node\.js 22/);
+  assert.match(instructions, /npm ci/);
+  assert.match(instructions, /npm run build:firefox/);
+  assert.match(instructions, /extension\/dist-firefox/);
+});
+
+test("Firefox AMO API requests use explicit JSON content negotiation", () => {
+  const api = readFileSync(resolve("scripts", "amo-api.mjs"), "utf8");
+
+  assert.match(api, /Accept: "application\/json"/);
+  assert.match(api, /"Content-Type": "application\/json"/);
+  assert.match(api, /"User-Agent": "OpenBiliClaw Firefox AMO publisher"/);
+});
+
+test("Firefox AMO privacy sync resolves the numeric add-on ID before its action route", () => {
+  const privacy = readFileSync(
+    resolve("scripts", "firefox-amo-privacy.mjs"),
+    "utf8",
+  );
+
+  assert.match(privacy, /addons\/addon\/\$\{encodeURIComponent\(geckoId\)\}\//);
+  assert.match(privacy, /Number\.isInteger\(addon\?\.id\)/);
+  assert.match(privacy, /addons\/addon\/\$\{addon\.id\}\/eula_policy\//);
+  assert.doesNotMatch(
+    privacy,
+    /addons\/addon\/\$\{encodeURIComponent\(geckoId\)\}\/eula_policy\//,
+  );
+});
+
 test("aggregate release sync treats signed Firefox XPI as a package asset", () => {
   const script = readFileSync(
     resolve("..", ".github", "scripts", "sync-aggregate-release.sh"),
