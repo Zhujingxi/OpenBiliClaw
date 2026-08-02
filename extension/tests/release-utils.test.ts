@@ -73,6 +73,43 @@ test("extension release workflow publishes signed Firefox XPI when enabled", () 
   assert.match(workflow, /release-artifacts\/openbiliclaw-extension-v\*\.(zip|xpi)/);
 });
 
+test("Firefox AMO workflow submits a listed build with metadata and reviewer source", () => {
+  const workflow = readFileSync(
+    resolve("..", ".github", "workflows", "publish-firefox-amo.yml"),
+    "utf8",
+  );
+  const metadata = JSON.parse(readFileSync(resolve("amo-metadata.json"), "utf8")) as {
+    categories?: Record<string, string[]>;
+    name?: Record<string, string>;
+    summary?: Record<string, string>;
+    version?: { approval_notes?: string; license?: string };
+  };
+
+  assert.match(workflow, /--channel=listed/);
+  assert.match(workflow, /--amo-metadata=amo-metadata\.json/);
+  assert.match(workflow, /--upload-source-code=/);
+  assert.match(workflow, /firefox-amo-privacy\.mjs/);
+  assert.match(workflow, /firefox-amo-status\.mjs/);
+  assert.deepEqual(metadata.categories?.firefox, ["photos-music-videos"]);
+  assert.deepEqual(metadata.categories?.android, ["photos-music-videos"]);
+  assert.equal(metadata.version?.license, "MIT");
+  assert.ok(metadata.name?.["zh-CN"]);
+  assert.ok(metadata.summary?.["en-US"]);
+  assert.match(metadata.version?.approval_notes ?? "", /npm run build:firefox/);
+});
+
+test("Firefox AMO source instructions reproduce the reviewed directory", () => {
+  const instructions = readFileSync(
+    resolve("..", "docs", "firefox-amo-source-build.md"),
+    "utf8",
+  );
+
+  assert.match(instructions, /Node\.js 22/);
+  assert.match(instructions, /npm ci/);
+  assert.match(instructions, /npm run build:firefox/);
+  assert.match(instructions, /extension\/dist-firefox/);
+});
+
 test("aggregate release sync treats signed Firefox XPI as a package asset", () => {
   const script = readFileSync(
     resolve("..", ".github", "scripts", "sync-aggregate-release.sh"),

@@ -1,0 +1,38 @@
+{
+  "categories": {
+    "android": [
+      "photos-music-videos"
+    ],
+    "firefox": [
+      "photos-music-videos"
+    ]
+  },
+  "default_locale": "zh-CN",
+  "description": {
+    "en-US": "OpenBiliClaw is a local-first, open-source AI content discovery companion. Its Firefox sidebar connects to the OpenBiliClaw backend you run, collects only the supported browsing and interaction signals described in the privacy policy, and turns them into cross-platform recommendations, an inspectable private profile, and feedback-driven tuning. Supported sources include Bilibili, Xiaohongshu, Douyin, YouTube, X, Zhihu, Reddit, and Bangumi. The extension does not send data to servers operated by the OpenBiliClaw developers.",
+    "zh-CN": "OpenBiliClaw 是本地优先、开源的 AI 内容发现伙伴。Firefox 侧边栏连接由你自行运行的 OpenBiliClaw 后端，仅采集隐私政策中说明的受支持浏览与互动信号，并生成跨平台推荐、可查看的私有画像和可持续反馈调教的推荐结果。支持 B站、小红书、抖音、YouTube、X、知乎、Reddit 与 Bangumi。插件不会把数据发送到 OpenBiliClaw 开发者运营的服务器。"
+  },
+  "homepage": {
+    "en-US": "https://whiteguo233.github.io/OpenBiliClaw/",
+    "zh-CN": "https://whiteguo233.github.io/OpenBiliClaw/"
+  },
+  "is_experimental": false,
+  "name": {
+    "en-US": "OpenBiliClaw",
+    "zh-CN": "OpenBiliClaw"
+  },
+  "requires_payment": false,
+  "slug": "openbiliclaw",
+  "summary": {
+    "en-US": "Local-first AI content discovery, private profiling, and sidebar recommendations",
+    "zh-CN": "本地优先的跨平台 AI 内容发现、私有画像与侧边栏推荐"
+  },
+  "version": {
+    "approval_notes": "OpenBiliClaw is local-first and requires a user-run backend. It does not load remote code or send telemetry to servers operated by the project. The optional all-sites host permission is requested only when a user explicitly configures a non-local backend; public hosts require HTTPS and device authentication. The declared data categories cover supported-site browsing/activity signals, user-triggered search and source tasks, locally stored authentication status, and comments/chat/danmaku text only after the user successfully submits it. Data is sent to the backend endpoint configured by the user. A reproducible source archive is attached; from its root run `cd extension`, `npm ci`, then `npm run build:firefox` using Node.js 22. The output submitted for review is `extension/dist-firefox`. See docs/firefox-amo-source-build.md and docs/privacy.md for the complete build and data-flow explanation.",
+    "license": "MIT",
+    "release_notes": {
+      "en-US": "Initial public AMO submission. Adds the reviewed Firefox distribution channel for OpenBiliClaw's local-first sidebar, cross-platform discovery, private profile, and recommendation feedback flows.",
+      "zh-CN": "首次提交 Firefox AMO 公开版本，为 OpenBiliClaw 本地优先侧边栏、跨平台发现、私有画像与推荐反馈链路增加经审核的自动更新渠道。"
+    }
+  }
+}

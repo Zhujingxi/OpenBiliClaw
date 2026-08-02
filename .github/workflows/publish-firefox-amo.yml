@@ -1,0 +1,90 @@
+name: Submit Firefox AMO Listed Package
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  submit:
+    name: Submit Firefox extension for AMO review
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: extension/package-lock.json
+
+      - name: Install extension dependencies
+        run: npm ci
+        working-directory: extension
+
+      - name: Build Firefox extension
+        run: npm run build:firefox
+        working-directory: extension
+
+      - name: Package reproducible reviewer source
+        id: source
+        shell: bash
+        run: |
+          version="$(node -e 'console.log(JSON.parse(require("fs").readFileSync("extension/manifest.json", "utf8")).version)')"
+          archive="$RUNNER_TEMP/openbiliclaw-extension-v${version}-source.zip"
+          prefix="openbiliclaw-extension-source-v${version}/"
+          git archive --format=zip --prefix="$prefix" --output="$archive" HEAD -- \
+            LICENSE \
+            docs/firefox-amo-source-build.md \
+            docs/privacy.md \
+            extension \
+            src/openbiliclaw/web/shared
+          test -s "$archive"
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Reviewer source archive: $(basename "$archive")"
+
+      - name: Synchronize AMO privacy policy
+        env:
+          AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
+          AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+        run: node scripts/firefox-amo-privacy.mjs
+        working-directory: extension
+
+      - name: Submit listed package to AMO
+        env:
+          AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
+          AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+          SOURCE_ARCHIVE: ${{ steps.source.outputs.archive }}
+        shell: bash
+        working-directory: extension
+        run: |
+          npx web-ext sign \
+            --channel=listed \
+            --source-dir=dist-firefox \
+            --artifacts-dir=web-ext-artifacts/firefox-listed \
+            --api-key="$AMO_JWT_ISSUER" \
+            --api-secret="$AMO_JWT_SECRET" \
+            --amo-metadata=amo-metadata.json \
+            --upload-source-code="$SOURCE_ARCHIVE" \
+            --approval-timeout=0 \
+            --no-input
+
+      - name: Verify AMO accepted the listed version
+        env:
+          AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
+          AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+          EXTENSION_VERSION: ${{ steps.source.outputs.version }}
+        run: node scripts/firefox-amo-status.mjs --version "$EXTENSION_VERSION"
+        working-directory: extension
+
+      - name: Retain reviewer source archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: firefox-amo-reviewer-source-v${{ steps.source.outputs.version }}
+          path: ${{ steps.source.outputs.archive }}
+          if-no-files-found: error
