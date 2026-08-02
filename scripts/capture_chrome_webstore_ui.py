@@ -6,10 +6,16 @@ import argparse
 import shutil
 import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
-from chrome_webstore_demo import DemoServer
-from playwright.sync_api import BrowserContext, Page, Route, sync_playwright
+if TYPE_CHECKING:
+    from playwright.sync_api import BrowserContext, Page, Route
+
+if __package__:
+    from scripts.chrome_webstore_demo import DemoServer
+else:
+    from chrome_webstore_demo import DemoServer
 
 ROOT = Path(__file__).resolve().parents[1]
 EXTENSION_ROOT = ROOT / "extension"
@@ -111,6 +117,8 @@ def _capture_web(
     blocked: list[str],
     docs_output_dir: Path | None = None,
 ) -> None:
+    from playwright.sync_api import sync_playwright
+
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(channel="chrome", headless=True)
         context = browser.new_context(
@@ -231,6 +239,8 @@ def _capture_extension(
     blocked: list[str],
     docs_output_dir: Path | None = None,
 ) -> None:
+    from playwright.sync_api import sync_playwright
+
     service_worker = EXTENSION_ROOT / "dist/background/service-worker.js"
     popup = EXTENSION_ROOT / "popup/popup.html"
     if not service_worker.exists() or not popup.exists():
@@ -322,6 +332,11 @@ def _capture_extension(
 
 
 def capture(output_dir: Path, docs_output_dir: Path | None = None) -> list[Path]:
+    if docs_output_dir is not None:
+        raise ValueError(
+            "demo fixture captures must not replace README or GitHub Pages screenshots; "
+            "capture those from a real running OpenBiliClaw profile"
+        )
     output_dir.mkdir(parents=True, exist_ok=True)
     expected_names = set(EXPECTED)
     for stale in output_dir.glob("*.png"):
@@ -352,21 +367,8 @@ def main() -> None:
         type=Path,
         default=ROOT / "docs/images/chrome-web-store/source",
     )
-    parser.add_argument(
-        "--refresh-docs",
-        action="store_true",
-        help="also refresh README and documentation screenshots under docs/images",
-    )
-    parser.add_argument(
-        "--docs-output-dir",
-        type=Path,
-        default=ROOT / "docs/images",
-    )
     args = parser.parse_args()
-    capture(
-        args.output_dir.resolve(),
-        args.docs_output_dir.resolve() if args.refresh_docs else None,
-    )
+    capture(args.output_dir.resolve())
 
 
 if __name__ == "__main__":

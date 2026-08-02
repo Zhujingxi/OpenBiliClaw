@@ -2,12 +2,21 @@ from pathlib import Path
 from urllib.parse import quote, urlsplit
 from urllib.request import urlopen
 
+import pytest
 from PIL import Image
+from scripts.capture_chrome_webstore_ui import capture
 from scripts.chrome_webstore_demo import (
     DEMO_COVER_HOST,
     DemoServer,
     demo_payload,
 )
+
+
+def test_demo_capture_cannot_overwrite_real_documentation_screenshots(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="must not replace README or GitHub Pages screenshots"):
+        capture(tmp_path / "store", tmp_path / "docs")
 
 
 def test_demo_recommendations_cover_multiple_platforms_without_private_data() -> None:
