@@ -1,9 +1,9 @@
 # LLM Token Diet Landing Hardening — Implementation Plan
 
-> **Spec:** [`2026-08-03-llm-token-diet-landing-hardening-spec.md`](./2026-08-03-llm-token-diet-landing-hardening-spec.md)  
-> **Owner:** root agent（规格、集成、验收）  
-> **Implementation:** bounded multi-agent tasks with non-overlapping file ownership  
-> **Status:** in progress
+> **Spec:** [`2026-08-03-llm-token-diet-landing-hardening-spec.md`](./2026-08-03-llm-token-diet-landing-hardening-spec.md)
+> **Owner:** root agent（规格、集成、验收）
+> **Implementation:** bounded multi-agent tasks with non-overlapping file ownership
+> **Status:** implementation complete; automated and real-replay acceptance in progress
 
 ## 0. Working rules
 
@@ -16,7 +16,7 @@
 
 ## Task 1 — Freeze landing contract
 
-**Owner:** root  
+**Owner:** root
 **Files:** this spec/plan
 
 - [x] 记录 replay、cache、reason、rebase 与文档阻塞项。
@@ -37,9 +37,14 @@
 
 **Gate:** worktree clean、无 conflict markers、`git diff --check` pass；备份 ref 可恢复。
 
+**Result:** semantic rebase completed on `main@1d9c2a4e`; backup ref
+`backup/perf-llm-token-diet-pre-rebase-20260803` preserves the pre-rebase head. Integration found
+and repaired a serializer-move regression: topic-lifecycle filtering remains owned by
+`soul/profile_views.py`, while `_utils` is only a compatibility re-export.
+
 ## Task 3 — Replay production-equivalence hardening
 
-**Owner:** `luna_max_replay` sub-agent  
+**Owner:** `luna_max_replay` sub-agent
 **Primary files:**
 
 - `scripts/run_profile_diet_ab.py`
@@ -47,14 +52,17 @@
 
 Implementation checklist:
 
-- [ ] effective profile loader applies overrides and active speculations；
-- [ ] strict embedding audit detects exception/empty/nonfinite/dimension mismatch；
-- [ ] embedding cache lifetime covers the whole run and closes in `finally`；
-- [ ] per logical run call attribution and route-equivalence validation；
-- [ ] re-enable faithful `body-cap` legacy-vs-production arm；
-- [ ] fail body-cap gate when zero candidate is actually affected；
-- [ ] artifact records blocking reasons, recall/route/embedding audit without private payloads；
-- [ ] unit tests cover every failure and valid zero-tail/zero-similarity case。
+- [x] effective profile loader applies overrides and active speculations；
+- [x] strict embedding audit detects exception/empty/nonfinite/dimension mismatch；
+- [x] embedding cache lifetime covers the whole run and closes in `finally`；
+- [x] per logical run call attribution and route-equivalence validation；
+- [x] re-enable faithful `body-cap` legacy-vs-production arm；
+- [x] fail body-cap gate when zero candidate is actually affected；
+- [x] artifact records blocking reasons, recall/route/embedding audit without private payloads；
+- [x] unit tests cover every failure and valid zero-tail/zero-similarity case；
+- [x] mirror topic lifecycle, production 30-item claim grouping and `mixed` context；reject
+      production `eval_prefilter_mode=enforce` because controlled replay intentionally uses `off`；
+- [x] extract and test final blocking-reason aggregation so every failed sub-audit blocks landing。
 
 **Focused gate:**
 
@@ -64,7 +72,7 @@ Implementation checklist:
 
 ## Task 4 — Evaluation cache input closure
 
-**Owner:** `luna_max_cache` sub-agent  
+**Owner:** `luna_max_cache` sub-agent
 **Primary files:**
 
 - `src/openbiliclaw/discovery/engine.py`
@@ -72,13 +80,16 @@ Implementation checklist:
 
 Implementation checklist:
 
-- [ ] deterministic prompt-visible content digest includes effective source context；
-- [ ] embedding/recall namespace participates in single and batch cache keys；
-- [ ] normal cache entries are written only after complete recall or explicit no-recall mode；
-- [ ] transient/partial recall failure cannot poison the normal cache；
-- [ ] same content/profile/negative inputs still hit LRU without repeated LLM work；
-- [ ] changed body/metrics/context/model namespace invalidates；
-- [ ] existing legacy tuple compatibility and 4096-entry LRU behavior remain green。
+- [x] deterministic prompt-visible content digest includes effective source context；
+- [x] embedding/recall namespace participates in single and batch cache keys；
+- [x] normal cache entries are written only after complete recall or explicit no-recall mode；
+- [x] transient/partial recall failure cannot poison the normal cache；
+- [x] same content/profile/negative inputs still hit LRU without repeated LLM work；
+- [x] changed body/metrics/context/model namespace invalidates；
+- [x] heterogeneous outer prompt metadata and actual vision attempts bypass normal per-item cache；
+- [x] raw cache hits reapply franchise/style caps with cold/warm-stable caller grouping, including
+      enforce-prefilter boundary compression；empty metadata clears stale object state；
+- [x] existing legacy tuple compatibility and 4096-entry LRU behavior remain green。
 
 **Focused gate:**
 
@@ -88,7 +99,7 @@ Implementation checklist:
 
 ## Task 5 — Runtime reason normalization
 
-**Owner:** `luna_max_reason` sub-agent  
+**Owner:** `luna_max_reason` sub-agent
 **Primary files:**
 
 - `src/openbiliclaw/discovery/engine.py` only after Task 4 owner coordination
@@ -98,11 +109,12 @@ Because Task 4 and Task 5 share the same files, Task 5 initially prepares a smal
 an isolated commit or waits for Task 4. The root agent decides integration order; agents must not
 edit the same file concurrently.
 
-- [ ] add one pure `normalize_evaluation_reason(score, raw_reason)` helper；
-- [ ] single and batch paths normalize before object/cache persistence；
-- [ ] `<0.5` always empty；`>=0.5` at most 30 code points；
-- [ ] missing empty accepted, non-string continues malformed retry/error path；
-- [ ] prompt text and admission semantics unchanged。
+- [x] add one pure `normalize_evaluation_reason(score, raw_reason)` helper；
+- [x] single and batch paths normalize before object/cache persistence；
+- [x] `<0.5` always empty；`>=0.5` at most 30 code points；
+- [x] missing empty accepted, non-string continues malformed retry/error path；
+- [x] scoring/admission semantics unchanged；prompt wording now labels reason as an internal
+      diagnostic and states the exact Unicode limit。
 
 **Focused gate:** reason prompt + single/batch/cache/persistence tests.
 
@@ -110,14 +122,14 @@ edit the same file concurrently.
 
 **Owner:** root
 
-- [ ] review agent diffs against spec invariants；
-- [ ] resolve overlap without dropping tests；
-- [ ] update `docs/modules/discovery.md` retry/cache/reason/body-cap truth；
-- [ ] update `docs/modules/recommendation.md` body cap to one value；
-- [ ] update `docs/modules/llm.md`, `docs/modules/config.md`, changelog and architecture/data-flow
+- [x] review agent diffs against spec invariants；
+- [x] resolve overlap without dropping tests；
+- [x] update `docs/modules/discovery.md` retry/cache/reason/body-cap truth；
+- [x] update `docs/modules/recommendation.md` body cap to one value；
+- [x] update `docs/modules/llm.md`, `docs/modules/config.md`, changelog and architecture/data-flow
       notes where ownership changed；
-- [ ] mark superseded historical gate claims explicitly；
-- [ ] update this plan with actual commands/results。
+- [x] mark superseded historical gate claims explicitly；
+- [x] update this plan with automated commands/results；real replay evidence remains in Task 8。
 
 **Gate:** documentation contains no contradictory retry/body-cap/replay claims found by targeted `rg`.
 
@@ -152,6 +164,15 @@ git diff --check
 If a failure also occurs on current `main`, record it as a baseline defect but do not waive it:
 either incorporate the current-main fix during rebase or document an environment-only skip with evidence.
 
+**Result (2026-08-03):**
+
+- Ruff format check: 544 files formatted；Ruff lint: pass；MyPy: 236 source files, pass；
+  `git diff --check`: pass。
+- Required focused integration group: 1470 passed in 130.17s。
+- Full repository: 7034 passed, 93 environment/platform skips in 645.76s；zero failures。
+- The rebase exposed two current-main hygiene failures (one missing blank line and one import order);
+  both were mechanically formatted so the repository-wide Ruff commands now pass without waiver。
+
 ## Task 8 — Replay and end-to-end acceptance
 
 **Owner:** root
@@ -167,6 +188,12 @@ either incorporate the current-main fix during rebase or document an environment
 **Final gate:** no code/test/docs/replay blocker remains. If a required real-data or provider prerequisite
 is unavailable, the branch is reported blocked rather than described as release-ready.
 
+**Progress:** deterministic SQLite E2E now covers enqueue → 60s coalescing wait → tokenized claim →
+real batch parser/runtime reason normalization → eval LRU → admission/content cache, including a warm
+eval-cache replay with zero additional provider calls. Production `config-show` exits 0 and the safe
+acceptance fields resolve to prefilter `shadow`, admission `0.6`, coalescing `15 / 90s`, topic lifecycle
+`off`. Three real replay artifacts remain before this task can be checked complete.
+
 ## Task 9 — Landing handoff
 
 **Owner:** root
@@ -176,4 +203,3 @@ is unavailable, the branch is reported blocked rather than described as release-
 - [ ] test/replay evidence；
 - [ ] remaining rollout observation and rollback points；
 - [ ] confirm no secrets/artifacts intended to stay local were committed。
-

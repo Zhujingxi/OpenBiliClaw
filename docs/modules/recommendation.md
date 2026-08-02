@@ -260,7 +260,7 @@ count = await engine.precompute_pool_copy(
 - 低并发批量调用 `generate_expression()` 的 LLM 主链生成朋友式推荐文案；默认 batch_size=30，默认 2 个 worker 并发处理 batch，避免大 backlog 一次性创建过多 LLM 任务
 - 解析批量 LLM 响应时通过共享 JSON helper 接受 `results/items/data/output` 等 wrapper、fenced JSON、JSONL、pretty-printed singleton object 和回显 schema 后的最终结果，但仍要求每条结果具备推荐表达所需字段
 - 批量 prompt 会把每条候选的 `bvid/content_id` 交给 LLM；如果响应带回 ID，写库时按 ID 匹配，不信任数组顺序。响应没有 ID 且数量不完整时会降级到单条生成，避免把后续视频的文案整体前移
-- 批量池文案 prompt 里的 `body_text` 会按 head+tail 截断为前 1000 字符 + 省略号 + 后 200 字符，避免 X / 知乎 / Reddit 这类长正文候选把整批表达 prompt 撑爆；标题、简介、style、topic 和 relevance 分数仍照常进入同一候选对象
+- 批量池文案 prompt 里的 `body_text` 会按与 discovery eval 相同的 head+tail 契约截断为前 200 字符 + 省略号 + 后 100 字符，避免 X / 知乎 / Reddit 这类长正文候选把整批表达 prompt 撑爆；标题、简介、style、topic 和 relevance 分数仍照常进入同一候选对象
 - 批量调用若命中 provider 限流 / cooldown / quota，不会再逐条调用 LLM；这些候选继续保持文案空值，等待下一轮后台预生成
 - 批量响应解析失败、缺少可验证 ID 或产生跨视频重复文案时，后台 drain 会在当前 worker 内递归拆半重试；只有拆到单条仍失败时才走单条表达兜底，因此默认 30 条 batch 不会因为一次弱模型输出异常直接放大成 30 个并发请求
 - 批量文案和推荐池分类调用复用 prompt 内 compact profile，并在兼容的 LLMService 路径上跳过额外 core memory 注入；这些调用还会复用共享画像分层缓存，画像核心 / 兴趣不变时保持前置 prompt block 完全相同。这只改变 token / prompt-cache 形态，不改变排序、入池 gate、评分 rubric 或文案策略。Delight score 预计算已改为零 LLM 的 Evo 结果复用路径

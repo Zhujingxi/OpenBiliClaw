@@ -86,6 +86,12 @@ background refresh → maintenance DB worker / isolated connection
 manual `discover --source douyin` → same Douyin producer as daemon
                                  → unified keyword lifecycle → plugin search/hot/feed
                                  → discovery_candidates(pending_eval)
+
+candidate evaluation → effective profile view + exact tail-recall pool + negative exemplars
+                     → prompt-visible content/context digest + embedding namespace
+                     → normal eval LRU lookup ─hit─→ raw result → caller-group diversity caps
+                     └─miss─→ complete recall → LLM batch → normalized reason → conditional cache
+                               embedding/recall degraded ───────────────→ no normal-cache write
 ```
 
 1. **用户交互层** — Chrome 浏览器插件（B 站 + 小红书 + 抖音 + YouTube + X (Twitter) + 知乎通过统一 `PlatformAdapter` 做页面行为采集，Reddit 通过 rdt-cli 做默认 discovery、插件保留 bootstrap 初始化信号和命令后端 fallback 登录态任务源，click 在 capture 阶段记录、scroll 覆盖内部 feed 容器 · 视频停留满意度信号 · 推荐展示与真实可换库存状态 · 文字卡（推文 / thread / 知乎回答 / Reddit 帖子）· 正向兴趣 / 避雷探针确认 · durable 对话与唯一主动洞察确认入口（待聊列表/卡片；认知更新区只读）· 后台 LLM 暂停开关 · 开机自启动开关 · 配置离线缓存 / 降级修复 UI · bili/xhs/dy/yt/zhihu/reddit 任务调度 / 初始化画像导入 / 多路 discovery · B 站 / 抖音 / X Cookie 自动同步 · 本机扩展驱动 E2E 捕捉自检）+ 移动 Web（`/m`）+ 桌面 Web（`/web`）。所有 `/api/*` 前置一道**可选密码门禁**（HTTP 中间件，见下方「API Auth Gateway」）：本机 / 扩展默认免登录，局域网 / 远程设备需密码。
@@ -95,6 +101,26 @@ manual `discover --source douyin` → same Douyin producer as daemon
 5. **多源适配层（v0.3.0+）** — `SourceAdapter` 协议下的 B 站 / 小红书 / 抖音 / YouTube / X (Twitter) / 知乎 / Reddit / Bangumi / 通用 Web 源；`sources.platforms` 注册表统一八个平台族的别名、strategy 与 URL host 身份。Bangumi 默认使用官方匿名只读 API，可选个人令牌（Bearer）读取私密收藏、令牌失效自动降级匿名；扩展仅在 `bgm.tv` / `bangumi.tv` 上提供账号身份自动识别（非任务桥、无行为采集）。
 6. **保存同步编排层（API/runtime + B 站 adapter + 三个图形化保存界面 + CLI 配置可见）** — canonical saved identity + normalized membership / native state + `/api/saved/*` + capability router + local-first `SavedSyncService` + `BilibiliNativeSaveAdapter`；六平台扩展保存 adapter 已按能力/目标矩阵注册，经稳定的 `ExtensionNativeSaveBroker` 入队，完整 broker flow 为 `extension_native_save_jobs -> /api/sources/<slug>/next-task -> installed extension`（具体 source 前缀为 `/api/sources/{xhs,dy,yt,x,zhihu,reddit}`），再由 authenticated `task-result` 回传安全状态。trusted-local `/api/extension/e2e/run` 的 dedicated native-save 模式只接受与 generic actions 互斥的 exact authorization，提交一个 canonical item 到同一 saved-sync/broker flow，并只回传六字段结果；通用 DOM runner 永不执行 favorite/bookmark。历史 `unsupported_adapter_missing` 行可重新同步，但真正的 `unsupported_content_type` 保持终态。YouTube favorite 与知乎 favorite 使用 exact `OpenBiliClaw`，YouTube watch-later 使用 `YouTube Watch Later`，其余平台回退原生收藏/书签/Saved；Bilibili favorite/watch-later 使用 direct adapter。2026-07-14 已在自动同步关闭、手动同步触发下完成七平台两类动作真实账号验证，终态均为 `synced/already_synced`；插件、移动 Web 与桌面 Web 共享 `item_key`，以 bounded request、retained list、per-key mutation fence、reload task recovery / item ownership 和 visibility-aware durable tracker 呈现同步状态；CLI 只通过 `config-show` 展示默认关闭的自动同步配置，不提供保存 / 同步动作命令
 7. **多层网状记忆存储** — Core / Episodic / Semantic / Working Memory（SQLite + 向量索引 + JSON）
+
+### Candidate evaluation 的可复现边界
+
+评估 cache 的 v2 key 覆盖实际 prompt-visible 候选字段、effective source context、compact
+profile 与精确 tail-recall pool、negative-examples 内容、embedding namespace、prefilter mode
+和 schema version。混合平台 / 不稳定隐式 context batch 与实际 vision attempt 不进入 normal
+per-item cache；embedding 异常、空 / 非有限向量或维度漂移时，本轮结果也不写 normal cache，
+恢复后必须重新 recall + evaluate。cache 保存逐项 raw model result，franchise/style cap 在稳定的
+caller grouping 上重放，因此 full/partial hit 和 `enforce` 预筛的 cold/warm 边界一致。
+
+`reason` 是内部诊断字段：single/batch 共用 runtime normalizer，低于 0.5 或被 batch cap
+淘汰时为空，高分 strip 后最多 30 个 Unicode code points；非字符串不做 `str()` 宽松转换，
+而是进入 malformed-member retry。对象、LRU 与候选持久化看到的都是归一化结果。
+
+`scripts/run_profile_diet_ab.py` 是 landing evidence harness，不是生产请求入口。它从只读 DB
+冻结候选、effective profile（含 overrides / active speculations）和负例，按生产的 30 条
+claim grouping 与 `source_context=mixed` 跑 repeated A/A + A/B；每个 logical run 记录实际
+provider/instance/model，并对 embedding、recall、route、snapshot 与 body-cap contract fail
+closed。Replay 固定 temperature 0 用于隔离采样噪声，artifact 同时披露生产默认 0.7；因此
+该结果是 model-visible diet 的受控相对门，不替代合入后的 48 小时生产观测。
 
 HTTPS 有两个互斥的**可选传输边缘**，都不是新的业务 API 层。公网域名的 Docker 部署叠加
 `docker-compose.https.yml`：Caddy 在 `:443` 自动终止受信 TLS，与后端共享 network namespace，

@@ -1,7 +1,7 @@
 # LLM Token Diet Landing Hardening Spec
 
-**Created:** 2026-08-03  
-**Status:** accepted for implementation  
+**Created:** 2026-08-03
+**Status:** accepted for implementation
 **Scope:** `perf/llm-token-diet` landing correctness, replay evidence, evaluation-cache
 correctness, reason normalization, integration with current `main`, and release verification.
 
@@ -24,7 +24,7 @@ chat core-memory split 与 eval reason diet。分支也包含大量单元测试�
 6. batch eval cache key 在 recall 生成前命中；实际 recalled labels、embedding namespace、
    prompt-visible content/source context 没有形成完整的可复现输入闭包。
 7. reason diet 只依赖 prompt 约束；parser/runtime 不会把 `<0.5` 的 reason 强制清空，
-   也不会把 `>=0.5` 的 reason 截到 30 个字符。
+   也不会把 `>=0.5` 的 reason 截到 30 个 Unicode code points。
 8. 分支落后当前 `main`，现有测试结果不能替代 rebase 后的集成验证。
 
 本规格是上述三个历史规格的 landing 修正版；发生冲突时，以本规格的验收门为准：

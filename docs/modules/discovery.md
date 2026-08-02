@@ -125,15 +125,15 @@ API daemon 的候选 admission 成功后只同步调用轻量 expression `notify
 
    进入批量 LLM 评估前，`evaluate_content_batch()` 会读取 `Database.get_seen_content_keys()`，并通过 `sources.platforms.normalize_source_platform()` 生成统一的 `source_platform:content_id`，判断所有已知已看过的 B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Bangumi 候选；命中项直接记为 0 分并从 prompt 中剔除，避免为已看内容消耗 discovery token。身份来自持久化 `seen_items`、不再受最近 2000 条事件窗口限制；老 BVID 也保留 raw key 兼容旧数据。
 
-   evaluator 使用的是 `compact_content_prompt_profile_summary(build_profile_summary(profile))`，不是完整无限画像：核心 traits / cognitive style / values / motivational drivers / deep needs 各保留前 20 条，扁平 `interests` 保留前 64 条，`interest_domains` 保留前 32 个域且每域最多 12 个 specifics，`recent_awareness` 和 `active_insights` 各取最新 12 条（insight evidence 最多 8 条，speculative interests 最多 12 条），并剔除 recent 条目中的 timestamp / session 等易变字段；`disliked_topics` 不做额外裁剪，继续按存储上限完整进入 prompt。为了不让长尾兴趣被 compact block 挤掉，每个候选 item 还可附带自己的 `related_interests`：recall pool 只取**画像块之外**的长尾兴趣（权重排名 65..256——前 64 名已在 compact block 里，重复召回只浪费 token；画像不足 64 个兴趣时该字段恒为空、零开销），按候选标题 / 摘要 embedding 与兴趣 embedding 的相似度和兴趣权重加权排序（当前实现为 `similarity*0.7 + weight*0.3`），取最多 3 个兴趣名字符串。这个字段挂在 `content_items` / 单条 `content_summary` 上，不进入 profile block；`_evaluation_profile_digest()` 同时 digest compact summary 和 recall pool `(name, category, round(weight, 2))`，所以缓存 key 覆盖了模型可见画像与召回池。没有 embedding service 或 embedding 失败时，`related_interests` 字段省略，评估仍按 compact profile 运行。
+   evaluator 使用的是 `compact_content_prompt_profile_summary(build_profile_summary(profile))`，不是完整无限画像：核心 traits / cognitive style / values / motivational drivers / deep needs 各保留前 20 条，扁平 `interests` 保留前 64 条，`interest_domains` 保留前 32 个域且每域最多 12 个 specifics，`recent_awareness` 和 `active_insights` 各取最新 12 条（insight evidence 最多 8 条，speculative interests 最多 12 条），并剔除 recent 条目中的 timestamp / session 等易变字段；`disliked_topics` 不做额外裁剪，继续按存储上限完整进入 prompt。为了不让长尾兴趣被 compact block 挤掉，每个候选 item 还可附带自己的 `related_interests`：recall pool 只取**画像块之外**的长尾兴趣（权重排名 65..256——前 64 名已在 compact block 里，重复召回只浪费 token；画像不足 64 个兴趣时该字段恒为空、零开销），按候选标题 / 摘要 embedding 与兴趣 embedding 的相似度和兴趣权重加权排序（当前实现为 `similarity*0.7 + weight*0.3`），取最多 3 个兴趣名字符串。这个字段挂在 `content_items` / 单条 `content_summary` 上，不进入 profile block；`_evaluation_profile_digest()` 同时 digest compact summary 和 recall pool 的精确 `(name, category, weight)`，权重尾数变化也会失效缓存。没有 embedding service 是明确的 production no-recall 模式；若已配置 embedding 却发生异常、空向量、非数值 / 非有限向量或维度不一致，本轮仍可按 compact profile 给分，但该候选不会写入 normal eval cache，服务恢复后会重新做 recall 与 LLM 评估。
 
    之后 evaluator 会按 `[discovery].eval_prefilter_mode` 运行 embedding 预过滤。默认 `shadow` 只计算低相似 would-filter 集合并打 `prefilter-shadow` 日志，所有候选仍进入 LLM，便于统计误杀；`enforce` 才会把非 `explore` 且与 top-256 recall-visible 兴趣标签 + 32 个 compact 兴趣域都低相似的候选写入低分评估缓存并从 LLM batch 中剔除，避免在长尾兴趣召回发生前误杀第 65–256 名兴趣。余弦相似度会夹在 `0..1` 后再映射预筛分数，不会产生负相关性分数。若单批会被过滤超过 50%，会 fail-open 退回全量 LLM 评估，避免坏 embedding 状态掐断供给。
 
    evaluator 的候选输入不再只依赖标题：各来源会尽量映射 `view_count`、`like_count`、`favorite_count` / `collect_count`、`comment_count` / `reply_count`、`share_count`、`danmaku_count`、`retweet_count`、`bookmark_count`、`tags`、`body_text` 等字段。目录型来源的 `rating_score / rating_count / source_rank` 只有真实非零值才进入 prompt；普通视频不会因统一数据结构而多发三个恒为 0 的键。对知乎 / X 这类 text-first 来源，如果 `description` 与 `body_text` 是同一段文本或只是正文前缀，prompt 会省略重复的 `description`；进入 eval prompt 的 `body_text` 按 head+tail 截断为前 200 字符 + 省略号 + 后 100 字符，兼顾开头语境与结论。除 `explore` 外，各发现路径和平台都只提供上下文，不能设置基础分、自动加分、降低门槛或替明显不匹配的候选编造画像关联；单条与 batch evaluator 使用同一规则。
 
-   `evaluate_content_batch()` 的进程内评分缓存按“候选身份 + compact eval profile digest（含 recall pool）+ negative_examples digest + evaluator cache version”命中，不再使用 Python `id(profile)` 或全局最新事件水位作为 key，并由 4096 条 LRU 上限防止长进程无界增长。这样同一画像内容在 profile 对象重建后仍能复用精确评分；普通非负向事件推进 event id 时不会冲掉缓存，但近期负样本内容发生变化仍会强制重新评估。LLM prompt 侧，batch evaluator 会把 compact 结构化画像拆成 `<profile_core>` / `<profile_life_context>` / `<profile_interests>` / `<profile_style_context>` / `<profile_recent_context>` 五层，并用 `PromptLayerRenderCache` 按层 digest 复用渲染后的 JSON block；近期觉察变化只会更新后置 recent 层，画像核心和兴趣层保持 byte-stable 前缀。批量 eval、单条 fallback eval 和搜索 / 排行 / 跨域 / 多平台关键词生成调用 `LLMService` 时，会在服务支持的情况下关闭额外 core memory 注入，因为这些 prompt 已经携带结构化画像；这能稳定 provider-side prompt-cache 前缀，同时不减少 evaluator 或 query generator 可见的画像信号。
+   `evaluate_content()` / `evaluate_content_batch()` 共用 4096 条进程内 LRU。v2 key 覆盖 evaluator schema、候选身份、实际 prompt-visible content digest（含截断后的正文 / 简介、互动指标、标签、平台 / 类型 / strategy 与 effective source context）、compact profile + 精确 recall pool digest、negative-examples 内容 digest、embedding namespace 和 prefilter mode，不再使用 Python `id(profile)` 或全局最新事件水位。这样等值画像对象可以命中；正文、指标、上下文、负例、长尾权重或 embedding 模型变化都会 miss。混合平台 batch、没有显式 context 且 strategy 不同的 batch，以及实际尝试读取封面 bytes 的多模态 batch 会整体绕过 normal per-item cache，避免 partial hit 改写外层 prompt 元数据或复用不同图片。cache entry 保存归一化后的模型原始逐项结果；franchise / style 这类依赖同批兄弟项的 cap 在 cache hit 后按稳定 caller grouping 重放，`enforce` 预筛导致的压缩边界也走同一路径，因此 cold / warm 结果一致。LLM prompt 侧，batch evaluator 会把 compact 结构化画像拆成 `<profile_core>` / `<profile_life_context>` / `<profile_interests>` / `<profile_style_context>` / `<profile_recent_context>` 五层，并用 `PromptLayerRenderCache` 按层 digest 复用渲染后的 JSON block；近期觉察变化只会更新后置 recent 层，画像核心和兴趣层保持 byte-stable 前缀。批量 eval、单条 eval 和搜索 / 排行 / 跨域 / 多平台关键词生成调用 `LLMService` 时，会在服务支持的情况下关闭额外 core memory 注入，因为这些 prompt 已经携带结构化画像。
 
-   batch evaluator 的 LLM 输出优先使用顶层 JSON object：`{"results": [...]}`，以匹配 OpenAI-compatible provider 的 `json_object` 约束；解析器仍兼容旧的根数组、fenced JSON、JSONL，以及 provider 偶发返回的 `{"content_id": {"score": ...}}` 映射对象。解析失败、结果数量无法可靠对齐、或其它非限流异常会先走 split-retry：当前 batch 失败后在同一 worker 内二分重试；递归子批大小 `<=5` 时改为顺序逐条 `evaluate_content()` 兜底，因此一次坏输出不会直接放大成整批 N 个单条调用。`is_llm_rate_limit_error()` 识别到的 rate limit / cooldown / quota 异常不拆分、不逐条 fallback，原样向上传递；runtime 待评估池会释放本批 claim 回 `pending_eval`，等 provider 恢复后再评估。
+   batch evaluator 的 LLM 输出优先使用顶层 JSON object：`{"results": [...]}`，以匹配 OpenAI-compatible provider 的 `json_object` 约束；解析器仍兼容旧的根数组、fenced JSON、JSONL，以及 provider 偶发返回的 `{"content_id": {"score": ...}}` 映射对象。成功响应里只有部分 member 缺失 / malformed 时，只重试缺失成员：最多递归 3 层、最多追加 6 个请求；若整组都缺失才二分，否则把缺失 subset 原样重试。预算耗尽的成员标成 `evaluation_response_missing` 交给 pipeline 释放整批 claim，**不会**展开为 N 次单条请求。provider transport / rate-limit / cooldown / quota 等调用异常原样向上传递，也不会被当成 0 分质量观测。
 
    当 `[discovery].multimodal_evaluation_enabled=true` 且当前 evaluation 路由支持图像输入时，带 `cover_url` 的候选会额外准备封面图：`discovery.multimodal.prepare_cover_image_inputs()` 走 `runtime.image_cache.get_or_fetch_cover_bytes()`，先查本地 `data/image-cache/`，命中则直接复用缓存图，未命中才按同一 SSRF / 白名单 / redirect / 大小限制边界抓取并写回缓存。小红书 token 图因此优先使用预取或 UI 代理已经落盘的副本，不依赖评估时原 CDN token 仍有效；随后再按 `multimodal_image_max_px` 与 `multimodal_image_quality` 压成 JPEG data URL。准备成功的候选会在 `content_batch` 里带 `cover_image_ref="cover:<content_id>"`，LLM user message 中每张图前也会插入同样的 `cover:<content_id>` 文字锚点，prompt 明确要求模型用这个锚点把图片和候选绑定；没有 `cover_image_ref` 的候选只按文本字段判断。该 batch 会使用更小的 `multimodal_batch_size`；如果模型不支持图像或图片准备失败，自动退回文本 + 互动指标评估。
 
@@ -141,7 +141,7 @@ API daemon 的候选 admission 成功后只同步调用轻量 expression `notify
 
    provider / LLM batch 级 transient 异常、空 scores、短 scores 或长 scores 都会释放回 `pending_eval` 后续重试，不消耗单条候选的 `eval_attempts`，避免一次短暂 provider outage 把整批内容永久打成 `failed_eval`；同时会递增独立的 `batch_eval_attempts`，高阈值熔断后才进入 `failed_eval`，避免永久坏 provider 无限 churn。batch prompt 明确要求不要因为平台不同而随意抬高或压低分数，只能按内容与用户画像匹配度打分。
 
-   **Reason 契约（v0.3.171 减肥）**：批量 / 单条评估 prompt 要求 `score` 严格低于固定 `0.5` 的条目 `reason` 写空串 `""`，`score >= 0.5` 的条目写一句不超过 30 个字的中文诊断。0.5 是 baked 进 system prompt 的静态常量（守缓存前缀 byte-identical 铁律）；配置层把 `admission_min_score` 支持范围限制为 `[0.5, 1]`，explore 固定为 0.58，所以空 `reason` 的低分条目不可能入池。解析侧仍用 `str(item_result.get("reason", "")).strip()` 把缺失 / 空值归一为 `""`，eval 缓存和候选持久化均接受空值。当前推荐表达与 delight 文案由独立生成链产生，不会把 evaluator `relevance_reason` 直接展示给用户。
+   **Reason 契约（v0.3.171 减肥）**：批量 / 单条评估 prompt 明确 reason 仅供内部诊断，不是用户文案；`score < 0.5` 写空串，`score >= 0.5` 写不超过 30 个 Unicode code points 的精炼中文。`normalize_evaluation_reason()` 在 runtime 再执行同一契约：缺失 / `None` 归一为空串，其它非字符串按 malformed member 重试，高分先 strip 再截 30 code points，低分和被 franchise / style cap 淘汰的条目强制清空。对象、eval cache 与候选持久化只接收归一化后的值。0.5 是 baked 进静态 system prompt 的常量；所有 admission 路径仍高于它，所以减掉低分诊断不会改变准入。推荐表达与 delight 文案由独立生成链产生，不展示 `relevance_reason`。
 
 5. **按相关性、供给层级和池子上限入推荐池**
    通过阈值的候选会先调用 `ContentDiscoveryEngine.normalize_evaluated_results()` 复用 discovery 旧路径的 topic_group / topic_key embedding normalization，再交给 `cache_evaluated_results()` 复用既有 `_cache_results()` 入库逻辑，写入正式推荐池 `content_cache`。`_cache_results()` 在真正写库前会再次调用同一 admission policy，任何兼容 / 手动调用即使绕过候选队列，也不能把未评估、缺分或低分内容写入正式池；`Database.cache_content()` 的缺省分数为 `0.0`，不再凭空赋予 `0.60`。数据库的普通取池、缓存回填、平台补位、文案预计算、池配额统计、历史推荐和 delight 出口同样使用来源感知的准入条件，所以 `explore=0.58` 能真实展示，而任意非 `explore=0.58` 仍被拒绝。写入前会检查 `count_pool_candidates()`；如果 `pool_available_count >= pool_target_count`，pipeline 直接停止 drain，runtime 也不会继续 discovery。因此“推荐池到了上限就不 discovery”的边界仍以正式可换池为准。成功 admission 的 item 会保存在 pipeline 的 `last_admitted_items` 中，供 runtime 更新 `recent_pool_topics`。
@@ -315,7 +315,7 @@ discovery 不是“把整个找片过程都交给 LLM”。当前实现里，LLM
 <rules>
 1. 输出必须是严格 JSON，不要附带解释。
 2. score 范围必须在 0 到 1 之间。
-3. reason 只写一句中文，解释为什么这个人会喜欢或不喜欢这个内容。
+3. reason 仅供内部诊断：低于 0.5 写空串，其余写不超过 30 个 Unicode 字符的中文依据。
 4. 不要只说“因为热门”或“因为看过类似的”，要结合用户画像。
 </rules>
 ```
@@ -401,23 +401,23 @@ discovery 不是“把整个找片过程都交给 LLM”。当前实现里，LLM
 ```json
 {
   "score": 0.86,
-  "reason": "这条内容会对上你偏好的高信息密度和结构化解释，也正贴合你最近在意的国际议题。"
+  "reason": "契合结构化解释偏好和近期国际议题"
 }
 ```
 
 收到后，引擎还会继续做这些事：
 
 - 把 `score` clamp 到 `0.0 ~ 1.0`
-- 把 `reason` 写回 `DiscoveredContent.relevance_reason`
-- 如果 JSON 非法或字段坏掉，这条评估直接按 `0.0` 处理
+- 先按分数归一化 `reason`，再写回 `DiscoveredContent.relevance_reason`
+- 单条 JSON 非法会返回 `0.0`；batch 缺失 / 坏 member 进入有界 subset retry，耗尽后由 pipeline 释放整批 claim
 
 #### v0.3.x 负样本锚定（batch evaluator）
 
 `ContentDiscoveryEngine._evaluate_batch` 在每次 batch 调用前会通过 `_get_negative_exemplars()` 从事件层拉一份「最近真正不喜欢」的标题列表（来自 `soul/negative_exemplars.py` 的 recency-weighted、去重、80 字截断、最多 16 条），并作为 `negative_examples=` 透传给 `build_batch_content_evaluation_prompt()`：
 
-- 引擎实例内部 `_get_negative_exemplars` 的 exemplar 缓存形如 `(timestamp, latest_event_id, exemplars)`，命中条件是 `latest_event_id` 未变且 `< 300s`（即 5 分钟 TTL）。同一窗口内的多次 batch 共用一次 `query_events` I/O；用户新打一条负反馈后，`latest_event_id` 改变，下一次 batch 立即看到新样本。注意这是 exemplar 池本身的缓存；候选**分数**的复用则通过 `_batch_eval_cache_key` 把 `latest_event_id` 拼进 cache key 完成（见下条 batch 评分缓存说明），两套机制互相独立。
+- 引擎实例内部 `_get_negative_exemplars` 的 exemplar 缓存形如 `(timestamp, latest_event_id, exemplars)`，命中条件是 `latest_event_id` 未变且 `< 300s`（即 5 分钟 TTL）。同一窗口内的多次 batch 共用一次 `query_events` I/O；用户新打一条负反馈后，`latest_event_id` 改变，下一次 batch 立即看到新样本。注意这是 exemplar 池本身的缓存；候选**分数** key 使用实际 prompt-visible exemplars 的确定性 digest，不使用事件水位，所以无关事件不会误伤命中，而负例内容真实变化一定 miss。
 - 上游 `_get_negative_exemplars()` 与 `recent_negative_exemplars()` 都把异常吞成 `None`/`[]`，event 表为空或存储抖动都不会中断 batch；user prompt 自动退回到无 `<negative_examples>` 形态，cache prefix 不被打断。
-- 拿到 exemplars 后 prompt builder 把它放在 `<source_context>` 与 `<content_batch>` 之间（系统规则 10/11 让 LLM 按话术 / 商业意图 / 标题结构层面去对照打分，而不是关键词重叠）。前置 `[soul.preference] satisfaction_filter_enabled` 未打开时，事件分类仍在跑，所以负样本池可以提前积累。batch 评分缓存 key 带最新 event id，避免负样本出现后继续复用旧分数。
+- 拿到 exemplars 后 prompt builder 把它放在 `<source_context>` 与 `<content_batch>` 之间（系统规则 10/11 让 LLM 按话术 / 商业意图 / 标题结构层面去对照打分，而不是关键词重叠）。前置 `[soul.preference] satisfaction_filter_enabled` 未打开时，事件分类仍在跑，所以负样本池可以提前积累。batch 评分缓存 key 带 exemplars 内容 digest，避免负样本变化后继续复用旧分数。
 
 所以这里的 LLM 不是“决定推荐”，而是在给候选池补一个统一、可比较的相关性分数。
 
@@ -636,7 +636,7 @@ discovery 不是“把整个找片过程都交给 LLM”。当前实现里，LLM
 | M122 来源优先补齐与观看模式误判修正 | ✅ | 池子压缩时会优先保留不同 `source` 的候选，再限制重复 `style`；同时补强 `style_key` 规则，减少深度内容误判成轻聊天模式 |
 | M123 按平台缺口补池子 | ✅ | runtime 在补货时会先按 `[scheduler.pool_source_shares]` 统计平台族余量；默认保存的 B 站 / 小红书 / 抖音 / YouTube / X / 知乎 share = 5 / 1 / 1 / 1 / 1 / 1，但默认只有 B 站启用，disabled 平台会从有效配比中剔除。B 站缺口会按前端真实可换来源数计算，并用 raw-material headroom 夹住请求量，再合并四个策略生产 raw candidates；小红书 / 抖音 / YouTube / X / 知乎缺口分别交给对应 producer。所有来源再统一进入 `discovery_candidates` batch 评估；超 raw-ceiling 配额的平台族才会被压回 raw 配额内 |
 | runtime 调度参数配置 | ✅ | 后台 discovery 不使用 `discovery_cron`；`ContinuousRefreshController` 从 `[scheduler]` 读取 `refresh_check_interval_seconds`、`signal_event_threshold`、`trending_refresh_minutes`、`explore_refresh_minutes`、`discovery_limit` 和 `proactive_push_interval_seconds`，配置热重载后重建 controller 生效 |
-| M124 LLM 评估窗口控费 | ✅ | runtime 按平台自身缺口传递补货 limit；各策略在 LLM 评估前把候选窗口收缩到 `max(6, limit*2)`、上限 90，少量补货时不再把几十条候选送去评分后立刻 suppressed；batch evaluator 优先要求 `{"results":[...]}` 以贴合 `json_object` provider，parser 兼容 fenced JSON、回显输入后追加结果、NDJSON object 序列和按内容 ID 映射的 object，非限流坏输出会先二分重试再在小批兜底单条，避免一次解析失败直接退回 N 次单条评估 |
+| M124 LLM 评估窗口控费 | ✅ | runtime 按平台自身缺口传递补货 limit；各策略在 LLM 评估前把候选窗口收缩到 `max(6, limit*2)`、上限 90，少量补货时不再把几十条候选送去评分后立刻 suppressed；batch evaluator 优先要求 `{"results":[...]}` 以贴合 `json_object` provider，parser 兼容 fenced JSON、回显输入后追加结果、NDJSON object 序列和按内容 ID 映射的 object。成功响应里的缺失 / malformed member 只做有界 subset/split retry（深度 3、额外请求 6），不再展开逐条调用；provider 异常直接传播 |
 | v0.3.74 eval-batch JSON 容错统一 | ✅ | `_evaluate_batch` 改用 `llm.json_utils.extract_llm_json_list()`，在原 fenced / echo / JSONL 基础上统一兼容 `results/items/data/output/scores/evaluations` wrapper、MiMo malformed `{ [ ... ] }` 数组包裹和 schema echo 后最终结果；解析失败仍按原有降级路径处理，不把示例 JSON 当作真实评分 |
 | v0.3.147 eval 画像分层 prompt cache | ✅ | `_evaluate_batch` 构造 prompt 时通过共享 `profile_prompt_layers()` 把 `build_profile_summary()` 输出按稳定性拆为 core / life_context / interests / style_context / recent_context 五层；`ContentDiscoveryEngine` 实例内的 `PromptLayerRenderCache` 按层 digest 复用渲染文本，画像某一层变动时只替换该层，帮助 provider prompt-cache 命中更长稳定前缀 |
 | v0.3.81 eval-batch 按内容 ID 绑定 | ✅ | batch 内容评估 prompt 会携带 `bvid/content_id`，解析时优先按返回 ID 写回 `score/reason/topic/style/franchise`。provider 乱序或漏项时，不再把后一条候选的 `relevance_reason` 写到前一条；无 ID 且数量不完整时进入 split-retry 路径，而不是整批直接逐条评估 |
@@ -645,7 +645,7 @@ discovery 不是“把整个找片过程都交给 LLM”。当前实现里，LLM
 | 多平台发布时间元数据 | ✅ | Bilibili、小红书、抖音、YouTube、X、知乎、Reddit 和 Bangumi 仅从语义明确的来源字段提取发布时间；`published_at` 统一规范为 UTC RFC 3339，只有相对时间时写 `published_label`。两字段贯穿 `DiscoveredContent` → `discovery_candidates` → `content_cache`，重新发现时空值分别保留已有非空值；缺失/异常值不影响候选入队。旧缓存不联网回填，也不以发现时间、任务时间、互动时间或推荐生成时间代替发布时间。 |
 | v0.3.x eval-batch 限流保护 | ✅ | batch LLM 调用若失败原因为 provider rate limit / cooldown / quota，不再降级到逐条 `evaluate_content()`，也不把候选当 0 分拒绝；runtime 待评估池会把本批 claim 释放回 `pending_eval`，待 provider 恢复后继续评估，避免一次 Gemini 429 放大成逐条请求或误淘汰整批候选 |
 | v0.3.144 eval 双 worker + 默认 45 | ✅ | `DiscoveryCandidatePipeline.drain_pending()` 文本 batch 默认 45，默认一次最多领取 `batch_size * 2` 个候选（90 条，仍 clamp evaluator hard cap），`ContentDiscoveryEngine.evaluate_content_batch()` 默认用 2 个 worker 跑 LLM batch；多模态 eval 继续使用独立小 batch；外层 drain lock 和全局 LLM semaphore 仍负责多入口 / provider 级并发控制 |
-| v0.3.154 eval prompt diet + replay gate | ✅ | 内容评估画像统一走 `compact_content_prompt_profile_summary()`：20 条核心上下文、64 个兴趣、32 个兴趣域 × 每域 12 个 specifics、12 条近期觉察 / 洞察，避雷项不裁剪；每条候选另带最多 3 个 `related_interests` 长尾兴趣召回（来自 top-256 recall pool，挂在 item 上而不是 profile block），digest 覆盖 compact summary + recall pool；`body_text` 进入 eval prompt 前按 200+100 head/tail 截断。`scripts/run_profile_diet_ab.py` 从只读真实 DB 精确抽取最近 `evaluated/cached/rejected_low_score` 生产混合候选，在同一冻结画像/负例/候选快照内交替运行至少 3 组 A/A 与 A/B；两臂共用 source context、temperature 0 和生产 4096 输出上限，缺失/短响应直接判门无效。命令要求 `--output` 写入 raw paired scores、快照 digest、路由/usage 和门指标；v2 模型臂使用 `model=<instance-id>`。相对门用重复 A/A 经验包络约束 A/B 的 flip、Spearman 与 admission 收缩。2026-07-18 的旧 PASS 因 source-context 污染、独立快照、16K 非生产预算和未实现门逻辑而作废，必须用修正脚本重跑 |
+| v0.3.154 eval prompt diet + replay gate | ✅ | 内容评估画像统一走 `compact_content_prompt_profile_summary()`：20 条核心上下文、64 个兴趣、32 个兴趣域 × 每域 12 个 specifics、12 条近期觉察 / 洞察，避雷项不裁剪；每条候选另带最多 3 个 `related_interests` 长尾兴趣召回（来自 top-256 recall pool，挂在 item 上而不是 profile block），digest 覆盖 compact summary + 精确 recall pool；`body_text` 进入 eval prompt 前按 200+100 head/tail 截断。`scripts/run_profile_diet_ab.py` v2 从只读真实 DB 精确抽取最近 `evaluated/cached/rejected_low_score` 生产混合候选，加载 overrides + active speculations 后冻结 effective profile / 负例 / 候选快照，交替运行至少 3 组 A/A 与 A/B。回放按生产 claim 以 30 条、`source_context=mixed` 评分，temperature 固定 0 以隔离采样噪声（artifact 同时披露生产默认 0.7），输出上限保持生产 4096；逐 run 校验实际 provider/instance/model，严格审计 embedding/recall，任一缺失响应、route / snapshot 漂移或基础设施降级都阻断最终门。artifact schema v2 保留 raw paired scores、digests、usage 和全部 blocking reasons，不写正文或完整画像。2026-07-18 旧 PASS 已作废，必须以当前 rebase 后脚本的独立 artifact 为准 |
 | B 站 search 风控冷却 | ✅ | `BilibiliAPIClient.search()` 连续 `v_voucher` 重试耗尽或 412 后会设置共享 cooldown；Search / Explore / RelatedChain 的搜索路径在冷却期直接跳过，不再继续生成 query/domain 或逐 query 撞风控 |
 | M126 explore 高风险子簇压缩 | ✅ | refresh 结束后会温和压一轮 `explore` 内部的高风险相邻簇，例如制造 / 工艺 / 材料、博弈 / 桌游 / 机制，避免单簇继续堆满 fresh pool |
 | v0.3.0 trending 按 rid 交错 | ✅ | `TrendingStrategy` 拉 5 个分区排行榜后做 round-robin 交错再送 LLM 评估，避免下游 30 条 hard-cap 把 rid=0/36 的顶部全吃掉 |
@@ -780,8 +780,8 @@ assert 0.0 <= score <= 1.0
 - 主候选少于目标数量时，会依次尝试策略 backfill 和历史缓存 backfill；策略 backfill 同样会收到兼容转发的 `pool_snapshot`
 - 当调用方只需要少量候选时，策略会先把送入 LLM 评估的候选窗口压到 `max(6, limit*2)`，仍保留过采样缓冲，但不再用固定 90 条窗口浪费评估调用
 - batch 评估结果解析会优先选择包含 `score` 的结果数组或 object 序列；如果 provider 回显输入 JSON、包 Markdown fence、或返回 NDJSON，仍按一次 batch 处理，不会因为包裹格式异常直接拆成 N 次单条评估
-- batch prompt 和响应都带 `bvid/content_id`；只要响应里有可识别 ID，引擎会按 ID 而不是数组下标写回评分和理由。没有 ID 且结果数量不完整时会进入 split-retry：当前 batch 二分重试，递归子批 `<=5` 才顺序单条兜底，避免 LLM 漏项导致后续候选整体错位
-- 如果 batch 调用失败被识别为 LLM provider 限流或 cooldown，本轮不会再触发逐条 fallback，也不会返回全 0 分；异常会向上传递给 `DiscoveryCandidatePipeline`，由 pipeline 释放本批 claim 回 `pending_eval`，下一轮 refresh 在 provider 恢复后继续评估原候选
+- batch prompt 和响应都带 `bvid/content_id`；只要响应里有可识别 ID，引擎会按 ID 而不是数组下标写回评分和理由。缺失 / malformed member 只重试缺失 subset；全组缺失才二分，最多深度 3 / 额外 6 请求，绝不退化成 N 次单条风暴
+- batch provider 调用异常不会返回全 0 分或触发逐条 fallback；异常向上传递给 `DiscoveryCandidatePipeline`，由 pipeline 释放本批 claim 回 `pending_eval`，下一轮在 provider 恢复后继续评估原候选
 - `SearchStrategy` / `TrendingStrategy` / `RelatedChainStrategy` / `ExploreStrategy`、YouTube 三策略和 `DouyinDirectStrategy` 在内部临时构造 evaluator 时都会透传 `database`。因此 CLI、daemon runtime、YouTube producer、Douyin producer 和 OpenClaw bootstrap 路径都能读取同一份近期 negative exemplars，避免只有外层 engine 能看到短期负反馈样本。
 - 排序口径优先 `candidate_tier`，再看 `relevance_score`、`last_scored_at`、`view_count`
 - 最终结果会把 `relevance_score`、`relevance_reason`、`candidate_tier` 一并写入 `content_cache`
