@@ -80,6 +80,13 @@ test("settings page exposes advanced config fields from backend schema", () => {
     "cfgTrendingRefreshMinutes",
     "cfgExploreRefreshMinutes",
     "cfgDiscoveryLimit",
+    "cfgVisualProfileEnabled",
+    "cfgKeyframeEnabled",
+    "cfgKeyframeMaxFrames",
+    "cfgKeyframeFetchLimit",
+    "cfgDanmakuEnabled",
+    "cfgDanmakuFetchLimit",
+    "cfgDanmakuMaxChars",
     "cfgMultimodalEvaluationEnabled",
     "cfgMultimodalBatchSize",
     "cfgMultimodalImageMaxPx",
@@ -197,20 +204,33 @@ test("settings page organizes backend config into tabs", () => {
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
   const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
   const tabsMarkup = popupHtml.match(/<div class="settings-tabs"[\s\S]*?<\/div>/)?.[0] ?? "";
-  const panelNames = ["models", "sources", "scheduler", "general", "logging"];
+  const panelNames = ["models", "sources", "scheduler", "advanced", "general", "logging"];
 
   assert.match(tabsMarkup, /role="tablist"/);
   for (const [id, label] of [
     ["settingsTabModels", "模型"],
     ["settingsTabSources", "平台源"],
     ["settingsTabScheduler", "调度"],
+    ["settingsTabAdvanced", "高级功能"],
     ["settingsTabGeneral", "通用"],
     ["settingsTabLogging", "日志"],
   ]) {
     assert.match(tabsMarkup, new RegExp(`id="${id}"`));
     assert.match(tabsMarkup, new RegExp(`>${label}<`));
+    const panelName = id.replace("settingsTab", "");
+    assert.match(
+      tabsMarkup,
+      new RegExp(`id="${id}"[^>]*role="tab"[^>]*aria-selected="(?:true|false)"[^>]*aria-controls="settingsPanel${panelName}"`),
+    );
+    assert.match(
+      popupHtml,
+      new RegExp(`id="settingsPanel${panelName}"[^>]*role="tabpanel"[^>]*aria-labelledby="${id}"`),
+    );
     assert.match(popupJs, new RegExp(`"${id}"`));
   }
+  assert.match(popupJs, /tab\.setAttribute\("aria-selected", isActive \? "true" : "false"\)/);
+  assert.match(popupJs, /tab\.tabIndex = isActive \? 0 : -1/);
+  assert.match(popupJs, /tab\.addEventListener\("click"/);
   for (const name of panelNames) {
     assert.match(popupHtml, new RegExp(`data-settings-panel="${name}"`));
     assert.match(popupJs, new RegExp(`"${name}"`));
@@ -461,7 +481,7 @@ test("settings page round-trips multimodal discovery evaluation controls", () =>
 
   assert.match(
     popupJs,
-    /setVal\("cfgCandidateEvalConcurrency", cfg\.discovery\?\.candidate_eval_concurrency\)/,
+    /setVal\("cfgCandidateEvalConcurrency", cfg\.discovery\?\.candidate_eval_concurrency \?\? 3\)/,
   );
   assert.match(
     popupJs,
@@ -469,19 +489,19 @@ test("settings page round-trips multimodal discovery evaluation controls", () =>
   );
   assert.match(
     popupJs,
-    /setVal\("cfgMultimodalBatchSize", cfg\.discovery\?\.multimodal_batch_size\)/,
+    /setVal\("cfgMultimodalBatchSize", cfg\.discovery\?\.multimodal_batch_size \?\? 8\)/,
   );
   assert.match(
     popupJs,
-    /setVal\("cfgMultimodalImageMaxPx", cfg\.discovery\?\.multimodal_image_max_px\)/,
+    /setVal\("cfgMultimodalImageMaxPx", cfg\.discovery\?\.multimodal_image_max_px \?\? 384\)/,
   );
   assert.match(
     popupJs,
-    /setVal\("cfgMultimodalImageQuality", cfg\.discovery\?\.multimodal_image_quality\)/,
+    /setVal\("cfgMultimodalImageQuality", cfg\.discovery\?\.multimodal_image_quality \?\? 72\)/,
   );
   assert.match(
     popupJs,
-    /setVal\("cfgMultimodalImageTimeout", cfg\.discovery\?\.multimodal_image_timeout_seconds\)/,
+    /setVal\("cfgMultimodalImageTimeout", cfg\.discovery\?\.multimodal_image_timeout_seconds \?\? 6\)/,
   );
   assert.match(popupJs, /multimodal_evaluation_enabled: checked\("cfgMultimodalEvaluationEnabled"\)/);
   assert.match(
@@ -497,6 +517,89 @@ test("settings page round-trips multimodal discovery evaluation controls", () =>
     popupJs,
     /multimodal_image_timeout_seconds: getInt\("cfgMultimodalImageTimeout", 6\)/,
   );
+});
+
+test("advanced settings keep recommendation signals together and preserve disabled values", () => {
+  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const advancedPanel =
+    popupHtml.match(/<div id="settingsPanelAdvanced"[\s\S]*?<div id="settingsPanelLogging"/)?.[0] ?? "";
+  const schedulerPanel =
+    popupHtml.match(/<div id="settingsPanelScheduler"[\s\S]*?<div id="settingsPanelAdvanced"/)?.[0] ?? "";
+  const modelsPanel =
+    popupHtml.match(/<div id="settingsPanelModels"[\s\S]*?<div id="settingsPanelSources"/)?.[0] ?? "";
+
+  assert.equal((advancedPanel.match(/<div class="settings-section">/g) ?? []).length, 3);
+  for (const id of [
+    "cfgVisualProfileEnabled",
+    "cfgKeyframeEnabled",
+    "cfgKeyframeMaxFrames",
+    "cfgKeyframeFetchLimit",
+    "cfgDanmakuEnabled",
+    "cfgDanmakuFetchLimit",
+    "cfgDanmakuMaxChars",
+    "cfgEmbeddingMultimodalEnabled",
+    "cfgCandidateEvalConcurrency",
+    "cfgMultimodalEvaluationEnabled",
+    "cfgMultimodalBatchSize",
+    "cfgMultimodalImageMaxPx",
+    "cfgMultimodalImageQuality",
+    "cfgMultimodalImageTimeout",
+    "cfgKeywordGenerationMode",
+  ]) {
+    assert.equal((advancedPanel.match(new RegExp(`id="${id}"`, "g")) ?? []).length, 1, id);
+    assert.equal((popupHtml.match(new RegExp(`id="${id}"`, "g")) ?? []).length, 1, `${id} duplicate`);
+  }
+  for (const id of [
+    "cfgKeywordGenerationMode",
+    "cfgCandidateEvalConcurrency",
+    "cfgMultimodalEvaluationEnabled",
+    "cfgMultimodalBatchSize",
+    "cfgMultimodalImageMaxPx",
+    "cfgMultimodalImageQuality",
+    "cfgMultimodalImageTimeout",
+  ]) {
+    assert.doesNotMatch(schedulerPanel, new RegExp(`id="${id}"`), `${id} moved out of scheduler`);
+  }
+  assert.doesNotMatch(modelsPanel, /id="cfgEmbeddingMultimodalEnabled"/);
+
+  for (const [id, min, max, placeholder] of [
+    ["cfgKeyframeMaxFrames", "1", "12", "4"],
+    ["cfgKeyframeFetchLimit", "1", "200", "50"],
+    ["cfgDanmakuFetchLimit", "1", "200", "50"],
+    ["cfgDanmakuMaxChars", "100", "2000", "500"],
+  ]) {
+    const control = advancedPanel.match(new RegExp(`id="${id}"[^>]*>`))?.[0] ?? "";
+    assert.match(control, new RegExp(`min="${min}"`));
+    assert.match(control, new RegExp(`max="${max}"`));
+    assert.match(control, new RegExp(`placeholder="${placeholder}"`));
+  }
+
+  for (const field of [
+    'visualProfile.checked = cfg.discovery?.visual_profile_enabled === true',
+    'keyframe.checked = cfg.discovery?.keyframe_enabled === true',
+    'setVal("cfgKeyframeMaxFrames", cfg.discovery?.keyframe_max_frames ?? 4)',
+    'setVal("cfgKeyframeFetchLimit", cfg.discovery?.keyframe_fetch_limit ?? 50)',
+    'danmaku.checked = cfg.discovery?.danmaku_enabled === true',
+    'setVal("cfgDanmakuFetchLimit", cfg.discovery?.danmaku_fetch_limit ?? 50)',
+    'setVal("cfgDanmakuMaxChars", cfg.discovery?.danmaku_max_chars ?? 500)',
+  ]) {
+    assert.ok(popupJs.includes(field), field);
+  }
+  const spread = "...(state.runtimeConfig?.discovery || {})";
+  assert.ok(popupJs.indexOf(spread) < popupJs.indexOf("visual_profile_enabled:"));
+  for (const field of [
+    'visual_profile_enabled: checked("cfgVisualProfileEnabled")',
+    'keyframe_enabled: checked("cfgKeyframeEnabled")',
+    'keyframe_max_frames: getInt("cfgKeyframeMaxFrames", 4)',
+    'keyframe_fetch_limit: getInt("cfgKeyframeFetchLimit", 50)',
+    'danmaku_enabled: checked("cfgDanmakuEnabled")',
+    'danmaku_fetch_limit: getInt("cfgDanmakuFetchLimit", 50)',
+    'danmaku_max_chars: getInt("cfgDanmakuMaxChars", 500)',
+  ]) {
+    assert.ok(popupJs.includes(field), field);
+    assert.ok(popupJs.indexOf(spread) < popupJs.indexOf(field), `${field} must follow spread`);
+  }
 });
 
 test("settings page round-trips embedding multimodal cover toggle + dashscope provider", () => {

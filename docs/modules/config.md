@@ -814,6 +814,16 @@ TOML 与显式环境变量覆盖在构造 `SchedulerConfig` 前统一归一为�
 
 > ✅ `unified_keyword_planner_enabled` **v0.3.124 起默认 `true`**：搜索词走统一规划器 + 关键词存储，本段其余字段随之生效。设为 `false` 可逐字回退到旧的逐平台搜索词生成路径（旧路径保留、回退无副作用）。
 
+#### Web 与插件设置页的「高级功能」
+
+桌面 Web 与浏览器插件 side panel 的设置页都提供独立的「高级功能」Tab：桌面端共 7 个 Tab，插件端共 6 个 Tab；两端固定使用同一套三个 section，字段语义、默认值和保存行为保持一致。
+
+- **推荐增强**：包含 P1 用户视觉画像、P2 弹幕语义、P3 视频关键帧的开关和预热参数。三者都是排序信号加权，不是过滤；P1/P3 依赖图像 Embedding，P2 只需文本 Embedding。P1 每个极性反馈不足 8 条时安全 no-op。关闭任一开关会保留缓存与参数并回退到原排序，不影响现有主流程；关键帧和弹幕目前仅作用于 B 站。
+- **多模态处理**：独立管理「图像 Embedding 能力」和「候选封面参与 LLM 评估」。前者是 P1/P3 的依赖，后者不会改变 P1/P3；Embedding provider、模型、凭据和探测仍在模型 Tab。
+- **搜索词生成**：集中管理经典、混合、灵感三档模式及成本提示；option value、顺序和文案与桌面端 / 插件端一致。
+
+两端加载时都会显式回填 `visual_profile_enabled`、`keyframe_enabled`、`keyframe_max_frames`、`keyframe_fetch_limit`、`danmaku_enabled`、`danmaku_fetch_limit`、`danmaku_max_chars`，保存时在已有 `discovery` 快照展开之后显式写入，数值范围分别为 `keyframe_max_frames=1..12`、两个 fetch limit 为 `1..200`、`danmaku_max_chars=100..2000`，默认值为 `4 / 50 / 50 / 500`。因此关闭开关不会因为保存设置而丢失预热参数或缓存。
+
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
 | `unified_keyword_planner_enabled` | bool | `true` | 统一关键词规划器总开关（v0.3.124 起默认 `true`）。`true` = 走 planner + 关键词存储；`false` = 回退旧逐平台搜索词生成。其余字段仅在 `true` 时生效 |

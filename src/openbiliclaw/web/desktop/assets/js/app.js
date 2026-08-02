@@ -7709,15 +7709,26 @@ ${cardFeedbackBarHtml()}`;
 
       const discovery = config.discovery || {};
       setSelect("keywordGenerationMode", discovery.keyword_generation_mode || "legacy");
-      setInput("candidateEvalConcurrency", discovery.candidate_eval_concurrency);
-      setSelect("multimodalEvaluationEnabled", discovery.multimodal_evaluation_enabled ? "on" : "off");
-      setInput("multimodalBatchSize", discovery.multimodal_batch_size);
-      setInput("multimodalImageMaxPx", discovery.multimodal_image_max_px);
-      setInput("multimodalImageQuality", discovery.multimodal_image_quality);
-      setInput("multimodalImageTimeout", discovery.multimodal_image_timeout_seconds);
+      const multimodalEvaluation = $("#multimodalEvaluationEnabled");
+      if (multimodalEvaluation) multimodalEvaluation.checked = discovery.multimodal_evaluation_enabled === true;
+      setInput("candidateEvalConcurrency", discovery.candidate_eval_concurrency ?? 3);
+      setInput("multimodalBatchSize", discovery.multimodal_batch_size ?? 8);
+      setInput("multimodalImageMaxPx", discovery.multimodal_image_max_px ?? 384);
+      setInput("multimodalImageQuality", discovery.multimodal_image_quality ?? 72);
+      setInput("multimodalImageTimeout", discovery.multimodal_image_timeout_seconds ?? 6);
+      const visualProfile = $("#visualProfileEnabled");
+      if (visualProfile) visualProfile.checked = discovery.visual_profile_enabled === true;
+      const keyframe = $("#keyframeEnabled");
+      if (keyframe) keyframe.checked = discovery.keyframe_enabled === true;
+      setInput("keyframeMaxFrames", discovery.keyframe_max_frames ?? 4);
+      setInput("keyframeFetchLimit", discovery.keyframe_fetch_limit ?? 50);
+      const danmaku = $("#danmakuEnabled");
+      if (danmaku) danmaku.checked = discovery.danmaku_enabled === true;
+      setInput("danmakuFetchLimit", discovery.danmaku_fetch_limit ?? 50);
+      setInput("danmakuMaxChars", discovery.danmaku_max_chars ?? 500);
       const multimodalStatus = $("#multimodalEvaluationStatus");
       if (multimodalStatus) {
-        multimodalStatus.textContent = discovery.multimodal_evaluation_enabled ? "开启" : "关闭";
+        multimodalStatus.textContent = discovery.multimodal_evaluation_enabled === true ? "候选封面 LLM 评估：开启" : "候选封面 LLM 评估：关闭";
       }
 
       setSelect("language", config.language || "zh");
@@ -7745,7 +7756,8 @@ ${cardFeedbackBarHtml()}`;
       setInput("embeddingBaseUrl", llm.embedding?.base_url);
       setInput("embeddingOutputDimensionality", llm.embedding?.output_dimensionality ?? 1024);
       setInput("embeddingSimilarity", llm.embedding?.similarity_threshold);
-      setSelect("embeddingMultimodalEnabled", llm.embedding?.multimodal_enabled ? "on" : "off");
+      const embeddingMultimodal = $("#embeddingMultimodalEnabled");
+      if (embeddingMultimodal) embeddingMultimodal.checked = llm.embedding?.multimodal_enabled === true;
       setSelect("biliAuth", config.bilibili?.auth_method || "cookie");
       setCookieOverrideInput("biliCookie", config.bilibili?.cookie, " B 站");
       setInput("biliBrowserExecutable", config.bilibili?.browser_executable);
@@ -8828,7 +8840,7 @@ ${cardFeedbackBarHtml()}`;
         model: getInput("embeddingModel"),
         output_dimensionality: Math.max(0, getIntInput("embeddingOutputDimensionality", 1024)),
         similarity_threshold: getFloatInput("embeddingSimilarity", 0.82),
-        multimodal_enabled: $("#embeddingMultimodalEnabled")?.value === "on"
+        multimodal_enabled: $("#embeddingMultimodalEnabled")?.checked === true
       };
       if (getInput("embeddingApiKey")) embedding.api_key = getInput("embeddingApiKey");
       if (getInput("embeddingBaseUrl")) embedding.base_url = getInput("embeddingBaseUrl");
@@ -8995,11 +9007,18 @@ ${cardFeedbackBarHtml()}`;
           ...(state.config?.discovery || {}),
           keyword_generation_mode: $("#keywordGenerationMode").value,
           candidate_eval_concurrency: getIntInput("candidateEvalConcurrency", 3),
-          multimodal_evaluation_enabled: $("#multimodalEvaluationEnabled").value === "on",
+          multimodal_evaluation_enabled: $("#multimodalEvaluationEnabled")?.checked === true,
           multimodal_batch_size: getIntInput("multimodalBatchSize", 8),
           multimodal_image_max_px: getIntInput("multimodalImageMaxPx", 384),
           multimodal_image_quality: getIntInput("multimodalImageQuality", 72),
-          multimodal_image_timeout_seconds: getIntInput("multimodalImageTimeout", 6)
+          multimodal_image_timeout_seconds: getIntInput("multimodalImageTimeout", 6),
+          visual_profile_enabled: $("#visualProfileEnabled")?.checked === true,
+          keyframe_enabled: $("#keyframeEnabled")?.checked === true,
+          keyframe_max_frames: getIntInput("keyframeMaxFrames", 4),
+          keyframe_fetch_limit: getIntInput("keyframeFetchLimit", 50),
+          danmaku_enabled: $("#danmakuEnabled")?.checked === true,
+          danmaku_fetch_limit: getIntInput("danmakuFetchLimit", 50),
+          danmaku_max_chars: getIntInput("danmakuMaxChars", 500)
         },
         saved_sync: { auto_sync_enabled: Boolean($("#savedAutoSync")?.checked) },
         storage: { db_path: getInput("storageDbPath") },
@@ -9402,18 +9421,37 @@ ${cardFeedbackBarHtml()}`;
     });
 
     function setActiveSettingsPanel(panelName = "models") {
-      document.querySelectorAll("[data-settings-tab]").forEach((tab) => {
+      const tabs = [...document.querySelectorAll("[data-settings-tab]")];
+      tabs.forEach((tab) => {
         const isActive = tab.dataset.settingsTab === panelName;
         tab.classList.toggle("is-active", isActive);
         tab.setAttribute("aria-selected", isActive ? "true" : "false");
+        tab.tabIndex = isActive ? 0 : -1;
       });
       document.querySelectorAll("[data-settings-panel]").forEach((panel) => {
-        panel.hidden = panel.dataset.settingsPanel !== panelName;
+        const isActive = panel.dataset.settingsPanel === panelName;
+        panel.hidden = !isActive;
+        panel.setAttribute("aria-hidden", isActive ? "false" : "true");
       });
     }
 
     document.querySelectorAll("[data-settings-tab]").forEach((tab) => {
       tab.addEventListener("click", () => setActiveSettingsPanel(tab.dataset.settingsTab));
+      tab.addEventListener("keydown", (event) => {
+        if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+        const tabs = [...document.querySelectorAll("[data-settings-tab]")];
+        const currentIndex = tabs.indexOf(tab);
+        if (currentIndex < 0 || !tabs.length) return;
+        event.preventDefault();
+        const nextIndex = event.key === "Home"
+          ? 0
+          : event.key === "End"
+            ? tabs.length - 1
+            : (currentIndex + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+        const nextTab = tabs[nextIndex];
+        setActiveSettingsPanel(nextTab.dataset.settingsTab);
+        nextTab.focus();
+      });
     });
 
     function setActiveModelSettingsPanel(groupName = "llm", panelName = "default") {
@@ -9852,7 +9890,7 @@ ${cardFeedbackBarHtml()}`;
       $("#runtimeSummary").textContent = error?.message || "请检查后端返回的数据结构。";
     }
     const requestedSettingsPanel = new URLSearchParams(window.location.search).get("settings");
-    if (["models", "sources", "scheduler", "general", "frontend", "logging"].includes(requestedSettingsPanel)) {
+    if (["models", "sources", "scheduler", "advanced", "general", "frontend", "logging"].includes(requestedSettingsPanel)) {
       openSettingsPage(requestedSettingsPanel);
     }
     void startDesktopBackendSession({ forceHydrate: true });

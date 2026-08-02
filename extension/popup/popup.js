@@ -7098,6 +7098,7 @@ function bindSettings() {
     ["models", document.getElementById("settingsTabModels")],
     ["sources", document.getElementById("settingsTabSources")],
     ["scheduler", document.getElementById("settingsTabScheduler")],
+    ["advanced", document.getElementById("settingsTabAdvanced")],
     ["general", document.getElementById("settingsTabGeneral")],
     ["logging", document.getElementById("settingsTabLogging")],
   ];
@@ -7108,10 +7109,12 @@ function bindSettings() {
       if (tab instanceof HTMLButtonElement) {
         tab.classList.toggle("is-active", isActive);
         tab.setAttribute("aria-selected", isActive ? "true" : "false");
+        tab.tabIndex = isActive ? 0 : -1;
       }
       const panel = overlay.querySelector(`[data-settings-panel="${name}"]`);
       if (panel instanceof HTMLElement) {
         panel.hidden = !isActive;
+        panel.setAttribute("aria-hidden", isActive ? "false" : "true");
       }
     }
   }
@@ -7119,6 +7122,23 @@ function bindSettings() {
   for (const [name, tab] of settingsTabs) {
     if (tab instanceof HTMLButtonElement) {
       tab.addEventListener("click", () => setActiveSettingsPanel(name));
+      tab.addEventListener("keydown", (event) => {
+        if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+        const tabs = settingsTabs
+          .map(([, candidate]) => candidate)
+          .filter((candidate) => candidate instanceof HTMLButtonElement);
+        const currentIndex = tabs.indexOf(tab);
+        if (currentIndex < 0 || !tabs.length) return;
+        event.preventDefault();
+        const nextIndex = event.key === "Home"
+          ? 0
+          : event.key === "End"
+            ? tabs.length - 1
+            : (currentIndex + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+        const nextTab = tabs[nextIndex];
+        setActiveSettingsPanel(nextTab.dataset.settingsTab || settingsTabs[nextIndex][0]);
+        nextTab.focus();
+      });
     }
   }
 
@@ -8549,15 +8569,25 @@ function bindSettings() {
     setVal("cfgExploreRefreshMinutes", cfg.scheduler?.explore_refresh_minutes);
     setVal("cfgDiscoveryLimit", cfg.scheduler?.discovery_limit);
     setVal("cfgKeywordGenerationMode", cfg.discovery?.keyword_generation_mode || "legacy");
-    setVal("cfgCandidateEvalConcurrency", cfg.discovery?.candidate_eval_concurrency);
+    const visualProfile = document.getElementById("cfgVisualProfileEnabled");
+    if (visualProfile) visualProfile.checked = cfg.discovery?.visual_profile_enabled === true;
+    const keyframe = document.getElementById("cfgKeyframeEnabled");
+    if (keyframe) keyframe.checked = cfg.discovery?.keyframe_enabled === true;
+    setVal("cfgKeyframeMaxFrames", cfg.discovery?.keyframe_max_frames ?? 4);
+    setVal("cfgKeyframeFetchLimit", cfg.discovery?.keyframe_fetch_limit ?? 50);
+    const danmaku = document.getElementById("cfgDanmakuEnabled");
+    if (danmaku) danmaku.checked = cfg.discovery?.danmaku_enabled === true;
+    setVal("cfgDanmakuFetchLimit", cfg.discovery?.danmaku_fetch_limit ?? 50);
+    setVal("cfgDanmakuMaxChars", cfg.discovery?.danmaku_max_chars ?? 500);
+    setVal("cfgCandidateEvalConcurrency", cfg.discovery?.candidate_eval_concurrency ?? 3);
     const multimodalEvaluation = document.getElementById("cfgMultimodalEvaluationEnabled");
     if (multimodalEvaluation) {
       multimodalEvaluation.checked = cfg.discovery?.multimodal_evaluation_enabled === true;
     }
-    setVal("cfgMultimodalBatchSize", cfg.discovery?.multimodal_batch_size);
-    setVal("cfgMultimodalImageMaxPx", cfg.discovery?.multimodal_image_max_px);
-    setVal("cfgMultimodalImageQuality", cfg.discovery?.multimodal_image_quality);
-    setVal("cfgMultimodalImageTimeout", cfg.discovery?.multimodal_image_timeout_seconds);
+    setVal("cfgMultimodalBatchSize", cfg.discovery?.multimodal_batch_size ?? 8);
+    setVal("cfgMultimodalImageMaxPx", cfg.discovery?.multimodal_image_max_px ?? 384);
+    setVal("cfgMultimodalImageQuality", cfg.discovery?.multimodal_image_quality ?? 72);
+    setVal("cfgMultimodalImageTimeout", cfg.discovery?.multimodal_image_timeout_seconds ?? 6);
     setVal("cfgProactivePushInterval", cfg.scheduler?.proactive_push_interval_seconds);
     setVal("cfgSpeculatorIdleInterval", cfg.scheduler?.speculator_idle_interval_minutes);
     const autoUpdate = document.getElementById("cfgAutoUpdate");
@@ -8747,6 +8777,13 @@ function bindSettings() {
         multimodal_image_max_px: getInt("cfgMultimodalImageMaxPx", 384),
         multimodal_image_quality: getInt("cfgMultimodalImageQuality", 72),
         multimodal_image_timeout_seconds: getInt("cfgMultimodalImageTimeout", 6),
+        visual_profile_enabled: checked("cfgVisualProfileEnabled"),
+        keyframe_enabled: checked("cfgKeyframeEnabled"),
+        keyframe_max_frames: getInt("cfgKeyframeMaxFrames", 4),
+        keyframe_fetch_limit: getInt("cfgKeyframeFetchLimit", 50),
+        danmaku_enabled: checked("cfgDanmakuEnabled"),
+        danmaku_fetch_limit: getInt("cfgDanmakuFetchLimit", 50),
+        danmaku_max_chars: getInt("cfgDanmakuMaxChars", 500),
       },
       scheduler: {
         enabled: !checked("cfgSchedulerEnabled"),
