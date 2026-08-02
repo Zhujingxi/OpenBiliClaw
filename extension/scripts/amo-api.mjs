@@ -35,6 +35,8 @@ export async function amoRequest(path, options = {}) {
     credentials: undefined,
     headers: {
       Authorization: `JWT ${createAmoJwt(credentials)}`,
+      Accept: "application/json",
+      "User-Agent": "OpenBiliClaw Firefox AMO publisher",
       ...(options.body ? { "Content-Type": "application/json" } : {}),
       ...options.headers,
     },

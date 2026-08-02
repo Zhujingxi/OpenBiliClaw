@@ -110,6 +110,14 @@ test("Firefox AMO source instructions reproduce the reviewed directory", () => {
   assert.match(instructions, /extension\/dist-firefox/);
 });
 
+test("Firefox AMO API requests use explicit JSON content negotiation", () => {
+  const api = readFileSync(resolve("scripts", "amo-api.mjs"), "utf8");
+
+  assert.match(api, /Accept: "application\/json"/);
+  assert.match(api, /"Content-Type": "application\/json"/);
+  assert.match(api, /"User-Agent": "OpenBiliClaw Firefox AMO publisher"/);
+});
+
 test("aggregate release sync treats signed Firefox XPI as a package asset", () => {
   const script = readFileSync(
     resolve("..", ".github", "scripts", "sync-aggregate-release.sh"),
