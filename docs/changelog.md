@@ -11,6 +11,7 @@
 - **跨平台公平保持零点与符号**：正负 bonus 以 0 为固定点按平台分段对齐，多平台只对齐到当前观测到的全局侧最大值并受组合 cap 限制，单平台不放大绝对幅度，弱正向不会变成负惩罚；关键帧/弹幕预热范围、fetch limit 和完整摘要长度均遵循当前候选池与配置。
 - **视觉结果不永久吞失败**：partial keyframe 结果携带 stable sampled-slot，成功槽位先入缓存但不落完成戳；只有 confirmed no-data 或完整采样且所有 embedding 成功才完成。Embedding provenance 同时隔离规范化 endpoint 的 fingerprint 与 L2 namespace；HTTP 200 的 HTML danmaku challenge 作为 transient failure 重试。
 - **配置与离线一致性**：`keyframe_max_frames`、`keyframe_fetch_limit`、`danmaku_fetch_limit`、`danmaku_max_chars` 由文件和 `PUT /api/config` 共同校验并 round-trip；`scripts/ab_visual_bonus.py` 与生产评分共享 signed suppression 和零点保持归一化。
+- **弹幕摘要严格遵守字符预算**：`condense_danmaku` 将 ` | ` 分隔符计入 `danmaku_max_chars`，保留完整弹幕，单条超限跳过，避免摘要实际长度超过配置预算。
 
 ## 未发布：连接与 HTTPS 部署（2026-08-01）
 

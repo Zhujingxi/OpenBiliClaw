@@ -105,9 +105,31 @@ def test_condense_drops_short_and_symbolic() -> None:
 
 def test_condense_respects_max_chars() -> None:
     texts = [f"这是一条足够长的弹幕内容用于测试字数上限编号{i}" for i in range(50)]
-    out = condense_danmaku(texts, max_chars=100)
-    assert len(out) <= 100 + 3 * 10  # separators allowed some slack
+    out = condense_danmaku(texts, max_chars=500)
+    assert len(out) <= 500
     assert out
+
+
+def test_condense_counts_separator_in_budget() -> None:
+    first = "A内容测试啊"
+    second = "B内容测试啊"
+    joined = f"{first} | {second}"
+
+    assert condense_danmaku([first, second], max_chars=len(joined) - 1) == first
+    assert condense_danmaku([first, second], max_chars=len(joined)) == joined
+
+
+@pytest.mark.parametrize("max_chars", [0, 1, 5])
+def test_condense_returns_empty_for_tiny_budget(max_chars: int) -> None:
+    out = condense_danmaku(["这是一条完整的弹幕"], max_chars=max_chars)
+
+    assert out == ""
+
+
+def test_condense_skips_overlong_single_item_without_truncating() -> None:
+    text = "这是一条不能被截断的超长弹幕内容"
+
+    assert condense_danmaku([text], max_chars=len(text) - 1) == ""
 
 
 def test_condense_empty_inputs() -> None:

@@ -49,6 +49,9 @@ _MAX_FREQUENCY = 3
 # usable semantics (the sample's mean was 7.2 chars, dominated by memes).
 _MIN_COLLAPSED_LENGTH = 6
 
+# Keep boundaries readable and stable in logs and embedding input.
+_DANMAKU_SEPARATOR = " | "
+
 # High-frequency community memes and reaction noise. These carry no
 # information about what the video is about. Matched after normalisation
 # (whitespace-stripped, repeats collapsed) as a whole string.
@@ -195,6 +198,10 @@ def condense_danmaku(
     the measurement that drove this. Entries appearing more than
     ``_MAX_FREQUENCY`` times are dropped as memes even when long.
 
+    Selected entries remain complete, and both their characters and the stable
+    ``" | "`` separators count toward ``max_chars``. An entry that does not fit
+    is skipped rather than truncated.
+
     Returns ``""`` when nothing survives, so the caller can skip writing an
     empty value into the cache (never cache a failed/empty result).
     """
@@ -245,16 +252,16 @@ def condense_danmaku(
 
     picked: list[str] = []
     total = 0
-    limit = max(1, int(max_chars))
+    limit = max(0, int(max_chars))
+    separator_length = len(_DANMAKU_SEPARATOR)
     for item in candidates[: max(1, int(top_n))]:
-        if total + len(item) > limit:
+        separator_cost = separator_length if picked else 0
+        candidate_total = total + separator_cost + len(item)
+        if candidate_total > limit:
             continue
         picked.append(item)
-        total += len(item)
+        total = candidate_total
         if total >= limit:
             break
 
-    # " | " rather than " ": individual danmaku frequently contain spaces
-    # themselves, and an explicit separator keeps the boundaries readable in
-    # logs and stable as one embedding input.
-    return " | ".join(picked)
+    return _DANMAKU_SEPARATOR.join(picked)
