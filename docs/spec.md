@@ -41,7 +41,10 @@ OpenBiliClaw 是一个**本地优先、开源的跨平台个性化内容发现 A
 - **小红书赞 / 收藏强信号**由 MAIN-world `xhs-action-tap`（`obc-xhs-action`，与 token sniffer 隔离）在网络层认定：like/dislike/collect/uncollect 写端点业务成功才发，替代此前「按钮文案匹配、图标按钮漏采」的 DOM 路径；xhs adapter 声明 `tapAuthoritativeActions:{like,favorite,retraction}`，kernel 抑制对应 DOM 发射，事件 URL 与后端 note 键型互通以支持赞→撤销折价
 - 记录用户的**主动反馈**：`dislike` 类动作统一规范成 `feedback` 事件，避免各平台负反馈语义分叉
 - 插件 side panel 与桌面 / 移动 Web 使用同一 platform-neutral 保存契约：卡片先本地保存，保存页显式同步并轮询逐项任务；默认关闭自动同步，首次开启提示将修改对应平台账号；本地删除不删除平台记录
-- 本机调试可通过 `/api/extension/e2e/run` 驱动已安装插件在抖音 / 小红书 / X 真实页面执行白名单 DOM 操作，再由后端校验 `/api/events` 是否自然入库；runner 会把复用 tab 归位到平台入口并在回传结果前 flush 捕捉 buffer，该链路不伪造行为事件，用于验证捕捉层本身。`/api/events` 在画像明确未初始化时会拒收普通行为事件，首轮画像信号只由点击「开始初始化」后的 guided init 来源任务拉取；初始化后 accepted 普通事件会先写入 memory，再进入 `ProfileUpdatePipeline`，随后通过 `request_replenishment(reason="event_ingest")` 排队补货需求。旧版本已经停在 discovery 水位后的普通行为事件由独立 `last_profile_pipeline_event_id` 补喂画像 pipeline，而 `pending_signal_events` 仍只是 search / related_chain refresh 的触发水位，不是画像待处理数。
+- 本机调试可通过 `/api/extension/e2e/run` 驱动已安装插件在抖音 / 小红书 / X 真实页面执行白名单 DOM 操作，再由后端校验 `/api/events` 是否自然入库；runner 会把复用 tab 归位到平台入口并在回传结果前 flush 捕捉 buffer，该链路不伪造行为事件，用于验证捕捉层本身。`/api/events` 的每个 `event_id`、`/api/feedback` 与 `/api/recommendation-click` 的 `request_id` 都是 trim 后 1–400 字符的必填稳定键；缺失、空白或超长由请求模型在任何 event/projection 写入前返回 422。同一动作重试必须复用，服务端不补随机键。`/api/events` 在画像明确未初始化时会拒收普通行为事件，首轮画像信号只由 guided init 来源任务拉取；初始化后所有 accepted event 都先经统一 ingress commit，HTTP 只 wake、不等待 pipeline / LLM。app-owned `EventProcessingScheduler` 让 `profile_events` generic consumer 与 `content_feedback` consumer 按各自 durable cursor 扫描显式 owner，以 event row ID 生成稳定 signal，并用 `checkpointed_enqueue_batch()` 在同一个 `pipeline_state.json` snapshot 中原子发布 buffer+cursor，再由 owner 调 `tick_if_buffered()`；独立周期画像维护才调用完整 `tick()`。首次 app startup 只 await owner fence、本地 durable 准备与 scheduler admission，真正 scan/checkpoint/consume 在 scheduler-owned background task 中继续；provider 401、pending buffer LLM 或永不返回调用不能延迟 listener/health。shutdown 取消并 gather；热重载仍同步 pause/drain/recover/rebind，不缩短 owner pass 或破坏 cursor/buffer。5 秒 safety scan 继续覆盖丢 wake。retraction 投影在 generic cursor 前完成，hypothesis/import feedback 由其它 owner 处理或只越过 feedback cursor。两个 owner 首次接管都先按最大 event row id 发布 cutover fence，旧 direct-ingest 行不重学。`feedback_state.json` 只作迁移 provenance/兼容镜像，不是 owner 权威。`pending_signal_events` 仍只是 search / related_chain refresh 的触发水位，不是画像待处理数。`/api/feedback` 另明确采用 event-first 两次 commit：durable event 后才单独更新 recommendation projection，第二步失败由同 `request_id` duplicate retry 校验并补投影，不宣称跨表原子；相同 ID 的不同 payload 维持 409。
+
+- 上述三个公开事件 ID 字段采用严格 JSON string 校验，不把数字、布尔或其它 JSON 类型自动转成
+  字符串；这类非字符串输入与缺失、空白、超长输入一样在 route 前 422 且零写入。
 
 **B 站数据接口**：
 - 通过 B 站 API 获取结构化数据（历史记录、收藏夹、关注列表等）
@@ -228,8 +231,16 @@ config recovery control plane (normal or degraded; business APIs stay gated)
                 ├─ draft → /api/config/probe-service → temporary registry → total gate
                 └─ draft → /api/config/discover-models → exact instance GET /models
                           → editable model list + local effort advisory (no config write)
-durable dialogue → confirmation entry(pending list / cards)
-                 → chat_turn(payload + fixed turn time) → SocraticDialogue(queued)
+cover images: proxy foreground ─┐
+              refresh prefetch ─┴→ app-stable coordinator(total 4 / bg 3, fg priority)
+                                  → cache-key singleflight → whitelist fetch → atomic cache
+dialogue entries → app-stable execution lease(max active 1; reload pause/drain)
+  durable dialogue → confirmation entry(pending list / cards)
+                 → chat_turn(pending) → rowid-ordered durable reply worker → SocraticDialogue(queued)
+                 → visible completion CAS
+                   transient/cancel → pending + bounded in-place retry; explicit invalid → failed CAS
+  direct chat/probes → same lease through response + ctx-dependent side effects
+post-reply learning/object settlement (independent of durable reply backlog)
                  → typed settlement queue[all 11 declared kinds] → one actual worker + guard
                  → pending≤3 → user open(no cooldown) | system 12h+object 72h
                    → confirmation INSERT → attached user INSERT (created_at,rowid)
@@ -263,8 +274,10 @@ pool maintenance → isolated maintenance DB worker → ≤50 mutations/transact
                  → commit/release lock → unchanged skip / 10m safety sweep
 ```
 
-下图的对话/反馈入口共享同一失败原子链路，但学习所有权显式分开：Web/API
-durable runtime 使用 `SocraticDialogue(queued)`，成功写入 user+agent 历史后同步
+对话回复与其后的 11-kind learning/settlement 是相邻但独立的 lane：Web/API durable runtime
+先由 app-owned 单 worker 按 `chat_turns.rowid` 领取 pending，再在稳定
+execution lease 内使用 `SocraticDialogue(queued)`；成功写入 user+agent 历史并用
+`WHERE status='pending'` 发布一次 completion CAS 后，同步
 提交 typed `learn`，由唯一 `DialogueSettlementQueue` worker 在线内 await
 `learn_from_dialogue`；CLI/OpenClaw 只在两个兼容构造点使用 `legacy_direct`，保持
 既有 detached direct learning，位于 queue/guard 外。其余 10 个 typed kind 的
@@ -280,8 +293,9 @@ admission，而返回 `dialogue_busy` 让 popup/桌面带等待态自动重试�
 直到队列 idle，再原子 pause/revoke，25 分钟安全窗覆盖 20 分钟 provider timeout。
 两条学习路径都使用 task-local bypass 跳过 background admission、保留 total gate，
 避免空库存反向阻塞纠偏。若学习真正新增长期避雷项，则在偏好落盘后立即复用共享
-dislike writeback，精确清池与后续语义精判不等待完整画像重建。失败/超时回滚临时
-用户历史，再由边界返回安全错因或持久化 `failed / reply=""`。桌面 Web 的推荐、
+dislike writeback，精确清池与后续语义精判不等待完整画像重建。provider、限流、配置、
+失败/超时与取消都会回滚临时用户历史并保持 durable `pending`，在队头原位有界退避；
+只有显式空/无效响应才持久化安全错因与 `failed / reply=""`。桌面 Web 的推荐、
 runtime 与次级 hydration 是独立分支。
 
 ```
@@ -308,9 +322,11 @@ trusted LAN ─ HTTPS（可选）──→ TLS Proxy :8443 ─ loopback/Compose 
 │  │ 扩展捕捉 E2E：run -> runtime-stream -> 入口归位 -> DOM 操作 -> /api/events │ │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
-│  │/api/events: accepted → memory → request_replenishment│   │
-│  │兴趣：事件/对话/反馈(priority) → ProfileUpdatePipeline│   │
-│  │ → 单一 INTEREST 线；旧反馈批仅由 false 回退          │   │
+│  │普通 events/推荐点击 → generic durable cursor ─┐      │   │
+│  │内容 feedback → content_feedback cursor ───────┴→ atomic buffer+cursor checkpoint│ │
+│  │首启 fence+task admission→listener；后台 owner→tick_if_buffered│ │
+│  │热重载 pause/drain/recover→rebind；周期画像维护→tick       │   │
+│  │对话 → typed settlement worker → learning；旧反馈批仅 false 回退│ │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │ delight / interest.probe / avoidance.probe 主动推送（含probe_mode）│ │
@@ -330,7 +346,8 @@ trusted LAN ─ HTTPS（可选）──→ TLS Proxy :8443 ─ loopback/Compose 
 │  │ 跳过 /api/health readiness / embedding probe                 │   │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
-│  │ 推荐/消息封面：UI -> /api/image-proxy -> 白名单 CDN -> UI    │   │
+│  │封面：proxy前台 + refresh预取 → app-stable 4/3优先lane → singleflight│ │
+│  │     → 白名单 CDN → tmp+fsync+replace cache → UI              │ │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │ 海外网络：config/UI -> direct|system|custom -> LLM/YT/updater/GitHub stats │   │
@@ -347,7 +364,7 @@ trusted LAN ─ HTTPS（可选）──→ TLS Proxy :8443 ─ loopback/Compose 
 │  │ durable chat：session=popup -> 插件/移动/桌面；可见时同步历史 │   │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
-│  │ 推荐/探针反馈：即时 UI -> 10s 可撤销提交 -> API；推荐再经 5s 合并学习 │ │
+│  │ 推荐/探针反馈：即时 UI -> 10s 可撤销 -> event commit/HTTP 200 -> 5s owner │ │
 │  │ 对话/反馈新增长期避雷 -> shared dislike purge -> purged_by_dislike │ │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │

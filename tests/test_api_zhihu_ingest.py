@@ -16,6 +16,7 @@ if TYPE_CHECKING:
 class RecordingMemoryManager:
     def __init__(self) -> None:
         self.events: list[dict[str, object]] = []
+        self._source_bootstrap_state: dict[str, object] = {}
 
     async def propagate_event(self, event: dict[str, object]) -> None:
         self.events.append(event)
@@ -27,10 +28,10 @@ class RecordingMemoryManager:
         return None
 
     def load_source_bootstrap_state(self) -> dict[str, object]:
-        return {}
+        return dict(self._source_bootstrap_state)
 
     def save_source_bootstrap_state(self, state: dict[str, object]) -> None:
-        return None
+        self._source_bootstrap_state = dict(state)
 
 
 class RecordingProfilePipeline:
@@ -182,4 +183,4 @@ def test_zhihu_bootstrap_result_with_profile_update_propagates_to_memory_and_pip
     assert event["event_type"] == "view"
     assert event["title"] == "最近浏览回答"
     assert event["metadata"]["source_platform"] == "zhihu"  # type: ignore[index]
-    assert soul.pipeline.signals
+    assert soul.pipeline.signals == []

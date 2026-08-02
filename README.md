@@ -530,7 +530,7 @@ OpenClaw 在后台开着 `listen`，某次 refresh 后系统发现了一条高�
 >
 > **你**："这条非常到位。"
 >
-> **OpenClaw**（内部执行 `submit-feedback --recommendation-id 4268 --feedback-type like`）
+> **OpenClaw**（内部执行 `submit-feedback --recommendation-id 4268 --feedback-type like --request-id feedback-4268-like-1`，重试复用该 ID）
 
 你没有开口要推荐——是系统主动捅过来的。
 
@@ -600,7 +600,8 @@ background ─ background admission (default 3) ──────┘
          ├→ /api/config/probe-service → 临时 registry → 总并发 gate
          └→ /api/config/discover-models → 精确实例 GET /models（不写配置）
                                       → 可编辑模型下拉 + 本地 Effort 建议
-持久对话回复：固定时间/payload → queued mode → 11-kind typed 结算单队列 → actual worker + guard
+持久对话回复：pending SQLite → rowid 串行 reply worker → 可见 completion CAS（app-stable 对话 lease）
+回复后学习/对象结算：独立 11-kind typed 结算单队列 → actual worker + guard
 确认入口（待聊列表/卡片）→ 单锚(kind+ref+generation) → 全入口 frozen admission / 归属矩阵
                        ├→ 待聊≤3 · 主动零冷却 / 系统12h+对象72h · 确认先于用户附着
                        ├→ worker忙：dialogue_busy + Retry-After → 两端等待态自动重试
@@ -611,6 +612,8 @@ background ─ background admission (default 3) ──────┘
                        └→ 疑惑 FIFO≤5 / 队头 fencing / 12h 补扫
 配置热重载：保持接单并排空旧 worker → 原子暂停/revoke → 新 worker；安全窗25分钟
 实时连接：runtime-stream 20s idle 心跳 → 短暂 close 显示重连中并自动续连
+封面：proxy 前台 + refresh 预取 → app-stable lane（总4/后台3、前台优先）
+                               → cache-key singleflight → 白名单抓取 → 原子缓存
 ```
 
 ```
@@ -630,10 +633,14 @@ background ─ background admission (default 3) ──────┘
 │  Soul   │  Memory  │ Discovery │ Recommendation │
 │ 灵魂画像 │ 五层记忆  │多源发现+准入│   推荐与表达     │
 ├─────────┴──────────┴───────────┴───────────────┤
-│ 兴趣：事件/对话/反馈(priority) → 统一管线      │
-│       ProfileUpdatePipeline → INTEREST         │
+│ 普通事件/推荐点击 → generic durable cursor ─┐    │
+│ 内容反馈 → content_feedback durable cursor ─┴→ buffer+cursor 同一原子 checkpoint │
+│ 首启 fence+task admission → listener；后台 owner recovery → tick_if_buffered │
+│ 热重载 pause/drain/recover 后 rebind；周期画像维护才调用 tick │
+│ 对话 → typed settlement worker → learning          │
 │ 旧反馈批：unified_interest_line=false 时启用   │
 │ 初始化屏障：完整画像落盘 → 发现/评估/表达 → 可浏览推荐 │
+│ 封面：proxy前台 + refresh预取 → app-stable 4/3 lane → singleflight/原子缓存 │
 │ Soul 认知纪律：待聊双轨冷却 · 单对话锚 · worker-only 结算 · 轻量 winner receipt · 疑惑 FIFO · 台账 · 深层门控 │
 │   LLM 适配层 · 多平台源适配（SourceAdapter）        │
 │   模块路由 → LLM 实例链 → Provider 适配 · 多平台源适配（SourceAdapter） │
@@ -643,7 +650,7 @@ background ─ background admission (default 3) ──────┘
 │ Bangumi 官方匿名 API → search/ranked/latest producer → shared eval │
 │ API projected 库存 → 3×30 worker → 串行入池；OpenClaw 首批≤4 → copy≤4/不拆分重试 → 四端 │
 │ 惊喜就绪门：正式推荐词/主题就绪 + seen_items 硬过滤 → 打分并原子快照 → 四端 × 写回已看账本 │
-│ API/OpenClaw 启动钩子 → 历史恢复/原子维护 → 再暴露 LLM │
+│ 库存 API/OpenClaw 启动钩子 → 历史恢复/原子维护 → 再暴露 LLM │
 │ 换屏快路：当前卡硬排除 → PoolServeSnapshot/seen_items → recommendation+shown 短事务 → 单条 reshuffle 事件 │
 │ 平台定向（仅 PC Web Tab）：source_platform → 平台候选（不跨平台补位）→ 同一排序/文案/持久化 │
 │ 平台库存：platform-availability → 同一 canonical 可推集合 → total == Σ by_platform │
@@ -660,10 +667,12 @@ background ─ background admission (default 3) ──────┘
 │ 六平台 adapter → broker → shared MV3 recovery barrier → Reddit/X/YT/XHS/DY/Zhihu executor（6/6 fixture + real-account）│
 └────────────────────────────────────────────────┘
 
-Web/API durable → SocraticDialogue(queued) → user+agent 历史 → typed queue[全部 declared entries] → 单 worker 在线内学习/结算
+Web/API durable → rowid 顺序回复 worker → app-stable 对话 lease(max active 1) → SocraticDialogue(queued) → 可见 CAS
+惊喜/legacy/兴趣探针/避雷探针 chat ────────────────────────────────┘（回复与必要副作用同 lease）
+回复完成后的 11-kind learning/settlement → 独立 typed 结算单 worker（不属于 reply backlog）
 CLI/OpenClaw → SocraticDialogue(legacy_direct) → user+agent 历史 → 队列/guard 外 direct learning
 学习 → 绕过后台门禁、保留总并发 ── 新避雷：共享清池 → content_cache
-失败/超时 → 回滚临时历史 → 安全错因 / failed turn
+瞬态/provider/超时/取消 → 回滚临时历史 → durable pending + 队头有界重试；显式空/无效响应 → failed CAS
 durable turn → 固定时间/payload → 确认入口（待聊列表/卡片） → frozen anchor admission → relation matrix
                                                    └→ 卡片/锚/chat/probe/confusion/replay/legacy 全部 worker-only
 卡片 action → 同步 200（空队列快路）| 202 processing → popup/桌面轮询；移动/CLI 无 action

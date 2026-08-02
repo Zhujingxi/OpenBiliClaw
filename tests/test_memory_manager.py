@@ -363,11 +363,13 @@ def test_feedback_state_defaults_when_missing(tmp_path: Path) -> None:
         # Unified interest line one-shot migration marker; empty = never ran.
         # Shares this file with the cursor so one write persists both.
         "unified_interest_line_migrated_at": "",
+        "feedback_owner_version": 0,
+        "feedback_owner_cutover_at": "",
     }
 
 
-def test_feedback_state_save_preserves_the_unified_migration_marker(tmp_path: Path) -> None:
-    """A cursor-only save (the legacy batch) must not clear the migration marker.
+def test_feedback_state_save_preserves_feedback_owner_markers(tmp_path: Path) -> None:
+    """A cursor-only save (the legacy batch) must not clear owner markers.
 
     Without the read-back, a single legacy-batch write after a rollback would
     erase the marker and let the one-shot migration replay — double-ingesting
@@ -380,6 +382,8 @@ def test_feedback_state_save_preserves_the_unified_migration_marker(tmp_path: Pa
             "last_processed_feedback_event_id": 5,
             "last_feedback_reanalyzed_at": "",
             "unified_interest_line_migrated_at": "2026-07-28T00:00:00",
+            "feedback_owner_version": 2,
+            "feedback_owner_cutover_at": "2026-08-01T00:00:00",
         }
     )
 
@@ -393,6 +397,8 @@ def test_feedback_state_save_preserves_the_unified_migration_marker(tmp_path: Pa
     state = memory.load_feedback_state()
     assert state["last_processed_feedback_event_id"] == 9
     assert state["unified_interest_line_migrated_at"] == "2026-07-28T00:00:00"
+    assert state["feedback_owner_version"] == 2
+    assert state["feedback_owner_cutover_at"] == "2026-08-01T00:00:00"
 
 
 def test_feedback_state_round_trips_to_json(tmp_path: Path) -> None:
@@ -403,6 +409,8 @@ def test_feedback_state_round_trips_to_json(tmp_path: Path) -> None:
         {
             "last_processed_feedback_event_id": 12,
             "last_feedback_reanalyzed_at": "2026-03-09T12:00:00",
+            "feedback_owner_version": 2,
+            "feedback_owner_cutover_at": "2026-08-01T01:02:03",
         }
     )
 
@@ -410,6 +418,8 @@ def test_feedback_state_round_trips_to_json(tmp_path: Path) -> None:
 
     assert state["last_processed_feedback_event_id"] == 12
     assert state["last_feedback_reanalyzed_at"] == "2026-03-09T12:00:00"
+    assert state["feedback_owner_version"] == 2
+    assert state["feedback_owner_cutover_at"] == "2026-08-01T01:02:03"
 
 
 def test_discovery_runtime_state_defaults_when_missing(tmp_path: Path) -> None:

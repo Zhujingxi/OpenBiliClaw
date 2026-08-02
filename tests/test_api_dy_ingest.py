@@ -199,16 +199,7 @@ class TestDyTaskResult:
         event_types = [e["event_type"] for e in memory.events]
         assert event_types == ["favorite", "like", "follow"]
         assert all(e["metadata"]["source_platform"] == "douyin" for e in memory.events)
-        assert len(memory.profile_signals) == 3
-        assert [signal.payload["event_type"] for signal in memory.profile_signals] == [
-            "favorite",
-            "like",
-            "follow",
-        ]
-        assert all(
-            signal.payload["metadata"]["source_platform"] == "douyin"
-            for signal in memory.profile_signals
-        )
+        assert memory.profile_signals == []
 
         # Task is marked completed.
         from openbiliclaw.sources.dy_tasks import DyTaskQueue
@@ -552,7 +543,7 @@ class TestDyTaskResult:
             assert response.status_code == 200
 
         assert [event["title"] for event in memory.events] == ["重复抖音收藏"]
-        assert len(memory.profile_signals) == 1
+        assert memory.profile_signals == []
         assert memory.load_source_bootstrap_state()["dy_seen_video_keys"] == [
             "dy_collect:repeated-dy"
         ]

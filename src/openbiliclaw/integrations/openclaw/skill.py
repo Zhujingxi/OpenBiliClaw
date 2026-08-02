@@ -85,6 +85,7 @@ def build_openclaw_skills(adapter: Any) -> list[OpenClawSkillDescriptor]:
                 recommendation_id=_to_int(payload.get("recommendation_id", 0)),
                 feedback_type=str(payload.get("feedback_type", "")),
                 note=str(payload.get("note", "")),
+                request_id=str(payload.get("request_id", "")),
             )
             return await adapter.submit_feedback(request)
 
@@ -161,8 +162,14 @@ def build_openclaw_skills(adapter: Any) -> list[OpenClawSkillDescriptor]:
                     "recommendation_id": {"type": "integer", "minimum": 1},
                     "feedback_type": {"type": "string"},
                     "note": {"type": "string"},
+                    "request_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 400,
+                        "description": "Stable idempotency ID; reuse it for retries.",
+                    },
                 },
-                "required": ["recommendation_id", "feedback_type"],
+                "required": ["recommendation_id", "feedback_type", "request_id"],
             },
             handler=submit_feedback_handler,
         ),

@@ -10,6 +10,7 @@ correctly; this file proves the surrounding machinery is solid.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -372,6 +373,79 @@ async def test_strong_signal_still_blocked_by_min_interval(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
+async def test_concurrent_ingest_batches_do_not_overlap_llm_analysis(tmp_path: Path) -> None:
+    """A burst of concurrent ingest_batch calls must serialize layer updates.
+
+    Without the pipeline lock, two rapid feedback ingests each drain their own
+    buffer and run parallel preference LLM passes (double cost + racing
+    ``pipeline_state.json`` snapshots). The lock queues the second call until
+    the first analysis finishes.
+    """
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    in_flight = 0
+    max_in_flight = 0
+
+    class BlockingService(_RichFakeService):
+        async def complete_structured_task(self, **kwargs: Any) -> LLMResponse:
+            nonlocal in_flight, max_in_flight
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+            entered.set()
+            try:
+                await asyncio.wait_for(release.wait(), timeout=10)
+            finally:
+                in_flight -= 1
+            return await super().complete_structured_task(**kwargs)
+
+    pipeline, _, _ = _make_low_threshold_pipeline(tmp_path, service=BlockingService())
+
+    first = asyncio.create_task(pipeline.ingest(signal_from_feedback("like", "A", "")))
+    await asyncio.wait_for(entered.wait(), timeout=5)
+    second = asyncio.create_task(pipeline.ingest(signal_from_feedback("like", "B", "")))
+    # Give the second call a real chance to start; the lock must keep it queued.
+    await asyncio.sleep(0.05)
+    assert max_in_flight == 1, "concurrent ingests must not overlap LLM analysis"
+    release.set()
+    results = await asyncio.gather(first, second)
+    assert all(result.signals_accepted == 1 for result in results)
+    assert max_in_flight == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_ingest_and_tick_do_not_overlap_llm_analysis(tmp_path: Path) -> None:
+    """The shared lock serializes an event ingest against a scheduler tick."""
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    in_flight = 0
+    max_in_flight = 0
+
+    class BlockingService(_RichFakeService):
+        async def complete_structured_task(self, **kwargs: Any) -> LLMResponse:
+            nonlocal in_flight, max_in_flight
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+            entered.set()
+            try:
+                await asyncio.wait_for(release.wait(), timeout=10)
+            finally:
+                in_flight -= 1
+            return await super().complete_structured_task(**kwargs)
+
+    pipeline, _, _ = _make_low_threshold_pipeline(tmp_path, service=BlockingService())
+    await pipeline.enqueue(signal_from_feedback("like", "tick 中的反馈", ""))
+
+    ticking = asyncio.create_task(pipeline.tick())
+    await asyncio.wait_for(entered.wait(), timeout=5)
+    ingesting = asyncio.create_task(pipeline.ingest(signal_from_feedback("like", "并发事件", "")))
+    await asyncio.sleep(0.05)
+    assert max_in_flight == 1
+    release.set()
+    await asyncio.gather(ticking, ingesting)
+    assert max_in_flight == 1
+
+
+@pytest.mark.asyncio
 async def test_max_buffer_size_evicts_oldest_signals(tmp_path: Path) -> None:
     """When buffer exceeds max_buffer_size, oldest signals should be dropped."""
     svc = _RichFakeService()
@@ -530,6 +604,132 @@ async def test_pipeline_buffer_survives_restart(tmp_path: Path) -> None:
         "Buffered signals must survive pipeline restart via state file"
     )
     assert interest_buf.signals[0]["payload"]["title"] == "持久化测试"
+
+
+@pytest.mark.asyncio
+async def test_enqueue_is_buffer_only_persistent_and_idempotent(tmp_path: Path) -> None:
+    """Durable enqueue never analyzes and a stable ID is appended only once."""
+    service = _RichFakeService()
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    pipeline = ProfileUpdatePipeline(
+        memory=memory,
+        preference_analyzer=PreferenceAnalyzer(registry=service),
+        profile_builder=ProfileBuilder(registry=service),
+    )
+    signal = signal_from_feedback(
+        "dislike",
+        "需要重启恢复的反馈",
+        "太浅",
+        signal_id="feedback-event-41",
+    )
+
+    first = await pipeline.enqueue(signal)
+    second = await pipeline.enqueue(signal)
+
+    assert first.signals_accepted == 1
+    assert second.signals_accepted == 0
+    assert service.calls == [], "enqueue-only must never enter an LLM-backed updater"
+
+    rebuilt_memory = MemoryManager(tmp_path)
+    rebuilt_memory.initialize()
+    rebuilt = ProfileUpdatePipeline(
+        memory=rebuilt_memory,
+        preference_analyzer=PreferenceAnalyzer(registry=service),
+        profile_builder=ProfileBuilder(registry=service),
+    )
+    for layer in (OnionLayer.INTEREST, OnionLayer.SURFACE):
+        matching = [
+            item
+            for item in rebuilt._buffers[layer.value].signals
+            if item.get("id") == "feedback-event-41"
+        ]
+        assert len(matching) == 1
+        assert matching[0]["signal_type"] == SignalType.FEEDBACK.value
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_save_failure_rolls_back_buffer_cursor_and_observation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A failed atomic replace leaves no in-memory claim or speculative tick."""
+
+    class SpySpeculator:
+        def __init__(self) -> None:
+            self.observed: list[object] = []
+
+        def observe(self, events: object) -> None:
+            self.observed.append(events)
+
+    speculator = SpySpeculator()
+    pipeline, _, _ = _make_low_threshold_pipeline(tmp_path, speculator=speculator)
+    signal = signal_from_feedback(
+        "dislike",
+        "save failure must retry",
+        "",
+        signal_id="feedback-event-77",
+    )
+
+    def fail_save() -> None:
+        raise OSError("atomic replace failed")
+
+    monkeypatch.setattr(pipeline, "_save_state", fail_save)
+
+    with pytest.raises(OSError, match="atomic replace failed"):
+        await pipeline.checkpointed_enqueue_batch(
+            [signal],
+            consumer="content_feedback",
+            cursor=77,
+            owner_version=2,
+            cutover_at="2026-08-01T00:00:00+00:00",
+            cutover_event_id=70,
+        )
+
+    assert pipeline.consumer_checkpoint("content_feedback") == {
+        "cursor": 0,
+        "owner_version": 0,
+        "cutover_at": "",
+        "cutover_event_id": 0,
+        "has_cutover_event_id": False,
+    }
+    assert pipeline._total_ingested == 0
+    assert speculator.observed == []
+    for layer in (OnionLayer.INTEREST, OnionLayer.SURFACE):
+        assert pipeline._buffers[layer.value].signals == []
+
+
+@pytest.mark.asyncio
+async def test_tick_commits_drain_before_later_maintenance_failure(tmp_path: Path) -> None:
+    """A failed speculator pass cannot make restart replay an applied layer update."""
+
+    class RaisingSpeculator:
+        def observe(self, _events: object) -> None:
+            return None
+
+        async def tick(self, *_args: object, **_kwargs: object) -> object:
+            raise RuntimeError("maintenance failed")
+
+    pipeline, _, _ = _make_low_threshold_pipeline(tmp_path)
+    pipeline._speculator = RaisingSpeculator()  # type: ignore[assignment]
+    signal = signal_from_feedback("like", "已经应用的反馈", "", signal_id="feedback-event-9")
+    await pipeline.enqueue(signal)
+
+    with pytest.raises(RuntimeError, match="maintenance failed"):
+        await pipeline.tick()
+
+    service = _RichFakeService()
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    rebuilt = ProfileUpdatePipeline(
+        memory=memory,
+        preference_analyzer=PreferenceAnalyzer(registry=service),
+        profile_builder=ProfileBuilder(registry=service),
+    )
+    for layer in (OnionLayer.INTEREST, OnionLayer.SURFACE):
+        assert all(
+            item.get("id") != "feedback-event-9" for item in rebuilt._buffers[layer.value].signals
+        )
 
 
 # ===========================================================================
@@ -817,6 +1017,18 @@ async def test_speculator_tick_called_during_pipeline_tick(tmp_path: Path) -> No
 
     await pipeline.tick()
     assert spy.tick_called, "pipeline.tick() must invoke speculator.tick()"
+
+
+@pytest.mark.asyncio
+async def test_tick_if_buffered_skips_empty_periodic_maintenance(tmp_path: Path) -> None:
+    """Event-owner empty recovery is O(1) and never invokes speculator work."""
+    spy = _SpeculatorSpy()
+    pipeline, _, _ = _make_low_threshold_pipeline(tmp_path, speculator=spy)
+
+    result = await pipeline.tick_if_buffered()
+
+    assert result.layers_updated == []
+    assert spy.tick_called is False
 
 
 def test_speculator_idle_interval_is_configurable(tmp_path: Path) -> None:

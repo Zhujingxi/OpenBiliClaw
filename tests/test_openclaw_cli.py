@@ -75,7 +75,13 @@ class _FakeCliAdapter:
 
     async def submit_feedback(self, request) -> FeedbackResponse:  # noqa: ANN001
         self.calls.append(
-            ("submit_feedback", request.recommendation_id, request.feedback_type, request.note)
+            (
+                "submit_feedback",
+                request.recommendation_id,
+                request.feedback_type,
+                request.note,
+                request.request_id,
+            )
         )
         return FeedbackResponse(
             ok=True,
@@ -234,6 +240,8 @@ def test_submit_feedback_cli_emits_error_json_and_returns_one(capsys) -> None:
             "9",
             "--feedback-type",
             "like",
+            "--request-id",
+            "openclaw-cli-like-9",
         ],
         adapter=BadAdapter(),
     )
@@ -245,6 +253,25 @@ def test_submit_feedback_cli_emits_error_json_and_returns_one(capsys) -> None:
         "error": "bad input: like",
         "error_type": "validation_error",
     }
+
+
+def test_submit_feedback_cli_requires_request_id() -> None:
+    from openbiliclaw.integrations.openclaw.cli import _build_parser
+
+    parser = _build_parser()
+
+    with pytest.raises(SystemExit) as exc_info:
+        parser.parse_args(
+            [
+                "submit-feedback",
+                "--recommendation-id",
+                "9",
+                "--feedback-type",
+                "like",
+            ]
+        )
+
+    assert exc_info.value.code == 2
 
 
 def test_doctor_cli_reports_skill_pack_and_registered_skill_names(capsys) -> None:

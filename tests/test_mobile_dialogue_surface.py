@@ -42,7 +42,7 @@ def test_mobile_dialogue_keeps_reader_state_across_live_renders() -> None:
     assert "const previousScrollTop = previousMessages?.scrollTop || 0;" in chat
     assert "if (openEvidence.has(turnId)) details.open = true;" in chat
     assert "textarea.value = previousDraft;" in chat
-    assert 'textarea.focus({ preventScroll: true })' in chat
+    assert "textarea.focus({ preventScroll: true })" in chat
 
 
 def test_mobile_long_lists_have_bounded_independent_scrollers() -> None:

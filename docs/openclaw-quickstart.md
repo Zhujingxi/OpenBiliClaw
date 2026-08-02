@@ -196,7 +196,7 @@ uv run python -m openbiliclaw.integrations.openclaw.cli <command> [flags]
 - `runtime-status`
 - `recommend --limit 5`
 - `recommend --limit 5 --refresh-if-needed`
-- `submit-feedback --recommendation-id 7 --feedback-type like`
+- `submit-feedback --recommendation-id 7 --feedback-type like --request-id feedback-7-like-1`
 - `listen` — 长连接推送 (`delight.candidate` + `interest.probe`)
 - `doctor`
 - `emit-skill-descriptors`
@@ -270,7 +270,8 @@ uv run python -m openbiliclaw.integrations.openclaw.cli recommend --limit 3
 ```bash
 uv run python -m openbiliclaw.integrations.openclaw.cli submit-feedback \
   --recommendation-id 12 \
-  --feedback-type like
+  --feedback-type like \
+  --request-id feedback-12-like-1
 ```
 
 如果是评论型反馈：
@@ -279,8 +280,11 @@ uv run python -m openbiliclaw.integrations.openclaw.cli submit-feedback \
 uv run python -m openbiliclaw.integrations.openclaw.cli submit-feedback \
   --recommendation-id 12 \
   --feedback-type comment \
+  --request-id feedback-12-comment-1 \
   --note "方向对，但我想看更深一点。"
 ```
+
+`--request-id` 必填，trim 后必须为 1–400 字符。同一个用户动作因超时、响应丢失或 agent 重试而再次提交时必须复用；不同动作即使 recommendation/type/note 相同，也应生成新的 ID。
 
 ### 5. 查看运行时状态
 

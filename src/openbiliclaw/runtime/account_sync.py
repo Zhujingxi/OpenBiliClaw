@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import hashlib
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -218,6 +219,9 @@ class AccountSyncService:
     check_interval_seconds: int = 300
     llm_work_allowed: Callable[[], bool] | None = None
     database: SupportsRecentEventUrls | None = None
+    # Bound by the API/OpenClaw composition root. Kept optional so third-party
+    # embedders with the pre-ingress protocol retain a compatibility path.
+    event_ingress: Any = None
     x_client: SupportsXClient | None = None
     x_health_store: SupportsXHealth | None = None
     profile_analysis_timeout_seconds: float = DEFAULT_PROFILE_ANALYSIS_TIMEOUT_SECONDS
@@ -445,9 +449,21 @@ class AccountSyncService:
         if events:
             events = self._dedup_cross_source(events)
 
+        readiness: bool | None = None
+        generic_async_owner = False
         if events:
-            for event in events:
-                await self.memory_manager.propagate_event(event)
+            readiness = self._profile_readiness()
+            generic_async_owner = self.event_ingress is not None and readiness is True
+            if self.event_ingress is not None:
+                await self._persist_via_event_ingress(
+                    events,
+                    generic_owner=generic_async_owner,
+                )
+            else:
+                # Compatibility-only persistence for older injected embedders.
+                for event in events:
+                    await self.memory_manager.propagate_event(event)
+        if events and not generic_async_owner:
             try:
                 timeout = (
                     self.profile_analysis_timeout_seconds
@@ -455,7 +471,10 @@ class AccountSyncService:
                     else None
                 )
                 async with asyncio.timeout(timeout):
-                    await self._apply_profile_update(events)
+                    await self._apply_legacy_profile_update(
+                        events,
+                        readiness=readiness,
+                    )
             except TimeoutError as exc:
                 timeout_error = TimeoutError(_PROFILE_ANALYSIS_TIMEOUT_MESSAGE)
                 logger.warning(
@@ -676,26 +695,55 @@ class AccountSyncService:
         new = str(candidate or "")
         return new if priority.get(new, 2) > priority.get(current, 2) else current
 
-    async def _apply_profile_update(self, events: list[dict[str, Any]]) -> None:
-        """Route pulled events through the same profile machinery as live events.
+    async def _persist_via_event_ingress(
+        self,
+        events: list[dict[str, Any]],
+        *,
+        generic_owner: bool,
+    ) -> None:
+        """Commit account facts; only ready profiles opt into async ownership."""
+        canonical: list[dict[str, Any]] = []
+        for raw_event in events:
+            event = dict(raw_event)
+            metadata = event.get("metadata")
+            metadata = dict(metadata) if isinstance(metadata, dict) else {}
+            metadata.setdefault("event_namespace", "import")
+            if generic_owner:
+                metadata["profile_update_owner"] = "generic"
+            else:
+                metadata.pop("profile_update_owner", None)
+            event["metadata"] = metadata
+            identity_parts = (
+                str(event.get("event_type") or event.get("type") or ""),
+                str(event.get("url") or ""),
+                str(metadata.get("source_platform") or event.get("source_platform") or ""),
+                str(
+                    metadata.get("content_id")
+                    or metadata.get("bvid")
+                    or metadata.get("mid")
+                    or metadata.get("tweet_id")
+                    or ""
+                ),
+                str(metadata.get("action") or metadata.get("timestamp") or ""),
+            )
+            digest = hashlib.sha256("\x1f".join(identity_parts).encode()).hexdigest()
+            event["ingest_key"] = digest
+            canonical.append(event)
+        receipt = await self.event_ingress.accept_batch(
+            canonical,
+            producer="account-sync",
+        )
+        if receipt.rejected:
+            reasons = "; ".join(item.error for item in receipt.items if item.error)
+            raise RuntimeError(f"account-sync event ingress rejected event: {reasons}")
 
-        Fallback matrix (default degrades to the legacy path, never to nothing):
-
-        * profile ready + pipeline present + ``ingest_batch`` succeeds → pipeline
-          only (no ``analyze_events``, no bootstrap);
-        * ready but pipeline missing / ``ingest_batch`` absent / raises → WARN
-          and fall back to ``analyze_events`` (no bootstrap — a profile exists);
-        * not ready → legacy ``analyze_events`` + ``_auto_bootstrap_soul_profile``;
-        * ``is_profile_ready`` missing or raising → treated as not ready
-          (conservative legacy path).
-
-        ``propagate_event`` persistence has already run unconditionally in the
-        caller, so events are never lost to a profile-path failure here.
-        """
-        # Single readiness probe per sync serves both routing and the
-        # bootstrap gate, so the pre-profile bootstrap fires at most once.
-        readiness = self._profile_readiness()
-
+    async def _apply_legacy_profile_update(
+        self,
+        events: list[dict[str, Any]],
+        *,
+        readiness: bool | None,
+    ) -> None:
+        """Compatibility analyzer for embedders that have not bound ingress."""
         if readiness is True:
             if await self._try_pipeline_ingest(events):
                 return
@@ -712,6 +760,29 @@ class AccountSyncService:
         if readiness is False:
             await self._auto_bootstrap_soul_profile(len(events))
 
+    async def _try_pipeline_ingest(self, events: list[dict[str, Any]]) -> bool:
+        """Feed a ready profile through the pre-ingress pipeline contract.
+
+        This path is compatibility-only: composition roots that bind
+        ``event_ingress`` use the durable generic event owner instead.  A
+        missing or failing narrow pipeline returns ``False`` so older
+        embedders retain their documented ``analyze_events`` fallback.
+        """
+        pipeline = getattr(self.soul_engine, "pipeline", None)
+        if pipeline is None:
+            return False
+        ingest_batch = getattr(pipeline, "ingest_batch", None)
+        if not callable(ingest_batch):
+            return False
+        try:
+            from openbiliclaw.soul.pipeline import signals_from_events
+
+            await ingest_batch(signals_from_events(events))
+            return True
+        except Exception:
+            logger.warning("account_sync: profile pipeline ingest failed", exc_info=True)
+            return False
+
     def _profile_readiness(self) -> bool | None:
         """Return profile readiness, or ``None`` when it cannot be determined.
 
@@ -727,28 +798,6 @@ class AccountSyncService:
         except Exception:
             logger.debug("account_sync: is_profile_ready check failed", exc_info=True)
             return None
-
-    async def _try_pipeline_ingest(self, events: list[dict[str, Any]]) -> bool:
-        """Feed events into ``soul_engine.pipeline.ingest_batch``.
-
-        Returns ``True`` only when the batch was ingested. Any missing handle
-        or raised exception returns ``False`` so the caller can fall back.
-        """
-        pipeline = getattr(self.soul_engine, "pipeline", None)
-        if pipeline is None:
-            return False
-        ingest_batch = getattr(pipeline, "ingest_batch", None)
-        if not callable(ingest_batch):
-            return False
-        try:
-            from openbiliclaw.soul.pipeline import signals_from_events
-
-            signals = signals_from_events(events)
-            await ingest_batch(signals)
-            return True
-        except Exception:
-            logger.warning("account_sync: profile pipeline ingest failed", exc_info=True)
-            return False
 
     def _dedup_cross_source(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Drop events whose identity key already appears in the events table.
@@ -1388,7 +1437,7 @@ class AccountSyncService:
     async def _auto_bootstrap_soul_profile(self, event_count: int) -> None:
         """Build the first soul profile after account sync learns preferences.
 
-        The caller (:meth:`_apply_profile_update`) only reaches this when the
+        The caller (:meth:`_apply_legacy_profile_update`) only reaches this when the
         profile is *definitively* not ready, so readiness is no longer
         re-probed here — that keeps ``is_profile_ready`` to one call per sync.
         """

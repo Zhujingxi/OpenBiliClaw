@@ -74,7 +74,13 @@ class _FakeAdapter:
         request,  # noqa: ANN001
     ) -> FeedbackResponse:
         self.calls.append(
-            ("submit_feedback", request.recommendation_id, request.feedback_type, request.note)
+            (
+                "submit_feedback",
+                request.recommendation_id,
+                request.feedback_type,
+                request.note,
+                request.request_id,
+            )
         )
         return FeedbackResponse(
             ok=True,
@@ -233,6 +239,7 @@ async def test_submit_feedback_skill_builds_request_and_delegates() -> None:
             "recommendation_id": 9,
             "feedback_type": "comment",
             "note": "方向对，但想更深一点。",
+            "request_id": "openclaw-skill-comment-9",
         }
     )
 
@@ -246,7 +253,26 @@ async def test_submit_feedback_skill_builds_request_and_delegates() -> None:
             )
         ),
     }
-    assert adapter.calls == [("submit_feedback", 9, "comment", "方向对，但想更深一点。")]
+    assert adapter.calls == [
+        (
+            "submit_feedback",
+            9,
+            "comment",
+            "方向对，但想更深一点。",
+            "openclaw-skill-comment-9",
+        )
+    ]
+    assert skill.input_schema["required"] == [
+        "recommendation_id",
+        "feedback_type",
+        "request_id",
+    ]
+    assert skill.input_schema["properties"]["request_id"] == {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 400,
+        "description": "Stable idempotency ID; reuse it for retries.",
+    }
 
 
 @pytest.mark.asyncio
@@ -268,6 +294,7 @@ async def test_skill_returns_validation_error_payload() -> None:
         {
             "recommendation_id": 9,
             "feedback_type": "like",
+            "request_id": "openclaw-skill-validation-9",
         }
     )
 
@@ -276,6 +303,30 @@ async def test_skill_returns_validation_error_payload() -> None:
         "error": "bad input: like",
         "error_type": "validation_error",
     }
+
+
+@pytest.mark.asyncio
+async def test_submit_feedback_skill_rejects_missing_request_id_before_adapter() -> None:
+    adapter = _FakeAdapter()
+    skill = next(
+        item
+        for item in build_openclaw_skills(adapter)
+        if item.name == "openbiliclaw_submit_feedback"
+    )
+
+    payload = await skill.handler(
+        {
+            "recommendation_id": 9,
+            "feedback_type": "like",
+        }
+    )
+
+    assert payload == {
+        "ok": False,
+        "error": "request_id is required.",
+        "error_type": "validation_error",
+    }
+    assert adapter.calls == []
 
 
 @pytest.mark.asyncio

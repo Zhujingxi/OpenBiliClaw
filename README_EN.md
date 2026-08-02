@@ -526,7 +526,7 @@ OpenClaw is running `listen` in the background. After a refresh cycle, the syste
 >
 > **You**: "That one nailed it."
 >
-> **OpenClaw** (internally runs `submit-feedback --recommendation-id 4268 --feedback-type like`)
+> **OpenClaw** (internally runs `submit-feedback --recommendation-id 4268 --feedback-type like --request-id feedback-4268-like-1`, reusing that ID on retries)
 
 You never asked for a recommendation — the system surfaced it on its own.
 
@@ -596,7 +596,8 @@ config recovery draft (normal or degraded; business APIs remain gated)
              ├→ /api/config/probe-service → temporary registry → total gate
              └→ /api/config/discover-models → exact instance GET /models (no write)
                                            → editable model list + local effort advisory
-durable reply: fixed time/payload → queued mode → one 11-kind typed settlement queue → actual worker + guard
+durable reply: pending SQLite → rowid-serial reply worker → visible completion CAS (app-stable dialogue lease)
+post-reply learning/object settlement: independent 11-kind typed queue → actual worker + guard
 confirmation entry (pending list/cards) → one anchor(kind+ref+generation) → frozen admission / relation matrix
                           ├→ pending≤3 · user no cooldown / system 12h+object 72h · confirmation-first attachment
                           ├→ busy worker: dialogue_busy + Retry-After → waiting UI auto-retry
@@ -607,6 +608,8 @@ confirmation entry (pending list/cards) → one anchor(kind+ref+generation) → 
                           └→ confusion FIFO≤5 / head fencing / 12h recovery
 config hot reload: accepting drain old worker → atomic pause/revoke → new worker; 25m safety window
 realtime: runtime-stream 20s idle heartbeat → transient close shows reconnecting and retries
+images: proxy foreground + refresh prefetch → app-stable lane (total 4 / bg 3, fg priority)
+                                            → cache-key singleflight → whitelist fetch → atomic cache
 ```
 
 ```
@@ -627,10 +630,14 @@ realtime: runtime-stream 20s idle heartbeat → transient close shows reconnecti
 │ Engine  │  System  │Discovery +│     Engine     │
 │         │          │ Admission │                │
 ├─────────┴──────────┴───────────┴───────────────┤
-│ Interest: events/dialogue/feedback(priority) → │
-│ ProfileUpdatePipeline → single INTEREST line   │
+│ Events/recommendation clicks → generic durable cursor ─┐ │
+│ Content feedback → content_feedback durable cursor ────┴→ atomic buffer+cursor checkpoint │
+│ cold start fence+task admission → listener; background recovery → tick_if_buffered │
+│ hot reload pause/drain/recover then rebind; periodic maintenance alone calls tick │
+│ Dialogue → typed settlement worker → learning       │
 │ Legacy batch only when rollback flag=false     │
 │ Init barrier: profile commit → discover/evaluate/copy → ready │
+│ Images: proxy fg + refresh prefetch → app-stable 4/3 lane → singleflight/atomic cache │
 │ Soul cognition: dual pending cooldown · one anchor · worker-only settlement · winner receipt · confusion FIFO · ledger · deep gate │
 │   LLM adapters · Source adapters (SourceAdapter) │
 │ Module route → LLM instance chain → adapter · SourceAdapter │
@@ -640,7 +647,7 @@ realtime: runtime-stream 20s idle heartbeat → transient close shows reconnecti
 │ Bangumi public API → search/ranked/date producer → shared eval │
 │ API projected stock → 3×30 workers → serial admit; OpenClaw first batch≤4 → copy≤4/no split retry → UI │
 │ Delight gate: formal copy/topic ready + seen_items guard → score/snapshot → UI × writes seen ledger │
-│ API/OpenClaw startup hook → recover/maintain → expose LLM │
+│ Inventory API/OpenClaw startup hook → recover/maintain → expose LLM │
 │ Reshuffle: current-card exclusion → PoolServeSnapshot/seen_items → short rec+shown write → one batch event │
 │ Platform scope (PC Web tabs only): source_platform → scoped candidates, no cross-platform floor → same rank/copy/persist │
 │ Platform inventory: platform-availability → same canonical servable set → total == Σ by_platform │
@@ -657,10 +664,12 @@ realtime: runtime-stream 20s idle heartbeat → transient close shows reconnecti
 │ Six adapters → broker → shared MV3 recovery barrier → Reddit/X/YT/XHS/DY/Zhihu executors (6/6 fixture + real-account)│
 └────────────────────────────────────────────────┘
 
-Web/API durable → SocraticDialogue(queued) → user+agent history → typed queue[all declared entries] → one in-line worker
+Web/API durable → rowid reply worker → app-stable dialogue lease(max active 1) → SocraticDialogue(queued) → visible CAS
+delight/legacy/interest-probe/avoidance chat ───────────────────────────────┘ (reply + required effects share the lease)
+post-reply 11-kind learning/settlement → independent typed settlement worker (not reply backlog)
 CLI/OpenClaw → SocraticDialogue(legacy_direct) → user+agent history → direct learning outside queue/guard
 learning → bypass background admission; keep total gate ── new dislike: shared purge → content_cache
-failure/timeout → rollback provisional history → safe error / failed turn
+transient/provider/timeout/cancel → rollback provisional history → durable pending + head retry; explicit invalid/empty → failed CAS
 durable turn → fixed time/payload → confirmation entry (pending list/cards) → frozen anchor admission → relation matrix
                                                   └→ card/anchor/chat/probe/confusion/replay/legacy all worker-only
 card action → synchronous 200 fast path | 202 processing → popup/desktop poll; mobile/CLI have no action

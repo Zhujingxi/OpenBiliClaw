@@ -690,6 +690,45 @@
       try { window.localStorage?.setItem(key, value); } catch {}
     }
 
+    const PENDING_REQUEST_IDS_KEY = "openbiliclaw.webui.pendingRequestIds";
+    const pendingRequestIds = new Map();
+
+    function newRequestId() {
+      if (typeof globalThis.crypto?.randomUUID === "function") return globalThis.crypto.randomUUID();
+      return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    }
+
+    function loadPendingRequestIds() {
+      try {
+        const parsed = JSON.parse(storageGet(PENDING_REQUEST_IDS_KEY) || "{}");
+        if (!parsed || typeof parsed !== "object") return;
+        Object.entries(parsed).forEach(([key, value]) => {
+          if (typeof value === "string" && value) pendingRequestIds.set(key, value);
+        });
+      } catch {}
+    }
+
+    function persistPendingRequestIds() {
+      storageSet(PENDING_REQUEST_IDS_KEY, JSON.stringify(Object.fromEntries(pendingRequestIds)));
+    }
+
+    function rememberPendingRequestId(namespace, identity) {
+      loadPendingRequestIds();
+      const key = `${namespace}:${identity}`;
+      const existing = pendingRequestIds.get(key);
+      if (existing) return { key, requestId: existing };
+      const requestId = newRequestId();
+      pendingRequestIds.set(key, requestId);
+      persistPendingRequestIds();
+      return { key, requestId };
+    }
+
+    function forgetPendingRequestId(pending) {
+      if (!pending || pendingRequestIds.get(pending.key) !== pending.requestId) return;
+      pendingRequestIds.delete(pending.key);
+      persistPendingRequestIds();
+    }
+
     const AUTO_LOAD_ON_SCROLL_KEY = "openbiliclaw.webui.autoLoadOnScroll";
     const AUTO_LOAD_COOLDOWN_MS = 8000;
     // 校准：一行卡片(16:9 封面 + 文案)高约 250–350px，若预载边距接近一行高度，
@@ -1270,6 +1309,18 @@
       } finally {
         if (timeoutId) window.clearTimeout(timeoutId);
       }
+    }
+
+    async function requestJsonWithPendingId(path, namespace, identity, payload, options = {}) {
+      const pending = rememberPendingRequestId(namespace, identity);
+      const result = await requestJsonStrict(path, {
+        ...options,
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+        body: JSON.stringify({ ...payload, request_id: pending.requestId })
+      });
+      forgetPendingRequestId(pending);
+      return result;
     }
 
     function configErrorMessage(details) {
@@ -3514,6 +3565,10 @@ ${savedCardFeedbackBarHtml(listKind)}
     function postSavedContentFeedback(item, feedbackType, note = "") {
       const saved = desktopSavedItem(item);
       const contentId = saved.content_id || item.bvid || "";
+      const pending = rememberPendingRequestId(
+        "behavior-command",
+        JSON.stringify([saved.item_key || item.id || contentId, feedbackType, note])
+      );
       return requestJsonStrict(ENDPOINTS.events, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -3524,6 +3579,7 @@ ${savedCardFeedbackBarHtml(listKind)}
             title: saved.title || "",
             url: saved.content_url || "",
             timestamp: Date.now(),
+            event_id: pending.requestId,
             metadata: {
               feedback_type: feedbackType,
               bvid: contentId,
@@ -3541,6 +3597,7 @@ ${savedCardFeedbackBarHtml(listKind)}
             ? "画像尚未就绪，暂时无法记录反馈。"
             : "反馈未被接受，请稍后重试。");
         }
+        forgetPendingRequestId(pending);
         return res;
       });
     }
@@ -3819,10 +3876,7 @@ ${cardFeedbackBarHtml()}`;
 
     function trackRecommendationClick(item) {
       const url = contentUrl(item);
-      void requestJson(ENDPOINTS.click, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      const payload = {
           bvid: item.bvid,
           content_id: item.content_id || item.bvid,
           content_url: url || item.content_url,
@@ -3831,8 +3885,28 @@ ${cardFeedbackBarHtml()}`;
           recommendation_id: item.id,
           topic_label: item.topic,
           up_name: item.up || item.up_name
-        })
-      }).catch(() => {});
+      };
+      const stableRecommendationId = payload.recommendation_id ?? null;
+      const stableContentId = String(payload.content_id || payload.bvid || "").trim();
+      let fallbackUrl = "";
+      if (stableRecommendationId == null && !stableContentId) {
+        const rawUrl = String(payload.content_url || "").trim();
+        try {
+          const normalizedUrl = new URL(rawUrl, globalThis.location?.href);
+          normalizedUrl.hash = "";
+          fallbackUrl = normalizedUrl.toString();
+        } catch { fallbackUrl = rawUrl; }
+      }
+      const identity = JSON.stringify([
+        stableRecommendationId,
+        stableContentId || fallbackUrl
+      ]);
+      void requestJsonWithPendingId(
+        ENDPOINTS.click,
+        "recommendation-click",
+        identity,
+        payload
+      ).catch(() => {});
     }
 
     function openRecommendation(item, card) {
@@ -3843,13 +3917,17 @@ ${cardFeedbackBarHtml()}`;
     }
 
     function submitFeedback(item, feedback_type, note = "", { keepalive = false } = {}) {
-      return requestJsonStrict(ENDPOINTS.feedback, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ recommendation_id: item.id, feedback_type, note }),
+      const payload = { recommendation_id: item.id, feedback_type, note };
+      return requestJsonWithPendingId(
+        ENDPOINTS.feedback,
+        "feedback",
+        JSON.stringify([item.id, feedback_type, note]),
+        payload,
+        {
         timeoutMs: 30000,
         keepalive
-      });
+        }
+      );
     }
 
     function feedbackActionKey(item) {
@@ -5725,16 +5803,25 @@ ${cardFeedbackBarHtml()}`;
       const feedbackToast = response === "like" ? "惊喜推荐已喜欢" : response === "dislike" ? "这类惊喜先少来点" : "已标为看过，不再推荐";
       const toastImmediately = response === "like" || response === "dislike";
       if (toastImmediately) showToast(feedbackToast);
-      const feedbackResult = await requestJson(ENDPOINTS.delightRespond, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      let feedbackResult;
+      try {
+        const payload = {
           bvid: delight.bvid,
           response,
           title: delight.title,
           message: ""
-        })
-      });
+        };
+        feedbackResult = await requestJsonWithPendingId(
+          ENDPOINTS.delightRespond,
+          "delight-response",
+          JSON.stringify([delight.bvid, response]),
+          payload
+        );
+      } catch (error) {
+        // 失败不假装成功：保留当前卡片，下次可再试。
+        showToast(response === "like" ? "这次喜欢还没记上，可以再试一次" : "这次还没记上，请再试一次");
+        return;
+      }
       if (response === "dismiss" && feedbackResult == null) {
         showToast("这次还没记上，请再试一次");
         setActiveDelight(state.delightIndex);

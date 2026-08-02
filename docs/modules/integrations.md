@@ -83,7 +83,7 @@ skills = build_openclaw_skills(adapter)
 - `sync_account()`
 - `get_profile()`
 - `recommend(limit=5, refresh_if_needed=True)`
-- `submit_feedback(request)`
+- `submit_feedback(request)`：trim 后非空、最长 400 字符的 `request_id` 必填，并在 `openclaw` producer namespace 内唯一；adapter 不生成默认值。durable event 首写与 recommendation 投影提交后 operation 即成功，后续认知记录、内容反馈 owner drain 和摘要刷新只决定 `processing=completed/queued`，失败不会撤销或误报已经提交的反馈。相同 ID 携带不同 recommendation/type/note 会返回 validation conflict，绝不覆盖第一份 payload。
 - `get_runtime_status()`
 - `chat(request)`：成功返回 `ChatResponse`，并通过显式 `legacy_direct` 保持原有
   学习行为（queue submit=0，不承诺 queue 串行/receipt/guard）；失败抛出包含
@@ -121,6 +121,7 @@ uv run python -m openbiliclaw.integrations.openclaw.cli respond-avoidance-probe 
 uv run python -m openbiliclaw.integrations.openclaw.cli submit-feedback \
   --recommendation-id 12 \
   --feedback-type comment \
+  --request-id openclaw-feedback-12-comment-1 \
   --note "方向对，但我想看更深一点。"
 ```
 
@@ -136,6 +137,7 @@ CLI bridge 返回稳定 JSON：
 - 如果显式 refresh 超时或上游请求异常，adapter 会自动回退到已有历史；历史为空时继续尝试 serve 已完成文案的 canonical pool。若没有任何已复制的 canonical 行（例如首 batch 全部无效），会如实返回空列表而不伪造推荐
 - `doctor` 用于确认 skill pack 路径、发现状态和 skill 名称列表
 - `emit-skill-descriptors` 用于导出可序列化的 skill 定义，便于调试 OpenClaw 接线
+- `submit-feedback` 的 `--request-id` 是 required；同一个动作的 CLI/agent 重试必须复用，skill descriptor 同样把 `request_id` 列入 required，并声明 `minLength=1/maxLength=400`
 - `next-probe` / `next-avoidance-probe` 会返回下一条待确认的正向兴趣 / 避雷假设，并记录本次 domain / axis，避免连续拉取重复候选
 - `respond-avoidance-probe --response confirm|reject|chat` 语义是确认或否认“不喜欢”：`confirm` 写入 `disliked_topics` 并触发候选池清理，`reject` 只进入冷却，`chat` 会进入带避雷上下文的对话
 
@@ -169,6 +171,7 @@ request = FeedbackRequest(
     recommendation_id=7,
     feedback_type="comment",
     note="方向对，但我想看更深一点。",
+    request_id="openclaw-feedback-7-comment-1",
 )
 
 avoidance = AvoidanceProbeFeedbackRequest(

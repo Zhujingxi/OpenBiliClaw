@@ -49,12 +49,18 @@ class FeedbackRequest:
     recommendation_id: int
     feedback_type: str
     note: str = ""
+    request_id: str = ""
 
     def __post_init__(self) -> None:
         if self.recommendation_id <= 0:
             raise AdapterValidationError("recommendation_id must be positive.")
         self.feedback_type = self.feedback_type.strip().lower()
         self.note = self.note.strip()
+        self.request_id = self.request_id.strip()
+        if not self.request_id:
+            raise AdapterValidationError("request_id is required.")
+        if len(self.request_id) > 400:
+            raise AdapterValidationError("request_id is too long.")
         if self.feedback_type not in _VALID_FEEDBACK_TYPES:
             raise AdapterValidationError(f"Unsupported feedback type: {self.feedback_type}")
         if self.feedback_type == "comment" and not self.note:
@@ -68,6 +74,9 @@ class FeedbackResponse:
     ok: bool
     recommendation_id: int
     feedback_type: str
+    event_id: int = 0
+    duplicate: bool = False
+    processing: str = "completed"
 
 
 @dataclass(slots=True)

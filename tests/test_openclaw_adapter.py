@@ -169,23 +169,62 @@ def test_delight_response_serializes_without_item() -> None:
 
 def test_feedback_request_rejects_unsupported_feedback_type() -> None:
     with pytest.raises(AdapterValidationError):
-        FeedbackRequest(recommendation_id=7, feedback_type="bookmark")
+        FeedbackRequest(
+            recommendation_id=7,
+            feedback_type="bookmark",
+            request_id="openclaw-invalid-type",
+        )
 
 
 def test_feedback_request_rejects_comment_without_note() -> None:
     with pytest.raises(AdapterValidationError):
-        FeedbackRequest(recommendation_id=7, feedback_type="comment", note="")
+        FeedbackRequest(
+            recommendation_id=7,
+            feedback_type="comment",
+            note="",
+            request_id="openclaw-comment-without-note",
+        )
+
+
+@pytest.mark.parametrize("request_id", ("", " \t "))
+def test_feedback_request_rejects_blank_request_id(request_id: str) -> None:
+    with pytest.raises(AdapterValidationError, match="request_id is required"):
+        FeedbackRequest(
+            recommendation_id=7,
+            feedback_type="like",
+            request_id=request_id,
+        )
+
+
+def test_feedback_request_rejects_request_id_over_400_characters() -> None:
+    with pytest.raises(AdapterValidationError, match="request_id is too long"):
+        FeedbackRequest(
+            recommendation_id=7,
+            feedback_type="like",
+            request_id="x" * 401,
+        )
 
 
 def test_feedback_request_normalizes_valid_payload() -> None:
-    payload = FeedbackRequest(recommendation_id=7, feedback_type=" Like ", note=" 很对胃口 ")
+    payload = FeedbackRequest(
+        recommendation_id=7,
+        feedback_type=" Like ",
+        note=" 很对胃口 ",
+        request_id=" openclaw-normalized ",
+    )
 
     assert payload.feedback_type == "like"
     assert payload.note == "很对胃口"
+    assert payload.request_id == "openclaw-normalized"
 
 
 def test_feedback_request_accepts_dismiss_without_note() -> None:
-    payload = FeedbackRequest(recommendation_id=7, feedback_type="dismiss", note="")
+    payload = FeedbackRequest(
+        recommendation_id=7,
+        feedback_type="dismiss",
+        note="",
+        request_id="openclaw-dismiss",
+    )
 
     assert payload.feedback_type == "dismiss"
     assert payload.note == ""
@@ -315,6 +354,7 @@ class _FakeSoulEngine:
             ),
         )
         self.feedback_batches = 0
+        self.feedback_owner_prepares = 0
         self.immediate_calls: list[tuple[str, str, str]] = []
         self._speculator = _FakeSpeculator()
         self._avoidance_speculator = _FakeAvoidanceSpeculator()
@@ -354,6 +394,10 @@ class _FakeSoulEngine:
     ) -> None:
         self.immediate_calls.append((feedback_type, title, note))
 
+    async def prepare_feedback_owner_cutover(self) -> dict[str, object]:
+        self.feedback_owner_prepares += 1
+        return {"prepared": True, "feedback_owner_version": 2}
+
     async def process_feedback_batch_if_needed(self) -> dict[str, object]:
         self.feedback_batches += 1
         return {"processed": True}
@@ -378,6 +422,7 @@ class _FakeDatabase:
     def __init__(self) -> None:
         self.updated: list[tuple[int, str, str]] = []
         self.recommendation_list_calls: list[int] = []
+        self.event_rows: dict[int, dict[str, object]] = {}
 
     def get_recommendation_by_id(self, recommendation_id: int) -> dict[str, object] | None:
         if recommendation_id == 404:
@@ -411,6 +456,48 @@ class _FakeDatabase:
         feedback_note: str = "",
     ) -> None:
         self.updated.append((recommendation_id, feedback_type, feedback_note))
+
+    def query_event_rows_by_ids(self, event_ids: list[int]) -> list[dict[str, object]]:
+        return [self.event_rows[event_id] for event_id in event_ids if event_id in self.event_rows]
+
+
+class _FakeEventIngress:
+    def __init__(
+        self,
+        memory: _FakeMemoryManager,
+        database: _FakeDatabase,
+        soul_engine: _FakeSoulEngine,
+    ) -> None:
+        self.memory = memory
+        self.database = database
+        self.soul_engine = soul_engine
+        self.key_to_event_id: dict[tuple[str, str], int] = {}
+
+    async def accept(self, event: dict[str, object], *, producer: str) -> SimpleNamespace:
+        await self.soul_engine.prepare_feedback_owner_cutover()
+        raw_key = str(event.get("ingest_key") or "")
+        namespaced_key = (producer, raw_key)
+        duplicate = bool(raw_key and namespaced_key in self.key_to_event_id)
+        if duplicate:
+            event_id = self.key_to_event_id[namespaced_key]
+        else:
+            event_id = len(self.database.event_rows) + 1
+            if raw_key:
+                self.key_to_event_id[namespaced_key] = event_id
+            stored = dict(event)
+            self.database.event_rows[event_id] = stored
+            self.memory.events.append(stored)
+        return SimpleNamespace(
+            accepted=1,
+            rejected=0,
+            items=[
+                SimpleNamespace(
+                    event_id=event_id,
+                    inserted=not duplicate,
+                    duplicate=duplicate,
+                )
+            ],
+        )
 
 
 class _FakeRuntimeController:
@@ -508,6 +595,7 @@ def _build_adapter() -> tuple[
     account_sync_service = _FakeAccountSyncService()
     recommendation_engine = _FakeRecommendationEngine()
     llm_service = _FakeLLMService()
+    event_ingress = _FakeEventIngress(memory_manager, database, soul_engine)
     services = SimpleNamespace(
         soul_engine=soul_engine,
         memory_manager=memory_manager,
@@ -516,6 +604,7 @@ def _build_adapter() -> tuple[
         account_sync_service=account_sync_service,
         recommendation_engine=recommendation_engine,
         llm_service=llm_service,
+        event_ingress=event_ingress,
     )
     return (
         OpenClawAdapter(services=services),
@@ -704,30 +793,110 @@ async def test_submit_feedback_records_event_and_runs_post_feedback_hooks() -> N
     ) = _build_adapter()
 
     result = await adapter.submit_feedback(
-        FeedbackRequest(recommendation_id=7, feedback_type="like", note="很对胃口")
+        FeedbackRequest(
+            recommendation_id=7,
+            feedback_type="like",
+            note="很对胃口",
+            request_id="openclaw-submit-like",
+        )
     )
 
     assert asdict(result) == {
         "ok": True,
         "recommendation_id": 7,
         "feedback_type": "like",
+        "event_id": 1,
+        "duplicate": False,
+        "processing": "completed",
     }
     assert database.updated == [(7, "like", "很对胃口")]
-    assert memory_manager.events == [
-        {
-            "event_type": "feedback",
-            "title": "把国际局势讲出结构感",
-            "metadata": {
-                "recommendation_id": 7,
-                "bvid": "BV1REC",
-                "feedback_type": "like",
-                "feedback_note": "很对胃口",
-            },
-        }
-    ]
+    assert len(memory_manager.events) == 1
+    stored = memory_manager.events[0]
+    assert stored["event_type"] == "feedback"
+    assert stored["title"] == "把国际局势讲出结构感"
+    assert stored["metadata"] == {
+        "recommendation_id": 7,
+        "bvid": "BV1REC",
+        "feedback_type": "like",
+        "feedback_note": "很对胃口",
+        "event_namespace": "recommendation",
+        "profile_update_owner": "content_feedback",
+        "source_platform": "bilibili",
+        "signal_strength": 1.0,
+    }
+    assert soul_engine.feedback_owner_prepares == 1
     assert soul_engine.immediate_calls == [("like", "把国际局势讲出结构感", "很对胃口")]
     assert soul_engine.feedback_batches == 1
     assert runtime_controller.refresh_after_feedback_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_submit_feedback_reports_queued_when_owner_lock_skips_drain() -> None:
+    adapter, soul_engine, memory, database, runtime, *_ = _build_adapter()
+
+    async def skip_busy_owner() -> dict[str, object]:
+        soul_engine.feedback_batches += 1
+        return {"skipped": True, "reason": "feedback_batch_in_progress"}
+
+    soul_engine.process_feedback_batch_if_needed = skip_busy_owner  # type: ignore[method-assign]
+
+    result = await adapter.submit_feedback(
+        FeedbackRequest(
+            recommendation_id=7,
+            feedback_type="like",
+            note="已提交",
+            request_id="openclaw-submit-queued",
+        )
+    )
+
+    assert result.ok is True
+    assert result.processing == "queued"
+    assert database.updated == [(7, "like", "已提交")]
+    assert len(memory.events) == 1
+    assert runtime.refresh_after_feedback_calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_stage", ["cognition", "owner", "refresh"])
+async def test_submit_feedback_keeps_commit_success_when_follow_up_fails(
+    failure_stage: str,
+) -> None:
+    adapter, soul_engine, memory, database, runtime, *_ = _build_adapter()
+
+    if failure_stage == "cognition":
+
+        def fail_cognition(**_kwargs: object) -> None:
+            raise RuntimeError("cognition unavailable")
+
+        soul_engine.record_immediate_feedback_cognition = fail_cognition  # type: ignore[method-assign]
+    elif failure_stage == "owner":
+
+        async def fail_owner() -> dict[str, object]:
+            raise RuntimeError("owner unavailable")
+
+        soul_engine.process_feedback_batch_if_needed = fail_owner  # type: ignore[method-assign]
+    else:
+
+        async def fail_refresh() -> dict[str, object]:
+            runtime.refresh_after_feedback_calls += 1
+            raise RuntimeError("refresh unavailable")
+
+        runtime.refresh_after_feedback = fail_refresh  # type: ignore[method-assign]
+
+    result = await adapter.submit_feedback(
+        FeedbackRequest(
+            recommendation_id=7,
+            feedback_type="dislike",
+            note="别再推荐",
+            request_id=f"openclaw-submit-failure-{failure_stage}",
+        )
+    )
+
+    assert result.ok is True
+    assert result.processing == "queued"
+    assert result.event_id == 1
+    assert database.updated == [(7, "dislike", "别再推荐")]
+    assert len(memory.events) == 1
 
 
 @pytest.mark.asyncio
@@ -1725,6 +1894,7 @@ def test_build_openclaw_adapter_returns_ready_adapter(monkeypatch) -> None:
         recommendation_engine=object(),
         runtime_controller=object(),
         account_sync_service=object(),
+        event_ingress=object(),
     )
 
     monkeypatch.setattr(

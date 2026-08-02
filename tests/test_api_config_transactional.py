@@ -83,6 +83,74 @@ def test_put_config_success_saves_snapshot_then_hot_reloads(
     assert (tmp_path / "config.toml.bak").read_bytes() == before
 
 
+def test_put_config_skips_feedback_cutover_for_incomplete_memory_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A real rebuilt SoulEngine must respect its stable adapter capability."""
+    from openbiliclaw.soul.engine import SoulEngine
+
+    calls = 0
+
+    async def unexpected_cutover(self: SoulEngine) -> dict[str, object]:  # noqa: ARG001
+        nonlocal calls
+        calls += 1
+        raise AssertionError("incomplete memory adapter cannot own a durable cursor")
+
+    monkeypatch.setattr(
+        SoulEngine,
+        "prepare_feedback_owner_cutover",
+        unexpected_cutover,
+    )
+    client = _make_client(monkeypatch, tmp_path, _valid_config())
+
+    response = client.put(
+        "/api/config",
+        json={"llm": {"openai": {"model": "gpt-4.1-mini"}}},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["reloaded"] is True
+    assert calls == 0
+
+
+def test_put_config_runs_feedback_cutover_for_capable_memory_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The capability guard must not suppress the production MemoryManager."""
+    from openbiliclaw.memory.manager import MemoryManager
+    from openbiliclaw.soul.engine import SoulEngine
+
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    save_config(_valid_config(), tmp_path / "config.toml")
+    memory = MemoryManager(tmp_path / "data")
+    memory.initialize()
+    calls = 0
+
+    async def record_cutover(self: SoulEngine) -> dict[str, object]:  # noqa: ARG001
+        nonlocal calls
+        calls += 1
+        return {"prepared": False, "feedback_owner_version": 2}
+
+    monkeypatch.setattr(
+        SoulEngine,
+        "prepare_feedback_owner_cutover",
+        record_cutover,
+    )
+    app = create_app(memory_manager=memory, database=object(), soul_engine=object())
+    client = TestClient(app)
+
+    response = client.put(
+        "/api/config",
+        json={"llm": {"openai": {"model": "gpt-4.1-mini"}}},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["reloaded"] is True
+    assert calls == 1
+
+
 def test_put_config_rolls_back_when_hot_reload_fails(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

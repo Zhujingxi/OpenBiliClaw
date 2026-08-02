@@ -184,7 +184,7 @@ def test_chat_rerender_keeps_reader_position_and_open_evidence(chromium_page: Pa
     rows = "".join(
         f"""
         <article data-dialogue-turn-id="turn-{index}" style="height:150px">
-          <details class="dialogue-evidence"{(' open' if index == 2 else '')}>
+          <details class="dialogue-evidence"{(" open" if index == 2 else "")}>
             <summary>依据</summary><p>第 {index} 条依据</p>
           </details>
         </article>

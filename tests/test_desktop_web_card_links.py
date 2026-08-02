@@ -99,9 +99,7 @@ def test_delight_close_button_is_labeled_as_permanent_seen_action() -> None:
     delight_meta = index_html.index('<div class="delight-meta">')
     delight_copy = index_html.index('<div class="delight-copy">', delight_meta)
     delight_dismiss = index_html.index('class="delight-dismiss-btn"', delight_meta)
-    feedback_actions = index_html.index(
-        '<div class="delight-feedback-actions card-feedback-icons"'
-    )
+    feedback_actions = index_html.index('<div class="delight-feedback-actions card-feedback-icons"')
     status_line = index_html.index('<p class="status-line"', feedback_actions)
     assert delight_meta < delight_dismiss < delight_copy
     assert 'data-delight="dismiss"' not in index_html[feedback_actions:status_line]

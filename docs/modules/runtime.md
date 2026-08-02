@@ -23,6 +23,8 @@ gate 属于 `RuntimeContext` 的稳定部分：热重载构造成功后在同一
 | Windows 后台子进程不再弹控制台窗口 | ✅ | 新增 `openbiliclaw/proc.py::no_window_kwargs()`：Windows 下返回 `creationflags=CREATE_NO_WINDOW`，其它平台返回空 dict，可无条件 splat。后端自行发起的全部外部命令都已接入——Reddit 的 `rdt` / `opencli`（含状态探测与每个关键词一条的发现命令）、自动更新的 `git`、`agent-browser` 版本探测与命令、mcporter 灵感检索、SQLite 修复用的 `sqlite3` / `lsof`、托管 ollama 退出用的 `taskkill`。用户在终端主动敲的命令（`openbiliclaw` CLI、`codex login`、dev 用 optimizer）保持原样，它们本来就有自己的控制台且需要交互提示。`tests/test_proc_no_window.py` 用 AST 扫描 `src/` 全量守住这条约定：任何新的 `subprocess.run` / `Popen` / `create_subprocess_exec` 漏掉该 kwarg 即测试失败（`os.name == "nt"` 分支的 else 支路自动豁免）。第三方库自己起的孙进程不在该 flag 覆盖范围内，已知的一处是 rdt-cli 凭据超 TTL 时的 `uv run --with browser-cookie3`，靠 `_RDT_CREDENTIAL_TTL_SECONDS` 比 rdt 阈值提前 6 小时判过期来规避（见 `sources/reddit_tasks.py` 常量注释）。X 的 twitter-cli 与 YouTube 的 yt-dlp 均为进程内库调用，不起子进程。 |
 | 桌面应用统一品牌图标 | ✅ | Windows 安装包 / EXE 使用多尺寸 `packaging/icon.ico`，macOS `.app` 使用完整 iconset 生成的 `packaging/icon.icns`；系统托盘与 macOS 菜单栏从随包 Web 资源 `openbiliclaw/web/icon-192.png` 加载同一官方图标。Windows PyInstaller 启动页直接复用最新品牌源图，并以 560×280 深色渐变卡片展示启动状态、活动进度轨及从 `pyproject.toml` 读取的当前版本号；CJK 字体不可用时保持英文降级。桌面容器与托盘保留去白边后的透明外缘；浏览器标签使用独立 32px 满幅品牌粉 favicon 并以版本 URL 规避旧缓存，页面头图用品牌粉背景承接透明圆角。 |
 | 对话结算单队列生命周期（Wave 1–3） | ✅ | 每个 API runtime generation 只安装一个 `dialogue_settlement_queue`、一个 exhaustive typed dispatcher 与一个 actual worker。11 个 kind 的生产入口已全部 cutover：queued dialogue learning/settles、卡片 confirm/reject/discuss/defer、pending-open/anchor、GET reconcile、probe/confusion reply、confusion open/replay 与 legacy façade 都只 submit；guard 已装到 protected mutator façade，request task 与 inherited-context child 均 fail closed。`card.reconcile` 只在 worker 内补 applied receipt 的 stable audit/projection/exact-generation publication，或把无活锚 orphan discussion 恢复为 pending；没有 restart scanner。队列 self-owned、非 durable、不进入 `BackgroundTaskRegistry`，`create_app()` 注入真实 queued dialogue时采用同一实例。卡片 action 只 shield 等待 1 秒：本地完成返回 200，队头阻塞返回 202 而 job 继续；进程重启丢失未执行 job 后由 action retry/GET reconcile 重新 admission。热重载先保持 old queue 可受理并 drain，最迟等待 25 分钟；队列真正空闲后才无 await 原子切到 paused，再 exact revoke old permit → start/register new → publish new → shutdown old，避免等待期间丢弃用户点击。构造/注册失败只在 permit 单槽为空时用 fresh nonce 恢复 old。CLI/OpenClaw 不属于该 runtime，显式使用 `legacy_direct`，不享受 queue/receipt/guard 保证。上线只观察 queue depth/oldest age、action wait、202 比例与 retry；连续 7 天 `202 >1%` 或 p95 `>5s` 才另开分析，不预埋第二队列。 |
+| Durable reply lane 与 app-stable dialogue lease | ✅ | `DialogueExecutionCoordinator` 由 FastAPI app 持有，不随 `RuntimeContext` 热重载替换；durable worker、惊喜 chat、legacy chat、兴趣/避雷探针共享 max-active=1 lease，并在 admission 后才解析当前 dialogue/speculator。`DurableChatReplyScheduler` 只有一个 worker，按 SQLite rowid 恢复/执行全部 pending，瞬态失败原位指数退避以阻止后序 overtaking；shutdown/cancel 不写 failed，重启继续。热重载先 pause admission + drain active，再发布新 context；超时自动 resume old 且 rebuild 零调用。`runtime-status` 的 `chat_reply_depth` 读取 durable pending count，另暴露 active/last_error/processed，不含消息内容。该 reply lane 与 `DialogueSettlementQueue` 正交：前者拥有模型回复/可见 CAS，后者拥有回复后的 typed learning/settlement。 |
+| App-stable 封面抓取 lane | ✅ | `runtime.image_fetch.ImageFetchCoordinator` 由 FastAPI app 持有，`/api/image-proxy` 前台 miss 与 `ContinuousRefreshController` 预取共用 Condition priority gate：总 active≤4、background≤3，始终为前台保留一槽且 queued 前台优先。按归一化 `image_cache_key` singleflight；waiter 用 `shield`，取消单个请求不取消 owned upstream，前台加入 queued background 同 key 时会提升优先级并采用更新的签名 URL。cache glob/read/write 全在线程执行，命中不进 gate；写入为同目录 tmp+fsync+replace。热重载新 controller 重绑同一实例；shutdown 先停 producer，再取消 active/queued owned task。状态只暴露整数计数与峰值，不含 URL/token。 |
 | 桌面安装包升级进程交接 | ✅ | Windows Inno Setup 在覆盖文件前通过 Restart Manager + `taskkill /T /F` 结束旧版进程树，安装成功后 `[Run]` 无条件从 `{app}\OpenBiliClaw.exe` 启动刚写入的新版本，交互与静默升级一致。macOS DMG 因系统模型没有安装完成回调，根目录提供显式 `安装并启动 Install OpenBiliClaw.command`：先用 `ditto` 完整暂存并校验 bundle version + code signature，再发起有界的优雅退出请求（连 `osascript` 等待本身也受窗口约束；超时 TERM/KILL，且只清理由旧 OpenBiliClaw.app 拉起的内置 Ollama）、同卷备份后原子替换 `/Applications/OpenBiliClaw.app`，二次校验失败或中断会恢复旧 app，成功后 `open -n` 精确启动安装路径并确认进程出现。助手不自动删除 quarantine；Gatekeeper 决策仍由 macOS 和用户完成。传统拖拽保持兼容，但需手动退出、替换、重开。macOS-only E2E 使用两个 ad-hoc 签名最小 app 和真实只读挂载 DMG，覆盖旧 PID 退出、版本/签名更新、新 PID 启动与暂存清理。 |
 | 扩展原生保存共享 runtime | ✅（6/6 executor + 真实账号验证） | 扩展已定义与后端一致的 `native_save` task/result allow-list、canonical HTTPS URL 规则、`NATIVE_SAVE_EXECUTE` / `NATIVE_SAVE_RESULT` 消息契约和 active-tab runner，并统一经过共享 MV3 recovery barrier。一般 runner 与 legacy dispatcher 共用 `globalThis` mutex 保护 tab 创建/加载，加载完成即释放；XHS 手动 native-save 使用 exact tokenized route + identity/control fence，可在没有精确复用页时越过后台 discovery mutex，且 alarm/runtime wake poll single-flight。执行中的任务按 task/tab 独立分桶，仍各自在单一绝对 deadline 内严格校验 final tab 与 sender URL、tab/ID/item/platform。`chrome.storage.session` 可同时记录多个 runner-owned tab，MV3 recovery 只关闭这些 ID；content 用 256 项 bounded outcome-promise cache。YouTube duplicate exact playlist 优先 checked proof，否则稳定复用一个；知乎 typed `question/answer/article` identity 适配 current `Favlists-item`；小红书适配 current `noteContainer/collect-wrapper`。2026-07-14 六个平台 favorite 与 watch-later/fallback 真实终态均为 `synced/already_synced`。 |
 | 扩展原生保存 broker 与 adapter 注册 | ✅（6/6 executor + 真实账号验证） | `RuntimeContext.extension_native_save_broker` 是热重载不替换的 test-injectable 稳定实例；local/degraded construction 与 config rebuild 都注册六平台 adapter，service/router 会替换而 broker 不变。wake best-effort 发布 `<slug>_task_available`。broker poll/lease、native task/item heartbeat 与 terminal persistence 使用线程卸载的独立短连接并有界重试 SQLite lock；durable terminal state 在 heartbeat completion race 中优先。开发用 `/api/extension/reload` 返回 `delivered`，可确认至少一个 runtime-stream 订阅者收到热重载事件。 |
@@ -42,8 +44,8 @@ gate 属于 `RuntimeContext` 的稳定部分：热重载构造成功后在同一
 | X 源健康状态机 | ✅ | `storage/x_health.py` 的 `XSourceHealthStore` 持久化 `ok` / `missing_cookie` / `expired_cookie`(401) / `blocked`(403) / `rate_limited`(429) 五态；按 code 分别退避，429 带 `cooldown_until` 自愈，401/403/missing 须等用户重新登录 x.com 才恢复；连续 For-You 失败触发 `feed_allowed()=false` 自动暂停。状态经 `GET /api/sources/x/status` 暴露到插件设置页。 |
 | 运行时频率配置 | ✅ | `refresh_check_interval_seconds`、行为触发阈值、trending / explore 间隔、单轮发现上限、惊喜队列加载数量、主动推送间隔和 speculator idle tick 都从 `[scheduler]` 读取，配置热重载后重建 runtime 生效。 |
 | 惊喜永久消费 | ✅ | `mark_delight_sent()` 仍只表示通知已送达；新增 `mark_delight_seen()` 供用户主动叉掉时委托 storage 写 canonical `seen_items` 并置 `delight_notified`，随后更新主动惊喜冷却。两种动作分开，避免“通知出现过”被误当成“用户看过”。 |
-| Durable 对话失败原子性 | ✅ | `/api/chat/turns` 在对话缺失、超时、provider/service 失败或空回复时持久化 `status="failed", reply="", error=<安全分类文案>`；真实回复生成后会先持久化 `completed + reply`，再 best-effort 运行情绪/投机/认知/事件副作用，副作用失败不得把已完成 turn 改为 failed；completed 持久化本身失败时也只记录并保留非 failed 状态供恢复。相同已终结 `turn_id` 保持幂等。 |
-| 推荐反馈批学习调度 | ✅ | `FeedbackBatchScheduler` 挂在 FastAPI `app.state`，`/api/feedback` 每次只标记 dirty 并触发 5 秒 debounce；burst 内多条推荐反馈 coalesce 成一次 `SoulEngine.process_feedback_batch_if_needed()`，处理期间又有新反馈时会在本轮结束后再补跑一轮，避免每条反馈都启动画像重分析。 |
+| Durable 对话失败原子性 | ✅ | `/api/chat/turns` 只把显式无效/空回复持久化为 `status="failed", reply="", error=<安全分类文案>`；provider、限流、配置、超时、service 瞬态失败与 shutdown cancellation 都保持 `pending` 并在队头原位有界退避。真实回复以 `WHERE status='pending'` completion CAS 发布；重复 completion、迟到 failure 与重启重放不能覆盖首个可见终态。回复完成后的 11-kind learning/settlement 由独立 `DialogueSettlementQueue` 处理，不计入 SQLite reply backlog。 |
+| Durable event consumer 调度 | ✅ | app-owned `EventProcessingScheduler` 同时调度 generic 与 content-feedback owner；`FeedbackBatchScheduler` 仅是兼容 import/injection alias。所有 event ingress 只 commit+wake，5 秒 debounce 合并 burst；单 owner pass 先运行 `SoulEngine.process_profile_events_if_needed()`，再运行 `process_feedback_batch_if_needed()`。两者都通过 `checkpointed_enqueue_batch()` 把 buffer+cursor 原子发布到同一 `pipeline_state.json`，随后调用 `tick_if_buffered()`；只有独立周期画像维护调用 `tick()`。5 秒 periodic scan 与 startup recover 覆盖 commit 后丢 wake；处理中又有新 event 会补跑下一轮。热重载 pause+drain 旧 owner，重绑 resolver 后先 recover 再恢复周期扫描。`event_lane_depth` 只是 dirty wake 的 `0/1`，不是 SQLite backlog。 |
 | 浏览器 presence / 初始化 gate | ✅ | `background_llm_work_allowed()` 结合 `scheduler.enabled` 与 `pause_on_extension_disconnect` 控制 daemon-owned 后台 LLM / embedding 工作；首个完整画像尚未落盘或 guided init 活跃时也一律返回 false，防止 account-sync 在用户点击初始化前先导入、分析并重复写入同一批 bootstrap 历史。guided init 自身绕过该 gate。 |
 | Runtime event stream | ✅ | `/api/runtime-stream` 向扩展推送状态、Cookie sync 请求、配置重载、候选池快照和 presence 事件；background 连接时会请求小红书 / 知乎立即回传一次本地 Cookie 存在性的布尔心跳，X 启用时还会请求当前完整 Cookie，均不打开或请求平台页面。`RuntimeEventHub.publish()` 会返回是否至少有一个订阅者接收，供一次性事件判断是否真正投递。 |
 | WebSocket 运行时依赖 | ✅ | 默认安装显式携带 `websockets>=13`，PyInstaller spec 显式收集 `uvicorn.protocols.websockets.websockets_impl` 与 `websockets`，避免源码 / Docker / 桌面包只安装裸 `uvicorn` 时 `/api/runtime-stream` 缺协议实现。 |
@@ -97,6 +99,25 @@ gate 属于 `RuntimeContext` 的稳定部分：热重载构造成功后在同一
   root margin。前者避免点击抖动，后两者分别控制明确切换与接近视口时加载。
 
 ## 公开 API
+
+### Durable dialogue execution lane
+
+```python
+from openbiliclaw.runtime.dialogue_reply_scheduler import (
+    DialogueExecutionCoordinator,
+    DurableChatReplyScheduler,
+    TerminalChatReplyError,
+)
+
+async with coordinator.lease():
+    ...  # admission 后解析当前 RuntimeContext owner
+
+scheduler.schedule(turn_id)  # 幂等 wake；pending SQLite row 才是权威事实
+await scheduler.start()       # 分页恢复全部 pending
+await scheduler.close()       # 取消内存 worker，数据库仍保持 pending
+```
+
+`pause_and_drain(timeout=...)` 只有在 active lease 结束后才返回；timeout/cancel 会先恢复 admission 再抛出。scheduler 只把 `TerminalChatReplyError` 交给 failed CAS，普通异常与 `CancelledError` 不改变 durable pending 事实。`status_payload()` 返回队列健康摘要，不返回 turn ID、message 或 reply。
 
 扩展共享原生保存基础（6/6 executor 已接、fixture 全覆盖，并于 2026-07-14 完成 favorite + watch-later/fallback 真实账号验证）：
 
@@ -161,27 +182,29 @@ controller.candidate_eval_coordinator.notify("candidate_enqueued:bilibili")
 - `on_admitted(count)`：同步、返回 `None` 的轻量通知接口；协调器不 await 文案工作，因此 admission 通知不会占住串行 commit lane。Task 7 的文案协调器通过该接口接入，本任务不改变其微批状态机。
 - `candidate_evaluation_owned_by_coordinator`：仅 API daemon 在 coordinator attach 后，对会同步 drain 的 Douyin / YouTube / Zhihu producer 置为 `True`。B 站 refresh、X 与 Reddit 同样走共享 pipeline；X 不再直接写数据库，因而所有 managed source 都经 pipeline 的一次 callback `notify("candidate_enqueued:pipeline")` 立即唤醒 coordinator，且不得再调用 `drain_pending()`。OpenClaw direct adapter 不启动该 owner，故其 producer 保持 `False` 并走有 90 条硬上限的 inline drain；独立/CLI 也保持此兼容路径。
 
-### FeedbackBatchScheduler
+### EventProcessingScheduler（兼容别名 `FeedbackBatchScheduler`）
 
 ```python
-from openbiliclaw.runtime.feedback_scheduler import FeedbackBatchScheduler
+from openbiliclaw.runtime.feedback_scheduler import EventProcessingScheduler
 
-scheduler = FeedbackBatchScheduler(soul_engine, debounce_seconds=5.0)
+scheduler = EventProcessingScheduler(soul_engine, debounce_seconds=5.0)
 scheduler.schedule()
 ```
 
 核心调用：
 
-- `schedule()`：标记当前有新反馈待处理；若没有活跃任务，创建一个后台任务，先等待 debounce 窗口，再调用 `SoulEngine.process_feedback_batch_if_needed()`。
+- `schedule()`：把 dirty wake 置为 `1`；若没有活跃任务，创建一个后台任务，等待 debounce 后在同一 owner pass 依次调用 generic 与 content-feedback consumer。wake 不携带事实，真实 backlog 仍在 SQLite / pipeline checkpoint。
+- `recover()`：同步跑完一次恢复 pass；只供热重载等已经 pause+drain、必须把旧 owner 遗留工作清空后才能 rebind 的顺序屏障使用。
+- `start_background_recovery()` / `start_periodic()`：首次 FastAPI startup 只 admission 一个 scheduler-owned recovery task，不 await consumer 或 LLM；之后每 5 秒做丢 wake 安全扫描。
 - `drain()`：测试辅助，等待当前调度任务结束。
-- `close()`：关闭 API 时取消还没跑完的调度任务。
+- `close()`：关闭 API 时取消并 gather 还没跑完的调度任务；startup 暴露的 recovery task 只是同一 owned task 的观测引用，不形成第二个 owner。
 
 调度语义：
 
-- 多个 `/api/feedback` 请求在 debounce 窗口内只会合并成一次批处理。
-- 批处理执行中再次收到反馈，会把 dirty 标志重新置位；当前处理结束后再等待一个 debounce 窗口并补跑一次。
-- 该调度器只解决 API 层的 burst coalesce；Soul 层仍有 `process_feedback_batch_if_needed()` single-flight，防止其它入口绕过 API 时并发重放同一游标。
-- **调度器现在默认驱动 shim / 统一兴趣线**：`process_feedback_batch_if_needed()` 在 debounce 窗口结束后不再跑「游标批 + 全量 `analyze_events`」，而是（首次）一次性迁移旧游标之后未消费的 feedback 事件进认知流水线，然后触发 `pipeline.tick()` 让已达 FEEDBACK 优先级阈值的 INTEREST 缓冲立刻消费。实时反馈本就由 `/api/feedback` 作为优先信号直接入线，所以 debounce 的职责收窄成「兜底 flush + 迁移」：它保证攒够阈值的缓冲不必等满 `min_interval_seconds`，也保证重启前刚填满的缓冲不会被搁置。仅显式设置 `scheduler.unified_interest_line=false` 时，调度器才逐字节回到旧反馈批路径。详见 [soul 模块文档](soul.md) 的「默认统一兴趣线如何取代旧反馈批」。
+- 多个 `/api/events`、`/api/feedback` 与 source/account-sync wake 在 debounce 窗口内合并成一次 owner pass。
+- owner pass 执行中再次收到 wake，会把 dirty 标志重新置位；当前处理结束后再等待一个 debounce 窗口并补跑一次。
+- Soul 层的两个 consumer 各自保留 single-flight lock 和 durable cursor；调度器拥有执行时序，不拥有事实。
+- **统一兴趣线 owner**：generic consumer 领取显式 `profile_update_owner="generic"` 行；content-feedback consumer 领取 `like/dislike/comment/dismiss` 且非 import 的反馈。每批以稳定 event-derived ID 调用 `checkpointed_enqueue_batch()`，同一次原子状态替换同时发布 buffer+cursor，然后 `tick_if_buffered()` 仅在存在恢复信号时消费。hypothesis/import feedback 只越过 feedback cursor，retraction 在 generic cursor 前投影。首次 API startup 的严格顺序是 `owner cutover fence → local scheduler admission → HTTP lifespan 返回`；真正的 event scan / checkpoint / consume 在 scheduler-owned task 中继续，即使 provider 401、pending buffer 的 LLM 或永不返回调用已经开始，也不延迟 listener 与 `/api/health`。这里不靠给 `_process_once()` 加短 timeout 或粗暴 cancel 来伪造快速启动，durable cursor/buffer 语义保持完整。shutdown 通过 `close()` 回收；配置热重载则仍执行 `pause_and_drain → recover()`，待旧 owner 真正清空后才 rebind/restart。仅显式设置 `scheduler.unified_interest_line=false` 时，内容反馈 consumer 回到旧反馈批路径。
 
 ### InitCoordinator + InitPrereqs（引导初始化）
 
@@ -233,7 +256,7 @@ embedding_progress.reset()
 - `pool_pending_eval_count`：`discovery_candidates.status IN ('pending_eval', 'evaluating')` 的数量，表示已经找到但还没完成统一 LLM 评估的内容。
 - `pool_evaluated_pending_count`：`discovery_candidates.status='evaluated'` 的数量，表示已经完成评估但尚未 admission 到 `content_cache` 的内容。
 - `last_discovered_count`：最近一轮 refresh 新入队的 raw candidates 数；已评估待入池候选的 retry / admission 不会冒充“新发现”。
-- `pending_signal_events`：`discovery_runtime.last_processed_event_id` 之后新增的 discovery-trigger 行为事件数，只用于判断是否触发 `search + related_chain`，不表示画像 pipeline backlog。普通 `/api/events` 会用独立 `last_profile_pipeline_event_id` 把旧 pending 行为事件补喂给画像 pipeline，但不会推进 discovery 水位；补货执行由已排队的 replenishment reason、定时 tick 或用户刷新后的低库存检查统一触发。
+- `pending_signal_events`：`discovery_runtime.last_processed_event_id` 之后新增的 discovery-trigger 行为事件数，只用于判断是否触发 `search + related_chain`，不表示画像 pipeline backlog。普通 `/api/events` 只提交 durable row 并 wake；generic `profile_events` consumer 与 `content_feedback` consumer 分别按自己保存在 `pipeline_state.json` 的 cursor 扫描归属事件，通过 `checkpointed_enqueue_batch()` 原子发布 buffer+cursor 后调用 `tick_if_buffered()`，完全不推进 discovery 水位。补货执行由已排队的 replenishment reason、周期 `tick()` 或用户刷新后的低库存检查统一触发。
 - `recent_pool_topics`：最近一轮实际 admission 到推荐池的内容主题；retry-only admission 可以更新该字段，但不会增加 `last_discovered_count`。
 
 前端凡是显示“可换”都必须只读取 `pool_available_count`。`pool_pending_count` / `pool_pending_eval_count` / `pool_evaluated_pending_count` 只能用于“正在整理成可换内容”等辅助文案和诊断。
@@ -248,7 +271,7 @@ embedding_progress.reset()
 - `headline`：最新动态条目的摘要；没有动态条目时回退到 `live_summary`。
 - `items`：认知更新、反馈记录和推荐池补货等最近动态。
 
-首启 / setup 阶段要优先保护初始化入口：当 `initialized=false`，且 `recommendation_count`、`pool_available_count`、`pool_pending_count`、`last_replenished_count`、`last_discovered_count` 都为 0 时，普通 `/api/events` 会以 `not_initialized` 拒收，不会写入 memory 或制造新的 `pending_signal_events`；`live_summary` 也会提示用户点击「开始初始化」，不会因为历史残留 pending signal 显示“已记下 N 个新动作”。一旦已有推荐或候选池产物，上述 pending signal 文案会按初始化后的正常运行状态展示。这里的 `pending_signal_events` 是 discovery refresh 触发水位，不是画像待处理队列；画像增量由 `/api/events` accepted 事件进入 `ProfileUpdatePipeline`，同时用 `last_profile_pipeline_event_id` 兜底补喂旧 pending 行为事件，再由 pipeline / cognition cycle 按各自节奏更新。事件入口不会同步执行补货，只通过 `request_replenishment(reason="event_ingest")` 排队，交给定时 tick 或用户刷新后的低库存检查统一处理。
+首启 / setup 阶段要优先保护初始化入口：当 `initialized=false`，且 `recommendation_count`、`pool_available_count`、`pool_pending_count`、`last_replenished_count`、`last_discovered_count` 都为 0 时，普通 `/api/events` 会以 `not_initialized` 拒收，不会写入 memory 或制造新的 `pending_signal_events`；`live_summary` 也会提示用户点击「开始初始化」，不会因为历史残留 pending signal 显示“已记下 N 个新动作”。一旦已有推荐或候选池产物，上述 pending signal 文案会按初始化后的正常运行状态展示。这里的 `pending_signal_events` 是 discovery refresh 触发水位，不是画像待处理队列；画像增量由 app-owned event scheduler 在 HTTP commit+wake 之后异步运行 generic/content-feedback 两个 durable consumer，buffer 与 cursor 在同一 pipeline snapshot 中提交，再由 pipeline / cognition cycle 按各自节奏更新。事件入口不会同步执行补货，只通过 `request_replenishment(reason="event_ingest")` 排队，交给定时 tick 或用户刷新后的低库存检查统一处理。
 
 ### Runtime Status Update Fields
 
@@ -352,9 +375,11 @@ Windows 回归不是只 mock `winreg`：`tests/test_windows_autostart_e2e.py` �
 
 #### 发现即缓存（封面预取）
 
-白名单 / redirect / 大小 / 类型校验的抓取核心 `fetch_cover_bytes` 是唯一真源，由 proxy 路由和预取共用；失败抛 `CoverFetchError`（携带 400/403/413/502/504），proxy 路由再映射回对应 HTTP 状态。v0.3.153+：抓取按主机分流代理——国内 CDN（hdslb / xhscdn / pstatp / douyinpic / douyinvod）恒直连（`trust_env=False`，代理出口 IP 易被风控，与 B站 登录探测同因），境外 CDN（ytimg / ggpht）保持继承环境 / 系统代理，需要代理才能拉 YouTube 封面的用户不受影响。`get_or_fetch_cover_bytes` 是缓存优先入口：先按同一白名单边界校验 URL，再读取 `data/image-cache/` 的非空文件，未命中才调用 `fetch_cover_bytes` 并写回缓存。多模态 discovery evaluator 使用这个入口，因此小红书已缓存头图即使原 CDN token 过期，也能继续参与封面图评估。
+白名单 / redirect / 大小 / 类型校验的抓取核心 `fetch_cover_bytes` 是唯一真源；失败抛 `CoverFetchError`（携带 400/403/413/502/504），proxy 路由再映射回对应 HTTP 状态。v0.3.153+：抓取按主机分流代理——国内 CDN（hdslb / xhscdn / pstatp / douyinpic / douyinvod）恒直连（`trust_env=False`，代理出口 IP 易被风控，与 B站 登录探测同因），境外 CDN（ytimg / ggpht）保持继承环境 / 系统代理，需要代理才能拉 YouTube 封面的用户不受影响。`get_or_fetch_cover_bytes` 是多模态 discovery evaluator 的兼容缓存优先入口；磁盘读写同样卸载到线程，因此小红书已缓存头图即使原 CDN token 过期，也能继续参与封面图评估。
 
-`RefreshRuntime._loop_cover_prefetch` 每 60 秒做一次「发现即缓存」：从 `Database.iter_servable_cover_urls` 取最近 12 小时内、仍可展示（`fresh / shown / suppressed` 或已保存）的封面（最新优先），`select_prefetch_targets` 过滤掉非白名单和已缓存项、把**无法重抓的小红书封面排在最前**，每轮最多抓 40 张写入缓存。这修复了此前封面只在「展示时」才懒加载、而小红书签名 token 早已过期导致 502 破图的问题——预取趁 token 新鲜时就把图落盘；最近窗口也避免对 token 已死的旧内容反复重试。预取按 `content_cache.cover_url` 原始值（可能是 `//` 或 `http://`）归一化后再抓，落盘 key 与 proxy 查找一致，故预取的封面 proxy 能直接命中。
+API daemon 中，proxy miss 与 refresh prefetch 进一步共用 app-owned `ImageFetchCoordinator`。Condition gate 保证总 upstream active≤4、background≤3；前台请求可占保留槽，任一前台排队时 background 不得抢刚释放的槽。按 `image_cache_key(url)` singleflight，所有 waiter `shield` shared task；一个 HTTP request 取消不会取消其它 waiter/owned upstream。前台加入尚未启动的 background 同 key 时会把它提升为 foreground，并用前台携带的更新签名 URL 抓取。cache hit 在 gate 外；同步 glob/read/write 用 `asyncio.to_thread`，落盘使用同目录临时文件 `flush+fsync+os.replace`，所以观察者只会看到旧文件或完整新文件。
+
+`RefreshRuntime._loop_cover_prefetch` 每 60 秒做一次「发现即缓存」：在线程中从 `Database.iter_servable_cover_urls` 取最近 12 小时内、仍可展示（`fresh / shown / suppressed` 或已保存）的封面（最新优先），`select_prefetch_targets` 按 cache key 去重、过滤非白名单和已缓存项、把**无法重抓的小红书封面排在最前**，每轮最多提交 40 张到共享 background lane，最多 3 张并行。这修复了此前封面只在「展示时」才懒加载、而小红书签名 token 早已过期导致 502 破图的问题——预取趁 token 新鲜时就把图落盘；最近窗口也避免对 token 已死的旧内容反复重试。预取按 `content_cache.cover_url` 原始值（可能是 `//` 或 `http://`）归一化后再抓，落盘 key 与 proxy 查找一致，故预取的封面 proxy 能直接命中。热重载后新 controller 在恢复 loop 前重绑同一 app-owned coordinator；关闭时先停 refresh producer，再取消 active/queued owned task。
 
 #### 小红书封面：扩展抓取时采集 URL 与字节（2026-07「没头图」修复）
 
@@ -362,7 +387,7 @@ Windows 回归不是只 mock `winreg`：`tests/test_windows_autostart_e2e.py` �
 
 修复（`extension/src/content/xhs/cover-harvest.ts`）：任务执行器先用 `backfillCoverUrlsFromState` 从 `__INITIAL_STATE__` 做**形状无关**的深扫（循环安全、深度/节点数有界，按 note_id 命中对象后取 cover 路径），把占位符/空 cover_url 回填成真实 CDN URL；DOM 提取（passive 与任务两路）一律拒收 `data:`/`blob:` 占位符。随后 `attachCoverData` 在页面上下文抓封面字节（此刻 token 最新鲜、走用户自己的浏览器会话），转 base64 挂 `cover_data`/`cover_content_type` 随既有 observed-urls / 任务结果通道上报；后端 `_cache_xhs_notes` 将非 http(s) 的 cover_url 归一为空，并经 `save_extension_cover`（白名单 / `image/*` / 1MB 上限 / base64 校验，坏封面绝不阻断笔记入库）把字节写入同一 `data/image-cache/`——缓存 key 本就剥离轮换 token，serve 零改动全走缓存命中。已知候选去重跳过的笔记也会先存封面，用户重新刷到旧笔记时可就地治愈无封面的存量行。服务端预取继续保留（对拿得到 URL、出网正常的环境仍是第二道保险）。
 
-同期补齐了封面链路的可观测性（此前 `image_cache` 模块零日志，这次定位只能靠「慢取日志里 xhscdn 完全缺席、其它 CN CDN 都在」反推）：`fetch_cover_bytes` 的上游非 2xx / 超时 / 网络错误按 host 限频打 WARNING（首次立即、之后每 host 每 10 分钟至多一条并携带抑制计数），错误 detail 携带真实上游状态码；`/api/image-proxy` 失败补 DEBUG 行关联具体请求；`_cache_xhs_notes` 每批打 INFO 汇报缓存的扩展采集封面数。
+同期补齐了封面链路的可观测性（此前 `image_cache` 模块零日志，这次定位只能靠「慢取日志里 xhscdn 完全缺席、其它 CN CDN 都在」反推）：`fetch_cover_bytes` 的上游非 2xx / 超时 / 网络错误按 host 限频打 WARNING（首次立即、之后每 host 每 10 分钟至多一条并携带抑制计数），错误 detail 携带真实上游状态码；`/api/image-proxy` 的失败/慢 miss DEBUG 与扩展 cover reject 都只记录 host + cache hash 前缀 + 安全错误类别，不记录签名 path/query 或可能回显 URL 的 `httpx` exception repr；`_cache_xhs_notes` 每批打 INFO 汇报缓存的扩展采集封面数。`/api/runtime-status` 另公开 active/waiting/inflight、upstream started、singleflight joins 与 total/background 峰值，全部是整数。
 
 ### AccountSyncService
 
@@ -386,7 +411,7 @@ status = service.get_runtime_status()
 # "本轮账号同步：B 站收藏夹未同步（B 站接口返回异常）。..."
 ```
 
-`sync_now()` 会拉取最近一批 B 站历史、收藏夹和关注列表，只有新增信号会进入 `memory.propagate_event()` 与画像更新：
+`sync_now()` 会拉取最近一批 B 站历史、收藏夹和关注列表，只有新增信号会进入 durable event ingress 与画像更新：
 
 - 历史记录：使用 `last_history_view_at`、`last_history_bvid` 和 `history_bvids_at_last_view_at` 跳过已经处理过的同秒历史项。
 - 收藏夹：使用稳定排序后的 `favorite_signature` 和 `favorite_bvids`，签名变化时只导入新增 bvid。扫描上限对齐 init（`max_folders=200`），并带 `max_total_items=500` 预算封顶请求数（最坏约 26 次请求），覆盖第 11 个及以后收藏夹的新收藏。
@@ -394,14 +419,14 @@ status = service.get_runtime_status()
 
 **跨源去重**：注入 `database` 后，构造事件前会经 `_dedup_cross_source` 过滤——48 小时窗口（`_CROSS_SOURCE_DEDUP_WINDOW_HOURS`）内 events 表已有同键事件（view/favorite 按 bvid、follow 按 mid、X 按 tweet ID）则跳过，避免扩展实时上报与账号拉取对同一次行为双写双计。查询恒带 `exclude_source="account_sync"`：自己上一轮写的行不参与压制，只被历史 API 观察到的窗口内重看仍会正常发事件。游标照常前进，去重不阻塞水位线；丢弃数量记 INFO 日志。
 
-**画像更新路径（四行回退矩阵，`_apply_profile_update`）**：`propagate_event` 持久化永远无条件先行，之后——
+**画像更新路径**：composition root 注入 `event_ingress` 后，所有新增事实先经 `EventIngressService.accept_batch(producer="account-sync")` 一批提交；每项的稳定 digest 在入口处加 producer namespace，重放返回 durable receipt。画像已就绪时写入 `profile_update_owner="generic"`，后续由 app-owned generic cursor consumer 通过 `checkpointed_enqueue_batch()` 推进，不在账号同步请求内直调 pipeline/LLM。画像未就绪或 readiness 不可判定时，事件仍先落 durable ingress，再走兼容 `analyze_events` 路径；只有明确未就绪才尝试首次 bootstrap。未注入 ingress 的第三方旧 embedder 才回退逐条 `memory.propagate_event()`。
 
 | 条件 | 动作 |
 | --- | --- |
-| 画像就绪 + `soul_engine.pipeline.ingest_batch` 可用且成功 | 只走增量管线（`signals_from_events` → `ingest_batch`），不再整层重算 preference |
-| 画像就绪，但管线缺失 / 抛错 | WARN 回退 `analyze_events`（不 bootstrap——画像已存在） |
-| 画像未就绪 | 旧路径：`analyze_events` + `_auto_bootstrap_soul_profile` |
-| `is_profile_ready` 缺失 / 抛错 | 按未就绪保守处理 |
+| ingress 已注入 + 画像就绪 | durable batch commit + generic owner；HTTP/sync 返回不等待画像学习 |
+| ingress 已注入 + 画像未就绪 | durable batch commit + `analyze_events` + `_auto_bootstrap_soul_profile` |
+| ingress 已注入 + readiness 缺失 / 抛错 | durable batch commit + `analyze_events`，保守跳过 bootstrap |
+| 未注入 ingress（兼容 embedder） | 逐条 `propagate_event()` 后按同一 readiness 规则走 legacy analyzer |
 
 **错误可见化**：每个拉取阶段的异常都会 `logger.warning`，同时写入两个兼容层级。旧字段 `last_sync_error_kind` 继续保留整轮最高优先级摘要（`auth_expired` / `x_auth_expired` / `x_blocked` / `x_rate_limited` / `error` / 空）；新字段 `last_sync_issues` 保存最多 8 个去重后的稳定 `{stage,kind}`，stage 覆盖 `bilibili_history` / `bilibili_favorites` / `bilibili_following`、`x_preferences` / `x_likes` / `x_bookmarks` 与 `profile_analysis`。B 站阶段可区分 `auth_expired` / `rate_limited` / `timeout` / `network` / `api_error` / `unexpected_error`，X 保留平台专属的登录、403 与限流分类，画像分析则经 `classify_llm_failure_kind` 与安全诊断区分 `no_provider` / `model_not_found` / `auth_failed` / `quota_exhausted` / `rate_limited` / `timeout` / `connection` / `ssl` / `server_error` / `invalid_response` / `moderation` / `unexpected_error`。
 

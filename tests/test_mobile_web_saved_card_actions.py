@@ -21,7 +21,9 @@ def _read(path: Path) -> str:
 def _fn_body(src: str, name: str) -> str:
     match = re.search(rf"function {re.escape(name)}\(", src)
     assert match, f"{name} not found"
-    start = src.index("{", match.start())
+    body_open = re.search(r"\)\s*\{", src[match.start() :])
+    assert body_open, f"{name} body not found"
+    start = match.start() + body_open.end() - 1
     depth = 0
     for index in range(start, len(src)):
         if src[index] == "{":
@@ -36,8 +38,12 @@ def _fn_body(src: str, name: str) -> str:
 def test_mobile_web_api_exposes_content_behavior_events() -> None:
     api = _read(API_JS)
     body = _fn_body(api, "sendBehaviorEvents")
-    assert "export async function sendBehaviorEvents(events)" in api
+    assert 'export async function sendBehaviorEvents(events, { retryKey = "" } = {})' in api
     assert 'requestJson("/events", json({ events }))' in body
+    assert 'rememberPendingRequestId("behavior-command", retryKey)' in body
+    assert "event.event_id = existing || newRequestId();" in body
+    assert "Number(result?.accepted || 0) >= 1" in body
+    assert "forgetPendingRequestId(pending.key, pending.requestId);" in body
     assert '"/feedback"' not in body
 
 
@@ -88,6 +94,8 @@ def test_mobile_web_saved_feedback_uses_events_not_recommendation_feedback() -> 
     assert "feedback_type: feedbackType" in post
     assert "content_id: contentId" in post
     assert "saved_feedback: true" in post
+    assert "const retryKey = [" in post
+    assert "}], { retryKey })" in post
     assert "recommendation_id" not in post
     assert "postSavedFeedback(item, feedbackType)" in handle
     assert 'postSavedFeedback(item, "comment", note)' in wire

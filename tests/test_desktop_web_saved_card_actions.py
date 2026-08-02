@@ -139,6 +139,9 @@ def test_saved_feedback_uses_content_signal_not_recommendation_endpoint() -> Non
     assert "feedback_type: feedbackType" in post
     assert "content_id: contentId" in post
     assert "saved_feedback: true" in post
+    assert 'rememberPendingRequestId(\n        "behavior-command"' in post
+    assert "event_id: pending.requestId" in post
+    assert "forgetPendingRequestId(pending);" in post
     assert "recommendation_id" not in post
     assert 'events: "/events",' in app_js
 

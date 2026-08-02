@@ -410,6 +410,8 @@ class DyTaskQueue:
         stale_before = (datetime.now(UTC) - timedelta(minutes=15)).strftime("%Y-%m-%d %H:%M:%S")
         # ``only_ids`` restricts which tasks may be claimed (gui-init: during an
         # active init only init-owned bootstrap tasks are handed out). None = all.
+        # Staged results remain stale-reclaimable so a lost result response
+        # gets a fresh dispatcher callback that repairs canonical projections.
         where = "(status = 'pending' OR (status = 'in_progress' AND claimed_at <= ?))"
         params: list[Any] = [stale_before]
         if only_ids is not None:
@@ -503,6 +505,8 @@ class DyTaskQueue:
             WHERE status = 'pending'
               AND type IN ({placeholders})
               AND created_at < ?
+              AND COALESCE(result_json, '') NOT LIKE
+                  '%"_openbiliclaw_terminal_status"%'
             """,
             (result_payload, *normalized_types, cutoff_text),
         )
@@ -561,6 +565,12 @@ class DyTaskQueue:
                 except json.JSONDecodeError:
                     current = {}
 
+            from openbiliclaw.sources.task_result_protocol import staged_terminal_status
+
+            if staged_terminal_status(current):
+                conn.commit()
+                return []
+
             merged, added = _merge_dy_result_payload(
                 current,
                 videos=videos,
@@ -589,25 +599,63 @@ class DyTaskQueue:
         finally:
             conn.close()
 
+    def stage_final_result(
+        self,
+        task_id: str,
+        *,
+        terminal_status: str,
+        videos: list[dict[str, Any]] | None = None,
+        scope_counts: dict[str, Any] | None = None,
+        debug: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Stage the immutable canonical result before downstream projection."""
+        from openbiliclaw.sources.task_result_protocol import stage_terminal_result
+
+        def merge(current: dict[str, Any]) -> dict[str, Any]:
+            merged, _added = _merge_dy_result_payload(
+                current,
+                videos=videos,
+                scope_counts=scope_counts,
+                debug=debug,
+                completion_status=terminal_status,
+            )
+            return merged
+
+        return stage_terminal_result(
+            self._db,
+            table="dy_tasks",
+            task_id=task_id,
+            terminal_status=terminal_status,
+            merge=merge,
+        )
+
+    def complete_staged_result(self, task_id: str) -> bool:
+        """Mark a staged canonical result complete without replacing it."""
+        from openbiliclaw.sources.task_result_protocol import complete_staged_result
+
+        return complete_staged_result(self._db, table="dy_tasks", task_id=task_id)
+
     def fail(
         self,
         task_id: str,
         *,
         error: str = "",
         debug: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> bool:
         """Mark an active task failed without overwriting a terminal result."""
         result_payload: dict[str, Any] = {"error": error}
         if debug is not None:
             result_payload["debug"] = debug
-        result = json.dumps(result_payload, ensure_ascii=False)
-        self._db.conn.execute(
-            "UPDATE dy_tasks SET status = 'failed', result_json = ?, "
-            "completed_at = CURRENT_TIMESTAMP "
-            "WHERE id = ? AND status NOT IN ('completed', 'failed')",
-            (result, task_id),
+        from openbiliclaw.sources.task_result_protocol import mutate_unstaged_result
+
+        mutated, _canonical = mutate_unstaged_result(
+            self._db,
+            table="dy_tasks",
+            task_id=task_id,
+            mutate=lambda _current: result_payload,
+            terminal_status="failed",
         )
-        self._db.conn.commit()
+        return mutated
 
 
 def _is_stale_pending_result(result_json: Any) -> bool:
