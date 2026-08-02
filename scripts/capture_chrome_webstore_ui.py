@@ -6,9 +6,11 @@ import argparse
 import shutil
 import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
-from playwright.sync_api import BrowserContext, Page, Route, sync_playwright
+if TYPE_CHECKING:
+    from playwright.sync_api import BrowserContext, Page, Route
 
 if __package__:
     from scripts.chrome_webstore_demo import DemoServer
@@ -115,6 +117,8 @@ def _capture_web(
     blocked: list[str],
     docs_output_dir: Path | None = None,
 ) -> None:
+    from playwright.sync_api import sync_playwright
+
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(channel="chrome", headless=True)
         context = browser.new_context(
@@ -235,6 +239,8 @@ def _capture_extension(
     blocked: list[str],
     docs_output_dir: Path | None = None,
 ) -> None:
+    from playwright.sync_api import sync_playwright
+
     service_worker = EXTENSION_ROOT / "dist/background/service-worker.js"
     popup = EXTENSION_ROOT / "popup/popup.html"
     if not service_worker.exists() or not popup.exists():
