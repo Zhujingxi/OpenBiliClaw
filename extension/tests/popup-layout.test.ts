@@ -240,6 +240,9 @@ test("settings tabs use stable compact panels", () => {
 
   assert.match(tabsBlock, /display:\s*grid;/);
   assert.match(tabsBlock, /grid-template-columns:\s*repeat\(6,\s*minmax\(0,\s*1fr\)\);/);
+  // The overlay is a scrolling flex column. Without this, a long settings form
+  // collapses the tab strip and lets the following panel cover its buttons.
+  assert.match(tabsBlock, /flex-shrink:\s*0;/);
   assert.match(tabsBlock, /overflow-x:\s*auto;/);
   assert.match(settingsOverlayBlock, /overflow-x:\s*hidden;/);
   assert.match(
