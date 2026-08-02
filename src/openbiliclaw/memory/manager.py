@@ -9,10 +9,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from typing import TYPE_CHECKING, Any
 
 from openbiliclaw.sources.event_format import default_signal_strength_for_event
-from openbiliclaw.storage.database import Database
+from openbiliclaw.storage.database import Database, EventInsertResult
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -22,25 +23,28 @@ if TYPE_CHECKING:
     from openbiliclaw.soul.overrides import ProfileOverrides
 
 logger = logging.getLogger(__name__)
-_EVENT_TYPES = {
-    "view",
-    "dialogue",
-    "pause",
-    "seek",
-    "search",
-    "favorite",
-    "like",
-    "coin",
-    "comment",
-    "click",
-    "scroll",
-    "hover",
-    "snapshot",
-    "reshuffle",
-    "feedback",
-    "follow",
-    "share",
-}
+SUPPORTED_EVENT_TYPES = frozenset(
+    {
+        "view",
+        "dialogue",
+        "pause",
+        "seek",
+        "search",
+        "favorite",
+        "like",
+        "coin",
+        "comment",
+        "click",
+        "scroll",
+        "hover",
+        "snapshot",
+        "reshuffle",
+        "feedback",
+        "follow",
+        "share",
+    }
+)
+_EVENT_TYPES = SUPPORTED_EVENT_TYPES
 _DISCOVERY_RUNTIME_HISTORY_KEYS = (
     "probe_feedback_history",
     "avoidance_probe_feedback_history",
@@ -237,16 +241,18 @@ class MemoryManager:
     def load_feedback_state(self) -> dict[str, object]:
         """Load feedback-processing cursor state from disk.
 
-        ``unified_interest_line_migrated_at`` is the one-shot marker for the
-        unified interest line's legacy-cursor migration (spec 2026-07-27
-        Phase 3). It lives in the SAME file as the cursor on purpose: one JSON
-        write persists both, so no crash can leave the marker set without the
-        cursor advanced (or the reverse).
+        ``unified_interest_line_migrated_at`` records the v1 direct-ingest
+        rollout. ``feedback_owner_version`` / ``feedback_owner_cutover_at``
+        fence that old ownership model from the v2 durable cursor owner. All
+        fields live beside the cursor so one atomic replace publishes the
+        ownership boundary and its watermark together.
         """
         default_state = {
             "last_processed_feedback_event_id": 0,
             "last_feedback_reanalyzed_at": "",
             "unified_interest_line_migrated_at": "",
+            "feedback_owner_version": 0,
+            "feedback_owner_cutover_at": "",
         }
         if not self._feedback_state_path.exists():
             return default_state
@@ -262,31 +268,53 @@ class MemoryManager:
             "unified_interest_line_migrated_at": str(
                 loaded.get("unified_interest_line_migrated_at", "")
             ),
+            "feedback_owner_version": self._to_int(loaded.get("feedback_owner_version", 0)),
+            "feedback_owner_cutover_at": str(loaded.get("feedback_owner_cutover_at", "")),
         }
 
     def save_feedback_state(self, state: dict[str, object]) -> None:
         """Persist feedback-processing cursor state to disk.
 
-        Callers that only touch the cursor (the legacy feedback batch) must not
-        clear the migration marker, so an absent key is read back off disk
-        rather than defaulted away.
+        Callers that only touch the legacy cursor must not clear either rollout
+        marker, so absent ownership keys are read back off disk rather than
+        defaulted away. The temp-file replace keeps the cursor and owner fence
+        on one crash-safe publication boundary.
         """
         self._feedback_state_path.parent.mkdir(parents=True, exist_ok=True)
-        if "unified_interest_line_migrated_at" in state:
-            migrated_at = str(state.get("unified_interest_line_migrated_at", ""))
-        else:
-            migrated_at = str(
-                self.load_feedback_state().get("unified_interest_line_migrated_at", "")
+        preserved = self.load_feedback_state()
+        migrated_at = str(
+            state.get(
+                "unified_interest_line_migrated_at",
+                preserved.get("unified_interest_line_migrated_at", ""),
             )
+        )
         payload = {
             "last_processed_feedback_event_id": self._to_int(
                 state.get("last_processed_feedback_event_id", 0)
             ),
             "last_feedback_reanalyzed_at": str(state.get("last_feedback_reanalyzed_at", "")),
             "unified_interest_line_migrated_at": migrated_at,
+            "feedback_owner_version": self._to_int(
+                state.get(
+                    "feedback_owner_version",
+                    preserved.get("feedback_owner_version", 0),
+                )
+            ),
+            "feedback_owner_cutover_at": str(
+                state.get(
+                    "feedback_owner_cutover_at",
+                    preserved.get("feedback_owner_cutover_at", ""),
+                )
+            ),
         }
-        with open(self._feedback_state_path, "w", encoding="utf-8") as file:
+        temporary_path = self._feedback_state_path.with_suffix(
+            f"{self._feedback_state_path.suffix}.tmp"
+        )
+        with open(temporary_path, "w", encoding="utf-8") as file:
             json.dump(payload, file, ensure_ascii=False, indent=2)
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temporary_path, self._feedback_state_path)
 
     def load_account_sync_state(self) -> dict[str, object]:
         """Load account-side sync cursor state from disk."""
@@ -876,7 +904,12 @@ class MemoryManager:
     # --- Cross-layer operations ---
 
     def _reconcile_retracted_positive(
-        self, event_type: str, url: str, metadata: dict[str, Any]
+        self,
+        event_type: str,
+        url: str,
+        metadata: dict[str, Any],
+        *,
+        retraction_index: dict[tuple[str, str], datetime] | None = None,
     ) -> dict[str, Any]:
         """Discount a late-arriving positive already undone by a stored retraction.
 
@@ -899,7 +932,13 @@ class MemoryManager:
         if event_time is None:
             return metadata
         try:
-            retraction_time = self._database.latest_retraction_time_for(url, action)
+            if retraction_index is None:
+                retraction_time = self._database.latest_retraction_time_for(url, action)
+            else:
+                from openbiliclaw.sources.identity_keys import dedup_key
+
+                identity_key = dedup_key(url)
+                retraction_time = retraction_index.get((identity_key, action))
         except Exception:
             logger.warning("retraction reconciliation lookup failed", exc_info=True)
             return metadata
@@ -974,6 +1013,63 @@ class MemoryManager:
         logger.debug("Event batch persisted: %s rows", inserted)
         return inserted
 
+    async def persist_events_with_receipts(
+        self,
+        events: list[dict[str, Any]],
+    ) -> list[EventInsertResult]:
+        """Persist a validated batch and return durable idempotency receipts."""
+        results = await asyncio.to_thread(self._persist_events_with_receipts_sync, events)
+        logger.debug(
+            "Event ingress persisted: %d inserted, %d duplicate",
+            sum(1 for result in results if result.inserted),
+            sum(1 for result in results if result.duplicate),
+        )
+        return results
+
+    def _persist_events_with_receipts_sync(
+        self,
+        events: list[dict[str, Any]],
+    ) -> list[EventInsertResult]:
+        """Normalize/reconcile and commit an ingress batch off the event loop."""
+        from openbiliclaw.sources.event_format import RETRACTABLE_ACTIONS
+
+        needs_retraction_index = any(
+            str(event.get("event_type") or event.get("type") or "").strip().lower()
+            in RETRACTABLE_ACTIONS
+            for event in events
+        )
+        retraction_index: dict[tuple[str, str], datetime] = {}
+        if needs_retraction_index:
+            try:
+                retraction_index = self._database.load_retraction_index()
+            except Exception:
+                # Preserve the historical contract: reconciliation is a
+                # best-effort enrichment and never rejects the durable fact.
+                logger.warning("retraction reconciliation index load failed", exc_info=True)
+        normalized: list[dict[str, Any]] = []
+        for event in events:
+            event_type = str(event.get("event_type") or event.get("type") or "").strip()
+            if event_type not in _EVENT_TYPES:
+                raise ValueError(f"Unsupported event type: {event_type or 'unknown'}")
+            item = dict(event)
+            item["event_type"] = event_type
+            metadata_raw = item.get("metadata", {})
+            if not isinstance(metadata_raw, dict):
+                raise ValueError("Event metadata must be an object")
+            metadata = dict(metadata_raw)
+            if "signal_strength" not in metadata:
+                signal_strength = default_signal_strength_for_event(event_type, metadata)
+                if signal_strength is not None:
+                    metadata["signal_strength"] = signal_strength
+            item["metadata"] = self._reconcile_retracted_positive(
+                event_type,
+                str(item.get("url", "")),
+                metadata,
+                retraction_index=retraction_index,
+            )
+            normalized.append(item)
+        return self._database.insert_events_with_receipts(normalized)
+
     def query_events(
         self,
         *,
@@ -1007,6 +1103,64 @@ class MemoryManager:
             after_event_id=after_event_id,
             event_types=event_types,
         )
+
+    def query_event_rows_after(
+        self,
+        *,
+        after_event_id: int,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """Scan all durable event rows in insertion order."""
+        return self._database.query_event_rows_after(
+            after_event_id=after_event_id,
+            limit=limit,
+        )
+
+    def query_event_rows_by_ids(self, event_ids: list[int]) -> list[dict[str, Any]]:
+        """Read durable first-write payloads for idempotent projections."""
+        return self._database.query_event_rows_by_ids(event_ids)
+
+    def get_latest_event_id(self) -> int:
+        """Return the append-only event ledger watermark."""
+        return self._database.get_latest_event_id()
+
+    def apply_retraction_db_marks(self, events: list[dict[str, Any]]) -> int:
+        """Project durable retractions onto causally-earlier positive rows.
+
+        The generic event owner calls this outside the ingress request. The
+        update is idempotent, and failures intentionally propagate so the
+        owner's cursor remains behind the failed row for recovery.
+        """
+        from openbiliclaw.sources.event_format import (
+            RETRACTABLE_ACTIONS,
+            parse_event_timestamp,
+        )
+
+        total = 0
+        for event in events:
+            event_type = str(event.get("event_type") or event.get("type") or "").strip().lower()
+            metadata = event.get("metadata")
+            if event_type != "feedback" or not isinstance(metadata, dict):
+                continue
+            if str(metadata.get("feedback_type") or "").strip().lower() != "retraction":
+                continue
+            action = str(metadata.get("retracted_action") or "").strip().lower()
+            if action not in RETRACTABLE_ACTIONS:
+                logger.warning(
+                    "generic event projection: skipping out-of-whitelist retracted_action %r",
+                    action,
+                )
+                continue
+            url = str(event.get("url") or "")
+            retraction_at = parse_event_timestamp(metadata)
+            if not url or retraction_at is None:
+                continue
+            total += self._database.mark_positive_events_retracted(
+                [url],
+                action,
+                retraction_at=retraction_at,
+            )
+        return total
 
     def get_event_stats(
         self,

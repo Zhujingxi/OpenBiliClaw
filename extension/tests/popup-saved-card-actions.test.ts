@@ -57,6 +57,8 @@ test("popup behavior events post saved feedback to /events", async () => {
     assert.equal(calls.length, 1);
     assert.equal(calls[0].url, "http://127.0.0.1:8420/api/events");
     assert.equal(calls[0].options.method, "POST");
+    assert.equal(typeof events[0].event_id, "string");
+    assert.ok(events[0].event_id.length > 0);
     assert.deepEqual(JSON.parse(String(calls[0].options.body)), { events });
     assert.doesNotMatch(calls[0].url, /\/feedback$/);
   } finally {

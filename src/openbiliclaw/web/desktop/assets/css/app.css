@@ -457,6 +457,10 @@
     .back-to-top:active { transform: translateY(1px); }
     .back-to-top:focus-visible { outline: none; box-shadow: var(--focus-ring), var(--elev-raised); }
     .back-to-top[hidden] { display: none; }
+    /* The chat composer is pinned to the viewport bottom. Lift the global
+       scroll shortcut above it so a long transcript never makes the floating
+       control intercept the Send button. */
+    body.chat-page-open .back-to-top { bottom: calc(max(22px, env(safe-area-inset-bottom, 0px)) + 76px); }
     body.chat-page-open { overflow-y: hidden; }
     body.chat-page-open .layout { height: calc(100vh - var(--topbar-height)); padding-block: var(--space-6); overflow: hidden; }
     .main-col { min-width: 0; }
@@ -969,6 +973,17 @@
     .dialogue-card-action.is-reject:hover { border-color: var(--danger); background: color-mix(in oklab, var(--danger), transparent 90%); color: var(--danger); }
     .dialogue-card-action.is-defer { border-color: transparent; background: transparent; color: var(--muted); }
     .dialogue-card-action:disabled { opacity: 0.48; cursor: default; }
+    .dialogue-context-bar { display: flex; align-items: center; gap: 12px; min-width: 0; margin: 0 0 var(--space-3); padding: 9px 12px; border: 1px solid var(--border-soft); border-radius: var(--radius-md); background: var(--surface); }
+    .dialogue-context-copy { min-width: 0; display: grid; gap: 2px; overflow: hidden; }
+    .dialogue-context-label { color: var(--accent); font-size: var(--text-xs); font-weight: 800; }
+    .dialogue-context-copy strong, .dialogue-reply-quote strong { min-width: 0; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; text-overflow: ellipsis; line-height: 1.4; }
+    .dialogue-context-copy strong { color: var(--fg); font-size: var(--text-sm); }
+    .dialogue-context-clear { flex: 0 0 auto; min-height: 36px; padding: 0 12px; border: 1px solid var(--border-soft); border-radius: var(--radius-pill); background: var(--surface); color: var(--accent); font: inherit; font-size: var(--text-xs); font-weight: 800; cursor: pointer; }
+    .dialogue-reply-quote { display: flex; max-width: min(82%, 680px); justify-self: end; margin: 0 0 -4px; }
+    .dialogue-reply-quote button { display: grid; gap: 2px; min-width: 0; padding: 7px 10px; border: 1px solid var(--border-soft); border-radius: var(--radius-sm); background: var(--surface); color: var(--fg-2); font: inherit; font-size: var(--text-xs); text-align: left; cursor: pointer; }
+    .dialogue-reply-quote button span { color: var(--accent); font-weight: 800; }
+    .dialogue-reply-quote button strong { color: var(--fg); font-size: var(--text-xs); }
+    .dialogue-context-clear:focus-visible, .dialogue-reply-quote button:focus-visible { outline: none; box-shadow: var(--focus-ring); }
     .dialogue-question-shell { width: min(100%, 760px); display: grid; gap: var(--space-2); }
     .dialogue-question-shell .dialogue-evidence { margin-left: var(--space-3); }
     .chat-page .chat-bubble { width: fit-content; max-width: min(82%, 680px); padding: 12px 15px; line-height: 1.55; }

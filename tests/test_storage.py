@@ -3,6 +3,7 @@
 import json
 import sqlite3
 import tempfile
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -39,6 +40,109 @@ class TestDatabase:
             db.initialize()
             assert db.conn is not None
             db.close()
+
+    def test_thread_connections_preserve_existing_foreign_key_semantics(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Facade calls stay legacy-off; explicit transactions stay on."""
+        db = Database(tmp_path / "foreign-key-semantics.db")
+        db.initialize()
+
+        primary_foreign_keys = int(db.conn.execute("PRAGMA foreign_keys").fetchone()[0])
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            worker_foreign_keys, worker_recommendation_id = executor.submit(
+                lambda: (
+                    int(db.conn.execute("PRAGMA foreign_keys").fetchone()[0]),
+                    db.insert_recommendation("BVWORKERFK", confidence=0.7),
+                )
+            ).result(timeout=5)
+        explicit = db.open_connection()
+        try:
+            explicit_foreign_keys = int(explicit.execute("PRAGMA foreign_keys").fetchone()[0])
+        finally:
+            explicit.close()
+
+        assert primary_foreign_keys == 0
+        assert worker_foreign_keys == 0
+        assert worker_recommendation_id > 0
+        assert explicit_foreign_keys == 1
+        db.close()
+
+    def test_active_worker_reader_never_shares_connection_with_settlement_writer(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A pending SELECT on one worker cannot corrupt another worker's write.
+
+        Real dialogue settlement failed with ``another row available`` while a
+        concurrent status/event worker was stepping a result on the same
+        ``check_same_thread=False`` connection. Keep the reader cursor active
+        across the state transition and pin the generic Database boundary:
+        every worker thread owns a distinct WAL connection.
+        """
+        db = Database(tmp_path / "thread-affine.db")
+        db.initialize()
+        db.create_chat_turn(
+            turn_id="settlement-turn",
+            message="learn",
+            payload={"state": "discussing"},
+        )
+        for index in range(8):
+            db.insert_llm_usage(
+                provider="test",
+                model="test",
+                prompt_tokens=index,
+                completion_tokens=1,
+                estimated_cost_cny=0.0,
+            )
+
+        main_connection_id = id(db.conn)
+        worker_connection_ids: set[int] = set()
+        connection_ids_lock = threading.Lock()
+        reader_ready = threading.Event()
+        writer_finished = threading.Event()
+        release_reader = threading.Event()
+
+        def record_connection() -> sqlite3.Connection:
+            connection = db.conn
+            with connection_ids_lock:
+                worker_connection_ids.add(id(connection))
+            return connection
+
+        def hold_active_reader() -> int:
+            connection = record_connection()
+            cursor = connection.execute("SELECT id FROM llm_usage ORDER BY id")
+            first = cursor.fetchone()
+            assert first is not None
+            reader_ready.set()
+            assert writer_finished.wait(timeout=5)
+            assert release_reader.wait(timeout=5)
+            return 1 + len(cursor.fetchall())
+
+        def transition_payload() -> bool:
+            assert reader_ready.wait(timeout=5)
+            record_connection()
+            try:
+                return db.update_chat_turn_payload_state(
+                    "settlement-turn",
+                    expected_state="discussing",
+                    new_state="pending",
+                )
+            finally:
+                writer_finished.set()
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            reader = executor.submit(hold_active_reader)
+            writer = executor.submit(transition_payload)
+            assert writer.result(timeout=5) is True
+            release_reader.set()
+            assert reader.result(timeout=5) == 8
+
+        assert len(worker_connection_ids) == 2
+        assert main_connection_id not in worker_connection_ids
+        assert db.get_chat_turn("settlement-turn")["payload"]["state"] == "pending"
+        db.close()
 
     def test_claim_token_prevents_stale_evaluation_write(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -3901,6 +4005,7 @@ class TestDatabase:
                 def __init__(self) -> None:
                     self.calls = 0
                     self.commits = 0
+                    self.rollbacks = 0
 
                 def execute(self, sql: str, params: tuple[object, ...]) -> object:
                     self.calls += 1
@@ -3915,6 +4020,9 @@ class TestDatabase:
                 def commit(self) -> None:
                     self.commits += 1
 
+                def rollback(self) -> None:
+                    self.rollbacks += 1
+
             fake_conn = _LockingConnection()
             db._conn = fake_conn  # type: ignore[assignment]
 
@@ -3923,6 +4031,7 @@ class TestDatabase:
             assert recommendation_id == 7
             assert fake_conn.calls == 2
             assert fake_conn.commits == 1
+            assert fake_conn.rollbacks == 1
 
     def test_update_recommendation_content_persists_expression_and_topic(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

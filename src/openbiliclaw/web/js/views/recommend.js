@@ -942,8 +942,27 @@ async function handleDelightAction(d, action) {
     try {
       await respondToDelight(d.bvid, apiResponse, d.title);
     } catch {
-      if (action === "like") {
+      // 失败不假装成功：like/reject 保持卡片原状（不 mark sent、不移除），
+      // 显示重试提示并恢复按钮；其它动作继续 best-effort。
+      if (action === "like" || action === "reject") {
+        const updated = state.activeDelights.map((item) =>
+          (item.bvid || normalizeDelightCandidate(item).bvid) === d.bvid
+            ? { ...item, response_message: "\u64CD\u4F5C\u5931\u8D25\uFF0C\u8BF7\u91CD\u8BD5", response_tone: "error" }
+            : item
+        );
+        patchState({ activeDelights: updated });
         rerenderDelightOnly();
+        setTimeout(() => {
+          const cur = state.activeDelights[state.delightCurrentIndex];
+          if (!cur || normalizeDelightCandidate(cur).bvid !== d.bvid) return;
+          const cleared = state.activeDelights.map((item) =>
+            (item.bvid || normalizeDelightCandidate(item).bvid) === d.bvid
+              ? { ...item, response_message: "", response_tone: "" }
+              : item
+          );
+          patchState({ activeDelights: cleared });
+          rerenderDelightOnly();
+        }, 3000);
         return;
       }
       /* Other legacy actions remain best-effort. */

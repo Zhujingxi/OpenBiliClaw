@@ -123,6 +123,7 @@ export function createBehaviorEvent(
   const contentId = adapter.extractContentId(url);
   const platformMeta = adapter.buildEventMetadata(url);
   return {
+    event_id: globalThis.crypto.randomUUID(),
     type,
     url,
     title: doc.title,

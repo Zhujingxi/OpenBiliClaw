@@ -53,7 +53,7 @@ openbiliclaw [--log-level DEBUG|INFO|WARNING|ERROR] <命令>
 | `import-youtube <path>` | 从 Google Takeout 导入 YouTube 历史 / 订阅 / 点赞 | ✅ |
 | `setup-embedding` | 配置本地 Ollama 作为独立 embedding provider（可选） | ✅ |
 | `recommend` | 查看推荐 | ✅ |
-| `feedback <id> <like\|dislike\|comment\|dismiss>` | 对推荐提交反馈 | ✅ |
+| `feedback <id> <like\|dislike\|comment\|dismiss> [--request-id <stable-id>]` | 对推荐提交反馈；省略 ID 时生成并回显，跨命令重试必须复用 | ✅ |
 | `profile` | 查看用户画像 | ✅ |
 | `questions` | 只读查看对话确认入口的待聊假设与疑惑 | ✅ |
 | `keyword-inspiration-dry-run` | 真实调用当前 LLM + inspiration 搜索 provider 链，预览关键词生成中间链路，不写关键词池；支持 `--persist-axes` | ✅ |
@@ -81,6 +81,10 @@ openbiliclaw [--log-level DEBUG|INFO|WARNING|ERROR] <命令>
 | `probe` | 手动查看并确认猜测兴趣方向 | ✅ |
 | `python -m openbiliclaw.integrations.openclaw.cli next-avoidance-probe` | OpenClaw JSON bridge：拉取下一条不喜欢领域探针 | ✅ |
 | `python -m openbiliclaw.integrations.openclaw.cli respond-avoidance-probe` | OpenClaw JSON bridge：确认 / 否认 / 多聊避雷探针 | ✅ |
+
+CLI/OpenClaw 保持兼容但不新增卡片选择 UI，也不伪造 `reply_to_turn_id` 或
+`dialogue_binding`。它们继续走显式 `legacy_direct` 对话入口；三端图形客户端的
+server-owned binding、context preview 与卡片 action 不改变 CLI 的既有契约。
 
 ## 详细说明
 
@@ -895,15 +899,21 @@ $ openbiliclaw feedback 7 dislike --note "太浅了"
 反馈详情
   推荐ID: 7
   反馈: dislike
+  请求ID: 8f4...（实际输出为完整 ID）
   备注: 太浅了
 
-$ openbiliclaw feedback 7 comment --note "方向对，但我想看更深一点。"
+$ openbiliclaw feedback 7 comment --note "方向对，但我想看更深一点。" \
+  --request-id feedback-7-comment-20260802
 ```
+
+`--request-id` 会 trim，最长 400 字符。省略或只传空白时命令生成 UUID hex，并在「反馈详情」打印出来；如果终端在 durable commit 后丢失响应、或要在另一次命令中重试，必须把第一次输出的 ID 传回 `--request-id`。同一次进程内盲目再生成新 ID 会被视为新的反馈动作。显式 ID 超过 400 字符会在构造 runtime/写库前退出。
 
 每次反馈执行以下两个写入操作：
 
 - 更新 `recommendations` 表中的 `feedback_type` / `feedback_note` / `feedback_at`
 - 写入一条 `event_type="feedback"` 的事件，供后续记忆系统使用
+
+durable event 的首写与 recommendation 投影是命令成功边界；后续即时认知记录、owner drain 或摘要刷新属于可恢复的 follow-up。它们暂时失败时命令仍以退出码 `0` 返回，并明确提示「反馈已记录，画像处理稍后重试」，不会把已经提交的反馈误报为失败。相同 request identity 的重试读取首写 payload；若身份已被不同反馈占用则报冲突，不覆盖原记录。CLI 的 producer namespace 会把该 ID 持久化为 `cli:<request-id>`，用户仍只传/保存未加前缀的输出值。
 
 ### `openbiliclaw fetch-douyin`
 

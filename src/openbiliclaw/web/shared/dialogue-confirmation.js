@@ -92,6 +92,10 @@
     return isRecord(turn?.payload) && turn.payload.type === "card";
   }
 
+  function isTerminalCardTurn(turn) {
+    return isCardTurn(turn) && TERMINAL_CARD_STATES.has(normalizedCardState(turn));
+  }
+
   function isQuestionTurn(turn) {
     return isRecord(turn?.payload) && turn.payload.type === "question";
   }
@@ -349,15 +353,170 @@
     );
   }
 
-  function evidenceRefs(payload) {
-    if (!Array.isArray(payload?.evidence_refs)) return [];
+  function readableEvidenceValues(values) {
+    if (!Array.isArray(values)) return [];
     return [
       ...new Set(
-        payload.evidence_refs
+        values
           .map((item) => (typeof item === "string" || typeof item === "number" ? text(item) : ""))
-          .filter((item) => item && !isOpaqueEvidenceId(item)),
+          .filter((item) => item && !isOpaqueEvidenceId(item))
+          .map((item) => item.slice(0, 240)),
       ),
-    ];
+    ].slice(0, 5);
+  }
+
+  function evidenceRefs(payload) {
+    return readableEvidenceValues(payload?.evidence_refs);
+  }
+
+  function contextPath(turnId) {
+    return `/chat/contexts/${encodeURIComponent(text(turnId))}`;
+  }
+
+  function normalizeContextPreview(value) {
+    if (!isRecord(value) || value.active !== true) return null;
+    const replyToTurnId = text(value.reply_to_turn_id);
+    const sourceType = text(value.source_type).toLowerCase();
+    const kind = text(value.kind).toLowerCase();
+    const generation = Number(value.generation);
+    const title = text(value.title);
+    const digest = text(value.context_digest);
+    if (
+      !replyToTurnId ||
+      !["card", "question"].includes(sourceType) ||
+      !["hypothesis", "confusion"].includes(kind) ||
+      !Number.isInteger(generation) ||
+      generation <= 0 ||
+      !title ||
+      !digest
+    ) return null;
+    return {
+      active: true,
+      reply_to_turn_id: replyToTurnId,
+      source_type: sourceType,
+      kind,
+      generation,
+      title,
+      evidence_labels: readableEvidenceValues(value.evidence_labels),
+      context_digest: digest,
+    };
+  }
+
+  function contextSelectionFromTurn(turn, preview) {
+    const normalized = normalizeContextPreview(preview);
+    if (!normalized || text(turn?.turn_id) !== normalized.reply_to_turn_id) return null;
+    return normalized;
+  }
+
+  function replaceContextSelection(current, next) {
+    const normalized = normalizeContextPreview(next);
+    return normalized || normalizeContextPreview(current);
+  }
+
+  function clearContextSelection() {
+    return null;
+  }
+
+  function contextSelectionForSubmit(selection) {
+    const normalized = normalizeContextPreview(selection);
+    return normalized ? { reply_to_turn_id: normalized.reply_to_turn_id } : {};
+  }
+
+  function contextStorageKey(surface) {
+    const normalized = text(surface).toLowerCase().replace(/[^a-z0-9_-]/g, "-") || "default";
+    return `openbiliclaw.dialogue-context.${normalized}`;
+  }
+
+  function readContextSelection(storage, surface) {
+    if (!storage || typeof storage.getItem !== "function") return null;
+    try {
+      return normalizeContextPreview(JSON.parse(storage.getItem(contextStorageKey(surface)) || "null"));
+    } catch {
+      return null;
+    }
+  }
+
+  function writeContextSelection(storage, surface, selection) {
+    const normalized = normalizeContextPreview(selection);
+    if (!storage || typeof storage.setItem !== "function") return normalized;
+    try {
+      if (normalized) storage.setItem(contextStorageKey(surface), JSON.stringify(normalized));
+      else if (typeof storage.removeItem === "function") storage.removeItem(contextStorageKey(surface));
+    } catch {
+      // Storage is an optimization only; server validation remains authoritative.
+    }
+    return normalized;
+  }
+
+  function contextBarMarkup(selection) {
+    const normalized = normalizeContextPreview(selection);
+    if (!normalized) return "";
+    const kindLabel = normalized.kind === "confusion" ? "疑惑" : "阿B 的猜测";
+    return `<div class="dialogue-context-bar" role="status"><span class="dialogue-context-copy"><span class="dialogue-context-label">正在回复 ${kindLabel}</span><strong title="${escapeHtml(normalized.title)}">${escapeHtml(normalized.title)}</strong></span><button type="button" class="dialogue-context-clear" data-context-clear="true" aria-label="清除当前对话上下文">清除</button></div>`;
+  }
+
+  function contextTitleFromTurn(turn) {
+    const payload = isRecord(turn?.payload) ? turn.payload : {};
+    return text(payload.title) || text(turn?.subject_title) || text(turn?.message) || "已选对话上下文";
+  }
+
+  function replyQuoteMarkup(turn, targetTurns) {
+    const targetId = text(turn?.reply_to_turn_id);
+    if (!targetId) return "";
+    const candidates = Array.isArray(targetTurns)
+      ? targetTurns
+      : targetTurns instanceof Map
+        ? [...targetTurns.values()]
+        : [];
+    const target = candidates.find((item) => text(item?.turn_id) === targetId);
+    const bindingContext = isRecord(turn?.payload?.dialogue_binding?.context)
+      ? turn.payload.dialogue_binding.context
+      : {};
+    const title = text(bindingContext.title) || contextTitleFromTurn(target);
+    const kind = text(bindingContext.kind).toLowerCase() === "confusion"
+      || isQuestionTurn(target)
+      ? "疑惑"
+      : "阿B 的猜测";
+    return `<div class="dialogue-reply-quote" data-reply-quote-target="${escapeHtml(targetId)}"><button type="button" data-reply-quote-target-id="${escapeHtml(targetId)}" aria-label="回到${escapeHtml(kind)}：${escapeHtml(title)}"><span>${escapeHtml(kind)}</span><strong title="${escapeHtml(title)}">${escapeHtml(title)}</strong></button></div>`;
+  }
+
+  function activateReplyQuote(event, root) {
+    const target = event?.target instanceof Element
+      ? event.target.closest("[data-reply-quote-target-id]")
+      : null;
+    if (!(target instanceof HTMLElement)) return false;
+    const turnId = text(target.dataset.replyQuoteTargetId);
+    if (!turnId || !root || typeof root.querySelector !== "function") return false;
+    const escaped = typeof CSS !== "undefined" && typeof CSS.escape === "function"
+      ? CSS.escape(turnId)
+      : turnId.replace(/[^a-zA-Z0-9_-]/g, "\\$&");
+    const destination = root.querySelector(
+      `[data-dialogue-turn-container="${escaped}"], [data-dialogue-turn-id="${escaped}"]`,
+    );
+    if (!destination) return false;
+    destination.scrollIntoView?.({ behavior: "smooth", block: "center" });
+    destination.setAttribute?.("tabindex", "-1");
+    destination.focus?.({ preventScroll: true });
+    return true;
+  }
+
+  function contextErrorCode(error) {
+    return text(error?.details?.detail?.code || error?.details?.code).toLowerCase();
+  }
+
+  function contextErrorMessage(error) {
+    const code = contextErrorCode(error);
+    const serverMessage = text(error?.details?.detail?.message || error?.details?.message);
+    const localizedMessage = {
+      reply_target_not_found: "这条卡片已经不在了，请重新打开一条待聊内容。",
+      reply_target_inactive: "这条上下文已经失效，请重新打开后再发。",
+      reply_target_processing: "这条上下文正在处理，稍后可以重试。",
+      turn_id_conflict: "这条消息已经提交过，当前草稿没有覆盖原记录。",
+      reserved_payload_key: "这次请求包含了不受信任的上下文字段。",
+      invalid_reply_target: "请选择一条仍在讨论中的卡片或疑惑。",
+      dialogue_busy: "后台正在整理上一段对话，请稍后重试。",
+    }[code];
+    return localizedMessage || serverMessage || "这句暂时没有发出去，请保留草稿后重试。";
   }
 
   function evidenceMarkup(payload) {
@@ -468,11 +627,27 @@
     cardActionPath,
     executeCardAction,
     executePendingConfirmationOpen,
+    activateReplyQuote,
+    clearContextSelection,
+    contextBarMarkup,
+    contextErrorCode,
+    contextErrorMessage,
+    contextPath,
+    contextSelectionForSubmit,
+    contextSelectionFromTurn,
+    contextStorageKey,
+    normalizeContextPreview,
     isCardTurn,
+    isTerminalCardTurn,
     isQuestionTurn,
     pendingConfirmationOpenPath,
+    readableEvidenceValues,
+    replaceContextSelection,
+    replyQuoteMarkup,
     renderPendingListMarkup,
     renderTurnMarkup,
+    writeContextSelection,
+    readContextSelection,
     selectDialogueTurns,
   };
   global.OpenBiliClawDialogueConfirmation = api;

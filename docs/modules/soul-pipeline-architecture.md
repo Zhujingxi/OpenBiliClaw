@@ -209,14 +209,19 @@ profile = await builder.build(
 
 **调用流程：**
 ```python
-result = await pipeline.ingest(signal)       # 单个信号
+result = await pipeline.enqueue(signal)       # 单条：只缓冲并持久化，不分析
+result = await pipeline.enqueue_batch(signals) # 批量：只缓冲并持久化，不分析
+result = await pipeline.ingest(signal)        # 单条：enqueue + ready consumption
 result = await pipeline.ingest_batch(signals) # 批量信号
-result = await pipeline.tick()               # 周期检查
+result = await pipeline.tick_if_buffered()    # durable owner 恢复：空 buffer 不跑维护
+result = await pipeline.tick()                # 独立周期检查 + 维护
 result = await pipeline.flush(layers=...)    # 强制刷新
 ```
 
+`enqueue*` 与 `ingest_batch` 复用同一个 `_enqueue_batch_locked()`：retraction 预处理、buffer append / evict、speculator 轻量 observe 只有一份实现。signal `id` 在当前持久 buffer 中是幂等键。event consumer 不采用分离的 enqueue/cursor 写入，而调用 `checkpointed_enqueue_batch()`，在同一个 `_ingest_lock` 与同一次原子 `pipeline_state.json` replace 中发布 buffer+cursor；统一反馈线的 ID 为 `feedback-event-{event_row_id}`。`enqueue` / `ingest_batch` / `tick_if_buffered` / `tick` / `flush` 的 buffer mutation 和 layer drain 共享 `_ingest_lock`；两种 tick 都在成功 drain 后立即保存，只有 `tick_if_buffered()` 在空恢复 pass 直接返回且不运行 maintenance。
+
 **可优化点：**
-- 未实现信号去重
+- 当前只对仍在 buffer 中的 signal ID 去重；已消费 ID 没有独立长期 ledger
 - 没有优先级队列
 - PORTRAIT触发时机可改为"检测到实质变化时"
 
@@ -326,10 +331,10 @@ memory.sync_profile_files(profile)   # 输出 soul_profile.json + .md
 ## 数据流全景图
 
 ```
-用户行为事件 (view/like/skip/search)
-         |
-         v
-ProfileUpdatePipeline.ingest()
+用户行为事件 (view/like/skip/search) ─────→ ProfileUpdatePipeline.ingest()
+推荐 / 扩展 feedback → events durable cursor → atomic checkpoint → tick_if_buffered()
+                                                   |
+                                                   v
   1. classify_signal() --- 按信号类型分类到目标层
   2. LayerBuffer       --- 按层缓冲
   3. is_ready()        --- 阈值检查

@@ -25,7 +25,10 @@ def test_mobile_top_button_tracks_page_and_chat_scroll_containers() -> None:
     assert "function initBackToTop()" in app_js
     assert 'document.getElementById("chat-messages")' in app_js
     assert "target.scrollTo({ top: 0, behavior })" in app_js
+    assert 'document.body.classList.toggle("chat-view-active", id === "chat")' in app_js
     assert ".back-to-top[hidden]" in css
+    assert "body.chat-view-active .back-to-top" in css
+    assert "bottom: calc(160px + var(--safe-bottom));" in css
 
 
 def test_desktop_web_uses_popup_as_the_shared_chat_session() -> None:
@@ -47,6 +50,8 @@ def test_desktop_top_button_covers_page_and_chat_logs() -> None:
     assert '$("#messageChatLog")' in app_js
     assert "function initBackToTop()" in app_js
     assert ".back-to-top[hidden]" in css
+    assert "body.chat-page-open .back-to-top" in css
+    assert "+ 76px" in css
 
 
 def test_shared_chat_surfaces_poll_history_while_chat_is_open() -> None:

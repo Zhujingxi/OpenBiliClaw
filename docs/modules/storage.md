@@ -4,12 +4,13 @@
 
 `src/openbiliclaw/storage/` 负责本地 SQLite 数据库、schema 初始化、候选池计数和高频读写路径。它不理解 runtime state 或用户画像，只提供确定性的持久化 API。
 
-本模块当前承担四类边界：
+本模块当前承担五类边界：
 
 - 行为、推荐、候选池、聊天和鉴权状态的 SQLite 表结构管理。
 - 推荐池 `content_cache` 的可换 / raw / pending 计数口径。
 - discovery 待评估池 `discovery_candidates` 的生命周期管理。
 - 跨平台收藏 / 稍后再看的 canonical 本地 membership、元数据快照、native sync 状态和独立任务快照持久化。
+- 事件入口幂等回执，以及小红书 / 抖音 / YouTube / 知乎来源任务首个终态结果的 crash-safe staging。
 
 ## 已实现功能
 
@@ -20,9 +21,14 @@
 | 视觉 / 弹幕 provenance 迁移 | ✅ | 旧 `content_cache` 自动补 keyframe/danmaku fingerprint、维度和采样签名列；旧 `user_visual_clusters` 补 provenance，另建单行 profile state。keyframe/danmaku selector 只对已有向量（`keyframe_count > 0` / `danmaku_text` 非空）响应 provider/model namespace、维度变化；确认 source no-data 的行不会因 namespace 或采样签名变化反复抓取。请求或已存维度为 0 都表示未知，不当作已证实不兼容；只有两个正维度实际不同才重排 |
 | 初始化运行租约 | ✅ | `init_runs` 同时持久化 `sequence/updated_at`（owner heartbeat）与 `progress_sequence/progress_at`（有效业务进展）。旧库自动补列并从 `updated_at` 回填；预约新 run 时两套时钟一起重置，运行期 orphan reconcile 可安全释放没有 owner 的 `starting/running` 行。 |
 | 初始化事件批量落库 | ✅ | `insert_events_batch()` 复用单事件规范化逻辑，在独立短连接的一次事务中写完阶段 1 的 B站 / X / 知乎 / Reddit / Bangumi 事件；失败整体回滚，避免数百次 commit 拉长初始化和扩大半写状态窗口。 |
+| Database facade 跨线程连接隔离 | ✅ | 长生命周期 `Database` 不再把同一条 `check_same_thread=False` 连接同时交给 API event-loop、status reader 与后台 worker；初始化线程保留 primary，其它调用线程各自缓存一条 WAL connection，同一普通 facade 方法在主线程/worker 都保持既有 `foreign_keys=OFF` 语义，只有显式 `open_connection()` 的原子短事务继续 `foreign_keys=ON`。并发写由 SQLite WAL + `busy_timeout` 串行，不用会卡住 event loop 的 process-wide mutex；`_execute_write()` / `_execute_many_write()` 在任何 `OperationalError` 后先 rollback 清理隐式事务，再决定 lock retry 或原样抛出。线程连接会长期复用，因此绕过 helper 的 direct DML 也必须在每次成功 execute 后 commit（即使 `rowcount=0`，SQLite 仍可能已开启隐式写事务），异常则 rollback；XHS token backfill 与 self-info purge 已按该契约收口。`close()` 先排空 facade 自有 worker，再关闭 registry 内全部连接。 |
 | 实时事件并发写隔离 | ✅ | `insert_event()` 不再让 API、账号同步和后台任务跨线程共享 process-wide SQLite 隐式事务；每条事件使用独立短连接，把 event、`seen_items` 与 backfill cursor 在同一事务提交，锁冲突按既有有界策略重试，退出必关闭连接。这样不会再由其它线程的 commit/rollback 触发 `cannot commit - no transaction is active`。 |
+| Durable event ingress 回执 | ✅ | `events.ingest_key TEXT NOT NULL DEFAULT ''` 由旧库迁移幂等补列；`idx_events_ingest_key_unique` 只约束 `ingest_key <> ''`，因此无幂等键的 legacy/internal direct 写入仍保持 append-only。公开 HTTP 边界更严格：`/api/events` 每项 `event_id`、`/api/feedback` 与 `/api/recommendation-click` 的 `request_id` 都先 trim，再要求 1–400 字符；缺失/空白/超长在 route 前 422，不能产生 event、`seen_items` 或 recommendation 投影。CLI feedback 省略 ID 时生成并回显，OpenClaw CLI/skill 必填；这些边界不会把空 key 传到 storage。`EventIngressService` 把非空客户端键规范为 `producer:client_key`（总长 ≤512），逐项拒绝非法输入，再由 `MemoryManager.persist_events_with_receipts()` / `Database.insert_events_with_receipts()` 在一个独立短连接事务中提交全部合法项、同步 `seen_items` 与 cursor，并按原输入位置返回稳定 `event_id / inserted / duplicate`。并发重放只有首写成功，后续回执指回首写行；commit 后的 owner wake 只是延迟提示，失败不会撤销 durable fact。 |
+| 四来源 staged canonical task result | ✅ | `XhsTaskQueue` / `DyTaskQueue` / `YtTaskQueue` / `ZhihuTaskQueue` 共用 `sources.task_result_protocol`：`stage_final_result()` 在 `BEGIN IMMEDIATE` 下把首个 final callback 合并进 `result_json` 并写 `_openbiliclaw_terminal_status`，此时数据库 `status` 刻意保持非终态，普通 claim lease 仍可在请求 5xx / 进程崩溃后回收。marker 已存在即返回冻结结果，晚到 partial / final / failure（以及 XHS rate-limit）均不得改写。调用方只从冻结行重放 durable event ingress、来源投影与严格 bootstrap seen-key checkpoint；全部成功后 `complete_staged_result()` 才原子翻成 `completed`，且不替换 `result_json`。这些步骤是可重放的多次短事务，不宣称跨表原子；任一点崩溃都由下一次 lease reclaim 从首个 canonical result 修复。 |
 | 画像更新台账（`profile_update_ledger`，v0.3.174+） | ✅ | 认知画像流水线 Phase 0 的**只追加审计表**。`insert_profile_ledger(*, write_point, source, before_summary, after_summary, diff, source_refs, outcome, turn_id, gate_verdict, held_id, error, effect_key='')` 在动作结束后追加一行（`outcome=success\|failed`，`source_refs` JSON 编码）；空 `effect_key` 保持普通 append，结算 worker 传入固定形状 `dialogue:<ref-sha256>:ledger` / `dialogue:<ref-sha256>:derived:<content-sha256>` 时由 partial unique index + `INSERT OR IGNORE` 保证 observer effect 至多一行。`query_profile_ledger(*, days=30, write_point='', limit=200)` 按时间窗 + 写点过滤返回（newest-first，`source_refs` 解码回列表，并带回 `effect_key`）。其余字段：`write_point`、`source`、before/after 摘要、`diff`（≤2000 字符）、`turn_id`、`gate_verdict`、`held_id`。fresh schema + 旧库 `_ensure_profile_update_ledger_table()` 会幂等补列和索引。写点挂钩清单见 `docs/modules/soul.md`。 |
 | Durable chat payload + 单 worker 对象结算收据（v0.3.182+） | ✅ | `chat_turns.payload` 承载结构化卡片/疑惑提问，列表以 `(created_at,rowid)` 稳定排序。`create_chat_confirmation_turn()` 在 `BEGIN IMMEDIATE` 内先查 `attached_to_turn_id`、再查 `(ref,session)`、最后插入 completed turn，保证并发 open 与“卡片先于用户消息”crash gap 均不重复；跨 session 各自产 turn。卡片 discussion payload 只保存 `state`：worker 直接执行 `pending→discussing`，建锚失败补偿回 `pending`，GET 提交的 reconcile 会校正无活锚 orphan；没有 `attempt_token/discussing_at`、三段 discuss CAS 或 stale scanner。`card_settlements` 只保存 hypothesis/confusion/speculation 的 immutable winner `payload`、`applied/result`、稳定 `event_id` 与时间戳，不再保存 claim lease/token 或三段 CAS。`_migrate_card_settlements_to_wave_2()` 以 table rebuild 保留最早表与旧 claim 表的 winner；旧 `seg_event=1` 或 `applied=1` 仅在 migration 中映射为已记录 event identity，runtime schema 不再暴露这些列。`record_card_settlement_event_once()` 在一个 `BEGIN IMMEDIATE` 事务内插入 event 并标记 receipt；`complete_card_settlement()` 无 token，`project_applied_card_settlement()` 仍只消费 `applied=1` 并批量刷新所有 session。`applied=1` 是对象语义终点：显式同 ref retry 只补跑 ledger observer、projection 与精确 generation 解锚，不再重做 object/derived/rebuild。进程内 `DialogueSettlementQueue` 不落这层 job/inbox 表，重启恢复依赖显式 action 重试或 GET reconcile。 |
+| Turn relation + immutable binding（2026-08-01） | ✅ | `chat_turns.reply_to_turn_id TEXT NOT NULL DEFAULT ''` 与普通索引采用 additive、幂等迁移；旧行保持空 relation。API 在 capture canonical target 后同步写 user row，`payload.dialogue_binding` 只保存 server-owned `bound/ordinary/detached` binding 与完整 digest；客户端同名事实不会直接写入。context preview 是只读查询，retry 比较已存 normalized request，避免同 turn id 改 target、message 或 generation。 |
+| Durable reply CAS 与完整恢复扫描 | ✅ | `complete_chat_turn()` / `fail_chat_turn()` 都以 `WHERE status='pending'` compare-and-swap 并返回是否真正改变一行，重复 completion、迟到 failure 与崩溃后重放不能覆盖首个可见终态。`list_pending_chat_turn_page(after_rowid, limit)` 以不可变 rowid 分页，startup 不再静默截断 1000 条；`count_pending_chat_turns()` 提供 runtime status 的真实 backlog。取消、provider/config/timeout/rate-limit 等瞬态错误不调用 failure CAS，row 保持 pending 供同一 app worker 或下次进程恢复。 |
 | 态势门控 shadow 采数 + 代理折价（v0.3.176+） | ✅ | 认知画像流水线 Phase 3 / Wave B 遗留。`posture_gate_shadow_stats()` 从 `profile_update_ledger` 汇总 enforce save-time 校验所需的 shadow 判定统计：最早**有效**判定时间（`gate_verdict IN (shadow_accept, shadow_downgrade, shadow_reject)`，不含 `shadow_error`）+ 近 14 天 / 近 7 天有效判定数。`discount_events_by_confusion(evidence_refs)` 对可解析为事件 id 的 `evidence_refs` 关联 events 行 patch `metadata.discounted_by_confusion=true` + `signal_strength` 折至 0.2（`sources/event_format.apply_confusion_discount`，幂等）；非 id ref 跳过，不删行、不改其它列。供疑惑 `proxy_behavior` 出口调用。 |
 | 疑惑对象表 + 归属重放队列（`confusions`，v0.3.182+） | ✅ | 原有状态、72h ask 冷却、partial unique `clarifying≤1` 与 `held_updates` 保持；新增幂等迁移列 `replay_queue TEXT NOT NULL DEFAULT '[]'`。`release_orphan_confusion_claim()` 同时要求 status/`expected_ask_turn_id` 匹配、claim 的 `updated_at` 已超过调用方给定最小年龄、且同一原子 UPDATE 内 `NOT EXISTS(chat_turns.turn_id)`，才把真 crash-gap 孤儿恢复为 open 并清除未实际提问的 `ask_turn_id/asked_at`；活跃 claim→create 窗口和已有 live turn 都不会被回收。`enqueue_confusion_replay()` 在独立 `BEGIN IMMEDIATE` 中去重入尾、上限 5、返回最旧逐出项；`pop_confusion_replay_head(expected_id=...)` 只允许精确队头出队（顺序 fencing）；`clear_confusion_replay_queue()` 原子返回并清空。`list_pending_confusion_dialogue_replays()` **优先扫描任意 status 的非空 replay_queue**（覆盖 resolve commit→pop 之间崩溃后已 terminal 的行），剩余额度再查 `clarifying` 且 completed、晚于 `asked_at`、尚无 turn payload receipt 的 classification gap。`mark_confusion_dialogue_replay_processed()` 可在 turn 仍 pending 时先写幂等 receipt，完成后扫描不会重复计数。 |
 | Retraction 事件折价（离线重读面） | ✅ | `mark_positive_events_retracted(identity_urls, retracted_action, *, retraction_at)` 在独立短连接的一次事务中，对 `event_type == retracted_action` 且 URL 归一化 identity key（`sources/identity_keys.dedup_key`：tweet_id / bvid / mid / xhs note_id）命中、**且事件时间早于 `retraction_at`** 的行 patch `metadata.retracted=true` + `signal_strength=min(现值,0.2)`；事件时间不可得的行保守不标。无时间窗口（identity key 全局唯一），覆盖 `openbiliclaw init` 全量重建与 12h 认知整理等重读 events 表路径；不删行、不改 `event_type`/`url`。`latest_retraction_time_for(url, action)` 返回该 identity + action 最新的已存 retraction 事件时间，供落库路径对账迟到正向事件（account_sync 回填）。`retracted_action` 越界返回 0/None。 |
@@ -60,6 +66,55 @@ fresh servable pool predicate，并可按 embedding fingerprint、正维度和 s
 增量补列，旧的无 provenance 行不会被当作当前 embedding namespace 的完成结果。
 
 ## 公开 API
+
+### Durable event ingress 回执
+
+```python
+receipts = db.insert_events_with_receipts(
+    [
+        {
+            "event_type": "click",
+            "ingest_key": "web:request-7",
+            "metadata": {},
+        }
+    ]
+)
+
+first = receipts[0]
+# EventInsertResult(event_id=..., event_type="click",
+#                   ingest_key="web:request-7", inserted=True)
+assert first.duplicate is False
+```
+
+`Database.insert_events_with_receipts()` 假定调用方已经完成 producer namespace；面向 API / 扩展 / account sync 的入口应调用 `EventIngressService.accept()` / `accept_batch()`，由它验证 `producer`、补 `producer:` 前缀，并返回保留输入位置与逐项 rejection 的 `EventIngressReceipt`。同批非法项在写事务前被剔除；剩余合法项要么在一次事务内全部提交，要么全部回滚。重复键返回数据库中首写行的稳定 id 与 event type，不采用重放请求中变化后的字段。
+
+数据库保留空 `ingest_key` 只为旧库迁移、历史 append-only 调用与不暴露重试语义的内部 direct writer；它不是公开客户端的“可选幂等”契约。新增用户动作入口必须在进入 storage 前取得稳定非空 ID，并为同一动作的响应丢失/网络重试复用该 ID。
+
+### 四来源任务结果 staging
+
+```python
+canonical = xhs_queue.stage_final_result(
+    task_id,
+    terminal_status="ok",
+    notes=notes,
+)
+
+# 只从 canonical 执行幂等的 event / source / seen-key 投影。
+xhs_queue.complete_staged_result(task_id)
+```
+
+上述协议适用于 `XhsTaskQueue`、`DyTaskQueue`、`YtTaskQueue` 与 `ZhihuTaskQueue`。`stage_final_result()` 的首写 winner 是逻辑终态，但仍可由原 claim lease 回收；`complete_staged_result()` 只允许存在 staged marker 的非失败任务翻成 `completed`。业务层不得在两者之间信任重试 callback 的新字段，也不得先翻 terminal 再做事件或 seen-key 投影，否则中途崩溃将失去自动修复入口。
+
+### Durable chat reply 状态
+
+```python
+changed = db.complete_chat_turn(turn_id, reply=reply)  # pending -> completed CAS
+failed = db.fail_chat_turn(turn_id, error=safe_error)  # pending -> failed CAS
+page = db.list_pending_chat_turn_page(after_rowid=0, limit=500)
+depth = db.count_pending_chat_turns()
+```
+
+两个终态写都只允许 pending 行变化并返回 `bool`；调用方在 `False` 时重读行，已有终态视为幂等完成，仍为 pending 则按持久化瞬态故障重试。恢复 page 按 rowid 严格升序，不能用 `created_at` 单独排序（SQLite 时间戳可能同秒）。
 
 ### 对象结算 winner 收据
 

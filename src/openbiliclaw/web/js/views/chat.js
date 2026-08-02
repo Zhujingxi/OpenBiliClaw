@@ -6,6 +6,7 @@
 
 import {
   startChatTurn,
+  fetchChatContext,
   fetchChatTurn,
   fetchChatTurns,
   fetchPendingConfirmations,
@@ -54,13 +55,24 @@ if (!dialogueConfirmation) {
   throw new Error("dialogue-confirmation shared helper did not load");
 }
 const {
+  activateReplyQuote,
+  clearContextSelection,
+  contextBarMarkup,
+  contextErrorCode,
+  contextErrorMessage,
+  contextSelectionFromTurn,
   executeCardAction,
   executePendingConfirmationOpen,
   isCardTurn,
+  isTerminalCardTurn,
   isQuestionTurn,
+  normalizeContextPreview,
+  readContextSelection,
+  replyQuoteMarkup,
   renderPendingListMarkup,
   renderTurnMarkup,
   selectDialogueTurns,
+  writeContextSelection,
 } = dialogueConfirmation;
 
 let $root = null;
@@ -75,6 +87,13 @@ let historyRefreshTimer = null;
 let historyRefreshInFlight = false;
 let lastHistorySignature = null;
 let dialogueStatus = { message: "", tone: "info" };
+let retainedDraft = "";
+let dialogueContextSelection = readContextSelection(
+  (() => {
+    try { return globalThis.localStorage; } catch { return null; }
+  })(),
+  "mobile-web",
+);
 const dialogueTurnsById = new Map();
 const dialogueCardActionAbortController = new AbortController();
 let pendingConfirmations = {
@@ -116,6 +135,60 @@ let inputFocused = false;
 
 function chatSession(scope = "chat") {
   return getMobileChatSession(scope);
+}
+
+function contextStorage() {
+  try { return globalThis.localStorage; } catch { return null; }
+}
+
+function storeDialogueContext(selection) {
+  dialogueContextSelection = writeContextSelection(contextStorage(), "mobile-web", selection);
+  return dialogueContextSelection;
+}
+
+async function validateDialogueContext({ announce = false } = {}) {
+  const current = normalizeContextPreview(dialogueContextSelection);
+  if (!current) return null;
+  const contextTarget = turns.find((turn) => turn?.turn_id === current.reply_to_turn_id);
+  if (isTerminalCardTurn(contextTarget)) {
+    storeDialogueContext(clearContextSelection());
+    return null;
+  }
+  try {
+    const preview = normalizeContextPreview(await fetchChatContext(current.reply_to_turn_id));
+    if (!preview) throw new Error("invalid_context_preview");
+    return storeDialogueContext(preview);
+  } catch (error) {
+    const code = contextErrorCode(error);
+    if (["reply_target_not_found", "reply_target_inactive", "invalid_reply_target"].includes(code)) {
+      storeDialogueContext(clearContextSelection());
+      if (announce) setDialogueStatus(contextErrorMessage(error), "error");
+    } else if (announce && code === "reply_target_processing") {
+      setDialogueStatus(contextErrorMessage(error), "info");
+    }
+    return code === "reply_target_processing" ? current : null;
+  }
+}
+
+async function selectDialogueContext(turnId, preview = null) {
+  const turn = turns.find((item) => item?.turn_id === turnId) || { turn_id: turnId };
+  const candidate = contextSelectionFromTurn(turn, preview);
+  if (candidate) {
+    storeDialogueContext(candidate);
+    render();
+    return candidate;
+  }
+  try {
+    const fetched = normalizeContextPreview(await fetchChatContext(turnId));
+    const fetchedCandidate = contextSelectionFromTurn(turn, fetched);
+    if (!fetchedCandidate) throw new Error("invalid_context_preview");
+    storeDialogueContext(fetchedCandidate);
+    render();
+    return fetchedCandidate;
+  } catch (error) {
+    setDialogueStatus(contextErrorMessage(error), "error");
+    return null;
+  }
 }
 
 // ── Escape helper ────────────────────────────────────────────
@@ -202,7 +275,9 @@ function render() {
   const previousPendingScrollTop = previousPendingList?.scrollTop || 0;
   const shouldStickToBottom = !previousMessages || isNearChatBottom(previousMessages);
   const openEvidence = openEvidenceTurnIds(previousMessages);
-  const previousDraft = previousInput instanceof HTMLTextAreaElement ? previousInput.value : "";
+  const previousDraft = previousInput instanceof HTMLTextAreaElement
+    ? previousInput.value || retainedDraft
+    : retainedDraft;
   const restoreInputFocus = document.activeElement === previousInput;
   $root.innerHTML = "";
 
@@ -230,7 +305,7 @@ function render() {
     const container = document.createElement("div");
     container.className = "dialogue-turn";
     container.dataset.dialogueTurnContainer = turn?.turn_id || "";
-    container.innerHTML = renderTurnMarkup(turn, { surface: "desktop" });
+    container.innerHTML = `${replyQuoteMarkup(turn, dialogueTurns)}${renderTurnMarkup(turn, { surface: "desktop" })}`;
     if (
       !isCardTurn(turn) &&
       !isQuestionTurn(turn) &&
@@ -243,6 +318,10 @@ function render() {
       container.appendChild(thinking);
     }
     if (turn.status === "error" || turn.status === "failed") {
+      const errBubble = container.querySelector('[data-part="assistant"]');
+      if (errBubble) {
+        errBubble.textContent = turn.error || "\u56DE\u590D\u5931\u8D25";
+      }
       const retryBtn = document.createElement("button");
       retryBtn.className = "chat-retry-btn";
       retryBtn.type = "button";
@@ -258,6 +337,7 @@ function render() {
     userScrolledUp = !isNearChatBottom(messages);
   });
   messages.addEventListener("click", (event) => {
+    activateReplyQuote(event, messages);
     const button = event.target instanceof Element
       ? event.target.closest("[data-card-action]")
       : null;
@@ -265,6 +345,19 @@ function render() {
   });
 
   shell.appendChild(messages);
+
+  const contextMarkup = contextBarMarkup(dialogueContextSelection);
+  if (contextMarkup) {
+    const contextBar = document.createElement("div");
+    contextBar.innerHTML = contextMarkup;
+    const clearButton = contextBar.querySelector("[data-context-clear]");
+    clearButton?.addEventListener("click", () => {
+      storeDialogueContext(clearContextSelection());
+      setDialogueStatus("已清除这条消息的对话上下文。", "info");
+      render();
+    });
+    shell.appendChild(contextBar.firstElementChild || contextBar);
+  }
 
   // Input row
   const inputRow = document.createElement("div");
@@ -386,22 +479,31 @@ async function handleSend() {
 
   sending = true;
   const turnId = `m-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const replyToTurnId = dialogueContextSelection?.reply_to_turn_id || "";
 
+  retainedDraft = "";
   input.value = "";
-  turns.push({ turn_id: turnId, message: text, response: null, status: "pending" });
+  turns.push({
+    turn_id: turnId,
+    message: text,
+    response: null,
+    status: "pending",
+    reply_to_turn_id: replyToTurnId,
+  });
   userScrolledUp = false;
   setDialogueStatus("阿B 正在整理这句话…", "info");
   render();
 
   try {
-    await startChatTurn({ turnId, ...chatSession(), message: text });
+    await startChatTurn({ turnId, ...chatSession(), replyToTurnId, message: text });
     pendingTurnId = turnId;
     pollForResponse();
-  } catch {
+  } catch (error) {
     const t = turns.find((t) => t.turn_id === turnId);
     if (t) { t.status = "error"; t.error = "\u53D1\u9001\u5931\u8D25"; }
+    retainedDraft = text;
     sending = false;
-    setDialogueStatus("这句暂时没发出去，可以再试一次。", "error");
+    setDialogueStatus(contextErrorMessage(error), "error");
     render();
   }
 }
@@ -410,6 +512,7 @@ async function retryTurn(failedTurn) {
   if (sending) return;
   failedTurn.status = "pending";
   failedTurn.error = "";
+  retainedDraft = "";
   sending = true;
   render();
 
@@ -420,14 +523,16 @@ async function retryTurn(failedTurn) {
       message: failedTurn.message,
       subjectId: failedTurn.subject_id || "",
       subjectTitle: failedTurn.subject_title || "",
+      replyToTurnId: failedTurn.reply_to_turn_id || "",
     });
     pendingTurnId = failedTurn.turn_id;
     pollForResponse();
-  } catch {
+  } catch (error) {
     failedTurn.status = "error";
     failedTurn.error = "\u91CD\u8BD5\u5931\u8D25";
     sending = false;
-    setDialogueStatus("重试没有成功，请检查后端连接。", "error");
+    retainedDraft = failedTurn.message || "";
+    setDialogueStatus(contextErrorMessage(error), "error");
     render();
   }
 }
@@ -485,6 +590,11 @@ async function handleDialogueCardAction(button) {
       );
       return;
     }
+    if (action === "discuss") {
+      await selectDialogueContext(turnId, response?.context_preview || null);
+    } else if (dialogueContextSelection?.reply_to_turn_id === turnId) {
+      storeDialogueContext(clearContextSelection());
+    }
     await loadHistory();
     setDialogueStatus(
       action === "discuss"
@@ -498,8 +608,8 @@ async function handleDialogueCardAction(button) {
               : "已记下这条猜测不准。",
       "success",
     );
-  } catch {
-    setDialogueStatus("这次没有结算成功，卡片已经恢复，可以重试。", "error");
+  } catch (error) {
+    setDialogueStatus(contextErrorMessage(error), "error");
     render();
   }
 }
@@ -521,7 +631,10 @@ async function handlePendingConfirmationOpen(button) {
         setDialogueStatus(`${message}，空闲后会自动打开。`, "info");
       },
     });
-    if (turn?.turn_id) updateDialogueTurn(turn);
+    if (turn?.turn_id) {
+      updateDialogueTurn(turn);
+      await selectDialogueContext(turn.turn_id);
+    }
     await loadHistory();
     userScrolledUp = false;
     setDialogueStatus(
@@ -802,6 +915,11 @@ async function loadHistory() {
         pendingConfirmations = { ...pendingConfirmations, ...nextPending };
         changed = true;
       }
+    }
+    const contextBefore = dialogueContextSelection?.reply_to_turn_id || "";
+    await validateDialogueContext({ announce: true });
+    if ((dialogueContextSelection?.reply_to_turn_id || "") !== contextBefore) {
+      changed = true;
     }
     if (!changed) return;
     render();

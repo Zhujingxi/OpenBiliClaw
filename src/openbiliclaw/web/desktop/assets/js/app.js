@@ -24,6 +24,7 @@
       events: "/events",
       click: "/recommendation-click",
       chatTurns: "/chat/turns",
+      dialogueContexts: "/chat/contexts",
       pendingConfirmations: "/chat/pending-confirmations",
       interestProbeRespond: "/interest-probes/respond",
       avoidanceProbeRespond: "/avoidance-probes/respond",
@@ -50,16 +51,35 @@
     const dialogueConfirmation = globalThis.OpenBiliClawDialogueConfirmation;
     if (!dialogueConfirmation) throw new Error("dialogue-confirmation shared helper did not load");
     const {
+      activateReplyQuote,
+      clearContextSelection,
+      contextBarMarkup,
+      contextErrorCode,
+      contextErrorMessage,
+      contextSelectionFromTurn,
       executeCardAction,
       executePendingConfirmationOpen,
       isCardTurn,
+      isTerminalCardTurn,
       isQuestionTurn,
+      normalizeContextPreview,
+      readContextSelection,
+      replyQuoteMarkup,
       renderPendingListMarkup,
       renderTurnMarkup,
-      selectDialogueTurns
+      selectDialogueTurns,
+      writeContextSelection,
     } = dialogueConfirmation;
+    let dialogueContextSelection = readContextSelection(
+      (() => {
+        try { return window.localStorage; } catch { return null; }
+      })(),
+      "desktop-web",
+    );
+    let retainedChatDraft = "";
     const dialogueCardActionAbortController = new AbortController();
     const CHAT_SCROLL_BOTTOM_TOLERANCE_PX = 48;
+    let hasOpenedDialogueChatPage = false;
 
     const state = {
       query: "",
@@ -690,6 +710,45 @@
       try { window.localStorage?.setItem(key, value); } catch {}
     }
 
+    const PENDING_REQUEST_IDS_KEY = "openbiliclaw.webui.pendingRequestIds";
+    const pendingRequestIds = new Map();
+
+    function newRequestId() {
+      if (typeof globalThis.crypto?.randomUUID === "function") return globalThis.crypto.randomUUID();
+      return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    }
+
+    function loadPendingRequestIds() {
+      try {
+        const parsed = JSON.parse(storageGet(PENDING_REQUEST_IDS_KEY) || "{}");
+        if (!parsed || typeof parsed !== "object") return;
+        Object.entries(parsed).forEach(([key, value]) => {
+          if (typeof value === "string" && value) pendingRequestIds.set(key, value);
+        });
+      } catch {}
+    }
+
+    function persistPendingRequestIds() {
+      storageSet(PENDING_REQUEST_IDS_KEY, JSON.stringify(Object.fromEntries(pendingRequestIds)));
+    }
+
+    function rememberPendingRequestId(namespace, identity) {
+      loadPendingRequestIds();
+      const key = `${namespace}:${identity}`;
+      const existing = pendingRequestIds.get(key);
+      if (existing) return { key, requestId: existing };
+      const requestId = newRequestId();
+      pendingRequestIds.set(key, requestId);
+      persistPendingRequestIds();
+      return { key, requestId };
+    }
+
+    function forgetPendingRequestId(pending) {
+      if (!pending || pendingRequestIds.get(pending.key) !== pending.requestId) return;
+      pendingRequestIds.delete(pending.key);
+      persistPendingRequestIds();
+    }
+
     const AUTO_LOAD_ON_SCROLL_KEY = "openbiliclaw.webui.autoLoadOnScroll";
     const AUTO_LOAD_COOLDOWN_MS = 8000;
     // 校准：一行卡片(16:9 封面 + 文案)高约 250–350px，若预载边距接近一行高度，
@@ -1270,6 +1329,18 @@
       } finally {
         if (timeoutId) window.clearTimeout(timeoutId);
       }
+    }
+
+    async function requestJsonWithPendingId(path, namespace, identity, payload, options = {}) {
+      const pending = rememberPendingRequestId(namespace, identity);
+      const result = await requestJsonStrict(path, {
+        ...options,
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+        body: JSON.stringify({ ...payload, request_id: pending.requestId })
+      });
+      forgetPendingRequestId(pending);
+      return result;
     }
 
     function configErrorMessage(details) {
@@ -2295,8 +2366,10 @@
     function openChatPage() {
       closeMobileMenu();
       document.querySelectorAll(".drawer.is-open, .overlay.is-open").forEach((panel) => closePanel(panel.id));
+      const forceBottom = !hasOpenedDialogueChatPage;
       showMainPage("chatPage");
-      renderChat({ forceBottom: true });
+      renderChat({ forceBottom });
+      hasOpenedDialogueChatPage = true;
       scheduleDialogueConfirmationRefresh();
       const input = document.getElementById("chatInput");
       window.scrollTo({ top: 0, behavior: "smooth" });
@@ -3514,6 +3587,10 @@ ${savedCardFeedbackBarHtml(listKind)}
     function postSavedContentFeedback(item, feedbackType, note = "") {
       const saved = desktopSavedItem(item);
       const contentId = saved.content_id || item.bvid || "";
+      const pending = rememberPendingRequestId(
+        "behavior-command",
+        JSON.stringify([saved.item_key || item.id || contentId, feedbackType, note])
+      );
       return requestJsonStrict(ENDPOINTS.events, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -3524,6 +3601,7 @@ ${savedCardFeedbackBarHtml(listKind)}
             title: saved.title || "",
             url: saved.content_url || "",
             timestamp: Date.now(),
+            event_id: pending.requestId,
             metadata: {
               feedback_type: feedbackType,
               bvid: contentId,
@@ -3541,6 +3619,7 @@ ${savedCardFeedbackBarHtml(listKind)}
             ? "画像尚未就绪，暂时无法记录反馈。"
             : "反馈未被接受，请稍后重试。");
         }
+        forgetPendingRequestId(pending);
         return res;
       });
     }
@@ -3819,10 +3898,7 @@ ${cardFeedbackBarHtml()}`;
 
     function trackRecommendationClick(item) {
       const url = contentUrl(item);
-      void requestJson(ENDPOINTS.click, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      const payload = {
           bvid: item.bvid,
           content_id: item.content_id || item.bvid,
           content_url: url || item.content_url,
@@ -3831,8 +3907,28 @@ ${cardFeedbackBarHtml()}`;
           recommendation_id: item.id,
           topic_label: item.topic,
           up_name: item.up || item.up_name
-        })
-      }).catch(() => {});
+      };
+      const stableRecommendationId = payload.recommendation_id ?? null;
+      const stableContentId = String(payload.content_id || payload.bvid || "").trim();
+      let fallbackUrl = "";
+      if (stableRecommendationId == null && !stableContentId) {
+        const rawUrl = String(payload.content_url || "").trim();
+        try {
+          const normalizedUrl = new URL(rawUrl, globalThis.location?.href);
+          normalizedUrl.hash = "";
+          fallbackUrl = normalizedUrl.toString();
+        } catch { fallbackUrl = rawUrl; }
+      }
+      const identity = JSON.stringify([
+        stableRecommendationId,
+        stableContentId || fallbackUrl
+      ]);
+      void requestJsonWithPendingId(
+        ENDPOINTS.click,
+        "recommendation-click",
+        identity,
+        payload
+      ).catch(() => {});
     }
 
     function openRecommendation(item, card) {
@@ -3843,13 +3939,17 @@ ${cardFeedbackBarHtml()}`;
     }
 
     function submitFeedback(item, feedback_type, note = "", { keepalive = false } = {}) {
-      return requestJsonStrict(ENDPOINTS.feedback, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ recommendation_id: item.id, feedback_type, note }),
+      const payload = { recommendation_id: item.id, feedback_type, note };
+      return requestJsonWithPendingId(
+        ENDPOINTS.feedback,
+        "feedback",
+        JSON.stringify([item.id, feedback_type, note]),
+        payload,
+        {
         timeoutMs: 30000,
         keepalive
-      });
+        }
+      );
     }
 
     function feedbackActionKey(item) {
@@ -5725,16 +5825,25 @@ ${cardFeedbackBarHtml()}`;
       const feedbackToast = response === "like" ? "惊喜推荐已喜欢" : response === "dislike" ? "这类惊喜先少来点" : "已标为看过，不再推荐";
       const toastImmediately = response === "like" || response === "dislike";
       if (toastImmediately) showToast(feedbackToast);
-      const feedbackResult = await requestJson(ENDPOINTS.delightRespond, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      let feedbackResult;
+      try {
+        const payload = {
           bvid: delight.bvid,
           response,
           title: delight.title,
           message: ""
-        })
-      });
+        };
+        feedbackResult = await requestJsonWithPendingId(
+          ENDPOINTS.delightRespond,
+          "delight-response",
+          JSON.stringify([delight.bvid, response]),
+          payload
+        );
+      } catch (error) {
+        // 失败不假装成功：保留当前卡片，下次可再试。
+        showToast(response === "like" ? "这次喜欢还没记上，可以再试一次" : "这次还没记上，请再试一次");
+        return;
+      }
       if (response === "dismiss" && feedbackResult == null) {
         showToast("这次还没记上，请再试一次");
         setActiveDelight(state.delightIndex);
@@ -5808,7 +5917,9 @@ ${cardFeedbackBarHtml()}`;
 
     function chatHtml(messages) {
       return messages.map((msg) => {
-        if (msg?.turn) return renderTurnMarkup(msg.turn, { surface: "desktop" });
+        if (msg?.turn) {
+          return `${replyQuoteMarkup(msg.turn, desktopDialogueTurns())}${renderTurnMarkup(msg.turn, { surface: "desktop" })}`;
+        }
         return `<div class="chat-bubble ${msg.role === "user" ? "user" : "agent"}">${escapeHtml(msg.text)}</div>`;
       }).join("");
     }
@@ -5881,17 +5992,7 @@ ${cardFeedbackBarHtml()}`;
       const signature = JSON.stringify(items);
       if (signature === lastDialogueChatSignature) return;
       lastDialogueChatSignature = signature;
-      state.chat = items.flatMap((turn) => {
-        if (isCardTurn(turn) || isQuestionTurn(turn)) return [{ turn }];
-        const failed = String(turn.status || "").toLowerCase() === "failed";
-        const agentText = failed
-          ? turn.error || "这句还没发出去，稍后再试。"
-          : turn.reply || turn.assistant_message || "等待后端回复中。";
-        return [
-          { role: "user", text: turn.message || turn.user_message || "" },
-          { role: "agent", text: agentText }
-        ].filter((item) => item.text);
-      });
+      state.chat = items.map((turn) => ({ turn }));
       renderChat();
     }
 
@@ -5920,6 +6021,96 @@ ${cardFeedbackBarHtml()}`;
       }
     }
 
+    function desktopDialogueTurns() {
+      return state.chat.map((entry) => entry?.turn).filter((turn) => turn && turn.turn_id);
+    }
+
+    function storeDialogueContext(selection) {
+      dialogueContextSelection = writeContextSelection(
+        (() => {
+          try { return window.localStorage; } catch { return null; }
+        })(),
+        "desktop-web",
+        selection,
+      );
+      return dialogueContextSelection;
+    }
+
+    async function validateDialogueContext({ announce = false } = {}) {
+      const current = normalizeContextPreview(dialogueContextSelection);
+      if (!current) return null;
+      const contextTarget = desktopDialogueTurns().find(
+        (turn) => turn.turn_id === current.reply_to_turn_id
+      );
+      if (isTerminalCardTurn(contextTarget)) {
+        storeDialogueContext(clearContextSelection());
+        return null;
+      }
+      try {
+        const preview = normalizeContextPreview(await requestJsonStrict(
+          `${ENDPOINTS.dialogueContexts}/${encodeURIComponent(current.reply_to_turn_id)}`,
+          { cache: "no-store", timeoutMs: 5000 },
+        ));
+        if (!preview) throw new Error("invalid_context_preview");
+        return storeDialogueContext(preview);
+      } catch (error) {
+        const code = contextErrorCode(error);
+        if (["reply_target_not_found", "reply_target_inactive", "invalid_reply_target"].includes(code)) {
+          storeDialogueContext(clearContextSelection());
+          if (announce) showToast(contextErrorMessage(error));
+        } else if (announce && code === "reply_target_processing") {
+          showToast(contextErrorMessage(error));
+        }
+        return code === "reply_target_processing" ? current : null;
+      }
+    }
+
+    async function selectDialogueContext(turnId, preview = null) {
+      const target = desktopDialogueTurns().find((turn) => turn.turn_id === turnId) || { turn_id: turnId };
+      const candidate = contextSelectionFromTurn(target, preview);
+      if (candidate) {
+        storeDialogueContext(candidate);
+        renderDialogueContextBar();
+        return candidate;
+      }
+      try {
+        const fetched = normalizeContextPreview(await requestJsonStrict(
+          `${ENDPOINTS.dialogueContexts}/${encodeURIComponent(turnId)}`,
+          { cache: "no-store", timeoutMs: 5000 },
+        ));
+        const fetchedCandidate = contextSelectionFromTurn(target, fetched);
+        if (!fetchedCandidate) throw new Error("invalid_context_preview");
+        storeDialogueContext(fetchedCandidate);
+        renderDialogueContextBar();
+        return fetchedCandidate;
+      } catch (error) {
+        showToast(contextErrorMessage(error));
+        return null;
+      }
+    }
+
+    function renderDialogueContextBar() {
+      const form = $("#chatForm");
+      if (!form) return;
+      let bar = $("#desktopDialogueContextBar");
+      const markup = contextBarMarkup(dialogueContextSelection);
+      if (!markup) {
+        bar?.remove();
+        return;
+      }
+      if (!bar) {
+        bar = document.createElement("div");
+        bar.id = "desktopDialogueContextBar";
+        form.parentElement?.insertBefore(bar, form);
+      }
+      bar.innerHTML = markup;
+      bar.querySelector("[data-context-clear]")?.addEventListener("click", () => {
+        storeDialogueContext(clearContextSelection());
+        showToast("已清除这条消息的对话上下文");
+        renderDialogueContextBar();
+      });
+    }
+
     async function refreshDesktopPendingConfirmations() {
       const payload = await requestJsonStrict(
         `${ENDPOINTS.pendingConfirmations}?session=${encodeURIComponent(SHARED_CHAT_SESSION)}`,
@@ -5935,6 +6126,8 @@ ${cardFeedbackBarHtml()}`;
 
     async function refreshDialogueConfirmationSurface() {
       await Promise.allSettled([refreshDialogueTurns(), refreshDesktopPendingConfirmations()]);
+      await validateDialogueContext({ announce: true });
+      renderDialogueContextBar();
     }
 
     async function refreshSharedChatSurface() {
@@ -5999,6 +6192,12 @@ ${cardFeedbackBarHtml()}`;
           }
           return;
         }
+        if (action === "discuss") {
+          await selectDialogueContext(turnId, response?.context_preview || null);
+        } else if (dialogueContextSelection?.reply_to_turn_id === turnId) {
+          storeDialogueContext(clearContextSelection());
+          renderDialogueContextBar();
+        }
         if (response?.outcome === "already_settled") showToast("这条已在另一个窗口结算，已同步最终状态");
         else if (action === "discuss") {
           showToast("好，沿着这条猜测继续聊");
@@ -6007,8 +6206,8 @@ ${cardFeedbackBarHtml()}`;
         else if (response?.state === "revised") showToast("已按你的修正记下这条");
         else showToast(action === "confirm" ? "已确认这条猜测" : "已记下这条猜测不准");
         await refreshDialogueConfirmationSurface();
-      } catch {
-        showToast("这次没有结算成功，卡片已恢复，可以重试");
+      } catch (error) {
+        showToast(contextErrorMessage(error));
       }
     }
 
@@ -6034,7 +6233,10 @@ ${cardFeedbackBarHtml()}`;
             showToast(`${message}，空闲后会自动打开`, { duration: 4200 });
           }
         });
-        if (turn?.turn_id) updateDesktopDialogueTurn(turn);
+        if (turn?.turn_id) {
+          updateDesktopDialogueTurn(turn);
+          await selectDialogueContext(turn.turn_id);
+        }
         await refreshDialogueConfirmationSurface();
         showToast(isQuestionTurn(turn) ? "这条疑惑已经放进对话里" : "这张确认卡已经放进对话里");
         $("#chatInput")?.focus();
@@ -6052,6 +6254,7 @@ ${cardFeedbackBarHtml()}`;
     }
 
     function renderChat({ forceBottom = false } = {}) {
+      renderDialogueContextBar();
       renderDesktopPendingConfirmations();
       const chatLog = $("#chatLog");
       renderChatLogElement(chatLog, chatHtml(state.chat), { forceBottom });
@@ -6097,6 +6300,7 @@ ${cardFeedbackBarHtml()}`;
 
     async function sendChat(message, options = {}) {
       const payloadMessage = options.contextPrefix ? `${options.contextPrefix}\n\n${message}` : message;
+      const replyToTurnId = dialogueContextSelection?.["reply_to_turn_id"] || "";
       state.chat.push({ role: "user", text: message });
       state.chat.push({ role: "agent", text: "正在提交给后端，并等待 durable chat turn 完成。" });
       renderChat({ forceBottom: true });
@@ -6105,9 +6309,21 @@ ${cardFeedbackBarHtml()}`;
         scope: options.scope || "chat",
         subject_id: options.subjectId || "",
         subject_title: options.subjectTitle || "",
+        reply_to_turn_id: replyToTurnId,
         message: payloadMessage
       };
-      const turn = await requestJson(ENDPOINTS.chatTurns, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+      let turn;
+      try {
+        turn = await requestJsonStrict(ENDPOINTS.chatTurns, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+      } catch (error) {
+        retainedChatDraft = message;
+        const input = $("#chatInput");
+        if (input) input.value = message;
+        state.chat[state.chat.length - 1] = { role: "agent", text: contextErrorMessage(error) };
+        renderChat();
+        showToast(contextErrorMessage(error));
+        return;
+      }
       if (!turn?.turn_id) {
         state.chat[state.chat.length - 1] = { role: "agent", text: "当前没有连上后端，聊天没有提交成功。请检查 FastAPI 地址后重试。" };
         renderChat();
@@ -8818,6 +9034,8 @@ ${cardFeedbackBarHtml()}`;
       // 预取 LAN IP，供二维码面板使用；它不参与任一首屏资源的应用顺序。
       requestJson(ENDPOINTS.qrInfo).then((info) => { if (info?.lan_ip) _cachedLanIp = info.lan_ip; }).catch(() => {});
       await Promise.allSettled(secondaryPromises);
+      await validateDialogueContext({ announce: true });
+      renderDialogueContextBar();
       await Promise.allSettled([
         recommendationApplicationPromise,
         runtimeApplicationPromise,
@@ -9659,6 +9877,7 @@ ${cardFeedbackBarHtml()}`;
       if (button instanceof HTMLButtonElement) void handleDesktopPendingOpen(button);
     });
     $("#chatLog")?.addEventListener("click", (event) => {
+      activateReplyQuote(event, $("#chatLog"));
       const button = event.target instanceof Element
         ? event.target.closest("[data-card-action]")
         : null;

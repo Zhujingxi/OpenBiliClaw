@@ -12,17 +12,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable
     from datetime import tzinfo
 
     from openbiliclaw.llm.service import LLMService, ModuleOverride, SupportsComplete
     from openbiliclaw.soul.dialogue_learn_queue import DialogueSettlementQueue
+    from openbiliclaw.soul.dialogue_turn_context import DialogueTurnBinding
     from openbiliclaw.soul.engine import SoulEngine
 
 logger = logging.getLogger(__name__)
@@ -77,6 +79,24 @@ def format_dialogue_turn_timestamp(
     return f"[{local:%m-%d %H:%M}]"
 
 
+def _relation_prefix_from_payload(payload: object) -> str:
+    """Extract the readable relation prefix from a server-owned turn payload."""
+    if not isinstance(payload, Mapping):
+        return ""
+    raw_binding = payload.get("dialogue_binding")
+    if not isinstance(raw_binding, Mapping) or str(raw_binding.get("mode", "")) != "bound":
+        return ""
+    raw_context = raw_binding.get("context")
+    if not isinstance(raw_context, Mapping):
+        return ""
+    title = str(raw_context.get("title", "")).strip()
+    source_type = str(raw_context.get("source_type", "")).strip()
+    if not title or source_type not in {"card", "question"}:
+        return ""
+    label = "卡片" if source_type == "card" else "疑惑问题"
+    return f"[回复{label}「{title}」]"
+
+
 @dataclass
 class DialogueTurn:
     """A single turn in a dialogue."""
@@ -85,6 +105,9 @@ class DialogueTurn:
     content: str
     timestamp: str = field(default_factory=_default_turn_timestamp)
     extracted_insights: list[str] | None = None
+    # A durable relation is rendered only for LLM history; ``content`` stays
+    # the original user text for UI and audit.
+    relation_prefix: str = ""
 
 
 class SocraticDialogue:
@@ -152,6 +175,7 @@ class SocraticDialogue:
         scope: str = "chat",
         turn_id: str = "",
         session: str = "",
+        dialogue_binding: DialogueTurnBinding | Mapping[str, object] | None = None,
     ) -> str:
         """Generate a Socratic response to a user message.
 
@@ -180,6 +204,17 @@ class SocraticDialogue:
                 "queued dialogue learning requires DialogueSettlementQueue"
             )
 
+        binding: DialogueTurnBinding | None = None
+        if dialogue_binding is not None:
+            from openbiliclaw.soul.dialogue_turn_context import DialogueTurnBinding
+
+            if isinstance(dialogue_binding, DialogueTurnBinding):
+                binding = dialogue_binding
+            elif isinstance(dialogue_binding, Mapping):
+                binding = DialogueTurnBinding.from_mapping(dialogue_binding)
+            else:
+                raise TypeError("dialogue_binding must be DialogueTurnBinding or a mapping")
+
         async with self._respond_lock:
             self._ensure_history_loaded()
             history_length = len(self._history)
@@ -190,7 +225,12 @@ class SocraticDialogue:
 
             try:
                 service = self._llm_service or self._build_service()
-                prompt_user_message = self._user_prompt_with_current_time(user_message)
+                prompt_message = (
+                    binding.render_user_prompt(user_message)
+                    if binding is not None
+                    else user_message
+                )
+                prompt_user_message = self._user_prompt_with_current_time(prompt_message)
 
                 # If tools are configured, try tool-calling path first
                 if self._tools and self._tool_dispatcher:
@@ -214,21 +254,48 @@ class SocraticDialogue:
                     timestamp=self._local_now().isoformat(),
                 )
             )
-            payload = {
+            payload: dict[str, object] = {
                 "user_message": user_message,
                 "assistant_reply": reply,
                 "session": session.strip() or self._session,
                 "scope": scope,
                 "turn_id": turn_id,
             }
+            if binding is not None:
+                payload["dialogue_binding"] = binding.to_mapping()
             if self._learning_mode is DialogueLearningMode.QUEUED:
-                from openbiliclaw.soul.dialogue_learn_queue import DialogueJobKind
+                from openbiliclaw.soul.dialogue_learn_queue import (
+                    ANCHOR_NOT_APPLICABLE,
+                    AnchorAdmissionSnapshot,
+                    AnchorPersisted,
+                    DialogueJobKind,
+                )
 
                 queue = self._settlement_queue
                 assert queue is not None
                 # ``submit`` synchronously freezes the queue-global logical
                 # anchor head before the immutable learn envelope is put.
-                admitted = queue.submit(DialogueJobKind.LEARN, payload)
+                frozen_snapshot: AnchorAdmissionSnapshot | None = None
+                if binding is not None:
+                    if binding.mode.value == "bound" and binding.context is not None:
+                        frozen_snapshot = AnchorPersisted(
+                            kind=binding.context.kind,
+                            ref=binding.context.ref,
+                            generation=binding.context.generation,
+                        )
+                    else:
+                        frozen_snapshot = ANCHOR_NOT_APPLICABLE
+                if frozen_snapshot is None:
+                    # Keep the long-standing queue protocol for ordinary
+                    # unbound turns.  Besides avoiding an unnecessary marker,
+                    # this keeps lightweight queue adapters source-compatible.
+                    admitted = queue.submit(DialogueJobKind.LEARN, payload)
+                else:
+                    admitted = queue.submit(
+                        DialogueJobKind.LEARN,
+                        payload,
+                        _server_frozen_anchor_snapshot=frozen_snapshot,
+                    )
                 if admitted is None:
                     raise DialogueLearningConfigurationError(
                         "dialogue settlement queue is not accepting learn jobs"
@@ -390,7 +457,14 @@ class SocraticDialogue:
             if not message or not reply:
                 continue
             timestamp = str(row.get("created_at", "") or "")
-            self._history.append(DialogueTurn(role="user", content=message, timestamp=timestamp))
+            self._history.append(
+                DialogueTurn(
+                    role="user",
+                    content=message,
+                    timestamp=timestamp,
+                    relation_prefix=_relation_prefix_from_payload(payload),
+                )
+            )
             self._history.append(DialogueTurn(role="agent", content=reply, timestamp=timestamp))
 
     def _history_to_messages(self) -> list[dict[str, str]]:
@@ -411,7 +485,10 @@ class SocraticDialogue:
                 turn.timestamp,
                 local_timezone=self._local_timezone,
             )
-            content = f"{prefix} {turn.content}" if prefix else turn.content
+            relation = f"{turn.relation_prefix} " if turn.relation_prefix else ""
+            content = (
+                f"{prefix} {relation}{turn.content}" if prefix else f"{relation}{turn.content}"
+            )
             messages.append(
                 {
                     "role": "assistant" if turn.role == "agent" else turn.role,

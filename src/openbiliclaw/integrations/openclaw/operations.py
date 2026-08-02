@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime
@@ -51,6 +52,7 @@ class SupportsOpenClawServices(Protocol):
     account_sync_service: Any
     recommendation_engine: Any
     llm_service: Any
+    event_ingress: Any
 
 
 @dataclass(slots=True)
@@ -94,6 +96,13 @@ class OpenClawAdapter:
         """Run one account sync and normalize the result."""
         try:
             result = await self.services.account_sync_service.sync_now()
+            process_profile = getattr(
+                self.services.soul_engine,
+                "process_profile_events_if_needed",
+                None,
+            )
+            if callable(process_profile):
+                await process_profile()
         except Exception as exc:  # pragma: no cover - defensive adapter boundary
             raise AdapterOperationError("Failed to sync account signals.") from exc
         return SyncAccountResponse(
@@ -205,52 +214,111 @@ class OpenClawAdapter:
             )
             if recommendation is None:
                 raise AdapterOperationError("Recommendation not found.")
+            from openbiliclaw.sources.event_format import build_event
+
+            event = build_event(
+                event_type="feedback",
+                source_platform=str(recommendation.get("source_platform", "bilibili")),
+                title=str(recommendation.get("title", "")),
+                metadata={
+                    "recommendation_id": request.recommendation_id,
+                    "bvid": recommendation.get("bvid", ""),
+                    "feedback_type": request.feedback_type,
+                    "feedback_note": request.note,
+                    "event_namespace": "recommendation",
+                    "profile_update_owner": "content_feedback",
+                },
+            )
+            event["ingest_key"] = request.request_id
+            receipt = await self.services.event_ingress.accept(
+                event,
+                producer="openclaw",
+            )
+            if receipt.accepted != 1 or receipt.rejected:
+                raise AdapterOperationError("Feedback event was rejected.")
+            item_receipt = receipt.items[0]
+            stored_rows = self.services.database.query_event_rows_by_ids([item_receipt.event_id])
+            if len(stored_rows) != 1:
+                raise AdapterOperationError("Durable feedback event could not be read back.")
+            raw_metadata = stored_rows[0].get("metadata", {})
+            if isinstance(raw_metadata, str):
+                try:
+                    raw_metadata = json.loads(raw_metadata) if raw_metadata else {}
+                except (TypeError, ValueError):
+                    raw_metadata = {}
+            stored_metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
+            stored_recommendation_id = self._to_int(stored_metadata.get("recommendation_id", 0))
+            stored_feedback_type = str(stored_metadata.get("feedback_type") or "").strip().lower()
+            stored_note = str(stored_metadata.get("feedback_note") or "").strip()
+            if (
+                stored_recommendation_id != request.recommendation_id
+                or stored_feedback_type != request.feedback_type
+                or stored_note != request.note
+            ):
+                raise AdapterValidationError("request_id was already used for different feedback.")
+            # Idempotent projection repair driven by the durable first write.
             self.services.database.update_recommendation_feedback(
-                request.recommendation_id,
-                feedback_type=request.feedback_type,
-                feedback_note=request.note,
+                stored_recommendation_id,
+                feedback_type=stored_feedback_type,
+                feedback_note=stored_note,
             )
-            await self.services.memory_manager.propagate_event(
-                {
-                    "event_type": "feedback",
-                    "title": str(recommendation.get("title", "")),
-                    "metadata": {
-                        "recommendation_id": request.recommendation_id,
-                        "bvid": recommendation.get("bvid", ""),
-                        "feedback_type": request.feedback_type,
-                        "feedback_note": request.note,
-                    },
-                }
-            )
-            immediate = getattr(
-                self.services.soul_engine,
-                "record_immediate_feedback_cognition",
-                None,
-            )
-            if callable(immediate):
+        except (AdapterOperationError, AdapterValidationError):
+            raise
+        except Exception as exc:  # pragma: no cover - defensive adapter boundary
+            raise AdapterOperationError("Failed to submit recommendation feedback.") from exc
+
+        # Durable first write + recommendation projection is the command's
+        # commit boundary. Everything below is retryable follow-up work and may
+        # only downgrade ``processing`` to queued, never fail the command.
+        follow_up_failed = False
+        immediate = getattr(
+            self.services.soul_engine,
+            "record_immediate_feedback_cognition",
+            None,
+        )
+        if item_receipt.inserted and callable(immediate):
+            try:
                 immediate(
                     feedback_type=request.feedback_type,
                     title=str(recommendation.get("title", "")),
                     note=request.note,
                 )
-            process_feedback = getattr(
-                self.services.soul_engine,
-                "process_feedback_batch_if_needed",
-                None,
-            )
-            if callable(process_feedback):
-                await process_feedback()
-            refresh = getattr(self.services.runtime_controller, "refresh_after_feedback", None)
-            if callable(refresh):
+            except Exception:
+                follow_up_failed = True
+                logger.warning("OpenClaw feedback cognition follow-up deferred", exc_info=True)
+
+        drain_completed = False
+        process_feedback = getattr(
+            self.services.soul_engine,
+            "process_feedback_batch_if_needed",
+            None,
+        )
+        if callable(process_feedback):
+            try:
+                process_result = await process_feedback()
+                if isinstance(process_result, dict) and process_result.get("skipped"):
+                    logger.info("OpenClaw feedback owner busy; durable event remains queued")
+                else:
+                    drain_completed = True
+            except Exception:
+                follow_up_failed = True
+                logger.warning("OpenClaw feedback owner follow-up deferred", exc_info=True)
+
+        refresh = getattr(self.services.runtime_controller, "refresh_after_feedback", None)
+        if item_receipt.inserted and callable(refresh):
+            try:
                 await refresh()
-        except AdapterOperationError:
-            raise
-        except Exception as exc:  # pragma: no cover - defensive adapter boundary
-            raise AdapterOperationError("Failed to submit recommendation feedback.") from exc
+            except Exception:
+                follow_up_failed = True
+                logger.warning("OpenClaw feedback refresh follow-up deferred", exc_info=True)
+
         return FeedbackResponse(
             ok=True,
             recommendation_id=request.recommendation_id,
             feedback_type=request.feedback_type,
+            event_id=item_receipt.event_id,
+            duplicate=item_receipt.duplicate,
+            processing=("completed" if drain_completed and not follow_up_failed else "queued"),
         )
 
     async def get_delight(self) -> DelightResponse:

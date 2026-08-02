@@ -37,6 +37,7 @@ from openbiliclaw.sources.platforms import source_family as _source_family
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
 
+    from openbiliclaw.runtime.image_fetch import ImageFetchCoordinator
     from openbiliclaw.runtime.task_registry import BackgroundTaskRegistry
     from openbiliclaw.storage.database import PoolMaintenanceResult
 
@@ -327,6 +328,7 @@ class ContinuousRefreshController:
     discovery_engine: SupportsDiscoveryEngine
     recommendation_engine: SupportsRecommendationEngine
     event_hub: Any | None = None
+    image_fetch_coordinator: ImageFetchCoordinator | None = None
     discovery_candidate_pipeline: Any | None = None
     candidate_eval_coordinator: Any | None = None
     expression_copy_coordinator: Any | None = None
@@ -1875,7 +1877,10 @@ class ContinuousRefreshController:
         while True:
             await asyncio.sleep(_IMAGE_CACHE_CLEANUP_INTERVAL_SECONDS)
             try:
-                result = cleanup_image_cache(database=self.database)
+                result = await asyncio.to_thread(
+                    cleanup_image_cache,
+                    database=self.database,
+                )
             except Exception:
                 logger.debug("image cache cleanup tick failed", exc_info=True)
                 continue
@@ -1904,16 +1909,20 @@ class ContinuousRefreshController:
         token is fresh. Un-refetchable (XHS rotating-token) covers are tried first
         since re-fetchable ones (Bilibili etc.) never expire. Best-effort and bounded.
         """
-        candidates = self.database.iter_servable_cover_urls(
+        candidates = await asyncio.to_thread(
+            self.database.iter_servable_cover_urls,
             recent_hours=_COVER_PREFETCH_RECENT_HOURS,
             limit=scan,
         )
-        targets = select_prefetch_targets(candidates, max_fetch=max_fetch)
-        fetched = 0
-        for url in targets:
-            if await prefetch_cover(url):
-                fetched += 1
-        return fetched
+        targets = await asyncio.to_thread(
+            select_prefetch_targets,
+            candidates,
+            max_fetch=max_fetch,
+        )
+        coordinator = self.image_fetch_coordinator
+        prefetch = coordinator.prefetch if coordinator is not None else prefetch_cover
+        results = await asyncio.gather(*(prefetch(url) for url in targets))
+        return sum(results)
 
     async def _loop_cover_prefetch(self) -> None:
         """Periodically cache discovered covers while their CDN token is fresh."""

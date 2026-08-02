@@ -95,6 +95,11 @@ def _build_parser() -> argparse.ArgumentParser:
     feedback_parser.add_argument("--recommendation-id", type=int, required=True)
     feedback_parser.add_argument("--feedback-type", required=True)
     feedback_parser.add_argument("--note", default="")
+    feedback_parser.add_argument(
+        "--request-id",
+        required=True,
+        help="Stable idempotency ID; reuse it for retries of the same action.",
+    )
 
     avoidance_feedback_parser = subparsers.add_parser("respond-avoidance-probe")
     avoidance_feedback_parser.add_argument("--domain", required=True)
@@ -158,6 +163,7 @@ async def _run_command(args: argparse.Namespace, adapter: Any) -> dict[str, obje
                 recommendation_id=args.recommendation_id,
                 feedback_type=args.feedback_type,
                 note=args.note,
+                request_id=args.request_id,
             )
             result = await adapter.submit_feedback(request)
         elif args.command == "chat":

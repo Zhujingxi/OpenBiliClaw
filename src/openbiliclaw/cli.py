@@ -12,6 +12,7 @@ import os
 import re
 import sys
 import threading
+import uuid
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -10977,6 +10978,11 @@ def feedback(
     recommendation_id: int,
     signal: str,
     note: str = typer.Option("", "--note", help="补充反馈备注"),
+    request_id: str = typer.Option(
+        "",
+        "--request-id",
+        help="稳定请求 ID；省略时自动生成，跨命令重试请复用输出值",
+    ),
 ) -> None:
     """对一条推荐记录提交反馈."""
     _require_runtime_config()
@@ -10987,6 +10993,12 @@ def feedback(
     if normalized_signal == "comment" and not note.strip():
         _print_status_panel("error", "comment 需要备注", "请通过 `--note` 补充一句你的想法。")
         raise typer.Exit(code=1)
+    normalized_request_id = request_id.strip()
+    if len(normalized_request_id) > 400:
+        _print_status_panel("error", "请求 ID 无效", "--request-id 最长 400 个字符。")
+        raise typer.Exit(code=1)
+    if not normalized_request_id:
+        normalized_request_id = uuid.uuid4().hex
 
     recommendation_engine = _build_recommendation_engine()
     memory = _build_memory_manager()
@@ -10996,46 +11008,119 @@ def feedback(
         raise typer.Exit(code=1)
     soul_engine = _build_soul_engine()
 
-    asyncio.run(
-        recommendation_engine.record_feedback(
-            recommendation_id,
-            feedback_type=normalized_signal,
-            note=note.strip(),
-        )
-    )
-    asyncio.run(
-        memory.propagate_event(
-            {
-                "event_type": "feedback",
-                "title": str(recommendation.get("title", "")),
-                "metadata": {
-                    "recommendation_id": recommendation_id,
-                    "bvid": recommendation.get("bvid", ""),
-                    "feedback_type": normalized_signal,
-                    "feedback_note": note.strip(),
-                },
-            }
-        )
-    )
-    record_immediate_feedback_cognition = getattr(
-        soul_engine,
-        "record_immediate_feedback_cognition",
-        None,
-    )
-    if callable(record_immediate_feedback_cognition):
-        with suppress(Exception):
-            record_immediate_feedback_cognition(
-                feedback_type=normalized_signal,
-                title=str(recommendation.get("title", "")),
-                note=note.strip(),
-            )
-    with suppress(Exception):
-        asyncio.run(soul_engine.process_feedback_batch_if_needed())
+    async def _accept_and_process_feedback() -> tuple[str, list[str]]:
+        from openbiliclaw.runtime.event_ingress import EventIngressService
+        from openbiliclaw.sources.event_format import build_event
 
-    _print_status_panel("success", "反馈已记录", f"推荐ID {recommendation_id} 已更新。")
+        async def _prepare_owners() -> None:
+            prepare_profile = getattr(
+                soul_engine,
+                "prepare_profile_event_owner_cutover",
+                None,
+            )
+            if callable(prepare_profile):
+                await prepare_profile()
+            prepare_feedback = getattr(soul_engine, "prepare_feedback_owner_cutover", None)
+            if callable(prepare_feedback):
+                await prepare_feedback()
+
+        ingress = EventIngressService(memory, prepare_owner=_prepare_owners)
+        event = build_event(
+            event_type="feedback",
+            source_platform=str(recommendation.get("source_platform", "bilibili")),
+            title=str(recommendation.get("title", "")),
+            metadata={
+                "recommendation_id": recommendation_id,
+                "bvid": recommendation.get("bvid", ""),
+                "feedback_type": normalized_signal,
+                "feedback_note": note.strip(),
+                "event_namespace": "recommendation",
+                "profile_update_owner": "content_feedback",
+            },
+        )
+        event["ingest_key"] = normalized_request_id
+        receipt = await ingress.accept(event, producer="cli")
+        if receipt.accepted != 1 or receipt.rejected:
+            raise RuntimeError("feedback event was rejected")
+        item_receipt = receipt.items[0]
+        stored_rows = memory.query_event_rows_by_ids([item_receipt.event_id])
+        if len(stored_rows) != 1:
+            raise RuntimeError("durable feedback event could not be read back")
+        raw_metadata = stored_rows[0].get("metadata", {})
+        if isinstance(raw_metadata, str):
+            try:
+                raw_metadata = json.loads(raw_metadata) if raw_metadata else {}
+            except (TypeError, ValueError):
+                raw_metadata = {}
+        stored_metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
+        stored_recommendation_id = int(stored_metadata.get("recommendation_id") or 0)
+        stored_feedback_type = str(stored_metadata.get("feedback_type") or "").strip().lower()
+        stored_note = str(stored_metadata.get("feedback_note") or "").strip()
+        if (
+            stored_recommendation_id != recommendation_id
+            or stored_feedback_type != normalized_signal
+            or stored_note != note.strip()
+        ):
+            raise RuntimeError("request_id was already used for different feedback")
+        # Duplicate retries repair an event-commit→recommendation-projection
+        # interruption using the durable first-write payload.
+        await recommendation_engine.record_feedback(
+            stored_recommendation_id,
+            feedback_type=stored_feedback_type,
+            note=stored_note,
+        )
+
+        # The command is durably successful at this boundary. Cognition and
+        # owner draining are repairable follow-up work; they must never turn an
+        # already-recorded first write into a false "写入失败" result.
+        follow_up_warnings: list[str] = []
+        record_cognition = getattr(
+            soul_engine,
+            "record_immediate_feedback_cognition",
+            None,
+        )
+        if item_receipt.inserted and callable(record_cognition):
+            try:
+                record_cognition(
+                    feedback_type=normalized_signal,
+                    title=str(recommendation.get("title", "")),
+                    note=note.strip(),
+                )
+            except Exception as exc:
+                follow_up_warnings.append(f"即时认知记录待重试：{exc}")
+        process_feedback = getattr(soul_engine, "process_feedback_batch_if_needed", None)
+        drain_completed = False
+        if callable(process_feedback):
+            try:
+                process_result = await process_feedback()
+                if isinstance(process_result, dict) and process_result.get("skipped"):
+                    follow_up_warnings.append("画像处理通道正忙，已进入稍后重试队列")
+                else:
+                    drain_completed = True
+            except Exception as exc:
+                follow_up_warnings.append(f"画像处理待重试：{exc}")
+        else:
+            follow_up_warnings.append("画像处理通道暂不可用")
+        processing = "completed" if drain_completed and not follow_up_warnings else "queued"
+        return processing, follow_up_warnings
+
+    try:
+        processing, follow_up_warnings = asyncio.run(_accept_and_process_feedback())
+    except Exception as exc:
+        _print_status_panel("error", "反馈事件写入失败", str(exc))
+        raise typer.Exit(code=1) from exc
+
+    if processing == "completed":
+        _print_status_panel("success", "反馈已记录", f"推荐ID {recommendation_id} 已更新。")
+    else:
+        detail = f"推荐ID {recommendation_id} 已更新。"
+        if follow_up_warnings:
+            detail = f"{detail}\n" + "；".join(follow_up_warnings)
+        _print_status_panel("warning", "反馈已记录，画像处理稍后重试", detail)
     rows = [
         ("推荐ID", str(recommendation_id)),
         ("反馈", normalized_signal),
+        ("请求ID", normalized_request_id),
     ]
     if note:
         rows.append(("备注", note.strip()))

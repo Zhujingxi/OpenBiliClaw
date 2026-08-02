@@ -2991,8 +2991,22 @@ def test_feedback_command_updates_recommendation_and_records_event(
         def __init__(self) -> None:
             self.events: list[dict[str, object]] = []
 
-        async def propagate_event(self, event: dict[str, object]) -> None:
-            self.events.append(event)
+        async def persist_events_with_receipts(
+            self, events: list[dict[str, object]]
+        ) -> list[SimpleNamespace]:
+            self.events.extend(events)
+            return [
+                SimpleNamespace(
+                    event_id=index,
+                    event_type=event["event_type"],
+                    inserted=True,
+                    duplicate=False,
+                )
+                for index, event in enumerate(events, start=1)
+            ]
+
+        def query_event_rows_by_ids(self, event_ids: list[int]) -> list[dict[str, object]]:
+            return [self.events[event_id - 1] for event_id in event_ids]
 
     fake_engine = FakeRecommendationEngine()
     fake_memory = FakeMemoryManager()
@@ -3009,6 +3023,7 @@ def test_feedback_command_updates_recommendation_and_records_event(
         lambda: fake_memory,
         raising=False,
     )
+    monkeypatch.setattr(cli_module, "_build_soul_engine", lambda: object(), raising=False)
     monkeypatch.setattr(cli_module, "_initialize_logging", lambda log_level_override=None: None)
 
     result = runner.invoke(app, ["feedback", "7", "dislike", "--note", "太浅了"])
@@ -3019,6 +3034,95 @@ def test_feedback_command_updates_recommendation_and_records_event(
     assert fake_memory.events[0]["event_type"] == "feedback"
     assert fake_memory.events[0]["metadata"]["recommendation_id"] == 7
     assert fake_memory.events[0]["metadata"]["feedback_type"] == "dislike"
+    persisted_ingest_key = str(fake_memory.events[0]["ingest_key"])
+    assert persisted_ingest_key.startswith("cli:")
+    generated_request_id = persisted_ingest_key.removeprefix("cli:")
+    assert len(generated_request_id) == 32
+    assert int(generated_request_id, 16) >= 0
+    assert generated_request_id in result.stdout
+
+
+def test_feedback_command_trims_and_reuses_explicit_request_id(
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+) -> None:
+    class FakeRecommendationEngine:
+        def get_recommendation(self, recommendation_id: int) -> dict[str, object]:
+            return {"id": recommendation_id, "bvid": "BV1REC", "title": "稳定重试"}
+
+        async def record_feedback(
+            self,
+            recommendation_id: int,
+            *,
+            feedback_type: str,
+            note: str = "",
+        ) -> None:
+            return None
+
+    class FakeMemoryManager:
+        def __init__(self) -> None:
+            self.events: list[dict[str, object]] = []
+
+        async def persist_events_with_receipts(
+            self,
+            events: list[dict[str, object]],
+        ) -> list[SimpleNamespace]:
+            self.events.extend(events)
+            return [
+                SimpleNamespace(
+                    event_id=1,
+                    event_type=events[0]["event_type"],
+                    inserted=True,
+                    duplicate=False,
+                )
+            ]
+
+        def query_event_rows_by_ids(self, event_ids: list[int]) -> list[dict[str, object]]:
+            assert event_ids == [1]
+            return [self.events[0]]
+
+    memory = FakeMemoryManager()
+    monkeypatch.setattr(cli_module, "_require_runtime_config", lambda: None)
+    monkeypatch.setattr(
+        cli_module,
+        "_build_recommendation_engine",
+        lambda: FakeRecommendationEngine(),
+        raising=False,
+    )
+    monkeypatch.setattr(cli_module, "_build_memory_manager", lambda: memory, raising=False)
+    monkeypatch.setattr(cli_module, "_build_soul_engine", lambda: object(), raising=False)
+    monkeypatch.setattr(cli_module, "_initialize_logging", lambda log_level_override=None: None)
+
+    result = runner.invoke(
+        app,
+        [
+            "feedback",
+            "7",
+            "like",
+            "--request-id",
+            "  cli-stable-retry  ",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert memory.events[0]["ingest_key"] == "cli:cli-stable-retry"
+    assert "cli-stable-retry" in result.stdout
+
+
+def test_feedback_command_rejects_request_id_over_400_characters(
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+) -> None:
+    monkeypatch.setattr(cli_module, "_require_runtime_config", lambda: None)
+    monkeypatch.setattr(cli_module, "_initialize_logging", lambda log_level_override=None: None)
+
+    result = runner.invoke(
+        app,
+        ["feedback", "7", "like", "--request-id", "x" * 401],
+    )
+
+    assert result.exit_code == 1
+    assert "最长 400" in result.stdout
 
 
 def test_feedback_command_reports_missing_recommendation(
@@ -3066,8 +3170,22 @@ def test_feedback_command_supports_comment_with_note(
         def __init__(self) -> None:
             self.events: list[dict[str, object]] = []
 
-        async def propagate_event(self, event: dict[str, object]) -> None:
-            self.events.append(event)
+        async def persist_events_with_receipts(
+            self, events: list[dict[str, object]]
+        ) -> list[SimpleNamespace]:
+            self.events.extend(events)
+            return [
+                SimpleNamespace(
+                    event_id=index,
+                    event_type=event["event_type"],
+                    inserted=True,
+                    duplicate=False,
+                )
+                for index, event in enumerate(events, start=1)
+            ]
+
+        def query_event_rows_by_ids(self, event_ids: list[int]) -> list[dict[str, object]]:
+            return [self.events[event_id - 1] for event_id in event_ids]
 
     fake_engine = FakeRecommendationEngine()
     fake_memory = FakeMemoryManager()
@@ -3084,6 +3202,7 @@ def test_feedback_command_supports_comment_with_note(
         lambda: fake_memory,
         raising=False,
     )
+    monkeypatch.setattr(cli_module, "_build_soul_engine", lambda: object(), raising=False)
     monkeypatch.setattr(cli_module, "_initialize_logging", lambda log_level_override=None: None)
 
     result = runner.invoke(
@@ -3112,6 +3231,8 @@ def test_feedback_command_requires_note_for_comment(
 def test_feedback_command_triggers_profile_refresh_check(
     monkeypatch: pytest.MonkeyPatch, runner: CliRunner
 ) -> None:
+    order: list[str] = []
+
     class FakeRecommendationEngine:
         async def record_feedback(
             self,
@@ -3126,14 +3247,37 @@ def test_feedback_command_triggers_profile_refresh_check(
             return {"id": recommendation_id, "bvid": "BV1REC", "title": "讲透城市与建筑"}
 
     class FakeMemoryManager:
-        async def propagate_event(self, event: dict[str, object]) -> None:
-            return None
+        def __init__(self) -> None:
+            self.events: list[dict[str, object]] = []
+
+        async def persist_events_with_receipts(
+            self, events: list[dict[str, object]]
+        ) -> list[SimpleNamespace]:
+            order.append("event")
+            self.events.extend(events)
+            return [
+                SimpleNamespace(
+                    event_id=index,
+                    event_type=event["event_type"],
+                    inserted=True,
+                    duplicate=False,
+                )
+                for index, event in enumerate(events, start=1)
+            ]
+
+        def query_event_rows_by_ids(self, event_ids: list[int]) -> list[dict[str, object]]:
+            return [self.events[event_id - 1] for event_id in event_ids]
 
     class FakeSoulEngine:
         def __init__(self) -> None:
             self.called = False
 
+        async def prepare_feedback_owner_cutover(self) -> dict[str, object]:
+            order.append("prepare")
+            return {"prepared": True, "feedback_owner_version": 2}
+
         async def process_feedback_batch_if_needed(self) -> dict[str, object]:
+            order.append("process")
             self.called = True
             return {"triggered": False}
 
@@ -3163,6 +3307,77 @@ def test_feedback_command_triggers_profile_refresh_check(
 
     assert result.exit_code == 0
     assert fake_soul_engine.called is True
+    assert order == ["prepare", "event", "process"]
+
+
+@pytest.mark.parametrize("owner_outcome", ["skipped", "error"])
+def test_feedback_command_keeps_durable_success_when_owner_is_deferred(
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+    owner_outcome: str,
+) -> None:
+    projected: list[tuple[int, str, str]] = []
+
+    class FakeRecommendationEngine:
+        def get_recommendation(self, recommendation_id: int) -> dict[str, object]:
+            return {"id": recommendation_id, "bvid": "BV1REC", "title": "已落账反馈"}
+
+        async def record_feedback(
+            self,
+            recommendation_id: int,
+            *,
+            feedback_type: str,
+            note: str = "",
+        ) -> None:
+            projected.append((recommendation_id, feedback_type, note))
+
+    class FakeMemoryManager:
+        def __init__(self) -> None:
+            self.events: list[dict[str, object]] = []
+
+        async def persist_events_with_receipts(
+            self,
+            events: list[dict[str, object]],
+        ) -> list[SimpleNamespace]:
+            self.events.extend(events)
+            return [
+                SimpleNamespace(
+                    event_id=1,
+                    event_type=events[0]["event_type"],
+                    inserted=True,
+                    duplicate=False,
+                )
+            ]
+
+        def query_event_rows_by_ids(self, event_ids: list[int]) -> list[dict[str, object]]:
+            return [self.events[event_id - 1] for event_id in event_ids]
+
+    class FakeSoulEngine:
+        async def process_feedback_batch_if_needed(self) -> dict[str, object]:
+            if owner_outcome == "error":
+                raise RuntimeError("owner unavailable")
+            return {"skipped": True, "reason": "feedback_batch_in_progress"}
+
+    memory = FakeMemoryManager()
+    monkeypatch.setattr(cli_module, "_require_runtime_config", lambda: None)
+    monkeypatch.setattr(
+        cli_module,
+        "_build_recommendation_engine",
+        lambda: FakeRecommendationEngine(),
+        raising=False,
+    )
+    monkeypatch.setattr(cli_module, "_build_memory_manager", lambda: memory, raising=False)
+    monkeypatch.setattr(cli_module, "_build_soul_engine", lambda: FakeSoulEngine(), raising=False)
+    monkeypatch.setattr(cli_module, "_initialize_logging", lambda log_level_override=None: None)
+
+    result = runner.invoke(app, ["feedback", "7", "dislike", "--note", "太浅了"])
+
+    assert result.exit_code == 0
+    assert "反馈已记录" in result.stdout
+    assert "画像处理稍后重试" in result.stdout
+    assert "反馈事件写入失败" not in result.stdout
+    assert projected == [(7, "dislike", "太浅了")]
+    assert len(memory.events) == 1
 
 
 def test_init_reports_authentication_failure(

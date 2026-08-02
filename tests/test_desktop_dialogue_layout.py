@@ -43,6 +43,25 @@ def test_desktop_dialogue_composer_has_an_accessible_name() -> None:
     assert 'id="chatInput" aria-label="和阿B聊聊你的口味"' in html
 
 
+def test_desktop_dialogue_first_open_scrolls_restored_history_to_latest() -> None:
+    source = APP_JS.read_text(encoding="utf-8")
+    start = source.index("    function openChatPage()")
+    end = source.index("    function openSettingsPage", start)
+    block = source[start:end]
+
+    assert "let hasOpenedDialogueChatPage = false;" in source
+    assert "const forceBottom = !hasOpenedDialogueChatPage;" in block
+    assert "renderChat({ forceBottom });" in block
+    assert "hasOpenedDialogueChatPage = true;" in block
+
+
+def test_desktop_silently_clears_a_context_after_its_card_settles() -> None:
+    source = APP_JS.read_text(encoding="utf-8")
+
+    assert "isTerminalCardTurn" in source
+    assert "if (isTerminalCardTurn(contextTarget))" in source
+
+
 def test_desktop_dialogue_history_uses_natural_rows_and_visible_scroll_affordance() -> None:
     html = INDEX_HTML.read_text(encoding="utf-8")
     css = APP_CSS.read_text(encoding="utf-8")
@@ -64,4 +83,4 @@ def test_desktop_dialogue_refresh_preserves_reader_scroll_and_open_evidence() ->
     assert "function renderChatLogElement(element, markup" in js
     assert "const previousScrollTop = element.scrollTop;" in js
     assert "if (openEvidenceTurnIds.has(turnId)) details.open = true;" in js
-    assert "renderChat({ forceBottom: true });" in js
+    assert "renderChat({ forceBottom });" in js

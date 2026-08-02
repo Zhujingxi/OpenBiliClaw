@@ -119,6 +119,34 @@ test("terminal card state replaces actions in place", () => {
   assert.doesNotMatch(markup, /data-card-action=/);
 });
 
+test("terminal card detection covers every settled state but keeps discussion active", () => {
+  const api = dialogue as unknown as Record<string, (...args: unknown[]) => unknown>;
+
+  for (const state of ["confirmed", "rejected", "revised", "deferred"]) {
+    assert.equal(api.isTerminalCardTurn(cardTurn(state)), true, `${state} should be terminal`);
+  }
+  assert.equal(api.isTerminalCardTurn(cardTurn("discussing")), false);
+  assert.equal(api.isTerminalCardTurn({ payload: { type: "question", state: "resolved" } }), false);
+});
+
+test("known context errors use localized copy before an English server message", () => {
+  const api = dialogue as unknown as Record<string, (...args: unknown[]) => unknown>;
+  const known = {
+    details: {
+      detail: {
+        code: "reply_target_inactive",
+        message: "Discuss the hypothesis card before replying to it.",
+      },
+    },
+  };
+  const unknown = {
+    details: { detail: { code: "future_error", message: "A useful server detail." } },
+  };
+
+  assert.equal(api.contextErrorMessage(known), "这条上下文已经失效，请重新打开后再发。");
+  assert.equal(api.contextErrorMessage(unknown), "A useful server detail.");
+});
+
 test("turns without structured payload keep the text conversation fallback", () => {
   const markup = dialogue!.renderTurnMarkup(
     {
@@ -460,4 +488,50 @@ test("pending open does not retry unrelated 409 conflicts", async () => {
     /conflict/,
   );
   assert.equal(calls, 1);
+});
+
+test("context preview is normalized, locally replaceable, and submits only the target id", () => {
+  const api = dialogue as unknown as Record<string, (...args: unknown[]) => unknown>;
+  const preview = {
+    active: true,
+    reply_to_turn_id: "card-a",
+    source_type: "card",
+    kind: "hypothesis",
+    generation: 7,
+    title: "A 的冻结标题",
+    evidence_labels: [
+      "42",
+      "event-7",
+      "可读依据",
+      "可读依据",
+      "https://example.test/a",
+    ],
+    context_digest: "a".repeat(64),
+  };
+  const normalized = api.normalizeContextPreview(preview) as Record<string, unknown>;
+  assert.deepEqual(normalized.evidence_labels, ["可读依据", "https://example.test/a"]);
+  assert.deepEqual(api.contextSelectionForSubmit(normalized), { reply_to_turn_id: "card-a" });
+  assert.deepEqual(api.contextSelectionForSubmit(null), {});
+  assert.deepEqual(api.replaceContextSelection(normalized, { active: false }), normalized);
+  assert.equal(api.clearContextSelection(), null);
+
+  const bar = String(api.contextBarMarkup(normalized));
+  assert.match(bar, /正在回复 阿B 的猜测/);
+  assert.match(bar, /清除/);
+  assert.doesNotMatch(bar, /event-7|42|a{64}/);
+
+  const quote = String(api.replyQuoteMarkup(
+    {
+      turn_id: "turn-u",
+      reply_to_turn_id: "card-a",
+      payload: { dialogue_binding: { context: { title: "A 的冻结标题", kind: "hypothesis" } } },
+    },
+    [{
+      turn_id: "card-a",
+      payload: { type: "card", title: "A 的冻结标题" },
+    }],
+  ));
+  assert.match(quote, /data-reply-quote-target-id="card-a"/);
+  assert.match(quote, /A 的冻结标题/);
+  assert.doesNotMatch(quote, /context_digest|a{64}/);
 });

@@ -16,7 +16,8 @@ import subprocess
 import time
 import unicodedata
 import uuid
-from contextlib import suppress
+from collections.abc import Mapping
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Annotated, Any, Literal, NoReturn, cast
@@ -57,12 +58,15 @@ from openbiliclaw.api.models import (
     ConfigUpdateResponse,
     DelightAckIn,
     DelightAckResponse,
+    DelightResponseIn,
+    DialogueContextPreview,
     DiscoveryConfigOut,
     DouyinCookieIn,
     DouyinCookieResponse,
     DouyinSourceConfigOut,
     EmbeddingConfigOut,
     EventIngestResponse,
+    EventReceiptOut,
     EventRejectedOut,
     ExtensionE2EAction,
     ExtensionE2EActionReportOut,
@@ -162,20 +166,20 @@ from openbiliclaw.api.models import (
 )
 from openbiliclaw.llm.base import safe_llm_failure_message
 from openbiliclaw.runtime import embedding_progress
+from openbiliclaw.runtime.dialogue_reply_scheduler import (
+    DialogueExecutionCoordinator,
+    DurableChatReplyScheduler,
+    TerminalChatReplyError,
+)
+from openbiliclaw.runtime.event_ingress import EventIngressService
 from openbiliclaw.runtime.feedback_scheduler import FeedbackBatchScheduler
 from openbiliclaw.runtime.image_cache import (
     CoverFetchError,
     cleanup_image_cache,
-    fetch_cover_bytes,
+    image_log_identity,
     save_extension_cover,
-    save_image_bytes,
 )
-from openbiliclaw.runtime.image_cache import (
-    image_cache_dir as _image_cache_dir,
-)
-from openbiliclaw.runtime.image_cache import (
-    image_cache_key as _image_cache_key,
-)
+from openbiliclaw.runtime.image_fetch import ImageFetchCoordinator
 from openbiliclaw.runtime.keyword_fetch import (
     mark_keyword_terminal_from_xhs_task,
     requeue_keyword_from_xhs_rate_limit,
@@ -208,7 +212,7 @@ from openbiliclaw.sources.platforms import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable
     from pathlib import Path
 
     from openbiliclaw.api.source_auth.contract import SourceAuthContract
@@ -223,6 +227,50 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 _CONFIG_SAVE_LOCK = asyncio.Lock()
 _fire_and_forget_tasks: set[asyncio.Task[None]] = set()
+
+
+def apply_retraction_db_marks(database: Any, events: list[dict[str, Any]]) -> int:
+    """Deprecated best-effort retraction projection compatibility wrapper.
+
+    HTTP ingress no longer calls this hook: the generic durable event owner
+    performs the strict projection before advancing its cursor.  Keep the old
+    import surface for embedders while delegating to the same whitelist and
+    timestamp rules.
+    """
+    from openbiliclaw.sources.event_format import (
+        RETRACTABLE_ACTIONS,
+        parse_event_timestamp,
+    )
+
+    total = 0
+    for event in events:
+        event_type = str(event.get("event_type") or event.get("type") or "").strip().lower()
+        metadata = event.get("metadata")
+        if event_type != "feedback" or not isinstance(metadata, dict):
+            continue
+        if str(metadata.get("feedback_type") or "").strip().lower() != "retraction":
+            continue
+        action = str(metadata.get("retracted_action") or "").strip().lower()
+        if action not in RETRACTABLE_ACTIONS:
+            logger.warning("Skipping out-of-whitelist retracted_action %r", action)
+            continue
+        url = str(event.get("url") or "")
+        retraction_at = parse_event_timestamp(metadata)
+        if not url or retraction_at is None:
+            continue
+        try:
+            total += int(
+                database.mark_positive_events_retracted(
+                    [url],
+                    action,
+                    retraction_at=retraction_at,
+                )
+                or 0
+            )
+        except Exception:
+            logger.warning("Legacy retraction DB projection failed", exc_info=True)
+    return total
+
 
 _HYPOTHESIS_CARD_ACTIONS = ("confirm", "reject", "discuss", "defer")
 # Settled for good — no reconcile, no further action. ``revised`` belongs here:
@@ -259,6 +307,7 @@ _CONFIRMATION_GLOBAL_COOLDOWN_HOURS = 12
 # permanent dismissal. Recalibrate after the first production month.
 _CONFIRMATION_OBJECT_COOLDOWN_HOURS = 72
 _RUNTIME_STREAM_HEARTBEAT_SECONDS = 20.0
+_DIALOGUE_EXECUTION_DRAIN_TIMEOUT_SECONDS = 1500.0
 
 # Guided-init owner-lease heartbeat period. A stage can spend minutes inside one
 # provider call, so ``touch()`` proves that the wrapper/event loop still owns the
@@ -310,17 +359,6 @@ _FIRST_PAGE_TOPUP_DEBOUNCE_SECONDS = 30.0
 # is intentionally tiny: it is a load-shedding single-flight window, not a
 # user-visible freshness policy. Mutating recommendation routes invalidate it.
 _RECOMMENDATION_SNAPSHOT_TTL_SECONDS = 1.0
-_PROFILE_UPDATE_BACKFILL_LIMIT = 200
-_PROFILE_UPDATE_BACKFILL_EVENT_TYPES = [
-    "view",
-    "search",
-    "favorite",
-    "like",
-    "coin",
-    "comment",
-    "feedback",
-]
-
 # Canonical home is openbiliclaw.sources.x_auth (mirrors douyin_auth);
 # re-exported here because callers historically imported from api.app.
 #
@@ -985,6 +1023,32 @@ def _event_row_metadata(row: dict[str, Any]) -> dict[str, Any]:
     return metadata if isinstance(metadata, dict) else {}
 
 
+def _durable_ingress_row(
+    ctx: Any,
+    *,
+    event_id: int,
+    inserted: bool,
+    submitted_event: dict[str, Any],
+) -> dict[str, Any]:
+    """Read an ingress first-write row, with an injected-test compatibility fallback."""
+    rows: list[dict[str, Any]] = []
+    for owner in (getattr(ctx, "database", None), getattr(ctx, "memory_manager", None)):
+        query = getattr(owner, "query_event_rows_by_ids", None)
+        if callable(query):
+            rows = list(query([event_id]))
+            break
+    if len(rows) == 1:
+        return rows[0]
+    if inserted:
+        # Some narrow dependency-injection tests use persistence fakes that do
+        # not expose a reread API. The just-inserted submitted payload is still
+        # the first write; duplicate/repair paths never take this fallback.
+        fallback = dict(submitted_event)
+        fallback["id"] = event_id
+        return fallback
+    raise RuntimeError("durable ingress event could not be read back")
+
+
 def _coerce_e2e_event_rows(rows: object, *, after_event_id: int = 0) -> list[dict[str, Any]]:
     if not isinstance(rows, list | tuple):
         return []
@@ -1028,43 +1092,6 @@ def _latest_e2e_event_id(ctx: Any) -> int:
         if rows:
             return _event_row_id(rows[-1]) or 0
     return 0
-
-
-def apply_retraction_db_marks(database: Any, events: list[dict[str, Any]]) -> int:
-    """Discount stored positives undone by retractions in this batch (Phase 0 face 2).
-
-    For every ``feedback``/``retraction`` event with a whitelisted
-    ``retracted_action`` and a usable event time, mark matching stored positive
-    rows (identity key + causally-earlier event time) via
-    ``Database.mark_positive_events_retracted``. Out-of-whitelist actions are
-    logged and skipped (invariant 4); per-event failures are swallowed at
-    WARNING so a bad retraction never blocks event ingest. Returns rows marked.
-    """
-    from openbiliclaw.sources.event_format import RETRACTABLE_ACTIONS, parse_event_timestamp
-
-    marker = getattr(database, "mark_positive_events_retracted", None)
-    if not callable(marker):
-        return 0
-    total = 0
-    for event in events:
-        metadata = event.get("metadata")
-        if not isinstance(metadata, dict):
-            continue
-        if str(metadata.get("feedback_type") or "").strip().lower() != "retraction":
-            continue
-        action = str(metadata.get("retracted_action") or "").strip().lower()
-        if action not in RETRACTABLE_ACTIONS:
-            logger.warning("api retraction: skipping out-of-whitelist retracted_action %r", action)
-            continue
-        url = str(event.get("url") or "")
-        retraction_at = parse_event_timestamp(metadata)
-        if not url or retraction_at is None:
-            continue
-        try:
-            total += marker([url], action, retraction_at=retraction_at)
-        except Exception:
-            logger.warning("api retraction DB mark failed", exc_info=True)
-    return total
 
 
 def _query_e2e_events(ctx: Any, *, after_event_id: int, limit: int = 1000) -> list[dict[str, Any]]:
@@ -1286,6 +1313,28 @@ def _fallback_recommendation_click_url(
     return ""
 
 
+def _normalize_recommendation_click_identity_url(value: str) -> str:
+    """Normalize the URL used only when a click has no stable content ID."""
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    try:
+        parts = urlsplit(raw)
+    except ValueError:
+        return raw
+    if parts.scheme.lower() not in {"http", "https"} or not parts.netloc:
+        return raw
+    return urlunsplit(
+        (
+            parts.scheme.lower(),
+            parts.netloc.lower(),
+            parts.path,
+            parts.query,
+            "",
+        )
+    )
+
+
 def _normalize_probe_mode_for_payload(value: object) -> str:
     normalized = str(value or "").strip().lower()
     return normalized if normalized in _PROBE_MODES else "near"
@@ -1384,34 +1433,6 @@ def _normalize_cognition_update(item: dict[str, object]) -> CognitionUpdateSumma
         source_label=source_label,
         expand_hint=expand_hint,
         created_at=str(item.get("created_at", "")).strip(),
-    )
-
-
-def _image_cache_lookup(url: str) -> tuple[Path, str] | None:
-    """Return (path, content_type) if a cached copy exists."""
-    key = _image_cache_key(url)
-    cache_dir = _image_cache_dir()
-    for candidate in cache_dir.glob(f"{key}.*"):
-        ext = candidate.suffix.lstrip(".")
-        content_type = f"image/{ext}" if ext else "image/jpeg"
-        if candidate.stat().st_size > 0:
-            return candidate, content_type
-    return None
-
-
-def _image_cache_response(url: str) -> FileResponse | None:
-    cached = _image_cache_lookup(url)
-    if not cached:
-        return None
-    cache_path, cache_ct = cached
-    return FileResponse(
-        cache_path,
-        media_type=cache_ct,
-        headers={
-            "Cache-Control": "public, max-age=86400",
-            "X-Content-Type-Options": "nosniff",
-            "X-Image-Cache": "hit",
-        },
     )
 
 
@@ -1846,10 +1867,16 @@ def create_app(
     app.state.degraded_reason = str(getattr(ctx, "degraded_reason", ""))
     app.state.degraded_issues = list(getattr(ctx, "degraded_issues", []))
     feedback_batch_scheduler = FeedbackBatchScheduler(
-        getattr(ctx, "soul_engine", None),
+        soul_engine_resolver=lambda: getattr(ctx, "soul_engine", None),
         debounce_seconds=_FEEDBACK_BATCH_DEBOUNCE_SECONDS,
     )
     app.state.feedback_batch_scheduler = feedback_batch_scheduler
+    app.state.event_recovery_task = None
+    dialogue_execution_coordinator = DialogueExecutionCoordinator()
+    app.state.dialogue_execution_coordinator = dialogue_execution_coordinator
+    image_fetch_coordinator = ImageFetchCoordinator()
+    app.state.image_fetch_coordinator = image_fetch_coordinator
+    chat_reply_scheduler: DurableChatReplyScheduler
 
     def _complete_degraded_runtime_recovery() -> None:
         """Publish an atomically rebuilt degraded context as fully available.
@@ -1868,8 +1895,6 @@ def create_app(
         app.state.degraded_reason = ""
         app.state.degraded_issues = []
         feedback_batch_scheduler.soul_engine = ctx.soul_engine
-
-    profile_pipeline_backfill_lock = asyncio.Lock()
 
     # ── Password gate (LAN/remote auth) ─────────────────────────────
     app.state.auth_gate = AuthGate(_auth_cfg, getattr(ctx, "database", None))
@@ -2255,207 +2280,263 @@ def create_app(
         with suppress(Exception):
             feedback_batch_scheduler.schedule()
 
-    async def _ingest_feedback_signal(
-        *,
-        feedback_type: str,
-        title: str,
-        note: str,
-    ) -> int:
-        """Feed one recommendation feedback into the profile-update pipeline.
-
-        Unified interest line, Wave A (spec 2026-07-27): the pipeline becomes
-        the single event-driven writer of the interest layer. Gated behind
-        ``scheduler.unified_interest_line`` because the legacy feedback batch
-        (``_schedule_post_feedback_tasks``) still runs — with both consumers
-        live the same feedback would be counted twice. Best-effort: a pipeline
-        failure never breaks the feedback response.
-        """
-        if ctx.soul_engine is None:
-            return 0
-        if not bool(getattr(ctx.soul_engine, "unified_interest_line_enabled", False)):
-            return 0
-        is_ready = getattr(ctx.soul_engine, "is_profile_ready", None)
-        if callable(is_ready):
-            with suppress(Exception):
-                if not bool(is_ready()):
-                    return 0
-        pipeline = getattr(ctx.soul_engine, "pipeline", None)
-        ingest = getattr(pipeline, "ingest", None)
-        if not callable(ingest):
-            return 0
-
-        from openbiliclaw.soul.pipeline import signal_from_feedback
-
-        try:
-            await ingest(signal_from_feedback(feedback_type, title, note))
-        except Exception:
-            logger.exception("Failed to ingest feedback into profile pipeline")
-            return 0
-        return 1
-
-    async def _ingest_profile_update_events(events: list[dict[str, Any]]) -> int:
-        """Feed events into the profile-update pipeline when ready.
-
-        Init handles first-run analysis explicitly via ``analyze_events`` +
-        ``build_initial_profile``. After a profile exists, ordinary browser
-        events and extension task results should also affect the incremental
-        update buffers instead of only being persisted to event memory.
-        """
-        if not events or ctx.soul_engine is None:
-            return 0
-        is_ready = getattr(ctx.soul_engine, "is_profile_ready", None)
-        if callable(is_ready):
-            with suppress(Exception):
-                if not bool(is_ready()):
-                    return 0
-
-        pipeline = getattr(ctx.soul_engine, "pipeline", None)
-        if pipeline is None:
-            return 0
-
-        from openbiliclaw.soul.pipeline import signals_from_events
-
-        signals = signals_from_events(events)
-        if not signals:
-            return 0
-        try:
-            ingest_batch = getattr(pipeline, "ingest_batch", None)
-            if callable(ingest_batch):
-                await ingest_batch(signals)
-                return len(signals)
-            ingest = getattr(pipeline, "ingest", None)
-            if callable(ingest):
-                for signal in signals:
-                    await ingest(signal)
-                return len(signals)
-        except Exception:
-            logger.exception("Failed to ingest events into profile pipeline")
-        return 0
-
-    def _event_cursor_value(value: object) -> int:
-        if isinstance(value, bool):
-            return 0
-        if not isinstance(value, int | float | str | bytes | bytearray):
-            return 0
-        try:
-            event_id = int(value or 0)
-        except (TypeError, ValueError):
-            return 0
-        return max(0, event_id)
-
-    def _runtime_state_value(state: dict[str, object], key: str) -> int:
-        return _event_cursor_value(state.get(key, 0))
-
-    def _query_profile_update_backfill_events(
-        *,
-        after_event_id: int,
-        max_event_id: int,
-    ) -> list[dict[str, Any]]:
-        query_events_since = getattr(ctx.database, "query_events_since", None)
-        if not callable(query_events_since):
-            query_events_since = getattr(ctx.memory_manager, "query_events_since", None)
-        if not callable(query_events_since):
-            return []
-        try:
-            rows = query_events_since(
-                after_event_id=after_event_id,
-                event_types=list(_PROFILE_UPDATE_BACKFILL_EVENT_TYPES),
-            )
-        except Exception:
-            logger.exception("Failed to query profile pipeline backfill events")
-            return []
-        if not isinstance(rows, list | tuple):
-            return []
-
-        events: list[dict[str, Any]] = []
-        for row in rows:
-            if not isinstance(row, dict):
-                with suppress(Exception):
-                    row = dict(row)
-            if not isinstance(row, dict):
-                continue
-            event_id = _event_row_id(row)
-            if event_id is None:
-                continue
-            if max_event_id > 0 and event_id > max_event_id:
-                continue
-            event = dict(row)
-            event["metadata"] = _event_row_metadata(event)
-            events.append(event)
-            if len(events) >= _PROFILE_UPDATE_BACKFILL_LIMIT:
-                break
-        return events
-
-    async def _backfill_pending_discovery_events_to_profile_pipeline(
-        *,
-        max_event_id: int,
-    ) -> int:
-        """Feed discovery-pending event rows that predate the current request.
-
-        Older versions only used ``pending_signal_events`` as a discovery
-        refresh watermark. If such rows already exist on disk, this backfill
-        lets the next successful ordinary event ingest catch them up without
-        advancing the discovery cursor itself.
-        """
-        if max_event_id <= 0:
-            return 0
-        if profile_pipeline_backfill_lock.locked():
-            logger.debug("profile pipeline backfill already in progress; skipping duplicate claim")
-            return 0
-        async with profile_pipeline_backfill_lock:
-            return await _backfill_pending_discovery_events_to_profile_pipeline_locked(
-                max_event_id=max_event_id
-            )
-
-    async def _backfill_pending_discovery_events_to_profile_pipeline_locked(
-        *,
-        max_event_id: int,
-    ) -> int:
-        """Feed discovery-pending profile events while holding the backfill claim lock."""
-        load_state = getattr(ctx.memory_manager, "load_discovery_runtime_state", None)
-        update_state = getattr(ctx.memory_manager, "update_discovery_runtime_state", None)
-        if not callable(load_state) or not callable(update_state):
-            return 0
-        try:
-            state = load_state()
-        except Exception:
-            logger.exception("Failed to load discovery runtime state for profile backfill")
-            return 0
-        if not isinstance(state, dict):
-            return 0
-
-        discovery_cursor = _runtime_state_value(state, "last_processed_event_id")
-        if "last_profile_pipeline_event_id" in state:
-            cursor = _runtime_state_value(state, "last_profile_pipeline_event_id")
-        elif discovery_cursor > 0 and discovery_cursor < max_event_id:
-            cursor = discovery_cursor
-        else:
-            cursor = max(0, max_event_id - _PROFILE_UPDATE_BACKFILL_LIMIT)
-        if cursor >= max_event_id:
-            return 0
-
-        events = _query_profile_update_backfill_events(
-            after_event_id=cursor,
-            max_event_id=max_event_id,
+    def _unified_feedback_owner_enabled() -> bool:
+        return bool(
+            ctx.soul_engine is not None
+            and getattr(ctx.soul_engine, "unified_interest_line_enabled", False)
         )
-        if not events:
-            return 0
 
-        ingested = await _ingest_profile_update_events(events)
-        if ingested <= 0:
-            return 0
+    def _feedback_owner_storage_available(soul_engine: Any) -> bool:
+        """Whether this engine has the durable state contract its owner needs.
 
-        latest_backfilled_id = max(_event_row_id(event) or 0 for event in events)
-        if latest_backfilled_id <= 0:
-            return ingested
+        RuntimeContext keeps injected stable components across config reloads.
+        A degraded embedder may therefore rebuild a real ``SoulEngine`` around
+        a deliberately narrow memory adapter.  Method presence is the honest
+        capability boundary: skip owner publication when that adapter cannot
+        persist/read the cursor, while allowing real I/O failures from a
+        complete adapter to propagate and abort the handoff.
+        """
+        memory = getattr(soul_engine, "_memory", None)
+        if memory is None:
+            memory = getattr(ctx, "memory_manager", None)
+        required = (
+            "load_feedback_state",
+            "save_feedback_state",
+            "query_events_since",
+            "get_latest_event_id",
+        )
+        return all(callable(getattr(memory, method, None)) for method in required)
 
-        def _advance(runtime_state: dict[str, object]) -> None:
-            current = _runtime_state_value(runtime_state, "last_profile_pipeline_event_id")
-            runtime_state["last_profile_pipeline_event_id"] = max(current, latest_backfilled_id)
+    async def _prepare_unified_feedback_owner() -> None:
+        """Publish the v1→v2 owner fence before any new feedback event write."""
+        if not _unified_feedback_owner_enabled():
+            return
+        soul_engine = getattr(ctx, "soul_engine", None)
+        if not _feedback_owner_storage_available(soul_engine):
+            return
+        prepare = getattr(soul_engine, "prepare_feedback_owner_cutover", None)
+        if callable(prepare):
+            await prepare()
 
-        with suppress(Exception):
-            update_state(_advance)
-        return ingested
+    async def _prepare_event_owners() -> None:
+        """Fence current hot-reload runtime owners before event-only commits."""
+        soul_engine = getattr(ctx, "soul_engine", None)
+        prepare_profile = getattr(soul_engine, "prepare_profile_event_owner_cutover", None)
+        if callable(prepare_profile):
+            await prepare_profile()
+        if _unified_feedback_owner_enabled() and _feedback_owner_storage_available(soul_engine):
+            prepare_feedback = getattr(soul_engine, "prepare_feedback_owner_cutover", None)
+            if callable(prepare_feedback):
+                await prepare_feedback()
+
+    event_ingress = EventIngressService(
+        getattr(ctx, "memory_manager", None),
+        memory_manager_resolver=lambda: getattr(ctx, "memory_manager", None),
+        prepare_owner=_prepare_event_owners,
+        wake=_schedule_post_feedback_tasks,
+    )
+    app.state.event_ingress = event_ingress
+
+    def _bind_runtime_lane_dependencies() -> None:
+        runtime_controller = getattr(ctx, "runtime_controller", None)
+        if runtime_controller is not None:
+            try:
+                runtime_controller.image_fetch_coordinator = image_fetch_coordinator
+            except (AttributeError, TypeError):
+                logger.debug("runtime fixture does not accept image fetch binding")
+        account_sync = getattr(ctx, "account_sync_service", None)
+        if account_sync is not None:
+            try:
+                account_sync.event_ingress = event_ingress
+            except (AttributeError, TypeError):
+                # Narrow dependency-injection fixtures may use immutable
+                # sentinels; production AccountSyncService exposes this slot.
+                logger.debug("account sync fixture does not accept event ingress binding")
+
+    _bind_runtime_lane_dependencies()
+
+    async def _accept_source_profile_events(
+        *,
+        source: str,
+        task_id: str,
+        events_with_keys: list[tuple[dict[str, Any], str]],
+        generic_owner: bool,
+    ) -> set[str]:
+        """Persist extension source results through the durable ingress.
+
+        Guided init owns profile construction, so its events are durable facts
+        but deliberately carry no incremental owner marker. Steady-state source
+        imports opt into the generic cursor explicitly.
+        """
+        canonical: list[dict[str, Any]] = []
+        keys_by_index: list[str] = []
+        for raw_event, bootstrap_key in events_with_keys:
+            event = dict(raw_event)
+            metadata = event.get("metadata")
+            metadata = dict(metadata) if isinstance(metadata, dict) else {}
+            metadata.setdefault("event_namespace", "source_import")
+            metadata["source_task_id"] = task_id
+            if generic_owner:
+                metadata["profile_update_owner"] = "generic"
+            else:
+                metadata.pop("profile_update_owner", None)
+            event["metadata"] = metadata
+            stable_content_id = str(
+                metadata.get("content_id")
+                or metadata.get("bvid")
+                or metadata.get("note_id")
+                or metadata.get("aweme_id")
+                or metadata.get("creator_sec_uid")
+                or metadata.get("video_id")
+                or metadata.get("channel_id")
+                or ""
+            ).strip()
+            stable_item_id = bootstrap_key.strip() or stable_content_id
+            if stable_item_id:
+                item_identity = f"id:{stable_item_id}"
+            else:
+                # Signed source URLs are mutable transport locators. They are
+                # only an identity fallback when the adapter supplied no
+                # stable bootstrap/content key, and fragments are irrelevant.
+                normalized_url = _normalize_recommendation_click_identity_url(
+                    str(event.get("url") or "")
+                )
+                item_identity = f"url:{normalized_url}"
+            stable_identity = "|".join(
+                (
+                    source,
+                    item_identity,
+                    str(event.get("event_type") or event.get("type") or ""),
+                    str(
+                        metadata.get("action")
+                        or metadata.get("feedback_type")
+                        or metadata.get("source_event")
+                        or ""
+                    ),
+                )
+            )
+            stable_digest = uuid.uuid5(uuid.NAMESPACE_URL, stable_identity).hex
+            event["ingest_key"] = stable_digest
+            canonical.append(event)
+            keys_by_index.append(bootstrap_key)
+        if not canonical:
+            return set()
+        receipt = await event_ingress.accept_batch(
+            canonical,
+            producer=f"source-{source}",
+        )
+        if receipt.rejected:
+            reasons = "; ".join(item.error for item in receipt.items if item.error)
+            raise RuntimeError(f"source event ingress rejected canonical event: {reasons}")
+        return {
+            keys_by_index[item.index]
+            for item in receipt.items
+            if (item.inserted or item.duplicate) and keys_by_index[item.index]
+        }
+
+    async def _restart_background_tasks_after_event_recovery(
+        *,
+        run_post_reload_llm_work: bool = True,
+        resume_execution_lanes: bool = True,
+        recover_event_owner_synchronously: bool = True,
+    ) -> None:
+        """Fence/admit durable owners, then restart runtime periodic tasks.
+
+        Hot reload keeps the default synchronous recovery after draining the
+        old owner and publishing the replacement runtime.  Process startup is
+        the sole caller that opts out: it admits recovery into the app-owned
+        scheduler without awaiting provider-backed pipeline consumption.
+        """
+        _bind_runtime_lane_dependencies()
+        if resume_execution_lanes:
+            await _prepare_event_owners()
+            await feedback_batch_scheduler.resume(
+                recover=recover_event_owner_synchronously,
+            )
+            if not recover_event_owner_synchronously:
+                start_recovery = getattr(
+                    feedback_batch_scheduler,
+                    "start_background_recovery",
+                    None,
+                )
+                if callable(start_recovery):
+                    app.state.event_recovery_task = start_recovery()
+                else:  # compatibility with narrow injected scheduler fakes
+                    feedback_batch_scheduler.schedule()
+                    app.state.event_recovery_task = None
+        restart = ctx.restart_background_tasks
+        try:
+            restart_signature = inspect.signature(restart)
+            supports_post_reload_flag = (
+                "run_post_reload_llm_work" in restart_signature.parameters
+                or any(
+                    parameter.kind is inspect.Parameter.VAR_KEYWORD
+                    for parameter in restart_signature.parameters.values()
+                )
+            )
+        except (TypeError, ValueError):
+            supports_post_reload_flag = True
+        if supports_post_reload_flag:
+            await restart(
+                app,
+                run_post_reload_llm_work=run_post_reload_llm_work,
+            )
+        else:  # compatibility with narrow injected test runtimes
+            await restart(app)
+
+    async def _rebuild_runtime_with_lane_handoff(
+        new_config: Any,
+        *,
+        run_post_reload_llm_work: bool = True,
+        resume_execution_lanes: bool = True,
+        after_rebuild: Any = None,
+    ) -> None:
+        """Quiesce old owners before publishing and recovering a new runtime."""
+        await feedback_batch_scheduler.pause_and_drain()
+        dialogue_paused = False
+        try:
+            await dialogue_execution_coordinator.pause_and_drain(
+                timeout=_DIALOGUE_EXECUTION_DRAIN_TIMEOUT_SECONDS
+            )
+            dialogue_paused = True
+            await ctx.rebuild_from_config(new_config)
+            if callable(after_rebuild):
+                after_rebuild()
+            await _restart_background_tasks_after_event_recovery(
+                run_post_reload_llm_work=run_post_reload_llm_work,
+                resume_execution_lanes=resume_execution_lanes,
+            )
+        except BaseException:
+            # Rebuild is atomic: on construction failure ctx still exposes the
+            # old runtime; after publication it exposes the new one. Resolve at
+            # resume time in both cases and never leave the lane paused.
+            with suppress(Exception):
+                await _restart_background_tasks_after_event_recovery(
+                    run_post_reload_llm_work=run_post_reload_llm_work,
+                    resume_execution_lanes=resume_execution_lanes,
+                )
+            raise
+        finally:
+            # Guided init may keep event owners paused, but the independent
+            # chat lane must always resume against the current/rolled-back ctx.
+            if dialogue_paused:
+                await dialogue_execution_coordinator.resume()
+
+    # Stable, app-owned handoff seam used by every internal rebuild caller.
+    # Keeping it on app.state also makes drain/publication invariants directly
+    # testable without forcing a config.toml write through the HTTP surface.
+    app.state._rebuild_runtime_with_lane_handoff = _rebuild_runtime_with_lane_handoff
+
+    def _is_feedback_event(event: dict[str, Any]) -> bool:
+        return str(event.get("event_type") or event.get("type") or "").strip() == "feedback"
+
+    def _is_retraction_feedback_event(event: dict[str, Any]) -> bool:
+        if not _is_feedback_event(event):
+            return False
+        metadata = event.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = _event_row_metadata(event)
+        return str(metadata.get("feedback_type") or "").strip().lower() == "retraction"
 
     def _load_source_bootstrap_state() -> dict[str, object]:
         from openbiliclaw.sources.bootstrap_state import (
@@ -2470,14 +2551,35 @@ def create_app(
             return normalize_source_bootstrap_state(load_state())
         return default_source_bootstrap_state()
 
-    def _save_source_bootstrap_state(state: dict[str, object]) -> None:
+    def _save_source_bootstrap_state(
+        state: dict[str, object],
+        *,
+        strict: bool = False,
+    ) -> None:
         from openbiliclaw.sources.bootstrap_state import normalize_source_bootstrap_state
 
         save_state = getattr(ctx.memory_manager, "save_source_bootstrap_state", None)
         if not callable(save_state):
+            if strict:
+                raise RuntimeError("source bootstrap state persistence is unavailable")
             return
-        with suppress(Exception):
-            save_state(normalize_source_bootstrap_state(state))
+        normalized = normalize_source_bootstrap_state(state)
+        try:
+            save_state(normalized)
+            if strict:
+                load_state = getattr(ctx.memory_manager, "load_source_bootstrap_state", None)
+                if not callable(load_state):
+                    raise RuntimeError("source bootstrap state verification is unavailable")
+                persisted = normalize_source_bootstrap_state(load_state())
+                for key, expected in normalized.items():
+                    if isinstance(expected, list):
+                        actual = persisted.get(key)
+                        if not isinstance(actual, list) or not set(expected).issubset(actual):
+                            raise RuntimeError(f"source bootstrap state verification failed: {key}")
+        except Exception:
+            if strict:
+                raise
+            logger.warning("Failed to persist source bootstrap state", exc_info=True)
 
     def _filter_new_source_bootstrap_items(
         source: str,
@@ -2528,11 +2630,12 @@ def create_app(
             merged.append(normalized)
         state[state_key] = merged
         state["last_source_bootstrap_sync_at"] = datetime.now(UTC).isoformat()
-        _save_source_bootstrap_state(state)
+        # This marker is the projection checkpoint for source task results.
+        # Terminal completion must not proceed if it cannot be persisted;
+        # retry will replay the staged canonical result and repair it.
+        _save_source_bootstrap_state(state, strict=True)
 
-    chat_turn_lock = asyncio.Lock()
     fallback_chat_turns: dict[str, dict[str, Any]] = {}
-    running_chat_turn_tasks: set[str] = set()
 
     def _dialogue_confirmation_state_path() -> Any:
         from pathlib import Path
@@ -2897,6 +3000,7 @@ def create_app(
             scope=_normalize_chat_scope(str(row.get("scope", "chat"))),
             subject_id=str(row.get("subject_id", "") or ""),
             subject_title=str(row.get("subject_title", "") or ""),
+            reply_to_turn_id=str(row.get("reply_to_turn_id", "") or ""),
             message=str(row.get("message", "") or ""),
             reply=str(row.get("reply", "") or ""),
             status=str(row.get("status", "pending") or "pending"),
@@ -2921,6 +3025,260 @@ def create_app(
         queue = _dialogue_settlement_queue()
         ready = getattr(queue, "ready_for_interactive_submission", None)
         return True if ready is None else bool(ready)
+
+    def _dialogue_queue_peek_anchor(
+        *,
+        target_kind: str = "",
+        target_ref: str = "",
+    ) -> Any:
+        """Read the admission head without retaining a queue reference."""
+        queue = _dialogue_settlement_queue()
+        peek = getattr(queue, "peek_anchor", None)
+        if callable(peek):
+            return peek(target_kind=target_kind, target_ref=target_ref)
+        registry = getattr(queue, "registry", None)
+        peek_registry = getattr(registry, "peek", None)
+        if callable(peek_registry):
+            return peek_registry(target_kind=target_kind, target_ref=target_ref)
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "dialogue_busy",
+                "message": "Dialogue context validation is not ready.",
+            },
+        )
+
+    def _dialogue_context_error(
+        status_code: int,
+        code: str,
+        message: str,
+        *,
+        retry_after: str | None = None,
+    ) -> NoReturn:
+        headers = {"Retry-After": retry_after} if retry_after else None
+        raise HTTPException(
+            status_code=status_code,
+            detail={"code": code, "message": message},
+            headers=headers,
+        )
+
+    def _row_payload(row: Mapping[str, object]) -> dict[str, object]:
+        raw_payload = row.get("payload", {})
+        if isinstance(raw_payload, str):
+            try:
+                raw_payload = json.loads(raw_payload)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                raw_payload = {}
+        return dict(raw_payload) if isinstance(raw_payload, Mapping) else {}
+
+    def _stored_dialogue_binding(row: Mapping[str, object]) -> Any | None:
+        from openbiliclaw.soul.dialogue_turn_context import (
+            DialogueBindingError,
+            DialogueTurnBinding,
+        )
+
+        raw_binding = _row_payload(row).get("dialogue_binding")
+        if not isinstance(raw_binding, Mapping):
+            return None
+        try:
+            return DialogueTurnBinding.from_mapping(raw_binding)
+        except DialogueBindingError:
+            # Legacy/corrupt rows are intentionally readable as unbound. They
+            # never become evidence for a new target.
+            logger.warning(
+                "Ignoring invalid stored dialogue binding for turn=%r",
+                row.get("turn_id"),
+            )
+            return None
+
+    def _binding_from_turn(turn: ChatTurnOut) -> Any | None:
+        return _stored_dialogue_binding({"payload": turn.payload, "turn_id": turn.turn_id})
+
+    def _canonical_context_for_target(reply_to_turn_id: str) -> tuple[Any, str, str, str]:
+        """Resolve a target row plus exact admission generation synchronously."""
+        from openbiliclaw.soul.dialogue_learn_queue import (
+            AnchorAbsent,
+            AnchorFailed,
+            AnchorNotApplicable,
+            AnchorPersisted,
+            AnchorReserved,
+        )
+        from openbiliclaw.soul.dialogue_turn_context import DialogueTurnContext
+
+        normalized_target = reply_to_turn_id.strip()
+        target = _read_chat_turn_row(normalized_target)
+        if target is None:
+            _dialogue_context_error(
+                404,
+                "reply_target_not_found",
+                "The card or question you selected is no longer available.",
+            )
+        assert target is not None
+        if str(target.get("status", "")) != "completed":
+            _dialogue_context_error(
+                409,
+                "reply_target_inactive",
+                "That card or question is still processing.",
+            )
+        payload = _row_payload(target)
+        payload_type = str(payload.get("type", "")).strip().lower()
+        kind = str(payload.get("kind", "")).strip().lower()
+        ref = str(payload.get("ref", "") or target.get("subject_id", "")).strip()
+        title = str(payload.get("title", "") or target.get("subject_title", "")).strip()
+        state = str(payload.get("state", "")).strip().lower()
+        if payload_type == "card" and kind == "hypothesis":
+            if state != "discussing":
+                _dialogue_context_error(
+                    409,
+                    "reply_target_inactive",
+                    "Discuss the hypothesis card before replying to it.",
+                )
+            source_type = "card"
+            canonical_scope = "chat"
+            canonical_subject_id = ""
+            canonical_subject_title = ""
+        elif payload_type == "question" and kind == "confusion":
+            if state in {"resolved", "dismissed", "expired"}:
+                _dialogue_context_error(
+                    409,
+                    "reply_target_inactive",
+                    "That question has already been settled.",
+                )
+            source_type = "question"
+            canonical_scope = "confusion"
+            canonical_subject_id = ref
+            canonical_subject_title = title
+        else:
+            _dialogue_context_error(
+                422,
+                "invalid_reply_target",
+                "reply_to_turn_id must identify a completed card or question.",
+            )
+        if not ref or not title:
+            _dialogue_context_error(
+                422,
+                "invalid_reply_target",
+                "The selected dialogue target has no canonical identity.",
+            )
+
+        snapshot = _dialogue_queue_peek_anchor(target_kind=kind, target_ref=ref)
+        if isinstance(snapshot, AnchorReserved):
+            _dialogue_context_error(
+                409,
+                "reply_target_processing",
+                "That dialogue target is still being opened; try again shortly.",
+                retry_after="2",
+            )
+        if isinstance(snapshot, (AnchorAbsent, AnchorFailed, AnchorNotApplicable)):
+            _dialogue_context_error(
+                409,
+                "reply_target_inactive",
+                "That dialogue target is no longer active.",
+            )
+        if not isinstance(snapshot, AnchorPersisted):
+            _dialogue_context_error(
+                409,
+                "reply_target_inactive",
+                "That dialogue target is no longer active.",
+            )
+
+        anchor_manager = getattr(ctx.soul_engine, "_dialogue_anchor_manager", None)
+        active = anchor_manager.current() if anchor_manager is not None else None
+        if active is not None and (
+            active.kind != kind or active.ref != ref or active.generation != snapshot.generation
+        ):
+            _dialogue_context_error(
+                409,
+                "reply_target_inactive",
+                "That dialogue target was replaced before the reply was sent.",
+            )
+        origin_turn_id = (
+            str(active.origin_turn_id).strip()
+            if active is not None and active.kind == kind and active.ref == ref
+            else normalized_target
+        )
+        evidence_refs = payload.get("evidence_refs", [])
+        evidence_labels = evidence_refs if isinstance(evidence_refs, list) else []
+        try:
+            context = DialogueTurnContext(
+                reply_to_turn_id=normalized_target,
+                source_type=source_type,
+                kind=kind,
+                ref=ref,
+                generation=snapshot.generation,
+                anchor_origin_turn_id=origin_turn_id,
+                title=title,
+                evidence_labels=tuple(str(item) for item in evidence_labels),
+                captured_at=datetime.now(UTC).isoformat(),
+            )
+        except ValueError as exc:
+            _dialogue_context_error(422, "invalid_reply_target", str(exc))
+        return context, canonical_scope, canonical_subject_id, canonical_subject_title
+
+    def _unbound_dialogue_binding(*, attached_confirmation: bool) -> Any:
+        from openbiliclaw.soul.dialogue_learn_queue import (
+            AnchorAbsent,
+            AnchorFailed,
+            AnchorNotApplicable,
+            AnchorPersisted,
+            AnchorReserved,
+        )
+        from openbiliclaw.soul.dialogue_turn_context import DialogueTurnBinding
+
+        if attached_confirmation:
+            return DialogueTurnBinding.detached()
+        snapshot = _dialogue_queue_peek_anchor()
+        if isinstance(snapshot, (AnchorPersisted, AnchorReserved)):
+            return DialogueTurnBinding.detached()
+        if isinstance(snapshot, (AnchorAbsent, AnchorFailed, AnchorNotApplicable)):
+            return DialogueTurnBinding.ordinary()
+        return DialogueTurnBinding.ordinary()
+
+    def _stored_request_matches(row: Mapping[str, object], payload: ChatTurnIn) -> bool:
+        """Compare a retry with the immutable request/binding already stored."""
+        stored_binding = _stored_dialogue_binding(row)
+        if str(row.get("message", "")) != payload.message.strip():
+            return False
+        if str(row.get("session", "popup") or "popup") != (payload.session.strip() or "popup"):
+            return False
+        if str(row.get("reply_to_turn_id", "") or "") != payload.reply_to_turn_id.strip():
+            return False
+        if stored_binding is None or stored_binding.mode.value != "bound":
+            return (
+                _normalize_chat_scope(str(row.get("scope", "chat")))
+                == _normalize_chat_scope(payload.scope)
+                and str(row.get("subject_id", "") or "") == payload.subject_id.strip()
+                and str(row.get("subject_title", "") or "") == payload.subject_title.strip()
+            )
+        context = stored_binding.context
+        if context is None:
+            return False
+        if context.kind == "hypothesis":
+            return (
+                _normalize_chat_scope(payload.scope) == "chat"
+                and not payload.subject_id.strip()
+                and not payload.subject_title.strip()
+            )
+        return (
+            _normalize_chat_scope(payload.scope) in {"chat", "confusion"}
+            and payload.subject_id.strip() in {"", context.ref}
+            and payload.subject_title.strip() in {"", context.title}
+        )
+
+    def _context_preview(binding: Any) -> DialogueContextPreview:
+        context = binding.context
+        if context is None:
+            raise RuntimeError("Only bound bindings have context previews")
+        return DialogueContextPreview(
+            active=True,
+            reply_to_turn_id=context.reply_to_turn_id,
+            source_type=context.source_type,
+            kind=context.kind,
+            generation=context.generation,
+            title=context.title,
+            evidence_labels=list(context.evidence_labels),
+            context_digest=binding.context_digest,
+        )
 
     def _raise_dialogue_busy() -> NoReturn:
         raise HTTPException(
@@ -3118,6 +3476,7 @@ def create_app(
                     subject_id=payload.subject_id.strip(),
                     subject_title=payload.subject_title.strip(),
                     message=payload.message.strip(),
+                    reply_to_turn_id=payload.reply_to_turn_id.strip(),
                     payload=structured_payload or {},
                 ),
             )
@@ -3133,6 +3492,7 @@ def create_app(
                 "scope": _normalize_chat_scope(payload.scope),
                 "subject_id": payload.subject_id.strip(),
                 "subject_title": payload.subject_title.strip(),
+                "reply_to_turn_id": payload.reply_to_turn_id.strip(),
                 "message": payload.message.strip(),
                 "status": "pending",
                 "reply": "",
@@ -3393,12 +3753,15 @@ def create_app(
             return turn
         return None
 
-    def _complete_chat_turn_row(turn_id: str, *, reply: str) -> None:
+    def _complete_chat_turn_row(turn_id: str, *, reply: str) -> bool:
         complete_chat_turn = _chat_db_method("complete_chat_turn")
         if complete_chat_turn is not None:
-            complete_chat_turn(turn_id, reply=reply)
-            return
-        if turn_id in fallback_chat_turns:
+            changed = complete_chat_turn(turn_id, reply=reply)
+            return True if changed is None else bool(changed)
+        if (
+            turn_id in fallback_chat_turns
+            and str(fallback_chat_turns[turn_id].get("status", "")) == "pending"
+        ):
             from datetime import datetime
 
             fallback_chat_turns[turn_id].update(
@@ -3409,13 +3772,18 @@ def create_app(
                     "updated_at": datetime.now().isoformat(sep=" "),
                 }
             )
+            return True
+        return False
 
-    def _fail_chat_turn_row(turn_id: str, *, error: str, reply: str = "") -> None:
+    def _fail_chat_turn_row(turn_id: str, *, error: str, reply: str = "") -> bool:
         fail_chat_turn = _chat_db_method("fail_chat_turn")
         if fail_chat_turn is not None:
-            fail_chat_turn(turn_id, error=error, reply=reply)
-            return
-        if turn_id in fallback_chat_turns:
+            changed = fail_chat_turn(turn_id, error=error, reply=reply)
+            return True if changed is None else bool(changed)
+        if (
+            turn_id in fallback_chat_turns
+            and str(fallback_chat_turns[turn_id].get("status", "")) == "pending"
+        ):
             from datetime import datetime
 
             fallback_chat_turns[turn_id].update(
@@ -3426,6 +3794,8 @@ def create_app(
                     "updated_at": datetime.now().isoformat(sep=" "),
                 }
             )
+            return True
+        return False
 
     def _health_profile_ready() -> bool | None:
         soul_engine = getattr(ctx, "soul_engine", None)
@@ -4035,8 +4405,11 @@ def create_app(
         if bool(getattr(ctx, "degraded", False)):
             return
         try:
-            await ctx.rebuild_from_config(cfg)
-            await ctx.restart_background_tasks(app, run_post_reload_llm_work=False)
+            await _rebuild_runtime_with_lane_handoff(
+                cfg,
+                run_post_reload_llm_work=False,
+                resume_execution_lanes=False,
+            )
             with suppress(Exception):
                 await ctx.event_hub.publish(
                     {
@@ -4165,7 +4538,7 @@ def create_app(
                     await heartbeat_task
             if not bool(getattr(ctx, "degraded", False)):
                 with suppress(Exception):
-                    await ctx.restart_background_tasks(app)
+                    await _restart_background_tasks_after_event_recovery()
 
     @app.post("/api/init")
     async def start_guided_init(request: Request) -> JSONResponse:
@@ -4903,7 +5276,7 @@ def create_app(
     @app.get("/api/image-proxy", response_model=None)
     async def image_proxy(
         url: str = Query(..., description="URL-encoded image URL to proxy"),
-    ) -> Response | FileResponse:
+    ) -> Response:
         """Proxy whitelisted remote cover images through the local backend.
 
         Cache-first: a cached copy IS the image for that URL (the URL identifies
@@ -4914,33 +5287,35 @@ def create_app(
         / redirect / size validation), cache it, and serve. ``X-Image-Cache``
         reports hit/miss; slow misses are logged for diagnosis.
         """
-        if cached := _image_cache_response(url):
-            return cached
-
         started = time.monotonic()
         try:
-            data, content_type = await fetch_cover_bytes(url)
+            result = await image_fetch_coordinator.fetch(url)
         except CoverFetchError as exc:
-            # Validation failures (400/403/413) surface as-is; upstream / network
-            # failures (>=500) fall back to a cached copy when one appeared.
-            if exc.status_code >= 500 and (cached := _image_cache_response(url)):
-                return cached
-            # fetch_cover_bytes already emits the per-host rate-limited WARNING;
-            # this line ties the failure to a concrete serve-time request.
-            logger.debug("image-proxy FAIL %d (%s) %s", exc.status_code, exc.detail, url[:100])
+            host, cache_id = image_log_identity(url)
+            logger.debug(
+                "image-proxy FAIL status=%d host=%s cache=%s",
+                exc.status_code,
+                host,
+                cache_id,
+            )
             raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 
-        save_image_bytes(url, data, content_type)
         elapsed_ms = int((time.monotonic() - started) * 1000)
-        if elapsed_ms > 800:
-            logger.debug("image-proxy MISS %dms %s", elapsed_ms, url[:100])
+        if not result.cache_hit and elapsed_ms > 800:
+            host, cache_id = image_log_identity(url)
+            logger.debug(
+                "image-proxy MISS elapsed_ms=%d host=%s cache=%s",
+                elapsed_ms,
+                host,
+                cache_id,
+            )
         return Response(
-            content=data,
-            media_type=content_type,
+            content=result.data,
+            media_type=result.content_type,
             headers={
                 "Cache-Control": "public, max-age=86400",
                 "X-Content-Type-Options": "nosniff",
-                "X-Image-Cache": "miss",
+                "X-Image-Cache": "hit" if result.cache_hit else "miss",
             },
         )
 
@@ -5462,7 +5837,8 @@ def create_app(
         # Prune the cover-image cache on startup (consumed + unsaved content,
         # plus aged orphans). The periodic pass runs from RefreshRuntime.
         try:
-            result = cleanup_image_cache(
+            result = await asyncio.to_thread(
+                cleanup_image_cache,
                 database=getattr(ctx, "database", None),
                 max_age_days=_IMAGE_CACHE_MAX_AGE_DAYS,
             )
@@ -5496,16 +5872,31 @@ def create_app(
         except Exception:
             logger.exception("Confusion claim boot reconciliation failed")
 
+        # Recover every durable pending turn in insertion-order pages. The
+        # scheduler is app-owned and therefore survives RuntimeContext swaps.
+        await chat_reply_scheduler.start()
+
         if bool(getattr(ctx, "degraded", False)):
             return
-        await ctx.restart_background_tasks(app)
+        # Fence committed facts synchronously, then admit their potentially
+        # provider-backed consume as an app-owned task.  A 401, a wedged model,
+        # or a durable pending buffer must never hold the ASGI lifespan in
+        # ``Waiting for application startup``.
+        await _restart_background_tasks_after_event_recovery(
+            recover_event_owner_synchronously=False,
+        )
 
     @app.on_event("shutdown")
     async def shutdown_refresh_loop() -> None:
+        reply_scheduler = getattr(app.state, "chat_reply_scheduler", None)
+        if reply_scheduler is not None:
+            with suppress(Exception):
+                await reply_scheduler.close()
         feedback_scheduler = getattr(app.state, "feedback_batch_scheduler", None)
         if feedback_scheduler is not None:
             with suppress(Exception):
                 await feedback_scheduler.close()
+        app.state.event_recovery_task = None
         refresh_task = getattr(app.state, "refresh_task", None)
         if refresh_task is not None:
             refresh_task.cancel()
@@ -5521,6 +5912,11 @@ def create_app(
             auto_update_task.cancel()
             with suppress(asyncio.CancelledError):
                 await auto_update_task
+        # Producers are stopped before their shared image lane. This prevents a
+        # refresh tick from enqueueing new prefetch work during coordinator
+        # shutdown; close then cancels both active and already-queued fetches.
+        with suppress(Exception):
+            await image_fetch_coordinator.close()
         # Drain the self-owned dialogue settlement queue; it is not covered by
         # the background-task cancellation above.
         settlement_queue = getattr(ctx, "dialogue_settlement_queue", None)
@@ -5894,16 +6290,8 @@ def create_app(
                 ],
             )
 
-        latest_event_id_before_ingest = 0
-        get_latest_event_id = getattr(ctx.database, "get_latest_event_id", None)
-        if callable(get_latest_event_id):
-            with suppress(Exception):
-                latest_event_id_before_ingest = _event_cursor_value(get_latest_event_id())
-
-        accepted = 0
-        accepted_events: list[dict[str, Any]] = []
-        rejected: list[EventRejectedOut] = []
-        for index, item in enumerate(payload.events):
+        canonical_events: list[dict[str, Any]] = []
+        for item in payload.events:
             source_platform = (item.source_platform or "bilibili").strip() or "bilibili"
             raw_event_type = str(item.type or "").strip()
             event_type = "feedback" if raw_event_type == "dislike" else raw_event_type
@@ -5930,6 +6318,21 @@ def create_app(
             if raw_event_type == "dislike":
                 metadata.setdefault("feedback_type", "dislike")
                 metadata.setdefault("reaction", "thumbs_down")
+            feedback_type = str(metadata.get("feedback_type") or "").strip().lower()
+            if event_type == "feedback" and feedback_type == "retraction":
+                metadata.setdefault("event_namespace", "retraction")
+                metadata["profile_update_owner"] = "generic"
+            elif event_type == "feedback" and feedback_type in {
+                "like",
+                "dislike",
+                "comment",
+                "dismiss",
+            }:
+                metadata.setdefault("event_namespace", "content")
+                metadata["profile_update_owner"] = "content_feedback"
+            else:
+                metadata.setdefault("event_namespace", "content")
+                metadata["profile_update_owner"] = "generic"
             if not isinstance(raw_context, str) and raw_context:
                 metadata.setdefault("raw_context", raw_context)
             # v0.3.x event-satisfaction: fold top-level dwell into
@@ -5949,35 +6352,18 @@ def create_app(
                 context=context_str,
                 metadata=metadata,
             )
-            try:
-                await ctx.memory_manager.propagate_event(event)
-            except ValueError as exc:
-                rejected.append(
-                    EventRejectedOut(
-                        index=index,
-                        type=raw_event_type,
-                        reason=str(exc),
-                    )
-                )
-                continue
-            accepted += 1
-            accepted_events.append(event)
-        if accepted_events:
-            # Phase 0 face 2: mark stored positives undone by any retraction in
-            # this batch so offline reread paths (init rebuild / 12h cognition)
-            # see the discount. In-memory face is handled by the pipeline.
-            with suppress(Exception):
-                apply_retraction_db_marks(ctx.database, accepted_events)
-            await _backfill_pending_discovery_events_to_profile_pipeline(
-                max_event_id=latest_event_id_before_ingest
-            )
-            await _ingest_profile_update_events(accepted_events)
-        if accepted > 0:
+            event["ingest_key"] = item.event_id.strip()
+            canonical_events.append(event)
+        receipt = await event_ingress.accept_batch(
+            canonical_events,
+            producer="extension",
+        )
+        if receipt.inserted > 0:
             await _request_runtime_replenishment(reason="event_ingest")
         # Notify popup that the activity feed has new entries so it can
         # refresh its UI without polling. Throttled naturally to once per
         # ingest call (extension batches 10+ events into a single POST).
-        if accepted > 0:
+        if receipt.inserted > 0:
             event_hub = getattr(ctx.runtime_controller, "event_hub", None)
             publish = getattr(event_hub, "publish", None)
             if callable(publish):
@@ -5985,10 +6371,33 @@ def create_app(
                     await publish(
                         {
                             "type": "activity.added",
-                            "count": accepted,
+                            "count": receipt.inserted,
                         }
                     )
-        return EventIngestResponse(accepted=accepted, rejected=rejected)
+        return EventIngestResponse(
+            accepted=receipt.accepted,
+            duplicates=receipt.duplicates,
+            rejected=[
+                EventRejectedOut(
+                    index=item.index,
+                    type=item.event_type,
+                    reason=item.error,
+                )
+                for item in receipt.items
+                if item.error
+            ],
+            receipts=[
+                EventReceiptOut(
+                    index=item.index,
+                    event_id=item.event_id,
+                    event_type=item.event_type,
+                    inserted=item.inserted,
+                    duplicate=item.duplicate,
+                )
+                for item in receipt.items
+                if not item.error
+            ],
+        )
 
     async def _load_recommendations() -> RecommendationListResponse:
         nonlocal first_page_topup_attempted_at
@@ -7017,34 +7426,33 @@ def create_app(
             counts_after = {}
             timings = None
         if items:
-            propagate_event = getattr(ctx.memory_manager, "propagate_event", None)
-            if callable(propagate_event):
-                from openbiliclaw.sources.event_format import SOURCE_WEB, build_event
+            from openbiliclaw.sources.event_format import SOURCE_WEB, build_event
 
-                returned_item_ids = [
-                    str(getattr(getattr(item, "content", None), "bvid", "") or "").strip()
-                    for item in items
-                ]
-                returned_item_ids = [item_id for item_id in returned_item_ids if item_id]
-                try:
-                    await propagate_event(
-                        build_event(
-                            event_type="reshuffle",
-                            source_platform=SOURCE_WEB,
-                            title="推荐列表",
-                            context="你在推荐页换了一批内容。",
-                            metadata={
-                                "recommendation_source_platform": source_platform or "all",
-                                "excluded_item_ids": excluded_bvids[:100],
-                                "returned_item_ids": returned_item_ids[:100],
-                                "batch_size": len(items),
-                            },
-                        )
-                    )
-                except Exception:
-                    # A behavioral breadcrumb must never turn a successful
-                    # recommendation response into an HTTP failure.
-                    logger.warning("Failed to persist reshuffle batch event", exc_info=True)
+            returned_item_ids = [
+                str(getattr(getattr(item, "content", None), "bvid", "") or "").strip()
+                for item in items
+            ]
+            returned_item_ids = [item_id for item_id in returned_item_ids if item_id]
+            reshuffle_event = build_event(
+                event_type="reshuffle",
+                source_platform=SOURCE_WEB,
+                title="推荐列表",
+                context="你在推荐页换了一批内容。",
+                metadata={
+                    "recommendation_source_platform": source_platform or "all",
+                    "excluded_item_ids": excluded_bvids[:100],
+                    "returned_item_ids": returned_item_ids[:100],
+                    "batch_size": len(items),
+                    "event_namespace": "recommendation",
+                    "profile_update_owner": "generic",
+                },
+            )
+            reshuffle_receipt = await event_ingress.accept(
+                reshuffle_event,
+                producer="web",
+            )
+            if reshuffle_receipt.accepted != 1:
+                raise HTTPException(status_code=422, detail="reshuffle event rejected")
         _schedule_exact_pool_status_snapshot()
         available_after = counts_after.get("available")
         await _trigger_replenishment_if_needed(
@@ -7158,20 +7566,27 @@ def create_app(
     @app.get("/api/runtime-status", response_model=RuntimeStatusResponse)
     async def runtime_status() -> RuntimeStatusResponse:
         get_runtime_status = getattr(ctx.runtime_controller, "get_runtime_status", None)
-        if not callable(get_runtime_status):
-            return RuntimeStatusResponse(
-                initialized=False,
-                recommendation_count=0,
-                pending_signal_events=0,
-                unread_count=0,
-            )
-        payload = dict(await asyncio.to_thread(get_runtime_status))
+        if callable(get_runtime_status):
+            payload = dict(await asyncio.to_thread(get_runtime_status))
+        else:
+            # Scheduler health remains observable even in a degraded runtime;
+            # returning here used to hide durable work exactly when operators
+            # needed recovery diagnostics most.
+            payload = {
+                "initialized": False,
+                "recommendation_count": 0,
+                "pending_signal_events": 0,
+                "unread_count": 0,
+            }
         get_account_sync_status = getattr(ctx.account_sync_service, "get_runtime_status", None)
         if callable(get_account_sync_status):
             payload.update(get_account_sync_status())
         get_update_status = getattr(ctx.auto_update_service, "get_runtime_status", None)
         if callable(get_update_status):
             payload.update(get_update_status())
+        payload.update(feedback_batch_scheduler.status_payload())
+        payload.update(chat_reply_scheduler.status_payload())
+        payload.update(image_fetch_coordinator.status_payload())
         return RuntimeStatusResponse(**payload)
 
     def _backend_update_status() -> BackendUpdateStatusOut:
@@ -7485,7 +7900,7 @@ def create_app(
         return DelightAckResponse(ok=True, bvid=bvid)
 
     @app.post("/api/delight/respond")
-    async def respond_to_delight(payload: dict[str, Any]) -> Any:
+    async def respond_to_delight(payload: DelightResponseIn) -> Any:
         """User responds to a delight (surprise) recommendation.
 
         Body:
@@ -7500,9 +7915,9 @@ def create_app(
         """
         from fastapi.responses import JSONResponse
 
-        bvid = str(payload.get("bvid", "")).strip()
-        title = str(payload.get("title", "")).strip()
-        response_type = str(payload.get("response") or "").strip().lower()
+        bvid = payload.bvid.strip()
+        title = payload.title.strip()
+        response_type = payload.response.strip().lower()
         if not bvid:
             raise HTTPException(status_code=422, detail="bvid is required")
         if response_type not in {"view", "like", "dislike", "chat", "dismiss"}:
@@ -7510,6 +7925,59 @@ def create_app(
                 status_code=422,
                 detail="response must be view, like, dislike, chat, or dismiss",
             )
+
+        reaction_receipt: Any = None
+        if response_type in {"like", "dislike", "dismiss"}:
+            from openbiliclaw.sources.event_format import SOURCE_WEB, build_event
+
+            reaction_event = build_event(
+                event_type="feedback",
+                source_platform=SOURCE_WEB,
+                title=title or bvid,
+                metadata={
+                    "bvid": bvid,
+                    "content_id": bvid,
+                    "feedback_type": response_type,
+                    "event_namespace": "recommendation",
+                    "source": "delight_response",
+                    "profile_update_owner": "content_feedback",
+                },
+            )
+            reaction_event["ingest_key"] = payload.request_id.strip()
+            receipt = await event_ingress.accept(
+                reaction_event,
+                producer="delight",
+            )
+            if receipt.accepted != 1 or receipt.rejected:
+                raise HTTPException(status_code=422, detail="delight reaction was rejected")
+            reaction_receipt = receipt.items[0]
+            stored_reaction = _durable_ingress_row(
+                ctx,
+                event_id=reaction_receipt.event_id,
+                inserted=reaction_receipt.inserted,
+                submitted_event=reaction_event,
+            )
+            stored_metadata = _event_row_metadata(stored_reaction)
+            if (
+                str(stored_metadata.get("bvid") or "").strip() != bvid
+                or str(stored_metadata.get("feedback_type") or "").strip().lower() != response_type
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="request_id was already used for a different delight reaction",
+                )
+
+        def reaction_response(action: str) -> JSONResponse:
+            content: dict[str, object] = {"ok": True, "action": action, "bvid": bvid}
+            if reaction_receipt is not None:
+                content.update(
+                    {
+                        "event_id": reaction_receipt.event_id,
+                        "duplicate": reaction_receipt.duplicate,
+                        "processing": "queued",
+                    }
+                )
+            return JSONResponse(content=content)
 
         def mark_delight_consumed() -> None:
             mark_sent = getattr(ctx.runtime_controller, "mark_delight_sent", None)
@@ -7557,90 +8025,93 @@ def create_app(
                         "error": "persist_failed",
                     },
                 )
-            return JSONResponse(content={"ok": True, "action": "dismissed", "bvid": bvid})
+            return reaction_response("dismissed")
 
         if response_type == "like":
             # User marks this delight as liked WITHOUT having opened the
             # video. Treat as a strong positive feedback signal: boost
             # the row's relevance score and record a cognition update so
             # downstream scoring + UI both reflect the preference.
-            try:
-                ctx.database._execute_write(
-                    "UPDATE content_cache SET feedback_type='like', "
-                    "feedback_at=CURRENT_TIMESTAMP, "
-                    "relevance_score=MIN(1.0, COALESCE(relevance_score, 0.5) + 0.15) "
-                    "WHERE bvid = ?",
-                    (bvid,),
-                )
-            except Exception:
-                logger.debug("Failed to record delight like for %s", bvid)
+            ctx.database._execute_write(
+                "UPDATE content_cache SET feedback_type='like', "
+                "feedback_at=CURRENT_TIMESTAMP, "
+                "relevance_score=MAX(COALESCE(relevance_score, 0.5), 0.65) "
+                "WHERE bvid = ?",
+                (bvid,),
+            )
             label = title or bvid
-            _record_probe_cognition(
-                f"你喜欢惊喜推荐「{label}」，会多挖类似的。",
-                bvid,
-                "delight_like",
-            )
-            await _publish_probe_event(
-                "delight.liked",
-                f"好，「{label}」这类多来点。",
-                bvid,
-            )
-            _record_exploration_buffer_event(
-                domain=label,
-                source_event="card_more_like",
-                evidence_id=bvid,
-            )
-            return JSONResponse(content={"ok": True, "action": "liked", "bvid": bvid})
+            if reaction_receipt.inserted:
+                _record_probe_cognition(
+                    f"你喜欢惊喜推荐「{label}」，会多挖类似的。",
+                    bvid,
+                    "delight_like",
+                )
+                await _publish_probe_event(
+                    "delight.liked",
+                    f"好，「{label}」这类多来点。",
+                    bvid,
+                )
+                _record_exploration_buffer_event(
+                    domain=label,
+                    source_event="card_more_like",
+                    evidence_id=bvid,
+                )
+            return reaction_response("liked")
 
         if response_type == "dislike":
-            try:
-                ctx.database._execute_write(
-                    "UPDATE content_cache SET pool_status = 'purged_by_dislike', "
-                    "feedback_type='dislike', feedback_at=CURRENT_TIMESTAMP "
-                    "WHERE bvid = ?",
-                    (bvid,),
-                )
-                mark_delight_consumed()
-            except Exception:
-                logger.debug("Failed to purge delight bvid %s", bvid)
+            ctx.database._execute_write(
+                "UPDATE content_cache SET pool_status = 'purged_by_dislike', "
+                "feedback_type='dislike', feedback_at=CURRENT_TIMESTAMP "
+                "WHERE bvid = ?",
+                (bvid,),
+            )
+            mark_delight_consumed()
             label = title or bvid
-            _record_probe_cognition(
-                f"你对惊喜推荐「{label}」不感兴趣。",
-                bvid,
-                "delight_dislike",
-            )
-            await _publish_probe_event(
-                "delight.disliked",
-                f"好，「{label}」这类先不推了。",
-                bvid,
-            )
-            _record_exploration_buffer_event(
-                domain=label,
-                source_event="negative",
-                evidence_id=bvid,
-            )
-            return JSONResponse(content={"ok": True, "action": "disliked", "bvid": bvid})
+            if reaction_receipt.inserted:
+                _record_probe_cognition(
+                    f"你对惊喜推荐「{label}」不感兴趣。",
+                    bvid,
+                    "delight_dislike",
+                )
+                await _publish_probe_event(
+                    "delight.disliked",
+                    f"好，「{label}」这类先不推了。",
+                    bvid,
+                )
+                _record_exploration_buffer_event(
+                    domain=label,
+                    source_event="negative",
+                    evidence_id=bvid,
+                )
+            return reaction_response("disliked")
 
         # Chat
-        raw_message = str(payload.get("message", "")).strip()
+        raw_message = payload.message.strip()
         if not raw_message:
             raw_message = f"聊聊你为什么觉得「{title or bvid}」我会喜欢"
         contextual_message = f"[关于惊喜推荐「{title or bvid}」的反馈] {raw_message}"
-        if ctx.dialogue is None:
-            exc = RuntimeError("Dialogue service is not configured.")
-            return JSONResponse(
-                content={
-                    "ok": False,
-                    "action": "chat",
-                    "bvid": bvid,
-                    "reply": safe_llm_failure_message(exc),
-                }
+
+        async def _run_delight_chat(dialogue_owner: Any) -> str:
+            reply = await asyncio.wait_for(
+                dialogue_owner.respond(contextual_message),
+                timeout=30,
             )
-        concurrency = getattr(ctx.discovery_engine, "_concurrency", None)
-        if concurrency is not None:
-            concurrency.chat_active = True
+            label = title or bvid
+            _record_probe_cognition(
+                f"关于惊喜推荐「{label}」你说：{raw_message}",
+                bvid,
+                "delight_chat",
+                detail=f"你的反馈：{raw_message}\n阿b的回复：{reply}",
+            )
+            await _publish_probe_event(
+                "delight.chat",
+                f"关于「{label}」你说：{raw_message}",
+                bvid,
+            )
+            return str(reply)
+
         try:
-            reply = await asyncio.wait_for(ctx.dialogue.respond(contextual_message), timeout=30)
+            reply = await _run_with_dialogue_execution(_run_delight_chat)
         except Exception as exc:
             logger.exception("Dialogue failed for delight chat: %s", bvid)
             return JSONResponse(
@@ -7651,17 +8122,6 @@ def create_app(
                     "reply": safe_llm_failure_message(exc),
                 }
             )
-        finally:
-            if concurrency is not None:
-                concurrency.chat_active = False
-        label = title or bvid
-        _record_probe_cognition(
-            f"关于惊喜推荐「{label}」你说：{raw_message}",
-            bvid,
-            "delight_chat",
-            detail=f"你的反馈：{raw_message}\n阿b的回复：{reply}",
-        )
-        await _publish_probe_event("delight.chat", f"关于「{label}」你说：{raw_message}", bvid)
         return JSONResponse(content={"ok": True, "action": "chat", "bvid": bvid, "reply": reply})
 
     @app.post("/api/notifications/sent", response_model=NotificationAckResponse)
@@ -7683,22 +8143,24 @@ def create_app(
         message = payload.message.strip()
         if not message:
             raise HTTPException(status_code=422, detail="Chat message is required.")
-        # Pause discovery LLM calls while user is chatting
-        concurrency = getattr(ctx.discovery_engine, "_concurrency", None)
-        if concurrency is not None:
-            concurrency.chat_active = True
+
+        async def _run_legacy_chat(dialogue_owner: Any) -> str:
+            return str(
+                await asyncio.wait_for(
+                    dialogue_owner.respond(message),
+                    timeout=120,
+                )
+            )
+
         try:
             # Bumped from 30s to 120s — deepseek with reasoning_effort=max
             # routinely takes 60-90s for one dialogue turn, so a 30s budget
             # truncated essentially every reply. Extension's AbortController
             # is sized to be generous enough to cover this end-to-end.
-            reply = await asyncio.wait_for(ctx.dialogue.respond(message), timeout=120)
+            reply = await _run_with_dialogue_execution(_run_legacy_chat)
         except Exception as exc:
             logger.exception("Chat dialogue failed")
             reply = safe_llm_failure_message(exc)
-        finally:
-            if concurrency is not None:
-                concurrency.chat_active = False
         return JSONResponse(content={"reply": reply})
 
     def _record_probe_cognition(
@@ -8134,6 +8596,12 @@ def create_app(
         return domain, specifics
 
     def _contextual_chat_message(turn: ChatTurnOut) -> str:
+        binding = _binding_from_turn(turn)
+        if binding is not None and binding.mode.value == "bound":
+            # Bound context supplies the sole readable wrapper.  Keeping the
+            # durable message raw prevents confusion replies from receiving a
+            # second legacy scope prefix.
+            return turn.message
         if turn.scope == "delight":
             label = turn.subject_title or turn.subject_id or "这条惊喜推荐"
             return f"[关于惊喜推荐「{label}」的反馈] {turn.message}"
@@ -8147,6 +8615,29 @@ def create_app(
             label = turn.subject_title or turn.subject_id or "这个我没太看懂的地方"
             return f"[关于我有点困惑的「{label}」的澄清] {turn.message}"
         return turn.message
+
+    @asynccontextmanager
+    async def _dialogue_execution_lease() -> AsyncIterator[Any]:
+        """Hold the app-stable dialogue lease and then resolve current ctx."""
+        async with dialogue_execution_coordinator.lease():
+            current_dialogue = getattr(ctx, "dialogue", None)
+            if current_dialogue is None:
+                raise RuntimeError("Dialogue service is not configured.")
+            concurrency = getattr(getattr(ctx, "discovery_engine", None), "_concurrency", None)
+            if concurrency is not None:
+                concurrency.chat_active = True
+            try:
+                yield current_dialogue
+            finally:
+                if concurrency is not None:
+                    concurrency.chat_active = False
+
+    async def _run_with_dialogue_execution(
+        operation: Callable[[Any], Awaitable[Any]],
+    ) -> Any:
+        """Run response and its ctx-dependent side effects under one lease."""
+        async with _dialogue_execution_lease() as current_dialogue:
+            return await operation(current_dialogue)
 
     async def _ensure_confusion_dialogue_anchor(turn: ChatTurnOut) -> None:
         """Queue the claim and anchor before this reply can admit its learn job."""
@@ -8195,38 +8686,30 @@ def create_app(
             },
         )
 
-    async def _generate_durable_chat_reply(turn: ChatTurnOut) -> str:
-        if ctx.dialogue is None:
-            raise RuntimeError("Dialogue service is not configured.")
-
-        concurrency = getattr(ctx.discovery_engine, "_concurrency", None)
-        if concurrency is not None:
-            concurrency.chat_active = True
+    async def _generate_durable_chat_reply(turn: ChatTurnOut, dialogue_owner: Any) -> str:
+        respond_kwargs: dict[str, object] = {
+            "scope": turn.scope or "chat",
+            "turn_id": turn.turn_id,
+        }
+        binding = _binding_from_turn(turn)
+        respond_parameters: Mapping[str, inspect.Parameter] = {}
         try:
-            async with chat_turn_lock:
-                respond_kwargs: dict[str, object] = {
-                    "scope": turn.scope or "chat",
-                    "turn_id": turn.turn_id,
-                }
-                try:
-                    supports_session = (
-                        "session" in inspect.signature(ctx.dialogue.respond).parameters
-                    )
-                except (TypeError, ValueError):
-                    supports_session = False
-                if supports_session:
-                    respond_kwargs["session"] = turn.session
-                reply = await asyncio.wait_for(
-                    ctx.dialogue.respond(
-                        _contextual_chat_message(turn),
-                        **respond_kwargs,
-                    ),
-                    timeout=120,
-                )
-                reply = str(reply)
-        finally:
-            if concurrency is not None:
-                concurrency.chat_active = False
+            respond_parameters = inspect.signature(dialogue_owner.respond).parameters
+        except (TypeError, ValueError):
+            respond_parameters = {}
+        if "session" in respond_parameters:
+            respond_kwargs["session"] = turn.session
+        if binding is not None and "dialogue_binding" in respond_parameters:
+            respond_kwargs["dialogue_binding"] = binding
+        reply = str(
+            await asyncio.wait_for(
+                dialogue_owner.respond(
+                    _contextual_chat_message(turn),
+                    **respond_kwargs,
+                ),
+                timeout=120,
+            )
+        )
 
         if not reply.strip():
             from openbiliclaw.llm.service import LLMResponseContentError
@@ -8350,6 +8833,7 @@ def create_app(
         elif turn.scope == "confusion":
             from openbiliclaw.soul.dialogue_learn_queue import DialogueJobKind
 
+            binding = _binding_from_turn(turn)
             await _submit_dialogue_settlement_required(
                 DialogueJobKind.CONFUSION_REPLY_APPLY,
                 {
@@ -8358,6 +8842,7 @@ def create_app(
                     "subject_title": turn.subject_title,
                     "message": turn.message,
                     "reply": reply,
+                    "dialogue_binding": binding.to_mapping() if binding is not None else {},
                 },
             )
 
@@ -8762,7 +9247,7 @@ def create_app(
             raise ValueError("probe.reply.apply requires turn_id and domain")
         receipt_key = "probe_reply_apply"
         receipt = _chat_turn_effect_receipt(turn_id, receipt_key)
-        speculator = getattr(ctx.soul_engine, "_speculator", None)
+        speculator: Any = getattr(ctx.soul_engine, "_speculator", None)
         if receipt is None:
             sentiment, classifier = await _classify_probe_sentiment(message, reply, domain)
             metadata: dict[str, object] = (
@@ -8918,6 +9403,10 @@ def create_app(
         label = str(job.payload.get("subject_title", "")).strip() or subject_id or "这个方向"
         message = str(job.payload.get("message", ""))
         reply = str(job.payload.get("reply", ""))
+        raw_binding = job.payload.get("dialogue_binding")
+        context_digest = ""
+        if isinstance(raw_binding, Mapping):
+            context_digest = str(raw_binding.get("context_digest", "")).strip()
         domain = subject_id or label
         receipt_key = "confusion_reply_apply"
         receipt = _chat_turn_effect_receipt(turn_id, receipt_key)
@@ -8925,6 +9414,7 @@ def create_app(
             receipt = {
                 "summary": f"关于「{label}」你说：{message}",
                 "effects": {"cognition": False, "event": False},
+                "context_digest": context_digest,
             }
             _store_chat_turn_effect_receipt(turn_id, receipt_key, receipt)
         summary = str(receipt.get("summary", f"关于「{label}」你说：{message}"))
@@ -8989,40 +9479,58 @@ def create_app(
     )
 
     async def _complete_durable_chat_turn(turn_id: str) -> None:
-        if turn_id in running_chat_turn_tasks:
+        row = _get_chat_turn_row(turn_id)
+        if row is None or str(row.get("status", "")) != "pending":
             return
-        running_chat_turn_tasks.add(turn_id)
-        try:
+        async with _dialogue_execution_lease() as current_dialogue:
+            # The turn may have completed while this worker waited behind hot
+            # reload or a synchronous dialogue. Re-read under the stable lease.
             row = _get_chat_turn_row(turn_id)
-            if row is None:
+            if row is None or str(row.get("status", "")) != "pending":
                 return
             turn = _normalize_chat_turn(row)
-            if turn.status != "pending":
-                return
             try:
-                await _ensure_confusion_dialogue_anchor(turn)
-                reply = await _generate_durable_chat_reply(turn)
+                binding = _binding_from_turn(turn)
+                if binding is None or binding.mode.value != "bound":
+                    await _ensure_confusion_dialogue_anchor(turn)
+                reply = await _generate_durable_chat_reply(turn, current_dialogue)
+            except asyncio.CancelledError:
+                # Shutdown leaves the durable row pending for startup recovery.
+                raise
             except Exception as exc:
-                logger.exception("Failed to generate durable chat turn %s", turn_id)
-                _fail_chat_turn_row(
-                    turn_id,
-                    error=safe_llm_failure_message(exc),
-                    reply="",
-                )
-                return
+                from openbiliclaw.llm.service import LLMResponseContentError
 
-            try:
-                _complete_chat_turn_row(turn_id, reply=reply)
-            except Exception:
-                logger.exception("Failed to persist completed durable chat turn %s", turn_id)
-                return
+                if isinstance(exc, LLMResponseContentError):
+                    raise TerminalChatReplyError(
+                        safe_llm_failure_message(exc),
+                        code="invalid_response",
+                    ) from exc
+                raise
 
+            completed = _complete_chat_turn_row(turn_id, reply=reply)
+            if not completed:
+                current = _get_chat_turn_row(turn_id)
+                if current is not None and str(current.get("status", "")) == "pending":
+                    # A genuine CAS miss means another owner already made the
+                    # outcome visible. A pending row means persistence did not
+                    # land and must stay at the head of the retry lane.
+                    raise RuntimeError("chat turn completion CAS did not update pending row")
+                return
             try:
+                # Handoff effects read current ctx and therefore stay inside
+                # the same lease as anchor→respond→visible completion CAS.
                 await _apply_durable_chat_success_side_effects(turn, reply)
             except Exception:
-                logger.exception("Failed to apply durable chat side effects for %s", turn_id)
-        finally:
-            running_chat_turn_tasks.discard(turn_id)
+                logger.exception(
+                    "Failed to apply durable chat side effects for %s",
+                    turn_id,
+                )
+
+    chat_reply_scheduler = DurableChatReplyScheduler(
+        processor=_complete_durable_chat_turn,
+        database_resolver=lambda: getattr(ctx, "database", None),
+    )
+    app.state.chat_reply_scheduler = chat_reply_scheduler
 
     @app.post("/api/chat/turns", response_model=ChatTurnOut)
     async def start_chat_turn(payload: ChatTurnIn) -> ChatTurnOut:
@@ -9041,16 +9549,24 @@ def create_app(
         turn_id = raw_turn_id or f"turn-{uuid.uuid4().hex}"
         existing = _get_chat_turn_row(turn_id)
         if existing is not None:
+            if not _stored_request_matches(existing, payload):
+                _dialogue_context_error(
+                    409,
+                    "turn_id_conflict",
+                    "This turn id already belongs to a different request.",
+                )
             turn = _normalize_chat_turn(existing)
             if turn.status == "pending":
-                asyncio.create_task(_complete_durable_chat_turn(turn.turn_id))
+                chat_reply_scheduler.schedule(turn.turn_id)
             return turn
-        if normalized_scope in {"chat", "delight", "probe", "avoidance_probe"}:
-            # Deterministic attachment boundary: the confirmation row is
-            # committed before the user's durable row, so equal-second
-            # timestamps are still ordered by SQLite rowid.
-            await _maybe_attach_system_confirmation(payload, turn_id=turn_id)
+
         if normalized_scope == "hypothesis":
+            if payload.reply_to_turn_id.strip():
+                _dialogue_context_error(
+                    422,
+                    "invalid_reply_target",
+                    "A hypothesis card cannot itself reply to another turn.",
+                )
             row = _create_chat_turn_row(
                 payload,
                 turn_id=turn_id,
@@ -9061,8 +9577,76 @@ def create_app(
             if completed is None:
                 raise RuntimeError("Completed hypothesis card disappeared")
             return _normalize_chat_turn(completed)
-        row = _create_chat_turn_row(payload, turn_id=turn_id)
-        asyncio.create_task(_complete_durable_chat_turn(turn_id))
+
+        from openbiliclaw.soul.dialogue_turn_context import DialogueTurnBinding
+
+        binding: DialogueTurnBinding
+        canonical_scope = normalized_scope
+        canonical_subject_id = payload.subject_id.strip()
+        canonical_subject_title = payload.subject_title.strip()
+        if payload.reply_to_turn_id.strip():
+            context, canonical_scope, canonical_subject_id, canonical_subject_title = (
+                _canonical_context_for_target(payload.reply_to_turn_id)
+            )
+            requested_scope = normalized_scope
+            requested_subject_id = payload.subject_id.strip()
+            requested_subject_title = payload.subject_title.strip()
+            if context.source_type == "card":
+                valid_request = (
+                    requested_scope == "chat"
+                    and not requested_subject_id
+                    and not requested_subject_title
+                )
+            else:
+                # ``scope=confusion`` is retained for older clients only when
+                # they still point at the exact canonical question. New clients
+                # use the default chat/empty-subject request shape.
+                valid_request = (
+                    requested_scope in {"chat", "confusion"}
+                    and requested_subject_id in {"", context.ref}
+                    and requested_subject_title in {"", context.title}
+                )
+            if not valid_request:
+                _dialogue_context_error(
+                    422,
+                    "invalid_reply_target",
+                    "The selected target conflicts with the canonical reply context.",
+                )
+            binding = DialogueTurnBinding.from_context(context)
+        else:
+            attached_confirmation: ChatTurnOut | None = None
+            if normalized_scope in {"chat", "delight", "probe", "avoidance_probe"}:
+                # Deterministic attachment boundary: the confirmation row is
+                # committed before the user's durable row, so equal-second
+                # timestamps are still ordered by SQLite rowid.
+                attached_confirmation = await _maybe_attach_system_confirmation(
+                    payload,
+                    turn_id=turn_id,
+                )
+            binding = (
+                DialogueTurnBinding.detached()
+                if attached_confirmation is not None
+                else _unbound_dialogue_binding(attached_confirmation=False)
+            )
+
+        # Everything below this line is synchronous: the binding is already a
+        # canonical immutable value and must be durable before any reply task
+        # can observe it.  Do not add an await between capture and INSERT.
+        canonical_request = payload.model_copy(
+            update={
+                "scope": canonical_scope,
+                "subject_id": canonical_subject_id,
+                "subject_title": canonical_subject_title,
+            }
+        )
+        structured_payload = dict(payload.payload)
+        structured_payload["dialogue_binding"] = binding.to_mapping()
+        row = _create_chat_turn_row(
+            canonical_request,
+            turn_id=turn_id,
+            structured_payload=structured_payload,
+        )
+        chat_reply_scheduler.schedule(turn_id)
         return _normalize_chat_turn(row)
 
     @app.get("/api/chat/pending-confirmations", response_model=None)
@@ -9144,13 +9728,29 @@ def create_app(
                         "settlement_ref": ref,
                     },
                 )
-            result = (
+            result: dict[str, Any] = (
                 dict(completion.settlement)
                 if completion.settlement is not None
                 else {"outcome": completion.outcome}
             )
             if result.get("outcome") == "processing":
                 return JSONResponse(status_code=202, content=result)
+            if action == "discuss" and result.get("outcome") == "discussing":
+                try:
+                    context, _scope, _subject_id, _subject_title = _canonical_context_for_target(
+                        turn.turn_id
+                    )
+                    from openbiliclaw.soul.dialogue_turn_context import DialogueTurnBinding
+
+                    result["context_preview"] = _context_preview(
+                        DialogueTurnBinding.from_context(context)
+                    ).model_dump()
+                except HTTPException:
+                    logger.warning(
+                        "card.discuss completed without a readable context preview: %s",
+                        turn.turn_id,
+                        exc_info=True,
+                    )
             return result
         result = await _settle_hypothesis(
             ref=str(turn.payload.get("ref", "")).strip(),
@@ -9162,6 +9762,19 @@ def create_app(
         if result.get("outcome") == "processing":
             return JSONResponse(status_code=202, content=result)
         return result
+
+    @app.get(
+        "/api/chat/contexts/{reply_to_turn_id}",
+        response_model=DialogueContextPreview,
+    )
+    async def get_chat_context(reply_to_turn_id: str) -> DialogueContextPreview:
+        """Return a canonical target preview without admitting any queue work."""
+        context, _scope, _subject_id, _subject_title = _canonical_context_for_target(
+            reply_to_turn_id
+        )
+        from openbiliclaw.soul.dialogue_turn_context import DialogueTurnBinding
+
+        return _context_preview(DialogueTurnBinding.from_context(context))
 
     @app.get("/api/chat/turns", response_model=ChatTurnListResponse)
     async def list_chat_turns(
@@ -9187,7 +9800,7 @@ def create_app(
         turn = _normalize_chat_turn(row)
         _submit_chat_card_reconcile(row)
         if turn.status == "pending":
-            asyncio.create_task(_complete_durable_chat_turn(turn.turn_id))
+            chat_reply_scheduler.schedule(turn.turn_id)
         return turn
 
     @app.post("/api/interest-probes/trigger")
@@ -9257,8 +9870,8 @@ def create_app(
                 status_code=422, detail="response must be confirm, reject, defer, or chat"
             )
 
-        speculator = getattr(ctx.soul_engine, "_speculator", None)
-        if speculator is None:
+        speculator: Any = getattr(ctx.soul_engine, "_speculator", None)
+        if response_type != "chat" and speculator is None:
             raise HTTPException(status_code=503, detail="Speculator not available")
 
         if response_type == "confirm":
@@ -9439,25 +10052,79 @@ def create_app(
         # Inject domain context so dialogue engine + learn_from_dialogue
         # understand this is feedback on a specific speculated interest
         contextual_message = f"[关于猜测兴趣「{domain}」的反馈] {raw_message}"
-        if ctx.dialogue is None:
-            exc = RuntimeError("Dialogue service is not configured.")
-            return {
-                "ok": False,
-                "action": "chat",
-                "domain": domain,
-                "reply": safe_llm_failure_message(exc),
-            }
-        # Pause discovery LLM calls while user is chatting
-        concurrency = getattr(ctx.discovery_engine, "_concurrency", None)
-        if concurrency is not None:
-            concurrency.chat_active = True
-        try:
+
+        async def _run_probe_chat(dialogue_owner: Any) -> JSONResponse:
+            # Resolve every swappable owner only after admission. A request
+            # queued behind hot reload must pair the new dialogue with the
+            # new soul runtime for all post-reply mutations.
+            current_speculator = getattr(ctx.soul_engine, "_speculator", None)
+            if current_speculator is None:
+                raise RuntimeError("Speculator not available")
             reply = await asyncio.wait_for(
-                ctx.dialogue.respond(contextual_message),
+                dialogue_owner.respond(contextual_message),
                 timeout=30,
             )
-            # Judge sentiment while discovery is still paused
-            sentiment, classifier = await _classify_probe_sentiment(raw_message, reply, domain)
+            sentiment, classifier = await _classify_probe_sentiment(
+                raw_message,
+                reply,
+                domain,
+            )
+
+            chat_response = "chat_neutral"
+            resulting_action = "none"
+            if sentiment == "negative":
+                chat_response = "chat_rejected"
+                resulting_action = "rejected"
+                current_speculator.user_reject_speculation(domain, cooldown_days=14)
+                summary = f"你对「{domain}」的反馈偏负面（{raw_message}），已暂时搁置 14 天。"
+            elif sentiment == "strong_positive":
+                chat_response = "chat_confirmed"
+                resulting_action = "confirmed"
+                _confirm_speculation_with_source(
+                    current_speculator,
+                    domain,
+                    confirmation_source="chat_confirmed",
+                )
+                summary = f"你明确确认了对「{domain}」的兴趣，已加入画像。"
+            elif sentiment == "weak_positive":
+                chat_response = "weak_positive"
+                resulting_action = "weak_positive_deferred"
+                _record_exploration_buffer_event(
+                    domain=domain,
+                    source_event="weak_positive_chat",
+                )
+                summary = f"你对「{domain}」有轻微信号，先作为短期探索方向观察。"
+            elif sentiment == "neutral_deferred":
+                defer_result = current_speculator.user_defer_speculation(domain)
+                if defer_result.outcome == "exhausted":
+                    chat_response = "defer_exhausted"
+                    resulting_action = "defer_exhausted"
+                    summary = f"你多次想把「{domain}」放一放，之后先不提了。"
+                else:
+                    chat_response = "defer"
+                    resulting_action = "deferred"
+                    summary = f"你想把「{domain}」先放一放，过阵子再聊。"
+            else:
+                summary = f"关于「{domain}」你说：{raw_message}"
+
+            _record_probe_feedback_history(
+                domain,
+                chat_response,
+                speculator=current_speculator,
+                message=raw_message,
+                classification=sentiment,
+                classifier=classifier,
+                resulting_action=resulting_action,
+            )
+            detail = f"你的反馈：{raw_message}\n阿b的回复：{reply}"
+            _record_probe_cognition(summary, domain, "chat", detail=detail)
+            await _publish_probe_event("interest.chat", summary, domain)
+            return JSONResponse(
+                content={"ok": True, "action": "chat", "domain": domain, "reply": reply}
+            )
+
+        try:
+            return cast("JSONResponse", await _run_with_dialogue_execution(_run_probe_chat))
         except Exception as exc:
             logger.exception("Dialogue failed for probe chat: %s", domain)
             return {
@@ -9466,69 +10133,6 @@ def create_app(
                 "domain": domain,
                 "reply": safe_llm_failure_message(exc),
             }
-        finally:
-            if concurrency is not None:
-                concurrency.chat_active = False
-
-        chat_response = "chat_neutral"
-        resulting_action = "none"
-        if sentiment == "negative":
-            chat_response = "chat_rejected"
-            resulting_action = "rejected"
-            speculator.user_reject_speculation(domain, cooldown_days=14)
-            summary = f"你对「{domain}」的反馈偏负面（{raw_message}），已暂时搁置 14 天。"
-        elif sentiment == "strong_positive":
-            chat_response = "chat_confirmed"
-            resulting_action = "confirmed"
-            _confirm_speculation_with_source(
-                speculator,
-                domain,
-                confirmation_source="chat_confirmed",
-            )
-            summary = f"你明确确认了对「{domain}」的兴趣，已加入画像。"
-        elif sentiment == "weak_positive":
-            chat_response = "weak_positive"
-            resulting_action = "weak_positive_deferred"
-            _record_exploration_buffer_event(
-                domain=domain,
-                source_event="weak_positive_chat",
-            )
-            summary = f"你对「{domain}」有轻微信号，先作为短期探索方向观察。"
-        elif sentiment == "neutral_deferred":
-            defer_result = speculator.user_defer_speculation(domain)
-            if defer_result.outcome == "exhausted":
-                chat_response = "defer_exhausted"
-                resulting_action = "defer_exhausted"
-                summary = f"你多次想把「{domain}」放一放，之后先不提了。"
-            else:
-                chat_response = "defer"
-                resulting_action = "deferred"
-                summary = f"你想把「{domain}」先放一放，过阵子再聊。"
-        else:
-            summary = f"关于「{domain}」你说：{raw_message}"
-
-        _record_probe_feedback_history(
-            domain,
-            chat_response,
-            speculator=speculator,
-            message=raw_message,
-            classification=sentiment,
-            classifier=classifier,
-            resulting_action=resulting_action,
-        )
-
-        detail = f"你的反馈：{raw_message}\n阿b的回复：{reply}"
-        _record_probe_cognition(summary, domain, "chat", detail=detail)
-        await _publish_probe_event(
-            "interest.chat",
-            summary,
-            domain,
-        )
-        from fastapi.responses import JSONResponse
-
-        return JSONResponse(
-            content={"ok": True, "action": "chat", "domain": domain, "reply": reply}
-        )
 
     @app.post("/api/avoidance-probes/trigger")
     async def trigger_avoidance_probe() -> dict[str, Any]:
@@ -9585,8 +10189,8 @@ def create_app(
                 status_code=422, detail="response must be confirm, reject, defer, or chat"
             )
 
-        speculator = getattr(ctx.soul_engine, "_avoidance_speculator", None)
-        if speculator is None:
+        speculator: Any = getattr(ctx.soul_engine, "_avoidance_speculator", None)
+        if response_type != "chat" and speculator is None:
             raise HTTPException(status_code=503, detail="Avoidance speculator not available")
 
         def metadata_fn(item_domain: str) -> dict[str, object]:
@@ -9729,21 +10333,23 @@ def create_app(
         if not raw_message:
             raw_message = f"我想聊聊你猜我可能想避开的「{domain}」这个方向"
         contextual_message = f"[关于避雷方向「{domain}」的反馈] {raw_message}"
-        if ctx.dialogue is None:
-            exc = RuntimeError("Dialogue service is not configured.")
-            return {
-                "ok": False,
-                "action": "chat",
-                "domain": domain,
-                "reply": safe_llm_failure_message(exc),
-            }
 
-        concurrency = getattr(ctx.discovery_engine, "_concurrency", None)
-        if concurrency is not None:
-            concurrency.chat_active = True
-        try:
+        async def _run_avoidance_chat(dialogue_owner: Any) -> JSONResponse:
+            # Keep the dialogue and avoidance state owner from the same
+            # post-reload RuntimeContext. The outer ``speculator`` is only for
+            # synchronous button actions that never wait on this lease.
+            current_speculator = getattr(ctx.soul_engine, "_avoidance_speculator", None)
+            if current_speculator is None:
+                raise RuntimeError("Avoidance speculator not available")
+
+            def current_metadata_fn(item_domain: str) -> dict[str, object]:
+                return _probe_metadata_from_active_avoidance(
+                    current_speculator,
+                    item_domain,
+                )
+
             reply = await asyncio.wait_for(
-                ctx.dialogue.respond(contextual_message),
+                dialogue_owner.respond(contextual_message),
                 timeout=30,
             )
             sentiment, classifier = await _classify_probe_sentiment(
@@ -9751,6 +10357,73 @@ def create_app(
                 reply,
                 domain,
             )
+
+            if sentiment == "negative":
+                chat_response = "avoidance_chat_confirmed"
+                resulting_action = "confirmed"
+                current_speculator.observe(
+                    [
+                        {
+                            "event_type": "dislike",
+                            "title": domain,
+                            "metadata": {
+                                "feedback_type": "dislike",
+                                "user_message": raw_message,
+                                "source": "avoidance_probe_chat",
+                            },
+                        }
+                    ]
+                )
+                summary = f"你确认「{domain}」偏向不喜欢，确认度 +1。"
+            elif sentiment in {"strong_positive", "weak_positive"}:
+                chat_response = "avoidance_chat_rejected"
+                resulting_action = "rejected"
+                reject_fn = getattr(current_speculator, "user_reject_avoidance", None)
+                if callable(reject_fn):
+                    reject_fn(domain, cooldown_days=14)
+                summary = f"你表示其实不排斥「{domain}」，已暂时搁置 14 天。"
+            elif sentiment == "neutral_deferred":
+                defer_fn = getattr(current_speculator, "user_defer_avoidance", None)
+                defer_result = defer_fn(domain) if callable(defer_fn) else None
+                if defer_result is not None and defer_result.outcome == "exhausted":
+                    chat_response = "defer_exhausted"
+                    resulting_action = "defer_exhausted"
+                    summary = f"你多次想把避雷方向「{domain}」放一放，之后先不提了。"
+                else:
+                    chat_response = "defer"
+                    resulting_action = "deferred"
+                    summary = f"你想把避雷方向「{domain}」先放一放，过阵子再聊。"
+            else:
+                chat_response = "avoidance_chat_neutral"
+                resulting_action = "none"
+                summary = f"关于避雷方向「{domain}」你说：{raw_message}"
+
+            _record_probe_feedback_history(
+                domain,
+                chat_response,
+                speculator=current_speculator,
+                message=raw_message,
+                classification=sentiment,
+                classifier=classifier,
+                resulting_action=resulting_action,
+                state_key="avoidance_probe_feedback_history",
+                metadata_fn=current_metadata_fn,
+            )
+            detail = f"你的反馈：{raw_message}\n阿b的回复：{reply}"
+            _record_probe_cognition(
+                summary,
+                domain,
+                "chat",
+                source="avoidance_probe",
+                detail=detail,
+            )
+            await _publish_probe_event("avoidance.chat", summary, domain)
+            return JSONResponse(
+                content={"ok": True, "action": "chat", "domain": domain, "reply": reply}
+            )
+
+        try:
+            return cast("JSONResponse", await _run_with_dialogue_execution(_run_avoidance_chat))
         except Exception as exc:
             logger.exception("Dialogue failed for avoidance probe chat: %s", domain)
             return {
@@ -9759,73 +10432,6 @@ def create_app(
                 "domain": domain,
                 "reply": safe_llm_failure_message(exc),
             }
-        finally:
-            if concurrency is not None:
-                concurrency.chat_active = False
-
-        if sentiment == "negative":
-            chat_response = "avoidance_chat_confirmed"
-            resulting_action = "confirmed"
-            speculator.observe(
-                [
-                    {
-                        "event_type": "dislike",
-                        "title": domain,
-                        "metadata": {
-                            "feedback_type": "dislike",
-                            "user_message": raw_message,
-                            "source": "avoidance_probe_chat",
-                        },
-                    }
-                ]
-            )
-            summary = f"你确认「{domain}」偏向不喜欢，确认度 +1。"
-        elif sentiment in {"strong_positive", "weak_positive"}:
-            chat_response = "avoidance_chat_rejected"
-            resulting_action = "rejected"
-            reject_fn = getattr(speculator, "user_reject_avoidance", None)
-            if callable(reject_fn):
-                reject_fn(domain, cooldown_days=14)
-            summary = f"你表示其实不排斥「{domain}」，已暂时搁置 14 天。"
-        elif sentiment == "neutral_deferred":
-            defer_fn = getattr(speculator, "user_defer_avoidance", None)
-            defer_result = defer_fn(domain) if callable(defer_fn) else None
-            if defer_result is not None and defer_result.outcome == "exhausted":
-                chat_response = "defer_exhausted"
-                resulting_action = "defer_exhausted"
-                summary = f"你多次想把避雷方向「{domain}」放一放，之后先不提了。"
-            else:
-                chat_response = "defer"
-                resulting_action = "deferred"
-                summary = f"你想把避雷方向「{domain}」先放一放，过阵子再聊。"
-        else:
-            chat_response = "avoidance_chat_neutral"
-            resulting_action = "none"
-            summary = f"关于避雷方向「{domain}」你说：{raw_message}"
-
-        _record_probe_feedback_history(
-            domain,
-            chat_response,
-            speculator=speculator,
-            message=raw_message,
-            classification=sentiment,
-            classifier=classifier,
-            resulting_action=resulting_action,
-            state_key="avoidance_probe_feedback_history",
-            metadata_fn=metadata_fn,
-        )
-        detail = f"你的反馈：{raw_message}\n阿b的回复：{reply}"
-        _record_probe_cognition(
-            summary,
-            domain,
-            "chat",
-            source="avoidance_probe",
-            detail=detail,
-        )
-        await _publish_probe_event("avoidance.chat", summary, domain)
-        return JSONResponse(
-            content={"ok": True, "action": "chat", "domain": domain, "reply": reply}
-        )
 
     @app.post("/api/feedback", response_model=FeedbackResponse)
     async def feedback(payload: FeedbackIn) -> FeedbackResponse:
@@ -9840,12 +10446,6 @@ def create_app(
         if recommendation is None:
             raise HTTPException(status_code=404, detail="Recommendation not found.")
 
-        ctx.database.update_recommendation_feedback(
-            payload.recommendation_id,
-            feedback_type=feedback_type,
-            feedback_note=note,
-        )
-        _invalidate_recommendation_snapshot()
         from openbiliclaw.sources.event_format import (
             SOURCE_BILIBILI,
             build_event,
@@ -9864,29 +10464,65 @@ def create_app(
         )
         if note:
             feedback_context = f"{feedback_context},备注:{note}"
-        await ctx.memory_manager.propagate_event(
-            build_event(
-                event_type="feedback",
-                source_platform=source_platform,
-                title=rec_title,
-                context=feedback_context,
-                metadata={
-                    "recommendation_id": payload.recommendation_id,
-                    "bvid": recommendation.get("bvid", ""),
-                    "feedback_type": feedback_type,
-                    "feedback_note": note,
-                },
-            )
+        feedback_event = build_event(
+            event_type="feedback",
+            source_platform=source_platform,
+            title=rec_title,
+            context=feedback_context,
+            metadata={
+                "recommendation_id": payload.recommendation_id,
+                "bvid": recommendation.get("bvid", ""),
+                "feedback_type": feedback_type,
+                "feedback_note": note,
+                "event_namespace": "recommendation",
+                "profile_update_owner": "content_feedback",
+            },
         )
+        feedback_event["ingest_key"] = payload.request_id.strip()
+        ingress_receipt = await event_ingress.accept(
+            feedback_event,
+            producer="feedback",
+        )
+        if ingress_receipt.accepted != 1 or ingress_receipt.rejected:
+            reason = ingress_receipt.items[0].error if ingress_receipt.items else "rejected"
+            raise HTTPException(status_code=422, detail=f"feedback event rejected: {reason}")
+        item_receipt = ingress_receipt.items[0]
+        stored_feedback = _durable_ingress_row(
+            ctx,
+            event_id=item_receipt.event_id,
+            inserted=item_receipt.inserted,
+            submitted_event=feedback_event,
+        )
+        stored_metadata = _event_row_metadata(stored_feedback)
+        stored_recommendation_id = int(stored_metadata.get("recommendation_id") or 0)
+        stored_feedback_type = str(stored_metadata.get("feedback_type") or "").strip().lower()
+        stored_note = str(stored_metadata.get("feedback_note") or "").strip()
+        if (
+            stored_recommendation_id != payload.recommendation_id
+            or stored_feedback_type != feedback_type
+            or stored_note != note
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="request_id was already used for different feedback",
+            )
+        # Durable projection: a duplicate retry repairs commit→projection
+        # failures, while conflicting payloads above never drive new state.
+        ctx.database.update_recommendation_feedback(
+            stored_recommendation_id,
+            feedback_type=stored_feedback_type,
+            feedback_note=stored_note,
+        )
+        _invalidate_recommendation_snapshot()
         buffer_domain, buffer_specifics = _recommendation_buffer_domain(recommendation)
-        if feedback_type == "like":
+        if item_receipt.inserted and feedback_type == "like":
             _record_exploration_buffer_event(
                 domain=buffer_domain,
                 specifics=buffer_specifics,
                 source_event="card_like",
                 evidence_id=str(recommendation.get("bvid", "")),
             )
-        elif feedback_type == "dislike":
+        elif item_receipt.inserted and feedback_type == "dislike":
             _record_exploration_buffer_event(
                 domain=buffer_domain,
                 specifics=buffer_specifics,
@@ -9898,23 +10534,20 @@ def create_app(
             "record_immediate_feedback_cognition",
             None,
         )
-        if callable(record_immediate_feedback_cognition):
+        if item_receipt.inserted and callable(record_immediate_feedback_cognition):
             with suppress(Exception):
                 record_immediate_feedback_cognition(
                     feedback_type=feedback_type,
                     title=str(recommendation.get("title", "")),
                     note=note,
                 )
-        await _ingest_feedback_signal(
-            feedback_type=feedback_type,
-            title=rec_title,
-            note=note,
-        )
-        _schedule_post_feedback_tasks()
         return FeedbackResponse(
             ok=True,
             recommendation_id=payload.recommendation_id,
             feedback_type=feedback_type,
+            event_id=item_receipt.event_id,
+            duplicate=item_receipt.duplicate,
+            processing="queued",
         )
 
     @app.post(
@@ -9924,18 +10557,14 @@ def create_app(
     async def recommendation_click(
         payload: RecommendationClickIn,
     ) -> RecommendationClickResponse:
-        """Ingest a recommendation click-through as a strong profile signal.
+        """Persist a recommendation click-through for async strong-signal processing.
 
-        The click is evidence that the user actively chose to watch a
-        recommended video. It is treated as a strong signal that bypasses
-        the pipeline's min_signals gate and updates Interest + Surface
-        immediately. If the recommendation_id resolves to a stored card,
-        its metadata (title, topic, up_name) is pulled from the database
-        so the payload reaches the pipeline even when the extension sends
-        only a bare BV id.
+        The click is evidence that the user actively chose a recommendation.
+        This request commits that fact to the append-only event ledger and
+        returns; the generic event owner projects it asynchronously. If the
+        recommendation_id resolves to a stored card, its canonical metadata
+        fills fields omitted by the client.
         """
-        from openbiliclaw.soul.pipeline import signal_from_recommendation_click
-
         recommendation: dict[str, object] | None = None
         if payload.recommendation_id is not None:
             recommendation = ctx.database.get_recommendation_by_id(
@@ -10000,6 +10629,8 @@ def create_app(
             "topic_label": topic_label,
             "up_name": up_name,
             "source": "recommendation_click",
+            "event_namespace": "recommendation",
+            "profile_update_owner": "generic",
         }
         # v0.3.x event-satisfaction: forward dwell so the persisted
         # click row can be classified as meaningful_dwell vs quick_exit.
@@ -10010,57 +10641,88 @@ def create_app(
             click_metadata["watch_seconds"] = payload.watch_seconds
         if payload.video_duration_seconds is not None:
             click_metadata["video_duration_seconds"] = payload.video_duration_seconds
-        with suppress(Exception):
-            await ctx.memory_manager.propagate_event(
-                build_event(
-                    event_type="click",
-                    source_platform=source_platform,
-                    title=title,
-                    url=content_url,
-                    author=up_name,
-                    context=click_context,
-                    metadata=click_metadata,
-                )
-            )
-        buffer_domain, buffer_specifics = _recommendation_buffer_domain(
-            {
-                "title": title,
-                "topic_label": topic_label,
-                "bvid": bvid,
-            }
+        click_event = build_event(
+            event_type="click",
+            source_platform=source_platform,
+            title=title,
+            url=content_url,
+            author=up_name,
+            context=click_context,
+            metadata=click_metadata,
         )
-        _record_exploration_buffer_event(
-            domain=buffer_domain,
-            specifics=buffer_specifics,
-            source_event="plain_click",
-            evidence_id=bvid,
+        click_event["ingest_key"] = payload.request_id.strip()
+        ingress_receipt = await event_ingress.accept(
+            click_event,
+            producer="recommendation",
         )
-
-        # Push a strong signal into the profile update pipeline.
-        layers_updated: list[str] = []
-        pipeline = getattr(ctx.soul_engine, "pipeline", None) if ctx.soul_engine else None
-        if pipeline is not None:
-            signal = signal_from_recommendation_click(
-                bvid=bvid,
-                title=title,
-                recommendation_id=payload.recommendation_id,
-                topic_label=topic_label,
-                up_name=up_name,
-                content_id=content_id,
-                content_url=content_url,
-                source_platform=source_platform,
+        if ingress_receipt.accepted != 1 or ingress_receipt.rejected:
+            reason = ingress_receipt.items[0].error if ingress_receipt.items else "rejected"
+            raise HTTPException(status_code=422, detail=f"click event rejected: {reason}")
+        item_receipt = ingress_receipt.items[0]
+        stored_click = _durable_ingress_row(
+            ctx,
+            event_id=item_receipt.event_id,
+            inserted=item_receipt.inserted,
+            submitted_event=click_event,
+        )
+        stored_metadata = _event_row_metadata(stored_click)
+        stored_recommendation_id_raw = stored_metadata.get("recommendation_id")
+        try:
+            stored_recommendation_id = (
+                int(stored_recommendation_id_raw)
+                if stored_recommendation_id_raw is not None
+                else None
             )
-            try:
-                ingest_result = await pipeline.ingest(signal)
-            except Exception:
-                logger.exception("Failed to ingest recommendation_click signal")
-            else:
-                layers_updated = [r.layer.value for r in ingest_result.layers_updated]
+        except (TypeError, ValueError):
+            stored_recommendation_id = None
+        stored_content_id = str(
+            stored_metadata.get("content_id") or stored_metadata.get("bvid") or ""
+        ).strip()
+        stored_content_url = str(
+            stored_metadata.get("content_url") or stored_click.get("url") or ""
+        ).strip()
+        stored_source_platform = _normalize_source_platform(
+            str(stored_metadata.get("source_platform") or "")
+        )
+        stable_content_identity = bool(content_id or bvid)
+        identity_conflict = (
+            stored_recommendation_id != payload.recommendation_id
+            or stored_content_id != content_id
+            or stored_source_platform != source_platform
+        )
+        if not stable_content_identity:
+            identity_conflict = identity_conflict or (
+                _normalize_recommendation_click_identity_url(stored_content_url)
+                != _normalize_recommendation_click_identity_url(content_url)
+            )
+        if identity_conflict:
+            raise HTTPException(
+                status_code=409,
+                detail="request_id was already used for a different recommendation click",
+            )
+        stored_bvid = str(stored_metadata.get("bvid") or stored_content_id).strip()
+        if item_receipt.inserted:
+            buffer_domain, buffer_specifics = _recommendation_buffer_domain(
+                {
+                    "title": title,
+                    "topic_label": topic_label,
+                    "bvid": bvid,
+                }
+            )
+            _record_exploration_buffer_event(
+                domain=buffer_domain,
+                specifics=buffer_specifics,
+                source_event="plain_click",
+                evidence_id=bvid,
+            )
 
         return RecommendationClickResponse(
             ok=True,
-            bvid=bvid,
-            layers_updated=layers_updated,
+            bvid=stored_bvid,
+            layers_updated=[],
+            event_id=item_receipt.event_id,
+            duplicate=item_receipt.duplicate,
+            processing="queued",
         )
 
     @app.post("/api/insights/feedback", response_model=InsightFeedbackResponse)
@@ -10390,6 +11052,27 @@ def create_app(
         """
         from urllib.parse import urlparse
 
+        try:
+            connection = database.conn
+        except Exception:
+            return 0
+
+        def best_effort_update(sql: str, params: tuple[str, str]) -> int:
+            """Run one optional projection without leaving a zero-row transaction open."""
+            try:
+                cursor = connection.execute(sql, params)
+                # SQLite starts an implicit write transaction even when UPDATE
+                # matches zero rows.  Commit every successful statement, not
+                # only statements whose ``rowcount`` is positive; otherwise a
+                # thread-affine request connection can retain the writer lock
+                # after TestClient/request teardown indefinitely.
+                connection.commit()
+                return int(cursor.rowcount or 0)
+            except Exception:
+                with suppress(Exception):
+                    connection.rollback()
+                return 0
+
         updated = 0
         for url in urls:
             if "xsec_token=" not in url:
@@ -10401,30 +11084,23 @@ def create_app(
                 continue
             if not note_id:
                 continue
-            try:
-                cursor = database.conn.execute(
+            updated += best_effort_update(
+                (
                     "UPDATE content_cache SET content_url=? "
                     "WHERE bvid=? AND source_platform='xiaohongshu' "
-                    "AND (content_url = '' OR content_url NOT LIKE '%xsec_token=%')",
-                    (url, note_id),
-                )
-                updated += cursor.rowcount or 0
-            except Exception:
-                pass
-            try:
-                cursor = database.conn.execute(
+                    "AND (content_url = '' OR content_url NOT LIKE '%xsec_token=%')"
+                ),
+                (url, note_id),
+            )
+            updated += best_effort_update(
+                (
                     "UPDATE discovery_candidates "
                     "SET content_url=?, last_seen_at=CURRENT_TIMESTAMP "
                     "WHERE source_platform='xiaohongshu' AND content_id=? "
-                    "AND (content_url = '' OR content_url NOT LIKE '%xsec_token=%')",
-                    (url, note_id),
-                )
-                updated += cursor.rowcount or 0
-            except Exception:
-                continue
-        if updated:
-            with suppress(Exception):
-                database.conn.commit()
+                    "AND (content_url = '' OR content_url NOT LIKE '%xsec_token=%')"
+                ),
+                (url, note_id),
+            )
         return updated
 
     # ── XHS self-author filter (v0.3.48+) ────────────────────────────
@@ -10577,8 +11253,9 @@ def create_app(
         nickname = (self_info.get("nickname") or "").strip()
         if not nickname:
             return 0
+        connection = database.conn
         try:
-            cursor = database.conn.execute(
+            cursor = connection.execute(
                 "UPDATE content_cache "
                 "SET pool_status = 'suppressed' "
                 "WHERE source_platform = 'xiaohongshu' "
@@ -10589,9 +11266,11 @@ def create_app(
                 "  )",
                 (nickname, nickname),
             )
-            database.conn.commit()
+            connection.commit()
             return int(cursor.rowcount or 0)
         except Exception:
+            with suppress(Exception):
+                connection.rollback()
             logger.exception("Failed to purge self-authored xhs pool items")
             return 0
 
@@ -11491,8 +12170,20 @@ def create_app(
             raise HTTPException(status_code=409, detail="task_result_conflict")
         task = _require_legacy_task(legacy_queue, task_id)
         task_type = str(task.get("type", "")).strip() if task else ""
+        task_status = str(task.get("status", "")).strip()
+        if task_status in {"completed", "failed"}:
+            # Terminal rows are immutable. In particular, never ingest fields
+            # from a changed retry payload after the canonical result closed.
+            return {"ok": True, "ignored": True}
+        from openbiliclaw.sources.task_result_protocol import (
+            parse_task_result,
+            staged_terminal_status,
+        )
 
-        if status == "rate_limited":
+        canonical_result = parse_task_result(task.get("result_json"))
+        staged_status = staged_terminal_status(canonical_result)
+
+        if status == "rate_limited" and not staged_status:
             legacy_queue.record_rate_limit(
                 task_id,
                 error=str(payload.get("error", "") or "xhs_rate_limited"),
@@ -11501,30 +12192,59 @@ def create_app(
                 scope_counts=scope_counts,
                 debug=debug,
             )
-            requeue_keyword_from_xhs_rate_limit(
-                ctx.database,
-                task.get("payload_json") if task is not None else None,
-            )
-        elif status in {"partial", "ok"} or (
-            status == "empty" and task_type == "bootstrap_profile"
-        ):
-            is_final = status == "ok" or (status == "empty" and task_type == "bootstrap_profile")
-            added_notes, enriched_notes = legacy_queue.merge_result_with_enrichment(
-                task_id,
-                urls=urls,
-                notes=notes if notes else None,
-                scope_counts=scope_counts,
-                debug=debug,
-                complete=is_final,
-            )
-            # Unified keyword planner lifecycle (P1.7): XHS is truly async, so a
-            # claimed search word stays ``executing`` until this terminal
-            # callback. On a final ``ok`` mark its ``source_keyword_id`` word
-            # ``used`` (a ``partial`` is not terminal → leave it ``executing``).
-            if is_final and task is not None:
-                mark_keyword_terminal_from_xhs_task(
-                    ctx.database, task.get("payload_json"), success=True
+            rate_limited_task = legacy_queue.get(task_id) or {}
+            if str(rate_limited_task.get("status") or "").strip() == "failed":
+                requeue_keyword_from_xhs_rate_limit(
+                    ctx.database,
+                    task.get("payload_json") if task is not None else None,
                 )
+        elif (
+            staged_status
+            or status in {"partial", "ok"}
+            or (status == "empty" and task_type == "bootstrap_profile")
+        ):
+            is_final = (
+                bool(staged_status)
+                or status == "ok"
+                or (status == "empty" and task_type == "bootstrap_profile")
+            )
+            incoming_self_info = _extract_self_info_from_payload(payload)
+            merge_debug = dict(debug or {})
+            if incoming_self_info is not None:
+                merge_debug["_source_self_info"] = incoming_self_info
+            if staged_status:
+                # A previous attempt durably staged the first final payload.
+                # Ignore every field on this retry and repair from that row.
+                canonical_result = parse_task_result(task.get("result_json"))
+            elif is_final:
+                canonical_result = legacy_queue.stage_final_result(
+                    task_id,
+                    terminal_status=str(status),
+                    urls=urls,
+                    notes=notes if notes else None,
+                    scope_counts=scope_counts,
+                    debug=merge_debug or None,
+                )
+            else:
+                legacy_queue.merge_result_with_enrichment(
+                    task_id,
+                    urls=urls,
+                    notes=notes if notes else None,
+                    scope_counts=scope_counts,
+                    debug=merge_debug or None,
+                    complete=False,
+                )
+                canonical_task = legacy_queue.get(task_id) or {}
+                canonical_result = parse_task_result(canonical_task.get("result_json"))
+
+            canonical_urls = [
+                value for value in canonical_result.get("urls", []) if isinstance(value, str)
+            ]
+            canonical_notes = [
+                value for value in canonical_result.get("notes", []) if isinstance(value, dict)
+            ]
+            canonical_debug = canonical_result.get("debug")
+            canonical_debug = canonical_debug if isinstance(canonical_debug, dict) else {}
             # v0.3.48+: piggyback self_info from bootstrap debug payload.
             # v0.3.57+: also accept self_info at the payload top level for
             # search / creator / passive paths via extension v0.3.10.
@@ -11532,10 +12252,12 @@ def create_app(
             # AND use the just-extracted value in this request's
             # downstream filters (skip a state round-trip that some
             # in-process test stubs don't implement).
-            self_info_from_request = _extract_self_info_from_payload(payload)
-            if self_info_from_request:
-                _persist_xhs_self_info(self_info_from_request)
-            self_info_now = self_info_from_request or _load_xhs_self_info()
+            canonical_self_info = _normalize_self_info(
+                canonical_debug.get("_source_self_info")
+            ) or _extract_self_info_from_payload(canonical_result)
+            if canonical_self_info:
+                _persist_xhs_self_info(canonical_self_info)
+            self_info_now = canonical_self_info or _load_xhs_self_info()
             # gui-init D1: the result is always persisted above (merge_result)
             # so init's own collector can read it. During an active init:
             #  - skip ALL live discovery-pool writes (stage 4 owns the pool);
@@ -11548,11 +12270,11 @@ def create_app(
             _init_busy = _init_active_now()
             _skip_profile = _init_busy and not _init_owns_task(task_id)
             # Store discovered URLs + metadata
-            valid_urls = [u for u in urls if isinstance(u, str) and u.startswith(xhs_url_prefix)]
+            valid_urls = [u for u in canonical_urls if u.startswith(xhs_url_prefix)]
             if valid_urls and not _init_busy:
                 ctx.database.save_xhs_observed_urls(valid_urls, "task")
                 _backfill_xhs_tokens(ctx.database, valid_urls)
-            candidate_notes = [*added_notes, *enriched_notes]
+            candidate_notes = canonical_notes
             if candidate_notes and not _init_busy:
                 # P1.8: a planner-driven xhs *search* task carries its
                 # ``source_keyword_id`` on the payload → thread it onto the
@@ -11572,50 +12294,53 @@ def create_app(
                 )
                 if enqueued:
                     _notify_discovery_candidates_enqueued("xiaohongshu")
-            if task_type == "bootstrap_profile" and added_notes and not _skip_profile:
+            if task_type == "bootstrap_profile" and canonical_notes and not _skip_profile:
                 fresh_notes, note_keys_by_index = _filter_new_source_bootstrap_items(
                     "xhs",
-                    added_notes,
+                    canonical_notes,
                     xhs_bootstrap_note_key,
                 )
                 # Filter self-authored notes from event propagation —
                 # otherwise the user's own posts get treated as their
                 # own "favorite/like" signals and warp the soul profile.
-                propagated = 0
                 skipped_self = 0
-                profile_events: list[dict[str, Any]] = []
-                propagated_keys: list[str] = []
+                events_with_keys: list[tuple[dict[str, Any], str]] = []
                 for index, note in enumerate(fresh_notes):
                     if _is_self_authored_note(note, self_info_now):
                         skipped_self += 1
                         continue
                     for event in xhs_bootstrap_notes_to_events([note]):
-                        await ctx.memory_manager.propagate_event(event)
-                        profile_events.append(event)
                         key = note_keys_by_index.get(index, "")
-                        if key:
-                            propagated_keys.append(key)
-                        propagated += 1
-                # During init, skip the incremental profile-update pipeline even
-                # for owned results — run_guided_init's explicit analyze/build
-                # owns the profile this run, and a force re-init has an existing
-                # profile that _ingest would otherwise mutate concurrently
-                # (gui-init review). Memory propagation above still records the
-                # signals; the pipeline resumes for steady-state after init.
-                if not _init_busy:
-                    await _ingest_profile_update_events(profile_events)
-                _mark_source_bootstrap_keys("xhs", propagated_keys)
+                        events_with_keys.append((event, key))
+                accepted_keys = await _accept_source_profile_events(
+                    source="xhs",
+                    task_id=task_id,
+                    events_with_keys=events_with_keys,
+                    generic_owner=not _init_busy,
+                )
+                _mark_source_bootstrap_keys("xhs", sorted(accepted_keys))
                 if skipped_self > 0:
                     logger.info(
                         "xhs bootstrap propagate: dropped %d self-authored note(s) (%d propagated)",
                         skipped_self,
-                        propagated,
+                        len(accepted_keys),
                     )
+            if is_final:
+                # Keyword lifecycle is also downstream of the canonical row;
+                # perform it before the one-way terminal flip so retry can
+                # repair every intermediate failure.
+                if task is not None:
+                    mark_keyword_terminal_from_xhs_task(
+                        ctx.database,
+                        task.get("payload_json"),
+                        success=True,
+                    )
+                legacy_queue.complete_staged_result(task_id)
         else:
-            legacy_queue.fail(task_id, error=payload.get("error", ""), debug=debug)
+            failed = legacy_queue.fail(task_id, error=payload.get("error", ""), debug=debug)
             # Unified keyword planner lifecycle (P1.7): the async search failed →
             # mark its ``source_keyword_id`` word ``failed`` (retry via attempts).
-            if task is not None:
+            if failed and task is not None:
                 mark_keyword_terminal_from_xhs_task(
                     ctx.database, task.get("payload_json"), success=False
                 )
@@ -12089,8 +12814,7 @@ def create_app(
             # old runtime intact, so a failure here costs a stale client, never
             # a broken one.
             with suppress(Exception):
-                await ctx.rebuild_from_config(load_config())
-                await ctx.restart_background_tasks(app)
+                await _rebuild_runtime_with_lane_handoff(load_config())
                 runtime_refreshed = True
 
         event_type = {
@@ -12413,7 +13137,7 @@ def create_app(
                 raise HTTPException(status_code=409, detail="task_result_conflict")
             return _submit_extension_native_result("dy", payload)
 
-        status = payload.get("status", "")
+        status = str(payload.get("status", "") or "").strip()
         videos = [v for v in payload.get("videos", []) if isinstance(v, dict)]
         scope_counts = payload.get("scope_counts")
         if not isinstance(scope_counts, dict):
@@ -12433,44 +13157,73 @@ def create_app(
             # dispatcher does not enter a resend loop.
             return {"ok": True, "ignored": True}
 
-        if status in {"partial", "ok", "degraded"} or (
-            status == "empty" and task_type == "bootstrap_profile"
+        from openbiliclaw.sources.task_result_protocol import (
+            parse_task_result,
+            staged_terminal_status,
+        )
+
+        canonical_result = parse_task_result(task.get("result_json"))
+        staged_status = staged_terminal_status(canonical_result)
+
+        if (
+            staged_status
+            or status in {"partial", "ok", "degraded"}
+            or (status == "empty" and task_type == "bootstrap_profile")
         ):
-            is_final = status in {"ok", "degraded"} or (
-                status == "empty" and task_type == "bootstrap_profile"
+            is_final = (
+                bool(staged_status)
+                or status in {"ok", "degraded"}
+                or (status == "empty" and task_type == "bootstrap_profile")
             )
-            added_videos = legacy_queue.merge_result(
-                task_id,
-                videos=videos if videos else None,
-                scope_counts=scope_counts,
-                debug=debug,
-                completion_status=str(status) if is_final else None,
-                complete=is_final,
-            )
+            if staged_status:
+                # Repair exclusively from the first durable final payload.
+                canonical_result = parse_task_result(task.get("result_json"))
+            elif is_final:
+                canonical_result = legacy_queue.stage_final_result(
+                    task_id,
+                    terminal_status=status,
+                    videos=videos if videos else None,
+                    scope_counts=scope_counts,
+                    debug=debug,
+                )
+            else:
+                legacy_queue.merge_result(
+                    task_id,
+                    videos=videos if videos else None,
+                    scope_counts=scope_counts,
+                    debug=debug,
+                    complete=False,
+                )
+                canonical_task = legacy_queue.get(task_id) or {}
+                canonical_result = parse_task_result(canonical_task.get("result_json"))
+            canonical_videos = [
+                value for value in canonical_result.get("videos", []) if isinstance(value, dict)
+            ]
             # gui-init D1: persist the result (above) for init's own collector;
             # during init skip profile propagation for non-owned results, but
             # propagate init-OWNED bootstrap results through the deduped path.
             _init_busy = _init_active_now()
             _skip_profile = _init_busy and not _init_owns_task(task_id)
-            if task_type == "bootstrap_profile" and added_videos and not _skip_profile:
+            if task_type == "bootstrap_profile" and canonical_videos and not _skip_profile:
                 fresh_videos, video_keys_by_index = _filter_new_source_bootstrap_items(
                     "dy",
-                    added_videos,
+                    canonical_videos,
                     dy_bootstrap_video_key,
                 )
-                profile_events: list[dict[str, Any]] = []
-                propagated_keys: list[str] = []
+                events_with_keys: list[tuple[dict[str, Any], str]] = []
                 for index, video in enumerate(fresh_videos):
                     for event in dy_bootstrap_videos_to_events([video]):
-                        await ctx.memory_manager.propagate_event(event)
-                        profile_events.append(event)
                         key = video_keys_by_index.get(index, "")
-                        if key:
-                            propagated_keys.append(key)
-                # Skip the incremental pipeline during init (see xhs handler).
-                if not _init_busy:
-                    await _ingest_profile_update_events(profile_events)
-                _mark_source_bootstrap_keys("dy", propagated_keys)
+                        events_with_keys.append((event, key))
+                accepted_keys = await _accept_source_profile_events(
+                    source="dy",
+                    task_id=task_id,
+                    events_with_keys=events_with_keys,
+                    generic_owner=not _init_busy,
+                )
+                _mark_source_bootstrap_keys("dy", sorted(accepted_keys))
+            if is_final:
+                legacy_queue.complete_staged_result(task_id)
         else:
             legacy_queue.fail(task_id, error=payload.get("error", ""), debug=debug)
 
@@ -12672,6 +13425,8 @@ def create_app(
             raise HTTPException(status_code=409, detail="task_result_conflict")
         task = _require_legacy_task(legacy_queue, task_id)
         task_type = str(task.get("type", "")).strip() if task else ""
+        if str(task.get("status", "")).strip() in {"completed", "failed"}:
+            return {"ok": True, "ignored": True}
         task_payload: dict[str, Any] = {}
         if task and task.get("payload_json"):
             with suppress(Exception):
@@ -12680,40 +13435,66 @@ def create_app(
                     task_payload = parsed_payload
         profile_update = bool(task_payload.get("profile_update"))
 
-        if status in {"partial", "ok"} or status == "empty":
-            is_final = status in {"ok", "empty"}
-            added_items = legacy_queue.merge_result(
-                task_id,
-                items=items if items else None,
-                scope_counts=scope_counts,
-                debug=debug,
-                complete=is_final,
-            )
+        from openbiliclaw.sources.task_result_protocol import (
+            parse_task_result,
+            staged_terminal_status,
+        )
+
+        canonical_result = parse_task_result(task.get("result_json"))
+        staged_status = staged_terminal_status(canonical_result)
+
+        if staged_status or status in {"partial", "ok", "empty"}:
+            is_final = bool(staged_status) or status in {"ok", "empty"}
+            if staged_status:
+                canonical_result = parse_task_result(task.get("result_json"))
+            elif is_final:
+                canonical_result = legacy_queue.stage_final_result(
+                    task_id,
+                    terminal_status=status,
+                    items=items if items else None,
+                    scope_counts=scope_counts,
+                    debug=debug,
+                )
+            else:
+                legacy_queue.merge_result(
+                    task_id,
+                    items=items if items else None,
+                    scope_counts=scope_counts,
+                    debug=debug,
+                    complete=False,
+                )
+                canonical_task = legacy_queue.get(task_id) or {}
+                canonical_result = parse_task_result(canonical_task.get("result_json"))
+            canonical_items = [
+                value for value in canonical_result.get("items", []) if isinstance(value, dict)
+            ]
             _init_busy = _init_active_now()
             _skip_profile = _init_busy and not _init_owns_task(task_id)
             if (
                 task_type == "bootstrap_events"
                 and profile_update
-                and added_items
+                and canonical_items
                 and not _skip_profile
             ):
                 fresh_items, item_keys_by_index = _filter_new_source_bootstrap_items(
                     "zhihu",
-                    added_items,
+                    canonical_items,
                     zhihu_bootstrap_item_key,
                 )
-                profile_events: list[dict[str, Any]] = []
-                propagated_keys: list[str] = []
+                events_with_keys: list[tuple[dict[str, Any], str]] = []
                 for index, item in enumerate(fresh_items):
                     for event in zhihu_bootstrap_items_to_events([item]):
-                        await ctx.memory_manager.propagate_event(event)
-                        profile_events.append(event)
                         key = item_keys_by_index.get(index, "")
-                        if key:
-                            propagated_keys.append(key)
-                if not _init_busy:
-                    await _ingest_profile_update_events(profile_events)
-                _mark_source_bootstrap_keys("zhihu", propagated_keys)
+                        events_with_keys.append((event, key))
+                accepted_keys = await _accept_source_profile_events(
+                    source="zhihu",
+                    task_id=task_id,
+                    events_with_keys=events_with_keys,
+                    generic_owner=not _init_busy,
+                )
+                _mark_source_bootstrap_keys("zhihu", sorted(accepted_keys))
+            if is_final:
+                legacy_queue.complete_staged_result(task_id)
         else:
             legacy_queue.fail(task_id, error=str(payload.get("error", "") or ""), debug=debug)
 
@@ -12763,7 +13544,7 @@ def create_app(
                 raise HTTPException(status_code=409, detail="task_result_conflict")
             return _submit_extension_native_result("yt", payload)
 
-        status = payload.get("status", "")
+        status = str(payload.get("status", "") or "").strip()
         items = [v for v in payload.get("items", []) if isinstance(v, dict)]
         scope_counts = payload.get("scope_counts")
         if not isinstance(scope_counts, dict):
@@ -12777,40 +13558,75 @@ def create_app(
             raise HTTPException(status_code=409, detail="task_result_conflict")
         task = _require_legacy_task(legacy_queue, task_id)
         task_type = str(task.get("type", "")).strip() if task else ""
+        if str(task.get("status", "")).strip() in {"completed", "failed"}:
+            return {"ok": True, "ignored": True}
 
-        if status in {"partial", "ok"} or (status == "empty" and task_type == "bootstrap_profile"):
-            is_final = status == "ok" or (status == "empty" and task_type == "bootstrap_profile")
-            added_items = legacy_queue.merge_result(
-                task_id,
-                items=items if items else None,
-                scope_counts=scope_counts,
-                debug=debug,
-                complete=is_final,
+        from openbiliclaw.sources.task_result_protocol import (
+            parse_task_result,
+            staged_terminal_status,
+        )
+
+        canonical_result = parse_task_result(task.get("result_json"))
+        staged_status = staged_terminal_status(canonical_result)
+
+        if (
+            staged_status
+            or status in {"partial", "ok"}
+            or (status == "empty" and task_type == "bootstrap_profile")
+        ):
+            is_final = (
+                bool(staged_status)
+                or status == "ok"
+                or (status == "empty" and task_type == "bootstrap_profile")
             )
+            if staged_status:
+                canonical_result = parse_task_result(task.get("result_json"))
+            elif is_final:
+                canonical_result = legacy_queue.stage_final_result(
+                    task_id,
+                    terminal_status=status,
+                    items=items if items else None,
+                    scope_counts=scope_counts,
+                    debug=debug,
+                )
+            else:
+                legacy_queue.merge_result(
+                    task_id,
+                    items=items if items else None,
+                    scope_counts=scope_counts,
+                    debug=debug,
+                    complete=False,
+                )
+                canonical_task = legacy_queue.get(task_id) or {}
+                canonical_result = parse_task_result(canonical_task.get("result_json"))
+            canonical_items = [
+                value for value in canonical_result.get("items", []) if isinstance(value, dict)
+            ]
             # gui-init D1: persist the result (above) for init's own collector;
             # during init skip profile propagation for non-owned results, but
             # propagate init-OWNED bootstrap results through the deduped path.
             _init_busy = _init_active_now()
             _skip_profile = _init_busy and not _init_owns_task(task_id)
-            if task_type == "bootstrap_profile" and added_items and not _skip_profile:
+            if task_type == "bootstrap_profile" and canonical_items and not _skip_profile:
                 fresh_items, item_keys_by_index = _filter_new_source_bootstrap_items(
                     "yt",
-                    added_items,
+                    canonical_items,
                     yt_bootstrap_item_key,
                 )
-                profile_events: list[dict[str, Any]] = []
-                propagated_keys: list[str] = []
+                events_with_keys: list[tuple[dict[str, Any], str]] = []
                 for index, item in enumerate(fresh_items):
                     for event in yt_bootstrap_items_to_events([item]):
-                        await ctx.memory_manager.propagate_event(event)
-                        profile_events.append(event)
                         key = item_keys_by_index.get(index, "")
-                        if key:
-                            propagated_keys.append(key)
-                # Skip the incremental pipeline during init (see xhs handler).
-                if not _init_busy:
-                    await _ingest_profile_update_events(profile_events)
-                _mark_source_bootstrap_keys("yt", propagated_keys)
+                        events_with_keys.append((event, key))
+                accepted_keys = await _accept_source_profile_events(
+                    source="yt",
+                    task_id=task_id,
+                    events_with_keys=events_with_keys,
+                    generic_owner=not _init_busy,
+                )
+                _mark_source_bootstrap_keys("yt", sorted(accepted_keys))
+            if is_final:
+                legacy_queue.complete_staged_result(task_id)
         else:
             legacy_queue.fail(task_id, error=payload.get("error", ""), debug=debug)
 
@@ -15431,19 +16247,19 @@ def create_app(
             reload_message = f"配置已保存到 {saved_path}。"
             was_degraded = bool(getattr(ctx, "degraded", False))
             recovered_from_degraded = False
+
+            def _after_config_runtime_rebuilt() -> None:
+                nonlocal recovered_from_degraded
+                if not was_degraded:
+                    return
+                _complete_degraded_runtime_recovery()
+                recovered_from_degraded = True
+
             try:
-                await ctx.rebuild_from_config(cfg)
-                if was_degraded:
-                    # Core runtime activation is the transaction boundary.  A
-                    # degraded context has no old business runtime to preserve,
-                    # and rebuild_from_config publishes only after every
-                    # component was constructed, so it is now safe to remove
-                    # the 503 guard without restarting the process.
-                    _complete_degraded_runtime_recovery()
-                    recovered_from_degraded = True
-                await ctx.restart_background_tasks(
-                    app,
+                await _rebuild_runtime_with_lane_handoff(
+                    cfg,
                     run_post_reload_llm_work=not suppress_background_llm_work,
+                    after_rebuild=_after_config_runtime_rebuilt,
                 )
                 reload_message += (
                     " 后端已从降级模式原地恢复，无需重启。"
