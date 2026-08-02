@@ -8,6 +8,9 @@ Usage:
         --arm-b reason-diet --sample 100 --repeats 3 \
         --output data/eval/reason-diet.json
     .venv/bin/python scripts/run_profile_diet_ab.py \
+        --arm-b body-cap --platform twitter --sample 100 --repeats 3 \
+        --output data/eval/profile-diet-body-cap.json
+    .venv/bin/python scripts/run_profile_diet_ab.py \
         --arm-b model=<instance-id> --sample 100 --repeats 3 \
         --output data/eval/model-route.json
 
@@ -29,10 +32,13 @@ import json
 import logging
 import math
 import sqlite3
+import subprocess
 import sys
+from collections import Counter
 from collections.abc import Iterator, Mapping, Sequence
-from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from contextlib import ExitStack, contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from statistics import median
@@ -54,9 +60,19 @@ BODY_CAP_TAIL = 100
 BODY_CAP_JOINER = "\u2026"
 
 _REPLAY_STATUSES = frozenset({"evaluated", "cached", "rejected_low_score"})
-_DEFAULT_BATCH_SIZE = 45
+_DEFAULT_BATCH_SIZE = 30
 _RELATIVE_ADMISSION_SHRINK_MAX = 0.03
-_REPLAY_SOURCE_CONTEXT = "profile_diet_ab.replay"
+_REPLAY_SOURCE_CONTEXT = "mixed"
+_EMPTY_REPLAY_ATTRIBUTION: Mapping[str, object] = {
+    "pair_kind": "",
+    "repeat": 0,
+    "logical_run": "",
+    "arm": "",
+}
+_REPLAY_ATTRIBUTION: ContextVar[Mapping[str, object]] = ContextVar(
+    "openbiliclaw_profile_diet_replay_attribution",
+    default=_EMPTY_REPLAY_ATTRIBUTION,
+)
 
 
 @dataclass(frozen=True)
@@ -123,6 +139,210 @@ class ReplayPair:
     scores_a: tuple[float, ...]
     scores_b: tuple[float, ...]
     metrics: ReplayMetrics
+
+
+@dataclass(frozen=True)
+class ReplayProfileSnapshot:
+    """Frozen raw/effective profile identities used by every replay arm."""
+
+    raw_profile: object
+    effective_profile: object
+    raw_digest: str
+    effective_digest: str
+    overrides_present: bool
+    active_speculation_count: int
+
+
+class ReplayEmbeddingValidationError(RuntimeError):
+    """Raised when one replay embedding result is not usable evidence."""
+
+
+class ReplayEmbeddingAudit:
+    """Fail-closed wrapper and privacy-safe audit for replay embeddings."""
+
+    def __init__(self, inner: object) -> None:
+        self._inner = inner
+        self.namespace = _embedding_namespace(inner)
+        self.calls: list[dict[str, object]] = []
+        self.errors: list[str] = []
+        self._dimension: int | None = None
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._inner, name)
+
+    async def embed(self, text: str) -> list[float]:
+        attribution = dict(_REPLAY_ATTRIBUTION.get())
+        request: dict[str, object] = {
+            **attribution,
+            "request_digest": _digest(str(text)),
+            "namespace": self.namespace,
+        }
+        try:
+            raw_vector = await self._inner.embed(text)
+            vector = _validated_embedding_vector(raw_vector)
+            dimension = len(vector)
+            if self._dimension is None:
+                self._dimension = dimension
+            elif dimension != self._dimension:
+                raise ReplayEmbeddingValidationError(
+                    f"embedding dimension drift: expected {self._dimension}, got {dimension}"
+                )
+        except Exception as exc:
+            reason = _embedding_error_reason(exc)
+            self.errors.append(reason)
+            self.calls.append({**request, "status": "error", "dimension": 0, "error": reason})
+            if isinstance(exc, ReplayEmbeddingValidationError):
+                raise
+            raise ReplayEmbeddingValidationError(reason) from exc
+        self.calls.append({**request, "status": "ok", "dimension": dimension})
+        return vector
+
+    def summary(
+        self,
+        *,
+        eligible_tail_count: int,
+        recall_audit: ReplayRecallAudit,
+        expected_runs: set[tuple[str, int, str]] | None = None,
+    ) -> dict[str, object]:
+        blocking_reasons = list(dict.fromkeys(self.errors))
+        production_recall_batches = recall_audit.production_batch_count
+        if eligible_tail_count > 0 and production_recall_batches <= 0:
+            blocking_reasons.append(
+                "eligible tail interests existed but production recall was never invoked"
+            )
+        if eligible_tail_count > 0 and not self.calls:
+            blocking_reasons.append(
+                "eligible tail interests existed but no embedding request was audited"
+            )
+        if eligible_tail_count > 0 and expected_runs:
+            observed_runs = {
+                (
+                    str(call.get("pair_kind") or ""),
+                    _to_int(call.get("repeat")),
+                    str(call.get("logical_run") or ""),
+                )
+                for call in self.calls
+            }
+            for missing in sorted(expected_runs - observed_runs):
+                blocking_reasons.append(
+                    f"production recall run {missing!r} emitted no embedding request"
+                )
+        return {
+            "passed": not blocking_reasons,
+            "degraded": False,
+            "namespace": self.namespace,
+            "call_count": len(self.calls),
+            "successful_call_count": sum(call.get("status") == "ok" for call in self.calls),
+            "dimension": self._dimension or 0,
+            "eligible_tail_count": eligible_tail_count,
+            "blocking_reasons": blocking_reasons,
+            "calls": [dict(call) for call in self.calls],
+        }
+
+
+class ReplayRecallAudit:
+    """Record whether production recall ran and injected labels per logical run."""
+
+    def __init__(self) -> None:
+        self.events: list[dict[str, object]] = []
+
+    @property
+    def production_batch_count(self) -> int:
+        return sum(event.get("scope") == "batch" for event in self.events)
+
+    def record_batch(
+        self,
+        result: Mapping[int, Sequence[object]],
+        *,
+        candidate_count: int,
+        complete_candidate_count: int | None = None,
+    ) -> None:
+        injected = sum(len(labels) for labels in result.values())
+        completed = (
+            candidate_count if complete_candidate_count is None else complete_candidate_count
+        )
+        self.events.append(
+            {
+                **dict(_REPLAY_ATTRIBUTION.get()),
+                "scope": "batch",
+                "candidate_count": candidate_count,
+                "complete_candidate_count": completed,
+                "candidates_with_injection": len(result),
+                "injected_label_count": injected,
+            }
+        )
+
+    def record_single(self, result: Sequence[object], *, complete: bool = True) -> None:
+        self.events.append(
+            {
+                **dict(_REPLAY_ATTRIBUTION.get()),
+                "scope": "single",
+                "candidate_count": 1,
+                "complete_candidate_count": int(complete),
+                "candidates_with_injection": int(bool(result)),
+                "injected_label_count": len(result),
+            }
+        )
+
+    def payload(self) -> dict[str, object]:
+        return {
+            "production_batch_count": self.production_batch_count,
+            "injected_label_count": sum(
+                int(event["injected_label_count"]) for event in self.events
+            ),
+            "candidates_with_injection": sum(
+                int(event["candidates_with_injection"]) for event in self.events
+            ),
+            "candidate_count": sum(int(event["candidate_count"]) for event in self.events),
+            "complete_candidate_count": sum(
+                int(event["complete_candidate_count"]) for event in self.events
+            ),
+            "events": [dict(event) for event in self.events],
+        }
+
+    def validate(
+        self,
+        *,
+        expected_runs: set[tuple[str, int, str]],
+        minimum_batches_per_run: int,
+        expected_candidate_count: int,
+    ) -> dict[str, object]:
+        grouped: Counter[tuple[str, int, str]] = Counter()
+        candidate_counts: Counter[tuple[str, int, str]] = Counter()
+        blocking_reasons: list[str] = []
+        for event in self.events:
+            if event.get("scope") != "batch":
+                continue
+            key = (
+                str(event.get("pair_kind") or ""),
+                _to_int(event.get("repeat")),
+                str(event.get("logical_run") or ""),
+            )
+            grouped[key] += 1
+            candidate_counts[key] += int(event.get("candidate_count") or 0)
+            if int(event.get("complete_candidate_count") or 0) != int(
+                event.get("candidate_count") or 0
+            ):
+                blocking_reasons.append(f"production recall batch {key!r} was incomplete")
+        for expected in sorted(expected_runs):
+            if grouped[expected] < minimum_batches_per_run:
+                blocking_reasons.append(
+                    f"production recall run {expected!r} emitted "
+                    f"{grouped[expected]} batch audit(s), expected at least "
+                    f"{minimum_batches_per_run}"
+                )
+            if candidate_counts[expected] < expected_candidate_count:
+                blocking_reasons.append(
+                    f"production recall run {expected!r} covered "
+                    f"{candidate_counts[expected]} candidate(s), expected at least "
+                    f"{expected_candidate_count}"
+                )
+        reasons = list(dict.fromkeys(blocking_reasons))
+        return {
+            **self.payload(),
+            "passed": not reasons,
+            "blocking_reasons": reasons,
+        }
 
 
 def score_delta_summary(scores_a: Sequence[float], scores_b: Sequence[float]) -> ScoreDeltaSummary:
@@ -247,6 +467,143 @@ def cap_body_text(
     return text[:head] + joiner + text[-tail:]
 
 
+def body_cap_affected_count(rows: Sequence[Mapping[str, Any]]) -> int:
+    """Count candidates whose model-visible body changes under production caps."""
+
+    return sum(
+        cap_body_text(str(row.get("body_text") or "")) != str(row.get("body_text") or "")
+        for row in rows
+    )
+
+
+@contextmanager
+def replay_call_attribution(
+    *,
+    pair_kind: str,
+    repeat: int,
+    logical_run: str,
+    arm: str,
+) -> Iterator[None]:
+    """Attribute every nested LLM/embedding call to one logical replay run."""
+
+    token = _REPLAY_ATTRIBUTION.set(
+        {
+            "pair_kind": pair_kind,
+            "repeat": int(repeat),
+            "logical_run": logical_run,
+            "arm": arm,
+        }
+    )
+    try:
+        yield
+    finally:
+        _REPLAY_ATTRIBUTION.reset(token)
+
+
+@contextmanager
+def configured_topic_lifecycle_serialization(config: object) -> Iterator[bool]:
+    """Mirror the API/CLI archived-topic serialization switch for replay."""
+
+    from openbiliclaw.soul.profile_views import (
+        set_topic_lifecycle_serialization,
+        topic_lifecycle_serialization_enabled,
+    )
+
+    previous = topic_lifecycle_serialization_enabled()
+    configured = (
+        str(
+            getattr(
+                getattr(config, "soul", None),
+                "topic_lifecycle_serialization",
+                "off",
+            )
+        )
+        .strip()
+        .lower()
+        == "on"
+    )
+    set_topic_lifecycle_serialization(configured)
+    try:
+        yield configured
+    finally:
+        set_topic_lifecycle_serialization(previous)
+
+
+def validate_replay_prefilter_compatibility(config: object) -> str:
+    """Return production prefilter mode or reject behavior-changing enforce runs."""
+
+    mode = (
+        str(
+            getattr(getattr(config, "discovery", None), "eval_prefilter_mode", "shadow") or "shadow"
+        )
+        .strip()
+        .lower()
+    )
+    if mode not in {"off", "shadow", "enforce"}:
+        mode = "shadow"
+    if mode == "enforce":
+        raise RuntimeError(
+            "Replay isolates model-visible diet changes with eval_prefilter_mode=off, but "
+            "production config is enforce. Switch production back to shadow/off before "
+            "collecting landing evidence; otherwise the replay cohort is not equivalent."
+        )
+    return mode
+
+
+@contextmanager
+def legacy_body_text_prompt_caps() -> Iterator[None]:
+    """Disable evaluation body caps at prompt construction for body-cap arm A.
+
+    Candidates remain byte-for-byte unchanged. This preserves the production
+    description/body dedup relation and changes only the model-visible cap.
+    """
+
+    from openbiliclaw.discovery import engine as engine_module
+
+    original_head = engine_module._EVALUATION_BODY_TEXT_HEAD_CAP
+    original_tail = engine_module._EVALUATION_BODY_TEXT_TAIL_CAP
+    engine_module._EVALUATION_BODY_TEXT_HEAD_CAP = sys.maxsize
+    engine_module._EVALUATION_BODY_TEXT_TAIL_CAP = 0
+    try:
+        yield
+    finally:
+        engine_module._EVALUATION_BODY_TEXT_HEAD_CAP = original_head
+        engine_module._EVALUATION_BODY_TEXT_TAIL_CAP = original_tail
+
+
+def _embedding_namespace(service: object) -> str:
+    for attribute in (
+        "cache_model_namespace",
+        "embedding_fingerprint",
+        "embedding_model",
+    ):
+        value = str(getattr(service, attribute, "") or "").strip()
+        if value:
+            return value
+    service_type = type(service)
+    return _digest(f"{service_type.__module__}.{service_type.__qualname__}")[:32]
+
+
+def _validated_embedding_vector(value: object) -> list[float]:
+    if not isinstance(value, list) or not value:
+        raise ReplayEmbeddingValidationError("embedding returned an empty or non-list vector")
+    vector: list[float] = []
+    for item in value:
+        if isinstance(item, bool) or not isinstance(item, (int, float)):
+            raise ReplayEmbeddingValidationError("embedding vector contained a non-numeric value")
+        number = float(item)
+        if not math.isfinite(number):
+            raise ReplayEmbeddingValidationError("embedding vector contained NaN or infinity")
+        vector.append(number)
+    return vector
+
+
+def _embedding_error_reason(exc: BaseException) -> str:
+    if isinstance(exc, ReplayEmbeddingValidationError):
+        return str(exc)
+    return f"embedding request raised {type(exc).__name__}"
+
+
 # ``--arm-b reason-diet``: arm A restores the pre-2689d412 reason instruction
 # (unconditional one-sentence reasons) by surgically swapping the exact new
 # snippets back to the legacy text inside the current prompt constants; arm B
@@ -256,11 +613,17 @@ def cap_body_text(
 _REASON_DIET_SWAPS: tuple[tuple[str, str, str], ...] = (
     (
         "_SINGLE_CONTENT_EVALUATION_SYSTEM_PROMPT",
-        '3. reason 写法(省 token):score 严格低于 0.5 的条目,reason 必须写成空串 ""'
+        "3. reason 仅供内部诊断,不是面向用户的推荐文案。写法(省 token):"
+        'score 严格低于 0.5 的条目,reason 必须写成空串 ""'
         "(这些条目达不到准入门槛、会被直接丢弃,写理由是纯浪费);"
-        "score 大于等于 0.5 的条目,reason 写一句口语化、可直接展示给用户的中文,"
-        "不超过 30 个字,说明为什么这个人会喜欢或不喜欢这个内容。\n",
+        "score 大于等于 0.5 的条目,reason 写一句精炼中文,"
+        "不超过 30 个 Unicode 字符,说明内容与画像匹配或不匹配的依据。\n",
         "3. reason 只写一句中文,解释为什么这个人会喜欢或不喜欢这个内容。\n",
+    ),
+    (
+        "_SINGLE_CONTENT_EVALUATION_SYSTEM_PROMPT",
+        '  "reason": "主题契合画像中的长期兴趣,内容角度有增量",\n',
+        '  "reason": "这个视频的选题角度新颖,节奏轻快,契合你对该领域的好奇心。",\n',
     ),
     (
         "_BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT",
@@ -269,10 +632,11 @@ _REASON_DIET_SWAPS: tuple[tuple[str, str, str], ...] = (
     ),
     (
         "_BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT",
-        '3a. reason 写法(省 token):score 严格低于 0.5 的条目,reason 必须写成空串 ""'
+        "3a. reason 仅供内部诊断,不是面向用户的推荐文案。写法(省 token):"
+        'score 严格低于 0.5 的条目,reason 必须写成空串 ""'
         "(这些条目达不到准入门槛、会被直接丢弃,写理由是纯浪费);"
-        "score 大于等于 0.5 的条目,reason 写一句口语化、可直接展示给用户的中文,"
-        "不超过 30 个字,说明为什么这个人会喜欢这个内容。\n",
+        "score 大于等于 0.5 的条目,reason 写一句精炼中文,"
+        "不超过 30 个 Unicode 字符,说明内容与画像匹配的依据。\n",
         "",
     ),
     (
@@ -487,9 +851,23 @@ def _fetch_replay_rows(database: Any, *, sample: int, platform: str | None) -> l
     return selected
 
 
-def _load_current_profile(data_root: Path) -> object:
+def _profile_digest_payload(profile: object) -> dict[str, object]:
+    serialized = profile.to_dict() if callable(getattr(profile, "to_dict", None)) else str(profile)
+    speculations = getattr(profile, "_active_speculations", None)
+    speculation_payload = [
+        item.to_dict() if callable(getattr(item, "to_dict", None)) else str(item)
+        for item in (speculations if isinstance(speculations, list) else [])
+    ]
+    return {"profile": serialized, "active_speculations": speculation_payload}
+
+
+def _load_profile_snapshot(data_root: Path) -> ReplayProfileSnapshot:
+    """Load the exact effective profile shape exposed by SoulEngine.get_profile."""
+
     from openbiliclaw.memory.manager import MemoryManager
+    from openbiliclaw.soul.overrides import apply_overrides
     from openbiliclaw.soul.profile import OnionProfile
+    from openbiliclaw.soul.speculator import load_speculative_state
 
     memory = MemoryManager(data_root)
     soul_layer = memory.get_layer("soul")
@@ -498,7 +876,28 @@ def _load_current_profile(data_root: Path) -> object:
         raise RuntimeError(
             f"No current soul profile found in {data_root / 'memory' / 'soul.json'}."
         )
-    return OnionProfile.from_dict(dict(soul_layer.data))
+    raw_profile = OnionProfile.from_dict(dict(soul_layer.data))
+    overrides = memory.load_profile_overrides()
+    effective_profile = apply_overrides(raw_profile, overrides)
+    active_speculations = [
+        item for item in load_speculative_state(data_root).active if item.status == "active"
+    ]
+    if active_speculations:
+        effective_profile._active_speculations = active_speculations  # type: ignore[attr-defined]
+    return ReplayProfileSnapshot(
+        raw_profile=raw_profile,
+        effective_profile=effective_profile,
+        raw_digest=_digest(_profile_digest_payload(raw_profile)),
+        effective_digest=_digest(_profile_digest_payload(effective_profile)),
+        overrides_present=not overrides.is_empty(),
+        active_speculation_count=len(active_speculations),
+    )
+
+
+def _load_current_profile(data_root: Path) -> object:
+    """Backward-compatible helper returning the effective replay profile."""
+
+    return _load_profile_snapshot(data_root).effective_profile
 
 
 def _load_memory_for_llm(data_root: Path) -> object:
@@ -569,12 +968,57 @@ def _build_llm_service(
 def _build_embedding_service(config: object) -> object | None:
     from openbiliclaw.llm.registry import build_embedding_service, build_llm_registry
 
+    registry = build_llm_registry(config)
+    return build_embedding_service(config, registry)
+
+
+def _configured_embedding_provider(config: object) -> str:
+    llm_config = getattr(config, "llm", None)
+    embedding_config = getattr(llm_config, "embedding", None)
+    primary = str(getattr(embedding_config, "provider", "") or "").strip().lower()
+    fallback = str(getattr(embedding_config, "fallback_provider", "") or "").strip().lower()
+    return primary or fallback
+
+
+@contextmanager
+def run_scoped_embedding_audit(
+    config: object,
+    *,
+    allow_no_embedding: bool,
+) -> Iterator[ReplayEmbeddingAudit | None]:
+    """Build a replay-only embedding cache that remains alive for the full run."""
+
+    original_data_dir = getattr(config, "data_dir", None)
+    configured_provider = _configured_embedding_provider(config)
     try:
-        registry = build_llm_registry(config)
-        return build_embedding_service(config, registry)
-    except Exception:
-        logger.debug("Failed to build replay embedding service", exc_info=True)
-        return None
+        with TemporaryDirectory(prefix="openbiliclaw-replay-embedding-") as cache_dir:
+            config.data_dir = cache_dir  # type: ignore[attr-defined]
+            service = _build_embedding_service(config)
+            if service is None:
+                if configured_provider:
+                    raise RuntimeError(
+                        "Configured embedding provider could not be constructed; "
+                        "replay cannot treat this as a zero-recall observation."
+                    )
+                if not allow_no_embedding:
+                    raise RuntimeError(
+                        "Embedding is disabled in production config. Replay requires a usable "
+                        "embedding service by default; pass --allow-no-embedding only to emit "
+                        "a degraded, non-landing artifact."
+                    )
+                yield None
+                return
+
+            audit = ReplayEmbeddingAudit(service)
+            try:
+                yield audit
+            finally:
+                l2_cache = getattr(service, "_l2_cache", None)
+                close_cache = getattr(l2_cache, "close", None)
+                if callable(close_cache):
+                    close_cache()
+    finally:
+        config.data_dir = original_data_dir  # type: ignore[attr-defined]
 
 
 class _DeterministicLLMService:
@@ -586,8 +1030,9 @@ class _DeterministicLLMService:
     repeated A/A envelope around both treatment arms.
     """
 
-    def __init__(self, inner: object) -> None:
+    def __init__(self, inner: object, *, service: str = "") -> None:
         self._inner = inner
+        self._service = service
         self.calls: list[dict[str, object]] = []
 
     def __getattr__(self, name: str) -> object:
@@ -606,20 +1051,185 @@ class _DeterministicLLMService:
         # must fail rather than masking a production failure with extra headroom.
         kwargs["max_tokens"] = 4096
         method = getattr(self._inner, method_name)
-        response = await method(**kwargs)
+        attribution = dict(_REPLAY_ATTRIBUTION.get())
+        try:
+            response = await method(**kwargs)
+        except Exception:
+            self.calls.append(
+                {
+                    "service": self._service,
+                    **attribution,
+                    "method": method_name,
+                    "caller": str(kwargs.get("caller") or ""),
+                    "provider": "",
+                    "instance_id": "",
+                    "model": "",
+                    "temperature": 0.0,
+                    "max_tokens": 4096,
+                    "usage": None,
+                    "status": "error",
+                }
+            )
+            raise
         usage = getattr(response, "usage", None)
         self.calls.append(
             {
+                "service": self._service,
+                **attribution,
                 "method": method_name,
                 "caller": str(kwargs.get("caller") or ""),
                 "provider": str(getattr(response, "provider", "") or ""),
                 "instance_id": str(getattr(response, "instance_id", "") or ""),
                 "model": str(getattr(response, "model", "") or ""),
+                "temperature": 0.0,
                 "max_tokens": 4096,
                 "usage": dict(usage) if isinstance(usage, Mapping) else None,
+                "status": "ok",
             }
         )
         return response
+
+
+def _expected_evaluation_instance(service: object) -> str:
+    inner = getattr(service, "_inner", service)
+    resolve_chain = getattr(inner, "_resolve_module_chain", None)
+    if callable(resolve_chain):
+        chain = resolve_chain("discovery.evaluate_batch")
+        if isinstance(chain, Sequence) and not isinstance(chain, str | bytes) and chain:
+            return str(chain[0]).strip().lower()
+    resolve_override = getattr(inner, "_resolve_module_override", None)
+    if callable(resolve_override):
+        override = resolve_override("discovery.evaluate_batch")
+        if isinstance(override, tuple) and override:
+            return str(override[0]).strip().lower()
+    registry = getattr(inner, "registry", None)
+    return str(getattr(registry, "default_provider", "") or "").strip().lower()
+
+
+def validate_replay_routes(
+    calls: Sequence[Mapping[str, object]],
+    *,
+    repeats: int,
+    model_override: ModelOverride | None,
+    expected_control_instance: str = "",
+    expected_treatment_instance: str = "",
+) -> dict[str, object]:
+    """Require one actual route per logical run and arm-equivalent routing."""
+
+    expected: dict[tuple[str, int, str], str] = {}
+    for repeat in range(1, repeats + 1):
+        expected[("control", repeat, "A1")] = "A"
+        expected[("control", repeat, "A2")] = "A"
+        expected[("treatment", repeat, "A")] = "A"
+        expected[("treatment", repeat, "B")] = "B"
+
+    grouped: dict[tuple[str, int, str], list[Mapping[str, object]]] = {}
+    blocking_reasons: list[str] = []
+    for call in calls:
+        key = (
+            str(call.get("pair_kind") or ""),
+            _to_int(call.get("repeat")),
+            str(call.get("logical_run") or ""),
+        )
+        if key not in expected:
+            blocking_reasons.append(f"LLM call has missing/invalid replay attribution: {key!r}")
+            continue
+        if str(call.get("arm") or "") != expected[key]:
+            blocking_reasons.append(f"LLM call arm attribution mismatch for {key!r}")
+        grouped.setdefault(key, []).append(call)
+
+    run_payloads: list[dict[str, object]] = []
+    route_by_run: dict[tuple[str, int, str], tuple[str, str, str]] = {}
+    for key, expected_arm in expected.items():
+        run_calls = grouped.get(key, [])
+        if not run_calls:
+            blocking_reasons.append(f"logical run {key!r} emitted no LLM call")
+            continue
+        routes = {
+            (
+                str(call.get("provider") or "").strip(),
+                str(call.get("instance_id") or "").strip(),
+                str(call.get("model") or "").strip(),
+            )
+            for call in run_calls
+        }
+        if any(call.get("status") != "ok" for call in run_calls):
+            blocking_reasons.append(f"logical run {key!r} contains a failed LLM call")
+        if any(not all(route) for route in routes):
+            blocking_reasons.append(f"logical run {key!r} contains an empty actual route")
+        if len(routes) != 1:
+            blocking_reasons.append(f"logical run {key!r} mixed {len(routes)} actual routes")
+        route = next(iter(routes))
+        route_by_run[key] = route
+        run_payloads.append(
+            {
+                "pair_kind": key[0],
+                "repeat": key[1],
+                "logical_run": key[2],
+                "arm": expected_arm,
+                "call_count": len(run_calls),
+                "route": {
+                    "provider": route[0],
+                    "instance_id": route[1],
+                    "model": route[2],
+                },
+            }
+        )
+
+    baseline_routes = {
+        route
+        for key, route in route_by_run.items()
+        if key[0] == "control" or (key[0] == "treatment" and key[2] == "A")
+    }
+    if len(baseline_routes) != 1:
+        blocking_reasons.append(
+            "control A/A and treatment A did not use one identical actual route"
+        )
+    elif expected_control_instance:
+        baseline_route = next(iter(baseline_routes))
+        if baseline_route[1] != expected_control_instance:
+            blocking_reasons.append(
+                "control route unexpectedly failed over from configured instance "
+                f"{expected_control_instance!r} to {baseline_route[1]!r}"
+            )
+
+    treatment_b_routes = {
+        route for key, route in route_by_run.items() if key[0] == "treatment" and key[2] == "B"
+    }
+    if len(treatment_b_routes) != 1:
+        blocking_reasons.append("treatment B did not use one stable actual route")
+    else:
+        treatment_b_route = next(iter(treatment_b_routes))
+        if expected_treatment_instance and treatment_b_route[1] != expected_treatment_instance:
+            blocking_reasons.append(
+                "treatment route unexpectedly failed over from configured instance "
+                f"{expected_treatment_instance!r} to {treatment_b_route[1]!r}"
+            )
+    if len(treatment_b_routes) == 1:
+        treatment_b_route = next(iter(treatment_b_routes))
+        if model_override is None:
+            if baseline_routes != treatment_b_routes:
+                blocking_reasons.append("non-model experiment drifted route between arms A and B")
+        else:
+            if model_override.model:
+                if (
+                    treatment_b_route[0] != model_override.provider
+                    or treatment_b_route[2] != model_override.model
+                ):
+                    blocking_reasons.append(
+                        "legacy model treatment did not use the requested provider/model"
+                    )
+            elif treatment_b_route[1] != model_override.provider:
+                blocking_reasons.append(
+                    "instance-routed model treatment did not use the requested instance"
+                )
+
+    unique_reasons = list(dict.fromkeys(blocking_reasons))
+    return {
+        "passed": not unique_reasons,
+        "blocking_reasons": unique_reasons,
+        "logical_runs": run_payloads,
+    }
 
 
 def _build_engine(
@@ -630,11 +1240,13 @@ def _build_engine(
     negative_examples: list[dict[str, object]] | None,
     legacy_profile: bool,
     embedding_service: object | None,
+    recall_audit: ReplayRecallAudit | None = None,
 ) -> object:
     from openbiliclaw.discovery.engine import (
         ContentDiscoveryEngine,
         DiscoveryConcurrencyController,
-        compact_evaluation_profile_summary,
+        _BatchRelatedInterestRecall,
+        _RelatedInterestRecall,
     )
     from openbiliclaw.discovery.strategies._utils import build_profile_summary
 
@@ -643,6 +1255,7 @@ def _build_engine(
             self._replay_negative_examples = negative_examples
             self._replay_compact_profile = compact_profile
             self._replay_legacy_profile = legacy_profile
+            self._replay_recall_audit = recall_audit
             super().__init__(*args, **kwargs)
 
         def _get_eval_cache_entry(self, cache_key: str) -> None:
@@ -663,10 +1276,9 @@ def _build_engine(
         def _evaluation_profile_summary(self, profile: object) -> dict[str, object]:
             if bool(getattr(self, "_replay_legacy_profile", False)):
                 return build_profile_summary(profile)
-            summary = ContentDiscoveryEngine._evaluation_profile_summary(profile)
-            if not bool(getattr(self, "_replay_compact_profile", False)):
-                return summary
-            return compact_evaluation_profile_summary(summary)
+            # Production owns the compact view. Applying the transform again
+            # would let replay drift if it ever stops being idempotent.
+            return ContentDiscoveryEngine._evaluation_profile_summary(profile)
 
         async def _related_interests_for_content(
             self,
@@ -674,10 +1286,29 @@ def _build_engine(
             profile: object,
             *,
             top_k: int = 3,
-        ) -> list[dict[str, str]]:
+        ) -> list[str]:
             if bool(getattr(self, "_replay_legacy_profile", False)):
                 return []
             return await super()._related_interests_for_content(content, profile, top_k=top_k)
+
+        async def _related_interests_for_content_result(
+            self,
+            content: object,
+            profile: object,
+            *,
+            top_k: int = 3,
+        ) -> _RelatedInterestRecall:
+            if bool(getattr(self, "_replay_legacy_profile", False)):
+                return _RelatedInterestRecall([], True)
+            result = await super()._related_interests_for_content_result(
+                content,
+                profile,
+                top_k=top_k,
+            )
+            audit = getattr(self, "_replay_recall_audit", None)
+            if isinstance(audit, ReplayRecallAudit):
+                audit.record_single(result.related, complete=result.complete)
+            return result
 
         async def _related_interests_for_batch(
             self,
@@ -685,10 +1316,33 @@ def _build_engine(
             profile: object,
             *,
             top_k: int = 3,
-        ) -> dict[int, list[dict[str, str]]]:
+        ) -> dict[int, list[str]]:
             if bool(getattr(self, "_replay_legacy_profile", False)):
                 return {}
             return await super()._related_interests_for_batch(contents, profile, top_k=top_k)
+
+        async def _related_interests_for_batch_result(
+            self,
+            contents: Sequence[object],
+            profile: object,
+            *,
+            top_k: int = 3,
+        ) -> _BatchRelatedInterestRecall:
+            if bool(getattr(self, "_replay_legacy_profile", False)):
+                return _BatchRelatedInterestRecall({}, frozenset(range(len(contents))))
+            result = await super()._related_interests_for_batch_result(
+                contents,
+                profile,
+                top_k=top_k,
+            )
+            audit = getattr(self, "_replay_recall_audit", None)
+            if isinstance(audit, ReplayRecallAudit):
+                audit.record_batch(
+                    result.related_by_index,
+                    candidate_count=len(contents),
+                    complete_candidate_count=len(result.complete_indices),
+                )
+            return result
 
     discovery_cfg = getattr(config, "discovery", None)
     return ReplayDiscoveryEngine(
@@ -709,16 +1363,10 @@ def _build_engine(
     )
 
 
-def _rows_to_contents(rows: Sequence[Mapping[str, Any]], *, body_cap: bool) -> list[Any]:
+def _rows_to_contents(rows: Sequence[Mapping[str, Any]]) -> list[Any]:
     from openbiliclaw.discovery.candidate_pool import row_to_discovered_content
 
-    contents = [row_to_discovered_content(dict(row)) for row in rows]
-    if not body_cap:
-        return contents
-    return [
-        replace(content, body_text=cap_body_text(str(content.body_text or "")))
-        for content in contents
-    ]
+    return [row_to_discovered_content(dict(row)) for row in rows]
 
 
 async def _score_contents(
@@ -730,7 +1378,8 @@ async def _score_contents(
 ) -> list[float]:
     if not contents:
         return []
-    # Chunk at the batch size (45), not the 90 hard cap: each chunk carries
+    # Match the current API coordinator's production claim size (30), not the
+    # engine's 90-item hard cap: each chunk carries
     # its own recall-embedding warm-up, so smaller chunks keep the per-chunk
     # timeout budget meaningful.
     hard_cap = max(1, int(getattr(engine, "_EVALUATE_BATCH_HARD_CAP", 90) or 90))
@@ -904,6 +1553,49 @@ def relative_gate(
     }
 
 
+def replay_blocking_reasons(
+    *,
+    quality_passed: bool,
+    route_audit: Mapping[str, object],
+    embedding_audit: Mapping[str, object],
+    recall_audit: Mapping[str, object],
+    body_cap: bool,
+    body_cap_affected: int,
+    body_cap_contract_matches: bool,
+    profile_snapshot_stable: bool,
+    candidate_snapshot_stable: bool,
+) -> list[str]:
+    """Return every independent reason that invalidates landing evidence."""
+
+    blocking_reasons: list[str] = []
+    if not quality_passed:
+        blocking_reasons.append("relative quality gate failed")
+
+    for label, audit in (
+        ("route", route_audit),
+        ("embedding", embedding_audit),
+        ("recall", recall_audit),
+    ):
+        if not bool(audit.get("passed")):
+            blocking_reasons.append(f"{label} audit failed")
+        blocking_reasons.extend(str(reason) for reason in audit.get("blocking_reasons", []))
+
+    if body_cap and body_cap_affected <= 0:
+        blocking_reasons.append(
+            "body-cap experiment had zero candidates affected by the production cap"
+        )
+    if body_cap and not body_cap_contract_matches:
+        blocking_reasons.append(
+            "live production body caps no longer match replay contract "
+            f"({BODY_CAP_HEAD}+{BODY_CAP_TAIL})"
+        )
+    if not profile_snapshot_stable:
+        blocking_reasons.append("effective profile snapshot drifted during replay")
+    if not candidate_snapshot_stable:
+        blocking_reasons.append("candidate snapshot drifted during replay")
+    return list(dict.fromkeys(blocking_reasons))
+
+
 def _print_report(
     *,
     arm_b: str,
@@ -1052,13 +1744,35 @@ def _digest(value: object) -> str:
     return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
 
 
-def _pair_payload(pair: ReplayPair) -> dict[str, object]:
+def _pair_payload(
+    pair: ReplayPair,
+    *,
+    candidates: Sequence[ReplayCandidate],
+    admission_min_score: float,
+) -> dict[str, object]:
+    thresholds = [
+        _candidate_admission_threshold(candidate, admission_min_score=admission_min_score)
+        for candidate in candidates
+    ]
+    admitted_a = [
+        score >= threshold for score, threshold in zip(pair.scores_a, thresholds, strict=True)
+    ]
+    admitted_b = [
+        score >= threshold for score, threshold in zip(pair.scores_b, thresholds, strict=True)
+    ]
     return {
         "repeat": pair.repeat,
         "kind": pair.kind,
         "first_arm": pair.first_arm,
         "scores_a": list(pair.scores_a),
         "scores_b": list(pair.scores_b),
+        "scores_a_digest": _digest(list(pair.scores_a)),
+        "scores_b_digest": _digest(list(pair.scores_b)),
+        "admission_thresholds": thresholds,
+        "admitted_a": admitted_a,
+        "admitted_b": admitted_b,
+        "admitted_a_digest": _digest(admitted_a),
+        "admitted_b_digest": _digest(admitted_b),
         "metrics": {
             "mean_abs_delta": pair.metrics.mean_abs_delta,
             "p95_abs_delta": pair.metrics.p95_abs_delta,
@@ -1072,56 +1786,136 @@ def _pair_payload(pair: ReplayPair) -> dict[str, object]:
     }
 
 
+def _git_metadata() -> dict[str, object]:
+    def command(*args: str) -> str:
+        completed = subprocess.run(
+            ["git", *args],
+            cwd=PROJECT_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return completed.stdout.strip()
+
+    return {
+        "commit": command("rev-parse", "HEAD"),
+        "dirty": bool(command("status", "--porcelain")),
+    }
+
+
 def _write_artifact(
     output_path: Path,
     *,
     args: argparse.Namespace,
     db_path: Path,
+    config_path: Path,
     rows: Sequence[Mapping[str, Any]],
-    profile: object,
+    profile_snapshot: ReplayProfileSnapshot,
     negative_examples: Sequence[Mapping[str, object]] | None,
     candidates: Sequence[ReplayCandidate],
     control_pairs: Sequence[ReplayPair],
     treatment_pairs: Sequence[ReplayPair],
     gate_passed: bool,
-    gate: Mapping[str, float],
+    gate: Mapping[str, object],
     admission_min_score: float,
     calls: Sequence[Mapping[str, object]],
+    route_audit: Mapping[str, object],
+    embedding_audit: Mapping[str, object],
+    recall_audit: Mapping[str, object],
+    body_cap_affected: int,
+    production_prefilter_mode: str,
+    topic_lifecycle_serialization: bool,
 ) -> None:
-    profile_payload = (
-        profile.to_dict() if callable(getattr(profile, "to_dict", None)) else str(profile)
-    )
     candidate_payload = [
         {
             "candidate_id": candidate.candidate_id,
-            "title": candidate.title,
             "source_strategy": candidate.source_strategy,
             "source_platform": candidate.source_platform,
             "content_id": candidate.content_id,
-            "content_url": candidate.content_url,
             "score_threshold": candidate.score_threshold,
             "status": str(row.get("status") or ""),
         }
         for candidate, row in zip(candidates, rows, strict=True)
     ]
+    mix = Counter(
+        (
+            str(row.get("status") or ""),
+            candidate.source_platform or "unknown",
+            candidate.source_strategy or "default",
+        )
+        for candidate, row in zip(candidates, rows, strict=True)
+    )
     artifact = {
-        "schema_version": 1,
+        "schema_version": 2,
         "created_at": datetime.now(UTC).isoformat(),
+        "git": _git_metadata(),
         "arm_b": str(args.arm_b),
         "sample": len(candidates),
         "repeats": int(args.repeats),
         "platform": args.platform,
         "source_context": _REPLAY_SOURCE_CONTEXT,
-        "db_path": str(db_path),
+        "production_context": {
+            "eval_prefilter_mode": production_prefilter_mode,
+            "topic_lifecycle_serialization": ("on" if topic_lifecycle_serialization else "off"),
+        },
+        "replay_context": {"eval_prefilter_mode": "off"},
+        "config_path_digest": _digest(str(config_path.resolve())),
+        "db_path_digest": _digest(str(db_path.resolve())),
         "admission_min_score": admission_min_score,
         "snapshot": {
-            "candidate_digest": _digest(candidate_payload),
-            "profile_digest": _digest(profile_payload),
+            "candidate_digest": _digest([dict(row) for row in rows]),
+            "candidate_metadata_digest": _digest(candidate_payload),
+            "raw_profile_digest": profile_snapshot.raw_digest,
+            "effective_profile_digest": profile_snapshot.effective_digest,
+            "overrides_present": profile_snapshot.overrides_present,
+            "active_speculation_count": profile_snapshot.active_speculation_count,
             "negative_examples_digest": _digest(negative_examples or []),
         },
+        "cohort_mix": [
+            {
+                "status": key[0],
+                "platform": key[1],
+                "strategy": key[2],
+                "count": count,
+            }
+            for key, count in sorted(mix.items())
+        ],
         "candidates": candidate_payload,
-        "control_pairs": [_pair_payload(pair) for pair in control_pairs],
-        "treatment_pairs": [_pair_payload(pair) for pair in treatment_pairs],
+        "control_pairs": [
+            _pair_payload(
+                pair,
+                candidates=candidates,
+                admission_min_score=admission_min_score,
+            )
+            for pair in control_pairs
+        ],
+        "treatment_pairs": [
+            _pair_payload(
+                pair,
+                candidates=candidates,
+                admission_min_score=admission_min_score,
+            )
+            for pair in treatment_pairs
+        ],
+        "body_cap": {
+            "head": BODY_CAP_HEAD,
+            "tail": BODY_CAP_TAIL,
+            "joiner": BODY_CAP_JOINER,
+            "affected_count": body_cap_affected,
+        },
+        "gate_constants": {
+            "flip_rate_max": FLIP_RATE_MAX,
+            "spearman_min": SPEARMAN_MIN,
+            "relative_admission_shrink_max": _RELATIVE_ADMISSION_SHRINK_MAX,
+            "llm_max_tokens": 4096,
+            "replay_temperature": 0.0,
+            "production_default_temperature": 0.7,
+            "batch_size": _DEFAULT_BATCH_SIZE,
+            "chunk_timeout_seconds": CHUNK_TIMEOUT_SECONDS,
+        },
+        "embedding": dict(embedding_audit),
+        "recall": dict(recall_audit),
+        "routes": dict(route_audit),
         "gate": {"passed": gate_passed, **dict(gate)},
         "llm_calls": [dict(call) for call in calls],
     }
@@ -1133,9 +1927,16 @@ def _write_artifact(
 
 
 async def run(args: argparse.Namespace) -> int:
-    from openbiliclaw.config import load_config
+    from openbiliclaw.config import _default_config_path, load_config
+    from openbiliclaw.discovery.engine import (
+        _EVALUATION_BODY_TEXT_HEAD_CAP,
+        _EVALUATION_BODY_TEXT_TAIL_CAP,
+        _evaluation_recall_interests,
+    )
 
     config = load_config(args.config) if args.config else load_config()
+    production_prefilter_mode = validate_replay_prefilter_compatibility(config)
+    config_path = Path(args.config) if args.config else _default_config_path()
     db_path = Path(args.db) if args.db else _database_path(config)
     if not db_path.exists():
         raise RuntimeError(f"Database not found: {db_path}")
@@ -1144,178 +1945,322 @@ async def run(args: argparse.Namespace) -> int:
     compact_profile = str(args.arm_b) == "compact"
     body_cap = str(args.arm_b) == "body-cap"
     legacy_reason = str(args.arm_b) == "reason-diet"
-    if body_cap:
+    if not compact_profile and not body_cap and model_override is None and not legacy_reason:
         raise ValueError(
-            "--arm-b body-cap is obsolete: body_text head+tail capping became production "
-            "behavior for both arms (Task 7); pre-capping again only corrupts the "
-            "description-dedup relation and skews the comparison."
-        )
-    if not compact_profile and model_override is None and not legacy_reason:
-        raise ValueError(
-            "--arm-b must be compact, reason-diet, model=<instance-id> (v2), "
+            "--arm-b must be compact, body-cap, reason-diet, model=<instance-id> (v2), "
             "or model=<provider:model> (legacy)"
         )
 
     database = _load_read_only_database(db_path)
-    rows = _fetch_replay_rows(database, sample=int(args.sample), platform=args.platform)
+    cleanup = ExitStack()
+    topic_lifecycle_serialization = cleanup.enter_context(
+        configured_topic_lifecycle_serialization(config)
+    )
+    try:
+        rows = _fetch_replay_rows(database, sample=int(args.sample), platform=args.platform)
+        frozen_rows_digest = _digest([dict(row) for row in rows])
 
-    data_root = db_path.parent
-    # Memory/profile inputs come from the deployment data directory.
-    config.data_dir = str(data_root)  # type: ignore[attr-defined]
-    profile = _load_current_profile(data_root)
-    negative_examples = _recent_negative_exemplars(database)
-    candidates = [_row_to_replay_candidate(row) for row in rows]
-    discovery_cfg = getattr(config, "discovery", None)
-    admission_min_score = float(getattr(discovery_cfg, "admission_min_score", 0.60) or 0.60)
+        data_root = db_path.parent
+        # Memory/profile inputs come from the deployment data directory.
+        config.data_dir = str(data_root)  # type: ignore[attr-defined]
+        profile_snapshot = _load_profile_snapshot(data_root)
+        profile = profile_snapshot.effective_profile
+        frozen_profile_digest = profile_snapshot.effective_digest
+        negative_examples = _recent_negative_exemplars(database)
+        candidates = [_row_to_replay_candidate(row) for row in rows]
+        discovery_cfg = getattr(config, "discovery", None)
+        admission_min_score = float(getattr(discovery_cfg, "admission_min_score", 0.60) or 0.60)
+        body_cap_affected = body_cap_affected_count(rows)
+        eligible_tail_count = len(_evaluation_recall_interests(profile))
 
-    arm_a_service = _DeterministicLLMService(_build_llm_service(config, data_root))
-    arm_b_service = _DeterministicLLMService(
-        _build_llm_service(config, data_root, model_override=model_override)
-    )
-    # The replay opens the production candidate DB read-only and must not
-    # mutate the adjacent embedding cache either. A run-scoped L2 cache also
-    # keeps both arms on the same frozen cache state.
-    replay_cache_dir = TemporaryDirectory(prefix="openbiliclaw-replay-embedding-")
-    config.data_dir = replay_cache_dir.name  # type: ignore[attr-defined]
-    embedding_service = _build_embedding_service(config)
-    if embedding_service is not None:
-        l2_cache = getattr(embedding_service, "_l2_cache", None)
-        close_cache = getattr(l2_cache, "close", None)
-        if callable(close_cache):
-            close_cache()
-        embedding_service._l2_cache = None  # type: ignore[attr-defined]
-    replay_cache_dir.cleanup()
-    recall_note = (
-        "related_interests recall disabled: embedding service unavailable"
-        if embedding_service is None
-        else ""
-    )
-    arm_a_engine = _build_engine(
-        arm_a_service,
-        config,
-        compact_profile=False,
-        negative_examples=negative_examples,
-        legacy_profile=compact_profile,
-        embedding_service=None if compact_profile else embedding_service,
-    )
-    arm_b_engine = _build_engine(
-        arm_b_service,
-        config,
-        compact_profile=compact_profile,
-        negative_examples=negative_examples,
-        legacy_profile=False,
-        embedding_service=embedding_service,
-    )
+        arm_a_service = _DeterministicLLMService(
+            _build_llm_service(config, data_root),
+            service="arm_a",
+        )
+        arm_b_service = _DeterministicLLMService(
+            _build_llm_service(config, data_root, model_override=model_override),
+            service="arm_b",
+        )
+        recall_audit = ReplayRecallAudit()
 
-    async def score_arm_a() -> tuple[float, ...]:
-        if legacy_reason:
-            with legacy_reason_prompts():
-                scores = await _score_contents(
-                    arm_a_engine,
-                    _rows_to_contents(rows, body_cap=False),
-                    profile,
-                    source_context=_REPLAY_SOURCE_CONTEXT,
+        # The run-scoped L2 database lives until every A/A and A/B call has
+        # completed, then closes before its temporary directory is removed.
+        with run_scoped_embedding_audit(
+            config,
+            allow_no_embedding=bool(getattr(args, "allow_no_embedding", False)),
+        ) as embedding_audit_service:
+            embedding_service: object | None = embedding_audit_service
+            recall_note = (
+                "related_interests recall disabled by explicit degraded replay flag"
+                if embedding_service is None
+                else ""
+            )
+            arm_a_engine = _build_engine(
+                arm_a_service,
+                config,
+                compact_profile=False,
+                negative_examples=negative_examples,
+                legacy_profile=compact_profile,
+                embedding_service=None if compact_profile else embedding_service,
+                recall_audit=recall_audit,
+            )
+            arm_b_engine = _build_engine(
+                arm_b_service,
+                config,
+                compact_profile=compact_profile,
+                negative_examples=negative_examples,
+                legacy_profile=False,
+                embedding_service=embedding_service,
+                recall_audit=recall_audit,
+            )
+
+            async def score_arm_a(
+                *,
+                pair_kind: str,
+                repeat: int,
+                logical_run: str,
+            ) -> tuple[float, ...]:
+                with replay_call_attribution(
+                    pair_kind=pair_kind,
+                    repeat=repeat,
+                    logical_run=logical_run,
+                    arm="A",
+                ):
+                    if legacy_reason:
+                        with legacy_reason_prompts():
+                            scores = await _score_contents(
+                                arm_a_engine,
+                                _rows_to_contents(rows),
+                                profile,
+                                source_context=_REPLAY_SOURCE_CONTEXT,
+                            )
+                    elif body_cap:
+                        with legacy_body_text_prompt_caps():
+                            scores = await _score_contents(
+                                arm_a_engine,
+                                _rows_to_contents(rows),
+                                profile,
+                                source_context=_REPLAY_SOURCE_CONTEXT,
+                            )
+                    else:
+                        scores = await _score_contents(
+                            arm_a_engine,
+                            _rows_to_contents(rows),
+                            profile,
+                            source_context=_REPLAY_SOURCE_CONTEXT,
+                        )
+                return tuple(scores)
+
+            async def score_arm_b(
+                *,
+                pair_kind: str,
+                repeat: int,
+            ) -> tuple[float, ...]:
+                with replay_call_attribution(
+                    pair_kind=pair_kind,
+                    repeat=repeat,
+                    logical_run="B",
+                    arm="B",
+                ):
+                    scores = await _score_contents(
+                        arm_b_engine,
+                        _rows_to_contents(rows),
+                        profile,
+                        source_context=_REPLAY_SOURCE_CONTEXT,
+                    )
+                return tuple(scores)
+
+            async def control_pair(repeat_index: int) -> ReplayPair:
+                repeat = repeat_index + 1
+                scores_a = await score_arm_a(
+                    pair_kind="control",
+                    repeat=repeat,
+                    logical_run="A1",
                 )
-        else:
-            scores = await _score_contents(
-                arm_a_engine,
-                _rows_to_contents(rows, body_cap=False),
-                profile,
-                source_context=_REPLAY_SOURCE_CONTEXT,
+                scores_b = await score_arm_a(
+                    pair_kind="control",
+                    repeat=repeat,
+                    logical_run="A2",
+                )
+                return ReplayPair(
+                    repeat=repeat,
+                    kind="control",
+                    first_arm="A",
+                    scores_a=scores_a,
+                    scores_b=scores_b,
+                    metrics=_pair_metrics(
+                        candidates,
+                        scores_a,
+                        scores_b,
+                        admission_min_score=admission_min_score,
+                    ),
+                )
+
+            async def treatment_pair(repeat_index: int) -> ReplayPair:
+                repeat = repeat_index + 1
+                if repeat_index % 2 == 0:
+                    scores_a = await score_arm_a(
+                        pair_kind="treatment",
+                        repeat=repeat,
+                        logical_run="A",
+                    )
+                    scores_b = await score_arm_b(pair_kind="treatment", repeat=repeat)
+                    first_arm = "A"
+                else:
+                    scores_b = await score_arm_b(pair_kind="treatment", repeat=repeat)
+                    scores_a = await score_arm_a(
+                        pair_kind="treatment",
+                        repeat=repeat,
+                        logical_run="A",
+                    )
+                    first_arm = "B"
+                return ReplayPair(
+                    repeat=repeat,
+                    kind="treatment",
+                    first_arm=first_arm,
+                    scores_a=scores_a,
+                    scores_b=scores_b,
+                    metrics=_pair_metrics(
+                        candidates,
+                        scores_a,
+                        scores_b,
+                        admission_min_score=admission_min_score,
+                    ),
+                )
+
+            control_pairs: list[ReplayPair] = []
+            treatment_pairs: list[ReplayPair] = []
+            for repeat_index in range(int(args.repeats)):
+                # Alternate control/treatment order across repeats so gateway
+                # drift is not systematically assigned to one pair type.
+                if repeat_index % 2 == 0:
+                    control_pairs.append(await control_pair(repeat_index))
+                    treatment_pairs.append(await treatment_pair(repeat_index))
+                else:
+                    treatment_pairs.append(await treatment_pair(repeat_index))
+                    control_pairs.append(await control_pair(repeat_index))
+
+            quality_passed, quality_gate = _print_repeated_report(
+                arm_b=str(args.arm_b),
+                candidates=candidates,
+                control_pairs=control_pairs,
+                treatment_pairs=treatment_pairs,
+                platform=args.platform,
+                recall_note=recall_note,
             )
-        return tuple(scores)
-
-    async def score_arm_b() -> tuple[float, ...]:
-        return tuple(
-            await _score_contents(
-                arm_b_engine,
-                _rows_to_contents(rows, body_cap=body_cap),
-                profile,
-                source_context=_REPLAY_SOURCE_CONTEXT,
+            calls = [*arm_a_service.calls, *arm_b_service.calls]
+            route_audit = validate_replay_routes(
+                calls,
+                repeats=int(args.repeats),
+                model_override=model_override,
+                expected_control_instance=_expected_evaluation_instance(arm_a_service),
+                expected_treatment_instance=_expected_evaluation_instance(arm_b_service),
             )
-        )
+            expected_recall_runs: set[tuple[str, int, str]] = set()
+            for repeat in range(1, int(args.repeats) + 1):
+                expected_recall_runs.add(("treatment", repeat, "B"))
+                if not compact_profile:
+                    expected_recall_runs.update(
+                        {
+                            ("control", repeat, "A1"),
+                            ("control", repeat, "A2"),
+                            ("treatment", repeat, "A"),
+                        }
+                    )
+            recall_validation = recall_audit.validate(
+                expected_runs=expected_recall_runs,
+                minimum_batches_per_run=math.ceil(len(rows) / _DEFAULT_BATCH_SIZE),
+                expected_candidate_count=len(rows),
+            )
+            if embedding_audit_service is None:
+                embedding_audit: dict[str, object] = {
+                    "passed": False,
+                    "degraded": True,
+                    "namespace": "",
+                    "call_count": 0,
+                    "successful_call_count": 0,
+                    "dimension": 0,
+                    "eligible_tail_count": eligible_tail_count,
+                    "blocking_reasons": [
+                        "embedding disabled; artifact is degraded and not landing evidence"
+                    ],
+                    "calls": [],
+                }
+            else:
+                embedding_audit = embedding_audit_service.summary(
+                    eligible_tail_count=eligible_tail_count,
+                    recall_audit=recall_audit,
+                    expected_runs=expected_recall_runs,
+                )
 
-    async def control_pair(repeat_index: int) -> ReplayPair:
-        scores_a = await score_arm_a()
-        scores_b = await score_arm_a()
-        return ReplayPair(
-            repeat=repeat_index + 1,
-            kind="control",
-            first_arm="A",
-            scores_a=scores_a,
-            scores_b=scores_b,
-            metrics=_pair_metrics(
-                candidates,
-                scores_a,
-                scores_b,
+            blocking_reasons = replay_blocking_reasons(
+                quality_passed=quality_passed,
+                route_audit=route_audit,
+                embedding_audit=embedding_audit,
+                recall_audit=recall_validation,
+                body_cap=body_cap,
+                body_cap_affected=body_cap_affected,
+                body_cap_contract_matches=(
+                    _EVALUATION_BODY_TEXT_HEAD_CAP == BODY_CAP_HEAD
+                    and _EVALUATION_BODY_TEXT_TAIL_CAP == BODY_CAP_TAIL
+                ),
+                profile_snapshot_stable=(
+                    _digest(_profile_digest_payload(profile)) == frozen_profile_digest
+                ),
+                candidate_snapshot_stable=(
+                    _digest([dict(row) for row in rows]) == frozen_rows_digest
+                ),
+            )
+            gate_passed = not blocking_reasons
+            gate: dict[str, object] = {
+                **quality_gate,
+                "quality_passed": quality_passed,
+                "route_passed": bool(route_audit.get("passed")),
+                "embedding_passed": bool(embedding_audit.get("passed")),
+                "recall_passed": bool(recall_validation.get("passed")),
+                "body_cap_affected": body_cap_affected,
+                "blocking_reasons": blocking_reasons,
+            }
+            if blocking_reasons:
+                print("\nBlocking reasons")
+                for reason in blocking_reasons:
+                    print(f"  - {reason}")
+                print("\nFinal gate: FAIL")
+            else:
+                print("\nFinal gate: PASS")
+
+            output_path = Path(args.output)
+            _write_artifact(
+                output_path,
+                args=args,
+                db_path=db_path,
+                config_path=config_path,
+                rows=rows,
+                profile_snapshot=profile_snapshot,
+                negative_examples=negative_examples,
+                candidates=candidates,
+                control_pairs=control_pairs,
+                treatment_pairs=treatment_pairs,
+                gate_passed=gate_passed,
+                gate=gate,
                 admission_min_score=admission_min_score,
-            ),
-        )
-
-    async def treatment_pair(repeat_index: int) -> ReplayPair:
-        if repeat_index % 2 == 0:
-            scores_a = await score_arm_a()
-            scores_b = await score_arm_b()
-            first_arm = "A"
-        else:
-            scores_b = await score_arm_b()
-            scores_a = await score_arm_a()
-            first_arm = "B"
-        return ReplayPair(
-            repeat=repeat_index + 1,
-            kind="treatment",
-            first_arm=first_arm,
-            scores_a=scores_a,
-            scores_b=scores_b,
-            metrics=_pair_metrics(
-                candidates,
-                scores_a,
-                scores_b,
-                admission_min_score=admission_min_score,
-            ),
-        )
-
-    control_pairs: list[ReplayPair] = []
-    treatment_pairs: list[ReplayPair] = []
-    for repeat_index in range(int(args.repeats)):
-        # Alternate control/treatment order across repeats so gateway drift is
-        # not systematically assigned to one pair type.
-        if repeat_index % 2 == 0:
-            control_pairs.append(await control_pair(repeat_index))
-            treatment_pairs.append(await treatment_pair(repeat_index))
-        else:
-            treatment_pairs.append(await treatment_pair(repeat_index))
-            control_pairs.append(await control_pair(repeat_index))
-
-    gate_passed, gate = _print_repeated_report(
-        arm_b=str(args.arm_b),
-        candidates=candidates,
-        control_pairs=control_pairs,
-        treatment_pairs=treatment_pairs,
-        platform=args.platform,
-        recall_note=recall_note,
-    )
-    calls = [{"service": "arm_a", **call} for call in arm_a_service.calls] + [
-        {"service": "arm_b", **call} for call in arm_b_service.calls
-    ]
-    output_path = Path(args.output)
-    _write_artifact(
-        output_path,
-        args=args,
-        db_path=db_path,
-        rows=rows,
-        profile=profile,
-        negative_examples=negative_examples,
-        candidates=candidates,
-        control_pairs=control_pairs,
-        treatment_pairs=treatment_pairs,
-        gate_passed=gate_passed,
-        gate=gate,
-        admission_min_score=admission_min_score,
-        calls=calls,
-    )
-    print(f"Artifact: {output_path}")
-    return 0 if gate_passed else 1
+                calls=calls,
+                route_audit=route_audit,
+                embedding_audit=embedding_audit,
+                recall_audit=recall_validation,
+                body_cap_affected=body_cap_affected,
+                production_prefilter_mode=production_prefilter_mode,
+                topic_lifecycle_serialization=topic_lifecycle_serialization,
+            )
+            print(f"Artifact: {output_path}")
+            return 0 if gate_passed else 1
+    finally:
+        try:
+            close_database = getattr(database, "close", None)
+            if callable(close_database):
+                close_database()
+        finally:
+            cleanup.close()
 
 
 def _positive_int(raw: str) -> int:
@@ -1363,8 +2308,16 @@ def parse_args() -> argparse.Namespace:
         "--arm-b",
         required=True,
         help=(
-            "Arm B transform: compact, reason-diet, model=<instance-id> (v2), "
+            "Arm B transform: compact, body-cap, reason-diet, model=<instance-id> (v2), "
             "or model=<provider:model> (legacy)"
+        ),
+    )
+    parser.add_argument(
+        "--allow-no-embedding",
+        action="store_true",
+        help=(
+            "Allow an explicitly embedding-disabled config to run only as degraded, "
+            "non-landing evidence (the final gate still fails)."
         ),
     )
     parser.add_argument(
