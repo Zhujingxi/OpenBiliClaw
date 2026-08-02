@@ -239,7 +239,6 @@ def reddit_bootstrap_item_key(item: dict[str, Any]) -> str:
             "display_name_prefixed",
             "name",
             "id",
-            "title",
         )
         normalized = _normalize_reddit_named_identity(name, prefixes=("sr_", "r/", "t5_"))
         if normalized:
@@ -276,28 +275,39 @@ def reddit_bootstrap_item_key(item: dict[str, Any]) -> str:
                 return f"usr_{normalized.lower()}"
         return ""
 
-    raw_identity = _identity_text(
-        item,
-        "content_id",
-        "fullname",
-        "name",
-        "id",
-        "post_id",
-        "comment_id",
-    )
+    prefixed_identity = _identity_text(item, "fullname", "name", "content_id", "id")
     is_comment = (
-        content_type in {"comment", "reply"} or kind == "t1" or raw_identity.startswith("t1_")
+        content_type in {"comment", "reply"}
+        or kind == "t1"
+        or prefixed_identity.lower().startswith("t1_")
     )
     prefix = "t1_" if is_comment else "t3_"
-    if raw_identity:
-        if raw_identity.startswith(("t1_", "t3_")):
-            return raw_identity
-        raw_identity = re.sub(r"^t[13]_", "", raw_identity, flags=re.I)
-        if raw_identity:
-            return f"{prefix}{raw_identity}"
+    identity_fields = (
+        ("comment_id", "fullname", "name", "id", "content_id")
+        if is_comment
+        else ("post_id", "fullname", "name", "id", "content_id")
+    )
+    for field_name in identity_fields:
+        raw_identity = _identity_text(item, field_name)
+        if not raw_identity:
+            continue
+        lowered = raw_identity.lower()
+        if lowered.startswith(("t1_", "t3_")):
+            if lowered.startswith(prefix):
+                return raw_identity
+            # Do not reinterpret a lower-priority bare id after an upstream
+            # fullname has already identified the opposite Reddit thing type.
+            return ""
+        return f"{prefix}{raw_identity}"
 
     url = _identity_text(item, "url", "permalink", "link")
-    match = re.search(r"/comments/([^/?#]+)", url, re.I)
+    if is_comment:
+        # A comment permalink has post id + title slug + comment id. A shorter
+        # post URL cannot identify a comment and must not be mislabeled with
+        # the post id (or with the mutable title segment).
+        match = re.search(r"/comments/[^/?#]+/[^/?#]+/([^/?#]+)", url, re.I)
+    else:
+        match = re.search(r"(?:/comments/|redd\.it/)([^/?#]+)", url, re.I)
     if match:
         value = match.group(1)
         value = re.sub(r"^t[13]_", "", value, flags=re.I)
@@ -356,11 +366,11 @@ def reddit_items_to_contents(
         url = _content_url(item)
         title = _text(item, "title", "name")
         body_text = _text(item, "selftext", "body", "text", "content")
-        if not content_id and not url:
+        if not content_id:
             continue
         if not title and not body_text and not url:
             continue
-        key = content_id or url
+        key = content_id
         if key in seen:
             continue
         seen.add(key)
@@ -381,13 +391,13 @@ def reddit_items_to_contents(
 
         contents.append(
             DiscoveredContent(
-                bvid=content_id or url,
+                bvid=content_id,
                 title=title or body_text[:80] or url,
                 up_name=author,
                 author_name=author,
                 description=body_text,
                 body_text=body_text,
-                content_id=content_id or url,
+                content_id=content_id,
                 content_url=url,
                 content_type=_content_type(content_id, item),
                 source_platform=SOURCE_REDDIT,
@@ -422,6 +432,8 @@ def reddit_items_to_events(
     events: list[dict[str, Any]] = []
     for item in items:
         content_id = _content_id(item)
+        if not content_id:
+            continue
         url = _content_url(item)
         title = _text(item, "title", "name") or _text(item, "selftext", "body", "text")[:80]
         if not title and not url:
@@ -620,6 +632,8 @@ class RedditTaskQueue:
         *,
         daily_budget: int = 100,
     ) -> str | None:
+        conn = self._db.conn
+        participating_in_transaction = bool(conn.in_transaction)
         count_today = self._budgeted_count_today(task_type) if daily_budget > 0 else 0
         if daily_budget > 0 and count_today >= daily_budget:
             logger.info(
@@ -632,11 +646,12 @@ class RedditTaskQueue:
             )
             return None
         task_id = str(uuid.uuid4())
-        self._db.conn.execute(
+        conn.execute(
             "INSERT INTO reddit_tasks (id, type, payload_json) VALUES (?, ?, ?)",
             (task_id, task_type, json.dumps(payload, ensure_ascii=False)),
         )
-        self._db.conn.commit()
+        if not participating_in_transaction:
+            conn.commit()
         return task_id
 
     def _budgeted_count_today(self, task_type: str) -> int:
@@ -1266,14 +1281,7 @@ def _reddit_read_post_id(value: str) -> str:
 
 
 def _content_id(item: dict[str, Any]) -> str:
-    raw = _text(item, "content_id", "name", "fullname", "id", "post_id")
-    if not raw:
-        return ""
-    if raw.startswith(("t1_", "t3_")):
-        return raw
-    kind = str(item.get("kind") or item.get("type") or "").strip().lower()
-    prefix = "t1_" if kind in {"comment", "t1"} else "t3_"
-    return f"{prefix}{raw}"
+    return reddit_bootstrap_item_key(item)
 
 
 def _content_url(item: dict[str, Any]) -> str:
@@ -1300,8 +1308,12 @@ def _author(item: dict[str, Any]) -> str:
 
 def _content_type(content_id: str, item: dict[str, Any]) -> str:
     explicit = str(item.get("content_type") or item.get("type") or "").strip().lower()
-    if explicit in {"comment", "post"}:
+    if explicit in {"comment", "post", "subreddit", "user"}:
         return explicit
+    if content_id.startswith("sr_"):
+        return "subreddit"
+    if content_id.startswith("usr_"):
+        return "user"
     return "comment" if content_id.startswith("t1_") else "post"
 
 

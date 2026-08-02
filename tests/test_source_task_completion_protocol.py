@@ -409,6 +409,33 @@ def test_reddit_bootstrap_filters_old_rows_and_repeat_cycle_adds_no_events(
     ]
 
 
+def test_reddit_seen_checkpoint_preserves_canonical_result_order(
+    durable_source_app: tuple[TestClient, Database, MemoryManager],
+) -> None:
+    client, database, memory = durable_source_app
+    case = SOURCE_CASES[-1]
+    first_item = dict(case["item"], id="z-first", title="FIRST reddit")
+    second_item = dict(case["item"], id="a-second", title="SECOND reddit")
+    queue, task_id = _enqueue(database, case)
+    _claim(client, case, task_id)
+
+    response = client.post(
+        "/api/sources/reddit/task-result",
+        json={
+            "task_id": task_id,
+            "status": "ok",
+            "items": [first_item, second_item],
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert queue.get(task_id)["status"] == "completed"
+    assert memory.load_source_bootstrap_state()[case["state_key"]] == [
+        "t3_z-first",
+        "t3_a-second",
+    ]
+
+
 def test_xhs_source_event_identity_ignores_rotating_url_and_title(
     durable_source_app: tuple[TestClient, Database, MemoryManager],
 ) -> None:

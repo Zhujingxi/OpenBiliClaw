@@ -2361,7 +2361,7 @@ def create_app(
         task_id: str,
         events_with_keys: list[tuple[dict[str, Any], str]],
         generic_owner: bool,
-    ) -> set[str]:
+    ) -> list[str]:
         """Persist extension source results through the durable ingress.
 
         Guided init owns profile construction, so its events are durable facts
@@ -2420,7 +2420,7 @@ def create_app(
             canonical.append(event)
             keys_by_index.append(bootstrap_key)
         if not canonical:
-            return set()
+            return []
         receipt = await event_ingress.accept_batch(
             canonical,
             producer=f"source-{source}",
@@ -2428,11 +2428,11 @@ def create_app(
         if receipt.rejected:
             reasons = "; ".join(item.error for item in receipt.items if item.error)
             raise RuntimeError(f"source event ingress rejected canonical event: {reasons}")
-        return {
+        return [
             keys_by_index[item.index]
             for item in receipt.items
             if (item.inserted or item.duplicate) and keys_by_index[item.index]
-        }
+        ]
 
     async def _restart_background_tasks_after_event_recovery(
         *,
@@ -4320,7 +4320,7 @@ def create_app(
         *,
         bangumi_username: str | None = None,
         bangumi_token: str | None = None,
-    ) -> None:
+    ) -> bool:
         """Best-effort: checked guided-init sources become enabled settings.
 
         The run itself uses ``effective_sources`` directly, so a config write
@@ -4332,7 +4332,7 @@ def create_app(
         cfg = getattr(ctx, "config", None)
         sources_cfg = getattr(cfg, "sources", None) if cfg is not None else None
         if sources_cfg is None or not effective_sources:
-            return
+            return False
 
         changed = False
         for source in _INIT_SOURCE_ORDER:
@@ -4362,7 +4362,7 @@ def create_app(
             bangumi_cfg.access_token = bangumi_token
             changed = True
         if not changed:
-            return
+            return False
 
         try:
             from openbiliclaw.config import Config, save_config
@@ -4373,10 +4373,10 @@ def create_app(
                 save_config(cfg)
         except Exception:
             logger.warning("guided init source opt-in save_config failed", exc_info=True)
-            return
+            return False
 
         if bool(getattr(ctx, "degraded", False)):
-            return
+            return False
         try:
             await _rebuild_runtime_with_lane_handoff(
                 cfg,
@@ -4390,8 +4390,12 @@ def create_app(
                         "message": "初始化来源选择已写入配置。",
                     }
                 )
+            return True
         except Exception:
             logger.warning("guided init source opt-in hot-reload failed", exc_info=True)
+            # The handoff attempts a suspended recovery in its own exception
+            # path, so callers must still restore normal owners if init aborts.
+            return True
 
     async def _run_guided_init_wrapper(
         run_id: str,
@@ -4761,6 +4765,23 @@ def create_app(
             and not effective_bangumi_token
         ):
             warnings.append("Bangumi 未填写令牌或公开用户名：本次仅启用条目发现，不提供画像信号。")
+
+        # Reserve the init run before source opt-in can hot-reload runtime
+        # components. The durable init-active gate is therefore already
+        # visible to an old controller, and the setup reload keeps the new
+        # controller fully suspended until the guided-init wrapper finishes.
+        run_id = uuid.uuid4().hex
+        if not coord.try_start(run_id):
+            return JSONResponse({"error": "already_running"}, status_code=409)
+
+        setup_runtime_suspended = False
+
+        async def _abort_reserved_start(reason: str) -> None:
+            coord.reset_to_idle(run_id, reason=reason)
+            if setup_runtime_suspended and not bool(getattr(ctx, "degraded", False)):
+                with suppress(Exception):
+                    await _restart_background_tasks_after_event_recovery()
+
         if selected_sources is not None:
             # With a token the username was resolved from /v0/me; persist that so
             # status/config reflect the real account. Otherwise keep the explicit
@@ -4768,15 +4789,11 @@ def create_app(
             username_to_persist = (
                 effective_bangumi_username if effective_bangumi_token else selected_bangumi_username
             )
-            await _persist_guided_init_source_opt_in(
+            setup_runtime_suspended = await _persist_guided_init_source_opt_in(
                 effective_sources,
                 bangumi_username=username_to_persist,
                 bangumi_token=selected_bangumi_token,
             )
-
-        run_id = uuid.uuid4().hex
-        if not coord.try_start(run_id):
-            return JSONResponse({"error": "already_running"}, status_code=409)
 
         # Critical-section revalidation: prereqs may have lapsed between the
         # status poll and now. On a miss, roll the reservation back to idle so
@@ -4785,7 +4802,7 @@ def create_app(
         if "bilibili" in effective_sources:
             bili = await ctx.init_prereqs.bilibili_check()
             if bili != "ok":
-                coord.reset_to_idle(run_id, reason="bilibili_not_logged_in")
+                await _abort_reserved_start("bilibili_not_logged_in")
                 return JSONResponse(
                     {
                         "error": "bilibili_not_logged_in",
@@ -4795,7 +4812,7 @@ def create_app(
                 )
         chat = await ctx.init_prereqs.chat_ready()
         if not chat:
-            coord.reset_to_idle(run_id, reason="llm_not_ready")
+            await _abort_reserved_start("llm_not_ready")
             # Propagate the classified cause the live probe just diagnosed
             # (无效 API Key / 服务不可达 / 模型不存在) so the rejection is
             # actionable rather than a generic "not ready" (project rule 7).
@@ -4803,7 +4820,7 @@ def create_app(
             return JSONResponse({"error": "llm_not_ready", "detail": chat_detail}, status_code=409)
         if _embedding_required_for_init() and not await _health_embedding_ready(strict=True):
             pulling = await _maybe_autostart_embedding_pull()
-            coord.reset_to_idle(run_id, reason="embedding_not_ready")
+            await _abort_reserved_start("embedding_not_ready")
             detail = (
                 _repair_progress_detail()
                 if pulling
@@ -12291,7 +12308,7 @@ def create_app(
                     events_with_keys=events_with_keys,
                     generic_owner=not _init_busy,
                 )
-                _mark_source_bootstrap_keys("xhs", sorted(accepted_keys))
+                _mark_source_bootstrap_keys("xhs", accepted_keys)
                 if skipped_self > 0:
                     logger.info(
                         "xhs bootstrap propagate: dropped %d self-authored note(s) (%d propagated)",
@@ -13194,7 +13211,7 @@ def create_app(
                     events_with_keys=events_with_keys,
                     generic_owner=not _init_busy,
                 )
-                _mark_source_bootstrap_keys("dy", sorted(accepted_keys))
+                _mark_source_bootstrap_keys("dy", accepted_keys)
             if is_final:
                 legacy_queue.complete_staged_result(task_id)
         else:
@@ -13405,7 +13422,7 @@ def create_app(
                     events_with_keys=events_with_keys,
                     generic_owner=not _init_busy,
                 )
-                _mark_source_bootstrap_keys("reddit", sorted(accepted_keys))
+                _mark_source_bootstrap_keys("reddit", accepted_keys)
             if is_final:
                 legacy_queue.complete_staged_result(task_id)
         else:
@@ -13545,7 +13562,7 @@ def create_app(
                     events_with_keys=events_with_keys,
                     generic_owner=not _init_busy,
                 )
-                _mark_source_bootstrap_keys("zhihu", sorted(accepted_keys))
+                _mark_source_bootstrap_keys("zhihu", accepted_keys)
             if is_final:
                 legacy_queue.complete_staged_result(task_id)
         else:
@@ -13677,7 +13694,7 @@ def create_app(
                     events_with_keys=events_with_keys,
                     generic_owner=not _init_busy,
                 )
-                _mark_source_bootstrap_keys("yt", sorted(accepted_keys))
+                _mark_source_bootstrap_keys("yt", accepted_keys)
             if is_final:
                 legacy_queue.complete_staged_result(task_id)
         else:

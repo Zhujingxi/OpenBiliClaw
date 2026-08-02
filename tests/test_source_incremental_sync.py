@@ -16,6 +16,7 @@ from openbiliclaw.runtime import source_incremental_sync as scheduler_module
 from openbiliclaw.runtime.source_incremental_sync import (
     SOURCE_ORDER,
     SourceIncrementalSync,
+    SourceIncrementalSyncResult,
 )
 from openbiliclaw.sources.bootstrap_state import default_source_bootstrap_state
 from openbiliclaw.sources.source_bootstrap import BootstrapEnqueueResult
@@ -201,7 +202,32 @@ async def test_global_zero_and_per_source_zero_disable_independently(
 
 
 @pytest.mark.asyncio
+async def test_per_source_override_controls_actual_due_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = SchedulerConfig(source_incremental_hours=24, xhs_incremental_hours=2)
+    scheduler, database, _memory, _presence, clock, _kicks = _harness(
+        monkeypatch,
+        config=config,
+        enabled={source: source == "xhs" for source in SOURCE_ORDER},
+    )
+
+    first = await scheduler.tick()
+    _complete(database, "xhs", str(first.task_id))
+    clock.advance(hours=1)
+    assert (await scheduler.tick()).reason == "not_due"
+
+    clock.advance(hours=1)
+    assert (await scheduler.tick()).source == "xhs"
+
+
+@pytest.mark.asyncio
 async def test_enabled_presence_profile_and_init_gates(monkeypatch: pytest.MonkeyPatch) -> None:
+    disabled = SchedulerConfig(enabled=False)
+    scheduler, _db, _memory, presence, _clock, _kicks = _harness(monkeypatch, config=disabled)
+    assert (await scheduler.tick()).reason == "scheduler_disabled"
+    assert presence.calls == []
+
     scheduler, _db, _memory, presence, _clock, _kicks = _harness(
         monkeypatch, enabled={source: False for source in SOURCE_ORDER}
     )
@@ -249,7 +275,10 @@ async def test_reused_or_none_outcome_does_not_stamp_schedule_state(
     task_id: str | None,
     reason: str,
 ) -> None:
-    scheduler, _db, memory, _presence, _clock, kicks = _harness(monkeypatch)
+    scheduler, _db, memory, _presence, _clock, kicks = _harness(
+        monkeypatch,
+        enabled={source: source == "xhs" for source in SOURCE_ORDER},
+    )
     original = deepcopy(memory.state)
 
     def outcome(_db: Any, *, force: bool, incremental: bool) -> BootstrapEnqueueResult:
@@ -266,6 +295,32 @@ async def test_reused_or_none_outcome_does_not_stamp_schedule_state(
     assert result.reason == reason
     assert memory.state == original
     assert kicks == []
+
+
+@pytest.mark.asyncio
+async def test_exhausted_source_budget_does_not_starve_next_due_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scheduler, database, memory, _presence, clock, kicks = _harness(monkeypatch)
+    table, task_type, _ = scheduler_module._TASK_SPECS["xhs"]
+
+    def exhausted(_db: Any, *, force: bool, incremental: bool) -> BootstrapEnqueueResult:
+        assert force and incremental
+        return BootstrapEnqueueResult(None, False, "enqueue_failed")
+
+    monkeypatch.setattr(
+        scheduler_module,
+        "_TASK_SPECS",
+        {**scheduler_module._TASK_SPECS, "xhs": (table, task_type, exhausted)},
+    )
+
+    result = await scheduler.tick()
+
+    assert (result.reason, result.source, result.created) == ("created", "dy", True)
+    assert memory.state["source_incremental"]["last_attempt_at"].keys() == {"dy"}  # type: ignore[index,union-attr]
+    assert database.conn.execute("SELECT COUNT(*) FROM xhs_tasks").fetchone()[0] == 0
+    assert database.conn.execute("SELECT COUNT(*) FROM dy_tasks").fetchone()[0] == 1
+    assert kicks == ["dy"]
 
 
 @pytest.mark.asyncio
@@ -325,6 +380,49 @@ async def test_concurrent_ticks_on_one_scheduler_create_only_one_task(
 
 
 @pytest.mark.asyncio
+async def test_hot_reload_scheduler_instances_share_one_decision_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first, database, memory, presence, clock, kicks = _harness(monkeypatch)
+    second = SourceIncrementalSync(
+        database=database,
+        memory_manager=memory,
+        presence=presence,
+        source_enabled=first.source_enabled,
+        scheduler_config=first.scheduler_config,
+        profile_ready=lambda: True,
+        init_active=lambda: False,
+        kick=first.kick,
+        clock=clock,
+    )
+    first_scanned = threading.Event()
+    release_first = threading.Event()
+    original_reconcile = first._reconcile_active_state
+
+    def pause_after_empty_scan(
+        state: dict[str, object], *, now: datetime
+    ) -> SourceIncrementalSyncResult | None:
+        result = original_reconcile(state, now=now)
+        assert result is None
+        first_scanned.set()
+        assert release_first.wait(timeout=2)
+        return result
+
+    monkeypatch.setattr(first, "_reconcile_active_state", pause_after_empty_scan)
+    first_tick = asyncio.create_task(first.tick())
+    assert await asyncio.to_thread(first_scanned.wait, 2)
+    second_tick = asyncio.create_task(second.tick())
+    await asyncio.sleep(0.05)
+    release_first.set()
+    results = await asyncio.gather(first_tick, second_tick)
+
+    assert sum(result.created for result in results) == 1
+    assert {result.reason for result in results} == {"created", "active_task"}
+    assert database.conn.execute("SELECT COUNT(*) FROM xhs_tasks").fetchone()[0] == 1
+    assert kicks == ["xhs"]
+
+
+@pytest.mark.asyncio
 async def test_terminal_active_state_is_cleared_before_next_due_decision(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -350,7 +448,7 @@ async def test_terminal_active_state_is_cleared_before_next_due_decision(
 async def test_crash_window_adopts_unrecorded_incremental_task(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    scheduler, database, memory, _presence, _clock, kicks = _harness(monkeypatch)
+    scheduler, database, memory, _presence, clock, kicks = _harness(monkeypatch)
     database.conn.execute(
         "INSERT INTO xhs_tasks (id, type, payload_json, status, created_at) "
         "VALUES ('crashed', 'bootstrap_profile', "
@@ -364,7 +462,19 @@ async def test_crash_window_adopts_unrecorded_incremental_task(
         "source": "xhs",
         "task_id": "crashed",
     }
+    assert memory.state["source_incremental"]["cursor"] == "xhs"  # type: ignore[index]
+    assert (
+        memory.state["source_incremental"]["last_attempt_at"]["xhs"]  # type: ignore[index]
+        == "2026-08-03T00:00:00+00:00"
+    )
     assert kicks == []
+
+    scheduler.source_enabled = {source: source == "xhs" for source in SOURCE_ORDER}
+    _complete(database, "xhs", "crashed")
+    assert (await scheduler.tick()).reason == "not_due"
+
+    clock.advance(hours=24)
+    assert (await scheduler.tick()).source == "xhs"
 
 
 @pytest.mark.asyncio
@@ -383,6 +493,44 @@ async def test_corrupt_state_and_timestamp_are_safe_and_due(
     result = await scheduler.tick()
     assert result.created is True
     assert memory.state["source_incremental"]["cursor"] == "xhs"  # type: ignore[index]
+
+
+@pytest.mark.asyncio
+async def test_future_timestamp_is_treated_as_corrupt_and_due(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = default_source_bootstrap_state()
+    state["source_incremental"] = {
+        "cursor": "reddit",
+        "last_attempt_at": {"xhs": "2099-01-01T00:00:00+00:00"},
+        "active_task": None,
+    }
+    scheduler, _db, _memory, _presence, _clock, _kicks = _harness(
+        monkeypatch,
+        state=state,
+        enabled={source: source == "xhs" for source in SOURCE_ORDER},
+    )
+
+    assert (await scheduler.tick()).source == "xhs"
+
+
+@pytest.mark.asyncio
+async def test_naive_recent_timestamp_is_treated_as_corrupt_and_due(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = default_source_bootstrap_state()
+    state["source_incremental"] = {
+        "cursor": "reddit",
+        "last_attempt_at": {"xhs": "2026-08-03T00:00:00"},
+        "active_task": None,
+    }
+    scheduler, _db, _memory, _presence, _clock, _kicks = _harness(
+        monkeypatch,
+        state=state,
+        enabled={source: source == "xhs" for source in SOURCE_ORDER},
+    )
+
+    assert (await scheduler.tick()).source == "xhs"
 
 
 @pytest.mark.asyncio

@@ -376,11 +376,11 @@ account_sync_interval_hours = 6
 source_incremental_hours = 24
 # Per-source overrides: omit (or set through the API to null) to inherit the
 # global interval; 0 disables only that source. Allowed values: 0..168.
-xhs_incremental_hours = 24
-douyin_incremental_hours = 24
-youtube_incremental_hours = 24
-zhihu_incremental_hours = 24
-reddit_incremental_hours = 24
+# xhs_incremental_hours = 12
+# douyin_incremental_hours = 24
+# youtube_incremental_hours = 24
+# zhihu_incremental_hours = 24
+# reddit_incremental_hours = 24
 # --- Runtime refresh tuning ---
 refresh_check_interval_seconds = 60      # Main loop poll interval; values <15 fallback
 signal_event_threshold = 6               # New behavior events before search+related refresh

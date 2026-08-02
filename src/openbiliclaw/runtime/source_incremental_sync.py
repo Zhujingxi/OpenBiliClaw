@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any
 
 from openbiliclaw.config import _normalize_source_incremental_hours
 from openbiliclaw.sources.source_bootstrap import (
+    SOURCE_BOOTSTRAP_DECISION_LOCK,
     BootstrapEnqueueResult,
     enqueue_dy_bootstrap,
     enqueue_reddit_bootstrap,
@@ -75,6 +76,7 @@ class _ActiveTask:
     task_id: str
     status: str
     incremental: bool
+    created_at: datetime | None
 
 
 def _utc_now(value: datetime) -> datetime:
@@ -88,9 +90,27 @@ def _parse_timestamp(value: object) -> datetime | None:
     if not text:
         return None
     try:
-        return _utc_now(datetime.fromisoformat(text))
+        parsed = datetime.fromisoformat(text)
     except (TypeError, ValueError):
         return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(UTC)
+
+
+def _parse_task_created_at(value: object) -> datetime | None:
+    """Parse SQLite's UTC ``CURRENT_TIMESTAMP`` as task recovery evidence."""
+
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _row_value(row: object, key: str, index: int) -> object:
@@ -149,7 +169,7 @@ class SourceIncrementalSync:
 
             now = _utc_now(self.clock())
             try:
-                outcome = await asyncio.to_thread(self._tick_sync, now)
+                outcome = await asyncio.to_thread(self._locked_tick_sync, now)
             except Exception:
                 logger.exception("source incremental sync database decision failed")
                 return SourceIncrementalSyncResult(reason="database_error")
@@ -174,6 +194,12 @@ class SourceIncrementalSync:
                     )
             return outcome
 
+    def _locked_tick_sync(self, now: datetime) -> SourceIncrementalSyncResult:
+        # Shared with CLI/guided-init enqueue helpers, so a manual task cannot
+        # slip into the active-scan -> periodic-enqueue window (or vice versa).
+        with SOURCE_BOOTSTRAP_DECISION_LOCK:
+            return self._tick_sync(now)
+
     async def _gate_value(
         self,
         callback: Callable[[], bool | Awaitable[bool]],
@@ -194,32 +220,48 @@ class SourceIncrementalSync:
         if state is None:
             return SourceIncrementalSyncResult(reason="state_error")
 
-        reconciled = self._reconcile_active_state(state)
+        reconciled = self._reconcile_active_state(state, now=now)
         if reconciled is not None:
             return reconciled
 
-        source = self._select_due_source(state, now)
-        if source is None:
-            return SourceIncrementalSyncResult(reason="not_due")
-
-        _table, _task_type, enqueue = _TASK_SPECS[source]
-        try:
-            outcome = enqueue(self.database, force=True, incremental=True)
-        except Exception:
-            logger.exception("source incremental enqueue failed source=%s", source)
-            return SourceIncrementalSyncResult(reason="enqueue_error", source=source)
-
-        task_id = str(outcome.task_id or "").strip()
-        if not outcome.created or not task_id:
-            # Reuse, budget exhaustion, and empty/None ids are deliberately
-            # not schedule attempts.  In particular, do not advance the
-            # cursor merely because a helper returned a recent task id.
-            return SourceIncrementalSyncResult(
-                reason=outcome.reason,
-                source=source,
-                task_id=task_id or None,
-                created=False,
+        skipped_budget_sources: set[str] = set()
+        first_budget_result: SourceIncrementalSyncResult | None = None
+        while True:
+            source = self._select_due_source(
+                state,
+                now,
+                excluded=skipped_budget_sources,
             )
+            if source is None:
+                return first_budget_result or SourceIncrementalSyncResult(reason="not_due")
+
+            _table, _task_type, enqueue = _TASK_SPECS[source]
+            try:
+                outcome = enqueue(self.database, force=True, incremental=True)
+            except Exception:
+                logger.exception("source incremental enqueue failed source=%s", source)
+                return SourceIncrementalSyncResult(reason="enqueue_error", source=source)
+
+            task_id = str(outcome.task_id or "").strip()
+            if not outcome.created or not task_id:
+                # The enqueue core uses this exact empty result for a source's
+                # exhausted daily budget. It proves no row was inserted, so
+                # the same tick may safely consider the next due source and
+                # avoid starving it. Reuse, exceptions, and inconsistent
+                # created-without-id outcomes stop immediately because they do
+                # not provide that no-row guarantee.
+                result = SourceIncrementalSyncResult(
+                    reason=outcome.reason,
+                    source=source,
+                    task_id=task_id or None,
+                    created=False,
+                )
+                if outcome.reason == "enqueue_failed" and not outcome.created and not task_id:
+                    first_budget_result = first_budget_result or result
+                    skipped_budget_sources.add(source)
+                    continue
+                return result
+            break
 
         timestamp = _utc_now(now).isoformat()
         try:
@@ -286,6 +328,8 @@ class SourceIncrementalSync:
     def _reconcile_active_state(
         self,
         state: dict[str, object],
+        *,
+        now: datetime,
     ) -> SourceIncrementalSyncResult | None:
         incremental_state = self._incremental_state(state)
         raw_active = incremental_state.get("active_task")
@@ -324,11 +368,14 @@ class SourceIncrementalSync:
 
         first = active_rows[0]
         if first.incremental:
+            adopted_at = first.created_at or _utc_now(now)
             try:
                 self._update_state(
-                    lambda current: self._replace_active_task(
+                    lambda current: self._stamp_created_task(
                         current,
-                        active_task={"source": first.source, "task_id": first.task_id},
+                        source=first.source,
+                        task_id=first.task_id,
+                        timestamp=adopted_at.isoformat(),
                     )
                 )
             except Exception:
@@ -399,7 +446,7 @@ class SourceIncrementalSync:
             params.append(task_id)
         try:
             rows = conn.execute(
-                f"SELECT id, status, payload_json FROM {table} WHERE {where} "
+                f"SELECT id, status, payload_json, created_at FROM {table} WHERE {where} "
                 "ORDER BY created_at ASC",
                 params,
             ).fetchall()
@@ -420,6 +467,7 @@ class SourceIncrementalSync:
                     task_id=normalized_id,
                     status=status,
                     incremental=self._payload_flag(payload.get("incremental")),
+                    created_at=_parse_task_created_at(_row_value(row, "created_at", 3)),
                 )
             )
         return result
@@ -470,7 +518,13 @@ class SourceIncrementalSync:
             return global_hours
         return override_hours
 
-    def _select_due_source(self, state: dict[str, object], now: datetime) -> str | None:
+    def _select_due_source(
+        self,
+        state: dict[str, object],
+        now: datetime,
+        *,
+        excluded: set[str] | None = None,
+    ) -> str | None:
         incremental = self._incremental_state(state)
         cursor = str(incremental.get("cursor", "")).strip().lower()
         try:
@@ -482,13 +536,19 @@ class SourceIncrementalSync:
         current = _utc_now(now)
         for offset in range(len(SOURCE_ORDER)):
             source = SOURCE_ORDER[(start + offset) % len(SOURCE_ORDER)]
+            if excluded and source in excluded:
+                continue
             if not self._source_is_enabled(source):
                 continue
             interval_hours = self._effective_interval_hours(source)
             if interval_hours == 0:
                 continue
             timestamp = _parse_timestamp(attempts.get(source))
-            if timestamp is None or current - timestamp >= timedelta(hours=interval_hours):
+            if (
+                timestamp is None
+                or timestamp > current
+                or current - timestamp >= timedelta(hours=interval_hours)
+            ):
                 return source
         return None
 

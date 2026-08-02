@@ -5,6 +5,9 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from threading import Barrier
 from typing import Any
 
 import pytest
@@ -310,6 +313,110 @@ def test_budget_exhaustion_is_a_structured_failure(
     assert "今日任务预算已用完" in messages[-1]
 
 
+def test_force_does_not_bypass_cross_source_active_work(tmp_path: Path) -> None:
+    from openbiliclaw.sources import source_bootstrap
+    from openbiliclaw.storage.database import Database
+
+    database = Database(tmp_path / "active-bootstrap.db")
+    database.initialize()
+
+    first = source_bootstrap.enqueue_dy_bootstrap(database, force=True)
+    blocked = source_bootstrap.enqueue_xhs_bootstrap(database, force=True)
+
+    assert first.created is True
+    assert blocked == source_bootstrap.BootstrapEnqueueResult(
+        task_id=None,
+        created=False,
+        reason="active_task",
+    )
+    assert database.conn.execute("SELECT COUNT(*) FROM dy_tasks").fetchone()[0] == 1
+    assert database.conn.execute("SELECT COUNT(*) FROM xhs_tasks").fetchone()[0] == 0
+
+
+def test_concurrent_manual_bootstrap_helpers_create_one_global_active_task(
+    tmp_path: Path,
+) -> None:
+    from openbiliclaw.sources import source_bootstrap
+    from openbiliclaw.storage.database import Database
+
+    database = Database(tmp_path / "concurrent-bootstrap.db")
+    database.initialize()
+    barrier = Barrier(2)
+
+    def enqueue(source: str) -> source_bootstrap.BootstrapEnqueueResult:
+        barrier.wait()
+        helper = (
+            source_bootstrap.enqueue_xhs_bootstrap
+            if source == "xhs"
+            else source_bootstrap.enqueue_dy_bootstrap
+        )
+        return helper(database, force=True)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(enqueue, ("xhs", "dy")))
+
+    assert sum(result.created for result in results) == 1
+    assert {result.reason for result in results} == {"created", "active_task"}
+    active_rows = 0
+    for table in ("xhs_tasks", "dy_tasks"):
+        active_rows += database.conn.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE status IN ('pending', 'in_progress')"
+        ).fetchone()[0]
+    assert active_rows == 1
+
+
+def test_sqlite_admission_serializes_separate_database_facades_without_process_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.sources import source_bootstrap
+    from openbiliclaw.sources.dy_tasks import DyTaskQueue
+    from openbiliclaw.sources.xhs_tasks import XhsTaskQueue
+    from openbiliclaw.storage.database import Database
+
+    class NoopDecisionLock:
+        def __enter__(self) -> None:
+            return None
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    path = tmp_path / "cross-facade-bootstrap.db"
+    first_database = Database(path)
+    first_database.initialize()
+    second_database = Database(path)
+    second_database.initialize()
+    # Initialize both source tables before the race so schema DDL is not the
+    # mechanism serializing the two admissions.
+    XhsTaskQueue(first_database)
+    DyTaskQueue(first_database)
+    monkeypatch.setattr(
+        source_bootstrap,
+        "SOURCE_BOOTSTRAP_DECISION_LOCK",
+        NoopDecisionLock(),
+    )
+    barrier = Barrier(2)
+
+    def enqueue(source: str) -> source_bootstrap.BootstrapEnqueueResult:
+        barrier.wait()
+        if source == "xhs":
+            return source_bootstrap.enqueue_xhs_bootstrap(first_database, force=True)
+        return source_bootstrap.enqueue_dy_bootstrap(second_database, force=True)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(enqueue, ("xhs", "dy")))
+
+    assert sum(result.created for result in results) == 1
+    assert {result.reason for result in results} == {"created", "active_task"}
+    active_rows = sum(
+        first_database.conn.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE status IN ('pending', 'in_progress')"
+        ).fetchone()[0]
+        for table in ("xhs_tasks", "dy_tasks")
+    )
+    assert active_rows == 1
+
+
 def test_source_bootstrap_import_does_not_load_cli_or_ui_dependencies() -> None:
     code = (
         "import sys\n"
@@ -374,7 +481,7 @@ def test_cli_wrapper_maps_created_result_and_respects_deferred_kick(
 
 
 def _repo_root() -> str:
-    return str(__file__).rsplit("/tests/", 1)[0]
+    return str(Path(__file__).resolve().parents[1])
 
 
 @pytest.mark.parametrize("source", ("xhs", "dy", "yt", "zhihu"))

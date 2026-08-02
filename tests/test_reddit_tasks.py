@@ -61,14 +61,54 @@ def test_reddit_bootstrap_item_key_uses_stable_identity_before_url_fallback() ->
                 "url": "https://www.reddit.com/r/test/comments/post-1/comment-1/",
             }
         )
-        == "t1_post-1"
+        == ""
+    )
+    assert (
+        reddit_bootstrap_item_key(
+            {
+                "content_type": "comment",
+                "url": "https://www.reddit.com/r/test/comments/post-1/title/comment-1/",
+            }
+        )
+        == "t1_comment-1"
+    )
+    assert (
+        reddit_bootstrap_item_key(
+            {
+                "content_type": "comment",
+                "post_id": "post-1",
+                "comment_id": "comment-1",
+            }
+        )
+        == "t1_comment-1"
     )
 
 
 def test_reddit_bootstrap_item_key_rejects_unidentifiable_rows_and_deduplicates_batch() -> None:
     assert reddit_bootstrap_item_key({}) == ""
     assert reddit_bootstrap_item_key({"title": "not an identity"}) == ""
+    assert (
+        reddit_bootstrap_item_key(
+            {
+                "scope": "reddit_subscribed",
+                "content_type": "subreddit",
+                "title": "mutable community title",
+            }
+        )
+        == ""
+    )
     assert reddit_bootstrap_item_key({"id": {"nested": "no"}}) == ""
+    assert (
+        reddit_bootstrap_item_key(
+            {
+                "content_type": "comment",
+                "name": "t3_parent-post",
+                "id": "parent-post",
+                "body": "opposite fullname must not fall through to a bare id",
+            }
+        )
+        == ""
+    )
 
     rows = [
         {"content_type": "post", "id": "same"},
@@ -309,6 +349,49 @@ def test_reddit_items_to_events_maps_bootstrap_scopes_to_profile_signals() -> No
     assert events[2]["metadata"]["signal_strength"] == 0.65
     assert events[2]["metadata"]["source_platform"] == "reddit"
     assert events[2]["context"].startswith("在Reddit关注了")
+
+
+def test_reddit_event_conversion_requires_and_preserves_type_specific_identity() -> None:
+    events = reddit_items_to_events(
+        [
+            {
+                "scope": "reddit_upvoted",
+                "content_type": "comment",
+                "post_id": "parent-post",
+                "comment_id": "comment-a",
+                "body": "first comment",
+                "url": "https://www.reddit.com/r/test/comments/parent/title/comment-a/",
+            },
+            {
+                "scope": "reddit_upvoted",
+                "content_type": "comment",
+                "post_id": "parent-post",
+                "comment_id": "comment-b",
+                "body": "second comment",
+                "url": "https://www.reddit.com/r/test/comments/parent/title/comment-b/",
+            },
+            {
+                "scope": "reddit_upvoted",
+                "content_type": "comment",
+                "post_id": "parent-post",
+                "body": "no stable comment identity",
+                "url": "https://www.reddit.com/r/test/comments/parent/title/",
+            },
+            {
+                "scope": "reddit_upvoted",
+                "content_type": "comment",
+                "name": "t3_parent-post",
+                "id": "parent-post",
+                "body": "opposite fullname must not fall through to a bare id",
+            },
+        ],
+        import_source="reddit_bootstrap_events",
+    )
+
+    assert [event["metadata"]["content_id"] for event in events] == [
+        "t1_comment-a",
+        "t1_comment-b",
+    ]
 
 
 def test_probe_reddit_command_backend_reports_missing_without_side_effects() -> None:

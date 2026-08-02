@@ -316,9 +316,11 @@ class XhsTaskQueue:
         ``daily_budget <= 0`` disables the per-day cap; runtime producers are
         then controlled by source deficits and their per-run throttles.
         """
+        conn = self._db.conn
+        participating_in_transaction = bool(conn.in_transaction)
         today = datetime.now(UTC).strftime("%Y-%m-%d")
         if daily_budget > 0:
-            count_today = self._db.conn.execute(
+            count_today = conn.execute(
                 "SELECT COUNT(*) FROM xhs_tasks WHERE type = ? AND created_at >= ?",
                 (task_type, today),
             ).fetchone()[0]
@@ -337,11 +339,12 @@ class XhsTaskQueue:
             return None
 
         task_id = str(uuid.uuid4())
-        self._db.conn.execute(
+        conn.execute(
             "INSERT INTO xhs_tasks (id, type, payload_json) VALUES (?, ?, ?)",
             (task_id, task_type, json.dumps(payload, ensure_ascii=False)),
         )
-        self._db.conn.commit()
+        if not participating_in_transaction:
+            conn.commit()
         return task_id
 
     def runtime_state(self, *, now: datetime | None = None) -> dict[str, Any]:

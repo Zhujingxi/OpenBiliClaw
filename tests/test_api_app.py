@@ -1664,7 +1664,7 @@ class TestBackendAPI:
         try:
             await asyncio.sleep(0)
             ctx.runtime_controller = new
-            await ctx.restart_background_tasks(app, run_post_reload_llm_work=False)
+            await ctx.restart_background_tasks(app)
             for _ in range(5):
                 await asyncio.sleep(0)
                 if new_started.is_set():
@@ -1681,6 +1681,37 @@ class TestBackendAPI:
                 old_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await old_task
+
+    @pytest.mark.asyncio
+    async def test_guided_init_setup_reload_keeps_whole_controller_suspended(self) -> None:
+        from types import SimpleNamespace
+
+        from openbiliclaw.api.runtime_context import RuntimeContext
+        from openbiliclaw.config import Config
+
+        started = False
+
+        class Controller:
+            source_incremental_sync = object()
+
+            async def run_forever(self) -> None:
+                nonlocal started
+                started = True
+
+        ctx = RuntimeContext(
+            config=Config(),
+            runtime_controller=Controller(),
+            account_sync_service=object(),
+            auto_update_service=object(),
+        )
+        app = SimpleNamespace(state=SimpleNamespace())
+
+        await ctx.restart_background_tasks(app, run_post_reload_llm_work=False)
+        await asyncio.sleep(0)
+
+        assert app.state.refresh_task is None
+        assert started is False
+        assert ctx.task_registry.stats().get("refresh_loop") is None
 
     @pytest.mark.asyncio
     async def test_restart_background_tasks_bounds_cancel_ignoring_coroutine(
@@ -17171,6 +17202,42 @@ class TestGuidedInitEndpoints:
         assert captured["include_dy"] is True
         assert captured["include_xhs"] is False
         assert captured["include_reddit"] is False
+
+    def test_init_reserves_before_source_opt_in_runtime_reload(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.config import Config
+
+        captured = self._capture_run_guided_init(monkeypatch)
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=[])
+        app, _ = self._make_app(tmp_path, prereqs=prereqs)
+        ctx = app.state.runtime_context
+        ctx.config = Config()
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        ctx.config.data_dir = str(data_dir)
+        ctx.config.sources.douyin.enabled = False
+        reservation_seen_during_rebuild: list[bool] = []
+
+        async def observe_rebuild(_config: object) -> None:
+            reservation_seen_during_rebuild.append(ctx.init_coordinator.init_active())
+
+        async def no_op_restart(_app: object, **_kwargs: object) -> None:
+            return None
+
+        monkeypatch.setattr(ctx, "rebuild_from_config", observe_rebuild)
+        monkeypatch.setattr(ctx, "restart_background_tasks", no_op_restart)
+        monkeypatch.setattr("openbiliclaw.config.save_config", lambda _config: None)
+
+        with TestClient(app) as client:
+            response = client.post("/api/init", json={"sources": ["douyin"]})
+            assert response.status_code == 202, response.text
+            self._drive_until(client, captured, key="include_dy")
+
+        assert reservation_seen_during_rebuild == [True]
+        assert captured["include_dy"] is True
 
     def test_cancel_without_active_run_returns_409(self, tmp_path: Path) -> None:
         from fastapi.testclient import TestClient

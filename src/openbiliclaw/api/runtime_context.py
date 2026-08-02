@@ -1620,14 +1620,11 @@ class RuntimeContext:
         # Start new tasks from the freshly-built components.
         # v0.3.63+: route through ``self.task_registry.track`` so the
         # next hot-reload's ``cancel_all`` cleanly stops them too.
-        # The extension-account scheduler is independent of LLM work.  A
-        # real controller therefore still owns one ``run_forever`` task when
-        # post-reload LLM one-shots are suppressed (for example while guided
-        # init is active); its own init/profile gates keep collection paused.
-        controller_has_source_sync = (
-            getattr(self.runtime_controller, "source_incremental_sync", None) is not None
-        )
-        if run_post_reload_llm_work or controller_has_source_sync:
+        # ``False`` is also the setup/guided-init lane fence: starting the
+        # controller here would start every discovery loop, not only the
+        # extension-account scheduler. The normal post-init restart owns the
+        # one replacement controller and its independent source loop.
+        if run_post_reload_llm_work:
             run_forever = getattr(self.runtime_controller, "run_forever", None)
             if "refresh_task" not in stuck_tasks:
                 app.state.refresh_task = (
