@@ -186,9 +186,15 @@ bootstrap tasks, regardless of whether they were created by init, a CLI command,
 scheduler. If any exists, enqueue nothing. Persist the periodic active task for status and
 crash recovery, but treat the task table as the authoritative active-work ledger.
 
+All runtime, CLI, and guided-init enqueue helpers perform that five-table scan and the
+selected queue insert under one SQLite `BEGIN IMMEDIATE` admission transaction. The
+process-local lock remains a fast thread/hot-reload fence, but correctness does not depend
+on it: separate `Database` facades or processes still serialize at SQLite.
+
 If a process crashes after the DB enqueue but before JSON state updates, the next tick must
-discover the row's `incremental=true` payload, adopt it into scheduler state, and not create
-a duplicate.
+discover the row's `incremental=true` payload, adopt its persisted creation time plus
+cursor/active projection into scheduler state, and not create a duplicate or immediately
+reschedule it after terminal completion.
 
 ### I7. Stamp only a newly created real task
 

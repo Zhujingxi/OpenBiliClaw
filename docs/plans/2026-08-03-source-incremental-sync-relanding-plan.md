@@ -1,10 +1,31 @@
 # Source Incremental Sync Relanding — Implementation Plan
 
 > **Spec:** [`2026-08-03-source-incremental-sync-relanding-spec.md`](./2026-08-03-source-incremental-sync-relanding-spec.md)  
-> **Base:** `origin/main` `15e61bc0` / v0.3.192  
+> **Base:** started from `origin/main` `15e61bc0`; merged current `origin/main` `5342b866` before final verification.
 > **Execution:** LunaMax (`gpt-5.6-luna`, `max`) multi-agent worktrees; primary agent owns integration, review, fixes, and final verification.  
 > **Rule:** the old `source-incremental-sync` branch is read-only reference. Never merge, rebase, or cherry-pick its implementation commits.  
-> **Status:** r1, ready to execute.
+> **Status:** implemented, independently reviewed, and automatically verified on 2026-08-03.
+
+## Execution record
+
+- LunaMax (`gpt-5.6-luna`, `max`) agents implemented the enqueue extraction, atomic state,
+  Reddit staging, scheduler/runtime wiring, and an independent read-only review. The
+  primary agent integrated the commits, reconciled every confirmed finding, updated docs,
+  and owned final testing.
+- Pre-change focused baseline: `1259 passed` (`2004 warnings`, 131.92s).
+- Final focused backend gate: `1398 passed` (`2060 warnings`, 142.80s).
+- Final complete backend gate: `7056 passed, 49 skipped` (`4540 warnings`, 880.93s).
+- Extension gate: `1248 passed`; TypeScript `tsc --noEmit` and Chrome build passed.
+- Static gate: Ruff format checked 541 files, Ruff check passed, MyPy passed for 236 source
+  files, and `git diff --check` passed.
+- Independent review reported 2 high, 5 medium, and 2 low findings against the pre-fix
+  snapshot. All confirmed correctness findings are closed with regression coverage,
+  including SQLite-backed global admission, init reservation ordering, crash-adoption
+  timing, config inheritance, receipt ordering, Reddit identity, strict timestamps, and
+  documentation contracts.
+- Installed-extension, logged-in manual smoke was **not run** because no such confirmed
+  environment was available. It remains explicitly unchecked below; no browser automation
+  result is presented as a substitute.
 
 ## Invariants to re-read before every task
 
@@ -45,8 +66,8 @@ all final gates.
 
 ### Steps
 
-- [ ] Record `git status`, `git rev-parse HEAD`, Python version, and tool versions.
-- [ ] Run the focused pre-change contract suite:
+- [x] Record `git status`, `git rev-parse HEAD`, Python version, and tool versions.
+- [x] Run the focused pre-change contract suite:
 
   ```bash
   env -u OPENBILICLAW_PROJECT_ROOT PYTHONPATH=src .venv/bin/pytest \
@@ -55,7 +76,7 @@ all final gates.
     tests/test_memory_manager.py tests/test_refresh_runtime.py -q -p no:randomly
   ```
 
-- [ ] Record any pre-existing failure exactly; do not normalize a new failure as baseline.
+- [x] Record any pre-existing failure exactly; do not normalize a new failure as baseline.
 
 ### Acceptance
 
@@ -93,20 +114,20 @@ kick.
 
 ### Steps
 
-- [ ] Write failing tests for all five exact task types/scopes/default limits/budgets.
-- [ ] Write failing tests proving `force=false` preserves recent-task reuse and
+- [x] Write failing tests for all five exact task types/scopes/default limits/budgets.
+- [x] Write failing tests proving `force=false` preserves recent-task reuse and
   `force=true` creates a new row; retain Douyin's special retry of a degraded recent task.
-- [ ] Write failing tests proving `incremental=true` writes the backend payload marker and
+- [x] Write failing tests proving `incremental=true` writes the backend payload marker and
   makes Zhihu/Reddit profile-update eligible; `incremental=false` preserves today's payload
   shape exactly.
-- [ ] Write an import-isolation test proving the new module does not load `cli`, Typer,
+- [x] Write an import-isolation test proving the new module does not load `cli`, Typer,
   Click, or Rich.
-- [ ] Move queue/payload/dedupe/budget logic into the new module. Keep environment override
+- [x] Move queue/payload/dedupe/budget logic into the new module. Keep environment override
   behavior and user text through an optional `notify` callback.
-- [ ] Convert each `_enqueue_*_bootstrap_task` into a thin CLI wrapper that resolves the
+- [x] Convert each `_enqueue_*_bootstrap_task` into a thin CLI wrapper that resolves the
   runtime DB, maps `BootstrapEnqueueResult` back to the existing `str | None` return, prints
   the existing messages, and performs the existing kick only after a real task id.
-- [ ] Preserve the guided-init `kick=False -> register ownership -> kick` ordering.
+- [x] Preserve the guided-init `kick=False -> register ownership -> kick` ordering.
 
 ### Acceptance
 
@@ -132,19 +153,19 @@ kick.
 
 ### Steps
 
-- [ ] Write failing normalization tests for missing, malformed, old-version, and unknown
+- [x] Write failing normalization tests for missing, malformed, old-version, and unknown
   state fields.
-- [ ] Write failing cap/recency tests: insert cap+1 evicts the oldest; re-marking a key
+- [x] Write failing cap/recency tests: insert cap+1 evicts the oldest; re-marking a key
   moves it to the newest slot; blanks and duplicates collapse.
-- [ ] Write a concurrent two-writer test using separate threads/managers and assert the
+- [x] Write a concurrent two-writer test using separate threads/managers and assert the
   final state contains both writers' keys.
-- [ ] Implement atomic load/update/serialize using `memory.json_state.update_json_state`.
-- [ ] Change `_mark_source_bootstrap_keys` to one strict atomic mutator. It must raise on
+- [x] Implement atomic load/update/serialize using `memory.json_state.update_json_state`.
+- [x] Change `_mark_source_bootstrap_keys` to one strict atomic mutator. It must raise on
   persistence failure so the surrounding staged terminal remains repairable.
-- [ ] Preserve `_accept_source_profile_events` as the only event write path; do not add a
+- [x] Preserve `_accept_source_profile_events` as the only event write path; do not add a
   same-source lock unless a failing test demonstrates a fact-level duplication that
   deterministic ingress keys do not already prevent.
-- [ ] Update the crash-repair test that currently monkeypatches
+- [x] Update the crash-repair test that currently monkeypatches
   `save_source_bootstrap_state` so it targets the new atomic projection seam.
 
 ### Acceptance
@@ -164,19 +185,19 @@ tests.
 
 ### Steps
 
-- [ ] Add `reddit_bootstrap_item_key()` tests for post, comment, subreddit, user, malformed
+- [x] Add `reddit_bootstrap_item_key()` tests for post, comment, subreddit, user, malformed
   row, stability, and mixed-batch uniqueness.
-- [ ] Add `reddit_tasks` to the shared staged-terminal allowlist.
-- [ ] Give `RedditTaskQueue` the same atomic mutation, `stage_final_result`,
+- [x] Add `reddit_tasks` to the shared staged-terminal allowlist.
+- [x] Give `RedditTaskQueue` the same atomic mutation, `stage_final_result`,
   `complete_staged_result`, immutable-terminal `fail`, and stale-row protections as Zhihu.
-- [ ] Add Reddit to the parameterized first-final-wins and crash-repair suite.
-- [ ] Rewrite `reddit_task_result` to freeze the first final, read canonical accumulated
+- [x] Add Reddit to the parameterized first-final-wins and crash-repair suite.
+- [x] Rewrite `reddit_task_result` to freeze the first final, read canonical accumulated
   items, and for `bootstrap_events` with `profile_update OR incremental` run:
 
   `stable filter -> reddit_items_to_events(import_source="reddit_bootstrap_events") -> _accept_source_profile_events(generic_owner=not init_busy) -> strict atomic key mark -> complete_staged_result`.
 
-- [ ] Preserve plain guided-init/fetch behavior when neither payload flag is present.
-- [ ] Test `N` old + `M` new rows, repeated callback, changed retry payload, ingress failure,
+- [x] Preserve plain guided-init/fetch behavior when neither payload flag is present.
+- [x] Test `N` old + `M` new rows, repeated callback, changed retry payload, ingress failure,
   state-checkpoint failure, and terminal-flip failure.
 
 ### Acceptance
@@ -196,11 +217,11 @@ tests.
 
 ### Steps
 
-- [ ] Add the six config fields from Spec I12 with one shared optional-int normalizer.
+- [x] Add the six config fields from Spec I12 with one shared optional-int normalizer.
   Load, save, env/config filtering, typed API output, API update validation, and round-trip
   behavior must agree. Replace the current “other branch unknown key” regression with the
   new known-key contract while retaining a different unknown-key regression.
-- [ ] Add fake-clock scheduler tests before implementation:
+- [x] Add fake-clock scheduler tests before implementation:
   - due vs not due;
   - global and per-source `0` disable;
   - source-enabled gate;
@@ -213,11 +234,11 @@ tests.
   - crash-window adoption of an unrecorded `incremental=true` DB task;
   - corrupt state/timestamp recovery;
   - in-process kick only for a created task and kick failure fallback.
-- [ ] Implement an async `SourceIncrementalSync.tick()` that offloads synchronous DB/state
+- [x] Implement an async `SourceIncrementalSync.tick()` that offloads synchronous DB/state
   work and awaits an injected async kick callback.
-- [ ] Use task tables as active-work truth. Persist cursor, last attempt, and active task in
+- [x] Use task tables as active-work truth. Persist cursor, last attempt, and active task in
   the normalized `source_incremental` state block.
-- [ ] Enqueue only one selected source with `force=true, incremental=true`.
+- [x] Enqueue only one selected source with `force=true, incremental=true`.
 
 ### Acceptance
 
@@ -235,23 +256,23 @@ tests.
 
 ### Steps
 
-- [ ] Add `source_incremental_sync` as an optional controller dependency and an independent
+- [x] Add `source_incremental_sync` as an optional controller dependency and an independent
   loop. It must not be inside the LLM gate, but must honor scheduler enabled, profile
   readiness, and init-active checks.
-- [ ] Construct the scheduler in `RuntimeContext` with the current DB, memory manager,
+- [x] Construct the scheduler in `RuntimeContext` with the current DB, memory manager,
   presence tracker, source-enabled map, scheduler config, and an async `EventHub.publish`
   kick. Do not capture an event loop in a worker-thread closure.
-- [ ] Include the loop in the existing `run_forever` task group so current cancellation and
+- [x] Include the loop in the existing `run_forever` task group so current cancellation and
   hot-reload ownership remain single-owner.
-- [ ] After a guided-init collector returns a genuinely successful `ok` or successful-empty
+- [x] After a guided-init collector returns a genuinely successful `ok` or successful-empty
   terminal, atomically seed that platform's `last_attempt_at`. Do not seed failed,
   login-required, timeout, degraded, or skipped results. Add explicit tests for the chosen
   empty-result rule per platform; ambiguous unauthenticated empties must not be labelled
   successful without evidence.
-- [ ] Confirm guided init sets source enabled before the runtime can schedule, and that
+- [x] Confirm guided init sets source enabled before the runtime can schedule, and that
   init-active/profile-ready gates prevent overlap.
-- [ ] Document the extension-online constraint and interval fields in `config.example.toml`.
-- [ ] Add hot-reload tests proving a config change replaces interval/source policy and only
+- [x] Document the extension-online constraint and interval fields in `config.example.toml`.
+- [x] Add hot-reload tests proving a config change replaces interval/source policy and only
   one scheduler loop remains.
 
 ### Acceptance
@@ -268,15 +289,15 @@ tests.
 
 ### Review checklist
 
-- [ ] Compare every changed handler against current XHS staged-terminal ordering.
-- [ ] Audit retry boundaries: canonical stage, ingress, state checkpoint, terminal flip.
-- [ ] Audit task active-state races and crash windows.
-- [ ] Audit init ownership, generic owner metadata, and no direct pipeline calls.
-- [ ] Audit payload parity and Douyin degraded behavior.
-- [ ] Audit config load/save/API/hot-reload consistency.
-- [ ] Run `git diff --check`, search for `source_incremental`, `incremental`, direct
+- [x] Compare every changed handler against current XHS staged-terminal ordering.
+- [x] Audit retry boundaries: canonical stage, ingress, state checkpoint, terminal flip.
+- [x] Audit task active-state races and crash windows.
+- [x] Audit init ownership, generic owner metadata, and no direct pipeline calls.
+- [x] Audit payload parity and Douyin degraded behavior.
+- [x] Audit config load/save/API/hot-reload consistency.
+- [x] Run `git diff --check`, search for `source_incremental`, `incremental`, direct
   `propagate_event`, localhost `8420`, and unexpected CLI imports.
-- [ ] Fix every confirmed finding and add a regression test before proceeding.
+- [x] Fix every confirmed finding and add a regression test before proceeding.
 
 ### Acceptance
 
@@ -290,16 +311,16 @@ tests.
 
 ### Steps
 
-- [ ] Update module implemented-feature and public-API sections for runtime, extension,
+- [x] Update module implemented-feature and public-API sections for runtime, extension,
   config, API, init, and memory.
-- [ ] Add one concise bullet under the current `docs/changelog.md` version block; do not
+- [x] Add one concise bullet under the current `docs/changelog.md` version block; do not
   create a release or edit README release highlights.
-- [ ] Update all four architecture surfaces (`docs/architecture.md`, `docs/spec.md` §3,
+- [x] Update all four architecture surfaces (`docs/architecture.md`, `docs/spec.md` §3,
   README CN, README EN) with the new extension account-refresh loop and durable ingress.
-- [ ] Keep README diagrams semantically identical across languages.
-- [ ] Ensure docs say “extension-online periodic re-pull”, never “background/browser-free
+- [x] Keep README diagrams semantically identical across languages.
+- [x] Ensure docs say “extension-online periodic re-pull”, never “background/browser-free
   account sync”.
-- [ ] Document state keys, cap, intervals, per-source disable, init behavior, and failure
+- [x] Document state keys, cap, intervals, per-source disable, init behavior, and failure
   retry semantics.
 
 ### Acceptance

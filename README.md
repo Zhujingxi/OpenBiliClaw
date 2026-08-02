@@ -662,6 +662,8 @@ background ─ background admission (default 3) ──────┘
 │ /api/saved/* · 保存 Router · B 站原生保存 Adapter      │
 │ 六平台 Adapter → ExtensionNativeSaveBroker → extension_native_save_jobs │
 │ 六平台 source task multiplex：xhs / dy / yt / x / zhihu / reddit       │
+│ 扩展在线周期回拉：Runtime → 五源 bootstrap task（全局串行）→ installed extension │
+│ task-result → staged durable ingress → 原子有界 seen keys（每源5000）→ terminal │
 │ XHS 自动任务：来源/调度领取门 → SQLite 节流/风控冷却 → 关闭或限流时不开新 tab │
 │ extension_native_save_jobs -> /api/sources/<slug>/next-task -> installed extension │
 │ exact OpenBiliClaw / YouTube Watch Later 目标 → 安全 task-result          │
@@ -728,7 +730,7 @@ durable turn → 固定时间/payload → 确认入口（待聊列表/卡片） 
 
 发现之后的统一流程：
 
-- **安全取数** — 后端不代登录、不爬你看不到的内容；所有平台复用你浏览器里已有的登录会话，首轮画像信号只在你点「开始初始化」后按所选来源拉取。
+- **安全取数** — 后端不代登录、不爬你看不到的内容；所有平台复用你浏览器里已有的登录会话，首轮画像信号只在你点「开始初始化」后按所选来源拉取。画像完成后，已启用的小红书、抖音、YouTube、知乎和 Reddit 也只在扩展在线时按配置周期回拉。
 - **连续统一评估** — 各来源原始候选进入同一待评估池，默认 3×30 worker 任一完成即补位；调度只计可用、待文案与已评估 durable 库存，串行 admission 按实时 headroom 封顶，raw 不会虚增库存。
 - **多样性选择** — 平台配额 → 主题去重 → 风格均衡 → 跨平台混排 → 数量封顶；开箱只启用 B 站，其余平台在设置里显式打开。
 

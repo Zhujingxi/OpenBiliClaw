@@ -10,7 +10,7 @@
 - 推荐池 `content_cache` 的可换 / raw / pending 计数口径。
 - discovery 待评估池 `discovery_candidates` 的生命周期管理。
 - 跨平台收藏 / 稍后再看的 canonical 本地 membership、元数据快照、native sync 状态和独立任务快照持久化。
-- 事件入口幂等回执，以及小红书 / 抖音 / YouTube / 知乎来源任务首个终态结果的 crash-safe staging。
+- 事件入口幂等回执，以及小红书 / 抖音 / YouTube / 知乎 / Reddit 来源任务首个终态结果的 crash-safe staging。
 
 ## 已实现功能
 
@@ -24,7 +24,7 @@
 | Database facade 跨线程连接隔离 | ✅ | 长生命周期 `Database` 不再把同一条 `check_same_thread=False` 连接同时交给 API event-loop、status reader 与后台 worker；初始化线程保留 primary，其它调用线程各自缓存一条 WAL connection，同一普通 facade 方法在主线程/worker 都保持既有 `foreign_keys=OFF` 语义，只有显式 `open_connection()` 的原子短事务继续 `foreign_keys=ON`。并发写由 SQLite WAL + `busy_timeout` 串行，不用会卡住 event loop 的 process-wide mutex；`_execute_write()` / `_execute_many_write()` 在任何 `OperationalError` 后先 rollback 清理隐式事务，再决定 lock retry 或原样抛出。线程连接会长期复用，因此绕过 helper 的 direct DML 也必须在每次成功 execute 后 commit（即使 `rowcount=0`，SQLite 仍可能已开启隐式写事务），异常则 rollback；XHS token backfill 与 self-info purge 已按该契约收口。`close()` 先排空 facade 自有 worker，再关闭 registry 内全部连接。 |
 | 实时事件并发写隔离 | ✅ | `insert_event()` 不再让 API、账号同步和后台任务跨线程共享 process-wide SQLite 隐式事务；每条事件使用独立短连接，把 event、`seen_items` 与 backfill cursor 在同一事务提交，锁冲突按既有有界策略重试，退出必关闭连接。这样不会再由其它线程的 commit/rollback 触发 `cannot commit - no transaction is active`。 |
 | Durable event ingress 回执 | ✅ | `events.ingest_key TEXT NOT NULL DEFAULT ''` 由旧库迁移幂等补列；`idx_events_ingest_key_unique` 只约束 `ingest_key <> ''`，因此无幂等键的 legacy/internal direct 写入仍保持 append-only。公开 HTTP 边界更严格：`/api/events` 每项 `event_id`、`/api/feedback` 与 `/api/recommendation-click` 的 `request_id` 都先 trim，再要求 1–400 字符；缺失/空白/超长在 route 前 422，不能产生 event、`seen_items` 或 recommendation 投影。CLI feedback 省略 ID 时生成并回显，OpenClaw CLI/skill 必填；这些边界不会把空 key 传到 storage。`EventIngressService` 把非空客户端键规范为 `producer:client_key`（总长 ≤512），逐项拒绝非法输入，再由 `MemoryManager.persist_events_with_receipts()` / `Database.insert_events_with_receipts()` 在一个独立短连接事务中提交全部合法项、同步 `seen_items` 与 cursor，并按原输入位置返回稳定 `event_id / inserted / duplicate`。并发重放只有首写成功，后续回执指回首写行；commit 后的 owner wake 只是延迟提示，失败不会撤销 durable fact。 |
-| 四来源 staged canonical task result | ✅ | `XhsTaskQueue` / `DyTaskQueue` / `YtTaskQueue` / `ZhihuTaskQueue` 共用 `sources.task_result_protocol`：`stage_final_result()` 在 `BEGIN IMMEDIATE` 下把首个 final callback 合并进 `result_json` 并写 `_openbiliclaw_terminal_status`，此时数据库 `status` 刻意保持非终态，普通 claim lease 仍可在请求 5xx / 进程崩溃后回收。marker 已存在即返回冻结结果，晚到 partial / final / failure（以及 XHS rate-limit）均不得改写。调用方只从冻结行重放 durable event ingress、来源投影与严格 bootstrap seen-key checkpoint；全部成功后 `complete_staged_result()` 才原子翻成 `completed`，且不替换 `result_json`。这些步骤是可重放的多次短事务，不宣称跨表原子；任一点崩溃都由下一次 lease reclaim 从首个 canonical result 修复。 |
+| 五来源 staged canonical task result | ✅ | `XhsTaskQueue` / `DyTaskQueue` / `YtTaskQueue` / `ZhihuTaskQueue` / `RedditTaskQueue` 共用 `sources.task_result_protocol`：`stage_final_result()` 在 `BEGIN IMMEDIATE` 下把首个 final callback 合并进 `result_json` 并写 `_openbiliclaw_terminal_status`，此时数据库 `status` 刻意保持非终态，普通 claim lease 仍可在请求 5xx / 进程崩溃后回收。marker 已存在即返回冻结结果，晚到 partial / final / failure（以及 XHS rate-limit）均不得改写。调用方只从冻结行重放 durable event ingress、来源投影与严格 bootstrap seen-key checkpoint；全部成功后 `complete_staged_result()` 才原子翻成 `completed`，且不替换 `result_json`。这些步骤是可重放的多次短事务，不宣称跨表原子；任一点崩溃都由下一次 lease reclaim 从首个 canonical result 修复。 |
 | 画像更新台账（`profile_update_ledger`，v0.3.174+） | ✅ | 认知画像流水线 Phase 0 的**只追加审计表**。`insert_profile_ledger(*, write_point, source, before_summary, after_summary, diff, source_refs, outcome, turn_id, gate_verdict, held_id, error, effect_key='')` 在动作结束后追加一行（`outcome=success\|failed`，`source_refs` JSON 编码）；空 `effect_key` 保持普通 append，结算 worker 传入固定形状 `dialogue:<ref-sha256>:ledger` / `dialogue:<ref-sha256>:derived:<content-sha256>` 时由 partial unique index + `INSERT OR IGNORE` 保证 observer effect 至多一行。`query_profile_ledger(*, days=30, write_point='', limit=200)` 按时间窗 + 写点过滤返回（newest-first，`source_refs` 解码回列表，并带回 `effect_key`）。其余字段：`write_point`、`source`、before/after 摘要、`diff`（≤2000 字符）、`turn_id`、`gate_verdict`、`held_id`。fresh schema + 旧库 `_ensure_profile_update_ledger_table()` 会幂等补列和索引。写点挂钩清单见 `docs/modules/soul.md`。 |
 | Durable chat payload + 单 worker 对象结算收据（v0.3.182+） | ✅ | `chat_turns.payload` 承载结构化卡片/疑惑提问，列表以 `(created_at,rowid)` 稳定排序。`create_chat_confirmation_turn()` 在 `BEGIN IMMEDIATE` 内先查 `attached_to_turn_id`、再查 `(ref,session)`、最后插入 completed turn，保证并发 open 与“卡片先于用户消息”crash gap 均不重复；跨 session 各自产 turn。卡片 discussion payload 只保存 `state`：worker 直接执行 `pending→discussing`，建锚失败补偿回 `pending`，GET 提交的 reconcile 会校正无活锚 orphan；没有 `attempt_token/discussing_at`、三段 discuss CAS 或 stale scanner。`card_settlements` 只保存 hypothesis/confusion/speculation 的 immutable winner `payload`、`applied/result`、稳定 `event_id` 与时间戳，不再保存 claim lease/token 或三段 CAS。`_migrate_card_settlements_to_wave_2()` 以 table rebuild 保留最早表与旧 claim 表的 winner；旧 `seg_event=1` 或 `applied=1` 仅在 migration 中映射为已记录 event identity，runtime schema 不再暴露这些列。`record_card_settlement_event_once()` 在一个 `BEGIN IMMEDIATE` 事务内插入 event 并标记 receipt；`complete_card_settlement()` 无 token，`project_applied_card_settlement()` 仍只消费 `applied=1` 并批量刷新所有 session。`applied=1` 是对象语义终点：显式同 ref retry 只补跑 ledger observer、projection 与精确 generation 解锚，不再重做 object/derived/rebuild。进程内 `DialogueSettlementQueue` 不落这层 job/inbox 表，重启恢复依赖显式 action 重试或 GET reconcile。 |
 | Turn relation + immutable binding（2026-08-01） | ✅ | `chat_turns.reply_to_turn_id TEXT NOT NULL DEFAULT ''` 与普通索引采用 additive、幂等迁移；旧行保持空 relation。API 在 capture canonical target 后同步写 user row，`payload.dialogue_binding` 只保存 server-owned `bound/ordinary/detached` binding 与完整 digest；客户端同名事实不会直接写入。context preview 是只读查询，retry 比较已存 normalized request，避免同 turn id 改 target、message 或 generation。 |
@@ -90,7 +90,7 @@ assert first.duplicate is False
 
 数据库保留空 `ingest_key` 只为旧库迁移、历史 append-only 调用与不暴露重试语义的内部 direct writer；它不是公开客户端的“可选幂等”契约。新增用户动作入口必须在进入 storage 前取得稳定非空 ID，并为同一动作的响应丢失/网络重试复用该 ID。
 
-### 四来源任务结果 staging
+### 五来源任务结果 staging
 
 ```python
 canonical = xhs_queue.stage_final_result(
@@ -103,7 +103,7 @@ canonical = xhs_queue.stage_final_result(
 xhs_queue.complete_staged_result(task_id)
 ```
 
-上述协议适用于 `XhsTaskQueue`、`DyTaskQueue`、`YtTaskQueue` 与 `ZhihuTaskQueue`。`stage_final_result()` 的首写 winner 是逻辑终态，但仍可由原 claim lease 回收；`complete_staged_result()` 只允许存在 staged marker 的非失败任务翻成 `completed`。业务层不得在两者之间信任重试 callback 的新字段，也不得先翻 terminal 再做事件或 seen-key 投影，否则中途崩溃将失去自动修复入口。
+上述协议适用于 `XhsTaskQueue`、`DyTaskQueue`、`YtTaskQueue`、`ZhihuTaskQueue` 与 `RedditTaskQueue`。`stage_final_result()` 的首写 winner 是逻辑终态，但仍可由原 claim lease 回收；`complete_staged_result()` 只允许存在 staged marker 的非失败任务翻成 `completed`。业务层不得在两者之间信任重试 callback 的新字段，也不得先翻 terminal 再做事件或 seen-key 投影，否则中途崩溃将失去自动修复入口。
 
 ### Durable chat reply 状态
 

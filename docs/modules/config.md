@@ -746,12 +746,18 @@ TOML 与显式环境变量覆盖在构造 `SchedulerConfig` 前统一归一为�
 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
-| `enabled` | bool | `true` | 后台 LLM / embedding 工作总开关；插件设置页显示为「停止后台 LLM 请求」。关闭后 runtime 的刷新、补池预计算、账户同步、猜测兴趣和主动推送等 daemon-owned 后台任务都会跳过；手动 CLI / API 请求仍按显式操作执行。若候选池为空，推荐页可能暂时没有内容 |
+| `enabled` | bool | `true` | daemon 后台调度总开关；插件设置页显示为「停止后台 LLM 请求」。关闭后 runtime 的刷新、补池预计算、账户同步、猜测兴趣、主动推送和五源扩展账号周期回拉都会跳过；手动 CLI / API 请求仍按显式操作执行。若候选池为空，推荐页可能暂时没有内容 |
 | `pause_on_extension_disconnect` | bool | `false` | 开启后，daemon-owned 后台 LLM / embedding 工作只在浏览器插件有 `/api/runtime-stream` 连接、或刚断开仍处于宽限窗口内时运行；离线期间不会自动补新内容 |
 | `extension_disconnect_grace_seconds` | int | `90` | 插件最后一个 `runtime-stream` 连接断开后的宽限秒数；小于等于 0 或无法解析时回退到 `90` |
 | `discovery_cron` | string | `"0 */8 * * *"` | 兼容旧配置的保留字段；当前 runtime 不消费这个 cron，发现补池由轮询、候选池缺口、行为阈值和下方策略间隔驱动。插件与桌面 Web 设置页均不再暴露该字段，只能通过手改 `config.toml` 保留 |
 | `pool_target_count` | int | `300` | 前端真实可换候选目标；允许范围 `1..600`。`count_pool_candidates()`（含预生成 / 分类 / 可打开 / 最近看过过滤 / topic window）达到目标时 refresh（含 `force_refresh`）返回 `pool_at_cap` 不再 discover；后台定时 refresh 采用约 90% 的低水位，略低于目标时不立即跑 discovery，等库存真正低于水位再补货。raw 素材库存由独立 raw ceiling `max(pool_target_count * 2, pool_target_count + 120)` 控制，不再被压成与可换目标相同 |
 | `account_sync_interval_hours` | int | `6` | 账户侧长期信号同步间隔；运行时会低频拉取 history / favorites / following |
+| `source_incremental_hours` | int | `24` | 已安装扩展在线时，XHS / 抖音 / YouTube / 知乎 / Reddit 账号 bootstrap 信号的全局周期（小时），范围 `0..168`；`0` 关闭五源周期回拉。它复用浏览器登录态，不是无浏览器后台同步 |
+| `xhs_incremental_hours` | int 或 null | `null` | 小红书周期覆盖；缺省 / `null` 继承全局，`0` 只关闭小红书，范围 `0..168` |
+| `douyin_incremental_hours` | int 或 null | `null` | 抖音周期覆盖；缺省 / `null` 继承全局，`0` 只关闭抖音，范围 `0..168` |
+| `youtube_incremental_hours` | int 或 null | `null` | YouTube 周期覆盖；缺省 / `null` 继承全局，`0` 只关闭 YouTube，范围 `0..168` |
+| `zhihu_incremental_hours` | int 或 null | `null` | 知乎周期覆盖；缺省 / `null` 继承全局，`0` 只关闭知乎，范围 `0..168` |
+| `reddit_incremental_hours` | int 或 null | `null` | Reddit 周期覆盖；缺省 / `null` 继承全局，`0` 只关闭 Reddit，范围 `0..168` |
 | `refresh_check_interval_seconds` | int | `60` | `ContinuousRefreshController` 主循环轮询间隔；小于 `15` 或无法解析时回退默认值 |
 | `signal_event_threshold` | int | `6` | 累计多少条新行为事件后触发 `search + related_chain` 补池；小于 `1` 时回退默认值 |
 | `trending_refresh_minutes` | int | `3` | `trending` 策略的最小刷新间隔（分钟）；小于 `1` 时回退默认值。**v0.3.186 起单位由小时改为分钟**并与各来源 producer 的 `min_interval_minutes` 对齐；旧配置里的 `trending_refresh_hours` 仍会被读取并按 ×60 换算（`3` 小时 → `180` 分钟），保存后写回新键 |
@@ -788,6 +794,8 @@ TOML 与显式环境变量覆盖在构造 `SchedulerConfig` 前统一归一为�
 > 即使 `pool_target_count` 设得较高，单次 refresh 里的 discover wave 也由 `discovery_limit` 控制（默认 `30`，最大 `60`），避免一次性把全部缺口都打满。
 > 后台 refresh 还会使用约 90% 的可换池低水位；池子只是轻微低于 `pool_target_count` 时不跑 discovery。B 站完整四策略补货在小缺口阶段优先只给 `search + related_chain` 预算，`trending/explore` 延后到更深缺口。
 > `pause_on_extension_disconnect` 只约束后端 daemon 自己发起的后台 LLM / embedding 工作；用户手动点击刷新、CLI 显式命令、配置保存和普通读取接口不因为插件离线而被拦截。`runtime-stream` 连接断开由后端 receive-side detector 记录，浏览器 idle disconnect 后不会让 presence 状态卡住。
+>
+> 五源账号周期回拉始终直接检查扩展 presence，不受 `pause_on_extension_disconnect` 的默认值影响。逐源字段在 TOML 中应省略以继承；`config.example.toml` 只把它们作为注释示例。`PUT /api/config` 可用 JSON `null` 恢复继承；设置页热重载后新 scheduler 立即采用新周期，但不会越过已有五源 active task。
 
 ### `[scheduler.pool_source_shares]`
 
@@ -1023,6 +1031,12 @@ OpenAI-compatible 协议没有列举 reasoning effort 能力的标准接口；�
 | `OPENBILICLAW_PROXY_PORT` | Docker 运行时可选宿主机代理端口，默认 `7897` |
 | `OPENBILICLAW_PROXY_TIMEOUT` | Docker 运行时代理探测超时（秒），默认 `1.0` |
 | `OPENBILICLAW_DOUYIN_COOKIE` | 抖音 direct-cookie discovery 的显式 Cookie 覆盖；未设置时读取扩展同步的 `data/douyin_cookie.json` |
+| `OPENBILICLAW_SCHEDULER_SOURCE_INCREMENTAL_HOURS` | 覆盖五源扩展在线周期回拉的全局小时数（`0..168`） |
+| `OPENBILICLAW_SCHEDULER_XHS_INCREMENTAL_HOURS` | 覆盖小红书周期；空值按未覆盖处理，`0` 只关闭该源 |
+| `OPENBILICLAW_SCHEDULER_DOUYIN_INCREMENTAL_HOURS` | 覆盖抖音周期；空值按未覆盖处理，`0` 只关闭该源 |
+| `OPENBILICLAW_SCHEDULER_YOUTUBE_INCREMENTAL_HOURS` | 覆盖 YouTube 周期；空值按未覆盖处理，`0` 只关闭该源 |
+| `OPENBILICLAW_SCHEDULER_ZHIHU_INCREMENTAL_HOURS` | 覆盖知乎周期；空值按未覆盖处理，`0` 只关闭该源 |
+| `OPENBILICLAW_SCHEDULER_REDDIT_INCREMENTAL_HOURS` | 覆盖 Reddit 周期；空值按未覆盖处理，`0` 只关闭该源 |
 | `OPENBILICLAW_API_AUTH_ENABLED` | 覆盖 `[api.auth].enabled`（局域网密码门禁总开关） |
 | `OPENBILICLAW_API_AUTH_PASSWORD` | 明文访问密码；启动时即 scrypt hash，优先于 `_PASSWORD_HASH`（适合 Docker / 多 worker 注入同一密码） |
 | `OPENBILICLAW_API_AUTH_PASSWORD_HASH` | 预生成的 scrypt 密码哈希；覆盖 `[api.auth].password_hash` |

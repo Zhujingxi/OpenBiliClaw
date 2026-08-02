@@ -659,6 +659,8 @@ images: proxy foreground + refresh prefetch → app-stable lane (total 4 / bg 3,
 │ /api/saved/* · router · Bilibili native save      │
 │ Six adapters → ExtensionNativeSaveBroker → extension_native_save_jobs │
 │ six-platform source task multiplex: xhs / dy / yt / x / zhihu / reddit │
+│ Extension-online periodic re-pull: Runtime → five bootstrap tasks (global serial) → installed extension │
+│ task-result → staged durable ingress → atomic bounded seen keys (5,000/source) → terminal │
 │ XHS auto tasks: source/scheduler gate → SQLite pacing/breaker → no new tab while off/limited │
 │ extension_native_save_jobs -> /api/sources/<slug>/next-task -> installed extension │
 │ exact OpenBiliClaw / YouTube Watch Later targets → safe task-result    │
@@ -730,7 +732,7 @@ localhost-only. The two edges are mutually exclusive, and the default HTTP path 
 
 What happens after discovery:
 
-- **Safe fetching** — the backend never logs in for you and never crawls content you can't see; every platform reuses the sessions already in your browser, and first-run profile signals are pulled only after you click "Start initialization".
+- **Safe fetching** — the backend never logs in for you and never crawls content you can't see; every platform reuses the sessions already in your browser, and first-run profile signals are pulled only after you click "Start initialization." Once the profile exists, enabled XHS, Douyin, YouTube, Zhihu, and Reddit account signals are re-pulled on schedule only while the extension is online.
 - **Continuous unified evaluation** — raw candidates share one eval pool with 3×30 immediate-refill workers; scheduling counts only available, copy-pending, and evaluated durable stock, while serial admission is capped by current headroom.
 - **Diversity selection** — platform quotas → topic dedup → style balancing → cross-platform interleaving → count caps; only Bilibili is enabled out of the box, other platforms are switched on in settings.
 

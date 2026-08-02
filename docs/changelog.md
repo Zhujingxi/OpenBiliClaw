@@ -12,6 +12,12 @@
 
 ## v0.3.192：多模态推荐、可靠反馈与连接增强（2026-08-03）
 
+### 扩展在线账号信号刷新
+
+- **五个浏览器账号来源支持周期增量回拉**：画像就绪且 installed extension 在线时，runtime 默认每 24 小时按持久 round-robin 复用小红书、抖音、YouTube、知乎和 Reddit 的既有 bootstrap scope；五源任务全局串行，扩展离线、guided init 活跃、来源/调度关闭或周期为 0 时零入队、零时间推进。全局与逐源 `0..168` 小时配置支持热重载和逐源 `null` 继承；成功 init 会种下最近 attempt，失败留给后续在线 tick 自愈。
+- **五源 task-result 统一崩溃恢复和有界去重**：Reddit 加入 XHS / 抖音 / YouTube / 知乎的 first-final-wins staged 协议，按 canonical result → durable event ingress → 原子 seen-key checkpoint → terminal flip 执行；任一窗口失败都由租约重领从首写修复。五源 seen key 按真实响应顺序各保留最新 5,000 个，Reddit post/comment/subreddit/user 使用分型稳定身份，重复周期回拉不会重复写事件。
+- **独立审查收紧并发与初始化边界**：runtime / CLI / guided init 共用 SQLite `BEGIN IMMEDIATE` admission transaction，五表 active scan 与 insert 在跨 facade / 进程场景也保持单飞，`force` 不绕过；崩溃窗口收养同步任务创建时间与 cursor，非法无时区 / 未来时间戳按到期自愈。`POST /api/init` 在来源 opt-in 热重载前先持久预定 run，新旧 controller 都看得到 init fence；Reddit 扩展与后端同时拒绝把 parent post ID、短 post URL 或仅标题社区行误作 comment/community identity。
+
 ### 多模态推荐与高级配置
 
 - **完整视觉 embedding pipeline**：视觉画像（P1）与关键帧（P3）使用带 cross-clean、contested 区和冷启动门控的 margin 几何评分；关键帧单独开启时也会构建质心，P1 cover bonus 仍由 `visual_profile_enabled` 控制。

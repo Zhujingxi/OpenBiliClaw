@@ -231,9 +231,11 @@ config recovery control plane (normal or degraded; business APIs stay gated)
                 ├─ draft → /api/config/probe-service → temporary registry → total gate
                 └─ draft → /api/config/discover-models → exact instance GET /models
                           → editable model list + local effort advisory (no config write)
-XHS/DY/YT/Zhihu task final: canonical staged result → durable event receipt → verified seen-key → terminal flip
-                          stale lease reclaim replays first write; staged row rejects late mutation
-                          Reddit task-result is not migrated by this protocol change
+XHS/DY/YT/Zhihu/Reddit task final: canonical staged result → durable event receipt
+                                 → atomic bounded seen-key → terminal flip
+                                 stale lease reclaim replays first write; staged row rejects late mutation
+extension-online periodic re-pull: presence + profile/init/config gates → persisted round-robin
+                                 → one active bootstrap across five task tables → EventHub → extension
 
 cover images: proxy foreground ─┐
               refresh prefetch ─┴→ app-stable coordinator(total 4 / bg 3, fg priority)
@@ -426,6 +428,8 @@ trusted LAN ─ HTTPS（可选）──→ TLS Proxy :8443 ─ loopback/Compose 
 │  │     Pool readiness: servable/raw/pending 统一库存口径       │   │
 │  │     Atomic maintenance: canonical protected -> topic/source/raw -> invariant/rollback │ │
 │  │     Source bootstrap seen-key guard -> Memory/Profile      │   │
+│  │     Extension-online re-pull -> five bootstrap tables (global serial) -> installed extension │ │
+│  │       -> staged durable ingress -> atomic seen keys (5000/source) -> terminal │ │
 │  │     Profile overrides overlay: 用户编辑 -> profile_overrides.json │ │
 │  │       -> get_profile()/sync_profile_files 读时叠加（抗画像重建）│ │
 │  └──────────────────────────────────────────────────────┘   │
