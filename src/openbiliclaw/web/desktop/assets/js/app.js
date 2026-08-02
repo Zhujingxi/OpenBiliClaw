@@ -7715,7 +7715,7 @@ ${cardFeedbackBarHtml()}`;
       setInput("speculationMaxSecondary", scheduler.speculation_max_secondary_interests);
 
       const discovery = config.discovery || {};
-      setSelect("keywordGenerationMode", discovery.keyword_generation_mode || "legacy");
+      setSelect("keywordGenerationMode", discovery.keyword_generation_mode || "hybrid");
       const multimodalEvaluation = $("#multimodalEvaluationEnabled");
       if (multimodalEvaluation) multimodalEvaluation.checked = discovery.multimodal_evaluation_enabled === true;
       setInput("candidateEvalConcurrency", discovery.candidate_eval_concurrency ?? 3);

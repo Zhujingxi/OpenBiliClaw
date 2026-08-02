@@ -551,6 +551,15 @@ test("advanced settings keep recommendation signals together and preserve disabl
     assert.equal((popupHtml.match(new RegExp(`id="${id}"`, "g")) ?? []).length, 1, `${id} duplicate`);
   }
   for (const id of [
+    "cfgVisualProfileEnabled",
+    "cfgKeyframeEnabled",
+    "cfgEmbeddingMultimodalEnabled",
+    "cfgMultimodalEvaluationEnabled",
+  ]) {
+    const control = advancedPanel.match(new RegExp(`id="${id}"[^>]*>`))?.[0] ?? "";
+    assert.doesNotMatch(control, /checked/, `${id} must default off`);
+  }
+  for (const id of [
     "cfgKeywordGenerationMode",
     "cfgCandidateEvalConcurrency",
     "cfgMultimodalEvaluationEnabled",
@@ -920,7 +929,7 @@ test("settings page wires the keyword generation mode selector (matches desktop 
   // Select + the three options — values/labels byte-identical to desktop web.
   assert.match(popupHtml, /id="cfgKeywordGenerationMode"/);
   assert.match(popupHtml, /<option value="legacy">经典<\/option>/);
-  assert.match(popupHtml, /<option value="hybrid">混合<\/option>/);
+  assert.match(popupHtml, /<option value="hybrid" selected>混合<\/option>/);
   assert.match(popupHtml, /<option value="inspiration">灵感<\/option>/);
   // Cost hint conveys 混合最贵.
   assert.match(popupHtml, /混合最贵/);
@@ -928,7 +937,7 @@ test("settings page wires the keyword generation mode selector (matches desktop 
   // Load fills the select from the derived discovery field.
   assert.match(
     popupJs,
-    /setVal\("cfgKeywordGenerationMode", cfg\.discovery\?\.keyword_generation_mode \|\| "legacy"\)/,
+    /setVal\("cfgKeywordGenerationMode", cfg\.discovery\?\.keyword_generation_mode \|\| "hybrid"\)/,
   );
 
   // Save collects it into the discovery payload AFTER the snapshot spread, so a

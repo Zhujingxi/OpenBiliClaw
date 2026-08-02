@@ -2066,7 +2066,7 @@ class DiscoveryConfigOut(BaseModel):
     # Read-only UI/API-derived enum over the two canonical DiscoveryConfig
     # booleans (inspiration_search_enabled / inspiration_replace_merged_keywords).
     # Not a config.toml field — the two booleans stay the single source of truth.
-    keyword_generation_mode: Literal["legacy", "hybrid", "inspiration"] = "legacy"
+    keyword_generation_mode: Literal["legacy", "hybrid", "inspiration"] = "hybrid"
 
 
 class BackendUpdateStatusOut(BaseModel):

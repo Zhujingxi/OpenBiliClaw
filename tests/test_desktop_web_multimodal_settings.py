@@ -29,7 +29,7 @@ def test_desktop_web_settings_wires_multimodal_discovery_controls() -> None:
     )
     assert "const discovery = config.discovery || {}" in js
     assert 'setInput("candidateEvalConcurrency", discovery.candidate_eval_concurrency ?? 3)' in js
-    assert 'multimodalEvaluation.checked = discovery.multimodal_evaluation_enabled === true' in js
+    assert "multimodalEvaluation.checked = discovery.multimodal_evaluation_enabled === true" in js
     assert 'setInput("multimodalBatchSize", discovery.multimodal_batch_size ?? 8)' in js
     assert "discovery: {" in js
     assert 'candidate_eval_concurrency: getIntInput("candidateEvalConcurrency", 3)' in js
@@ -74,6 +74,16 @@ def test_desktop_advanced_panel_owns_all_moved_controls_and_recommendation_field
     ):
         assert advanced_html.count(f'id="{element_id}"') == 1
         assert html.count(f'id="{element_id}"') == 1
+
+    for element_id in (
+        "visualProfileEnabled",
+        "keyframeEnabled",
+        "embeddingMultimodalEnabled",
+        "multimodalEvaluationEnabled",
+    ):
+        control = re.search(rf'id="{element_id}"[^>]*>', advanced_html)
+        assert control is not None
+        assert "checked" not in control.group(0)
 
     assert 'id="embeddingMultimodalEnabled"' not in models_html
     for element_id in (
@@ -128,7 +138,7 @@ def test_desktop_settings_tabs_have_tabpanel_contract_and_advanced_registration(
     assert '"advanced"' in js
     assert 'tab.setAttribute("aria-selected", isActive ? "true" : "false")' in js
     assert "tab.tabIndex = isActive ? 0 : -1" in js
-    assert "tab.addEventListener(\"click\"" in js
+    assert 'tab.addEventListener("click"' in js
     assert ".settings-tab:focus-visible" in css
     assert "grid-template-columns: repeat(7, minmax(0, 1fr))" in css
     assert "grid-template-columns: repeat(7, minmax(92px, 1fr))" in css
@@ -142,11 +152,11 @@ def test_desktop_advanced_discovery_fields_load_and_save_after_snapshot_spread()
     spread_index = js.index(spread)
 
     for load_snippet in (
-        'visualProfile.checked = discovery.visual_profile_enabled === true',
-        'keyframe.checked = discovery.keyframe_enabled === true',
+        "visualProfile.checked = discovery.visual_profile_enabled === true",
+        "keyframe.checked = discovery.keyframe_enabled === true",
         'setInput("keyframeMaxFrames", discovery.keyframe_max_frames ?? 4)',
         'setInput("keyframeFetchLimit", discovery.keyframe_fetch_limit ?? 50)',
-        'danmaku.checked = discovery.danmaku_enabled === true',
+        "danmaku.checked = discovery.danmaku_enabled === true",
         'setInput("danmakuFetchLimit", discovery.danmaku_fetch_limit ?? 50)',
         'setInput("danmakuMaxChars", discovery.danmaku_max_chars ?? 500)',
     ):
@@ -175,7 +185,7 @@ def test_desktop_settings_save_requires_dirty_state_and_guards_reentry() -> None
     assert "disabled" in save_button.group(0)
 
     assert "let settingsSaveInFlight = false;" in js
-    assert 'if (save) save.disabled = settingsSaveInFlight || count === 0;' in js
+    assert "if (save) save.disabled = settingsSaveInFlight || count === 0;" in js
     assert "if (settingsSaveInFlight || settingsDirtyFields.size === 0)" in js
     assert "settingsSaveInFlight = true;" in js
     assert "settingsSaveInFlight = false;" in js

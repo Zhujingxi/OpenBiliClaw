@@ -16,7 +16,7 @@ def test_desktop_web_html_wires_keyword_generation_mode_select() -> None:
     assert 'id="keywordGenerationMode"' in html
     # Three options with the exact backend-facing values + Chinese labels.
     assert '<option value="legacy">经典</option>' in html
-    assert '<option value="hybrid">混合</option>' in html
+    assert '<option value="hybrid" selected>混合</option>' in html
     assert '<option value="inspiration">灵感</option>' in html
     # A cost hint explaining hybrid is the most expensive mode.
     assert "settings-note-inline" in html
@@ -25,7 +25,7 @@ def test_desktop_web_html_wires_keyword_generation_mode_select() -> None:
 
 def test_desktop_web_js_loads_keyword_generation_mode() -> None:
     js = _JS.read_text(encoding="utf-8")
-    assert 'setSelect("keywordGenerationMode", discovery.keyword_generation_mode || "legacy")' in js
+    assert 'setSelect("keywordGenerationMode", discovery.keyword_generation_mode || "hybrid")' in js
 
 
 def test_desktop_web_js_saves_keyword_generation_mode_after_spread() -> None:
@@ -41,4 +41,4 @@ def test_desktop_web_js_saves_keyword_generation_mode_after_spread() -> None:
 @pytest.mark.parametrize("value", ["legacy", "hybrid", "inspiration"])
 def test_desktop_web_option_values_match_backend(value: str) -> None:
     html = _HTML.read_text(encoding="utf-8")
-    assert f'<option value="{value}">' in html
+    assert f'value="{value}"' in html

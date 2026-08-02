@@ -826,6 +826,8 @@ TOML 与显式环境变量覆盖在构造 `SchedulerConfig` 前统一归一为�
 
 两端加载时都会显式回填 `visual_profile_enabled`、`keyframe_enabled`、`keyframe_max_frames`、`keyframe_fetch_limit`、`danmaku_enabled`、`danmaku_fetch_limit`、`danmaku_max_chars`，保存时在已有 `discovery` 快照展开之后显式写入，数值范围分别为 `keyframe_max_frames=1..12`、两个 fetch limit 为 `1..200`、`danmaku_max_chars=100..2000`，默认值为 `4 / 50 / 50 / 500`。因此关闭开关不会因为保存设置而丢失预热参数或缓存。
 
+视觉相关能力保持显式 opt-in：`[llm.embedding].multimodal_enabled`、`multimodal_evaluation_enabled`、`visual_profile_enabled`、`keyframe_enabled` 的后端默认值、配置样例和两端初始控件均为 `false`。搜索词生成则默认使用“混合”，即 `inspiration_search_enabled=true`、`inspiration_replace_merged_keywords=false`；已有配置里显式保存的值保持不变。
+
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
 | `unified_keyword_planner_enabled` | bool | `true` | 统一关键词规划器总开关（v0.3.124 起默认 `true`）。`true` = 走 planner + 关键词存储；`false` = 回退旧逐平台搜索词生成。其余字段仅在 `true` 时生效 |
@@ -840,7 +842,7 @@ TOML 与显式环境变量覆盖在构造 `SchedulerConfig` 前统一归一为�
 | `plan_ttl_hours` | int | `12` | 兜底失效（小时）：即便画像 `profile_kw_digest` 未变，`pending` 关键词超过这个时长也会过期；同画像、同平台需求块、同池子避让提示的 merged keyword 生成结果也按这个 TTL 在进程内复用。小于 `1` 时回退默认值 |
 | `admission_min_score` | float | `0.60` | 普通推荐池统一入池最低分。候选行 / raw payload 显式 `score_threshold` 可作为策略阈值覆盖；来源标签如 `admission_policy="observed"` 不能绕过该分数门。探索类策略可略低于该值，但平台 / 插件来源不能获得特权。必须在 `(0, 1]` 内，非法值回退默认值 |
 | `candidate_eval_concurrency` | int | `3` | 候选 LLM 评估的期望 worker 数，合法范围 `1..3`；每个 worker 最多 30 条，因此总 raw 在途上限为 90。超出范围的手工 TOML / API 值按本段既有整型规则回退默认 `3`。有效值为 `min(本值, max(1, llm.concurrency-1))`，为聊天等交互保留一个全局 LLM 槽位；插件与桌面 Web 设置页可修改，CLI `config-show` 自动显示。移动 Web 没有配置面板，不适用。 |
-| `inspiration_search_enabled` | bool | `false` | 是否启用 query inspiration 脑暴阶段。开启后 `KeywordPlanner` 会通过本机 mcporter 搜索 provider 链获取搜索预览，再让 `discovery.keyword_inspiration` LLM caller 做 Profile Curator / Detail Expander，最终把带 `aspect_id/inspiration_id/expansion_id` 元数据的关键词写入 `discovery_keywords` |
+| `inspiration_search_enabled` | bool | `true` | 是否启用 query inspiration 脑暴阶段。默认与 merged keyword planner 并行组成“混合”模式；`KeywordPlanner` 会通过本机 mcporter 搜索 provider 链获取搜索预览，再让 `discovery.keyword_inspiration` LLM caller 做 Profile Curator / Detail Expander，最终把带 `aspect_id/inspiration_id/expansion_id` 元数据的关键词写入 `discovery_keywords` |
 | `inspiration_search_backends` | list[str] | `["local_cache", "platform_sources", "exa", "you"]` | query inspiration 搜索后端顺序。`local_cache` 会先从本地 `content_cache` 抽取相关标题 / URL / 摘要作为 evidence，本地命中不消耗外部 grounding 预算；证据不足时才 fallback。`platform_sources` 会从用户已启用且当前可同步/可注入 bridge 的平台源里抽样做 inspiration-only grounding（B站 / YouTube / X / Reddit；抖音 direct client；小红书 / 知乎 bridge 可用时），只把标题 / URL / 摘要作为灵感证据，不写候选池；`exa` 调用 `mcporter call exa.web_search_exa`；`you` 调用 `mcporter call you.you-search`（You.com Free MCP profile）。某个后端报错 / 限流 / 返回空结果时会继续尝试后面的后端。远端 MCP server 需要先写入本机 `config/mcporter.json` |
 | `inspiration_replace_merged_keywords` | bool | `false` | 实验性替换模式。仅在 `inspiration_search_enabled=true` 且 inspiration provider 可用时生效：due 平台跳过旧 `discovery.keyword_planner` merged call，只通过 search-backed inspiration flow 产词；当 B 站 explore 到期且有补货空间时，也会用同一轮共享 brainstorm / grounding stage 写入 `keyword_kind="explore"` 的探索词池。开 replace 前应先用 `keyword-inspiration-report` 跑 cohort 门禁，避免无质量数据直接替换 |
 | `inspiration_breadth` | str | `"high"` | 探索广度档位（Phase 2 config 收敛，13→4）：`low` / `medium` / `high`。旧的 10 个 `inspiration_*` 细粒度旋钮已删除，其派生成内部常量的有效值由本档位决定（见下表）。**默认 `high`（更宽的素材/轴/关键词产量）**；`medium` 逐项等于旧的 `_DEFAULT_INSPIRATION_*` 默认值，需与收敛前行为逐项对齐时显式设 `medium`。注意 `high` 会把每轮真实 probe 搜索与 LLM 用量放大（daemon 常驻），成本敏感可设 `medium`/`low`。非法档位（非 `low`/`medium`/`high`）→ 配置错误（`ConfigError`），未设置回退 `high` |
@@ -895,6 +897,8 @@ TOML 与显式环境变量覆盖在构造 `SchedulerConfig` 前统一归一为�
 #### `keyword_generation_mode`（搜索词生成模式，UI/API 派生便利层）
 
 配置页（**桌面 Web `/web` 与插件 popup 设置区**）把 `inspiration_search_enabled` / `inspiration_replace_merged_keywords` 两个布尔收成**单一「搜索词生成模式」下拉**（经典 / 混合 / 灵感）。这**不是** `DiscoveryConfig` 新字段——`config.toml` 仍只存这两个布尔（单一真相源）；`keyword_generation_mode` 只是 API 层的派生便利：`DiscoveryConfigOut` 读出它、`PUT /api/config` 把它翻译回两布尔，两端 UI 只见一个下拉。
+
+新配置及缺少该字段的 UI/API 回退默认选择 **混合 / `hybrid`**；已有配置若显式保存为经典或灵感则继续尊重原值，不做迁移覆盖。
 
 三档 ↔ 两布尔映射：
 

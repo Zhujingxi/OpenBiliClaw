@@ -459,9 +459,10 @@ planner_poll_seconds = 120
 plan_ttl_hours = 12
 # 统一推荐池入池最低分。来源/插件 observed 标签不能绕过该门槛。
 admission_min_score = 0.6
-# 可选 query inspiration 脑暴。默认关闭；开启后 planner 会通过本机 mcporter 调用
-# 搜索 provider 链获取预览，再由 discovery.keyword_inspiration 生成带溯源 metadata 的搜索词。
-inspiration_search_enabled = false
+# query inspiration 脑暴默认开启，与旧 merged keyword planner 并行组成“混合”模式；
+# planner 会通过本机 mcporter 调用搜索 provider 链获取预览，再由
+# discovery.keyword_inspiration 生成带溯源 metadata 的搜索词。
+inspiration_search_enabled = true
 # 搜索后端按顺序尝试。默认先用 local_cache 复用本地 content_cache evidence；
 # 本地证据不足时再用已启用的平台源做 inspiration-only grounding（当前同步支持
 # B站 / YouTube / X / Reddit，抖音 direct client；小红书 / 知乎 bridge 可用时

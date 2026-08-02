@@ -996,10 +996,10 @@ class DiscoveryConfig:
     # Plan staleness backstop: pending keywords older than this expire even if
     # the profile digest hasn't changed.
     plan_ttl_hours: int = _DEFAULT_PLAN_TTL_HOURS
-    # Optional search-inspired query brainstorming stage. Default off: when
-    # enabled, the keyword planner may use an injected search provider to mine
-    # adjacent concepts and insert metadata-bearing keywords.
-    inspiration_search_enabled: bool = False
+    # Search-inspired query brainstorming stage. Default on in hybrid mode:
+    # the merged keyword planner keeps running while the inspiration flow adds
+    # grounded adjacent concepts and metadata-bearing keywords.
+    inspiration_search_enabled: bool = True
     inspiration_search_backends: tuple[str, ...] = _DEFAULT_INSPIRATION_SEARCH_BACKENDS
     # Optional experiment mode: when true and inspiration search is available,
     # due platforms skip the legacy merged keyword planner and are filled only
@@ -2287,7 +2287,7 @@ def _build_discovery(discovery_raw: dict[str, Any]) -> DiscoveryConfig:
         ),
         inspiration_search_enabled=_coerce_bool(
             discovery_raw.get("inspiration_search_enabled"),
-            default=False,
+            default=True,
         ),
         inspiration_search_backends=_normalize_inspiration_search_backends(
             discovery_raw.get("inspiration_search_backends")

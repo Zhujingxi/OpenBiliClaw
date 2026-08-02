@@ -179,6 +179,17 @@ def test_discovery_config_response_caps_candidate_eval_concurrency_at_three() ->
         DiscoveryConfigOut(candidate_eval_concurrency=4)
 
 
+def test_discovery_config_response_defaults_to_hybrid_with_visual_features_off() -> None:
+    from openbiliclaw.api.models import DiscoveryConfigOut
+
+    config = DiscoveryConfigOut()
+
+    assert config.keyword_generation_mode == "hybrid"
+    assert config.multimodal_evaluation_enabled is False
+    assert config.visual_profile_enabled is False
+    assert config.keyframe_enabled is False
+
+
 def assert_publication(payload: dict[str, object]) -> None:
     assert payload["published_at"] == "2026-07-08T06:30:00Z"
     assert payload["published_label"] == "3 days ago"
@@ -18366,6 +18377,22 @@ class TestKeywordGenerationMode:
         from openbiliclaw.api.app import _derive_keyword_generation_mode
 
         assert _derive_keyword_generation_mode(enabled, replace) == expected
+
+    def test_default_config_derives_hybrid_mode(self) -> None:
+        from openbiliclaw.api.app import _derive_keyword_generation_mode
+        from openbiliclaw.config import Config
+
+        discovery = Config().discovery
+
+        assert discovery.inspiration_search_enabled is True
+        assert discovery.inspiration_replace_merged_keywords is False
+        assert (
+            _derive_keyword_generation_mode(
+                discovery.inspiration_search_enabled,
+                discovery.inspiration_replace_merged_keywords,
+            )
+            == "hybrid"
+        )
 
     @pytest.mark.parametrize(
         ("enabled", "replace", "expected"),

@@ -8572,7 +8572,7 @@ function bindSettings() {
     setVal("cfgTrendingRefreshMinutes", cfg.scheduler?.trending_refresh_minutes);
     setVal("cfgExploreRefreshMinutes", cfg.scheduler?.explore_refresh_minutes);
     setVal("cfgDiscoveryLimit", cfg.scheduler?.discovery_limit);
-    setVal("cfgKeywordGenerationMode", cfg.discovery?.keyword_generation_mode || "legacy");
+    setVal("cfgKeywordGenerationMode", cfg.discovery?.keyword_generation_mode || "hybrid");
     const visualProfile = document.getElementById("cfgVisualProfileEnabled");
     if (visualProfile) visualProfile.checked = cfg.discovery?.visual_profile_enabled === true;
     const keyframe = document.getElementById("cfgKeyframeEnabled");
