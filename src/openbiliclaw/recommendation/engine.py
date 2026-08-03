@@ -19,11 +19,6 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from openbiliclaw.discovery.strategies._utils import (
-    _EVALUATION_BODY_TEXT_HEAD_CAP,
-    _EVALUATION_BODY_TEXT_TAIL_CAP,
-    _EXPRESSION_BODY_TEXT_HEAD_CAP,
-    _EXPRESSION_BODY_TEXT_TAIL_CAP,
-    _prompt_body_text,
     build_profile_summary,
     compact_content_prompt_profile_summary,
 )
@@ -1867,12 +1862,7 @@ class RecommendationEngine:
                 # Text-first items (X tweets/threads) carry their full text
                 # here — titles are low-information for those, so the LLM
                 # needs body_text to judge relevance. Empty for video sources.
-                # Head+tail capped exactly like discovery's batch evaluator.
-                "body_text": _prompt_body_text(
-                    c.body_text,
-                    head=_EVALUATION_BODY_TEXT_HEAD_CAP,
-                    tail=_EVALUATION_BODY_TEXT_TAIL_CAP,
-                ),
+                "body_text": c.body_text,
             }
             for c in batch
         ]
@@ -3739,11 +3729,7 @@ class RecommendationEngine:
                 "topic_group": item.topic_group,
                 "relevance_score": item.relevance_score,
                 "content_type": item.content_type,
-                "body_text": _prompt_body_text(
-                    item.body_text,
-                    head=_EXPRESSION_BODY_TEXT_HEAD_CAP,
-                    tail=_EXPRESSION_BODY_TEXT_TAIL_CAP,
-                ),
+                "body_text": item.body_text,
             }
             for item in batch
         ]
@@ -4108,11 +4094,7 @@ class RecommendationEngine:
                 "topic_group": content.topic_group,
                 "relevance_score": content.relevance_score,
                 "content_type": content.content_type,
-                "body_text": _prompt_body_text(
-                    content.body_text,
-                    head=_EXPRESSION_BODY_TEXT_HEAD_CAP,
-                    tail=_EXPRESSION_BODY_TEXT_TAIL_CAP,
-                ),
+                "body_text": content.body_text,
             },
             tone_profile=tone_profile,
             source_platform=content.source_platform or "bilibili",

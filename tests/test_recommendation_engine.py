@@ -1088,6 +1088,7 @@ async def test_generate_expression_passes_body_text_for_text_items() -> None:
         llm = _DummyLLM()
         engine = RecommendationEngine(llm=llm, database=db)
 
+        body_text = "H" * 300 + "MIDDLE_BODY_MARKER" + "T" * 200
         await engine.generate_expression(
             DiscoveredContent(
                 bvid="1790000000000000001",
@@ -1098,7 +1099,7 @@ async def test_generate_expression_passes_body_text_for_text_items() -> None:
                 content_type="thread",
                 cover_url="",
                 duration=0,
-                body_text="1/ BODY_MARKER long-form note_tweet on systems design ...",
+                body_text=body_text,
                 style_key="deep_dive",
                 topic_group="系统设计",
                 relevance_score=0.8,
@@ -1107,10 +1108,10 @@ async def test_generate_expression_passes_body_text_for_text_items() -> None:
         )
 
         user_input = str(llm.calls[0]["user_input"])
-        assert "BODY_MARKER" in user_input
+        assert body_text in user_input
         assert '"body_text"' in user_input
         # body_text must never leak into the cached system prompt.
-        assert "BODY_MARKER" not in str(llm.calls[0]["system_instruction"])
+        assert "MIDDLE_BODY_MARKER" not in str(llm.calls[0]["system_instruction"])
 
 
 @pytest.mark.asyncio
@@ -2171,7 +2172,7 @@ async def test_classify_pool_backlog_fills_metadata() -> None:
             caller: str = "",
             reasoning_effort: str | None = None,
         ) -> LLMResponse:
-            self.calls.append({"system_instruction": system_instruction})
+            self.calls.append({"system_instruction": system_instruction, "user_input": user_input})
             # Check if this is a classification call (batch eval prompt)
             # or an expression-generation call
             if "批量评估" in system_instruction or "score" in system_instruction:
@@ -2213,6 +2214,7 @@ async def test_classify_pool_backlog_fills_metadata() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         db = Database(Path(tmpdir) / "test.db")
         db.initialize()
+        full_body_text = "H" * 300 + "CLASSIFY_MIDDLE_MARKER" + "T" * 200
 
         # Insert 2 XHS items with NO metadata
         _seed_visible(
@@ -2228,6 +2230,7 @@ async def test_classify_pool_backlog_fills_metadata() -> None:
             topic_group="",
             topic_key="",
             relevance_score=0.0,
+            body_text=full_body_text,
         )
         _seed_visible(
             db,
@@ -2253,6 +2256,8 @@ async def test_classify_pool_backlog_fills_metadata() -> None:
         )
 
         assert classified == 2
+        assert full_body_text in str(llm.calls[0]["user_input"])
+        assert "CLASSIFY_MIDDLE_MARKER" not in str(llm.calls[0]["system_instruction"])
 
         # Verify DB was updated
         rows = db.get_pool_candidates(limit=10)
@@ -2938,7 +2943,7 @@ async def test_precompute_batch_requests_no_core_memory_injection_when_supported
 
 
 @pytest.mark.asyncio
-async def test_precompute_batch_caps_body_text_head_tail() -> None:
+async def test_precompute_batch_preserves_full_body_text() -> None:
     class _BodyRecordingBatchLLM:
         def __init__(self) -> None:
             self.user_inputs: list[str] = []
@@ -2992,7 +2997,7 @@ async def test_precompute_batch_caps_body_text_head_tail() -> None:
 
         assert completed == 1
         batch = _content_batch_from_prompt(llm.user_inputs[0])
-        assert batch[0]["body_text"] == ("H" * 200) + "…" + ("T" * 100)
+        assert batch[0]["body_text"] == body_text
 
 
 @pytest.mark.asyncio

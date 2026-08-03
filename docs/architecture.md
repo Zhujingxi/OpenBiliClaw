@@ -118,8 +118,8 @@ caller grouping 上重放，因此 full/partial hit 和 `enforce` 预筛的 cold
 `scripts/run_profile_diet_ab.py` 是 landing evidence harness，不是生产请求入口。它从只读 DB
 冻结候选、effective profile（含 overrides / active speculations）和负例，按生产的 30 条
 claim grouping 与 `source_context=mixed` 跑 repeated A/A + A/B；每个 logical run 记录实际
-provider/instance/model，并对 embedding、recall、route、snapshot 与 body-cap contract fail
-closed。Replay 固定 temperature 0 用于隔离采样噪声，artifact 同时披露生产默认 0.7；因此
+provider/instance/model，并对 embedding、recall、route 与 snapshot fail closed。Replay 固定
+temperature 0 用于隔离采样噪声，artifact 同时披露生产默认 0.7；因此
 该结果是 model-visible diet 的受控相对门，不替代合入后的 48 小时生产观测。
 
 HTTPS 有两个互斥的**可选传输边缘**，都不是新的业务 API 层。公网域名的 Docker 部署叠加

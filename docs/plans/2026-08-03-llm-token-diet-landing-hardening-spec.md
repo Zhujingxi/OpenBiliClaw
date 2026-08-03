@@ -1,15 +1,15 @@
 # LLM Token Diet Landing Hardening Spec
 
 **Created:** 2026-08-03
-**Status:** accepted for implementation
+**Status:** implementation contract frozen; clean-commit acceptance required
 **Scope:** `perf/llm-token-diet` landing correctness, replay evidence, evaluation-cache
 correctness, reason normalization, integration with current `main`, and release verification.
 
 ## 1. Context
 
 `perf/llm-token-diet` 已完成 compact evaluation profile、per-item long-tail recall、
-embedding prefilter、bounded eval cache、candidate coalescing、body-text caps、profile views、
-chat core-memory split 与 eval reason diet。分支也包含大量单元测试和 golden fixtures。
+embedding prefilter、bounded eval cache、candidate coalescing、profile views、chat core-memory
+split 与 eval reason diet。分支曾实现 body-text caps，但严格真实回放已将其否决并回滚。
 
 当前实现还不能作为可合入证据：
 
@@ -19,8 +19,8 @@ chat core-memory split 与 eval reason diet。分支也包含大量单元测试�
    compact + recall 确实被执行。
 4. A/B 的实际 provider / instance / model 只被平铺记录，没有按 pair/run 归属，也没有
    阻止非模型实验在两臂之间发生 route drift。
-5. body-text cap 已成为两臂共同的生产行为，脚本却直接拒绝 `--arm-b body-cap`，导致
-   Task 7 的 model-visible input gate 无法执行。
+5. body-text cap 曾缺少可执行的 model-visible input gate；补齐对照后的 Reddit 100×3
+   回放证明它造成显著质量回归，因此生产和正式 replay arm 都必须删除该变更。
 6. batch eval cache key 在 recall 生成前命中；实际 recalled labels、embedding namespace、
    prompt-visible content/source context 没有形成完整的可复现输入闭包。
 7. reason diet 只依赖 prompt 约束；parser/runtime 不会把 `<0.5` 的 reason 强制清空，
@@ -41,21 +41,22 @@ Replay 使用与生产 evaluator 相同的 effective profile、negative exemplar
 embedding model namespace、route 和 output ceiling。基础设施降级必须显式进入 artifact；
 会改变实验语义的降级必须让 gate 失败，不能变成零分或无 recall 的正常观测。
 
-### G2. 三类 model-visible 变更都有可执行对照
+### G2. 保留变更有可执行对照，被否决变更有可复核证据
 
-同一个脚本必须支持：
+同一个脚本必须支持两个仍在生产候选范围内的变更：
 
 - `compact`：legacy full profile/no recall 对比 production compact + recall；
-- `body-cap`：production profile/recall 下，legacy uncapped body 对比 production 200+100 cap；
 - `reason-diet`：production inputs 下，legacy unconditional reason 对比 production reason diet。
 
-每一类实验使用冻结 snapshot、重复 A/A 与 A/B、同一 admission policy，并产出独立 JSON。
+两类实验使用冻结 snapshot、重复 A/A 与 A/B、同一 admission policy，并产出独立 JSON。
+历史 `body-cap` 对照使用相同契约完成后必须保留失败 artifact 与回滚结论，但不再作为脚本的
+正式 arm，也不要求在完整正文的最终代码上制造无意义的两臂差异。
 
 ### G3. Eval cache 覆盖决定 prompt 的稳定输入
 
 缓存命中必须只发生在“同一 evaluator 语义输入”上。至少覆盖：
 
-- prompt-visible content fields 的确定性 digest（包括截断后的 body/description、metrics、
+- prompt-visible content fields 的确定性 digest（包括完整 body、去重后的 description、metrics、
   tags、platform/type/strategy 与 effective source context）；
 - compact profile + recall pool digest；
 - negative exemplars digest；
@@ -110,7 +111,7 @@ Replay 的 embedding wrapper 记录每个 request 的 model namespace、非空�
 - provider exception、空向量、NaN/Inf、同一 namespace 维度漂移：实验失败；
 - tail-interest pool 为空：合法的 zero-recall case，记录 `eligible_tail_count=0`；
 - 向量完整但没有兴趣超过 similarity threshold：合法，记录 injected label count 为 0；
-- compact/body-cap/reason-diet acceptance 默认要求可用的生产 embedding service；若生产配置
+- compact/reason-diet acceptance 默认要求可用的生产 embedding service；若生产配置
   明确禁用 embedding，则必须通过显式 `--allow-no-embedding` 运行，artifact 标为 degraded，
   不能作为 compact + recall 的 landing 证据。
 
@@ -139,12 +140,15 @@ route drift、artifact write failure 均以非零退出。不得转换为 score 
 429；明确映射的 HTTP 402、余额/计费错误和其它异常不重试。重试预算按 chunk 独立，前一 chunk
 恢复成功时不能耗掉下一 chunk 的预算。
 
-### I5. Body-cap contrast is faithful
+### I5. Body-cap rejection is binding
 
-`body-cap` 的 arm A 在 prompt construction 层临时关闭 cap，但仍使用原始 candidate body，
-以保留 description/body dedup 关系；不得通过提前修改 `DiscoveredContent.body_text` 制造对照。
-arm B 使用生产 200 head + `…` + 100 tail。Artifact 记录实际受 cap 影响的 candidate 数；为 0
-时 gate 失败。
+历史 `body-cap` 对照在 prompt construction 层比较原始正文与 production 200 head + `…` +
+100 tail，并保持 description/body dedup 关系。Reddit 100×3 结果为：treatment flip-rate 中位数
+`18% > 8%` control ceiling，Spearman 中位数 `0.192031 < 0.632378` floor，admission delta
+中位数 `-11pp < -3pp` floor；42 / 100 条正文受影响且仅保留 12.95% 字符。该失败结论约束
+最终实现：discovery single/batch eval 与 recommendation legacy/recovery/single/batch expression
+必须保留完整 `body_text`，正式 replay CLI 不再暴露已回滚的 `body-cap` arm。失败 artifact
+`data/eval/profile-diet-body-cap-rejected-11f77a64.json` 只作隐私安全的诊断证据。
 
 ### I6. Cache determinism and degradation
 
@@ -188,7 +192,8 @@ Final-commit 的首次真实 compact 100×3 replay 对 64 interests / 12 specifi
 - 当前生产画像的全部实际 interests / domain specifics 都保留，主要只移除 volatile metadata；
 - mature fixture 仍减少约 58% 字符，maxed fixture 减少约 63%，继续满足高成熟度画像的降本目标；
 - 当前画像不再为了约 11% 的有限缩短承受语义截断；
-- Spearman、flip-rate、admission floors 完全不变，三臂在修正后的 clean commit 重新执行。
+- Spearman、flip-rate、admission floors 完全不变，保留的 compact / reason-diet 两臂在修正后的
+  clean commit 重新执行。
 
 ## 5. Replay artifact contract
 
@@ -197,7 +202,7 @@ Final-commit 的首次真实 compact 100×3 replay 对 64 interests / 12 specifi
 - git commit、dirty flag、config path digest、DB path digest；
 - candidate IDs、status/platform/strategy mix、snapshot digest；
 - raw/effective profile digest、negative exemplar digest；
-- experiment arm、body-cap affected count、tail-interest count；
+- experiment arm、tail-interest count；
 - per pair raw scores、admission decisions和 metrics；
 - attributed LLM calls、actual routes、usage；
 - embedding namespace、call count、vector completeness/dimensions、recall injection counts；
@@ -225,19 +230,16 @@ Artifact 不包含 API key、Cookie、完整 config、完整 profile 或完整�
   --output data/eval/profile-diet-compact.json
 
 .venv/bin/python scripts/run_profile_diet_ab.py \
-  --arm-b body-cap --platform reddit --sample 100 --repeats 3 \
-  --output data/eval/profile-diet-body-cap.json
-
-.venv/bin/python scripts/run_profile_diet_ab.py \
   --arm-b reason-diet --sample 100 --repeats 3 \
   --output data/eval/reason-diet.json
 ```
 
-若指定 text platform 不足 100 条 eligible rows，必须选择真实有足量长正文的 text platform；
-不得改用全空 body 的 Bilibili cohort 冒充 body-cap gate。
-
-每个命令必须 exit 0，artifact 自身 `gate.passed=true`、无 blocking reasons、route 与 embedding
+两个命令必须 exit 0，artifact 自身 `gate.passed=true`、无 blocking reasons、route 与 embedding
 完整性 gate 通过。
+
+被否决的 body-cap 不再从最终代码重跑；其冻结失败 artifact 必须保持 `gate.passed=false`，并可
+从 raw paired scores 独立复算上述质量回归。最终代码用单元/E2E 测试确认所有相关 prompt 路径
+保留完整正文。
 
 ### C. Runtime/E2E smoke
 

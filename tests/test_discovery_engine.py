@@ -605,22 +605,6 @@ def test_compact_evaluation_profile_summary_strips_recent_context_volatile_field
     assert "session_context" not in insight
 
 
-def test_prompt_body_text_head_tail_truncates_deterministically() -> None:
-    from openbiliclaw.discovery.strategies._utils import _prompt_body_text
-
-    short = "short-body"
-    long = "H" * 12 + "M" * 8 + "T" * 6
-
-    assert _prompt_body_text(None, head=12, tail=6) is None
-    assert _prompt_body_text("", head=12, tail=6) == ""
-    assert _prompt_body_text(short, head=12, tail=6) == short
-    assert _prompt_body_text(long, head=12, tail=6) == ("H" * 12) + "…" + ("T" * 6)
-    assert (
-        _prompt_body_text(long, head=12, tail=6).encode()
-        == (_prompt_body_text(long, head=12, tail=6) or "").encode()
-    )
-
-
 def test_evaluation_profile_prompt_block_shrinks_by_at_least_sixty_percent() -> None:
     profile = _maxed_onion_profile()
     full_summary = build_profile_summary(profile)
@@ -894,7 +878,7 @@ async def test_evaluate_content_single_passes_text_metrics_and_tags_to_prompt() 
 
 
 @pytest.mark.asyncio
-async def test_evaluate_content_single_caps_body_text_head_tail() -> None:
+async def test_evaluate_content_single_preserves_full_body_text() -> None:
     llm_service = FakeLLMService(
         '{"score": 0.82, "reason": "匹配", "topic_group": "系统", "style_key": "deep_dive"}'
     )
@@ -914,8 +898,7 @@ async def test_evaluate_content_single_caps_body_text_head_tail() -> None:
     )
 
     user_input = str(llm_service.calls[0]["user_input"])
-    assert ("H" * 200) + "…" + ("T" * 100) in user_input
-    assert body_text not in user_input
+    assert body_text in user_input
 
 
 @pytest.mark.asyncio
@@ -1209,7 +1192,7 @@ async def test_evaluate_content_batch_omits_duplicate_text_description() -> None
 
 
 @pytest.mark.asyncio
-async def test_evaluate_content_batch_caps_body_text_head_tail() -> None:
+async def test_evaluate_content_batch_preserves_full_body_text() -> None:
     llm_service = _DynamicBatchLLMService()
     engine = ContentDiscoveryEngine(llm_service=llm_service)
     body_text = "H" * 300 + "T" * 200
@@ -1239,7 +1222,7 @@ async def test_evaluate_content_batch_caps_body_text_head_tail() -> None:
         )[0]
     )
     items = json.loads(batch_json.strip())
-    assert items[0]["body_text"] == ("H" * 200) + "…" + ("T" * 100)
+    assert items[0]["body_text"] == body_text
 
 
 @pytest.mark.asyncio

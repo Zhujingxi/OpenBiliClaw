@@ -3,7 +3,7 @@
 > **Spec:** [`2026-08-03-llm-token-diet-landing-hardening-spec.md`](./2026-08-03-llm-token-diet-landing-hardening-spec.md)
 > **Owner:** root agent（规格、集成、验收）
 > **Implementation:** bounded multi-agent tasks with non-overlapping file ownership
-> **Status:** implementation complete; conservative compact-cap correction and final acceptance in progress
+> **Status:** implementation complete; acceptance runs from the resulting clean commit
 
 ## 0. Working rules
 
@@ -20,7 +20,7 @@
 **Files:** this spec/plan
 
 - [x] 记录 replay、cache、reason、rebase 与文档阻塞项。
-- [x] 定义 effective-profile、embedding、route、body-cap 和 artifact contract。
+- [x] 定义 effective-profile、embedding、route、body-cap 否决条件和 artifact contract。
 - [x] 定义自动化、真实 replay 和 runtime/E2E 三层验收。
 
 **Gate:** spec 和 plan 在任何生产代码修改前存在并可引用。
@@ -56,8 +56,8 @@ Implementation checklist:
 - [x] strict embedding audit detects exception/empty/nonfinite/dimension mismatch；
 - [x] embedding cache lifetime covers the whole run and closes in `finally`；
 - [x] per logical run call attribution and route-equivalence validation；
-- [x] re-enable faithful `body-cap` legacy-vs-production arm；
-- [x] fail body-cap gate when zero candidate is actually affected；
+- [x] 临时恢复 faithful `body-cap` legacy-vs-production arm 并完成真实对照；
+- [x] 真实 gate 否决 200+100 后删除该正式 arm，并把生产正文路径完整回滚；
 - [x] artifact records blocking reasons, recall/route/embedding audit without private payloads；
 - [x] unit tests cover every failure and valid zero-tail/zero-similarity case；
 - [x] mirror topic lifecycle, production 30-item claim grouping and `mixed` context；reject
@@ -127,14 +127,15 @@ edit the same file concurrently.
 
 - [x] review agent diffs against spec invariants；
 - [x] resolve overlap without dropping tests；
-- [x] update `docs/modules/discovery.md` retry/cache/reason/body-cap truth；
-- [x] update `docs/modules/recommendation.md` body cap to one value；
+- [x] update `docs/modules/discovery.md` retry/cache/reason/body-cap rejection truth；
+- [x] update `docs/modules/recommendation.md` to document full-body rollback；
 - [x] update `docs/modules/llm.md`, `docs/modules/config.md`, changelog and architecture/data-flow
       notes where ownership changed；
 - [x] mark superseded historical gate claims explicitly；
 - [x] update this plan with automated commands/results；real replay evidence remains in Task 8。
 
-**Gate:** documentation contains no contradictory retry/body-cap/replay claims found by targeted `rg`.
+**Gate:** documentation contains no contradictory retry/body-cap-rejection/replay claims found by targeted
+`rg`.
 
 ## Task 7 — Automated verification
 
@@ -171,10 +172,10 @@ either incorporate the current-main fix during rebase or document an environment
 
 - Ruff format check: 544 files formatted；Ruff lint: pass；MyPy: 236 source files, pass；
   `git diff --check`: pass。
-- Required focused integration group after the conservative 80 / 16 correction and normalized
-  rate-limit-boundary fix: 1360 passed in 130.16s。
-- Full repository after the same final corrections: 7040 passed, 93 environment/platform skips in
-  625.47s；zero failures。
+- Required focused integration group after the conservative 80 / 16 correction, normalized
+  rate-limit-boundary fix and full-body rollback: 1355 passed in 130.33s。
+- Full repository after the same final corrections: 7035 passed, 93 environment/platform skips in
+  624.06s；zero failures。
 - Extension final-main compatibility: TypeScript typecheck pass；1244 Node tests pass after the
   worktree installed lockfile-pinned dev dependencies。
 - The rebase exposed two current-main hygiene failures (one missing blank line and one import order);
@@ -185,7 +186,8 @@ either incorporate the current-main fix during rebase or document an environment
 **Owner:** root
 
 1. Validate DB/config prerequisites without printing secrets。
-2. Run compact, body-cap and reason-diet commands from Spec §6B。
+2. Run compact and reason-diet commands from Spec §6B；retain and independently validate the rejected
+   body-cap diagnostic artifact without rerunning a removed production feature。
 3. Validate each JSON artifact structurally and recompute key metrics independently from raw scores。
 4. Run deterministic candidate-pipeline E2E cases from Spec §6C。
 5. Smoke `openbiliclaw config-show` and relevant API config serialization。
@@ -199,16 +201,22 @@ is unavailable, the branch is reported blocked rather than described as release-
 real batch parser/runtime reason normalization → eval LRU → admission/content cache, including a warm
 eval-cache replay with zero additional provider calls. Production `config-show` exits 0 and the safe
 acceptance fields resolve to prefilter `shadow`, admission `0.6`, coalescing `15 / 90s`, topic lifecycle
-`off`. A pre-hardening compact run passed, but it is intentionally not final evidence because the
-subsequent body-cap run exposed a transient provider 429 and caused the replay-only bounded cooldown
-retry change. The first compact run on that hardened commit then correctly failed the unchanged relative
+`off`. A pre-hardening compact run passed, but it is intentionally not final evidence because a subsequent
+provider 429 caused the replay-only bounded cooldown retry change. The first compact run on that hardened
+commit then correctly failed the unchanged relative
 quality gate at 64 / 12 (Spearman median `0.494686 < 0.570454`; admission delta median
 `-0.09 < -0.07`). Root diagnosis found that this cut saved only about 11% on the current profile while
 removing model-visible semantic tail, so the implementation now uses 80 interests / 16 specifics and
-tail recall ranks 81..256. Focused serializer/discovery/replay/recommendation tests pass (324 tests),
-the required integration group passes 1360 tests, and the full repository passes 7040 tests with 93
-environment/platform skips after the final corrections. All three real artifacts rerun from the next clean
-commit；the failed artifact is retained only as diagnostic evidence. The first 80 / 16 rerun also
+tail recall ranks 81..256. The full-body rollback's focused discovery/replay/recommendation group passes
+304 tests；the required integration group passes 1355 tests, and the full repository passes 7035 tests
+with 93 environment/platform skips. Extension TypeScript typecheck and all 1244 Node tests also pass.
+The 80 / 16 compact artifact on
+`11f77a64` passed its final gate, while the strict Reddit 100×3 body-cap artifact failed all three quality
+dimensions (18% flip vs 8% ceiling, 0.192031 Spearman vs 0.632378 floor, -11pp admission vs -3pp floor).
+Because the cap retained only 12.95% of affected body characters, all discovery/recommendation body
+truncation and the formal replay arm were removed instead of tuning the gate. Compact and reason-diet are
+rerun from the resulting clean commit；the rejected artifact remains diagnostic evidence only. The first
+80 / 16 rerun also
 exposed and closed a replay-only classifier bug where raw SDK 429 metadata overrode the adapter's
 normalized transient-rate-limit decision；no quality metrics were emitted by that aborted run.
 

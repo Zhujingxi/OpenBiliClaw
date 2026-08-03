@@ -1,12 +1,12 @@
 # LLM Token Diet — Implementation Plan
 
-> **2026-07-28 correction:** the executable replay workflow below is superseded
-> by the hardened gate in
-> [`2026-07-18-eval-reason-diet-spec.md`](./2026-07-18-eval-reason-diet-spec.md).
+> **2026-08-03 landing correction:** the executable replay workflow below is superseded
+> by [`2026-08-03-llm-token-diet-landing-hardening-spec.md`](./2026-08-03-llm-token-diet-landing-hardening-spec.md).
 > Current runs require `--repeats >=3` and `--output`, preserve production
 > traffic weights, use one frozen snapshot and production `max_tokens=4096`,
 > and fail on missing responses. Old standalone gate evidence is not valid for
-> landing.
+> landing. The proposed 200+100 `body_text` cap failed the strict Reddit 100×3 gate and was
+> completely reverted; only the LRU and classify-batch parts of Task 7 remain accepted.
 >
 > **Spec:** [`2026-07-05-llm-token-diet-spec.md`](./2026-07-05-llm-token-diet-spec.md)
 > **Status:** Final r2 — 2026-07-05. r1 = cost levers; r2 added the quality-preservation layer
@@ -15,7 +15,7 @@
 > before the previous one's tests are green.
 > **Execution order (from Spec):** Wave A = Tasks 3, 4, 6, 2 (ships behavior-neutral in
 > shadow), 7's LRU + classify-batch parts — zero quality surface, any order. Wave B = Task 0 →
-> 1 → 5 → 7's body-cap part — each merges only with its quality-gate evidence in the PR.
+> 1 → 5. Task 7's body-cap experiment was executed and rejected by its quality gate.
 > Task 8 (docs) last.
 > **Tech:** Python 3.11+, pytest (`asyncio_mode=auto`), Ruff, MyPy strict, 100-char lines.
 > Interpreter is `.venv/bin/python` (plain `python`/`python3` has no deps).
@@ -33,8 +33,8 @@
 - Disliked topics never cut below store cap.
 - Rate-limit errors propagate without split/single fallback.
 - Explore candidates exempt from embedding pre-filter; pre-filter defaults to **shadow** mode.
-- **Quality gate:** Tasks 1, 5, and 7's body-text cap do not merge without a passing Task 0
-  replay run (flip ≤ 3%, Spearman ≥ 0.95) recorded in the PR description.
+- **Quality gate:** Tasks 1 and 5 require passing replay evidence. Task 7's body-text cap failed
+  that gate and therefore does not merge.
 - Do NOT touch `runtime/keyword_planner.py` (owned by `feature/discovery-inspiration-mvp`).
 
 ---
@@ -271,14 +271,14 @@ Test `tests/test_config.py`, `tests/test_candidate_pipeline.py` (names — verif
 4. Plumb into both `DiscoveryCandidatePipeline(...)` construction sites.
 5. Run targeted tests + lint + mypy.
 
-### Task 7: Hygiene — bounded eval cache, `body_text` caps, classify batch size
+### Task 7: Hygiene — bounded eval cache, rejected `body_text` cap, classify batch size
 
 **Files:** Modify `src/openbiliclaw/discovery/engine.py`,
 `src/openbiliclaw/recommendation/engine.py`;
 Test `tests/test_discovery_engine.py`, `tests/test_recommendation_engine.py`
 
 **Steps:**
-1. Failing tests:
+1. Historical experiment tests:
    - `_eval_cache` holds ≤ 4096 entries; inserting 4097 evicts the least-recently-used (a get
      refreshes recency); legacy 4-tuple entries still read correctly.
    - Eval batch item and single-eval `body_text` truncated **head+tail** (200 head + 100 tail,
@@ -290,14 +290,16 @@ Test `tests/test_discovery_engine.py`, `tests/test_recommendation_engine.py`
 2. Replace `self._eval_cache: dict` (`engine.py:719`) with an `OrderedDict`-based LRU (module
    constant `_EVAL_CACHE_MAX_ENTRIES = 4096`; wrap get/set in two small private methods so all
    five existing touch points — `:1158,1192,1256,1364,1853` — go through them).
-3. Add `_prompt_body_text(value: str | None, *, head: int, tail: int) -> str` (deterministic
+3. The experiment added `_prompt_body_text(value: str | None, *, head: int, tail: int)` (deterministic
    head+tail slices, fixed `…` joiner) in a shared spot (`discovery/strategies/_utils.py`),
    apply at `discovery/engine.py:1675`, `:1210` and
    `recommendation/engine.py:1361` — all head 200 / tail 100 (tightened from the draft
    1600+400 / 1000+200 by user decision; title/description already carry the gist).
    Constants module-level.
    Then run the Task 0 replay with `--arm-b body-cap --platform x` (or whichever text source
-   has rows) — bilibili-only DBs trivially pass (empty `body_text`); record the result.
+   has rows) — bilibili-only DBs trivially pass (empty `body_text`); record the result. The strict
+   Reddit 100×3 run failed flip-rate, Spearman and admission gates, so this helper, its constants,
+   production call sites and the formal replay arm were subsequently removed. Full body text is the final contract.
 4. `classify_pool_backlog` `batch_size: int = 10` → `30` (`recommendation/engine.py:1024`).
 5. Run targeted tests + lint + mypy.
 
@@ -310,7 +312,8 @@ Test `tests/test_discovery_engine.py`, `tests/test_recommendation_engine.py`
 1. `discovery.md`: compacted eval profile summary (caps table) + per-item `related_interests`
    recall, batch embedding pre-filter (off/shadow/enforce rollout), split-retry fallback
    ladder, coalescing knobs, `scripts/run_profile_diet_ab.py` quality-gate workflow.
-2. `recommendation.md`: shared profile compactor, `body_text` cap, classify batch default.
+2. `recommendation.md`: shared profile compactor, rejected `body_text` cap / full-body outcome,
+   classify batch default.
 3. `llm.md`: updated routing-bucket table (all callers ↔ buckets, including the six new ones).
 4. `config.md`: `[scheduler].eval_min_batch_size` / `eval_max_wait_seconds`, bucket coverage
    notes for `[llm.*]` overrides.

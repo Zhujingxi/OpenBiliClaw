@@ -53,25 +53,6 @@ if TYPE_CHECKING:
 
 _T = TypeVar("_T")
 
-_EVALUATION_BODY_TEXT_HEAD_CAP = 200
-_EVALUATION_BODY_TEXT_TAIL_CAP = 100
-_EXPRESSION_BODY_TEXT_HEAD_CAP = 200
-_EXPRESSION_BODY_TEXT_TAIL_CAP = 100
-_PROMPT_BODY_TEXT_JOINER = "…"
-
-
-def _prompt_body_text(value: str | None, *, head: int, tail: int) -> str | None:
-    if value is None or value == "":
-        return value
-
-    head = max(0, head)
-    tail = max(0, tail)
-    if len(value) <= head + tail:
-        return value
-
-    suffix = value[-tail:] if tail else ""
-    return f"{value[:head]}{_PROMPT_BODY_TEXT_JOINER}{suffix}"
-
 
 async def _gather_bounded(
     awaitables: list[Awaitable[_T]],

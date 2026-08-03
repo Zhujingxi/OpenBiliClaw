@@ -26,10 +26,7 @@ from scripts.run_profile_diet_ab import (
     _score_contents,
     _write_artifact,
     admission_flip_summary,
-    body_cap_affected_count,
-    cap_body_text,
     configured_topic_lifecycle_serialization,
-    legacy_body_text_prompt_caps,
     relative_gate,
     replay_blocking_reasons,
     replay_call_attribution,
@@ -236,9 +233,6 @@ def _passing_replay_gate_inputs() -> dict[str, object]:
         "route_audit": {"passed": True, "blocking_reasons": []},
         "embedding_audit": {"passed": True, "blocking_reasons": []},
         "recall_audit": {"passed": True, "blocking_reasons": []},
-        "body_cap": False,
-        "body_cap_affected": 0,
-        "body_cap_contract_matches": True,
         "profile_snapshot_stable": True,
         "candidate_snapshot_stable": True,
     }
@@ -255,8 +249,6 @@ def test_replay_final_gate_accepts_only_complete_evidence() -> None:
         ("route", "route audit failed"),
         ("embedding", "embedding audit failed"),
         ("recall", "recall audit failed"),
-        ("body_zero", "zero candidates affected"),
-        ("body_contract", "body caps no longer match"),
         ("profile", "profile snapshot drifted"),
         ("candidate", "candidate snapshot drifted"),
     ],
@@ -270,10 +262,6 @@ def test_replay_final_gate_blocks_each_independent_failure(
         inputs["quality_passed"] = False
     elif failure in {"route", "embedding", "recall"}:
         inputs[f"{failure}_audit"] = {"passed": False, "blocking_reasons": []}
-    elif failure == "body_zero":
-        inputs.update(body_cap=True, body_cap_affected=0)
-    elif failure == "body_contract":
-        inputs.update(body_cap=True, body_cap_affected=1, body_cap_contract_matches=False)
     elif failure == "profile":
         inputs["profile_snapshot_stable"] = False
     elif failure == "candidate":
@@ -340,7 +328,6 @@ def test_artifact_keeps_raw_scores_digests_usage_routes_without_private_payloads
         route_audit={"passed": True, "logical_runs": []},
         embedding_audit={"passed": True, "namespace": "embed-v1"},
         recall_audit={"passed": True, "injected_label_count": 0},
-        body_cap_affected=1,
         production_prefilter_mode="shadow",
         topic_lifecycle_serialization=True,
     )
@@ -393,67 +380,6 @@ def test_select_replay_rows_preserves_recent_production_mix() -> None:
     assert [row["id"] for row in select_replay_rows(rows, sample=4)] == [
         row["id"] for row in selected
     ]
-
-
-def test_cap_body_text_keeps_short_text_and_caps_long_text() -> None:
-    short = "short body"
-    long = "h" * 300 + "m" * 100 + "t" * 200
-
-    assert cap_body_text(short) == short
-    assert cap_body_text(long) == ("h" * 200) + "\u2026" + ("t" * 100)
-
-
-def test_body_cap_arm_changes_prompt_cap_without_mutating_candidate_body() -> None:
-    from openbiliclaw.discovery import engine as engine_module
-
-    body = "description prefix" + ("x" * 500)
-    rows = [
-        {
-            "id": 1,
-            "content_id": "tweet-1",
-            "source_platform": "twitter",
-            "source_strategy": "feed",
-            "title": "long post",
-            "description": "description prefix",
-            "body_text": body,
-        }
-    ]
-
-    content = _rows_to_contents(rows)[0]
-
-    assert content.body_text == body
-    assert body_cap_affected_count(rows) == 1
-    assert engine_module._prompt_description_for_content(content, limit=400) == ""
-    assert engine_module._prompt_body_text(
-        content.body_text,
-        head=engine_module._EVALUATION_BODY_TEXT_HEAD_CAP,
-        tail=engine_module._EVALUATION_BODY_TEXT_TAIL_CAP,
-    ) == cap_body_text(body)
-    assert engine_module._batch_evaluation_content_item(
-        content,
-        source_context="replay",
-    )["body_text"] == cap_body_text(body)
-    with legacy_body_text_prompt_caps():
-        assert (
-            engine_module._prompt_body_text(
-                content.body_text,
-                head=engine_module._EVALUATION_BODY_TEXT_HEAD_CAP,
-                tail=engine_module._EVALUATION_BODY_TEXT_TAIL_CAP,
-            )
-            == body
-        )
-        # Description dedup still sees the original body in both arms.
-        assert engine_module._prompt_description_for_content(content, limit=400) == ""
-        assert (
-            engine_module._batch_evaluation_content_item(
-                content,
-                source_context="replay",
-            )["body_text"]
-            == body
-        )
-
-    assert engine_module._EVALUATION_BODY_TEXT_HEAD_CAP == 200
-    assert engine_module._EVALUATION_BODY_TEXT_TAIL_CAP == 100
 
 
 def test_profile_snapshot_matches_effective_soul_profile_contract(tmp_path: Path) -> None:

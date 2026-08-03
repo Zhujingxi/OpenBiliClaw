@@ -1,9 +1,10 @@
 # LLM Token Diet Spec — heavy-user cost scaling
 
-> **2026-07-28 correction:** Phase 0's original standalone gate description is
+> **2026-08-03 landing correction:** Phase 0's original standalone gate description is
 > historical. Use the production-equivalent repeated gate in
-> [`2026-07-18-eval-reason-diet-spec.md`](./2026-07-18-eval-reason-diet-spec.md);
-> the former independent-snapshot / absolute-threshold evidence is invalid.
+> [`2026-08-03-llm-token-diet-landing-hardening-spec.md`](./2026-08-03-llm-token-diet-landing-hardening-spec.md);
+> the former independent-snapshot / absolute-threshold evidence is invalid. The proposed 200+100
+> `body_text` cap failed the strict Reddit 100×3 gate and was completely reverted.
 >
 **Created:** 2026-07-05
 **Scope:** discovery evaluation prompt/cache/fallback, recommendation expression & classification
@@ -56,7 +57,8 @@ before vs after, plus `evaluation_profile_prompt_cache_stats` (`discovery/engine
 6. **Explore-strategy candidates are exempt from embedding pre-filter** (cross-domain discovery
    is intentionally outside the interest neighborhood, `discovery/engine.py:1187-1189`).
 7. **Measure before you cut (quality gate):** any phase that changes what the model sees
-   (Phase 1, 5, 7-body-text) must pass the golden-set replay gate (Phase 0) before merge:
+   must pass the golden-set replay gate before merge. Phase 7's body-text experiment failed and
+   was removed; the historical absolute thresholds below are superseded by the repeated relative gate:
    admission flip rate ≤ 3%, Spearman rank correlation ≥ 0.95 vs the full-profile baseline on
    ≥100 real evaluated candidates. The embedding pre-filter (Phase 2) ships in **shadow mode
    first** — it logs what it *would* filter without filtering; it is flipped to enforce only
@@ -107,7 +109,7 @@ the full wait machinery is implemented (`candidate_pipeline.py:765-800`) but nei
 (`cli.py:8889`, `api/runtime_context.py:642`) passes values and no config field exists. Trickle
 candidates produce tiny batches, each paying the full profile-block overhead.
 
-### D7. `body_text` is uncapped in prompts
+### D7. `body_text` is uncapped in prompts (cap proposal later rejected)
 
 Eval batch (`engine.py:1675`), eval single (`engine.py:1210`), batch expression
 (`recommendation/engine.py:1361`) all pass raw `body_text`. Empty for bilibili videos, but
@@ -139,9 +141,10 @@ original analysis that framed it as per-wave hot path).
 | 4 | Complete `_ROUTE_BUCKET_PREFIXES` + config tiering guidance | **MUST** | Tiny change; unblocks config-only flash-tier routing for the whole hot path |
 | 5 | Expression / classification profile diet (share compactor) | RECOMMENDED | Same lever as Phase 1 on the second-largest prompt family; expression side additionally gated on a side-by-side sample |
 | 6 | Eval-drain coalescing config (`eval_min_batch_size` / `eval_max_wait_seconds`) | RECOMMENDED | Machinery exists; needs config plumbing + sane defaults; no quality surface (delay-only) |
-| 7 | Hygiene: `_eval_cache` LRU bound, `body_text` head+tail caps, classify batch 10→30 | RECOMMENDED / OPTIONAL | Correctness hardening + latent-bomb defusal; no immediate spend today |
+| 7 | Hygiene: `_eval_cache` LRU bound, rejected `body_text` head+tail experiment, classify batch 10→30 | PARTIAL | LRU and batch-size changes remain; strict replay rejected the body-text cap |
 
-Dependencies: Phases 1, 5, and 7's body-text cap are gated on Phase 0's replay verdict.
+Dependencies: Phases 1 and 5 are gated on Phase 0's replay verdict. Phase 7's body-text cap was
+evaluated under that rule and rejected.
 Phase 5 depends on Phase 1 (shared compactor relocation). Phases 2, 3, 4, 6 are otherwise
 independent of each other and of Phase 1.
 
@@ -152,8 +155,8 @@ independent of each other and of Phase 1.
   size, and Phase 2's *code* (default `shadow` is behavior-neutral — the quality decision is
   the later `enforce` config flip, made on shadow data).
 - **Wave B (quality-gated, in order):** Phase 0 (gate infra) → Phase 1 (compact + recall,
-  replay-gated) → Phase 5 (expression/classification diet, replay + side-by-side) → Phase 7's
-  body-text cap (replay-gated on a text-source sample).
+  replay-gated) → Phase 5 (expression/classification diet, replay + side-by-side). The later
+  Phase 7 body-text experiment failed its text-source gate and was rolled back.
 
 Every Wave B step lands with its gate evidence in the PR; work can stop after any wave with
 all shipped value retained.
@@ -324,12 +327,14 @@ chosen so first-run init (large pending backlog) is never delayed.
 
 - `_eval_cache` → bounded LRU (cap 4096 entries; `OrderedDict` move-to-end on hit, evict oldest
   on insert). Keep the 4/5-tuple legacy tolerance (`engine.py:1370-1374`).
-- `body_text` caps via one shared **head+tail** helper (keep the opening *and* the conclusion —
+- Historical proposal: `body_text` caps via one shared **head+tail** helper (keep the opening *and* the conclusion —
   long posts put the thesis up front and the takeaway at the end; a head-only slice loses the
   latter): eval and expression paths 200 head + 100 tail chars (tightened from the draft 1600+400 by user decision - title/description already carry the gist), with a
   fixed `…` joiner. Deterministic (plain slices — cache convention). Cap values are module
   constants, and the eval cap change rides the Phase 0 replay gate on a text-source sample
-  (bilibili items have empty `body_text`, so bilibili-only replays trivially pass).
+  (bilibili items have empty `body_text`, so bilibili-only replays trivially pass). The required
+  Reddit 100×3 replay later failed all quality dimensions; the helper and all production call sites
+  were removed, leaving full body text as the accepted behavior.
 - `classify_pool_backlog` default `batch_size` 10 → 30.
 
 ## Expected impact (heavy user, mature profile)
@@ -353,7 +358,7 @@ that branch's caller names) and a possible trivial merge conflict in `llm/servic
 ## Documentation obligations (per CLAUDE.md)
 
 - `docs/modules/discovery.md` — compacted eval summary, batch pre-filter, split-retry, coalescing
-- `docs/modules/recommendation.md` — shared compactor, body_text cap, classify batch size
+- `docs/modules/recommendation.md` — shared compactor, rejected body-text cap, classify batch size
 - `docs/modules/llm.md` — routing-bucket table update
 - `docs/modules/config.md` — new `[scheduler]` fields, bucket coverage
 - `docs/changelog.md` — bullet under the current version block

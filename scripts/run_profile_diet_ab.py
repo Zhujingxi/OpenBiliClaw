@@ -8,9 +8,6 @@ Usage:
         --arm-b reason-diet --sample 100 --repeats 3 \
         --output data/eval/reason-diet.json
     .venv/bin/python scripts/run_profile_diet_ab.py \
-        --arm-b body-cap --platform twitter --sample 100 --repeats 3 \
-        --output data/eval/profile-diet-body-cap.json
-    .venv/bin/python scripts/run_profile_diet_ab.py \
         --arm-b model=<instance-id> --sample 100 --repeats 3 \
         --output data/eval/model-route.json
 
@@ -55,10 +52,6 @@ FLIP_RATE_MAX = 0.03
 SPEARMAN_MIN = 0.95
 CHUNK_TIMEOUT_SECONDS = 900.0
 RATE_LIMIT_RETRY_DELAYS_SECONDS = (65.0, 130.0)
-
-BODY_CAP_HEAD = 200
-BODY_CAP_TAIL = 100
-BODY_CAP_JOINER = "\u2026"
 
 _REPLAY_STATUSES = frozenset({"evaluated", "cached", "rejected_low_score"})
 _DEFAULT_BATCH_SIZE = 30
@@ -142,7 +135,6 @@ class ReplayCandidate:
     source_platform: str = ""
     content_id: str = ""
     content_url: str = ""
-    body_text: str = ""
     score_threshold: float = 0.0
 
 
@@ -506,33 +498,6 @@ def select_replay_rows(
     return selected[:sample_count]
 
 
-def cap_body_text(
-    text: str,
-    *,
-    head_chars: int = BODY_CAP_HEAD,
-    tail_chars: int = BODY_CAP_TAIL,
-    joiner: str = BODY_CAP_JOINER,
-) -> str:
-    """Return ``text`` capped to head + tail with an ellipsis joiner."""
-
-    head = max(0, int(head_chars))
-    tail = max(0, int(tail_chars))
-    if len(text) <= head + tail:
-        return text
-    if tail == 0:
-        return text[:head] + joiner
-    return text[:head] + joiner + text[-tail:]
-
-
-def body_cap_affected_count(rows: Sequence[Mapping[str, Any]]) -> int:
-    """Count candidates whose model-visible body changes under production caps."""
-
-    return sum(
-        cap_body_text(str(row.get("body_text") or "")) != str(row.get("body_text") or "")
-        for row in rows
-    )
-
-
 @contextmanager
 def replay_call_attribution(
     *,
@@ -605,27 +570,6 @@ def validate_replay_prefilter_compatibility(config: object) -> str:
             "collecting landing evidence; otherwise the replay cohort is not equivalent."
         )
     return mode
-
-
-@contextmanager
-def legacy_body_text_prompt_caps() -> Iterator[None]:
-    """Disable evaluation body caps at prompt construction for body-cap arm A.
-
-    Candidates remain byte-for-byte unchanged. This preserves the production
-    description/body dedup relation and changes only the model-visible cap.
-    """
-
-    from openbiliclaw.discovery import engine as engine_module
-
-    original_head = engine_module._EVALUATION_BODY_TEXT_HEAD_CAP
-    original_tail = engine_module._EVALUATION_BODY_TEXT_TAIL_CAP
-    engine_module._EVALUATION_BODY_TEXT_HEAD_CAP = sys.maxsize
-    engine_module._EVALUATION_BODY_TEXT_TAIL_CAP = 0
-    try:
-        yield
-    finally:
-        engine_module._EVALUATION_BODY_TEXT_HEAD_CAP = original_head
-        engine_module._EVALUATION_BODY_TEXT_TAIL_CAP = original_tail
 
 
 def _embedding_namespace(service: object) -> str:
@@ -851,7 +795,6 @@ def _row_to_replay_candidate(row: Mapping[str, Any]) -> ReplayCandidate:
         source_platform=_normalize_platform(row.get("source_platform")),
         content_id=content_id,
         content_url=str(row.get("content_url") or ""),
-        body_text=str(row.get("body_text") or ""),
         score_threshold=float(row.get("score_threshold") or 0.0),
     )
 
@@ -1667,9 +1610,6 @@ def replay_blocking_reasons(
     route_audit: Mapping[str, object],
     embedding_audit: Mapping[str, object],
     recall_audit: Mapping[str, object],
-    body_cap: bool,
-    body_cap_affected: int,
-    body_cap_contract_matches: bool,
     profile_snapshot_stable: bool,
     candidate_snapshot_stable: bool,
 ) -> list[str]:
@@ -1688,15 +1628,6 @@ def replay_blocking_reasons(
             blocking_reasons.append(f"{label} audit failed")
         blocking_reasons.extend(str(reason) for reason in audit.get("blocking_reasons", []))
 
-    if body_cap and body_cap_affected <= 0:
-        blocking_reasons.append(
-            "body-cap experiment had zero candidates affected by the production cap"
-        )
-    if body_cap and not body_cap_contract_matches:
-        blocking_reasons.append(
-            "live production body caps no longer match replay contract "
-            f"({BODY_CAP_HEAD}+{BODY_CAP_TAIL})"
-        )
     if not profile_snapshot_stable:
         blocking_reasons.append("effective profile snapshot drifted during replay")
     if not candidate_snapshot_stable:
@@ -1930,7 +1861,6 @@ def _write_artifact(
     route_audit: Mapping[str, object],
     embedding_audit: Mapping[str, object],
     recall_audit: Mapping[str, object],
-    body_cap_affected: int,
     production_prefilter_mode: str,
     topic_lifecycle_serialization: bool,
 ) -> None:
@@ -2005,12 +1935,6 @@ def _write_artifact(
             )
             for pair in treatment_pairs
         ],
-        "body_cap": {
-            "head": BODY_CAP_HEAD,
-            "tail": BODY_CAP_TAIL,
-            "joiner": BODY_CAP_JOINER,
-            "affected_count": body_cap_affected,
-        },
         "gate_constants": {
             "flip_rate_max": FLIP_RATE_MAX,
             "spearman_min": SPEARMAN_MIN,
@@ -2036,11 +1960,7 @@ def _write_artifact(
 
 async def run(args: argparse.Namespace) -> int:
     from openbiliclaw.config import _default_config_path, load_config
-    from openbiliclaw.discovery.engine import (
-        _EVALUATION_BODY_TEXT_HEAD_CAP,
-        _EVALUATION_BODY_TEXT_TAIL_CAP,
-        _evaluation_recall_interests,
-    )
+    from openbiliclaw.discovery.engine import _evaluation_recall_interests
 
     config = load_config(args.config) if args.config else load_config()
     production_prefilter_mode = validate_replay_prefilter_compatibility(config)
@@ -2051,11 +1971,10 @@ async def run(args: argparse.Namespace) -> int:
 
     model_override = parse_model_override(str(args.arm_b))
     compact_profile = str(args.arm_b) == "compact"
-    body_cap = str(args.arm_b) == "body-cap"
     legacy_reason = str(args.arm_b) == "reason-diet"
-    if not compact_profile and not body_cap and model_override is None and not legacy_reason:
+    if not compact_profile and model_override is None and not legacy_reason:
         raise ValueError(
-            "--arm-b must be compact, body-cap, reason-diet, model=<instance-id> (v2), "
+            "--arm-b must be compact, reason-diet, model=<instance-id> (v2), "
             "or model=<provider:model> (legacy)"
         )
 
@@ -2078,7 +1997,6 @@ async def run(args: argparse.Namespace) -> int:
         candidates = [_row_to_replay_candidate(row) for row in rows]
         discovery_cfg = getattr(config, "discovery", None)
         admission_min_score = float(getattr(discovery_cfg, "admission_min_score", 0.60) or 0.60)
-        body_cap_affected = body_cap_affected_count(rows)
         eligible_tail_count = len(_evaluation_recall_interests(profile))
 
         arm_a_service = _DeterministicLLMService(
@@ -2136,14 +2054,6 @@ async def run(args: argparse.Namespace) -> int:
                 ):
                     if legacy_reason:
                         with legacy_reason_prompts():
-                            scores = await _score_contents(
-                                arm_a_engine,
-                                _rows_to_contents(rows),
-                                profile,
-                                source_context=_REPLAY_SOURCE_CONTEXT,
-                            )
-                    elif body_cap:
-                        with legacy_body_text_prompt_caps():
                             scores = await _score_contents(
                                 arm_a_engine,
                                 _rows_to_contents(rows),
@@ -2306,12 +2216,6 @@ async def run(args: argparse.Namespace) -> int:
                 route_audit=route_audit,
                 embedding_audit=embedding_audit,
                 recall_audit=recall_validation,
-                body_cap=body_cap,
-                body_cap_affected=body_cap_affected,
-                body_cap_contract_matches=(
-                    _EVALUATION_BODY_TEXT_HEAD_CAP == BODY_CAP_HEAD
-                    and _EVALUATION_BODY_TEXT_TAIL_CAP == BODY_CAP_TAIL
-                ),
                 profile_snapshot_stable=(
                     _digest(_profile_digest_payload(profile)) == frozen_profile_digest
                 ),
@@ -2326,7 +2230,6 @@ async def run(args: argparse.Namespace) -> int:
                 "route_passed": bool(route_audit.get("passed")),
                 "embedding_passed": bool(embedding_audit.get("passed")),
                 "recall_passed": bool(recall_validation.get("passed")),
-                "body_cap_affected": body_cap_affected,
                 "blocking_reasons": blocking_reasons,
             }
             if blocking_reasons:
@@ -2356,7 +2259,6 @@ async def run(args: argparse.Namespace) -> int:
                 route_audit=route_audit,
                 embedding_audit=embedding_audit,
                 recall_audit=recall_validation,
-                body_cap_affected=body_cap_affected,
                 production_prefilter_mode=production_prefilter_mode,
                 topic_lifecycle_serialization=topic_lifecycle_serialization,
             )
@@ -2416,7 +2318,7 @@ def parse_args() -> argparse.Namespace:
         "--arm-b",
         required=True,
         help=(
-            "Arm B transform: compact, body-cap, reason-diet, model=<instance-id> (v2), "
+            "Arm B transform: compact, reason-diet, model=<instance-id> (v2), "
             "or model=<provider:model> (legacy)"
         ),
     )
