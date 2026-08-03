@@ -254,6 +254,15 @@ layered-profile characters shrink `26.02%`；the maxed fixture shrinks `67.82%`.
 discovery / recommendation / replay tests pass 310 cases. A clean commit and unchanged 100×3 replay are
 still required before this experiment can be accepted or rejected.
 
+The clean experiment commit is `55e89797`. A one-repeat provider diagnostic completed its calls but was
+intentionally rejected by the existing minimum-three relative gate before artifact serialization, so no
+provider-token claim is made from that run. The replacement no-evaluator diagnostic used the same 100
+real candidates and actual prompt construction with 300 deterministic recalled labels: full prompts were
+249918 characters / 124141 `cl100k_base` tokens, while 48 / 16 prompts were 224580 characters / 115833
+tokens, a `10.14%` character and `6.69%` diagnostic-token reduction. Without recall the token reduction is
+`9.33%`; the 3-label-per-item quality counterweight consumes about `2.64pp`. Formal DeepSeek usage and
+quality still require the unchanged 100×3 run.
+
 ## Task 9 — Landing handoff
 
 **Owner:** root

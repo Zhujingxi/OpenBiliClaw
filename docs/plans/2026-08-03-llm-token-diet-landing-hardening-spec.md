@@ -223,6 +223,13 @@ block 从 `29072` 降到 `21508` 字符（`26.02%`），maxed fixture 从 `16100
 （`67.82%`）。这些只证明体积收益，不替代质量证据；48 / 16 必须从 clean commit 完整执行
 同一 100×3 gate，任何阈值均不放宽。
 
+收益诊断进一步使用同一真实 100 条 cohort 构造完整 A/B prompts，并用确定性本地 embedding
+让 compact 侧每条候选实际携带 3 个 `related_interests`（共 300 个标签），但用本地假评分器
+避免再次消耗 evaluator LLM。四个生产尺寸 batch 的 prompt 字符从 `249918` 降到 `224580`
+（`10.14%`）；`cl100k_base` 诊断 tokenizer 从 `124141` 降到 `115833` tokens，少 `8308`
+（`6.69%`，DeepSeek 实际 tokenizer 仍须正式 artifact 复核）。不做 recall 时为 `9.33%`，说明
+长尾质量补偿消耗约 `2.64pp` 的毛收益。
+
 ## 5. Replay artifact contract
 
 每个 artifact 至少包含：
