@@ -341,6 +341,12 @@ def test_artifact_keeps_raw_scores_digests_usage_routes_without_private_payloads
     assert artifact["llm_calls"][0]["usage"] == {"output_tokens": 7}
     assert artifact["routes"]["passed"] is True
     assert artifact["gate_constants"]["llm_max_tokens"] == 4096
+    assert artifact["gate_constants"]["rate_limit_retry_delays_seconds"] == [
+        65.0,
+        130.0,
+        260.0,
+        520.0,
+    ]
     assert artifact["production_context"] == {
         "eval_prefilter_mode": "shadow",
         "topic_lifecycle_serialization": "on",
@@ -1028,6 +1034,53 @@ async def test_score_contents_resets_rate_limit_budget_for_each_chunk(
     assert scores == [0.7] * 40
     assert engine.calls_by_start == {0: 3, 30: 2}
     assert sleeps == [65.0, 130.0, 65.0]
+
+
+@pytest.mark.asyncio
+async def test_score_contents_uses_bounded_extended_budget_for_sustained_throttling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    class _SustainedRateLimitedEngine:
+        _EVALUATE_BATCH_HARD_CAP = 90
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def evaluate_content_batch(
+            self,
+            contents: list[object],
+            profile: object,
+            *,
+            source_context: str,
+            batch_size: int,
+        ) -> list[float]:
+            del profile, source_context, batch_size
+            self.calls += 1
+            if self.calls <= len(replay_script.RATE_LIMIT_RETRY_DELAYS_SECONDS):
+                try:
+                    raise LLMRateLimitError("openai_compatible rate limit exceeded")
+                except LLMRateLimitError as exc:
+                    raise LLMProviderExecutionError("All providers failed") from exc
+            return [0.7] * len(contents)
+
+    monkeypatch.setattr(replay_script.asyncio, "sleep", fake_sleep)
+    engine = _SustainedRateLimitedEngine()
+    content = SimpleNamespace(
+        content_id="candidate-1",
+        relevance_score=0.0,
+        relevance_reason="",
+    )
+
+    scores = await _score_contents(engine, [content], object(), source_context="mixed")
+
+    assert scores == [0.7]
+    assert engine.calls == 5
+    assert sleeps == [65.0, 130.0, 260.0, 520.0]
 
 
 @pytest.mark.asyncio

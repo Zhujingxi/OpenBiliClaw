@@ -138,7 +138,9 @@ route drift、artifact write failure 均以非零退出。不得转换为 score 
 实际 route 时才能视为 recovered。分类以 provider adapter 的第一个规范化
 `LLMRateLimitError` 为边界，不用 SDK raw cause 中的通用 metadata 重新解释已经映射的 HTTP
 429；明确映射的 HTTP 402、余额/计费错误和其它异常不重试。重试预算按 chunk 独立，前一 chunk
-恢复成功时不能耗掉下一 chunk 的预算。
+恢复成功时不能耗掉下一 chunk 的预算。真实 clean-commit run 证明两次 cooldown 不足以覆盖
+gateway 协议修复链中的持续 429，因此 bounded schedule 固定为 65 / 130 / 260 / 520 秒、最多
+四次；schedule 必须进入 artifact，不能无限重试。
 
 ### I5. Body-cap rejection is binding
 

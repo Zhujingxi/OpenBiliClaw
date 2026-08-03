@@ -51,7 +51,7 @@ logger = logging.getLogger("eval.profile_diet_ab")
 FLIP_RATE_MAX = 0.03
 SPEARMAN_MIN = 0.95
 CHUNK_TIMEOUT_SECONDS = 900.0
-RATE_LIMIT_RETRY_DELAYS_SECONDS = (65.0, 130.0)
+RATE_LIMIT_RETRY_DELAYS_SECONDS = (65.0, 130.0, 260.0, 520.0)
 
 _REPLAY_STATUSES = frozenset({"evaluated", "cached", "rejected_low_score"})
 _DEFAULT_BATCH_SIZE = 30
@@ -1944,6 +1944,7 @@ def _write_artifact(
             "production_default_temperature": 0.7,
             "batch_size": _DEFAULT_BATCH_SIZE,
             "chunk_timeout_seconds": CHUNK_TIMEOUT_SECONDS,
+            "rate_limit_retry_delays_seconds": list(RATE_LIMIT_RETRY_DELAYS_SECONDS),
         },
         "embedding": dict(embedding_audit),
         "recall": dict(recall_audit),

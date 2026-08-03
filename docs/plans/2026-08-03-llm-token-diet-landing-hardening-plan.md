@@ -65,7 +65,8 @@ Implementation checklist:
 - [x] extract and test final blocking-reason aggregation so every failed sub-audit blocks landing。
 - [x] retry only recovered transient provider rate limits after cooldown, restoring chunk evaluation
       state and retaining failed attempts in route audit；classification stops at the normalized
-      provider-limit boundary, retry budgets reset per chunk, and 402/billing errors remain fatal。
+      provider-limit boundary, retry budgets reset per chunk, and 402/billing errors remain fatal；
+      clean-commit sustained throttling expands the bounded schedule to 65 / 130 / 260 / 520 seconds。
 
 **Focused gate:**
 
@@ -173,9 +174,9 @@ either incorporate the current-main fix during rebase or document an environment
 - Ruff format check: 544 files formatted；Ruff lint: pass；MyPy: 236 source files, pass；
   `git diff --check`: pass。
 - Required focused integration group after the conservative 80 / 16 correction, normalized
-  rate-limit-boundary fix and full-body rollback: 1355 passed in 130.33s。
-- Full repository after the same final corrections: 7035 passed, 93 environment/platform skips in
-  624.06s；zero failures。
+  rate-limit-boundary fix, full-body rollback and extended bounded cooldown: 1356 passed in 130.74s。
+- Full repository after the same final corrections: 7036 passed, 93 environment/platform skips in
+  624.42s；zero failures。
 - Extension final-main compatibility: TypeScript typecheck pass；1244 Node tests pass after the
   worktree installed lockfile-pinned dev dependencies。
 - The rebase exposed two current-main hygiene failures (one missing blank line and one import order);
@@ -208,7 +209,7 @@ quality gate at 64 / 12 (Spearman median `0.494686 < 0.570454`; admission delta 
 `-0.09 < -0.07`). Root diagnosis found that this cut saved only about 11% on the current profile while
 removing model-visible semantic tail, so the implementation now uses 80 interests / 16 specifics and
 tail recall ranks 81..256. The full-body rollback's focused discovery/replay/recommendation group passes
-304 tests；the required integration group passes 1355 tests, and the full repository passes 7035 tests
+305 tests；the required integration group passes 1356 tests, and the full repository passes 7036 tests
 with 93 environment/platform skips. Extension TypeScript typecheck and all 1244 Node tests also pass.
 The 80 / 16 compact artifact on
 `11f77a64` passed its final gate, while the strict Reddit 100×3 body-cap artifact failed all three quality
@@ -219,6 +220,12 @@ rerun from the resulting clean commit；the rejected artifact remains diagnostic
 80 / 16 rerun also
 exposed and closed a replay-only classifier bug where raw SDK 429 metadata overrode the adapter's
 normalized transient-rate-limit decision；no quality metrics were emitted by that aborted run.
+The next clean-commit compact run on `0395e138` progressed for 97 minutes but correctly exited nonzero
+when the final 10-item chunk exhausted 65 / 130 second retries: the gateway's successful empty/think
+responses forced immediate protocol-level follow-up calls that repeatedly hit genuine 429s. No artifact
+or quality result was emitted. Replay-only cooldown is therefore still bounded but extended to
+65 / 130 / 260 / 520 seconds, with the schedule recorded in artifact v2；production retry behavior,
+model-visible inputs and every quality threshold remain unchanged.
 
 ## Task 9 — Landing handoff
 
