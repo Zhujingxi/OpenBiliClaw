@@ -154,11 +154,11 @@ def _profile_interests_by_weight(profile: SoulProfile) -> list[object]:
 
 
 def _evaluation_recall_interests(profile: SoulProfile) -> list[dict[str, object]]:
-    """Tail interests only: ranks beyond the compact block's top-80.
+    """Tail interests only: ranks beyond the compact block's top-96.
 
     Interests inside the compact profile block are already visible to the
     model; recalling them per item would duplicate tokens for nothing. On a
-    young profile (<= 80 interests) this list is empty and recall costs zero.
+    young profile (<= 96 interests) this list is empty and recall costs zero.
     """
     interests: list[dict[str, object]] = []
     tail = _profile_interests_by_weight(profile)[_CONTENT_PROMPT_INTEREST_CAP:_EVAL_RECALL_POOL_CAP]
@@ -908,7 +908,7 @@ class ContentDiscoveryEngine:
         )
         # Enforce must see every interest that the downstream long-tail recall
         # can surface. Restricting this to the compact prompt's visible block
-        # would reject candidates matching ranks 81..256 before recall ran.
+        # would reject candidates matching ranks 97..256 before recall ran.
         for interest in ranked_interests[:_EVAL_RECALL_POOL_CAP]:
             append_label(interest.name)
 

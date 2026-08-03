@@ -77,11 +77,11 @@ Test `tests/test_discovery_engine.py`
 1. Failing tests:
    - `_evaluation_profile_summary(profile)` returns
      `compact_evaluation_profile_summary(build_profile_summary(profile))` (compare dicts on a
-     synthetic maxed profile: >32 interest domains with >16 specifics each, >80 interests,
+     synthetic maxed profile: >32 interest domains with >16 specifics each, >96 interests,
      >20 core traits).
    - `disliked_topics` length is identical before/after compaction even with 100+ entries.
    - `_evaluation_profile_digest` changes when an interest domain is added, **and** when a
-     tail interest (rank > 80, outside the compact block but inside the recall pool) is added —
+     tail interest (rank > 96, outside the compact block but inside the recall pool) is added —
      the digest must cover the recall pool (invariant 3).
    - Digest **unchanged** when only volatile per-entry fields change (see step 4).
    - Rendered profile block (join of

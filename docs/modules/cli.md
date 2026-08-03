@@ -595,7 +595,7 @@ $ openbiliclaw questions
 
 ### `openbiliclaw profile-consolidate`
 
-用 LLM 整理合并画像里重复的喜欢 / 讨厌主题。兴趣标签和避雷主题会不断积累措辞变体（「智能体开发」vs「智能体开发与实现」），把进入内容 prompt 的 top-80 名额挤占掉；本命令按「规则合并 → embedding 聚类 → LLM 裁决 → 校验执行 → active 库存归档」流水线做同义合并，默认整理 likes 权重 top-512 + 全量避雷主题。后台默认每 12 小时自动跑一轮（见 `[scheduler].profile_consolidation_*`），本命令用于手动触发与预览。
+用 LLM 整理合并画像里重复的喜欢 / 讨厌主题。兴趣标签和避雷主题会不断积累措辞变体（「智能体开发」vs「智能体开发与实现」），把进入内容 prompt 的 top-96 名额挤占掉；本命令按「规则合并 → embedding 聚类 → LLM 裁决 → 校验执行 → active 库存归档」流水线做同义合并，默认整理 likes 权重 top-512 + 全量避雷主题。后台默认每 12 小时自动跑一轮（见 `[scheduler].profile_consolidation_*`），本命令用于手动触发与预览。
 
 ```bash
 $ openbiliclaw profile-consolidate            # dry-run：只打印建议

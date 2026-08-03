@@ -188,12 +188,23 @@ Final-commit 的首次真实 compact 100×3 replay 对 64 interests / 12 specifi
 失败：treatment Spearman 中位数 `0.494686 < 0.570454` control floor，admission delta 中位数
 `-0.09 < -0.07` floor。该 artifact 只用于诊断，不能作为 landing PASS。
 
-修正边界为 80 interests / 32 domains × 16 specifics；per-item tail recall 相应只覆盖 ranks
-81..256。选择这一边界的约束是：
+第一次修正把边界提高到 80 interests / 32 domains × 16 specifics，并让 per-item tail recall
+覆盖 ranks 81..256。`11f77a64` 的冻结画像回放曾通过，但不能替代最终 commit 的重验：随后
+effective profile 增长到 87 项兴趣，`397fe03e` 上的严格 100×3 compact replay 再次失败，
+treatment flip-rate 中位数为 `15% > 7%` ceiling，Spearman 中位数为
+`0.356586 < 0.564777` floor；admission delta 中位数 `+1pp` 通过，唯一 blocker 仍是相对质量门。
+失败 artifact 归档为 `data/eval/profile-diet-compact-failed-397fe03e.json`，SHA-256
+`d58bb6888276e9c0b40c821d2d450f478645771380a8b4f88d46cdbc06dadcdc`。
 
-- 当前生产画像的全部实际 interests / domain specifics 都保留，主要只移除 volatile metadata；
-- mature fixture 仍减少约 58% 字符，maxed fixture 减少约 63%，继续满足高成熟度画像的降本目标；
-- 当前画像不再为了约 11% 的有限缩短承受语义截断；
+最终修正边界为 96 interests / 32 domains × 16 specifics；per-item tail recall 相应只覆盖
+ranks 97..256。选择这一边界的约束是：
+
+- 当前生产画像的 87 项 interests 和全部实际 domain specifics 都保留，主要只移除 volatile
+  metadata；当前序列化画像保留 `98.29%` 字符；
+- mature fixture 仍减少 `53.58%` 字符，maxed fixture 的实际分层 prompt 减少 `61.17%`，
+  继续通过既有“极限画像至少缩短 60%”测试；96 是所验证的 80 / 96 / 128 候选中满足该约束
+  的最大边界，128 的同一分层 prompt 仅减少 `56.74%`；
+- 画像继续增长到第 97 项后，长尾 recall 与 eval digest 仍覆盖 ranks 97..256；
 - Spearman、flip-rate、admission floors 完全不变，保留的 compact / reason-diet 两臂在修正后的
   clean commit 重新执行。
 

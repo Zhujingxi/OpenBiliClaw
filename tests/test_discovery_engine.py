@@ -267,7 +267,7 @@ def _maxed_onion_profile() -> OnionProfile:
     return profile
 
 
-def _profile_with_ranked_interests(count: int = 90) -> SoulProfile:
+def _profile_with_ranked_interests(count: int = 96) -> SoulProfile:
     profile = SoulProfile()
     profile.preferences.interests = [
         InterestTag(
@@ -481,8 +481,9 @@ def test_compact_evaluation_profile_summary_keeps_high_signal_context() -> None:
     compacted = compact_evaluation_profile_summary(profile_summary)
 
     assert len(compacted["core_traits"]) == 20
-    assert len(compacted["interests"]) == 80
+    assert len(compacted["interests"]) == 96
     assert compacted["interests"][0]["name"] == "interest-0"
+    assert compacted["interests"][-1]["name"] == "interest-95"
     assert compacted["disliked_topics"] == profile_summary["disliked_topics"]
     assert len(compacted["interest_domains"]) == 32
     assert len(compacted["interest_domains"][0]["specifics"]) == 16
@@ -501,7 +502,7 @@ def test_content_prompt_profile_compactor_is_eval_backcompat_alias() -> None:
     profile_summary = {
         "core_traits": [f"trait-{index}" for index in range(30)],
         "interests": [
-            {"name": f"interest-{index}", "weight": 1.0 - index / 100} for index in range(90)
+            {"name": f"interest-{index}", "weight": 1.0 - index / 100} for index in range(110)
         ],
         "disliked_topics": ["avoid"],
     }
@@ -914,7 +915,7 @@ async def test_related_interests_returns_tail_match_and_degrades_without_embeddi
     vectors = {
         content_text: _MATCH_VEC,
         "稀有铁路模型": _MATCH_VEC,
-        **{f"头部兴趣{index:02d}": _LOW_SIM_VEC for index in range(90)},
+        **{f"头部兴趣{index:02d}": _LOW_SIM_VEC for index in range(96)},
     }
     engine = ContentDiscoveryEngine(
         llm_service=None,
@@ -961,7 +962,7 @@ async def test_evaluate_batch_adds_related_interests_without_changing_profile_pr
     vectors = {
         content_text: _MATCH_VEC,
         "稀有铁路模型": _MATCH_VEC,
-        **{f"头部兴趣{index:02d}": _LOW_SIM_VEC for index in range(90)},
+        **{f"头部兴趣{index:02d}": _LOW_SIM_VEC for index in range(96)},
     }
     llm_with_recall = _DynamicBatchLLMService()
     engine_with_recall = ContentDiscoveryEngine(
@@ -1008,7 +1009,7 @@ async def test_evaluate_content_single_adds_related_interests_to_content_summary
             {
                 content_text: _MATCH_VEC,
                 "稀有铁路模型": _MATCH_VEC,
-                **{f"头部兴趣{index:02d}": _LOW_SIM_VEC for index in range(90)},
+                **{f"头部兴趣{index:02d}": _LOW_SIM_VEC for index in range(96)},
             }
         ),
         eval_prefilter_mode="off",
@@ -1401,16 +1402,16 @@ async def test_embedding_prefilter_includes_long_tail_recall_interests() -> None
             category="测试",
             weight=1.0 - index / 1000,
         )
-        for index in range(80)
+        for index in range(96)
     ]
     profile.preferences.interests.append(
-        InterestTag(name="第81项长尾", category="测试", weight=0.5)
+        InterestTag(name="第97项长尾", category="测试", weight=0.5)
     )
-    vectors = {f"头部兴趣{index}": [1.0, 0.0] for index in range(80)}
+    vectors = {f"头部兴趣{index}": [1.0, 0.0] for index in range(96)}
     vectors.update(
         {
-            "第81项长尾": [0.0, 1.0],
-            "长尾命中 只匹配第81项": [0.0, 1.0],
+            "第97项长尾": [0.0, 1.0],
+            "长尾命中 只匹配第97项": [0.0, 1.0],
         }
     )
     engine = ContentDiscoveryEngine(
@@ -1420,7 +1421,7 @@ async def test_embedding_prefilter_includes_long_tail_recall_interests() -> None
     )
 
     filtered = await engine._embedding_prefilter(  # noqa: SLF001
-        [DiscoveredContent(bvid="BVTAIL", title="长尾命中", description="只匹配第81项")],
+        [DiscoveredContent(bvid="BVTAIL", title="长尾命中", description="只匹配第97项")],
         profile,
     )
 
@@ -4148,7 +4149,7 @@ async def test_evaluate_batch_uses_layered_profile_prompt_with_compacted_interes
     profile = _build_profile()
     profile.preferences.interests = [
         InterestTag(name=f"兴趣{index}", category="测试", weight=1.0 - index / 1000)
-        for index in range(80)
+        for index in range(110)
     ]
 
     await engine._evaluate_batch(
@@ -4169,8 +4170,8 @@ async def test_evaluate_batch_uses_layered_profile_prompt_with_compacted_interes
     profile_interests = _json_prompt_block(user_input, "profile_interests")
     interests = profile_interests["interests"]
     assert isinstance(interests, list)
-    assert len(interests) == 80
-    assert interests[-1]["name"] == "兴趣79"
+    assert len(interests) == 96
+    assert interests[-1]["name"] == "兴趣95"
 
 
 @pytest.mark.asyncio
@@ -4753,7 +4754,6 @@ async def test_batch_eval_cache_preserves_exact_tail_interest_weight_in_digest()
 
 def _tail_recall_vectors(*content_texts: str) -> dict[str, list[float]]:
     return {
-        **{f"\u5934\u90e8\u5174\u8da3{index:02d}": _LOW_SIM_VEC for index in range(80, 90)},
         "\u7a00\u6709\u94c1\u8def\u6a21\u578b": _MATCH_VEC,
         **{content_text: _MATCH_VEC for content_text in content_texts},
     }
@@ -4853,7 +4853,7 @@ async def test_batch_eval_empty_interest_vector_is_not_a_stable_zero_recall() ->
     profile = _profile_with_tail_interest()
     content_text = "\u7a00\u6709\u94c1\u8def\u6a21\u578b \u5411\u91cf\u6062\u590d"
     vectors = _tail_recall_vectors(content_text)
-    vectors.pop("\u5934\u90e8\u5174\u8da380")
+    vectors.pop("\u7a00\u6709\u94c1\u8def\u6a21\u578b")
     embedding = _NamespacedEmbeddingService(vectors, fingerprint="stable-model")
     llm = _DynamicBatchLLMService()
     engine = ContentDiscoveryEngine(
@@ -4873,7 +4873,7 @@ async def test_batch_eval_empty_interest_vector_is_not_a_stable_zero_recall() ->
     await engine.evaluate_content_batch([candidate()], profile)
     assert "related_interests" not in _batch_prompt_items(llm.user_inputs[0])[0]
 
-    embedding.vectors["\u5934\u90e8\u5174\u8da380"] = _LOW_SIM_VEC
+    embedding.vectors["\u7a00\u6709\u94c1\u8def\u6a21\u578b"] = _MATCH_VEC
     await engine.evaluate_content_batch([candidate()], profile)
     await engine.evaluate_content_batch([candidate()], profile)
 

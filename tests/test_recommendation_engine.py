@@ -158,7 +158,7 @@ def test_recommendation_profile_summary_compacts_maxed_profile() -> None:
 
     assert summary == expected
     assert len(summary["core_traits"]) == 20
-    assert len(summary["interests"]) == 80
+    assert len(summary["interests"]) == 96
     assert len(summary["interest_domains"]) == 32
 
 
@@ -170,14 +170,14 @@ def test_recommendation_profile_summary_compacts_after_interests_substitution() 
             "category": "selected",
             "weight": 1.0 - index / 1000,
         }
-        for index in range(90)
+        for index in range(110)
     ]
 
     summary = _recommendation_profile_summary(profile, interests=selected_interests)
 
-    assert len(summary["interests"]) == 80
+    assert len(summary["interests"]) == 96
     assert summary["interests"][0]["name"] == "selected-interest-00"
-    assert summary["interests"][-1]["name"] == "selected-interest-79"
+    assert summary["interests"][-1]["name"] == "selected-interest-95"
     assert "interest-000-" not in json.dumps(summary["interests"], ensure_ascii=False)
 
 

@@ -1209,6 +1209,134 @@
       "name": "细分-2-6",
       "source": "behavior",
       "weight": 0.77
+    },
+    {
+      "category": "领域-3",
+      "first_seen": "2026-01-01",
+      "last_seen": "2026-06-27",
+      "name": "细分-3-6",
+      "source": "behavior",
+      "weight": 0.77
+    },
+    {
+      "category": "领域-4",
+      "first_seen": "2026-01-01",
+      "last_seen": "2026-06-27",
+      "name": "细分-4-6",
+      "source": "behavior",
+      "weight": 0.77
+    },
+    {
+      "category": "领域-5",
+      "first_seen": "2026-01-01",
+      "last_seen": "2026-06-27",
+      "name": "细分-5-6",
+      "source": "behavior",
+      "weight": 0.77
+    },
+    {
+      "category": "领域-6",
+      "first_seen": "2026-01-01",
+      "last_seen": "2026-06-27",
+      "name": "细分-6-6",
+      "source": "behavior",
+      "weight": 0.77
+    },
+    {
+      "category": "领域-7",
+      "first_seen": "2026-01-01",
+      "last_seen": "2026-06-27",
+      "name": "细分-7-6",
+      "source": "behavior",
+      "weight": 0.77
+    },
+    {
+      "category": "领域-8",
+      "first_seen": "2026-01-01",
+      "last_seen": "2026-06-27",
+      "name": "细分-8-6",
+      "source": "behavior",
+      "weight": 0.77
+    },
+    {
+      "category": "领域-9",
+      "first_seen": "2026-01-01",
+      "last_seen": "2026-06-27",
+      "name": "细分-9-6",
+      "source": "behavior",
+      "weight": 0.77
+    },
+    {
+      "category": "领域-10",
+      "first_seen": "2026-01-01",
+      "last_seen": "2026-06-27",
+      "name": "细分-10-6",
+      "source": "behavior",
+      "weight": 0.77
+    },
+    {
+      "category": "领域-11",
+      "first_seen": "2026-01-01",
+      "last_seen": "2026-06-27",
+      "name": "细分-11-6",
+      "source": "behavior",
+      "weight": 0.77
+    },
+    {
+      "category": "领域-5",
+      "first_seen": "2026-01-01",
+      "last_seen": "2026-06-27",
+      "name": "领域-5",
+      "source": "behavior",
+      "weight": 0.74
+    },
+    {
+      "category": "领域-0",
+      "first_seen": "2026-01-01",
+      "last_seen": "2026-06-27",
+      "name": "细分-0-7",
+      "source": "behavior",
+      "weight": 0.74
+    },
+    {
+      "category": "领域-1",
+      "first_seen": "2026-01-01",
+      "last_seen": "2026-06-27",
+      "name": "细分-1-7",
+      "source": "behavior",
+      "weight": 0.74
+    },
+    {
+      "category": "领域-2",
+      "first_seen": "2026-01-01",
+      "last_seen": "2026-06-27",
+      "name": "细分-2-7",
+      "source": "behavior",
+      "weight": 0.74
+    },
+    {
+      "category": "领域-3",
+      "first_seen": "2026-01-01",
+      "last_seen": "2026-06-27",
+      "name": "细分-3-7",
+      "source": "behavior",
+      "weight": 0.74
+    },
+    {
+      "category": "领域-4",
+      "first_seen": "2026-01-01",
+      "last_seen": "2026-06-27",
+      "name": "细分-4-7",
+      "source": "behavior",
+      "weight": 0.74
+    },
+    {
+      "category": "领域-5",
+      "first_seen": "2026-01-01",
+      "last_seen": "2026-06-27",
+      "name": "细分-5-7",
+      "source": "behavior",
+      "weight": 0.74
     }
   ],
   "life_stage": "工作稳定期",

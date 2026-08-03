@@ -171,12 +171,12 @@ either incorporate the current-main fix during rebase or document an environment
 
 **Result (2026-08-03):**
 
-- Ruff format check: 544 files formatted；Ruff lint: pass；MyPy: 236 source files, pass；
+- Ruff format check: 543 files formatted；Ruff lint: pass；MyPy: 236 source files, pass；
   `git diff --check`: pass。
-- Required focused integration group after the conservative 80 / 16 correction, normalized
-  rate-limit-boundary fix, full-body rollback and extended bounded cooldown: 1356 passed in 130.74s。
-- Full repository after the same final corrections: 7036 passed, 93 environment/platform skips in
-  624.42s；zero failures。
+- Replay / discovery / recommendation focused group after the 96 / 16 correction: 305 passed in
+  15.66s；required focused integration group: 1356 passed in 129.86s。
+- Full repository after the same correction: 7036 passed, 93 environment/platform skips in
+  619.93s；zero failures。
 - Extension final-main compatibility: TypeScript typecheck pass；1244 Node tests pass after the
   worktree installed lockfile-pinned dev dependencies。
 - The rebase exposed two current-main hygiene failures (one missing blank line and one import order);
@@ -206,13 +206,12 @@ acceptance fields resolve to prefilter `shadow`, admission `0.6`, coalescing `15
 provider 429 caused the replay-only bounded cooldown retry change. The first compact run on that hardened
 commit then correctly failed the unchanged relative
 quality gate at 64 / 12 (Spearman median `0.494686 < 0.570454`; admission delta median
-`-0.09 < -0.07`). Root diagnosis found that this cut saved only about 11% on the current profile while
-removing model-visible semantic tail, so the implementation now uses 80 interests / 16 specifics and
-tail recall ranks 81..256. The full-body rollback's focused discovery/replay/recommendation group passes
-305 tests；the required integration group passes 1356 tests, and the full repository passes 7036 tests
-with 93 environment/platform skips. Extension TypeScript typecheck and all 1244 Node tests also pass.
-The 80 / 16 compact artifact on
-`11f77a64` passed its final gate, while the strict Reddit 100×3 body-cap artifact failed all three quality
+`-0.09 < -0.07`). Root diagnosis found that this cut saved only about 11% on the then-current profile
+while removing model-visible semantic tail, so the first correction used 80 interests / 16 specifics.
+The full-body rollback's focused discovery/replay/recommendation group passed 305 tests；the required
+integration group passed 1356 tests, and the full repository passed 7036 tests with 93
+environment/platform skips. Extension TypeScript typecheck and all 1244 Node tests also passed.
+The 80 / 16 compact artifact on `11f77a64` passed its final gate, while the strict Reddit 100×3 body-cap artifact failed all three quality
 dimensions (18% flip vs 8% ceiling, 0.192031 Spearman vs 0.632378 floor, -11pp admission vs -3pp floor).
 Because the cap retained only 12.95% of affected body characters, all discovery/recommendation body
 truncation and the formal replay arm were removed instead of tuning the gate. Compact and reason-diet are
@@ -226,6 +225,21 @@ responses forced immediate protocol-level follow-up calls that repeatedly hit ge
 or quality result was emitted. Replay-only cooldown is therefore still bounded but extended to
 65 / 130 / 260 / 520 seconds, with the schedule recorded in artifact v2；production retry behavior,
 model-visible inputs and every quality threshold remain unchanged.
+
+The resulting clean-commit 80 / 16 replay on `397fe03e` completed its infrastructure audit but failed
+the unchanged quality gate: treatment flip-rate median `15% > 7%` ceiling and Spearman median
+`0.356586 < 0.564777` floor；admission delta median `+1pp` passed. Structural comparison showed that the
+effective profile had grown to 87 interests, so the compact block now dropped ranks 81..87 even though
+the older frozen snapshot had fit inside 80. The failed artifact is archived as
+`data/eval/profile-diet-compact-failed-397fe03e.json` with SHA-256
+`d58bb6888276e9c0b40c821d2d450f478645771380a8b4f88d46cdbc06dadcdc`.
+
+The second correction therefore uses 96 interests / 16 specifics and recall ranks 97..256. It preserves
+all current 87 interests (`98.29%` of current serialized profile characters) while the maxed fixture's
+actual layered prompt still shrinks `61.17%`, preserving the existing ≥60% contract；128 would only
+shrink the same layered fixture by `56.74%`. After this correction, the 305-test focused group, 1356-test
+required integration group and full 7036-test repository all pass with zero failures. A new clean-commit
+compact replay, followed by reason-diet, remains required before Task 8 can close.
 
 ## Task 9 — Landing handoff
 
