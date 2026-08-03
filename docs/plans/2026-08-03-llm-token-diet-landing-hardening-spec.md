@@ -196,7 +196,7 @@ treatment flip-rate 中位数为 `15% > 7%` ceiling，Spearman 中位数为
 失败 artifact 归档为 `data/eval/profile-diet-compact-failed-397fe03e.json`，SHA-256
 `d58bb6888276e9c0b40c821d2d450f478645771380a8b4f88d46cdbc06dadcdc`。
 
-最终修正边界为 96 interests / 32 domains × 16 specifics；per-item tail recall 相应只覆盖
+第二次修正边界为 96 interests / 32 domains × 16 specifics；per-item tail recall 相应只覆盖
 ranks 97..256。选择这一边界的约束是：
 
 - 当前生产画像的 87 项 interests 和全部实际 domain specifics 都保留，主要只移除 volatile
@@ -207,6 +207,21 @@ ranks 97..256。选择这一边界的约束是：
 - 画像继续增长到第 97 项后，长尾 recall 与 eval digest 仍覆盖 ranks 97..256；
 - Spearman、flip-rate、admission floors 完全不变，保留的 compact / reason-diet 两臂在修正后的
   clean commit 重新执行。
+
+`f26c63e5` 上的 96 / 16 clean-commit replay 又以 treatment flip-rate 中位数
+`18% > 16%` control ceiling 失败；Spearman `0.616499` 和 admission delta `+10pp` 通过，
+route / embedding / recall audit 均通过。artifact 归档为
+`data/eval/profile-diet-compact-failed-f26c63e5.json`，SHA-256
+`734fad9310a125d1763e69d3f0f89600862c1715d6a64e84ecd4f1f984231428`。usage 独立汇总同时
+证明该边界没有足够收益：标准 100 条 / 4 batch 只从 `103820` 降到 `103124` prompt tokens，
+即少 `696`（`0.67%`）；实际含 member-repair 的 treatment 则因 17 次调用对 14 次调用，total
+tokens 反而多 `14.75%`。
+
+因此第三次、明确以收益为目的的实验边界为 48 interests / 32 domains × 16 specifics，tail
+recall 覆盖 ranks 49..256。冻结前确定性测量显示当前 93 项 effective profile 的分层 profile
+block 从 `29072` 降到 `21508` 字符（`26.02%`），maxed fixture 从 `161007` 降到 `51815`
+（`67.82%`）。这些只证明体积收益，不替代质量证据；48 / 16 必须从 clean commit 完整执行
+同一 100×3 gate，任何阈值均不放宽。
 
 ## 5. Replay artifact contract
 

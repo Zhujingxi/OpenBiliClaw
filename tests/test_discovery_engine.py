@@ -267,7 +267,7 @@ def _maxed_onion_profile() -> OnionProfile:
     return profile
 
 
-def _profile_with_ranked_interests(count: int = 96) -> SoulProfile:
+def _profile_with_ranked_interests(count: int = 48) -> SoulProfile:
     profile = SoulProfile()
     profile.preferences.interests = [
         InterestTag(
@@ -481,9 +481,9 @@ def test_compact_evaluation_profile_summary_keeps_high_signal_context() -> None:
     compacted = compact_evaluation_profile_summary(profile_summary)
 
     assert len(compacted["core_traits"]) == 20
-    assert len(compacted["interests"]) == 96
+    assert len(compacted["interests"]) == 48
     assert compacted["interests"][0]["name"] == "interest-0"
-    assert compacted["interests"][-1]["name"] == "interest-95"
+    assert compacted["interests"][-1]["name"] == "interest-47"
     assert compacted["disliked_topics"] == profile_summary["disliked_topics"]
     assert len(compacted["interest_domains"]) == 32
     assert len(compacted["interest_domains"][0]["specifics"]) == 16
@@ -915,7 +915,7 @@ async def test_related_interests_returns_tail_match_and_degrades_without_embeddi
     vectors = {
         content_text: _MATCH_VEC,
         "稀有铁路模型": _MATCH_VEC,
-        **{f"头部兴趣{index:02d}": _LOW_SIM_VEC for index in range(96)},
+        **{f"头部兴趣{index:02d}": _LOW_SIM_VEC for index in range(48)},
     }
     engine = ContentDiscoveryEngine(
         llm_service=None,
@@ -962,7 +962,7 @@ async def test_evaluate_batch_adds_related_interests_without_changing_profile_pr
     vectors = {
         content_text: _MATCH_VEC,
         "稀有铁路模型": _MATCH_VEC,
-        **{f"头部兴趣{index:02d}": _LOW_SIM_VEC for index in range(96)},
+        **{f"头部兴趣{index:02d}": _LOW_SIM_VEC for index in range(48)},
     }
     llm_with_recall = _DynamicBatchLLMService()
     engine_with_recall = ContentDiscoveryEngine(
@@ -1009,7 +1009,7 @@ async def test_evaluate_content_single_adds_related_interests_to_content_summary
             {
                 content_text: _MATCH_VEC,
                 "稀有铁路模型": _MATCH_VEC,
-                **{f"头部兴趣{index:02d}": _LOW_SIM_VEC for index in range(96)},
+                **{f"头部兴趣{index:02d}": _LOW_SIM_VEC for index in range(48)},
             }
         ),
         eval_prefilter_mode="off",
@@ -1402,16 +1402,16 @@ async def test_embedding_prefilter_includes_long_tail_recall_interests() -> None
             category="测试",
             weight=1.0 - index / 1000,
         )
-        for index in range(96)
+        for index in range(48)
     ]
     profile.preferences.interests.append(
-        InterestTag(name="第97项长尾", category="测试", weight=0.5)
+        InterestTag(name="第49项长尾", category="测试", weight=0.5)
     )
-    vectors = {f"头部兴趣{index}": [1.0, 0.0] for index in range(96)}
+    vectors = {f"头部兴趣{index}": [1.0, 0.0] for index in range(48)}
     vectors.update(
         {
-            "第97项长尾": [0.0, 1.0],
-            "长尾命中 只匹配第97项": [0.0, 1.0],
+            "第49项长尾": [0.0, 1.0],
+            "长尾命中 只匹配第49项": [0.0, 1.0],
         }
     )
     engine = ContentDiscoveryEngine(
@@ -1421,7 +1421,7 @@ async def test_embedding_prefilter_includes_long_tail_recall_interests() -> None
     )
 
     filtered = await engine._embedding_prefilter(  # noqa: SLF001
-        [DiscoveredContent(bvid="BVTAIL", title="长尾命中", description="只匹配第97项")],
+        [DiscoveredContent(bvid="BVTAIL", title="长尾命中", description="只匹配第49项")],
         profile,
     )
 
@@ -4170,8 +4170,8 @@ async def test_evaluate_batch_uses_layered_profile_prompt_with_compacted_interes
     profile_interests = _json_prompt_block(user_input, "profile_interests")
     interests = profile_interests["interests"]
     assert isinstance(interests, list)
-    assert len(interests) == 96
-    assert interests[-1]["name"] == "兴趣95"
+    assert len(interests) == 48
+    assert interests[-1]["name"] == "兴趣47"
 
 
 @pytest.mark.asyncio

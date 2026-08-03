@@ -121,7 +121,7 @@ canonical owner；`discovery.strategies._utils` 的同名符号仅用于旧调�
 - `build_profile_summary` — 规范结构化画像（排除 `personality_portrait`），所有源平台
   内容 prompt 的统一输入。
 - `compact_content_prompt_profile_summary` — 对 `build_profile_summary` dict 做高频
-  内容 prompt 的裁剪（20 核心 / 96 兴趣 / 32 域 × 16 specifics / 12 recent，长期避雷
+  内容 prompt 的裁剪（20 核心 / 48 兴趣 / 32 域 × 16 specifics / 12 recent，长期避雷
   不裁剪）。
 - `build_query_generation_profile_summary` — discovery 关键词 / 领域生成用的查询瘦身
   口味 view（MMR 多样化、embedding 可选）。

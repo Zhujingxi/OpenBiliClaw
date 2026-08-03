@@ -234,12 +234,25 @@ the older frozen snapshot had fit inside 80. The failed artifact is archived as
 `data/eval/profile-diet-compact-failed-397fe03e.json` with SHA-256
 `d58bb6888276e9c0b40c821d2d450f478645771380a8b4f88d46cdbc06dadcdc`.
 
-The second correction therefore uses 96 interests / 16 specifics and recall ranks 97..256. It preserves
+The second correction used 96 interests / 16 specifics and recall ranks 97..256. It preserved
 all current 87 interests (`98.29%` of current serialized profile characters) while the maxed fixture's
 actual layered prompt still shrinks `61.17%`, preserving the existing ≥60% contract；128 would only
 shrink the same layered fixture by `56.74%`. After this correction, the 305-test focused group, 1356-test
 required integration group and full 7036-test repository all pass with zero failures. A new clean-commit
-compact replay, followed by reason-diet, remains required before Task 8 can close.
+compact replay, followed by reason-diet, remained required before Task 8 could close.
+
+That clean-commit replay on `f26c63e5` completed in 6034.3s and still failed: treatment flip median
+`18% > 16%` control ceiling, while Spearman `0.616499` and admission delta `+10pp` passed. The artifact
+is archived as `data/eval/profile-diet-compact-failed-f26c63e5.json` (SHA-256
+`734fad9310a125d1763e69d3f0f89600862c1715d6a64e84ecd4f1f984231428`). Independent usage aggregation
+showed that 96 / 16 only saves 696 input tokens per standard 100-candidate / 4-batch run (`0.67%`)；with
+actual member-repair calls, the B arm used 17 successful calls vs A's 14 and `14.75%` more total tokens.
+
+The user therefore selected a materially smaller 48-interest experiment rather than 32. The code now
+uses 48 / 16 with recall ranks 49..256. On the current 93-interest effective profile, deterministic
+layered-profile characters shrink `26.02%`；the maxed fixture shrinks `67.82%`. Focused profile-view /
+discovery / recommendation / replay tests pass 310 cases. A clean commit and unchanged 100×3 replay are
+still required before this experiment can be accepted or rejected.
 
 ## Task 9 — Landing handoff
 

@@ -3,7 +3,7 @@
 Interest tags and disliked topics accumulate wording variants forever:
 the merge path only collapses exact ``(name, category)`` matches, and
 weight decay never removes a variant that keeps getting reinforced. On
-real profiles this leaves the weight-sorted top-96 (the slice that
+real profiles this leaves the weight-sorted top-48 (the slice that
 actually reaches LLM prompts) half-occupied by duplicates of the same
 concept, crowding genuinely distinct interests out of the boundary.
 
@@ -60,7 +60,7 @@ logger = logging.getLogger(__name__)
 # _DISLIKED_TOPICS_STORE_CAP). Real profiles accumulate 1000+ interest
 # tags; a narrow boundary (128 until v0.3.121) left most wording
 # variants untouched, so duplicate weight stayed split across variants
-# and never re-entered the truncated top-96. 512 covers the whole
+# and never re-entered the truncated top-48. 512 covers the whole
 # meaningful store; only the deep <0.5-weight tail is left to decay.
 _LIKES_BOUNDARY = 512
 _SIMILARITY_THRESHOLD = 0.85

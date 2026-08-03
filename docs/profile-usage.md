@@ -28,7 +28,7 @@ so every legacy import path stays valid):
 
 | Surface | Trigger cadence | View / serializer | Fields (caps) | Portrait? | LLM? |
 | --- | --- | --- | --- | --- | --- |
-| Recommendation evaluation / expression | Per candidate (discovery + serve) | `compact_content_prompt_profile_summary(build_profile_summary(...))` — `recommendation/engine.py:126-127` | compact (20 core / 96 interests / 32 domains × 16 specifics / 12 recent; dislikes uncapped) | No | Yes |
+| Recommendation evaluation / expression | Per candidate (discovery + serve) | `compact_content_prompt_profile_summary(build_profile_summary(...))` — `recommendation/engine.py:126-127` | compact (20 core / 48 interests / 32 domains × 16 specifics / 12 recent; dislikes uncapped) | No | Yes |
 | Discovery evaluation | Per candidate batch | `_evaluation_profile_summary` = `compact_evaluation_profile_summary(build_profile_summary(...))` — `discovery/engine.py:1874`; applied `discovery/engine.py:823` | compact | No | Yes |
 | Discovery evaluation digest (cache key) | Per candidate batch | `_evaluation_profile_digest` — `discovery/engine.py:1862`; used `discovery/engine.py:1542`, `:2119` | digest over the compact prompt-visible slice | No | No (cache key) |
 | Search keyword generation | Per discovery cycle | `build_query_generation_profile_summary` — `discovery/strategies/search.py:547`, `:550` | query-trimmed | No | Yes |
