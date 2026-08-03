@@ -54,6 +54,7 @@ logger = logging.getLogger("eval.profile_diet_ab")
 FLIP_RATE_MAX = 0.03
 SPEARMAN_MIN = 0.95
 CHUNK_TIMEOUT_SECONDS = 900.0
+RATE_LIMIT_RETRY_DELAYS_SECONDS = (65.0, 130.0)
 
 BODY_CAP_HEAD = 200
 BODY_CAP_TAIL = 100
@@ -63,6 +64,27 @@ _REPLAY_STATUSES = frozenset({"evaluated", "cached", "rejected_low_score"})
 _DEFAULT_BATCH_SIZE = 30
 _RELATIVE_ADMISSION_SHRINK_MAX = 0.03
 _REPLAY_SOURCE_CONTEXT = "mixed"
+_REPLAY_EVALUATION_OUTPUT_FIELDS = (
+    "relevance_score",
+    "relevance_reason",
+    "topic_key",
+    "topic_group",
+    "style_key",
+    "franchise_key",
+    "pool_expression",
+    "pool_topic_label",
+)
+_NON_RETRYABLE_PROVIDER_LIMIT_MARKERS = (
+    "http 402",
+    "payment required",
+    "insufficient balance",
+    "insufficient_quota",
+    "billing",
+    "out of credit",
+    "credit exhausted",
+    "余额不足",
+    "账户余额",
+)
 _EMPTY_REPLAY_ATTRIBUTION: Mapping[str, object] = {
     "pair_kind": "",
     "repeat": 0,
@@ -73,6 +95,28 @@ _REPLAY_ATTRIBUTION: ContextVar[Mapping[str, object]] = ContextVar(
     "openbiliclaw_profile_diet_replay_attribution",
     default=_EMPTY_REPLAY_ATTRIBUTION,
 )
+
+
+def _exception_chain_messages(exc: BaseException) -> str:
+    messages: list[str] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        messages.append(str(current).lower())
+        current = current.__cause__ or current.__context__
+    return " ".join(messages)
+
+
+def _is_retryable_replay_rate_limit(exc: BaseException) -> bool:
+    """Return whether one failed replay call is safe to retry after cooldown."""
+
+    from openbiliclaw.llm.service import is_llm_rate_limit_error
+
+    messages = _exception_chain_messages(exc)
+    if any(marker in messages for marker in _NON_RETRYABLE_PROVIDER_LIMIT_MARKERS):
+        return False
+    return is_llm_rate_limit_error(exc)
 
 
 @dataclass(frozen=True)
@@ -1054,7 +1098,8 @@ class _DeterministicLLMService:
         attribution = dict(_REPLAY_ATTRIBUTION.get())
         try:
             response = await method(**kwargs)
-        except Exception:
+        except Exception as exc:
+            retryable_rate_limit = _is_retryable_replay_rate_limit(exc)
             self.calls.append(
                 {
                     "service": self._service,
@@ -1068,6 +1113,9 @@ class _DeterministicLLMService:
                     "max_tokens": 4096,
                     "usage": None,
                     "status": "error",
+                    "error_kind": (
+                        "transient_rate_limit" if retryable_rate_limit else type(exc).__name__
+                    ),
                 }
             )
             raise
@@ -1145,16 +1193,29 @@ def validate_replay_routes(
         if not run_calls:
             blocking_reasons.append(f"logical run {key!r} emitted no LLM call")
             continue
+        successful_calls = [call for call in run_calls if call.get("status") == "ok"]
+        failed_calls = [call for call in run_calls if call.get("status") != "ok"]
+        recovered_rate_limit_calls = [
+            call for call in failed_calls if call.get("error_kind") == "transient_rate_limit"
+        ]
+        fatal_failed_calls = [
+            call for call in failed_calls if call.get("error_kind") != "transient_rate_limit"
+        ]
         routes = {
             (
                 str(call.get("provider") or "").strip(),
                 str(call.get("instance_id") or "").strip(),
                 str(call.get("model") or "").strip(),
             )
-            for call in run_calls
+            for call in successful_calls
         }
-        if any(call.get("status") != "ok" for call in run_calls):
-            blocking_reasons.append(f"logical run {key!r} contains a failed LLM call")
+        if fatal_failed_calls:
+            blocking_reasons.append(f"logical run {key!r} contains a fatal failed LLM call")
+        if failed_calls and len(recovered_rate_limit_calls) != len(failed_calls):
+            blocking_reasons.append(f"logical run {key!r} contains an unaudited failed LLM call")
+        if not successful_calls:
+            blocking_reasons.append(f"logical run {key!r} emitted no successful LLM call")
+            continue
         if any(not all(route) for route in routes):
             blocking_reasons.append(f"logical run {key!r} contains an empty actual route")
         if len(routes) != 1:
@@ -1168,6 +1229,8 @@ def validate_replay_routes(
                 "logical_run": key[2],
                 "arm": expected_arm,
                 "call_count": len(run_calls),
+                "successful_call_count": len(successful_calls),
+                "recovered_rate_limit_call_count": len(recovered_rate_limit_calls),
                 "route": {
                     "provider": route[0],
                     "instance_id": route[1],
@@ -1228,6 +1291,9 @@ def validate_replay_routes(
     return {
         "passed": not unique_reasons,
         "blocking_reasons": unique_reasons,
+        "recovered_rate_limit_call_count": sum(
+            int(run.get("recovered_rate_limit_call_count") or 0) for run in run_payloads
+        ),
         "logical_runs": run_payloads,
     }
 
@@ -1390,25 +1456,54 @@ async def _score_contents(
         raise RuntimeError("Replay engine does not expose evaluate_content_batch")
     for start in range(0, len(contents), hard_cap):
         chunk = list(contents[start : start + hard_cap])
+        initial_evaluation_state = [
+            {
+                field: getattr(content, field)
+                for field in _REPLAY_EVALUATION_OUTPUT_FIELDS
+                if hasattr(content, field)
+            }
+            for content in chunk
+        ]
         # Hard deadline per chunk: a stalled provider/gateway must fail the
         # gate run loudly instead of hanging it forever (observed in prod:
         # one stuck upstream session blocked an un-timeboxed call for 2h+).
-        try:
-            chunk_scores = await asyncio.wait_for(
-                evaluate(
-                    chunk,
-                    profile,
-                    source_context=source_context,
-                    batch_size=_DEFAULT_BATCH_SIZE,
-                ),
-                timeout=CHUNK_TIMEOUT_SECONDS,
-            )
-        except TimeoutError as exc:
-            raise RuntimeError(
-                f"Evaluation chunk timed out after {CHUNK_TIMEOUT_SECONDS}s "
-                f"({source_context}, items {start}..{start + len(chunk) - 1}); "
-                "check the LLM provider/gateway and rerun."
-            ) from exc
+        for attempt in range(len(RATE_LIMIT_RETRY_DELAYS_SECONDS) + 1):
+            try:
+                chunk_scores = await asyncio.wait_for(
+                    evaluate(
+                        chunk,
+                        profile,
+                        source_context=source_context,
+                        batch_size=_DEFAULT_BATCH_SIZE,
+                    ),
+                    timeout=CHUNK_TIMEOUT_SECONDS,
+                )
+                break
+            except TimeoutError as exc:
+                raise RuntimeError(
+                    f"Evaluation chunk timed out after {CHUNK_TIMEOUT_SECONDS}s "
+                    f"({source_context}, items {start}..{start + len(chunk) - 1}); "
+                    "check the LLM provider/gateway and rerun."
+                ) from exc
+            except Exception as exc:
+                if not _is_retryable_replay_rate_limit(exc) or attempt >= len(
+                    RATE_LIMIT_RETRY_DELAYS_SECONDS
+                ):
+                    raise
+                for content, state in zip(chunk, initial_evaluation_state, strict=True):
+                    for field, value in state.items():
+                        setattr(content, field, value)
+                delay = RATE_LIMIT_RETRY_DELAYS_SECONDS[attempt]
+                logger.warning(
+                    "Replay chunk hit a transient provider rate limit; retrying items "
+                    "%d..%d after %.0fs (%d/%d)",
+                    start,
+                    start + len(chunk) - 1,
+                    delay,
+                    attempt + 1,
+                    len(RATE_LIMIT_RETRY_DELAYS_SECONDS),
+                )
+                await asyncio.sleep(delay)
         if len(chunk_scores) != len(chunk):
             raise RuntimeError(
                 "Evaluation returned an incomplete score vector "

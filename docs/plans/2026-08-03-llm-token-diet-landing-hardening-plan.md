@@ -63,6 +63,8 @@ Implementation checklist:
 - [x] mirror topic lifecycle, production 30-item claim grouping and `mixed` context；reject
       production `eval_prefilter_mode=enforce` because controlled replay intentionally uses `off`；
 - [x] extract and test final blocking-reason aggregation so every failed sub-audit blocks landing。
+- [x] retry only recovered transient provider rate limits after cooldown, restoring chunk evaluation
+      state and retaining failed attempts in route audit；402/billing and all other errors remain fatal。
 
 **Focused gate:**
 
@@ -168,8 +170,11 @@ either incorporate the current-main fix during rebase or document an environment
 
 - Ruff format check: 544 files formatted；Ruff lint: pass；MyPy: 236 source files, pass；
   `git diff --check`: pass。
-- Required focused integration group: 1470 passed in 130.17s。
-- Full repository: 7034 passed, 93 environment/platform skips in 645.76s；zero failures。
+- Required focused integration group after transient-rate-limit hardening: 1358 passed in 130.77s。
+- Full repository after the same hardening: 7038 passed, 93 environment/platform skips in
+  622.44s；zero failures。
+- Extension final-main compatibility: TypeScript typecheck pass；1244 Node tests pass after the
+  worktree installed lockfile-pinned dev dependencies。
 - The rebase exposed two current-main hygiene failures (one missing blank line and one import order);
   both were mechanically formatted so the repository-wide Ruff commands now pass without waiver。
 
@@ -192,7 +197,11 @@ is unavailable, the branch is reported blocked rather than described as release-
 real batch parser/runtime reason normalization → eval LRU → admission/content cache, including a warm
 eval-cache replay with zero additional provider calls. Production `config-show` exits 0 and the safe
 acceptance fields resolve to prefilter `shadow`, admission `0.6`, coalescing `15 / 90s`, topic lifecycle
-`off`. Three real replay artifacts remain before this task can be checked complete.
+`off`. A pre-hardening compact run passed, but it is intentionally not final evidence because the
+subsequent body-cap run exposed a transient provider 429 and caused the replay-only bounded cooldown
+retry change. All three artifacts therefore rerun from the final clean commit. This tracked plan is
+frozen before those runs；their exact digests and metrics live in ignored artifacts and the landing
+handoff so recording results cannot change the commit under test.
 
 ## Task 9 — Landing handoff
 

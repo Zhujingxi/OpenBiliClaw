@@ -132,6 +132,10 @@ route 为空、混用或意外 failover 都让 gate 失败。
 Timeout、LLM/embedding exception、缺失 parsed member、score vector 长度不符、snapshot drift、
 route drift、artifact write failure 均以非零退出。不得转换为 score 0 后继续统计。
 
+明确的瞬时 provider rate limit 可以在 registry cooldown 后对同一 chunk 做有界重试；重试前
+必须恢复该 chunk 的评估输出字段，失败调用必须留在 route audit，且只有后续成功调用使用同一
+实际 route 时才能视为 recovered。HTTP 402、余额/计费错误和其它异常不重试。
+
 ### I5. Body-cap contrast is faithful
 
 `body-cap` 的 arm A 在 prompt construction 层临时关闭 cap，但仍使用原始 candidate body，

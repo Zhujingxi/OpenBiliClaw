@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import scripts.run_profile_diet_ab as replay_script
 from scripts.run_profile_diet_ab import (
     _REPLAY_SOURCE_CONTEXT,
     ModelOverride,
@@ -42,7 +43,8 @@ from scripts.run_profile_diet_ab import (
 
 from openbiliclaw.discovery.engine import ContentDiscoveryEngine, compact_evaluation_profile_summary
 from openbiliclaw.discovery.strategies._utils import build_profile_summary
-from openbiliclaw.llm.base import LLMResponse
+from openbiliclaw.llm.base import LLMRateLimitError, LLMResponse
+from openbiliclaw.llm.service import LLMProviderExecutionError
 from openbiliclaw.memory.manager import MemoryManager
 from openbiliclaw.soul.overrides import ListEdit, ProfileOverrides
 from openbiliclaw.soul.profile import InterestDomain, InterestTag, OnionProfile, SoulProfile
@@ -766,6 +768,33 @@ async def test_deterministic_wrapper_keeps_production_budget_for_multimodal() ->
     ]
 
 
+@pytest.mark.asyncio
+async def test_deterministic_wrapper_labels_transient_rate_limit_for_route_audit() -> None:
+    class _RateLimitedService:
+        async def complete_structured_task(self, **kwargs: object) -> LLMResponse:
+            del kwargs
+            try:
+                raise LLMRateLimitError("openai_compatible rate limit exceeded")
+            except LLMRateLimitError as exc:
+                raise LLMProviderExecutionError("All providers failed") from exc
+
+    service = _DeterministicLLMService(_RateLimitedService(), service="arm_a")
+
+    with (
+        replay_call_attribution(
+            pair_kind="control",
+            repeat=1,
+            logical_run="A1",
+            arm="A",
+        ),
+        pytest.raises(LLMProviderExecutionError),
+    ):
+        await service.complete_structured_task(system_instruction="system", user_input="user")
+
+    assert service.calls[0]["status"] == "error"
+    assert service.calls[0]["error_kind"] == "transient_rate_limit"
+
+
 def _attributed_route_calls(
     *,
     treatment_b_route: tuple[str, str, str] = ("openai", "primary", "model-a"),
@@ -859,6 +888,33 @@ def test_route_audit_rejects_empty_and_mixed_routes_within_logical_run() -> None
     assert "mixed 2 actual routes" in reasons
 
 
+def test_route_audit_allows_a_recovered_transient_rate_limit() -> None:
+    calls = _attributed_route_calls()
+    calls.append(
+        {
+            **calls[0],
+            "provider": "",
+            "instance_id": "",
+            "model": "",
+            "status": "error",
+            "error_kind": "transient_rate_limit",
+        }
+    )
+
+    audit = validate_replay_routes(calls, repeats=3, model_override=None)
+
+    assert audit["passed"] is True
+    assert audit["recovered_rate_limit_call_count"] == 1
+    recovered_run = next(
+        run
+        for run in audit["logical_runs"]
+        if run["pair_kind"] == "control" and run["repeat"] == 1 and run["logical_run"] == "A1"
+    )
+    assert recovered_run["call_count"] == 2
+    assert recovered_run["successful_call_count"] == 1
+    assert recovered_run["recovered_rate_limit_call_count"] == 1
+
+
 class _MissingResponseEngine:
     _EVALUATE_BATCH_HARD_CAP = 90
 
@@ -932,6 +988,97 @@ async def test_score_contents_matches_production_claim_grouping_and_context() ->
         (10, "mixed", 30),
     ]
     assert scores == [0.7] * 100
+
+
+@pytest.mark.asyncio
+async def test_score_contents_retries_transient_rate_limit_and_restores_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    class _RateLimitedOnceEngine:
+        _EVALUATE_BATCH_HARD_CAP = 90
+
+        def __init__(self) -> None:
+            self.states: list[tuple[float, str]] = []
+
+        async def evaluate_content_batch(
+            self,
+            contents: list[object],
+            profile: object,
+            *,
+            source_context: str,
+            batch_size: int,
+        ) -> list[float]:
+            del profile, source_context, batch_size
+            content = contents[0]
+            self.states.append((content.relevance_score, content.relevance_reason))
+            if len(self.states) == 1:
+                content.relevance_score = 0.99
+                content.relevance_reason = "partial failed attempt"
+                try:
+                    raise LLMRateLimitError("openai_compatible rate limit exceeded")
+                except LLMRateLimitError as exc:
+                    raise LLMProviderExecutionError("All providers failed") from exc
+            return [0.7]
+
+    monkeypatch.setattr(replay_script.asyncio, "sleep", fake_sleep)
+    engine = _RateLimitedOnceEngine()
+    content = SimpleNamespace(
+        content_id="candidate-1",
+        title="candidate",
+        relevance_score=0.1,
+        relevance_reason="original",
+    )
+
+    scores = await _score_contents(engine, [content], object(), source_context="mixed")
+
+    assert scores == [0.7]
+    assert sleeps == [65.0]
+    assert engine.states == [(0.1, "original"), (0.1, "original")]
+
+
+@pytest.mark.asyncio
+async def test_score_contents_does_not_retry_non_transient_quota_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    class _BillingLimitedEngine:
+        _EVALUATE_BATCH_HARD_CAP = 90
+
+        async def evaluate_content_batch(
+            self,
+            contents: list[object],
+            profile: object,
+            *,
+            source_context: str,
+            batch_size: int,
+        ) -> list[float]:
+            del contents, profile, source_context, batch_size
+            try:
+                raise LLMRateLimitError("provider backoff: HTTP 402 insufficient balance")
+            except LLMRateLimitError as exc:
+                raise LLMProviderExecutionError("All providers failed") from exc
+
+    monkeypatch.setattr(replay_script.asyncio, "sleep", fake_sleep)
+    content = SimpleNamespace(
+        content_id="candidate-1",
+        title="candidate",
+        relevance_score=0.1,
+        relevance_reason="original",
+    )
+
+    with pytest.raises(LLMProviderExecutionError, match="All providers failed"):
+        await _score_contents(_BillingLimitedEngine(), [content], object(), source_context="mixed")
+
+    assert sleeps == []
 
 
 def _many_interest_profile() -> SoulProfile:
