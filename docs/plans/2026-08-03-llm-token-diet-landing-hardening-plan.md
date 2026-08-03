@@ -64,7 +64,8 @@ Implementation checklist:
       production `eval_prefilter_mode=enforce` because controlled replay intentionally uses `off`；
 - [x] extract and test final blocking-reason aggregation so every failed sub-audit blocks landing。
 - [x] retry only recovered transient provider rate limits after cooldown, restoring chunk evaluation
-      state and retaining failed attempts in route audit；402/billing and all other errors remain fatal。
+      state and retaining failed attempts in route audit；classification stops at the normalized
+      provider-limit boundary, retry budgets reset per chunk, and 402/billing errors remain fatal。
 
 **Focused gate:**
 
@@ -170,10 +171,10 @@ either incorporate the current-main fix during rebase or document an environment
 
 - Ruff format check: 544 files formatted；Ruff lint: pass；MyPy: 236 source files, pass；
   `git diff --check`: pass。
-- Required focused integration group after the conservative 80 / 16 correction: 1358 passed in
-  131.24s。
-- Full repository after the same correction: 7038 passed, 93 environment/platform skips in
-  623.79s；zero failures。
+- Required focused integration group after the conservative 80 / 16 correction and normalized
+  rate-limit-boundary fix: 1360 passed in 130.16s。
+- Full repository after the same final corrections: 7040 passed, 93 environment/platform skips in
+  625.47s；zero failures。
 - Extension final-main compatibility: TypeScript typecheck pass；1244 Node tests pass after the
   worktree installed lockfile-pinned dev dependencies。
 - The rebase exposed two current-main hygiene failures (one missing blank line and one import order);
@@ -204,10 +205,12 @@ retry change. The first compact run on that hardened commit then correctly faile
 quality gate at 64 / 12 (Spearman median `0.494686 < 0.570454`; admission delta median
 `-0.09 < -0.07`). Root diagnosis found that this cut saved only about 11% on the current profile while
 removing model-visible semantic tail, so the implementation now uses 80 interests / 16 specifics and
-tail recall ranks 81..256. Focused serializer/discovery/replay/recommendation tests pass (322 tests),
-the required integration group passes 1358 tests, and the full repository passes 7038 tests with 93
-environment/platform skips after the correction. All three real artifacts rerun from the next clean
-commit；the failed artifact is retained only as diagnostic evidence.
+tail recall ranks 81..256. Focused serializer/discovery/replay/recommendation tests pass (324 tests),
+the required integration group passes 1360 tests, and the full repository passes 7040 tests with 93
+environment/platform skips after the final corrections. All three real artifacts rerun from the next clean
+commit；the failed artifact is retained only as diagnostic evidence. The first 80 / 16 rerun also
+exposed and closed a replay-only classifier bug where raw SDK 429 metadata overrode the adapter's
+normalized transient-rate-limit decision；no quality metrics were emitted by that aborted run.
 
 ## Task 9 — Landing handoff
 

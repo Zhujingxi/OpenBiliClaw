@@ -1041,6 +1041,69 @@ async def test_score_contents_retries_transient_rate_limit_and_restores_state(
     assert engine.states == [(0.1, "original"), (0.1, "original")]
 
 
+def test_replay_rate_limit_classification_stops_at_normalized_provider_error() -> None:
+    raw_sdk_error = RuntimeError("429 response metadata included a billing field")
+    try:
+        raise LLMRateLimitError("openai_compatible rate limit exceeded") from raw_sdk_error
+    except LLMRateLimitError as normalized:
+        try:
+            raise LLMProviderExecutionError("All providers failed") from normalized
+        except LLMProviderExecutionError as wrapped:
+            assert replay_script._is_retryable_replay_rate_limit(wrapped)
+
+
+@pytest.mark.asyncio
+async def test_score_contents_resets_rate_limit_budget_for_each_chunk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    class _PerChunkRateLimitedEngine:
+        _EVALUATE_BATCH_HARD_CAP = 90
+
+        def __init__(self) -> None:
+            self.calls_by_start: dict[int, int] = {}
+
+        async def evaluate_content_batch(
+            self,
+            contents: list[object],
+            profile: object,
+            *,
+            source_context: str,
+            batch_size: int,
+        ) -> list[float]:
+            del profile, source_context, batch_size
+            start = int(str(contents[0].content_id))
+            self.calls_by_start[start] = self.calls_by_start.get(start, 0) + 1
+            failures_before_success = 2 if start == 0 else 1
+            if self.calls_by_start[start] <= failures_before_success:
+                try:
+                    raise LLMRateLimitError("openai_compatible rate limit exceeded")
+                except LLMRateLimitError as exc:
+                    raise LLMProviderExecutionError("All providers failed") from exc
+            return [0.7] * len(contents)
+
+    monkeypatch.setattr(replay_script.asyncio, "sleep", fake_sleep)
+    engine = _PerChunkRateLimitedEngine()
+    contents = [
+        SimpleNamespace(
+            content_id=str(index),
+            relevance_score=0.0,
+            relevance_reason="",
+        )
+        for index in range(40)
+    ]
+
+    scores = await _score_contents(engine, contents, object(), source_context="mixed")
+
+    assert scores == [0.7] * 40
+    assert engine.calls_by_start == {0: 3, 30: 2}
+    assert sleeps == [65.0, 130.0, 65.0]
+
+
 @pytest.mark.asyncio
 async def test_score_contents_does_not_retry_non_transient_quota_failure(
     monkeypatch: pytest.MonkeyPatch,

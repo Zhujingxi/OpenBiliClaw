@@ -97,13 +97,26 @@ _REPLAY_ATTRIBUTION: ContextVar[Mapping[str, object]] = ContextVar(
 )
 
 
-def _exception_chain_messages(exc: BaseException) -> str:
+def _normalized_provider_limit_messages(exc: BaseException) -> str:
+    """Return messages through the first normalized provider-limit error.
+
+    Provider adapters deliberately translate SDK exceptions into
+    ``LLMRateLimitError``. Raw SDK causes can contain incidental response
+    metadata such as a ``billing`` field even for a transient HTTP 429; once
+    the adapter has classified the error, replay policy must not reinterpret
+    those lower-level implementation details.
+    """
+
+    from openbiliclaw.llm.base import LLMRateLimitError
+
     messages: list[str] = []
     seen: set[int] = set()
     current: BaseException | None = exc
     while current is not None and id(current) not in seen:
         seen.add(id(current))
         messages.append(str(current).lower())
+        if isinstance(current, LLMRateLimitError):
+            break
         current = current.__cause__ or current.__context__
     return " ".join(messages)
 
@@ -113,7 +126,7 @@ def _is_retryable_replay_rate_limit(exc: BaseException) -> bool:
 
     from openbiliclaw.llm.service import is_llm_rate_limit_error
 
-    messages = _exception_chain_messages(exc)
+    messages = _normalized_provider_limit_messages(exc)
     if any(marker in messages for marker in _NON_RETRYABLE_PROVIDER_LIMIT_MARKERS):
         return False
     return is_llm_rate_limit_error(exc)

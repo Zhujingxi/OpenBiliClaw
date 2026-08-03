@@ -134,7 +134,10 @@ route drift、artifact write failure 均以非零退出。不得转换为 score 
 
 明确的瞬时 provider rate limit 可以在 registry cooldown 后对同一 chunk 做有界重试；重试前
 必须恢复该 chunk 的评估输出字段，失败调用必须留在 route audit，且只有后续成功调用使用同一
-实际 route 时才能视为 recovered。HTTP 402、余额/计费错误和其它异常不重试。
+实际 route 时才能视为 recovered。分类以 provider adapter 的第一个规范化
+`LLMRateLimitError` 为边界，不用 SDK raw cause 中的通用 metadata 重新解释已经映射的 HTTP
+429；明确映射的 HTTP 402、余额/计费错误和其它异常不重试。重试预算按 chunk 独立，前一 chunk
+恢复成功时不能耗掉下一 chunk 的预算。
 
 ### I5. Body-cap contrast is faithful
 
