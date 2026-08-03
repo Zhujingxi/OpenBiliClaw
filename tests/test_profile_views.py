@@ -24,9 +24,9 @@ Three representative profiles exercise both branches of every serializer:
   category-reconstruction branch of ``_extract_interest_domains`` and the
   ``_raw_mbti`` branch of ``_summarize_mbti``).
 
-Regenerate the goldens with ``python tests/test_profile_views.py --generate``
-*only* against pre-move code — never after the relocation (that would re-freeze
-identical bytes and defeat the check).
+The original move was verified against pre-move goldens. After that move, regenerate
+only when the serializer contract changes intentionally, and review the resulting
+snapshot diff rather than using regeneration to hide an accidental relocation change.
 """
 
 from __future__ import annotations
@@ -445,9 +445,9 @@ if __name__ == "__main__":  # pragma: no cover — golden generation helper
     import sys
 
     if "--generate" in sys.argv:
-        # Generate goldens from the CURRENT (pre-move) implementation. The
-        # serializers still live in ``_utils`` at generation time; importing
-        # them here freezes old bytes. NEVER run this after the relocation.
+        # Generate goldens from the current canonical implementation. This was
+        # originally run against pre-move ``_utils``; after the relocation it is
+        # reserved for reviewed, intentional serializer-contract changes.
         from openbiliclaw.discovery.strategies import _utils
 
         _GOLDEN_DIR.mkdir(parents=True, exist_ok=True)

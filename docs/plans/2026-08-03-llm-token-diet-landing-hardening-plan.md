@@ -3,7 +3,7 @@
 > **Spec:** [`2026-08-03-llm-token-diet-landing-hardening-spec.md`](./2026-08-03-llm-token-diet-landing-hardening-spec.md)
 > **Owner:** root agent（规格、集成、验收）
 > **Implementation:** bounded multi-agent tasks with non-overlapping file ownership
-> **Status:** implementation complete; automated and real-replay acceptance in progress
+> **Status:** implementation complete; conservative compact-cap correction and final acceptance in progress
 
 ## 0. Working rules
 
@@ -170,9 +170,10 @@ either incorporate the current-main fix during rebase or document an environment
 
 - Ruff format check: 544 files formatted；Ruff lint: pass；MyPy: 236 source files, pass；
   `git diff --check`: pass。
-- Required focused integration group after transient-rate-limit hardening: 1358 passed in 130.77s。
-- Full repository after the same hardening: 7038 passed, 93 environment/platform skips in
-  622.44s；zero failures。
+- Required focused integration group after the conservative 80 / 16 correction: 1358 passed in
+  131.24s。
+- Full repository after the same correction: 7038 passed, 93 environment/platform skips in
+  623.79s；zero failures。
 - Extension final-main compatibility: TypeScript typecheck pass；1244 Node tests pass after the
   worktree installed lockfile-pinned dev dependencies。
 - The rebase exposed two current-main hygiene failures (one missing blank line and one import order);
@@ -199,9 +200,14 @@ eval-cache replay with zero additional provider calls. Production `config-show` 
 acceptance fields resolve to prefilter `shadow`, admission `0.6`, coalescing `15 / 90s`, topic lifecycle
 `off`. A pre-hardening compact run passed, but it is intentionally not final evidence because the
 subsequent body-cap run exposed a transient provider 429 and caused the replay-only bounded cooldown
-retry change. All three artifacts therefore rerun from the final clean commit. This tracked plan is
-frozen before those runs；their exact digests and metrics live in ignored artifacts and the landing
-handoff so recording results cannot change the commit under test.
+retry change. The first compact run on that hardened commit then correctly failed the unchanged relative
+quality gate at 64 / 12 (Spearman median `0.494686 < 0.570454`; admission delta median
+`-0.09 < -0.07`). Root diagnosis found that this cut saved only about 11% on the current profile while
+removing model-visible semantic tail, so the implementation now uses 80 interests / 16 specifics and
+tail recall ranks 81..256. Focused serializer/discovery/replay/recommendation tests pass (322 tests),
+the required integration group passes 1358 tests, and the full repository passes 7038 tests with 93
+environment/platform skips after the correction. All three real artifacts rerun from the next clean
+commit；the failed artifact is retained only as diagnostic evidence.
 
 ## Task 9 — Landing handoff
 

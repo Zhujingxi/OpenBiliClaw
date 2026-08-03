@@ -1085,7 +1085,7 @@ def _many_interest_profile() -> SoulProfile:
     profile = SoulProfile()
     profile.preferences.interests = [
         InterestTag(name=f"兴趣{index}", category="测试", weight=1.0 - index / 1000)
-        for index in range(80)
+        for index in range(100)
     ]
     return profile
 
@@ -1116,7 +1116,7 @@ def test_compact_replay_arm_a_forces_legacy_full_profile(
     summary = engine._evaluation_profile_summary(_many_interest_profile())
     interests = summary["interests"]
     assert isinstance(interests, list)
-    assert len(interests) == 80
+    assert len(interests) == 100
 
 
 def test_replay_engine_receives_embedding_service_for_production_recall() -> None:

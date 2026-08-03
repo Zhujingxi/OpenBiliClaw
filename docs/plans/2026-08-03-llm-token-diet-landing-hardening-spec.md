@@ -173,6 +173,20 @@ runtime reason normalization 均不能进入生产 system prompt。Per-call data
 - token-diet 新增的 `eval_prefilter_mode`、eval coalescing、route 文档不能丢失；
 - tests 与文档同时保留两侧语义。
 
+### I10. Quality failure changes the diet, not the gate
+
+Final-commit 的首次真实 compact 100×3 replay 对 64 interests / 12 specifics 边界给出明确
+失败：treatment Spearman 中位数 `0.494686 < 0.570454` control floor，admission delta 中位数
+`-0.09 < -0.07` floor。该 artifact 只用于诊断，不能作为 landing PASS。
+
+修正边界为 80 interests / 32 domains × 16 specifics；per-item tail recall 相应只覆盖 ranks
+81..256。选择这一边界的约束是：
+
+- 当前生产画像的全部实际 interests / domain specifics 都保留，主要只移除 volatile metadata；
+- mature fixture 仍减少约 58% 字符，maxed fixture 减少约 63%，继续满足高成熟度画像的降本目标；
+- 当前画像不再为了约 11% 的有限缩短承受语义截断；
+- Spearman、flip-rate、admission floors 完全不变，三臂在修正后的 clean commit 重新执行。
+
 ## 5. Replay artifact contract
 
 每个 artifact 至少包含：
@@ -208,7 +222,7 @@ Artifact 不包含 API key、Cookie、完整 config、完整 profile 或完整�
   --output data/eval/profile-diet-compact.json
 
 .venv/bin/python scripts/run_profile_diet_ab.py \
-  --arm-b body-cap --platform twitter --sample 100 --repeats 3 \
+  --arm-b body-cap --platform reddit --sample 100 --repeats 3 \
   --output data/eval/profile-diet-body-cap.json
 
 .venv/bin/python scripts/run_profile_diet_ab.py \

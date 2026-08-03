@@ -77,11 +77,11 @@ Test `tests/test_discovery_engine.py`
 1. Failing tests:
    - `_evaluation_profile_summary(profile)` returns
      `compact_evaluation_profile_summary(build_profile_summary(profile))` (compare dicts on a
-     synthetic maxed profile: >32 interest domains with >12 specifics each, >64 interests,
+     synthetic maxed profile: >32 interest domains with >16 specifics each, >80 interests,
      >20 core traits).
    - `disliked_topics` length is identical before/after compaction even with 100+ entries.
    - `_evaluation_profile_digest` changes when an interest domain is added, **and** when a
-     tail interest (rank > 64, outside the compact block but inside the recall pool) is added —
+     tail interest (rank > 80, outside the compact block but inside the recall pool) is added —
      the digest must cover the recall pool (invariant 3).
    - Digest **unchanged** when only volatile per-entry fields change (see step 4).
    - Rendered profile block (join of
@@ -150,8 +150,8 @@ Test `tests/test_discovery_engine.py`, `tests/test_config.py`
    threshold; flip to enforce when ≈ 0).
 3. Extract the single-path logic (`engine.py:1172-1199`) into
    `async def _embedding_prefilter(self, contents, profile) -> dict[int, float]` returning
-   index → filtered score. Interest vector pool = top-64 interest tags + 32 compact domain
-   labels, **computed once per call** and reused across candidates (do not copy the single
+   index → filtered score. Interest vector pool = the full top-256 recall-visible tags + 32 compact
+   domain labels, **computed once per call** and reused across candidates (do not copy the single
    path's per-item recomputation). Threshold: module constant
    `_EMBEDDING_PREFILTER_MIN_SIMILARITY = 0.3`.
 4. Call it in `evaluate_content_batch` after the cache split (`engine.py:1357-1386`), before
