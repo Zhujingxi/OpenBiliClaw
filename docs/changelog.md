@@ -4,14 +4,14 @@
 
 ---
 
-## v0.3.194 / extension v0.3.194：小红书真实搜索修复与首启可靠性（2026-08-05）
+## v0.3.194 / extension v0.3.195：小红书真实搜索修复与首启可靠性（2026-08-05）
 
 - **修复小红书真实搜索的隐藏页与失效登录双重误诊**：更新后的工作区插件第一次回执显示 `document.hidden=true`、46 个普通 anchor 但 0 个 note anchor；切到前台后 `hidden=false` 仍为空，随后在同一真实浏览器手动提交搜索，页面明确弹出“登录后查看搜索结果”，证明残留 `web_session` Cookie 把失效会话误报成已登录，而非搜索频率直接触发风控。dispatcher 现在先记录当前活动标签，search 短暂以前台标签渲染并在结束后恢复原标签；executor 看到可见登录弹层会立即返回 `xhs_login_required`，后端再把这份真实页面证据写回登录态为 false。creator 保持后台，默认 20 分钟目标间隔（稳定 ±25% 抖动）、每日 20 次预算、队列积压门控和 `1h → 24h` 指数退避全部保留。
 - **搜索路由与空结果诊断继续收口**：task、bootstrap、被动采集共用 `/explore/{id}`、`/discovery/item/{id}`、`/search_result/{id}` 三路由 selector；搜索 SPA 最多等待 12 秒。真实空结果仍只回传 pathname、可见性、viewport 与 anchor 计数，不上传搜索词、页面正文、链接、Cookie 或 state 内容。
 - **修复首启 bge-m3 下载进度不实时更新（Issue #142）**：安装包在启动拉取线程前发布进程全局 running 状态，setup、桌面 Web 与 popup 在初始化前即可接管并持续轮询下载进度，慢速 Windows 下载不再只显示静态等待。
 - **候选评估使用真实发布时间**：单条、批量和补分类路径统一携带来源 `published_at` 与真实 UTC `evaluated_at`，缓存同时绑定发布时间摘要和评估小时桶；缺失或无效发布时间保持中性，不再让模型按知识截止时间猜测当前日期。
 - **发现关键词轮换与积压保护增强**：planner 避免重复消费同一关键词，XHS producer 按默认 20 分钟节奏检查，并在 pending + in-progress 搜索达到 5 条时停止 claim 与 LLM 生成。
-- **统一发布版本**：后端、桌面与 Chrome/Firefox 插件统一升级到 `0.3.194`；`0.3.193` 已用于 Firefox AMO 首次公开提审，故不复用该版本号。本次发布会生成独立 GitHub 组件标签，并分别提交 Chrome Web Store 与 Firefox AMO 更新审核。
+- **发布版本与 AMO channel 冲突处理**：后端、桌面和首轮 GitHub 插件包发布为 `0.3.194`；该扩展标签的既有自动签名流程先在 AMO 占用了 unlisted `0.3.194`，AMO 因此拒绝同版本转 listed。商店补丁版本提升为 `0.3.195`，Chrome 用它替换刚提交的 `0.3.194` 审核包，Firefox 以全新 listed 版本重提；仓库变量 `FIREFOX_SIGNING_ENABLED` 同步关闭，今后 GitHub 扩展发布不再抢占正式 AMO listed 版本号。
 
 ## extension v0.3.193：Firefox AMO 公开商店提审（2026-08-03）
 
