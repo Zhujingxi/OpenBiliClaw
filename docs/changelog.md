@@ -6,6 +6,8 @@
 
 ## extension v0.3.193：Firefox AMO 公开商店提审（2026-08-03）
 
+- **PC Web「聊聊口味」补上持续可见的模型等待态**：消息刚提交时立即显示「阿B 正在思考，等待模型回复…」与三点动效；后端创建 durable `pending/processing` turn、历史刷新接管后继续按真实状态显示，不再因临时提示被刷新覆盖而只剩用户消息。回复完成或失败时等待气泡由终态原位替换；状态使用 polite live region、`aria-busy` 并遵守 reduced-motion。
+- **修复小红书搜索任务整页 0 条的路由漂移**：2026-08-04 真实插件请求复现 `Python` 搜索 0 条且无风控命中，随后确认 Chrome 商店 0.3.192 的通用适配器已经识别 `/search_result/{note_id}`，但 task executor、被动采集和共享 note selector 仍只认 `/explore/{id}` / `/discovery/item/{id}`。三条采集链路现统一使用同一选择器与 URL parser，后端 observed-urls、内容页分类和原生保存身份校验同步接受第三种 note 路由；搜索 SPA 等待上限由 5 秒调整为 12 秒（仍低于 30 秒 dispatcher timeout）。真实空结果会写 `xhs_empty_result`，并只回传 pathname、生命周期标志和各路由 anchor 数量，不包含搜索词、标题、正文、href、Cookie 或页面 state。真机对照确认在测试浏览器实际运行的是商店包 0.3.192；工作区 0.3.193 构建与回归已通过，修复版真实请求须先把该浏览器更新到新包，`chrome.runtime.reload()` 只会重启当前商店包、不会加载工作区 `/dist`。
 - **Firefox 首次公开上架不再复用 unlisted 签名链路**：新增手动 `Submit Firefox AMO Listed Package` workflow，以全局唯一的扩展版本构建 `dist-firefox/`，携带双语名称、摘要、描述、MIT license、合法 Firefox / Android 分类和审核说明提交 `web-ext sign --channel=listed`；0.3.192 已作为 unlisted 版本存在，故公开提审使用独立扩展版本 0.3.193，后端与桌面版本仍保持 0.3.192。
 - **审核所需源码与隐私资料和提交包同源**：workflow 从同一 Git commit 打包 `extension/`、共享 Web 模块、lockfile、构建说明和 `docs/privacy.md`，主动通过 `--upload-source-code` 附上可复现源码；提交后查询版本列表并要求 0.3.193 的 channel 真实为 `listed`，避免把上传成功误报成已提审。
 - **AMO 隐私字段故障不再反向阻断版本提审**：连续真实请求证明 `eula_policy` PATCH 无论补齐与 `web-ext` 一致的 JSON headers、使用 Gecko GUID 还是 canonical 数字 add-on ID，当前 developer JWT 都只收到无正文 HTTP 406；该非必需字段因此移动到 listed 版本已受理并核验之后 best-effort 同步，失败会在 workflow 留下显式 warning 和 Developer Hub 手动回填指引。manifest 数据类别、reviewer notes、双语 listing 描述、随 reviewer source 附带的 `docs/privacy.md` 仍随提审送达，不会把隐私披露静默省略。
@@ -19,6 +21,10 @@
 - **候选池维护不再恢复/裁剪振荡**：suppressed 恢复受 raw headroom 限制，raw 已满或超限时先裁剪；protected/token-owned excess 已无 victim 时返回 `has_more=False` 并把原 ERROR 风暴降为稳定 WARNING。用户日志中的 AB raw 状态不再每 tick 反复切换。
 - **错误模型路由快速失败**：OpenAI-compatible 的 400/403/404/405/422 不再做三次无效 provider 重试；`404 model route not found` 保留完整原因交给 fallback/配置诊断，5xx、timeout 与传输错误继续按原策略重试。
 
+### 小红书访问节奏与风控背压
+
+- **小红书主动搜索改用保守默认节奏，并补齐四层背压**：新配置或缺键配置的 `daily_search_budget / task_interval_seconds / min_interval_minutes` 从 `0 / 300 / 3` 调整为 `20 / 1200 / 20`；20 分钟是目标值，legacy search / creator 每次 claim 按任务 ID 施加稳定 ±25% 抖动（约 15–25 分钟）并把实际 `next_claim_at` 落 SQLite，避免后端、MV3 或多浏览器 profile 重启绕过，也避免固定周期访问。`XhsTaskProducer` 在 pending + in-progress search 达 5 条时直接返回 `backlog`，不 claim planner 词、不调用 LLM，只按空位补队列；默认每日 20 次与该积压门共同限制高缺口时的持续搜索。风险回调新增持久 `rate_limit_strikes`，独立风控轮次按 `1h → 2h → 4h → 8h → 16h → 24h` 指数退避并封顶；同一活动冷却内重复报告不加轮次，冷却后的正常 search / creator 成功才重置，晚到成功不能取消其它任务刚打开的冷却。状态 API 同步显示连续轮次与剩余时间。插件、桌面 Web、CLI、配置样例、模块文档和架构图已统一默认值；**这些数值是工程安全起点，不是小红书官方阈值，已有显式 `config.toml` 值不迁移、不覆盖**。
+
 ### 多模态推荐与高级配置
 
 - **完整视觉 embedding pipeline**：视觉画像（P1）与关键帧（P3）使用带 cross-clean、contested 区和冷启动门控的 margin 几何评分；关键帧单独开启时也会构建质心，P1 cover bonus 仍由 `visual_profile_enabled` 控制。
@@ -29,6 +35,7 @@
 - **弹幕摘要严格遵守字符预算**：`condense_danmaku` 将 ` | ` 分隔符计入 `danmaku_max_chars`，保留完整弹幕，单条超限跳过，避免摘要实际长度超过配置预算。
 - **桌面 Web 与插件设置页新增统一的「高级功能」Tab**：桌面端 7 个 Tab、插件端 6 个 Tab 都固定提供「推荐增强 / 多模态处理 / 搜索词生成」三个 section；P1/P2/P3 依赖关系、关闭无副作用、七个 discovery 字段的 round-trip 和搜索词三档 option 契约保持一致，调度 Tab 只保留真正的调度项。
 - **设置页保存按钮只在有改动时启用**：桌面 Web 与插件 side panel 在配置无变化或保存请求进行中都会禁用保存，避免无操作的完整 `PUT /api/config` 和无意义热重载；输入、LLM 实例/调用链草稿及候选池建议比例等程序化修改都会进入脏状态。保存成功后按钮重新禁用，失败则保留改动并允许重试。
+- **配置保存不再被长对话拖到 60 秒超时**：`PUT /api/config` 仍先校验、快照并落盘；检测到对话、结算或事件 owner 正忙时改为立即返回 `202 apply_state="queued"`，由 app-owned latest-wins 队列在后台安全 drain 后热重载。连续保存只保留最新待应用修订，旧修订失败不会覆盖新文件；最终成功/失败通过 `config_reloaded` / `config_reload_failed` 推送，并可由 `GET /api/config/apply-status` 回读。最新修订失败会恢复最后一次已生效配置，初始化在应用完成前返回 `409 config_applying`，插件与桌面 Web 分别展示“已排队”及最终失败回执。
 - **插件配置保存栏固定在视口底部**：side panel 不再把位于长表单末尾的 sticky 保存栏留在页面底部；保存状态和按钮始终固定在扩展视口底边，滚动容器同步预留安全区与操作栏高度，最后一项配置仍可完整滚到按钮上方，不会被遮挡。
 - **高级功能默认值统一**：新配置的搜索词生成默认使用“混合”（经典 merged planner + search-backed 灵感轴），桌面 Web、插件和 API 缺省回退同步为 `hybrid`；图像 Embedding、候选封面 LLM 评估、P1 视觉画像和 P3 关键帧继续全部默认关闭，已有显式配置不被覆盖。
 - **补充 PR #135 贡献者致谢**：README 中英文与贡献指南正式记录 [@wuwafly3](https://github.com/wuwafly3) 对用户视觉画像（P1）、B 站弹幕语义（P2）、视频关键帧（P3）和跨平台视觉加权管线的贡献，并保留其此前在 [#100](https://github.com/whiteguo233/OpenBiliClaw/pull/100) 中完成的 DashScope 多模态 embedding 与封面 image-only 向量归属。
@@ -40,7 +47,6 @@
 - **对话 turn 绑定安全性收口**：三端把卡片/疑惑作为 durable turn，通过 `reply_to_turn_id` 只声明目标；服务端在 user INSERT 前冻结 canonical context、digest 和 ordinary/detached mode，统一贯穿 prompt、event、学习与结算，A→B replacement 只会安全 stale-drop。新增只读 context preview、opaque evidence 过滤、独立长列表滚动、reply quote 与失败草稿保留；恢复长历史时首次进入会落到最新消息，后续实时刷新仍保留阅读位置。真实三端 E2E 补齐结算态收尾：卡片已确认/修正/拒绝/稍后时会静默清除旧 context，已知服务端错误优先显示中文；移动端固定回顶按钮按 360px 窄屏重新留距，不再与发送按钮相交。
 - **修复 GitHub Star 数量请求偶发 403**：桌面 Web 和扩展不再从浏览器匿名直连 GitHub REST API，统一改走公开同源 `GET /api/project-stats`；后端持久化 12 小时缓存、使用 ETag 条件请求，并在 403 / 429、断网或 GitHub 异常时按响应头退避、返回旧缓存或无数量的本地 200。GitHub Pages 静态官网没有可用的同源后端，因此保留 Star CTA、停止动态请求数量；所有浏览器入口都不再产生 GitHub 失败资源日志，点击仓库行为保持不变。
 - **桌面惊喜推荐把“× / 看过了，不再推荐”移到卡片右上角**：关闭动作不再夹在喜欢、不感兴趣、稍后看和收藏之间，避免被误认成同级反馈或误触；按钮保留原有永久已读语义、可见键盘焦点与禁用态，窄屏触控区域不小于 44×44。
-- **配置保存不再被长对话拖到 60 秒超时**：`PUT /api/config` 仍先校验、快照并落盘；检测到对话、结算或事件 owner 正忙时改为立即返回 `202 apply_state="queued"`，由 app-owned latest-wins 队列在后台安全 drain 后热重载。连续保存只保留最新待应用修订，旧修订失败不会覆盖新文件；最终成功/失败通过 `config_reloaded` / `config_reload_failed` 推送，并可由 `GET /api/config/apply-status` 回读。最新修订失败会恢复最后一次已生效配置，初始化在应用完成前返回 `409 config_applying`，插件与桌面 Web 分别展示“已排队”及最终失败回执。
 - **修复 X「测试连接」只读旧健康记录的问题**：设置页现在通过 `twitter-cli` 的只读账户状态请求即时验证 `auth_token` / `ct0`，401、403、429 和传输失败分别保持失败或待判定语义，不把网络故障误报成 Cookie 失效。
 - **修复后端启动后 X Cookie 同步滞后**：启用 X 时，扩展每次新建 `/api/runtime-stream` 连接都会收到 `x_cookie_sync_requested`，立即把当前浏览器 Cookie 回传；原有启动、变更监听和小时 alarm 继续作为兜底。
 - **移除扩展临时调试日志中继**：抖音任务仍通过正常的 `task-result` 回传结构化诊断，但不再向 `/api/sources/_debug/log` 额外发起请求；废弃 helper 和后端 relay 路由同步删除。

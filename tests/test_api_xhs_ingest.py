@@ -267,6 +267,25 @@ class TestXhsObservedUrls:
         body = response.json()
         assert body["accepted"] == 1  # the discovery/item URL, not the junk one
 
+    def test_urls_branch_accepts_search_result_note_variant(
+        self,
+        app_client: TestClient,
+    ) -> None:
+        note = "0123456789abcdef01234567"
+        response = app_client.post(
+            "/api/sources/xhs/observed-urls",
+            json={
+                "urls": [
+                    f"https://www.xiaohongshu.com/search_result/{note}?xsec_token=Z",
+                    "https://www.xiaohongshu.com/search_result?keyword=not-a-note",
+                ],
+                "page_type": "search",
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json()["accepted"] == 1
+
     def test_stores_observations_in_db(self, app_client: TestClient, tmp_path: Path) -> None:
         from openbiliclaw.storage.database import Database
 

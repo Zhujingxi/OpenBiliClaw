@@ -515,7 +515,7 @@ def _native_save_e2e_content_id_from_url(
             ):
                 return ""
         match = re.fullmatch(
-            r"/(?:explore|discovery/item)/([A-Za-z0-9_-]+)/?",
+            r"/(?:explore|discovery/item|search_result)/([A-Za-z0-9_-]+)/?",
             parsed.path,
         )
         return match.group(1) if match else ""
@@ -11712,17 +11712,15 @@ def create_app(
             _persist_xhs_self_info(self_info_now)
         self_info_for_filter = self_info_now or _load_xhs_self_info()
 
-        # Filter to valid xhs note URLs. Accept both note-detail shapes xhs
-        # exposes — ``/explore/<id>`` and the legacy ``/discovery/item/<id>``
-        # — so the bare-``urls`` branch stops silently dropping discovery/item
-        # links the ``notes`` branch already ingests (both key on the same
-        # note id via sources.identity_keys).
+        # Filter to valid xhs note URLs. Search cards may now expose
+        # ``/search_result/<id>`` in addition to ``/explore/<id>`` and the
+        # legacy ``/discovery/item/<id>``; all three key on the same note id.
         valid_urls = [
             u
             for u in urls_raw
             if isinstance(u, str)
             and u.startswith(xhs_url_prefix)
-            and ("/explore/" in u or "/discovery/item/" in u)
+            and ("/explore/" in u or "/discovery/item/" in u or "/search_result/" in u)
         ]
 
         # Store bare URLs for tracking
@@ -12361,10 +12359,10 @@ def create_app(
         try:
             task_interval_seconds = max(
                 0,
-                int(getattr(xhs_cfg, "task_interval_seconds", 300)),
+                int(getattr(xhs_cfg, "task_interval_seconds", 1200)),
             )
         except (TypeError, ValueError):
-            task_interval_seconds = 300
+            task_interval_seconds = 1200
         task = _xhs_task_queue.next_pending(
             only_ids=_init_owned_ids_filter(),
             min_interval_seconds=task_interval_seconds,
@@ -12591,7 +12589,13 @@ def create_app(
                     )
                 legacy_queue.complete_staged_result(task_id)
         else:
-            failed = legacy_queue.fail(task_id, error=payload.get("error", ""), debug=debug)
+            # Search/creator ``empty`` is retryable and remains a failed task,
+            # but never persist a blank error: it made real selector drift look
+            # indistinguishable from an unexplained transport failure.
+            failure_error = str(payload.get("error", "") or "").strip()
+            if not failure_error and status == "empty":
+                failure_error = "xhs_empty_result"
+            failed = legacy_queue.fail(task_id, error=failure_error, debug=debug)
             # Unified keyword planner lifecycle (P1.7): the async search failed →
             # mark its ``source_keyword_id`` word ``failed`` (retry via attempts).
             if failed and task is not None:
@@ -12847,9 +12851,14 @@ def create_app(
         if xhs_item.enabled and bool(xhs_runtime_state.get("rate_limited")):
             remaining_seconds = int(xhs_runtime_state.get("cooldown_remaining_seconds", 0) or 0)
             remaining_minutes = max(1, (remaining_seconds + 59) // 60)
+            rate_limit_strikes = max(
+                1,
+                int(xhs_runtime_state.get("rate_limit_strikes", 1) or 1),
+            )
             xhs_item.state = "rate_limited"
             xhs_item.detail = (
-                f"小红书触发安全验证，后台任务已自动暂停，约 {remaining_minutes} 分钟后恢复领取。"
+                f"小红书连续第 {rate_limit_strikes} 次触发平台风控，后台任务已自动暂停，"
+                f"约 {remaining_minutes} 分钟后恢复领取。"
             )
             xhs_item.feed_paused = True
         # Bangumi's uniform item (built above) is replaced: it carries a
