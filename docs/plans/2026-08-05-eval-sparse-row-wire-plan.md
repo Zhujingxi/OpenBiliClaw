@@ -57,15 +57,17 @@
 
 **Owner:** root
 
-- [ ] Run `sparse-json` on 100 candidates × 3 repeats and independently recompute all gates.
-- [ ] If and only if sparse JSON passes, run `row-wire-v1` on the same 100 × 3 design.
-- [ ] Scan artifacts against source rows for privacy leakage and verify usage completeness.
-- [ ] Record exact commands, commits, artifact hashes, runtimes, savings, quality deltas and incidents.
+- [x] Run `sparse-json` on 100 candidates × 3 repeats and independently recompute all gates.
+- [x] If and only if sparse JSON passes, run `row-wire-v1` on the same 100 × 3 design.
+- [x] Scan artifacts against source rows for privacy leakage and verify usage completeness.
+- [x] Record exact commands, commits, artifact hashes, runtimes, savings, quality deltas and incidents.
 
 ## Task 7 — Production decision
 
 **Owner:** root
 
-- [ ] Land row-wire-v1 only if both independent experiments pass every locked gate.
-- [ ] Otherwise keep production bytes unchanged and record the failed arm without threshold tuning.
-- [ ] Rerun applicable full and end-to-end tests after the landing/rejection decision.
+- [x] Evaluate the landing condition: sparse passed, but row-wire-v1 failed locked savings and
+      classification gates, so no landing is permitted.
+- [x] Keep production bytes unchanged and record the failed arm without threshold tuning.
+- [x] Rerun applicable full and end-to-end tests after the landing/rejection decision (`7199 passed`,
+      `93 skipped`; four candidate-wire/pipeline E2E passed).

@@ -205,3 +205,31 @@ Landing is allowed only when both arms pass independently. Then:
 No CLI/config setting is introduced, so config, CLI, installer and architecture diagrams are out of scope.
 Rollback restores the production candidate JSON renderer and prior cache namespace without reverting replay
 evidence or parser hardening.
+
+## 8. Real replay result and decision
+
+The locked two-stage gate was completed without relaxing thresholds:
+
+- `sparse-json` ran on commit `c3540abd` over 100 candidates × 3 repeats in `5262s`.
+  Paired prompt-token savings were `17.12% / 29.19% / 27.99%` (median `27.99%`) and total-token
+  savings were `10.68% / 24.32% / 24.05%` (median `24.05%`). The A/A-relative score,
+  Spearman, admission, classification, repair, route, embedding, recall, usage and privacy gates passed.
+  The original artifact reported a false prompt-contract failure because one seven-item A/A control response
+  omitted one `reason` while every changed-transport response retained it. Commit `f644bbe9` corrected the
+  auditor to attribute transport contract drift only to treatment B; offline re-audit of the immutable calls
+  then passed with no blockers. Artifact SHA-256:
+  `f183fce2a98ac9e0edf188c8e741b60ec78652df42b2762735ac31b2507b23f7`.
+- `row-wire-v1` ran on commit `f644bbe9` over the same 100 × 3 design in `5446.6s`. Relative to sparse
+  JSON, paired prompt-token savings were `-4.67% / 2.20% / 9.99%` (median `2.20%`, below the locked
+  `5%` gate) and total-token savings were `-4.18% / 2.63% / 10.81%` (median `2.63%`). The general
+  score/Spearman/admission gate passed, but `style_key` agreement (`0.6333` vs A/A floor `0.7667`) and
+  `franchise_key` agreement (`0.8000` vs A/A floor `0.8667`) failed. One repeat also had an A-arm sparse
+  root request without billable usage; this was recorded as an additional fail-closed incident rather than
+  treated as zero. Artifact SHA-256:
+  `8fc7065df93e2d82e7cd3647b3e0245f9462971ca0e091c823babcfed8b573e0`.
+- An independent source-row scan checked 692 title/body/description/identity/URL/author values in each
+  artifact and found zero raw-value hits.
+
+Decision: reject `row-wire-v1`, do not tune the locked gates, and keep the production pretty-JSON bytes,
+cache namespace and prompt-cache documentation unchanged. The sparse/local-ID and row codecs remain behind
+the replay-only seam as reproducible evidence and parser-hardening coverage; they are not production defaults.
