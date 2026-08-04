@@ -3,6 +3,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 import openbiliclaw.llm.prompts as prompt_module
 from openbiliclaw.discovery.style_keys import VALID_STYLE_KEYS
 from openbiliclaw.llm.prompts import (
@@ -555,6 +557,93 @@ def test_batch_content_evaluation_compact_json_changes_whitespace_only() -> None
         assert "\n  " not in compact_json
 
     assert "保留 字符串 内部 空格" in compact[1]["content"]
+
+
+def test_batch_content_evaluation_treatment_seam_preserves_production_bytes() -> None:
+    kwargs = {
+        "profile_summary": {"interests": ["systems"]},
+        "content_items": [{"content_id": "global-1", "title": "candidate"}],
+        "source_context": "search",
+        "source_platform": "bilibili",
+    }
+
+    historical_defaults = build_batch_content_evaluation_prompt(**kwargs)
+    explicit_production = build_batch_content_evaluation_prompt(
+        **kwargs,
+        candidate_block=None,
+        local_result_ids=False,
+    )
+
+    assert explicit_production == historical_defaults
+
+
+def test_batch_content_evaluation_sparse_contract_is_static_and_transport_neutral() -> None:
+    sparse_json = (
+        '{"defaults":{"content_type":"video","mode":"normal",'
+        '"source_platform":"bilibili"},"items":'
+        '[{"author":"u","id":"0","title":"candidate"}]}'
+    )
+    row_wire = "ROW-WIRE-V1\ndefaults\tmode=normal\ncolumns\tid\nrow\t0"
+
+    sparse_messages = build_batch_content_evaluation_prompt(
+        profile_summary={"interests": ["systems"]},
+        content_items=[],
+        candidate_block=sparse_json,
+        local_result_ids=True,
+    )
+    row_messages = build_batch_content_evaluation_prompt(
+        profile_summary={"interests": ["different"]},
+        content_items=[{"content_id": "must-not-render"}],
+        candidate_block=row_wire,
+        local_result_ids=True,
+    )
+
+    system = sparse_messages[0]["content"]
+    assert row_messages[0]["content"] == system
+    assert "ROW-WIRE-V1" in system
+    assert "defaults/items" in system
+    assert "原样带回输入里的 id" in system
+    assert "cover:<id>" in system
+    assert "bvid" not in system
+    assert "content_id" not in system
+    assert "严格低于 0.5" in system
+
+    sparse_block = (
+        sparse_messages[1]["content"]
+        .split("<content_batch>", 1)[1]
+        .split(
+            "</content_batch>",
+            1,
+        )[0]
+    )
+    row_block = (
+        row_messages[1]["content"]
+        .split("<content_batch>", 1)[1]
+        .split(
+            "</content_batch>",
+            1,
+        )[0]
+    )
+    assert sparse_block.strip() == sparse_json
+    assert row_block.strip() == row_wire
+    assert "must-not-render" not in row_messages[1]["content"]
+
+
+@pytest.mark.parametrize(
+    ("candidate_block", "local_result_ids"),
+    [(None, True), ('{"defaults":{},"items":[]}', False)],
+)
+def test_batch_content_evaluation_rejects_mixed_identity_contracts(
+    candidate_block: str | None,
+    local_result_ids: bool,
+) -> None:
+    with pytest.raises(ValueError, match="must be enabled together"):
+        build_batch_content_evaluation_prompt(
+            profile_summary={},
+            content_items=[],
+            candidate_block=candidate_block,
+            local_result_ids=local_result_ids,
+        )
 
 
 def test_content_evaluation_prompts_only_allow_explore_scoring_exception() -> None:

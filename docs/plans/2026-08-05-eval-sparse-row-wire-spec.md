@@ -19,12 +19,14 @@ On the frozen 100-candidate cohort used by the JSON-minify replay, content-block
 | --- | ---: | ---: |
 | production pretty JSON | 114861 | baseline |
 | compact production JSON | 99245 | -13.60% |
-| sparse compact JSON proxy | 37699 | -67.18% |
-| sparse escaped TSV proxy | 29643 | -74.19% |
+| implemented sparse compact JSON | 39836 | -65.32% |
+| implemented row-wire-v1 | 30280 | -73.64% |
 
-These are serializer character proxies, not provider-token claims. There is no model-independent tokenizer;
-real prompt/completion/total usage must be recorded from each replay response. The design must not depend
-on provider caching, a provider-specific tokenizer, reasoning controls or structured-output extensions.
+These measurements use the implemented serializers over the same four production-sized batches; row wire
+is another `23.99%` smaller than sparse JSON. They are still character proxies, not provider-token claims.
+There is no model-independent tokenizer; real prompt/completion/total usage must be recorded from each
+replay response. The design must not depend on provider caching, a provider-specific tokenizer, reasoning
+controls or structured-output extensions.
 
 ## 2. Canonical sparse candidate schema
 

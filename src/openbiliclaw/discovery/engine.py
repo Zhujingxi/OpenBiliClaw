@@ -20,6 +20,12 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
 
 from openbiliclaw.discovery.admission import effective_admission_threshold
+from openbiliclaw.discovery.eval_payload import (
+    CanonicalEvaluationBatch,
+    build_canonical_evaluation_batch,
+    render_sparse_evaluation_json,
+    resolve_local_evaluation_results,
+)
 from openbiliclaw.discovery.eval_reason import normalize_evaluation_reason
 from openbiliclaw.discovery.strategies._utils import (
     _CONTENT_PROMPT_DOMAIN_CAP,
@@ -28,6 +34,7 @@ from openbiliclaw.discovery.strategies._utils import (
     compact_content_prompt_profile_summary,
 )
 from openbiliclaw.discovery.style_keys import normalize_style_key
+from openbiliclaw.llm.evaluation_wire import encode_evaluation_row_wire
 from openbiliclaw.llm.json_utils import (
     extract_llm_json_list,
     parse_llm_json_tolerant,
@@ -97,6 +104,7 @@ _RAW_CANDIDATE_MODE: contextvars.ContextVar[bool] = contextvars.ContextVar(
 _EVAL_BATCH_CACHE_VERSION = "content-eval-v2"
 _EMBEDDING_PREFILTER_DEFAULT_MODE = "shadow"
 _EMBEDDING_PREFILTER_MODES = {"off", "shadow", "enforce"}
+_EVALUATION_CANDIDATE_TRANSPORTS = frozenset({"production", "row-wire-v1", "sparse-json"})
 _EMBEDDING_PREFILTER_MIN_SIMILARITY = 0.2
 _EMBEDDING_PREFILTER_REASON = "embedding 预过滤: 与所有兴趣相似度极低"
 _NEGATIVE_EXAMPLES_UNSET = object()
@@ -445,14 +453,19 @@ def _batch_evaluation_platform(content: DiscoveredContent) -> str:
     return platform or "bilibili"
 
 
+def _batch_evaluation_content_type(content: DiscoveredContent) -> str:
+    from openbiliclaw.discovery.candidate_pool import resolve_content_type
+
+    platform = _batch_evaluation_platform(content)
+    return resolve_content_type(content.content_type, platform)
+
+
 def _batch_evaluation_content_item(
     content: DiscoveredContent,
     *,
     source_context: str,
 ) -> dict[str, object]:
     """Build the exact text content object rendered by the batch evaluator."""
-
-    from openbiliclaw.discovery.candidate_pool import resolve_content_type
 
     platform = _batch_evaluation_platform(content)
     return {
@@ -462,7 +475,7 @@ def _batch_evaluation_content_item(
         "source_platform": platform,
         "source_strategy": content.source_strategy,
         "source_context": source_context or content.source_strategy,
-        "content_type": resolve_content_type(content.content_type, platform),
+        "content_type": _batch_evaluation_content_type(content),
         "body_text": content.body_text,
         "title": content.title,
         "up_name": content.up_name,
@@ -827,6 +840,7 @@ class ContentDiscoveryEngine:
         eval_batch_concurrency: int = _DEFAULT_EVAL_BATCH_CONCURRENCY,
         eval_prefilter_mode: str = _EMBEDDING_PREFILTER_DEFAULT_MODE,
         compact_evaluation_json: bool = False,
+        evaluation_candidate_transport: str = "production",
     ) -> None:
         self._strategies: list[DiscoveryStrategy] = []
         self._llm_service = llm_service
@@ -848,6 +862,16 @@ class ContentDiscoveryEngine:
         # Replay-only unless and until the real provider quality/token gate
         # approves compact deterministic evaluator JSON.
         self.compact_evaluation_json = bool(compact_evaluation_json)
+        normalized_candidate_transport = str(evaluation_candidate_transport).strip().lower()
+        if normalized_candidate_transport not in _EVALUATION_CANDIDATE_TRANSPORTS:
+            supported = ", ".join(sorted(_EVALUATION_CANDIDATE_TRANSPORTS))
+            raise ValueError(
+                "unsupported evaluation candidate transport "
+                f"{evaluation_candidate_transport!r}; expected one of: {supported}"
+            )
+        # Replay-only treatment seam. The default preserves the historical
+        # candidate JSON, result identity and prompt bytes.
+        self.evaluation_candidate_transport = normalized_candidate_transport
         self._multimodal_vision_supported_override = multimodal_vision_supported
         self.multimodal_unavailable_reason = ""
         self._eval_cache: OrderedDict[str, _EvalCacheEntry] = OrderedDict()
@@ -2338,13 +2362,22 @@ class ContentDiscoveryEngine:
         Mixed-platform batches render an aggregate ``mixed`` platform, while a batch
         without an explicit context inherits that value from its first item. Either
         value can change after a partial cache hit, so heterogeneous calls bypass the
-        normal cache. Vision attempts also bypass it until keys can cover the actual
-        prepared image bytes rather than only their URLs.
+        normal cache. Sparse transports also lift homogeneous content types into
+        batch defaults, so mixed-type treatment batches bypass member caching.
+        Vision attempts bypass it until keys can cover the actual prepared image
+        bytes rather than only their URLs.
         """
 
         if not contents:
             return False
         same_platform = len({_batch_evaluation_platform(content) for content in contents}) == 1
+        candidate_transport = (
+            str(getattr(self, "evaluation_candidate_transport", "production")).strip().lower()
+        )
+        stable_content_type = (
+            candidate_transport == "production"
+            or len({_batch_evaluation_content_type(content) for content in contents}) == 1
+        )
         stable_context = (
             bool(source_context) or len({content.source_strategy for content in contents}) == 1
         )
@@ -2353,7 +2386,7 @@ class ContentDiscoveryEngine:
             and self._supports_multimodal_evaluation()
             and any((content.cover_url or "").strip() for content in contents)
         )
-        return same_platform and stable_context and not multimodal_attempted
+        return same_platform and stable_content_type and stable_context and not multimodal_attempted
 
     def _single_eval_cache_key(
         self,
@@ -2390,12 +2423,21 @@ class ContentDiscoveryEngine:
     ) -> str:
         effective_batch_context = source_context or content.source_strategy
         effective_batch_platform = _batch_evaluation_platform(content)
+        candidate_transport = (
+            str(getattr(self, "evaluation_candidate_transport", "production")).strip().lower()
+        )
+        production_content_item = _batch_evaluation_content_item(
+            content,
+            source_context=source_context,
+        )
+        prompt_visible_content: object = production_content_item
+        if candidate_transport != "production":
+            prompt_visible_content = build_canonical_evaluation_batch(
+                [production_content_item]
+            ).as_payload()
         prompt_digest = stable_json_digest(
             {
-                "content_item": _batch_evaluation_content_item(
-                    content,
-                    source_context=source_context,
-                ),
+                "content_item": prompt_visible_content,
                 "batch_source_context": effective_batch_context,
                 "batch_source_platform": effective_batch_platform,
                 "multimodal_enabled": bool(getattr(self, "multimodal_evaluation_enabled", False)),
@@ -2404,12 +2446,15 @@ class ContentDiscoveryEngine:
         prefilter_mode = self._normalize_eval_prefilter_mode(
             getattr(self, "eval_prefilter_mode", "")
         )
+        transport_suffix = (
+            "" if candidate_transport == "production" else f":transport:{candidate_transport}"
+        )
         return (
             f"{_EVAL_BATCH_CACHE_VERSION}:batch:"
             f"{self._content_identity(content)}:content:{prompt_digest}:"
             f"profile:{profile_digest}:neg:{negative_digest}:"
             f"embed:{self._evaluation_embedding_namespace()}:"
-            f"prefilter:{prefilter_mode}"
+            f"prefilter:{prefilter_mode}{transport_suffix}"
         )
 
     async def _evaluate_batch_once(
@@ -2427,6 +2472,11 @@ class ContentDiscoveryEngine:
         profile_data = self._evaluation_profile_summary(profile)
         effective_batch_context = source_context or (batch[0].source_strategy if batch else "")
         effective_batch_platform = self._batch_prompt_source_platform(batch)
+        candidate_transport = (
+            str(getattr(self, "evaluation_candidate_transport", "production")).strip().lower()
+        )
+        if candidate_transport not in _EVALUATION_CANDIDATE_TRANSPORTS:
+            raise ValueError(f"unsupported evaluation candidate transport: {candidate_transport!r}")
         normal_cache_enabled = normal_cache_enabled and self._batch_normal_cache_eligible(
             batch,
             source_context=source_context,
@@ -2456,11 +2506,60 @@ class ContentDiscoveryEngine:
             )
             image_ids = {image.content_id for image in prepared_images}
             if image_ids:
-                for item in content_items:
-                    content_id = str(item.get("content_id") or item.get("bvid") or "")
-                    if content_id in image_ids:
-                        item["cover_image_ref"] = f"cover:{content_id}"
-                image_inputs = [image.to_llm_input() for image in prepared_images]
+                if candidate_transport == "production":
+                    for item in content_items:
+                        content_id = str(item.get("content_id") or item.get("bvid") or "")
+                        if content_id in image_ids:
+                            item["cover_image_ref"] = f"cover:{content_id}"
+                    image_inputs = [image.to_llm_input() for image in prepared_images]
+                else:
+                    # Treatment anchors must not leak global identifiers. Only
+                    # unambiguous one-to-one image/content identities are kept;
+                    # ambiguous inputs are omitted together with their text
+                    # anchor so they cannot bind to the wrong request member.
+                    content_identity_counts = Counter(
+                        str(item.get("content_id") or item.get("bvid") or "")
+                        for item in content_items
+                    )
+                    prepared_identity_counts = Counter(
+                        image.content_id for image in prepared_images
+                    )
+                    local_id_by_content_identity = {
+                        content_identity: str(index)
+                        for index, item in enumerate(content_items)
+                        if (
+                            (
+                                content_identity := str(
+                                    item.get("content_id") or item.get("bvid") or ""
+                                )
+                            )
+                            and content_identity_counts[content_identity] == 1
+                            and prepared_identity_counts[content_identity] == 1
+                        )
+                    }
+                    for item in content_items:
+                        content_identity = str(item.get("content_id") or item.get("bvid") or "")
+                        local_id = local_id_by_content_identity.get(content_identity)
+                        if local_id is not None:
+                            item["cover_image_ref"] = f"cover:{local_id}"
+                    for image in prepared_images:
+                        local_id = local_id_by_content_identity.get(image.content_id)
+                        if local_id is None:
+                            continue
+                        image_input = image.to_llm_input()
+                        image_input["content_id"] = local_id
+                        image_inputs.append(image_input)
+
+        canonical_batch: CanonicalEvaluationBatch | None = None
+        local_content_by_id: dict[str, DiscoveredContent] = {}
+        candidate_block: str | None = None
+        if candidate_transport != "production":
+            canonical_batch = build_canonical_evaluation_batch(content_items)
+            local_content_by_id = dict(zip(canonical_batch.local_ids, batch, strict=True))
+            if candidate_transport == "sparse-json":
+                candidate_block = render_sparse_evaluation_json(canonical_batch)
+            else:
+                candidate_block = encode_evaluation_row_wire(canonical_batch.as_payload())
         if negative_examples is _NEGATIVE_EXAMPLES_UNSET:
             negative_examples = self._get_negative_exemplars()
         # Treat empty list as "no examples" so the user-message stays
@@ -2483,6 +2582,8 @@ class ContentDiscoveryEngine:
             source_platform=effective_batch_platform,
             negative_examples=negative_examples_for_prompt,
             compact_json=compact_json,
+            candidate_block=candidate_block,
+            local_result_ids=canonical_batch is not None,
         )
 
         assert self._llm_service is not None
@@ -2536,19 +2637,33 @@ class ContentDiscoveryEngine:
         if payload is None:
             return [None] * len(batch)
 
-        payload_by_id = _batch_results_by_content_key(payload, batch)
-        if payload_by_id is None and len(payload) != len(batch):
-            logger.warning(
-                "Batch evaluation result count mismatch without IDs (%d results for %d items), "
-                "falling back to single eval",
-                len(payload),
-                len(batch),
+        local_payload: list[dict[str, Any] | None] | None = None
+        payload_by_id: dict[str, dict[str, Any]] | None = None
+        if canonical_batch is not None:
+            local_payload = resolve_local_evaluation_results(
+                payload,
+                canonical_batch.local_ids,
             )
-            return [None] * len(batch)
+        else:
+            payload_by_id = _batch_results_by_content_key(payload, batch)
+            if payload_by_id is None and len(payload) != len(batch):
+                logger.warning(
+                    "Batch evaluation result count mismatch without IDs (%d results for %d items), "
+                    "falling back to single eval",
+                    len(payload),
+                    len(batch),
+                )
+                return [None] * len(batch)
 
         results: list[float | None] = []
         for i, content in enumerate(batch):
-            if payload_by_id is None:
+            if canonical_batch is not None:
+                local_id = canonical_batch.local_ids[i]
+                if local_content_by_id.get(local_id) is not content:
+                    raise RuntimeError("request-local evaluation identity map is inconsistent")
+                assert local_payload is not None
+                raw_item = local_payload[i]
+            elif payload_by_id is None:
                 raw_item = payload[i] if i < len(payload) else None
             else:
                 raw_item = next(

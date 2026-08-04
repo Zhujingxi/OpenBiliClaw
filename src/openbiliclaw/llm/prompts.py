@@ -1474,6 +1474,71 @@ _BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT = (
 )
 
 
+def _build_sparse_batch_evaluation_system_prompt() -> str:
+    """Return the static local-ID contract shared by sparse transports."""
+
+    replacements = (
+        (
+            "3. 每项必须原样带回输入里的 bvid 或 content_id,并包含 score(0-1)、"
+            "reason、topic_group(2-4词粗分类)、style_key(13选1)、"
+            "franchise_key(可空)。\n",
+            "3. content_batch 编码一个 canonical batch,可能是含 defaults/items 的 JSON,"
+            "也可能是 ROW-WIRE-V1 表；表中的 defaults、columns、row 与同名 canonical "
+            "字段完全等价。defaults 是所有 items/rows 共享的默认值,每项同名字段优先。"
+            "每项包含请求内局部 id、title、author,以及非空的内容/互动字段。"
+            "每项必须原样带回输入里的 id,并包含 score(0-1)、reason、"
+            "topic_group(2-4词粗分类)、style_key(13选1)、franchise_key(可空)。\n",
+        ),
+        (
+            "10. When content_batch items include source_platform/source_strategy/content_type, "
+            "use those per-item fields as the authoritative platform context. "
+            "Do not lower or raise preference score merely because content comes from a "
+            "different platform; score every item against the same Soul-profile rubric. ",
+            "10. Resolve source_platform, content_type and mode from each canonical item, "
+            "falling back to content_batch.defaults when the item omits that field. "
+            "Only mode=explore receives the explore exception; mode=normal covers every "
+            "other discovery path. Do not lower or raise preference score merely because "
+            "content comes from a different platform; score every item against the same "
+            "Soul-profile rubric. ",
+        ),
+        (
+            "它的值形如 cover:<content_id>,对应同一 user 消息中紧随文字锚点"
+            " `Cover image cover:<content_id> ...` 后面的图片。评分时必须结合该头图 / 封面图",
+            "它的值形如 cover:<id>,对应同一 user 消息中紧随文字锚点"
+            " `Cover image cover:<id> ...` 后面的图片。评分时必须结合该头图 / 封面图",
+        ),
+        (
+            '    {"bvid": "BV1xxx", "score": 0.78, "reason": "...", '
+            '"topic_group": "认知科学", '
+            '"style_key": "deep_focus", "franchise_key": ""},\n'
+            '    {"bvid": "BV2xxx", "score": 0.72, "reason": "...", '
+            '"topic_group": "游戏摄影", '
+            '"style_key": "aesthetic_browse", "franchise_key": "原神"},\n'
+            '    {"bvid": "BV3xxx", "score": 0.45, "reason": "", '
+            '"topic_group": "美食", '
+            '"style_key": "social_chat", "franchise_key": ""}\n',
+            '    {"id": "0", "score": 0.78, "reason": "...", '
+            '"topic_group": "认知科学", '
+            '"style_key": "deep_focus", "franchise_key": ""},\n'
+            '    {"id": "1", "score": 0.72, "reason": "...", '
+            '"topic_group": "游戏摄影", '
+            '"style_key": "aesthetic_browse", "franchise_key": "原神"},\n'
+            '    {"id": "2", "score": 0.45, "reason": "", '
+            '"topic_group": "美食", '
+            '"style_key": "social_chat", "franchise_key": ""}\n',
+        ),
+    )
+    prompt = _BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT
+    for production_text, sparse_text in replacements:
+        if prompt.count(production_text) != 1:
+            raise RuntimeError("sparse evaluator system prompt is stale")
+        prompt = prompt.replace(production_text, sparse_text, 1)
+    return prompt
+
+
+_SPARSE_BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT = _build_sparse_batch_evaluation_system_prompt()
+
+
 def build_batch_content_evaluation_prompt(
     *,
     profile_summary: dict[str, object],
@@ -1483,6 +1548,8 @@ def build_batch_content_evaluation_prompt(
     source_platform: str = "bilibili",
     negative_examples: list[dict[str, object]] | None = None,
     compact_json: bool = False,
+    candidate_block: str | None = None,
+    local_result_ids: bool = False,
 ) -> list[dict[str, str]]:
     """Build a prompt that evaluates multiple content items in one LLM call.
 
@@ -1516,7 +1583,15 @@ def build_batch_content_evaluation_prompt(
     ``compact_json`` is an experiment seam for deterministic JSON whitespace
     removal. It never changes field names or values, and defaults to the
     historical indented bytes.
+
+    ``candidate_block`` and ``local_result_ids`` are treatment-only seams for
+    canonical sparse transports. The block is already rendered by the shared
+    transport layer; the static local-ID system contract is shared by sparse
+    JSON and row wire. Their defaults preserve the production prompt bytes.
     """
+
+    if (candidate_block is not None) != local_result_ids:
+        raise ValueError("candidate_block and local_result_ids must be enabled together")
 
     def render_json(value: object) -> str:
         if compact_json:
@@ -1558,13 +1633,24 @@ def build_batch_content_evaluation_prompt(
     user_blocks.extend(
         [
             "<content_batch>",
-            render_json([_normalize_content_style_fields(item) for item in content_items]),
+            (
+                candidate_block
+                if candidate_block is not None
+                else render_json([_normalize_content_style_fields(item) for item in content_items])
+            ),
             "</content_batch>",
         ]
     )
     user_prompt = "\n\n".join(user_blocks)
     return [
-        {"role": "system", "content": _BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT},
+        {
+            "role": "system",
+            "content": (
+                _SPARSE_BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT
+                if local_result_ids
+                else _BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT
+            ),
+        },
         {"role": "user", "content": user_prompt},
     ]
 

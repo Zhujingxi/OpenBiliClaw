@@ -14,6 +14,12 @@ Usage:
         --arm-b json-minify --sample 100 --repeats 3 \
         --output data/eval/json-minify.json
     .venv/bin/python scripts/run_profile_diet_ab.py \
+        --arm-b sparse-json --sample 100 --repeats 3 \
+        --output data/eval/sparse-json.json
+    .venv/bin/python scripts/run_profile_diet_ab.py \
+        --arm-b row-wire-v1 --sample 100 --repeats 3 \
+        --output data/eval/row-wire-v1.json
+    .venv/bin/python scripts/run_profile_diet_ab.py \
         --arm-b model=<instance-id> --sample 100 --repeats 3 \
         --output data/eval/model-route.json
 
@@ -28,7 +34,10 @@ evaluation prompts only. ``json-minify`` leaves arm A on production pretty JSON
 and removes whitespace only from arm B's profile, negative-example, and content
 JSON blocks. The gate uses the production 4096-token output ceiling and fails on
 missing evaluation responses instead of treating gateway/parse failures as
-genuine zero scores.
+genuine zero scores. ``sparse-json`` independently compares production candidate
+JSON/global IDs with canonical sparse JSON/local IDs. ``row-wire-v1`` then
+independently compares that same sparse JSON with its exact row-wire encoding;
+neither arm substitutes for the other's quality and token gate.
 """
 
 from __future__ import annotations
@@ -70,6 +79,27 @@ _DEFAULT_BATCH_SIZE = 30
 _RELATIVE_ADMISSION_SHRINK_MAX = 0.03
 _JSON_MINIFY_PROMPT_TOKEN_SAVINGS_MIN = 0.10
 _JSON_MINIFY_TOTAL_TOKEN_SAVINGS_MIN = 0.08
+_CANDIDATE_TRANSPORT_EXPERIMENTS: Mapping[str, Mapping[str, object]] = {
+    "sparse-json": {
+        "arm_a_transport": "production-json",
+        "arm_b_transport": "sparse-json",
+        "prompt_token_savings_min": 0.20,
+        "total_token_savings_min": 0.15,
+        "total_savings_strict": False,
+    },
+    "row-wire-v1": {
+        "arm_a_transport": "sparse-json",
+        "arm_b_transport": "row-wire-v1",
+        "prompt_token_savings_min": 0.05,
+        "total_token_savings_min": 0.0,
+        "total_savings_strict": True,
+    },
+}
+_ENGINE_CANDIDATE_TRANSPORTS = {
+    "production-json": "production",
+    "sparse-json": "sparse-json",
+    "row-wire-v1": "row-wire-v1",
+}
 _REPLAY_SOURCE_CONTEXT = "mixed"
 _REPLAY_EVALUATION_OUTPUT_FIELDS = (
     "relevance_score",
@@ -266,7 +296,7 @@ class ReplayEmbeddingAudit:
         attribution = dict(_REPLAY_ATTRIBUTION.get())
         request: dict[str, object] = {
             **attribution,
-            "request_digest": _digest(str(text)),
+            "request_digest": _privacy_digest({"embedding_request": str(text)}),
             "namespace": self.namespace,
         }
         try:
@@ -1177,8 +1207,163 @@ def _evaluation_output_entries(parsed: object) -> list[tuple[str, Mapping[str, o
     ]
 
 
+@dataclass(frozen=True)
+class _CandidateTransportContext:
+    """Ephemeral decoded candidate facts; raw identities never enter artifacts."""
+
+    transport: str
+    decode_valid: bool
+    payload_start: int
+    payload_end: int
+    payload: str
+    canonical_payload: dict[str, object] | None
+    identity_positions: dict[str, int]
+    local_ids: tuple[str, ...]
+    raw_identity_field_count: int
+    raw_url_field_count: int
+
+
+def _candidate_block_span(user_input: str) -> tuple[int, int, str] | None:
+    """Return the builder-owned content-batch body without matching content data."""
+
+    open_frame = "<content_batch>\n\n"
+    close_frame = "\n\n</content_batch>"
+    start = user_input.find(open_frame)
+    if start < 0:
+        return None
+    payload_start = start + len(open_frame)
+    payload_end = user_input.find(close_frame, payload_start)
+    if payload_end < 0:
+        return None
+    if user_input.find(open_frame, payload_end + len(close_frame)) >= 0:
+        return None
+    return payload_start, payload_end, user_input[payload_start:payload_end]
+
+
+def _recursive_field_count(value: object, fields: frozenset[str]) -> int:
+    if isinstance(value, Mapping):
+        return sum(key in fields for key in value) + sum(
+            _recursive_field_count(member, fields) for member in value.values()
+        )
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes):
+        return sum(_recursive_field_count(member, fields) for member in value)
+    return 0
+
+
+def _candidate_transport_context(
+    user_input: str,
+    *,
+    expected_transport: str,
+) -> _CandidateTransportContext:
+    """Strictly decode one candidate block through the shared canonical APIs."""
+
+    span = _candidate_block_span(user_input)
+    if span is None:
+        return _CandidateTransportContext(
+            transport="",
+            decode_valid=False,
+            payload_start=0,
+            payload_end=0,
+            payload="",
+            canonical_payload=None,
+            identity_positions={},
+            local_ids=(),
+            raw_identity_field_count=0,
+            raw_url_field_count=0,
+        )
+    payload_start, payload_end, payload = span
+    actual_transport = expected_transport
+    decoded_wire: object = None
+    canonical_payload: dict[str, object] | None = None
+    identity_positions: dict[str, int] = {}
+    local_ids: tuple[str, ...] = ()
+    decode_valid = False
+    try:
+        from openbiliclaw.discovery.eval_payload import (
+            build_canonical_evaluation_batch,
+            decode_sparse_evaluation_json,
+        )
+        from openbiliclaw.llm.evaluation_wire import (
+            ROW_WIRE_V1_HEADER,
+            decode_evaluation_row_wire,
+        )
+
+        if payload.startswith(ROW_WIRE_V1_HEADER):
+            actual_transport = "row-wire-v1"
+            decoded_wire = decode_evaluation_row_wire(payload)
+            assert isinstance(decoded_wire, dict)
+            batch = decode_sparse_evaluation_json(
+                json.dumps(
+                    decoded_wire,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+            canonical_payload = batch.as_payload()
+            local_ids = batch.local_ids
+            identity_positions = batch.local_id_to_index
+        else:
+            decoded_wire = json.loads(payload)
+            if isinstance(decoded_wire, list) and all(
+                isinstance(item, Mapping) for item in decoded_wire
+            ):
+                actual_transport = "production-json"
+                source_items = [dict(item) for item in decoded_wire]
+                batch = build_canonical_evaluation_batch(source_items)
+                canonical_payload = batch.as_payload()
+                local_ids = batch.local_ids
+                raw_identity_positions: dict[str, list[int]] = {}
+                for position, item in enumerate(source_items):
+                    for field in ("content_id", "bvid", "item_key"):
+                        identifier = str(item.get(field) or "").strip()
+                        if identifier:
+                            raw_identity_positions.setdefault(identifier, []).append(position)
+                identity_positions = {
+                    identifier: positions[0]
+                    for identifier, positions in raw_identity_positions.items()
+                    if len(set(positions)) == 1
+                }
+            elif isinstance(decoded_wire, dict):
+                actual_transport = "sparse-json"
+                batch = decode_sparse_evaluation_json(payload)
+                canonical_payload = batch.as_payload()
+                local_ids = batch.local_ids
+                identity_positions = batch.local_id_to_index
+            else:
+                actual_transport = ""
+        decode_valid = canonical_payload is not None
+    except (AssertionError, TypeError, ValueError, json.JSONDecodeError):
+        decode_valid = False
+        canonical_payload = None
+        identity_positions = {}
+        local_ids = ()
+
+    inspected_payload = decoded_wire if decoded_wire is not None else payload
+    return _CandidateTransportContext(
+        transport=actual_transport,
+        decode_valid=decode_valid,
+        payload_start=payload_start,
+        payload_end=payload_end,
+        payload=payload,
+        canonical_payload=canonical_payload,
+        identity_positions=identity_positions,
+        local_ids=local_ids,
+        raw_identity_field_count=_recursive_field_count(
+            inspected_payload,
+            frozenset({"bvid", "content_id", "item_key"}),
+        ),
+        raw_url_field_count=_recursive_field_count(
+            inspected_payload,
+            frozenset({"content_url", "cover_url", "url"}),
+        ),
+    )
+
+
 def _structured_output_metadata(
     response: object,
+    *,
+    candidate_positions: Mapping[str, int] | None = None,
 ) -> dict[str, object]:
     """Build privacy-safe metadata proving whether an output omitted reason."""
 
@@ -1212,11 +1397,32 @@ def _structured_output_metadata(
                 ),
                 "nonempty": bool(normalized),
             }
-        identifier = str(item.get("content_id") or item.get("bvid") or mapped_key).strip()
+        identifier = str(
+            item.get("id")
+            or item.get("content_id")
+            or item.get("bvid")
+            or item.get("item_key")
+            or mapped_key
+        ).strip()
+        candidate_position = (
+            candidate_positions.get(identifier)
+            if candidate_positions is not None and identifier
+            else None
+        )
+        if candidate_positions is not None:
+            candidate_key_payload: object = (
+                {"candidate_position": candidate_position}
+                if candidate_position is not None
+                else {"unbound_result_position": position, "identifier_present": bool(identifier)}
+            )
+        else:
+            candidate_key_payload = {"candidate_key": identifier}
         classification_items.append(
             {
                 "candidate_key_digest": (
-                    _privacy_digest({"candidate_key": identifier}) if identifier else ""
+                    _privacy_digest(candidate_key_payload)
+                    if identifier or candidate_positions is not None
+                    else ""
                 ),
                 "position": position,
                 "fields": fields,
@@ -1256,6 +1462,20 @@ def _tagged_json_prompt_metadata(user_input: str) -> tuple[str, list[dict[str, o
             json_start = marker_end
             while json_start < len(user_input) and user_input[json_start].isspace():
                 json_start += 1
+            if name == "content_batch" and user_input.startswith("ROW-WIRE-V1", json_start):
+                closing_frame = f"\n\n{close_marker}"
+                close_frame_start = user_input.find(closing_frame, json_start)
+                if close_frame_start < 0:
+                    raise RuntimeError(f"missing closing replay JSON tag </{name}>")
+                spans.append(
+                    (
+                        json_start,
+                        close_frame_start,
+                        user_input[json_start:close_frame_start],
+                    )
+                )
+                search_from = close_frame_start + len(closing_frame)
+                continue
             try:
                 value, json_end = decoder.raw_decode(user_input, json_start)
             except json.JSONDecodeError as exc:
@@ -1278,7 +1498,9 @@ def _tagged_json_prompt_metadata(user_input: str) -> tuple[str, list[dict[str, o
             blocks.append(
                 {
                     "name": name,
-                    "semantic_digest": hashlib.sha256(compact.encode("utf-8")).hexdigest(),
+                    "semantic_digest": _privacy_digest(
+                        {"prompt_json_block": name, "canonical": compact}
+                    ),
                     "json_chars": len(raw_json),
                     "json_bytes": len(raw_json.encode("utf-8")),
                     "exact_compact": raw_json == compact,
@@ -1296,10 +1518,180 @@ def _tagged_json_prompt_metadata(user_input: str) -> tuple[str, list[dict[str, o
     return "".join(normalized_parts), blocks
 
 
+def _candidate_prompt_metadata(
+    context: _CandidateTransportContext,
+    *,
+    user_input: str,
+    image_inputs: Sequence[object],
+) -> dict[str, object]:
+    """Return privacy-safe proof that one provider-visible candidate block is canonical."""
+
+    canonical_payload = context.canonical_payload
+    canonical_items = (
+        canonical_payload.get("items") if isinstance(canonical_payload, Mapping) else None
+    )
+    items = (
+        [item for item in canonical_items if isinstance(item, Mapping)]
+        if isinstance(canonical_items, list)
+        else []
+    )
+    expected_ids = tuple(str(position) for position in range(len(items)))
+    local_transport = context.transport in {"sparse-json", "row-wire-v1"}
+    local_coverage = (
+        context.decode_valid
+        and local_transport
+        and context.local_ids == expected_ids
+        and len(set(context.local_ids)) == len(context.local_ids)
+    )
+
+    image_payloads: list[dict[str, object]] = []
+    image_anchors: list[str] = []
+    for position, raw_image in enumerate(image_inputs):
+        if not isinstance(raw_image, Mapping):
+            continue
+        content_id = str(raw_image.get("content_id") or "")
+        image_anchors.append(f"cover:{content_id}")
+        image_payloads.append(
+            {
+                "position": position,
+                "mime_type": str(raw_image.get("mime_type") or ""),
+                "data_url": str(raw_image.get("data_url") or ""),
+            }
+        )
+    canonical_anchors = [
+        str(item.get("cover_image_ref") or "")
+        for item in items
+        if str(item.get("cover_image_ref") or "")
+    ]
+    if local_transport:
+        image_anchor_coverage_complete = (
+            len(image_anchors) == len(set(image_anchors))
+            and len(canonical_anchors) == len(set(canonical_anchors))
+            and set(image_anchors) == set(canonical_anchors)
+        )
+    else:
+        # Global-ID production anchors are not part of the local-ID gate. They
+        # remain covered by existing production multimodal tests; paired image
+        # bytes/MIME/order are compared independently below.
+        image_anchor_coverage_complete = True
+
+    user_context = (
+        user_input[: context.payload_start]
+        + "<canonical-candidate-block>"
+        + user_input[context.payload_end :]
+        if context.payload_end > context.payload_start
+        else user_input
+    )
+    return {
+        "candidate_transport": context.transport,
+        "candidate_decode_valid": context.decode_valid,
+        "candidate_item_count": len(items),
+        "candidate_canonical_digest": (
+            _privacy_digest({"canonical_candidate_payload": canonical_payload})
+            if context.decode_valid
+            else ""
+        ),
+        "candidate_payload_chars": len(context.payload),
+        "candidate_payload_bytes": len(context.payload.encode("utf-8")),
+        "candidate_local_id_coverage_complete": local_coverage,
+        "candidate_global_identity_field_count": context.raw_identity_field_count,
+        "candidate_url_field_count": context.raw_url_field_count,
+        "user_context_digest": _privacy_digest({"candidate_free_user_context": user_context}),
+        "image_payloads_digest": _privacy_digest({"ordered_image_payloads": image_payloads}),
+        "image_anchor_coverage_complete": image_anchor_coverage_complete,
+        "image_reference_count": len(canonical_anchors),
+    }
+
+
+def _result_identity_metadata(
+    response: object | None,
+    *,
+    context: _CandidateTransportContext | None,
+    expected_transport: str,
+) -> dict[str, object]:
+    """Prove local result members are resolved only through the shared safe resolver."""
+
+    from openbiliclaw.llm.json_utils import parse_llm_json_tolerant
+
+    content = str(getattr(response, "content", "") or "").strip()
+    parsed = parse_llm_json_tolerant(content) if content else None
+    entries = _evaluation_output_entries(parsed)
+    members = [dict(item) for _mapped_key, item in entries]
+    if expected_transport not in {"sparse-json", "row-wire-v1"}:
+        positions = context.identity_positions if context is not None else {}
+        bound_global_identity_count = sum(
+            bool(str(item.get("content_id") or item.get("bvid") or mapped_key).strip() in positions)
+            for mapped_key, item in entries
+        )
+        return {
+            "result_identity_contract": (
+                "global-id"
+                if entries and bound_global_identity_count == len(entries)
+                else "unverified-global-id"
+            ),
+            "result_local_id_binding_safe": True,
+            "result_local_id_count": 0,
+            "result_missing_local_id_count": 0,
+            "result_unknown_local_id_count": 0,
+            "result_duplicate_local_id_count": 0,
+            "result_global_identity_field_count": _recursive_field_count(
+                members,
+                frozenset({"bvid", "content_id", "item_key"}),
+            ),
+        }
+
+    from openbiliclaw.discovery.eval_payload import resolve_local_evaluation_results
+
+    expected_ids = context.local_ids if context is not None else ()
+    explicit_ids = [
+        item.get("id") for item in members if item.get("id") is not None and item.get("id") != ""
+    ]
+    valid_ids = [
+        identifier
+        for identifier in explicit_ids
+        if isinstance(identifier, str) and identifier in set(expected_ids)
+    ]
+    duplicate_count = len(valid_ids) - len(set(valid_ids))
+    unknown_count = sum(
+        not isinstance(identifier, str) or identifier not in set(expected_ids)
+        for identifier in explicit_ids
+    )
+    missing_count = max(len(expected_ids) - len(set(valid_ids)), 0)
+    global_identity_count = _recursive_field_count(
+        members,
+        frozenset({"bvid", "content_id", "item_key"}),
+    ) + sum(
+        bool(mapped_key) and mapped_key not in set(expected_ids) for mapped_key, _item in entries
+    )
+    binding_safe = False
+    if context is not None and context.decode_valid:
+        try:
+            resolved = resolve_local_evaluation_results(members, expected_ids)
+            binding_safe = all(
+                member is None
+                or member.get("id") == expected_id
+                or (len(expected_ids) == 1 and len(members) == 1 and member.get("id") in {None, ""})
+                for expected_id, member in zip(expected_ids, resolved, strict=True)
+            )
+        except (TypeError, ValueError):
+            binding_safe = False
+    return {
+        "result_identity_contract": ("local-id" if global_identity_count == 0 else "global-id"),
+        "result_local_id_binding_safe": binding_safe,
+        "result_local_id_count": len(valid_ids),
+        "result_missing_local_id_count": missing_count,
+        "result_unknown_local_id_count": unknown_count,
+        "result_duplicate_local_id_count": duplicate_count,
+        "result_global_identity_field_count": global_identity_count,
+    }
+
+
 def _prompt_transport_metadata(
     kwargs: Mapping[str, object],
     *,
     expected_compact_json: bool,
+    expected_candidate_transport: str = "production-json",
+    candidate_transport_audit_enabled: bool = False,
 ) -> dict[str, object]:
     """Describe exact provider-visible text without retaining prompt payloads."""
 
@@ -1329,7 +1721,7 @@ def _prompt_transport_metadata(
                 "content_id_digest": _privacy_digest({"content_id": content_id}),
                 "mime_type": mime_type,
                 "data_url_bytes": len(data_url.encode("utf-8")),
-                "data_url_digest": hashlib.sha256(data_url.encode("utf-8")).hexdigest(),
+                "data_url_digest": _privacy_digest({"image_data_url": data_url}),
             }
         )
     image_semantics = json.dumps(
@@ -1340,13 +1732,14 @@ def _prompt_transport_metadata(
     )
     prompt_payload = system_instruction + "\0" + user_input + "\0" + image_semantics
     semantic_payload = system_instruction + "\0" + normalized_user_input + "\0" + image_semantics
-    return {
+    metadata = {
         "prompt_chars": len(system_instruction) + len(user_input),
         "prompt_bytes": len(system_instruction.encode("utf-8")) + len(user_input.encode("utf-8")),
         "system_digest": hashlib.sha256(system_instruction.encode("utf-8")).hexdigest(),
-        "prompt_digest": hashlib.sha256(prompt_payload.encode("utf-8")).hexdigest(),
-        "prompt_semantic_digest": hashlib.sha256(semantic_payload.encode("utf-8")).hexdigest(),
+        "prompt_digest": _privacy_digest({"raw_prompt": prompt_payload}),
+        "prompt_semantic_digest": _privacy_digest({"semantic_prompt": semantic_payload}),
         "expected_compact_json": expected_compact_json,
+        "expected_candidate_transport": expected_candidate_transport,
         "json_block_count": len(blocks),
         "compact_json_block_count": compact_block_count,
         "all_target_json_compact": bool(blocks) and compact_block_count == len(blocks),
@@ -1356,10 +1749,23 @@ def _prompt_transport_metadata(
         "negative_examples_json_block_count": names.count("negative_examples"),
         "content_batch_json_block_count": names.count("content_batch"),
         "image_input_count": len(image_metadata),
-        "image_inputs_digest": hashlib.sha256(image_semantics.encode("utf-8")).hexdigest(),
+        "image_inputs_digest": _privacy_digest({"image_inputs": image_semantics}),
         "image_data_url_bytes": sum(int(item["data_url_bytes"]) for item in image_metadata),
         "json_blocks": blocks,
     }
+    if candidate_transport_audit_enabled:
+        context = _candidate_transport_context(
+            user_input,
+            expected_transport=expected_candidate_transport,
+        )
+        metadata.update(
+            _candidate_prompt_metadata(
+                context,
+                user_input=user_input,
+                image_inputs=image_inputs,
+            )
+        )
+    return metadata
 
 
 def _normalized_usage(
@@ -1553,11 +1959,15 @@ class _DeterministicLLMService:
         *,
         service: str = "",
         expected_compact_json: bool = False,
+        expected_candidate_transport: str = "production-json",
+        candidate_transport_audit_enabled: bool = False,
         attempt_usage_recorder: _ProviderAttemptUsageRecorder | None = None,
     ) -> None:
         self._inner = inner
         self._service = service
         self._expected_compact_json = expected_compact_json
+        self._expected_candidate_transport = expected_candidate_transport
+        self._candidate_transport_audit_enabled = candidate_transport_audit_enabled
         self._attempt_usage_recorder = attempt_usage_recorder
         self._provider_call_sequence = 0
         self.calls: list[dict[str, object]] = []
@@ -1582,9 +1992,19 @@ class _DeterministicLLMService:
         provider_call_id = f"{self._service}:{self._provider_call_sequence}"
         provider_call_token = _REPLAY_PROVIDER_CALL_ID.set(provider_call_id)
         attribution = dict(_REPLAY_ATTRIBUTION.get())
+        candidate_context = (
+            _candidate_transport_context(
+                str(kwargs.get("user_input") or ""),
+                expected_transport=self._expected_candidate_transport,
+            )
+            if self._candidate_transport_audit_enabled
+            else None
+        )
         prompt_metadata = _prompt_transport_metadata(
             kwargs,
             expected_compact_json=self._expected_compact_json,
+            expected_candidate_transport=self._expected_candidate_transport,
+            candidate_transport_audit_enabled=self._candidate_transport_audit_enabled,
         )
         try:
             response = await method(**kwargs)
@@ -1621,6 +2041,15 @@ class _DeterministicLLMService:
                     "structured_item_count": 0,
                     "reason_field_count": 0,
                     "classification_items": [],
+                    **(
+                        _result_identity_metadata(
+                            None,
+                            context=candidate_context,
+                            expected_transport=self._expected_candidate_transport,
+                        )
+                        if self._candidate_transport_audit_enabled
+                        else {}
+                    ),
                     "error_kind": (
                         "transient_rate_limit" if retryable_rate_limit else type(exc).__name__
                     ),
@@ -1671,7 +2100,23 @@ class _DeterministicLLMService:
                 ),
                 "provider_attempts": attempts,
                 "status": "ok",
-                **_structured_output_metadata(response),
+                **_structured_output_metadata(
+                    response,
+                    candidate_positions=(
+                        candidate_context.identity_positions
+                        if candidate_context is not None
+                        else None
+                    ),
+                ),
+                **(
+                    _result_identity_metadata(
+                        response,
+                        context=candidate_context,
+                        expected_transport=self._expected_candidate_transport,
+                    )
+                    if self._candidate_transport_audit_enabled
+                    else {}
+                ),
             }
         )
         return response
@@ -1841,7 +2286,9 @@ def _profile_layer_cache_summary(
         layers.append(
             {
                 "name": name,
-                "digest": str(raw.get("digest") or ""),
+                "digest": _privacy_digest(
+                    {"profile_layer": name, "source_digest": str(raw.get("digest") or "")}
+                ),
                 "hits": hits,
                 "misses": misses,
             }
@@ -1857,10 +2304,11 @@ def _profile_layer_cache_summary(
     }
 
 
-def _json_minify_repair_audit(
+def _member_repair_audit(
     grouped: Mapping[tuple[str, int, str, str], Sequence[Mapping[str, object]]],
     *,
     repeats: int,
+    experiment_label: str,
 ) -> dict[str, object]:
     blocking_reasons: list[str] = []
     logical_runs: list[dict[str, object]] = []
@@ -1899,7 +2347,8 @@ def _json_minify_repair_audit(
         summary = _prompt_run_summary(grouped.get(key, ()))
         if int(summary["root_call_count"]) <= 0:
             blocking_reasons.append(
-                f"json-minify repair audit found no root calls for {key[0]} #{key[1]} {key[2]}"
+                f"{experiment_label} repair audit found no root calls for "
+                f"{key[0]} #{key[1]} {key[2]}"
             )
         return int(summary["repair_call_count"]), int(summary["repair_candidate_count"])
 
@@ -1924,10 +2373,12 @@ def _json_minify_repair_audit(
         median(treatment_candidate_deltas) if treatment_candidate_deltas else None
     )
     if treatment_call_median is None or treatment_call_median > call_ceiling:
-        blocking_reasons.append("json-minify member-repair call amplification exceeded A/A noise")
+        blocking_reasons.append(
+            f"{experiment_label} member-repair call amplification exceeded A/A noise"
+        )
     if treatment_candidate_median is None or treatment_candidate_median > candidate_ceiling:
         blocking_reasons.append(
-            "json-minify member-repair candidate amplification exceeded A/A noise"
+            f"{experiment_label} member-repair candidate amplification exceeded A/A noise"
         )
     unique_reasons = list(dict.fromkeys(blocking_reasons))
     return {
@@ -1939,6 +2390,18 @@ def _json_minify_repair_audit(
         "treatment_repair_call_delta_median": treatment_call_median,
         "treatment_repair_candidate_delta_median": treatment_candidate_median,
     }
+
+
+def _json_minify_repair_audit(
+    grouped: Mapping[tuple[str, int, str, str], Sequence[Mapping[str, object]]],
+    *,
+    repeats: int,
+) -> dict[str, object]:
+    return _member_repair_audit(
+        grouped,
+        repeats=repeats,
+        experiment_label="json-minify",
+    )
 
 
 def validate_json_minify_transport(
@@ -2294,6 +2757,354 @@ def validate_json_minify_transport(
             "pairs": token_pairs,
         },
         "profile_layer_cache": profile_cache,
+        "repair": repair_audit,
+        "classification": classification_audit,
+    }
+
+
+def validate_candidate_transport_experiment(
+    calls: Sequence[Mapping[str, object]],
+    *,
+    experiment: str,
+    repeats: int,
+) -> dict[str, object]:
+    """Validate one isolated candidate-wire experiment and its locked savings gate."""
+
+    raw_config = _CANDIDATE_TRANSPORT_EXPERIMENTS.get(experiment)
+    if raw_config is None:
+        return {"enabled": False, "passed": True, "blocking_reasons": []}
+    arm_transports = {
+        "A": str(raw_config["arm_a_transport"]),
+        "B": str(raw_config["arm_b_transport"]),
+    }
+    prompt_savings_min = float(raw_config["prompt_token_savings_min"])
+    total_savings_min = float(raw_config["total_token_savings_min"])
+    total_savings_strict = bool(raw_config["total_savings_strict"])
+    grouped: dict[tuple[str, int, str, str], list[Mapping[str, object]]] = {}
+    for call in calls:
+        grouped.setdefault(_replay_run_key(call), []).append(call)
+
+    blocking_reasons: list[str] = []
+    repair_audit = _member_repair_audit(
+        grouped,
+        repeats=repeats,
+        experiment_label=experiment,
+    )
+    blocking_reasons.extend(str(reason) for reason in repair_audit["blocking_reasons"])
+
+    system_digests_by_arm: dict[str, list[str]] = {}
+    for arm in ("A", "B"):
+        digests = sorted(
+            {str(call.get("system_digest") or "") for call in calls if call.get("arm") == arm}
+        )
+        system_digests_by_arm[arm] = digests
+        if len(digests) != 1 or "" in digests:
+            blocking_reasons.append(f"{experiment} arm {arm} system prompt is not stable")
+    if experiment == "row-wire-v1" and system_digests_by_arm["A"] != system_digests_by_arm["B"]:
+        blocking_reasons.append("row-wire-v1 changed the local-ID system prompt between arms")
+
+    local_transports = {"sparse-json", "row-wire-v1"}
+    for call in calls:
+        arm = str(call.get("arm") or "")
+        expected_transport = arm_transports.get(arm, "")
+        actual_transport = str(call.get("candidate_transport") or "")
+        if call.get("expected_candidate_transport") != expected_transport:
+            blocking_reasons.append(
+                f"{experiment} arm {arm} wrapper expected the wrong candidate transport"
+            )
+        if actual_transport != expected_transport:
+            blocking_reasons.append(
+                f"{experiment} arm {arm} rendered {actual_transport or 'unknown'} "
+                f"instead of {expected_transport}"
+            )
+        if call.get("candidate_decode_valid") is not True:
+            blocking_reasons.append(f"{experiment} candidate payload did not decode canonically")
+        request_count = int(call.get("request_candidate_count") or 0)
+        if int(call.get("candidate_item_count") or 0) != request_count:
+            blocking_reasons.append(f"{experiment} candidate payload member count drifted")
+        if not str(call.get("candidate_canonical_digest") or ""):
+            blocking_reasons.append(f"{experiment} candidate canonical digest is missing")
+        if not str(call.get("user_context_digest") or ""):
+            blocking_reasons.append(f"{experiment} non-candidate prompt digest is missing")
+        if not str(call.get("image_payloads_digest") or ""):
+            blocking_reasons.append(f"{experiment} ordered image payload digest is missing")
+        structured_item_count = int(call.get("structured_item_count") or 0)
+        if structured_item_count > 0 and int(call.get("reason_field_count") or 0) != (
+            structured_item_count
+        ):
+            blocking_reasons.append(f"{experiment} response changed the reason output contract")
+        raw_classification_items = call.get("classification_items")
+        if structured_item_count > 0 and (
+            not isinstance(raw_classification_items, list)
+            or len(raw_classification_items) != structured_item_count
+        ):
+            blocking_reasons.append(f"{experiment} response classification metadata is incomplete")
+        usage = call.get("usage")
+        if not isinstance(usage, Mapping):
+            blocking_reasons.append(f"{experiment} provider call lacks billable usage")
+        else:
+            call_prompt_tokens = _usage_token_value(
+                usage,
+                ("prompt_tokens", "input_tokens"),
+            )
+            call_completion_tokens = _usage_token_value(
+                usage,
+                ("completion_tokens", "output_tokens"),
+            )
+            call_total_tokens = _usage_token_value(usage, ("total_tokens",)) or (
+                call_prompt_tokens + call_completion_tokens
+            )
+            if call_prompt_tokens <= 0 or call_total_tokens <= 0:
+                blocking_reasons.append(
+                    f"{experiment} provider call reported zero or incomplete billable usage"
+                )
+        if expected_transport in local_transports:
+            if call.get("candidate_local_id_coverage_complete") is not True:
+                blocking_reasons.append(f"{experiment} local-ID request coverage is incomplete")
+            if int(call.get("candidate_global_identity_field_count") or 0) != 0:
+                blocking_reasons.append(f"{experiment} leaked a global identity field")
+            if int(call.get("candidate_url_field_count") or 0) != 0:
+                blocking_reasons.append(f"{experiment} leaked a URL field")
+            if call.get("image_anchor_coverage_complete") is not True:
+                blocking_reasons.append(f"{experiment} image/local-ID anchors do not match")
+            if structured_item_count > 0 and call.get("result_identity_contract") != "local-id":
+                blocking_reasons.append(f"{experiment} response did not use local IDs")
+            if call.get("result_local_id_binding_safe") is not True:
+                blocking_reasons.append(f"{experiment} response local-ID binding was unsafe")
+        elif structured_item_count > 0 and call.get("result_identity_contract") != "global-id":
+            blocking_reasons.append(
+                f"{experiment} production response identity contract was not verified"
+            )
+
+        provider = str(call.get("provider") or "").strip().lower()
+        if provider in {"openai", "openai_compatible", "openrouter", "deepseek"}:
+            if call.get("provider_attempt_accounting") != "raw_adapter_attempts":
+                blocking_reasons.append(
+                    f"{experiment} OpenAI-protocol call lacks raw provider-attempt accounting"
+                )
+            if call.get("provider_attempt_usage_complete") is not True:
+                blocking_reasons.append(
+                    f"{experiment} OpenAI-protocol call has incomplete provider-attempt usage"
+                )
+
+    pair_payloads: list[dict[str, object]] = []
+
+    def successful_roots(key: tuple[str, int, str, str]) -> list[Mapping[str, object]]:
+        return [
+            call
+            for call in grouped.get(key, ())
+            if call.get("request_kind") == "root" and call.get("status") == "ok"
+        ]
+
+    def semantic_counter(items: Sequence[Mapping[str, object]]) -> Counter[tuple[object, ...]]:
+        return Counter(
+            (
+                call.get("candidate_canonical_digest"),
+                call.get("user_context_digest"),
+                call.get("image_payloads_digest"),
+                call.get("method"),
+                call.get("caller"),
+                call.get("temperature"),
+                call.get("max_tokens"),
+                call.get("request_candidate_count"),
+                call.get("image_input_count"),
+            )
+            for call in items
+        )
+
+    def compare_pair(
+        *,
+        pair_kind: str,
+        repeat: int,
+        left_run: str,
+        right_run: str,
+        treatment: bool,
+    ) -> None:
+        left = successful_roots((pair_kind, repeat, left_run, "A"))
+        right_arm = "B" if treatment else "A"
+        right = successful_roots((pair_kind, repeat, right_run, right_arm))
+        semantic_equal = bool(left) and semantic_counter(left) == semantic_counter(right)
+        if not semantic_equal:
+            blocking_reasons.append(
+                f"{experiment} {pair_kind} #{repeat} canonical candidate semantics differ"
+            )
+        left_raw = Counter(str(call.get("prompt_digest") or "") for call in left)
+        right_raw = Counter(str(call.get("prompt_digest") or "") for call in right)
+        raw_contract_passed = bool(left_raw)
+        if treatment:
+            raw_contract_passed = raw_contract_passed and set(left_raw).isdisjoint(right_raw)
+        else:
+            raw_contract_passed = raw_contract_passed and left_raw == right_raw
+        if not raw_contract_passed:
+            blocking_reasons.append(
+                f"{experiment} {pair_kind} #{repeat} raw prompt contract failed"
+            )
+
+        payload_smaller = True
+        if treatment:
+            left_by_canonical: dict[str, list[Mapping[str, object]]] = {}
+            right_by_canonical: dict[str, list[Mapping[str, object]]] = {}
+            for call in left:
+                left_by_canonical.setdefault(
+                    str(call.get("candidate_canonical_digest") or ""), []
+                ).append(call)
+            for call in right:
+                right_by_canonical.setdefault(
+                    str(call.get("candidate_canonical_digest") or ""), []
+                ).append(call)
+            for digest in set(left_by_canonical) & set(right_by_canonical):
+                left_matches = left_by_canonical[digest]
+                right_matches = right_by_canonical[digest]
+                payload_smaller = payload_smaller and (
+                    max(int(call.get("candidate_payload_bytes") or 0) for call in right_matches)
+                    < min(int(call.get("candidate_payload_bytes") or 0) for call in left_matches)
+                    and max(int(call.get("prompt_bytes") or 0) for call in right_matches)
+                    < min(int(call.get("prompt_bytes") or 0) for call in left_matches)
+                )
+            payload_smaller = payload_smaller and bool(
+                set(left_by_canonical) & set(right_by_canonical)
+            )
+            if not payload_smaller:
+                blocking_reasons.append(
+                    f"{experiment} treatment #{repeat} candidate transport is not smaller"
+                )
+        pair_payloads.append(
+            {
+                "pair_kind": pair_kind,
+                "repeat": repeat,
+                "semantic_equal": semantic_equal,
+                "raw_prompt_contract_passed": raw_contract_passed,
+                "candidate_transport_smaller": payload_smaller if treatment else None,
+                "root_prompt_count": len(left),
+            }
+        )
+
+    for repeat in range(1, repeats + 1):
+        compare_pair(
+            pair_kind="control",
+            repeat=repeat,
+            left_run="A1",
+            right_run="A2",
+            treatment=False,
+        )
+        compare_pair(
+            pair_kind="treatment",
+            repeat=repeat,
+            left_run="A",
+            right_run="B",
+            treatment=True,
+        )
+
+    token_pairs: list[dict[str, object]] = []
+    prompt_savings: list[float] = []
+    total_savings: list[float] = []
+    expected_keys = [
+        key
+        for repeat in range(1, repeats + 1)
+        for key in (
+            ("control", repeat, "A1", "A"),
+            ("control", repeat, "A2", "A"),
+            ("treatment", repeat, "A", "A"),
+            ("treatment", repeat, "B", "B"),
+        )
+    ]
+    for key in expected_keys:
+        summary = _token_usage_summary(grouped.get(key, ()))
+        if (
+            int(summary["successful_call_count"]) <= 0
+            or int(summary["usage_missing_call_count"]) > 0
+            or int(summary["prompt_tokens"]) <= 0
+        ):
+            blocking_reasons.append(
+                f"{experiment} {key[0]} #{key[1]} {key[2]} lacks complete billable usage"
+            )
+    for repeat in range(1, repeats + 1):
+        arm_a = _token_usage_summary(grouped.get(("treatment", repeat, "A", "A"), ()))
+        arm_b = _token_usage_summary(grouped.get(("treatment", repeat, "B", "B"), ()))
+        a_prompt = int(arm_a["prompt_tokens"])
+        b_prompt = int(arm_b["prompt_tokens"])
+        a_total = int(arm_a["total_tokens"])
+        b_total = int(arm_b["total_tokens"])
+        prompt_saving = (a_prompt - b_prompt) / a_prompt if a_prompt else None
+        total_saving = (a_total - b_total) / a_total if a_total else None
+        if prompt_saving is not None:
+            prompt_savings.append(prompt_saving)
+        if total_saving is not None:
+            total_savings.append(total_saving)
+        token_pairs.append(
+            {
+                "repeat": repeat,
+                "arm_a": arm_a,
+                "arm_b": arm_b,
+                "prompt_token_savings": prompt_saving,
+                "total_token_savings": total_saving,
+            }
+        )
+    prompt_savings_median = median(prompt_savings) if len(prompt_savings) == repeats else None
+    total_savings_median = median(total_savings) if len(total_savings) == repeats else None
+    if prompt_savings_median is None or prompt_savings_median < prompt_savings_min:
+        blocking_reasons.append(
+            f"{experiment} prompt-token savings missed the {prompt_savings_min:.0%} gate"
+        )
+    total_gate_passed = total_savings_median is not None and (
+        total_savings_median > total_savings_min
+        if total_savings_strict
+        else total_savings_median >= total_savings_min
+    )
+    if not total_gate_passed:
+        comparator = ">" if total_savings_strict else ">="
+        blocking_reasons.append(
+            f"{experiment} total-token savings missed the {comparator} {total_savings_min:.0%} gate"
+        )
+
+    classification_audit = _classification_output_audit(
+        calls,
+        enabled=True,
+        experiment_label=experiment,
+    )
+    blocking_reasons.extend(
+        str(reason) for reason in classification_audit.get("blocking_reasons", [])
+    )
+    logical_runs = [
+        {
+            "pair_kind": key[0],
+            "repeat": key[1],
+            "logical_run": key[2],
+            "arm": key[3],
+            **_prompt_run_summary(grouped[key]),
+        }
+        for key in sorted(grouped)
+    ]
+    unique_reasons = list(dict.fromkeys(blocking_reasons))
+    return {
+        "enabled": True,
+        "experiment": experiment,
+        "arm_transports": arm_transports,
+        "passed": not unique_reasons,
+        "blocking_reasons": unique_reasons,
+        "privacy": {
+            "raw_prompt_retained": False,
+            "raw_candidate_payload_retained": False,
+            "digests": "run-salted for all prompt, candidate, image, and identity data",
+        },
+        "system_digests_by_arm": system_digests_by_arm,
+        "system_comparison": (
+            "identical local-ID contract"
+            if experiment == "row-wire-v1"
+            else "arm-specific identity contract"
+        ),
+        "prompt_pairs": pair_payloads,
+        "logical_runs": logical_runs,
+        "token_usage": _token_usage_audit(calls),
+        "token_gate": {
+            "prompt_savings_min": prompt_savings_min,
+            "total_savings_min": total_savings_min,
+            "total_savings_strict": total_savings_strict,
+            "prompt_savings_median": prompt_savings_median,
+            "total_savings_median": total_savings_median,
+            "pairs": token_pairs,
+        },
+        "cache_diagnostics_only": True,
         "repair": repair_audit,
         "classification": classification_audit,
     }
@@ -2732,6 +3543,7 @@ def _build_engine(
     embedding_service: object | None,
     recall_audit: ReplayRecallAudit | None = None,
     compact_evaluation_json: bool = False,
+    evaluation_candidate_transport: str = "production",
 ) -> object:
     from openbiliclaw.discovery.engine import (
         ContentDiscoveryEngine,
@@ -2880,6 +3692,7 @@ def _build_engine(
             getattr(discovery_cfg, "multimodal_image_timeout_seconds", 6)
         ),
         compact_evaluation_json=compact_evaluation_json,
+        evaluation_candidate_transport=evaluation_candidate_transport,
         eval_prefilter_mode="off",
     )
 
@@ -3378,7 +4191,7 @@ def _write_artifact(
 ) -> None:
     candidate_payload = [
         {
-            "candidate_id": candidate.candidate_id,
+            "candidate_ordinal": ordinal,
             "source_strategy": candidate.source_strategy,
             "source_platform": candidate.source_platform,
             "content_key_digest": _privacy_digest(
@@ -3391,7 +4204,7 @@ def _write_artifact(
             "score_threshold": candidate.score_threshold,
             "status": str(row.get("status") or ""),
         }
-        for candidate, row in zip(candidates, rows, strict=True)
+        for ordinal, (candidate, row) in enumerate(zip(candidates, rows, strict=True))
     ]
     mix = Counter(
         (
@@ -3402,7 +4215,7 @@ def _write_artifact(
         for candidate, row in zip(candidates, rows, strict=True)
     )
     artifact = {
-        "schema_version": 3,
+        "schema_version": 4,
         "created_at": datetime.now(UTC).isoformat(),
         "git": _git_metadata(),
         "arm_b": str(args.arm_b),
@@ -3415,17 +4228,25 @@ def _write_artifact(
             "topic_lifecycle_serialization": ("on" if topic_lifecycle_serialization else "off"),
         },
         "replay_context": {"eval_prefilter_mode": "off"},
-        "config_path_digest": _digest(str(config_path.resolve())),
-        "db_path_digest": _digest(str(db_path.resolve())),
+        "config_path_digest": _privacy_digest({"config_path": str(config_path.resolve())}),
+        "db_path_digest": _privacy_digest({"db_path": str(db_path.resolve())}),
         "admission_min_score": admission_min_score,
         "snapshot": {
-            "candidate_digest": _digest([dict(row) for row in rows]),
-            "candidate_metadata_digest": _digest(candidate_payload),
-            "raw_profile_digest": profile_snapshot.raw_digest,
-            "effective_profile_digest": profile_snapshot.effective_digest,
+            "candidate_digest": _privacy_digest(
+                {"candidate_snapshot": [dict(row) for row in rows]}
+            ),
+            "candidate_metadata_digest": _privacy_digest({"candidate_metadata": candidate_payload}),
+            "raw_profile_digest": _privacy_digest(
+                {"raw_profile_source_digest": profile_snapshot.raw_digest}
+            ),
+            "effective_profile_digest": _privacy_digest(
+                {"effective_profile_source_digest": profile_snapshot.effective_digest}
+            ),
             "overrides_present": profile_snapshot.overrides_present,
             "active_speculation_count": profile_snapshot.active_speculation_count,
-            "negative_examples_digest": _digest(negative_examples or []),
+            "negative_examples_digest": _privacy_digest(
+                {"negative_examples": negative_examples or []}
+            ),
         },
         "cohort_mix": [
             {
@@ -3469,6 +4290,11 @@ def _write_artifact(
         "routes": dict(route_audit),
         "reason_output": dict(reason_output_audit),
         "prompt_transport": dict(prompt_transport_audit),
+        "candidate_transport": (
+            dict(prompt_transport_audit)
+            if str(args.arm_b) in _CANDIDATE_TRANSPORT_EXPERIMENTS
+            else {"enabled": False, "passed": True, "blocking_reasons": []}
+        ),
         "gate": {"passed": gate_passed, **dict(gate)},
         "llm_calls": [dict(call) for call in calls],
     }
@@ -3495,16 +4321,28 @@ async def run(args: argparse.Namespace) -> int:
     legacy_reason = str(args.arm_b) == "reason-diet"
     reason_off = str(args.arm_b) == "reason-off"
     json_minify = str(args.arm_b) == "json-minify"
+    candidate_transport_config = _CANDIDATE_TRANSPORT_EXPERIMENTS.get(str(args.arm_b))
+    arm_a_candidate_transport = (
+        str(candidate_transport_config["arm_a_transport"])
+        if candidate_transport_config is not None
+        else "production-json"
+    )
+    arm_b_candidate_transport = (
+        str(candidate_transport_config["arm_b_transport"])
+        if candidate_transport_config is not None
+        else "production-json"
+    )
     if (
         not compact_profile
         and model_override is None
         and not legacy_reason
         and not reason_off
         and not json_minify
+        and candidate_transport_config is None
     ):
         raise ValueError(
-            "--arm-b must be compact, reason-diet, reason-off, json-minify, "
-            "model=<instance-id> (v2), or model=<provider:model> (legacy)"
+            "--arm-b must be compact, reason-diet, reason-off, json-minify, sparse-json, "
+            "row-wire-v1, model=<instance-id> (v2), or model=<provider:model> (legacy)"
         )
 
     database = _load_read_only_database(db_path)
@@ -3538,12 +4376,16 @@ async def run(args: argparse.Namespace) -> int:
             arm_a_inner,
             service="arm_a",
             expected_compact_json=False,
+            expected_candidate_transport=arm_a_candidate_transport,
+            candidate_transport_audit_enabled=candidate_transport_config is not None,
             attempt_usage_recorder=arm_a_attempts,
         )
         arm_b_service = _DeterministicLLMService(
             arm_b_inner,
             service="arm_b",
             expected_compact_json=json_minify,
+            expected_candidate_transport=arm_b_candidate_transport,
+            candidate_transport_audit_enabled=candidate_transport_config is not None,
             attempt_usage_recorder=arm_b_attempts,
         )
         recall_audit = ReplayRecallAudit()
@@ -3568,6 +4410,9 @@ async def run(args: argparse.Namespace) -> int:
                 legacy_profile=compact_profile,
                 embedding_service=None if compact_profile else embedding_service,
                 recall_audit=recall_audit,
+                evaluation_candidate_transport=_ENGINE_CANDIDATE_TRANSPORTS[
+                    arm_a_candidate_transport
+                ],
             )
             arm_b_engine = _build_engine(
                 arm_b_service,
@@ -3578,6 +4423,9 @@ async def run(args: argparse.Namespace) -> int:
                 embedding_service=embedding_service,
                 recall_audit=recall_audit,
                 compact_evaluation_json=json_minify,
+                evaluation_candidate_transport=_ENGINE_CANDIDATE_TRANSPORTS[
+                    arm_b_candidate_transport
+                ],
             )
 
             async def score_arm_a(
@@ -3717,13 +4565,20 @@ async def run(args: argparse.Namespace) -> int:
             )
             calls = [*arm_a_service.calls, *arm_b_service.calls]
             reason_output_audit = validate_reason_off_outputs(calls, enabled=reason_off)
-            prompt_transport_audit = validate_json_minify_transport(
-                calls,
-                enabled=json_minify,
-                repeats=int(args.repeats),
-                arm_a_profile_cache_stats=arm_a_engine.evaluation_profile_prompt_cache_stats(),
-                arm_b_profile_cache_stats=arm_b_engine.evaluation_profile_prompt_cache_stats(),
-            )
+            if candidate_transport_config is not None:
+                prompt_transport_audit = validate_candidate_transport_experiment(
+                    calls,
+                    experiment=str(args.arm_b),
+                    repeats=int(args.repeats),
+                )
+            else:
+                prompt_transport_audit = validate_json_minify_transport(
+                    calls,
+                    enabled=json_minify,
+                    repeats=int(args.repeats),
+                    arm_a_profile_cache_stats=arm_a_engine.evaluation_profile_prompt_cache_stats(),
+                    arm_b_profile_cache_stats=arm_b_engine.evaluation_profile_prompt_cache_stats(),
+                )
             route_audit = validate_replay_routes(
                 calls,
                 repeats=int(args.repeats),
@@ -3881,8 +4736,8 @@ def parse_args() -> argparse.Namespace:
         "--arm-b",
         required=True,
         help=(
-            "Arm B transform: compact, reason-diet, reason-off, json-minify, "
-            "model=<instance-id> (v2), or model=<provider:model> (legacy)"
+            "Arm B transform: compact, reason-diet, reason-off, json-minify, sparse-json, "
+            "row-wire-v1, model=<instance-id> (v2), or model=<provider:model> (legacy)"
         ),
     )
     parser.add_argument(

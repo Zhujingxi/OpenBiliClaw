@@ -207,6 +207,14 @@ def _batch_prompt_items(user_input: str) -> list[dict[str, object]]:
     return [item for item in raw_items if isinstance(item, dict)]
 
 
+def _sparse_batch_prompt_envelope(user_input: str) -> dict[str, object]:
+    batch_json = user_input.split("<content_batch>", 1)[1].split("</content_batch>", 1)[0]
+    raw_envelope = json.loads(batch_json.strip())
+    assert isinstance(raw_envelope, dict)
+    assert set(raw_envelope) == {"defaults", "items"}
+    return raw_envelope
+
+
 def _single_prompt_content_summary(user_input: str) -> dict[str, object]:
     summary_json = user_input.split("<content_summary>", 1)[1].split(
         "</content_summary>",
@@ -1795,6 +1803,149 @@ async def test_multimodal_evaluation_sends_prepared_cover_images(monkeypatch) ->
     ]
     assert '"cover_image_ref": "cover:cover-0"' in llm_service.user_inputs[0]
     assert llm_service.max_tokens == [4096]
+
+
+@pytest.mark.asyncio
+async def test_sparse_multimodal_evaluation_localizes_only_prepared_image_anchors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.discovery.multimodal import PreparedCoverImage
+
+    prepared = [
+        PreparedCoverImage(
+            content_id="GLOBAL-C",
+            data_url="data:image/jpeg;base64,third",
+            mime_type="image/jpeg",
+        ),
+        PreparedCoverImage(
+            content_id="GLOBAL-A",
+            data_url="data:image/png;base64,first",
+            mime_type="image/png",
+        ),
+    ]
+
+    async def fake_prepare_cover_image_inputs(
+        *_args: object,
+        **_kwargs: object,
+    ) -> list[PreparedCoverImage]:
+        return prepared
+
+    monkeypatch.setattr(
+        "openbiliclaw.discovery.multimodal.prepare_cover_image_inputs",
+        fake_prepare_cover_image_inputs,
+    )
+
+    class _SparseMultimodalLLMService:
+        supports_image_input = True
+
+        def __init__(self) -> None:
+            self.user_inputs: list[str] = []
+            self.image_inputs: list[list[dict[str, str]]] = []
+
+        async def complete_structured_task(self, **_kwargs: object) -> object:
+            raise AssertionError("prepared images must use the multimodal evaluator")
+
+        async def complete_multimodal_structured_task(
+            self,
+            *,
+            system_instruction: str,
+            user_input: str,
+            image_inputs: list[dict[str, str]],
+            history: list[dict[str, str]] | None = None,
+            temperature: float = 0.7,
+            max_tokens: int = 4096,
+            caller: str = "",
+            reasoning_effort: str | None = None,
+        ) -> object:
+            self.user_inputs.append(user_input)
+            self.image_inputs.append(image_inputs)
+            envelope = _sparse_batch_prompt_envelope(user_input)
+            items = envelope["items"]
+            assert isinstance(items, list)
+            return _SlowResponse(
+                json.dumps(
+                    [
+                        {
+                            "id": str(index),
+                            "score": 0.7 + index / 100,
+                            "reason": "ok",
+                            "topic_group": "visual",
+                            "style_key": "aesthetic_browse",
+                            "franchise_key": "",
+                        }
+                        for index in range(len(items))
+                    ]
+                )
+            )
+
+    llm = _SparseMultimodalLLMService()
+    engine = ContentDiscoveryEngine(
+        llm_service=llm,
+        evaluation_candidate_transport="sparse-json",
+        multimodal_evaluation_enabled=True,
+    )
+    contents = [
+        DiscoveredContent(
+            content_id="GLOBAL-A",
+            title="first",
+            author_name="u",
+            cover_url="https://example.com/a.jpg",
+            source_platform="youtube",
+            content_type="video",
+            source_strategy="search",
+        ),
+        DiscoveredContent(
+            content_id="GLOBAL-B",
+            title="text fallback",
+            author_name="u",
+            cover_url="https://example.com/b.jpg",
+            source_platform="youtube",
+            content_type="video",
+            source_strategy="search",
+        ),
+        DiscoveredContent(
+            content_id="GLOBAL-C",
+            title="third",
+            author_name="u",
+            cover_url="https://example.com/c.jpg",
+            source_platform="youtube",
+            content_type="video",
+            source_strategy="search",
+        ),
+    ]
+
+    scores = await engine._evaluate_batch(
+        contents,
+        _build_profile(),
+        normal_cache_enabled=False,
+        apply_batch_caps=False,
+    )
+
+    assert scores == [0.7, 0.71, 0.72]
+    envelope = _sparse_batch_prompt_envelope(llm.user_inputs[0])
+    items = envelope["items"]
+    assert isinstance(items, list)
+    assert items[0]["cover_image_ref"] == "cover:0"
+    assert "cover_image_ref" not in items[1]
+    assert items[2]["cover_image_ref"] == "cover:2"
+    assert llm.image_inputs == [
+        [
+            {
+                "content_id": "2",
+                "data_url": "data:image/jpeg;base64,third",
+                "mime_type": "image/jpeg",
+            },
+            {
+                "content_id": "0",
+                "data_url": "data:image/png;base64,first",
+                "mime_type": "image/png",
+            },
+        ]
+    ]
+    candidate_wire = json.dumps(envelope, ensure_ascii=False)
+    assert "GLOBAL-A" not in candidate_wire
+    assert "GLOBAL-B" not in candidate_wire
+    assert "GLOBAL-C" not in candidate_wire
 
 
 async def test_multimodal_evaluation_e2e_binds_cached_cover_to_content_id(
@@ -4068,6 +4219,386 @@ class _RecordingBatchKwargsLLMService(_RecordingBatchLLMService):
             caller=caller,
             reasoning_effort=reasoning_effort,
         )
+
+
+@pytest.mark.asyncio
+async def test_sparse_evaluation_uses_private_local_ids_and_binds_reordered_results() -> None:
+    llm = _RecordingBatchLLMService(
+        response=json.dumps(
+            [
+                {
+                    "id": "1",
+                    "score": 0.83,
+                    "reason": "second",
+                    "topic_group": "life",
+                    "style_key": "daily_wander",
+                    "franchise_key": "",
+                },
+                {
+                    "id": "0",
+                    "score": 0.61,
+                    "reason": "first",
+                    "topic_group": "tech",
+                    "style_key": "deep_focus",
+                    "franchise_key": "",
+                },
+            ],
+            ensure_ascii=False,
+        )
+    )
+    engine = ContentDiscoveryEngine(
+        llm_service=llm,
+        evaluation_candidate_transport="sparse-json",
+    )
+    contents = [
+        DiscoveredContent(
+            bvid="BV-PRIVATE-A",
+            content_id="GLOBAL-PRIVATE-A",
+            content_url="https://example.com/private-a",
+            title="First candidate",
+            up_name="duplicate author A",
+            author_name="author A",
+            source_platform="bilibili",
+            content_type="video",
+            source_strategy="search",
+        ),
+        DiscoveredContent(
+            content_id="GLOBAL-PRIVATE-B",
+            content_url="https://example.com/private-b",
+            title="Second candidate",
+            author_name="author B",
+            source_platform="twitter",
+            content_type="thread",
+            source_strategy="feed",
+        ),
+    ]
+
+    scores = await engine._evaluate_batch(
+        contents,
+        _build_profile(),
+        source_context="mixed",
+        normal_cache_enabled=False,
+        apply_batch_caps=False,
+    )
+
+    assert scores == [0.61, 0.83]
+    assert contents[0].relevance_reason == "first"
+    assert contents[1].relevance_reason == "second"
+    envelope = _sparse_batch_prompt_envelope(llm.user_inputs[0])
+    assert envelope["defaults"] == {"mode": "normal"}
+    assert envelope["items"] == [
+        {
+            "author": "author A",
+            "content_type": "video",
+            "id": "0",
+            "source_platform": "bilibili",
+            "title": "First candidate",
+        },
+        {
+            "author": "author B",
+            "content_type": "thread",
+            "id": "1",
+            "source_platform": "twitter",
+            "title": "Second candidate",
+        },
+    ]
+    candidate_wire = json.dumps(envelope, ensure_ascii=False)
+    for private_value in (
+        "BV-PRIVATE-A",
+        "GLOBAL-PRIVATE-A",
+        "GLOBAL-PRIVATE-B",
+        "https://",
+        "content_url",
+        "source_strategy",
+        "up_name",
+    ):
+        assert private_value not in candidate_wire
+
+
+@pytest.mark.asyncio
+async def test_row_wire_evaluation_uses_the_same_canonical_local_id_contract() -> None:
+    from openbiliclaw.llm.evaluation_wire import decode_evaluation_row_wire
+
+    class _RowWireLLMService:
+        def __init__(self) -> None:
+            self.candidate_blocks: list[str] = []
+            self.system_instructions: list[str] = []
+
+        async def complete_structured_task(
+            self,
+            *,
+            system_instruction: str,
+            user_input: str,
+            history: list[dict[str, str]] | None = None,
+            temperature: float = 0.7,
+            max_tokens: int = 4096,
+            caller: str = "",
+            reasoning_effort: str | None = None,
+        ) -> object:
+            candidate_block = (
+                user_input.split("<content_batch>", 1)[1]
+                .split(
+                    "</content_batch>",
+                    1,
+                )[0]
+                .removeprefix("\n\n")
+                .removesuffix("\n\n")
+            )
+            envelope = decode_evaluation_row_wire(candidate_block)
+            items = envelope["items"]
+            assert isinstance(items, list)
+            self.candidate_blocks.append(candidate_block)
+            self.system_instructions.append(system_instruction)
+            return _SlowResponse(
+                json.dumps(
+                    [
+                        {
+                            "id": str(index),
+                            "score": 0.76,
+                            "reason": "ok",
+                            "topic_group": "tech",
+                            "style_key": "deep_focus",
+                            "franchise_key": "",
+                        }
+                        for index in range(len(items))
+                    ]
+                )
+            )
+
+    llm = _RowWireLLMService()
+    engine = ContentDiscoveryEngine(
+        llm_service=llm,
+        evaluation_candidate_transport="row-wire-v1",
+    )
+
+    scores = await engine._evaluate_batch(
+        [
+            DiscoveredContent(
+                content_id="GLOBAL-ROW-PRIVATE",
+                content_url="https://example.com/private-row",
+                title="row candidate",
+                author_name="author",
+                source_platform="twitter",
+                content_type="thread",
+                source_strategy="search",
+            )
+        ],
+        _build_profile(),
+        normal_cache_enabled=False,
+        apply_batch_caps=False,
+    )
+
+    assert scores == [0.76]
+    assert llm.candidate_blocks[0].startswith("ROW-WIRE-V1\n")
+    assert "GLOBAL-ROW-PRIVATE" not in llm.candidate_blocks[0]
+    assert "https://" not in llm.candidate_blocks[0]
+    assert "ROW-WIRE-V1" in llm.system_instructions[0]
+
+
+@pytest.mark.asyncio
+async def test_sparse_evaluation_repairs_multi_member_results_without_ids() -> None:
+    class _IdlessThenSingletonLLMService:
+        def __init__(self) -> None:
+            self.call_sizes: list[int] = []
+            self.ids_by_call: list[list[str]] = []
+
+        async def complete_structured_task(
+            self,
+            *,
+            system_instruction: str,
+            user_input: str,
+            history: list[dict[str, str]] | None = None,
+            temperature: float = 0.7,
+            max_tokens: int = 4096,
+            caller: str = "",
+            reasoning_effort: str | None = None,
+        ) -> object:
+            envelope = _sparse_batch_prompt_envelope(user_input)
+            items = envelope["items"]
+            assert isinstance(items, list)
+            self.call_sizes.append(len(items))
+            self.ids_by_call.append([str(item["id"]) for item in items if isinstance(item, dict)])
+            if len(items) > 1:
+                # Equal-length positional-looking output must not bind.
+                return _SlowResponse(
+                    json.dumps(
+                        [
+                            {
+                                "score": 0.99,
+                                "reason": "wrong positional first",
+                                "topic_group": "wrong",
+                                "style_key": "deep_focus",
+                                "franchise_key": "",
+                            },
+                            {
+                                "score": 0.01,
+                                "reason": "",
+                                "topic_group": "wrong",
+                                "style_key": "deep_focus",
+                                "franchise_key": "",
+                            },
+                        ]
+                    )
+                )
+            item = items[0]
+            assert isinstance(item, dict)
+            score = 0.62 if item["title"] == "first" else 0.84
+            return _SlowResponse(
+                json.dumps(
+                    [
+                        {
+                            "id": "0",
+                            "score": score,
+                            "reason": "repaired",
+                            "topic_group": "valid",
+                            "style_key": "deep_focus",
+                            "franchise_key": "",
+                        }
+                    ]
+                )
+            )
+
+    llm = _IdlessThenSingletonLLMService()
+    engine = ContentDiscoveryEngine(
+        llm_service=llm,
+        evaluation_candidate_transport="sparse-json",
+    )
+
+    scores = await engine._evaluate_batch(
+        [
+            DiscoveredContent(
+                bvid="BVrepair0",
+                title="first",
+                up_name="u",
+                source_strategy="search",
+            ),
+            DiscoveredContent(
+                bvid="BVrepair1",
+                title="second",
+                up_name="u",
+                source_strategy="search",
+            ),
+        ],
+        _build_profile(),
+        normal_cache_enabled=False,
+        apply_batch_caps=False,
+    )
+
+    assert scores == [0.62, 0.84]
+    assert llm.call_sizes == [2, 1, 1]
+    assert llm.ids_by_call == [["0", "1"], ["0"], ["0"]]
+
+
+def test_sparse_evaluation_cache_namespace_isolated_without_changing_production_key() -> None:
+    default_engine = ContentDiscoveryEngine()
+    explicit_production_engine = ContentDiscoveryEngine(evaluation_candidate_transport="production")
+    sparse_engine = ContentDiscoveryEngine(evaluation_candidate_transport="sparse-json")
+    row_engine = ContentDiscoveryEngine(evaluation_candidate_transport="row-wire-v1")
+
+    def content(
+        *,
+        content_url: str = "https://example.com/a",
+        cover_url: str = "https://example.com/cover-a",
+        body_text: str = "body",
+        view_count: int = 10,
+        source_strategy: str = "search",
+    ) -> DiscoveredContent:
+        return DiscoveredContent(
+            bvid="BVcache-transport",
+            content_url=content_url,
+            cover_url=cover_url,
+            title="candidate",
+            up_name="u",
+            body_text=body_text,
+            view_count=view_count,
+            source_strategy=source_strategy,
+        )
+
+    kwargs = {
+        "profile_digest": "profile",
+        "negative_digest": "negative",
+        "source_context": "",
+    }
+
+    default_key = default_engine._batch_eval_cache_key(content(), **kwargs)
+    explicit_production_key = explicit_production_engine._batch_eval_cache_key(
+        content(),
+        **kwargs,
+    )
+    sparse_key = sparse_engine._batch_eval_cache_key(content(), **kwargs)
+    row_key = row_engine._batch_eval_cache_key(content(), **kwargs)
+
+    assert explicit_production_key == default_key
+    assert ":transport:" not in default_key
+    assert sparse_key != default_key
+    assert sparse_key.endswith(":transport:sparse-json")
+    assert row_key.endswith(":transport:row-wire-v1")
+    assert sparse_key.removesuffix(":transport:sparse-json") == row_key.removesuffix(
+        ":transport:row-wire-v1"
+    )
+
+    changed_runtime_urls_key = sparse_engine._batch_eval_cache_key(
+        content(
+            content_url="https://different.example/item",
+            cover_url="https://different.example/cover",
+        ),
+        **kwargs,
+    )
+    assert changed_runtime_urls_key == sparse_key
+    assert (
+        sparse_engine._batch_eval_cache_key(
+            content(body_text="different body"),
+            **kwargs,
+        )
+        != sparse_key
+    )
+    assert (
+        sparse_engine._batch_eval_cache_key(
+            content(view_count=11),
+            **kwargs,
+        )
+        != sparse_key
+    )
+    assert (
+        sparse_engine._batch_eval_cache_key(
+            content(source_strategy="explore"),
+            **kwargs,
+        )
+        != sparse_key
+    )
+
+
+def test_sparse_normal_cache_requires_homogeneous_content_types() -> None:
+    contents = [
+        DiscoveredContent(
+            bvid="BVtype0",
+            title="video",
+            content_type="video",
+            source_strategy="search",
+        ),
+        DiscoveredContent(
+            bvid="BVtype1",
+            title="thread",
+            content_type="thread",
+            source_strategy="search",
+        ),
+    ]
+
+    assert ContentDiscoveryEngine()._batch_normal_cache_eligible(
+        contents,
+        source_context="",
+    )
+    assert not ContentDiscoveryEngine(
+        evaluation_candidate_transport="sparse-json"
+    )._batch_normal_cache_eligible(contents, source_context="")
+    assert not ContentDiscoveryEngine(
+        evaluation_candidate_transport="row-wire-v1"
+    )._batch_normal_cache_eligible(contents, source_context="")
+
+
+def test_evaluation_candidate_transport_rejects_unknown_values() -> None:
+    with pytest.raises(ValueError, match="unsupported evaluation candidate transport"):
+        ContentDiscoveryEngine(evaluation_candidate_transport="row-wire-v0")
 
 
 @pytest.mark.asyncio

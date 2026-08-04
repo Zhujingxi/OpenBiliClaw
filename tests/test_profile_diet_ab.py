@@ -35,6 +35,7 @@ from scripts.run_profile_diet_ab import (
     score_delta_summary,
     select_replay_rows,
     spearman_rank_correlation,
+    validate_candidate_transport_experiment,
     validate_json_minify_transport,
     validate_reason_off_outputs,
     validate_replay_prefilter_compatibility,
@@ -46,8 +47,13 @@ from openbiliclaw.discovery.engine import (
     compact_evaluation_profile_summary,
     evaluation_profile_prompt_layers,
 )
+from openbiliclaw.discovery.eval_payload import (
+    build_canonical_evaluation_batch,
+    render_sparse_evaluation_json,
+)
 from openbiliclaw.discovery.strategies._utils import build_profile_summary
 from openbiliclaw.llm.base import LLMRateLimitError, LLMResponse
+from openbiliclaw.llm.evaluation_wire import encode_evaluation_row_wire
 from openbiliclaw.llm.prompt_cache import PromptLayerRenderCache
 from openbiliclaw.llm.prompts import build_batch_content_evaluation_prompt
 from openbiliclaw.llm.service import LLMProviderExecutionError
@@ -403,6 +409,240 @@ def test_json_minify_prompt_metadata_rejects_malformed_tagged_json() -> None:
         )
 
 
+def _candidate_transport_prompt_metadata() -> dict[str, dict[str, object]]:
+    content_items = [
+        {
+            "content_id": "PRIVATE-GLOBAL-ID",
+            "content_url": "https://private.invalid/item",
+            "cover_url": "https://private.invalid/image",
+            "title": "PRIVATE TITLE",
+            "author_name": "PRIVATE AUTHOR",
+            "body_text": "PRIVATE BODY\nwith tabs\tand slashes\\",
+            "source_platform": "bilibili",
+            "content_type": "video",
+            "source_context": "mixed",
+            "cover_image_ref": "cover:PRIVATE-GLOBAL-ID",
+        }
+    ]
+    canonical = build_canonical_evaluation_batch(content_items)
+    blocks = {
+        "production-json": None,
+        "sparse-json": render_sparse_evaluation_json(canonical),
+        "row-wire-v1": encode_evaluation_row_wire(canonical.as_payload()),
+    }
+    metadata: dict[str, dict[str, object]] = {}
+    for transport, candidate_block in blocks.items():
+        local_ids = transport != "production-json"
+        messages = build_batch_content_evaluation_prompt(
+            profile_summary={"core_traits": ["PRIVATE PROFILE"]},
+            content_items=content_items,
+            source_context="mixed",
+            source_platform="bilibili",
+            candidate_block=candidate_block,
+            local_result_ids=local_ids,
+        )
+        metadata[transport] = replay_script._prompt_transport_metadata(
+            {
+                "system_instruction": messages[0]["content"],
+                "user_input": messages[1]["content"],
+                "image_inputs": [
+                    {
+                        "content_id": "0" if local_ids else "PRIVATE-GLOBAL-ID",
+                        "mime_type": "image/jpeg",
+                        "data_url": "data:image/jpeg;base64,PRIVATE-IMAGE-BYTES",
+                    }
+                ],
+            },
+            expected_compact_json=False,
+            expected_candidate_transport=transport,
+            candidate_transport_audit_enabled=True,
+        )
+    return metadata
+
+
+def test_candidate_transport_metadata_proves_canonical_and_image_equality_privately() -> None:
+    metadata = _candidate_transport_prompt_metadata()
+    production = metadata["production-json"]
+    sparse = metadata["sparse-json"]
+    row = metadata["row-wire-v1"]
+
+    assert [metadata[name]["candidate_transport"] for name in metadata] == [
+        "production-json",
+        "sparse-json",
+        "row-wire-v1",
+    ]
+    assert all(item["candidate_decode_valid"] is True for item in metadata.values())
+    assert {item["candidate_canonical_digest"] for item in metadata.values()} == {
+        production["candidate_canonical_digest"]
+    }
+    assert {item["user_context_digest"] for item in metadata.values()} == {
+        production["user_context_digest"]
+    }
+    assert {item["image_payloads_digest"] for item in metadata.values()} == {
+        production["image_payloads_digest"]
+    }
+    assert production["candidate_global_identity_field_count"] == 1
+    assert production["candidate_url_field_count"] == 2
+    for treatment in (sparse, row):
+        assert treatment["candidate_local_id_coverage_complete"] is True
+        assert treatment["candidate_global_identity_field_count"] == 0
+        assert treatment["candidate_url_field_count"] == 0
+        assert treatment["image_anchor_coverage_complete"] is True
+    assert sparse["system_digest"] == row["system_digest"]
+    assert "PRIVATE" not in json.dumps(metadata, ensure_ascii=False)
+
+
+def test_candidate_transport_metadata_rejects_dangling_local_image_anchor() -> None:
+    metadata = _candidate_transport_prompt_metadata()["sparse-json"]
+    assert metadata["image_anchor_coverage_complete"] is True
+
+    content_items = [
+        {
+            "content_id": "global-id",
+            "title": "title",
+            "author_name": "author",
+            "source_platform": "bilibili",
+            "content_type": "video",
+            "cover_image_ref": "cover:global-id",
+        }
+    ]
+    canonical = build_canonical_evaluation_batch(content_items)
+    messages = build_batch_content_evaluation_prompt(
+        profile_summary={},
+        content_items=content_items,
+        source_context="mixed",
+        source_platform="bilibili",
+        candidate_block=render_sparse_evaluation_json(canonical),
+        local_result_ids=True,
+    )
+    mismatched = replay_script._prompt_transport_metadata(
+        {
+            "system_instruction": messages[0]["content"],
+            "user_input": messages[1]["content"],
+            "image_inputs": [
+                {
+                    "content_id": "1",
+                    "mime_type": "image/jpeg",
+                    "data_url": "data:image/jpeg;base64,safe",
+                }
+            ],
+        },
+        expected_compact_json=False,
+        expected_candidate_transport="sparse-json",
+        candidate_transport_audit_enabled=True,
+    )
+
+    assert mismatched["image_anchor_coverage_complete"] is False
+
+
+def test_candidate_transport_metadata_accepts_reversed_prepared_image_order() -> None:
+    content_items = [
+        {
+            "content_id": f"global-{index}",
+            "title": f"title-{index}",
+            "author_name": "author",
+            "source_platform": "bilibili",
+            "content_type": "video",
+            "cover_image_ref": f"cover:global-{index}",
+        }
+        for index in range(2)
+    ]
+    canonical = build_canonical_evaluation_batch(content_items)
+    messages = build_batch_content_evaluation_prompt(
+        profile_summary={},
+        content_items=content_items,
+        source_context="mixed",
+        source_platform="bilibili",
+        candidate_block=render_sparse_evaluation_json(canonical),
+        local_result_ids=True,
+    )
+
+    def metadata(order: tuple[int, int]) -> dict[str, object]:
+        return replay_script._prompt_transport_metadata(
+            {
+                "system_instruction": messages[0]["content"],
+                "user_input": messages[1]["content"],
+                "image_inputs": [
+                    {
+                        "content_id": str(index),
+                        "mime_type": "image/jpeg",
+                        "data_url": f"data:image/jpeg;base64,image-{index}",
+                    }
+                    for index in order
+                ],
+            },
+            expected_compact_json=False,
+            expected_candidate_transport="sparse-json",
+            candidate_transport_audit_enabled=True,
+        )
+
+    forward = metadata((0, 1))
+    reversed_order = metadata((1, 0))
+
+    assert forward["image_anchor_coverage_complete"] is True
+    assert reversed_order["image_anchor_coverage_complete"] is True
+    assert forward["image_payloads_digest"] != reversed_order["image_payloads_digest"]
+
+
+def test_local_result_identity_metadata_never_position_binds_multi_member_errors() -> None:
+    content_items = [
+        {
+            "content_id": f"global-{index}",
+            "title": f"title-{index}",
+            "author_name": "author",
+            "source_platform": "bilibili",
+            "content_type": "video",
+        }
+        for index in range(2)
+    ]
+    canonical = build_canonical_evaluation_batch(content_items)
+    messages = build_batch_content_evaluation_prompt(
+        profile_summary={},
+        content_items=content_items,
+        source_context="mixed",
+        source_platform="bilibili",
+        candidate_block=render_sparse_evaluation_json(canonical),
+        local_result_ids=True,
+    )
+    context = replay_script._candidate_transport_context(
+        messages[1]["content"],
+        expected_transport="sparse-json",
+    )
+    response = SimpleNamespace(
+        content=json.dumps(
+            {
+                "results": [
+                    {"id": "0", "score": 0.8},
+                    {"id": "0", "score": 0.7},
+                    {"id": "unknown", "score": 0.6},
+                    {"score": 0.5},
+                ]
+            }
+        )
+    )
+
+    audit = replay_script._result_identity_metadata(
+        response,
+        context=context,
+        expected_transport="sparse-json",
+    )
+
+    assert audit["result_identity_contract"] == "local-id"
+    assert audit["result_local_id_binding_safe"] is True
+    assert audit["result_duplicate_local_id_count"] == 1
+    assert audit["result_unknown_local_id_count"] == 1
+    assert audit["result_missing_local_id_count"] == 1
+
+    mapped_global = replay_script._result_identity_metadata(
+        SimpleNamespace(content=json.dumps({"PRIVATE-GLOBAL-ID": {"score": 0.9}})),
+        context=context,
+        expected_transport="sparse-json",
+    )
+    assert mapped_global["result_identity_contract"] == "global-id"
+    assert mapped_global["result_global_identity_field_count"] == 1
+    assert "PRIVATE" not in json.dumps(mapped_global)
+
+
 def _json_minify_audit_calls(*, repeats: int = 3) -> list[dict[str, object]]:
     pretty, compact = _json_minify_prompt_pair()
     calls: list[dict[str, object]] = []
@@ -692,6 +932,248 @@ def test_json_minify_transport_empty_evidence_fails_with_strict_json_artifact() 
     json.dumps(audit, allow_nan=False)
 
 
+def _candidate_transport_audit_calls(experiment: str) -> list[dict[str, object]]:
+    config = replay_script._CANDIDATE_TRANSPORT_EXPERIMENTS[experiment]
+    arm_transports = {
+        "A": str(config["arm_a_transport"]),
+        "B": str(config["arm_b_transport"]),
+    }
+    calls: list[dict[str, object]] = []
+    local_transports = {"sparse-json", "row-wire-v1"}
+
+    def add_call(*, pair_kind: str, repeat: int, logical_run: str, arm: str) -> None:
+        transport = arm_transports[arm]
+        if experiment == "sparse-json":
+            prompt_tokens, completion_tokens = (1000, 100) if arm == "A" else (750, 150)
+            prompt_bytes = 10000 if arm == "A" else 6000
+            candidate_bytes = 8000 if arm == "A" else 4000
+            system_digest = f"stable-{arm}-identity-system"
+        else:
+            prompt_tokens, completion_tokens = (1000, 100) if arm == "A" else (900, 150)
+            prompt_bytes = 6000 if arm == "A" else 5000
+            candidate_bytes = 4000 if arm == "A" else 3200
+            system_digest = "stable-local-id-system"
+        classification_items = [
+            {
+                "candidate_key_digest": f"candidate-{index}",
+                "position": index,
+                "fields": {
+                    field: {"digest": f"stable-{field}", "nonempty": True}
+                    for field in replay_script._REPLAY_CLASSIFICATION_FIELDS
+                },
+            }
+            for index in range(30)
+        ]
+        raw_prompt_digest = f"{transport}-prompt"
+        calls.append(
+            {
+                "pair_kind": pair_kind,
+                "repeat": repeat,
+                "logical_run": logical_run,
+                "arm": arm,
+                "method": "complete_structured_task",
+                "caller": "discovery.evaluate_batch",
+                "temperature": 0.0,
+                "max_tokens": 4096,
+                "request_kind": "root",
+                "request_ordinal": 0,
+                "request_candidate_count": 30,
+                "expected_candidate_transport": transport,
+                "candidate_transport": transport,
+                "candidate_decode_valid": True,
+                "candidate_item_count": 30,
+                "candidate_canonical_digest": "run-salted-canonical",
+                "candidate_payload_bytes": candidate_bytes,
+                "candidate_local_id_coverage_complete": transport in local_transports,
+                "candidate_global_identity_field_count": 0,
+                "candidate_url_field_count": 0,
+                "user_context_digest": "run-salted-context",
+                "image_input_count": 0,
+                "image_payloads_digest": "run-salted-images",
+                "image_anchor_coverage_complete": True,
+                "result_identity_contract": (
+                    "local-id" if transport in local_transports else "global-id"
+                ),
+                "result_local_id_binding_safe": transport in local_transports,
+                "system_digest": system_digest,
+                "prompt_digest": raw_prompt_digest,
+                "prompt_chars": prompt_bytes,
+                "prompt_bytes": prompt_bytes,
+                "cache_metric_supported": False,
+                "status": "ok",
+                "structured_item_count": 30,
+                "reason_field_count": 30,
+                "classification_items": classification_items,
+                "usage": {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": prompt_tokens + completion_tokens,
+                },
+            }
+        )
+
+    for repeat in range(1, 4):
+        add_call(pair_kind="control", repeat=repeat, logical_run="A1", arm="A")
+        add_call(pair_kind="control", repeat=repeat, logical_run="A2", arm="A")
+        add_call(pair_kind="treatment", repeat=repeat, logical_run="A", arm="A")
+        add_call(pair_kind="treatment", repeat=repeat, logical_run="B", arm="B")
+    return calls
+
+
+@pytest.mark.parametrize(
+    ("experiment", "expected_prompt_savings", "expected_total_savings"),
+    [
+        ("sparse-json", 0.25, pytest.approx(1 - 900 / 1100)),
+        ("row-wire-v1", 0.10, pytest.approx(1 - 1050 / 1100)),
+    ],
+)
+def test_candidate_transport_audit_passes_independent_locked_gates(
+    experiment: str,
+    expected_prompt_savings: float,
+    expected_total_savings: object,
+) -> None:
+    audit = validate_candidate_transport_experiment(
+        _candidate_transport_audit_calls(experiment),
+        experiment=experiment,
+        repeats=3,
+    )
+
+    assert audit["passed"] is True
+    assert audit["arm_transports"] == (
+        {"A": "production-json", "B": "sparse-json"}
+        if experiment == "sparse-json"
+        else {"A": "sparse-json", "B": "row-wire-v1"}
+    )
+    assert audit["token_gate"]["prompt_savings_median"] == pytest.approx(expected_prompt_savings)
+    assert audit["token_gate"]["total_savings_median"] == expected_total_savings
+    assert audit["cache_diagnostics_only"] is True
+    assert audit["repair"]["passed"] is True
+    assert audit["classification"]["passed"] is True
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_reason"),
+    [
+        ("transport", "rendered production-json instead of sparse-json"),
+        ("decode", "did not decode canonically"),
+        ("count", "member count drifted"),
+        ("canonical", "canonical digest is missing"),
+        ("context", "non-candidate prompt digest is missing"),
+        ("image_digest", "ordered image payload digest is missing"),
+        ("local_ids", "local-ID request coverage is incomplete"),
+        ("global_id", "leaked a global identity field"),
+        ("url", "leaked a URL field"),
+        ("image", "image/local-ID anchors do not match"),
+        ("result_contract", "response did not use local IDs"),
+        ("binding", "response local-ID binding was unsafe"),
+        ("reason_contract", "response changed the reason output contract"),
+        ("production_contract", "production response identity contract was not verified"),
+        ("semantics", "canonical candidate semantics differ"),
+        ("raw", "raw prompt contract failed"),
+        ("size", "candidate transport is not smaller"),
+        ("usage", "lacks complete billable usage"),
+        ("zero_usage", "reported zero or incomplete billable usage"),
+        ("savings", "prompt-token savings missed the 20% gate"),
+        ("total", "total-token savings missed the >= 15% gate"),
+        ("classification", "topic_group agreement fell below the A/A noise floor"),
+    ],
+)
+def test_sparse_json_transport_audit_fails_closed(
+    failure: str,
+    expected_reason: str,
+) -> None:
+    calls = _candidate_transport_audit_calls("sparse-json")
+    treatment_b = [
+        call for call in calls if call["pair_kind"] == "treatment" and call["arm"] == "B"
+    ]
+    if failure == "transport":
+        treatment_b[-1]["candidate_transport"] = "production-json"
+    elif failure == "decode":
+        treatment_b[-1]["candidate_decode_valid"] = False
+    elif failure == "count":
+        treatment_b[-1]["candidate_item_count"] = 29
+    elif failure == "canonical":
+        treatment_b[-1]["candidate_canonical_digest"] = ""
+    elif failure == "context":
+        treatment_b[-1]["user_context_digest"] = ""
+    elif failure == "image_digest":
+        treatment_b[-1]["image_payloads_digest"] = ""
+    elif failure == "local_ids":
+        treatment_b[-1]["candidate_local_id_coverage_complete"] = False
+    elif failure == "global_id":
+        treatment_b[-1]["candidate_global_identity_field_count"] = 1
+    elif failure == "url":
+        treatment_b[-1]["candidate_url_field_count"] = 1
+    elif failure == "image":
+        treatment_b[-1]["image_anchor_coverage_complete"] = False
+    elif failure == "result_contract":
+        treatment_b[-1]["result_identity_contract"] = "global-id"
+    elif failure == "binding":
+        treatment_b[-1]["result_local_id_binding_safe"] = False
+    elif failure == "reason_contract":
+        treatment_b[-1]["reason_field_count"] = 29
+    elif failure == "production_contract":
+        calls[0]["result_identity_contract"] = "unverified-global-id"
+    elif failure == "semantics":
+        treatment_b[-1]["candidate_canonical_digest"] = "semantic-drift"
+    elif failure == "raw":
+        treatment_b[-1]["prompt_digest"] = "production-json-prompt"
+    elif failure == "size":
+        treatment_b[-1]["candidate_payload_bytes"] = 9000
+    elif failure == "usage":
+        treatment_b[-1]["usage"] = None
+    elif failure == "zero_usage":
+        treatment_b[-1]["usage"] = {}
+    elif failure == "savings":
+        for call in treatment_b:
+            call["usage"] = {
+                "prompt_tokens": 850,
+                "completion_tokens": 150,
+                "total_tokens": 1000,
+            }
+    elif failure == "total":
+        for call in treatment_b:
+            call["usage"] = {
+                "prompt_tokens": 750,
+                "completion_tokens": 200,
+                "total_tokens": 950,
+            }
+    elif failure == "classification":
+        for call in treatment_b:
+            items = call["classification_items"]
+            assert isinstance(items, list)
+            items[0]["fields"]["topic_group"]["digest"] = "classification-drift"
+
+    audit = validate_candidate_transport_experiment(
+        calls,
+        experiment="sparse-json",
+        repeats=3,
+    )
+
+    assert audit["passed"] is False
+    assert expected_reason in " ".join(audit["blocking_reasons"])
+
+
+def test_row_wire_transport_requires_strictly_positive_total_savings() -> None:
+    calls = _candidate_transport_audit_calls("row-wire-v1")
+    for call in calls:
+        if call["pair_kind"] == "treatment" and call["arm"] == "B":
+            call["usage"] = {
+                "prompt_tokens": 900,
+                "completion_tokens": 200,
+                "total_tokens": 1100,
+            }
+
+    audit = validate_candidate_transport_experiment(
+        calls,
+        experiment="row-wire-v1",
+        repeats=3,
+    )
+
+    assert audit["passed"] is False
+    assert "total-token savings missed the > 0% gate" in " ".join(audit["blocking_reasons"])
+
+
 def test_artifact_keeps_raw_scores_digests_usage_routes_without_private_payloads(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -777,8 +1259,11 @@ def test_artifact_keeps_raw_scores_digests_usage_routes_without_private_payloads
 
     raw_artifact = output.read_text(encoding="utf-8")
     artifact = json.loads(raw_artifact)
-    assert artifact["schema_version"] == 3
-    assert artifact["snapshot"]["raw_profile_digest"] == "raw-digest"
+    assert artifact["schema_version"] == 4
+    assert artifact["snapshot"]["raw_profile_digest"] != "raw-digest"
+    assert len(artifact["snapshot"]["raw_profile_digest"]) == 64
+    assert artifact["candidates"][0]["candidate_ordinal"] == 0
+    assert "candidate_id" not in artifact["candidates"][0]
     assert artifact["control_pairs"][0]["scores_a"] == [0.6]
     assert artifact["control_pairs"][0]["scores_a_digest"]
     assert artifact["llm_calls"][0]["usage"] == {"output_tokens": 7}
@@ -806,7 +1291,10 @@ def test_artifact_keeps_raw_scores_digests_usage_routes_without_private_payloads
     assert artifact["replay_context"] == {"eval_prefilter_mode": "off"}
     assert "PRIVATE TITLE" not in raw_artifact
     assert "PRIVATE BODY" not in raw_artifact
-    assert '"content_id": "item-1"' not in raw_artifact
+    assert "item-1" not in raw_artifact
+    assert "production.db" not in raw_artifact
+    assert "config.toml" not in raw_artifact
+    assert "raw-digest" not in raw_artifact
 
 
 def test_select_replay_rows_preserves_recent_production_mix() -> None:
@@ -1008,6 +1496,9 @@ async def test_embedding_audit_accepts_complete_vectors_with_zero_injection() ->
     assert summary["passed"] is True
     assert summary["call_count"] == 2
     assert recall.payload()["injected_label_count"] == 0
+    assert "tail interest" not in json.dumps(summary)
+    assert "unrelated content" not in json.dumps(summary)
+    assert summary["calls"][0]["request_digest"] != replay_script._digest("tail interest")
 
 
 def test_embedding_audit_accepts_zero_tail_without_requests() -> None:
@@ -2030,6 +2521,39 @@ def test_json_minify_replay_flag_is_instance_scoped_and_default_off() -> None:
     assert arm_b.compact_evaluation_json is True
 
 
+def test_candidate_transport_replay_flag_is_instance_scoped_and_default_off() -> None:
+    production = _build_engine(
+        object(),
+        _ReplayConfig(),
+        compact_profile=True,
+        negative_examples=None,
+        legacy_profile=False,
+        embedding_service=None,
+    )
+    sparse = _build_engine(
+        object(),
+        _ReplayConfig(),
+        compact_profile=True,
+        negative_examples=None,
+        legacy_profile=False,
+        embedding_service=None,
+        evaluation_candidate_transport="sparse-json",
+    )
+    row = _build_engine(
+        object(),
+        _ReplayConfig(),
+        compact_profile=True,
+        negative_examples=None,
+        legacy_profile=False,
+        embedding_service=None,
+        evaluation_candidate_transport="row-wire-v1",
+    )
+
+    assert production.evaluation_candidate_transport == "production"
+    assert sparse.evaluation_candidate_transport == "sparse-json"
+    assert row.evaluation_candidate_transport == "row-wire-v1"
+
+
 class _MemberRepairService:
     def __init__(self) -> None:
         self.call_count = 0
@@ -2111,6 +2635,278 @@ async def test_replay_engine_attributes_root_and_member_repair_calls() -> None:
     assert [call["request_ordinal"] for call in service.calls] == [0, 1]
     assert [call["request_candidate_count"] for call in service.calls] == [2, 1]
     assert all(call["all_target_json_compact"] is True for call in service.calls)
+
+
+class _LocalMemberRepairService:
+    def __init__(self) -> None:
+        self.call_count = 0
+
+    async def complete_structured_task(self, **kwargs: object) -> LLMResponse:
+        del kwargs
+        score = 0.7 + self.call_count / 10
+        self.call_count += 1
+        return LLMResponse(
+            content=json.dumps(
+                {
+                    "results": [
+                        {
+                            "id": "0",
+                            "score": score,
+                            "reason": "match",
+                            "topic_group": "topic",
+                            "style_key": "deep_focus",
+                            "franchise_key": "",
+                        }
+                    ]
+                }
+            ),
+            provider="test-provider",
+            instance_id="gateway",
+            model="model",
+            usage={
+                "prompt_tokens": 100,
+                "completion_tokens": 20,
+                "total_tokens": 120,
+            },
+        )
+
+
+@pytest.mark.parametrize("transport", ["sparse-json", "row-wire-v1"])
+@pytest.mark.asyncio
+async def test_replay_engine_audits_local_candidate_transport_and_member_repair(
+    transport: str,
+) -> None:
+    service = _DeterministicLLMService(
+        _LocalMemberRepairService(),
+        service="arm_b",
+        expected_candidate_transport=transport,
+        candidate_transport_audit_enabled=True,
+    )
+    engine = _build_engine(
+        service,
+        _ReplayConfig(),
+        compact_profile=True,
+        negative_examples=None,
+        legacy_profile=False,
+        embedding_service=None,
+        evaluation_candidate_transport=transport,
+    )
+    contents = _rows_to_contents(
+        [
+            {
+                "content_id": content_id,
+                "content_url": f"https://private.invalid/{content_id}",
+                "source_platform": "bilibili",
+                "source_strategy": "feed",
+                "title": content_id,
+                "body_text": "body",
+            }
+            for content_id in ("PRIVATE-GLOBAL-1", "PRIVATE-GLOBAL-2")
+        ]
+    )
+
+    with replay_call_attribution(
+        pair_kind="treatment",
+        repeat=1,
+        logical_run="B",
+        arm="B",
+    ):
+        scores = await engine.evaluate_content_batch(
+            contents,
+            SoulProfile(),
+            source_context="mixed",
+            batch_size=30,
+        )
+
+    assert scores == pytest.approx([0.7, 0.8])
+    assert [call["request_kind"] for call in service.calls] == ["root", "repair"]
+    assert [call["request_candidate_count"] for call in service.calls] == [2, 1]
+    assert all(call["candidate_transport"] == transport for call in service.calls)
+    assert all(call["candidate_decode_valid"] is True for call in service.calls)
+    assert all(call["candidate_local_id_coverage_complete"] is True for call in service.calls)
+    assert all(call["candidate_global_identity_field_count"] == 0 for call in service.calls)
+    assert all(call["candidate_url_field_count"] == 0 for call in service.calls)
+    assert all(call["result_identity_contract"] == "local-id" for call in service.calls)
+    assert all(call["result_local_id_binding_safe"] is True for call in service.calls)
+    assert "PRIVATE" not in json.dumps(service.calls, ensure_ascii=False)
+
+
+class _CandidateGateService:
+    def __init__(
+        self,
+        *,
+        transport: str,
+        content_ids: list[str],
+        usage: dict[str, int],
+    ) -> None:
+        self.transport = transport
+        self.content_ids = content_ids
+        self.usage = usage
+
+    async def complete_structured_task(self, **kwargs: object) -> LLMResponse:
+        del kwargs
+        identifiers = (
+            self.content_ids
+            if self.transport == "production-json"
+            else [str(index) for index in range(len(self.content_ids))]
+        )
+        identity_field = "content_id" if self.transport == "production-json" else "id"
+        return LLMResponse(
+            content=json.dumps(
+                {
+                    "results": [
+                        {
+                            identity_field: identifier,
+                            "score": 0.7,
+                            "reason": "stable",
+                            "topic_group": "topic",
+                            "style_key": "deep_focus",
+                            "franchise_key": "",
+                        }
+                        for identifier in identifiers
+                    ]
+                }
+            ),
+            provider="test-provider",
+            instance_id="test-instance",
+            model="test-model",
+            usage=self.usage,
+        )
+
+
+@pytest.mark.parametrize("experiment", ["sparse-json", "row-wire-v1"])
+@pytest.mark.asyncio
+async def test_candidate_transport_real_prompt_matrix_passes_independent_audit(
+    experiment: str,
+) -> None:
+    raw_config = replay_script._CANDIDATE_TRANSPORT_EXPERIMENTS[experiment]
+    arm_a_transport = str(raw_config["arm_a_transport"])
+    arm_b_transport = str(raw_config["arm_b_transport"])
+    content_ids = [f"PRIVATE-GLOBAL-{index}" for index in range(30)]
+    rows = [
+        {
+            "content_id": content_id,
+            "content_url": f"https://private.invalid/{content_id}",
+            "source_platform": "bilibili",
+            "content_type": "video",
+            "source_strategy": "feed",
+            "title": f"Candidate {index} with a moderately long private title",
+            "author_name": "private author",
+            "body_text": "private body text " * 8,
+            "view_count": 1000 + index,
+            "like_count": 100 + index,
+        }
+        for index, content_id in enumerate(content_ids)
+    ]
+    if experiment == "sparse-json":
+        usage_a = {"prompt_tokens": 1000, "completion_tokens": 100, "total_tokens": 1100}
+        usage_b = {"prompt_tokens": 750, "completion_tokens": 150, "total_tokens": 900}
+    else:
+        usage_a = {"prompt_tokens": 1000, "completion_tokens": 100, "total_tokens": 1100}
+        usage_b = {"prompt_tokens": 900, "completion_tokens": 150, "total_tokens": 1050}
+
+    service_a = _DeterministicLLMService(
+        _CandidateGateService(
+            transport=arm_a_transport,
+            content_ids=content_ids,
+            usage=usage_a,
+        ),
+        service="arm_a",
+        expected_candidate_transport=arm_a_transport,
+        candidate_transport_audit_enabled=True,
+    )
+    service_b = _DeterministicLLMService(
+        _CandidateGateService(
+            transport=arm_b_transport,
+            content_ids=content_ids,
+            usage=usage_b,
+        ),
+        service="arm_b",
+        expected_candidate_transport=arm_b_transport,
+        candidate_transport_audit_enabled=True,
+    )
+    engine_a = _build_engine(
+        service_a,
+        _ReplayConfig(),
+        compact_profile=True,
+        negative_examples=None,
+        legacy_profile=False,
+        embedding_service=None,
+        evaluation_candidate_transport=replay_script._ENGINE_CANDIDATE_TRANSPORTS[arm_a_transport],
+    )
+    engine_b = _build_engine(
+        service_b,
+        _ReplayConfig(),
+        compact_profile=True,
+        negative_examples=None,
+        legacy_profile=False,
+        embedding_service=None,
+        evaluation_candidate_transport=replay_script._ENGINE_CANDIDATE_TRANSPORTS[arm_b_transport],
+    )
+
+    async def score(
+        engine: object,
+        *,
+        pair_kind: str,
+        repeat: int,
+        logical_run: str,
+        arm: str,
+    ) -> None:
+        with replay_call_attribution(
+            pair_kind=pair_kind,
+            repeat=repeat,
+            logical_run=logical_run,
+            arm=arm,
+        ):
+            scores = await engine.evaluate_content_batch(
+                _rows_to_contents(rows),
+                SoulProfile(),
+                source_context="mixed",
+                batch_size=30,
+            )
+        assert len(scores) == len(rows)
+        assert scores[:8] == pytest.approx([0.7] * 8)
+
+    for repeat in range(1, 4):
+        await score(
+            engine_a,
+            pair_kind="control",
+            repeat=repeat,
+            logical_run="A1",
+            arm="A",
+        )
+        await score(
+            engine_a,
+            pair_kind="control",
+            repeat=repeat,
+            logical_run="A2",
+            arm="A",
+        )
+        await score(
+            engine_a,
+            pair_kind="treatment",
+            repeat=repeat,
+            logical_run="A",
+            arm="A",
+        )
+        await score(
+            engine_b,
+            pair_kind="treatment",
+            repeat=repeat,
+            logical_run="B",
+            arm="B",
+        )
+
+    audit = validate_candidate_transport_experiment(
+        [*service_a.calls, *service_b.calls],
+        experiment=experiment,
+        repeats=3,
+    )
+
+    assert audit["passed"] is True, audit["blocking_reasons"]
+    assert audit["repair"]["passed"] is True
+    assert audit["classification"]["passed"] is True
+    assert "PRIVATE" not in json.dumps(audit, ensure_ascii=False)
 
 
 def test_compact_arm_b_uses_exact_production_profile_view() -> None:
