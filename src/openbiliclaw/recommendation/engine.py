@@ -721,7 +721,7 @@ class RecommendationEngine:
             if excluded_bvids:
                 candidates = [item for item in candidates if item.bvid not in excluded_bvids]
             after_exclude_count = len(candidates)
-            candidates = self._exclude_disliked_topic_candidates(candidates, profile)
+            candidates = self._exclude_disliked_topic_candidates_for_serve(candidates, profile)
             after_disliked_count = len(candidates)
             if snapshot.seen_bvids:
                 candidates = [item for item in candidates if item.bvid not in snapshot.seen_bvids]
@@ -5079,7 +5079,7 @@ class RecommendationEngine:
         if excluded_bvids:
             candidates = [item for item in candidates if item.bvid not in excluded_bvids]
         after_exclude_count = len(candidates)
-        candidates = self._exclude_disliked_topic_candidates(candidates, profile)
+        candidates = self._exclude_disliked_topic_candidates_for_serve(candidates, profile)
         after_disliked_count = len(candidates)
         candidates = self._exclude_recently_viewed(candidates)
         return (
@@ -5201,6 +5201,40 @@ class RecommendationEngine:
         return [item for item in candidates if not cls._matches_disliked_topic(item, terms)]
 
     @classmethod
+    def _exclude_disliked_topic_candidates_for_serve(
+        cls,
+        candidates: list[DiscoveredContent],
+        profile: SoulProfile,
+    ) -> list[DiscoveredContent]:
+        """Keep exact topic bans when fuzzy dislike matching starves a serve window.
+
+        Preference analysis stores natural-language avoid phrases. Matching those
+        phrases against titles, descriptions, authors, tags, and body text is a
+        useful purge-race guard, but a generic phrase such as ``视频`` or ``内容``
+        can otherwise remove every candidate indefinitely. Only a total fuzzy
+        wipeout activates this fail-safe; structured topic fields remain hard
+        exclusions, so confirmed category-level dislikes are never restored.
+        """
+        filtered = cls._exclude_disliked_topic_candidates(candidates, profile)
+        if not candidates or filtered:
+            return filtered
+
+        terms = cls._normalized_disliked_topics(profile)
+        exact_only = [
+            item for item in candidates if not cls._matches_disliked_topic_exact(item, terms)
+        ]
+        if not exact_only:
+            return filtered
+
+        logger.warning(
+            "serve dislike fail-safe restored %d/%d candidate(s) after fuzzy "
+            "disliked_topics matched the entire window; exact topic bans remain active",
+            len(exact_only),
+            len(candidates),
+        )
+        return exact_only
+
+    @classmethod
     def _normalized_disliked_topics(cls, profile: SoulProfile) -> list[str]:
         raw_topics = getattr(getattr(profile, "preferences", None), "disliked_topics", []) or []
         result: list[str] = []
@@ -5219,11 +5253,8 @@ class RecommendationEngine:
         item: DiscoveredContent,
         disliked_terms: list[str],
     ) -> bool:
-        exact_fields = [
-            cls._normalize_dislike_match_text(item.topic_key),
-            cls._normalize_dislike_match_text(item.topic_group),
-            cls._normalize_dislike_match_text(item.pool_topic_label),
-        ]
+        if cls._matches_disliked_topic_exact(item, disliked_terms):
+            return True
         search_fields = [
             cls._normalize_dislike_match_text(item.title),
             cls._normalize_dislike_match_text(item.pool_topic_label),
@@ -5233,11 +5264,23 @@ class RecommendationEngine:
             *[cls._normalize_dislike_match_text(tag) for tag in item.tags],
         ]
         for term in disliked_terms:
-            if term in exact_fields:
-                return True
             if any(term in field for field in search_fields if field):
                 return True
         return False
+
+    @classmethod
+    def _matches_disliked_topic_exact(
+        cls,
+        item: DiscoveredContent,
+        disliked_terms: list[str],
+    ) -> bool:
+        exact_fields = {
+            cls._normalize_dislike_match_text(item.topic_key),
+            cls._normalize_dislike_match_text(item.topic_group),
+            cls._normalize_dislike_match_text(item.pool_topic_label),
+        }
+        exact_fields.discard("")
+        return any(term in exact_fields for term in disliked_terms)
 
     @staticmethod
     def _normalize_dislike_match_text(value: object) -> str:
