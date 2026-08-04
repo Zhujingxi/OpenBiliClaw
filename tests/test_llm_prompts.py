@@ -556,6 +556,35 @@ def test_content_evaluation_prompts_only_allow_explore_scoring_exception() -> No
         assert "related_chain 允许适度偏移" not in system
 
 
+def test_content_evaluation_prompts_define_publication_time_semantics() -> None:
+    single_messages = build_content_evaluation_prompt(
+        profile_summary={"interests": ["人工智能"]},
+        content_summary={"title": "模型更新", "published_at": "2026-08-01T00:00:00Z"},
+        source_context="trending",
+        source_platform="bilibili",
+    )
+    batch_messages = build_batch_content_evaluation_prompt(
+        profile_summary={"interests": ["人工智能"]},
+        content_items=[
+            {
+                "content_id": "BV1TIME",
+                "title": "模型更新",
+                "published_at": "2026-08-01T00:00:00Z",
+            }
+        ],
+        source_context="trending",
+        source_platform="bilibili",
+    )
+
+    for messages in (single_messages, batch_messages):
+        system = messages[0]["content"]
+        user = messages[1]["content"]
+        assert "published_at 是来源提供的权威发布时间" in system
+        assert "模型知识截止时间" in system
+        assert "字段缺失或无效时保持中性" in system
+        assert '"published_at": "2026-08-01T00:00:00Z"' in user
+
+
 def test_batch_content_evaluation_prompt_allows_per_item_platforms() -> None:
     messages = build_batch_content_evaluation_prompt(
         profile_summary={"interests": ["systems"]},
