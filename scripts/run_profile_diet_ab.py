@@ -103,6 +103,10 @@ _REPLAY_ATTRIBUTION: ContextVar[Mapping[str, object]] = ContextVar(
     "openbiliclaw_profile_diet_replay_attribution",
     default=_EMPTY_REPLAY_ATTRIBUTION,
 )
+_REPLAY_PROVIDER_CALL_ID: ContextVar[str] = ContextVar(
+    "openbiliclaw_profile_diet_provider_call_id",
+    default="",
+)
 _REPLAY_EVAL_REQUEST_COUNTER: ContextVar[dict[str, int] | None] = ContextVar(
     "openbiliclaw_profile_diet_eval_request_counter",
     default=None,
@@ -121,6 +125,7 @@ _EVALUATION_JSON_TAGS = (
 _REPLAY_PRIVACY_DIGEST_SALT = secrets.token_bytes(32)
 _CACHE_USAGE_SEMANTICS_BY_PROVIDER = {
     "claude": "prompt_excludes_cached",
+    "deepseek": "prompt_includes_cached",
     "gemini": "prompt_includes_cached",
     "openai": "prompt_includes_cached",
     "openai_compatible": "prompt_includes_cached",
@@ -1357,17 +1362,16 @@ def _prompt_transport_metadata(
     }
 
 
-def _normalized_replay_usage(
-    response: object,
+def _normalized_usage(
+    provider: str,
+    usage: object,
 ) -> tuple[dict[object, object] | None, str, bool]:
-    """Normalize provider cache accounting for paired replay comparisons."""
+    """Normalize one provider usage payload for paired replay comparisons."""
 
-    usage = getattr(response, "usage", None)
     if not isinstance(usage, Mapping):
         return None, "unsupported", False
     normalized: dict[object, object] = dict(usage)
-    provider = str(getattr(response, "provider", "") or "").strip().lower()
-    semantics = _CACHE_USAGE_SEMANTICS_BY_PROVIDER.get(provider, "unsupported")
+    semantics = _CACHE_USAGE_SEMANTICS_BY_PROVIDER.get(provider.strip().lower(), "unsupported")
     if semantics == "unsupported":
         return normalized, semantics, False
 
@@ -1382,6 +1386,156 @@ def _normalized_replay_usage(
         normalized["prompt_tokens"] = prompt_tokens
         normalized["total_tokens"] = prompt_tokens + completion
     return normalized, semantics, True
+
+
+def _normalized_replay_usage(
+    response: object,
+) -> tuple[dict[object, object] | None, str, bool]:
+    """Normalize provider cache accounting for paired replay comparisons."""
+
+    return _normalized_usage(
+        str(getattr(response, "provider", "") or ""),
+        getattr(response, "usage", None),
+    )
+
+
+def _raw_openai_usage(response: object) -> dict[str, int] | None:
+    """Extract usage from one successful OpenAI-protocol wire attempt."""
+
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return None
+
+    def value(*names: str) -> int:
+        for name in names:
+            raw = usage.get(name) if isinstance(usage, Mapping) else getattr(usage, name, None)
+            if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
+                return raw
+        return 0
+
+    prompt = value("prompt_tokens", "input_tokens")
+    completion = value("completion_tokens", "output_tokens")
+    total = value("total_tokens") or (prompt + completion)
+    cached = value("prompt_cache_hit_tokens", "cached_input_tokens")
+    details = (
+        usage.get("prompt_tokens_details")
+        if isinstance(usage, Mapping)
+        else getattr(usage, "prompt_tokens_details", None)
+    )
+    if details is None:
+        details = (
+            usage.get("input_tokens_details")
+            if isinstance(usage, Mapping)
+            else getattr(usage, "input_tokens_details", None)
+        )
+    if not cached and details is not None:
+        raw_cached = (
+            details.get("cached_tokens")
+            if isinstance(details, Mapping)
+            else getattr(details, "cached_tokens", None)
+        )
+        if isinstance(raw_cached, int) and not isinstance(raw_cached, bool) and raw_cached >= 0:
+            cached = raw_cached
+    return {
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "total_tokens": total,
+        "cached_input_tokens": cached,
+    }
+
+
+class _ProviderAttemptUsageRecorder:
+    """Account successful raw OpenAI-protocol attempts hidden by adapter retries."""
+
+    _METHODS = ("_request_with_retry", "_responses_request_with_retry")
+
+    def __init__(self) -> None:
+        self._attempts: dict[str, list[dict[str, object]]] = {}
+        self._instrumented_provider_ids: set[int] = set()
+
+    def instrument_registry(self, registry: object) -> None:
+        available = getattr(registry, "available_providers", ())
+        get_provider = getattr(registry, "get", None)
+        provider_type = getattr(registry, "provider_type", None)
+        if not callable(get_provider) or not callable(provider_type):
+            return
+        names = available if isinstance(available, Sequence) else ()
+        for name in names:
+            adapter = str(provider_type(name) or "").strip().lower()
+            if adapter not in {"openai", "openai_compatible", "openrouter", "deepseek"}:
+                continue
+            provider = get_provider(name)
+            if id(provider) in self._instrumented_provider_ids:
+                continue
+            self._instrumented_provider_ids.add(id(provider))
+            provider_name = str(getattr(provider, "name", "") or adapter).strip().lower()
+            for method_name in self._METHODS:
+                original = getattr(provider, method_name, None)
+                if not callable(original):
+                    continue
+
+                async def recorded(
+                    *args: object,
+                    __original: Any = original,
+                    __provider_name: str = provider_name,
+                    __method_name: str = method_name,
+                    **kwargs: object,
+                ) -> object:
+                    response = await __original(*args, **kwargs)
+                    self._record(
+                        call_id=_REPLAY_PROVIDER_CALL_ID.get(),
+                        provider=__provider_name,
+                        method=__method_name,
+                        response=response,
+                    )
+                    return response
+
+                setattr(provider, method_name, recorded)
+
+    def _record(
+        self,
+        *,
+        call_id: str,
+        provider: str,
+        method: str,
+        response: object,
+    ) -> None:
+        if not call_id:
+            return
+        usage, semantics, supported = _normalized_usage(provider, _raw_openai_usage(response))
+        self._attempts.setdefault(call_id, []).append(
+            {
+                "provider": provider,
+                "method": method,
+                "usage": usage,
+                "cache_usage_semantics": semantics,
+                "cache_metric_supported": supported,
+            }
+        )
+
+    def take(self, call_id: str) -> list[dict[str, object]]:
+        return self._attempts.pop(call_id, [])
+
+
+def _aggregate_provider_attempt_usage(
+    attempts: Sequence[Mapping[str, object]],
+) -> dict[object, object] | None:
+    usages = [attempt.get("usage") for attempt in attempts]
+    if not usages or any(not isinstance(usage, Mapping) for usage in usages):
+        return None
+    keys = {
+        str(key)
+        for usage in usages
+        if isinstance(usage, Mapping)
+        for key in usage
+        if isinstance(key, str)
+    }
+    return {
+        key: sum(
+            _usage_token_value(usage, (key,)) for usage in usages if isinstance(usage, Mapping)
+        )
+        for key in keys
+    }
 
 
 class _DeterministicLLMService:
@@ -1399,10 +1553,13 @@ class _DeterministicLLMService:
         *,
         service: str = "",
         expected_compact_json: bool = False,
+        attempt_usage_recorder: _ProviderAttemptUsageRecorder | None = None,
     ) -> None:
         self._inner = inner
         self._service = service
         self._expected_compact_json = expected_compact_json
+        self._attempt_usage_recorder = attempt_usage_recorder
+        self._provider_call_sequence = 0
         self.calls: list[dict[str, object]] = []
 
     def __getattr__(self, name: str) -> object:
@@ -1421,6 +1578,9 @@ class _DeterministicLLMService:
         # must fail rather than masking a production failure with extra headroom.
         kwargs["max_tokens"] = 4096
         method = getattr(self._inner, method_name)
+        self._provider_call_sequence += 1
+        provider_call_id = f"{self._service}:{self._provider_call_sequence}"
+        provider_call_token = _REPLAY_PROVIDER_CALL_ID.set(provider_call_id)
         attribution = dict(_REPLAY_ATTRIBUTION.get())
         prompt_metadata = _prompt_transport_metadata(
             kwargs,
@@ -1429,6 +1589,11 @@ class _DeterministicLLMService:
         try:
             response = await method(**kwargs)
         except Exception as exc:
+            attempts = (
+                self._attempt_usage_recorder.take(provider_call_id)
+                if self._attempt_usage_recorder is not None
+                else []
+            )
             retryable_rate_limit = _is_retryable_replay_rate_limit(exc)
             self.calls.append(
                 {
@@ -1442,7 +1607,15 @@ class _DeterministicLLMService:
                     "temperature": 0.0,
                     "max_tokens": 4096,
                     **prompt_metadata,
-                    "usage": None,
+                    "usage": _aggregate_provider_attempt_usage(attempts),
+                    "provider_attempt_count": len(attempts),
+                    "provider_hidden_retry_count": max(0, len(attempts) - 1),
+                    "provider_attempt_usage_complete": bool(attempts)
+                    and _aggregate_provider_attempt_usage(attempts) is not None,
+                    "provider_attempt_accounting": (
+                        "raw_adapter_attempts" if attempts else "logical_response_only"
+                    ),
+                    "provider_attempts": attempts,
                     "status": "error",
                     "structured_output_parseable": False,
                     "structured_item_count": 0,
@@ -1454,7 +1627,25 @@ class _DeterministicLLMService:
                 }
             )
             raise
+        finally:
+            _REPLAY_PROVIDER_CALL_ID.reset(provider_call_token)
         usage, cache_usage_semantics, cache_metric_supported = _normalized_replay_usage(response)
+        attempts = (
+            self._attempt_usage_recorder.take(provider_call_id)
+            if self._attempt_usage_recorder is not None
+            else []
+        )
+        aggregate_attempt_usage = _aggregate_provider_attempt_usage(attempts)
+        if attempts:
+            usage = aggregate_attempt_usage
+            cache_semantics = {
+                str(attempt.get("cache_usage_semantics") or "") for attempt in attempts
+            }
+            cache_support = {bool(attempt.get("cache_metric_supported")) for attempt in attempts}
+            cache_usage_semantics = (
+                next(iter(cache_semantics)) if len(cache_semantics) == 1 else "mixed"
+            )
+            cache_metric_supported = cache_support == {True}
         self.calls.append(
             {
                 "service": self._service,
@@ -1470,6 +1661,15 @@ class _DeterministicLLMService:
                 "cache_usage_semantics": cache_usage_semantics,
                 "cache_metric_supported": cache_metric_supported,
                 "usage": usage,
+                "provider_attempt_count": len(attempts) or 1,
+                "provider_hidden_retry_count": max(0, len(attempts) - 1),
+                "provider_attempt_usage_complete": (
+                    aggregate_attempt_usage is not None if attempts else usage is not None
+                ),
+                "provider_attempt_accounting": (
+                    "raw_adapter_attempts" if attempts else "logical_response_only"
+                ),
+                "provider_attempts": attempts,
                 "status": "ok",
                 **_structured_output_metadata(response),
             }
@@ -1523,6 +1723,12 @@ def _token_usage_summary(calls: Sequence[Mapping[str, object]]) -> dict[str, obj
 
     return {
         "call_count": len(calls),
+        "provider_attempt_count": sum(
+            int(call.get("provider_attempt_count") or 0) for call in calls
+        ),
+        "provider_hidden_retry_count": sum(
+            int(call.get("provider_hidden_retry_count") or 0) for call in calls
+        ),
         "successful_call_count": sum(call.get("status") == "ok" for call in calls),
         "error_call_count": sum(call.get("status") != "ok" for call in calls),
         "usage_missing_call_count": len(calls) - observed,
@@ -1761,6 +1967,16 @@ def validate_json_minify_transport(
 
     for call in calls:
         arm = str(call.get("arm") or "")
+        provider = str(call.get("provider") or "").strip().lower()
+        if provider in {"openai", "openai_compatible", "openrouter", "deepseek"}:
+            if call.get("provider_attempt_accounting") != "raw_adapter_attempts":
+                blocking_reasons.append(
+                    "OpenAI-protocol call lacks raw provider-attempt accounting"
+                )
+            if call.get("provider_attempt_usage_complete") is not True:
+                blocking_reasons.append(
+                    "OpenAI-protocol call has incomplete provider-attempt usage"
+                )
         usage = call.get("usage")
         if isinstance(usage, Mapping) and call.get("cache_metric_supported") is True:
             if "cached_input_tokens" not in usage:
@@ -3312,15 +3528,23 @@ async def run(args: argparse.Namespace) -> int:
         admission_min_score = float(getattr(discovery_cfg, "admission_min_score", 0.60) or 0.60)
         eligible_tail_count = len(_evaluation_recall_interests(profile))
 
+        arm_a_inner = _build_llm_service(config, data_root)
+        arm_b_inner = _build_llm_service(config, data_root, model_override=model_override)
+        arm_a_attempts = _ProviderAttemptUsageRecorder()
+        arm_b_attempts = _ProviderAttemptUsageRecorder()
+        arm_a_attempts.instrument_registry(getattr(arm_a_inner, "registry", None))
+        arm_b_attempts.instrument_registry(getattr(arm_b_inner, "registry", None))
         arm_a_service = _DeterministicLLMService(
-            _build_llm_service(config, data_root),
+            arm_a_inner,
             service="arm_a",
             expected_compact_json=False,
+            attempt_usage_recorder=arm_a_attempts,
         )
         arm_b_service = _DeterministicLLMService(
-            _build_llm_service(config, data_root, model_override=model_override),
+            arm_b_inner,
             service="arm_b",
             expected_compact_json=json_minify,
+            attempt_usage_recorder=arm_b_attempts,
         )
         recall_audit = ReplayRecallAudit()
 

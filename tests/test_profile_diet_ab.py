@@ -520,6 +520,7 @@ def test_json_minify_transport_audit_passes_complete_evidence() -> None:
         ("usage", "lacks complete token usage"),
         ("error_usage", "lacks complete token usage"),
         ("cache_metric", "supported cache usage omitted cached_input_tokens"),
+        ("attempt_accounting", "lacks raw provider-attempt accounting"),
         ("classification", "topic_group agreement fell below the A/A noise floor"),
         ("savings", "prompt-token savings missed the 10% gate"),
         ("total_savings", "total-token savings missed the 8% gate"),
@@ -602,6 +603,8 @@ def test_json_minify_transport_audit_fails_closed(
             if call["pair_kind"] == "treatment" and call["arm"] == "B":
                 assert isinstance(call["usage"], dict)
                 call["usage"].pop("cached_input_tokens")
+    elif failure == "attempt_accounting":
+        calls[-1]["provider"] = "openai_compatible"
     elif failure == "classification":
         for call in calls:
             if call["pair_kind"] == "treatment" and call["arm"] == "B":
@@ -1164,6 +1167,86 @@ def test_replay_usage_normalizes_claude_cache_accounting_to_total_prompt() -> No
 
 
 @pytest.mark.asyncio
+async def test_replay_accounts_hidden_openai_adapter_attempt_usage() -> None:
+    class Provider:
+        name = "openai_compatible"
+
+        def __init__(self) -> None:
+            self.responses = [
+                SimpleNamespace(
+                    usage=SimpleNamespace(
+                        prompt_tokens=100,
+                        completion_tokens=10,
+                        total_tokens=110,
+                    )
+                ),
+                SimpleNamespace(
+                    usage=SimpleNamespace(
+                        prompt_tokens=90,
+                        completion_tokens=5,
+                        total_tokens=95,
+                    )
+                ),
+            ]
+
+        async def _request_with_retry(self, **kwargs: object) -> object:
+            del kwargs
+            return self.responses.pop(0)
+
+    class Registry:
+        available_providers = ["gateway"]
+
+        def __init__(self, provider: Provider) -> None:
+            self.provider = provider
+
+        def provider_type(self, name: str) -> str:
+            assert name == "gateway"
+            return "openai_compatible"
+
+        def get(self, name: str) -> Provider:
+            assert name == "gateway"
+            return self.provider
+
+    class Inner:
+        def __init__(self, provider: Provider) -> None:
+            self.provider = provider
+
+        async def complete_structured_task(self, **kwargs: object) -> LLMResponse:
+            del kwargs
+            await self.provider._request_with_retry()
+            await self.provider._request_with_retry()
+            return LLMResponse(
+                content='{"results": [{"content_id": "safe", "score": 0.7}]}',
+                provider="openai_compatible",
+                model="test-model",
+                usage={"prompt_tokens": 90, "completion_tokens": 5, "total_tokens": 95},
+            )
+
+    provider = Provider()
+    recorder = replay_script._ProviderAttemptUsageRecorder()
+    recorder.instrument_registry(Registry(provider))
+    service = _DeterministicLLMService(
+        Inner(provider),
+        service="arm_a",
+        attempt_usage_recorder=recorder,
+    )
+
+    await service.complete_structured_task(system_instruction="system", user_input="user")
+
+    call = service.calls[0]
+    assert call["provider_attempt_count"] == 2
+    assert call["provider_hidden_retry_count"] == 1
+    assert call["provider_attempt_usage_complete"] is True
+    assert call["provider_attempt_accounting"] == "raw_adapter_attempts"
+    assert call["usage"] == {
+        "prompt_tokens": 190,
+        "completion_tokens": 15,
+        "total_tokens": 205,
+        "cached_input_tokens": 0,
+    }
+
+
+@pytest.mark.asyncio
 async def test_deterministic_wrapper_keeps_production_budget_for_multimodal() -> None:
     inner = _RecordingMultimodalService()
     service = _DeterministicLLMService(inner, service="arm_a")
@@ -1208,6 +1291,11 @@ async def test_deterministic_wrapper_keeps_production_budget_for_multimodal() ->
             "cache_usage_semantics": "unsupported",
             "cache_metric_supported": False,
             "usage": {"output_tokens": 12},
+            "provider_attempt_count": 1,
+            "provider_hidden_retry_count": 0,
+            "provider_attempt_usage_complete": True,
+            "provider_attempt_accounting": "logical_response_only",
+            "provider_attempts": [],
             "status": "ok",
             **output_metadata,
         }

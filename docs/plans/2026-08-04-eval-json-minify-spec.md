@@ -70,6 +70,8 @@ the existing frozen snapshot, route, embedding, recall, A/A noise envelope, scor
 blocking-reason evidence, the artifact records:
 
 - per logical run prompt/completion/total/cached/uncached input tokens;
+- per raw OpenAI-protocol adapter attempt usage, including successful empty-content attempts that
+  trigger the adapter's response-format fallback before the final logical response;
 - call, success, error and usage-missing counts;
 - standard-call and member-repair counts;
 - per arm prompt character and UTF-8 byte totals built from the exact messages;
@@ -118,7 +120,8 @@ Landing requires all existing infrastructure and relative-quality gates plus:
 - artifact privacy and raw-score independent recomputation pass.
 
 Failed quality, repair, route or token gates reject the production change; thresholds are not relaxed after
-observing results.
+observing results. A run is also invalid if a billable successful adapter attempt cannot be attributed or
+lacks usage; the final response's usage must never silently overwrite an earlier empty-response attempt.
 
 ## 6. Landing and rollback
 

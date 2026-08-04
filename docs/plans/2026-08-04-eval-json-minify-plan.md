@@ -39,6 +39,9 @@
 
 ## Task 5 — Real replay and independent audit
 
+- [x] Abort the first provider run after detecting unattributed successful empty-content retries whose
+      usage was overwritten by the adapter's final response; do not treat the partial run as evidence.
+- [x] Add and test per-wire-attempt OpenAI-protocol usage accounting before restarting the experiment.
 - [ ] Run the exact 100×3 command from the spec on a clean commit.
 - [ ] Independently recompute score/admission/Spearman and paired usage deltas from raw artifact data.
 - [ ] Validate route/embedding/recall/cache/repair gates and artifact privacy.
