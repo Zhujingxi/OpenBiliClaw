@@ -92,7 +92,8 @@ _EVAL_PROFILE_SPECIFICS_PER_DOMAIN_CAP = 12
 _EVAL_PROFILE_RECENT_CAP = 12
 _EVAL_PROFILE_EVIDENCE_CAP = 8
 _EVAL_PROFILE_SPECULATION_CAP = 12
-_EVAL_BATCH_CACHE_VERSION = "batch-content-eval-v1"
+_EVAL_SINGLE_CACHE_VERSION = "single-content-eval-v2"
+_EVAL_BATCH_CACHE_VERSION = "batch-content-eval-v2"
 _NEGATIVE_EXAMPLES_UNSET = object()
 
 
@@ -1241,8 +1242,17 @@ class ContentDiscoveryEngine:
         if self._llm_service is None:
             return 0.0
 
-        # Check eval cache (same content identity in same profile → same score)
-        cache_key = f"{self._content_identity(content)}:{id(profile)}"
+        from openbiliclaw.llm.prompts import content_evaluation_clock
+
+        evaluated_at, evaluation_bucket = content_evaluation_clock()
+        publication_digest = self._content_publication_digest(content)
+        # Freshness is prompt-visible, so both publication metadata changes and
+        # the shared hourly evaluation clock must invalidate an old score.
+        cache_key = (
+            f"{_EVAL_SINGLE_CACHE_VERSION}:{self._content_identity(content)}:"
+            f"published:{publication_digest}:evaluation_bucket:{evaluation_bucket}:"
+            f"profile:{id(profile)}"
+        )
         cached = self._eval_cache.get(cache_key)
         if cached is not None:
             score, reason, topic_group, style_key, franchise_key = cached
@@ -1307,6 +1317,7 @@ class ContentDiscoveryEngine:
             },
             source_context=source_context or content.source_strategy,
             source_platform=content.source_platform or "bilibili",
+            evaluated_at=evaluated_at,
         )
         try:
             complete_structured = self._llm_service.complete_structured_task
@@ -1411,6 +1422,10 @@ class ContentDiscoveryEngine:
         if self._llm_service is None or not contents:
             return [0.0] * len(contents)
 
+        from openbiliclaw.llm.prompts import content_evaluation_clock
+
+        evaluated_at, evaluation_bucket = content_evaluation_clock()
+
         original_len = len(contents)
         if original_len > self._EVALUATE_BATCH_HARD_CAP:
             logger.warning(
@@ -1463,6 +1478,7 @@ class ContentDiscoveryEngine:
                 content,
                 profile_digest=profile_digest,
                 negative_digest=negative_digest,
+                evaluation_bucket=evaluation_bucket,
             )
             cached = self._eval_cache.get(cache_key)
             if cached is not None:
@@ -1527,6 +1543,8 @@ class ContentDiscoveryEngine:
                 profile,
                 source_context=source_context,
                 negative_examples=negative_examples,
+                evaluated_at=evaluated_at,
+                evaluation_bucket=evaluation_bucket,
             )
             elapsed = time.monotonic() - t0
             kept = sum(1 for s in batch_scores if s > 0)
@@ -1728,16 +1746,27 @@ class ContentDiscoveryEngine:
     def _negative_examples_digest(examples: list[dict[str, object]] | None) -> str:
         return stable_json_digest(examples or [])
 
+    @staticmethod
+    def _content_publication_digest(content: DiscoveredContent) -> str:
+        return stable_json_digest({"published_at": str(content.published_at or "")})
+
     def _batch_eval_cache_key(
         self,
         content: DiscoveredContent,
         *,
         profile_digest: str,
         negative_digest: str,
+        evaluation_bucket: str = "",
     ) -> str:
+        if not evaluation_bucket:
+            from openbiliclaw.llm.prompts import content_evaluation_clock
+
+            _evaluated_at, evaluation_bucket = content_evaluation_clock()
         return (
             f"{_EVAL_BATCH_CACHE_VERSION}:"
             f"{self._content_identity(content)}:"
+            f"published:{self._content_publication_digest(content)}:"
+            f"evaluation_bucket:{evaluation_bucket}:"
             f"profile:{profile_digest}:neg:{negative_digest}"
         )
 
@@ -1748,10 +1777,20 @@ class ContentDiscoveryEngine:
         *,
         source_context: str = "",
         negative_examples: object = _NEGATIVE_EXAMPLES_UNSET,
+        evaluated_at: str = "",
+        evaluation_bucket: str = "",
     ) -> list[float | None]:
         """Send one LLM call for a batch of items."""
         from openbiliclaw.discovery.candidate_pool import resolve_content_type
-        from openbiliclaw.llm.prompts import build_batch_content_evaluation_prompt
+        from openbiliclaw.llm.prompts import (
+            build_batch_content_evaluation_prompt,
+            content_evaluation_clock,
+        )
+
+        if not evaluated_at or not evaluation_bucket:
+            current_evaluated_at, current_bucket = content_evaluation_clock()
+            evaluated_at = evaluated_at or current_evaluated_at
+            evaluation_bucket = evaluation_bucket or current_bucket
 
         profile_data = self._evaluation_profile_summary(profile)
         content_items: list[dict[str, object]] = []
@@ -1836,6 +1875,7 @@ class ContentDiscoveryEngine:
             source_context=source_context or (batch[0].source_strategy if batch else ""),
             source_platform=batch_source_platform,
             negative_examples=negative_examples_for_prompt,
+            evaluated_at=evaluated_at,
         )
 
         assert self._llm_service is not None
@@ -1951,6 +1991,7 @@ class ContentDiscoveryEngine:
                 content,
                 profile_digest=profile_digest,
                 negative_digest=negative_digest,
+                evaluation_bucket=evaluation_bucket,
             )
             self._eval_cache[cache_key] = (
                 score,
@@ -2045,10 +2086,18 @@ class ContentDiscoveryEngine:
         *,
         source_context: str = "",
         negative_examples: object = _NEGATIVE_EXAMPLES_UNSET,
+        evaluated_at: str = "",
+        evaluation_bucket: str = "",
         max_split_depth: int = 3,
         max_extra_requests: int = 6,
     ) -> list[float]:
         """Retry only missing members from successful malformed responses."""
+        from openbiliclaw.llm.prompts import content_evaluation_clock
+
+        if not evaluated_at or not evaluation_bucket:
+            current_evaluated_at, current_bucket = content_evaluation_clock()
+            evaluated_at = evaluated_at or current_evaluated_at
+            evaluation_bucket = evaluation_bucket or current_bucket
         results: list[float | None] = [None] * len(batch)
         budget = {"remaining": max(0, int(max_extra_requests))}
 
@@ -2059,6 +2108,8 @@ class ContentDiscoveryEngine:
                 profile,
                 source_context=source_context,
                 negative_examples=negative_examples,
+                evaluated_at=evaluated_at,
+                evaluation_bucket=evaluation_bucket,
             )
             missing: list[int] = []
             for index, score in zip(indices, subset_results, strict=True):

@@ -1841,7 +1841,12 @@ class RecommendationEngine:
         Mutates each item in-place: sets ``relevance_score``,
         ``relevance_reason``, ``topic_group``, and ``style_key``.
         """
-        from openbiliclaw.llm.prompts import build_batch_content_evaluation_prompt
+        from openbiliclaw.llm.prompts import (
+            build_batch_content_evaluation_prompt,
+            content_evaluation_clock,
+        )
+
+        evaluated_at, _evaluation_bucket = content_evaluation_clock()
 
         profile_data = _recommendation_profile_summary(profile)
         content_items = [
@@ -1851,6 +1856,7 @@ class RecommendationEngine:
                 "title": c.title,
                 "up_name": c.up_name or c.author_name,
                 "description": (c.description or "")[:400],
+                "published_at": c.published_at,
                 "duration": c.duration,
                 "view_count": c.view_count,
                 "source_strategy": c.source_strategy,
@@ -1881,6 +1887,7 @@ class RecommendationEngine:
             source_context=batch[0].source_strategy if batch else "",
             source_platform=platform,
             negative_examples=negative_examples,
+            evaluated_at=evaluated_at,
         )
 
         complete_structured = self._llm.complete_structured_task

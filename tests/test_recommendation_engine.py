@@ -2113,7 +2113,7 @@ async def test_classify_pool_backlog_fills_metadata() -> None:
             caller: str = "",
             reasoning_effort: str | None = None,
         ) -> LLMResponse:
-            self.calls.append({"system_instruction": system_instruction})
+            self.calls.append({"system_instruction": system_instruction, "user_input": user_input})
             # Check if this is a classification call (batch eval prompt)
             # or an expression-generation call
             if "批量评估" in system_instruction or "score" in system_instruction:
@@ -2170,6 +2170,7 @@ async def test_classify_pool_backlog_fills_metadata() -> None:
             topic_group="",
             topic_key="",
             relevance_score=0.0,
+            published_at="2026-08-04T08:00:00Z",
         )
         _seed_visible(
             db,
@@ -2206,6 +2207,10 @@ async def test_classify_pool_backlog_fills_metadata() -> None:
         assert xhs1["topic_group"] == "美食烹饪"
         assert xhs1["topic_key"] == "美食烹饪"  # backfilled from topic_group
         assert float(xhs1["relevance_score"]) == pytest.approx(0.85)
+
+        classification_prompt = str(llm.calls[0]["user_input"])
+        assert '"published_at": "2026-08-04T08:00:00Z"' in classification_prompt
+        assert '"evaluated_at": "' in classification_prompt
 
         xhs2 = by_bvid.get("xhs_002")
         assert xhs2 is not None

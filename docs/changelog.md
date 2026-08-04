@@ -14,7 +14,7 @@
 
 ### 用户日志暴露的推荐空窗与后台振荡修复
 
-- **候选评估使用真实发布时间**：单条与批量 LLM evaluator 现在都携带来源已有的 `published_at`，并明确把它作为热点、时事和版本更新等时效性判断的权威依据；模型不再根据自身知识截止时间推测发布时间，缺失或无效时间保持中性。
+- **候选评估使用真实发布时间**：单条、批量及推荐池补分类 evaluator 都携带来源已有的 `published_at`，并用精确 UTC `evaluated_at` 作为热点、时事和版本更新等时效性判断的权威基准；模型不再根据自身知识截止时间推测当前日期，缺失或无效时间保持中性。单条 / 批量评分缓存同时绑定发布时间摘要与独立评估小时桶，来源后补时间或 daemon 跨小时后不会继续复用旧分数。
 - **避雷画像不再把推荐永久杀空**：正常情况下仍用 `disliked_topics` 对结构化 topic 与标题/简介/作者/标签/正文做即时出口过滤；只有模糊子串规则将整个 serve 窗口过滤为零时，才对该窗口降级为 `topic_key/topic_group/pool_topic_label` 精确硬禁用并记录诊断，显式类别避雷不恢复。
 - **候选池维护不再恢复/裁剪振荡**：suppressed 恢复受 raw headroom 限制，raw 已满或超限时先裁剪；protected/token-owned excess 已无 victim 时返回 `has_more=False` 并把原 ERROR 风暴降为稳定 WARNING。用户日志中的 AB raw 状态不再每 tick 反复切换。
 - **错误模型路由快速失败**：OpenAI-compatible 的 400/403/404/405/422 不再做三次无效 provider 重试；`404 model route not found` 保留完整原因交给 fallback/配置诊断，5xx、timeout 与传输错误继续按原策略重试。

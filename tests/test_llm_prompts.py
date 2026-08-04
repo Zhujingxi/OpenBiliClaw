@@ -1,5 +1,6 @@
 """Tests for prompt builders and core memory rendering."""
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 import openbiliclaw.llm.prompts as prompt_module
@@ -21,6 +22,7 @@ from openbiliclaw.llm.prompts import (
     build_socratic_dialogue_prompt,
     build_soul_profile_prompt,
     build_speculation_generation_prompt,
+    content_evaluation_clock,
     parse_merged_keywords,
     parse_merged_keywords_with_presence,
     parse_merged_keywords_with_presence_and_explore_domains,
@@ -562,6 +564,7 @@ def test_content_evaluation_prompts_define_publication_time_semantics() -> None:
         content_summary={"title": "模型更新", "published_at": "2026-08-01T00:00:00Z"},
         source_context="trending",
         source_platform="bilibili",
+        evaluated_at="2026-08-04T09:00:00Z",
     )
     batch_messages = build_batch_content_evaluation_prompt(
         profile_summary={"interests": ["人工智能"]},
@@ -574,15 +577,25 @@ def test_content_evaluation_prompts_define_publication_time_semantics() -> None:
         ],
         source_context="trending",
         source_platform="bilibili",
+        evaluated_at="2026-08-04T09:00:00Z",
     )
 
     for messages in (single_messages, batch_messages):
         system = messages[0]["content"]
         user = messages[1]["content"]
         assert "published_at 是来源提供的权威发布时间" in system
+        assert "evaluation_context.evaluated_at 是本次评估的权威时间基准" in system
         assert "模型知识截止时间" in system
         assert "字段缺失或无效时保持中性" in system
+        assert '"evaluated_at": "2026-08-04T09:00:00Z"' in user
         assert '"published_at": "2026-08-01T00:00:00Z"' in user
+
+
+def test_content_evaluation_clock_keeps_exact_time_and_utc_hour_bucket() -> None:
+    assert content_evaluation_clock(now=datetime(2026, 8, 4, 9, 47, 31, 123456, tzinfo=UTC)) == (
+        "2026-08-04T09:47:31Z",
+        "2026-08-04T09:00:00Z",
+    )
 
 
 def test_batch_content_evaluation_prompt_allows_per_item_platforms() -> None:
