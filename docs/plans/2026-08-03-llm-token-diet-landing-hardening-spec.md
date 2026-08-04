@@ -47,6 +47,9 @@ embedding model namespace、route 和 output ceiling。基础设施降级必须�
 
 - `compact`：legacy full profile/no recall 对比 production compact + recall；
 - `reason-diet`：production inputs 下，legacy unconditional reason 对比 production reason diet。
+- `reason-off`（replay-only 诊断）：production reason diet 对比完全省略成功评估结果的
+  `reason` 字段；不改变生产默认，并额外审计实际 token usage 与
+  `topic_group/style_key/franchise_key` 的 fill/agreement。
 
 两类实验使用冻结 snapshot、重复 A/A 与 A/B、同一 admission policy，并产出独立 JSON。
 历史 `body-cap` 对照使用相同契约完成后必须保留失败 artifact 与回滚结论，但不再作为脚本的
@@ -267,9 +270,13 @@ Artifact 不包含 API key、Cookie、完整 config、完整 profile 或完整�
 .venv/bin/python scripts/run_profile_diet_ab.py \
   --arm-b reason-diet --sample 100 --repeats 3 \
   --output data/eval/reason-diet.json
+
+.venv/bin/python scripts/run_profile_diet_ab.py \
+  --arm-b reason-off --sample 100 --repeats 3 \
+  --output data/eval/reason-off.json
 ```
 
-两个命令必须 exit 0，artifact 自身 `gate.passed=true`、无 blocking reasons、route 与 embedding
+三个命令必须 exit 0，artifact 自身 `gate.passed=true`、无 blocking reasons、route 与 embedding
 完整性 gate 通过。
 
 被否决的 body-cap 不再从最终代码重跑；其冻结失败 artifact 必须保持 `gate.passed=false`，并可

@@ -187,7 +187,7 @@ either incorporate the current-main fix during rebase or document an environment
 **Owner:** root
 
 1. Validate DB/config prerequisites without printing secrets。
-2. Run compact and reason-diet commands from Spec §6B；retain and independently validate the rejected
+2. Run compact、reason-diet and replay-only reason-off commands from Spec §6B；retain and independently validate the rejected
    body-cap diagnostic artifact without rerunning a removed production feature。
 3. Validate each JSON artifact structurally and recompute key metrics independently from raw scores。
 4. Run deterministic candidate-pipeline E2E cases from Spec §6C。
@@ -262,6 +262,16 @@ real candidates and actual prompt construction with 300 deterministic recalled l
 tokens, a `10.14%` character and `6.69%` diagnostic-token reduction. Without recall the token reduction is
 `9.33%`; the 3-label-per-item quality counterweight consumes about `2.64pp`. Formal DeepSeek usage and
 quality still require the unchanged 100×3 run.
+
+The user then requested a true evaluator `reason-off` measurement. A new replay-only arm keeps A on the
+current production reason diet and removes the reason field only from B; production prompts remain
+unchanged. The artifact fails closed if B still emits reason, and compares privacy-safe
+`topic_group/style_key/franchise_key` fill/agreement against the repeated A/A envelope in addition to
+score/Spearman/admission. It also aggregates prompt/completion/total usage per logical run; downstream
+style/franchise cap-drop remains explicitly unmeasured. A deterministic proxy over the current 100-row
+cohort (58 below 0.5, 42 at/above 0.5) estimates that omitting the field reduces minified structured-output
+characters by `16.66%` and UTF-8 bytes by `24.77%` versus the current reason diet. These are not provider
+tokens; the real DeepSeek usage and quality conclusion require the new 100×3 artifact.
 
 ## Task 9 — Landing handoff
 

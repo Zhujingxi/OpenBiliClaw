@@ -8,16 +8,22 @@ Usage:
         --arm-b reason-diet --sample 100 --repeats 3 \
         --output data/eval/reason-diet.json
     .venv/bin/python scripts/run_profile_diet_ab.py \
+        --arm-b reason-off --sample 100 --repeats 3 \
+        --output data/eval/reason-off.json
+    .venv/bin/python scripts/run_profile_diet_ab.py \
         --arm-b model=<instance-id> --sample 100 --repeats 3 \
         --output data/eval/model-route.json
 
 For ``--arm-b compact``, arm A forces the legacy full-profile/no-recall prompt
 shape and arm B uses current production inputs: compact profile plus per-item
 ``related_interests`` recall when an embedding service is configured. For
-``reason-diet`` and ``model=...`` arms, both sides use production profile/recall
-shape so the requested arm remains the only intentional difference. The gate
-uses the production 4096-token output ceiling and fails on missing evaluation
-responses instead of treating gateway/parse failures as genuine zero scores.
+``reason-diet``, ``reason-off``, and ``model=...`` arms, both sides use
+production profile/recall shape so the requested arm remains the only
+intentional difference. ``reason-off`` leaves arm A on the production reason
+contract and temporarily removes the ``reason`` output field from arm B's
+evaluation prompts only. The gate uses the production 4096-token output ceiling
+and fails on missing evaluation responses instead of treating gateway/parse
+failures as genuine zero scores.
 """
 
 from __future__ import annotations
@@ -67,6 +73,7 @@ _REPLAY_EVALUATION_OUTPUT_FIELDS = (
     "pool_expression",
     "pool_topic_label",
 )
+_REPLAY_CLASSIFICATION_FIELDS = ("topic_group", "style_key", "franchise_key")
 _NON_RETRYABLE_PROVIDER_LIMIT_MARKERS = (
     "http 402",
     "payment required",
@@ -675,6 +682,89 @@ def legacy_reason_prompts() -> Iterator[None]:
             setattr(prompts_module, constant_name, text)
 
 
+# ``--arm-b reason-off`` is intentionally replay-only. Arm A keeps the live
+# production prompt while arm B removes the reason field from both instructions
+# and output schemas. Exact-snippet guards make prompt drift fail loudly instead
+# of silently producing an A/A comparison.
+_REASON_OFF_SWAPS: tuple[tuple[str, str, str], ...] = (
+    (
+        "_SINGLE_CONTENT_EVALUATION_SYSTEM_PROMPT",
+        "3. reason 仅供内部诊断,不是面向用户的推荐文案。写法(省 token):"
+        'score 严格低于 0.5 的条目,reason 必须写成空串 ""'
+        "(这些条目达不到准入门槛、会被直接丢弃,写理由是纯浪费);"
+        "score 大于等于 0.5 的条目,reason 写一句精炼中文,"
+        "不超过 30 个 Unicode 字符,说明内容与画像匹配或不匹配的依据。\n",
+        "3. 输出中禁止包含 reason 字段;只保留 score、topic_group、style_key、franchise_key。\n",
+    ),
+    (
+        "_SINGLE_CONTENT_EVALUATION_SYSTEM_PROMPT",
+        '4. 不要只说"因为热门"或"因为看过类似的",要结合用户画像。\n',
+        "4. 评分必须结合用户画像,不得只因为热门或看过类似内容就提高分数。\n",
+    ),
+    (
+        "_SINGLE_CONTENT_EVALUATION_SYSTEM_PROMPT",
+        '  "reason": "主题契合画像中的长期兴趣,内容角度有增量",\n',
+        "",
+    ),
+    (
+        "_BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT",
+        "、reason、topic_group(2-4词粗分类)、style_key(13选1)、",
+        "、topic_group(2-4词粗分类)、style_key(13选1)、",
+    ),
+    (
+        "_BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT",
+        "3a. reason 仅供内部诊断,不是面向用户的推荐文案。写法(省 token):"
+        'score 严格低于 0.5 的条目,reason 必须写成空串 ""'
+        "(这些条目达不到准入门槛、会被直接丢弃,写理由是纯浪费);"
+        "score 大于等于 0.5 的条目,reason 写一句精炼中文,"
+        "不超过 30 个 Unicode 字符,说明内容与画像匹配的依据。\n",
+        "3a. results 的每个条目都禁止包含 reason 字段。\n",
+    ),
+    (
+        "_BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT",
+        '"score": 0.78, "reason": "...", "topic_group": "认知科学"',
+        '"score": 0.78, "topic_group": "认知科学"',
+    ),
+    (
+        "_BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT",
+        '"score": 0.72, "reason": "...", "topic_group": "游戏摄影"',
+        '"score": 0.72, "topic_group": "游戏摄影"',
+    ),
+    (
+        "_BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT",
+        '"score": 0.45, "reason": "", "topic_group": "美食"',
+        '"score": 0.45, "topic_group": "美食"',
+    ),
+)
+
+
+@contextmanager
+def reason_off_prompts() -> Iterator[None]:
+    """Temporarily remove evaluation ``reason`` outputs for replay arm B."""
+
+    from openbiliclaw.llm import prompts as prompts_module
+
+    originals: dict[str, str] = {}
+    patched: dict[str, str] = {}
+    for constant_name, current_snippet, reason_off_snippet in _REASON_OFF_SWAPS:
+        base = patched.get(constant_name, getattr(prompts_module, constant_name))
+        if constant_name not in originals:
+            originals[constant_name] = getattr(prompts_module, constant_name)
+        if current_snippet not in base:
+            raise RuntimeError(
+                "reason-off arm is stale: expected snippet not found in "
+                f"{constant_name}; update _REASON_OFF_SWAPS to match the live prompt."
+            )
+        patched[constant_name] = base.replace(current_snippet, reason_off_snippet, 1)
+    for constant_name, text in patched.items():
+        setattr(prompts_module, constant_name, text)
+    try:
+        yield
+    finally:
+        for constant_name, text in originals.items():
+            setattr(prompts_module, constant_name, text)
+
+
 def parse_model_override(raw_arm: str) -> ModelOverride | None:
     """Parse a model arm value, returning None for non-model arms."""
 
@@ -1021,6 +1111,87 @@ def run_scoped_embedding_audit(
         config.data_dir = original_data_dir  # type: ignore[attr-defined]
 
 
+def _evaluation_output_entries(parsed: object) -> list[tuple[str, Mapping[str, object]]]:
+    """Return optional mapping keys and score-bearing evaluator results."""
+
+    if isinstance(parsed, list):
+        return [("", item) for item in parsed if isinstance(item, Mapping) and "score" in item]
+    if not isinstance(parsed, Mapping):
+        return []
+    if "score" in parsed:
+        return [("", parsed)]
+    for wrapper_key in ("results", "items", "evaluations", "scores", "data"):
+        wrapped = parsed.get(wrapper_key)
+        if isinstance(wrapped, list):
+            return [("", item) for item in wrapped if isinstance(item, Mapping) and "score" in item]
+        if isinstance(wrapped, Mapping):
+            if "score" in wrapped:
+                return [("", wrapped)]
+            mapped_entries = [
+                (str(key), item)
+                for key, item in wrapped.items()
+                if isinstance(item, Mapping) and "score" in item
+            ]
+            if mapped_entries:
+                return mapped_entries
+    return [
+        (str(key), item)
+        for key, item in parsed.items()
+        if isinstance(item, Mapping) and "score" in item
+    ]
+
+
+def _structured_output_metadata(
+    response: object,
+) -> dict[str, object]:
+    """Build privacy-safe metadata proving whether an output omitted reason."""
+
+    from openbiliclaw.llm.json_utils import parse_llm_json_tolerant
+
+    content = str(getattr(response, "content", "") or "").strip()
+    parsed = parse_llm_json_tolerant(content) if content else None
+    if parsed is None:
+        return {
+            "structured_output_parseable": False,
+            "structured_item_count": 0,
+            "reason_field_count": 0,
+            "classification_items": [],
+        }
+    from openbiliclaw.discovery.style_keys import normalize_style_key
+
+    entries = _evaluation_output_entries(parsed)
+    classification_items: list[dict[str, object]] = []
+    for position, (mapped_key, item) in enumerate(entries):
+        fields: dict[str, object] = {}
+        for field in _REPLAY_CLASSIFICATION_FIELDS:
+            value = item.get(field)
+            normalized = value.strip() if isinstance(value, str) else None
+            if field == "style_key" and normalized is not None:
+                normalized = normalize_style_key(normalized)
+            fields[field] = {
+                "digest": (
+                    _digest({"field": field, "value": normalized}) if normalized is not None else ""
+                ),
+                "nonempty": bool(normalized),
+            }
+        identifier = str(item.get("content_id") or item.get("bvid") or mapped_key).strip()
+        classification_items.append(
+            {
+                "candidate_key_digest": (
+                    _digest({"candidate_key": identifier}) if identifier else ""
+                ),
+                "position": position,
+                "fields": fields,
+            }
+        )
+    return {
+        "structured_output_parseable": True,
+        "structured_item_count": len(entries),
+        "reason_field_count": sum("reason" in item for _mapped_key, item in entries),
+        "classification_items": classification_items,
+    }
+
+
 class _DeterministicLLMService:
     """Force temperature=0 so the replay measures prompt changes, not sampling noise.
 
@@ -1069,6 +1240,10 @@ class _DeterministicLLMService:
                     "max_tokens": 4096,
                     "usage": None,
                     "status": "error",
+                    "structured_output_parseable": False,
+                    "structured_item_count": 0,
+                    "reason_field_count": 0,
+                    "classification_items": [],
                     "error_kind": (
                         "transient_rate_limit" if retryable_rate_limit else type(exc).__name__
                     ),
@@ -1089,9 +1264,356 @@ class _DeterministicLLMService:
                 "max_tokens": 4096,
                 "usage": dict(usage) if isinstance(usage, Mapping) else None,
                 "status": "ok",
+                **_structured_output_metadata(response),
             }
         )
         return response
+
+
+def _usage_token_value(usage: Mapping[object, object], keys: Sequence[str]) -> int:
+    for key in keys:
+        value = usage.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            return value
+    return 0
+
+
+def _token_usage_summary(calls: Sequence[Mapping[str, object]]) -> dict[str, object]:
+    prompt_tokens = 0
+    completion_tokens = 0
+    total_tokens = 0
+    observed = 0
+    for call in calls:
+        usage = call.get("usage")
+        if not isinstance(usage, Mapping):
+            continue
+        observed += 1
+        call_input = _usage_token_value(usage, ("prompt_tokens", "input_tokens"))
+        call_completion = _usage_token_value(usage, ("completion_tokens", "output_tokens"))
+        call_total = _usage_token_value(usage, ("total_tokens",))
+        prompt_tokens += call_input
+        completion_tokens += call_completion
+        total_tokens += call_total or (call_input + call_completion)
+    evaluated_item_count = sum(
+        int(call.get("structured_item_count") or 0) for call in calls if call.get("status") == "ok"
+    )
+
+    return {
+        "call_count": len(calls),
+        "successful_call_count": sum(call.get("status") == "ok" for call in calls),
+        "error_call_count": sum(call.get("status") != "ok" for call in calls),
+        "usage_missing_call_count": len(calls) - observed,
+        "evaluated_item_count": evaluated_item_count,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": total_tokens,
+        "prompt_tokens_per_evaluated_item": (
+            prompt_tokens / evaluated_item_count if evaluated_item_count else None
+        ),
+        "completion_tokens_per_evaluated_item": (
+            completion_tokens / evaluated_item_count if evaluated_item_count else None
+        ),
+        "total_tokens_per_evaluated_item": (
+            total_tokens / evaluated_item_count if evaluated_item_count else None
+        ),
+    }
+
+
+def _token_usage_audit(calls: Sequence[Mapping[str, object]]) -> dict[str, object]:
+    grouped: dict[tuple[str, int, str, str], list[Mapping[str, object]]] = {}
+    for call in calls:
+        key = (
+            str(call.get("pair_kind") or ""),
+            int(call.get("repeat") or 0),
+            str(call.get("logical_run") or ""),
+            str(call.get("arm") or ""),
+        )
+        grouped.setdefault(key, []).append(call)
+    return {
+        "comparison_basis": "treatment A versus B only; A/A controls excluded",
+        "logical_runs": [
+            {
+                "pair_kind": key[0],
+                "repeat": key[1],
+                "logical_run": key[2],
+                "arm": key[3],
+                **_token_usage_summary(grouped[key]),
+            }
+            for key in sorted(grouped)
+        ],
+        "treatment_comparison": {
+            arm: _token_usage_summary(
+                [
+                    call
+                    for call in calls
+                    if call.get("pair_kind") == "treatment"
+                    and call.get("logical_run") == arm
+                    and call.get("arm") == arm
+                ]
+            )
+            for arm in ("A", "B")
+        },
+    }
+
+
+def _classification_items_by_run(
+    calls: Sequence[Mapping[str, object]],
+) -> dict[tuple[str, int, str, str], dict[str, Mapping[str, object]]]:
+    grouped: dict[tuple[str, int, str, str], dict[str, Mapping[str, object]]] = {}
+    call_positions: Counter[tuple[str, int, str, str]] = Counter()
+    for call in calls:
+        if call.get("status") != "ok":
+            continue
+        run_key = (
+            str(call.get("pair_kind") or ""),
+            int(call.get("repeat") or 0),
+            str(call.get("logical_run") or ""),
+            str(call.get("arm") or ""),
+        )
+        raw_items = call.get("classification_items")
+        if not isinstance(raw_items, list):
+            continue
+        call_position = call_positions[run_key]
+        call_positions[run_key] += 1
+        run_items = grouped.setdefault(run_key, {})
+        for raw_item in raw_items:
+            if not isinstance(raw_item, Mapping):
+                continue
+            candidate_digest = str(raw_item.get("candidate_key_digest") or "") or (
+                f"position:{call_position}:{int(raw_item.get('position') or 0)}"
+            )
+            fields = raw_item.get("fields")
+            if isinstance(fields, Mapping):
+                run_items[candidate_digest] = fields
+    return grouped
+
+
+def _classification_field_metadata(
+    fields: Mapping[str, object] | None,
+    field: str,
+) -> tuple[str, bool]:
+    raw = fields.get(field) if fields is not None else None
+    if not isinstance(raw, Mapping):
+        return "", False
+    return str(raw.get("digest") or ""), bool(raw.get("nonempty"))
+
+
+def _classification_run_summary(
+    key: tuple[str, int, str, str],
+    items: Mapping[str, Mapping[str, object]],
+) -> dict[str, object]:
+    item_count = len(items)
+    return {
+        "pair_kind": key[0],
+        "repeat": key[1],
+        "logical_run": key[2],
+        "arm": key[3],
+        "item_count": item_count,
+        "fields": {
+            field: {
+                "presence_rate": (
+                    sum(
+                        bool(_classification_field_metadata(item, field)[0])
+                        for item in items.values()
+                    )
+                    / item_count
+                    if item_count
+                    else 0.0
+                ),
+                "fill_rate": (
+                    sum(_classification_field_metadata(item, field)[1] for item in items.values())
+                    / item_count
+                    if item_count
+                    else 0.0
+                ),
+                "values_digest": _digest(
+                    sorted(
+                        _classification_field_metadata(item, field)[0] for item in items.values()
+                    )
+                ),
+            }
+            for field in _REPLAY_CLASSIFICATION_FIELDS
+        },
+    }
+
+
+def _classification_pair_summary(
+    *,
+    kind: str,
+    repeat: int,
+    left: Mapping[str, Mapping[str, object]],
+    right: Mapping[str, Mapping[str, object]],
+) -> dict[str, object]:
+    candidate_keys = sorted(set(left) | set(right))
+    item_count = len(candidate_keys)
+    fields: dict[str, object] = {}
+    for field in _REPLAY_CLASSIFICATION_FIELDS:
+        agreement = left_present = right_present = left_filled = right_filled = 0
+        for candidate_key in candidate_keys:
+            left_digest, left_nonempty = _classification_field_metadata(
+                left.get(candidate_key), field
+            )
+            right_digest, right_nonempty = _classification_field_metadata(
+                right.get(candidate_key), field
+            )
+            left_present += bool(left_digest)
+            right_present += bool(right_digest)
+            left_filled += left_nonempty
+            right_filled += right_nonempty
+            agreement += bool(left_digest and left_digest == right_digest)
+        fields[field] = {
+            "agreement_rate": agreement / item_count if item_count else 0.0,
+            "left_presence_rate": left_present / item_count if item_count else 0.0,
+            "right_presence_rate": right_present / item_count if item_count else 0.0,
+            "left_fill_rate": left_filled / item_count if item_count else 0.0,
+            "right_fill_rate": right_filled / item_count if item_count else 0.0,
+        }
+    return {
+        "kind": kind,
+        "repeat": repeat,
+        "item_count": item_count,
+        "fields": fields,
+    }
+
+
+def _classification_output_audit(
+    calls: Sequence[Mapping[str, object]],
+    *,
+    enabled: bool,
+) -> dict[str, object]:
+    runs = _classification_items_by_run(calls)
+    repeats = sorted(
+        {int(call.get("repeat") or 0) for call in calls if int(call.get("repeat") or 0) > 0}
+    )
+    control_pairs = [
+        _classification_pair_summary(
+            kind="control",
+            repeat=repeat,
+            left=runs.get(("control", repeat, "A1", "A"), {}),
+            right=runs.get(("control", repeat, "A2", "A"), {}),
+        )
+        for repeat in repeats
+    ]
+    treatment_pairs = [
+        _classification_pair_summary(
+            kind="treatment",
+            repeat=repeat,
+            left=runs.get(("treatment", repeat, "A", "A"), {}),
+            right=runs.get(("treatment", repeat, "B", "B"), {}),
+        )
+        for repeat in repeats
+    ]
+    blocking_reasons: list[str] = []
+    gate: dict[str, object] = {}
+    if enabled:
+        if not repeats:
+            blocking_reasons.append("reason-off classification audit found no attributed repeats")
+        expected_runs = [
+            key
+            for repeat in repeats
+            for key in (
+                ("control", repeat, "A1", "A"),
+                ("control", repeat, "A2", "A"),
+                ("treatment", repeat, "A", "A"),
+                ("treatment", repeat, "B", "B"),
+            )
+        ]
+        missing_run_count = sum(not runs.get(key) for key in expected_runs)
+        if missing_run_count:
+            blocking_reasons.append(
+                f"reason-off classification audit has {missing_run_count} empty logical runs"
+            )
+        if control_pairs and treatment_pairs:
+            for field in _REPLAY_CLASSIFICATION_FIELDS:
+                control_agreement_floor = _nearest_rank_percentile(
+                    [float(pair["fields"][field]["agreement_rate"]) for pair in control_pairs],
+                    0.05,
+                )
+                treatment_agreement_median = median(
+                    float(pair["fields"][field]["agreement_rate"]) for pair in treatment_pairs
+                )
+                treatment_a_fill_median = median(
+                    float(pair["fields"][field]["left_fill_rate"]) for pair in treatment_pairs
+                )
+                treatment_b_fill_median = median(
+                    float(pair["fields"][field]["right_fill_rate"]) for pair in treatment_pairs
+                )
+                treatment_a_presence_median = median(
+                    float(pair["fields"][field]["left_presence_rate"]) for pair in treatment_pairs
+                )
+                treatment_b_presence_median = median(
+                    float(pair["fields"][field]["right_presence_rate"]) for pair in treatment_pairs
+                )
+                agreement_passed = treatment_agreement_median >= control_agreement_floor
+                presence_passed = treatment_b_presence_median >= treatment_a_presence_median - 0.03
+                fill_passed = (
+                    field == "franchise_key"
+                    or treatment_b_fill_median >= treatment_a_fill_median - 0.03
+                )
+                gate[field] = {
+                    "control_agreement_floor": control_agreement_floor,
+                    "treatment_agreement_median": treatment_agreement_median,
+                    "treatment_a_fill_median": treatment_a_fill_median,
+                    "treatment_b_fill_median": treatment_b_fill_median,
+                    "passed": agreement_passed and presence_passed and fill_passed,
+                }
+                if not agreement_passed:
+                    blocking_reasons.append(
+                        f"reason-off {field} agreement fell below the A/A noise floor"
+                    )
+                if not fill_passed:
+                    blocking_reasons.append(f"reason-off {field} fill rate regressed")
+                if not presence_passed:
+                    blocking_reasons.append(f"reason-off {field} presence rate regressed")
+    return {
+        "passed": not blocking_reasons,
+        "runs": [_classification_run_summary(key, items) for key, items in sorted(runs.items())],
+        "control_pairs": control_pairs,
+        "treatment_pairs": treatment_pairs,
+        "gate": gate,
+        "blocking_reasons": list(dict.fromkeys(blocking_reasons)),
+        "cap_drop_audit": "not measured: replay stops before downstream cross-batch caps",
+    }
+
+
+def validate_reason_off_outputs(
+    calls: Sequence[Mapping[str, object]],
+    *,
+    enabled: bool,
+) -> dict[str, object]:
+    """Fail closed unless every successful reason-off B output omits reason."""
+
+    arm_calls = {arm: [call for call in calls if call.get("arm") == arm] for arm in ("A", "B")}
+    classification_audit = _classification_output_audit(calls, enabled=enabled)
+    blocking_reasons: list[str] = []
+    if enabled:
+        successful_b = [call for call in arm_calls["B"] if call.get("status") == "ok"]
+        if not successful_b:
+            blocking_reasons.append("reason-off arm B produced no successful LLM responses")
+        if any(
+            not call.get("structured_output_parseable")
+            or int(call.get("structured_item_count") or 0) == 0
+            for call in successful_b
+        ):
+            blocking_reasons.append(
+                "reason-off arm B returned successful responses without verifiable scored JSON"
+            )
+        if any(int(call.get("reason_field_count") or 0) for call in successful_b):
+            blocking_reasons.append("reason-off arm B returned one or more reason fields")
+        blocking_reasons.extend(
+            str(reason) for reason in classification_audit.get("blocking_reasons", [])
+        )
+    return {
+        "enabled": enabled,
+        "passed": not blocking_reasons,
+        "reason_field_count": {
+            arm: sum(int(call.get("reason_field_count") or 0) for call in arm_calls[arm])
+            for arm in ("A", "B")
+        },
+        "token_usage": _token_usage_audit(calls),
+        "classification": classification_audit,
+        "blocking_reasons": list(dict.fromkeys(blocking_reasons)),
+    }
 
 
 def _expected_evaluation_instance(service: object) -> str:
@@ -1610,6 +2132,7 @@ def replay_blocking_reasons(
     route_audit: Mapping[str, object],
     embedding_audit: Mapping[str, object],
     recall_audit: Mapping[str, object],
+    reason_output_audit: Mapping[str, object],
     profile_snapshot_stable: bool,
     candidate_snapshot_stable: bool,
 ) -> list[str]:
@@ -1623,6 +2146,7 @@ def replay_blocking_reasons(
         ("route", route_audit),
         ("embedding", embedding_audit),
         ("recall", recall_audit),
+        ("reason-output", reason_output_audit),
     ):
         if not bool(audit.get("passed")):
             blocking_reasons.append(f"{label} audit failed")
@@ -1861,6 +2385,7 @@ def _write_artifact(
     route_audit: Mapping[str, object],
     embedding_audit: Mapping[str, object],
     recall_audit: Mapping[str, object],
+    reason_output_audit: Mapping[str, object],
     production_prefilter_mode: str,
     topic_lifecycle_serialization: bool,
 ) -> None:
@@ -1949,6 +2474,7 @@ def _write_artifact(
         "embedding": dict(embedding_audit),
         "recall": dict(recall_audit),
         "routes": dict(route_audit),
+        "reason_output": dict(reason_output_audit),
         "gate": {"passed": gate_passed, **dict(gate)},
         "llm_calls": [dict(call) for call in calls],
     }
@@ -1973,9 +2499,10 @@ async def run(args: argparse.Namespace) -> int:
     model_override = parse_model_override(str(args.arm_b))
     compact_profile = str(args.arm_b) == "compact"
     legacy_reason = str(args.arm_b) == "reason-diet"
-    if not compact_profile and model_override is None and not legacy_reason:
+    reason_off = str(args.arm_b) == "reason-off"
+    if not compact_profile and model_override is None and not legacy_reason and not reason_off:
         raise ValueError(
-            "--arm-b must be compact, reason-diet, model=<instance-id> (v2), "
+            "--arm-b must be compact, reason-diet, reason-off, model=<instance-id> (v2), "
             "or model=<provider:model> (legacy)"
         )
 
@@ -2081,12 +2608,21 @@ async def run(args: argparse.Namespace) -> int:
                     logical_run="B",
                     arm="B",
                 ):
-                    scores = await _score_contents(
-                        arm_b_engine,
-                        _rows_to_contents(rows),
-                        profile,
-                        source_context=_REPLAY_SOURCE_CONTEXT,
-                    )
+                    if reason_off:
+                        with reason_off_prompts():
+                            scores = await _score_contents(
+                                arm_b_engine,
+                                _rows_to_contents(rows),
+                                profile,
+                                source_context=_REPLAY_SOURCE_CONTEXT,
+                            )
+                    else:
+                        scores = await _score_contents(
+                            arm_b_engine,
+                            _rows_to_contents(rows),
+                            profile,
+                            source_context=_REPLAY_SOURCE_CONTEXT,
+                        )
                 return tuple(scores)
 
             async def control_pair(repeat_index: int) -> ReplayPair:
@@ -2168,6 +2704,7 @@ async def run(args: argparse.Namespace) -> int:
                 recall_note=recall_note,
             )
             calls = [*arm_a_service.calls, *arm_b_service.calls]
+            reason_output_audit = validate_reason_off_outputs(calls, enabled=reason_off)
             route_audit = validate_replay_routes(
                 calls,
                 repeats=int(args.repeats),
@@ -2217,6 +2754,7 @@ async def run(args: argparse.Namespace) -> int:
                 route_audit=route_audit,
                 embedding_audit=embedding_audit,
                 recall_audit=recall_validation,
+                reason_output_audit=reason_output_audit,
                 profile_snapshot_stable=(
                     _digest(_profile_digest_payload(profile)) == frozen_profile_digest
                 ),
@@ -2231,6 +2769,7 @@ async def run(args: argparse.Namespace) -> int:
                 "route_passed": bool(route_audit.get("passed")),
                 "embedding_passed": bool(embedding_audit.get("passed")),
                 "recall_passed": bool(recall_validation.get("passed")),
+                "reason_output_passed": bool(reason_output_audit.get("passed")),
                 "blocking_reasons": blocking_reasons,
             }
             if blocking_reasons:
@@ -2260,6 +2799,7 @@ async def run(args: argparse.Namespace) -> int:
                 route_audit=route_audit,
                 embedding_audit=embedding_audit,
                 recall_audit=recall_validation,
+                reason_output_audit=reason_output_audit,
                 production_prefilter_mode=production_prefilter_mode,
                 topic_lifecycle_serialization=topic_lifecycle_serialization,
             )
@@ -2319,7 +2859,7 @@ def parse_args() -> argparse.Namespace:
         "--arm-b",
         required=True,
         help=(
-            "Arm B transform: compact, reason-diet, model=<instance-id> (v2), "
+            "Arm B transform: compact, reason-diet, reason-off, model=<instance-id> (v2), "
             "or model=<provider:model> (legacy)"
         ),
     )

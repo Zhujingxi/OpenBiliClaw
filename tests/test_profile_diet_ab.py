@@ -27,6 +27,7 @@ from scripts.run_profile_diet_ab import (
     _write_artifact,
     admission_flip_summary,
     configured_topic_lifecycle_serialization,
+    reason_off_prompts,
     relative_gate,
     replay_blocking_reasons,
     replay_call_attribution,
@@ -34,6 +35,7 @@ from scripts.run_profile_diet_ab import (
     score_delta_summary,
     select_replay_rows,
     spearman_rank_correlation,
+    validate_reason_off_outputs,
     validate_replay_prefilter_compatibility,
     validate_replay_routes,
 )
@@ -233,6 +235,7 @@ def _passing_replay_gate_inputs() -> dict[str, object]:
         "route_audit": {"passed": True, "blocking_reasons": []},
         "embedding_audit": {"passed": True, "blocking_reasons": []},
         "recall_audit": {"passed": True, "blocking_reasons": []},
+        "reason_output_audit": {"passed": True, "blocking_reasons": []},
         "profile_snapshot_stable": True,
         "candidate_snapshot_stable": True,
     }
@@ -249,6 +252,7 @@ def test_replay_final_gate_accepts_only_complete_evidence() -> None:
         ("route", "route audit failed"),
         ("embedding", "embedding audit failed"),
         ("recall", "recall audit failed"),
+        ("reason_output", "reason-output audit failed"),
         ("profile", "profile snapshot drifted"),
         ("candidate", "candidate snapshot drifted"),
     ],
@@ -260,7 +264,7 @@ def test_replay_final_gate_blocks_each_independent_failure(
     inputs = _passing_replay_gate_inputs()
     if failure == "quality":
         inputs["quality_passed"] = False
-    elif failure in {"route", "embedding", "recall"}:
+    elif failure in {"route", "embedding", "recall", "reason_output"}:
         inputs[f"{failure}_audit"] = {"passed": False, "blocking_reasons": []}
     elif failure == "profile":
         inputs["profile_snapshot_stable"] = False
@@ -295,6 +299,22 @@ def test_artifact_keeps_raw_scores_digests_usage_routes_without_private_payloads
         admission_delta=0.0,
     )
     output = tmp_path / "artifact.json"
+    calls = [
+        {
+            "pair_kind": "treatment",
+            "repeat": 1,
+            "logical_run": "A",
+            "arm": "A",
+            "provider": "openai",
+            "status": "ok",
+            "structured_output_parseable": True,
+            "structured_item_count": 1,
+            "reason_field_count": 1,
+            "classification_items": [],
+            "usage": {"output_tokens": 7},
+        }
+    ]
+    reason_output_audit = validate_reason_off_outputs(calls, enabled=False)
 
     _write_artifact(
         output,
@@ -324,10 +344,11 @@ def test_artifact_keeps_raw_scores_digests_usage_routes_without_private_payloads
         gate_passed=True,
         gate={"blocking_reasons": []},
         admission_min_score=0.6,
-        calls=[{"provider": "openai", "usage": {"output_tokens": 7}}],
+        calls=calls,
         route_audit={"passed": True, "logical_runs": []},
         embedding_audit={"passed": True, "namespace": "embed-v1"},
         recall_audit={"passed": True, "injected_label_count": 0},
+        reason_output_audit=reason_output_audit,
         production_prefilter_mode="shadow",
         topic_lifecycle_serialization=True,
     )
@@ -340,6 +361,13 @@ def test_artifact_keeps_raw_scores_digests_usage_routes_without_private_payloads
     assert artifact["control_pairs"][0]["scores_a_digest"]
     assert artifact["llm_calls"][0]["usage"] == {"output_tokens": 7}
     assert artifact["routes"]["passed"] is True
+    assert (
+        artifact["reason_output"]["token_usage"]["treatment_comparison"]["A"]["completion_tokens"]
+        == 7
+    )
+    assert (
+        artifact["reason_output"]["token_usage"]["treatment_comparison"]["A"]["prompt_tokens"] == 0
+    )
     assert artifact["gate_constants"]["llm_max_tokens"] == 4096
     assert artifact["gate_constants"]["rate_limit_retry_delays_seconds"] == [
         65.0,
@@ -648,11 +676,21 @@ def test_degraded_flag_cannot_mask_configured_embedding_failure(
 class _RecordingMultimodalService:
     def __init__(self) -> None:
         self.kwargs: dict[str, object] = {}
+        self.response_content = json.dumps(
+            {
+                "content_id": "item-1",
+                "score": 0.7,
+                "topic_group": "系统",
+                "style_key": "deep_focus",
+                "franchise_key": "",
+            },
+            ensure_ascii=False,
+        )
 
     async def complete_multimodal_structured_task(self, **kwargs: object) -> LLMResponse:
         self.kwargs = dict(kwargs)
         return LLMResponse(
-            content="{}",
+            content=self.response_content,
             provider="sensenova",
             instance_id="gateway",
             model="reasoning-model",
@@ -680,6 +718,9 @@ async def test_deterministic_wrapper_keeps_production_budget_for_multimodal() ->
 
     assert inner.kwargs["temperature"] == 0.0
     assert inner.kwargs["max_tokens"] == 4096
+    output_metadata = replay_script._structured_output_metadata(
+        SimpleNamespace(content=inner.response_content),
+    )
     assert service.calls == [
         {
             "service": "arm_a",
@@ -696,8 +737,238 @@ async def test_deterministic_wrapper_keeps_production_budget_for_multimodal() ->
             "max_tokens": 4096,
             "usage": {"output_tokens": 12},
             "status": "ok",
+            **output_metadata,
         }
     ]
+
+
+def test_reason_output_metadata_counts_fields_without_retaining_payload() -> None:
+    response = SimpleNamespace(
+        content=(
+            '{"results": ['
+            '{"content_id": "PRIVATE-ID-1", "score": 0.8, '
+            '"reason": "PRIVATE REASON", "topic_group": "PRIVATE TOPIC", '
+            '"style_key": "deep_dive", "franchise_key": "PRIVATE IP"}, '
+            '{"content_id": "PRIVATE-ID-2", "score": 0.4, '
+            '"diagnostic": {"reason": "PRIVATE NESTED REASON"}, '
+            '"topic_group": "PRIVATE TOPIC 2", "style_key": "social_chat", '
+            '"franchise_key": ""}]}'
+        )
+    )
+
+    metadata = replay_script._structured_output_metadata(response)
+
+    assert metadata["structured_output_parseable"] is True
+    assert metadata["structured_item_count"] == 2
+    assert metadata["reason_field_count"] == 1
+    classification_items = metadata["classification_items"]
+    assert isinstance(classification_items, list)
+    assert len(classification_items) == 2
+    assert classification_items[0]["fields"]["topic_group"]["nonempty"] is True
+    assert classification_items[0]["fields"]["style_key"]["nonempty"] is True
+    assert classification_items[1]["fields"]["franchise_key"]["nonempty"] is False
+    assert "PRIVATE" not in json.dumps(metadata)
+
+
+def _reason_audit_call(
+    *,
+    pair_kind: str,
+    repeat: int,
+    logical_run: str,
+    arm: str,
+    topic_group: str = "系统",
+    style_key: str = "deep_focus",
+    franchise_key: str = "",
+    missing_field: str = "",
+) -> dict[str, object]:
+    result: dict[str, object] = {
+        "content_id": "item-1",
+        "score": 0.7,
+        "topic_group": topic_group,
+        "style_key": style_key,
+        "franchise_key": franchise_key,
+    }
+    if arm == "A":
+        result["reason"] = "production diagnostic"
+    if missing_field:
+        result.pop(missing_field)
+    metadata = replay_script._structured_output_metadata(
+        SimpleNamespace(content=json.dumps({"results": [result]})),
+    )
+    if pair_kind == "control":
+        usage = {"prompt_tokens": 1000, "completion_tokens": 999, "total_tokens": 1999}
+    elif arm == "A":
+        usage = {"prompt_tokens": 100, "completion_tokens": 40, "total_tokens": 140}
+    else:
+        usage = {"input_tokens": 90, "output_tokens": 20, "total_tokens": 110}
+    return {
+        "pair_kind": pair_kind,
+        "repeat": repeat,
+        "logical_run": logical_run,
+        "arm": arm,
+        "status": "ok",
+        "usage": usage,
+        **metadata,
+    }
+
+
+def _complete_reason_off_audit_calls(
+    *,
+    b_topic_group: str = "系统",
+    b_style_key: str = "deep_focus",
+    b_missing_field: str = "",
+) -> list[dict[str, object]]:
+    calls: list[dict[str, object]] = []
+    for repeat in range(1, 4):
+        calls.extend(
+            [
+                _reason_audit_call(
+                    pair_kind="control",
+                    repeat=repeat,
+                    logical_run="A1",
+                    arm="A",
+                ),
+                _reason_audit_call(
+                    pair_kind="control",
+                    repeat=repeat,
+                    logical_run="A2",
+                    arm="A",
+                ),
+                _reason_audit_call(
+                    pair_kind="treatment",
+                    repeat=repeat,
+                    logical_run="A",
+                    arm="A",
+                ),
+                _reason_audit_call(
+                    pair_kind="treatment",
+                    repeat=repeat,
+                    logical_run="B",
+                    arm="B",
+                    topic_group=b_topic_group,
+                    style_key=b_style_key,
+                    missing_field=b_missing_field,
+                ),
+            ]
+        )
+    return calls
+
+
+def test_reason_off_output_audit_attributes_usage_and_contract_to_each_arm() -> None:
+    calls = _complete_reason_off_audit_calls()
+    calls.append(
+        {
+            "pair_kind": "treatment",
+            "repeat": 1,
+            "logical_run": "B",
+            "arm": "B",
+            "status": "error",
+            "usage": None,
+            "structured_output_parseable": False,
+            "structured_item_count": 0,
+            "reason_field_count": 0,
+            "classification_items": [],
+        }
+    )
+    audit = validate_reason_off_outputs(calls, enabled=True)
+
+    assert audit["passed"] is True
+    assert audit["reason_field_count"] == {"A": 9, "B": 0}
+    token_usage = audit["token_usage"]
+    comparison = token_usage["treatment_comparison"]
+    assert comparison["A"]["prompt_tokens_per_evaluated_item"] == 100
+    assert comparison["B"]["prompt_tokens_per_evaluated_item"] == 90
+    assert comparison["A"]["completion_tokens_per_evaluated_item"] == 40
+    assert comparison["B"]["completion_tokens_per_evaluated_item"] == 20
+    assert comparison["A"]["total_tokens_per_evaluated_item"] == 140
+    assert comparison["B"]["total_tokens_per_evaluated_item"] == 110
+    assert comparison["B"]["error_call_count"] == 1
+    assert comparison["B"]["usage_missing_call_count"] == 1
+    assert len(token_usage["logical_runs"]) == 12
+    classification = audit["classification"]
+    assert classification["passed"] is True
+    assert classification["gate"]["topic_group"]["treatment_agreement_median"] == 1.0
+    assert classification["cap_drop_audit"].startswith("not measured")
+
+
+@pytest.mark.parametrize(
+    ("calls", "expected_reason"),
+    [
+        (
+            _complete_reason_off_audit_calls(b_topic_group="不同主题"),
+            "topic_group agreement fell below",
+        ),
+        (
+            _complete_reason_off_audit_calls(b_style_key=""),
+            "style_key fill rate regressed",
+        ),
+        (
+            _complete_reason_off_audit_calls(b_missing_field="franchise_key"),
+            "franchise_key presence rate regressed",
+        ),
+    ],
+)
+def test_reason_off_classification_audit_blocks_non_score_regressions(
+    calls: list[dict[str, object]],
+    expected_reason: str,
+) -> None:
+    audit = validate_reason_off_outputs(calls, enabled=True)
+
+    assert audit["passed"] is False
+    assert expected_reason in " ".join(audit["blocking_reasons"])
+
+
+@pytest.mark.parametrize(
+    ("call", "expected_reason"),
+    [
+        (
+            {
+                "arm": "B",
+                "status": "ok",
+                "structured_output_parseable": False,
+                "structured_item_count": 0,
+                "reason_field_count": 0,
+            },
+            "without verifiable scored JSON",
+        ),
+        (
+            {
+                "arm": "B",
+                "status": "ok",
+                "structured_output_parseable": True,
+                "structured_item_count": 1,
+                "reason_field_count": 1,
+            },
+            "one or more reason fields",
+        ),
+    ],
+)
+def test_reason_off_output_audit_fails_closed(
+    call: dict[str, object],
+    expected_reason: str,
+) -> None:
+    audit = validate_reason_off_outputs([call], enabled=True)
+
+    assert audit["passed"] is False
+    assert expected_reason in " ".join(audit["blocking_reasons"])
+
+
+def test_reason_output_audit_is_non_blocking_for_other_replay_arms() -> None:
+    audit = validate_reason_off_outputs(
+        [
+            {
+                "arm": "B",
+                "status": "ok",
+                "structured_output_parseable": True,
+                "structured_item_count": 1,
+                "reason_field_count": 1,
+            }
+        ],
+        enabled=False,
+    )
+
+    assert audit["passed"] is True
+    assert audit["blocking_reasons"] == []
 
 
 @pytest.mark.asyncio
@@ -1265,5 +1536,26 @@ def test_legacy_reason_prompts_swaps_and_restores() -> None:
         assert "只写一句中文" in prompts_module._SINGLE_CONTENT_EVALUATION_SYSTEM_PROMPT
         assert "3a. reason" not in prompts_module._BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT
         assert "reason(一句中文)" in prompts_module._BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT
+    assert before_single == prompts_module._SINGLE_CONTENT_EVALUATION_SYSTEM_PROMPT
+    assert before_batch == prompts_module._BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT
+
+
+def test_reason_off_prompts_remove_output_fields_and_restore_production() -> None:
+    from openbiliclaw.llm import prompts as prompts_module
+
+    before_single = prompts_module._SINGLE_CONTENT_EVALUATION_SYSTEM_PROMPT
+    before_batch = prompts_module._BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT
+    assert '"reason":' in before_single
+    assert '"reason":' in before_batch
+
+    with reason_off_prompts():
+        single = prompts_module._SINGLE_CONTENT_EVALUATION_SYSTEM_PROMPT
+        batch = prompts_module._BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT
+        assert "输出中禁止包含 reason 字段" in single
+        assert "每个条目都禁止包含 reason 字段" in batch
+        assert '"reason":' not in single
+        assert '"reason":' not in batch
+        assert "、reason、topic_group" not in batch
+
     assert before_single == prompts_module._SINGLE_CONTENT_EVALUATION_SYSTEM_PROMPT
     assert before_batch == prompts_module._BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT
