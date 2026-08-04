@@ -575,7 +575,7 @@ daemon，保留当前 v2 文件和自动备份，再由操作者显式把导出�
 >
 > `127.0.0.1` 与 `localhost` 并非总是等价：macOS 上 Chrome 常只绑定 IPv6 `::1:9222`，而 Python urllib 默认走 IPv4。用 `localhost` 最稳妥（`getaddrinfo` 会同时尝试两边）。
 
-> **关于 `daily_*_budget`：** 这些字段是**每 UTC 日、按任务类型的入队次数上限**，不是启用 / 关闭该来源的开关（来源开关是各段的 `enabled`）。`0`（或留空）表示不设每日上限，补池只受平台缺口 / `discovery_limit` / producer 节流控制。填 `1` 只会把该任务类型限制到每天 1 次——配置加载时对落在 1–4 的可疑值会打印一次 WARN 提示。
+> **关于 `daily_*_budget`：** 这些字段是**每 UTC 日、按任务类型的入队次数上限**，不是启用 / 关闭该来源的开关（来源开关是各段的 `enabled`）。显式填 `0` 表示不设每日上限，补池只受平台缺口 / `discovery_limit` / producer 节流控制；字段缺省时使用各来源表格所列默认值，其中小红书搜索为 `20`。填 `1` 只会把该任务类型限制到每天 1 次——配置加载时对落在 1–4 的可疑值会打印一次 WARN 提示。
 
 ### `[sources.bilibili]`
 
@@ -615,12 +615,14 @@ Bilibili discovery 的平台级开关。B 站账号登录 / Cookie 获取仍由 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
 | `enabled` | bool | `false` | 是否启用小红书 discovery 和 init bootstrap；默认关闭，`init` 选 Yes、`--yes-xhs` 或插件设置页打开后才会写回 `true`。关闭后 producer 停止产词，`/api/sources/xhs/next-task` 也不会领取此前已排队的自动 search / creator / bootstrap 任务，因此扩展不会继续打开自动发现页面；任务保留为 pending，重新开启后恢复 |
-| `daily_search_budget` | int | `0` | 每天后端允许入队的 Soul 驱动搜索任务数上限；`0` 表示不设每日上限，持续补池只受平台缺口、单轮 `discovery_limit` 和 producer 节流控制 |
+| `daily_search_budget` | int | `20` | 每天后端允许入队的 Soul 驱动搜索任务数上限；`0` 表示不设每日上限。默认 20 是保守工程起点，不代表小红书官方阈值 |
 | `daily_creator_budget` | int | `0` | 每天订阅创作者抓取任务上限；`0` 表示不设每日上限 |
-| `task_interval_seconds` | int | `300` | 后端领取连续 search / creator 任务的最小间隔（秒，默认 5 分钟）；下一次可领取时间持久化在 SQLite，后端重启、MV3 service worker 重启或多个浏览器 profile 都不能绕过。bootstrap 不受普通间隔限制，但仍受来源开关和平台风控冷却约束 |
-| `min_interval_minutes` | int | `3` | `XhsTaskProducer` 两次入队之间的最小间隔；`0` 表示每个 refresh tick 都允许检查执行。v0.3.186 前该项名为 `min_interval_hours`（默认 `1`）且不可配置，单位改为分钟以与其余来源对齐 |
+| `task_interval_seconds` | int | `1200` | 后端领取连续 search / creator 任务的**目标间隔**（默认 20 分钟）；每个任务按稳定的 ±25% 抖动得到实际 15–25 分钟窗口，下一次可领取时间持久化在 SQLite，后端重启、MV3 service worker 重启或多个浏览器 profile 都不能绕过。bootstrap 不受普通间隔限制，但仍受来源开关和平台风控冷却约束 |
+| `min_interval_minutes` | int | `20` | `XhsTaskProducer` 两次入队之间的最小间隔；producer 还会在 pending + in-progress 搜索任务达到 5 条时停止 claim / 生成关键词，只补到 5 条，不让积压继续增长。`0` 只关闭 producer 时间闸，不关闭这道积压门 |
 
-> **安全设计要点：** 后端从不直接调用小红书搜索 / Feed API。所有"主动发现"（关键词搜索、创作者主页浏览）都在用户自己的浏览器中以后台标签页形式执行，由扩展代理完成。被动发现则利用用户正常浏览时已经加载的卡片 URL，零额外请求。扩展识别到可见的安全验证、操作频繁或 HTTP 429 后会返回结构化 `rate_limited`；后端固定进入 1 小时持久化平台冷却，期间停止任务领取和关键词生产。该安全窗口当前故意不提供可调短配置，避免用户误把风控保护降到不安全值。
+> **默认值升级边界：** 上述 `20 / 1200 / 20` 只用于新配置或缺少对应键的配置。已有 `config.toml` 中显式写入的值（包括 `0 / 300 / 3`）继续原样读取，不做静默迁移或强制覆盖。
+>
+> **安全设计要点：** 后端从不直接调用小红书搜索 / Feed API。所有“主动发现”（关键词搜索、创作者主页浏览）都在用户自己的浏览器中以后台标签页形式执行，由扩展代理完成。被动发现则利用用户正常浏览时已经加载的卡片 URL，零额外请求。扩展识别到可见的安全验证、操作频繁或 HTTP 429 后会返回结构化 `rate_limited`；后端按连续风控轮次使用 `1h → 2h → 4h → 8h → 16h → 24h` 持久化冷却（24 小时封顶），同一活动冷却内的重复报告不增加轮次，冷却后完成一条正常 search / creator 任务才重置。冷却期间停止全部任务领取和关键词生产；安全窗口不提供可调短配置。
 
 ### `[sources.douyin]`
 
@@ -814,13 +816,13 @@ TOML 与显式环境变量覆盖在构造 `SchedulerConfig` 前统一归一为�
 
 > ✅ `unified_keyword_planner_enabled` **v0.3.124 起默认 `true`**：搜索词走统一规划器 + 关键词存储，本段其余字段随之生效。设为 `false` 可逐字回退到旧的逐平台搜索词生成路径（旧路径保留、回退无副作用）。
 
-#### Web 与插件设置页的「高级功能」
-
 #### 保存与运行时应用状态
 
 `PUT /api/config` 的持久化阶段继续执行候选配置校验、`config.toml.bak` 快照、完整写盘和凭据 patch 语义；只有这些步骤成功才会返回 2xx。受保护的 dialogue execution、dialogue settlement、event owner 或另一轮 runtime rebuild 正忙时，后端不再让 HTTP 请求同步等待最长 25 分钟，而是返回 HTTP 202：`apply_state="queued"`、单调递增的 `apply_revision`、`reloaded=false`。插件与桌面 Web 应把它显示为“已保存、等待后台应用”，不能当作保存失败。
 
 后台队列只合并尚未开始的修订并保留最新值；正在应用的修订完成后会立即追上最新 pending。`GET /api/config/apply-status` 返回 `requested_revision / applied_revision / state / message / error / updated_at`，其中不含配置或秘密。最终成功广播 `config_reloaded`；最新修订失败会恢复最后一次已生效配置并广播 `config_reload_failed`。初始化与配置应用互斥：应用中的 `POST /api/init` 返回 `409 config_applying`，运行中的 init 继续让配置保存返回 `409 init_running`。
+
+#### Web 与插件设置页的「高级功能」
 
 桌面 Web 与浏览器插件 side panel 的设置页都提供独立的「高级功能」Tab：桌面端共 7 个 Tab，插件端共 6 个 Tab；两端固定使用同一套三个 section，字段语义、默认值和保存行为保持一致。
 

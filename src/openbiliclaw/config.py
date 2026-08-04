@@ -1064,18 +1064,17 @@ class XiaohongshuSourceConfig:
     # browser session. Init --yes-xhs or the settings page can enable it later.
     enabled: bool = False
     # Max Soul-driven search tasks the backend may enqueue per day.
-    daily_search_budget: int = 0
+    daily_search_budget: int = 20
     # Max creator-subscription fetch tasks per day.
     daily_creator_budget: int = 0
     # Minimum seconds the backend permits between extension-dispatched
-    # search/creator task claims. Persisted centrally so MV3/browser restarts
-    # and multiple extension profiles cannot bypass the pacing floor.
-    task_interval_seconds: int = 300
-    # Minimum gap between two producer runs for this source. Aligned to 3
-    # minutes across every source (2026-07-26) so pool replenishment has one
-    # cadence instead of eight; the per-run size is still bounded by
-    # ``[scheduler].discovery_limit`` and each branch's daily budget.
-    min_interval_minutes: int = 3
+    # search/creator task claims. This is a target: each claim applies stable
+    # ±25% jitter and persists the resulting next-claim time centrally.
+    task_interval_seconds: int = 1200
+    # Minimum gap between two producer runs for this source. Keep production
+    # aligned with the 20-minute claim target; queue backlog is separately
+    # bounded before the producer claims or generates more keywords.
+    min_interval_minutes: int = 20
 
 
 @dataclass
@@ -1925,10 +1924,10 @@ def _build_config(raw: dict[str, Any]) -> Config:
         ),
         xiaohongshu=XiaohongshuSourceConfig(
             enabled=bool(xhs_raw.get("enabled", False)),
-            daily_search_budget=int(xhs_raw.get("daily_search_budget", 0)),
+            daily_search_budget=int(xhs_raw.get("daily_search_budget", 20)),
             daily_creator_budget=int(xhs_raw.get("daily_creator_budget", 0)),
-            task_interval_seconds=int(xhs_raw.get("task_interval_seconds", 300)),
-            min_interval_minutes=max(0, int(xhs_raw.get("min_interval_minutes", 3))),
+            task_interval_seconds=int(xhs_raw.get("task_interval_seconds", 1200)),
+            min_interval_minutes=max(0, int(xhs_raw.get("min_interval_minutes", 20))),
         ),
         douyin=DouyinSourceConfig(
             enabled=bool(douyin_raw.get("enabled", False)),

@@ -1190,9 +1190,10 @@ def test_sources_xiaohongshu_defaults() -> None:
     config = _build_config({})
 
     assert config.sources.xiaohongshu.enabled is False
-    assert config.sources.xiaohongshu.daily_search_budget == 0
+    assert config.sources.xiaohongshu.daily_search_budget == 20
     assert config.sources.xiaohongshu.daily_creator_budget == 0
-    assert config.sources.xiaohongshu.task_interval_seconds == 300
+    assert config.sources.xiaohongshu.task_interval_seconds == 1200
+    assert config.sources.xiaohongshu.min_interval_minutes == 20
 
 
 def test_sources_douyin_defaults() -> None:

@@ -1998,10 +1998,10 @@ class BilibiliSourceConfigOut(BaseModel):
 
 class XiaohongshuSourceConfigOut(BaseModel):
     enabled: bool = False
-    daily_search_budget: int = 0
+    daily_search_budget: int = 20
     daily_creator_budget: int = 0
-    task_interval_seconds: int = 300
-    min_interval_minutes: int = 3
+    task_interval_seconds: int = 1200
+    min_interval_minutes: int = 20
 
 
 class DouyinSourceConfigOut(BaseModel):
