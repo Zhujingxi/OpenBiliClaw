@@ -1122,8 +1122,8 @@ class RuntimeContext:
                 soul_engine=new_soul_engine,
                 llm_service=new_llm_service,
                 enabled=xhs_enabled,
-                daily_budget=int(getattr(xhs_cfg, "daily_search_budget", 0)),
-                min_interval_minutes=int(getattr(xhs_cfg, "min_interval_minutes", 3)),
+                daily_budget=int(getattr(xhs_cfg, "daily_search_budget", 20)),
+                min_interval_minutes=int(getattr(xhs_cfg, "min_interval_minutes", 20)),
                 keyword_fetch=new_keyword_fetch,
             )
             from openbiliclaw.runtime.douyin_producer import build_douyin_discovery_producer

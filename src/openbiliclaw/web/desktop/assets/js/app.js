@@ -5915,11 +5915,28 @@ ${cardFeedbackBarHtml()}`;
       }, 0);
     }
 
+    function desktopChatThinkingMarkup(
+      label = "阿B 正在思考，等待模型回复…"
+    ) {
+      return `<div class="chat-bubble agent chat-thinking" role="status" aria-live="polite" aria-atomic="true" aria-busy="true"><span class="chat-thinking-label">${escapeHtml(label)}</span><span class="chat-thinking-dots" aria-hidden="true"><span></span><span></span><span></span></span></div>`;
+    }
+
+    function desktopTurnIsWaitingForReply(turn) {
+      if (!turn || isCardTurn(turn) || isQuestionTurn(turn)) return false;
+      const status = String(turn.status || "").toLowerCase();
+      const reply = String(turn.reply || turn.assistant_message || "").trim();
+      return !reply && (status === "pending" || status === "processing");
+    }
+
     function chatHtml(messages) {
       return messages.map((msg) => {
         if (msg?.turn) {
-          return `${replyQuoteMarkup(msg.turn, desktopDialogueTurns())}${renderTurnMarkup(msg.turn, { surface: "desktop" })}`;
+          const waiting = desktopTurnIsWaitingForReply(msg.turn)
+            ? desktopChatThinkingMarkup()
+            : "";
+          return `${replyQuoteMarkup(msg.turn, desktopDialogueTurns())}${renderTurnMarkup(msg.turn, { surface: "desktop" })}${waiting}`;
         }
+        if (msg?.thinking) return desktopChatThinkingMarkup(msg.text);
         return `<div class="chat-bubble ${msg.role === "user" ? "user" : "agent"}">${escapeHtml(msg.text)}</div>`;
       }).join("");
     }
@@ -6302,7 +6319,11 @@ ${cardFeedbackBarHtml()}`;
       const payloadMessage = options.contextPrefix ? `${options.contextPrefix}\n\n${message}` : message;
       const replyToTurnId = dialogueContextSelection?.["reply_to_turn_id"] || "";
       state.chat.push({ role: "user", text: message });
-      state.chat.push({ role: "agent", text: "正在提交给后端，并等待 durable chat turn 完成。" });
+      state.chat.push({
+        role: "agent",
+        text: "阿B 正在思考，等待模型回复…",
+        thinking: true,
+      });
       renderChat({ forceBottom: true });
       const payload = {
         session: SHARED_CHAT_SESSION,
@@ -9120,10 +9141,10 @@ ${cardFeedbackBarHtml()}`;
           },
           xiaohongshu: {
             enabled: $("#xhsEnabled").value === "on",
-            daily_search_budget: getIntInput("xhsDailySearchBudget", 0),
+            daily_search_budget: getIntInput("xhsDailySearchBudget", 20),
             daily_creator_budget: getIntInput("xhsDailyCreatorBudget", 0),
-            task_interval_seconds: getIntInput("xhsTaskInterval", 300),
-            min_interval_minutes: getIntInput("xhsMinInterval", 3)
+            task_interval_seconds: getIntInput("xhsTaskInterval", 1200),
+            min_interval_minutes: getIntInput("xhsMinInterval", 20)
           },
           douyin: {
             enabled: $("#douyinEnabled").value === "on",
@@ -10075,7 +10096,11 @@ ${cardFeedbackBarHtml()}`;
             ? "\n配置已进入后台应用队列，连续保存会自动合并为最新版本。"
             : result?.reloaded === false ? "\n后端返回未热重载，请检查运行状态。" : "";
         if ($("#configStatus")) $("#configStatus").value = `${message}${suffix}`;
-        showToast(result?.restart_required ? "配置已保存，需要重启后端" : "配置已保存");
+        showToast(
+          result?.restart_required
+            ? "配置已保存，需要重启后端"
+            : queued ? "配置已保存，等待后台应用" : "配置已保存"
+        );
         void hydrateFromBackend();
         void refreshUpdateStatus();
       } catch (error) {

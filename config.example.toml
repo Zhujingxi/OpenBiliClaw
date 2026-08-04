@@ -237,15 +237,14 @@ min_interval_minutes = 3                 # producer 两次入队之间的最小�
 # pool_source_shares 中的 xiaohongshu 配额会被丢弃（不会让池子卡在低于目标）。
 # 默认 false；init 交互式提示选 Yes、--yes-xhs 或插件设置页打开后才会写回 true。
 enabled = false
-# 每天后端允许入队的 Soul 驱动搜索任务数上限；0 表示不设每日上限，
-# 仅受平台缺口、每轮 discovery_limit 与任务节流控制。
-daily_search_budget = 0
+# 每天后端允许入队的 Soul 驱动搜索任务数上限；默认 20，0 表示不设每日上限。
+daily_search_budget = 20
 # 每天订阅创作者抓取任务上限；0 表示不设每日上限。
 daily_creator_budget = 0
-# 后端允许扩展领取两次搜索/创作者任务之间的最小间隔（秒）；
-# 状态持久化，重启扩展或同时使用多个浏览器配置也不会绕过
-task_interval_seconds = 300
-min_interval_minutes = 3                 # producer 两次入队之间的最小间隔
+# 后端允许扩展领取两次搜索/创作者任务的目标间隔（秒）；实际按 ±25% 抖动，
+# 下一次领取时间持久化，重启扩展或同时使用多个浏览器配置也不会绕过。
+task_interval_seconds = 1200
+min_interval_minutes = 20                # producer 两次入队之间的最小间隔
 
 # ── 抖音（Douyin）direct-cookie discovery 专用配置 ──
 # 初始化画像仍走浏览器扩展；这里仅控制可选的后台内容发现。

@@ -81,9 +81,10 @@ ID 字段是严格 JSON string，不接受数字、布尔或其它类型的自�
 
 | 方法与路径 | 状态 | 契约 |
 |---|---|---|
-| `GET /api/sources/xhs/next-task` | ✅ | native-save job 仍是用户显式动作；自动 discovery 的 search / creator / bootstrap 则在每次 claim 前动态检查 `sources.xiaohongshu.enabled` 与 `scheduler.enabled`。任一关闭时返回 bodyless 204，既有任务保持 pending，不会再驱动扩展打开页面。search / creator 的 `task_interval_seconds` 由后端持久化执行；处于节流或平台冷却时返回 204，存在明确等待时间时附 `Retry-After`。 |
-| `POST /api/sources/xhs/task-result` | ✅ | 除 `ok / partial / empty / error` 外接受 `status="rate_limited"`。legacy task 命中后终结该任务、持久化 1 小时平台冷却，并将关联 `source_keyword_id` 从 executing 无损退回 pending；native-save 结果命中同样打开平台级冷却。debug 只接受扩展给出的结构化风险原因，不要求或存储验证页全文。 |
-| `GET /api/sources/status` | ✅ | 来源仍开启且冷却生效时，将小红书 legacy 状态投影为 `state="rate_limited"`、`feed_paused=true` 并显示剩余分钟；来源已关闭时不让冷却覆盖 `enabled=false` 的正交配置事实。该端点只读本地状态，不访问小红书。 |
+| `GET /api/sources/xhs/next-task` | ✅ | native-save job 仍是用户显式动作；自动 discovery 的 search / creator / bootstrap 则在每次 claim 前动态检查 `sources.xiaohongshu.enabled` 与 `scheduler.enabled`。任一关闭时返回 bodyless 204，既有任务保持 pending，不会再驱动扩展打开页面。search / creator 的 `task_interval_seconds` 是目标值，后端按任务 ID 施加 ±25% 稳定抖动并持久化实际下一次时间；处于节流或平台冷却时返回 204，存在明确等待时间时附 `Retry-After`。 |
+| `POST /api/sources/xhs/task-result` | ✅ | 除 `ok / partial / empty / error` 外接受 `status="rate_limited"`。legacy task 命中后终结该任务、按连续轮次持久化 `1h → 2h → 4h … → 24h` 平台冷却，并将关联 `source_keyword_id` 从 executing 无损退回 pending；同一活动冷却内的重复报告不增加轮次，native-save 结果命中同样打开平台级冷却。冷却后的正常 search / creator 完成会重置轮次，活动冷却中的晚到成功不会提前解封。search / creator 的 `empty` 仍作为可重试失败，但缺失 error 的旧插件 payload 会归一为 `xhs_empty_result`；扩展结构化 debug 只允许 pathname、页面生命周期和 route anchor 计数，不要求或存储搜索词、验证页全文或页面 state。 |
+| `POST /api/sources/xhs/observed-urls` | ✅ | URL-only 与带 note metadata 两条分支都接受 `/explore/{id}`、旧 `/discovery/item/{id}` 和 `/search_result/{id}` 三种笔记路由；`/search_result?keyword=...` 搜索列表页本身不计入 accepted。metadata 继续进入 `discovery_candidates`，URL-only 继续写 observed ledger 并参与 token 回填。 |
+| `GET /api/sources/status` | ✅ | 来源仍开启且冷却生效时，将小红书 legacy 状态投影为 `state="rate_limited"`、`feed_paused=true` 并显示连续触发轮次和剩余分钟；来源已关闭时不让冷却覆盖 `enabled=false` 的正交配置事实。该端点只读本地状态，不访问小红书。 |
 
 ## 对话确认端点
 

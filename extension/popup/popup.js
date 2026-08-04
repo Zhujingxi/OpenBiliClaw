@@ -8827,10 +8827,10 @@ function bindSettings() {
         // write identical values for an untouched form.
         xiaohongshu: {
           enabled: checked("cfgXhsEnabled"),
-          daily_search_budget: getInt("cfgXhsDailySearchBudget", 0),
+          daily_search_budget: getInt("cfgXhsDailySearchBudget", 20),
           daily_creator_budget: getInt("cfgXhsDailyCreatorBudget", 0),
-          task_interval_seconds: getInt("cfgXhsTaskInterval", 300),
-          min_interval_minutes: getInt("cfgXhsMinInterval", 3),
+          task_interval_seconds: getInt("cfgXhsTaskInterval", 1200),
+          min_interval_minutes: getInt("cfgXhsMinInterval", 20),
         },
         douyin: {
           enabled: checked("cfgDouyinEnabled"),

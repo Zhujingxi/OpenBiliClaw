@@ -6316,20 +6316,20 @@
         </div>
         <div class="settings-field">
           <label for="cfgXhsDailySearchBudget">小红书每日搜索任务</label>
-          <input id="cfgXhsDailySearchBudget" type="number" min="0" step="1" placeholder="0 = 不限">
+          <input id="cfgXhsDailySearchBudget" type="number" min="0" step="1" placeholder="默认 20">
         </div>
         <div class="settings-field">
           <label for="cfgXhsDailyCreatorBudget">小红书每日创作者任务</label>
           <input id="cfgXhsDailyCreatorBudget" type="number" min="0" step="1" placeholder="0 = 不限">
         </div>
-        <p class="settings-hint" data-budget-note>预算 = 每日任务次数上限，不是开关；填 1 表示每天只允许 1 次。0 或留空 = 不限。</p>
+        <p class="settings-hint" data-budget-note>预算 = 每日任务次数上限；搜索默认每天 20 次，显式填 0 = 不限；创作者预算 0 或留空 = 不限。</p>
         <div class="settings-field">
-          <label for="cfgXhsTaskInterval">小红书任务间隔秒数</label>
-          <input id="cfgXhsTaskInterval" type="number" min="0" step="1" placeholder="300">
+          <label for="cfgXhsTaskInterval">小红书目标任务间隔秒数（±25%）</label>
+          <input id="cfgXhsTaskInterval" type="number" min="0" step="1" placeholder="1200">
         </div>
         <div class="settings-field">
-          <label for="cfgXhsMinInterval">小红书最小调度间隔分钟</label>
-          <input id="cfgXhsMinInterval" type="number" min="0" step="1" placeholder="3">
+          <label for="cfgXhsMinInterval">小红书关键词入队间隔分钟</label>
+          <input id="cfgXhsMinInterval" type="number" min="0" step="1" placeholder="20">
         </div>
       </div>
       </div>
