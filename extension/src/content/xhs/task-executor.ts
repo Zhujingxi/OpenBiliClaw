@@ -52,6 +52,7 @@ import {
   type XhsBootstrapScope,
 } from "./bootstrap.js";
 import {
+  detectXhsTaskLoginRequired,
   detectXhsTaskRiskControl,
   type XhsRiskControlDetection,
 } from "./risk-control.js";
@@ -191,6 +192,26 @@ function emptySearchTaskResult(
           discovery_item: safeSelectorCount(doc, 'a[href*="/discovery/item/"]'),
           search_result: safeSelectorCount(doc, 'a[href*="/search_result/"]'),
         },
+      },
+    },
+  };
+}
+
+function loginRequiredTaskResult(
+  msg: TaskExecuteMessage,
+  win: Window,
+): TaskResultPayload {
+  return {
+    task_id: msg.task_id,
+    urls: [],
+    notes: [],
+    status: "error",
+    error: "xhs_login_required",
+    debug: {
+      xhs_auth: {
+        reason: "visible_login_overlay",
+        task_type: msg.type,
+        pathname: pathnameOnly(win.location.href),
       },
     },
   };
@@ -741,6 +762,9 @@ async function executeTaskInPage(
   doc: Document,
 ): Promise<TaskResultPayload> {
   try {
+    if (detectXhsTaskLoginRequired(doc)) {
+      return loginRequiredTaskResult(msg, win);
+    }
     if (msg.type === "bootstrap_profile") {
       const immediateRisk = detectXhsTaskRiskControl(doc);
       if (immediateRisk) {
@@ -764,6 +788,9 @@ async function executeTaskInPage(
     }
     const found = await waitForCards(doc);
     if (!found) {
+      if (detectXhsTaskLoginRequired(doc)) {
+        return loginRequiredTaskResult(msg, win);
+      }
       const emptyPageRisk = detectXhsTaskRiskControl(doc, {
         includePageText: true,
       });

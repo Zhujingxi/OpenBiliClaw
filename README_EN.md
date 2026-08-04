@@ -189,12 +189,12 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.192 (2026-08-03)**
+📌 Latest: **v0.3.194 (2026-08-05)**
 
-- **Multimodal recommendation enhancements are independently controllable** — visual profiles, danmaku semantics, and keyframe weighting have separate switches, with visual features off by default.
-- **Feedback and dialogue submissions are more reliable** — likes, dislikes, chats, and pending-card settlement now use durable asynchronous processing across slow models and restarts.
-- **Advanced settings are easier to use** — the extension save bar stays at the bottom, keyword generation defaults to hybrid, and advanced controls are grouped together.
-- **Connectivity and remote deployment are steadier** — X sessions resync after runtime reconnects, and a Caddy HTTPS Compose entry point is now available.
+- **Xiaohongshu discovery is steadier and more conservative** — a jittered 20-minute target, budgets, and exponential backoff remain in force while search briefly renders in front and restores the previous tab.
+- **First-launch progress no longer stalls** — setup, desktop web, and the extension show live bge-m3 download progress as soon as the pull starts.
+- **Freshness evaluation is more accurate** — candidate scoring uses source publication time and the real UTC evaluation time instead of guessing from model knowledge cutoffs.
+- **Keyword rotation stays fresher** — the planner avoids repeatedly consuming the same terms and stops generating more while the queue is backed up.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 

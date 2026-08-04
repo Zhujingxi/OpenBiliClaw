@@ -664,6 +664,40 @@ class TestXhsTaskApi:
         assert result["error"] == "xhs_empty_result"
         assert result["debug"] == debug
 
+    def test_visible_login_gate_overrides_stale_cookie_login_state(
+        self,
+        api_client: TestClient,
+    ) -> None:
+        db = api_client.app.state.runtime_context.database
+        queue = XhsTaskQueue(db)
+        db.set_xhs_login_state(True)
+        assert queue.enqueue("search", {"keyword": "login-check"})
+        claimed = api_client.get("/api/sources/xhs/next-task")
+        assert claimed.status_code == 200
+
+        response = api_client.post(
+            "/api/sources/xhs/task-result",
+            json={
+                "task_id": claimed.json()["id"],
+                "status": "error",
+                "urls": [],
+                "notes": [],
+                "error": "xhs_login_required",
+                "debug": {
+                    "xhs_auth": {
+                        "reason": "visible_login_overlay",
+                        "pathname": "/search_result",
+                    }
+                },
+            },
+        )
+
+        assert response.status_code == 200
+        assert db.get_xhs_login_state()[0] is False
+        stored = queue.get(claimed.json()["id"])
+        assert stored is not None
+        assert stored["status"] == "failed"
+
     def test_rate_limited_result_trips_persistent_cooldown(
         self,
         api_client: TestClient,

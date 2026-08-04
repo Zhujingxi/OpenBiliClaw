@@ -12596,6 +12596,13 @@ def create_app(
             if not failure_error and status == "empty":
                 failure_error = "xhs_empty_result"
             failed = legacy_queue.fail(task_id, error=failure_error, debug=debug)
+            if failure_error == "xhs_login_required" and hasattr(
+                ctx.database, "set_xhs_login_state"
+            ):
+                # Cookie presence is only a hint: XHS can retain web_session
+                # while the rendered page already presents its login gate.
+                # The task page is fresher, direct browser evidence.
+                ctx.database.set_xhs_login_state(False)
             # Unified keyword planner lifecycle (P1.7): the async search failed →
             # mark its ``source_keyword_id`` word ``failed`` (retry via attempts).
             if failed and task is not None:
