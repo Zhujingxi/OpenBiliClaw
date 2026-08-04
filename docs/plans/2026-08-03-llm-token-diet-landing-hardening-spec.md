@@ -276,8 +276,14 @@ Artifact 不包含 API key、Cookie、完整 config、完整 profile 或完整�
   --output data/eval/reason-off.json
 ```
 
-三个命令必须 exit 0，artifact 自身 `gate.passed=true`、无 blocking reasons、route 与 embedding
-完整性 gate 通过。
+compact 与 reason-diet 两个生产候选命令必须 exit 0，artifact 自身 `gate.passed=true`、无
+blocking reasons、route 与 embedding 完整性 gate 通过。`reason-off` 是独立诊断臂：只有在
+token 与质量门同时通过时才能成为生产候选；若任一门失败，则保留可复核的失败 artifact、
+记录否决结论并保持生产 reason diet 不变，不反向阻塞已验证的生产方案。
+
+`c6327506` 的 100×3 reason-off 诊断已经否决该方案：B reason field count 为 0，但 total token
+增加 `31.70%`，准入差值中位数 `-5pp` 低于相对 floor `+2pp`。artifact 的 route、embedding、
+recall、reason-output 与分类完整性子门均通过；最终非零退出仅来自 relative quality gate。
 
 被否决的 body-cap 不再从最终代码重跑；其冻结失败 artifact 必须保持 `gate.passed=false`，并可
 从 raw paired scores 独立复算上述质量回归。最终代码用单元/E2E 测试确认所有相关 prompt 路径

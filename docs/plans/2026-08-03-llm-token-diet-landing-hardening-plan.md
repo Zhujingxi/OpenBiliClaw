@@ -273,6 +273,21 @@ cohort (58 below 0.5, 42 at/above 0.5) estimates that omitting the field reduces
 characters by `16.66%` and UTF-8 bytes by `24.77%` versus the current reason diet. These are not provider
 tokens; the real DeepSeek usage and quality conclusion require the new 100×3 artifact.
 
+The clean-commit `reason-off` replay on `c6327506` completed 100 candidates × 3 repeats and correctly
+exited nonzero on the unchanged relative quality gate. B emitted zero reason fields, yet application-visible
+successful-call usage increased from A's `313906 / 35498 / 349404` prompt / completion / total tokens to
+B's `410877 / 49300 / 460177`, or `+30.89% / +38.88% / +31.70%`. The first repeat had three error calls in
+both arms; the two zero-error repeats still increased total usage by `7.18%` and `25.97%`, independently
+ruling out rate-limit noise as the explanation. B required 7 / 6 / 5 successful calls versus A's 4 / 6 / 4,
+showing that omitted reason made structured member completion/repair operationally more expensive.
+Treatment Spearman median `0.709700`, flip median `5%`, and all privacy-safe classification gates passed,
+but admission delta median `-5pp` fell below the A/A-derived `+2pp` floor. Raw scores and admission vectors
+were independently recomputed exactly. The ignored local artifact is
+`data/eval/reason-off-c6327506.json`, SHA-256
+`f6b7276fc5024faa3a61c2524124bf43644044029fb6c93490a50ea30aaa81b2`; it contains no API key, Cookie,
+authorization or token credential keys. Production therefore keeps the current reason diet; `reason-off`
+remains a rejected diagnostic arm rather than a landing change.
+
 ## Task 9 — Landing handoff
 
 **Owner:** root
