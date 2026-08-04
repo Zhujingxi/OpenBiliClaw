@@ -1455,7 +1455,7 @@
         // download is running keep polling so the row shows live percent
         // (embedding_check="repairing", detail carries progress).
         renderInitChecklist(status, readSelectedInitSources());
-        if (status?.prerequisites?.embedding_repair_running) {
+        if (embeddingPullProgressView(status).active) {
           scheduleInitPoll(INIT_POLL_MS);
           return;
         }
@@ -1528,6 +1528,11 @@
       }
       if (status.initialized) {
         showInitCompletion(status);
+        return;
+      }
+      if (embeddingPullProgressView(status).active) {
+        renderInitProgress(status);
+        scheduleInitPoll(INIT_POLL_MS);
         return;
       }
       if (!selected.length) {
@@ -1765,6 +1770,16 @@
         }
         if (status.initialized) {
           showInitCompletion(status);
+          return;
+        }
+        // The packaged desktop may start pulling bge-m3 before guided init
+        // owns a run. Attach the wizard to that live progress immediately;
+        // otherwise the first click on “开始初始化” becomes the accidental
+        // status-poll trigger users experience as a frozen download bar.
+        if (embeddingPullProgressView(status).active) {
+          setStep(2);
+          renderInitProgress(status);
+          scheduleInitPoll(INIT_POLL_MS);
           return;
         }
       } catch {}

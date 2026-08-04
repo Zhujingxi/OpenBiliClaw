@@ -1548,6 +1548,18 @@
       return { active, pct, label };
     }
 
+    // Embedding download is process-global work and can begin before guided
+    // init reserves a run. It still needs the same status poll while the UI is
+    // idle, otherwise the first CTA click becomes the only refresh trigger.
+    function embeddingPullNeedsPolling(status) {
+      return Boolean(
+        status &&
+          !status.running &&
+          !status.initialized &&
+          embeddingPullProgressView(status).active,
+      );
+    }
+
     function buildInitChecklist(status, selected = null) {
       const prereq = status?.prerequisites || {};
       const enabled = initEnabledPlatforms(status);
@@ -2142,7 +2154,7 @@
           return;
         }
         renderAll(initStatusRenderOptions());
-        if (embeddingPullProgressView(status).active) {
+        if (embeddingPullNeedsPolling(status)) {
           scheduleInitStatusRefresh(schedule ? INIT_STATUS_POLL_MS : INIT_STATUS_WATCHDOG_MS);
         } else if (!status?.running) {
           clearInitPolling();
@@ -2188,6 +2200,12 @@
         state.initReason = status?.partial_success ? initStatusReasonText(status) : "";
         scheduleBackendHydration();
         renderAll();
+        return;
+      }
+      if (embeddingPullNeedsPolling(status)) {
+        state.initBusy = false;
+        renderAll();
+        scheduleInitStatusRefresh(INIT_STATUS_POLL_MS);
         return;
       }
       if (!selected.length) {
@@ -8933,8 +8951,7 @@ ${cardFeedbackBarHtml()}`;
         // Re-attach the init poll if a run is live at load time. Hydrate only
         // fetches init-status once, while the poll observes quiet heartbeats
         // when runtime events are unavailable.
-        if (snapshot.running
-          || embeddingPullProgressView(snapshot).active) {
+        if (snapshot.running || embeddingPullNeedsPolling(snapshot)) {
           scheduleInitStatusRefresh(INIT_STATUS_POLL_MS);
         }
       }

@@ -6,6 +6,7 @@
 
 ## extension v0.3.193：Firefox AMO 公开商店提审（2026-08-03）
 
+- **修复首启 bge-m3 下载进度不实时更新（Issue #142）**：桌面 `/setup/`、`/web` 与 popup 在初始化前就会接管后台 embedding 拉取并持续轮询；安装包启动拉取前先发布进程全局 running 状态，慢速 Windows 下载无需先点击「开始初始化」即可看到实时进度。
 - **PC Web「聊聊口味」补上持续可见的模型等待态**：消息刚提交时立即显示「阿B 正在思考，等待模型回复…」与三点动效；后端创建 durable `pending/processing` turn、历史刷新接管后继续按真实状态显示，不再因临时提示被刷新覆盖而只剩用户消息。回复完成或失败时等待气泡由终态原位替换；状态使用 polite live region、`aria-busy` 并遵守 reduced-motion。
 - **修复小红书搜索任务整页 0 条的路由漂移**：2026-08-04 真实插件请求复现 `Python` 搜索 0 条且无风控命中，随后确认 Chrome 商店 0.3.192 的通用适配器已经识别 `/search_result/{note_id}`，但 task executor、被动采集和共享 note selector 仍只认 `/explore/{id}` / `/discovery/item/{id}`。三条采集链路现统一使用同一选择器与 URL parser，后端 observed-urls、内容页分类和原生保存身份校验同步接受第三种 note 路由；搜索 SPA 等待上限由 5 秒调整为 12 秒（仍低于 30 秒 dispatcher timeout）。真实空结果会写 `xhs_empty_result`，并只回传 pathname、生命周期标志和各路由 anchor 数量，不包含搜索词、标题、正文、href、Cookie 或页面 state。真机对照确认在测试浏览器实际运行的是商店包 0.3.192；工作区 0.3.193 构建与回归已通过，修复版真实请求须先把该浏览器更新到新包，`chrome.runtime.reload()` 只会重启当前商店包、不会加载工作区 `/dist`。
 - **Firefox 首次公开上架不再复用 unlisted 签名链路**：新增手动 `Submit Firefox AMO Listed Package` workflow，以全局唯一的扩展版本构建 `dist-firefox/`，携带双语名称、摘要、描述、MIT license、合法 Firefox / Android 分类和审核说明提交 `web-ext sign --channel=listed`；0.3.192 已作为 unlisted 版本存在，故公开提审使用独立扩展版本 0.3.193，后端与桌面版本仍保持 0.3.192。

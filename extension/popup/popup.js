@@ -58,6 +58,7 @@ import {
   INIT_RUNNING_HINT,
   INIT_SOURCE_OPTIONS,
   INIT_SOURCE_LOGIN_HINT,
+  shouldAttachEmbeddingPullProgress,
   shouldAttachRunningInitProgress,
   stalenessView,
 } from "./popup-init-control.js";
@@ -1727,12 +1728,43 @@ async function handleCancelInitClick() {
   }
 }
 
+function renderEmbeddingPullStatus(status) {
+  renderInitPanelIdle();
+  _renderInitChecklist(status, _readSelectedInitSources());
+}
+
+async function pollEmbeddingPullProgress() {
+  let status;
+  try {
+    status = await fetchInitStatus();
+  } catch {
+    clearInitPolling();
+    initPollTimer = setTimeout(() => void pollEmbeddingPullProgress(), 3000);
+    return;
+  }
+  if (status?.running || status?.initialized) {
+    renderInitProgress(status);
+    if (status.running) {
+      _startInitProgressPoll();
+    } else {
+      clearInitPolling();
+    }
+    return;
+  }
+  renderEmbeddingPullStatus(status);
+  if (shouldAttachEmbeddingPullProgress(status)) {
+    clearInitPolling();
+    initPollTimer = setTimeout(() => void pollEmbeddingPullProgress(), 3000);
+  } else {
+    clearInitPolling();
+  }
+}
+
 // Boot-time re-attach: when the popup opens while a run is already live, the
 // uninitialized branch would otherwise paint the idle panel and never poll
-// (the run started elsewhere, so no click/SSE kicked the poll here). Fetch once
-// and, ONLY if a run is in flight, take over with the progress view + poll.
-// The idle path is left untouched (renderInitProgress would clobber it). This
-// mirrors the setup wizard's boot guard and the desktop hydrate re-attach.
+// (the run started elsewhere, so no click/SSE kicked the poll here). The same
+// applies to a packaged desktop's background bge-m3 pull: it is live work,
+// but it has no guided-init run id or SSE event of its own.
 async function maybeAttachRunningInitProgress() {
   let status;
   try {
@@ -1741,6 +1773,12 @@ async function maybeAttachRunningInitProgress() {
     return false;
   }
   if (!shouldAttachRunningInitProgress(status)) {
+    if (shouldAttachEmbeddingPullProgress(status)) {
+      renderEmbeddingPullStatus(status);
+      clearInitPolling();
+      initPollTimer = setTimeout(() => void pollEmbeddingPullProgress(), 1200);
+      return true;
+    }
     return false;
   }
   renderInitProgress(status);
@@ -1802,6 +1840,15 @@ async function handleStartInitClick() {
   if (status.running) {
     renderInitProgress(status);
     _startInitProgressPoll();
+    return;
+  }
+
+  // A background bge-m3 pull is not a guided-init run. Keep the CTA idle and
+  // attach the checklist poll instead of treating the pull as a failed init.
+  if (shouldAttachEmbeddingPullProgress(status)) {
+    renderEmbeddingPullStatus(status);
+    clearInitPolling();
+    initPollTimer = setTimeout(() => void pollEmbeddingPullProgress(), 1200);
     return;
   }
 
