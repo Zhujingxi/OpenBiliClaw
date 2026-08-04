@@ -1154,6 +1154,20 @@ def test_sparse_json_transport_audit_fails_closed(
     assert expected_reason in " ".join(audit["blocking_reasons"])
 
 
+def test_candidate_transport_reason_contract_ignores_control_arm_provider_noise() -> None:
+    calls = _candidate_transport_audit_calls("sparse-json")
+    control_a = next(call for call in calls if call["pair_kind"] == "control")
+    control_a["reason_field_count"] = int(control_a["structured_item_count"]) - 1
+
+    audit = validate_candidate_transport_experiment(
+        calls,
+        experiment="sparse-json",
+        repeats=3,
+    )
+
+    assert audit["passed"] is True, audit["blocking_reasons"]
+
+
 def test_row_wire_transport_requires_strictly_positive_total_savings() -> None:
     calls = _candidate_transport_audit_calls("row-wire-v1")
     for call in calls:

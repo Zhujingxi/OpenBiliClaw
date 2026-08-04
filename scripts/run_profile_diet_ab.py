@@ -2829,8 +2829,18 @@ def validate_candidate_transport_experiment(
         if not str(call.get("image_payloads_digest") or ""):
             blocking_reasons.append(f"{experiment} ordered image payload digest is missing")
         structured_item_count = int(call.get("structured_item_count") or 0)
-        if structured_item_count > 0 and int(call.get("reason_field_count") or 0) != (
-            structured_item_count
+        # The candidate-transport gate attributes contract drift to the changed
+        # transport only.  Provider noise in an A/A control (or the unchanged
+        # treatment A baseline) is preserved in the artifact, but must not be
+        # mislabeled as a sparse/row regression.  Arm B still fails closed when
+        # any structured result omits the production ``reason`` field.
+        is_changed_transport_response = (
+            arm == "B" and str(call.get("pair_kind") or "") == "treatment"
+        )
+        if (
+            is_changed_transport_response
+            and structured_item_count > 0
+            and int(call.get("reason_field_count") or 0) != structured_item_count
         ):
             blocking_reasons.append(f"{experiment} response changed the reason output contract")
         raw_classification_items = call.get("classification_items")
