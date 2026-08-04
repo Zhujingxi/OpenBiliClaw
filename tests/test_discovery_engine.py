@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+import openbiliclaw.llm.prompts as prompt_module
 from openbiliclaw.discovery.engine import (
     ContentDiscoveryEngine,
     DiscoveredContent,
@@ -481,6 +482,7 @@ async def test_evaluate_content_single_passes_text_metrics_and_tags_to_prompt() 
             content_id="tweet-1",
             title="正文首行",
             body_text="完整 thread 正文",
+            published_at="2026-08-01T12:30:00+00:00",
             tags=["systems", "async"],
             source_platform="twitter",
             content_type="thread",
@@ -501,6 +503,8 @@ async def test_evaluate_content_single_passes_text_metrics_and_tags_to_prompt() 
 
     user_input = str(llm_service.calls[0]["user_input"])
     assert '"body_text": "完整 thread 正文"' in user_input
+    assert '"evaluated_at": "' in user_input
+    assert '"published_at": "2026-08-01T12:30:00+00:00"' in user_input
     assert '"tags": [' in user_input
     assert '"like_count": 100' in user_input
     assert '"favorite_count": 90' in user_input
@@ -511,6 +515,31 @@ async def test_evaluate_content_single_passes_text_metrics_and_tags_to_prompt() 
     assert '"reply_count": 40' in user_input
     assert '"retweet_count": 30' in user_input
     assert '"bookmark_count": 20' in user_input
+
+
+@pytest.mark.asyncio
+async def test_evaluate_content_cache_invalidates_when_published_at_changes() -> None:
+    llm_service = FakeLLMService(
+        '{"score": 0.82, "reason": "匹配", "topic_group": "系统", "style_key": "deep_dive"}'
+    )
+    engine = ContentDiscoveryEngine(llm_service=llm_service)
+    profile = _build_profile()
+
+    await engine.evaluate_content(
+        DiscoveredContent(bvid="BV1TIME", title="模型更新", source_strategy="search"),
+        profile,
+    )
+    await engine.evaluate_content(
+        DiscoveredContent(
+            bvid="BV1TIME",
+            title="模型更新",
+            published_at="2026-08-04T08:00:00Z",
+            source_strategy="search",
+        ),
+        profile,
+    )
+
+    assert len(llm_service.calls) == 2
 
 
 @pytest.mark.asyncio
@@ -2861,12 +2890,14 @@ async def test_evaluate_batch_sends_per_item_platform_metadata() -> None:
             DiscoveredContent(
                 bvid="BV1",
                 title="Bili",
+                published_at="2026-08-02T08:00:00+00:00",
                 source_platform="bilibili",
                 source_strategy="search",
             ),
             DiscoveredContent(
                 content_id="xhs1",
                 title="XHS",
+                published_at="",
                 source_platform="xiaohongshu",
                 source_strategy="xhs-extension-search",
                 content_url="https://www.xiaohongshu.com/explore/xhs1",
@@ -2879,6 +2910,9 @@ async def test_evaluate_batch_sends_per_item_platform_metadata() -> None:
     user = llm.user_inputs[-1]
     assert '"source_platform": "bilibili"' in user
     assert '"source_platform": "xiaohongshu"' in user
+    assert '"published_at": "2026-08-02T08:00:00+00:00"' in user
+    assert '"published_at": ""' in user
+    assert '"evaluated_at": "' in user
     assert '"source_strategy": "xhs-extension-search"' in user
     assert '"content_type": "note"' in user
     assert "<source_platform>\n\nmixed\n\n</source_platform>" in user
@@ -3119,6 +3153,59 @@ async def test_eval_cache_rechecks_content_when_negative_exemplars_change() -> N
 
     assert len(llm.user_inputs) == 2, "negative-anchor revision must invalidate eval cache"
     assert "<negative_examples>" in llm.user_inputs[1]
+
+
+@pytest.mark.asyncio
+async def test_batch_eval_cache_rechecks_content_when_published_at_changes() -> None:
+    db = _StubNegativeExemplarsDatabase(rows=[])
+    llm = _RecordingBatchLLMService()
+    engine = ContentDiscoveryEngine(llm_service=llm, database=db)
+    profile = _build_profile()
+
+    await engine.evaluate_content_batch(
+        [DiscoveredContent(bvid="BVtime", title="模型更新", source_strategy="search")],
+        profile,
+    )
+    await engine.evaluate_content_batch(
+        [
+            DiscoveredContent(
+                bvid="BVtime",
+                title="模型更新",
+                published_at="2026-08-04T08:00:00Z",
+                source_strategy="search",
+            )
+        ],
+        profile,
+    )
+
+    assert len(llm.user_inputs) == 2
+
+
+@pytest.mark.asyncio
+async def test_batch_eval_cache_expires_on_next_evaluation_hour(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clocks = iter(
+        [
+            ("2026-08-04T09:47:00Z", "2026-08-04T09:00:00Z"),
+            ("2026-08-04T10:02:00Z", "2026-08-04T10:00:00Z"),
+        ]
+    )
+    monkeypatch.setattr(prompt_module, "content_evaluation_clock", lambda: next(clocks))
+    llm = _RecordingBatchLLMService()
+    engine = ContentDiscoveryEngine(llm_service=llm)
+    profile = _build_profile()
+    content = DiscoveredContent(
+        bvid="BVhour",
+        title="滚动热点",
+        published_at="2026-08-04T08:30:00Z",
+        source_strategy="trending",
+    )
+
+    await engine.evaluate_content_batch([content], profile)
+    await engine.evaluate_content_batch([content], profile)
+
+    assert len(llm.user_inputs) == 2
 
 
 @pytest.mark.asyncio
