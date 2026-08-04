@@ -25,12 +25,12 @@ controller's ``run_forever``) and, when the
    falls back. When the merged call **fails entirely** (raised / no usable
    response), ALL due platforms fall back to deterministic interest names.
 4. Rotation polish (P2.3). ``claim_keywords`` is FIFO (oldest pending first), so
-   generated words rotate fairly. After a generation cycle, a non-declined due
-   platform whose pending is still below ``kw_cache_low`` is conservatively
-   topped up from its oldest ``used`` words via ``recycle_oldest_used`` (no
-   extra LLM call) so variety keeps flowing; a declined platform is left alone.
-   The sparse-profile recycle (generation + fallback produced nothing new)
-   stays as the deeper safety valve.
+   generated words rotate fairly. Recent words participate in the generation
+   cache key and are enforced again before insert, so a stable profile cannot
+   replay one cached batch for the whole plan TTL. After a generation cycle, a
+   non-declined due platform whose pending is still below ``kw_cache_low`` may
+   reuse an old ``used`` word only after the configured history window has
+   elapsed; a declined platform is left alone.
 
 It never fetches — fetch (claim → search) is P1.7. Single-flight is enforced
 through the DB-level planner lock, whose write transaction is released
@@ -1440,6 +1440,14 @@ class KeywordPlanner:
                 {
                     "platform": str(block.get("platform", "")),
                     "need": int(cast("Any", block.get("need", 0)) or 0),
+                    # The prompt already receives this list. It must also shape
+                    # the cache key: omitting it made a stable profile replay the
+                    # same generated batch for ``plan_ttl_hours`` even after the
+                    # words had been searched and moved into recent history.
+                    "recent_keywords": [
+                        self._match_text(item)
+                        for item in _as_str_list(block.get("recent_keywords"))
+                    ],
                     "avoid_topics": _as_str_list(block.get("avoid_topics")),
                     "avoid_styles": _as_str_list(block.get("avoid_styles")),
                     "avoid_franchises": _as_str_list(block.get("avoid_franchises")),
@@ -1650,8 +1658,19 @@ class KeywordPlanner:
             logger.exception("count_pending_keywords failed for %s", platform)
             return 0
 
-    def _history(self, platform: str) -> list[str]:
+    def _history(self, platform: str, *, keyword_kind: str = "regular") -> list[str]:
         try:
+            return list(
+                self._db.history_keywords(
+                    platform,
+                    int(self._discovery.history_window_size),
+                    float(self._discovery.history_window_hours),
+                    keyword_kind=keyword_kind,
+                )
+            )
+        except TypeError:
+            if keyword_kind != "regular":
+                return []
             return list(
                 self._db.history_keywords(
                     platform,
@@ -1674,11 +1693,18 @@ class KeywordPlanner:
     ) -> int:
         if not words:
             return 0
+        filtered = self._novel_keywords(
+            platform,
+            words,
+            keyword_kind=keyword_kind,
+        )
+        if not filtered:
+            return 0
         try:
             return int(
                 self._db.insert_pending_keywords(
                     platform,
-                    words,
+                    filtered,
                     digest,
                     keyword_kind=keyword_kind,
                     metadata_by_keyword=metadata_by_keyword,
@@ -1687,20 +1713,123 @@ class KeywordPlanner:
         except TypeError:
             if keyword_kind != "regular":
                 return 0
-            return int(self._db.insert_pending_keywords(platform, words, digest))
+            return int(self._db.insert_pending_keywords(platform, filtered, digest))
         except Exception:
             logger.exception("insert_pending_keywords failed for %s", platform)
             return 0
+
+    def _novel_keywords(
+        self,
+        platform: str,
+        words: Sequence[str],
+        *,
+        keyword_kind: str = "regular",
+    ) -> list[str]:
+        """Remove exact and suffix-only variants of recently consumed queries."""
+
+        recent = {
+            self._keyword_family_key(item)
+            for item in self._history(platform, keyword_kind=keyword_kind)
+            if self._keyword_family_key(item)
+        }
+        filtered: list[str] = []
+        seen: set[str] = set()
+        for word in words:
+            key = self._keyword_family_key(word)
+            if not key or key in recent or key in seen:
+                continue
+            seen.add(key)
+            filtered.append(str(word))
+        if len(filtered) != len(words):
+            logger.info(
+                "keyword planner novelty filter: platform=%s kind=%s input=%d kept=%d",
+                platform,
+                keyword_kind,
+                len(words),
+                len(filtered),
+            )
+        return filtered
 
     def _recycle(self, platform: str, n: int, digest: str) -> int:
         recycle = getattr(self._db, "recycle_oldest_used", None)
         if not callable(recycle) or n <= 0:
             return 0
         try:
+            return int(
+                recycle(
+                    platform,
+                    n,
+                    digest,
+                    min_age_hours=float(self._discovery.history_window_hours),
+                )
+            )
+        except TypeError:
             return int(recycle(platform, n, digest))
         except Exception:
             logger.exception("recycle_oldest_used failed for %s", platform)
             return 0
+
+    @staticmethod
+    def _keyword_novelty_key(value: object) -> str:
+        """Normalize formatting-only query differences for exact cooldown.
+
+        This is deliberately conservative: it collapses case, spaces and
+        punctuation but does not attempt semantic similarity, which could hide
+        genuinely different long-tail searches under the same broad interest.
+        """
+        return re.sub(r"[\W_]+", "", str(value or "").strip().casefold())
+
+    @classmethod
+    def _keyword_family_key(cls, value: object) -> str:
+        """Collapse a query plus generic trailing style markers to one family.
+
+        The rule stays intentionally narrow: only suffixes that add no new
+        search subject are stripped. Different entities or mechanisms remain
+        distinct, while ``同一事件 争议`` and ``同一事件 争议 复盘`` share a
+        cooldown family.
+        """
+
+        key = cls._keyword_novelty_key(value)
+        if not key:
+            return ""
+        suffixes = (
+            "深度解析",
+            "技术解析",
+            "原理解析",
+            "复盘分析",
+            "实测评测",
+            "入门教程",
+            "完整教程",
+            "详细教程",
+            "教程",
+            "复盘",
+            "解析",
+            "分析",
+            "盘点",
+            "解说",
+            "科普",
+            "测评",
+            "评测",
+            "实测",
+            "推荐",
+            "攻略",
+            "教学",
+            "explained",
+            "tutorial",
+            "analysis",
+            "review",
+            "guide",
+            "tips",
+        )
+        changed = True
+        while changed:
+            changed = False
+            for suffix in suffixes:
+                if key.endswith(suffix) and len(key) > len(suffix):
+                    key = key[: -len(suffix)]
+                    changed = True
+                    break
+        return key
 
     def _avoid_hints(self, profile: SoulProfile | None = None) -> dict[str, dict[str, object]]:
         """Per-platform topic avoid + global style/franchise avoid (P3.1).

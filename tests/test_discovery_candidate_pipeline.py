@@ -1683,6 +1683,41 @@ def test_pipeline_target_zero_still_bounds_enqueued_candidates(tmp_path: Path) -
     }
 
 
+def test_pipeline_retires_keyword_when_every_returned_identity_is_known(tmp_path: Path) -> None:
+    db = Database(tmp_path / "test.db")
+    db.initialize()
+    db.insert_pending_keywords("bilibili", ["重复热榜词"], "digest")
+    [claimed] = db.claim_keywords("bilibili", 1)
+    db.mark_keyword_used(int(claimed["id"]))
+    pipeline = DiscoveryCandidatePipeline(
+        database=db,
+        discovery_engine=object(),  # type: ignore[arg-type]
+        pool_target_count=30,
+    )
+    original = DiscoveredContent(
+        content_id="BVKNOWN",
+        title="Known",
+        source_platform="bilibili",
+        source_strategy="search",
+    )
+    assert pipeline.enqueue_candidates([original], source_context="search") == 1
+    duplicate = DiscoveredContent(
+        content_id="BVKNOWN",
+        title="Known again",
+        source_platform="bilibili",
+        source_strategy="search",
+        source_keyword_id=int(claimed["id"]),
+    )
+
+    assert pipeline.enqueue_candidates([duplicate], source_context="search") == 0
+    row = db.conn.execute(
+        "SELECT status, used_at FROM discovery_keywords WHERE id=?",
+        (int(claimed["id"]),),
+    ).fetchone()
+    assert row["status"] == "expired"
+    assert row["used_at"] is not None
+
+
 @pytest.mark.asyncio
 async def test_pipeline_produce_and_enqueue_short_circuits_when_pool_full(
     tmp_path: Path,

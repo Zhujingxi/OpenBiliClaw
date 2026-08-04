@@ -292,6 +292,20 @@ class TestHistoryAndRecycle:
         hist = db.history_keywords(_BILI, window_size=50, window_hours=48)
         assert hist == ["recent"]
 
+    def test_history_keeps_consumed_zero_yield_word_after_retirement(self, db: Database) -> None:
+        db.insert_pending_keywords(_BILI, ["重复搜索词"], _DIGEST_A)
+        [row] = db.claim_keywords(_BILI, 1)
+        db.mark_keyword_used(int(row["id"]))
+
+        assert db.retire_duplicate_only_keywords([int(row["id"])]) == 1
+        assert db.history_keywords(_BILI, window_size=50, window_hours=48) == ["重复搜索词"]
+
+    def test_history_does_not_keep_unconsumed_stale_digest_word(self, db: Database) -> None:
+        db.insert_pending_keywords(_BILI, ["旧画像待用词"], _DIGEST_A)
+        assert db.expire_pending_by_digest(_BILI, _DIGEST_B) == 1
+
+        assert db.history_keywords(_BILI, window_size=50, window_hours=48) == []
+
     def test_history_caps_to_window_size(self, db: Database) -> None:
         db.insert_pending_keywords(_BILI, [f"w{i}" for i in range(10)], _DIGEST_A)
         for r in db.claim_keywords(_BILI, 10):
@@ -329,6 +343,24 @@ class TestHistoryAndRecycle:
         assert _status_of_keyword(db, "second") == "used"
         # Recycled row is re-stamped with the requested digest and claimable again.
         assert db.count_pending_keywords(_BILI, _DIGEST_A) == 1
+
+    def test_recycle_respects_minimum_age_cooldown(self, db: Database) -> None:
+        db.insert_pending_keywords(_BILI, ["recent", "old"], _DIGEST_A)
+        rows = {r["keyword"]: r for r in db.claim_keywords(_BILI, 10)}
+        for row in rows.values():
+            db.mark_keyword_used(int(row["id"]))
+        _backdate(db, int(rows["old"]["id"]), "used_at", minutes_ago=60 * 72)
+
+        recycled = db.recycle_oldest_used(
+            _BILI,
+            10,
+            _DIGEST_A,
+            min_age_hours=48,
+        )
+
+        assert recycled == 1
+        assert _status(db, int(rows["old"]["id"])) == "pending"
+        assert _status(db, int(rows["recent"]["id"])) == "used"
 
     def test_recycle_skips_word_already_inflight_for_digest(self, db: Database) -> None:
         # `dup` is both used (old) and freshly pending under the same digest.

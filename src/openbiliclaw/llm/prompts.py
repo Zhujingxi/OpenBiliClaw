@@ -2417,7 +2417,13 @@ Rules:
    appear in allocation_targets.
 10. Keep axes grounded in fresh_evidence. evidence_refs should point to the provided URL or compact
    evidence identifier when available.
-11. Keep JSON compact and valid. No markdown, no commentary, no trailing prose.
+11. A keyword's ``interest`` MUST exactly name one item from selected_interests. Its core_concept
+   must be supported by fresh_evidence or an existing axis for that SAME interest. Never copy a
+   work, person, event, controversy, or mechanism from another interest's evidence and relabel it.
+   If the same-interest evidence cannot support a concrete query, omit that keyword instead.
+12. Treat recent_keywords as query families, not exact strings: adding only a generic suffix such
+   as 复盘 / 解析 / 分析 / 教程 / 盘点 / review / explained is still a duplicate and must be omitted.
+13. Keep JSON compact and valid. No markdown, no commentary, no trailing prose.
 """.strip()
 
 

@@ -19,6 +19,8 @@
 - **避雷画像不再把推荐永久杀空**：正常情况下仍用 `disliked_topics` 对结构化 topic 与标题/简介/作者/标签/正文做即时出口过滤；只有模糊子串规则将整个 serve 窗口过滤为零时，才对该窗口降级为 `topic_key/topic_group/pool_topic_label` 精确硬禁用并记录诊断，显式类别避雷不恢复。
 - **候选池维护不再恢复/裁剪振荡**：suppressed 恢复受 raw headroom 限制，raw 已满或超限时先裁剪；protected/token-owned excess 已无 victim 时返回 `has_more=False` 并把原 ERROR 风暴降为稳定 WARNING。用户日志中的 AB raw 状态不再每 tick 反复切换。
 - **错误模型路由快速失败**：OpenAI-compatible 的 400/403/404/405/422 不再做三次无效 provider 重试；`404 model route not found` 保留完整原因交给 fallback/配置诊断，5xx、timeout 与传输错误继续按原策略重试。
+- **稳定画像不再回放同一批搜索词**：关键词 generation cache key 纳入实时 `recent_keywords`，写入前再按大小写/空白/标点做近期词硬去重；候选预过滤若发现某个 `source_keyword_id` 的返回结果全部已存在，会立即把该词退役并保留冷却历史。`recycle_oldest_used` 只允许超过 `history_window_hours` 的历史有效词兜底，避免画像 digest 不变时在 `plan_ttl_hours` 内反复搜索相同内容。
+- **灵感词按真实产出轮换并拦截换皮/错归因**：`materialize_platform_keywords()` 先覆盖每个选中兴趣再给同兴趣补第二轴，避免少量兴趣抢完平台配额；selection ledger 延后到装配与近期过滤之后，只记录实际留下关键词的兴趣。输出若冒用未选兴趣、或 core 明确命中另一个画像兴趣会被拒绝；只给旧 query 增加「复盘 / 解析 / 教程 / 盘点 / 测评」等尾缀也归入同一冷却 family。
 
 ### 小红书访问节奏与风控背压
 
