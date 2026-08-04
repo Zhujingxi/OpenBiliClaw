@@ -1,5 +1,6 @@
 """Tests for prompt builders and core memory rendering."""
 
+import json
 from pathlib import Path
 
 import openbiliclaw.llm.prompts as prompt_module
@@ -523,6 +524,37 @@ def test_batch_content_evaluation_prompt_orders_profile_before_source_and_batch(
     assert user_prompt.index("<profile_summary>") < user_prompt.index("<source_platform>")
     assert user_prompt.index("<source_platform>") < user_prompt.index("<source_context>")
     assert user_prompt.index("<source_context>") < user_prompt.index("<content_batch>")
+
+
+def test_batch_content_evaluation_compact_json_changes_whitespace_only() -> None:
+    kwargs = {
+        "profile_summary": {"interests": ["系统 设计"], "values": ["可靠"]},
+        "content_items": [
+            {
+                "content_id": "item-1",
+                "title": "保留 字符串 内部 空格",
+                "tags": ["架构", "测试"],
+            }
+        ],
+        "source_context": "mixed",
+        "source_platform": "mixed",
+        "negative_examples": [{"title": "不要 破坏", "reason": "quick_exit"}],
+    }
+    pretty = build_batch_content_evaluation_prompt(**kwargs)
+    compact = build_batch_content_evaluation_prompt(**kwargs, compact_json=True)
+
+    assert compact[0]["content"] == pretty[0]["content"]
+    assert len(compact[1]["content"]) < len(pretty[1]["content"])
+
+    for tag in ("profile_summary", "negative_examples", "content_batch"):
+        start = f"<{tag}>\n\n"
+        end = f"\n\n</{tag}>"
+        pretty_json = pretty[1]["content"].split(start, 1)[1].split(end, 1)[0]
+        compact_json = compact[1]["content"].split(start, 1)[1].split(end, 1)[0]
+        assert json.loads(compact_json) == json.loads(pretty_json)
+        assert "\n  " not in compact_json
+
+    assert "保留 字符串 内部 空格" in compact[1]["content"]
 
 
 def test_content_evaluation_prompts_only_allow_explore_scoring_exception() -> None:

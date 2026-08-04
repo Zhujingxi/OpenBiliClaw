@@ -35,14 +35,21 @@ from scripts.run_profile_diet_ab import (
     score_delta_summary,
     select_replay_rows,
     spearman_rank_correlation,
+    validate_json_minify_transport,
     validate_reason_off_outputs,
     validate_replay_prefilter_compatibility,
     validate_replay_routes,
 )
 
-from openbiliclaw.discovery.engine import ContentDiscoveryEngine, compact_evaluation_profile_summary
+from openbiliclaw.discovery.engine import (
+    ContentDiscoveryEngine,
+    compact_evaluation_profile_summary,
+    evaluation_profile_prompt_layers,
+)
 from openbiliclaw.discovery.strategies._utils import build_profile_summary
 from openbiliclaw.llm.base import LLMRateLimitError, LLMResponse
+from openbiliclaw.llm.prompt_cache import PromptLayerRenderCache
+from openbiliclaw.llm.prompts import build_batch_content_evaluation_prompt
 from openbiliclaw.llm.service import LLMProviderExecutionError
 from openbiliclaw.memory.manager import MemoryManager
 from openbiliclaw.soul.overrides import ListEdit, ProfileOverrides
@@ -236,6 +243,7 @@ def _passing_replay_gate_inputs() -> dict[str, object]:
         "embedding_audit": {"passed": True, "blocking_reasons": []},
         "recall_audit": {"passed": True, "blocking_reasons": []},
         "reason_output_audit": {"passed": True, "blocking_reasons": []},
+        "prompt_transport_audit": {"passed": True, "blocking_reasons": []},
         "profile_snapshot_stable": True,
         "candidate_snapshot_stable": True,
     }
@@ -253,6 +261,7 @@ def test_replay_final_gate_accepts_only_complete_evidence() -> None:
         ("embedding", "embedding audit failed"),
         ("recall", "recall audit failed"),
         ("reason_output", "reason-output audit failed"),
+        ("prompt_transport", "prompt-transport audit failed"),
         ("profile", "profile snapshot drifted"),
         ("candidate", "candidate snapshot drifted"),
     ],
@@ -264,7 +273,7 @@ def test_replay_final_gate_blocks_each_independent_failure(
     inputs = _passing_replay_gate_inputs()
     if failure == "quality":
         inputs["quality_passed"] = False
-    elif failure in {"route", "embedding", "recall", "reason_output"}:
+    elif failure in {"route", "embedding", "recall", "reason_output", "prompt_transport"}:
         inputs[f"{failure}_audit"] = {"passed": False, "blocking_reasons": []}
     elif failure == "profile":
         inputs["profile_snapshot_stable"] = False
@@ -274,6 +283,410 @@ def test_replay_final_gate_blocks_each_independent_failure(
     reasons = replay_blocking_reasons(**inputs)  # type: ignore[arg-type]
 
     assert expected_reason in " ".join(reasons)
+
+
+def _json_minify_prompt_pair() -> tuple[dict[str, object], dict[str, object]]:
+    profile = {
+        "core_traits": ["PRIVATE TRAIT"],
+        "interests": [{"name": "中文 兴趣", "weight": 0.9}],
+        "current_phase": "PRIVATE PHASE",
+    }
+    content_items = [
+        {
+            "content_id": "PRIVATE-ID",
+            "title": "PRIVATE TITLE",
+            "body_text": "line one\nline two mentions <negative_examples> as data",
+            "source_platform": "bilibili",
+        }
+    ]
+    negative_examples = [{"title": "PRIVATE NEGATIVE", "reason": "quick_exit"}]
+
+    def messages(*, compact: bool) -> list[dict[str, str]]:
+        cache = PromptLayerRenderCache()
+        return build_batch_content_evaluation_prompt(
+            profile_summary=profile,
+            profile_blocks=cache.render_json_layers(
+                evaluation_profile_prompt_layers(profile),
+                compact=compact,
+            ),
+            content_items=content_items,
+            source_context="mixed",
+            source_platform="bilibili",
+            negative_examples=negative_examples,
+            compact_json=compact,
+        )
+
+    pretty = messages(compact=False)
+    compact = messages(compact=True)
+    pretty_metadata = replay_script._prompt_transport_metadata(
+        {
+            "system_instruction": pretty[0]["content"],
+            "user_input": pretty[1]["content"],
+        },
+        expected_compact_json=False,
+    )
+    compact_metadata = replay_script._prompt_transport_metadata(
+        {
+            "system_instruction": compact[0]["content"],
+            "user_input": compact[1]["content"],
+        },
+        expected_compact_json=True,
+    )
+    return pretty_metadata, compact_metadata
+
+
+def test_json_minify_prompt_metadata_proves_whitespace_only_and_is_private() -> None:
+    pretty, compact = _json_minify_prompt_pair()
+
+    assert pretty["system_digest"] == compact["system_digest"]
+    assert pretty["prompt_semantic_digest"] == compact["prompt_semantic_digest"]
+    assert pretty["prompt_digest"] != compact["prompt_digest"]
+    assert int(compact["prompt_chars"]) < int(pretty["prompt_chars"])
+    assert int(compact["prompt_bytes"]) < int(pretty["prompt_bytes"])
+    assert pretty["all_target_json_pretty"] is True
+    assert compact["all_target_json_compact"] is True
+    assert int(compact["profile_json_block_count"]) >= 1
+    assert compact["negative_examples_json_block_count"] == 1
+    assert compact["content_batch_json_block_count"] == 1
+    assert "PRIVATE" not in json.dumps([pretty, compact])
+
+
+def test_json_minify_prompt_metadata_pairs_images_without_retaining_them() -> None:
+    kwargs = {
+        "system_instruction": "system",
+        "user_input": '<content_batch>\n\n{"content_id": "safe"}\n\n</content_batch>',
+        "image_inputs": [
+            {
+                "content_id": "PRIVATE IMAGE ID",
+                "mime_type": "image/jpeg",
+                "data_url": "data:image/jpeg;base64,PRIVATE IMAGE BYTES",
+            }
+        ],
+    }
+
+    first = replay_script._prompt_transport_metadata(
+        kwargs,
+        expected_compact_json=True,
+    )
+    same = replay_script._prompt_transport_metadata(
+        kwargs,
+        expected_compact_json=True,
+    )
+    changed = replay_script._prompt_transport_metadata(
+        {
+            **kwargs,
+            "image_inputs": [
+                {
+                    "content_id": "PRIVATE IMAGE ID",
+                    "mime_type": "image/jpeg",
+                    "data_url": "data:image/jpeg;base64,DIFFERENT PRIVATE BYTES",
+                }
+            ],
+        },
+        expected_compact_json=True,
+    )
+
+    assert first["prompt_semantic_digest"] == same["prompt_semantic_digest"]
+    assert first["prompt_semantic_digest"] != changed["prompt_semantic_digest"]
+    assert first["image_input_count"] == 1
+    assert "PRIVATE" not in json.dumps([first, same, changed])
+
+
+def test_json_minify_prompt_metadata_rejects_malformed_tagged_json() -> None:
+    with pytest.raises(RuntimeError, match="malformed replay JSON block"):
+        replay_script._prompt_transport_metadata(
+            {
+                "system_instruction": "system",
+                "user_input": "<content_batch>\n\n{not-json}\n\n</content_batch>",
+            },
+            expected_compact_json=True,
+        )
+
+
+def _json_minify_audit_calls(*, repeats: int = 3) -> list[dict[str, object]]:
+    pretty, compact = _json_minify_prompt_pair()
+    calls: list[dict[str, object]] = []
+
+    def add_call(
+        *,
+        pair_kind: str,
+        repeat: int,
+        logical_run: str,
+        arm: str,
+    ) -> None:
+        metadata = pretty if arm == "A" else compact
+        if pair_kind == "treatment" and arm == "B":
+            usage = {
+                "input_tokens": 850,
+                "output_tokens": 30,
+                "total_tokens": 880,
+                "cached_input_tokens": 85,
+            }
+        else:
+            usage = {
+                "prompt_tokens": 1000,
+                "completion_tokens": 100,
+                "total_tokens": 1100,
+                "cached_input_tokens": 100,
+            }
+        classification_items = [
+            {
+                "candidate_key_digest": f"candidate-{index}",
+                "position": index,
+                "fields": {
+                    field: {"digest": f"stable-{field}", "nonempty": True}
+                    for field in replay_script._REPLAY_CLASSIFICATION_FIELDS
+                },
+            }
+            for index in range(30)
+        ]
+        calls.append(
+            {
+                "pair_kind": pair_kind,
+                "repeat": repeat,
+                "logical_run": logical_run,
+                "arm": arm,
+                "method": "complete_structured_task",
+                "caller": "discovery.evaluate_batch",
+                "temperature": 0.0,
+                "max_tokens": 4096,
+                "request_kind": "root",
+                "request_ordinal": 0,
+                "request_candidate_count": 30,
+                "cache_usage_semantics": "prompt_includes_cached",
+                "cache_metric_supported": True,
+                "status": "ok",
+                "structured_item_count": 30,
+                "classification_items": classification_items,
+                "usage": usage,
+                **metadata,
+            }
+        )
+
+    for repeat in range(1, repeats + 1):
+        add_call(pair_kind="control", repeat=repeat, logical_run="A1", arm="A")
+        add_call(pair_kind="control", repeat=repeat, logical_run="A2", arm="A")
+        add_call(pair_kind="treatment", repeat=repeat, logical_run="A", arm="A")
+        add_call(pair_kind="treatment", repeat=repeat, logical_run="B", arm="B")
+    return calls
+
+
+def _passing_json_minify_audit(calls: list[dict[str, object]]) -> dict[str, object]:
+    cache_stats = {
+        "profile_core": {"digest": "digest-core", "hits": 11, "misses": 1},
+        "profile_interests": {"digest": "digest-interests", "hits": 11, "misses": 1},
+    }
+    return validate_json_minify_transport(
+        calls,
+        enabled=True,
+        repeats=3,
+        arm_a_profile_cache_stats=cache_stats,
+        arm_b_profile_cache_stats=cache_stats,
+    )
+
+
+def test_json_minify_transport_audit_passes_complete_evidence() -> None:
+    audit = _passing_json_minify_audit(_json_minify_audit_calls())
+
+    assert audit["passed"] is True
+    token_gate = audit["token_gate"]
+    assert token_gate["prompt_savings_median"] == pytest.approx(0.15)
+    assert token_gate["total_savings_median"] == pytest.approx(0.20)
+    treatment_a = audit["token_usage"]["treatment_comparison"]["A"]
+    assert treatment_a["cached_input_tokens"] == 300
+    assert treatment_a["uncached_input_tokens"] == 2700
+    assert treatment_a["evaluated_item_count"] == 90
+    assert treatment_a["evaluated_item_count_basis"] == "root_request_candidates"
+    assert audit["repair"]["treatment_repair_call_delta_median"] == 0
+    assert audit["classification"]["passed"] is True
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_reason"),
+    [
+        ("compact", "non-compact target JSON"),
+        ("pretty", "non-pretty target JSON"),
+        ("compact_flag", "did not use the instance compact flag"),
+        ("blocks", "invalid content-batch block count"),
+        ("semantics", "root prompt semantics differ"),
+        ("system", "system prompt digest changed"),
+        ("raw", "raw prompt bytes violate arm contract"),
+        ("size", "compact prompts are not smaller"),
+        ("runtime", "changed provider call settings"),
+        ("attribution", "missing root/repair attribution"),
+        ("ordinal", "inconsistent repair ordinal"),
+        ("candidate_count", "invalid request candidate count"),
+        ("repair", "member-repair call amplification"),
+        ("usage", "lacks complete token usage"),
+        ("error_usage", "lacks complete token usage"),
+        ("cache_metric", "supported cache usage omitted cached_input_tokens"),
+        ("classification", "topic_group agreement fell below the A/A noise floor"),
+        ("savings", "prompt-token savings missed the 10% gate"),
+        ("total_savings", "total-token savings missed the 8% gate"),
+        ("cache", "provider cache ratio regressed beyond A/A noise"),
+        ("cached_bounds", "cached input tokens exceed prompt tokens"),
+    ],
+)
+def test_json_minify_transport_audit_fails_closed(
+    failure: str,
+    expected_reason: str,
+) -> None:
+    calls = _json_minify_audit_calls()
+    if failure == "compact":
+        calls[-1]["all_target_json_compact"] = False
+    elif failure == "pretty":
+        calls[0]["all_target_json_pretty"] = False
+    elif failure == "compact_flag":
+        calls[-1]["expected_compact_json"] = False
+    elif failure == "blocks":
+        calls[-1]["content_batch_json_block_count"] = 0
+    elif failure == "semantics":
+        calls[-1]["prompt_semantic_digest"] = "semantic-drift"
+    elif failure == "system":
+        calls[-1]["system_digest"] = "system-drift"
+    elif failure == "raw":
+        treatment_a = next(
+            call
+            for call in calls
+            if call["pair_kind"] == "treatment" and call["repeat"] == 3 and call["arm"] == "A"
+        )
+        calls[-1]["prompt_digest"] = treatment_a["prompt_digest"]
+    elif failure == "size":
+        treatment_a = next(
+            call
+            for call in calls
+            if call["pair_kind"] == "treatment" and call["repeat"] == 3 and call["arm"] == "A"
+        )
+        calls[-1]["prompt_chars"] = treatment_a["prompt_chars"]
+        calls[-1]["prompt_bytes"] = treatment_a["prompt_bytes"]
+    elif failure == "runtime":
+        calls[-1]["max_tokens"] = 8192
+    elif failure == "attribution":
+        calls[-1].pop("request_kind")
+    elif failure == "ordinal":
+        calls[-1]["request_ordinal"] = 1
+    elif failure == "candidate_count":
+        calls[-1]["request_candidate_count"] = 0
+    elif failure == "repair":
+        for repeat in range(1, 4):
+            root = next(
+                call
+                for call in calls
+                if call["pair_kind"] == "treatment"
+                and call["repeat"] == repeat
+                and call["arm"] == "B"
+            )
+            repair = dict(root)
+            repair.update(
+                {
+                    "request_kind": "repair",
+                    "request_ordinal": 1,
+                    "request_candidate_count": 1,
+                    "structured_item_count": 1,
+                    "usage": {
+                        "prompt_tokens": 50,
+                        "completion_tokens": 5,
+                        "total_tokens": 55,
+                        "cached_input_tokens": 5,
+                    },
+                }
+            )
+            calls.append(repair)
+    elif failure == "usage":
+        calls[-1]["usage"] = None
+    elif failure == "error_usage":
+        calls[-1]["status"] = "error"
+        calls[-1]["usage"] = None
+    elif failure == "cache_metric":
+        for call in calls:
+            if call["pair_kind"] == "treatment" and call["arm"] == "B":
+                assert isinstance(call["usage"], dict)
+                call["usage"].pop("cached_input_tokens")
+    elif failure == "classification":
+        for call in calls:
+            if call["pair_kind"] == "treatment" and call["arm"] == "B":
+                items = call["classification_items"]
+                assert isinstance(items, list)
+                fields = items[0]["fields"]
+                assert isinstance(fields, dict)
+                topic = fields["topic_group"]
+                assert isinstance(topic, dict)
+                topic["digest"] = "classification-drift"
+    elif failure == "savings":
+        for call in calls:
+            if call["pair_kind"] == "treatment" and call["arm"] == "B":
+                call["usage"] = {
+                    "prompt_tokens": 950,
+                    "completion_tokens": 120,
+                    "total_tokens": 1070,
+                    "cached_input_tokens": 95,
+                }
+    elif failure == "cache":
+        for call in calls:
+            if call["pair_kind"] == "treatment" and call["arm"] == "B":
+                call["usage"] = {
+                    "prompt_tokens": 850,
+                    "completion_tokens": 30,
+                    "total_tokens": 880,
+                    "cached_input_tokens": 0,
+                }
+    elif failure == "total_savings":
+        for call in calls:
+            if call["pair_kind"] == "treatment" and call["arm"] == "B":
+                call["usage"] = {
+                    "prompt_tokens": 850,
+                    "completion_tokens": 230,
+                    "total_tokens": 1080,
+                    "cached_input_tokens": 85,
+                }
+    elif failure == "cached_bounds":
+        calls[-1]["usage"] = {
+            "prompt_tokens": 850,
+            "completion_tokens": 30,
+            "total_tokens": 880,
+            "cached_input_tokens": 851,
+        }
+
+    audit = _passing_json_minify_audit(calls)
+
+    assert audit["passed"] is False
+    assert expected_reason in " ".join(audit["blocking_reasons"])
+
+
+def test_json_minify_transport_requires_profile_layer_cache_evidence() -> None:
+    audit = validate_json_minify_transport(
+        _json_minify_audit_calls(),
+        enabled=True,
+        repeats=3,
+        arm_a_profile_cache_stats=None,
+        arm_b_profile_cache_stats=None,
+    )
+
+    assert audit["passed"] is False
+    assert "profile-layer cache evidence is missing" in " ".join(audit["blocking_reasons"])
+
+
+def test_json_minify_transport_requires_profile_layer_cache_reuse() -> None:
+    cold_stats = {
+        "profile_core": {"digest": "digest-core", "hits": 0, "misses": 1},
+    }
+    audit = validate_json_minify_transport(
+        _json_minify_audit_calls(),
+        enabled=True,
+        repeats=3,
+        arm_a_profile_cache_stats=cold_stats,
+        arm_b_profile_cache_stats=cold_stats,
+    )
+
+    assert audit["passed"] is False
+    assert "recorded no reuse" in " ".join(audit["blocking_reasons"])
+
+
+def test_json_minify_transport_empty_evidence_fails_with_strict_json_artifact() -> None:
+    audit = validate_json_minify_transport([], enabled=True, repeats=3)
+
+    assert audit["passed"] is False
+    json.dumps(audit, allow_nan=False)
 
 
 def test_artifact_keeps_raw_scores_digests_usage_routes_without_private_payloads(
@@ -318,7 +731,7 @@ def test_artifact_keeps_raw_scores_digests_usage_routes_without_private_payloads
 
     _write_artifact(
         output,
-        args=SimpleNamespace(arm_b="compact", repeats=3, platform=None),
+        args=SimpleNamespace(arm_b="json-minify", repeats=3, platform=None),
         db_path=tmp_path / "production.db",
         config_path=tmp_path / "config.toml",
         rows=[
@@ -349,18 +762,26 @@ def test_artifact_keeps_raw_scores_digests_usage_routes_without_private_payloads
         embedding_audit={"passed": True, "namespace": "embed-v1"},
         recall_audit={"passed": True, "injected_label_count": 0},
         reason_output_audit=reason_output_audit,
+        prompt_transport_audit={
+            "enabled": True,
+            "passed": True,
+            "blocking_reasons": [],
+            "logical_runs": [{"prompt_chars": 123, "prompt_bytes": 145}],
+        },
         production_prefilter_mode="shadow",
         topic_lifecycle_serialization=True,
     )
 
     raw_artifact = output.read_text(encoding="utf-8")
     artifact = json.loads(raw_artifact)
-    assert artifact["schema_version"] == 2
+    assert artifact["schema_version"] == 3
     assert artifact["snapshot"]["raw_profile_digest"] == "raw-digest"
     assert artifact["control_pairs"][0]["scores_a"] == [0.6]
     assert artifact["control_pairs"][0]["scores_a_digest"]
     assert artifact["llm_calls"][0]["usage"] == {"output_tokens": 7}
     assert artifact["routes"]["passed"] is True
+    assert artifact["prompt_transport"]["passed"] is True
+    assert artifact["prompt_transport"]["logical_runs"][0]["prompt_bytes"] == 145
     assert (
         artifact["reason_output"]["token_usage"]["treatment_comparison"]["A"]["completion_tokens"]
         == 7
@@ -382,6 +803,7 @@ def test_artifact_keeps_raw_scores_digests_usage_routes_without_private_payloads
     assert artifact["replay_context"] == {"eval_prefilter_mode": "off"}
     assert "PRIVATE TITLE" not in raw_artifact
     assert "PRIVATE BODY" not in raw_artifact
+    assert '"content_id": "item-1"' not in raw_artifact
 
 
 def test_select_replay_rows_preserves_recent_production_mix() -> None:
@@ -698,6 +1120,49 @@ class _RecordingMultimodalService:
         )
 
 
+def test_replay_usage_normalizes_supported_cold_cache_to_explicit_zero() -> None:
+    usage, semantics, supported = replay_script._normalized_replay_usage(
+        SimpleNamespace(
+            provider="openai_compatible",
+            usage={"prompt_tokens": 120, "completion_tokens": 8, "total_tokens": 128},
+        )
+    )
+
+    assert supported is True
+    assert semantics == "prompt_includes_cached"
+    assert usage == {
+        "prompt_tokens": 120,
+        "completion_tokens": 8,
+        "total_tokens": 128,
+        "cached_input_tokens": 0,
+    }
+
+
+def test_replay_usage_normalizes_claude_cache_accounting_to_total_prompt() -> None:
+    usage, semantics, supported = replay_script._normalized_replay_usage(
+        SimpleNamespace(
+            provider="claude",
+            usage={
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "cached_input_tokens": 100,
+                "cache_creation_input_tokens": 20,
+            },
+        )
+    )
+
+    assert supported is True
+    assert semantics == "prompt_excludes_cached"
+    assert usage == {
+        "prompt_tokens": 130,
+        "completion_tokens": 5,
+        "cached_input_tokens": 100,
+        "cache_creation_input_tokens": 20,
+        "provider_uncached_input_tokens": 10,
+        "total_tokens": 135,
+    }
+
+
 @pytest.mark.asyncio
 async def test_deterministic_wrapper_keeps_production_budget_for_multimodal() -> None:
     inner = _RecordingMultimodalService()
@@ -721,6 +1186,10 @@ async def test_deterministic_wrapper_keeps_production_budget_for_multimodal() ->
     output_metadata = replay_script._structured_output_metadata(
         SimpleNamespace(content=inner.response_content),
     )
+    prompt_metadata = replay_script._prompt_transport_metadata(
+        {"system_instruction": "system", "user_input": "user"},
+        expected_compact_json=False,
+    )
     assert service.calls == [
         {
             "service": "arm_a",
@@ -735,6 +1204,9 @@ async def test_deterministic_wrapper_keeps_production_budget_for_multimodal() ->
             "model": "reasoning-model",
             "temperature": 0.0,
             "max_tokens": 4096,
+            **prompt_metadata,
+            "cache_usage_semantics": "unsupported",
+            "cache_metric_supported": False,
             "usage": {"output_tokens": 12},
             "status": "ok",
             **output_metadata,
@@ -1445,6 +1917,112 @@ def test_replay_engine_receives_embedding_service_for_production_recall() -> Non
     )
 
     assert engine._embedding_service is embedding  # noqa: SLF001
+
+
+def test_json_minify_replay_flag_is_instance_scoped_and_default_off() -> None:
+    arm_a = _build_engine(
+        object(),
+        _ReplayConfig(),
+        compact_profile=True,
+        negative_examples=None,
+        legacy_profile=False,
+        embedding_service=None,
+    )
+    arm_b = _build_engine(
+        object(),
+        _ReplayConfig(),
+        compact_profile=True,
+        negative_examples=None,
+        legacy_profile=False,
+        embedding_service=None,
+        compact_evaluation_json=True,
+    )
+
+    assert arm_a.compact_evaluation_json is False
+    assert arm_b.compact_evaluation_json is True
+
+
+class _MemberRepairService:
+    def __init__(self) -> None:
+        self.call_count = 0
+
+    async def complete_structured_task(self, **kwargs: object) -> LLMResponse:
+        del kwargs
+        content_id = "item-1" if self.call_count == 0 else "item-2"
+        self.call_count += 1
+        return LLMResponse(
+            content=json.dumps(
+                {
+                    "results": [
+                        {
+                            "content_id": content_id,
+                            "score": 0.7,
+                            "reason": "match",
+                            "topic_group": "topic",
+                            "style_key": "deep_focus",
+                            "franchise_key": "",
+                        }
+                    ]
+                }
+            ),
+            provider="openai",
+            instance_id="gateway",
+            model="model",
+            usage={
+                "prompt_tokens": 100,
+                "completion_tokens": 20,
+                "total_tokens": 120,
+            },
+        )
+
+
+@pytest.mark.asyncio
+async def test_replay_engine_attributes_root_and_member_repair_calls() -> None:
+    service = _DeterministicLLMService(
+        _MemberRepairService(),
+        service="arm_b",
+        expected_compact_json=True,
+    )
+    engine = _build_engine(
+        service,
+        _ReplayConfig(),
+        compact_profile=True,
+        negative_examples=None,
+        legacy_profile=False,
+        embedding_service=None,
+        compact_evaluation_json=True,
+    )
+    contents = _rows_to_contents(
+        [
+            {
+                "content_id": content_id,
+                "source_platform": "bilibili",
+                "source_strategy": "feed",
+                "title": content_id,
+                "body_text": "body",
+            }
+            for content_id in ("item-1", "item-2")
+        ]
+    )
+
+    with replay_call_attribution(
+        pair_kind="treatment",
+        repeat=1,
+        logical_run="B",
+        arm="B",
+    ):
+        scores = await engine.evaluate_content_batch(
+            contents,
+            SoulProfile(),
+            source_context="mixed",
+            batch_size=30,
+        )
+
+    assert scores == [0.7, 0.7]
+    assert [call["request_kind"] for call in service.calls] == ["root", "repair"]
+    assert [call["request_ordinal"] for call in service.calls] == [0, 1]
+    assert [call["request_candidate_count"] for call in service.calls] == [2, 1]
+    assert all(call["all_target_json_compact"] is True for call in service.calls)
 
 
 def test_compact_arm_b_uses_exact_production_profile_view() -> None:

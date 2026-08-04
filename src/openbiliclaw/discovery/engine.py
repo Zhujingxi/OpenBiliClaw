@@ -826,6 +826,7 @@ class ContentDiscoveryEngine:
         multimodal_vision_supported: bool | None = None,
         eval_batch_concurrency: int = _DEFAULT_EVAL_BATCH_CONCURRENCY,
         eval_prefilter_mode: str = _EMBEDDING_PREFILTER_DEFAULT_MODE,
+        compact_evaluation_json: bool = False,
     ) -> None:
         self._strategies: list[DiscoveryStrategy] = []
         self._llm_service = llm_service
@@ -844,6 +845,9 @@ class ContentDiscoveryEngine:
         )
         self.eval_batch_concurrency = max(1, min(16, int(eval_batch_concurrency)))
         self.eval_prefilter_mode = self._normalize_eval_prefilter_mode(eval_prefilter_mode)
+        # Replay-only unless and until the real provider quality/token gate
+        # approves compact deterministic evaluator JSON.
+        self.compact_evaluation_json = bool(compact_evaluation_json)
         self._multimodal_vision_supported_override = multimodal_vision_supported
         self.multimodal_unavailable_reason = ""
         self._eval_cache: OrderedDict[str, _EvalCacheEntry] = OrderedDict()
@@ -2466,8 +2470,10 @@ class ContentDiscoveryEngine:
         negative_examples_for_prompt = cast("list[dict[str, object]] | None", negative_examples)
         profile_digest = self._evaluation_profile_digest(profile)
         negative_digest = self._negative_examples_digest(negative_examples_for_prompt)
+        compact_json = bool(getattr(self, "compact_evaluation_json", False))
         profile_blocks = self._evaluation_profile_prompt_cache_obj().render_json_layers(
-            evaluation_profile_prompt_layers(profile_data)
+            evaluation_profile_prompt_layers(profile_data),
+            compact=compact_json,
         )
         messages = build_batch_content_evaluation_prompt(
             profile_summary=profile_data,
@@ -2476,6 +2482,7 @@ class ContentDiscoveryEngine:
             source_context=effective_batch_context,
             source_platform=effective_batch_platform,
             negative_examples=negative_examples_for_prompt,
+            compact_json=compact_json,
         )
 
         assert self._llm_service is not None

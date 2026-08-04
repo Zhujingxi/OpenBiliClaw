@@ -1482,6 +1482,7 @@ def build_batch_content_evaluation_prompt(
     source_context: str = "",
     source_platform: str = "bilibili",
     negative_examples: list[dict[str, object]] | None = None,
+    compact_json: bool = False,
 ) -> list[dict[str, str]]:
     """Build a prompt that evaluates multiple content items in one LLM call.
 
@@ -1511,18 +1512,28 @@ def build_batch_content_evaluation_prompt(
     hints from the tail interest pool (ranks beyond the compact block's top
     64), intentionally kept out of the stable profile blocks so provider
     prompt-cache prefixes remain byte-stable.
+
+    ``compact_json`` is an experiment seam for deterministic JSON whitespace
+    removal. It never changes field names or values, and defaults to the
+    historical indented bytes.
     """
+
+    def render_json(value: object) -> str:
+        if compact_json:
+            return json.dumps(
+                value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        return json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True)
+
     user_blocks: list[str] = (
         list(profile_blocks)
         if profile_blocks
         else [
             "<profile_summary>",
-            json.dumps(
-                profile_summary,
-                ensure_ascii=False,
-                indent=2,
-                sort_keys=True,
-            ),
+            render_json(profile_summary),
             "</profile_summary>",
         ]
     )
@@ -1540,24 +1551,14 @@ def build_batch_content_evaluation_prompt(
         user_blocks.extend(
             [
                 "<negative_examples>",
-                json.dumps(
-                    negative_examples,
-                    ensure_ascii=False,
-                    indent=2,
-                    sort_keys=True,
-                ),
+                render_json(negative_examples),
                 "</negative_examples>",
             ]
         )
     user_blocks.extend(
         [
             "<content_batch>",
-            json.dumps(
-                [_normalize_content_style_fields(item) for item in content_items],
-                ensure_ascii=False,
-                indent=2,
-                sort_keys=True,
-            ),
+            render_json([_normalize_content_style_fields(item) for item in content_items]),
             "</content_batch>",
         ]
     )

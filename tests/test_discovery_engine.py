@@ -4175,6 +4175,41 @@ async def test_evaluate_batch_uses_layered_profile_prompt_with_compacted_interes
 
 
 @pytest.mark.asyncio
+async def test_evaluate_batch_compact_json_minifies_profile_and_content_blocks() -> None:
+    llm = _RecordingBatchLLMService()
+    engine = ContentDiscoveryEngine(llm_service=llm, compact_evaluation_json=True)
+
+    await engine._evaluate_batch(
+        [
+            DiscoveredContent(
+                bvid="BVcompact",
+                title="保留 标题 内部 空格",
+                up_name="u",
+                source_strategy="search",
+            )
+        ],
+        _build_profile(),
+    )
+
+    user_input = llm.user_inputs[0]
+    for tag in (
+        "profile_core",
+        "profile_life_context",
+        "profile_interests",
+        "profile_style_context",
+        "profile_recent_context",
+        "content_batch",
+    ):
+        start = f"<{tag}>\n\n"
+        end = f"\n\n</{tag}>"
+        block = user_input.split(start, 1)[1].split(end, 1)[0]
+        assert json.loads(block) is not None
+        assert "\n  " not in block
+
+    assert "保留 标题 内部 空格" in user_input
+
+
+@pytest.mark.asyncio
 async def test_evaluate_batch_only_updates_changed_profile_layers() -> None:
     llm = _RecordingBatchLLMService()
     engine = ContentDiscoveryEngine(llm_service=llm)

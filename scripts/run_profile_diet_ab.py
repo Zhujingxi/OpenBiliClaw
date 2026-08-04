@@ -11,19 +11,24 @@ Usage:
         --arm-b reason-off --sample 100 --repeats 3 \
         --output data/eval/reason-off.json
     .venv/bin/python scripts/run_profile_diet_ab.py \
+        --arm-b json-minify --sample 100 --repeats 3 \
+        --output data/eval/json-minify.json
+    .venv/bin/python scripts/run_profile_diet_ab.py \
         --arm-b model=<instance-id> --sample 100 --repeats 3 \
         --output data/eval/model-route.json
 
 For ``--arm-b compact``, arm A forces the legacy full-profile/no-recall prompt
 shape and arm B uses current production inputs: compact profile plus per-item
 ``related_interests`` recall when an embedding service is configured. For
-``reason-diet``, ``reason-off``, and ``model=...`` arms, both sides use
+``reason-diet``, ``reason-off``, ``json-minify``, and ``model=...`` arms, both sides use
 production profile/recall shape so the requested arm remains the only
 intentional difference. ``reason-off`` leaves arm A on the production reason
 contract and temporarily removes the ``reason`` output field from arm B's
-evaluation prompts only. The gate uses the production 4096-token output ceiling
-and fails on missing evaluation responses instead of treating gateway/parse
-failures as genuine zero scores.
+evaluation prompts only. ``json-minify`` leaves arm A on production pretty JSON
+and removes whitespace only from arm B's profile, negative-example, and content
+JSON blocks. The gate uses the production 4096-token output ceiling and fails on
+missing evaluation responses instead of treating gateway/parse failures as
+genuine zero scores.
 """
 
 from __future__ import annotations
@@ -34,6 +39,7 @@ import hashlib
 import json
 import logging
 import math
+import secrets
 import sqlite3
 import subprocess
 import sys
@@ -62,6 +68,8 @@ RATE_LIMIT_RETRY_DELAYS_SECONDS = (65.0, 130.0, 260.0, 520.0)
 _REPLAY_STATUSES = frozenset({"evaluated", "cached", "rejected_low_score"})
 _DEFAULT_BATCH_SIZE = 30
 _RELATIVE_ADMISSION_SHRINK_MAX = 0.03
+_JSON_MINIFY_PROMPT_TOKEN_SAVINGS_MIN = 0.10
+_JSON_MINIFY_TOTAL_TOKEN_SAVINGS_MIN = 0.08
 _REPLAY_SOURCE_CONTEXT = "mixed"
 _REPLAY_EVALUATION_OUTPUT_FIELDS = (
     "relevance_score",
@@ -95,6 +103,29 @@ _REPLAY_ATTRIBUTION: ContextVar[Mapping[str, object]] = ContextVar(
     "openbiliclaw_profile_diet_replay_attribution",
     default=_EMPTY_REPLAY_ATTRIBUTION,
 )
+_REPLAY_EVAL_REQUEST_COUNTER: ContextVar[dict[str, int] | None] = ContextVar(
+    "openbiliclaw_profile_diet_eval_request_counter",
+    default=None,
+)
+_EVALUATION_JSON_TAGS = (
+    "profile_core",
+    "profile_life_context",
+    "profile_interests",
+    "profile_style_context",
+    "profile_recent_context",
+    "profile_extra",
+    "profile_summary",
+    "negative_examples",
+    "content_batch",
+)
+_REPLAY_PRIVACY_DIGEST_SALT = secrets.token_bytes(32)
+_CACHE_USAGE_SEMANTICS_BY_PROVIDER = {
+    "claude": "prompt_excludes_cached",
+    "gemini": "prompt_includes_cached",
+    "openai": "prompt_includes_cached",
+    "openai_compatible": "prompt_includes_cached",
+    "openrouter": "prompt_includes_cached",
+}
 
 
 def _normalized_provider_limit_messages(exc: BaseException) -> str:
@@ -1170,7 +1201,9 @@ def _structured_output_metadata(
                 normalized = normalize_style_key(normalized)
             fields[field] = {
                 "digest": (
-                    _digest({"field": field, "value": normalized}) if normalized is not None else ""
+                    _privacy_digest({"field": field, "value": normalized})
+                    if normalized is not None
+                    else ""
                 ),
                 "nonempty": bool(normalized),
             }
@@ -1178,7 +1211,7 @@ def _structured_output_metadata(
         classification_items.append(
             {
                 "candidate_key_digest": (
-                    _digest({"candidate_key": identifier}) if identifier else ""
+                    _privacy_digest({"candidate_key": identifier}) if identifier else ""
                 ),
                 "position": position,
                 "fields": fields,
@@ -1192,6 +1225,165 @@ def _structured_output_metadata(
     }
 
 
+def _tagged_json_prompt_metadata(user_input: str) -> tuple[str, list[dict[str, object]]]:
+    """Return a JSON-whitespace-normalized prompt and privacy-safe block facts."""
+
+    decoder = json.JSONDecoder()
+    spans: list[tuple[int, int, str]] = []
+    blocks: list[dict[str, object]] = []
+    for name in _EVALUATION_JSON_TAGS:
+        open_marker = f"<{name}>"
+        close_marker = f"</{name}>"
+        search_from = 0
+        while True:
+            marker_start = user_input.find(open_marker, search_from)
+            if marker_start < 0:
+                break
+            marker_end = marker_start + len(open_marker)
+            if (
+                marker_start > 0 and user_input[marker_start - 2 : marker_start] != "\n\n"
+            ) or user_input[marker_end : marker_end + 2] != "\n\n":
+                # A candidate string may itself mention one of the XML-like
+                # tags. Only builder-owned standalone blocks are transport
+                # boundaries; JSON string contents are data.
+                search_from = marker_end
+                continue
+            json_start = marker_end
+            while json_start < len(user_input) and user_input[json_start].isspace():
+                json_start += 1
+            try:
+                value, json_end = decoder.raw_decode(user_input, json_start)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"malformed replay JSON block <{name}>") from exc
+            close_start = json_end
+            while close_start < len(user_input) and user_input[close_start].isspace():
+                close_start += 1
+            if not user_input.startswith(close_marker, close_start):
+                raise RuntimeError(f"missing closing replay JSON tag </{name}>")
+
+            compact = json.dumps(
+                value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            pretty = json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True)
+            raw_json = user_input[json_start:json_end]
+            spans.append((json_start, json_end, compact))
+            blocks.append(
+                {
+                    "name": name,
+                    "semantic_digest": hashlib.sha256(compact.encode("utf-8")).hexdigest(),
+                    "json_chars": len(raw_json),
+                    "json_bytes": len(raw_json.encode("utf-8")),
+                    "exact_compact": raw_json == compact,
+                    "exact_pretty": raw_json == pretty,
+                }
+            )
+            search_from = close_start + len(close_marker)
+
+    normalized_parts: list[str] = []
+    cursor = 0
+    for start, end, compact in sorted(spans):
+        normalized_parts.extend((user_input[cursor:start], compact))
+        cursor = end
+    normalized_parts.append(user_input[cursor:])
+    return "".join(normalized_parts), blocks
+
+
+def _prompt_transport_metadata(
+    kwargs: Mapping[str, object],
+    *,
+    expected_compact_json: bool,
+) -> dict[str, object]:
+    """Describe exact provider-visible text without retaining prompt payloads."""
+
+    system_instruction = str(kwargs.get("system_instruction") or "")
+    user_input = str(kwargs.get("user_input") or "")
+    normalized_user_input, blocks = _tagged_json_prompt_metadata(user_input)
+    compact_block_count = sum(bool(block["exact_compact"]) for block in blocks)
+    pretty_block_count = sum(bool(block["exact_pretty"]) for block in blocks)
+    profile_block_count = sum(str(block["name"]).startswith("profile_") for block in blocks)
+    names = [str(block["name"]) for block in blocks]
+    raw_image_inputs = kwargs.get("image_inputs")
+    image_inputs = (
+        raw_image_inputs
+        if isinstance(raw_image_inputs, Sequence) and not isinstance(raw_image_inputs, str | bytes)
+        else ()
+    )
+    image_metadata: list[dict[str, object]] = []
+    for position, image in enumerate(image_inputs):
+        if not isinstance(image, Mapping):
+            continue
+        content_id = str(image.get("content_id") or "")
+        data_url = str(image.get("data_url") or "")
+        mime_type = str(image.get("mime_type") or "")
+        image_metadata.append(
+            {
+                "position": position,
+                "content_id_digest": _privacy_digest({"content_id": content_id}),
+                "mime_type": mime_type,
+                "data_url_bytes": len(data_url.encode("utf-8")),
+                "data_url_digest": hashlib.sha256(data_url.encode("utf-8")).hexdigest(),
+            }
+        )
+    image_semantics = json.dumps(
+        image_metadata,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    prompt_payload = system_instruction + "\0" + user_input + "\0" + image_semantics
+    semantic_payload = system_instruction + "\0" + normalized_user_input + "\0" + image_semantics
+    return {
+        "prompt_chars": len(system_instruction) + len(user_input),
+        "prompt_bytes": len(system_instruction.encode("utf-8")) + len(user_input.encode("utf-8")),
+        "system_digest": hashlib.sha256(system_instruction.encode("utf-8")).hexdigest(),
+        "prompt_digest": hashlib.sha256(prompt_payload.encode("utf-8")).hexdigest(),
+        "prompt_semantic_digest": hashlib.sha256(semantic_payload.encode("utf-8")).hexdigest(),
+        "expected_compact_json": expected_compact_json,
+        "json_block_count": len(blocks),
+        "compact_json_block_count": compact_block_count,
+        "all_target_json_compact": bool(blocks) and compact_block_count == len(blocks),
+        "pretty_json_block_count": pretty_block_count,
+        "all_target_json_pretty": bool(blocks) and pretty_block_count == len(blocks),
+        "profile_json_block_count": profile_block_count,
+        "negative_examples_json_block_count": names.count("negative_examples"),
+        "content_batch_json_block_count": names.count("content_batch"),
+        "image_input_count": len(image_metadata),
+        "image_inputs_digest": hashlib.sha256(image_semantics.encode("utf-8")).hexdigest(),
+        "image_data_url_bytes": sum(int(item["data_url_bytes"]) for item in image_metadata),
+        "json_blocks": blocks,
+    }
+
+
+def _normalized_replay_usage(
+    response: object,
+) -> tuple[dict[object, object] | None, str, bool]:
+    """Normalize provider cache accounting for paired replay comparisons."""
+
+    usage = getattr(response, "usage", None)
+    if not isinstance(usage, Mapping):
+        return None, "unsupported", False
+    normalized: dict[object, object] = dict(usage)
+    provider = str(getattr(response, "provider", "") or "").strip().lower()
+    semantics = _CACHE_USAGE_SEMANTICS_BY_PROVIDER.get(provider, "unsupported")
+    if semantics == "unsupported":
+        return normalized, semantics, False
+
+    cached = _usage_token_value(normalized, ("cached_input_tokens",))
+    normalized["cached_input_tokens"] = cached
+    if semantics == "prompt_excludes_cached":
+        provider_uncached = _usage_token_value(normalized, ("prompt_tokens", "input_tokens"))
+        cache_creation = _usage_token_value(normalized, ("cache_creation_input_tokens",))
+        completion = _usage_token_value(normalized, ("completion_tokens", "output_tokens"))
+        prompt_tokens = provider_uncached + cached + cache_creation
+        normalized["provider_uncached_input_tokens"] = provider_uncached
+        normalized["prompt_tokens"] = prompt_tokens
+        normalized["total_tokens"] = prompt_tokens + completion
+    return normalized, semantics, True
+
+
 class _DeterministicLLMService:
     """Force temperature=0 so the replay measures prompt changes, not sampling noise.
 
@@ -1201,9 +1393,16 @@ class _DeterministicLLMService:
     repeated A/A envelope around both treatment arms.
     """
 
-    def __init__(self, inner: object, *, service: str = "") -> None:
+    def __init__(
+        self,
+        inner: object,
+        *,
+        service: str = "",
+        expected_compact_json: bool = False,
+    ) -> None:
         self._inner = inner
         self._service = service
+        self._expected_compact_json = expected_compact_json
         self.calls: list[dict[str, object]] = []
 
     def __getattr__(self, name: str) -> object:
@@ -1223,6 +1422,10 @@ class _DeterministicLLMService:
         kwargs["max_tokens"] = 4096
         method = getattr(self._inner, method_name)
         attribution = dict(_REPLAY_ATTRIBUTION.get())
+        prompt_metadata = _prompt_transport_metadata(
+            kwargs,
+            expected_compact_json=self._expected_compact_json,
+        )
         try:
             response = await method(**kwargs)
         except Exception as exc:
@@ -1238,6 +1441,7 @@ class _DeterministicLLMService:
                     "model": "",
                     "temperature": 0.0,
                     "max_tokens": 4096,
+                    **prompt_metadata,
                     "usage": None,
                     "status": "error",
                     "structured_output_parseable": False,
@@ -1250,7 +1454,7 @@ class _DeterministicLLMService:
                 }
             )
             raise
-        usage = getattr(response, "usage", None)
+        usage, cache_usage_semantics, cache_metric_supported = _normalized_replay_usage(response)
         self.calls.append(
             {
                 "service": self._service,
@@ -1262,7 +1466,10 @@ class _DeterministicLLMService:
                 "model": str(getattr(response, "model", "") or ""),
                 "temperature": 0.0,
                 "max_tokens": 4096,
-                "usage": dict(usage) if isinstance(usage, Mapping) else None,
+                **prompt_metadata,
+                "cache_usage_semantics": cache_usage_semantics,
+                "cache_metric_supported": cache_metric_supported,
+                "usage": usage,
                 "status": "ok",
                 **_structured_output_metadata(response),
             }
@@ -1282,7 +1489,9 @@ def _token_usage_summary(calls: Sequence[Mapping[str, object]]) -> dict[str, obj
     prompt_tokens = 0
     completion_tokens = 0
     total_tokens = 0
+    cached_input_tokens = 0
     observed = 0
+    cache_metric_observed = 0
     for call in calls:
         usage = call.get("usage")
         if not isinstance(usage, Mapping):
@@ -1291,12 +1500,26 @@ def _token_usage_summary(calls: Sequence[Mapping[str, object]]) -> dict[str, obj
         call_input = _usage_token_value(usage, ("prompt_tokens", "input_tokens"))
         call_completion = _usage_token_value(usage, ("completion_tokens", "output_tokens"))
         call_total = _usage_token_value(usage, ("total_tokens",))
+        call_cached = _usage_token_value(usage, ("cached_input_tokens",))
         prompt_tokens += call_input
         completion_tokens += call_completion
         total_tokens += call_total or (call_input + call_completion)
+        cached_input_tokens += call_cached
+        if call.get("cache_metric_supported") is True:
+            cache_metric_observed += 1
     evaluated_item_count = sum(
-        int(call.get("structured_item_count") or 0) for call in calls if call.get("status") == "ok"
+        int(call.get("request_candidate_count") or 0)
+        for call in calls
+        if call.get("status") == "ok" and call.get("request_kind") == "root"
     )
+    evaluated_item_count_basis = "root_request_candidates"
+    if evaluated_item_count <= 0:
+        evaluated_item_count = sum(
+            int(call.get("structured_item_count") or 0)
+            for call in calls
+            if call.get("status") == "ok"
+        )
+        evaluated_item_count_basis = "structured_output_items"
 
     return {
         "call_count": len(calls),
@@ -1304,11 +1527,24 @@ def _token_usage_summary(calls: Sequence[Mapping[str, object]]) -> dict[str, obj
         "error_call_count": sum(call.get("status") != "ok" for call in calls),
         "usage_missing_call_count": len(calls) - observed,
         "evaluated_item_count": evaluated_item_count,
+        "evaluated_item_count_basis": evaluated_item_count_basis,
         "prompt_tokens": prompt_tokens,
+        "cached_input_tokens": cached_input_tokens,
+        "uncached_input_tokens": max(prompt_tokens - cached_input_tokens, 0),
+        "cache_metric_observed_call_count": cache_metric_observed,
+        "cache_hit_ratio": (cached_input_tokens / prompt_tokens if prompt_tokens else None),
         "completion_tokens": completion_tokens,
         "total_tokens": total_tokens,
         "prompt_tokens_per_evaluated_item": (
             prompt_tokens / evaluated_item_count if evaluated_item_count else None
+        ),
+        "cached_input_tokens_per_evaluated_item": (
+            cached_input_tokens / evaluated_item_count if evaluated_item_count else None
+        ),
+        "uncached_input_tokens_per_evaluated_item": (
+            max(prompt_tokens - cached_input_tokens, 0) / evaluated_item_count
+            if evaluated_item_count
+            else None
         ),
         "completion_tokens_per_evaluated_item": (
             completion_tokens / evaluated_item_count if evaluated_item_count else None
@@ -1353,6 +1589,497 @@ def _token_usage_audit(calls: Sequence[Mapping[str, object]]) -> dict[str, objec
             )
             for arm in ("A", "B")
         },
+    }
+
+
+def _replay_run_key(call: Mapping[str, object]) -> tuple[str, int, str, str]:
+    return (
+        str(call.get("pair_kind") or ""),
+        int(call.get("repeat") or 0),
+        str(call.get("logical_run") or ""),
+        str(call.get("arm") or ""),
+    )
+
+
+def _prompt_run_summary(calls: Sequence[Mapping[str, object]]) -> dict[str, object]:
+    usage = _token_usage_summary(calls)
+    successful_usage_missing = sum(
+        call.get("status") == "ok" and not isinstance(call.get("usage"), Mapping) for call in calls
+    )
+    return {
+        **usage,
+        "successful_usage_missing_call_count": successful_usage_missing,
+        "prompt_chars": sum(int(call.get("prompt_chars") or 0) for call in calls),
+        "prompt_bytes": sum(int(call.get("prompt_bytes") or 0) for call in calls),
+        "root_call_count": sum(call.get("request_kind") == "root" for call in calls),
+        "repair_call_count": sum(call.get("request_kind") == "repair" for call in calls),
+        "repair_candidate_count": sum(
+            int(call.get("request_candidate_count") or 0)
+            for call in calls
+            if call.get("request_kind") == "repair"
+        ),
+        "system_digests": sorted({str(call.get("system_digest") or "") for call in calls}),
+        "prompt_semantic_digests": sorted(
+            {str(call.get("prompt_semantic_digest") or "") for call in calls}
+        ),
+    }
+
+
+def _profile_layer_cache_summary(
+    stats: Mapping[str, Mapping[str, object]] | None,
+) -> dict[str, object]:
+    layers: list[dict[str, object]] = []
+    for name, raw in sorted((stats or {}).items()):
+        hits = max(0, int(raw.get("hits") or 0))
+        misses = max(0, int(raw.get("misses") or 0))
+        layers.append(
+            {
+                "name": name,
+                "digest": str(raw.get("digest") or ""),
+                "hits": hits,
+                "misses": misses,
+            }
+        )
+    hits = sum(int(layer["hits"]) for layer in layers)
+    misses = sum(int(layer["misses"]) for layer in layers)
+    return {
+        "layers": layers,
+        "layer_count": len(layers),
+        "hits": hits,
+        "misses": misses,
+        "hit_ratio": hits / (hits + misses) if hits + misses else None,
+    }
+
+
+def _json_minify_repair_audit(
+    grouped: Mapping[tuple[str, int, str, str], Sequence[Mapping[str, object]]],
+    *,
+    repeats: int,
+) -> dict[str, object]:
+    blocking_reasons: list[str] = []
+    logical_runs: list[dict[str, object]] = []
+    for key in sorted(grouped):
+        summary = _prompt_run_summary(grouped[key])
+        logical_runs.append(
+            {
+                "pair_kind": key[0],
+                "repeat": key[1],
+                "logical_run": key[2],
+                "arm": key[3],
+                "call_count": summary["call_count"],
+                "root_call_count": summary["root_call_count"],
+                "repair_call_count": summary["repair_call_count"],
+                "repair_candidate_count": summary["repair_candidate_count"],
+                "successful_call_count": summary["successful_call_count"],
+                "error_call_count": summary["error_call_count"],
+            }
+        )
+
+    for calls in grouped.values():
+        for call in calls:
+            kind = str(call.get("request_kind") or "")
+            ordinal = call.get("request_ordinal")
+            candidate_count = call.get("request_candidate_count")
+            if kind not in {"root", "repair"}:
+                blocking_reasons.append("evaluation call is missing root/repair attribution")
+            if not isinstance(ordinal, int) or ordinal < 0:
+                blocking_reasons.append("evaluation call has invalid request ordinal")
+            elif (kind == "root" and ordinal != 0) or (kind == "repair" and ordinal == 0):
+                blocking_reasons.append("evaluation call has inconsistent repair ordinal")
+            if not isinstance(candidate_count, int) or candidate_count <= 0:
+                blocking_reasons.append("evaluation call has invalid request candidate count")
+
+    def repair_values(key: tuple[str, int, str, str]) -> tuple[int, int]:
+        summary = _prompt_run_summary(grouped.get(key, ()))
+        if int(summary["root_call_count"]) <= 0:
+            blocking_reasons.append(
+                f"json-minify repair audit found no root calls for {key[0]} #{key[1]} {key[2]}"
+            )
+        return int(summary["repair_call_count"]), int(summary["repair_candidate_count"])
+
+    control_call_deltas: list[float] = []
+    control_candidate_deltas: list[float] = []
+    treatment_call_deltas: list[float] = []
+    treatment_candidate_deltas: list[float] = []
+    for repeat in range(1, repeats + 1):
+        a1_calls, a1_candidates = repair_values(("control", repeat, "A1", "A"))
+        a2_calls, a2_candidates = repair_values(("control", repeat, "A2", "A"))
+        a_calls, a_candidates = repair_values(("treatment", repeat, "A", "A"))
+        b_calls, b_candidates = repair_values(("treatment", repeat, "B", "B"))
+        control_call_deltas.append(float(abs(a2_calls - a1_calls)))
+        control_candidate_deltas.append(float(abs(a2_candidates - a1_candidates)))
+        treatment_call_deltas.append(float(b_calls - a_calls))
+        treatment_candidate_deltas.append(float(b_candidates - a_candidates))
+
+    call_ceiling = max(control_call_deltas, default=0.0)
+    candidate_ceiling = max(control_candidate_deltas, default=0.0)
+    treatment_call_median = median(treatment_call_deltas) if treatment_call_deltas else None
+    treatment_candidate_median = (
+        median(treatment_candidate_deltas) if treatment_candidate_deltas else None
+    )
+    if treatment_call_median is None or treatment_call_median > call_ceiling:
+        blocking_reasons.append("json-minify member-repair call amplification exceeded A/A noise")
+    if treatment_candidate_median is None or treatment_candidate_median > candidate_ceiling:
+        blocking_reasons.append(
+            "json-minify member-repair candidate amplification exceeded A/A noise"
+        )
+    unique_reasons = list(dict.fromkeys(blocking_reasons))
+    return {
+        "passed": not unique_reasons,
+        "blocking_reasons": unique_reasons,
+        "logical_runs": logical_runs,
+        "control_repair_call_delta_ceiling": call_ceiling,
+        "control_repair_candidate_delta_ceiling": candidate_ceiling,
+        "treatment_repair_call_delta_median": treatment_call_median,
+        "treatment_repair_candidate_delta_median": treatment_candidate_median,
+    }
+
+
+def validate_json_minify_transport(
+    calls: Sequence[Mapping[str, object]],
+    *,
+    enabled: bool,
+    repeats: int,
+    arm_a_profile_cache_stats: Mapping[str, Mapping[str, object]] | None = None,
+    arm_b_profile_cache_stats: Mapping[str, Mapping[str, object]] | None = None,
+) -> dict[str, object]:
+    """Validate whitespace-only treatment evidence without retaining prompts."""
+
+    if not enabled:
+        return {"enabled": False, "passed": True, "blocking_reasons": []}
+
+    grouped: dict[tuple[str, int, str, str], list[Mapping[str, object]]] = {}
+    for call in calls:
+        grouped.setdefault(_replay_run_key(call), []).append(call)
+    blocking_reasons: list[str] = []
+    repair_audit = _json_minify_repair_audit(grouped, repeats=repeats)
+    blocking_reasons.extend(str(reason) for reason in repair_audit["blocking_reasons"])
+
+    system_digests = {str(call.get("system_digest") or "") for call in calls}
+    if len(system_digests) != 1 or "" in system_digests:
+        blocking_reasons.append("json-minify system prompt digest changed across replay calls")
+
+    for call in calls:
+        arm = str(call.get("arm") or "")
+        usage = call.get("usage")
+        if isinstance(usage, Mapping) and call.get("cache_metric_supported") is True:
+            if "cached_input_tokens" not in usage:
+                blocking_reasons.append("supported cache usage omitted cached_input_tokens")
+            prompt_tokens = _usage_token_value(usage, ("prompt_tokens", "input_tokens"))
+            cached_tokens = _usage_token_value(usage, ("cached_input_tokens",))
+            if cached_tokens > prompt_tokens:
+                blocking_reasons.append("cached input tokens exceed prompt tokens")
+        if arm == "B":
+            if call.get("expected_compact_json") is not True:
+                blocking_reasons.append("json-minify B call did not use the instance compact flag")
+            if call.get("all_target_json_compact") is not True:
+                blocking_reasons.append("json-minify B call contains non-compact target JSON")
+            if int(call.get("profile_json_block_count") or 0) <= 0:
+                blocking_reasons.append("json-minify B call has no profile JSON block")
+            if int(call.get("content_batch_json_block_count") or 0) != 1:
+                blocking_reasons.append(
+                    "json-minify B call has an invalid content-batch block count"
+                )
+        elif arm == "A":
+            if call.get("expected_compact_json") is not False:
+                blocking_reasons.append("json-minify A call unexpectedly enabled compact JSON")
+            if call.get("all_target_json_pretty") is not True:
+                blocking_reasons.append("json-minify A call contains non-pretty target JSON")
+
+    pair_payloads: list[dict[str, object]] = []
+
+    def compare_prompt_runs(
+        *,
+        pair_kind: str,
+        repeat: int,
+        left_run: str,
+        left_arm: str,
+        right_run: str,
+        right_arm: str,
+        treatment: bool,
+    ) -> None:
+        left = [
+            call
+            for call in grouped.get((pair_kind, repeat, left_run, left_arm), ())
+            if call.get("request_kind") == "root" and call.get("status") == "ok"
+        ]
+        right = [
+            call
+            for call in grouped.get((pair_kind, repeat, right_run, right_arm), ())
+            if call.get("request_kind") == "root" and call.get("status") == "ok"
+        ]
+        left_semantic_counts = Counter(
+            str(call.get("prompt_semantic_digest") or "") for call in left
+        )
+        right_semantic_counts = Counter(
+            str(call.get("prompt_semantic_digest") or "") for call in right
+        )
+        left_semantic = set(left_semantic_counts)
+        right_semantic = set(right_semantic_counts)
+        semantic_equal = bool(left_semantic_counts) and (
+            left_semantic_counts == right_semantic_counts
+        )
+        if not semantic_equal or "" in left_semantic | right_semantic:
+            blocking_reasons.append(
+                f"json-minify {pair_kind} #{repeat} root prompt semantics differ"
+            )
+        raw_changed_only = True
+        compact_smaller = True
+        runtime_equal = True
+        for semantic_digest in left_semantic & right_semantic:
+            left_matches = [
+                call for call in left if call.get("prompt_semantic_digest") == semantic_digest
+            ]
+            right_matches = [
+                call for call in right if call.get("prompt_semantic_digest") == semantic_digest
+            ]
+            left_raw = {str(call.get("prompt_digest") or "") for call in left_matches}
+            right_raw = {str(call.get("prompt_digest") or "") for call in right_matches}
+            if treatment:
+                raw_changed_only = (
+                    raw_changed_only and bool(left_raw) and left_raw.isdisjoint(right_raw)
+                )
+                compact_smaller = compact_smaller and (
+                    max(int(call.get("prompt_chars") or 0) for call in right_matches)
+                    < min(int(call.get("prompt_chars") or 0) for call in left_matches)
+                    and max(int(call.get("prompt_bytes") or 0) for call in right_matches)
+                    < min(int(call.get("prompt_bytes") or 0) for call in left_matches)
+                )
+            else:
+                raw_changed_only = raw_changed_only and left_raw == right_raw
+
+            def runtime_signatures(
+                matching_calls: Sequence[Mapping[str, object]],
+            ) -> set[tuple[object, ...]]:
+                return {
+                    (
+                        call.get("method"),
+                        call.get("caller"),
+                        call.get("temperature"),
+                        call.get("max_tokens"),
+                        call.get("request_candidate_count"),
+                        call.get("image_input_count"),
+                        call.get("image_inputs_digest"),
+                    )
+                    for call in matching_calls
+                }
+
+            runtime_equal = runtime_equal and (
+                runtime_signatures(left_matches) == runtime_signatures(right_matches)
+            )
+        if not raw_changed_only:
+            blocking_reasons.append(
+                f"json-minify {pair_kind} #{repeat} raw prompt bytes violate arm contract"
+            )
+        if treatment and not compact_smaller:
+            blocking_reasons.append(
+                f"json-minify treatment #{repeat} compact prompts are not smaller"
+            )
+        if not runtime_equal:
+            blocking_reasons.append(
+                f"json-minify {pair_kind} #{repeat} changed provider call settings"
+            )
+        pair_payloads.append(
+            {
+                "pair_kind": pair_kind,
+                "repeat": repeat,
+                "left_run": left_run,
+                "right_run": right_run,
+                "semantic_equal": semantic_equal,
+                "raw_prompt_contract_passed": raw_changed_only,
+                "compact_smaller": compact_smaller if treatment else None,
+                "runtime_equal": runtime_equal,
+                "root_prompt_count": len(left),
+                "semantic_digests": sorted(left_semantic & right_semantic),
+            }
+        )
+
+    for repeat in range(1, repeats + 1):
+        compare_prompt_runs(
+            pair_kind="control",
+            repeat=repeat,
+            left_run="A1",
+            left_arm="A",
+            right_run="A2",
+            right_arm="A",
+            treatment=False,
+        )
+        compare_prompt_runs(
+            pair_kind="treatment",
+            repeat=repeat,
+            left_run="A",
+            left_arm="A",
+            right_run="B",
+            right_arm="B",
+            treatment=True,
+        )
+
+    usage_audit = _token_usage_audit(calls)
+    token_pairs: list[dict[str, object]] = []
+    prompt_savings: list[float] = []
+    total_savings: list[float] = []
+    control_cache_deltas: list[float] = []
+    treatment_cache_deltas: list[float] = []
+    for repeat in range(1, repeats + 1):
+        a1 = _token_usage_summary(grouped.get(("control", repeat, "A1", "A"), ()))
+        a2 = _token_usage_summary(grouped.get(("control", repeat, "A2", "A"), ()))
+        arm_a = _token_usage_summary(grouped.get(("treatment", repeat, "A", "A"), ()))
+        arm_b = _token_usage_summary(grouped.get(("treatment", repeat, "B", "B"), ()))
+        for arm, summary in (("A", arm_a), ("B", arm_b)):
+            successful = int(summary["successful_call_count"])
+            if (
+                successful <= 0
+                or int(summary["error_call_count"]) > 0
+                or int(summary["usage_missing_call_count"]) > 0
+                or int(summary["prompt_tokens"]) <= 0
+            ):
+                blocking_reasons.append(
+                    f"json-minify treatment #{repeat} arm {arm} lacks complete token usage"
+                )
+        a_prompt = int(arm_a["prompt_tokens"])
+        b_prompt = int(arm_b["prompt_tokens"])
+        a_total = int(arm_a["total_tokens"])
+        b_total = int(arm_b["total_tokens"])
+        prompt_saving = (a_prompt - b_prompt) / a_prompt if a_prompt else None
+        total_saving = (a_total - b_total) / a_total if a_total else None
+        if prompt_saving is not None:
+            prompt_savings.append(prompt_saving)
+        if total_saving is not None:
+            total_savings.append(total_saving)
+        a1_cache = a1["cache_hit_ratio"]
+        a2_cache = a2["cache_hit_ratio"]
+        a_cache = arm_a["cache_hit_ratio"]
+        b_cache = arm_b["cache_hit_ratio"]
+        control_cache_complete = all(
+            int(summary["successful_call_count"]) > 0
+            and int(summary["error_call_count"]) == 0
+            and int(summary["usage_missing_call_count"]) == 0
+            and int(summary["cache_metric_observed_call_count"])
+            == int(summary["successful_call_count"])
+            for summary in (a1, a2)
+        )
+        if control_cache_complete and all(
+            isinstance(value, int | float) for value in (a1_cache, a2_cache)
+        ):
+            control_cache_deltas.append(abs(float(a2_cache) - float(a1_cache)))
+        else:
+            blocking_reasons.append(f"json-minify control #{repeat} lacks cache ratio evidence")
+        treatment_cache_complete = all(
+            int(summary["successful_call_count"]) > 0
+            and int(summary["error_call_count"]) == 0
+            and int(summary["usage_missing_call_count"]) == 0
+            and int(summary["cache_metric_observed_call_count"])
+            == int(summary["successful_call_count"])
+            for summary in (arm_a, arm_b)
+        )
+        if treatment_cache_complete and all(
+            isinstance(value, int | float) for value in (a_cache, b_cache)
+        ):
+            treatment_cache_deltas.append(float(b_cache) - float(a_cache))
+        else:
+            blocking_reasons.append(f"json-minify treatment #{repeat} lacks cache ratio evidence")
+        token_pairs.append(
+            {
+                "repeat": repeat,
+                "arm_a": arm_a,
+                "arm_b": arm_b,
+                "prompt_token_savings": prompt_saving,
+                "total_token_savings": total_saving,
+                "cache_hit_ratio_delta": (
+                    float(b_cache) - float(a_cache)
+                    if isinstance(a_cache, int | float) and isinstance(b_cache, int | float)
+                    else None
+                ),
+            }
+        )
+
+    prompt_savings_median = median(prompt_savings) if len(prompt_savings) == repeats else None
+    total_savings_median = median(total_savings) if len(total_savings) == repeats else None
+    if (
+        prompt_savings_median is None
+        or prompt_savings_median < _JSON_MINIFY_PROMPT_TOKEN_SAVINGS_MIN
+    ):
+        blocking_reasons.append("json-minify prompt-token savings missed the 10% gate")
+    if total_savings_median is None or total_savings_median < _JSON_MINIFY_TOTAL_TOKEN_SAVINGS_MIN:
+        blocking_reasons.append("json-minify total-token savings missed the 8% gate")
+    cache_regression_ceiling = max(control_cache_deltas, default=0.0)
+    treatment_cache_delta_median = (
+        median(treatment_cache_deltas) if len(treatment_cache_deltas) == repeats else None
+    )
+    if (
+        treatment_cache_delta_median is None
+        or treatment_cache_delta_median < -cache_regression_ceiling
+    ):
+        blocking_reasons.append("json-minify provider cache ratio regressed beyond A/A noise")
+
+    profile_cache = {
+        "A": _profile_layer_cache_summary(arm_a_profile_cache_stats),
+        "B": _profile_layer_cache_summary(arm_b_profile_cache_stats),
+    }
+    if int(profile_cache["B"]["layer_count"]) <= 0:
+        blocking_reasons.append("json-minify B profile-layer cache evidence is missing")
+    if int(profile_cache["B"]["hits"]) <= 0:
+        blocking_reasons.append("json-minify B profile-layer cache recorded no reuse")
+
+    prompt_logical_runs = [
+        {
+            "pair_kind": key[0],
+            "repeat": key[1],
+            "logical_run": key[2],
+            "arm": key[3],
+            **_prompt_run_summary(grouped[key]),
+        }
+        for key in sorted(grouped)
+    ]
+    treatment_prompt_totals = {
+        arm: {
+            "prompt_chars": sum(
+                int(call.get("prompt_chars") or 0)
+                for call in calls
+                if call.get("pair_kind") == "treatment" and call.get("arm") == arm
+            ),
+            "prompt_bytes": sum(
+                int(call.get("prompt_bytes") or 0)
+                for call in calls
+                if call.get("pair_kind") == "treatment" and call.get("arm") == arm
+            ),
+        }
+        for arm in ("A", "B")
+    }
+    classification_audit = _classification_output_audit(
+        calls,
+        enabled=True,
+        experiment_label="json-minify",
+    )
+    blocking_reasons.extend(
+        str(reason) for reason in classification_audit.get("blocking_reasons", [])
+    )
+    unique_reasons = list(dict.fromkeys(blocking_reasons))
+    return {
+        "enabled": True,
+        "passed": not unique_reasons,
+        "blocking_reasons": unique_reasons,
+        "privacy": {
+            "raw_prompt_retained": False,
+            "recorded_fields": "lengths, counts, usage, and SHA-256 digests only",
+        },
+        "system_digests": sorted(system_digests),
+        "prompt_pairs": pair_payloads,
+        "logical_runs": prompt_logical_runs,
+        "treatment_prompt_totals": treatment_prompt_totals,
+        "token_usage": usage_audit,
+        "token_gate": {
+            "prompt_savings_min": _JSON_MINIFY_PROMPT_TOKEN_SAVINGS_MIN,
+            "total_savings_min": _JSON_MINIFY_TOTAL_TOKEN_SAVINGS_MIN,
+            "prompt_savings_median": prompt_savings_median,
+            "total_savings_median": total_savings_median,
+            "cache_regression_ceiling": cache_regression_ceiling,
+            "treatment_cache_delta_median": treatment_cache_delta_median,
+            "pairs": token_pairs,
+        },
+        "profile_layer_cache": profile_cache,
+        "repair": repair_audit,
+        "classification": classification_audit,
     }
 
 
@@ -1480,6 +2207,7 @@ def _classification_output_audit(
     calls: Sequence[Mapping[str, object]],
     *,
     enabled: bool,
+    experiment_label: str = "reason-off",
 ) -> dict[str, object]:
     runs = _classification_items_by_run(calls)
     repeats = sorted(
@@ -1507,7 +2235,9 @@ def _classification_output_audit(
     gate: dict[str, object] = {}
     if enabled:
         if not repeats:
-            blocking_reasons.append("reason-off classification audit found no attributed repeats")
+            blocking_reasons.append(
+                f"{experiment_label} classification audit found no attributed repeats"
+            )
         expected_runs = [
             key
             for repeat in repeats
@@ -1521,7 +2251,7 @@ def _classification_output_audit(
         missing_run_count = sum(not runs.get(key) for key in expected_runs)
         if missing_run_count:
             blocking_reasons.append(
-                f"reason-off classification audit has {missing_run_count} empty logical runs"
+                f"{experiment_label} classification audit has {missing_run_count} empty logical runs"
             )
         if control_pairs and treatment_pairs:
             for field in _REPLAY_CLASSIFICATION_FIELDS:
@@ -1559,12 +2289,12 @@ def _classification_output_audit(
                 }
                 if not agreement_passed:
                     blocking_reasons.append(
-                        f"reason-off {field} agreement fell below the A/A noise floor"
+                        f"{experiment_label} {field} agreement fell below the A/A noise floor"
                     )
                 if not fill_passed:
-                    blocking_reasons.append(f"reason-off {field} fill rate regressed")
+                    blocking_reasons.append(f"{experiment_label} {field} fill rate regressed")
                 if not presence_passed:
-                    blocking_reasons.append(f"reason-off {field} presence rate regressed")
+                    blocking_reasons.append(f"{experiment_label} {field} presence rate regressed")
     return {
         "passed": not blocking_reasons,
         "runs": [_classification_run_summary(key, items) for key, items in sorted(runs.items())],
@@ -1785,6 +2515,7 @@ def _build_engine(
     legacy_profile: bool,
     embedding_service: object | None,
     recall_audit: ReplayRecallAudit | None = None,
+    compact_evaluation_json: bool = False,
 ) -> object:
     from openbiliclaw.discovery.engine import (
         ContentDiscoveryEngine,
@@ -1807,6 +2538,35 @@ def _build_engine(
 
         def _set_eval_cache_entry(self, cache_key: str, entry: object) -> None:
             return None
+
+        async def _evaluate_batch(self, *args: Any, **kwargs: Any) -> list[float]:
+            request_token = _REPLAY_EVAL_REQUEST_COUNTER.set({"ordinal": 0})
+            try:
+                return await super()._evaluate_batch(*args, **kwargs)
+            finally:
+                _REPLAY_EVAL_REQUEST_COUNTER.reset(request_token)
+
+        async def _evaluate_batch_once(
+            self,
+            batch: list[Any],
+            *args: Any,
+            **kwargs: Any,
+        ) -> list[float | None]:
+            request_counter = _REPLAY_EVAL_REQUEST_COUNTER.get()
+            ordinal = request_counter["ordinal"] if request_counter is not None else 0
+            if request_counter is not None:
+                request_counter["ordinal"] = ordinal + 1
+            attribution = {
+                **dict(_REPLAY_ATTRIBUTION.get()),
+                "request_kind": "root" if ordinal == 0 else "repair",
+                "request_ordinal": ordinal,
+                "request_candidate_count": len(batch),
+            }
+            attribution_token = _REPLAY_ATTRIBUTION.set(attribution)
+            try:
+                return await super()._evaluate_batch_once(batch, *args, **kwargs)
+            finally:
+                _REPLAY_ATTRIBUTION.reset(attribution_token)
 
         def _get_negative_exemplars(self) -> list[dict[str, object]] | None:
             examples = getattr(self, "_replay_negative_examples", None)
@@ -1903,6 +2663,7 @@ def _build_engine(
         multimodal_image_timeout_seconds=int(
             getattr(discovery_cfg, "multimodal_image_timeout_seconds", 6)
         ),
+        compact_evaluation_json=compact_evaluation_json,
         eval_prefilter_mode="off",
     )
 
@@ -2133,6 +2894,7 @@ def replay_blocking_reasons(
     embedding_audit: Mapping[str, object],
     recall_audit: Mapping[str, object],
     reason_output_audit: Mapping[str, object],
+    prompt_transport_audit: Mapping[str, object],
     profile_snapshot_stable: bool,
     candidate_snapshot_stable: bool,
 ) -> list[str]:
@@ -2147,6 +2909,7 @@ def replay_blocking_reasons(
         ("embedding", embedding_audit),
         ("recall", recall_audit),
         ("reason-output", reason_output_audit),
+        ("prompt-transport", prompt_transport_audit),
     ):
         if not bool(audit.get("passed")):
             blocking_reasons.append(f"{label} audit failed")
@@ -2307,6 +3070,13 @@ def _digest(value: object) -> str:
     return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
 
 
+def _privacy_digest(value: object) -> str:
+    """Return a run-private digest that cannot be reversed by dictionary lookup."""
+
+    payload = _canonical_json(value).encode("utf-8")
+    return hashlib.sha256(_REPLAY_PRIVACY_DIGEST_SALT + payload).hexdigest()
+
+
 def _pair_payload(
     pair: ReplayPair,
     *,
@@ -2386,6 +3156,7 @@ def _write_artifact(
     embedding_audit: Mapping[str, object],
     recall_audit: Mapping[str, object],
     reason_output_audit: Mapping[str, object],
+    prompt_transport_audit: Mapping[str, object],
     production_prefilter_mode: str,
     topic_lifecycle_serialization: bool,
 ) -> None:
@@ -2394,7 +3165,13 @@ def _write_artifact(
             "candidate_id": candidate.candidate_id,
             "source_strategy": candidate.source_strategy,
             "source_platform": candidate.source_platform,
-            "content_id": candidate.content_id,
+            "content_key_digest": _privacy_digest(
+                {
+                    "candidate_id": candidate.candidate_id,
+                    "source_platform": candidate.source_platform,
+                    "content_id": candidate.content_id,
+                }
+            ),
             "score_threshold": candidate.score_threshold,
             "status": str(row.get("status") or ""),
         }
@@ -2409,7 +3186,7 @@ def _write_artifact(
         for candidate, row in zip(candidates, rows, strict=True)
     )
     artifact = {
-        "schema_version": 2,
+        "schema_version": 3,
         "created_at": datetime.now(UTC).isoformat(),
         "git": _git_metadata(),
         "arm_b": str(args.arm_b),
@@ -2475,6 +3252,7 @@ def _write_artifact(
         "recall": dict(recall_audit),
         "routes": dict(route_audit),
         "reason_output": dict(reason_output_audit),
+        "prompt_transport": dict(prompt_transport_audit),
         "gate": {"passed": gate_passed, **dict(gate)},
         "llm_calls": [dict(call) for call in calls],
     }
@@ -2500,10 +3278,17 @@ async def run(args: argparse.Namespace) -> int:
     compact_profile = str(args.arm_b) == "compact"
     legacy_reason = str(args.arm_b) == "reason-diet"
     reason_off = str(args.arm_b) == "reason-off"
-    if not compact_profile and model_override is None and not legacy_reason and not reason_off:
+    json_minify = str(args.arm_b) == "json-minify"
+    if (
+        not compact_profile
+        and model_override is None
+        and not legacy_reason
+        and not reason_off
+        and not json_minify
+    ):
         raise ValueError(
-            "--arm-b must be compact, reason-diet, reason-off, model=<instance-id> (v2), "
-            "or model=<provider:model> (legacy)"
+            "--arm-b must be compact, reason-diet, reason-off, json-minify, "
+            "model=<instance-id> (v2), or model=<provider:model> (legacy)"
         )
 
     database = _load_read_only_database(db_path)
@@ -2530,10 +3315,12 @@ async def run(args: argparse.Namespace) -> int:
         arm_a_service = _DeterministicLLMService(
             _build_llm_service(config, data_root),
             service="arm_a",
+            expected_compact_json=False,
         )
         arm_b_service = _DeterministicLLMService(
             _build_llm_service(config, data_root, model_override=model_override),
             service="arm_b",
+            expected_compact_json=json_minify,
         )
         recall_audit = ReplayRecallAudit()
 
@@ -2566,6 +3353,7 @@ async def run(args: argparse.Namespace) -> int:
                 legacy_profile=False,
                 embedding_service=embedding_service,
                 recall_audit=recall_audit,
+                compact_evaluation_json=json_minify,
             )
 
             async def score_arm_a(
@@ -2705,6 +3493,13 @@ async def run(args: argparse.Namespace) -> int:
             )
             calls = [*arm_a_service.calls, *arm_b_service.calls]
             reason_output_audit = validate_reason_off_outputs(calls, enabled=reason_off)
+            prompt_transport_audit = validate_json_minify_transport(
+                calls,
+                enabled=json_minify,
+                repeats=int(args.repeats),
+                arm_a_profile_cache_stats=arm_a_engine.evaluation_profile_prompt_cache_stats(),
+                arm_b_profile_cache_stats=arm_b_engine.evaluation_profile_prompt_cache_stats(),
+            )
             route_audit = validate_replay_routes(
                 calls,
                 repeats=int(args.repeats),
@@ -2755,6 +3550,7 @@ async def run(args: argparse.Namespace) -> int:
                 embedding_audit=embedding_audit,
                 recall_audit=recall_validation,
                 reason_output_audit=reason_output_audit,
+                prompt_transport_audit=prompt_transport_audit,
                 profile_snapshot_stable=(
                     _digest(_profile_digest_payload(profile)) == frozen_profile_digest
                 ),
@@ -2770,6 +3566,7 @@ async def run(args: argparse.Namespace) -> int:
                 "embedding_passed": bool(embedding_audit.get("passed")),
                 "recall_passed": bool(recall_validation.get("passed")),
                 "reason_output_passed": bool(reason_output_audit.get("passed")),
+                "prompt_transport_passed": bool(prompt_transport_audit.get("passed")),
                 "blocking_reasons": blocking_reasons,
             }
             if blocking_reasons:
@@ -2800,6 +3597,7 @@ async def run(args: argparse.Namespace) -> int:
                 embedding_audit=embedding_audit,
                 recall_audit=recall_validation,
                 reason_output_audit=reason_output_audit,
+                prompt_transport_audit=prompt_transport_audit,
                 production_prefilter_mode=production_prefilter_mode,
                 topic_lifecycle_serialization=topic_lifecycle_serialization,
             )
@@ -2859,8 +3657,8 @@ def parse_args() -> argparse.Namespace:
         "--arm-b",
         required=True,
         help=(
-            "Arm B transform: compact, reason-diet, reason-off, model=<instance-id> (v2), "
-            "or model=<provider:model> (legacy)"
+            "Arm B transform: compact, reason-diet, reason-off, json-minify, "
+            "model=<instance-id> (v2), or model=<provider:model> (legacy)"
         ),
     )
     parser.add_argument(
