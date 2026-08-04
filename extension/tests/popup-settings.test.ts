@@ -881,6 +881,17 @@ test("settings page wires offline cache and degraded-mode banners", () => {
   }
 
   assert.match(popupJs, /readCachedConfigSnapshot/);
+test("settings save understands queued config apply and background failure events", () => {
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const saveBlock =
+    popupJs.match(/saveBtn\.addEventListener\("click"[\s\S]*?\n  \}\);/)?.[0] ?? "";
+
+  assert.match(saveBlock, /result\.apply_state === "queued"/);
+  assert.match(saveBlock, /queued[\s\S]*"warning"/);
+  assert.match(popupJs, /event\.type === "config_reload_failed"/);
+  assert.match(popupJs, /后台应用配置失败，已恢复上一次生效配置/);
+});
+
   assert.match(popupJs, /cached_at/);
   assert.match(popupJs, /后端不可达且没有缓存配置/);
   assert.match(popupJs, /renderDegradedBanner\(cfg\)/);

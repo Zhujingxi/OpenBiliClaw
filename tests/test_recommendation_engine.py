@@ -559,6 +559,71 @@ async def test_serve_filters_profile_disliked_topics_before_pool_purge_finishes(
 
 
 @pytest.mark.asyncio
+async def test_serve_falls_back_to_exact_topics_when_fuzzy_dislikes_starve_window() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        try:
+            _seed_visible(
+                db,
+                "BV1SCIENCE",
+                title="天文学入门",
+                description="一条讲解恒星演化的视频",
+                topic_key="天文学",
+                topic_group="自然科学",
+                pool_topic_label="天文学",
+            )
+            _seed_visible(
+                db,
+                "BV1HISTORY",
+                title="城市史档案",
+                description="一条梳理城市变迁的视频",
+                topic_key="城市史",
+                topic_group="人文历史",
+                pool_topic_label="城市史",
+                relevance_score=0.8,
+            )
+            profile = _build_profile()
+            profile.preferences.disliked_topics = ["视频"]
+            engine = RecommendationEngine(llm=_DummyLLM(), database=db)
+
+            recommendations = await engine.serve(profile, limit=1)
+            await asyncio.sleep(0)
+        finally:
+            db.close()
+
+        assert [item.content.bvid for item in recommendations] == ["BV1SCIENCE"]
+
+
+@pytest.mark.asyncio
+async def test_serve_fail_safe_never_restores_exact_disliked_topics() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        try:
+            for index in range(2):
+                _seed_visible(
+                    db,
+                    f"BV1CASE{index}",
+                    title=f"案件复盘 {index}",
+                    topic_key="刑事案件",
+                    topic_group="法律案件",
+                    pool_topic_label="刑事案件",
+                    relevance_score=0.9 - index * 0.1,
+                )
+            profile = _build_profile()
+            profile.preferences.disliked_topics = ["刑事案件"]
+            engine = RecommendationEngine(llm=_DummyLLM(), database=db)
+
+            recommendations = await engine.serve(profile, limit=1)
+            await asyncio.sleep(0)
+        finally:
+            db.close()
+
+        assert recommendations == []
+
+
+@pytest.mark.asyncio
 async def test_generate_recommendations_prefers_primary_then_relevance_then_recency() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         db = Database(Path(tmpdir) / "test.db")

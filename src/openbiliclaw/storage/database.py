@@ -6930,6 +6930,7 @@ class Database:
         available_before = 0
         raw_before = 0
         protected_ids: set[str] = set()
+        recovery_budget = 0
         lock_wait_ms = 0.0
         recovery_ms = 0.0
         stale_trim_ms = 0.0
@@ -6965,14 +6966,22 @@ class Database:
                 str(row["bvid"]) for row in before_rows[: min(len(before_rows), clean_target)]
             }
             recovered_ids: list[str] = []
-            if recover_suppressed:
+            # Suppressed rows do not count as raw material until restored. Never
+            # restore through an already-exhausted raw ceiling: doing so used to
+            # alternate forever with the next batch's capacity trim while the
+            # frontend-visible availability remained unchanged.
+            recovery_budget = min(
+                mutation_budget,
+                max(0, clean_raw_ceiling - raw_before),
+            )
+            if recover_suppressed and recovery_budget > 0:
                 phase_started = time.perf_counter()
                 recovered_ids = self._recover_suppressed_pool_inventory_on(
                     conn,
                     deficit=max(0, clean_target - available_before),
                     source_share_quotas=clean_source_quotas,
                     xhs_self_nickname=xhs_self_nickname,
-                    max_restore=mutation_budget,
+                    max_restore=recovery_budget,
                     _viewed_content_keys=viewed_content_keys,
                 )
                 recovery_ms = (time.perf_counter() - phase_started) * 1000.0
@@ -7179,6 +7188,15 @@ class Database:
             commit_started = time.perf_counter()
             conn.commit()
             write_ms += (time.perf_counter() - commit_started) * 1000.0
+            recovery_can_continue = (
+                recover_suppressed
+                and len(after_rows) < clean_target
+                and raw_after < clean_raw_ceiling
+                and (
+                    (recovery_budget == 0 and raw_after < raw_before)
+                    or (recovery_budget > 0 and len(recovered_ids) >= recovery_budget)
+                )
+            )
             result = PoolMaintenanceResult(
                 available_before=available_before,
                 available_after=len(after_rows),
@@ -7203,11 +7221,7 @@ class Database:
                 mutation_count=(
                     len(recovered_ids) + len(all_content_victims) + len(raw_plan.candidate_ids)
                 ),
-                has_more=(
-                    omitted_mutations > 0
-                    or raw_after > clean_raw_ceiling
-                    or (len(after_rows) < clean_target and len(recovered_ids) >= mutation_budget)
-                ),
+                has_more=(omitted_mutations > 0 or recovery_can_continue),
                 lock_wait_ms=lock_wait_ms,
                 recovery_ms=recovery_ms,
                 stale_trim_ms=stale_trim_ms,
@@ -7218,10 +7232,10 @@ class Database:
                 write_ms=write_ms,
                 total_ms=(time.perf_counter() - total_started) * 1000.0,
             )
-            if result.untrimmed_raw_excess > 0:
-                logger.error(
-                    "pool maintenance retained protected/token-owned raw excess: %s",
-                    result.untrimmed_raw_excess,
+            if full_raw_plan.untrimmed_excess > 0:
+                logger.warning(
+                    "pool maintenance cannot trim protected/token-owned raw excess: %s",
+                    full_raw_plan.untrimmed_excess,
                 )
             return result
         except Exception as exc:

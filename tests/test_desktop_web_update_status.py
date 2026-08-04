@@ -31,6 +31,15 @@ def test_desktop_web_settings_wires_update_status_line() -> None:
     assert js.count("void refreshUpdateStatus();") >= 2
 
 
+def test_desktop_web_settings_understands_background_config_apply() -> None:
+    js = (ROOT / "src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
+
+    assert 'result?.apply_state === "queued"' in js
+    assert "配置已进入后台应用队列，连续保存会自动合并为最新版本" in js
+    assert 'event.type === "config_reload_failed"' in js
+    assert "后台应用配置失败，已恢复上一次生效配置" in js
+
+
 def test_desktop_web_settings_wires_manual_update_actions() -> None:
     """The spec-required 立即检查 / 立即应用 controls exist and are wired."""
     html = (ROOT / "src/openbiliclaw/web/desktop/index.html").read_text(encoding="utf-8")

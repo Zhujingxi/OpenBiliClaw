@@ -8594,6 +8594,14 @@ ${cardFeedbackBarHtml()}`;
         const editingSettings = Boolean(settingsForm && settingsForm.contains(document.activeElement));
         if (!editingSettings) scheduleBackendHydration();
       }
+      if (event.type === "config_reload_failed") {
+        const message = String(event.message || "后台应用配置失败，已恢复上一次生效配置。");
+        if ($("#configStatus")) {
+          $("#configStatus").setAttribute("role", "alert");
+          $("#configStatus").value = message;
+        }
+        showToast("配置应用失败：请查看配置状态");
+      }
       if (["init_progress", "init_failed", "init_completed"].includes(event.type)) {
         void refreshInitStatus({ schedule: event.type === "init_progress" });
       }
@@ -10060,7 +10068,12 @@ ${cardFeedbackBarHtml()}`;
         if (result?.config) applyConfig(result.config);
         else clearSettingsDirty();
         const message = result?.message || "配置已保存。";
-        const suffix = result?.restart_required ? "\n当前配置需要重启后端后完全生效。" : result?.reloaded === false ? "\n后端返回未热重载，请检查运行状态。" : "";
+        const queued = result?.apply_state === "queued";
+        const suffix = result?.restart_required
+          ? "\n当前配置需要重启后端后完全生效。"
+          : queued
+            ? "\n配置已进入后台应用队列，连续保存会自动合并为最新版本。"
+            : result?.reloaded === false ? "\n后端返回未热重载，请检查运行状态。" : "";
         if ($("#configStatus")) $("#configStatus").value = `${message}${suffix}`;
         showToast(result?.restart_required ? "配置已保存，需要重启后端" : "配置已保存");
         void hydrateFromBackend();

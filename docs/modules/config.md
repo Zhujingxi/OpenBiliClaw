@@ -816,6 +816,12 @@ TOML 与显式环境变量覆盖在构造 `SchedulerConfig` 前统一归一为�
 
 #### Web 与插件设置页的「高级功能」
 
+#### 保存与运行时应用状态
+
+`PUT /api/config` 的持久化阶段继续执行候选配置校验、`config.toml.bak` 快照、完整写盘和凭据 patch 语义；只有这些步骤成功才会返回 2xx。受保护的 dialogue execution、dialogue settlement、event owner 或另一轮 runtime rebuild 正忙时，后端不再让 HTTP 请求同步等待最长 25 分钟，而是返回 HTTP 202：`apply_state="queued"`、单调递增的 `apply_revision`、`reloaded=false`。插件与桌面 Web 应把它显示为“已保存、等待后台应用”，不能当作保存失败。
+
+后台队列只合并尚未开始的修订并保留最新值；正在应用的修订完成后会立即追上最新 pending。`GET /api/config/apply-status` 返回 `requested_revision / applied_revision / state / message / error / updated_at`，其中不含配置或秘密。最终成功广播 `config_reloaded`；最新修订失败会恢复最后一次已生效配置并广播 `config_reload_failed`。初始化与配置应用互斥：应用中的 `POST /api/init` 返回 `409 config_applying`，运行中的 init 继续让配置保存返回 `409 init_running`。
+
 桌面 Web 与浏览器插件 side panel 的设置页都提供独立的「高级功能」Tab：桌面端共 7 个 Tab，插件端共 6 个 Tab；两端固定使用同一套三个 section，字段语义、默认值和保存行为保持一致。
 
 - **推荐增强**：包含 P1 用户视觉画像、P2 弹幕语义、P3 视频关键帧的开关和预热参数。三者都是排序信号加权，不是过滤；P1/P3 依赖图像 Embedding，P2 只需文本 Embedding。P1 每个极性反馈不足 8 条时安全 no-op。关闭任一开关会保留缓存与参数并回退到原排序，不影响现有主流程；关键帧和弹幕目前仅作用于 B 站。
