@@ -2388,6 +2388,19 @@ class ConfigUpdateResponse(BaseModel):
     reloaded: bool = False
     rollback_applied: bool = False
     restart_required: bool = False
+    apply_state: Literal["idle", "queued", "applying", "applied", "failed"] = "idle"
+    apply_revision: int = 0
+
+
+class ConfigApplyStatusResponse(BaseModel):
+    """Non-sensitive status for the latest persisted runtime-config revision."""
+
+    state: Literal["idle", "queued", "applying", "applied", "failed"] = "idle"
+    requested_revision: int = 0
+    applied_revision: int = 0
+    message: str = ""
+    error: str = ""
+    updated_at: str = ""
 
 
 class SourceShareSuggestionResponse(BaseModel):

@@ -231,6 +231,7 @@ config recovery control plane (normal or degraded; business APIs stay gated)
                 ├─ draft → /api/config/probe-service → temporary registry → total gate
                 └─ draft → /api/config/discover-models → exact instance GET /models
                           → editable model list + local effort advisory (no config write)
+config save control plane: persist first → idle sync apply / busy latest-wins queue → runtime receipt
 XHS/DY/YT/Zhihu task final: canonical staged result → durable event receipt → verified seen-key → terminal flip
                           stale lease reclaim replays first write; staged row rejects late mutation
                           Reddit task-result is not migrated by this protocol change

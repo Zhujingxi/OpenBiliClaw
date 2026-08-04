@@ -33,6 +33,7 @@
 - **对话 turn 绑定安全性收口**：三端把卡片/疑惑作为 durable turn，通过 `reply_to_turn_id` 只声明目标；服务端在 user INSERT 前冻结 canonical context、digest 和 ordinary/detached mode，统一贯穿 prompt、event、学习与结算，A→B replacement 只会安全 stale-drop。新增只读 context preview、opaque evidence 过滤、独立长列表滚动、reply quote 与失败草稿保留；恢复长历史时首次进入会落到最新消息，后续实时刷新仍保留阅读位置。真实三端 E2E 补齐结算态收尾：卡片已确认/修正/拒绝/稍后时会静默清除旧 context，已知服务端错误优先显示中文；移动端固定回顶按钮按 360px 窄屏重新留距，不再与发送按钮相交。
 - **修复 GitHub Star 数量请求偶发 403**：桌面 Web 和扩展不再从浏览器匿名直连 GitHub REST API，统一改走公开同源 `GET /api/project-stats`；后端持久化 12 小时缓存、使用 ETag 条件请求，并在 403 / 429、断网或 GitHub 异常时按响应头退避、返回旧缓存或无数量的本地 200。GitHub Pages 静态官网没有可用的同源后端，因此保留 Star CTA、停止动态请求数量；所有浏览器入口都不再产生 GitHub 失败资源日志，点击仓库行为保持不变。
 - **桌面惊喜推荐把“× / 看过了，不再推荐”移到卡片右上角**：关闭动作不再夹在喜欢、不感兴趣、稍后看和收藏之间，避免被误认成同级反馈或误触；按钮保留原有永久已读语义、可见键盘焦点与禁用态，窄屏触控区域不小于 44×44。
+- **配置保存不再被长对话拖到 60 秒超时**：`PUT /api/config` 仍先校验、快照并落盘；检测到对话、结算或事件 owner 正忙时改为立即返回 `202 apply_state="queued"`，由 app-owned latest-wins 队列在后台安全 drain 后热重载。连续保存只保留最新待应用修订，旧修订失败不会覆盖新文件；最终成功/失败通过 `config_reloaded` / `config_reload_failed` 推送，并可由 `GET /api/config/apply-status` 回读。最新修订失败会恢复最后一次已生效配置，初始化在应用完成前返回 `409 config_applying`，插件与桌面 Web 分别展示“已排队”及最终失败回执。
 - **修复 X「测试连接」只读旧健康记录的问题**：设置页现在通过 `twitter-cli` 的只读账户状态请求即时验证 `auth_token` / `ct0`，401、403、429 和传输失败分别保持失败或待判定语义，不把网络故障误报成 Cookie 失效。
 - **修复后端启动后 X Cookie 同步滞后**：启用 X 时，扩展每次新建 `/api/runtime-stream` 连接都会收到 `x_cookie_sync_requested`，立即把当前浏览器 Cookie 回传；原有启动、变更监听和小时 alarm 继续作为兜底。
 - **移除扩展临时调试日志中继**：抖音任务仍通过正常的 `task-result` 回传结构化诊断，但不再向 `/api/sources/_debug/log` 额外发起请求；废弃 helper 和后端 relay 路由同步删除。

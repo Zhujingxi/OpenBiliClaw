@@ -13,6 +13,19 @@
 `danmaku_max_chars (100..2000)` 做范围校验，保存后由 RuntimeContext 透传到推荐引擎；配置文件
 与 API round-trip 保持这些数值。配置字段仍默认关闭视觉 / 弹幕功能，不会改变默认排序。
 
+## 配置保存与后台应用
+
+`PUT /api/config` 把“持久化成功”和“运行时已经切换”分成两个明确阶段。请求仍在 `_CONFIG_SAVE_LOCK` 内完成校验、`config.toml.bak` 快照、`config.toml` 写入和凭据存储；运行时 lane 空闲时继续同步热重载并返回 `200 apply_state="applied"`。若对话执行、对话结算、事件 owner 或另一轮 runtime handoff 正忙，请求不会等待最长 25 分钟，而是立即返回 `202 apply_state="queued"`、`apply_revision` 与已脱敏配置快照。
+
+后台配置应用队列为 app-owned、latest-wins：正在应用的修订不会被取消，尚未开始的多个修订会合并为最新一份；因为每次 PATCH 都基于最新已落盘配置构建，合并不会丢掉前一轮已保存字段。成功广播 `config_reloaded`；失败且没有更新修订等待时恢复最后一次已生效配置并广播 `config_reload_failed`，若已有更新修订则不回滚覆盖它，直接继续应用最新值。进程在排队期间退出也不会丢配置，下一次启动直接从已落盘 `config.toml` 构建运行时。
+
+| 方法与路径 | 状态 | 契约 |
+|---|---|---|
+| `PUT /api/config` | ✅ | 空闲时 `200 applied`；受保护 lane 正忙时 `202 queued`。响应新增 `apply_state`、`apply_revision`，原有 `reloaded` / `rollback_applied` / `restart_required` 保持兼容。 |
+| `GET /api/config/apply-status` | ✅ | 返回 `state`、最新请求修订、最后已应用修订、消息、非敏感错误分类和更新时间；不包含配置内容或凭据。 |
+
+guided init 不与待应用配置并行：队列为 `queued/applying` 时 `POST /api/init` 返回 `409 config_applying`；init 已开始时 `PUT /api/config` 仍返回既有 `409 init_running`。
+
 ## 公开项目统计
 
 | 方法与路径 | 状态 | 契约 |

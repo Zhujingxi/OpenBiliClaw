@@ -2209,6 +2209,11 @@ function connectRuntimeStream() {
         setHint("后端配置已热重载，正在刷新数据…", "success");
         scheduleRecommendationsRefresh();
       }
+      if (event.type === "config_reload_failed") {
+        const message = String(event.message || "后台应用配置失败，已恢复上一次生效配置。");
+        setHint(message, "error");
+        showToast(message, "error");
+      }
       if (
         event.type === "backend_update_available" ||
         event.type === "backend_update_failed" ||
@@ -9559,7 +9564,10 @@ function bindSettings() {
         } else {
           clearSettingsDirty();
         }
-        const tone = result.restart_required ? "warning" : result.reloaded ? "success" : "warning";
+        const queued = result.apply_state === "queued";
+        const tone = result.restart_required || queued
+          ? "warning"
+          : result.reloaded ? "success" : "warning";
         showToast(result.message || "配置已保存。", tone);
       } catch (err) {
         if (err?.name === "AbortError") {
