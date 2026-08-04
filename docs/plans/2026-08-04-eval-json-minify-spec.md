@@ -135,3 +135,23 @@ expected.
 
 Rollback is one isolated production wiring commit: restore pretty evaluator serialization and its previous
 cache version while retaining the replay arm and rejected artifact metadata for diagnosis.
+
+## 7. Result
+
+The clean `ad4ba670` replay completed 100 candidates × 3 repeats in `6227.3s`. All 46 successful
+empty-content format fallbacks were attributed and billed in the attempt totals; three transient rate
+limits recovered and remained visible in route evidence. Compact JSON reduced treatment prompt characters
+by `25.05%` and UTF-8 bytes by `20.81%`. Attempt-inclusive paired median prompt/total token savings were
+`13.57% / 11.29%`; aggregate three-repeat savings were `15.72% / 13.16%`, so the nominal savings gates
+passed. Repair and topic/style/franchise classification gates also passed.
+
+The experiment nevertheless failed the locked landing gate. Treatment admission deltas were
+`-6pp / -6pp / +4pp`, whose `-6pp` median fell below the A/A-relative `-4pp` floor. Provider cache ratio
+fell by `32.20pp` and `31.98pp` in the two otherwise complete first/third treatment repeats, while a
+recovered A rate-limit call made repeat two's full usage/cache evidence incomplete. Production therefore
+keeps pretty JSON; no eval-cache or `CLAUDE.md` convention change is made.
+
+The local schema-v3 artifact is `data/eval/json-minify-ad4ba670.json` at SHA-256
+`873d90c9d46c6b45465201a883044d49d921d54eaa18878e012f377a87c2c8c9`. Independent recomputation matched
+all score and usage aggregates, and a scan against the 100 selected database rows found no retained title,
+body, raw content ID or URL.

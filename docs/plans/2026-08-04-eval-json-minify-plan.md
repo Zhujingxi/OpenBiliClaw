@@ -42,17 +42,20 @@
 - [x] Abort the first provider run after detecting unattributed successful empty-content retries whose
       usage was overwritten by the adapter's final response; do not treat the partial run as evidence.
 - [x] Add and test per-wire-attempt OpenAI-protocol usage accounting before restarting the experiment.
-- [ ] Run the exact 100×3 command from the spec on a clean commit.
-- [ ] Independently recompute score/admission/Spearman and paired usage deltas from raw artifact data.
-- [ ] Validate route/embedding/recall/cache/repair gates and artifact privacy.
-- [ ] Record artifact path, commit, SHA-256, runtime, retries and any provider limitations.
+- [x] Run the exact 100×3 command from the spec on clean commit `ad4ba670`.
+- [x] Independently recompute score/admission/Spearman and paired usage deltas from raw artifact data.
+- [x] Validate route/embedding/recall/cache/repair gates and artifact privacy.
+- [x] Record local artifact `data/eval/json-minify-ad4ba670.json`, SHA-256
+      `873d90c9d46c6b45465201a883044d49d921d54eaa18878e012f377a87c2c8c9`, runtime
+      `6227.3s`, 46 accounted format fallbacks and 3 recovered rate limits.
 
 ## Task 6 — Production decision
 
-- [ ] If every gate passes, wire compact JSON only into production batch evaluation.
-- [ ] Bump eval-cache version and update `CLAUDE.md`, discovery docs and changelog.
-- [ ] Rerun focused, full backend and applicable end-to-end tests on the final clean commit.
-- [ ] If any gate fails, keep production pretty JSON and record the rejected result without tuning gates.
+- [x] Reject production compact JSON because relative admission quality, provider cache and complete
+      token-evidence gates failed; do not tune thresholds after observing the result.
+- [x] Keep production pretty JSON, the existing eval-cache version and the existing `CLAUDE.md`
+      prompt-cache convention unchanged.
+- [x] Rerun focused, full backend and applicable end-to-end tests before the final result commit.
 
 ## Deferred independent experiments
 
