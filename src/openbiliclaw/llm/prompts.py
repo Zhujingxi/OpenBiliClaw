@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
 from openbiliclaw.discovery.style_keys import STYLE_KEY_PROMPT_TEXT, normalize_style_key
@@ -16,6 +17,21 @@ _PLATFORM_DISPLAY_NAMES: dict[str, str] = {
     "bilibili": "B 站",
     "xiaohongshu": "小红书",
 }
+
+
+def content_evaluation_clock(*, now: datetime | None = None) -> tuple[str, str]:
+    """Return the exact UTC evaluation time and its cache-friendly hour bucket.
+
+    The prompt receives the exact timestamp so current-hour publications never
+    look futuristic. The separate hour bucket keeps repeated discovery passes
+    cacheable while ensuring a long-lived daemon revisits content as it ages.
+    """
+    current = (now or datetime.now(UTC)).astimezone(UTC)
+    evaluated_at = current.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    evaluation_bucket = (
+        current.replace(minute=0, second=0, microsecond=0).isoformat().replace("+00:00", "Z")
+    )
+    return evaluated_at, evaluation_bucket
 
 
 def _platform_content_label(source_platform: str) -> str:
@@ -1244,7 +1260,8 @@ _SINGLE_CONTENT_EVALUATION_SYSTEM_PROMPT = (
     "<task>\n"
     "你要评估一个候选内容与一个用户画像的匹配度。下面 user 消息会给出 "
     "<source_context>(发现路径)、<source_platform>(平台)、"
-    "<profile_summary>(画像)、<content_summary>(候选),你按下面规则打分。\n"
+    "<profile_summary>(画像)、<evaluation_context>(评估时间)、"
+    "<content_summary>(候选),你按下面规则打分。\n"
     "</task>\n\n"
     "<rules>\n"
     "1. 输出必须是严格 JSON,不要附带解释。\n"
@@ -1280,6 +1297,10 @@ _SINGLE_CONTENT_EVALUATION_SYSTEM_PROMPT = (
     "   - 同一 IP 必须用相同写法,不要在「原神」「Genshin」「米哈游 原神」之间切换。\n"
     "9. 不同 source_platform(bilibili / xiaohongshu / 其他)的内容标签同 schema,"
     "不要因为来源不同特殊处理评分逻辑。\n"
+    "10. published_at 是来源提供的权威发布时间，evaluation_context.evaluated_at 是本次评估的"
+    "权威时间基准。不得根据模型知识截止时间或标题中的年份推测发布时间；对热点、时事、版本更新"
+    "等时效性内容，应比较 published_at 与 evaluated_at 判断内容是否仍然新鲜，"
+    "但不得仅因内容较新就覆盖与用户画像的真实匹配度。字段缺失或无效时保持中性，不得武断降分。\n"
     "</rules>\n\n"
     "<output_schema>\n"
     "{\n"
@@ -1299,6 +1320,7 @@ def build_content_evaluation_prompt(
     content_summary: dict[str, object],
     source_context: str = "",
     source_platform: str = "bilibili",
+    evaluated_at: str = "",
 ) -> list[dict[str, str]]:
     """Build a structured prompt for single-item content relevance evaluation.
 
@@ -1307,6 +1329,7 @@ def build_content_evaluation_prompt(
         content_summary: Content metadata.
         source_context: Discovery context hint (e.g. search / trending / explore).
         source_platform: Platform identifier for dynamic prompt wording.
+        evaluated_at: Authoritative UTC evaluation-time bucket for freshness comparisons.
 
     v0.3.28+ cache-friendly: ``system_prompt`` is the module-level
     constant ``_SINGLE_CONTENT_EVALUATION_SYSTEM_PROMPT`` (100% static).
@@ -1323,6 +1346,14 @@ def build_content_evaluation_prompt(
             "<profile_summary>",
             json.dumps(profile_summary, ensure_ascii=False, indent=2, sort_keys=True),
             "</profile_summary>",
+            "<evaluation_context>",
+            json.dumps(
+                {"evaluated_at": evaluated_at or "(unspecified)"},
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ),
+            "</evaluation_context>",
             "<content_summary>",
             json.dumps(
                 _normalize_content_style_fields(content_summary),
@@ -1351,7 +1382,8 @@ _BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT = (
     "下面 user 消息会按稳定性顺序给出画像层(<profile_core>、<profile_life_context>、"
     "<profile_interests>、<profile_style_context>、<profile_recent_context>)、"
     "<source_platform>(平台)、"
-    "<source_context>(发现路径)、<content_batch>(本批候选),你按下面规则打分。\n"
+    "<source_context>(发现路径)、<evaluation_context>(评估时间)、"
+    "<content_batch>(本批候选),你按下面规则打分。\n"
     "</task>\n\n"
     "<rules>\n"
     '1. 输出必须是严格 JSON 对象,不要附带解释。顶层只包含 "results" 数组。\n'
@@ -1419,6 +1451,11 @@ _BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT = (
     "与 title、body_text、description、tags、互动指标一起判断主题、风格、视觉质感和点击诱因;"
     "如果图片与文本存在冲突,把可见图像证据作为辅助修正,但不要仅凭封面热闹给高分。"
     "没有 cover_image_ref 的条目表示没有可用图片,只按文本字段判断,不要猜测缺失图片。\n"
+    "10c. content_batch 中的 published_at 是来源提供的权威发布时间，"
+    "evaluation_context.evaluated_at 是本次评估的权威时间基准。不得根据模型知识截止时间"
+    "或标题中的年份推测发布时间；对热点、时事、版本更新等时效性内容，应比较 published_at"
+    "与 evaluated_at 判断内容是否仍然新鲜，但不得仅因内容较新就覆盖与用户画像的真实匹配度。字段缺失或无效时"
+    "保持中性，不得武断降分。\n"
     "11. 当 user 消息携带 `<negative_examples>` 时,把这些标题视为用户最近"
     "**明确不喜欢**的样本——理由可能是快速划走 (`quick_exit`) 或显式负反馈"
     " (`explicit_negative`)。\n"
@@ -1452,6 +1489,7 @@ def build_batch_content_evaluation_prompt(
     source_context: str = "",
     source_platform: str = "bilibili",
     negative_examples: list[dict[str, object]] | None = None,
+    evaluated_at: str = "",
 ) -> list[dict[str, str]]:
     """Build a prompt that evaluates multiple content items in one LLM call.
 
@@ -1513,6 +1551,18 @@ def build_batch_content_evaluation_prompt(
                 "</negative_examples>",
             ]
         )
+    user_blocks.extend(
+        [
+            "<evaluation_context>",
+            json.dumps(
+                {"evaluated_at": evaluated_at or "(unspecified)"},
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ),
+            "</evaluation_context>",
+        ]
+    )
     user_blocks.extend(
         [
             "<content_batch>",

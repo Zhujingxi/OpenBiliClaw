@@ -650,6 +650,7 @@ images: proxy foreground + refresh prefetch → app-stable lane (total 4 / bg 3,
 │ Source-family registry: alias · strategy · URL host │
 │             → pool accounting · durable seen_items ledger │
 │ Bangumi public API → search/ranked/date producer → shared eval │
+│ Eval clock: published_at + exact UTC evaluated_at → hourly cache invalidation │
 │ API projected stock → 3×30 workers → serial admit; OpenClaw first batch≤4 → copy≤4/no split retry → UI │
 │ Delight gate: formal copy/topic ready + seen_items guard → score/snapshot → UI × writes seen ledger │
 │ Inventory API/OpenClaw startup hook → recover/maintain → expose LLM │
