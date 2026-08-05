@@ -12,6 +12,7 @@
 - **候选评估使用真实发布时间**：单条、批量和补分类路径统一携带来源 `published_at` 与真实 UTC `evaluated_at`，缓存同时绑定发布时间摘要和评估小时桶；缺失或无效发布时间保持中性，不再让模型按知识截止时间猜测当前日期。
 - **发现关键词轮换与积压保护增强**：planner 避免重复消费同一关键词，XHS producer 按默认 20 分钟节奏检查，并在 pending + in-progress 搜索达到 5 条时停止 claim 与 LLM 生成。
 - **发布版本与 AMO channel 冲突处理**：后端、桌面和首轮 GitHub 插件包发布为 `0.3.194`；该扩展标签的既有自动签名流程先在 AMO 占用了 unlisted `0.3.194`，AMO 因此拒绝同版本转 listed。商店补丁版本提升为 `0.3.195`，Chrome 用它替换刚提交的 `0.3.194` 审核包，Firefox 以全新 listed 版本重提；仓库变量 `FIREFOX_SIGNING_ENABLED` 同步关闭，今后 GitHub 扩展发布不再抢占正式 AMO listed 版本号。
+- **PC Web 平台 Tab 集合在配置快照瞬断后自动恢复**：水合时 `/api/config` 与库存快照并行读取，偶发的连接重置此前会被静默吞掉——已启用但零库存的平台（如 Reddit）因此永久缺席筛选行，直到整页刷新。配置快照现在与平台库存一致采用有界重试（1s / 2s / 4s / 8s），成功后 Tab 并集收敛；E2E 桩改用 HTTP/1.0 短连接消除并行水合时的 keep-alive 复位竞态，并新增「配置两次失败后 Reddit 仍以 0 计数出现」的回归用例。
 
 ## extension v0.3.193：Firefox AMO 公开商店提审（2026-08-03）
 
