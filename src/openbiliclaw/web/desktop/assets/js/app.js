@@ -315,6 +315,10 @@
       () => refreshDialogueConfirmationSurface(),
       300
     );
+    const scheduleDesktopPendingConfirmationRefresh = debounceAsync(
+      () => refreshDesktopPendingConfirmations().catch(() => {}),
+      300
+    );
 
     let platformAvailabilityRetryAttempt = 0;
     let platformAvailabilityRetryTimer = null;
@@ -8650,6 +8654,7 @@ ${cardFeedbackBarHtml()}`;
 
     function handleRuntimeEvent(event) {
       if (!event?.type) return;
+      scheduleDesktopPendingConfirmationRefresh();
       if (event.type === "refresh.pool_updated" && typeof event.pool_available_count === "number") {
         desktopRuntimeGeneration += 1;
         clearDesktopRuntimeRecovery();
@@ -8801,6 +8806,7 @@ ${cardFeedbackBarHtml()}`;
         socket.addEventListener("open", () => {
           $("#statusLabel").textContent = "实时连接正常";
           restartDesktopFailedRecoveries();
+          scheduleDesktopPendingConfirmationRefresh();
           // The page may load before the backend binds (frozen-entry launch
           // race): the boot hydrate then swallows every failure into nulls and
           // nothing else ever re-fetches — an uninitialized backend emits no
@@ -9088,6 +9094,10 @@ ${cardFeedbackBarHtml()}`;
         return;
       }
 
+      // The chat badge is tiny but high-signal: start it before recommendation
+      // cards fan out into saved-status reads, otherwise a healthy 10ms request
+      // can sit behind the first-screen connection queue for several seconds.
+      const pendingConfirmationsPromise = refreshDesktopPendingConfirmations();
       const recommendationsPromise = readRecommendationSnapshot();
       const runtimePromise = readRuntimeSnapshot();
 
@@ -9105,6 +9115,7 @@ ${cardFeedbackBarHtml()}`;
       );
 
       const secondaryPromises = [
+        pendingConfirmationsPromise,
         requestJson(ENDPOINTS.health),
         requestJson(ENDPOINTS.initStatus).then(applyInitStatusSnapshot),
         requestJson(`${ENDPOINTS.activityFeed}?limit=5`).then(applyActivitySnapshot),

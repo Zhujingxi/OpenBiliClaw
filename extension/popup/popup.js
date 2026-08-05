@@ -419,6 +419,7 @@ offlineBackendPoller = createOfflineBackendPoller({
       setHint("后端连上了，正在刷新。", "success");
     }
     scheduleRecommendationsRefresh({ delayMs: 0 });
+    scheduleDialogueConfirmationRefresh();
     void maybeShowEmbeddingBanner();
   },
 });
@@ -755,6 +756,7 @@ const savedTaskRuntimes = {
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) {
     for (const runtime of Object.values(savedTaskRuntimes)) runtime.coordinator.resumeAll();
+    scheduleDialogueConfirmationRefresh();
   }
 });
 window.addEventListener("pagehide", () => {
@@ -2387,6 +2389,7 @@ function connectRuntimeStream() {
           "success",
         );
         scheduleRecommendationsRefresh({ delayMs: 0 });
+        scheduleDialogueConfirmationRefresh();
       }
     },
     onDisconnect() {
