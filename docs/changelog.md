@@ -4,6 +4,15 @@
 
 ---
 
+## v0.3.196：候选池即时补给与模型调用瘦身（2026-08-06）
+
+- **候选池从定时等待改为缺口驱动即时补给**：候选评估器缺少 raw work 时会按平台份额缺口并行唤醒全部已配置 producer；周期 tick 与即时 tick 共用 per-source lock。补池结果显式区分插入量、真实进展与有效产出，重复结果不再冒充成功，而会进入 30 / 60 / 120 / 300 / 600 秒无产出退避；任一候选真正入队即清零阶梯。真实端到端请求已验证抖音来源任务、模型评估、候选入池与推荐库存恢复闭环。
+- **通过真实门的 sparse JSON 成为 batch evaluator 默认**：100 条候选 × 3 轮对照中，prompt-token 节省中位数为 `27.99%`，total-token 节省中位数为 `24.05%`，相对质量、分类、repair、route、embedding、recall、usage 与隐私门均通过。生产请求使用 request-local ID 和 canonical sparse envelope，未发送的 URL / 全局 ID 不再造成 cache false miss；完整正文、发布时间、多模态顺序和失败修复契约保持不变。
+- **画像二级兴趣按推荐意图治理重复项**：候选门结合 embedding 与保守词面召回，连通分量替代首成员贪心聚类；父子兴趣、跨类通用后缀和用户显式 no-merge 仍受保护。任一模型批次失败都会留下 `retry_pending`，精确 raw Soul 快照支持回滚，apply 前的完整 revision 校验避免长模型调用覆盖并发写入的新兴趣。
+- **三端待聊与平台状态恢复更可靠**：插件在后端恢复在线、runtime stream 重连和侧栏重新可见时刷新待聊角标；PC Web 将待聊计数提升为首屏高优先级请求，移动 Web 同步显示底部对话角标。PC 平台 Tab 的配置快照读取增加 1 / 2 / 4 / 8 秒有界重试，瞬时连接重置后仍会收敛到已启用平台集合。
+- **发布类型检查在 Python 3.11 / 3.12 间保持一致**：`evaluation_wire` 用显式类型变量承接已验证 JSON 数字，消除 CI 的 `redundant-cast` 与本地的 `no-any-return` 分叉，row-wire 运行语义不变。
+- **后端、桌面与浏览器插件统一发布为 `0.3.196`**：组件标签、GitHub 聚合 Release、Docker 镜像和桌面安装包使用同一版本；Chrome Web Store 以替换 pending submission 的方式提交审核，Firefox 继续走独立 AMO listed channel，并附可复现 reviewer source。
+
 ## v0.3.194 / extension v0.3.195：小红书真实搜索修复与首启可靠性（2026-08-05）
 
 - **画像二级兴趣去重从“严格同义词”升级为“同一推荐意图”**：真实画像诊断显示，“社会时事 / 时事新闻”“生活日常 / 生活记录”等相近二级项在 bge-m3 下只到 0.77–0.82，旧固定 0.85 候选门根本不会送审；新流程用跨类 0.80、同 category 再放宽 0.04 的 embedding 门叠加保守词面召回，并以连通分量替换首成员贪心聚类，修复 A≈B、B≈C 但 A≉C 时 C 永久落单。跨 category 的通用后缀不连边；dislikes 仍保持 0.85。no-merge 现在只切断已判 pair、不再遮住新邻居，并同时进入 prompt 与代码校验；策略版本升级会重审旧严格口径下的模型 keep，但用户显式 revert 的 pair 独立保护，旧状态可从 run snapshot + changelog 恢复。likes judge 改按“是否重复占用同一推荐/搜索意图”裁决，但父子兴趣仍分开。另修复真实运行日志已复现的失败闭环：`soul.consolidation` 因 provider cooldown 失败后，旧实现仍写 clean digest；现在任一 batch 失败、缺失或校验拒绝都会标记 `retry_pending` 且不写 clean digest，下一 due tick 会重试同一输入。真实隔离 apply/revert 还暴露出旧 run record 只保存 flat preference、回滚时会重建而非恢复原始 Soul 树；新记录现在额外保留完整 raw `soul.json`，先恢复 overrides 再精确恢复 Soul 和有效画像镜像，旧记录继续走兼容重建路径。同期真实 daemon 多轮 preference 写入又验证了 40–60 秒裁决窗口内确有并发更新；apply 现在落盘前校验 active / archived / dislikes 的完整 revision，冲突时不写画像、不写 run/state、下一 tick 立即重试，避免旧合并快照吃掉刚落入的新兴趣。
