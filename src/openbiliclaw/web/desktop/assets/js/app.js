@@ -370,6 +370,42 @@
       }
     }
 
+    let configSnapshotRetryAttempt = 0;
+    let configSnapshotRetryTimer = null;
+    let configSnapshotRecoveryInFlight = false;
+
+    // 配置快照只在水合时读一次；失败被 requestJson 静默吞掉会让筛选行永久缺失
+    // 已启用但零库存的平台（库存快照不会包含这类平台），设置页也拿不到默认值。
+    // 与平台库存一样做有界重试，成功后由后续保存 / 刷新自然接管。
+    function scheduleConfigSnapshotRetry() {
+      if (document.hidden) return;
+      if (state.config) return;
+      if (configSnapshotRetryTimer !== null) return;
+      if (configSnapshotRetryAttempt >= DESKTOP_RECOVERY_DELAYS_MS.length) return;
+      const delayMs = DESKTOP_RECOVERY_DELAYS_MS[configSnapshotRetryAttempt];
+      configSnapshotRetryAttempt += 1;
+      configSnapshotRetryTimer = window.setTimeout(() => {
+        configSnapshotRetryTimer = null;
+        void loadConfigSnapshot();
+      }, delayMs);
+    }
+
+    async function loadConfigSnapshot() {
+      if (configSnapshotRecoveryInFlight) return;
+      configSnapshotRecoveryInFlight = true;
+      try {
+        const snapshot = await requestJson(ENDPOINTS.config);
+        if (!snapshot) {
+          scheduleConfigSnapshotRetry();
+          return;
+        }
+        configSnapshotRetryAttempt = 0;
+        applyConfigSnapshot(snapshot);
+      } finally {
+        configSnapshotRecoveryInFlight = false;
+      }
+    }
+
     async function runBackendHydration() {
       if (document.hidden) {
         backendHydrationPending = true;
@@ -8136,6 +8172,14 @@ ${cardFeedbackBarHtml()}`;
       clearSettingsDirty();
     }
 
+    function applyConfigSnapshot(snapshot) {
+      const configSnapshot = snapshot?.config || snapshot;
+      applyConfig(configSnapshot);
+      presentDegradedConfigRecovery(configSnapshot);
+      renderFilters();
+      syncSourceMetric();
+    }
+
     function normalizeDelight(item) {
       if (!item) return null;
       const canonical = window.OpenBiliClawSavedSync.normalizeSavedItem(item);
@@ -9008,14 +9052,6 @@ ${cardFeedbackBarHtml()}`;
         }
       }
 
-      function applyConfigSnapshot(snapshot) {
-        const configSnapshot = snapshot?.config || snapshot;
-        applyConfig(configSnapshot);
-        presentDegradedConfigRecovery(configSnapshot);
-        renderFilters();
-        syncSourceMetric();
-      }
-
       async function reconcileRuntimeAfterRecommendations() {
         const secondRuntimeGeneration = desktopRuntimeGeneration;
         runtimeReconciliationGeneration = secondRuntimeGeneration;
@@ -9044,7 +9080,9 @@ ${cardFeedbackBarHtml()}`;
       const pingSnapshot = await requestJson(ENDPOINTS.ping);
       applyHealthSnapshot(pingSnapshot);
       if (pingSnapshot?.degraded === true) {
-        applyConfigSnapshot(await requestJson(ENDPOINTS.config));
+        const configSnapshot = await requestJson(ENDPOINTS.config);
+        applyConfigSnapshot(configSnapshot);
+        if (!configSnapshot) scheduleConfigSnapshotRetry();
         return;
       }
 
@@ -9073,7 +9111,7 @@ ${cardFeedbackBarHtml()}`;
         requestJson(ENDPOINTS.notificationPending).then(applyNotificationSnapshot),
         requestJson(`${ENDPOINTS.chatTurns}?session=${encodeURIComponent(SHARED_CHAT_SESSION)}&scope=chat&limit=20`).then(applyChatSnapshot),
         requestJson(`${ENDPOINTS.chatTurns}?session=${encodeURIComponent(SHARED_CHAT_SESSION)}&scope=delight&limit=80`).then(applyDelightChatSnapshot),
-        requestJson(ENDPOINTS.config).then(applyConfigSnapshot),
+        loadConfigSnapshot(),
         refreshPlatformAvailability(),
       ];
 
