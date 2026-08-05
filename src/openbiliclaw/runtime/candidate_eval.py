@@ -182,7 +182,7 @@ class CandidateEvalCoordinator:
                 if self._projected_inventory(snapshot) >= snapshot.target:
                     self.state = "idle"
                 else:
-                    self._fill_open_slots()
+                    coalescing_wait = self._fill_open_slots()
                     snapshot = self._snapshot()
                     if not self._workers and snapshot.pending_eval <= 0:
                         supply_cooldown_remaining = self._supply_cooldown_until - now
@@ -196,6 +196,12 @@ class CandidateEvalCoordinator:
                         self.state = "waiting_supply" if self._supply_task else "idle"
                     elif self._workers:
                         self.state = "running"
+                    elif coalescing_wait is not None and coalescing_wait > 0:
+                        self.state = "coalescing"
+                        await self._wait_for_activity(
+                            min(self.safety_wake_seconds, coalescing_wait)
+                        )
+                        continue
 
                 await self._wait_for_activity(self.safety_wake_seconds)
         finally:
@@ -247,19 +253,27 @@ class CandidateEvalCoordinator:
             admitted_pending_copy=int(value.get("admitted_pending_copy", 0)),
         )
 
-    def _fill_open_slots(self) -> None:
+    def _fill_open_slots(self) -> float | None:
         while not self._stopping and len(self._workers) < self.worker_count:
             snapshot = self._snapshot()
             if self._projected_inventory(snapshot) >= snapshot.target or snapshot.pending_eval <= 0:
-                return
-            claim = self.pipeline.claim_batch(limit=self.batch_size)
+                return None
+            claim_ready = getattr(self.pipeline, "claim_ready_batch", None)
+            if callable(claim_ready):
+                claim = claim_ready(limit=self.batch_size)
+            else:
+                claim = self.pipeline.claim_batch(limit=self.batch_size)
             if claim is None:
-                return
+                ready_in = getattr(self.pipeline, "eval_ready_in_seconds", None)
+                if callable(ready_in):
+                    return max(0.0, float(ready_in(limit=self.batch_size)))
+                return None
             task = asyncio.create_task(
                 self._evaluate_worker(claim),
                 name=f"candidate_eval:{claim.token[:8]}",
             )
             self._workers[task] = claim
+        return None
 
     async def _evaluate_worker(self, claim: Any) -> Any:
         profile = self.profile_provider()

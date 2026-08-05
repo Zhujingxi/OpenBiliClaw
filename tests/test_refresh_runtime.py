@@ -1920,7 +1920,27 @@ async def test_candidate_eval_rate_limit_releases_claims_for_recovery_with_real_
             self.calls += 1
             if self.calls == 1:
                 raise LLMRateLimitError("provider 429 rate limit")
-            return _StructuredResponse(json.dumps(self.payload, ensure_ascii=False))
+            candidate_block = user_input.split("<content_batch>", 1)[1].split(
+                "</content_batch>", 1
+            )[0]
+            decoded = json.loads(candidate_block.strip())
+            if isinstance(decoded, dict):
+                request_items = decoded.get("items", [])
+                assert isinstance(request_items, list)
+                payload = [
+                    {
+                        **{
+                            key: value
+                            for key, value in self.payload[index].items()
+                            if key not in {"bvid", "content_id"}
+                        },
+                        "id": str(index),
+                    }
+                    for index in range(len(request_items))
+                ]
+            else:
+                payload = self.payload
+            return _StructuredResponse(json.dumps(payload, ensure_ascii=False))
 
     database = Database(tmp_path / "candidate-eval-rate-limit-e2e.db")
     database.initialize()

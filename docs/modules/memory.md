@@ -393,7 +393,14 @@ updated_pref = await analyzer.analyze_events(
 - `recent_awareness`
 - `active_insights`
 
-`LLMService.complete_structured_task()` 会把这份 core memory 自动注入到后续的偏好分析、觉察、洞察、聊天学习和 discovery 评分 prompt 里，让系统在“记得你是谁”的前提下继续理解新信号。
+`get_core_memory()` 通过 `_effective_soul_data()` 读取 **生效画像**（AI 画像 ⊕ `profile_overrides.json`，与 `SoulEngine.get_profile()` 同源），因此用户手动编辑的画像会在聊天里生效；无 overrides 时短路返回原始层，行为不变、零额外开销。
+
+**稳定/易变拆分（v0.3.171）**：`render_core_memory_blocks()` 委托 `soul/profile_views.py:chat_core_memory`，把 core memory 拆成两块——
+
+- `stable_block`（用户画像 + 核心特质/价值观/深层需求/MBTI + 偏好摘要）：跨觉察刷新字节稳定，注入 **system** 前缀，保住 provider prompt 缓存命中；
+- `volatile_block`（近期观察 + 当前洞察）：每个认知周期都在变，注入 **user** 消息、位于本轮输入之前（most-stable-first）。
+
+`LLMService.complete_with_core_memory()`（及 `complete_structured_task` / `complete_with_tools` / socratic / multimodal 全族）统一走这套注入拆分；觉察/洞察变化不再打碎 system 前缀。`render_core_memory_prompt()` 保留为「stable + volatile」拼接的兼容包装，供非聊天读者使用。
 
 ## 状态文件体系
 
@@ -448,7 +455,7 @@ MemoryManager 被以下组件直接依赖：
 | 组件 | 读操作 | 写操作 |
 |------|--------|--------|
 | **SoulEngine** | 全部五层 + feedback/insight/cognition 状态 | 全部五层 + feedback/insight/cognition 状态 |
-| **LLMService** | `render_core_memory_prompt()`, `get_core_memory()` | — |
+| **LLMService** | `render_core_memory_blocks()`, `render_core_memory_prompt()`, `get_core_memory()` | — |
 | **FastAPI (app.py)** | `load_cognition_updates()` | `propagate_event()`, `save_cognition_updates()` |
 | **Source task endpoints** | `load_source_bootstrap_state()` | `save_source_bootstrap_state()`, `propagate_event()` |
 | **RefreshController** | `load_discovery_runtime_state()` | `save_discovery_runtime_state()` |
@@ -474,8 +481,8 @@ data_dir = "data"  # 记忆 JSON 文件存储在 data/memory/ 下
 3. **运行时共享 SQLite 实例**：CLI / API 高流量路径优先复用同一个 `Database`，减少锁冲突和重复初始化
 4. **合并策略**：按 `(name, category)` 双键去重，权重取 max，`first_seen` 保持不变
 5. **灵魂层双存储**：`soul_profile.json` 存储结构化 OnionProfile v2 格式（版本 2），`soul_profile.md` 提供人类可读的镜像，`soul_changelog.md` 记录每次更新的来源、时间和变化摘要；自动迁移 v1 flat SoulProfile 格式
-6. **核心记忆裁剪**：`get_core_memory()` 只暴露稳定摘要，不把整层原始 JSON 直接塞进 prompt
-7. **统一 Prompt 注入**：`render_core_memory_prompt()` 和 `LLMService` 统一为画像、偏好、觉察、洞察链路注入用户上下文
+6. **核心记忆裁剪**：`get_core_memory()` 只暴露稳定摘要（读生效画像 AI ⊕ overrides），不把整层原始 JSON 直接塞进 prompt
+7. **统一 Prompt 注入 + 稳定/易变拆分**：`render_core_memory_blocks()`（委托 `chat_core_memory` 视图）把核心记忆拆成 system 侧稳定块与 user 侧易变块，`LLMService` 全注入族共享该拆分——觉察/洞察刷新不再打碎 system 前缀缓存；`render_core_memory_prompt()` 保留为拼接兼容包装
 8. **插件事件兼容**：事件层白名单已扩到插件采集事件，避免 `/api/events` 在 `snapshot`、`scroll`、`hover`、`seek` 等行为上拒收
 9. **反馈状态独立持久化**：`feedback_state.json` 单独保存反馈处理游标，以及 `feedback_owner_version` / `feedback_owner_cutover_at` 升级边界；写入使用 tmp + fsync + `os.replace`，让 cursor 与 owner fence 同时发布，避免把运行状态塞进 `preference.json` 或 `soul.json`
 10. **聊天候选与正式画像分层**：聊天提取出的 `insight_candidates.json` 先作为中间状态保留，不直接覆盖 `soul.json`

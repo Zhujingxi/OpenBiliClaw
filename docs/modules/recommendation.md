@@ -95,8 +95,9 @@ runtime 使用公开 `drain_pending_expression_copy(profile, limit<=60, max_extr
 | v0.3.x 画像输入上限放宽 | ✅ | `_recommendation_profile_summary()` 兴趣 tag 上限 10 → 30 → 64 → 256 且按 weight 降序排序后截断；`disliked_topics` 5 → 16 → 64 → 128（与存储上限对齐，避雷项不再截断）；`_select_relevant_interests()` 的 embedding 候选池按 weight 排序取前 256（与画像兴趣上限对齐，让头部之外的小众兴趣在语义最匹配时也能被选中；`top_k=5` 不变，故注入 prompt 的数量不变；fallback「top-K by weight」语义与实现一致） |
 | v0.3.x 文案 / delight 候选 description 对齐 | ✅ | 推荐重评估和批量文案表达的候选 `description` 截断统一对齐到 400 字符（此前 200 / 300 / 280 混用），与 discovery 评估输入一致，避免中文简介在关键句中途被砍。Delight score 当前复用 Evo 结果，不再单独构造候选评分或 reason prompt；MMR 去重 embedding 文本仍保持 `[:160]/[:200]`（它是缓存 key，不动） |
 | v0.3.123 推荐画像输入与 discovery 统一 | ✅ | `_recommendation_profile_summary()` 改为直接委托 discovery 的 `build_profile_summary()`，推荐与发现喂给 LLM 的是**同一份**结构化画像；推荐侧因此补齐了之前缺的字段（`values` / `cognitive_style` / `motivational_drivers` / `current_phase` / `life_stage` / `source_platform_mix` / `recent_awareness` / `mbti` / `interest_domains` 等），并随统一一起不再带 `personality_portrait` 总结。`include_active_insights` 形参移除（统一输入恒含 active_insights）；embedding 选出的相关兴趣经 `interests=` 透传 |
-| v0.3.144+ 推荐画像上下文缓存前缀保护 | ✅ | 批量池文案、单条实时文案和 legacy/recovery 分类 prompt 已经携带完整结构化画像；调用 `LLMService.complete_structured_task()` 时会在支持路径上设置 `inject_core_memory=False`。v0.3.147+ 起这些画像 prompt 还会复用共享 `profile_prompt_layers()`：稳定 core / interests 层放前，recent 层放后，并用 `PromptLayerRenderCache` 只替换发生变化的层。Delight score 预计算不再单独调用 LLM |
+| v0.3.144+ 推荐画像上下文缓存前缀保护 | ✅ | 批量池文案、单条实时文案和 legacy/recovery 分类 prompt 已经携带结构化画像；调用 `LLMService.complete_structured_task()` 时会在支持路径上设置 `inject_core_memory=False`。v0.3.147+ 起这些画像 prompt 还会复用共享 `profile_prompt_layers()`：稳定 core / interests 层放前，recent 层放后，并用 `PromptLayerRenderCache` 只替换发生变化的层。Delight score 预计算不再单独调用 LLM |
 | v0.3.144 推荐理由双 worker + 默认 30 | ✅ | `_drain_expression_copy()` 不再对所有待生成 batch 一次性 `gather`，而是默认 batch_size=30、用 2 个 worker 顺序领取 batch；真实 provider 并发测试显示 45 条推荐文案偶发 JSON 解析失败，因此推荐理由保持保守批量；批量解析失败会在当前 worker 内先拆半重试，半批仍失败才退到单条兜底；`_expression_lock` 仍串行化多入口，热重载 / shutdown 的 `CancelledError` 不会被当作普通 batch 失败吞掉 |
+| v0.3.154 推荐 prompt diet | 🧪 | `_recommendation_profile_summary()` 现在是推荐表达与 legacy 分类的单一画像入口：先 `build_profile_summary()`，再应用 discovery 共享的 `compact_content_prompt_profile_summary()`（20 条核心上下文、48 个兴趣、32 个兴趣域 × 每域 16 个 specifics、12 条近期语境，避雷项不裁剪）。单条表达传入的 `interests=` 内容相关兴趣替换仍保留，替换后再统一 compact。96 / 16 在当前画像只节省 `0.67%` 标准请求输入 token 且严格 replay 仍失败，因此按收益验证要求实验性改为 48 / 16；长尾召回从第 49 项开始，最终是否保留取决于新的 100×3 fail-closed replay。`classify_pool_backlog()` 默认 `batch_size=30`。原定 200+100 `body_text` 截断被 Reddit 100×3 质量门否决，legacy/recovery 分类与 single/batch expression 均恢复完整正文 |
 | v0.3.x XHS 自发布内容过滤 | ✅ | `get_pool_candidates` / `count_pool_candidates` / `count_pool_readiness` 及后台整理查询（evaluation / copy / delight）在 SQL 层排除已知的自发布小红书行；`_purge_self_authored_pool_items` 同时匹配 `up_name` 和 `author_name`；self_info 首次到达或变更时立即 purge 已入池内容。`RecommendationEngine` 通过 `xhs_self_info_provider` 回调从 runtime state 获取 nickname，`Database` 保持纯存储层不直接读 runtime state |
 | v0.3.x serve 平台保底 | ✅ | `serve()` 装载 top-40 relevance 窗口后、排除过滤前调用 `_apply_platform_floor()`：按 `list_servable_pool_platforms()` 找出窗口内缺席但仍可服务的平台，对每个用 `get_pool_candidates_for_platform(platform, limit=5)` 补拉并按 bvid 去重扩窗（补货时记一行 INFO），避免会话早期 top-40 全是 B站 而知乎 / 小红书 / 抖音标签页长时间空置；下游 MMR / 多样化不变。单平台池（纯 B站 安装）直接跳过，行为零变化 |
 ### Visual prewarm API
@@ -141,7 +142,7 @@ items = await engine.generate_recommendations(
 - 生成结果后会写入 `recommendations` 表，避免下次重复选中
 - 每条推荐都会调用 `generate_expression()` 生成 `expression` 和 `topic_label`
 - 推荐表达会先从当前画像、偏好摘要、`disliked_topics` 和近期反馈推断 `ToneProfile`，再生成更贴近用户口味且避开长期雷点的“老B友”式文案；内容 `style_key` 只用于决定从人物、场景、信息点或情绪等角度切入，不再把用户语气动态调轻
-- 推荐表达和推荐池分类 prompt 自身已经包含完整结构化 profile；通过 `LLMService` 执行时会关闭额外 core memory 注入，避免同一画像在请求里出现两次；画像输入按 core / life / interests / style / recent 分层渲染，稳定层在前，便于 provider prompt-cache 复用更长前缀。Delight score 预计算不再单独调用 LLM，直接复用 Evo 的评分；卡片理由必须等待 `pool_expression / pool_topic_label` 完整并同步，绝不展示 evaluator 的内部判断 reason
+- 推荐表达和推荐池分类 prompt 自身已经包含 compact 结构化 profile；`_recommendation_profile_summary()` 是单一收口点，统一应用 `compact_content_prompt_profile_summary()`，单条表达仍先把内容相关兴趣放进摘要再 compact，保护长尾兴趣。`LLMService` 会关闭额外 core memory 注入，画像按 core / life / interests / style / recent 分层渲染以稳定缓存前缀。Delight score 预计算直接复用 Evo 评分；卡片理由必须等待 `pool_expression / pool_topic_label` 完整并同步，绝不展示 evaluator 的内部判断 reason
 - CLI 展示后会把对应推荐记录标记为 `presented = 1`
 - `feedback` 命令会把 `feedback_type` / `feedback_note` / `feedback_at` 写回推荐记录
 - 多样性回填会分阶段放宽 `style`、`source`、`topic` 约束，只有候选真的不足时才彻底兜底补满
@@ -259,9 +260,10 @@ count = await engine.precompute_pool_copy(
 - 低并发批量调用 `generate_expression()` 的 LLM 主链生成朋友式推荐文案；默认 batch_size=30，默认 2 个 worker 并发处理 batch，避免大 backlog 一次性创建过多 LLM 任务
 - 解析批量 LLM 响应时通过共享 JSON helper 接受 `results/items/data/output` 等 wrapper、fenced JSON、JSONL、pretty-printed singleton object 和回显 schema 后的最终结果，但仍要求每条结果具备推荐表达所需字段
 - 批量 prompt 会把每条候选的 `bvid/content_id` 交给 LLM；如果响应带回 ID，写库时按 ID 匹配，不信任数组顺序。响应没有 ID 且数量不完整时会降级到单条生成，避免把后续视频的文案整体前移
+- 批量池文案与单条表达 prompt 保留完整 `body_text`；200+100 head/tail 方案在真实 Reddit 质量门中造成明显排序与准入回归，不能用 token 节省覆盖内容语义
 - 批量调用若命中 provider 限流 / cooldown / quota，不会再逐条调用 LLM；这些候选继续保持文案空值，等待下一轮后台预生成
 - 批量响应解析失败、缺少可验证 ID 或产生跨视频重复文案时，后台 drain 会在当前 worker 内递归拆半重试；只有拆到单条仍失败时才走单条表达兜底，因此默认 30 条 batch 不会因为一次弱模型输出异常直接放大成 30 个并发请求
-- 批量文案和推荐池分类调用复用 prompt 内完整 profile，并在兼容的 LLMService 路径上跳过额外 core memory 注入；这些调用还会复用共享画像分层缓存，画像核心 / 兴趣不变时保持前置 prompt block 完全相同。这只改变 token / prompt-cache 形态，不改变排序、入池 gate、评分 rubric 或文案策略。Delight score 预计算已改为零 LLM 的 Evo 结果复用路径
+- 批量文案和推荐池分类调用复用 prompt 内 compact profile，并在兼容的 LLMService 路径上跳过额外 core memory 注入；这些调用还会复用共享画像分层缓存，画像核心 / 兴趣不变时保持前置 prompt block 完全相同。这只改变 token / prompt-cache 形态，不改变排序、入池 gate、评分 rubric 或文案策略。Delight score 预计算已改为零 LLM 的 Evo 结果复用路径
 - 批量文案并发由 `_expression_lock + expression_batch_concurrency(default=2)` 控制：多入口不会抢同一批候选，同一次 drain 内也只会有两个文案 batch 同时打 LLM；拆半重试在 worker 内串行执行，不额外创建嵌套并发任务
 - 成功后把结果回写到 `content_cache.pool_expression / content_cache.pool_topic_label`
 - 生成失败时不会写 profile 级统一 fallback，而是保留空值，交给 popup 隐藏
@@ -546,7 +548,7 @@ report: PoolHealthReport = curator.check_pool_health()
 
 如果候选内容明显命中 `disliked_topics`，prompt 不允许把该避雷项包装成“你一直喜欢这个”。表达层最多保守说明它与已知雷点的差异化理由，避免在已经被用户明确排斥的方向上热情背书。
 
-`classify_pool_backlog()` 对旧版本遗留、人工导入或异常恢复后已经在 `content_cache` 里但尚未分类的内容做 batch 评估时，也会从事件层读取近期 negative exemplars 并作为 `negative_examples` 传给同一个 evaluator prompt。正常 XHS / 抖音 / YouTube ingest 现在先进入 `discovery_candidates`，由 discovery pipeline 统一评估后才 admission 到推荐池；这条分类路径保留为 recovery 安全网。
+`classify_pool_backlog()` 对旧版本遗留、人工导入或异常恢复后已经在 `content_cache` 里但尚未分类的内容做 batch 评估时，也会从事件层读取近期 negative exemplars 并作为 `negative_examples` 传给同一个 evaluator prompt，默认 batch size 为 30。正常 XHS / 抖音 / YouTube ingest 现在先进入 `discovery_candidates`，由 discovery pipeline 统一评估后才 admission 到推荐池；这条分类路径保留为 recovery 安全网。
 
 ### 第四层影响：反馈回流到下一轮推荐
 

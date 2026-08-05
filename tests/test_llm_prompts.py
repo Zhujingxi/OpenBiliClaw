@@ -1,7 +1,10 @@
 """Tests for prompt builders and core memory rendering."""
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
+
+import pytest
 
 import openbiliclaw.llm.prompts as prompt_module
 from openbiliclaw.discovery.style_keys import VALID_STYLE_KEYS
@@ -527,6 +530,130 @@ def test_batch_content_evaluation_prompt_orders_profile_before_source_and_batch(
     assert user_prompt.index("<source_context>") < user_prompt.index("<content_batch>")
 
 
+def test_batch_content_evaluation_compact_json_changes_whitespace_only() -> None:
+    kwargs = {
+        "profile_summary": {"interests": ["系统 设计"], "values": ["可靠"]},
+        "content_items": [
+            {
+                "content_id": "item-1",
+                "title": "保留 字符串 内部 空格",
+                "tags": ["架构", "测试"],
+            }
+        ],
+        "source_context": "mixed",
+        "source_platform": "mixed",
+        "negative_examples": [{"title": "不要 破坏", "reason": "quick_exit"}],
+        "evaluated_at": "2026-08-04T09:47:31Z",
+    }
+    pretty = build_batch_content_evaluation_prompt(**kwargs)
+    compact = build_batch_content_evaluation_prompt(**kwargs, compact_json=True)
+
+    assert compact[0]["content"] == pretty[0]["content"]
+    assert len(compact[1]["content"]) < len(pretty[1]["content"])
+
+    for tag in (
+        "profile_summary",
+        "negative_examples",
+        "evaluation_context",
+        "content_batch",
+    ):
+        start = f"<{tag}>\n\n"
+        end = f"\n\n</{tag}>"
+        pretty_json = pretty[1]["content"].split(start, 1)[1].split(end, 1)[0]
+        compact_json = compact[1]["content"].split(start, 1)[1].split(end, 1)[0]
+        assert json.loads(compact_json) == json.loads(pretty_json)
+        assert "\n  " not in compact_json
+
+    assert "保留 字符串 内部 空格" in compact[1]["content"]
+
+
+def test_batch_content_evaluation_treatment_seam_preserves_production_bytes() -> None:
+    kwargs = {
+        "profile_summary": {"interests": ["systems"]},
+        "content_items": [{"content_id": "global-1", "title": "candidate"}],
+        "source_context": "search",
+        "source_platform": "bilibili",
+    }
+
+    historical_defaults = build_batch_content_evaluation_prompt(**kwargs)
+    explicit_production = build_batch_content_evaluation_prompt(
+        **kwargs,
+        candidate_block=None,
+        local_result_ids=False,
+    )
+
+    assert explicit_production == historical_defaults
+
+
+def test_batch_content_evaluation_sparse_contract_is_static_and_transport_neutral() -> None:
+    sparse_json = (
+        '{"defaults":{"content_type":"video","mode":"normal",'
+        '"source_platform":"bilibili"},"items":'
+        '[{"author":"u","id":"0","title":"candidate"}]}'
+    )
+    row_wire = "ROW-WIRE-V1\ndefaults\tmode=normal\ncolumns\tid\nrow\t0"
+
+    sparse_messages = build_batch_content_evaluation_prompt(
+        profile_summary={"interests": ["systems"]},
+        content_items=[],
+        candidate_block=sparse_json,
+        local_result_ids=True,
+    )
+    row_messages = build_batch_content_evaluation_prompt(
+        profile_summary={"interests": ["different"]},
+        content_items=[{"content_id": "must-not-render"}],
+        candidate_block=row_wire,
+        local_result_ids=True,
+    )
+
+    system = sparse_messages[0]["content"]
+    assert row_messages[0]["content"] == system
+    assert "ROW-WIRE-V1" in system
+    assert "defaults/items" in system
+    assert "原样带回输入里的 id" in system
+    assert "cover:<id>" in system
+    assert "bvid" not in system
+    assert "content_id" not in system
+    assert "严格低于 0.5" in system
+
+    sparse_block = (
+        sparse_messages[1]["content"]
+        .split("<content_batch>", 1)[1]
+        .split(
+            "</content_batch>",
+            1,
+        )[0]
+    )
+    row_block = (
+        row_messages[1]["content"]
+        .split("<content_batch>", 1)[1]
+        .split(
+            "</content_batch>",
+            1,
+        )[0]
+    )
+    assert sparse_block.strip() == sparse_json
+    assert row_block.strip() == row_wire
+    assert "must-not-render" not in row_messages[1]["content"]
+
+
+@pytest.mark.parametrize(
+    ("candidate_block", "local_result_ids"),
+    [(None, True), ('{"defaults":{},"items":[]}', False)],
+)
+def test_batch_content_evaluation_rejects_mixed_identity_contracts(
+    candidate_block: str | None,
+    local_result_ids: bool,
+) -> None:
+    with pytest.raises(ValueError, match="must be enabled together"):
+        build_batch_content_evaluation_prompt(
+            profile_summary={},
+            content_items=[],
+            candidate_block=candidate_block,
+            local_result_ids=local_result_ids,
+        )
+
+
 def test_content_evaluation_prompts_only_allow_explore_scoring_exception() -> None:
     single_system = build_content_evaluation_prompt(
         profile_summary={"interests": ["音乐", "生活方式"]},
@@ -596,6 +723,31 @@ def test_content_evaluation_clock_keeps_exact_time_and_utc_hour_bucket() -> None
         "2026-08-04T09:47:31Z",
         "2026-08-04T09:00:00Z",
     )
+
+
+def test_content_evaluation_prompts_skip_low_score_reason() -> None:
+    """Both eval system prompts bake the 0.5 skip floor + ≤30字 cap (static).
+
+    Reason-diet contract (v0.3.171): ``score`` strictly below the fixed 0.5
+    floor writes an empty ``reason`` (pure waste — never admitted); the rest get
+    one internal diagnostic capped at 30 Unicode code points. The floor is baked
+    constant text, not a per-call value.
+    """
+    single_system = build_content_evaluation_prompt(
+        profile_summary={"interests": ["音乐"]},
+        content_summary={"title": "匿名视频"},
+    )[0]["content"]
+    batch_system = build_batch_content_evaluation_prompt(
+        profile_summary={"interests": ["音乐"]},
+        content_items=[{"content_id": "x", "title": "匿名视频"}],
+    )[0]["content"]
+
+    for system in (single_system, batch_system):
+        assert "严格低于 0.5" in system
+        assert "必须写成空串" in system
+        assert "不超过 30 个 Unicode 字符" in system
+        assert "内部诊断" in system
+        assert "直接展示给用户" not in system
 
 
 def test_batch_content_evaluation_prompt_allows_per_item_platforms() -> None:

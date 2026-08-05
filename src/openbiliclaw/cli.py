@@ -1126,6 +1126,7 @@ def _build_discovery_engine() -> Any:
         multimodal_image_timeout_seconds=int(
             getattr(discovery_cfg, "multimodal_image_timeout_seconds", 6)
         ),
+        eval_prefilter_mode=str(getattr(discovery_cfg, "eval_prefilter_mode", "shadow")),
     )
     search_strategy = SearchStrategy(
         llm_service=llm_service,
@@ -11741,6 +11742,11 @@ def _build_discovery_candidate_pipeline(
         discovery_engine=discovery_engine,
         pool_target_count=int(getattr(config.scheduler, "pool_target_count", 300)),
         admission_min_score=admission_min_score,
+        # Manual producer commands are one-shot processes. An in-memory wait
+        # window cannot survive process exit, so they must drain immediately;
+        # daemon coalescing is owned by CandidateEvalCoordinator.
+        min_eval_batch_size=1,
+        max_eval_wait_seconds=0.0,
     )
 
 

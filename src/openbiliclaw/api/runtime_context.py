@@ -961,6 +961,7 @@ class RuntimeContext:
             multimodal_image_timeout_seconds=(
                 int(getattr(discovery_cfg, "multimodal_image_timeout_seconds", 6))
             ),
+            eval_prefilter_mode=str(getattr(discovery_cfg, "eval_prefilter_mode", "shadow")),
         )
         search_strategy = SearchStrategy(
             llm_service=new_llm_service,
@@ -1062,8 +1063,10 @@ class RuntimeContext:
             discovery_engine=new_discovery_engine,
             pool_target_count=new_config.scheduler.pool_target_count,
             admission_min_score=admission_min_score,
-            min_eval_batch_size=8,
-            max_eval_wait_seconds=120,
+            min_eval_batch_size=int(getattr(new_config.scheduler, "eval_min_batch_size", 15)),
+            max_eval_wait_seconds=float(
+                getattr(new_config.scheduler, "eval_max_wait_seconds", 90.0)
+            ),
             candidate_fetch_oversample=4,
             xhs_self_nickname_provider=lambda: str(
                 (_xhs_self_info_provider() or {}).get("nickname", "") or ""

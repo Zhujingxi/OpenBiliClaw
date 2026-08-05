@@ -528,6 +528,36 @@ class DiscoveryCandidatePipeline:
         items = tuple(row_to_discovered_content(row) for row in rows)
         return CandidateEvalClaim(token=token, rows=tuple(rows), items=items)
 
+    def claim_ready_batch(self, *, limit: int) -> CandidateEvalClaim | None:
+        """Claim only when the configured coalescing window is ready."""
+
+        batch_size = self._effective_batch_size(limit)
+        if batch_size <= 0:
+            return None
+        if self._waiting_pending_eval_count(batch_size) is not None:
+            return None
+        return self.claim_batch(limit=batch_size)
+
+    def eval_ready_in_seconds(self, *, limit: int) -> float:
+        """Return the remaining coalescing delay for the current pending rows."""
+
+        batch_size = self._effective_batch_size(limit)
+        if batch_size <= 0:
+            return 0.0
+        pending_count = self._pending_eval_count()
+        if pending_count is None or pending_count <= 0:
+            return 0.0
+        min_batch = min(max(1, int(self.min_eval_batch_size)), batch_size)
+        if min_batch <= 1 or pending_count >= min_batch:
+            return 0.0
+        max_wait = max(0.0, float(self.max_eval_wait_seconds or 0.0))
+        if max_wait <= 0:
+            return 0.0
+        first_seen = self._first_pending_eval_seen_at
+        if first_seen is None:
+            return max_wait
+        return max(0.0, max_wait - max(0.0, float(self.time_fn()) - first_seen))
+
     async def evaluate_claim(self, claim: CandidateEvalClaim, profile: Any) -> CandidateEvalOutcome:
         """Run only the LLM evaluation stage; this method performs no writes."""
 

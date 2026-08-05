@@ -86,6 +86,12 @@ background refresh → maintenance DB worker / isolated connection
 manual `discover --source douyin` → same Douyin producer as daemon
                                  → unified keyword lifecycle → plugin search/hot/feed
                                  → discovery_candidates(pending_eval)
+
+candidate evaluation → effective profile view + exact tail-recall pool + negative exemplars
+                     → prompt-visible content/context digest + embedding namespace
+                     → normal eval LRU lookup ─hit─→ raw result → caller-group diversity caps
+                     └─miss─→ complete recall → LLM batch → normalized reason → conditional cache
+                               embedding/recall degraded ───────────────→ no normal-cache write
 ```
 
 1. **用户交互层** — Chrome 浏览器插件（B 站 + 小红书 + 抖音 + YouTube + X (Twitter) + 知乎通过统一 `PlatformAdapter` 做页面行为采集，Reddit 通过 rdt-cli 做默认 discovery、插件保留 bootstrap 初始化信号和命令后端 fallback 登录态任务源，click 在 capture 阶段记录、scroll 覆盖内部 feed 容器 · 视频停留满意度信号 · 推荐展示与真实可换库存状态 · 文字卡（推文 / thread / 知乎回答 / Reddit 帖子）· 正向兴趣 / 避雷探针确认 · durable 对话与唯一主动洞察确认入口（待聊列表/卡片；认知更新区只读）· 后台 LLM 暂停开关 · 开机自启动开关 · 配置离线缓存 / 降级修复 UI · bili/xhs/dy/yt/zhihu/reddit 任务调度 / 初始化画像导入 / 多路 discovery · B 站 / 抖音 / X Cookie 自动同步 · 本机扩展驱动 E2E 捕捉自检）+ 移动 Web（`/m`）+ 桌面 Web（`/web`）。所有 `/api/*` 前置一道**可选密码门禁**（HTTP 中间件，见下方「API Auth Gateway」）：本机 / 扩展默认免登录，局域网 / 远程设备需密码。
@@ -95,6 +101,26 @@ manual `discover --source douyin` → same Douyin producer as daemon
 5. **多源适配层（v0.3.0+）** — `SourceAdapter` 协议下的 B 站 / 小红书 / 抖音 / YouTube / X (Twitter) / 知乎 / Reddit / Bangumi / 通用 Web 源；`sources.platforms` 注册表统一八个平台族的别名、strategy 与 URL host 身份。Bangumi 默认使用官方匿名只读 API，可选个人令牌（Bearer）读取私密收藏、令牌失效自动降级匿名；扩展仅在 `bgm.tv` / `bangumi.tv` 上提供账号身份自动识别（非任务桥、无行为采集）。
 6. **保存同步编排层（API/runtime + B 站 adapter + 三个图形化保存界面 + CLI 配置可见）** — canonical saved identity + normalized membership / native state + `/api/saved/*` + capability router + local-first `SavedSyncService` + `BilibiliNativeSaveAdapter`；六平台扩展保存 adapter 已按能力/目标矩阵注册，经稳定的 `ExtensionNativeSaveBroker` 入队，完整 broker flow 为 `extension_native_save_jobs -> /api/sources/<slug>/next-task -> installed extension`（具体 source 前缀为 `/api/sources/{xhs,dy,yt,x,zhihu,reddit}`），再由 authenticated `task-result` 回传安全状态。trusted-local `/api/extension/e2e/run` 的 dedicated native-save 模式只接受与 generic actions 互斥的 exact authorization，提交一个 canonical item 到同一 saved-sync/broker flow，并只回传六字段结果；通用 DOM runner 永不执行 favorite/bookmark。历史 `unsupported_adapter_missing` 行可重新同步，但真正的 `unsupported_content_type` 保持终态。YouTube favorite 与知乎 favorite 使用 exact `OpenBiliClaw`，YouTube watch-later 使用 `YouTube Watch Later`，其余平台回退原生收藏/书签/Saved；Bilibili favorite/watch-later 使用 direct adapter。2026-07-14 已在自动同步关闭、手动同步触发下完成七平台两类动作真实账号验证，终态均为 `synced/already_synced`；插件、移动 Web 与桌面 Web 共享 `item_key`，以 bounded request、retained list、per-key mutation fence、reload task recovery / item ownership 和 visibility-aware durable tracker 呈现同步状态；CLI 只通过 `config-show` 展示默认关闭的自动同步配置，不提供保存 / 同步动作命令
 7. **多层网状记忆存储** — Core / Episodic / Semantic / Working Memory（SQLite + 向量索引 + JSON）
+
+### Candidate evaluation 的可复现边界
+
+评估 cache 的 v2 key 覆盖实际 prompt-visible 候选字段、effective source context、compact
+profile 与精确 tail-recall pool、negative-examples 内容、embedding namespace、prefilter mode
+和 schema version。混合平台 / 不稳定隐式 context batch 与实际 vision attempt 不进入 normal
+per-item cache；embedding 异常、空 / 非有限向量或维度漂移时，本轮结果也不写 normal cache，
+恢复后必须重新 recall + evaluate。cache 保存逐项 raw model result，franchise/style cap 在稳定的
+caller grouping 上重放，因此 full/partial hit 和 `enforce` 预筛的 cold/warm 边界一致。
+
+`reason` 是内部诊断字段：single/batch 共用 runtime normalizer，低于 0.5 或被 batch cap
+淘汰时为空，高分 strip 后最多 30 个 Unicode code points；非字符串不做 `str()` 宽松转换，
+而是进入 malformed-member retry。对象、LRU 与候选持久化看到的都是归一化结果。
+
+`scripts/run_profile_diet_ab.py` 是 landing evidence harness，不是生产请求入口。它从只读 DB
+冻结候选、effective profile（含 overrides / active speculations）和负例，按生产的 30 条
+claim grouping 与 `source_context=mixed` 跑 repeated A/A + A/B；每个 logical run 记录实际
+provider/instance/model，并对 embedding、recall、route 与 snapshot fail closed。Replay 固定
+temperature 0 用于隔离采样噪声，artifact 同时披露生产默认 0.7；因此
+该结果是 model-visible diet 的受控相对门，不替代合入后的 48 小时生产观测。
 
 HTTPS 有两个互斥的**可选传输边缘**，都不是新的业务 API 层。公网域名的 Docker 部署叠加
 `docker-compose.https.yml`：Caddy 在 `:443` 自动终止受信 TLS，与后端共享 network namespace，
@@ -184,7 +210,8 @@ Web durable turn 只在成功 completion CAS 后交接认知与成功事件；�
 - 轴库学习闭环 + 编排抽取（Phase 2，`runtime/inspiration_pipeline.py::InspirationKeywordPipeline`）：上述 ①–⑥ inspiration 编排从 `KeywordPlanner` god-file 抽成独立 pipeline（行为逐字不变，planner 保留四个签名不变的兼容委托 + 一个 `host` 反向引用共享 `_history`/`_insert`/`_avoid_hints`/`_supply_hints`/`_load_profile`）。轴库从"能复用"升级为"会学习"：production stage 在取轴前先跑一次纯 SQL 的 `backfill_inspiration_axis_yield()`（trailing-window 全量重算 / 幂等 / Laplace 平滑）+ `apply_inspiration_axis_lifecycle()`（active→stale/retired→90 天 purge），6 小时节流、preview 永不触发；排序有效分改为条件式 prior 地板（只保护从未消费过的轴，坏轴按真实分下沉）。config 收敛：13 个 `inspiration_*` 旋钮压到 4 个（enabled / replace / backends / `inspiration_breadth` 档位），其余由档位派生成内部常量，删除键经 diagnostics 通道给出移除提示。可选 embedding 近邻轴合并在 pipeline 层（async）解析"新轴→应并入的既有 axis_id"（cosine≥0.92）后交给同步零 I/O 的 `upsert_inspiration_axes()`，服务不可用 / 超时无损降级回字符串行为并标 `axis_embedding_degraded`。Phase 2.3 起，B 站**跨域 explore 通道也走这条 pipeline**（默认开 coexist）：以 merged call 现成的 `explore_domains` 为种子跑 `_run_explore_inspiration_stage`，产 `source='explore'` 的轴 + `keyword_kind='explore'` 词，复用 Phase 2 按 `axis_id` 的 yield 回填 + `list_inspiration_axes_by_source('explore')` 构成舒适区扩张闭环；富生成 degraded 时无损降级回旧 `_explore_domain_queries` 拍平（explore 池不裸奔），到期轮仅多一次 explore 富生成调用，regular 通道不变，`replace` 模式 explore 路径不变。
 - `DiscoveredContent` 全形态：`body_text` 支持推文 / thread / 知乎回答摘要全文 / Reddit selftext 或评论正文 / Bangumi 条目简介，`content_type` 支持 `video/note/tweet/thread/answer/article/question/post/comment/subject`，让文字和目录型来源正确流过统一待评估池并渲染对应卡片。新增通用目录指标 `rating_score/rating_count/source_rank`，与其它元数据贯穿待评估池、正式缓存、推荐/惊喜 API 和三端卡片；评分不冒充 like/comment。
 - 统一发布时间契约：Bilibili、小红书、抖音、YouTube、X、知乎、Reddit 和 Bangumi 的当前来源 payload 只在存在语义明确字段时生成 `published_at`（UTC RFC 3339）或 `published_label`（清洗后的来源相对文本）。字段与时长/互动元数据一起走 `source normalizer -> DiscoveredContent -> discovery_candidates -> candidate evaluation prompt (published_at + exact UTC evaluated_at) -> content_cache -> recommendation/delight API`；LLM 以 `evaluated_at` 为当前时间基准，不依赖模型知识截止日期。单条 / 批量 eval cache 同时绑定发布时间摘要与独立评估小时桶，后补时间或跨小时会重评；缺失值不阻断候选，重新发现的空值不覆盖已有非空值，旧缓存不联网回填，也不从 `discovered_at`、任务时间、互动时间或推荐时间猜测。
-- 统一待评估池：`source adapters -> discovery_candidates -> tokenized claim -> 最多 3 个 LLM-only worker -> 串行 commit/admission -> content_cache -> expression copy -> servable pool`。API daemon 任一 30 条 worker 完成即补位，总在途不超过 90；串行 lane 先持久化全部 token-owned 评分，再按 `target - available - admitted_pending_copy` admission，超额结果保留为 `evaluated`。OpenClaw one-shot 不启动这些 daemon owner：`recommend(refresh_if_needed=True)` 的首轮 source supply 与 inline claim 固定 ≤4（fetch oversample=1、min eval batch=4、inline evaluator=1），随后请求再补下一批，并在 admission commit 后 await ≤4 durable expression copy、禁用本次 split retry；首 batch 的有效 subset 立即成为 canonical pool，未完成行保持 pending，不会留下 notify-only coordinator 或 detached provider task。projected 只计 `available + admitted_pending_copy + evaluated_pending_admission`，不计 raw pending/evaluating；完成 / 释放匹配 `id + status + claim_token`，60 秒只作 API safety wake。
+- 统一待评估池：`source adapters -> discovery_candidates -> tokenized claim -> 最多 3 个 LLM-only worker -> 串行 commit/admission -> content_cache -> expression copy -> servable pool`。`CandidateEvalCoordinator` 是 API runtime 唯一 claim owner，按 `[scheduler].eval_min_batch_size / eval_max_wait_seconds`（默认 15 / 90 秒）凑批；每个 worker 最多 30 条，任一完成即补位，总在途不超过 90。worker 只运行 LLM；串行 lane 先持久化全部 token-owned 评分，再按 `target - available - admitted_pending_copy` admission，超额合格结果保留为 `evaluated`。手动 CLI 固定 `1 / 0` 立即 drain。`[discovery].eval_prefilter_mode` 默认 shadow 只记录 would-filter，enforce 仅在 recall-visible 兴趣与 compact domains 均低相似时缓存 0–1 分并跳过 LLM，单批过滤过高 fail-open。OpenClaw one-shot 不启动 daemon owner：首轮 source supply / inline claim ≤4（oversample=1、min batch=4、inline evaluator=1），admission 后 await ≤4 durable expression copy 且禁用本次 split retry；有效 subset 立即成为 canonical pool，未完成行保持 pending，不留 detached provider task。projected 只计 `available + admitted_pending_copy + evaluated_pending_admission`；complete/release 必须匹配 `id + status + claim_token`，60 秒仅作 safety wake。
+- evaluator wire 默认使用 canonical compact `sparse-json` envelope 与请求内 `0..N-1` local ID；严格按 local ID 绑定结果和图片锚点，URL、全局 ID、重复字段及空/零可选字段不进入模型 wire。`published_at` 仍按候选保留，exact UTC `evaluated_at` 仍在顶层 evaluation context；cache namespace 为 v3。显式 `production` 保留历史 pretty-JSON/global-ID rollback，`row-wire-v1` 只作历史 replay seam，遇到新增 `published_at` 会显式拒绝而非静默丢字段。
 - 候选分层、去重和缓存写入：`discovery.admission` 定义贯穿候选评估、缓存写入与数据库展示的唯一准入策略——非 `explore` 至少使用全局门槛，精确 `explore` 唯一使用 `0.58`。达标候选通过 `cache_evaluated_results()` admission 到正式推荐池 `content_cache`，`_cache_results()` 写前再次 fail closed，数据库取池 / 回填 / delight 等出口再执行同一来源感知条件；写入时 `pool_status='suppressed'` 的旧候选只有在新分数达标时自动复活成 `'fresh'`。`DiscoveredContent.item_key` 由共享 identity helper 派生；B 站缓存仍使用 raw BV storage key，其它平台使用 namespaced key，原始 ID 独立保留在 `content_id`。非空 `item_key` 由 partial unique index 保护，空串仅容纳不知道该 additive 列的旧写入器；当前初始化会补全空 identity、合并 canonical 冲突并恢复 partial unique。`content_cache` 是 recommendation serve 的唯一正式池，`discovery_candidates` 是 discovery 阶段的待评估 / 已评估队列。
 - v0.3.0+ 多样性栈：trending 固定 `rid=0` + 非 0 rid 本地洗牌轮转覆盖，并按 rid 交错 / explore 按 domain 交错 / `_compress_topic_repeats` 单次压缩 / `trim_topic_group_overflow` 跨源跨轮配额（任意 topic_group ≤ 池子 10%）/ deficit-source 合并 + 并行 fan-out
 

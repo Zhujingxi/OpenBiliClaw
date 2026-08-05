@@ -73,6 +73,7 @@
 | v0.3.x LLM 限流识别 | ✅ | `is_llm_rate_limit_error()` 会沿异常链识别 `LLMRateLimitError`、cooldown、429 / quota / resource exhausted 文本；discovery / recommendation 批量调用据此跳过逐条 fallback，避免一次 provider 限流放大成 N 个必失败调用和堆栈日志 |
 | v0.3.x 余额 / 账单错误熔断 | ✅ | OpenAI-compatible provider 会把 HTTP 402、`Insufficient Balance`、`payment required`、`billing`、余额不足等 provider 余额 / 账单失败归一为 `LLMRateLimitError`，跳过 provider 内部 retry，并让 registry cooldown 与批量任务的“跳过逐条 fallback”保护生效 |
 | v0.3.x Eval-batch 负样本锚定与跨平台公平 | ✅ | `build_batch_content_evaluation_prompt` 新增可选 `negative_examples` kwarg；非空时在 user prompt `<source_context>` 与 `<content_batch>` 之间插入 `<negative_examples>` 块（`sort_keys=True` 决定性 JSON）。`None` / `[]` 退回原 user 字节形态以保留 cold-start 缓存前缀。`_BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT` 加入永久规则：按话术 / 商业意图 / 标题结构层面 pattern-match 候选与示例，不要看关键词重叠；混源 batch 中不得仅因 `source_platform` 不同而抬高或压低 preference score，只能把平台作为内容语境。规则改动一次后 system message 保持 call-invariant |
+| v0.3.171 Eval reason 减肥 | ✅ | `_SINGLE_CONTENT_EVALUATION_SYSTEM_PROMPT` / `_BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT` 明确 reason 仅供内部诊断：`score < 0.5` 写空串，`score >= 0.5` 写不超过 30 个 Unicode code points 的精炼中文。`discovery.eval_reason.normalize_evaluation_reason()` 在 single / batch / cache hit 路径强制同一契约：`None`→空串，其它非字符串 fail closed，高分 strip+截断，低分与 diversity-cap drop 清空；缓存和持久化只接收归一化值。0.5 保持静态 prompt 常量且低于全部 admission 路径，推荐表达 / delight copy 不展示 `relevance_reason`。旧 2026-07-18 PASS 已作废；有效 replay v2 必须基于同一冻结 effective profile（含 overrides/speculations）与候选快照跑重复 A/A+A/B，使用生产 4096 ceiling、30 条 claim grouping 和 `mixed` context，逐 run 验证实际 route、embedding/recall 完整性，并输出 raw scores 与所有 blocking reasons |
 | v0.3.x dislike-aware prompts | ✅ | `build_preference_analysis_prompt` 明确把 negative / dislike / thumbs_down 事件限制为 `disliked_topics` 与风格避让证据，禁止提取为正向兴趣；`build_awareness_prompt` 可从近期 dislike 生成“最近开始避开 X”的保守观察；单条 / 批量推荐表达 prompt 会消费 `profile_summary.disliked_topics`，命中避雷项时不得热情背书 |
 | v0.3.x 避雷探针多样性 prompt | ✅ | `build_avoidance_generation_prompt` 会携带 `existing_avoidance_details`，让 LLM 看到已有 active 的 `source_mode`、`source_signal`、体验轴和 specifics；system prompt 要求同一 `source_mode` + 同一粗主题 / 证据源只生成一个候选，已有 AI positive_boundary 时不再输出 AI 教程 / 测评 / 趋势换皮项 |
 | v0.3.x 第三方 API 网关适配（issue #72） | ✅ | Claude 实例的 `base_url` 可指向任意 Anthropic 协议网关；OpenAI / OpenAI-compatible 实例的 `api_flavor` 可选 Chat Completions 或 Responses。每个实例独立持有渠道 URL / token / model，所以同一 adapter 的多个网关可同时注册并互为降级；非法组合由配置校验 blocking 拦截 |
@@ -289,6 +290,24 @@ messages = build_dialogue_insight_prompt(
 
 `anchor` 是可选公开参数。未传或传 `None` 时，builder 不增加任何锚段，继续输出普通 `{candidates, settles}` 契约；传入时只在 user message 增加当前锚和 `anchor.relation` 契约，允许 hypothesis 的 `support/contradict/revise/ambiguous/unrelated` 或 confusion 的 `answer/ambiguous/unrelated`。调用方仍必须用持久化 ref+generation 做 CAS，prompt 中的 generation 不是授权凭证。
 
+### Core-memory 注入默认表（维护/画像类调用点）
+
+`complete_structured_task()` / `complete_with_core_memory()` 默认 `inject_core_memory=True`。
+下表记录 Soul 维护类调用点经 Task 8 审计后的最终注入策略；完整逐点理由见
+[`docs/profile-usage.md`](../profile-usage.md) 的「Maintenance-caller injection audit」。
+
+| 调用点 | 注入 | 依据 |
+| --- | --- | --- |
+| `soul/consolidator.py` 簇裁决 | ❌ opt-out | 只按 user prompt 的簇成员列表裁决合并/保留，画像无关 |
+| `soul/category_migration.py` 分类映射 | ❌ opt-out | 纯分类名规范化，无用户特定判断 |
+| `soul/pool_purge.py` 厌恶精判 | ❌ opt-out | 判定材料（新厌恶 + 全部厌恶 + 候选）已全在 user prompt |
+| `soul/dialogue_insight_analyzer.py` 洞察抽取 | ❌ opt-out | prompt 已显式 `json.dumps(core_memory)` 进 user 消息，注入是重复 |
+| `soul/layer_updaters.py` role / values / core 更新 ×3 | ✅ 保留 | 更新画像层自身，注入上下文帮 LLM 把证据 connect 到用户情境 |
+| `api/app.py` 探针情感判定 | ✅ 保留 | 聊天邻接，在用户自身语境里读语气/意图 |
+
+维护类调用点关闭注入统一用 `llm.task_options.without_core_memory_kwargs(fn)`，它在旧 stub
+不支持该参数时安全降级为空 kwargs。
+
 ### 结构化 JSON 解析 helper
 
 ```python
@@ -373,14 +392,28 @@ stats = cache.stats()
 #### 分模块路由
 
 `LLMService` 的 `module_overrides` 来自 `module_overrides_from_config(config)`，每项是“继承全局链”或一条独立的实例 ID 链。
-路由不使用 caller 第一段朴素判断，而是内置 bucket：
+路由不使用 caller 第一段朴素判断，而是内置 bucket。匹配规则支持精确匹配、`.` 子调用和 `_` 后缀调用，因此 `discovery.keyword` 可以覆盖当前的 `discovery.keyword_planner`，也能覆盖后续 `discovery.keyword_*` 形态：
 
-| caller 前缀 | module bucket |
-|---|---|
-| `soul.*` | `soul` |
-| `discovery.search/explore/trending/related.*`、`yt_search.*`、`sources.xhs.*` | `discovery` |
-| `recommendation.evaluate_batch`、`discovery.evaluate*`、`eval.*` | `evaluation` |
-| 其他 `recommendation.*` | `recommendation` |
+| caller 前缀 | module bucket | 说明 |
+|---|---|---|
+| `recommendation.evaluate_batch` | `evaluation` | 推荐侧复用 evaluator 做候选评分 / 分类的质量模型 |
+| `discovery.evaluate` | `evaluation` | discovery 单条 / 批量内容评估家族 |
+| `discovery.eval` | `evaluation` | discovery eval 简写家族 |
+| `eval` | `evaluation` | 通用 eval 调用 |
+| `discovery.search` | `discovery` | B 站 search query 生成等发现查询任务 |
+| `discovery.keyword` | `discovery` | 统一关键词 planner：覆盖 `discovery.keyword_planner` 与 `discovery.keyword_*` |
+| `discovery.explore` | `discovery` | B 站 explore domain / query 生成 |
+| `discovery.trending` | `discovery` | trending 相关发现生成任务 |
+| `discovery.related` | `discovery` | related-chain 相关发现生成任务 |
+| `discovery.x` | `discovery` | X / Twitter discovery keyword generation |
+| `discovery.douyin` | `discovery` | 抖音 discovery keyword generation |
+| `runtime.bilibili_extension_search` | `discovery` | 浏览器插件 B 站扩展搜索 query 生成 |
+| `yt_search` | `discovery` | YouTube search query 生成 |
+| `sources.xhs` | `discovery` | 小红书关键词 / 抽取等来源发现任务 |
+| `recommendation` | `recommendation` | 其他推荐表达、批量文案等调用 |
+| `pool_purge` | `soul` | 候选池清理会删除内容，走画像 / 判断质量模型 |
+| `api.sentiment` | `soul` | API 情绪 / 语义判断，用户可见且质量敏感 |
+| `soul` | `soul` | 偏好、画像、觉察、洞察、聊天等 Soul 调用 |
 
 路由规则：
 

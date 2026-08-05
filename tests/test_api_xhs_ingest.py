@@ -94,23 +94,44 @@ class _XhsScoringLLM:
         caller: str = "",
         reasoning_effort: str | None = None,
     ) -> object:
+        candidate_block = (
+            user_input.split("<content_batch>", 1)[1]
+            .split(
+                "</content_batch>",
+                1,
+            )[0]
+            .strip()
+        )
+        candidate_envelope = json.loads(candidate_block)
+        assert isinstance(candidate_envelope, dict)
+        candidate_items = candidate_envelope.get("items")
+        assert isinstance(candidate_items, list)
+        local_ids = [
+            str(item["id"])
+            for item in candidate_items
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
+        ]
         self.calls.append(
             {
                 "system_instruction": system_instruction,
                 "user_input": user_input,
                 "caller": caller,
+                "candidate_block": candidate_block,
+                "candidate_envelope": candidate_envelope,
+                "returned_ids": local_ids,
             }
         )
         return _Response(
             json.dumps(
                 [
                     {
-                        "content_id": self.content_id,
+                        "id": local_id,
                         "score": self.score,
                         "reason": "fit" if self.score >= 0.60 else "new direction",
                         "topic_group": "生活方式",
                         "style_key": "story_doc",
                     }
+                    for local_id in local_ids
                 ],
                 ensure_ascii=False,
             )
@@ -451,9 +472,30 @@ class TestXhsObservedUrls:
         assert row["topic_group"] == "生活方式"
         assert row["style_key"] == "story_immersion"
         assert row["relevance_score"] == 0.88
-        user_input = str(llm.calls[0]["user_input"])
-        assert '"source_platform": "xiaohongshu"' in user_input
-        assert '"content_type": "note"' in user_input
+        call = llm.calls[0]
+        candidate_block = str(call["candidate_block"])
+        assert "\n" not in candidate_block
+        assert llm.content_id not in candidate_block
+        assert "https://" not in candidate_block
+        assert call["returned_ids"] == ["0"]
+        assert call["candidate_envelope"] == {
+            "defaults": {
+                "content_type": "note",
+                "mode": "normal",
+                "source_platform": "xiaohongshu",
+            },
+            "items": [
+                {
+                    "author": "Creator",
+                    "id": "0",
+                    "title": "小红书 E2E Note",
+                }
+            ],
+        }
+        system_instruction = str(call["system_instruction"])
+        assert "原样带回输入里的 id" in system_instruction
+        assert "bvid" not in system_instruction
+        assert "content_id" not in system_instruction
 
     def test_observed_note_low_relevance_score_is_rejected_before_content_cache(
         self,

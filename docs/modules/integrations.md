@@ -82,7 +82,11 @@ skills = build_openclaw_skills(adapter)
 当前稳定 operation 包括：
 
 - `sync_account()`
-- `get_profile()`
+- `get_profile()` — 返回的 `ProfileResponse` **有意**携带 `personality_portrait`
+  全文（`integrations/openclaw/operations.py:113`），并把 `core_traits` /
+  `deep_needs` / `top_interests` 各截断为前 5 条（`operations.py:114-120`）。这是画像
+  边界的两个允许暴露画像的外部出口之一（另一个是聊天 core memory），不同于内容管线
+  serializer 一律排除画像；详见 [画像使用登记表](../profile-usage.md)。
 - `recommend(limit=5, refresh_if_needed=True)`
 - `submit_feedback(request)`：trim 后非空、最长 400 字符的 `request_id` 必填，并在 `openclaw` producer namespace 内唯一；adapter 不生成默认值。durable event 首写与 recommendation 投影提交后 operation 即成功，后续认知记录、内容反馈 owner drain 和摘要刷新只决定 `processing=completed/queued`，失败不会撤销或误报已经提交的反馈。相同 ID 携带不同 recommendation/type/note 会返回 validation conflict，绝不覆盖第一份 payload。
 - `get_runtime_status()`

@@ -81,10 +81,12 @@ class _StubLLM:
         self.payload = payload
         self.calls = 0
         self.last_user_input = ""
+        self.call_kwargs: list[dict[str, Any]] = []
 
     async def complete_structured_task(self, **kwargs: Any) -> Any:
         self.calls += 1
         self.last_user_input = str(kwargs.get("user_input", ""))
+        self.call_kwargs.append(dict(kwargs))
         return SimpleNamespace(content=json.dumps(self.payload, ensure_ascii=False))
 
 
@@ -1709,3 +1711,58 @@ async def test_judge_failed_batch_only_loses_its_own_clusters(tmp_path: Path) ->
     assert len(report.rejected_clusters) == 32
     assert not report.errors
     assert len(memory.get_layer("preference").data["interests"]) == 2 * 32 + 8
+
+
+async def test_consolidation_judge_opts_out_of_core_memory_injection(tmp_path: Path) -> None:
+    """Task 8 audit: the cluster-merge judge must not carry core-memory injection.
+
+    Deterministic op-diff assurance (spec Task 8, Path B — the real ``--dry-run``
+    op list is non-deterministic at temperature 0.2, so a mocked-LLM equivalence
+    check is the honest gate): the judged material is built solely by
+    ``build_profile_consolidation_prompt`` from the cluster payload and never
+    depends on ``inject_core_memory``. This test pins that every judge call opts
+    out (``inject_core_memory=False``) while the recorded user prompt still carries
+    the full cluster payload — so removing the injection cannot change any
+    merge/keep decision.
+    """
+    memory = _FakeMemory(
+        {
+            "interests": [
+                _interest("智能体开发", 0.97, first_seen="2026-03-01T00:00:00"),
+                _interest("智能体开发与实现", 0.88, first_seen="2026-01-15T00:00:00"),
+                _interest("篮球", 0.95, "体育"),
+            ],
+            "disliked_topics": [],
+        },
+        soul={"personality_portrait": "PORTRAIT_SENTINEL_XYZ"},
+        data_dir=tmp_path,
+    )
+    llm = _StubLLM(
+        {
+            "likes": [
+                {
+                    "cluster_id": "L1",
+                    "op": "merge",
+                    "members": ["智能体开发", "智能体开发与实现"],
+                    "canonical": "智能体开发",
+                }
+            ],
+            "dislikes": [],
+        }
+    )
+    consolidator = ProfileConsolidator(
+        memory=memory,
+        llm_service=llm,
+        embedding_service=_StubEmbedding([["智能体开发", "智能体开发与实现"]]),
+        data_dir=tmp_path,
+    )
+
+    report = await consolidator.run(dry_run=False)
+
+    assert llm.calls >= 1
+    for call in llm.call_kwargs:
+        assert call.get("inject_core_memory") is False
+    # Judged payload is the cluster list, independent of the injection flag.
+    assert "智能体开发" in llm.last_user_input
+    assert "PORTRAIT_SENTINEL_XYZ" not in llm.last_user_input
+    assert report.merges and report.merges[0]["canonical"] == "智能体开发"

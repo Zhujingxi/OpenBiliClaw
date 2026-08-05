@@ -14,7 +14,9 @@ from typing import Any
 import pytest
 
 from openbiliclaw.discovery.engine import DiscoveredContent
+from openbiliclaw.discovery.strategies._utils import build_profile_summary
 from openbiliclaw.llm.base import LLMFallbackError, LLMProviderError, LLMRateLimitError, LLMResponse
+from openbiliclaw.llm.prompts import build_batch_expression_prompt
 from openbiliclaw.llm.service import LLMProviderExecutionError
 from openbiliclaw.recommendation.engine import (
     ExpressionBatchMalformed,
@@ -23,7 +25,13 @@ from openbiliclaw.recommendation.engine import (
     _recommendation_profile_summary,
 )
 from openbiliclaw.runtime.expression_copy import ExpressionCopyCoordinator
-from openbiliclaw.soul.profile import InterestTag, PreferenceLayer, SoulProfile
+from openbiliclaw.soul.profile import (
+    AwarenessNote,
+    InsightHypothesis,
+    InterestTag,
+    PreferenceLayer,
+    SoulProfile,
+)
 from openbiliclaw.storage.database import Database
 
 
@@ -73,6 +81,54 @@ def _build_profile() -> SoulProfile:
     )
 
 
+def _build_maxed_prompt_profile() -> SoulProfile:
+    profile = SoulProfile(
+        personality_portrait="一个有大量历史行为、兴趣和近期洞察的人。",
+        core_traits=[f"trait-{index}-" + ("a" * 24) for index in range(35)],
+        cognitive_style=[f"style-{index}-" + ("b" * 24) for index in range(35)],
+        values=[f"value-{index}-" + ("c" * 24) for index in range(35)],
+        motivational_drivers=[f"driver-{index}-" + ("d" * 24) for index in range(35)],
+        deep_needs=[f"need-{index}-" + ("e" * 24) for index in range(35)],
+        current_phase="正在整理大量输入",
+        life_stage="高密度探索期",
+        preferences=PreferenceLayer(
+            interests=[
+                InterestTag(
+                    name=f"interest-{index:03d}-" + ("tag" * 6),
+                    category=f"domain-{index:03d}",
+                    weight=1.0 - index / 1000,
+                    source="test",
+                )
+                for index in range(180)
+            ],
+            disliked_topics=[f"avoid-{index}" for index in range(128)],
+            source_platform_mix={"bilibili": 0.5, "twitter": 0.5},
+        ),
+        recent_awareness=[
+            AwarenessNote(
+                date=f"2026-07-{(index % 28) + 1:02d}",
+                observation=f"awareness-{index}-" + ("x" * 40),
+                trend=f"trend-{index}",
+            )
+            for index in range(30)
+        ],
+        active_insights=[
+            InsightHypothesis(
+                hypothesis=f"insight-{index}-" + ("y" * 40),
+                evidence=[f"evidence-{index}-{item}-" + ("z" * 24) for item in range(30)],
+                created_at=f"2026-07-{(index % 28) + 1:02d}T12:00:00",
+            )
+            for index in range(30)
+        ],
+    )
+    profile.preferences.style.depth_preference = 0.9
+    profile.preferences.context.session_type = "deep_dive"
+    profile._active_speculations = [  # type: ignore[attr-defined]
+        {"domain": f"spec-{index}", "reason": "maybe " + ("r" * 24)} for index in range(30)
+    ]
+    return profile
+
+
 def _content_batch_from_prompt(user_input: str) -> list[dict[str, object]]:
     batch_json = user_input.split("<content_batch>", 1)[1].split("</content_batch>", 1)[0]
     payload = json.loads(batch_json.strip())
@@ -90,6 +146,73 @@ def test_recommendation_profile_summary_includes_disliked_topics() -> None:
     # avoid-topic reaches prompts; only an over-cap store (impossible in
     # practice) would be cut.
     assert summary["disliked_topics"] == [f"话题{i}" for i in range(1, 129)]
+
+
+def test_recommendation_profile_summary_compacts_maxed_profile() -> None:
+    from openbiliclaw.discovery.strategies._utils import compact_content_prompt_profile_summary
+
+    profile = _build_maxed_prompt_profile()
+
+    summary = _recommendation_profile_summary(profile)
+    expected = compact_content_prompt_profile_summary(build_profile_summary(profile))
+
+    assert summary == expected
+    assert len(summary["core_traits"]) == 20
+    assert len(summary["interests"]) == 48
+    assert len(summary["interest_domains"]) == 32
+
+
+def test_recommendation_profile_summary_compacts_after_interests_substitution() -> None:
+    profile = _build_maxed_prompt_profile()
+    selected_interests = [
+        {
+            "name": f"selected-interest-{index:02d}",
+            "category": "selected",
+            "weight": 1.0 - index / 1000,
+        }
+        for index in range(110)
+    ]
+
+    summary = _recommendation_profile_summary(profile, interests=selected_interests)
+
+    assert len(summary["interests"]) == 48
+    assert summary["interests"][0]["name"] == "selected-interest-00"
+    assert summary["interests"][-1]["name"] == "selected-interest-47"
+    assert "interest-000-" not in json.dumps(summary["interests"], ensure_ascii=False)
+
+
+def test_batch_expression_prompt_shrinks_with_compacted_recommendation_profile() -> None:
+    profile = _build_maxed_prompt_profile()
+    full_summary = build_profile_summary(profile)
+    compact_summary = _recommendation_profile_summary(profile)
+    content_items = [
+        {
+            "bvid": "BV_SHRINK",
+            "title": "结构化工作流复盘",
+            "up_name": "效率实验室",
+            "description": "如何把复杂问题拆成稳定系统。",
+        }
+    ]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        engine = RecommendationEngine(llm=_DummyLLM(), database=db)
+
+        full_prompt = build_batch_expression_prompt(
+            profile_summary=full_summary,
+            profile_blocks=engine._profile_blocks(full_summary, cache_key="batch_expression"),
+            content_items=content_items,
+            tone_profile=None,
+        )[1]["content"]
+        compact_prompt = build_batch_expression_prompt(
+            profile_summary=compact_summary,
+            profile_blocks=engine._profile_blocks(compact_summary, cache_key="batch_expression"),
+            content_items=content_items,
+            tone_profile=None,
+        )[1]["content"]
+
+    assert len(compact_prompt) <= len(full_prompt) * 0.5
 
 
 def _seed_pool(
@@ -1030,6 +1153,7 @@ async def test_generate_expression_passes_body_text_for_text_items() -> None:
         llm = _DummyLLM()
         engine = RecommendationEngine(llm=llm, database=db)
 
+        body_text = "H" * 300 + "MIDDLE_BODY_MARKER" + "T" * 200
         await engine.generate_expression(
             DiscoveredContent(
                 bvid="1790000000000000001",
@@ -1040,7 +1164,7 @@ async def test_generate_expression_passes_body_text_for_text_items() -> None:
                 content_type="thread",
                 cover_url="",
                 duration=0,
-                body_text="1/ BODY_MARKER long-form note_tweet on systems design ...",
+                body_text=body_text,
                 style_key="deep_dive",
                 topic_group="系统设计",
                 relevance_score=0.8,
@@ -1049,10 +1173,10 @@ async def test_generate_expression_passes_body_text_for_text_items() -> None:
         )
 
         user_input = str(llm.calls[0]["user_input"])
-        assert "BODY_MARKER" in user_input
+        assert body_text in user_input
         assert '"body_text"' in user_input
         # body_text must never leak into the cached system prompt.
-        assert "BODY_MARKER" not in str(llm.calls[0]["system_instruction"])
+        assert "MIDDLE_BODY_MARKER" not in str(llm.calls[0]["system_instruction"])
 
 
 @pytest.mark.asyncio
@@ -2155,6 +2279,7 @@ async def test_classify_pool_backlog_fills_metadata() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         db = Database(Path(tmpdir) / "test.db")
         db.initialize()
+        full_body_text = "H" * 300 + "CLASSIFY_MIDDLE_MARKER" + "T" * 200
 
         # Insert 2 XHS items with NO metadata
         _seed_visible(
@@ -2171,6 +2296,7 @@ async def test_classify_pool_backlog_fills_metadata() -> None:
             topic_key="",
             relevance_score=0.0,
             published_at="2026-08-04T08:00:00Z",
+            body_text=full_body_text,
         )
         _seed_visible(
             db,
@@ -2196,6 +2322,8 @@ async def test_classify_pool_backlog_fills_metadata() -> None:
         )
 
         assert classified == 2
+        assert full_body_text in str(llm.calls[0]["user_input"])
+        assert "CLASSIFY_MIDDLE_MARKER" not in str(llm.calls[0]["system_instruction"])
 
         # Verify DB was updated
         rows = db.get_pool_candidates(limit=10)
@@ -2216,6 +2344,86 @@ async def test_classify_pool_backlog_fills_metadata() -> None:
         assert xhs2 is not None
         assert xhs2["style_key"] == "hands_on"
         assert xhs2["topic_group"] == "游戏攻略"
+
+
+@pytest.mark.asyncio
+async def test_classify_pool_backlog_default_batch_size_is_30_and_override_still_applies() -> None:
+    class _BatchSizingClassifyLLM:
+        def __init__(self) -> None:
+            self.batch_sizes: list[int] = []
+
+        async def complete_structured_task(
+            self,
+            *,
+            system_instruction: str = "",
+            user_input: str = "",
+            history: list[dict[str, str]] | None = None,
+            temperature: float = 0.7,
+            max_tokens: int = 4096,
+            caller: str = "",
+            reasoning_effort: str | None = None,
+        ) -> LLMResponse:
+            batch = _content_batch_from_prompt(user_input)
+            self.batch_sizes.append(len(batch))
+            return LLMResponse(
+                content=json.dumps(
+                    [
+                        {
+                            "score": 0.71,
+                            "reason": "batch classification",
+                            "topic_group": "批量分类",
+                            "style_key": "deep_dive",
+                        }
+                        for _item in batch
+                    ],
+                    ensure_ascii=False,
+                ),
+                provider="test",
+                model="dummy",
+                usage={},
+            )
+
+    def seed_unclassified_rows(db: Database, count: int) -> None:
+        for index in range(count):
+            _seed_visible(
+                db,
+                f"BV_classify_{index}",
+                title=f"待分类内容 {index}",
+                up_name="UP主",
+                source="search",
+                style_key="",
+                topic_group="",
+                topic_key="",
+                relevance_score=0.0,
+            )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "default.db")
+        db.initialize()
+        seed_unclassified_rows(db, 60)
+        llm = _BatchSizingClassifyLLM()
+        engine = RecommendationEngine(llm=llm, database=db)
+
+        classified = await engine.classify_pool_backlog(profile=_build_profile(), limit=60)
+
+        assert classified == 60
+        assert llm.batch_sizes == [30, 30]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "override.db")
+        db.initialize()
+        seed_unclassified_rows(db, 60)
+        llm = _BatchSizingClassifyLLM()
+        engine = RecommendationEngine(llm=llm, database=db)
+
+        classified = await engine.classify_pool_backlog(
+            profile=_build_profile(),
+            limit=60,
+            batch_size=25,
+        )
+
+        assert classified == 60
+        assert llm.batch_sizes == [25, 25, 10]
 
 
 @pytest.mark.asyncio
@@ -2802,6 +3010,64 @@ async def test_precompute_batch_requests_no_core_memory_injection_when_supported
                 "inject_core_memory": False,
             }
         ]
+
+
+@pytest.mark.asyncio
+async def test_precompute_batch_preserves_full_body_text() -> None:
+    class _BodyRecordingBatchLLM:
+        def __init__(self) -> None:
+            self.user_inputs: list[str] = []
+
+        async def complete_structured_task(
+            self,
+            *,
+            system_instruction: str,
+            user_input: str,
+            history: list[dict[str, str]] | None = None,
+            temperature: float = 0.7,
+            max_tokens: int = 4096,
+            caller: str = "",
+            reasoning_effort: str | None = None,
+        ) -> LLMResponse:
+            self.user_inputs.append(user_input)
+            return LLMResponse(
+                content=json.dumps(
+                    [
+                        {
+                            "bvid": "BV_EXPR_BODY",
+                            "expression": "这条能接住你最近想拆流程的劲头。",
+                            "topic_label": "流程拆解",
+                        }
+                    ],
+                    ensure_ascii=False,
+                ),
+                provider="test",
+                model="dummy",
+                usage={},
+            )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        body_text = "H" * 300 + "T" * 200
+        item = DiscoveredContent(
+            bvid="BV_EXPR_BODY",
+            title="长线程怎么拆",
+            up_name="效率实验室",
+            source_platform="twitter",
+            content_type="thread",
+            body_text=body_text,
+            relevance_score=0.88,
+        )
+        _seed_pool(db, [item], precomputed=False)
+        llm = _BodyRecordingBatchLLM()
+        engine = RecommendationEngine(llm=llm, database=db)
+
+        completed = await engine._precompute_batch([item], _build_profile())
+
+        assert completed == 1
+        batch = _content_batch_from_prompt(llm.user_inputs[0])
+        assert batch[0]["body_text"] == body_text
 
 
 @pytest.mark.asyncio
@@ -5397,3 +5663,36 @@ async def test_generate_expression_rejects_nested_batch_payload() -> None:
             assert "topic_label" not in value
             assert "expression" not in value
             assert not value.lstrip().startswith(("[", "{"))
+
+
+def test_evo_delight_reason_uses_only_formal_user_facing_copy() -> None:
+    """Evaluator diagnostics must never leak into delight card copy."""
+    # pool_expression wins first.
+    assert (
+        RecommendationEngine._evo_delight_reason(
+            DiscoveredContent(
+                bvid="BV1", title="x", pool_expression="现成文案", relevance_reason=""
+            )
+        )
+        == "现成文案"
+    )
+    # Internal evaluator reason is deliberately not a user-facing fallback.
+    assert (
+        RecommendationEngine._evo_delight_reason(
+            DiscoveredContent(bvid="BV2", title="x", relevance_reason="这条正合你的胃口。")
+        )
+        == ""
+    )
+    # Topic metadata and empty candidates likewise wait for formal copy.
+    assert (
+        RecommendationEngine._evo_delight_reason(
+            DiscoveredContent(bvid="BV3", title="x", relevance_reason="", topic_group="航天")
+        )
+        == ""
+    )
+    assert (
+        RecommendationEngine._evo_delight_reason(
+            DiscoveredContent(bvid="BV4", title="x", relevance_reason="")
+        )
+        == ""
+    )

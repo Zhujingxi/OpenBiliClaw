@@ -18,6 +18,10 @@ from datetime import datetime
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
+from openbiliclaw.discovery.strategies._utils import (
+    build_profile_summary,
+    compact_content_prompt_profile_summary,
+)
 from openbiliclaw.discovery.style_keys import VALID_STYLE_KEYS, normalize_style_key
 from openbiliclaw.llm.base import classify_llm_failure_kind
 from openbiliclaw.llm.json_utils import (
@@ -278,9 +282,9 @@ def _recommendation_profile_summary(
     embedding-selected, content-relevant tag list for the default weight-ranked
     one.
     """
-    from openbiliclaw.discovery.strategies._utils import build_profile_summary
-
-    return build_profile_summary(profile, interests=interests)
+    return compact_content_prompt_profile_summary(
+        build_profile_summary(profile, interests=interests)
+    )
 
 
 def _content_result_keys(content: DiscoveredContent) -> set[str]:
@@ -1736,7 +1740,7 @@ class RecommendationEngine:
         *,
         profile: SoulProfile,
         limit: int = 30,
-        batch_size: int = 10,
+        batch_size: int = 30,
     ) -> int:
         """Legacy/recovery path for cached rows lacking style / topic / score.
 
@@ -1849,7 +1853,7 @@ class RecommendationEngine:
         evaluated_at, _evaluation_bucket = content_evaluation_clock()
 
         profile_data = _recommendation_profile_summary(profile)
-        content_items = [
+        content_items: list[dict[str, object]] = [
             {
                 "bvid": c.bvid,
                 "content_id": c.content_id or c.bvid,
@@ -3720,7 +3724,7 @@ class RecommendationEngine:
             },
             recent_feedback=[],
         )
-        content_items = [
+        content_items: list[dict[str, object]] = [
             {
                 "bvid": item.bvid,
                 "content_id": item.content_id or item.bvid,

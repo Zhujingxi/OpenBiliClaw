@@ -8677,6 +8677,9 @@ def create_app(
 
         messages = build_probe_sentiment_prompt(domain=domain, user_message=user_message)
         try:
+            # Intentionally carries core memory (chat-adjacent): classifying the
+            # sentiment of a probe reply benefits from knowing who the user is, so
+            # tone/intent is read in the user's own context. Kept per Task 8 audit.
             response = await asyncio.wait_for(
                 llm.complete_with_core_memory(
                     system_instruction=messages[0]["content"],
@@ -14585,6 +14588,8 @@ def create_app(
                 ),
                 account_sync_interval_hours=cfg.scheduler.account_sync_interval_hours,
                 refresh_check_interval_seconds=cfg.scheduler.refresh_check_interval_seconds,
+                eval_min_batch_size=cfg.scheduler.eval_min_batch_size,
+                eval_max_wait_seconds=cfg.scheduler.eval_max_wait_seconds,
                 signal_event_threshold=cfg.scheduler.signal_event_threshold,
                 feedback_batch_threshold=cfg.scheduler.feedback_batch_threshold,
                 trending_refresh_minutes=cfg.scheduler.trending_refresh_minutes,
@@ -14632,6 +14637,7 @@ def create_app(
                 planner_poll_seconds=cfg.discovery.planner_poll_seconds,
                 plan_ttl_hours=cfg.discovery.plan_ttl_hours,
                 admission_min_score=cfg.discovery.admission_min_score,
+                eval_prefilter_mode=cfg.discovery.eval_prefilter_mode,
                 candidate_eval_concurrency=cfg.discovery.candidate_eval_concurrency,
                 multimodal_evaluation_enabled=cfg.discovery.multimodal_evaluation_enabled,
                 visual_profile_enabled=cfg.discovery.visual_profile_enabled,
@@ -15606,6 +15612,8 @@ def create_app(
             _DEFAULT_DANMAKU_MAX_CHARS,
             _DEFAULT_DELIGHT_QUEUE_LIMIT,
             _DEFAULT_DISCOVERY_LIMIT,
+            _DEFAULT_EVAL_MAX_WAIT_SECONDS,
+            _DEFAULT_EVAL_MIN_BATCH_SIZE,
             _DEFAULT_EXPLORE_REFRESH_MINUTES,
             _DEFAULT_FEEDBACK_BATCH_THRESHOLD,
             _DEFAULT_KEYFRAME_FETCH_LIMIT,
@@ -15619,11 +15627,16 @@ def create_app(
             _DEFAULT_SIGNAL_EVENT_THRESHOLD,
             _DEFAULT_SPECULATOR_IDLE_INTERVAL_MINUTES,
             _DEFAULT_TRENDING_REFRESH_MINUTES,
+            _MAX_EVAL_MAX_WAIT_SECONDS,
+            _MAX_EVAL_MIN_BATCH_SIZE,
+            _MIN_EVAL_MAX_WAIT_SECONDS,
+            _MIN_EVAL_MIN_BATCH_SIZE,
             _collect_config_issues,
             _default_config_path,
             _normalize_extension_disconnect_grace,
             _normalize_pool_source_shares,
             _normalize_probability,
+            _normalize_scheduler_float,
             _normalize_scheduler_int,
             _validate_auto_update_check_interval,
             load_config,
@@ -16178,6 +16191,11 @@ def create_app(
                     15,
                     None,
                 ),
+                "eval_min_batch_size": (
+                    _DEFAULT_EVAL_MIN_BATCH_SIZE,
+                    _MIN_EVAL_MIN_BATCH_SIZE,
+                    _MAX_EVAL_MIN_BATCH_SIZE,
+                ),
                 "signal_event_threshold": (_DEFAULT_SIGNAL_EVENT_THRESHOLD, 1, None),
                 "trending_refresh_minutes": (_DEFAULT_TRENDING_REFRESH_MINUTES, 1, None),
                 "explore_refresh_minutes": (_DEFAULT_EXPLORE_REFRESH_MINUTES, 1, None),
@@ -16212,6 +16230,8 @@ def create_app(
                 "pool_target_count",
                 "account_sync_interval_hours",
                 "refresh_check_interval_seconds",
+                "eval_min_batch_size",
+                "eval_max_wait_seconds",
                 "signal_event_threshold",
                 "trending_refresh_minutes",
                 "explore_refresh_minutes",
@@ -16255,6 +16275,17 @@ def create_app(
                         except ValueError as exc:
                             raise HTTPException(status_code=400, detail=str(exc)) from exc
                         setattr(cfg.scheduler, key, interval)
+                    elif key == "eval_max_wait_seconds":
+                        setattr(
+                            cfg.scheduler,
+                            key,
+                            _normalize_scheduler_float(
+                                sdata[key],
+                                default=_DEFAULT_EVAL_MAX_WAIT_SECONDS,
+                                min_value=_MIN_EVAL_MAX_WAIT_SECONDS,
+                                max_value=_MAX_EVAL_MAX_WAIT_SECONDS,
+                            ),
+                        )
                     elif key in scheduler_int_limits:
                         default, min_value, max_value = scheduler_int_limits[key]
                         setattr(
@@ -16328,6 +16359,14 @@ def create_app(
                         ddata["admission_min_score"],
                         default=_DEFAULT_ADMISSION_MIN_SCORE,
                     )
+                if "eval_prefilter_mode" in ddata:
+                    eval_prefilter_mode = str(ddata["eval_prefilter_mode"] or "").strip().lower()
+                    if eval_prefilter_mode not in {"off", "shadow", "enforce"}:
+                        raise HTTPException(
+                            status_code=422,
+                            detail="discovery.eval_prefilter_mode must be off, shadow, or enforce",
+                        )
+                    cfg.discovery.eval_prefilter_mode = eval_prefilter_mode
                 for key, (default, min_value, max_value) in discovery_int_limits.items():
                     if key in ddata:
                         setattr(

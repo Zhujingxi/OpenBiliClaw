@@ -208,6 +208,13 @@ def build_socratic_dialogue_prompt(
     dialogue turns. Multi-user deployments would want to refactor this
     further, but for the current single-user model leaving the system
     prompt user-specific is the simpler and equally-effective approach.
+
+    ``core_memory_text`` is a documented injection seam: it lets tests feed
+    a core-memory block directly, but in production the dialogue caller
+    passes ``""`` and the real core-memory injection happens downstream in
+    ``LLMService.complete_with_core_memory`` (and its ``complete_with_tools``
+    sibling), not here. Do not resurrect any per-service core-memory-block
+    getattr probe at the dialogue call site.
     """
     friend_label = _friend_label_from_mix(source_platform_mix)
     system_prompt = "\n\n".join(
@@ -1256,6 +1263,15 @@ def build_posture_gate_prompt(
 # 100% static system prompt for single-item content evaluation.
 # All variables (source_context, source_platform, profile, content)
 # go in user_prompt — see ``build_content_evaluation_prompt``.
+# Reason-diet floor (v0.3.171): the "< 0.5 → empty reason" threshold below is a
+# fixed 0.5 baked into the static prompt text, NOT the runtime
+# ``admission_min_score``. It must stay a literal constant for two reasons:
+# (1) cache convention — the system prompt has to be byte-identical across
+# calls, so it cannot interpolate a per-call/config value; (2) safety margin —
+# 0.5 is strictly below every admission path (0.60 default, 0.58 explore per
+# ``discovery/admission.py``), so omitting low-score diagnostic text cannot
+# affect admission. Reopen this only if an admission path ever drops at/below
+# 0.5.
 _SINGLE_CONTENT_EVALUATION_SYSTEM_PROMPT = (
     "<task>\n"
     "你要评估一个候选内容与一个用户画像的匹配度。下面 user 消息会给出 "
@@ -1266,7 +1282,11 @@ _SINGLE_CONTENT_EVALUATION_SYSTEM_PROMPT = (
     "<rules>\n"
     "1. 输出必须是严格 JSON,不要附带解释。\n"
     "2. score 范围必须在 0 到 1 之间。\n"
-    "3. reason 只写一句中文,解释为什么这个人会喜欢或不喜欢这个内容。\n"
+    "3. reason 仅供内部诊断,不是面向用户的推荐文案。写法(省 token):"
+    "score 严格低于 0.5 的条目,reason 必须写成空串 "
+    '""(这些条目达不到准入门槛、会被直接丢弃,写理由是纯浪费);'
+    "score 大于等于 0.5 的条目,reason 写一句精炼中文,"
+    "不超过 30 个 Unicode 字符,说明内容与画像匹配或不匹配的依据。\n"
     '4. 不要只说"因为热门"或"因为看过类似的",要结合用户画像。\n'
     "5. 除 explore 外，发现路径和平台只提供上下文，不得影响评分标准:"
     "search、trending、hot、feed、related_chain、channel、creator 等所有非 explore 候选"
@@ -1305,7 +1325,7 @@ _SINGLE_CONTENT_EVALUATION_SYSTEM_PROMPT = (
     "<output_schema>\n"
     "{\n"
     '  "score": 0.78,\n'
-    '  "reason": "这个视频的选题角度新颖,节奏轻快,契合你对该领域的好奇心。",\n'
+    '  "reason": "主题契合画像中的长期兴趣,内容角度有增量",\n'
     '  "topic_group": "生活方式",\n'
     '  "style_key": "social_chat",\n'
     '  "franchise_key": ""\n'
@@ -1376,6 +1396,11 @@ def build_content_evaluation_prompt(
 # profile data — all of those go in user_prompt). Provider-side prompt
 # cache (DeepSeek 90% / OpenAI 50% / Claude 90% / Gemini 75% off) only
 # fires when the prefix is byte-identical across calls.
+#
+# Reason-diet floor (v0.3.171): rule 3a bakes a fixed 0.5 skip threshold (see
+# the single-eval constant above for the full rationale) — a literal constant,
+# never the runtime ``admission_min_score``, so the prefix stays byte-stable and
+# stays strictly below every admission path (0.60 default, 0.58 explore).
 _BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT = (
     "<task>\n"
     "你要批量评估多个候选内容与一个用户画像的匹配度。"
@@ -1389,8 +1414,13 @@ _BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT = (
     '1. 输出必须是严格 JSON 对象,不要附带解释。顶层只包含 "results" 数组。\n'
     "2. results 数组长度必须与输入内容数量一致,顺序一一对应。\n"
     "3. 每项必须原样带回输入里的 bvid 或 content_id,并包含 score(0-1)、"
-    "reason(一句中文)、topic_group(2-4词粗分类)、style_key(13选1)、"
+    "reason、topic_group(2-4词粗分类)、style_key(13选1)、"
     "franchise_key(可空)。\n"
+    "3a. reason 仅供内部诊断,不是面向用户的推荐文案。写法(省 token):"
+    "score 严格低于 0.5 的条目,reason 必须写成空串 "
+    '""(这些条目达不到准入门槛、会被直接丢弃,写理由是纯浪费);'
+    "score 大于等于 0.5 的条目,reason 写一句精炼中文,"
+    "不超过 30 个 Unicode 字符,说明内容与画像匹配的依据。\n"
     "4. 除 explore 外，发现路径和平台只提供上下文，不得影响评分标准:"
     "search、trending、hot、feed、related_chain、channel、creator 等所有非 explore 候选"
     "都必须按内容与用户画像的真实匹配度统一评分;"
@@ -1473,12 +1503,77 @@ _BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT = (
     '"style_key": "deep_focus", "franchise_key": ""},\n'
     '    {"bvid": "BV2xxx", "score": 0.72, "reason": "...", "topic_group": "游戏摄影", '
     '"style_key": "aesthetic_browse", "franchise_key": "原神"},\n'
-    '    {"bvid": "BV3xxx", "score": 0.45, "reason": "...", "topic_group": "美食", '
+    '    {"bvid": "BV3xxx", "score": 0.45, "reason": "", "topic_group": "美食", '
     '"style_key": "social_chat", "franchise_key": ""}\n'
     "  ]\n"
     "}\n"
     "</output_schema>"
 )
+
+
+def _build_sparse_batch_evaluation_system_prompt() -> str:
+    """Return the static local-ID contract shared by sparse transports."""
+
+    replacements = (
+        (
+            "3. 每项必须原样带回输入里的 bvid 或 content_id,并包含 score(0-1)、"
+            "reason、topic_group(2-4词粗分类)、style_key(13选1)、"
+            "franchise_key(可空)。\n",
+            "3. content_batch 编码一个 canonical batch,可能是含 defaults/items 的 JSON,"
+            "也可能是 ROW-WIRE-V1 表；表中的 defaults、columns、row 与同名 canonical "
+            "字段完全等价。defaults 是所有 items/rows 共享的默认值,每项同名字段优先。"
+            "每项包含请求内局部 id、title、author,以及非空的内容/互动字段。"
+            "每项必须原样带回输入里的 id,并包含 score(0-1)、reason、"
+            "topic_group(2-4词粗分类)、style_key(13选1)、franchise_key(可空)。\n",
+        ),
+        (
+            "10. When content_batch items include source_platform/source_strategy/content_type, "
+            "use those per-item fields as the authoritative platform context. "
+            "Do not lower or raise preference score merely because content comes from a "
+            "different platform; score every item against the same Soul-profile rubric. ",
+            "10. Resolve source_platform, content_type and mode from each canonical item, "
+            "falling back to content_batch.defaults when the item omits that field. "
+            "Only mode=explore receives the explore exception; mode=normal covers every "
+            "other discovery path. Do not lower or raise preference score merely because "
+            "content comes from a different platform; score every item against the same "
+            "Soul-profile rubric. ",
+        ),
+        (
+            "它的值形如 cover:<content_id>,对应同一 user 消息中紧随文字锚点"
+            " `Cover image cover:<content_id> ...` 后面的图片。评分时必须结合该头图 / 封面图",
+            "它的值形如 cover:<id>,对应同一 user 消息中紧随文字锚点"
+            " `Cover image cover:<id> ...` 后面的图片。评分时必须结合该头图 / 封面图",
+        ),
+        (
+            '    {"bvid": "BV1xxx", "score": 0.78, "reason": "...", '
+            '"topic_group": "认知科学", '
+            '"style_key": "deep_focus", "franchise_key": ""},\n'
+            '    {"bvid": "BV2xxx", "score": 0.72, "reason": "...", '
+            '"topic_group": "游戏摄影", '
+            '"style_key": "aesthetic_browse", "franchise_key": "原神"},\n'
+            '    {"bvid": "BV3xxx", "score": 0.45, "reason": "", '
+            '"topic_group": "美食", '
+            '"style_key": "social_chat", "franchise_key": ""}\n',
+            '    {"id": "0", "score": 0.78, "reason": "...", '
+            '"topic_group": "认知科学", '
+            '"style_key": "deep_focus", "franchise_key": ""},\n'
+            '    {"id": "1", "score": 0.72, "reason": "...", '
+            '"topic_group": "游戏摄影", '
+            '"style_key": "aesthetic_browse", "franchise_key": "原神"},\n'
+            '    {"id": "2", "score": 0.45, "reason": "", '
+            '"topic_group": "美食", '
+            '"style_key": "social_chat", "franchise_key": ""}\n',
+        ),
+    )
+    prompt = _BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT
+    for production_text, sparse_text in replacements:
+        if prompt.count(production_text) != 1:
+            raise RuntimeError("sparse evaluator system prompt is stale")
+        prompt = prompt.replace(production_text, sparse_text, 1)
+    return prompt
+
+
+_SPARSE_BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT = _build_sparse_batch_evaluation_system_prompt()
 
 
 def build_batch_content_evaluation_prompt(
@@ -1490,6 +1585,9 @@ def build_batch_content_evaluation_prompt(
     source_platform: str = "bilibili",
     negative_examples: list[dict[str, object]] | None = None,
     evaluated_at: str = "",
+    compact_json: bool = False,
+    candidate_block: str | None = None,
+    local_result_ids: bool = False,
 ) -> list[dict[str, str]]:
     """Build a prompt that evaluates multiple content items in one LLM call.
 
@@ -1513,18 +1611,44 @@ def build_batch_content_evaluation_prompt(
     prefix unchanged for cold-start users). System prompt picks up two
     permanent rules about how to consume the block (rules 10 + 11) and
     stays call-invariant after that one-time template change.
+
+    v0.3.x: discovery evaluation may include item-level ``related_interests``
+    entries inside ``content_items``. They are per-candidate name-string recall
+    hints from the tail interest pool (ranks beyond the compact block's top
+    64), intentionally kept out of the stable profile blocks so provider
+    prompt-cache prefixes remain byte-stable.
+
+    ``compact_json`` is an experiment seam for deterministic JSON whitespace
+    removal. It never changes field names or values, and defaults to the
+    historical indented rollback bytes.
+
+    ``candidate_block`` and ``local_result_ids`` carry the production sparse
+    candidate wire and request-local result identity. The block is already
+    rendered by the shared transport layer; the static local-ID system contract
+    is shared by production sparse JSON and replay-only row wire. Leaving both
+    arguments disabled preserves the historical explicit-``production``
+    rollback prompt bytes.
     """
+
+    if (candidate_block is not None) != local_result_ids:
+        raise ValueError("candidate_block and local_result_ids must be enabled together")
+
+    def render_json(value: object) -> str:
+        if compact_json:
+            return json.dumps(
+                value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        return json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True)
+
     user_blocks: list[str] = (
         list(profile_blocks)
         if profile_blocks
         else [
             "<profile_summary>",
-            json.dumps(
-                profile_summary,
-                ensure_ascii=False,
-                indent=2,
-                sort_keys=True,
-            ),
+            render_json(profile_summary),
             "</profile_summary>",
         ]
     )
@@ -1542,42 +1666,38 @@ def build_batch_content_evaluation_prompt(
         user_blocks.extend(
             [
                 "<negative_examples>",
-                json.dumps(
-                    negative_examples,
-                    ensure_ascii=False,
-                    indent=2,
-                    sort_keys=True,
-                ),
+                render_json(negative_examples),
                 "</negative_examples>",
             ]
         )
     user_blocks.extend(
         [
             "<evaluation_context>",
-            json.dumps(
-                {"evaluated_at": evaluated_at or "(unspecified)"},
-                ensure_ascii=False,
-                indent=2,
-                sort_keys=True,
-            ),
+            render_json({"evaluated_at": evaluated_at or "(unspecified)"}),
             "</evaluation_context>",
         ]
     )
     user_blocks.extend(
         [
             "<content_batch>",
-            json.dumps(
-                [_normalize_content_style_fields(item) for item in content_items],
-                ensure_ascii=False,
-                indent=2,
-                sort_keys=True,
+            (
+                candidate_block
+                if candidate_block is not None
+                else render_json([_normalize_content_style_fields(item) for item in content_items])
             ),
             "</content_batch>",
         ]
     )
     user_prompt = "\n\n".join(user_blocks)
     return [
-        {"role": "system", "content": _BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT},
+        {
+            "role": "system",
+            "content": (
+                _SPARSE_BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT
+                if local_result_ids
+                else _BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT
+            ),
+        },
         {"role": "user", "content": user_prompt},
     ]
 
@@ -2126,7 +2246,7 @@ _AVOIDANCE_GENERATION_SYSTEM_PROMPT = """
 
 def build_avoidance_generation_prompt(
     *,
-    profile_summary: dict[str, object],
+    profile_summary: str | dict[str, object],
     existing_avoidances: list[str],
     existing_avoidance_details: list[dict[str, object]] | None = None,
     cooldown_domains: list[str],
