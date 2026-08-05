@@ -31,6 +31,7 @@ import {
 } from "./xhs/bootstrap.js";
 import { attachCoverData } from "./xhs/cover-harvest.js";
 import { registerTaskExecutor } from "./xhs/task-executor.js";
+import { NOTE_ANCHOR_SELECTOR } from "./xhs/selectors.ts";
 import { installNativeSaveExecutor } from "./native-save/runtime.ts";
 import { saveXiaohongshu, verifyXiaohongshu } from "./native-save/xiaohongshu.ts";
 import { buildEventFromXhsAction, isXhsAction } from "./xhs/action-event.ts";
@@ -133,10 +134,9 @@ document.addEventListener("visibilitychange", () => {
 const PASSIVE_SCROLL_DEBOUNCE_MS = 500;
 const PASSIVE_TOLERANCE_BELOW_PX = 400;
 const PASSIVE_MAX_URLS_PER_BATCH = 20;
-const PASSIVE_ANCHOR_SELECTOR = [
-  'a[href*="/explore/"]',
-  'a[href*="/discovery/item/"]',
-].join(",");
+// Keep passive browsing and background task collection on the same route set.
+// In particular, search cards now use /search_result/{note_id} on some rollouts.
+const PASSIVE_ANCHOR_SELECTOR = NOTE_ANCHOR_SELECTOR;
 
 const reportedUrls = new Set<string>();
 
@@ -163,7 +163,11 @@ function snapshotAnchors(): AnchorLike[] {
  */
 function selfNoteAnchor(): AnchorLike | null {
   const { pathname, search } = window.location;
-  if (!pathname.startsWith("/explore/") && !pathname.startsWith("/discovery/item/")) {
+  if (
+    !pathname.startsWith("/explore/") &&
+    !pathname.startsWith("/discovery/item/") &&
+    !pathname.startsWith("/search_result/")
+  ) {
     return null;
   }
   const params = new URLSearchParams(search);

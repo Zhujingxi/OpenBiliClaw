@@ -54,6 +54,45 @@ test("popup keeps its internal pending-confirmation count and list API", () => {
   assert.match(popup, /pendingConfirmations/);
 });
 
+test("all visible clients hydrate and reconnect the pending-confirmation badge", () => {
+  const popup = extensionFile("popup/popup.js");
+  const desktop = projectFile("src/openbiliclaw/web/desktop/assets/js/app.js");
+  const mobileApp = projectFile("src/openbiliclaw/web/js/app.js");
+  const mobileChat = projectFile("src/openbiliclaw/web/js/views/chat.js");
+  const mobileState = projectFile("src/openbiliclaw/web/js/state.js");
+  const mobileCss = projectFile("src/openbiliclaw/web/css/app.css");
+
+  assert.match(popup, /await refreshPendingConfirmations\(\)/);
+  assert.match(
+    popup,
+    /onConnect\(\)[\s\S]*?scheduleDialogueConfirmationRefresh\(\)/,
+    "the popup must heal an empty startup count when its stream reconnects",
+  );
+  assert.match(
+    popup,
+    /onOnline:\s*async \(\) =>[\s\S]*?scheduleDialogueConfirmationRefresh\(\)/,
+    "the popup HTTP recovery path must also heal the count",
+  );
+
+  assert.match(
+    desktop,
+    /const pendingConfirmationsPromise = refreshDesktopPendingConfirmations\(\);[\s\S]*const recommendationsPromise = readRecommendationSnapshot\(\)/,
+    "desktop must start the badge request before the recommendation-card request fan-out",
+  );
+  assert.match(desktop, /const secondaryPromises = \[\s*pendingConfirmationsPromise,/);
+  assert.match(desktop, /function handleRuntimeEvent\(event\)[\s\S]*scheduleDesktopPendingConfirmationRefresh\(\)/);
+  assert.match(desktop, /socket\.addEventListener\("open"[\s\S]*scheduleDesktopPendingConfirmationRefresh\(\)/);
+
+  assert.match(mobileState, /pendingConfirmationCount:\s*0/);
+  assert.match(mobileApp, /class="tab-count-badge"/);
+  assert.match(mobileApp, /refreshChatPendingConfirmations\(\{ renderNow: false \}\)/);
+  assert.match(mobileChat, /export async function refreshPendingConfirmations/);
+  assert.match(mobileChat, /patchState\(\{ pendingConfirmationCount:/);
+  assert.match(mobileChat, /export function onStreamEvent[\s\S]*pendingConfirmationRefreshTimer/);
+  assert.match(mobileCss, /\.tab-count-badge\s*\{/);
+  assert.match(mobileCss, /\.tab-count-badge\[hidden\]/);
+});
+
 test("desktop mirrors popup semantics with the shared chat session and a visible pending count", () => {
   const app = projectFile("src/openbiliclaw/web/desktop/assets/js/app.js");
   const html = projectFile("src/openbiliclaw/web/desktop/index.html");

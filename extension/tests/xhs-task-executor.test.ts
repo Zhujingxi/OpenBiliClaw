@@ -37,6 +37,7 @@ import {
   type XhsBootstrapNote,
 } from "../src/content/xhs/bootstrap.ts";
 import {
+  classifyXhsLoginRequiredText,
   classifyXhsRiskControlText,
 } from "../src/content/xhs/risk-control.ts";
 
@@ -127,6 +128,13 @@ test("classifyXhsRiskControlText does not treat generic retry copy as a challeng
   assert.equal(classifyXhsRiskControlText("网络开小差了，请稍后重试"), null);
   assert.equal(classifyXhsRiskControlText("账号安全验证使用说明"), null);
   assert.equal(classifyXhsRiskControlText("普通的小红书笔记内容"), null);
+});
+
+test("XHS login gate is distinct from risk control and ordinary login prose", () => {
+  assert.equal(classifyXhsLoginRequiredText("登录后查看搜索结果"), true);
+  assert.equal(classifyXhsLoginRequiredText("登录即可查看 Ta 的笔记"), true);
+  assert.equal(classifyXhsLoginRequiredText("登录探索更多内容"), false);
+  assert.equal(classifyXhsRiskControlText("登录后查看搜索结果"), null);
 });
 
 test("extractBootstrapNotesFromState maps saved liked and history groups", () => {

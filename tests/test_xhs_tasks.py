@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 import pytest
 from fastapi.testclient import TestClient
 
+from openbiliclaw.api.models import XiaohongshuSourceConfigOut
 from openbiliclaw.sources.xhs_tasks import (
     XhsCreatorStore,
     XhsTaskQueue,
@@ -42,6 +43,42 @@ def queue(db: Database) -> XhsTaskQueue:
 @pytest.fixture
 def creator_store(db: Database) -> XhsCreatorStore:
     return XhsCreatorStore(db)
+
+
+def test_runtime_state_schema_adds_rate_limit_strikes_to_existing_database(
+    tmp_path: Path,
+) -> None:
+    database = Database(tmp_path / "legacy-xhs.db")
+    database.initialize()
+    database.conn.executescript("""
+        DROP TABLE IF EXISTS xhs_task_runtime_state;
+        CREATE TABLE xhs_task_runtime_state (
+            singleton       INTEGER PRIMARY KEY CHECK (singleton = 1),
+            next_claim_at   TIMESTAMP,
+            cooldown_until  TIMESTAMP,
+            cooldown_reason TEXT NOT NULL DEFAULT '',
+            updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT INTO xhs_task_runtime_state(singleton) VALUES (1);
+    """)
+
+    queue = XhsTaskQueue(database)
+
+    columns = {
+        str(row["name"])
+        for row in database.conn.execute("PRAGMA table_info(xhs_task_runtime_state)").fetchall()
+    }
+    assert "rate_limit_strikes" in columns
+    assert queue.runtime_state()["rate_limit_strikes"] == 0
+    database.close()
+
+
+def test_xhs_api_config_model_uses_safety_defaults() -> None:
+    config = XiaohongshuSourceConfigOut()
+
+    assert config.daily_search_budget == 20
+    assert config.task_interval_seconds == 1200
+    assert config.min_interval_minutes == 20
 
 
 class TestXhsTaskQueue:
@@ -87,21 +124,46 @@ class TestXhsTaskQueue:
         queue.enqueue("search", {"keyword": "first"})
         queue.enqueue("search", {"keyword": "second"})
 
-        first = queue.next_pending(min_interval_seconds=60, now=now)
+        first = queue.next_pending(
+            min_interval_seconds=60,
+            jitter_ratio=0,
+            now=now,
+        )
         assert first is not None
         queue.complete(str(first["id"]), urls=[])
 
         assert (
             queue.next_pending(
                 min_interval_seconds=60,
+                jitter_ratio=0,
                 now=now + timedelta(seconds=59),
             )
             is None
         )
         second = queue.next_pending(
             min_interval_seconds=60,
+            jitter_ratio=0,
             now=now + timedelta(seconds=60),
         )
+        assert second is not None
+        assert json.loads(str(second["payload_json"]))["keyword"] == "second"
+
+    def test_search_claim_interval_is_stably_jittered_around_target(
+        self,
+        queue: XhsTaskQueue,
+    ) -> None:
+        now = datetime.now(UTC).replace(microsecond=0)
+        queue.enqueue("search", {"keyword": "first"})
+        queue.enqueue("search", {"keyword": "second"})
+
+        first = queue.next_pending(min_interval_seconds=1200, now=now)
+        assert first is not None
+        delay = int(queue.runtime_state(now=now)["next_claim_delay_seconds"])
+        assert 900 <= delay <= 1500
+        queue.complete(str(first["id"]), urls=[])
+
+        assert queue.next_pending(now=now + timedelta(seconds=delay - 1)) is None
+        second = queue.next_pending(now=now + timedelta(seconds=delay))
         assert second is not None
         assert json.loads(str(second["payload_json"]))["keyword"] == "second"
 
@@ -147,6 +209,7 @@ class TestXhsTaskQueue:
         )
         assert state["rate_limited"] is True
         assert state["cooldown_remaining_seconds"] == 3600
+        assert state["rate_limit_strikes"] == 1
 
         restored_queue = XhsTaskQueue(db)
         assert restored_queue.next_pending(now=now + timedelta(seconds=3599)) is None
@@ -160,6 +223,83 @@ class TestXhsTaskQueue:
         result = json.loads(str(stored["result_json"]))
         assert result["error"] == "xhs_rate_limited"
         assert result["rate_limited"] is True
+        assert result["rate_limit_strikes"] == 1
+
+    def test_rate_limit_uses_exponential_backoff_and_caps_it(
+        self,
+        queue: XhsTaskQueue,
+    ) -> None:
+        now = datetime.now(UTC).replace(microsecond=0)
+
+        first = queue.record_rate_limit(
+            cooldown_seconds=60,
+            max_cooldown_seconds=180,
+            now=now,
+        )
+        second = queue.record_rate_limit(
+            cooldown_seconds=60,
+            max_cooldown_seconds=180,
+            now=now + timedelta(seconds=61),
+        )
+        third = queue.record_rate_limit(
+            cooldown_seconds=60,
+            max_cooldown_seconds=180,
+            now=now + timedelta(seconds=182),
+        )
+
+        assert first["rate_limit_strikes"] == 1
+        assert first["cooldown_remaining_seconds"] == 60
+        assert second["rate_limit_strikes"] == 2
+        assert second["cooldown_remaining_seconds"] == 120
+        assert third["rate_limit_strikes"] == 3
+        assert third["cooldown_remaining_seconds"] == 180
+
+    def test_duplicate_rate_limit_report_reuses_active_strike(
+        self,
+        queue: XhsTaskQueue,
+    ) -> None:
+        now = datetime.now(UTC).replace(microsecond=0)
+        queue.record_rate_limit(cooldown_seconds=60, now=now)
+
+        duplicate = queue.record_rate_limit(
+            cooldown_seconds=60,
+            now=now + timedelta(seconds=30),
+        )
+
+        assert duplicate["rate_limit_strikes"] == 1
+        assert duplicate["cooldown_remaining_seconds"] == 60
+
+    def test_success_after_cooldown_resets_rate_limit_backoff(
+        self,
+        queue: XhsTaskQueue,
+    ) -> None:
+        past = datetime.now(UTC).replace(microsecond=0) - timedelta(minutes=2)
+        queue.record_rate_limit(cooldown_seconds=60, now=past)
+        queue.enqueue("search", {"keyword": "healthy"})
+        task = queue.next_pending()
+        assert task is not None
+
+        queue.complete(str(task["id"]), urls=[])
+
+        assert queue.runtime_state()["rate_limit_strikes"] == 0
+        next_episode = queue.record_rate_limit(cooldown_seconds=60)
+        assert next_episode["rate_limit_strikes"] == 1
+        assert next_episode["cooldown_remaining_seconds"] == 60
+
+    def test_late_success_does_not_cancel_an_active_cooldown(
+        self,
+        queue: XhsTaskQueue,
+    ) -> None:
+        queue.enqueue("search", {"keyword": "already-running"})
+        task = queue.next_pending()
+        assert task is not None
+        queue.record_rate_limit(cooldown_seconds=60)
+
+        queue.complete(str(task["id"]), urls=[])
+
+        state = queue.runtime_state()
+        assert state["rate_limited"] is True
+        assert state["rate_limit_strikes"] == 1
 
     def test_complete_marks_task_done(self, queue: XhsTaskQueue) -> None:
         queue.enqueue("search", {"keyword": "x"})
@@ -488,6 +628,76 @@ class TestXhsTaskApi:
         assert second.status_code == 200
         assert second.json()["keyword"] == "second"
 
+    def test_search_empty_result_records_explicit_error_and_safe_debug(
+        self,
+        api_client: TestClient,
+    ) -> None:
+        db = api_client.app.state.runtime_context.database
+        queue = XhsTaskQueue(db)
+        assert queue.enqueue("search", {"keyword": "selector-regression"})
+        claimed = api_client.get("/api/sources/xhs/next-task")
+        assert claimed.status_code == 200
+
+        debug = {
+            "xhs_search_empty": {
+                "reason": "no_note_anchor_after_wait",
+                "pathname": "/search_result",
+                "anchor_counts": {"note": 0, "search_result": 0},
+            }
+        }
+        response = api_client.post(
+            "/api/sources/xhs/task-result",
+            json={
+                "task_id": claimed.json()["id"],
+                "status": "empty",
+                "urls": [],
+                "notes": [],
+                "debug": debug,
+            },
+        )
+
+        assert response.status_code == 200
+        stored = queue.get(claimed.json()["id"])
+        assert stored is not None
+        assert stored["status"] == "failed"
+        result = json.loads(str(stored["result_json"]))
+        assert result["error"] == "xhs_empty_result"
+        assert result["debug"] == debug
+
+    def test_visible_login_gate_overrides_stale_cookie_login_state(
+        self,
+        api_client: TestClient,
+    ) -> None:
+        db = api_client.app.state.runtime_context.database
+        queue = XhsTaskQueue(db)
+        db.set_xhs_login_state(True)
+        assert queue.enqueue("search", {"keyword": "login-check"})
+        claimed = api_client.get("/api/sources/xhs/next-task")
+        assert claimed.status_code == 200
+
+        response = api_client.post(
+            "/api/sources/xhs/task-result",
+            json={
+                "task_id": claimed.json()["id"],
+                "status": "error",
+                "urls": [],
+                "notes": [],
+                "error": "xhs_login_required",
+                "debug": {
+                    "xhs_auth": {
+                        "reason": "visible_login_overlay",
+                        "pathname": "/search_result",
+                    }
+                },
+            },
+        )
+
+        assert response.status_code == 200
+        assert db.get_xhs_login_state()[0] is False
+        stored = queue.get(claimed.json()["id"])
+        assert stored is not None
+        assert stored["status"] == "failed"
+
     def test_rate_limited_result_trips_persistent_cooldown(
         self,
         api_client: TestClient,
@@ -543,6 +753,7 @@ class TestXhsTaskApi:
         xhs_status = status.json()["xiaohongshu"]
         assert xhs_status["state"] == "rate_limited"
         assert xhs_status["feed_paused"] is True
+        assert "连续第 1 次" in xhs_status["detail"]
         assert "后台任务已自动暂停" in xhs_status["detail"]
 
     def test_task_result_completes_task(self, api_client: TestClient) -> None:

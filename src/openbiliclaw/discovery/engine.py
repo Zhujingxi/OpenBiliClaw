@@ -10,17 +10,31 @@ import asyncio
 import contextvars
 import inspect
 import logging
+import math
 import re
 import time
 from abc import ABC, abstractmethod
-from collections import Counter
+from collections import Counter, OrderedDict
 from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
 
 from openbiliclaw.discovery.admission import effective_admission_threshold
-from openbiliclaw.discovery.strategies._utils import build_profile_summary
-from openbiliclaw.discovery.style_keys import VALID_STYLE_KEYS, normalize_style_key
+from openbiliclaw.discovery.eval_payload import (
+    CanonicalEvaluationBatch,
+    build_canonical_evaluation_batch,
+    render_sparse_evaluation_json,
+    resolve_local_evaluation_results,
+)
+from openbiliclaw.discovery.eval_reason import normalize_evaluation_reason
+from openbiliclaw.discovery.strategies._utils import (
+    _CONTENT_PROMPT_DOMAIN_CAP,
+    _CONTENT_PROMPT_INTEREST_CAP,
+    build_profile_summary,
+    compact_content_prompt_profile_summary,
+)
+from openbiliclaw.discovery.style_keys import normalize_style_key
+from openbiliclaw.llm.evaluation_wire import encode_evaluation_row_wire
 from openbiliclaw.llm.json_utils import (
     extract_llm_json_list,
     parse_llm_json_tolerant,
@@ -48,6 +62,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 _T = TypeVar("_T")
+_EvalCacheEntry = tuple[float, str, str, str] | tuple[float, str, str, str, str]
 _BILIBILI_CONTENT_ID_PATTERN = re.compile(r"^BV[0-9A-Za-z]+$")
 _CANONICAL_STORAGE_KEY_PLATFORMS = frozenset(
     {
@@ -64,6 +79,7 @@ _CANONICAL_STORAGE_KEY_PLATFORMS = frozenset(
 _EVALUATE_BATCH_HARD_CAP_DEFAULT: int = 90
 _DEFAULT_EVAL_BATCH_SIZE: int = 45
 _DEFAULT_EVAL_BATCH_CONCURRENCY: int = 2
+_EVAL_CACHE_MAX_ENTRIES: int = 4096
 _LLM_EVAL_OVERSAMPLE_FACTOR: int = 2
 
 
@@ -85,57 +101,35 @@ _RAW_CANDIDATE_MODE: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "openbiliclaw_discovery_raw_candidate_mode",
     default=False,
 )
-_EVAL_PROFILE_CORE_CAP = 20
-_EVAL_PROFILE_INTEREST_CAP = 64
-_EVAL_PROFILE_DOMAIN_CAP = 32
-_EVAL_PROFILE_SPECIFICS_PER_DOMAIN_CAP = 12
-_EVAL_PROFILE_RECENT_CAP = 12
-_EVAL_PROFILE_EVIDENCE_CAP = 8
-_EVAL_PROFILE_SPECULATION_CAP = 12
-_EVAL_BATCH_CACHE_VERSION = "batch-content-eval-v1"
+_EVAL_BATCH_CACHE_VERSION = "content-eval-v3"
+_EMBEDDING_PREFILTER_DEFAULT_MODE = "shadow"
+_EMBEDDING_PREFILTER_MODES = {"off", "shadow", "enforce"}
+_DEFAULT_EVALUATION_CANDIDATE_TRANSPORT = "sparse-json"
+_EVALUATION_CANDIDATE_TRANSPORTS = frozenset({"production", "row-wire-v1", "sparse-json"})
+_EMBEDDING_PREFILTER_MIN_SIMILARITY = 0.2
+_EMBEDDING_PREFILTER_REASON = "embedding 预过滤: 与所有兴趣相似度极低"
 _NEGATIVE_EXAMPLES_UNSET = object()
+_EVAL_RECALL_POOL_CAP = 256
+_EVAL_RECALL_MIN_SIMILARITY = 0.45
+compact_evaluation_profile_summary = compact_content_prompt_profile_summary
+
+
+@dataclass(frozen=True)
+class _RelatedInterestRecall:
+    related: list[str]
+    complete: bool
+
+
+@dataclass(frozen=True)
+class _BatchRelatedInterestRecall:
+    related_by_index: dict[int, list[str]]
+    complete_indices: frozenset[int]
 
 
 def discovery_raw_candidate_mode_enabled() -> bool:
     """Return whether the current coroutine should fetch without LLM evaluation."""
 
     return bool(_RAW_CANDIDATE_MODE.get())
-
-
-def compact_evaluation_profile_summary(profile_summary: dict[str, object]) -> dict[str, object]:
-    """Return a smaller profile summary for high-volume candidate evaluation.
-
-    Discovery evaluation pays the full profile prompt on every batch. Keep the
-    highest-signal interests plus the newest awareness/insight windows, while
-    preserving hard negatives such as ``disliked_topics`` unchanged.
-    """
-
-    compacted = dict(profile_summary)
-    for key in ("core_traits", "cognitive_style", "values", "motivational_drivers", "deep_needs"):
-        compacted[key] = _cap_profile_sequence(
-            profile_summary.get(key),
-            _EVAL_PROFILE_CORE_CAP,
-        )
-    compacted["interests"] = _cap_weighted_profile_dicts(
-        profile_summary.get("interests"),
-        _EVAL_PROFILE_INTEREST_CAP,
-    )
-    compacted["interest_domains"] = _compact_interest_domains(
-        profile_summary.get("interest_domains"),
-    )
-    compacted["recent_awareness"] = _cap_profile_sequence(
-        profile_summary.get("recent_awareness"),
-        _EVAL_PROFILE_RECENT_CAP,
-        newest=True,
-    )
-    compacted["active_insights"] = _compact_active_insights(
-        profile_summary.get("active_insights"),
-    )
-    compacted["speculative_interests"] = _cap_profile_sequence(
-        profile_summary.get("speculative_interests"),
-        _EVAL_PROFILE_SPECULATION_CAP,
-    )
-    return compacted
 
 
 def evaluation_profile_prompt_layers(
@@ -145,63 +139,62 @@ def evaluation_profile_prompt_layers(
     return profile_prompt_layers(profile_summary)
 
 
-def _cap_profile_sequence(value: object, cap: int, *, newest: bool = False) -> object:
-    if not isinstance(value, list):
-        return value if value is not None else []
-    if len(value) <= cap:
-        return list(value)
-    return list(value[-cap:] if newest else value[:cap])
+def _profile_interest_weight(interest: object) -> float:
+    return _coerce_recall_weight(getattr(interest, "weight", 0.0))
 
 
-def _profile_weight(value: object) -> float:
-    if not isinstance(value, dict):
-        return 0.0
-    try:
-        return float(value.get("weight", 0.0) or 0.0)
-    except (TypeError, ValueError):
-        return 0.0
+def _coerce_recall_weight(value: object) -> float:
+    if isinstance(value, bool):
+        return float(value)
+    if isinstance(value, int | float | str):
+        try:
+            return float(value or 0.0)
+        except ValueError:
+            return 0.0
+    return 0.0
 
 
-def _cap_weighted_profile_dicts(value: object, cap: int) -> list[object]:
-    if not isinstance(value, list):
+def _profile_interests_by_weight(profile: SoulProfile) -> list[object]:
+    preferences = getattr(profile, "preferences", None)
+    raw_interests = getattr(preferences, "interests", []) if preferences is not None else []
+    if not isinstance(raw_interests, list):
         return []
-    return sorted(list(value), key=_profile_weight, reverse=True)[:cap]
+    return sorted(raw_interests, key=_profile_interest_weight, reverse=True)
 
 
-def _compact_interest_domains(value: object) -> list[object]:
-    if not isinstance(value, list):
-        return []
-    domains = _cap_weighted_profile_dicts(value, _EVAL_PROFILE_DOMAIN_CAP)
-    compacted: list[object] = []
-    for domain in domains:
-        if not isinstance(domain, dict):
-            compacted.append(domain)
+def _evaluation_recall_interests(profile: SoulProfile) -> list[dict[str, object]]:
+    """Tail interests only: ranks beyond the compact block's top-48.
+
+    Interests inside the compact profile block are already visible to the
+    model; recalling them per item would duplicate tokens for nothing. On a
+    young profile (<= 48 interests) this list is empty and recall costs zero.
+    """
+    interests: list[dict[str, object]] = []
+    tail = _profile_interests_by_weight(profile)[_CONTENT_PROMPT_INTEREST_CAP:_EVAL_RECALL_POOL_CAP]
+    for interest in tail:
+        name = str(getattr(interest, "name", "") or "").strip()
+        if not name:
             continue
-        item = dict(domain)
-        specifics = item.get("specifics")
-        item["specifics"] = _cap_weighted_profile_dicts(
-            specifics,
-            _EVAL_PROFILE_SPECIFICS_PER_DOMAIN_CAP,
+        category = str(getattr(interest, "category", "") or "").strip()
+        interests.append(
+            {
+                "name": name,
+                "category": category,
+                "weight": _profile_interest_weight(interest),
+            }
         )
-        compacted.append(item)
-    return compacted
+    return interests
 
 
-def _compact_active_insights(value: object) -> list[object]:
-    if not isinstance(value, list):
-        return []
-    insights = list(value[-_EVAL_PROFILE_RECENT_CAP:])
-    compacted: list[object] = []
-    for insight in insights:
-        if not isinstance(insight, dict):
-            compacted.append(insight)
-            continue
-        item = dict(insight)
-        evidence = item.get("evidence")
-        if isinstance(evidence, list):
-            item["evidence"] = list(evidence[:_EVAL_PROFILE_EVIDENCE_CAP])
-        compacted.append(item)
-    return compacted
+def _evaluation_recall_pool_digest_payload(profile: SoulProfile) -> list[tuple[str, str, float]]:
+    return [
+        (
+            str(interest["name"]),
+            str(interest["category"]),
+            _coerce_recall_weight(interest["weight"]),
+        )
+        for interest in _evaluation_recall_interests(profile)
+    ]
 
 
 @dataclass
@@ -432,6 +425,69 @@ def _prompt_description_for_content(
     if desc_key and body_key.startswith(desc_key):
         return ""
     return description
+
+
+def _single_evaluation_content_summary(content: DiscoveredContent) -> dict[str, object]:
+    """Build the exact content object rendered by the single evaluator."""
+
+    return {
+        "content_id": content.content_id or content.bvid,
+        "content_url": content.content_url,
+        "source_platform": content.source_platform or "bilibili",
+        "content_type": content.content_type,
+        "body_text": content.body_text,
+        "title": content.title,
+        "up_name": content.up_name,
+        "author_name": content.author_name or content.up_name,
+        "description": _prompt_description_for_content(content),
+        "published_at": content.published_at,
+        "duration": content.duration,
+        "source_strategy": content.source_strategy,
+        **_prompt_visible_content_fields(content),
+    }
+
+
+def _batch_evaluation_platform(content: DiscoveredContent) -> str:
+    platform = normalize_source_platform(
+        content.source_platform,
+        default="bilibili" if content.bvid else "",
+    )
+    return platform or "bilibili"
+
+
+def _batch_evaluation_content_type(content: DiscoveredContent) -> str:
+    from openbiliclaw.discovery.candidate_pool import resolve_content_type
+
+    platform = _batch_evaluation_platform(content)
+    return resolve_content_type(content.content_type, platform)
+
+
+def _batch_evaluation_content_item(
+    content: DiscoveredContent,
+    *,
+    source_context: str,
+) -> dict[str, object]:
+    """Build the exact text content object rendered by the batch evaluator."""
+
+    platform = _batch_evaluation_platform(content)
+    return {
+        "bvid": content.bvid,
+        "content_id": content.content_id or content.bvid,
+        "content_url": content.content_url,
+        "source_platform": platform,
+        "source_strategy": content.source_strategy,
+        "source_context": source_context or content.source_strategy,
+        "content_type": _batch_evaluation_content_type(content),
+        "body_text": content.body_text,
+        "title": content.title,
+        "up_name": content.up_name,
+        "author_name": content.author_name or content.up_name,
+        "description": _prompt_description_for_content(content, limit=400),
+        "published_at": content.published_at,
+        "cover_url": content.cover_url,
+        "duration": content.duration,
+        **_prompt_visible_content_fields(content),
+    }
 
 
 def _batch_results_by_content_key(
@@ -785,6 +841,9 @@ class ContentDiscoveryEngine:
         multimodal_image_timeout_seconds: int = 6,
         multimodal_vision_supported: bool | None = None,
         eval_batch_concurrency: int = _DEFAULT_EVAL_BATCH_CONCURRENCY,
+        eval_prefilter_mode: str = _EMBEDDING_PREFILTER_DEFAULT_MODE,
+        compact_evaluation_json: bool = False,
+        evaluation_candidate_transport: str = _DEFAULT_EVALUATION_CANDIDATE_TRANSPORT,
     ) -> None:
         self._strategies: list[DiscoveryStrategy] = []
         self._llm_service = llm_service
@@ -802,9 +861,24 @@ class ContentDiscoveryEngine:
             min(20, int(multimodal_image_timeout_seconds)),
         )
         self.eval_batch_concurrency = max(1, min(16, int(eval_batch_concurrency)))
+        self.eval_prefilter_mode = self._normalize_eval_prefilter_mode(eval_prefilter_mode)
+        # Replay-only unless and until the real provider quality/token gate
+        # approves compact deterministic evaluator JSON.
+        self.compact_evaluation_json = bool(compact_evaluation_json)
+        normalized_candidate_transport = str(evaluation_candidate_transport).strip().lower()
+        if normalized_candidate_transport not in _EVALUATION_CANDIDATE_TRANSPORTS:
+            supported = ", ".join(sorted(_EVALUATION_CANDIDATE_TRANSPORTS))
+            raise ValueError(
+                "unsupported evaluation candidate transport "
+                f"{evaluation_candidate_transport!r}; expected one of: {supported}"
+            )
+        # Sparse JSON is the production batch-candidate contract. Explicit
+        # ``production`` retains the historical pretty-JSON/global-ID rollback
+        # path; ``row-wire-v1`` remains an internal replay-only seam.
+        self.evaluation_candidate_transport = normalized_candidate_transport
         self._multimodal_vision_supported_override = multimodal_vision_supported
         self.multimodal_unavailable_reason = ""
-        self._eval_cache: dict[str, tuple[float, str, str, str, str]] = {}
+        self._eval_cache: OrderedDict[str, _EvalCacheEntry] = OrderedDict()
         self._evaluation_profile_prompt_cache = PromptLayerRenderCache()
         # v0.3.x negative-anchors cache: (timestamp, latest_event_id,
         # exemplars). Refreshes when either the latest event id changes
@@ -812,6 +886,139 @@ class ContentDiscoveryEngine:
         self._negative_exemplars_cache: tuple[float, int | None, list[dict[str, object]]] | None = (
             None
         )
+
+    def _eval_cache_store(self) -> OrderedDict[str, _EvalCacheEntry]:
+        # Tests (and older call sites) reset the cache by assigning a plain
+        # dict; convert in place so LRU bookkeeping never AttributeErrors.
+        cache = self._eval_cache
+        if not isinstance(cache, OrderedDict):
+            cache = OrderedDict(cache)
+            self._eval_cache = cache
+        return cache
+
+    def _get_eval_cache_entry(self, cache_key: str) -> _EvalCacheEntry | None:
+        cache = self._eval_cache_store()
+        cached = cache.get(cache_key)
+        if cached is None:
+            return None
+        cache.move_to_end(cache_key)
+        return cached
+
+    def _set_eval_cache_entry(self, cache_key: str, entry: _EvalCacheEntry) -> None:
+        cache = self._eval_cache_store()
+        cache[cache_key] = entry
+        cache.move_to_end(cache_key)
+        while len(cache) > _EVAL_CACHE_MAX_ENTRIES:
+            cache.popitem(last=False)
+
+    @staticmethod
+    def _normalize_eval_prefilter_mode(mode: str) -> str:
+        normalized = str(mode or "").strip().lower()
+        if normalized in _EMBEDDING_PREFILTER_MODES:
+            return normalized
+        return _EMBEDDING_PREFILTER_DEFAULT_MODE
+
+    @staticmethod
+    def _embedding_prefilter_content_text(content: DiscoveredContent) -> str:
+        return f"{content.title} {content.description or ''}".strip()
+
+    def _embedding_prefilter_interest_labels(self, profile: SoulProfile) -> list[str]:
+        labels: list[str] = []
+        seen: set[str] = set()
+
+        def append_label(value: object) -> None:
+            label = str(value or "").strip()
+            if not label or label in seen:
+                return
+            labels.append(label)
+            seen.add(label)
+
+        ranked_interests = sorted(
+            profile.preferences.interests,
+            key=lambda interest: float(interest.weight or 0.0),
+            reverse=True,
+        )
+        # Enforce must see every interest that the downstream long-tail recall
+        # can surface. Restricting this to the compact prompt's visible block
+        # would reject candidates matching ranks 49..256 before recall ran.
+        for interest in ranked_interests[:_EVAL_RECALL_POOL_CAP]:
+            append_label(interest.name)
+
+        compact_profile = compact_evaluation_profile_summary(
+            self._evaluation_profile_summary(profile)
+        )
+        raw_domains = compact_profile.get("interest_domains")
+        if isinstance(raw_domains, list):
+            for domain in raw_domains[:_CONTENT_PROMPT_DOMAIN_CAP]:
+                if isinstance(domain, dict):
+                    append_label(domain.get("domain"))
+                else:
+                    append_label(domain)
+
+        return labels
+
+    async def _embedding_prefilter(
+        self,
+        contents: Sequence[DiscoveredContent],
+        profile: SoulProfile,
+    ) -> dict[int, float]:
+        """Return candidate indexes that are too dissimilar for LLM evaluation."""
+
+        # getattr: e2e tests build engines via __new__ without __init__.
+        embedding_service = getattr(self, "_embedding_service", None)
+        if embedding_service is None or not contents or not profile.preferences.interests:
+            return {}
+        if not any(
+            str(content.source_strategy or "").strip().lower() != "explore" for content in contents
+        ):
+            return {}
+
+        labels = self._embedding_prefilter_interest_labels(profile)
+        if not labels:
+            return {}
+
+        from openbiliclaw.llm.embedding import cosine_similarity
+
+        interest_vectors: list[list[float]] = []
+        for label in labels:
+            try:
+                vector = await embedding_service.embed(label)
+            except Exception:
+                logger.debug(
+                    "embedding prefilter: interest embed failed for %r", label, exc_info=True
+                )
+                continue
+            if vector:
+                interest_vectors.append(vector)
+        if not interest_vectors:
+            return {}
+
+        filtered_scores: dict[int, float] = {}
+        for index, content in enumerate(contents):
+            if str(content.source_strategy or "").strip().lower() == "explore":
+                continue
+            content_text = self._embedding_prefilter_content_text(content)
+            if not content_text:
+                continue
+            try:
+                content_vec = await embedding_service.embed(content_text)
+            except Exception:
+                logger.debug(
+                    "embedding prefilter: content embed failed for %s",
+                    content.content_id or content.bvid or content.title,
+                    exc_info=True,
+                )
+                continue
+            if not content_vec:
+                continue
+            max_sim = max(
+                (cosine_similarity(content_vec, interest_vec) for interest_vec in interest_vectors),
+                default=0.0,
+            )
+            max_sim = max(0.0, min(1.0, max_sim))
+            if max_sim < _EMBEDDING_PREFILTER_MIN_SIMILARITY:
+                filtered_scores[index] = round(max_sim * 0.5, 4)
+        return filtered_scores
 
     def _supports_multimodal_evaluation(self) -> bool:
         override = getattr(self, "_multimodal_vision_supported_override", None)
@@ -1241,71 +1448,88 @@ class ContentDiscoveryEngine:
         if self._llm_service is None:
             return 0.0
 
-        # Check eval cache (same content identity in same profile → same score)
-        cache_key = f"{self._content_identity(content)}:{id(profile)}"
-        cached = self._eval_cache.get(cache_key)
+        from openbiliclaw.llm.prompts import content_evaluation_clock
+
+        evaluated_at, evaluation_bucket = content_evaluation_clock()
+        # Cache the complete evaluator input, not merely object identity. Profile
+        # reloads with equivalent values should hit; content/context/model changes
+        # must miss without issuing an embedding or LLM request. Publication
+        # metadata and the hourly evaluation clock are prompt-visible too.
+        profile_digest = self._evaluation_profile_digest(profile)
+        cache_key = self._single_eval_cache_key(
+            content,
+            profile_digest=profile_digest,
+            source_context=source_context,
+            evaluation_bucket=evaluation_bucket,
+        )
+        cached = self._get_eval_cache_entry(cache_key)
         if cached is not None:
-            score, reason, topic_group, style_key, franchise_key = cached
-            style_key = normalize_style_key(style_key)
-            content.relevance_score = score
-            content.relevance_reason = reason
-            if topic_group:
+            score = cached[0]
+            reason = cached[1]
+            normalized_reason = normalize_evaluation_reason(score, reason)
+            if normalized_reason is not None:
+                topic_group = cached[2]
+                style_key = normalize_style_key(cached[3])
+                franchise_key = cached[4] if len(cached) == 5 else ""
+                content.relevance_score = score
+                content.relevance_reason = normalized_reason
                 content.topic_group = topic_group
-            if style_key:
                 content.style_key = style_key
-            if franchise_key:
                 content.franchise_key = franchise_key
-            return score
+                return score
 
-        # Embedding pre-filter: skip LLM call for content with very low
-        # similarity to any user interest (saves API cost)
-        if self._embedding_service is not None and profile.preferences.interests:
-            from openbiliclaw.llm.embedding import cosine_similarity
-
-            content_text = f"{content.title} {content.description or ''}"
-            content_vec = await self._embedding_service.embed(content_text)
-            if content_vec:
-                max_sim = 0.0
-                for interest_item in profile.preferences.interests[:10]:
-                    interest_vec = await self._embedding_service.embed(interest_item.name)
-                    if interest_vec:
-                        sim = cosine_similarity(content_vec, interest_vec)
-                        if sim > max_sim:
-                            max_sim = sim
-                # Very low similarity to all interests AND not from explore strategy
-                # (explore is intentionally cross-domain, so don't pre-filter it)
-                if max_sim < 0.3 and content.source_strategy != "explore":
-                    content.relevance_score = round(max_sim * 0.5, 4)
-                    content.relevance_reason = "embedding 预过滤: 与所有兴趣相似度极低"
-                    self._eval_cache[cache_key] = (
-                        content.relevance_score,
-                        content.relevance_reason,
-                        "",
-                        "",
-                        "",
+        prefilter_mode = self._normalize_eval_prefilter_mode(
+            getattr(self, "eval_prefilter_mode", _EMBEDDING_PREFILTER_DEFAULT_MODE)
+        )
+        if prefilter_mode != "off":
+            prefiltered = await self._embedding_prefilter([content], profile)
+            if 0 in prefiltered:
+                prefilter_score = prefiltered[0]
+                max_sim = prefilter_score * 2.0
+                if prefilter_mode == "shadow":
+                    logger.info(
+                        "prefilter-shadow title=%r max_sim=%.4f strategy=%s",
+                        content.title,
+                        max_sim,
+                        content.source_strategy,
+                    )
+                elif prefilter_mode == "enforce":
+                    content.relevance_score = prefilter_score
+                    content.relevance_reason = (
+                        normalize_evaluation_reason(
+                            prefilter_score,
+                            _EMBEDDING_PREFILTER_REASON,
+                        )
+                        or ""
+                    )
+                    content.topic_group = ""
+                    content.style_key = ""
+                    content.franchise_key = ""
+                    self._set_eval_cache_entry(
+                        cache_key,
+                        (
+                            content.relevance_score,
+                            content.relevance_reason,
+                            "",
+                            "",
+                            "",
+                        ),
                     )
                     return content.relevance_score
 
         from openbiliclaw.llm.prompts import build_content_evaluation_prompt
 
+        content_summary = _single_evaluation_content_summary(content)
+        recall = await self._related_interests_for_content_result(content, profile)
+        if recall.related:
+            content_summary["related_interests"] = recall.related
+
         messages = build_content_evaluation_prompt(
-            profile_summary=build_profile_summary(profile),
-            content_summary={
-                "content_id": content.content_id or content.bvid,
-                "content_url": content.content_url,
-                "source_platform": content.source_platform or "bilibili",
-                "content_type": content.content_type,
-                "body_text": content.body_text,
-                "title": content.title,
-                "up_name": content.up_name,
-                "author_name": content.author_name or content.up_name,
-                "description": _prompt_description_for_content(content),
-                "duration": content.duration,
-                "source_strategy": content.source_strategy,
-                **_prompt_visible_content_fields(content),
-            },
+            profile_summary=self._evaluation_profile_summary(profile),
+            content_summary=content_summary,
             source_context=source_context or content.source_strategy,
             source_platform=content.source_platform or "bilibili",
+            evaluated_at=evaluated_at,
         )
         try:
             complete_structured = self._llm_service.complete_structured_task
@@ -1339,7 +1563,10 @@ class ContentDiscoveryEngine:
                 # raising, so a non-string reason would otherwise be repr'd into
                 # relevance_reason and surface as delight copy.
                 raise ValueError("Non-string field in content evaluation response")
-            reason = checked_reason
+            normalized_reason = normalize_evaluation_reason(score, checked_reason)
+            if normalized_reason is None:
+                raise ValueError("Non-string reason in content evaluation response")
+            reason = normalized_reason
             topic_group = checked_topic_group
             franchise_key = checked_franchise
             style_key = normalize_style_key(payload.get("style_key", ""))
@@ -1349,19 +1576,20 @@ class ContentDiscoveryEngine:
 
         content.relevance_score = score
         content.relevance_reason = reason
-        if topic_group:
-            content.topic_group = topic_group
-        if style_key in VALID_STYLE_KEYS:
-            content.style_key = style_key
-        if franchise_key:
-            content.franchise_key = franchise_key
-        self._eval_cache[cache_key] = (
-            score,
-            reason,
-            topic_group,
-            style_key,
-            franchise_key,
-        )
+        content.topic_group = topic_group
+        content.style_key = style_key
+        content.franchise_key = franchise_key
+        if recall.complete:
+            self._set_eval_cache_entry(
+                cache_key,
+                (
+                    score,
+                    reason,
+                    topic_group,
+                    style_key,
+                    franchise_key,
+                ),
+            )
         return score
 
     # Safety cap applied at the evaluator level regardless of caller.
@@ -1410,6 +1638,10 @@ class ContentDiscoveryEngine:
         if self._llm_service is None or not contents:
             return [0.0] * len(contents)
 
+        from openbiliclaw.llm.prompts import content_evaluation_clock
+
+        evaluated_at, evaluation_bucket = content_evaluation_clock()
+
         original_len = len(contents)
         if original_len > self._EVALUATE_BATCH_HARD_CAP:
             logger.warning(
@@ -1445,6 +1677,32 @@ class ContentDiscoveryEngine:
 
         eval_indices = [index for index, _content in eval_pairs]
         eval_contents = [content for _index, content in eval_pairs]
+        normal_cache_enabled = self._batch_normal_cache_eligible(
+            eval_contents,
+            source_context=source_context,
+        )
+
+        def finalize_scores(*, effective_batch_size: int, apply_cached_caps: bool) -> list[float]:
+            if apply_cached_caps:
+                group_size = max(1, int(effective_batch_size))
+                for start in range(0, len(eval_contents), group_size):
+                    group_contents = eval_contents[start : start + group_size]
+                    group_scores: list[float | None] = [
+                        scores[eval_indices[index]]
+                        for index in range(start, start + len(group_contents))
+                    ]
+                    self._apply_intra_batch_caps(group_contents, group_scores)
+                    for offset, group_score in enumerate(group_scores):
+                        scores[eval_indices[start + offset]] = float(group_score or 0.0)
+                logger.info(
+                    "eval_batch final caller recap: source=%s size=%d kept=%d",
+                    source_context or "mixed",
+                    len(eval_contents),
+                    sum(scores[index] > 0 for index in eval_indices),
+                )
+            if len(scores) < original_len:
+                return scores + [0.0] * (original_len - len(scores))
+            return scores
 
         # Split into cached vs uncached. Batch eval consumes recent negative
         # exemplars, so the in-memory score cache is versioned by the actual
@@ -1457,13 +1715,16 @@ class ContentDiscoveryEngine:
         profile_digest = self._evaluation_profile_digest(profile)
         negative_digest = self._negative_examples_digest(negative_examples)
         uncached_indices: list[int] = []
+        cache_hit_count = 0
         for i, content in enumerate(eval_contents):
             cache_key = self._batch_eval_cache_key(
                 content,
                 profile_digest=profile_digest,
                 negative_digest=negative_digest,
+                evaluation_bucket=evaluation_bucket,
+                source_context=source_context,
             )
-            cached = self._eval_cache.get(cache_key)
+            cached = self._get_eval_cache_entry(cache_key) if normal_cache_enabled else None
             if cached is not None:
                 # Cache tuple grew in v0.3.18 to carry franchise_key.
                 # Tolerate the legacy 4-tuple shape so an in-flight
@@ -1474,23 +1735,125 @@ class ContentDiscoveryEngine:
                 else:
                     score, reason, topic_group, style_key = cached
                     franchise_key = ""
+                normalized_reason = normalize_evaluation_reason(score, reason)
+                if normalized_reason is None:
+                    uncached_indices.append(i)
+                    continue
                 style_key = normalize_style_key(style_key)
                 content.relevance_score = score
-                content.relevance_reason = reason
-                if topic_group:
-                    content.topic_group = topic_group
-                if style_key:
-                    content.style_key = style_key
-                if franchise_key:
-                    content.franchise_key = franchise_key
+                content.relevance_reason = normalized_reason
+                content.topic_group = topic_group
+                content.style_key = style_key
+                content.franchise_key = franchise_key
                 scores[eval_indices[i]] = score
+                cache_hit_count += 1
             else:
                 uncached_indices.append(i)
 
         if not uncached_indices:
-            if len(scores) < original_len:
-                scores = scores + [0.0] * (original_len - len(scores))
-            return scores
+            effective_batch_size = self._effective_eval_batch_size(eval_contents, batch_size)
+            return finalize_scores(
+                effective_batch_size=effective_batch_size,
+                apply_cached_caps=cache_hit_count > 0,
+            )
+
+        prefilter_mode = self._normalize_eval_prefilter_mode(
+            getattr(self, "eval_prefilter_mode", _EMBEDDING_PREFILTER_DEFAULT_MODE)
+        )
+        filtered_local_indices: set[int] = set()
+        if prefilter_mode != "off":
+            prefilter_contents = [eval_contents[i] for i in uncached_indices]
+            prefiltered_scores = await self._embedding_prefilter(prefilter_contents, profile)
+            would_filter_count = len(prefiltered_scores)
+            if prefilter_mode == "shadow":
+                for local_index, prefilter_score in prefiltered_scores.items():
+                    content = prefilter_contents[local_index]
+                    logger.info(
+                        "prefilter-shadow title=%r max_sim=%.4f strategy=%s",
+                        content.title,
+                        prefilter_score * 2.0,
+                        content.source_strategy,
+                    )
+                logger.info(
+                    "eval_batch embedding prefilter: mode=shadow source=%s in=%d "
+                    "would_filter=%d to_llm=%d",
+                    source_context or "mixed",
+                    len(prefilter_contents),
+                    would_filter_count,
+                    len(uncached_indices),
+                )
+            elif prefilter_mode == "enforce":
+                if (
+                    len(prefilter_contents) > 1
+                    and would_filter_count / len(prefilter_contents) > 0.5
+                ):
+                    logger.warning(
+                        "eval_batch embedding prefilter kill-rate guard: source=%s in=%d "
+                        "would_filter=%d to_llm=%d",
+                        source_context or "mixed",
+                        len(prefilter_contents),
+                        would_filter_count,
+                        len(uncached_indices),
+                    )
+                    prefiltered_scores = {}
+                    would_filter_count = 0
+                else:
+                    filtered_local_indices = set(prefiltered_scores)
+                    for local_index, prefilter_score in prefiltered_scores.items():
+                        content = prefilter_contents[local_index]
+                        eval_content_index = uncached_indices[local_index]
+                        content.relevance_score = prefilter_score
+                        content.relevance_reason = (
+                            normalize_evaluation_reason(
+                                prefilter_score,
+                                _EMBEDDING_PREFILTER_REASON,
+                            )
+                            or ""
+                        )
+                        content.topic_group = ""
+                        content.style_key = ""
+                        content.franchise_key = ""
+                        scores[eval_indices[eval_content_index]] = prefilter_score
+                        if normal_cache_enabled:
+                            cache_key = self._batch_eval_cache_key(
+                                content,
+                                profile_digest=profile_digest,
+                                negative_digest=negative_digest,
+                                evaluation_bucket=evaluation_bucket,
+                                source_context=source_context,
+                            )
+                            self._set_eval_cache_entry(
+                                cache_key,
+                                (
+                                    prefilter_score,
+                                    content.relevance_reason,
+                                    "",
+                                    "",
+                                    "",
+                                ),
+                            )
+                    uncached_indices = [
+                        eval_content_index
+                        for local_index, eval_content_index in enumerate(uncached_indices)
+                        if local_index not in filtered_local_indices
+                    ]
+                logger.info(
+                    "eval_batch embedding prefilter: mode=enforce source=%s in=%d "
+                    "prefiltered=%d to_llm=%d",
+                    source_context or "mixed",
+                    len(prefilter_contents),
+                    would_filter_count,
+                    len(uncached_indices),
+                )
+                if not uncached_indices:
+                    effective_batch_size = self._effective_eval_batch_size(
+                        eval_contents,
+                        batch_size,
+                    )
+                    return finalize_scores(
+                        effective_batch_size=effective_batch_size,
+                        apply_cached_caps=cache_hit_count > 0,
+                    )
 
         batch_size = self._effective_eval_batch_size(
             [eval_contents[i] for i in uncached_indices],
@@ -1498,6 +1861,14 @@ class ContentDiscoveryEngine:
         )
         if self.multimodal_unavailable_reason:
             logger.info("eval_batch multimodal fallback: %s", self.multimodal_unavailable_reason)
+
+        # Cache hits and enforce-prefilter removals compress the provider
+        # prompt relative to the caller's stable grouping. Defer sibling-
+        # dependent caps until every raw score is back in caller order so a
+        # cold run and a full-cache replay cannot disagree at a boundary.
+        caller_recap_needed = cache_hit_count > 0 or (
+            normal_cache_enabled and bool(filtered_local_indices)
+        )
 
         total_batches = (len(uncached_indices) + batch_size - 1) // batch_size
         eval_batch_concurrency = self._effective_eval_batch_concurrency()
@@ -1526,9 +1897,27 @@ class ContentDiscoveryEngine:
                 profile,
                 source_context=source_context,
                 negative_examples=negative_examples,
+                evaluated_at=evaluated_at,
+                evaluation_bucket=evaluation_bucket,
+                normal_cache_enabled=normal_cache_enabled,
+                apply_batch_caps=False,
             )
+            if not caller_recap_needed:
+                self._apply_intra_batch_caps(batch_contents, batch_scores)
             elapsed = time.monotonic() - t0
             kept = sum(1 for s in batch_scores if s > 0)
+            if caller_recap_needed:
+                logger.info(
+                    "eval_batch %d/%d provider done: source=%s size=%d elapsed=%.1fs "
+                    "raw_positive=%d final_recap=pending",
+                    batch_idx,
+                    total_batches,
+                    source_context or "mixed",
+                    len(batch_indices),
+                    elapsed,
+                    kept,
+                )
+                return batch_indices, batch_scores
             # v0.3.31+: diversity snapshot of the kept items so we can
             # see whether discovery is feeding the pool with variety or
             # 30 candidates that all collapse to the same topic_group.
@@ -1597,12 +1986,15 @@ class ContentDiscoveryEngine:
             for idx, batch_score in zip(batch_indices, batch_scores, strict=True):
                 scores[eval_indices[idx]] = batch_score
 
-        # Pad for any items dropped by the hard cap above so callers
-        # that ``zip(candidates, scores, strict=True)`` still line up.
-        if len(scores) < original_len:
-            scores = scores + [0.0] * (original_len - len(scores))
-
-        return scores
+        # Cache entries hold raw model scores. Reapply batch-dependent caps
+        # against the stable caller grouping whenever a hit or a cached
+        # enforce-prefilter result participated; ordinary cold batches were
+        # capped in their actual provider chunks above.
+        final_scores = finalize_scores(
+            effective_batch_size=batch_size,
+            apply_cached_caps=caller_recap_needed,
+        )
+        return final_scores
 
     def _recent_viewed_content_keys(self) -> set[str]:
         database = getattr(self, "_database", None)
@@ -1701,13 +2093,230 @@ class ContentDiscoveryEngine:
         return exemplars
 
     def _evaluation_profile_digest(self, profile: SoulProfile) -> str:
-        """Digest the full structured profile shape visible to batch evaluation."""
+        """Digest the structured profile slice and recall pool visible to evaluation."""
 
-        return stable_json_digest(self._evaluation_profile_summary(profile))
+        compacted = self._evaluation_profile_summary(profile)
+        return stable_json_digest(
+            {
+                "summary": compacted,
+                "recall_pool": _evaluation_recall_pool_digest_payload(profile),
+            }
+        )
 
     @staticmethod
     def _evaluation_profile_summary(profile: SoulProfile) -> dict[str, object]:
-        return build_profile_summary(profile)
+        return compact_evaluation_profile_summary(build_profile_summary(profile))
+
+    async def _related_interests_for_content(
+        self,
+        content: DiscoveredContent,
+        profile: SoulProfile,
+        *,
+        top_k: int = 3,
+    ) -> list[str]:
+        """Return content-relevant tail-interest names for one candidate."""
+
+        result = await self._related_interests_for_content_result(
+            content,
+            profile,
+            top_k=top_k,
+        )
+        return result.related
+
+    async def _related_interests_for_content_result(
+        self,
+        content: DiscoveredContent,
+        profile: SoulProfile,
+        *,
+        top_k: int = 3,
+    ) -> _RelatedInterestRecall:
+        """Return recalled labels plus whether recall completed without degradation."""
+
+        embedding_service = getattr(self, "_embedding_service", None)
+        if embedding_service is None:
+            return _RelatedInterestRecall([], True)
+        interests = _evaluation_recall_interests(profile)
+        if not interests:
+            return _RelatedInterestRecall([], True)
+        try:
+            interest_vectors = await self._embed_related_interest_vectors(
+                embedding_service,
+                interests,
+            )
+            interest_dimension = self._complete_embedding_vector_dimension(
+                interest_vectors,
+                expected_count=len(interests),
+            )
+            if interest_dimension == 0:
+                return _RelatedInterestRecall([], False)
+            content_vec = await embedding_service.embed(
+                self._embedding_prefilter_content_text(content)
+            )
+        except Exception:
+            logger.debug("related_interests: embedding failed", exc_info=True)
+            return _RelatedInterestRecall([], False)
+        if self._embedding_vector_dimension(content_vec) != interest_dimension:
+            return _RelatedInterestRecall([], False)
+        try:
+            related = self._score_related_interests(
+                content_vec,
+                interests,
+                interest_vectors,
+                top_k=top_k,
+            )
+        except Exception:
+            logger.debug("related_interests: scoring failed", exc_info=True)
+            return _RelatedInterestRecall([], False)
+        return _RelatedInterestRecall(related, True)
+
+    async def _related_interests_for_batch(
+        self,
+        contents: Sequence[DiscoveredContent],
+        profile: SoulProfile,
+        *,
+        top_k: int = 3,
+    ) -> dict[int, list[str]]:
+        result = await self._related_interests_for_batch_result(
+            contents,
+            profile,
+            top_k=top_k,
+        )
+        return result.related_by_index
+
+    async def _related_interests_for_batch_result(
+        self,
+        contents: Sequence[DiscoveredContent],
+        profile: SoulProfile,
+        *,
+        top_k: int = 3,
+    ) -> _BatchRelatedInterestRecall:
+        """Return per-item recalls and indexes safe to store in the normal cache."""
+
+        all_indices = frozenset(range(len(contents)))
+        embedding_service = getattr(self, "_embedding_service", None)
+        if embedding_service is None or not contents:
+            return _BatchRelatedInterestRecall({}, all_indices)
+        interests = _evaluation_recall_interests(profile)
+        if not interests:
+            return _BatchRelatedInterestRecall({}, all_indices)
+        try:
+            interest_vectors = await self._embed_related_interest_vectors(
+                embedding_service,
+                interests,
+            )
+        except Exception:
+            logger.debug("related_interests: interest embedding batch failed", exc_info=True)
+            return _BatchRelatedInterestRecall({}, frozenset())
+        interest_dimension = self._complete_embedding_vector_dimension(
+            interest_vectors,
+            expected_count=len(interests),
+        )
+        if interest_dimension == 0:
+            return _BatchRelatedInterestRecall({}, frozenset())
+
+        related_by_index: dict[int, list[str]] = {}
+        complete_indices: set[int] = set()
+        for index, content in enumerate(contents):
+            try:
+                content_vec = await embedding_service.embed(
+                    self._embedding_prefilter_content_text(content)
+                )
+            except Exception:
+                logger.debug(
+                    "related_interests: content embedding failed for %s",
+                    content.content_id or content.bvid or content.title,
+                    exc_info=True,
+                )
+                continue
+            if self._embedding_vector_dimension(content_vec) != interest_dimension:
+                continue
+            try:
+                related = self._score_related_interests(
+                    content_vec,
+                    interests,
+                    interest_vectors,
+                    top_k=top_k,
+                )
+            except Exception:
+                logger.debug(
+                    "related_interests: scoring failed for %s",
+                    content.content_id or content.bvid or content.title,
+                    exc_info=True,
+                )
+                continue
+            complete_indices.add(index)
+            if related:
+                related_by_index[index] = related
+        return _BatchRelatedInterestRecall(
+            related_by_index,
+            frozenset(complete_indices),
+        )
+
+    @staticmethod
+    def _embedding_vector_dimension(vector: object) -> int:
+        if not isinstance(vector, list) or not vector:
+            return 0
+        if any(isinstance(value, bool) or not isinstance(value, int | float) for value in vector):
+            return 0
+        values = [float(value) for value in vector]
+        if not all(math.isfinite(value) for value in values):
+            return 0
+        return len(values)
+
+    @classmethod
+    def _complete_embedding_vector_dimension(
+        cls,
+        vectors: Sequence[object],
+        *,
+        expected_count: int,
+    ) -> int:
+        if len(vectors) != expected_count or expected_count <= 0:
+            return 0
+        dimensions = {cls._embedding_vector_dimension(vector) for vector in vectors}
+        if len(dimensions) != 1:
+            return 0
+        dimension = next(iter(dimensions))
+        return dimension if dimension > 0 else 0
+
+    @staticmethod
+    async def _embed_related_interest_vectors(
+        embedding_service: SupportsEmbeddingService,
+        interests: list[dict[str, object]],
+    ) -> list[list[float]]:
+        vectors: list[list[float]] = []
+        for interest in interests:
+            vector = await embedding_service.embed(str(interest["name"]))
+            vectors.append(vector)
+        return vectors
+
+    @staticmethod
+    def _score_related_interests(
+        content_vec: list[float],
+        interests: list[dict[str, object]],
+        interest_vectors: list[list[float]],
+        *,
+        top_k: int,
+    ) -> list[str]:
+        from openbiliclaw.llm.embedding import cosine_similarity
+
+        scored: list[tuple[dict[str, object], float]] = []
+        for interest, interest_vec in zip(interests, interest_vectors, strict=False):
+            if not interest_vec:
+                continue
+            weight = _coerce_recall_weight(interest.get("weight", 0.0))
+            sim = cosine_similarity(content_vec, interest_vec)
+            if sim < _EVAL_RECALL_MIN_SIMILARITY:
+                # Recall is a targeted hint, not a mandatory tag: an item
+                # unrelated to every tail interest gets no entries at all.
+                continue
+            scored.append((interest, sim * 0.7 + weight * 0.3))
+
+        scored.sort(key=lambda item: -item[1])
+        limit = max(0, int(top_k))
+        # Plain name strings: ~30 chars per entry in the indent=2 prompt JSON
+        # versus ~300 for {name, category} objects — the field must stay far
+        # cheaper than the profile tokens it recalls.
+        return [str(interest["name"]) for interest, _score in scored[:limit]]
 
     def _evaluation_profile_prompt_cache_obj(self) -> PromptLayerRenderCache:
         """Return eval profile prompt cache, creating it for lightweight tests."""
@@ -1727,17 +2336,173 @@ class ContentDiscoveryEngine:
     def _negative_examples_digest(examples: list[dict[str, object]] | None) -> str:
         return stable_json_digest(examples or [])
 
+    def _evaluation_embedding_namespace(self) -> str:
+        """Return a stable recall namespace without performing an embed call."""
+
+        embedding_service = getattr(self, "_embedding_service", None)
+        if embedding_service is None:
+            return "embedding-disabled"
+
+        service_type = type(embedding_service)
+        identity: dict[str, object] = {
+            "service_type": f"{service_type.__module__}.{service_type.__qualname__}",
+            "recall_pool_cap": _EVAL_RECALL_POOL_CAP,
+            "recall_min_similarity": _EVAL_RECALL_MIN_SIMILARITY,
+        }
+        for attribute in (
+            "embedding_fingerprint",
+            "cache_model_namespace",
+            "embedding_model",
+            "embedding_provider",
+            "similarity_threshold",
+        ):
+            try:
+                value = getattr(embedding_service, attribute, None)
+            except Exception:
+                value = None
+            if isinstance(value, str | bool | int | float):
+                identity[attribute] = value
+        return stable_json_digest(identity)
+
+    @staticmethod
+    def _batch_prompt_source_platform(contents: Sequence[DiscoveredContent]) -> str:
+        platforms = {_batch_evaluation_platform(content) for content in contents}
+        return "mixed" if len(platforms) > 1 else next(iter(platforms), "bilibili")
+
+    def _batch_normal_cache_eligible(
+        self,
+        contents: Sequence[DiscoveredContent],
+        *,
+        source_context: str,
+    ) -> bool:
+        """Return whether per-item keys fully determine batch-level prompt metadata.
+
+        Mixed-platform batches render an aggregate ``mixed`` platform, while a batch
+        without an explicit context inherits that value from its first item. Either
+        value can change after a partial cache hit, so heterogeneous calls bypass the
+        normal cache. Sparse transports also lift homogeneous content types into
+        batch defaults, so mixed-type treatment batches bypass member caching.
+        Vision attempts bypass it until keys can cover the actual prepared image
+        bytes rather than only their URLs.
+        """
+
+        if not contents:
+            return False
+        same_platform = len({_batch_evaluation_platform(content) for content in contents}) == 1
+        candidate_transport = (
+            str(
+                getattr(
+                    self,
+                    "evaluation_candidate_transport",
+                    _DEFAULT_EVALUATION_CANDIDATE_TRANSPORT,
+                )
+            )
+            .strip()
+            .lower()
+        )
+        stable_content_type = (
+            candidate_transport == "production"
+            or len({_batch_evaluation_content_type(content) for content in contents}) == 1
+        )
+        stable_context = (
+            bool(source_context) or len({content.source_strategy for content in contents}) == 1
+        )
+        multimodal_attempted = (
+            bool(getattr(self, "multimodal_evaluation_enabled", False))
+            and self._supports_multimodal_evaluation()
+            and any((content.cover_url or "").strip() for content in contents)
+        )
+        return same_platform and stable_content_type and stable_context and not multimodal_attempted
+
+    def _single_eval_cache_key(
+        self,
+        content: DiscoveredContent,
+        *,
+        profile_digest: str,
+        source_context: str = "",
+        evaluation_bucket: str = "",
+    ) -> str:
+        if not evaluation_bucket:
+            from openbiliclaw.llm.prompts import content_evaluation_clock
+
+            _evaluated_at, evaluation_bucket = content_evaluation_clock()
+        effective_source_context = source_context or content.source_strategy
+        prompt_digest = stable_json_digest(
+            {
+                "content_summary": _single_evaluation_content_summary(content),
+                "source_context": effective_source_context,
+                "source_platform": content.source_platform or "bilibili",
+            }
+        )
+        prefilter_mode = self._normalize_eval_prefilter_mode(
+            getattr(self, "eval_prefilter_mode", "")
+        )
+        return (
+            f"{_EVAL_BATCH_CACHE_VERSION}:single:"
+            f"{self._content_identity(content)}:content:{prompt_digest}:"
+            f"evaluation_bucket:{evaluation_bucket}:"
+            f"profile:{profile_digest}:embed:{self._evaluation_embedding_namespace()}:"
+            f"prefilter:{prefilter_mode}"
+        )
+
     def _batch_eval_cache_key(
         self,
         content: DiscoveredContent,
         *,
         profile_digest: str,
         negative_digest: str,
+        evaluation_bucket: str = "",
+        source_context: str = "",
     ) -> str:
+        if not evaluation_bucket:
+            from openbiliclaw.llm.prompts import content_evaluation_clock
+
+            _evaluated_at, evaluation_bucket = content_evaluation_clock()
+        effective_batch_context = source_context or content.source_strategy
+        effective_batch_platform = _batch_evaluation_platform(content)
+        candidate_transport = (
+            str(
+                getattr(
+                    self,
+                    "evaluation_candidate_transport",
+                    _DEFAULT_EVALUATION_CANDIDATE_TRANSPORT,
+                )
+            )
+            .strip()
+            .lower()
+        )
+        production_content_item = _batch_evaluation_content_item(
+            content,
+            source_context=source_context,
+        )
+        prompt_visible_content: object = production_content_item
+        cache_content_identity = self._content_identity(content)
+        if candidate_transport != "production":
+            prompt_visible_content = build_canonical_evaluation_batch(
+                [production_content_item]
+            ).as_payload()
+            cache_content_identity = f"canonical:{stable_json_digest(prompt_visible_content)}"
+        prompt_digest = stable_json_digest(
+            {
+                "content_item": prompt_visible_content,
+                "batch_source_context": effective_batch_context,
+                "batch_source_platform": effective_batch_platform,
+                "multimodal_enabled": bool(getattr(self, "multimodal_evaluation_enabled", False)),
+            }
+        )
+        prefilter_mode = self._normalize_eval_prefilter_mode(
+            getattr(self, "eval_prefilter_mode", "")
+        )
+        transport_suffix = (
+            "" if candidate_transport == "production" else f":transport:{candidate_transport}"
+        )
         return (
-            f"{_EVAL_BATCH_CACHE_VERSION}:"
-            f"{self._content_identity(content)}:"
-            f"profile:{profile_digest}:neg:{negative_digest}"
+            f"{_EVAL_BATCH_CACHE_VERSION}:batch:"
+            f"{cache_content_identity}:content:{prompt_digest}:"
+            f"evaluation_bucket:{evaluation_bucket}:"
+            f"profile:{profile_digest}:neg:{negative_digest}:"
+            f"embed:{self._evaluation_embedding_namespace()}:"
+            f"prefilter:{prefilter_mode}{transport_suffix}"
         )
 
     async def _evaluate_batch_once(
@@ -1747,44 +2512,49 @@ class ContentDiscoveryEngine:
         *,
         source_context: str = "",
         negative_examples: object = _NEGATIVE_EXAMPLES_UNSET,
+        evaluated_at: str = "",
+        evaluation_bucket: str = "",
+        normal_cache_enabled: bool = True,
     ) -> list[float | None]:
         """Send one LLM call for a batch of items."""
-        from openbiliclaw.discovery.candidate_pool import resolve_content_type
-        from openbiliclaw.llm.prompts import build_batch_content_evaluation_prompt
+        from openbiliclaw.llm.prompts import (
+            build_batch_content_evaluation_prompt,
+            content_evaluation_clock,
+        )
+
+        if not evaluated_at or not evaluation_bucket:
+            current_evaluated_at, current_bucket = content_evaluation_clock()
+            evaluated_at = evaluated_at or current_evaluated_at
+            evaluation_bucket = evaluation_bucket or current_bucket
 
         profile_data = self._evaluation_profile_summary(profile)
-        content_items: list[dict[str, object]] = []
-        for c in batch:
-            platform = (c.source_platform or ("bilibili" if c.bvid else "")).strip().lower()
-            if platform == "xhs":
-                platform = "xiaohongshu"
-            elif platform == "dy":
-                platform = "douyin"
-            elif platform == "yt":
-                platform = "youtube"
-            elif platform == "bili":
-                platform = "bilibili"
-            if not platform:
-                platform = "bilibili"
-            content_items.append(
-                {
-                    "bvid": c.bvid,
-                    "content_id": c.content_id or c.bvid,
-                    "content_url": c.content_url,
-                    "source_platform": platform,
-                    "source_strategy": c.source_strategy,
-                    "source_context": source_context or c.source_strategy,
-                    "content_type": resolve_content_type(c.content_type, platform),
-                    "body_text": c.body_text,
-                    "title": c.title,
-                    "up_name": c.up_name,
-                    "author_name": c.author_name or c.up_name,
-                    "description": _prompt_description_for_content(c, limit=400),
-                    "cover_url": c.cover_url,
-                    "duration": c.duration,
-                    **_prompt_visible_content_fields(c),
-                }
+        effective_batch_context = source_context or (batch[0].source_strategy if batch else "")
+        effective_batch_platform = self._batch_prompt_source_platform(batch)
+        candidate_transport = (
+            str(
+                getattr(
+                    self,
+                    "evaluation_candidate_transport",
+                    _DEFAULT_EVALUATION_CANDIDATE_TRANSPORT,
+                )
             )
+            .strip()
+            .lower()
+        )
+        if candidate_transport not in _EVALUATION_CANDIDATE_TRANSPORTS:
+            raise ValueError(f"unsupported evaluation candidate transport: {candidate_transport!r}")
+        normal_cache_enabled = normal_cache_enabled and self._batch_normal_cache_eligible(
+            batch,
+            source_context=source_context,
+        )
+        recall = await self._related_interests_for_batch_result(batch, profile)
+        content_items: list[dict[str, object]] = []
+        for index, c in enumerate(batch):
+            item = _batch_evaluation_content_item(c, source_context=source_context)
+            related_interests = recall.related_by_index.get(index)
+            if related_interests:
+                item["related_interests"] = related_interests
+            content_items.append(item)
         image_inputs: list[dict[str, str]] = []
         multimodal_enabled = bool(getattr(self, "multimodal_evaluation_enabled", False))
         if (
@@ -1802,19 +2572,60 @@ class ContentDiscoveryEngine:
             )
             image_ids = {image.content_id for image in prepared_images}
             if image_ids:
-                for item in content_items:
-                    content_id = str(item.get("content_id") or item.get("bvid") or "")
-                    if content_id in image_ids:
-                        item["cover_image_ref"] = f"cover:{content_id}"
-                image_inputs = [image.to_llm_input() for image in prepared_images]
-        source_platforms = {
-            str(item.get("source_platform") or "").strip()
-            for item in content_items
-            if str(item.get("source_platform") or "").strip()
-        }
-        batch_source_platform = (
-            "mixed" if len(source_platforms) > 1 else next(iter(source_platforms), "bilibili")
-        )
+                if candidate_transport == "production":
+                    for item in content_items:
+                        content_id = str(item.get("content_id") or item.get("bvid") or "")
+                        if content_id in image_ids:
+                            item["cover_image_ref"] = f"cover:{content_id}"
+                    image_inputs = [image.to_llm_input() for image in prepared_images]
+                else:
+                    # Treatment anchors must not leak global identifiers. Only
+                    # unambiguous one-to-one image/content identities are kept;
+                    # ambiguous inputs are omitted together with their text
+                    # anchor so they cannot bind to the wrong request member.
+                    content_identity_counts = Counter(
+                        str(item.get("content_id") or item.get("bvid") or "")
+                        for item in content_items
+                    )
+                    prepared_identity_counts = Counter(
+                        image.content_id for image in prepared_images
+                    )
+                    local_id_by_content_identity = {
+                        content_identity: str(index)
+                        for index, item in enumerate(content_items)
+                        if (
+                            (
+                                content_identity := str(
+                                    item.get("content_id") or item.get("bvid") or ""
+                                )
+                            )
+                            and content_identity_counts[content_identity] == 1
+                            and prepared_identity_counts[content_identity] == 1
+                        )
+                    }
+                    for item in content_items:
+                        content_identity = str(item.get("content_id") or item.get("bvid") or "")
+                        local_id = local_id_by_content_identity.get(content_identity)
+                        if local_id is not None:
+                            item["cover_image_ref"] = f"cover:{local_id}"
+                    for image in prepared_images:
+                        local_id = local_id_by_content_identity.get(image.content_id)
+                        if local_id is None:
+                            continue
+                        image_input = image.to_llm_input()
+                        image_input["content_id"] = local_id
+                        image_inputs.append(image_input)
+
+        canonical_batch: CanonicalEvaluationBatch | None = None
+        local_content_by_id: dict[str, DiscoveredContent] = {}
+        candidate_block: str | None = None
+        if candidate_transport != "production":
+            canonical_batch = build_canonical_evaluation_batch(content_items)
+            local_content_by_id = dict(zip(canonical_batch.local_ids, batch, strict=True))
+            if candidate_transport == "sparse-json":
+                candidate_block = render_sparse_evaluation_json(canonical_batch)
+            else:
+                candidate_block = encode_evaluation_row_wire(canonical_batch.as_payload())
         if negative_examples is _NEGATIVE_EXAMPLES_UNSET:
             negative_examples = self._get_negative_exemplars()
         # Treat empty list as "no examples" so the user-message stays
@@ -1824,16 +2635,22 @@ class ContentDiscoveryEngine:
         negative_examples_for_prompt = cast("list[dict[str, object]] | None", negative_examples)
         profile_digest = self._evaluation_profile_digest(profile)
         negative_digest = self._negative_examples_digest(negative_examples_for_prompt)
+        compact_json = bool(getattr(self, "compact_evaluation_json", False))
         profile_blocks = self._evaluation_profile_prompt_cache_obj().render_json_layers(
-            evaluation_profile_prompt_layers(profile_data)
+            evaluation_profile_prompt_layers(profile_data),
+            compact=compact_json,
         )
         messages = build_batch_content_evaluation_prompt(
             profile_summary=profile_data,
             profile_blocks=profile_blocks,
             content_items=content_items,
-            source_context=source_context or (batch[0].source_strategy if batch else ""),
-            source_platform=batch_source_platform,
+            source_context=effective_batch_context,
+            source_platform=effective_batch_platform,
             negative_examples=negative_examples_for_prompt,
+            evaluated_at=evaluated_at,
+            compact_json=compact_json,
+            candidate_block=candidate_block,
+            local_result_ids=canonical_batch is not None,
         )
 
         assert self._llm_service is not None
@@ -1887,19 +2704,33 @@ class ContentDiscoveryEngine:
         if payload is None:
             return [None] * len(batch)
 
-        payload_by_id = _batch_results_by_content_key(payload, batch)
-        if payload_by_id is None and len(payload) != len(batch):
-            logger.warning(
-                "Batch evaluation result count mismatch without IDs (%d results for %d items), "
-                "falling back to single eval",
-                len(payload),
-                len(batch),
+        local_payload: list[dict[str, Any] | None] | None = None
+        payload_by_id: dict[str, dict[str, Any]] | None = None
+        if canonical_batch is not None:
+            local_payload = resolve_local_evaluation_results(
+                payload,
+                canonical_batch.local_ids,
             )
-            return [None] * len(batch)
+        else:
+            payload_by_id = _batch_results_by_content_key(payload, batch)
+            if payload_by_id is None and len(payload) != len(batch):
+                logger.warning(
+                    "Batch evaluation result count mismatch without IDs (%d results for %d items), "
+                    "falling back to single eval",
+                    len(payload),
+                    len(batch),
+                )
+                return [None] * len(batch)
 
         results: list[float | None] = []
         for i, content in enumerate(batch):
-            if payload_by_id is None:
+            if canonical_batch is not None:
+                local_id = canonical_batch.local_ids[i]
+                if local_content_by_id.get(local_id) is not content:
+                    raise RuntimeError("request-local evaluation identity map is inconsistent")
+                assert local_payload is not None
+                raw_item = local_payload[i]
+            elif payload_by_id is None:
                 raw_item = payload[i] if i < len(payload) else None
             else:
                 raw_item = next(
@@ -1918,7 +2749,7 @@ class ContentDiscoveryEngine:
                 continue
             item_result: dict[str, Any] = raw_item
             score = self._clamp_score(item_result.get("score", 0.0))
-            reason = validated_text_field(
+            checked_reason = validated_text_field(
                 item_result.get("reason", ""), field="reason", content_key=content.bvid
             )
             topic_group = validated_text_field(
@@ -1929,35 +2760,56 @@ class ContentDiscoveryEngine:
                 field="franchise_key",
                 content_key=content.bvid,
             )
-            if reason is None or topic_group is None or franchise_key is None:
+            if checked_reason is None or topic_group is None or franchise_key is None:
                 # Treat a non-string field as a missing result so the item is
                 # retried instead of persisting a repr as relevance_reason.
+                results.append(None)
+                continue
+            reason = normalize_evaluation_reason(score, checked_reason)
+            if reason is None:
                 results.append(None)
                 continue
             style_key = normalize_style_key(item_result.get("style_key", ""))
 
             content.relevance_score = score
             content.relevance_reason = reason
-            if topic_group:
-                content.topic_group = topic_group
-            if style_key in VALID_STYLE_KEYS:
-                content.style_key = style_key
-            if franchise_key:
-                content.franchise_key = franchise_key
+            content.topic_group = topic_group
+            content.style_key = style_key
+            content.franchise_key = franchise_key
 
             cache_key = self._batch_eval_cache_key(
                 content,
                 profile_digest=profile_digest,
                 negative_digest=negative_digest,
+                evaluation_bucket=evaluation_bucket,
+                source_context=source_context,
             )
-            self._eval_cache[cache_key] = (
-                score,
-                reason,
-                topic_group,
-                style_key,
-                franchise_key,
-            )
+            if normal_cache_enabled and i in recall.complete_indices:
+                self._set_eval_cache_entry(
+                    cache_key,
+                    (
+                        score,
+                        reason,
+                        topic_group,
+                        style_key,
+                        franchise_key,
+                    ),
+                )
             results.append(score)
+
+        return results
+
+    @staticmethod
+    def _apply_intra_batch_caps(
+        batch: Sequence[DiscoveredContent],
+        results: list[float] | list[float | None],
+    ) -> None:
+        """Apply batch-dependent diversity caps to raw or cached eval scores.
+
+        Eval-cache entries intentionally store the model's raw per-item result.
+        These caps depend on the current sibling batch, so they must be applied
+        after every cache lookup as well as after a fresh provider response.
+        """
 
         # v0.3.50+: intra-batch franchise cap. The LLM dutifully fills
         # franchise_key for IP/series content (per the prompt's batch-
@@ -1972,7 +2824,7 @@ class ContentDiscoveryEngine:
             buckets: dict[str, list[int]] = {}
             for i, content in enumerate(batch):
                 capped_score = results[i] if i < len(results) else None
-                if capped_score is None or capped_score <= 0:
+                if capped_score is None or capped_score < 0.5:
                     continue
                 key = (content.franchise_key or "").strip().lower()
                 if not key:
@@ -1987,6 +2839,7 @@ class ContentDiscoveryEngine:
                 for idx in indices[cap:]:
                     results[idx] = 0.0
                     batch[idx].relevance_score = 0.0
+                    batch[idx].relevance_reason = ""
                     dropped += 1
             if dropped:
                 logger.info(
@@ -2009,7 +2862,7 @@ class ContentDiscoveryEngine:
             style_buckets: dict[str, list[int]] = {}
             for i, content in enumerate(batch):
                 capped_score = results[i] if i < len(results) else None
-                if capped_score is None or capped_score <= 0:
+                if capped_score is None or capped_score < 0.5:
                     continue
                 style_key = normalize_style_key(content.style_key)
                 if not style_key:
@@ -2023,6 +2876,7 @@ class ContentDiscoveryEngine:
                 for idx in indices[style_cap:]:
                     results[idx] = 0.0
                     batch[idx].relevance_score = 0.0
+                    batch[idx].relevance_reason = ""
                     style_dropped += 1
             if style_dropped:
                 logger.info(
@@ -2034,8 +2888,6 @@ class ContentDiscoveryEngine:
                     ),
                 )
 
-        return results
-
     async def _evaluate_batch(
         self,
         batch: list[DiscoveredContent],
@@ -2043,12 +2895,26 @@ class ContentDiscoveryEngine:
         *,
         source_context: str = "",
         negative_examples: object = _NEGATIVE_EXAMPLES_UNSET,
+        evaluated_at: str = "",
+        evaluation_bucket: str = "",
+        normal_cache_enabled: bool = True,
+        apply_batch_caps: bool = True,
         max_split_depth: int = 3,
         max_extra_requests: int = 6,
     ) -> list[float]:
         """Retry only missing members from successful malformed responses."""
+        from openbiliclaw.llm.prompts import content_evaluation_clock
+
+        if not evaluated_at or not evaluation_bucket:
+            current_evaluated_at, current_bucket = content_evaluation_clock()
+            evaluated_at = evaluated_at or current_evaluated_at
+            evaluation_bucket = evaluation_bucket or current_bucket
         results: list[float | None] = [None] * len(batch)
         budget = {"remaining": max(0, int(max_extra_requests))}
+        normal_cache_enabled = normal_cache_enabled and self._batch_normal_cache_eligible(
+            batch,
+            source_context=source_context,
+        )
 
         async def run(indices: list[int], depth: int) -> None:
             subset = [batch[index] for index in indices]
@@ -2057,6 +2923,9 @@ class ContentDiscoveryEngine:
                 profile,
                 source_context=source_context,
                 negative_examples=negative_examples,
+                evaluated_at=evaluated_at,
+                evaluation_bucket=evaluation_bucket,
+                normal_cache_enabled=normal_cache_enabled,
             )
             missing: list[int] = []
             for index, score in zip(indices, subset_results, strict=True):
@@ -2085,6 +2954,8 @@ class ContentDiscoveryEngine:
                 final.append(0.0)
             else:
                 final.append(score)
+        if apply_batch_caps:
+            self._apply_intra_batch_caps(batch, final)
         return final
 
     @staticmethod

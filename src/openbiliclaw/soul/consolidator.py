@@ -3,7 +3,7 @@
 Interest tags and disliked topics accumulate wording variants forever:
 the merge path only collapses exact ``(name, category)`` matches, and
 weight decay never removes a variant that keeps getting reinforced. On
-real profiles this leaves the weight-sorted top-64 (the slice that
+real profiles this leaves the weight-sorted top-48 (the slice that
 actually reaches LLM prompts) half-occupied by duplicates of the same
 concept, crowding genuinely distinct interests out of the boundary.
 
@@ -45,6 +45,7 @@ from openbiliclaw.llm.json_utils import (
     parse_llm_json_tolerant,
 )
 from openbiliclaw.llm.prompts import build_profile_consolidation_prompt
+from openbiliclaw.llm.task_options import without_core_memory_kwargs
 from openbiliclaw.soul.ledger import ProfileLedger
 
 if TYPE_CHECKING:
@@ -59,7 +60,7 @@ logger = logging.getLogger(__name__)
 # _DISLIKED_TOPICS_STORE_CAP). Real profiles accumulate 1000+ interest
 # tags; a narrow boundary (128 until v0.3.121) left most wording
 # variants untouched, so duplicate weight stayed split across variants
-# and never re-entered the truncated top-64. 512 covers the whole
+# and never re-entered the truncated top-48. 512 covers the whole
 # meaningful store; only the deep <0.5-weight tail is left to decay.
 _LIKES_BOUNDARY = 512
 _SIMILARITY_THRESHOLD = 0.85
@@ -883,12 +884,17 @@ class ProfileConsolidator:
             likes_clusters=likes_payload,
             dislikes_clusters=dislikes_payload,
         )
+        # Cluster merge/keep decisions are judged purely from the interest-label
+        # payload in the user prompt (see ``build_profile_consolidation_prompt``);
+        # the user's portrait/core memory is irrelevant to whether two labels denote
+        # the same interest. Opt out of the default core-memory injection.
         response = await self._llm_service.complete_structured_task(
             system_instruction=messages[0]["content"],
             user_input=messages[1]["content"],
             temperature=0.2,
             max_tokens=DEFAULT_STRUCTURED_MAX_TOKENS,
             caller="soul.consolidation",
+            **without_core_memory_kwargs(self._llm_service.complete_structured_task),
         )
         parsed = parse_llm_json_tolerant(response.content)
         if not isinstance(parsed, dict):

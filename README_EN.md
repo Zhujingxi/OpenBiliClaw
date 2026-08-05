@@ -189,12 +189,12 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.192 (2026-08-03)**
+📌 Latest: **v0.3.194 (2026-08-05)**
 
-- **Multimodal recommendation enhancements are independently controllable** — visual profiles, danmaku semantics, and keyframe weighting have separate switches, with visual features off by default.
-- **Feedback and dialogue submissions are more reliable** — likes, dislikes, chats, and pending-card settlement now use durable asynchronous processing across slow models and restarts.
-- **Advanced settings are easier to use** — the extension save bar stays at the bottom, keyword generation defaults to hybrid, and advanced controls are grouped together.
-- **Connectivity and remote deployment are steadier** — X sessions resync after runtime reconnects, and a Caddy HTTPS Compose entry point is now available.
+- **Xiaohongshu discovery is steadier and more conservative** — a jittered 20-minute target, budgets, and exponential backoff remain in force while search briefly renders in front and restores the previous tab.
+- **First-launch progress no longer stalls** — setup, desktop web, and the extension show live bge-m3 download progress as soon as the pull starts.
+- **Freshness evaluation is more accurate** — candidate scoring uses source publication time and the real UTC evaluation time instead of guessing from model knowledge cutoffs.
+- **Keyword rotation stays fresher** — the planner avoids repeatedly consuming the same terms and stops generating more while the queue is backed up.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
@@ -608,6 +608,7 @@ confirmation entry (pending list/cards) → one anchor(kind+ref+generation) → 
                           ├→ one context digest → prompt/history/event/learn/settlement provenance
                           ├→ action local≤1s: completed 200 / blocked 202 → popup/mobile/desktop poll 1/2/5s, ≤30s
                           └→ confusion FIFO≤5 / head fencing / 12h recovery
+config save: synchronous reload when idle; busy lane → persist → latest-wins background apply queue → final receipt
 config hot reload: accepting drain old worker → atomic pause/revoke → new worker; 25m safety window
 realtime: runtime-stream 20s idle heartbeat → transient close shows reconnecting and retries
 images: proxy foreground + refresh prefetch → app-stable lane (total 4 / bg 3, fg priority)
@@ -649,6 +650,7 @@ images: proxy foreground + refresh prefetch → app-stable lane (total 4 / bg 3,
 │ Source-family registry: alias · strategy · URL host │
 │             → pool accounting · durable seen_items ledger │
 │ Bangumi public API → search/ranked/date producer → shared eval │
+│ Eval clock: published_at + exact UTC evaluated_at → hourly cache invalidation │
 │ API projected stock → 3×30 workers → serial admit; OpenClaw first batch≤4 → copy≤4/no split retry → UI │
 │ Delight gate: formal copy/topic ready + seen_items guard → score/snapshot → UI × writes seen ledger │
 │ Inventory API/OpenClaw startup hook → recover/maintain → expose LLM │
@@ -733,7 +735,7 @@ localhost-only. The two edges are mutually exclusive, and the default HTTP path 
 What happens after discovery:
 
 - **Safe fetching** — the backend never logs in for you and never crawls content you can't see; every platform reuses the sessions already in your browser, and first-run profile signals are pulled only after you click "Start initialization." Once the profile exists, enabled XHS, Douyin, YouTube, Zhihu, and Reddit account signals are re-pulled on schedule only while the extension is online.
-- **Continuous unified evaluation** — raw candidates share one eval pool with 3×30 immediate-refill workers; scheduling counts only available, copy-pending, and evaluated durable stock, while serial admission is capped by current headroom.
+- **Continuous unified evaluation** — raw candidates share one eval pool and are scored against your Soul profile, content text, and recent negative feedback. The default 3×30 workers refill immediately, scheduling counts only durable stock, and serial admission is capped by current headroom. Optional embedding prefiltering starts in shadow mode before enforce may skip clearly low-similarity items.
 - **Diversity selection** — platform quotas → topic dedup → style balancing → cross-platform interleaving → count caps; only Bilibili is enabled out of the box, other platforms are switched on in settings.
 
 > Per-platform task pipelines, pool accounting, and fallback strategies are documented in the [Discovery Engine docs](docs/modules/discovery.md).

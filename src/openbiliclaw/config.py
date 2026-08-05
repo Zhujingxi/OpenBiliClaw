@@ -82,6 +82,12 @@ _LLM_PROVIDER_DISPLAY_NAMES = {
 }
 _MIN_POOL_TARGET_COUNT = 1
 _MAX_POOL_TARGET_COUNT = 600
+_DEFAULT_EVAL_MIN_BATCH_SIZE = 15
+_MIN_EVAL_MIN_BATCH_SIZE = 1
+_MAX_EVAL_MIN_BATCH_SIZE = 90
+_DEFAULT_EVAL_MAX_WAIT_SECONDS = 90.0
+_MIN_EVAL_MAX_WAIT_SECONDS = 0.0
+_MAX_EVAL_MAX_WAIT_SECONDS = 600.0
 _DEFAULT_EXTENSION_DISCONNECT_GRACE_SECONDS = 90
 _DEFAULT_EXTENSION_TOKEN_TTL_HOURS = 24
 _DEFAULT_SOURCE_INCREMENTAL_HOURS = 24
@@ -133,6 +139,9 @@ _DEFAULT_INSPIRATION_SEARCH_BACKENDS: tuple[str, ...] = (
 )
 _DEFAULT_ADMISSION_MIN_SCORE = 0.60
 _DEFAULT_CANDIDATE_EVAL_CONCURRENCY = 3
+_MIN_ADMISSION_MIN_SCORE = 0.50
+_DEFAULT_EVAL_PREFILTER_MODE = "shadow"
+_SUPPORTED_EVAL_PREFILTER_MODES = {"off", "shadow", "enforce"}
 _DEFAULT_MULTIMODAL_BATCH_SIZE = 8
 _DEFAULT_MULTIMODAL_IMAGE_MAX_PX = 384
 _DEFAULT_MULTIMODAL_IMAGE_QUALITY = 72
@@ -925,6 +934,8 @@ class SchedulerConfig:
     zhihu_incremental_hours: int | None = None
     reddit_incremental_hours: int | None = None
     refresh_check_interval_seconds: int = _DEFAULT_REFRESH_CHECK_INTERVAL_SECONDS
+    eval_min_batch_size: int = _DEFAULT_EVAL_MIN_BATCH_SIZE
+    eval_max_wait_seconds: float = _DEFAULT_EVAL_MAX_WAIT_SECONDS
     signal_event_threshold: int = _DEFAULT_SIGNAL_EVENT_THRESHOLD
     # 2026-07-26: unit changed hours → minutes and both aligned to 3, so the
     # Bilibili main-discovery cadence matches every source producer's
@@ -1035,6 +1046,9 @@ class DiscoveryConfig:
     # 3×30 design caps this at three (90 raw candidates in flight); runtime
     # also reserves one global LLM slot, so the effective count may be lower.
     candidate_eval_concurrency: int = _DEFAULT_CANDIDATE_EVAL_CONCURRENCY
+    # Embedding pre-filter rollout for discovery evaluation. ``shadow`` logs
+    # would-be filtered candidates without suppressing LLM evaluation.
+    eval_prefilter_mode: str = _DEFAULT_EVAL_PREFILTER_MODE
     # Optional cover-image evaluation. Kept off by default because it changes
     # LLM cost/latency and requires a vision-capable evaluation model.
     multimodal_evaluation_enabled: bool = False
@@ -1084,18 +1098,17 @@ class XiaohongshuSourceConfig:
     # browser session. Init --yes-xhs or the settings page can enable it later.
     enabled: bool = False
     # Max Soul-driven search tasks the backend may enqueue per day.
-    daily_search_budget: int = 0
+    daily_search_budget: int = 20
     # Max creator-subscription fetch tasks per day.
     daily_creator_budget: int = 0
     # Minimum seconds the backend permits between extension-dispatched
-    # search/creator task claims. Persisted centrally so MV3/browser restarts
-    # and multiple extension profiles cannot bypass the pacing floor.
-    task_interval_seconds: int = 300
-    # Minimum gap between two producer runs for this source. Aligned to 3
-    # minutes across every source (2026-07-26) so pool replenishment has one
-    # cadence instead of eight; the per-run size is still bounded by
-    # ``[scheduler].discovery_limit`` and each branch's daily budget.
-    min_interval_minutes: int = 3
+    # search/creator task claims. This is a target: each claim applies stable
+    # ±25% jitter and persists the resulting next-claim time centrally.
+    task_interval_seconds: int = 1200
+    # Minimum gap between two producer runs for this source. Keep production
+    # aligned with the 20-minute claim target; queue backlog is separately
+    # bounded before the producer claims or generates more keywords.
+    min_interval_minutes: int = 20
 
 
 @dataclass
@@ -1951,10 +1964,10 @@ def _build_config(raw: dict[str, Any]) -> Config:
         ),
         xiaohongshu=XiaohongshuSourceConfig(
             enabled=bool(xhs_raw.get("enabled", False)),
-            daily_search_budget=int(xhs_raw.get("daily_search_budget", 0)),
+            daily_search_budget=int(xhs_raw.get("daily_search_budget", 20)),
             daily_creator_budget=int(xhs_raw.get("daily_creator_budget", 0)),
-            task_interval_seconds=int(xhs_raw.get("task_interval_seconds", 300)),
-            min_interval_minutes=max(0, int(xhs_raw.get("min_interval_minutes", 3))),
+            task_interval_seconds=int(xhs_raw.get("task_interval_seconds", 1200)),
+            min_interval_minutes=max(0, int(xhs_raw.get("min_interval_minutes", 20))),
         ),
         douyin=DouyinSourceConfig(
             enabled=bool(douyin_raw.get("enabled", False)),
@@ -2144,6 +2157,18 @@ def _build_config(raw: dict[str, Any]) -> Config:
                         sched_raw.get("refresh_check_interval_seconds"),
                         default=_DEFAULT_REFRESH_CHECK_INTERVAL_SECONDS,
                         min_value=15,
+                    ),
+                    "eval_min_batch_size": _normalize_scheduler_int(
+                        sched_raw.get("eval_min_batch_size"),
+                        default=_DEFAULT_EVAL_MIN_BATCH_SIZE,
+                        min_value=_MIN_EVAL_MIN_BATCH_SIZE,
+                        max_value=_MAX_EVAL_MIN_BATCH_SIZE,
+                    ),
+                    "eval_max_wait_seconds": _normalize_scheduler_float(
+                        sched_raw.get("eval_max_wait_seconds"),
+                        default=_DEFAULT_EVAL_MAX_WAIT_SECONDS,
+                        min_value=_MIN_EVAL_MAX_WAIT_SECONDS,
+                        max_value=_MAX_EVAL_MAX_WAIT_SECONDS,
                     ),
                     "signal_event_threshold": _normalize_scheduler_int(
                         sched_raw.get("signal_event_threshold"),
@@ -2365,6 +2390,9 @@ def _build_discovery(discovery_raw: dict[str, Any]) -> DiscoveryConfig:
             min_value=1,
             max_value=3,
         ),
+        eval_prefilter_mode=_normalize_eval_prefilter_mode(
+            discovery_raw.get("eval_prefilter_mode")
+        ),
         multimodal_evaluation_enabled=_coerce_bool(
             discovery_raw.get("multimodal_evaluation_enabled"),
             default=False,
@@ -2433,7 +2461,7 @@ def _build_discovery(discovery_raw: dict[str, Any]) -> DiscoveryConfig:
 
 
 def _normalize_probability(value: object, *, default: float) -> float:
-    """Normalize a TOML probability in the open interval ``(0, 1]``."""
+    """Normalize the admission floor in the supported interval ``[0.5, 1]``."""
     if isinstance(value, bool):
         return default
     if not isinstance(value, (int, float, str)):
@@ -2442,9 +2470,16 @@ def _normalize_probability(value: object, *, default: float) -> float:
         score = float(value)
     except (TypeError, ValueError):
         return default
-    if score <= 0.0 or score > 1.0:
+    if score < _MIN_ADMISSION_MIN_SCORE or score > 1.0:
         return default
     return score
+
+
+def _normalize_eval_prefilter_mode(value: object) -> str:
+    if not isinstance(value, str):
+        return _DEFAULT_EVAL_PREFILTER_MODE
+    mode = value.strip().lower()
+    return mode or _DEFAULT_EVAL_PREFILTER_MODE
 
 
 def _coerce_bool(value: object, *, default: bool = False) -> bool:
@@ -3059,6 +3094,31 @@ def _normalize_inspiration_breadth(value: object) -> str:
     return tier
 
 
+def _normalize_scheduler_float(
+    value: object,
+    *,
+    default: float,
+    min_value: float,
+    max_value: float | None = None,
+) -> float:
+    """Normalize scheduler tuning values into bounded floats."""
+    if isinstance(value, int | float):
+        normalized = float(value)
+    elif isinstance(value, str):
+        try:
+            normalized = float(value.strip())
+        except ValueError:
+            return default
+    else:
+        return default
+
+    if normalized < min_value:
+        return default
+    if max_value is not None and normalized > max_value:
+        return default
+    return normalized
+
+
 def _normalize_auto_update_allowed_remotes(value: object) -> list[str]:
     """Normalize auto-update remote allowlist into non-empty string URLs."""
     if not isinstance(value, list):
@@ -3635,6 +3695,44 @@ def _collect_config_issues(config: Config) -> list[ConfigIssue]:
                     "`scheduler.pool_target_count` 必须在 "
                     f"{_MIN_POOL_TARGET_COUNT}..{_MAX_POOL_TARGET_COUNT} 之间。"
                 ),
+            )
+        )
+
+    if not (
+        _MIN_EVAL_MIN_BATCH_SIZE <= config.scheduler.eval_min_batch_size <= _MAX_EVAL_MIN_BATCH_SIZE
+    ):
+        issues.append(
+            ConfigIssue(
+                field="scheduler.eval_min_batch_size",
+                message=(
+                    "`scheduler.eval_min_batch_size` 必须在 "
+                    f"{_MIN_EVAL_MIN_BATCH_SIZE}..{_MAX_EVAL_MIN_BATCH_SIZE} 之间。"
+                ),
+            )
+        )
+
+    if not (
+        _MIN_EVAL_MAX_WAIT_SECONDS
+        <= config.scheduler.eval_max_wait_seconds
+        <= _MAX_EVAL_MAX_WAIT_SECONDS
+    ):
+        issues.append(
+            ConfigIssue(
+                field="scheduler.eval_max_wait_seconds",
+                message=(
+                    "`scheduler.eval_max_wait_seconds` 必须在 "
+                    f"{_MIN_EVAL_MAX_WAIT_SECONDS:g}..{_MAX_EVAL_MAX_WAIT_SECONDS:g} 之间。"
+                ),
+            )
+        )
+
+    eval_prefilter_mode = str(config.discovery.eval_prefilter_mode or "").strip().lower()
+    if eval_prefilter_mode not in _SUPPORTED_EVAL_PREFILTER_MODES:
+        issues.append(
+            ConfigIssue(
+                field="discovery.eval_prefilter_mode",
+                message='`discovery.eval_prefilter_mode` 仅支持: "off", "shadow", "enforce"。',
+                severity="blocking",
             )
         )
 
@@ -4453,6 +4551,8 @@ def _render_config_toml(
                 else []
             ),
             f"refresh_check_interval_seconds = {config.scheduler.refresh_check_interval_seconds}",
+            f"eval_min_batch_size = {config.scheduler.eval_min_batch_size}",
+            f"eval_max_wait_seconds = {config.scheduler.eval_max_wait_seconds:g}",
             f"signal_event_threshold = {config.scheduler.signal_event_threshold}",
             f"trending_refresh_minutes = {config.scheduler.trending_refresh_minutes}",
             f"explore_refresh_minutes = {config.scheduler.explore_refresh_minutes}",
@@ -4535,6 +4635,7 @@ def _render_config_toml(
             "inspiration_replace_merged_keywords = "
             f"{_toml_bool(config.discovery.inspiration_replace_merged_keywords)}",
             f"inspiration_breadth = {_toml_string(config.discovery.inspiration_breadth)}",
+            f"eval_prefilter_mode = {_toml_string(config.discovery.eval_prefilter_mode)}",
             "multimodal_evaluation_enabled = "
             f"{_toml_bool(config.discovery.multimodal_evaluation_enabled)}",
             f"visual_profile_enabled = {_toml_bool(config.discovery.visual_profile_enabled)}",

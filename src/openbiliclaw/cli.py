@@ -1120,6 +1120,7 @@ def _build_discovery_engine() -> Any:
         multimodal_image_timeout_seconds=int(
             getattr(discovery_cfg, "multimodal_image_timeout_seconds", 6)
         ),
+        eval_prefilter_mode=str(getattr(discovery_cfg, "eval_prefilter_mode", "shadow")),
     )
     search_strategy = SearchStrategy(
         llm_service=llm_service,
@@ -11174,8 +11175,8 @@ def _run_xhs_discovery(*, force: bool) -> None:
         soul_engine=soul_engine,
         llm_service=llm_service,
         enabled=True,
-        daily_budget=int(getattr(xhs_cfg, "daily_search_budget", 0)),
-        min_interval_minutes=0 if force else int(getattr(xhs_cfg, "min_interval_minutes", 3)),
+        daily_budget=int(getattr(xhs_cfg, "daily_search_budget", 20)),
+        min_interval_minutes=0 if force else int(getattr(xhs_cfg, "min_interval_minutes", 20)),
     )
     result = asyncio.run(producer.produce_if_due())
 
@@ -11190,12 +11191,12 @@ def _run_xhs_discovery(*, force: bool) -> None:
             [
                 ("入队关键词数", str(enqueued)),
                 ("尝试关键词数", str(attempted)),
-                ("今日预算", str(int(getattr(xhs_cfg, "daily_search_budget", 0)))),
+                ("今日预算", str(int(getattr(xhs_cfg, "daily_search_budget", 20)))),
                 (
                     "节流开关",
                     "已跳过（--force）"
                     if force
-                    else f"{int(getattr(xhs_cfg, 'min_interval_minutes', 3))} 分钟节流",
+                    else f"{int(getattr(xhs_cfg, 'min_interval_minutes', 20))} 分钟节流",
                 ),
             ],
         )
@@ -11209,8 +11210,18 @@ def _run_xhs_discovery(*, force: bool) -> None:
         ),
         "throttled": (
             "info",
-            f"距离上次关键词生产不足 {int(getattr(xhs_cfg, 'min_interval_minutes', 3))} 分钟",
+            f"距离上次关键词生产不足 {int(getattr(xhs_cfg, 'min_interval_minutes', 20))} 分钟",
             "可使用 `--force` 忽略节流重新触发。",
+        ),
+        "backlog": (
+            "info",
+            "小红书搜索任务队列已满",
+            "已有 5 条待执行或执行中的搜索任务；扩展消费后会自动继续补充。",
+        ),
+        "rate_limited": (
+            "warning",
+            "小红书后台任务正在风控冷却",
+            "请等待状态页显示的冷却时间结束；`--force` 不会绕过该安全窗口。",
         ),
         "no_profile": (
             "warning",
@@ -11458,6 +11469,11 @@ def _build_discovery_candidate_pipeline(
         discovery_engine=discovery_engine,
         pool_target_count=int(getattr(config.scheduler, "pool_target_count", 300)),
         admission_min_score=admission_min_score,
+        # Manual producer commands are one-shot processes. An in-memory wait
+        # window cannot survive process exit, so they must drain immediately;
+        # daemon coalescing is owned by CandidateEvalCoordinator.
+        min_eval_batch_size=1,
+        max_eval_wait_seconds=0.0,
     )
 
 

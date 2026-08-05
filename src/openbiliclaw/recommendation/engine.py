@@ -18,6 +18,10 @@ from datetime import datetime
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
+from openbiliclaw.discovery.strategies._utils import (
+    build_profile_summary,
+    compact_content_prompt_profile_summary,
+)
 from openbiliclaw.discovery.style_keys import VALID_STYLE_KEYS, normalize_style_key
 from openbiliclaw.llm.base import classify_llm_failure_kind
 from openbiliclaw.llm.json_utils import (
@@ -278,9 +282,9 @@ def _recommendation_profile_summary(
     embedding-selected, content-relevant tag list for the default weight-ranked
     one.
     """
-    from openbiliclaw.discovery.strategies._utils import build_profile_summary
-
-    return build_profile_summary(profile, interests=interests)
+    return compact_content_prompt_profile_summary(
+        build_profile_summary(profile, interests=interests)
+    )
 
 
 def _content_result_keys(content: DiscoveredContent) -> set[str]:
@@ -721,7 +725,7 @@ class RecommendationEngine:
             if excluded_bvids:
                 candidates = [item for item in candidates if item.bvid not in excluded_bvids]
             after_exclude_count = len(candidates)
-            candidates = self._exclude_disliked_topic_candidates(candidates, profile)
+            candidates = self._exclude_disliked_topic_candidates_for_serve(candidates, profile)
             after_disliked_count = len(candidates)
             if snapshot.seen_bvids:
                 candidates = [item for item in candidates if item.bvid not in snapshot.seen_bvids]
@@ -1736,7 +1740,7 @@ class RecommendationEngine:
         *,
         profile: SoulProfile,
         limit: int = 30,
-        batch_size: int = 10,
+        batch_size: int = 30,
     ) -> int:
         """Legacy/recovery path for cached rows lacking style / topic / score.
 
@@ -1841,16 +1845,22 @@ class RecommendationEngine:
         Mutates each item in-place: sets ``relevance_score``,
         ``relevance_reason``, ``topic_group``, and ``style_key``.
         """
-        from openbiliclaw.llm.prompts import build_batch_content_evaluation_prompt
+        from openbiliclaw.llm.prompts import (
+            build_batch_content_evaluation_prompt,
+            content_evaluation_clock,
+        )
+
+        evaluated_at, _evaluation_bucket = content_evaluation_clock()
 
         profile_data = _recommendation_profile_summary(profile)
-        content_items = [
+        content_items: list[dict[str, object]] = [
             {
                 "bvid": c.bvid,
                 "content_id": c.content_id or c.bvid,
                 "title": c.title,
                 "up_name": c.up_name or c.author_name,
                 "description": (c.description or "")[:400],
+                "published_at": c.published_at,
                 "duration": c.duration,
                 "view_count": c.view_count,
                 "source_strategy": c.source_strategy,
@@ -1881,6 +1891,7 @@ class RecommendationEngine:
             source_context=batch[0].source_strategy if batch else "",
             source_platform=platform,
             negative_examples=negative_examples,
+            evaluated_at=evaluated_at,
         )
 
         complete_structured = self._llm.complete_structured_task
@@ -3713,7 +3724,7 @@ class RecommendationEngine:
             },
             recent_feedback=[],
         )
-        content_items = [
+        content_items: list[dict[str, object]] = [
             {
                 "bvid": item.bvid,
                 "content_id": item.content_id or item.bvid,
@@ -5079,7 +5090,7 @@ class RecommendationEngine:
         if excluded_bvids:
             candidates = [item for item in candidates if item.bvid not in excluded_bvids]
         after_exclude_count = len(candidates)
-        candidates = self._exclude_disliked_topic_candidates(candidates, profile)
+        candidates = self._exclude_disliked_topic_candidates_for_serve(candidates, profile)
         after_disliked_count = len(candidates)
         candidates = self._exclude_recently_viewed(candidates)
         return (
@@ -5201,6 +5212,40 @@ class RecommendationEngine:
         return [item for item in candidates if not cls._matches_disliked_topic(item, terms)]
 
     @classmethod
+    def _exclude_disliked_topic_candidates_for_serve(
+        cls,
+        candidates: list[DiscoveredContent],
+        profile: SoulProfile,
+    ) -> list[DiscoveredContent]:
+        """Keep exact topic bans when fuzzy dislike matching starves a serve window.
+
+        Preference analysis stores natural-language avoid phrases. Matching those
+        phrases against titles, descriptions, authors, tags, and body text is a
+        useful purge-race guard, but a generic phrase such as ``视频`` or ``内容``
+        can otherwise remove every candidate indefinitely. Only a total fuzzy
+        wipeout activates this fail-safe; structured topic fields remain hard
+        exclusions, so confirmed category-level dislikes are never restored.
+        """
+        filtered = cls._exclude_disliked_topic_candidates(candidates, profile)
+        if not candidates or filtered:
+            return filtered
+
+        terms = cls._normalized_disliked_topics(profile)
+        exact_only = [
+            item for item in candidates if not cls._matches_disliked_topic_exact(item, terms)
+        ]
+        if not exact_only:
+            return filtered
+
+        logger.warning(
+            "serve dislike fail-safe restored %d/%d candidate(s) after fuzzy "
+            "disliked_topics matched the entire window; exact topic bans remain active",
+            len(exact_only),
+            len(candidates),
+        )
+        return exact_only
+
+    @classmethod
     def _normalized_disliked_topics(cls, profile: SoulProfile) -> list[str]:
         raw_topics = getattr(getattr(profile, "preferences", None), "disliked_topics", []) or []
         result: list[str] = []
@@ -5219,11 +5264,8 @@ class RecommendationEngine:
         item: DiscoveredContent,
         disliked_terms: list[str],
     ) -> bool:
-        exact_fields = [
-            cls._normalize_dislike_match_text(item.topic_key),
-            cls._normalize_dislike_match_text(item.topic_group),
-            cls._normalize_dislike_match_text(item.pool_topic_label),
-        ]
+        if cls._matches_disliked_topic_exact(item, disliked_terms):
+            return True
         search_fields = [
             cls._normalize_dislike_match_text(item.title),
             cls._normalize_dislike_match_text(item.pool_topic_label),
@@ -5233,11 +5275,23 @@ class RecommendationEngine:
             *[cls._normalize_dislike_match_text(tag) for tag in item.tags],
         ]
         for term in disliked_terms:
-            if term in exact_fields:
-                return True
             if any(term in field for field in search_fields if field):
                 return True
         return False
+
+    @classmethod
+    def _matches_disliked_topic_exact(
+        cls,
+        item: DiscoveredContent,
+        disliked_terms: list[str],
+    ) -> bool:
+        exact_fields = {
+            cls._normalize_dislike_match_text(item.topic_key),
+            cls._normalize_dislike_match_text(item.topic_group),
+            cls._normalize_dislike_match_text(item.pool_topic_label),
+        }
+        exact_fields.discard("")
+        return any(term in exact_fields for term in disliked_terms)
 
     @staticmethod
     def _normalize_dislike_match_text(value: object) -> str:

@@ -58,6 +58,7 @@ import {
   INIT_RUNNING_HINT,
   INIT_SOURCE_OPTIONS,
   INIT_SOURCE_LOGIN_HINT,
+  shouldAttachEmbeddingPullProgress,
   shouldAttachRunningInitProgress,
   stalenessView,
 } from "./popup-init-control.js";
@@ -418,6 +419,7 @@ offlineBackendPoller = createOfflineBackendPoller({
       setHint("后端连上了，正在刷新。", "success");
     }
     scheduleRecommendationsRefresh({ delayMs: 0 });
+    scheduleDialogueConfirmationRefresh();
     void maybeShowEmbeddingBanner();
   },
 });
@@ -754,6 +756,7 @@ const savedTaskRuntimes = {
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) {
     for (const runtime of Object.values(savedTaskRuntimes)) runtime.coordinator.resumeAll();
+    scheduleDialogueConfirmationRefresh();
   }
 });
 window.addEventListener("pagehide", () => {
@@ -1727,12 +1730,43 @@ async function handleCancelInitClick() {
   }
 }
 
+function renderEmbeddingPullStatus(status) {
+  renderInitPanelIdle();
+  _renderInitChecklist(status, _readSelectedInitSources());
+}
+
+async function pollEmbeddingPullProgress() {
+  let status;
+  try {
+    status = await fetchInitStatus();
+  } catch {
+    clearInitPolling();
+    initPollTimer = setTimeout(() => void pollEmbeddingPullProgress(), 3000);
+    return;
+  }
+  if (status?.running || status?.initialized) {
+    renderInitProgress(status);
+    if (status.running) {
+      _startInitProgressPoll();
+    } else {
+      clearInitPolling();
+    }
+    return;
+  }
+  renderEmbeddingPullStatus(status);
+  if (shouldAttachEmbeddingPullProgress(status)) {
+    clearInitPolling();
+    initPollTimer = setTimeout(() => void pollEmbeddingPullProgress(), 3000);
+  } else {
+    clearInitPolling();
+  }
+}
+
 // Boot-time re-attach: when the popup opens while a run is already live, the
 // uninitialized branch would otherwise paint the idle panel and never poll
-// (the run started elsewhere, so no click/SSE kicked the poll here). Fetch once
-// and, ONLY if a run is in flight, take over with the progress view + poll.
-// The idle path is left untouched (renderInitProgress would clobber it). This
-// mirrors the setup wizard's boot guard and the desktop hydrate re-attach.
+// (the run started elsewhere, so no click/SSE kicked the poll here). The same
+// applies to a packaged desktop's background bge-m3 pull: it is live work,
+// but it has no guided-init run id or SSE event of its own.
 async function maybeAttachRunningInitProgress() {
   let status;
   try {
@@ -1741,6 +1775,12 @@ async function maybeAttachRunningInitProgress() {
     return false;
   }
   if (!shouldAttachRunningInitProgress(status)) {
+    if (shouldAttachEmbeddingPullProgress(status)) {
+      renderEmbeddingPullStatus(status);
+      clearInitPolling();
+      initPollTimer = setTimeout(() => void pollEmbeddingPullProgress(), 1200);
+      return true;
+    }
     return false;
   }
   renderInitProgress(status);
@@ -1802,6 +1842,15 @@ async function handleStartInitClick() {
   if (status.running) {
     renderInitProgress(status);
     _startInitProgressPoll();
+    return;
+  }
+
+  // A background bge-m3 pull is not a guided-init run. Keep the CTA idle and
+  // attach the checklist poll instead of treating the pull as a failed init.
+  if (shouldAttachEmbeddingPullProgress(status)) {
+    renderEmbeddingPullStatus(status);
+    clearInitPolling();
+    initPollTimer = setTimeout(() => void pollEmbeddingPullProgress(), 1200);
     return;
   }
 
@@ -2209,6 +2258,11 @@ function connectRuntimeStream() {
         setHint("后端配置已热重载，正在刷新数据…", "success");
         scheduleRecommendationsRefresh();
       }
+      if (event.type === "config_reload_failed") {
+        const message = String(event.message || "后台应用配置失败，已恢复上一次生效配置。");
+        setHint(message, "error");
+        showToast(message, "error");
+      }
       if (
         event.type === "backend_update_available" ||
         event.type === "backend_update_failed" ||
@@ -2335,6 +2389,7 @@ function connectRuntimeStream() {
           "success",
         );
         scheduleRecommendationsRefresh({ delayMs: 0 });
+        scheduleDialogueConfirmationRefresh();
       }
     },
     onDisconnect() {
@@ -8822,10 +8877,10 @@ function bindSettings() {
         // write identical values for an untouched form.
         xiaohongshu: {
           enabled: checked("cfgXhsEnabled"),
-          daily_search_budget: getInt("cfgXhsDailySearchBudget", 0),
+          daily_search_budget: getInt("cfgXhsDailySearchBudget", 20),
           daily_creator_budget: getInt("cfgXhsDailyCreatorBudget", 0),
-          task_interval_seconds: getInt("cfgXhsTaskInterval", 300),
-          min_interval_minutes: getInt("cfgXhsMinInterval", 3),
+          task_interval_seconds: getInt("cfgXhsTaskInterval", 1200),
+          min_interval_minutes: getInt("cfgXhsMinInterval", 20),
         },
         douyin: {
           enabled: checked("cfgDouyinEnabled"),
@@ -9559,7 +9614,10 @@ function bindSettings() {
         } else {
           clearSettingsDirty();
         }
-        const tone = result.restart_required ? "warning" : result.reloaded ? "success" : "warning";
+        const queued = result.apply_state === "queued";
+        const tone = result.restart_required || queued
+          ? "warning"
+          : result.reloaded ? "success" : "warning";
         showToast(result.message || "配置已保存。", tone);
       } catch (err) {
         if (err?.name === "AbortError") {

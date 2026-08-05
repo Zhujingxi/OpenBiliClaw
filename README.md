@@ -209,12 +209,12 @@
 
 ## 最近更新
 
-📌 最新版本：**v0.3.192（2026-08-03）**
+📌 最新版本：**v0.3.194（2026-08-05）**
 
-- **多模态推荐增强可独立控制** —— 视觉画像、弹幕语义与关键帧加权可以分别开关，视觉相关能力默认关闭。
-- **反馈与对话提交更可靠** —— 点赞、点踩、聊天和待聊结算改为持久异步处理，慢模型或重启不再让已提交操作丢失。
-- **高级配置更顺手** —— 插件保存栏固定在底部，搜索词生成默认混合模式，多模态与搜索配置集中到高级功能页。
-- **连接与远程部署更稳** —— X 登录态会在运行时重连后立即同步，并新增 Caddy HTTPS Compose 部署入口。
+- **小红书发现更稳、更克制** —— 默认目标间隔 20 分钟并带抖动、预算和指数退避，搜索页短暂前台渲染后自动恢复原标签。
+- **首启进度不再卡住** —— bge-m3 下载启动即在 setup、桌面 Web 和插件持续显示真实进度。
+- **推荐时效判断更准确** —— 候选评估使用来源发布时间和真实 UTC 评估时间，不再按模型知识截止时间猜日期。
+- **搜索词轮换更有新鲜感** —— planner 避免反复消费同一关键词，并在积压时停止继续生成。
 
 完整变更详见 [docs/changelog.md](docs/changelog.md)。
 
@@ -612,6 +612,7 @@ background ─ background admission (default 3) ──────┘
                        ├→ one context digest → prompt/history/event/learn/settlement provenance
                        ├→ action 本地≤1s：完成 200 / 阻塞 202 → popup/移动/桌面 1/2/5s 轮询≤30s
                        └→ 疑惑 FIFO≤5 / 队头 fencing / 12h 补扫
+配置保存：空闲时同步热重载；lane 忙时先落盘 → latest-wins 后台应用队列 → 成功/失败回执
 配置热重载：保持接单并排空旧 worker → 原子暂停/revoke → 新 worker；安全窗25分钟
 实时连接：runtime-stream 20s idle 心跳 → 短暂 close 显示重连中并自动续连
 封面：proxy 前台 + refresh 预取 → app-stable lane（总4/后台3、前台优先）
@@ -652,6 +653,7 @@ background ─ background admission (default 3) ──────┘
 │  来源族注册表：alias · strategy · URL host             │
 │             → pool 统计 · seen_items 持久化已看账本     │
 │ Bangumi 官方匿名 API → search/ranked/latest producer → shared eval │
+│ 候选评估时钟：published_at + 精确 UTC evaluated_at → 小时桶缓存失效 │
 │ API projected 库存 → 3×30 worker → 串行入池；OpenClaw 首批≤4 → copy≤4/不拆分重试 → 四端 │
 │ 惊喜就绪门：正式推荐词/主题就绪 + seen_items 硬过滤 → 打分并原子快照 → 四端 × 写回已看账本 │
 │ 库存 API/OpenClaw 启动钩子 → 历史恢复/原子维护 → 再暴露 LLM │
@@ -731,7 +733,7 @@ durable turn → 固定时间/payload → 确认入口（待聊列表/卡片） 
 发现之后的统一流程：
 
 - **安全取数** — 后端不代登录、不爬你看不到的内容；所有平台复用你浏览器里已有的登录会话，首轮画像信号只在你点「开始初始化」后按所选来源拉取。画像完成后，已启用的小红书、抖音、YouTube、知乎和 Reddit 也只在扩展在线时按配置周期回拉。
-- **连续统一评估** — 各来源原始候选进入同一待评估池，默认 3×30 worker 任一完成即补位；调度只计可用、待文案与已评估 durable 库存，串行 admission 按实时 headroom 封顶，raw 不会虚增库存。
+- **连续统一评估** — 各来源原始候选进入同一待评估池，由共享 evaluator 结合灵魂画像、正文和近期负反馈批量打分；默认 3×30 worker 任一完成即补位，调度只计 durable 库存，串行 admission 按实时 headroom 封顶。可选 embedding 预过滤默认先 shadow 观测，确认无误后才 enforce 跳过明显低相似候选。
 - **多样性选择** — 平台配额 → 主题去重 → 风格均衡 → 跨平台混排 → 数量封顶；开箱只启用 B 站，其余平台在设置里显式打开。
 
 > 各平台任务链路、候选池计数、fallback 策略等完整机制见 [内容发现引擎文档](docs/modules/discovery.md)。

@@ -1998,10 +1998,10 @@ class BilibiliSourceConfigOut(BaseModel):
 
 class XiaohongshuSourceConfigOut(BaseModel):
     enabled: bool = False
-    daily_search_budget: int = 0
+    daily_search_budget: int = 20
     daily_creator_budget: int = 0
-    task_interval_seconds: int = 300
-    min_interval_minutes: int = 3
+    task_interval_seconds: int = 1200
+    min_interval_minutes: int = 20
 
 
 class DouyinSourceConfigOut(BaseModel):
@@ -2115,6 +2115,8 @@ class SchedulerConfigOut(BaseModel):
     zhihu_incremental_hours: int | None = None
     reddit_incremental_hours: int | None = None
     refresh_check_interval_seconds: int = 60
+    eval_min_batch_size: int = Field(default=15, ge=1, le=90)
+    eval_max_wait_seconds: float = Field(default=90.0, ge=0.0, le=600.0)
     signal_event_threshold: int = 6
     feedback_batch_threshold: int = 3
     trending_refresh_minutes: int = 3
@@ -2153,6 +2155,7 @@ class DiscoveryConfigOut(BaseModel):
     planner_poll_seconds: int = 120
     plan_ttl_hours: int = 12
     admission_min_score: float = 0.60
+    eval_prefilter_mode: Literal["off", "shadow", "enforce"] = "shadow"
     candidate_eval_concurrency: int = Field(default=3, ge=1, le=3)
     multimodal_evaluation_enabled: bool = False
     visual_profile_enabled: bool = False
@@ -2394,6 +2397,19 @@ class ConfigUpdateResponse(BaseModel):
     reloaded: bool = False
     rollback_applied: bool = False
     restart_required: bool = False
+    apply_state: Literal["idle", "queued", "applying", "applied", "failed"] = "idle"
+    apply_revision: int = 0
+
+
+class ConfigApplyStatusResponse(BaseModel):
+    """Non-sensitive status for the latest persisted runtime-config revision."""
+
+    state: Literal["idle", "queued", "applying", "applied", "failed"] = "idle"
+    requested_revision: int = 0
+    applied_revision: int = 0
+    message: str = ""
+    error: str = ""
+    updated_at: str = ""
 
 
 class SourceShareSuggestionResponse(BaseModel):

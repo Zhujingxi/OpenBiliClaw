@@ -161,6 +161,12 @@ class TestConfigDefaults:
 
         assert config.scheduler.pool_target_count == 300
 
+    def test_config_defaults_eval_batch_coalescing_fields(self) -> None:
+        config = Config()
+
+        assert config.scheduler.eval_min_batch_size == 15
+        assert config.scheduler.eval_max_wait_seconds == 90.0
+
     def test_scheduler_pool_source_shares_defaults(self) -> None:
         config = Config()
 
@@ -947,6 +953,31 @@ def test_validate_runtime_config_rejects_pool_target_count_above_cap() -> None:
         validate_runtime_config(config)
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("eval_min_batch_size", 0),
+        ("eval_min_batch_size", 91),
+        ("eval_max_wait_seconds", -0.1),
+        ("eval_max_wait_seconds", 600.1),
+    ],
+)
+def test_validate_runtime_config_rejects_eval_batch_coalescing_out_of_range(
+    field: str,
+    value: int | float,
+) -> None:
+    config = Config(
+        llm=LLMConfig(
+            default_provider="ollama",
+            ollama=LLMProviderConfig(model="llama3", base_url="http://localhost:11434"),
+        )
+    )
+    setattr(config.scheduler, field, value)
+
+    with pytest.raises(ConfigError, match=f"scheduler.{field}"):
+        validate_runtime_config(config)
+
+
 def test_build_config_supports_account_sync_interval() -> None:
     config = _build_config(
         {
@@ -1038,6 +1069,8 @@ def test_load_config_reads_scheduler_runtime_fields(tmp_path: Path) -> None:
         """
 [scheduler]
 refresh_check_interval_seconds = 75
+eval_min_batch_size = 23
+eval_max_wait_seconds = 45.5
 signal_event_threshold = 9
 trending_refresh_minutes = 5
 explore_refresh_minutes = 18
@@ -1056,6 +1089,8 @@ avoidance_speculation_max_active = 5
     config = load_config(toml_path)
 
     assert config.scheduler.refresh_check_interval_seconds == 75
+    assert config.scheduler.eval_min_batch_size == 23
+    assert config.scheduler.eval_max_wait_seconds == 45.5
     assert config.scheduler.signal_event_threshold == 9
     assert config.scheduler.trending_refresh_minutes == 5
     assert config.scheduler.explore_refresh_minutes == 18
@@ -1074,6 +1109,11 @@ avoidance_speculation_max_active = 5
     [
         ("refresh_check_interval_seconds", "0", 60),
         ("refresh_check_interval_seconds", '"abc"', 60),
+        ("eval_min_batch_size", "0", 15),
+        ("eval_min_batch_size", "91", 15),
+        ("eval_max_wait_seconds", "-1", 90.0),
+        ("eval_max_wait_seconds", "601", 90.0),
+        ("eval_max_wait_seconds", '"abc"', 90.0),
         ("signal_event_threshold", "-1", 6),
         ("trending_refresh_minutes", "0", 3),
         ("explore_refresh_minutes", "0", 3),
@@ -1123,6 +1163,8 @@ def test_save_config_round_trips_scheduler_runtime_fields(tmp_path: Path) -> Non
     config_path = tmp_path / "config.toml"
     config = Config()
     config.scheduler.refresh_check_interval_seconds = 75
+    config.scheduler.eval_min_batch_size = 23
+    config.scheduler.eval_max_wait_seconds = 45.5
     config.scheduler.signal_event_threshold = 9
     config.scheduler.trending_refresh_minutes = 5
     config.scheduler.explore_refresh_minutes = 18
@@ -1139,6 +1181,8 @@ def test_save_config_round_trips_scheduler_runtime_fields(tmp_path: Path) -> Non
     loaded = load_config(config_path)
 
     assert loaded.scheduler.refresh_check_interval_seconds == 75
+    assert loaded.scheduler.eval_min_batch_size == 23
+    assert loaded.scheduler.eval_max_wait_seconds == 45.5
     assert loaded.scheduler.signal_event_threshold == 9
     assert loaded.scheduler.trending_refresh_minutes == 5
     assert loaded.scheduler.explore_refresh_minutes == 18
@@ -1288,9 +1332,10 @@ def test_sources_xiaohongshu_defaults() -> None:
     config = _build_config({})
 
     assert config.sources.xiaohongshu.enabled is False
-    assert config.sources.xiaohongshu.daily_search_budget == 0
+    assert config.sources.xiaohongshu.daily_search_budget == 20
     assert config.sources.xiaohongshu.daily_creator_budget == 0
-    assert config.sources.xiaohongshu.task_interval_seconds == 300
+    assert config.sources.xiaohongshu.task_interval_seconds == 1200
+    assert config.sources.xiaohongshu.min_interval_minutes == 20
 
 
 def test_sources_douyin_defaults() -> None:
@@ -2480,6 +2525,7 @@ class TestDiscoveryConfig:
             "you",
         )
         assert config.discovery.inspiration_breadth == "high"
+        assert config.discovery.eval_prefilter_mode == "shadow"
         assert config.discovery.multimodal_evaluation_enabled is False
         assert config.discovery.visual_profile_enabled is False
         assert config.discovery.keyframe_enabled is False
@@ -2510,6 +2556,7 @@ class TestDiscoveryConfig:
             "you",
         )
         assert config.discovery.inspiration_breadth == "high"
+        assert config.discovery.eval_prefilter_mode == "shadow"
         assert config.discovery.multimodal_evaluation_enabled is False
         assert config.discovery.visual_profile_enabled is False
         assert config.discovery.keyframe_enabled is False
@@ -2580,6 +2627,7 @@ inspiration_search_enabled = true
 inspiration_replace_merged_keywords = true
 inspiration_search_backends = ["platform_sources", "exa", "you"]
 inspiration_breadth = "high"
+eval_prefilter_mode = "enforce"
 multimodal_evaluation_enabled = true
 candidate_eval_concurrency = 3
 multimodal_batch_size = 4
@@ -2607,6 +2655,7 @@ multimodal_image_timeout_seconds = 10
         assert config.discovery.inspiration_replace_merged_keywords is True
         assert config.discovery.inspiration_search_backends == ("platform_sources", "exa", "you")
         assert config.discovery.inspiration_breadth == "high"
+        assert config.discovery.eval_prefilter_mode == "enforce"
         assert config.discovery.multimodal_evaluation_enabled is True
         assert config.discovery.candidate_eval_concurrency == 3
         assert config.discovery.multimodal_batch_size == 4
@@ -2695,7 +2744,7 @@ multimodal_image_timeout_seconds = 10
 
         assert getattr(config.discovery, field) == expected
 
-    @pytest.mark.parametrize("literal", ["0", "-0.1", "1.1", '"nope"'])
+    @pytest.mark.parametrize("literal", ["0", "0.49", "-0.1", "1.1", '"nope"'])
     def test_discovery_invalid_admission_min_score_falls_back_to_default(
         self, tmp_path: Path, literal: str
     ) -> None:
@@ -2711,6 +2760,31 @@ admission_min_score = {literal}
         config = load_config(toml_path)
 
         assert config.discovery.admission_min_score == 0.60
+
+    def test_discovery_eval_prefilter_mode_normalizes_from_toml(self, tmp_path: Path) -> None:
+        toml_path = tmp_path / "c.toml"
+        toml_path.write_text(
+            """
+[discovery]
+eval_prefilter_mode = "  Shadow  "
+""".strip(),
+            encoding="utf-8",
+        )
+
+        config = load_config(toml_path)
+
+        assert config.discovery.eval_prefilter_mode == "shadow"
+
+    def test_validate_runtime_config_rejects_invalid_eval_prefilter_mode(self) -> None:
+        config = Config()
+        config.llm.default_provider = "ollama"
+        # Main's stricter validation requires an explicit ollama chat model;
+        # satisfy it so validation reaches the prefilter-mode check.
+        config.llm.ollama.model = "qwen2.5:7b"
+        config.discovery.eval_prefilter_mode = "aggressive"
+
+        with pytest.raises(ConfigError, match="discovery\\.eval_prefilter_mode"):
+            validate_runtime_config(config)
 
     def test_discovery_missing_table_uses_defaults(self, tmp_path: Path) -> None:
         toml_path = tmp_path / "c.toml"
@@ -2781,6 +2855,7 @@ admission_min_score = {literal}
         config.discovery.inspiration_replace_merged_keywords = True
         config.discovery.inspiration_search_backends = ("you",)
         config.discovery.inspiration_breadth = "low"
+        config.discovery.eval_prefilter_mode = "enforce"
         config.discovery.multimodal_evaluation_enabled = True
         config.discovery.multimodal_batch_size = 4
         config.discovery.multimodal_image_max_px = 512
@@ -2805,6 +2880,7 @@ admission_min_score = {literal}
         assert loaded.discovery.inspiration_replace_merged_keywords is True
         assert loaded.discovery.inspiration_search_backends == ("you",)
         assert loaded.discovery.inspiration_breadth == "low"
+        assert loaded.discovery.eval_prefilter_mode == "enforce"
         assert loaded.discovery.multimodal_evaluation_enabled is True
         assert loaded.discovery.multimodal_batch_size == 4
         assert loaded.discovery.multimodal_image_max_px == 512
@@ -2828,6 +2904,7 @@ admission_min_score = {literal}
             in rendered
         )
         assert 'inspiration_breadth = "high"' in rendered
+        assert 'eval_prefilter_mode = "shadow"' in rendered
         assert "multimodal_evaluation_enabled = false" in rendered
         assert "multimodal_batch_size = 8" in rendered
         assert "multimodal_image_max_px = 384" in rendered

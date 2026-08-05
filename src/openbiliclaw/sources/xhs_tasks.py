@@ -11,6 +11,7 @@ a nightly scheduler enqueues one creator task per subscription.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import uuid
@@ -23,6 +24,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 XHS_RATE_LIMIT_COOLDOWN_SECONDS = 60 * 60
+XHS_RATE_LIMIT_MAX_COOLDOWN_SECONDS = 24 * 60 * 60
+XHS_TASK_INTERVAL_JITTER_RATIO = 0.25
 _XHS_RUNTIME_STATE_ROW_ID = 1
 _XHS_PACED_TASK_TYPES = frozenset({"search", "creator"})
 
@@ -77,6 +80,27 @@ def _remaining_seconds(until: datetime | None, now: datetime) -> int:
         return 0
     seconds = max(0.0, (until - now).total_seconds())
     return int(seconds) if seconds.is_integer() else int(seconds) + 1
+
+
+def _jittered_interval_seconds(
+    target_seconds: int,
+    *,
+    task_id: str,
+    jitter_ratio: float,
+) -> int:
+    """Return a stable per-task interval around the configured target."""
+    target = max(0, int(target_seconds))
+    ratio = min(0.9, max(0.0, float(jitter_ratio)))
+    if target == 0 or ratio == 0:
+        return target
+    digest = hashlib.blake2b(
+        task_id.encode("utf-8"),
+        digest_size=8,
+        person=b"xhs-pace",
+    ).digest()
+    unit = int.from_bytes(digest, "big") / ((1 << 64) - 1)
+    factor = (1.0 - ratio) + (2.0 * ratio * unit)
+    return max(1, round(target * factor))
 
 
 def _note_key(note: dict[str, Any]) -> str:
@@ -271,6 +295,7 @@ class XhsTaskQueue:
                 next_claim_at   TIMESTAMP,
                 cooldown_until  TIMESTAMP,
                 cooldown_reason TEXT NOT NULL DEFAULT '',
+                rate_limit_strikes INTEGER NOT NULL DEFAULT 0,
                 updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             INSERT OR IGNORE INTO xhs_task_runtime_state(singleton)
@@ -282,7 +307,16 @@ class XhsTaskQueue:
         }
         if "claimed_at" not in columns:
             self._db.conn.execute("ALTER TABLE xhs_tasks ADD COLUMN claimed_at TIMESTAMP")
-            self._db.conn.commit()
+        runtime_columns = {
+            str(row["name"])
+            for row in self._db.conn.execute("PRAGMA table_info(xhs_task_runtime_state)").fetchall()
+        }
+        if "rate_limit_strikes" not in runtime_columns:
+            self._db.conn.execute(
+                "ALTER TABLE xhs_task_runtime_state "
+                "ADD COLUMN rate_limit_strikes INTEGER NOT NULL DEFAULT 0"
+            )
+        self._db.conn.commit()
 
     def enqueue(
         self,
@@ -347,12 +381,25 @@ class XhsTaskQueue:
             conn.commit()
         return task_id
 
+    def active_task_count(self, task_type: str) -> int:
+        """Return pending and in-progress task count for one task type."""
+        row = self._db.conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM xhs_tasks
+            WHERE type = ? AND status IN ('pending', 'in_progress')
+            """,
+            (task_type,),
+        ).fetchone()
+        return int(row[0]) if row is not None else 0
+
     def runtime_state(self, *, now: datetime | None = None) -> dict[str, Any]:
         """Return persisted pacing and risk-control state for diagnostics."""
         current = _utc_now(now)
         row = self._db.conn.execute(
             """
-            SELECT next_claim_at, cooldown_until, cooldown_reason, updated_at
+            SELECT next_claim_at, cooldown_until, cooldown_reason,
+                   rate_limit_strikes, updated_at
             FROM xhs_task_runtime_state
             WHERE singleton = ?
             """,
@@ -366,6 +413,7 @@ class XhsTaskQueue:
                 "cooldown_until": "",
                 "next_claim_at": "",
                 "cooldown_reason": "",
+                "rate_limit_strikes": 0,
                 "updated_at": "",
             }
         next_claim_at = _parse_sqlite_timestamp(row["next_claim_at"])
@@ -381,6 +429,7 @@ class XhsTaskQueue:
             "cooldown_until": str(row["cooldown_until"] or ""),
             "next_claim_at": str(row["next_claim_at"] or ""),
             "cooldown_reason": str(row["cooldown_reason"] or ""),
+            "rate_limit_strikes": max(0, int(row["rate_limit_strikes"] or 0)),
             "updated_at": str(row["updated_at"] or ""),
         }
 
@@ -398,22 +447,25 @@ class XhsTaskQueue:
         scope_counts: dict[str, Any] | None = None,
         debug: dict[str, Any] | None = None,
         cooldown_seconds: int = XHS_RATE_LIMIT_COOLDOWN_SECONDS,
+        max_cooldown_seconds: int = XHS_RATE_LIMIT_MAX_COOLDOWN_SECONDS,
         now: datetime | None = None,
     ) -> dict[str, Any]:
         """Persist a platform-wide cooldown and optionally fail its task.
 
         The state lives outside an individual task so it survives backend and
-        MV3 service-worker restarts. Repeated reports can only extend the
-        cooldown; they never shorten an existing safety window.
+        MV3 service-worker restarts. Separate risk episodes back off
+        exponentially; duplicate reports inside one active cooldown share the
+        same strike and can only extend, never shorten, its safety window.
         """
         current = _utc_now(now)
-        requested_until = current + timedelta(seconds=max(1, int(cooldown_seconds)))
+        base_cooldown = max(1, int(cooldown_seconds))
+        max_cooldown = max(base_cooldown, int(max_cooldown_seconds))
         conn = self._db.open_connection()
         try:
             conn.execute("BEGIN IMMEDIATE")
             state = conn.execute(
                 """
-                SELECT next_claim_at, cooldown_until
+                SELECT next_claim_at, cooldown_until, rate_limit_strikes
                 FROM xhs_task_runtime_state
                 WHERE singleton = ?
                 """,
@@ -422,6 +474,17 @@ class XhsTaskQueue:
             existing_cooldown = (
                 _parse_sqlite_timestamp(state["cooldown_until"]) if state is not None else None
             )
+            existing_strikes = max(
+                0,
+                int(state["rate_limit_strikes"] or 0) if state is not None else 0,
+            )
+            if _remaining_seconds(existing_cooldown, current) > 0:
+                strike_count = max(1, existing_strikes)
+            else:
+                strike_count = existing_strikes + 1
+            exponent = min(30, max(0, strike_count - 1))
+            applied_cooldown = min(max_cooldown, base_cooldown * (1 << exponent))
+            requested_until = current + timedelta(seconds=applied_cooldown)
             effective_until = max(
                 requested_until,
                 existing_cooldown or requested_until,
@@ -437,13 +500,14 @@ class XhsTaskQueue:
                 """
                 INSERT INTO xhs_task_runtime_state(
                     singleton, next_claim_at, cooldown_until,
-                    cooldown_reason, updated_at
+                    cooldown_reason, rate_limit_strikes, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(singleton) DO UPDATE SET
                     next_claim_at = excluded.next_claim_at,
                     cooldown_until = excluded.cooldown_until,
                     cooldown_reason = excluded.cooldown_reason,
+                    rate_limit_strikes = excluded.rate_limit_strikes,
                     updated_at = excluded.updated_at
                 """,
                 (
@@ -451,6 +515,7 @@ class XhsTaskQueue:
                     _format_sqlite_timestamp(effective_next_claim),
                     _format_sqlite_timestamp(effective_until),
                     str(error or "xhs_rate_limited")[:128],
+                    strike_count,
                     _format_sqlite_timestamp(current),
                 ),
             )
@@ -484,6 +549,7 @@ class XhsTaskQueue:
                     merged["error"] = str(error or "xhs_rate_limited")
                     merged["rate_limited"] = True
                     merged["cooldown_until"] = _format_sqlite_timestamp(effective_until)
+                    merged["rate_limit_strikes"] = strike_count
                     conn.execute(
                         """
                         UPDATE xhs_tasks
@@ -506,9 +572,12 @@ class XhsTaskQueue:
         finally:
             conn.close()
         logger.warning(
-            "xhs task circuit breaker opened: task_id=%s reason=%s cooldown_until=%s",
+            "xhs task circuit breaker opened: task_id=%s reason=%s strikes=%d "
+            "cooldown_seconds=%d cooldown_until=%s",
             task_id or "-",
             str(error or "xhs_rate_limited")[:128],
+            strike_count,
+            applied_cooldown,
             _format_sqlite_timestamp(effective_until),
         )
         return self.runtime_state(now=current)
@@ -518,6 +587,7 @@ class XhsTaskQueue:
         only_ids: set[str] | None = None,
         *,
         min_interval_seconds: int = 0,
+        jitter_ratio: float = XHS_TASK_INTERVAL_JITTER_RATIO,
         now: datetime | None = None,
     ) -> dict[str, Any] | None:
         """Claim and return the oldest runnable task, or None.
@@ -587,7 +657,12 @@ class XhsTaskQueue:
             )
             interval_seconds = max(0, int(min_interval_seconds))
             if task_type in _XHS_PACED_TASK_TYPES and interval_seconds > 0:
-                next_claim_at = current + timedelta(seconds=interval_seconds)
+                paced_seconds = _jittered_interval_seconds(
+                    interval_seconds,
+                    task_id=task_id,
+                    jitter_ratio=jitter_ratio,
+                )
+                next_claim_at = current + timedelta(seconds=paced_seconds)
                 conn.execute(
                     """
                     UPDATE xhs_task_runtime_state
@@ -674,13 +749,15 @@ class XhsTaskQueue:
             result_payload["debug"] = debug
         from openbiliclaw.sources.task_result_protocol import mutate_unstaged_result
 
-        mutate_unstaged_result(
+        mutated, _canonical = mutate_unstaged_result(
             self._db,
             table="xhs_tasks",
             task_id=task_id,
             mutate=lambda _current: result_payload,
             terminal_status="completed",
         )
+        if mutated:
+            self._reset_rate_limit_strikes_after_success(task_id)
 
     def merge_result(
         self,
@@ -740,6 +817,8 @@ class XhsTaskQueue:
             mutate=mutate,
             terminal_status="completed" if complete else None,
         )
+        if complete and mutated:
+            self._reset_rate_limit_strikes_after_success(task_id)
         return (added_notes, enriched_notes) if mutated else ([], [])
 
     def stage_final_result(
@@ -777,7 +856,78 @@ class XhsTaskQueue:
         """Mark a staged canonical result complete without replacing it."""
         from openbiliclaw.sources.task_result_protocol import complete_staged_result
 
-        return complete_staged_result(self._db, table="xhs_tasks", task_id=task_id)
+        completed = complete_staged_result(self._db, table="xhs_tasks", task_id=task_id)
+        if completed:
+            self._reset_rate_limit_strikes_after_success(task_id)
+        return completed
+
+    def _reset_rate_limit_strikes_after_success(self, task_id: str) -> bool:
+        """Clear expired risk backoff after a successful paced task."""
+        current = _utc_now()
+        conn = self._db.open_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            task = conn.execute(
+                "SELECT type, status FROM xhs_tasks WHERE id = ?",
+                (task_id,),
+            ).fetchone()
+            if task is None or (
+                str(task["type"] or "") not in _XHS_PACED_TASK_TYPES
+                or str(task["status"] or "") != "completed"
+            ):
+                conn.commit()
+                return False
+            state = conn.execute(
+                """
+                SELECT cooldown_until, rate_limit_strikes
+                FROM xhs_task_runtime_state
+                WHERE singleton = ?
+                """,
+                (_XHS_RUNTIME_STATE_ROW_ID,),
+            ).fetchone()
+            cooldown_until = (
+                _parse_sqlite_timestamp(state["cooldown_until"]) if state is not None else None
+            )
+            if _remaining_seconds(cooldown_until, current) > 0:
+                # A different in-flight task may have opened the breaker before
+                # this success arrived. Never let that late result cancel an
+                # active safety window.
+                conn.commit()
+                return False
+            strikes = int(state["rate_limit_strikes"] or 0) if state is not None else 0
+            if strikes <= 0:
+                conn.commit()
+                return False
+            conn.execute(
+                """
+                UPDATE xhs_task_runtime_state
+                SET cooldown_until = NULL,
+                    cooldown_reason = '',
+                    rate_limit_strikes = 0,
+                    updated_at = ?
+                WHERE singleton = ?
+                """,
+                (
+                    _format_sqlite_timestamp(current),
+                    _XHS_RUNTIME_STATE_ROW_ID,
+                ),
+            )
+            conn.commit()
+            logger.info("xhs task circuit breaker reset after successful task: %s", task_id)
+            return True
+        except Exception:
+            if conn.in_transaction:
+                conn.rollback()
+            # Completion is already durable by the time this best-effort reset
+            # runs. Keeping an old strike is safer than turning a successful
+            # callback into a 5xx that cannot roll the terminal task back.
+            logger.exception(
+                "xhs task circuit breaker reset failed after successful task: %s",
+                task_id,
+            )
+            return False
+        finally:
+            conn.close()
 
     def fail(
         self,

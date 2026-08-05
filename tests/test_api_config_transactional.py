@@ -287,3 +287,117 @@ async def test_put_config_serializes_concurrent_saves(
     assert second.status_code == 200
     assert load_config(config_path).llm.openai.model == "gpt-5-mini"
     assert load_config(tmp_path / "config.toml.bak").llm.openai.model == "gpt-4.1-mini"
+
+
+@pytest.mark.asyncio
+async def test_busy_dialogue_queues_config_and_latest_revision_wins(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    save_config(_valid_config(), config_path)
+    app = create_app(memory_manager=object(), database=object(), soul_engine=object())
+    monkeypatch.setattr(app.state.auth_gate, "is_trusted_local", lambda _request: True)
+    coordinator = app.state.dialogue_execution_coordinator
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def hold_dialogue_lane() -> None:
+        async with coordinator.lease():
+            entered.set()
+            await release.wait()
+
+    owner = asyncio.create_task(hold_dialogue_lane())
+    await asyncio.wait_for(entered.wait(), timeout=1)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app, client=("127.0.0.1", 12345)),
+        base_url="http://testserver",
+    ) as client:
+        first = await asyncio.wait_for(
+            client.put(
+                "/api/config",
+                json={"llm": {"openai": {"model": "gpt-4.1-mini"}}},
+            ),
+            timeout=1,
+        )
+        second = await asyncio.wait_for(
+            client.put(
+                "/api/config",
+                json={"llm": {"openai": {"model": "gpt-5-mini"}}},
+            ),
+            timeout=1,
+        )
+
+        assert first.status_code == 202
+        assert second.status_code == 202
+        assert first.json()["apply_state"] == "queued"
+        assert second.json()["apply_revision"] > first.json()["apply_revision"]
+        assert load_config(config_path).llm.openai.model == "gpt-5-mini"
+        init_response = await client.post("/api/init", json={"sources": ["bilibili"]})
+        assert init_response.status_code == 409
+        assert init_response.json()["error"] == "config_applying"
+
+        release.set()
+        await owner
+        for _ in range(200):
+            status = (await client.get("/api/config/apply-status")).json()
+            if status["state"] == "applied":
+                break
+            await asyncio.sleep(0.01)
+        else:
+            pytest.fail("queued config revision did not apply")
+
+    assert status["requested_revision"] == second.json()["apply_revision"]
+    assert status["applied_revision"] == second.json()["apply_revision"]
+    assert app.state.runtime_context.config.llm.openai.model == "gpt-5-mini"
+
+
+@pytest.mark.asyncio
+async def test_queued_config_failure_restores_last_applied_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    save_config(_valid_config(), config_path)
+    app = create_app(memory_manager=object(), database=object(), soul_engine=object())
+    coordinator = app.state.dialogue_execution_coordinator
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def hold_dialogue_lane() -> None:
+        async with coordinator.lease():
+            entered.set()
+            await release.wait()
+
+    async def fail_rebuild(self: RuntimeContext, new_config: Config) -> None:  # noqa: ARG001
+        raise RuntimeError("queued rebuild failed")
+
+    owner = asyncio.create_task(hold_dialogue_lane())
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    monkeypatch.setattr(RuntimeContext, "rebuild_from_config", fail_rebuild)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.put(
+            "/api/config",
+            json={"llm": {"openai": {"model": "gpt-4.1-mini"}}},
+        )
+        assert response.status_code == 202
+        release.set()
+        await owner
+        for _ in range(200):
+            status = (await client.get("/api/config/apply-status")).json()
+            if status["state"] == "failed":
+                break
+            await asyncio.sleep(0.01)
+        else:
+            pytest.fail("queued config failure did not settle")
+
+    assert "queued rebuild failed" in status["error"]
+    assert load_config(config_path).llm.openai.model == "gpt-4o-mini"
+    assert load_config(tmp_path / "config.toml.bak").llm.openai.model == "gpt-4o-mini"

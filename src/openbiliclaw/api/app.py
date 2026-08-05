@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import inspect
 import ipaddress
 import json
@@ -48,6 +49,7 @@ from openbiliclaw.api.models import (
     CognitionUpdateSeenIn,
     CognitionUpdateSeenResponse,
     CognitionUpdateSummary,
+    ConfigApplyStatusResponse,
     ConfigIssueOut,
     ConfigModelDiscoveryIn,
     ConfigModelDiscoveryResponse,
@@ -309,6 +311,17 @@ _CONFIRMATION_OBJECT_COOLDOWN_HOURS = 72
 _RUNTIME_STREAM_HEARTBEAT_SECONDS = 20.0
 _DIALOGUE_EXECUTION_DRAIN_TIMEOUT_SECONDS = 1500.0
 
+
+@dataclass(slots=True)
+class _QueuedConfigApply:
+    """One persisted config revision waiting for a safe runtime handoff."""
+
+    revision: int
+    config: Any
+    saved_path: Path
+    run_post_reload_llm_work: bool
+
+
 # Guided-init owner-lease heartbeat period. A stage can spend minutes inside one
 # provider call, so ``touch()`` proves that the wrapper/event loop still owns the
 # run. It deliberately does not advance the separate useful-progress clock.
@@ -502,7 +515,7 @@ def _native_save_e2e_content_id_from_url(
             ):
                 return ""
         match = re.fullmatch(
-            r"/(?:explore|discovery/item)/([A-Za-z0-9_-]+)/?",
+            r"/(?:explore|discovery/item|search_result)/([A-Za-z0-9_-]+)/?",
             parsed.path,
         )
         return match.group(1) if match else ""
@@ -1874,6 +1887,17 @@ def create_app(
     app.state.event_recovery_task = None
     dialogue_execution_coordinator = DialogueExecutionCoordinator()
     app.state.dialogue_execution_coordinator = dialogue_execution_coordinator
+    config_runtime_reload_lock = asyncio.Lock()
+    config_apply_task: asyncio.Task[None] | None = None
+    config_apply_pending: _QueuedConfigApply | None = None
+    config_apply_revision = 0
+    config_applied_revision = 0
+    config_apply_state: Literal["idle", "queued", "applying", "applied", "failed"] = "idle"
+    config_apply_message = ""
+    config_apply_error = ""
+    config_apply_updated_at = ""
+    config_last_good = copy.deepcopy(getattr(ctx, "config", None) or config)
+    app.state.config_apply_task = None
     image_fetch_coordinator = ImageFetchCoordinator()
     app.state.image_fetch_coordinator = image_fetch_coordinator
     chat_reply_scheduler: DurableChatReplyScheduler
@@ -2133,6 +2157,7 @@ def create_app(
             # so the recovery surface must stay reachable while degraded.
             or path in ("/api/update-status", "/api/update/check", "/api/update/apply")
             or (path == "/api/config" and method in {"GET", "PUT"})
+            or (path == "/api/config/apply-status" and method == "GET")
             # Draft-only config helpers are part of the recovery control
             # plane, not business LLM traffic.  Each builds from the submitted
             # form (or config + DB for source shares), so blocking it here made
@@ -2492,40 +2517,256 @@ def create_app(
         after_rebuild: Any = None,
     ) -> None:
         """Quiesce old owners before publishing and recovering a new runtime."""
-        await feedback_batch_scheduler.pause_and_drain()
-        dialogue_paused = False
-        try:
-            await dialogue_execution_coordinator.pause_and_drain(
-                timeout=_DIALOGUE_EXECUTION_DRAIN_TIMEOUT_SECONDS
-            )
-            dialogue_paused = True
-            await ctx.rebuild_from_config(new_config)
-            if callable(after_rebuild):
-                after_rebuild()
-            await _restart_background_tasks_after_event_recovery(
-                run_post_reload_llm_work=run_post_reload_llm_work,
-                resume_execution_lanes=resume_execution_lanes,
-            )
-        except BaseException:
-            # Rebuild is atomic: on construction failure ctx still exposes the
-            # old runtime; after publication it exposes the new one. Resolve at
-            # resume time in both cases and never leave the lane paused.
-            with suppress(Exception):
+        async with config_runtime_reload_lock:
+            await feedback_batch_scheduler.pause_and_drain()
+            dialogue_paused = False
+            try:
+                await dialogue_execution_coordinator.pause_and_drain(
+                    timeout=_DIALOGUE_EXECUTION_DRAIN_TIMEOUT_SECONDS
+                )
+                dialogue_paused = True
+                await ctx.rebuild_from_config(new_config)
+                if callable(after_rebuild):
+                    after_rebuild()
                 await _restart_background_tasks_after_event_recovery(
                     run_post_reload_llm_work=run_post_reload_llm_work,
                     resume_execution_lanes=resume_execution_lanes,
                 )
-            raise
-        finally:
-            # Guided init may keep event owners paused, but the independent
-            # chat lane must always resume against the current/rolled-back ctx.
-            if dialogue_paused:
-                await dialogue_execution_coordinator.resume()
+            except BaseException:
+                # Rebuild is atomic: on construction failure ctx still exposes the
+                # old runtime; after publication it exposes the new one. Resolve at
+                # resume time in both cases and never leave the lane paused.
+                with suppress(Exception):
+                    await _restart_background_tasks_after_event_recovery(
+                        run_post_reload_llm_work=run_post_reload_llm_work,
+                        resume_execution_lanes=resume_execution_lanes,
+                    )
+                raise
+            finally:
+                # Guided init may keep event owners paused, but the independent
+                # chat lane must always resume against the current/rolled-back ctx.
+                if dialogue_paused:
+                    await dialogue_execution_coordinator.resume()
 
     # Stable, app-owned handoff seam used by every internal rebuild caller.
     # Keeping it on app.state also makes drain/publication invariants directly
     # testable without forcing a config.toml write through the HTTP surface.
     app.state._rebuild_runtime_with_lane_handoff = _rebuild_runtime_with_lane_handoff
+
+    def _set_config_apply_status(
+        state: Literal["idle", "queued", "applying", "applied", "failed"],
+        message: str,
+        *,
+        error: str = "",
+    ) -> None:
+        nonlocal config_apply_state, config_apply_message
+        nonlocal config_apply_error, config_apply_updated_at
+        config_apply_state = state
+        config_apply_message = message
+        config_apply_error = error
+        config_apply_updated_at = datetime.now(UTC).isoformat()
+
+    def _config_apply_status_response() -> ConfigApplyStatusResponse:
+        return ConfigApplyStatusResponse(
+            state=config_apply_state,
+            requested_revision=config_apply_revision,
+            applied_revision=config_applied_revision,
+            message=config_apply_message,
+            error=config_apply_error,
+            updated_at=config_apply_updated_at,
+        )
+
+    def _config_apply_busy() -> bool:
+        task_running = config_apply_task is not None and not config_apply_task.done()
+        return (
+            task_running
+            or config_apply_pending is not None
+            or config_apply_state
+            in {
+                "queued",
+                "applying",
+            }
+        )
+
+    def _runtime_lane_busy_for_config_apply() -> bool:
+        """Avoid putting an interactive save behind a known long-running owner."""
+        if _config_apply_busy() or config_runtime_reload_lock.locked():
+            return True
+        if dialogue_execution_coordinator.active or dialogue_execution_coordinator.paused:
+            return True
+        event_status = feedback_batch_scheduler.status_payload()
+        if bool(event_status.get("event_lane_active")):
+            return True
+        settlement_queue = getattr(ctx, "dialogue_settlement_queue", None)
+        ready = getattr(settlement_queue, "ready_for_interactive_submission", True)
+        return ready is False
+
+    def _config_reload_error(exc: BaseException) -> str:
+        if isinstance(exc, TimeoutError):
+            return "后台对话在 25 分钟内仍未整理完成，运行时未能安全切换"
+        return str(exc).strip() or type(exc).__name__
+
+    async def _apply_runtime_config_revision(item: _QueuedConfigApply) -> str:
+        """Apply one persisted revision without owning the config-file lock."""
+        was_degraded = bool(getattr(ctx, "degraded", False))
+        recovered_from_degraded = False
+
+        def _after_config_runtime_rebuilt() -> None:
+            nonlocal recovered_from_degraded
+            if not was_degraded:
+                return
+            _complete_degraded_runtime_recovery()
+            recovered_from_degraded = True
+
+        try:
+            await _rebuild_runtime_with_lane_handoff(
+                item.config,
+                run_post_reload_llm_work=item.run_post_reload_llm_work,
+                after_rebuild=_after_config_runtime_rebuilt,
+            )
+        except Exception:
+            if not recovered_from_degraded:
+                raise
+            logger.exception("Degraded runtime recovered, but background task restart failed")
+            message = (
+                f"配置已保存到 {item.saved_path}。后端已原地恢复；"
+                "部分后台任务启动失败，将在后续配置刷新时重试，"
+                "不影响继续初始化。"
+            )
+        else:
+            message = f"配置已保存到 {item.saved_path}。"
+            message += (
+                " 后端已从降级模式原地恢复，无需重启。"
+                if was_degraded
+                else " 运行时组件已热重载，新配置立即生效。"
+            )
+        logger.info("Config hot-reload succeeded: revision=%d", item.revision)
+        with suppress(Exception):
+            await ctx.event_hub.publish(
+                {
+                    "type": "config_reloaded",
+                    "revision": item.revision,
+                    "message": "配置已热重载，运行时组件已重建。",
+                }
+            )
+        return message
+
+    async def _run_config_apply_queue() -> None:
+        """Apply the newest queued revision; intermediate pending saves coalesce."""
+        nonlocal config_apply_task, config_apply_pending
+        nonlocal config_applied_revision, config_last_good
+        from openbiliclaw.config import save_config
+        from openbiliclaw.network import set_outbound_proxy
+
+        try:
+            while config_apply_pending is not None:
+                item = config_apply_pending
+                config_apply_pending = None
+                _set_config_apply_status(
+                    "applying",
+                    f"正在后台应用配置修订 {item.revision}。",
+                )
+                try:
+                    proxy_cfg = getattr(item.config, "network", None)
+                    set_outbound_proxy(
+                        str(getattr(proxy_cfg, "proxy", "") or ""),
+                        mode=str(getattr(proxy_cfg, "mode", "system") or "system"),
+                    )
+                    message = await _apply_runtime_config_revision(item)
+                except asyncio.CancelledError:
+                    config_apply_pending = item
+                    _set_config_apply_status(
+                        "queued",
+                        f"配置修订 {item.revision} 已保存，将在后端重启后生效。",
+                    )
+                    raise
+                except Exception as exc:
+                    logger.exception(
+                        "Queued config hot-reload failed: revision=%d",
+                        item.revision,
+                    )
+                    error = _config_reload_error(exc)
+                    async with _CONFIG_SAVE_LOCK:
+                        if config_apply_pending is not None:
+                            _set_config_apply_status(
+                                "queued",
+                                (
+                                    f"配置修订 {item.revision} 应用失败；"
+                                    f"正在改用更新的修订 {config_apply_pending.revision}。"
+                                ),
+                                error=error,
+                            )
+                            continue
+                        try:
+                            restored_path = save_config(copy.deepcopy(config_last_good))
+                            _snapshot_config_file(restored_path)
+                            proxy_cfg = getattr(config_last_good, "network", None)
+                            set_outbound_proxy(
+                                str(getattr(proxy_cfg, "proxy", "") or ""),
+                                mode=str(getattr(proxy_cfg, "mode", "system") or "system"),
+                            )
+                        except Exception as restore_exc:
+                            logger.critical(
+                                "Queued config rollback failed after hot-reload exception",
+                                exc_info=True,
+                            )
+                            failure_message = (
+                                "后台热重载失败，且无法恢复最后一次已生效配置；"
+                                "请检查 config.toml 与后端日志。"
+                            )
+                            _set_config_apply_status(
+                                "failed",
+                                failure_message,
+                                error=str(restore_exc).strip() or type(restore_exc).__name__,
+                            )
+                        else:
+                            failure_message = (
+                                f"配置修订 {item.revision} 热重载失败（{error[:200]}），"
+                                "已恢复最后一次生效配置。"
+                            )
+                            _set_config_apply_status(
+                                "failed",
+                                failure_message,
+                                error=error,
+                            )
+                    with suppress(Exception):
+                        await ctx.event_hub.publish(
+                            {
+                                "type": "config_reload_failed",
+                                "revision": item.revision,
+                                "message": config_apply_message,
+                            }
+                        )
+                else:
+                    config_last_good = copy.deepcopy(item.config)
+                    config_applied_revision = item.revision
+                    if config_apply_pending is None:
+                        _set_config_apply_status("applied", message)
+                    else:
+                        _set_config_apply_status(
+                            "queued",
+                            (
+                                f"配置修订 {item.revision} 已生效；"
+                                f"修订 {config_apply_pending.revision} 等待应用。"
+                            ),
+                        )
+        finally:
+            config_apply_task = None
+            app.state.config_apply_task = None
+
+    def _enqueue_config_apply(item: _QueuedConfigApply) -> None:
+        nonlocal config_apply_pending, config_apply_task
+        config_apply_pending = item
+        _set_config_apply_status(
+            "queued",
+            f"配置修订 {item.revision} 已保存，后端空闲后自动应用。",
+        )
+        if config_apply_task is None or config_apply_task.done():
+            config_apply_task = asyncio.create_task(
+                _run_config_apply_queue(),
+                name="config-apply",
+            )
+            app.state.config_apply_task = config_apply_task
 
     def _is_feedback_event(event: dict[str, Any]) -> bool:
         return str(event.get("event_type") or event.get("type") or "").strip() == "feedback"
@@ -4536,6 +4777,14 @@ def create_app(
                 {"error": "degraded", "detail": _degraded_init_detail},
                 status_code=409,
             )
+        if _config_apply_busy():
+            return JSONResponse(
+                {
+                    "error": "config_applying",
+                    "detail": "配置正在后台应用，请等待热重载完成后再开始初始化。",
+                },
+                status_code=409,
+            )
         try:
             body = await request.json()
         except Exception:
@@ -5878,6 +6127,11 @@ def create_app(
 
     @app.on_event("shutdown")
     async def shutdown_refresh_loop() -> None:
+        apply_task = getattr(app.state, "config_apply_task", None)
+        if apply_task is not None and not apply_task.done():
+            apply_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await apply_task
         reply_scheduler = getattr(app.state, "chat_reply_scheduler", None)
         if reply_scheduler is not None:
             with suppress(Exception):
@@ -8413,6 +8667,9 @@ def create_app(
 
         messages = build_probe_sentiment_prompt(domain=domain, user_message=user_message)
         try:
+            # Intentionally carries core memory (chat-adjacent): classifying the
+            # sentiment of a probe reply benefits from knowing who the user is, so
+            # tone/intent is read in the user's own context. Kept per Task 8 audit.
             response = await asyncio.wait_for(
                 llm.complete_with_core_memory(
                     system_instruction=messages[0]["content"],
@@ -11448,17 +11705,15 @@ def create_app(
             _persist_xhs_self_info(self_info_now)
         self_info_for_filter = self_info_now or _load_xhs_self_info()
 
-        # Filter to valid xhs note URLs. Accept both note-detail shapes xhs
-        # exposes — ``/explore/<id>`` and the legacy ``/discovery/item/<id>``
-        # — so the bare-``urls`` branch stops silently dropping discovery/item
-        # links the ``notes`` branch already ingests (both key on the same
-        # note id via sources.identity_keys).
+        # Filter to valid xhs note URLs. Search cards may now expose
+        # ``/search_result/<id>`` in addition to ``/explore/<id>`` and the
+        # legacy ``/discovery/item/<id>``; all three key on the same note id.
         valid_urls = [
             u
             for u in urls_raw
             if isinstance(u, str)
             and u.startswith(xhs_url_prefix)
-            and ("/explore/" in u or "/discovery/item/" in u)
+            and ("/explore/" in u or "/discovery/item/" in u or "/search_result/" in u)
         ]
 
         # Store bare URLs for tracking
@@ -12097,10 +12352,10 @@ def create_app(
         try:
             task_interval_seconds = max(
                 0,
-                int(getattr(xhs_cfg, "task_interval_seconds", 300)),
+                int(getattr(xhs_cfg, "task_interval_seconds", 1200)),
             )
         except (TypeError, ValueError):
-            task_interval_seconds = 300
+            task_interval_seconds = 1200
         task = _xhs_task_queue.next_pending(
             only_ids=_init_owned_ids_filter(),
             min_interval_seconds=task_interval_seconds,
@@ -12327,7 +12582,20 @@ def create_app(
                     )
                 legacy_queue.complete_staged_result(task_id)
         else:
-            failed = legacy_queue.fail(task_id, error=payload.get("error", ""), debug=debug)
+            # Search/creator ``empty`` is retryable and remains a failed task,
+            # but never persist a blank error: it made real selector drift look
+            # indistinguishable from an unexplained transport failure.
+            failure_error = str(payload.get("error", "") or "").strip()
+            if not failure_error and status == "empty":
+                failure_error = "xhs_empty_result"
+            failed = legacy_queue.fail(task_id, error=failure_error, debug=debug)
+            if failure_error == "xhs_login_required" and hasattr(
+                ctx.database, "set_xhs_login_state"
+            ):
+                # Cookie presence is only a hint: XHS can retain web_session
+                # while the rendered page already presents its login gate.
+                # The task page is fresher, direct browser evidence.
+                ctx.database.set_xhs_login_state(False)
             # Unified keyword planner lifecycle (P1.7): the async search failed →
             # mark its ``source_keyword_id`` word ``failed`` (retry via attempts).
             if failed and task is not None:
@@ -12583,9 +12851,14 @@ def create_app(
         if xhs_item.enabled and bool(xhs_runtime_state.get("rate_limited")):
             remaining_seconds = int(xhs_runtime_state.get("cooldown_remaining_seconds", 0) or 0)
             remaining_minutes = max(1, (remaining_seconds + 59) // 60)
+            rate_limit_strikes = max(
+                1,
+                int(xhs_runtime_state.get("rate_limit_strikes", 1) or 1),
+            )
             xhs_item.state = "rate_limited"
             xhs_item.detail = (
-                f"小红书触发安全验证，后台任务已自动暂停，约 {remaining_minutes} 分钟后恢复领取。"
+                f"小红书连续第 {rate_limit_strikes} 次触发平台风控，后台任务已自动暂停，"
+                f"约 {remaining_minutes} 分钟后恢复领取。"
             )
             xhs_item.feed_paused = True
         # Bangumi's uniform item (built above) is replaced: it carries a
@@ -14391,6 +14664,8 @@ def create_app(
                 zhihu_incremental_hours=getattr(cfg.scheduler, "zhihu_incremental_hours", None),
                 reddit_incremental_hours=getattr(cfg.scheduler, "reddit_incremental_hours", None),
                 refresh_check_interval_seconds=cfg.scheduler.refresh_check_interval_seconds,
+                eval_min_batch_size=cfg.scheduler.eval_min_batch_size,
+                eval_max_wait_seconds=cfg.scheduler.eval_max_wait_seconds,
                 signal_event_threshold=cfg.scheduler.signal_event_threshold,
                 feedback_batch_threshold=cfg.scheduler.feedback_batch_threshold,
                 trending_refresh_minutes=cfg.scheduler.trending_refresh_minutes,
@@ -14438,6 +14713,7 @@ def create_app(
                 planner_poll_seconds=cfg.discovery.planner_poll_seconds,
                 plan_ttl_hours=cfg.discovery.plan_ttl_hours,
                 admission_min_score=cfg.discovery.admission_min_score,
+                eval_prefilter_mode=cfg.discovery.eval_prefilter_mode,
                 candidate_eval_concurrency=cfg.discovery.candidate_eval_concurrency,
                 multimodal_evaluation_enabled=cfg.discovery.multimodal_evaluation_enabled,
                 visual_profile_enabled=cfg.discovery.visual_profile_enabled,
@@ -14505,6 +14781,11 @@ def create_app(
             degraded=bool(getattr(ctx, "degraded", False)),
             degraded_reason=str(getattr(ctx, "degraded_reason", "")),
         )
+
+    @app.get("/api/config/apply-status", response_model=ConfigApplyStatusResponse)
+    def get_config_apply_status() -> ConfigApplyStatusResponse:
+        """Report whether the latest saved revision is queued, active, or applied."""
+        return _config_apply_status_response()
 
     def _as_bool(value: object) -> bool:
         if isinstance(value, bool):
@@ -15407,6 +15688,8 @@ def create_app(
             _DEFAULT_DANMAKU_MAX_CHARS,
             _DEFAULT_DELIGHT_QUEUE_LIMIT,
             _DEFAULT_DISCOVERY_LIMIT,
+            _DEFAULT_EVAL_MAX_WAIT_SECONDS,
+            _DEFAULT_EVAL_MIN_BATCH_SIZE,
             _DEFAULT_EXPLORE_REFRESH_MINUTES,
             _DEFAULT_FEEDBACK_BATCH_THRESHOLD,
             _DEFAULT_KEYFRAME_FETCH_LIMIT,
@@ -15421,11 +15704,16 @@ def create_app(
             _DEFAULT_SOURCE_INCREMENTAL_HOURS,
             _DEFAULT_SPECULATOR_IDLE_INTERVAL_MINUTES,
             _DEFAULT_TRENDING_REFRESH_MINUTES,
+            _MAX_EVAL_MAX_WAIT_SECONDS,
+            _MAX_EVAL_MIN_BATCH_SIZE,
+            _MIN_EVAL_MAX_WAIT_SECONDS,
+            _MIN_EVAL_MIN_BATCH_SIZE,
             _collect_config_issues,
             _default_config_path,
             _normalize_extension_disconnect_grace,
             _normalize_pool_source_shares,
             _normalize_probability,
+            _normalize_scheduler_float,
             _normalize_scheduler_int,
             _normalize_source_incremental_hours,
             _validate_auto_update_check_interval,
@@ -15985,6 +16273,11 @@ def create_app(
                     15,
                     None,
                 ),
+                "eval_min_batch_size": (
+                    _DEFAULT_EVAL_MIN_BATCH_SIZE,
+                    _MIN_EVAL_MIN_BATCH_SIZE,
+                    _MAX_EVAL_MIN_BATCH_SIZE,
+                ),
                 "signal_event_threshold": (_DEFAULT_SIGNAL_EVENT_THRESHOLD, 1, None),
                 "trending_refresh_minutes": (_DEFAULT_TRENDING_REFRESH_MINUTES, 1, None),
                 "explore_refresh_minutes": (_DEFAULT_EXPLORE_REFRESH_MINUTES, 1, None),
@@ -16025,6 +16318,8 @@ def create_app(
                 "zhihu_incremental_hours",
                 "reddit_incremental_hours",
                 "refresh_check_interval_seconds",
+                "eval_min_batch_size",
+                "eval_max_wait_seconds",
                 "signal_event_threshold",
                 "trending_refresh_minutes",
                 "explore_refresh_minutes",
@@ -16101,6 +16396,17 @@ def create_app(
                                 detail="source_incremental_hours must be an integer in 0..168",
                             )
                         setattr(cfg.scheduler, key, global_interval)
+                    elif key == "eval_max_wait_seconds":
+                        setattr(
+                            cfg.scheduler,
+                            key,
+                            _normalize_scheduler_float(
+                                sdata[key],
+                                default=_DEFAULT_EVAL_MAX_WAIT_SECONDS,
+                                min_value=_MIN_EVAL_MAX_WAIT_SECONDS,
+                                max_value=_MAX_EVAL_MAX_WAIT_SECONDS,
+                            ),
+                        )
                     elif key in scheduler_int_limits:
                         default, min_value, max_value = scheduler_int_limits[key]
                         setattr(
@@ -16174,6 +16480,14 @@ def create_app(
                         ddata["admission_min_score"],
                         default=_DEFAULT_ADMISSION_MIN_SCORE,
                     )
+                if "eval_prefilter_mode" in ddata:
+                    eval_prefilter_mode = str(ddata["eval_prefilter_mode"] or "").strip().lower()
+                    if eval_prefilter_mode not in {"off", "shadow", "enforce"}:
+                        raise HTTPException(
+                            status_code=422,
+                            detail="discovery.eval_prefilter_mode must be off, shadow, or enforce",
+                        )
+                    cfg.discovery.eval_prefilter_mode = eval_prefilter_mode
                 for key, (default, min_value, max_value) in discovery_int_limits.items():
                     if key in ddata:
                         setattr(
@@ -16357,45 +16671,53 @@ def create_app(
                     ) from exc
                 landed.append(slug)
 
-            # Refresh the process-level outbound-proxy mirror BEFORE any runtime
-            # rebuild so the rebuilt LLM registry constructs its clients with the
-            # new proxy. CN-direct clients never read this value.
+            nonlocal config_apply_revision, config_applied_revision, config_last_good
+            config_apply_revision += 1
+            item = _QueuedConfigApply(
+                revision=config_apply_revision,
+                config=copy.deepcopy(cfg),
+                saved_path=saved_path,
+                run_post_reload_llm_work=not suppress_background_llm_work,
+            )
+
+            # A known active dialogue/event owner can legitimately take many
+            # minutes to drain. Persist immediately, then let a latest-wins
+            # background queue perform the safe handoff instead of pinning this
+            # HTTP request (and every later save) behind that work.
+            if _runtime_lane_busy_for_config_apply():
+                _enqueue_config_apply(item)
+                queued_response = ConfigUpdateResponse(
+                    ok=True,
+                    config=_config_to_response(cfg, issues, mask_keys=True),
+                    message=(
+                        f"配置已保存到 {saved_path}，已进入后台应用队列；后端空闲后会自动热重载。"
+                    ),
+                    reloaded=False,
+                    rollback_applied=False,
+                    restart_required=False,
+                    apply_state="queued",
+                    apply_revision=item.revision,
+                )
+                return JSONResponse(
+                    status_code=202,
+                    content=queued_response.model_dump(mode="json"),
+                )
+
+            # Fast path: when all protected lanes are already idle, preserve the
+            # existing synchronous success/rollback contract.
             from openbiliclaw.network import set_outbound_proxy
 
             set_outbound_proxy(cfg.network.proxy, mode=cfg.network.mode)
-
-            # ── Hot-reload: rebuild runtime components ──────────────
-            reload_message = f"配置已保存到 {saved_path}。"
+            _set_config_apply_status(
+                "applying",
+                f"正在应用配置修订 {item.revision}。",
+            )
             was_degraded = bool(getattr(ctx, "degraded", False))
-            recovered_from_degraded = False
-
-            def _after_config_runtime_rebuilt() -> None:
-                nonlocal recovered_from_degraded
-                if not was_degraded:
-                    return
-                _complete_degraded_runtime_recovery()
-                recovered_from_degraded = True
-
             try:
-                await _rebuild_runtime_with_lane_handoff(
-                    cfg,
-                    run_post_reload_llm_work=not suppress_background_llm_work,
-                    after_rebuild=_after_config_runtime_rebuilt,
-                )
-                reload_message += (
-                    " 后端已从降级模式原地恢复，无需重启。"
-                    if was_degraded
-                    else " 运行时组件已热重载，新配置立即生效。"
-                )
-                logger.info("Config hot-reload succeeded")
-                # Notify WebSocket subscribers so the extension re-fetches data
-                with suppress(Exception):
-                    await ctx.event_hub.publish(
-                        {
-                            "type": "config_reloaded",
-                            "message": "配置已热重载，运行时组件已重建。",
-                        }
-                    )
+                reload_message = await _apply_runtime_config_revision(item)
+                config_last_good = copy.deepcopy(item.config)
+                config_applied_revision = item.revision
+                _set_config_apply_status("applied", reload_message)
                 return ConfigUpdateResponse(
                     ok=True,
                     config=_config_to_response(cfg, issues, mask_keys=True),
@@ -16403,45 +16725,12 @@ def create_app(
                     reloaded=True,
                     rollback_applied=False,
                     restart_required=False,
+                    apply_state="applied",
+                    apply_revision=item.revision,
                 )
             except Exception as exc:
-                if recovered_from_degraded:
-                    # The complete runtime is already live and matches the
-                    # persisted config; only ancillary background-loop startup
-                    # failed. Rolling config.toml back here would create the
-                    # inverse split-brain (healthy new runtime + broken old
-                    # config on disk). Keep the recovered runtime available;
-                    # setup intentionally suppresses those loops until init.
-                    logger.exception(
-                        "Degraded runtime recovered, but background task restart failed"
-                    )
-                    with suppress(Exception):
-                        await ctx.event_hub.publish(
-                            {
-                                "type": "config_reloaded",
-                                "message": (
-                                    "配置已生效，后端已原地恢复；"
-                                    "部分后台任务启动失败，将在后续配置刷新时重试。"
-                                ),
-                            }
-                        )
-                    return ConfigUpdateResponse(
-                        ok=True,
-                        config=_config_to_response(cfg, issues, mask_keys=True),
-                        message=(
-                            reload_message + " 后端已原地恢复；部分后台任务启动失败，"
-                            "不影响继续初始化。"
-                        ),
-                        reloaded=True,
-                        rollback_applied=False,
-                        restart_required=False,
-                    )
                 logger.exception("Config hot-reload failed — attempting config rollback")
-                reload_error = str(exc).strip()
-                if isinstance(exc, TimeoutError):
-                    reload_error = "后台对话在 25 分钟内仍未整理完成，运行时未能安全切换"
-                elif not reload_error:
-                    reload_error = type(exc).__name__
+                reload_error = _config_reload_error(exc)
                 if backup_path is None:
                     rollback_message = (
                         f" 热重载失败（{reload_error[:200]}），未找到可回滚的 config.toml.bak。"
@@ -16455,6 +16744,11 @@ def create_app(
                         logger.critical(
                             "Config rollback failed after hot-reload exception",
                             exc_info=True,
+                        )
+                        _set_config_apply_status(
+                            "failed",
+                            "配置热重载与回滚均失败，需要人工恢复 config.toml。",
+                            error=str(restore_exc).strip() or type(restore_exc).__name__,
                         )
                         return JSONResponse(
                             status_code=500,
@@ -16475,7 +16769,14 @@ def create_app(
                         f" 热重载失败（{reload_error[:200]}），已从 config.toml.bak 回滚。"
                     )
                     rollback_applied = True
+                    config_last_good = copy.deepcopy(rollback_cfg)
+                    set_outbound_proxy(
+                        rollback_cfg.network.proxy,
+                        mode=rollback_cfg.network.mode,
+                    )
 
+                failure_message = f"配置已保存到 {saved_path}。{rollback_message}"
+                _set_config_apply_status("failed", failure_message, error=reload_error)
                 failure_response = ConfigUpdateResponse(
                     ok=True,
                     config=_config_to_response(
@@ -16486,13 +16787,15 @@ def create_app(
                             str(getattr(ctx, "degraded_reason", "")) if was_degraded else ""
                         ),
                     ),
-                    message=reload_message + rollback_message,
+                    message=failure_message,
                     reloaded=False,
                     rollback_applied=rollback_applied,
                     # With no prior file to restore, the validated config did
                     # land on disk but could not activate in-process. Retain the
                     # old restart fallback for this exceptional bootstrap path.
                     restart_required=bool(was_degraded and backup_path is None),
+                    apply_state="failed",
+                    apply_revision=item.revision,
                 )
                 if was_degraded and rollback_applied:
                     failure_response.ok = False
