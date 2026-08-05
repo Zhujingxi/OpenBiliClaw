@@ -51,7 +51,25 @@ class _ScoringLLM:
                 "caller": caller,
             }
         )
-        return _Response(json.dumps(self.payload, ensure_ascii=False))
+        candidate_block = user_input.split("<content_batch>", 1)[1].split("</content_batch>", 1)[0]
+        decoded = json.loads(candidate_block.strip())
+        if isinstance(decoded, dict):
+            request_items = decoded.get("items", [])
+            assert isinstance(request_items, list)
+            payload = [
+                {
+                    **{
+                        key: value
+                        for key, value in self.payload[index].items()
+                        if key not in {"bvid", "content_id"}
+                    },
+                    "id": str(index),
+                }
+                for index in range(len(request_items))
+            ]
+        else:
+            payload = self.payload
+        return _Response(json.dumps(payload, ensure_ascii=False))
 
 
 class _FailingEvalEngine:
@@ -698,10 +716,12 @@ async def test_pipeline_e2e_dedupes_text_first_description_before_llm(
         )[0]
         .strip()
     )
-    items = json.loads(batch_json)
-    assert items[0]["source_platform"] == "zhihu"
-    assert items[0]["body_text"] == summary
-    assert items[0]["description"] == ""
+    envelope = json.loads(batch_json)
+    assert envelope["defaults"]["source_platform"] == "zhihu"
+    item = envelope["items"][0]
+    assert item["body_text"] == summary
+    assert "description" not in item
+    assert "answer:dedupe-e2e" not in batch_json
 
 
 @pytest.mark.asyncio

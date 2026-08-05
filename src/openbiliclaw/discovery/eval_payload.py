@@ -1,4 +1,4 @@
-"""Canonical sparse candidate payloads for evaluator wire experiments."""
+"""Canonical sparse candidate payloads for production and replay evaluator wires."""
 
 from __future__ import annotations
 

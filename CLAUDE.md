@@ -105,9 +105,12 @@ byte-identical across calls**. So:
 2. ALL per-call variables (profile, content, source_platform, tone, …)
    live in `user_prompt`, ordered from most stable (persona) to most
    variable (this batch's items).
-3. JSON serialization MUST be deterministic: always pass
+3. JSON serialization MUST be deterministic: normally pass
    `ensure_ascii=False, indent=2, sort_keys=True` to `json.dumps`. A
-   dict-key reordering is enough to break the cache prefix.
+   dict-key reordering is enough to break the cache prefix. The production
+   batch-evaluator candidate block is the deliberate exception: it must use
+   `render_sparse_evaluation_json()` (canonical sorted compact JSON) and must
+   never be reserialized ad hoc at the prompt call site.
 4. Reference the system prompt's "see user message for X / Y / Z"
    contract explicitly so the LLM knows where to find each variable.
 5. Any prompt that carries the user profile MUST serialize it through a
@@ -120,6 +123,15 @@ byte-identical across calls**. So:
    first; the structural guard in `tests/test_profile_views.py` fails if a
    serializer is defined outside that module. The legacy
    `discovery/strategies/_utils.py` import path is a compat re-export only.
+
+**Batch evaluator transport**: `ContentDiscoveryEngine` defaults to canonical
+`sparse-json`. Its system message is the byte-static module constant
+`_SPARSE_BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT`; profile and candidate data
+remain in the user message, and results bind through request-local IDs.
+`_BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT` plus
+`evaluation_candidate_transport="production"` is the frozen pretty-JSON /
+global-ID rollback contract. `row-wire-v1` is replay-only. Changing either
+production contract requires a cache-namespace bump and a fixed prompt golden.
 
 **Exception**: `build_socratic_dialogue_prompt` keeps tone / friend
 label / core memory in system. That's intentional for OpenBiliClaw's

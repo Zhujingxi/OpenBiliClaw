@@ -970,10 +970,19 @@ async def test_search_strategy_caps_llm_eval_candidates_for_small_limit() -> Non
             if "<content_batch>" not in user_input:
                 return _FakeResponse('{"queries": ["q0", "q1", "q2", "q3"]}')
             batch = json.loads(user_input.split("<content_batch>")[1].split("</content_batch>")[0])
-            self.batch_sizes.append(len(batch))
+            batch_items = batch if isinstance(batch, list) else batch.get("items", [])
+            self.batch_sizes.append(len(batch_items))
             return _FakeResponse(
                 json.dumps(
-                    [{"score": 0.82, "reason": "ok", "style_key": "deep_dive"} for _ in batch]
+                    [
+                        {
+                            "id": str(index),
+                            "score": 0.82,
+                            "reason": "ok",
+                            "style_key": "deep_dive",
+                        }
+                        for index, _ in enumerate(batch_items)
+                    ]
                 )
             )
 

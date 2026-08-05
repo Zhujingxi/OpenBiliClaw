@@ -1582,12 +1582,14 @@ def build_batch_content_evaluation_prompt(
 
     ``compact_json`` is an experiment seam for deterministic JSON whitespace
     removal. It never changes field names or values, and defaults to the
-    historical indented bytes.
+    historical indented rollback bytes.
 
-    ``candidate_block`` and ``local_result_ids`` are treatment-only seams for
-    canonical sparse transports. The block is already rendered by the shared
-    transport layer; the static local-ID system contract is shared by sparse
-    JSON and row wire. Their defaults preserve the production prompt bytes.
+    ``candidate_block`` and ``local_result_ids`` carry the production sparse
+    candidate wire and request-local result identity. The block is already
+    rendered by the shared transport layer; the static local-ID system contract
+    is shared by production sparse JSON and replay-only row wire. Leaving both
+    arguments disabled preserves the historical explicit-``production``
+    rollback prompt bytes.
     """
 
     if (candidate_block is not None) != local_result_ids:

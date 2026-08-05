@@ -230,6 +230,7 @@ The locked two-stage gate was completed without relaxing thresholds:
 - An independent source-row scan checked 692 title/body/description/identity/URL/author values in each
   artifact and found zero raw-value hits.
 
-Decision: reject `row-wire-v1`, do not tune the locked gates, and keep the production pretty-JSON bytes,
-cache namespace and prompt-cache documentation unchanged. The sparse/local-ID and row codecs remain behind
-the replay-only seam as reproducible evidence and parser-hardening coverage; they are not production defaults.
+Decision at completion of this two-arm experiment: reject `row-wire-v1` and do not tune the locked gates.
+The subsequent sparse-only production decision is specified separately in
+`docs/plans/2026-08-05-eval-sparse-json-landing-spec.md`; it does not change the row rejection or reinterpret
+this experiment's thresholds.

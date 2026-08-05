@@ -101,9 +101,10 @@ _RAW_CANDIDATE_MODE: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "openbiliclaw_discovery_raw_candidate_mode",
     default=False,
 )
-_EVAL_BATCH_CACHE_VERSION = "content-eval-v2"
+_EVAL_BATCH_CACHE_VERSION = "content-eval-v3"
 _EMBEDDING_PREFILTER_DEFAULT_MODE = "shadow"
 _EMBEDDING_PREFILTER_MODES = {"off", "shadow", "enforce"}
+_DEFAULT_EVALUATION_CANDIDATE_TRANSPORT = "sparse-json"
 _EVALUATION_CANDIDATE_TRANSPORTS = frozenset({"production", "row-wire-v1", "sparse-json"})
 _EMBEDDING_PREFILTER_MIN_SIMILARITY = 0.2
 _EMBEDDING_PREFILTER_REASON = "embedding 预过滤: 与所有兴趣相似度极低"
@@ -840,7 +841,7 @@ class ContentDiscoveryEngine:
         eval_batch_concurrency: int = _DEFAULT_EVAL_BATCH_CONCURRENCY,
         eval_prefilter_mode: str = _EMBEDDING_PREFILTER_DEFAULT_MODE,
         compact_evaluation_json: bool = False,
-        evaluation_candidate_transport: str = "production",
+        evaluation_candidate_transport: str = _DEFAULT_EVALUATION_CANDIDATE_TRANSPORT,
     ) -> None:
         self._strategies: list[DiscoveryStrategy] = []
         self._llm_service = llm_service
@@ -869,8 +870,9 @@ class ContentDiscoveryEngine:
                 "unsupported evaluation candidate transport "
                 f"{evaluation_candidate_transport!r}; expected one of: {supported}"
             )
-        # Replay-only treatment seam. The default preserves the historical
-        # candidate JSON, result identity and prompt bytes.
+        # Sparse JSON is the production batch-candidate contract. Explicit
+        # ``production`` retains the historical pretty-JSON/global-ID rollback
+        # path; ``row-wire-v1`` remains an internal replay-only seam.
         self.evaluation_candidate_transport = normalized_candidate_transport
         self._multimodal_vision_supported_override = multimodal_vision_supported
         self.multimodal_unavailable_reason = ""
@@ -2372,7 +2374,15 @@ class ContentDiscoveryEngine:
             return False
         same_platform = len({_batch_evaluation_platform(content) for content in contents}) == 1
         candidate_transport = (
-            str(getattr(self, "evaluation_candidate_transport", "production")).strip().lower()
+            str(
+                getattr(
+                    self,
+                    "evaluation_candidate_transport",
+                    _DEFAULT_EVALUATION_CANDIDATE_TRANSPORT,
+                )
+            )
+            .strip()
+            .lower()
         )
         stable_content_type = (
             candidate_transport == "production"
@@ -2424,17 +2434,27 @@ class ContentDiscoveryEngine:
         effective_batch_context = source_context or content.source_strategy
         effective_batch_platform = _batch_evaluation_platform(content)
         candidate_transport = (
-            str(getattr(self, "evaluation_candidate_transport", "production")).strip().lower()
+            str(
+                getattr(
+                    self,
+                    "evaluation_candidate_transport",
+                    _DEFAULT_EVALUATION_CANDIDATE_TRANSPORT,
+                )
+            )
+            .strip()
+            .lower()
         )
         production_content_item = _batch_evaluation_content_item(
             content,
             source_context=source_context,
         )
         prompt_visible_content: object = production_content_item
+        cache_content_identity = self._content_identity(content)
         if candidate_transport != "production":
             prompt_visible_content = build_canonical_evaluation_batch(
                 [production_content_item]
             ).as_payload()
+            cache_content_identity = f"canonical:{stable_json_digest(prompt_visible_content)}"
         prompt_digest = stable_json_digest(
             {
                 "content_item": prompt_visible_content,
@@ -2451,7 +2471,7 @@ class ContentDiscoveryEngine:
         )
         return (
             f"{_EVAL_BATCH_CACHE_VERSION}:batch:"
-            f"{self._content_identity(content)}:content:{prompt_digest}:"
+            f"{cache_content_identity}:content:{prompt_digest}:"
             f"profile:{profile_digest}:neg:{negative_digest}:"
             f"embed:{self._evaluation_embedding_namespace()}:"
             f"prefilter:{prefilter_mode}{transport_suffix}"
@@ -2473,7 +2493,15 @@ class ContentDiscoveryEngine:
         effective_batch_context = source_context or (batch[0].source_strategy if batch else "")
         effective_batch_platform = self._batch_prompt_source_platform(batch)
         candidate_transport = (
-            str(getattr(self, "evaluation_candidate_transport", "production")).strip().lower()
+            str(
+                getattr(
+                    self,
+                    "evaluation_candidate_transport",
+                    _DEFAULT_EVALUATION_CANDIDATE_TRANSPORT,
+                )
+            )
+            .strip()
+            .lower()
         )
         if candidate_transport not in _EVALUATION_CANDIDATE_TRANSPORTS:
             raise ValueError(f"unsupported evaluation candidate transport: {candidate_transport!r}")
