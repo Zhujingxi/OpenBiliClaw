@@ -9375,7 +9375,7 @@ def profile_consolidate(
         console.print(f"  [yellow]库存说明:[/yellow] {report.inventory_reason}")
     if not apply and (report.merges or report.rule_merges):
         console.print("\n  [dim]满意的话用 --apply 真正写入。[/dim]")
-    if apply and (report.merges or report.rule_merges or report.archived_interests):
+    if apply and report.applied:
         console.print(f"\n  [dim]已备份，run_id={report.run_id}[/dim]")
 
 

@@ -1264,13 +1264,13 @@ def test_soul_profile_prompt_serialization_is_deterministic() -> None:
     assert messages_a[1]["content"] == messages_b[1]["content"]
 
 
-def test_profile_consolidation_prompt_requires_representative_item_names() -> None:
+def test_profile_consolidation_prompt_prefers_concise_representative_names() -> None:
     messages = build_profile_consolidation_prompt(likes_clusters=[], dislikes_clusters=[])
     system_prompt = messages[0]["content"]
 
-    assert "不要默认选择第一个 member 或最短 member" in system_prompt
-    assert "只有当旧 member 能覆盖所有被合并成员时才可作为 canonical" in system_prompt
-    assert "必须起一个组合概念名" in system_prompt
+    assert "优先选择能准确" in system_prompt
+    assert "覆盖整组的简洁旧 member" in system_prompt
+    assert "不得为了看似完整而堆砌近义词" in system_prompt
 
 
 def test_category_mapping_prompt_user_message_carries_vocab_and_histogram() -> None:

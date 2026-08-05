@@ -2295,8 +2295,8 @@ _PROFILE_CONSOLIDATION_SYSTEM_PROMPT = (
     "<task>\n"
     "你是用户画像的整理器。输入是若干「嫌疑重复」的主题簇（cluster），\n"
     "分为 likes（兴趣主题）和 dislikes（避雷主题）两组。\n"
-    "你要对每个簇内的主题做出裁决：哪些是同一概念的措辞变体（应合并），\n"
-    "哪些是真正不同的概念（应保留）。\n"
+    "你要对每个簇内的主题做出裁决：哪些在用户画像里表达相同的推荐意图、\n"
+    "继续并存只会重复占位（应合并），哪些能带来不同推荐结果（应保留）。\n"
     "</task>\n"
     "\n"
     "<rules>\n"
@@ -2304,25 +2304,28 @@ _PROFILE_CONSOLIDATION_SYSTEM_PROMPT = (
     "2. merge 的 members 必须从该簇的 members 中【逐字原样复制】；普通成员可用字符串，\n"
     '   同名异类成员必须用 {"name": 原名, "category": 原分类} 精确引用。\n'
     "3. 每个簇内的每个主题，必须被 merge 或 keep 恰好覆盖一次，不能遗漏、不能重复。\n"
-    "4. merge 至少 2 个 members。canonical 是合并后的代表性 item 名：如果某个\n"
-    "   member 已能准确代表整个合并组，可以选它；如果 members 分别只覆盖一部分，\n"
-    "   应起一个更准确的组合概念名，让它能代表所有 members。新名必须与 members\n"
-    "   同等具体或更精确，不得更宽泛。\n"
-    "   不要默认选择第一个 member 或最短 member；只有当旧 member 能覆盖所有被合并成员时才可作为 canonical。\n"
-    "   如果旧 member 只是上位词、短词或只覆盖一个侧面，必须起一个组合概念名。\n"
-    "5. 「合并」只适用于同一概念的措辞变体（如「智能体开发」vs「智能体开发与实现」）。\n"
-    "   子集/包含关系不是同义（如「篮球」vs「NBA」、「游戏」vs「手机游戏」），必须分别 keep。\n"
+    "4. merge 至少 2 个 members。canonical 是合并后的代表性 item 名。优先选择能准确\n"
+    "   覆盖整组的简洁旧 member；只有旧 member 都只覆盖一部分时才起具体组合名。\n"
+    "   新名必须与 members 同等具体或更精确，不得为了看似完整而堆砌近义词。\n"
+    "5. likes 的目标是减少画像槽位重复，不限于字典意义上的严格同义词。措辞变体、\n"
+    "   同粒度且推荐/搜索结果高度重叠的标签、以及加了空泛前后缀但没有新增选择价值的\n"
+    "   标签都应 merge（如「搞笑」vs「娱乐搞笑」）。\n"
+    "   真正的父子兴趣若会带来不同推荐结果仍须 keep（如「篮球」vs「NBA」、\n"
+    "   「AI技术」vs「AI视频技术」、「游戏」vs「手机游戏」）。\n"
     "6. dislikes 组的标准更严：只合并语义几乎相同的真同义项；【严禁向上泛化】——\n"
     "   canonical 绝不能比 members 更宽泛（如把「一个案例反复切悬念拖时长」归并成\n"
     "   「低质内容」是严重错误，会误伤大量正常内容）。拿不准时一律 keep。\n"
-    "7. likes 组可以稍宽松，但同样不允许把具体兴趣合并成大类。\n"
+    "7. likes 可以按「是否重复占用同一推荐意图」从宽合并，但同样不允许把具体兴趣\n"
+    "   向上合并成会改变召回范围的大类。拿不准两项能否产生不同结果时才 keep。\n"
     "8. likes 成员带 category（一级分类）。同名/近名但 category 不同且语义不同的条目\n"
     "   是【同名异义】（如 苹果(科技) vs 苹果(美食)），必须分别 keep，严禁合并。\n"
     "   只有确认它们是同一概念被误标了不同分类时才 merge；此时 merge.members 和\n"
     "   keep.member 都必须使用 {name, category}，使每个同名条目可被逐一追踪。\n"
-    "9. 输出严格 JSON，不要附带解释文本。\n"
-    "10. 各变量见 user 消息：likes_clusters / dislikes_clusters（各簇带 cluster_id、\n"
-    "   members 及其权重 / category 元数据）。\n"
+    "9. 每个簇可带 known_distinct_pairs；这些 pair 是用户回滚或当前策略下已确认要分开\n"
+    "   的成员，严禁在任何 merge 中放到一起，也无需重新裁决它们之间的关系。\n"
+    "10. 输出严格 JSON，不要附带解释文本。\n"
+    "11. 各变量见 user 消息：likes_clusters / dislikes_clusters（各簇带 cluster_id、\n"
+    "   members、known_distinct_pairs 及权重 / category 元数据）。\n"
     "</rules>\n"
     "\n"
     "<output_schema>\n"
@@ -2352,8 +2355,9 @@ def build_profile_consolidation_prompt(
 ) -> list[dict[str, str]]:
     """Build the prompt for LLM-judged consolidation of like/dislike topics.
 
-    Each cluster dict carries ``cluster_id`` and ``members`` (list of dicts
-    with name + weight + category metadata for likes, plain strings for dislikes).
+    Each cluster dict carries ``cluster_id``, ``known_distinct_pairs`` and
+    ``members`` (list of dicts with name + weight + category metadata for
+    likes, plain strings for dislikes).
     System prompt is fully static (cache-friendly per CLAUDE.md convention);
     all per-call data lives in the user message with deterministic
     serialization.
