@@ -203,6 +203,104 @@ class TestConfigDefaults:
         assert config.scheduler.proactive_push_interval_seconds == 120
         assert config.scheduler.speculator_idle_interval_minutes == 30
 
+    def test_scheduler_source_incremental_defaults(self) -> None:
+        config = Config()
+
+        assert config.scheduler.source_incremental_hours == 24
+        assert config.scheduler.xhs_incremental_hours is None
+        assert config.scheduler.douyin_incremental_hours is None
+        assert config.scheduler.youtube_incremental_hours is None
+        assert config.scheduler.zhihu_incremental_hours is None
+        assert config.scheduler.reddit_incremental_hours is None
+
+    def test_example_config_keeps_per_source_incremental_intervals_inherited(self) -> None:
+        example_path = Path(__file__).parents[1] / "config.example.toml"
+
+        with example_path.open("rb") as handle:
+            scheduler = tomllib.load(handle)["scheduler"]
+
+        assert scheduler["source_incremental_hours"] == 24
+        assert "xhs_incremental_hours" not in scheduler
+        assert "douyin_incremental_hours" not in scheduler
+        assert "youtube_incremental_hours" not in scheduler
+        assert "zhihu_incremental_hours" not in scheduler
+        assert "reddit_incremental_hours" not in scheduler
+
+    def test_scheduler_source_incremental_config_round_trip(self, tmp_path: Path) -> None:
+        config = Config()
+        config.scheduler.source_incremental_hours = 37
+        config.scheduler.xhs_incremental_hours = 0
+        config.scheduler.douyin_incremental_hours = 168
+        config.scheduler.youtube_incremental_hours = None
+        config.scheduler.zhihu_incremental_hours = 7
+        config.scheduler.reddit_incremental_hours = 42
+
+        target = tmp_path / "config.toml"
+        save_config(config, target)
+        rendered = target.read_text(encoding="utf-8")
+        loaded = load_config(target)
+
+        assert loaded.scheduler.source_incremental_hours == 37
+        assert loaded.scheduler.xhs_incremental_hours == 0
+        assert loaded.scheduler.douyin_incremental_hours == 168
+        assert loaded.scheduler.youtube_incremental_hours is None
+        assert loaded.scheduler.zhihu_incremental_hours == 7
+        assert loaded.scheduler.reddit_incremental_hours == 42
+        assert "xhs_incremental_hours = 0" in rendered
+        assert "youtube_incremental_hours" not in rendered
+
+    def test_scheduler_source_incremental_env_fields_are_filtered_to_flat_keys(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        target = tmp_path / "config.toml"
+        target.write_text("[scheduler]\n", encoding="utf-8")
+        values = {
+            "OPENBILICLAW_SCHEDULER_SOURCE_INCREMENTAL_HOURS": "1",
+            "OPENBILICLAW_SCHEDULER_XHS_INCREMENTAL_HOURS": "2",
+            "OPENBILICLAW_SCHEDULER_DOUYIN_INCREMENTAL_HOURS": "3",
+            "OPENBILICLAW_SCHEDULER_YOUTUBE_INCREMENTAL_HOURS": "4",
+            "OPENBILICLAW_SCHEDULER_ZHIHU_INCREMENTAL_HOURS": "5",
+            "OPENBILICLAW_SCHEDULER_REDDIT_INCREMENTAL_HOURS": "6",
+        }
+        for key, value in values.items():
+            monkeypatch.setenv(key, value)
+
+        loaded = load_config(target)
+
+        assert loaded.scheduler.source_incremental_hours == 1
+        assert loaded.scheduler.xhs_incremental_hours == 2
+        assert loaded.scheduler.douyin_incremental_hours == 3
+        assert loaded.scheduler.youtube_incremental_hours == 4
+        assert loaded.scheduler.zhihu_incremental_hours == 5
+        assert loaded.scheduler.reddit_incremental_hours == 6
+
+    @pytest.mark.parametrize("value", [-1, 169, True, 1.5, "not-an-int"])
+    def test_scheduler_source_incremental_loader_falls_back_for_invalid_values(
+        self, value: object
+    ) -> None:
+        config = _build_config(
+            {
+                "scheduler": {
+                    "source_incremental_hours": value,
+                    "xhs_incremental_hours": value,
+                }
+            }
+        )
+
+        assert config.scheduler.source_incremental_hours == 24
+        assert config.scheduler.xhs_incremental_hours is None
+
+    def test_scheduler_source_incremental_save_rejects_invalid_direct_dataclass_values(
+        self, tmp_path: Path
+    ) -> None:
+        config = Config()
+        config.scheduler.source_incremental_hours = 169
+
+        with pytest.raises(ValueError, match="0..168"):
+            save_config(config, tmp_path / "config.toml")
+
     def test_build_from_empty_dict(self) -> None:
         config = _build_config({})
         assert config.language == "zh"
@@ -3341,12 +3439,9 @@ def test_legacy_refresh_hours_keys_convert_to_minutes_without_crashing() -> None
 class TestUnknownConfigKeysAreTolerated:
     """A config.toml written by a newer build must not brick an older one.
 
-    Real incident: a worktree config carried ``[scheduler].source_incremental_hours``
-    (a field that only exists on another branch). ``SchedulerConfig(**sched_raw)``
-    splatted it straight into the dataclass, so ``load_config()`` died with a bare
-    ``TypeError: unexpected keyword argument`` and every code path that loads config
-    went down with it — including 74 unrelated tests. Downgrading after an upgrade
-    wrote new fields is the same failure in production.
+    ``source_incremental_hours`` is now a supported scheduler field. Keep this
+    regression focused on a genuinely unknown key so future additions do not
+    accidentally weaken the compatibility filter.
     """
 
     def test_unknown_scheduler_key_is_ignored_instead_of_crashing(
@@ -3356,7 +3451,7 @@ class TestUnknownConfigKeysAreTolerated:
         config_path.write_text(
             """
 [scheduler]
-source_incremental_hours = 24
+future_scheduler_field = 24
 discovery_limit = 17
 """.strip(),
             encoding="utf-8",
@@ -3367,8 +3462,8 @@ discovery_limit = 17
 
         # Known siblings keep working — the unknown key is dropped, not the section.
         assert config.scheduler.discovery_limit == 17
-        assert not hasattr(config.scheduler, "source_incremental_hours")
-        assert "source_incremental_hours" in caplog.text
+        assert not hasattr(config.scheduler, "future_scheduler_field")
+        assert "future_scheduler_field" in caplog.text
         assert "scheduler" in caplog.text
 
     def test_unknown_keys_are_tolerated_across_provider_and_plain_sections(
@@ -3413,7 +3508,7 @@ unknown_logging_key = "loud"
             """
 [scheduler]
 enabled = false
-source_incremental_hours = 24
+future_scheduler_field = 24
 refresh_check_interval_seconds = 75
 trending_refresh_minutes = 5
 """.strip(),

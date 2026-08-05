@@ -4,6 +4,11 @@
 
 ---
 
+## 未发布：小红书登录态与画像回传上限修复（2026-08-06）
+
+- **适配小红书当前 `/explore` 登录门形态**：search / creator / bootstrap 除可见登录弹层外，也识别可见的登录手机输入框和侧栏本人登录按钮；完整祖先可见性检查会排除隐藏控件与普通笔记里的“登录”文字。真实已登录浏览器验收确认 `/api/sources/status` 可恢复为 `browser_heartbeat / verified`，搜索任务不再被旧 `web_session` 或新版 DOM 误判。
+- **bootstrap scope 与单 scope 上限升级为后端 canonical 契约**：`XhsTaskQueue` 从任务创建时的不可变 payload 读取允许的 `scopes` 与 `max_items_per_scope`，在 partial、final、直接完成和风控失败合并时累计裁剪；未声明 scope、非整数计数和未被 canonical note 接纳的裸 URL 会被丢弃，先到的 canonical 行优先，默认 scope 与扩展统一为 saved / liked / xhs_history。已接纳的同一笔记仍可补发布时间与首个同 identity `xsec_token` / tokenized URL，不增加条目或替换首写标题。扩展重试或分批回传不能再扩大任务预算。真实小规模收藏 / 点赞请求在隔离数据目录复现并覆盖该缺口，回归同时验证首个终态冻结与重复回调零新增事件。
+
 ## v0.3.196：候选池即时补给与模型调用瘦身（2026-08-06）
 
 - **候选池从定时等待改为缺口驱动即时补给**：候选评估器缺少 raw work 时会按平台份额缺口并行唤醒全部已配置 producer；周期 tick 与即时 tick 共用 per-source lock。补池结果显式区分插入量、真实进展与有效产出，重复结果不再冒充成功，而会进入 30 / 60 / 120 / 300 / 600 秒无产出退避；任一候选真正入队即清零阶梯。真实端到端请求已验证抖音来源任务、模型评估、候选入池与推荐库存恢复闭环。
@@ -37,6 +42,12 @@
 - **AMO 隐私字段故障不再反向阻断版本提审**：连续真实请求证明 `eula_policy` PATCH 无论补齐与 `web-ext` 一致的 JSON headers、使用 Gecko GUID 还是 canonical 数字 add-on ID，当前 developer JWT 都只收到无正文 HTTP 406；该非必需字段因此移动到 listed 版本已受理并核验之后 best-effort 同步，失败会在 workflow 留下显式 warning 和 Developer Hub 手动回填指引。manifest 数据类别、reviewer notes、双语 listing 描述、随 reviewer source 附带的 `docs/privacy.md` 仍随提审送达，不会把隐私披露静默省略。
 
 ## v0.3.192：多模态推荐、可靠反馈与连接增强（2026-08-03）
+
+### 扩展在线账号信号刷新
+
+- **五个浏览器账号来源支持周期增量回拉**：画像就绪且 installed extension 在线时，runtime 默认每 24 小时按持久 round-robin 复用小红书、抖音、YouTube、知乎和 Reddit 的既有 bootstrap scope；五源任务全局串行，扩展离线、guided init 活跃、来源/调度关闭或周期为 0 时零入队、零时间推进。全局与逐源 `0..168` 小时配置支持热重载和逐源 `null` 继承；成功 init 会种下最近 attempt，失败留给后续在线 tick 自愈。
+- **五源 task-result 统一崩溃恢复和有界去重**：Reddit 加入 XHS / 抖音 / YouTube / 知乎的 first-final-wins staged 协议，按 canonical result → durable event ingress → 原子 seen-key checkpoint → terminal flip 执行；任一窗口失败都由租约重领从首写修复。五源 seen key 按真实响应顺序各保留最新 5,000 个，Reddit post/comment/subreddit/user 使用分型稳定身份，重复周期回拉不会重复写事件。
+- **独立审查收紧并发与初始化边界**：runtime / CLI / guided init 共用 SQLite `BEGIN IMMEDIATE` admission transaction，五表 active scan 与 insert 在跨 facade / 进程场景也保持单飞，`force` 不绕过；崩溃窗口收养同步任务创建时间与 cursor，非法无时区 / 未来时间戳按到期自愈。`POST /api/init` 在来源 opt-in 热重载前先持久预定 run，新旧 controller 都看得到 init fence；Reddit 扩展与后端同时拒绝把 parent post ID、短 post URL 或仅标题社区行误作 comment/community identity。
 
 ### 用户日志暴露的推荐空窗与后台振荡修复
 

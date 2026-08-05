@@ -2108,6 +2108,12 @@ class SchedulerConfigOut(BaseModel):
     pool_target_count: int = 300
     pool_source_shares: dict[str, int] = Field(default_factory=dict)
     account_sync_interval_hours: int = 6
+    source_incremental_hours: int = 24
+    xhs_incremental_hours: int | None = None
+    douyin_incremental_hours: int | None = None
+    youtube_incremental_hours: int | None = None
+    zhihu_incremental_hours: int | None = None
+    reddit_incremental_hours: int | None = None
     refresh_check_interval_seconds: int = 60
     eval_min_batch_size: int = Field(default=15, ge=1, le=90)
     eval_max_wait_seconds: float = Field(default=90.0, ge=0.0, le=600.0)

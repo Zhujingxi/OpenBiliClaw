@@ -2386,7 +2386,7 @@ def create_app(
         task_id: str,
         events_with_keys: list[tuple[dict[str, Any], str]],
         generic_owner: bool,
-    ) -> set[str]:
+    ) -> list[str]:
         """Persist extension source results through the durable ingress.
 
         Guided init owns profile construction, so its events are durable facts
@@ -2445,7 +2445,7 @@ def create_app(
             canonical.append(event)
             keys_by_index.append(bootstrap_key)
         if not canonical:
-            return set()
+            return []
         receipt = await event_ingress.accept_batch(
             canonical,
             producer=f"source-{source}",
@@ -2453,11 +2453,11 @@ def create_app(
         if receipt.rejected:
             reasons = "; ".join(item.error for item in receipt.items if item.error)
             raise RuntimeError(f"source event ingress rejected canonical event: {reasons}")
-        return {
+        return [
             keys_by_index[item.index]
             for item in receipt.items
             if (item.inserted or item.duplicate) and keys_by_index[item.index]
-        }
+        ]
 
     async def _restart_background_tasks_after_event_recovery(
         *,
@@ -2792,36 +2792,6 @@ def create_app(
             return normalize_source_bootstrap_state(load_state())
         return default_source_bootstrap_state()
 
-    def _save_source_bootstrap_state(
-        state: dict[str, object],
-        *,
-        strict: bool = False,
-    ) -> None:
-        from openbiliclaw.sources.bootstrap_state import normalize_source_bootstrap_state
-
-        save_state = getattr(ctx.memory_manager, "save_source_bootstrap_state", None)
-        if not callable(save_state):
-            if strict:
-                raise RuntimeError("source bootstrap state persistence is unavailable")
-            return
-        normalized = normalize_source_bootstrap_state(state)
-        try:
-            save_state(normalized)
-            if strict:
-                load_state = getattr(ctx.memory_manager, "load_source_bootstrap_state", None)
-                if not callable(load_state):
-                    raise RuntimeError("source bootstrap state verification is unavailable")
-                persisted = normalize_source_bootstrap_state(load_state())
-                for key, expected in normalized.items():
-                    if isinstance(expected, list):
-                        actual = persisted.get(key)
-                        if not isinstance(actual, list) or not set(expected).issubset(actual):
-                            raise RuntimeError(f"source bootstrap state verification failed: {key}")
-        except Exception:
-            if strict:
-                raise
-            logger.warning("Failed to persist source bootstrap state", exc_info=True)
-
     def _filter_new_source_bootstrap_items(
         source: str,
         items: list[dict[str, Any]],
@@ -2855,26 +2825,29 @@ def create_app(
         from datetime import UTC, datetime
 
         from openbiliclaw.sources.bootstrap_state import (
-            as_string_list,
+            SOURCE_SEEN_KEY_CAP,
+            merge_seen_keys,
             source_bootstrap_state_key,
         )
 
-        state = _load_source_bootstrap_state()
         state_key = source_bootstrap_state_key(source)
-        merged = as_string_list(state.get(state_key, []))
-        seen = set(merged)
-        for key in keys:
-            normalized = str(key).strip()
-            if not normalized or normalized in seen:
-                continue
-            seen.add(normalized)
-            merged.append(normalized)
-        state[state_key] = merged
-        state["last_source_bootstrap_sync_at"] = datetime.now(UTC).isoformat()
-        # This marker is the projection checkpoint for source task results.
-        # Terminal completion must not proceed if it cannot be persisted;
-        # retry will replay the staged canonical result and repair it.
-        _save_source_bootstrap_state(state, strict=True)
+        update_state = getattr(ctx.memory_manager, "update_source_bootstrap_state", None)
+        if not callable(update_state):
+            raise RuntimeError("source bootstrap state atomic updater is unavailable")
+
+        def _mutate(state: dict[str, object]) -> dict[str, object]:
+            state[state_key] = merge_seen_keys(
+                state.get(state_key, []),
+                keys,
+                cap=SOURCE_SEEN_KEY_CAP,
+            )
+            state["last_source_bootstrap_sync_at"] = datetime.now(UTC).isoformat()
+            return state
+
+        # This is the projection checkpoint for source task results.  Keep it
+        # strict: terminal completion must not proceed when this write fails;
+        # stale-lease repair will replay the frozen canonical result instead.
+        update_state(_mutate)
 
     fallback_chat_turns: dict[str, dict[str, Any]] = {}
 
@@ -4588,7 +4561,7 @@ def create_app(
         *,
         bangumi_username: str | None = None,
         bangumi_token: str | None = None,
-    ) -> None:
+    ) -> bool:
         """Best-effort: checked guided-init sources become enabled settings.
 
         The run itself uses ``effective_sources`` directly, so a config write
@@ -4600,7 +4573,7 @@ def create_app(
         cfg = getattr(ctx, "config", None)
         sources_cfg = getattr(cfg, "sources", None) if cfg is not None else None
         if sources_cfg is None or not effective_sources:
-            return
+            return False
 
         changed = False
         for source in _INIT_SOURCE_ORDER:
@@ -4630,7 +4603,7 @@ def create_app(
             bangumi_cfg.access_token = bangumi_token
             changed = True
         if not changed:
-            return
+            return False
 
         try:
             from openbiliclaw.config import Config, save_config
@@ -4641,10 +4614,10 @@ def create_app(
                 save_config(cfg)
         except Exception:
             logger.warning("guided init source opt-in save_config failed", exc_info=True)
-            return
+            return False
 
         if bool(getattr(ctx, "degraded", False)):
-            return
+            return False
         try:
             await _rebuild_runtime_with_lane_handoff(
                 cfg,
@@ -4658,8 +4631,12 @@ def create_app(
                         "message": "初始化来源选择已写入配置。",
                     }
                 )
+            return True
         except Exception:
             logger.warning("guided init source opt-in hot-reload failed", exc_info=True)
+            # The handoff attempts a suspended recovery in its own exception
+            # path, so callers must still restore normal owners if init aborts.
+            return True
 
     async def _run_guided_init_wrapper(
         run_id: str,
@@ -5037,6 +5014,23 @@ def create_app(
             and not effective_bangumi_token
         ):
             warnings.append("Bangumi 未填写令牌或公开用户名：本次仅启用条目发现，不提供画像信号。")
+
+        # Reserve the init run before source opt-in can hot-reload runtime
+        # components. The durable init-active gate is therefore already
+        # visible to an old controller, and the setup reload keeps the new
+        # controller fully suspended until the guided-init wrapper finishes.
+        run_id = uuid.uuid4().hex
+        if not coord.try_start(run_id):
+            return JSONResponse({"error": "already_running"}, status_code=409)
+
+        setup_runtime_suspended = False
+
+        async def _abort_reserved_start(reason: str) -> None:
+            coord.reset_to_idle(run_id, reason=reason)
+            if setup_runtime_suspended and not bool(getattr(ctx, "degraded", False)):
+                with suppress(Exception):
+                    await _restart_background_tasks_after_event_recovery()
+
         if selected_sources is not None:
             # With a token the username was resolved from /v0/me; persist that so
             # status/config reflect the real account. Otherwise keep the explicit
@@ -5044,15 +5038,11 @@ def create_app(
             username_to_persist = (
                 effective_bangumi_username if effective_bangumi_token else selected_bangumi_username
             )
-            await _persist_guided_init_source_opt_in(
+            setup_runtime_suspended = await _persist_guided_init_source_opt_in(
                 effective_sources,
                 bangumi_username=username_to_persist,
                 bangumi_token=selected_bangumi_token,
             )
-
-        run_id = uuid.uuid4().hex
-        if not coord.try_start(run_id):
-            return JSONResponse({"error": "already_running"}, status_code=409)
 
         # Critical-section revalidation: prereqs may have lapsed between the
         # status poll and now. On a miss, roll the reservation back to idle so
@@ -5061,7 +5051,7 @@ def create_app(
         if "bilibili" in effective_sources:
             bili = await ctx.init_prereqs.bilibili_check()
             if bili != "ok":
-                coord.reset_to_idle(run_id, reason="bilibili_not_logged_in")
+                await _abort_reserved_start("bilibili_not_logged_in")
                 return JSONResponse(
                     {
                         "error": "bilibili_not_logged_in",
@@ -5071,7 +5061,7 @@ def create_app(
                 )
         chat = await ctx.init_prereqs.chat_ready()
         if not chat:
-            coord.reset_to_idle(run_id, reason="llm_not_ready")
+            await _abort_reserved_start("llm_not_ready")
             # Propagate the classified cause the live probe just diagnosed
             # (无效 API Key / 服务不可达 / 模型不存在) so the rejection is
             # actionable rather than a generic "not ready" (project rule 7).
@@ -5079,7 +5069,7 @@ def create_app(
             return JSONResponse({"error": "llm_not_ready", "detail": chat_detail}, status_code=409)
         if _embedding_required_for_init() and not await _health_embedding_ready(strict=True):
             pulling = await _maybe_autostart_embedding_pull()
-            coord.reset_to_idle(run_id, reason="embedding_not_ready")
+            await _abort_reserved_start("embedding_not_ready")
             detail = (
                 _repair_progress_detail()
                 if pulling
@@ -12573,7 +12563,7 @@ def create_app(
                     events_with_keys=events_with_keys,
                     generic_owner=not _init_busy,
                 )
-                _mark_source_bootstrap_keys("xhs", sorted(accepted_keys))
+                _mark_source_bootstrap_keys("xhs", accepted_keys)
                 if skipped_self > 0:
                     logger.info(
                         "xhs bootstrap propagate: dropped %d self-authored note(s) (%d propagated)",
@@ -13494,7 +13484,7 @@ def create_app(
                     events_with_keys=events_with_keys,
                     generic_owner=not _init_busy,
                 )
-                _mark_source_bootstrap_keys("dy", sorted(accepted_keys))
+                _mark_source_bootstrap_keys("dy", accepted_keys)
             if is_final:
                 legacy_queue.complete_staged_result(task_id)
         else:
@@ -13553,7 +13543,11 @@ def create_app(
         return await _kick_source_task("x")
 
     # ── YouTube bootstrap endpoints ────────────────────────────────
-    from openbiliclaw.sources.reddit_tasks import RedditTaskQueue
+    from openbiliclaw.sources.reddit_tasks import (
+        RedditTaskQueue,
+        reddit_bootstrap_item_key,
+        reddit_items_to_events,
+    )
     from openbiliclaw.sources.yt_tasks import (
         YtTaskQueue,
         yt_bootstrap_item_key,
@@ -13598,7 +13592,13 @@ def create_app(
 
     @app.post("/api/sources/reddit/task-result")
     async def reddit_task_result(payload: dict[str, Any]) -> dict[str, Any]:
-        """Accept a Reddit task result from the extension dispatcher."""
+        """Accept a Reddit task result from the extension dispatcher.
+
+        Plain Reddit fetch tasks only persist their canonical result. Bootstrap
+        tasks marked by the backend as ``profile_update`` or ``incremental``
+        additionally replay their accumulated rows through durable event
+        ingress before the staged terminal status is flipped.
+        """
         task_id = str(payload.get("task_id", "") or "").strip()
         if not task_id:
             raise HTTPException(status_code=422, detail="task_id is required")
@@ -13619,16 +13619,85 @@ def create_app(
         legacy_queue = _reddit_task_queue
         if legacy_queue is None:
             raise HTTPException(status_code=409, detail="task_result_conflict")
-        _require_legacy_task(legacy_queue, task_id)
+        task = _require_legacy_task(legacy_queue, task_id)
+        task_type = str(task.get("type", "")).strip()
+        if str(task.get("status", "")).strip() in {"completed", "failed"}:
+            return {"ok": True, "ignored": True}
 
-        if status in {"partial", "ok", "empty"}:
-            legacy_queue.merge_result(
-                task_id,
-                items=items if items else None,
-                scope_counts=scope_counts,
-                debug=debug,
-                complete=status in {"ok", "empty"},
-            )
+        task_payload: dict[str, Any] = {}
+        if task.get("payload_json"):
+            with suppress(Exception):
+                parsed_payload = json.loads(str(task.get("payload_json") or "{}"))
+                if isinstance(parsed_payload, dict):
+                    task_payload = parsed_payload
+        profile_update = bool(task_payload.get("profile_update"))
+        incremental = bool(task_payload.get("incremental"))
+
+        from openbiliclaw.sources.task_result_protocol import (
+            parse_task_result,
+            staged_terminal_status,
+        )
+
+        canonical_result = parse_task_result(task.get("result_json"))
+        staged_status = staged_terminal_status(canonical_result)
+        if staged_status or status in {"partial", "ok", "empty"}:
+            is_final = bool(staged_status) or status in {"ok", "empty"}
+            if staged_status:
+                # Repair exclusively from the first durable final payload;
+                # changed retry fields are intentionally ignored.
+                canonical_result = parse_task_result(task.get("result_json"))
+            elif is_final:
+                canonical_result = legacy_queue.stage_final_result(
+                    task_id,
+                    terminal_status=status,
+                    items=items if items else None,
+                    scope_counts=scope_counts,
+                    debug=debug,
+                )
+            else:
+                legacy_queue.merge_result(
+                    task_id,
+                    items=items if items else None,
+                    scope_counts=scope_counts,
+                    debug=debug,
+                    complete=False,
+                )
+                canonical_task = legacy_queue.get(task_id) or {}
+                canonical_result = parse_task_result(canonical_task.get("result_json"))
+
+            canonical_items = [
+                value for value in canonical_result.get("items", []) if isinstance(value, dict)
+            ]
+            _init_busy = _init_active_now()
+            _skip_profile = _init_busy and not _init_owns_task(task_id)
+            if (
+                task_type == "bootstrap_events"
+                and (profile_update or incremental)
+                and canonical_items
+                and not _skip_profile
+            ):
+                fresh_items, item_keys_by_index = _filter_new_source_bootstrap_items(
+                    "reddit",
+                    canonical_items,
+                    reddit_bootstrap_item_key,
+                )
+                events_with_keys: list[tuple[dict[str, Any], str]] = []
+                for index, item in enumerate(fresh_items):
+                    for event in reddit_items_to_events(
+                        [item],
+                        import_source="reddit_bootstrap_events",
+                    ):
+                        key = item_keys_by_index.get(index, "")
+                        events_with_keys.append((event, key))
+                accepted_keys = await _accept_source_profile_events(
+                    source="reddit",
+                    task_id=task_id,
+                    events_with_keys=events_with_keys,
+                    generic_owner=not _init_busy,
+                )
+                _mark_source_bootstrap_keys("reddit", accepted_keys)
+            if is_final:
+                legacy_queue.complete_staged_result(task_id)
         else:
             legacy_queue.fail(
                 task_id,
@@ -13672,9 +13741,9 @@ def create_app(
         """Accept a Zhihu task result from the extension dispatcher.
 
         Plain ``fetch-zhihu`` smoke tasks only record the task payload. Tasks
-        explicitly marked ``profile_update`` also propagate bootstrap events to
-        memory and, once a profile exists, into the incremental profile-update
-        pipeline.
+        explicitly marked ``profile_update`` or ``incremental`` also propagate
+        bootstrap events to memory and, once a profile exists, into the
+        incremental profile-update pipeline.
         """
         task_id = str(payload.get("task_id", "") or "").strip()
         if not task_id:
@@ -13707,6 +13776,7 @@ def create_app(
                 if isinstance(parsed_payload, dict):
                     task_payload = parsed_payload
         profile_update = bool(task_payload.get("profile_update"))
+        incremental = bool(task_payload.get("incremental"))
 
         from openbiliclaw.sources.task_result_protocol import (
             parse_task_result,
@@ -13745,7 +13815,7 @@ def create_app(
             _skip_profile = _init_busy and not _init_owns_task(task_id)
             if (
                 task_type == "bootstrap_events"
-                and profile_update
+                and (profile_update or incremental)
                 and canonical_items
                 and not _skip_profile
             ):
@@ -13765,7 +13835,7 @@ def create_app(
                     events_with_keys=events_with_keys,
                     generic_owner=not _init_busy,
                 )
-                _mark_source_bootstrap_keys("zhihu", sorted(accepted_keys))
+                _mark_source_bootstrap_keys("zhihu", accepted_keys)
             if is_final:
                 legacy_queue.complete_staged_result(task_id)
         else:
@@ -13897,7 +13967,7 @@ def create_app(
                     events_with_keys=events_with_keys,
                     generic_owner=not _init_busy,
                 )
-                _mark_source_bootstrap_keys("yt", sorted(accepted_keys))
+                _mark_source_bootstrap_keys("yt", accepted_keys)
             if is_final:
                 legacy_queue.complete_staged_result(task_id)
         else:
@@ -14587,6 +14657,12 @@ def create_app(
                     cfg.scheduler.pool_source_shares
                 ),
                 account_sync_interval_hours=cfg.scheduler.account_sync_interval_hours,
+                source_incremental_hours=getattr(cfg.scheduler, "source_incremental_hours", 24),
+                xhs_incremental_hours=getattr(cfg.scheduler, "xhs_incremental_hours", None),
+                douyin_incremental_hours=getattr(cfg.scheduler, "douyin_incremental_hours", None),
+                youtube_incremental_hours=getattr(cfg.scheduler, "youtube_incremental_hours", None),
+                zhihu_incremental_hours=getattr(cfg.scheduler, "zhihu_incremental_hours", None),
+                reddit_incremental_hours=getattr(cfg.scheduler, "reddit_incremental_hours", None),
                 refresh_check_interval_seconds=cfg.scheduler.refresh_check_interval_seconds,
                 eval_min_batch_size=cfg.scheduler.eval_min_batch_size,
                 eval_max_wait_seconds=cfg.scheduler.eval_max_wait_seconds,
@@ -15625,6 +15701,7 @@ def create_app(
             _DEFAULT_PROACTIVE_PUSH_INTERVAL_SECONDS,
             _DEFAULT_REFRESH_CHECK_INTERVAL_SECONDS,
             _DEFAULT_SIGNAL_EVENT_THRESHOLD,
+            _DEFAULT_SOURCE_INCREMENTAL_HOURS,
             _DEFAULT_SPECULATOR_IDLE_INTERVAL_MINUTES,
             _DEFAULT_TRENDING_REFRESH_MINUTES,
             _MAX_EVAL_MAX_WAIT_SECONDS,
@@ -15638,6 +15715,7 @@ def create_app(
             _normalize_probability,
             _normalize_scheduler_float,
             _normalize_scheduler_int,
+            _normalize_source_incremental_hours,
             _validate_auto_update_check_interval,
             load_config,
             normalize_outbound_proxy,
@@ -15647,6 +15725,10 @@ def create_app(
 
         cfg = load_config()
         update = payload.model_dump(exclude_none=True)
+        # Preserve an explicit ``null`` for optional incremental overrides so
+        # the API can restore inheritance; omitted fields still remain absent.
+        if payload.scheduler is not None:
+            update["scheduler"] = dict(payload.scheduler)
         reset_fields = [str(field) for field in update.pop("reset_fields", [])]
         suppress_background_llm_work = bool(update.pop("suppress_background_llm_work", False))
         unknown_reset_fields = [
@@ -16229,6 +16311,12 @@ def create_app(
                 "discovery_cron",
                 "pool_target_count",
                 "account_sync_interval_hours",
+                "source_incremental_hours",
+                "xhs_incremental_hours",
+                "douyin_incremental_hours",
+                "youtube_incremental_hours",
+                "zhihu_incremental_hours",
+                "reddit_incremental_hours",
                 "refresh_check_interval_seconds",
                 "eval_min_batch_size",
                 "eval_max_wait_seconds",
@@ -16275,6 +16363,39 @@ def create_app(
                         except ValueError as exc:
                             raise HTTPException(status_code=400, detail=str(exc)) from exc
                         setattr(cfg.scheduler, key, interval)
+                    elif key in {
+                        "xhs_incremental_hours",
+                        "douyin_incremental_hours",
+                        "youtube_incremental_hours",
+                        "zhihu_incremental_hours",
+                        "reddit_incremental_hours",
+                    }:
+                        try:
+                            source_interval = _normalize_source_incremental_hours(
+                                sdata[key],
+                                default=None,
+                                allow_none=True,
+                                strict=True,
+                            )
+                        except ValueError as exc:
+                            raise HTTPException(status_code=400, detail=str(exc)) from exc
+                        setattr(cfg.scheduler, key, source_interval)
+                    elif key == "source_incremental_hours":
+                        try:
+                            global_interval = _normalize_source_incremental_hours(
+                                sdata[key],
+                                default=_DEFAULT_SOURCE_INCREMENTAL_HOURS,
+                                allow_none=False,
+                                strict=True,
+                            )
+                        except ValueError as exc:
+                            raise HTTPException(status_code=400, detail=str(exc)) from exc
+                        if global_interval is None:
+                            raise HTTPException(
+                                status_code=400,
+                                detail="source_incremental_hours must be an integer in 0..168",
+                            )
+                        setattr(cfg.scheduler, key, global_interval)
                     elif key == "eval_max_wait_seconds":
                         setattr(
                             cfg.scheduler,

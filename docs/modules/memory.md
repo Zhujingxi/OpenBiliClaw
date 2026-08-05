@@ -106,7 +106,7 @@
 | 持续刷新状态 | ✅ | `discovery_runtime.json` 记录候选池刷新、通知游标、最近处理事件位置、正向/负向 probe 冷却、probe distance 历史和短期探索 buffer |
 | 认知变化状态 | ✅ | `cognition_updates.json` 记录关键认知变化、通知状态和来源 |
 | 账户同步状态 | ✅ | `account_sync_state.json` 记录历史/收藏/关注同步游标、已见 ID 集合、签名、最近错误，以及最多 8 个去重后的 `{stage,kind}` 结构化同步问题 |
-| 多源 bootstrap 去重状态 | ✅ | `source_bootstrap_state.json` 记录 XHS / 抖音 / YouTube 已进入事件路径的 bootstrap identity key，避免跨任务重放旧画像信号 |
+| 多源 bootstrap 去重与周期状态 | ✅ | `source_bootstrap_state.json` 记录 XHS / 抖音 / YouTube / 知乎 / Reddit 已进入事件路径的 bootstrap identity key，每源按响应顺序保留最新 5,000 个；同文件的 `source_incremental` 保存 round-robin cursor、逐源最后真实创建时间和当前 active task。所有写入经 `update_source_bootstrap_state()` 的文件锁 + 原子 replace，避免并发 task-result / scheduler 丢更新 |
 | 用户画像覆盖层 | ✅ | `profile_overrides.json` 存用户对画像的手动编辑（文本/标量固定 + 列表/兴趣树增删）；`load/save_profile_overrides` 读写，`sync_profile_files` 渲染人类可读镜像前叠加覆盖层，确保编辑在画像重建后仍反映在 `soul_profile.md/.json` |
 | 插件聊天回合 | ✅ | SQLite `chat_turns` 持久化 side panel 主聊天、惊喜推荐内聊、兴趣猜测内聊和避雷探针内聊的 pending/completed/failed 状态 |
 | JSON 状态原子读写 | ✅ | `memory/json_state.py` 提供共享同一进程内锁/跨进程文件锁的 `read_json_state()` 与 `update_json_state()`，写侧再以 `os.replace` 发布；`discovery_runtime.json` 的 probe 反馈历史、冷却 map、短期探索 buffer 等运行态通过 mutator 更新并合并旧快照，避免安装包常驻进程/后台任务并发保存时丢掉用户点击反馈。对话锚在 LLM 返回后的 ref+generation 二次校验使用锁内读，因此不会观察到写到一半的代次。 |
@@ -274,7 +274,14 @@ source_bootstrap_state = memory.load_source_bootstrap_state()
 #   "xhs_seen_note_keys": ["saved:note-id"],
 #   "dy_seen_video_keys": ["dy_collect:aweme-id"],
 #   "yt_seen_item_keys": ["yt_history:video-id"],
+#   "zhihu_seen_item_keys": ["zhihu_collection:item-id"],
+#   "reddit_seen_item_keys": ["t3_post-id"],
 #   "last_source_bootstrap_sync_at": "2026-05-20T12:00:00+00:00",
+#   "source_incremental": {
+#       "cursor": "reddit",
+#       "last_attempt_at": {"reddit": "2026-08-03T12:00:00+00:00"},
+#       "active_task": None,
+#   },
 # }
 ```
 
@@ -426,7 +433,7 @@ data/memory/
 |------|------|-----------|
 | `feedback_state.json` | 记录反馈处理游标、v1 rollout provenance 与 owner-v2 cutover fence，避免升级重放和稳态重复分析 | SoulEngine |
 | `account_sync_state.json` | 历史/收藏/关注的增量同步游标、同秒历史 bvid 集合、收藏 bvid 集合、关注 mid 集合、签名，以及有界的分阶段错误诊断 | AccountSyncService |
-| `source_bootstrap_state.json` | XHS / 抖音 / YouTube bootstrap 已传播 identity key，避免跨任务重复写入同一批画像信号 | FastAPI source task endpoints |
+| `source_bootstrap_state.json` | 五个扩展账号来源的有界已传播 identity key，以及周期回拉 cursor / attempt / active-task 状态 | FastAPI source task endpoints / SourceIncrementalSync |
 | `discovery_runtime.json` | 候选池刷新时间、通知游标、最近话题、近期 probe domain / axis / distance 历史、显式 probe feedback 历史、短期探索 buffer | RefreshController / OpenClaw / FastAPI |
 | `avoidance_state.json` | 不喜欢领域探针的 active/cooldown 列表和生命周期状态 | AvoidanceSpeculator / FastAPI |
 | `insight_candidates.json` | 聊天中提取的候选洞察，等待置信度达标 | SoulEngine |
@@ -457,7 +464,7 @@ MemoryManager 被以下组件直接依赖：
 | **SoulEngine** | 全部五层 + feedback/insight/cognition 状态 | 全部五层 + feedback/insight/cognition 状态 |
 | **LLMService** | `render_core_memory_blocks()`, `render_core_memory_prompt()`, `get_core_memory()` | — |
 | **FastAPI (app.py)** | `load_cognition_updates()` | `propagate_event()`, `save_cognition_updates()` |
-| **Source task endpoints** | `load_source_bootstrap_state()` | `save_source_bootstrap_state()`, `propagate_event()` |
+| **Source task endpoints / SourceIncrementalSync** | `load_source_bootstrap_state()` | `update_source_bootstrap_state()`；事件事实经 `EventIngressService`，不直接调用画像 pipeline |
 | **RefreshController** | `load_discovery_runtime_state()` | `save_discovery_runtime_state()` |
 | **AccountSyncService** | `load_account_sync_state()` | `save_account_sync_state()`, `propagate_event()` |
 | **CLI / guided init** | — | `propagate_event()`, `propagate_events()`（初始化批量事务） |
@@ -490,4 +497,4 @@ data_dir = "data"  # 记忆 JSON 文件存储在 data/memory/ 下
 12. **候选池运行状态分层**：`discovery_runtime.json` 只负责刷新与通知游标，不与 `feedback_state.json`、`insight_candidates.json` 或画像数据混存
 13. **认知变化单独留痕**：`cognition_updates.json` 保存系统最近形成的关键理解变化，既供插件通知使用，也让画像页能回显”最近记住了什么”
 14. **账户同步状态单独持久化**：`account_sync_state.json` 记录 history / favorites / following 的增量游标、已见 ID 集合、稳定签名与有界的 `{stage,kind}` 错误清单，既避免每轮全量重灌事件层和同秒历史游标导致重复画像分析，也让 runtime-status 无需解析原始异常文本即可定位失败环节
-15. **多源 bootstrap 去重状态独立持久化**：`source_bootstrap_state.json` 只保存 XHS / 抖音 / YouTube 已见 bootstrap identity key，不塞进画像 JSON；task-result 仍保留完整原始结果用于调试，但进入 memory / profile pipeline 前会过滤旧 key
+15. **多源 bootstrap 去重与调度状态独立持久化**：`source_bootstrap_state.json` 保存 XHS / 抖音 / YouTube / 知乎 / Reddit 已见 bootstrap identity key（每源最新 5,000）及 `source_incremental` 调度投影，不塞进画像 JSON；`update_source_bootstrap_state(mutator)` 在同一进程锁、跨进程文件锁内读改写并以 `os.replace` 发布。task-result 保留首份 canonical 原始结果，durable ingress 成功后再按响应顺序写 seen-key，失败时不翻 terminal，可由租约重领修复

@@ -437,6 +437,9 @@ class ContinuousRefreshController:
     # the flag is on. Constructed in ``api/runtime_context.py``; ``None`` (tests
     # / flag off) → the B站 search keeps its legacy self-generating path.
     keyword_fetch: Any | None = None
+    # Extension-online account bootstrap refresh.  This loop has its own
+    # direct presence/profile/init gates and must not inherit the LLM gate.
+    source_incremental_sync: Any | None = None
     _manual_refresh_task: asyncio.Task[None] | None = None
     _discovery_drain_lock: asyncio.Lock = field(
         default_factory=asyncio.Lock,
@@ -1606,6 +1609,7 @@ class ContinuousRefreshController:
             ├─ _loop_bangumi_producer()  60s   Bangumi official-API discovery when under quota
             ├─ _loop_proactive_push()    60s   delight + interest probe
             ├─ _loop_keyword_planner()  120s   P1.6 — merged keyword generation (flag-gated)
+            ├─ _loop_source_incremental_sync() 60s  extension account refresh
             ├─ _loop_image_cache_cleanup() 6h  prune consumed+unsaved covers
             └─ _loop_cover_prefetch()    60s   cache fresh-token covers (XHS)
         """
@@ -1652,6 +1656,8 @@ class ContinuousRefreshController:
             asyncio.create_task(self._loop_image_cache_cleanup()),
             asyncio.create_task(self._loop_cover_prefetch()),
         ]
+        if self.source_incremental_sync is not None:
+            tasks.append(asyncio.create_task(self._loop_source_incremental_sync()))
         try:
             await asyncio.gather(*tasks)
         finally:
@@ -1664,6 +1670,21 @@ class ContinuousRefreshController:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _loop_source_incremental_sync(self) -> None:
+        """Poll the extension-online account refresh scheduler independently.
+
+        The scheduler performs its own scheduler-enabled, presence, profile,
+        and guided-init checks.  In particular, this loop never calls
+        ``_llm_work_allowed``: periodic account collection is not LLM work.
+        """
+        scheduler = self.source_incremental_sync
+        if scheduler is None:
+            return
+        while True:
+            with suppress(Exception):
+                await scheduler.tick()
+            await asyncio.sleep(self.check_interval_seconds)
 
     async def _loop_refresh(self) -> None:
         """Discovery refresh — fills the candidate pool."""

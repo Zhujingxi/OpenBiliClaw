@@ -39,6 +39,7 @@ import {
 import {
   classifyXhsLoginRequiredText,
   classifyXhsRiskControlText,
+  detectXhsTaskLoginRequired,
 } from "../src/content/xhs/risk-control.ts";
 
 // We can't directly import task-executor.ts because it transitively
@@ -135,6 +136,58 @@ test("XHS login gate is distinct from risk control and ordinary login prose", ()
   assert.equal(classifyXhsLoginRequiredText("登录即可查看 Ta 的笔记"), true);
   assert.equal(classifyXhsLoginRequiredText("登录探索更多内容"), false);
   assert.equal(classifyXhsRiskControlText("登录后查看搜索结果"), null);
+});
+
+function loginGateDocument(
+  requiredSelector: string,
+  options: { visible?: boolean; input?: boolean } = {},
+): Document {
+  const visible = options.visible ?? true;
+  const element = {
+    hidden: false,
+    parentElement: null,
+    innerText: "登录",
+    textContent: "登录",
+    getAttribute: () => null,
+    getBoundingClientRect: () => ({
+      width: visible ? 120 : 0,
+      height: visible ? 40 : 0,
+    }),
+    matches: (selector: string) =>
+      selector.includes(requiredSelector) ||
+      (Boolean(options.input) && selector.includes("input[type='tel']")),
+  } as unknown as HTMLElement;
+  return {
+    defaultView: {
+      getComputedStyle: () => ({
+        display: "block",
+        visibility: "visible",
+        opacity: "1",
+      }),
+    },
+    querySelectorAll: (selector: string) =>
+      selector.includes(requiredSelector) ? [element] : [],
+  } as unknown as Document;
+}
+
+test("detectXhsTaskLoginRequired recognizes the current visible sidebar login control", () => {
+  const doc = loginGateDocument(
+    ".side-bar .side-bar-component.login-btn button.login-btn",
+  );
+  assert.equal(detectXhsTaskLoginRequired(doc), true);
+});
+
+test("detectXhsTaskLoginRequired recognizes a phone input inside the current login modal", () => {
+  const doc = loginGateDocument(".login-container input[type='tel']", { input: true });
+  assert.equal(detectXhsTaskLoginRequired(doc), true);
+});
+
+test("detectXhsTaskLoginRequired ignores hidden sidebar login controls", () => {
+  const doc = loginGateDocument(
+    ".side-bar .side-bar-component.login-btn button.login-btn",
+    { visible: false },
+  );
+  assert.equal(detectXhsTaskLoginRequired(doc), false);
 });
 
 test("extractBootstrapNotesFromState maps saved liked and history groups", () => {

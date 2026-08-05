@@ -17,6 +17,7 @@ import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
+from urllib.parse import parse_qs, urlparse
 
 if TYPE_CHECKING:
     from openbiliclaw.storage.database import Database
@@ -46,6 +47,9 @@ XHS_BOOTSTRAP_SCOPE_LABELS = {
     "liked": "点赞",
     "xhs_history": "浏览记录",
 }
+
+_DEFAULT_BOOTSTRAP_SCOPES = ("saved", "liked", "xhs_history")
+_DEFAULT_BOOTSTRAP_MAX_ITEMS_PER_SCOPE = 300
 
 _RECENT_TASK_STATUSES = ("pending", "in_progress", "completed", "failed")
 
@@ -116,9 +120,117 @@ def _has_publication_value(value: Any) -> bool:
     return value is not None and (not isinstance(value, str) or bool(value.strip()))
 
 
+def _xhs_note_url_identity(value: Any) -> str:
+    if not isinstance(value, str) or not value:
+        return ""
+    try:
+        parsed = urlparse(value)
+    except ValueError:
+        return ""
+    if parsed.scheme != "https" or parsed.hostname != "www.xiaohongshu.com":
+        return ""
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) < 2:
+        return ""
+    if parts[0] == "explore" or parts[0] == "search_result":
+        return parts[-1]
+    if len(parts) >= 3 and parts[:2] == ["discovery", "item"]:
+        return parts[-1]
+    return ""
+
+
+def _xhs_url_token(value: Any) -> str:
+    if not _xhs_note_url_identity(value):
+        return ""
+    try:
+        parsed = urlparse(str(value))
+        tokens = parse_qs(parsed.query, keep_blank_values=False).get("xsec_token", [])
+    except ValueError:
+        return ""
+    return str(tokens[0]).strip() if tokens else ""
+
+
+def _enrich_xhs_access_token(existing: dict[str, Any], incoming: dict[str, Any]) -> bool:
+    """Upgrade one admitted note from a bare URL to its first tokenized URL."""
+    existing_url = existing.get("url")
+    incoming_url = incoming.get("url")
+    existing_identity = _xhs_note_url_identity(existing_url)
+    incoming_identity = _xhs_note_url_identity(incoming_url)
+    if not incoming_identity or (existing_identity and existing_identity != incoming_identity):
+        return False
+    existing_note_id = existing.get("note_id")
+    incoming_note_id = incoming.get("note_id")
+    expected_identity = (existing_note_id.strip() if isinstance(existing_note_id, str) else "") or (
+        incoming_note_id.strip() if isinstance(incoming_note_id, str) else ""
+    )
+    if expected_identity and incoming_identity != expected_identity:
+        return False
+
+    existing_raw_token = existing.get("xsec_token")
+    incoming_raw_token = incoming.get("xsec_token")
+    existing_field_token = existing_raw_token.strip() if isinstance(existing_raw_token, str) else ""
+    existing_url_token = _xhs_url_token(existing_url)
+    existing_token = existing_field_token or existing_url_token
+    incoming_field_token = incoming_raw_token.strip() if isinstance(incoming_raw_token, str) else ""
+    incoming_url_token = _xhs_url_token(incoming_url)
+    incoming_token = incoming_field_token or incoming_url_token
+    if not incoming_token or (existing_token and existing_token != incoming_token):
+        return False
+
+    enriched = False
+    if not existing_field_token:
+        existing["xsec_token"] = incoming_token
+        enriched = True
+    if not existing_url_token and incoming_url_token:
+        existing["url"] = incoming_url
+        enriched = True
+    return enriched
+
+
 def xhs_bootstrap_note_key(note: dict[str, Any]) -> str:
     """Return the stable cross-task identity key for one bootstrap note."""
     return _note_key(note)
+
+
+def _bootstrap_result_policy(
+    task_type: object,
+    payload_json: object,
+) -> tuple[frozenset[str] | None, int | None]:
+    """Return immutable bootstrap scopes and per-scope cap stored on one task."""
+    if str(task_type or "").strip() != "bootstrap_profile":
+        return None, None
+
+    payload: dict[str, Any] = {}
+    if isinstance(payload_json, str) and payload_json:
+        try:
+            parsed = json.loads(payload_json)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            payload = parsed
+
+    raw_limit = payload.get(
+        "max_items_per_scope",
+        _DEFAULT_BOOTSTRAP_MAX_ITEMS_PER_SCOPE,
+    )
+    if isinstance(raw_limit, bool):
+        max_items_per_scope = _DEFAULT_BOOTSTRAP_MAX_ITEMS_PER_SCOPE
+    else:
+        try:
+            max_items_per_scope = max(1, int(raw_limit))
+        except (TypeError, ValueError, OverflowError):
+            max_items_per_scope = _DEFAULT_BOOTSTRAP_MAX_ITEMS_PER_SCOPE
+
+    raw_scopes = payload.get("scopes")
+    scopes: list[str] = []
+    if isinstance(raw_scopes, list):
+        for value in raw_scopes:
+            scope = str(value).strip() if isinstance(value, str) else ""
+            if scope in XHS_BOOTSTRAP_SCOPE_EVENT_TYPES and scope not in scopes:
+                scopes.append(scope)
+    if not scopes:
+        scopes = list(_DEFAULT_BOOTSTRAP_SCOPES)
+    return frozenset(scopes), max_items_per_scope
 
 
 def _merge_result_payload(
@@ -128,6 +240,8 @@ def _merge_result_payload(
     notes: list[dict[str, Any]] | None = None,
     scope_counts: dict[str, Any] | None = None,
     debug: dict[str, Any] | None = None,
+    allowed_scopes: frozenset[str] | None = None,
+    max_items_per_scope: int | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
     merged_urls: list[str] = []
     seen_urls: set[str] = set()
@@ -140,15 +254,39 @@ def _merge_result_payload(
     merged_notes: list[dict[str, Any]] = []
     seen_notes: set[str] = set()
     notes_by_key: dict[str, dict[str, Any]] = {}
+    admitted_scope_counts: dict[str, int] = {}
+
+    def scope_is_allowed(note: dict[str, Any]) -> bool:
+        if allowed_scopes is None:
+            return True
+        scope = str(note.get("scope", "")).strip()
+        return scope in allowed_scopes
+
+    def scope_has_capacity(note: dict[str, Any]) -> bool:
+        if max_items_per_scope is None:
+            return True
+        scope = str(note.get("scope", "")).strip()
+        return admitted_scope_counts.get(scope, 0) < max_items_per_scope
+
+    def record_scope(note: dict[str, Any]) -> None:
+        scope = str(note.get("scope", "")).strip()
+        admitted_scope_counts[scope] = admitted_scope_counts.get(scope, 0) + 1
+
     for note in current.get("notes") or []:
         if not isinstance(note, dict):
             continue
         key = _note_key(note)
-        if not key or key in seen_notes:
+        if (
+            not key
+            or key in seen_notes
+            or not scope_is_allowed(note)
+            or not scope_has_capacity(note)
+        ):
             continue
         seen_notes.add(key)
         merged_notes.append(note)
         notes_by_key[key] = note
+        record_scope(note)
 
     added_notes: list[dict[str, Any]] = []
     enriched_notes_by_key: dict[str, dict[str, Any]] = {}
@@ -156,11 +294,11 @@ def _merge_result_payload(
         if not isinstance(note, dict):
             continue
         key = _note_key(note)
-        if not key:
+        if not key or not scope_is_allowed(note):
             continue
         if key in seen_notes:
             existing = notes_by_key[key]
-            enriched = False
+            enriched = _enrich_xhs_access_token(existing, note)
             for field in ("published_at", "published_label"):
                 if not _has_publication_value(existing.get(field)) and _has_publication_value(
                     note.get(field)
@@ -170,10 +308,23 @@ def _merge_result_payload(
             if enriched:
                 enriched_notes_by_key[key] = dict(existing)
             continue
+        if not scope_has_capacity(note):
+            continue
         seen_notes.add(key)
         merged_notes.append(note)
         notes_by_key[key] = note
         added_notes.append(note)
+        record_scope(note)
+
+    if allowed_scopes is not None:
+        merged_urls = []
+        seen_urls = set()
+        for note in merged_notes:
+            note_url = note.get("url")
+            if not isinstance(note_url, str) or not note_url or note_url in seen_urls:
+                continue
+            seen_urls.add(note_url)
+            merged_urls.append(note_url)
 
     merged: dict[str, Any] = {"urls": merged_urls}
     if merged_notes:
@@ -181,15 +332,30 @@ def _merge_result_payload(
 
     merged_counts: dict[str, Any] = {}
     existing_counts = current.get("scope_counts")
-    if isinstance(existing_counts, dict):
-        merged_counts.update(existing_counts)
-    if isinstance(scope_counts, dict):
-        for scope, count in scope_counts.items():
-            current_count = merged_counts.get(scope, 0)
-            if isinstance(current_count, int) and isinstance(count, int):
-                merged_counts[scope] = max(current_count, count)
-            else:
-                merged_counts[scope] = count
+    if allowed_scopes is None:
+        if isinstance(existing_counts, dict):
+            merged_counts.update(existing_counts)
+        if isinstance(scope_counts, dict):
+            for scope, count in scope_counts.items():
+                current_count = merged_counts.get(scope, 0)
+                if isinstance(current_count, int) and isinstance(count, int):
+                    merged_counts[scope] = max(current_count, count)
+                else:
+                    merged_counts[scope] = count
+    else:
+        for reported_counts in (existing_counts, scope_counts):
+            if not isinstance(reported_counts, dict):
+                continue
+            for scope, count in reported_counts.items():
+                if (
+                    not isinstance(scope, str)
+                    or scope not in allowed_scopes
+                    or isinstance(count, bool)
+                    or not isinstance(count, int)
+                ):
+                    continue
+                current_count = merged_counts.get(scope, 0)
+                merged_counts[scope] = max(current_count, max(0, count))
     note_counts: dict[str, int] = {}
     for note in merged_notes:
         scope = str(note.get("scope", "")).strip()
@@ -200,6 +366,10 @@ def _merge_result_payload(
         merged_counts[scope] = (
             max(reported_count, note_count) if isinstance(reported_count, int) else note_count
         )
+    if max_items_per_scope is not None:
+        for scope, count in list(merged_counts.items()):
+            if isinstance(count, int) and not isinstance(count, bool):
+                merged_counts[scope] = min(max(0, count), max_items_per_scope)
     if merged_counts:
         merged["scope_counts"] = merged_counts
 
@@ -350,9 +520,11 @@ class XhsTaskQueue:
         ``daily_budget <= 0`` disables the per-day cap; runtime producers are
         then controlled by source deficits and their per-run throttles.
         """
+        conn = self._db.conn
+        participating_in_transaction = bool(conn.in_transaction)
         today = datetime.now(UTC).strftime("%Y-%m-%d")
         if daily_budget > 0:
-            count_today = self._db.conn.execute(
+            count_today = conn.execute(
                 "SELECT COUNT(*) FROM xhs_tasks WHERE type = ? AND created_at >= ?",
                 (task_type, today),
             ).fetchone()[0]
@@ -371,11 +543,12 @@ class XhsTaskQueue:
             return None
 
         task_id = str(uuid.uuid4())
-        self._db.conn.execute(
+        conn.execute(
             "INSERT INTO xhs_tasks (id, type, payload_json) VALUES (?, ?, ?)",
             (task_id, task_type, json.dumps(payload, ensure_ascii=False)),
         )
-        self._db.conn.commit()
+        if not participating_in_transaction:
+            conn.commit()
         return task_id
 
     def active_task_count(self, task_type: str) -> int:
@@ -519,7 +692,7 @@ class XhsTaskQueue:
 
             if task_id:
                 row = conn.execute(
-                    "SELECT status, result_json FROM xhs_tasks WHERE id = ?",
+                    "SELECT type, payload_json, status, result_json FROM xhs_tasks WHERE id = ?",
                     (task_id,),
                 ).fetchone()
                 current_result: dict[str, Any] = {}
@@ -536,12 +709,17 @@ class XhsTaskQueue:
                     str(row["status"] or "").strip() not in {"completed", "failed"}
                     and not staged_terminal_status(current_result)
                 ):
+                    allowed_scopes, max_items_per_scope = _bootstrap_result_policy(
+                        row["type"], row["payload_json"]
+                    )
                     merged, _added, _enriched = _merge_result_payload(
                         current_result,
                         urls=urls,
                         notes=notes,
                         scope_counts=scope_counts,
                         debug=debug,
+                        allowed_scopes=allowed_scopes,
+                        max_items_per_scope=max_items_per_scope,
                     )
                     merged["error"] = str(error or "xhs_rate_limited")
                     merged["rate_limited"] = True
@@ -727,6 +905,15 @@ class XhsTaskQueue:
             return None
         return dict(row)
 
+    def _result_policy(self, task_id: str) -> tuple[frozenset[str] | None, int | None]:
+        row = self._db.conn.execute(
+            "SELECT type, payload_json FROM xhs_tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        if row is None:
+            return None, None
+        return _bootstrap_result_policy(row["type"], row["payload_json"])
+
     def complete(
         self,
         task_id: str,
@@ -737,13 +924,16 @@ class XhsTaskQueue:
         debug: dict[str, Any] | None = None,
     ) -> None:
         """Mark a task as completed with optional result payload details."""
-        result_payload: dict[str, Any] = {"urls": urls or []}
-        if notes is not None:
-            result_payload["notes"] = notes
-        if scope_counts is not None:
-            result_payload["scope_counts"] = scope_counts
-        if debug is not None:
-            result_payload["debug"] = debug
+        allowed_scopes, max_items_per_scope = self._result_policy(task_id)
+        result_payload, _added, _enriched = _merge_result_payload(
+            {},
+            urls=urls,
+            notes=notes,
+            scope_counts=scope_counts,
+            debug=debug,
+            allowed_scopes=allowed_scopes,
+            max_items_per_scope=max_items_per_scope,
+        )
         from openbiliclaw.sources.task_result_protocol import mutate_unstaged_result
 
         mutated, _canonical = mutate_unstaged_result(
@@ -795,6 +985,7 @@ class XhsTaskQueue:
 
         added_notes: list[dict[str, Any]] = []
         enriched_notes: list[dict[str, Any]] = []
+        allowed_scopes, max_items_per_scope = self._result_policy(task_id)
 
         def mutate(current: dict[str, Any]) -> dict[str, Any]:
             nonlocal added_notes, enriched_notes
@@ -804,6 +995,8 @@ class XhsTaskQueue:
                 notes=notes,
                 scope_counts=scope_counts,
                 debug=debug,
+                allowed_scopes=allowed_scopes,
+                max_items_per_scope=max_items_per_scope,
             )
             return merged
 
@@ -831,6 +1024,8 @@ class XhsTaskQueue:
         """Stage the immutable canonical result before downstream projection."""
         from openbiliclaw.sources.task_result_protocol import stage_terminal_result
 
+        allowed_scopes, max_items_per_scope = self._result_policy(task_id)
+
         def merge(current: dict[str, Any]) -> dict[str, Any]:
             merged, _added, _enriched = _merge_result_payload(
                 current,
@@ -838,6 +1033,8 @@ class XhsTaskQueue:
                 notes=notes,
                 scope_counts=scope_counts,
                 debug=debug,
+                allowed_scopes=allowed_scopes,
+                max_items_per_scope=max_items_per_scope,
             )
             return merged
 

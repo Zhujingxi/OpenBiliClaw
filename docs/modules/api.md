@@ -63,7 +63,9 @@ ID 字段是严格 JSON string，不接受数字、布尔或其它类型的自�
 
 ## 来源任务结果的两阶段完成
 
-`POST /api/sources/{xhs,dy,yt,zhihu}/task-result` 的最终回调不再先把任务写成 `completed`。后端先在 `BEGIN IMMEDIATE` 中合并并冻结第一份 canonical result（含 XHS `self_info` 私有快照），任务仍保持非终态；随后只从这份持久结果重放来源事件、seen-key 和来源专属投影，全部成功后才执行不替换 `result_json` 的 terminal flip。若进程分别退出在 canonical merge→event ingress、event ingress→seen-key 或 seen-key→terminal 三个窗口，后续 callback 会忽略变化后的 body，用第一份结果补齐缺口。队列把 staged marker 视为业务 mutation 的逻辑终态：并发/迟到的 partial、final、fail、rate-limit 都不能改写它；但它继续遵守普通 claim lease，丢失非 2xx 响应后会在 15 分钟 lease 过期时由 dispatcher 重新领取，从而自动触发修复。seen-key 保存使用严格写后读验证，失败会阻止 terminal flip；事件稳定键不含 task ID，因此 ingress 已提交但 marker 未写时的重放只返回 duplicate receipt。
+`POST /api/sources/{xhs,dy,yt,zhihu,reddit}/task-result` 的最终回调不再先把任务写成 `completed`。后端先在 `BEGIN IMMEDIATE` 中合并并冻结第一份 canonical result（含 XHS `self_info` 私有快照），任务仍保持非终态；随后只从这份持久结果重放来源事件、seen-key 和来源专属投影，全部成功后才执行不替换 `result_json` 的 terminal flip。若进程分别退出在 canonical merge→event ingress、event ingress→seen-key 或 seen-key→terminal 三个窗口，后续 callback 会忽略变化后的 body，用第一份结果补齐缺口。队列把 staged marker 视为业务 mutation 的逻辑终态：并发/迟到的 partial、final、fail、rate-limit 都不能改写它；但它继续遵守普通 claim lease，丢失非 2xx 响应后会在 15 分钟 lease 过期时由 dispatcher 重新领取，从而自动触发修复。seen-key 通过 `update_source_bootstrap_state()` 原子、严格落盘并按源保留最新 5,000 个身份键，失败会阻止 terminal flip；事件稳定键不含 task ID，因此 ingress 已提交但 marker 未写时的重放只返回 duplicate receipt。Reddit post/comment/subreddit/user 使用各自稳定身份，comment URL fallback 只接受含 comment id 的完整 permalink，不能把 post id 或标题误作 comment key。
+
+周期任务 payload 带 `incremental=true`；五源 handler 在 guided init 外给 durable event 标记 `profile_update_owner="generic"`，在 init-owned 回调中只落事实、由阶段 2/3 统一建模。事件 ingress 成功或 duplicate receipt 后才按响应顺序 checkpoint seen key，再翻 terminal；没有 handler 直接调用画像 pipeline。扩展离线时 runtime 不创建任务，也不推进调度时间。
 
 ## 封面代理与抓取状态
 

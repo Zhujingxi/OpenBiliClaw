@@ -4394,6 +4394,77 @@ async def test_run_forever_drives_pipeline_tick_and_refresh() -> None:
     )
 
 
+async def test_source_incremental_loop_is_not_behind_the_llm_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ticks = 0
+
+    class Scheduler:
+        async def tick(self) -> None:
+            nonlocal ticks
+            ticks += 1
+
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=_FakeDatabase(events=[]),
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+        source_incremental_sync=Scheduler(),
+        check_interval_seconds=60,
+    )
+
+    def _must_not_be_called() -> bool:
+        raise AssertionError("source incremental loop must not consult the LLM gate")
+
+    controller._llm_work_allowed = _must_not_be_called  # type: ignore[method-assign]
+
+    async def _cancel_sleep(_seconds: float) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(asyncio, "sleep", _cancel_sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await controller._loop_source_incremental_sync()
+
+    assert ticks == 1
+
+
+async def test_run_forever_owns_one_source_incremental_loop() -> None:
+    started = 0
+    ready = asyncio.Event()
+    release = asyncio.Event()
+
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=_FakeDatabase(events=[]),
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+        source_incremental_sync=object(),
+        check_interval_seconds=3600,
+    )
+    controller.run_startup_maintenance = lambda: None  # type: ignore[method-assign]
+    controller._llm_work_allowed = lambda: False  # type: ignore[method-assign]
+
+    async def _source_loop() -> None:
+        nonlocal started
+        started += 1
+        ready.set()
+        await release.wait()
+
+    controller._loop_source_incremental_sync = _source_loop  # type: ignore[method-assign]
+    task = asyncio.create_task(controller.run_forever())
+    try:
+        await asyncio.wait_for(ready.wait(), timeout=0.5)
+        assert started == 1
+    finally:
+        release.set()
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
 async def test_run_forever_startup_order_repairs_before_llm_and_background_tasks() -> None:
     calls: list[str] = []
     candidate_started = asyncio.Event()

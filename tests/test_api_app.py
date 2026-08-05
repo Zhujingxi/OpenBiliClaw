@@ -9,6 +9,7 @@ import json
 import textwrap
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -1655,6 +1656,91 @@ class TestBackendAPI:
         assert ctx.task_registry.stats().get("prewarm_pool_mmr_embeddings") is None
 
     @pytest.mark.asyncio
+    async def test_runtime_context_replaces_one_independent_source_scheduler_owner(self) -> None:
+        from types import SimpleNamespace
+
+        from openbiliclaw.api.runtime_context import RuntimeContext
+        from openbiliclaw.config import Config
+
+        started: list[str] = []
+        release = asyncio.Event()
+        new_started = asyncio.Event()
+
+        class Controller:
+            def __init__(self, label: str) -> None:
+                self.label = label
+                self.source_incremental_sync = object()
+
+            async def run_forever(self) -> None:
+                started.append(self.label)
+                if self.label == "new":
+                    new_started.set()
+                await release.wait()
+
+        old = Controller("old")
+        new = Controller("new")
+        old_task = asyncio.create_task(old.run_forever())
+        ctx = RuntimeContext(
+            config=Config(),
+            runtime_controller=old,
+            account_sync_service=object(),
+            auto_update_service=object(),
+        )
+        app = SimpleNamespace(state=SimpleNamespace(refresh_task=old_task))
+
+        try:
+            await asyncio.sleep(0)
+            ctx.runtime_controller = new
+            await ctx.restart_background_tasks(app)
+            for _ in range(5):
+                await asyncio.sleep(0)
+                if new_started.is_set():
+                    break
+
+            assert old_task.cancelled()
+            assert started == ["old", "new"]
+            assert app.state.refresh_task is not old_task
+            assert ctx.task_registry.stats().get("refresh_loop") == 1
+        finally:
+            release.set()
+            await ctx.task_registry.cancel_all()
+            if not old_task.done():
+                old_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await old_task
+
+    @pytest.mark.asyncio
+    async def test_guided_init_setup_reload_keeps_whole_controller_suspended(self) -> None:
+        from types import SimpleNamespace
+
+        from openbiliclaw.api.runtime_context import RuntimeContext
+        from openbiliclaw.config import Config
+
+        started = False
+
+        class Controller:
+            source_incremental_sync = object()
+
+            async def run_forever(self) -> None:
+                nonlocal started
+                started = True
+
+        ctx = RuntimeContext(
+            config=Config(),
+            runtime_controller=Controller(),
+            account_sync_service=object(),
+            auto_update_service=object(),
+        )
+        app = SimpleNamespace(state=SimpleNamespace())
+
+        await ctx.restart_background_tasks(app, run_post_reload_llm_work=False)
+        await asyncio.sleep(0)
+
+        assert app.state.refresh_task is None
+        assert started is False
+        assert ctx.task_registry.stats().get("refresh_loop") is None
+
+    @pytest.mark.asyncio
     async def test_restart_background_tasks_bounds_cancel_ignoring_coroutine(
         self, monkeypatch
     ) -> None:
@@ -2688,6 +2774,18 @@ class TestBackendAPI:
         assert (
             captured["runtime_controller_kwargs"]["presence"] is app.state.runtime_context.presence
         )
+        source_sync = captured["runtime_controller_kwargs"]["source_incremental_sync"]
+        assert source_sync.database is app.state.runtime_context.database
+        assert source_sync.memory_manager is app.state.runtime_context.memory_manager
+        assert source_sync.presence is app.state.runtime_context.presence
+        assert source_sync.scheduler_config is fake_config.scheduler
+        assert source_sync.source_enabled == {
+            "xhs": False,
+            "dy": False,
+            "yt": False,
+            "zhihu": False,
+            "reddit": False,
+        }
         assert captured["runtime_controller_kwargs"]["bilibili_producer"] is not None
         assert (
             captured["bilibili_producer_kwargs"]["presence"] is app.state.runtime_context.presence
@@ -2719,6 +2817,11 @@ class TestBackendAPI:
         runtime_context._rebuild_components(fake_config)
 
         assert runtime_context.llm_service is not old_service
+        assert captured["runtime_controller_kwargs"]["source_incremental_sync"] is not source_sync
+        assert (
+            captured["runtime_controller_kwargs"]["source_incremental_sync"].scheduler_config
+            is fake_config.scheduler
+        )
         assert old_service.concurrency_gate is shared_gate
         assert runtime_context.llm_service.concurrency_gate is shared_gate
         assert captured["soul_engine_kwargs"]["llm_concurrency_gate"] is shared_gate
@@ -3483,6 +3586,66 @@ class TestBackendAPI:
         response = client.post("/api/sources/zhihu/login-state", json={"logged_in": "true"})
 
         assert response.status_code == 422
+
+    def test_zhihu_incremental_task_result_enters_durable_profile_ingress(
+        self, tmp_path: Path
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.sources.bootstrap_state import default_source_bootstrap_state
+        from openbiliclaw.sources.zhihu_tasks import ZhihuTaskQueue
+        from openbiliclaw.storage.database import Database
+
+        class MemorySpy:
+            def __init__(self) -> None:
+                self.events: list[dict[str, object]] = []
+                self.state = default_source_bootstrap_state()
+
+            async def propagate_event(self, event: dict[str, object]) -> None:
+                self.events.append(event)
+
+            def load_source_bootstrap_state(self) -> dict[str, object]:
+                return dict(self.state)
+
+            def update_source_bootstrap_state(self, mutator: Any) -> dict[str, object]:
+                result = mutator(self.state)
+                self.state = result if isinstance(result, dict) else self.state
+                return self.state
+
+        db = Database(tmp_path / "zhihu-incremental-result.db")
+        db.initialize()
+        queue = ZhihuTaskQueue(db)
+        task_id = queue.enqueue_with_id(
+            "bootstrap_events",
+            {"scopes": ["zhihu_read_history"], "incremental": True},
+        )
+        assert task_id is not None
+        memory = MemorySpy()
+        client = TestClient(create_app(memory_manager=memory, database=db, soul_engine=object()))
+
+        response = client.post(
+            "/api/sources/zhihu/task-result",
+            json={
+                "task_id": task_id,
+                "status": "ok",
+                "items": [
+                    {
+                        "scope": "zhihu_read_history",
+                        "content_type": "answer",
+                        "content_id": "answer-42",
+                        "title": "Incremental Zhihu signal",
+                        "url": "https://www.zhihu.com/question/1/answer/42",
+                    }
+                ],
+                "scope_counts": {"zhihu_read_history": 1},
+            },
+        )
+
+        assert response.status_code == 200
+        assert len(memory.events) == 1
+        assert memory.events[0]["event_type"] == "view"
+        assert memory.events[0]["metadata"]["profile_update_owner"] == "generic"  # type: ignore[index]
+        assert queue.get(task_id)["status"] == "completed"
 
     def test_sources_status_zhihu_login_required_reports_missing(
         self,
@@ -14704,6 +14867,71 @@ class TestEmbeddingAndCompatProviderE2E:
         assert scheduler["pause_on_extension_disconnect"] is True
         assert scheduler["extension_disconnect_grace_seconds"] == 45
 
+    def test_scheduler_source_incremental_api_round_trip_and_null_inheritance(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig
+
+        cfg = Config(llm=LLMConfig(openai=LLMProviderConfig(api_key="sk-openai")))
+        cfg.scheduler.source_incremental_hours = 36
+        cfg.scheduler.xhs_incremental_hours = 0
+        cfg.scheduler.douyin_incremental_hours = 168
+        client = self._make_client(monkeypatch, tmp_path, cfg)
+
+        initial = client.get("/api/config")
+        assert initial.status_code == 200
+        assert initial.json()["scheduler"]["source_incremental_hours"] == 36
+        assert initial.json()["scheduler"]["xhs_incremental_hours"] == 0
+        assert initial.json()["scheduler"]["douyin_incremental_hours"] == 168
+        assert initial.json()["scheduler"]["youtube_incremental_hours"] is None
+
+        updated = client.put(
+            "/api/config",
+            json={
+                "scheduler": {
+                    "source_incremental_hours": 48,
+                    "xhs_incremental_hours": None,
+                    "douyin_incremental_hours": 12,
+                    "youtube_incremental_hours": 0,
+                    "zhihu_incremental_hours": 7,
+                    "reddit_incremental_hours": 168,
+                }
+            },
+        )
+
+        assert updated.status_code == 200
+        assert cfg.scheduler.source_incremental_hours == 48
+        assert cfg.scheduler.xhs_incremental_hours is None
+        assert cfg.scheduler.douyin_incremental_hours == 12
+        assert cfg.scheduler.youtube_incremental_hours == 0
+        assert cfg.scheduler.zhihu_incremental_hours == 7
+        assert cfg.scheduler.reddit_incremental_hours == 168
+        assert updated.json()["config"]["scheduler"]["xhs_incremental_hours"] is None
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("source_incremental_hours", -1),
+            ("source_incremental_hours", 169),
+            ("source_incremental_hours", None),
+            ("xhs_incremental_hours", -1),
+            ("xhs_incremental_hours", 169),
+        ],
+    )
+    def test_scheduler_source_incremental_api_rejects_invalid_intervals(
+        self, monkeypatch, tmp_path, field: str, value: object
+    ) -> None:
+        from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig
+
+        cfg = Config(llm=LLMConfig(openai=LLMProviderConfig(api_key="sk-openai")))
+        client = self._make_client(monkeypatch, tmp_path, cfg)
+
+        response = client.put("/api/config", json={"scheduler": {field: value}})
+
+        assert response.status_code == 400
+        expected = 24 if field == "source_incremental_hours" else None
+        assert getattr(cfg.scheduler, field) == expected
+
     @pytest.mark.parametrize(("raw_bool", "bad_grace"), [("true", -1), ("on", 0), ("true", "abc")])
     def test_put_config_updates_scheduler_pause_on_extension_disconnect(
         self,
@@ -17030,6 +17258,42 @@ class TestGuidedInitEndpoints:
         assert captured["include_dy"] is True
         assert captured["include_xhs"] is False
         assert captured["include_reddit"] is False
+
+    def test_init_reserves_before_source_opt_in_runtime_reload(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.config import Config
+
+        captured = self._capture_run_guided_init(monkeypatch)
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=[])
+        app, _ = self._make_app(tmp_path, prereqs=prereqs)
+        ctx = app.state.runtime_context
+        ctx.config = Config()
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        ctx.config.data_dir = str(data_dir)
+        ctx.config.sources.douyin.enabled = False
+        reservation_seen_during_rebuild: list[bool] = []
+
+        async def observe_rebuild(_config: object) -> None:
+            reservation_seen_during_rebuild.append(ctx.init_coordinator.init_active())
+
+        async def no_op_restart(_app: object, **_kwargs: object) -> None:
+            return None
+
+        monkeypatch.setattr(ctx, "rebuild_from_config", observe_rebuild)
+        monkeypatch.setattr(ctx, "restart_background_tasks", no_op_restart)
+        monkeypatch.setattr("openbiliclaw.config.save_config", lambda _config: None)
+
+        with TestClient(app) as client:
+            response = client.post("/api/init", json={"sources": ["douyin"]})
+            assert response.status_code == 202, response.text
+            self._drive_until(client, captured, key="include_dy")
+
+        assert reservation_seen_during_rebuild == [True]
+        assert captured["include_dy"] is True
 
     def test_cancel_without_active_run_returns_409(self, tmp_path: Path) -> None:
         from fastapi.testclient import TestClient
