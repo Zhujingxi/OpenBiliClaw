@@ -348,6 +348,81 @@ class TestXhsTaskQueue:
         assert result["notes"][0]["published_at"] == 1783492200000
         assert result["notes"][0]["published_label"] == "3小时前"
 
+    def test_duplicate_note_at_cap_accepts_only_token_upgrade(self, queue: XhsTaskQueue) -> None:
+        assert queue.enqueue(
+            "bootstrap_profile",
+            {"scopes": ["saved"], "max_items_per_scope": 1},
+        )
+        task = queue.next_pending()
+        assert task is not None
+        bare_url = "https://www.xiaohongshu.com/explore/token-upgrade"
+        tokenized_url = f"{bare_url}?xsec_token=fresh-token"
+        partial_note = {
+            "scope": "saved",
+            "note_id": "token-upgrade",
+            "title": "first title",
+            "url": bare_url,
+            "xsec_token": "",
+        }
+        queue.merge_result(task["id"], urls=[bare_url], notes=[partial_note])
+
+        canonical = queue.stage_final_result(
+            task["id"],
+            terminal_status="ok",
+            urls=[tokenized_url],
+            notes=[
+                {
+                    **partial_note,
+                    "title": "must not replace first title",
+                    "url": tokenized_url,
+                    "xsec_token": "fresh-token",
+                },
+                {
+                    "scope": "saved",
+                    "note_id": "overflow",
+                    "title": "overflow",
+                    "url": "https://www.xiaohongshu.com/explore/overflow",
+                },
+            ],
+        )
+
+        assert len(canonical["notes"]) == 1
+        assert canonical["notes"][0]["title"] == "first title"
+        assert canonical["notes"][0]["url"] == tokenized_url
+        assert canonical["notes"][0]["xsec_token"] == "fresh-token"
+        assert canonical["urls"] == [tokenized_url]
+
+    def test_duplicate_note_with_preexisting_token_upgrades_bare_url(
+        self, queue: XhsTaskQueue
+    ) -> None:
+        assert queue.enqueue(
+            "bootstrap_profile",
+            {"scopes": ["saved"], "max_items_per_scope": 1},
+        )
+        task = queue.next_pending()
+        assert task is not None
+        bare_url = "https://www.xiaohongshu.com/explore/preexisting-token"
+        tokenized_url = f"{bare_url}?xsec_token=known-token"
+        partial_note = {
+            "scope": "saved",
+            "note_id": "preexisting-token",
+            "title": "first title",
+            "url": bare_url,
+            "xsec_token": "known-token",
+        }
+        queue.merge_result(task["id"], urls=[bare_url], notes=[partial_note])
+
+        canonical = queue.stage_final_result(
+            task["id"],
+            terminal_status="ok",
+            urls=[tokenized_url],
+            notes=[{**partial_note, "url": tokenized_url}],
+        )
+
+        assert canonical["notes"][0]["url"] == tokenized_url
+        assert canonical["notes"][0]["xsec_token"] == "known-token"
+        assert canonical["urls"] == [tokenized_url]
+
     def test_merge_result_counts_disjoint_partial_pages(self, queue: XhsTaskQueue) -> None:
         assert queue.enqueue("bootstrap_profile", {"scopes": ["saved"]})
         task = queue.next_pending()
@@ -373,6 +448,200 @@ class TestXhsTaskQueue:
         result = json.loads(stored["result_json"])
         assert len(result["notes"]) == 10
         assert result["scope_counts"]["saved"] == 10
+
+    def test_merge_result_enforces_bootstrap_scope_cap_across_partial_and_final(
+        self, queue: XhsTaskQueue
+    ) -> None:
+        assert queue.enqueue(
+            "bootstrap_profile",
+            {"scopes": ["saved", "liked"], "max_items_per_scope": 2},
+        )
+        task = queue.next_pending()
+        assert task is not None
+
+        partial_saved = [
+            {
+                "scope": "saved",
+                "note_id": f"saved-partial-{index}",
+                "title": "partial saved",
+                "url": f"https://www.xiaohongshu.com/explore/saved-partial-{index}",
+            }
+            for index in range(2)
+        ]
+        overflow_saved = [
+            {
+                "scope": "saved",
+                "note_id": f"saved-final-{index}",
+                "title": "overflow saved",
+                "url": f"https://www.xiaohongshu.com/explore/saved-final-{index}",
+            }
+            for index in range(2)
+        ]
+        final_liked = [
+            {
+                "scope": "liked",
+                "note_id": f"liked-final-{index}",
+                "title": "final liked",
+                "url": f"https://www.xiaohongshu.com/explore/liked-final-{index}",
+            }
+            for index in range(2)
+        ]
+
+        queue.merge_result(
+            task["id"],
+            urls=[str(note["url"]) for note in partial_saved],
+            notes=partial_saved,
+            scope_counts={"saved": 2, "liked": 0},
+        )
+        canonical = queue.stage_final_result(
+            task["id"],
+            terminal_status="ok",
+            urls=[str(note["url"]) for note in [*overflow_saved, *final_liked]],
+            notes=[*overflow_saved, *final_liked],
+            scope_counts={"saved": 2, "liked": 2},
+        )
+
+        assert [note["note_id"] for note in canonical["notes"]] == [
+            "saved-partial-0",
+            "saved-partial-1",
+            "liked-final-0",
+            "liked-final-1",
+        ]
+        assert canonical["scope_counts"] == {"saved": 2, "liked": 2}
+        assert canonical["urls"] == [
+            *(str(note["url"]) for note in partial_saved),
+            *(str(note["url"]) for note in final_liked),
+        ]
+
+    def test_bootstrap_cap_drops_overflow_urls_when_other_scope_is_empty(
+        self, queue: XhsTaskQueue
+    ) -> None:
+        assert queue.enqueue(
+            "bootstrap_profile",
+            {"scopes": ["saved", "liked"], "max_items_per_scope": 2},
+        )
+        task = queue.next_pending()
+        assert task is not None
+
+        notes = [
+            {
+                "scope": "saved",
+                "note_id": f"saved-{index}",
+                "url": f"https://www.xiaohongshu.com/explore/saved-{index}",
+            }
+            for index in range(4)
+        ]
+        queue.complete(
+            task["id"],
+            urls=[str(note["url"]) for note in notes],
+            notes=notes,
+            scope_counts={"saved": 4, "liked": 0},
+        )
+
+        stored = queue.get(task["id"])
+        assert stored is not None
+        result = json.loads(stored["result_json"])
+        assert [note["note_id"] for note in result["notes"]] == ["saved-0", "saved-1"]
+        assert result["urls"] == [
+            "https://www.xiaohongshu.com/explore/saved-0",
+            "https://www.xiaohongshu.com/explore/saved-1",
+        ]
+        assert result["scope_counts"] == {"saved": 2, "liked": 0}
+
+    def test_bootstrap_result_accepts_only_task_scopes_and_integer_counts(
+        self, queue: XhsTaskQueue
+    ) -> None:
+        assert queue.enqueue(
+            "bootstrap_profile",
+            {"scopes": ["saved"], "max_items_per_scope": 2},
+        )
+        task = queue.next_pending()
+        assert task is not None
+        notes = [
+            {
+                "scope": scope,
+                "note_id": scope,
+                "url": f"https://www.xiaohongshu.com/explore/{scope}",
+            }
+            for scope in ("saved", "liked", "xhs_history", "unknown")
+        ]
+
+        queue.complete(
+            task["id"],
+            urls=[str(note["url"]) for note in notes],
+            notes=notes,
+            scope_counts={
+                "saved": "999",
+                "liked": 1,
+                "xhs_history": 1.5,
+                "unknown": 1,
+            },
+        )
+
+        stored = queue.get(task["id"])
+        assert stored is not None
+        result = json.loads(stored["result_json"])
+        assert [note["scope"] for note in result["notes"]] == ["saved"]
+        assert result["urls"] == ["https://www.xiaohongshu.com/explore/saved"]
+        assert result["scope_counts"] == {"saved": 1}
+
+    def test_bootstrap_missing_scopes_matches_extension_defaults(self, queue: XhsTaskQueue) -> None:
+        assert queue.enqueue(
+            "bootstrap_profile",
+            {"max_items_per_scope": 1},
+        )
+        task = queue.next_pending()
+        assert task is not None
+        notes = [
+            {
+                "scope": scope,
+                "note_id": scope,
+                "url": f"https://www.xiaohongshu.com/explore/{scope}",
+            }
+            for scope in ("saved", "liked", "xhs_history")
+        ]
+
+        queue.complete(task["id"], notes=notes)
+
+        stored = queue.get(task["id"])
+        assert stored is not None
+        result = json.loads(stored["result_json"])
+        assert [note["scope"] for note in result["notes"]] == [
+            "saved",
+            "liked",
+            "xhs_history",
+        ]
+        assert result["urls"] == [str(note["url"]) for note in notes]
+
+    def test_rate_limit_result_uses_bootstrap_scope_policy(self, queue: XhsTaskQueue) -> None:
+        assert queue.enqueue(
+            "bootstrap_profile",
+            {"scopes": ["saved"], "max_items_per_scope": 1},
+        )
+        task = queue.next_pending()
+        assert task is not None
+        notes = [
+            {
+                "scope": "saved",
+                "note_id": f"saved-{index}",
+                "url": f"https://www.xiaohongshu.com/explore/saved-{index}",
+            }
+            for index in range(2)
+        ]
+
+        queue.record_rate_limit(
+            task["id"],
+            urls=[str(note["url"]) for note in notes],
+            notes=notes,
+            scope_counts={"saved": 2, "liked": 50},
+        )
+
+        stored = queue.get(task["id"])
+        assert stored is not None
+        result = json.loads(stored["result_json"])
+        assert [note["note_id"] for note in result["notes"]] == ["saved-0"]
+        assert result["urls"] == ["https://www.xiaohongshu.com/explore/saved-0"]
+        assert result["scope_counts"] == {"saved": 1}
 
     def test_fail_marks_task_failed(self, queue: XhsTaskQueue) -> None:
         queue.enqueue("search", {"keyword": "x"})

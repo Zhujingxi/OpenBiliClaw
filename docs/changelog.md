@@ -4,10 +4,15 @@
 
 ---
 
+## 未发布：小红书登录态与画像回传上限修复（2026-08-06）
+
+- **适配小红书当前 `/explore` 登录门形态**：search / creator / bootstrap 除可见登录弹层外，也识别可见的登录手机输入框和侧栏本人登录按钮；完整祖先可见性检查会排除隐藏控件与普通笔记里的“登录”文字。真实已登录浏览器验收确认 `/api/sources/status` 可恢复为 `browser_heartbeat / verified`，搜索任务不再被旧 `web_session` 或新版 DOM 误判。
+- **bootstrap scope 与单 scope 上限升级为后端 canonical 契约**：`XhsTaskQueue` 从任务创建时的不可变 payload 读取允许的 `scopes` 与 `max_items_per_scope`，在 partial、final、直接完成和风控失败合并时累计裁剪；未声明 scope、非整数计数和未被 canonical note 接纳的裸 URL 会被丢弃，先到的 canonical 行优先，默认 scope 与扩展统一为 saved / liked / xhs_history。已接纳的同一笔记仍可补发布时间与首个同 identity `xsec_token` / tokenized URL，不增加条目或替换首写标题。扩展重试或分批回传不能再扩大任务预算。真实小规模收藏 / 点赞请求在隔离数据目录复现并覆盖该缺口，回归同时验证首个终态冻结与重复回调零新增事件。
+
 ## v0.3.194 / extension v0.3.195：小红书真实搜索修复与首启可靠性（2026-08-05）
 
 - **修复三端“待聊确认”数字角标偶发不出现**：插件 popup 在启动探测离线后恢复、runtime stream 重连及面板重新可见时都会刷新；PC Web 把待聊数量提升为首屏高优先级请求，避免被推荐卡 saved-status 请求扇出挤进浏览器连接队列，并随实时事件与重连去抖更新；移动 Web 新增底部对话 Tab 数字角标，并在首屏、重连与实时事件后同步。浏览器工具栏角标继续只表示后端健康，不混入待聊计数。
-- **修复小红书真实搜索的隐藏页与失效登录双重误诊**：更新后的工作区插件第一次回执显示 `document.hidden=true`、46 个普通 anchor 但 0 个 note anchor；切到前台后 `hidden=false` 仍为空，随后在同一真实浏览器手动提交搜索，页面明确弹出“登录后查看搜索结果”，证明残留 `web_session` Cookie 把失效会话误报成已登录，而非搜索频率直接触发风控。dispatcher 现在先记录当前活动标签，search 短暂以前台标签渲染并在结束后恢复原标签；executor 看到可见登录弹层会立即返回 `xhs_login_required`，后端再把这份真实页面证据写回登录态为 false。2026-08-05 的真实 `/explore` 页面还出现了没有稳定提示文案的新版形态，因此识别补充为可见的登录手机输入框或侧栏本人登录按钮，隐藏控件与普通笔记里的“登录”文字仍不会命中。creator 保持后台，默认 20 分钟目标间隔（稳定 ±25% 抖动）、每日 20 次预算、队列积压门控和 `1h → 24h` 指数退避全部保留。
+- **修复小红书真实搜索的隐藏页与失效登录双重误诊**：更新后的工作区插件第一次回执显示 `document.hidden=true`、46 个普通 anchor 但 0 个 note anchor；切到前台后 `hidden=false` 仍为空，随后在同一真实浏览器手动提交搜索，页面明确弹出“登录后查看搜索结果”，证明残留 `web_session` Cookie 把失效会话误报成已登录，而非搜索频率直接触发风控。dispatcher 现在先记录当前活动标签，search 短暂以前台标签渲染并在结束后恢复原标签；executor 看到可见登录弹层会立即返回 `xhs_login_required`，后端再把这份真实页面证据写回登录态为 false。creator 保持后台，默认 20 分钟目标间隔（稳定 ±25% 抖动）、每日 20 次预算、队列积压门控和 `1h → 24h` 指数退避全部保留。
 - **搜索路由与空结果诊断继续收口**：task、bootstrap、被动采集共用 `/explore/{id}`、`/discovery/item/{id}`、`/search_result/{id}` 三路由 selector；搜索 SPA 最多等待 12 秒。真实空结果仍只回传 pathname、可见性、viewport 与 anchor 计数，不上传搜索词、页面正文、链接、Cookie 或 state 内容。
 - **修复首启 bge-m3 下载进度不实时更新（Issue #142）**：安装包在启动拉取线程前发布进程全局 running 状态，setup、桌面 Web 与 popup 在初始化前即可接管并持续轮询下载进度，慢速 Windows 下载不再只显示静态等待。
 - **候选评估使用真实发布时间**：单条、批量和补分类路径统一携带来源 `published_at` 与真实 UTC `evaluated_at`，缓存同时绑定发布时间摘要和评估小时桶；缺失或无效发布时间保持中性，不再让模型按知识截止时间猜测当前日期。

@@ -536,7 +536,7 @@ B 站扩展搜索 producer 是 API 搜索的兜底，不是常驻主发现路径
 
 XHS / 抖音 / YouTube / 知乎 / Reddit 的插件任务桥保留两层去重：
 
-- 单任务内：`merge_result()` 合并 partial / final payload 时按 scope + 平台原生 ID / URL / title 去重，只把本次新增项返回给 API 传播。XHS 的 `scope_counts` 以扩展报告值和已合并 scope-aware canonical 行数两者较大值为准；因此两个互不重叠的 partial 即使各自都报告 `saved=5`，终态也会诚实显示 `saved=10`，同一笔记同时出现在 saved/liked 则保留为两个不同强信号。
+- 单任务内：`merge_result()` 合并 partial / final payload 时按 scope + 平台原生 ID / URL / title 去重，只把本次新增项返回给 API 传播。XHS 只接纳任务不可变 `scopes` 白名单内的 note 与整数计数；缺失 / 空列表按扩展默认回退为 saved / liked / xhs_history。`scope_counts` 以扩展报告值和已合并 scope-aware canonical 行数两者较大值为准，但最终受 `max_items_per_scope` 约束：两个互不重叠的 partial 可在预算内从各报 `saved=5` 累积为 `saved=10`；达到上限后先到的 canonical 行优先，后续同行、计数与未被 note 接纳的裸 URL 都被裁掉。已接纳同 identity note 的发布时间与首个有效 tokenized URL 可继续补齐，不占新额度。同一笔记同时出现在 saved/liked 仍保留为两个不同强信号，各自占用所属 scope 的预算。
 - 跨任务：API 在传播 bootstrap 事件前读取 `source_bootstrap_state.json`，跳过五个平台已经进入 durable event ingress 的 identity key；seen-key checkpoint 使用原子 read-modify-write，按扩展响应顺序为每源保留最新 5,000 个。这样 `fetch-*`、`init`、周期回拉或近期任务复用重复返回同一批收藏 / 历史时，不会再次插入行为事实或触发画像更新。五个平台的 final callback 都先冻结首份 canonical result，随后依次修复 event ingress、seen state 和 terminal flip；任一步失败都保持 staged/nonterminal，供租约重领后从冻结结果重放。
 
 ## 配置项

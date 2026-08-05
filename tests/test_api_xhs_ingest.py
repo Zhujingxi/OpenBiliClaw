@@ -1161,6 +1161,101 @@ class TestXhsTaskResults:
         assert candidate["published_at"] == "2026-07-08T06:30:00Z"
         assert candidate["published_label"] == "3小时前"
 
+    def test_xhs_bootstrap_partial_and_final_share_one_scope_cap(
+        self,
+        xhs_task_client: tuple[TestClient, Database, RecordingMemoryManager],
+    ) -> None:
+        import json
+
+        from openbiliclaw.sources.xhs_tasks import XhsTaskQueue
+
+        app_client, db, memory = xhs_task_client
+        queue = XhsTaskQueue(db)
+        assert queue.enqueue(
+            "bootstrap_profile",
+            {"scopes": ["saved", "liked"], "max_items_per_scope": 2},
+        )
+        task = queue.next_pending()
+        assert task is not None
+
+        def note(scope: str, note_id: str) -> dict[str, str]:
+            return {
+                "scope": scope,
+                "title": note_id,
+                "url": f"https://www.xiaohongshu.com/explore/{note_id}",
+                "note_id": note_id,
+            }
+
+        partial_saved = [note("saved", f"saved-partial-{index}") for index in range(2)]
+        overflow_saved = [note("saved", f"saved-final-{index}") for index in range(2)]
+        final_liked = [note("liked", f"liked-final-{index}") for index in range(2)]
+        unrequested = [
+            note("xhs_history", "history-final"),
+            note("unknown", "unknown-final"),
+        ]
+
+        partial = app_client.post(
+            "/api/sources/xhs/task-result",
+            json={
+                "task_id": task["id"],
+                "status": "partial",
+                "urls": [item["url"] for item in partial_saved],
+                "notes": partial_saved,
+                "scope_counts": {"saved": 2, "liked": 0},
+            },
+        )
+        assert partial.status_code == 200
+
+        final = app_client.post(
+            "/api/sources/xhs/task-result",
+            json={
+                "task_id": task["id"],
+                "status": "ok",
+                "urls": [item["url"] for item in [*overflow_saved, *final_liked, *unrequested]],
+                "notes": [*overflow_saved, *final_liked, *unrequested],
+                "scope_counts": {
+                    "saved": 2,
+                    "liked": 2,
+                    "xhs_history": "999",
+                    "unknown": 1,
+                },
+            },
+        )
+        assert final.status_code == 200
+
+        row = db.conn.execute(
+            "SELECT status, result_json FROM xhs_tasks WHERE id=?",
+            (task["id"],),
+        ).fetchone()
+        assert row["status"] == "completed"
+        result = json.loads(row["result_json"])
+        assert [item["note_id"] for item in result["notes"]] == [
+            "saved-partial-0",
+            "saved-partial-1",
+            "liked-final-0",
+            "liked-final-1",
+        ]
+        assert result["scope_counts"] == {"saved": 2, "liked": 2}
+        assert result["urls"] == [
+            *(item["url"] for item in partial_saved),
+            *(item["url"] for item in final_liked),
+        ]
+        assert len(memory.events) == 4
+
+        replay = app_client.post(
+            "/api/sources/xhs/task-result",
+            json={
+                "task_id": task["id"],
+                "status": "ok",
+                "urls": [item["url"] for item in overflow_saved],
+                "notes": overflow_saved,
+                "scope_counts": {"saved": 2, "liked": 0},
+            },
+        )
+        assert replay.status_code == 200
+        assert replay.json() == {"ok": True, "ignored": True}
+        assert len(memory.events) == 4
+
     def test_xhs_bootstrap_empty_result_preserves_scope_counts(
         self,
         xhs_task_client: tuple[TestClient, Database, RecordingMemoryManager],
