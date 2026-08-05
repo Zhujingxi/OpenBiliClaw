@@ -189,12 +189,12 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.194 (2026-08-05)**
+📌 Latest: **v0.3.196 (2026-08-06)**
 
-- **Xiaohongshu discovery is steadier and more conservative** — a jittered 20-minute target, budgets, and exponential backoff remain in force while search briefly renders in front and restores the previous tab.
-- **First-launch progress no longer stalls** — setup, desktop web, and the extension show live bge-m3 download progress as soon as the pull starts.
-- **Freshness evaluation is more accurate** — candidate scoring uses source publication time and the real UTC evaluation time instead of guessing from model knowledge cutoffs.
-- **Keyword rotation stays fresher** — the planner avoids repeatedly consuming the same terms and stops generating more while the queue is backed up.
+- **The candidate pool now refills on demand** — low inventory wakes every configured source in parallel, while duplicate-only runs no longer masquerade as progress and stretch into hours-long gaps.
+- **Content evaluation uses fewer model tokens** — sparse JSON passed a real 100×3 quality gate and is now the default, cutting median prompt tokens by 27.99% and total tokens by 24.05%.
+- **Profiles stay cleaner and safer** — overlapping sub-interests merge by recommendation intent, failed consolidation retries, and rollback or concurrent writes no longer discard fresh interests.
+- **Cross-surface state recovery is more reliable** — pending-chat badges refresh after reconnects and visibility changes, while desktop platform filters recover from transient config-read failures.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
@@ -652,6 +652,7 @@ images: proxy foreground + refresh prefetch → app-stable lane (total 4 / bg 3,
 │ Bangumi public API → search/ranked/date producer → shared eval │
 │ Eval clock: published_at + exact UTC evaluated_at → hourly cache invalidation │
 │ API projected stock → 3×30 workers → serial admit; OpenClaw first batch≤4 → copy≤4/no split retry → UI │
+│ API raw-empty → wake under-share sources now → real progress resets / duplicate-only waves back off │
 │ Delight gate: formal copy/topic ready + seen_items guard → score/snapshot → UI × writes seen ledger │
 │ Inventory API/OpenClaw startup hook → recover/maintain → expose LLM │
 │ Reshuffle: current-card exclusion → PoolServeSnapshot/seen_items → short rec+shown write → one batch event │

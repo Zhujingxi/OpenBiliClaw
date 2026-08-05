@@ -49,11 +49,27 @@ def effective_candidate_eval_workers(configured: int, llm_concurrency: int) -> i
 
 
 def _supply_result_is_productive(result: Any) -> bool:
-    """Treat only recognized mapping results without refresh output as unproductive."""
+    """Return whether a supply request made concrete replenishment progress.
+
+    New runtime callbacks report an explicit productivity flag or count.  The
+    legacy ``refreshed`` fallback remains for third-party/one-shot callbacks,
+    but an explicit zero must win over ``refreshed=True``: merely executing a
+    discovery strategy does not mean it inserted a new raw candidate.
+    """
 
     if not isinstance(result, Mapping):
         return True
     try:
+        if "supply_productive" in result:
+            return bool(result.get("supply_productive"))
+        for key in ("supply_progress_count", "supply_inserted_count"):
+            if key in result:
+                return int(result.get(key, 0) or 0) > 0
+
+        progress_keys = ("inserted", "enqueued", "cached", "discovered")
+        present_progress = [key for key in progress_keys if key in result]
+        if present_progress:
+            return any(int(result.get(key, 0) or 0) > 0 for key in present_progress)
         return bool(result.get("refreshed"))
     except Exception:
         logger.debug(
@@ -136,7 +152,8 @@ class CandidateEvalCoordinator:
         self.last_wake_reason = str(reason)
         self._supply_cooldown_until = 0.0
         resume_notification = self._resume_notification(reason)
-        if resume_notification:
+        supply_progress_notification = str(reason).strip().lower().startswith("candidate_enqueued:")
+        if resume_notification or supply_progress_notification:
             self._reset_supply_backoff()
         if self._paused and resume_notification:
             self._paused = False

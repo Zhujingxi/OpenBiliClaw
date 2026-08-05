@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Mapping
-from typing import cast
 
 ROW_WIRE_V1_HEADER = "ROW-WIRE-V1"
 
@@ -339,12 +338,14 @@ def _decode_number_cell(value: str, *, field: str, location: str) -> int | float
     if field in _POSITIVE_INTEGER_ITEM_FIELDS:
         if isinstance(decoded, bool) or not isinstance(decoded, int) or decoded <= 0:
             raise EvaluationWireError(f"{location} must decode to a positive integer")
-        return cast("int", decoded)
+        positive_integer: int = decoded
+        return positive_integer
     if isinstance(decoded, bool) or not isinstance(decoded, int | float):
         raise EvaluationWireError(f"{location} must decode to a number")
     if not _is_finite_positive_number(decoded):
         raise EvaluationWireError(f"{location} must decode to a finite positive number")
-    return cast("int | float", decoded)
+    positive_number: int | float = decoded
+    return positive_number
 
 
 def decode_evaluation_row_wire(payload: str) -> dict[str, object]:

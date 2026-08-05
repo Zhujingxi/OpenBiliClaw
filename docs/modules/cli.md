@@ -615,6 +615,7 @@ $ openbiliclaw profile-consolidate --revert 20260612-031500   # 按 run_id 回�
 - `--full` 与 `--migrate-categories` 互斥；推荐先 `--migrate-categories --apply`，再 `--full --apply`
 - active likes 超过 `profile_consolidation_like_target_upper` 时，定时整理会自动临时开 full boundary，并按 `upper -> soft` 水位压力降低 likes embedding 聚类阈值（CLI 输出 `likes 动态聚类阈值`）；合并后仍超上限时，会把低权重且非用户保护的长尾兴趣归档到 `archived_interests`
 - dry-run 会显示预计归档数量和库存说明；`--apply` 写入后 run record 可同时回滚 active / archived inventory
+- `--apply` 在 LLM 裁决后会重新核对完整 preference revision；若同期偏好分析写入了新证据，本轮放弃全部旧快照结果、不写 run/state，并由下一 tick 重试
 - 避雷主题只合真同义、严禁向上泛化（canonical 不得比成员更宽泛）
 - 用户在画像编辑里手动 remove/add 的条目会随改名同步（rename map 穿透 overrides），不会被合并「借尸还魂」
 - 回滚会把被回滚的合并对记入 no-merge 记忆，下一轮定时整理不会重做同一合并
