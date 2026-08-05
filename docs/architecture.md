@@ -220,7 +220,7 @@ Web durable turn 只在成功 completion CAS 后交接认知与成功事件；�
 - `PoolServeSnapshot` — 专属 serve DB worker 在一个只读事务内统一读取 readiness、候选窗口、平台补位、持久化 `seen_items` 和 curator 信号；MMR/多样性纯函数与排序规则不变
 - `serve_with_result()` — 返回 items、提交后扣减库存与分阶段耗时；推荐历史和 shown 在独立短事务中原子提交，API 先广播结果库存，再 detached 精确收敛
 - 换批是默认硬去重动作：桌面 Web、移动 Web 与扩展 side panel 都提交当前卡片 ID，后端继续叠加推荐历史和 `seen_items`；成功响应只写一条 `reshuffle` 批次事件。桌面端不再暴露“换一批时忽略当前”开关，也不会逐卡提交 `dismiss`。CLI 没有持久卡片列表，只复用后两层去重。
-- 平台定向作用域（PC Web 平台 Tab）：`serve / reshuffle / append` 的可选 `source_platform` 让 snapshot 只装载该 canonical 平台的候选并跳过跨平台保底补位，其后的 curator、MMR、多样性、文案、持久化与 shown 提交完全复用同一实现；返回前校验并丢弃跨平台泄漏行（记 ERROR）。数据流为 `PC Web tab → POST {reshuffle,append}.source_platform → RecommendationEngine → Storage 平台候选`，配套只读 `GET /api/recommendations/platform-availability` 提供 Tab 库存徽标。库存与选片共用同一份 canonical available 行集合，`total_available == sum(by_platform)`。移动 Web、扩展与 CLI 无平台 Tab，继续走不带平台的兼容路径
+- 平台定向作用域（PC Web 平台 Tab）：`serve / reshuffle / append` 的可选 `source_platform` 让 snapshot 只装载该 canonical 平台的候选并跳过跨平台保底补位，其后的 curator、MMR、多样性、文案、持久化与 shown 提交完全复用同一实现；返回前校验并丢弃跨平台泄漏行（记 ERROR）。数据流为 `PC Web tab → POST {reshuffle,append}.source_platform → RecommendationEngine → Storage 平台候选`，配套只读 `GET /api/recommendations/platform-availability` 提供 Tab 库存徽标。Tab 集合取“启用配置 ∪ 正库存 ∪ 已加载卡片”；首屏 `/api/config` 瞬断时按 1s / 2s / 4s / 8s 有界恢复，页签转入后台会取消重试定时器，恢复可见后重新水合并收敛。库存与选片共用同一份 canonical available 行集合，`total_available == sum(by_platform)`。移动 Web、扩展与 CLI 无平台 Tab，继续走不带平台的兼容路径
 - 个性化专题生成
 
 ### Runtime (`runtime/`)

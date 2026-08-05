@@ -8858,6 +8858,7 @@ ${cardFeedbackBarHtml()}`;
         desktopRecommendationRecoveryTimer,
         desktopRuntimeRecoveryTimer,
         platformAvailabilityRetryTimer,
+        configSnapshotRetryTimer,
         activityPageRefreshTimer,
       ]) {
         if (timer !== null) window.clearTimeout(timer);
@@ -8866,6 +8867,7 @@ ${cardFeedbackBarHtml()}`;
       desktopRecommendationRecoveryTimer = null;
       desktopRuntimeRecoveryTimer = null;
       platformAvailabilityRetryTimer = null;
+      configSnapshotRetryTimer = null;
       activityPageRefreshTimer = null;
       clearInitPolling();
       const socket = state.runtimeSocket;
