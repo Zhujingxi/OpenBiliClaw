@@ -1,10 +1,10 @@
 # Source Incremental Sync Relanding — Implementation Plan
 
-> **Spec:** [`2026-08-03-source-incremental-sync-relanding-spec.md`](./2026-08-03-source-incremental-sync-relanding-spec.md)  
-> **Base:** started from `origin/main` `15e61bc0`; merged current `origin/main` `5342b866` before final verification.
-> **Execution:** LunaMax (`gpt-5.6-luna`, `max`) multi-agent worktrees; primary agent owns integration, review, fixes, and final verification.  
-> **Rule:** the old `source-incremental-sync` branch is read-only reference. Never merge, rebase, or cherry-pick its implementation commits.  
-> **Status:** implemented, independently reviewed, and automatically verified on 2026-08-03.
+> **Spec:** [`2026-08-03-source-incremental-sync-relanding-spec.md`](./2026-08-03-source-incremental-sync-relanding-spec.md)<br>
+> **Base:** started from `origin/main` `15e61bc0`; synchronized through `origin/main` `4dda1bf8` before final landing verification.<br>
+> **Execution:** LunaMax (`gpt-5.6-luna`, `max`) multi-agent worktrees; primary agent owns integration, review, fixes, and final verification.<br>
+> **Rule:** the old `source-incremental-sync` branch is read-only reference. Never merge, rebase, or cherry-pick its implementation commits.<br>
+> **Status:** implemented, independently reviewed, and fully reverified for landing on 2026-08-06.
 
 ## Execution record
 
@@ -18,14 +18,23 @@
 - Extension gate: `1248 passed`; TypeScript `tsc --noEmit` and Chrome build passed.
 - Static gate: Ruff format checked 541 files, Ruff check passed, MyPy passed for 236 source
   files, and `git diff --check` passed.
+- Final landing gate after synchronizing `origin/main` `4dda1bf8`: all 7,540 collected
+  backend tests completed with exit code 0 in 828.9 seconds; all 1,256 extension tests,
+  TypeScript typecheck, Chrome build, Ruff, changed-file formatting, MyPy for 240 source
+  files, and `git diff --check` passed.
 - Independent review reported 2 high, 5 medium, and 2 low findings against the pre-fix
   snapshot. All confirmed correctness findings are closed with regression coverage,
   including SQLite-backed global admission, init reservation ordering, crash-adoption
   timing, config inheritance, receipt ordering, Reddit identity, strict timestamps, and
   documentation contracts.
-- Installed-extension, logged-in manual smoke was **not run** because no such confirmed
-  environment was available. It remains explicitly unchecked below; no browser automation
-  result is presented as a substitute.
+- The original 2026-08-03 cross-platform scheduler smoke was **not run** because no
+  confirmed logged-in extension environment was available then; those bullets remain
+  explicitly unchecked below.
+- On 2026-08-06, a real logged-in installed-extension XHS session became available. The
+  landing smoke verified current `/explore` login-gate detection, a 20-note real search,
+  capped saved/liked bootstrap ingestion (5 accepted rows per requested scope), canonical
+  URL/note correlation, 10 durable events, and terminal replay idempotency with zero new
+  events. It did not perform any state-changing XHS action or write the real profile/memory.
 
 ## Invariants to re-read before every task
 
@@ -61,7 +70,7 @@ all final gates.
 
 ## Task 0: Freeze the current-main baseline
 
-**Owner:** primary agent  
+**Owner:** primary agent<br>
 **Files:** no production changes.
 
 ### Steps
@@ -85,7 +94,7 @@ all final gates.
 
 ## Task 1: Extract non-CLI enqueue core and add force/incremental parity
 
-**Owner:** LunaMax Agent A  
+**Owner:** LunaMax Agent A<br>
 **Files:** add `src/openbiliclaw/sources/source_bootstrap.py`, modify
 `src/openbiliclaw/cli.py`; add `tests/test_source_bootstrap.py`, update
 `tests/test_cli.py` only where wrapper seams change.
@@ -138,7 +147,7 @@ kick.
 
 ## Task 2: Make source bootstrap state atomic and bounded
 
-**Owner:** LunaMax Agent B  
+**Owner:** LunaMax Agent B<br>
 **Files:** `src/openbiliclaw/sources/bootstrap_state.py`,
 `src/openbiliclaw/memory/manager.py`, `src/openbiliclaw/api/app.py`;
 `tests/test_memory_manager.py`, `tests/test_api_app.py` or a focused new state test module.
@@ -176,7 +185,7 @@ kick.
 
 ## Task 3: Give Reddit durable-ingress and staged-terminal parity
 
-**Owner:** LunaMax Agent C  
+**Owner:** LunaMax Agent C<br>
 **Files:** `src/openbiliclaw/sources/reddit_tasks.py`,
 `src/openbiliclaw/sources/task_result_protocol.py`,
 `src/openbiliclaw/sources/bootstrap_state.py`, `src/openbiliclaw/api/app.py`;
@@ -209,7 +218,7 @@ tests.
 
 ## Task 4: Add config and the scheduler core
 
-**Owner:** LunaMax implementation agent after Wave 1 integration  
+**Owner:** LunaMax implementation agent after Wave 1 integration<br>
 **Files:** `src/openbiliclaw/config.py`, `src/openbiliclaw/api/models.py`,
 `src/openbiliclaw/api/app.py`, add
 `src/openbiliclaw/runtime/source_incremental_sync.py`, add
@@ -248,7 +257,7 @@ tests.
 
 ## Task 5: Wire runtime ownership, init seeding, and hot reload
 
-**Owner:** same LunaMax implementation agent; separate LunaMax reviewer audits races  
+**Owner:** same LunaMax implementation agent; separate LunaMax reviewer audits races<br>
 **Files:** `src/openbiliclaw/runtime/refresh.py`,
 `src/openbiliclaw/api/runtime_context.py`, `src/openbiliclaw/cli.py`,
 `config.example.toml`; `tests/test_refresh_runtime.py`, `tests/test_api_app.py`,
@@ -284,7 +293,7 @@ tests.
 
 ## Task 6: Independent review and corrective pass
 
-**Owner:** primary agent  
+**Owner:** primary agent<br>
 **Files:** as findings require.
 
 ### Review checklist
@@ -306,7 +315,7 @@ tests.
 
 ## Task 7: Mandatory documentation sync
 
-**Owner:** primary agent; LunaMax may draft, primary verifies  
+**Owner:** primary agent; LunaMax may draft, primary verifies<br>
 **Files:** all documents listed in the spec's Documentation obligations.
 
 ### Steps
@@ -330,7 +339,7 @@ tests.
 
 ## Task 8: Comprehensive verification
 
-**Owner:** primary agent  
+**Owner:** primary agent<br>
 **Files:** no unreviewed production changes during this task.
 
 ### Focused gate
@@ -368,8 +377,9 @@ env -u OPENBILICLAW_PROJECT_ROOT PYTHONPATH=src .venv/bin/pytest tests/ -q -p no
 - [ ] Repeat the same pull and verify zero additional events.
 - [ ] Disconnect the extension and verify no task/state advance.
 
-If the environment has no logged-in extension, report the manual smoke as **not run**, not
-passed. Automated gates remain required.
+These original cross-platform scheduler bullets were not run as one manual scenario. The
+later logged-in XHS smoke recorded above verifies the XHS task/auth/ingestion boundary, but
+does not substitute for multi-platform serialization or extension-disconnect checks.
 
 ### Final acceptance
 

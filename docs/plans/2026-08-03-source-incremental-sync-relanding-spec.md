@@ -1,9 +1,9 @@
 # Source Incremental Sync Relanding Spec — extension-online periodic account refresh
 
-**Created:** 2026-08-03  
-**Base:** `origin/main` at `15e61bc0` (`v0.3.192`)  
-**Legacy reference:** local-only branch `source-incremental-sync` at `ce5beb5e` (`v0.3.158`)  
-**Scope:** periodically re-run the existing browser-extension account bootstrap for 小红书、抖音、YouTube、知乎、Reddit, then admit only new account signals through the current durable event ingress.  
+**Created:** 2026-08-03<br>
+**Base:** `origin/main` at `15e61bc0` (`v0.3.192`)<br>
+**Legacy reference:** local-only branch `source-incremental-sync` at `ce5beb5e` (`v0.3.158`)<br>
+**Scope:** periodically re-run the existing browser-extension account bootstrap for 小红书、抖音、YouTube、知乎、Reddit, then admit only new account signals through the current durable event ingress.<br>
 **Status:** r1, approved for implementation. The legacy branch is reference material only; no merge or rebase is allowed.
 
 ## Goal and honest product boundary
