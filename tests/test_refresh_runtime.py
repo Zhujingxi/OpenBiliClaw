@@ -2162,7 +2162,7 @@ async def test_run_refresh_plan_uses_supply_loop_when_pipeline_supports_it() -> 
         pool_target_count=30,
     )
 
-    await controller._run_refresh_plan(
+    result = await controller._run_refresh_plan(
         state=_FakeMemoryManager().load_discovery_runtime_state(),
         profile={"profile": "ok"},
         plan=[(["search", "explore"], 10)],
@@ -2172,6 +2172,40 @@ async def test_run_refresh_plan_uses_supply_loop_when_pipeline_supports_it() -> 
     assert pipeline.supply_calls
     assert pipeline.supply_calls[0]["target_pending"] == pipeline.drain_calls[0]["batch_size"]
     assert pipeline.supply_calls[0]["strategies"] == ["search", "explore"]
+    assert result["supply_inserted_count"] == 6
+    assert result["supply_productive"] is True
+
+
+async def test_refresh_attempt_with_only_duplicate_supply_is_not_productive() -> None:
+    class DuplicateOnlySupplyPipeline:
+        last_admitted_items: list[object] = []
+
+        async def ensure_pending_supply(self, **_kwargs: object) -> dict[str, int]:
+            return {"inserted": 0, "pending_eval": 0, "evaluating": 0, "attempts": 3}
+
+        async def drain_pending(self, **_kwargs: object) -> dict[str, int]:
+            return {"evaluated": 0, "cached": 0, "rejected": 0}
+
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=_FakeDatabase([], pool_count=20, source_counts={"bilibili": 12}),
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+        discovery_candidate_pipeline=DuplicateOnlySupplyPipeline(),
+        pool_target_count=30,
+    )
+
+    result = await controller._run_refresh_plan(
+        state=_FakeMemoryManager().load_discovery_runtime_state(),
+        profile={"profile": "ok"},
+        plan=[(["search", "related_chain"], 10)],
+        reason="test",
+    )
+
+    assert result["refreshed"] is True
+    assert result["supply_inserted_count"] == 0
+    assert result["supply_productive"] is False
 
 
 async def test_run_refresh_plan_respects_candidate_eval_batch_floor() -> None:
@@ -3245,6 +3279,86 @@ async def test_refresh_replenishes_when_raw_ceiling_is_full_but_available_pool_i
     assert result["refreshed"] is True
     assert discovery.calls, "raw-ceiling pressure must not strand a low available pool"
     assert discovery.calls[0][1] == ["search", "related_chain", "trending", "explore"]
+
+
+async def test_candidate_supply_wakes_all_under_quota_platform_producers() -> None:
+    xhs = _FakeXhsProducer()
+    douyin = _FakeDouyinProducer()
+    discovery = _FakeDiscoveryEngine()
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=_FakeDatabase(
+            [],
+            pool_count=30,
+            source_available_counts={
+                "bilibili": 30,
+                "xiaohongshu": 0,
+                "douyin": 0,
+            },
+            source_raw_counts={
+                "bilibili": 30,
+                "xiaohongshu": 0,
+                "douyin": 0,
+            },
+        ),
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=discovery,
+        recommendation_engine=_FakeRecommendationEngine(),
+        xhs_producer=xhs,
+        douyin_producer=douyin,
+        pool_target_count=90,
+        pool_source_shares={"bilibili": 1, "xiaohongshu": 1, "douyin": 1},
+        discovery_limit=30,
+    )
+
+    result = await controller.supply_candidates_once(reason="candidate_supply")
+
+    assert xhs.calls == [30]
+    assert douyin.calls == [30]
+    assert discovery.calls == []
+    assert result["refreshed"] is False
+    assert result["supply_progress_count"] == 4
+    assert result["supply_productive"] is True
+
+
+async def test_periodic_and_demand_ticks_do_not_duplicate_same_source_fetch() -> None:
+    class BlockingProducer:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def produce_if_due(self, *, limit: int | None = None) -> dict[str, object]:
+            self.calls += 1
+            self.started.set()
+            await self.release.wait()
+            return {"enqueued": 1, "reason": "ok"}
+
+    producer = BlockingProducer()
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=_FakeDatabase(
+            [],
+            pool_count=0,
+            source_available_counts={"xiaohongshu": 0},
+            source_raw_counts={"xiaohongshu": 0},
+        ),
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+        xhs_producer=producer,
+        pool_target_count=30,
+        pool_source_shares={"xiaohongshu": 1},
+    )
+
+    first = asyncio.create_task(controller._tick_xhs_producer())
+    await producer.started.wait()
+    overlapping = await controller._tick_xhs_producer()
+    producer.release.set()
+    await first
+
+    assert producer.calls == 1
+    assert overlapping["reason"] == "in_flight"
 
 
 async def test_under_share_non_bili_producer_runs_even_when_global_pool_is_full() -> None:

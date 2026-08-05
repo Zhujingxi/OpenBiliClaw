@@ -525,6 +525,33 @@ def test_api_candidate_snapshot_uses_exact_durable_readiness_and_available_gate(
     assert ctx.llm_concurrency_gate.inventory_priority_state is InventoryPriorityState.EMPTY
 
 
+def test_api_candidate_supply_callback_uses_quota_aware_supply_wave(monkeypatch, tmp_path) -> None:
+    from openbiliclaw.api.runtime_context import build_runtime_context
+    from openbiliclaw.config import Config
+
+    config = Config(data_dir=str(tmp_path / "data"))
+    config.llm.default_provider = "ollama"
+    config.llm.ollama.model = "llama3"
+    ctx = build_runtime_context(config)
+    calls: list[str] = []
+
+    async def supply_candidates_once(*, reason: str) -> dict[str, object]:
+        calls.append(reason)
+        return {"supply_productive": True, "supply_progress_count": 2}
+
+    monkeypatch.setattr(
+        ctx.runtime_controller,
+        "supply_candidates_once",
+        supply_candidates_once,
+    )
+
+    callback = ctx.runtime_controller.candidate_eval_coordinator.supply_callback
+    result = asyncio.run(callback("candidate_supply"))
+
+    assert calls == ["candidate_supply"]
+    assert result == {"supply_productive": True, "supply_progress_count": 2}
+
+
 @pytest.mark.asyncio
 async def test_old_engine_commit_callback_uses_current_controller_after_two_reloads(
     tmp_path,

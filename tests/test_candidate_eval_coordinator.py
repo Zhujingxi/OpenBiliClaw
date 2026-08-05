@@ -767,6 +767,42 @@ async def test_productive_supply_resets_ladder() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "result",
+    [
+        {"refreshed": True, "supply_inserted_count": 0},
+        {"refreshed": True, "supply_progress_count": 0},
+        {"refreshed": True, "supply_productive": False},
+    ],
+)
+async def test_explicit_zero_supply_progress_backs_off(
+    result: dict[str, object],
+) -> None:
+    coordinator = _coordinator(_FakeStagedPipeline(candidate_count=0))
+    coordinator.time_fn = lambda: 100.0
+    coordinator.supply_callback = lambda reason: result
+
+    coordinator._request_supply("test")
+    assert coordinator._supply_task is not None
+    await coordinator._supply_task
+    await coordinator._settle_supply_task()
+
+    assert coordinator._supply_streak == 1
+    assert coordinator._supply_cooldown_until == 130.0
+
+
+def test_candidate_enqueue_notification_resets_supply_ladder() -> None:
+    coordinator = _coordinator(_FakeStagedPipeline(candidate_count=0))
+    coordinator._record_supply_result(productive=False)
+    coordinator._record_supply_result(productive=False)
+
+    coordinator.notify("candidate_enqueued:pipeline")
+
+    assert coordinator._supply_streak == 0
+    assert coordinator._supply_cooldown_until == 0.0
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("result", [None, "legacy"])
 async def test_legacy_supply_result_shape_is_not_throttled(result: object) -> None:
     coordinator = _coordinator(_FakeStagedPipeline(candidate_count=0))

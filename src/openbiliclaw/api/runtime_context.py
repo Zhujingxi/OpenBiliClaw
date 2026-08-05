@@ -1321,8 +1321,7 @@ class RuntimeContext:
             )
 
         async def _request_candidate_supply(reason: str) -> dict[str, object]:
-            await new_runtime_controller.request_replenishment(reason=reason)
-            return await new_runtime_controller.refresh_if_needed()
+            return await new_runtime_controller.supply_candidates_once(reason=reason)
 
         async def _precompute_committed_candidates() -> None:
             expression_coordinator.notify("candidate_commit")

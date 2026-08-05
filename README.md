@@ -655,6 +655,7 @@ background ─ background admission (default 3) ──────┘
 │ Bangumi 官方匿名 API → search/ranked/latest producer → shared eval │
 │ 候选评估时钟：published_at + 精确 UTC evaluated_at → 小时桶缓存失效 │
 │ API projected 库存 → 3×30 worker → 串行入池；OpenClaw 首批≤4 → copy≤4/不拆分重试 → 四端 │
+│ API raw 断供 → 欠份额来源即时并行补给 → 真实新增清退避 / 重复空转阶梯退避 │
 │ 惊喜就绪门：正式推荐词/主题就绪 + seen_items 硬过滤 → 打分并原子快照 → 四端 × 写回已看账本 │
 │ 库存 API/OpenClaw 启动钩子 → 历史恢复/原子维护 → 再暴露 LLM │
 │ 换屏快路：当前卡硬排除 → PoolServeSnapshot/seen_items → recommendation+shown 短事务 → 单条 reshuffle 事件 │

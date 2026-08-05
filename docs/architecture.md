@@ -82,6 +82,8 @@ platform-availability HTTP → isolated read snapshot of the canonical available
                            → {total_available, by_platform}, total == sum(by_platform)
 background refresh → maintenance DB worker / isolated connection
                    → ≤50 mutations per transaction → commit/yield/retry next batch
+candidate raw-empty → quota-aware supply wave → under-share platform producers + Bili refresh
+                    → inserted/enqueued progress → reset, or 30/60/120/300/600s backoff
 
 manual `discover --source douyin` → same Douyin producer as daemon
                                  → unified keyword lifecycle → plugin search/hot/feed
