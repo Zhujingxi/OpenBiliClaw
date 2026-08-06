@@ -2495,6 +2495,7 @@
       watch_later: window.OpenBiliClawSavedSync.createRetainedSavedListState(),
       favorite: window.OpenBiliClawSavedSync.createRetainedSavedListState()
     };
+    const desktopSavedBadgeSyncGenerations = { watch_later: 0, favorite: 0 };
     const desktopSyncingKeys = {
       watch_later: window.OpenBiliClawSavedSync.createSavedSubmissionFence(),
       favorite: window.OpenBiliClawSavedSync.createSavedSubmissionFence()
@@ -2763,20 +2764,26 @@ ${savedCardFeedbackBarHtml(listKind)}
     }
 
     async function refreshWatchLater() {
+      const generation = ++desktopSavedBadgeSyncGenerations.watch_later;
+      const isCurrent = () => generation === desktopSavedBadgeSyncGenerations.watch_later;
       const retained = desktopSavedListStates.watch_later;
       try {
         const data = await fetchDesktopSaved("watch_later");
+        if (!isCurrent()) return;
         retained.commit({ items: (data?.items || []).map(desktopSavedItem), total: data?.total });
         await desktopSavedTaskRuntimes.watch_later.coordinator.recover(
           retained.snapshot().items,
           desktopRecoveredTaskCallbacks("watch_later", refreshWatchLater),
         );
+        if (!isCurrent()) return;
         const status = document.getElementById("watchLaterSyncStatus");
         if (status?.dataset.loadError === "true") { status.replaceChildren(); status.removeAttribute("role"); delete status.dataset.loadError; }
       } catch (error) {
+        if (!isCurrent()) return;
         retained.fail(error);
         showDesktopSavedLoadError("watch_later", document.getElementById("watchLaterSyncStatus"), retained, refreshWatchLater);
       }
+      if (!isCurrent()) return;
       const { items, total } = retained.snapshot();
       renderSavedList("watch_later", "watchLaterList", "watchLaterEmpty", items, refreshWatchLater);
       bindDesktopSavedBatch("watch_later", items, refreshWatchLater);
@@ -2784,20 +2791,26 @@ ${savedCardFeedbackBarHtml(listKind)}
     }
 
     async function refreshFavorites() {
+      const generation = ++desktopSavedBadgeSyncGenerations.favorite;
+      const isCurrent = () => generation === desktopSavedBadgeSyncGenerations.favorite;
       const retained = desktopSavedListStates.favorite;
       try {
         const data = await fetchDesktopSaved("favorite");
+        if (!isCurrent()) return;
         retained.commit({ items: (data?.items || []).map(desktopSavedItem), total: data?.total });
         await desktopSavedTaskRuntimes.favorite.coordinator.recover(
           retained.snapshot().items,
           desktopRecoveredTaskCallbacks("favorite", refreshFavorites),
         );
+        if (!isCurrent()) return;
         const status = document.getElementById("favoritesSyncStatus");
         if (status?.dataset.loadError === "true") { status.replaceChildren(); status.removeAttribute("role"); delete status.dataset.loadError; }
       } catch (error) {
+        if (!isCurrent()) return;
         retained.fail(error);
         showDesktopSavedLoadError("favorite", document.getElementById("favoritesSyncStatus"), retained, refreshFavorites);
       }
+      if (!isCurrent()) return;
       const { items, total } = retained.snapshot();
       renderSavedList("favorite", "favoritesList", "favoritesEmpty", items, refreshFavorites);
       bindDesktopSavedBatch("favorite", items, refreshFavorites);
@@ -2806,7 +2819,9 @@ ${savedCardFeedbackBarHtml(listKind)}
 
     // Re-sync the pressed state + count badge for all visible ☆/♥ toggles.
     function syncWatchLaterButtons() {
-      fetchDesktopSaved("watch_later").then((data) => {
+      const generation = desktopSavedBadgeSyncGenerations.watch_later;
+      return fetchDesktopSaved("watch_later").then((data) => {
+        if (generation !== desktopSavedBadgeSyncGenerations.watch_later) return;
         const saved = new Set((data?.items || []).map((it) => desktopSavedItem(it).item_key));
         document.querySelectorAll('.video-card [data-action="watch-later"]').forEach((btn) => {
           const card = btn.closest(".video-card");
@@ -2820,7 +2835,9 @@ ${savedCardFeedbackBarHtml(listKind)}
     }
 
     function syncFavoriteButtons() {
-      fetchDesktopSaved("favorite").then((data) => {
+      const generation = desktopSavedBadgeSyncGenerations.favorite;
+      return fetchDesktopSaved("favorite").then((data) => {
+        if (generation !== desktopSavedBadgeSyncGenerations.favorite) return;
         const saved = new Set((data?.items || []).map((it) => desktopSavedItem(it).item_key));
         document.querySelectorAll('.video-card [data-action="favorite"]').forEach((btn) => {
           const card = btn.closest(".video-card");
@@ -6907,6 +6924,12 @@ ${cardFeedbackBarHtml()}`;
     // contract yet; `describeAccess()` falls back to the legacy `state` for it.
     const SourceStatus = globalThis.OpenBiliClawSourceStatus;
     const SOURCE_STATUS_KEYS = SourceStatus.SOURCE_KEYS;
+    const SOURCE_STATUS_REFRESH_EVENTS = new Set([
+      "bilibili_cookie_synced",
+      "douyin_cookie_synced",
+      "x_cookie_synced",
+      "reddit_cookie_synced"
+    ]);
     const SOURCE_ENABLE_SELECT_IDS = {
       bilibili: "bilibiliEnabled",
       xiaohongshu: "xhsEnabled",
@@ -7249,12 +7272,11 @@ ${cardFeedbackBarHtml()}`;
     initSourceCards();
 
     // Login happens outside this page (user signs into a platform in another
-    // tab), so a one-shot render on settings open goes stale — re-poll while
-    // the status list is actually visible.
+    // tab). Runtime events make the normal update immediate; this visible-page
+    // poll catches missed events / reconnect gaps and also keeps the dashboard
+    // warning current when the source settings list is closed.
     setInterval(() => {
       if (document.hidden) return;
-      const list = $("#sourceStatusList");
-      if (!list || list.offsetParent === null) return;
       void renderSourcesStatus();
     }, 30000);
 
@@ -8681,6 +8703,10 @@ ${cardFeedbackBarHtml()}`;
         clearDesktopRuntimeRecovery();
       }
       applyRuntimeStatus({ ...event, live_summary: event.message || event.live_summary || event.type });
+      // Credential sync changes the backend-owned source contract. Refresh it
+      // immediately so the dashboard warning does not retain the pre-login
+      // snapshot until settings is opened or the fallback poll runs.
+      if (SOURCE_STATUS_REFRESH_EVENTS.has(event.type)) void renderSourcesStatus();
       // 库存变化事件只刷新 Tab 数字 / 空态 / 自动续页 gate，不碰已加载的推荐卡片。
       if (event.type === "refresh.pool_updated" || event.type === "pool_status") schedulePlatformAvailabilityRefresh();
       if (event.type === "degraded") {
@@ -9132,6 +9158,8 @@ ${cardFeedbackBarHtml()}`;
 
       const secondaryPromises = [
         pendingConfirmationsPromise,
+        syncWatchLaterButtons(),
+        syncFavoriteButtons(),
         requestJson(ENDPOINTS.health),
         requestJson(ENDPOINTS.initStatus).then(applyInitStatusSnapshot),
         requestJson(`${ENDPOINTS.activityFeed}?limit=5`).then(applyActivitySnapshot),

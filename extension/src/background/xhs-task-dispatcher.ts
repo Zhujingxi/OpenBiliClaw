@@ -3,8 +3,9 @@
  *
  * Polls ``GET /api/sources/xhs/next-task`` at intervals. When the backend
  * hands out a task, the dispatcher:
- *   1. Opens the appropriate XHS URL. Search briefly runs in the foreground
- *      because XHS does not render its virtualised note grid in hidden tabs.
+ *   1. Opens discovery URLs in a hidden tab. Search results come from the
+ *      page's own API-response bridge when XHS skips hidden-tab DOM rendering.
+ *      Profile bootstrap remains foreground because it intentionally scrolls.
  *   2. Listens for ``XHS_TASK_RESULT`` from the content script.
  *   3. POSTs the result back to ``/api/sources/xhs/task-result``.
  *   4. Closes the tab.
@@ -108,7 +109,6 @@ let bootstrapDebugSteps: unknown[] = [];
 let dispatcherDebugEvents: unknown[] = [];
 let taskUpdateListener: ((tabId: number, changeInfo: { status?: string }) => void) | null = null;
 let taskNavigationFallbackId: ReturnType<typeof setTimeout> | null = null;
-let previousActiveTabId: number | null = null;
 
 // ---------------------------------------------------------------------------
 // Pure helpers (testable without chrome)
@@ -187,10 +187,7 @@ function shouldActivateBeforeExecute(task: XhsLegacyTask): boolean {
 }
 
 function shouldOpenTaskForeground(task: XhsLegacyTask): boolean {
-  // XHS search pages currently keep the note-card grid empty while the tab is
-  // hidden. Keep bootstrap visible as before and briefly foreground searches;
-  // cleanupTask restores the user's previously active tab afterwards.
-  return task.type === "bootstrap_profile" || task.type === "search";
+  return task.type === "bootstrap_profile";
 }
 
 function buildExecuteMessageData(task: XhsLegacyTask): Record<string, unknown> {
@@ -364,7 +361,6 @@ function cleanupTask(): void {
     taskNavigationFallbackId = null;
   }
   const tabToClose = taskTabId !== null && ownsTaskTab ? taskTabId : null;
-  const tabToRestore = previousActiveTabId;
   taskTabId = null;
   ownsTaskTab = false;
   currentTaskId = null;
@@ -372,17 +368,11 @@ function cleanupTask(): void {
   bootstrapNavigationCount = 0;
   bootstrapDebugSteps = [];
   dispatcherDebugEvents = [];
-  previousActiveTabId = null;
   taskInFlight = false;
   releaseDispatcherMutex("xhs");
-  if (tabToClose !== null || tabToRestore !== null) {
+  if (tabToClose !== null) {
     void (async () => {
-      if (tabToClose !== null) {
-        await chrome.tabs.remove(tabToClose).catch(() => {});
-      }
-      if (tabToRestore !== null && tabToRestore !== tabToClose) {
-        await chrome.tabs.update(tabToRestore, { active: true }).catch(() => {});
-      }
+      await chrome.tabs.remove(tabToClose).catch(() => {});
     })();
   }
 }
@@ -512,10 +502,6 @@ export async function executeTask(
 
   try {
     const foreground = shouldOpenTaskForeground(task);
-    if (task.type === "search") {
-      const activeTabs = await chrome.tabs.query({ active: true, currentWindow: true });
-      previousActiveTabId = activeTabs[0]?.id ?? null;
-    }
     const tab = await chrome.tabs.create({
       url,
       active: foreground,
@@ -526,7 +512,6 @@ export async function executeTask(
       tab_id: taskTabId ?? "",
       url,
       active: foreground,
-      previous_active_tab_id: previousActiveTabId ?? "",
     });
   } catch {
     await reportTaskResult({ task_id: task.id, urls: [], status: "error", error: "tab_create_failed" });

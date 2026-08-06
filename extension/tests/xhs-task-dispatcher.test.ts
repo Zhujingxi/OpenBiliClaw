@@ -390,9 +390,8 @@ test("executeTask opens bootstrap_profile in a foreground tab regardless of scro
   await flush();
 });
 
-test("executeTask foregrounds search rendering and restores the previous tab", async () => {
+test("executeTask keeps search discovery in a background tab", async () => {
   const state = installChromeMock();
-  state.queryResult = [{ id: 7, url: "https://example.com/current" }];
 
   const task: XhsTask = { id: "t-search-bg", type: "search", keyword: "demo" };
   await executeTask(task);
@@ -400,15 +399,15 @@ test("executeTask foregrounds search rendering and restores the previous tab", a
   assert.deepEqual(state.createdTabs, [
     {
       url: "https://www.xiaohongshu.com/search_result?keyword=demo",
-      active: true,
+      active: false,
     },
   ]);
-  assert.deepEqual(state.queriedTabs, [{ active: true, currentWindow: true }]);
+  assert.deepEqual(state.queriedTabs, []);
 
   await handleTaskResult({ task_id: "t-search-bg", urls: [], status: "ok" });
   await flush();
   assert.deepEqual(state.removedTabs, [42]);
-  assert.deepEqual(state.updatedTabs, [{ tabId: 7, active: true }]);
+  assert.deepEqual(state.updatedTabs, []);
 });
 
 test("rate-limited task result is reported and closes the task tab", async () => {
