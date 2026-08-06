@@ -189,12 +189,10 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.197 (2026-08-06)**
+📌 Latest: **v0.3.198 (2026-08-06)**
 
-- **Five account sources now refresh incrementally** — Xiaohongshu, Douyin, YouTube, Zhihu, and Reddit use a durable daily round-robin by default and pause safely while the extension is offline or initialization is active.
-- **Cross-platform ingestion is more crash-safe and duplicate-resistant** — Reddit gains atomic terminal results and typed deduplication, while Xiaohongshu enforces task scopes and per-scope limits across retries.
-- **Login state detection is more accurate** — Xiaohongshu recognizes the current `/explore` login gates, and the Desktop Web clears stale yellow Cookie warnings immediately after Bilibili and other credential syncs.
-- **Verified against a real signed-in session** — the status refresh followed the Chrome credential event within 1 ms, and an independent read-only Bilibili probe returned `replayed=false / verified`.
+- **Xiaohongshu discovery no longer steals the active page** — search and creator tasks run in background tabs; search consumes the page's own response with a DOM fallback, so hidden tabs still return results reliably.
+- **Verified with a real signed-in session** — three consecutive background searches each returned 20 notes in about 4–5 seconds while the user's original page stayed visible throughout.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
