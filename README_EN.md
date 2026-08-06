@@ -189,10 +189,10 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.198 (2026-08-06)**
+📌 Latest: **v0.3.199 (2026-08-06)**
 
-- **Xiaohongshu discovery no longer steals the active page** — search and creator tasks run in background tabs; search consumes the page's own response with a DOM fallback, so hidden tabs still return results reliably.
-- **Verified with a real signed-in session** — three consecutive background searches each returned 20 notes in about 4–5 seconds while the user's original page stayed visible throughout.
+- **More reliable configuration saves** — persistence returns `202` immediately with observable background-apply status; failures restore the last-known-good runtime configuration.
+- **Saved-list badges are correct on first load** — desktop Web hydrates Watch Later and Favorites counts immediately, and stale responses cannot overwrite newer state.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 

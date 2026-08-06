@@ -66,10 +66,17 @@ test("runtime stream refresh handlers coalesce expensive frontend reloads", () =
   assert.notEqual(desktopHydrationTrigger, "", "配置终态仍需触发安全再水合");
   assert.doesNotMatch(desktopHydrationTrigger, /refresh\.pool_updated/);
   assert.doesNotMatch(desktopHydrationTrigger, /recommendation\.reshuffled/);
+  assert.match(desktopJs, /if \(reachedTerminal\) \{/);
   assert.match(
     desktopJs,
-    /if \(reachedTerminal\) scheduleSettingsHydrationIfSafe\(\);/,
-    "配置成功或失败终态都必须尝试同步后端配置",
+    /settingsSavePhase === "failed" && settingsDirtyFields\.size > 0/,
+    "失败终态保留新草稿时必须走 canonical 快照刷新",
+  );
+  assert.match(desktopJs, /void refreshConfigSnapshotOnly\(\);/);
+  assert.match(
+    desktopJs,
+    /scheduleSettingsHydrationIfSafe\(\);/,
+    "没有新草稿时配置终态必须安全再水合",
   );
   const desktopInitTrigger =
     desktopJs.match(/if \(\["init_progress", "init_failed", "init_completed"\]\.includes\(event\.type\)\) \{[\s\S]*?\n      \}/)?.[0] ?? "";
