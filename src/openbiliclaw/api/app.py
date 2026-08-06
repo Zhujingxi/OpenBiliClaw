@@ -2588,19 +2588,6 @@ def create_app(
             }
         )
 
-    def _runtime_lane_busy_for_config_apply() -> bool:
-        """Avoid putting an interactive save behind a known long-running owner."""
-        if _config_apply_busy() or config_runtime_reload_lock.locked():
-            return True
-        if dialogue_execution_coordinator.active or dialogue_execution_coordinator.paused:
-            return True
-        event_status = feedback_batch_scheduler.status_payload()
-        if bool(event_status.get("event_lane_active")):
-            return True
-        settlement_queue = getattr(ctx, "dialogue_settlement_queue", None)
-        ready = getattr(settlement_queue, "ready_for_interactive_submission", True)
-        return ready is False
-
     def _config_reload_error(exc: BaseException) -> str:
         if isinstance(exc, TimeoutError):
             return "后台对话在 25 分钟内仍未整理完成，运行时未能安全切换"
@@ -16629,7 +16616,7 @@ def create_app(
                 )
             config_path = _default_config_path()
             try:
-                backup_path = _snapshot_config_file(config_path)
+                _snapshot_config_file(config_path)
             except Exception as exc:
                 logger.exception("Config snapshot failed — refusing to overwrite config.toml")
                 return JSONResponse(
@@ -16671,7 +16658,7 @@ def create_app(
                     ) from exc
                 landed.append(slug)
 
-            nonlocal config_apply_revision, config_applied_revision, config_last_good
+            nonlocal config_apply_revision
             config_apply_revision += 1
             item = _QueuedConfigApply(
                 revision=config_apply_revision,
@@ -16680,130 +16667,23 @@ def create_app(
                 run_post_reload_llm_work=not suppress_background_llm_work,
             )
 
-            # A known active dialogue/event owner can legitimately take many
-            # minutes to drain. Persist immediately, then let a latest-wins
-            # background queue perform the safe handoff instead of pinning this
-            # HTTP request (and every later save) behind that work.
-            if _runtime_lane_busy_for_config_apply():
-                _enqueue_config_apply(item)
-                queued_response = ConfigUpdateResponse(
-                    ok=True,
-                    config=_config_to_response(cfg, issues, mask_keys=True),
-                    message=(
-                        f"配置已保存到 {saved_path}，已进入后台应用队列；后端空闲后会自动热重载。"
-                    ),
-                    reloaded=False,
-                    rollback_applied=False,
-                    restart_required=False,
-                    apply_state="queued",
-                    apply_revision=item.revision,
-                )
-                return JSONResponse(
-                    status_code=202,
-                    content=queued_response.model_dump(mode="json"),
-                )
-
-            # Fast path: when all protected lanes are already idle, preserve the
-            # existing synchronous success/rollback contract.
-            from openbiliclaw.network import set_outbound_proxy
-
-            set_outbound_proxy(cfg.network.proxy, mode=cfg.network.mode)
-            _set_config_apply_status(
-                "applying",
-                f"正在应用配置修订 {item.revision}。",
+            # 持久化与运行时应用是两个阶段。统一进入已有 latest-wins 队列，
+            # 避免一次后台 LLM 或事件排空把交互式保存请求挂住数十秒。
+            _enqueue_config_apply(item)
+            queued_response = ConfigUpdateResponse(
+                ok=True,
+                config=_config_to_response(cfg, issues, mask_keys=True),
+                message=f"配置已保存到 {saved_path}，正在后台应用。",
+                reloaded=False,
+                rollback_applied=False,
+                restart_required=False,
+                apply_state="queued",
+                apply_revision=item.revision,
             )
-            was_degraded = bool(getattr(ctx, "degraded", False))
-            try:
-                reload_message = await _apply_runtime_config_revision(item)
-                config_last_good = copy.deepcopy(item.config)
-                config_applied_revision = item.revision
-                _set_config_apply_status("applied", reload_message)
-                return ConfigUpdateResponse(
-                    ok=True,
-                    config=_config_to_response(cfg, issues, mask_keys=True),
-                    message=reload_message,
-                    reloaded=True,
-                    rollback_applied=False,
-                    restart_required=False,
-                    apply_state="applied",
-                    apply_revision=item.revision,
-                )
-            except Exception as exc:
-                logger.exception("Config hot-reload failed — attempting config rollback")
-                reload_error = _config_reload_error(exc)
-                if backup_path is None:
-                    rollback_message = (
-                        f" 热重载失败（{reload_error[:200]}），未找到可回滚的 config.toml.bak。"
-                    )
-                    rollback_cfg = cfg
-                    rollback_applied = False
-                else:
-                    try:
-                        _restore_config_snapshot(backup_path, saved_path)
-                    except Exception as restore_exc:
-                        logger.critical(
-                            "Config rollback failed after hot-reload exception",
-                            exc_info=True,
-                        )
-                        _set_config_apply_status(
-                            "failed",
-                            "配置热重载与回滚均失败，需要人工恢复 config.toml。",
-                            error=str(restore_exc).strip() or type(restore_exc).__name__,
-                        )
-                        return JSONResponse(
-                            status_code=500,
-                            content={
-                                "error": "config_persistence_corrupted",
-                                "message": (
-                                    "config.toml may be in inconsistent state after hot-reload "
-                                    f"failure and rollback failure: {restore_exc}"
-                                ),
-                                "manual_recovery": (
-                                    "config.toml may be in inconsistent state; if "
-                                    "config.toml.bak exists, manually copy it back."
-                                ),
-                            },
-                        )
-                    rollback_cfg = load_config(saved_path)
-                    rollback_message = (
-                        f" 热重载失败（{reload_error[:200]}），已从 config.toml.bak 回滚。"
-                    )
-                    rollback_applied = True
-                    config_last_good = copy.deepcopy(rollback_cfg)
-                    set_outbound_proxy(
-                        rollback_cfg.network.proxy,
-                        mode=rollback_cfg.network.mode,
-                    )
-
-                failure_message = f"配置已保存到 {saved_path}。{rollback_message}"
-                _set_config_apply_status("failed", failure_message, error=reload_error)
-                failure_response = ConfigUpdateResponse(
-                    ok=True,
-                    config=_config_to_response(
-                        rollback_cfg,
-                        _collect_config_issues(rollback_cfg),
-                        degraded=was_degraded,
-                        degraded_reason=(
-                            str(getattr(ctx, "degraded_reason", "")) if was_degraded else ""
-                        ),
-                    ),
-                    message=failure_message,
-                    reloaded=False,
-                    rollback_applied=rollback_applied,
-                    # With no prior file to restore, the validated config did
-                    # land on disk but could not activate in-process. Retain the
-                    # old restart fallback for this exceptional bootstrap path.
-                    restart_required=bool(was_degraded and backup_path is None),
-                    apply_state="failed",
-                    apply_revision=item.revision,
-                )
-                if was_degraded and rollback_applied:
-                    failure_response.ok = False
-                    return JSONResponse(
-                        status_code=503,
-                        content=failure_response.model_dump(mode="json"),
-                    )
-                return failure_response
+            return JSONResponse(
+                status_code=202,
+                content=queued_response.model_dump(mode="json"),
+            )
 
     def _normalize_enabled_sources_override(
         raw_enabled: dict[str, bool] | None,
