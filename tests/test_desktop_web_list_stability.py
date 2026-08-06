@@ -97,8 +97,10 @@ def test_background_rehydration_never_replaces_the_loaded_list() -> None:
     assert "await hydrateFromBackend({ replaceRecommendations: true });" in _function_body(
         "refreshRecommendations", async_function=True
     )
-    # 切回标签页 / config_reloaded / 保存配置走的是无参默认值（不替换）。
+    # 切回标签页 / config_reloaded 走无参默认值（不替换）。保存后的 202 只查询
+    # 应用状态，避免在后台热重载尚未完成时重复水合并覆盖下一轮本地编辑。
     assert "await hydrateFromBackend();" in _function_body(
         "runBackendHydration", async_function=True
     )
-    assert "void hydrateFromBackend();" in APP_JS
+    assert "void hydrateFromBackend();" not in APP_JS
+    assert "if (queued) void refreshConfigApplyStatus();" in APP_JS

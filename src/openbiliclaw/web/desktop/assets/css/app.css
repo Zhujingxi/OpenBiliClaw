@@ -1374,8 +1374,14 @@
     /* 吸底保存栏：任何分类下都能就地看到未保存修改并保存 */
     .settings-savebar { grid-column: 1 / -1; position: sticky; bottom: 0; z-index: 12; display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); flex-wrap: wrap; margin: var(--space-2) calc(var(--space-4) * -1) calc(var(--space-4) * -1); padding: var(--space-3) var(--space-4); border-top: 1px solid var(--border-soft); background: color-mix(in oklab, var(--surface), transparent 6%); backdrop-filter: blur(18px); }
     .settings-savebar[data-dirty="true"] { border-top-color: var(--accent); }
+    .settings-savebar[data-save-state="saving"], .settings-savebar[data-save-state="applying"] { border-top-color: var(--accent); }
+    .settings-savebar[data-save-state="applied"] { border-top-color: var(--success); }
+    .settings-savebar[data-save-state="failed"] { border-top-color: var(--danger); }
     .settings-savebar-msg { color: var(--muted); font-size: var(--text-sm); }
     .settings-savebar[data-dirty="true"] .settings-savebar-msg { color: var(--accent-strong); font-weight: 650; }
+    .settings-savebar[data-save-state="saving"] .settings-savebar-msg, .settings-savebar[data-save-state="applying"] .settings-savebar-msg { color: var(--accent-strong); font-weight: 650; }
+    .settings-savebar[data-save-state="applied"] .settings-savebar-msg { color: var(--success); font-weight: 650; }
+    .settings-savebar[data-save-state="failed"] .settings-savebar-msg { color: var(--danger); font-weight: 650; }
     .settings-savebar-actions { display: flex; gap: var(--space-2); }
     .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
     .source-status-row { min-width: 0; display: grid; gap: var(--space-2); padding: var(--space-3); border: 1px solid var(--border-soft); border-radius: var(--radius-sm); background: color-mix(in oklab, var(--surface), var(--bg) 35%); transition: border-color var(--motion-fast) var(--ease-standard), background var(--motion-fast) var(--ease-standard); }
