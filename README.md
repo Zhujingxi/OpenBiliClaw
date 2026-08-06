@@ -668,6 +668,7 @@ background ─ background admission (default 3) ──────┘
 │ 扩展在线周期回拉：Runtime → 五源 bootstrap task（全局串行）→ installed extension │
 │ task-result → staged durable ingress → 原子有界 seen keys（每源5000）→ terminal │
 │ XHS 自动任务：来源/调度领取门 → SQLite 节流/风控冷却 → 关闭或限流时不开新 tab │
+│ XHS 搜索：inactive tab → MAIN 搜索响应归一化 → isolated replay / DOM 兜底   │
 │ extension_native_save_jobs -> /api/sources/<slug>/next-task -> installed extension │
 │ exact OpenBiliClaw / YouTube Watch Later 目标 → 安全 task-result          │
 │ trusted-local E2E 精确授权 → 单 item saved sync → 六字段安全 callback      │
@@ -790,7 +791,7 @@ OpenBiliClaw/
 | 浏览器插件 | TypeScript + Chrome Extension (Manifest V3) |
 | LLM | 同一 Provider 类型可建多个独立 Base URL / token / model 实例，并配置全局及模块有序降级链；首次迁移自动保留旧配置备份，`config-export-legacy` 可生成旧版副本；内置 Gemini / DeepSeek / OpenAI / Claude / OpenRouter / Ollama，兼容任意 OpenAI 协议服务；OpenAI 可实验性复用 Codex CLI OAuth |
 | B 站交互 | 自研 API 客户端 (WBI 签名 · v_voucher 自动恢复 · 速率控制) |
-| 小红书交互 | 扩展 DOM/state 元数据提取 + 插件任务调度；滚动型初始化会前台打开 `/explore` 并点击页面 profile 入口（零后端爬取） |
+| 小红书交互 | 扩展 DOM/state 元数据提取 + 插件任务调度；search / creator 在后台标签执行，search 用 MAIN-world 页面响应桥避开隐藏页虚拟 DOM 限制；仅滚动型初始化会前台打开 `/explore` 并点击页面 profile 入口（零后端爬取） |
 | 抖音交互 | 扩展 DOM + MAIN-world 被动 fetch tap + 插件任务调度；初始化导入发布 / 收藏 / 点赞 / 关注信号，search / hot / feed discovery 从抖音首页模拟 DOM 操作触发加载，search/feed 被动收集页面响应 / 渲染结果，hot 可用热榜 `group_id` seed 走已登录页面 related fallback（零后端代登录） |
 | YouTube 交互 | 扩展 DOM 任务调度读取观看历史 / 订阅 / 点赞；Google Takeout 可离线导入旧数据 |
 | X 交互 | 服务端 cookie 重放（默认安装内置 `twitter-cli`，只读且 lazy import）；扩展捕获你在 x.com 的互动并同步 cookie；推文为纯文本卡片 |

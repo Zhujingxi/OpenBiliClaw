@@ -2,13 +2,14 @@
  * xhs task executor — content-script side.
  *
  * When the background dispatcher opens a tab with a search or creator
- * page, this module waits for note cards to render (MutationObserver,
- * 12 s hard cap), extracts up to 20 note URLs from the initial viewport
- * plus immediately adjacent DOM, and emits `XHS_TASK_RESULT` back to
- * the service worker.
+ * page, this module extracts up to 20 notes and emits `XHS_TASK_RESULT`
+ * back to the service worker. Search tasks prefer normalized page API
+ * responses so hidden tabs do not depend on the virtualized DOM mounting;
+ * rendered cards remain the fallback for schema drift and creator pages.
  *
  * Bootstrap profile imports can optionally scroll when the backend requests
- * it, but passive search/creator collection still only reads rendered cards.
+ * it. Search/creator discovery remains passive: it never scrolls or mutates
+ * the page, and search only observes the page's own response.
  */
 
 import { attachCoverData, backfillCoverUrlsFromState } from "./cover-harvest.js";
@@ -57,6 +58,10 @@ import {
   type XhsRiskControlDetection,
 } from "./risk-control.js";
 import { NOTE_ANCHOR_SELECTOR } from "./selectors.ts";
+import {
+  readXhsSearchResponseNotes,
+  requestXhsSearchResponseReplay,
+} from "./search-response-buffer.js";
 
 const MAX_URLS = 20;
 // Remote background-tab traces on 2026-08-03 showed the old 5s ceiling could
@@ -266,6 +271,24 @@ function waitForCards(doc: Document): Promise<boolean> {
       }
     }, RENDER_WAIT_MS);
   });
+}
+
+async function waitForSearchResponseOrCards(
+  doc: Document,
+  win: Window,
+): Promise<"response" | "cards" | "empty"> {
+  requestXhsSearchResponseReplay(win);
+  const deadline = Date.now() + RENDER_WAIT_MS;
+  while (Date.now() < deadline) {
+    if (readXhsSearchResponseNotes().length > 0) return "response";
+    if (doc.querySelectorAll(NOTE_ANCHOR_SELECTOR).length > 0) return "cards";
+    await sleep(CHECK_INTERVAL_MS);
+  }
+  return readXhsSearchResponseNotes().length > 0
+    ? "response"
+    : doc.querySelectorAll(NOTE_ANCHOR_SELECTOR).length > 0
+      ? "cards"
+      : "empty";
 }
 
 function waitForBootstrapProfileContent(doc: Document): Promise<boolean> {
@@ -786,8 +809,13 @@ async function executeTaskInPage(
     if (immediateRisk) {
       return rateLimitedTaskResult(msg.task_id, immediateRisk);
     }
-    const found = await waitForCards(doc);
-    if (!found) {
+    const source =
+      msg.type === "search"
+        ? await waitForSearchResponseOrCards(doc, win)
+        : (await waitForCards(doc))
+          ? "cards"
+          : "empty";
+    if (source === "empty") {
       if (detectXhsTaskLoginRequired(doc)) {
         return loginRequiredTaskResult(msg, win);
       }
@@ -800,14 +828,18 @@ async function executeTaskInPage(
       return emptySearchTaskResult(msg, win, doc, "no_note_anchor_after_wait");
     }
 
-    const anchors = snapshotAllAnchors(doc);
-    const viewport = buildLargeViewport(win);
     const baseUrl = win.location.href;
-    const urls = collectInViewportNoteUrls(anchors, viewport, {
-      baseUrl,
-      toleranceBelowPx: 500,
-      toleranceAbovePx: 500,
-    });
+    const responseNotes = source === "response" ? readXhsSearchResponseNotes() : [];
+    const anchors = source === "cards" ? snapshotAllAnchors(doc) : [];
+    const viewport = buildLargeViewport(win);
+    const urls =
+      source === "response"
+        ? responseNotes.map((note) => note.url).slice(0, MAX_URLS)
+        : collectInViewportNoteUrls(anchors, viewport, {
+            baseUrl,
+            toleranceBelowPx: 500,
+            toleranceAbovePx: 500,
+          });
 
     if (urls.length === 0) {
       const emptyPageRisk = detectXhsTaskRiskControl(doc, {
@@ -821,15 +853,17 @@ async function executeTaskInPage(
 
     // Extract metadata from DOM for each discovered URL
     const urlSet = new Set(urls.slice(0, MAX_URLS));
-    const notes: XhsNoteMetadata[] = [];
-    const anchorEls = doc.querySelectorAll<HTMLAnchorElement>(NOTE_ANCHOR_SELECTOR);
-    anchorEls.forEach((el) => {
-      const meta = extractNoteMetadataFromAnchor(el, baseUrl);
-      if (meta && urlSet.has(meta.url)) {
-        notes.push(meta);
-        urlSet.delete(meta.url);
-      }
-    });
+    const notes: XhsNoteMetadata[] = responseNotes.map((note) => ({ ...note }));
+    if (source === "cards") {
+      const anchorEls = doc.querySelectorAll<HTMLAnchorElement>(NOTE_ANCHOR_SELECTOR);
+      anchorEls.forEach((el) => {
+        const meta = extractNoteMetadataFromAnchor(el, baseUrl);
+        if (meta && urlSet.has(meta.url)) {
+          notes.push(meta);
+          urlSet.delete(meta.url);
+        }
+      });
+    }
 
     // v0.3.10+: search / creator pages expose the same logged-in
     // user fingerprint via __INITIAL_STATE__. Capture + scrape-time
@@ -852,6 +886,12 @@ async function executeTaskInPage(
       urls: urls.slice(0, MAX_URLS),
       notes: filteredNotes,
       status: "ok",
+      debug: {
+        xhs_discovery: {
+          source: source === "response" ? "search_api" : "rendered_dom",
+          task_type: msg.type,
+        },
+      },
     };
     if (selfInfo) {
       result.self_info = selfInfo;

@@ -233,6 +233,7 @@ config recovery control plane (normal or degraded; business APIs stay gated)
                 └─ draft → /api/config/discover-models → exact instance GET /models
                           → editable model list + local effort advisory (no config write)
 config save control plane: persist first → idle sync apply / busy latest-wins queue → runtime receipt
+XHS hidden search tab → MAIN search-response normalizer → isolated replay/DOM fallback → task final
 XHS/DY/YT/Zhihu/Reddit task final: canonical staged result (XHS bootstrap payload caps enforced) → durable event receipt
                                  → atomic bounded seen-key → terminal flip
                                  stale lease reclaim replays first write; staged row rejects late mutation
@@ -325,6 +326,7 @@ trusted LAN ─ HTTPS（可选）──→ TLS Proxy :8443 ─ loopback/Compose 
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │ bili/xhs/dy/yt/zhihu/reddit 任务调度 + 源开关/比例配置（后台 tab / 初始化导入 / 配比建议）│ │
 │  │ XHS 自动任务：source/scheduler 领取门 → SQLite 节流/风控冷却 → 关闭/限流时不再开任务 tab │ │
+│  │ XHS search：inactive tab → MAIN 搜索响应归一化 → isolated replay / DOM 兜底          │ │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │ runtime-stream 20s idle 心跳 + B站/抖音/X Cookie 请求与扩展回传│   │

@@ -4,6 +4,10 @@
 
 ---
 
+## 未发布：小红书 discover 后台化（2026-08-06）
+
+- **小红书搜索发现不再抢占当前页面**：search task 改为始终在 inactive tab 执行；MAIN-world bridge 只对小红书搜索接口响应提取与既有 DOM collector 等价的公开卡片字段，并通过页面内 replay 缓存交给 isolated task executor，解决隐藏页不挂载虚拟列表时的空结果。DOM 仍作为 schema 漂移兜底，creator 继续后台执行，只有需要点击个人入口和受控滚动的 `bootstrap_profile` 保持前台。真实登录态连续 3 次搜索均在约 4–5 秒返回 20 条笔记，原活动页面 35 次可见性采样全部保持 `visible`。
+
 ## v0.3.197：来源账号增量同步与登录态可靠性（2026-08-06）
 
 - **五个浏览器账号来源支持可靠的周期增量回拉**：画像就绪且插件在线时，runtime 默认每 24 小时按持久 round-robin 复用小红书、抖音、YouTube、知乎和 Reddit 的既有 bootstrap scope；五源全局串行，并受扩展在线、guided init、来源开关、热重载周期和跨进程 SQLite admission fence 共同约束。任务结果按 canonical result → durable event ingress → seen-key checkpoint → terminal flip 落盘，崩溃窗口可由租约重领修复，重复回拉不会重复学习同一事件。
