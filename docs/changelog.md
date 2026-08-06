@@ -4,14 +4,13 @@
 
 ---
 
-## 未发布：PC Web 来源状态刷新修复（2026-08-06）
+## v0.3.197：来源账号增量同步与登录态可靠性（2026-08-06）
 
-- **已登录后黄色 Cookie 警示会自动消退**：PC Web 收到 B 站、抖音、X 或 Reddit 的凭据同步 runtime 事件后立即重读后端来源状态；页面可见时保留 30 秒离线状态轮询作为断线与漏事件兜底，不再要求用户打开来源设置页或手动刷新首页。状态读取仍不触发任何平台出网探测。真实 Chrome 登录态 E2E 用两次已验证的 B 站凭据写入分别触发同步与原值恢复，浏览器时间线均捕获到 `bilibili_cookie_synced` 后 1ms 内紧随 `/api/sources/status`；独立只读探针返回 `replayed=false / verified`，临时标记与凭据原值清理校验通过。
-
-## 未发布：小红书登录态与画像回传上限修复（2026-08-06）
-
-- **适配小红书当前 `/explore` 登录门形态**：search / creator / bootstrap 除可见登录弹层外，也识别可见的登录手机输入框和侧栏本人登录按钮；完整祖先可见性检查会排除隐藏控件与普通笔记里的“登录”文字。真实已登录浏览器验收确认 `/api/sources/status` 可恢复为 `browser_heartbeat / verified`，搜索任务不再被旧 `web_session` 或新版 DOM 误判。
-- **bootstrap scope 与单 scope 上限升级为后端 canonical 契约**：`XhsTaskQueue` 从任务创建时的不可变 payload 读取允许的 `scopes` 与 `max_items_per_scope`，在 partial、final、直接完成和风控失败合并时累计裁剪；未声明 scope、非整数计数和未被 canonical note 接纳的裸 URL 会被丢弃，先到的 canonical 行优先，默认 scope 与扩展统一为 saved / liked / xhs_history。已接纳的同一笔记仍可补发布时间与首个同 identity `xsec_token` / tokenized URL，不增加条目或替换首写标题。扩展重试或分批回传不能再扩大任务预算。真实小规模收藏 / 点赞请求在隔离数据目录复现并覆盖该缺口，回归同时验证首个终态冻结与重复回调零新增事件。
+- **五个浏览器账号来源支持可靠的周期增量回拉**：画像就绪且插件在线时，runtime 默认每 24 小时按持久 round-robin 复用小红书、抖音、YouTube、知乎和 Reddit 的既有 bootstrap scope；五源全局串行，并受扩展在线、guided init、来源开关、热重载周期和跨进程 SQLite admission fence 共同约束。任务结果按 canonical result → durable event ingress → seen-key checkpoint → terminal flip 落盘，崩溃窗口可由租约重领修复，重复回拉不会重复学习同一事件。
+- **Reddit 与小红书回传边界进一步收紧**：Reddit 补齐 first-final-wins staged ingestion、有界分型 identity 去重和 parent / short URL 防误认；小红书 bootstrap 的允许 scope 与 `max_items_per_scope` 由任务创建时的不可变 payload 决定，partial、final、直接完成和风控失败合并都累计裁剪。扩展重试、分批回传或未知 scope 不能再扩大画像事件预算，已接纳笔记仍可安全补发布时间与首个同 identity token。
+- **真实页面登录态识别跟上当前小红书 DOM**：search / creator / bootstrap 除可见登录弹层外，也识别登录手机号输入框与侧栏本人登录按钮，并用完整祖先可见性排除隐藏控件和普通笔记文字。真实已登录浏览器验收确认 `/api/sources/status` 恢复为 `browser_heartbeat / verified`，旧 `web_session` 与新版 `/explore` 登录门不再造成误判。
+- **PC Web 已登录后的黄色 Cookie 警示会自动消退**：收到 B 站、抖音、X 或 Reddit 凭据同步 runtime 事件后立即重读来源状态；页面可见时保留 30 秒离线轮询作为漏事件兜底，不再要求打开来源设置页或手动刷新首页。真实 Chrome 登录态 E2E 两次捕获 `bilibili_cookie_synced` 后 1ms 内紧随 `/api/sources/status`，独立只读探针为 `replayed=false / verified`。
+- **发布门禁消除并发测试调度抖动**：image-fetch singleflight 回归先等待全部并发调用加入再断言计数，避免慢 CI runner 在任务尚未调度完时误报；生产协调器语义不变。后端、桌面、浏览器插件、Docker 与聚合 Release 统一使用 `0.3.197`。
 
 ## v0.3.196：候选池即时补给与模型调用瘦身（2026-08-06）
 

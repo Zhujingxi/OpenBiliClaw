@@ -189,12 +189,12 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.196 (2026-08-06)**
+📌 Latest: **v0.3.197 (2026-08-06)**
 
-- **The candidate pool now refills on demand** — low inventory wakes every configured source in parallel, while duplicate-only runs no longer masquerade as progress and stretch into hours-long gaps.
-- **Content evaluation uses fewer model tokens** — sparse JSON passed a real 100×3 quality gate and is now the default, cutting median prompt tokens by 27.99% and total tokens by 24.05%.
-- **Profiles stay cleaner and safer** — overlapping sub-interests merge by recommendation intent, failed consolidation retries, and rollback or concurrent writes no longer discard fresh interests.
-- **Cross-surface state recovery is more reliable** — pending-chat badges refresh after reconnects and visibility changes, while desktop platform filters recover from transient config-read failures.
+- **Five account sources now refresh incrementally** — Xiaohongshu, Douyin, YouTube, Zhihu, and Reddit use a durable daily round-robin by default and pause safely while the extension is offline or initialization is active.
+- **Cross-platform ingestion is more crash-safe and duplicate-resistant** — Reddit gains atomic terminal results and typed deduplication, while Xiaohongshu enforces task scopes and per-scope limits across retries.
+- **Login state detection is more accurate** — Xiaohongshu recognizes the current `/explore` login gates, and the Desktop Web clears stale yellow Cookie warnings immediately after Bilibili and other credential syncs.
+- **Verified against a real signed-in session** — the status refresh followed the Chrome credential event within 1 ms, and an independent read-only Bilibili probe returned `replayed=false / verified`.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
