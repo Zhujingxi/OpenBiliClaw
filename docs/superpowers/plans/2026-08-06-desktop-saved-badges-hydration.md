@@ -4,7 +4,7 @@
 
 **Goal:** 让桌面 Web 刷新后在用户点击 Tab 前就显示“稍后再看”和“收藏”的真实数量徽标。
 
-**Architecture:** 复用现有 `syncWatchLaterButtons()` 与 `syncFavoriteButtons()`，让它们返回请求 Promise，并加入 `hydrateFromBackend()` 的次级并行水合任务。保存列表接口失败继续由函数内部吞吐，不阻塞推荐首页；不新增后端接口或状态。
+**Architecture:** 复用现有 `syncWatchLaterButtons()` 与 `syncFavoriteButtons()`，让它们返回请求 Promise，并加入 `hydrateFromBackend()` 的次级并行水合任务。每个列表用代次栅栏阻止较旧的启动响应覆盖用户进入列表后得到的新快照。保存列表接口失败继续由函数内部吞吐，不阻塞推荐首页；不新增后端接口或持久化状态。
 
 **Tech Stack:** 原生 JavaScript、Python pytest、Playwright Chromium、`ThreadingHTTPServer` 测试桩
 
@@ -26,7 +26,7 @@
 
 **Interfaces:**
 - Consumes: `fetchDesktopSaved(listKind) -> Promise<{items: Array, total: number}>`、`updateSavedBadge(badgeId, total)`、`hydrateFromBackend()` 的 `secondaryPromises`
-- Produces: `syncWatchLaterButtons() -> Promise<void>`、`syncFavoriteButtons() -> Promise<void>`；首次水合完成前发起两个保存列表请求并更新对应徽标
+- Produces: `syncWatchLaterButtons() -> Promise<void>`、`syncFavoriteButtons() -> Promise<void>`、`desktopSavedBadgeSyncGenerations: {watch_later: number, favorite: number}`；首次水合完成前发起两个保存列表请求并更新对应徽标，较旧的启动响应不能覆盖后续完整刷新
 
 - [ ] **Step 1: 扩展 Chromium 测试桩并写失败测试**
 
@@ -78,6 +78,9 @@ def test_saved_badge_hydration_failure_does_not_block_home(
     failed_reads: list[str] = []
 
     def fail_saved_list(route: Any) -> None:
+        if "/status?" in route.request.url:
+            route.continue_()
+            return
         failed_reads.append(route.request.url)
         route.abort("failed")
 
@@ -85,29 +88,37 @@ def test_saved_badge_hydration_failure_does_not_block_home(
     chromium_page.goto(f"{base_url}/web/", wait_until="domcontentloaded")
 
     expect(chromium_page.locator("#videoGrid .video-card")).to_have_count(3, timeout=3000)
+    chromium_page.wait_for_timeout(1000)
     expect(chromium_page.locator("#watchLaterCountBadge")).to_be_hidden()
     expect(chromium_page.locator("#favoritesCountBadge")).to_be_hidden()
     assert len(failed_reads) == 2
 ```
+
+增加响应乱序测试：在浏览器内延迟首个“稍后再看”列表 Promise，使点击 Tab 触发的
+第二个请求先返回 `total = 4`，再释放首个请求的 `total = 3`，最终徽标必须保持 `4`。
 
 - [ ] **Step 2: 运行测试并确认旧代码失败**
 
 Run:
 
 ```bash
-pytest -q tests/test_desktop_web_issue_98_e2e.py -k 'saved_badge' -v
+pytest -q tests/test_desktop_web_issue_98_e2e.py -k 'saved_badge or older_badge' -v
 ```
 
-Expected: 两个测试均 FAIL；成功场景中的徽标仍为 hidden，失败场景中的
-`failed_reads` 仍为空，证明首次水合没有读取保存列表。
+Expected: 三个测试均 FAIL；成功场景中的徽标仍为 hidden，失败场景中的
+`failed_reads` 仍为空，响应乱序场景会把新徽标 `4` 覆盖回旧值 `3`。
 
 - [ ] **Step 3: 实现最小启动水合改动**
 
 让两个现有同步函数返回各自的请求 Promise，保留原有失败吞吐：
 
 ```javascript
+const desktopSavedBadgeSyncGenerations = { watch_later: 0, favorite: 0 };
+
 function syncWatchLaterButtons() {
+  const generation = desktopSavedBadgeSyncGenerations.watch_later;
   return fetchDesktopSaved("watch_later").then((data) => {
+    if (generation !== desktopSavedBadgeSyncGenerations.watch_later) return;
     const saved = new Set((data?.items || []).map((it) => desktopSavedItem(it).item_key));
     document.querySelectorAll('.video-card [data-action="watch-later"]').forEach((btn) => {
       const card = btn.closest(".video-card");
@@ -121,7 +132,9 @@ function syncWatchLaterButtons() {
 }
 
 function syncFavoriteButtons() {
+  const generation = desktopSavedBadgeSyncGenerations.favorite;
   return fetchDesktopSaved("favorite").then((data) => {
+    if (generation !== desktopSavedBadgeSyncGenerations.favorite) return;
     const saved = new Set((data?.items || []).map((it) => desktopSavedItem(it).item_key));
     document.querySelectorAll('.video-card [data-action="favorite"]').forEach((btn) => {
       const card = btn.closest(".video-card");
@@ -134,6 +147,9 @@ function syncFavoriteButtons() {
   }).catch(() => {});
 }
 ```
+
+`refreshWatchLater()` 和 `refreshFavorites()` 开始完整刷新时推进对应代次；两个启动
+同步函数捕获发请求时的代次，响应返回后若代次已变化则直接退出，不更新按钮或徽标。
 
 将两个 Promise 加入 `hydrateFromBackend()` 的次级资源列表：
 
@@ -160,11 +176,11 @@ const secondaryPromises = [
 Run:
 
 ```bash
-pytest -q tests/test_desktop_web_issue_98_e2e.py -k 'saved_badge' -v
+pytest -q tests/test_desktop_web_issue_98_e2e.py -k 'saved_badge or older_badge' -v
 ```
 
-Expected: `2 passed`；两个接口均在首次加载阶段被请求，徽标在未点击 Tab 时显示
-`3` 和 `2`，请求失败时推荐首页仍正常显示。
+Expected: `3 passed`；两个接口均在首次加载阶段被请求，徽标在未点击 Tab 时显示
+`3` 和 `2`，请求失败时推荐首页仍正常显示，旧启动响应不能覆盖点击后的新徽标。
 
 - [ ] **Step 5: 运行相关回归测试和静态检查**
 

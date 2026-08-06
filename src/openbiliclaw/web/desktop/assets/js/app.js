@@ -2489,6 +2489,7 @@
       watch_later: window.OpenBiliClawSavedSync.createRetainedSavedListState(),
       favorite: window.OpenBiliClawSavedSync.createRetainedSavedListState()
     };
+    const desktopSavedBadgeSyncGenerations = { watch_later: 0, favorite: 0 };
     const desktopSyncingKeys = {
       watch_later: window.OpenBiliClawSavedSync.createSavedSubmissionFence(),
       favorite: window.OpenBiliClawSavedSync.createSavedSubmissionFence()
@@ -2757,6 +2758,7 @@ ${savedCardFeedbackBarHtml(listKind)}
     }
 
     async function refreshWatchLater() {
+      desktopSavedBadgeSyncGenerations.watch_later += 1;
       const retained = desktopSavedListStates.watch_later;
       try {
         const data = await fetchDesktopSaved("watch_later");
@@ -2778,6 +2780,7 @@ ${savedCardFeedbackBarHtml(listKind)}
     }
 
     async function refreshFavorites() {
+      desktopSavedBadgeSyncGenerations.favorite += 1;
       const retained = desktopSavedListStates.favorite;
       try {
         const data = await fetchDesktopSaved("favorite");
@@ -2800,7 +2803,9 @@ ${savedCardFeedbackBarHtml(listKind)}
 
     // Re-sync the pressed state + count badge for all visible ☆/♥ toggles.
     function syncWatchLaterButtons() {
-      fetchDesktopSaved("watch_later").then((data) => {
+      const generation = desktopSavedBadgeSyncGenerations.watch_later;
+      return fetchDesktopSaved("watch_later").then((data) => {
+        if (generation !== desktopSavedBadgeSyncGenerations.watch_later) return;
         const saved = new Set((data?.items || []).map((it) => desktopSavedItem(it).item_key));
         document.querySelectorAll('.video-card [data-action="watch-later"]').forEach((btn) => {
           const card = btn.closest(".video-card");
@@ -2814,7 +2819,9 @@ ${savedCardFeedbackBarHtml(listKind)}
     }
 
     function syncFavoriteButtons() {
-      fetchDesktopSaved("favorite").then((data) => {
+      const generation = desktopSavedBadgeSyncGenerations.favorite;
+      return fetchDesktopSaved("favorite").then((data) => {
+        if (generation !== desktopSavedBadgeSyncGenerations.favorite) return;
         const saved = new Set((data?.items || []).map((it) => desktopSavedItem(it).item_key));
         document.querySelectorAll('.video-card [data-action="favorite"]').forEach((btn) => {
           const card = btn.closest(".video-card");
@@ -9125,6 +9132,8 @@ ${cardFeedbackBarHtml()}`;
 
       const secondaryPromises = [
         pendingConfirmationsPromise,
+        syncWatchLaterButtons(),
+        syncFavoriteButtons(),
         requestJson(ENDPOINTS.health),
         requestJson(ENDPOINTS.initStatus).then(applyInitStatusSnapshot),
         requestJson(`${ENDPOINTS.activityFeed}?limit=5`).then(applyActivitySnapshot),
