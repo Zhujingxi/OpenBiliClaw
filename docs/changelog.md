@@ -4,6 +4,10 @@
 
 ---
 
+## 未发布：PC Web 来源状态刷新修复（2026-08-06）
+
+- **已登录后黄色 Cookie 警示会自动消退**：PC Web 收到 B 站、抖音、X 或 Reddit 的凭据同步 runtime 事件后立即重读后端来源状态；页面可见时保留 30 秒离线状态轮询作为断线与漏事件兜底，不再要求用户打开来源设置页或手动刷新首页。状态读取仍不触发任何平台出网探测。真实 Chrome 登录态 E2E 用两次已验证的 B 站凭据写入分别触发同步与原值恢复，浏览器时间线均捕获到 `bilibili_cookie_synced` 后 1ms 内紧随 `/api/sources/status`；独立只读探针返回 `replayed=false / verified`，临时标记与凭据原值清理校验通过。
+
 ## 未发布：小红书登录态与画像回传上限修复（2026-08-06）
 
 - **适配小红书当前 `/explore` 登录门形态**：search / creator / bootstrap 除可见登录弹层外，也识别可见的登录手机输入框和侧栏本人登录按钮；完整祖先可见性检查会排除隐藏控件与普通笔记里的“登录”文字。真实已登录浏览器验收确认 `/api/sources/status` 可恢复为 `browser_heartbeat / verified`，搜索任务不再被旧 `web_session` 或新版 DOM 误判。

@@ -6901,6 +6901,12 @@ ${cardFeedbackBarHtml()}`;
     // contract yet; `describeAccess()` falls back to the legacy `state` for it.
     const SourceStatus = globalThis.OpenBiliClawSourceStatus;
     const SOURCE_STATUS_KEYS = SourceStatus.SOURCE_KEYS;
+    const SOURCE_STATUS_REFRESH_EVENTS = new Set([
+      "bilibili_cookie_synced",
+      "douyin_cookie_synced",
+      "x_cookie_synced",
+      "reddit_cookie_synced"
+    ]);
     const SOURCE_ENABLE_SELECT_IDS = {
       bilibili: "bilibiliEnabled",
       xiaohongshu: "xhsEnabled",
@@ -7243,12 +7249,11 @@ ${cardFeedbackBarHtml()}`;
     initSourceCards();
 
     // Login happens outside this page (user signs into a platform in another
-    // tab), so a one-shot render on settings open goes stale — re-poll while
-    // the status list is actually visible.
+    // tab). Runtime events make the normal update immediate; this visible-page
+    // poll catches missed events / reconnect gaps and also keeps the dashboard
+    // warning current when the source settings list is closed.
     setInterval(() => {
       if (document.hidden) return;
-      const list = $("#sourceStatusList");
-      if (!list || list.offsetParent === null) return;
       void renderSourcesStatus();
     }, 30000);
 
@@ -8660,6 +8665,10 @@ ${cardFeedbackBarHtml()}`;
         clearDesktopRuntimeRecovery();
       }
       applyRuntimeStatus({ ...event, live_summary: event.message || event.live_summary || event.type });
+      // Credential sync changes the backend-owned source contract. Refresh it
+      // immediately so the dashboard warning does not retain the pre-login
+      // snapshot until settings is opened or the fallback poll runs.
+      if (SOURCE_STATUS_REFRESH_EVENTS.has(event.type)) void renderSourcesStatus();
       // 库存变化事件只刷新 Tab 数字 / 空态 / 自动续页 gate，不碰已加载的推荐卡片。
       if (event.type === "refresh.pool_updated" || event.type === "pool_status") schedulePlatformAvailabilityRefresh();
       if (event.type === "degraded") {
