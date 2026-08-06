@@ -6,6 +6,7 @@
 
 ## v0.3.197：来源账号增量同步与登录态可靠性（2026-08-06）
 
+- **修复桌面 Web 保存列表徽标首屏缺失与乱序覆盖**：刷新 `/web` 时并行水合稍后再看 / 收藏列表，直接使用后端 `total` 显示侧栏徽标；零值和读取失败继续保持隐藏，不阻塞推荐首页。首屏请求与用户进入列表后的完整刷新通过 per-list generation fence 隔离，迟到旧响应不会把新数量覆盖回去。
 - **五个浏览器账号来源支持可靠的周期增量回拉**：画像就绪且插件在线时，runtime 默认每 24 小时按持久 round-robin 复用小红书、抖音、YouTube、知乎和 Reddit 的既有 bootstrap scope；五源全局串行，并受扩展在线、guided init、来源开关、热重载周期和跨进程 SQLite admission fence 共同约束。任务结果按 canonical result → durable event ingress → seen-key checkpoint → terminal flip 落盘，崩溃窗口可由租约重领修复，重复回拉不会重复学习同一事件。
 - **Reddit 与小红书回传边界进一步收紧**：Reddit 补齐 first-final-wins staged ingestion、有界分型 identity 去重和 parent / short URL 防误认；小红书 bootstrap 的允许 scope 与 `max_items_per_scope` 由任务创建时的不可变 payload 决定，partial、final、直接完成和风控失败合并都累计裁剪。扩展重试、分批回传或未知 scope 不能再扩大画像事件预算，已接纳笔记仍可安全补发布时间与首个同 identity token。
 - **真实页面登录态识别跟上当前小红书 DOM**：search / creator / bootstrap 除可见登录弹层外，也识别登录手机号输入框与侧栏本人登录按钮，并用完整祖先可见性排除隐藏控件和普通笔记文字。真实已登录浏览器验收确认 `/api/sources/status` 恢复为 `browser_heartbeat / verified`，旧 `web_session` 与新版 `/explore` 登录门不再造成误判。

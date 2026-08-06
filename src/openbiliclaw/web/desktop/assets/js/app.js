@@ -2758,21 +2758,26 @@ ${savedCardFeedbackBarHtml(listKind)}
     }
 
     async function refreshWatchLater() {
-      desktopSavedBadgeSyncGenerations.watch_later += 1;
+      const generation = ++desktopSavedBadgeSyncGenerations.watch_later;
+      const isCurrent = () => generation === desktopSavedBadgeSyncGenerations.watch_later;
       const retained = desktopSavedListStates.watch_later;
       try {
         const data = await fetchDesktopSaved("watch_later");
+        if (!isCurrent()) return;
         retained.commit({ items: (data?.items || []).map(desktopSavedItem), total: data?.total });
         await desktopSavedTaskRuntimes.watch_later.coordinator.recover(
           retained.snapshot().items,
           desktopRecoveredTaskCallbacks("watch_later", refreshWatchLater),
         );
+        if (!isCurrent()) return;
         const status = document.getElementById("watchLaterSyncStatus");
         if (status?.dataset.loadError === "true") { status.replaceChildren(); status.removeAttribute("role"); delete status.dataset.loadError; }
       } catch (error) {
+        if (!isCurrent()) return;
         retained.fail(error);
         showDesktopSavedLoadError("watch_later", document.getElementById("watchLaterSyncStatus"), retained, refreshWatchLater);
       }
+      if (!isCurrent()) return;
       const { items, total } = retained.snapshot();
       renderSavedList("watch_later", "watchLaterList", "watchLaterEmpty", items, refreshWatchLater);
       bindDesktopSavedBatch("watch_later", items, refreshWatchLater);
@@ -2780,21 +2785,26 @@ ${savedCardFeedbackBarHtml(listKind)}
     }
 
     async function refreshFavorites() {
-      desktopSavedBadgeSyncGenerations.favorite += 1;
+      const generation = ++desktopSavedBadgeSyncGenerations.favorite;
+      const isCurrent = () => generation === desktopSavedBadgeSyncGenerations.favorite;
       const retained = desktopSavedListStates.favorite;
       try {
         const data = await fetchDesktopSaved("favorite");
+        if (!isCurrent()) return;
         retained.commit({ items: (data?.items || []).map(desktopSavedItem), total: data?.total });
         await desktopSavedTaskRuntimes.favorite.coordinator.recover(
           retained.snapshot().items,
           desktopRecoveredTaskCallbacks("favorite", refreshFavorites),
         );
+        if (!isCurrent()) return;
         const status = document.getElementById("favoritesSyncStatus");
         if (status?.dataset.loadError === "true") { status.replaceChildren(); status.removeAttribute("role"); delete status.dataset.loadError; }
       } catch (error) {
+        if (!isCurrent()) return;
         retained.fail(error);
         showDesktopSavedLoadError("favorite", document.getElementById("favoritesSyncStatus"), retained, refreshFavorites);
       }
+      if (!isCurrent()) return;
       const { items, total } = retained.snapshot();
       renderSavedList("favorite", "favoritesList", "favoritesEmpty", items, refreshFavorites);
       bindDesktopSavedBatch("favorite", items, refreshFavorites);

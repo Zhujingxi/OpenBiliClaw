@@ -520,6 +520,57 @@ def test_opening_saved_page_prevents_older_badge_hydration_from_winning(
     expect(chromium_page.locator("#watchLaterCountBadge")).to_have_text("4")
 
 
+def test_older_full_saved_refresh_cannot_overwrite_newer_badge(
+    issue_98_server: tuple[str, Issue98Stub],
+    chromium_page: Page,
+) -> None:
+    base_url, _ = issue_98_server
+    chromium_page.add_init_script(
+        """
+        window.__obcWatchLaterListReads = 0;
+        window.__obcResolveFirstFullWatchLater = null;
+        const realFetch = window.fetch.bind(window);
+        window.fetch = (input, init) => {
+          const url = typeof input === "string" ? input : input.url;
+          if (!url.includes("/api/saved/watch_later?limit=")) return realFetch(input, init);
+          window.__obcWatchLaterListReads += 1;
+          const response = (total) => new Response(
+            JSON.stringify({ items: [], total }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+          if (window.__obcWatchLaterListReads === 2) {
+            return new Promise((resolve) => {
+              window.__obcResolveFirstFullWatchLater = () => resolve(response(4));
+            });
+          }
+          if (window.__obcWatchLaterListReads === 3) return Promise.resolve(response(5));
+          return realFetch(input, init);
+        };
+        """
+    )
+
+    chromium_page.goto(f"{base_url}/web/", wait_until="domcontentloaded")
+    chromium_page.wait_for_function("() => window.__obcWatchLaterListReads === 1")
+    chromium_page.evaluate(
+        """
+        () => {
+          const button = document.getElementById("watchLaterBtn");
+          button.click();
+          button.click();
+        }
+        """
+    )
+    chromium_page.wait_for_function(
+        "() => window.__obcWatchLaterListReads === 3 "
+        "&& typeof window.__obcResolveFirstFullWatchLater === 'function'"
+    )
+    expect(chromium_page.locator("#watchLaterCountBadge")).to_have_text("5", timeout=3000)
+
+    chromium_page.evaluate("window.__obcResolveFirstFullWatchLater()")
+    chromium_page.wait_for_timeout(300)
+    expect(chromium_page.locator("#watchLaterCountBadge")).to_have_text("5")
+
+
 def test_default_classic_notice_stays_out_of_operational_toast_stack(
     issue_98_server: tuple[str, Issue98Stub],
     chromium_page: Page,
