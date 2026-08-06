@@ -8,6 +8,7 @@
 
 - **配置保存与后台应用状态统一收口**：`PUT /api/config` 持久化成功后统一立即返回 `202` 与单调 `apply_revision`，由 app-owned latest-wins 队列在后台安全热重载；`GET /api/config/apply-status`、`config_reloaded` 与 `config_reload_failed` 成为桌面 Web、插件和 `/setup/` 的共同状态契约。向导会等待配置真正应用后再进入下一步，热重载失败同时恢复磁盘与内存 last-good runtime；桌面设置页忽略旧 revision 的迟到状态，并在保留新草稿时更新 Discard 使用的 canonical 回滚快照。
 - **修复桌面 Web 保存列表徽标首屏缺失与乱序覆盖**：刷新 `/web` 时并行水合稍后再看 / 收藏列表，直接使用后端 `total` 显示侧栏徽标；零值和读取失败继续保持隐藏，不阻塞推荐首页。首屏请求与用户进入列表后的完整刷新通过 per-list generation fence 隔离，迟到旧响应不会把新数量覆盖回去。
+- **Issue #147「聊聊口味」支持 Markdown 回复**：popup、桌面 Web、移动 Web 及惊喜推荐 / 探针内嵌聊天统一渲染 AI 回复中的加粗、斜体、列表、代码、引用和安全链接；原始 HTML 与不安全链接会被转义或拒绝，用户输入仍按纯文本显示。
 
 ## v0.3.198：小红书 discover 后台化（2026-08-06）
 

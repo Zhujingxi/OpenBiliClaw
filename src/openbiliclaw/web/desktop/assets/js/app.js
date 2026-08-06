@@ -66,6 +66,7 @@
       normalizeContextPreview,
       readContextSelection,
       replyQuoteMarkup,
+      renderMarkdown,
       renderPendingListMarkup,
       renderTurnMarkup,
       selectDialogueTurns,
@@ -5300,7 +5301,10 @@ ${cardFeedbackBarHtml()}`;
       if (!container) return null;
       const bubble = document.createElement("div");
       bubble.className = `inline-chat-bubble ${role}${role === "reply" ? " inline-chat-reply" : ""}`;
-      bubble.textContent = text;
+      if (role === "reply") {
+        bubble.classList.add("chat-markdown");
+        bubble.innerHTML = renderMarkdown(text);
+      } else bubble.textContent = text;
       container.appendChild(bubble);
       return bubble;
     }
@@ -5684,8 +5688,8 @@ ${cardFeedbackBarHtml()}`;
       area.hidden = false;
       if (!turns.length && delight?.chat_reply) {
         const bubble = document.createElement("div");
-        bubble.className = "delight-turn-bubble is-assistant";
-        bubble.textContent = delight.chat_reply;
+        bubble.className = "delight-turn-bubble is-assistant chat-markdown";
+        bubble.innerHTML = renderMarkdown(delight.chat_reply);
         area.append(bubble);
         scheduleActivityRailHeightSync();
         return;
@@ -5700,11 +5704,16 @@ ${cardFeedbackBarHtml()}`;
         const assistantBubble = document.createElement("div");
         const status = String(turn.status || "pending");
         assistantBubble.className = `delight-turn-bubble is-assistant${status === "pending" ? " is-thinking" : ""}${status === "failed" ? " is-error" : ""}`;
-        assistantBubble.textContent = status === "pending"
+        const assistantText = status === "pending"
           ? "阿B 正在品你这句话…"
           : status === "failed"
             ? turn.error || "这句还没发出去，稍后再试。"
             : turn.reply || "后端已完成这轮聊天。";
+        if (status === "pending") assistantBubble.textContent = assistantText;
+        else {
+          assistantBubble.classList.add("chat-markdown");
+          assistantBubble.innerHTML = renderMarkdown(assistantText);
+        }
         area.append(assistantBubble);
       }
       scheduleActivityRailHeightSync();
@@ -6018,7 +6027,10 @@ ${cardFeedbackBarHtml()}`;
           return `${replyQuoteMarkup(msg.turn, desktopDialogueTurns())}${renderTurnMarkup(msg.turn, { surface: "desktop" })}${waiting}`;
         }
         if (msg?.thinking) return desktopChatThinkingMarkup(msg.text);
-        return `<div class="chat-bubble ${msg.role === "user" ? "user" : "agent"}">${escapeHtml(msg.text)}</div>`;
+        const body = msg.role === "user"
+          ? escapeHtml(msg.text)
+          : `<div class="chat-markdown">${renderMarkdown(msg.text)}</div>`;
+        return `<div class="chat-bubble ${msg.role === "user" ? "user" : "agent"}">${body}</div>`;
       }).join("");
     }
 

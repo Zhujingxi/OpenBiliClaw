@@ -69,6 +69,7 @@ const {
   normalizeContextPreview,
   readContextSelection,
   replyQuoteMarkup,
+  renderMarkdown,
   renderPendingListMarkup,
   renderTurnMarkup,
   selectDialogueTurns,
@@ -1154,8 +1155,8 @@ function expandInlineChatOnCard(card, { scope, subjectId, subjectTitle, placehol
         input.remove();
         sendBtn.remove();
         const replyEl = document.createElement("div");
-        replyEl.className = "inline-chat-reply";
-        replyEl.textContent = t.reply || t.response || "收到了，我会结合这个方向继续观察。";
+        replyEl.className = "inline-chat-reply chat-markdown";
+        replyEl.innerHTML = renderMarkdown(t.reply || t.response || "收到了，我会结合这个方向继续观察。");
         chatArea.appendChild(replyEl);
         setTimeout(() => {
           const domain = subjectId;

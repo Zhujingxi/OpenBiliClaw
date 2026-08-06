@@ -171,6 +171,7 @@ const {
   normalizeContextPreview,
   readContextSelection,
   replyQuoteMarkup,
+  renderMarkdown,
   renderPendingListMarkup,
   renderTurnMarkup,
   selectDialogueTurns,
@@ -3240,8 +3241,8 @@ function buildMessageCard(probe) {
     item.append(createChatThinkingPlaceholder("阿B 正在思考这个方向"));
   } else if (probe.chat_reply) {
     const reply = document.createElement("div");
-    reply.className = "message-chat-reply";
-    reply.textContent = probe.chat_reply;
+    reply.className = "message-chat-reply chat-markdown";
+    reply.innerHTML = renderMarkdown(probe.chat_reply);
     item.append(reply);
   }
 
@@ -3404,8 +3405,8 @@ function buildDelightCard(delight) {
     item.append(createChatThinkingPlaceholder("阿B 正在品你这句话"));
   } else if (delight.chat_reply) {
     const reply = document.createElement("div");
-    reply.className = "message-chat-reply";
-    reply.textContent = delight.chat_reply;
+    reply.className = "message-chat-reply chat-markdown";
+    reply.innerHTML = renderMarkdown(delight.chat_reply);
     item.append(reply);
   }
 
@@ -3528,9 +3529,10 @@ function expandDelightChat(itemEl, delight) {
       const showReply = (nextTurn) => {
         thinking.remove();
         const replyEl = document.createElement("div");
-        replyEl.className = "message-chat-reply";
-        replyEl.textContent =
-          nextTurn.reply || "\u6536\u5230\u4E86\uFF0C\u6211\u4F1A\u7EE7\u7EED\u89C2\u5BDF\u3002";
+        replyEl.className = "message-chat-reply chat-markdown";
+        replyEl.innerHTML = renderMarkdown(
+          nextTurn.reply || "\u6536\u5230\u4E86\uFF0C\u6211\u4F1A\u7EE7\u7EED\u89C2\u5BDF\u3002",
+        );
         itemEl.append(replyEl);
         applyTurnToMessage(nextTurn);
         applyTurnToDelight(nextTurn);
@@ -3692,9 +3694,10 @@ async function sendInlineChat(itemEl, domain, input, sendBtn, type = "interest.p
       thinking.remove();
       chatArea.remove();
       const replyEl = document.createElement("div");
-      replyEl.className = "message-chat-reply";
-      replyEl.textContent =
-        nextTurn.reply || "\u6536\u5230\u4E86\uFF0C\u6211\u4F1A\u7ED3\u5408\u8FD9\u4E2A\u65B9\u5411\u7EE7\u7EED\u89C2\u5BDF\u3002";
+      replyEl.className = "message-chat-reply chat-markdown";
+      replyEl.innerHTML = renderMarkdown(
+        nextTurn.reply || "\u6536\u5230\u4E86\uFF0C\u6211\u4F1A\u7ED3\u5408\u8FD9\u4E2A\u65B9\u5411\u7EE7\u7EED\u89C2\u5BDF\u3002",
+      );
       itemEl.append(replyEl);
       applyTurnToMessage(nextTurn);
       setTimeout(() => {
@@ -5119,9 +5122,10 @@ function appendChatMessage(role, content, { turnId = "", part = "" } = {}) {
   label.className = "chat-role";
   label.textContent = role;
 
-  const text = document.createElement("p");
-  text.className = "chat-content";
-  text.textContent = content;
+  const text = document.createElement(role === "助手" ? "div" : "p");
+  text.className = `chat-content${role === "助手" ? " chat-markdown" : ""}`;
+  if (role === "助手") text.innerHTML = renderMarkdown(content);
+  else text.textContent = content;
 
   item.append(label, text);
   elements.chatMessages.append(item);
@@ -5148,7 +5152,7 @@ function appendChatThinkingPlaceholder(turnId = "") {
   label.className = "chat-role";
   label.textContent = "助手";
 
-  const text = document.createElement("p");
+  const text = document.createElement("div");
   text.className = "chat-content chat-thinking-content";
   text.innerHTML =
     '<span class="chat-thinking-label">正在想</span>' +
@@ -5174,7 +5178,8 @@ function replaceChatThinkingPlaceholder(placeholder, content) {
   const text = placeholder.querySelector(".chat-content");
   if (text instanceof HTMLElement) {
     text.classList.remove("chat-thinking-content");
-    text.textContent = content;
+    text.classList.add("chat-markdown");
+    text.innerHTML = renderMarkdown(content);
   }
   scrollChatMessagesToBottom();
 }
@@ -5789,8 +5794,8 @@ function renderDelightSlot() {
           aiBubble.className = "delight-turn-bubble is-assistant is-error";
           aiBubble.textContent = t.error || "这句还没发出去，稍后再试。";
         } else {
-          aiBubble.className = "delight-turn-bubble is-assistant";
-          aiBubble.textContent = t.reply || "";
+          aiBubble.className = "delight-turn-bubble is-assistant chat-markdown";
+          aiBubble.innerHTML = renderMarkdown(t.reply || "");
         }
         bubbleArea.append(aiBubble);
       }
@@ -5798,8 +5803,8 @@ function renderDelightSlot() {
     } else if (delight.chat_reply) {
       // Fallback: show single chat_reply for backward compat
       const reply = document.createElement("p");
-      reply.className = "delight-banner-chat-reply";
-      reply.textContent = delight.chat_reply;
+      reply.className = "delight-banner-chat-reply chat-markdown";
+      reply.innerHTML = renderMarkdown(delight.chat_reply);
       body.append(reply);
     }
 
