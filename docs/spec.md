@@ -510,7 +510,10 @@ trusted LAN ─ HTTPS（可选）──→ TLS Proxy :8443 ─ loopback/Compose 
 │  可选视觉 / 弹幕预热：质心、关键帧、完整 document embedding；endpoint provenance + stable slot retry │
 │  Desktop bundle: official Ollama.app runtime (ollama + runner dylibs/assets) │
 │  LLMService caller bucket → inherit global chain / custom chain │
+│  cognition named views → task gate: awareness_confusions compact; others legacy │
+│    └→ token diet: preference packing + weighted recent/judged/relevant/important insight≤40 → full merge │
 │  discovery evaluator: text + metrics + optional compressed cover image input │
+│    └→ embedding prefilter shadow → privacy-safe decision → raw score/admission join → read-only gate │
 │  OpenAI auth_mode: api_key / experimental Codex CLI OAuth      │
 │  结构化 JSON helper: wrapper / fenced / JSONL / schema echo / MiMo 容错 │
 ├──────────────────────────────────────────────────────────────┤
@@ -522,6 +525,9 @@ trusted LAN ─ HTTPS（可选）──→ TLS Proxy :8443 ─ loopback/Compose 
 │  └───────────┘ └─────────────┘ └────────────┘ └─────────┘  │
 │  SQLite: events(inferred_satisfaction) / seen_items(views+saves+snapshot)   │
 │          discovery_candidates                                      │
+│          evaluator_prefilter_shadow_audit (30d / 20k bounded, no raw content) │
+│          discovery_keywords → 24h safe cross-digest pending reconcile (0=hard expiry) │
+│          admitted pending copy → bounded copy-ready watermark → serve/refill │
 │          discovery_keywords(+cohort gate) / discovery_inspiration_*│
 │          content_cache(item_key: nonblank partial unique + legacy blank repair)              │
 │          recommendations(item_key) / chat_turns / card_settlements / avoidance_state          │

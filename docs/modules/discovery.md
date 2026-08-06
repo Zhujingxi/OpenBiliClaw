@@ -591,7 +591,7 @@ discovery 不是“把整个找片过程都交给 LLM”。当前实现里，LLM
 
 此前多个 search 关键词生成器（B 站 `search`、小红书 `xhs-search`、抖音 `search`、YouTube `yt_search`、X `x-search`、知乎 `zhihu-search`、Reddit `reddit-search`、Bangumi `bangumi-search`）各自独立调 LLM、各发一份画像。统一 planner 把它们收敛成一套「双缓冲 + 缺口拉动」的背压模型，接管各平台 **search 关键词**，并接管 B 站 `ExploreStrategy` 的 `keyword_kind="explore"` query cache 生成；`trending / related / hot / feed / channel / creator / subreddit / ranked / latest` 及各自的 budget/cadence **原样不动**。
 
-**关键词存储**（`storage/database.py`，表 `discovery_keywords` + `discovery_keyword_yield` + CAS 单飞锁 `discovery_planner_lock`）是生成侧的缓存 / 历史 / yield 账本。状态机：`pending → claimed → (内联) used / failed` 或 `→ (异步) executing → used / failed`；任意在途态可经租约回收 / 预算回滚回到 `pending`，小红书任务遇到平台安全验证时也会从 `executing` 无损回到 `pending` 且不增加 attempts；旧画像 digest 的**未消费** `pending` 作废为 `expired`。`keyword_kind` 区分 `regular` 与 `explore`：普通 search 只 claim `regular`，老 B 站 `ExploreStrategy` 在 planner 开启时只 claim `explore`。在途四元组 `(platform, keyword, profile_kw_digest, keyword_kind)` 部分唯一；已经实际搜索后因零产出或全量重复而变成 `expired` 的词保留 `used_at`，在 `history_window_hours` 内继续参与近期词冷却，而旧画像未消费词不污染新画像历史。
+**关键词存储**（`storage/database.py`，表 `discovery_keywords` + `discovery_keyword_yield` + CAS 单飞锁 `discovery_planner_lock`）是生成侧的缓存 / 历史 / yield 账本。状态机：`pending → claimed → (内联) used / failed` 或 `→ (异步) executing → used / failed`；任意在途态可经租约回收 / 预算回滚回到 `pending`，小红书任务遇到平台安全验证时也会从 `executing` 无损回到 `pending` 且不增加 attempts。画像 digest 变化时，planner 会先原子整理 `regular/pending`：当前 digest 优先保留；旧 digest 中创建未超过 `keyword_digest_grace_hours`、不命中显式 `disliked_topics` 或平台 `avoid_topics`、且未超过当前动态高水位的词继续可领取，并保留原 digest 与全部生成溯源；过龄、命中避雷、重复或超额才变成 `expired`。设宽限为 `0` 即恢复旧版硬过期。`claimed/executing`、终态行和 `keyword_kind="explore"` 均不参与整理。`keyword_kind` 区分 `regular` 与 `explore`：普通 search 只 claim `regular`，老 B 站 `ExploreStrategy` 在 planner 开启时只 claim `explore`。在途四元组 `(platform, keyword, profile_kw_digest, keyword_kind)` 部分唯一；已经实际搜索后因零产出或全量重复而变成 `expired` 的词保留 `used_at`，在 `history_window_hours` 内继续参与近期词冷却；宽限保留的 pending 也进入生成历史，避免库存尚在时又生成同族关键词。
 
 **生成（planner loop）**：`runtime/keyword_planner.py::KeywordPlanner` 作为独立后台对象（在 `api/runtime_context.py` 构造、持 `llm_service`+db+config，由 refresh controller 的 `run_forever` 拉起），每 `planner_poll_seconds` 轮一次：
 
@@ -607,7 +607,7 @@ discovery 不是“把整个找片过程都交给 LLM”。当前实现里，LLM
 
 **yield / 重复率端到端**：候选全程透传 `source_keyword_id`，入池（`_cache_results` 这唯一 admission 收口）按 `(source_keyword_id, content_id)` **幂等**回填 `yield_count`（与 `used` 解耦，覆盖三形态）；连续 0 产出且过保护期的 `used` 词退役为 `expired`。候选预过滤还会按 keyword 汇总 `known_candidate / known_cache / duplicate_in_batch`：某词本轮返回的所有身份都已存在时立即标记 `expired` 并补 `used_at`，让真实重复结果直接驱动下一轮换词，而不是等画像变化。
 
-**成本可观测**：合并调用是**一次 response**，token 无法在平台间拆分 → 统一记单一 caller `discovery.keyword_planner`（`openbiliclaw cost --by caller` 可见 search 关键词总成本随合并而塌缩）。per-platform 归因不靠冒充 token 拆分，而靠 planner 每轮 emit 的结构化 ledger（`{platform: {generated, yield}}`，`generated` 取本轮产词数、`yield` 取 `keyword_yield_total(platform)` 的累计 admit 产出），落在 `keyword planner cycle ledger` 日志行、并存于 `KeywordPlanner.last_cycle_ledger`。
+**成本可观测**：合并调用是**一次 response**，token 无法在平台间拆分 → 统一记单一 caller `discovery.keyword_planner`（`openbiliclaw cost --by caller` 可见 search 关键词总成本随合并而塌缩）。per-platform 归因不靠冒充 token 拆分，而靠 planner 每轮 emit 的结构化 ledger（`{platform: {generated, yield}}`，`generated` 取本轮产词数、`yield` 取 `keyword_yield_total(platform)` 的累计 admit 产出），落在 `keyword planner cycle ledger` 日志行、并存于 `KeywordPlanner.last_cycle_ledger`。digest 整理另以聚合计数 `current/reused/expired_aged/expired_blocked/expired_excess` 暴露在 `last_digest_grace_ledger` 和日志中，不记录关键词、画像或 digest 正文。
 
 **生成结果复用与轮换**：一次成功的 merged keyword JSON 会按 `profile_kw_digest + 平台需求块 + recent_keywords + 池子避让 / prefer hints + gen_batch` 缓存在进程内，TTL 使用 `[discovery].plan_ttl_hours`。同一批尚未消费时仍可复用，避免重叠 planner pass 重复调用；一旦关键词被实际搜索并进入近期历史，cache key 就变化，稳定画像也会重新生成下一批，而不会在整个 TTL 内回放旧 JSON。
 
@@ -621,7 +621,7 @@ discovery 不是“把整个找片过程都交给 LLM”。当前实现里，LLM
 
 **合并调用的 ask 收口 + 动态 max_tokens**（真实模型端到端验证补强）：合并生成是全系统输出最大的一次调用（每个 due 平台 × 至多 `gen_batch` 个词同在一个 JSON）。两处保证不被截断：① 给模型的每平台 `need` **收口到 `gen_batch`**——P3.2 的动态水位可达 `kw_cache_high×3`，但解析每平台只保留 `gen_batch`，若按 80 去要、只留 30，既浪费模型输出又把排在 JSON 靠后的平台顶向截断；现在「要多少＝留多少」。② 合并调用的 `max_tokens` 不再用固定默认，而是**按本轮实际要词量动态算**：`max(4096, sum(收口后 need) × 48 + 1024)`，随平台数 / `gen_batch` 自适应、留足余量（`max_tokens` 是天花板、按真实输出计费，放大几乎零成本）。否则靠后的平台会被截断、退回兴趣名兜底（实测 deepseek 下 5 平台 ×30 词若限额过小，youtube/twitter 会退化成裸兴趣名；修复后各平台均满额、英文平台正确出英文）。
 
-**默认开启 / 如何回退**：v0.3.124 起 `[discovery].unified_keyword_planner_enabled` 默认 `true`，无需配置即生效（其余 `kw_cache_high/low`、`gen_batch`、`fetch_batch`、`history_window_*`、`claim_lease_minutes`、`planner_poll_seconds`、`plan_ttl_hours` 用 §6 默认即可，详见 `docs/modules/config.md`）。要回退旧逐平台生成，把该项设为 `false` 并重启后端即可，逐字回到旧路径、无副作用。端到端正确性由 `tests/test_keyword_backpressure_e2e.py` 在 flag-on 下覆盖，回退路径由 producer / planner 的 flag-off 测试覆盖。
+**默认开启 / 如何回退**：v0.3.124 起 `[discovery].unified_keyword_planner_enabled` 默认 `true`，无需配置即生效（其余 `kw_cache_high/low`、`gen_batch`、`fetch_batch`、`history_window_*`、`claim_lease_minutes`、`planner_poll_seconds`、`plan_ttl_hours`、`keyword_digest_grace_hours` 用 §6 默认即可，详见 `docs/modules/config.md`）。要回退旧逐平台生成，把总开关设为 `false`；只回退跨 digest 复用则把 `keyword_digest_grace_hours=0`。两者均在重载后生效。端到端正确性由 `tests/test_keyword_backpressure_e2e.py` 在 flag-on 下覆盖，回退路径由 producer / planner 的 flag-off 与 grace=0 测试覆盖。
 
 ## 已实现功能
 
@@ -632,6 +632,7 @@ discovery 不是“把整个找片过程都交给 LLM”。当前实现里，LLM
 | 5.3 相关推荐链策略 | ✅ | 事件种子 + 偏好/策略兜底种子 + 2 层相关推荐链 + LLM 评分过滤 |
 | 5.4 跨领域探索策略 | ✅ | compact 画像生成短 JSON 探索 domain + 按 covered topic 缓存 + query 搜索 + exploration bonus + prompt 级外推多样性约束 |
 | 5.5 内容评估 | ✅ | `evaluate_content()` 已被四类发现策略复用（含 SearchStrategy） |
+| evaluator prefilter shadow 证据门 | ✅ | 默认仍为 `shadow`：每个未命中评分缓存的候选先生成不含标题、URL、正文或原始画像的审计决策，LLM 返回后用随机 decision id 回填原始模型分数和统一 admission 阈值结果；provider / parse 失败在产品评分路径可保守结算为 0，但审计行保持 unjoined，绝不把合成 0 伪装成 eventual LLM score。required-interest 集合与实际 embedding 输入使用同一份按权重排序的 top-256；无 embedding service 也使用固定域分隔 digest namespace 落下可连接证据，`profile_interests_missing` 与缺失/异常向量一并作为 degraded fail-open 进入 gate。审计写失败同样 fail-open。即使显式配置 `enforce`，当前批无法完整生成并持久化每条决策证据时也整批保留 LLM 路径；`scripts/evaluate_prefilter_shadow_gate.py` 只读冻结 retained cohort 并计算 §6.4 gate，从不自动切换 `enforce`。 |
 | 5.6 发现引擎编排 | ✅ | 并发执行策略 + 高分去重 + 直接 discover 缓存收口；runtime 正常路径通过待评估池 admission 到 SQLite 推荐池 |
 | 统一待评估候选池 | ✅ | B 站、XHS、抖音、YouTube、X、知乎、Reddit、Bangumi 的原始候选先写入 `discovery_candidates(pending_eval)`；API runtime 先用 supply fill loop 按 `pending_eval + evaluating` 补足有效水位，入库前过滤历史候选和已缓存内容，再由唯一 `CandidateEvalCoordinator` 按 `[scheduler].eval_min_batch_size / eval_max_wait_seconds`（默认 15 / 90 秒）凑批，以最多 3×30 连续评估并串行 commit/admission；手动 CLI 固定 `1 / 0` 立即 drain。各路径共享 tokenized claim、统一阈值与 projected-inventory 规则。 |
 | 小红书自动任务领取门与风控背压 | ✅ | 自动 search / creator / bootstrap 在 API claim 时再次检查小红书来源开关与全局 scheduler，关闭后旧 pending 任务不会触发浏览器页面；search / creator 默认以 20 分钟为中心做 ±25% 稳定抖动并持久化下一次领取时间。搜索每日默认 20 次，producer 只把 pending + in-progress 搜索队列补到 5 条。扩展识别安全验证 / 操作频繁 / 429 后，后端按连续轮次打开 1/2/4…小时（24 小时封顶）平台冷却，停止 producer 与所有 XHS task claim，并把关联 planner 关键词无损退回 pending；同一冷却内重复报告不加轮次，冷却后的正常任务成功才重置。 |
@@ -791,6 +792,7 @@ assert 0.0 <= score <= 1.0
 - batch 评估结果解析会优先选择包含 `score` 的结果数组或 object 序列；如果 provider 回显输入 JSON、包 Markdown fence、或返回 NDJSON，仍按一次 batch 处理，不会因为包裹格式异常直接拆成 N 次单条评估
 - batch prompt 和响应都带 `bvid/content_id`；只要响应里有可识别 ID，引擎会按 ID 而不是数组下标写回评分和理由。缺失 / malformed member 只重试缺失 subset；全组缺失才二分，最多深度 3 / 额外 6 请求，绝不退化成 N 次单条风暴
 - batch provider 调用异常不会返回全 0 分或触发逐条 fallback；异常向上传递给 `DiscoveryCandidatePipeline`，由 pipeline 释放本批 claim 回 `pending_eval`，下一轮在 provider 恢复后继续评估原候选
+- `eval_prefilter_mode="shadow"` 会把每条决策写入有界的 `evaluator_prefilter_shadow_audit`，并在 batch diversity cap 之前回填原始 LLM score；持久字段只有 candidate hash、平台/上下文类别、相似度/阈值、explore/保护标志、embedding/profile digest 和 admission 结果。审计或 embedding 异常只会让候选继续走 LLM，并使 gate 保持关闭；代码不会把通过的报告自动转成 `enforce` 配置。
 - `SearchStrategy` / `TrendingStrategy` / `RelatedChainStrategy` / `ExploreStrategy`、YouTube 三策略和 `DouyinDirectStrategy` 在内部临时构造 evaluator 时都会透传 `database`。因此 CLI、daemon runtime、YouTube producer、Douyin producer 和 OpenClaw bootstrap 路径都能读取同一份近期 negative exemplars，避免只有外层 engine 能看到短期负反馈样本。
 - 排序口径优先 `candidate_tier`，再看 `relevance_score`、`last_scored_at`、`view_count`
 - 最终结果会把 `relevance_score`、`relevance_reason`、`candidate_tier` 一并写入 `content_cache`

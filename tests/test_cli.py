@@ -1731,7 +1731,15 @@ def test_db_repair_reports_successful_rebuild(
     assert "openbiliclaw.repaired.db" in result.stdout.replace("\n", "")
 
 
-def test_runtime_builders_share_database_instance(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("configured_copy_target", "expected_copy_target"),
+    [(47, 30), (0, 0)],
+)
+def test_runtime_builders_share_database_instance(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_copy_target: int,
+    expected_copy_target: int,
+) -> None:
     from types import SimpleNamespace
 
     import openbiliclaw.discovery.engine as discovery_module
@@ -1794,6 +1802,7 @@ def test_runtime_builders_share_database_instance(monkeypatch: pytest.MonkeyPatc
         ) -> None:
             self.llm = llm
             self.database = database
+            self.kwargs = _extras
 
     class FakeDiscoveryEngine:
         def __init__(
@@ -1827,11 +1836,16 @@ def test_runtime_builders_share_database_instance(monkeypatch: pytest.MonkeyPatc
         llm=SimpleNamespace(concurrency=3),
         soul=SimpleNamespace(
             preference=SimpleNamespace(satisfaction_filter_enabled=True),
+            preference_prompt_view="compact-v1",
+            awareness_prompt_view="legacy",
+            insight_prompt_view="compact-v1",
             posture_gate_mode="shadow",
             posture_gate_force_enforce=False,
             topic_lifecycle_serialization="off",
         ),
         scheduler=SimpleNamespace(
+            pool_target_count=30,
+            copy_ready_target_count=configured_copy_target,
             speculation_interval_minutes=10,
             speculation_ttl_days=3,
             speculation_cooldown_days=7,
@@ -1880,6 +1894,7 @@ def test_runtime_builders_share_database_instance(monkeypatch: pytest.MonkeyPatc
     assert created_memories[0].initialized == 1
     assert created_memories[0].database is created_databases[0]
     assert recommendation_engine.database is created_databases[0]
+    assert recommendation_engine.kwargs["copy_ready_target_count"] == expected_copy_target
     assert discovery_engine.database is created_databases[0]
     recorder = recommendation_engine.llm.usage_recorder
     assert recorder is not None
@@ -1889,6 +1904,9 @@ def test_runtime_builders_share_database_instance(monkeypatch: pytest.MonkeyPatc
         recommendation_engine.llm.concurrency_gate is discovery_engine.llm_service.concurrency_gate
     )
     assert soul_engine.kwargs["llm_concurrency_gate"] is recommendation_engine.llm.concurrency_gate
+    assert soul_engine.kwargs["preference_prompt_view"] == "compact-v1"
+    assert soul_engine.kwargs["awareness_prompt_view"] == "legacy"
+    assert soul_engine.kwargs["insight_prompt_view"] == "compact-v1"
     assert discovery_engine.concurrency.llm_evaluation_concurrency == 2
 
 

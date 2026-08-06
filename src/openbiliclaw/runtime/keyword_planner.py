@@ -6,17 +6,18 @@ backpressure model (design spec §5.2). It runs as its own background object
 controller's ``run_forever``) and, when the
 ``[discovery].unified_keyword_planner_enabled`` flag is on, periodically:
 
-1. Finds the ``due`` platforms — those whose keyword cache (``pending`` rows
-   for the current ``profile_kw_digest``) is below ``kw_cache_low`` **and**
+1. Reconciles bounded, recent, safe regular ``pending`` rows across profile
+   digest churn, then finds the ``due`` platforms — those whose usable keyword
+   cache is below ``kw_cache_low`` **and**
    that have a real search deficit (the controller's existing pool-replenish
    口径, including raw-material headroom + in-flight rows — NOT just visible
    pool rows). B站 additionally enters ``due`` on its existing catalysts
    (pool-below-target or ≥ ``signal_event_threshold`` pending signal events),
    even when its cache is not below low.
-2. For every due platform, expires any stale-digest ``pending`` rows, then
-   builds one merged ``<platforms>`` block and issues a **single** structured
+2. Builds one merged ``<platforms>`` block and issues a **single** structured
    LLM call covering all due platforms. Parsed keywords are inserted as
-   ``pending`` per platform under the current digest.
+   ``pending`` per platform under the current digest. Reused rows keep their
+   original digest and generation provenance.
 3. Decline vs failure (P2.2). When the merged call **succeeds**, a platform the
    model explicitly returned an empty list ``[]`` for is an **intentional
    decline** (its supply advantage doesn't fit the user) — it is skipped this
@@ -801,6 +802,10 @@ class KeywordPlanner:
         # ``{platform: {"generated": n, "yield": y}}`` snapshot emitted by a
         # generation pass. Empty until the first pass that generates anything.
         self.last_cycle_ledger: dict[str, dict[str, int]] = {}
+        # Aggregate-only digest-grace observability. This deliberately stores
+        # counts rather than keyword/profile/digest text.
+        self.last_digest_grace_ledger: dict[str, dict[str, int]] = {}
+        self._grace_inventory_ready: set[str] = set()
         # Phase 2.3 telemetry: True when the last coexist explore round fell back
         # from rich axis-library generation to the flat ``explore_domains``
         # queries (rich-gen degraded / empty). Reset each explore attempt.
@@ -1114,22 +1119,22 @@ class KeywordPlanner:
             return await self._run_once_locked()
 
     async def _run_once_locked(self) -> dict[str, int]:
+        self.last_digest_grace_ledger = {}
+        self._grace_inventory_ready.clear()
         profile = await self._load_profile()
         if profile is None:
             return {}
 
         digest = profile_kw_digest(profile)
+        hints_by_platform = self._avoid_hints(profile)
+        self._reconcile_pending_inventory(
+            profile=profile,
+            digest=digest,
+            hints_by_platform=hints_by_platform,
+        )
         due = self._due_platforms(digest)
         if not due:
             return {}
-
-        # Flush stale-digest pending for every due platform up front so the
-        # cache count below low / the merged need both reflect the live digest.
-        for platform in due:
-            try:
-                self._db.expire_pending_by_digest(platform, digest)
-            except Exception:
-                logger.exception("expire_pending_by_digest failed for %s", platform)
 
         # Single-flight: short CAS lock, released BEFORE the LLM call.
         lease_seconds = max(1.0, float(self._discovery.claim_lease_minutes) * 60.0)
@@ -1139,7 +1144,12 @@ class KeywordPlanner:
 
         ledger: dict[str, int] = {}
         try:
-            ledger = await self._generate_for(due, profile=profile, digest=digest)
+            ledger = await self._generate_for(
+                due,
+                profile=profile,
+                digest=digest,
+                hints_by_platform=hints_by_platform,
+            )
         finally:
             self._release_lock()
         return ledger
@@ -1150,8 +1160,8 @@ class KeywordPlanner:
         *,
         profile: SoulProfile,
         digest: str,
+        hints_by_platform: dict[str, dict[str, object]],
     ) -> dict[str, int]:
-        hints_by_platform = self._avoid_hints(profile)
         supply_by_platform = self._supply_hints(hints_by_platform)
         blocks: list[dict[str, object]] = []
         needs: dict[str, int] = {}
@@ -1651,7 +1661,99 @@ class KeywordPlanner:
 
     # ── store + snapshot helpers ────────────────────────────────────────
 
+    def _reconcile_pending_inventory(
+        self,
+        *,
+        profile: SoulProfile,
+        digest: str,
+        hints_by_platform: dict[str, dict[str, object]],
+    ) -> None:
+        """Prepare safe usable inventory before due calculation.
+
+        Both reconciliation and all-digest counting must be available. Any
+        missing/raising capability falls back to the legacy hard-expiration +
+        exact-digest count path for that platform.
+        """
+        reconcile = getattr(self._db, "reconcile_pending_keyword_digests", None)
+        count_all = getattr(self._db, "count_pending_keywords_all_digests", None)
+        preferences = getattr(profile, "preferences", None)
+        explicit_dislikes = _as_str_list(getattr(preferences, "disliked_topics", []))
+        grace_hours = int(getattr(self._discovery, "keyword_digest_grace_hours", 0))
+
+        for platform in _PLANNER_PLATFORMS:
+            if not callable(reconcile) or not callable(count_all):
+                self._legacy_expire_pending(platform, digest)
+                continue
+            avoid_topics = _as_str_list(hints_by_platform.get(platform, {}).get("avoid_topics"))
+            blocked_terms = list(dict.fromkeys([*explicit_dislikes, *avoid_topics]))
+            try:
+                raw_ledger = reconcile(
+                    platform,
+                    digest,
+                    grace_hours=grace_hours,
+                    max_pending=self._target_high(platform),
+                    blocked_terms=blocked_terms,
+                    keyword_kind="regular",
+                )
+                # Validate the companion count while still in the reconciliation
+                # phase. A partial rollout must fail back before due computation.
+                int(count_all(platform, keyword_kind="regular"))
+                if not isinstance(raw_ledger, Mapping):
+                    raise TypeError("keyword digest reconciliation returned a non-mapping ledger")
+                ledger = {
+                    key: max(0, _ledger_int(raw_ledger.get(key, 0)))
+                    for key in (
+                        "current",
+                        "reused",
+                        "expired_aged",
+                        "expired_blocked",
+                        "expired_excess",
+                    )
+                }
+            except Exception:
+                logger.exception(
+                    "keyword digest reconciliation failed for %s; using hard expiration",
+                    platform,
+                )
+                self._legacy_expire_pending(platform, digest)
+                continue
+            self._grace_inventory_ready.add(platform)
+            if any(ledger.values()):
+                self.last_digest_grace_ledger[platform] = ledger
+            if any(ledger[key] for key in ledger if key != "current"):
+                logger.info(
+                    "keyword digest reconciliation: platform=%s current=%d reused=%d "
+                    "expired_aged=%d expired_blocked=%d expired_excess=%d",
+                    platform,
+                    ledger["current"],
+                    ledger["reused"],
+                    ledger["expired_aged"],
+                    ledger["expired_blocked"],
+                    ledger["expired_excess"],
+                )
+
+    def _legacy_expire_pending(self, platform: str, digest: str) -> None:
+        try:
+            self._db.expire_pending_by_digest(platform, digest)
+        except Exception:
+            logger.exception("expire_pending_by_digest failed for %s", platform)
+
     def _count_pending(self, platform: str, digest: str) -> int:
+        if platform in self._grace_inventory_ready:
+            try:
+                return int(
+                    self._db.count_pending_keywords_all_digests(
+                        platform,
+                        keyword_kind="regular",
+                    )
+                )
+            except Exception:
+                logger.exception(
+                    "all-digest pending count failed for %s; using hard expiration",
+                    platform,
+                )
+                self._grace_inventory_ready.discard(platform)
+                self._legacy_expire_pending(platform, digest)
         try:
             return int(self._db.count_pending_keywords(platform, digest))
         except Exception:
@@ -1659,6 +1761,11 @@ class KeywordPlanner:
             return 0
 
     def _history(self, platform: str, *, keyword_kind: str = "regular") -> list[str]:
+        include_pending = (
+            keyword_kind == "regular"
+            and platform in self._grace_inventory_ready
+            and int(getattr(self._discovery, "keyword_digest_grace_hours", 0)) > 0
+        )
         try:
             return list(
                 self._db.history_keywords(
@@ -1666,6 +1773,7 @@ class KeywordPlanner:
                     int(self._discovery.history_window_size),
                     float(self._discovery.history_window_hours),
                     keyword_kind=keyword_kind,
+                    include_pending=include_pending,
                 )
             )
         except TypeError:

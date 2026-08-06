@@ -134,6 +134,7 @@ from openbiliclaw.api.models import (
     SavedSyncItemResponse,
     SavedSyncRequest,
     SchedulerConfigOut,
+    SoulConfigOut,
     SourceCredentialItem,
     SourceCredentialWriteIn,
     SourceCredentialWriteResponse,
@@ -14665,6 +14666,7 @@ def create_app(
                 extension_disconnect_grace_seconds=cfg.scheduler.extension_disconnect_grace_seconds,
                 discovery_cron=cfg.scheduler.discovery_cron,
                 pool_target_count=cfg.scheduler.pool_target_count,
+                copy_ready_target_count=cfg.scheduler.copy_ready_target_count,
                 pool_source_shares=_normalized_config_pool_source_shares(
                     cfg.scheduler.pool_source_shares
                 ),
@@ -14724,6 +14726,7 @@ def create_app(
                 claim_lease_minutes=cfg.discovery.claim_lease_minutes,
                 planner_poll_seconds=cfg.discovery.planner_poll_seconds,
                 plan_ttl_hours=cfg.discovery.plan_ttl_hours,
+                keyword_digest_grace_hours=cfg.discovery.keyword_digest_grace_hours,
                 admission_min_score=cfg.discovery.admission_min_score,
                 eval_prefilter_mode=cfg.discovery.eval_prefilter_mode,
                 candidate_eval_concurrency=cfg.discovery.candidate_eval_concurrency,
@@ -14763,6 +14766,14 @@ def create_app(
                 aggregate_budget_mb=cfg.logging.aggregate_budget_mb,
                 unmanaged_truncate_mb=cfg.logging.unmanaged_truncate_mb,
                 unmanaged_max_age_days=cfg.logging.unmanaged_max_age_days,
+            ),
+            soul=SoulConfigOut(
+                preference_prompt_view=cfg.soul.preference_prompt_view,
+                awareness_prompt_view=cfg.soul.awareness_prompt_view,
+                insight_prompt_view=cfg.soul.insight_prompt_view,
+                posture_gate_mode=cfg.soul.posture_gate_mode,
+                posture_gate_force_enforce=cfg.soul.posture_gate_force_enforce,
+                topic_lifecycle_serialization=cfg.soul.topic_lifecycle_serialization,
             ),
             issues=issue_list,
         )
@@ -15696,6 +15707,7 @@ def create_app(
         from openbiliclaw.config import (
             _DEFAULT_ADMISSION_MIN_SCORE,
             _DEFAULT_CANDIDATE_EVAL_CONCURRENCY,
+            _DEFAULT_COPY_READY_TARGET_COUNT,
             _DEFAULT_DANMAKU_FETCH_LIMIT,
             _DEFAULT_DANMAKU_MAX_CHARS,
             _DEFAULT_DELIGHT_QUEUE_LIMIT,
@@ -15706,6 +15718,7 @@ def create_app(
             _DEFAULT_FEEDBACK_BATCH_THRESHOLD,
             _DEFAULT_KEYFRAME_FETCH_LIMIT,
             _DEFAULT_KEYFRAME_MAX_FRAMES,
+            _DEFAULT_KEYWORD_DIGEST_GRACE_HOURS,
             _DEFAULT_MULTIMODAL_BATCH_SIZE,
             _DEFAULT_MULTIMODAL_IMAGE_MAX_PX,
             _DEFAULT_MULTIMODAL_IMAGE_QUALITY,
@@ -15716,8 +15729,10 @@ def create_app(
             _DEFAULT_SOURCE_INCREMENTAL_HOURS,
             _DEFAULT_SPECULATOR_IDLE_INTERVAL_MINUTES,
             _DEFAULT_TRENDING_REFRESH_MINUTES,
+            _MAX_COPY_READY_TARGET_COUNT,
             _MAX_EVAL_MAX_WAIT_SECONDS,
             _MAX_EVAL_MIN_BATCH_SIZE,
+            _MIN_COPY_READY_TARGET_COUNT,
             _MIN_EVAL_MAX_WAIT_SECONDS,
             _MIN_EVAL_MIN_BATCH_SIZE,
             _collect_config_issues,
@@ -16290,6 +16305,11 @@ def create_app(
                     _MIN_EVAL_MIN_BATCH_SIZE,
                     _MAX_EVAL_MIN_BATCH_SIZE,
                 ),
+                "copy_ready_target_count": (
+                    _DEFAULT_COPY_READY_TARGET_COUNT,
+                    _MIN_COPY_READY_TARGET_COUNT,
+                    _MAX_COPY_READY_TARGET_COUNT,
+                ),
                 "signal_event_threshold": (_DEFAULT_SIGNAL_EVENT_THRESHOLD, 1, None),
                 "trending_refresh_minutes": (_DEFAULT_TRENDING_REFRESH_MINUTES, 1, None),
                 "explore_refresh_minutes": (_DEFAULT_EXPLORE_REFRESH_MINUTES, 1, None),
@@ -16322,6 +16342,7 @@ def create_app(
                 "extension_disconnect_grace_seconds",
                 "discovery_cron",
                 "pool_target_count",
+                "copy_ready_target_count",
                 "account_sync_interval_hours",
                 "source_incremental_hours",
                 "xhs_incremental_hours",
@@ -16447,6 +16468,11 @@ def create_app(
             ddata = update["discovery"]
             if isinstance(ddata, dict):
                 discovery_int_limits = {
+                    "keyword_digest_grace_hours": (
+                        _DEFAULT_KEYWORD_DIGEST_GRACE_HOURS,
+                        0,
+                        168,
+                    ),
                     "candidate_eval_concurrency": (
                         _DEFAULT_CANDIDATE_EVAL_CONCURRENCY,
                         1,
@@ -16594,6 +16620,17 @@ def create_app(
         # guard applied just below.
         if "soul" in update and isinstance(update["soul"], dict):
             sdata = update["soul"]
+            for prompt_view_field in (
+                "preference_prompt_view",
+                "awareness_prompt_view",
+                "insight_prompt_view",
+            ):
+                if prompt_view_field in sdata:
+                    setattr(
+                        cfg.soul,
+                        prompt_view_field,
+                        str(sdata[prompt_view_field]).strip().lower(),
+                    )
             if "posture_gate_mode" in sdata:
                 cfg.soul.posture_gate_mode = str(sdata["posture_gate_mode"]).strip().lower()
             if "posture_gate_force_enforce" in sdata:

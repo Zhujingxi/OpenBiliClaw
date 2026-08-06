@@ -1271,12 +1271,16 @@ async def test_evaluate_content_batch_preserves_full_body_text() -> None:
 @pytest.mark.asyncio
 async def test_evaluate_content_batch_prefilter_enforce_filters_cache_and_excludes_llm(
     caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
 ) -> None:
     low_text = "不相关内容 厨房技巧"
     embedding = _CountingEmbeddingService(_prefilter_vectors(low_texts=[low_text]))
     llm_service = _DynamicBatchLLMService()
+    database = Database(tmp_path / "prefilter-enforce.db")
+    database.initialize()
     engine = ContentDiscoveryEngine(
         llm_service=llm_service,
+        database=database,
         embedding_service=embedding,
         eval_prefilter_mode="enforce",
     )
@@ -1314,6 +1318,11 @@ async def test_evaluate_content_batch_prefilter_enforce_filters_cache_and_exclud
     cached = engine._get_eval_cache_entry(cache_key)
     assert cached is not None
     assert cached[:2] == (0.05, "")
+    assert database.prefilter_shadow_audit_counts() == {
+        "total": 2,
+        "joined": 1,
+        "incomplete": 1,
+    }
     assert any(
         "eval_batch embedding prefilter" in record.message
         and "in=2" in record.message
@@ -1325,21 +1334,17 @@ async def test_evaluate_content_batch_prefilter_enforce_filters_cache_and_exclud
 
 @pytest.mark.asyncio
 async def test_enforce_prefilter_keeps_cold_and_warm_style_caps_identical(
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     llm_service = _DynamicBatchLLMService()
+    database = Database(tmp_path / "prefilter-style-caps.db")
+    database.initialize()
     engine = ContentDiscoveryEngine(
         llm_service=llm_service,
+        database=database,
+        embedding_service=_CountingEmbeddingService(_prefilter_vectors(low_texts=["候选 0"])),
         eval_prefilter_mode="enforce",
     )
-
-    async def prefilter_first(
-        contents: list[DiscoveredContent],
-        _profile: SoulProfile,
-    ) -> dict[int, float]:
-        return {0: 0.05} if contents and contents[0].bvid == "BVPREFILTER" else {}
-
-    monkeypatch.setattr(engine, "_embedding_prefilter", prefilter_first)
 
     def candidates() -> list[DiscoveredContent]:
         return [
@@ -1469,6 +1474,33 @@ async def test_embedding_prefilter_includes_long_tail_recall_interests() -> None
 
     filtered = await engine._embedding_prefilter(  # noqa: SLF001
         [DiscoveredContent(bvid="BVTAIL", title="长尾命中", description="只匹配第49项")],
+        profile,
+    )
+
+    assert filtered == {}
+
+
+@pytest.mark.asyncio
+async def test_embedding_prefilter_required_set_matches_weight_ranked_top_256() -> None:
+    profile = SoulProfile()
+    profile.preferences.interests = [
+        InterestTag(name="排序外低权重", category="测试", weight=0.0),
+        *[
+            InterestTag(name=f"中权重兴趣{index}", category="测试", weight=0.5)
+            for index in range(255)
+        ],
+        InterestTag(name="末位高权重必需兴趣", category="测试", weight=1.0),
+    ]
+    vectors = {f"中权重兴趣{index}": [1.0, 0.0] for index in range(255)}
+    vectors["低相似候选 厨房技巧"] = _LOW_SIM_VEC
+    engine = ContentDiscoveryEngine(
+        llm_service=_DynamicBatchLLMService(),
+        embedding_service=_CountingEmbeddingService(vectors),
+        eval_prefilter_mode="enforce",
+    )
+
+    filtered = await engine._embedding_prefilter(  # noqa: SLF001
+        [DiscoveredContent(bvid="BVRANKED", title="低相似候选", description="厨房技巧")],
         profile,
     )
 
@@ -1663,12 +1695,17 @@ async def test_evaluate_content_batch_prefilter_item_embedding_failure_fails_ope
 
 
 @pytest.mark.asyncio
-async def test_evaluate_content_batch_prefilter_all_filtered_batch_of_one_skips_llm() -> None:
+async def test_evaluate_content_batch_prefilter_all_filtered_batch_of_one_skips_llm(
+    tmp_path: Path,
+) -> None:
     low_text = "不相关内容 厨房技巧"
     embedding = _CountingEmbeddingService(_prefilter_vectors(low_texts=[low_text]))
     llm_service = _DynamicBatchLLMService()
+    database = Database(tmp_path / "prefilter-all-filtered.db")
+    database.initialize()
     engine = ContentDiscoveryEngine(
         llm_service=llm_service,
+        database=database,
         embedding_service=embedding,
         eval_prefilter_mode="enforce",
     )
@@ -1707,6 +1744,61 @@ async def test_evaluate_content_prefilter_shadow_single_path_uses_llm() -> None:
     assert score == 0.84
     assert content.relevance_reason == "llm kept it"
     assert len(llm_service.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_evaluate_content_prefilter_enforce_single_without_audit_sink_fails_open() -> None:
+    low_text = "不相关内容 厨房技巧"
+    llm_service = FakeLLMService('{"score": 0.84, "reason": "llm kept it"}')
+    engine = ContentDiscoveryEngine(
+        llm_service=llm_service,
+        embedding_service=_CountingEmbeddingService(_prefilter_vectors(low_texts=[low_text])),
+        eval_prefilter_mode="enforce",
+    )
+    content = DiscoveredContent(
+        bvid="BVSINGLEFAILOPEN",
+        title="不相关内容",
+        description="厨房技巧",
+        source_strategy="trending",
+    )
+
+    score = await engine.evaluate_content(content, _build_profile())
+
+    assert score == 0.84
+    assert content.relevance_reason == "llm kept it"
+    assert len(llm_service.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_evaluate_content_prefilter_enforce_single_with_audit_sink_filters(
+    tmp_path: Path,
+) -> None:
+    low_text = "不相关内容 厨房技巧"
+    database = Database(tmp_path / "prefilter-single-enforce.db")
+    database.initialize()
+    llm_service = FakeLLMService('{"score": 0.84, "reason": "should not run"}')
+    engine = ContentDiscoveryEngine(
+        llm_service=llm_service,
+        database=database,
+        embedding_service=_CountingEmbeddingService(_prefilter_vectors(low_texts=[low_text])),
+        eval_prefilter_mode="enforce",
+    )
+    content = DiscoveredContent(
+        bvid="BVSINGLEFILTER",
+        title="不相关内容",
+        description="厨房技巧",
+        source_strategy="trending",
+    )
+
+    score = await engine.evaluate_content(content, _build_profile())
+
+    assert score == 0.05
+    assert llm_service.calls == []
+    assert database.prefilter_shadow_audit_counts() == {
+        "total": 1,
+        "joined": 0,
+        "incomplete": 1,
+    }
 
 
 @pytest.mark.asyncio

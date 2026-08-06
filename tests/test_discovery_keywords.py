@@ -9,6 +9,8 @@ re-generation, digest expiry, history dedup, sparse recycle) and the
 from __future__ import annotations
 
 import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -268,6 +270,121 @@ class TestExpireByDigest:
         assert _status_of_keyword(db, "keep_pending") == "pending"  # current digest kept
 
 
+class TestDigestGraceReconciliation:
+    def test_keeps_recent_safe_rows_with_original_digest_and_caps_inventory(
+        self, db: Database
+    ) -> None:
+        db.insert_pending_keywords(
+            _BILI,
+            ["安全保留", "AI 教程", "安全超额", "陈旧关键词"],
+            _DIGEST_A,
+        )
+        stale_ids = {
+            str(row["keyword"]): int(row["id"])
+            for row in db.conn.execute(
+                "SELECT id, keyword FROM discovery_keywords WHERE profile_kw_digest = ?",
+                (_DIGEST_A,),
+            ).fetchall()
+        }
+        _backdate(db, stale_ids["AI 教程"], "created_at", minutes_ago=1)
+        _backdate(db, stale_ids["安全保留"], "created_at", minutes_ago=2)
+        _backdate(db, stale_ids["安全超额"], "created_at", minutes_ago=3)
+        _backdate(db, stale_ids["陈旧关键词"], "created_at", minutes_ago=60 * 30)
+        db.insert_pending_keywords(_BILI, ["当前一", "当前二"], _DIGEST_B)
+
+        ledger = db.reconcile_pending_keyword_digests(
+            _BILI,
+            _DIGEST_B,
+            grace_hours=24,
+            max_pending=3,
+            blocked_terms=["AI"],
+        )
+
+        assert ledger == {
+            "current": 2,
+            "reused": 1,
+            "expired_aged": 1,
+            "expired_blocked": 1,
+            "expired_excess": 1,
+        }
+        assert db.count_pending_keywords_all_digests(_BILI) == 3
+        retained = db.conn.execute(
+            "SELECT status, profile_kw_digest FROM discovery_keywords WHERE keyword = ?",
+            ("安全保留",),
+        ).fetchone()
+        assert retained is not None
+        assert str(retained["status"]) == "pending"
+        assert str(retained["profile_kw_digest"]) == _DIGEST_A
+        assert _status_of_keyword(db, "AI 教程") == "expired"
+        assert _status_of_keyword(db, "安全超额") == "expired"
+        assert _status_of_keyword(db, "陈旧关键词") == "expired"
+
+    def test_zero_grace_restores_hard_expiration_and_isolates_other_states(
+        self, db: Database
+    ) -> None:
+        db.insert_pending_keywords(
+            _BILI,
+            ["claimed", "executing", "used", "failed"],
+            _DIGEST_A,
+        )
+        rows = {str(row["keyword"]): row for row in db.claim_keywords(_BILI, 10)}
+        db.mark_keyword_executing(int(rows["executing"]["id"]))
+        db.mark_keyword_used(int(rows["used"]["id"]))
+        db.mark_keyword_failed(int(rows["failed"]["id"]))
+        db.insert_pending_keywords(_BILI, ["regular-pending"], _DIGEST_A)
+        db.insert_pending_keywords(
+            _BILI,
+            ["explore-pending"],
+            _DIGEST_A,
+            keyword_kind="explore",
+        )
+
+        ledger = db.reconcile_pending_keyword_digests(
+            _BILI,
+            _DIGEST_B,
+            grace_hours=0,
+            max_pending=10,
+            blocked_terms=[],
+        )
+
+        assert ledger["expired_aged"] == 1
+        assert _status_of_keyword(db, "regular-pending") == "expired"
+        assert _status_of_keyword(db, "claimed") == "claimed"
+        assert _status_of_keyword(db, "executing") == "executing"
+        assert _status_of_keyword(db, "used") == "used"
+        assert _status_of_keyword(db, "failed") == "failed"
+        assert _status_of_keyword(db, "explore-pending") == "pending"
+
+    def test_reconciliation_serializes_with_atomic_claim(self, db: Database) -> None:
+        db.insert_pending_keywords(_BILI, [f"race-{index}" for index in range(20)], _DIGEST_A)
+        barrier = threading.Barrier(2)
+
+        def reconcile() -> dict[str, int]:
+            barrier.wait()
+            return db.reconcile_pending_keyword_digests(
+                _BILI,
+                _DIGEST_B,
+                grace_hours=24,
+                max_pending=5,
+                blocked_terms=[],
+            )
+
+        def claim() -> list[dict[str, object]]:
+            barrier.wait()
+            return db.claim_keywords(_BILI, 5)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            reconcile_future = pool.submit(reconcile)
+            claim_future = pool.submit(claim)
+            ledger = reconcile_future.result(timeout=5)
+            claimed = claim_future.result(timeout=5)
+
+        assert sum(ledger.values()) >= 5
+        assert len({int(row["id"]) for row in claimed}) == len(claimed)
+        assert db.count_pending_keywords_all_digests(_BILI) <= 5
+        assert all(str(row["status"]) == "claimed" for row in claimed)
+
+
 class TestHistoryAndRecycle:
     def test_history_returns_inflight_and_used_newest_first(self, db: Database) -> None:
         db.insert_pending_keywords(_BILI, ["h_used", "h_exec", "h_claim"], _DIGEST_A)
@@ -281,6 +398,14 @@ class TestHistoryAndRecycle:
         hist = db.history_keywords(_BILI, window_size=50, window_hours=48)
         assert set(hist) == {"h_used", "h_exec", "h_claim"}
         assert "h_pending" not in hist
+
+        grace_hist = db.history_keywords(
+            _BILI,
+            window_size=50,
+            window_hours=48,
+            include_pending=True,
+        )
+        assert set(grace_hist) == {"h_used", "h_exec", "h_claim", "h_pending"}
 
     def test_history_respects_window_hours(self, db: Database) -> None:
         db.insert_pending_keywords(_BILI, ["recent", "ancient"], _DIGEST_A)

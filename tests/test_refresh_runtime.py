@@ -589,6 +589,14 @@ class _FakeEventHub:
         self.events.append(event)
 
 
+class _ExpressionCopyNotifySpy:
+    def __init__(self) -> None:
+        self.reasons: list[str] = []
+
+    def notify(self, reason: str) -> None:
+        self.reasons.append(reason)
+
+
 _LOOP_BODY_ATTRS = [
     ("_loop_refresh", ("_on_profile_ready_if_first_time", "refresh_if_needed")),
     ("_loop_pool_precompute", ("_drain_pool_precompute_backlog",)),
@@ -1070,6 +1078,45 @@ def test_get_pending_delight_skips_effective_disliked_candidate() -> None:
         recommendation_engine=_FakeRecommendationEngine(),
     )
     assert allowed.get_pending_delight() is not None
+
+
+def test_delight_consumption_notifies_expression_copy_refill() -> None:
+    coordinator = _ExpressionCopyNotifySpy()
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=_FakeDatabase([]),
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+        expression_copy_coordinator=coordinator,
+    )
+
+    controller.mark_delight_sent("BVDELIGHT_SENT")
+    controller.mark_delight_seen("BVDELIGHT_SEEN")
+
+    assert coordinator.reasons == ["delight_consumed", "delight_seen"]
+
+
+def test_pool_maintenance_mutation_notifies_expression_copy_refill() -> None:
+    coordinator = _ExpressionCopyNotifySpy()
+    database = _FakeDatabase([], pool_count=10)
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=database,
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+        expression_copy_coordinator=coordinator,
+        pool_target_count=10,
+    )
+    result = database.maintain_pool_inventory(
+        target=10,
+        raw_ceiling=20,
+        source_share_quotas={"bilibili": 10},
+    )
+
+    assert controller._record_pool_maintenance_result(replace(result, mutation_count=1)) is True
+    assert coordinator.reasons == ["pool_maintenance"]
 
 
 def test_runtime_status_reports_pool_readiness_counts() -> None:
@@ -5034,15 +5081,35 @@ async def test_refresh_after_event_ingest_queues_without_running_discovery() -> 
 
 
 async def test_refresh_after_feedback_skips_when_scheduler_disabled() -> None:
+    coordinator = _ExpressionCopyNotifySpy()
     controller = _controller_with_gate(
         scheduler_config=SimpleNamespace(enabled=False, pause_on_extension_disconnect=False),
     )
+    controller.expression_copy_coordinator = coordinator
 
     result = await controller.refresh_after_feedback()
 
     assert result["refreshed"] is False
     assert result["reason"] == "queued"
     assert result["queued_reason"] == "feedback"
+    assert coordinator.reasons == ["feedback"]
+
+
+async def test_public_feedback_replenishment_notifies_expression_copy() -> None:
+    coordinator = _ExpressionCopyNotifySpy()
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=_FakeDatabase([]),
+        soul_engine=_FakeSoulEngine(),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+        expression_copy_coordinator=coordinator,
+    )
+
+    result = await controller.request_replenishment(reason="feedback")
+
+    assert result["state"] == "queued"
+    assert coordinator.reasons == ["feedback"]
 
 
 async def test_force_refresh_consumes_queued_replenishment_reasons() -> None:

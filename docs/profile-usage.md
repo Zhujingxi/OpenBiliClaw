@@ -20,9 +20,15 @@ so every legacy import path stays valid):
 | `build_profile_summary` | `soul/profile_views.py:360` (re-export `discovery/strategies/_utils.py`) | dict | **No** | Canonical structured profile; portrait deliberately excluded (`profile_views.py:371-375`). `favorite_up_users` also excluded (`profile_views.py:392`). |
 | `compact_content_prompt_profile_summary` | `soul/profile_views.py:512` (re-export `discovery/strategies/_utils.py`) | dict | **No** | Caps a `build_profile_summary` dict for high-volume content prompts. Aliased as `compact_evaluation_profile_summary` (`discovery/engine.py:102`). Dislike floor preserved (`profile_views.py:46-50`). |
 | `build_query_generation_profile_summary` | `soul/profile_views.py:914` (re-export `discovery/strategies/_utils.py`) | dict | **No** | Query-trimmed taste shape; drops awareness/insights/timestamps. Interests cap 64, domains ≤16. |
+| `build_cognition_profile_view_v1` / `CognitionProfileViewV1` | `soul/profile_views.py` | stable soul + stable preference + volatile cognition | **Yes, when soul is supplied** | Named, uncapped cognition-only projection. Removes storage/init bookkeeping and the duplicate `soul.interest` subtree, filters archived positive interests, preserves negative evidence and unknown semantic fields, and splits recent awareness/active insights from the stable prefix. Awareness/Insight historically received the full soul snapshot, including `personality_portrait`, so compact-v1 deliberately preserves it. Preference does not supply a soul snapshot. |
 | `speculation` (→ `to_llm_context(include_portrait=False)`) | `soul/profile_views.py` (`speculation`); renderer `soul/profile.py:720` (onion) / `:115` (flat) | str | **No** (opted out) | String view for the two speculator prompts. Task 7 collected the former in-line `to_llm_context(include_portrait=False)` fork into a façade view that delegates to the profile's own renderer (zero behaviour change). `include_portrait=True` default still keeps the portrait for eval/persona rendering (not this path). |
 | `chat_core_memory` / `render_core_memory_blocks` | `soul/profile_views.py` (`chat_core_memory`), `memory/manager.py` (`render_core_memory_blocks` / `render_core_memory_prompt`) | `(stable, volatile)` str pair | **Yes** (stable block) | Chat core-memory view. Reads the **effective** profile (AI ⊕ overrides via `_effective_soul_data`, `manager.py`), so manual edits show. `complete_with_core_memory` injects `stable_block` (portrait/identity/preference) into system and `volatile_block` (awareness/insights) ahead of the user turn — awareness churn no longer breaks the cached system prefix (Task 6). `render_core_memory_prompt` kept as the concatenated compat wrapper for non-chat readers. |
 | `ProfileResponse` (openclaw) | `integrations/openclaw/operations.py:105` | dataclass | **Yes** (intentional) | External API surface; portrait re-exposed at `operations.py:113`, each list capped `[:5]` (`operations.py:114-120`). |
+
+`CognitionEventViewV1` lives in `soul/event_prompt_views.py`. It is the matching
+event projection, not a profile serializer: it preserves event order/count and
+semantic evidence, parses metadata deterministically, and removes only an
+explicit narrow set of transport/projection bookkeeping fields.
 
 ## Consumer surfaces
 
@@ -49,6 +55,10 @@ so every legacy import path stays valid):
 | Category migration | On migration | `inject_core_memory=False` (opt-out) — `soul/category_migration.py:145` | none (pure taxonomy mapping) | No | Yes |
 | Pool purge (dislike match) | On new dislike | `inject_core_memory=False` (opt-out) — `soul/pool_purge.py:201` | none (judges dislike-vs-candidate payload only) | No | Yes |
 | Dialogue-insight analyzer | Post-chat | `inject_core_memory=False` (opt-out) — `soul/dialogue_insight_analyzer.py:70` | core memory already in user prompt (injection was a duplicate) | Yes (user prompt) | Yes |
+| Preference analysis (`soul.preference*`) | Init, event chunk, or feedback batch | `build_preference_analysis_prompt(..., input_view=...)`; `compact-v1` uses `CognitionEventViewV1` + `CognitionProfileViewV1.stable_preference` | Event count/order and semantic evidence preserved; profile/event bookkeeping removed; awareness/insight context remains uncapped when supplied | No (no soul snapshot supplied) | Yes |
+| Plain awareness (`soul.awareness`) | Legacy direct awareness analysis | `build_awareness_prompt(..., input_view="legacy")` in production; compact seam exists only for controlled replay | Full legacy soul/preference/events | Yes (historical full soul) | Yes |
+| Awareness with confusions (`soul.awareness_confusions`) | Production cognition cycle | `build_awareness_with_confusions_prompt(..., input_view=awareness_prompt_view)`; default `compact-v1` after the 2026-08-06 SenseTime task gate | Stable soul → stable preference → prior volatile cognition → current projected event batch; no semantic caps | Yes (historical full soul) | Yes |
+| Insight (`soul.insight`) | Cognition cycle | `build_insight_prompt(..., input_view=insight_prompt_view)`; default `legacy` because the compact arm failed its task gate | Compact replay seam uses stable soul/preference then hypotheses/awareness; production remains full legacy input | Yes (historical full soul) | Yes |
 | Probe sentiment judge | Per probe reply | `inject_core_memory=True` (intentional) — `api/app.py:6244` | core memory (kept: chat-adjacent tone reading) | Yes | Yes |
 | Related-chain seed | Per discovery cycle | direct read `favorite_up_users[:1]` — `discovery/strategies/related_chain.py:392` | favorite UPs only | No | No |
 | `/api/profile-summary` (UI) | On request | direct read — `api/app.py:3990` | full profile incl. portrait | Yes | No |
@@ -57,9 +67,14 @@ so every legacy import path stays valid):
 
 ## Portrait boundary (invariant)
 
-`personality_portrait` is allowed into exactly two prompt/response surfaces:
+`personality_portrait` is prohibited from content-pipeline prompt serializers.
+It remains intentional on these established surfaces:
 
 - **Chat core memory** (`render_core_memory_prompt` → `complete_with_core_memory`).
+- **Cognition awareness/insight** — their legacy prompts already consumed the
+  complete soul snapshot; `CognitionProfileViewV1.stable_soul` preserves the
+  portrait so compact-v1 does not silently change interpretation. Preference
+  compact does not receive a soul snapshot.
 - **OpenClaw external `ProfileResponse`** (`operations.py:113`) — plus UI
   (`/api/profile-summary`) and eval personas, which are out of the profile-views
   scope but keep the portrait by design.

@@ -39,9 +39,7 @@ def _wait_for_config_apply(
             if expected == "applied"
             else status.get("requested_revision")
         )
-        if status["state"] == expected and (
-            revision is None or status_revision == revision
-        ):
+        if status["state"] == expected and (revision is None or status_revision == revision):
             return status
         time.sleep(0.01)
     pytest.fail(f"后台配置状态未进入 {expected}（revision={revision}）")
@@ -61,9 +59,7 @@ async def _wait_for_config_apply_async(
             if expected == "applied"
             else status.get("requested_revision")
         )
-        if status["state"] == expected and (
-            revision is None or status_revision == revision
-        ):
+        if status["state"] == expected and (revision is None or status_revision == revision):
             return status
         await asyncio.sleep(0.01)
     pytest.fail(f"后台配置状态未进入 {expected}（revision={revision}）")
@@ -232,6 +228,9 @@ def test_discovery_config_response_caps_candidate_eval_concurrency_at_three() ->
     assert DiscoveryConfigOut(candidate_eval_concurrency=3).candidate_eval_concurrency == 3
     with pytest.raises(ValidationError):
         DiscoveryConfigOut(candidate_eval_concurrency=4)
+    assert DiscoveryConfigOut(keyword_digest_grace_hours=0).keyword_digest_grace_hours == 0
+    with pytest.raises(ValidationError):
+        DiscoveryConfigOut(keyword_digest_grace_hours=169)
 
 
 def test_discovery_config_response_defaults_to_hybrid_with_visual_features_off() -> None:
@@ -595,6 +594,66 @@ def test_api_candidate_supply_callback_uses_quota_aware_supply_wave(monkeypatch,
 
     assert calls == ["candidate_supply"]
     assert result == {"supply_productive": True, "supply_progress_count": 2}
+
+
+@pytest.mark.asyncio
+async def test_copy_ready_target_clamps_and_rebinds_provider_on_rebuild(tmp_path) -> None:
+    from openbiliclaw.api.runtime_context import build_runtime_context
+    from openbiliclaw.config import Config
+
+    initial = Config(data_dir=str(tmp_path / "data"))
+    initial.llm.default_provider = "ollama"
+    initial.llm.ollama.model = "llama3"
+    initial.scheduler.pool_target_count = 10
+    initial.scheduler.copy_ready_target_count = 25
+    initial.soul.preference_prompt_view = "compact-v1"
+    initial.soul.awareness_prompt_view = "legacy"
+    initial.soul.insight_prompt_view = "compact-v1"
+    ctx = build_runtime_context(initial)
+    for index in range(4):
+        ctx.database.cache_content(
+            f"BVCOPYREBUILD{index}",
+            title=f"pending copy {index}",
+            source="search",
+            relevance_score=0.9,
+            style_key="tutorial",
+            topic_group=f"copy-rebuild-{index}",
+        )
+
+    old_engine = ctx.recommendation_engine
+    old_soul_engine = ctx.soul_engine
+    old_coordinator = ctx.runtime_controller.expression_copy_coordinator
+    old_provider = old_coordinator.pending_count_provider
+    assert old_soul_engine._preference_prompt_view == "compact-v1"
+    assert old_soul_engine._awareness_prompt_view == "legacy"
+    assert old_soul_engine._insight_prompt_view == "compact-v1"
+    assert old_engine.copy_ready_target_count == 10
+    assert getattr(old_provider, "__self__", None) is old_engine
+    assert old_provider() == 4
+
+    reloaded = Config(data_dir=str(tmp_path / "data"))
+    reloaded.llm.default_provider = "ollama"
+    reloaded.llm.ollama.model = "llama3"
+    reloaded.scheduler.pool_target_count = 2
+    reloaded.scheduler.copy_ready_target_count = 8
+    reloaded.soul.preference_prompt_view = "legacy"
+    reloaded.soul.awareness_prompt_view = "compact-v1"
+    reloaded.soul.insight_prompt_view = "legacy"
+    await ctx.rebuild_from_config(reloaded)
+
+    new_engine = ctx.recommendation_engine
+    new_soul_engine = ctx.soul_engine
+    new_coordinator = ctx.runtime_controller.expression_copy_coordinator
+    new_provider = new_coordinator.pending_count_provider
+    assert new_engine is not old_engine
+    assert new_soul_engine is not old_soul_engine
+    assert new_soul_engine._preference_prompt_view == "legacy"
+    assert new_soul_engine._awareness_prompt_view == "compact-v1"
+    assert new_soul_engine._insight_prompt_view == "legacy"
+    assert new_coordinator is not old_coordinator
+    assert new_engine.copy_ready_target_count == 2
+    assert getattr(new_provider, "__self__", None) is new_engine
+    assert new_provider() == 2
 
 
 @pytest.mark.asyncio
@@ -2647,6 +2706,9 @@ class TestBackendAPI:
                 self.llm = llm
                 self.database = database
                 self.task_registry = task_registry
+
+            def count_pending_expression_copy_demand(self) -> int:
+                return 0
 
         class FakeRuntimeController:
             def __init__(self, **kwargs) -> None:
@@ -14983,6 +15045,63 @@ class TestEmbeddingAndCompatProviderE2E:
         expected = 24 if field == "source_incremental_hours" else None
         assert getattr(cfg.scheduler, field) == expected
 
+    def test_copy_ready_target_round_trips_through_config_api(self, monkeypatch, tmp_path) -> None:
+        from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig
+
+        cfg = Config(llm=LLMConfig(openai=LLMProviderConfig(api_key="sk-openai")))
+        client = self._make_client(monkeypatch, tmp_path, cfg)
+
+        initial = client.get("/api/config")
+        updated = client.put(
+            "/api/config",
+            json={"scheduler": {"copy_ready_target_count": 47}},
+        )
+
+        assert initial.status_code == 200
+        assert initial.json()["scheduler"]["copy_ready_target_count"] == 90
+        assert updated.status_code == 202
+        assert updated.json()["config"]["scheduler"]["copy_ready_target_count"] == 47
+        assert cfg.scheduler.copy_ready_target_count == 47
+
+    def test_task_scoped_cognition_views_round_trip_through_config_api(
+        self,
+        monkeypatch,
+        tmp_path,
+    ) -> None:
+        from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig
+
+        cfg = Config(llm=LLMConfig(openai=LLMProviderConfig(api_key="sk-openai")))
+        client = self._make_client(monkeypatch, tmp_path, cfg)
+
+        initial = client.get("/api/config")
+        updated = client.put(
+            "/api/config",
+            json={
+                "soul": {
+                    "preference_prompt_view": "compact-v1",
+                    "awareness_prompt_view": "legacy",
+                    "insight_prompt_view": "compact-v1",
+                }
+            },
+        )
+
+        assert initial.status_code == 200
+        initial_soul = initial.json()["soul"]
+        assert initial_soul["preference_prompt_view"] == "legacy"
+        assert initial_soul["awareness_prompt_view"] == "compact-v1"
+        assert initial_soul["insight_prompt_view"] == "legacy"
+        assert "cognition_prompt_view" not in initial_soul
+        assert updated.status_code == 202
+        updated_soul = updated.json()["config"]["soul"]
+        assert updated_soul["preference_prompt_view"] == "compact-v1"
+        assert updated_soul["awareness_prompt_view"] == "legacy"
+        assert updated_soul["insight_prompt_view"] == "compact-v1"
+        assert cfg.soul.preference_prompt_view == "compact-v1"
+        assert cfg.soul.awareness_prompt_view == "legacy"
+        assert cfg.soul.insight_prompt_view == "compact-v1"
+        rendered = (tmp_path / "config.toml").read_text(encoding="utf-8")
+        assert "cognition_prompt_view" not in rendered
+
     @pytest.mark.parametrize(("raw_bool", "bad_grace"), [("true", -1), ("on", 0), ("true", "abc")])
     def test_put_config_updates_scheduler_pause_on_extension_disconnect(
         self,
@@ -19553,6 +19672,22 @@ class TestKeywordGenerationModeWrite:
         assert response.status_code == 202, response.text
         assert cfg.discovery.inspiration_search_enabled is False
         assert cfg.discovery.inspiration_replace_merged_keywords is False
+
+    def test_put_config_persists_keyword_digest_grace_hours(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:
+        cfg = self._valid_config()
+        client, config_path = self._client(monkeypatch, tmp_path, cfg)
+
+        response = client.put(
+            "/api/config",
+            json={"discovery": {"keyword_digest_grace_hours": 0}},
+        )
+
+        assert response.status_code == 202, response.text
+        assert cfg.discovery.keyword_digest_grace_hours == 0
+        assert "keyword_digest_grace_hours = 0" in config_path.read_text(encoding="utf-8")
+        assert response.json()["config"]["discovery"]["keyword_digest_grace_hours"] == 0
 
 
 # ---------------------------------------------------------------------------

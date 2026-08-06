@@ -35,6 +35,7 @@
 | 自动格式迁移 | ✅ | `from_legacy()` 支持将 v1 flat SoulProfile 自动迁移到 v2 OnionProfile，SoulEngine 透明处理版本升级 |
 | SoulEngine.analyze_events() | ✅ | 事件 → PreferenceAnalyzer → 偏好层更新；v0.3.162+ 新增可选 `progress_callback: Callable[[int, int], Awaitable[None]]`（透传给 `PreferenceAnalyzer.analyze_events`），分片路径每完成一个 chunk 回调一次 `(done, total)`（并发 gather 下 done 仍严格递增）、单发路径回调一次 `(1, 1)`；回调异常吞掉 log WARNING，观测者绝不影响分析结果，也不触碰任何 prompt 构造 / 分片方式 / 序列化（prompt-cache 约定不变）。guided init 阶段 2 用它驱动 GUI 分片进度与 CLI 逐批打印 |
 | SoulEngine module overrides | ✅ | 构造时可接收 `module_overrides` 并注入内部 `LLMService`，确保 preference / awareness / insight / profile_builder / speculator / dialogue_insight 都遵循 `[llm.soul]` 路由 |
+| Task-scoped cognition prompt rollout（2026-08-06） | ✅ | `SoulEngine` 分别接收 `preference_prompt_view` / `awareness_prompt_view` / `insight_prompt_view`；默认 `legacy / compact-v1 / legacy`。SenseTime 真回放实际覆盖的是 `build_awareness_with_confusions_prompt` / `soul.awareness_confusions`，所以 AwarenessAnalyzer 明确拆成两个 seam：普通 `analyze()` / `soul.awareness` 固定 `legacy`，只有 `analyze_with_confusions()` 获得 `awareness_prompt_view`。不存在聚合 full-compact 构造参数；replay 的显式双臂不受生产默认影响，artifact 用任务名 `awareness_confusions` 避免误称整个 Awareness 已放行 |
 | PreferenceAnalyzer | ✅ | LLM structured extraction + 合并 + 衰减；偏好分析 system prompt 注入 `CATEGORY_VOCAB`（静态常量、缓存安全），代码侧在 `(name, category)` 合并键生成前执行 `resolve_category()`：词表外 → embedding 最近邻（≥0.55）→「其他」，任何路径都不会把词表外一级分类写入 preference 层；v0.3.x `satisfaction_filter_enabled=True` 默认开启，构 prompt 前会丢掉 `quick_exit` 等被动 negative 事件，保留 positive + neutral + unknown / NULL；显式 `dislike` / `thumbs_down` 负反馈会保留为 disliked_topics / 风格避让证据；偏好分析调用前有 prompt 预算保护，超长 chunk 会递归二分，单条超长事件会 compact，`n_keep >= n_ctx` / `context length` 等上下文错误会用更小 chunk 重试；chunked 分析遇到 LLM 拒答 / 非 JSON 时会对单条事件追加 title / URL / source-only 安全压缩重试，避免长网页 context 触发安全拒答后直接丢失该条画像信号；偏好归一化对 LLM 输出做 schema 校验（`_normalize_style` / `_normalize_context_dict` / `_finalize_taste`）——`preferred_duration`(short/medium/long) / `preferred_pace`(fast/moderate/slow) 越界重置为 ""、非数值口味字段与 `exploration_openness` 回落字段默认 0.5（合法字面 0 保留）、数值 clamp 到 [0,1]、context 占位符（unknown/none/n/a/未知）清空，任一字段被纠偏即打一行列出字段名的 WARNING（避免画像面板静默全 unknown/0%）|
 | Init 认知草稿落库（2026-07-26+） | ✅ | `analyze_events` 在偏好落盘后调 `_persist_init_cognition_drafts`，把 `_init_cognition_context` 的觉察/洞察经与常规认知**同一条 merge 路径**写入 `awareness.json` / `insight.json`（去重、生命周期、`user_verdict` 语义一致）。觉察挂本轮 init 记入事件账本的真实 event id（上限 `_INIT_DRAFT_EVIDENCE_CAP=300`）并标 `source_event_ids_approximate=True`——模型是按轮归属而非按条，不假装精确。洞察一律 `validated=False` / `user_verdict=""`（是待确认的假设，不是结论）。落库记 `init_cognition_persist` 台账；整段 best-effort，失败只 WARNING 不影响 init。**动机**：草稿此前只影响首份画像随即丢弃，加上 init 历史当时不入事件表，认知循环连重新提炼的素材都没有，导致全新装机后「待聊确认」是空的 |
 | 收藏作为独立行进画像（2026-07-26+） | ✅ | `build_initial_profile` 收到的 `combined_history` 里每条收藏各自成行（`event_type="favorite"`），不再塌成 `[收藏夹汇总]` 一行。`event_type` 承重：强信号权重 3.0 + 采样 40% 预留份额 + 语境渲染成「收藏了」；`_history_timestamp` 读 `fav_time` 让收藏参与时间分层。**动机**：旧实现里 `_favorites` 列表写入了却无人读取，`_summarize_history` 只取汇总句，于是用户主动收藏的内容在画像里一个标题都不可见 |
@@ -707,6 +708,16 @@ active 池会做两层多样性保护：词面 / specifics 的 novelty guard 阻
 一起喂给 LLM。
 
 所以可以把它们理解为：**觉察层和洞察层不是更新闸门，而是画像重建时的“叙述素材层”**。它们决定画像写得是否更像“这个人怎么理解世界”，而不是只像一堆兴趣标签。
+
+#### 认知调用的有界输入与持久历史边界
+
+`PreferenceAnalyzer` 的自动预算回退不再用“完整请求总字符 × 事件比例”估算分片。完整请求里旧 preference 可能很大，但独立 chunk 请求按既有合并契约传 `existing_preference={}`；旧估算会因此把本可一次发送的事件误拆成多次。现在自动路径从每个剩余事件 offset 使用生产 prompt builder 渲染独立请求，并以二分查找贪心装入不超过 `max_prompt_chars` 的最大当前前缀；因此后段局部超长事件只由既有单条 compact recovery 处理，不会迫使其后的短事件沿用第一段固定宽度而产生额外调用。显式 `event_chunk_size`、provider 限流重试和 chunk 结果合并语义不变。
+
+`CognitionCycle._run_insight()` 继续读取、合并并保存完整 `insight.json`，只对本轮 LLM prompt 建一个最多 40 条的确定性视图。选择器先为最新 8 条和最近 8 条 `validated` / `user_verdict` 锚点保底，再分别给当前相关性 16 个槽、重要性/多样性 8 个槽；重叠或不足的配额流入统一加权补位。总分由当前觉察/画像相关性 35%、源索引新近性 25%、用户裁决 20%、置信度/证据 15%、重复支持 5% 组成，不调用 embedding 或额外模型。
+
+文本先做 NFKC、英文词/CJK bigram 的 provider-independent 特征化。同一 confirmed/rejected/unjudged 状态的近重复假设只竞争一个 **prompt 槽**，不同状态永不归并，避免新重述吞掉旧确认或否定；最终仍恢复原存储顺序。模型新输出始终与**完整历史**执行 `merge_insights()`，选择器不改写、摘要或删除持久行；任何 legacy 文本令选择器异常时，立即退回 Phase 3 的「最新 20 + judged 20」有界视图，不阻断 cognition cycle，也不会丢 verdict。
+
+这两项都是 provider/tokenizer 无关的请求形状优化：不修改 system prompt、输出 schema、reasoning、max token ceiling 或保存格式。历史基线由 `scripts/replay_token_diet_phase3.py` 保持固定选择器复现；`scripts/replay_weighted_insight_context.py` 对固定窗口 A/A/A、加权窗口 B 和完整历史 F 做隐私安全真实门，只写 hash、计数、usage、匿名结构质量与 route，不持久化事件、画像、prompt、模型正文、URL 或凭据。2026-08-06 的 442 条生产快照中，加权视图保留 40 条（其中 24 条在固定窗口外），完整 prompt `48523 → 27725` provider token，节省 `42.86%`；相对固定 20 条只增加 `3.75%` prompt token。最终 B 为 0 repair、9/9 结构有效、0 重复，置信度/平均证据漂移均落在 A/A 噪声内，完整历史 merge 后仍为 444 条。
 
 ### 6. 画像重建时，LLM 实际拿到什么
 

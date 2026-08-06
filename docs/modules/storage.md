@@ -41,6 +41,7 @@
 | 换批读写隔离 | ✅ | `PoolServeSnapshot` 在专属单线程 serve worker 的一次只读事务中统一读取 readiness、候选、平台补位、持久化已看账本和 curator 信号；同一快照只物化一次 `seen_items`，并按账本最新 event id 缓存结果，写入新浏览事件后自动失效。`persist_pool_serve_async()` 用另一条短事务原子写入 recommendation + shown。serve 与 maintenance 使用不同 executor、不同 SQLite 连接，不把共享 `Database.conn` 直接跨线程并发访问。 |
 | 八平台来源族归一化 | ✅ | `sources.platforms` 以可枚举规则统一 Bilibili、小红书、抖音、YouTube、X、知乎、Reddit、Bangumi 的别名、策略前缀和 URL host；pool accounting、已看身份与 URL 推断共用同一口径。 |
 | discovery 待评估池 | ✅ | `discovery_candidates` 支持 mixed-source enqueue / claim / evaluation / admission，并持久化 `claim_token`、`score_threshold`、`eval_attempts` 与 batch 级 `batch_eval_attempts`；stale-sensitive 完成和释放都匹配 `id + status + claim_token`。 |
+| evaluator prefilter shadow 审计 | ✅ | `evaluator_prefilter_shadow_audit` 用随机 decision id 连接预过滤决策与最终原始 LLM score / admission 结果；只保存 identity hash、类别、数值和 digest，不保存标题、URL、正文、prompt、画像文本或 provider response。每次 insert 同时执行 30 天和 20,000 行双重 retention；任何写入/回填失败由 discovery fail-open，并以 incomplete telemetry 阻断 enforce gate。 |
 | discovery 历史候选查询 | ✅ | `get_existing_discovery_candidate_keys()` 与 `get_existing_content_cache_ids()` 支持 pipeline 在 enqueue 前过滤历史候选和已缓存内容，避免重复 raw 占住 Evo 前供给窗口。 |
 | discovery 状态恢复 | ✅ | 启动初始化会释放过期 `evaluating` 行；terminal 状态有 status guard，避免 stale update 改写 cached / rejected 结果。 |
 | discovery keyword store | ✅ | `discovery_keywords` 用 `keyword_kind` 区分常规 search 词与 explore 词；默认 `regular`，`explore` 词只供 `ExploreStrategy` 专用 claim，不会被普通 B 站 search 消费。`history_keywords()` 把带 `used_at` 的零产出/全重复 `expired` 词保留在近期冷却内，`recycle_oldest_used(min_age_hours=...)` 只回收超过窗口的历史词；`retire_duplicate_only_keywords()` 接收候选预过滤的真实重复反馈并立即退役无新身份的词。`requeue_keyword_after_transient_failure()` 仍可把 claimed / executing 词无损退回 pending、清理执行时间且不增加 attempts，供平台风控等瞬时故障重试。 |
@@ -377,6 +378,20 @@ known_content_ids = db.get_existing_content_cache_ids(["BV1xx411c7mD"])
 - `mark_discovery_candidate_cached()` / `reject_discovery_candidate(..., status=...)` 只改写 `evaluating` / `evaluated` 行；terminal rows 不会被 stale caller 复活或覆盖。常见 rejection status 包括 `rejected_low_score`、`rejected_duplicate`、`rejected_cache_admission`、`rejected_recently_viewed`、`rejected_franchise_quota`。
 - `count_discovery_candidates_by_status()` 与 `count_discovery_candidates_by_source_status()` 用于诊断待评估池生命周期分布。
 - `count_pool_readiness()["evaluated_pending"]` 是 `discovery_candidates(status='evaluated')` 的 durable 数量；`admitted_pending_copy` 与 `get_pool_candidates_needing_copy()` 共用 `_load_admitted_pending_copy_rows_on()`，不会用宽泛的 `pending` 差值推算。
+
+### Evaluator Prefilter Shadow Audit
+
+```python
+inserted = db.record_prefilter_shadow_decisions(decision_records)
+updated = db.complete_prefilter_shadow_decisions(outcome_records)
+rows = db.query_prefilter_shadow_audit()
+counts = db.prefilter_shadow_audit_counts()
+```
+
+- `record_prefilter_shadow_decisions()` 在落库前拒绝非 SHA-256 candidate identity、未净化平台/上下文、非 digest namespace/profile 和非法数值，避免调用方把原始候选或画像误写进审计表。
+- `complete_prefilter_shadow_decisions()` 只按随机 `decision_id` 回填一次，并校验 `admission_result == (llm_score >= admission_threshold)`；进程在两步之间退出，或 provider / parse 没有产生 production-valid raw score，都会留下 incomplete row，gate 的 telemetry coverage 因而不能静默达到 100%。产品路径为兼容性生成的 synthetic 0 不进入该表。
+- retention 常量来自 Phase 2 多日 shadow 校准窗口：30 天保证真实波次可跨日分层，20,000 行 ceiling 在 evaluator 90 条 hard cap 下仍覆盖 220 轮以上，同时为长期 daemon 提供与流量无关的硬上界。
+- `query_prefilter_shadow_audit()` 只返回 privacy-safe 列；只读 gate 命令在 SQLite read transaction 中冻结当前最大 audit id，输出聚合 count/recall/strata/fail-open 结果，不初始化数据库、不调用 provider、也不写配置。
 - `get_existing_discovery_candidate_keys(keys)` 返回任意 lifecycle status 下已经出现过的 `candidate_key`；`get_existing_content_cache_ids(ids)` 返回已经进入正式 `content_cache` 的 BVID / `content_id`。两者用于 `DiscoveryCandidatePipeline` 在 enqueue 前过滤历史重复，而不是等 SQLite `INSERT OR IGNORE` 静默吞掉后才发现供给不足。
 
 ### Bangumi Producer Ledger
@@ -409,6 +424,14 @@ db.insert_pending_keywords(
 
 regular = db.claim_keywords("bilibili", 5)
 explore = db.claim_keywords("bilibili", 5, keyword_kind="explore")
+grace_ledger = db.reconcile_pending_keyword_digests(
+    "bilibili",
+    current_digest,
+    grace_hours=24,
+    max_pending=30,
+    blocked_terms=["明确避雷主题"],
+)
+pending_all_digests = db.count_pending_keywords_all_digests("bilibili")
 coverage = db.get_keyword_interest_coverage_snapshot()
 db.record_keyword_interest_selection(["独立游戏叙事"], query_kind="regular")
 stats = db.get_keyword_cohort_stats(window_days=14)
@@ -422,6 +445,8 @@ db.migrate_keyword_interest_labels({"AI 工具": "AI 工程化"})
 - `keyword_kind="explore"` 是 `KeywordPlanner` 写入的 B 站探索 query 候选池，只有 `ExploreStrategy` 的 planner-backed 分支会 claim。
 - 在途唯一约束包含 `(platform, keyword, profile_kw_digest, keyword_kind)`；同一个 query 可分别作为 regular 与 explore 生命周期存在，互不抢占。
 - `history_keywords()` 与 `recycle_oldest_used()` 也默认只读 `regular` 池；需要查看 / 回收探索池时必须显式传 `keyword_kind="explore"`。
+- `reconcile_pending_keyword_digests()` 在短 `BEGIN IMMEDIATE` 事务内整理指定平台和 kind 的 pending 库存：当前 digest 行优先；旧 digest 行按“宽限时间 → blocked term → 归一化重复 → 总 cap”顺序保留或过期。保留行不重写 `profile_kw_digest`、创建时间或 inspiration/axis/interest 等溯源；只触碰 `pending`，不会复活或改写 `claimed/executing/used/failed/expired`。返回值只有 `current/reused/expired_aged/expired_blocked/expired_excess` 聚合计数。
+- `count_pending_keywords_all_digests()` 是完成上述整理后的水位口径；旧的 `count_pending_keywords(platform, digest)` 保留给 grace=0 与能力缺失时的硬过期回退。`history_keywords(..., include_pending=True)` 只由成功完成 grace 整理的 regular planner 使用，防止尚可领取的旧库存被同族新词重复生成；默认仍为 `False`。
 - `pending → claimed → used/failed/executing` 状态机保持不变；租约回收和失败回滚对两类 keyword 都生效。平台瞬时故障可通过 `requeue_keyword_after_transient_failure(keyword_id)` 把 claimed / executing 原子退回 pending，且不消耗 attempts；当前 XHS `rate_limited` 回调使用该入口。
 - `metadata_by_keyword` 是可选溯源字段，不参与唯一约束；同一个 in-flight query 的去重仍只看 `(platform, keyword, profile_kw_digest, keyword_kind)`。当前支持记录 `aspect_id`、`inspiration_backend`、`inspiration_id`、`inspiration_terms`、`expansion_id`、`angle_id`、`query_kind`、`source_domain`、`source_interest`、`grounding_source`、`generation_reason` 和 `normalized_keyword` 等字段，供 query 丰富度诊断和后续反馈学习使用。
 - `search_local_inspiration_evidence(query, limit=..., lookback_days=...)` 是 local-first inspiration grounding 的 Phase 1 DAO：它只读 `content_cache`，用 CJK 2-gram / token overlap 做相关性筛选，并在 B站 legacy 行缺少 `content_url` 时用 `bvid` 合成视频 URL；返回值只作为灵感 evidence，不写候选池。

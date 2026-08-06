@@ -858,6 +858,7 @@ TOML 与显式环境变量覆盖在构造 `SchedulerConfig` 前统一归一为�
 | `claim_lease_minutes` | int | `10` | 领取租约（分钟）：`claimed`/`executing` 超过这个时长未变会被回收成 `pending`，防 loop / 任务崩溃泄漏在途行。小于 `1` 时回退默认值 |
 | `planner_poll_seconds` | int | `120` | 关键词规划器轮询间隔（秒）；空闲轮询近似零成本。小于 `1` 时回退默认值 |
 | `plan_ttl_hours` | int | `12` | 兜底失效（小时）：即便画像 `profile_kw_digest` 未变，`pending` 关键词超过这个时长也会过期；同画像、同平台需求块、同池子避让提示的 merged keyword 生成结果也按这个 TTL 在进程内复用。小于 `1` 时回退默认值 |
+| `keyword_digest_grace_hours` | int | `24` | 画像 digest 变化后，最近且安全的旧 `regular/pending` 关键词可继续领取的宽限时长，合法范围 `0..168`。整理时当前 digest 优先；旧词命中显式 dislike / 平台 avoid、过龄、重复或超过动态高水位都会过期，原 digest 与生成溯源不会改写。`0` 恢复旧版“digest 一变即硬过期”，也是独立回滚开关。GET/PUT 配置 API、热重载、CLI/OpenClaw 构造与 TOML round-trip 均透传该值 |
 | `admission_min_score` | float | `0.60` | 普通推荐池统一入池最低分。候选行 / raw payload 显式 `score_threshold` 只能抬高门槛；来源标签如 `admission_policy="observed"` 不能绕过该分数门。探索类策略固定使用 `0.58`，平台 / 插件来源不能获得特权。支持范围为 `[0.5, 1]`，非法值回退默认值；下界与 evaluator 的 reason 省略契约绑定，禁止低于 0.5 的无 reason 候选入池 |
 | `eval_prefilter_mode` | string | `"shadow"` | discovery evaluator 的 embedding 预过滤模式：`"off"` 不计算相似度；`"shadow"` 只记录 `prefilter-shadow` would-filter 日志但仍送 LLM；`"enforce"` 对 top-256 recall-visible 兴趣与 compact 兴趣域均低相似的非 explore 候选缓存低分并跳过 LLM。余弦值先夹到 `0..1`，单批过滤超过 50% 时 fail-open。非法值会被运行时配置校验拦截；OpenClaw、GET/PUT 配置接口与 daemon 热重载均透传该字段。上线时先用 shadow 观察 would-filter 中是否仍有高于 `admission_min_score` 的候选，再切 enforce |
 | `candidate_eval_concurrency` | int | `3` | 候选 LLM 评估的期望 worker 数，合法范围 `1..3`；每个 worker 最多 30 条，因此总 raw 在途上限为 90。超出范围的手工 TOML / API 值按本段既有整型规则回退默认 `3`。有效值为 `min(本值, max(1, llm.concurrency-1))`，为聊天等交互保留一个全局 LLM 槽位；插件与桌面 Web 设置页可修改，CLI `config-show` 自动显示。移动 Web 没有配置面板，不适用。 |
@@ -951,13 +952,22 @@ TOML 与显式环境变量覆盖在构造 `SchedulerConfig` 前统一归一为�
 |----|------|--------|------|
 | `db_path` | string | `"data/openbiliclaw.db"` | SQLite 数据库路径 |
 
-### `[soul]` (v0.3.176+，态势门控)
+### `[soul]`（态势门控与 task-scoped cognition rollout）
 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
+| `preference_prompt_view` | string | `"legacy"` | Preference prompt 的独立输入视图，只允许 `legacy` / `compact-v1`。2026-08-06 SenseTime task gate 未放行 Preference compact，因此默认保留逐字节回滚路径 |
+| `awareness_prompt_view` | string | `"compact-v1"` | 仅控制 `AwarenessAnalyzer.analyze_with_confusions()` / `soul.awareness_confusions` 的输入视图，只允许 `legacy` / `compact-v1`。2026-08-06 SenseTime token + quality gate 只放行了该 caller，因此默认启用；普通 `analyze()` / `soul.awareness` 固定为 `legacy`，不继承这个值 |
+| `insight_prompt_view` | string | `"legacy"` | Insight prompt 的独立输入视图，只允许 `legacy` / `compact-v1`。Insight 尚无预声明 token 阈值且本轮未获放行，默认保留 `legacy` |
 | `posture_gate_mode` | string | `"shadow"` | 深层写入一致性门控（认知画像流水线 Phase 3）。`shadow`=判定异步旁路、**零延迟不阻塞原写入**，判定只落台账（`shadow_accept`/`shadow_downgrade`/`shadow_reject`，LLM 异常记 `shadow_error`）；`enforce`=写入前同步判定，reject/downgrade 拦截深层写入（downgrade 转为待验证假设），异常/解析失败保守 downgrade；`off`=完全旁路、与未接门控前逐字节一致。门控作用面仅三处：对话 goal/value/state 深层候选、管线 VALUES/CORE 层、soul 整份重建（interest 快线与 ROLE 层永不过门控） |
 | `posture_gate_force_enforce` | bool | `false` | 逃生门。切到 `enforce` 需满足 save-time 三条件（最早有效 shadow 判定距今 ≥14 天 **且** 近 14 天有效判定 ≥10 条 **且** 近 7 天 ≥1 条），否则保存被 blocking 拒绝。置 `true` 无条件放行——**有风险**：门控尚未校准即启用可能误拦或误放深层写入 |
 | `topic_lifecycle_serialization` | string | `"off"` | topic 状态机的 archived 序列化排除开关（认知画像流水线 Phase 4，本版**唯一最小消费**）。`off`（默认）时 `build_profile_summary` 与未接状态机前**逐字节一致**（回放门）；`on` 时把 `archived` 状态的 topic 排出 LLM 可见画像（domain/tag 两级）。规范 owner 是 `soul.profile_views.set_topic_lifecycle_serialization`；进程启动时由 `create_app` / CLI 设置，旧 `discovery.strategies._utils` 路径仅保留兼容 re-export。仅 `off`/`on` 两值，其余落默认 `off` |
+
+三个 prompt view 从 TOML、`GET/PUT /api/config`、CLI runtime、API 热重载与 OpenClaw
+bootstrap 一路独立透传到 `SoulEngine`；其中 Awareness 值只进入 with-confusions seam，普通
+Awareness seam 固定为 `legacy`。未发布的聚合字段
+`soul.cognition_prompt_view` 已删除且不作为兼容别名读取，避免一次配置误把三个任务全部
+切到 compact；replay 仍显式渲染 A/B 双臂，不读取这些生产默认值。
 
 ### `[soul.preference]`
 

@@ -375,6 +375,10 @@ discovery_cron = "0 */8 * * *"
 # Keep at least this many fresh candidates ready in the discovery pool
 # Allowed range: 1..600; each single refresh will backfill at most 60
 pool_target_count = 300
+# Number of candidates kept immediately serveable with validated recommendation
+# copy. 0 restores legacy behaviour and drains copy for the entire candidate pool.
+# Runtime clamps this high watermark to pool_target_count.
+copy_ready_target_count = 90
 # Low-frequency account sync interval for history / favorites / following
 account_sync_interval_hours = 6
 # Extension-online periodic account bootstrap refresh. This only runs while
@@ -479,6 +483,9 @@ claim_lease_minutes = 10
 planner_poll_seconds = 120
 # 兜底失效（小时）：即便画像 digest 未变，pending 关键词超过这个时长也会过期。
 plan_ttl_hours = 12
+# 画像 digest 变化后，近期且未命中当前避雷主题的普通 pending 关键词可继续复用。
+# 合法范围 0-168 小时；设为 0 可恢复旧版“digest 一变立即过期”的行为。
+keyword_digest_grace_hours = 24
 # 统一推荐池入池最低分，合法范围 [0.5, 1]；低于 0.5 会回退 0.6。
 # 来源/插件 observed 标签不能绕过该门槛。
 admission_min_score = 0.6
@@ -588,6 +595,15 @@ aggregate_budget_mb = 500
 unmanaged_truncate_mb = 200
 # logs/ 目录里超过这个天数的 *unmanaged* 文件,启动时直接删除。设 0 关闭。
 unmanaged_max_age_days = 30
+
+[soul]
+# Provider-agnostic prompt projections roll out independently per task.
+# 2026-08-06 SenseTime replay passed only the awareness-with-confusions caller;
+# plain soul.awareness, Preference, and Insight remain on the byte-compatible
+# rollback path pending their own task-scoped quality gates.
+preference_prompt_view = "legacy"
+awareness_prompt_view = "compact-v1"
+insight_prompt_view = "legacy"
 
 [soul.preference]
 # v0.3.x event-satisfaction signal.

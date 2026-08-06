@@ -812,6 +812,9 @@ class RuntimeContext:
             memory=self.memory_manager,
             usage_recorder=new_usage_recorder,
             satisfaction_filter_enabled=satisfaction_filter_enabled,
+            preference_prompt_view=str(getattr(soul_cfg, "preference_prompt_view", "legacy")),
+            awareness_prompt_view=str(getattr(soul_cfg, "awareness_prompt_view", "compact-v1")),
+            insight_prompt_view=str(getattr(soul_cfg, "insight_prompt_view", "legacy")),
             posture_gate_mode=str(getattr(soul_cfg, "posture_gate_mode", "shadow")),
             posture_gate_force_enforce=bool(getattr(soul_cfg, "posture_gate_force_enforce", False)),
             module_overrides=new_module_overrides,
@@ -894,6 +897,14 @@ class RuntimeContext:
             info = state.get("xhs_self_info")
             return info if isinstance(info, dict) else None
 
+        configured_copy_target = max(
+            0,
+            int(getattr(new_config.scheduler, "copy_ready_target_count", 0) or 0),
+        )
+        effective_copy_target = min(
+            configured_copy_target,
+            max(0, int(getattr(new_config.scheduler, "pool_target_count", 0) or 0)),
+        )
         new_recommendation_engine = RecommendationEngine(
             llm=new_llm_service,
             database=self.database,
@@ -901,6 +912,7 @@ class RuntimeContext:
             embedding_service=new_embedding_service,
             task_registry=self.task_registry,
             xhs_self_info_provider=_xhs_self_info_provider,
+            copy_ready_target_count=effective_copy_target,
             visual_profile_enabled=bool(
                 getattr(getattr(new_config, "discovery", None), "visual_profile_enabled", False)
             ),
@@ -1371,7 +1383,7 @@ class RuntimeContext:
             return int(completed)
 
         expression_coordinator = ExpressionCopyCoordinator(
-            pending_count_provider=lambda: int(_candidate_eval_snapshot().admitted_pending_copy),
+            pending_count_provider=new_recommendation_engine.count_pending_expression_copy_demand,
             drain_callback=_drain_expression_copy,
             safety_wake_seconds=float(
                 getattr(new_config.scheduler, "refresh_check_interval_seconds", 60)

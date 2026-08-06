@@ -82,6 +82,13 @@ _LLM_PROVIDER_DISPLAY_NAMES = {
 }
 _MIN_POOL_TARGET_COUNT = 1
 _MAX_POOL_TARGET_COUNT = 600
+# Copy-ready inventory is deliberately shallower than the 300-row candidate
+# pool: three complete 30-item expression batches keep several UI/CLI serves
+# warm while avoiding copy for rows that expire unseen. Recalibrate after a
+# provider/model swap or a material serve-size change (CLAUDE.md pitfall #3).
+_DEFAULT_COPY_READY_TARGET_COUNT = 90
+_MIN_COPY_READY_TARGET_COUNT = 0  # 0 restores legacy drain-the-whole-backlog mode.
+_MAX_COPY_READY_TARGET_COUNT = _MAX_POOL_TARGET_COUNT
 _DEFAULT_EVAL_MIN_BATCH_SIZE = 15
 _MIN_EVAL_MIN_BATCH_SIZE = 1
 _MAX_EVAL_MIN_BATCH_SIZE = 90
@@ -118,6 +125,7 @@ _DEFAULT_HISTORY_WINDOW_HOURS = 48
 _DEFAULT_CLAIM_LEASE_MINUTES = 10
 _DEFAULT_PLANNER_POLL_SECONDS = 120
 _DEFAULT_PLAN_TTL_HOURS = 12
+_DEFAULT_KEYWORD_DIGEST_GRACE_HOURS = 24
 # Phase-2 config collapse: these constants are the ``medium`` breadth tier
 # (the pre-collapse per-knob defaults, item-identical — a table-driven test
 # guards the equality so upgrading is zero behavior drift).
@@ -921,6 +929,7 @@ class SchedulerConfig:
     extension_disconnect_grace_seconds: int = _DEFAULT_EXTENSION_DISCONNECT_GRACE_SECONDS
     discovery_cron: str = "0 */8 * * *"
     pool_target_count: int = 300
+    copy_ready_target_count: int = _DEFAULT_COPY_READY_TARGET_COUNT
     pool_source_shares: dict[str, int] = field(
         default_factory=lambda: dict(_DEFAULT_POOL_SOURCE_SHARES)
     )
@@ -1027,6 +1036,9 @@ class DiscoveryConfig:
     # Plan staleness backstop: pending keywords older than this expire even if
     # the profile digest hasn't changed.
     plan_ttl_hours: int = _DEFAULT_PLAN_TTL_HOURS
+    # Recent safe regular keywords may survive profile-digest churn without
+    # losing their original generation provenance. 0 restores hard expiry.
+    keyword_digest_grace_hours: int = _DEFAULT_KEYWORD_DIGEST_GRACE_HOURS
     # Search-inspired query brainstorming stage. Default on in hybrid mode:
     # the merged keyword planner keeps running while the inspiration flow adds
     # grounded adjacent concepts and metadata-bearing keywords.
@@ -1355,6 +1367,7 @@ POSTURE_GATE_ENFORCE_RECENT_WINDOW_DAYS = 7
 POSTURE_GATE_ENFORCE_MIN_RECENT_COUNT = 1
 _POSTURE_GATE_MODES = frozenset({"shadow", "enforce", "off"})
 _TOPIC_LIFECYCLE_SERIALIZATION_MODES = frozenset({"off", "on"})
+_COGNITION_PROMPT_VIEW_MODES = frozenset({"legacy", "compact-v1"})
 
 
 @dataclass
@@ -1370,6 +1383,13 @@ class SoulConfig:
     """
 
     preference: SoulPreferenceConfig = field(default_factory=SoulPreferenceConfig)
+    # Provider-agnostic LLM input projections are rolled out independently per
+    # cognition task. ``legacy`` is the byte-for-byte rollback path;
+    # ``compact-v1`` removes internal event fields and duplicate profile
+    # subtrees while preserving the model-visible evidence contract.
+    preference_prompt_view: str = "legacy"
+    awareness_prompt_view: str = "compact-v1"
+    insight_prompt_view: str = "legacy"
     posture_gate_mode: str = "shadow"
     posture_gate_force_enforce: bool = False
     # Topic-lifecycle serialization (spec §Phase 4). ``off`` (default) keeps the
@@ -2068,6 +2088,15 @@ def _build_config(raw: dict[str, Any]) -> Config:
         soul_raw.get("preference", {}) if isinstance(soul_raw.get("preference"), dict) else {}
     )
     raw_gate_mode = str(soul_raw.get("posture_gate_mode", "shadow") or "shadow").strip().lower()
+    raw_preference_prompt_view = (
+        str(soul_raw.get("preference_prompt_view", "legacy") or "legacy").strip().lower()
+    )
+    raw_awareness_prompt_view = (
+        str(soul_raw.get("awareness_prompt_view", "compact-v1") or "compact-v1").strip().lower()
+    )
+    raw_insight_prompt_view = (
+        str(soul_raw.get("insight_prompt_view", "legacy") or "legacy").strip().lower()
+    )
     raw_lifecycle = (
         str(soul_raw.get("topic_lifecycle_serialization", "off") or "off").strip().lower()
     )
@@ -2077,6 +2106,9 @@ def _build_config(raw: dict[str, Any]) -> Config:
                 soul_preference_raw.get("satisfaction_filter_enabled", True)
             ),
         ),
+        preference_prompt_view=raw_preference_prompt_view,
+        awareness_prompt_view=raw_awareness_prompt_view,
+        insight_prompt_view=raw_insight_prompt_view,
         posture_gate_mode=raw_gate_mode if raw_gate_mode in _POSTURE_GATE_MODES else "shadow",
         posture_gate_force_enforce=bool(soul_raw.get("posture_gate_force_enforce", False)),
         topic_lifecycle_serialization=(
@@ -2152,6 +2184,12 @@ def _build_config(raw: dict[str, Any]) -> Config:
                         sched_raw.get("reddit_incremental_hours"),
                         default=None,
                         allow_none=True,
+                    ),
+                    "copy_ready_target_count": _normalize_scheduler_int(
+                        sched_raw.get("copy_ready_target_count"),
+                        default=_DEFAULT_COPY_READY_TARGET_COUNT,
+                        min_value=_MIN_COPY_READY_TARGET_COUNT,
+                        max_value=_MAX_COPY_READY_TARGET_COUNT,
                     ),
                     "refresh_check_interval_seconds": _normalize_scheduler_int(
                         sched_raw.get("refresh_check_interval_seconds"),
@@ -2365,6 +2403,12 @@ def _build_discovery(discovery_raw: dict[str, Any]) -> DiscoveryConfig:
             discovery_raw.get("plan_ttl_hours"),
             default=_DEFAULT_PLAN_TTL_HOURS,
             min_value=1,
+        ),
+        keyword_digest_grace_hours=_normalize_scheduler_int(
+            discovery_raw.get("keyword_digest_grace_hours"),
+            default=_DEFAULT_KEYWORD_DIGEST_GRACE_HOURS,
+            min_value=0,
+            max_value=168,
         ),
         inspiration_search_enabled=_coerce_bool(
             discovery_raw.get("inspiration_search_enabled"),
@@ -3417,6 +3461,23 @@ def _collect_config_issues(config: Config) -> list[ConfigIssue]:
             )
         )
 
+    for field_name in (
+        "preference_prompt_view",
+        "awareness_prompt_view",
+        "insight_prompt_view",
+    ):
+        raw_prompt_view = getattr(config.soul, field_name)
+        if str(raw_prompt_view or "").strip().lower() not in _COGNITION_PROMPT_VIEW_MODES:
+            issues.append(
+                ConfigIssue(
+                    field=f"soul.{field_name}",
+                    message=(
+                        f"不支持的 {field_name}: `{raw_prompt_view}`。仅支持: legacy, compact-v1。"
+                    ),
+                    severity="blocking",
+                )
+            )
+
     if (
         str(config.soul.topic_lifecycle_serialization or "").strip().lower()
         not in _TOPIC_LIFECYCLE_SERIALIZATION_MODES
@@ -3452,6 +3513,21 @@ def _collect_config_issues(config: Config) -> list[ConfigIssue]:
                     severity="blocking",
                 )
             )
+
+    if not (
+        _MIN_COPY_READY_TARGET_COUNT
+        <= config.scheduler.copy_ready_target_count
+        <= _MAX_COPY_READY_TARGET_COUNT
+    ):
+        issues.append(
+            ConfigIssue(
+                field="scheduler.copy_ready_target_count",
+                message=(
+                    "`scheduler.copy_ready_target_count` 必须在 "
+                    f"{_MIN_COPY_READY_TARGET_COUNT}..{_MAX_COPY_READY_TARGET_COUNT} 之间。"
+                ),
+            )
+        )
 
     if config.llm.instance_routing:
         issues.extend(_collect_llm_instance_routing_issues(config.llm))
@@ -4523,6 +4599,7 @@ def _render_config_toml(
             f"{config.scheduler.extension_disconnect_grace_seconds}",
             f"discovery_cron = {_toml_string(config.scheduler.discovery_cron)}",
             f"pool_target_count = {config.scheduler.pool_target_count}",
+            f"copy_ready_target_count = {config.scheduler.copy_ready_target_count}",
             f"account_sync_interval_hours = {config.scheduler.account_sync_interval_hours}",
             f"source_incremental_hours = {config.scheduler.source_incremental_hours}",
             *(
@@ -4626,6 +4703,7 @@ def _render_config_toml(
             f"claim_lease_minutes = {config.discovery.claim_lease_minutes}",
             f"planner_poll_seconds = {config.discovery.planner_poll_seconds}",
             f"plan_ttl_hours = {config.discovery.plan_ttl_hours}",
+            f"keyword_digest_grace_hours = {config.discovery.keyword_digest_grace_hours}",
             f"admission_min_score = {config.discovery.admission_min_score:g}",
             f"candidate_eval_concurrency = {config.discovery.candidate_eval_concurrency}",
             "inspiration_search_enabled = "
@@ -4675,6 +4753,11 @@ def _render_config_toml(
             f"unmanaged_max_age_days = {config.logging.unmanaged_max_age_days}",
             "",
             "[soul]",
+            "# Provider-agnostic cognition prompt views. Each task rolls out",
+            "# independently; legacy is the byte-compatible rollback path.",
+            f"preference_prompt_view = {_toml_string(config.soul.preference_prompt_view)}",
+            f"awareness_prompt_view = {_toml_string(config.soul.awareness_prompt_view)}",
+            f"insight_prompt_view = {_toml_string(config.soul.insight_prompt_view)}",
             "# Deep-write consistency gate (spec Phase 3). shadow = async",
             "# side-channel judging without blocking writes (default);",
             "# enforce = synchronous gate (savable only after >=14 days of",

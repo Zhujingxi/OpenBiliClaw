@@ -982,6 +982,9 @@ def test_build_openclaw_adapter_services_forwards_soul_engine_config_and_databas
     cfg.scheduler.feedback_batch_threshold = 6
     cfg.scheduler.unified_interest_line = True
     cfg.soul.preference.satisfaction_filter_enabled = False
+    cfg.soul.preference_prompt_view = "compact-v1"
+    cfg.soul.awareness_prompt_view = "legacy"
+    cfg.soul.insight_prompt_view = "compact-v1"
 
     captured: dict[str, object] = {}
 
@@ -1020,11 +1023,22 @@ def test_build_openclaw_adapter_services_forwards_soul_engine_config_and_databas
     assert captured["feedback_batch_threshold"] == 6
     assert captured["unified_interest_line"] is True
     assert captured["satisfaction_filter_enabled"] is False
+    assert captured["preference_prompt_view"] == "compact-v1"
+    assert captured["awareness_prompt_view"] == "legacy"
+    assert captured["insight_prompt_view"] == "compact-v1"
     memory = captured["memory"]
     assert captured["database"] is memory.database
 
 
-def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("configured_copy_target", "expected_copy_target"),
+    [(47, 30), (0, 0)],
+)
+def test_build_openclaw_adapter_services_reuses_shared_database(
+    monkeypatch,
+    configured_copy_target: int,
+    expected_copy_target: int,
+) -> None:
     import openbiliclaw.integrations.openclaw.bootstrap as bootstrap_module
 
     created_databases: list[object] = []
@@ -1097,6 +1111,7 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
         ) -> None:
             self.llm = llm
             self.database = database
+            self.kwargs = _extras
             self.pool_inventory_commit_callback = None
 
         def set_pool_inventory_commit_callback(self, callback) -> None:
@@ -1186,6 +1201,7 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
             enabled=True,
             pause_on_extension_disconnect=False,
             pool_target_count=30,
+            copy_ready_target_count=configured_copy_target,
             pool_source_shares={
                 "bilibili": 8,
                 "xiaohongshu": 3,
@@ -1277,6 +1293,9 @@ def test_build_openclaw_adapter_services_reuses_shared_database(monkeypatch) -> 
     assert services.llm_service.concurrency == 3
     assert services.discovery_engine.concurrency.llm_evaluation_concurrency == 2
     assert services.discovery_engine.eval_prefilter_mode == "enforce"
+    assert services.recommendation_engine.kwargs["copy_ready_target_count"] == (
+        expected_copy_target
+    )
     assert (
         services.llm_service.concurrency_gate is services.soul_engine.kwargs["llm_concurrency_gate"]
     )

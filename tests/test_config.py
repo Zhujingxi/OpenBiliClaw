@@ -160,6 +160,7 @@ class TestConfigDefaults:
         config = Config()
 
         assert config.scheduler.pool_target_count == 300
+        assert config.scheduler.copy_ready_target_count == 90
 
     def test_config_defaults_eval_batch_coalescing_fields(self) -> None:
         config = Config()
@@ -385,6 +386,59 @@ manage_ollama = true
         assert isinstance(config.soul, SoulConfig)
         assert isinstance(config.soul.preference, SoulPreferenceConfig)
         assert config.soul.preference.satisfaction_filter_enabled is True
+
+    def test_token_diet_runtime_controls_round_trip(self, tmp_path: Path) -> None:
+        cfg = Config()
+        cfg.scheduler.copy_ready_target_count = 47
+        cfg.soul.preference_prompt_view = "compact-v1"
+        cfg.soul.awareness_prompt_view = "legacy"
+        cfg.soul.insight_prompt_view = "compact-v1"
+        target = tmp_path / "config.toml"
+
+        save_config(cfg, target)
+        rendered = target.read_text(encoding="utf-8")
+        loaded = load_config(target)
+
+        assert "copy_ready_target_count = 47" in rendered
+        assert 'preference_prompt_view = "compact-v1"' in rendered
+        assert 'awareness_prompt_view = "legacy"' in rendered
+        assert 'insight_prompt_view = "compact-v1"' in rendered
+        assert "cognition_prompt_view" not in rendered
+        assert loaded.scheduler.copy_ready_target_count == 47
+        assert loaded.soul.preference_prompt_view == "compact-v1"
+        assert loaded.soul.awareness_prompt_view == "legacy"
+        assert loaded.soul.insight_prompt_view == "compact-v1"
+
+    def test_token_diet_runtime_control_defaults_only_enable_awareness(self) -> None:
+        cfg = Config()
+
+        assert cfg.soul.preference_prompt_view == "legacy"
+        assert cfg.soul.awareness_prompt_view == "compact-v1"
+        assert cfg.soul.insight_prompt_view == "legacy"
+
+    def test_token_diet_runtime_controls_reject_invalid_values(self) -> None:
+        from openbiliclaw.config import _collect_config_issues
+
+        cfg = Config()
+        cfg.scheduler.copy_ready_target_count = 601
+        cfg.soul.preference_prompt_view = "semantic-preference"
+        cfg.soul.awareness_prompt_view = "semantic-awareness"
+        cfg.soul.insight_prompt_view = "semantic-insight"
+
+        fields = {issue.field for issue in _collect_config_issues(cfg)}
+
+        assert "scheduler.copy_ready_target_count" in fields
+        assert "soul.preference_prompt_view" in fields
+        assert "soul.awareness_prompt_view" in fields
+        assert "soul.insight_prompt_view" in fields
+
+    def test_unpublished_global_cognition_prompt_view_is_not_a_compatibility_alias(self) -> None:
+        config = _build_config({"soul": {"cognition_prompt_view": "compact-v1"}})
+
+        assert config.soul.preference_prompt_view == "legacy"
+        assert config.soul.awareness_prompt_view == "compact-v1"
+        assert config.soul.insight_prompt_view == "legacy"
+        assert not hasattr(config.soul, "cognition_prompt_view")
 
     def test_soul_preference_satisfaction_filter_round_trips_false(self, tmp_path: Path) -> None:
         """save_config → load_config preserves an explicit opt-out."""
@@ -2515,6 +2569,7 @@ class TestDiscoveryConfig:
         assert config.discovery.claim_lease_minutes == 10
         assert config.discovery.planner_poll_seconds == 120
         assert config.discovery.plan_ttl_hours == 12
+        assert config.discovery.keyword_digest_grace_hours == 24
         assert config.discovery.admission_min_score == 0.60
         assert config.discovery.inspiration_search_enabled is True
         assert config.discovery.inspiration_replace_merged_keywords is False
@@ -2546,6 +2601,7 @@ class TestDiscoveryConfig:
         assert config.discovery.unified_keyword_planner_enabled is True
         assert config.discovery.kw_cache_high == 30
         assert config.discovery.plan_ttl_hours == 12
+        assert config.discovery.keyword_digest_grace_hours == 24
         assert config.discovery.admission_min_score == 0.60
         assert config.discovery.inspiration_search_enabled is True
         assert config.discovery.inspiration_replace_merged_keywords is False
@@ -2622,6 +2678,7 @@ history_window_hours = 72
 claim_lease_minutes = 15
 planner_poll_seconds = 90
 plan_ttl_hours = 6
+keyword_digest_grace_hours = 36
 admission_min_score = 0.72
 inspiration_search_enabled = true
 inspiration_replace_merged_keywords = true
@@ -2650,6 +2707,7 @@ multimodal_image_timeout_seconds = 10
         assert config.discovery.claim_lease_minutes == 15
         assert config.discovery.planner_poll_seconds == 90
         assert config.discovery.plan_ttl_hours == 6
+        assert config.discovery.keyword_digest_grace_hours == 36
         assert config.discovery.admission_min_score == 0.72
         assert config.discovery.inspiration_search_enabled is True
         assert config.discovery.inspiration_replace_merged_keywords is True
@@ -2716,6 +2774,8 @@ multimodal_image_timeout_seconds = 10
             ("claim_lease_minutes", "0", 10),
             ("planner_poll_seconds", '"nope"', 120),
             ("plan_ttl_hours", "0", 12),
+            ("keyword_digest_grace_hours", "-1", 24),
+            ("keyword_digest_grace_hours", "169", 24),
             ("candidate_eval_concurrency", "0", 3),
             ("candidate_eval_concurrency", "4", 3),
             ("multimodal_batch_size", "0", 8),
@@ -2850,6 +2910,7 @@ eval_prefilter_mode = "  Shadow  "
         config.discovery.claim_lease_minutes = 12
         config.discovery.planner_poll_seconds = 100
         config.discovery.plan_ttl_hours = 8
+        config.discovery.keyword_digest_grace_hours = 0
         config.discovery.admission_min_score = 0.72
         config.discovery.inspiration_search_enabled = True
         config.discovery.inspiration_replace_merged_keywords = True
@@ -2875,6 +2936,7 @@ eval_prefilter_mode = "  Shadow  "
         assert loaded.discovery.claim_lease_minutes == 12
         assert loaded.discovery.planner_poll_seconds == 100
         assert loaded.discovery.plan_ttl_hours == 8
+        assert loaded.discovery.keyword_digest_grace_hours == 0
         assert loaded.discovery.admission_min_score == 0.72
         assert loaded.discovery.inspiration_search_enabled is True
         assert loaded.discovery.inspiration_replace_merged_keywords is True
@@ -2896,6 +2958,7 @@ eval_prefilter_mode = "  Shadow  "
         assert "unified_keyword_planner_enabled = true" in rendered
         assert "kw_cache_high = 30" in rendered
         assert "plan_ttl_hours = 12" in rendered
+        assert "keyword_digest_grace_hours = 24" in rendered
         assert "admission_min_score = 0.6" in rendered
         assert "inspiration_search_enabled = true" in rendered
         assert "inspiration_replace_merged_keywords = false" in rendered

@@ -1038,6 +1038,8 @@ class ContinuousRefreshController:
             return result.available_before >= self.pool_target_count
         self._last_pool_maintenance_succeeded = True
         self._update_llm_inventory_state(result.available_after)
+        if int(getattr(result, "mutation_count", 0) or 0) > 0:
+            self.notify_expression_copy_pending("pool_maintenance")
         return result.at_target
 
     @staticmethod
@@ -1334,6 +1336,7 @@ class ContinuousRefreshController:
     def mark_delight_sent(self, bvid: str) -> None:
         """Persist delight notification delivery markers."""
         self.database.mark_delight_notified(bvid)
+        self.notify_expression_copy_pending("delight_consumed")
         now = self._now().isoformat()
         self._update_discovery_runtime_state(
             lambda state: state.update({"last_delight_notification_at": now})
@@ -1346,10 +1349,22 @@ class ContinuousRefreshController:
             marker(bvid)
         else:
             self.database.mark_delight_notified(bvid)
+        self.notify_expression_copy_pending("delight_seen")
         now = self._now().isoformat()
         self._update_discovery_runtime_state(
             lambda state: state.update({"last_delight_notification_at": now})
         )
+
+    def notify_expression_copy_pending(self, reason: str) -> None:
+        """Wake the runtime-owned copy coordinator without doing inline LLM work."""
+
+        notify = getattr(self.expression_copy_coordinator, "notify", None)
+        if not callable(notify):
+            return
+        try:
+            notify(str(reason))
+        except Exception:
+            logger.warning("expression-copy runtime notification failed", exc_info=True)
 
     async def prepare_delight_candidates(self) -> int:
         """Warm ready-to-push delight candidates even when no refresh runs."""
@@ -1394,6 +1409,8 @@ class ContinuousRefreshController:
         or UI paths that just consumed the visible pool.
         """
         normalized = self._normalize_replenishment_reason(reason)
+        if normalized == "feedback":
+            self.notify_expression_copy_pending("feedback")
         if force:
             return await self.trigger_manual_refresh(reason=normalized)
         queued = self._queue_replenishment_reason(normalized)
@@ -2368,6 +2385,7 @@ class ContinuousRefreshController:
 
     async def refresh_after_feedback(self) -> dict[str, object]:
         """Compatibility shim: feedback marks demand, scheduler refreshes later."""
+        self.notify_expression_copy_pending("feedback")
         return self._queue_replenishment_reason("feedback")
 
     async def refresh_after_init(self) -> dict[str, object]:

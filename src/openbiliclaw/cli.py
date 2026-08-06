@@ -876,6 +876,9 @@ def _build_soul_engine() -> Any:
         memory=memory,
         usage_recorder=_build_usage_recorder(),
         satisfaction_filter_enabled=cfg.soul.preference.satisfaction_filter_enabled,
+        preference_prompt_view=str(getattr(cfg.soul, "preference_prompt_view", "legacy")),
+        awareness_prompt_view=str(getattr(cfg.soul, "awareness_prompt_view", "compact-v1")),
+        insight_prompt_view=str(getattr(cfg.soul, "insight_prompt_view", "legacy")),
         posture_gate_mode=cfg.soul.posture_gate_mode,
         posture_gate_force_enforce=cfg.soul.posture_gate_force_enforce,
         module_overrides=module_overrides_from_config(cfg),
@@ -928,6 +931,14 @@ def _build_recommendation_engine() -> Any:
     memory = _build_memory_manager()
     database = _get_runtime_database()
     cfg = load_config()
+    configured_copy_target = max(
+        0,
+        int(getattr(cfg.scheduler, "copy_ready_target_count", 0) or 0),
+    )
+    effective_copy_target = min(
+        configured_copy_target,
+        max(0, int(getattr(cfg.scheduler, "pool_target_count", 0) or 0)),
+    )
     registry = _build_registry()
     llm_service = LLMService(
         registry=registry,
@@ -956,6 +967,7 @@ def _build_recommendation_engine() -> Any:
         database=database,
         embedding_service=embedding_service,
         xhs_self_info_provider=_xhs_self_info_provider,
+        copy_ready_target_count=effective_copy_target,
         visual_profile_enabled=bool(
             getattr(getattr(cfg, "discovery", None), "visual_profile_enabled", False)
         ),

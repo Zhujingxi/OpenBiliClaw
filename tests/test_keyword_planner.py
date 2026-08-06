@@ -2221,8 +2221,7 @@ async def test_planner_requires_bili_deficit_before_requesting_explore_domains(
 
 
 async def test_digest_change_expires_old_and_regenerates(db: Database) -> None:
-    """When the profile digest changes, old-digest pending is expired and new
-    keywords are generated under the new digest."""
+    """The zero-hour rollback expires old-digest pending and regenerates."""
     old_profile = _profile(("露营", 0.9))
     old_digest = profile_kw_digest(old_profile)
     # Seed stale pending under the OLD digest directly in the store.
@@ -2236,7 +2235,13 @@ async def test_digest_change_expires_old_and_regenerates(db: Database) -> None:
 
     llm = _FakeLLM(payload={_XHS: ["新词A", "新词B"]})
     deficit = _FakeDeficitSource(deficits={_XHS: 33})
-    planner = _make_planner(db, llm=llm, profile=new_profile, deficit=deficit)
+    planner = _make_planner(
+        db,
+        llm=llm,
+        profile=new_profile,
+        deficit=deficit,
+        discovery=_discovery_cfg(keyword_digest_grace_hours=0),
+    )
 
     await planner.run_once()
 
@@ -2248,6 +2253,142 @@ async def test_digest_change_expires_old_and_regenerates(db: Database) -> None:
     assert str(old_rows["status"]) == "expired"
     # New keywords under the new digest.
     assert _pending(db, _XHS, new_digest) == ["新词A", "新词B"]
+
+
+async def test_digest_change_reuses_safe_inventory_and_skips_llm(
+    db: Database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old_profile = _profile(("露营", 0.9))
+    old_digest = profile_kw_digest(old_profile)
+    db.insert_pending_keywords(
+        _XHS,
+        ["AI 教程", "机器学习 入门", "露营路线"],
+        old_digest,
+    )
+
+    new_profile = _profile(("城市规划", 0.9))
+    new_profile.preferences.disliked_topics = ["AI"]
+    llm = _FakeLLM(payload={_XHS: ["不应生成"]})
+    planner = _make_planner(
+        db,
+        llm=llm,
+        profile=new_profile,
+        deficit=_FakeDeficitSource(deficits={_XHS: 20}),
+        discovery=_discovery_cfg(kw_cache_low=1),
+    )
+    hints = planner._avoid_hints(new_profile)
+    hints[_XHS]["avoid_topics"] = ["机器学习"]
+    monkeypatch.setattr(planner, "_avoid_hints", lambda _profile: hints)
+
+    ledger = await planner.run_once()
+
+    assert ledger == {}
+    assert llm.calls == []
+    assert db.count_pending_keywords_all_digests(_XHS) == 1
+    retained = db.conn.execute(
+        "SELECT status, profile_kw_digest FROM discovery_keywords WHERE keyword = '露营路线'"
+    ).fetchone()
+    assert retained is not None
+    assert str(retained["status"]) == "pending"
+    assert str(retained["profile_kw_digest"]) == old_digest
+    assert planner.last_digest_grace_ledger[_XHS] == {
+        "current": 0,
+        "reused": 1,
+        "expired_aged": 0,
+        "expired_blocked": 2,
+        "expired_excess": 0,
+    }
+
+
+async def test_reused_pending_history_blocks_family_regeneration(db: Database) -> None:
+    old_profile = _profile(("旧主题", 0.9))
+    old_digest = profile_kw_digest(old_profile)
+    db.insert_pending_keywords(_XHS, ["旧主题"], old_digest)
+
+    new_profile = _profile(("城市观察", 0.9))
+    llm = _FakeLLM(payload={_XHS: ["旧主题 解析"]})
+    planner = _make_planner(
+        db,
+        llm=llm,
+        profile=new_profile,
+        deficit=_FakeDeficitSource(deficits={_XHS: 20}),
+        discovery=_discovery_cfg(kw_cache_low=2, kw_cache_high=3, gen_batch=3),
+    )
+
+    ledger = await planner.run_once()
+
+    assert len(llm.calls) == 1
+    assert "旧主题" in llm.calls[0]["user"]
+    assert ledger[_XHS] == 0
+    assert db.count_pending_keywords_all_digests(_XHS) == 1
+    assert _pending(db, _XHS, old_digest) == ["旧主题"]
+
+
+async def test_reconciliation_failure_falls_back_to_hard_expiration(
+    db: Database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old_profile = _profile(("露营", 0.9))
+    old_digest = profile_kw_digest(old_profile)
+    db.insert_pending_keywords(_XHS, ["旧词"], old_digest)
+    new_profile = _profile(("城市规划", 0.9))
+    new_digest = profile_kw_digest(new_profile)
+    original_reconcile = db.reconcile_pending_keyword_digests
+
+    def fail_xhs(platform: str, *args: object, **kwargs: object) -> dict[str, int]:
+        if platform == _XHS:
+            raise RuntimeError("synthetic reconciliation failure")
+        return original_reconcile(platform, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(db, "reconcile_pending_keyword_digests", fail_xhs)
+    llm = _FakeLLM(payload={_XHS: ["新词"]})
+    planner = _make_planner(
+        db,
+        llm=llm,
+        profile=new_profile,
+        deficit=_FakeDeficitSource(deficits={_XHS: 20}),
+    )
+
+    await planner.run_once()
+
+    assert len(llm.calls) == 1
+    assert db.count_pending_keywords(_XHS, old_digest) == 0
+    assert _pending(db, _XHS, new_digest) == ["新词"]
+    assert _XHS not in planner._grace_inventory_ready
+
+
+async def test_malformed_reconciliation_ledger_falls_back_to_hard_expiration(
+    db: Database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old_profile = _profile(("露营", 0.9))
+    old_digest = profile_kw_digest(old_profile)
+    db.insert_pending_keywords(_XHS, ["旧词"], old_digest)
+    new_profile = _profile(("城市规划", 0.9))
+    new_digest = profile_kw_digest(new_profile)
+    original_reconcile = db.reconcile_pending_keyword_digests
+
+    def malformed_xhs(platform: str, *args: object, **kwargs: object) -> object:
+        if platform == _XHS:
+            return None
+        return original_reconcile(platform, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(db, "reconcile_pending_keyword_digests", malformed_xhs)
+    llm = _FakeLLM(payload={_XHS: ["新词"]})
+    planner = _make_planner(
+        db,
+        llm=llm,
+        profile=new_profile,
+        deficit=_FakeDeficitSource(deficits={_XHS: 20}),
+    )
+
+    await planner.run_once()
+
+    assert len(llm.calls) == 1
+    assert db.count_pending_keywords(_XHS, old_digest) == 0
+    assert _pending(db, _XHS, new_digest) == ["新词"]
+    assert _XHS not in planner._grace_inventory_ready
 
 
 async def test_single_flight_second_concurrent_run_does_not_double_generate(

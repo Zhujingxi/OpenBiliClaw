@@ -7,7 +7,7 @@ views instead of inventing private serializers; the legacy
 ``discovery/strategies/_utils.py`` import path re-exports the same objects for
 backward compatibility.
 
-The three public views:
+The core public structured views:
 
 * :func:`build_profile_summary` — canonical structured profile (portrait
   excluded); every source-platform content prompt feeds on this.
@@ -15,6 +15,8 @@ The three public views:
   ``build_profile_summary`` dict for high-volume content prompts.
 * :func:`build_query_generation_profile_summary` — query-trimmed taste shape for
   discovery keyword/domain generation (MMR-diversified, embedding-optional).
+* :func:`build_cognition_profile_view_v1` — uncapped, deterministic cognition
+  projection split into cache-stable soul/preference and volatile context.
 
 This module was carved out of ``discovery/strategies/_utils.py`` verbatim
 (Task 5, Wave B of the profile-views plan) — a mechanical move with zero
@@ -29,11 +31,12 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable
 
     from openbiliclaw.soul.profile import InterestDomain, OnionProfile, SoulProfile
 
@@ -127,6 +130,165 @@ class ChatCoreMemory:
 
     stable_block: str
     volatile_block: str
+
+
+# Profile storage repeats the full interest tree under ``soul.interest`` even
+# though cognition callers send the canonical preference layer beside it.  The
+# compact cognition view removes that duplicate and storage-only revision
+# markers, but deliberately does not cap active interests, dislikes, evidence,
+# or unknown semantic fields.  Lifecycle evidence (state/count/first/last
+# evidence times/parent) remains model-visible; it affects confidence and is
+# not equivalent to a storage revision timestamp.
+_COGNITION_PROFILE_INTERNAL_FIELDS = frozenset(
+    {
+        "_init_cognition_context",
+        "awareness_candidates",
+        "created_at",
+        "insight_candidates",
+        "profile_ready",
+        "updated_at",
+        "version",
+    }
+)
+_COGNITION_SOUL_DUPLICATE_FIELDS = frozenset(
+    {
+        "active_insights",
+        "interest",
+        "preferences",
+        "recent_awareness",
+    }
+)
+
+
+def _cognition_value_is_empty(value: object) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    return isinstance(value, (list, tuple, dict)) and not value
+
+
+def _cognition_profile_value(value: object) -> object:
+    if isinstance(value, Mapping):
+        return _cognition_profile_mapping(value)
+    if isinstance(value, list | tuple):
+        projected: list[object] = []
+        for item in value:
+            if _cognition_value_is_empty(item):
+                continue
+            detached = _cognition_profile_value(item)
+            if not _cognition_value_is_empty(detached):
+                projected.append(detached)
+        return projected
+    return value
+
+
+def _cognition_profile_mapping(
+    value: Mapping[str, object],
+    *,
+    omit: frozenset[str] = frozenset(),
+) -> dict[str, object]:
+    projected: dict[str, object] = {}
+    for raw_key in sorted(value, key=str):
+        key = str(raw_key)
+        item = value[raw_key]
+        if (
+            key in omit
+            or key in _COGNITION_PROFILE_INTERNAL_FIELDS
+            or _cognition_value_is_empty(item)
+        ):
+            continue
+        detached = _cognition_profile_value(item)
+        if not _cognition_value_is_empty(detached):
+            projected[key] = detached
+    return projected
+
+
+def _cognition_profile_sequence(value: object) -> list[object]:
+    if not isinstance(value, list | tuple):
+        return []
+    projected: list[object] = []
+    for item in value:
+        if _cognition_value_is_empty(item):
+            continue
+        if isinstance(item, Mapping):
+            state = str(item.get("state", "") or "").strip().lower()
+            if state == "archived":
+                continue
+        detached = _cognition_profile_value(item)
+        if not _cognition_value_is_empty(detached):
+            projected.append(detached)
+    return projected
+
+
+def _cognition_preference_mapping(value: Mapping[str, object]) -> dict[str, object]:
+    projected = _cognition_profile_mapping(value)
+    # Only positive/active-interest collections apply lifecycle filtering.
+    # Negative evidence is intentionally copied whole and never capped.
+    for key in ("interest_domains", "interests", "likes", "speculative_interests"):
+        raw_items = value.get(key)
+        if isinstance(raw_items, list | tuple):
+            items = _cognition_profile_sequence(raw_items)
+            if items:
+                projected[key] = items
+            else:
+                projected.pop(key, None)
+    return projected
+
+
+@dataclass(frozen=True)
+class CognitionProfileViewV1:
+    """Stable profile blocks plus uncapped volatile cognition context."""
+
+    stable_soul: dict[str, object]
+    stable_preference: dict[str, object]
+    recent_awareness: tuple[object, ...]
+    active_insights: tuple[object, ...]
+
+    def volatile_cognition(self) -> dict[str, object]:
+        """Return a detached JSON-ready volatile block."""
+
+        result: dict[str, object] = {}
+        if self.recent_awareness:
+            result["recent_awareness"] = [
+                _cognition_profile_value(item) for item in self.recent_awareness
+            ]
+        if self.active_insights:
+            result["active_insights"] = [
+                _cognition_profile_value(item) for item in self.active_insights
+            ]
+        return result
+
+
+def build_cognition_profile_view_v1(
+    *,
+    soul_profile: Mapping[str, object] | None = None,
+    preference_summary: Mapping[str, object] | None = None,
+    recent_awareness: Sequence[object] | None = None,
+    active_insights: Sequence[object] | None = None,
+) -> CognitionProfileViewV1:
+    """Build the named compact cognition profile view without mutating input.
+
+    ``None`` for a volatile list means "derive it from the persisted soul
+    snapshot".  Passing an explicit empty list suppresses that snapshot when a
+    caller already supplies the authoritative current batch separately.
+    """
+
+    raw_soul = soul_profile or {}
+    raw_preference = preference_summary or {}
+    derived_awareness = raw_soul.get("recent_awareness")
+    derived_insights = raw_soul.get("active_insights")
+    awareness_source: object = derived_awareness if recent_awareness is None else recent_awareness
+    insights_source: object = derived_insights if active_insights is None else active_insights
+    return CognitionProfileViewV1(
+        stable_soul=_cognition_profile_mapping(
+            raw_soul,
+            omit=_COGNITION_SOUL_DUPLICATE_FIELDS,
+        ),
+        stable_preference=_cognition_preference_mapping(raw_preference),
+        recent_awareness=tuple(_cognition_profile_sequence(awareness_source)),
+        active_insights=tuple(_cognition_profile_sequence(insights_source)),
+    )
 
 
 def _chat_str_list(value: object) -> list[str]:

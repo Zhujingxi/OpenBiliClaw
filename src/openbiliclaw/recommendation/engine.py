@@ -466,6 +466,7 @@ class RecommendationEngine:
         xhs_self_info_provider: Callable[[], dict[str, object] | None] | None = None,
         pool_inventory_commit_callback: Callable[..., object] | None = None,
         expression_batch_concurrency: int = _DEFAULT_EXPRESSION_BATCH_CONCURRENCY,
+        copy_ready_target_count: int | None = 0,
         visual_profile_enabled: bool = False,
         keyframe_enabled: bool = False,
         keyframe_max_frames: int = _KEYFRAME_DEFAULT_MAX_FRAMES,
@@ -501,6 +502,12 @@ class RecommendationEngine:
         self._pool_inventory_commit_callback = pool_inventory_commit_callback
         self._copy_pending_callback: Callable[[str], None] | None = None
         self._expression_batch_concurrency = max(1, min(16, int(expression_batch_concurrency)))
+        # ``0`` is the compatibility/rollback contract: drain the durable
+        # expression backlog exactly as before. A positive target is injected
+        # by runtime wiring after its config value has been clamped to the
+        # candidate-pool target; the engine only enforces that ready-copy high
+        # watermark and never deletes already-generated copy.
+        self.copy_ready_target_count = max(0, int(copy_ready_target_count or 0))
         # v0.3.63+: optional registry for detached fire-and-forget tasks
         # (classify_pool_backlog_detached, precompute_delight_scores_detached).
         # When provided, those tasks register here so RuntimeContext's
@@ -578,13 +585,56 @@ class RecommendationEngine:
                 available = int(counts.get("available", 0))
                 return {
                     "available": max(0, available),
+                    "copy_ready": max(
+                        0,
+                        int(counts.get("copy_ready", available)),
+                    ),
                     "raw": max(0, int(counts.get("raw", available))),
                     "pending": max(0, int(counts.get("pending", 0))),
+                    "admitted_pending_copy": max(
+                        0,
+                        int(counts.get("admitted_pending_copy", 0)),
+                    ),
                 }
             except Exception:
                 logger.exception("Failed to load pool readiness counts")
         available = int(self._database.count_pool_candidates(xhs_self_nickname=nickname))
-        return {"available": max(0, available), "raw": max(0, available), "pending": 0}
+        return {
+            "available": max(0, available),
+            "copy_ready": max(0, available),
+            "raw": max(0, available),
+            "pending": 0,
+            "admitted_pending_copy": 0,
+        }
+
+    def count_pending_expression_copy_demand(self) -> int:
+        """Return durable copy work currently allowed by the ready watermark.
+
+        ``copy_ready`` is the canonical count of fully gated, non-viewed fresh
+        rows before the per-topic display window. Pending-copy rows never count
+        as ready; they only cap how much of the current deficit can be filled.
+        ``None``/``0`` at construction preserves the legacy drain-to-backlog
+        behavior.
+        """
+
+        readiness = self._pool_readiness_counts()
+        pending = max(0, int(readiness.get("admitted_pending_copy", 0)))
+        target = self.copy_ready_target_count
+        if target <= 0:
+            return pending
+        deficit = max(0, target - max(0, int(readiness.get("copy_ready", 0))))
+        return min(pending, deficit)
+
+    def _expression_copy_drain_limit(self, requested_limit: int) -> int:
+        """Bound one lock-owned drain without weakening legacy behavior."""
+
+        requested = max(0, int(requested_limit))
+        target = self.copy_ready_target_count
+        if requested <= 0 or target <= 0:
+            return requested
+        readiness = self._pool_readiness_counts()
+        deficit = max(0, target - max(0, int(readiness.get("copy_ready", 0))))
+        return min(requested, deficit)
 
     async def serve(
         self,
@@ -774,6 +824,7 @@ class RecommendationEngine:
                 pending_pool_count,
             )
             self._last_served_bvids = frozenset()
+            self._notify_copy_pending("serve_insufficient")
             return ServeResult(
                 items=[],
                 pool_counts_after=pool_readiness,
@@ -801,6 +852,7 @@ class RecommendationEngine:
                 after_viewed_count,
             )
             self._last_served_bvids = frozenset()
+            self._notify_copy_pending("serve_insufficient")
             return ServeResult(
                 items=[],
                 pool_counts_after=pool_readiness,
@@ -1001,7 +1053,7 @@ class RecommendationEngine:
 
         consumed = len(ids)
         pool_counts_after = {key: max(0, int(value)) for key, value in pool_readiness.items()}
-        for key in ("available", "raw"):
+        for key in ("available", "copy_ready", "raw"):
             if key in pool_counts_after:
                 pool_counts_after[key] = max(0, pool_counts_after[key] - consumed)
 
@@ -1062,28 +1114,32 @@ class RecommendationEngine:
         counts: dict[str, int] | None = None,
     ) -> None:
         callback = self._pool_inventory_commit_callback
-        if callback is None:
-            return
-        try:
-            accepts_counts = False
+        if callback is not None:
             try:
-                signature = inspect.signature(callback)
-                accepts_counts = any(
-                    parameter.kind
-                    in (
-                        inspect.Parameter.POSITIONAL_ONLY,
-                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                        inspect.Parameter.VAR_POSITIONAL,
+                accepts_counts = False
+                try:
+                    signature = inspect.signature(callback)
+                    accepts_counts = any(
+                        parameter.kind
+                        in (
+                            inspect.Parameter.POSITIONAL_ONLY,
+                            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                            inspect.Parameter.VAR_POSITIONAL,
+                        )
+                        for parameter in signature.parameters.values()
                     )
-                    for parameter in signature.parameters.values()
-                )
-            except (TypeError, ValueError):
-                pass
-            result = callback(counts) if accepts_counts else callback()
-            if inspect.isawaitable(result):
-                await result
-        except Exception:
-            logger.exception("pool inventory commit callback failed")
+                except (TypeError, ValueError):
+                    pass
+                result = callback(counts) if accepts_counts else callback()
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                logger.exception("pool inventory commit callback failed")
+        # The shown-state commit is now durable, so a demand-driven copy
+        # coordinator may refill the ready watermark in the background. This
+        # notifier is synchronous/non-blocking and never runs provider work on
+        # the response path.
+        self._notify_copy_pending("inventory_consumed")
 
     # Hybrid rule for online supergroup merging:
     #   - Strict embedding alone: sim >= 0.90 (catches 自走棋↔金铲铲之战
@@ -1528,7 +1584,11 @@ class RecommendationEngine:
         pass so the same items are never double-spent on LLM tokens.
         """
         async with self._expression_lock:
-            candidates = self._load_pool_candidates_needing_copy(limit=max(0, limit))
+            # Re-read canonical ready inventory *inside* the expression lock.
+            # This is what prevents two queued drains from both observing the
+            # same deficit and overfilling the high watermark.
+            effective_limit = self._expression_copy_drain_limit(limit)
+            candidates = self._load_pool_candidates_needing_copy(limit=effective_limit)
             if not candidates:
                 return 0
 
@@ -1633,6 +1693,17 @@ class RecommendationEngine:
 
         self._copy_pending_callback = callback
 
+    def _notify_copy_pending(self, reason: str) -> None:
+        """Best-effort signal for the runtime-owned expression coordinator."""
+
+        callback = self._copy_pending_callback
+        if callback is None:
+            return
+        try:
+            callback(str(reason))
+        except Exception:
+            logger.warning("expression-copy notification failed", exc_info=True)
+
     # ── Source-agnostic content classification ───────────────────────
     #
     # Content from any source (bilibili, xiaohongshu, web, …) must carry
@@ -1698,10 +1769,7 @@ class RecommendationEngine:
             return 0
         if classified > 0:
             if self._copy_pending_callback is not None:
-                try:
-                    self._copy_pending_callback(f"classified:{classified}")
-                except Exception:
-                    logger.warning("post-classify expression notification failed", exc_info=True)
+                self._notify_copy_pending(f"classified:{classified}")
             else:
                 await self.drain_pending_expression_copy(
                     profile=profile, limit=max(limit, classified)

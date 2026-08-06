@@ -13,9 +13,20 @@
 `danmaku_max_chars (100..2000)` 做范围校验，保存后由 RuntimeContext 透传到推荐引擎；配置文件
 与 API round-trip 保持这些数值。配置字段仍默认关闭视觉 / 弹幕功能，不会改变默认排序。
 
+Discovery 配置响应与更新白名单同时公开 `keyword_digest_grace_hours`，默认 `24`、合法范围
+`0..168`。`PUT /api/config` 拒绝布尔值、非整数和越界值；合法值进入同一次 TOML 持久化与
+runtime apply。`0` 是只关闭跨 digest 关键词复用的回滚值，不会关闭统一 planner 或删除历史行。
+
 ## 配置保存与后台应用
 
 `PUT /api/config` 把“持久化成功”和“运行时已经切换”分成两个明确阶段。请求仍在 `_CONFIG_SAVE_LOCK` 内完成校验、`config.toml.bak` 快照、`config.toml` 写入和凭据存储，然后统一立即返回 `202 apply_state="queued"`、`apply_revision` 与已脱敏配置快照；运行时 lane 由 app-owned latest-wins 队列在后台安全应用，前端通过 `GET /api/config/apply-status` 或 runtime event 观察终态，不把 202 当作失败。
+
+Phase 2 cognition rollout 在配置 API 中也是 task-scoped：`soul` GET/PUT 模型公开
+`preference_prompt_view`、`awareness_prompt_view`、`insight_prompt_view` 三个
+`legacy|compact-v1` 字段，默认分别为 `legacy / compact-v1 / legacy`。旧的聚合
+`cognition_prompt_view` 不在响应模型或更新白名单中。热重载后 Awareness 字段只影响
+`soul.awareness_confusions`；普通 `soul.awareness` 固定使用 `legacy`，其余两个值各自只影响
+对应 analyzer。
 
 后台配置应用队列为 app-owned、latest-wins：正在应用的修订不会被取消，尚未开始的多个修订会合并为最新一份；因为每次 PATCH 都基于最新已落盘配置构建，合并不会丢掉前一轮已保存字段。成功广播 `config_reloaded`；失败且没有更新修订等待时恢复最后一次已生效配置并广播 `config_reload_failed`，若已有更新修订则不回滚覆盖它，直接继续应用最新值。进程在排队期间退出也不会丢配置，下一次启动直接从已落盘 `config.toml` 构建运行时。
 

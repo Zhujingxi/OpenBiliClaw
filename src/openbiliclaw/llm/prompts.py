@@ -8,6 +8,11 @@ from typing import TYPE_CHECKING, Any, cast
 
 from openbiliclaw.discovery.style_keys import STYLE_KEY_PROMPT_TEXT, normalize_style_key
 from openbiliclaw.llm.json_utils import parse_llm_json_tolerant
+from openbiliclaw.soul.event_prompt_views import (
+    build_cognition_event_view_v1,
+    normalize_cognition_input_view,
+)
+from openbiliclaw.soul.profile_views import build_cognition_profile_view_v1
 
 if TYPE_CHECKING:
     from openbiliclaw.soul.tone import ToneProfile
@@ -339,6 +344,7 @@ def build_preference_analysis_prompt(
     existing_preference: dict[str, object],
     awareness_notes: list[dict[str, object]] | None = None,
     active_insights: list[dict[str, object]] | None = None,
+    input_view: str = "legacy",
 ) -> list[dict[str, str]]:
     """Build a structured prompt for extracting user preferences from events.
 
@@ -354,6 +360,61 @@ def build_preference_analysis_prompt(
     from openbiliclaw.sources.event_format import render_retraction_marked_events
 
     system_prompt = _PREFERENCE_ANALYSIS_SYSTEM_PROMPT
+    selected_view = normalize_cognition_input_view(input_view)
+    rendered_events = render_retraction_marked_events(events)
+    if selected_view == "compact-v1":
+        profile_view = build_cognition_profile_view_v1(
+            preference_summary=existing_preference,
+            recent_awareness=awareness_notes,
+            active_insights=active_insights,
+        )
+        sections = [
+            "<existing_preference>",
+            json.dumps(
+                profile_view.stable_preference,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ),
+            "</existing_preference>",
+        ]
+        if profile_view.recent_awareness:
+            sections += [
+                "<recent_awareness>",
+                json.dumps(
+                    profile_view.recent_awareness,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                ),
+                "</recent_awareness>",
+            ]
+        if profile_view.active_insights:
+            sections += [
+                "<active_insights>",
+                json.dumps(
+                    profile_view.active_insights,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                ),
+                "</active_insights>",
+            ]
+        sections += [
+            "<event_batch>",
+            json.dumps(
+                build_cognition_event_view_v1(rendered_events).as_list(),
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ),
+            "</event_batch>",
+        ]
+        return [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": "\n\n".join(sections)},
+        ]
+
     sections = [
         "<existing_preference>",
         json.dumps(existing_preference, ensure_ascii=False, indent=2),
@@ -374,7 +435,7 @@ def build_preference_analysis_prompt(
     sections += [
         "<event_batch>",
         json.dumps(
-            render_retraction_marked_events(events),
+            rendered_events,
             ensure_ascii=False,
             indent=2,
         ),
@@ -767,9 +828,72 @@ def build_awareness_prompt(
     events: list[dict[str, object]],
     preference_summary: dict[str, object],
     soul_profile: dict[str, object],
+    input_view: str = "legacy",
 ) -> list[dict[str, str]]:
     """Build a structured prompt for recent awareness-note generation."""
     from openbiliclaw.sources.event_format import render_retraction_marked_events
+
+    selected_view = normalize_cognition_input_view(input_view)
+    rendered_events = render_retraction_marked_events(events)
+    if selected_view == "compact-v1":
+        profile_view = build_cognition_profile_view_v1(
+            soul_profile=soul_profile,
+            preference_summary=preference_summary,
+        )
+        sections = [
+            "<soul_profile>",
+            json.dumps(
+                profile_view.stable_soul,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ),
+            "</soul_profile>",
+            "<preference_summary>",
+            json.dumps(
+                profile_view.stable_preference,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ),
+            "</preference_summary>",
+        ]
+        if profile_view.recent_awareness:
+            sections += [
+                "<recent_awareness>",
+                json.dumps(
+                    profile_view.recent_awareness,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                ),
+                "</recent_awareness>",
+            ]
+        if profile_view.active_insights:
+            sections += [
+                "<active_insights>",
+                json.dumps(
+                    profile_view.active_insights,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                ),
+                "</active_insights>",
+            ]
+        sections += [
+            "<recent_events>",
+            json.dumps(
+                build_cognition_event_view_v1(rendered_events).as_list(),
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ),
+            "</recent_events>",
+        ]
+        return [
+            {"role": "system", "content": _AWARENESS_SYSTEM_PROMPT},
+            {"role": "user", "content": "\n\n".join(sections)},
+        ]
 
     user_prompt = "\n\n".join(
         [
@@ -781,7 +905,7 @@ def build_awareness_prompt(
             "</preference_summary>",
             "<recent_events>",
             json.dumps(
-                render_retraction_marked_events(events),
+                rendered_events,
                 ensure_ascii=False,
                 indent=2,
                 sort_keys=True,
@@ -848,6 +972,7 @@ def build_awareness_with_confusions_prompt(
     events: list[dict[str, object]],
     preference_summary: dict[str, object],
     soul_profile: dict[str, object],
+    input_view: str = "legacy",
 ) -> list[dict[str, str]]:
     """Build the awareness+confusions prompt (Phase 2).
 
@@ -860,6 +985,68 @@ def build_awareness_with_confusions_prompt(
     """
     from openbiliclaw.sources.event_format import render_retraction_marked_events
 
+    selected_view = normalize_cognition_input_view(input_view)
+    rendered_events = render_retraction_marked_events(events)
+    if selected_view == "compact-v1":
+        profile_view = build_cognition_profile_view_v1(
+            soul_profile=soul_profile,
+            preference_summary=preference_summary,
+        )
+        sections = [
+            "<soul_profile>",
+            json.dumps(
+                profile_view.stable_soul,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ),
+            "</soul_profile>",
+            "<preference_summary>",
+            json.dumps(
+                profile_view.stable_preference,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ),
+            "</preference_summary>",
+        ]
+        if profile_view.recent_awareness:
+            sections += [
+                "<recent_awareness>",
+                json.dumps(
+                    profile_view.recent_awareness,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                ),
+                "</recent_awareness>",
+            ]
+        if profile_view.active_insights:
+            sections += [
+                "<active_insights>",
+                json.dumps(
+                    profile_view.active_insights,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                ),
+                "</active_insights>",
+            ]
+        sections += [
+            "<recent_events>",
+            json.dumps(
+                build_cognition_event_view_v1(rendered_events).as_list(),
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ),
+            "</recent_events>",
+        ]
+        return [
+            {"role": "system", "content": _AWARENESS_WITH_CONFUSIONS_SYSTEM_PROMPT},
+            {"role": "user", "content": "\n\n".join(sections)},
+        ]
+
     user_prompt = "\n\n".join(
         [
             "<soul_profile>",
@@ -870,7 +1057,7 @@ def build_awareness_with_confusions_prompt(
             "</preference_summary>",
             "<recent_events>",
             json.dumps(
-                render_retraction_marked_events(events),
+                rendered_events,
                 ensure_ascii=False,
                 indent=2,
                 sort_keys=True,
@@ -884,22 +1071,7 @@ def build_awareness_with_confusions_prompt(
     ]
 
 
-def build_insight_prompt(
-    *,
-    awareness_notes: list[dict[str, object]],
-    preference_summary: dict[str, object],
-    soul_profile: dict[str, object],
-    existing_hypotheses: list[dict[str, object]] | None = None,
-) -> list[dict[str, str]]:
-    """Build a structured prompt for insight-hypothesis generation.
-
-    ``existing_hypotheses`` (optional) is the set of currently-active
-    hypotheses passed as read-only context so an incremental run — which
-    only sees *new* awareness notes — can refine or avoid restating them
-    instead of regenerating from the full awareness history every time.
-    See rules 5 / 6 below.
-    """
-    system_prompt = """
+_INSIGHT_SYSTEM_PROMPT = """
 <task>
 你要基于近期觉察、偏好摘要和用户画像，生成谨慎的解释性假设。
 </task>
@@ -923,6 +1095,71 @@ def build_insight_prompt(
 ]
 </output_schema>
 """.strip()
+
+
+def build_insight_prompt(
+    *,
+    awareness_notes: list[dict[str, object]],
+    preference_summary: dict[str, object],
+    soul_profile: dict[str, object],
+    existing_hypotheses: list[dict[str, object]] | None = None,
+    input_view: str = "legacy",
+) -> list[dict[str, str]]:
+    """Build a structured prompt for insight-hypothesis generation.
+
+    ``existing_hypotheses`` (optional) is the set of currently-active
+    hypotheses passed as read-only context so an incremental run — which
+    only sees *new* awareness notes — can refine or avoid restating them
+    instead of regenerating from the full awareness history every time.
+    See rules 5 / 6 below.
+    """
+    selected_view = normalize_cognition_input_view(input_view)
+    if selected_view == "compact-v1":
+        profile_view = build_cognition_profile_view_v1(
+            soul_profile=soul_profile,
+            preference_summary=preference_summary,
+            recent_awareness=awareness_notes,
+            active_insights=existing_hypotheses,
+        )
+        sections = [
+            "<soul_profile>",
+            json.dumps(
+                profile_view.stable_soul,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ),
+            "</soul_profile>",
+            "<preference_summary>",
+            json.dumps(
+                profile_view.stable_preference,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ),
+            "</preference_summary>",
+            "<existing_hypotheses>",
+            json.dumps(
+                profile_view.active_insights,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ),
+            "</existing_hypotheses>",
+            "<awareness_notes>",
+            json.dumps(
+                profile_view.recent_awareness,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ),
+            "</awareness_notes>",
+        ]
+        return [
+            {"role": "system", "content": _INSIGHT_SYSTEM_PROMPT},
+            {"role": "user", "content": "\n\n".join(sections)},
+        ]
+
     user_prompt = "\n\n".join(
         [
             "<awareness_notes>",
@@ -940,7 +1177,7 @@ def build_insight_prompt(
         ]
     )
     return [
-        {"role": "system", "content": system_prompt},
+        {"role": "system", "content": _INSIGHT_SYSTEM_PROMPT},
         {"role": "user", "content": user_prompt},
     ]
 

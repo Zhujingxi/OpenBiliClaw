@@ -71,6 +71,49 @@ class _DummyLLM:
         )
 
 
+class _CopyReadyExpressionLLM:
+    """Deterministic batch-copy provider used by watermark integration tests."""
+
+    def __init__(self, *, fail_first: bool = False, block_first: bool = False) -> None:
+        self.fail_first = fail_first
+        self.block_first = block_first
+        self.calls = 0
+        self.batch_sizes: list[int] = []
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def complete_structured_task(
+        self,
+        *,
+        user_input: str,
+        **_kwargs: object,
+    ) -> LLMResponse:
+        self.calls += 1
+        batch = _content_batch_from_prompt(user_input)
+        self.batch_sizes.append(len(batch))
+        if self.fail_first and self.calls == 1:
+            raise TimeoutError("copy provider timed out")
+        if self.block_first and self.calls == 1:
+            self.entered.set()
+            await self.release.wait()
+        return LLMResponse(
+            content=json.dumps(
+                [
+                    {
+                        "bvid": item["bvid"],
+                        "expression": f"{item['bvid']} 的按需推荐文案。",
+                        "topic_label": "按需补文案",
+                    }
+                    for item in batch
+                ],
+                ensure_ascii=False,
+            ),
+            provider="test",
+            model="dummy",
+            usage={},
+        )
+
+
 def _build_profile() -> SoulProfile:
     return SoulProfile(
         personality_portrait="一个偏好高信息密度、慢热但判断稳定的人。",
@@ -3268,6 +3311,341 @@ async def test_public_expression_drain_caps_sixty_then_processes_tail() -> None:
 
 
 @pytest.mark.asyncio
+async def test_copy_ready_target_fills_only_deficit_and_leaves_deep_backlog() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        for index in range(4):
+            _seed_visible(
+                db,
+                f"BV_READY_{index}",
+                title=f"ready {index}",
+                topic_group=f"ready-{index}",
+            )
+        _seed_pool(
+            db,
+            [
+                DiscoveredContent(
+                    bvid=f"BV_PENDING_{index}",
+                    title=f"pending {index}",
+                    style_key="deep_focus",
+                    topic_group=f"按需文案-{index}",
+                    relevance_score=0.9,
+                )
+                for index in range(10)
+            ],
+            precomputed=False,
+        )
+        llm = _CopyReadyExpressionLLM()
+        engine = RecommendationEngine(
+            llm=llm,
+            database=db,
+            copy_ready_target_count=6,
+        )
+
+        assert engine.count_pending_expression_copy_demand() == 2
+        assert await engine.drain_pending_expression_copy(profile=_build_profile(), limit=60) == 2
+        assert db.count_pool_readiness()["available"] == 6
+        assert db.count_pool_readiness()["admitted_pending_copy"] == 8
+        assert engine.count_pending_expression_copy_demand() == 0
+        assert await engine.drain_pending_expression_copy(profile=_build_profile(), limit=60) == 0
+        assert llm.batch_sizes == [2]
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_copy_ready_target_does_not_drain_backlog_hidden_by_topic_window() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        for index in range(5):
+            _seed_visible(
+                db,
+                f"BV_TOPIC_READY_{index}",
+                title=f"ready {index}",
+                topic_group="concentrated-topic",
+            )
+        _seed_pool(
+            db,
+            [
+                DiscoveredContent(
+                    bvid=f"BV_TOPIC_PENDING_{index}",
+                    title=f"pending {index}",
+                    style_key="deep_focus",
+                    topic_group="concentrated-topic",
+                    relevance_score=0.8,
+                )
+                for index in range(4)
+            ],
+            precomputed=False,
+        )
+        llm = _CopyReadyExpressionLLM()
+        engine = RecommendationEngine(
+            llm=llm,
+            database=db,
+            copy_ready_target_count=5,
+        )
+
+        readiness = db.count_pool_readiness()
+        assert readiness["available"] == 3
+        assert readiness["copy_ready"] == 5
+        assert readiness["admitted_pending_copy"] == 4
+        assert engine.count_pending_expression_copy_demand() == 0
+        assert await engine.drain_pending_expression_copy(profile=_build_profile(), limit=60) == 0
+        assert llm.calls == 0
+        assert db.count_pool_readiness()["admitted_pending_copy"] == 4
+        db.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", [None, 0])
+async def test_copy_ready_target_disabled_preserves_legacy_backlog_drain(
+    target: int | None,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        for index in range(3):
+            _seed_visible(
+                db,
+                f"BV_LEGACY_READY_{index}",
+                title=f"ready {index}",
+                topic_group=f"legacy-ready-{index}",
+            )
+        _seed_pool(
+            db,
+            [
+                DiscoveredContent(
+                    bvid=f"BV_LEGACY_PENDING_{index}",
+                    title=f"pending {index}",
+                    style_key="deep_focus",
+                    topic_group=f"legacy-pending-{index}",
+                    relevance_score=0.9,
+                )
+                for index in range(7)
+            ],
+            precomputed=False,
+        )
+        llm = _CopyReadyExpressionLLM()
+        engine = RecommendationEngine(
+            llm=llm,
+            database=db,
+            copy_ready_target_count=target,
+        )
+
+        assert engine.count_pending_expression_copy_demand() == 7
+        assert await engine.drain_pending_expression_copy(profile=_build_profile(), limit=60) == 7
+        assert db.count_pool_readiness()["available"] == 10
+        assert db.count_pool_readiness()["admitted_pending_copy"] == 0
+        assert llm.batch_sizes == [7]
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_copy_ready_target_rechecks_deficit_under_expression_lock() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_pool(
+            db,
+            [
+                DiscoveredContent(
+                    bvid=f"BV_LOCK_PENDING_{index}",
+                    title=f"pending {index}",
+                    style_key="deep_focus",
+                    topic_group=f"lock-{index}",
+                    relevance_score=0.9,
+                )
+                for index in range(8)
+            ],
+            precomputed=False,
+        )
+        llm = _CopyReadyExpressionLLM(block_first=True)
+        engine = RecommendationEngine(
+            llm=llm,
+            database=db,
+            copy_ready_target_count=4,
+        )
+
+        first = asyncio.create_task(
+            engine.drain_pending_expression_copy(profile=_build_profile(), limit=60)
+        )
+        await asyncio.wait_for(llm.entered.wait(), timeout=1)
+        second = asyncio.create_task(
+            engine.drain_pending_expression_copy(profile=_build_profile(), limit=60)
+        )
+        await asyncio.sleep(0)
+        llm.release.set()
+
+        assert await first == 4
+        assert await second == 0
+        assert db.count_pool_readiness()["available"] == 4
+        assert db.count_pool_readiness()["admitted_pending_copy"] == 4
+        assert llm.batch_sizes == [4]
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_copy_ready_target_failure_keeps_pending_for_next_success() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_pool(
+            db,
+            [
+                DiscoveredContent(
+                    bvid=f"BV_RETRY_PENDING_{index}",
+                    title=f"pending {index}",
+                    style_key="deep_focus",
+                    topic_group="retry",
+                    relevance_score=0.9,
+                )
+                for index in range(2)
+            ],
+            precomputed=False,
+        )
+        llm = _CopyReadyExpressionLLM(fail_first=True)
+        engine = RecommendationEngine(
+            llm=llm,
+            database=db,
+            copy_ready_target_count=2,
+        )
+
+        with pytest.raises(ExpressionCopyTransientError) as exc_info:
+            await engine.drain_pending_expression_copy(profile=_build_profile(), limit=60)
+        assert exc_info.value.kind == "timeout"
+        assert db.count_pool_readiness()["available"] == 0
+        assert db.count_pool_readiness()["admitted_pending_copy"] == 2
+
+        assert await engine.drain_pending_expression_copy(profile=_build_profile(), limit=60) == 2
+        assert db.count_pool_readiness()["available"] == 2
+        assert db.count_pool_readiness()["admitted_pending_copy"] == 0
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_lower_copy_ready_target_keeps_existing_copy_and_pending_rows() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        for index in range(5):
+            _seed_visible(
+                db,
+                f"BV_LOWER_READY_{index}",
+                title=f"ready {index}",
+                topic_group=f"lower-ready-{index}",
+            )
+        _seed_pool(
+            db,
+            [
+                DiscoveredContent(
+                    bvid=f"BV_LOWER_PENDING_{index}",
+                    title=f"pending {index}",
+                    style_key="deep_focus",
+                    topic_group=f"lower-pending-{index}",
+                    relevance_score=0.9,
+                )
+                for index in range(3)
+            ],
+            precomputed=False,
+        )
+        llm = _CopyReadyExpressionLLM()
+        engine = RecommendationEngine(
+            llm=llm,
+            database=db,
+            copy_ready_target_count=3,
+        )
+
+        assert engine.count_pending_expression_copy_demand() == 0
+        assert await engine.drain_pending_expression_copy(profile=_build_profile(), limit=60) == 0
+        readiness = db.count_pool_readiness()
+        assert readiness["available"] == 5
+        assert readiness["admitted_pending_copy"] == 3
+        assert llm.calls == 0
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_copy_ready_target_keeps_empty_copy_rows_out_of_serve_and_notifies_consumption() -> (
+    None
+):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_visible(
+            db,
+            "BV_SERVE_READY",
+            title="ready",
+            pool_expression="正式推荐文案",
+            pool_topic_label="正式主题",
+        )
+        _seed_pool(
+            db,
+            [
+                DiscoveredContent(
+                    bvid="BV_SERVE_PENDING",
+                    title="pending",
+                    style_key="deep_focus",
+                    topic_group="serve",
+                    relevance_score=0.9,
+                )
+            ],
+            precomputed=False,
+        )
+        notifications: list[str] = []
+        engine = RecommendationEngine(
+            llm=_CopyReadyExpressionLLM(),
+            database=db,
+            copy_ready_target_count=1,
+        )
+        engine.set_copy_pending_callback(notifications.append)
+
+        recommendations = await engine.serve(_build_profile(), limit=2)
+        await asyncio.sleep(0)
+
+        assert [item.content.bvid for item in recommendations] == ["BV_SERVE_READY"]
+        assert all(item.expression.strip() and item.topic_label.strip() for item in recommendations)
+        assert db.count_pool_readiness()["admitted_pending_copy"] == 1
+        assert notifications == ["inventory_consumed"]
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_empty_ready_serve_notifies_bounded_copy_refill() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        _seed_pool(
+            db,
+            [
+                DiscoveredContent(
+                    bvid="BV_ONLY_PENDING_COPY",
+                    title="pending only",
+                    style_key="deep_focus",
+                    topic_group="serve-empty",
+                    relevance_score=0.9,
+                )
+            ],
+            precomputed=False,
+        )
+        notifications: list[str] = []
+        engine = RecommendationEngine(
+            llm=_CopyReadyExpressionLLM(),
+            database=db,
+            copy_ready_target_count=1,
+        )
+        engine.set_copy_pending_callback(notifications.append)
+
+        result = await engine.serve(_build_profile(), limit=1)
+
+        assert result == []
+        assert notifications == ["serve_insufficient"]
+        assert engine.count_pending_expression_copy_demand() == 1
+        assert db.count_pool_readiness()["admitted_pending_copy"] == 1
+        db.close()
+
+
+@pytest.mark.asyncio
 async def test_drain_expression_copy_splits_failed_batch_before_single_fallback() -> None:
     class _SplitRetryExpressionLLM:
         def __init__(self) -> None:
@@ -5387,6 +5765,7 @@ async def test_isolated_pool_snapshot_preserves_legacy_bvid_order(
     assert [item.content.bvid for item in isolated] == [item.content.bvid for item in legacy]
     assert isolated_result.pool_counts_after == {
         "available": 8,
+        "copy_ready": 8,
         "raw": 8,
         "pending": 0,
         "admitted_pending_copy": 0,

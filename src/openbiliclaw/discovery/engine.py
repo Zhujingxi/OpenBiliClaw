@@ -27,6 +27,17 @@ from openbiliclaw.discovery.eval_payload import (
     resolve_local_evaluation_results,
 )
 from openbiliclaw.discovery.eval_reason import normalize_evaluation_reason
+from openbiliclaw.discovery.prefilter_audit import (
+    PREFILTER_EXPLORE_EXEMPT_STATUS,
+    PREFILTER_NO_INTERESTS_STATUS,
+    PREFILTER_OK_STATUS,
+    PrefilterShadowDecision,
+    PrefilterShadowOutcome,
+    classify_prefilter_context,
+    hash_prefilter_candidate_identity,
+    is_explicit_strong_interest_context,
+    sanitize_prefilter_platform,
+)
 from openbiliclaw.discovery.strategies._utils import (
     _CONTENT_PROMPT_DOMAIN_CAP,
     _CONTENT_PROMPT_INTEREST_CAP,
@@ -54,7 +65,7 @@ from openbiliclaw.saved_sync.identity import (
 from openbiliclaw.sources.platforms import normalize_source_platform
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Sequence
+    from collections.abc import Awaitable, Mapping, Sequence
 
     from openbiliclaw.llm.embedding import SupportsEmbeddingService
     from openbiliclaw.soul.profile import SoulProfile
@@ -935,7 +946,7 @@ class ContentDiscoveryEngine:
 
         ranked_interests = sorted(
             profile.preferences.interests,
-            key=lambda interest: float(interest.weight or 0.0),
+            key=_profile_interest_weight,
             reverse=True,
         )
         # Enforce must see every interest that the downstream long-tail recall
@@ -964,61 +975,408 @@ class ContentDiscoveryEngine:
     ) -> dict[int, float]:
         """Return candidate indexes that are too dissimilar for LLM evaluation."""
 
+        try:
+            filtered, _decisions = await self._embedding_prefilter_analysis(
+                contents,
+                profile,
+                audit=False,
+            )
+        except Exception:
+            logger.warning("embedding prefilter failed unexpectedly; failing open", exc_info=True)
+            return {}
+        return filtered
+
+    async def _embedding_prefilter_shadow_analysis(
+        self,
+        contents: Sequence[DiscoveredContent],
+        profile: SoulProfile,
+        *,
+        source_context: str,
+        profile_digest: str,
+    ) -> tuple[dict[int, float], list[PrefilterShadowDecision]]:
+        """Return would-filter scores plus privacy-safe shadow decisions."""
+
+        try:
+            return await self._embedding_prefilter_analysis(
+                contents,
+                profile,
+                audit=True,
+                source_context=source_context,
+                profile_digest=profile_digest,
+            )
+        except Exception:
+            logger.warning(
+                "embedding prefilter shadow analysis failed unexpectedly; failing open",
+                exc_info=True,
+            )
+            return {}, []
+
+    async def _embedding_prefilter_analysis(
+        self,
+        contents: Sequence[DiscoveredContent],
+        profile: SoulProfile,
+        *,
+        audit: bool,
+        source_context: str = "",
+        profile_digest: str = "",
+    ) -> tuple[dict[int, float], list[PrefilterShadowDecision]]:
+        """Compute prefilter decisions while failing open on degraded vectors."""
+
+        decisions: list[PrefilterShadowDecision] = []
+        if not contents:
+            return {}, decisions
+
+        embedding_namespace = self._evaluation_embedding_namespace() if audit else ""
+
+        def record(
+            index: int,
+            *,
+            similarity: float | None,
+            would_filter: bool,
+            status: str,
+            fail_open: bool,
+        ) -> None:
+            if not audit:
+                return
+            content = contents[index]
+            context_class = classify_prefilter_context(
+                source_context,
+                content.source_strategy,
+            )
+            platform = normalize_source_platform(
+                content.source_platform,
+                default="bilibili" if content.bvid else "unknown",
+            )
+            decisions.append(
+                PrefilterShadowDecision(
+                    content_index=index,
+                    candidate_hash=hash_prefilter_candidate_identity(
+                        self._content_identity(content)
+                    ),
+                    platform_class=sanitize_prefilter_platform(platform),
+                    context_class=context_class,
+                    similarity=similarity,
+                    threshold=_EMBEDDING_PREFILTER_MIN_SIMILARITY,
+                    explore=(context_class == "explore"),
+                    embedding_namespace=embedding_namespace,
+                    profile_digest=profile_digest,
+                    would_filter=would_filter,
+                    embedding_status=status,
+                    fail_open=fail_open,
+                    explicit_strong_interest=is_explicit_strong_interest_context(
+                        context_class=context_class,
+                        source_keyword_id=content.source_keyword_id,
+                    ),
+                )
+            )
+
+        def record_batch_failure(
+            status: str,
+        ) -> tuple[dict[int, float], list[PrefilterShadowDecision]]:
+            for index, content in enumerate(contents):
+                context_class = classify_prefilter_context(
+                    source_context,
+                    content.source_strategy,
+                )
+                if context_class == "explore":
+                    record(
+                        index,
+                        similarity=None,
+                        would_filter=False,
+                        status=PREFILTER_EXPLORE_EXEMPT_STATUS,
+                        fail_open=False,
+                    )
+                else:
+                    record(
+                        index,
+                        similarity=None,
+                        would_filter=False,
+                        status=status,
+                        fail_open=True,
+                    )
+            return {}, decisions
+
         # getattr: e2e tests build engines via __new__ without __init__.
         embedding_service = getattr(self, "_embedding_service", None)
-        if embedding_service is None or not contents or not profile.preferences.interests:
-            return {}
-        if not any(
-            str(content.source_strategy or "").strip().lower() != "explore" for content in contents
-        ):
-            return {}
+        if embedding_service is None:
+            return record_batch_failure("embedding_service_missing")
 
-        labels = self._embedding_prefilter_interest_labels(profile)
+        preferences = getattr(profile, "preferences", None)
+        interests = getattr(preferences, "interests", None)
+        if not interests:
+            return record_batch_failure(PREFILTER_NO_INTERESTS_STATUS)
+        if not any(
+            classify_prefilter_context(source_context, content.source_strategy) != "explore"
+            for content in contents
+        ):
+            return record_batch_failure(PREFILTER_EXPLORE_EXEMPT_STATUS)
+
+        try:
+            labels = self._embedding_prefilter_interest_labels(profile)
+        except Exception:
+            logger.warning(
+                "embedding prefilter: interest labels unavailable; failing open", exc_info=True
+            )
+            return record_batch_failure("interest_embedding_invalid")
         if not labels:
-            return {}
+            return record_batch_failure("interest_embedding_missing")
 
         from openbiliclaw.llm.embedding import cosine_similarity
 
+        ranked_required_interests = sorted(
+            interests,
+            key=_profile_interest_weight,
+            reverse=True,
+        )
+        required_labels = {
+            str(getattr(interest, "name", "") or "").strip()
+            for interest in ranked_required_interests[:_EVAL_RECALL_POOL_CAP]
+            if str(getattr(interest, "name", "") or "").strip()
+        }
+
+        def valid_vector(
+            raw_vector: object,
+            *,
+            expected_dimension: int | None = None,
+        ) -> list[float] | None:
+            if not isinstance(raw_vector, list) or not raw_vector:
+                return None
+            vector: list[float] = []
+            for value in raw_vector:
+                if isinstance(value, bool) or not isinstance(value, int | float):
+                    return None
+                number = float(value)
+                if not math.isfinite(number):
+                    return None
+                vector.append(number)
+            if expected_dimension is not None and len(vector) != expected_dimension:
+                return None
+            if not any(value != 0.0 for value in vector):
+                return None
+            return vector
+
         interest_vectors: list[list[float]] = []
+        expected_dimension: int | None = None
         for label in labels:
             try:
-                vector = await embedding_service.embed(label)
+                raw_vector = await embedding_service.embed(label)
             except Exception:
-                logger.debug(
-                    "embedding prefilter: interest embed failed for %r", label, exc_info=True
+                logger.warning(
+                    "embedding prefilter: interest embed failed; failing batch open",
+                    exc_info=True,
                 )
+                return record_batch_failure("interest_embedding_error")
+            if not raw_vector:
+                if label in required_labels:
+                    logger.warning(
+                        "embedding prefilter: required interest embed missing; failing batch open"
+                    )
+                    return record_batch_failure("interest_embedding_missing")
+                # Compact domain labels supplement the canonical interest
+                # list. Some lightweight/test services do not materialize
+                # every derived label; missing an optional supplement is safe
+                # only while every canonical interest remains represented.
+                logger.debug("embedding prefilter: optional domain embed missing")
                 continue
-            if vector:
-                interest_vectors.append(vector)
-        if not interest_vectors:
-            return {}
+            vector = valid_vector(raw_vector, expected_dimension=expected_dimension)
+            if vector is None:
+                logger.warning("embedding prefilter: interest vector invalid; failing batch open")
+                return record_batch_failure("interest_embedding_invalid")
+            expected_dimension = expected_dimension or len(vector)
+            interest_vectors.append(vector)
+
+        if not interest_vectors or expected_dimension is None:
+            return record_batch_failure("interest_embedding_missing")
 
         filtered_scores: dict[int, float] = {}
         for index, content in enumerate(contents):
-            if str(content.source_strategy or "").strip().lower() == "explore":
+            context_class = classify_prefilter_context(source_context, content.source_strategy)
+            if context_class == "explore":
+                record(
+                    index,
+                    similarity=None,
+                    would_filter=False,
+                    status=PREFILTER_EXPLORE_EXEMPT_STATUS,
+                    fail_open=False,
+                )
                 continue
             content_text = self._embedding_prefilter_content_text(content)
             if not content_text:
+                record(
+                    index,
+                    similarity=None,
+                    would_filter=False,
+                    status="content_text_missing",
+                    fail_open=True,
+                )
                 continue
             try:
-                content_vec = await embedding_service.embed(content_text)
+                raw_content_vector = await embedding_service.embed(content_text)
             except Exception:
                 logger.debug(
                     "embedding prefilter: content embed failed for %s",
                     content.content_id or content.bvid or content.title,
                     exc_info=True,
                 )
+                record(
+                    index,
+                    similarity=None,
+                    would_filter=False,
+                    status="content_embedding_error",
+                    fail_open=True,
+                )
                 continue
-            if not content_vec:
+            if not raw_content_vector:
+                record(
+                    index,
+                    similarity=None,
+                    would_filter=False,
+                    status="content_embedding_missing",
+                    fail_open=True,
+                )
                 continue
-            max_sim = max(
-                (cosine_similarity(content_vec, interest_vec) for interest_vec in interest_vectors),
-                default=0.0,
+            content_vector = valid_vector(
+                raw_content_vector,
+                expected_dimension=expected_dimension,
             )
+            if content_vector is None:
+                record(
+                    index,
+                    similarity=None,
+                    would_filter=False,
+                    status="content_embedding_invalid",
+                    fail_open=True,
+                )
+                continue
+            try:
+                max_sim = max(
+                    (
+                        cosine_similarity(content_vector, interest_vector)
+                        for interest_vector in interest_vectors
+                    ),
+                    default=0.0,
+                )
+            except Exception:
+                logger.warning(
+                    "embedding prefilter: similarity failed; candidate kept", exc_info=True
+                )
+                record(
+                    index,
+                    similarity=None,
+                    would_filter=False,
+                    status="similarity_error",
+                    fail_open=True,
+                )
+                continue
+            if not math.isfinite(max_sim):
+                record(
+                    index,
+                    similarity=None,
+                    would_filter=False,
+                    status="similarity_error",
+                    fail_open=True,
+                )
+                continue
             max_sim = max(0.0, min(1.0, max_sim))
-            if max_sim < _EMBEDDING_PREFILTER_MIN_SIMILARITY:
+            would_filter = max_sim < _EMBEDDING_PREFILTER_MIN_SIMILARITY
+            if would_filter:
                 filtered_scores[index] = round(max_sim * 0.5, 4)
-        return filtered_scores
+            record(
+                index,
+                similarity=round(max_sim, 6),
+                would_filter=would_filter,
+                status=PREFILTER_OK_STATUS,
+                fail_open=False,
+            )
+        return filtered_scores, decisions
+
+    def _persist_prefilter_shadow_decisions(
+        self,
+        decisions: Sequence[PrefilterShadowDecision],
+    ) -> bool:
+        """Best-effort audit insert; failure never removes an LLM candidate."""
+
+        if not decisions:
+            return False
+        database = getattr(self, "_database", None)
+        recorder = getattr(database, "record_prefilter_shadow_decisions", None)
+        if not callable(recorder):
+            return False
+        try:
+            inserted = int(recorder([decision.as_storage_record() for decision in decisions]) or 0)
+        except Exception:
+            logger.warning(
+                "prefilter shadow telemetry insert failed; candidates remain on LLM path",
+                exc_info=True,
+            )
+            return False
+        if inserted != len(decisions):
+            logger.warning(
+                "prefilter shadow telemetry insert incomplete: expected=%d inserted=%d",
+                len(decisions),
+                inserted,
+            )
+            return False
+        return True
+
+    def _complete_prefilter_shadow_decisions(
+        self,
+        decisions: Sequence[PrefilterShadowDecision],
+        contents: Sequence[DiscoveredContent],
+        raw_scores: Mapping[int, float],
+        *,
+        persisted: bool,
+    ) -> None:
+        """Best-effort score join; incomplete telemetry keeps the gate closed."""
+
+        if not persisted or not decisions:
+            return
+        outcomes: list[PrefilterShadowOutcome] = []
+        try:
+            for decision in decisions:
+                score = raw_scores.get(decision.content_index)
+                if score is None:
+                    # Provider/parse failures settle as synthetic 0.0 for the
+                    # product path, but they are not eventual model scores.
+                    # Leave those decisions unjoined so gate coverage closes.
+                    continue
+                threshold = self._admission_threshold_for_item(contents[decision.content_index])
+                normalized_score = self._clamp_score(score)
+                outcomes.append(
+                    PrefilterShadowOutcome(
+                        decision_id=decision.decision_id,
+                        llm_score=normalized_score,
+                        admission_threshold=threshold,
+                        admission_result=normalized_score >= threshold,
+                    )
+                )
+            if not outcomes:
+                return
+        except Exception:
+            logger.warning(
+                "prefilter shadow telemetry outcome construction failed; gate remains closed",
+                exc_info=True,
+            )
+            return
+
+        database = getattr(self, "_database", None)
+        completer = getattr(database, "complete_prefilter_shadow_decisions", None)
+        if not callable(completer):
+            return
+        try:
+            updated = int(completer([outcome.as_storage_record() for outcome in outcomes]) or 0)
+        except Exception:
+            logger.warning(
+                "prefilter shadow telemetry score join failed; gate remains closed",
+                exc_info=True,
+            )
+            return
+        if updated != len(outcomes):
+            logger.warning(
+                "prefilter shadow telemetry score join incomplete: expected=%d updated=%d",
+                len(outcomes),
+                updated,
+            )
 
     def _supports_multimodal_evaluation(self) -> bool:
         override = getattr(self, "_multimodal_vision_supported_override", None)
@@ -1481,8 +1839,22 @@ class ContentDiscoveryEngine:
         prefilter_mode = self._normalize_eval_prefilter_mode(
             getattr(self, "eval_prefilter_mode", _EMBEDDING_PREFILTER_DEFAULT_MODE)
         )
+        shadow_decisions: list[PrefilterShadowDecision] = []
+        shadow_persisted = False
         if prefilter_mode != "off":
-            prefiltered = await self._embedding_prefilter([content], profile)
+            prefiltered, shadow_decisions = await self._embedding_prefilter_shadow_analysis(
+                [content],
+                profile,
+                source_context=source_context,
+                profile_digest=profile_digest,
+            )
+            shadow_persisted = self._persist_prefilter_shadow_decisions(shadow_decisions)
+            evidence_complete = len(shadow_decisions) == 1 and shadow_persisted
+            if prefilter_mode == "enforce" and not evidence_complete:
+                logger.warning(
+                    "prefilter enforce decision telemetry unavailable; failing candidate open"
+                )
+                prefiltered = {}
             if 0 in prefiltered:
                 prefilter_score = prefiltered[0]
                 max_sim = prefilter_score * 2.0
@@ -1546,9 +1918,10 @@ class ContentDiscoveryEngine:
             payload = parse_llm_json_tolerant(str(getattr(response, "content", "")).strip())
             if not isinstance(payload, dict):
                 raise ValueError("Expected JSON object from content evaluation")
-            if not isinstance(payload, dict):
-                return 0.0
-            score = self._clamp_score(payload.get("score", 0.0))
+            validated_score = self._validated_model_score(payload.get("score"))
+            if validated_score is None:
+                raise ValueError("Expected finite content evaluation score in [0, 1]")
+            score = validated_score
             checked_reason = validated_text_field(
                 payload.get("reason", ""), field="reason", content_key=content.bvid
             )
@@ -1559,9 +1932,8 @@ class ContentDiscoveryEngine:
                 payload.get("franchise_key", ""), field="franchise_key", content_key=content.bvid
             )
             if checked_reason is None or checked_topic_group is None or checked_franchise is None:
-                # _clamp_score() silently coerces a bad score to 0.0 instead of
-                # raising, so a non-string reason would otherwise be repr'd into
-                # relevance_reason and surface as delight copy.
+                # A non-string reason must not be repr'd into relevance_reason
+                # and surface as delight copy.
                 raise ValueError("Non-string field in content evaluation response")
             normalized_reason = normalize_evaluation_reason(score, checked_reason)
             if normalized_reason is None:
@@ -1590,6 +1962,12 @@ class ContentDiscoveryEngine:
                     franchise_key,
                 ),
             )
+        self._complete_prefilter_shadow_decisions(
+            shadow_decisions,
+            [content],
+            {0: score},
+            persisted=shadow_persisted,
+        )
         return score
 
     # Safety cap applied at the evaluator level regardless of caller.
@@ -1761,9 +2139,27 @@ class ContentDiscoveryEngine:
             getattr(self, "eval_prefilter_mode", _EMBEDDING_PREFILTER_DEFAULT_MODE)
         )
         filtered_local_indices: set[int] = set()
+        shadow_decisions: list[PrefilterShadowDecision] = []
+        shadow_contents: list[DiscoveredContent] = []
+        shadow_eval_indices: tuple[int, ...] = ()
+        shadow_persisted = False
         if prefilter_mode != "off":
             prefilter_contents = [eval_contents[i] for i in uncached_indices]
-            prefiltered_scores = await self._embedding_prefilter(prefilter_contents, profile)
+            (
+                prefiltered_scores,
+                shadow_decisions,
+            ) = await self._embedding_prefilter_shadow_analysis(
+                prefilter_contents,
+                profile,
+                source_context=source_context,
+                profile_digest=profile_digest,
+            )
+            shadow_contents = prefilter_contents
+            shadow_eval_indices = tuple(uncached_indices)
+            shadow_persisted = self._persist_prefilter_shadow_decisions(shadow_decisions)
+            evidence_complete = (
+                len(shadow_decisions) == len(prefilter_contents) and shadow_persisted
+            )
             would_filter_count = len(prefiltered_scores)
             if prefilter_mode == "shadow":
                 for local_index, prefilter_score in prefiltered_scores.items():
@@ -1794,6 +2190,12 @@ class ContentDiscoveryEngine:
                         len(prefilter_contents),
                         would_filter_count,
                         len(uncached_indices),
+                    )
+                    prefiltered_scores = {}
+                    would_filter_count = 0
+                elif not evidence_complete:
+                    logger.warning(
+                        "prefilter enforce decision telemetry unavailable; failing batch open"
                     )
                     prefiltered_scores = {}
                     would_filter_count = 0
@@ -1886,11 +2288,14 @@ class ContentDiscoveryEngine:
         # global provider-facing cap across all discovery work; this local
         # worker cap prevents one large eval job from creating unbounded
         # child tasks or occupying every global LLM slot.
+        raw_model_scores: dict[int, float] = {}
+
         async def _run_batch(
             batch_idx: int,
             batch_indices: list[int],
         ) -> tuple[list[int], list[float]]:
             batch_contents = [eval_contents[i] for i in batch_indices]
+            valid_batch_score_indices: set[int] = set()
             t0 = time.monotonic()
             batch_scores = await self._evaluate_batch(
                 batch_contents,
@@ -1901,7 +2306,13 @@ class ContentDiscoveryEngine:
                 evaluation_bucket=evaluation_bucket,
                 normal_cache_enabled=normal_cache_enabled,
                 apply_batch_caps=False,
+                valid_score_indices=valid_batch_score_indices,
             )
+            for batch_local_index, (eval_content_index, raw_score) in enumerate(
+                zip(batch_indices, batch_scores, strict=True)
+            ):
+                if batch_local_index in valid_batch_score_indices:
+                    raw_model_scores[eval_content_index] = float(raw_score)
             if not caller_recap_needed:
                 self._apply_intra_batch_caps(batch_contents, batch_scores)
             elapsed = time.monotonic() - t0
@@ -1993,6 +2404,18 @@ class ContentDiscoveryEngine:
         final_scores = finalize_scores(
             effective_batch_size=batch_size,
             apply_cached_caps=caller_recap_needed,
+        )
+        shadow_raw_scores = {
+            decision.content_index: raw_model_scores[shadow_eval_indices[decision.content_index]]
+            for decision in shadow_decisions
+            if decision.content_index < len(shadow_eval_indices)
+            and shadow_eval_indices[decision.content_index] in raw_model_scores
+        }
+        self._complete_prefilter_shadow_decisions(
+            shadow_decisions,
+            shadow_contents,
+            shadow_raw_scores,
+            persisted=shadow_persisted,
         )
         return final_scores
 
@@ -2341,7 +2764,12 @@ class ContentDiscoveryEngine:
 
         embedding_service = getattr(self, "_embedding_service", None)
         if embedding_service is None:
-            return "embedding-disabled"
+            return stable_json_digest(
+                {
+                    "namespace_contract": "evaluation-embedding-v1",
+                    "service_type": "disabled",
+                }
+            )
 
         service_type = type(embedding_service)
         identity: dict[str, object] = {
@@ -2748,7 +3176,10 @@ class ContentDiscoveryEngine:
                 results.append(None)
                 continue
             item_result: dict[str, Any] = raw_item
-            score = self._clamp_score(item_result.get("score", 0.0))
+            score = self._validated_model_score(item_result.get("score"))
+            if score is None:
+                results.append(None)
+                continue
             checked_reason = validated_text_field(
                 item_result.get("reason", ""), field="reason", content_key=content.bvid
             )
@@ -2901,6 +3332,7 @@ class ContentDiscoveryEngine:
         apply_batch_caps: bool = True,
         max_split_depth: int = 3,
         max_extra_requests: int = 6,
+        valid_score_indices: set[int] | None = None,
     ) -> list[float]:
         """Retry only missing members from successful malformed responses."""
         from openbiliclaw.llm.prompts import content_evaluation_clock
@@ -2910,6 +3342,8 @@ class ContentDiscoveryEngine:
             evaluated_at = evaluated_at or current_evaluated_at
             evaluation_bucket = evaluation_bucket or current_bucket
         results: list[float | None] = [None] * len(batch)
+        if valid_score_indices is not None:
+            valid_score_indices.clear()
         budget = {"remaining": max(0, int(max_extra_requests))}
         normal_cache_enabled = normal_cache_enabled and self._batch_normal_cache_eligible(
             batch,
@@ -2948,11 +3382,13 @@ class ContentDiscoveryEngine:
 
         await run(list(range(len(batch))), 0)
         final: list[float] = []
-        for content, score in zip(batch, results, strict=True):
+        for index, (content, score) in enumerate(zip(batch, results, strict=True)):
             if score is None:
                 content.relevance_reason = "evaluation_response_missing"
                 final.append(0.0)
             else:
+                if valid_score_indices is not None:
+                    valid_score_indices.add(index)
                 final.append(score)
         if apply_batch_caps:
             self._apply_intra_batch_caps(batch, final)
@@ -2970,6 +3406,25 @@ class ContentDiscoveryEngine:
         else:
             value = 0.0
         return max(0.0, min(1.0, round(value, 4)))
+
+    @classmethod
+    def _validated_model_score(cls, raw_value: object) -> float | None:
+        """Return a production-valid evaluator score without inventing zero."""
+
+        if isinstance(raw_value, bool):
+            return None
+        if isinstance(raw_value, int | float):
+            value = float(raw_value)
+        elif isinstance(raw_value, str):
+            try:
+                value = float(raw_value)
+            except ValueError:
+                return None
+        else:
+            return None
+        if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+            return None
+        return cls._clamp_score(value)
 
     @staticmethod
     def _merge_duplicates(results: list[DiscoveredContent]) -> list[DiscoveredContent]:

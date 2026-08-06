@@ -2106,6 +2106,7 @@ class SchedulerConfigOut(BaseModel):
     extension_disconnect_grace_seconds: int = 90
     discovery_cron: str = "0 */8 * * *"
     pool_target_count: int = 300
+    copy_ready_target_count: int = Field(default=90, ge=0, le=600)
     pool_source_shares: dict[str, int] = Field(default_factory=dict)
     account_sync_interval_hours: int = 6
     source_incremental_hours: int = 24
@@ -2143,6 +2144,15 @@ class SchedulerConfigOut(BaseModel):
     auto_update_allowed_remotes: list[str] = Field(default_factory=list)
 
 
+class SoulConfigOut(BaseModel):
+    preference_prompt_view: Literal["legacy", "compact-v1"] = "legacy"
+    awareness_prompt_view: Literal["legacy", "compact-v1"] = "compact-v1"
+    insight_prompt_view: Literal["legacy", "compact-v1"] = "legacy"
+    posture_gate_mode: Literal["shadow", "enforce", "off"] = "shadow"
+    posture_gate_force_enforce: bool = False
+    topic_lifecycle_serialization: Literal["off", "on"] = "off"
+
+
 class DiscoveryConfigOut(BaseModel):
     unified_keyword_planner_enabled: bool = True
     kw_cache_high: int = 30
@@ -2154,6 +2164,7 @@ class DiscoveryConfigOut(BaseModel):
     claim_lease_minutes: int = 10
     planner_poll_seconds: int = 120
     plan_ttl_hours: int = 12
+    keyword_digest_grace_hours: int = Field(default=24, ge=0, le=168)
     admission_min_score: float = 0.60
     eval_prefilter_mode: Literal["off", "shadow", "enforce"] = "shadow"
     candidate_eval_concurrency: int = Field(default=3, ge=1, le=3)
@@ -2285,6 +2296,7 @@ class ConfigResponse(BaseModel):
     saved_sync: SavedSyncConfigOut = Field(default_factory=SavedSyncConfigOut)
     storage: StorageConfigOut = Field(default_factory=StorageConfigOut)
     logging: LoggingConfigOut = Field(default_factory=LoggingConfigOut)
+    soul: SoulConfigOut = Field(default_factory=SoulConfigOut)
     issues: list[ConfigIssueOut] = Field(default_factory=list)
 
 
@@ -2304,6 +2316,7 @@ class ConfigUpdateIn(BaseModel):
     saved_sync: SavedSyncConfigUpdateIn | None = None
     storage: dict[str, object] | None = None
     logging: dict[str, object] | None = None
+    soul: dict[str, object] | None = None
 
     @field_validator("saved_sync", mode="before")
     @classmethod

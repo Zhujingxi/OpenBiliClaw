@@ -649,6 +649,11 @@ images: proxy foreground + refresh prefetch → app-stable lane (total 4 / bg 3,
 │             → pool accounting · durable seen_items ledger │
 │ Bangumi public API → search/ranked/date producer → shared eval │
 │ Eval clock: published_at + exact UTC evaluated_at → hourly cache invalidation │
+│ Evaluator prefilter stays shadow → privacy-safe decision/raw-score join → read-only gate (no auto-enforce) │
+│ Named cognition views → task gate: compact only for awareness_confusions; others legacy │
+│ Token diet: per-offset preference packing; weighted recent/judged/relevant/important insight≤40 → full merge │
+│ Keyword planner → safe 24h cross-digest pending reconcile → deficit/generate/claim (0=hard expiry) │
+│ Admitted backlog → fill copy-ready watermark deficit → async refill after serve (0=legacy drain-all) │
 │ API projected stock → 3×30 workers → serial admit; OpenClaw first batch≤4 → copy≤4/no split retry → UI │
 │ API raw-empty → wake under-share sources now → real progress resets / duplicate-only waves back off │
 │ Delight gate: formal copy/topic ready + seen_items guard → score/snapshot → UI × writes seen ledger │
