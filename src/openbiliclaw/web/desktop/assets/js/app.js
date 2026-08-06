@@ -8667,13 +8667,13 @@ ${cardFeedbackBarHtml()}`;
           state: "applied",
           requested_revision: revision,
           applied_revision: revision,
-        });
+        }, { source: "runtime-event" });
       } else if (event.type === "config_reload_failed") {
         configApplyEventAccepted = applyConfigApplyStatus({
           state: "failed",
           requested_revision: Number(event.revision || 0),
           applied_revision: 0,
-        });
+        }, { source: "runtime-event" });
       }
       scheduleDesktopPendingConfirmationRefresh();
       if (event.type === "refresh.pool_updated" && typeof event.pool_available_count === "number") {
@@ -10104,6 +10104,7 @@ ${cardFeedbackBarHtml()}`;
     let settingsSaveInFlight = false;
     let settingsSavePhase = "idle";
     let settingsPendingApplyRevision = 0;
+    let settingsLastTerminalRevision = 0;
 
     function settingsFormHasActiveEditor() {
       const settingsForm = document.getElementById("settingsForm");
@@ -10151,18 +10152,32 @@ ${cardFeedbackBarHtml()}`;
       if (save) save.disabled = settingsSaveInFlight || count === 0;
     }
 
-    function applyConfigApplyStatus(snapshot) {
+    function applyConfigApplyStatus(snapshot, { source = "status" } = {}) {
       const applyState = String(snapshot?.state || "");
       const requested = Number(snapshot?.requested_revision || 0);
       const applied = Number(snapshot?.applied_revision || 0);
+      const fromRuntimeEvent = source === "runtime-event";
+      const terminalRevision = Math.max(requested, applied);
       let reachedTerminal = false;
       if (
         settingsPendingApplyRevision > 0 &&
         requested < settingsPendingApplyRevision
       ) return false;
       if (
+        terminalRevision > 0 &&
+        ["applied", "failed"].includes(applyState) &&
+        terminalRevision <= settingsLastTerminalRevision
+      ) return false;
+      if (
         settingsPendingApplyRevision === 0 &&
-        ["applied", "failed"].includes(applyState)
+        ["queued", "applying"].includes(applyState) &&
+        settingsLastTerminalRevision > 0 &&
+        requested <= settingsLastTerminalRevision
+      ) return false;
+      if (
+        settingsPendingApplyRevision === 0 &&
+        ["applied", "failed"].includes(applyState) &&
+        !fromRuntimeEvent
       ) return false;
 
       if (["queued", "applying"].includes(applyState)) {
@@ -10170,24 +10185,45 @@ ${cardFeedbackBarHtml()}`;
         settingsSavePhase = "applying";
       } else if (
         applyState === "applied" &&
-        settingsPendingApplyRevision > 0 &&
-        applied >= settingsPendingApplyRevision
+        (
+          (settingsPendingApplyRevision > 0 && applied >= settingsPendingApplyRevision) ||
+          (fromRuntimeEvent && requested > 0)
+        )
       ) {
         settingsPendingApplyRevision = 0;
         settingsSavePhase = "applied";
+        settingsLastTerminalRevision = Math.max(settingsLastTerminalRevision, terminalRevision);
         reachedTerminal = true;
       } else if (
         applyState === "failed" &&
-        settingsPendingApplyRevision > 0 &&
-        requested >= settingsPendingApplyRevision
+        (
+          (settingsPendingApplyRevision > 0 && requested >= settingsPendingApplyRevision) ||
+          (fromRuntimeEvent && requested > 0)
+        )
       ) {
         settingsPendingApplyRevision = 0;
         settingsSavePhase = "failed";
+        settingsLastTerminalRevision = Math.max(settingsLastTerminalRevision, terminalRevision);
         reachedTerminal = true;
       }
       renderSettingsDirty();
-      if (reachedTerminal) scheduleSettingsHydrationIfSafe();
+      if (reachedTerminal) {
+        if (settingsSavePhase === "failed" && settingsDirtyFields.size > 0) {
+          // Keep a new local draft in the form, but refresh the canonical
+          // snapshot used by Discard. Otherwise a failed save followed by a
+          // second edit would make Discard restore the rejected candidate.
+          void refreshConfigSnapshotOnly();
+        } else {
+          scheduleSettingsHydrationIfSafe();
+        }
+      }
       return true;
+    }
+
+    async function refreshConfigSnapshotOnly() {
+      const snapshot = await requestJson(ENDPOINTS.config, { cache: "no-store" });
+      const config = snapshot?.config || snapshot;
+      if (config && typeof config === "object") state.config = config;
     }
 
     async function refreshConfigApplyStatus() {

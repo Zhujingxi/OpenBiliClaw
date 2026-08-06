@@ -267,6 +267,46 @@ async def test_put_config_rolls_back_when_hot_reload_fails(
 
 
 @pytest.mark.asyncio
+async def test_put_config_restores_in_memory_runtime_after_restart_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A post-rebuild task failure must not leave the rejected config live."""
+    config_path = tmp_path / "config.toml"
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    save_config(_valid_config(), config_path)
+    app = create_app(memory_manager=object(), database=object(), soul_engine=object())
+
+    async def fail_background_restart(
+        app_arg: object,  # noqa: ARG001
+        *,
+        run_post_reload_llm_work: bool = True,  # noqa: ARG001
+    ) -> None:
+        raise RuntimeError("simulated background restart failure")
+
+    monkeypatch.setattr(
+        app.state.runtime_context,
+        "restart_background_tasks",
+        fail_background_restart,
+    )
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.put(
+            "/api/config",
+            json={"llm": {"openai": {"model": "gpt-4.1-mini"}}},
+        )
+        status = await _wait_for_apply_state(client, "failed")
+
+    assert response.status_code == 202
+    assert "background restart failure" in status["error"]
+    assert load_config(config_path).llm.openai.model == "gpt-4o-mini"
+    assert app.state.runtime_context.config.llm.openai.model == "gpt-4o-mini"
+
+
+@pytest.mark.asyncio
 async def test_put_config_explains_blank_hot_reload_timeout(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

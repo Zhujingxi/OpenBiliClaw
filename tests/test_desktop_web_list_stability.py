@@ -65,9 +65,10 @@ def test_pool_events_do_not_redraw_the_recommendation_grid() -> None:
     assert "schedulePlatformAvailabilityRefresh();" in handle_runtime
     assert 'event.type === "config_reloaded" && !configApplyEventAccepted' in handle_runtime
     assert "scheduleBackendHydration();" not in handle_runtime
-    assert "if (reachedTerminal) scheduleSettingsHydrationIfSafe();" in _function_body(
-        "applyConfigApplyStatus"
-    )
+    apply_status = _function_body("applyConfigApplyStatus")
+    assert "if (reachedTerminal)" in apply_status
+    assert "scheduleSettingsHydrationIfSafe();" in apply_status
+    assert "refreshConfigSnapshotOnly();" in apply_status
     assert 'event.type === "refresh.pool_updated" && Boolean(state.initStatus?.initialized)' in (
         handle_runtime
     )

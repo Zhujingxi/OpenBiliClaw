@@ -608,7 +608,7 @@ confirmation entry (pending list/cards) → one anchor(kind+ref+generation) → 
                           ├→ one context digest → prompt/history/event/learn/settlement provenance
                           ├→ action local≤1s: completed 200 / blocked 202 → popup/mobile/desktop poll 1/2/5s, ≤30s
                           └→ confusion FIFO≤5 / head fencing / 12h recovery
-config save: synchronous reload when idle; busy lane → persist → latest-wins background apply queue → final receipt
+config save: persist → HTTP 202 queued/apply_revision → latest-wins background apply queue → apply-status / final receipt
 config hot reload: accepting drain old worker → atomic pause/revoke → new worker; 25m safety window
 realtime: runtime-stream 20s idle heartbeat → transient close shows reconnecting and retries
 images: proxy foreground + refresh prefetch → app-stable lane (total 4 / bg 3, fg priority)

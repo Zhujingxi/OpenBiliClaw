@@ -2628,15 +2628,28 @@ def create_app(
                 else " 运行时组件已热重载，新配置立即生效。"
             )
         logger.info("Config hot-reload succeeded: revision=%d", item.revision)
-        with suppress(Exception):
-            await ctx.event_hub.publish(
-                {
-                    "type": "config_reloaded",
-                    "revision": item.revision,
-                    "message": "配置已热重载，运行时组件已重建。",
-                }
-            )
         return message
+
+    async def _restore_runtime_after_failed_config_apply() -> None:
+        """Bring the in-memory runtime back to the persisted last-good config.
+
+        ``RuntimeContext.rebuild_from_config`` publishes the new component set
+        before the background-task restart step.  If that later step fails, the
+        config file rollback alone would leave ``ctx.config`` describing the
+        rejected candidate.  Rebuilding the last-good config is best effort: a
+        second failure is logged, while the queue still reports the original
+        apply error and keeps the on-disk rollback semantics.
+        """
+        try:
+            await _rebuild_runtime_with_lane_handoff(
+                copy.deepcopy(config_last_good),
+                run_post_reload_llm_work=False,
+            )
+        except Exception:
+            logger.critical(
+                "Queued config rollback restored the file but not the in-memory runtime",
+                exc_info=True,
+            )
 
     async def _run_config_apply_queue() -> None:
         """Apply the newest queued revision; intermediate pending saves coalesce."""
@@ -2653,12 +2666,14 @@ def create_app(
                     "applying",
                     f"正在后台应用配置修订 {item.revision}。",
                 )
+                runtime_apply_started = False
                 try:
                     proxy_cfg = getattr(item.config, "network", None)
                     set_outbound_proxy(
                         str(getattr(proxy_cfg, "proxy", "") or ""),
                         mode=str(getattr(proxy_cfg, "mode", "system") or "system"),
                     )
+                    runtime_apply_started = True
                     message = await _apply_runtime_config_revision(item)
                 except asyncio.CancelledError:
                     config_apply_pending = item
@@ -2692,6 +2707,8 @@ def create_app(
                                 str(getattr(proxy_cfg, "proxy", "") or ""),
                                 mode=str(getattr(proxy_cfg, "mode", "system") or "system"),
                             )
+                            if runtime_apply_started:
+                                await _restore_runtime_after_failed_config_apply()
                         except Exception as restore_exc:
                             logger.critical(
                                 "Queued config rollback failed after hot-reload exception",
@@ -2736,6 +2753,14 @@ def create_app(
                                 f"配置修订 {item.revision} 已生效；"
                                 f"修订 {config_apply_pending.revision} 等待应用。"
                             ),
+                        )
+                    with suppress(Exception):
+                        await ctx.event_hub.publish(
+                            {
+                                "type": "config_reloaded",
+                                "revision": item.revision,
+                                "message": message,
+                            }
                         )
         finally:
             config_apply_task = None

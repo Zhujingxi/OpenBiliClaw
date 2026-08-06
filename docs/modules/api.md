@@ -15,13 +15,13 @@
 
 ## 配置保存与后台应用
 
-`PUT /api/config` 把“持久化成功”和“运行时已经切换”分成两个明确阶段。请求仍在 `_CONFIG_SAVE_LOCK` 内完成校验、`config.toml.bak` 快照、`config.toml` 写入和凭据存储；运行时 lane 空闲时继续同步热重载并返回 `200 apply_state="applied"`。若对话执行、对话结算、事件 owner 或另一轮 runtime handoff 正忙，请求不会等待最长 25 分钟，而是立即返回 `202 apply_state="queued"`、`apply_revision` 与已脱敏配置快照。
+`PUT /api/config` 把“持久化成功”和“运行时已经切换”分成两个明确阶段。请求仍在 `_CONFIG_SAVE_LOCK` 内完成校验、`config.toml.bak` 快照、`config.toml` 写入和凭据存储，然后统一立即返回 `202 apply_state="queued"`、`apply_revision` 与已脱敏配置快照；运行时 lane 由 app-owned latest-wins 队列在后台安全应用，前端通过 `GET /api/config/apply-status` 或 runtime event 观察终态，不把 202 当作失败。
 
 后台配置应用队列为 app-owned、latest-wins：正在应用的修订不会被取消，尚未开始的多个修订会合并为最新一份；因为每次 PATCH 都基于最新已落盘配置构建，合并不会丢掉前一轮已保存字段。成功广播 `config_reloaded`；失败且没有更新修订等待时恢复最后一次已生效配置并广播 `config_reload_failed`，若已有更新修订则不回滚覆盖它，直接继续应用最新值。进程在排队期间退出也不会丢配置，下一次启动直接从已落盘 `config.toml` 构建运行时。
 
 | 方法与路径 | 状态 | 契约 |
 |---|---|---|
-| `PUT /api/config` | ✅ | 空闲时 `200 applied`；受保护 lane 正忙时 `202 queued`。响应新增 `apply_state`、`apply_revision`，原有 `reloaded` / `rollback_applied` / `restart_required` 保持兼容。 |
+| `PUT /api/config` | ✅ | 持久化成功后统一返回 `202 queued`；响应新增 `apply_state`、`apply_revision`，原有 `reloaded` / `rollback_applied` / `restart_required` 保持兼容。 |
 | `GET /api/config/apply-status` | ✅ | 返回 `state`、最新请求修订、最后已应用修订、消息、非敏感错误分类和更新时间；不包含配置内容或凭据。 |
 
 guided init 不与待应用配置并行：队列为 `queued/applying` 时 `POST /api/init` 返回 `409 config_applying`；init 已开始时 `PUT /api/config` 仍返回既有 `409 init_running`。
@@ -75,7 +75,7 @@ ID 字段是严格 JSON string，不接受数字、布尔或其它类型的自�
 
 ## 降级配置恢复
 
-`PUT /api/config` 在 `llm_registry_unavailable` 降级态下不再只写盘并要求重启。服务端会复用当前进程已经初始化的数据库、MemoryManager、事件总线、任务注册表和 LLM total gate，通过正常热重载路径原子构造完整的 LLM Registry、Soul、Discovery、Recommendation、来源客户端与 runtime controller。构造全部成功后才同步解除业务 API 的 503 guard，并返回 `reloaded=true`、`restart_required=false`；`/setup/` 和插件设置页可以在同一进程里立即继续。
+`PUT /api/config` 在 `llm_registry_unavailable` 降级态下不再只写盘并要求重启。服务端会复用当前进程已经初始化的数据库、MemoryManager、事件总线、任务注册表和 LLM total gate，通过正常热重载路径原子构造完整的 LLM Registry、Soul、Discovery、Recommendation、来源客户端与 runtime controller。构造全部成功后才解除业务 API 的 503 guard，并在后台应用状态进入 `applied` 后广播 `config_reloaded`；`/setup/` 会等待该终态，插件与桌面设置页也会观察同一状态后继续。
 
 如果核心运行时构造失败，已有 `config.toml` 会从事务备份恢复，响应为 HTTP 503、`ok=false`、`rollback_applied=true`，降级 guard 保持不变。若核心已经成功发布、只是附属后台循环重启失败，则保留已生效的新配置与健康运行时，返回 `ok=true`、`reloaded=true` 并携带 warning，避免把磁盘配置回滚成与内存运行时不一致的旧版本。只有没有可回滚旧文件且进程内激活失败的异常 bootstrap 路径，才保留 `restart_required=true` 兼容兜底。
 

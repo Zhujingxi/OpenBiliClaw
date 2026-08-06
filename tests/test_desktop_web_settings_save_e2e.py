@@ -321,6 +321,30 @@ def test_settings_save_unlocks_before_runtime_apply_finishes(
     expect(bar).to_have_attribute("data-save-state", "dirty")
 
 
+def test_external_runtime_config_event_rehydrates_settings(
+    settings_save_server: tuple[str, SettingsSaveStub],
+    chromium_page: Page,
+) -> None:
+    base_url, stub = settings_save_server
+    page = chromium_page
+    page.goto(f"{base_url}/web/")
+
+    page.get_by_role("button", name="设置", exact=True).click()
+    page.get_by_role("tab", name="平台源").click()
+    share = page.get_by_label("Bilibili 候选池占比")
+    expect(share).to_have_value("5")
+
+    with stub.lock:
+        stub.revision = 7
+        stub.applied_revision = 7
+        stub.apply_state = "applied"
+        stub.config["scheduler"]["pool_source_shares"]["bilibili"] = 7
+    page.evaluate("window.__obcPushRuntime({type: 'config_reloaded', revision: 7})")
+
+    expect(share).to_have_value("7", timeout=3000)
+    expect(page.locator("#settingsSaveMsg")).to_have_text("配置已应用")
+
+
 def test_settings_save_recovers_terminal_status_that_wins_the_response_race(
     settings_save_server: tuple[str, SettingsSaveStub],
     chromium_page: Page,
@@ -359,12 +383,37 @@ def test_settings_failure_rehydrates_rollback_without_overwriting_new_drafts(
         stub.config["scheduler"]["pool_source_shares"]["bilibili"] = 5
     page.evaluate("window.__obcPushRuntime({type: 'config_reload_failed', revision: 7})")
 
-    expect(page.locator("#settingsSaveMsg")).to_have_text(
-        "配置应用失败，已恢复上一次生效配置"
-    )
+    expect(page.locator("#settingsSaveMsg")).to_have_text("配置应用失败，已恢复上一次生效配置")
     expect(share).to_have_value("5")
 
     share.fill("4")
     page.evaluate("window.__obcPushRuntime({type: 'config_reload_failed', revision: 7})")
     expect(page.locator("#settingsSaveMsg")).to_have_text("已修改 1 项，未保存")
     expect(share).to_have_value("4")
+
+
+def test_failed_apply_refreshes_canonical_snapshot_behind_new_draft(
+    settings_save_server: tuple[str, SettingsSaveStub],
+    chromium_page: Page,
+) -> None:
+    base_url, stub = settings_save_server
+    page = chromium_page
+    page.goto(f"{base_url}/web/")
+
+    page.get_by_role("button", name="设置", exact=True).click()
+    page.get_by_role("tab", name="平台源").click()
+    share = page.get_by_label("Bilibili 候选池占比")
+    share.fill("2")
+    page.get_by_role("button", name="保存配置").click()
+    expect(page.locator("#settingsSaveMsg")).to_have_text("配置已保存，正在后台应用…")
+
+    share.fill("4")
+    with stub.lock:
+        stub.revision = 8
+        stub.apply_state = "failed"
+        stub.config["scheduler"]["pool_source_shares"]["bilibili"] = 5
+    page.evaluate("window.__obcPushRuntime({type: 'config_reload_failed', revision: 8})")
+
+    expect(share).to_have_value("4")
+    page.get_by_role("button", name="放弃修改").click()
+    expect(share).to_have_value("5")

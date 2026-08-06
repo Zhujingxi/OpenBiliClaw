@@ -8,6 +8,7 @@
 
 - **适配小红书当前 `/explore` 登录门形态**：search / creator / bootstrap 除可见登录弹层外，也识别可见的登录手机输入框和侧栏本人登录按钮；完整祖先可见性检查会排除隐藏控件与普通笔记里的“登录”文字。真实已登录浏览器验收确认 `/api/sources/status` 可恢复为 `browser_heartbeat / verified`，搜索任务不再被旧 `web_session` 或新版 DOM 误判。
 - **bootstrap scope 与单 scope 上限升级为后端 canonical 契约**：`XhsTaskQueue` 从任务创建时的不可变 payload 读取允许的 `scopes` 与 `max_items_per_scope`，在 partial、final、直接完成和风控失败合并时累计裁剪；未声明 scope、非整数计数和未被 canonical note 接纳的裸 URL 会被丢弃，先到的 canonical 行优先，默认 scope 与扩展统一为 saved / liked / xhs_history。已接纳的同一笔记仍可补发布时间与首个同 identity `xsec_token` / tokenized URL，不增加条目或替换首写标题。扩展重试或分批回传不能再扩大任务预算。真实小规模收藏 / 点赞请求在隔离数据目录复现并覆盖该缺口，回归同时验证首个终态冻结与重复回调零新增事件。
+- **配置保存与后台应用状态统一收口**：`PUT /api/config` 持久化成功后统一立即返回 `202` 与单调 `apply_revision`，由 app-owned latest-wins 队列在后台安全热重载；`GET /api/config/apply-status`、`config_reloaded` 与 `config_reload_failed` 成为桌面 Web、插件和 `/setup/` 的共同状态契约。向导会等待配置真正应用后再进入下一步，热重载失败同时恢复磁盘与内存 last-good runtime；桌面设置页忽略旧 revision 的迟到状态，并在保留新草稿时更新 Discard 使用的 canonical 回滚快照。
 
 ## v0.3.196：候选池即时补给与模型调用瘦身（2026-08-06）
 
