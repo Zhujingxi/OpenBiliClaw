@@ -8,6 +8,7 @@
 
 - **小红书搜索发现不再抢占当前页面**：search task 改为始终在 inactive tab 执行；MAIN-world bridge 只对小红书搜索接口响应提取与既有 DOM collector 等价的公开卡片字段，并通过页面内 replay 缓存交给 isolated task executor，解决隐藏页不挂载虚拟列表时的空结果。DOM 仍作为 schema 漂移兜底，creator 继续后台执行，只有需要点击个人入口和受控滚动的 `bootstrap_profile` 保持前台。真实登录态连续 3 次搜索均在约 4–5 秒返回 20 条笔记，原活动页面 35 次可见性采样全部保持 `visible`；后端、桌面、浏览器插件、Docker 与聚合 Release 统一使用 `0.3.198`。
 - **发布门禁等待 detached saved-sync 完整收尾**：慢速 CI runner 上，测试在 durable `synced` 终态已落盘后继续等待 watchdog done-callback 清理完成，再断言内部 task 集合为空；生产 saved-sync 行为不变，消除数据库终态与事件循环回调之间的时序抖动。
+- **配置保存与后台应用状态统一收口**：`PUT /api/config` 持久化成功后统一立即返回 `202` 与单调 `apply_revision`，由 app-owned latest-wins 队列在后台安全热重载；`GET /api/config/apply-status`、`config_reloaded` 与 `config_reload_failed` 成为桌面 Web、插件和 `/setup/` 的共同状态契约。向导会等待配置真正应用后再进入下一步，热重载失败同时恢复磁盘与内存 last-good runtime；桌面设置页忽略旧 revision 的迟到状态，并在保留新草稿时更新 Discard 使用的 canonical 回滚快照。
 
 ## v0.3.197：来源账号增量同步与登录态可靠性（2026-08-06）
 

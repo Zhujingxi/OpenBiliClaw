@@ -1374,8 +1374,14 @@
     /* 吸底保存栏：任何分类下都能就地看到未保存修改并保存 */
     .settings-savebar { grid-column: 1 / -1; position: sticky; bottom: 0; z-index: 12; display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); flex-wrap: wrap; margin: var(--space-2) calc(var(--space-4) * -1) calc(var(--space-4) * -1); padding: var(--space-3) var(--space-4); border-top: 1px solid var(--border-soft); background: color-mix(in oklab, var(--surface), transparent 6%); backdrop-filter: blur(18px); }
     .settings-savebar[data-dirty="true"] { border-top-color: var(--accent); }
+    .settings-savebar[data-save-state="saving"], .settings-savebar[data-save-state="applying"] { border-top-color: var(--accent); }
+    .settings-savebar[data-save-state="applied"] { border-top-color: var(--success); }
+    .settings-savebar[data-save-state="failed"] { border-top-color: var(--danger); }
     .settings-savebar-msg { color: var(--muted); font-size: var(--text-sm); }
     .settings-savebar[data-dirty="true"] .settings-savebar-msg { color: var(--accent-strong); font-weight: 650; }
+    .settings-savebar[data-save-state="saving"] .settings-savebar-msg, .settings-savebar[data-save-state="applying"] .settings-savebar-msg { color: var(--accent-strong); font-weight: 650; }
+    .settings-savebar[data-save-state="applied"] .settings-savebar-msg { color: var(--success); font-weight: 650; }
+    .settings-savebar[data-save-state="failed"] .settings-savebar-msg { color: var(--danger); font-weight: 650; }
     .settings-savebar-actions { display: flex; gap: var(--space-2); }
     .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
     .source-status-row { min-width: 0; display: grid; gap: var(--space-2); padding: var(--space-3); border: 1px solid var(--border-soft); border-radius: var(--radius-sm); background: color-mix(in oklab, var(--surface), var(--bg) 35%); transition: border-color var(--motion-fast) var(--ease-standard), background var(--motion-fast) var(--ease-standard); }
@@ -1421,6 +1427,7 @@
     .source-credential-actions .small-btn { min-height: 28px; padding: 4px 12px; font-size: 12px; }
     .source-credential-actions .small-btn:disabled { opacity: 0.5; cursor: not-allowed; }
     .toast-container { position: fixed; right: var(--space-4); bottom: var(--space-6); z-index: 90; pointer-events: none; width: 288px; }
+    body:has(#settingsPage:not([hidden])) .toast-container { bottom: calc(96px + env(safe-area-inset-bottom, 0px)); }
     .toast-item { position: absolute; right: 0; pointer-events: auto; width: 100%; padding: var(--space-8) var(--space-5); border-radius: var(--radius-lg); border: 1px solid color-mix(in oklab, var(--accent-light), transparent 40%); background: color-mix(in oklab, var(--fg), transparent 60%); backdrop-filter: blur(24px) saturate(1.3); -webkit-backdrop-filter: blur(24px) saturate(1.3); color: var(--surface); cursor: pointer; transition: bottom 350ms cubic-bezier(.22,1,.36,1), transform 250ms ease, opacity 250ms ease; will-change: transform, bottom; }
     .toast-item.entering { transform: translateX(calc(100% + var(--space-4))); transition: none; }
     .toast-item.exiting { transform: translateX(calc(100% + var(--space-4))); opacity: 0; transition: transform 200ms ease, opacity 200ms ease; pointer-events: none; }

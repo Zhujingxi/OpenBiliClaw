@@ -25,6 +25,50 @@ from openbiliclaw.api.app import create_app
 from openbiliclaw.llm.service import LLMResponseContentError
 
 
+def _wait_for_config_apply(
+    client: Any,
+    expected: str = "applied",
+    *,
+    revision: int | None = None,
+) -> dict[str, object]:
+    """等待后台配置应用进入预期终态。"""
+    for _ in range(200):
+        status = client.get("/api/config/apply-status").json()
+        status_revision = (
+            status.get("applied_revision")
+            if expected == "applied"
+            else status.get("requested_revision")
+        )
+        if status["state"] == expected and (
+            revision is None or status_revision == revision
+        ):
+            return status
+        time.sleep(0.01)
+    pytest.fail(f"后台配置状态未进入 {expected}（revision={revision}）")
+
+
+async def _wait_for_config_apply_async(
+    client: Any,
+    expected: str = "applied",
+    *,
+    revision: int | None = None,
+) -> dict[str, object]:
+    """异步等待后台配置应用进入预期终态。"""
+    for _ in range(200):
+        status = (await client.get("/api/config/apply-status")).json()
+        status_revision = (
+            status.get("applied_revision")
+            if expected == "applied"
+            else status.get("requested_revision")
+        )
+        if status["state"] == expected and (
+            revision is None or status_revision == revision
+        ):
+            return status
+        await asyncio.sleep(0.01)
+    pytest.fail(f"后台配置状态未进入 {expected}（revision={revision}）")
+
+
 def test_extension_debug_relay_route_is_not_registered() -> None:
     """Temporary extension debug events must not have a production API route."""
     source = inspect.getsource(create_app)
@@ -2234,8 +2278,10 @@ class TestBackendAPI:
                 timeout=0.5,
             )
 
-        assert response.status_code == 200
-        assert response.json()["reloaded"] is True
+        assert response.status_code == 202
+        body = response.json()
+        assert body["apply_state"] == "queued"
+        assert body["reloaded"] is False
 
     @pytest.mark.asyncio
     async def test_put_config_setup_suppression_flag_skips_post_reload_llm_work(
@@ -2280,9 +2326,15 @@ class TestBackendAPI:
                 "/api/config",
                 json={"language": "zh", "suppress_background_llm_work": True},
             )
+            body = response.json()
+            await _wait_for_config_apply_async(
+                client,
+                revision=body["apply_revision"],
+            )
 
-        assert response.status_code == 200
-        assert response.json()["reloaded"] is True
+        assert response.status_code == 202
+        assert body["apply_state"] == "queued"
+        assert body["reloaded"] is False
         assert restart_flags == [False]
 
     def test_create_app_bootstrap_shares_database_with_memory_manager(
@@ -11939,7 +11991,7 @@ class TestBackendAPI:
             },
         )
 
-        assert response.status_code == 200
+        assert response.status_code == 202
         data = response.json()
         assert data["ok"] is True
         # Chat-side "fallback_enabled" from legacy clients is accepted but
@@ -11988,7 +12040,7 @@ class TestBackendAPI:
             },
         )
 
-        assert response.status_code == 200, response.text
+        assert response.status_code == 202, response.text
         data = response.json()
         assert data["ok"] is True
         # Write path: no longer dropped.
@@ -12044,7 +12096,7 @@ class TestBackendAPI:
             },
         )
 
-        assert response.status_code == 200, response.text
+        assert response.status_code == 202, response.text
         data = response.json()
         assert data["ok"] is True
         assert cfg.sources.reddit.enabled is True
@@ -12099,7 +12151,7 @@ class TestBackendAPI:
             },
         )
 
-        assert response.status_code == 200, response.text
+        assert response.status_code == 202, response.text
         assert cfg.sources.bangumi.enabled is True
         assert cfg.sources.bangumi.username == "sai"
         assert cfg.sources.bangumi.subject_types == ("anime", "book", "music")
@@ -12179,7 +12231,7 @@ class TestBackendAPI:
             json={"sources": {"bangumi": {"access_token": "live-token"}}},
         )
 
-        assert response.status_code == 200, response.text
+        assert response.status_code == 202, response.text
         assert cfg.sources.bangumi.access_token == "live-token"
         # /v0/me is the source of truth for the username.
         assert cfg.sources.bangumi.username == "resolveduser"
@@ -12260,7 +12312,7 @@ class TestBackendAPI:
             json={"sources": {"bangumi": {"access_token": ""}}},
         )
 
-        assert response.status_code == 200, response.text
+        assert response.status_code == 202, response.text
         assert cfg.sources.bangumi.access_token == ""
         assert _read_token_rejection(database) is None
 
@@ -12283,7 +12335,7 @@ class TestBackendAPI:
             "/api/config",
             json={"sources": {"bangumi": {"username": "sai"}}},
         )
-        assert omitted.status_code == 200, omitted.text
+        assert omitted.status_code == 202, omitted.text
         assert cfg.sources.bangumi.access_token == "keepme"
 
         # Masked echo (contains the **** mask marker): treated as unchanged.
@@ -12291,7 +12343,7 @@ class TestBackendAPI:
             "/api/config",
             json={"sources": {"bangumi": {"access_token": "keep****eep"}}},
         )
-        assert masked.status_code == 200, masked.text
+        assert masked.status_code == 202, masked.text
         assert cfg.sources.bangumi.access_token == "keepme"
 
     def test_put_config_updates_embedding_credentials(
@@ -12349,7 +12401,7 @@ class TestBackendAPI:
                 },
             },
         )
-        assert put_resp.status_code == 200
+        assert put_resp.status_code == 202
         assert cfg.llm.embedding.api_key == "sk-dedicated-embedding-xyz1234567890"
         assert cfg.llm.embedding.base_url == "https://embed.example.com/v1"
 
@@ -12429,7 +12481,7 @@ class TestBackendAPI:
             },
         )
 
-        assert response.status_code == 200
+        assert response.status_code == 202
         data = response.json()
         assert data["ok"] is True
 
@@ -14241,7 +14293,7 @@ class TestEmbeddingAndCompatProviderE2E:
                 },
             },
         )
-        assert put_resp.status_code == 200
+        assert put_resp.status_code == 202
         body = put_resp.json()
         assert body["ok"] is True
 
@@ -14327,7 +14379,7 @@ class TestEmbeddingAndCompatProviderE2E:
                 },
             },
         )
-        assert resp.status_code == 200
+        assert resp.status_code == 202
 
         issues = resp.json()["config"]["issues"]
         fields = [i["field"] for i in issues]
@@ -14358,7 +14410,7 @@ class TestEmbeddingAndCompatProviderE2E:
                 },
             },
         )
-        assert put.status_code == 200
+        assert put.status_code == 202
         assert cfg.llm.embedding.provider == "openai_compatible"
         assert cfg.llm.embedding.api_key == "vllm-token-1234567890"
         assert cfg.llm.embedding.base_url == "http://vllm.internal:8000/v1"
@@ -14425,12 +14477,7 @@ class TestEmbeddingAndCompatProviderE2E:
     # ── Hot-reload verification ─────────────────────────────────────
 
     def test_put_triggers_runtime_hot_reload(self, monkeypatch, tmp_path) -> None:
-        """``rebuild_from_config`` must run successfully when the new
-        config is valid (here: openai default with api_key set). The
-        ``reloaded=true`` flag in the response is the externally
-        observable signal that the registry was actually rebuilt — the
-        popup uses this to decide whether to show "立即生效" vs "重启
-        生效" feedback."""
+        """有效配置写盘返回后，后台必须成功完成运行时重建。"""
         from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig
 
         cfg = Config(llm=LLMConfig(openai=LLMProviderConfig(api_key="sk-old")))
@@ -14450,9 +14497,13 @@ class TestEmbeddingAndCompatProviderE2E:
             },
         )
         body = resp.json()
-        assert body["reloaded"] is True, (
-            f"expected hot-reload to succeed, got message: {body['message']}"
+        assert resp.status_code == 202
+        assert body["reloaded"] is False
+        status = _wait_for_config_apply(
+            client,
+            revision=body["apply_revision"],
         )
+        assert status["state"] == "applied"
 
     # ── Coexistence: both providers usable in one config ────────────
 
@@ -14724,7 +14775,7 @@ class TestEmbeddingAndCompatProviderE2E:
             "/api/config",
             json={"sources": {"reddit": {"cookie": "reddit_session=abc123; token_v2=tok; loid=x"}}},
         )
-        assert response.status_code == 200
+        assert response.status_code == 202
 
         stored = _json.loads(credential_file.read_text(encoding="utf-8"))
         assert stored["cookies"]["reddit_session"] == "abc123"
@@ -14777,7 +14828,7 @@ class TestEmbeddingAndCompatProviderE2E:
             },
         )
 
-        assert response.status_code == 200
+        assert response.status_code == 202
         assert cfg.discovery.candidate_eval_concurrency == 3
         assert cfg.discovery.multimodal_evaluation_enabled is True
         assert cfg.discovery.multimodal_batch_size == 4
@@ -14810,7 +14861,7 @@ class TestEmbeddingAndCompatProviderE2E:
             },
         )
 
-        assert response.status_code == 200
+        assert response.status_code == 202
         assert cfg.discovery.keyframe_max_frames == 9
         assert cfg.discovery.keyframe_fetch_limit == 17
         assert cfg.discovery.danmaku_fetch_limit == 23
@@ -14842,7 +14893,7 @@ class TestEmbeddingAndCompatProviderE2E:
             },
         )
 
-        assert response.status_code == 200
+        assert response.status_code == 202
         discovery = response.json()["config"]["discovery"]
         assert discovery["multimodal_evaluation_enabled"] is True
         assert discovery["multimodal_batch_size"] == 8
@@ -14899,7 +14950,7 @@ class TestEmbeddingAndCompatProviderE2E:
             },
         )
 
-        assert updated.status_code == 200
+        assert updated.status_code == 202
         assert cfg.scheduler.source_incremental_hours == 48
         assert cfg.scheduler.xhs_incremental_hours is None
         assert cfg.scheduler.douyin_incremental_hours == 12
@@ -14955,7 +15006,7 @@ class TestEmbeddingAndCompatProviderE2E:
             },
         )
 
-        assert response.status_code == 200
+        assert response.status_code == 202
         assert cfg.scheduler.pause_on_extension_disconnect is True
         assert cfg.scheduler.extension_disconnect_grace_seconds == 90
         scheduler = response.json()["config"]["scheduler"]
@@ -14991,7 +15042,12 @@ class TestEmbeddingAndCompatProviderE2E:
             },
         )
 
-        assert response.status_code == 200
+        assert response.status_code == 202
+        body = response.json()
+        _wait_for_config_apply(
+            client,
+            revision=body["apply_revision"],
+        )
         runtime_scheduler = client.app.state.runtime_context.runtime_controller.scheduler_config
         assert runtime_scheduler.pause_on_extension_disconnect is True
         assert runtime_scheduler.extension_disconnect_grace_seconds == 12
@@ -15103,7 +15159,7 @@ class TestEmbeddingAndCompatProviderE2E:
             },
         )
 
-        assert response.status_code == 200
+        assert response.status_code == 202
         assert cfg.data_dir == "runtime-data"
         assert cfg.llm.concurrency == 5
         assert response.json()["config"]["llm"]["concurrency"] == 5
@@ -15195,7 +15251,7 @@ class TestEmbeddingAndCompatProviderE2E:
             json={"llm": {"deepseek": {"reasoning_effort": ""}}},
         )
 
-        assert response.status_code == 200
+        assert response.status_code == 202
         assert cfg.llm.deepseek.reasoning_effort == ""
         assert response.json()["config"]["llm"]["deepseek"]["reasoning_effort"] == ""
 
@@ -15225,7 +15281,7 @@ class TestEmbeddingAndCompatProviderE2E:
             },
         )
 
-        assert response.status_code == 200
+        assert response.status_code == 202
         scheduler = response.json()["config"]["scheduler"]
         assert scheduler["refresh_check_interval_seconds"] == 60
         assert scheduler["signal_event_threshold"] == 6
@@ -19431,7 +19487,7 @@ class TestKeywordGenerationModeWrite:
 
         response = client.put("/api/config", json={"discovery": {"keyword_generation_mode": mode}})
 
-        assert response.status_code == 200, response.text
+        assert response.status_code == 202, response.text
         # Both canonical booleans set (no stale residue).
         assert cfg.discovery.inspiration_search_enabled is enabled
         assert cfg.discovery.inspiration_replace_merged_keywords is replace
@@ -19453,13 +19509,13 @@ class TestKeywordGenerationModeWrite:
         r1 = client.put(
             "/api/config", json={"discovery": {"keyword_generation_mode": "inspiration"}}
         )
-        assert r1.status_code == 200
+        assert r1.status_code == 202
         assert cfg.discovery.inspiration_search_enabled is True
         assert cfg.discovery.inspiration_replace_merged_keywords is True
 
         # ...then legacy: replace MUST go back to false (no stale residue, R1 S2).
         r2 = client.put("/api/config", json={"discovery": {"keyword_generation_mode": "legacy"}})
-        assert r2.status_code == 200
+        assert r2.status_code == 202
         assert cfg.discovery.inspiration_search_enabled is False
         assert cfg.discovery.inspiration_replace_merged_keywords is False
         assert r2.json()["config"]["discovery"]["keyword_generation_mode"] == "legacy"
@@ -19494,7 +19550,7 @@ class TestKeywordGenerationModeWrite:
             },
         )
 
-        assert response.status_code == 200, response.text
+        assert response.status_code == 202, response.text
         assert cfg.discovery.inspiration_search_enabled is False
         assert cfg.discovery.inspiration_replace_merged_keywords is False
 

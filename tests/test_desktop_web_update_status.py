@@ -34,8 +34,18 @@ def test_desktop_web_settings_wires_update_status_line() -> None:
 def test_desktop_web_settings_understands_background_config_apply() -> None:
     js = (ROOT / "src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
 
+    assert 'configApplyStatus: "/config/apply-status"' in js
+    assert 'let settingsSavePhase = "idle";' in js
+    assert "let settingsPendingApplyRevision = 0;" in js
+    assert "正在保存配置…" in js
+    assert "配置已保存，正在后台应用…" in js
+    assert 'bar.toggleAttribute("aria-busy",' in js
+    assert "function applyConfigApplyStatus" in js
+    assert "function refreshConfigApplyStatus" in js
+    assert "void refreshConfigApplyStatus();" in js
     assert 'result?.apply_state === "queued"' in js
     assert "配置已进入后台应用队列，连续保存会自动合并为最新版本" in js
+    assert 'event.type === "config_reloaded"' in js
     assert 'event.type === "config_reload_failed"' in js
     assert "后台应用配置失败，已恢复上一次生效配置" in js
 

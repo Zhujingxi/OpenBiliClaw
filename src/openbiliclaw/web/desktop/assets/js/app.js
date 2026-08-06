@@ -29,6 +29,7 @@
       interestProbeRespond: "/interest-probes/respond",
       avoidanceProbeRespond: "/avoidance-probes/respond",
       sourceShareSuggestion: "/config/source-share-suggestion",
+      configApplyStatus: "/config/apply-status",
       sourceCredentials: "/sources/credentials",
       configProbe: "/config/probe-service",
       configModelDiscovery: "/config/discover-models",
@@ -413,6 +414,11 @@
     async function runBackendHydration() {
       if (document.hidden) {
         backendHydrationPending = true;
+        return;
+      }
+      if (settingsDirtyFields.size > 0 || settingsFormHasActiveEditor()) {
+        // 事件到真正执行再水合之间有 1 秒防抖；这段时间里用户可能已经开始下一轮编辑。
+        // 执行前再次检查，不能让过期快照清空刚出现的本地草稿。
         return;
       }
       if (backendHydrationInFlight) {
@@ -8676,6 +8682,21 @@ ${cardFeedbackBarHtml()}`;
 
     function handleRuntimeEvent(event) {
       if (!event?.type) return;
+      let configApplyEventAccepted = true;
+      if (event.type === "config_reloaded") {
+        const revision = Number(event.revision || 0);
+        configApplyEventAccepted = applyConfigApplyStatus({
+          state: "applied",
+          requested_revision: revision,
+          applied_revision: revision,
+        }, { source: "runtime-event" });
+      } else if (event.type === "config_reload_failed") {
+        configApplyEventAccepted = applyConfigApplyStatus({
+          state: "failed",
+          requested_revision: Number(event.revision || 0),
+          applied_revision: 0,
+        }, { source: "runtime-event" });
+      }
       scheduleDesktopPendingConfirmationRefresh();
       if (event.type === "refresh.pool_updated" && typeof event.pool_available_count === "number") {
         desktopRuntimeGeneration += 1;
@@ -8700,15 +8721,9 @@ ${cardFeedbackBarHtml()}`;
       // (/api/recommendations only returns the latest top window). Header/pool counts
       // still update via applyRuntimeStatus above; user-initiated 换一批 / 加载更多 replace
       // the list explicitly. Matches recommend.js + popup.js (fix 79042ce).
-      if (["config_reloaded"].includes(event.type)) {
-        // config_reloaded 会触发全量再水合，applyConfig 覆盖设置表单里的每个字段。
-        // 用户正在表单里编辑（焦点在 #settingsForm 内）时跳过，避免未保存的输入
-        // 被后台事件悄悄打回。
-        const settingsForm = document.getElementById("settingsForm");
-        const editingSettings = Boolean(settingsForm && settingsForm.contains(document.activeElement));
-        if (!editingSettings) scheduleBackendHydration();
-      }
+      if (event.type === "config_reloaded" && !configApplyEventAccepted) return;
       if (event.type === "config_reload_failed") {
+        if (!configApplyEventAccepted) return;
         const message = String(event.message || "后台应用配置失败，已恢复上一次生效配置。");
         if ($("#configStatus")) {
           $("#configStatus").setAttribute("role", "alert");
@@ -8833,6 +8848,7 @@ ${cardFeedbackBarHtml()}`;
           $("#statusLabel").textContent = "实时连接正常";
           restartDesktopFailedRecoveries();
           scheduleDesktopPendingConfirmationRefresh();
+          void refreshConfigApplyStatus();
           // The page may load before the backend binds (frozen-entry launch
           // race): the boot hydrate then swallows every failure into nulls and
           // nothing else ever re-fetches — an uninitialized backend emits no
@@ -10114,6 +10130,25 @@ ${cardFeedbackBarHtml()}`;
     // retyping the same input does not inflate the number.
     const settingsDirtyFields = new Set();
     let settingsSaveInFlight = false;
+    let settingsSavePhase = "idle";
+    let settingsPendingApplyRevision = 0;
+    let settingsLastTerminalRevision = 0;
+
+    function settingsFormHasActiveEditor() {
+      const settingsForm = document.getElementById("settingsForm");
+      const active = document.activeElement;
+      return Boolean(
+        settingsForm &&
+        active instanceof Element &&
+        settingsForm.contains(active) &&
+        active.matches('input:not([readonly]), textarea:not([readonly]), select, [contenteditable="true"]')
+      );
+    }
+
+    function scheduleSettingsHydrationIfSafe() {
+      if (settingsDirtyFields.size > 0 || settingsFormHasActiveEditor()) return;
+      scheduleBackendHydration();
+    }
 
     function renderSettingsDirty() {
       const bar = $("#settingsSaveBar");
@@ -10121,10 +10156,107 @@ ${cardFeedbackBarHtml()}`;
       const discard = $("#settingsDiscardBtn");
       const save = $("#settingsSaveBtn");
       const count = settingsDirtyFields.size;
-      if (bar) bar.dataset.dirty = count > 0 ? "true" : "false";
-      if (msg) msg.textContent = count > 0 ? `已修改 ${count} 项，未保存` : "没有未保存的修改";
-      if (discard) discard.disabled = count === 0;
+      const phase = settingsSaveInFlight
+        ? "saving"
+        : count > 0 ? "dirty" : settingsSavePhase;
+      const messages = {
+        idle: "没有未保存的修改",
+        saving: "正在保存配置…",
+        applying: "配置已保存，正在后台应用…",
+        applied: "配置已应用",
+        failed: "配置应用失败，已恢复上一次生效配置",
+      };
+      if (bar) {
+        bar.dataset.dirty = count > 0 ? "true" : "false";
+        bar.dataset.saveState = phase;
+        bar.toggleAttribute("aria-busy", phase === "saving" || phase === "applying");
+      }
+      if (msg) {
+        msg.textContent = phase === "dirty"
+          ? `已修改 ${count} 项，未保存`
+          : (messages[phase] || messages.idle);
+      }
+      if (discard) discard.disabled = settingsSaveInFlight || count === 0;
       if (save) save.disabled = settingsSaveInFlight || count === 0;
+    }
+
+    function applyConfigApplyStatus(snapshot, { source = "status" } = {}) {
+      const applyState = String(snapshot?.state || "");
+      const requested = Number(snapshot?.requested_revision || 0);
+      const applied = Number(snapshot?.applied_revision || 0);
+      const fromRuntimeEvent = source === "runtime-event";
+      const terminalRevision = Math.max(requested, applied);
+      let reachedTerminal = false;
+      if (
+        settingsPendingApplyRevision > 0 &&
+        requested < settingsPendingApplyRevision
+      ) return false;
+      if (
+        terminalRevision > 0 &&
+        ["applied", "failed"].includes(applyState) &&
+        terminalRevision <= settingsLastTerminalRevision
+      ) return false;
+      if (
+        settingsPendingApplyRevision === 0 &&
+        ["queued", "applying"].includes(applyState) &&
+        settingsLastTerminalRevision > 0 &&
+        requested <= settingsLastTerminalRevision
+      ) return false;
+      if (
+        settingsPendingApplyRevision === 0 &&
+        ["applied", "failed"].includes(applyState) &&
+        !fromRuntimeEvent
+      ) return false;
+
+      if (["queued", "applying"].includes(applyState)) {
+        settingsPendingApplyRevision = Math.max(settingsPendingApplyRevision, requested);
+        settingsSavePhase = "applying";
+      } else if (
+        applyState === "applied" &&
+        (
+          (settingsPendingApplyRevision > 0 && applied >= settingsPendingApplyRevision) ||
+          (fromRuntimeEvent && requested > 0)
+        )
+      ) {
+        settingsPendingApplyRevision = 0;
+        settingsSavePhase = "applied";
+        settingsLastTerminalRevision = Math.max(settingsLastTerminalRevision, terminalRevision);
+        reachedTerminal = true;
+      } else if (
+        applyState === "failed" &&
+        (
+          (settingsPendingApplyRevision > 0 && requested >= settingsPendingApplyRevision) ||
+          (fromRuntimeEvent && requested > 0)
+        )
+      ) {
+        settingsPendingApplyRevision = 0;
+        settingsSavePhase = "failed";
+        settingsLastTerminalRevision = Math.max(settingsLastTerminalRevision, terminalRevision);
+        reachedTerminal = true;
+      }
+      renderSettingsDirty();
+      if (reachedTerminal) {
+        if (settingsSavePhase === "failed" && settingsDirtyFields.size > 0) {
+          // Keep a new local draft in the form, but refresh the canonical
+          // snapshot used by Discard. Otherwise a failed save followed by a
+          // second edit would make Discard restore the rejected candidate.
+          void refreshConfigSnapshotOnly();
+        } else {
+          scheduleSettingsHydrationIfSafe();
+        }
+      }
+      return true;
+    }
+
+    async function refreshConfigSnapshotOnly() {
+      const snapshot = await requestJson(ENDPOINTS.config, { cache: "no-store" });
+      const config = snapshot?.config || snapshot;
+      if (config && typeof config === "object") state.config = config;
+    }
+
+    async function refreshConfigApplyStatus() {
+      const snapshot = await requestJson(ENDPOINTS.configApplyStatus, { cache: "no-store" });
+      if (snapshot) applyConfigApplyStatus(snapshot);
     }
 
     function markSettingsDirty(target) {
@@ -10186,6 +10318,18 @@ ${cardFeedbackBarHtml()}`;
         else clearSettingsDirty();
         const message = result?.message || "配置已保存。";
         const queued = result?.apply_state === "queued";
+        if (queued) {
+          settingsPendingApplyRevision = Math.max(
+            settingsPendingApplyRevision,
+            Number(result?.apply_revision || 0),
+          );
+          settingsSavePhase = "applying";
+          renderSettingsDirty();
+        } else if (result?.reloaded === true) {
+          settingsPendingApplyRevision = 0;
+          settingsSavePhase = "applied";
+          renderSettingsDirty();
+        }
         const suffix = result?.restart_required
           ? "\n当前配置需要重启后端后完全生效。"
           : queued
@@ -10195,18 +10339,18 @@ ${cardFeedbackBarHtml()}`;
         showToast(
           result?.restart_required
             ? "配置已保存，需要重启后端"
-            : queued ? "配置已保存，等待后台应用" : "配置已保存"
+            : queued ? "配置已保存，正在后台应用…" : "配置已保存"
         );
-        void hydrateFromBackend();
+        if (queued) void refreshConfigApplyStatus();
         void refreshUpdateStatus();
       } catch (error) {
         if (error?.code === "request_timeout") {
-          const pendingMessage = "保存请求仍可能在后台等待对话整理完成；期间后端功能可继续使用，完成后页面会自动收到热重载事件。";
+          const pendingMessage = "保存请求超时，当前无法确认配置是否已经写入；请稍后查看配置状态，避免立即重复提交。";
           if ($("#configStatus")) {
             $("#configStatus").setAttribute("role", "status");
             $("#configStatus").value = pendingMessage;
           }
-          showToast("配置仍在后台安全热重载", { duration: 5200 });
+          showToast("保存请求超时，请稍后确认配置状态", { duration: 5200 });
           return;
         }
         const message = configErrorMessage(error.details) || error.message || "未知错误";

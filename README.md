@@ -610,7 +610,7 @@ background ─ background admission (default 3) ──────┘
                        ├→ one context digest → prompt/history/event/learn/settlement provenance
                        ├→ action 本地≤1s：完成 200 / 阻塞 202 → popup/移动/桌面 1/2/5s 轮询≤30s
                        └→ 疑惑 FIFO≤5 / 队头 fencing / 12h 补扫
-配置保存：空闲时同步热重载；lane 忙时先落盘 → latest-wins 后台应用队列 → 成功/失败回执
+配置保存：事务落盘后统一 HTTP 202 queued/apply_revision → latest-wins 后台应用队列 → apply-status / 成功失败回执
 配置热重载：保持接单并排空旧 worker → 原子暂停/revoke → 新 worker；安全窗25分钟
 实时连接：runtime-stream 20s idle 心跳 → 短暂 close 显示重连中并自动续连
 封面：proxy 前台 + refresh 预取 → app-stable lane（总4/后台3、前台优先）
