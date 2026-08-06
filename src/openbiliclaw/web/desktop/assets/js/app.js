@@ -416,6 +416,11 @@
         backendHydrationPending = true;
         return;
       }
+      if (settingsDirtyFields.size > 0 || settingsFormHasActiveEditor()) {
+        // 事件到真正执行再水合之间有 1 秒防抖；这段时间里用户可能已经开始下一轮编辑。
+        // 执行前再次检查，不能让过期快照清空刚出现的本地草稿。
+        return;
+      }
       if (backendHydrationInFlight) {
         backendHydrationPending = true;
         return;
@@ -8690,14 +8695,7 @@ ${cardFeedbackBarHtml()}`;
       // (/api/recommendations only returns the latest top window). Header/pool counts
       // still update via applyRuntimeStatus above; user-initiated 换一批 / 加载更多 replace
       // the list explicitly. Matches recommend.js + popup.js (fix 79042ce).
-      if (["config_reloaded"].includes(event.type)) {
-        if (!configApplyEventAccepted) return;
-        // config_reloaded 会触发全量再水合，applyConfig 覆盖设置表单里的每个字段。
-        // 用户有未保存输入，或正在表单里编辑时跳过，避免后台事件把草稿悄悄打回。
-        const settingsForm = document.getElementById("settingsForm");
-        const editingSettings = Boolean(settingsForm && settingsForm.contains(document.activeElement));
-        if (!editingSettings && settingsDirtyFields.size === 0) scheduleBackendHydration();
-      }
+      if (event.type === "config_reloaded" && !configApplyEventAccepted) return;
       if (event.type === "config_reload_failed") {
         if (!configApplyEventAccepted) return;
         const message = String(event.message || "后台应用配置失败，已恢复上一次生效配置。");
@@ -10107,6 +10105,22 @@ ${cardFeedbackBarHtml()}`;
     let settingsSavePhase = "idle";
     let settingsPendingApplyRevision = 0;
 
+    function settingsFormHasActiveEditor() {
+      const settingsForm = document.getElementById("settingsForm");
+      const active = document.activeElement;
+      return Boolean(
+        settingsForm &&
+        active instanceof Element &&
+        settingsForm.contains(active) &&
+        active.matches('input:not([readonly]), textarea:not([readonly]), select, [contenteditable="true"]')
+      );
+    }
+
+    function scheduleSettingsHydrationIfSafe() {
+      if (settingsDirtyFields.size > 0 || settingsFormHasActiveEditor()) return;
+      scheduleBackendHydration();
+    }
+
     function renderSettingsDirty() {
       const bar = $("#settingsSaveBar");
       const msg = $("#settingsSaveMsg");
@@ -10138,33 +10152,41 @@ ${cardFeedbackBarHtml()}`;
     }
 
     function applyConfigApplyStatus(snapshot) {
+      const applyState = String(snapshot?.state || "");
       const requested = Number(snapshot?.requested_revision || 0);
       const applied = Number(snapshot?.applied_revision || 0);
+      let reachedTerminal = false;
       if (
         settingsPendingApplyRevision > 0 &&
-        requested > 0 &&
         requested < settingsPendingApplyRevision
       ) return false;
+      if (
+        settingsPendingApplyRevision === 0 &&
+        ["applied", "failed"].includes(applyState)
+      ) return false;
 
-      if (["queued", "applying"].includes(snapshot?.state)) {
+      if (["queued", "applying"].includes(applyState)) {
         settingsPendingApplyRevision = Math.max(settingsPendingApplyRevision, requested);
         settingsSavePhase = "applying";
       } else if (
-        snapshot?.state === "applied" &&
+        applyState === "applied" &&
         settingsPendingApplyRevision > 0 &&
         applied >= settingsPendingApplyRevision
       ) {
         settingsPendingApplyRevision = 0;
         settingsSavePhase = "applied";
+        reachedTerminal = true;
       } else if (
-        snapshot?.state === "failed" &&
+        applyState === "failed" &&
         settingsPendingApplyRevision > 0 &&
         requested >= settingsPendingApplyRevision
       ) {
         settingsPendingApplyRevision = 0;
         settingsSavePhase = "failed";
+        reachedTerminal = true;
       }
       renderSettingsDirty();
+      if (reachedTerminal) scheduleSettingsHydrationIfSafe();
       return true;
     }
 
@@ -10259,12 +10281,12 @@ ${cardFeedbackBarHtml()}`;
         void refreshUpdateStatus();
       } catch (error) {
         if (error?.code === "request_timeout") {
-          const pendingMessage = "保存请求仍可能在后台等待对话整理完成；期间后端功能可继续使用，完成后页面会自动收到热重载事件。";
+          const pendingMessage = "保存请求超时，当前无法确认配置是否已经写入；请稍后查看配置状态，避免立即重复提交。";
           if ($("#configStatus")) {
             $("#configStatus").setAttribute("role", "status");
             $("#configStatus").value = pendingMessage;
           }
-          showToast("配置仍在后台安全热重载", { duration: 5200 });
+          showToast("保存请求超时，请稍后确认配置状态", { duration: 5200 });
           return;
         }
         const message = configErrorMessage(error.details) || error.message || "未知错误";

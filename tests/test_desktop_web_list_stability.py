@@ -63,8 +63,11 @@ def test_pool_events_do_not_redraw_the_recommendation_grid() -> None:
     # 库存事件仍旧只做局部刷新 + 走 init-status 支路（fix 79042ce 的约定不变）：
     # 再水合只挂在 config_reloaded 上，pool_updated 绝不能触发整表替换。
     assert "schedulePlatformAvailabilityRefresh();" in handle_runtime
-    assert 'if (["config_reloaded"].includes(event.type)) {' in handle_runtime
-    assert handle_runtime.count("scheduleBackendHydration();") == 1
+    assert 'event.type === "config_reloaded" && !configApplyEventAccepted' in handle_runtime
+    assert "scheduleBackendHydration();" not in handle_runtime
+    assert "if (reachedTerminal) scheduleSettingsHydrationIfSafe();" in _function_body(
+        "applyConfigApplyStatus"
+    )
     assert 'event.type === "refresh.pool_updated" && Boolean(state.initStatus?.initialized)' in (
         handle_runtime
     )
@@ -100,6 +103,9 @@ def test_background_rehydration_never_replaces_the_loaded_list() -> None:
     # 切回标签页 / config_reloaded 走无参默认值（不替换）。保存后的 202 只查询
     # 应用状态，避免在后台热重载尚未完成时重复水合并覆盖下一轮本地编辑。
     assert "await hydrateFromBackend();" in _function_body(
+        "runBackendHydration", async_function=True
+    )
+    assert "settingsDirtyFields.size > 0 || settingsFormHasActiveEditor()" in _function_body(
         "runBackendHydration", async_function=True
     )
     assert "void hydrateFromBackend();" not in APP_JS
