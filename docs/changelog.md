@@ -6,6 +6,7 @@
 
 ## Unreleased：dislike 即时推荐排除（2026-08-07）
 
+- **探针聊天跨界面对齐**：从消息里的「多聊聊」提交的 `probe` / `avoidance_probe` durable turn 现在也会进入插件、桌面 Web 与移动 Web 的主对话历史；关闭消息面板或切换到「聊聊口味」后仍能找回这段对话，惊喜推荐 `delight` 继续保留在自己的内容卡片内聊中。
 - **修正 dislike 的产品边界**：普通 dislike 不再被当成搜索词禁令，也不再让跨 digest 关键词整理撤销同词 pending；搜索与多源抓取可以继续宽搜，单卡反馈只同步隐藏该卡，主题证据确认后才约束相关推荐输出。平台库存饱和产生的 supply avoid 仍可独立淘汰冗余关键词。
 - **关闭偏好写入到推荐展示的延迟窗口**：`get_profile()` 立即合并 flat preference 的最新 dislikes；推荐历史 snapshot 绑定 dislike digest，首屏、换批、追加、OpenClaw 与主动通知在最终输出边界复核，不再等待 1 秒缓存、Soul rebuild 或异步清池。
 - **保留误杀保护与既有语义清池**：结构化 topic 精确命中始终排除，普通模糊命中在多卡全灭时只恢复 exact-safe 行，单条 push 不恢复；embedding + LLM 清池继续作为库存优化而非展示正确性边界。

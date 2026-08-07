@@ -166,6 +166,7 @@ const {
   executeCardAction,
   executePendingConfirmationOpen,
   isCardTurn,
+  isDialogueReplyTurn,
   isTerminalCardTurn,
   isQuestionTurn,
   normalizeContextPreview,
@@ -5426,7 +5427,7 @@ async function hydrateChatHistory() {
       dialogueTurnsById.clear();
       for (const turn of nextTurns) {
         renderChatTurn(turn);
-        if (turn.scope === "chat" && turn.status === "pending") {
+        if (isDialogueReplyTurn(turn) && (turn.status === "pending" || turn.status === "processing")) {
           pollChatTurnUntilSettled(turn.turn_id, {
             onUpdate: renderChatTurn,
             onDone: refreshAfterChatTurn,

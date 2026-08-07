@@ -386,7 +386,7 @@ trusted LAN ─ HTTPS（可选）──→ TLS Proxy :8443 ─ loopback/Compose 
 │  │ 推荐点击：content_id/url/source_platform -> source-aware click signal │ │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
-│  │ durable chat：session=popup -> 插件/移动/桌面；可见时同步历史 │   │
+│  │ durable chat：session=popup -> 插件/移动/桌面；主历史含 probe 聊天 │   │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │ 推荐/探针反馈：即时 UI -> 10s 可撤销 -> event commit/HTTP 200 -> 5s owner │ │

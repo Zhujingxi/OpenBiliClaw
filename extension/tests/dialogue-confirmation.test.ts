@@ -445,7 +445,7 @@ test("anchor_dependency_failed refusal also rolls back to retryable_error", asyn
   assert.doesNotMatch(markup, /已标记不准/);
 });
 
-test("pending list markup opens an encoded ref and selected flow excludes probe/delight turns", () => {
+test("pending list markup opens an encoded ref and dialogue history includes probe turns", () => {
   const markup = dialogue!.renderPendingListMarkup([
     { kind: "hypothesis", ref: "hash/8", title: "喜欢系统分析", confidence: 0.81 },
     { kind: "confusion", ref: "12", title: "收藏后马上退出", confidence: 0.72 },
@@ -461,12 +461,13 @@ test("pending list markup opens an encoded ref and selected flow excludes probe/
 
   const selected = dialogue!.selectDialogueTurns([
     { turn_id: "probe", scope: "probe", created_at: "2026-07-22T08:00:00Z" },
-    { turn_id: "card", scope: "hypothesis", created_at: "2026-07-22T08:02:00Z" },
     { turn_id: "chat", scope: "chat", created_at: "2026-07-22T08:01:00Z" },
+    { turn_id: "avoidance", scope: "avoidance_probe", created_at: "2026-07-22T08:01:30Z" },
+    { turn_id: "card", scope: "hypothesis", created_at: "2026-07-22T08:02:00Z" },
     { turn_id: "question", scope: "confusion", created_at: "2026-07-22T08:03:00Z" },
     { turn_id: "delight", scope: "delight", created_at: "2026-07-22T08:04:00Z" },
   ]);
-  assert.deepEqual(selected.map((turn) => turn.turn_id), ["chat", "card", "question"]);
+  assert.deepEqual(selected.map((turn) => turn.turn_id), ["probe", "chat", "avoidance", "card", "question"]);
 });
 
 test("pending open retries only the explicit dialogue-busy response", async () => {

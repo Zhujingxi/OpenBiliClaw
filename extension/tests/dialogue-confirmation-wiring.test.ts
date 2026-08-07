@@ -109,6 +109,18 @@ test("desktop mirrors popup semantics with the shared chat session and a visible
   assert.match(html, /\/shared\/dialogue-confirmation\.js/);
 });
 
+test("probe chats use the shared main-dialogue history on popup and desktop", () => {
+  const popup = extensionFile("popup/popup.js");
+  const desktop = projectFile("src/openbiliclaw/web/desktop/assets/js/app.js");
+  const shared = projectFile("src/openbiliclaw/web/shared/dialogue-confirmation.js");
+
+  assert.match(shared, /"probe"/);
+  assert.match(shared, /"avoidance_probe"/);
+  assert.match(popup, /isDialogueReplyTurn\(turn\)/);
+  assert.match(desktop, /chatTurns\}\?session=.*&limit=100/);
+  assert.match(desktop, /function applyChatSnapshot\(snapshot\)[\s\S]*applyDialogueChatSnapshot\(snapshot\)/);
+});
+
 test("popup and desktop toast honestly when anchor refusal becomes retryable_error", () => {
   // Shared helper maps stale_anchor → retryable_error with reason; both
   // surfaces must surface that reason instead of the success "已确认" branch.

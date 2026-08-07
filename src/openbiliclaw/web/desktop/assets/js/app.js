@@ -9092,19 +9092,10 @@ ${cardFeedbackBarHtml()}`;
       }
 
       function applyChatSnapshot(snapshot) {
-        const chatItems = Array.isArray(snapshot) ? snapshot : asArray(snapshot?.items);
-        if (!chatItems.length) return;
-        state.chat = chatItems.flatMap((turn) => {
-          const failed = String(turn.status || "").toLowerCase() === "failed";
-          const agentText = failed
-            ? turn.error || "这句还没发出去，稍后再试。"
-            : turn.reply || turn.assistant_message || "等待后端回复中。";
-          return [
-            { role: "user", text: turn.message || turn.user_message || "" },
-            { role: "agent", text: agentText }
-          ];
-        }).filter((item) => item.text);
-        renderChat();
+        // Use the same scoped durable-turn renderer as later refreshes. The
+        // initial snapshot must not briefly show delight-only history or
+        // flatten probe turns into an untracked user/assistant pair.
+        applyDialogueChatSnapshot(snapshot);
       }
 
       function applyDelightChatSnapshot(snapshot) {
@@ -9178,7 +9169,7 @@ ${cardFeedbackBarHtml()}`;
         requestJson(ENDPOINTS.profile).then(applyProfileSnapshot),
         requestJson(ENDPOINTS.delightBatch).then(applyDelightSnapshot),
         requestJson(ENDPOINTS.notificationPending).then(applyNotificationSnapshot),
-        requestJson(`${ENDPOINTS.chatTurns}?session=${encodeURIComponent(SHARED_CHAT_SESSION)}&scope=chat&limit=20`).then(applyChatSnapshot),
+        requestJson(`${ENDPOINTS.chatTurns}?session=${encodeURIComponent(SHARED_CHAT_SESSION)}&limit=100`).then(applyChatSnapshot),
         requestJson(`${ENDPOINTS.chatTurns}?session=${encodeURIComponent(SHARED_CHAT_SESSION)}&scope=delight&limit=80`).then(applyDelightChatSnapshot),
         loadConfigSnapshot(),
         refreshPlatformAvailability(),
