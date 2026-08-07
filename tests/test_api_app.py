@@ -5734,6 +5734,64 @@ class TestBackendAPI:
 
         assert database.reads == 1
 
+    def test_recommendations_cache_rechecks_latest_dislikes_immediately(self) -> None:
+        """A preference write must invalidate visibility even inside the 1s TTL."""
+        from fastapi.testclient import TestClient
+
+        class FakeSoulEngine:
+            def __init__(self) -> None:
+                self.disliked_topics: list[str] = []
+
+            def get_effective_disliked_topics(self) -> list[str]:
+                return list(self.disliked_topics)
+
+        class FakeDatabase:
+            def __init__(self) -> None:
+                self.reads = 0
+
+            def get_recommendations(
+                self, limit: int = 20, *, exclude_processed: bool = False
+            ) -> list[dict[str, object]]:
+                assert limit == 40
+                assert exclude_processed is True
+                self.reads += 1
+                return [
+                    {
+                        "id": 1,
+                        "bvid": "BV-REHAB",
+                        "title": "腰椎保护实操训练",
+                        "topic": "运动康复",
+                        "topic_group": "运动康复",
+                        "confidence": 0.90,
+                        "franchise_key": "",
+                    },
+                    {
+                        "id": 2,
+                        "bvid": "BV-SQLITE",
+                        "title": "SQLite 查询优化",
+                        "topic": "数据库",
+                        "topic_group": "数据库",
+                        "confidence": 0.90,
+                        "franchise_key": "",
+                    },
+                ]
+
+        soul = FakeSoulEngine()
+        database = FakeDatabase()
+        app = create_app(database=database, soul_engine=soul)
+        client = TestClient(app)
+
+        first = client.get("/api/recommendations")
+        soul.disliked_topics = ["运动康复"]
+        second = client.get("/api/recommendations")
+
+        assert [item["bvid"] for item in first.json()["items"]] == [
+            "BV-REHAB",
+            "BV-SQLITE",
+        ]
+        assert [item["bvid"] for item in second.json()["items"]] == ["BV-SQLITE"]
+        assert database.reads == 2
+
     def test_recommendations_endpoint_caps_same_franchise(self) -> None:
         """End-to-end: when the DB returns 5 同 IP rows in the
         franchise_key column, the API trims down to ``max_per_franchise=2``
@@ -7008,6 +7066,80 @@ class TestBackendAPI:
             and event.get("pool_pending_count") == 2
             for event in hub.events
         )
+
+    def test_reshuffle_rechecks_dislike_committed_during_inflight_serve(self) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.discovery.engine import DiscoveredContent
+        from openbiliclaw.recommendation.engine import Recommendation
+
+        class FakeSoulEngine:
+            def __init__(self) -> None:
+                self.disliked_topics: list[str] = []
+
+            async def get_profile(self) -> dict[str, object]:
+                return {"profile": "old-snapshot"}
+
+            def get_effective_disliked_topics(self) -> list[str]:
+                return list(self.disliked_topics)
+
+        class FakeMemoryManager:
+            def __init__(self) -> None:
+                self.events: list[dict[str, object]] = []
+
+            async def propagate_event(self, event: dict[str, object]) -> None:
+                self.events.append(event)
+
+        class FakeRecommendationEngine:
+            def __init__(self, soul: FakeSoulEngine) -> None:
+                self.soul = soul
+
+            async def reshuffle_recommendations_with_result(self, **_kwargs: object) -> object:
+                items = [
+                    Recommendation(
+                        content=DiscoveredContent(
+                            bvid="BV-REHAB",
+                            title="腰椎保护实操训练",
+                            topic_group="运动康复",
+                        ),
+                        recommendation_id=1,
+                        topic_label="运动康复",
+                    ),
+                    Recommendation(
+                        content=DiscoveredContent(
+                            bvid="BV-SQLITE",
+                            title="SQLite 查询优化",
+                            topic_group="数据库",
+                        ),
+                        recommendation_id=2,
+                        topic_label="数据库",
+                    ),
+                ]
+                # Simulate a durable preference write after profile capture but
+                # before the serve result reaches the HTTP boundary.
+                self.soul.disliked_topics = ["运动康复"]
+                return SimpleNamespace(
+                    items=items,
+                    pool_counts_after={"available": 2},
+                    timings=SimpleNamespace(),
+                )
+
+        soul = FakeSoulEngine()
+        memory = FakeMemoryManager()
+        app = create_app(
+            memory_manager=memory,
+            database=object(),
+            soul_engine=soul,
+            recommendation_engine=FakeRecommendationEngine(soul),
+            runtime_controller=object(),
+        )
+        client = TestClient(app)
+
+        response = client.post("/api/recommendations/reshuffle")
+
+        assert response.status_code == 200
+        assert [item["bvid"] for item in response.json()["items"]] == ["BV-SQLITE"]
+        assert memory.events[0]["metadata"]["returned_item_ids"] == ["BV-SQLITE"]
 
     def test_append_recommendations_endpoint_excludes_existing_bvids(self) -> None:
         from fastapi.testclient import TestClient

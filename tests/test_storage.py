@@ -4328,7 +4328,15 @@ class TestDatabase:
             db.initialize()
 
             db.cache_content("BVLOW", title="普通内容", up_name="普通UP", source="search")
-            db.cache_content("BVHIGH", title="高置信内容", up_name="高能UP", source="trending")
+            db.cache_content(
+                "BVHIGH",
+                title="高置信内容",
+                up_name="高能UP",
+                source="trending",
+                topic_group="运动康复",
+                pool_topic_label="身体训练",
+                tags=["久坐", "拉伸"],
+            )
             low_id = db.insert_recommendation("BVLOW", confidence=0.7, presented=0)
             high_id = db.insert_recommendation("BVHIGH", confidence=0.91, presented=0)
 
@@ -4337,6 +4345,9 @@ class TestDatabase:
             assert candidate is not None
             assert candidate["id"] == high_id
             assert candidate["bvid"] == "BVHIGH"
+            assert candidate["topic_group"] == "运动康复"
+            assert candidate["pool_topic_label"] == "身体训练"
+            assert json.loads(candidate["tags"]) == ["久坐", "拉伸"]
 
             db.mark_notification_sent("BVHIGH")
 

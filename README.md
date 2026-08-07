@@ -636,6 +636,8 @@ background ─ background admission (default 3) ──────┘
 ├─────────┴──────────┴───────────┴───────────────┤
 │ 普通事件/推荐点击 → generic durable cursor ─┐    │
 │ 内容反馈 → content_feedback durable cursor ─┴→ buffer+cursor 同一原子 checkpoint │
+│ dislike：单卡同步隐藏；主题写入后 effective snapshot → 推荐历史/换批/通知最终复核 │
+│ discovery 可继续宽搜；异步语义清池只优化库存，不作为展示正确性边界 │
 │ 首启 fence+task admission → listener；后台 owner recovery → tick_if_buffered │
 │ 热重载 pause/drain/recover 后 rebind；周期画像维护才调用 tick │
 │ 对话 → typed settlement worker → learning          │

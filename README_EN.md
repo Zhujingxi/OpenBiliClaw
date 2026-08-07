@@ -633,6 +633,8 @@ images: proxy foreground + refresh prefetch → app-stable lane (total 4 / bg 3,
 ├─────────┴──────────┴───────────┴───────────────┤
 │ Events/recommendation clicks → generic durable cursor ─┐ │
 │ Content feedback → content_feedback durable cursor ────┴→ atomic buffer+cursor checkpoint │
+│ dislike: exact card hides synchronously; durable topic → final history/serve/push recheck │
+│ discovery may keep broad search; async semantic purge optimizes inventory, not correctness │
 │ cold start fence+task admission → listener; background recovery → tick_if_buffered │
 │ hot reload pause/drain/recover then rebind; periodic maintenance alone calls tick │
 │ Dialogue → typed settlement worker → learning       │

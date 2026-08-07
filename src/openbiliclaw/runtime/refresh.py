@@ -1228,6 +1228,15 @@ class ContinuousRefreshController:
         candidate = self.database.get_notification_candidate(min_confidence=0.82)
         if candidate is None:
             return None
+        from openbiliclaw.recommendation.exclusion import filter_recommendation_rows
+
+        disliked_phrases = self._load_disliked_topic_phrases()
+        if not filter_recommendation_rows(
+            [candidate],
+            disliked_phrases,
+            restore_on_total_fuzzy_match=False,
+        ):
+            return None
         return {
             "recommendation_id": int(candidate["id"]),
             "bvid": str(candidate.get("bvid", "")),
@@ -1320,7 +1329,10 @@ class ContinuousRefreshController:
             try:
                 return [str(item).strip().lower() for item in getter() if str(item).strip()]
             except Exception:
-                return []
+                logger.warning(
+                    "effective dislike read failed; falling back to flat preference",
+                    exc_info=True,
+                )
         try:
             layer = self.memory_manager.get_layer("preference")
         except Exception:

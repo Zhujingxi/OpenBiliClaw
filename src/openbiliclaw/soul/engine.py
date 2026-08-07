@@ -814,6 +814,23 @@ class SoulEngine:
             raise SoulProfileNotInitializedError("Soul profile has not been initialized yet.")
         profile = OnionProfile.from_dict(soul_data)
         profile = apply_overrides(profile, self._memory.load_profile_overrides())
+        # Flat preference writeback can land before the asynchronous profile
+        # rebuild. Expose the authoritative dislike snapshot immediately so
+        # serve-time and recommendation-output filters cannot observe a stale
+        # profile in that window.
+        effective_dislikes = self.get_effective_disliked_topics()
+        existing_dislikes = {
+            str(domain.domain).strip().casefold() for domain in profile.interest.dislikes
+        }
+        if effective_dislikes:
+            from openbiliclaw.soul.profile import InterestDomain
+
+            for topic in effective_dislikes:
+                text = str(topic).strip()
+                key = text.casefold()
+                if text and key not in existing_dislikes:
+                    profile.interest.dislikes.append(InterestDomain(domain=text, weight=0.9))
+                    existing_dislikes.add(key)
         # Attach active speculations so downstream consumers (Discovery) can use them
         active_specs = self._speculator.get_active_speculations()
         if active_specs:

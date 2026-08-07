@@ -1128,7 +1128,6 @@ class KeywordPlanner:
         digest = profile_kw_digest(profile)
         hints_by_platform = self._avoid_hints(profile)
         self._reconcile_pending_inventory(
-            profile=profile,
             digest=digest,
             hints_by_platform=hints_by_platform,
         )
@@ -1664,7 +1663,6 @@ class KeywordPlanner:
     def _reconcile_pending_inventory(
         self,
         *,
-        profile: SoulProfile,
         digest: str,
         hints_by_platform: dict[str, dict[str, object]],
     ) -> None:
@@ -1676,8 +1674,6 @@ class KeywordPlanner:
         """
         reconcile = getattr(self._db, "reconcile_pending_keyword_digests", None)
         count_all = getattr(self._db, "count_pending_keywords_all_digests", None)
-        preferences = getattr(profile, "preferences", None)
-        explicit_dislikes = _as_str_list(getattr(preferences, "disliked_topics", []))
         grace_hours = int(getattr(self._discovery, "keyword_digest_grace_hours", 0))
 
         for platform in _PLANNER_PLATFORMS:
@@ -1685,14 +1681,17 @@ class KeywordPlanner:
                 self._legacy_expire_pending(platform, digest)
                 continue
             avoid_topics = _as_str_list(hints_by_platform.get(platform, {}).get("avoid_topics"))
-            blocked_terms = list(dict.fromkeys([*explicit_dislikes, *avoid_topics]))
             try:
                 raw_ledger = reconcile(
                     platform,
                     digest,
                     grace_hours=grace_hours,
                     max_pending=self._target_high(platform),
-                    blocked_terms=blocked_terms,
+                    # These are inventory-diversity hints derived from current
+                    # pool saturation, not user dislikes. An ordinary dislike
+                    # constrains recommendation output and must never revoke a
+                    # pending search term.
+                    blocked_terms=avoid_topics,
                     keyword_kind="regular",
                 )
                 # Validate the companion count while still in the reconciliation

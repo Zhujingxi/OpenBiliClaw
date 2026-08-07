@@ -813,6 +813,20 @@ async def test_recommend_falls_back_to_cached_rows_when_refresh_times_out() -> N
 
 
 @pytest.mark.asyncio
+async def test_recommend_cached_fallback_honors_latest_effective_dislikes() -> None:
+    adapter, soul_engine, _, database, _, _, recommendation_engine = _build_adapter()
+    soul_engine.get_effective_disliked_topics = lambda: [  # type: ignore[attr-defined]
+        "你最近那股想把系统想透的劲头"
+    ]
+
+    result = await adapter.recommend(limit=3, refresh_if_needed=True)
+
+    assert result.items[0].recommendation_id == 11
+    assert database.recommendation_list_calls == [3]
+    assert recommendation_engine.calls == [(None, 3)]
+
+
+@pytest.mark.asyncio
 async def test_submit_feedback_records_event_and_runs_post_feedback_hooks() -> None:
     (
         adapter,

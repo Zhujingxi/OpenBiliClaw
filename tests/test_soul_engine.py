@@ -2046,6 +2046,23 @@ async def test_get_profile_applies_overrides_get_raw_does_not(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_get_profile_overlays_flat_dislike_before_soul_rebuild(tmp_path: Path) -> None:
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+    engine = SoulEngine(llm=FakeRegistry("{}"), memory=memory)
+    _seed_soul(memory, _overlay_profile(dislikes=("营销号",)))
+    preference = memory.get_layer("preference")
+    preference.data["disliked_topics"] = ["运动康复"]
+    preference.save()
+
+    effective = await engine.get_profile()
+    raw = await engine.get_raw_profile()
+
+    assert effective.preferences.disliked_topics == ["营销号", "运动康复"]
+    assert raw.preferences.disliked_topics == ["营销号"]
+
+
+@pytest.mark.asyncio
 async def test_get_profile_overrides_survive_rebuild(tmp_path: Path) -> None:
     memory = MemoryManager(tmp_path)
     memory.initialize()

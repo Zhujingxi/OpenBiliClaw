@@ -35,6 +35,13 @@ interest updates: HTTP/source event → durable commit + wake (no pipeline/LLM w
                   └─ dialogue → typed settlement worker → learning
                   legacy feedback batch retired; unified_interest_line=false is rollback only
 
+dislike output boundary:
+  exact card feedback commit → processed projection + recommendation snapshot invalidation
+  confirmed topic durable write → SoulEngine effective snapshot (flat preference + Soul + overrides)
+                                → evaluation / serve profile sees it before Soul rebuild
+                                → history cache digest + reshuffle/append/OpenClaw/push final recheck
+  discovery search remains broad; detached exact/semantic pool purge is inventory optimization
+
 XHS hidden search tab → MAIN search-response normalizer → isolated replay/DOM fallback → task final
 XHS/DY/YT/Zhihu/Reddit task final: canonical staged result (XHS bootstrap payload caps enforced) → durable event receipt
                                  → atomic bounded seen-key → terminal flip
@@ -77,6 +84,7 @@ config hot-reload → accepting drain old settlement worker → atomic pause →
                      new start failure: fresh nonce reauthorize old + resume
 
 reshuffle HTTP → PoolServeSnapshot → serve DB worker / isolated read connection
+               → latest effective-dislike final check → HTTP serialization
                → unchanged MMR selector → isolated short recommendation+shown transaction
   optional source_platform (PC Web tabs only, additive):
     canonical platform → platform-scoped candidate rows, no cross-platform floor

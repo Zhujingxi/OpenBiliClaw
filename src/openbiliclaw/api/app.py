@@ -1870,12 +1870,26 @@ def create_app(
     first_page_topup_attempted_at = 0.0
     recommendation_snapshot_cache: RecommendationListResponse | None = None
     recommendation_snapshot_cached_at = 0.0
+    recommendation_snapshot_dislike_digest = ""
     recommendation_snapshot_lock = asyncio.Lock()
 
     def _invalidate_recommendation_snapshot() -> None:
         nonlocal recommendation_snapshot_cache, recommendation_snapshot_cached_at
+        nonlocal recommendation_snapshot_dislike_digest
         recommendation_snapshot_cache = None
         recommendation_snapshot_cached_at = 0.0
+        recommendation_snapshot_dislike_digest = ""
+
+    def _effective_recommendation_dislikes() -> tuple[list[str], str]:
+        """Read the latest output-policy snapshot without waiting for rebuild."""
+
+        from openbiliclaw.recommendation.exclusion import disliked_topics_digest
+
+        getter = getattr(ctx.soul_engine, "get_effective_disliked_topics", None)
+        topics: list[str] = []
+        if callable(getter):
+            topics = [str(item).strip() for item in getter() if str(item).strip()]
+        return topics, disliked_topics_digest(topics)
 
     app.state.degraded = bool(getattr(ctx, "degraded", False))
     app.state.degraded_reason = str(getattr(ctx, "degraded_reason", ""))
@@ -5879,6 +5893,36 @@ def create_app(
             for item in items
         ]
 
+    def _filter_recommendation_objects_for_latest_dislikes(items: list[Any]) -> list[Any]:
+        """Recheck an in-flight serve batch at the final HTTP boundary."""
+
+        if not items:
+            return []
+        from openbiliclaw.recommendation.exclusion import filter_recommendation_rows
+
+        disliked_topics, _digest = _effective_recommendation_dislikes()
+        if not disliked_topics:
+            return items
+        projected = [
+            {
+                "_item_index": index,
+                "title": str(getattr(getattr(item, "content", None), "title", "")),
+                "topic_label": str(getattr(item, "topic_label", "")),
+                "topic_key": str(getattr(getattr(item, "content", None), "topic_key", "")),
+                "topic_group": str(getattr(getattr(item, "content", None), "topic_group", "")),
+                "pool_topic_label": str(
+                    getattr(getattr(item, "content", None), "pool_topic_label", "")
+                ),
+                "description": str(getattr(getattr(item, "content", None), "description", "")),
+                "body_text": str(getattr(getattr(item, "content", None), "body_text", "")),
+                "up_name": str(getattr(getattr(item, "content", None), "up_name", "")),
+                "tags": getattr(getattr(item, "content", None), "tags", []),
+            }
+            for index, item in enumerate(items)
+        ]
+        allowed = filter_recommendation_rows(projected, disliked_topics)
+        return [items[cast("int", row["_item_index"])] for row in allowed]
+
     @app.websocket("/api/runtime-stream")
     async def runtime_stream(websocket: WebSocket) -> None:
         # The http auth middleware does NOT cover the websocket scope, so the
@@ -6519,6 +6563,7 @@ def create_app(
             )
         except ProfileEditError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        _invalidate_recommendation_snapshot()
 
         try:
             raw = await ctx.soul_engine.get_raw_profile()
@@ -6656,7 +6701,9 @@ def create_app(
             ],
         )
 
-    async def _load_recommendations() -> RecommendationListResponse:
+    async def _load_recommendations(
+        disliked_topics: list[str] | None = None,
+    ) -> RecommendationListResponse:
         nonlocal first_page_topup_attempted_at
 
         def _admission_min_score() -> float:
@@ -6742,6 +6789,10 @@ def create_app(
                         len(rows),
                     )
 
+        if disliked_topics:
+            from openbiliclaw.recommendation.exclusion import filter_recommendation_rows
+
+            rows = filter_recommendation_rows(rows, disliked_topics)
         rows = _cap_by_franchise(rows, max_per_franchise=2)[:20]
         return RecommendationListResponse(
             items=[
@@ -6791,24 +6842,34 @@ def create_app(
         mutations immediately visible through explicit invalidation.
         """
         nonlocal recommendation_snapshot_cache, recommendation_snapshot_cached_at
+        nonlocal recommendation_snapshot_dislike_digest
 
         now = time.monotonic()
+        disliked_topics, dislike_digest = _effective_recommendation_dislikes()
         if (
             recommendation_snapshot_cache is not None
             and now - recommendation_snapshot_cached_at < _RECOMMENDATION_SNAPSHOT_TTL_SECONDS
+            and recommendation_snapshot_dislike_digest == dislike_digest
         ):
             return recommendation_snapshot_cache.model_copy(deep=True)
 
         async with recommendation_snapshot_lock:
             now = time.monotonic()
+            disliked_topics, dislike_digest = _effective_recommendation_dislikes()
             if (
                 recommendation_snapshot_cache is not None
                 and now - recommendation_snapshot_cached_at < _RECOMMENDATION_SNAPSHOT_TTL_SECONDS
+                and recommendation_snapshot_dislike_digest == dislike_digest
             ):
                 return recommendation_snapshot_cache.model_copy(deep=True)
-            snapshot = await _load_recommendations()
+            snapshot = await _load_recommendations(disliked_topics)
+            latest_topics, latest_digest = _effective_recommendation_dislikes()
+            if latest_digest != dislike_digest:
+                snapshot = await _load_recommendations(latest_topics)
+                dislike_digest = latest_digest
             recommendation_snapshot_cache = snapshot.model_copy(deep=True)
             recommendation_snapshot_cached_at = time.monotonic()
+            recommendation_snapshot_dislike_digest = dislike_digest
             return snapshot
 
     # ── Platform-neutral saved memberships and native sync ─────────
@@ -7682,6 +7743,7 @@ def create_app(
             )
             counts_after = {}
             timings = None
+        items = _filter_recommendation_objects_for_latest_dislikes(items)
         if items:
             from openbiliclaw.sources.event_format import SOURCE_WEB, build_event
 
@@ -7778,6 +7840,7 @@ def create_app(
             )
             counts_after = {}
             timings = None
+        items = _filter_recommendation_objects_for_latest_dislikes(items)
         _schedule_exact_pool_status_snapshot()
         available_after = counts_after.get("available")
         await _trigger_replenishment_if_needed(
@@ -7917,12 +7980,32 @@ def create_app(
             if callable(get_notification_candidate):
                 candidate = get_notification_candidate(min_confidence=0.82)
                 if candidate is not None:
-                    item = {
-                        "recommendation_id": int(candidate["id"]),
-                        "bvid": str(candidate.get("bvid", "")),
-                        "title": str(candidate.get("title", "")),
-                        "reason": str(candidate.get("expression", "")),
-                    }
+                    from openbiliclaw.recommendation.exclusion import (
+                        filter_recommendation_rows,
+                    )
+
+                    disliked_topics, _digest = _effective_recommendation_dislikes()
+                    if filter_recommendation_rows(
+                        [candidate],
+                        disliked_topics,
+                        restore_on_total_fuzzy_match=False,
+                    ):
+                        item = {
+                            "recommendation_id": int(candidate["id"]),
+                            "bvid": str(candidate.get("bvid", "")),
+                            "title": str(candidate.get("title", "")),
+                            "reason": str(candidate.get("expression", "")),
+                        }
+        if item is not None:
+            from openbiliclaw.recommendation.exclusion import filter_recommendation_rows
+
+            disliked_topics, _digest = _effective_recommendation_dislikes()
+            if not filter_recommendation_rows(
+                [item],
+                disliked_topics,
+                restore_on_total_fuzzy_match=False,
+            ):
+                item = None
         if item is None:
             return PendingNotificationResponse(item=None)
         return PendingNotificationResponse(item=PendingNotificationOut(**item))

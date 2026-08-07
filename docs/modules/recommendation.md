@@ -93,6 +93,7 @@ runtime 使用公开 `drain_pending_expression_copy(profile, limit<=60, max_extr
 | v0.3.x 批量文案错位 / 重复防护 | ✅ | 强化 v0.3.81：**多条**候选缺 `bvid/content_id` 时（不止数量不完整）一律降级逐条生成——位置匹配只对无歧义的单条批次保留，杜绝弱模型乱序导致的文案张冠李戴；新增去重闸，同一句文案被分配给多个不同 bvid 时整组丢弃（宁可不发也不发重复），根治本地小模型上下文截断时「每条理由都一样且对不上视频」 |
 | v0.3.x 负反馈表达避让 | ✅ | `_recommendation_profile_summary()` 会把 `preferences.disliked_topics` 带入推荐画像摘要；单条和批量推荐表达 prompt 都要求避开这些主题 / 话术模式，候选明显命中时只能保守说明差异化理由，不得热情背书或把避雷项包装成用户偏好 |
 | v0.3.x 推荐出口避雷兜底 | ✅ | `serve()` 从 discovery pool 读出候选后，会按当前 `profile.preferences.disliked_topics` 再做一次过滤：`topic_key/topic_group/pool_topic_label` 精确命中始终硬丢弃，标题、标签、简介、作者名和短正文包含 dislike term 时用于覆盖异步清池尚未完成或清池失败的窗口。若自然语言子串过滤把整个 serve 窗口杀空，则只对该窗口降级为精确 topic 硬禁用并记录 WARNING，避免“视频/内容”等泛化画像项让推荐永久为空；只要模糊过滤仍留下任一候选，原硬过滤行为完全不变。 |
+| v0.3.x dislike 即时输出一致性 | ✅ | 单卡 dislike 继续同步标记 processed；已确认主题写入后，历史推荐、1 秒 API snapshot、reshuffle/append、OpenClaw fallback/新生成结果和主动通知都会在最终边界读取最新 effective dislikes。snapshot 命中同时要求 dislike digest 一致；多卡模糊全灭沿用 exact-safe 恢复，单条 push 禁止恢复。普通 dislike 不阻断 discovery 搜索，异步语义清池只优化库存。 |
 | v0.3.x 画像输入上限放宽 | ✅ | `_recommendation_profile_summary()` 兴趣 tag 上限 10 → 30 → 64 → 256 且按 weight 降序排序后截断；`disliked_topics` 5 → 16 → 64 → 128（与存储上限对齐，避雷项不再截断）；`_select_relevant_interests()` 的 embedding 候选池按 weight 排序取前 256（与画像兴趣上限对齐，让头部之外的小众兴趣在语义最匹配时也能被选中；`top_k=5` 不变，故注入 prompt 的数量不变；fallback「top-K by weight」语义与实现一致） |
 | v0.3.x 文案 / delight 候选 description 对齐 | ✅ | 推荐重评估和批量文案表达的候选 `description` 截断统一对齐到 400 字符（此前 200 / 300 / 280 混用），与 discovery 评估输入一致，避免中文简介在关键句中途被砍。Delight score 当前复用 Evo 结果，不再单独构造候选评分或 reason prompt；MMR 去重 embedding 文本仍保持 `[:160]/[:200]`（它是缓存 key，不动） |
 | v0.3.123 推荐画像输入与 discovery 统一 | ✅ | `_recommendation_profile_summary()` 改为直接委托 discovery 的 `build_profile_summary()`，推荐与发现喂给 LLM 的是**同一份**结构化画像；推荐侧因此补齐了之前缺的字段（`values` / `cognitive_style` / `motivational_drivers` / `current_phase` / `life_stage` / `source_platform_mix` / `recent_awareness` / `mbti` / `interest_domains` 等），并随统一一起不再带 `personality_portrait` 总结。`include_active_insights` 形参移除（统一输入恒含 active_insights）；embedding 选出的相关兴趣经 `interests=` 透传 |
@@ -139,7 +140,7 @@ items = await engine.generate_recommendations(
 - 若未传入 `discovered`，从 `content_cache` 中读取未推荐内容
 - 从 `content_cache` 读取时，也会先做一轮来源均衡，避免前排高分缓存把候选窗口压成单一来源
 - 从 `content_cache` / discovery pool 取候选时会用持久化 `seen_items` 里的 `source_platform:content_id` 过滤所有已知已看内容；B 站保留 raw BVID 兼容，其他来源不会再因为没有 BVID 而漏过滤，且不受旧版 2000 条事件窗口限制
-- 从 discovery pool 进入排序前，会用 `profile.preferences.disliked_topics` 做 serve-time 兜底硬过滤，防止已知避雷主题在异步清池尚未完成时继续展示
+- 从 discovery pool 进入排序前，会用 `profile.preferences.disliked_topics` 做 serve-time 兜底过滤；API / OpenClaw 在序列化前还会用最新 effective snapshot 复核，覆盖 flat preference 已写但 Soul rebuild 或 in-flight serve 尚未收敛的窗口
 - 排序主键先看 `candidate_tier`，再看 `relevance_score`、`last_scored_at/discovered_at`、`view_count`
 - 生成结果后会写入 `recommendations` 表，避免下次重复选中
 - 每条推荐都会调用 `generate_expression()` 生成 `expression` 和 `topic_label`
@@ -561,12 +562,12 @@ report: PoolHealthReport = curator.check_pool_health()
 2. 追加一条 `feedback` 事件到事件层
 3. 把对应 `content_cache` 项标记为 `feedbacked`
 4. 若是 `dislike`，候选池查询会直接把这条内容排除
-5. 当新反馈累计到阈值后，再统一触发偏好重分析和画像更新
+5. 当新反馈累计到阈值后，再统一触发偏好重分析；主题一旦写入 flat preference，推荐出口立即生效，不等待完整画像重建
 
 所以反馈的影响分成两档：
 
-- **即时影响**：这条不喜欢的内容会立刻更难再次出现
-- **延迟影响**：累计反馈足够后，系统才会真正改偏好层和画像，进而改变后续 discovery 打分与推荐排序
+- **即时影响**：这条不喜欢的卡片同步变为不可操作；已确认主题一落入 flat preference，相关历史/缓存/换批/通知立即按最新快照过滤
+- **延迟影响**：单次点踩是否上升为主题 dislike 仍由学习阈值控制；异步 Soul rebuild 和语义清池随后改善 discovery 打分与库存效率
 
 ### 一个简化后的因果链
 
@@ -581,7 +582,7 @@ report: PoolHealthReport = curator.check_pool_health()
 5. **反馈保留当前状态**：v0.1 只保存当前反馈结果，不额外引入 feedback 历史表
 6. **三端走同一反馈语义**：CLI、API 和 popup 都只写入当前反馈状态，并同步追加 `feedback` 事件
 7. **先平衡候选，再放宽约束**：优先通过来源均衡和分阶段回填守住一批内容的丰富度，而不是靠最后一步无条件补满
-8. **反馈驱动学习延迟触发**：推荐反馈不会逐条立刻重写画像，而是累计到阈值后统一重分析，降低噪声
+8. **单卡与主题分层**：推荐反馈不会逐条推断整个主题；卡片身份同步隐藏，累计证据确认主题后再立即应用到所有推荐输出，降低误杀
 9. **推荐语气跟着用户而不是内容类型变**：表达风格会根据画像和近期反馈推断 `ToneProfile`，但不会因为某条内容是轻聊天、日常或审美浏览就自动把语气调轻；`style_key` 只影响推荐理由的切入角度，避免同一个助手在不同内容之间人格漂移。
 10. **缓存候选不能退化成只看播放量**：一旦从 `content_cache` 回读候选，也必须恢复 `relevance_score`、`candidate_tier` 和时间字段，保持与实时发现同一排序标准
 11. **候选池先可展示，再做文案增强**：`discover` 入池时就要带 `relevance_reason`，popup “换一批”先秒级从池子里出片，`expression` 只是增强层，不再阻塞展示

@@ -1052,6 +1052,33 @@ def test_load_disliked_topic_phrases_reads_effective_dislikes() -> None:
     assert controller._load_disliked_topic_phrases() == ["营销号", "标题党"]
 
 
+def test_get_pending_notification_blocks_structured_disliked_topic() -> None:
+    class _NotificationDatabase(_FakeDatabase):
+        def get_notification_candidate(
+            self,
+            *,
+            min_confidence: float = 0.82,
+        ) -> dict[str, object] | None:
+            assert min_confidence == 0.82
+            return {
+                "id": 7,
+                "bvid": "BV1REHAB",
+                "title": "办公室久坐舒展指南",
+                "expression": "一套具体动作。",
+                "topic_group": "运动康复",
+            }
+
+    controller = ContinuousRefreshController(
+        memory_manager=_FakeMemoryManager(),
+        database=_NotificationDatabase([]),
+        soul_engine=_FakeSoulEngine(disliked=["运动康复"]),
+        discovery_engine=_FakeDiscoveryEngine(),
+        recommendation_engine=_FakeRecommendationEngine(),
+    )
+
+    assert controller.get_pending_notification() is None
+
+
 def test_get_pending_delight_skips_effective_disliked_candidate() -> None:
     candidate = {
         "bvid": "BV1MKT",
