@@ -46,6 +46,15 @@ API daemon 的候选 admission 成功后只同步调用轻量 expression `notify
 - **sources.platforms** — 八个平台族的唯一可枚举注册表；discovery 已看过滤、pool 配额统计、已看事件身份和 URL host 推断统一复用别名 / strategy 前缀规则，`bangumi/bgm` 与 `bgm.tv/subject/*` 归入同一来源族
 - **SourceAdapter 协议** — 多源适配层（`sources/`），在上述 4 个 B 站策略之外挂载非 B 站内容源（小红书、抖音、YouTube、X、知乎、Reddit、Bangumi、V2EX 等）
 
+## Dislike 与搜索边界（2026-08-07）
+
+普通 `disliked_topics` 是候选评估与推荐输出约束，不是抓取授权列表。SearchStrategy、统一关键词 planner 和各来源
+producer 仍可发送同主题 query；同一个搜索词可能返回安全的相邻内容，且抓取日志本身不代表内容会被推荐。
+
+内容评估继续读取画像中的最新 dislikes 并降低命中项分数，新增 dislike 仍会异步执行 exact + embedding recall +
+LLM precision 清池以减少库存浪费。最终“不展示”的正确性由 recommendation 输出层负责，不能依赖一次性清池
+是否已经完成。普通 dislike 不过期 planner keyword，不撤销已排队来源任务，也不增加请求前 LLM gate。
+
 ## 多源适配层
 
 `sources/` 把"内容从哪里来"从"怎么挑"里彻底解耦。`ContentDiscoveryEngine` 通过 `register_adapter()` 挂载任意实现了 `SourceAdapter` 协议的源，每个源用一条 `SourceRecipe`（`source_type` + `strategy` + `config`）描述订阅，引擎在一轮 discovery 里并发驱动所有启用的 recipe。
@@ -591,7 +600,7 @@ discovery 不是“把整个找片过程都交给 LLM”。当前实现里，LLM
 
 此前多个 search 关键词生成器（B 站 `search`、小红书 `xhs-search`、抖音 `search`、YouTube `yt_search`、X `x-search`、知乎 `zhihu-search`、Reddit `reddit-search`、Bangumi `bangumi-search`）各自独立调 LLM、各发一份画像。统一 planner 把它们收敛成一套「双缓冲 + 缺口拉动」的背压模型，接管各平台 **search 关键词**，并接管 B 站 `ExploreStrategy` 的 `keyword_kind="explore"` query cache 生成；`trending / related / hot / feed / channel / creator / subreddit / ranked / latest` 及各自的 budget/cadence **原样不动**。
 
-**关键词存储**（`storage/database.py`，表 `discovery_keywords` + `discovery_keyword_yield` + CAS 单飞锁 `discovery_planner_lock`）是生成侧的缓存 / 历史 / yield 账本。状态机：`pending → claimed → (内联) used / failed` 或 `→ (异步) executing → used / failed`；任意在途态可经租约回收 / 预算回滚回到 `pending`，小红书任务遇到平台安全验证时也会从 `executing` 无损回到 `pending` 且不增加 attempts。画像 digest 变化时，planner 会先原子整理 `regular/pending`：当前 digest 优先保留；旧 digest 中创建未超过 `keyword_digest_grace_hours`、不命中显式 `disliked_topics` 或平台 `avoid_topics`、且未超过当前动态高水位的词继续可领取，并保留原 digest 与全部生成溯源；过龄、命中避雷、重复或超额才变成 `expired`。设宽限为 `0` 即恢复旧版硬过期。`claimed/executing`、终态行和 `keyword_kind="explore"` 均不参与整理。`keyword_kind` 区分 `regular` 与 `explore`：普通 search 只 claim `regular`，老 B 站 `ExploreStrategy` 在 planner 开启时只 claim `explore`。在途四元组 `(platform, keyword, profile_kw_digest, keyword_kind)` 部分唯一；已经实际搜索后因零产出或全量重复而变成 `expired` 的词保留 `used_at`，在 `history_window_hours` 内继续参与近期词冷却；宽限保留的 pending 也进入生成历史，避免库存尚在时又生成同族关键词。
+**关键词存储**（`storage/database.py`，表 `discovery_keywords` + `discovery_keyword_yield` + CAS 单飞锁 `discovery_planner_lock`）是生成侧的缓存 / 历史 / yield 账本。状态机：`pending → claimed → (内联) used / failed` 或 `→ (异步) executing → used / failed`；任意在途态可经租约回收 / 预算回滚回到 `pending`，小红书任务遇到平台安全验证时也会从 `executing` 无损回到 `pending` 且不增加 attempts。画像 digest 变化时，planner 会先原子整理 `regular/pending`：当前 digest 优先保留；旧 digest 中创建未超过 `keyword_digest_grace_hours`、不命中由当前库存饱和度产生的平台 `avoid_topics`、且未超过动态高水位的词继续可领取，并保留原 digest 与全部生成溯源；过龄、供给饱和、重复或超额才变成 `expired`。普通 user dislike 不参与关键词过期或撤销。设宽限为 `0` 即恢复旧版硬过期。`claimed/executing`、终态行和 `keyword_kind="explore"` 均不参与整理。`keyword_kind` 区分 `regular` 与 `explore`：普通 search 只 claim `regular`，老 B 站 `ExploreStrategy` 在 planner 开启时只 claim `explore`。在途四元组 `(platform, keyword, profile_kw_digest, keyword_kind)` 部分唯一；已经实际搜索后因零产出或全量重复而变成 `expired` 的词保留 `used_at`，在 `history_window_hours` 内继续参与近期词冷却；宽限保留的 pending 也进入生成历史，避免库存尚在时又生成同族关键词。
 
 **生成（planner loop）**：`runtime/keyword_planner.py::KeywordPlanner` 作为独立后台对象（在 `api/runtime_context.py` 构造、持 `llm_service`+db+config，由 refresh controller 的 `run_forever` 拉起），每 `planner_poll_seconds` 轮一次：
 

@@ -136,6 +136,18 @@ Agent：那我理解了。这是一个很有意思的特质——你可能也会
 
 **目标**：像一个熟悉多个内容社区的专业编辑一样，通过多种方式主动发现好内容。
 
+#### 2.2.1 不喜欢的即时推荐边界
+
+普通 dislike 的语义是“不再推荐这张卡 / 已确认主题”，不是“禁止搜索这个词”。单卡反馈提交后同步把
+recommendation 标为 processed 并失效推荐快照；主题 dislike 一旦写入 flat preference，
+`SoulEngine.get_effective_disliked_topics()` 就把 flat preference、Soul 与用户 overrides 合成当前权威快照，
+`get_profile()` 在完整 Soul 重建前也会带上它。
+
+推荐历史缓存把该快照 digest 纳入命中条件；推荐首屏、换一批、追加、OpenClaw fallback 与主动通知在最终输出
+边界再次按最新快照过滤。结构化 topic 精确命中始终排除；自然语言子串若误杀整个多卡窗口，只恢复没有精确
+topic 命中的条目，单条 push 不恢复。异步 embedding + LLM 清池继续减少无效库存，但不再承担展示正确性。
+Discovery 可以继续宽搜，普通 dislike 不撤销关键词或来源任务。
+
 #### 发现策略
 
 | 策略 | 说明 |

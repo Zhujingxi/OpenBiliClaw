@@ -52,6 +52,17 @@ guided init 不与待应用配置并行：队列为 `queued/applying` 时 `POST 
 
 ## 推荐反馈端点
 
+### 推荐输出与 dislike 的即时一致性
+
+| 方法与路径 | 状态 | 契约 |
+|---|---|---|
+| `GET /api/recommendations` | ✅ | 只读未处理历史；1 秒 snapshot 只有在 TTL 与 effective dislike digest 都未变化时复用。加载期间 dislike 变化会按新快照重读，再在 franchise cap 前过滤。 |
+| `POST /api/recommendations/reshuffle` / `append` | ✅ | serve 使用带 flat-preference overlay 的画像，完成后在 HTTP 序列化前再读一次最新 effective dislikes，关闭请求进行中的偏好竞态。 |
+| `GET /api/notifications/pending` | ✅ | 单条候选在返回前按最新 dislike 复核；模糊命中时不使用多卡窗口的“全灭恢复”保护。 |
+| profile edit / `POST /api/feedback` | ✅ | durable edit 或单卡反馈 projection 完成后立即失效 recommendation snapshot；单卡反馈仍由 `exclude_processed` 同步隐藏。 |
+
+这些边界不阻止 discovery 搜索，也不等待异步语义清池或完整 Soul rebuild。
+
 ### 公开事件写入口的幂等 ID
 
 以下三个公开写入口都要求调用方显式提供稳定 ID；字段会先去除首尾空白，再校验非空且最长 400 字符：

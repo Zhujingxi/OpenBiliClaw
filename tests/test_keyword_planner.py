@@ -2255,7 +2255,7 @@ async def test_digest_change_expires_old_and_regenerates(db: Database) -> None:
     assert _pending(db, _XHS, new_digest) == ["新词A", "新词B"]
 
 
-async def test_digest_change_reuses_safe_inventory_and_skips_llm(
+async def test_digest_change_keeps_disliked_query_but_respects_supply_avoid(
     db: Database,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2285,18 +2285,28 @@ async def test_digest_change_reuses_safe_inventory_and_skips_llm(
 
     assert ledger == {}
     assert llm.calls == []
-    assert db.count_pending_keywords_all_digests(_XHS) == 1
+    assert db.count_pending_keywords_all_digests(_XHS) == 2
     retained = db.conn.execute(
-        "SELECT status, profile_kw_digest FROM discovery_keywords WHERE keyword = '露营路线'"
+        """
+        SELECT keyword, status, profile_kw_digest
+        FROM discovery_keywords
+        WHERE keyword IN ('AI 教程', '露营路线')
+        ORDER BY keyword
+        """
+    ).fetchall()
+    assert [str(row["keyword"]) for row in retained] == ["AI 教程", "露营路线"]
+    assert all(str(row["status"]) == "pending" for row in retained)
+    assert all(str(row["profile_kw_digest"]) == old_digest for row in retained)
+    machine_learning = db.conn.execute(
+        "SELECT status FROM discovery_keywords WHERE keyword = '机器学习 入门'"
     ).fetchone()
-    assert retained is not None
-    assert str(retained["status"]) == "pending"
-    assert str(retained["profile_kw_digest"]) == old_digest
+    assert machine_learning is not None
+    assert str(machine_learning["status"]) == "expired"
     assert planner.last_digest_grace_ledger[_XHS] == {
         "current": 0,
-        "reused": 1,
+        "reused": 2,
         "expired_aged": 0,
-        "expired_blocked": 2,
+        "expired_blocked": 1,
         "expired_excess": 0,
     }
 
