@@ -71,6 +71,7 @@ gate 属于 `RuntimeContext` 的稳定部分：热重载构造成功后在同一
 | 桌面 Web 可撤销即时反馈 | ✅ | 普通推荐卡和正向/避雷探针的非聊天动作先更新本地 UI，再由共享 pending-action coordinator 保留 10 秒提交屏障；点击撤销会取消定时器且不发 API 写请求，提交失败恢复原状态，`pagehide` 会以 keepalive 立即结清未提交动作。探针聊天和推荐评论需要服务端回复或文本语义，保持直接提交，不伪装成可撤销动作。 |
 | 桌面 Web 探针反馈文案 | ✅ | 消息抽屉与画像页的正向/避雷探针共用一个 domain-aware feedback helper；inline 结果与 toast 使用同一条文本，明确显示经折叠空白且最长 24 字符的探针主题（超长以省略号收束），并通过 `textContent` / `showToast(text)` 写入，避免把主题插入 HTML。 |
 | 桌面 Web 对话等待反馈 | ✅ | 「聊聊口味」发送消息后立即显示「阿B 正在思考，等待模型回复…」状态；服务端创建 durable `pending/processing` turn 并触发历史刷新后，该状态继续由真实 turn 生命周期渲染，不会被刷新覆盖成只剩用户消息。完成或失败时原位替换为终态内容；等待气泡使用 `role=status`、polite live region、`aria-busy` 和受 reduced-motion 保护的三点动效。 |
+| 探针聊天跨界面历史对齐 | ✅ | 从消息里的「多聊聊」创建的 durable `scope=probe` / `scope=avoidance_probe` turn 与普通 `scope=chat` 一样进入插件、桌面 Web、移动 Web 的主对话历史；共享 renderer 保留统一时间顺序，pending / processing 继续按真实 turn 状态刷新，`scope=delight` 仍由推荐卡独立管理。 |
 | 三端 probe 反馈语义 | ✅ | 桌面、移动和插件的兴趣/避雷 probe 统一使用 confirm/defer/reject/chat 语义，所有操作均有可见文字；推荐区不新增画像或对话纠偏引导入口。 |
 | 四端换批语义 | ✅ | 桌面 Web、移动 Web 与扩展 side panel 都把当前卡片 ID 作为 `excluded_bvids` 提交换批；后端负责默认硬去重并在成功时只写一条中性的 `reshuffle` 批次事件，不批量提交逐卡 `dismiss`。桌面端已删除“换一批时忽略当前”开关；CLI 无持久卡片列表，继续由推荐历史与 `seen_items` 去重。 |
 | 桌面 Web 前端偏好键 | ✅ | `/web` 的纯前端偏好继续走 `storageGet` / `storageSet`，不写 `config.toml`：`obc.theme` 保存主题三态，`openbiliclaw.webui.autoLoadOnScroll` 保存滚动自动加载开关；设置页保存状态行回显主题与滚动自动加载状态。 |

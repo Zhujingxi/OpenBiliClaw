@@ -46,7 +46,18 @@
   // Match the backend's safe hot-reload drain window. The page/popup abort
   // signal still stops retries immediately when its owner goes away.
   const PENDING_OPEN_RETRY_DEADLINE_MS = 25 * 60_000;
-  const DIALOGUE_SCOPES = new Set(["chat", "hypothesis", "confusion"]);
+  // Probe chat is a durable conversational turn too. Keep delight chat out
+  // of the main dialogue because it belongs to the recommendation card's
+  // own contextual history, but show both probe polarities in the shared
+  // dialogue view so closing the message inbox cannot hide the conversation.
+  const DIALOGUE_SCOPES = new Set([
+    "chat",
+    "hypothesis",
+    "confusion",
+    "probe",
+    "avoidance_probe",
+  ]);
+  const DIALOGUE_REPLY_SCOPES = new Set(["chat", "probe", "avoidance_probe"]);
   // Backend refuses settlement when another card owns the dialogue anchor.
   // These outcomes are honest failures — never fall back to the optimistic
   // terminal state, or the UI will claim "已确认" while nothing was written.
@@ -261,6 +272,14 @@
 
   function isQuestionTurn(turn) {
     return isRecord(turn?.payload) && turn.payload.type === "question";
+  }
+
+  function isDialogueTurn(turn) {
+    return isRecord(turn) && DIALOGUE_SCOPES.has(text(turn.scope));
+  }
+
+  function isDialogueReplyTurn(turn) {
+    return isRecord(turn) && DIALOGUE_REPLY_SCOPES.has(text(turn.scope));
   }
 
   function cardActionPath(turnId) {
@@ -777,7 +796,7 @@
     const list = Array.isArray(items) ? items : [];
     return list
       .map((turn, index) => ({ turn, index }))
-      .filter(({ turn }) => isRecord(turn) && DIALOGUE_SCOPES.has(text(turn.scope)))
+      .filter(({ turn }) => isDialogueTurn(turn))
       .sort((left, right) => {
         const byTime = text(left.turn.created_at).localeCompare(text(right.turn.created_at));
         return byTime || left.index - right.index;
@@ -802,6 +821,8 @@
     contextStorageKey,
     normalizeContextPreview,
     isCardTurn,
+    isDialogueReplyTurn,
+    isDialogueTurn,
     isTerminalCardTurn,
     isQuestionTurn,
     pendingConfirmationOpenPath,
