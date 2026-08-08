@@ -189,10 +189,10 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.200 (2026-08-06)**
+📌 Latest: **v0.3.201 (2026-08-08)**
 
-- **More reliable configuration saves** — persistence returns `202` immediately with observable background-apply status; failures restore the last-known-good runtime configuration.
-- **Saved-list badges are correct on first load** — desktop Web hydrates Watch Later and Favorites counts immediately, and stale responses cannot overwrite newer state.
+- **“Chat more” conversations no longer disappear** — probe chats started from message cards now stay visible in the main dialogue across the extension, desktop Web, and mobile Web.
+- **Dislike feedback takes effect immediately** — recommendation display honors the latest dislike while preserving precise-topic protection without over-blocking broad discovery.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
