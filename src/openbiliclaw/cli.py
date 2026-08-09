@@ -11421,8 +11421,9 @@ def _run_douyin_discovery(
             _print_status_panel(
                 "warning",
                 "抖音插件任务等待超时",
-                "任务可能仍在浏览器后台执行；可提高 "
-                "OPENBILICLAW_DY_DISCOVERY_SEARCH_WAIT_SECONDS 后重试并检查任务状态。",
+                "等待超时的任务已写入 failed 终态，不会残留 pending。请确认浏览器扩展在线；"
+                "若扩展确实在执行但耗时较长，可提高 "
+                "OPENBILICLAW_DY_DISCOVERY_SEARCH_WAIT_SECONDS 后重试。",
             )
             raise typer.Exit(code=1)
         if "failed" in outcomes:

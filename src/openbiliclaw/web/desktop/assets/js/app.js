@@ -6942,6 +6942,10 @@ ${cardFeedbackBarHtml()}`;
       "x_cookie_synced",
       "reddit_cookie_synced"
     ]);
+    // Extension wake-up signals are transport control frames, not user-facing
+    // runtime activity. Rendering their wire type as the dashboard summary is
+    // both noisy and misleading.
+    const RUNTIME_TRANSPORT_ONLY_EVENTS = new Set(["dy_task_available"]);
     const SOURCE_ENABLE_SELECT_IDS = {
       bilibili: "bilibiliEnabled",
       xiaohongshu: "xhsEnabled",
@@ -8694,6 +8698,7 @@ ${cardFeedbackBarHtml()}`;
 
     function handleRuntimeEvent(event) {
       if (!event?.type) return;
+      if (RUNTIME_TRANSPORT_ONLY_EVENTS.has(event.type)) return;
       let configApplyEventAccepted = true;
       if (event.type === "config_reloaded") {
         const revision = Number(event.revision || 0);
@@ -9686,7 +9691,9 @@ ${cardFeedbackBarHtml()}`;
     async function probeConfigService(kind, config, instanceId = "") {
       return await requestJsonStrict(ENDPOINTS.configProbe, {
         method: "POST",
-        timeoutMs: 35000,
+        // Backend allows a bounded 120s probe so cold local Ollama models can
+        // finish their startup retry window. The browser must outlive it.
+        timeoutMs: 125000,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ kind, instance_id: String(instanceId || ""), config })
       });

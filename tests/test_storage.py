@@ -1996,6 +1996,43 @@ class TestDatabase:
 
             db.close()
 
+    def test_get_unrecommended_content_filters_platform_before_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+
+            for index in range(60):
+                db.cache_content(
+                    f"reddit:{index}",
+                    content_id=str(index),
+                    source_platform="reddit",
+                    source="reddit-hot",
+                    relevance_score=0.99,
+                )
+            db.cache_content(
+                "BV1BILI",
+                source_platform="bilibili",
+                source="trending",
+                relevance_score=0.80,
+            )
+            # Legacy Bilibili rows may have a blank source_platform.
+            db.cache_content(
+                "BV1LEGACY",
+                source_platform="",
+                source="search",
+                relevance_score=0.79,
+            )
+
+            items = db.get_unrecommended_content(
+                limit=10,
+                source_platforms=["bili"],
+            )
+
+            assert [item["bvid"] for item in items] == ["BV1BILI", "BV1LEGACY"]
+            assert {str(item["source_platform"] or "bilibili") for item in items} == {"bilibili"}
+
+            db.close()
+
     def test_get_unrecommended_content_orders_by_tier_then_relevance_and_recency(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db = Database(Path(tmpdir) / "test.db")

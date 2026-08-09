@@ -228,6 +228,24 @@ if TYPE_CHECKING:
     )
 
 logger = logging.getLogger(__name__)
+
+# A local Ollama chat probe can spend ~31 seconds in its documented cold-load
+# retry window before the model answers. The previous 30-second API cap killed
+# that legitimate retry at the boundary and made the first settings-page test
+# fail while an immediate retry passed. Keep a finite control-plane budget, but
+# leave enough headroom for cold local providers.
+_CONFIG_LLM_PROBE_MAX_TIMEOUT_SECONDS = 120.0
+
+
+def _config_llm_probe_timeout_seconds(configured_timeout: object) -> float:
+    """Clamp one settings-page LLM probe to a finite cold-start-safe budget."""
+    try:
+        parsed = float(str(configured_timeout or 300))
+    except (TypeError, ValueError):
+        parsed = 300.0
+    return min(max(parsed, 10.0), _CONFIG_LLM_PROBE_MAX_TIMEOUT_SECONDS)
+
+
 _CONFIG_SAVE_LOCK = asyncio.Lock()
 _fire_and_forget_tasks: set[asyncio.Task[None]] = set()
 
@@ -15454,6 +15472,9 @@ def create_app(
         is_instance = kind == "llm_instance"
         target_instance = str(instance_id or "").strip().lower()
         configured_chain = effective_llm_default_chain(cfg.llm)
+        timeout_s = _config_llm_probe_timeout_seconds(
+            getattr(cfg.llm, "timeout", 300),
+        )
         if is_fallback:
             legacy_routing = not bool(getattr(cfg.llm, "instance_routing", False))
             legacy_default = str(getattr(cfg.llm, "default_provider", "") or "").strip().lower()
@@ -15538,7 +15559,6 @@ def create_app(
                 model = str(
                     getattr(provider_obj, "_model", "") or getattr(provider_cfg, "model", "") or ""
                 ).strip()
-            timeout_s = min(max(float(getattr(cfg.llm, "timeout", 300) or 300), 10.0), 30.0)
 
             async def _complete_probe() -> Any:
                 async with ctx.llm_concurrency_gate.slot(caller="api.config_probe"):
@@ -15590,6 +15610,16 @@ def create_app(
                 model=response_model,
                 message=f"{label} is available." if ok else "",
                 error="" if ok else f"{label} returned an empty response.",
+                latency_ms=int((time.perf_counter() - started) * 1000),
+            )
+        except TimeoutError:
+            return ConfigServiceProbeResponse(
+                ok=False,
+                kind=kind,
+                instance_id=target_instance,
+                provider=provider,
+                model=model,
+                error=f"LLM connectivity probe timed out after {timeout_s:g}s.",
                 latency_ms=int((time.perf_counter() - started) * 1000),
             )
         except Exception as exc:

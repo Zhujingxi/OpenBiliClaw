@@ -802,7 +802,10 @@ export async function fetchSourceShareSuggestion(overrides = null) {
 export async function probeConfigService(kind, config, instanceId = "") {
   return requestJson("/config/probe-service", {
     method: "POST",
-    timeoutMs: 35_000,
+    // Keep the popup alive beyond the backend's bounded 120s LLM cold-start
+    // probe window; otherwise the browser aborts a request the backend still
+    // legitimately owns.
+    timeoutMs: 125_000,
     headers: {
       "Content-Type": "application/json",
     },

@@ -101,6 +101,11 @@ class SourceAuthContract(BaseModel):
 | `POST /api/sources/{slug}/verify` | 显式验证，返回契约 + `outcome` / `replayed` / `retry_after_seconds` |
 | `POST /api/sources/{slug}/credential` | 统一写入：结构校验 → 活体校验 → 落盘 → 广播 → 返回重算契约 |
 
+`state / logged_in` 是给旧客户端和 Agent 宿主的兼容视图，但仍由各平台 provider 负责，不能与
+同一响应里的 `auth` 自相矛盾。抖音读取最近一次匹配当前凭据的活体探针：`verified` 同步映射为
+`ready / true`，`stale` 映射为 `stale / false`，其余结论映射为 `unverified / false`。状态端点
+仍只读 probe cache、绝不因轮询出网。
+
 7 条老写入端点（`/api/bilibili/cookie`、`/api/sources/{dy,x,reddit}/cookie`、`/api/sources/xhs/tokens`、`/api/sources/{xhs,zhihu}/login-state`）保留为 `deprecated=True` 的内部转发，响应结构**逐字段冻结（值，不只是键集）**——它们有浏览器扩展在调用，而一个键还在、值被掏空的响应对只比对键集的测试是隐形的。`PUT /api/config` 的四处凭据写入同样委托统一校验门。
 
 **凭据读取是状态查询，不是秘密导出。** `GET /api/sources/credentials` 的 `available`、掩码预览、`summary` 与非敏感 Cookie 名称用于回答“是否已保存/由哪里管理”；秘密原值永不返回。历史 `reveal_keys` query 保留为 no-op，`form.actions` 不再包含 `copy`，桌面页面也不渲染复制按钮。新值只能走统一 credential 写入或配置 PUT；空值与掩码回显不会覆盖现有值。
@@ -113,7 +118,7 @@ class SourceAuthContract(BaseModel):
 
 ## 设计决策
 
-**旧 `state` 是承袭的，不是推导的。** 原计划写一个 `derive_legacy_state(contract)`，实施时证明不可能：bilibili 与 douyin 的正交字段完全相同（`present` + `unverified` + `live_probe`），旧值却分别是 `ready`/`True` 与 `unverified`/`False`——B 站因「cookie 字段齐全」获得信任推定，抖音因其分支被写成永不声称成功而没有。**这个不可能性本身就是旧字段语义坍塌的最强证据。** 改由 `legacy.py` 的 `check_legacy_consistency()` 断言两套视图互不矛盾（不是相等：`ready` 合法地对应 `verified` 或 `unverified`）。
+**旧 `state` 是 provider-owned compatibility，不是全局推导。** 原计划写一个 `derive_legacy_state(contract)`，实施时证明不可能：同样的正交字段在不同平台具有不同历史兼容语义。各 provider 因而继续拥有自己的映射，`legacy.py` 的 `check_legacy_consistency()` 只断言两套视图不矛盾。provider 获得更强证据时可以在旧词汇内同步升级；抖音活体探针成功后若仍固定输出 `unverified / false`，会让同一响应的外层与 `auth.verification=verified` 直接冲突，因此现已映射为 `ready / true`。
 
 **状态端点绝不出网，由作用域强制。** `SourceAuthContext` 只持有 config 与 database，**拿不到 HTTP client**。PC Web 收到 `bilibili_cookie_synced`、`douyin_cookie_synced`、`x_cookie_synced` 或 `reddit_cookie_synced` runtime 事件后会立即重读该端点；文档可见时仍每 30 秒轮询一次，作为事件遗漏或 WebSocket 重连空窗的兜底，并同时刷新首页警示与来源卡片。若状态端点自己探测，一个空闲标签页就会每分钟打抖音两次、永不停止——那是自造风控。活体探测只发生在显式的 verify 动作里，状态端点通过 `probe_cache.LiveProbeCache.peek()` 读取上次结论（零 I/O）。
 

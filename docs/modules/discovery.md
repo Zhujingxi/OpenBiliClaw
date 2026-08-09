@@ -46,6 +46,20 @@ API daemon 的候选 admission 成功后只同步调用轻量 expression `notify
 - **sources.platforms** — 八个平台族的唯一可枚举注册表；discovery 已看过滤、pool 配额统计、已看事件身份和 URL host 推断统一复用别名 / strategy 前缀规则，`bangumi/bgm` 与 `bgm.tv/subject/*` 归入同一来源族
 - **SourceAdapter 协议** — 多源适配层（`sources/`），在上述 4 个 B 站策略之外挂载非 B 站内容源（小红书、抖音、YouTube、X、知乎、Reddit、Bangumi、V2EX 等）
 
+## 来源定向回填与抖音任务预算
+
+`DiscoveryStrategy.source_platform` 是一次策略运行的权威平台身份；历史四个 B 站策略默认返回
+`bilibili`，YouTube 与抖音策略显式覆盖。主策略不足时，`ContentDiscoveryEngine` 只从本轮策略
+声明的平台回填 `content_cache`，并把平台条件交给 storage 在 SQL `LIMIT` 与来源平衡之前执行。
+旧库中空 `source_platform` 仍按 B 站兼容，不能让 `discover --source bilibili` 在 B 站无结果时
+混入 Reddit、YouTube 等其它来源。
+
+抖音插件任务的 `wait_seconds` 是**整轮 wall-clock 预算**，不是 search / hot / feed / creator
+每个分支各自重新领取一份预算。首个分支耗尽预算后，未执行分支直接记为 `timeout`，不再继续
+入队。单任务到期会原子转成 `failed + wait_timeout`；上层 deadline 或进程取消会尽力转成
+`failed + wait_cancelled`，且不会覆盖已经由扩展完成的终态。因此任一次 CLI、daemon 或 Agent
+Bridge 调用结束后，都不应留下由该调用创建的永久 `pending/in_progress` 任务。
+
 ## Dislike 与搜索边界（2026-08-07）
 
 普通 `disliked_topics` 是候选评估与推荐输出约束，不是抓取授权列表。SearchStrategy、统一关键词 planner 和各来源

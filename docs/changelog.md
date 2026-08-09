@@ -6,6 +6,8 @@
 
 ## v0.3.201：探针聊天与 dislike 即时推荐（2026-08-08）
 
+- **Agent Bridge 与当前内核能力对齐**：OpenClaw 历史接入升级为 `agent-bridge/v2` 协议中立适配层，Hermes / WorkBuddy 可复用同一套能力协商、24 个 skill descriptor、JSON CLI 和 Python alias；补齐多源推荐、换一批 / 追加、活动流与平台可用性、四态兴趣 / 避雷探针、惊喜反馈、durable chat history、画像编辑、本地保存与显式授权 native-save 同步。后续新增对外能力必须同时登记 operation DTO、skill descriptor、CLI（适用时）、capability manifest 与集成文档，并配套 idempotency / state-changing 边界测试。
+- **全面真实 E2E 后收紧多源与控制面可靠性**：source-scoped discovery 的历史回填先按策略平台过滤，B 站空结果不再混入 Reddit 缓存；抖音插件 search/hot/feed 共用一次等待预算，超时/取消任务落失败终态，daemon 在扩展缺席时零入队并对空跑、错误和预算耗尽退避；抖音 live probe 的 legacy 与正交状态保持一致。配置页 LLM 探测扩到有限 120 秒后端 / 125 秒客户端窗口，覆盖 Ollama 冷启动；桌面 runtime 看板不再显示 `dy_task_available` 原始控制帧。
 - **探针聊天跨界面对齐**：从消息里的「多聊聊」提交的 `probe` / `avoidance_probe` durable turn 现在也会进入插件、桌面 Web 与移动 Web 的主对话历史；关闭消息面板或切换到「聊聊口味」后仍能找回这段对话，惊喜推荐 `delight` 继续保留在自己的内容卡片内聊中。
 - **修正 dislike 的产品边界**：普通 dislike 不再被当成搜索词禁令，也不再让跨 digest 关键词整理撤销同词 pending；搜索与多源抓取可以继续宽搜，单卡反馈只同步隐藏该卡，主题证据确认后才约束相关推荐输出。平台库存饱和产生的 supply avoid 仍可独立淘汰冗余关键词。
 - **关闭偏好写入到推荐展示的延迟窗口**：`get_profile()` 立即合并 flat preference 的最新 dislikes；推荐历史 snapshot 绑定 dislike digest，首屏、换批、追加、OpenClaw 与主动通知在最终输出边界复核，不再等待 1 秒缓存、Soul rebuild 或异步清池。

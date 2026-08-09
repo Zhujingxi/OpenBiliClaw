@@ -133,6 +133,15 @@ def test_desktop_pool_status_labels_pending_signals_as_discovery_context() -> No
     assert "新动作" in index_html
 
 
+def test_desktop_ignores_extension_transport_wakeup_events() -> None:
+    """Wire-only task wakeups must not become raw dashboard activity copy."""
+    app_js = Path("src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
+    body = _function_body(app_js, "handleRuntimeEvent")
+
+    assert 'const RUNTIME_TRANSPORT_ONLY_EVENTS = new Set(["dy_task_available"])' in app_js
+    assert "RUNTIME_TRANSPORT_ONLY_EVENTS.has(event.type)" in body
+
+
 def test_desktop_replenished_label_distinguishes_previous_success_from_current_status() -> None:
     """The replenish count is historical, so its label must not read as this round."""
     index_html = Path("src/openbiliclaw/web/desktop/index.html").read_text(encoding="utf-8")

@@ -485,19 +485,20 @@ npm run package
 
 </details>
 
-## 🤖 Integrate with OpenClaw / AI Coding Agents
+## 🤖 Integrate with OpenClaw / Hermes / WorkBuddy Agents
 
-This repo ships a [workspace skill](skills/openbiliclaw-adapter/SKILL.md). Point any skill-aware AI coding agent (OpenClaw / Claude Code / Codex CLI / Cursor, etc.) at this checkout and it can drive your local OpenBiliClaw directly.
+This repo ships a [workspace skill](skills/openbiliclaw-adapter/SKILL.md) and a versioned, host-neutral Agent Bridge. Point any skill-aware or local-JSON-capable agent (OpenClaw / Hermes / WorkBuddy / Claude Code / Codex CLI / Cursor, etc.) at this checkout and it can drive your local OpenBiliClaw directly.
 
 ### What you get after integration
 
 - ✨ **Proactive recommendations** — the system continuously discovers content in the background; when it finds a high-scoring surprise, it pushes to OpenClaw via WebSocket — **you don't have to ask**
-- 🔮 **Proactive interest probing** — the system guesses you might be into a new domain, generates a hypothesis and a question, and has OpenClaw come ask you "does this direction resonate?" — your answer automatically refines the profile
-- 🧭 **Proactive avoidance probing** — the system can also ask whether a low-quality form, style boundary, or topic shape is something you want to avoid; OpenClaw uses `next-avoidance-probe` / `respond-avoidance-probe`, and nothing is filtered until you confirm it
-- 💬 **Socratic dialogue** — not just interest confirmation; OpenClaw can have deep conversations: probing motivations, proposing hypotheses, confirming understanding — the more you talk, the better it knows you
+- 🔮 **Proactive interest probing** — confirm, reject, defer, or discuss speculative interests
+- 🧭 **Proactive avoidance probing** — the same four-state contract for content boundaries; nothing is filtered until you confirm it
+- 💬 **Durable Socratic dialogue** — every supported storage backend can return a stable `turn_id` and history for retries and host changes
 - 📖 **Read the current soul profile** — MBTI, core traits, deep needs, interest domains
-- 🎯 **Fetch personalized recommendations on demand** — with explanations, confidence scores, and topic labels
-- 💬 **Write feedback back into the learning loop** — `like` / `dislike` / `comment` instantly update the profile and pool scoring
+- 🎯 **Fetch multi-source recommendations** — platform scope, reshuffle, append, inventory availability, explanations and content metadata
+- 💬 **Write durable feedback back into the learning loop** — recommendation and delight-card actions are idempotent
+- 💾 **Local-first saved lists** — favorite/watch-later membership is local; native sync requires explicit authorization
 - 🔄 **Sync Bilibili account signals** — pull history / favorites / following and feed them into the memory system
 
 ### One-sentence integration prompt
@@ -505,7 +506,7 @@ This repo ships a [workspace skill](skills/openbiliclaw-adapter/SKILL.md). Point
 Paste the following into OpenClaw (or Claude Code / Codex CLI / Cursor) — it will read the guide and wire everything up:
 
 ```text
-Please follow https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docs/openclaw-quickstart.md to integrate this repository into OpenClaw (use Bash `curl` to fetch the document, NOT WebFetch — WebFetch summarises markdown and drops critical commands).
+Please follow https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docs/openclaw-quickstart.md to integrate this repository into the Agent Bridge (target host: OpenClaw; use Bash `curl` to fetch the document, NOT WebFetch — WebFetch summarises markdown and drops critical commands).
 ```
 
 ### Usage examples
@@ -553,9 +554,9 @@ Of course, the traditional "you ask → it answers" flow works too:
 >
 > **OpenClaw** (internally runs `recommend --limit 3`, formats and replies)
 
-The whole loop stays local — OpenClaw just calls the CLI bridge; your profile and data never leave the SQLite file on your disk.
+The whole loop stays local — the agent host just calls the CLI bridge; your profile and data never leave the SQLite file on your disk.
 
-> 📖 Full command reference and troubleshooting: [OpenClaw Integration Guide](docs/openclaw-quickstart.md).
+> 📖 Full command reference and troubleshooting: [Agent Bridge Integration Guide](docs/openclaw-quickstart.md) and [capability contract](docs/agent-integration.md). Hosts should run `capabilities` at startup instead of caching an old subset.
 
 ## ✨ Key Features
 
@@ -591,10 +592,17 @@ background ─ background admission (default 3) ──────┘
 guided init: signals → preferences → full profile commit → discover → evaluate → copy → canonical ready
                                                               └→ optional probes after terminal state
 
+Agent hosts (OpenClaw / Hermes / WorkBuddy)
+        → capabilities(agent-bridge/v2) + JSON CLI / skill descriptors
+        → integrations.agent alias / integrations.openclaw compatibility adapter
+        → runtime / soul / recommendation / saved_sync owners
+
 config recovery draft (normal or degraded; business APIs remain gated)
              ├→ /api/config/probe-service → temporary registry → total gate
              └→ /api/config/discover-models → exact instance GET /models (no write)
                                            → editable model list + local effort advisory
+Douyin supply: daemon presence gate (explicit manual calls bypass it) → one shared plugin-cycle budget
+              → terminal dy_task → pending_eval; absent means zero enqueue, failures back off
 durable reply: reply_to_turn_id + fixed time/payload → POST-time frozen binding → pending SQLite → rowid-serial reply worker → visible completion CAS (app-stable dialogue lease)
 post-reply learning/object settlement: independent 11-kind typed queue → actual worker + guard
 confirmation entry (pending list/cards) → one anchor(kind+ref+generation) → frozen admission / relation matrix

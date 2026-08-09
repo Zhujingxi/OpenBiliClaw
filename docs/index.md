@@ -12,6 +12,7 @@
 - [Docker 部署指南](docker-deployment.md) — 手动 Docker / docker compose 部署步骤
 - [可选 HTTPS 部署](https-deployment.md) — 公网域名 Caddy 自动证书，以及可信 LAN 的 TLS profile / 本地 CA 流程
 - [OpenClaw 接入最短指南](openclaw-quickstart.md) — 把 OpenBiliClaw 接进 OpenClaw / AI 编码助手
+- [Agent Bridge 能力契约](agent-integration.md) — `agent-bridge/v2` 能力协商、宿主别名与新功能同步清单
 
 ## 🛠️ 我是开发者 / 贡献者
 
@@ -61,7 +62,7 @@
 | 局域网密码门禁 | [modules/api-auth.md](modules/api-auth.md) | `src/openbiliclaw/auth_core.py` + `src/openbiliclaw/api/auth.py` | ✅ 可选 `[api.auth]` 密码门禁 + `/api/auth/*` + `set-password` |
 | 公网 HTTPS 网关 | [HTTPS 部署](https-deployment.md) | `docker-compose.https.yml` | ✅ 默认关闭的 Caddy 自动证书 + shared-loopback upstream + REST/WebSocket |
 | TLS 反向代理 | [modules/tls-proxy.md](modules/tls-proxy.md) | `src/openbiliclaw/tls_proxy.py` | ✅ 默认关闭的 LAN/self-managed HTTPS + 精确 Origin/Host + WebSocket + SAN 检测 |
-| 集成适配层 | [modules/integrations.md](modules/integrations.md) | `src/openbiliclaw/integrations/` | ✅ OpenClaw adapter 已接入 |
+| 集成适配层 | [modules/integrations.md](modules/integrations.md) · [agent-integration.md](agent-integration.md) | `src/openbiliclaw/integrations/` | ✅ Agent Bridge v2；OpenClaw 兼容，Hermes / WorkBuddy 共用能力清单 |
 | 运行时服务 | [modules/runtime.md](modules/runtime.md) | `src/openbiliclaw/runtime/` | ✅ refresh / candidate pipeline / presence gate / autostart / Ollama preflight / degraded boot / runtime-stream / 扩展 E2E 控制事件 / backend tag auto-update |
 | 原生保存授权 E2E | [native-save-e2e.md](native-save-e2e.md) | 手动验证 runbook | ⚠️ 仅在明确授权命名 BV 号 / 测试账号后执行平台写入 |
 | 六平台原生保存安全 E2E | [testing/six-platform-native-save-e2e.md](testing/six-platform-native-save-e2e.md) | 精确授权、安全结果与手动验证矩阵 | ⚠️ 默认只做 local-only；六平台真实写入必须逐项获得当前授权 |

@@ -1151,6 +1151,10 @@ class RuntimeContext:
                 discovery_engine=new_discovery_engine,
                 candidate_pipeline=new_candidate_pipeline,
                 keyword_fetch=new_keyword_fetch,
+                presence=self.presence,
+                presence_grace_seconds=int(
+                    getattr(sched_cfg, "extension_disconnect_grace_seconds", 90)
+                ),
             )
             new_youtube_producer = build_youtube_discovery_producer(
                 config=new_config,
