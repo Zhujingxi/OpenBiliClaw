@@ -1334,6 +1334,7 @@ def test_build_openclaw_adapter_services_reuses_shared_database(
     assert services.recommendation_engine.kwargs["copy_ready_target_count"] == (
         expected_copy_target
     )
+    assert services.recommendation_engine.kwargs["pool_available_target_count"] == 30
     assert (
         services.llm_service.concurrency_gate is services.soul_engine.kwargs["llm_concurrency_gate"]
     )

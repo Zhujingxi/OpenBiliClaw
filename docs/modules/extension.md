@@ -497,12 +497,12 @@ CLI 入口：
 - 如果某条候选的预生成文案还没补好，卡片会先只展示标题、封面和 UP 信息，不会再显示统一占位话题或默认推荐理由
 - 后台补货继续异步进行，不会阻塞 popup 立刻换片
 - pool 状态摘要现在会区分“正在补货”“这轮找到了内容但可换库存没变”“刚补进 N 条”，不再把 refresh 进行中和上一轮净新增为 0 混成同一句
-- 插件 side panel、移动 Web 和桌面 Web 统一把 `pool_available_count` 当作真实可换数量；当 `pool_available_count=0` 但 `pool_pending_count>0` 时显示“找到 N 条素材，正在整理成可换内容”，不会把待评估 / 待分类 / 待文案 / 不可打开的素材数写成“可换”。`pool_pending_eval_count` 和 `pool_evaluated_pending_count` 只作为诊断与整理状态使用。
+- 插件 side panel、移动 Web 和桌面 Web 统一把 `pool_available_count` 当作真实可换数量；只要 `pool_pending_count>0`，摘要都会在真实可换数之外显示“另有 N 条素材 / 素材已抓到，会按可换库存缺口整理”，不会把待评估 / 待分类 / 待文案 / 不可打开的素材数写成“可换”。`pool_pending_eval_count` 和 `pool_evaluated_pending_count` 只作为诊断与整理状态使用。插件首次 `/runtime-status` 失败后若先收到权威 `pool_status` stream 事件，会立即把库存状态提升为 initialized 并显示事件中的真实计数，不再把非零库存隐藏成未知/零。
 - 推荐 tab 头部现已进一步压缩成双层内容型入口：第一层只保留 `For You`、标题和 `换一批`，第二层把池子状态收成三枚紧凑 chips，让第一张推荐卡更早进入首屏
 - 推荐 tab 现在还会在头部下方展示独立的“惊喜推荐”首屏卡位：popup 启动时会主动读取 `/api/delight/pending`，runtime stream 收到新的 `delight.candidate` 也会立刻刷新这张卡
 - 推荐 tab 会展示候选池摘要：
   - `当前可换`
-  - `最近补进`
+  - `补货进展`
   - `现在在忙`
   - 三条状态仍然保留，但文案已收短成更适合 chips 的形式，例如 `还有 151 条可换 / 刚补进 6 条 / 这会儿先不补货`
   - `当前可换` 只显示真实可立即换出的数量；待整理素材会进入“素材整理 / 现在在忙”语义，不会混进可换数字

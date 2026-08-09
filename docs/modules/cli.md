@@ -103,7 +103,9 @@ server-owned binding、context preview 与卡片 action 不改变 CLI 的既有�
 `danmaku_fetch_limit` 和 `danmaku_max_chars`；手动 `recommend` 的预热范围与 daemon/API 使用同一配置。
 CLI 组合根也会把 `[scheduler].copy_ready_target_count` 规范为
 `min(max(copy_ready_target_count, 0), max(pool_target_count, 0))` 后注入推荐引擎，与 API 和
-OpenClaw 的文案水位语义一致；显式设为 `0` 时保留 legacy drain-all 回滚行为。
+OpenClaw 的文案水位语义一致，同时注入 `pool_target_count`：正数 copy 水位会优先补齐当前
+topic 展示窗口可兑现的公开库存缺口，再维持 unrestricted copy-ready 水位；显式设为 `0`
+时保留 legacy drain-all 回滚行为。
 
 ```bash
 $ openbiliclaw config-show

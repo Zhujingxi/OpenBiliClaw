@@ -192,8 +192,8 @@ uv run python -m openbiliclaw.integrations.openclaw.cli capabilities
 
 返回的 `protocol_version` 当前为 `agent-bridge/v2`，`skill_names` 是宿主应缓存的完整清单。每次 CLI bridge 构造 direct adapter 时，会在任何画像、对话或推荐 LLM operation 可调用前，先同步执行一次零 LLM 的候选池历史恢复与原子维护；同一 controller 后续若进入后台 runtime，不会重复执行该启动维护。
 direct adapter 构造推荐引擎时会把 `[scheduler].copy_ready_target_count` 钳到
-`0..pool_target_count`，与 API/普通 CLI 使用同一 copy-ready 水位；配置为 `0` 时明确保留
-legacy drain-all，便于紧急回滚。
+`0..pool_target_count`，并同时注入公开 `pool_target_count`，与 API/普通 CLI 使用同一
+eligible topic-first 双缺口文案调度；配置为 `0` 时明确保留 legacy drain-all，便于紧急回滚。
 
 已支持的命令：
 

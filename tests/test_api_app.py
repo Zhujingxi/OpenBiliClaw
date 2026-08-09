@@ -566,6 +566,8 @@ def test_api_candidate_snapshot_uses_exact_durable_readiness_and_available_gate(
     assert snapshot.evaluating == 60
     assert snapshot.evaluated_pending_admission == 3
     assert snapshot.admitted_pending_copy == 4
+    assert snapshot.admitted_pending_available == 3
+    assert ctx.recommendation_engine.pool_available_target_count == 10
     assert ctx.llm_concurrency_gate.inventory_priority_state is InventoryPriorityState.EMPTY
 
 
@@ -628,6 +630,7 @@ async def test_copy_ready_target_clamps_and_rebinds_provider_on_rebuild(tmp_path
     assert old_soul_engine._awareness_prompt_view == "legacy"
     assert old_soul_engine._insight_prompt_view == "compact-v1"
     assert old_engine.copy_ready_target_count == 10
+    assert old_engine.pool_available_target_count == 10
     assert getattr(old_provider, "__self__", None) is old_engine
     assert old_provider() == 4
 
@@ -652,6 +655,7 @@ async def test_copy_ready_target_clamps_and_rebinds_provider_on_rebuild(tmp_path
     assert new_soul_engine._insight_prompt_view == "legacy"
     assert new_coordinator is not old_coordinator
     assert new_engine.copy_ready_target_count == 2
+    assert new_engine.pool_available_target_count == 2
     assert getattr(new_provider, "__self__", None) is new_engine
     assert new_provider() == 2
 

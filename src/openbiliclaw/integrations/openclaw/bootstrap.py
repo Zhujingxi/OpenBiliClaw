@@ -225,6 +225,10 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
         curator=curator,
         embedding_service=embedding_service,
         copy_ready_target_count=effective_copy_target,
+        pool_available_target_count=max(
+            0,
+            int(getattr(config.scheduler, "pool_target_count", 0) or 0),
+        ),
         visual_profile_enabled=config.discovery.visual_profile_enabled,
         keyframe_enabled=config.discovery.keyframe_enabled,
         keyframe_max_frames=config.discovery.keyframe_max_frames,

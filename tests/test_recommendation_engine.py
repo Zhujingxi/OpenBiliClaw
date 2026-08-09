@@ -3429,6 +3429,7 @@ async def test_copy_ready_target_does_not_drain_backlog_hidden_by_topic_window()
             llm=llm,
             database=db,
             copy_ready_target_count=5,
+            pool_available_target_count=5,
         )
 
         readiness = db.count_pool_readiness()
@@ -3439,6 +3440,151 @@ async def test_copy_ready_target_does_not_drain_backlog_hidden_by_topic_window()
         assert await engine.drain_pending_expression_copy(profile=_build_profile(), limit=60) == 0
         assert llm.calls == 0
         assert db.count_pool_readiness()["admitted_pending_copy"] == 4
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_copy_watermark_fills_public_pool_deficit_with_eligible_topic_first() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        for index in range(5):
+            _seed_visible(
+                db,
+                f"BV_PUBLIC_READY_{index}",
+                title=f"ready {index}",
+                topic_group="saturated-topic",
+                relevance_score=0.95 - index * 0.01,
+            )
+        for index in range(3):
+            _seed_pool(
+                db,
+                [
+                    DiscoveredContent(
+                        bvid=f"BV_PUBLIC_BLOCKED_{index}",
+                        title=f"blocked {index}",
+                        style_key="deep_focus",
+                        topic_group="saturated-topic",
+                        relevance_score=0.9 - index * 0.01,
+                    )
+                ],
+                precomputed=False,
+            )
+        _seed_pool(
+            db,
+            [
+                DiscoveredContent(
+                    bvid="BV_PUBLIC_ELIGIBLE",
+                    title="eligible public slot",
+                    style_key="deep_focus",
+                    topic_group="open-topic",
+                    relevance_score=0.65,
+                )
+            ],
+            precomputed=False,
+        )
+        llm = _CopyReadyExpressionLLM()
+        engine = RecommendationEngine(
+            llm=llm,
+            database=db,
+            copy_ready_target_count=7,
+            pool_available_target_count=4,
+        )
+
+        readiness = db.count_pool_readiness()
+        assert readiness["available"] == 3
+        assert readiness["copy_ready"] == 5
+        assert readiness["admitted_pending_available"] == 1
+        # One eligible row fills the public gap while a second row fills the
+        # deeper copy-ready watermark; eligible-first must satisfy both with
+        # the same two-row batch.
+        assert engine.count_pending_expression_copy_demand() == 2
+
+        assert await engine.drain_pending_expression_copy(profile=_build_profile(), limit=60) == 2
+
+        readiness = db.count_pool_readiness()
+        assert readiness["available"] == 4
+        assert readiness["copy_ready"] == 7
+        assert readiness["admitted_pending_copy"] == 2
+        assert readiness["admitted_pending_available"] == 0
+        assert engine.count_pending_expression_copy_demand() == 0
+        assert llm.batch_sizes == [2]
+        copied = db.conn.execute(
+            "SELECT pool_expression FROM content_cache WHERE bvid = 'BV_PUBLIC_ELIGIBLE'"
+        ).fetchone()
+        assert str(copied["pool_expression"]).strip()
+        copied_blocked_count = int(
+            db.conn.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM content_cache
+                WHERE bvid LIKE 'BV_PUBLIC_BLOCKED_%'
+                  AND COALESCE(pool_expression, '') != ''
+                """
+            ).fetchone()["count"]
+        )
+        assert copied_blocked_count == 1
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_copy_refill_is_not_blocked_by_seen_rows_ahead_in_same_topic() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        for index in range(5):
+            _seed_visible(
+                db,
+                f"BV_OTHER_READY_{index}",
+                title=f"other ready {index}",
+                topic_group=f"other-ready-{index}",
+            )
+        for index in range(3):
+            bvid = f"BV_SEEN_HEAD_{index}"
+            _seed_visible(
+                db,
+                bvid,
+                title=f"seen head {index}",
+                topic_group="seen-head-topic",
+                relevance_score=0.99 - index * 0.01,
+            )
+            db.insert_event(
+                "view",
+                title=f"seen head {index}",
+                url=f"https://www.bilibili.com/video/{bvid}",
+                metadata={"bvid": bvid},
+            )
+        _seed_pool(
+            db,
+            [
+                DiscoveredContent(
+                    bvid="BV_PENDING_BELOW_SEEN",
+                    title="pending below seen heads",
+                    style_key="deep_focus",
+                    topic_group="seen-head-topic",
+                    relevance_score=0.65,
+                )
+            ],
+            precomputed=False,
+        )
+        llm = _CopyReadyExpressionLLM()
+        engine = RecommendationEngine(
+            llm=llm,
+            database=db,
+            copy_ready_target_count=5,
+            pool_available_target_count=6,
+        )
+
+        readiness = db.count_pool_readiness()
+        assert readiness["available"] == 5
+        assert readiness["copy_ready"] == 5
+        assert readiness["admitted_pending_available"] == 1
+        assert engine.count_pending_expression_copy_demand() == 1
+
+        assert await engine.drain_pending_expression_copy(profile=_build_profile(), limit=60) == 1
+
+        assert db.count_pool_readiness()["available"] == 6
+        assert llm.batch_sizes == [1]
         db.close()
 
 
@@ -5814,6 +5960,7 @@ async def test_isolated_pool_snapshot_preserves_legacy_bvid_order(
         "raw": 8,
         "pending": 0,
         "admitted_pending_copy": 0,
+        "admitted_pending_available": 0,
         "pending_eval": 0,
         "evaluated_pending": 0,
     }

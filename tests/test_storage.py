@@ -3340,6 +3340,7 @@ class TestDatabase:
                 "raw": 3,
                 "pending": 1,
                 "admitted_pending_copy": 1,
+                "admitted_pending_available": 1,
                 "pending_eval": 0,
                 "evaluated_pending": 0,
             }
@@ -3362,6 +3363,140 @@ class TestDatabase:
 
             assert readiness["available"] == 3
             assert readiness["copy_ready"] == 5
+            db.close()
+
+    def test_pending_available_count_and_priority_follow_public_topic_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+            for index in range(3):
+                _seed_visible(
+                    db,
+                    f"BVREADY_SATURATED_{index}",
+                    topic_group="saturated-topic",
+                    relevance_score=0.95 - index * 0.01,
+                )
+            for index in range(4):
+                db.cache_content(
+                    f"BVPENDING_SATURATED_{index}",
+                    title=f"saturated pending {index}",
+                    source="search",
+                    relevance_score=0.9 - index * 0.01,
+                    style_key="tutorial",
+                    topic_group="saturated-topic",
+                )
+            db.cache_content(
+                "BVPENDING_OPEN_TOPIC",
+                title="open topic pending",
+                source="search",
+                relevance_score=0.65,
+                style_key="tutorial",
+                topic_group="open-topic",
+            )
+
+            readiness = db.count_pool_readiness()
+            prioritized = db.get_pool_candidates_needing_copy(
+                limit=5,
+                eligible_available_first=True,
+            )
+
+            assert readiness["available"] == 3
+            assert readiness["admitted_pending_copy"] == 5
+            assert readiness["admitted_pending_available"] == 1
+            assert prioritized[0]["bvid"] == "BVPENDING_OPEN_TOPIC"
+            assert {row["bvid"] for row in prioritized[1:]} == {
+                f"BVPENDING_SATURATED_{index}" for index in range(4)
+            }
+            db.close()
+
+    def test_seen_topic_heads_do_not_block_lower_pending_copy_from_public_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+            for index in range(3):
+                bvid = f"BVSEEN_TOPIC_HEAD_{index}"
+                _seed_visible(
+                    db,
+                    bvid,
+                    title=f"seen head {index}",
+                    topic_group="seen-head-topic",
+                    relevance_score=0.99 - index * 0.01,
+                )
+                db.insert_event(
+                    "view",
+                    title=f"seen head {index}",
+                    url=f"https://www.bilibili.com/video/{bvid}",
+                    metadata={"bvid": bvid},
+                )
+            db.cache_content(
+                "BVPENDING_BELOW_SEEN_HEADS",
+                title="pending below seen heads",
+                source="search",
+                relevance_score=0.65,
+                style_key="tutorial",
+                topic_group="seen-head-topic",
+            )
+
+            readiness = db.count_pool_readiness()
+
+            assert readiness["available"] == 0
+            assert readiness["admitted_pending_available"] == 1
+            assert [
+                row["bvid"]
+                for row in db.get_pool_candidates_needing_copy(
+                    limit=1,
+                    eligible_available_first=True,
+                )
+            ] == ["BVPENDING_BELOW_SEEN_HEADS"]
+
+            db.update_pool_copy(
+                "BVPENDING_BELOW_SEEN_HEADS",
+                expression="可用文案",
+                topic_label="可用主题",
+            )
+
+            assert db.count_pool_candidates() == 1
+            assert [row["bvid"] for row in db.get_pool_candidates(limit=5)] == [
+                "BVPENDING_BELOW_SEEN_HEADS"
+            ]
+            db.close()
+
+    def test_topic_window_ranking_excludes_tier_but_keeps_tier_in_global_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "test.db")
+            db.initialize()
+            _seed_visible(
+                db,
+                "BVLOW_PRIMARY",
+                topic_group="shared-topic",
+                candidate_tier="primary",
+                relevance_score=0.7,
+            )
+            for index, score in enumerate((0.99, 0.98, 0.97)):
+                _seed_visible(
+                    db,
+                    f"BVHIGH_SECONDARY_{index}",
+                    topic_group="shared-topic",
+                    candidate_tier="secondary",
+                    relevance_score=score,
+                )
+            _seed_visible(
+                db,
+                "BVOTHER_PRIMARY",
+                topic_group="other-topic",
+                candidate_tier="primary",
+                relevance_score=0.6,
+            )
+
+            rows = db.get_pool_candidates(limit=10)
+
+            assert db.count_pool_candidates() == 4
+            assert [row["bvid"] for row in rows] == [
+                "BVOTHER_PRIMARY",
+                "BVHIGH_SECONDARY_0",
+                "BVHIGH_SECONDARY_1",
+                "BVHIGH_SECONDARY_2",
+            ]
             db.close()
 
     def test_copy_ready_budget_excludes_nonservable_pool_rows(self) -> None:
@@ -3930,7 +4065,7 @@ class TestDatabase:
 
             _seed_visible(
                 db,
-                "note-seen",
+                "xiaohongshu:note-seen",
                 title="已经看过的小红书",
                 source="xhs-extension-task",
                 source_platform="xiaohongshu",
@@ -3940,7 +4075,7 @@ class TestDatabase:
             )
             _seed_visible(
                 db,
-                "note-fresh",
+                "xiaohongshu:note-fresh",
                 title="新小红书",
                 source="xhs-extension-task",
                 source_platform="xiaohongshu",
@@ -3957,7 +4092,7 @@ class TestDatabase:
 
             items = db.get_pool_candidates(limit=10)
 
-            assert [item["bvid"] for item in items] == ["note-fresh"]
+            assert [item["bvid"] for item in items] == ["xiaohongshu:note-fresh"]
             assert db.count_pool_candidates() == 1
 
             db.close()

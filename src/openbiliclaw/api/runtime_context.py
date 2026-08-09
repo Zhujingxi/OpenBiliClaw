@@ -915,6 +915,10 @@ class RuntimeContext:
             task_registry=self.task_registry,
             xhs_self_info_provider=_xhs_self_info_provider,
             copy_ready_target_count=effective_copy_target,
+            pool_available_target_count=max(
+                0,
+                int(getattr(new_config.scheduler, "pool_target_count", 0) or 0),
+            ),
             visual_profile_enabled=bool(
                 getattr(getattr(new_config, "discovery", None), "visual_profile_enabled", False)
             ),
@@ -1369,6 +1373,7 @@ class RuntimeContext:
                 evaluating=int(status_counts.get("evaluating", 0)),
                 evaluated_pending_admission=int(status_counts.get("evaluated", 0)),
                 admitted_pending_copy=int(readiness.get("admitted_pending_copy", 0)),
+                admitted_pending_available=int(readiness.get("admitted_pending_available", 0)),
             )
 
         async def _request_candidate_supply(reason: str) -> dict[str, object]:

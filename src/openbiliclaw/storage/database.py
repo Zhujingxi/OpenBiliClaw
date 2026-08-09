@@ -5935,113 +5935,41 @@ class Database:
         # Over-fetch widely so the per-group filter still leaves headroom
         # for the downstream balance pass.
         fetch_limit = max(limit * 8, 80)
-        admission_sql, admission_params = self._pool_admission_sql()
-        guard_sql = _xhs_self_author_guard_sql()
-        guard_params = _xhs_self_author_guard_params(xhs_self_nickname)
-        delight_threshold = self.dynamic_delight_threshold(
-            default_threshold=_DELIGHT_CLAIM_MIN_SCORE
-        )
-        delight_guard_sql = _delight_claim_guard_sql()
-        if max_per_topic_group <= 0:
-            sql = f"""
-                SELECT *
-                FROM content_cache
-                WHERE COALESCE(pool_status, 'fresh') = 'fresh'
-                  AND COALESCE(feedback_type, '') != 'dislike'
-                  AND {admission_sql}
-                  AND COALESCE(pool_expression, '') != ''
-                  AND COALESCE(pool_topic_label, '') != ''
-                  AND COALESCE(style_key, '') != ''
-                  AND COALESCE(topic_group, '') != ''
-                  AND (
-                    source_platform != 'xiaohongshu'
-                    OR content_url LIKE '%xsec_token=%'
-                  )
-                  {guard_sql}
-                  {delight_guard_sql}
-                  AND NOT EXISTS (
-                    SELECT 1
-                    FROM recommendations AS r
-                    WHERE r.bvid = content_cache.bvid
-                  )
-                ORDER BY
-                    CASE candidate_tier WHEN 'primary' THEN 0 ELSE 1 END ASC,
-                    relevance_score DESC,
-                    last_scored_at DESC,
-                    view_count DESC,
-                    bvid ASC
-                LIMIT ?
-            """
-            params: tuple[Any, ...] = (
-                *admission_params,
-                *guard_params,
-                delight_threshold,
-                fetch_limit,
-            )
-        else:
-            # Per-group rank via window function: keep the top-N classified
-            # items of each topic_group, then order the remainder by relevance.
-            sql = f"""
-                WITH ranked AS (
-                    SELECT *,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY topic_group
-                               ORDER BY
-                                   relevance_score DESC,
-                                   last_scored_at DESC,
-                                   view_count DESC,
-                                   bvid ASC
-                           ) AS group_rank
-                    FROM content_cache
-                    WHERE COALESCE(pool_status, 'fresh') = 'fresh'
-                      AND COALESCE(feedback_type, '') != 'dislike'
-                      AND {admission_sql}
-                      AND COALESCE(pool_expression, '') != ''
-                      AND COALESCE(pool_topic_label, '') != ''
-                      AND COALESCE(style_key, '') != ''
-                      AND COALESCE(topic_group, '') != ''
-                      AND (
-                        source_platform != 'xiaohongshu'
-                        OR content_url LIKE '%xsec_token=%'
-                      )
-                      {guard_sql}
-                      {delight_guard_sql}
-                      AND NOT EXISTS (
-                        SELECT 1
-                        FROM recommendations AS r
-                        WHERE r.bvid = content_cache.bvid
-                      )
-                )
-                SELECT * FROM ranked
-                WHERE group_rank <= ?
-                ORDER BY
-                    CASE candidate_tier WHEN 'primary' THEN 0 ELSE 1 END ASC,
-                    relevance_score DESC,
-                    last_scored_at DESC,
-                    view_count DESC,
-                    bvid ASC
-                LIMIT ?
-            """
-            params = (
-                *admission_params,
-                *guard_params,
-                delight_threshold,
-                max_per_topic_group,
-                fetch_limit,
-            )
-        cursor = self.conn.execute(sql, params)
-        rows = [dict(row) for row in cursor.fetchall()]
         viewed_content_keys = (
             self.get_recent_viewed_content_keys()
             if _viewed_content_keys is None
             else _viewed_content_keys
         )
-        rows = self._exclude_viewed_rows(
-            rows,
-            viewed_content_keys,
-            limit=len(rows),
+        canonical_rows = self._load_available_pool_candidate_rows_on(
+            self.conn,
+            max_per_topic_group=max_per_topic_group,
+            xhs_self_nickname=xhs_self_nickname,
+            _viewed_content_keys=viewed_content_keys,
         )
+        head_bvids = [str(row["bvid"]) for row in canonical_rows[:fetch_limit]]
+        rows = self._load_content_cache_rows_by_bvid_on(self.conn, head_bvids)
         return self._balance_pool_rows(rows, limit=limit)
+
+    @staticmethod
+    def _load_content_cache_rows_by_bvid_on(
+        conn: sqlite3.Connection,
+        bvids: Sequence[str],
+    ) -> list[dict[str, Any]]:
+        """Load full cache rows while preserving a canonical bvid order."""
+
+        ordered_bvids = [str(bvid) for bvid in bvids if str(bvid)]
+        if not ordered_bvids:
+            return []
+        by_bvid: dict[str, dict[str, Any]] = {}
+        for offset in range(0, len(ordered_bvids), 500):
+            chunk = ordered_bvids[offset : offset + 500]
+            placeholders = ", ".join("?" for _ in chunk)
+            cursor = conn.execute(
+                f"SELECT * FROM content_cache WHERE bvid IN ({placeholders})",
+                chunk,
+            )
+            by_bvid.update((str(row["bvid"]), dict(row)) for row in cursor.fetchall())
+        return [by_bvid[bvid] for bvid in ordered_bvids if bvid in by_bvid]
 
     def _pool_servable_where_clause_on(
         self,
@@ -6281,107 +6209,115 @@ class Database:
             "*"
             if full_rows
             else (
-                "bvid, source, source_platform, content_url, topic_group, "
+                "bvid, content_id, source, source_platform, content_url, topic_group, "
                 "candidate_tier, relevance_score, last_scored_at, view_count"
             )
         )
-        if max_per_topic_group > 0:
-            cursor = conn.execute(
-                f"""
-                WITH ranked AS (
-                    SELECT {projection},
-                           ROW_NUMBER() OVER (
-                               PARTITION BY topic_group
-                               ORDER BY
-                                   relevance_score DESC,
-                                   last_scored_at DESC,
-                                   view_count DESC,
-                                   bvid ASC
-                           ) AS group_rank
-                    FROM content_cache
-                    WHERE COALESCE(pool_status, 'fresh') = 'fresh'
-                      AND COALESCE(feedback_type, '') != 'dislike'
-                      AND {admission_sql}
-                      AND COALESCE(pool_expression, '') != ''
-                      AND COALESCE(pool_topic_label, '') != ''
-                      AND COALESCE(style_key, '') != ''
-                      AND COALESCE(topic_group, '') != ''
-                      AND (
-                        source_platform != 'xiaohongshu'
-                        OR content_url LIKE '%xsec_token=%'
-                      )
-                      {guard_sql}
-                      {delight_guard_sql}
-                      AND NOT EXISTS (
-                        SELECT 1
-                        FROM recommendations AS r
-                        WHERE r.bvid = content_cache.bvid
-                      )
-                )
-                SELECT {projection}
-                FROM ranked
-                WHERE group_rank <= ?
-                ORDER BY
-                    CASE candidate_tier WHEN 'primary' THEN 0 ELSE 1 END ASC,
-                    relevance_score DESC,
-                    last_scored_at DESC,
-                    view_count DESC,
-                    bvid ASC
-                """,
-                (*admission_params, *guard_params, delight_threshold, max_per_topic_group),
-            )
-        else:
-            cursor = conn.execute(
-                f"""
-                SELECT {projection}
-                FROM content_cache
-                WHERE COALESCE(pool_status, 'fresh') = 'fresh'
-                  AND COALESCE(feedback_type, '') != 'dislike'
-                  AND {admission_sql}
-                  AND COALESCE(pool_expression, '') != ''
-                  AND COALESCE(pool_topic_label, '') != ''
-                  AND COALESCE(style_key, '') != ''
-                  AND COALESCE(topic_group, '') != ''
-                  AND (
-                    source_platform != 'xiaohongshu'
-                    OR content_url LIKE '%xsec_token=%'
-                  )
-                  {guard_sql}
-                  {delight_guard_sql}
-                  AND NOT EXISTS (
-                    SELECT 1
-                    FROM recommendations AS r
-                    WHERE r.bvid = content_cache.bvid
-                  )
-                ORDER BY
-                    CASE candidate_tier WHEN 'primary' THEN 0 ELSE 1 END ASC,
-                    relevance_score DESC,
-                    last_scored_at DESC,
-                    view_count DESC,
-                    bvid ASC
-                """,
-                (*admission_params, *guard_params, delight_threshold),
-            )
+        cursor = conn.execute(
+            f"""
+            SELECT {projection}
+            FROM content_cache
+            WHERE COALESCE(pool_status, 'fresh') = 'fresh'
+              AND COALESCE(feedback_type, '') != 'dislike'
+              AND {admission_sql}
+              AND COALESCE(pool_expression, '') != ''
+              AND COALESCE(pool_topic_label, '') != ''
+              AND COALESCE(style_key, '') != ''
+              AND COALESCE(topic_group, '') != ''
+              AND (
+                source_platform != 'xiaohongshu'
+                OR content_url LIKE '%xsec_token=%'
+              )
+              {guard_sql}
+              {delight_guard_sql}
+              AND NOT EXISTS (
+                SELECT 1
+                FROM recommendations AS r
+                WHERE r.bvid = content_cache.bvid
+              )
+            ORDER BY
+                CASE candidate_tier WHEN 'primary' THEN 0 ELSE 1 END ASC,
+                relevance_score DESC,
+                last_scored_at DESC,
+                view_count DESC,
+                bvid ASC
+            """,
+            (*admission_params, *guard_params, delight_threshold),
+        )
+        rows = [dict(row) for row in cursor.fetchall()]
         viewed_content_keys = (
             self._recent_viewed_content_keys_on(conn)
             if _viewed_content_keys is None
             else _viewed_content_keys
         )
-        rows: list[dict[str, Any]] = []
-        for row in cursor.fetchall():
+        filtered = self._filter_available_pool_candidate_rows(
+            rows,
+            viewed_content_keys=viewed_content_keys,
+        )
+        return self._apply_pool_topic_window(
+            filtered,
+            max_per_topic_group=max_per_topic_group,
+        )
+
+    @staticmethod
+    def _filter_available_pool_candidate_rows(
+        rows: Sequence[Mapping[str, Any]],
+        *,
+        viewed_content_keys: set[str],
+    ) -> list[dict[str, Any]]:
+        """Apply the Python half of the canonical availability gate."""
+
+        filtered: list[dict[str, Any]] = []
+        for row in rows:
             row_dict = dict(row)
             if not str(row_dict.get("bvid", "")).strip():
                 continue
-            if self._is_viewed_row(row_dict, viewed_content_keys):
+            if Database._is_viewed_row(row_dict, viewed_content_keys):
                 continue
             if not _is_linkable_pool_source(
-                row["source"],
-                row["source_platform"],
-                row["content_url"],
+                row_dict.get("source"),
+                row_dict.get("source_platform"),
+                row_dict.get("content_url"),
             ):
                 continue
-            rows.append(row_dict)
-        return rows
+            filtered.append(row_dict)
+        return filtered
+
+    @staticmethod
+    def _apply_pool_topic_window(
+        rows: Sequence[Mapping[str, Any]],
+        *,
+        max_per_topic_group: int,
+    ) -> list[dict[str, Any]]:
+        """Apply topic rank after canonical seen/linkability filtering.
+
+        Topic-local ranking intentionally excludes ``candidate_tier`` while
+        the returned global order retains it, matching the former SQL window
+        function's two distinct orderings.
+        """
+
+        topic_cap = max(0, int(max_per_topic_group))
+        materialized = [dict(row) for row in rows]
+        if topic_cap <= 0:
+            return materialized
+
+        rows_by_topic: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in materialized:
+            rows_by_topic[str(row.get("topic_group") or "")].append(row)
+
+        selected_bvids: set[str] = set()
+        for topic_rows in rows_by_topic.values():
+            # Stable multi-pass sorting mirrors relevance DESC, timestamp DESC,
+            # view_count DESC, bvid ASC without letting candidate_tier leak in.
+            topic_rows.sort(key=lambda row: str(row.get("bvid") or ""))
+            topic_rows.sort(key=lambda row: int(row.get("view_count") or 0), reverse=True)
+            topic_rows.sort(key=lambda row: str(row.get("last_scored_at") or ""), reverse=True)
+            topic_rows.sort(
+                key=lambda row: float(row.get("relevance_score") or 0.0),
+                reverse=True,
+            )
+            selected_bvids.update(str(row.get("bvid") or "") for row in topic_rows[:topic_cap])
+        return [row for row in materialized if str(row.get("bvid") or "") in selected_bvids]
 
     def count_pool_available_candidates_by_source(
         self, *, max_per_topic_group: int = 3, xhs_self_nickname: str = ""
@@ -6700,26 +6636,28 @@ class Database:
             xhs_self_nickname=xhs_self_nickname,
             _viewed_content_keys=viewed_content_keys,
         )
-        copy_ready = len(
-            self._load_available_pool_candidate_rows_on(
-                self.conn,
-                max_per_topic_group=0,
-                xhs_self_nickname=xhs_self_nickname,
-                _viewed_content_keys=viewed_content_keys,
-            )
+        copy_ready_rows = self._load_available_pool_candidate_rows_on(
+            self.conn,
+            max_per_topic_group=0,
+            xhs_self_nickname=xhs_self_nickname,
+            _viewed_content_keys=viewed_content_keys,
+        )
+        pending_copy_rows = self._load_admitted_pending_copy_rows_on(
+            self.conn,
+            xhs_self_nickname=xhs_self_nickname,
+            _viewed_content_keys=viewed_content_keys,
+        )
+        pending_available_rows = self._select_admitted_pending_available_rows(
+            pending_copy_rows,
+            copy_ready_rows=copy_ready_rows,
         )
         return {
             "available": available,
-            "copy_ready": copy_ready,
+            "copy_ready": len(copy_ready_rows),
             "raw": raw_count + discovery_pending_count,
             "pending": pending_count + discovery_pending_count,
-            "admitted_pending_copy": len(
-                self._load_admitted_pending_copy_rows_on(
-                    self.conn,
-                    xhs_self_nickname=xhs_self_nickname,
-                    _viewed_content_keys=viewed_content_keys,
-                )
-            ),
+            "admitted_pending_copy": len(pending_copy_rows),
+            "admitted_pending_available": len(pending_available_rows),
             "pending_eval": pending_eval_count,
             "evaluated_pending": evaluated_pending_count,
         }
@@ -6799,6 +6737,41 @@ class Database:
             if max_rows is not None and len(rows) >= max_rows:
                 break
         return rows
+
+    @staticmethod
+    def _select_admitted_pending_available_rows(
+        pending_copy_rows: Sequence[Mapping[str, Any]],
+        *,
+        copy_ready_rows: Sequence[Mapping[str, Any]],
+        max_per_topic_group: int = 3,
+    ) -> list[dict[str, Any]]:
+        """Return pending-copy rows that can increase public availability.
+
+        Public availability exposes at most ``max_per_topic_group`` ready rows
+        from each topic after canonical seen/linkability filtering. A pending
+        row therefore adds one public slot only while its topic has remaining
+        headroom. ``pending_copy_rows`` is already in canonical copy priority
+        order, so this also produces a stable availability-first prefix.
+        """
+
+        topic_cap = max(0, int(max_per_topic_group))
+        if topic_cap <= 0:
+            return [dict(row) for row in pending_copy_rows]
+
+        ready_by_topic: defaultdict[str, int] = defaultdict(int)
+        for row in copy_ready_rows:
+            ready_by_topic[str(row.get("topic_group") or "")] += 1
+
+        selected_by_topic: defaultdict[str, int] = defaultdict(int)
+        selected: list[dict[str, Any]] = []
+        for row in pending_copy_rows:
+            topic_group = str(row.get("topic_group") or "")
+            remaining = topic_cap - ready_by_topic[topic_group]
+            if selected_by_topic[topic_group] >= max(0, remaining):
+                continue
+            selected.append(dict(row))
+            selected_by_topic[topic_group] += 1
+        return selected
 
     def count_pool_candidates_by_source(self) -> dict[str, int]:
         """Return fresh pool counts grouped by discovery source family."""
@@ -7503,7 +7476,8 @@ class Database:
 
         The former implementation re-ran the full servability window after
         every restored row. A 300-row recovery therefore performed hundreds
-        of window-function scans while holding ``BEGIN IMMEDIATE``. We model
+        of canonical availability scans while holding ``BEGIN IMMEDIATE``.
+        We model
         the availability/source counters in memory; the caller then validates
         the batch against one canonical availability scan and reverts any
         speculative rows that did not produce net-new inventory.
@@ -8954,7 +8928,11 @@ class Database:
         return rows[:limit]
 
     def get_pool_candidates_needing_copy(
-        self, limit: int = 20, *, xhs_self_nickname: str = ""
+        self,
+        limit: int = 20,
+        *,
+        xhs_self_nickname: str = "",
+        eligible_available_first: bool = False,
     ) -> list[dict[str, Any]]:
         """Return fresh pool candidates missing precomputed popup copy.
 
@@ -8962,13 +8940,41 @@ class Database:
         be classified before expression generation.  This prevents
         unclassified items (e.g. raw XHS notes) from getting an expression
         and leaking through the serve gate without proper relevance scoring.
+
+        With ``eligible_available_first``, rows whose completed copy can add a
+        slot to the public per-topic availability window are returned before
+        deeper same-topic rows.  The complete admitted backlog remains
+        selectable after that prefix, preserving copy-watermark fills.
         """
         self._ensure_fresh_read()
-        return self._load_admitted_pending_copy_rows_on(
+        max_rows = max(0, int(limit))
+        if max_rows == 0:
+            return []
+        viewed_content_keys = self.get_recent_viewed_content_keys()
+        pending_rows = self._load_admitted_pending_copy_rows_on(
             self.conn,
             xhs_self_nickname=xhs_self_nickname,
-            limit=limit,
+            _viewed_content_keys=viewed_content_keys,
         )
+        if not eligible_available_first:
+            return pending_rows[:max_rows]
+
+        copy_ready_rows = self._load_available_pool_candidate_rows_on(
+            self.conn,
+            max_per_topic_group=0,
+            xhs_self_nickname=xhs_self_nickname,
+            _viewed_content_keys=viewed_content_keys,
+        )
+        eligible_rows = self._select_admitted_pending_available_rows(
+            pending_rows,
+            copy_ready_rows=copy_ready_rows,
+        )
+        eligible_ids = {str(row.get("bvid") or "") for row in eligible_rows}
+        ordered = [
+            *eligible_rows,
+            *(row for row in pending_rows if str(row.get("bvid") or "") not in eligible_ids),
+        ]
+        return ordered[:max_rows]
 
     def update_pool_copy(
         self,

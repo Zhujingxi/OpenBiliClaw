@@ -7600,6 +7600,8 @@ ${cardFeedbackBarHtml()}`;
           ? `刚补进 ${runtime.last_replenished_count} 条`
           : runtime.last_discovered_count > 0
             ? "这轮找到了内容"
+            : runtime.pool_pending_count > 0
+              ? `另有 ${runtime.pool_pending_count} 条素材`
             : sufficient
               ? "这会儿先不补货"
               : "这轮还没补进",
@@ -7607,6 +7609,8 @@ ${cardFeedbackBarHtml()}`;
           ? runtime.recent_pool_topics.join(" / ")
           : runtime.last_discovered_count > 0
             ? "但可立即换的库存还没变"
+            : runtime.pool_pending_count > 0
+              ? "素材已抓到，会按可换库存缺口整理"
             : sufficient
               ? "先把这一池给你慢慢换开"
               : "还在继续摸你的口味"

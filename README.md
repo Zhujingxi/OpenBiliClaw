@@ -677,8 +677,8 @@ Agent 宿主（OpenClaw / Hermes / WorkBuddy）
 │ cognition named views → task-scoped gate：仅 awareness_confusions compact；其余 legacy │
 │ token diet：偏好逐段真实装箱；洞察 近期/裁决保底 + 相关/重要/多样性加权≤40 → 完整历史 merge │
 │ keyword planner → 24h 安全跨 digest pending 整理 → 缺口/生成/领取（0=硬过期）│
-│ admitted backlog → copy-ready 高水位缺口补文案 → serve 后异步回水（0=legacy drain-all）│
-│ API projected 库存 → 3×30 worker → 串行入池；OpenClaw 首批≤4 → copy≤4/不拆分重试 → 四端 │
+│ admitted backlog → copy 水位 ∪ 可换 topic 空位缺口 → eligible-first 补文案（0=legacy drain-all）│
+│ API projected=available+eligible copy-pending+evaluated → 3×30 worker → 串行入池 → 四端 │
 │ API raw 断供 → 欠份额来源即时并行补给 → 真实新增清退避 / 重复空转阶梯退避 │
 │ 惊喜就绪门：正式推荐词/主题就绪 + seen_items 硬过滤 → 打分并原子快照 → 四端 × 写回已看账本 │
 │ 库存 API/OpenClaw 启动钩子 → 历史恢复/原子维护 → 再暴露 LLM │

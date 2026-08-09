@@ -2016,6 +2016,7 @@ def test_runtime_builders_share_database_instance(
     assert created_memories[0].database is created_databases[0]
     assert recommendation_engine.database is created_databases[0]
     assert recommendation_engine.kwargs["copy_ready_target_count"] == expected_copy_target
+    assert recommendation_engine.kwargs["pool_available_target_count"] == 30
     assert discovery_engine.database is created_databases[0]
     recorder = recommendation_engine.llm.usage_recorder
     assert recorder is not None

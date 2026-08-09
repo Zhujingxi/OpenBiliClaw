@@ -968,6 +968,10 @@ def _build_recommendation_engine() -> Any:
         embedding_service=embedding_service,
         xhs_self_info_provider=_xhs_self_info_provider,
         copy_ready_target_count=effective_copy_target,
+        pool_available_target_count=max(
+            0,
+            int(getattr(cfg.scheduler, "pool_target_count", 0) or 0),
+        ),
         visual_profile_enabled=bool(
             getattr(getattr(cfg, "discovery", None), "visual_profile_enabled", False)
         ),
