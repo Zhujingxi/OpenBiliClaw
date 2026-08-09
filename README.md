@@ -489,19 +489,20 @@ npm run package
 
 </details>
 
-## 🤖 接入 OpenClaw / AI 编码助手
+## 🤖 接入 OpenClaw / Hermes / WorkBuddy Agent
 
-OpenBiliClaw 仓库内置了一个 [workspace skill](skills/openbiliclaw-adapter/SKILL.md)。把仓库挂到任何支持 skill 的 AI 编码助手（OpenClaw / Claude Code / Codex CLI / Cursor 等），助手就能直接调用你本机上的 OpenBiliClaw。
+OpenBiliClaw 仓库内置了一个 [workspace skill](skills/openbiliclaw-adapter/SKILL.md) 和版本化的 Agent Bridge。把仓库挂到任何支持 skill 或本地 JSON CLI 的 Agent 宿主（OpenClaw / Hermes / WorkBuddy / Claude Code / Codex CLI / Cursor 等），宿主就能直接调用你本机上的 OpenBiliClaw。
 
 ### 接入之后能干什么
 
 - ✨ **主动推荐** — 系统在后台持续发现内容，遇到高分惊喜时通过 WebSocket 主动推送给 OpenClaw，OpenClaw 再转述给你——**你不需要开口问**
-- 🔮 **主动追问兴趣** — 系统猜测你可能对某个方向感兴趣，生成一个假设和问题，通过 OpenClaw 主动来问你"这个方向你认不认？"——你回答后画像自动更新
-- 🧭 **主动确认避雷** — 系统也会确认你可能想避开的内容形态，OpenClaw 可用 `next-avoidance-probe` / `respond-avoidance-probe` 完成确认；只有确认后才写入过滤偏好
-- 💬 **苏格拉底式对话** — 不止是确认兴趣，OpenClaw 可以跟你深聊：追问动机、提出假设、确认理解，越聊越懂你
+- 🔮 **主动追问兴趣** — 系统猜测你可能对某个方向感兴趣，支持 confirm / reject / defer / chat 四态反馈，画像自动更新
+- 🧭 **主动确认避雷** — 系统也会确认你可能想避开的内容形态，支持四态反馈；只有确认后才写入过滤偏好
+- 💬 **苏格拉底式对话** — 带 durable `turn_id` 的多轮对话，重试或切换宿主后仍可读取历史
 - 📖 **读当前灵魂画像** — MBTI、核心特质、深层需求、兴趣领域
-- 🎯 **按需拉个性化推荐** — 带解释、带置信度、带主题标签
-- 💬 **把反馈写回学习闭环** — `like` / `dislike` / `comment` 即时更新画像与池子评分
+- 🎯 **按需拉多源推荐** — 支持平台范围、换一批、追加、库存可用量和完整内容元数据
+- 💬 **把反馈写回学习闭环** — 推荐和惊喜卡片反馈都支持 durable 幂等
+- 💾 **本地优先保存** — 收藏 / 稍后再看先落本地；外部同步必须显式授权
 - 🔄 **同步 B 站账号行为** — 拉历史、收藏、关注等长期信号，注入记忆系统
 
 ### 一句话让 OpenClaw 完成接入
@@ -509,7 +510,7 @@ OpenBiliClaw 仓库内置了一个 [workspace skill](skills/openbiliclaw-adapter
 把下面这段粘给 OpenClaw（或 Claude Code / Codex CLI / Cursor），它会自动读指南并完成接入：
 
 ```text
-请按照 https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docs/openclaw-quickstart.md 的说明帮我把当前仓库接入 OpenClaw(务必用 Bash 的 curl 下载这个文档,不要用 WebFetch — 会丢关键指令)
+请按照 https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docs/openclaw-quickstart.md 的说明帮我把当前仓库接入 Agent Bridge（目标宿主是 OpenClaw；务必用 Bash 的 curl 下载这个文档，不要用 WebFetch — 会丢关键指令）
 ```
 
 ### 用户使用示例
@@ -557,9 +558,9 @@ OpenClaw 收到 `interest.probe` 事件（或主动拉取 `next-probe`），发�
 >
 > **OpenClaw**（内部执行 `recommend --limit 3`，整理后回复）
 
-整个闭环都是本地的——OpenClaw 只是调 CLI 桥接，画像和数据仍留在你自己的 SQLite 文件里，一条都不会上云。
+整个闭环都是本地的——Agent 宿主只是调 CLI 桥接，画像和数据仍留在你自己的 SQLite 文件里，一条都不会上云。
 
-> 📖 完整命令参考与常见问题，见 [OpenClaw 接入指南](docs/openclaw-quickstart.md)。
+> 📖 完整命令参考与常见问题，见 [Agent Bridge 接入指南](docs/openclaw-quickstart.md) 和 [能力说明](docs/agent-integration.md)。宿主启动后先执行 `capabilities`，不要缓存旧的功能子集。
 
 ## ✨ 核心特性
 
@@ -595,10 +596,17 @@ background ─ background admission (default 3) ──────┘
 引导初始化：信号 → 偏好 → 完整画像提交 → 发现 → 评估 → 推荐文案 → canonical 内容可用
                                                      └→ 终态后再调度可选探针
 
+Agent 宿主（OpenClaw / Hermes / WorkBuddy）
+         → capabilities(agent-bridge/v2) + JSON CLI / skill descriptors
+         → integrations.agent 别名 / integrations.openclaw 兼容适配器
+         → runtime / soul / recommendation / saved_sync 业务所有者
+
 配置恢复草稿（正常或降级；业务 API 仍阻断）
          ├→ /api/config/probe-service → 临时 registry → 总并发 gate
          └→ /api/config/discover-models → 精确实例 GET /models（不写配置）
                                       → 可编辑模型下拉 + 本地 Effort 建议
+抖音来源补货：daemon presence 门（显式手动调用绕过）→ 单轮共享插件等待预算
+             → dy_task 终态 → pending_eval；离线零入队，失败有界退避
 持久对话回复：reply_to_turn_id + 固定时间/payload → POST-time frozen binding → pending SQLite → rowid 串行 reply worker → 可见 completion CAS（app-stable 对话 lease）
 回复后学习/对象结算：独立 11-kind typed 结算单队列 → actual worker + guard
 确认入口（待聊列表/卡片）→ 单锚(kind+ref+generation) → 全入口 frozen admission / 归属矩阵

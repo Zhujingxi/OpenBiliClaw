@@ -218,16 +218,16 @@ class DouyinDiscoveryProducer:
         """Record this attempt and apply the plugin-specific retry floor.
 
         Productive rounds go to the shared ledger so the floor survives a
-        restart.  Every attempt also gets an in-process stamp: the shared
-        ledger deliberately ignores empty rounds, but immediately retrying a
-        browser task can create an unbounded pending-task loop when the
-        extension is offline.  Infrastructure failures receive a longer
-        cool-down than a genuine empty response.
+        restart. Every attempt also gets an in-process stamp: the shared ledger
+        deliberately ignores empty rounds, but immediately retrying a browser
+        task can create an unbounded pending-task loop when the extension is
+        offline. Infrastructure failures receive a longer cool-down than a
+        genuine empty response.
         """
         now = datetime.now(UTC)
         record_producer_run(getattr(self, "database", None), "douyin", int(discovered))
         self._last_run_at = now
-        if int(discovered) > 0 or reason == "ok":
+        if int(discovered) > 0 or reason in {"ok", "empty"}:
             self._retry_not_before = None
         elif reason == "budget_exhausted":
             self._retry_not_before = now + timedelta(minutes=_DOUYIN_BUDGET_RETRY_MINUTES)
@@ -235,12 +235,12 @@ class DouyinDiscoveryProducer:
             self._retry_not_before = now + timedelta(minutes=_DOUYIN_FAILURE_RETRY_MINUTES)
 
     def _is_due(self) -> bool:
-        if self.min_interval_minutes <= 0:
-            return self._retry_not_before is None or datetime.now(UTC) >= self._retry_not_before
         now = datetime.now(UTC)
         if self._retry_not_before is not None and now < self._retry_not_before:
             return False
-        # The persisted ledger is intentionally productive-only.  Keep this
+        if self.min_interval_minutes <= 0:
+            return True
+        # The persisted ledger is intentionally productive-only. Keep this
         # local attempt floor as well so empty plugin tasks cannot be enqueued
         # once per refresh tick for the lifetime of the backend process.
         if self._last_run_at is not None and now - self._last_run_at < timedelta(

@@ -42,6 +42,7 @@
 | 有界库存维护与历史恢复 | ✅ | `maintain_pool_inventory(max_mutations=50)` 在独立短连接 `BEGIN IMMEDIATE` 中先恢复仍合格且能净增 canonical available 的历史 `suppressed` 结果，再统一 stale / explore / topic / source / raw 维护；恢复数受当批 `raw_ceiling - raw_before` headroom 约束，raw 已满或超限时先裁剪、绝不继续恢复。单事务最多修改 50 行，只有确有 deferred victim，或裁剪释放 headroom 后仍可继续恢复时才返回 `has_more=True`；protected/token-owned excess 无可裁剪 victim 时以稳定 WARNING 结束，不再形成恢复/裁剪振荡。已满 topic 不参与恢复，排名窗口试探失败会在同一事务还原。维护连接只等写锁 75ms，交互写入优先；每批仍保护 canonical available 底线并在不变量失败时整体回滚。 |
 | 换批读写隔离 | ✅ | `PoolServeSnapshot` 在专属单线程 serve worker 的一次只读事务中统一读取 readiness、候选、平台补位、持久化已看账本和 curator 信号；同一快照只物化一次 `seen_items`，并按账本最新 event id 缓存结果，写入新浏览事件后自动失效。`persist_pool_serve_async()` 用另一条短事务原子写入 recommendation + shown。serve 与 maintenance 使用不同 executor、不同 SQLite 连接，不把共享 `Database.conn` 直接跨线程并发访问。 |
 | 八平台来源族归一化 | ✅ | `sources.platforms` 以可枚举规则统一 Bilibili、小红书、抖音、YouTube、X、知乎、Reddit、Bangumi 的别名、策略前缀和 URL host；pool accounting、已看身份与 URL 推断共用同一口径。 |
+| 来源定向历史缓存读取 | ✅ | `get_unrecommended_content(limit, source_platforms=...)` 在 SQL 平衡与 `LIMIT` 之前按平台过滤，供 source-scoped discovery backfill 使用；空 `source_platform` 的 legacy 行只按 B 站处理，不能跨源补进 B 站 / YouTube / 抖音定向运行。 |
 | discovery 待评估池 | ✅ | `discovery_candidates` 支持 mixed-source enqueue / claim / evaluation / admission，并持久化 `claim_token`、`score_threshold`、`eval_attempts` 与 batch 级 `batch_eval_attempts`；stale-sensitive 完成和释放都匹配 `id + status + claim_token`。 |
 | evaluator prefilter shadow 审计 | ✅ | `evaluator_prefilter_shadow_audit` 用随机 decision id 连接预过滤决策与最终原始 LLM score / admission 结果；只保存 identity hash、类别、数值和 digest，不保存标题、URL、正文、prompt、画像文本或 provider response。每次 insert 同时执行 30 天和 20,000 行双重 retention；任何写入/回填失败由 discovery fail-open，并以 incomplete telemetry 阻断 enforce gate。 |
 | 推荐时效排序 shadow 审计 | ✅ | `temporal_ranking_shadow_audit` 只保存一次候选窗口的总数、时间覆盖、bonus 资格数，以及 class/source/age bucket 和 Top10/50/100 before/after 聚合；不保存任何候选 identity 或内容文本。每次写入执行 30 天 / 5,000 行双重 retention，失败不影响推荐。 |
@@ -363,6 +364,10 @@ db.reset_claimed_discovery_candidates_to_pending(
 db.reset_stale_discovery_candidate_evaluations(max_age_minutes=30)
 known_candidate_keys = db.get_existing_discovery_candidate_keys(["bangumi:326"])
 known_content_ids = db.get_existing_content_cache_ids(["BV1xx411c7mD"])
+cached_bilibili = db.get_unrecommended_content(
+    limit=30,
+    source_platforms=["bilibili"],
+)
 ```
 
 行为说明：
@@ -397,6 +402,7 @@ counts = db.prefilter_shadow_audit_counts()
 - retention 常量来自 Phase 2 多日 shadow 校准窗口：30 天保证真实波次可跨日分层，20,000 行 ceiling 在 evaluator 90 条 hard cap 下仍覆盖 220 轮以上，同时为长期 daemon 提供与流量无关的硬上界。
 - `query_prefilter_shadow_audit()` 只返回 privacy-safe 列；只读 gate 命令在 SQLite read transaction 中冻结当前最大 audit id，输出聚合 count/recall/strata/fail-open 结果，不初始化数据库、不调用 provider、也不写配置。
 - `get_existing_discovery_candidate_keys(keys)` 返回任意 lifecycle status 下已经出现过的 `candidate_key`；`get_existing_content_cache_ids(ids)` 返回已经进入正式 `content_cache` 的 BVID / `content_id`。两者用于 `DiscoveryCandidatePipeline` 在 enqueue 前过滤历史重复，而不是等 SQLite `INSERT OR IGNORE` 静默吞掉后才发现供给不足。
+- `get_unrecommended_content(limit, source_platforms=None)` 缺省保留跨源兼容读取；传平台集合时先在 SQL 中筛选再取平衡窗口，避免大量高分其它来源占满 `limit * 5` 窗口后把目标来源饿死。空 legacy 平台值只在目标包含 B 站时可见。
 
 ### Temporal Ranking Shadow Audit
 

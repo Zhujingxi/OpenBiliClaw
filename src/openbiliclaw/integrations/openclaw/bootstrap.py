@@ -56,6 +56,7 @@ class OpenClawAdapterServices:
     runtime_controller: ContinuousRefreshController | Any
     account_sync_service: AccountSyncService | Any
     event_ingress: EventIngressService | Any
+    saved_sync_service: Any = None
 
 
 def _build_account_sync_x_components(
@@ -442,6 +443,31 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
     )
     account_sync_service.event_ingress = event_ingress
 
+    # Saved lists are local-first.  Native account writes remain an explicit
+    # operation on the adapter; the bridge does not start a background task
+    # registry or silently mutate an external account during bootstrap.
+    from openbiliclaw.saved_sync.adapters.bilibili import BilibiliNativeSaveAdapter
+    from openbiliclaw.saved_sync.adapters.extension import (
+        build_extension_native_save_adapters,
+    )
+    from openbiliclaw.saved_sync.extension_broker import ExtensionNativeSaveBroker
+    from openbiliclaw.saved_sync.router import NativeSaveRouter
+    from openbiliclaw.saved_sync.service import SavedSyncService
+
+    async def _wake_extension(_platform_slug: str) -> None:
+        return None
+
+    extension_broker = ExtensionNativeSaveBroker(database, wake_platform=_wake_extension)
+    saved_sync_service = SavedSyncService(
+        database,
+        NativeSaveRouter(
+            (
+                *build_extension_native_save_adapters(extension_broker),
+                BilibiliNativeSaveAdapter(bilibili_client),
+            )
+        ),
+    )
+
     return OpenClawAdapterServices(
         config=config,
         database=database,
@@ -454,6 +480,7 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
         runtime_controller=runtime_controller,
         account_sync_service=account_sync_service,
         event_ingress=event_ingress,
+        saved_sync_service=saved_sync_service,
     )
 
 

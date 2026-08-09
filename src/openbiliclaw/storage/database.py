@@ -5709,8 +5709,37 @@ class Database:
         )
         return [dict(row) for row in cursor.fetchall()]
 
-    def get_unrecommended_content(self, limit: int = 100) -> list[dict[str, Any]]:
-        """Get cached content that has not been recommended yet."""
+    def get_unrecommended_content(
+        self,
+        limit: int = 100,
+        *,
+        source_platforms: Sequence[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Get cached content that has not been recommended yet.
+
+        When ``source_platforms`` is supplied, filtering happens in SQL before
+        balancing and limiting. Blank legacy platform values count as
+        ``bilibili`` so old Bilibili cache rows remain eligible without opening
+        a cross-platform backfill path.
+        """
+        platform_sql = ""
+        platform_params: tuple[str, ...] = ()
+        if source_platforms is not None:
+            normalized_platforms = tuple(
+                dict.fromkeys(
+                    normalize_source_platform(platform, default=_BILIBILI_SOURCE_FAMILY)
+                    for platform in source_platforms
+                    if str(platform or "").strip()
+                )
+            )
+            if not normalized_platforms:
+                return []
+            placeholders = ",".join("?" for _ in normalized_platforms)
+            platform_sql = (
+                "AND COALESCE(NULLIF(LOWER(TRIM(c.source_platform)), ''), 'bilibili') "
+                f"IN ({placeholders})"
+            )
+            platform_params = normalized_platforms
         admission_sql, admission_params = self._pool_admission_sql(
             score_expr="COALESCE(c.relevance_score, 0.0)",
             source_expr="c.source",
@@ -5720,6 +5749,7 @@ class Database:
             SELECT c.*
             FROM content_cache AS c
             WHERE {admission_sql}
+              {platform_sql}
               AND NOT EXISTS (
                 SELECT 1
                 FROM recommendations AS r
@@ -5733,7 +5763,7 @@ class Database:
                 c.bvid ASC
             LIMIT ?
             """,
-            (*admission_params, max(limit * 5, 50)),
+            (*admission_params, *platform_params, max(limit * 5, 50)),
         )
         rows = [dict(row) for row in cursor.fetchall()]
         rows = self._exclude_viewed_rows(

@@ -3327,6 +3327,41 @@ async def test_discovery_engine_caches_final_results() -> None:
 
 
 @pytest.mark.asyncio
+async def test_bilibili_discovery_cache_backfill_never_leaks_other_platforms() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+        db.cache_content(
+            "reddit:high-score",
+            content_id="high-score",
+            content_url="https://www.reddit.com/r/test/comments/high-score",
+            title="Reddit cached item",
+            source="reddit-hot",
+            source_platform="reddit",
+            relevance_score=0.99,
+        )
+        db.cache_content(
+            "BV1ONLY",
+            title="Bilibili cached item",
+            source="trending",
+            source_platform="bilibili",
+            relevance_score=0.80,
+        )
+
+        engine = ContentDiscoveryEngine(database=db, target_primary_count=2)
+        engine.register_strategy(_RecordingStrategy("trending", []))
+
+        results = await engine.discover(
+            _build_profile(),
+            strategies=["trending"],
+            limit=2,
+        )
+
+        assert [item.bvid for item in results] == ["BV1ONLY"]
+        assert {item.source_platform for item in results} == {"bilibili"}
+
+
+@pytest.mark.asyncio
 async def test_discovery_engine_cache_results_preserves_multi_source_fields() -> None:
     """Regression: rescoring xhs rows must not overwrite source_platform.
 

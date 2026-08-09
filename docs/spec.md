@@ -170,6 +170,7 @@ Discovery 可以继续宽搜，普通 dislike 不撤销关键词或来源任务�
 - **近期供给与排序观测**：B 站 API 主搜索与扩展 fallback 都只提供一个小型 recent lane；lane provenance 贯穿 `DiscoveredContent → discovery_candidates`，但不改变来源策略、准入阈值或配额。推荐侧对每个候选窗口聚合比较“含 publication bonus”与“无 bonus”Top10/50/100，按 class/source/age 记录进入退出；shadow 不含候选身份/文本，写失败 fail-open，也不会自动开启 stale 淘汰。
 - **可选辅助指标**：播放量/点赞/弹幕质量等——由用户画像决定是否参考（有些用户在意质量指标，有些人不在意）
 - **统一待评估池与准入**：API daemon 的不同来源 raw candidates 进入 `discovery_candidates` 后，由唯一 `CandidateEvalCoordinator` tokenized claim；默认 3 个 30 条 LLM worker 并行，任一完成即补位，SQLite 完成提交与 admission 串行。pipeline 单次 enqueue callback 立即唤醒这个 owner，refresh / managed producer 不再同步 drain。raw 清空且 projected 仍低于目标时，coordinator 调用 quota-aware supply wave，即时 tick 所有欠份额 producer 并执行 B 站 refresh；同平台周期 / 即时 tick 由 per-source lock 去重。补池生产性以真实 `inserted/enqueued` 为准，全部 duplicate 即使跑过策略也进入 30/60/120/300/600 秒退避，真实入队立即清零。串行 lane 先持久化全部 token-owned 评分，再按 `target - available - admitted_pending_copy` admission；超过 headroom 的达标结果保留为 `evaluated`。评估输入包含正文 / 标签 / 互动指标；`[discovery].eval_prefilter_mode` 默认 shadow 只记录 embedding would-filter，enforce 才会让明显低相似且非 explore 的候选本地低分缓存并跳过 LLM；多模态评估开启且模型支持图像时会复用运行时图片缓存。OpenClaw direct one-shot 不启动 daemon owner，`recommend(refresh_if_needed=True)` 的首轮 source supply / inline claim 固定 ≤4，并在 durable admission 后同步 drain ≤4 条 expression copy。调度 projected 固定为 `available + admitted_pending_copy + evaluated_pending_admission`，普通 raw 不计入；来源只影响取数方式、配额和 prompt 上下文，平台节流、raw ceiling 与准入阈值不变。
+- **来源定向回填**：主策略不足时，历史 `content_cache` backfill 先按本轮 strategy 的 `source_platform` 在 SQL 中过滤，再做平衡与 `LIMIT`；空 legacy 平台只归 B 站。一次 B 站 / YouTube / 抖音定向运行不能被其它平台的高分历史行补满。
 
 ---
 
@@ -222,6 +223,20 @@ Discovery 可以继续宽搜，普通 dislike 不撤销关键词或来源任务�
   - 例如：新平台接入、特定领域的内容评估策略、新的推荐呈现方式
 - **Skill 注册**：Agent 自动发现可用 Skill，根据任务需要选择调用
 
+#### 2.5.1 Agent Bridge 能力协商与兼容边界
+
+OpenClaw、Hermes、WorkBuddy 等宿主通过同一份 `agent-bridge/v2` 能力清单发现
+OpenBiliClaw 的当前功能；`integrations/openclaw/skill.py` 是 descriptor 的唯一注册表，
+`integrations/agent.py` 提供协议中立的 Python 别名，历史 `integrations.openclaw` 路径和
+`openbiliclaw.integrations.openclaw.cli` 命令继续兼容。宿主启动或升级后先调用
+`capabilities`，不得根据旧版 skill 名称猜测能力。
+
+当前桥接边界覆盖多源推荐与分页消费、活动流和平台可用性、兴趣 / 避雷四态探针、惊喜反馈、
+带 `turn_id` 的 durable 对话历史、画像编辑，以及 local-first 保存列表。所有写入动作都返回
+稳定 request / turn 标识；外部账号 native-save 只能通过显式授权的 `sync_saved` 触发，不能把
+本地 membership 当成平台同步成功。新增核心功能时必须同步更新 operation DTO / handler、skill
+descriptor、CLI（适用时）、capability manifest、幂等测试和集成文档，保持宿主不会悄悄落后于内核。
+
 ---
 
 ## 3. 系统架构
@@ -241,6 +256,11 @@ guided init: signals → preferences → full profile commit
                                   → discovery → evaluation → copy → canonical pool ready
                                   → terminal → runtime schedules optional probes
 
+Agent hosts (OpenClaw / Hermes / WorkBuddy)
+        → capabilities(agent-bridge/v2) + JSON CLI / skill descriptors
+        → integrations.agent alias / integrations.openclaw compatibility adapter
+        → runtime / soul / recommendation / saved_sync owners
+
 config recovery control plane (normal or degraded; business APIs stay gated)
                 ├─ draft → /api/config/probe-service → temporary registry → total gate
                 └─ draft → /api/config/discover-models → exact instance GET /models
@@ -252,6 +272,9 @@ XHS/DY/YT/Zhihu/Reddit task final: canonical staged result (XHS bootstrap payloa
                                  stale lease reclaim replays first write; staged row rejects late mutation
 extension-online periodic re-pull: presence + profile/init/config gates → persisted round-robin
                                  → one active bootstrap across five task tables → EventHub → extension
+Douyin source supply: daemon presence gate (explicit manual call bypasses it)
+                     → one shared plugin-cycle wait budget → terminal dy_task → pending_eval
+                     absent → zero enqueue; timeout/error/budget → bounded retry floor
 
 cover images: proxy foreground ─┐
               refresh prefetch ─┴→ app-stable coordinator(total 4 / bg 3, fg priority)

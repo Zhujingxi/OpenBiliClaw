@@ -6,7 +6,7 @@
 
 ## 初始化期间的配置探测
 
-`POST /api/config/probe-service` 只在内存副本上应用设置页草稿并真实探测 LLM、默认链、embedding 或网络策略，不写 `config.toml`、不热重载 runtime。它因此不受 guided init 的 HTTP 写端 409 门控；初始化运行时仍可测试，LLM 请求继续经过进程级稳定 total gate。`PUT /api/config` 仍在初始化期间返回 `409 init_running`，避免替换本轮任务正在使用的组件。
+`POST /api/config/probe-service` 只在内存副本上应用设置页草稿并真实探测 LLM、默认链、embedding 或网络策略，不写 `config.toml`、不热重载 runtime。它因此不受 guided init 的 HTTP 写端 409 门控；初始化运行时仍可测试，LLM 请求继续经过进程级稳定 total gate。LLM 实例 / 链探测的 outer deadline 按草稿 `[llm].timeout` 取值并夹在 10–120 秒，超时以 `ok=false` 和稳定错误文案返回；图形客户端使用 125 秒预算，覆盖本地模型冷启动而不允许无界挂起。`PUT /api/config` 仍在初始化期间返回 `409 init_running`，避免替换本轮任务正在使用的组件。
 
 视觉预热配置也属于同一事务契约：`PUT /api/config` 对 `keyframe_max_frames (1..12)`、
 `keyframe_fetch_limit (1..200)`、`danmaku_fetch_limit (1..200)` 和
@@ -179,3 +179,5 @@ popup、移动 Web 与桌面 Web 只有 durable 对话中的假设卡片保留 c
 ## Runtime stream 保活与重连
 
 `GET ws://.../api/runtime-stream` 在 20 秒没有业务事件时发送 `{"type":"runtime.heartbeat","sent_at":"..."}`。心跳与普通事件共用唯一 writer，避免并发 `send_json`；鉴权撤销仍在每次发送前和 15 秒 watchdog 中 fail closed。桌面 Web 收到心跳即确认“实时连接正常”，异常 close 则显示“实时流重连中”、记录 close code/reason，并按 3 秒节奏重连；页面进入后台时仍按 visibility 生命周期主动关闭，不把该主动关闭显示成后端离线。
+
+`dy_task_available` 等 task-available 帧用于唤醒浏览器扩展 dispatcher，不是用户活动。桌面 Web 会在运行时状态投影之前丢弃 `dy_task_available`，避免把原始 wire type 显示成首页“现在在忙”；扩展仍照常消费该事件并立即轮询任务。

@@ -4,13 +4,9 @@ Phase 0 safety net for the source-auth-contract refactor
 (``docs/plans/2026-07-18-source-auth-contract-spec.md``).
 
 Every case pins the **current** ``(state, logged_in)`` pair a platform
-reports for a given credential precondition. This file deliberately
-records behaviour the spec calls *wrong* — most notably douyin, which
-reports ``("unverified", False)`` even with a perfectly valid cookie
-(spec D11) — because Wave A promises "zero output change" and this is
-the net that proves it. Do not "fix" an expectation here to match an
-ideal contract; change the expectation only together with the code
-change that intentionally moves the output, and say so in the PR.
+reports for a given credential precondition. Credential presence without a
+probe remains unverified; once a live probe returns, the legacy fields must
+move with the orthogonal verdict so one response cannot contradict itself.
 
 Isolation (the hard requirement): each case runs against a temporary
 project root, a temporary SQLite database, and a patched rdt credential
@@ -531,7 +527,7 @@ _CASES: dict[str, _Case] = {
         detail="尚未收到小红书浏览器登录态；插件连接后会在本地同步。",
         enabled=False,
     ),
-    # douyin — cookie presence only; logged_in is hard-wired False (spec D11).
+    # douyin — cookie presence alone is unverified; a later live probe can move it.
     "douyin-cookie-file": _Case(
         "douyin",
         _dy_cookie_file,
@@ -1006,14 +1002,18 @@ def test_sources_status_makes_no_outbound_request(contract_env: _Env) -> None:
 
 
 @pytest.mark.parametrize(
-    ("recorded", "expected_verification"),
+    ("recorded", "expected_verification", "expected_legacy"),
     [
-        ({"authenticated": True}, "verified"),
-        ({"authenticated": False}, "failed"),
+        ({"authenticated": True}, "verified", ("ready", True)),
+        ({"authenticated": False}, "failed", ("unverified", False)),
         # A proxy/timeout failure says nothing about the cookie, so it must not
         # be reported as a rejection — that is how a flaky network turns into a
         # bogus "your login expired".
-        ({"authenticated": False, "network_error": True}, "unverified"),
+        (
+            {"authenticated": False, "network_error": True},
+            "unverified",
+            ("unverified", False),
+        ),
     ],
     ids=["logged-in", "logged-out", "transport-failure"],
 )
@@ -1021,15 +1021,9 @@ def test_live_probe_verdict_reaches_the_contract(
     contract_env: _Env,
     recorded: dict[str, bool],
     expected_verification: str,
+    expected_legacy: tuple[str, bool],
 ) -> None:
-    """A cached probe verdict drives ``verification`` — and only ``verification``.
-
-    This is the Wave A zero-break property in one assertion: 抖音 with a valid
-    cookie is genuinely logged in (spec D11), and the contract can now say so,
-    while ``legacy_state`` stays the frozen ``unverified`` that old frontends
-    expect. It also proves ``probe_cache`` is wired to the providers at all,
-    which nothing else here would catch until Task 6 lands.
-    """
+    """A cached probe verdict drives both contract and compatibility views."""
     from openbiliclaw.api.source_auth.probe_cache import LIVE_PROBES
 
     _dy_cookie_file(contract_env)
@@ -1040,8 +1034,7 @@ def test_live_probe_verdict_reaches_the_contract(
     finally:
         LIVE_PROBES.clear()
 
-    # Legacy verdict unmoved, whatever the probe found.
-    assert (item["state"], item["logged_in"]) == ("unverified", False)
+    assert (item["state"], item["logged_in"]) == expected_legacy
 
     contract = SourceAuthContract.model_validate(item["auth"])
     assert contract.verification == expected_verification
@@ -1299,7 +1292,9 @@ def test_douyin_probe_distinguishes_login(
     assert contract.verify_method == "live_probe"
     assert body["outcome"] == expected_outcome
     assert contract.verified_at
-    # Wave A's promise: the legacy verdict does not move, whatever we learn.
+    assert (contract.legacy_state, contract.legacy_logged_in) == (
+        ("ready", True) if expected_verification == "verified" else ("unverified", False)
+    )
     assert check_legacy_consistency("douyin", contract) == []
 
 

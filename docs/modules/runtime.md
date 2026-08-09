@@ -463,6 +463,10 @@ daemon 的 `sync_if_due()` 还受共享 `background_llm_work_allowed()` 约束�
 
 `DouyinDiscoveryProducer.produce_if_due()` 是 daemon 与 `openbiliclaw discover --source douyin` 共用的正式入口。手动 CLI 构造时传 `enabled_override=True`，只绕过后台 scheduler 总开关；来源 enabled/mode、最小间隔、每日预算和候选池上限仍照常执行。producer 通过 `KeywordFetchCoordinator` claim 统一关键词，用 `DouyinDiscoveryService(cache=False, evaluate=False)` 拉 raw candidates，再交 `DiscoveryCandidatePipeline` 写入 `discovery_candidates(pending_eval)`。
 
+API runtime 会把共享 `PresenceTracker` 和 `extension_disconnect_grace_seconds` 注入 producer；插件不在线且不在宽限期时直接返回 `extension_absent`，不 claim 关键词、不创建 `dy_tasks`、也不推进执行时间。显式 CLI / debug 构造保持 `presence=None`，允许用户主动发起一次真实 smoke。
+
+每次实际尝试都会写进程内 cadence：真实空结果按配置的 `min_interval_minutes` 节流，timeout / infrastructure error 至少退避 15 分钟，预算耗尽至少退避 60 分钟；有候选的 productive 轮次仍写共享 producer ledger，使最小间隔跨重启生效。这样 extension 离线、任务超时或空页面不会在 candidate coordinator 的每个补货 tick 上形成任务风暴。
+
 search / hot / feed 每条分支都有结构化终态 `used / empty / timeout / failed / budget_exhausted`。search 按关键词分别结算：有候选才 `mark_used`，真实空结果 `mark_failed`，插件 timeout / failed 调 `requeue_transient()` 无损退回 pending 且不增加 attempts，预算耗尽的当前词与未执行词 rollback；前序已成功候选不会被整轮异常丢弃。统一关键词池为空时不再跳过整轮，search 可回退画像兴趣词，hot / feed 仍独立执行。大缺口固定包含 search，并在 hot / feed 间逐轮轮换，避免 feed 长期饥饿；小缺口仍优先 feed / hot。
 
 API daemon 构造 producer 时会注入共享 extension presence：扩展离线且超过 `extension_disconnect_grace_seconds` 后，`produce_if_due()` 在创建浏览器任务前直接返回 `extension_absent`，不会先入队再等待 180 秒；显式 CLI / smoke 未注入 presence，仍可用于人工诊断。每次真正尝试都会记录进程内 cadence：真实空结果遵循来源 `min_interval_minutes`，`timeout / failed` 使用 15 分钟基础设施退避，预算耗尽使用 60 分钟退避；有产出的轮次仍写共享 productive ledger。该分层同时避免离线 pending 堆积和在线故障时的分钟级重试风暴。

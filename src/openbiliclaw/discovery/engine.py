@@ -780,6 +780,16 @@ class DiscoveryStrategy(ABC):
     """Base class for content discovery strategies."""
 
     @property
+    def source_platform(self) -> str:
+        """Canonical platform produced by this strategy.
+
+        Bilibili is the historical/default strategy family. Multi-source
+        strategies override this so cache backfill can never leak candidates
+        from another platform into a source-scoped discovery run.
+        """
+        return "bilibili"
+
+    @property
     @abstractmethod
     def name(self) -> str:
         """Strategy name."""
@@ -3720,6 +3730,13 @@ class ContentDiscoveryEngine:
             self._load_cached_backfill(
                 limit=limit,
                 exclude_bvids={item.bvid for item in merged},
+                source_platforms={
+                    normalize_source_platform(
+                        getattr(strategy, "source_platform", "bilibili"),
+                        default="bilibili",
+                    )
+                    for strategy in strategies
+                },
             )
         )
         return results
@@ -3729,11 +3746,15 @@ class ContentDiscoveryEngine:
         *,
         limit: int,
         exclude_bvids: set[str],
+        source_platforms: set[str],
     ) -> list[DiscoveredContent]:
         if self._database is None:
             return []
 
-        rows = self._database.get_unrecommended_content(limit=limit)
+        rows = self._database.get_unrecommended_content(
+            limit=limit,
+            source_platforms=sorted(source_platforms),
+        )
         candidates: list[DiscoveredContent] = []
         for row in rows:
             bvid = str(row.get("bvid", "")).strip()

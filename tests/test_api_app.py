@@ -2531,7 +2531,7 @@ class TestBackendAPI:
         config.sources.youtube.enabled = True
         config.sources.zhihu.enabled = True
         producers: dict[str, SimpleNamespace] = {}
-        dy_kwargs: list[dict[str, object]] = []
+        douyin_kwargs: list[dict[str, object]] = []
         x_kwargs: list[dict[str, object]] = []
 
         def build_producer(kind: str) -> SimpleNamespace:
@@ -2542,7 +2542,7 @@ class TestBackendAPI:
         monkeypatch.setattr(
             douyin_producer_module,
             "build_douyin_discovery_producer",
-            lambda **kwargs: dy_kwargs.append(kwargs) or build_producer("douyin"),
+            lambda **kwargs: douyin_kwargs.append(kwargs) or build_producer("douyin"),
         )
         monkeypatch.setattr(
             runtime_context_module,
@@ -2563,8 +2563,8 @@ class TestBackendAPI:
         ctx = runtime_context_module.build_runtime_context(config)
 
         assert set(producers) == {"douyin", "youtube", "zhihu", "twitter"}
-        assert dy_kwargs[0]["presence"] is ctx.presence
-        assert dy_kwargs[0]["presence_grace_seconds"] == (
+        assert douyin_kwargs[0]["presence"] is ctx.presence
+        assert douyin_kwargs[0]["presence_grace_seconds"] == (
             config.scheduler.extension_disconnect_grace_seconds
         )
         assert all(
@@ -17794,6 +17794,67 @@ class TestGuidedInitEndpoints:
         assert embedding.json()["ok"] is True
         assert calls == ["llm:probe-instance", "embedding"]
 
+    def test_config_llm_probe_timeout_returns_structured_failure(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        class SlowRegistry:
+            def is_chat_capable(self, name: str) -> bool:
+                return name == "slow-instance"
+
+            def provider_type(self, name: str) -> str:  # noqa: ARG002
+                return "ollama"
+
+            def get(self, name: str) -> object:  # noqa: ARG002
+                return SimpleNamespace(_model="cold-model")
+
+            async def complete_provider(
+                self,
+                provider_name: str,
+                *_args: object,
+                **_kwargs: object,
+            ) -> object:
+                await asyncio.sleep(1)
+                return SimpleNamespace(
+                    content="late",
+                    instance_id=provider_name,
+                    provider="ollama",
+                    model="cold-model",
+                )
+
+        app, _ = self._make_app(tmp_path)
+        monkeypatch.setattr(
+            "openbiliclaw.llm.registry.build_llm_registry",
+            lambda _cfg: SlowRegistry(),
+        )
+        monkeypatch.setattr(
+            "openbiliclaw.api.app._config_llm_probe_timeout_seconds",
+            lambda _configured: 0.01,
+        )
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/config/probe-service",
+                json={
+                    "kind": "llm_instance",
+                    "instance_id": "slow-instance",
+                    "config": {},
+                },
+            )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["ok"] is False
+        assert body["kind"] == "llm_instance"
+        assert body["instance_id"] == "slow-instance"
+        assert body["provider"] == "ollama"
+        assert body["model"] == "cold-model"
+        assert body["error"] == "LLM connectivity probe timed out after 0.01s."
+        assert 0 <= body["latency_ms"] < 1000
+
     def test_write_endpoint_allowed_when_idle(self, tmp_path: Path) -> None:
         from fastapi.testclient import TestClient
 
@@ -19464,6 +19525,15 @@ class TestEmbeddingDiagnosisAndRepair:
         finally:
             embedding_progress.mark_pull_done(True, "")
             embedding_progress.report_ollama_phase("ready")
+
+
+def test_config_llm_probe_timeout_allows_cold_start_but_remains_bounded() -> None:
+    from openbiliclaw.api.app import _config_llm_probe_timeout_seconds
+
+    assert _config_llm_probe_timeout_seconds(2) == 10.0
+    assert _config_llm_probe_timeout_seconds(30) == 30.0
+    assert _config_llm_probe_timeout_seconds(1200) == 120.0
+    assert _config_llm_probe_timeout_seconds("invalid") == 120.0
 
 
 class TestLlmFallbackConfigValidationAndProbe:

@@ -27,6 +27,11 @@ config recovery control plane (normal or degraded; business APIs stay gated)
                 ├─ draft → /api/config/probe-service → temporary registry → total gate
                 └─ draft → /api/config/discover-models → exact instance GET /models
                           → editable model list + local effort advisory (no config write)
+
+Agent hosts (OpenClaw / Hermes / WorkBuddy)
+        → capabilities(agent-bridge/v2) + JSON CLI / skill descriptors
+        → integrations.agent alias / integrations.openclaw compatibility adapter
+        → existing runtime / soul / recommendation / saved_sync owners
 interest updates: HTTP/source event → durable commit + wake (no pipeline/LLM wait)
                   ├─ profile_events cursor(generic owner) ──────┐
                   ├─ content_feedback cursor(priority owner) ──┴→ atomic buffer+cursor checkpoint
@@ -48,6 +53,9 @@ XHS/DY/YT/Zhihu/Reddit task final: canonical staged result (XHS bootstrap payloa
                                  stale lease reclaim replays first write; staged row rejects late mutation
 extension-online periodic re-pull: presence + profile/init/config gates → persisted round-robin
                                  → one active bootstrap across five task tables → EventHub → extension
+Douyin source supply: daemon presence gate (explicit manual call bypasses it)
+                     → one shared plugin-cycle wait budget → terminal dy_task → pending_eval
+                     absent → zero enqueue; timeout/error/budget → bounded retry floor
 
 cover images: UI proxy foreground ───┐
               refresh prefetch bg ───┴→ app-stable ImageFetchCoordinator(total 4 / bg 3, fg priority)
@@ -99,6 +107,8 @@ candidate raw-empty → quota-aware supply wave → under-share platform produce
 manual `discover --source douyin` → same Douyin producer as daemon
                                  → unified keyword lifecycle → plugin search/hot/feed
                                  → discovery_candidates(pending_eval)
+source-scoped cache backfill → strategy source_platform set → SQL filter before balance/LIMIT
+                             → only that platform can supplement an underfilled run
 
 candidate evaluation → effective profile view + exact tail-recall pool + negative exemplars
                      → prompt-visible content/context digest + embedding namespace
@@ -165,8 +175,10 @@ cookie 补 `Secure`，并把已验证的 Web Origin 做最小 `https→http` 适
 ### Integrations (`integrations/`)
 - 对外系统接入边界
 - adapter bootstrap、DTO 裁剪和异常翻译
-- 将现有 runtime / engine 能力暴露为 OpenClaw 可调用 skill
-- 提供 JSON CLI bridge，供仓库内真实 OpenClaw skill pack 调用
+- 将现有 runtime / engine 能力暴露为协议中立 Agent skill；OpenClaw 前缀仅为兼容命名
+- `agent.py` 提供 Hermes / WorkBuddy 等宿主的稳定 Python 别名，`openclaw/` 保留历史路径
+- `capabilities.py` 输出 `agent-bridge/v2`、宿主兼容名和完整 descriptor manifest
+- 提供 JSON CLI bridge，供仓库内 workspace skill 和其他本地 Agent 宿主调用
 
 ### Saved Sync (`saved_sync/`)
 - `NativeSaveRouter` 根据 adapter capability 确定 favorite / watch-later 路由；watch-later 仅在平台不支持原生动作且支持 favorite 时回退
@@ -443,11 +455,11 @@ embedding 和空向量失败留待下轮重试，成功槽位会复用。已有�
 
 ## 对外集成约束
 
-当前 OpenClaw 接入遵循两条边界：
+当前 Agent Bridge 接入遵循以下边界：
 
 1. **外部集成只通过 adapter 调用内核**
-   OpenClaw 不直接访问 SQLite、memory JSON 或内部 engine 组合细节。Direct bootstrap 会在 adapter 暴露 Soul/recommendation operation 前调用 controller 的幂等 startup maintenance，避免绕过 daemon `run_forever()` 的恢复顺序；其 inline admission 在返回前同步补齐 durable copy，而不假设未启动的 daemon owner 会在稍后处理。
+   Agent 宿主不直接访问 SQLite、memory JSON 或内部 engine 组合细节。Direct bootstrap 会在 adapter 暴露 Soul/recommendation operation 前调用 controller 的幂等 startup maintenance，避免绕过 daemon `run_forever()` 的恢复顺序；其 inline admission 在返回前同步补齐 durable copy，而不假设未启动的 daemon owner 会在稍后处理。
 2. **skill 只是协议包装，不是业务主链**
-   学习、推荐、反馈回流仍由 `runtime/`、`soul/`、`recommendation/` 等模块负责，`integrations/openclaw/skill.py` 只负责对外暴露稳定 handler。
-3. **真实 OpenClaw 技能发现走仓库根目录 `skills/`**
-   当前仓库通过 `skills/openbiliclaw-adapter/SKILL.md` 提供真实 workspace skill，再由 skill 内部调用 adapter CLI bridge。
+   学习、推荐、反馈回流仍由 `runtime/`、`soul/`、`recommendation/` 等模块负责，`integrations/openclaw/skill.py` 只负责对外暴露稳定 handler；新功能必须同时进入 operation、descriptor、CLI（若适合）和 capability manifest。
+3. **宿主发现走能力协商 + 仓库根目录 `skills/`**
+   当前仓库通过 `skills/openbiliclaw-adapter/SKILL.md` 提供真实 workspace skill，再由 skill 内部调用 adapter CLI bridge；`capabilities` 是避免宿主继续使用旧能力子集的权威入口。
