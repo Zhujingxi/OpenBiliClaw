@@ -331,6 +331,10 @@ function initActiveView(route = readHash()) {
   else if (id === "chat") initChatView(views.chat);
 }
 
+function syncChatViewBodyState(id) {
+  document.body.classList.toggle("chat-view-active", id === "chat");
+}
+
 /**
  * Navigate to a tab. Exported for cross-view use (e.g. delight "聊一聊" → chat).
  */
@@ -356,7 +360,7 @@ export function navigateToTab(id, { libraryTab = "", replaceRoute = false } = {}
   }
   if (nextId !== "library") leaveContentLibraryView();
   patchState({ activeTab: nextId });
-  document.body.classList.toggle("chat-view-active", nextId === "chat");
+  syncChatViewBodyState(nextId);
   for (const [key, el] of Object.entries(views)) {
     el.classList.toggle("active", key === nextId);
   }
