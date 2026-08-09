@@ -2,7 +2,7 @@
 
 ## 概述
 
-`src/openbiliclaw/api/` 暴露本地 FastAPI 契约，并把 UI 请求编排到 durable storage、Soul、Dialogue 与 runtime。本文记录对话确认入口新增的公开端点；通用鉴权见 [api-auth.md](api-auth.md)，初始化端点见 [init.md](init.md)。
+`src/openbiliclaw/api/` 暴露本地 FastAPI 契约，并把 UI 请求编排到 durable storage、Soul、Dialogue 与 runtime。本文记录配置、迁移、推荐和对话等公开端点；通用鉴权见 [api-auth.md](api-auth.md)，初始化端点见 [init.md](init.md)。
 
 ## 初始化期间的配置探测
 
@@ -21,6 +21,8 @@ runtime apply。`0` 是只关闭跨 digest 关键词复用的回滚值，不会�
 
 `PUT /api/config` 把“持久化成功”和“运行时已经切换”分成两个明确阶段。请求仍在 `_CONFIG_SAVE_LOCK` 内完成校验、`config.toml.bak` 快照、`config.toml` 写入和凭据存储，然后统一立即返回 `202 apply_state="queued"`、`apply_revision` 与已脱敏配置快照；运行时 lane 由 app-owned latest-wins 队列在后台安全应用，前端通过 `GET /api/config/apply-status` 或 runtime event 观察终态，不把 202 当作失败。
 
+`general.data_dir` 不支持热切换。若保存值的 canonical 路径与当前 runtime 已打开、已持有进程级锁的 active data dir 不同，磁盘配置仍记录新值，但 202 返回 `restart_required=true`；后台只把其它字段应用到继续绑定旧 active data dir 的 `RuntimeContext`。同一次请求涉及的抖音 / X 外部凭据也读写旧 active 目录，避免在尚未持有新目录锁时写入。完整退出并重新启动、取得新 canonical data-dir lock 后才启用新路径；因此 apply status 的 `applied` 不代表目录已切换。
+
 Phase 2 cognition rollout 在配置 API 中也是 task-scoped：`soul` GET/PUT 模型公开
 `preference_prompt_view`、`awareness_prompt_view`、`insight_prompt_view` 三个
 `legacy|compact-v1` 字段，默认分别为 `legacy / compact-v1 / legacy`。旧的聚合
@@ -32,10 +34,27 @@ Phase 2 cognition rollout 在配置 API 中也是 task-scoped：`soul` GET/PUT �
 
 | 方法与路径 | 状态 | 契约 |
 |---|---|---|
-| `PUT /api/config` | ✅ | 持久化成功后统一返回 `202 queued`；响应新增 `apply_state`、`apply_revision`，原有 `reloaded` / `rollback_applied` / `restart_required` 保持兼容。 |
-| `GET /api/config/apply-status` | ✅ | 返回 `state`、最新请求修订、最后已应用修订、消息、非敏感错误分类和更新时间；不包含配置内容或凭据。 |
+| `PUT /api/config` | ✅ | 持久化成功后统一返回 `202 queued`；响应新增 `apply_state`、`apply_revision`，原有 `reloaded` / `rollback_applied` / `restart_required` 保持兼容。改变 canonical `data_dir` 时 `restart_required=true`，新路径仅在完整重启后启用。 |
+| `GET /api/config/apply-status` | ✅ | 返回 `state`、最新请求修订、最后已应用修订、消息、非敏感错误分类和更新时间；不包含配置内容或凭据。`applied` 只确认本进程可应用部分，不取消 PUT 已返回的目录重启要求。 |
 
 guided init 不与待应用配置并行：队列为 `queued/applying` 时 `POST /api/init` 返回 `409 config_applying`；init 已开始时 `PUT /api/config` 仍返回既有 `409 init_running`。
+
+## 本机数据迁移
+
+桌面 Web 的「设置 → 通用 → 数据迁移」使用四条独立 API。它们在正常和 `llm_registry_unavailable` 降级态都保持可达，但不继承“已登录即可远程管理”的范围：每次请求必须由后端真实解析为 loopback transport（直接连接，或可信代理正确报告的 loopback client）并显式携带 `X-OBC-Auth: 1`；浏览器请求还必须通过 Origin / Host 同源检查，扩展 Origin 明确拒绝，无 Origin 的本机 CLI / curl 仍可使用。迁移判定独立于 `[api.auth].trust_loopback`，远端 Bearer / Cookie、局域网客户端，以及由 Caddy / TLS Proxy / 容器转发过来的非 loopback 客户端都不能借密码门禁绕过。guided init 活动期间导出 / 导入返回 `409 init_active`；状态查询与取消暂存继续可用，便于对账或撤销此前已经暂存的导入。
+
+| 方法与路径 | 请求 | 成功响应与副作用 |
+|---|---|---|
+| `POST /api/migration/export` | JSON body 可选；桌面端发送 `{"frontend": {...}}`，后端只接受主题模式、色相、强调风格、自动续页和侧抽屉开关 | `200 application/vnd.openbiliclaw.backup+zip`，下载 `openbiliclaw-backup-YYYYMMDD-HHMMSS.obcbackup`。响应使用 `Cache-Control: no-store, private`；临时导出目录在文件传输结束后删除。配置保存锁忙时返回 `409 config_busy`。后端读取并合并磁盘上的 `config.toml` / `config.local.toml`（不烘焙环境变量），移除整段 `[api.auth]` 后只写包内 `config/config.toml`，不携带密码、password hash、session secret 或扩展设备 key；数据文件始终从当前进程已持锁的 active data dir 导出，尚待重启的新 `data_dir` 不会被提前读取。 |
+| `POST /api/migration/import` | 原始 `.obcbackup` bytes，不是 multipart；必须带 `X-OBC-Migration-Confirm: replace-all`。可选 `X-OBC-Migration-Request-ID: <UUID>`；未提供时服务端生成 UUID，非法值返回 `400 invalid_request_id`。压缩包上限 2 GB，服务端流式写临时文件 | `202 state="staged"`，返回迁移 ID、规范化的 `request_id`、源版本、文件数、解压大小、安全 UI 偏好、被目标机设置覆盖的字段、`source_omitted_environment_variables`、导入当时的 `target_active_environment_variables` 和 `restart_required=true`。此时当前配置、SQLite 与 runtime 均未替换。 |
+| `GET /api/migration/status` | 无 body | 返回 `idle`、`processing`、`staged`、`applied`、`failed` 或 `cancelled`。上传 / 校验仍在进行时，`processing` 携带规范化 `request_id`、`phase="uploading|validating"` 与 `restart_required=false`；`staged` 携带 `migration_id`、`request_id`、两类环境变量名、调整字段与 `restart_required=true`；`applied` 携带 `migration_id` 和白名单 `frontend`。响应不会暴露包内凭据。 |
+| `DELETE /api/migration/pending` | 无 body | 删除尚未应用的 pending stage，返回 `cancelled=true, state="cancelled"`；没有 pending 时是 `cancelled=false, state="idle"` 的幂等空操作。它不修改当前配置或用户数据；若迁移已进入启动期 apply journal 则返回 `409`。 |
+
+导出响应是**未加密且包含敏感信息**的 ZIP 容器；API 不宣称也不实现服务端加密。模型 / 来源凭据和平台 Cookie 会迁移，但源机器的整段 `[api.auth]` 不进入包。启动应用时会重新读取目标机最新磁盘配置，以当时整段 `api.auth` 为基线，再轮换文件 session secret、关闭扩展远程访问并清空设备 key；prepared DB 同时把 `auth_epoch` 设为来源与目标当前 epoch 最大值再加一，严格高于两者并撤销两台机器的旧 Web 会话，即使目标 session secret 由环境变量固定也不会延续。因此源包不会覆盖目标机密码门禁策略，旧会话或扩展配对也不会继续有效。
+
+导入完整校验 manifest、成员类型 / 路径 / 大小、SHA-256、配置和 SQLite 后，才把内容发布到项目根下的私有暂存区。`request_id` 是上传结果的关联 / 对账 ID，不是服务端自动去重键；收到不确定结果时应先 `GET /api/migration/status`，不要盲目重复上传。匹配同一 `request_id` 的 `processing` 表示后端仍在上传或校验，不是失败；断连后的单次瞬时 `idle` 也不能单独作为本次请求的终局。桌面端最多强制查询 3 次，遇到 `idle/cancelled` 会间隔 500ms 再确认，匹配 request ID 的 `processing/staged` 则立即收口；每次打开「通用」还会绕过本地已加载标记重新查询。
+
+配置、SQLite、画像、白名单 UI 偏好和其它数据都要等下一次 `openbiliclaw start`、`openbiliclaw serve-api` 或桌面包启动取得 migration runtime lock 并成功 apply 后才生效；status 的 staged / applied 响应都只可能携带白名单 `frontend`，桌面端会忽略 staged 值。`state="applied"` 后，每个浏览器会把 `migration_id` 记为本地一次性交接回执，只应用该迁移的偏好一次；之后用户修改主题或滚动设置，即使旧 applied status 仍持久存在也不会再次覆盖。详见[存储层的可移植数据迁移](storage.md#可移植数据迁移)。再次提交合法迁移包会替换尚未应用的暂存包，也可在重启前调用 `DELETE /api/migration/pending` 取消。
 
 ## 公开项目统计
 

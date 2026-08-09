@@ -91,7 +91,7 @@
 
 ### 🔒 100% 本地，100% 你的
 
-所有数据留在你硬盘上的一个 SQLite 文件里。LLM 默认用你自己的 API Key，也可实验性复用本机 Codex CLI 的 ChatGPT OAuth 凭据。没有云端，没有账号，没有任何人能看到你的画像。这个 Agent 怎么长，完全你说了算——反馈推荐、对话调教、换 LLM、改数据库，随你。
+核心行为、推荐和对话数据留在你硬盘上的 SQLite，配置、画像、凭据与缓存也只保存在本机文件中。LLM 默认用你自己的 API Key，也可实验性复用本机 Codex CLI 的 ChatGPT OAuth 凭据。没有 OpenBiliClaw 运营的云端账号，没有任何人能看到你的画像。这个 Agent 怎么长，完全你说了算——反馈推荐、对话调教、换 LLM、迁移或改数据库，随你。
 
 > 💡 **和其他推荐工具的对比**
 >
@@ -575,8 +575,9 @@ OpenClaw 收到 `interest.probe` 事件（或主动拉取 `next-probe`），发�
 - ⭐ **本地优先收藏 / 稍后看** — 推荐卡先写本地 SQLite，自动同步默认关闭；桌面 Web 刷新后首屏就显示保存数量徽标；B站和六个扩展平台均支持收藏与原生稍后看/收藏回退，2026-07-14 七平台两类动作真实账号回归均为 `synced/already_synced`
 - 🧩 **浏览器插件** — Chrome / Edge / Brave / Arc / Firefox，侧边栏推荐 + 跨站行为采集，装上就能用
 - 🚀 **图形化引导初始化** — 安装包 `/setup/`、桌面 Web 和插件都能点一下完成初始化，不碰命令行
+- 📦 **跨机器迁移** — 桌面配置页一键导出 / 导入可移植配置、SQLite、画像、Cookie 与图片缓存；导入先校验暂存，可查询 / 取消，重启后带回滚副本应用。`.obcbackup` 含明文敏感信息，但不含源机 API 登录密码 / 会话签名密钥或扩展设备 key
 - 🔬 **自动化评测优化** — 5 个模块各带 LLM-as-judge 自优化循环，prompt 质量随轮次自动提升
-- 🔒 **完全私有** — 所有数据本地 SQLite，LLM 用你自己的 Key，每个实例只为你一个人构建
+- 🔒 **完全私有** — SQLite、配置、画像与缓存都留在本机，LLM 用你自己的 Key，每个实例只为你一个人构建
 - 🔌 **本地 embedding** — 可选 Ollama + bge-m3，CPU 即可，无需额外 API Key
 - 🔧 **完全可控** — 同类型 LLM 可配置多个独立渠道，拖拽全局 / 模块故障切换链；也可直接编辑画像、写自定义 Skill
 
@@ -607,6 +608,10 @@ Agent 宿主（OpenClaw / Hermes / WorkBuddy）
                                       → 可编辑模型下拉 + 本地 Effort 建议
 抖音来源补货：daemon presence 门（显式手动调用绕过）→ 单轮共享插件等待预算
              → dy_task 终态 → pending_eval；离线零入队，失败有界退避
+本机数据迁移：导出 → 去除 api.auth 的配置 + SQLite 在线快照 + 可移植文件 → 明文 .obcbackup
+            导入(request_id) → processing(上传/校验) → 私有暂存 ↔ status / cancel
+                               ↘ 每次打开通用设置强制对账；applied 偏好按 migration_id 每浏览器一次
+                               → 重启取得项目 + canonical data-dir lock → 替换成功 | 回滚原数据
 持久对话回复：reply_to_turn_id + 固定时间/payload → POST-time frozen binding → pending SQLite → rowid 串行 reply worker → 可见 completion CAS（app-stable 对话 lease）
 回复后学习/对象结算：独立 11-kind typed 结算单队列 → actual worker + guard
 确认入口（待聊列表/卡片）→ 单锚(kind+ref+generation) → 全入口 frozen admission / 归属矩阵
@@ -618,7 +623,7 @@ Agent 宿主（OpenClaw / Hermes / WorkBuddy）
                        ├→ one context digest → prompt/history/event/learn/settlement provenance
                        ├→ action 本地≤1s：完成 200 / 阻塞 202 → popup/移动/桌面 1/2/5s 轮询≤30s
                        └→ 疑惑 FIFO≤5 / 队头 fencing / 12h 补扫
-配置保存：事务落盘后统一 HTTP 202 queued/apply_revision → latest-wins 后台应用队列 → apply-status / 成功失败回执
+配置保存：事务落盘后统一 HTTP 202 queued/apply_revision → latest-wins 后台应用队列 → apply-status / 成功失败回执；data_dir 仅持久化，完整重启后切换
 配置热重载：保持接单并排空旧 worker → 原子暂停/revoke → 新 worker；安全窗25分钟
 实时连接：runtime-stream 20s idle 心跳 → 短暂 close 显示重连中并自动续连
 封面：proxy 前台 + refresh 预取 → app-stable lane（总4/后台3、前台优先）
@@ -661,6 +666,7 @@ Agent 宿主（OpenClaw / Hermes / WorkBuddy）
 │   可选视觉预热：封面 / 画像质心 / 关键帧 + 弹幕 document embedding     │
 │   provenance（provider/model/dim/采样）→ 成功空 / 瞬时失败 → 下轮重试   │
 │   配置恢复草稿（正常/降级）→ 临时探测 / 精确实例 /models（不写盘）│
+│   本机迁移：checksummed .obcbackup → request-id pending ↔ status/cancel → 重启 replace/rollback │
 │  来源族注册表：alias · strategy · URL host             │
 │             → pool 统计 · seen_items 持久化已看账本     │
 │ Bangumi 官方匿名 API → search/ranked/latest producer → shared eval │
@@ -871,7 +877,7 @@ OpenBiliClaw 的目标是做你的**全网个性化内容入口**——从 B 站
 
 ## 隐私速览
 
-默认数据流向：浏览器插件 → 你配置的本地 OpenBiliClaw 后端 → 本机 SQLite。插件不会把数据发送到 OpenBiliClaw 开发者运营的服务器。若你配置云端 LLM / embedding，相关内容会按你的配置发送给对应服务商。详见 [隐私政策](docs/privacy.md)。
+默认数据流向：浏览器插件 → 你配置的本地 OpenBiliClaw 后端 → 本机 SQLite / 数据文件。插件不会把数据发送到 OpenBiliClaw 开发者运营的服务器。若你配置云端 LLM / embedding，相关内容会按你的配置发送给对应服务商。你主动从配置页导出的 `.obcbackup` 可能包含模型 / 来源 API Key、Cookie、画像和历史，且**没有加密**；它会排除源机整段 API auth（密码、session、设备 key 等），但仍只能在可信设备间传递。详见 [隐私政策](docs/privacy.md)。
 
 ## 📄 License
 

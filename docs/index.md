@@ -5,9 +5,9 @@
 ## 👤 我是用户
 
 - [项目主页](index.html) — GitHub Pages 首页，桌面安装包 / 一句话安装、插件下载和产品卖点概览
-- [常见问题 FAQ](faq.md) — macOS 安全阻挡、插件连不上后端、embedding 配置、手机访问等高频问题
+- [常见问题 FAQ](faq.md) — macOS 安全阻挡、插件连不上后端、embedding 配置、跨机器迁移、手机访问等高频问题
 - [GitHub Releases](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) — Latest Release 的 `openbiliclaw-v*` 聚合页，下载浏览器插件 zip 和桌面安装包；维护者通道仍保留 `extension-v*` / `desktop-v*` / `backend-v*`
-- [隐私权政策](privacy.md) — 插件数据收集披露与本地优先数据流说明
+- [隐私权政策](privacy.md) — 插件数据收集披露、本地优先数据流与明文迁移包说明
 - [变更日志](changelog.md) — 各版本交付记录
 - [Docker 部署指南](docker-deployment.md) — 手动 Docker / docker compose 部署步骤
 - [可选 HTTPS 部署](https-deployment.md) — 公网域名 Caddy 自动证书，以及可信 LAN 的 TLS profile / 本地 CA 流程
@@ -35,14 +35,14 @@
 - [Soul 模块架构与流程图](diagrams/soul-architecture.html) — Soul 真实写回口、pipeline 输入边界、完整 rebuild 与局部写回路径
 - [Soul 更新变化流程图](diagrams/soul-update-flow.html) — 事件来源矩阵、分层路由、典型场景和专属名词注释
 - [Recommendation 模块架构与流程图](diagrams/recommendation-architecture.html) — 候选池 readiness、serve 热路径、PoolCurator、MMR 和反馈回流
-- [Web HTML 模块架构与流程图](diagrams/web-architecture.html) — `/web` 桌面端、`/m` 移动端、REST hydration、runtime-stream 和用户动作边界
+- [Web HTML 模块架构与流程图](diagrams/web-architecture.html) — `/web` 桌面端、`/m` 移动端、REST hydration、runtime-stream、配置页迁移和用户动作边界
 - [Discovery 模块架构图](diagrams/discovery-architecture.html) — 多源发现、刷新调度、评估优化和模块协议边界
 
 ## 模块文档
 
 | 模块 | 文档 | 对应代码 | 状态 |
 |------|------|----------|------|
-| 后端 API | [modules/api.md](modules/api.md) | `src/openbiliclaw/api/` | ✅ durable 对话卡片 action + 待聊列表/count + 双轨冷却附着 + legacy 转发 |
+| 后端 API | [modules/api.md](modules/api.md) | `src/openbiliclaw/api/` | ✅ durable 对话 + 配置后台应用 + 本机-only 迁移四 API（request ID 对账 / pending 取消） |
 | LLM 多模型支持 | [modules/llm.md](modules/llm.md) | `src/openbiliclaw/llm/` | ✅ v0.3.74 统一结构化 JSON 容错 + Ollama embedding 空凭据静默 |
 | B 站接入层 | [modules/bilibili.md](modules/bilibili.md) | `src/openbiliclaw/bilibili/` | ✅ M3 完成 |
 | 多源适配层 | [modules/discovery.md](modules/discovery.md#多源适配层) | `src/openbiliclaw/sources/` | ✅ v0.3.x 落地 B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Bangumi / 通用 Web 多源 discovery |
@@ -53,12 +53,12 @@
 | 灵魂引擎 | [modules/soul.md](modules/soul.md) | `src/openbiliclaw/soul/` | ✅ 完成 |
 | 内容发现引擎 | [modules/discovery.md](modules/discovery.md) | `src/openbiliclaw/discovery/` | ✅ v0.3.x 多源 + 统一待评估池 + 跨源跨轮 topic 配额 |
 | 推荐引擎 | [modules/recommendation.md](modules/recommendation.md) | `src/openbiliclaw/recommendation/` | ✅ v0.3.x 双轴 fatigue + per-group 候选窗口 + reshuffle 0.6s |
-| 存储层 | [modules/storage.md](modules/storage.md) | `src/openbiliclaw/storage/` | ✅ SQLite schema + discovery_candidates 待评估池 + pool readiness 计数 |
+| 存储层 | [modules/storage.md](modules/storage.md) | `src/openbiliclaw/storage/` | ✅ SQLite schema + discovery candidates / pool readiness + 去除 API auth 的 `.obcbackup` 快照、暂存 / 取消、重启应用与回滚 |
 | 原生保存同步 | [modules/saved-sync.md](modules/saved-sync.md) | `src/openbiliclaw/saved_sync/` | ✅ canonical API + runtime + B 站 direct adapter + 六平台 extension adapter/executor + 三端后端状态驱动保存界面；CLI 可见配置 |
 | 灵魂管线架构 | [modules/soul-pipeline-architecture.md](modules/soul-pipeline-architecture.md) | `src/openbiliclaw/soul/` | ✅ 完成 |
 | 浏览器插件 | [modules/extension.md](modules/extension.md) | `extension/` | ✅ 支持 B 站 + 小红书 + 抖音 + YouTube + X + 知乎 + Reddit 任务桥、跨平台行为采集、扩展驱动 E2E 捕捉自检、Cookie 同步、自启动开关和降级配置修复 |
 | CLI 命令参考 | [modules/cli.md](modules/cli.md) | `src/openbiliclaw/cli.py` | ✅ 持续更新 (含 `autostart` / `setup-embedding` / `discover-douyin` / `fetch-reddit` / `fetch-bangumi` / `discover-bangumi*`) |
-| 配置参考 | [modules/config.md](modules/config.md) | `config.example.toml` | ✅ 持续更新 (含 `[sources.reddit]`、`[sources.bangumi]`、`[autostart]`、`/api/config` 回滚与 `reset_fields`) |
+| 配置参考 | [modules/config.md](modules/config.md) | `config.example.toml` | ✅ 持续更新（含来源、`[autostart]`、`/api/config` 回滚与迁移 auth / 环境变量保留边界） |
 | 局域网密码门禁 | [modules/api-auth.md](modules/api-auth.md) | `src/openbiliclaw/auth_core.py` + `src/openbiliclaw/api/auth.py` | ✅ 可选 `[api.auth]` 密码门禁 + `/api/auth/*` + `set-password` |
 | 公网 HTTPS 网关 | [HTTPS 部署](https-deployment.md) | `docker-compose.https.yml` | ✅ 默认关闭的 Caddy 自动证书 + shared-loopback upstream + REST/WebSocket |
 | TLS 反向代理 | [modules/tls-proxy.md](modules/tls-proxy.md) | `src/openbiliclaw/tls_proxy.py` | ✅ 默认关闭的 LAN/self-managed HTTPS + 精确 Origin/Host + WebSocket + SAN 检测 |

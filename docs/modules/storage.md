@@ -12,6 +12,51 @@
 - evaluator prefilter 与推荐时效排序的 privacy-safe shadow 审计。
 - 跨平台收藏 / 稍后再看的 canonical 本地 membership、元数据快照、native sync 状态和独立任务快照持久化。
 - 事件入口幂等回执，以及小红书 / 抖音 / YouTube / 知乎 / Reddit 来源任务首个终态结果的 crash-safe staging。
+- 跨机器迁移包的一致快照、严格校验、私有暂存和重启期 journaled replace / rollback。
+
+## 可移植数据迁移
+
+`storage/migration.py` 把运行中的用户状态导出为格式版本 1 的 `openbiliclaw-user-data` 包，文件扩展名为 `.obcbackup`。容器本质是标准 ZIP，**没有密码和加密**；`manifest.json` 明确写入 `contains_secrets=true`、`encrypted=false`，并为每个允许成员记录路径、类型、字节数与 SHA-256。导出 SQLite 时不直接复制可能正在写入的主文件，而是以只读 URI 打开源库、用 SQLite online backup API 生成一致快照并执行 `PRAGMA integrity_check`；其它文件复制前后会核对 stat / digest，持续变化时拒绝生成伪一致快照。目录遍历会在进入前剪枝排除根、采用独立扫描上限，并在复制前、复制流中和 ZIP 写入时逐层执行容量限制；ZIP 完成后立即删除最多 8 GB 的未压缩 snapshot，只在一次受全程互斥保护的下载期间保留最多 2 GB 的 archive。
+
+### 导出范围
+
+| 包含 | 刻意排除 |
+|---|---|
+| 磁盘 `config.toml` + `config.local.toml` 合并、移除整段 `[api.auth]` 后生成的单份 `config/config.toml`；主数据库和数据目录中的其它可迁移 SQLite；Soul / memory / runtime 用户状态文件；`*_cookie.json` 等平台登录凭据；`data/image-cache/`；白名单桌面偏好 | 来源配置的分层 provenance 与整段 `[api.auth]`（含密码 / hash、session secret、proxy / Origin 策略与设备 key）；`logs/`；`data/backups/`、`data/cache/`、`data/eval/`、`data/embedding_cache.db`；`data/certs/`、`data/autostart/`；WAL / SHM / lock / temp；OpenBiliClaw Web / 扩展访问会话；外部 CLI 凭据；环境变量**值** |
+
+图片缓存是刻意包含的用户状态：部分平台的签名图片 URL 会过期，迁移后无法可靠重新下载。导出配置仍来自磁盘 `config.toml` + `config.local.toml`，但数据快照路径固定为当前进程已取得 canonical lock 的 active data dir；在线保存但尚未重启启用的新 `data_dir` 不会成为本次数据来源。manifest 的 `source_omitted_environment_variables` 只记录源机导出时有值、会影响运行结果的环境变量**名称**（`OPENBILICLAW_*`、Gemini 标准 Key、系统代理 / CA），不记录 value；暂存时另采集目标进程当时有值的名称为 `target_active_environment_variables`。前者提示目标机重新提供来源依赖，后者是目标环境可能覆盖导入文件的暂存时快照；实际应用仍以重启时环境为准，两者都不表示值已迁移。前端文件只允许 `theme_mode`、`theme_hue`、`accent_style`、`auto_load_on_scroll`、`side_drawer_open`；后端 endpoint、Bearer / session、通知与缓存状态不进入包。
+
+### 校验与暂存
+
+`stage_migration_archive()` 在任何 active 配置或数据库被替换前完成全部验证：
+
+- 压缩包不超过 2 GB，成员不超过 20,000 个，目录扫描项目不超过 100,000 个，单成员不超过 4 GB，总解压大小不超过 8 GB；manifest 不超过 16 MB，前端偏好文件不超过 64 KB，成员路径不超过 512 字符 / 16 层；
+- ZIP 成员必须是 manifest 精确列出的普通文件，拒绝绝对路径、`..`、过深 / 过长路径、符号链接、设备 / 特殊文件、重复成员和加密成员；
+- 格式版本必须等于当前版本，源 OpenBiliClaw 版本不能高于目标运行版本；
+- 每个文件的实际大小和 SHA-256 必须匹配，TOML 必须能构建无 blocking issue 的 `Config`，每个识别为 SQLite 的文件必须通过 `integrity_check`。
+
+校验通过后才把内容发布到项目根的 `.openbiliclaw-migration/pending-<uuid>/`，记录整个暂存树的 seal 并原子更新 `pending.json`；启动应用前会重新核对该 seal，暂存内容被改动就拒绝替换。运行中的 `Database`、`MemoryManager`、配置对象和浏览器偏好保持不变，HTTP 最终返回 `202 staged + migration_id + request_id + restart_required`。`request_id` 是 UUID 规范化后的上传关联 ID；持久化 `migration_status()` 会在 staged 状态回传它，而 HTTP status 路由还会在上传 / 校验进行中叠加 `state="processing"`、同一 `request_id` 与 `phase="uploading|validating"`。这让客户端在响应超时 / 断线后区分“仍在处理”和已暂存，但 request ID 不是服务端自动去重键。桌面端不会用一次瞬时 `idle` 终结不确定请求：它最多强制查询 3 次，对 `idle/cancelled` 间隔 500ms 再确认，匹配 ID 的 `processing/staged` 立即收口。如果再次导入另一个合法包，新的 pending marker 取代旧包，旧暂存目录被清理；`cancel_pending_migration()` 可在应用开始前删除 pending，且不接触 active 数据。
+
+### 重启应用与回滚
+
+`openbiliclaw start`、`openbiliclaw serve-api` 和桌面打包入口在读取业务数据库前，同时尝试持有项目根 `.openbiliclaw-migration/runtime.lock` 与 canonical 数据目录同级的 `.<data-dir-name>.openbiliclaw-runtime.lock`。这样同一项目、或不同项目但共享同一数据目录的受支持后端，都不能并行越过应用边界。锁覆盖整个进程生命周期，因此在线 `PUT /api/config` 改变 `data_dir` 只能持久化并返回 `restart_required=true`；当前 runtime 与外部凭据写继续使用已锁住的 active 目录，完整重启取得新目录锁后才切换。存在 pending 时，启动器先在目标配置 / 数据目录旁准备新副本，再通过 `apply-journal.json` 记录每一步并执行同目录 `os.replace`：
+
+1. 目标 `config.toml`、`config.local.toml` 与数据目录按存在情况移为 `*.pre-import-<migration-id 前 12 位>.bak`；
+2. 在 prepared 主库上运行当前 schema 初始化 smoke；读取来源 prepared DB 与目标 active DB 的当前 `auth_epoch`，写入 `max(来源, 目标) + 1` 并删除来源 `password_fingerprint`。新 epoch 严格高于两者，使会话撤销不依赖 session secret 是否被环境变量固定；随后启用导入数据与规范化配置并再次校验 SQLite；
+3. 成功后在 `status.json` 保存不对 API 暴露的活动代际回执（目标路径、配置 SHA-256、严格递增的 DB auth epoch），再删除 pending / journal / 暂存目录；若不支持目录 fsync 的文件系统在断电后复活同一 marker，启动端必须先锁回执中的数据目录并精确验证代际，只清理重复 marker、绝不重放。任何一步失败则按可重复执行的 `rolling_back` journal 恢复原配置和数据，并记录 `failed` 状态；提交确认前出现的 premature applied 回执会先被降为 failed，避免恢复后自锁。
+
+本次成功应用产生的 `pre-import` 回滚副本会保留；完成提交后会清理更早迁移遗留的同类回滚 / failed / prepared artifact，使每个目标只保留本次可恢复副本。启动应用会重新读取目标机的磁盘配置与有效数据路径；`data/certs/` 与 `data/autostart/` 会从应用时目标目录复制到新数据目录，路径、监听端口、日志、网络 / TLS / 自启动和 CDP 等机器专属配置也使用此时目标机现值。整段 `api.auth` 先以目标机应用时的最新磁盘值为基线，来源包既不含也不覆盖任何 auth 字段；随后轮换磁盘 session secret，并把扩展远程访问 key 清空且关闭。prepared DB 的严格递增 `auth_epoch` 同时高于来源与目标当前 epoch，会独立撤销两台机器的旧 Web 会话，即使 `OPENBILICLAW_API_AUTH_SESSION_SECRET` 仍由目标环境固定也不例外；正常启动 reconcile 再记录目标凭据 fingerprint。这样保留目标机的门禁 / 密码 / proxy / Origin 策略，但不保留旧会话和设备配对。白名单桌面偏好也只在这次 apply 成功后由设置页生效，不在上传暂存时提前切换；浏览器按 `migration_id` 只接收一次，同一 applied status 后续不会覆盖用户的新选择。
+
+### 公开 Python API
+
+| API | 作用 |
+|---|---|
+| `create_migration_archive(config, frontend_settings, project_root=...)` | 创建在线一致、带清单与校验和的临时导出包；调用方负责在响应完成后删除临时目录。 |
+| `stage_migration_archive(path, current_config, project_root=..., request_id=...)` | 验证并发布唯一 pending 导入，记录规范化请求关联 ID，不修改 active runtime。 |
+| `cancel_pending_migration(project_root=...)` | 删除尚未应用的 pending；没有 pending 时返回 `False`，不修改 active 配置或数据。 |
+| `acquire_migration_runtime_guard(project_root, data_dir=None)` | 非阻塞取得项目锁，并在给出 `data_dir` 时同时取得 canonical 数据目录锁；任一冲突即返回 `None`。 |
+| `apply_pending_migration(project_root=...)` | 只应在持有 runtime guard 时调用；应用或恢复一次 pending migration。 |
+| `migration_status(project_root=...)` | 返回 `idle/staged/applied/failed/cancelled` 的非敏感状态；staged 含 `request_id` 和两类环境变量名供对账。 |
 
 ## 已实现功能
 

@@ -38,6 +38,10 @@
       updateApply: "/update/apply",
       embeddingRepair: "/embedding/repair",
       config: "/config",
+      migrationExport: "/migration/export",
+      migrationImport: "/migration/import",
+      migrationPending: "/migration/pending",
+      migrationStatus: "/migration/status",
       watchLater: "/watch-later",
       favorites: "/favorites",
       profileEdit: "/profile/edit",
@@ -761,8 +765,35 @@
     const pendingRequestIds = new Map();
 
     function newRequestId() {
-      if (typeof globalThis.crypto?.randomUUID === "function") return globalThis.crypto.randomUUID();
-      return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+      const cryptoApi = globalThis.crypto;
+      if (typeof cryptoApi?.randomUUID === "function") {
+        try { return cryptoApi.randomUUID(); } catch {}
+      }
+
+      const bytes = new Uint8Array(16);
+      let securelyFilled = false;
+      if (typeof cryptoApi?.getRandomValues === "function") {
+        try {
+          cryptoApi.getRandomValues(bytes);
+          securelyFilled = true;
+        } catch {}
+      }
+      if (!securelyFilled) {
+        // Last-resort compatibility path for restricted/legacy browser contexts.
+        // It is not cryptographic, but remains an RFC 4122 UUID accepted by the
+        // backend and mixes time into Math.random so retries do not share a key.
+        const timestamp = Date.now();
+        const highResolution = Math.floor(globalThis.performance?.now?.() || 0);
+        for (let index = 0; index < bytes.length; index += 1) {
+          const timeByte = Math.floor(timestamp / (2 ** ((index % 6) * 8))) & 0xff;
+          const timerByte = Math.floor(highResolution / (2 ** ((index % 4) * 8))) & 0xff;
+          bytes[index] = Math.floor(Math.random() * 256) ^ timeByte ^ timerByte;
+        }
+      }
+      bytes[6] = (bytes[6] & 0x0f) | 0x40;
+      bytes[8] = (bytes[8] & 0x3f) | 0x80;
+      const hex = Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
+      return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
     }
 
     function loadPendingRequestIds() {
@@ -1375,6 +1406,385 @@
         throw error;
       } finally {
         if (timeoutId) window.clearTimeout(timeoutId);
+      }
+    }
+
+    let migrationStatusLoaded = false;
+    let migrationBusy = false;
+    const MIGRATION_FRONTEND_APPLIED_KEY = "openbiliclaw.webui.appliedMigrationFrontend";
+
+    function setMigrationStatus(message, tone = "neutral") {
+      const status = $("#migrationStatus");
+      if (status) {
+        status.textContent = String(message || "");
+        status.dataset.tone = tone;
+        status.setAttribute("role", tone === "error" ? "alert" : "status");
+      }
+      const card = document.querySelector(".settings-migration-card");
+      card?.toggleAttribute("aria-busy", tone === "pending");
+    }
+
+    function setMigrationBusy(busy) {
+      migrationBusy = Boolean(busy);
+      ["migrationExportBtn", "migrationImportBtn", "migrationCancelBtn", "migrationImportFile"].forEach((id) => {
+        const control = document.getElementById(id);
+        if (control && "disabled" in control) control.disabled = migrationBusy;
+      });
+    }
+
+    function setMigrationPending(staged) {
+      const cancel = $("#migrationCancelBtn");
+      if (cancel instanceof HTMLButtonElement) {
+        cancel.hidden = !staged;
+        cancel.disabled = migrationBusy;
+      }
+    }
+
+    function collectMigrationFrontendSettings() {
+      return {
+        theme_mode: normalizeThemeMode(state.themeMode),
+        theme_hue: Number.isFinite(state.themeHue) ? Math.max(0, Math.min(360, Math.round(state.themeHue))) : 20,
+        accent_style: ACCENT_OPTIONS.includes(state.accentStyle) ? state.accentStyle : "classic",
+        auto_load_on_scroll: Boolean(state.autoLoadOnScroll),
+        side_drawer_open: storageGet(SIDE_DRAWER_OPEN_KEY) !== "0",
+      };
+    }
+
+    function applyMigrationFrontendSettings(value) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return;
+      if (THEME_OPTIONS.includes(value.theme_mode)) {
+        setThemeMode(value.theme_mode, { persist: true });
+      }
+      if (Number.isInteger(value.theme_hue) && value.theme_hue >= 0 && value.theme_hue <= 360) {
+        setThemeHue(value.theme_hue, { persist: true });
+      }
+      if (ACCENT_OPTIONS.includes(value.accent_style)) {
+        setAccentStyle(value.accent_style, { persist: true });
+      }
+      if (typeof value.auto_load_on_scroll === "boolean") {
+        setAutoLoadOnScroll(value.auto_load_on_scroll, { persist: true });
+      }
+      if (typeof value.side_drawer_open === "boolean") {
+        storageSet(SIDE_DRAWER_OPEN_KEY, value.side_drawer_open ? "1" : "0");
+        if (!isMobileViewport()) setSideDrawerOpen(value.side_drawer_open, { persist: false });
+      }
+    }
+
+    function applyMigrationFrontendSettingsOnce(result) {
+      const migrationReceipt = String(
+        result?.migration_id || result?.applied_at || "legacy-applied-migration",
+      ).trim();
+      if (storageGet(MIGRATION_FRONTEND_APPLIED_KEY) === migrationReceipt) return false;
+      applyMigrationFrontendSettings(result?.frontend);
+      storageSet(MIGRATION_FRONTEND_APPLIED_KEY, migrationReceipt);
+      return true;
+    }
+
+    function migrationDownloadFilename(contentDisposition) {
+      const value = String(contentDisposition || "");
+      const encoded = value.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+      const quoted = value.match(/filename="([^"]+)"/i)?.[1];
+      const plain = value.match(/filename=([^;]+)/i)?.[1]?.trim();
+      let filename = encoded || quoted || plain || "";
+      try { filename = decodeURIComponent(filename); } catch {}
+      filename = filename.replace(/[\\/\u0000-\u001f\u007f]/g, "-").trim();
+      if (!filename) {
+        filename = `openbiliclaw-${new Date().toISOString().replace(/[:.]/g, "-")}.obcbackup`;
+      } else if (!filename.toLowerCase().endsWith(".obcbackup")) {
+        filename += ".obcbackup";
+      }
+      return filename;
+    }
+
+    function formatMigrationBytes(value) {
+      const bytes = Number(value || 0);
+      if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+      if (bytes < 1024) return `${Math.round(bytes)} B`;
+      const units = ["KB", "MB", "GB"];
+      let scaled = bytes / 1024;
+      let index = 0;
+      while (scaled >= 1024 && index < units.length - 1) {
+        scaled /= 1024;
+        index += 1;
+      }
+      return `${scaled >= 10 ? scaled.toFixed(0) : scaled.toFixed(1)} ${units[index]}`;
+    }
+
+    async function requestMigrationArchive(frontend, writable = null) {
+      const base = getApiBase() || DEFAULT_API_BASE;
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), 30 * 60 * 1000);
+      try {
+        const response = await fetch(`${base}${ENDPOINTS.migrationExport}`, {
+          method: "POST",
+          credentials: "same-origin",
+          headers: withBearer({
+            "Content-Type": "application/json",
+            "X-OBC-Auth": "1",
+          }),
+          body: JSON.stringify({ frontend }),
+          signal: controller.signal,
+        });
+        if (!response.ok) {
+          const contentType = response.headers.get("content-type") || "";
+          const details = contentType.includes("application/json")
+            ? await response.json().catch(() => null)
+            : await response.text().catch(() => "");
+          if (response.status === 401) {
+            setSessionToken("");
+            handleAuthRequired();
+          }
+          const error = new Error(configErrorMessage(details) || `导出失败：HTTP ${response.status}`);
+          error.status = response.status;
+          error.details = details;
+          throw error;
+        }
+        const filename = migrationDownloadFilename(response.headers.get("content-disposition"));
+        const declaredSize = Number(response.headers.get("content-length") || 0);
+        if (writable && response.body && typeof response.body.pipeTo === "function") {
+          await response.body.pipeTo(writable);
+          return { blob: null, filename, size: Number.isFinite(declaredSize) ? declaredSize : 0 };
+        }
+        const blob = await response.blob();
+        if (writable) {
+          await writable.write(blob);
+          await writable.close();
+          return { blob: null, filename, size: blob.size };
+        }
+        return { blob, filename, size: blob.size };
+      } catch (error) {
+        if (error?.name === "AbortError") throw new Error("迁移包生成超时，请检查磁盘空间后重试。");
+        throw error;
+      } finally {
+        window.clearTimeout(timeoutId);
+      }
+    }
+
+    async function exportMigrationData() {
+      if (migrationBusy) return;
+      const unsavedWarning = settingsDirtyFields.size > 0
+        ? `\n\n当前还有 ${settingsDirtyFields.size} 项配置未保存；导出只包含上一次已保存的配置。`
+        : "";
+      const confirmed = window.confirm(
+        "迁移包会包含 API Key、平台 Cookie、画像和历史记录，且当前不加密。请只把它保存在可信设备。" + unsavedWarning,
+      );
+      if (!confirmed) {
+        setMigrationStatus("已取消导出，当前数据未发生变化。", "neutral");
+        return;
+      }
+      let writable = null;
+      if (typeof window.showSaveFilePicker === "function") {
+        try {
+          const handle = await window.showSaveFilePicker({
+            suggestedName: migrationDownloadFilename(""),
+            types: [{
+              description: "OpenBiliClaw 迁移包",
+              accept: { "application/vnd.openbiliclaw.backup+zip": [".obcbackup"] },
+            }],
+          });
+          writable = await handle.createWritable();
+        } catch (error) {
+          if (error?.name === "AbortError") {
+            setMigrationStatus("已取消导出，当前数据未发生变化。", "neutral");
+            return;
+          }
+          setMigrationStatus(`无法创建迁移包文件：${error?.message || "浏览器拒绝写入"}`, "error");
+          return;
+        }
+      }
+      const button = $("#migrationExportBtn");
+      const previousText = button?.textContent || "导出全部信息";
+      setMigrationBusy(true);
+      if (button) button.textContent = "正在生成迁移包…";
+      setMigrationStatus("正在生成一致性快照；数据较多时可能需要几分钟，请勿关闭页面。", "pending");
+      try {
+        const { blob, filename, size } = await requestMigrationArchive(
+          collectMigrationFrontendSettings(),
+          writable,
+        );
+        if (!writable) {
+          if (!blob?.size) throw new Error("后端返回了空迁移包。");
+          const url = URL.createObjectURL(blob);
+          const anchor = document.createElement("a");
+          anchor.href = url;
+          anchor.download = filename;
+          anchor.hidden = true;
+          document.body.append(anchor);
+          anchor.click();
+          anchor.remove();
+          window.setTimeout(() => URL.revokeObjectURL(url), 2000);
+        }
+        const sizeLabel = size > 0 ? `（${formatMigrationBytes(size)}）` : "";
+        setMigrationStatus(`迁移包已保存${sizeLabel}，下载完成。迁移完成后请从两台机器上妥善删除该文件。`, "success");
+        showToast("迁移包已生成");
+      } catch (error) {
+        if (writable && typeof writable.abort === "function") {
+          try { await writable.abort(error); } catch {}
+        }
+        const message = configErrorMessage(error?.details) || error?.message || "生成迁移包失败。";
+        setMigrationStatus(`导出失败：${message}`, "error");
+        showToast("迁移包导出失败");
+      } finally {
+        setMigrationBusy(false);
+        if (button) button.textContent = previousText;
+      }
+    }
+
+    function migrationEnvironmentWarning(targetNames, sourceNames) {
+      const target = Array.isArray(targetNames)
+        ? targetNames.filter((name) => typeof name === "string" && name)
+        : [];
+      const source = Array.isArray(sourceNames)
+        ? sourceNames.filter((name) => typeof name === "string" && name)
+        : [];
+      const targetWarning = target.length
+        ? ` 本机当前启用的这些环境变量仍会影响重启后的运行配置：${target.join("、")}。`
+        : "";
+      const sourceWarning = source.length
+        ? ` 来源机通过这些环境变量提供的值没有写入迁移包：${source.join("、")}。`
+        : "";
+      return targetWarning + sourceWarning;
+    }
+
+    async function stageMigrationImport(file) {
+      if (migrationBusy || !(file instanceof File)) return;
+      const unsavedWarning = settingsDirtyFields.size > 0
+        ? `\n\n当前 ${settingsDirtyFields.size} 项未保存设置会被丢弃。`
+        : "";
+      const confirmed = window.confirm(
+        `确定导入“${file.name}”吗？重启后会用迁移包替换当前配置、画像和历史数据；当前数据会保留一份本地回滚副本。${unsavedWarning}`,
+      );
+      if (!confirmed) {
+        setMigrationStatus("已取消导入，当前数据未发生变化。", "neutral");
+        return;
+      }
+      const button = $("#migrationImportBtn");
+      const previousText = button?.textContent || "导入迁移包";
+      setMigrationBusy(true);
+      if (button) button.textContent = "正在校验迁移包…";
+      setMigrationStatus(`正在校验 ${file.name}；校验完成前不会改动当前数据。`, "pending");
+      const requestId = newRequestId();
+      try {
+        const result = await requestJsonStrict(ENDPOINTS.migrationImport, {
+          method: "POST",
+          timeoutMs: 30 * 60 * 1000,
+          headers: {
+            "Content-Type": "application/octet-stream",
+            "X-OBC-Migration-Confirm": "replace-all",
+            "X-OBC-Migration-Request-ID": requestId,
+          },
+          body: file,
+        });
+        migrationStatusLoaded = true;
+        setMigrationPending(true);
+        setMigrationStatus(
+          `${result?.message || "迁移包已完整校验并暂存。"} 请完全退出并重新启动 OpenBiliClaw；重启前仍使用当前数据。${migrationEnvironmentWarning(result?.target_active_environment_variables, result?.source_omitted_environment_variables)}`,
+          "success",
+        );
+        showToast("迁移包已就绪，请重启 OpenBiliClaw");
+      } catch (error) {
+        const uncertain = error?.code === "request_timeout" || error?.name === "TimeoutError" || error instanceof TypeError;
+        if (uncertain) {
+          migrationStatusLoaded = false;
+          setMigrationStatus("上传连接中断，正在向后端确认迁移包是否已经暂存…", "pending");
+          const normalizedExpected = String(requestId).replaceAll("-", "").toLowerCase();
+          let reconciled = null;
+          for (let attempt = 0; attempt < 3; attempt += 1) {
+            reconciled = await refreshMigrationStatus({ force: true });
+            const state = String(reconciled?.state || "");
+            const actual = String(reconciled?.request_id || "").replaceAll("-", "").toLowerCase();
+            if ((state === "staged" || state === "processing") && actual === normalizedExpected) break;
+            if (!["idle", "cancelled"].includes(state) || attempt === 2) break;
+            migrationStatusLoaded = false;
+            await new Promise((resolve) => window.setTimeout(resolve, 500));
+          }
+          const normalizedActual = String(reconciled?.request_id || "").replaceAll("-", "").toLowerCase();
+          if (reconciled?.state === "staged" && normalizedActual === normalizedExpected) {
+            showToast("迁移包已就绪，请重启 OpenBiliClaw");
+          } else if (reconciled?.state === "processing" && normalizedActual === normalizedExpected) {
+            migrationStatusLoaded = false;
+            setMigrationStatus("上传连接已中断，但后端仍在校验本次迁移包；当前数据尚未改动，请稍后重新打开此页确认。", "pending");
+          } else if (["idle", "cancelled"].includes(String(reconciled?.state || ""))) {
+            setMigrationStatus("上传中断，后端确认没有暂存本次迁移包；当前数据未改动。", "error");
+          } else {
+            setMigrationStatus("上传结果暂时无法确认。重启前请重新打开此页检查状态；若出现待导入项，可先取消。", "error");
+          }
+          return;
+        }
+        const message = configErrorMessage(error?.details) || error?.message || "迁移包无效。";
+        setMigrationStatus(`本次导入未暂存，当前在线数据未改动：${message}`, "error");
+        showToast("迁移包导入失败");
+      } finally {
+        setMigrationBusy(false);
+        if (button) button.textContent = previousText;
+      }
+    }
+
+    async function refreshMigrationStatus({ force = false } = {}) {
+      if ((migrationBusy && !force) || (migrationStatusLoaded && !force)) return null;
+      try {
+        const result = await requestJsonStrict(ENDPOINTS.migrationStatus, {
+          cache: "no-store",
+          timeoutMs: 8000,
+        });
+        migrationStatusLoaded = true;
+        const status = String(result?.state || "idle");
+        if (status === "staged") {
+          setMigrationPending(true);
+          setMigrationStatus(
+            `迁移包已校验并暂存。请完全退出并重新启动 OpenBiliClaw；重启前仍使用当前数据。${migrationEnvironmentWarning(result?.target_active_environment_variables, result?.source_omitted_environment_variables)}`,
+            "success",
+          );
+        } else if (status === "applied") {
+          applyMigrationFrontendSettingsOnce(result);
+          setMigrationPending(false);
+          setMigrationStatus(result?.message || "上一个迁移包已成功载入。现在可以删除迁移包文件。", "success");
+        } else if (status === "processing") {
+          setMigrationPending(false);
+          setMigrationStatus(result?.message || "迁移包仍在上传或校验，当前数据尚未改动。", "pending");
+        } else if (status === "failed") {
+          setMigrationPending(false);
+          setMigrationStatus(result?.message || "上一次迁移应用失败，原数据已恢复。", "error");
+        } else if (status === "cancelled") {
+          setMigrationPending(false);
+          setMigrationStatus(result?.message || "待导入迁移包已取消，当前数据未改动。", "neutral");
+        } else {
+          setMigrationPending(false);
+          setMigrationStatus("只能在运行后端的本机操作；导入会先校验，重启后才替换当前数据。", "neutral");
+        }
+        return result;
+      } catch (error) {
+        migrationStatusLoaded = false;
+        const message = error?.status === 403
+          ? "数据迁移只能从运行后端的本机、同源配置页操作。"
+          : (configErrorMessage(error?.details) || error?.message || "无法读取迁移状态。");
+        setMigrationStatus(message, "error");
+        return null;
+      }
+    }
+
+    async function cancelPendingMigration() {
+      if (migrationBusy || !window.confirm("取消待导入迁移包吗？当前在线数据不会发生变化。")) return;
+      const button = $("#migrationCancelBtn");
+      const previousText = button?.textContent || "取消待导入";
+      setMigrationBusy(true);
+      if (button) button.textContent = "正在取消…";
+      setMigrationStatus("正在删除已校验的暂存副本…", "pending");
+      try {
+        const result = await requestJsonStrict(ENDPOINTS.migrationPending, {
+          method: "DELETE",
+          timeoutMs: 15000,
+        });
+        migrationStatusLoaded = true;
+        setMigrationPending(false);
+        setMigrationStatus(result?.message || "待导入迁移包已取消，当前数据未改动。", "neutral");
+        showToast("已取消待导入迁移包");
+      } catch (error) {
+        const message = configErrorMessage(error?.details) || error?.message || "取消失败。";
+        setMigrationStatus(`取消失败：${message}`, "error");
+      } finally {
+        setMigrationBusy(false);
+        if (button) button.textContent = previousText;
       }
     }
 
@@ -8954,6 +9364,7 @@ ${cardFeedbackBarHtml()}`;
           backendHydrationPending = false;
         }
         if (!document.hidden) connectRuntimeStream();
+        if (forceHydrate) await refreshMigrationStatus({ force: true });
       } catch (error) {
         console.error("后端数据加载失败", error);
         $("#statusLabel").textContent = "后端数据加载失败";
@@ -9809,6 +10220,7 @@ ${cardFeedbackBarHtml()}`;
         panel.hidden = !isActive;
         panel.setAttribute("aria-hidden", isActive ? "false" : "true");
       });
+      if (panelName === "general") void refreshMigrationStatus({ force: true });
     }
 
     document.querySelectorAll("[data-settings-tab]").forEach((tab) => {
@@ -10144,6 +10556,21 @@ ${cardFeedbackBarHtml()}`;
     let settingsPendingApplyRevision = 0;
     let settingsLastTerminalRevision = 0;
 
+    safeBind("#migrationExportBtn", "click", () => { void exportMigrationData(); });
+    safeBind("#migrationImportBtn", "click", () => {
+      const input = $("#migrationImportFile");
+      if (!(input instanceof HTMLInputElement) || migrationBusy) return;
+      input.value = "";
+      input.click();
+    });
+    safeBind("#migrationImportFile", "change", (event) => {
+      const input = event.currentTarget;
+      const file = input instanceof HTMLInputElement ? input.files?.[0] : null;
+      if (!file) return;
+      void stageMigrationImport(file).finally(() => { input.value = ""; });
+    });
+    safeBind("#migrationCancelBtn", "click", () => { void cancelPendingMigration(); });
+
     function settingsFormHasActiveEditor() {
       const settingsForm = document.getElementById("settingsForm");
       const active = document.activeElement;
@@ -10286,7 +10713,11 @@ ${cardFeedbackBarHtml()}`;
         if (!(el instanceof Element)) return;
         // Read-only status mirrors (配置状态 / 凭据脱敏预览) are written by the
         // page itself and must never look like a user edit.
-        if (el.hasAttribute("readonly") || el.classList.contains("source-credential-value")) return;
+        if (
+          el.hasAttribute("readonly") ||
+          el.hasAttribute("data-settings-ignore-dirty") ||
+          el.classList.contains("source-credential-value")
+        ) return;
         markSettingsDirty(el);
       });
     });

@@ -71,7 +71,7 @@ This is the core differentiator: the system **guesses domains you might enjoy bu
 
 ### 🔒 100% local, 100% yours
 
-All data lives in a single SQLite file on your disk. LLM calls use your own API key by default, with an experimental option to reuse local Codex CLI ChatGPT OAuth credentials. No cloud, no accounts, no one else can see your profile. How this Agent grows is entirely your call — send feedback, chat with it, swap LLMs, edit the database, whatever you want.
+Core behavior, recommendation, and dialogue data lives in SQLite on your disk; config, profiles, credentials, and caches also stay in local files. LLM calls use your own API key by default, with an experimental option to reuse local Codex CLI ChatGPT OAuth credentials. There is no OpenBiliClaw-operated cloud account, and no one else can see your profile. How this Agent grows is entirely your call — send feedback, chat with it, swap LLMs, migrate it, or edit the database.
 
 > 💡 **How it compares**
 >
@@ -571,8 +571,9 @@ The whole loop stays local — the agent host just calls the CLI bridge; your pr
 - ⭐ **Local-First Favorites / Watch Later** — cards save to local SQLite first and auto-sync stays off by default; desktop Web hydrates the sidebar count badges on first load; the 2026-07-14 real-account regression completed both actions across all seven platforms as `synced/already_synced`
 - 🧩 **Browser Extension** — Chrome / Edge / Brave / Arc / Firefox; side-panel recommendations + cross-site behavior collection, install and go
 - 🚀 **Guided Init in the UI** — the packaged `/setup/` wizard, Desktop Web, and the extension can all initialize with one click; no terminal required
+- 📦 **Cross-Machine Migration** — export/import portable config, SQLite, profiles, cookies, and the image cache from Desktop settings; imports are validated and staged, can be inspected or cancelled, then apply on restart with rollback copies. `.obcbackup` contains plaintext secrets but excludes the source machine's API-login password, session-signing secret, and extension device keys
 - 🔬 **Self-Optimizing Eval Loops** — five modules each carry an LLM-as-judge loop that improves prompt quality over rounds
-- 🔒 **Fully Private** — all data in local SQLite, LLM calls use your own key, each instance is built for exactly one person
+- 🔒 **Fully Private** — SQLite, config, profiles, and caches stay local; LLM calls use your own key, and each instance is built for exactly one person
 - 🔌 **Local Embedding** — optional Ollama + bge-m3, CPU-only, no extra API key
 - 🔧 **Fully Controllable** — create multiple independent channels of the same LLM type and drag global or per-module failover chains; edit your profile or add custom Skills
 
@@ -603,6 +604,10 @@ config recovery draft (normal or degraded; business APIs remain gated)
                                            → editable model list + local effort advisory
 Douyin supply: daemon presence gate (explicit manual calls bypass it) → one shared plugin-cycle budget
               → terminal dy_task → pending_eval; absent means zero enqueue, failures back off
+local migration: export → config minus api.auth + online SQLite snapshot + portable files → plaintext .obcbackup
+                 import(request_id) → processing(upload/validate) → private stage ↔ status/cancel
+                                    ↘ General-open force reconcile; applied prefs once/browser/migration_id
+                                    → restart + project/canonical data-dir locks → replace | rollback
 durable reply: reply_to_turn_id + fixed time/payload → POST-time frozen binding → pending SQLite → rowid-serial reply worker → visible completion CAS (app-stable dialogue lease)
 post-reply learning/object settlement: independent 11-kind typed queue → actual worker + guard
 confirmation entry (pending list/cards) → one anchor(kind+ref+generation) → frozen admission / relation matrix
@@ -614,7 +619,7 @@ confirmation entry (pending list/cards) → one anchor(kind+ref+generation) → 
                           ├→ one context digest → prompt/history/event/learn/settlement provenance
                           ├→ action local≤1s: completed 200 / blocked 202 → popup/mobile/desktop poll 1/2/5s, ≤30s
                           └→ confusion FIFO≤5 / head fencing / 12h recovery
-config save: persist → HTTP 202 queued/apply_revision → latest-wins background apply queue → apply-status / final receipt
+config save: persist → HTTP 202 queued/apply_revision → latest-wins background apply queue → apply-status / final receipt; data_dir is persisted only and switches after a full restart
 config hot reload: accepting drain old worker → atomic pause/revoke → new worker; 25m safety window
 realtime: runtime-stream 20s idle heartbeat → transient close shows reconnecting and retries
 images: proxy foreground + refresh prefetch → app-stable lane (total 4 / bg 3, fg priority)
@@ -658,6 +663,7 @@ images: proxy foreground + refresh prefetch → app-stable lane (total 4 / bg 3,
 │ Optional visual prewarm: covers / profile centroids / keyframes + danmaku │
 │ provenance (provider/model/dim/sampling) → empty-success / retryable fail │
 │ Config recovery draft (normal/degraded) → temp probe / exact /models (no write) │
+│ Local migration: checksummed .obcbackup → request-id pending ↔ status/cancel → restart replace/rollback │
 │ Source-family registry: alias · strategy · URL host │
 │             → pool accounting · durable seen_items ledger │
 │ Bangumi public API → search/ranked/date producer → shared eval │
@@ -863,7 +869,7 @@ If OpenBiliClaw gave you back control of your feed, [a star](https://github.com/
 
 ## Privacy at a glance
 
-Default data flow: browser extension → your configured local OpenBiliClaw backend → SQLite on your machine. The extension does not send data to servers operated by OpenBiliClaw developers. If you configure a cloud LLM or embedding provider, the relevant content is sent to that provider according to your configuration. See the [Privacy Policy](docs/privacy.md).
+Default data flow: browser extension → your configured local OpenBiliClaw backend → SQLite / data files on your machine. The extension does not send data to servers operated by OpenBiliClaw developers. If you configure a cloud LLM or embedding provider, the relevant content is sent to that provider according to your configuration. A `.obcbackup` you explicitly export from Settings may contain model/source API keys, cookies, your profile, and history, and it is **not encrypted**. It excludes the source machine's entire API-auth section (including passwords, sessions, and device keys), but must still be transferred only between trusted devices. See the [Privacy Policy](docs/privacy.md).
 
 ## 📄 License
 

@@ -1,7 +1,10 @@
 """Tests for the Storage database module."""
 
 import json
+import os
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -9,6 +12,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
+
+import pytest
 
 from openbiliclaw.discovery.candidate_pool import DiscoveryCandidateWrite
 from openbiliclaw.saved_sync.models import SavedItemInput
@@ -4889,6 +4894,72 @@ class TestDatabaseMaintenance:
         assert backup.db_backup.read_text(encoding="utf-8") == "db"
         assert backup.wal_backup is not None
         assert backup.wal_backup.read_text(encoding="utf-8") == "wal"
+
+    @pytest.mark.skipif(os.name != "posix", reason="regression covers POSIX SQLite locks")
+    def test_scheduled_backup_before_runtime_connection_preserves_wal_locking(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from openbiliclaw.storage.maintenance import maybe_create_scheduled_backup
+
+        db_path = tmp_path / "openbiliclaw.db"
+        bootstrap = sqlite3.connect(db_path)
+        bootstrap.execute("PRAGMA journal_mode=WAL")
+        bootstrap.execute("CREATE TABLE writes (value TEXT NOT NULL)")
+        bootstrap.execute("INSERT INTO writes VALUES ('bootstrap')")
+        bootstrap.commit()
+        bootstrap.close()
+
+        backup = maybe_create_scheduled_backup(
+            db_path,
+            tmp_path / "backups",
+            now=datetime(2026, 8, 9, 0, 0, 0),
+            minimum_interval=timedelta(0),
+        )
+        assert backup is not None
+
+        persistent = sqlite3.connect(db_path)
+        persistent.execute("PRAGMA journal_mode=WAL")
+        persistent.execute("INSERT INTO writes VALUES ('persistent-before-probe')")
+        persistent.commit()
+        wal_path = db_path.with_name(f"{db_path.name}-wal")
+        wal_inode = wal_path.stat().st_ino
+
+        probe = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import sqlite3, sys; "
+                    "connection = sqlite3.connect(sys.argv[1]); "
+                    "result = connection.execute('PRAGMA integrity_check').fetchone()[0]; "
+                    "connection.close(); "
+                    "raise SystemExit(0 if result == 'ok' else 1)"
+                ),
+                str(db_path),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert probe.returncode == 0, probe.stderr
+        assert wal_path.exists()
+        assert wal_path.stat().st_ino == wal_inode
+
+        persistent.execute("INSERT INTO writes VALUES ('persistent-after-probe')")
+        persistent.commit()
+        secondary = sqlite3.connect(db_path)
+        secondary.execute("INSERT INTO writes VALUES ('secondary-after-probe')")
+        secondary.commit()
+        secondary.close()
+        persistent.close()
+
+        verification = sqlite3.connect(db_path)
+        try:
+            assert verification.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+            assert verification.execute("SELECT COUNT(*) FROM writes").fetchone() == (4,)
+        finally:
+            verification.close()
 
     def test_rotate_database_backups_keeps_recent_daily_and_weekly_sets(
         self,

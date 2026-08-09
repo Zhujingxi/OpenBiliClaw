@@ -1210,6 +1210,22 @@
     .settings-probe-status { flex: 1 1 240px; min-width: 0; color: var(--muted); font-size: var(--text-sm); line-height: 1.45; overflow-wrap: anywhere; }
     .settings-probe-status[data-tone="success"] { color: var(--success); }
     .settings-probe-status[data-tone="error"] { color: var(--danger); }
+    .settings-migration-card { grid-column: 1 / -1; display: grid; gap: var(--space-4); min-width: 0; padding: clamp(18px, 2.4vw, 28px); border: 1px solid color-mix(in oklab, var(--accent), var(--border) 72%); border-radius: var(--radius-lg); background: linear-gradient(145deg, color-mix(in oklab, var(--surface), var(--accent) 7%), color-mix(in oklab, var(--surface), var(--bg) 34%)); box-shadow: var(--elev-ring); }
+    .settings-migration-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4); min-width: 0; }
+    .settings-migration-head h3 { margin: 0; color: var(--fg); font-size: clamp(20px, 2vw, 25px); line-height: 1.25; }
+    .settings-migration-badge { flex: 0 0 auto; display: inline-flex; align-items: center; min-height: 28px; padding: 3px 10px; border: 1px solid color-mix(in oklab, var(--accent), var(--border-soft) 55%); border-radius: var(--radius-pill); background: color-mix(in oklab, var(--surface), var(--accent) 10%); color: var(--accent-strong); font-size: 12px; font-weight: 750; white-space: nowrap; }
+    .settings-migration-copy { margin: 0; color: var(--fg-2); line-height: 1.65; overflow-wrap: anywhere; }
+    .settings-migration-inventory { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-3); min-width: 0; }
+    .settings-migration-inventory > span { display: grid; align-content: start; gap: 5px; min-width: 0; padding: var(--space-3); border: 1px solid var(--border-soft); border-radius: var(--radius-md); background: color-mix(in oklab, var(--surface), transparent 4%); }
+    .settings-migration-inventory strong { color: var(--fg); font-size: var(--text-sm); }
+    .settings-migration-inventory small { color: var(--muted); line-height: 1.5; overflow-wrap: anywhere; }
+    .settings-migration-warning { margin: 0; padding: var(--space-3) var(--space-4); border: 1px solid color-mix(in oklab, var(--warn), var(--border-soft) 52%); border-radius: var(--radius-md); background: color-mix(in oklab, var(--surface), var(--warn) 10%); color: color-mix(in oklab, var(--warn-fg), var(--fg) 25%); line-height: 1.55; overflow-wrap: anywhere; }
+    .settings-migration-actions { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); }
+    .settings-migration-actions button:disabled { opacity: 0.55; cursor: wait; }
+    .settings-migration-status { min-height: 1.5em; margin: 0; color: var(--muted); font-size: var(--text-sm); line-height: 1.5; overflow-wrap: anywhere; }
+    .settings-migration-status[data-tone="pending"] { color: var(--accent-strong); }
+    .settings-migration-status[data-tone="success"] { color: var(--success); }
+    .settings-migration-status[data-tone="error"] { color: var(--danger); }
     /* Verification answers in three, not two. "Could not tell" — a dead proxy, a
        closed browser, a throttled platform, YouTube needing no login at all — is
        not a failure, and painting it red sends users off to delete a cookie that
@@ -1574,6 +1590,7 @@
       .delight-main-actions { flex-basis: 212px; grid-template-columns: 116px 88px; }
       .delight-feedback-actions { width: 128px; }
       .settings-grid, .settings-panel, .settings-subpanel, .inline-row, .settings-advanced-fields { grid-template-columns: 1fr; }
+      .settings-migration-inventory { grid-template-columns: 1fr; }
       .llm-instance-grid, .llm-module-grid { grid-template-columns: 1fr; }
       .llm-instance-dialog { padding: 0; }
       .llm-instance-dialog-panel { width: 100%; height: 100%; max-height: none; border: 0; border-radius: 0; }
@@ -1618,6 +1635,10 @@
       .spec-actions { flex-wrap: wrap; }
     }
     @media (max-width: 620px) {
+      .settings-migration-head { display: grid; }
+      .settings-migration-badge { width: fit-content; }
+      .settings-migration-actions { align-items: stretch; }
+      .settings-migration-actions .pill-btn { flex: 1 1 160px; }
       .delight-actions { flex-wrap: wrap; justify-content: stretch; }
       .delight-main-actions { flex: 1 1 212px; grid-template-columns: minmax(116px, 1fr) 88px; }
       .delight-feedback-actions { flex: 0 0 128px; margin-left: auto; }

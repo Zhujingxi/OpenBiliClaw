@@ -993,6 +993,30 @@
             <span class="settings-probe-status" id="probeNetworkProxyStatus" aria-live="polite"></span>
           </div>
           <p class="settings-note-inline" id="networkProxyHint">仅作用于海外服务（海外 AI 服务、需要海外出网的内容来源、更新检查）；B 站等国内请求始终直连。直连会忽略环境代理；自定义模式支持 http/https/socks5/socks5h。哪些来源需要海外出网，见「平台源」页每个来源的接入状态。</p>
+          <p class="settings-section-title">数据迁移</p>
+          <section class="settings-migration-card" aria-labelledby="migrationHeading">
+            <div class="settings-migration-head">
+              <div>
+                <p class="settings-section-kicker">Portable backup</p>
+                <h3 id="migrationHeading">把阿B完整搬到另一台机器</h3>
+              </div>
+              <span class="settings-migration-badge">重启后生效</span>
+            </div>
+            <p class="settings-migration-copy">导出配置与 API Key、平台 Cookie、画像、行为与推荐历史，以及无法重新拉取的图片缓存。向量缓存、日志、历史备份、证书、系统自启动、Web 访问密码与签名密钥、浏览器登录会话和环境变量的值不会打包；导入时保留目标机的访问门禁并撤销旧会话与扩展配对。</p>
+            <div class="settings-migration-inventory" role="list" aria-label="迁移内容">
+              <span role="listitem"><strong>配置与凭据</strong><small>模型、来源、API Key、平台 Cookie</small></span>
+              <span role="listitem"><strong>画像与历史</strong><small>记忆、对话、反馈、收藏与推荐记录</small></span>
+              <span role="listitem"><strong>安全替换</strong><small>导入先校验，重启时替换并保留回滚副本</small></span>
+            </div>
+            <p class="settings-migration-warning"><strong>敏感文件：</strong>迁移包当前不加密。任何拿到文件的人都可能读取其中的 API Key 和 Cookie，请只保存在可信设备并在迁移后删除。</p>
+            <div class="settings-migration-actions">
+              <button class="pill-btn primary" id="migrationExportBtn" type="button">导出全部信息</button>
+              <button class="pill-btn" id="migrationImportBtn" type="button" aria-controls="migrationImportFile">导入迁移包</button>
+              <button class="pill-btn" id="migrationCancelBtn" type="button" hidden>取消待导入</button>
+              <input id="migrationImportFile" type="file" accept=".obcbackup,application/zip,application/octet-stream,application/vnd.openbiliclaw.backup+zip" hidden data-settings-ignore-dirty>
+            </div>
+            <p class="settings-migration-status" id="migrationStatus" role="status" aria-live="polite">只能在运行后端的本机操作。</p>
+          </section>
         </div>
 
         <div id="settingsPanelFrontend" class="settings-panel" data-settings-panel="frontend" role="tabpanel" aria-labelledby="settingsTabFrontend" hidden>

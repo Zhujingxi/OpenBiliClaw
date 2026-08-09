@@ -13,6 +13,7 @@ import re
 import secrets
 import shutil
 import socket
+import sqlite3
 import subprocess
 import time
 import unicodedata
@@ -21,13 +22,21 @@ from collections.abc import Mapping
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal, NoReturn, cast
 from urllib.parse import parse_qsl, quote, urlparse, urlsplit, urlunsplit
 from uuid import UUID
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import (
+    FileResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
+from starlette.background import BackgroundTask
 
 from openbiliclaw.api.models import (
     ActivityFeedItemOut,
@@ -216,7 +225,6 @@ from openbiliclaw.sources.platforms import (
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
-    from pathlib import Path
 
     from openbiliclaw.api.source_auth.contract import SourceAuthContract
     from openbiliclaw.api.source_auth.write import CredentialWriteOutcome
@@ -247,7 +255,48 @@ def _config_llm_probe_timeout_seconds(configured_timeout: object) -> float:
 
 
 _CONFIG_SAVE_LOCK = asyncio.Lock()
+_MIGRATION_TRANSFER_LOCK = asyncio.Lock()
 _fire_and_forget_tasks: set[asyncio.Task[None]] = set()
+
+
+class _MigrationArchiveStreamingResponse(StreamingResponse):
+    """Always erase a plaintext export, including ASGI send-start failures."""
+
+    def __init__(
+        self,
+        *args: Any,
+        cleanup_directory: Path,
+        release_callback: Callable[[], None] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        self._cleanup_directory = cleanup_directory
+        self._release_callback = release_callback
+        super().__init__(*args, **kwargs)
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            # Starlette does not necessarily close an async body iterator when
+            # an ASGI 2.3 client disconnects while ``send`` is suspended. On
+            # Windows the still-open archive then prevents rmtree from removing
+            # the plaintext file. Close first, delete second, and only then let
+            # another export acquire the transfer lock.
+            close_iterator = getattr(self.body_iterator, "aclose", None)
+            if callable(close_iterator):
+                try:
+                    close_result = close_iterator()
+                    if inspect.isawaitable(close_result):
+                        await close_result
+                except (Exception, asyncio.CancelledError):
+                    logger.warning("Failed to close migration archive response iterator")
+            try:
+                shutil.rmtree(self._cleanup_directory, ignore_errors=True)
+            finally:
+                release_callback = self._release_callback
+                self._release_callback = None
+                if release_callback is not None:
+                    release_callback()
 
 
 def apply_retraction_db_marks(database: Any, events: list[dict[str, Any]]) -> int:
@@ -339,6 +388,7 @@ class _QueuedConfigApply:
     config: Any
     saved_path: Path
     run_post_reload_llm_work: bool
+    restart_required: bool = False
 
 
 # Guided-init owner-lease heartbeat period. A stage can spend minutes inside one
@@ -1834,6 +1884,40 @@ def create_app(
 
         ctx.llm_concurrency_gate = LLMConcurrencyGate(llm_concurrency_from_config(config))
 
+    # The process-lifetime migration guard was acquired for the data directory
+    # that was active at startup.  A newly persisted ``data_dir`` must therefore
+    # remain restart-only: every live data read/write and every hot rebuild is
+    # pinned to this immutable path until a fresh process acquires the new lock.
+    # Capture the effective startup config, which is the path the supervisor
+    # locked before constructing this app. Injected tests may deliberately pass
+    # a standalone Database or MemoryManager rooted elsewhere; those component
+    # fixtures do not redefine where source credentials and other project data
+    # live. Runtime config is therefore the sole authority for this process-wide
+    # path, just as it is for the startup guard.
+    active_runtime_data_path = Path(config.data_path).expanduser().resolve()
+    app.state.active_runtime_data_path = active_runtime_data_path
+
+    def _active_runtime_data_path() -> Path:
+        """Return the canonical data directory protected by this process's lock."""
+        return active_runtime_data_path
+
+    def _pin_active_runtime_config(candidate: Any) -> Any:
+        """Copy *candidate* while retaining this process's locked data directory."""
+        pinned = copy.deepcopy(candidate)
+        if not hasattr(pinned, "data_dir") and not hasattr(pinned, "data_path"):
+            # Narrow injected test doubles may use an opaque sentinel for the
+            # candidate. Production rebuilds always receive Config.
+            return pinned
+        pinned.data_dir = str(active_runtime_data_path)
+        return pinned
+
+    def _preserve_persisted_restart_fields(candidate: Any) -> Any:
+        """Merge restart-only values from disk before a whole-config write."""
+        desired = load_config(consult_environment=False)
+        merged = copy.deepcopy(candidate)
+        merged.data_dir = str(desired.data_dir)
+        return merged
+
     def _inventory_target() -> int:
         controller_target = getattr(ctx.runtime_controller, "pool_target_count", None)
         if controller_target is not None:
@@ -1929,8 +2013,10 @@ def create_app(
     config_apply_message = ""
     config_apply_error = ""
     config_apply_updated_at = ""
-    config_last_good = copy.deepcopy(getattr(ctx, "config", None) or config)
+    config_last_good = _pin_active_runtime_config(getattr(ctx, "config", None) or config)
     app.state.config_apply_task = None
+    app.state.migration_import_request_id = ""
+    app.state.migration_import_phase = ""
     image_fetch_coordinator = ImageFetchCoordinator()
     app.state.image_fetch_coordinator = image_fetch_coordinator
     chat_reply_scheduler: DurableChatReplyScheduler
@@ -2191,6 +2277,16 @@ def create_app(
             or path in ("/api/update-status", "/api/update/check", "/api/update/apply")
             or (path == "/api/config" and method in {"GET", "PUT"})
             or (path == "/api/config/apply-status" and method == "GET")
+            or (
+                path
+                in {
+                    "/api/migration/export",
+                    "/api/migration/import",
+                    "/api/migration/pending",
+                    "/api/migration/status",
+                }
+                and method in {"DELETE", "GET", "POST"}
+            )
             # Draft-only config helpers are part of the recovery control
             # plane, not business LLM traffic.  Each builds from the submitted
             # form (or config + DB for source shares), so blocking it here made
@@ -2298,6 +2394,7 @@ def create_app(
             "/api/init/cancel",
             "/api/config/probe-service",
             "/api/bilibili/cookie",
+            "/api/migration/pending",
             "/api/sources/bangumi/identity",
         }
     )
@@ -2558,7 +2655,7 @@ def create_app(
                     timeout=_DIALOGUE_EXECUTION_DRAIN_TIMEOUT_SECONDS
                 )
                 dialogue_paused = True
-                await ctx.rebuild_from_config(new_config)
+                await ctx.rebuild_from_config(_pin_active_runtime_config(new_config))
                 if callable(after_rebuild):
                     after_rebuild()
                 await _restart_background_tasks_after_event_recovery(
@@ -2655,10 +2752,12 @@ def create_app(
             )
         else:
             message = f"配置已保存到 {item.saved_path}。"
+            if was_degraded:
+                message += " 后端已从降级模式原地恢复。"
             message += (
-                " 后端已从降级模式原地恢复，无需重启。"
-                if was_degraded
-                else " 运行时组件已热重载，新配置立即生效。"
+                " 除需完全重启的字段外，其余运行时组件已热重载。"
+                if item.restart_required
+                else " 运行时组件已热重载，新配置立即生效，无需重启。"
             )
         logger.info("Config hot-reload succeeded: revision=%d", item.revision)
         return message
@@ -2733,7 +2832,9 @@ def create_app(
                             )
                             continue
                         try:
-                            restored_path = save_config(copy.deepcopy(config_last_good))
+                            restored_path = save_config(
+                                _preserve_persisted_restart_fields(config_last_good)
+                            )
                             _snapshot_config_file(restored_path)
                             proxy_cfg = getattr(config_last_good, "network", None)
                             set_outbound_proxy(
@@ -4656,7 +4757,7 @@ def create_app(
             cfg = cast("Config", cfg)
 
             async with _CONFIG_SAVE_LOCK:
-                save_config(cfg)
+                save_config(_preserve_persisted_restart_fields(cfg))
         except Exception:
             logger.warning("guided init source opt-in save_config failed", exc_info=True)
             return False
@@ -5661,6 +5762,7 @@ def create_app(
             effective_cookie = ""
             try:
                 _cfg, _ = load_config_with_diagnostics()
+                _cfg = _pin_active_runtime_config(_cfg)
                 effective_cookie = (_cfg.bilibili.cookie or "").strip()
                 if not effective_cookie:
                     effective_cookie = AuthManager(data_dir=_cfg.data_path).load_cookie().strip()
@@ -12954,7 +13056,7 @@ def create_app(
         )
         from openbiliclaw.config import load_config
 
-        cfg = load_config()
+        cfg = _pin_active_runtime_config(load_config())
         auth_ctx = SourceAuthContext(cfg=cfg, database=ctx.database)
         items: dict[str, SourceStatusItem] = {}
         for slug, provider in SOURCE_AUTH_PROVIDERS.items():
@@ -13016,7 +13118,7 @@ def create_app(
         try:
             result = await verify_source(
                 slug,
-                cfg=load_config(),
+                cfg=_pin_active_runtime_config(load_config()),
                 database=ctx.database,
                 event_hub=getattr(ctx, "event_hub", None),
             )
@@ -13061,7 +13163,12 @@ def create_app(
         provider = SOURCE_AUTH_PROVIDERS.get(slug)
         if provider is None:
             return SourceAuthContract()
-        return provider(SourceAuthContext(cfg=load_config(), database=ctx.database))
+        return provider(
+            SourceAuthContext(
+                cfg=_pin_active_runtime_config(load_config()),
+                database=ctx.database,
+            )
+        )
 
     def _credential_landed(slug: str, *, verdict: Any, value: str, changed: bool) -> None:
         """Bookkeeping every credential write owes once the value is really stored.
@@ -13136,7 +13243,7 @@ def create_app(
         )
         from openbiliclaw.config import load_config
 
-        cfg = load_config()
+        cfg = _pin_active_runtime_config(load_config())
         verdict = await validate_credential(slug, kind, value, cfg=cfg)
         if not verdict.ok:
             return CredentialWriteOutcome(
@@ -13340,7 +13447,7 @@ def create_app(
         from openbiliclaw.sources.douyin_auth import resolve_douyin_cookie
         from openbiliclaw.sources.reddit_tasks import rdt_credential_cookie_names
 
-        cfg = load_config()
+        cfg = _pin_active_runtime_config(load_config())
         srcs = cfg.sources
 
         bili_cookie = resolve_runtime_cookie(
@@ -14545,13 +14652,13 @@ def create_app(
         dy_cookie = ""
         with suppress(Exception):
             dy_cookie = resolve_douyin_cookie(
-                data_dir=cfg.data_path,
+                data_dir=_active_runtime_data_path(),
                 cookie_env=cfg.sources.douyin.cookie_env,
             )
         tw_cookie = ""
         with suppress(Exception):
             tw_cookie = resolve_x_cookie(
-                data_dir=cfg.data_path,
+                data_dir=_active_runtime_data_path(),
                 cookie_env=cfg.sources.twitter.cookie_env,
             )
 
@@ -14915,6 +15022,379 @@ def create_app(
             mask_keys=True,
             degraded=bool(getattr(ctx, "degraded", False)),
             degraded_reason=str(getattr(ctx, "degraded_reason", "")),
+        )
+
+    def _migration_request_allowed(request: Request) -> bool:
+        """Require real loopback transport plus same-origin browser intent."""
+        from openbiliclaw import auth_core
+
+        gate = _get_auth_gate()
+        if auth_core.is_extension_origin(request.headers.get("origin")):
+            return False
+        client_ip, local_transport = gate.resolve_client(request)
+        return (
+            request.headers.get("x-obc-auth") == "1"
+            and auth_core.is_trusted_local(client_ip, local_transport)
+            and gate._origin_safe_for_local(request)
+        )
+
+    def _require_local_migration_request(
+        request: Request,
+        *,
+        allow_during_init: bool = False,
+    ) -> None:
+        if not _migration_request_allowed(request):
+            raise HTTPException(status_code=403, detail={"code": "local_only"})
+        if not allow_during_init and _init_active_now():
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "init_active",
+                    "message": "初始化进行中，完成或取消后再迁移数据。",
+                },
+            )
+
+    async def _await_migration_worker(
+        worker: asyncio.Task[Any],
+        *,
+        cleanup_result: Any = None,
+    ) -> Any:
+        """Do not abandon sensitive temp files or staging on request cancellation."""
+        try:
+            return await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            while not worker.done():
+                try:
+                    await asyncio.shield(worker)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    break
+            try:
+                result = worker.result()
+            except BaseException:
+                pass
+            else:
+                if callable(cleanup_result):
+                    with suppress(Exception):
+                        cleanup_result(result)
+            raise
+
+    @app.post("/api/migration/export")
+    async def export_user_migration(
+        request: Request,
+        payload: Annotated[dict[str, Any] | None, Body()] = None,
+    ) -> StreamingResponse:
+        """Download a checksummed archive of portable user data and secrets."""
+        _require_local_migration_request(request)
+        if _CONFIG_SAVE_LOCK.locked():
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "config_busy", "message": "配置正在保存，请稍后再导出。"},
+            )
+        from openbiliclaw.config import load_config as load_migration_config
+        from openbiliclaw.storage.migration import MigrationError, create_migration_archive
+
+        frontend = (payload or {}).get("frontend")
+        if frontend is not None and not isinstance(frontend, dict):
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "invalid_frontend", "message": "前端偏好格式无效。"},
+            )
+        if _MIGRATION_TRANSFER_LOCK.locked():
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "migration_busy", "message": "另一项迁移正在处理。"},
+            )
+        await _MIGRATION_TRANSFER_LOCK.acquire()
+        exported: Any = None
+        try:
+            async with _CONFIG_SAVE_LOCK:
+                current_config = await asyncio.to_thread(load_migration_config)
+                current_config = _pin_active_runtime_config(current_config)
+                worker = asyncio.create_task(
+                    asyncio.to_thread(
+                        create_migration_archive,
+                        current_config,
+                        frontend,
+                    )
+                )
+                exported = await _await_migration_worker(
+                    worker,
+                    cleanup_result=lambda result: shutil.rmtree(
+                        result.path.parent,
+                        ignore_errors=True,
+                    ),
+                )
+        except MigrationError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": exc.code, "message": str(exc)},
+            ) from exc
+        except (OSError, sqlite3.DatabaseError) as exc:
+            logger.exception("Failed to create user-data migration archive")
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "code": "export_failed",
+                    "message": "创建迁移包失败，请检查磁盘空间。",
+                },
+            ) from exc
+        finally:
+            if exported is None:
+                _MIGRATION_TRANSFER_LOCK.release()
+        archive_path = exported.path
+        try:
+            archive_size = archive_path.stat().st_size
+        except OSError as exc:
+            shutil.rmtree(archive_path.parent, ignore_errors=True)
+            _MIGRATION_TRANSFER_LOCK.release()
+            raise HTTPException(
+                status_code=500,
+                detail={"code": "export_failed", "message": "迁移包生成后无法读取。"},
+            ) from exc
+
+        async def _stream_archive() -> AsyncIterator[bytes]:
+            try:
+                with archive_path.open("rb") as handle:
+                    while chunk := handle.read(1024 * 1024):
+                        yield chunk
+            finally:
+                shutil.rmtree(archive_path.parent, ignore_errors=True)
+
+        try:
+            return _MigrationArchiveStreamingResponse(
+                _stream_archive(),
+                media_type="application/vnd.openbiliclaw.backup+zip",
+                cleanup_directory=archive_path.parent,
+                release_callback=_MIGRATION_TRANSFER_LOCK.release,
+                # A disconnect can happen before the body iterator is entered, so
+                # its ``finally`` block alone cannot guarantee sensitive cleanup.
+                # Both paths are idempotent and cover early as well as mid-stream
+                # disconnects.
+                background=BackgroundTask(
+                    shutil.rmtree,
+                    archive_path.parent,
+                    ignore_errors=True,
+                ),
+                headers={
+                    "Cache-Control": "no-store, private",
+                    "Pragma": "no-cache",
+                    "X-Content-Type-Options": "nosniff",
+                    "X-OBC-Migration-Files": str(exported.file_count),
+                    "Content-Length": str(archive_size),
+                    "Content-Disposition": f'attachment; filename="{exported.filename}"',
+                },
+            )
+        except Exception:
+            shutil.rmtree(archive_path.parent, ignore_errors=True)
+            _MIGRATION_TRANSFER_LOCK.release()
+            raise
+
+    @app.post("/api/migration/import", status_code=202)
+    async def import_user_migration(request: Request) -> JSONResponse:
+        """Validate an uploaded archive and stage replacement for next restart."""
+        _require_local_migration_request(request)
+        if request.headers.get("x-obc-migration-confirm") != "replace-all":
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "confirmation_required",
+                    "message": "导入需要明确确认替换当前用户数据。",
+                },
+            )
+        from openbiliclaw.config import load_config as load_migration_config
+        from openbiliclaw.storage.migration import (
+            MAX_MIGRATION_ARCHIVE_BYTES,
+            MigrationError,
+            stage_migration_archive,
+        )
+
+        raw_request_id = request.headers.get("x-obc-migration-request-id", "").strip()
+        try:
+            request_id = UUID(raw_request_id).hex if raw_request_id else uuid.uuid4().hex
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "invalid_request_id", "message": "迁移请求 ID 无效。"},
+            ) from exc
+
+        content_length = request.headers.get("content-length", "").strip()
+        if content_length:
+            try:
+                declared_size = int(content_length)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail={"code": "invalid_content_length"},
+                ) from exc
+            if declared_size <= 0 or declared_size > MAX_MIGRATION_ARCHIVE_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail={
+                        "code": "archive_too_large",
+                        "message": "迁移包为空或超过 2 GB。",
+                    },
+                )
+
+        import tempfile
+        from pathlib import Path as _MigrationPath
+
+        if _MIGRATION_TRANSFER_LOCK.locked():
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "migration_busy",
+                    "message": "另一项迁移正在上传或校验，请稍后重试。",
+                },
+            )
+        await _MIGRATION_TRANSFER_LOCK.acquire()
+        app.state.migration_import_request_id = request_id
+        app.state.migration_import_phase = "uploading"
+        upload_dir: _MigrationPath | None = None
+        try:
+            upload_dir = _MigrationPath(tempfile.mkdtemp(prefix="openbiliclaw-import-upload-"))
+            upload_path = upload_dir / "upload.obcbackup"
+            received = 0
+            with upload_path.open("xb") as handle:
+                write_buffer = bytearray()
+                async for chunk in request.stream():
+                    received += len(chunk)
+                    if received > MAX_MIGRATION_ARCHIVE_BYTES:
+                        raise HTTPException(
+                            status_code=413,
+                            detail={
+                                "code": "archive_too_large",
+                                "message": "迁移包超过 2 GB 上传上限。",
+                            },
+                        )
+                    write_buffer.extend(chunk)
+                    if len(write_buffer) >= 4 * 1024 * 1024:
+                        await asyncio.to_thread(handle.write, write_buffer)
+                        write_buffer.clear()
+                if write_buffer:
+                    await asyncio.to_thread(handle.write, write_buffer)
+                await asyncio.to_thread(handle.flush)
+                await asyncio.to_thread(os.fsync, handle.fileno())
+            if received == 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail={"code": "empty_archive", "message": "请选择迁移包文件。"},
+                )
+            if _CONFIG_SAVE_LOCK.locked():
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": "config_busy", "message": "配置正在保存，请稍后再导入。"},
+                )
+            async with _CONFIG_SAVE_LOCK:
+                current_config = await asyncio.to_thread(load_migration_config)
+                app.state.migration_import_phase = "validating"
+                worker = asyncio.create_task(
+                    asyncio.to_thread(
+                        stage_migration_archive,
+                        upload_path,
+                        current_config,
+                        request_id=request_id,
+                    )
+                )
+                staged = await _await_migration_worker(worker)
+        except MigrationError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": exc.code, "message": str(exc)},
+            ) from exc
+        finally:
+            if upload_dir is not None:
+                shutil.rmtree(upload_dir, ignore_errors=True)
+            if app.state.migration_import_request_id == request_id:
+                app.state.migration_import_request_id = ""
+                app.state.migration_import_phase = ""
+            _MIGRATION_TRANSFER_LOCK.release()
+
+        return JSONResponse(
+            status_code=202,
+            content={
+                "state": "staged",
+                "migration_id": staged.migration_id,
+                "request_id": staged.request_id,
+                "source_version": staged.source_version,
+                "file_count": staged.file_count,
+                "uncompressed_bytes": staged.uncompressed_bytes,
+                "frontend": staged.frontend_settings,
+                "adjusted_fields": list(staged.adjusted_fields),
+                "source_omitted_environment_variables": list(
+                    staged.source_omitted_environment_variables
+                ),
+                "target_active_environment_variables": list(
+                    staged.target_active_environment_variables
+                ),
+                "restart_required": True,
+                "message": "迁移包已完整校验；请重启 OpenBiliClaw 以载入数据。",
+            },
+            headers={"Cache-Control": "no-store, private"},
+        )
+
+    @app.get("/api/migration/status")
+    def get_user_migration_status(request: Request) -> JSONResponse:
+        """Return pending/last restore status to the local settings page."""
+        _require_local_migration_request(request, allow_during_init=True)
+        from openbiliclaw.storage.migration import migration_status
+
+        status = migration_status()
+        active_request_id = str(app.state.migration_import_request_id or "")
+        if active_request_id and not (
+            status.get("state") == "staged"
+            and str(status.get("request_id") or "") == active_request_id
+        ):
+            status = {
+                "state": "processing",
+                "request_id": active_request_id,
+                "phase": str(app.state.migration_import_phase or "validating"),
+                "restart_required": False,
+                "message": "迁移包仍在上传或校验，当前数据尚未改动。",
+            }
+        return JSONResponse(
+            status,
+            headers={"Cache-Control": "no-store, private"},
+        )
+
+    @app.delete("/api/migration/pending")
+    async def cancel_user_migration(request: Request) -> JSONResponse:
+        """Cancel the staged restore while leaving current user data untouched."""
+        _require_local_migration_request(request, allow_during_init=True)
+        from openbiliclaw.storage.migration import MigrationError, cancel_pending_migration
+
+        if _MIGRATION_TRANSFER_LOCK.locked():
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "migration_busy",
+                    "message": "迁移包仍在上传、导出或校验，请完成后再取消。",
+                },
+            )
+        await _MIGRATION_TRANSFER_LOCK.acquire()
+        try:
+            async with _CONFIG_SAVE_LOCK:
+                cancelled = await asyncio.to_thread(cancel_pending_migration)
+        except MigrationError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": exc.code, "message": str(exc)},
+            ) from exc
+        finally:
+            _MIGRATION_TRANSFER_LOCK.release()
+        return JSONResponse(
+            {
+                "state": "cancelled" if cancelled else "idle",
+                "cancelled": cancelled,
+                "restart_required": False,
+                "message": (
+                    "待导入迁移包已取消，当前数据未改动。"
+                    if cancelled
+                    else "当前没有待导入迁移包。"
+                ),
+            },
+            headers={"Cache-Control": "no-store, private"},
         )
 
     @app.get("/api/config/apply-status", response_model=ConfigApplyStatusResponse)
@@ -15875,6 +16355,9 @@ def create_app(
         )
 
         cfg = load_config()
+        from pathlib import Path as _ConfigPath
+
+        active_data_path = _active_runtime_data_path()
         update = payload.model_dump(exclude_none=True)
         # Preserve an explicit ``null`` for optional incremental overrides so
         # the API can restore inheritance; omitted fields still remain absent.
@@ -16064,7 +16547,7 @@ def create_app(
                             current = ""
                             with suppress(Exception):
                                 current = resolve_douyin_cookie(
-                                    data_dir=cfg.data_path,
+                                    data_dir=active_data_path,
                                     cookie_env=cfg.sources.douyin.cookie_env,
                                 )
                             # Unchanged form echo → no write (env override
@@ -16077,7 +16560,7 @@ def create_app(
                                 def _store_douyin(
                                     cookie: str = new_cookie, verdict: Any = dy_verdict
                                 ) -> None:
-                                    DouyinCookieManager(cfg.data_path).set_cookie(
+                                    DouyinCookieManager(active_data_path).set_cookie(
                                         cookie, source="config-update"
                                     )
                                     _credential_landed(
@@ -16127,7 +16610,7 @@ def create_app(
                             current = ""
                             with suppress(Exception):
                                 current = resolve_x_cookie(
-                                    data_dir=cfg.data_path,
+                                    data_dir=active_data_path,
                                     cookie_env=cfg.sources.twitter.cookie_env,
                                 )
                             if new_cookie != current:
@@ -16136,7 +16619,7 @@ def create_app(
                                 def _store_twitter(
                                     cookie: str = new_cookie, verdict: Any = x_verdict
                                 ) -> None:
-                                    XCookieManager(cfg.data_path).set_cookie(
+                                    XCookieManager(active_data_path).set_cookie(
                                         cookie, source="config-update"
                                     )
                                     # A pasted valid cookie is a re-login signal,
@@ -16790,6 +17273,8 @@ def create_app(
                 content=response.model_dump(mode="json"),
             )
 
+        desired_data_path = _ConfigPath(cfg.data_path).expanduser().resolve()
+        data_dir_restart_required = desired_data_path != active_data_path
         async with _CONFIG_SAVE_LOCK:
             # gui-init D1 / spec §5b: re-check inside the lock. The middleware
             # gated this path on init_active before the handler ran, but a run
@@ -16846,11 +17331,16 @@ def create_app(
 
             nonlocal config_apply_revision
             config_apply_revision += 1
+            # The process-lifetime migration guard protects active_data_path.
+            # Persist a new data_dir for the next startup, but never publish it
+            # into this process without first acquiring that directory's lock.
+            runtime_config = _pin_active_runtime_config(cfg)
             item = _QueuedConfigApply(
                 revision=config_apply_revision,
-                config=copy.deepcopy(cfg),
+                config=runtime_config,
                 saved_path=saved_path,
                 run_post_reload_llm_work=not suppress_background_llm_work,
+                restart_required=data_dir_restart_required,
             )
 
             # 持久化与运行时应用是两个阶段。统一进入已有 latest-wins 队列，
@@ -16859,10 +17349,15 @@ def create_app(
             queued_response = ConfigUpdateResponse(
                 ok=True,
                 config=_config_to_response(cfg, issues, mask_keys=True),
-                message=f"配置已保存到 {saved_path}，正在后台应用。",
+                message=(
+                    f"配置已保存到 {saved_path}；data_dir 将在完全重启后生效，"
+                    "其余配置正在后台应用。"
+                    if data_dir_restart_required
+                    else f"配置已保存到 {saved_path}，正在后台应用。"
+                ),
                 reloaded=False,
                 rollback_applied=False,
-                restart_required=False,
+                restart_required=data_dir_restart_required,
                 apply_state="queued",
                 apply_revision=item.revision,
             )

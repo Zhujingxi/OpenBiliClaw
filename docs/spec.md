@@ -239,6 +239,18 @@ descriptor、CLI（适用时）、capability manifest、幂等测试和集成文
 
 ---
 
+### 2.6 📦 本机数据迁移
+
+**目标**：让单用户 Agent 的可移植状态能安全、可理解地从一台机器搬到另一台机器，而不复制目标机器的网络身份或在运行中替换数据库。
+
+- **用户入口**：桌面 Web「设置 → 通用 → 数据迁移」提供导出、导入、状态查询和取消 pending；四条 API 仅接受后端真实观察到的本机 loopback，请求来自浏览器时还必须同源，扩展、LAN 与远端调用不在授权范围。
+- **包格式**：`.obcbackup` 是带版本、成员大小和 SHA-256 清单的标准 ZIP，明确为**未加密敏感文件**。它包含模型 / 来源凭据、SQLite、画像 / 记忆、平台 Cookie、图片缓存和少量安全 UI 偏好，但两层磁盘配置合并后会移除整段 `[api.auth]`，密码 / hash、session secret 和扩展设备 key 不进入包。配置快照来自磁盘两层，数据快照则固定读取本进程已持锁的 active data dir，不提前使用尚待重启的新目录。
+- **可移植边界**：日志、旧备份、embedding / 评测 / 临时缓存、证书、自启动文件、OpenBiliClaw Web / 扩展访问会话、外部 CLI 凭据与环境变量值不导出；平台登录 Cookie 是明确包含的敏感状态。`source_omitted_environment_variables` 提示源机遗漏的变量名，`target_active_environment_variables` 单独提示目标进程仍会覆盖导入配置的变量名。
+- **导入边界**：上传只做有界 ZIP 校验、checksum、配置构建与 SQLite integrity check，并发布私有 pending stage；active runtime 与 UI 偏好都不变化。导入携带 / 生成 UUID `request_id`；上传 / 校验期间 status 返回匹配 ID 的 `processing` 与 `uploading|validating` phase。连接结果不确定时，桌面端最多强制查询 3 次，对 `idle/cancelled` 间隔 500ms 再确认，不能以一次瞬时 `idle` 终结对账；每次打开「通用」也强制查询。重启前可取消 pending。下一次后端启动同时持有项目与 canonical data-dir 互斥锁后，通过 journaled replace 原子应用配置 / 数据；桌面端只在 status 已为 `applied` 后按 `migration_id` 为每个浏览器应用一次白名单偏好，用户后续修改不再被旧 status 覆盖。
+- **故障与身份**：替换失败恢复原配置 / 数据；成功后原文件保留为 `pre-import` 回滚副本。目标机器的数据 / 数据库 / 日志路径、API host / port、网络 / TLS / 自启动和 CDP 设置继续生效；Bilibili 专用代理与本机浏览器可执行文件路径也保留目标值，目标证书 / 自启动文件保留。整段 `api.auth` 采用目标机现值，再轮换文件 session secret、把 auth epoch 严格提升为来源 / 目标当前值最大值加一以强制撤销旧会话，并清空 / 关闭扩展远程配对。
+
+---
+
 ## 3. 系统架构
 
 ```text
@@ -266,6 +278,10 @@ config recovery control plane (normal or degraded; business APIs stay gated)
                 └─ draft → /api/config/discover-models → exact instance GET /models
                           → editable model list + local effort advisory (no config write)
 config save control plane: persist first → HTTP 202 queued/apply_revision → latest-wins queue → runtime receipt/status
+                           └─ data_dir changed → restart_required; active locked dir stays until full restart
+migration control plane: local export → checksummed plaintext .obcbackup
+                      → local import + request_id validates/stages ↔ status/cancel
+                      → restart + runtime lock → journaled config/data replace → applied | rollback
 XHS hidden search tab → MAIN search-response normalizer → isolated replay/DOM fallback → task final
 XHS/DY/YT/Zhihu/Reddit task final: canonical staged result (XHS bootstrap payload caps enforced) → durable event receipt
                                  → atomic bounded seen-key → terminal flip
@@ -651,6 +667,7 @@ localhost。两个入口互斥，默认 HTTP 不变。
 - [ ] 情境感知推荐（时间/情绪/场景自适应）
 - [ ] 定时自动发现和推送
 - [ ] 记忆可视化（查看 Agent 对你的理解）
+- [x] 配置页跨机器导出 / 导入可移植用户状态
 - [ ] UP 主追踪和新视频提醒
 
 ### v1.0 — 成熟的开源工具
@@ -671,9 +688,9 @@ localhost。两个入口互斥，默认 HTTP 不变。
 2. **有温度的表达** — Agent 的每一次输出都像朋友在说话
 3. **主动追问和假设** — 不等用户说，主动猜测并验证
 4. **用户掌控权** — 用户可以查看、修正、引导 Agent 的理解
-5. **隐私本地化** — 所有数据和计算在本地
+5. **隐私本地化** — 所有数据和计算在本地；用户可导出可移植状态，但迁移包含明文敏感信息，边界必须显式可见
 6. **开放可扩展** — 通用开源设计 + Skill 系统
 
 ---
 
-*文档版本: v0.3 | 日期: 2026-06-25 | 状态: 持续更新*
+*文档版本: v0.3 | 日期: 2026-08-09 | 状态: 持续更新*

@@ -313,10 +313,12 @@ $ openbiliclaw start --host 0.0.0.0 --port 9000
 
 适合本地直接运行或调试场景。若只希望本机访问，把 `[api].host` 改为 `127.0.0.1`，或启动时传 `--host 127.0.0.1`。
 
-启动前会先做两件事：
+`start` 与 `serve-api` 都会先取得项目根和 canonical `data_dir` 的 migration runtime lock；如果存在已校验的 pending 或未完成 journal，会在任何业务数据库访问前完成应用或恢复。锁会持续到后端退出，另一个指向同一数据目录的受支持后端无法并发启动。迁移应用后会重新读取配置并补锁实际运行目录；无法取得任一锁时拒绝启动。
+
+随后 `start` 会按固定顺序做两件事：
 
 1. 检查 `data/openbiliclaw.db` 是否完整；如果检测到损坏，会拒绝启动并提示先执行 `openbiliclaw db-repair`
-2. 在数据库健康且距离上次冷备超过 24 小时时，自动生成一份冷备到 `data/backups/`
+2. 在数据库健康且距离上次冷备超过 24 小时时，自动生成一份冷备到 `data/backups/`；该冷备严格早于 guided-init / runtime 持久 SQLite 连接创建，避免普通文件复制干扰 POSIX WAL 锁
 
 数据库健康后、API server 启动前，`start` 还会执行自启动相关的轻量 reconcile：
 
@@ -382,6 +384,7 @@ TLS enabled 时，证书检查、SSL context 和 socket bind 在 uvicorn 前同�
 原因并让 `serve-api` 非零退出，不会继续显示“HTTPS 已启动”。API wildcard host 会转换成
 可连接的 loopback（`0.0.0.0 → 127.0.0.1`、`:: → ::1`）供代理连接。
 推荐容器内使用该命令作为启动入口。
+`serve-api` 与 `start` 共用上述 migration runtime lock、pending apply / journal recovery 和迁移后实际数据目录补锁流程；容器启动不会绕过迁移事务。它不执行 `start` 专属的 24 小时数据库冷备。
 当 `scheduler.pause_on_extension_disconnect=true` 时，`serve-api` 与 `start` 一样会在 uvicorn 启动前打印 extension presence WARN，提醒容器后端若没有插件客户端连接，后台 LLM 工作会在宽限期后暂停。
 当配置进入降级模式时，`serve-api` 也会打印同一张 `降级模式 / Degraded mode` 面板；容器或脚本可继续通过 `/api/config` 写入修复配置，成功响应会原地启用新 registry，不需要重启服务。
 
