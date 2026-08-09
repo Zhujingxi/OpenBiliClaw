@@ -89,6 +89,15 @@ ID 字段是严格 JSON string，不接受数字、布尔或其它类型的自�
 
 周期任务 payload 带 `incremental=true`；五源 handler 在 guided init 外给 durable event 标记 `profile_update_owner="generic"`，在 init-owned 回调中只落事实、由阶段 2/3 统一建模。事件 ingress 成功或 duplicate receipt 后才按响应顺序 checkpoint seen key，再翻 terminal；没有 handler 直接调用画像 pipeline。扩展离线时 runtime 不创建任务，也不推进调度时间。
 
+## B 站与抖音浏览器任务边界
+
+| 方法与路径 | 状态 | 契约 |
+|---|---|---|
+| `POST /api/sources/bili/task-result` | ✅ | B 站扩展搜索任务 payload 带 `discovery_lane="recent"` 时，结果仍以 `source_strategy="bili-extension-search"` 进入统一 evaluator，同时保存 `source_context="bili-extension-search:recent"` 和 raw lane provenance；该标记不改变相关性、阈值或 admission。 |
+| `GET /api/sources/dy/next-task` | ✅ | 对 legacy discovery 的 `dy_tasks` 执行 durable source-wide single-flight：`BEGIN IMMEDIATE` 内若已有未超过 15 分钟的 `in_progress` lease，则返回 bodyless 204，不让另一个扩展 ID/Profile 领取第二条任务；过期或缺失 `claimed_at` 的 lease 可按 FIFO 重领。此门禁不涵盖先于 legacy queue 检查的 native-save job。 |
+
+抖音的 15 分钟 stale lease 与 producer 的 15 分钟基础设施失败退避来自 2026-08-09 真实扩展 E2E：正常任务约 15–35 秒，而执行上下文丢失会耗尽 180 秒 watchdog。它们是防止重复 claim/分钟级重试风暴的工程安全值，不是抖音官方限额；任务 watchdog、lease 或调度 cadence 改动时必须重新校准。
+
 ## 封面代理与抓取状态
 
 `GET /api/image-proxy?url=...` 先在线程中读取本地 `data/image-cache/`；命中不占网络槽并返回原始图片类型、`Cache-Control`、`nosniff` 与 `X-Image-Cache: hit`。未命中进入 app-owned `ImageFetchCoordinator`：API 前台请求和 `ContinuousRefreshController` 后台预取共用总上限 4，后台最多 3，队列有前台请求时优先放行；同一 `image_cache_key(url)` 只产生一个 upstream task。单个 HTTP waiter 取消不会取消共享抓取，>=500 失败仍会在线程中做一次“并发写入已落盘”的 cache race fallback。成功响应保留 `X-Image-Cache: miss`。

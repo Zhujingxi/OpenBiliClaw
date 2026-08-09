@@ -46,6 +46,11 @@ from openbiliclaw.discovery.prefilter_audit import (
     PREFILTER_AUDIT_RETENTION_DAYS,
     validate_prefilter_storage_record,
 )
+from openbiliclaw.discovery.temporal import (
+    TEMPORAL_POLICY_VERSION,
+    normalize_temporal_class,
+    normalize_temporal_confidence,
+)
 from openbiliclaw.published_time import normalize_published_time
 from openbiliclaw.saved_sync.identity import (
     canonical_source_platform,
@@ -116,6 +121,12 @@ _CARD_SETTLEMENT_EFFECT_KEY_RE = re.compile(r"\Adialogue:[0-9a-f]{64}:[a-z_]+\Z"
 _PROFILE_LEDGER_EFFECT_KEY_RE = re.compile(
     r"\Adialogue:[0-9a-f]{64}:(?:ledger|derived:[0-9a-f]{64})\Z"
 )
+# Aggregate-only temporal ranking shadows are tiny (one row per serve), so 30
+# days / 5,000 rows retains several calibration windows without turning an
+# observability feature into unbounded user-data growth.
+_TEMPORAL_RANKING_AUDIT_RETENTION_DAYS = 30
+_TEMPORAL_RANKING_AUDIT_MAX_ROWS = 5_000
+_TEMPORAL_RANKING_AUDIT_POLICY = "temporal-ranking-shadow-v1"
 
 
 def _validated_card_settlement_ref(ref: object) -> str:
@@ -942,6 +953,10 @@ CREATE TABLE IF NOT EXISTS content_cache (
     source_rank INTEGER DEFAULT 0,
     relevance_score REAL DEFAULT 0.0,
     relevance_reason TEXT DEFAULT '',
+    temporal_class TEXT DEFAULT 'unknown',
+    temporal_confidence REAL DEFAULT 0.0,
+    temporal_reason TEXT DEFAULT '',
+    temporal_policy_version TEXT DEFAULT 'v1',
     pool_expression TEXT DEFAULT '',
     pool_topic_label TEXT DEFAULT '',
     candidate_tier TEXT DEFAULT 'primary',
@@ -1009,6 +1024,10 @@ CREATE TABLE IF NOT EXISTS discovery_candidates (
     franchise_key         TEXT NOT NULL DEFAULT '',
     relevance_score       REAL NOT NULL DEFAULT 0.0,
     relevance_reason      TEXT NOT NULL DEFAULT '',
+    temporal_class        TEXT NOT NULL DEFAULT 'unknown',
+    temporal_confidence   REAL NOT NULL DEFAULT 0.0,
+    temporal_reason       TEXT NOT NULL DEFAULT '',
+    temporal_policy_version TEXT NOT NULL DEFAULT 'v1',
     pool_expression       TEXT NOT NULL DEFAULT '',
     pool_topic_label      TEXT NOT NULL DEFAULT '',
     eval_error            TEXT NOT NULL DEFAULT '',
@@ -1173,6 +1192,23 @@ CREATE INDEX IF NOT EXISTS idx_prefilter_shadow_created
     ON evaluator_prefilter_shadow_audit(created_at, id);
 CREATE INDEX IF NOT EXISTS idx_prefilter_shadow_platform_context
     ON evaluator_prefilter_shadow_audit(platform_class, context_class, created_at);
+
+-- Aggregate-only counterfactual for the recommendation temporal bonus. It
+-- intentionally stores no content identity, title, URL, author, or keyword.
+CREATE TABLE IF NOT EXISTS temporal_ranking_shadow_audit (
+    id                        INTEGER PRIMARY KEY AUTOINCREMENT,
+    policy_version            TEXT NOT NULL,
+    candidate_count           INTEGER NOT NULL,
+    parseable_published_count INTEGER NOT NULL,
+    bonus_eligible_count      INTEGER NOT NULL,
+    class_counts_json         TEXT NOT NULL DEFAULT '{}',
+    source_counts_json        TEXT NOT NULL DEFAULT '{}',
+    age_bucket_counts_json    TEXT NOT NULL DEFAULT '{}',
+    top_k_metrics_json        TEXT NOT NULL DEFAULT '[]',
+    created_at                TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_temporal_ranking_shadow_created
+    ON temporal_ranking_shadow_audit(created_at, id);
 
 -- v0.3.174+ (cognitive profile pipeline Phase 0): append-only audit ledger
 -- for profile write points. One row per profile-mutating action, recorded
@@ -1445,6 +1481,59 @@ def _normalize_admission_min_score(value: object) -> float:
     return score
 
 
+def _normalize_temporal_fields_for_storage(
+    *,
+    temporal_class: object,
+    temporal_confidence: object,
+    temporal_reason: object,
+) -> tuple[str, float, str, str]:
+    """Validate temporal evaluator metadata before it reaches SQLite."""
+
+    normalized_class = normalize_temporal_class(temporal_class)
+    try:
+        normalized_confidence = normalize_temporal_confidence(temporal_confidence)
+    except (OverflowError, TypeError, ValueError):
+        normalized_confidence = 0.0
+    raw_confidence: float | None = None
+    if not isinstance(temporal_confidence, bool) and isinstance(temporal_confidence, int | float):
+        try:
+            raw_confidence = float(temporal_confidence)
+        except (OverflowError, TypeError, ValueError):
+            raw_confidence = None
+    confidence_is_valid = (
+        raw_confidence is not None
+        and math.isfinite(raw_confidence)
+        and 0.0 <= raw_confidence <= 1.0
+    )
+    normalized_reason = temporal_reason.strip() if isinstance(temporal_reason, str) else ""
+    reason_is_valid = bool(normalized_reason)
+    is_neutral_default = (
+        normalized_class == "unknown"
+        and isinstance(temporal_class, str)
+        and temporal_class.strip().lower() == "unknown"
+        and confidence_is_valid
+        and normalized_confidence == 0.0
+        and isinstance(temporal_reason, str)
+        and not normalized_reason
+    )
+    if normalized_class == "unknown" or not confidence_is_valid or not reason_is_valid:
+        if not is_neutral_default:
+            logger.warning(
+                "Invalid temporal metadata coerced to unknown "
+                "(class_type=%s, confidence_type=%s, reason_type=%s)",
+                type(temporal_class).__name__,
+                type(temporal_confidence).__name__,
+                type(temporal_reason).__name__,
+            )
+        return ("unknown", 0.0, "", TEMPORAL_POLICY_VERSION)
+    return (
+        normalized_class,
+        normalized_confidence,
+        normalized_reason,
+        TEMPORAL_POLICY_VERSION,
+    )
+
+
 class Database:
     """Lightweight SQLite wrapper for OpenBiliClaw.
 
@@ -1504,6 +1593,7 @@ class Database:
         self._ensure_recommendation_feedback_columns()
         self._ensure_content_cache_runtime_columns()
         self._ensure_content_cache_relevance_columns()
+        self._ensure_content_cache_temporal_columns()
         self._ensure_content_cache_topic_columns()
         self._ensure_content_cache_pool_copy_columns()
         self._ensure_content_cache_delight_columns()
@@ -3789,6 +3879,205 @@ class Database:
             "incomplete": int(row["incomplete"] or 0),
         }
 
+    # ------------------------------------------------------------------
+    # Recommendation temporal-ranking shadow audit
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _temporal_audit_count_map(value: object, *, expected_total: int) -> dict[str, int]:
+        """Validate one aggregate count map without accepting content identity."""
+
+        if not isinstance(value, Mapping):
+            raise ValueError("temporal ranking audit count map must be an object")
+        normalized: dict[str, int] = {}
+        for raw_key, raw_count in value.items():
+            key = str(raw_key).strip().lower()
+            if re.fullmatch(r"[a-z0-9_<>\-=]{1,32}", key) is None:
+                raise ValueError("temporal ranking audit count-map key is invalid")
+            if isinstance(raw_count, bool) or not isinstance(raw_count, int) or raw_count < 0:
+                raise ValueError("temporal ranking audit counts must be non-negative integers")
+            normalized[key] = raw_count
+        if sum(normalized.values()) != expected_total:
+            raise ValueError("temporal ranking audit count map has the wrong total")
+        return dict(sorted(normalized.items()))
+
+    def record_temporal_ranking_shadow_audit(self, audit: Mapping[str, Any]) -> int:
+        """Persist one privacy-safe ranking counterfactual with bounded retention."""
+
+        policy_version = str(audit.get("policy_version") or "")
+        if policy_version != _TEMPORAL_RANKING_AUDIT_POLICY:
+            raise ValueError("unsupported temporal ranking audit policy")
+
+        def _count(name: str) -> int:
+            value = audit.get(name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"temporal ranking audit {name} must be non-negative")
+            return value
+
+        candidate_count = _count("candidate_count")
+        parseable_count = _count("parseable_published_count")
+        eligible_count = _count("bonus_eligible_count")
+        if parseable_count > candidate_count or eligible_count > parseable_count:
+            raise ValueError("temporal ranking audit coverage counts are inconsistent")
+
+        class_counts = self._temporal_audit_count_map(
+            audit.get("class_counts"),
+            expected_total=candidate_count,
+        )
+        source_counts = self._temporal_audit_count_map(
+            audit.get("source_counts"),
+            expected_total=candidate_count,
+        )
+        age_bucket_counts = self._temporal_audit_count_map(
+            audit.get("age_bucket_counts"),
+            expected_total=candidate_count,
+        )
+
+        raw_top_k = audit.get("top_k_metrics")
+        if not isinstance(raw_top_k, list) or len(raw_top_k) > 3:
+            raise ValueError("temporal ranking audit top-k metrics must be a bounded list")
+        scalar_count_keys = {
+            "requested_top_k",
+            "effective_top_k",
+            "overlap_count",
+            "positional_match_count",
+            "baseline_parseable_published",
+            "effective_parseable_published",
+            "baseline_bonus_eligible",
+            "effective_bonus_eligible",
+        }
+        count_map_keys = {
+            "baseline_classes",
+            "effective_classes",
+            "entered_classes",
+            "exited_classes",
+            "baseline_sources",
+            "effective_sources",
+            "entered_sources",
+            "exited_sources",
+            "baseline_age_buckets",
+            "effective_age_buckets",
+            "entered_age_buckets",
+            "exited_age_buckets",
+        }
+        allowed_keys = scalar_count_keys | count_map_keys | {"jaccard"}
+        top_k_metrics: list[dict[str, object]] = []
+        for raw_metric in raw_top_k:
+            if not isinstance(raw_metric, Mapping) or set(raw_metric) != allowed_keys:
+                raise ValueError("temporal ranking audit top-k metric schema is invalid")
+            metric: dict[str, object] = {}
+            normalized_scalar_counts: dict[str, int] = {}
+            for key in scalar_count_keys:
+                value = raw_metric.get(key)
+                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                    raise ValueError("temporal ranking audit top-k counts must be non-negative")
+                normalized_scalar_counts[key] = value
+                metric[key] = value
+            effective_top_k = normalized_scalar_counts["effective_top_k"]
+            requested_top_k = normalized_scalar_counts["requested_top_k"]
+            overlap_count = normalized_scalar_counts["overlap_count"]
+            if (
+                requested_top_k not in {10, 50, 100}
+                or effective_top_k > min(requested_top_k, candidate_count)
+                or overlap_count > effective_top_k
+            ):
+                raise ValueError("temporal ranking audit top-k bounds are inconsistent")
+            raw_jaccard = raw_metric.get("jaccard")
+            if isinstance(raw_jaccard, bool) or not isinstance(raw_jaccard, int | float):
+                raise ValueError("temporal ranking audit jaccard must be numeric")
+            jaccard = float(raw_jaccard)
+            if not math.isfinite(jaccard) or not 0.0 <= jaccard <= 1.0:
+                raise ValueError("temporal ranking audit jaccard must be finite in [0, 1]")
+            metric["jaccard"] = jaccard
+            changed = effective_top_k - overlap_count
+            for key in count_map_keys:
+                expected = changed if key.startswith(("entered_", "exited_")) else effective_top_k
+                metric[key] = self._temporal_audit_count_map(
+                    raw_metric.get(key),
+                    expected_total=expected,
+                )
+            top_k_metrics.append(metric)
+
+        cursor = self._execute_write(
+            """
+            INSERT INTO temporal_ranking_shadow_audit (
+                policy_version,
+                candidate_count,
+                parseable_published_count,
+                bonus_eligible_count,
+                class_counts_json,
+                source_counts_json,
+                age_bucket_counts_json,
+                top_k_metrics_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                policy_version,
+                candidate_count,
+                parseable_count,
+                eligible_count,
+                json.dumps(class_counts, sort_keys=True, separators=(",", ":")),
+                json.dumps(source_counts, sort_keys=True, separators=(",", ":")),
+                json.dumps(age_bucket_counts, sort_keys=True, separators=(",", ":")),
+                json.dumps(top_k_metrics, sort_keys=True, separators=(",", ":")),
+            ),
+        )
+        self._execute_write(
+            """
+            DELETE FROM temporal_ranking_shadow_audit
+            WHERE created_at < datetime('now', ?)
+            """,
+            (f"-{_TEMPORAL_RANKING_AUDIT_RETENTION_DAYS} days",),
+        )
+        self._execute_write(
+            """
+            DELETE FROM temporal_ranking_shadow_audit
+            WHERE id IN (
+                SELECT id
+                FROM temporal_ranking_shadow_audit
+                ORDER BY created_at DESC, id DESC
+                LIMIT -1 OFFSET ?
+            )
+            """,
+            (_TEMPORAL_RANKING_AUDIT_MAX_ROWS,),
+        )
+        return int(cursor.lastrowid or 0)
+
+    def query_temporal_ranking_shadow_audit(
+        self,
+        *,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return retained aggregate-only temporal ranking shadows."""
+
+        sql = """
+            SELECT id,
+                   policy_version,
+                   candidate_count,
+                   parseable_published_count,
+                   bonus_eligible_count,
+                   class_counts_json,
+                   source_counts_json,
+                   age_bucket_counts_json,
+                   top_k_metrics_json,
+                   created_at
+            FROM temporal_ranking_shadow_audit
+            ORDER BY id ASC
+        """
+        params: tuple[Any, ...] = ()
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (max(0, int(limit)),)
+        results: list[dict[str, Any]] = []
+        for raw_row in self.conn.execute(sql, params).fetchall():
+            row = dict(raw_row)
+            row["class_counts"] = json.loads(str(row.pop("class_counts_json")))
+            row["source_counts"] = json.loads(str(row.pop("source_counts_json")))
+            row["age_bucket_counts"] = json.loads(str(row.pop("age_bucket_counts_json")))
+            row["top_k_metrics"] = json.loads(str(row.pop("top_k_metrics_json")))
+            results.append(row)
+        return results
+
     def query_llm_usage_by_day(
         self,
         *,
@@ -4214,6 +4503,15 @@ class Database:
             kwargs.get("published_at"),
             label=kwargs.get("published_label"),
         )
+        temporal = _normalize_temporal_fields_for_storage(
+            temporal_class=kwargs.get("temporal_class", "unknown"),
+            temporal_confidence=kwargs.get("temporal_confidence", 0.0),
+            temporal_reason=kwargs.get("temporal_reason", ""),
+        )
+        has_explicit_temporal = all(
+            field in kwargs
+            for field in ("temporal_class", "temporal_confidence", "temporal_reason")
+        )
         source_platform = str(kwargs.get("source_platform", "bilibili") or "").strip()
         raw_content_id = str(kwargs.get("content_id", bvid) or "").strip()
         identity_content_id = raw_content_id if source_platform else bvid.strip()
@@ -4258,6 +4556,10 @@ class Database:
                 bookmark_count,
                 relevance_score,
                 relevance_reason,
+                temporal_class,
+                temporal_confidence,
+                temporal_reason,
+                temporal_policy_version,
                 pool_expression,
                 pool_topic_label,
                 candidate_tier,
@@ -4277,7 +4579,7 @@ class Database:
             VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             ON CONFLICT(bvid) DO UPDATE SET
                 title = excluded.title,
@@ -4345,6 +4647,25 @@ class Database:
                     content_cache.relevance_reason,
                     ''
                 ),
+                temporal_class = CASE
+                    WHEN ? THEN excluded.temporal_class
+                    ELSE COALESCE(content_cache.temporal_class, 'unknown')
+                END,
+                temporal_confidence = CASE
+                    WHEN ? THEN excluded.temporal_confidence
+                    ELSE COALESCE(content_cache.temporal_confidence, 0.0)
+                END,
+                temporal_reason = CASE
+                    WHEN ? THEN excluded.temporal_reason
+                    ELSE COALESCE(content_cache.temporal_reason, '')
+                END,
+                temporal_policy_version = CASE
+                    WHEN ? THEN excluded.temporal_policy_version
+                    ELSE COALESCE(
+                        NULLIF(content_cache.temporal_policy_version, ''),
+                        'v1'
+                    )
+                END,
                 pool_expression = COALESCE(
                     NULLIF(excluded.pool_expression, ''),
                     content_cache.pool_expression,
@@ -4440,6 +4761,10 @@ class Database:
                 kwargs.get("bookmark_count", 0),
                 kwargs.get("relevance_score", 0.0),
                 kwargs.get("relevance_reason", ""),
+                temporal[0],
+                temporal[1],
+                temporal[2],
+                temporal[3],
                 kwargs.get("pool_expression", ""),
                 kwargs.get("pool_topic_label", ""),
                 kwargs.get("candidate_tier", "primary"),
@@ -4454,6 +4779,10 @@ class Database:
                 float(kwargs.get("rating_score", 0.0) or 0.0),
                 max(0, int(kwargs.get("rating_count", 0) or 0)),
                 max(0, int(kwargs.get("source_rank", 0) or 0)),
+                has_explicit_temporal,
+                has_explicit_temporal,
+                has_explicit_temporal,
+                has_explicit_temporal,
                 EXPLORE_STRATEGY,
                 EXPLORE_ADMISSION_MIN_SCORE,
                 self._pool_admission_min_score(),
@@ -4918,6 +5247,11 @@ class Database:
             candidate_id = int(evaluation.get("candidate_id") or evaluation.get("id") or 0)
             if candidate_id <= 0:
                 continue
+            temporal = _normalize_temporal_fields_for_storage(
+                temporal_class=evaluation.get("temporal_class", "unknown"),
+                temporal_confidence=evaluation.get("temporal_confidence", 0.0),
+                temporal_reason=evaluation.get("temporal_reason", ""),
+            )
             cursor = self._execute_write(
                 """
                 UPDATE discovery_candidates
@@ -4928,6 +5262,10 @@ class Database:
                     franchise_key = ?,
                     relevance_score = ?,
                     relevance_reason = ?,
+                    temporal_class = ?,
+                    temporal_confidence = ?,
+                    temporal_reason = ?,
+                    temporal_policy_version = ?,
                     pool_expression = ?,
                     pool_topic_label = ?,
                     eval_error = ?,
@@ -4947,6 +5285,10 @@ class Database:
                     str(evaluation.get("franchise_key") or ""),
                     float(evaluation.get("relevance_score") or evaluation.get("score") or 0.0),
                     str(evaluation.get("relevance_reason") or evaluation.get("reason") or ""),
+                    temporal[0],
+                    temporal[1],
+                    temporal[2],
+                    temporal[3],
                     str(evaluation.get("pool_expression") or ""),
                     str(evaluation.get("pool_topic_label") or ""),
                     str(evaluation.get("eval_error") or ""),
@@ -4971,6 +5313,11 @@ class Database:
             candidate_id = int(evaluation.get("candidate_id") or evaluation.get("id") or 0)
             if candidate_id <= 0:
                 continue
+            temporal = _normalize_temporal_fields_for_storage(
+                temporal_class=evaluation.get("temporal_class", "unknown"),
+                temporal_confidence=evaluation.get("temporal_confidence", 0.0),
+                temporal_reason=evaluation.get("temporal_reason", ""),
+            )
             cursor = self._execute_write(
                 """
                 UPDATE discovery_candidates
@@ -4981,6 +5328,10 @@ class Database:
                     franchise_key = ?,
                     relevance_score = ?,
                     relevance_reason = ?,
+                    temporal_class = ?,
+                    temporal_confidence = ?,
+                    temporal_reason = ?,
+                    temporal_policy_version = ?,
                     pool_expression = ?,
                     pool_topic_label = ?,
                     eval_error = ?,
@@ -5001,6 +5352,10 @@ class Database:
                     str(evaluation.get("franchise_key") or ""),
                     float(evaluation.get("relevance_score") or evaluation.get("score") or 0.0),
                     str(evaluation.get("relevance_reason") or evaluation.get("reason") or ""),
+                    temporal[0],
+                    temporal[1],
+                    temporal[2],
+                    temporal[3],
                     str(evaluation.get("pool_expression") or ""),
                     str(evaluation.get("pool_topic_label") or ""),
                     str(evaluation.get("eval_error") or ""),
@@ -9178,6 +9533,24 @@ class Database:
                 continue
             self.conn.execute(f"ALTER TABLE content_cache ADD COLUMN {column_name} {column_type}")
 
+    def _ensure_content_cache_temporal_columns(self) -> None:
+        """Backfill evaluator-owned temporal metadata for existing caches."""
+
+        existing_columns = {
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(content_cache)").fetchall()
+        }
+        required_columns = {
+            "temporal_class": "TEXT DEFAULT 'unknown'",
+            "temporal_confidence": "REAL DEFAULT 0.0",
+            "temporal_reason": "TEXT DEFAULT ''",
+            "temporal_policy_version": "TEXT DEFAULT 'v1'",
+        }
+        for column_name, column_type in required_columns.items():
+            if column_name in existing_columns:
+                continue
+            self.conn.execute(f"ALTER TABLE content_cache ADD COLUMN {column_name} {column_type}")
+
     def _ensure_content_cache_topic_columns(self) -> None:
         """Backfill topic bucketing fields for existing content-cache rows."""
         existing_columns = {
@@ -9892,6 +10265,10 @@ class Database:
             "rating_score": "REAL NOT NULL DEFAULT 0.0",
             "rating_count": "INTEGER NOT NULL DEFAULT 0",
             "source_rank": "INTEGER NOT NULL DEFAULT 0",
+            "temporal_class": "TEXT NOT NULL DEFAULT 'unknown'",
+            "temporal_confidence": "REAL NOT NULL DEFAULT 0.0",
+            "temporal_reason": "TEXT NOT NULL DEFAULT ''",
+            "temporal_policy_version": "TEXT NOT NULL DEFAULT 'v1'",
         }
         for column_name, column_type in required_columns.items():
             if column_name in existing_columns:

@@ -11233,6 +11233,7 @@ def create_app(
         *,
         query: str = "",
         source_keyword_id: int | None = None,
+        discovery_lane: str = "",
     ) -> int:
         """Enqueue extension-collected Bilibili search videos for evaluation."""
 
@@ -11244,6 +11245,8 @@ def create_app(
         if not callable(enqueue):
             return 0
         writes = []
+        lane = "recent" if str(discovery_lane).strip().lower() == "recent" else ""
+        source_context = "bili-extension-search:recent" if lane else "bili-extension-search"
         for video in videos:
             bvid = str(video.get("bvid") or video.get("content_id") or "").strip()
             if not bvid:
@@ -11289,6 +11292,7 @@ def create_app(
                 tags=tags,
                 description=str(video.get("description") or video.get("desc") or "").strip(),
                 source_strategy="bili-extension-search",
+                discovery_lane=lane,
                 content_id=bvid,
                 content_url=content_url,
                 source_platform="bilibili",
@@ -11301,13 +11305,14 @@ def create_app(
             writes.append(
                 discovered_content_to_candidate_write(
                     item,
-                    source_context="bili-extension-search",
+                    source_context=source_context,
                     raw_payload={
                         "bvid": bvid,
                         "query": query,
                         "url": content_url,
                         "admission_policy": "observed",
                         "score_threshold": 0.60,
+                        **({"discovery_lane": lane} if lane else {}),
                     },
                 )
             )
@@ -12298,6 +12303,11 @@ def create_app(
                         task_payload = parsed
             query = str(task_payload.get("query") or task_payload.get("keyword") or "").strip()
             source_keyword_id = source_keyword_id_from_bili_task(task_payload_json)
+            discovery_lane = (
+                "recent"
+                if str(task_payload.get("discovery_lane") or "").strip().lower() == "recent"
+                else ""
+            )
             enqueued = 0
             if added_videos:
                 enqueued = _cache_bili_search_videos(
@@ -12305,6 +12315,7 @@ def create_app(
                     added_videos,
                     query=query,
                     source_keyword_id=source_keyword_id,
+                    discovery_lane=discovery_lane,
                 )
                 if enqueued:
                     _notify_discovery_candidates_enqueued("bilibili")

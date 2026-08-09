@@ -643,6 +643,9 @@ background ─ background admission (default 3) ──────┘
 │ 对话 → typed settlement worker → learning          │
 │ 旧反馈批：unified_interest_line=false 时启用   │
 │ 初始化屏障：完整画像落盘 → 发现/评估/表达 → 可浏览推荐 │
+│ B站供给：普通相关性搜索 + 预算内 1×5 pubdate recent lane → 统一评估 │
+│ 候选评估：时间中性相关性 + Agent 时效分型 → 发布时间高置信正向 bonus │
+│ 推荐时效 shadow：含 bonus vs 无 bonus Top10/50/100 聚合 → class/source/age 审计（不改 serving）│
 │ 封面：proxy前台 + refresh预取 → app-stable 4/3 lane → singleflight/原子缓存 │
 │ Soul 认知纪律：待聊双轨冷却 · 单对话锚 · worker-only 结算 · 轻量 winner receipt · 疑惑 FIFO · 台账 · 深层门控 │
 │   LLM 适配层 · 多平台源适配（SourceAdapter）        │

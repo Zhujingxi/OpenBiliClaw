@@ -15,6 +15,8 @@ from openbiliclaw.config import llm_concurrency_from_config as _llm_concurrency_
 from openbiliclaw.discovery.candidate_pipeline import DiscoveryCandidatePipeline
 from openbiliclaw.discovery.engine import ContentDiscoveryEngine
 from openbiliclaw.discovery.strategies.strategies import (
+    RECENT_SUPPLY_LANE_PAGE_SIZE,
+    RECENT_SUPPLY_LANE_QUERIES,
     ExploreStrategy,
     RelatedChainStrategy,
     SearchStrategy,
@@ -254,6 +256,8 @@ def build_openclaw_adapter_services() -> OpenClawAdapterServices:
         concurrency=concurrency,
         database=database,
         embedding_service=embedding_service,
+        recent_lane_queries_per_run=RECENT_SUPPLY_LANE_QUERIES,
+        recent_lane_page_size=RECENT_SUPPLY_LANE_PAGE_SIZE,
     )
     trending_strategy = TrendingStrategy(
         bilibili_client=bilibili_client,

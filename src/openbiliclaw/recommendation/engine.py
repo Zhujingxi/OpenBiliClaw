@@ -23,6 +23,7 @@ from openbiliclaw.discovery.strategies._utils import (
     compact_content_prompt_profile_summary,
 )
 from openbiliclaw.discovery.style_keys import VALID_STYLE_KEYS, normalize_style_key
+from openbiliclaw.discovery.temporal import TEMPORAL_POLICY_VERSION
 from openbiliclaw.llm.base import classify_llm_failure_kind
 from openbiliclaw.llm.json_utils import (
     extract_llm_json_list,
@@ -5085,6 +5086,12 @@ class RecommendationEngine:
                 topic_key=str(row.get("topic_key", "")),
                 topic_group=str(row.get("topic_group", "")),
                 style_key=str(row.get("style_key", "")),
+                temporal_class=str(row.get("temporal_class", "") or "unknown"),
+                temporal_confidence=float(row.get("temporal_confidence", 0.0) or 0.0),
+                temporal_reason=str(row.get("temporal_reason", "") or ""),
+                temporal_policy_version=str(
+                    row.get("temporal_policy_version", "") or TEMPORAL_POLICY_VERSION
+                ),
                 source_strategy=str(row.get("source", "")),
                 relevance_score=float(row.get("relevance_score", 0.0) or 0.0),
                 relevance_reason=str(row.get("relevance_reason", "")),
@@ -5186,10 +5193,19 @@ class RecommendationEngine:
             context = build_from_rows(*curator_snapshot)
         else:
             context = self._curator.build_context()
-        return (
-            self._curator.score_candidates(candidates, context),
-            context.over_budget_amplification_keys,
+        scores = self._curator.score_candidates(candidates, context)
+        record_temporal_shadow = getattr(
+            self._curator,
+            "record_temporal_ranking_shadow_audit",
+            None,
         )
+        if callable(record_temporal_shadow):
+            try:
+                record_temporal_shadow(candidates, scores, context)
+            except Exception:
+                # Shadow observability must never make the serving path fail.
+                logger.warning("temporal ranking shadow observer failed", exc_info=True)
+        return scores, context.over_budget_amplification_keys
 
     def _apply_platform_floor(self, candidates: list[DiscoveredContent]) -> list[DiscoveredContent]:
         """Guarantee every stocked platform is represented in the serve window.

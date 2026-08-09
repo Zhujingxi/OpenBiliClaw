@@ -298,12 +298,14 @@ content executor 的 selector 策略按平台收敛在 `src/content/e2e-executor
   "task_id": "...",
   "type": "search",
   "query": "机械键盘 声音",
-  "limit": 20,
-  "page_size": 20
+  "limit": 5,
+  "page_size": 5,
+  "order": "pubdate",
+  "discovery_lane": "recent"
 }
 ```
 
-dispatcher 导航到 `https://search.bilibili.com/all?keyword=...`，等 tab ready 后发送 `BILI_TASK_EXECUTE`；如果 Chrome 报 content script listener 暂未就绪，dispatcher 会在 8 秒窗口内短重试，吸收真实页面 `complete` 早于 isolated content script 注册的时序抖动。`src/content/bili/task-executor.ts` 不在 isolated world 里直连 B 站 API，也不伪造 WBI 签名；它只等待真实搜索页渲染出 `.bili-video-card` / `.video-list-item`，从 DOM 卡片里提取 `bvid`、标题、UP 主、播放数、封面、时长和简介，再用 `BILI_TASK_RESULT` 回给 service worker。service worker POST 到 `/api/sources/bili/task-result` 后，后端把结果写入 `discovery_candidates`，继续走共享 evaluator / admission，而不是由插件直接写推荐池。
+普通任务的 `order/discovery_lane` 省略；producer 每轮只把第一个兜底任务标为上述近期 lane，并限制为 5 条。dispatcher 对该任务导航到 `https://search.bilibili.com/all?keyword=...&order=pubdate`，普通任务仍使用原 URL；它只接受 `totalrank/pubdate` 和 `recent` 这组封闭枚举。等 tab ready 后 dispatcher 发送 `BILI_TASK_EXECUTE`；如果 Chrome 报 content script listener 暂未就绪，会在 8 秒窗口内短重试，吸收真实页面 `complete` 早于 isolated content script 注册的时序抖动。`src/content/bili/task-executor.ts` 不在 isolated world 里直连 B 站 API，也不伪造 WBI 签名；它只等待真实搜索页渲染出 `.bili-video-card` / `.video-list-item`，从 DOM 卡片里提取 `bvid`、标题、UP 主、播放数、封面、时长和简介，再用 `BILI_TASK_RESULT` 回给 service worker。service worker POST 到 `/api/sources/bili/task-result` 后，后端把结果写入 `discovery_candidates`，继续走共享 evaluator / admission，而不是由插件直接写推荐池。近期结果仍使用 `source_strategy="bili-extension-search"`，只在 `source_context` 和 raw payload 中留下 `recent` provenance。
 
 真实联调可用两档验证：
 
@@ -383,11 +385,17 @@ search / creator 任务的 note 路由与被动采集共用 `NOTE_ANCHOR_SELECTO
 
 `src/content/dy/task-executor.ts` 负责在页面内切换 scope、滚动与回传。`src/main/dy-fetch-tap.ts` 运行在 MAIN world，拦截抖音页面 fetch，并对四个账号 scope 走站内分页 API harvester：作品 / 收藏 / 喜欢使用 `max_cursor`，关注使用 `max_time`。分页前不再只等页面偶然发出带 `sec_user_id` 的请求：`#RENDER_DATA` 只有显式 `isLogin=true` 时才提供候选，随后仍必须由 MAIN-world `/aweme/v1/web/user/profile/self/` 正面确认；该端点只接受 `status_code=0` 且 `user.sec_uid` 非空，冲突时以它为准，也只有它确认的结果能在同一 tab 内缓存 / 合并并发探测。常驻 fetch / XHR wrapper 不从被动请求 URL 提取或记录 `sec_user_id`；身份消息只会由用户触发的 bootstrap 身份请求返回。该 bridge 使用页面自身已登录 fetch 上下文，不传 Cookie 值；身份响应传公开 `sec_uid`，分页响应传任务所需的解析后条目，不转发未裁剪的原始响应对象。MAIN / isolated 两侧的 `postMessage` listener 都要求 `event.source === window` 且 `event.origin === window.location.origin`；这只降低跨 frame / 页面噪声误接收，不是授权边界，同页脚本仍可发消息，因此 sentinel、request ID 与 payload 校验继续保留。
 
+fetch tap 的安装状态保存在页面 Window 上，而不是单次 bundle closure：同一个 Douyin SPA 文档被 dispatcher、content script 或更新后的 bundle 重复注入时，仍然存活的 fetch / XHR wrapper 与 API listener 不会重复安装；如果页面 bundle 后来替换了 fetch 或 XHR，则下一次 SDK-ready 校验 / 动态重注入会只重包当前原语。API bridge 以 `type + requestId` 做 single-flight；完成后立即释放，悬挂请求以 120 秒 TTL 和 128 条上限清理，过期响应不再发回已经结束的 isolated listener。
+
 采集到的条目通过 `postMessage` 回到 isolated world 后进入 `BootstrapItemSink` 去重，再以 `status="partial"` 分批 POST 到 `/api/sources/dy/task-result`。全部 scope 正常完成时最终状态为 `ok`；身份仍不可得、API 首屏业务状态失败、后续 HTTP / cursor 页中断、游标缺失 / 非法 / 停滞 / 成环，或 50 页安全上限耗尽时，保留已采到的有效条目并以终态 `degraded` 完成，最终 debug 同时保存各 scope 状态与稳定原因。后端将 DB 任务标记为已结束，同时把 `result_json.status="degraded"` 留给 CLI / init 展示；终态后的迟到 partial / 重试回调会被幂等忽略，不能清除降级状态或重复传播事件。CLI 最终摘要与 API init 都把它显示为“部分完成”，阶段 1 也以 `warning / douyin_degraded` 完成，但已采事件仍参与本次画像建模；近期任务去重不会复用这个降级终态，下一次会重新入队补齐分页。新增 videos 仍按既有映射转成统一事件：发布 → `view`，收藏 → `favorite`，点赞 → `like`，关注 → `follow`。扩展不再额外 POST 临时调试事件到后端；`task-result` 中已有的结构化 `debug` 字段仍随正常任务结果传递。
 
 fetch tap 除 manifest 的 document-start 注入外，还会在 dispatcher 与 content script 的 SPA 重注入路径动态加载。Chrome/Edge 从仓库根或 release archive 加载时资源通常是 `dist/main/dy-fetch-tap.js`；部分既有 unpacked 构建把输出目录本身作为资源根，文件则是 `main/dy-fetch-tap.js`。`shared/asset-prefix.ts::runtimeAssetCandidates()` 统一生成候选，background 的 `chrome.scripting.executeScript` 与 content 的 `<script src=chrome.runtime.getURL(...)>` 都按同一顺序回退；Firefox 的空 prefix 只产生一个 `main/...`，不会重复注入。该回退只改变扩展自身文件定位，不扩大 host permission，也不触发额外平台请求。
 
-本地 `npm run build` 只更新磁盘上的 bundle，不会替正在运行的 Chrome service worker 热换代码；真实账号复测前必须在 `chrome://extensions` 对 unpacked OpenBiliClaw 点一次“重新加载”。后端 debug 若仍只出现 `Could not load file: 'dist/main/dy-fetch-tap.js'`，说明浏览器还在运行旧单路径 bundle，不能据此判断新 fallback 失败；新版本成功状态会携带实际命中的 `ok_file=<candidate>`。
+Douyin dispatcher 会先确认当前 worker 具备 `chrome.tabs.create`，再在 `/next-task` claim 前获取跨来源 mutex，并让 alarm 与 runtime-stream kick 共用同一个 poll promise；残缺运行环境或锁忙时不 claim，并发唤醒也只认领一次。claim 后 executor 用 `accepted / declined` 握手，拒绝任务会先回传失败再释放锁。注入资源明确失败、tap 未就绪、API / UI / 导航失败且零候选时，search / hot / feed 会回传稳定 `failed` 终态；hot 不再把 `failed` 继续合并成 partial 后再写 `ok`。feed 若唯一问题是 `feed_no_observed_response`，dispatcher 会在原后台 tab 最多执行一次 `tabs.reload({bypassCache:true})` 并重试，任务预算相应为 120 秒；不会激活 tab，也不会对真实空、限流、风控、登录或注入错误重试。已获得 DOM / passive 候选时仍保留有效结果，只有链路正常且确实没有内容时才使用 `empty`。task-result 回传要求后端 2xx ACK，并对同一幂等 body 做最多 3 次有界退避重试；终态未确认时不清理本地 lifecycle，也不继续认领下一条任务。
+
+扩展 mutex 只能覆盖同一 service worker。后端 `DyTaskQueue.next_pending()` 因此在 `BEGIN IMMEDIATE` 领取事务内额外检查全表未过期 `in_progress` lease：存在时返回 204，不把第二条任务交给另一个 unpacked 扩展 ID 或 Chrome profile；15 分钟过期 lease 仍按原协议优先重领并修复 staged result。
+
+本地 `npm run build` 只更新磁盘上的 bundle，不会替正在运行的 Chrome service worker 热换代码；真实账号复测前需要在 `chrome://extensions` 对 unpacked OpenBiliClaw 点一次“重新加载”，或在扩展 runtime-stream 已连接时调用本地开发端点 `POST /api/extension/reload`。后端 debug 若仍只出现 `Could not load file: 'dist/main/dy-fetch-tap.js'`，说明浏览器还在运行旧单路径 bundle，不能据此判断新 fallback 失败；新版本成功状态会携带实际命中的 `ok_file=<candidate>`。
 
 CLI 侧分两层使用这条链路：
 
@@ -426,7 +434,9 @@ CLI 侧分两层使用这条链路：
 }
 ```
 
-dispatcher 等待首页 ready 时会同时处理两种情况：正常的 `chrome.tabs.onUpdated(status="complete")`，以及抖音 SPA 没有再发完整 `complete` 事件的 fallback timer，避免任务卡住直到 `task_timeout`。search 任务按关键词数计算超时窗口，单关键词至少 180 秒，覆盖首页打开、DOM 搜索触发、搜索结果页路由确认、页面自身响应和 DOM 解析的真实耗时；后端 `DouyinPluginSearchClient` 默认也等 180 秒，避免插件刚开始执行 DOM 操作就被后端清成 stale。`src/content/douyin.ts` 会尝试触发页面搜索 UI、热点入口点击或推荐流滚动；search 会区分 `ui_triggered`（已提交）和 `search_navigation_ok`（URL 已进入真实搜索结果路由），防止搜索建议或登录弹窗被误判为搜索结果页。`src/main/dy-fetch-tap.ts` 先作为 MAIN-world 被动 fetch / XHR tap，把页面自己发出的 search / related / feed 响应转成候选，feed 兼容当前页面实际发出的 `/aweme/v2/web/module/feed/` 响应，search 兼容 `/aweme/v1/web/general/search/stream/` 返回的 chunked JSON。search / hot / feed discovery 不主动访问 `/search/...`、`/hot/...` 快捷 URL；search 在被动 fetch tap 和 DOM 解析不足时会调用已登录页面的 search API bridge 兜底，hot 会把 hot board 的 `group_id` 作为 `seed_aweme_id` 透传给扩展，优先执行带 seed 的热词，并在 DOM 点击 / 被动监听不足时用已登录页面的 related API bridge 拉取相关视频，feed 不主动调用 API bridge。搜索结果以 `scope="dy_search"`、热点结果以 `scope="dy_hot"`、首页推荐结果以 `scope="dy_feed"` 回写到 `dy_tasks.result_json`，不会转成初始化画像事件；content script 会在回传前按目标 scope 过滤候选，避免首页 feed 响应混入 search / hot 结果；`DouyinPluginSearchClient` 会把这些候选映射成 aweme-like JSON，分别以 `dy-plugin-search` / `dy-plugin-hot-related` / `dy-plugin-feed` 进入 `discovery_candidates` 待评估池，再由后端共享 evaluator 判定是否进入推荐池。插件任务空 / 超时 / 失败时默认返回空结果，direct-cookie fallback 仅保留给显式诊断路径；如果真实 search 响应带 `search_nil_info.search_nil_item="hit_shark"` 且无 `data/aweme_list`，会按抖音反爬空结果处理。
+dispatcher 等待首页 ready 时会同时处理两种情况：正常的 `chrome.tabs.onUpdated(status="complete")`，以及抖音 SPA 没有再发完整 `complete` 事件的 fallback timer，避免任务卡住直到 `task_timeout`。search 任务按关键词数计算超时窗口，单关键词至少 180 秒，覆盖首页打开、DOM 搜索触发、搜索结果页路由确认、页面自身响应和 DOM 解析的真实耗时；后端 `DouyinPluginSearchClient` 默认也等 180 秒，避免插件刚开始执行 DOM 操作就被后端清成 stale。`src/content/douyin.ts` 会尝试触发页面搜索 UI、热点入口点击或推荐流滚动；search 会区分 `ui_triggered`（已提交）和 `search_navigation_ok`（URL 已进入真实搜索结果路由），防止搜索建议或登录弹窗被误判为搜索结果页。`src/main/dy-fetch-tap.ts` 作为 manifest 声明的 MAIN-world `document_start` 被动 fetch / XHR tap，把页面自己发出的 search / related / feed 响应转成候选；如果这些消息早于任务 collector，isolated content script 会按 `scope:aweme_id` 去重，最多保留 256 条 / 120 秒，并在对应任务启动时一次性 drain。feed 兼容当前页面实际发出的 `/aweme/v2/web/module/feed/`，search 兼容 `/aweme/v1/web/general/search/stream/` chunked JSON；DOM fallback 同时识别 `a[href*="/video/"]`、`div[data-aweme-id]`、非 anchor `href` 与 `video_<id>` class，并从卡片语义文本中补标题 / 作者，因此页面不再发续请求时仍可读取当前已渲染推荐。合法空响应会增加 `passive_responses_observed`，只有响应和 DOM 都未提供内容时才是 `feed_no_observed_response`。search / hot / feed discovery 不主动访问 `/search/...`、`/hot/...` 快捷 URL；search 在被动 fetch tap 和 DOM 解析不足时会调用已登录页面的 search API bridge 兜底，hot 会把 hot board 的 `group_id` 作为 `seed_aweme_id` 透传给扩展，优先执行带 seed 的热词，并在 DOM 点击 / 被动监听不足时用已登录页面的 related API bridge 拉取相关视频，feed 不主动调用 API bridge。搜索结果以 `scope="dy_search"`、热点结果以 `scope="dy_hot"`、首页推荐结果以 `scope="dy_feed"` 回写到 `dy_tasks.result_json`，不会转成初始化画像事件；content script 会在回传前按目标 scope 过滤候选，避免首页 feed 响应混入 search / hot 结果；`DouyinPluginSearchClient` 会把这些候选映射成 aweme-like JSON，分别以 `dy-plugin-search` / `dy-plugin-hot-related` / `dy-plugin-feed` 进入 `discovery_candidates` 待评估池，再由后端共享 evaluator 判定是否进入推荐池。插件任务会区分真实 `empty` 与 `timeout / failed`：基础设施失败返回空候选但保留失败终态，direct-cookie fallback 仅保留给显式诊断路径。真实 search 响应带 `search_nil_info.search_nil_item="hit_shark"` 且无 `data/aweme_list` 时按反爬失败处理，让 runtime 使用故障退避而不是分钟级重试。
+
+search 首次首页 ready 后直接注入并提交，不再对同一 URL 做冗余 `tabs.update`；多关键词任务会为下一关键词换用新的后台首页 tab，隔离上一关键词的迟到响应与虚拟列表 DOM。dispatcher 会在提交前监听目标搜索路由；若 UI 触发真实 document navigation，新文档 ready 后用 `resume_after_navigation` 只恢复采集，若只是 SPA 路由变化，同文档 execution key 会拒绝重复执行。search API bridge 的 isolated wait 收紧为 20 秒（MAIN request 自身仍有更短 abort），避免后台标签页计时延迟把单词任务推到总看门狗边缘。
 
 CLI 入口：
 
@@ -527,6 +537,8 @@ CLI 入口：
 - 运行时脚本不再直接把 `tsc` 的 ESM 产物交给 Chrome
 - `scripts/build.mjs` 使用 `esbuild` 将各 content entry 和 `service-worker.ts` bundle 为可直接加载的单文件
 - `tsc --emitDeclarationOnly` 继续负责类型声明产物
+- Chrome 的 `npm run build` 只清理 / 重建 `dist/`，Firefox 的 `npm run build:firefox` 只清理 / 重建 `dist-firefox/`；Firefox 仅执行 `typecheck` 而不再把声明文件写入 Chrome 输出，因此按任意顺序连续构建都不会删除或污染另一目标的现有产物。显式 `npm run clean` 仍会同时清理两者
+- 每个 target 的 bundle 完成后都会运行 manifest 资产预检，逐项确认后台脚本、content scripts 与 `web_accessible_resources` 文件真实存在；`dy-fetch-tap.js` 等动态注入资源缺失时构建立刻失败，不再留到浏览器任务执行时才报错。也可用 `npm run verify:assets` / `npm run verify:assets:firefox` 单独复查
 - 新增构建回归测试，确保 content script 不会再次产出浏览器无法执行的 `import` 语句
 
 ## 本地开发
@@ -548,6 +560,7 @@ npm run build
 - B 站搜索兜底 opt-in 浏览器 E2E harness（默认 skip，`BILI_EXTENSION_E2E=1` 才启动真实 Chromium）
 - B 站 / 抖音 Cookie 自动同步的重试闹钟和幂等监听器
 - manifest 图标资源存在性
+- Chrome / Firefox 构建目录隔离，以及两个 manifest 的后台脚本、content scripts、WAR bundle 资产预检
 - Firefox manifest 的 version 注入、`sidebar_action` 降级路径、AMO 数据收集类别声明、Firefox zip 打包清理、AMO unlisted XPI 签名，以及 listed workflow 的元数据 / 隐私政策 / reviewer source / channel 核验
 - popup 设置页字段与 `/api/config` schema 的基础对齐
 - popup API durable chat turn：`startChatTurn()`、`fetchChatTurn()`、`fetchChatTurns()` 会分别调用 `/api/chat/turns`、`/api/chat/turns/{turn_id}` 和列表接口

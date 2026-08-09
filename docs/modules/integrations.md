@@ -2,6 +2,8 @@
 
 API runtime generation 拥有且只拥有一个 `ExpressionCopyCoordinator`，它连接候选 admission、推荐分类 callback 与 daemon 生命周期。OpenClaw direct composition 不启动 daemon loop，因此不构造这个 coordinator：候选 inline admission 后会 await 一次最多 4 条的 durable expression-copy drain，且本次不做 split retry；首个 provider batch 中有效的文案立即持久化，剩余行保留 durable pending 交给下一次 OpenClaw 请求，返回前不留下 notify-only owner 或 provider 后台任务。`recommend(refresh_if_needed=True)` 还会把本次 source supply 与 inline evaluation 首批一起限制为 4 条，优先在 adapter 的交互等待窗口内产出可 serve 的有效 subset；若首 batch 全部无效，本次仍可能没有可 serve 行，诊断会如实保留该结果。这不是新的配置项，也不缩小 API daemon 的持续补货波次。
 
+OpenClaw bootstrap 与 API/CLI production composition 使用同一组近期供给常量：`SearchStrategy` 在既有请求预算内把 1 个 query 设为 `order="pubdate"`、最多取 5 条。该 lane 只补检索覆盖并留下 `discovery_lane="recent"` provenance，不改变 evaluator relevance、admission 阈值或推荐排序。
+
 > OpenClaw bootstrap 每个 runtime 只拥有一个 LLM gate，主服务、Soul 与 refresh 按对象身份共享；gate 在任何 provider 调用前从 canonical database available 初始化，candidate snapshot 与 controller readiness 持续同步 refill admission；发现评估并发不再硬编码。
 
 > 面向外部系统的薄适配层，负责把 OpenBiliClaw 现有学习与推荐能力整理成稳定的 integration 接口。
@@ -26,6 +28,7 @@ API runtime generation 拥有且只拥有一个 `ExpressionCopyCoordinator`，�
 | 任务 | 状态 | 说明 |
 |------|------|------|
 | OpenClaw bootstrap | ✅ | `build_openclaw_adapter_services()` 初始化 database/memory 后立刻用 canonical available 配置共享 LLM gate，再构造任何可调用 provider 的 service；构造 `SoulEngine` 时与 API runtime 一样透传 canonical `database`、`[soul.preference].satisfaction_filter_enabled`，以及 task-scoped `preference_prompt_view / awareness_prompt_view / insight_prompt_view`（默认 `legacy / compact-v1 / legacy`）；其中 Awareness 值只控制 `soul.awareness_confusions`，普通 `soul.awareness` 固定 `legacy`，避免 integration 面使用分裂的持久化、满意度过滤或 cognition rollout 语义；暴露 adapter 前同步调用 controller 的幂等 `run_startup_maintenance()`。OpenClaw direct adapter 不启动 daemon `run_forever()`，因此不 attach `CandidateEvalCoordinator` 或 `ExpressionCopyCoordinator`、不把 producer 标为 coordinator-owned；`recommend(refresh_if_needed=True)` 专用 controller 把首轮 source supply 与 inline claim 固定限制为 4（fetch oversample=1、min eval batch=4、inline evaluator=1），后续调用再继续补货。每次 durable admission 会在同一请求内 await `RecommendationEngine.drain_pending_expression_copy(profile, limit=4, max_extra_requests=0)`：首 batch 的有效 subset 立刻成为 canonical available，未完成行保持 pending 由下一请求续补，避免在 45 秒交互窗口内递归拆分；若该 subset 非空且推荐历史为空，`recommend(refresh_if_needed=True)` 会直接 serve 已复制 pool。若首 batch 全部无效，本次仍可能返回空池并由后续请求重试。该首批限制是 bootstrap 内部策略，不新增 `config.toml` 字段，API daemon 的 coordinator、每轮 60 条 copy drain 与 4× supply oversample 保持不变。 |
+| OpenClaw 近期供给接线 | ✅ | bootstrap 构造 `SearchStrategy` 时显式注入共享 `RECENT_SUPPLY_LANE_QUERIES=1` 与 `RECENT_SUPPLY_LANE_PAGE_SIZE=5`；与 API/CLI 使用同一有界 `pubdate` lane，避免 direct adapter 因 composition 漏接而失去近期供给。 |
 | OpenClaw 视觉预热配置 | ✅ | bootstrap 构造 `RecommendationEngine` 时透传视觉画像、关键帧 / 弹幕开关、采样帧数、两个 fetch limit、摘要长度和共享 `BilibiliAPIClient`；默认关闭路径保持 no-op，配置模型切换后的 provenance 重建仍由引擎负责 |
 | OpenClaw adapter operations | ✅ | 已提供 `sync_account / get_profile / recommend / submit_feedback / get_runtime_status / chat`；chat 构造点显式固定为 `legacy_direct`，成功回复后仍执行既有 detached direct learning，不提交 API runtime 的 queue、也不持有 worker guard permit；Wave 3 的 HTTP `202 processing` / card poll 不改变 adapter 请求或响应。失败转为携带安全 LLM 分类文案的 `AdapterOperationError`，不暴露原始上游细节。 |
 | 推荐消费后的 durable inventory 同步 | ✅ | API 与 OpenClaw composition 都给真实 `RecommendationEngine` 注入 post-commit callback；独立 serve DB worker 把 recommendation + shown 在同一短事务提交成功后，callback 直接携带 `pool_counts_after` 更新共享 gate，不再同步重读共享连接。写失败不触发 callback，callback 失败也不改写 durable 提交结果；API 另在响应关键路径外读取精确 canonical snapshot 收敛广播。 |
@@ -224,7 +227,7 @@ OpenClaw integration 本身没有新增独立 `config.toml` 段落，直接复�
 1. **先 adapter，后 skill**
    skill 只是 OpenClaw 的接入外皮，核心集成边界应放在 adapter，而不是把业务逻辑直接写进 skill handler。
 2. **复用现有 runtime 主链**
-   推荐、学习、反馈回流仍由 OpenBiliClaw 内核负责，integration 层不复制业务流程。OpenClaw direct bootstrap 不运行 daemon 的 `run_forever()`，但会在返回可调用 adapter 前执行同一个 controller startup-maintenance hook；若宿主随后也启动该 controller，幂等标记避免重复维护。它仍使用和 API runtime 相同的 scheduler 参数与后台 LLM gate；但因没有启动 candidate / expression coordinator task，`recommend(refresh_if_needed=True)` 的 controller refresh 使用固定 4 条首批 source/evaluation wave，并在 admission 后同步 drain 至多 4 条 durable copy、禁用本请求内的 split retry：有效 subset 立即可服务，未完成行留作下一请求补齐，不会把候选交给未运行的 owner。API daemon 的 30 条 coordinator worker wave 与 60 条 copy drain 不受影响。
+   推荐、学习、反馈回流仍由 OpenBiliClaw 内核负责，integration 层不复制业务流程。OpenClaw direct bootstrap 不运行 daemon 的 `run_forever()`，但会在返回可调用 adapter 前执行同一个 controller startup-maintenance hook；若宿主随后也启动该 controller，幂等标记避免重复维护。它仍使用和 API runtime 相同的 scheduler 参数、后台 LLM gate，以及预算内 `1×5` 的 B 站近期供给 lane；但因没有启动 candidate / expression coordinator task，`recommend(refresh_if_needed=True)` 的 controller refresh 使用固定 4 条首批 source/evaluation wave，并在 admission 后同步 drain 至多 4 条 durable copy、禁用本请求内的 split retry：有效 subset 立即可服务，未完成行留作下一请求补齐，不会把候选交给未运行的 owner。API daemon 的 30 条 coordinator worker wave 与 60 条 copy drain 不受影响。
 3. **协议中立**
    当前 `skill.py` 只返回 descriptor，不绑定未知的 OpenClaw SDK，避免过早引入外部硬依赖。
 4. **真实 OpenClaw 接入走 skill pack，而不是 Python SDK**

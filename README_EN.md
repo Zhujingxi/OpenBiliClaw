@@ -640,6 +640,9 @@ images: proxy foreground + refresh prefetch → app-stable lane (total 4 / bg 3,
 │ Dialogue → typed settlement worker → learning       │
 │ Legacy batch only when rollback flag=false     │
 │ Init barrier: profile commit → discover/evaluate/copy → ready │
+│ Bilibili supply: relevance search + budgeted 1×5 pubdate recent lane → shared evaluation │
+│ Evaluation: time-neutral relevance + Agent temporal class → high-confidence publication bonus │
+│ Temporal shadow: bonus vs no-bonus Top10/50/100 aggregates → class/source/age audit (no serving change) │
 │ Images: proxy fg + refresh prefetch → app-stable 4/3 lane → singleflight/atomic cache │
 │ Soul cognition: dual pending cooldown · one anchor · worker-only settlement · winner receipt · confusion FIFO · ledger · deep gate │
 │   LLM adapters · Source adapters (SourceAdapter) │

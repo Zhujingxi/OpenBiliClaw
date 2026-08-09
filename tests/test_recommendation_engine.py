@@ -9,6 +9,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -682,6 +683,50 @@ async def test_serve_empty_after_exclusions_skips_curator_context() -> None:
             db.close()
 
         assert result == []
+
+
+def test_curator_scoring_records_temporal_shadow_without_changing_scores() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = Database(Path(tmpdir) / "test.db")
+        db.initialize()
+
+        class RecordingCurator:
+            def __init__(self) -> None:
+                self.audit_calls: list[tuple[object, object, object]] = []
+
+            def build_context(self) -> object:
+                return SimpleNamespace(over_budget_amplification_keys=frozenset())
+
+            def score_candidates(
+                self,
+                candidates: list[DiscoveredContent],
+                context: object,
+            ) -> dict[str, float]:
+                del context
+                return {item.bvid: 0.73 for item in candidates}
+
+            def record_temporal_ranking_shadow_audit(
+                self,
+                candidates: object,
+                scores: object,
+                context: object,
+            ) -> None:
+                self.audit_calls.append((candidates, scores, context))
+
+        curator = RecordingCurator()
+        engine = RecommendationEngine(
+            llm=_DummyLLM(),
+            database=db,
+            curator=curator,  # type: ignore[arg-type]
+        )
+        candidates = [DiscoveredContent(bvid="BV1", relevance_score=0.7)]
+
+        scores, amplification = engine._score_candidates_with_curator(candidates)
+
+        assert scores == {"BV1": 0.73}
+        assert amplification == frozenset()
+        assert len(curator.audit_calls) == 1
+        assert curator.audit_calls[0][1] is scores
 
 
 @pytest.mark.asyncio
@@ -5961,6 +6006,10 @@ def test_rows_to_discovered_round_trips_all_engagement_stats() -> None:
             cover_url="//i2.hdslb.com/bfs/archive/x.jpg",
             published_at="2026-07-08T06:30:00Z",
             published_label="3 天前",
+            temporal_class="versioned",
+            temporal_confidence=0.91,
+            temporal_reason="内容依赖具体软件版本",
+            temporal_policy_version="v1",
             source="search",
             relevance_score=0.9,
             **stats,
@@ -5977,6 +6026,10 @@ def test_rows_to_discovered_round_trips_all_engagement_stats() -> None:
         assert kwargs["author_name"] == "Rayman小何"
         assert kwargs["published_at"] == "2026-07-08T06:30:00Z"
         assert kwargs["published_label"] == "3 天前"
+        assert kwargs["temporal_class"] == "versioned"
+        assert kwargs["temporal_confidence"] == 0.91
+        assert kwargs["temporal_reason"] == "内容依赖具体软件版本"
+        assert kwargs["temporal_policy_version"] == "v1"
         db.close()
 
 

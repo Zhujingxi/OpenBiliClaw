@@ -2531,6 +2531,7 @@ class TestBackendAPI:
         config.sources.youtube.enabled = True
         config.sources.zhihu.enabled = True
         producers: dict[str, SimpleNamespace] = {}
+        dy_kwargs: list[dict[str, object]] = []
         x_kwargs: list[dict[str, object]] = []
 
         def build_producer(kind: str) -> SimpleNamespace:
@@ -2541,7 +2542,7 @@ class TestBackendAPI:
         monkeypatch.setattr(
             douyin_producer_module,
             "build_douyin_discovery_producer",
-            lambda **_kwargs: build_producer("douyin"),
+            lambda **kwargs: dy_kwargs.append(kwargs) or build_producer("douyin"),
         )
         monkeypatch.setattr(
             runtime_context_module,
@@ -2562,6 +2563,10 @@ class TestBackendAPI:
         ctx = runtime_context_module.build_runtime_context(config)
 
         assert set(producers) == {"douyin", "youtube", "zhihu", "twitter"}
+        assert dy_kwargs[0]["presence"] is ctx.presence
+        assert dy_kwargs[0]["presence_grace_seconds"] == (
+            config.scheduler.extension_disconnect_grace_seconds
+        )
         assert all(
             producer.candidate_evaluation_owned_by_coordinator is True
             for kind, producer in producers.items()

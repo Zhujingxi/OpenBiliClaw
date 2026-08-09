@@ -422,19 +422,23 @@ Content-Type: application/json
 from openbiliclaw.recommendation.curator import PoolCurator
 ```
 
-`PoolCurator` 提供推荐侧的独立评分，不依赖 Discovery 的结果。它从候选池中读取内容，按照一套专属权重对每条候选打分，供上层调用方叠加使用。
+`PoolCurator` 提供推荐侧的独立评分。它从候选池读取 Evaluation Agent 已持久化的语义特征，并按照一套专属权重对每条候选打分；时效只以发布时间明确、高置信类别的正向 bonus 进入推荐排序，不改写 discovery relevance 或 admission。
 
 #### ScoringWeights
 
 | 维度 | 权重 |
 |------|------|
 | `relevance` | 0.30 |
-| `freshness` | 0.20 |
-| `topic_fatigue` | 0.15 |
+| `freshness` | 0.10 |
+| `topic_fatigue` | 0.25 |
 | `source_monotony` | 0.15 |
 | `serendipity` | 0.20 |
 
 `serendipity` 加分只对 `explore` 来源发放（满额 1.0）。其余任何 strategy —— 包括 `trending` —— 一律为 0.0：来源只是上下文，不能凭发现路径白拿 rec_score（issue #90）。
+
+`freshness` 现在表示 publication-time temporal bonus，不再读取 `discovered_at`。只有 `breaking/current/versioned`、有效 `published_at` 且分类置信度至少 `0.60` 的候选参与：半衰期分别为 1 / 14 / 120 天，类别权重为 0.85 / 0.60 / 0.30；置信度 `>=0.80` 使用完整权重，`>=0.60 且 <0.80` 使用半量，低于 0.60 为 0。`evergreen/historical/unknown`、缺失/无效/明显未来时间全部保持中性，不会把发现时间冒充发布时间。
+
+每次 Curator 评分还会 best-effort 生成 `temporal-ranking-shadow-v1` 聚合审计：把当前含 bonus 排序与“精确减掉本次 bonus”的 no-bonus 反事实比较，记录 Top 10 / 50 / 100 的 overlap、Jaccard、同位置数，以及按时效类别、来源和年龄桶的进入/退出分布。审计发生在 MMR/多样性选择之前，不改变分数、准入或 serving；写入失败只记 WARNING。持久化内容不含 BVID、内容 ID、标题、作者、URL、query 或画像文本，保留上限为 30 天 / 5,000 轮。
 
 #### 关键数据结构
 
@@ -474,7 +478,10 @@ from openbiliclaw.recommendation.curator import PoolCurator
 
 | 常量 | 值 |
 |------|----|
-| 新鲜度半衰期 | 3 天 |
+| `breaking` temporal bonus | 半衰期 1 天，类别权重 0.85 |
+| `current` temporal bonus | 半衰期 14 天，类别权重 0.60 |
+| `versioned` temporal bonus | 半衰期 120 天，类别权重 0.30 |
+| temporal confidence 分档 | `>=0.80` 全量；`>=0.60 且 <0.80` 半量；其余中性 |
 | dislike UP 主惩罚 | 0.20 |
 | dislike 话题惩罚 | 0.10 |
 | like 话题加成 | 0.05 |
@@ -489,11 +496,15 @@ context: ScoringContext = curator.build_context()
 # 对候选列表评分，返回 bvid → rec_score 的映射（不修改输入）
 scores: dict[str, float] = curator.score_candidates(candidates, context)
 
+# 聚合比较含 bonus 排序与 no-bonus 反事实；不改变 scores/serving
+audit = curator.build_temporal_ranking_shadow_audit(candidates, scores, context)
+curator.record_temporal_ranking_shadow_audit(candidates, scores, context)
+
 # 检查候选池健康状态
 report: PoolHealthReport = curator.check_pool_health()
 ```
 
-`score_candidates()` 以叠加覆盖层的形式返回新的分数映射，不会修改传入的候选对象。`PoolCurator` 的所有方法均不修改输入数据。
+`score_candidates()` 以叠加覆盖层的形式返回新的分数映射，不会修改传入的候选对象。`PoolCurator` 的所有方法均不修改输入数据。shadow 的年龄桶固定为 `<=1d / 1-7d / 7-30d / 30-180d / >180d / unknown`，用于与 2026-08 历史回放口径连续比较；它只回答“bonus 改了谁的相对位置”，不自动开启硬 stale gate。
 
 ## 示例：记忆如何影响推荐结果
 

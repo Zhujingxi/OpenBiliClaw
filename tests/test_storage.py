@@ -41,6 +41,55 @@ class TestDatabase:
             assert db.conn is not None
             db.close()
 
+    def test_initialize_adds_temporal_columns_to_existing_tables(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "temporal-migration.db"
+        db = Database(db_path)
+        db.initialize()
+        db.cache_content("BVLEGACY", title="legacy", source="search")
+        db.enqueue_discovery_candidates(
+            [
+                DiscoveryCandidateWrite(
+                    candidate_key="bilibili:BVLEGACY-CANDIDATE",
+                    source_platform="bilibili",
+                    source_strategy="search",
+                    content_id="BVLEGACY-CANDIDATE",
+                    title="legacy candidate",
+                )
+            ]
+        )
+        for table_name in ("content_cache", "discovery_candidates"):
+            for column_name in (
+                "temporal_class",
+                "temporal_confidence",
+                "temporal_reason",
+                "temporal_policy_version",
+            ):
+                db.conn.execute(f"ALTER TABLE {table_name} DROP COLUMN {column_name}")
+        db.conn.commit()
+        db.close()
+
+        migrated = Database(db_path)
+        migrated.initialize()
+
+        for table_name in ("content_cache", "discovery_candidates"):
+            columns = {
+                str(row["name"])
+                for row in migrated.conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+            }
+            assert {
+                "temporal_class",
+                "temporal_confidence",
+                "temporal_reason",
+                "temporal_policy_version",
+            } <= columns
+            row = migrated.conn.execute(f"SELECT * FROM {table_name} LIMIT 1").fetchone()
+            assert row["temporal_class"] == "unknown"
+            assert row["temporal_confidence"] == 0.0
+            assert row["temporal_reason"] == ""
+            assert row["temporal_policy_version"] == "v1"
+
+        migrated.close()
+
     def test_thread_connections_preserve_existing_foreign_key_semantics(
         self,
         tmp_path: Path,
@@ -259,6 +308,120 @@ class TestDatabase:
 
             db.close()
 
+    def test_discovery_temporal_metadata_roundtrips_claim_and_admission(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        db = Database(tmp_path / "temporal-candidate.db")
+        db.initialize()
+        db.enqueue_discovery_candidates(
+            [
+                DiscoveryCandidateWrite(
+                    candidate_key="bilibili:BVTEMPORAL",
+                    source_platform="bilibili",
+                    source_strategy="search",
+                    content_id="BVTEMPORAL",
+                    title="Temporal candidate",
+                )
+            ]
+        )
+
+        claimed = db.claim_discovery_candidates_for_eval(limit=1, claim_token="temporal-claim")[0]
+        assert claimed["temporal_class"] == "unknown"
+        assert claimed["temporal_confidence"] == 0.0
+        assert claimed["temporal_policy_version"] == "v1"
+
+        updated = db.persist_claimed_discovery_candidate_evaluations(
+            [
+                {
+                    "candidate_id": claimed["id"],
+                    "status": "evaluated",
+                    "relevance_score": 0.9,
+                    "temporal_class": "CURRENT",
+                    "temporal_confidence": 0.85,
+                    "temporal_reason": "  价值依赖近期状态  ",
+                    "temporal_policy_version": "v1-test",
+                }
+            ],
+            claim_token="temporal-claim",
+        )
+        admitted = db.get_evaluated_discovery_candidates_for_admission(limit=1)[0]
+
+        assert updated == {int(claimed["id"])}
+        assert admitted["temporal_class"] == "current"
+        assert admitted["temporal_confidence"] == 0.85
+        assert admitted["temporal_reason"] == "价值依赖近期状态"
+        assert admitted["temporal_policy_version"] == "v1"
+
+        db.cache_content(
+            "BVTEMPORAL",
+            title=admitted["title"],
+            source=admitted["source_strategy"],
+            temporal_class=admitted["temporal_class"],
+            temporal_confidence=admitted["temporal_confidence"],
+            temporal_reason=admitted["temporal_reason"],
+            temporal_policy_version=admitted["temporal_policy_version"],
+        )
+        db.mark_discovery_candidate_cached(int(claimed["id"]))
+        db.close()
+
+        reloaded = Database(tmp_path / "temporal-candidate.db")
+        reloaded.initialize()
+        cached_candidate = reloaded.conn.execute(
+            "SELECT * FROM discovery_candidates WHERE id = ?",
+            (int(claimed["id"]),),
+        ).fetchone()
+        cached_content = reloaded.conn.execute(
+            "SELECT * FROM content_cache WHERE bvid = 'BVTEMPORAL'"
+        ).fetchone()
+        for row in (cached_candidate, cached_content):
+            assert row["temporal_class"] == "current"
+            assert row["temporal_confidence"] == 0.85
+            assert row["temporal_reason"] == "价值依赖近期状态"
+            assert row["temporal_policy_version"] == "v1"
+        assert cached_candidate["status"] == "cached"
+        reloaded.close()
+
+    def test_discovery_temporal_storage_fails_neutral_for_invalid_values(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        db = Database(tmp_path / "temporal-candidate-invalid.db")
+        db.initialize()
+        db.enqueue_discovery_candidates(
+            [
+                DiscoveryCandidateWrite(
+                    candidate_key="bilibili:BVTEMPORAL-INVALID",
+                    source_platform="bilibili",
+                    source_strategy="search",
+                    content_id="BVTEMPORAL-INVALID",
+                    title="Invalid temporal candidate",
+                )
+            ]
+        )
+        claimed = db.claim_discovery_candidates_for_eval(limit=1)[0]
+
+        assert (
+            db.update_discovery_candidate_evaluations(
+                [
+                    {
+                        "candidate_id": claimed["id"],
+                        "status": "evaluated",
+                        "temporal_class": "instant-news",
+                        "temporal_confidence": 0.9,
+                        "temporal_reason": "invalid class",
+                    }
+                ]
+            )
+            == 1
+        )
+        stored = db.get_evaluated_discovery_candidates_for_admission(limit=1)[0]
+        assert stored["temporal_class"] == "unknown"
+        assert stored["temporal_confidence"] == 0.0
+        assert stored["temporal_reason"] == ""
+        assert stored["temporal_policy_version"] == "v1"
+        db.close()
+
     def test_initialize_creates_recommendation_read_indexes(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             db = Database(Path(tmpdir) / "test.db")
@@ -359,6 +522,166 @@ class TestDatabase:
             assert row["relevance_score"] == 0.0
 
             db.close()
+
+    def test_cache_content_validates_and_upserts_temporal_metadata(
+        self,
+        tmp_path: Path,
+        caplog: Any,
+    ) -> None:
+        db = Database(tmp_path / "temporal-cache.db")
+        db.initialize()
+        db.cache_content(
+            "BVTEMPORAL",
+            title="Temporal",
+            source="search",
+            temporal_class="VERSIONED",
+            temporal_confidence=0.75,
+            temporal_reason="  依赖软件版本  ",
+            temporal_policy_version="v1-test",
+        )
+        stored = db.conn.execute(
+            """
+            SELECT temporal_class, temporal_confidence, temporal_reason,
+                   temporal_policy_version
+            FROM content_cache
+            WHERE bvid = 'BVTEMPORAL'
+            """
+        ).fetchone()
+        assert dict(stored) == {
+            "temporal_class": "versioned",
+            "temporal_confidence": 0.75,
+            "temporal_reason": "依赖软件版本",
+            "temporal_policy_version": "v1",
+        }
+
+        db.cache_content(
+            "BVTEMPORAL",
+            title="Temporal rediscovered",
+            source="related",
+            view_count=10,
+        )
+        rediscovered = db.conn.execute(
+            """
+            SELECT temporal_class, temporal_confidence, temporal_reason,
+                   temporal_policy_version
+            FROM content_cache
+            WHERE bvid = 'BVTEMPORAL'
+            """
+        ).fetchone()
+        assert dict(rediscovered) == dict(stored)
+
+        caplog.clear()
+        db.cache_content(
+            "BVTEMPORAL",
+            title="Temporal",
+            source="search",
+            temporal_class="not-a-class",
+            temporal_confidence=0.9,
+            temporal_reason="invalid class",
+            temporal_policy_version="",
+        )
+        invalid_class = db.conn.execute(
+            """
+            SELECT temporal_class, temporal_confidence, temporal_reason,
+                   temporal_policy_version
+            FROM content_cache
+            WHERE bvid = 'BVTEMPORAL'
+            """
+        ).fetchone()
+        assert dict(invalid_class) == {
+            "temporal_class": "unknown",
+            "temporal_confidence": 0.0,
+            "temporal_reason": "",
+            "temporal_policy_version": "v1",
+        }
+        assert any(
+            "Invalid temporal metadata coerced to unknown" in record.message
+            for record in caplog.records
+        )
+
+        db.cache_content(
+            "BVTEMPORAL",
+            title="Temporal",
+            source="search",
+            temporal_class="current",
+            temporal_confidence=1.5,
+            temporal_reason="invalid confidence",
+        )
+        invalid_confidence = db.conn.execute(
+            """
+            SELECT temporal_class, temporal_confidence
+            FROM content_cache
+            WHERE bvid = 'BVTEMPORAL'
+            """
+        ).fetchone()
+        assert dict(invalid_confidence) == {
+            "temporal_class": "unknown",
+            "temporal_confidence": 0.0,
+        }
+
+        db.cache_content(
+            "BVTEMPORAL",
+            title="Temporal",
+            source="search",
+            temporal_class="current",
+            temporal_confidence=0.8,
+            temporal_reason={"unsafe": "repr"},
+        )
+        invalid_reason = db.conn.execute(
+            """
+            SELECT temporal_class, temporal_confidence, temporal_reason
+            FROM content_cache
+            WHERE bvid = 'BVTEMPORAL'
+            """
+        ).fetchone()
+        assert dict(invalid_reason) == {
+            "temporal_class": "unknown",
+            "temporal_confidence": 0.0,
+            "temporal_reason": "",
+        }
+
+        db.cache_content(
+            "BVTEMPORAL",
+            title="Temporal",
+            source="search",
+            temporal_class="current",
+            temporal_confidence=10**10000,
+            temporal_reason="huge integer confidence",
+        )
+        huge_confidence = db.conn.execute(
+            """
+            SELECT temporal_class, temporal_confidence, temporal_reason
+            FROM content_cache
+            WHERE bvid = 'BVTEMPORAL'
+            """
+        ).fetchone()
+        assert dict(huge_confidence) == {
+            "temporal_class": "unknown",
+            "temporal_confidence": 0.0,
+            "temporal_reason": "",
+        }
+
+        db.cache_content(
+            "BVTEMPORAL",
+            title="Temporal",
+            source="search",
+            temporal_class="current",
+            temporal_confidence=0.8,
+            temporal_reason="   ",
+        )
+        empty_reason = db.conn.execute(
+            """
+            SELECT temporal_class, temporal_confidence, temporal_reason
+            FROM content_cache
+            WHERE bvid = 'BVTEMPORAL'
+            """
+        ).fetchone()
+        assert dict(empty_reason) == {
+            "temporal_class": "unknown",
+            "temporal_confidence": 0.0,
+            "temporal_reason": "",
+        }
+        db.close()
 
     def test_cache_content_empty_cover_does_not_wipe_existing(self) -> None:
         """空封面的重摄入(如仅刷新互动数据)不得抹掉已有的好封面。"""

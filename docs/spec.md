@@ -152,7 +152,7 @@ Discovery 可以继续宽搜，普通 dislike 不撤销关键词或来源任务�
 
 | 策略 | 说明 |
 |------|------|
-| **兴趣关键词搜索** | 根据用户画像生成关键词组合搜索 |
+| **兴趣关键词搜索** | 根据用户画像生成关键词组合搜索；B 站生产路径在既有请求预算内预留 1 个 `pubdate` 请求（最多 5 条），与普通相关性结果交错进入评估窗口，只补近期供给而不改变 relevance/admission |
 | **搜索灵感脑暴** | 可选地从 like 二级兴趣抽样；`OnionProfile.interest.likes` 会优先展开 specifics，一级 domain 只在缺少 specifics 时兜底，并按 parent 计数降权防止小窗口被同一领域占满；结合 recent interest selection count、关键词覆盖频次、raw candidate 数量 / 占比 / dominant content type 和最终候选池占比降权高频兴趣，coverage join 统一走 `_normalize_match_text()` 折叠大小写 / 空白漂移，画像整理会同步迁移 keyword 与 selection ledger 标签，完整 coverage 只在本地控制环使用，LLM payload 只携带 must-cover + 少量 cooldown 摘要；随后由 `discovery.keyword_brainstorm` 脑暴带 `kind_fit=regular|explore|both` 的搜索 probe branch，每兴趣最多 2 条，regular + explore 同轮触发时共用一次 brainstorm 和一次 grounding stage；按 `[discovery].inspiration_search_backends` 通过 search provider 链（默认已启用平台源 → Exa → You.com free MCP）grounding 具体实体 / 社区词 / 讨论点，stage 级搜索预算由 `inspiration_max_probe_searches_per_stage` 控制，平台源扇出由 `inspiration_platforms_per_probe` 控制，每 probe 翻页 / 扩量由 `inspiration_search_pages_per_probe` 控制，B 站 / 抖音 / X 等 risk-controlled 来源受 `inspiration_riskcontrolled_probe_budget` 与 cooldown / 限流约束；`platform_sources` 只把 B站 / YouTube / X / Reddit / Bangumi、抖音 direct client，以及小红书 / 知乎 bridge 可用时的搜索标题 / URL / 摘要作为灵感 evidence，不入候选池；泛词不是硬错误，会交给 curator 结合画像、平台 guide 和覆盖约束判断；再经 `discovery.keyword_inspiration` 做 Profile Curator / Detail Expander，优先生成按平台 keyed 的 `platform_keywords`；`platform_guides.query_style` 明确 B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Bangumi 的平台检索语法；写库前由系统侧执行 must-cover 排序、每平台二级兴趣 / lens family 上限、原样证据标题 / URL / 过长 query / 平台语言不匹配 / 平台检索语法不匹配过滤、grounding hint `source_interest` 校正、explore 横向 lens 校验，缺失 must-cover 兴趣时用 `discovery.keyword_inspiration.repair` 做一次 bounded repair，repair 仍缺词时用 deterministic platform-native backfill 补齐；新配置默认以混合模式开启，与旧 merged keyword planner 并行，admission yield 会回填 inspiration / expansion 反馈计数；实验开关可让 due 平台完全跳过旧 merged keyword planner，只用新流程产词，并在 B 站 explore 到期时写入 `keyword_kind="explore"` 的探索词池；`keyword-inspiration-dry-run` 可真实预览中间链路但不写关键词池，且使用独立 preview selection scope，`keyword-inspiration-report` 对比 inspiration / merged cohort、输出 production / preview 抽中分布并给出 replace 门禁 |
 | **相关推荐链探索** | 从已知好内容出发，沿相关推荐不断深入 |
 | **分区热门/排行榜** | 固定全站榜，并按本地洗牌轮转覆盖非 0 分区榜，结合用户画像筛选 |
@@ -166,7 +166,8 @@ Discovery 可以继续宽搜，普通 dislike 不撤销关键词或来源任务�
 > 评估的核心依据是**用户的 Soul（灵魂画像）和深层兴趣**，而非通用指标。
 
 - **核心评估**：这个内容是否匹配这个用户的深层兴趣和当前状态？
-- **时效性基准**：来源 `published_at` 与本轮精确 UTC `evaluated_at` 一起进入单条、批量及推荐池补分类 prompt；模型比较两者判断热点 / 时事 / 版本更新是否仍新鲜，不根据自身知识截止日期猜当前时间。发布时间缺失或无效时保持中性；评分缓存绑定发布时间摘要与独立评估小时桶。
+- **时效性基准**：来源 `published_at` 与本轮精确 UTC `evaluated_at` 一起进入单条、批量及推荐池补分类 prompt；模型用内容主体判断 `breaking/current/versioned/evergreen/historical/unknown` 及置信度，不根据标题日期词或自身知识截止日期猜当前时间。`relevance_score` 与新旧完全解耦；发布时间缺失或无效时仍可语义分类，但推荐侧不发时间 bonus。评估缓存绑定发布时间摘要与独立小时桶，并由 v4 namespace 隔离旧评分语义。
+- **近期供给与排序观测**：B 站 API 主搜索与扩展 fallback 都只提供一个小型 recent lane；lane provenance 贯穿 `DiscoveredContent → discovery_candidates`，但不改变来源策略、准入阈值或配额。推荐侧对每个候选窗口聚合比较“含 publication bonus”与“无 bonus”Top10/50/100，按 class/source/age 记录进入退出；shadow 不含候选身份/文本，写失败 fail-open，也不会自动开启 stale 淘汰。
 - **可选辅助指标**：播放量/点赞/弹幕质量等——由用户画像决定是否参考（有些用户在意质量指标，有些人不在意）
 - **统一待评估池与准入**：API daemon 的不同来源 raw candidates 进入 `discovery_candidates` 后，由唯一 `CandidateEvalCoordinator` tokenized claim；默认 3 个 30 条 LLM worker 并行，任一完成即补位，SQLite 完成提交与 admission 串行。pipeline 单次 enqueue callback 立即唤醒这个 owner，refresh / managed producer 不再同步 drain。raw 清空且 projected 仍低于目标时，coordinator 调用 quota-aware supply wave，即时 tick 所有欠份额 producer 并执行 B 站 refresh；同平台周期 / 即时 tick 由 per-source lock 去重。补池生产性以真实 `inserted/enqueued` 为准，全部 duplicate 即使跑过策略也进入 30/60/120/300/600 秒退避，真实入队立即清零。串行 lane 先持久化全部 token-owned 评分，再按 `target - available - admitted_pending_copy` admission；超过 headroom 的达标结果保留为 `evaluated`。评估输入包含正文 / 标签 / 互动指标；`[discovery].eval_prefilter_mode` 默认 shadow 只记录 embedding would-filter，enforce 才会让明显低相似且非 explore 的候选本地低分缓存并跳过 LLM；多模态评估开启且模型支持图像时会复用运行时图片缓存。OpenClaw direct one-shot 不启动 daemon owner，`recommend(refresh_if_needed=True)` 的首轮 source supply / inline claim 固定 ≤4，并在 durable admission 后同步 drain ≤4 条 expression copy。调度 projected 固定为 `available + admitted_pending_copy + evaluated_pending_admission`，普通 raw 不计入；来源只影响取数方式、配额和 prompt 上下文，平台节流、raw ceiling 与准入阈值不变。
 
@@ -419,6 +420,8 @@ trusted LAN ─ HTTPS（可选）──→ TLS Proxy :8443 ─ loopback/Compose 
 │  │     request_replenishment + 定时/手动补货 + B/XHS/DY/YT/X/Zhihu/Reddit/Bangumi=5/1/1/1/1/1/1/1 │ │
 │  │     raw断供 → 欠份额 producer 即时并行唤醒 → 真实新增计数 / 无产出阶梯退避 │ │
 │  │ API CandidateEvalCoordinator: durable projected -> 3×30 workers -> serial headroom admit │ │
+│  │ evaluator: time-neutral relevance + temporal class/confidence/reason -> durable candidate/cache │ │
+│  │ curator: valid published_at + high-confidence temporal class -> bounded positive bonus │ │
 │  │ OpenClaw refresh: first source/eval <=4 -> copy <=4/no split retry -> canonical subset; both hosts recover first │ │
 │  │ delight: copy/topic ready + seen_items guard -> score/snapshot -> UI × writes seen ledger │ │
 │  │ reshuffle: current IDs + seen_items -> PoolServeSnapshot/MMR -> atomic persist -> one batch event │ │
