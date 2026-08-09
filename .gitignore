@@ -73,7 +73,15 @@ screenshot/
 
 # Local artifacts / debug output
 output/
-.codex/
+.codex/*
+!.codex/skills/
+.codex/skills/*
+!.codex/skills/add-platform-source/
+.codex/skills/add-platform-source/*
+!.codex/skills/add-platform-source/SKILL.md
+!.codex/skills/add-platform-source/agents/
+.codex/skills/add-platform-source/agents/*
+!.codex/skills/add-platform-source/agents/openai.yaml
 # Scratch dir for local debug screenshots + serve-api.log, and stray
 # root-level probe screenshots from manual UI verification runs
 .tmp/

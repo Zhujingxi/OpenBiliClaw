@@ -21,7 +21,7 @@
 - [记忆系统设计](memory-design.md) — 多层网状记忆架构详解
 - [v0.1 开发任务清单](v0.1-todolist.md) — 当前版本的开发主线
 - [技术债清单](technical-debt.md) — 已确认技术债、风险解析、建议治理方向和待确认 TODO 线索
-- [新平台来源接入指南](platform-source-integration.md) — 事件抓取、插件任务、discover、配置页、推荐卡、真实 E2E 和发布文档的标准接入流程（含知乎 / Reddit 接入经验沉淀的检查清单）
+- [新平台来源接入指南](platform-source-integration.md) / [来源契约模板](platform-source-contract.example.toml) / [验收报告模板](platform-source-acceptance.example.md) / [历史失败教训索引](platform-source-history-lessons.md) — 从既有多平台首版与后续修复提炼的契约式接入流程，含 capability-aware audit、任务/增量状态机、双浏览器构建与真实 E2E 完成门禁
 - [Bangumi 来源文档](modules/bangumi.md) / [接入 Spec](plans/2026-07-17-bangumi-source-spec.md) / [实施计划](plans/2026-07-17-bangumi-source-plan.md) — 官方只读 API、公开收藏初始化、统一 discover、三端体验与验收边界
 - [手动端到端联调](manual-e2e.md) — CLI、插件与 SQLite 的真实联调步骤
 - [Agent 机器契约 (短)](agent-install.md) — 给 AI 智能体读取的短部署契约,配合 README 的短粘贴语句
@@ -47,7 +47,7 @@
 | B 站接入层 | [modules/bilibili.md](modules/bilibili.md) | `src/openbiliclaw/bilibili/` | ✅ M3 完成 |
 | 多源适配层 | [modules/discovery.md](modules/discovery.md#多源适配层) | `src/openbiliclaw/sources/` | ✅ v0.3.x 落地 B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Bangumi / 通用 Web 多源 discovery |
 | Bangumi 接入 | [modules/bangumi.md](modules/bangumi.md) | `src/openbiliclaw/sources/bangumi*.py` + `runtime/bangumi_producer.py` | ✅ 官方匿名只读 API + 公开收藏 init + search/ranked/latest discovery |
-| 平台来源接入契约 | [modules/source-auth.md](modules/source-auth.md) | `src/openbiliclaw/api/source_auth/` | ✅ 七平台登录态契约正交化 + `verify_method` 证据强度 + 一键验证；Bangumi 暂走 legacy 状态兜底，移动端入口与 B 站凭据迁移待 Wave C |
+| 平台来源接入契约 | [modules/source-auth.md](modules/source-auth.md) | `src/openbiliclaw/api/source_auth/` | ✅ 八平台登录态契约正交化 + `verify_method` 证据强度 + 一键验证；Bangumi 已覆盖匿名 + 可选 PAT 的状态/证据，移动端凭据管理仍为有意排除 |
 | YouTube 接入 | [modules/youtube.md](modules/youtube.md) | `src/openbiliclaw/youtube/` + `src/openbiliclaw/sources/yt_tasks.py` | ✅ init / fetch smoke / Google Takeout 导入 |
 | 记忆系统 | [modules/memory.md](modules/memory.md) | `src/openbiliclaw/memory/` | ✅ 完成 |
 | 灵魂引擎 | [modules/soul.md](modules/soul.md) | `src/openbiliclaw/soul/` | ✅ 完成 |

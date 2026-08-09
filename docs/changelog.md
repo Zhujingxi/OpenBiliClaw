@@ -4,6 +4,10 @@
 
 ---
 
+## 未发布
+
+- **重构新增平台来源 skill 为证据驱动的阶段门**：复盘本地 Codex session、Git/GitHub 首次接入与后续修复，把 `full / discovery-only / capability-increment / audit-only`、机器可读来源契约、逐能力 hybrid auth、fail-closed E2E 写动作边界、中央注册 audit、required/N/A 与 PASS/FAIL 分离、原子任务准入、MV3 恢复、真假空结果、增量同步、scope completeness、时间语义、双浏览器资产和安装包真机 provenance 固化为完成条件；新增历史失败索引与 skill 镜像/契约审计测试，只有全部 required gate 有证据通过才允许报告 complete，发布 mutation 仍需明确授权。独立盲测还复现并修复了 `browser_heartbeat` 对未知来源默认落到知乎的错源分派，现由 source→prefix 显式 registry 驱动，未知来源 fail closed，新增来源必须成组提供 DB getter、扩展 event handler 与往返测试。
+
 ## v0.3.201：探针聊天与 dislike 即时推荐（2026-08-08）
 
 - **修复抖音 discovery 长时间空转与零结果误报**：本机任务历史复现到 `stale_pending` 分钟级循环、`tab_create_failed`、构建产物缺失，以及 feed 首屏响应早于任务 collector 后仍写 `ok + 0` 的竞态。Chrome / Firefox 构建现隔离清理并校验 manifest 资产；Douyin MAIN-world fetch / XHR tap 从 `document_start` 安装，页面替换网络原语后会幂等重包，isolated world 对早到的归一化 discovery 条目做 120 秒 / 256 条有界、按 scope 一次性回放，并单独记录 response observation。真实 `/jingxuan` 卡片不再只按 `a[href]` 解析，同时识别 `div[data-aweme-id]`、非 anchor `href` 与 `video_<id>`，网络没有续请求时也能从已渲染卡片提取 ID / URL / 标题 / 作者；完全未观察到 feed 响应且 DOM 也无内容时才触发原后台 tab 一次 bypass-cache reload，仍失败才返回 `feed_no_observed_response`，不会冒充真实空或对限流 / 风控重试。search dispatcher 会在提交前监听结果路由；搜索触发真实整页导航时，新文档只恢复采集阶段，同文档 SPA 则由 execution key 去重，并移除首次 ready 后重复导航首页的竞态。dispatcher 在具备 tab 能力且拿到跨来源 mutex 后才 claim，alarm / WS poll 单飞，task-result 要求 2xx 并做有界幂等重试；daemon 在扩展离线时前置跳过，并对基础设施失败 / 预算耗尽分别使用 15 / 60 分钟退避。

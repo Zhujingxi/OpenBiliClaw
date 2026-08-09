@@ -942,7 +942,7 @@ class CredentialFormSpec(BaseModel):
     """How a settings surface should ask for one platform's credential.
 
     The point of shipping this from the backend is invariant I4: with a
-    descriptor, three frontends render seven platforms without a single
+    descriptor, three frontends render every registered platform without a single
     ``key === "xiaohongshu"``. Without it, each surface re-derives "does this
     platform even take a paste box" from platform knowledge it has no business
     holding — and the two that got it wrong disagreed about 小红书.

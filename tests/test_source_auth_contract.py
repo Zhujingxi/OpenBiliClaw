@@ -46,8 +46,10 @@ from openbiliclaw.api.source_auth.forms import WRITABLE_FORM_KINDS
 from openbiliclaw.api.source_auth.probe_cache import LIVE_PROBES
 from openbiliclaw.api.source_auth.providers import _DOUYIN_DETAIL, SOURCE_AUTH_PROVIDERS
 from openbiliclaw.api.source_auth.verify import (
+    _BROWSER_HEARTBEAT_PREFIXES,
     VERIFY_ACTIONS,
     VERIFY_DEBOUNCE,
+    _verify_browser_heartbeat,
     verify_source,
 )
 from openbiliclaw.api.source_auth.write import CREDENTIAL_SPECS, FormKind
@@ -104,7 +106,7 @@ class _Case:
     enabled: bool
     feed_paused: bool = False
     # Bangumi's optional-token axis (``ok`` / ``rejected`` / ``""``); "" for the
-    # seven cookie/heartbeat platforms, which never set it. Frozen because it is
+    # the other source-auth platforms, which never set it. Frozen because it is
     # what the frontend overlays as 「令牌已失效」, and a refactor moving Bangumi
     # onto the contract must not silently drop it.
     token_state: str = ""
@@ -1116,17 +1118,20 @@ def test_verify_action_table_covers_every_platform() -> None:
     """
     assert set(VERIFY_ACTIONS) == set(SOURCE_AUTH_PROVIDERS)
     assert set(_EXPECTED_VERIFY_METHODS) == set(SOURCE_AUTH_PROVIDERS)
+    assert set(_BROWSER_HEARTBEAT_PREFIXES) == {
+        slug for slug, action in VERIFY_ACTIONS.items() if action == "browser_heartbeat"
+    }
 
 
 @pytest.mark.parametrize("slug", sorted(_EXPECTED_VERIFY_METHODS), ids=str)
 def test_verify_returns_200_and_declared_method_for_every_platform(
     slug: str, contract_env: _Env
 ) -> None:
-    """7/7 platforms answer the same route with their declared evidence strength.
+    """Every registered platform answers with its declared evidence strength.
 
     Run with no credentials anywhere, so no platform has anything to probe —
     which is also why the outbound guard can be absolute here: a verify with
-    nothing to verify must not reach for the network on any of the seven.
+    nothing to verify must not reach for the network on any registered source.
     """
     attempts: list[str] = []
 
@@ -1683,6 +1688,27 @@ async def test_bilibili_verdict_is_dropped_when_the_cookie_goes_away(
 
 
 # ── browser-heartbeat round trip (小红书 / 知乎) ──────────────────────
+
+
+async def test_unknown_browser_heartbeat_source_never_falls_back_to_zhihu() -> None:
+    class _Database:
+        def get_zhihu_login_state(self) -> tuple[bool, str]:
+            return True, "stale"
+
+    class _Hub:
+        def __init__(self) -> None:
+            self.events: list[dict[str, object]] = []
+
+        async def publish(self, event: dict[str, object]) -> bool:
+            self.events.append(event)
+            return True
+
+    hub = _Hub()
+    result = await _verify_browser_heartbeat("unregistered", _Database(), hub)
+
+    assert hub.events == []
+    assert result.conclusive is False
+    assert "尚未注册" in result.message
 
 
 @pytest.mark.parametrize(
@@ -2269,7 +2295,7 @@ def test_superseded_credential_endpoints_are_marked_deprecated(contract_env: _En
 
 
 # ── Phase 4: credential form descriptors ──────────────────────────────
-# The form descriptor exists so three frontends can render seven platforms
+# The form descriptor exists so three frontends can render every registered platform
 # with no per-platform branches (invariant I4). These tests guard the two ways
 # that promise can rot: a platform shipping without a descriptor (the branch
 # comes straight back), and a descriptor that advertises more than the write
@@ -2286,7 +2312,7 @@ def _credentials_payload(env: _Env) -> dict[str, Any]:
 
 @pytest.mark.parametrize("slug", sorted(CREDENTIAL_SPECS))
 def test_every_platform_ships_a_credential_form(contract_env: _Env, slug: str) -> None:
-    """7/7 platforms carry a ``form``, so no surface has to invent one."""
+    """Every registered platform carries a form, so no surface has to invent one."""
     payload = _credentials_payload(contract_env)
     form = payload[slug]["form"]
 
@@ -2354,7 +2380,7 @@ def test_form_actions_are_backed_by_a_real_capability(contract_env: _Env, slug: 
 
     assert "clear" not in actions, slug
     assert "copy" not in actions, slug
-    # POST /api/sources/{slug}/verify serves all seven, YouTube included.
+    # POST /api/sources/{slug}/verify serves every registered source, YouTube included.
     assert "verify" in actions, slug
     for entry in form["actions"]:
         if entry["action"] == "open_login_window":
