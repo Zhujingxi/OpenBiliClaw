@@ -82,6 +82,18 @@ guided init 不与待应用配置并行：队列为 `queued/applying` 时 `POST 
 
 这些边界不阻止 discovery 搜索，也不等待异步语义清池或完整 Soul rebuild。
 
+### 30 天内容历史（issue #112）
+
+| 方法与路径 | 状态 | 契约 |
+|---|---|---|
+| `GET /api/content-history?category=clicked\|shown\|removed&limit=12&cursor={opaque}` | ✅ | 分页返回最近 30 天的「主动点开过 / 出现过但没点开 / 最近移除」。每类按 canonical `item_key` 去重，并以 `occurred_at DESC, source_kind DESC, source_id DESC, item_key ASC` 形成全序。首屏省略 `cursor` 和 `offset`；响应通过 `next_cursor` / `has_more` 驱动续页。`limit` 为 1–50；旧客户端仍可在不传 cursor 时单独使用非负 `offset`，越过 SQLite signed integer 范围会在参数校验阶段返回 422。端点只读本地数据、在 LLM 降级态仍可用；仍受现有 API auth middleware 保护。 |
+
+cursor 是版本化、base64url 编码的 opaque token，调用方不得解析或拼装。服务端严格校验其完整 shape、长度和类型，并绑定请求 `category`、固定 30 天 retention、上一页完整排序位置以及首屏看到的 events / recommendations / removal 三个最大行 ID；坏格式、跨 category 重放以及 cursor 与任何显式 offset 并用都返回 422。续页因此不会因首屏后以新行追加的头部事实（event、removal 或新 recommendation）发生 OFFSET 式重复/跳项；`total` 仍统计锚定集合中当前符合该 category 的全部卡片，不是 cursor 后剩余数，`has_more` 由 `limit + 1` 判断。该 token 不是跨请求 MVCC 快照：既有行的更新/删除、保存恢复状态和滚动 30 天边界仍按续页请求时的当前投影可见。
+
+响应每项继续保留顶层 `context` / `restored` 兼容字段；`removed` 另返回 `contexts: [{context, occurred_at, restored}]`，同一内容可同时包含 `favorite`、`watch_later`、`dismiss`、`dislike` 的各自最新事实。收藏与稍后再看分别按对应 membership 计算 restored，互不遮挡；反馈 context 的 restored 固定为 false。`clicked` / `shown` 在 SQL 投影前复用平台 registry 规范 source alias 和 item-key 前缀（包括 `x/yt/xhs`），使 alias 与 canonical 事件折叠到同一身份，且 `shown` 能正确排除已点击卡片。
+
+三套图形界面每组默认只请求 12 条，续页只回传上一页的 `next_cursor`。历史输出会把 `content_url` 与 `cover_url` 中的协议相对 URL `//...` 统一补成 `https://...`，并只返回无凭据、无空白/控制字符且结构有效的绝对 HTTP(S) URL；非法内容链接仅在平台和内容 ID 能安全构造 canonical 链接时回退，否则返回空串，非法封面直接返回空串。封面继续交给 `/api/image-proxy`，前端使用 lazy / low-priority 图片，不在打开历史页时预热整月封面。
+
 ### 公开事件写入口的幂等 ID
 
 以下三个公开写入口都要求调用方显式提供稳定 ID；字段会先去除首尾空白，再校验非空且最长 400 字符：

@@ -17,7 +17,7 @@
 | 统一品牌图标 | ✅ | Chrome / Edge / Brave / Firefox manifest 使用 16 / 32 / 48 / 128px 精确尺寸图标，side panel 顶部品牌标记、普通透明 PWA 图标、专用不透明 `maskable` / Apple 主屏幕图标、32px 根 favicon、首次设置页、桌面 Web、移动 Web 和 GitHub Pages 官网统一从 `assets/brand/openbiliclaw-icon.png` 派生。源图的半透明边缘已去除旧白底消光色；扩展图标、favicon 与 maskable 图标使用满幅品牌粉底，页面头图容器也用品牌粉承接透明圆角。旧字母 `B`、CSS 圆环和官网重复的内联 SVG favicon 已移除；社交分享图、Chrome Web Store 素材与 README / 官网截图通过 `build_social_preview_assets.py`、`capture_chrome_webstore_ui.py --refresh-docs` 和既有构建脚本确定性重建。 |
 | 8.1 行为采集 | ✅ | `content/kernel.ts` + `shared/platforms/*` + `service-worker.ts` 已接通统一事件链；B 站 / 小红书 / 抖音 / YouTube / X / 知乎都通过 `PlatformAdapter` 产出同一 `BehaviorEvent` 形态，平台差异只保留在 selector、内容 ID 和 action 识别中；Reddit 通过插件任务源接入初始化 saved/upvoted/subscribed 信号和 discovery search/hot/subreddit/related；click 监听在 capture 阶段执行，scroll 同时覆盖页面和内部滚动容器 |
 | 8.2 后端 API | ✅ | Python 侧 `/api/events`、`/api/health`、`/api/recommendations` 已可联调；`/api/events` 在 soul 画像明确未初始化时只返回 `not_initialized` 拒收结果，不写 memory，首轮画像信号由 guided init 的来源任务拉取 |
-| 8.3 Side Panel | ✅ | 已切到 side panel 主入口，继续复用 `popup/` 页面承载推荐 / 稍后 / 收藏 / 画像 / 对话五个 tab；顶部功能区提供「手机版」入口（v0.3.154 起为手机图形 + 「手机版」文字标签，与相邻图标同款白底样式），按当前插件后端地址和 HTTP/HTTPS scheme 生成 `/m/` 扫码链接；460px 以下窄宽度会把 Web、二维码、消息、设置按钮换到品牌区下一行靠右排列，避免和标题 / 状态徽标重叠；如果当前后端地址仍是 `127.0.0.1` / `localhost`，会以同一 scheme 调用轻量端点 `GET /api/qr-info`（不触发 embedding readiness probe）并读取响应中的 `lan_ip` 字段，用局域网 IP 生成二维码，提示为 info 状态；后端优先返回 RFC1918 IPv4 并排除 `198.18.x.x` 等 VPN/TUN 地址，没有可用 IPv4 时回退 ULA / global IPv6，二维码生成器会把 IPv6 literal 包进 `[]`；移动 Web 推荐页首屏先渲染 `/api/recommendations`，再异步补 runtime status / activity / delight，慢请求不会让页面无限停在 loading；聊天改走后端 durable turn，Chrome 丢弃或切 tab 后可恢复；惊喜推荐、兴趣猜测和避雷探针的内联聊天也会按 `scope=delight/probe/avoidance_probe` 恢复 pending/completed/failed turn；主聊天与移动/桌面 Web 共用 `session=popup&scope=chat`，聊天 Tab 可见且在线时约每 2.5 秒增量刷新历史，内容未变化不重绘，阅读旧消息时保留滚动位置；聊天 tab 激活时隐藏底部活动栏，聊天记录区独立滚动并占满上方空间，输入框固定在底部且会轮播想法、口味、自我描述、近期状态等多场景提示语 |
+| 8.3 Side Panel | ✅ | 已切到 side panel 主入口，继续复用 `popup/` 页面承载推荐 / 内容库 / 画像 / 对话四个一级 tab；内容库内用「稍后再看 / 收藏 / 历史记录」三个语义子 tab，兼容旧 `?tab=watchLater|favorites|history` 入口。历史按点开、出现未点和最近移除三组分页读取 30 天本地事实，使用 opaque cursor 续页；同一内容的多个移除 context 同卡显示，收藏和稍后再看可独立恢复，封面 lazy + low-priority 走既有代理缓存。历史读取有 12 秒截止时间；续页失败保留已有卡片并显示可访问的重试提示，坏封面显示 SVG fallback。顶部功能区提供「手机版」入口（v0.3.154 起为手机图形 + 「手机版」文字标签，与相邻图标同款白底样式），按当前插件后端地址和 HTTP/HTTPS scheme 生成 `/m/` 扫码链接；460px 以下窄宽度会把 Web、二维码、消息、设置按钮换到品牌区下一行靠右排列，避免和标题 / 状态徽标重叠；如果当前后端地址仍是 `127.0.0.1` / `localhost`，会以同一 scheme 调用轻量端点 `GET /api/qr-info`（不触发 embedding readiness probe）并读取响应中的 `lan_ip` 字段，用局域网 IP 生成二维码，提示为 info 状态；后端优先返回 RFC1918 IPv4 并排除 `198.18.x.x` 等 VPN/TUN 地址，没有可用 IPv4 时回退 ULA / global IPv6，二维码生成器会把 IPv6 literal 包进 `[]`；移动 Web 推荐页首屏先渲染 `/api/recommendations`，再异步补 runtime status / activity / delight，慢请求不会让页面无限停在 loading；聊天改走后端 durable turn，Chrome 丢弃或切 tab 后可恢复；惊喜推荐、兴趣猜测和避雷探针的内联聊天也会按 `scope=delight/probe/avoidance_probe` 恢复 pending/completed/failed turn；主聊天与移动/桌面 Web 共用 `session=popup&scope=chat`，聊天 Tab 可见且在线时约每 2.5 秒增量刷新历史，内容未变化不重绘，阅读旧消息时保留滚动位置；聊天 tab 激活时隐藏底部活动栏，聊天记录区独立滚动并占满上方空间，输入框固定在底部且会轮播想法、口味、自我描述、近期状态等多场景提示语 |
 | Durable 对话失败展示 | ✅ | side panel 的主聊天在 `turn.status === "failed"` 时优先渲染后端持久化的安全 `turn.error`，不把历史遗留 `turn.reply` 误当成功；惊喜/探针内联 turn 只有 `completed` 才显示成功并移除已处理探针，`failed` 显示 `turn.error`、恢复 handled/按钮状态并保留卡片供重试。 |
 | Issue #147 聊聊口味 Markdown 渲染 | ✅ | 主聊天、惊喜推荐和兴趣/避雷探针内嵌聊天复用 `web/shared/dialogue-confirmation.js` 的安全 Markdown renderer；popup、桌面 Web、移动 Web 的 AI 回复支持加粗、斜体、标题、列表、代码块、引用和 `http(s)` 链接，原始 HTML / `javascript:` 等不安全内容不会进入 DOM，用户消息仍按纯文本展示。 |
 | 对话确认入口（Wave C/D + 单队列 cutover） | ✅ | popup、移动 Web 与桌面 Web 共用 `web/shared/dialogue-confirmation.js` 渲染 `hypothesis` 卡片、纯提问气泡和普通文字 turn：卡片提供「准 / 不准 / 聊聊 / 稍后」四动作、可展开依据与原地结算态；纯数字、UUID、事件 / note 前缀、BVID 或裸哈希等只有机器 ID 的依据会整项过滤，过滤后为空则不渲染「依据」区。桌面「待聊确认」与插件保持同一套紧凑视觉：柔和品牌色折叠条、数字徽标、轻量箭头和单列小卡片，不再额外加入说明文案或桌面仪表盘式重容器；猜测卡片仍按标题、依据、结算状态、主次动作分层，430px 以下动作改两列，深浅主题、可见 focus 与 reduced-motion 继续沿用全局设计令牌。action 先乐观更新；同步 `200` 直接采用服务端状态，`already_settled`（包括相反 verdict）覆盖本地乐观结果。收到 `202 processing` 才复用各端既有 `fetchChatTurn` 按 `1s/2s/5s`（随后 5s）读取 durable turn，30 秒总截止；终态立即停，连续读取失败、截止或页面 abort 只把本地卡片标为 `retryable_error`，允许刷新/重试，不伪造 durable 失败。三端各自持有 action AbortController，页面卸载会终止轮询。popup 与移动 Web 的「待聊确认」列表调用 `GET /api/chat/pending-confirmations`，主动打开用 `session="popup"`；桌面端镜像相同语义并用 `session="popup"`，侧栏「聊聊口味」显示待聊计数。三端对话记录和待聊列表都使用有界独立滚动，重绘保留读者位置与已展开依据；聊天可见且在线时约每 2.5 秒增量刷新历史，快照未变化不重绘；移动端动作保持两列 44px 触控目标。待聊数字只在三端对话入口显示；service worker 不请求 `?count_only=1`，也不把待聊数写入工具栏，工具栏角标只表达后端不可达或未初始化。三端的画像/认知更新区均只读，主动确认只存在于 durable 对话卡片。后端 deprecated legacy 端点继续保留，新客户端不调用。 |
@@ -473,6 +473,7 @@ CLI 入口：
 - 收到后台 `refresh.pool_updated` 时，推荐 tab 只更新池子数量、最近补货数量、方向提示和底部可换提示；移动 Web 空态也会用同一 runtime status 重新计算“还有多少可换 / 多少素材在整理”。不会调用 `/api/recommendations` 替换当前列表，用户已续页出来的历史内容会保留到下一次主动“换一批”或页面重新初始化。首次初始化推荐列表后会再读一次 `/api/runtime-status`，避免 `/api/recommendations` 从候选池 bootstrap 后仍显示 bootstrap 前库存
 - popup API 现在会统一规范化推荐项，追加出来的 `cover_url` 也会被收敛成可直接加载的 `https://` 地址；推荐点击 payload 会保留 `content_id / content_url / source_platform`，因此 YouTube 等跨源卡片打开后也会被后端记成对应来源，而不是落回 B 站 BV 号语义
 - 推荐、惊喜推荐和消息内封面图会通过 `popup-helpers.buildImageProxyPath()` 生成 `/api/image-proxy?url=...`，再用 `popup-backend-config.getBackendOrigin()` 拼成当前后端绝对地址；图片加载失败时保留已有 wrapper fallback，不让卡片布局塌缩
+- 内容库的收藏 / 稍后再看封面同样走当前后端图片代理；真实 403、网络错误或已缓存的失败图片都会从 DOM 移除并替换为可见 SVG 占位，插件不会保留浏览器破图图标，卡片打开按钮的可访问名称保持不变
 - 保存页刷新失败时保留最后一次成功的列表，错误行提供「重试加载」；全部 saved read/write/status/sync/task 请求都有 Abort timeout，且同一 deadline 从后端地址解析开始，覆盖初次设备会话交换、401 强制换票、受保护请求与响应解析，认证 fetch 接收同一 AbortSignal。每次成功加载会按 `sync_task_id` 去重恢复非终态 task，task→item ownership 把关联行显示为「同步中」并从单项 / 批量候选排除；side panel 重新可见时立即恢复查询，pagehide 清理 tracker。批量同步与重试加载会先捕获列表级焦点，重渲染后优先回到同一列表动作；卡片动作消失时再依次落到相邻卡片动作、列表动作、页面标题。「全部稍后看」按结果下标保留失败项，采用服务端 URL fallback `item_key` 更新状态，并把自动同步 task 纳入同一 ownership。coarse pointer 下推荐 / delight 保存按钮至少 44×44，sync 文案切换预留固定宽度。
 - `/api/recommendations/refresh` 仍保留为后台补货入口，用于继续往候选池里持续进货
 - popup 推荐卡片现在不会再把空 `expression / topic_label` 补成固定占位文案；后端预生成没完成时，这两块会直接隐藏
@@ -530,7 +531,7 @@ CLI 入口：
 - 惊喜推荐和兴趣猜测卡片内的 `聊一聊` 也会用 `scope=delight/probe` 写入 durable turn，回复完成后同步刷新对应卡片状态、画像摘要和最近动态；旧的 `/api/chat` 仍保留给兼容入口
 - durable chat turn 写入 SQLite `chat_turns`，不再依赖 DOM、JS 内存或 `sessionStorage` 保留主聊天历史；惊喜推荐保留 `localStorage` UI 草稿、展开态和 per-delight `turns` 作为本地兜底，权威回复状态以后端为准
 - 推荐、画像和聊天文案共享后端的 `ToneProfile`，基础风格是“老B友”，但会根据画像和近期反馈在信息密度、温度和梗感上动态调整
-- 推荐、稍后、收藏、画像、对话五个 tab 已统一为同一套浅色卡片语言，推荐内容被提升为侧边栏首屏视觉重心
+- 推荐、内容库、画像、对话四个一级 tab 已统一为同一套浅色卡片语言；内容库内的稍后再看、收藏、历史记录三个子 tab 按需加载并保留各自滚动位置，历史按 30 天三分类 cursor 分页
 
 ### 构建链路
 
@@ -628,7 +629,7 @@ npm run build
 - SQLite `events` 表已能写入 `snapshot` 事件
 - popup 能根据 `/api/ping`（连接徽章活性，404 回退 `/api/health`）、`/api/health`（embedding / profile 就绪）与 `/api/recommendations` 切换在线、空状态与推荐列表展示；如果打开时后端尚未就绪，side panel 会离线短轮询 `/api/ping`，后端启动后自动恢复在线状态并刷新推荐
 - side panel 页面反馈按钮已能经 `/api/feedback` 写回推荐表和事件层
-- side panel 现已支持 `推荐 / 稍后 / 收藏 / 画像 / 对话` 五个 tab，其中稍后再看和收藏列表与 PC Web、移动 Web 的保存语义一致
+- side panel 现已支持 `推荐 / 内容库 / 画像 / 对话` 四个一级 tab，内容库内含 `稍后再看 / 收藏 / 历史记录` 三个子项；历史与 PC Web、移动 Web 共用 30 天、三分类、cursor 分页及多 context 独立恢复语义
 - side panel 聊天信号已进入后端学习链，但仍采用受控积累，不会因为单轮聊天立即重写画像
 - side panel 聊天已支持 durable turn 恢复：主聊天、惊喜推荐内聊和兴趣猜测内聊在页面 reload 后会按 `turn_id` 从后端恢复 pending / completed / failed 状态
 - side panel 推荐、画像和聊天回复现在共用“老B友”动态语气，不再固定成一套机械模板
@@ -636,7 +637,7 @@ npm run build
 - side panel 现在还能通过 websocket 看到“开始补候选 / 当前跑到哪个策略 / 刚补进几条新的 / 这批先换好了”这类实时运行状态
 - service worker 现在会在高置信推荐出现时触发浏览器通知，并通过后端回写 `notification_sent`
 - service worker 现在也会拉取认知变化通知；如果最近系统对用户形成了新的高置信理解，会发一条更克制的“阿B 又对你多看清了一点”提醒
-- side panel 新版亮色布局已通过本地静态页面快照检查，推荐 / 稍后 / 收藏 / 画像 / 对话五个视图结构渲染正常
+- side panel 新版亮色布局已通过本地静态结构检查，四个一级视图与内容库三个子视图结构渲染正常
 - 小红书 `bootstrap_profile` 任务已通过单元测试覆盖：dispatcher 识别任务类型并能跟随 profile URL 二次执行，executor 可从 mock `__INITIAL_STATE__` 的 saved / liked / history 分组提取 scoped notes，并能用 `partial` 批次在滚动任务中持续回传新增结果
 - 抖音 `bootstrap_profile` 任务已通过扩展和后端回归覆盖：`RENDER_DATA` 只提供已显式登录的候选，`profile/self` MAIN-world bridge 对当前账号做最终权威确认（冲突时 profile 优先、未确认不缓存），API harvester 可分页拉取四个 scope 并报告后续页错误；dispatcher 的 partial 批次会在后端合并、去重并转成统一 memory 事件，身份 / 分页不完整时最终状态保持为 `degraded` 而不是伪装 `ok`
 - 抖音 `search` / `hot` / `feed` 任务已通过扩展回归覆盖：dispatcher 三类 discovery 都从抖音首页启动；search 会通过首页搜索框提交并用 `search_navigation_ok` 校验是否进入真实搜索结果路由；content script 声明 search / hot 均支持 DOM interaction + passive fetch tap + active API bridge，feed 仍是 DOM interaction + passive fetch tap；fetch / XHR tap 可被动转发页面自身 search / related / feed 响应，并按目标 scope 过滤结果；`search-douyin -k 猫 --max-items-per-keyword 10 -w 180` 可用于 smoke `dy_search` 候选，`discover-douyin --source search --keyword 猫 --limit 5 --no-cache --no-evaluate` 可预览 `dy-plugin-search` 候选

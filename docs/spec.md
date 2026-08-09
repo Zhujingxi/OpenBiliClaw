@@ -41,6 +41,7 @@ OpenBiliClaw 是一个**本地优先、开源的跨平台个性化内容发现 A
 - **小红书赞 / 收藏强信号**由 MAIN-world `xhs-action-tap`（`obc-xhs-action`，与 token sniffer 隔离）在网络层认定：like/dislike/collect/uncollect 写端点业务成功才发，替代此前「按钮文案匹配、图标按钮漏采」的 DOM 路径；xhs adapter 声明 `tapAuthoritativeActions:{like,favorite,retraction}`，kernel 抑制对应 DOM 发射，事件 URL 与后端 note 键型互通以支持赞→撤销折价
 - 记录用户的**主动反馈**：`dislike` 类动作统一规范成 `feedback` 事件，避免各平台负反馈语义分叉
 - 插件 side panel 与桌面 / 移动 Web 使用同一 platform-neutral 保存契约：卡片先本地保存，保存页显式同步并轮询逐项任务；默认关闭自动同步，首次开启提示将修改对应平台账号；本地删除不删除平台记录
+- 插件 side panel 与桌面 / 移动 Web 使用同一 30 天内容历史契约：recommendation-owned click、推荐展示和本地保存移除快照分别投影为「主动点开过 / 出现过但没点开 / 最近移除」，按 canonical identity 去重分页；保存移除项可恢复，封面不做整页预热，只按视口懒加载走现有图片代理缓存
 - 本机调试可通过 `/api/extension/e2e/run` 驱动已安装插件在抖音 / 小红书 / X 真实页面执行白名单 DOM 操作，再由后端校验 `/api/events` 是否自然入库；runner 会把复用 tab 归位到平台入口并在回传结果前 flush 捕捉 buffer，该链路不伪造行为事件，用于验证捕捉层本身。`/api/events` 的每个 `event_id`、`/api/feedback` 与 `/api/recommendation-click` 的 `request_id` 都是 trim 后 1–400 字符的必填稳定键；缺失、空白或超长由请求模型在任何 event/projection 写入前返回 422。同一动作重试必须复用，服务端不补随机键。`/api/events` 在画像明确未初始化时会拒收普通行为事件，首轮画像信号只由 guided init 来源任务拉取；初始化后所有 accepted event 都先经统一 ingress commit，HTTP 只 wake、不等待 pipeline / LLM。app-owned `EventProcessingScheduler` 让 `profile_events` generic consumer 与 `content_feedback` consumer 按各自 durable cursor 扫描显式 owner，以 event row ID 生成稳定 signal，并用 `checkpointed_enqueue_batch()` 在同一个 `pipeline_state.json` snapshot 中原子发布 buffer+cursor，再由 owner 调 `tick_if_buffered()`；独立周期画像维护才调用完整 `tick()`。首次 app startup 只 await owner fence、本地 durable 准备与 scheduler admission，真正 scan/checkpoint/consume 在 scheduler-owned background task 中继续；provider 401、pending buffer LLM 或永不返回调用不能延迟 listener/health。shutdown 取消并 gather；热重载仍同步 pause/drain/recover/rebind，不缩短 owner pass 或破坏 cursor/buffer。5 秒 safety scan 继续覆盖丢 wake。retraction 投影在 generic cursor 前完成，hypothesis/import feedback 由其它 owner 处理或只越过 feedback cursor。两个 owner 首次接管都先按最大 event row id 发布 cutover fence，旧 direct-ingest 行不重学。`feedback_state.json` 只作迁移 provenance/兼容镜像，不是 owner 权威。`pending_signal_events` 仍只是 search / related_chain refresh 的触发水位，不是画像待处理数。`/api/feedback` 另明确采用 event-first 两次 commit：durable event 后才单独更新 recommendation projection，第二步失败由同 `request_id` duplicate retry 校验并补投影，不宣称跨表原子；相同 ID 的不同 payload 维持 409。
 
 - 上述三个公开事件 ID 字段采用严格 JSON string 校验，不把数字、布尔或其它 JSON 类型自动转成
@@ -424,6 +425,10 @@ trusted LAN ─ HTTPS（可选）──→ TLS Proxy :8443 ─ loopback/Compose 
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │ 推荐点击：content_id/url/source_platform -> source-aware click signal │ │
+│  └──────────────────────────────────────────────────────┘   │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │30天历史：click events + recommendations + saved_item_removals│ │
+│  │ -> /api/content-history 三分类分页 -> 插件/移动/桌面 lazy 封面 │ │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │ durable chat：session=popup -> 插件/移动/桌面；主历史含 probe 聊天 │   │

@@ -20,6 +20,10 @@
 - **在线修改 `data_dir` 改为重启后切换**：`PUT /api/config` 仍持久化用户选择，但 canonical 路径与当前 active data dir 不同时返回 `restart_required=true`；本进程的 `RuntimeContext`、数据库、同次保存的外部 Cookie 凭据和迁移导出的数据快照继续使用已经取得 runtime lock 的旧目录，其它字段照常进入后台应用队列。只有完整重启并取得新目录锁后才启用新路径，`apply-status=applied` 不再被误解为数据目录已热重载。
 - **修复启动冷备与 SQLite WAL 锁的顺序风险**：`openbiliclaw start` 现在在 guided init 或 runtime 建立持久 SQLite 连接之前完成健康检查和到期冷备；不再在已有连接后用普通文件复制打开 / 关闭主库 inode，避免 POSIX 进程锁被意外释放并导致后续 checkpoint 使用错误 WAL 世代。迁移导出的 online backup 也改用只读源连接；新增跨进程完整性探针后旧 / 新连接交替写入的回归，确保最终数据库仍通过完整性检查。
 
+- **Issue #112 新增 30 天内容历史**：插件 side panel、桌面 Web 与移动 Web 都新增「历史记录」，按「主动点开过 / 出现过但没点开 / 最近移除」三组分页展示。后端复用 recommendation 点击事件与推荐记录，只为会随 membership 删除而丢失的本地收藏 / 稍后移除保存快照；重复内容按 canonical `item_key` 折叠，最近移除可一键恢复。三端封面统一按页、懒加载、低优先级走现有磁盘缓存代理，避免打开历史时并发请求整月图片。
+- **Issue #112 内容库信息架构收敛**：插件、桌面 Web 与移动 Web 将原来的「稍后 / 收藏 / 历史」三个一级入口合并为单一「内容库」，内部保留三个语义子 tab；移动底栏和插件导航都缩为「推荐 / 内容库 / 画像 / 对话」四项。旧 hash、deep link 与 popup `?tab=` 参数会迁移到对应子项；键盘方向键、Home / End、焦点环、44px 触控目标与每个子项的滚动位置保持可用。
+- **Issue #112 真实 E2E 加固**：在匿名 B 站实时数据、旧库迁移、三端真实浏览器、断服重启、并发读写与真实图片代理上补齐验证；legacy 推荐先确定 canonical key 再做等值关联，成熟库 `shown` 首屏由约 8 秒降至冷启动约 0.14 秒、热查询约 0.02 秒。历史 URL 只返回安全 HTTP(S)；新界面首屏不发送 cursor，续页使用绑定分类、30 天窗口、全序位置与 source max-id anchors 的 opaque `next_cursor / has_more`，避免头部新增造成 OFFSET 漂移，但不把既有行更新/删除描述成跨请求快照。每个内容的 `contexts` 分别保留 favorite/watch_later/dismiss/dislike 最新事实，收藏与稍后再看独立恢复；坏封面显示可见 fallback，插件读取另有 12 秒截止时间。
+- **Issue #112 保存卡坏封面回退**：真实图片代理返回 403 或浏览器已缓存失败结果时，移动 Web、桌面 Web 与插件的收藏 / 稍后再看卡片都会移除破图 `<img>`，在原尺寸位置显示可见 SVG 占位；打开卡片的标题标签和布局保持不变。
 - **探针聊天跨界面对齐**：从消息里的「多聊聊」提交的 `probe` / `avoidance_probe` durable turn 现在也会进入插件、桌面 Web 与移动 Web 的主对话历史；关闭消息面板或切换到「聊聊口味」后仍能找回这段对话，惊喜推荐 `delight` 继续保留在自己的内容卡片内聊中。
 - **修正 dislike 的产品边界**：普通 dislike 不再被当成搜索词禁令，也不再让跨 digest 关键词整理撤销同词 pending；搜索与多源抓取可以继续宽搜，单卡反馈只同步隐藏该卡，主题证据确认后才约束相关推荐输出。平台库存饱和产生的 supply avoid 仍可独立淘汰冗余关键词。
 - **关闭偏好写入到推荐展示的延迟窗口**：`get_profile()` 立即合并 flat preference 的最新 dislikes；推荐历史 snapshot 绑定 dislike digest，首屏、换批、追加、OpenClaw 与主动通知在最终输出边界复核，不再等待 1 秒缓存、Soul rebuild 或异步清池。

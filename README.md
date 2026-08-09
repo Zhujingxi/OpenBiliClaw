@@ -329,14 +329,14 @@ Chrome Web Store / AMO 发布包默认只声明本机后端权限。让插件连
 openbiliclaw start
 ```
 
-- **桌面端**：浏览器直接访问 `http://127.0.0.1:8420/web`（或 `http://127.0.0.1:8420/`，自动跳转）。大屏两栏布局，推荐流、画像、聊天、消息和设置全在一页。
-- **移动端**：点击插件顶部的手机图标扫二维码，或手动输入 `http://<电脑局域网 IP>:8420/m/`。适合手机上刷推荐、看画像、和阿B聊天。
+- **桌面端**：浏览器直接访问 `http://127.0.0.1:8420/web`（或 `http://127.0.0.1:8420/`，自动跳转）。大屏两栏布局，推荐流、30 天历史、画像、聊天、消息和设置全在一页。
+- **移动端**：点击插件顶部的手机图标扫二维码，或手动输入 `http://<电脑局域网 IP>:8420/m/`。适合手机上刷推荐、回看 30 天历史、看画像和与阿B聊天。
 
 > 首次运行 `openbiliclaw init` 时会询问是否允许局域网访问（默认 Y）。如果选了 N 或想改回来，编辑 `config.toml` 的 `[api].host`（`0.0.0.0` = 通过可用的 IPv4 / IPv6 局域网访问，`127.0.0.1` = 仅本机）。二维码优先使用 IPv4；仅有 IPv6 时会自动生成带方括号的 IPv6 地址。
 
 打开 `/m/` 后可以把手机页面保存成桌面快捷入口：iPhone / iPad 用 Safari 的「分享 → 添加到主屏幕」；Android Chrome / Chromium 浏览器用菜单里的「安装应用」或「添加到主屏幕」。局域网 HTTP 在部分 Android 浏览器上可能只生成快捷方式；如果想要更稳定的完整 PWA 安装提示，建议在可信环境里用 HTTPS 反代访问本机后端。
 
-页面包含「推荐 / 稍后 / 收藏 / 画像 / 对话」五个底部 Tab：推荐页支持「换一批 / 加载更多 / 喜欢 / 不感兴趣 / 稍后再看 / 收藏 / 写一句 / 聊一聊」，稍后和收藏页管理「稍后再看 / 收藏」列表，画像页展示人格素描、核心特质、兴趣和认知更新，对话页与插件共享主聊天历史。
+页面底部收敛为「推荐 / 内容库 / 画像 / 对话」四个一级 Tab。内容库内再按「稍后再看 / 收藏 / 历史记录」切换：前两项管理保存列表；历史记录按「主动点开过 / 出现过但没点开 / 最近移除」分页展示近 30 天内容，同一内容的多个移除原因会一起显示，收藏和稍后再看可以分别恢复。旧的稍后、收藏和历史直达链接会自动迁移到对应内容库子项。
 
 <details>
 <summary>不用 AI 助手：直接跑一句话安装脚本</summary>
@@ -573,6 +573,7 @@ OpenClaw 收到 `interest.probe` 事件（或主动拉取 `next-probe`），发�
 - 💬 **有温度的推荐理由** — 像朋友一样解释为什么你会喜欢，而不是「因为你看过类似视频」
 - 🔄 **持续学习** — 苏格拉底式对话 + 行为分析 + 反馈即时生效，越用越懂你
 - ⭐ **本地优先收藏 / 稍后看** — 推荐卡先写本地 SQLite，自动同步默认关闭；桌面 Web 刷新后首屏就显示保存数量徽标；B站和六个扩展平台均支持收藏与原生稍后看/收藏回退，2026-07-14 七平台两类动作真实账号回归均为 `synced/already_synced`
+- 🕘 **30 天内容历史** — 插件、桌面与移动端统一显示点开过、出现未点和最近移除；按页懒加载封面，移除的本地收藏 / 稍后看可一键恢复
 - 🧩 **浏览器插件** — Chrome / Edge / Brave / Arc / Firefox，侧边栏推荐 + 跨站行为采集，装上就能用
 - 🚀 **图形化引导初始化** — 安装包 `/setup/`、桌面 Web 和插件都能点一下完成初始化，不碰命令行
 - 📦 **跨机器迁移** — 桌面配置页一键导出 / 导入可移植配置、SQLite、画像、Cookie 与图片缓存；导入先校验暂存，可查询 / 取消，重启后带回滚副本应用。`.obcbackup` 含明文敏感信息，但不含源机 API 登录密码 / 会话签名密钥或扩展设备 key
@@ -649,6 +650,7 @@ Agent 宿主（OpenClaw / Hermes / WorkBuddy）
 ├─────────┴──────────┴───────────┴───────────────┤
 │ 普通事件/推荐点击 → generic durable cursor ─┐    │
 │ 内容反馈 → content_feedback durable cursor ─┴→ buffer+cursor 同一原子 checkpoint │
+│ 30天历史：click events + recommendations + saved_item_removals → 三端分页/lazy │
 │ dislike：单卡同步隐藏；主题写入后 effective snapshot → 推荐历史/换批/通知最终复核 │
 │ discovery 可继续宽搜；异步语义清池只优化库存，不作为展示正确性边界 │
 │ 首启 fence+task admission → listener；后台 owner recovery → tick_if_buffered │
@@ -695,7 +697,7 @@ Agent 宿主（OpenClaw / Hermes / WorkBuddy）
 │ exact OpenBiliClaw / YouTube Watch Later 目标 → 安全 task-result          │
 │ trusted-local E2E 精确授权 → 单 item saved sync → 六字段安全 callback      │
 │ unsupported_adapter_missing 可重试 · unsupported_content_type local-only │
-│ Canonical ID · Local-first SavedSync · Task Poll · SQLite（事件 · 已看账本 · 候选池 · 推荐 · 保存/任务）│
+│ Canonical ID · Local-first SavedSync · Task Poll · SQLite（事件 · 已看账本 · 候选池 · 推荐 · 保存/任务 · 移除快照）│
 │ 六平台 adapter → broker → shared MV3 recovery barrier → Reddit/X/YT/XHS/DY/Zhihu executor（6/6 fixture + real-account）│
 └────────────────────────────────────────────────┘
 

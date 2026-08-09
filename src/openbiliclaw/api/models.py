@@ -271,6 +271,48 @@ class RecommendationListResponse(BaseModel):
     items: list[RecommendationOut]
 
 
+ContentHistoryCategory = Literal["clicked", "shown", "removed"]
+ContentHistoryContext = Literal["favorite", "watch_later", "dismiss", "dislike"]
+
+
+class ContentHistoryContextOut(BaseModel):
+    """Latest state for one removal context attached to a history card."""
+
+    context: ContentHistoryContext
+    occurred_at: str
+    restored: bool = False
+
+
+class ContentHistoryItemOut(BaseModel):
+    """One canonical item in a bounded content-history category."""
+
+    item_key: str
+    source_platform: str
+    content_id: str
+    content_url: str = ""
+    content_type: str = "video"
+    title: str = ""
+    author_name: str = ""
+    cover_url: str = ""
+    body_text: str = ""
+    recommendation_id: int | None = None
+    occurred_at: str = ""
+    context: str = ""
+    restored: bool = False
+    contexts: list[ContentHistoryContextOut] = Field(default_factory=list)
+
+
+class ContentHistoryResponse(BaseModel):
+    """One paginated 30-day history category."""
+
+    category: ContentHistoryCategory
+    items: list[ContentHistoryItemOut]
+    total: int
+    retention_days: int = 30
+    next_cursor: str | None = None
+    has_more: bool = False
+
+
 class RecommendationReshuffleResponse(BaseModel):
     """Immediate recommendation reshuffle result."""
 

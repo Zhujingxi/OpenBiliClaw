@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import copy
 import inspect
 import ipaddress
@@ -67,6 +69,9 @@ from openbiliclaw.api.models import (
     ConfigServiceProbeResponse,
     ConfigUpdateIn,
     ConfigUpdateResponse,
+    ContentHistoryContextOut,
+    ContentHistoryItemOut,
+    ContentHistoryResponse,
     DelightAckIn,
     DelightAckResponse,
     DelightResponseIn,
@@ -222,6 +227,7 @@ from openbiliclaw.sources.platforms import (
 from openbiliclaw.sources.platforms import (
     infer_source_platform_from_url as _registry_infer_source_platform_from_url,
 )
+from openbiliclaw.storage.database import CONTENT_HISTORY_RETENTION_DAYS
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -257,6 +263,10 @@ def _config_llm_probe_timeout_seconds(configured_timeout: object) -> float:
 _CONFIG_SAVE_LOCK = asyncio.Lock()
 _MIGRATION_TRANSFER_LOCK = asyncio.Lock()
 _fire_and_forget_tasks: set[asyncio.Task[None]] = set()
+_SQLITE_SIGNED_INTEGER_MAX = (1 << 63) - 1
+_CONTENT_HISTORY_CURSOR_VERSION = 1
+_CONTENT_HISTORY_CURSOR_MAX_LENGTH = 32768
+_CONTENT_HISTORY_CURSOR_ITEM_KEY_MAX_LENGTH = 2048
 
 
 class _MigrationArchiveStreamingResponse(StreamingResponse):
@@ -1395,6 +1405,172 @@ def _fallback_recommendation_click_url(
     return ""
 
 
+def _normalize_content_history_http_url(value: object) -> str:
+    """Return an absolute HTTP(S) history URL or an empty safe value.
+
+    Old Bilibili cache rows commonly store protocol-relative covers.  History
+    is rendered by three clients, so normalize those once at the API boundary
+    and never expose a script/data/file scheme (or a credential-bearing URL)
+    for a client to navigate or render.
+    """
+    raw = str(value or "").strip()
+    if raw.startswith("//"):
+        raw = f"https:{raw}"
+    if not raw or any(character.isspace() for character in raw):
+        return ""
+    if any(unicodedata.category(character).startswith("C") for character in raw):
+        return ""
+    try:
+        parts = urlsplit(raw)
+        hostname = parts.hostname
+        port = parts.port
+    except ValueError:
+        return ""
+    if (
+        parts.scheme.lower() not in {"http", "https"}
+        or not parts.netloc
+        or hostname is None
+        or parts.username is not None
+        or parts.password is not None
+        or (port is not None and port <= 0)
+    ):
+        return ""
+    return urlunsplit(
+        (
+            parts.scheme.lower(),
+            parts.netloc,
+            parts.path,
+            parts.query,
+            parts.fragment,
+        )
+    )
+
+
+def _encode_content_history_cursor(
+    category: str,
+    position: tuple[str, int, int, str, int, int, int],
+) -> str:
+    """Encode one stable history order tuple as a restart-safe opaque token."""
+    payload = {
+        "v": _CONTENT_HISTORY_CURSOR_VERSION,
+        "category": category,
+        "retention_days": CONTENT_HISTORY_RETENTION_DAYS,
+        "after": list(position[:4]),
+        "anchors": list(position[4:]),
+    }
+    raw = json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    token = base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+    if len(token) > _CONTENT_HISTORY_CURSOR_MAX_LENGTH:  # pragma: no cover - trusted DB bound
+        raise RuntimeError("content history cursor exceeds its encoded length bound")
+    return token
+
+
+def _decode_content_history_cursor(
+    token: str,
+    *,
+    category: str,
+) -> tuple[str, int, int, str, int, int, int]:
+    """Strictly decode and bind an opaque history cursor to one category."""
+    if (
+        not token
+        or len(token) > _CONTENT_HISTORY_CURSOR_MAX_LENGTH
+        or re.fullmatch(r"[A-Za-z0-9_-]+", token) is None
+    ):
+        raise ValueError("invalid content history cursor encoding")
+    padding = "=" * (-len(token) % 4)
+    try:
+        raw = base64.b64decode(
+            (token + padding).encode("ascii"),
+            altchars=b"-_",
+            validate=True,
+        )
+        payload = json.loads(raw.decode("utf-8"))
+    except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ValueError("invalid content history cursor encoding") from exc
+    if not isinstance(payload, dict) or set(payload) != {
+        "v",
+        "category",
+        "retention_days",
+        "after",
+        "anchors",
+    }:
+        raise ValueError("invalid content history cursor payload")
+    version = payload["v"]
+    retention_days = payload["retention_days"]
+    if (
+        not isinstance(version, int)
+        or isinstance(version, bool)
+        or version != _CONTENT_HISTORY_CURSOR_VERSION
+        or payload["category"] != category
+        or not isinstance(retention_days, int)
+        or isinstance(retention_days, bool)
+        or retention_days != CONTENT_HISTORY_RETENTION_DAYS
+    ):
+        raise ValueError("content history cursor does not match this request")
+    after = payload["after"]
+    if not isinstance(after, list) or len(after) != 4:
+        raise ValueError("invalid content history cursor order tuple")
+    occurred_at, source_kind, source_id, item_key = after
+    if (
+        not isinstance(occurred_at, str)
+        or not occurred_at
+        or len(occurred_at) > 64
+        or any(unicodedata.category(character).startswith("C") for character in occurred_at)
+    ):
+        raise ValueError("invalid content history cursor timestamp")
+    try:
+        datetime.fromisoformat(occurred_at.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("invalid content history cursor timestamp") from exc
+    if (
+        not isinstance(source_kind, int)
+        or isinstance(source_kind, bool)
+        or source_kind < 0
+        or source_kind > 2
+        or not isinstance(source_id, int)
+        or isinstance(source_id, bool)
+        or source_id < 0
+        or source_id > _SQLITE_SIGNED_INTEGER_MAX
+    ):
+        raise ValueError("invalid content history cursor source position")
+    if (
+        not isinstance(item_key, str)
+        or not item_key
+        or len(item_key) > _CONTENT_HISTORY_CURSOR_ITEM_KEY_MAX_LENGTH
+        or any(character.isspace() for character in item_key)
+        or any(unicodedata.category(character).startswith("C") for character in item_key)
+    ):
+        raise ValueError("invalid content history cursor item key")
+    anchors = payload["anchors"]
+    if (
+        not isinstance(anchors, list)
+        or len(anchors) != 3
+        or any(
+            not isinstance(anchor, int)
+            or isinstance(anchor, bool)
+            or anchor < 0
+            or anchor > _SQLITE_SIGNED_INTEGER_MAX
+            for anchor in anchors
+        )
+    ):
+        raise ValueError("invalid content history cursor snapshot anchors")
+    event_anchor, recommendation_anchor, removal_anchor = anchors
+    return (
+        occurred_at,
+        source_kind,
+        source_id,
+        item_key,
+        event_anchor,
+        recommendation_anchor,
+        removal_anchor,
+    )
+
+
 def _normalize_recommendation_click_identity_url(value: str) -> str:
     """Normalize the URL used only when a click has no stable content ID."""
     raw = str(value or "").strip()
@@ -2267,6 +2443,7 @@ def create_app(
             or path == "/api/project-stats"
             or path == "/api/health"
             or path == "/api/runtime-status"
+            or (path == "/api/content-history" and method == "GET")
             or path == "/favicon.ico"
             or path == "/api/autostart-status"
             or path == "/api/autostart/apply"
@@ -6991,6 +7168,107 @@ def create_app(
             recommendation_snapshot_cached_at = time.monotonic()
             recommendation_snapshot_dislike_digest = dislike_digest
             return snapshot
+
+    def _content_history_item(row: dict[str, Any]) -> ContentHistoryItemOut:
+        source_platform = _normalize_source_platform(
+            str(row.get("source_platform", "") or "bilibili")
+        )
+        content_id = str(row.get("content_id", "") or "").strip()
+        content_url = _normalize_content_history_http_url(row.get("content_url", ""))
+        if not content_url:
+            content_url = _normalize_content_history_http_url(
+                _fallback_recommendation_click_url(
+                    source_platform=source_platform,
+                    content_id=content_id,
+                    bvid=content_id,
+                )
+            )
+        cover_url = _normalize_content_history_http_url(row.get("cover_url", ""))
+        contexts: list[ContentHistoryContextOut] = []
+        raw_contexts = row.get("contexts", [])
+        if isinstance(raw_contexts, list):
+            for raw_context in raw_contexts:
+                if not isinstance(raw_context, Mapping):
+                    continue
+                context = str(raw_context.get("context", "") or "")
+                occurred_at = str(raw_context.get("occurred_at", "") or "")
+                if context not in {"favorite", "watch_later", "dismiss", "dislike"}:
+                    continue
+                contexts.append(
+                    ContentHistoryContextOut(
+                        context=cast("Any", context),
+                        occurred_at=occurred_at,
+                        restored=bool(raw_context.get("restored", False)),
+                    )
+                )
+        recommendation_id = row.get("recommendation_id")
+        return ContentHistoryItemOut(
+            item_key=str(row.get("item_key", "") or ""),
+            source_platform=source_platform,
+            content_id=content_id,
+            content_url=content_url,
+            content_type=str(row.get("content_type", "") or "video"),
+            title=str(row.get("title", "") or ""),
+            author_name=str(row.get("author_name", "") or ""),
+            cover_url=cover_url,
+            body_text=str(row.get("body_text", "") or ""),
+            recommendation_id=(int(recommendation_id) if recommendation_id is not None else None),
+            occurred_at=str(row.get("occurred_at", "") or ""),
+            context=str(row.get("context", "") or ""),
+            restored=bool(row.get("restored", False)),
+            contexts=contexts,
+        )
+
+    @app.get("/api/content-history", response_model=ContentHistoryResponse)
+    async def content_history(
+        category: Literal["clicked", "shown", "removed"] = Query(...),
+        limit: int = Query(default=12, ge=1, le=50),
+        offset: int | None = Query(
+            default=None,
+            ge=0,
+            le=_SQLITE_SIGNED_INTEGER_MAX,
+        ),
+        cursor: str | None = Query(
+            default=None,
+            min_length=1,
+            max_length=_CONTENT_HISTORY_CURSOR_MAX_LENGTH,
+        ),
+    ) -> ContentHistoryResponse:
+        """Return one lazy-loadable category from the bounded content history."""
+        if cursor is not None and offset is not None:
+            raise HTTPException(
+                status_code=422,
+                detail="content history cursor cannot be combined with offset",
+            )
+        try:
+            cursor_position = (
+                _decode_content_history_cursor(cursor, category=category)
+                if cursor is not None
+                else None
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        rows, total, has_more, next_position = await asyncio.to_thread(
+            ctx.database.list_content_history_page,
+            category,
+            limit=limit,
+            offset=offset or 0,
+            cursor=cursor_position,
+            retention_days=CONTENT_HISTORY_RETENTION_DAYS,
+        )
+        next_cursor = (
+            _encode_content_history_cursor(category, next_position)
+            if has_more and next_position is not None
+            else None
+        )
+        return ContentHistoryResponse(
+            category=category,
+            items=[_content_history_item(row) for row in rows],
+            total=total,
+            retention_days=CONTENT_HISTORY_RETENTION_DAYS,
+            next_cursor=next_cursor,
+            has_more=has_more,
+        )
 
     # ── Platform-neutral saved memberships and native sync ─────────
 

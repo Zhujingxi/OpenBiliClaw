@@ -95,6 +95,56 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _normalize_content_history_source_platform(value: object) -> str:
+    """Use the shared registry while rejecting tokens unsafe for item keys."""
+    canonical = normalize_source_platform(str(value or ""))
+    if (
+        not canonical
+        or len(canonical) > 128
+        or ":" in canonical
+        or any(character.isspace() for character in canonical)
+        or any(unicodedata.category(character).startswith("C") for character in canonical)
+    ):
+        return ""
+    return canonical
+
+
+def _normalize_content_history_item_key(value: object) -> str:
+    """Canonicalize only the platform prefix of a persisted item key."""
+    raw = str(value or "").strip()
+    if (
+        not raw
+        or len(raw) > 2048
+        or any(character.isspace() for character in raw)
+        or any(unicodedata.category(character).startswith("C") for character in raw)
+    ):
+        return ""
+    platform, separator, suffix = raw.partition(":")
+    if not platform or not separator or not suffix:
+        return ""
+    canonical_platform = _normalize_content_history_source_platform(platform)
+    if not canonical_platform:
+        return ""
+    normalized = f"{canonical_platform}:{suffix}"
+    return normalized if len(normalized) <= 2048 else ""
+
+
+def _content_history_item_key_platform(value: object) -> str:
+    """Return the canonical platform prefix carried by an item key."""
+    normalized = _normalize_content_history_item_key(value)
+    platform, separator, suffix = normalized.partition(":")
+    return platform if separator and suffix else ""
+
+
+def _content_history_item_key_content_id(value: object) -> str:
+    """Recover a raw stable ID from a canonical key when one is available."""
+    normalized = _normalize_content_history_item_key(value)
+    _platform, separator, suffix = normalized.partition(":")
+    if not separator or not suffix or suffix.startswith("url:"):
+        return ""
+    return suffix
+
+
 @dataclass(frozen=True)
 class EventInsertResult:
     """One durable event insert/deduplication result."""
@@ -306,6 +356,8 @@ class _RawTrimPlan:
 # pragmatic middle ground.
 _LOCK_RETRY_ATTEMPTS = 8
 _LOCK_RETRY_SLEEP_SECONDS = 0.02
+CONTENT_HISTORY_RETENTION_DAYS = 30
+_CONTENT_HISTORY_CATEGORIES = frozenset({"clicked", "shown", "removed"})
 # CALIBRATION PROVENANCE: the recommendation endpoint has a 3s hard tail
 # target. Recommendation persistence inherits the existing eight-attempt retry
 # loop, so each attempt waits at most 250ms (about 2.14s including retry sleeps)
@@ -1615,6 +1667,7 @@ class Database:
         self._ensure_discovery_keywords_table()
         self._ensure_favorites_table()
         self._ensure_saved_sync_tables()
+        self._ensure_content_history_tables()
         self._ensure_user_visual_clusters_table()
         self._ensure_auth_state_table()
         self._ensure_init_runs_table()
@@ -1664,6 +1717,33 @@ class Database:
             check_same_thread=False,
         )
         connection.row_factory = sqlite3.Row
+        # SQL projections must use the same platform alias registry as Python
+        # ingestion.  Register the shared helper instead of copying aliases
+        # into CASE expressions that would drift as platforms evolve.
+        connection.create_function(
+            "normalize_source_platform",
+            1,
+            _normalize_content_history_source_platform,
+            deterministic=True,
+        )
+        connection.create_function(
+            "normalize_content_history_item_key",
+            1,
+            _normalize_content_history_item_key,
+            deterministic=True,
+        )
+        connection.create_function(
+            "content_history_item_key_platform",
+            1,
+            _content_history_item_key_platform,
+            deterministic=True,
+        )
+        connection.create_function(
+            "content_history_item_key_content_id",
+            1,
+            _content_history_item_key_content_id,
+            deterministic=True,
+        )
         if enforce_foreign_keys:
             connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA busy_timeout = 30000")
@@ -9445,6 +9525,901 @@ class Database:
             recommendation_ids,
         )
 
+    def prune_content_history(
+        self,
+        *,
+        retention_days: int = CONTENT_HISTORY_RETENTION_DAYS,
+    ) -> int:
+        """Delete saved-removal snapshots outside the bounded history window."""
+        days = max(1, int(retention_days))
+        cursor = self._execute_write(
+            """
+            DELETE FROM saved_item_removals
+            WHERE removed_at < datetime('now', ?)
+            """,
+            (f"-{days} days",),
+        )
+        return max(0, int(cursor.rowcount or 0))
+
+    def list_content_history(
+        self,
+        category: str,
+        *,
+        limit: int = 12,
+        offset: int = 0,
+        retention_days: int = CONTENT_HISTORY_RETENTION_DAYS,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Return an offset-compatible page for legacy callers."""
+        items, total, _has_more, _next_position = self.list_content_history_page(
+            category,
+            limit=limit,
+            offset=offset,
+            retention_days=retention_days,
+        )
+        return items, total
+
+    def list_content_history_page(
+        self,
+        category: str,
+        *,
+        limit: int = 12,
+        offset: int = 0,
+        cursor: tuple[str, int, int, str, int, int, int] | None = None,
+        retention_days: int = CONTENT_HISTORY_RETENTION_DAYS,
+    ) -> tuple[
+        list[dict[str, Any]],
+        int,
+        bool,
+        tuple[str, int, int, str, int, int, int] | None,
+    ]:
+        """Return one page of the 30-day content-history projection.
+
+        ``clicked`` is projected from recommendation-owned click events,
+        ``shown`` from recommendation rows without a matching click, and
+        ``removed`` from saved-list removal snapshots plus explicit card
+        dismiss/dislike feedback.  Rows are deduplicated by canonical item key
+        within each category so repeated exposure does not flood the UI.
+        """
+        normalized_category = str(category or "").strip().lower()
+        if normalized_category not in _CONTENT_HISTORY_CATEGORIES:
+            raise ValueError(f"unsupported content history category: {category!r}")
+        page_limit = max(1, min(100, int(limit)))
+        if cursor is not None:
+            if offset:
+                raise ValueError("content history cursor cannot be combined with offset")
+            (
+                occurred_at,
+                source_kind,
+                source_id,
+                item_key,
+                event_anchor,
+                recommendation_anchor,
+                removal_anchor,
+            ) = cursor
+            if (
+                not isinstance(occurred_at, str)
+                or not occurred_at
+                or len(occurred_at) > 64
+                or any(unicodedata.category(character).startswith("C") for character in occurred_at)
+                or not isinstance(source_kind, int)
+                or isinstance(source_kind, bool)
+                or source_kind < 0
+                or source_kind > 2
+                or not isinstance(source_id, int)
+                or isinstance(source_id, bool)
+                or source_id < 0
+                or source_id > (1 << 63) - 1
+                or not isinstance(item_key, str)
+                or not item_key
+                or len(item_key) > 2048
+                or any(character.isspace() for character in item_key)
+                or any(unicodedata.category(character).startswith("C") for character in item_key)
+                or any(
+                    not isinstance(anchor, int)
+                    or isinstance(anchor, bool)
+                    or anchor < 0
+                    or anchor > (1 << 63) - 1
+                    for anchor in (event_anchor, recommendation_anchor, removal_anchor)
+                )
+            ):
+                raise ValueError("invalid content history cursor position")
+        # Python integers are unbounded, while SQLite LIMIT/OFFSET bindings are
+        # signed 64-bit integers.  The HTTP boundary rejects larger values;
+        # keep the storage API defensive for direct callers too.
+        page_offset = max(0, min((1 << 63) - 1, int(offset)))
+        days = max(1, min(365, int(retention_days)))
+        cutoff = f"-{days} days"
+        self._ensure_fresh_read()
+
+        cursor_anchors: tuple[int | None, int | None, int | None] = (
+            (None, None, None) if cursor is None else (cursor[4], cursor[5], cursor[6])
+        )
+        history_snapshot_cte = """
+            history_snapshot AS MATERIALIZED (
+                SELECT
+                    COALESCE(
+                        ?,
+                        (SELECT COALESCE(MAX(id), 0) FROM events),
+                        0
+                    ) AS event_anchor,
+                    COALESCE(
+                        ?,
+                        (SELECT COALESCE(MAX(id), 0) FROM recommendations),
+                        0
+                    ) AS recommendation_anchor,
+                    COALESCE(
+                        ?,
+                        (SELECT COALESCE(MAX(id), 0) FROM saved_item_removals),
+                        0
+                    ) AS removal_anchor
+            )
+        """
+
+        recent_clicks_cte = """
+            recent_click_facts AS MATERIALIZED (
+                SELECT
+                    e.id AS source_id,
+                    0 AS source_kind,
+                    e.created_at AS occurred_at,
+                    NULLIF(CAST(json_extract(e.metadata, '$.recommendation_id') AS INTEGER), 0)
+                        AS raw_recommendation_id,
+                    CASE
+                        WHEN json_type(e.metadata, '$.source_platform') IS NULL
+                          OR json_type(e.metadata, '$.source_platform') = 'null'
+                          OR (
+                              json_type(e.metadata, '$.source_platform') = 'text'
+                              AND trim(json_extract(
+                                  e.metadata, '$.source_platform'
+                              )) = ''
+                          ) THEN 'bilibili'
+                        WHEN json_type(e.metadata, '$.source_platform') != 'text'
+                            THEN ''
+                        ELSE normalize_source_platform(
+                            json_extract(e.metadata, '$.source_platform')
+                        )
+                    END AS source_platform,
+                    COALESCE(
+                        NULLIF(json_extract(e.metadata, '$.content_id'), ''),
+                        NULLIF(json_extract(e.metadata, '$.bvid'), ''),
+                        ''
+                    ) AS content_id,
+                    COALESCE(
+                        NULLIF(json_extract(e.metadata, '$.content_url'), ''),
+                        NULLIF(e.url, ''),
+                        ''
+                    ) AS content_url,
+                    COALESCE(NULLIF(e.title, ''), '') AS event_title,
+                    COALESCE(
+                        NULLIF(json_extract(e.metadata, '$.up_name'), ''),
+                        NULLIF(json_extract(e.metadata, '$.author'), ''),
+                        ''
+                    ) AS event_author
+                FROM events AS e
+                CROSS JOIN history_snapshot AS snapshot
+                WHERE e.event_type = 'click'
+                  AND e.id <= snapshot.event_anchor
+                  AND e.created_at >= datetime('now', ?)
+                  AND json_valid(e.metadata)
+                  AND (
+                      json_extract(e.metadata, '$.source') = 'recommendation_click'
+                      OR json_extract(e.metadata, '$.event_namespace') = 'recommendation'
+                  )
+            ),
+            recent_clicks AS MATERIALIZED (
+                SELECT
+                    facts.source_id,
+                    facts.source_kind,
+                    facts.occurred_at,
+                    COALESCE(r.id, facts.raw_recommendation_id) AS recommendation_id,
+                    COALESCE(
+                        NULLIF(normalize_content_history_item_key(r.item_key), ''),
+                        NULLIF((
+                            SELECT normalize_content_history_item_key(cc.item_key)
+                            FROM content_cache AS cc
+                            WHERE normalize_source_platform(cc.source_platform) =
+                                    facts.source_platform
+                              AND facts.source_platform != ''
+                              AND cc.content_id = facts.content_id
+                              AND cc.item_key != ''
+                            ORDER BY cc.last_scored_at DESC, cc.bvid DESC
+                            LIMIT 1
+                        ), ''),
+                        NULLIF(normalize_content_history_item_key(r.bvid), ''),
+                        NULLIF(normalize_content_history_item_key(
+                            facts.source_platform || ':' || r.bvid
+                        ), ''),
+                        NULLIF(normalize_content_history_item_key(
+                            facts.source_platform || ':' || facts.content_id
+                        ), ''),
+                        COALESCE(
+                            NULLIF(facts.source_platform, ''),
+                            'unknown'
+                        ) || ':event-' || facts.source_id
+                    ) AS resolved_item_key,
+                    COALESCE(
+                        (
+                            SELECT cc.bvid
+                            FROM content_cache AS cc
+                            WHERE cc.item_key = r.item_key
+                            ORDER BY cc.last_scored_at DESC, cc.bvid DESC
+                            LIMIT 1
+                        ),
+                        (
+                            SELECT cc.bvid
+                            FROM content_cache AS cc
+                            WHERE cc.bvid = r.bvid
+                            LIMIT 1
+                        ),
+                        (
+                            SELECT cc.bvid
+                            FROM content_cache AS cc
+                            WHERE normalize_source_platform(cc.source_platform) =
+                                    facts.source_platform
+                              AND facts.source_platform != ''
+                              AND cc.content_id = facts.content_id
+                            ORDER BY cc.last_scored_at DESC, cc.bvid DESC
+                            LIMIT 1
+                        )
+                    ) AS hydration_bvid,
+                    COALESCE(
+                        NULLIF(content_history_item_key_content_id(
+                            normalize_content_history_item_key(r.item_key)
+                        ), ''),
+                        NULLIF(content_history_item_key_content_id(
+                            normalize_content_history_item_key(r.bvid)
+                        ), ''),
+                        CASE WHEN instr(r.bvid, ':') = 0 THEN r.bvid ELSE '' END,
+                        ''
+                    ) AS recommendation_content_id,
+                    facts.source_platform,
+                    facts.content_id,
+                    facts.content_url,
+                    facts.event_title,
+                    facts.event_author
+                FROM recent_click_facts AS facts
+                LEFT JOIN recommendations AS r ON r.id = facts.raw_recommendation_id
+            )
+        """
+
+        if normalized_category == "clicked":
+            cte = (
+                "WITH "
+                + history_snapshot_cte
+                + ","
+                + recent_clicks_cte
+                + """,
+                hydrated AS (
+                    SELECT
+                        recent_clicks.source_id,
+                        recent_clicks.source_kind,
+                        recent_clicks.occurred_at,
+                        recent_clicks.recommendation_id,
+                        recent_clicks.resolved_item_key AS item_key,
+                        COALESCE(
+                            NULLIF(normalize_source_platform(c.source_platform), ''),
+                            NULLIF(content_history_item_key_platform(
+                                recent_clicks.resolved_item_key
+                            ), ''),
+                            recent_clicks.source_platform
+                        ) AS source_platform,
+                        COALESCE(
+                            NULLIF(c.content_id, ''),
+                            NULLIF(recent_clicks.content_id, ''),
+                            NULLIF(recent_clicks.recommendation_content_id, ''),
+                            ''
+                        ) AS content_id,
+                        COALESCE(
+                            NULLIF(c.content_url, ''),
+                            NULLIF(recent_clicks.content_url, ''),
+                            ''
+                        ) AS content_url,
+                        COALESCE(NULLIF(c.content_type, ''), 'video') AS content_type,
+                        COALESCE(NULLIF(c.title, ''), NULLIF(recent_clicks.event_title, ''), '')
+                            AS title,
+                        COALESCE(NULLIF(c.up_name, ''), NULLIF(c.author_name, ''),
+                                 NULLIF(recent_clicks.event_author, ''), '') AS author_name,
+                        COALESCE(c.cover_url, '') AS cover_url,
+                        COALESCE(c.body_text, '') AS body_text,
+                        '' AS context,
+                        0 AS restored,
+                        '[]' AS contexts_json
+                    FROM recent_clicks
+                    LEFT JOIN content_cache AS c
+                      ON c.bvid = recent_clicks.hydration_bvid
+                ),
+                ranked AS (
+                    SELECT hydrated.*,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY item_key
+                               ORDER BY occurred_at DESC, source_kind DESC, source_id DESC
+                           ) AS row_number
+                    FROM hydrated
+                ),
+                entries AS MATERIALIZED (
+                    SELECT * FROM ranked WHERE row_number = 1
+                )
+            """
+            )
+            params: tuple[Any, ...] = (*cursor_anchors, cutoff)
+        elif normalized_category == "shown":
+            cte = (
+                "WITH "
+                + history_snapshot_cte
+                + ","
+                + recent_clicks_cte
+                + """,
+                clicked_recommendation_ids AS MATERIALIZED (
+                    SELECT DISTINCT recommendation_id
+                    FROM recent_clicks
+                    WHERE recommendation_id IS NOT NULL
+                ),
+                clicked_item_keys AS MATERIALIZED (
+                    SELECT DISTINCT resolved_item_key
+                    FROM recent_clicks
+                ),
+                eligible AS MATERIALIZED (
+                    SELECT
+                        r.id AS source_id,
+                        0 AS source_kind,
+                        COALESCE(r.presented_at, r.created_at) AS occurred_at,
+                        r.id AS recommendation_id,
+                        COALESCE(
+                            NULLIF(normalize_content_history_item_key(r.item_key), ''),
+                            NULLIF((
+                                SELECT normalize_content_history_item_key(cc.item_key)
+                                FROM content_cache AS cc
+                                WHERE cc.bvid = r.bvid
+                                LIMIT 1
+                            ), ''),
+                            NULLIF((
+                                SELECT normalize_content_history_item_key(cc.item_key)
+                                FROM content_cache AS cc
+                                WHERE cc.content_id = r.bvid
+                                  AND cc.item_key != ''
+                                ORDER BY
+                                    CASE
+                                        WHEN normalize_source_platform(
+                                            cc.source_platform
+                                        ) = 'bilibili' THEN 0
+                                        ELSE 1
+                                    END,
+                                    cc.last_scored_at DESC,
+                                    cc.bvid DESC
+                                LIMIT 1
+                            ), ''),
+                            NULLIF(normalize_content_history_item_key(r.bvid), ''),
+                            NULLIF(normalize_content_history_item_key(
+                                'bilibili:' || r.bvid
+                            ), ''),
+                            'bilibili:rec-' || r.id
+                        ) AS resolved_item_key,
+                        COALESCE(
+                            (
+                                SELECT cc.bvid
+                                FROM content_cache AS cc
+                                WHERE cc.item_key = r.item_key
+                                ORDER BY cc.last_scored_at DESC, cc.bvid DESC
+                                LIMIT 1
+                            ),
+                            (
+                                SELECT cc.bvid
+                                FROM content_cache AS cc
+                                WHERE cc.bvid = r.bvid
+                                LIMIT 1
+                            ),
+                            (
+                                SELECT cc.bvid
+                                FROM content_cache AS cc
+                                WHERE cc.content_id = r.bvid
+                                ORDER BY
+                                    CASE
+                                        WHEN normalize_source_platform(
+                                            cc.source_platform
+                                        ) = 'bilibili' THEN 0
+                                        ELSE 1
+                                    END,
+                                    cc.last_scored_at DESC,
+                                    cc.bvid DESC
+                                LIMIT 1
+                            )
+                        ) AS hydration_bvid,
+                        COALESCE(
+                            NULLIF(content_history_item_key_content_id(
+                                normalize_content_history_item_key(r.item_key)
+                            ), ''),
+                            NULLIF(content_history_item_key_content_id(
+                                normalize_content_history_item_key(r.bvid)
+                            ), ''),
+                            CASE WHEN instr(r.bvid, ':') = 0 THEN r.bvid ELSE '' END,
+                            ''
+                        ) AS fallback_content_id,
+                        r.bvid
+                    FROM recommendations AS r
+                    CROSS JOIN history_snapshot AS snapshot
+                    WHERE COALESCE(r.presented_at, r.created_at) >= datetime('now', ?)
+                      AND r.id <= snapshot.recommendation_anchor
+                      AND COALESCE(r.feedback_type, '') NOT IN ('dismiss', 'dislike')
+                ),
+                hydrated AS (
+                    SELECT
+                        eligible.source_id,
+                        eligible.source_kind,
+                        eligible.occurred_at,
+                        eligible.recommendation_id,
+                        eligible.resolved_item_key AS item_key,
+                        COALESCE(
+                            NULLIF(normalize_source_platform(c.source_platform), ''),
+                            NULLIF(content_history_item_key_platform(
+                                eligible.resolved_item_key
+                            ), ''),
+                            'bilibili'
+                        ) AS source_platform,
+                        COALESCE(
+                            NULLIF(c.content_id, ''),
+                            NULLIF(eligible.fallback_content_id, ''),
+                            ''
+                        ) AS content_id,
+                        COALESCE(c.content_url, '') AS content_url,
+                        COALESCE(NULLIF(c.content_type, ''), 'video') AS content_type,
+                        COALESCE(c.title, '') AS title,
+                        COALESCE(NULLIF(c.up_name, ''), NULLIF(c.author_name, ''), '')
+                            AS author_name,
+                        COALESCE(c.cover_url, '') AS cover_url,
+                        COALESCE(c.body_text, '') AS body_text,
+                        '' AS context,
+                        0 AS restored,
+                        '[]' AS contexts_json
+                    FROM eligible
+                    LEFT JOIN content_cache AS c ON c.bvid = eligible.hydration_bvid
+                    WHERE eligible.source_id NOT IN (
+                              SELECT recommendation_id
+                              FROM clicked_recommendation_ids
+                          )
+                      AND eligible.resolved_item_key NOT IN (
+                              SELECT resolved_item_key
+                              FROM clicked_item_keys
+                          )
+                ),
+                ranked AS (
+                    SELECT hydrated.*,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY item_key
+                               ORDER BY occurred_at DESC, source_kind DESC, source_id DESC
+                           ) AS row_number
+                    FROM hydrated
+                ),
+                entries AS MATERIALIZED (
+                    SELECT * FROM ranked WHERE row_number = 1
+                )
+            """
+            )
+            params = (*cursor_anchors, cutoff, cutoff)
+        else:
+            cte = (
+                "WITH "
+                + history_snapshot_cte
+                + """,
+                normalized_memberships AS MATERIALIZED (
+                    SELECT
+                        list_kind,
+                        normalize_content_history_item_key(item_key) AS canonical_item_key
+                    FROM saved_memberships
+                ),
+                recent_saved_facts AS MATERIALIZED (
+                    SELECT
+                        COALESCE(
+                            NULLIF(normalize_content_history_item_key(removal.item_key), ''),
+                            NULLIF(normalize_content_history_item_key(
+                                normalize_source_platform(removal.source_platform)
+                                || ':' || removal.content_id
+                            ), ''),
+                            ''
+                        ) AS canonical_item_key,
+                        removal.*
+                    FROM saved_item_removals AS removal
+                    CROSS JOIN history_snapshot AS snapshot
+                    WHERE removal.removed_at >= datetime('now', ?)
+                      AND removal.id <= snapshot.removal_anchor
+                ),
+                recent_saved AS (
+                    SELECT
+                        removal.id AS source_id,
+                        2 AS source_kind,
+                        removal.removed_at AS occurred_at,
+                        NULL AS recommendation_id,
+                        COALESCE(
+                            NULLIF(removal.canonical_item_key, ''),
+                            'bilibili:removal-' || removal.id
+                        ) AS item_key,
+                        COALESCE(
+                            NULLIF(normalize_source_platform(removal.source_platform), ''),
+                            NULLIF(content_history_item_key_platform(
+                                removal.canonical_item_key
+                            ), ''),
+                            'bilibili'
+                        ) AS source_platform,
+                        removal.content_id,
+                        removal.content_url,
+                        removal.content_type,
+                        removal.title,
+                        removal.author_name,
+                        removal.cover_url,
+                        '' AS body_text,
+                        removal.list_kind AS context,
+                        CASE WHEN EXISTS (
+                            SELECT 1
+                            FROM normalized_memberships AS membership
+                            WHERE membership.list_kind = removal.list_kind
+                              AND removal.canonical_item_key != ''
+                              AND membership.canonical_item_key != ''
+                              AND membership.canonical_item_key =
+                                  removal.canonical_item_key
+                        ) THEN 1 ELSE 0 END AS restored
+                    FROM recent_saved_facts AS removal
+                ),
+                eligible_feedback AS MATERIALIZED (
+                    SELECT
+                        r.id AS source_id,
+                        1 AS source_kind,
+                        COALESCE(r.feedback_at, r.created_at) AS occurred_at,
+                        r.id AS recommendation_id,
+                        COALESCE(
+                            NULLIF(normalize_content_history_item_key(r.item_key), ''),
+                            NULLIF((
+                                SELECT normalize_content_history_item_key(cc.item_key)
+                                FROM content_cache AS cc
+                                WHERE cc.bvid = r.bvid
+                                LIMIT 1
+                            ), ''),
+                            NULLIF((
+                                SELECT normalize_content_history_item_key(cc.item_key)
+                                FROM content_cache AS cc
+                                WHERE cc.content_id = r.bvid
+                                  AND cc.item_key != ''
+                                ORDER BY
+                                    CASE
+                                        WHEN normalize_source_platform(
+                                            cc.source_platform
+                                        ) = 'bilibili' THEN 0
+                                        ELSE 1
+                                    END,
+                                    cc.last_scored_at DESC,
+                                    cc.bvid DESC
+                                LIMIT 1
+                            ), ''),
+                            NULLIF(normalize_content_history_item_key(r.bvid), ''),
+                            NULLIF(normalize_content_history_item_key(
+                                'bilibili:' || r.bvid
+                            ), ''),
+                            'bilibili:rec-' || r.id
+                        ) AS resolved_item_key,
+                        COALESCE(
+                            (
+                                SELECT cc.bvid
+                                FROM content_cache AS cc
+                                WHERE cc.item_key = r.item_key
+                                ORDER BY cc.last_scored_at DESC, cc.bvid DESC
+                                LIMIT 1
+                            ),
+                            (
+                                SELECT cc.bvid
+                                FROM content_cache AS cc
+                                WHERE cc.bvid = r.bvid
+                                LIMIT 1
+                            ),
+                            (
+                                SELECT cc.bvid
+                                FROM content_cache AS cc
+                                WHERE cc.content_id = r.bvid
+                                ORDER BY
+                                    CASE
+                                        WHEN normalize_source_platform(
+                                            cc.source_platform
+                                        ) = 'bilibili' THEN 0
+                                        ELSE 1
+                                    END,
+                                    cc.last_scored_at DESC,
+                                    cc.bvid DESC
+                                LIMIT 1
+                            )
+                        ) AS hydration_bvid,
+                        COALESCE(
+                            NULLIF(content_history_item_key_content_id(
+                                normalize_content_history_item_key(r.item_key)
+                            ), ''),
+                            NULLIF(content_history_item_key_content_id(
+                                normalize_content_history_item_key(r.bvid)
+                            ), ''),
+                            CASE WHEN instr(r.bvid, ':') = 0 THEN r.bvid ELSE '' END,
+                            ''
+                        ) AS fallback_content_id,
+                        r.bvid,
+                        COALESCE(r.feedback_type, 'dismiss') AS context
+                    FROM recommendations AS r
+                    CROSS JOIN history_snapshot AS snapshot
+                    WHERE r.feedback_type IN ('dismiss', 'dislike')
+                      AND COALESCE(r.feedback_at, r.created_at) >= datetime('now', ?)
+                      AND r.id <= snapshot.recommendation_anchor
+                ),
+                recent_feedback AS (
+                    SELECT
+                        eligible_feedback.source_id,
+                        eligible_feedback.source_kind,
+                        eligible_feedback.occurred_at,
+                        eligible_feedback.recommendation_id,
+                        eligible_feedback.resolved_item_key AS item_key,
+                        COALESCE(
+                            NULLIF(normalize_source_platform(c.source_platform), ''),
+                            NULLIF(content_history_item_key_platform(
+                                eligible_feedback.resolved_item_key
+                            ), ''),
+                            'bilibili'
+                        ) AS source_platform,
+                        COALESCE(
+                            NULLIF(c.content_id, ''),
+                            NULLIF(eligible_feedback.fallback_content_id, ''),
+                            ''
+                        ) AS content_id,
+                        COALESCE(c.content_url, '') AS content_url,
+                        COALESCE(NULLIF(c.content_type, ''), 'video') AS content_type,
+                        COALESCE(c.title, '') AS title,
+                        COALESCE(NULLIF(c.up_name, ''), NULLIF(c.author_name, ''), '')
+                            AS author_name,
+                        COALESCE(c.cover_url, '') AS cover_url,
+                        COALESCE(c.body_text, '') AS body_text,
+                        eligible_feedback.context,
+                        0 AS restored
+                    FROM eligible_feedback
+                    LEFT JOIN content_cache AS c
+                      ON c.bvid = eligible_feedback.hydration_bvid
+                ),
+                hydrated AS (
+                    SELECT * FROM recent_saved
+                    UNION ALL
+                    SELECT * FROM recent_feedback
+                ),
+                context_ranked AS (
+                    SELECT hydrated.*,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY item_key, context
+                               ORDER BY occurred_at DESC, source_kind DESC, source_id DESC
+                           ) AS context_row_number
+                    FROM hydrated
+                ),
+                latest_contexts AS MATERIALIZED (
+                    SELECT *
+                    FROM context_ranked
+                    WHERE context_row_number = 1
+                ),
+                card_ranked AS (
+                    SELECT latest_contexts.*,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY item_key
+                               ORDER BY
+                                   occurred_at DESC,
+                                   source_kind DESC,
+                                   source_id DESC,
+                                   context ASC
+                           ) AS card_row_number
+                    FROM latest_contexts
+                ),
+                context_summaries AS MATERIALIZED (
+                    SELECT
+                        item_key,
+                        MAX(CASE WHEN context = 'favorite' THEN occurred_at END)
+                            AS favorite_occurred_at,
+                        MAX(CASE WHEN context = 'favorite' THEN restored ELSE 0 END)
+                            AS favorite_restored,
+                        MAX(CASE WHEN context = 'favorite' THEN source_id ELSE 0 END)
+                            AS favorite_source_id,
+                        MAX(CASE WHEN context = 'watch_later' THEN occurred_at END)
+                            AS watch_later_occurred_at,
+                        MAX(CASE WHEN context = 'watch_later' THEN restored ELSE 0 END)
+                            AS watch_later_restored,
+                        MAX(CASE WHEN context = 'watch_later' THEN source_id ELSE 0 END)
+                            AS watch_later_source_id,
+                        MAX(CASE WHEN context = 'dismiss' THEN occurred_at END)
+                            AS dismiss_occurred_at,
+                        MAX(CASE WHEN context = 'dismiss' THEN source_id ELSE 0 END)
+                            AS dismiss_source_id,
+                        MAX(CASE WHEN context = 'dislike' THEN occurred_at END)
+                            AS dislike_occurred_at,
+                        MAX(CASE WHEN context = 'dislike' THEN source_id ELSE 0 END)
+                            AS dislike_source_id
+                    FROM latest_contexts
+                    GROUP BY item_key
+                ),
+                entries AS MATERIALIZED (
+                    SELECT
+                        card_ranked.source_id,
+                        card_ranked.source_kind,
+                        card_ranked.occurred_at,
+                        card_ranked.recommendation_id,
+                        card_ranked.item_key,
+                        card_ranked.source_platform,
+                        card_ranked.content_id,
+                        card_ranked.content_url,
+                        card_ranked.content_type,
+                        card_ranked.title,
+                        card_ranked.author_name,
+                        card_ranked.cover_url,
+                        card_ranked.body_text,
+                        card_ranked.context,
+                        card_ranked.restored,
+                        context_summaries.favorite_occurred_at,
+                        context_summaries.favorite_restored,
+                        context_summaries.favorite_source_id,
+                        context_summaries.watch_later_occurred_at,
+                        context_summaries.watch_later_restored,
+                        context_summaries.watch_later_source_id,
+                        context_summaries.dismiss_occurred_at,
+                        context_summaries.dismiss_source_id,
+                        context_summaries.dislike_occurred_at,
+                        context_summaries.dislike_source_id
+                    FROM card_ranked
+                    JOIN context_summaries USING (item_key)
+                    WHERE card_ranked.card_row_number = 1
+                )
+            """
+            )
+            params = (*cursor_anchors, cutoff, cutoff)
+
+        cursor_clause = ""
+        cursor_params: tuple[Any, ...] = ()
+        if cursor is not None:
+            occurred_at, source_kind, source_id, item_key = cursor[:4]
+            cursor_clause = """
+                WHERE
+                    occurred_at < ?
+                    OR (occurred_at = ? AND source_kind < ?)
+                    OR (
+                        occurred_at = ?
+                        AND source_kind = ?
+                        AND source_id < ?
+                    )
+                    OR (
+                        occurred_at = ?
+                        AND source_kind = ?
+                        AND source_id = ?
+                        AND item_key > ?
+                    )
+            """
+            cursor_params = (
+                occurred_at,
+                occurred_at,
+                source_kind,
+                occurred_at,
+                source_kind,
+                source_id,
+                occurred_at,
+                source_kind,
+                source_id,
+                item_key,
+            )
+        context_columns = ""
+        if normalized_category == "removed":
+            context_columns = """
+                , favorite_occurred_at, favorite_restored, favorite_source_id
+                , watch_later_occurred_at, watch_later_restored, watch_later_source_id
+                , dismiss_occurred_at, dismiss_source_id
+                , dislike_occurred_at, dislike_source_id
+            """
+
+        connection = self.conn
+        owns_read_snapshot = not connection.in_transaction
+        if owns_read_snapshot:
+            connection.execute("BEGIN")
+        try:
+            rows = connection.execute(
+                cte
+                + f"""
+                    SELECT
+                        item_key, source_platform, content_id, content_url,
+                        content_type, title, author_name, cover_url, body_text,
+                        recommendation_id, occurred_at, context, restored,
+                        source_kind, source_id
+                        {context_columns},
+                        (SELECT COUNT(*) FROM entries) AS history_total,
+                        (SELECT event_anchor FROM history_snapshot) AS history_event_anchor,
+                        (SELECT recommendation_anchor FROM history_snapshot)
+                            AS history_recommendation_anchor,
+                        (SELECT removal_anchor FROM history_snapshot) AS history_removal_anchor
+                    FROM entries
+                    {cursor_clause}
+                    ORDER BY occurred_at DESC, source_kind DESC, source_id DESC, item_key ASC
+                    LIMIT ? OFFSET ?
+                """,
+                (*params, *cursor_params, page_limit + 1, page_offset),
+            ).fetchall()
+            if rows:
+                total = int(rows[0]["history_total"] or 0)
+            elif page_offset > 0 or cursor is not None:
+                # An empty OFFSET/keyset page has no row to carry the scalar
+                # total.  This fallback remains in the same explicit read
+                # transaction, so it cannot observe a different WAL head.
+                count_row = connection.execute(
+                    cte + " SELECT COUNT(*) AS count FROM entries",
+                    params,
+                ).fetchone()
+                total = int(count_row["count"] or 0) if count_row is not None else 0
+            else:
+                total = 0
+        except Exception:
+            if owns_read_snapshot:
+                connection.rollback()
+            raise
+        else:
+            if owns_read_snapshot:
+                connection.commit()
+
+        has_more = len(rows) > page_limit
+        page_rows = rows[:page_limit]
+        next_position: tuple[str, int, int, str, int, int, int] | None = None
+        if has_more and page_rows:
+            last_row = page_rows[-1]
+            next_position = (
+                str(last_row["occurred_at"] or ""),
+                int(last_row["source_kind"] or 0),
+                int(last_row["source_id"] or 0),
+                str(last_row["item_key"] or ""),
+                int(last_row["history_event_anchor"] or 0),
+                int(last_row["history_recommendation_anchor"] or 0),
+                int(last_row["history_removal_anchor"] or 0),
+            )
+
+        result: list[dict[str, Any]] = []
+        for row in page_rows:
+            item = dict(row)
+            item.pop("history_total", None)
+            item.pop("history_event_anchor", None)
+            item.pop("history_recommendation_anchor", None)
+            item.pop("history_removal_anchor", None)
+            item.pop("source_kind", None)
+            item.pop("source_id", None)
+            contexts: list[dict[str, Any]] = []
+            if normalized_category == "removed":
+                context_specs = (
+                    ("favorite", "favorite", 2),
+                    ("watch_later", "watch_later", 2),
+                    ("dismiss", "dismiss", 1),
+                    ("dislike", "dislike", 1),
+                )
+                sortable_contexts: list[tuple[str, int, int, dict[str, Any]]] = []
+                for context_name, column_prefix, context_source_kind in context_specs:
+                    context_occurred_at = str(item.pop(f"{column_prefix}_occurred_at", "") or "")
+                    context_source_id = int(item.pop(f"{column_prefix}_source_id", 0) or 0)
+                    if not context_occurred_at:
+                        if context_name in {"favorite", "watch_later"}:
+                            item.pop(f"{column_prefix}_restored", None)
+                        continue
+                    context_restored = False
+                    if context_name in {"favorite", "watch_later"}:
+                        context_restored = bool(item.pop(f"{column_prefix}_restored", 0))
+                    detail = {
+                        "context": context_name,
+                        "occurred_at": context_occurred_at,
+                        "restored": context_restored,
+                    }
+                    sortable_contexts.append(
+                        (
+                            context_occurred_at,
+                            context_source_kind,
+                            context_source_id,
+                            detail,
+                        )
+                    )
+                # Establish the final ASC tie-break before the stable DESC
+                # sort for the first three order dimensions.
+                sortable_contexts.sort(key=lambda value: str(value[3]["context"]))
+                sortable_contexts.sort(
+                    key=lambda value: (value[0], value[1], value[2]),
+                    reverse=True,
+                )
+                contexts = [value[3] for value in sortable_contexts]
+            item["contexts"] = contexts
+            result.append(item)
+        return result, total, has_more, next_position
+
     def close(self) -> None:
         """Close owned workers, then every thread-affine SQLite connection."""
         for attribute in ("_maintenance_executor", "_serve_executor"):
@@ -13289,6 +14264,40 @@ class Database:
         )
         return [dict(row) for row in cursor.fetchall()]
 
+    def _ensure_content_history_tables(self) -> None:
+        """Create the bounded audit projection used by the history surfaces.
+
+        Recommendation exposure and click facts already have durable owners in
+        ``recommendations`` and ``events``.  Only local saved-list removals lose
+        their item snapshot during deletion, so this table records that missing
+        fact instead of duplicating all three history streams.
+        """
+        self.conn.executescript("""
+            CREATE TABLE IF NOT EXISTS saved_item_removals (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                list_kind       TEXT NOT NULL
+                    CHECK (list_kind IN ('favorite', 'watch_later')),
+                item_key        TEXT NOT NULL,
+                source_platform TEXT NOT NULL,
+                content_id      TEXT NOT NULL,
+                content_url     TEXT NOT NULL DEFAULT '',
+                content_type    TEXT NOT NULL DEFAULT 'video',
+                title           TEXT NOT NULL DEFAULT '',
+                author_name     TEXT NOT NULL DEFAULT '',
+                cover_url       TEXT NOT NULL DEFAULT '',
+                removed_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_saved_item_removals_removed
+                ON saved_item_removals (removed_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_saved_item_removals_item
+                ON saved_item_removals (item_key, removed_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_events_type_created
+                ON events (event_type, created_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_recommendations_feedback_created
+                ON recommendations (feedback_type, feedback_at DESC, id DESC);
+        """)
+        self.prune_content_history()
+
     def _ensure_saved_sync_tables(self) -> None:
         """Create normalized saved-content tables and import legacy saved rows once."""
         self.conn.executescript("""
@@ -14130,6 +15139,10 @@ class Database:
         conn = self.open_connection()
         try:
             conn.execute("BEGIN IMMEDIATE")
+            removed_snapshot = conn.execute(
+                self._saved_membership_select() + " WHERE m.list_kind = ? AND m.item_key = ?",
+                (normalized_kind, normalized_key),
+            ).fetchone()
             active_state = conn.execute(
                 """
                 SELECT task_id
@@ -14157,6 +15170,33 @@ class Database:
                 (normalized_kind, normalized_key),
             )
             removed = int(cursor.rowcount or 0) > 0
+            if removed and removed_snapshot is not None:
+                conn.execute(
+                    """
+                    INSERT INTO saved_item_removals (
+                        list_kind, item_key, source_platform, content_id,
+                        content_url, content_type, title, author_name, cover_url
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        normalized_kind,
+                        normalized_key,
+                        str(removed_snapshot["source_platform"] or ""),
+                        str(removed_snapshot["content_id"] or ""),
+                        str(removed_snapshot["content_url"] or ""),
+                        str(removed_snapshot["content_type"] or "video"),
+                        str(removed_snapshot["title"] or ""),
+                        str(removed_snapshot["author_name"] or ""),
+                        str(removed_snapshot["cover_url"] or ""),
+                    ),
+                )
+            conn.execute(
+                """
+                DELETE FROM saved_item_removals
+                WHERE removed_at < datetime('now', ?)
+                """,
+                (f"-{CONTENT_HISTORY_RETENTION_DAYS} days",),
+            )
             direct_bilibili_clause = "bvid = ? OR" if legacy_bvid is not None else ""
             legacy_params = (legacy_bvid, normalized_key) if legacy_bvid else (normalized_key,)
             legacy_cursor = conn.execute(
