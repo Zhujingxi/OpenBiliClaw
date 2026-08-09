@@ -4,6 +4,10 @@
 
 ---
 
+## 未发布
+
+- **重构新增平台来源 skill 为证据驱动的阶段门**：复盘本地 Codex session、Git/GitHub 首次接入与后续修复，把 `full / discovery-only / capability-increment / audit-only`、机器可读来源契约、逐能力 hybrid auth、fail-closed E2E 写动作边界、中央注册 audit、required/N/A 与 PASS/FAIL 分离、原子任务准入、MV3 恢复、真假空结果、增量同步、scope completeness、时间语义、双浏览器资产和安装包真机 provenance 固化为完成条件；新增历史失败索引与 skill 镜像/契约审计测试，只有全部 required gate 有证据通过才允许报告 complete，发布 mutation 仍需明确授权。独立盲测还复现并修复了 `browser_heartbeat` 对未知来源默认落到知乎的错源分派，现由 source→prefix 显式 registry 驱动，未知来源 fail closed，新增来源必须成组提供 DB getter、扩展 event handler 与往返测试。
+
 ## v0.3.201：探针聊天与 dislike 即时推荐（2026-08-08）
 
 - **修复“抓了一天但一条新可换库存也没补进”的双协调器死区**：8 月 9 日用户日志显示来源抓取实际完成 78 次 enqueue（输入 2,158、保留 740），候选评估完成 1,337 条，可换库存始终为 221–224；但 65–78 条 admitted 素材长期卡在待文案，`recommendation.write_expression` 自 8 月 7 日晚后为零。根因是 copy coordinator 在 unrestricted `copy_ready>=90` 时认为无需工作，而 candidate coordinator 又把全部同 topic 深层 `admitted_pending_copy` 算进 projected，`available + pending≈300` 后也停止评估。storage 现新增 canonical `admitted_pending_available`，只统计补齐文案后能进入 topic 三条展示窗口的 pending；公开加载与计数统一先剔除 durable seen / 不可链接行再套 topic cap，避免这些高分行占窗并让 eligible 产生假净增。评估的 projected/admission 改用该子集，表达需求改为 copy 水位缺口与 eligible 公开库存缺口的较大值并 eligible-first 领取，API/CLI/OpenClaw 三个组合根统一注入公开库存目标，`copy_ready_target_count=0` 仍保留 legacy drain-all。插件若首次 runtime HTTP 失败，后续 `pool_status` stream 会恢复 initialized 状态；三端同时把待整理素材与真实可换数分开显示，并把误导性的“上次成功补货/最近补进”改为“补货进展”。

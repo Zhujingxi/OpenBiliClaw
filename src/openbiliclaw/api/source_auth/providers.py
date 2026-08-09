@@ -801,7 +801,7 @@ def auth_zhihu(ctx: SourceAuthContext) -> SourceAuthContract:
         # Timestamp columns feed only the display-only ``verified_at``. The
         # legacy branch never read them, so a row that cannot supply them must
         # cost the timestamp and nothing else — without this guard an unexpected
-        # row shape would raise out of the handler and 500 all seven platforms.
+        # row shape would raise out of the handler and 500 the entire source-status response.
         at = ""
         with suppress(Exception):
             at = str(_row_value(row, "completed_at", 4) or _row_value(row, "created_at", 3) or "")
@@ -1111,14 +1111,12 @@ def auth_bangumi(ctx: SourceAuthContext) -> SourceAuthContract:
     not, and folding it back into ``legacy_state`` would re-create the D1
     conflation the contract exists to remove.
 
-    **Known contract-shape gap (reported, not papered over):** because
-    ``auth_required=False``, the frontends render Bangumi as 「无需登录」 and
-    suppress the evidence badge even when a token is verified — ``source-auth.md``
-    is explicit that a no-credential source has no evidence to grade. The token
-    verdict is still carried honestly in these fields and surfaced via the verify
-    button's message and the ``token_state`` chip; showing it as a persistent
-    ◆ 联网验证 badge would need the contract extended with an "optional credential"
-    tier plus a frontend change, which is out of scope for this zero-frontend PR.
+    The shared renderer checks ``hasVerifiableCredential()`` before applying the
+    anonymous-source shortcut. No token therefore renders 「无需登录」, while a
+    configured token keeps its verified/failed/unverified verdict and persistent
+    evidence badge even though ``auth_required`` remains false. Runtime rejection
+    still outranks cached positive evidence through the separate ``token_state``
+    axis; see ``docs/modules/source-auth.md`` for the complete precedence rules.
     """
     bgm = ctx.source_cfg("bangumi")
     token = str(getattr(bgm, "access_token", "") or "").strip()
