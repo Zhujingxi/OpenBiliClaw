@@ -125,6 +125,9 @@ def test_v2ex_is_available_in_guided_init_and_settings_surfaces() -> None:
     shared = (ROOT / "src/openbiliclaw/web/shared/source-status.js").read_text(encoding="utf-8")
     setup = (ROOT / "src/openbiliclaw/web/setup/index.html").read_text(encoding="utf-8")
 
-    assert '"bangumi", "v2ex",' in shared
+    roster = shared.split("]);", 1)[0]
+    assert '"bangumi"' in roster
+    assert '"linuxdo"' in roster
+    assert '"v2ex"' in roster
     assert "v2ex: Object.freeze({ guidedInit: true })" in shared
     assert "INIT_SOURCE_KEYS" in setup

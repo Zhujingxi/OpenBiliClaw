@@ -54,9 +54,8 @@ def test_desktop_reddit_source_status_and_credentials_are_rendered() -> None:
     roster = shared.split("]);", 1)[0]
     assert '"bangumi"' in roster
     assert '"linuxdo"' in roster
-    # Bangumi and V2EX are in the roster; the roster answers "which sources
-    # exist", so dropping one would hide the platform from settings surfaces.
-    assert '"bangumi", "v2ex",' in shared
+    # V2EX is in the one roster too; source insertion order is not a feature.
+    assert '"v2ex"' in roster
     assert "SOURCE_STATUS_KEYS = SourceStatus.SOURCE_KEYS" in js
     assert 'reddit: $("#redditEnabled").value === "on"' in js
     assert 'if (shares.reddit !== undefined) setInput("shareReddit", shares.reddit)' in js
