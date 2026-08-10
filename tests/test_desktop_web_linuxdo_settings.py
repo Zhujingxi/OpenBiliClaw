@@ -55,6 +55,29 @@ def test_desktop_linuxdo_uses_shared_status_contract_without_cookie_input() -> N
     assert '"linuxdo"' in shared
 
 
+def test_desktop_source_cards_are_siblings_not_nested() -> None:
+    """Keep the Linux.do/V2EX cards from becoming a malformed nested DOM."""
+    html = (ROOT / "src/openbiliclaw/web/desktop/index.html").read_text(encoding="utf-8")
+
+    linuxdo_attr = html.index('data-source-status="linuxdo"')
+    linuxdo_start = html.rfind("<article", 0, linuxdo_attr)
+    v2ex_start = html.index('data-source-status="v2ex"')
+    source_list_end = html.index('<div class="source-aux-card">', v2ex_start)
+    source_list = html[linuxdo_start:source_list_end]
+
+    assert source_list.count('<article class="source-status-row source-card"') == 2
+    assert source_list.count('data-source-status="linuxdo"') == 1
+    assert source_list.count('data-source-status="v2ex"') == 1
+    assert source_list.index('data-source-status="linuxdo"') < source_list.index(
+        'data-source-status="v2ex"'
+    )
+    assert source_list.index("</article>") < source_list.index(
+        '<article class="source-status-row source-card" data-source-status="v2ex"'
+    )
+    assert 'id="shareLinuxdo"' in source_list
+    assert 'id="shareV2EX"' in source_list
+
+
 def test_desktop_linuxdo_recommendations_have_label_text_card_and_canonical_url() -> None:
     js = (ROOT / "src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
 

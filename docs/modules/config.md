@@ -766,6 +766,8 @@ Linux.do 通过浏览器扩展在真实 `linux.do` task tab 内执行同源只�
 #### 配置页来源状态契约
 
 插件 side panel 与桌面 Web `/web` 的平台源配置页统一读取 `GET /api/sources/status`。这个端点是**纯本地读取**：不会访问任何上游平台，也不会运行 `rdt` / `opencli` 命令。页面可见时每 30 秒刷新一次，但请求只到 OpenBiliClaw 本地后端；真实平台请求仅由用户显式初始化、发现、诊断任务或已启用的后台 producer 发起。
+
+桌面 Web 的来源卡片是设置面板 DOM 的结构边界：Linux.do、V2EX 及后续来源必须作为来源列表中的同级节点闭合，不能嵌套或包住来源总览、调度、模型等其它设置面板。否则浏览器会按容错规则重排后续节点，表现为配置页标签仍在但面板内容空白；该结构由 `tests/test_desktop_web_linuxdo_settings.py` 固定检查。
 ### `[sources.v2ex]`
 
 V2EX 是匿名公开 discovery 源，支持官方匿名 JSON API / Feed，以及可选的 API 2.0 PAT。`search`、`node`、`tab`、`hot`、`latest` 都只把 Topic 写入统一待评估池；Reply 不作为独立候选。PAT 只用于增强 Node / Topic 读取和 `/api/v2/member` live probe，401/403 时自动降级为匿名。扩展任务已接入四个只读 bootstrap scope，`init --yes-v2ex` 或 guided init 来源选择可以等待其结果；浏览器登录态与 PAT 分开显示。

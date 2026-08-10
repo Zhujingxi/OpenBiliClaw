@@ -11,6 +11,10 @@
 - 通过 background service worker 缓冲并上报到本地后端
 - 在 side panel 中展示连接状态、推荐结果、画像和聊天入口
 
+### 配置页 HTML 结构约束
+
+插件与桌面 Web 的设置面板都依赖浏览器原生 HTML 解析后再由脚本切换 `hidden` 状态。桌面 Web 平台源列表中的每个来源卡（尤其 Linux.do / V2EX）必须保持同级 `<article>` 节点，并在来源列表结束前闭合；来源卡不能包住后续的来源总览或其它 `data-settings-panel`。修改来源卡片时同步运行 `tests/test_desktop_web_linuxdo_settings.py`，防止标签嵌套导致配置页只剩 tab 栏。
+
 当前里程碑进度：
 
 | 子模块 | 状态 | 说明 |

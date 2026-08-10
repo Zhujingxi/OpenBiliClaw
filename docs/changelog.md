@@ -10,6 +10,7 @@
 
 ## v0.3.202：Linux.do、V2EX 与微博来源扩展（2026-08-10）
 
+- **修复桌面 Web 配置页空白**：合并 Linux.do / V2EX 来源卡片时出现的嵌套 HTML 让后续设置面板被错误收进来源卡片；现将两张来源卡恢复为同级节点，并加入 DOM 结构回归测试，确保模型、平台源、调度和高级设置面板都能正常渲染。
 - **发布与市场状态**：`backend-v0.3.202`、`extension-v0.3.202`、`desktop-v0.3.202` 与聚合 `openbiliclaw-v0.3.202` 均指向同一绿提交；聚合 Latest Release 只包含两份扩展包和四份桌面安装器共六个 `0.3.202` 资产。Chrome Web Store 已上传并进入 `PENDING_REVIEW`，Firefox AMO 已接受 listed `0.3.202`，文件状态为 `unreviewed`。AMO 隐私字段 API 仍返回 406，manifest data-collection 声明、reviewer notes、商店描述和包内隐私政策已随提交提供。
 - **新增 Linux.do 只读来源接入**：后端新增 `linuxdo_tasks` durable 队列、`LinuxdoDiscoveryProducer`、统一 topic/event 归一化、capability-specific source-auth 与周期增量同步；公开 discover 匿名可用，个人 profile/bootstrap/incremental 必须由同源会话正面确认。CLI 新增 `fetch-linuxdo` / `discover-linuxdo`，通用 `discover --source linuxdo` 也走同一 producer。五种 discovery 分支为 search / hot / feed / creator / related，三种个人初始化 scope 为 bookmarks / likes / read history。
 - **扩展采用同源、最小回传边界**：Linux.do 请求只在真实 `linux.do` task tab 内以 `GET` + `credentials: include` 访问 JSON endpoint；Cookie `_t` 只转换成登录布尔心跳，Cookie 值、CSRF 字段和未裁剪原始响应都不上传。任务具备 tab/task 隔离、分页与条数上限、超时、2 MiB 响应上限及结构化错误。

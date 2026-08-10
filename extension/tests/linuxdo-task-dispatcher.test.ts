@@ -122,9 +122,15 @@ test("dispatcher isolates discovery in an inactive Linux.do task tab", async () 
   }
 });
 
-test("bootstrap task tab is foregrounded for browser login visibility", () => {
+test("only bootstrap task tabs are foregrounded for browser login visibility", () => {
   assert.equal(shouldOpenLinuxdoTaskActive({ id: "b", claim_token: CLAIM_TOKEN, type: "bootstrap_events" }), true);
-  assert.equal(shouldOpenLinuxdoTaskActive({ id: "f", claim_token: CLAIM_TOKEN, type: "feed" }), false);
+  for (const [index, type] of ["search", "hot", "feed", "creator", "related"].entries()) {
+    assert.equal(
+      shouldOpenLinuxdoTaskActive({ id: `d-${index}`, claim_token: CLAIM_TOKEN, type }),
+      false,
+      `${type} discovery must run in an inactive tab`,
+    );
+  }
 });
 
 test("foreground bootstrap restores the previously active tab after backend ACK", async () => {

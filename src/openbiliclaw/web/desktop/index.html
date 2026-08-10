@@ -931,11 +931,6 @@
                 <span class="source-card-logo" data-source-logo="linuxdo" aria-hidden="true" style="background:#1f6f43">L</span>
                 <span class="source-card-head">
                   <strong class="source-card-name">Linux.do</strong>
-            <article class="source-status-row source-card" data-source-status="v2ex" data-source-credential="v2ex" data-open="0">
-              <div class="source-card-face" role="button" tabindex="0" aria-expanded="false" aria-controls="sourceCardBody-v2ex">
-                <span class="source-card-logo" data-source-logo="v2ex" aria-hidden="true">V2</span>
-                <span class="source-card-head">
-                  <strong class="source-card-name">V2EX</strong>
                   <span class="source-status-badges"><span class="source-source-badge">来源：加载中</span><span class="source-access-badge">接入：加载中</span><span class="source-evidence-badge" hidden></span></span>
                   <p class="src-detail">加载中…</p>
                   <span class="source-card-hint-slot"></span>
@@ -973,6 +968,28 @@
                     <label class="settings-field"><span>请求间隔秒数</span><input id="linuxdoRequestInterval" inputmode="numeric" min="0" max="30" placeholder="3"></label>
                     <label class="settings-field"><span>最小调度间隔分钟</span><input id="linuxdoMinInterval" inputmode="numeric" placeholder="3"></label>
                     <label class="settings-field"><span>初始化个人信号上限</span><input id="linuxdoBootstrapLimit" inputmode="numeric" min="1" max="300" placeholder="300"></label>
+                  </div>
+                </section>
+                <section class="source-seg">
+                  <h4>验证</h4>
+                  <div class="settings-probe-row source-verify-row">
+                    <button class="pill-btn source-verify-btn" type="button">测试连接</button>
+                    <span class="settings-probe-status source-verify-status" aria-live="polite"></span>
+                  </div>
+                </section>
+              </div>
+            </article>
+
+            <article class="source-status-row source-card" data-source-status="v2ex" data-source-credential="v2ex" data-open="0">
+              <div class="source-card-face" role="button" tabindex="0" aria-expanded="false" aria-controls="sourceCardBody-v2ex">
+                <span class="source-card-logo" data-source-logo="v2ex" aria-hidden="true">V2</span>
+                <span class="source-card-head">
+                  <strong class="source-card-name">V2EX</strong>
+                  <span class="source-status-badges"><span class="source-source-badge">来源：加载中</span><span class="source-access-badge">接入：加载中</span><span class="source-evidence-badge" hidden></span></span>
+                  <p class="src-detail">加载中…</p>
+                  <span class="source-card-hint-slot"></span>
+                </span>
+                <span class="source-card-right">
                   <label class="source-card-share"><span>占比</span><input id="shareV2EX" value="1" inputmode="numeric" aria-label="V2EX 候选池占比"></label>
                   <label class="source-card-enable"><span class="sr-only">启用 V2EX</span><select id="v2exEnabled"><option value="on">启用</option><option value="off">停用</option></select></label>
                   <span class="source-card-chev" aria-hidden="true">▾</span>
@@ -1018,7 +1035,6 @@
                 <section class="source-seg">
                   <h4>验证</h4>
                   <div class="settings-probe-row source-verify-row">
-                    <button class="pill-btn source-verify-btn" type="button">测试连接</button>
                     <button class="pill-btn source-verify-btn" type="button">测试 PAT</button>
                     <span class="settings-probe-status source-verify-status" aria-live="polite"></span>
                   </div>
