@@ -131,12 +131,14 @@ const SOURCE_LABEL_MAP = {
   bilibili: "Bilibili",
   xiaohongshu: "Xiaohongshu",
   douyin: "Douyin",
+  weibo: "微博",
   youtube: "YouTube",
   twitter: "X (Twitter)",
   zhihu: "知乎",
   reddit: "Reddit",
   bangumi: "Bangumi",
   linuxdo: "Linux.do",
+  v2ex: "V2EX",
   web: "Web",
 };
 
@@ -149,6 +151,8 @@ const SOURCE_ALIAS_MAP = {
   dy: "douyin",
   douyin: "douyin",
   tiktok: "douyin",
+  wb: "weibo",
+  weibo: "weibo",
   yt: "youtube",
   youtube: "youtube",
   x: "twitter",
@@ -161,6 +165,8 @@ const SOURCE_ALIAS_MAP = {
   bangumi: "bangumi",
   linuxdo: "linuxdo",
   "linux.do": "linuxdo",
+  v2: "v2ex",
+  v2ex: "v2ex",
 };
 
 const RUNTIME_TOPIC_LABEL_MAP = {
@@ -178,6 +184,12 @@ const RUNTIME_TOPIC_LABEL_MAP = {
   "douyin-search": "抖音搜索",
   "douyin-hot": "抖音热点",
   "douyin-feed": "抖音推荐流",
+  weibo_search: "微博搜索",
+  weibo_hot: "微博热榜",
+  weibo_creator: "微博作者",
+  "weibo-search": "微博搜索",
+  "weibo-hot": "微博热榜",
+  "weibo-creator": "微博作者",
   yt_search: "YouTube 搜索",
   yt_trending: "YouTube 热榜",
   yt_channel: "YouTube 频道",
@@ -218,6 +230,11 @@ const RUNTIME_TOPIC_LABEL_MAP = {
   "linuxdo-feed": "Linux.do 最新",
   "linuxdo-creator": "Linux.do 作者",
   "linuxdo-related": "Linux.do 相关",
+  "v2ex-search": "V2EX 搜索",
+  "v2ex-node": "V2EX Node",
+  "v2ex-tab": "V2EX Tab",
+  "v2ex-hot": "V2EX 热门",
+  "v2ex-latest": "V2EX 最新",
 };
 
 function urlHostMatches(url, hostnames) {
@@ -241,12 +258,14 @@ export function normalizeSourcePlatform(item) {
     if (lowerUrl.includes("bilibili.com") || lowerUrl.includes("b23.tv")) return "bilibili";
     if (lowerUrl.includes("xiaohongshu.com") || lowerUrl.includes("xhslink.com")) return "xiaohongshu";
     if (lowerUrl.includes("douyin.com")) return "douyin";
+    if (urlHostMatches(url, ["weibo.com", "weibo.cn", "sinaimg.cn", "sinaimg.com"])) return "weibo";
     if (lowerUrl.includes("youtube.com") || lowerUrl.includes("youtu.be")) return "youtube";
     if (urlHostMatches(url, ["x.com", "twitter.com"])) return "twitter";
     if (urlHostMatches(url, ["zhihu.com", "zhuanlan.zhihu.com"])) return "zhihu";
     if (urlHostMatches(url, ["reddit.com", "redd.it"])) return "reddit";
     if (urlHostMatches(url, ["bgm.tv", "bangumi.tv"])) return "bangumi";
     if (urlHostMatches(url, ["linux.do"])) return "linuxdo";
+    if (urlHostMatches(url, ["v2ex.com"])) return "v2ex";
     return "web";
   }
   if (normalizeText(item?.bvid)) return "bilibili";
@@ -282,10 +301,12 @@ function formatRuntimeTopicLabel(value) {
   if (RUNTIME_TOPIC_LABEL_MAP[key]) return RUNTIME_TOPIC_LABEL_MAP[key];
   if (key.startsWith("xhs-extension-")) return "小红书";
   if (key.startsWith("dy-plugin-") || key.startsWith("douyin-")) return "抖音";
+  if (key.startsWith("weibo-")) return "微博";
   if (key.startsWith("yt-") || key.startsWith("youtube-")) return "YouTube";
   if (key.startsWith("reddit-")) return "Reddit";
   if (key.startsWith("bangumi-")) return "Bangumi";
   if (key.startsWith("linuxdo-")) return "Linux.do";
+  if (key.startsWith("v2ex-")) return "V2EX";
   return text;
 }
 
@@ -339,6 +360,8 @@ export function buildContentUrl(item) {
       : "";
   }
   if (platform === "zhihu" || platform === "reddit") return "";
+  if (platform === "v2ex") return `https://www.v2ex.com/t/${encodeURIComponent(vid)}`;
+  if (platform === "zhihu" || platform === "reddit" || platform === "weibo") return "";
   return buildVideoUrl(vid);
 }
 
@@ -390,6 +413,7 @@ export function normalizeRecommendation(item) {
     view_count: Number(item?.view_count ?? 0),
     like_count: Number(item?.like_count ?? 0),
     comment_count: Number(item?.comment_count ?? 0),
+    share_count: Number(item?.share_count ?? 0),
     favorite_count: Number(item?.favorite_count ?? 0),
     danmaku_count: Number(item?.danmaku_count ?? 0),
     rating_score: Number(item?.rating_score ?? 0),
@@ -460,6 +484,7 @@ export function recommendationStats(item) {
   if (item?.view_count > 0) segments.push(`▶ ${formatCountCn(item.view_count)}`);
   if (item?.like_count > 0) segments.push(`👍 ${formatCountCn(item.like_count)}`);
   if (item?.comment_count > 0) segments.push(`💬 ${formatCountCn(item.comment_count)}`);
+  if (item?.share_count > 0) segments.push(`🔁 ${formatCountCn(item.share_count)}`);
   if (item?.favorite_count > 0) segments.push(`⭐ ${formatCountCn(item.favorite_count)}`);
   if (item?.danmaku_count > 0) segments.push(`弹幕 ${formatCountCn(item.danmaku_count)}`);
   if (item?.rating_score > 0) segments.push(`评分 ${Number(item.rating_score).toFixed(1)}`);
@@ -552,6 +577,7 @@ export function normalizeDelightCandidate(item) {
     view_count: Number(item?.view_count ?? 0),
     like_count: Number(item?.like_count ?? 0),
     comment_count: Number(item?.comment_count ?? 0),
+    share_count: Number(item?.share_count ?? 0),
     favorite_count: Number(item?.favorite_count ?? 0),
     danmaku_count: Number(item?.danmaku_count ?? 0),
     rating_score: Number(item?.rating_score ?? 0),
@@ -792,6 +818,8 @@ export function getPoolStatusSummary(status) {
         ? `刚补进 ${runtime.last_replenished_count} 条`
         : runtime.last_discovered_count > 0
           ? "这轮找到了内容"
+        : runtime.pool_pending_count > 0
+          ? `另有 ${runtime.pool_pending_count} 条素材`
         : poolIsSufficient
           ? "这会儿先不补货"
           : "这轮还没补进",
@@ -800,6 +828,8 @@ export function getPoolStatusSummary(status) {
         ? formatRuntimeTopicList(runtime.recent_pool_topics)
         : runtime.last_discovered_count > 0
           ? "但可立即换的库存还没变"
+          : runtime.pool_pending_count > 0
+            ? "素材已抓到，会按可换库存缺口整理"
           : poolIsSufficient
             ? "先把这一池给你慢慢换开"
             : "还在继续摸你的口味",
@@ -860,7 +890,7 @@ export function getMobileRecommendationHeaderState({
                   : runtime.last_discovered_count > 0
                     ? "已发现"
                     : poolSummary.replenished,
-            label: pendingOnly ? "素材整理" : "最近补进",
+            label: pendingOnly ? "素材整理" : "补货进展",
             tone: "brand",
           },
           {

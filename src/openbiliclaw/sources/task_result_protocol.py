@@ -13,7 +13,15 @@ if TYPE_CHECKING:
 
 STAGED_TERMINAL_STATUS_FIELD = "_openbiliclaw_terminal_status"
 _TASK_TABLES = frozenset(
-    {"xhs_tasks", "dy_tasks", "yt_tasks", "zhihu_tasks", "reddit_tasks", "linuxdo_tasks"}
+    {
+        "xhs_tasks",
+        "dy_tasks",
+        "yt_tasks",
+        "zhihu_tasks",
+        "reddit_tasks",
+        "linuxdo_tasks",
+        "v2ex_tasks",
+    }
 )
 
 

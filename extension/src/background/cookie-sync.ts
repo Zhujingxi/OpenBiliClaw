@@ -22,10 +22,11 @@
  * credential store for command-backed Reddit discovery; POST
  * /api/sources/xhs/login-state reports only whether xhs's web_session login
  * cookie exists; POST /api/sources/zhihu/login-state does the same for Zhihu's
- * z_c0 login cookie. Neither endpoint receives raw cookie values.
- * Linux.do follows the same boolean-only channel for its authenticated `_t`
- * cookie; the content executor separately confirms identity through
- * `/session/current.json` before collecting personal scopes.
+ * z_c0 login cookie. Linux.do follows the same boolean-only channel for its
+ * authenticated `_t` cookie; the content executor separately confirms identity
+ * through `/session/current.json` before collecting personal scopes. V2EX
+ * reports only whether the A2 cookie name exists.
+ * None of these login-state endpoints receives raw cookie values.
  */
 
 // .ts extension: see service-worker.ts for the node:test resolver rationale.
@@ -42,6 +43,7 @@ const REDDIT_COOKIE_SYNC_ALARM = "openbiliclaw-cookie-sync-reddit";
 const XHS_LOGIN_STATE_SYNC_ALARM = "openbiliclaw-cookie-sync-xhs";
 const ZHIHU_LOGIN_STATE_SYNC_ALARM = "openbiliclaw-cookie-sync-zhihu";
 const LINUXDO_LOGIN_STATE_SYNC_ALARM = "openbiliclaw-cookie-sync-linuxdo";
+const V2EX_LOGIN_STATE_SYNC_ALARM = "openbiliclaw-cookie-sync-v2ex";
 // Pre-split shared alarm. chrome.alarms persist across extension updates,
 // so an old install can still fire this name once after upgrading.
 const LEGACY_COOKIE_SYNC_ALARM = "openbiliclaw-cookie-sync";
@@ -96,8 +98,17 @@ const REQUIRED_REDDIT_COOKIE_NAMES = ["reddit_session"];
 const XHS_LOGIN_COOKIE_NAME = "web_session";
 const ZHIHU_LOGIN_COOKIE_NAME = "z_c0";
 const LINUXDO_LOGIN_COOKIE_NAME = "_t";
+const V2EX_LOGIN_COOKIE_NAME = "A2";
 
-type CookieSyncPlatform = "bilibili" | "douyin" | "x" | "reddit" | "xhs" | "zhihu" | "linuxdo";
+type CookieSyncPlatform =
+  | "bilibili"
+  | "douyin"
+  | "x"
+  | "reddit"
+  | "xhs"
+  | "zhihu"
+  | "linuxdo"
+  | "v2ex";
 
 const debounceTimers: Partial<Record<CookieSyncPlatform, ReturnType<typeof setTimeout>>> = {};
 let cookieSyncStarted = false;
@@ -272,6 +283,14 @@ export async function readLinuxdoLoginState(): Promise<boolean> {
   return cookies.some(
     (cookie) => cookie.name === LINUXDO_LOGIN_COOKIE_NAME && String(cookie.value || "").trim() !== "",
   );
+}
+
+/** Return whether the V2EX session-cookie name is present without reading its value. */
+export async function readV2EXLoginState(): Promise<boolean> {
+  const chromeApi = getChromeApi();
+  if (!chromeApi?.cookies?.getAll) return false;
+  const cookies = await chromeApi.cookies.getAll({ domain: "v2ex.com" });
+  return cookies.some((cookie) => cookie.name === V2EX_LOGIN_COOKIE_NAME);
 }
 
 /**
@@ -603,6 +622,39 @@ export async function syncLinuxdoLoginStateToBackend(
   }
 }
 
+export async function syncV2EXLoginStateToBackend(
+  source: string = "extension",
+): Promise<boolean> {
+  const loggedIn = await readV2EXLoginState();
+  try {
+    const response = await authenticatedFetch(await apiUrl("/sources/v2ex/credential"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind: "login_state", value: loggedIn, source }),
+    });
+    if (!response.ok) {
+      console.warn(`[openbiliclaw] v2ex login-state sync HTTP ${response.status}`);
+      scheduleCookieSyncAlarm(V2EX_LOGIN_STATE_SYNC_ALARM, COOKIE_SYNC_RETRY_MINUTES);
+      return false;
+    }
+    const result = (await response.json()) as { accepted: boolean; message?: string };
+    if (result.accepted) {
+      console.log(
+        `[openbiliclaw] v2ex login-state synced via ${source}` +
+          ` (${loggedIn ? "logged in" : "logged out"})`,
+      );
+      scheduleHourlyCookieSync(V2EX_LOGIN_STATE_SYNC_ALARM);
+      return true;
+    }
+    scheduleCookieSyncAlarm(V2EX_LOGIN_STATE_SYNC_ALARM, COOKIE_SYNC_RETRY_MINUTES);
+    return false;
+  } catch (err) {
+    console.warn("[openbiliclaw] v2ex login-state sync failed:", err);
+    scheduleCookieSyncAlarm(V2EX_LOGIN_STATE_SYNC_ALARM, COOKIE_SYNC_RETRY_MINUTES);
+    return false;
+  }
+}
+
 /**
  * Handle backend runtime-stream events that explicitly ask the extension
  * to push the current site cookie now.
@@ -637,6 +689,10 @@ export function handleCookieSyncRuntimeEvent(event: Record<string, unknown>): bo
     void syncLinuxdoLoginStateToBackend("runtime-stream-request");
     return true;
   }
+  if (eventType === "v2ex_login_state_sync_requested") {
+    void syncV2EXLoginStateToBackend("runtime-stream-request");
+    return true;
+  }
   return false;
 }
 
@@ -665,8 +721,10 @@ function scheduleCookieSync(platform: CookieSyncPlatform, source: string): void 
       void syncXhsLoginStateToBackend(source);
     } else if (platform === "zhihu") {
       void syncZhihuLoginStateToBackend(source);
-    } else {
+    } else if (platform === "linuxdo") {
       void syncLinuxdoLoginStateToBackend(source);
+    } else {
+      void syncV2EXLoginStateToBackend(source);
     }
   }, COOKIE_SYNC_DEBOUNCE_MS);
 }
@@ -699,6 +757,7 @@ export function startCookieSync(): void {
   void syncXhsLoginStateToBackend("startup");
   void syncZhihuLoginStateToBackend("startup");
   void syncLinuxdoLoginStateToBackend("startup");
+  void syncV2EXLoginStateToBackend("startup");
 
   // React to login / logout / refresh.
   chromeApi.cookies.onChanged.addListener((changeInfo) => {
@@ -758,6 +817,13 @@ export function startCookieSync(): void {
         "linuxdo",
         changeInfo.removed ? "linuxdo-logout" : "linuxdo-cookies-onchange",
       );
+      return;
+    }
+    if (domain.endsWith("v2ex.com")) {
+      if (changeInfo.cookie.name !== V2EX_LOGIN_COOKIE_NAME) {
+        return;
+      }
+      scheduleCookieSync("v2ex", changeInfo.removed ? "v2ex-logout" : "v2ex-cookies-onchange");
     }
   });
 
@@ -772,6 +838,7 @@ export function startCookieSync(): void {
   scheduleHourlyCookieSync(XHS_LOGIN_STATE_SYNC_ALARM);
   scheduleHourlyCookieSync(ZHIHU_LOGIN_STATE_SYNC_ALARM);
   scheduleHourlyCookieSync(LINUXDO_LOGIN_STATE_SYNC_ALARM);
+  scheduleHourlyCookieSync(V2EX_LOGIN_STATE_SYNC_ALARM);
 }
 
 /**
@@ -808,6 +875,10 @@ export function handleCookieSyncAlarm(alarmName: string): boolean {
     void syncLinuxdoLoginStateToBackend("hourly-alarm");
     return true;
   }
+  if (alarmName === V2EX_LOGIN_STATE_SYNC_ALARM) {
+    void syncV2EXLoginStateToBackend("hourly-alarm");
+    return true;
+  }
   if (alarmName === LEGACY_COOKIE_SYNC_ALARM) {
     // One last full round for an alarm persisted by an older version; each
     // sync re-registers its own per-platform alarm on success/failure and
@@ -819,6 +890,7 @@ export function handleCookieSyncAlarm(alarmName: string): boolean {
     void syncXhsLoginStateToBackend("hourly-alarm");
     void syncZhihuLoginStateToBackend("hourly-alarm");
     void syncLinuxdoLoginStateToBackend("hourly-alarm");
+    void syncV2EXLoginStateToBackend("hourly-alarm");
     return true;
   }
   return false;

@@ -485,6 +485,8 @@ SOURCE_ZHIHU = "zhihu"
 SOURCE_REDDIT = "reddit"
 SOURCE_BANGUMI = "bangumi"
 SOURCE_LINUXDO = "linuxdo"
+SOURCE_WEIBO = "weibo"
+SOURCE_V2EX = "v2ex"
 
 # Human-readable platform labels used to render the context string.
 # Keys must match the source_platform values stored in event metadata.
@@ -499,6 +501,8 @@ _PLATFORM_LABELS: dict[str, str] = {
     SOURCE_REDDIT: "Reddit",
     SOURCE_BANGUMI: "Bangumi",
     SOURCE_LINUXDO: "Linux.do",
+    SOURCE_WEIBO: "微博",
+    SOURCE_V2EX: "V2EX",
 }
 
 # Action verbs per event_type. Designed so the rendered sentence reads
@@ -515,6 +519,8 @@ _EVENT_TYPE_LABELS: dict[str, str] = {
     "dialogue": "聊到",
     "feedback": "反馈过",
     "comment": "评论过",
+    "discussion_reply": "参与讨论了",
+    "publish": "发布了",
     "share": "分享了",
     "reshuffle": "换了一批",
 }
@@ -525,6 +531,8 @@ _DEFAULT_SIGNAL_STRENGTH_BY_EVENT_TYPE: dict[str, float] = {
     "share": 0.85,
     "like": 0.85,
     "comment": 0.75,
+    "discussion_reply": 0.75,
+    "publish": 0.9,
     "dialogue": 0.65,
     "follow": 0.6,
     "view": 0.35,

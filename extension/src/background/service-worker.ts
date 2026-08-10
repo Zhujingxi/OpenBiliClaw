@@ -72,6 +72,13 @@ import {
   pollLinuxdoTaskNow,
 } from "./linuxdo-task-dispatcher.ts";
 import {
+  startV2EXTaskPolling,
+  handleV2EXTaskAlarm,
+  handleV2EXScopeResult,
+  ensureV2EXTaskRecovery,
+  pollV2EXTaskNow,
+} from "./v2ex-task-dispatcher.ts";
+import {
   startXTaskPolling,
   handleXTaskAlarm,
   pollXTaskNow,
@@ -88,6 +95,7 @@ import type { YtScopeResult } from "../content/yt/task-executor.js";
 import type { ZhihuTaskResult } from "../content/zhihu/task-executor.js";
 import type { RedditTaskResult } from "../content/reddit/task-executor.ts";
 import type { LinuxdoTaskResult } from "../content/linuxdo/task-executor.ts";
+import type { V2EXScopeResult } from "../content/v2ex/task-executor.ts";
 import {
   openExtensionUi,
   parseDelightBvid,
@@ -293,6 +301,10 @@ async function handleRuntimeEvent(event: Record<string, unknown>): Promise<void>
   }
   if (eventType === "linuxdo_task_available") {
     await pollLinuxdoTaskNow();
+    return;
+  }
+  if (eventType === "v2ex_task_available") {
+    pollV2EXTaskNow();
     return;
   }
   if (eventType === "x_task_available") {
@@ -573,6 +585,7 @@ function startPlatformTaskPolling(): void {
   startZhihuTaskPolling();
   startRedditTaskPolling();
   startLinuxdoTaskPolling();
+  startV2EXTaskPolling();
   startXTaskPolling();
   startBiliTaskPolling();
 }
@@ -587,6 +600,7 @@ async function startServiceWorkerAfterRecovery(): Promise<void> {
   const runtimeStreamReady = connectRuntimeStream();
   await ensureLinuxdoTaskRecovery();
   await ensureNativeSaveTaskRecovery();
+  await ensureV2EXTaskRecovery();
   await runtimeStreamReady;
   startPlatformTaskPolling();
   startCookieSync();
@@ -741,7 +755,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       })
       .catch((error: unknown) => {
         sendResponse({ ok: false, error: String(error) });
-    });
+      });
     return true;
   }
   if (message.action === "REDDIT_TASK_RESULT") {
@@ -756,6 +770,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   if (message.action === "LINUXDO_TASK_RESULT") {
     void handleLinuxdoTaskResult(message.data as LinuxdoTaskResult, sender.tab)
+      .then(() => {
+        sendResponse({ ok: true });
+      })
+      .catch((error: unknown) => {
+        sendResponse({ ok: false, error: String(error) });
+      });
+    return true;
+  }
+  if (message.action === "V2EX_SCOPE_RESULT") {
+    void handleV2EXScopeResult(message.data as V2EXScopeResult, sender)
       .then(() => {
         sendResponse({ ok: true });
       })
@@ -794,6 +818,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   handleZhihuTaskAlarm(alarm.name);
   void handleRedditTaskAlarm(alarm.name);
   void handleLinuxdoTaskAlarm(alarm.name);
+  handleV2EXTaskAlarm(alarm.name);
   void handleXTaskAlarm(alarm.name);
   handleBiliTaskAlarm(alarm.name);
   if (handleCookieSyncAlarm(alarm.name)) {

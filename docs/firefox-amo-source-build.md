@@ -47,3 +47,10 @@ page bodies never enter the task result. Only bounded normalized topic fields, s
 structured error are sent to the user-configured backend. Automated tests cover the protocol,
 pagination/caps, timeout/error mapping, and task-tab isolation; a real installed-extension E2E
 with a signed-in Linux.do account has not yet been completed.
+`extension/src/content/v2ex.ts` and the V2EX task executor run only on declared V2EX hosts.
+Normal Topic collection is passive and read-only. A user-triggered bootstrap or incremental
+task reads only bounded rendered fields from the user's topic, public-reply, favorite-topic,
+and favorite-Node pages. The background login check asks Firefox only whether the `A2` cookie
+exists and sends a boolean plus the public rendered username; it never accesses, stores, or
+sends the cookie value. The build contains no V2EX write client and does not forward page HTML,
+headers, CSRF/once values, private messages, or browser history.

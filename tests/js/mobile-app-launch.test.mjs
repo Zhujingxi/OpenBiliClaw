@@ -82,6 +82,10 @@ test("buildAppDeepLink maps douyin / youtube / twitter / zhihu", () => {
 
 test("buildAppDeepLink returns empty for unknown or malformed URLs", () => {
   assert.equal(buildAppDeepLink("https://www.reddit.com/r/foo/comments/abc/"), "");
+  // Weibo is a backend-only discovery source. Keep navigation on its canonical
+  // HTTPS URL instead of inventing an unverified mobile-app scheme.
+  assert.equal(buildAppDeepLink("https://m.weibo.cn/detail/5023456789012345"), "");
+  assert.equal(buildAppDeepLink("https://weibo.com/1234567890/P9Example"), "");
   assert.equal(buildAppDeepLink("https://example.com/whatever"), "");
   assert.equal(buildAppDeepLink(""), "");
   assert.equal(buildAppDeepLink(null), "");

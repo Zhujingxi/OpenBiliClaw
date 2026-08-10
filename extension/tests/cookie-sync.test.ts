@@ -91,6 +91,22 @@ test("startCookieSync registers cookie listener only once", async () => {
   assert.equal(listeners.length, 1);
 });
 
+test("V2EX login-state checks only the cookie name and never reads its secret value", async () => {
+  const { readV2EXLoginState } = await importCookieSync();
+  const sessionCookie = {
+    name: "A2",
+    domain: ".v2ex.com",
+  } as Cookie;
+  Object.defineProperty(sessionCookie, "value", {
+    get() {
+      throw new Error("V2EX cookie value must not be read");
+    },
+  });
+  installChromeMock([sessionCookie]);
+
+  assert.equal(await readV2EXLoginState(), true);
+});
+
 test("cookie sync runtime event posts the current bilibili cookie immediately", async () => {
   const { handleCookieSyncRuntimeEvent } = await importCookieSync();
   installChromeMock([
@@ -196,6 +212,9 @@ test("legacy shared cookie sync alarm refreshes bilibili and douyin cookies", as
     if (String(url).endsWith("/api/sources/dy/cookie")) {
       return new Response(JSON.stringify({ ok: true, has_cookie: true }), { status: 200 });
     }
+    if (String(url).endsWith("/api/sources/v2ex/credential")) {
+      return new Response(JSON.stringify({ accepted: true }), { status: 200 });
+    }
     return new Response(JSON.stringify({ ok: true, authenticated: true }), { status: 200 });
   };
 
@@ -212,6 +231,7 @@ test("legacy shared cookie sync alarm refreshes bilibili and douyin cookies", as
       "http://127.0.0.1:8420/api/bilibili/cookie",
       "http://127.0.0.1:8420/api/sources/dy/cookie",
       "http://127.0.0.1:8420/api/sources/linuxdo/login-state",
+      "http://127.0.0.1:8420/api/sources/v2ex/credential",
       "http://127.0.0.1:8420/api/sources/xhs/login-state",
       "http://127.0.0.1:8420/api/sources/zhihu/login-state",
     ],
@@ -228,6 +248,11 @@ test("legacy shared cookie sync alarm refreshes bilibili and douyin cookies", as
   });
   assert.deepEqual(calls.find((call) => call.url.endsWith("/api/sources/linuxdo/login-state"))?.body, {
     logged_in: false,
+  });
+  assert.deepEqual(calls.find((call) => call.url.endsWith("/api/sources/v2ex/credential"))?.body, {
+    kind: "login_state",
+    value: false,
+    source: "hourly-alarm",
   });
 });
 
@@ -525,6 +550,9 @@ test("legacy shared cookie sync alarm refreshes bilibili, douyin AND x cookies t
     if (String(url).endsWith("/api/bilibili/cookie")) {
       return new Response(JSON.stringify({ ok: true, authenticated: true }), { status: 200 });
     }
+    if (String(url).endsWith("/api/sources/v2ex/credential")) {
+      return new Response(JSON.stringify({ accepted: true }), { status: 200 });
+    }
     return new Response(JSON.stringify({ ok: true, has_cookie: true }), { status: 200 });
   };
 
@@ -538,6 +566,7 @@ test("legacy shared cookie sync alarm refreshes bilibili, douyin AND x cookies t
       "http://127.0.0.1:8420/api/bilibili/cookie",
       "http://127.0.0.1:8420/api/sources/dy/cookie",
       "http://127.0.0.1:8420/api/sources/linuxdo/login-state",
+      "http://127.0.0.1:8420/api/sources/v2ex/credential",
       "http://127.0.0.1:8420/api/sources/x/cookie",
       "http://127.0.0.1:8420/api/sources/xhs/login-state",
       "http://127.0.0.1:8420/api/sources/zhihu/login-state",

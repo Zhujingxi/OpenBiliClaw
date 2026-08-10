@@ -1028,6 +1028,7 @@ async def test_publish_delight_if_available_includes_publication_fields() -> Non
                 "delight_score": 0.95,
                 "published_at": "2026-07-08T06:30:00Z",
                 "published_label": "3 days ago",
+                "share_count": 321,
             },
         ),
         soul_engine=_FakeSoulEngine(),
@@ -1040,6 +1041,7 @@ async def test_publish_delight_if_available_includes_publication_fields() -> Non
 
     assert len(event_hub.events) == 1
     assert_publication(event_hub.events[0])
+    assert event_hub.events[0]["share_count"] == 321
 
 
 def test_load_disliked_topic_phrases_reads_effective_dislikes() -> None:

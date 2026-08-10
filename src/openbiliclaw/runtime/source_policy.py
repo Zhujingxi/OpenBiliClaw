@@ -16,6 +16,8 @@ SOURCE_ORDER = (
     "reddit",
     "bangumi",
     "linuxdo",
+    "v2ex",
+    "weibo",
 )
 DEFAULT_SOURCE_ENABLED = {
     "bilibili": True,
@@ -27,6 +29,8 @@ DEFAULT_SOURCE_ENABLED = {
     "reddit": False,
     "bangumi": False,
     "linuxdo": False,
+    "v2ex": False,
+    "weibo": False,
 }
 DEFAULT_POOL_SOURCE_SHARES = {
     "bilibili": 5,
@@ -38,6 +42,8 @@ DEFAULT_POOL_SOURCE_SHARES = {
     "reddit": 1,
     "bangumi": 1,
     "linuxdo": 1,
+    "v2ex": 1,
+    "weibo": 1,
 }
 
 

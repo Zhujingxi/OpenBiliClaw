@@ -262,11 +262,36 @@ test("recommendation card layout reserves a media cover slot", () => {
   const previewBlock = popupHtml.match(/\.recommendation-preview\s*\{[\s\S]*?\}/)?.[0] ?? "";
   const coverBlock = popupHtml.match(/\.recommendation-cover\s*\{[\s\S]*?\}/)?.[0] ?? "";
   const coverImageBlock = popupHtml.match(/\.recommendation-cover img\s*\{[\s\S]*?\}/)?.[0] ?? "";
+  const textCardBlock = popupHtml.match(/\.recommendation-cover\.is-text-card\s*\{[\s\S]*?\}/)?.[0] ?? "";
 
   assert.match(previewBlock, /flex-direction:\s*column;/);
   assert.match(coverBlock, /aspect-ratio:\s*16\s*\/\s*9;/);
   assert.match(coverBlock, /width:\s*100%;/);
   assert.match(coverImageBlock, /object-fit:\s*cover;/);
+  assert.match(textCardBlock, /aspect-ratio:\s*auto;/);
+  assert.match(textCardBlock, /min-height:\s*124px;/);
+  assert.match(textCardBlock, /max-height:\s*180px;/);
+});
+
+test("delight banner keeps usable controls and text fallbacks at narrow popup widths", () => {
+  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const thumbBlock = popupHtml.match(/\.delight-banner-thumb\s*\{[\s\S]*?\}/)?.[0] ?? "";
+  const kickerBlock = popupHtml.match(/\.delight-banner-kicker-line\s*\{[\s\S]*?\}/)?.[0] ?? "";
+  const navBlock = popupHtml.match(/\.delight-banner-nav\s*\{[\s\S]*?\}/)?.[0] ?? "";
+  const textThumbBlock = popupHtml.match(/\.delight-banner-thumb\.is-text-card\s*\{[\s\S]*?\}/)?.[0] ?? "";
+
+  assert.match(thumbBlock, /width:\s*clamp\(108px,\s*32vw,\s*136px\);/);
+  assert.match(kickerBlock, /flex-wrap:\s*wrap;/);
+  assert.match(navBlock, /width:\s*28px;/);
+  assert.match(navBlock, /height:\s*28px;/);
+  assert.match(navBlock, /flex:\s*0\s+0\s+28px;/);
+  assert.match(textThumbBlock, /aspect-ratio:\s*auto;/);
+  assert.match(popupJs, /delight\.body_text \|\| delight\.title/);
+  assert.doesNotMatch(popupJs, /row\.role = "button"/);
+  assert.match(popupJs, /const chevron = document\.createElement\("button"\)/);
+  assert.match(popupJs, /chevron\.setAttribute\("aria-expanded"/);
+  assert.match(popupJs, /event\.stopPropagation\(\);\s*toggleExpanded\(\);/);
 });
 
 test("saved cards reserve a thumbnail slot and load covers through the backend proxy", () => {
@@ -274,13 +299,21 @@ test("saved cards reserve a thumbnail slot and load covers through the backend p
   const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
   const coverBlock = popupHtml.match(/\.saved-card-cover\s*\{[\s\S]*?\}/)?.[0] ?? "";
   const coverImageBlock = popupHtml.match(/\.saved-card-cover img\s*\{[\s\S]*?\}/)?.[0] ?? "";
+  const fallbackBlock = popupHtml.match(/\.saved-card-cover\.is-fallback\s*\{[\s\S]*?\}/)?.[0] ?? "";
+  const fallbackIconBlock = popupHtml.match(/\.saved-card-cover\.is-fallback svg\s*\{[\s\S]*?\}/)?.[0] ?? "";
 
   assert.match(coverBlock, /width:\s*84px;/);
   assert.match(coverBlock, /aspect-ratio:\s*16\s*\/\s*9;/);
   assert.match(coverBlock, /flex:\s*0\s+0\s+84px;/);
   assert.match(coverImageBlock, /object-fit:\s*cover;/);
+  assert.match(fallbackBlock, /display:\s*flex;/);
+  assert.match(fallbackBlock, /justify-content:\s*center;/);
+  assert.match(fallbackIconBlock, /width:\s*22px;/);
   assert.match(popupJs, /function buildSavedCardMedia/);
   assert.match(popupJs, /setProxyImageSrc\(image,\s*item\.cover_url\)/);
+  assert.match(popupJs, /image\.addEventListener\("error",\s*showFallback/);
+  assert.match(popupJs, /image\.complete\s*&&\s*image\.naturalWidth\s*===\s*0/);
+  assert.match(popupJs, /media\.innerHTML\s*=\s*HISTORY_IMAGE_ICON_SVG/);
   assert.match(popupJs, /body\.prepend\(media\)/);
 });
 

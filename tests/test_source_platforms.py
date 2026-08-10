@@ -32,6 +32,8 @@ from openbiliclaw.sources.zhihu_tasks import ZHIHU_DISCOVERY_SCOPE_STRATEGIES
         ("linux.do", "linuxdo-hot", "linuxdo"),
         ("ldo", "linuxdo_feed", "linuxdo"),
         ("", "linuxdo-related", "linuxdo"),
+        ("wb", "weibo-hot", "weibo"),
+        ("v2", "v2ex-node", "v2ex"),
     ],
 )
 def test_source_family_aliases(platform: str, source: str, expected: str) -> None:
@@ -49,6 +51,8 @@ def test_registry_contains_every_runtime_platform() -> None:
         "reddit",
         "bangumi",
         "linuxdo",
+        "v2ex",
+        "weibo",
     )
 
 
@@ -65,6 +69,8 @@ def test_registry_contains_every_runtime_platform() -> None:
         ("https://bgm.tv/subject/326", "bangumi"),
         ("https://bangumi.tv/subject/326", "bangumi"),
         ("https://linux.do/t/topic/123", "linuxdo"),
+        ("https://m.weibo.cn/detail/5023456789012345", "weibo"),
+        ("https://www.v2ex.com/t/123456", "v2ex"),
     ],
 )
 def test_url_inference_uses_registry(url: str, expected: str) -> None:

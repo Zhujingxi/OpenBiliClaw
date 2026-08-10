@@ -270,6 +270,43 @@ test("Linux.do recommendations use canonical topic links and text cards", () => 
   assert.match(popupJs, /linuxdo: "Linux\.do"/);
 });
 
+test("Weibo aliases and hosts normalize to text-first post cards", () => {
+  const item = normalizeRecommendation({
+    id: 45,
+    content_id: "5023456789012345",
+    content_url: "https://m.weibo.cn/detail/5023456789012345",
+    title: "一条公开微博",
+    source_platform: "wb",
+    content_type: "post",
+    body_text: "公开微博正文。",
+    share_count: 321,
+  });
+
+  assert.equal(item.source_platform, "weibo");
+  assert.equal(platformDisplayName(item.source_platform), "微博");
+  assert.equal(buildContentUrl(item), "https://m.weibo.cn/detail/5023456789012345");
+  assert.equal(item.share_count, 321);
+  assert.deepEqual(getRecommendationCardKind(item), {
+    kind: "text",
+    coverUrl: "",
+    text: "公开微博正文。",
+  });
+
+  assert.equal(normalizeRecommendation({ content_url: "https://weibo.com/u/123" }).source_platform, "weibo");
+  assert.equal(normalizeRecommendation({ content_url: "https://wx1.sinaimg.cn/large/a.jpg" }).source_platform, "weibo");
+});
+
+test("buildContentUrl does not fabricate Bilibili links for Weibo ids", () => {
+  const item = normalizeRecommendation({
+    content_id: "5023456789012345",
+    title: "缺 URL 的微博",
+    source_platform: "weibo",
+    content_type: "post",
+  });
+
+  assert.equal(buildContentUrl(item), "");
+});
+
 test("probeMessageKey normalizes type and domain", () => {
   assert.equal(normalizeProbeType("avoidance.probe"), "avoidance.probe");
   assert.equal(normalizeProbeType("unknown"), "interest.probe");
@@ -480,15 +517,18 @@ test("getRecommendationCardKind keeps a cover card for video items with a cover"
   assert.equal(result.text, "");
 });
 
-test("popup recommendation renderer has text-card styles for X items", () => {
+test("popup recommendation renderer distinguishes text cards from image failures", () => {
   const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
 
-  assert.match(popupJs, /cover\.classList\.add\("is-fallback", "is-text-card"\)/);
+  assert.match(popupJs, /cover\.classList\.add\("is-text-card"\)/);
+  assert.doesNotMatch(popupJs, /cover\.classList\.add\("is-fallback", "is-text-card"\)/);
+  assert.match(popupJs, /card\.classList\.add\("is-text-only"\)/);
   assert.match(popupJs, /textNode\.className = "recommendation-cover-text"/);
   assert.match(popupJs, /source-platform-\$\{platformKey\}/);
   assert.match(popupJs, /twitter: "X"/);
   assert.match(popupHtml, /\.recommendation-cover\.is-text-card/);
+  assert.match(popupHtml, /aspect-ratio: auto/);
   assert.match(popupHtml, /\.recommendation-cover-text/);
 });
 
@@ -680,6 +720,7 @@ test("normalizeDelightCandidate fills stable fallbacks and upgrades cover urls",
     view_count: 0,
     like_count: 0,
     comment_count: 0,
+    share_count: 0,
     favorite_count: 0,
     danmaku_count: 0,
     rating_score: 0,
@@ -1270,6 +1311,26 @@ test("getPoolStatusSummary explains discovered-but-not-added refresh result", ()
   );
 });
 
+test("getPoolStatusSummary surfaces captured material beside existing inventory", () => {
+  assert.deepEqual(
+    getPoolStatusSummary({
+      initialized: true,
+      pool_available_count: 222,
+      pool_pending_count: 177,
+      pool_target_count: 300,
+      last_discovered_count: 0,
+      last_replenished_count: 0,
+      recent_pool_topics: [],
+      manual_refresh_state: "idle",
+    }),
+    {
+      available: "还有 222 条可换",
+      replenished: "另有 177 条素材",
+      topics: "素材已抓到，会按可换库存缺口整理",
+    },
+  );
+});
+
 test("getReadyRecommendationHint prefers pool inventory over unread history", () => {
   assert.deepEqual(
     getReadyRecommendationHint({
@@ -1364,6 +1425,19 @@ test("mergeRuntimeStatusEvent updates pool fields from runtime stream payload", 
   assert.equal(merged.pool_pending_count, 142);
   assert.equal(merged.last_replenished_count, 6);
   assert.deepEqual(merged.recent_pool_topics, ["国际时事", "宏观经济"]);
+});
+
+test("pool stream snapshot recovers inventory after first-load status timeout", () => {
+  const merged = mergeRuntimeStatusEvent(null, {
+    type: "pool_status",
+    pool_available_count: 222,
+    pool_raw_count: 455,
+    pool_pending_count: 177,
+  });
+
+  assert.equal(merged.initialized, true);
+  assert.equal(merged.pool_available_count, 222);
+  assert.equal(getPoolStatusSummary(merged)?.available, "还有 222 条可换");
 });
 
 test("getRealtimePoolStatusSummary prefers runtime stream message when available", () => {

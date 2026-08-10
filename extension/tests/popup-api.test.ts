@@ -17,6 +17,8 @@ import {
   fetchHealth,
   fetchProfileSummary,
   fetchSourceShareSuggestion,
+  fetchV2exIdentity,
+  acceptV2exBrowserIdentity,
   fetchUpdateStatus,
   fetchWatchLater,
   probeConfigService,
@@ -32,6 +34,23 @@ import {
 import { __resetBackendEndpointForTests } from "../popup/popup-backend-config.js";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+
+test("V2EX identity helpers use the dedicated read and acceptance endpoints", async () => {
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, options });
+    return { ok: true, async json() { return { status: "resolved", username: "alice" }; } };
+  };
+
+  await fetchV2exIdentity();
+  await acceptV2exBrowserIdentity(" alice ");
+
+  assert.match(calls[0].url, /\/api\/sources\/v2ex\/identity$/);
+  assert.equal(calls[0].options.method, "GET");
+  assert.match(calls[1].url, /\/api\/sources\/v2ex\/identity$/);
+  assert.equal(calls[1].options.method, "POST");
+  assert.deepEqual(JSON.parse(calls[1].options.body), { username: "alice", accept: true });
+});
 
 test("guided init API calls all have finite request deadlines", () => {
   const source = readFileSync(resolve("popup/popup-api.js"), "utf8");
@@ -357,6 +376,7 @@ test("reshuffleRecommendations posts to reshuffle endpoint", async () => {
         view_count: 0,
         like_count: 0,
         comment_count: 0,
+        share_count: 0,
         favorite_count: 0,
         danmaku_count: 0,
         rating_score: 0,
@@ -421,6 +441,7 @@ test("appendRecommendations posts excluded bvids to append endpoint", async () =
         view_count: 0,
         like_count: 0,
         comment_count: 0,
+        share_count: 0,
         favorite_count: 0,
         danmaku_count: 0,
         rating_score: 0,
@@ -500,6 +521,7 @@ test("fetchRecommendations normalizes cover urls from the recommend endpoint", a
       view_count: 0,
       like_count: 0,
       comment_count: 0,
+      share_count: 0,
       favorite_count: 0,
       danmaku_count: 0,
       rating_score: 0,

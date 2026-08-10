@@ -13,6 +13,7 @@ _INTERVAL_FIELDS = (
     "zhihu_incremental_hours",
     "reddit_incremental_hours",
     "linuxdo_incremental_hours",
+    "v2ex_incremental_hours",
 )
 
 
@@ -36,6 +37,7 @@ def test_source_incremental_docs_cover_configuration_and_six_source_staging() ->
         "ZhihuTaskQueue",
         "RedditTaskQueue",
         "LinuxdoTaskQueue",
+        "V2EXTaskQueue",
     ):
         assert queue_name in storage_docs
     assert "### 五来源任务结果 staging" not in storage_docs
@@ -50,6 +52,7 @@ def test_source_incremental_docs_state_online_and_atomic_admission_boundaries() 
 
     assert "BEGIN IMMEDIATE" in architecture
     assert "XHS→抖音→YouTube→知乎→Reddit→Linux.do" in architecture
+    assert "XHS→抖音→YouTube→知乎→Reddit→V2EX" in architecture
     assert "不是后端绕过浏览器登录态" in extension_docs
     assert "扩展在线周期回拉" in readme
     assert "extension-online periodic re-pull" in readme_en.lower()

@@ -100,6 +100,9 @@ _PLATFORM_SOURCE_ORDER = (
     "zhihu",
     "reddit",
     "linuxdo",
+    "bangumi",
+    "v2ex",
+    "weibo",
 )
 _BILIBILI_DISCOVERY_SOURCES = ("search", "related_chain", "trending", "explore")
 # Pool-share fairness (spec 2026-07-20, Phase 3): max over-share rows evicted
@@ -381,6 +384,8 @@ class ContinuousRefreshController:
     reddit_producer: Any | None = None
     bangumi_producer: Any | None = None
     linuxdo_producer: Any | None = None
+    v2ex_producer: Any | None = None
+    weibo_producer: Any | None = None
     scheduler_config: Any = field(default_factory=SchedulerConfig)
     presence: PresenceTracker = field(default_factory=PresenceTracker)
     # gui-init D1: optional init-aware gate. When it returns True (a guided init
@@ -574,6 +579,7 @@ class ContinuousRefreshController:
                 "raw": max(0, available),
                 "pending": 0,
                 "admitted_pending_copy": 0,
+                "admitted_pending_available": 0,
                 "pending_eval": 0,
                 "evaluated_pending": 0,
             }
@@ -591,6 +597,10 @@ class ContinuousRefreshController:
             "admitted_pending_copy": max(
                 0,
                 int(readiness.get("admitted_pending_copy", 0)),
+            ),
+            "admitted_pending_available": max(
+                0,
+                int(readiness.get("admitted_pending_available", 0)),
             ),
             "pending_eval": max(0, int(readiness.get("pending_eval", 0))),
             "evaluated_pending": max(0, int(readiness.get("evaluated_pending", 0))),
@@ -1310,6 +1320,7 @@ class ContinuousRefreshController:
             "view_count": int(candidate.get("view_count", 0) or 0),
             "like_count": int(candidate.get("like_count", 0) or 0),
             "comment_count": int(candidate.get("comment_count", 0) or 0),
+            "share_count": int(candidate.get("share_count", 0) or 0),
             "danmaku_count": int(candidate.get("danmaku_count", 0) or 0),
             "favorite_count": int(
                 candidate.get("favorite_count", 0) or candidate.get("collect_count", 0) or 0
@@ -1517,6 +1528,8 @@ class ContinuousRefreshController:
             "reddit": self._tick_reddit_producer,
             "bangumi": self._tick_bangumi_producer,
             "linuxdo": self._tick_linuxdo_producer,
+            "v2ex": self._tick_v2ex_producer,
+            "weibo": self._tick_weibo_producer,
         }
         raw_results = await asyncio.gather(
             *(ticker() for ticker in tickers.values()),
@@ -1640,6 +1653,7 @@ class ContinuousRefreshController:
             ├─ _loop_reddit_producer()   60s   Reddit command-backed discovery when under quota
             ├─ _loop_bangumi_producer()  60s   Bangumi official-API discovery when under quota
             ├─ _loop_linuxdo_producer()  60s   Linux.do extension discovery when under quota
+            ├─ _loop_weibo_producer()    60s   Weibo guest-session discovery when under quota
             ├─ _loop_proactive_push()    60s   delight + interest probe
             ├─ _loop_keyword_planner()  120s   P1.6 — merged keyword generation (flag-gated)
             ├─ _loop_source_incremental_sync() 60s  extension account refresh
@@ -1685,6 +1699,8 @@ class ContinuousRefreshController:
             asyncio.create_task(self._loop_reddit_producer()),
             asyncio.create_task(self._loop_bangumi_producer()),
             asyncio.create_task(self._loop_linuxdo_producer()),
+            asyncio.create_task(self._loop_v2ex_producer()),
+            asyncio.create_task(self._loop_weibo_producer()),
             asyncio.create_task(self._loop_proactive_push()),
             asyncio.create_task(self._loop_keyword_planner()),
             asyncio.create_task(self._loop_image_cache_cleanup()),
@@ -2008,6 +2024,27 @@ class ContinuousRefreshController:
                 await self._tick_linuxdo_producer()
             await asyncio.sleep(self.check_interval_seconds)
 
+    async def _loop_v2ex_producer(self) -> None:
+        """V2EX production — anonymous/public discovery with optional PAT."""
+        while True:
+            if not self._llm_work_allowed():
+                await asyncio.sleep(self.check_interval_seconds)
+                continue
+            with suppress(Exception):
+                await self._tick_v2ex_producer()
+            await asyncio.sleep(self.check_interval_seconds)
+
+    async def _loop_weibo_producer(self) -> None:
+        """Run anonymous Weibo discovery when its source quota is underfilled."""
+
+        while True:
+            if not self._llm_work_allowed():
+                await asyncio.sleep(self.check_interval_seconds)
+                continue
+            with suppress(Exception):
+                await self._tick_weibo_producer()
+            await asyncio.sleep(self.check_interval_seconds)
+
     async def _loop_keyword_planner(self) -> None:
         """P1.6: deficit-pulled merged keyword generation (flag-gated).
 
@@ -2265,6 +2302,22 @@ class ContinuousRefreshController:
         return await self._tick_platform_producer(
             source_family="linuxdo",
             producer=self.linuxdo_producer,
+        )
+
+    async def _tick_v2ex_producer(self) -> dict[str, object]:
+        """Invoke V2EX discovery when its source-family quota has a deficit."""
+
+        return await self._tick_platform_producer(
+            source_family="v2ex",
+            producer=self.v2ex_producer,
+        )
+
+    async def _tick_weibo_producer(self) -> dict[str, object]:
+        """Invoke Weibo discovery when its source-family quota has a deficit."""
+
+        return await self._tick_platform_producer(
+            source_family="weibo",
+            producer=self.weibo_producer,
         )
 
     async def _tick_soul_pipeline(self) -> None:
@@ -2993,11 +3046,12 @@ class ContinuousRefreshController:
                 "content_type": candidate.get("content_type", "video"),
                 "body_text": candidate.get("body_text", ""),
                 # Engagement stats so a live-pushed delight card shows the same
-                # ▶/👍/💬 row as the pending-batch path (0 = not fetched). Passed
+                # ▶/👍/💬/🔁 row as the pending-batch path (0 = not fetched). Passed
                 # through as-is like the other row fields; the client coerces.
                 "view_count": candidate.get("view_count", 0),
                 "like_count": candidate.get("like_count", 0),
                 "comment_count": candidate.get("comment_count", 0),
+                "share_count": candidate.get("share_count", 0),
                 "danmaku_count": candidate.get("danmaku_count", 0),
                 "favorite_count": candidate.get("favorite_count", 0)
                 or candidate.get("collect_count", 0),
@@ -3655,6 +3709,10 @@ class ContinuousRefreshController:
                 stranded.append("bangumi")
             elif source == "linuxdo" and self.linuxdo_producer is None:
                 stranded.append("linuxdo")
+            elif source == "v2ex" and self.v2ex_producer is None:
+                stranded.append("v2ex")
+            elif source == "weibo" and self.weibo_producer is None:
+                stranded.append("weibo")
             elif source not in {
                 "bilibili",
                 "xiaohongshu",
@@ -3665,6 +3723,8 @@ class ContinuousRefreshController:
                 "reddit",
                 "bangumi",
                 "linuxdo",
+                "v2ex",
+                "weibo",
             }:
                 # Unknown source family with an explicit share.
                 stranded.append(source)

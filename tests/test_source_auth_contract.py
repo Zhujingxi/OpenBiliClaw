@@ -4,13 +4,9 @@ Phase 0 safety net for the source-auth-contract refactor
 (``docs/plans/2026-07-18-source-auth-contract-spec.md``).
 
 Every case pins the **current** ``(state, logged_in)`` pair a platform
-reports for a given credential precondition. This file deliberately
-records behaviour the spec calls *wrong* — most notably douyin, which
-reports ``("unverified", False)`` even with a perfectly valid cookie
-(spec D11) — because Wave A promises "zero output change" and this is
-the net that proves it. Do not "fix" an expectation here to match an
-ideal contract; change the expectation only together with the code
-change that intentionally moves the output, and say so in the PR.
+reports for a given credential precondition. Credential presence without a
+probe remains unverified; once a live probe returns, the legacy fields must
+move with the orthogonal verdict so one response cannot contradict itself.
 
 Isolation (the hard requirement): each case runs against a temporary
 project root, a temporary SQLite database, and a patched rdt credential
@@ -50,8 +46,10 @@ from openbiliclaw.api.source_auth.forms import WRITABLE_FORM_KINDS
 from openbiliclaw.api.source_auth.probe_cache import LIVE_PROBES
 from openbiliclaw.api.source_auth.providers import _DOUYIN_DETAIL, SOURCE_AUTH_PROVIDERS
 from openbiliclaw.api.source_auth.verify import (
+    _BROWSER_HEARTBEAT_PREFIXES,
     VERIFY_ACTIONS,
     VERIFY_DEBOUNCE,
+    _verify_browser_heartbeat,
     verify_source,
 )
 from openbiliclaw.api.source_auth.write import CREDENTIAL_SPECS, FormKind
@@ -110,6 +108,7 @@ class _Case:
     feed_paused: bool = False
     # Bangumi's optional-token axis (``ok`` / ``rejected`` / ``""``); "" for the
     # other platforms, which never set it. Frozen because it is
+    # the other source-auth platforms, which never set it. Frozen because it is
     # what the frontend overlays as 「令牌已失效」, and a refactor moving Bangumi
     # onto the contract must not silently drop it.
     token_state: str = ""
@@ -290,6 +289,23 @@ def _yt_enabled_with_unrelated_credentials(env: _Env) -> None:
     env.cfg.bilibili.cookie = _FULL_BILI_COOKIE
 
 
+# ── weibo preconditions ─────────────────────────────────────────────
+
+
+def _weibo_enabled(env: _Env) -> None:
+    env.cfg.sources.weibo.enabled = True
+
+
+def _weibo_disabled(env: _Env) -> None:
+    env.cfg.sources.weibo.enabled = False
+
+
+def _weibo_enabled_with_unrelated_credentials(env: _Env) -> None:
+    """Account cookies for another source must never affect anonymous Weibo."""
+    env.cfg.sources.weibo.enabled = True
+    env.cfg.bilibili.cookie = _FULL_BILI_COOKIE
+
+
 # ── twitter preconditions ────────────────────────────────────────────
 
 
@@ -433,6 +449,7 @@ def _reddit_credential_without_session(env: _Env) -> None:
 # ``bangumi_discovery_runs`` rows), which every case here uses.
 
 _BANGUMI_TOKEN = "bgm-personal-access-token"
+_V2EX_TOKEN = "v2ex-personal-access-token"
 
 
 def _bangumi_no_token(env: _Env) -> None:
@@ -566,6 +583,23 @@ def _linuxdo_task_pending(env: _Env) -> None:
     )
 
 
+def _v2ex_no_token(env: _Env) -> None:
+    """Enabled, anonymous — public V2EX discovery needs no credential."""
+    env.cfg.sources.v2ex.enabled = True
+
+
+def _v2ex_token_unverified(env: _Env) -> None:
+    """An optional PAT is present but has not been live-checked yet."""
+    env.cfg.sources.v2ex.enabled = True
+    env.cfg.sources.v2ex.access_token = _V2EX_TOKEN
+
+
+def _v2ex_token_disabled(env: _Env) -> None:
+    """A saved PAT remains inert while the source is switched off."""
+    env.cfg.sources.v2ex.enabled = False
+    env.cfg.sources.v2ex.access_token = _V2EX_TOKEN
+
+
 # ── the frozen contract ──────────────────────────────────────────────
 
 _CASES: dict[str, _Case] = {
@@ -651,7 +685,7 @@ _CASES: dict[str, _Case] = {
         detail="尚未收到小红书浏览器登录态；插件连接后会在本地同步。",
         enabled=False,
     ),
-    # douyin — cookie presence only; logged_in is hard-wired False (spec D11).
+    # douyin — cookie presence alone is unverified; a later live probe can move it.
     "douyin-cookie-file": _Case(
         "douyin",
         _dy_cookie_file,
@@ -995,6 +1029,31 @@ _CASES: dict[str, _Case] = {
         detail=("Linux.do 任务正在等待插件执行（bootstrap_events / pending）；公开发现无需登录。"),
         enabled=True,
     ),
+    # v2ex — anonymous public discovery with an optional API 2.0 PAT.
+    "v2ex-no-token": _Case(
+        "v2ex",
+        _v2ex_no_token,
+        "no_auth",
+        True,
+        detail="公开源 · 无需登录；可选填 PAT 以识别账号并增强 Node / Topic API。",
+        enabled=True,
+    ),
+    "v2ex-token-unverified": _Case(
+        "v2ex",
+        _v2ex_token_unverified,
+        "no_auth",
+        True,
+        detail="已保存 V2EX 个人令牌，尚未联网确认；可点「测试连接」验证。",
+        enabled=True,
+    ),
+    "v2ex-token-disabled": _Case(
+        "v2ex",
+        _v2ex_token_disabled,
+        "no_auth",
+        True,
+        detail="已保存 V2EX 个人令牌，尚未联网确认；可点「测试连接」验证。",
+        enabled=False,
+    ),
 }
 
 
@@ -1262,6 +1321,7 @@ def test_linuxdo_optional_task_history_evidence_is_a_narrow_consistency_exceptio
 
 def test_contract_covers_every_platform_with_at_least_three_preconditions() -> None:
     """Spec Phase 0 gate: every platform has at least three frozen cases."""
+    """Spec Phase 0 gate: every registered platform has >=3 preconditions."""
     per_platform: dict[str, int] = {}
     for case in _CASES.values():
         per_platform[case.platform] = per_platform.get(case.platform, 0) + 1
@@ -1276,6 +1336,7 @@ def test_contract_covers_every_platform_with_at_least_three_preconditions() -> N
         "reddit",
         "bangumi",
         "linuxdo",
+        "v2ex",
     }
     thin = {platform: n for platform, n in per_platform.items() if n < 3}
     assert not thin, f"platforms with fewer than 3 preconditions: {thin}"
@@ -1371,14 +1432,18 @@ def test_sources_status_makes_no_outbound_request(contract_env: _Env) -> None:
 
 
 @pytest.mark.parametrize(
-    ("recorded", "expected_verification"),
+    ("recorded", "expected_verification", "expected_legacy"),
     [
-        ({"authenticated": True}, "verified"),
-        ({"authenticated": False}, "failed"),
+        ({"authenticated": True}, "verified", ("ready", True)),
+        ({"authenticated": False}, "failed", ("unverified", False)),
         # A proxy/timeout failure says nothing about the cookie, so it must not
         # be reported as a rejection — that is how a flaky network turns into a
         # bogus "your login expired".
-        ({"authenticated": False, "network_error": True}, "unverified"),
+        (
+            {"authenticated": False, "network_error": True},
+            "unverified",
+            ("unverified", False),
+        ),
     ],
     ids=["logged-in", "logged-out", "transport-failure"],
 )
@@ -1386,15 +1451,9 @@ def test_live_probe_verdict_reaches_the_contract(
     contract_env: _Env,
     recorded: dict[str, bool],
     expected_verification: str,
+    expected_legacy: tuple[str, bool],
 ) -> None:
-    """A cached probe verdict drives ``verification`` — and only ``verification``.
-
-    This is the Wave A zero-break property in one assertion: 抖音 with a valid
-    cookie is genuinely logged in (spec D11), and the contract can now say so,
-    while ``legacy_state`` stays the frozen ``unverified`` that old frontends
-    expect. It also proves ``probe_cache`` is wired to the providers at all,
-    which nothing else here would catch until Task 6 lands.
-    """
+    """A cached probe verdict drives both contract and compatibility views."""
     from openbiliclaw.api.source_auth.probe_cache import LIVE_PROBES
 
     _dy_cookie_file(contract_env)
@@ -1405,8 +1464,7 @@ def test_live_probe_verdict_reaches_the_contract(
     finally:
         LIVE_PROBES.clear()
 
-    # Legacy verdict unmoved, whatever the probe found.
-    assert (item["state"], item["logged_in"]) == ("unverified", False)
+    assert (item["state"], item["logged_in"]) == expected_legacy
 
     contract = SourceAuthContract.model_validate(item["auth"])
     assert contract.verification == expected_verification
@@ -1438,6 +1496,10 @@ _EXPECTED_VERIFY_METHODS = {
     # there is no credential verdict to verify, so the current method is none;
     # the fixed verify action remains browser_heartbeat.
     "linuxdo": "none",
+    "weibo": "none",
+    # V2EX is anonymous by default; its optional PAT only becomes probeable
+    # after the caller supplies a token.
+    "v2ex": "none",
 }
 
 
@@ -1492,6 +1554,9 @@ def test_verify_action_table_covers_every_platform() -> None:
     """
     assert set(VERIFY_ACTIONS) == set(SOURCE_AUTH_PROVIDERS)
     assert set(_EXPECTED_VERIFY_METHODS) == set(SOURCE_AUTH_PROVIDERS)
+    assert set(_BROWSER_HEARTBEAT_PREFIXES) == {
+        slug for slug, action in VERIFY_ACTIONS.items() if action == "browser_heartbeat"
+    }
 
 
 @pytest.mark.parametrize("slug", sorted(_EXPECTED_VERIFY_METHODS), ids=str)
@@ -1503,6 +1568,11 @@ def test_verify_returns_200_and_declared_method_for_every_platform(
     Run with no credentials anywhere, so no platform has anything to probe —
     which is also why the outbound guard can be absolute here: a verify with
     nothing to verify must not reach for the network on any platform.
+    Every registered platform answers with its declared evidence strength.
+
+    Run with no credentials anywhere, so no platform has anything to probe —
+    which is also why the outbound guard can be absolute here: a verify with
+    nothing to verify must not reach for the network on any registered source.
     """
     attempts: list[str] = []
 
@@ -1668,7 +1738,9 @@ def test_douyin_probe_distinguishes_login(
     assert contract.verify_method == "live_probe"
     assert body["outcome"] == expected_outcome
     assert contract.verified_at
-    # Wave A's promise: the legacy verdict does not move, whatever we learn.
+    assert (contract.legacy_state, contract.legacy_logged_in) == (
+        ("ready", True) if expected_verification == "verified" else ("unverified", False)
+    )
     assert check_legacy_consistency("douyin", contract) == []
 
 
@@ -2059,6 +2131,27 @@ async def test_bilibili_verdict_is_dropped_when_the_cookie_goes_away(
 # ── browser-heartbeat round trip (小红书 / 知乎 / Linux.do) ─────────
 
 
+async def test_unknown_browser_heartbeat_source_never_falls_back_to_zhihu() -> None:
+    class _Database:
+        def get_zhihu_login_state(self) -> tuple[bool, str]:
+            return True, "stale"
+
+    class _Hub:
+        def __init__(self) -> None:
+            self.events: list[dict[str, object]] = []
+
+        async def publish(self, event: dict[str, object]) -> bool:
+            self.events.append(event)
+            return True
+
+    hub = _Hub()
+    result = await _verify_browser_heartbeat("unregistered", _Database(), hub)
+
+    assert hub.events == []
+    assert result.conclusive is False
+    assert "尚未注册" in result.message
+
+
 @pytest.mark.parametrize(
     ("slug", "prefix"),
     [("xiaohongshu", "xhs"), ("zhihu", "zhihu"), ("linuxdo", "linuxdo")],
@@ -2402,6 +2495,7 @@ def test_credential_write_states_what_it_could_not_verify(contract_env: _Env) ->
             ("xiaohongshu", {"kind": "login_state", "value": True}),
             ("zhihu", {"kind": "login_state", "value": True}),
             ("linuxdo", {"kind": "login_state", "value": True}),
+            ("v2ex", {"kind": "login_state", "value": True}),
         ):
             response = client.post(f"/api/sources/{slug}/credential", json=body)
             assert response.status_code == 200, response.text
@@ -2421,7 +2515,7 @@ def test_credential_write_states_what_it_could_not_verify(contract_env: _Env) ->
     assert accepted["bilibili"]["checked"] == "live_probe"
     assert accepted["douyin"]["checked"] == "live_probe"
     # ...and the ones that cannot be probed say *that*, with a reason.
-    for slug in ("twitter", "reddit", "xiaohongshu", "zhihu", "linuxdo"):
+    for slug in ("twitter", "reddit", "xiaohongshu", "zhihu", "linuxdo", "v2ex"):
         assert accepted[slug]["checked"] != "live_probe", slug
         assert accepted[slug]["unverified_reason"], f"{slug} accepted a write without saying why"
 
@@ -2653,6 +2747,7 @@ def test_superseded_credential_endpoints_are_marked_deprecated(contract_env: _En
 
 # ── Phase 4: credential form descriptors ──────────────────────────────
 # The form descriptor exists so three frontends can render every platform
+# The form descriptor exists so three frontends can render every registered platform
 # with no per-platform branches (invariant I4). These tests guard the two ways
 # that promise can rot: a platform shipping without a descriptor (the branch
 # comes straight back), and a descriptor that advertises more than the write
@@ -2670,6 +2765,7 @@ def _credentials_payload(env: _Env) -> dict[str, Any]:
 @pytest.mark.parametrize("slug", sorted(CREDENTIAL_SPECS))
 def test_every_platform_ships_a_credential_form(contract_env: _Env, slug: str) -> None:
     """Every platform carries a ``form``, so no surface has to invent one."""
+    """Every registered platform carries a form, so no surface has to invent one."""
     payload = _credentials_payload(contract_env)
     form = payload[slug]["form"]
 
@@ -2738,6 +2834,7 @@ def test_form_actions_are_backed_by_a_real_capability(contract_env: _Env, slug: 
     assert "clear" not in actions, slug
     assert "copy" not in actions, slug
     # POST /api/sources/{slug}/verify serves every platform, YouTube included.
+    # POST /api/sources/{slug}/verify serves every registered source, YouTube included.
     assert "verify" in actions, slug
     for entry in form["actions"]:
         if entry["action"] == "open_login_window":

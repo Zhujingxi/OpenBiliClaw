@@ -15,6 +15,22 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+def test_weibo_alias_is_canonicalized_before_candidate_storage() -> None:
+    item = DiscoveredContent(
+        title="微博正文",
+        content_id="post-1",
+        content_url="https://weibo.com/123/post-1",
+        source_platform="wb",
+        source_strategy="weibo-search",
+        content_type="post",
+    )
+
+    write = discovered_content_to_candidate_write(item)
+
+    assert write.source_platform == "weibo"
+    assert write.candidate_key == "weibo:post-1"
+
+
 def test_enqueue_discovery_candidates_dedupes_by_source_key(tmp_path: Path) -> None:
     db = Database(tmp_path / "test.db")
     db.initialize()
@@ -106,7 +122,13 @@ def test_discovery_candidate_row_round_trips_to_discovered_content(tmp_path: Pat
             )
         ]
     )
-    row = db.claim_discovery_candidates_for_eval(limit=1)[0]
+    row = {
+        **db.claim_discovery_candidates_for_eval(limit=1)[0],
+        "temporal_class": "versioned",
+        "temporal_confidence": 0.84,
+        "temporal_reason": "内容依赖产品版本",
+        "temporal_policy_version": "v1",
+    }
 
     item = row_to_discovered_content(row)
 
@@ -128,6 +150,10 @@ def test_discovery_candidate_row_round_trips_to_discovered_content(tmp_path: Pat
     assert item.rating_score == 9.2
     assert item.rating_count == 9959
     assert item.source_rank == 1
+    assert item.temporal_class == "versioned"
+    assert item.temporal_confidence == 0.84
+    assert item.temporal_reason == "内容依赖产品版本"
+    assert item.temporal_policy_version == "v1"
 
 
 def test_discovery_candidate_row_defaults_missing_platform_to_bilibili() -> None:

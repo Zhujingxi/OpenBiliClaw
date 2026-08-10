@@ -487,6 +487,7 @@ class TestMobileWebViewModels:
               getSourceLabel,
               normalizeRecommendation,
               normalizeSourcePlatform,
+              recommendationStats,
             } from "./src/openbiliclaw/web/js/view-models.js";
 
             const post = normalizeRecommendation({
@@ -520,6 +521,53 @@ class TestMobileWebViewModels:
               }),
               "web",
             );
+          """)
+        )
+
+    def test_weibo_recommendation_alias_hosts_and_text_card_are_source_aware(self) -> None:
+        _assert_js(
+            dedent("""
+            import assert from "node:assert/strict";
+            import {
+              buildContentUrl,
+              getRecommendationCardKind,
+              getSourceLabel,
+              normalizeRecommendation,
+              normalizeSourcePlatform,
+              recommendationStats,
+            } from "./src/openbiliclaw/web/js/view-models.js";
+
+            const post = normalizeRecommendation({
+              content_id: "5023456789012345",
+              content_url: "https://m.weibo.cn/detail/5023456789012345",
+              title: "一条公开微博",
+              source_platform: "wb",
+              content_type: "post",
+              body_text: "公开微博正文。",
+              cover_url: "https://wx1.sinaimg.cn/large/example.jpg",
+              share_count: 321,
+            });
+
+            assert.equal(post.source_platform, "weibo");
+            assert.equal(getSourceLabel(post.source_platform), "微博");
+            assert.equal(buildContentUrl(post), "https://m.weibo.cn/detail/5023456789012345");
+            assert.equal(getRecommendationCardKind(post).kind, "text");
+            assert.match(recommendationStats(post), /🔁 321/);
+            assert.equal(
+              normalizeSourcePlatform({ content_url: "https://weibo.com/u/123" }),
+              "weibo",
+            );
+            assert.equal(
+              normalizeSourcePlatform({ content_url: "https://wx1.sinaimg.cn/large/a.jpg" }),
+              "weibo",
+            );
+
+            const missingUrl = normalizeRecommendation({
+              content_id: "5023456789012346",
+              source_platform: "weibo",
+              content_type: "post",
+            });
+            assert.equal(buildContentUrl(missingUrl), "");
           """)
         )
 
@@ -983,6 +1031,17 @@ class TestMobileWebViewModels:
             assert.equal(pending.available, "找到 142 条素材，正在整理成可换内容");
             assert.equal(pending.replenished, "正在整理");
             assert.equal(pending.topics, "整理好就能换，不会把素材数当可换数");
+
+            const stockedWithBacklog = getPoolStatusSummary({
+              initialized: true,
+              pool_available_count: 222,
+              pool_pending_count: 177,
+              pool_target_count: 300,
+              manual_refresh_state: "idle",
+            });
+            assert.equal(stockedWithBacklog.available, "还有 222 条可换");
+            assert.equal(stockedWithBacklog.replenished, "另有 177 条素材");
+            assert.equal(stockedWithBacklog.topics, "素材已抓到，会按可换库存缺口整理");
         """)
         )
 
@@ -1023,7 +1082,7 @@ class TestMobileWebViewModels:
               header.poolChips.map((chip) => [chip.label, chip.value, chip.tone]),
               [
                 ["当前可换", "23 条", "neutral"],
-                ["最近补进", "补进 7 条", "brand"],
+                ["补货进展", "补进 7 条", "brand"],
                 ["现在在忙", "城市影像 / 设备测评", "info"],
               ],
             );
@@ -1041,7 +1100,7 @@ class TestMobileWebViewModels:
               internal.poolChips.map((chip) => [chip.label, chip.value]),
               [
                 ["当前可换", "600 条"],
-                ["最近补进", "补进 1 条"],
+                ["补货进展", "补进 1 条"],
                 ["现在在忙", "小红书任务 / 探索"],
               ],
             );

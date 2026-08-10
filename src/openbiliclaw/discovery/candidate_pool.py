@@ -14,6 +14,7 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from openbiliclaw.discovery.engine import DiscoveredContent
+from openbiliclaw.discovery.temporal import TEMPORAL_POLICY_VERSION
 from openbiliclaw.saved_sync.identity import make_item_key
 
 PENDING_EVAL = "pending_eval"
@@ -96,6 +97,8 @@ def _canonical_platform(raw_platform: object) -> str:
         return "zhihu"
     if raw in {"bangumi", "bgm"}:
         return "bangumi"
+    if raw in {"weibo", "wb", "微博"}:
+        return "weibo"
     return raw or "unknown"
 
 
@@ -179,6 +182,17 @@ def discovered_content_to_candidate_write(
     payload = dict(raw_payload or {})
     if item.engagement_available and "engagement_available" not in payload:
         payload["engagement_available"] = list(item.engagement_available)
+    raw_discovery_lane = str(getattr(item, "discovery_lane", "") or "").strip().lower()
+    discovery_lane = "recent" if raw_discovery_lane == "recent" else ""
+    effective_source_context = source_context
+    if discovery_lane:
+        base_context = str(item.source_strategy or source_context or "").strip()
+        effective_source_context = (
+            base_context
+            if base_context.endswith(f":{discovery_lane}")
+            else f"{base_context}:{discovery_lane}".lstrip(":")
+        )
+        payload.setdefault("discovery_lane", discovery_lane)
     score_threshold = float(getattr(item, "score_threshold", 0.0) or 0.0)
     if score_threshold > 0 and "score_threshold" not in payload:
         payload["score_threshold"] = score_threshold
@@ -214,7 +228,7 @@ def discovered_content_to_candidate_write(
         rating_count=item.rating_count,
         source_rank=item.source_rank,
         tags=list(item.tags),
-        source_context=source_context,
+        source_context=effective_source_context,
         candidate_tier=item.candidate_tier,
         score_threshold=score_threshold,
         raw_payload=payload,
@@ -256,14 +270,14 @@ def row_to_discovered_content(row: dict[str, Any]) -> DiscoveredContent:
     content_id = str(row.get("content_id") or row.get("bvid") or "").strip()
     bvid = str(row.get("bvid") or content_id).strip()
     author_name = str(row.get("author_name") or row.get("up_name") or "").strip()
-    raw_payload = row.get("raw_payload")
-    if isinstance(raw_payload, str):
+    raw_payload_value = row.get("raw_payload")
+    if isinstance(raw_payload_value, str):
         try:
-            decoded_payload = json.loads(raw_payload)
+            decoded_payload = json.loads(raw_payload_value)
         except json.JSONDecodeError:
             decoded_payload = {}
     else:
-        decoded_payload = raw_payload if isinstance(raw_payload, dict) else {}
+        decoded_payload = raw_payload_value if isinstance(raw_payload_value, dict) else {}
     available = decoded_payload.get("engagement_available")
     engagement_available = (
         [str(value) for value in available if str(value) in {"view", "like", "comment"}]
@@ -300,8 +314,17 @@ def row_to_discovered_content(row: dict[str, Any]) -> DiscoveredContent:
         published_at=str(row.get("published_at") or ""),
         published_label=str(row.get("published_label") or ""),
         source_strategy=str(row.get("source_strategy") or ""),
+        discovery_lane=(
+            "recent"
+            if str(decoded_payload.get("discovery_lane") or "").strip().lower() == "recent"
+            else ""
+        ),
         relevance_score=float(row.get("relevance_score") or 0.0),
         relevance_reason=str(row.get("relevance_reason") or ""),
+        temporal_class=str(row.get("temporal_class") or "unknown"),
+        temporal_confidence=float(row.get("temporal_confidence") or 0.0),
+        temporal_reason=str(row.get("temporal_reason") or ""),
+        temporal_policy_version=str(row.get("temporal_policy_version") or TEMPORAL_POLICY_VERSION),
         pool_expression=str(row.get("pool_expression") or ""),
         pool_topic_label=str(row.get("pool_topic_label") or ""),
         candidate_tier=str(row.get("candidate_tier") or "primary"),

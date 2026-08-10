@@ -51,6 +51,7 @@ openbiliclaw [--log-level DEBUG|INFO|WARNING|ERROR] <命令>
 | `fetch-reddit` | 单独触发 Reddit 插件 bootstrap 或搜索 smoke（默认不写 memory、不重建画像） | ✅ |
 | `fetch-linuxdo` | 单独触发 Linux.do 书签 / 点赞 / 阅读记录只读 smoke（默认不写 memory） | ✅ |
 | `fetch-bangumi` | 读取 Bangumi 公开收藏（默认只读，不写 memory、不调用 LLM） | ✅ |
+| `fetch-v2ex` | 只读验证 V2EX 发布、讨论、收藏主题、收藏 Node 四个 bootstrap scope（不写 memory、不调用 LLM） | ✅ |
 | `import-youtube <path>` | 从 Google Takeout 导入 YouTube 历史 / 订阅 / 点赞 | ✅ |
 | `setup-embedding` | 配置本地 Ollama 作为独立 embedding provider（可选） | ✅ |
 | `recommend` | 查看推荐 | ✅ |
@@ -76,16 +77,28 @@ openbiliclaw [--log-level DEBUG|INFO|WARNING|ERROR] <命令>
 | `discover-bangumi <keyword>` | 只读验证 Bangumi Subject 搜索 | ✅ |
 | `discover-bangumi-ranked` | 只读验证 Bangumi 排名浏览 | ✅ |
 | `discover-bangumi-latest` | 只读验证 Bangumi 按日期浏览（可能含未播条目） | ✅ |
+| `discover-v2ex <keyword>` | 只读验证 V2EX Topic 搜索召回 | ✅ |
+| `discover-v2ex-node <node>` | 只读验证 V2EX Node Topic 召回 | ✅ |
+| `discover-v2ex-tab <tab>` | 只读验证 V2EX Tab Feed 召回 | ✅ |
+| `discover-v2ex-hot` | 只读验证 V2EX 热门 Topic | ✅ |
+| `discover-v2ex-latest` | 只读验证 V2EX 最新 Topic | ✅ |
 | `search-douyin` | 通过浏览器插件调试抖音搜索召回 | ✅ |
 | `chat` | 苏格拉底式对话 | ✅ |
 | `ledger` | 查看画像更新台账（`--line` 逐行 / `--days` / `--write-point` 过滤） | ✅ |
 | `delight` | 手动查看当前惊喜推荐候选 | ✅ |
 | `probe` | 手动查看并确认猜测兴趣方向 | ✅ |
-| `python -m openbiliclaw.integrations.openclaw.cli next-avoidance-probe` | OpenClaw JSON bridge：拉取下一条不喜欢领域探针 | ✅ |
-| `python -m openbiliclaw.integrations.openclaw.cli respond-avoidance-probe` | OpenClaw JSON bridge：确认 / 否认 / 多聊避雷探针 | ✅ |
+| `python -m openbiliclaw.integrations.openclaw.cli capabilities` | Agent Bridge capability negotiation：协议版本、宿主名和完整 skill 清单 | ✅ |
+| `python -m openbiliclaw.integrations.openclaw.cli next-avoidance-probe` | Agent JSON bridge：拉取下一条不喜欢领域探针 | ✅ |
+| `python -m openbiliclaw.integrations.openclaw.cli respond-avoidance-probe` | Agent JSON bridge：确认 / 否认 / 暂缓 / 多聊避雷探针 | ✅ |
+| `python -m openbiliclaw.integrations.openclaw.cli respond-interest-probe` | Agent JSON bridge：确认 / 否认 / 暂缓 / 多聊兴趣探针 | ✅ |
+| `python -m openbiliclaw.integrations.openclaw.cli respond-delight` | Agent JSON bridge：惊喜卡片 view / like / dislike / dismiss / chat | ✅ |
+| `python -m openbiliclaw.integrations.openclaw.cli activity-feed` | Agent JSON bridge：读取活动流 | ✅ |
+| `python -m openbiliclaw.integrations.openclaw.cli platform-availability` | Agent JSON bridge：读取平台库存可用量 | ✅ |
+| `python -m openbiliclaw.integrations.openclaw.cli save-local/list-saved/remove-saved/sync-saved` | Agent JSON bridge：本地优先保存与显式授权同步 | ✅ |
 
-CLI/OpenClaw 保持兼容但不新增卡片选择 UI，也不伪造 `reply_to_turn_id` 或
-`dialogue_binding`。它们继续走显式 `legacy_direct` 对话入口；三端图形客户端的
+CLI/Agent Bridge 保持兼容但不新增卡片选择 UI，也不伪造 `reply_to_turn_id` 或
+`dialogue_binding`。它们继续走显式 `legacy_direct` 对话入口；chat 现在会返回并持久化
+自己的 `turn_id`，但不加入 API runtime 的 settlement queue；三端图形客户端的
 server-owned binding、context preview 与卡片 action 不改变 CLI 的既有契约。
 
 ## 详细说明
@@ -98,7 +111,9 @@ server-owned binding、context preview 与卡片 action 不改变 CLI 的既有�
 `danmaku_fetch_limit` 和 `danmaku_max_chars`；手动 `recommend` 的预热范围与 daemon/API 使用同一配置。
 CLI 组合根也会把 `[scheduler].copy_ready_target_count` 规范为
 `min(max(copy_ready_target_count, 0), max(pool_target_count, 0))` 后注入推荐引擎，与 API 和
-OpenClaw 的文案水位语义一致；显式设为 `0` 时保留 legacy drain-all 回滚行为。
+OpenClaw 的文案水位语义一致，同时注入 `pool_target_count`：正数 copy 水位会优先补齐当前
+topic 展示窗口可兑现的公开库存缺口，再维持 unrestricted copy-ready 水位；显式设为 `0`
+时保留 legacy drain-all 回滚行为。
 
 ```bash
 $ openbiliclaw config-show
@@ -308,10 +323,12 @@ $ openbiliclaw start --host 0.0.0.0 --port 9000
 
 适合本地直接运行或调试场景。若只希望本机访问，把 `[api].host` 改为 `127.0.0.1`，或启动时传 `--host 127.0.0.1`。
 
-启动前会先做两件事：
+`start` 与 `serve-api` 都会先取得项目根和 canonical `data_dir` 的 migration runtime lock；如果存在已校验的 pending 或未完成 journal，会在任何业务数据库访问前完成应用或恢复。锁会持续到后端退出，另一个指向同一数据目录的受支持后端无法并发启动。迁移应用后会重新读取配置并补锁实际运行目录；无法取得任一锁时拒绝启动。
+
+随后 `start` 会按固定顺序做两件事：
 
 1. 检查 `data/openbiliclaw.db` 是否完整；如果检测到损坏，会拒绝启动并提示先执行 `openbiliclaw db-repair`
-2. 在数据库健康且距离上次冷备超过 24 小时时，自动生成一份冷备到 `data/backups/`
+2. 在数据库健康且距离上次冷备超过 24 小时时，自动生成一份冷备到 `data/backups/`；该冷备严格早于 guided-init / runtime 持久 SQLite 连接创建，避免普通文件复制干扰 POSIX WAL 锁
 
 数据库健康后、API server 启动前，`start` 还会执行自启动相关的轻量 reconcile：
 
@@ -377,6 +394,7 @@ TLS enabled 时，证书检查、SSL context 和 socket bind 在 uvicorn 前同�
 原因并让 `serve-api` 非零退出，不会继续显示“HTTPS 已启动”。API wildcard host 会转换成
 可连接的 loopback（`0.0.0.0 → 127.0.0.1`、`:: → ::1`）供代理连接。
 推荐容器内使用该命令作为启动入口。
+`serve-api` 与 `start` 共用上述 migration runtime lock、pending apply / journal recovery 和迁移后实际数据目录补锁流程；容器启动不会绕过迁移事务。它不执行 `start` 专属的 24 小时数据库冷备。
 当 `scheduler.pause_on_extension_disconnect=true` 时，`serve-api` 与 `start` 一样会在 uvicorn 启动前打印 extension presence WARN，提醒容器后端若没有插件客户端连接，后台 LLM 工作会在宽限期后暂停。
 当配置进入降级模式时，`serve-api` 也会打印同一张 `降级模式 / Degraded mode` 面板；容器或脚本可继续通过 `/api/config` 写入修复配置，成功响应会原地启用新 registry，不需要重启服务。
 
@@ -522,9 +540,16 @@ $ openbiliclaw probe
 2. 复杂系统
 ```
 
-### OpenClaw JSON bridge: avoidance probes
+### Agent JSON bridge: avoidance and current capabilities
 
-不喜欢领域探针目前通过 OpenClaw bridge 暴露，而不是新增顶层 `openbiliclaw` 命令。它返回稳定 JSON，供 OpenClaw / Codex / Claude Code 等 agent 调用。
+不喜欢领域探针、兴趣探针、惊喜反馈和新一代多源推荐能力通过 Agent Bridge 暴露，而不是新增顶层 `openbiliclaw` 命令。它返回稳定 JSON，供 OpenClaw / Hermes / WorkBuddy / Codex / Claude Code 等 agent 调用。
+
+宿主第一次启动或升级后先协商：
+
+```bash
+$ uv run python -m openbiliclaw.integrations.openclaw.cli capabilities
+{"ok": true, "data": {"protocol_version": "agent-bridge/v2", "host_names": ["openclaw", "hermes", "workbuddy"], "skill_names": ["..."]}}
+```
 
 ```bash
 $ uv run python -m openbiliclaw.integrations.openclaw.cli next-avoidance-probe
@@ -540,7 +565,22 @@ $ uv run python -m openbiliclaw.integrations.openclaw.cli respond-avoidance-prob
 
 - `confirm`：用户确认“不喜欢 / 需要避开”，后端写入 `preference.disliked_topics`，同步 soul layer，并触发候选池清理。
 - `reject`：用户否认“不排斥这个方向”，只进入 cooldown 和反馈历史，不写画像。
+- `defer`：暂缓本次探针并返回 `deferred_until/defer_count`，不会直接写永久拒绝。
 - `chat`：进入带 `avoidance_probe` scope 的上下文对话；明确确认或否认的聊天会转成对应反馈。
+
+兴趣探针使用相同的四态协议：
+
+```bash
+$ uv run python -m openbiliclaw.integrations.openclaw.cli respond-interest-probe \
+  --domain "建筑美学" --response defer
+```
+
+`recommend` 还支持 `--source-platform`、重复传入的 `--exclude-item-id`，以及当前 UI
+对应的 `reshuffle` / `append`。输出字段优先使用 `item_key/content_id/source_platform`，
+同时保留 `bvid/up_name` 兼容别名。
+
+`sync-saved` 是唯一会从 Agent bridge 触发外部账号 native-save 的入口，必须带
+`--allow-state-changing`；`save-local`、`list-saved` 和 `remove-saved` 只操作本地 membership。
 
 `listen` 默认转发 `delight.candidate`、`interest.probe` 和 `avoidance.probe`：
 
@@ -708,8 +748,13 @@ Reddit 导入也复用 `bootstrap_events` 任务。后端入队 `reddit_tasks(ty
 Linux.do 导入复用 `bootstrap_events` 任务。后端入队 `linuxdo_tasks(type="bootstrap_events")`，插件在真实 `https://linux.do` 任务 tab 内先用只读 `GET /session/current.json` 正面确认当前账号，再读取书签、点赞和阅读记录。三类信号分别映射为 `favorite`、`like`、`view`，并加入本轮画像。所有上游请求都是同源 GET；`_t` Cookie 只用于“是否可能登录”的布尔判断，其值、其他 Cookie、CSRF 数据和原始响应都不会上传。未登录只影响个人 bootstrap，公开 search / hot / feed / creator / related discovery 仍可使用。
 
 上述六个扩展账号来源共享 enqueue 核心并供 runtime 使用。完整画像已存在、引导初始化不在运行且扩展 runtime-stream 在线时，runtime 默认每 24 小时按全局串行 round-robin 重新入队一个已启用来源；这不是无浏览器账号同步，离线时不会创建任务。周期与逐源覆盖项见 [配置模块](config.md)。
+V2EX 导入使用独立的 `v2ex_tasks(type="bootstrap_profile")`。`init --yes-v2ex` 会入队 `public_topics`、`public_replies`、`favorite_topics`、`favorite_nodes` 四个只读 scope；扩展在 V2EX 页面读取渲染后的公开行，后端按 Topic 聚合回复并转换为 `publish`、`discussion_reply`、`favorite`、`follow` 事件，同时更新账号隔离的 Node affinity。未登录时公开 scope 仍可尝试，收藏 scope 会返回 `login_required`；任务的 `partial` 结果会保留已经成功的 scope。PAT 实测身份、浏览器观察身份和用户接受身份不一致时返回 `identity_mismatch`，暂停本轮账号画像投影但不影响公开 discovery。浏览器心跳只发送登录布尔值，不上传 Cookie、HTML、私信或 CSRF。
+
+上述六个扩展账号来源在 CLI 行为保持不变；共享 enqueue 核心同时供 runtime 使用。完整画像已存在、引导初始化不在运行且扩展 runtime-stream 在线时，runtime 默认每 24 小时按全局串行 round-robin 重新入队一个已启用来源；这不是无浏览器账号同步，离线时不会创建任务。V2EX 只有完整收藏快照才推进缺失计数，连续两次完整快照确认后才通过持久 outbox 生成 `retraction`；重新出现会生成恢复事件。真实登录浏览器 E2E 状态见 [V2EX 模块](v2ex.md)。周期与逐源覆盖项见 [配置模块](config.md)。
 
 Bangumi 初始化不依赖插件或登录态。`init --yes-bangumi --bangumi-username <name>` 会通过官方匿名 API 读取该用户名的公开收藏，转换为统一事件后纳入 `analyze_events()` / `build_initial_profile()`，并写回 `[sources.bangumi].enabled=true` 与用户名。`init --yes-bangumi --bangumi-token <token>` 走个人令牌通道：令牌先经 `GET /v0/me` 实测校验（被拒绝时当场退出并指引到 https://next.bgm.tv/demo/access-token 重新生成），解析出的用户名覆盖显式填写值（不一致时提示），随后带 Bearer 读取该账号收藏（含私密行）；校验通过的令牌与用户名一并写回 `[sources.bangumi]`。令牌与显式用户名皆缺时，init 会回退浏览器扩展自动识别的账号（扩展在已登录的 bgm.tv 页面读取公开 `CHOBITS_UID` + 导航 `/user/<username>` 链接并上报后端持久化；优先级：令牌 `/v0/me` > 显式用户名 > 扩展上报用户名），命中时输出"使用浏览器扩展识别到的账号"。Bangumi 作为唯一来源时三者至少满足一个（报错文案："提供 --bangumi-token（推荐，自动识别当前用户）或 --bangumi-username（公开用户名），或先在浏览器登录 bgm.tv 让扩展自动识别"）；与其它画像来源混用但全部缺失时，初始化会明确警告并只启用后续 Bangumi discovery。匿名路径私有收藏不可见，`updated_at` 不作为收藏行为时间。
+
+微博刻意不属于初始化来源：`init` 没有 `--yes-weibo` / `--no-weibo`、Cookie、UID 或 bootstrap 参数，也不会把公开热搜 / 搜索结果冒充成用户行为信号。请先用现有初始化来源建立画像，再在配置页或 `config.toml` 启用 `[sources.weibo].enabled=true`；该开关只影响后续 discovery。
 
 X (Twitter) 与其它平台不同：init 阶段**没有 bootstrap 导入任务**。X 的发现走服务端 cookie 重放，行为采集走浏览器扩展 MAIN-world tap，两者都在 init 之后才生效，所以 `init --yes-x` **只翻转 `[sources.twitter].enabled = true`**，不会在 init 期间打开 x.com 前台 tab 或拉取数据。启用后，用户登录 x.com → 扩展自动把 `auth_token` + `ct0` 同步到 `data/x_cookie.json` → 后台 `XDiscoveryProducer` 在下一个 refresh tick 按预算补 X 候选。非交互式终端默认跳过 X。
 
@@ -973,6 +1018,19 @@ YouTube 数据拉取
 
 这条命令只做单源 smoke / 补拉，不会隐式重建画像。profile 已初始化后，daemon 接收新增 partial 事件时会写入 memory 并进入增量画像更新链路。命令默认复用 6 小时内已有的 YouTube `bootstrap_profile` 任务，避免反复打开前台 YouTube 页面滚动历史 / 订阅 / 点赞；需要重新拉取时可设 `OPENBILICLAW_YT_BOOTSTRAP_DEDUPE_HOURS=0`。
 
+### `openbiliclaw fetch-v2ex`
+
+只读触发 V2EX `bootstrap_profile`，依次验证本人发布、本人回复、收藏主题和收藏 Node 四个 scope。命令会等待真实安装扩展使用当前浏览器登录态读取页面，把结果转换为 canonical 事件后只打印计数；任务显式携带 `smoke_only=true`，因此除 canonical task result 与身份 / 登录心跳外，不会写入 memory、Node Affinity、收藏快照或 Soul，也不会调用 LLM。
+
+```bash
+$ openbiliclaw fetch-v2ex --force --wait-seconds 300
+V2EX 数据拉取
+  V2EX 发布 42 条 / 讨论 186 个 Topic / 收藏主题 128 条 / 收藏 Node 16 个
+  共转换 372 条 canonical 事件；未写入 memory，未触发画像或 LLM。
+```
+
+用户名默认从已登录 V2EX 页面顶部导航观察；需要固定公开账号路径时可传 `--username <name>`。任务默认复用 6 小时内的近期结果，真实回归应加 `--force`。任一 scope 达到条目 / 页数上限或解析失败时命令显示 `partial`，保留已读取数据但明确不把本次结果作为完整收藏快照；身份冲突、无可归属信号、超时和任务失败使用非零退出码。CLI 的 `/kick` 会读取 `[api].port`，因此扩展与后端使用非默认端口时也能立即唤醒 dispatcher。
+
 ### `openbiliclaw fetch-zhihu`
 
 单独触发知乎 `bootstrap_events` 拉取，用于验证浏览器扩展、知乎登录态和 `/api/sources/zhihu/*` 后端任务桥是否联通。默认采集最近浏览记录、收藏夹条目和当前知乎用户主页动态里的点赞 / 收藏动作；扩展会通过 `/api/v4/me` 自动识别当前用户，传入 `--profile-slug` 时可手动覆盖。
@@ -1022,6 +1080,7 @@ $ openbiliclaw import-youtube ~/Downloads/takeout.zip --dry-run
 ### `openbiliclaw discover`
 
 读取当前画像并触发一次内容发现。默认跑 Bilibili 的全部策略并将结果写入 `content_cache`，支持通过 `--source` 切换到 xiaohongshu 关键词生产流程、douyin discovery、知乎插件 discovery、Reddit discovery、Linux.do discovery 或 Bangumi 官方 API discovery，或通过 `--strategy` 限定只跑部分 Bilibili 策略。知乎正式流程会复用 runtime `ZhihuDiscoveryProducer`，按配置页 / `config.toml` 的 `[sources.zhihu].source_modes` 入队 search / hot / feed / creator / related 任务；Reddit 正式流程复用 `RedditDiscoveryProducer`，默认用 `[sources.reddit].backend="rdt"` 的 rdt-cli 登录态命令后端，按 `source_modes` 抓 search / hot / subreddit / related 候选，命令后端不可用时自动 fallback 到 OpenBiliClaw 插件任务；Linux.do 正式流程复用 `LinuxdoDiscoveryProducer`，按 `[sources.linuxdo].source_modes` 在真实站点 tab 内执行 search / hot / feed / creator / related 同源 GET；Bangumi 正式流程复用 `BangumiDiscoveryProducer`，按 `[sources.bangumi].source_modes`、subject types、分支预算、cursor 与 cooldown 直连官方匿名 API。这些非 B 站来源的候选都只写 `discovery_candidates`，评估由后台统一 evaluator 处理。
+读取当前画像并触发一次内容发现。默认跑 Bilibili 的全部策略并将结果写入 `content_cache`，支持通过 `--source` 切换到 xiaohongshu 关键词生产流程、douyin discovery、知乎插件 discovery、Reddit discovery、Bangumi 官方 API discovery 或 V2EX discovery，或通过 `--strategy` 限定只跑部分 Bilibili 策略。知乎正式流程会复用 runtime `ZhihuDiscoveryProducer`，按配置页 / `config.toml` 的 `[sources.zhihu].source_modes` 入队 search / hot / feed / creator / related 任务并进入统一待评估池；Reddit 正式流程复用 `RedditDiscoveryProducer`，默认用 `[sources.reddit].backend="rdt"` 的 rdt-cli 登录态命令后端，按 `source_modes` 抓 search / hot / subreddit / related 候选，命令后端不可用时自动 fallback 到 OpenBiliClaw 插件任务；Bangumi 正式流程复用 `BangumiDiscoveryProducer`，按 `[sources.bangumi].source_modes`、subject types、分支预算、cursor 与 cooldown 直连官方匿名 API；V2EX 正式流程复用 `V2EXDiscoveryProducer`，按 `[sources.v2ex].source_modes`、Node/Tab 配置、分支预算和 cooldown 读取官方公开 API / Feed。Reddit、知乎、Bangumi 和 V2EX 候选都只写 `discovery_candidates`，评估由后台统一 evaluator 处理。
 
 手动 `discover` 是一次性进程，其 candidate pipeline 固定 `eval_min_batch_size=1`、`eval_max_wait_seconds=0`，立即 drain 本次已入队候选；只有常驻 API daemon 才读取 `[scheduler]` 的默认 15 / 90 秒聚合策略。这样 CLI 不会在退出时遗失只存在内存里的凑批等待状态。
 
@@ -1099,6 +1158,15 @@ Bangumi 内容发现
   入池候选: 20
   来源: bangumi
   分支: search, ranked, latest
+
+# 触发 V2EX 正式 discovery（匿名公开读取，PAT 可选）
+$ openbiliclaw discover --source v2ex --limit 20
+V2EX 内容发现
+发现摘要
+  发现条数: 20
+  入池候选: 20
+  来源: v2ex
+  分支: search, node, tab, hot, latest
 ```
 
 显式 Bangumi 或 Linux.do discover 要求对应 `[sources.<slug>].enabled=true`，但即使 `[scheduler].enabled=false` 也会执行；scheduler 总开关只暂停后台自动任务。producer 返回 disabled 或画像尚未初始化时，CLI 会显示对应修复提示，而不是回落为通用“未产出内容”。
@@ -1106,9 +1174,14 @@ Bangumi 内容发现
 选项：
 
 - `--source, -s`：`bilibili`（默认）、`xiaohongshu`、`douyin`、`zhihu`、`reddit`、`linuxdo` 或 `bangumi`
+显式 Bangumi / V2EX discover 要求对应 `[sources.<source>].enabled=true`，但即使 `[scheduler].enabled=false` 也会执行；scheduler 总开关只暂停后台自动任务。producer 返回 disabled 或画像尚未初始化时，CLI 会显示对应修复提示，而不是回落为通用“未产出内容”。
+
+选项：
+
+- `--source, -s`：`bilibili`（默认）、`xiaohongshu`、`douyin`、`zhihu`、`reddit`、`bangumi` 或 `v2ex`
 - `--strategy, -S`：仅对 Bilibili 生效，可多次传或逗号分隔，取值 `search` / `trending` / `explore` / `related_chain`
 - `--limit, -n`：发现结果条数上限，默认 `30`
-- `--force`：xiaohongshu / Bangumi 可用；忽略本地最小调度间隔，但 Bangumi 仍遵循持久化 `429` cooldown
+- `--force`：xiaohongshu / Bangumi / V2EX 可用；忽略本地最小调度间隔，但仍遵循持久化远端 cooldown
 
 抖音 discovery 需要 `[sources.douyin].enabled = true`。`discover --source douyin` 现在直接调用与 daemon 相同的正式 `DouyinDiscoveryProducer`：统一关键词 claim、插件 search / hot / feed、`DiscoveryCandidatePipeline` 待评估入池和关键词终态都与后台一致；显式手动命令只绕过 `[scheduler].enabled` 这个后台总开关，来源开关、source mode、预算、候选池上限和 producer cadence 仍然生效。Cookie 解析顺序是：先读 `cookie_env` 指向的环境变量（默认 `OPENBILICLAW_DOUYIN_COOKIE`，适合调试覆盖），再读浏览器扩展同步的 `data/douyin_cookie.json`。初始化画像的 `init --yes-douyin` 不受这个配置影响，仍走浏览器扩展任务桥。知乎 discovery 需要 `[sources.zhihu].enabled = true`，并依赖已登录知乎的浏览器扩展；`discover --source zhihu` 会读取 `[sources.zhihu].source_modes`，不会使用 `--strategy`。Reddit discovery 需要 `[sources.reddit].enabled = true`；默认 `backend="rdt"`，优先使用 rdt-cli 登录态命令后端，不使用 CDP/临时浏览器；rdt / opencli 不可用时自动复用 OpenBiliClaw 插件所在浏览器的 Reddit 登录态，也可在配置页显式切到 `extension`。Linux.do discovery 需要 `[sources.linuxdo].enabled = true` 和在线扩展；公开分支不要求登录，个人 bootstrap 才要求 `/session/current.json` 返回正面账号身份。
 
@@ -1126,7 +1199,7 @@ $ openbiliclaw discover-douyin \
   --no-evaluate
 ```
 
-`discover-douyin` 的 `--source` 只接受 `search` / `hot` / `feed`；不传时默认三者都跑。`--keyword` 不传时从 Soul 画像兴趣生成搜索词；`hot` 会自动取 hot board 热词，不需要手动传关键词；`feed` 直接从抖音首页推荐流召回，不需要关键词。
+`discover-douyin` 的 `--source` 只接受 `search` / `hot` / `feed`；不传时默认三者都跑。`--keyword` 不传时从 Soul 画像兴趣生成搜索词；`hot` 会自动取 hot board 热词，不需要手动传关键词；`feed` 直接从抖音首页推荐流召回，不需要关键词。插件链路的一次命令共享一个 wall-clock wait budget：首个 search / hot / feed 等待到期后，剩余分支不再串行各等 180 秒。超时任务会原子落成 `failed + wait_timeout`（上层取消为 `wait_cancelled`），CLI 返回非零并提示检查扩展在线状态或调大 `OPENBILICLAW_DY_DISCOVERY_SEARCH_WAIT_SECONDS`；该任务不会继续留在 `pending`。
 
 xiaohongshu 渠道并不直接抓取内容，而是调用 `XhsTaskProducer.produce_if_due()` 将 Soul 画像改写成关键词写入 `xhs_tasks` 表，由浏览器扩展的后台调度器在隐藏 Tab 中抓取。新配置默认每日搜索预算 20、producer 间隔 20 分钟；pending + in-progress 搜索任务达到 5 条时返回 `backlog`，不会继续生成关键词。若返回 `throttled` 可加 `--force` 跳过本次 producer 时间闸，但 `--force` 不会绕过积压门、每日预算、领取端 ±25% 抖动或平台风控冷却；若返回 `no_profile` 需先执行 `openbiliclaw init`。
 
@@ -1250,6 +1323,20 @@ openbiliclaw discover-bangumi-latest --limit 10
 搜索使用配置中的 `subject_types`；ranked/latest 会按配置类型分配结果窗口。`discover-bangumi-latest` 对应官方 `sort=date`，响应可能含未来或未播条目，因此 CLI 不把它表述为实时更新。单次 `--limit` 限制在 `1..50`。
 
 要让结果进入正式推荐链，使用 `openbiliclaw discover --source bangumi`；它会写 `discovery_candidates(pending_eval)`，由共享 evaluator/admission 决定是否进入可推荐池。每日分支预算按跨分支去重和最终 limit 后实际保留的候选计数，重复/截断条目不扣额度。
+
+### `openbiliclaw discover-v2ex*`
+
+五个独立命令是 V2EX 的只读公开 discovery smoke，不需要配置 PAT，也不写画像或 V2EX 站内状态：
+
+```bash
+openbiliclaw discover-v2ex "agent" --limit 10
+openbiliclaw discover-v2ex-node programmer --limit 10
+openbiliclaw discover-v2ex-tab tech --limit 10
+openbiliclaw discover-v2ex-hot --limit 10
+openbiliclaw discover-v2ex-latest --limit 10
+```
+
+正式来源补货使用 `openbiliclaw discover --source v2ex`。该命令要求 `[sources.v2ex].enabled=true`，使用 `search / node / tab / hot / latest` 配置和共享候选 pipeline；PAT 配置后会优先使用 API 2.0，401/403 自动回落匿名。`search` 优先复用已配置的 Exa / You provider 做 `site:v2ex.com/t` 召回，再用官方 Topic 详情补全；provider 不可用时才回退 latest/hot 有界本地匹配。所有 V2EX 结果都是 Topic 文字卡，Reply 不单独进入候选池；浏览器登录态仅用于四个只读 bootstrap / incremental scope，不参与公开 discovery 鉴权。
 
 ### `openbiliclaw search-douyin`
 

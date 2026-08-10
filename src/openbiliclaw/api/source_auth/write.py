@@ -301,6 +301,37 @@ CREDENTIAL_SPECS: dict[str, CredentialSpec] = {
             "插件只上报登录状态，不上传 Cookie。"
         ),
     ),
+    "v2ex": CredentialSpec(
+        slug="v2ex",
+        # PATs remain config-owned.  The only value accepted here is the
+        # privacy-preserving browser heartbeat: one boolean, never a cookie.
+        kinds=("login_state",),
+        opaque_credential=True,
+        unverified_reason=(
+            "V2EX 登录态只保存浏览器上报的布尔值，后端不读取 Cookie；"
+            "PAT 在 [sources.v2ex] 或环境变量中配置。"
+        ),
+        form_kind="none",
+        form_label="V2EX PAT（可选）",
+        env_var_path="sources.v2ex.token_env",
+        env_var_default="OPENBILICLAW_V2EX_TOKEN",
+        login_url="https://www.v2ex.com/help/api",
+        help_text=(
+            "V2EX 公开发现无需登录。可选 PAT 用于识别账号和增强 API 2.0，"
+            "请在设置 / config.toml 的 [sources.v2ex] 中填写，或使用 token_env 指定环境变量。"
+        ),
+    ),
+    "weibo": CredentialSpec(
+        slug="weibo",
+        kinds=(),
+        unverified_reason="微博发现使用进程内匿名访客会话，不需要也不接受用户凭据。",
+        form_kind="none",
+        form_label="微博匿名访客",
+        help_text=(
+            "无需粘贴微博 Cookie。OpenBiliClaw 只申请短期匿名访客会话并进行只读发现，"
+            "不会把访客会话当作账号登录态或写入配置。"
+        ),
+    ),
 }
 
 
@@ -708,6 +739,7 @@ def persist_credential(
             "xiaohongshu": "xhs",
             "zhihu": "zhihu",
             "linuxdo": "linuxdo",
+            "v2ex": "v2ex",
         }.get(slug, slug)
         setter = f"set_{prefix}_login_state"
         getter = f"get_{prefix}_login_state"

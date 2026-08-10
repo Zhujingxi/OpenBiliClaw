@@ -2161,11 +2161,7 @@ class Inventory:
             except SyntaxError:
                 continue
             lines = source.splitlines()
-            # Source-specific regressions often live as methods on a test
-            # class.  Walking only ``tree.body`` made the inventory report a
-            # false MISSING even when an executable class-based test covered
-            # the exact capability token.
-            for node in ast.walk(tree):
+            for node in tree.body:
                 if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     continue
                 if not node.name.startswith("test_"):
@@ -2731,26 +2727,60 @@ class Inventory:
                     "per-capability backend/status/setup/init readiness",
                     [
                         (
-                            "SourceAuthContract capability map",
-                            self._word(
-                                "src/openbiliclaw/api/source_auth/contract.py",
-                                "capabilities",
+                            "shared SourceCapabilityAuth model",
+                            self._first_regex(
+                                ("src/openbiliclaw/api/source_auth/contract.py",),
+                                r"class\s+SourceCapabilityAuth\s*\(",
                             ),
                         ),
                         (
-                            "shared capability admission helper",
-                            self._word(
-                                "src/openbiliclaw/runtime/init_prereqs.py",
-                                "source_capability_ready",
+                            "SourceAuthContract capabilities field",
+                            self._first_regex(
+                                ("src/openbiliclaw/api/source_auth/contract.py",),
+                                r"capabilities\s*:\s*dict\[str,\s*SourceCapabilityAuth\]",
                             ),
                         ),
                         (
-                            "source provider capability matrix",
-                            self._source_specific_test("capabilities"),
+                            "source-specific capability mode registry",
+                            self._first_regex(
+                                ("src/openbiliclaw/api/source_auth/providers.py",),
+                                rf"{re.escape(slug.upper())}_CAPABILITY_AUTH_MODES",
+                            ),
                         ),
                         (
-                            "init rejects an unready profile capability",
-                            self._source_specific_test("no_profile_signal_sources"),
+                            "status provider capability projection",
+                            self._first_regex(
+                                ("src/openbiliclaw/api/source_auth/providers.py",),
+                                r"capabilities=capabilities",
+                            ),
+                        ),
+                        (
+                            "guided-init source_capabilities projection",
+                            self._first_regex(
+                                ("src/openbiliclaw/api/models.py",),
+                                r"source_capabilities\s*:\s*dict",
+                            ),
+                        ),
+                        (
+                            "backend bootstrap capability gate",
+                            self._first_regex(
+                                ("src/openbiliclaw/api/app.py",),
+                                rf"{re.escape(slug)}_capability_readiness",
+                            ),
+                        ),
+                        (
+                            "shared frontend capability renderer",
+                            self._first_regex(
+                                ("src/openbiliclaw/web/shared/source-status.js",),
+                                r"describeCapabilityReadiness",
+                            ),
+                        ),
+                        (
+                            "setup capability admission gate",
+                            self._first_regex(
+                                ("src/openbiliclaw/web/setup/index.html",),
+                                r"source_capabilities",
+                            ),
                         ),
                     ],
                 )
@@ -3600,22 +3630,7 @@ class Inventory:
             )
         groups: list[tuple[str, tuple[str, ...]]]
         if surface == "setup":
-            setup_roster = self._word(
-                "src/openbiliclaw/web/setup/index.html",
-                "SourceStatus.SOURCE_KEYS",
-            )
-            shared_source = self._word(
-                "src/openbiliclaw/web/shared/source-status.js",
-                slug,
-            )
-            return self._pass_or_missing(
-                f"surface.{surface}",
-                label,
-                [
-                    ("setup uses the shared source roster", setup_roster),
-                    ("shared roster contains the source", shared_source),
-                ],
-            )
+            groups = [("setup page", ("src/openbiliclaw/web/setup/index.html",))]
         elif surface == "desktop":
             groups = [
                 ("desktop HTML", ("src/openbiliclaw/web/desktop/index.html",)),

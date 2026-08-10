@@ -25,6 +25,7 @@ from openbiliclaw.sources.source_bootstrap import (
     enqueue_dy_bootstrap,
     enqueue_linuxdo_bootstrap,
     enqueue_reddit_bootstrap,
+    enqueue_v2ex_bootstrap,
     enqueue_xhs_bootstrap,
     enqueue_yt_bootstrap,
     enqueue_zhihu_bootstrap,
@@ -36,7 +37,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-SOURCE_ORDER = ("xhs", "dy", "yt", "zhihu", "reddit", "linuxdo")
+SOURCE_ORDER = ("xhs", "dy", "yt", "zhihu", "reddit", "linuxdo", "v2ex")
 _ACTIVE_STATUSES = frozenset({"pending", "in_progress"})
 _TASK_SPECS: dict[str, tuple[str, str, Callable[..., BootstrapEnqueueResult]]] = {
     "xhs": ("xhs_tasks", "bootstrap_profile", enqueue_xhs_bootstrap),
@@ -45,6 +46,7 @@ _TASK_SPECS: dict[str, tuple[str, str, Callable[..., BootstrapEnqueueResult]]] =
     "zhihu": ("zhihu_tasks", "bootstrap_events", enqueue_zhihu_bootstrap),
     "reddit": ("reddit_tasks", "bootstrap_events", enqueue_reddit_bootstrap),
     "linuxdo": ("linuxdo_tasks", "bootstrap_events", enqueue_linuxdo_bootstrap),
+    "v2ex": ("v2ex_tasks", "bootstrap_profile", enqueue_v2ex_bootstrap),
 }
 _SOURCE_CONFIG_ALIASES: dict[str, tuple[str, ...]] = {
     "xhs": ("xhs", "xiaohongshu"),
@@ -53,6 +55,7 @@ _SOURCE_CONFIG_ALIASES: dict[str, tuple[str, ...]] = {
     "zhihu": ("zhihu",),
     "reddit": ("reddit",),
     "linuxdo": ("linuxdo",),
+    "v2ex": ("v2ex",),
 }
 _SOURCE_INTERVAL_FIELDS = {
     "xhs": "xhs_incremental_hours",
@@ -61,6 +64,7 @@ _SOURCE_INTERVAL_FIELDS = {
     "zhihu": "zhihu_incremental_hours",
     "reddit": "reddit_incremental_hours",
     "linuxdo": "linuxdo_incremental_hours",
+    "v2ex": "v2ex_incremental_hours",
 }
 
 
@@ -147,6 +151,7 @@ class SourceIncrementalSync:
     scheduler_config: SchedulerConfig
     profile_ready: Callable[[], bool | Awaitable[bool]]
     init_active: Callable[[], bool | Awaitable[bool]]
+    runtime_config: Any | None = None
     kick: Callable[[str], Awaitable[None]] | None = None
     clock: Callable[[], datetime] = field(default_factory=lambda: lambda: datetime.now(UTC))
     _tick_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
@@ -237,19 +242,58 @@ class SourceIncrementalSync:
             return SourceIncrementalSyncResult(reason="state_error")
 
         skipped_budget_sources: set[str] = set()
+        skipped_capability_sources: set[str] = set()
         first_budget_result: SourceIncrementalSyncResult | None = None
+        first_capability_result: SourceIncrementalSyncResult | None = None
         while True:
             source = self._select_due_source(
                 state,
                 now,
-                excluded=skipped_budget_sources,
+                excluded=skipped_budget_sources | skipped_capability_sources,
             )
             if source is None:
-                return first_budget_result or SourceIncrementalSyncResult(reason="not_due")
+                return (
+                    first_budget_result
+                    or first_capability_result
+                    or SourceIncrementalSyncResult(reason="not_due")
+                )
 
             _table, _task_type, enqueue = _TASK_SPECS[source]
+            enqueue_kwargs: dict[str, Any] = {}
+            if source == "v2ex" and self.runtime_config is not None:
+                from openbiliclaw.api.source_auth.probe_cache import LIVE_PROBES
+                from openbiliclaw.sources.v2ex_identity import resolve_v2ex_identity_state
+
+                identity = resolve_v2ex_identity_state(
+                    cfg=self.runtime_config,
+                    database=self.database,
+                    probes=LIVE_PROBES,
+                )
+                if not identity.private_bootstrap_available:
+                    first_capability_result = (
+                        first_capability_result
+                        or SourceIncrementalSyncResult(
+                            reason="capability_not_ready",
+                            source=source,
+                        )
+                    )
+                    skipped_capability_sources.add(source)
+                    continue
+                enqueue_kwargs = {
+                    "username": identity.username,
+                    "config": getattr(
+                        getattr(self.runtime_config, "sources", None),
+                        "v2ex",
+                        None,
+                    ),
+                }
             try:
-                outcome = enqueue(self.database, force=True, incremental=True)
+                outcome = enqueue(
+                    self.database,
+                    force=True,
+                    incremental=True,
+                    **enqueue_kwargs,
+                )
             except Exception:
                 logger.exception("source incremental enqueue failed source=%s", source)
                 return SourceIncrementalSyncResult(reason="enqueue_error", source=source)

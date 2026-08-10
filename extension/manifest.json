@@ -21,6 +21,7 @@
         "*://*.reddit.com/*",
         "*://*.redd.it/*",
         "https://linux.do/*",
+        "*://*.v2ex.com/*",
         "*://*.x.com/*",
         "*://*.twitter.com/*",
         "*://*.bgm.tv/*",
@@ -87,6 +88,16 @@
         },
         {
             "matches": [
+                "*://*.douyin.com/*"
+            ],
+            "js": [
+                "dist/main/dy-fetch-tap.js"
+            ],
+            "run_at": "document_start",
+            "world": "MAIN"
+        },
+        {
+            "matches": [
                 "*://*.youtube.com/*"
             ],
             "js": [
@@ -119,6 +130,15 @@
             ],
             "js": [
                 "dist/content/linuxdo.js"
+            ],
+            "run_at": "document_idle"
+        },
+        {
+            "matches": [
+                "*://*.v2ex.com/*"
+            ],
+            "js": [
+                "dist/content/v2ex.js"
             ],
             "run_at": "document_idle"
         },

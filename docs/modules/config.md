@@ -21,6 +21,25 @@ CLI / 源码运行仍按普通错误处理：配置文件损坏时直接暴露�
 
 配置读取接口把所有 API Key、Cookie、令牌及代理 URL userinfo 视为**只写秘密**：`GET /api/config` 始终返回掩码；旧客户端携带的 `?reveal_keys=true` 仅作兼容参数接受，不能再导出原值。桌面 Web 与扩展只请求普通 `/api/config`，扩展写入 `chrome.storage` 的也只是掩码快照。设置输入留空或回传掩码仍表示“保持原值”，新值只通过 `PUT /api/config` 写入。
 
+## 配置页跨机器迁移
+
+桌面 Web 的「设置 → 通用 → 数据迁移」可以在旧机器导出 `.obcbackup`，再到新机器选择该文件导入。这里的“全部信息”指**全部可移植用户状态**：磁盘上的 `config.toml` 与 `config.local.toml` 会先合并（不读取环境变量覆盖），移除 `[api.auth]` 后扁平化为包内单份 `config/config.toml`，其中仍包括文件中保存的模型 Key 与来源凭据；其余还包括当前进程已锁定的 active data dir 中的主 SQLite 和其它数据库、画像 / 记忆、平台 Cookie 文件、图片缓存，以及白名单内的桌面主题与滚动偏好。若刚在线保存了尚待重启的新 `data_dir`，配置快照仍来自磁盘两层，但数据成员不会提前改从新目录读取。它不是系统镜像，也不会复制日志、已有备份、embedding 派生缓存、评测 / 临时缓存、证书、自启动文件、OpenBiliClaw Web / 扩展访问会话、外部 CLI 凭据或环境变量值；平台 Cookie 则是明确包含的敏感登录态。源机器的 API 登录开关、密码 / password hash、session secret、受信代理、Bearer Origin 和扩展设备 key 都属于整段 `[api.auth]`，不会写入包。
+
+`.obcbackup` 是**未加密的敏感 ZIP**。只有在可信设备之间传递，并像保护 API Key / Cookie 一样保护和及时删除它。manifest 的 `source_omitted_environment_variables` 会列出源机器导出时有值、会影响运行结果的环境变量名称（`OPENBILICLAW_*`、Gemini 标准 Key、系统代理 / CA），但不会写入这些变量的值；如果源机器的有效配置依赖它们，目标机需自行重新提供。导入响应 / staged 状态中的 `target_active_environment_variables` 则是导入当时目标进程有值、重启后仍可能覆盖文件配置的环境变量快照；重启前如果环境改变，应以实际启动环境为准。两者都不是“已迁移的值”。
+
+导入不会在当前 API 进程里热替换配置或前端偏好。后端会先完整校验并暂存，设置页显示“需要重启”；下一次受支持的后端启动取得独占迁移锁并成功应用后，才写入规范化后的新 `config.toml`、替换后端数据并让设置页应用白名单桌面偏好。每个浏览器按 applied status 的 `migration_id` 在本地记录一次性交接回执，同一迁移的偏好只应用一次，所以用户之后修改主题、色相或滚动设置不会被持久存在的旧 status 再覆盖；每次打开「通用」仍会强制向后端对账，而不是只依赖页面启动时的缓存。来源机的 local overlay 已扁平化，不会以 `config.local.toml` 身份恢复；目标机原 `config.local.toml` 会按存在情况改名为 `config.local.toml.pre-import-<id>.bak`，其机器专属 / auth 取值已先合并进新 `config.toml` 的保留基线。
+
+以下机器专属字段始终采用**目标机器**的当前值，不从迁移包覆盖：
+
+- `general.data_dir` 与 `[storage]`（包括 `db_path`）；
+- `[api].host` / `[api].port`；
+- `[logging].directory` / `[logging].filename`；
+- `[network]`、`[tls_proxy]`、`[autostart]`；
+- `sources.browser_cdp_url`；
+- `bilibili.proxy` 与 `bilibili.browser_executable`（目标机网络策略和本机浏览器路径）。
+
+`[api.auth]` 也整段以**目标机器应用时的最新磁盘值**为基线：迁移包不提供或覆盖其中任何来源字段，重启应用会重新读取目标机两层配置，不使用暂存时的陈旧 auth 快照。应用时只执行安全收口——生成新的文件 `api.auth.session_secret`，把 `api.auth.extension_access_enabled` 设为 `false` 并清空 `extension_access_keys`；prepared DB 还把 `auth_epoch` 严格提升为 `max(来源 prepared DB epoch, 目标 active DB epoch) + 1`、删除来源 password fingerprint，启动后再按目标凭据 reconcile。因此目标机既有的门禁开关、密码凭据、会话 TTL、loopback / proxy / Origin 策略继续保留，但来源 / 目标旧 Web 会话都会失效（即使 session secret 由目标环境固定），扩展远程设备也需重新生成 key 并配对。目标数据目录里的 `certs/` 与 `autostart/` 文件会保留。详细包格式、校验和回滚流程见[存储层](storage.md#可移植数据迁移)，HTTP 契约见[后端 API](api.md#本机数据迁移)。
+
 ## 配置段落
 
 插件、桌面 Web 和移动 Web 的「保存时自动同步到对应平台」都从 API 读取，默认关闭。插件与移动 Web 的配置 GET/PUT 使用 AbortController 有界 timeout；插件的同一 deadline 从后端地址解析开始，覆盖初次设备会话交换、401 强制换票、受保护请求与响应解析，认证 fetch 接收同一 AbortSignal。移动 Web 使用模态设置对话框：Escape 可关闭、Tab 焦点留在对话框内，关闭后回到原设置按钮；配置 GET 超时或失败时保存与开关保持禁用，用户必须通过「重试加载」成功取得当前值后才能写回，避免用默认 false 覆盖未知远端状态。
@@ -30,7 +49,7 @@ CLI / 源码运行仍按普通错误处理：配置文件损坏时直接暴露�
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
 | `language` | string | `"zh"` | Agent 输出语言（`zh` / `en`） |
-| `data_dir` | string | `"data"` | 数据目录（记忆、Cookie、数据库） |
+| `data_dir` | string | `"data"` | 数据目录（记忆、Cookie、数据库）；通过配置 API 改动时只持久化，完整重启后才切换 |
 
 ### `[api]`
 
@@ -528,7 +547,7 @@ daemon，保留当前 v2 文件和自动备份，再由操作者显式把导出�
 
 ### `[network]` (v0.3.164+，v0.3.165 路由模式补强，v0.3.166 国内网关豁免)
 
-海外网络路由。仅作用于**海外客户端**：OpenAI / Claude / Gemini / OpenRouter / openai_compatible 的 chat + embedding SDK、YouTube（yt-dlp、scrapetube、InnerTube / 页面 fallback）、X 的服务端 `twitter-cli`、Reddit 的 `rdt-cli` / OpenCLI 命令后端、Bangumi（`api.bgm.tv` 与封面 CDN `lain.bgm.tv` 均为海外 Cloudflare，实测 2026-07-18 国内网络直连超时、走代理正常）、GitHub 自动更新、Codex OAuth 令牌刷新。X / Reddit 回落到浏览器扩展任务时，请求由浏览器发出并沿用浏览器自己的网络设置。**注意**：`openai_compatible` / `openai` 若指向的是国内网关或本机地址，则按下方「国内网关豁免」强制直连，不受本节代理影响。
+海外网络路由。仅作用于**海外客户端**：OpenAI / Claude / Gemini / OpenRouter / openai_compatible 的 chat + embedding SDK、YouTube（yt-dlp、scrapetube、InnerTube / 页面 fallback）、X 的服务端 `twitter-cli`、Reddit 的 `rdt-cli` / OpenCLI 命令后端、Bangumi（`api.bgm.tv` 与封面 CDN `lain.bgm.tv` 均为海外 Cloudflare，实测 2026-07-18 国内网络直连超时、走代理正常）、GitHub 自动更新、Codex OAuth 令牌刷新。X / Reddit 回落到浏览器扩展任务时，请求由浏览器发出并沿用浏览器自己的网络设置；微博的项目自有 `httpx` client 固定 `trust_env=false` 国内直连，也不读取本段。**注意**：`openai_compatible` / `openai` 若指向的是国内网关或本机地址，则按下方「国内网关豁免」强制直连，不受本节代理影响。
 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
@@ -537,7 +556,7 @@ daemon，保留当前 v2 文件和自动备份，再由操作者显式把导出�
 
 > 与 `[bilibili].proxy` 的区别：`[network].proxy` 是「海外出口」，`[bilibili].proxy` 是「B站专用」，两者语义相反、互不影响。
 >
-> **国内直连隔离**：B站 / 抖音 / Ollama / 国内 CDN 图片缓存等所有 `trust_env=False` 客户端**永远不使用**此代理（继承代理曾触发 B站 风控，`df626f3f`）。该隔离由 `tests/test_network_proxy_isolation.py` 守卫测试钉死。
+> **国内直连隔离**：B站 / 抖音 / 微博 / Ollama / 国内 CDN 图片缓存等所有 `trust_env=False` 客户端**永远不使用**此代理（继承代理曾触发 B站 风控，`df626f3f`）。该隔离由 `tests/test_network_proxy_isolation.py` 与微博 client 测试守卫。
 >
 > **国内大模型网关豁免（v0.3.166）**：即使 `mode` 为 `system` / `custom`，指向国内网关的 LLM 请求也会被识别并**强制直连**——DeepSeek（`api.deepseek.com`）、商汤 SenseNova（`.cn`）、通义千问（`aliyuncs.com`）、智谱、文心千帆、混元、火山方舟、Kimi、MiniMax、阶跃、百川、硅基流动、无问芯穹、PPIO 等，以及 `localhost` / 内网自建端点（cpa、vLLM 等）。识别覆盖 `.cn` 顶级域、已知厂商的非 `.cn` 域名白名单、loopback / 私有 / link-local IP，由 `openbiliclaw.network.is_domestic_endpoint` 裁决。避免「为连墙外模型开了代理 → 国内模型请求被绕道境外 → 总是超时」。豁免按 endpoint 生效，genuine 墙外网关仍走上面的代理策略。
 >
@@ -575,7 +594,7 @@ daemon，保留当前 v2 文件和自动备份，再由操作者显式把导出�
 >
 > `127.0.0.1` 与 `localhost` 并非总是等价：macOS 上 Chrome 常只绑定 IPv6 `::1:9222`，而 Python urllib 默认走 IPv4。用 `localhost` 最稳妥（`getaddrinfo` 会同时尝试两边）。
 
-> **关于 `daily_*_budget`：** 这些字段是**每 UTC 日、按任务类型的入队次数上限**，不是启用 / 关闭该来源的开关（来源开关是各段的 `enabled`）。显式填 `0` 表示不设每日上限，补池只受平台缺口 / `discovery_limit` / producer 节流控制；字段缺省时使用各来源表格所列默认值，其中小红书搜索为 `20`。填 `1` 只会把该任务类型限制到每天 1 次——配置加载时对落在 1–4 的可疑值会打印一次 WARN 提示。
+> **关于 `daily_*_budget`：** 多数来源的这些字段是**每 UTC 日、按任务类型的入队次数上限**；微博例外，三个 budget 只计最终经全局去重和 candidate pipeline 实际保留的候选条数。它们都不是启用 / 关闭来源的开关（来源开关是各段的 `enabled`）。显式填 `0` 表示不设每日上限，补池只受平台缺口 / `discovery_limit` / producer 节流控制；字段缺省时使用各来源表格所列默认值，其中小红书搜索为 `20`。对按任务计数的来源，填 `1` 只会把该任务类型限制到每天 1 次——配置加载时对落在 1–4 的可疑值会打印一次 WARN 提示。
 
 ### `[sources.bilibili]`
 
@@ -587,6 +606,7 @@ Bilibili discovery 的平台级开关。B 站账号登录 / Cookie 获取仍由 
 > **非 B 站的 8 个来源，这是稳态补货的唯一路径**，所以配置真实生效。
 >
 > **节流地板的判定口径（v0.3.186 起统一）**：抖音 / YouTube / X / 知乎 / Reddit 原先把「上次何时跑过」记在进程内属性里，后端一重启就清零、地板当轮失效——在真实数据上量到过：Reddit 25 天 55 轮里有 5 轮间隔是 8 / 10 / 11 / 35 / 40 分钟，而当时配置的是 60 分钟。同一处还有个反向毛病：跑完但零产出的轮次也会写时间戳，把本该立刻重试的情况锁死一个完整周期。现在八个非 B 站 producer 都使用持久 cadence：抖音 / YouTube / X / 知乎 / Reddit / Linux.do 共用 `source_producer_runs`，**只记录真正产出候选的轮次**；XHS 与 Bangumi 继续使用各自的持久 runtime state / run ledger。这样重启不失效，空跑不烧周期。未接数据库构造的共享-cadence producer（单测 / CLI 一次性调用）自动回落到原来的进程内时间戳。
+> **节流地板的判定口径（v0.3.186 起统一）**：抖音 / YouTube / X / 知乎 / Reddit 原先把「上次何时跑过」记在进程内属性里，后端一重启就清零、地板当轮失效——在真实数据上量到过：Reddit 25 天 55 轮里有 5 轮间隔是 8 / 10 / 11 / 35 / 40 分钟，而当时配置的是 60 分钟。同一处还有个反向毛病：跑完但零产出的轮次也会写时间戳，把本该立刻重试的情况锁死一个完整周期。现在九个来源统一以共享账本 `source_producer_runs` 为准，**只记录真正产出候选的轮次**——重启不失效，空跑不烧周期。未接数据库构造的 producer（单测 / CLI 一次性调用）自动回落到原来的进程内时间戳。
 >
 > B 站不同：它有两条路径，而闸门只管其中较少走的那条。
 >
@@ -600,8 +620,9 @@ Bilibili discovery 的平台级开关。B 站账号登录 / Cookie 获取仍由 
 > 换句话说，日常看到的 B 站补货绝大多数不受本字段影响；要调 B 站主发现的节奏请改 `[scheduler]`。
 >
 > **`trending_refresh_minutes` / `explore_refresh_minutes` 也只在池子不缺货时才生效（2026-07-27 实测）**：`_build_refresh_plan` 先看池子是否低于目标——低于时直接返回 `_build_source_replenishment_plan()` 的结果，而那条路径把 B 站四个策略 `search / related_chain / trending / explore` **整组下发、完全不查这两个间隔**；只有池子**不低于**目标时才会走到下面那段按间隔挑选策略的分支。真机采样：B 站有缺口时 `last_trending_refresh_at` / `last_explore_refresh_at` 每 ~1.1 分钟（即每个 refresh tick）同步推进一次，而不是配置的 3 分钟。也就是说这两个字段管的是「池子够用时的巡航节奏」，不是「缺货时的补货节奏」——后者由缺口大小、`discovery_limit` 和 B 站客户端自身的风控冷却决定。
-> 另有两处显式绕过：`openbiliclaw discover-xhs --force` 把间隔置 0，`BangumiDiscoveryProducer.produce_if_due(force=True)`
-> 同理；这两条都只在手动 CLI 触发时出现，常驻流程不会走。
+> 另有显式绕过：`openbiliclaw discover-xhs --force` 把间隔置 0，Bangumi / 微博的统一
+> `openbiliclaw discover --source <source> --force` 会把 `force=True` 交给 producer；它们都只跳过
+> cadence，不会绕过平台 cooldown、日预算或 pool gate，常驻流程不会强制执行。
 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
@@ -745,6 +766,41 @@ Linux.do 通过浏览器扩展在真实 `linux.do` task tab 内执行同源只�
 #### 配置页来源状态契约
 
 插件 side panel 与桌面 Web `/web` 的平台源配置页统一读取 `GET /api/sources/status`。这个端点是**纯本地读取**：不会访问 Bilibili、小红书、抖音、YouTube、X、知乎、Reddit、Bangumi 或 Linux.do，也不会运行 `rdt` / `opencli` 命令。页面可见时每 30 秒刷新一次，但请求只到 OpenBiliClaw 本地后端；真实平台请求仅由用户显式初始化、发现、诊断任务或已启用的后台 producer 发起。
+### `[sources.v2ex]`
+
+V2EX 是匿名公开 discovery 源，支持官方匿名 JSON API / Feed，以及可选的 API 2.0 PAT。`search`、`node`、`tab`、`hot`、`latest` 都只把 Topic 写入统一待评估池；Reply 不作为独立候选。PAT 只用于增强 Node / Topic 读取和 `/api/v2/member` live probe，401/403 时自动降级为匿名。扩展任务已接入四个只读 bootstrap scope，`init --yes-v2ex` 或 guided init 来源选择可以等待其结果；浏览器登录态与 PAT 分开显示。
+
+| 键 | 类型 | 默认值 | 说明 |
+|----|------|--------|------|
+| `enabled` | bool | `false` | 是否让 V2EX 参与候选池配比和后台 discovery；默认关闭 |
+| `username` | string | `""` | 可选公开用户名；用于公开 discovery / bootstrap 的身份候选，不等于登录凭据 |
+| `access_token` | string | `""` | 可选 V2EX API 2.0 PAT；设置页只显示是否已配置，保存前用 `/api/v2/member` 做只读校验 |
+| `token_env` | string | `"OPENBILICLAW_V2EX_TOKEN"` | PAT 环境变量名，优先级高于 `access_token` |
+| `source_modes` | list[str] | `[...]` | `search / node / tab / hot / latest` |
+| `tab_modes` | list[str] | `["tech", "creative", "qna"]` | Tab Feed 分支 |
+| `node_allowlist` | list[str] | `[]` | 手工指定 Node slug；为空时使用画像兴趣回退 |
+| `node_blocklist` | list[str] | `["sandbox"]` | 不抓取的 Node |
+| `node_downweight` | list[str] | `["promotions", "jobs", "deals"]` | 提高候选准入阈值到至少 `0.72`，且单批最多保留 2 条；不会像 blocklist 一样完全删除 |
+| `daily_*_budget` | int | `120/180/80/40/40` | 五个分支的 UTC 日预算；只按全局去重和共享预筛后真正保留的候选扣费，HTTP 请求与已知重复不扣；`0` 表示不设日上限 |
+| `request_interval_seconds` | int | `2` | 同一 client 两次请求之间的间隔 |
+| `min_interval_minutes` | int | `5` | producer 两次执行之间的最小间隔；`--force` 仅绕过本地间隔，不绕过远端 cooldown |
+| `detail_fetch_limit` | int | `15` | 每轮最多为多少条字段不完整的 Topic 补官方详情；`0` 关闭详情增强 |
+| `reply_enrichment_limit` | int | `10` | PAT 可用时每轮最多为多少条 Topic 读取 Reply 第一页并生成确定性摘要；`0` 关闭 |
+| `max_topic_chars` | int | `6000` | Topic 主楼进入候选前的最大文本长度 |
+| `max_reply_digest_chars` | int | `1200` | Topic 讨论摘要的最大长度；Reply 不独立入池 |
+| `max_profile_nodes` | int | `12` | allowlist / 画像 Node 进入单轮 Node 召回的最大数量 |
+| `bootstrap_topics_limit` | int | `100` | guided init / bootstrap 每次最多导入的本人主题数 |
+| `bootstrap_replies_limit` | int | `300` | guided init / bootstrap 每次最多导入的本人回复数 |
+| `bootstrap_favorites_limit` | int | `300` | guided init / bootstrap 每次最多导入的收藏主题数 |
+| `bootstrap_max_pages_per_scope` | int | `20` | 扩展任务每个 scope 的最大页面数 |
+
+保存时 `source_modes` / `tab_modes` 必须非空且来自允许集合；Node / Tab slug 会小写、去重并限制字符与条数。所有数值字段在直接配置保存与 `PUT /api/config` 共用同一边界，未知 V2EX 字段和布尔伪装整数都会返回校验错误；读取旧配置时则安全裁剪到边界，避免历史异常值制造无界任务。
+
+完整字段和公开路径见 [V2EX 来源文档](v2ex.md)。
+
+#### 配置页来源状态契约
+
+插件 side panel 与桌面 Web `/web` 的平台源配置页统一读取 `GET /api/sources/status`。这个端点是**纯本地读取**：不会访问 Bilibili、小红书、抖音、YouTube、X、知乎、Reddit、Bangumi 或 V2EX，也不会运行 `rdt` / `opencli` 命令。页面可见时每 30 秒刷新一次，但请求只到 OpenBiliClaw 本地后端；真实平台请求仅由用户显式初始化、发现、诊断任务或已启用的后台 producer 发起。
 
 状态语义如下：
 
@@ -760,6 +816,7 @@ Linux.do 通过浏览器扩展在真实 `linux.do` task tab 内执行同源只�
 | `no_auth` | 无需登录 | 公开来源 |
 
 平台特例：抖音只要本地 Cookie 存在即显示 `unverified`，必须由实际抖音任务确认；小红书 / 知乎优先使用插件上报的 `logged_in + updated_at`，知乎仅在从未收到浏览器心跳时回落最近任务历史；Reddit `backend="rdt"` 只读取本地 credential 文件，非 rdt 命令后端在状态页显示 `unverified`。Bangumi 不探测登录，状态由本地开关与最近 producer run ledger 计算为 `disabled / unverified / ready / partial / rate_limited / error`。Linux.do `auth_required=false`，公开发现始终是 optional-login；扩展 `_t` 布尔心跳只决定个人 bookmarks / likes / read-history 是否可尝试。`xsec_token` 只是小红书内容 URL 的访问令牌，配置页即使能展示它也不会据此判断账号已登录。
+平台特例：抖音只要本地 Cookie 存在即显示 `unverified`，必须由实际抖音任务确认；小红书 / 知乎优先使用插件上报的 `logged_in + updated_at`，知乎仅在从未收到浏览器心跳时回落最近任务历史；Reddit `backend="rdt"` 只读取本地 credential 文件，非 rdt 命令后端在状态页显示 `unverified`。Bangumi 不探测登录，状态由本地开关与最近 producer run ledger 计算为 `disabled / unverified / ready / partial / rate_limited / error`。V2EX 匿名时为 `no_auth`，配置 PAT 后由 live probe 区分 `unverified / verified / failed / rate_limited`，不会把 PAT 状态误写成浏览器登录态。`xsec_token` 只是小红书内容 URL 的访问令牌，配置页即使能展示它也不会据此判断账号已登录。
 
 ### `[scheduler]`
 
@@ -774,12 +831,14 @@ TOML 与显式环境变量覆盖在构造 `SchedulerConfig` 前统一归一为�
 | `pool_target_count` | int | `300` | 前端真实可换候选目标；允许范围 `1..600`。`count_pool_candidates()`（含预生成 / 分类 / 可打开 / 最近看过过滤 / topic window）达到目标时 refresh（含 `force_refresh`）返回 `pool_at_cap` 不再 discover；后台定时 refresh 采用约 90% 的低水位，略低于目标时不立即跑 discovery，等库存真正低于水位再补货。raw 素材库存由独立 raw ceiling `max(pool_target_count * 2, pool_target_count + 120)` 控制，不再被压成与可换目标相同 |
 | `account_sync_interval_hours` | int | `6` | 账户侧长期信号同步间隔；运行时会低频拉取 history / favorites / following |
 | `source_incremental_hours` | int | `24` | 已安装扩展在线时，XHS / 抖音 / YouTube / 知乎 / Reddit / Linux.do 账号 bootstrap 信号的全局周期（小时），范围 `0..168`；`0` 关闭六源周期回拉。它复用浏览器登录态，不是无浏览器后台同步 |
+| `source_incremental_hours` | int | `24` | 已安装扩展在线时，XHS / 抖音 / YouTube / 知乎 / Reddit / V2EX 账号 bootstrap 信号的全局周期（小时），范围 `0..168`；`0` 关闭六源周期回拉。它复用浏览器登录态，不是无浏览器后台同步 |
 | `xhs_incremental_hours` | int 或 null | `null` | 小红书周期覆盖；缺省 / `null` 继承全局，`0` 只关闭小红书，范围 `0..168` |
 | `douyin_incremental_hours` | int 或 null | `null` | 抖音周期覆盖；缺省 / `null` 继承全局，`0` 只关闭抖音，范围 `0..168` |
 | `youtube_incremental_hours` | int 或 null | `null` | YouTube 周期覆盖；缺省 / `null` 继承全局，`0` 只关闭 YouTube，范围 `0..168` |
 | `zhihu_incremental_hours` | int 或 null | `null` | 知乎周期覆盖；缺省 / `null` 继承全局，`0` 只关闭知乎，范围 `0..168` |
 | `reddit_incremental_hours` | int 或 null | `null` | Reddit 周期覆盖；缺省 / `null` 继承全局，`0` 只关闭 Reddit，范围 `0..168` |
 | `linuxdo_incremental_hours` | int 或 null | `null` | Linux.do 周期覆盖；缺省 / `null` 继承全局，`0` 只关闭 Linux.do，范围 `0..168` |
+| `v2ex_incremental_hours` | int 或 null | `null` | V2EX 周期覆盖；缺省 / `null` 继承全局，`0` 只关闭 V2EX，范围 `0..168` |
 | `refresh_check_interval_seconds` | int | `60` | `ContinuousRefreshController` 主循环轮询间隔；小于 `15` 或无法解析时回退默认值 |
 | `eval_min_batch_size` | int | `15` | API daemon raw candidate 评估 drain 的最小聚合批量；允许范围 `1..90`，小流量候选会等待凑批以减少 LLM trickle 调用。手动 CLI 是一次性进程，固定立即 drain，不读取该等待策略 |
 | `eval_max_wait_seconds` | float | `90.0` | API daemon raw candidate 评估 drain 的最长等待秒数；允许范围 `0..600`，单个候选最多等待该时长后会小批量送评。协调器按剩余等待时间唤醒 |
@@ -824,6 +883,7 @@ TOML 与显式环境变量覆盖在构造 `SchedulerConfig` 前统一归一为�
 ### `[scheduler.pool_source_shares]`
 
 候选池按平台族做保底配比，默认保存的 share 是 `bilibili:xiaohongshu:douyin:youtube:twitter:zhihu:reddit:bangumi:linuxdo = 5:1:1:1:1:1:1:1:1`。旧配置文件若已有本段但缺少后续新增的平台 key，加载时会自动补齐默认 share（例如 `linuxdo = 1`）。关闭的平台会保留配置值但在运行时从有效配比中剔除，剩余平台重新归一化吃满 `pool_target_count`；默认安装里小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Bangumi / Linux.do 都关闭，所以默认有效配比只有 Bilibili。
+候选池按平台族做保底配比，默认保存的 share 是 `bilibili:xiaohongshu:douyin:youtube:twitter:zhihu:reddit:bangumi:v2ex = 5:1:1:1:1:1:1:1:1`。旧配置文件若已有本段但缺少后续新增的平台 key，加载时会自动补齐默认 share（例如 `bangumi = 1`、`v2ex = 1`）。关闭的平台会保留配置值但在运行时从有效配比中剔除，剩余平台重新归一化吃满 `pool_target_count`；默认安装里小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Bangumi / V2EX 都关闭，所以默认有效配比只有 Bilibili。
 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
@@ -836,10 +896,12 @@ TOML 与显式环境变量覆盖在构造 `SchedulerConfig` 前统一归一为�
 | `reddit` | int | `1` | Reddit 平台族占比；插件 / 命令后端 `reddit-search` / `reddit-hot` / `reddit-subreddit` / `reddit-related` 候选统一计入该族 |
 | `bangumi` | int | `1` | Bangumi 平台族占比；`bangumi-search` / `bangumi-ranked` / `bangumi-latest` 统一计入该族 |
 | `linuxdo` | int | `1` | Linux.do 平台族占比；`linuxdo-search` / `linuxdo-hot` / `linuxdo-feed` / `linuxdo-creator` / `linuxdo-related` 统一计入该族 |
+| `v2ex` | int | `1` | V2EX 平台族占比；`v2ex-search` / `v2ex-node` / `v2ex-tab` / `v2ex-hot` / `v2ex-latest` 统一计入该族 |
 
 运行时会拆分两套 quota：前端可换来源目标用于补货和 `reactivate_under_quota_pool_sources()` 的缺口判断；raw ceiling 来源目标用于 `trim_pool_source_overflow()` / `trim_pool_to_target_count()` 的硬成本边界。小平台低于可换目标时，会优先保护 / 复活它们的候选，但不会超过 raw headroom；任一平台族 raw material 高于 raw ceiling 配额时，才会先压回配额内。B 站低于后台低水位且 `[sources.bilibili].enabled=true` 时，才由 B 站 discovery 补货；小缺口优先 `search + related_chain`，更深缺口再跑 `trending/explore`。抖音低于目标且 `[sources.douyin].enabled=true` 时，后台 `DouyinDiscoveryProducer` 会通过 `DouyinDiscoveryService(cache=True)` 触发 search / hot / feed 补池；YouTube 低于目标且 `[sources.youtube].enabled=true` 时，后台 `YoutubeDiscoveryProducer` 会在独立 loop 中触发 `yt_search` / `yt_trending` / `yt_channel`，主 refresh replenishment plan 不再 inline 调度 YouTube；X 低于目标且 `[sources.twitter].enabled=true` 时，后台 `XDiscoveryProducer` 会在独立 loop 中按预算和源健康触发 `search` / `feed` / `creator` 三个策略补池；知乎低于目标且 `[sources.zhihu].enabled=true` 时，后台 `ZhihuDiscoveryProducer` 会通过浏览器插件按 `source_modes` 触发 search / hot / feed / creator / related 补池；Reddit 低于目标且 `[sources.reddit].enabled=true` 时，后台 `RedditDiscoveryProducer` 默认通过 `rdt-cli` 按 `source_modes` 触发 search / hot / subreddit / related 补 raw candidates；命令后端不可用或显式切到插件后端时，入队 OpenBiliClaw 插件任务。Bangumi 低于目标且 `[sources.bangumi].enabled=true` 时，后台 `BangumiDiscoveryProducer` 直连官方匿名 API，按分支预算写 raw candidates，并遵循持久化限流冷却。Linux.do 低于目标且 `[sources.linuxdo].enabled=true` 时，后台 `LinuxdoDiscoveryProducer` 入队同源扩展任务，以五种只读模式写 raw candidates。
 
 `openbiliclaw init` 会根据用户是否接入小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Bangumi / Linux.do 写回对应 `enabled`。其中知乎在 `fetch-zhihu` 命令下仍只是事件爬取 smoke；在 guided init 勾选知乎或传 `--yes-zhihu` 时，`bootstrap_events` 会作为首版画像信号参与 `analyze_events()` / `build_initial_profile()`。Reddit 同样支持 guided init：勾选 Reddit 或传 `--yes-reddit` 时，插件读取 saved / upvoted / subscribed subreddit，每个 scope 默认最多 300 条，并把事件纳入首版画像；`fetch-reddit --mode bootstrap` 可单独验证这条事件拉取链路。Linux.do 勾选后读取本人 bookmarks / likes / read history；`fetch-linuxdo` 默认只做 smoke，显式 `--write-memory` 才写本地 memory。Bangumi 选择后只在提供公开 username 时读取公开收藏；没有 username 仍可作为 discovery 源。Bilibili 默认启用，也可在插件设置页或 `config.toml` 里手动关闭。交互式初始化在采集完各平台事件后，会按事件量给出一组推荐比例，用户可确认使用或手动输入。插件设置页也可开关九个平台、编辑九个平台占比，并通过 `/api/config/source-share-suggestion` 按已有事件重新生成建议值；GET 使用已保存配置，POST 可接收设置页当前尚未保存的 `enabled_sources` / `configured_shares`。
+`openbiliclaw init` 会根据用户是否接入小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Bangumi / V2EX 写回对应 `enabled`；V2EX 也可以从 guided init 来源选择中启用并等待浏览器任务。其余来源的初始化与 discovery 语义不变：知乎在 `fetch-zhihu` 命令下仍只是事件爬取 smoke；在 guided init 勾选知乎或传 `--yes-zhihu` 时，`bootstrap_events` 会作为首版画像信号参与 `analyze_events()` / `build_initial_profile()`。Reddit 同样支持 guided init；Bangumi 选择后只在提供公开 username 时读取公开收藏，没有 username 仍可作为 discovery 源。Bilibili 默认启用，也可在插件设置页或 `config.toml` 里手动关闭。交互式初始化在采集完各平台事件后，会按事件量给出一组推荐比例，用户可确认使用或手动输入。插件设置页现在可开关九个平台、编辑九个平台占比，并通过 `/api/config/source-share-suggestion` 按已有事件重新生成建议值；V2EX 未连接扩展时仍可匿名 discovery，但不会凭空产生浏览器初始化事件。
 
 ### `[discovery]`
 
@@ -1023,6 +1085,7 @@ Awareness seam 固定为 `legacy`。未发布的聚合字段
 - 基础：`language`、`data_dir`、`storage.db_path`
 - LLM：展示实例、全局调用链与四个模块链摘要，允许调整全局并发 / 超时、测试默认链，并跳转桌面 Web 完整编辑；插件保存其他字段时不会回写或压扁实例路由
 - B 站与多源：`bilibili.browser.*`、`sources.bilibili.enabled`、`sources.browser.*`、`sources.xiaohongshu.*`、`sources.douyin.*`、`sources.youtube.*`、`sources.twitter.*`、`sources.zhihu.*`、`sources.reddit.*`、`sources.bangumi.*`、`sources.linuxdo.*`
+- B 站与多源：`bilibili.browser.*`、`sources.bilibili.enabled`、`sources.browser.*`、`sources.xiaohongshu.*`、`sources.douyin.*`、`sources.youtube.*`、`sources.twitter.*`、`sources.zhihu.*`、`sources.reddit.*`、`sources.bangumi.*`、`sources.v2ex.*`
 - 调度：`scheduler.enabled`、`pause_on_extension_disconnect`、`extension_disconnect_grace_seconds`、`pool_target_count`、`account_sync_interval_hours`、eval drain 凑批参数、refresh / signal / trending / explore / discovery limit / proactive push / speculator idle 等 runtime 频率参数、九个平台 `pool_source_shares`、猜测兴趣参数、不喜欢领域探针参数、自动更新参数；设置页可调用 `/api/config/source-share-suggestion` 按已有事件和当前表单开关填入建议比例
 - 日志：控制台 / 文件级别、完整日志路径（保存时拆回 `directory` / `filename`）、轮转与非托管日志清理参数
 
@@ -1042,6 +1105,7 @@ Awareness seam 固定为 `legacy`。未发布的聚合字段
 - 首次启动的模板包含一个等待填写 Key 的 DeepSeek 占位实例；若用户在 `/setup/` 改选其他 Provider，向导会读取 `GET /api/config.issues`，只把其中明确指向 `llm.instances.<id>.*` 的 blocking 旧实例设为 `enabled=false` 并从全局链移除。被显式自定义模块链引用的实例不会被自动改写，正常或仅 warning 的既有实例也会保留；完整多实例整理仍由桌面/插件设置页负责。校验 400 会按 `ConfigUpdateResponse.config.issues` 展示具体原因，不再把响应 JSON 截成一段不可读文本。
 - 写盘前会先用新配置构建 LLM registry；blocking issue 会返回 400 且不写入 `config.toml`。
 - 写盘前会生成 `config.toml.bak`。持久化成功后接口统一返回 `202 apply_state="queued"` 和单调 `apply_revision`；后台热重载失败会恢复最后一次已生效的磁盘与内存 runtime 配置，并广播 `config_reload_failed`。如果恢复本身失败，状态接口保留人工恢复提示。
+- `general.data_dir` 是热重载的明确例外：如果请求值解析后的 canonical 路径不同于当前 `RuntimeContext` 已打开并由进程级锁保护的数据目录，接口会把新路径写入 `config.toml`，但本进程排队应用其它字段时仍强制使用旧的 active data dir，并在 202 响应返回 `restart_required=true`。当前数据库 / MemoryManager 和同一请求中的抖音、X 外部凭据读写都继续落在 active data dir；只有完整退出并重新启动、取得新目录的 canonical runtime lock 后才切换。`GET /api/config/apply-status` 的 `applied` 只表示可热重载部分已经应用，不表示新数据目录已启用。
 - 热重载与唯一 `DialogueSettlementQueue` 交接时保持 admission 开放，直到旧 worker 的 active job 与 backlog 真正排空，再在无 `await` 临界段原子暂停、撤销旧 permit 并注册新 worker；因此保存配置期间的聊天/待聊请求不再被直接丢弃。对话 LLM 单请求上限为 20 分钟，安全 drain 窗口相应为 25 分钟；桌面/插件自己的 60 秒请求预算到期只表示后端仍在等待安全切换，不会取消后端保存。超过 25 分钟才回滚，空字符串 `TimeoutError` 会转换为可读诊断。
 
 ## 模型列表发现（不写配置）
@@ -1057,13 +1121,13 @@ OpenAI-compatible 协议没有列举 reasoning effort 能力的标准接口；�
 | `ok` | 请求是否完成。校验失败时为 `false`。 |
 | `reloaded` | 是否已热重载运行时组件。 |
 | `rollback_applied` | 热重载失败后是否已从 `config.toml.bak` 回滚。 |
-| `restart_required` | 新配置是否已写入但无法原地激活、需要重启 daemon 的异常兜底。正常保存和成功的降级恢复都返回 `false`。 |
+| `restart_required` | 已写入的配置是否仍需完整重启才能全部生效。canonical `data_dir` 与当前 active data dir 不同时固定为 `true`；路径未变的正常保存和成功降级恢复为 `false`，异常 bootstrap 也可能为 `true`。 |
 | `apply_state` | 后台应用阶段：持久化成功的响应为 `queued`；状态接口还会返回 `applying`、`applied` 或 `failed`。 |
 | `apply_revision` | 单调递增的后台应用修订号；与 `GET /api/config/apply-status` 的 `requested_revision` / `applied_revision` 对应。 |
 | `config` | 保存后或回滚后的配置快照，API Key 仍默认 masked。 |
 | `message` | 给 UI 展示的人类可读状态。 |
 
-当 daemon 因 LLM registry 配置错误进入降级模式时，`GET /api/config` 会返回 `degraded=true`、`degraded_reason="llm_registry_unavailable"` 和 blocking issues。`PUT /api/config` 写入通过校验的修复配置后，会复用降级上下文已经保留的数据库、MemoryManager、事件总线和稳定 total gate，通过 `RuntimeContext.rebuild_from_config()` 原子构造完整运行时；成功后同步清除 context / `app.state` 的 degraded 状态、重绑 API 自有 feedback scheduler，并调用 `restart_background_tasks()`，返回 `reloaded=true / restart_required=false`。因此 `/setup/` 会在同一进程中立即进入账号连接步骤，插件与桌面设置页也会立即读到可用状态。核心构造失败会恢复 `config.toml.bak`、保持 503 guard 并返回 `ok=false`；只有没有旧文件可回滚且新配置已经落盘等异常 bootstrap 才使用 `restart_required=true`。前端保留短期续接标记与 `/api/ping` 轮询，仅用于兼容旧后端和该兜底响应。
+当 daemon 因 LLM registry 配置错误进入降级模式时，`GET /api/config` 会返回 `degraded=true`、`degraded_reason="llm_registry_unavailable"` 和 blocking issues。`PUT /api/config` 写入通过校验的修复配置后，会复用降级上下文已经保留的数据库、MemoryManager、事件总线和稳定 total gate，通过 `RuntimeContext.rebuild_from_config()` 原子构造完整运行时；成功后同步清除 context / `app.state` 的 degraded 状态、重绑 API 自有 feedback scheduler，并调用 `restart_background_tasks()`。只要 `data_dir` 未改变，响应为 `reloaded=true / restart_required=false`，`/setup/` 会在同一进程中立即进入账号连接步骤，插件与桌面设置页也会立即读到可用状态；如果同时改了 `data_dir`，其它修复仍可在本进程生效，但目录切换继续要求完整重启。核心构造失败会恢复 `config.toml.bak`、保持 503 guard 并返回 `ok=false`；没有旧文件可回滚且新配置已经落盘等异常 bootstrap 也会使用 `restart_required=true`。前端保留短期续接标记与 `/api/ping` 轮询，仅用于兼容旧后端和需要重启的响应。
 
 ## 环境变量
 

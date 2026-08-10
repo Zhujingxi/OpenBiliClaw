@@ -47,13 +47,16 @@ def test_desktop_reddit_source_status_and_credentials_are_rendered() -> None:
     # this page had two identical copies of it and the side panel a third.
     assert (
         'const SOURCE_KEYS = Object.freeze([\n    "bilibili", "xiaohongshu", '
-        '"douyin", "youtube", "twitter", "zhihu", "reddit",\n'
+        '"douyin", "weibo", "youtube", "twitter", "zhihu", "reddit",\n'
     ) in shared
     # New sources extend the one shared roster; they do not create another
     # platform list in either settings bundle.
     roster = shared.split("]);", 1)[0]
     assert '"bangumi"' in roster
     assert '"linuxdo"' in roster
+    # Bangumi and V2EX are in the roster; the roster answers "which sources
+    # exist", so dropping one would hide the platform from settings surfaces.
+    assert '"bangumi", "v2ex",' in shared
     assert "SOURCE_STATUS_KEYS = SourceStatus.SOURCE_KEYS" in js
     assert 'reddit: $("#redditEnabled").value === "on"' in js
     assert 'if (shares.reddit !== undefined) setInput("shareReddit", shares.reddit)' in js

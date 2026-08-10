@@ -3,8 +3,14 @@ import { fileURLToPath } from "node:url";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 
 const TARGETS = {
-  chrome: { manifestPath: "manifest.json", assetRoot: "." },
-  firefox: { manifestPath: "dist-firefox/manifest.json", assetRoot: "dist-firefox" },
+  chrome: {
+    manifestPath: "manifest.json",
+    assetRoot: ".",
+  },
+  firefox: {
+    manifestPath: "dist-firefox/manifest.json",
+    assetRoot: "dist-firefox",
+  },
 };
 
 function addAsset(assets, value, source) {
@@ -14,8 +20,14 @@ function addAsset(assets, value, source) {
   assets.add(value);
 }
 
+/**
+ * Return every executable or web-accessible asset referenced by a manifest.
+ * Static HTML and icons are intentionally outside this preflight: the build
+ * regression this guard prevents is a missing generated bundle.
+ */
 export function collectManifestBuildAssets(manifest) {
   const assets = new Set();
+
   if (manifest.background?.service_worker !== undefined) {
     addAsset(assets, manifest.background.service_worker, "background.service_worker");
   }
@@ -24,9 +36,14 @@ export function collectManifestBuildAssets(manifest) {
   }
   for (const [entryIndex, contentScript] of (manifest.content_scripts ?? []).entries()) {
     for (const [scriptIndex, script] of (contentScript.js ?? []).entries()) {
-      addAsset(assets, script, `content_scripts[${entryIndex}].js[${scriptIndex}]`);
+      addAsset(
+        assets,
+        script,
+        `content_scripts[${entryIndex}].js[${scriptIndex}]`,
+      );
     }
   }
+
   for (const [entryIndex, resourceEntry] of (
     manifest.web_accessible_resources ?? []
   ).entries()) {
@@ -38,6 +55,7 @@ export function collectManifestBuildAssets(manifest) {
       );
     }
   }
+
   if (assets.size === 0) {
     throw new Error("manifest does not reference any generated scripts or WAR assets");
   }
@@ -56,18 +74,23 @@ function resolveContainedAsset(assetRoot, assetPath) {
   return resolved;
 }
 
+/** Verify generated manifest assets for one browser target. */
 export async function verifyBuildAssets({
   root = resolve(import.meta.dirname, ".."),
   target = "chrome",
   log = true,
 } = {}) {
   const targetConfig = TARGETS[target];
-  if (!targetConfig) throw new Error(`unknown build target: ${target}`);
+  if (!targetConfig) {
+    throw new Error(`unknown build target: ${target}`);
+  }
+
   const manifestPath = resolve(root, targetConfig.manifestPath);
   const assetRoot = resolve(root, targetConfig.assetRoot);
   const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
   const assets = collectManifestBuildAssets(manifest);
   const missing = [];
+
   for (const assetPath of assets) {
     const resolvedAsset = resolveContainedAsset(assetRoot, assetPath);
     try {
@@ -81,6 +104,7 @@ export async function verifyBuildAssets({
       throw error;
     }
   }
+
   if (missing.length > 0) {
     throw new Error(
       `${target} build is missing manifest assets:\n${missing
@@ -88,6 +112,7 @@ export async function verifyBuildAssets({
         .join("\n")}`,
     );
   }
+
   if (log) {
     console.log(
       `\n✅ ${target} asset preflight: ${assets.length} manifest scripts/WAR assets present`,

@@ -56,6 +56,15 @@ test("settings page exposes advanced config fields from backend schema", () => {
     "cfgDouyinDailyHotBudget",
     "cfgDouyinDailyFeedBudget",
     "cfgDouyinRequestInterval",
+    "cfgWeiboEnabled",
+    "cfgWeiboModeSearch",
+    "cfgWeiboModeHot",
+    "cfgWeiboModeCreator",
+    "cfgWeiboDailySearchBudget",
+    "cfgWeiboDailyHotBudget",
+    "cfgWeiboDailyCreatorBudget",
+    "cfgWeiboRequestInterval",
+    "cfgWeiboMinInterval",
     "cfgYoutubeEnabled",
     "cfgYoutubeDailySearchBudget",
     "cfgYoutubeDailyTrendingBudget",
@@ -108,6 +117,7 @@ test("settings page exposes advanced config fields from backend schema", () => {
     "cfgPoolShareBilibili",
     "cfgPoolShareXhs",
     "cfgPoolShareDouyin",
+    "cfgPoolShareWeibo",
     "cfgPoolShareYoutube",
     "cfgPoolShareReddit",
     "cfgSuggestPoolShares",
@@ -159,6 +169,7 @@ test("settings source tab separates every platform into its own block", () => {
     "bilibili",
     "xiaohongshu",
     "douyin",
+    "weibo",
     "youtube",
     "twitter",
     "zhihu",
@@ -190,6 +201,30 @@ test("settings source tab separates every platform into its own block", () => {
   assert.match(sourcesPanel, /id="cfgXhsDailySearchBudget"[^>]*placeholder="默认 20"/);
   assert.match(sourcesPanel, /id="cfgXhsTaskInterval"[^>]*placeholder="1200"/);
   assert.match(sourcesPanel, /id="cfgXhsMinInterval"[^>]*placeholder="20"/);
+  assert.match(sourcesPanel, /id="cfgWeiboEnabled" type="checkbox"/);
+  assert.match(sourcesPanel, /无需用户 Cookie/);
+  assert.match(sourcesPanel, /不参与初始化画像/);
+  assert.match(sourcesPanel, /并非官方稳定 API/);
+  assert.doesNotMatch(sourcesPanel, /id="cfgWeiboCookie"/);
+  assert.match(popupJs, /weiboEnabled\.checked = cfg\.sources\?\.weibo\?\.enabled === true/);
+  assert.match(popupJs, /weibo:\s*\{\s*enabled: checked\("cfgWeiboEnabled"\)/);
+  assert.match(popupJs, /setWeiboSourceModes\(cfg\.sources\?\.weibo\?\.source_modes\)/);
+  assert.match(popupJs, /source_modes: collectWeiboSourceModes\(\)/);
+  assert.match(sourcesPanel, /作者（需同时启用搜索或热榜）/);
+  assert.match(popupJs, /daily_search_budget: getInt\("cfgWeiboDailySearchBudget", 60\)/);
+  assert.match(popupJs, /daily_hot_budget: getInt\("cfgWeiboDailyHotBudget", 10\)/);
+  assert.match(popupJs, /daily_creator_budget: getInt\("cfgWeiboDailyCreatorBudget", 30\)/);
+  assert.match(popupJs, /request_interval_seconds: getInt\("cfgWeiboRequestInterval", 3\)/);
+  assert.match(popupJs, /min_interval_minutes: getInt\("cfgWeiboMinInterval", 10\)/);
+});
+
+test("Weibo stays backend-only without extension permissions or native writeback", () => {
+  const manifest = JSON.parse(readFileSync(resolve("manifest.json"), "utf8"));
+  const manifestText = JSON.stringify(manifest);
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+
+  assert.doesNotMatch(manifestText, /weibo|sinaimg/i);
+  assert.doesNotMatch(popupJs, /weibo_cookie_synced|cfgWeiboCookie|syncWeibo/i);
 });
 
 test("settings logging tab edits a single full log path", () => {

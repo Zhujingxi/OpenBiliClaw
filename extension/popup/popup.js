@@ -122,15 +122,19 @@ import {
   fetchProfileSummary,
   fetchProjectStats,
   fetchRecommendations,
+  fetchContentHistory,
   fetchRuntimeStatus,
   fetchSourceShareSuggestion,
   fetchSourcesStatus,
+  fetchV2exIdentity,
+  acceptV2exBrowserIdentity,
   markDelightSent,
   openPendingConfirmation,
   probeConfigService,
   startEmbeddingRepair,
   startInit,
   readCachedConfigSnapshot,
+  reconcileContentHistoryPage,
   reportRecommendationClick,
   reshuffleRecommendations,
   refreshRecommendations,
@@ -279,13 +283,17 @@ const elements = {
   poolTopics: document.getElementById("poolTopics"),
   delightSlot: document.getElementById("delightSlot"),
   tabRecommend: document.getElementById("tabRecommend"),
+  tabLibrary: document.getElementById("tabLibrary"),
   tabWatchLater: document.getElementById("tabWatchLater"),
   tabFavorites: document.getElementById("tabFavorites"),
+  tabHistory: document.getElementById("tabHistory"),
   tabProfile: document.getElementById("tabProfile"),
   tabChat: document.getElementById("tabChat"),
   viewRecommend: document.getElementById("viewRecommend"),
+  viewLibrary: document.getElementById("viewLibrary"),
   viewWatchLater: document.getElementById("viewWatchLater"),
   viewFavorites: document.getElementById("viewFavorites"),
+  viewHistory: document.getElementById("viewHistory"),
   viewProfile: document.getElementById("viewProfile"),
   viewChat: document.getElementById("viewChat"),
   watchLaterList: document.getElementById("watchLaterList"),
@@ -296,6 +304,8 @@ const elements = {
   watchLaterSyncStatus: document.getElementById("watchLaterSyncStatus"),
   favoritesSyncAll: document.getElementById("favoritesSyncAll"),
   favoritesSyncStatus: document.getElementById("favoritesSyncStatus"),
+  historyRefresh: document.getElementById("historyRefresh"),
+  historySections: document.getElementById("historySections"),
   profileEmpty: document.getElementById("profileEmpty"),
   profileEmptyTitle: document.getElementById("profileEmptyTitle"),
   profileEmptyText: document.getElementById("profileEmptyText"),
@@ -460,6 +470,33 @@ const THUMBS_DOWN_ICON_SVG =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 14V4"/><path d="M9 18.8 10 14H4.6a1.8 1.8 0 0 1-1.7-2.2l1.5-6A2.4 2.4 0 0 1 6.7 4H17"/><path d="M17 14l-4.5 5.3A2 2 0 0 1 9 18v-4"/></svg>';
 const MESSAGE_ICON_SVG =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/></svg>';
+const HISTORY_IMAGE_ICON_SVG =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg>';
+const HISTORY_RESTORE_ICON_SVG =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>';
+
+const CONTENT_HISTORY_PAGE_SIZE = 12;
+const CONTENT_HISTORY_SECTIONS = [
+  { category: "clicked", eyebrow: "Opened", title: "主动点开过", description: "你明确选择打开的内容，最近一次操作排在前面。" },
+  { category: "shown", eyebrow: "Passed by", title: "出现过，但没点开", description: "曾进入推荐列表、但近 30 天没有打开记录的内容。" },
+  { category: "removed", eyebrow: "Recently removed", title: "最近移除", description: "从保存列表移除、忽略或标记不感兴趣的内容。" },
+];
+const contentHistoryState = Object.fromEntries(CONTENT_HISTORY_SECTIONS.map(({ category }) => [
+  category,
+  {
+    items: [],
+    total: 0,
+    nextCursor: "",
+    hasMore: false,
+    loading: false,
+    loadingMore: false,
+    error: "",
+    notice: "",
+    refreshRequired: false,
+  },
+]));
+let contentHistoryGeneration = 0;
+let contentHistoryLoadedAt = 0;
 
 const CHAT_PLACEHOLDERS = [
   // 想法与内容判断类
@@ -634,13 +671,86 @@ function initRecommendationAutoLoadIntent() {
   });
 }
 
-function setActiveTab(tabName) {
+const POPUP_LIBRARY_STORAGE_KEY = "openbiliclaw.popup.contentLibraryTab";
+const POPUP_LIBRARY_TABS = ["watchLater", "favorites", "history"];
+const popupLibraryScroll = new Map();
+let popupLibraryTab = "watchLater";
+let popupLibraryVisible = false;
+
+function normalizePopupLibraryTab(value, fallback = "watchLater") {
+  const normalized = String(value || "").trim().toLowerCase();
+  return {
+    watchlater: "watchLater",
+    "watch-later": "watchLater",
+    watch_later: "watchLater",
+    favorites: "favorites",
+    favorite: "favorites",
+    history: "history",
+  }[normalized] || fallback;
+}
+
+function storedPopupLibraryTab() {
+  try { return normalizePopupLibraryTab(localStorage.getItem(POPUP_LIBRARY_STORAGE_KEY)); }
+  catch { return "watchLater"; }
+}
+
+function persistPopupLibraryTab(tab) {
+  try { localStorage.setItem(POPUP_LIBRARY_STORAGE_KEY, tab); } catch { /* unavailable */ }
+}
+
+function loadPopupLibraryTab(tab) {
+  if (tab === "watchLater") void loadWatchLater();
+  else if (tab === "favorites") void loadFavorites();
+  else void refreshContentHistory();
+}
+
+function setActiveLibraryTab(value, { focus = false, entering = false, forceLoad = false } = {}) {
+  const tabName = normalizePopupLibraryTab(value, popupLibraryTab);
+  const changed = popupLibraryTab !== tabName;
+  if (popupLibraryVisible && changed && elements.content instanceof HTMLElement) {
+    popupLibraryScroll.set(popupLibraryTab, elements.content.scrollTop);
+  }
+  popupLibraryTab = tabName;
+  persistPopupLibraryTab(tabName);
+  const tabs = [
+    ["watchLater", elements.tabWatchLater, elements.viewWatchLater],
+    ["favorites", elements.tabFavorites, elements.viewFavorites],
+    ["history", elements.tabHistory, elements.viewHistory],
+  ];
+  for (const [name, button, panel] of tabs) {
+    const selected = name === tabName;
+    button?.classList.toggle("is-active", selected);
+    button?.setAttribute("aria-selected", String(selected));
+    if (button instanceof HTMLButtonElement) button.tabIndex = selected ? 0 : -1;
+    if (panel instanceof HTMLElement) panel.hidden = !selected;
+  }
+  if (changed || entering || forceLoad) loadPopupLibraryTab(tabName);
+  if ((changed || entering) && elements.content instanceof HTMLElement) {
+    requestAnimationFrame(() => {
+      elements.content.scrollTop = popupLibraryScroll.get(tabName) || 0;
+      if (focus) elements.viewLibrary?.querySelector('.library-tab[aria-selected="true"]')?.focus();
+    });
+  } else if (focus) {
+    elements.viewLibrary?.querySelector('.library-tab[aria-selected="true"]')?.focus();
+  }
+}
+
+function setActiveTab(requestedTab, { libraryTab = "" } = {}) {
+  const legacyChild = POPUP_LIBRARY_TABS.includes(requestedTab)
+    ? normalizePopupLibraryTab(requestedTab)
+    : "";
+  const tabName = legacyChild ? "library" : requestedTab;
+  if (!["recommend", "library", "profile", "chat"].includes(tabName)) return;
+  const enteringLibrary = tabName === "library" && !popupLibraryVisible;
+  if (state.activeTab === "library" && tabName !== "library" && elements.content instanceof HTMLElement) {
+    popupLibraryScroll.set(popupLibraryTab, elements.content.scrollTop);
+  }
+  popupLibraryVisible = tabName === "library";
   state.activeTab = tabName;
 
   const tabs = [
     ["recommend", elements.tabRecommend, elements.viewRecommend],
-    ["watchLater", elements.tabWatchLater, elements.viewWatchLater],
-    ["favorites", elements.tabFavorites, elements.viewFavorites],
+    ["library", elements.tabLibrary, elements.viewLibrary],
     ["profile", elements.tabProfile, elements.viewProfile],
     ["chat", elements.tabChat, elements.viewChat],
   ];
@@ -662,11 +772,8 @@ function setActiveTab(tabName) {
   if (tabName === "recommend") {
     queueRecommendationLoadCheck();
   }
-  if (tabName === "watchLater") {
-    void loadWatchLater();
-  }
-  if (tabName === "favorites") {
-    void loadFavorites();
+  if (tabName === "library") {
+    setActiveLibraryTab(libraryTab || legacyChild || storedPopupLibraryTab(), { entering: enteringLibrary });
   }
   if (tabName === "chat") {
     scrollChatMessagesToBottom();
@@ -1049,6 +1156,10 @@ function buildSavedCard(listKind, item, { list, empty, toggles }) {
   const title = document.createElement("p");
   title.className = "saved-card-title";
   title.textContent = item.title || item.content_id;
+  const platform = document.createElement("span");
+  platform.className = "saved-card-platform";
+  platform.dataset.source = item.source_platform || "bilibili";
+  platform.textContent = platformDisplayName(item.source_platform || "bilibili");
   const up = document.createElement("p");
   up.className = "saved-card-up";
   up.textContent = item.author_name || item.up_name || "";
@@ -1069,7 +1180,7 @@ function buildSavedCard(listKind, item, { list, empty, toggles }) {
   target.className = "saved-sync-target";
   target.textContent = savedSyncDetail(item);
   syncLine.append(chip, target);
-  copy.append(title, up, syncLine);
+  copy.append(platform, title, up, syncLine);
   body.append(copy);
   body.prepend(media);
   body.addEventListener("click", () => {
@@ -1202,14 +1313,26 @@ function buildSavedCard(listKind, item, { list, empty, toggles }) {
 function buildSavedCardMedia(item) {
   const media = document.createElement("span");
   media.className = "saved-card-cover";
+  let fallbackShown = false;
+  const showFallback = () => {
+    if (fallbackShown) return;
+    fallbackShown = true;
+    media.classList.add("is-fallback");
+    media.innerHTML = HISTORY_IMAGE_ICON_SVG;
+  };
   if (item.cover_url) {
     const image = document.createElement("img");
     image.alt = "";
     image.decoding = "async";
+    image.addEventListener("error", showFallback, { once: true });
     media.append(image);
-    void setProxyImageSrc(image, item.cover_url);
+    void setProxyImageSrc(image, item.cover_url)
+      .then((loaded) => {
+        if (!loaded || (image.complete && image.naturalWidth === 0)) showFallback();
+      })
+      .catch(showFallback);
   } else {
-    media.classList.add("is-fallback");
+    showFallback();
   }
   return media;
 }
@@ -1222,6 +1345,392 @@ async function loadFavorites() {
     status: elements.favoritesSyncStatus,
     toggles: favoriteToggles,
   });
+}
+
+function historyTextElement(tagName, className, text) {
+  const element = document.createElement(tagName);
+  if (className) element.className = className;
+  element.textContent = String(text || "");
+  return element;
+}
+
+function contentHistoryEventLabel(item, category) {
+  if (category === "clicked") return "点开";
+  if (category === "shown") return "出现";
+  return {
+    watch_later: "从稍后再看移除",
+    favorite: "从收藏移除",
+    dismiss: "已忽略",
+    dislike: "不感兴趣",
+  }[item.context] || "已移除";
+}
+
+function contentHistoryRemovedContexts(item) {
+  const contexts = Array.isArray(item?.contexts) ? item.contexts : [];
+  if (contexts.length) return contexts.filter((entry) => entry && typeof entry.context === "string");
+  if (!item?.context) return [];
+  item.contexts = [{
+    context: item.context,
+    occurred_at: item.occurred_at,
+    restored: item.restored === true,
+    restoring: item.restoring === true,
+  }];
+  return item.contexts;
+}
+
+function contentHistoryRestoreLabel(context) {
+  return context === "favorite" ? "重新收藏" : "重新加入稍后";
+}
+
+function contentHistoryTime(value) {
+  const text = String(value || "").trim();
+  if (!text) return "时间未知";
+  const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(text)
+    ? `${text.replace(" ", "T")}Z`
+    : text;
+  const date = new Date(normalized);
+  if (Number.isNaN(date.getTime())) return text;
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit",
+  }).format(date);
+}
+
+function contentHistoryUrl(item) {
+  return String(item.content_url || buildContentUrl({
+    ...item,
+    bvid: item.content_id,
+  }) || "").trim();
+}
+
+function openContentHistoryItem(item, category) {
+  const url = contentHistoryUrl(item);
+  if (!url) return;
+  const clickReport = reportRecommendationClick({
+    recommendation_id: item.recommendation_id,
+    bvid: item.content_id,
+    content_id: item.content_id,
+    content_url: url,
+    source_platform: item.source_platform,
+    title: item.title,
+    up_name: item.author_name,
+  });
+  if (category === "shown") {
+    void clickReport.then((reported) => {
+      if (reported) return refreshContentHistory(true);
+      return undefined;
+    });
+  }
+  window.open(url, "_blank");
+}
+
+function buildContentHistoryCard(item, category) {
+  const card = document.createElement("article");
+  card.className = "history-card";
+  card.dataset.historyItemKey = String(item.item_key || "");
+
+  const open = document.createElement("button");
+  open.type = "button";
+  open.className = "history-card-open";
+  const titleText = String(item.title || item.body_text || "这条内容暂时没有标题").trim();
+  open.setAttribute("aria-label", `打开：${titleText}`);
+  open.disabled = !contentHistoryUrl(item);
+  open.addEventListener("click", () => openContentHistoryItem(item, category));
+
+  const media = document.createElement("span");
+  media.className = "history-card-media";
+  if (item.cover_url) {
+    const image = document.createElement("img");
+    image.alt = `${titleText} 的封面`;
+    image.setAttribute("loading", "lazy");
+    image.setAttribute("fetchpriority", "low");
+    image.decoding = "async";
+    image.addEventListener("error", () => {
+      media.innerHTML = HISTORY_IMAGE_ICON_SVG;
+    }, { once: true });
+    media.append(image);
+    void setProxyImageSrc(image, item.cover_url);
+  } else {
+    media.innerHTML = HISTORY_IMAGE_ICON_SVG;
+  }
+
+  const copy = document.createElement("span");
+  copy.className = "history-card-copy";
+  copy.append(
+    historyTextElement("strong", "history-card-title", titleText),
+    historyTextElement("span", "history-card-author", item.author_name || platformDisplayName(item.source_platform)),
+  );
+  const meta = document.createElement("span");
+  meta.className = "history-card-meta";
+  const contexts = category === "removed" ? contentHistoryRemovedContexts(item) : [];
+  meta.append(
+    historyTextElement("span", "", category === "removed" ? `${contexts.length || 1} 项记录` : contentHistoryEventLabel(item, category)),
+    historyTextElement("time", "", contentHistoryTime(item.occurred_at)),
+  );
+  copy.append(meta);
+  open.append(media, copy);
+  card.append(open);
+
+  if (contexts.length) {
+    const contextList = document.createElement("div");
+    contextList.className = "history-contexts";
+    contextList.setAttribute("aria-label", "移除原因");
+    for (const context of contexts) {
+      const row = document.createElement("div");
+      row.className = "history-context-row";
+      const contextCopy = document.createElement("span");
+      contextCopy.className = "history-context-copy";
+      contextCopy.append(
+        historyTextElement("span", "", contentHistoryEventLabel(context, "removed")),
+        historyTextElement("time", "", contentHistoryTime(context.occurred_at)),
+      );
+      row.append(contextCopy);
+      if (["watch_later", "favorite"].includes(context.context)) {
+        const restore = document.createElement("button");
+        restore.type = "button";
+        restore.className = "history-restore";
+        restore.disabled = context.restored === true;
+        if (context.restoring === true) restore.setAttribute("aria-disabled", "true");
+        restore.dataset.historyContext = context.context;
+        restore.innerHTML = HISTORY_RESTORE_ICON_SVG;
+        restore.append(document.createTextNode(
+          context.restoring ? "恢复中…" : context.restored ? "已恢复" : contentHistoryRestoreLabel(context.context),
+        ));
+        restore.addEventListener("click", async () => {
+          if (context.restoring || context.restored) return;
+          const focusToken = contentHistoryFocusToken({
+            category: "removed",
+            itemKey: String(item.item_key || ""),
+            context: context.context,
+          });
+          context.restoring = true;
+          renderContentHistory();
+          restoreContentHistoryFocus(focusToken);
+          let restored = false;
+          try {
+            await saveItem(context.context, item);
+            context.restored = true;
+            restored = true;
+            if (item.context === context.context) item.restored = true;
+            if (context.context === "favorite") favoriteToggles.setSaved(item.item_key, true);
+            else watchLaterToggles.setSaved(item.item_key, true);
+            setHint(context.context === "favorite" ? "已重新收藏。" : "已重新加入稍后再看。", "success");
+          } catch (error) {
+            setHint(error?.message || "恢复失败，请稍后重试。", "error");
+          } finally {
+            context.restoring = false;
+            renderContentHistory();
+            restoreContentHistoryFocus(focusToken, { preferAction: !restored });
+          }
+        });
+        row.append(restore);
+      }
+      contextList.append(row);
+    }
+    card.append(contextList);
+  }
+  return card;
+}
+
+function buildContentHistorySection(section) {
+  const page = contentHistoryState[section.category];
+  const container = document.createElement("section");
+  container.className = "history-section";
+  container.dataset.historyCategory = section.category;
+  const heading = document.createElement("div");
+  heading.className = "history-section-head";
+  const title = document.createElement("div");
+  const titleHeading = historyTextElement("h3", "", section.title);
+  titleHeading.tabIndex = -1;
+  title.append(
+    historyTextElement("p", "view-kicker", section.eyebrow),
+    titleHeading,
+  );
+  heading.append(
+    title,
+    historyTextElement("span", "history-count", page.loading && !page.items.length ? "读取中" : `${page.total} 条`),
+  );
+  container.append(
+    heading,
+    historyTextElement("p", "history-description", section.description),
+  );
+
+  if (page.error && !page.items.length) {
+    const empty = historyTextElement("div", "history-empty", page.error);
+    const retry = historyTextElement("button", "history-more", "重试");
+    retry.type = "button";
+    retry.dataset.historyRetry = section.category;
+    retry.addEventListener("click", () => void loadContentHistoryCategory(
+      section.category,
+      false,
+      contentHistoryGeneration,
+      contentHistoryFocusToken({ category: section.category, action: "retry" }),
+    ));
+    empty.append(retry);
+    container.append(empty);
+  } else if (page.loading && !page.items.length) {
+    const loading = historyTextElement("div", "history-empty", "正在整理这段历史…");
+    loading.setAttribute("role", "status");
+    container.append(loading);
+  } else if (!page.items.length) {
+    container.append(historyTextElement("div", "history-empty", "近 30 天还没有这类记录。"));
+  } else {
+    const list = document.createElement("div");
+    list.className = "history-list";
+    page.items.forEach((item) => list.append(buildContentHistoryCard(item, section.category)));
+    container.append(list);
+  }
+
+  if (page.items.length && (page.error || page.notice)) {
+    const message = historyTextElement(
+      "p",
+      `history-page-message ${page.error ? "is-error" : "is-notice"}`,
+      page.error || page.notice,
+    );
+    message.setAttribute("role", page.error ? "alert" : "status");
+    container.append(message);
+  }
+
+  const refreshingExisting = page.loading && page.items.length > 0;
+  if (
+    refreshingExisting
+    || page.refreshRequired
+    || (page.error && page.items.length)
+    || page.hasMore
+  ) {
+    const label = refreshingExisting
+      ? "刷新中…"
+      : page.loadingMore
+      ? "加载中…"
+      : page.refreshRequired
+        ? "重试刷新列表"
+        : page.error
+          ? "重试加载更多"
+          : "加载更多";
+    const more = historyTextElement("button", "history-more", label);
+    more.type = "button";
+    more.dataset[page.refreshRequired || refreshingExisting ? "historyRetry" : "historyMore"] = section.category;
+    if (page.loading || page.loadingMore) more.setAttribute("aria-disabled", "true");
+    more.addEventListener("click", () => void loadContentHistoryCategory(
+      section.category,
+      !page.refreshRequired && !refreshingExisting,
+      contentHistoryGeneration,
+      contentHistoryFocusToken({
+        category: section.category,
+        action: page.refreshRequired || refreshingExisting ? "retry" : "more",
+      }),
+    ));
+    container.append(more);
+  }
+  return container;
+}
+
+function renderContentHistory() {
+  if (!(elements.historySections instanceof HTMLElement)) return;
+  elements.historySections.replaceChildren(...CONTENT_HISTORY_SECTIONS.map(buildContentHistorySection));
+}
+
+function contentHistoryFocusToken(token) {
+  return {
+    ...token,
+    scrollTop: Number(elements.content?.scrollTop) || 0,
+  };
+}
+
+function restoreContentHistoryFocus(token, { preferAction = true } = {}) {
+  if (!(elements.historySections instanceof HTMLElement) || !token) return;
+  const section = [...elements.historySections.querySelectorAll("[data-history-category]")]
+    .find((entry) => entry.dataset.historyCategory === token.category);
+  if (!section) return;
+  const card = token.itemKey
+    ? [...section.querySelectorAll("[data-history-item-key]")]
+      .find((entry) => entry.dataset.historyItemKey === token.itemKey)
+    : null;
+  let target = null;
+  if (card && preferAction && token.context) {
+    target = [...card.querySelectorAll("[data-history-context]")].find((button) => (
+      button.dataset.historyContext === token.context && !button.disabled
+    ));
+  }
+  if (card && !target) {
+    target = card.querySelector("[data-history-context]:not(:disabled):not([aria-disabled='true'])")
+      || card.querySelector(".history-card-open:not(:disabled)");
+  }
+  if (!target && token.action) {
+    target = section.querySelector(`[data-history-${token.action}]`)
+      || section.querySelector("[data-history-more], [data-history-retry]");
+  }
+  target ||= section.querySelector("h3[tabindex='-1']");
+  if (elements.content instanceof HTMLElement) elements.content.scrollTop = token.scrollTop;
+  target?.focus({ preventScroll: true });
+  if (elements.content instanceof HTMLElement) elements.content.scrollTop = token.scrollTop;
+}
+
+async function loadContentHistoryCategory(category, append, generation = contentHistoryGeneration, focusToken = null) {
+  const page = contentHistoryState[category];
+  if (!page || page.loading || page.loadingMore) return;
+  if (append) page.loadingMore = true;
+  else page.loading = true;
+  page.error = "";
+  page.notice = "";
+  page.refreshRequired = false;
+  renderContentHistory();
+  restoreContentHistoryFocus(focusToken);
+  try {
+    const payload = await fetchContentHistory(
+      category,
+      CONTENT_HISTORY_PAGE_SIZE,
+      append ? page.nextCursor : "",
+    );
+    if (generation !== contentHistoryGeneration) return;
+    const reconciled = reconcileContentHistoryPage({
+      items: page.items,
+      incomingItems: payload.items,
+      incomingTotal: payload.total,
+      nextCursor: payload.next_cursor,
+      hasMore: payload.has_more,
+      append,
+    });
+    page.items = reconciled.items;
+    page.total = reconciled.total;
+    page.nextCursor = reconciled.nextCursor;
+    page.hasMore = reconciled.hasMore;
+  } catch (error) {
+    if (generation !== contentHistoryGeneration) return;
+    page.error = error?.message || "历史记录加载失败，请稍后重试。";
+  } finally {
+    if (generation !== contentHistoryGeneration) return;
+    page.loading = false;
+    page.loadingMore = false;
+    renderContentHistory();
+    restoreContentHistoryFocus(focusToken);
+  }
+}
+
+async function refreshContentHistory(force = false) {
+  if (!force && contentHistoryLoadedAt && Date.now() - contentHistoryLoadedAt < 5_000) return;
+  contentHistoryGeneration += 1;
+  const generation = contentHistoryGeneration;
+  contentHistoryLoadedAt = Date.now();
+  Object.values(contentHistoryState).forEach((page) => {
+    page.items = [];
+    page.total = 0;
+    page.nextCursor = "";
+    page.hasMore = false;
+    page.loading = false;
+    page.loadingMore = false;
+    page.error = "";
+    page.notice = "";
+    page.refreshRequired = false;
+  });
+  await Promise.allSettled(CONTENT_HISTORY_SECTIONS.map(({ category }) => (
+    loadContentHistoryCategory(category, false, generation)
+  )));
+}
+
+function bindContentHistory() {
+  if (elements.historyRefresh instanceof HTMLButtonElement) {
+    elements.historyRefresh.addEventListener("click", () => void refreshContentHistory(true));
+  }
 }
 
 function showRecommendationEmptyState(title, message) {
@@ -3288,6 +3797,7 @@ function recommendationStats(item) {
   if (item?.view_count > 0) segments.push(`▶ ${formatCountCn(item.view_count)}`);
   if (item?.like_count > 0) segments.push(`👍 ${formatCountCn(item.like_count)}`);
   if (item?.comment_count > 0) segments.push(`💬 ${formatCountCn(item.comment_count)}`);
+  if (item?.share_count > 0) segments.push(`🔁 ${formatCountCn(item.share_count)}`);
   if (item?.favorite_count > 0) segments.push(`⭐ ${formatCountCn(item.favorite_count)}`);
   if (item?.danmaku_count > 0) segments.push(`弹幕 ${formatCountCn(item.danmaku_count)}`);
   if (item?.rating_score > 0) segments.push(`评分 ${Number(item.rating_score).toFixed(1)}`);
@@ -5647,31 +6157,36 @@ function renderDelightSlot() {
   banner.dataset.state = delight.state || "pending";
 
   // ── Row (always visible) ────────────────────────────────────────
-  const row = document.createElement("button");
-  row.type = "button";
+  const row = document.createElement("div");
   row.className = "delight-banner-row";
-  row.setAttribute("aria-expanded", isExpanded ? "true" : "false");
-  row.addEventListener("click", () => {
+  const toggleExpanded = () => {
     updateDelightHead({ expanded: !isExpanded });
     renderDelightSlot();
-  });
+  };
+  row.addEventListener("click", toggleExpanded);
 
   // Thumbnail (left)
   const thumb = document.createElement("span");
   thumb.className = "delight-banner-thumb";
+  const renderTextThumb = () => {
+    thumb.replaceChildren();
+    thumb.classList.add("is-fallback", "is-text-card");
+    const excerpt = document.createElement("span");
+    excerpt.className = "delight-banner-thumb-text";
+    excerpt.textContent = delight.body_text || delight.title || "一条文字推荐";
+    thumb.append(excerpt);
+  };
   if (delight.cover_url) {
     const image = document.createElement("img");
     void setProxyImageSrc(image, delight.cover_url);
     image.alt = "";
     image.addEventListener("error", () => {
       image.remove();
-      thumb.classList.add("is-fallback");
-      thumb.textContent = "✨";
+      renderTextThumb();
     });
     thumb.append(image);
   } else {
-    thumb.classList.add("is-fallback");
-    thumb.textContent = "✨";
+    renderTextThumb();
   }
 
   // Text column
@@ -5727,9 +6242,16 @@ function renderDelightSlot() {
 
   textCol.append(kickerLine, titleText);
 
-  const chevron = document.createElement("span");
+  const chevron = document.createElement("button");
+  chevron.type = "button";
   chevron.className = "delight-banner-chevron";
+  chevron.setAttribute("aria-label", isExpanded ? "收起惊喜推荐" : "展开惊喜推荐");
+  chevron.setAttribute("aria-expanded", isExpanded ? "true" : "false");
   chevron.textContent = isExpanded ? "▾" : "▸";
+  chevron.addEventListener("click", (event) => {
+    event.stopPropagation();
+    toggleExpanded();
+  });
 
   row.append(thumb, textCol, chevron);
 
@@ -6252,7 +6774,9 @@ function renderRecommendations(items, { append = false } = {}) {
     } else {
       // No-cover text card (X tweet/thread or empty cover): show the
       // body text instead of a thumbnail — never an <img> node.
-      cover.classList.add("is-fallback", "is-text-card");
+      card.classList.add("is-text-only");
+      preview.classList.add("is-text-only");
+      cover.classList.add("is-text-card");
       const textNode = document.createElement("p");
       textNode.className = "recommendation-cover-text";
       textNode.textContent = cardMedia.text || "先看标题也行";
@@ -6277,7 +6801,7 @@ function renderRecommendations(items, { append = false } = {}) {
     }
     const platformKey = (item.source_platform || "bilibili").toLowerCase();
     const platformLabel =
-      { bilibili: "B 站", xiaohongshu: "小红书", douyin: "抖音", youtube: "YouTube", twitter: "X", zhihu: "知乎", reddit: "Reddit", bangumi: "Bangumi", linuxdo: "Linux.do" }[
+      { bilibili: "B 站", xiaohongshu: "小红书", douyin: "抖音", weibo: "微博", youtube: "YouTube", twitter: "X", zhihu: "知乎", reddit: "Reddit", bangumi: "Bangumi", linuxdo: "Linux.do", v2ex: "V2EX" }[
         platformKey
       ] || item.source_platform;
     const sourceCorner = document.createElement("span");
@@ -6932,20 +7456,48 @@ async function handleManualRefresh() {
 function bindTabs() {
   const bindings = [
     [elements.tabRecommend, "recommend"],
-    [elements.tabWatchLater, "watchLater"],
-    [elements.tabFavorites, "favorites"],
+    [elements.tabLibrary, "library"],
     [elements.tabProfile, "profile"],
     [elements.tabChat, "chat"],
   ];
 
-  for (const [button, tabName] of bindings) {
+  bindings.forEach(([button, tabName], index) => {
     if (!(button instanceof HTMLButtonElement)) {
-      continue;
+      return;
     }
-    button.addEventListener("click", () => {
-      setActiveTab(tabName);
+    button.addEventListener("click", () => setActiveTab(tabName));
+    button.addEventListener("keydown", (event) => {
+      let nextIndex = null;
+      if (event.key === "ArrowRight") nextIndex = (index + 1) % bindings.length;
+      else if (event.key === "ArrowLeft") nextIndex = (index - 1 + bindings.length) % bindings.length;
+      else if (event.key === "Home") nextIndex = 0;
+      else if (event.key === "End") nextIndex = bindings.length - 1;
+      if (nextIndex === null) return;
+      event.preventDefault();
+      setActiveTab(bindings[nextIndex][1]);
+      bindings[nextIndex][0]?.focus();
     });
-  }
+  });
+
+  const libraryBindings = [
+    [elements.tabWatchLater, "watchLater"],
+    [elements.tabFavorites, "favorites"],
+    [elements.tabHistory, "history"],
+  ];
+  libraryBindings.forEach(([button, tabName], index) => {
+    if (!(button instanceof HTMLButtonElement)) return;
+    button.addEventListener("click", () => setActiveLibraryTab(tabName, { forceLoad: true }));
+    button.addEventListener("keydown", (event) => {
+      let nextIndex = null;
+      if (event.key === "ArrowRight") nextIndex = (index + 1) % libraryBindings.length;
+      else if (event.key === "ArrowLeft") nextIndex = (index - 1 + libraryBindings.length) % libraryBindings.length;
+      else if (event.key === "Home") nextIndex = 0;
+      else if (event.key === "End") nextIndex = libraryBindings.length - 1;
+      if (nextIndex === null) return;
+      event.preventDefault();
+      setActiveLibraryTab(libraryBindings[nextIndex][1], { focus: true });
+    });
+  });
 }
 
 function bindProfileHistoryLoading() {
@@ -7775,12 +8327,24 @@ function bindSettings() {
     ["creator", "cfgLinuxdoModeCreator"],
     ["related", "cfgLinuxdoModeRelated"],
   ];
+  const WEIBO_SOURCE_MODE_FIELDS = [
+    ["search", "cfgWeiboModeSearch"],
+    ["hot", "cfgWeiboModeHot"],
+    ["creator", "cfgWeiboModeCreator"],
+  ];
   const BANGUMI_SUBJECT_TYPE_FIELDS = [
     ["anime", "cfgBangumiTypeAnime"],
     ["book", "cfgBangumiTypeBook"],
     ["game", "cfgBangumiTypeGame"],
     ["music", "cfgBangumiTypeMusic"],
     ["real", "cfgBangumiTypeReal"],
+  ];
+  const V2EX_SOURCE_MODE_FIELDS = [
+    ["search", "cfgV2exModeSearch"],
+    ["node", "cfgV2exModeNode"],
+    ["tab", "cfgV2exModeTab"],
+    ["hot", "cfgV2exModeHot"],
+    ["latest", "cfgV2exModeLatest"],
   ];
 
   function setCheckedValues(fields, rawValues) {
@@ -7799,6 +8363,24 @@ function bindSettings() {
   function collectCheckedValues(fields, fallback) {
     const selected = fields.filter(([, id]) => checked(id)).map(([value]) => value);
     return selected.length > 0 ? selected : fallback;
+  }
+
+  function setWeiboSourceModes(rawValues) {
+    const selected = Array.isArray(rawValues) ? [...rawValues] : rawValues;
+    if (Array.isArray(selected) && selected.length === 1 && selected[0] === "creator") {
+      selected.unshift("search");
+    }
+    setCheckedValues(WEIBO_SOURCE_MODE_FIELDS, selected);
+  }
+
+  function collectWeiboSourceModes() {
+    const selected = collectCheckedValues(WEIBO_SOURCE_MODE_FIELDS, ["search"]);
+    if (selected.length === 1 && selected[0] === "creator") {
+      const search = document.getElementById("cfgWeiboModeSearch");
+      if (search) search.checked = true;
+      return ["search", "creator"];
+    }
+    return selected;
   }
 
   // Unified per-source login / cookie status from GET /api/sources/status,
@@ -7870,6 +8452,74 @@ function bindSettings() {
       if (dot) dot.style.color = access.color;
       applySourceNetworkHint(row, access.present ? item.network_hint : "", access.enabled);
       row.style.opacity = access.present && !access.enabled ? "0.6" : "1";
+    }
+    await renderV2exIdentity();
+  }
+
+  const V2EX_IDENTITY_ORIGIN_LABELS = {
+    pat: "PAT",
+    browser: "浏览器",
+    configured: "配置",
+    accepted: "已选择",
+  };
+
+  function renderV2exIdentityResult(identity) {
+    const statusEl = document.getElementById("cfgV2exIdentityStatus");
+    const acceptButton = document.getElementById("cfgV2exAcceptBrowserIdentity");
+    if (!statusEl || !acceptButton) return;
+    const claims = identity?.claims && typeof identity.claims === "object" ? identity.claims : {};
+    const browser = String(claims.browser || "").trim();
+    const active = String(identity?.active_profile_identity?.username || "").trim();
+    acceptButton.dataset.username = browser;
+    acceptButton.hidden = !(browser && identity?.status === "identity_mismatch");
+    if (!identity) {
+      setProbeStatus(statusEl, "muted", "后端不可达，暂时无法读取身份状态。");
+      return;
+    }
+    if (identity.status === "identity_mismatch") {
+      const detail = Object.entries(claims)
+        .map(([origin, username]) => `${V2EX_IDENTITY_ORIGIN_LABELS[origin] || origin}=${username}`)
+        .join(" · ");
+      setProbeStatus(statusEl, "error", `身份冲突：${detail}。账号初始化已暂停，公开发现仍可用。`);
+      return;
+    }
+    if (identity.identity_switch_required) {
+      setProbeStatus(
+        statusEl,
+        "warning",
+        `当前浏览器账号 ${browser || identity.username}，画像仍属于 ${active}；增量同步已暂停，请运行一次 V2EX 完整初始化完成切换。`,
+      );
+      return;
+    }
+    if (identity.status === "resolved") {
+      const suffix = identity.private_bootstrap_available ? "，浏览器四 Scope 初始化可用。" : "；公开发现可用。";
+      setProbeStatus(statusEl, "success", `当前账号 ${identity.username}${suffix}`);
+      return;
+    }
+    setProbeStatus(statusEl, "muted", "尚未识别账号；匿名公开发现仍可用。");
+  }
+
+  async function renderV2exIdentity() {
+    try {
+      renderV2exIdentityResult(await fetchV2exIdentity());
+    } catch {
+      renderV2exIdentityResult(null);
+    }
+  }
+
+  async function acceptCurrentV2exBrowserIdentity(button) {
+    const username = String(button?.dataset?.username || "").trim();
+    const statusEl = document.getElementById("cfgV2exIdentityStatus");
+    if (!username || button.disabled) return;
+    button.disabled = true;
+    setProbeStatus(statusEl, "pending", `正在采用浏览器账号 ${username}…`);
+    try {
+      await acceptV2exBrowserIdentity(username);
+      await renderV2exIdentity();
+    } catch (error) {
+      setProbeStatus(statusEl, "error", error?.message || "身份选择失败。");
+    } finally {
+      button.disabled = false;
     }
   }
 
@@ -8675,6 +9325,14 @@ function bindSettings() {
     setVal("cfgDouyinDailyFeedBudget", cfg.sources?.douyin?.daily_feed_budget);
     setVal("cfgDouyinRequestInterval", cfg.sources?.douyin?.request_interval_seconds);
     setVal("cfgDouyinMinInterval", cfg.sources?.douyin?.min_interval_minutes);
+    const weiboEnabled = document.getElementById("cfgWeiboEnabled");
+    if (weiboEnabled) weiboEnabled.checked = cfg.sources?.weibo?.enabled === true;
+    setWeiboSourceModes(cfg.sources?.weibo?.source_modes);
+    setVal("cfgWeiboDailySearchBudget", cfg.sources?.weibo?.daily_search_budget);
+    setVal("cfgWeiboDailyHotBudget", cfg.sources?.weibo?.daily_hot_budget);
+    setVal("cfgWeiboDailyCreatorBudget", cfg.sources?.weibo?.daily_creator_budget);
+    setVal("cfgWeiboRequestInterval", cfg.sources?.weibo?.request_interval_seconds);
+    setVal("cfgWeiboMinInterval", cfg.sources?.weibo?.min_interval_minutes);
     const youtubeEnabled = document.getElementById("cfgYoutubeEnabled");
     if (youtubeEnabled) youtubeEnabled.checked = cfg.sources?.youtube?.enabled === true;
     setVal("cfgYoutubeDailySearchBudget", cfg.sources?.youtube?.daily_search_budget);
@@ -8752,6 +9410,31 @@ function bindSettings() {
     setVal("cfgLinuxdoRequestInterval", cfg.sources?.linuxdo?.request_interval_seconds);
     setVal("cfgLinuxdoMinInterval", cfg.sources?.linuxdo?.min_interval_minutes);
     setVal("cfgLinuxdoBootstrapLimit", cfg.sources?.linuxdo?.bootstrap_limit);
+    const v2exEnabled = document.getElementById("cfgV2exEnabled");
+    if (v2exEnabled) v2exEnabled.checked = cfg.sources?.v2ex?.enabled === true;
+    setVal("cfgV2exUsername", cfg.sources?.v2ex?.username);
+    {
+      const v2exToken = document.getElementById("cfgV2exAccessToken");
+      if (v2exToken) {
+        v2exToken.value = "";
+        v2exToken.placeholder = cfg.sources?.v2ex?.access_token_set
+          ? "已配置（留空保持不变；填写新 PAT 以替换）"
+          : "可留空；匿名公开发现可直接使用";
+      }
+      const v2exClearToken = document.getElementById("cfgV2exClearToken");
+      if (v2exClearToken) {
+        v2exClearToken.checked = false;
+        v2exClearToken.disabled = cfg.sources?.v2ex?.access_token_set !== true;
+      }
+    }
+    setCheckedValues(V2EX_SOURCE_MODE_FIELDS, cfg.sources?.v2ex?.source_modes);
+    setVal("cfgV2exDailySearchBudget", cfg.sources?.v2ex?.daily_search_budget);
+    setVal("cfgV2exDailyNodeBudget", cfg.sources?.v2ex?.daily_node_budget);
+    setVal("cfgV2exDailyTabBudget", cfg.sources?.v2ex?.daily_tab_budget);
+    setVal("cfgV2exDailyHotBudget", cfg.sources?.v2ex?.daily_hot_budget);
+    setVal("cfgV2exDailyLatestBudget", cfg.sources?.v2ex?.daily_latest_budget);
+    setVal("cfgV2exRequestInterval", cfg.sources?.v2ex?.request_interval_seconds);
+    setVal("cfgV2exMinInterval", cfg.sources?.v2ex?.min_interval_minutes);
     void renderSourcesStatus();
 
     // General
@@ -8819,6 +9502,7 @@ function bindSettings() {
     setVal("cfgPoolShareReddit", cfg.scheduler?.pool_source_shares?.reddit);
     setVal("cfgPoolShareBangumi", cfg.scheduler?.pool_source_shares?.bangumi);
     setVal("cfgPoolShareLinuxdo", cfg.scheduler?.pool_source_shares?.linuxdo);
+    setVal("cfgPoolShareV2ex", cfg.scheduler?.pool_source_shares?.v2ex);
     setVal("cfgSpeculationInterval", cfg.scheduler?.speculation_interval_minutes);
     setVal("cfgSpeculationTtl", cfg.scheduler?.speculation_ttl_days);
     setVal("cfgSpeculationCooldown", cfg.scheduler?.speculation_cooldown_days);
@@ -8921,6 +9605,15 @@ function bindSettings() {
           request_interval_seconds: getInt("cfgDouyinRequestInterval", 2),
           min_interval_minutes: getInt("cfgDouyinMinInterval", 3),
         },
+        weibo: {
+          enabled: checked("cfgWeiboEnabled"),
+          source_modes: collectWeiboSourceModes(),
+          daily_search_budget: getInt("cfgWeiboDailySearchBudget", 60),
+          daily_hot_budget: getInt("cfgWeiboDailyHotBudget", 10),
+          daily_creator_budget: getInt("cfgWeiboDailyCreatorBudget", 30),
+          request_interval_seconds: getInt("cfgWeiboRequestInterval", 3),
+          min_interval_minutes: getInt("cfgWeiboMinInterval", 10),
+        },
         youtube: {
           enabled: checked("cfgYoutubeEnabled"),
           daily_search_budget: getInt("cfgYoutubeDailySearchBudget", 0),
@@ -8997,6 +9690,23 @@ function bindSettings() {
           min_interval_minutes: getInt("cfgLinuxdoMinInterval", 3),
           bootstrap_limit: getInt("cfgLinuxdoBootstrapLimit", 300),
         },
+        v2ex: {
+          enabled: checked("cfgV2exEnabled"),
+          username: getVal("cfgV2exUsername"),
+          ...(checked("cfgV2exClearToken")
+            ? { access_token: "" }
+            : (getVal("cfgV2exAccessToken") || "") !== ""
+              ? { access_token: getVal("cfgV2exAccessToken") }
+              : {}),
+          source_modes: collectCheckedValues(V2EX_SOURCE_MODE_FIELDS, ["search"]),
+          daily_search_budget: getInt("cfgV2exDailySearchBudget", 120),
+          daily_node_budget: getInt("cfgV2exDailyNodeBudget", 180),
+          daily_tab_budget: getInt("cfgV2exDailyTabBudget", 80),
+          daily_hot_budget: getInt("cfgV2exDailyHotBudget", 40),
+          daily_latest_budget: getInt("cfgV2exDailyLatestBudget", 40),
+          request_interval_seconds: getInt("cfgV2exRequestInterval", 2),
+          min_interval_minutes: getInt("cfgV2exMinInterval", 5),
+        },
       },
       discovery: {
         ...(state.runtimeConfig?.discovery || {}),
@@ -9039,6 +9749,7 @@ function bindSettings() {
           reddit: getInt("cfgPoolShareReddit", 1),
           bangumi: getInt("cfgPoolShareBangumi", 1),
           linuxdo: getInt("cfgPoolShareLinuxdo", 1),
+          v2ex: getInt("cfgPoolShareV2ex", 1),
         },
         speculation_interval_minutes: getInt("cfgSpeculationInterval", 10),
         speculation_ttl_days: getInt("cfgSpeculationTtl", 3),
@@ -9122,12 +9833,14 @@ function bindSettings() {
     bilibili: "cfgBilibiliEnabled",
     xiaohongshu: "cfgXhsEnabled",
     douyin: "cfgDouyinEnabled",
+    weibo: "cfgWeiboEnabled",
     youtube: "cfgYoutubeEnabled",
     twitter: "cfgTwitterEnabled",
     zhihu: "cfgZhihuEnabled",
     reddit: "cfgRedditEnabled",
     bangumi: "cfgBangumiEnabled",
-    linuxdo: "cfgLinuxdoEnabled"
+    linuxdo: "cfgLinuxdoEnabled",
+    v2ex: "cfgV2exEnabled",
   };
 
   function setSourceCardOpen(card, open) {
@@ -9253,6 +9966,15 @@ function bindSettings() {
   }
 
   document.getElementById("settingsPanelSources")?.addEventListener("click", (event) => {
+    const identityButton = event.target?.closest?.("#cfgV2exAcceptBrowserIdentity");
+    if (identityButton instanceof HTMLButtonElement) {
+      void acceptCurrentV2exBrowserIdentity(identityButton);
+      return;
+    }
+    if (event.target?.closest?.("#cfgV2exRefreshIdentity")) {
+      void renderV2exIdentity();
+      return;
+    }
     const button = event.target?.closest?.(".source-verify-btn");
     if (!(button instanceof HTMLButtonElement) || button.disabled) return;
     void runSourceVerify(button);
@@ -9575,35 +10297,41 @@ function bindSettings() {
             bilibili: checked("cfgBilibiliEnabled", true),
             xiaohongshu: checked("cfgXhsEnabled"),
             douyin: checked("cfgDouyinEnabled"),
+            weibo: checked("cfgWeiboEnabled"),
             youtube: checked("cfgYoutubeEnabled"),
             twitter: checked("cfgTwitterEnabled"),
             zhihu: checked("cfgZhihuEnabled"),
             reddit: checked("cfgRedditEnabled"),
             bangumi: checked("cfgBangumiEnabled"),
             linuxdo: checked("cfgLinuxdoEnabled"),
+            v2ex: checked("cfgV2exEnabled"),
           },
           configured_shares: {
             bilibili: getInt("cfgPoolShareBilibili", 5),
             xiaohongshu: getInt("cfgPoolShareXhs", 1),
             douyin: getInt("cfgPoolShareDouyin", 1),
+            weibo: getInt("cfgPoolShareWeibo", 1),
             youtube: getInt("cfgPoolShareYoutube", 1),
             twitter: getInt("cfgPoolShareTwitter", 1),
             zhihu: getInt("cfgPoolShareZhihu", 1),
             reddit: getInt("cfgPoolShareReddit", 1),
             bangumi: getInt("cfgPoolShareBangumi", 1),
             linuxdo: getInt("cfgPoolShareLinuxdo", 1),
+            v2ex: getInt("cfgPoolShareV2ex", 1),
           },
         });
         const shares = suggestion?.suggested_shares || {};
         if (shares.bilibili !== undefined) setVal("cfgPoolShareBilibili", shares.bilibili);
         if (shares.xiaohongshu !== undefined) setVal("cfgPoolShareXhs", shares.xiaohongshu);
         if (shares.douyin !== undefined) setVal("cfgPoolShareDouyin", shares.douyin);
+        if (shares.weibo !== undefined) setVal("cfgPoolShareWeibo", shares.weibo);
         if (shares.youtube !== undefined) setVal("cfgPoolShareYoutube", shares.youtube);
         if (shares.twitter !== undefined) setVal("cfgPoolShareTwitter", shares.twitter);
         if (shares.zhihu !== undefined) setVal("cfgPoolShareZhihu", shares.zhihu);
         if (shares.reddit !== undefined) setVal("cfgPoolShareReddit", shares.reddit);
         if (shares.bangumi !== undefined) setVal("cfgPoolShareBangumi", shares.bangumi);
         if (shares.linuxdo !== undefined) setVal("cfgPoolShareLinuxdo", shares.linuxdo);
+        if (shares.v2ex !== undefined) setVal("cfgPoolShareV2ex", shares.v2ex);
         markSettingsDirty(suggestBtn);
         showToast("已按已有信号填入建议比例，保存后生效。", "success");
       } catch (err) {
@@ -9880,8 +10608,10 @@ async function maybeShowEmbeddingBanner() {
 async function initializePopup() {
   const params = new URLSearchParams(window.location.search);
   const requestedTab = params.get("tab");
+  const requestedLibraryTab = params.get("section") || params.get("library") || "";
   state.delightHighlightBvid = params.get("delight")?.trim() || "";
   bindTabs();
+  bindContentHistory();
   bindProfileHistoryLoading();
   initRecommendationAutoLoadIntent();
   bindRefreshButton();
@@ -9895,9 +10625,10 @@ async function initializePopup() {
 
   bindMessages();
   setActiveTab(
-    requestedTab === "profile" || requestedTab === "chat" || requestedTab === "recommend"
+    ["recommend", "library", "watchLater", "favorites", "history", "profile", "chat"].includes(requestedTab)
       ? requestedTab
       : "recommend",
+    { libraryTab: requestedLibraryTab },
   );
   setHint("先看看本地后端连上没。");
   await initializeRecommendations();

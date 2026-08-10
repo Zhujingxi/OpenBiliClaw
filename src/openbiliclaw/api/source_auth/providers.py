@@ -1,9 +1,9 @@
 """Per-platform source-auth providers.
 
 ``GET /api/sources/status`` used to be a 424-line if/elif chain that flattened
-seven heterogeneous platforms by hand (spec D8). Adding a platform meant editing
+heterogeneous platforms by hand (spec D8). Adding a platform meant editing
 that one function, and nothing forced the new branch to answer the same
-questions as the previous seven — which is how the same ``state="ready"`` came
+questions as the previous providers — which is how the same ``state="ready"`` came
 to mean "we counted three cookie field names" for B站 and "a file exists on
 disk" for Reddit.
 
@@ -14,14 +14,15 @@ quietly skip one:
 * ``auth_required`` — does this source need a credential at all?
 * ``credential`` / ``credential_origin`` — is one stored, and where?
 * ``verification`` / ``verify_method`` — what was concluded, and *how*?
-* ``legacy_state`` / ``legacy_logged_in`` — the pre-existing verdict, carried
-  verbatim.
+* ``legacy_state`` / ``legacy_logged_in`` — the compatibility verdict in the
+  old vocabulary.
 
-**The legacy fields are transcribed, never derived.** Wave A promises
-byte-identical output from the old endpoint, and the old ``state`` is provably
-not a function of the orthogonal fields (see ``legacy.py``). Each provider
-therefore repeats its historical branch structure exactly, and
-``check_legacy_consistency`` asserts the two views never contradict each other.
+**The compatibility fields remain provider-owned, never globally derived.**
+The old ``state`` is provably not a function of the orthogonal fields (see
+``legacy.py``), so each provider preserves its platform-specific semantics.
+When a provider gains stronger evidence, it may intentionally move within the
+old vocabulary too; ``check_legacy_consistency`` asserts the two views never
+contradict each other.
 
 **No provider performs network I/O.** The status endpoint is polled every ~30s
 by open settings pages; the two platforms with live probes (B站, 抖音) read a
@@ -62,6 +63,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from openbiliclaw.api.source_auth.contract import (
+        CapabilityReadinessState,
         Credential,
         CredentialOrigin,
         Verification,
@@ -75,6 +77,7 @@ if TYPE_CHECKING:
 # on 2026-07-18: 71h -> ready, 73h -> stale (spec D2).
 _XHS_LOGIN_FRESH_HOURS = 72
 _ZHIHU_LOGIN_FRESH_HOURS = 72
+_V2EX_LOGIN_FRESH_HOURS = 72
 _LINUXDO_LOGIN_FRESH_HOURS = 72
 _HEARTBEAT_TTL_SECONDS = 72 * 3600
 
@@ -200,7 +203,7 @@ _BILIBILI_READY_DETAIL: dict[str, str] = {
 #
 # Note this is the contract's own ``detail``; the settings chip renders the
 # discovery-health ``detail`` that ``_bangumi_status_item`` keeps (Bangumi
-# carries a discovery-health axis the seven cookie/heartbeat platforms do not).
+# carries a discovery-health axis the other providers do not).
 _BANGUMI_TOKEN_DETAIL: dict[str, str] = {
     "verified": "个人令牌有效，已识别 Bangumi 账号，可读取你的私密收藏。",
     "failed": (
@@ -213,6 +216,14 @@ _BANGUMI_TOKEN_DETAIL: dict[str, str] = {
 
 # Contract-side ``detail`` for Bangumi with no token — the anonymous default.
 _BANGUMI_ANONYMOUS_DETAIL = "公开源 · 无需登录；可选填个人令牌以识别账号或读取私密收藏。"
+
+_V2EX_TOKEN_DETAIL: dict[str, str] = {
+    "verified": "个人令牌有效，已识别 V2EX 账号，可使用 API 2.0 增强发现。",
+    "failed": "V2EX 个人令牌被拒绝（可能过期或无效）；公开发现不受影响。",
+    "stale": "V2EX 个人令牌上次联网确认已超出有效期，可点「测试连接」重新确认。",
+    "unverified": "已保存 V2EX 个人令牌，尚未联网确认；可点「测试连接」验证。",
+}
+_V2EX_ANONYMOUS_DETAIL = "公开源 · 无需登录；可选填 PAT 以识别账号并增强 Node / Topic API。"
 
 
 @dataclass
@@ -557,9 +568,9 @@ def auth_douyin(ctx: SourceAuthContext) -> SourceAuthContract:
     ("用户未登录") when not (spec D11, refuting the old "no stable nav endpoint"
     claim). The verdict is read from the probe cache, never fetched here.
 
-    Note the legacy verdict stays ``("unverified", False)`` even when a cached
-    probe says ``verified``: that literal pair is what Wave A froze, and the
-    upgrade reaches users when the frontends switch to the orthogonal fields.
+    The compatibility fields follow the same cached verdict as the orthogonal
+    contract. Keeping ``state='unverified'`` after a successful live probe made
+    ``GET /api/sources/status`` contradict itself for legacy/agent consumers.
     """
     cfg = ctx.cfg
     dy_cfg = ctx.source_cfg("douyin")
@@ -588,6 +599,12 @@ def auth_douyin(ctx: SourceAuthContext) -> SourceAuthContract:
 
     origin: CredentialOrigin = "env" if os.environ.get(cookie_env, "").strip() else "data_file"
     verification, verified_at = _probe_verdict(ctx, "douyin", credential="present", cookie=cookie)
+    if verification == "verified":
+        legacy_state, legacy_logged_in = "ready", True
+    elif verification == "stale":
+        legacy_state, legacy_logged_in = "stale", False
+    else:
+        legacy_state, legacy_logged_in = "unverified", False
     return SourceAuthContract(
         auth_required=True,
         credential="present",
@@ -598,8 +615,8 @@ def auth_douyin(ctx: SourceAuthContext) -> SourceAuthContract:
         verify_ttl_seconds=_probe_ttl(verification),
         can_verify_now=True,
         detail=_DOUYIN_DETAIL.get(verification, _DOUYIN_DETAIL["unverified"]),
-        legacy_state="unverified",
-        legacy_logged_in=False,
+        legacy_state=legacy_state,
+        legacy_logged_in=legacy_logged_in,
     )
 
 
@@ -607,11 +624,11 @@ def auth_douyin(ctx: SourceAuthContext) -> SourceAuthContract:
 
 
 def auth_youtube(ctx: SourceAuthContext) -> SourceAuthContract:
-    """YouTube: public source, the one platform legitimately needing no login.
+    """YouTube: a public source that legitimately needs no login.
 
     ``verify_method`` must stay ``none`` here — not because verification is
     hard, but because there is nothing to verify. That is the only honest use
-    of ``none`` in the whole table (invariant I3).
+    of ``none`` for a source with no credential to verify (invariant I3).
     """
     return SourceAuthContract(
         auth_required=False,
@@ -622,6 +639,26 @@ def auth_youtube(ctx: SourceAuthContext) -> SourceAuthContract:
         verify_ttl_seconds=None,
         can_verify_now=False,
         detail="公开源 · 无需登录。",
+        legacy_state="no_auth",
+        legacy_logged_in=True,
+    )
+
+
+# ── Weibo ───────────────────────────────────────────────────────────
+
+
+def auth_weibo(ctx: SourceAuthContext) -> SourceAuthContract:
+    """Weibo: public discovery through an in-memory anonymous guest session."""
+
+    return SourceAuthContract(
+        auth_required=False,
+        credential="none",
+        credential_origin="none",
+        verification="unverified",
+        verify_method="none",
+        verify_ttl_seconds=None,
+        can_verify_now=False,
+        detail="匿名访客源 · 无需用户登录或 Cookie；访客会话只保存在进程内存中。",
         legacy_state="no_auth",
         legacy_logged_in=True,
     )
@@ -813,7 +850,7 @@ def auth_zhihu(ctx: SourceAuthContext) -> SourceAuthContract:
         # Timestamp columns feed only the display-only ``verified_at``. The
         # legacy branch never read them, so a row that cannot supply them must
         # cost the timestamp and nothing else — without this guard an unexpected
-        # row shape would raise out of the handler and 500 all seven platforms.
+        # row shape would raise out of the handler and 500 the entire source-status response.
         at = ""
         with suppress(Exception):
             at = str(_row_value(row, "completed_at", 4) or _row_value(row, "created_at", 3) or "")
@@ -1123,14 +1160,12 @@ def auth_bangumi(ctx: SourceAuthContext) -> SourceAuthContract:
     not, and folding it back into ``legacy_state`` would re-create the D1
     conflation the contract exists to remove.
 
-    **Known contract-shape gap (reported, not papered over):** because
-    ``auth_required=False``, the frontends render Bangumi as 「无需登录」 and
-    suppress the evidence badge even when a token is verified — ``source-auth.md``
-    is explicit that a no-credential source has no evidence to grade. The token
-    verdict is still carried honestly in these fields and surfaced via the verify
-    button's message and the ``token_state`` chip; showing it as a persistent
-    ◆ 联网验证 badge would need the contract extended with an "optional credential"
-    tier plus a frontend change, which is out of scope for this zero-frontend PR.
+    The shared renderer checks ``hasVerifiableCredential()`` before applying the
+    anonymous-source shortcut. No token therefore renders 「无需登录」, while a
+    configured token keeps its verified/failed/unverified verdict and persistent
+    evidence badge even though ``auth_required`` remains false. Runtime rejection
+    still outranks cached positive evidence through the separate ``token_state``
+    axis; see ``docs/modules/source-auth.md`` for the complete precedence rules.
     """
     bgm = ctx.source_cfg("bangumi")
     token = str(getattr(bgm, "access_token", "") or "").strip()
@@ -1161,6 +1196,210 @@ def auth_bangumi(ctx: SourceAuthContext) -> SourceAuthContract:
         verify_ttl_seconds=_probe_ttl(verification),
         can_verify_now=True,
         detail=_BANGUMI_TOKEN_DETAIL.get(verification, _BANGUMI_TOKEN_DETAIL["unverified"]),
+        legacy_state="no_auth",
+        legacy_logged_in=True,
+    )
+
+
+V2EX_CAPABILITY_AUTH_MODES: dict[str, tuple[str, bool]] = {
+    "discover": ("optional-credential", True),
+    "profile": ("login-required", True),
+    "bootstrap": ("login-required", True),
+    "incremental": ("login-required", True),
+    "cookie-sync": ("login-required", False),
+}
+
+
+def _v2ex_capability_state(
+    ctx: SourceAuthContext,
+    *,
+    configured_username: object | None = None,
+) -> tuple[dict[str, SourceCapabilityAuth], Any, str]:
+    """Return V2EX capability readiness without performing network I/O."""
+
+    from openbiliclaw.sources.v2ex_identity import (
+        resolve_v2ex_identity_state,
+    )
+
+    browser_logged_in, browser_when, browser_fresh = _login_heartbeat(
+        ctx.database,
+        getter="get_v2ex_login_state",
+        fresh_hours=_V2EX_LOGIN_FRESH_HOURS,
+    )
+    resolution = resolve_v2ex_identity_state(
+        cfg=ctx.cfg,
+        database=ctx.database,
+        probes=ctx.probes,
+        configured_username=configured_username,
+    )
+    browser_detail = ""
+    if browser_logged_in and browser_fresh:
+        browser_detail = "浏览器已登录"
+        browser_username = resolution.claims.get("browser", "")
+        if browser_username:
+            browser_detail += f" · {browser_username}"
+    elif browser_when and not browser_fresh:
+        browser_detail = "浏览器登录态已过期"
+
+    discover = SourceCapabilityAuth(
+        mode="optional-credential",
+        required=True,
+        ready=True,
+        state="ready",
+        detail="公开 API 与 Feed 可匿名发现；PAT 仅用于增强。",
+    )
+    private_state: CapabilityReadinessState
+    if resolution.status == "identity_mismatch":
+        private_state = "identity_mismatch"
+        private_detail = "账号证据冲突；请先确认要使用的 V2EX 账号。"
+    elif not browser_logged_in:
+        private_state = "login_required"
+        private_detail = "浏览器尚未登录 V2EX；公开发现仍可使用。"
+    elif not browser_fresh:
+        private_state = "stale"
+        private_detail = "浏览器登录心跳已过期；请打开 V2EX 后让扩展重新同步。"
+    elif not resolution.claims.get("browser"):
+        private_state = "identity_required"
+        private_detail = "已检测到登录态，但尚未可靠识别当前 V2EX 用户。"
+    elif not resolution.private_bootstrap_available:
+        private_state = "identity_required"
+        private_detail = "浏览器账号尚未通过后端身份解析，账号初始化暂停。"
+    else:
+        private_state = "ready"
+        private_detail = f"浏览器账号 {resolution.username} 已就绪，可只读初始化。"
+
+    private_ready = private_state == "ready"
+    active_profile_username = ""
+    if hasattr(ctx.database, "get_v2ex_profile_identity"):
+        try:
+            active_profile_username = str(ctx.database.get_v2ex_profile_identity()[0] or "").strip()
+        except Exception:  # pragma: no cover - defensive storage fallback
+            active_profile_username = ""
+    incremental_switch_required = bool(
+        private_ready
+        and active_profile_username
+        and active_profile_username.casefold() != resolution.username.casefold()
+    )
+    incremental_state: CapabilityReadinessState = (
+        "identity_switch_required" if incremental_switch_required else private_state
+    )
+    incremental_detail = (
+        f"当前画像属于 V2EX 账号 {active_profile_username}；"
+        f"请用账号 {resolution.username} 完整重新初始化后再恢复增量同步。"
+        if incremental_switch_required
+        else private_detail
+    )
+    capabilities = {
+        "discover": discover,
+        "profile": SourceCapabilityAuth(
+            mode="login-required",
+            required=True,
+            ready=private_ready,
+            state=private_state,
+            detail=private_detail,
+        ),
+        "bootstrap": SourceCapabilityAuth(
+            mode="login-required",
+            required=True,
+            ready=private_ready,
+            state=private_state,
+            detail=private_detail,
+        ),
+        "incremental": SourceCapabilityAuth(
+            mode="login-required",
+            required=True,
+            ready=private_ready and not incremental_switch_required,
+            state=incremental_state,
+            detail=incremental_detail,
+        ),
+        "cookie-sync": SourceCapabilityAuth(
+            mode="login-required",
+            required=False,
+            ready=bool(browser_logged_in and browser_fresh),
+            state=(
+                "ready"
+                if browser_logged_in and browser_fresh
+                else "stale"
+                if browser_when and not browser_fresh
+                else "login_required"
+            ),
+            detail=(
+                "浏览器登录状态心跳正常。"
+                if browser_logged_in and browser_fresh
+                else "等待浏览器扩展上报 V2EX 登录状态。"
+            ),
+        ),
+    }
+    return capabilities, resolution, browser_detail
+
+
+def v2ex_capability_readiness(
+    ctx: SourceAuthContext,
+    *,
+    configured_username: object | None = None,
+) -> dict[str, SourceCapabilityAuth]:
+    """Public backend-owned readiness registry used by status and guided init."""
+
+    capabilities, _, _ = _v2ex_capability_state(
+        ctx,
+        configured_username=configured_username,
+    )
+    return capabilities
+
+
+def auth_v2ex(ctx: SourceAuthContext) -> SourceAuthContract:
+    """V2EX: anonymous-public, optional PAT, and separate browser heartbeat."""
+
+    from openbiliclaw.sources.v2ex_identity import v2ex_identity_detail
+
+    cfg = ctx.source_cfg("v2ex")
+    token_env = str(getattr(cfg, "token_env", "OPENBILICLAW_V2EX_TOKEN") or "").strip()
+    env_token = str(os.environ.get(token_env, "") or "").strip() if token_env else ""
+    config_token = str(getattr(cfg, "access_token", "") or "").strip()
+    token = env_token or config_token
+    capabilities, resolution, browser_detail = _v2ex_capability_state(ctx)
+    identity_detail = v2ex_identity_detail(resolution)
+    if not token:
+        detail = _V2EX_ANONYMOUS_DETAIL
+        if browser_detail:
+            detail += f" · {browser_detail}"
+        if identity_detail:
+            detail += f" · {identity_detail}"
+        return SourceAuthContract(
+            auth_required=False,
+            credential="none",
+            credential_origin="none",
+            verification="unverified",
+            verify_method="none",
+            verify_ttl_seconds=None,
+            can_verify_now=False,
+            detail=detail,
+            capabilities=capabilities,
+            legacy_state="no_auth",
+            legacy_logged_in=True,
+        )
+    verification, verified_at = _probe_verdict(
+        ctx,
+        "v2ex",
+        credential="present",
+        cookie=token,
+    )
+    detail = _V2EX_TOKEN_DETAIL.get(verification, _V2EX_TOKEN_DETAIL["unverified"])
+    if browser_detail:
+        detail += f" · {browser_detail}"
+    if identity_detail:
+        detail += f" · {identity_detail}"
+    return SourceAuthContract(
+        auth_required=False,
+        credential="present",
+        credential_origin="env" if env_token else "config",
+        verification=verification,
+        verify_method="live_probe",
+        verified_at=verified_at,
+        verify_ttl_seconds=_probe_ttl(verification),
+        can_verify_now=True,
+        detail=detail,
+        capabilities=capabilities,
         legacy_state="no_auth",
         legacy_logged_in=True,
     )
@@ -1206,6 +1445,15 @@ def _linuxdo_capabilities(
             detail="Cookie 心跳只是观察证据，不等同于账号身份已验证。",
         ),
     }
+
+
+LINUXDO_CAPABILITY_AUTH_MODES: dict[str, tuple[str, bool]] = {
+    "discover": ("anonymous", True),
+    "profile": ("login-required", True),
+    "bootstrap": ("login-required", True),
+    "incremental": ("login-required", True),
+    "cookie-sync": ("optional-credential", False),
+}
 
 
 def _linuxdo_login_required_payload(payload: dict[str, Any]) -> bool:
@@ -1578,6 +1826,18 @@ def auth_linuxdo(ctx: SourceAuthContext) -> SourceAuthContract:
     )
 
 
+def linuxdo_capability_readiness(ctx: SourceAuthContext) -> dict[str, SourceCapabilityAuth]:
+    """Return Linux.do's public/private capability admission matrix."""
+
+    return auth_linuxdo(ctx).capabilities
+
+
+# ── registry ─────────────────────────────────────────────────────────
+
+#: Slug -> provider. Keys and order define the ``SourcesStatusResponse`` fields,
+#: so adding a platform means adding one entry and one provider here rather than
+#: editing the endpoint.
+
 # ── registry ─────────────────────────────────────────────────────────
 
 #: Slug -> provider. Keys and order define the ``SourcesStatusResponse`` fields,
@@ -1593,6 +1853,8 @@ SOURCE_AUTH_PROVIDERS: dict[str, Callable[[SourceAuthContext], SourceAuthContrac
     "reddit": auth_reddit,
     "bangumi": auth_bangumi,
     "linuxdo": auth_linuxdo,
+    "v2ex": auth_v2ex,
+    "weibo": auth_weibo,
 }
 
 

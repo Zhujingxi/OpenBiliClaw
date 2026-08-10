@@ -4,7 +4,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_docs_homepage_mentions_reddit_and_bangumi_sources() -> None:
+def test_docs_homepage_mentions_reddit_bangumi_and_v2ex_sources() -> None:
     html = (ROOT / "docs/index.html").read_text(encoding="utf-8")
     project_version = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))[
         "project"
@@ -16,8 +16,11 @@ def test_docs_homepage_mentions_reddit_and_bangumi_sources() -> None:
     assert "Bangumi 推荐" in html
     assert "sourceBangumiTitle" in html
     assert "sourceBangumiText" in html
-    assert "知乎 / Reddit 登录态任务桥" in html
-    assert "Zhihu, Reddit, Bangumi, and Web sources" in html
+    assert "V2EX 推荐" in html
+    assert "sourceV2exTitle" in html
+    assert "sourceV2exText" in html
+    assert "知乎 / Reddit / V2EX 登录态任务桥" in html
+    assert "Zhihu, Reddit, Bangumi, V2EX, and Web sources" in html
     # Bangumi host permission IS requested now, for identity-only recognition.
     # The homepage must describe it truthfully: no cookies, no browsing capture.
     assert "在 `bgm.tv` / `bangumi.tv` 上它仅做身份识别" in html

@@ -65,6 +65,7 @@ _PLATFORM_SOURCE_FIELDS = (
     "reddit",
     "bangumi",
     "linuxdo",
+    "v2ex",
 )
 
 
@@ -430,7 +431,13 @@ class InitPrereqs:
         contract = provider(SourceAuthContext(cfg=config, database=database))
         state = contract.capabilities.get(str(capability).strip())
         if state is not None:
-            return state.readiness
+            if state.readiness is not None:
+                return state.readiness
+            if state.ready:
+                return "ready"
+            if state.state in {"login_required", "stale"}:
+                return state.state
+            return "unverified"
         return "ready" if contract.capability_ready(capability) else "login_required"
 
     def source_capability_ready(self, slug: str, capability: str) -> bool:

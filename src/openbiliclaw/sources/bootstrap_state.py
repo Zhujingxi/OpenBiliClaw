@@ -21,6 +21,7 @@ SOURCE_BOOTSTRAP_STATE_KEYS: dict[str, str] = {
     "reddit": "reddit_seen_item_keys",
     "rdt": "reddit_seen_item_keys",
     "linuxdo": "linuxdo_seen_item_keys",
+    "v2ex": "v2ex_seen_item_keys",
 }
 
 
@@ -34,6 +35,7 @@ def default_source_bootstrap_state() -> dict[str, object]:
         "reddit_seen_item_keys": [],
         "linuxdo_seen_item_keys": [],
         "linuxdo_account_key": "",
+        "v2ex_seen_item_keys": [],
         "last_source_bootstrap_sync_at": "",
         "source_incremental": {
             "cursor": "",
@@ -159,6 +161,7 @@ def normalize_source_bootstrap_state(loaded: Any) -> dict[str, object]:
             if isinstance(loaded.get("linuxdo_account_key", ""), str)
             else ""
         ),
+        "v2ex_seen_item_keys": merge_seen_keys(loaded.get("v2ex_seen_item_keys", []), []),
         "last_source_bootstrap_sync_at": (
             loaded.get("last_source_bootstrap_sync_at", "").strip()
             if isinstance(loaded.get("last_source_bootstrap_sync_at", ""), str)

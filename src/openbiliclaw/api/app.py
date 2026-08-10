@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import copy
 import inspect
 import ipaddress
@@ -13,6 +15,7 @@ import re
 import secrets
 import shutil
 import socket
+import sqlite3
 import subprocess
 import time
 import unicodedata
@@ -21,13 +24,21 @@ from collections.abc import Mapping
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal, NoReturn, cast
 from urllib.parse import parse_qsl, quote, urlparse, urlsplit, urlunsplit
 from uuid import UUID
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import (
+    FileResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
+from starlette.background import BackgroundTask
 
 from openbiliclaw.api.models import (
     ActivityFeedItemOut,
@@ -58,6 +69,9 @@ from openbiliclaw.api.models import (
     ConfigServiceProbeResponse,
     ConfigUpdateIn,
     ConfigUpdateResponse,
+    ContentHistoryContextOut,
+    ContentHistoryItemOut,
+    ContentHistoryResponse,
     DelightAckIn,
     DelightAckResponse,
     DelightResponseIn,
@@ -154,10 +168,12 @@ from openbiliclaw.api.models import (
     UpdateApplyIn,
     UpdateCheckIn,
     UpdateStatusResponse,
+    V2EXSourceConfigOut,
     WatchLaterAddIn,
     WatchLaterItem,
     WatchLaterListResponse,
     WatchLaterStateResponse,
+    WeiboSourceConfigOut,
     XCookieIn,
     XCookieResponse,
     XhsLoginStateIn,
@@ -216,10 +232,10 @@ from openbiliclaw.sources.platforms import (
 from openbiliclaw.sources.platforms import (
     infer_source_platform_from_url as _registry_infer_source_platform_from_url,
 )
+from openbiliclaw.storage.database import CONTENT_HISTORY_RETENTION_DAYS
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
-    from pathlib import Path
 
     from openbiliclaw.api.source_auth.contract import SourceAuthContract
     from openbiliclaw.api.source_auth.write import CredentialWriteOutcome
@@ -231,8 +247,71 @@ if TYPE_CHECKING:
     )
 
 logger = logging.getLogger(__name__)
+
+# A local Ollama chat probe can spend ~31 seconds in its documented cold-load
+# retry window before the model answers. The previous 30-second API cap killed
+# that legitimate retry at the boundary and made the first settings-page test
+# fail while an immediate retry passed. Keep a finite control-plane budget, but
+# leave enough headroom for cold local providers.
+_CONFIG_LLM_PROBE_MAX_TIMEOUT_SECONDS = 120.0
+
+
+def _config_llm_probe_timeout_seconds(configured_timeout: object) -> float:
+    """Clamp one settings-page LLM probe to a finite cold-start-safe budget."""
+    try:
+        parsed = float(str(configured_timeout or 300))
+    except (TypeError, ValueError):
+        parsed = 300.0
+    return min(max(parsed, 10.0), _CONFIG_LLM_PROBE_MAX_TIMEOUT_SECONDS)
+
+
 _CONFIG_SAVE_LOCK = asyncio.Lock()
+_MIGRATION_TRANSFER_LOCK = asyncio.Lock()
 _fire_and_forget_tasks: set[asyncio.Task[None]] = set()
+_SQLITE_SIGNED_INTEGER_MAX = (1 << 63) - 1
+_CONTENT_HISTORY_CURSOR_VERSION = 1
+_CONTENT_HISTORY_CURSOR_MAX_LENGTH = 32768
+_CONTENT_HISTORY_CURSOR_ITEM_KEY_MAX_LENGTH = 2048
+
+
+class _MigrationArchiveStreamingResponse(StreamingResponse):
+    """Always erase a plaintext export, including ASGI send-start failures."""
+
+    def __init__(
+        self,
+        *args: Any,
+        cleanup_directory: Path,
+        release_callback: Callable[[], None] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        self._cleanup_directory = cleanup_directory
+        self._release_callback = release_callback
+        super().__init__(*args, **kwargs)
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            # Starlette does not necessarily close an async body iterator when
+            # an ASGI 2.3 client disconnects while ``send`` is suspended. On
+            # Windows the still-open archive then prevents rmtree from removing
+            # the plaintext file. Close first, delete second, and only then let
+            # another export acquire the transfer lock.
+            close_iterator = getattr(self.body_iterator, "aclose", None)
+            if callable(close_iterator):
+                try:
+                    close_result = close_iterator()
+                    if inspect.isawaitable(close_result):
+                        await close_result
+                except (Exception, asyncio.CancelledError):
+                    logger.warning("Failed to close migration archive response iterator")
+            try:
+                shutil.rmtree(self._cleanup_directory, ignore_errors=True)
+            finally:
+                release_callback = self._release_callback
+                self._release_callback = None
+                if release_callback is not None:
+                    release_callback()
 
 
 def apply_retraction_db_marks(database: Any, events: list[dict[str, Any]]) -> int:
@@ -324,6 +403,7 @@ class _QueuedConfigApply:
     config: Any
     saved_path: Path
     run_post_reload_llm_work: bool
+    restart_required: bool = False
 
 
 # Guided-init owner-lease heartbeat period. A stage can spend minutes inside one
@@ -404,6 +484,8 @@ _SOURCE_SHARE_ORDER = (
     "reddit",
     "bangumi",
     "linuxdo",
+    "v2ex",
+    "weibo",
 )
 _INIT_SOURCE_ORDER = (
     "bilibili",
@@ -415,6 +497,7 @@ _INIT_SOURCE_ORDER = (
     "reddit",
     "bangumi",
     "linuxdo",
+    "v2ex",
 )
 _PROBE_MODES = {"near", "lateral", "bridge", "wildcard"}
 _PROBE_CHALLENGE_MODES = {"lateral", "bridge", "wildcard"}
@@ -1330,9 +1413,177 @@ def _fallback_recommendation_click_url(
     if source_platform == "linuxdo":
         topic_id = item_id.removeprefix("topic:")
         return f"https://linux.do/t/{topic_id}" if topic_id.isdigit() and int(topic_id) > 0 else ""
+    if source_platform == "v2ex":
+        return f"https://www.v2ex.com/t/{quote(item_id, safe='')}"
     if source_platform == "bilibili":
         return f"https://www.bilibili.com/video/{quote(bvid or item_id, safe='')}"
     return ""
+
+
+def _normalize_content_history_http_url(value: object) -> str:
+    """Return an absolute HTTP(S) history URL or an empty safe value.
+
+    Old Bilibili cache rows commonly store protocol-relative covers.  History
+    is rendered by three clients, so normalize those once at the API boundary
+    and never expose a script/data/file scheme (or a credential-bearing URL)
+    for a client to navigate or render.
+    """
+    raw = str(value or "").strip()
+    if raw.startswith("//"):
+        raw = f"https:{raw}"
+    if not raw or any(character.isspace() for character in raw):
+        return ""
+    if any(unicodedata.category(character).startswith("C") for character in raw):
+        return ""
+    try:
+        parts = urlsplit(raw)
+        hostname = parts.hostname
+        port = parts.port
+    except ValueError:
+        return ""
+    if (
+        parts.scheme.lower() not in {"http", "https"}
+        or not parts.netloc
+        or hostname is None
+        or parts.username is not None
+        or parts.password is not None
+        or (port is not None and port <= 0)
+    ):
+        return ""
+    return urlunsplit(
+        (
+            parts.scheme.lower(),
+            parts.netloc,
+            parts.path,
+            parts.query,
+            parts.fragment,
+        )
+    )
+
+
+def _encode_content_history_cursor(
+    category: str,
+    position: tuple[str, int, int, str, int, int, int],
+) -> str:
+    """Encode one stable history order tuple as a restart-safe opaque token."""
+    payload = {
+        "v": _CONTENT_HISTORY_CURSOR_VERSION,
+        "category": category,
+        "retention_days": CONTENT_HISTORY_RETENTION_DAYS,
+        "after": list(position[:4]),
+        "anchors": list(position[4:]),
+    }
+    raw = json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    token = base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+    if len(token) > _CONTENT_HISTORY_CURSOR_MAX_LENGTH:  # pragma: no cover - trusted DB bound
+        raise RuntimeError("content history cursor exceeds its encoded length bound")
+    return token
+
+
+def _decode_content_history_cursor(
+    token: str,
+    *,
+    category: str,
+) -> tuple[str, int, int, str, int, int, int]:
+    """Strictly decode and bind an opaque history cursor to one category."""
+    if (
+        not token
+        or len(token) > _CONTENT_HISTORY_CURSOR_MAX_LENGTH
+        or re.fullmatch(r"[A-Za-z0-9_-]+", token) is None
+    ):
+        raise ValueError("invalid content history cursor encoding")
+    padding = "=" * (-len(token) % 4)
+    try:
+        raw = base64.b64decode(
+            (token + padding).encode("ascii"),
+            altchars=b"-_",
+            validate=True,
+        )
+        payload = json.loads(raw.decode("utf-8"))
+    except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ValueError("invalid content history cursor encoding") from exc
+    if not isinstance(payload, dict) or set(payload) != {
+        "v",
+        "category",
+        "retention_days",
+        "after",
+        "anchors",
+    }:
+        raise ValueError("invalid content history cursor payload")
+    version = payload["v"]
+    retention_days = payload["retention_days"]
+    if (
+        not isinstance(version, int)
+        or isinstance(version, bool)
+        or version != _CONTENT_HISTORY_CURSOR_VERSION
+        or payload["category"] != category
+        or not isinstance(retention_days, int)
+        or isinstance(retention_days, bool)
+        or retention_days != CONTENT_HISTORY_RETENTION_DAYS
+    ):
+        raise ValueError("content history cursor does not match this request")
+    after = payload["after"]
+    if not isinstance(after, list) or len(after) != 4:
+        raise ValueError("invalid content history cursor order tuple")
+    occurred_at, source_kind, source_id, item_key = after
+    if (
+        not isinstance(occurred_at, str)
+        or not occurred_at
+        or len(occurred_at) > 64
+        or any(unicodedata.category(character).startswith("C") for character in occurred_at)
+    ):
+        raise ValueError("invalid content history cursor timestamp")
+    try:
+        datetime.fromisoformat(occurred_at.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("invalid content history cursor timestamp") from exc
+    if (
+        not isinstance(source_kind, int)
+        or isinstance(source_kind, bool)
+        or source_kind < 0
+        or source_kind > 2
+        or not isinstance(source_id, int)
+        or isinstance(source_id, bool)
+        or source_id < 0
+        or source_id > _SQLITE_SIGNED_INTEGER_MAX
+    ):
+        raise ValueError("invalid content history cursor source position")
+    if (
+        not isinstance(item_key, str)
+        or not item_key
+        or len(item_key) > _CONTENT_HISTORY_CURSOR_ITEM_KEY_MAX_LENGTH
+        or any(character.isspace() for character in item_key)
+        or any(unicodedata.category(character).startswith("C") for character in item_key)
+    ):
+        raise ValueError("invalid content history cursor item key")
+    anchors = payload["anchors"]
+    if (
+        not isinstance(anchors, list)
+        or len(anchors) != 3
+        or any(
+            not isinstance(anchor, int)
+            or isinstance(anchor, bool)
+            or anchor < 0
+            or anchor > _SQLITE_SIGNED_INTEGER_MAX
+            for anchor in anchors
+        )
+    ):
+        raise ValueError("invalid content history cursor snapshot anchors")
+    event_anchor, recommendation_anchor, removal_anchor = anchors
+    return (
+        occurred_at,
+        source_kind,
+        source_id,
+        item_key,
+        event_anchor,
+        recommendation_anchor,
+        removal_anchor,
+    )
 
 
 def _normalize_recommendation_click_identity_url(value: str) -> str:
@@ -1824,6 +2075,40 @@ def create_app(
 
         ctx.llm_concurrency_gate = LLMConcurrencyGate(llm_concurrency_from_config(config))
 
+    # The process-lifetime migration guard was acquired for the data directory
+    # that was active at startup.  A newly persisted ``data_dir`` must therefore
+    # remain restart-only: every live data read/write and every hot rebuild is
+    # pinned to this immutable path until a fresh process acquires the new lock.
+    # Capture the effective startup config, which is the path the supervisor
+    # locked before constructing this app. Injected tests may deliberately pass
+    # a standalone Database or MemoryManager rooted elsewhere; those component
+    # fixtures do not redefine where source credentials and other project data
+    # live. Runtime config is therefore the sole authority for this process-wide
+    # path, just as it is for the startup guard.
+    active_runtime_data_path = Path(config.data_path).expanduser().resolve()
+    app.state.active_runtime_data_path = active_runtime_data_path
+
+    def _active_runtime_data_path() -> Path:
+        """Return the canonical data directory protected by this process's lock."""
+        return active_runtime_data_path
+
+    def _pin_active_runtime_config(candidate: Any) -> Any:
+        """Copy *candidate* while retaining this process's locked data directory."""
+        pinned = copy.deepcopy(candidate)
+        if not hasattr(pinned, "data_dir") and not hasattr(pinned, "data_path"):
+            # Narrow injected test doubles may use an opaque sentinel for the
+            # candidate. Production rebuilds always receive Config.
+            return pinned
+        pinned.data_dir = str(active_runtime_data_path)
+        return pinned
+
+    def _preserve_persisted_restart_fields(candidate: Any) -> Any:
+        """Merge restart-only values from disk before a whole-config write."""
+        desired = load_config(consult_environment=False)
+        merged = copy.deepcopy(candidate)
+        merged.data_dir = str(desired.data_dir)
+        return merged
+
     def _inventory_target() -> int:
         controller_target = getattr(ctx.runtime_controller, "pool_target_count", None)
         if controller_target is not None:
@@ -1919,8 +2204,10 @@ def create_app(
     config_apply_message = ""
     config_apply_error = ""
     config_apply_updated_at = ""
-    config_last_good = copy.deepcopy(getattr(ctx, "config", None) or config)
+    config_last_good = _pin_active_runtime_config(getattr(ctx, "config", None) or config)
     app.state.config_apply_task = None
+    app.state.migration_import_request_id = ""
+    app.state.migration_import_phase = ""
     image_fetch_coordinator = ImageFetchCoordinator()
     app.state.image_fetch_coordinator = image_fetch_coordinator
     chat_reply_scheduler: DurableChatReplyScheduler
@@ -2171,6 +2458,7 @@ def create_app(
             or path == "/api/project-stats"
             or path == "/api/health"
             or path == "/api/runtime-status"
+            or (path == "/api/content-history" and method == "GET")
             or path == "/favicon.ico"
             or path == "/api/autostart-status"
             or path == "/api/autostart/apply"
@@ -2181,6 +2469,16 @@ def create_app(
             or path in ("/api/update-status", "/api/update/check", "/api/update/apply")
             or (path == "/api/config" and method in {"GET", "PUT"})
             or (path == "/api/config/apply-status" and method == "GET")
+            or (
+                path
+                in {
+                    "/api/migration/export",
+                    "/api/migration/import",
+                    "/api/migration/pending",
+                    "/api/migration/status",
+                }
+                and method in {"DELETE", "GET", "POST"}
+            )
             # Draft-only config helpers are part of the recovery control
             # plane, not business LLM traffic.  Each builds from the submitted
             # form (or config + DB for source shares), so blocking it here made
@@ -2288,9 +2586,13 @@ def create_app(
             "/api/init/cancel",
             "/api/config/probe-service",
             "/api/bilibili/cookie",
+            "/api/migration/pending",
             "/api/sources/bangumi/identity",
             "/api/sources/linuxdo/login-state",
             "/api/sources/linuxdo/credential",
+            "/api/sources/v2ex/identity",
+            "/api/sources/v2ex/login-state",
+            "/api/sources/v2ex/credential",
         }
     )
 
@@ -2307,7 +2609,7 @@ def create_app(
             len(segments) == 5
             and segments[1] == "api"
             and segments[2] == "sources"
-            and segments[4] in ("kick", "task-result")
+            and (segments[4] in ("kick", "task-result"))
         )
 
     @app.middleware("http")
@@ -2550,7 +2852,7 @@ def create_app(
                     timeout=_DIALOGUE_EXECUTION_DRAIN_TIMEOUT_SECONDS
                 )
                 dialogue_paused = True
-                await ctx.rebuild_from_config(new_config)
+                await ctx.rebuild_from_config(_pin_active_runtime_config(new_config))
                 if callable(after_rebuild):
                     after_rebuild()
                 await _restart_background_tasks_after_event_recovery(
@@ -2647,10 +2949,12 @@ def create_app(
             )
         else:
             message = f"配置已保存到 {item.saved_path}。"
+            if was_degraded:
+                message += " 后端已从降级模式原地恢复。"
             message += (
-                " 后端已从降级模式原地恢复，无需重启。"
-                if was_degraded
-                else " 运行时组件已热重载，新配置立即生效。"
+                " 除需完全重启的字段外，其余运行时组件已热重载。"
+                if item.restart_required
+                else " 运行时组件已热重载，新配置立即生效，无需重启。"
             )
         logger.info("Config hot-reload succeeded: revision=%d", item.revision)
         return message
@@ -2725,7 +3029,9 @@ def create_app(
                             )
                             continue
                         try:
-                            restored_path = save_config(copy.deepcopy(config_last_good))
+                            restored_path = save_config(
+                                _preserve_persisted_restart_fields(config_last_good)
+                            )
                             _snapshot_config_file(restored_path)
                             proxy_cfg = getattr(config_last_good, "network", None)
                             set_outbound_proxy(
@@ -4454,6 +4760,25 @@ def create_app(
                 _health_embedding_ready(strict=True),
             )
         platforms = prereqs.enabled_platforms()
+        # Project the exact same backend-owned capability contract exposed by
+        # /api/sources/status.  This includes disabled sources because the setup
+        # wizard can explicitly opt one in for the current run before config is
+        # persisted; omitting it here would let a newly selected mixed-auth
+        # source bypass the readiness gate.
+        from openbiliclaw.api.source_auth.providers import (
+            SOURCE_AUTH_PROVIDERS,
+            SourceAuthContext,
+        )
+
+        capability_ctx = SourceAuthContext(
+            cfg=ctx.config if ctx.config is not None else config,
+            database=ctx.database,
+        )
+        source_capabilities = {
+            slug: contract.capabilities
+            for slug, provider in SOURCE_AUTH_PROVIDERS.items()
+            if (contract := provider(capability_ctx)).capabilities
+        }
         trusted = _get_auth_gate().is_trusted_local(request)
         supported = not is_running_in_container()
         # v0.3.118+: bilibili login is no longer a server-side hard gate —
@@ -4575,6 +4900,7 @@ def create_app(
                 embedding_pull_status=pull_status,
                 embedding_required=embedding_required,
                 enabled_platforms=platforms,
+                source_capabilities=source_capabilities,
             ),
             reason=reason,
             detail=detail,
@@ -4605,6 +4931,7 @@ def create_app(
         *,
         bangumi_username: str | None = None,
         bangumi_token: str | None = None,
+        v2ex_username: str | None = None,
     ) -> bool:
         """Best-effort: checked guided-init sources become enabled settings.
 
@@ -4636,6 +4963,15 @@ def create_app(
         ):
             bangumi_cfg.username = bangumi_username
             changed = True
+        v2ex_cfg = getattr(sources_cfg, "v2ex", None)
+        if (
+            v2ex_cfg is not None
+            and "v2ex" in effective_sources
+            and v2ex_username is not None
+            and str(getattr(v2ex_cfg, "username", "") or "").strip() != v2ex_username
+        ):
+            v2ex_cfg.username = v2ex_username
+            changed = True
         # Persist the validated token so background discovery and later syncs
         # authenticate without re-prompting (rule 7: only after /v0/me passed).
         if (
@@ -4655,7 +4991,7 @@ def create_app(
             cfg = cast("Config", cfg)
 
             async with _CONFIG_SAVE_LOCK:
-                save_config(cfg)
+                save_config(_preserve_persisted_restart_fields(cfg))
         except Exception:
             logger.warning("guided init source opt-in save_config failed", exc_info=True)
             return False
@@ -4687,6 +5023,7 @@ def create_app(
         selected_sources: set[str] | None = None,
         bangumi_username: str = "",
         bangumi_token: str = "",
+        v2ex_username: str = "",
     ) -> None:
         """Sole status/event writer for an API-launched guided init (gui-init
         §5f). Drives the shared ``run_guided_init`` through the coordinator and
@@ -4749,10 +5086,12 @@ def create_app(
                 include_x="twitter" in effective,
                 include_zhihu="zhihu" in effective,
                 include_reddit="reddit" in effective,
+                include_v2ex="v2ex" in effective,
                 include_bangumi="bangumi" in effective,
                 include_linuxdo="linuxdo" in effective,
                 bangumi_username=bangumi_username,
                 bangumi_token=bangumi_token,
+                v2ex_username=v2ex_username,
                 target_pool_count=_INIT_POOL_TARGET_COUNT,
                 discover_backfill=_api_discover_backfill,
                 coordinator=coord,
@@ -4764,6 +5103,9 @@ def create_app(
             linuxdo_status = str(getattr(result, "linuxdo_status", "skipped") or "skipped")
             linuxdo_degraded = linuxdo_status == "degraded"
             partial_success = discovery_partial or dy_degraded or linuxdo_degraded
+            v2ex_status = str(getattr(result, "v2ex_status", "skipped") or "skipped")
+            v2ex_partial = v2ex_status == "partial"
+            partial_success = discovery_partial or dy_degraded or v2ex_partial
             reason = getattr(result, "discovery_reason", None)
             detail = str(getattr(result, "discovery_detail", "") or "").strip()
             if dy_degraded:
@@ -4786,6 +5128,16 @@ def create_app(
                 detail = " ".join(part for part in (detail, linuxdo_detail) if part)
                 if not discovery_partial and not dy_degraded:
                     reason = "linuxdo_degraded"
+            if v2ex_partial:
+                v2ex_event_count = len(getattr(result, "v2ex_events", []) or [])
+                v2ex_detail = (
+                    "V2EX 采集状态 v2ex_status=partial："
+                    f"已保留并用于画像建模 {v2ex_event_count} 条事件，"
+                    "但至少一个公开或登录态范围未完整返回。"
+                )
+                detail = " ".join(part for part in (detail, v2ex_detail) if part)
+                if not discovery_partial and not dy_degraded:
+                    reason = "v2ex_partial"
             await coord.complete(
                 run_id,
                 partial_success=partial_success,
@@ -4860,7 +5212,7 @@ def create_app(
                 status_code=400,
             )
         source_options = source_options or {}
-        unknown_source_options = sorted(set(source_options) - {"bangumi"})
+        unknown_source_options = sorted(set(source_options) - {"bangumi", "v2ex"})
         if unknown_source_options:
             return JSONResponse(
                 {
@@ -4924,6 +5276,43 @@ def create_app(
                     status_code=400,
                 )
 
+        v2ex_options = source_options.get("v2ex", {})
+        if not isinstance(v2ex_options, dict):
+            return JSONResponse(
+                {"error": "invalid_source_options", "detail": "source_options.v2ex 必须是对象"},
+                status_code=400,
+            )
+        unknown_v2ex_options = sorted(set(v2ex_options) - {"username"})
+        if unknown_v2ex_options:
+            return JSONResponse(
+                {
+                    "error": "invalid_source_options",
+                    "detail": (
+                        "不支持的 source_options.v2ex 字段: " + ", ".join(unknown_v2ex_options)
+                    ),
+                },
+                status_code=400,
+            )
+        scoped_v2ex_username = "username" in v2ex_options
+        legacy_v2ex_username = isinstance(body, dict) and "v2ex_username" in body
+        v2ex_username_supplied = scoped_v2ex_username or legacy_v2ex_username
+        selected_v2ex_username: str | None = None
+        if v2ex_username_supplied:
+            from openbiliclaw.sources.v2ex_client import validate_v2ex_username
+
+            try:
+                raw_v2ex_username = (
+                    v2ex_options.get("username")
+                    if scoped_v2ex_username
+                    else body.get("v2ex_username")
+                )
+                selected_v2ex_username = validate_v2ex_username(raw_v2ex_username)
+            except ValueError as exc:
+                return JSONResponse(
+                    {"error": "invalid_v2ex_username", "detail": str(exc)},
+                    status_code=400,
+                )
+
         coord = ctx.init_coordinator
 
         # Release a previous ownerless active row before source persistence or
@@ -4962,9 +5351,10 @@ def create_app(
             "source_capability_readiness",
             None,
         )
-        if "linuxdo" in effective_sources and callable(capability_readiness):
+        linuxdo_capability_readiness = capability_readiness
+        if "linuxdo" in effective_sources and callable(linuxdo_capability_readiness):
             linuxdo_profile_readiness = str(
-                capability_readiness("linuxdo", "profile") or "unverified"
+                linuxdo_capability_readiness("linuxdo", "profile") or "unverified"
             )
             if linuxdo_profile_readiness != "ready":
                 if effective_sources == {"linuxdo"}:
@@ -5018,6 +5408,37 @@ def create_app(
         effective_bangumi_token = (
             configured_bangumi_token if selected_bangumi_token is None else selected_bangumi_token
         )
+        init_runtime_config = ctx.config if ctx.config is not None else config
+        configured_v2ex_username = str(
+            getattr(
+                getattr(getattr(init_runtime_config, "sources", None), "v2ex", None),
+                "username",
+                "",
+            )
+            or ""
+        ).strip()
+        effective_v2ex_username = (
+            configured_v2ex_username if selected_v2ex_username is None else selected_v2ex_username
+        )
+        if "v2ex" in effective_sources:
+            from openbiliclaw.api.source_auth.providers import (
+                SourceAuthContext,
+                v2ex_capability_readiness,
+            )
+
+            v2ex_readiness = v2ex_capability_readiness(
+                SourceAuthContext(cfg=init_runtime_config, database=ctx.database),
+                configured_username=effective_v2ex_username,
+            )["bootstrap"]
+            if not v2ex_readiness.ready:
+                return JSONResponse(
+                    {
+                        "error": "v2ex_bootstrap_not_ready",
+                        "detail": v2ex_readiness.detail,
+                        "capability": v2ex_readiness.model_dump(),
+                    },
+                    status_code=409,
+                )
         # A personal access token identifies the account via /v0/me, so validate
         # it live and resolve the username BEFORE reserving a run or persisting —
         # reject a bad/expired token with its real cause (project rule 7) instead
@@ -5133,6 +5554,7 @@ def create_app(
                 sources_to_persist,
                 bangumi_username=username_to_persist,
                 bangumi_token=selected_bangumi_token,
+                v2ex_username=(effective_v2ex_username if "v2ex" in effective_sources else None),
             )
 
         # Critical-section revalidation: prereqs may have lapsed between the
@@ -5179,6 +5601,7 @@ def create_app(
                     selected_sources,
                     effective_bangumi_username,
                     effective_bangumi_token,
+                    effective_v2ex_username,
                 ),
             )
         else:
@@ -5188,6 +5611,7 @@ def create_app(
                     selected_sources,
                     effective_bangumi_username,
                     effective_bangumi_token,
+                    effective_v2ex_username,
                 )
             )
         coord.attach_task(run_id, task)
@@ -5707,6 +6131,7 @@ def create_app(
             effective_cookie = ""
             try:
                 _cfg, _ = load_config_with_diagnostics()
+                _cfg = _pin_active_runtime_config(_cfg)
                 effective_cookie = (_cfg.bilibili.cookie or "").strip()
                 if not effective_cookie:
                     effective_cookie = AuthManager(data_dir=_cfg.data_path).load_cookie().strip()
@@ -5949,6 +6374,7 @@ def create_app(
                     or 0
                 ),
                 comment_count=int(getattr(item.content, "comment_count", 0) or 0),
+                share_count=int(getattr(item.content, "share_count", 0) or 0),
                 rating_score=float(getattr(item.content, "rating_score", 0.0) or 0.0),
                 rating_count=int(getattr(item.content, "rating_count", 0) or 0),
                 source_rank=int(getattr(item.content, "source_rank", 0) or 0),
@@ -6293,6 +6719,11 @@ def create_app(
         if callable(close_bangumi):
             with suppress(Exception):
                 await close_bangumi()
+        v2ex_client = getattr(ctx, "v2ex_client", None)
+        close_v2ex = getattr(v2ex_client, "aclose", None)
+        if callable(close_v2ex):
+            with suppress(Exception):
+                await close_v2ex()
 
     @app.get("/api/profile-summary", response_model=ProfileSummaryResponse)
     async def profile_summary(
@@ -6724,6 +7155,48 @@ def create_app(
             canonical_events,
             producer="extension",
         )
+        # A meaningful V2EX Topic read also feeds the account-scoped Node
+        # affinity projection. Event persistence is the durability fence: if
+        # this projection fails, the request fails and an extension retry gets
+        # the same durable event receipt, then repairs the idempotent Topic
+        # projection without duplicating either row. Never project into an
+        # active profile while the browser is observed as another account.
+        active_v2ex_username = ""
+        if hasattr(ctx.database, "get_v2ex_profile_identity"):
+            active_v2ex_username = str(ctx.database.get_v2ex_profile_identity()[0] or "").strip()
+        observed_v2ex_username = ""
+        if hasattr(ctx.database, "get_v2ex_browser_identity"):
+            observed_v2ex_username = str(ctx.database.get_v2ex_browser_identity()[0] or "").strip()
+        from openbiliclaw.sources.v2ex_affinity import v2ex_affinity_projection_username
+
+        affinity_username = v2ex_affinity_projection_username(
+            active_v2ex_username,
+            observed_v2ex_username,
+        )
+        if affinity_username:
+            from openbiliclaw.sources.v2ex_affinity import (
+                V2EXNodeAffinityStore,
+                v2ex_engaged_view_affinity_item,
+            )
+
+            engaged_view_items = [
+                affinity_item
+                for item_receipt in receipt.items
+                if not item_receipt.error
+                and (item_receipt.inserted or item_receipt.duplicate)
+                and (
+                    affinity_item := v2ex_engaged_view_affinity_item(
+                        canonical_events[item_receipt.index],
+                        event_id=item_receipt.event_id,
+                    )
+                )
+                is not None
+            ]
+            if engaged_view_items:
+                V2EXNodeAffinityStore(ctx.database).record_items(
+                    engaged_view_items,
+                    username=affinity_username,
+                )
         if receipt.inserted > 0:
             await _request_runtime_replenishment(reason="event_ingest")
         # Notify popup that the activity feed has new entries so it can
@@ -6886,6 +7359,7 @@ def create_app(
                         row.get("favorite_count", 0) or row.get("collect_count", 0) or 0
                     ),
                     comment_count=int(row.get("comment_count", 0) or 0),
+                    share_count=int(row.get("share_count", 0) or 0),
                     rating_score=float(row.get("rating_score", 0.0) or 0.0),
                     rating_count=int(row.get("rating_count", 0) or 0),
                     source_rank=int(row.get("source_rank", 0) or 0),
@@ -6935,6 +7409,107 @@ def create_app(
             recommendation_snapshot_cached_at = time.monotonic()
             recommendation_snapshot_dislike_digest = dislike_digest
             return snapshot
+
+    def _content_history_item(row: dict[str, Any]) -> ContentHistoryItemOut:
+        source_platform = _normalize_source_platform(
+            str(row.get("source_platform", "") or "bilibili")
+        )
+        content_id = str(row.get("content_id", "") or "").strip()
+        content_url = _normalize_content_history_http_url(row.get("content_url", ""))
+        if not content_url:
+            content_url = _normalize_content_history_http_url(
+                _fallback_recommendation_click_url(
+                    source_platform=source_platform,
+                    content_id=content_id,
+                    bvid=content_id,
+                )
+            )
+        cover_url = _normalize_content_history_http_url(row.get("cover_url", ""))
+        contexts: list[ContentHistoryContextOut] = []
+        raw_contexts = row.get("contexts", [])
+        if isinstance(raw_contexts, list):
+            for raw_context in raw_contexts:
+                if not isinstance(raw_context, Mapping):
+                    continue
+                context = str(raw_context.get("context", "") or "")
+                occurred_at = str(raw_context.get("occurred_at", "") or "")
+                if context not in {"favorite", "watch_later", "dismiss", "dislike"}:
+                    continue
+                contexts.append(
+                    ContentHistoryContextOut(
+                        context=cast("Any", context),
+                        occurred_at=occurred_at,
+                        restored=bool(raw_context.get("restored", False)),
+                    )
+                )
+        recommendation_id = row.get("recommendation_id")
+        return ContentHistoryItemOut(
+            item_key=str(row.get("item_key", "") or ""),
+            source_platform=source_platform,
+            content_id=content_id,
+            content_url=content_url,
+            content_type=str(row.get("content_type", "") or "video"),
+            title=str(row.get("title", "") or ""),
+            author_name=str(row.get("author_name", "") or ""),
+            cover_url=cover_url,
+            body_text=str(row.get("body_text", "") or ""),
+            recommendation_id=(int(recommendation_id) if recommendation_id is not None else None),
+            occurred_at=str(row.get("occurred_at", "") or ""),
+            context=str(row.get("context", "") or ""),
+            restored=bool(row.get("restored", False)),
+            contexts=contexts,
+        )
+
+    @app.get("/api/content-history", response_model=ContentHistoryResponse)
+    async def content_history(
+        category: Literal["clicked", "shown", "removed"] = Query(...),
+        limit: int = Query(default=12, ge=1, le=50),
+        offset: int | None = Query(
+            default=None,
+            ge=0,
+            le=_SQLITE_SIGNED_INTEGER_MAX,
+        ),
+        cursor: str | None = Query(
+            default=None,
+            min_length=1,
+            max_length=_CONTENT_HISTORY_CURSOR_MAX_LENGTH,
+        ),
+    ) -> ContentHistoryResponse:
+        """Return one lazy-loadable category from the bounded content history."""
+        if cursor is not None and offset is not None:
+            raise HTTPException(
+                status_code=422,
+                detail="content history cursor cannot be combined with offset",
+            )
+        try:
+            cursor_position = (
+                _decode_content_history_cursor(cursor, category=category)
+                if cursor is not None
+                else None
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        rows, total, has_more, next_position = await asyncio.to_thread(
+            ctx.database.list_content_history_page,
+            category,
+            limit=limit,
+            offset=offset or 0,
+            cursor=cursor_position,
+            retention_days=CONTENT_HISTORY_RETENTION_DAYS,
+        )
+        next_cursor = (
+            _encode_content_history_cursor(category, next_position)
+            if has_more and next_position is not None
+            else None
+        )
+        return ContentHistoryResponse(
+            category=category,
+            items=[_content_history_item(row) for row in rows],
+            total=total,
+            retention_days=CONTENT_HISTORY_RETENTION_DAYS,
+            next_cursor=next_cursor,
+            has_more=has_more,
+        )
 
     # ── Platform-neutral saved memberships and native sync ─────────
 
@@ -8183,6 +8758,14 @@ def create_app(
                 # readable title for legacy rows still holding answer_<id> (#79).
                 "content_type": str(row.get("content_type", "") or ""),
                 "body_text": str(row.get("body_text", "") or ""),
+                "view_count": int(row.get("view_count", 0) or 0),
+                "like_count": int(row.get("like_count", 0) or 0),
+                "comment_count": int(row.get("comment_count", 0) or 0),
+                "share_count": int(row.get("share_count", 0) or 0),
+                "danmaku_count": int(row.get("danmaku_count", 0) or 0),
+                "favorite_count": int(
+                    row.get("favorite_count", 0) or row.get("collect_count", 0) or 0
+                ),
             }
             with suppress(Exception):
                 await ctx.event_hub.publish(payload_event)
@@ -8273,11 +8856,12 @@ def create_app(
                 # readable title for legacy rows still holding answer_<id> (#79).
                 "content_type": str(row.get("content_type", "") or ""),
                 "body_text": str(row.get("body_text", "") or ""),
-                # Engagement stats so the delight card shows the same ▶/👍/💬 row
+                # Engagement stats so the delight card shows the same ▶/👍/💬/🔁 row
                 # as the grid (0 = not fetched → the card renders nothing for it).
                 "view_count": int(row.get("view_count", 0) or 0),
                 "like_count": int(row.get("like_count", 0) or 0),
                 "comment_count": int(row.get("comment_count", 0) or 0),
+                "share_count": int(row.get("share_count", 0) or 0),
                 "danmaku_count": int(row.get("danmaku_count", 0) or 0),
                 "favorite_count": int(
                     row.get("favorite_count", 0) or row.get("collect_count", 0) or 0
@@ -11297,6 +11881,7 @@ def create_app(
         *,
         query: str = "",
         source_keyword_id: int | None = None,
+        discovery_lane: str = "",
     ) -> int:
         """Enqueue extension-collected Bilibili search videos for evaluation."""
 
@@ -11308,6 +11893,8 @@ def create_app(
         if not callable(enqueue):
             return 0
         writes = []
+        lane = "recent" if str(discovery_lane).strip().lower() == "recent" else ""
+        source_context = "bili-extension-search:recent" if lane else "bili-extension-search"
         for video in videos:
             bvid = str(video.get("bvid") or video.get("content_id") or "").strip()
             if not bvid:
@@ -11353,6 +11940,7 @@ def create_app(
                 tags=tags,
                 description=str(video.get("description") or video.get("desc") or "").strip(),
                 source_strategy="bili-extension-search",
+                discovery_lane=lane,
                 content_id=bvid,
                 content_url=content_url,
                 source_platform="bilibili",
@@ -11365,13 +11953,14 @@ def create_app(
             writes.append(
                 discovered_content_to_candidate_write(
                     item,
-                    source_context="bili-extension-search",
+                    source_context=source_context,
                     raw_payload={
                         "bvid": bvid,
                         "query": query,
                         "url": content_url,
                         "admission_policy": "observed",
                         "score_threshold": 0.60,
+                        **({"discovery_lane": lane} if lane else {}),
                     },
                 )
             )
@@ -11990,6 +12579,98 @@ def create_app(
             updated_at=result.updated_at,
         )
 
+    @app.post("/api/sources/v2ex/login-state", deprecated=True)
+    async def update_v2ex_login_state(payload: dict[str, Any]) -> dict[str, Any]:
+        """Persist only the V2EX browser login heartbeat.
+
+        The extension may include a public username observed in the page nav;
+        cookie values, headers and page HTML are deliberately not accepted.
+        """
+        logged_in = payload.get("logged_in")
+        if not isinstance(logged_in, bool):
+            raise HTTPException(status_code=422, detail="logged_in must be boolean")
+        if not hasattr(ctx.database, "set_v2ex_login_state"):
+            raise HTTPException(status_code=503, detail="database not configured")
+        ctx.database.set_v2ex_login_state(logged_in)
+        if not logged_in and hasattr(ctx.database, "clear_v2ex_browser_identity"):
+            ctx.database.clear_v2ex_browser_identity()
+        username = str(payload.get("username", "") or "").strip()
+        if username and logged_in:
+            from openbiliclaw.sources.v2ex_client import validate_v2ex_username
+
+            try:
+                username = validate_v2ex_username(username)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail="invalid V2EX username") from exc
+            if hasattr(ctx.database, "set_v2ex_browser_identity"):
+                ctx.database.set_v2ex_browser_identity(username, evidence="observed")
+        _, updated_at = ctx.database.get_v2ex_login_state()
+        stored_username = ""
+        if hasattr(ctx.database, "get_v2ex_browser_identity"):
+            stored_username, _, _ = ctx.database.get_v2ex_browser_identity()
+        return {
+            "ok": True,
+            "logged_in": logged_in,
+            "username": stored_username,
+            "updated_at": updated_at,
+        }
+
+    @app.post("/api/sources/v2ex/identity")
+    async def ingest_v2ex_identity(payload: dict[str, Any]) -> dict[str, Any]:
+        """Persist an observed username or an explicit user acceptance."""
+        from openbiliclaw.sources.v2ex_client import validate_v2ex_username
+
+        try:
+            username = validate_v2ex_username(payload.get("username"))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="invalid V2EX username") from exc
+        if not username:
+            raise HTTPException(status_code=422, detail="invalid V2EX username")
+        accepted = payload.get("accept") is True
+        required_setter = "set_v2ex_accepted_identity" if accepted else "set_v2ex_browser_identity"
+        if not hasattr(ctx.database, required_setter):
+            raise HTTPException(status_code=503, detail="database not configured")
+        if accepted:
+            ctx.database.set_v2ex_accepted_identity(username)
+            _, observed_at = ctx.database.get_v2ex_accepted_identity()
+            evidence = "accepted"
+        else:
+            ctx.database.set_v2ex_browser_identity(username, evidence="observed")
+            _, evidence, observed_at = ctx.database.get_v2ex_browser_identity()
+        return {
+            "ok": True,
+            "username": username,
+            "evidence": evidence,
+            "observed_at": observed_at,
+        }
+
+    @app.get("/api/sources/v2ex/identity")
+    def get_v2ex_identity() -> dict[str, Any]:
+        """Return the local identity ladder and conflict gate without I/O."""
+        from openbiliclaw.api.source_auth.probe_cache import LIVE_PROBES
+        from openbiliclaw.config import load_config
+        from openbiliclaw.sources.v2ex_identity import resolve_v2ex_identity_state
+
+        result = resolve_v2ex_identity_state(
+            cfg=load_config(),
+            database=ctx.database,
+            probes=LIVE_PROBES,
+        ).as_dict()
+        active_username = ""
+        active_at = ""
+        if hasattr(ctx.database, "get_v2ex_profile_identity"):
+            active_username, active_at = ctx.database.get_v2ex_profile_identity()
+        result["active_profile_identity"] = {
+            "username": active_username,
+            "activated_at": active_at,
+        }
+        result["identity_switch_required"] = bool(
+            active_username
+            and result.get("username")
+            and active_username.casefold() != str(result["username"]).casefold()
+        )
+        return result
+
     # ── Bangumi extension identity channel ──────────────────────────
     # The content script on bgm.tv / bangumi.tv reads the page's public
     # ``CHOBITS_UID`` global (MAIN-world bridge) plus the nav's own
@@ -12382,6 +13063,11 @@ def create_app(
                         task_payload = parsed
             query = str(task_payload.get("query") or task_payload.get("keyword") or "").strip()
             source_keyword_id = source_keyword_id_from_bili_task(task_payload_json)
+            discovery_lane = (
+                "recent"
+                if str(task_payload.get("discovery_lane") or "").strip().lower() == "recent"
+                else ""
+            )
             enqueued = 0
             if added_videos:
                 enqueued = _cache_bili_search_videos(
@@ -12389,6 +13075,7 @@ def create_app(
                     added_videos,
                     query=query,
                     source_keyword_id=source_keyword_id,
+                    discovery_lane=discovery_lane,
                 )
                 if enqueued:
                     _notify_discovery_candidates_enqueued("bilibili")
@@ -12980,6 +13667,53 @@ def create_app(
             item.requires_overseas_network = requires_overseas_network(family)
             item.network_hint = overseas_network_hint(family, network_mode=network_mode)
 
+    def _weibo_status_item(cfg: Any, auth_ctx: Any) -> SourceStatusItem:
+        """Combine anonymous auth readiness with the latest local discovery run."""
+
+        from openbiliclaw.api.source_auth.providers import auth_weibo
+        from openbiliclaw.runtime.weibo_producer import weibo_source_status
+
+        enabled = bool(getattr(getattr(cfg.sources, "weibo", None), "enabled", False))
+        status = (
+            weibo_source_status(
+                ctx.database,
+                enabled=enabled,
+                source_modes=getattr(
+                    getattr(cfg.sources, "weibo", None),
+                    "source_modes",
+                    ("search", "hot", "creator"),
+                ),
+            )
+            if hasattr(ctx.database, "conn")
+            else {
+                "state": "unverified" if enabled else "disabled",
+                "detail": "尚未运行微博内容发现。" if enabled else "微博来源未启用。",
+            }
+        )
+        raw_discovery_state = str(status.get("state") or "unverified")
+        if raw_discovery_state not in {
+            "disabled",
+            "unverified",
+            "ready",
+            "partial",
+            "error",
+            "rate_limited",
+        }:
+            raw_discovery_state = "unverified"
+        discovery_state = cast(
+            "Literal['disabled', 'unverified', 'ready', 'partial', 'error', 'rate_limited']",
+            raw_discovery_state,
+        )
+        return SourceStatusItem(
+            enabled=enabled,
+            state="no_auth",
+            detail=str(status.get("detail") or "微博匿名访客源。"),
+            logged_in=True,
+            feed_paused=discovery_state == "rate_limited",
+            discovery_state=discovery_state,
+            auth=auth_weibo(auth_ctx),
+        )
+
     @app.get("/api/sources/status", response_model=SourcesStatusResponse)
     def sources_status() -> SourcesStatusResponse:
         """Unified per-source login / cookie readiness for the settings pages.
@@ -13009,7 +13743,7 @@ def create_app(
         )
         from openbiliclaw.config import load_config
 
-        cfg = load_config()
+        cfg = _pin_active_runtime_config(load_config())
         auth_ctx = SourceAuthContext(cfg=cfg, database=ctx.database)
         items: dict[str, SourceStatusItem] = {}
         for slug, provider in SOURCE_AUTH_PROVIDERS.items():
@@ -13045,6 +13779,7 @@ def create_app(
         # discovery-health detail and the token_state axis the loop cannot model.
         # Do not delete this line thinking the loop covers it — it does not.
         items["bangumi"] = _bangumi_status_item(cfg, auth_ctx)
+        items["weibo"] = _weibo_status_item(cfg, auth_ctx)
         statuses = SourcesStatusResponse(**items)
         _attach_network_hints(statuses, cfg)
         return statuses
@@ -13071,7 +13806,7 @@ def create_app(
         try:
             result = await verify_source(
                 slug,
-                cfg=load_config(),
+                cfg=_pin_active_runtime_config(load_config()),
                 database=ctx.database,
                 event_hub=getattr(ctx, "event_hub", None),
             )
@@ -13116,7 +13851,12 @@ def create_app(
         provider = SOURCE_AUTH_PROVIDERS.get(slug)
         if provider is None:
             return SourceAuthContract()
-        return provider(SourceAuthContext(cfg=load_config(), database=ctx.database))
+        return provider(
+            SourceAuthContext(
+                cfg=_pin_active_runtime_config(load_config()),
+                database=ctx.database,
+            )
+        )
 
     def _credential_landed(slug: str, *, verdict: Any, value: str, changed: bool) -> None:
         """Bookkeeping every credential write owes once the value is really stored.
@@ -13146,7 +13886,7 @@ def create_app(
         from openbiliclaw.api.source_auth.write import credential_fingerprint
 
         if verdict.checked == "live_probe" and not verdict.from_cache:
-            LIVE_PROBES.record(
+            recorded = LIVE_PROBES.record(
                 slug,
                 authenticated=verdict.authenticated,
                 detail=verdict.message,
@@ -13155,6 +13895,17 @@ def create_app(
                 username=verdict.username,
                 user_id=verdict.user_id,
             )
+            if (
+                slug == "v2ex"
+                and recorded.authenticated
+                and recorded.username
+                and recorded.credential_fingerprint
+                and hasattr(ctx.database, "set_v2ex_pat_identity")
+            ):
+                ctx.database.set_v2ex_pat_identity(
+                    recorded.username,
+                    credential_fingerprint=recorded.credential_fingerprint,
+                )
         if changed:
             note_credential_changed(slug)
 
@@ -13191,7 +13942,7 @@ def create_app(
         )
         from openbiliclaw.config import load_config
 
-        cfg = load_config()
+        cfg = _pin_active_runtime_config(load_config())
         verdict = await validate_credential(slug, kind, value, cfg=cfg)
         if not verdict.ok:
             return CredentialWriteOutcome(
@@ -13395,7 +14146,7 @@ def create_app(
         from openbiliclaw.sources.douyin_auth import resolve_douyin_cookie
         from openbiliclaw.sources.reddit_tasks import rdt_credential_cookie_names
 
-        cfg = load_config()
+        cfg = _pin_active_runtime_config(load_config())
         srcs = cfg.sources
 
         bili_cookie = resolve_runtime_cookie(
@@ -13523,6 +14274,22 @@ def create_app(
                 "",
                 "Linux.do 公开发现无需登录；个人收藏、点赞和阅读记录由浏览器插件"
                 "同源读取，后端不保存 Cookie。",
+            ),
+            v2ex=item(
+                "v2ex",
+                "可选 PAT",
+                str(
+                    os.environ.get(getattr(srcs.v2ex, "token_env", "OPENBILICLAW_V2EX_TOKEN"), "")
+                    or ""
+                )
+                or str(getattr(srcs.v2ex, "access_token", "") or ""),
+                "V2EX 公开发现无需凭据；PAT 只用于 API 2.0 身份和增强读取，后端严格只读。",
+            ),
+            weibo=item(
+                "weibo",
+                "匿名访客会话",
+                "",
+                "微博访客会话仅保存在后端内存中，不读取或保存用户 Cookie。",
             ),
         )
 
@@ -13742,6 +14509,14 @@ def create_app(
         reddit_bootstrap_item_key,
         reddit_items_to_events,
     )
+    from openbiliclaw.sources.v2ex_affinity import V2EXNodeAffinityStore
+    from openbiliclaw.sources.v2ex_tasks import (
+        V2EXFavoriteSnapshotStore,
+        V2EXTaskQueue,
+        v2ex_bootstrap_item_key,
+        v2ex_bootstrap_items_to_events,
+        v2ex_snapshot_effects_to_events,
+    )
     from openbiliclaw.sources.yt_tasks import (
         YtTaskQueue,
         yt_bootstrap_item_key,
@@ -13756,11 +14531,15 @@ def create_app(
     _zhihu_task_queue: ZhihuTaskQueue | None = None
     _reddit_task_queue: RedditTaskQueue | None = None
     _linuxdo_task_queue: LinuxdoTaskQueue | None = None
+    _v2ex_task_queue: V2EXTaskQueue | None = None
+    _v2ex_snapshot_store: V2EXFavoriteSnapshotStore | None = None
     db_conn = getattr(ctx.database, "conn", None)
     if hasattr(db_conn, "executescript"):
         _zhihu_task_queue = ZhihuTaskQueue(ctx.database)
         _reddit_task_queue = RedditTaskQueue(ctx.database)
         _linuxdo_task_queue = LinuxdoTaskQueue(ctx.database)
+        _v2ex_task_queue = V2EXTaskQueue(ctx.database)
+        _v2ex_snapshot_store = V2EXFavoriteSnapshotStore(ctx.database)
 
     @app.get("/api/sources/reddit/next-task")
     def reddit_next_task(response: Any = None) -> Any:
@@ -13907,6 +14686,298 @@ def create_app(
     async def reddit_task_kick() -> dict[str, Any]:
         """Broadcast `reddit_task_available` over runtime-stream."""
         return await _kick_source_task("reddit")
+
+    # ── V2EX browser-bootstrap endpoints ───────────────────────────
+
+    @app.get("/api/sources/v2ex/next-task")
+    def v2ex_next_task(response: Any = None) -> Any:
+        """Return the oldest pending read-only V2EX browser task, or 204."""
+        from starlette.responses import Response
+
+        if _v2ex_task_queue is None:
+            return Response(status_code=204)
+        task = _v2ex_task_queue.next_pending(only_ids=_init_owned_ids_filter())
+        if task is None:
+            return Response(status_code=204)
+        payload = json.loads(task["payload_json"]) if task.get("payload_json") else {}
+        return {
+            "id": task["id"],
+            "type": task["type"],
+            **(payload if isinstance(payload, dict) else {}),
+        }
+
+    @app.post("/api/sources/v2ex/task-result")
+    async def v2ex_task_result(payload: dict[str, Any]) -> dict[str, Any]:
+        """Accept and project one staged V2EX browser-bootstrap result.
+
+        The extension returns only public DOM-derived rows. The first terminal
+        callback is frozen in ``result_json`` before profile and Node-affinity
+        projections run, so a retry after a process crash cannot replace the
+        canonical result with a different browser payload.
+        """
+        task_id = str(payload.get("task_id", "") or "").strip()
+        if not task_id:
+            raise HTTPException(status_code=422, detail="task_id is required")
+        if _is_extension_native_job(task_id):
+            raise HTTPException(status_code=409, detail="task_result_conflict")
+
+        queue = _v2ex_task_queue
+        if queue is None:
+            raise HTTPException(status_code=409, detail="task_result_conflict")
+        task = _require_legacy_task(queue, task_id)
+        if str(task.get("status", "")).strip() in {"completed", "failed"}:
+            return {"ok": True, "ignored": True}
+
+        status = str(payload.get("status", "") or "").strip().lower()
+        items = [value for value in payload.get("items", []) if isinstance(value, dict)]
+        scope_counts = payload.get("scope_counts")
+        if not isinstance(scope_counts, dict):
+            scope_counts = None
+        debug = payload.get("debug")
+        if not isinstance(debug, dict):
+            debug = None
+        if status == "failed":
+            queue.fail(task_id, error=str(payload.get("error", "") or ""), debug=debug)
+            return {"ok": True}
+
+        task_payload: dict[str, Any] = {}
+        if task.get("payload_json"):
+            with suppress(Exception):
+                parsed_payload = json.loads(str(task.get("payload_json") or "{}"))
+                if isinstance(parsed_payload, dict):
+                    task_payload = parsed_payload
+        task_type = str(task.get("type", "")).strip()
+        profile_update = bool(task_payload.get("profile_update"))
+        incremental = bool(task_payload.get("incremental"))
+        smoke_only = bool(task_payload.get("smoke_only"))
+        profile_rebuild = bool(task_payload.get("profile_rebuild"))
+
+        from openbiliclaw.sources.task_result_protocol import (
+            parse_task_result,
+            staged_terminal_status,
+        )
+
+        canonical_result = parse_task_result(task.get("result_json"))
+        staged_status = staged_terminal_status(canonical_result)
+        if staged_status:
+            # The first final payload wins. Ignore changed retry fields.
+            is_final = True
+        elif status in {"ok", "partial", "empty"}:
+            canonical_result = queue.stage_final_result(
+                task_id,
+                terminal_status=status,
+                items=items if items else None,
+                scope_counts=scope_counts,
+                debug=debug,
+            )
+            is_final = True
+        elif status:
+            queue.merge_result(
+                task_id,
+                items=items if items else None,
+                scope_counts=scope_counts,
+                debug=debug,
+            )
+            canonical_task = queue.get(task_id) or {}
+            canonical_result = parse_task_result(canonical_task.get("result_json"))
+            is_final = False
+        else:
+            queue.fail(task_id, error="missing task status", debug=debug)
+            return {"ok": True}
+
+        canonical_items = [
+            value for value in canonical_result.get("items", []) if isinstance(value, dict)
+        ]
+        canonical_debug = canonical_result.get("debug")
+        canonical_debug = canonical_debug if isinstance(canonical_debug, dict) else {}
+        if isinstance(canonical_debug.get("logged_in"), bool) and hasattr(
+            ctx.database, "set_v2ex_login_state"
+        ):
+            ctx.database.set_v2ex_login_state(canonical_debug["logged_in"])
+            if canonical_debug["logged_in"] is False and hasattr(
+                ctx.database, "clear_v2ex_browser_identity"
+            ):
+                ctx.database.clear_v2ex_browser_identity()
+        if canonical_debug.get("logged_in") is True:
+            observed_username = str(canonical_debug.get("username", "") or "").strip()
+            if observed_username and hasattr(ctx.database, "set_v2ex_browser_identity"):
+                from openbiliclaw.sources.v2ex_client import validate_v2ex_username
+
+                with suppress(ValueError):
+                    ctx.database.set_v2ex_browser_identity(
+                        validate_v2ex_username(observed_username),
+                        evidence="observed",
+                    )
+        from openbiliclaw.api.source_auth.probe_cache import LIVE_PROBES
+        from openbiliclaw.config import load_config
+        from openbiliclaw.sources.v2ex_identity import resolve_v2ex_identity_state
+
+        identity_resolution = resolve_v2ex_identity_state(
+            cfg=load_config(),
+            database=ctx.database,
+            probes=LIVE_PROBES,
+            configured_username=task_payload.get("username") or None,
+            observed_username=canonical_debug.get("username"),
+            observed_logged_in=(
+                canonical_debug.get("logged_in")
+                if isinstance(canonical_debug.get("logged_in"), bool)
+                else None
+            ),
+        )
+        init_busy = _init_active_now()
+        skip_profile = init_busy and not _init_owns_task(task_id)
+        active_profile_username = ""
+        if hasattr(ctx.database, "get_v2ex_profile_identity"):
+            active_profile_username = str(ctx.database.get_v2ex_profile_identity()[0] or "").strip()
+        identity_switch_required = bool(
+            active_profile_username
+            and identity_resolution.username
+            and active_profile_username.casefold() != identity_resolution.username.casefold()
+        )
+        init_owned_task = init_busy and _init_owns_task(task_id)
+        switch_lane = init_owned_task or profile_rebuild
+        # Every row in this protocol came from the signed-in browser.  A PAT or
+        # manually accepted username is not enough to relabel another account's
+        # DOM, and a steady-state incremental task may not switch the profile
+        # owner behind the user's back.  Guided init is the sole switch lane:
+        # stage 3 rebuilds the Soul from the new run before activation.
+        identity_blocked = not identity_resolution.private_bootstrap_available or (
+            identity_switch_required and not switch_lane
+        )
+        if (
+            task_type == "bootstrap_profile"
+            and not smoke_only
+            and not skip_profile
+            and not identity_blocked
+        ):
+            identity_prefix = f"identity:{identity_resolution.username.casefold()}:"
+
+            def _identity_scoped_v2ex_key(item: dict[str, Any]) -> str:
+                key = v2ex_bootstrap_item_key(item)
+                return f"{identity_prefix}{key}" if key else ""
+
+            if canonical_items:
+                V2EXNodeAffinityStore(ctx.database).record_items(
+                    canonical_items,
+                    username=identity_resolution.username,
+                )
+            if (profile_update or incremental) and canonical_items:
+                fresh_items, _item_keys_by_index = _filter_new_source_bootstrap_items(
+                    "v2ex",
+                    canonical_items,
+                    _identity_scoped_v2ex_key,
+                )
+                events = v2ex_bootstrap_items_to_events(
+                    fresh_items,
+                    identity_username=identity_resolution.username,
+                )
+                events_with_keys: list[tuple[dict[str, Any], str]] = []
+                for event in events:
+                    metadata = event.get("metadata")
+                    metadata = metadata if isinstance(metadata, dict) else {}
+                    import_source = str(metadata.get("import_source") or "")
+                    scope = import_source.removeprefix("v2ex_bootstrap_")
+                    event_item: dict[str, Any] = {
+                        "scope": scope,
+                        "node_name": metadata.get("node_name", ""),
+                        "topic_id": metadata.get("topic_id") or metadata.get("content_id", ""),
+                    }
+                    if scope == "favorite_nodes":
+                        event_item.pop("topic_id", None)
+                    key = v2ex_bootstrap_item_key(event_item)
+                    if not key:
+                        # Keep a URL fallback only for malformed but otherwise
+                        # admissible rows; valid rows use the scope-aware key
+                        # above. This is deliberately event-derived because
+                        # Reply aggregation changes the raw item indexes.
+                        key = v2ex_bootstrap_item_key(
+                            {
+                                "scope": scope,
+                                "url": event.get("url", ""),
+                                "title": event.get("title", ""),
+                            }
+                        )
+                    if key:
+                        key = f"{identity_prefix}{key}"
+                    events_with_keys.append((event, key))
+                accepted_keys = await _accept_source_profile_events(
+                    source="v2ex",
+                    task_id=task_id,
+                    events_with_keys=events_with_keys,
+                    generic_owner=not init_busy,
+                )
+                _mark_source_bootstrap_keys("v2ex", accepted_keys)
+            # Seed the first complete bootstrap as the comparison baseline as
+            # well as processing later incremental snapshots. Otherwise an
+            # item removed between guided init and the first incremental run
+            # would never enter the missing-streak ledger at all.
+            if is_final and _v2ex_snapshot_store is not None:
+                scope_complete = canonical_debug.get("scope_complete")
+                scope_complete = scope_complete if isinstance(scope_complete, dict) else {}
+                scope_statuses = canonical_debug.get("scope_statuses")
+                scope_statuses = scope_statuses if isinstance(scope_statuses, dict) else {}
+                snapshot_username = identity_resolution.username
+                snapshot_effects: list[dict[str, Any]] = []
+                if snapshot_username and canonical_debug.get("logged_in") is True:
+                    for favorite_scope in ("favorite_topics", "favorite_nodes"):
+                        if scope_complete.get(favorite_scope) is not True or scope_statuses.get(
+                            favorite_scope
+                        ) not in {"ok", "empty"}:
+                            continue
+                        snapshot_effects.extend(
+                            _v2ex_snapshot_store.prepare_complete_snapshot(
+                                task_id=task_id,
+                                username=snapshot_username,
+                                scope=favorite_scope,
+                                items=canonical_items,
+                            )
+                        )
+                if snapshot_effects:
+                    snapshot_events = v2ex_snapshot_effects_to_events(
+                        snapshot_effects,
+                        identity_username=identity_resolution.username,
+                    )
+                    if len(snapshot_events) != len(snapshot_effects):
+                        raise RuntimeError("V2EX snapshot effect conversion was incomplete")
+                    snapshot_events_with_keys = [
+                        (event, str(effect.get("effect_key") or ""))
+                        for event, effect in zip(snapshot_events, snapshot_effects, strict=True)
+                    ]
+                    accepted_effect_keys = await _accept_source_profile_events(
+                        source="v2ex",
+                        task_id=task_id,
+                        events_with_keys=snapshot_events_with_keys,
+                        generic_owner=not init_busy,
+                    )
+                    if len(set(accepted_effect_keys)) != len(snapshot_effects):
+                        raise RuntimeError("V2EX snapshot effects were not durably accepted")
+                    V2EXNodeAffinityStore(ctx.database).apply_snapshot_effects(
+                        snapshot_effects,
+                        username=identity_resolution.username,
+                    )
+                    _v2ex_snapshot_store.mark_effects_emitted(accepted_effect_keys)
+            if (
+                not init_busy
+                and not active_profile_username
+                and not profile_rebuild
+                and hasattr(ctx.database, "activate_v2ex_profile_identity")
+            ):
+                ctx.database.activate_v2ex_profile_identity(identity_resolution.username)
+        if is_final:
+            queue.complete_staged_result(task_id)
+        if identity_blocked:
+            return {
+                "ok": True,
+                "profile_paused": True,
+                "identity_switch_required": identity_switch_required,
+                "identity": identity_resolution.as_dict(),
+            }
+        return {"ok": True}
+
+    @app.post("/api/sources/v2ex/kick")
+    async def v2ex_task_kick() -> dict[str, Any]:
+        """Broadcast ``v2ex_task_available`` to the extension dispatcher."""
+        return await _kick_source_task("v2ex")
 
     @app.get("/api/sources/zhihu/next-task")
     def zhihu_next_task(response: Any = None) -> Any:
@@ -14884,13 +15955,13 @@ def create_app(
         dy_cookie = ""
         with suppress(Exception):
             dy_cookie = resolve_douyin_cookie(
-                data_dir=cfg.data_path,
+                data_dir=_active_runtime_data_path(),
                 cookie_env=cfg.sources.douyin.cookie_env,
             )
         tw_cookie = ""
         with suppress(Exception):
             tw_cookie = resolve_x_cookie(
-                data_dir=cfg.data_path,
+                data_dir=_active_runtime_data_path(),
                 cookie_env=cfg.sources.twitter.cookie_env,
             )
 
@@ -15122,6 +16193,45 @@ def create_app(
                     min_interval_minutes=cfg.sources.linuxdo.min_interval_minutes,
                     bootstrap_limit=cfg.sources.linuxdo.bootstrap_limit,
                 ),
+                v2ex=V2EXSourceConfigOut(
+                    enabled=cfg.sources.v2ex.enabled,
+                    username=cfg.sources.v2ex.username,
+                    access_token_set=bool(
+                        str(os.environ.get(cfg.sources.v2ex.token_env, "") or "").strip()
+                        or str(cfg.sources.v2ex.access_token or "").strip()
+                    ),
+                    token_env=cfg.sources.v2ex.token_env,
+                    source_modes=list(cfg.sources.v2ex.source_modes),
+                    tab_modes=list(cfg.sources.v2ex.tab_modes),
+                    node_allowlist=list(cfg.sources.v2ex.node_allowlist),
+                    node_blocklist=list(cfg.sources.v2ex.node_blocklist),
+                    node_downweight=list(cfg.sources.v2ex.node_downweight),
+                    daily_search_budget=cfg.sources.v2ex.daily_search_budget,
+                    daily_node_budget=cfg.sources.v2ex.daily_node_budget,
+                    daily_tab_budget=cfg.sources.v2ex.daily_tab_budget,
+                    daily_hot_budget=cfg.sources.v2ex.daily_hot_budget,
+                    daily_latest_budget=cfg.sources.v2ex.daily_latest_budget,
+                    request_interval_seconds=cfg.sources.v2ex.request_interval_seconds,
+                    min_interval_minutes=cfg.sources.v2ex.min_interval_minutes,
+                    detail_fetch_limit=cfg.sources.v2ex.detail_fetch_limit,
+                    reply_enrichment_limit=cfg.sources.v2ex.reply_enrichment_limit,
+                    max_topic_chars=cfg.sources.v2ex.max_topic_chars,
+                    max_reply_digest_chars=cfg.sources.v2ex.max_reply_digest_chars,
+                    max_profile_nodes=cfg.sources.v2ex.max_profile_nodes,
+                    bootstrap_topics_limit=cfg.sources.v2ex.bootstrap_topics_limit,
+                    bootstrap_replies_limit=cfg.sources.v2ex.bootstrap_replies_limit,
+                    bootstrap_favorites_limit=cfg.sources.v2ex.bootstrap_favorites_limit,
+                    bootstrap_max_pages_per_scope=cfg.sources.v2ex.bootstrap_max_pages_per_scope,
+                ),
+                weibo=WeiboSourceConfigOut(
+                    enabled=cfg.sources.weibo.enabled,
+                    source_modes=list(cfg.sources.weibo.source_modes),
+                    daily_search_budget=cfg.sources.weibo.daily_search_budget,
+                    daily_hot_budget=cfg.sources.weibo.daily_hot_budget,
+                    daily_creator_budget=cfg.sources.weibo.daily_creator_budget,
+                    request_interval_seconds=cfg.sources.weibo.request_interval_seconds,
+                    min_interval_minutes=cfg.sources.weibo.min_interval_minutes,
+                ),
             ),
             scheduler=SchedulerConfigOut(
                 enabled=cfg.scheduler.enabled,
@@ -15141,6 +16251,7 @@ def create_app(
                 zhihu_incremental_hours=getattr(cfg.scheduler, "zhihu_incremental_hours", None),
                 reddit_incremental_hours=getattr(cfg.scheduler, "reddit_incremental_hours", None),
                 linuxdo_incremental_hours=getattr(cfg.scheduler, "linuxdo_incremental_hours", None),
+                v2ex_incremental_hours=getattr(cfg.scheduler, "v2ex_incremental_hours", None),
                 refresh_check_interval_seconds=cfg.scheduler.refresh_check_interval_seconds,
                 eval_min_batch_size=cfg.scheduler.eval_min_batch_size,
                 eval_max_wait_seconds=cfg.scheduler.eval_max_wait_seconds,
@@ -15267,6 +16378,379 @@ def create_app(
             mask_keys=True,
             degraded=bool(getattr(ctx, "degraded", False)),
             degraded_reason=str(getattr(ctx, "degraded_reason", "")),
+        )
+
+    def _migration_request_allowed(request: Request) -> bool:
+        """Require real loopback transport plus same-origin browser intent."""
+        from openbiliclaw import auth_core
+
+        gate = _get_auth_gate()
+        if auth_core.is_extension_origin(request.headers.get("origin")):
+            return False
+        client_ip, local_transport = gate.resolve_client(request)
+        return (
+            request.headers.get("x-obc-auth") == "1"
+            and auth_core.is_trusted_local(client_ip, local_transport)
+            and gate._origin_safe_for_local(request)
+        )
+
+    def _require_local_migration_request(
+        request: Request,
+        *,
+        allow_during_init: bool = False,
+    ) -> None:
+        if not _migration_request_allowed(request):
+            raise HTTPException(status_code=403, detail={"code": "local_only"})
+        if not allow_during_init and _init_active_now():
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "init_active",
+                    "message": "初始化进行中，完成或取消后再迁移数据。",
+                },
+            )
+
+    async def _await_migration_worker(
+        worker: asyncio.Task[Any],
+        *,
+        cleanup_result: Any = None,
+    ) -> Any:
+        """Do not abandon sensitive temp files or staging on request cancellation."""
+        try:
+            return await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            while not worker.done():
+                try:
+                    await asyncio.shield(worker)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    break
+            try:
+                result = worker.result()
+            except BaseException:
+                pass
+            else:
+                if callable(cleanup_result):
+                    with suppress(Exception):
+                        cleanup_result(result)
+            raise
+
+    @app.post("/api/migration/export")
+    async def export_user_migration(
+        request: Request,
+        payload: Annotated[dict[str, Any] | None, Body()] = None,
+    ) -> StreamingResponse:
+        """Download a checksummed archive of portable user data and secrets."""
+        _require_local_migration_request(request)
+        if _CONFIG_SAVE_LOCK.locked():
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "config_busy", "message": "配置正在保存，请稍后再导出。"},
+            )
+        from openbiliclaw.config import load_config as load_migration_config
+        from openbiliclaw.storage.migration import MigrationError, create_migration_archive
+
+        frontend = (payload or {}).get("frontend")
+        if frontend is not None and not isinstance(frontend, dict):
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "invalid_frontend", "message": "前端偏好格式无效。"},
+            )
+        if _MIGRATION_TRANSFER_LOCK.locked():
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "migration_busy", "message": "另一项迁移正在处理。"},
+            )
+        await _MIGRATION_TRANSFER_LOCK.acquire()
+        exported: Any = None
+        try:
+            async with _CONFIG_SAVE_LOCK:
+                current_config = await asyncio.to_thread(load_migration_config)
+                current_config = _pin_active_runtime_config(current_config)
+                worker = asyncio.create_task(
+                    asyncio.to_thread(
+                        create_migration_archive,
+                        current_config,
+                        frontend,
+                    )
+                )
+                exported = await _await_migration_worker(
+                    worker,
+                    cleanup_result=lambda result: shutil.rmtree(
+                        result.path.parent,
+                        ignore_errors=True,
+                    ),
+                )
+        except MigrationError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": exc.code, "message": str(exc)},
+            ) from exc
+        except (OSError, sqlite3.DatabaseError) as exc:
+            logger.exception("Failed to create user-data migration archive")
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "code": "export_failed",
+                    "message": "创建迁移包失败，请检查磁盘空间。",
+                },
+            ) from exc
+        finally:
+            if exported is None:
+                _MIGRATION_TRANSFER_LOCK.release()
+        archive_path = exported.path
+        try:
+            archive_size = archive_path.stat().st_size
+        except OSError as exc:
+            shutil.rmtree(archive_path.parent, ignore_errors=True)
+            _MIGRATION_TRANSFER_LOCK.release()
+            raise HTTPException(
+                status_code=500,
+                detail={"code": "export_failed", "message": "迁移包生成后无法读取。"},
+            ) from exc
+
+        async def _stream_archive() -> AsyncIterator[bytes]:
+            try:
+                with archive_path.open("rb") as handle:
+                    while chunk := handle.read(1024 * 1024):
+                        yield chunk
+            finally:
+                shutil.rmtree(archive_path.parent, ignore_errors=True)
+
+        try:
+            return _MigrationArchiveStreamingResponse(
+                _stream_archive(),
+                media_type="application/vnd.openbiliclaw.backup+zip",
+                cleanup_directory=archive_path.parent,
+                release_callback=_MIGRATION_TRANSFER_LOCK.release,
+                # A disconnect can happen before the body iterator is entered, so
+                # its ``finally`` block alone cannot guarantee sensitive cleanup.
+                # Both paths are idempotent and cover early as well as mid-stream
+                # disconnects.
+                background=BackgroundTask(
+                    shutil.rmtree,
+                    archive_path.parent,
+                    ignore_errors=True,
+                ),
+                headers={
+                    "Cache-Control": "no-store, private",
+                    "Pragma": "no-cache",
+                    "X-Content-Type-Options": "nosniff",
+                    "X-OBC-Migration-Files": str(exported.file_count),
+                    "Content-Length": str(archive_size),
+                    "Content-Disposition": f'attachment; filename="{exported.filename}"',
+                },
+            )
+        except Exception:
+            shutil.rmtree(archive_path.parent, ignore_errors=True)
+            _MIGRATION_TRANSFER_LOCK.release()
+            raise
+
+    @app.post("/api/migration/import", status_code=202)
+    async def import_user_migration(request: Request) -> JSONResponse:
+        """Validate an uploaded archive and stage replacement for next restart."""
+        _require_local_migration_request(request)
+        if request.headers.get("x-obc-migration-confirm") != "replace-all":
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "confirmation_required",
+                    "message": "导入需要明确确认替换当前用户数据。",
+                },
+            )
+        from openbiliclaw.config import load_config as load_migration_config
+        from openbiliclaw.storage.migration import (
+            MAX_MIGRATION_ARCHIVE_BYTES,
+            MigrationError,
+            stage_migration_archive,
+        )
+
+        raw_request_id = request.headers.get("x-obc-migration-request-id", "").strip()
+        try:
+            request_id = UUID(raw_request_id).hex if raw_request_id else uuid.uuid4().hex
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "invalid_request_id", "message": "迁移请求 ID 无效。"},
+            ) from exc
+
+        content_length = request.headers.get("content-length", "").strip()
+        if content_length:
+            try:
+                declared_size = int(content_length)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail={"code": "invalid_content_length"},
+                ) from exc
+            if declared_size <= 0 or declared_size > MAX_MIGRATION_ARCHIVE_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail={
+                        "code": "archive_too_large",
+                        "message": "迁移包为空或超过 2 GB。",
+                    },
+                )
+
+        import tempfile
+        from pathlib import Path as _MigrationPath
+
+        if _MIGRATION_TRANSFER_LOCK.locked():
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "migration_busy",
+                    "message": "另一项迁移正在上传或校验，请稍后重试。",
+                },
+            )
+        await _MIGRATION_TRANSFER_LOCK.acquire()
+        app.state.migration_import_request_id = request_id
+        app.state.migration_import_phase = "uploading"
+        upload_dir: _MigrationPath | None = None
+        try:
+            upload_dir = _MigrationPath(tempfile.mkdtemp(prefix="openbiliclaw-import-upload-"))
+            upload_path = upload_dir / "upload.obcbackup"
+            received = 0
+            with upload_path.open("xb") as handle:
+                write_buffer = bytearray()
+                async for chunk in request.stream():
+                    received += len(chunk)
+                    if received > MAX_MIGRATION_ARCHIVE_BYTES:
+                        raise HTTPException(
+                            status_code=413,
+                            detail={
+                                "code": "archive_too_large",
+                                "message": "迁移包超过 2 GB 上传上限。",
+                            },
+                        )
+                    write_buffer.extend(chunk)
+                    if len(write_buffer) >= 4 * 1024 * 1024:
+                        await asyncio.to_thread(handle.write, write_buffer)
+                        write_buffer.clear()
+                if write_buffer:
+                    await asyncio.to_thread(handle.write, write_buffer)
+                await asyncio.to_thread(handle.flush)
+                await asyncio.to_thread(os.fsync, handle.fileno())
+            if received == 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail={"code": "empty_archive", "message": "请选择迁移包文件。"},
+                )
+            if _CONFIG_SAVE_LOCK.locked():
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": "config_busy", "message": "配置正在保存，请稍后再导入。"},
+                )
+            async with _CONFIG_SAVE_LOCK:
+                current_config = await asyncio.to_thread(load_migration_config)
+                app.state.migration_import_phase = "validating"
+                worker = asyncio.create_task(
+                    asyncio.to_thread(
+                        stage_migration_archive,
+                        upload_path,
+                        current_config,
+                        request_id=request_id,
+                    )
+                )
+                staged = await _await_migration_worker(worker)
+        except MigrationError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": exc.code, "message": str(exc)},
+            ) from exc
+        finally:
+            if upload_dir is not None:
+                shutil.rmtree(upload_dir, ignore_errors=True)
+            if app.state.migration_import_request_id == request_id:
+                app.state.migration_import_request_id = ""
+                app.state.migration_import_phase = ""
+            _MIGRATION_TRANSFER_LOCK.release()
+
+        return JSONResponse(
+            status_code=202,
+            content={
+                "state": "staged",
+                "migration_id": staged.migration_id,
+                "request_id": staged.request_id,
+                "source_version": staged.source_version,
+                "file_count": staged.file_count,
+                "uncompressed_bytes": staged.uncompressed_bytes,
+                "frontend": staged.frontend_settings,
+                "adjusted_fields": list(staged.adjusted_fields),
+                "source_omitted_environment_variables": list(
+                    staged.source_omitted_environment_variables
+                ),
+                "target_active_environment_variables": list(
+                    staged.target_active_environment_variables
+                ),
+                "restart_required": True,
+                "message": "迁移包已完整校验；请重启 OpenBiliClaw 以载入数据。",
+            },
+            headers={"Cache-Control": "no-store, private"},
+        )
+
+    @app.get("/api/migration/status")
+    def get_user_migration_status(request: Request) -> JSONResponse:
+        """Return pending/last restore status to the local settings page."""
+        _require_local_migration_request(request, allow_during_init=True)
+        from openbiliclaw.storage.migration import migration_status
+
+        status = migration_status()
+        active_request_id = str(app.state.migration_import_request_id or "")
+        if active_request_id and not (
+            status.get("state") == "staged"
+            and str(status.get("request_id") or "") == active_request_id
+        ):
+            status = {
+                "state": "processing",
+                "request_id": active_request_id,
+                "phase": str(app.state.migration_import_phase or "validating"),
+                "restart_required": False,
+                "message": "迁移包仍在上传或校验，当前数据尚未改动。",
+            }
+        return JSONResponse(
+            status,
+            headers={"Cache-Control": "no-store, private"},
+        )
+
+    @app.delete("/api/migration/pending")
+    async def cancel_user_migration(request: Request) -> JSONResponse:
+        """Cancel the staged restore while leaving current user data untouched."""
+        _require_local_migration_request(request, allow_during_init=True)
+        from openbiliclaw.storage.migration import MigrationError, cancel_pending_migration
+
+        if _MIGRATION_TRANSFER_LOCK.locked():
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "migration_busy",
+                    "message": "迁移包仍在上传、导出或校验，请完成后再取消。",
+                },
+            )
+        await _MIGRATION_TRANSFER_LOCK.acquire()
+        try:
+            async with _CONFIG_SAVE_LOCK:
+                cancelled = await asyncio.to_thread(cancel_pending_migration)
+        except MigrationError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": exc.code, "message": str(exc)},
+            ) from exc
+        finally:
+            _MIGRATION_TRANSFER_LOCK.release()
+        return JSONResponse(
+            {
+                "state": "cancelled" if cancelled else "idle",
+                "cancelled": cancelled,
+                "restart_required": False,
+                "message": (
+                    "待导入迁移包已取消，当前数据未改动。"
+                    if cancelled
+                    else "当前没有待导入迁移包。"
+                ),
+            },
+            headers={"Cache-Control": "no-store, private"},
         )
 
     @app.get("/api/config/apply-status", response_model=ConfigApplyStatusResponse)
@@ -15835,6 +17319,9 @@ def create_app(
         is_instance = kind == "llm_instance"
         target_instance = str(instance_id or "").strip().lower()
         configured_chain = effective_llm_default_chain(cfg.llm)
+        timeout_s = _config_llm_probe_timeout_seconds(
+            getattr(cfg.llm, "timeout", 300),
+        )
         if is_fallback:
             legacy_routing = not bool(getattr(cfg.llm, "instance_routing", False))
             legacy_default = str(getattr(cfg.llm, "default_provider", "") or "").strip().lower()
@@ -15919,7 +17406,6 @@ def create_app(
                 model = str(
                     getattr(provider_obj, "_model", "") or getattr(provider_cfg, "model", "") or ""
                 ).strip()
-            timeout_s = min(max(float(getattr(cfg.llm, "timeout", 300) or 300), 10.0), 30.0)
 
             async def _complete_probe() -> Any:
                 async with ctx.llm_concurrency_gate.slot(caller="api.config_probe"):
@@ -15971,6 +17457,16 @@ def create_app(
                 model=response_model,
                 message=f"{label} is available." if ok else "",
                 error="" if ok else f"{label} returned an empty response.",
+                latency_ms=int((time.perf_counter() - started) * 1000),
+            )
+        except TimeoutError:
+            return ConfigServiceProbeResponse(
+                ok=False,
+                kind=kind,
+                instance_id=target_instance,
+                provider=provider,
+                model=model,
+                error=f"LLM connectivity probe timed out after {timeout_s:g}s.",
                 latency_ms=int((time.perf_counter() - started) * 1000),
             )
         except Exception as exc:
@@ -16215,6 +17711,9 @@ def create_app(
         )
 
         cfg = load_config()
+        from pathlib import Path as _ConfigPath
+
+        active_data_path = _active_runtime_data_path()
         update = payload.model_dump(exclude_none=True)
         # Preserve an explicit ``null`` for optional incremental overrides so
         # the API can restore inheritance; omitted fields still remain absent.
@@ -16404,7 +17903,7 @@ def create_app(
                             current = ""
                             with suppress(Exception):
                                 current = resolve_douyin_cookie(
-                                    data_dir=cfg.data_path,
+                                    data_dir=active_data_path,
                                     cookie_env=cfg.sources.douyin.cookie_env,
                                 )
                             # Unchanged form echo → no write (env override
@@ -16417,7 +17916,7 @@ def create_app(
                                 def _store_douyin(
                                     cookie: str = new_cookie, verdict: Any = dy_verdict
                                 ) -> None:
-                                    DouyinCookieManager(cfg.data_path).set_cookie(
+                                    DouyinCookieManager(active_data_path).set_cookie(
                                         cookie, source="config-update"
                                     )
                                     _credential_landed(
@@ -16467,7 +17966,7 @@ def create_app(
                             current = ""
                             with suppress(Exception):
                                 current = resolve_x_cookie(
-                                    data_dir=cfg.data_path,
+                                    data_dir=active_data_path,
                                     cookie_env=cfg.sources.twitter.cookie_env,
                                 )
                             if new_cookie != current:
@@ -16476,7 +17975,7 @@ def create_app(
                                 def _store_twitter(
                                     cookie: str = new_cookie, verdict: Any = x_verdict
                                 ) -> None:
-                                    XCookieManager(cfg.data_path).set_cookie(
+                                    XCookieManager(active_data_path).set_cookie(
                                         cookie, source="config-update"
                                     )
                                     # A pasted valid cookie is a re-login signal,
@@ -16808,6 +18307,174 @@ def create_app(
                                 status_code=400, detail=f"Linux.do {key} 超出允许范围"
                             )
                         setattr(cfg.sources.linuxdo, key, value)
+                v2ex_data = sources_data.get("v2ex")
+                if isinstance(v2ex_data, dict):
+                    from openbiliclaw.config import (
+                        V2EX_CONFIG_INTEGER_LIMITS,
+                        normalize_v2ex_list_field,
+                        normalize_v2ex_source_config,
+                    )
+                    from openbiliclaw.sources.v2ex_client import (
+                        V2EXAPIError,
+                        V2EXClient,
+                        member_username,
+                        validate_v2ex_access_token,
+                        validate_v2ex_username,
+                    )
+
+                    allowed_v2ex_fields = {
+                        "enabled",
+                        "username",
+                        "access_token",
+                        "token_env",
+                        "source_modes",
+                        "tab_modes",
+                        "node_allowlist",
+                        "node_blocklist",
+                        "node_downweight",
+                        *V2EX_CONFIG_INTEGER_LIMITS,
+                    }
+                    unknown_v2ex_fields = sorted(set(v2ex_data) - allowed_v2ex_fields)
+                    if unknown_v2ex_fields:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=("V2EX 包含不支持的配置字段: " + ", ".join(unknown_v2ex_fields)),
+                        )
+
+                    v2ex_cfg = cfg.sources.v2ex
+                    if "enabled" in v2ex_data:
+                        v2ex_cfg.enabled = _as_bool(v2ex_data["enabled"])
+                    if "username" in v2ex_data:
+                        try:
+                            v2ex_cfg.username = validate_v2ex_username(v2ex_data["username"])
+                        except ValueError as exc:
+                            raise HTTPException(status_code=400, detail=str(exc)) from exc
+                    if "token_env" in v2ex_data:
+                        token_env = str(v2ex_data["token_env"] or "").strip()
+                        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,127}", token_env):
+                            raise HTTPException(
+                                status_code=400, detail="V2EX token_env 不是合法环境变量名"
+                            )
+                        v2ex_cfg.token_env = token_env
+                    if "access_token" in v2ex_data and not _is_masked_echo(
+                        str(v2ex_data["access_token"] or "").strip()
+                    ):
+                        try:
+                            new_v2ex_token = validate_v2ex_access_token(v2ex_data["access_token"])
+                        except ValueError as exc:
+                            raise HTTPException(status_code=400, detail=str(exc)) from exc
+                        if new_v2ex_token:
+                            try:
+                                async with V2EXClient(
+                                    access_token=new_v2ex_token,
+                                    request_interval_seconds=0,
+                                ) as v2ex_client:
+                                    member = await v2ex_client.get_member()
+                                resolved_username = member_username(member)
+                            except V2EXAPIError as exc:
+                                if exc.code == "unauthorized":
+                                    return JSONResponse(
+                                        {
+                                            "error": "invalid_v2ex_access_token",
+                                            "message": "V2EX PAT 被拒绝（缺失、错误或已过期）。",
+                                        },
+                                        status_code=400,
+                                    )
+                                return JSONResponse(
+                                    {
+                                        "error": "v2ex_token_check_failed",
+                                        "message": "校验 V2EX PAT 时无法连接 V2EX，请稍后重试。",
+                                    },
+                                    status_code=502,
+                                )
+                            v2ex_cfg.access_token = new_v2ex_token
+                            v2ex_cfg.username = resolved_username
+                        else:
+                            v2ex_cfg.access_token = ""
+                    list_fields = {
+                        "source_modes",
+                        "tab_modes",
+                        "node_allowlist",
+                        "node_blocklist",
+                        "node_downweight",
+                    }
+                    for key in list_fields:
+                        if key not in v2ex_data:
+                            continue
+                        raw_values = v2ex_data[key]
+                        if not isinstance(raw_values, list):
+                            raise HTTPException(status_code=400, detail=f"V2EX {key} 必须是数组")
+                        try:
+                            values = normalize_v2ex_list_field(key, raw_values, strict=True)
+                        except ValueError as exc:
+                            raise HTTPException(status_code=400, detail=str(exc)) from exc
+                        setattr(v2ex_cfg, key, values)
+                    for key, (minimum, maximum) in V2EX_CONFIG_INTEGER_LIMITS.items():
+                        if key not in v2ex_data:
+                            continue
+                        try:
+                            if isinstance(v2ex_data[key], bool):
+                                raise ValueError
+                            value = int(v2ex_data[key])
+                        except (TypeError, ValueError) as exc:
+                            raise HTTPException(
+                                status_code=400, detail=f"V2EX {key} 必须是整数"
+                            ) from exc
+                        if value < minimum or value > maximum:
+                            raise HTTPException(
+                                status_code=400,
+                                detail=f"V2EX {key} 必须在 {minimum}..{maximum} 之间",
+                            )
+                        setattr(v2ex_cfg, key, value)
+                    try:
+                        normalize_v2ex_source_config(v2ex_cfg, strict=True)
+                    except ValueError as exc:
+                        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+                weibo_data = sources_data.get("weibo")
+                if isinstance(weibo_data, dict):
+                    if "enabled" in weibo_data:
+                        cfg.sources.weibo.enabled = _as_bool(weibo_data["enabled"])
+                    if "source_modes" in weibo_data:
+                        raw_modes = weibo_data["source_modes"]
+                        if not isinstance(raw_modes, list):
+                            raise HTTPException(
+                                status_code=400, detail="微博 source_modes 必须是数组"
+                            )
+                        selected_modes = tuple(
+                            dict.fromkeys(
+                                str(mode).strip() for mode in raw_modes if str(mode).strip()
+                            )
+                        )
+                        if not selected_modes or any(
+                            mode not in {"search", "hot", "creator"} for mode in selected_modes
+                        ):
+                            raise HTTPException(
+                                status_code=400, detail="微博 source_modes 包含不支持的值"
+                            )
+                        if "creator" in selected_modes and not (
+                            {"search", "hot"} & set(selected_modes)
+                        ):
+                            raise HTTPException(
+                                status_code=400,
+                                detail="微博 creator 模式需要同时启用 search 或 hot",
+                            )
+                        cfg.sources.weibo.source_modes = selected_modes
+                    for key in (
+                        "daily_search_budget",
+                        "daily_hot_budget",
+                        "daily_creator_budget",
+                        "request_interval_seconds",
+                        "min_interval_minutes",
+                    ):
+                        if key not in weibo_data:
+                            continue
+                        raw_value = weibo_data[key]
+                        if isinstance(raw_value, bool) or not isinstance(raw_value, int):
+                            raise HTTPException(status_code=400, detail=f"微博 {key} 必须是整数")
+                        if raw_value < 0:
+                            raise HTTPException(status_code=400, detail=f"微博 {key} 不能为负数")
+                        setattr(cfg.sources.weibo, key, raw_value)
 
         # Apply scheduler updates
         if "scheduler" in update:
@@ -16869,6 +18536,7 @@ def create_app(
                 "zhihu_incremental_hours",
                 "reddit_incremental_hours",
                 "linuxdo_incremental_hours",
+                "v2ex_incremental_hours",
                 "refresh_check_interval_seconds",
                 "eval_min_batch_size",
                 "eval_max_wait_seconds",
@@ -16922,6 +18590,7 @@ def create_app(
                         "zhihu_incremental_hours",
                         "reddit_incremental_hours",
                         "linuxdo_incremental_hours",
+                        "v2ex_incremental_hours",
                     }:
                         try:
                             source_interval = _normalize_source_incremental_hours(
@@ -17186,6 +18855,8 @@ def create_app(
                 content=response.model_dump(mode="json"),
             )
 
+        desired_data_path = _ConfigPath(cfg.data_path).expanduser().resolve()
+        data_dir_restart_required = desired_data_path != active_data_path
         async with _CONFIG_SAVE_LOCK:
             # gui-init D1 / spec §5b: re-check inside the lock. The middleware
             # gated this path on init_active before the handler ran, but a run
@@ -17242,11 +18913,16 @@ def create_app(
 
             nonlocal config_apply_revision
             config_apply_revision += 1
+            # The process-lifetime migration guard protects active_data_path.
+            # Persist a new data_dir for the next startup, but never publish it
+            # into this process without first acquiring that directory's lock.
+            runtime_config = _pin_active_runtime_config(cfg)
             item = _QueuedConfigApply(
                 revision=config_apply_revision,
-                config=copy.deepcopy(cfg),
+                config=runtime_config,
                 saved_path=saved_path,
                 run_post_reload_llm_work=not suppress_background_llm_work,
+                restart_required=data_dir_restart_required,
             )
 
             # 持久化与运行时应用是两个阶段。统一进入已有 latest-wins 队列，
@@ -17255,10 +18931,15 @@ def create_app(
             queued_response = ConfigUpdateResponse(
                 ok=True,
                 config=_config_to_response(cfg, issues, mask_keys=True),
-                message=f"配置已保存到 {saved_path}，正在后台应用。",
+                message=(
+                    f"配置已保存到 {saved_path}；data_dir 将在完全重启后生效，"
+                    "其余配置正在后台应用。"
+                    if data_dir_restart_required
+                    else f"配置已保存到 {saved_path}，正在后台应用。"
+                ),
                 reloaded=False,
                 rollback_applied=False,
-                restart_required=False,
+                restart_required=data_dir_restart_required,
                 apply_state="queued",
                 apply_revision=item.revision,
             )

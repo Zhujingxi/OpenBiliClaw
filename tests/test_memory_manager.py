@@ -936,6 +936,7 @@ def test_source_bootstrap_state_defaults_when_missing(tmp_path: Path) -> None:
         "reddit_seen_item_keys": [],
         "linuxdo_seen_item_keys": [],
         "linuxdo_account_key": "",
+        "v2ex_seen_item_keys": [],
         "last_source_bootstrap_sync_at": "",
         "source_incremental": {
             "cursor": "",
@@ -959,6 +960,7 @@ def test_source_bootstrap_state_round_trips_to_json(tmp_path: Path) -> None:
             "reddit_seen_item_keys": ["t3:reddit-1"],
             "linuxdo_seen_item_keys": ["linuxdo:sha256:test:linuxdo_bookmarks:topic:42"],
             "linuxdo_account_key": "sha256:test-account",
+            "v2ex_seen_item_keys": ["alice:favorite_topics:123"],
             "last_source_bootstrap_sync_at": "2026-05-20T12:00:00",
             "source_incremental": {
                 "cursor": "reddit",
@@ -978,6 +980,7 @@ def test_source_bootstrap_state_round_trips_to_json(tmp_path: Path) -> None:
     assert state["reddit_seen_item_keys"] == ["t3:reddit-1"]
     assert state["linuxdo_seen_item_keys"] == ["linuxdo:sha256:test:linuxdo_bookmarks:topic:42"]
     assert state["linuxdo_account_key"] == "sha256:test-account"
+    assert state["v2ex_seen_item_keys"] == ["alice:favorite_topics:123"]
     assert state["last_source_bootstrap_sync_at"] == "2026-05-20T12:00:00"
     assert state["source_incremental"] == {
         "cursor": "reddit",

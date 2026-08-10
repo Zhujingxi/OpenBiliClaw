@@ -2,6 +2,8 @@ import { cp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { build } from "esbuild";
 
+import { verifyBuildAssets } from "./verify-build-assets.mjs";
+
 const root = resolve(import.meta.dirname, "..");
 
 const isFirefox = process.env.TARGET === "firefox";
@@ -62,6 +64,10 @@ const entrypoints = [
   {
     entry: resolve(root, "src/content/linuxdo.ts"),
     outfile: resolve(root, `${outDir}/content/linuxdo.js`),
+  },
+  {
+    entry: resolve(root, "src/content/v2ex.ts"),
+    outfile: resolve(root, `${outDir}/content/v2ex.js`),
   },
   {
     entry: resolve(root, "src/content/x.ts"),
@@ -146,5 +152,7 @@ if (isFirefox) {
   console.log(`📁 Copied popup/ → ${outDir}/popup/`);
   console.log(`📁 Copied icons/ → ${outDir}/icons/`);
 }
+
+await verifyBuildAssets({ root, target: isFirefox ? "firefox" : "chrome" });
 
 console.log(`\n✅ Build complete: ${outDir}/\n`);
