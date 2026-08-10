@@ -14,8 +14,7 @@
 ## Short Description
 
 ```text
-需本地后端的八平台内容发现 AI Agent：跨平台推荐、私有画像与可反馈侧边栏
-需本地后端的九来源内容发现 AI Agent：跨平台推荐、私有画像与可反馈侧边栏
+需本地后端的十一来源内容发现 AI Agent：跨平台推荐、私有画像与可反馈侧边栏
 ```
 
 ## Detailed Description
@@ -23,8 +22,7 @@
 将下面的纯文本完整复制到 Chrome Web Store 的 `Detailed description` 字段。
 
 ```text
-OpenBiliClaw 是一个需要本地后端运行的、本地优先、私有、开源的个性化内容发现 Agent。它把你授权范围内的 B站、小红书、抖音、YouTube、X、知乎、Reddit 和 Linux.do 内容信号汇合成跨平台推荐、可查看和纠正的个人画像，以及能继续反馈调教的浏览器侧边栏。数据默认保存在你的本机。
-OpenBiliClaw 是一个需要本地后端运行的、本地优先、私有、开源的个性化内容发现 Agent。它把你授权范围内的 B站、小红书、抖音、YouTube、X、知乎、Reddit、Bangumi 和 V2EX 内容信号汇合成跨来源推荐、可查看和纠正的个人画像，以及能继续反馈调教的浏览器侧边栏。数据默认保存在你的本机。
+OpenBiliClaw 是一个需要本地后端运行的、本地优先、私有、开源的个性化内容发现 Agent。它把你授权范围内的 B站、小红书、抖音、YouTube、X、知乎、Reddit、Linux.do、Bangumi、V2EX 与微博内容汇合成跨来源推荐、可查看和纠正的个人画像，以及能继续反馈调教的浏览器侧边栏。数据默认保存在你的本机。
 
 项目主页：
 https://whiteguo233.github.io/OpenBiliClaw/
@@ -87,7 +85,7 @@ https://github.com/whiteguo233/OpenBiliClaw/blob/main/README_EN.md
 
 以下文件均为 1280×800，使用固定脱敏数据和当前真实 UI 生成。Developer Dashboard 中删除旧图后，按下面顺序上传：
 
-1. `01-seven-platform-recommendations.png` — 九来源推荐主视觉，推荐卡和惊喜位都有本地脱敏头图（文件名为兼容既有上传顺序而保留）
+1. `01-seven-platform-recommendations.png` — 十一来源推荐主视觉，推荐卡和惊喜位都有本地脱敏头图（文件名为兼容既有上传顺序而保留）
 2. `02-three-surfaces.png` — PC、插件、手机三端推荐体验
 3. `03-truthful-status-local-data.png` — 诚实接入状态与本地数据
 
@@ -125,8 +123,7 @@ npm run webstore:metadata -- \
 
 ## 提交前检查
 
-- `Short description` 与 `Detailed description` 已粘贴，八个平台名称完整，并单独解释 `https://linux.do/*` 权限理由与只读边界。
-- `Short description` 与 `Detailed description` 已粘贴，B站、小红书、抖音、YouTube、X、知乎、Reddit、Bangumi、V2EX 九个来源名称完整。
+- `Short description` 与 `Detailed description` 已粘贴，十一类来源名称完整，并单独解释 Linux.do / V2EX 权限理由、只读边界及微博 backend-only 边界。
 - 3 张截图已按上面的文件名顺序上传，尺寸均为 1280×800。
 - `Website URL` 使用项目主页：`https://whiteguo233.github.io/OpenBiliClaw/`。
 - `Support URL` 使用 GitHub Issues：`https://github.com/whiteguo233/OpenBiliClaw/issues`。

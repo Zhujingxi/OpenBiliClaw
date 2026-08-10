@@ -4,7 +4,11 @@
 
 ---
 
-## Unreleased
+## 未发布
+
+暂无。
+
+## v0.3.202：Linux.do、V2EX 与微博来源扩展（2026-08-10）
 
 - **新增 Linux.do 只读来源接入**：后端新增 `linuxdo_tasks` durable 队列、`LinuxdoDiscoveryProducer`、统一 topic/event 归一化、capability-specific source-auth 与周期增量同步；公开 discover 匿名可用，个人 profile/bootstrap/incremental 必须由同源会话正面确认。CLI 新增 `fetch-linuxdo` / `discover-linuxdo`，通用 `discover --source linuxdo` 也走同一 producer。五种 discovery 分支为 search / hot / feed / creator / related，三种个人初始化 scope 为 bookmarks / likes / read history。
 - **扩展采用同源、最小回传边界**：Linux.do 请求只在真实 `linux.do` task tab 内以 `GET` + `credentials: include` 访问 JSON endpoint；Cookie `_t` 只转换成登录布尔心跳，Cookie 值、CSRF 字段和未裁剪原始响应都不上传。任务具备 tab/task 隔离、分页与条数上限、超时、2 MiB 响应上限及结构化错误。
@@ -14,8 +18,6 @@
 - **长任务、重启恢复与部分成功语义**：Linux.do 默认端到端总等待为 32.5 分钟（pending 领取最多约 3 分钟、合法大任务按形状执行约 29 分钟、结果余量 30 秒），显式 CLI/env 等待值是总硬上限；claim lease 为约 35 分钟、共享 mutex stale 窗口为约 36 分钟。真实 `in_progress` 热重载复现了仅靠 `storage.session` 重绑会永久等待的缺口；runner 现把无凭据 task/tab/deadline 临时写入 `storage.local`，恢复后重发同一 task ID，仍存活的 content context 会合并重复执行，完整重载则安全重放只读 GET。bootstrap 部分 scope 或 discovery 分页 / 多输入中途失败以 `degraded` 保留有效 items，bootstrap `failed/degraded` 均不进入 6 小时近期任务复用；guided init 使用默认 Stage-1 预算时，Linux.do-only 至少给 32.5 分钟，多来源并选 Linux.do 时给 62.5 分钟，显式 override 不扩。
 - **Linux.do MV3 恢复与 engagement 分支缺口修复**：runtime stream 现在先于可能等待 mutex 的恢复 barrier 建连；`storage.session` generation 区分普通 worker recycle 与完整 extension reload，完整 reload 会刷新 runner-owned 页面再重放同一只读 task ID。真实 Chrome 中两页 feed 在 `in_progress` 时热重载，约 25 秒后以同一任务行 terminal=ok，返回 37 个唯一 topic；修复全局 result cap 后的隔离复跑再次以同一任务行返回 36/36 唯一 topic。正式 search/related 同时增加 retained-only topic detail hydrate，真站各 2/2 候选均取得主题作者、浏览、总赞和回复，不再缺字段，也不使用匹配回复的作者/点赞冒充主题指标；双关键词 `max_items=1` 真站任务也严格只回传 1 条。两轮个人 bootstrap 各返回 `2 bookmark / 1 like / 20 read`，durable ingress 保持 23 条不重复；真实 404 被分类为 `failed/linuxdo_http_error` 而不是假空。扩展全量 1323/1323、Chrome/Firefox build 与 17/17 资产校验通过；冻结 Firefox 安装版真账号门禁仍单列未执行。
 - **来源状态保留最近任务真值**：Linux.do 浏览器心跳优先；无心跳时，`/api/sources/status` 只读最近 `linuxdo_tasks` 作 `task_history` 间接证据。个人 bootstrap 成功可证明可选会话通路，公开 discovery 成功仍保持 `credential=none`；`login_required`、限流与运行中状态分别表达，不把匿名任务伪造成已登录。
-## 未发布
-
 - **新增微博匿名公开 discovery 来源**：后端以仅存内存的匿名 visitor 会话执行 search / hot / creator 只读发现，不读取用户 Cookie、不进入 guided init、不增加扩展 host permission，并复用统一候选评估、来源占比与三端文字卡。
 
 - **重构新增平台来源 skill 为证据驱动的阶段门**：复盘本地 Codex session、Git/GitHub 首次接入与后续修复，把 `full / discovery-only / capability-increment / audit-only`、机器可读来源契约、逐能力 hybrid auth、fail-closed E2E 写动作边界、中央注册 audit、required/N/A 与 PASS/FAIL 分离、原子任务准入、MV3 恢复、真假空结果、增量同步、scope completeness、时间语义、双浏览器资产和安装包真机 provenance 固化为完成条件；新增历史失败索引与 skill 镜像/契约审计测试，只有全部 required gate 有证据通过才允许报告 complete，发布 mutation 仍需明确授权。独立盲测还复现并修复了 `browser_heartbeat` 对未知来源默认落到知乎的错源分派，现由 source→prefix 显式 registry 驱动，未知来源 fail closed，新增来源必须成组提供 DB getter、扩展 event handler 与往返测试。

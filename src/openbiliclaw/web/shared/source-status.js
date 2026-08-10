@@ -64,7 +64,7 @@
   /** Platform slugs the contract covers, in settings-page display order. */
   const SOURCE_KEYS = Object.freeze([
     "bilibili", "xiaohongshu", "douyin", "weibo", "youtube", "twitter", "zhihu", "reddit",
-    "bangumi", "v2ex", "linuxdo",
+    "bangumi", "linuxdo", "v2ex",
   ]);
 
   const SOURCE_CAPABILITIES = Object.freeze({

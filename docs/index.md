@@ -21,7 +21,6 @@
 - [记忆系统设计](memory-design.md) — 多层网状记忆架构详解
 - [v0.1 开发任务清单](v0.1-todolist.md) — 当前版本的开发主线
 - [技术债清单](technical-debt.md) — 已确认技术债、风险解析、建议治理方向和待确认 TODO 线索
-- [新平台来源接入指南](platform-source-integration.md) — 事件抓取、插件任务、discover、配置页、推荐卡、真实 E2E 和发布文档的标准接入流程（含知乎 / Reddit / Linux.do 接入经验沉淀的检查清单）
 - [新平台来源接入指南](platform-source-integration.md) / [来源契约模板](platform-source-contract.example.toml) / [验收报告模板](platform-source-acceptance.example.md) / [历史失败教训索引](platform-source-history-lessons.md) — 从既有多平台首版与后续修复提炼的契约式接入流程，含 capability-aware audit、任务/增量状态机、双浏览器构建与真实 E2E 完成门禁
 - [Bangumi 来源文档](modules/bangumi.md) / [接入 Spec](plans/2026-07-17-bangumi-source-spec.md) / [实施计划](plans/2026-07-17-bangumi-source-plan.md) — 官方只读 API、公开收藏初始化、统一 discover、三端体验与验收边界
 - [Linux.do 来源文档](modules/linuxdo.md) — 扩展同源只读 GET、五路 discovery、三类个人 bootstrap、布尔登录态与隐私边界
@@ -47,12 +46,12 @@
 | 后端 API | [modules/api.md](modules/api.md) | `src/openbiliclaw/api/` | ✅ durable 对话 + 配置后台应用 + 本机-only 迁移四 API（request ID 对账 / pending 取消） |
 | LLM 多模型支持 | [modules/llm.md](modules/llm.md) | `src/openbiliclaw/llm/` | ✅ v0.3.74 统一结构化 JSON 容错 + Ollama embedding 空凭据静默 |
 | B 站接入层 | [modules/bilibili.md](modules/bilibili.md) | `src/openbiliclaw/bilibili/` | ✅ M3 完成 |
-| 多源适配层 | [modules/discovery.md](modules/discovery.md#多源适配层) | `src/openbiliclaw/sources/` | ✅ v0.3.x 落地 B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Bangumi / Linux.do / 通用 Web 多源 discovery |
+| 多源适配层 | [modules/discovery.md](modules/discovery.md#多源适配层) | `src/openbiliclaw/sources/` | ✅ v0.3.x 落地 B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Linux.do / Bangumi / V2EX / 微博 / 通用 Web 多源 discovery |
 | Bangumi 接入 | [modules/bangumi.md](modules/bangumi.md) | `src/openbiliclaw/sources/bangumi*.py` + `runtime/bangumi_producer.py` | ✅ 官方匿名只读 API + 公开收藏 init + search/ranked/latest discovery |
 | Linux.do 接入 | [modules/linuxdo.md](modules/linuxdo.md) | `src/openbiliclaw/sources/linuxdo_tasks.py` + `runtime/linuxdo_producer.py` + `extension/src/**/linuxdo*` | ✅ 只读实现、fixture、双浏览器构建与真实已登录 Chrome E2E 已完成 |
-| 平台来源接入契约 | [modules/source-auth.md](modules/source-auth.md) | `src/openbiliclaw/api/source_auth/` | ✅ Linux.do optional-login 已纳入统一契约 + `verify_method` 证据强度 + 一键验证；移动端入口与 B 站凭据迁移待 Wave C |
 | V2EX 接入 | [modules/v2ex.md](modules/v2ex.md) | `src/openbiliclaw/sources/v2ex*.py` + `runtime/v2ex_producer.py` + 扩展任务桥 | ✅ 匿名 API/Feed + 可选 PAT + 四个只读 bootstrap scope + Topic 回复聚合 |
-| 平台来源接入契约 | [modules/source-auth.md](modules/source-auth.md) | `src/openbiliclaw/api/source_auth/` | ✅ 九平台登录态契约正交化 + `verify_method` 证据强度 + 一键验证；V2EX 使用逐能力 readiness，Bangumi 覆盖匿名 + 可选 PAT，移动端凭据管理仍为有意排除 |
+| 微博接入 | [modules/weibo.md](modules/weibo.md) | `src/openbiliclaw/sources/weibo*.py` + `runtime/weibo_producer.py` | ✅ backend-only 匿名 search/hot/creator discovery；无扩展权限与 Cookie |
+| 平台来源接入契约 | [modules/source-auth.md](modules/source-auth.md) | `src/openbiliclaw/api/source_auth/` | ✅ 十一来源契约正交化 + `verify_method` 证据强度 + 一键验证；Linux.do / V2EX 使用逐能力 readiness，移动端凭据管理仍为有意排除 |
 | YouTube 接入 | [modules/youtube.md](modules/youtube.md) | `src/openbiliclaw/youtube/` + `src/openbiliclaw/sources/yt_tasks.py` | ✅ init / fetch smoke / Google Takeout 导入 |
 | 记忆系统 | [modules/memory.md](modules/memory.md) | `src/openbiliclaw/memory/` | ✅ 完成 |
 | 灵魂引擎 | [modules/soul.md](modules/soul.md) | `src/openbiliclaw/soul/` | ✅ 完成 |
@@ -61,12 +60,9 @@
 | 存储层 | [modules/storage.md](modules/storage.md) | `src/openbiliclaw/storage/` | ✅ SQLite schema + discovery candidates / pool readiness + 去除 API auth 的 `.obcbackup` 快照、暂存 / 取消、重启应用与回滚 |
 | 原生保存同步 | [modules/saved-sync.md](modules/saved-sync.md) | `src/openbiliclaw/saved_sync/` | ✅ canonical API + runtime + B 站 direct adapter + 六平台 extension adapter/executor + 三端后端状态驱动保存界面；CLI 可见配置 |
 | 灵魂管线架构 | [modules/soul-pipeline-architecture.md](modules/soul-pipeline-architecture.md) | `src/openbiliclaw/soul/` | ✅ 完成 |
-| 浏览器插件 | [modules/extension.md](modules/extension.md) | `extension/` | ✅ 支持 B 站 + 小红书 + 抖音 + YouTube + X + 知乎 + Reddit + Linux.do 任务桥、跨平台行为采集、扩展驱动 E2E 捕捉自检、Cookie/布尔登录态同步、自启动开关和降级配置修复 |
-| CLI 命令参考 | [modules/cli.md](modules/cli.md) | `src/openbiliclaw/cli.py` | ✅ 持续更新 (含 `autostart` / `setup-embedding` / `discover-douyin` / `fetch-reddit` / `fetch-bangumi` / `fetch-linuxdo` / `discover-linuxdo`) |
-| 配置参考 | [modules/config.md](modules/config.md) | `config.example.toml` | ✅ 持续更新 (含 `[sources.reddit]`、`[sources.bangumi]`、`[sources.linuxdo]`、`[autostart]`、`/api/config` 回滚与 `reset_fields`) |
-| 浏览器插件 | [modules/extension.md](modules/extension.md) | `extension/` | ✅ 支持 B 站 + 小红书 + 抖音 + YouTube + X + 知乎 + Reddit + V2EX 任务桥、跨平台行为采集、扩展驱动 E2E 捕捉自检、Cookie 同步、自启动开关和降级配置修复 |
-| CLI 命令参考 | [modules/cli.md](modules/cli.md) | `src/openbiliclaw/cli.py` | ✅ 持续更新（含 `discover-v2ex*` / `fetch-v2ex` / `discover-bangumi*` / `fetch-reddit` / `discover-douyin` / `autostart` / `setup-embedding`） |
-| 配置参考 | [modules/config.md](modules/config.md) | `config.example.toml` | ✅ 持续更新（含 `[sources.v2ex]`、`[sources.bangumi]`、`[sources.reddit]`、`[autostart]`、`/api/config` 回滚、迁移 auth / 环境变量保留边界与 `reset_fields`） |
+| 浏览器插件 | [modules/extension.md](modules/extension.md) | `extension/` | ✅ 支持 Linux.do / V2EX 等只读任务桥、跨平台行为采集、扩展驱动 E2E 捕捉自检、Cookie/布尔登录态同步、自启动开关和降级配置修复；微博不增加插件权限 |
+| CLI 命令参考 | [modules/cli.md](modules/cli.md) | `src/openbiliclaw/cli.py` | ✅ 持续更新（含 Linux.do / V2EX / 微博 discover 与 bootstrap smoke） |
+| 配置参考 | [modules/config.md](modules/config.md) | `config.example.toml` | ✅ 持续更新（含 `[sources.linuxdo]`、`[sources.v2ex]`、`[sources.weibo]`、`/api/config` round-trip 与来源占比） |
 | 局域网密码门禁 | [modules/api-auth.md](modules/api-auth.md) | `src/openbiliclaw/auth_core.py` + `src/openbiliclaw/api/auth.py` | ✅ 可选 `[api.auth]` 密码门禁 + `/api/auth/*` + `set-password` |
 | 公网 HTTPS 网关 | [HTTPS 部署](https-deployment.md) | `docker-compose.https.yml` | ✅ 默认关闭的 Caddy 自动证书 + shared-loopback upstream + REST/WebSocket |
 | TLS 反向代理 | [modules/tls-proxy.md](modules/tls-proxy.md) | `src/openbiliclaw/tls_proxy.py` | ✅ 默认关闭的 LAN/self-managed HTTPS + 精确 Origin/Host + WebSocket + SAN 检测 |

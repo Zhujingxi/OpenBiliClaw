@@ -765,7 +765,7 @@ Linux.do 通过浏览器扩展在真实 `linux.do` task tab 内执行同源只�
 
 #### 配置页来源状态契约
 
-插件 side panel 与桌面 Web `/web` 的平台源配置页统一读取 `GET /api/sources/status`。这个端点是**纯本地读取**：不会访问 Bilibili、小红书、抖音、YouTube、X、知乎、Reddit、Bangumi 或 Linux.do，也不会运行 `rdt` / `opencli` 命令。页面可见时每 30 秒刷新一次，但请求只到 OpenBiliClaw 本地后端；真实平台请求仅由用户显式初始化、发现、诊断任务或已启用的后台 producer 发起。
+插件 side panel 与桌面 Web `/web` 的平台源配置页统一读取 `GET /api/sources/status`。这个端点是**纯本地读取**：不会访问任何上游平台，也不会运行 `rdt` / `opencli` 命令。页面可见时每 30 秒刷新一次，但请求只到 OpenBiliClaw 本地后端；真实平台请求仅由用户显式初始化、发现、诊断任务或已启用的后台 producer 发起。
 ### `[sources.v2ex]`
 
 V2EX 是匿名公开 discovery 源，支持官方匿名 JSON API / Feed，以及可选的 API 2.0 PAT。`search`、`node`、`tab`、`hot`、`latest` 都只把 Topic 写入统一待评估池；Reply 不作为独立候选。PAT 只用于增强 Node / Topic 读取和 `/api/v2/member` live probe，401/403 时自动降级为匿名。扩展任务已接入四个只读 bootstrap scope，`init --yes-v2ex` 或 guided init 来源选择可以等待其结果；浏览器登录态与 PAT 分开显示。
@@ -798,10 +798,6 @@ V2EX 是匿名公开 discovery 源，支持官方匿名 JSON API / Feed，以及
 
 完整字段和公开路径见 [V2EX 来源文档](v2ex.md)。
 
-#### 配置页来源状态契约
-
-插件 side panel 与桌面 Web `/web` 的平台源配置页统一读取 `GET /api/sources/status`。这个端点是**纯本地读取**：不会访问 Bilibili、小红书、抖音、YouTube、X、知乎、Reddit、Bangumi 或 V2EX，也不会运行 `rdt` / `opencli` 命令。页面可见时每 30 秒刷新一次，但请求只到 OpenBiliClaw 本地后端；真实平台请求仅由用户显式初始化、发现、诊断任务或已启用的后台 producer 发起。
-
 状态语义如下：
 
 | 状态 | 配置页文案 | 含义 |
@@ -815,8 +811,7 @@ V2EX 是匿名公开 discovery 源，支持官方匿名 JSON API / Feed，以及
 | `error` | 检查失败 | 本地 credential 文件不可读或格式无效 |
 | `no_auth` | 无需登录 | 公开来源 |
 
-平台特例：抖音只要本地 Cookie 存在即显示 `unverified`，必须由实际抖音任务确认；小红书 / 知乎优先使用插件上报的 `logged_in + updated_at`，知乎仅在从未收到浏览器心跳时回落最近任务历史；Reddit `backend="rdt"` 只读取本地 credential 文件，非 rdt 命令后端在状态页显示 `unverified`。Bangumi 不探测登录，状态由本地开关与最近 producer run ledger 计算为 `disabled / unverified / ready / partial / rate_limited / error`。Linux.do `auth_required=false`，公开发现始终是 optional-login；扩展 `_t` 布尔心跳只决定个人 bookmarks / likes / read-history 是否可尝试。`xsec_token` 只是小红书内容 URL 的访问令牌，配置页即使能展示它也不会据此判断账号已登录。
-平台特例：抖音只要本地 Cookie 存在即显示 `unverified`，必须由实际抖音任务确认；小红书 / 知乎优先使用插件上报的 `logged_in + updated_at`，知乎仅在从未收到浏览器心跳时回落最近任务历史；Reddit `backend="rdt"` 只读取本地 credential 文件，非 rdt 命令后端在状态页显示 `unverified`。Bangumi 不探测登录，状态由本地开关与最近 producer run ledger 计算为 `disabled / unverified / ready / partial / rate_limited / error`。V2EX 匿名时为 `no_auth`，配置 PAT 后由 live probe 区分 `unverified / verified / failed / rate_limited`，不会把 PAT 状态误写成浏览器登录态。`xsec_token` 只是小红书内容 URL 的访问令牌，配置页即使能展示它也不会据此判断账号已登录。
+平台特例：抖音只要本地 Cookie 存在即显示 `unverified`，必须由实际抖音任务确认；小红书 / 知乎优先使用插件上报的 `logged_in + updated_at`，知乎仅在从未收到浏览器心跳时回落最近任务历史；Reddit `backend="rdt"` 只读取本地 credential 文件。Bangumi 不探测登录，状态由本地开关与最近 producer run ledger 计算。Linux.do 的公开发现始终匿名可用，扩展 `_t` 布尔心跳只决定个人 bookmarks / likes / read-history 是否可尝试；V2EX 匿名时为 `no_auth`，配置 PAT 后由 live probe 区分验证结论，不会把 PAT 状态误写成浏览器登录态。`xsec_token` 只是小红书内容 URL 的访问令牌，不会据此判断账号已登录。
 
 ### `[scheduler]`
 
@@ -824,14 +819,13 @@ TOML 与显式环境变量覆盖在构造 `SchedulerConfig` 前统一归一为�
 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
-| `enabled` | bool | `true` | daemon 后台调度总开关；插件设置页显示为「停止后台 LLM 请求」。关闭后 runtime 的刷新、补池预计算、账户同步、猜测兴趣、主动推送和六源扩展账号周期回拉都会跳过；手动 CLI / API 请求仍按显式操作执行。若候选池为空，推荐页可能暂时没有内容 |
+| `enabled` | bool | `true` | daemon 后台调度总开关；插件设置页显示为「停止后台 LLM 请求」。关闭后 runtime 的刷新、补池预计算、账户同步、猜测兴趣、主动推送和七源扩展账号周期回拉都会跳过；手动 CLI / API 请求仍按显式操作执行。若候选池为空，推荐页可能暂时没有内容 |
 | `pause_on_extension_disconnect` | bool | `false` | 开启后，daemon-owned 后台 LLM / embedding 工作只在浏览器插件有 `/api/runtime-stream` 连接、或刚断开仍处于宽限窗口内时运行；离线期间不会自动补新内容 |
 | `extension_disconnect_grace_seconds` | int | `90` | 插件最后一个 `runtime-stream` 连接断开后的宽限秒数；小于等于 0 或无法解析时回退到 `90` |
 | `discovery_cron` | string | `"0 */8 * * *"` | 兼容旧配置的保留字段；当前 runtime 不消费这个 cron，发现补池由轮询、候选池缺口、行为阈值和下方策略间隔驱动。插件与桌面 Web 设置页均不再暴露该字段，只能通过手改 `config.toml` 保留 |
 | `pool_target_count` | int | `300` | 前端真实可换候选目标；允许范围 `1..600`。`count_pool_candidates()`（含预生成 / 分类 / 可打开 / 最近看过过滤 / topic window）达到目标时 refresh（含 `force_refresh`）返回 `pool_at_cap` 不再 discover；后台定时 refresh 采用约 90% 的低水位，略低于目标时不立即跑 discovery，等库存真正低于水位再补货。raw 素材库存由独立 raw ceiling `max(pool_target_count * 2, pool_target_count + 120)` 控制，不再被压成与可换目标相同 |
 | `account_sync_interval_hours` | int | `6` | 账户侧长期信号同步间隔；运行时会低频拉取 history / favorites / following |
-| `source_incremental_hours` | int | `24` | 已安装扩展在线时，XHS / 抖音 / YouTube / 知乎 / Reddit / Linux.do 账号 bootstrap 信号的全局周期（小时），范围 `0..168`；`0` 关闭六源周期回拉。它复用浏览器登录态，不是无浏览器后台同步 |
-| `source_incremental_hours` | int | `24` | 已安装扩展在线时，XHS / 抖音 / YouTube / 知乎 / Reddit / V2EX 账号 bootstrap 信号的全局周期（小时），范围 `0..168`；`0` 关闭六源周期回拉。它复用浏览器登录态，不是无浏览器后台同步 |
+| `source_incremental_hours` | int | `24` | 已安装扩展在线时，XHS / 抖音 / YouTube / 知乎 / Reddit / Linux.do / V2EX 账号 bootstrap 信号的全局周期（小时），范围 `0..168`；`0` 关闭七源周期回拉。它复用浏览器登录态，不是无浏览器后台同步 |
 | `xhs_incremental_hours` | int 或 null | `null` | 小红书周期覆盖；缺省 / `null` 继承全局，`0` 只关闭小红书，范围 `0..168` |
 | `douyin_incremental_hours` | int 或 null | `null` | 抖音周期覆盖；缺省 / `null` 继承全局，`0` 只关闭抖音，范围 `0..168` |
 | `youtube_incremental_hours` | int 或 null | `null` | YouTube 周期覆盖；缺省 / `null` 继承全局，`0` 只关闭 YouTube，范围 `0..168` |
@@ -878,12 +872,11 @@ TOML 与显式环境变量覆盖在构造 `SchedulerConfig` 前统一归一为�
 > 后台 refresh 还会使用约 90% 的可换池低水位；池子只是轻微低于 `pool_target_count` 时不跑 discovery。B 站完整四策略补货在小缺口阶段优先只给 `search + related_chain` 预算，`trending/explore` 延后到更深缺口。
 > `pause_on_extension_disconnect` 只约束后端 daemon 自己发起的后台 LLM / embedding 工作；用户手动点击刷新、CLI 显式命令、配置保存和普通读取接口不因为插件离线而被拦截。`runtime-stream` 连接断开由后端 receive-side detector 记录，浏览器 idle disconnect 后不会让 presence 状态卡住。
 >
-> 六源账号周期回拉始终直接检查扩展 presence，不受 `pause_on_extension_disconnect` 的默认值影响。逐源字段在 TOML 中应省略以继承；`config.example.toml` 只把它们作为注释示例。`PUT /api/config` 可用 JSON `null` 恢复继承；设置页热重载后新 scheduler 立即采用新周期，但不会越过已有六源 active task。
+> 七源账号周期回拉始终直接检查扩展 presence，不受 `pause_on_extension_disconnect` 的默认值影响。逐源字段在 TOML 中应省略以继承；`config.example.toml` 只把它们作为注释示例。`PUT /api/config` 可用 JSON `null` 恢复继承；设置页热重载后新 scheduler 立即采用新周期，但不会越过已有 active task。
 
 ### `[scheduler.pool_source_shares]`
 
-候选池按平台族做保底配比，默认保存的 share 是 `bilibili:xiaohongshu:douyin:youtube:twitter:zhihu:reddit:bangumi:linuxdo = 5:1:1:1:1:1:1:1:1`。旧配置文件若已有本段但缺少后续新增的平台 key，加载时会自动补齐默认 share（例如 `linuxdo = 1`）。关闭的平台会保留配置值但在运行时从有效配比中剔除，剩余平台重新归一化吃满 `pool_target_count`；默认安装里小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Bangumi / Linux.do 都关闭，所以默认有效配比只有 Bilibili。
-候选池按平台族做保底配比，默认保存的 share 是 `bilibili:xiaohongshu:douyin:youtube:twitter:zhihu:reddit:bangumi:v2ex = 5:1:1:1:1:1:1:1:1`。旧配置文件若已有本段但缺少后续新增的平台 key，加载时会自动补齐默认 share（例如 `bangumi = 1`、`v2ex = 1`）。关闭的平台会保留配置值但在运行时从有效配比中剔除，剩余平台重新归一化吃满 `pool_target_count`；默认安装里小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Bangumi / V2EX 都关闭，所以默认有效配比只有 Bilibili。
+候选池按平台族做保底配比，默认保存的 share 是 `bilibili:xiaohongshu:douyin:youtube:twitter:zhihu:reddit:bangumi:linuxdo:v2ex:weibo = 5:1:1:1:1:1:1:1:1:1:1`。旧配置缺少后续新增的平台 key 时会自动补齐默认 share；关闭的平台保留配置值但从运行时有效配比中剔除，剩余平台重新归一化吃满 `pool_target_count`。默认安装只启用 Bilibili，因此初始有效配比仍只有 Bilibili。
 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
@@ -897,11 +890,11 @@ TOML 与显式环境变量覆盖在构造 `SchedulerConfig` 前统一归一为�
 | `bangumi` | int | `1` | Bangumi 平台族占比；`bangumi-search` / `bangumi-ranked` / `bangumi-latest` 统一计入该族 |
 | `linuxdo` | int | `1` | Linux.do 平台族占比；`linuxdo-search` / `linuxdo-hot` / `linuxdo-feed` / `linuxdo-creator` / `linuxdo-related` 统一计入该族 |
 | `v2ex` | int | `1` | V2EX 平台族占比；`v2ex-search` / `v2ex-node` / `v2ex-tab` / `v2ex-hot` / `v2ex-latest` 统一计入该族 |
+| `weibo` | int | `1` | 微博平台族占比；`weibo-search` / `weibo-hot` / `weibo-creator` 统一计入该族 |
 
 运行时会拆分两套 quota：前端可换来源目标用于补货和 `reactivate_under_quota_pool_sources()` 的缺口判断；raw ceiling 来源目标用于 `trim_pool_source_overflow()` / `trim_pool_to_target_count()` 的硬成本边界。小平台低于可换目标时，会优先保护 / 复活它们的候选，但不会超过 raw headroom；任一平台族 raw material 高于 raw ceiling 配额时，才会先压回配额内。B 站低于后台低水位且 `[sources.bilibili].enabled=true` 时，才由 B 站 discovery 补货；小缺口优先 `search + related_chain`，更深缺口再跑 `trending/explore`。抖音低于目标且 `[sources.douyin].enabled=true` 时，后台 `DouyinDiscoveryProducer` 会通过 `DouyinDiscoveryService(cache=True)` 触发 search / hot / feed 补池；YouTube 低于目标且 `[sources.youtube].enabled=true` 时，后台 `YoutubeDiscoveryProducer` 会在独立 loop 中触发 `yt_search` / `yt_trending` / `yt_channel`，主 refresh replenishment plan 不再 inline 调度 YouTube；X 低于目标且 `[sources.twitter].enabled=true` 时，后台 `XDiscoveryProducer` 会在独立 loop 中按预算和源健康触发 `search` / `feed` / `creator` 三个策略补池；知乎低于目标且 `[sources.zhihu].enabled=true` 时，后台 `ZhihuDiscoveryProducer` 会通过浏览器插件按 `source_modes` 触发 search / hot / feed / creator / related 补池；Reddit 低于目标且 `[sources.reddit].enabled=true` 时，后台 `RedditDiscoveryProducer` 默认通过 `rdt-cli` 按 `source_modes` 触发 search / hot / subreddit / related 补 raw candidates；命令后端不可用或显式切到插件后端时，入队 OpenBiliClaw 插件任务。Bangumi 低于目标且 `[sources.bangumi].enabled=true` 时，后台 `BangumiDiscoveryProducer` 直连官方匿名 API，按分支预算写 raw candidates，并遵循持久化限流冷却。Linux.do 低于目标且 `[sources.linuxdo].enabled=true` 时，后台 `LinuxdoDiscoveryProducer` 入队同源扩展任务，以五种只读模式写 raw candidates。
 
-`openbiliclaw init` 会根据用户是否接入小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Bangumi / Linux.do 写回对应 `enabled`。其中知乎在 `fetch-zhihu` 命令下仍只是事件爬取 smoke；在 guided init 勾选知乎或传 `--yes-zhihu` 时，`bootstrap_events` 会作为首版画像信号参与 `analyze_events()` / `build_initial_profile()`。Reddit 同样支持 guided init：勾选 Reddit 或传 `--yes-reddit` 时，插件读取 saved / upvoted / subscribed subreddit，每个 scope 默认最多 300 条，并把事件纳入首版画像；`fetch-reddit --mode bootstrap` 可单独验证这条事件拉取链路。Linux.do 勾选后读取本人 bookmarks / likes / read history；`fetch-linuxdo` 默认只做 smoke，显式 `--write-memory` 才写本地 memory。Bangumi 选择后只在提供公开 username 时读取公开收藏；没有 username 仍可作为 discovery 源。Bilibili 默认启用，也可在插件设置页或 `config.toml` 里手动关闭。交互式初始化在采集完各平台事件后，会按事件量给出一组推荐比例，用户可确认使用或手动输入。插件设置页也可开关九个平台、编辑九个平台占比，并通过 `/api/config/source-share-suggestion` 按已有事件重新生成建议值；GET 使用已保存配置，POST 可接收设置页当前尚未保存的 `enabled_sources` / `configured_shares`。
-`openbiliclaw init` 会根据用户是否接入小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Bangumi / V2EX 写回对应 `enabled`；V2EX 也可以从 guided init 来源选择中启用并等待浏览器任务。其余来源的初始化与 discovery 语义不变：知乎在 `fetch-zhihu` 命令下仍只是事件爬取 smoke；在 guided init 勾选知乎或传 `--yes-zhihu` 时，`bootstrap_events` 会作为首版画像信号参与 `analyze_events()` / `build_initial_profile()`。Reddit 同样支持 guided init；Bangumi 选择后只在提供公开 username 时读取公开收藏，没有 username 仍可作为 discovery 源。Bilibili 默认启用，也可在插件设置页或 `config.toml` 里手动关闭。交互式初始化在采集完各平台事件后，会按事件量给出一组推荐比例，用户可确认使用或手动输入。插件设置页现在可开关九个平台、编辑九个平台占比，并通过 `/api/config/source-share-suggestion` 按已有事件重新生成建议值；V2EX 未连接扩展时仍可匿名 discovery，但不会凭空产生浏览器初始化事件。
+`openbiliclaw init` 会按用户选择写回可参与画像初始化的来源开关：知乎、Reddit、Linux.do 与 V2EX 可通过扩展任务导入个人事件，Bangumi 仅在提供公开用户名时读取公开收藏；没有个人身份时，这些来源仍可按各自匿名能力参与 discovery。微博是 discovery-only，不进入初始化来源选择。Bilibili 默认启用，也可手动关闭。交互式初始化会按事件量给出十一平台候选池比例建议；插件设置页与桌面 Web 均可编辑开关和比例，并通过 `/api/config/source-share-suggestion` 重新生成建议值。
 
 ### `[discovery]`
 
@@ -1084,9 +1077,8 @@ Awareness seam 固定为 `legacy`。未发布的聚合字段
 
 - 基础：`language`、`data_dir`、`storage.db_path`
 - LLM：展示实例、全局调用链与四个模块链摘要，允许调整全局并发 / 超时、测试默认链，并跳转桌面 Web 完整编辑；插件保存其他字段时不会回写或压扁实例路由
-- B 站与多源：`bilibili.browser.*`、`sources.bilibili.enabled`、`sources.browser.*`、`sources.xiaohongshu.*`、`sources.douyin.*`、`sources.youtube.*`、`sources.twitter.*`、`sources.zhihu.*`、`sources.reddit.*`、`sources.bangumi.*`、`sources.linuxdo.*`
-- B 站与多源：`bilibili.browser.*`、`sources.bilibili.enabled`、`sources.browser.*`、`sources.xiaohongshu.*`、`sources.douyin.*`、`sources.youtube.*`、`sources.twitter.*`、`sources.zhihu.*`、`sources.reddit.*`、`sources.bangumi.*`、`sources.v2ex.*`
-- 调度：`scheduler.enabled`、`pause_on_extension_disconnect`、`extension_disconnect_grace_seconds`、`pool_target_count`、`account_sync_interval_hours`、eval drain 凑批参数、refresh / signal / trending / explore / discovery limit / proactive push / speculator idle 等 runtime 频率参数、九个平台 `pool_source_shares`、猜测兴趣参数、不喜欢领域探针参数、自动更新参数；设置页可调用 `/api/config/source-share-suggestion` 按已有事件和当前表单开关填入建议比例
+- B 站与多源：`bilibili.browser.*`、`sources.bilibili.enabled`、`sources.browser.*`，以及小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Linux.do / Bangumi / V2EX / 微博的来源配置
+- 调度：`scheduler.enabled`、`pause_on_extension_disconnect`、`extension_disconnect_grace_seconds`、`pool_target_count`、`account_sync_interval_hours`、eval drain 凑批参数、refresh / signal / trending / explore / discovery limit / proactive push / speculator idle 等 runtime 频率参数、十一个平台的 `pool_source_shares`、猜测兴趣参数、不喜欢领域探针参数、自动更新参数；设置页可调用 `/api/config/source-share-suggestion` 按已有事件和当前表单开关填入建议比例
 - 日志：控制台 / 文件级别、完整日志路径（保存时拆回 `directory` / `filename`）、轮转与非托管日志清理参数
 
 `[saved_sync].auto_sync_enabled` 已在桌面 / 移动 Web 和插件设置控件中暴露，也可通过 `config.toml` 或严格校验的 `/api/config` 管理。保留但不单独暴露的字段还包括目前只有一个有效值的内部兼容项，例如 `[sources.douyin].mode = "direct"`；保存时插件会继续按当前支持值写回，不会删除其他高级字段。

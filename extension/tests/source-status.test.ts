@@ -16,7 +16,7 @@ test("the shared module publishes itself for classic-script consumers", () => {
   assert.ok(SourceStatus, "source-status.js did not define OpenBiliClawSourceStatus");
   assert.deepEqual([...SourceStatus.SOURCE_KEYS], [
     "bilibili", "xiaohongshu", "douyin", "weibo", "youtube", "twitter", "zhihu", "reddit",
-    "bangumi", "v2ex", "linuxdo",
+    "bangumi", "linuxdo", "v2ex",
   ]);
 });
 

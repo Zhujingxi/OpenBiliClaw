@@ -4,8 +4,7 @@
 
 `src/openbiliclaw/api/source_auth/` 回答一个问题：**每个平台来源的凭据现在能不能用，以及这个结论有多可信。**
 
-它存在的原因是旧实现把四个互相独立的问题挤进了一个 `state` 字符串。结果是多个平台在设置页并排显示同一个「凭据已就绪」，而背后的证据强度天差地别——B 站只是数出 cookie 串里有三个字段名（完全不联网），小红书、知乎与 Linux.do 是浏览器心跳，Reddit 是本地文件未超过 7 天（代码注释明说绝不联网），X 既有后台真实请求健康记录，也支持设置页发起只读账户状态探针，YouTube 是一个硬编码常量。而抖音**即使 cookie 完全有效也永远显示「状态待验证」**。用户无从分辨「真的能用」和「只是填了个值」。
-它存在的原因是旧实现把四个互相独立的问题挤进了一个 `state` 字符串。结果是多个平台在设置页并排显示同一个「凭据已就绪」，而背后的证据强度天差地别——B 站只是数出 cookie 串里有三个字段名（完全不联网），小红书和知乎是浏览器 72 小时内的心跳，Reddit 是本地文件未超过 7 天（代码注释明说绝不联网），X 既有后台真实请求健康记录，也支持设置页发起只读账户状态探针，YouTube 是一个硬编码常量，Bangumi 和 V2EX 则是匿名可用但可选令牌的来源。而抖音**即使 cookie 完全有效也永远显示「状态待验证」**。用户无从分辨「真的能用」和「只是填了个值」。
+它存在的原因是旧实现把四个互相独立的问题挤进了一个 `state` 字符串。结果是多个平台在设置页并排显示同一个「凭据已就绪」，而背后的证据强度天差地别——B 站只做本地 Cookie 结构检查，小红书、知乎与 Linux.do 使用浏览器心跳，Reddit 读取本地凭据文件，X 既有被动健康记录也能显式只读探测，Bangumi 与 V2EX 则匿名可用但支持可选令牌。用户无从分辨「真的能用」和「只是填了个值」，这份契约因此把凭据存在、验证结论与证据强度拆开表达。
 
 完整诊断与设计见 [`docs/plans/2026-07-18-source-auth-contract-spec.md`](../plans/2026-07-18-source-auth-contract-spec.md)。
 
@@ -14,12 +13,9 @@
 | 能力 | 说明 | 状态 |
 | --- | --- | --- |
 | 正交契约 `SourceAuthContract` | 四个维度互不覆盖：要不要凭据 / 凭据在不在 / 验证结论 / **结论有多硬** | ✅ |
-| 每平台 provider | `providers.py` 的 9 个纯函数取代旧 if/elif 聚合器 | ✅ |
-| Bangumi 接入契约 | 第 8 个平台接入：匿名公开 `auth_required=False` + 可选个人令牌 `live_probe` 验证 `/v0/me` | ✅ 见下方「Bangumi 的接入」 |
-| Linux.do 接入契约 | 第 9 个平台接入：legacy `auth_required=False` + capability-specific 公开/个人 admission；`_t` 只上报布尔，Cookie 不进后端 | ✅ 见下方「Linux.do 的接入」 |
-| 每平台 provider | `providers.py` 的 9 个纯函数取代 424 行 if/elif 聚合器（现 49 行） | ✅ |
-| Bangumi / V2EX 接入契约 | 两个来源均支持匿名公开 `auth_required=False`；可选个人令牌通过 `live_probe` 验证 | ✅ 见下方「Bangumi 的接入」与 V2EX 说明 |
-| 显式验证动作 | `POST /api/sources/{slug}/verify`，9/9 平台可用，三态结果 | ✅ |
+| 每平台 provider | `providers.py` 的纯函数 provider 取代旧 if/elif 聚合器 | ✅ |
+| Bangumi / Linux.do / V2EX 接入契约 | 三者公开能力均可匿名；Bangumi / V2EX 支持可选令牌，Linux.do 个人能力使用浏览器心跳与任务历史 | ✅ 见下方各来源说明 |
+| 显式验证动作 | `POST /api/sources/{slug}/verify`，所有已注册来源共享三态结果 | ✅ |
 | 并发安全的本地状态读取 | X 健康表首建单飞，读写使用短生命周期 SQLite connection；状态轮询不共享 connection | ✅ |
 | 统一凭据写入 | `POST /api/sources/{slug}/credential`，写入即校验，7 条老端点转发 | ✅ |
 | 表单描述符 | `forms.py` 下发每平台表单形态，三端零 per-platform 分支 | ✅ |
@@ -60,12 +56,6 @@ class SourceAuthContract(BaseModel):
 ### 三端如何渲染这份契约
 
 契约字段若不落到像素上，整个重构对用户不可见。`describeAccess()` 因此**只读 `auth`**，legacy `state` 仅作老后端兜底。判定先看 `hasVerifiableCredential()`：只有 `auth_required=false` 且没有可验证凭据或个人能力时才直接显示「无需登录」；若匿名源另有 `live_probe` / `browser_heartbeat` / `task_history` 等可选身份能力，则继续按 `credential`（`none` / `invalid`）和 `verification` 渲染。凭据维度先于结论维度，是因为两者正交、可能互相矛盾，此时宁可少报也不点亮一盏兜不住的绿灯。
-| `task_history` | 由历史任务结果反推 | zhihu（无心跳时回落） |
-| `none` | 无验证能力，或不需要 | youtube、bangumi、v2ex（未配置令牌时） |
-
-### 三端如何渲染这份契约
-
-契约字段若不落到像素上，整个重构对用户不可见。`describeAccess()` 因此**只读 `auth`**，legacy `state` 仅作老后端兜底。判定先看 `hasVerifiableCredential()`：只有 `auth_required=false && 无可验证凭据` 才直接落到「无需登录」；其它情况再按 `credential`（`none` / `invalid`）→ `verification` 判定。凭据维度先于结论维度，是因为两者正交、可能互相矛盾，此时宁可少报也不点亮一盏兜不住的绿灯。
 
 | verification | 标签 | tone |
 | --- | --- | --- |
@@ -76,8 +66,7 @@ class SourceAuthContract(BaseModel):
 | `rate_limited` | 频率受限 | pending |
 | `blocked` | 接入受阻 | danger |
 
-`auth_required=false` 且 `hasVerifiableCredential()` 为 false 时是**无需登录**档（public 灰），既非已验证也非待验证，且不显示证据徽章。Bangumi 与 Linux.do 是“匿名可用 + 可选个人能力”的例外：Bangumi 配置令牌后有 `live_probe`；Linux.do 把 `/session/current.json` 个人任务终态作为最强证据，缺少该证据时才使用 `_t` 布尔 `browser_heartbeat`，两者都没有时再以最近 `task_history` 作间接证据。共享 UI 不会把它们永远压成「无需登录」：Linux.do 心跳明确为未登录时显示「公开发现可用」，个人任务已确认 / 心跳陈旧时分别按 verified / stale 渲染；无心跳时则如实显示历史个人 bootstrap 或公开 discovery 结果，不会把匿名 discovery 成功伪装成已登录。
-`auth_required=false` 且没有可验证凭据时单独一档：**无需登录**（public 灰），既非已验证也非待验证，也不显示证据徽章。匿名可用但带 optional credential 的来源不能走这个短路：`hasVerifiableCredential()` 会先识别已保存/失效凭据，`describeAuthVerdict()` 展示其 `verified/failed/unverified` 结论，`describeEvidence()` 常驻展示对应证据强度。Bangumi 的个人令牌已经采用这条路径；V2EX 还通过逐能力 readiness 把匿名 discover 与登录 bootstrap / incremental 分开。两者无令牌时仍显示公开能力无需登录，有令牌时常驻显示 ◆ 联网验证及结论。
+`auth_required=false` 且没有可验证凭据或个人能力时单独落在**无需登录**档（public 灰），既非已验证也非待验证。匿名可用但带 optional credential / identity 的来源不能走这个短路：Bangumi / V2EX 配置令牌后显示 `live_probe` 证据；Linux.do 把 `/session/current.json` 个人任务终态作为最强证据，缺少任务证据时使用 `_t` 布尔 `browser_heartbeat`，两者都没有时才回落公开 discovery。共享 UI 因而不会把匿名发现成功伪装成个人登录成功。
 
 证据强度是**独立于结论**的第二维度，同时用三种方式编码，其中没有一种是颜色（色觉障碍用户读不到颜色）：
 
@@ -122,7 +111,7 @@ class SourceAuthContract(BaseModel):
 
 **凭据读取是状态查询，不是秘密导出。** `GET /api/sources/credentials` 的 `available`、掩码预览、`summary` 与非敏感 Cookie 名称用于回答“是否已保存/由哪里管理”；秘密原值永不返回。历史 `reveal_keys` query 保留为 no-op，`form.actions` 不再包含 `copy`，桌面页面也不渲染复制按钮。新值只能走统一 credential 写入或配置 PUT；空值与掩码回显不会覆盖现有值。
 
-**首页问题分类与设置卡共用同一张表。** `describeSourceIssue()` 只把已启用来源的缺凭据、不完整、过期、失败、受阻、限流和未知契约列为 actionable issue，并原样携带后端 `detail`；`unverified`、`syncing`、无需登录与已验证都不是故障。桌面首页因此能覆盖九个平台并点名具体来源，而不会把每个平台都冒充为 `AccountSyncService` 的账号同步阶段。
+**首页问题分类与设置卡共用同一张表。** `describeSourceIssue()` 只把已启用来源的缺凭据、不完整、过期、失败、受阻、限流和未知契约列为 actionable issue，并原样携带后端 `detail`；`unverified`、`syncing`、无需登录与已验证都不是故障。桌面首页因此能覆盖所有已注册平台并点名具体来源，而不会把每个平台都冒充为 `AccountSyncService` 的账号同步阶段。
 
 **任何写入面都没有降低校验强度的开关。** `POST /api/sources/{slug}/credential` 的 `validate_live` 已删——全仓零调用方（扩展、三端前端、CLI 都不发），等于给任何能连上 localhost 的东西一个关掉端点核心承诺的官方途径，不换来任何好处。老端点 `POST /api/bilibili/cookie` 的 `validate_with_bilibili` **仍接受但不再生效**：只删新端点而把隔壁一模一样的开关留着，等于那次删除只是装饰——「装机扩展总是发 true」描述的是扩展，不是所有能连上这个端口的东西；实测传 `false` 会让一份结构完整但已失效的 cookie 在探针零调用的情况下落盘。字段保留在协议上是因为装机扩展每次同步 cookie 都会发它，直接拒绝该键会 422 掉它们的同步；**「接受这个字段」与「这个字段能降低校验」是两件事**。`validate_credential()` 也随之删掉了 `live` 参数——能活体校验的平台一律活体校验，没有"少查一点"的入参。
 
@@ -158,7 +147,7 @@ class SourceAuthContract(BaseModel):
 
 ## Linux.do 的接入
 
-Linux.do 是第 9 个 source-auth provider，形态是“公开 discovery 无需登录 + 个人 bootstrap/login-required”。legacy `auth_required` 仍为 `false`，但共享契约新增 `capabilities` 矩阵：discover 永远 `anonymous/ready`，profile/bootstrap/incremental 必须是 `login-required/ready` 才能作为 guided-init 个人信号来源。这样 `_t` 缺失、心跳陈旧或扩展离线不会误伤公开 search / hot / feed / creator / related，也不会让 Linux.do-only 初始化在未登录时先排一个长任务才失败。
+Linux.do 的形态是“公开 discovery 无需登录 + 个人 bootstrap/login-required”。legacy `auth_required` 仍为 `false`，但共享契约新增 `capabilities` 矩阵：discover 永远 `anonymous/ready`，profile/bootstrap/incremental 必须是 `login-required/ready` 才能作为 guided-init 个人信号来源。这样 `_t` 缺失、心跳陈旧或扩展离线不会误伤公开 search / hot / feed / creator / related，也不会让 Linux.do-only 初始化在未登录时先排一个长任务才失败。
 
 扩展读取 `linux.do` Cookie 列表后只计算 `_t` 是否存在且非空，并通过 deprecated-compatible `/api/sources/linuxdo/login-state` 或统一 credential writer 保存 `logged_in: bool`。后端不会收到 `_t` 值，也没有可用于 direct probe 的 Linux.do cookie：
 

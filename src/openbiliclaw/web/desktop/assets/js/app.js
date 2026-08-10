@@ -200,17 +200,15 @@
       { key: "zhihu", label: "知乎" },
       { key: "reddit", label: "Reddit" },
       { key: "bangumi", label: "Bangumi" },
-      { key: "linuxdo", label: "Linux.do" }
-      { key: "v2ex", label: "V2EX" }
+      { key: "linuxdo", label: "Linux.do" },
+      { key: "v2ex", label: "V2EX" },
     ];
     const sourceFilterOrder = sourceFilterDefinitions.map((source) => source.label);
     // 首次成功读到库存快照之前是"未知"，不能把还没读到伪装成 0。
     const PLATFORM_COUNT_UNKNOWN_TEXT = "—";
     const PLATFORM_COUNT_UNKNOWN_LABEL = "库存待读取";
-    const platformLabel = { bilibili: "B 站", youtube: "YouTube", douyin: "抖音", xiaohongshu: "小红书", xhs: "小红书", twitter: "X (Twitter)", x: "X (Twitter)", zhihu: "知乎", reddit: "Reddit", rd: "Reddit", bangumi: "Bangumi", bgm: "Bangumi", linuxdo: "Linux.do", "linux.do": "Linux.do" };
-    const platformAliases = { bili: "bilibili", bilibili: "bilibili", xhs: "xiaohongshu", xiaohongshu: "xiaohongshu", rednote: "xiaohongshu", dy: "douyin", douyin: "douyin", tiktok: "douyin", yt: "youtube", youtube: "youtube", x: "twitter", twitter: "twitter", zh: "zhihu", zhihu: "zhihu", rd: "reddit", reddit: "reddit", bgm: "bangumi", bangumi: "bangumi", linuxdo: "linuxdo", "linux.do": "linuxdo" };
-    const platformLabel = { bilibili: "B 站", youtube: "YouTube", douyin: "抖音", xiaohongshu: "小红书", xhs: "小红书", weibo: "微博", wb: "微博", twitter: "X (Twitter)", x: "X (Twitter)", zhihu: "知乎", reddit: "Reddit", rd: "Reddit", bangumi: "Bangumi", bgm: "Bangumi", v2ex: "V2EX", v2: "V2EX" };
-    const platformAliases = { bili: "bilibili", bilibili: "bilibili", xhs: "xiaohongshu", xiaohongshu: "xiaohongshu", rednote: "xiaohongshu", dy: "douyin", douyin: "douyin", tiktok: "douyin", wb: "weibo", weibo: "weibo", yt: "youtube", youtube: "youtube", x: "twitter", twitter: "twitter", zh: "zhihu", zhihu: "zhihu", rd: "reddit", reddit: "reddit", bgm: "bangumi", bangumi: "bangumi", v2: "v2ex", v2ex: "v2ex" };
+    const platformLabel = { bilibili: "B 站", youtube: "YouTube", douyin: "抖音", xiaohongshu: "小红书", xhs: "小红书", weibo: "微博", wb: "微博", twitter: "X (Twitter)", x: "X (Twitter)", zhihu: "知乎", reddit: "Reddit", rd: "Reddit", bangumi: "Bangumi", bgm: "Bangumi", linuxdo: "Linux.do", "linux.do": "Linux.do", v2ex: "V2EX", v2: "V2EX" };
+    const platformAliases = { bili: "bilibili", bilibili: "bilibili", xhs: "xiaohongshu", xiaohongshu: "xiaohongshu", rednote: "xiaohongshu", dy: "douyin", douyin: "douyin", tiktok: "douyin", wb: "weibo", weibo: "weibo", yt: "youtube", youtube: "youtube", x: "twitter", twitter: "twitter", zh: "zhihu", zhihu: "zhihu", rd: "reddit", reddit: "reddit", bgm: "bangumi", bangumi: "bangumi", linuxdo: "linuxdo", "linux.do": "linuxdo", v2: "v2ex", v2ex: "v2ex" };
     const textCardContentTypes = new Set(["tweet", "thread", "answer", "article", "question", "post", "comment"]);
     // v0.3.118+: bilibili is selectable like every other source — default
     // checked (recommended) but no longer forced. At least one source must
@@ -224,8 +222,8 @@
     // local first-run policy (the backend mirrors it in providers._ENABLED_BY_DEFAULT).
     const INIT_SOURCE_LABEL_FALLBACK = {
       bilibili: "B 站", xiaohongshu: "小红书", douyin: "抖音", youtube: "YouTube",
-      twitter: "X", zhihu: "知乎", reddit: "Reddit", bangumi: "Bangumi", linuxdo: "Linux.do"
-      twitter: "X", zhihu: "知乎", reddit: "Reddit", bangumi: "Bangumi", v2ex: "V2EX"
+      twitter: "X", zhihu: "知乎", reddit: "Reddit", bangumi: "Bangumi",
+      linuxdo: "Linux.do", v2ex: "V2EX"
     };
     const INIT_SOURCE_DEFAULT_CHECKED = new Set(["bilibili"]);
     const _initSourceStatus = globalThis.OpenBiliClawSourceStatus || null;
@@ -7838,6 +7836,7 @@ ${cardFeedbackBarHtml()}`;
       ["feed", "linuxdoModeFeed"],
       ["creator", "linuxdoModeCreator"],
       ["related", "linuxdoModeRelated"],
+    ];
     const WEIBO_SOURCE_MODE_FIELDS = [
       ["search", "weiboModeSearch"],
       ["hot", "weiboModeHot"],
@@ -7953,12 +7952,13 @@ ${cardFeedbackBarHtml()}`;
       bilibili: "bilibiliEnabled",
       xiaohongshu: "xhsEnabled",
       douyin: "douyinEnabled",
+      weibo: "weiboEnabled",
       youtube: "youtubeEnabled",
       twitter: "twitterEnabled",
       zhihu: "zhihuEnabled",
       reddit: "redditEnabled",
       bangumi: "bangumiEnabled",
-      linuxdo: "linuxdoEnabled"
+      linuxdo: "linuxdoEnabled",
       v2ex: "v2exEnabled"
     };
 
@@ -8254,7 +8254,7 @@ ${cardFeedbackBarHtml()}`;
       zhihu: "shareZhihu",
       reddit: "shareReddit",
       bangumi: "shareBangumi",
-      linuxdo: "shareLinuxdo"
+      linuxdo: "shareLinuxdo",
       v2ex: "shareV2EX",
       weibo: "shareWeibo"
     };
@@ -8262,12 +8262,13 @@ ${cardFeedbackBarHtml()}`;
       bilibili: "Bilibili",
       xiaohongshu: "小红书",
       douyin: "抖音",
+      weibo: "微博",
       youtube: "YouTube",
       twitter: "X (Twitter)",
       zhihu: "知乎",
       reddit: "Reddit",
       bangumi: "Bangumi",
-      linuxdo: "Linux.do"
+      linuxdo: "Linux.do",
       v2ex: "V2EX"
     };
     const SOURCE_CARD_INLINE_COLORS = { linuxdo: "#1f6f43" };
@@ -10502,6 +10503,7 @@ ${cardFeedbackBarHtml()}`;
             request_interval_seconds: getIntInput("linuxdoRequestInterval", 3),
             min_interval_minutes: getIntInput("linuxdoMinInterval", 3),
             bootstrap_limit: getIntInput("linuxdoBootstrapLimit", 300)
+          },
           v2ex: {
             enabled: $("#v2exEnabled").value === "on",
             username: getInput("v2exUsername"),
@@ -10544,7 +10546,7 @@ ${cardFeedbackBarHtml()}`;
             zhihu: getIntInput("shareZhihu", 1),
             reddit: getIntInput("shareReddit", 1),
             bangumi: getIntInput("shareBangumi", 1),
-            linuxdo: getIntInput("shareLinuxdo", 1)
+            linuxdo: getIntInput("shareLinuxdo", 1),
             v2ex: getIntInput("shareV2EX", 1),
             weibo: getIntInput("shareWeibo", 1)
           },
@@ -11300,8 +11302,7 @@ ${cardFeedbackBarHtml()}`;
       safeBind(`#${id}`, "change", () => renderSourcesStatusRows(state.sourceStatus));
     });
     safeBind("#suggestSharesBtn", "click", async () => {
-      const result = await requestJson(ENDPOINTS.sourceShareSuggestion, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled_sources: { bilibili: $("#bilibiliEnabled").value === "on", xiaohongshu: $("#xhsEnabled").value === "on", douyin: $("#douyinEnabled").value === "on", youtube: $("#youtubeEnabled").value === "on", twitter: $("#twitterEnabled").value === "on", zhihu: $("#zhihuEnabled").value === "on", reddit: $("#redditEnabled").value === "on", bangumi: $("#bangumiEnabled").value === "on", linuxdo: $("#linuxdoEnabled").value === "on" }, configured_shares: buildConfigUpdate().scheduler.pool_source_shares }) });
-      const result = await requestJson(ENDPOINTS.sourceShareSuggestion, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled_sources: { bilibili: $("#bilibiliEnabled").value === "on", xiaohongshu: $("#xhsEnabled").value === "on", douyin: $("#douyinEnabled").value === "on", youtube: $("#youtubeEnabled").value === "on", twitter: $("#twitterEnabled").value === "on", zhihu: $("#zhihuEnabled").value === "on", reddit: $("#redditEnabled").value === "on", bangumi: $("#bangumiEnabled").value === "on", v2ex: $("#v2exEnabled").value === "on" }, configured_shares: buildConfigUpdate().scheduler.pool_source_shares }) });
+      const result = await requestJson(ENDPOINTS.sourceShareSuggestion, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled_sources: { bilibili: $("#bilibiliEnabled").value === "on", xiaohongshu: $("#xhsEnabled").value === "on", douyin: $("#douyinEnabled").value === "on", youtube: $("#youtubeEnabled").value === "on", twitter: $("#twitterEnabled").value === "on", zhihu: $("#zhihuEnabled").value === "on", reddit: $("#redditEnabled").value === "on", bangumi: $("#bangumiEnabled").value === "on", linuxdo: $("#linuxdoEnabled").value === "on", v2ex: $("#v2exEnabled").value === "on", weibo: $("#weiboEnabled").value === "on" }, configured_shares: buildConfigUpdate().scheduler.pool_source_shares }) });
       const shares = result?.pool_source_shares || result?.shares || result?.suggested_shares;
       if (shares) {
         setInput("shareBilibili", shares.bilibili);

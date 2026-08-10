@@ -10,8 +10,8 @@
 - Python import / CLI: `/Users/white/workspace/OpenBiliClaw/.worktrees/linuxdo-source/src/openbiliclaw/__init__.py / shared .venv with explicit PYTHONPATH`
 - Backend bind / data / config root: safe real E2E used an isolated worktree data root; production roots are excluded
 - Browser / extension identity: 2026-08-10 hot-loaded the repaired current-worktree Chrome build into the real unpacked extension path and exercised it against an isolated backend; frozen Chrome/Firefox archives below have not both been installed for a release-candidate rerun
-- Chrome archive: `extension/openbiliclaw-extension-v0.3.201.zip`, SHA-256 `06881c31e00fe50f69eab0e421172d1c84e654cc4e5b83bda68b0fd80135be87`
-- Firefox archive: `extension/openbiliclaw-extension-v0.3.201-firefox.zip`, SHA-256 `92c582fdd0f9655bc2262009fb8c1b7c70787695db927770eb22fea8b4d70c20`
+- Chrome release-candidate archive: `extension/openbiliclaw-extension-v0.3.202.zip`, SHA-256 `5a52b53a47afd38f33f3cd9c463809514b0fc5925c93487c15fbe826f93f9d1e`
+- Firefox release-candidate archive: `extension/openbiliclaw-extension-v0.3.202-firefox.zip`, SHA-256 `4512a9ae42989fa4ed270f81c6b36fdd79f2828f82f459e79b449853c5228a9e`
 - Existing user changes preserved: yes; the dedicated worktree remains intentionally dirty and no unrelated change was reset
 
 ## Gate ledger
@@ -47,8 +47,8 @@
 | Chrome + Firefox tests/build/assets | required | PASS | extension 1,323/1,323; typecheck; both builds; 17/17 assets each; both build roots contain Linux.do + service worker | installed Firefox account E2E is separate and NOT_RUN |
 | Safe real E2E on final repaired archives | required | NOT_RUN | repaired current-worktree Chrome build passed authenticated search/related hydration plus in-progress full-reload recovery; this is not proof that both frozen release archives were installed | install both frozen Chrome/Firefox archives for release-candidate closure |
 | State-changing E2E | N/A | PASS | read-only source; no upstream mutation requested or executed | none |
-| Documentation / release-readiness | required | PASS | module/config/API/auth/init/runtime/privacy/store docs, changelog, contract, audit and this ledger updated | marketplace submission/release not requested |
-| Commit/version/tag/push/publish mutations | N/A | PASS | not requested; no release mutation authorized | none |
+| Documentation / release-readiness | required | PASS | module/config/API/auth/init/runtime/privacy/store docs, README / README_EN, homepage, changelog, contract, audit and this ledger updated for 0.3.202 | marketplace review state is verified after workflow submission |
+| Commit/version/tag/push/publish mutations | required | NOT_RUN | release and both marketplace submissions were explicitly authorized on 2026-08-10 | execute only after all local gates and main CI pass |
 
 ## Transport、身份与数据契约
 
@@ -68,10 +68,10 @@
 | focused backend tests | 0 | 411 passed / 28 skipped |
 | full backend tests (four alphabetic groups) | 0 | 7,756 passed / 54 skipped; three stale JSON-shape assertions repaired and rerun |
 | source contract metrics | 0 | 6/6; canonical registry-derived 9/9 verify coverage |
-| extension tests/typecheck | 0 | 1,320/1,320; typecheck passed |
-| Chrome build + asset verify | 0 | build passed; 17 required assets; archive hash above |
-| Firefox build + asset verify | 0 | build passed; 17 required assets; archive hash above |
-| Ruff / MyPy / diff check | 0 | Ruff check, MyPy (245 files), diff-check and 15 changed-file format checks pass; three unrelated pre-existing E2E test files remain in the repository-wide formatter baseline |
+| extension tests/typecheck | 0 | 1,386/1,386; typecheck passed |
+| Chrome build + asset verify | 0 | build passed; 18 required assets; archive hash above |
+| Firefox build + asset verify | 0 | build passed; 18 required assets; archive hash above |
+| Ruff / MyPy / diff check | 0 | changed-file Ruff, MyPy (258 source files), diff-check and release-version consistency pass |
 
 ## 真实 E2E
 

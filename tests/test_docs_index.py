@@ -4,7 +4,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_docs_homepage_mentions_reddit_bangumi_and_v2ex_sources() -> None:
+def test_docs_homepage_mentions_current_platform_sources() -> None:
     html = (ROOT / "docs/index.html").read_text(encoding="utf-8")
     project_version = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))[
         "project"
@@ -19,12 +19,13 @@ def test_docs_homepage_mentions_reddit_bangumi_and_v2ex_sources() -> None:
     assert "V2EX 推荐" in html
     assert "sourceV2exTitle" in html
     assert "sourceV2exText" in html
-    assert "知乎 / Reddit / V2EX 登录态任务桥" in html
-    assert "Zhihu, Reddit, Bangumi, V2EX, and Web sources" in html
-    # Bangumi host permission IS requested now, for identity-only recognition.
-    # The homepage must describe it truthfully: no cookies, no browsing capture.
-    assert "在 `bgm.tv` / `bangumi.tv` 上它仅做身份识别" in html
-    assert "不读 Cookie、不采集浏览行为" in html
+    assert "sourceLinuxdoTitle" in html
+    assert "sourceLinuxdoText" in html
+    assert "sourceWeiboTitle" in html
+    assert "sourceWeiboText" in html
+    assert "十一类平台来源与开放 Web" in html
+    assert "Eleven platform sources and the open web" in html
+    assert "微博 discovery 由后端完成，不申请微博权限" in html
     assert f'"softwareVersion": "{project_version}"' in html
 
 
