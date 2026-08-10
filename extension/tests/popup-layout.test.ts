@@ -44,6 +44,7 @@ test("popup header exposes a local mobile web QR entry", () => {
   assert.match(overlayMarkup, /id="mobileQrCode"/);
   assert.match(overlayMarkup, /id="mobileQrCopy"/);
   assert.match(overlayMarkup, /id="mobileQrOpen"/);
+  assert.match(overlayMarkup, /role="dialog" aria-modal="true" aria-labelledby="mobileQrTitle"/);
   assert.match(popupJs, /createQrSvgMarkup/);
   assert.doesNotMatch(popupHtml, /api\.qrserver|chart\.googleapis/);
 });
@@ -336,9 +337,35 @@ test("footer activity card keeps two lines and expandable history area", () => {
   assert.match(footerHintBlock, /font-weight:\s*700;/);
   assert.match(footerHeadlineBlock, /font-size:\s*11px;/);
   assert.match(footerHistoryBlock, /flex-direction:\s*column;/);
+  assert.match(footerHistoryBlock, /max-height:\s*clamp\(72px,\s*calc\(100dvh - 440px\),\s*360px\);/);
   assert.match(footerHintBlock, /padding-left:\s*22px;/);
   assert.match(successBlock, /background:/);
   assert.match(errorBlock, /background:/);
+});
+
+test("full-screen overlays isolate background focus and restore their triggers", () => {
+  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+
+  for (const [overlayId, titleId] of [
+    ["mobileQrOverlay", "mobileQrTitle"],
+    ["messagesOverlay", "messagesTitle"],
+    ["settingsOverlay", "settingsTitle"],
+  ]) {
+    assert.match(
+      popupHtml,
+      new RegExp(`id="${overlayId}"[^>]*role="dialog"[^>]*aria-modal="true"[^>]*aria-labelledby="${titleId}"`),
+    );
+  }
+  assert.match(popupJs, /function openPopupOverlay\(/);
+  assert.match(popupJs, /child\.inert = true;/);
+  assert.match(popupJs, /child\.setAttribute\("inert", ""\);/);
+  assert.match(popupJs, /child\.setAttribute\("aria-hidden", "true"\);/);
+  assert.match(popupJs, /function closePopupOverlay\(/);
+  assert.match(popupJs, /returnFocus\.focus\(\{ preventScroll: true \}\);/);
+  assert.match(popupJs, /function bindPopupOverlayKeyboard\(/);
+  assert.match(popupJs, /event\.key === "Escape"/);
+  assert.match(popupJs, /event\.key !== "Tab"/);
 });
 
 test("profile cognition cards reserve separate rows for context and explicit state", () => {
