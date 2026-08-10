@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from click import unstyle
 from typer.testing import CliRunner
 
 from openbiliclaw import cli as cli_module
@@ -59,10 +60,11 @@ def _post(
 )
 def test_weibo_smoke_commands_are_registered_and_have_help(command: str) -> None:
     result = CliRunner().invoke(app, [command, "--help"])
+    help_text = unstyle(result.output)
 
     assert result.exit_code == 0, result.output
-    assert "只读" in result.output
-    assert "--limit" in result.output
+    assert "只读" in help_text
+    assert "--limit" in help_text
 
 
 @pytest.mark.parametrize("alias", ["weibo", "wb"])
