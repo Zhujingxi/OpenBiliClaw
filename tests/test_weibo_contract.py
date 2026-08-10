@@ -1,4 +1,4 @@
-"""Executable exclusions and field mappings for the frozen Weibo contract."""
+"""Executable capability boundaries and field mappings for the Weibo contract."""
 
 from __future__ import annotations
 
@@ -11,6 +11,12 @@ from openbiliclaw.api.source_auth.write import CREDENTIAL_SPECS
 from openbiliclaw.config import Config
 from openbiliclaw.saved_sync.identity import is_native_save_local_only
 from openbiliclaw.sources.weibo import weibo_post_to_content
+from openbiliclaw.sources.weibo_tasks import (
+    is_weibo_account_key,
+    weibo_account_key,
+    weibo_bootstrap_item_key,
+    weibo_bootstrap_items_to_events,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTRACT = tomllib.loads(
@@ -41,56 +47,80 @@ def _mapped_post() -> object:
     )
 
 
-def test_weibo_profile_signals_are_discovery_only() -> None:
-    assert CONTRACT["integration_level"] == "discovery-only"
-    assert CONTRACT["profile"]["signals"] is False
-    assert "weibo-profile" not in _read("src/openbiliclaw/runtime/weibo_producer.py")
+def test_weibo_profile_signals_require_logged_in_bootstrap() -> None:
+    assert CONTRACT["integration_level"] == "full"
+    assert CONTRACT["profile"]["signals"] is True
+    assert CONTRACT["profile"]["refresh_mode"] == "init-only"
+    tasks = _read("src/openbiliclaw/sources/weibo_tasks.py")
+    assert "weibo_favorites" in tasks
+    assert "weibo_following" in tasks
+    assert "weibo_mentions" in tasks
 
 
-def test_weibo_profile_incremental_is_excluded() -> None:
+def test_weibo_profile_incremental_is_init_only() -> None:
     assert CONTRACT["profile"]["incremental"] is False
-    refresh = _read("src/openbiliclaw/runtime/refresh.py")
-    assert "_loop_weibo_producer" in refresh
-    assert "weibo_incremental" not in refresh
+    assert CONTRACT["profile"]["refresh_mode"] == "init-only"
+    assert "weibo_incremental" not in _read("src/openbiliclaw/runtime/refresh.py")
 
 
-def test_weibo_profile_refresh_mode_is_none() -> None:
-    assert CONTRACT["profile"]["refresh_mode"] == "none"
-    assert "weibo_profile_refresh" not in _read("src/openbiliclaw/runtime/refresh.py")
+def test_weibo_profile_refresh_mode_is_init_only() -> None:
+    assert CONTRACT["profile"]["refresh_mode"] == "init-only"
 
 
-def test_weibo_extension_task_is_excluded() -> None:
-    assert CONTRACT["extension"]["task"] == "none"
-    assert "weibo" not in _extension_runtime_source().casefold()
+def test_weibo_profile_account_binding_is_opaque_and_scope_partitioned() -> None:
+    account_key = weibo_account_key("2803301701")
+    assert is_weibo_account_key(account_key)
+    assert weibo_account_key("2803301701") == account_key
+    assert weibo_account_key("not-a-uid") == ""
+    item = {
+        "scope": "weibo_favorites",
+        "content_id": "5330495517763368",
+        "title": "收藏的公开微博",
+    }
+    assert weibo_bootstrap_item_key(item, account_key=account_key).startswith(
+        f"{account_key}:weibo_favorites:"
+    )
+    events = weibo_bootstrap_items_to_events([item], account_key=account_key)
+    assert events[0]["metadata"]["account_key"] == account_key
 
 
-def test_weibo_extension_task_marker_is_excluded() -> None:
-    assert CONTRACT["extension"]["task_marker"] is False
-    assert "weibo-task" not in _extension_runtime_source().casefold()
+def test_weibo_extension_task_is_browser_backed() -> None:
+    assert CONTRACT["extension"]["task"] == "browser-task"
+    assert "executeWeiboTask" in _extension_runtime_source()
+    assert "weibo-task-dispatcher" in _extension_runtime_source()
 
 
-def test_weibo_extension_background_is_excluded() -> None:
-    assert CONTRACT["extension"]["background"] is False
+def test_weibo_extension_task_marker_is_present() -> None:
+    assert CONTRACT["extension"]["task_marker"] is True
+    assert "openbiliclaw_weibo_task" in _read("extension/src/content/weibo/task-mode.ts")
+
+
+def test_weibo_extension_background_is_present() -> None:
+    assert CONTRACT["extension"]["background"] is True
     manifest = json.loads(_read("extension/manifest.json"))
-    assert "weibo" not in json.dumps(manifest, ensure_ascii=False).casefold()
+    assert any("weibo" in str(value).casefold() for value in manifest["host_permissions"])
+    assert "dist/content/weibo.js" in json.dumps(manifest, ensure_ascii=False)
 
 
-def test_weibo_extension_early_response_is_excluded() -> None:
+def test_weibo_extension_early_response_is_explicitly_false() -> None:
     assert CONTRACT["extension"]["early_response"] is False
-    assert "weibo" not in _extension_runtime_source().casefold()
-
-
-def test_weibo_extension_cookie_sync_is_excluded() -> None:
-    assert CONTRACT["extension"]["cookie_sync"] is False
     runtime = _extension_runtime_source().casefold()
-    assert "weibo" not in runtime
-    assert "sinaimg" not in runtime
+    assert "webrequest" not in runtime
+    assert "onbeforerequest" not in runtime
 
 
-def test_weibo_setup_surface_is_excluded() -> None:
-    assert CONTRACT["surfaces"]["setup"] is False
+def test_weibo_extension_cookie_sync_is_present_but_boolean_only() -> None:
+    assert CONTRACT["extension"]["cookie_sync"] is True
+    runtime = _extension_runtime_source().casefold()
+    assert "weibo_login_state_sync" in runtime
+    assert "/sources/weibo/credential" in runtime
+    assert "cookie" in runtime
+
+
+def test_weibo_setup_surface_is_in_guided_init() -> None:
+    assert CONTRACT["surfaces"]["setup"] is True
     shared = _read("src/openbiliclaw/web/shared/source-status.js")
-    assert "weibo: Object.freeze({ guidedInit: false })" in shared
+    assert "weibo: Object.freeze({ guidedInit: true })" in shared
     assert "SOURCE_KEYS.filter((key) => SOURCE_CAPABILITIES[key]?.guidedInit === true)" in shared
 
 
@@ -105,11 +135,11 @@ def test_weibo_mobile_popup_platform_filter_is_product_level_exclusion() -> None
     assert "platform filter" in str(scope["platform_filter_policy"]).casefold()
 
 
-def test_weibo_credentials_surface_is_excluded() -> None:
-    assert CONTRACT["surfaces"]["credentials"] is False
+def test_weibo_credentials_surface_is_login_state_only() -> None:
+    assert CONTRACT["surfaces"]["credentials"] is True
     spec = CREDENTIAL_SPECS["weibo"]
     form = build_credential_form("weibo", cfg=Config())
-    assert spec.kinds == ()
+    assert spec.kinds == ("login_state",)
     assert form.kind == "none"
     assert form.required_keys == []
 

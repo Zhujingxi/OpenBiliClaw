@@ -742,6 +742,20 @@ class LinuxdoLoginStateResponse(BaseModel):
     updated_at: str = ""
 
 
+class WeiboLoginStateIn(BaseModel):
+    """Privacy-preserving Weibo login state reported by the extension."""
+
+    logged_in: StrictBool
+
+
+class WeiboLoginStateResponse(BaseModel):
+    """Result of persisting the browser-observed Weibo login state."""
+
+    ok: bool = True
+    logged_in: bool
+    updated_at: str = ""
+
+
 class XStatusResponse(BaseModel):
     """Current X (Twitter) source health (spec §7).
 

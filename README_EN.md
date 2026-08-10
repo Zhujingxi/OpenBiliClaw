@@ -50,7 +50,7 @@ Four steps for most users. Firefox, Docker, scripted, and manual setup paths all
    Please follow https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docs/agent-install.md to deploy the OpenBiliClaw backend for me (use Bash `curl` to fetch the document, NOT WebFetch — WebFetch summarises markdown and drops critical commands).
    ```
 
-3. **Connect a source** — log in to [Bilibili](https://www.bilibili.com) (the default init source), or choose Xiaohongshu / Douyin / YouTube / X / Zhihu / Reddit / Linux.do / V2EX. Linux.do, Bangumi, V2EX, and Weibo support public discovery; signed-in Linux.do and V2EX add read-only personal signals, Bangumi can initialize from a public username, and Weibo is backend-only discovery.
+3. **Connect a source** — log in to [Bilibili](https://www.bilibili.com) (the default init source), or choose Xiaohongshu / Douyin / YouTube / X / Zhihu / Reddit / Linux.do / V2EX / Weibo. Linux.do, Bangumi, V2EX, and Weibo support public discovery; signed-in Linux.do, V2EX, and Weibo add read-only personal signals during initialization, Bangumi can initialize from a public username, and Weibo's public path remains anonymous.
 4. **Open the UI** — visit `http://127.0.0.1:8420/web`, or scan the extension QR code to open `http://<your-LAN-IP>:8420/m/` on your phone and save it to your home screen.
 
 ## Why OpenBiliClaw?
@@ -193,7 +193,7 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 - **Linux.do is now a complete read-only source** — public discovery works signed out, while signed-in sessions add bookmarks, likes, and read history through same-origin GETs.
 - **V2EX adds public discovery and four personal-signal scopes** — anonymous API / feeds, optional PAT verification, and account-isolated favorites / Node affinity are supported.
-- **Weibo joins as backend-only anonymous discovery** — search, hot, and creator results enter the shared pool without new extension permissions or cookie access.
+- **Weibo adds public discovery and init-only personal bootstrap** — search, hot, and creator results enter the shared pool anonymously; a signed-in same-origin task can import favorites, follows, and mentions without sending cookies to the backend.
 - **Browser tasks are more resilient** — cross-extension single-flight, MV3 reload recovery, partial-result preservation, and affirmative-empty checks are now shared safeguards.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
@@ -220,7 +220,7 @@ For most users, setup is four steps: install the extension, ask an AI coding age
 
 ### 1. Install the browser extension
 
-The extension is the main interface. It shows the sidebar on supported sites, records feedback, and runs bounded read-only tasks for sources including Zhihu, Reddit, Linux.do, and V2EX. Linux.do and V2EX task tabs are isolated from passive behavior collection; Weibo discovery runs independently in the backend and adds no Weibo extension permission, page capture, or task bridge.
+The extension is the main interface. It shows the sidebar on supported sites, records feedback, and runs bounded read-only tasks for sources including Zhihu, Reddit, Linux.do, V2EX, and Weibo. Linux.do, V2EX, and Weibo task tabs are isolated from passive behavior collection; Weibo public discovery still runs independently in the backend.
 
 Built on Manifest V3, the extension works in any Chrome-compatible browser — **Chrome, Edge, Brave, Arc, Vivaldi, Opera**, and more.
 
@@ -309,8 +309,8 @@ Paste this whole prompt into Claude Code, Codex CLI, Cursor, Windsurf, or anothe
 Please follow https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docs/agent-install.md to deploy the OpenBiliClaw backend for me (use Bash `curl` to fetch the document, NOT WebFetch — WebFetch summarises markdown and drops critical commands).
 ```
 
-The agent will clone the repo, install dependencies, start the backend with the LAN-accessible default bind (`0.0.0.0:8420`), run a health check, and ask a few questions with defaults. Before auto-init, it verifies that the ordered global LLM instance chain and the independent embedding service answer real lightweight calls; if either fails, init is blocked until you fix the service. Xiaohongshu, Douyin, YouTube, X, Zhihu, Reddit, Linux.do, and V2EX signals enter the initial profile only when you opt in. Bangumi needs a public username or valid token; Weibo is anonymous discovery-only and is not an init source.
-The agent will clone the repo, install dependencies, start the backend with the LAN-accessible default bind (`0.0.0.0:8420`), run a health check, and ask a few questions with defaults. Before auto-init, it verifies that the ordered global LLM instance chain and the independent embedding service answer real lightweight calls; if either fails, init is blocked until you fix the service. If unsure, pick the default. Xiaohongshu, Douyin, YouTube, X, Zhihu, and Reddit signals are used in the initial profile only when you explicitly opt in. Bangumi discovery needs no login; public collections seed the profile only when you enter a public username. Weibo also needs no login, but as a discovery-only source it is intentionally absent from the init-source list.
+The agent will clone the repo, install dependencies, start the backend with the LAN-accessible default bind (`0.0.0.0:8420`), run a health check, and ask a few questions with defaults. Before auto-init, it verifies that the ordered global LLM instance chain and the independent embedding service answer real lightweight calls; if either fails, init is blocked until you fix the service. Xiaohongshu, Douyin, YouTube, X, Zhihu, Reddit, Linux.do, V2EX, and Weibo signals enter the initial profile only when you opt in. Weibo personal signals require a signed-in Weibo browser session and the extension; public discovery remains anonymous.
+The agent will clone the repo, install dependencies, start the backend with the LAN-accessible default bind (`0.0.0.0:8420`), run a health check, and ask a few questions with defaults. Before auto-init, it verifies that the ordered global LLM instance chain and the independent embedding service answer real lightweight calls; if either fails, init is blocked until you fix the service. If unsure, pick the default. Xiaohongshu, Douyin, YouTube, X, Zhihu, Reddit, Linux.do, V2EX, and Weibo signals are used in the initial profile only when you explicitly opt in. Bangumi discovery needs no login; public collections seed the profile only when you enter a public username. Weibo public discovery needs no login, while personal initialization requires a signed-in Weibo browser and extension.
 
 Chrome Web Store / AMO builds only declare local-backend permissions by default. When you select a protocol and enter another LAN or remote endpoint, the browser requests `scheme://host/*`; WebExtension host permissions cannot be port-scoped across browsers, while actual requests remain pinned to the configured port. Public hosts require HTTPS. Enable the default-off device flow first with `ext-key generate` and `ext-key enable`.
 
@@ -352,7 +352,7 @@ Native Windows (PowerShell, no Docker or WSL2 required):
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; iwr https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/scripts/install.ps1 -UseBasicParsing | iex
 ```
 
-The script needs `git` and Python 3.11+. It clones the repo, then asks for the preferred LLM instance, embedding, Bilibili cookie, and Xiaohongshu / Douyin / YouTube opt-ins before installing dependencies or starting the backend. Once confirmed, it starts the backend, verifies the global LLM instance chain and embedding service, then runs init to build the first profile and discovery pool. X, Zhihu, Reddit, Linux.do, Bangumi, and V2EX can be enabled afterward in `/setup/` or settings. Public Linux.do, Bangumi, and V2EX discovery needs no login; personal initialization needs a signed-in browser or a Bangumi public username. Weibo can be enabled in settings as anonymous discovery only. If unsure, press Enter or choose the default.
+The script needs `git` and Python 3.11+. It clones the repo, then asks for the preferred LLM instance, embedding, Bilibili cookie, and Xiaohongshu / Douyin / YouTube opt-ins before installing dependencies or starting the backend. Once confirmed, it starts the backend, verifies the global LLM instance chain and embedding service, then runs init to build the first profile and discovery pool. X, Zhihu, Reddit, Linux.do, Bangumi, V2EX, and Weibo can be enabled afterward in `/setup/` or settings. Public Linux.do, Bangumi, V2EX, and Weibo discovery needs no login; Weibo personal initialization needs a signed-in Weibo browser and extension, while Bangumi personal initialization needs a public username. If unsure, press Enter or choose the default.
 
 </details>
 
@@ -480,7 +480,7 @@ openbiliclaw discover-linuxdo --limit 30
 # Optional: standalone Douyin search / hot / feed recall debugging
 openbiliclaw discover-douyin --keyword mechanical-keyboard --source search,feed --no-cache --no-evaluate
 
-# Optional: anonymous public Weibo discovery (enable [sources.weibo] first; no profile writes)
+# Optional: public Weibo discovery (enable [sources.weibo] first; public reads do not write profile)
 openbiliclaw discover --source weibo
 openbiliclaw discover-weibo mechanical-keyboard
 openbiliclaw discover-weibo-hot
@@ -819,8 +819,8 @@ OpenBiliClaw/
 │   ├── bilibili/              # Bilibili API layer (WBI signing · rate control)
 │   ├── llm/                   # Multi-model LLM adapters + structured JSON tolerance
 │   └── storage/               # Data storage layer
-├── extension/                 # Chrome/Firefox extension (including Linux.do/V2EX read-only task bridges; no Weibo permission/task)
-├── extension/                 # Chrome extension (Bilibili + XHS + Douyin + YouTube + X + Zhihu + Reddit + recovery; no Weibo permission/task)
+├── extension/                 # Chrome/Firefox extension (including Linux.do/V2EX/Weibo read-only task bridges)
+├── extension/                 # Chrome extension (Bilibili + XHS + Douyin + YouTube + X + Zhihu + Reddit + Weibo recovery/tasks)
 ├── skills/                    # Built-in Skill definitions
 ├── docs/                      # Documentation
 └── tests/                     # Tests (1900+)

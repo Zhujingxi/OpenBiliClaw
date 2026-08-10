@@ -16791,6 +16791,32 @@ class Database:
             timestamp_key="v2ex_login_state_at",
         )
 
+    def set_weibo_login_state(self, logged_in: bool, when_iso: str | None = None) -> None:
+        """Persist only the browser-observed Weibo login boolean.
+
+        The extension never sends a Weibo Cookie or visitor ``SUB`` value;
+        the actual account request runs inside the logged-in browser tab.
+        """
+        if not isinstance(logged_in, bool):
+            raise TypeError("logged_in must be bool")
+        if when_iso is None:
+            from datetime import UTC, datetime
+
+            when_iso = datetime.now(UTC).isoformat()
+        self._set_browser_login_state(
+            state_key="weibo_login_state",
+            timestamp_key="weibo_login_state_at",
+            logged_in=logged_in,
+            when_iso=str(when_iso),
+        )
+
+    def get_weibo_login_state(self) -> tuple[bool, str]:
+        """Return ``(logged_in, iso_timestamp)`` for Weibo."""
+        return self._get_browser_login_state(
+            state_key="weibo_login_state",
+            timestamp_key="weibo_login_state_at",
+        )
+
     def set_v2ex_browser_identity(
         self,
         username: str,

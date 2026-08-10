@@ -427,6 +427,7 @@ test("init source options: bilibili is default-checked but deselectable, others 
   assert.deepEqual(optional, [
     "xiaohongshu",
     "douyin",
+    "weibo",
     "youtube",
     "twitter",
     "zhihu",
@@ -449,8 +450,8 @@ test("init source roster derives from shared capability-aware INIT_SOURCE_KEYS (
     [...shared.INIT_SOURCE_KEYS],
   );
   assert.ok(shared.SOURCE_KEYS.includes("weibo"));
-  assert.ok(!shared.INIT_SOURCE_KEYS.includes("weibo"));
-  assert.ok(!INIT_SOURCE_OPTIONS.some((o) => o.key === "weibo"));
+  assert.ok(shared.INIT_SOURCE_KEYS.includes("weibo"));
+  assert.ok(INIT_SOURCE_OPTIONS.some((o) => o.key === "weibo"));
   // Labels come from the shared module too.
   for (const opt of INIT_SOURCE_OPTIONS) {
     assert.equal(opt.label, shared.sourceLabel(opt.key));
@@ -521,7 +522,7 @@ test("initSourceLabels maps known keys and passes unknowns through", () => {
     "Reddit",
     "Bangumi",
     "Linux.do",
-    "weibo",
+    "微博",
   ]);
   assert.deepEqual(initSourceLabels(undefined as unknown as string[]), []);
 });

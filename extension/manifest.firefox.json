@@ -39,6 +39,8 @@
         "*://*.redd.it/*",
         "https://linux.do/*",
         "*://*.v2ex.com/*",
+        "*://*.weibo.com/*",
+        "*://*.weibo.cn/*",
         "*://*.x.com/*",
         "*://*.twitter.com/*",
         "*://*.bgm.tv/*",
@@ -130,6 +132,16 @@
             ],
             "js": [
                 "content/zhihu.js"
+            ],
+            "run_at": "document_idle"
+        },
+        {
+            "matches": [
+                "*://*.weibo.com/*",
+                "*://*.weibo.cn/*"
+            ],
+            "js": [
+                "content/weibo.js"
             ],
             "run_at": "document_idle"
         },

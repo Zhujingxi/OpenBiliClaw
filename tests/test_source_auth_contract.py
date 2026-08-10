@@ -685,6 +685,31 @@ _CASES: dict[str, _Case] = {
         detail="尚未收到小红书浏览器登录态；插件连接后会在本地同步。",
         enabled=False,
     ),
+    # weibo — anonymous discovery plus capability-specific browser heartbeat.
+    "weibo-no-heartbeat": _Case(
+        "weibo",
+        _weibo_enabled,
+        "no_auth",
+        True,
+        detail="尚未运行微博内容发现。 初始化本人事件需要浏览器登录态。",
+        enabled=True,
+    ),
+    "weibo-disabled": _Case(
+        "weibo",
+        _weibo_disabled,
+        "no_auth",
+        True,
+        detail="微博来源未启用。",
+        enabled=False,
+    ),
+    "weibo-unrelated-credentials": _Case(
+        "weibo",
+        _weibo_enabled_with_unrelated_credentials,
+        "no_auth",
+        True,
+        detail="尚未运行微博内容发现。 初始化本人事件需要浏览器登录态。",
+        enabled=True,
+    ),
     # douyin — cookie presence alone is unverified; a later live probe can move it.
     "douyin-cookie-file": _Case(
         "douyin",
@@ -1337,6 +1362,7 @@ def test_contract_covers_every_platform_with_at_least_three_preconditions() -> N
         "bangumi",
         "linuxdo",
         "v2ex",
+        "weibo",
     }
     thin = {platform: n for platform, n in per_platform.items() if n < 3}
     assert not thin, f"platforms with fewer than 3 preconditions: {thin}"
@@ -2198,6 +2224,36 @@ async def test_verify_browser_heartbeat_waits_for_the_extension(
     assert result.outcome == ("indeterminate" if slug == "linuxdo" else "verified")
     assert result.changed is True
     assert check_legacy_consistency(slug, result.contract) == []
+
+
+async def test_weibo_browser_heartbeat_roundtrip_updates_verification(
+    contract_env: _Env,
+) -> None:
+    """微博 login-state callback is the sole backend auth evidence."""
+    _weibo_enabled(contract_env)
+    _seed_browser_login_state(
+        contract_env.db, prefix="weibo", logged_in=True, when_iso=_iso_hours_ago(73)
+    )
+
+    class _RespondingHub:
+        async def publish(self, event: dict[str, object]) -> bool:
+            assert event["type"] == "weibo_login_state_sync_requested"
+            _seed_browser_login_state(
+                contract_env.db, prefix="weibo", logged_in=True, when_iso=_iso_hours_ago(0)
+            )
+            return True
+
+    result = await verify_source(
+        "weibo",
+        cfg=contract_env.cfg,
+        database=contract_env.db,
+        event_hub=_RespondingHub(),
+    )
+
+    assert result.contract.verify_method == "browser_heartbeat"
+    assert result.contract.verification == "verified"
+    assert result.contract.capabilities["bootstrap"].readiness == "ready"
+    assert result.changed is True
 
 
 @pytest.mark.parametrize(

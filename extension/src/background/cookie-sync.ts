@@ -44,6 +44,7 @@ const XHS_LOGIN_STATE_SYNC_ALARM = "openbiliclaw-cookie-sync-xhs";
 const ZHIHU_LOGIN_STATE_SYNC_ALARM = "openbiliclaw-cookie-sync-zhihu";
 const LINUXDO_LOGIN_STATE_SYNC_ALARM = "openbiliclaw-cookie-sync-linuxdo";
 const V2EX_LOGIN_STATE_SYNC_ALARM = "openbiliclaw-cookie-sync-v2ex";
+const WEIBO_LOGIN_STATE_SYNC_ALARM = "openbiliclaw-cookie-sync-weibo";
 // Pre-split shared alarm. chrome.alarms persist across extension updates,
 // so an old install can still fire this name once after upgrading.
 const LEGACY_COOKIE_SYNC_ALARM = "openbiliclaw-cookie-sync";
@@ -99,6 +100,9 @@ const XHS_LOGIN_COOKIE_NAME = "web_session";
 const ZHIHU_LOGIN_COOKIE_NAME = "z_c0";
 const LINUXDO_LOGIN_COOKIE_NAME = "_t";
 const V2EX_LOGIN_COOKIE_NAME = "A2";
+// SUB is also issued to anonymous visitors and therefore is never sufficient
+// evidence of a logged-in account.  Require the account session pair instead.
+const WEIBO_LOGIN_COOKIE_NAMES = ["SUBP", "ALF"];
 
 type CookieSyncPlatform =
   | "bilibili"
@@ -108,7 +112,8 @@ type CookieSyncPlatform =
   | "xhs"
   | "zhihu"
   | "linuxdo"
-  | "v2ex";
+  | "v2ex"
+  | "weibo";
 
 const debounceTimers: Partial<Record<CookieSyncPlatform, ReturnType<typeof setTimeout>>> = {};
 let cookieSyncStarted = false;
@@ -291,6 +296,18 @@ export async function readV2EXLoginState(): Promise<boolean> {
   if (!chromeApi?.cookies?.getAll) return false;
   const cookies = await chromeApi.cookies.getAll({ domain: "v2ex.com" });
   return cookies.some((cookie) => cookie.name === V2EX_LOGIN_COOKIE_NAME);
+}
+
+/** Return whether Weibo has an account session, excluding anonymous SUB. */
+export async function readWeiboLoginState(): Promise<boolean> {
+  const chromeApi = getChromeApi();
+  if (!chromeApi?.cookies?.getAll) return false;
+  const cookies = [
+    ...(await chromeApi.cookies.getAll({ domain: "weibo.com" })),
+    ...(await chromeApi.cookies.getAll({ domain: "weibo.cn" })),
+  ].filter((cookie) => String(cookie.value || "").trim() !== "");
+  const names = new Set(cookies.map((cookie) => cookie.name));
+  return WEIBO_LOGIN_COOKIE_NAMES.every((name) => names.has(name));
 }
 
 /**
@@ -655,6 +672,33 @@ export async function syncV2EXLoginStateToBackend(
   }
 }
 
+export async function syncWeiboLoginStateToBackend(
+  source: string = "extension",
+): Promise<boolean> {
+  const loggedIn = await readWeiboLoginState();
+  try {
+    const response = await authenticatedFetch(await apiUrl("/sources/weibo/credential"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind: "login_state", value: loggedIn, source }),
+    });
+    if (!response.ok) {
+      scheduleCookieSyncAlarm(WEIBO_LOGIN_STATE_SYNC_ALARM, COOKIE_SYNC_RETRY_MINUTES);
+      return false;
+    }
+    const result = (await response.json()) as { accepted?: boolean };
+    if (result.accepted) {
+      scheduleHourlyCookieSync(WEIBO_LOGIN_STATE_SYNC_ALARM);
+      return true;
+    }
+    scheduleCookieSyncAlarm(WEIBO_LOGIN_STATE_SYNC_ALARM, COOKIE_SYNC_RETRY_MINUTES);
+    return false;
+  } catch {
+    scheduleCookieSyncAlarm(WEIBO_LOGIN_STATE_SYNC_ALARM, COOKIE_SYNC_RETRY_MINUTES);
+    return false;
+  }
+}
+
 /**
  * Handle backend runtime-stream events that explicitly ask the extension
  * to push the current site cookie now.
@@ -693,6 +737,10 @@ export function handleCookieSyncRuntimeEvent(event: Record<string, unknown>): bo
     void syncV2EXLoginStateToBackend("runtime-stream-request");
     return true;
   }
+  if (eventType === "weibo_login_state_sync_requested") {
+    void syncWeiboLoginStateToBackend("runtime-stream-request");
+    return true;
+  }
   return false;
 }
 
@@ -723,8 +771,10 @@ function scheduleCookieSync(platform: CookieSyncPlatform, source: string): void 
       void syncZhihuLoginStateToBackend(source);
     } else if (platform === "linuxdo") {
       void syncLinuxdoLoginStateToBackend(source);
-    } else {
+    } else if (platform === "v2ex") {
       void syncV2EXLoginStateToBackend(source);
+    } else {
+      void syncWeiboLoginStateToBackend(source);
     }
   }, COOKIE_SYNC_DEBOUNCE_MS);
 }
@@ -758,6 +808,7 @@ export function startCookieSync(): void {
   void syncZhihuLoginStateToBackend("startup");
   void syncLinuxdoLoginStateToBackend("startup");
   void syncV2EXLoginStateToBackend("startup");
+  void syncWeiboLoginStateToBackend("startup");
 
   // React to login / logout / refresh.
   chromeApi.cookies.onChanged.addListener((changeInfo) => {
@@ -824,6 +875,11 @@ export function startCookieSync(): void {
         return;
       }
       scheduleCookieSync("v2ex", changeInfo.removed ? "v2ex-logout" : "v2ex-cookies-onchange");
+      return;
+    }
+    if (domain.endsWith("weibo.com") || domain.endsWith("weibo.cn")) {
+      if (!WEIBO_LOGIN_COOKIE_NAMES.includes(changeInfo.cookie.name)) return;
+      scheduleCookieSync("weibo", changeInfo.removed ? "weibo-logout" : "weibo-cookies-onchange");
     }
   });
 
@@ -839,6 +895,7 @@ export function startCookieSync(): void {
   scheduleHourlyCookieSync(ZHIHU_LOGIN_STATE_SYNC_ALARM);
   scheduleHourlyCookieSync(LINUXDO_LOGIN_STATE_SYNC_ALARM);
   scheduleHourlyCookieSync(V2EX_LOGIN_STATE_SYNC_ALARM);
+  scheduleHourlyCookieSync(WEIBO_LOGIN_STATE_SYNC_ALARM);
 }
 
 /**
@@ -879,6 +936,10 @@ export function handleCookieSyncAlarm(alarmName: string): boolean {
     void syncV2EXLoginStateToBackend("hourly-alarm");
     return true;
   }
+  if (alarmName === WEIBO_LOGIN_STATE_SYNC_ALARM) {
+    void syncWeiboLoginStateToBackend("hourly-alarm");
+    return true;
+  }
   if (alarmName === LEGACY_COOKIE_SYNC_ALARM) {
     // One last full round for an alarm persisted by an older version; each
     // sync re-registers its own per-platform alarm on success/failure and
@@ -891,6 +952,7 @@ export function handleCookieSyncAlarm(alarmName: string): boolean {
     void syncZhihuLoginStateToBackend("hourly-alarm");
     void syncLinuxdoLoginStateToBackend("hourly-alarm");
     void syncV2EXLoginStateToBackend("hourly-alarm");
+    void syncWeiboLoginStateToBackend("hourly-alarm");
     return true;
   }
   return false;

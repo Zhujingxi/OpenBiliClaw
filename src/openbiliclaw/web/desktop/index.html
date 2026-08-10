@@ -422,7 +422,7 @@
 
         <div id="settingsPanelSources" class="settings-panel" data-settings-panel="sources" role="tabpanel" aria-labelledby="settingsTabSources" hidden>
           <p class="settings-note-inline">每个来源一张卡：卡面是开关、接入状态和候选池占比，展开后是接入方式、发现分支与预算、节流和该平台专属设置。开关改动需要保存配置才会进入或退出调度；接入状态只说明 cookie、令牌或插件任务是否可用。</p>
-          <p class="settings-note-inline">凭据一律脱敏：后端不会把原始 Cookie、令牌或 API Key 回传到页面，也不提供复制原值。手动粘贴入口只提供给后端直接带 Cookie 请求平台接口的源——B 站、抖音、X、Reddit（留空保存不会覆盖）；小红书、知乎由浏览器插件用登录态取数，YouTube、Bangumi 与微博使用公开接口，不保存 Cookie。微博的匿名访客会话只存在后端内存中。</p>
+          <p class="settings-note-inline">凭据一律脱敏：后端不会把原始 Cookie、令牌或 API Key 回传到页面，也不提供复制原值。手动粘贴入口只提供给后端直接带 Cookie 请求平台接口的源——B 站、抖音、X、Reddit（留空保存不会覆盖）；小红书、知乎由浏览器插件用登录态取数，YouTube、Bangumi 与微博公开 discovery 使用公开接口，不保存 Cookie。微博个人初始化由扩展同源任务读取登录态，后端只接收布尔状态、uid 与规范化事件。</p>
           <div id="sourceStatusList" class="source-card-list">
 
             <article class="source-status-row source-card" data-source-status="bilibili" data-source-credential="bilibili" data-open="0">
@@ -604,9 +604,9 @@
               <div class="source-card-body" id="sourceCardBody-weibo">
                 <section class="source-seg">
                   <h4>接入方式</h4>
-                  <p class="seg-note">使用微博匿名访客会话读取公开内容，无需用户 Cookie，也不会读取、上传或保存登录凭据。首版仅用于 discovery，不参与初始化画像；所用网页接口并非官方稳定 API，可能随微博调整而变化。</p>
+                  <p class="seg-note">公开 search / 热榜 / 作者 discovery 使用匿名访客会话，无需用户 Cookie。显式 guided init 时，扩展会在已登录微博的同源任务页只读收藏、关注和互动，并回传规范化事件；后端不接收或保存 Cookie。网页接口并非官方稳定 API，可能随微博调整而变化。</p>
                   <div class="source-cred-box">
-                    <div class="source-cred-line"><span class="source-credential-ro-tag">匿名</span><span class="source-credential-summary">加载中…</span></div>
+                    <div class="source-cred-line"><span class="source-credential-ro-tag">公开 + 登录态任务</span><span class="source-credential-summary">加载中…</span></div>
                     <textarea class="source-credential-value" rows="2" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
                   </div>
                 </section>

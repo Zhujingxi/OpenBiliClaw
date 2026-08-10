@@ -403,9 +403,10 @@ bootstrap_replies_limit = 300
 bootstrap_favorites_limit = 300
 bootstrap_max_pages_per_scope = 20
 
-# ── 微博匿名访客发现（只读）──
-# 后端只在内存中申请短期访客会话，不读取、上传或保存用户登录 Cookie。
-# hot 仅用于生成主题种子，最终仍搜索并入池真实微博正文；不支持初始化画像或写回。
+# ── 微博公开发现 + 登录态初始化（只读）──
+# 后端公开 search / hot / creator 只在内存中申请短期访客会话，不读取、上传或保存用户登录 Cookie。
+# 若在 guided init 中选择微博，浏览器插件会在已登录的 m.weibo.cn 同源任务页读取收藏、关注和 mentions，
+# 只回传归一化事件；后端只保存布尔登录心跳和账号绑定，不保存微博 Cookie。个人事件目前为 init-only，不做定时增量。
 [sources.weibo]
 enabled = false
 source_modes = ["search", "hot", "creator"]

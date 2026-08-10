@@ -25,7 +25,7 @@ def test_docs_homepage_mentions_current_platform_sources() -> None:
     assert "sourceWeiboText" in html
     assert "十一类平台来源与开放 Web" in html
     assert "Eleven platform sources and the open web" in html
-    assert "微博 discovery 由后端完成，不申请微博权限" in html
+    assert "登录微博后可在初始化时只读导入收藏、关注和互动" in html
     assert f'"softwareVersion": "{project_version}"' in html
 
 

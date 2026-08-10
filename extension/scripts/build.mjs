@@ -58,6 +58,10 @@ const entrypoints = [
     outfile: resolve(root, `${outDir}/content/zhihu.js`),
   },
   {
+    entry: resolve(root, "src/content/weibo.ts"),
+    outfile: resolve(root, `${outDir}/content/weibo.js`),
+  },
+  {
     entry: resolve(root, "src/content/reddit.ts"),
     outfile: resolve(root, `${outDir}/content/reddit.js`),
   },

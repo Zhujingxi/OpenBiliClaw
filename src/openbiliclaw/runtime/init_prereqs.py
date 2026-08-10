@@ -66,6 +66,7 @@ _PLATFORM_SOURCE_FIELDS = (
     "bangumi",
     "linuxdo",
     "v2ex",
+    "weibo",
 )
 
 

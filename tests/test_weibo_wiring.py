@@ -233,11 +233,11 @@ def _literal_module_assignment(path: Path, name: str) -> Any:
     raise AssertionError(f"missing module assignment: {name}")
 
 
-def test_guided_init_backend_roster_explicitly_excludes_discovery_only_weibo() -> None:
+def test_guided_init_backend_roster_includes_logged_in_weibo() -> None:
     app_path = Path(__file__).parents[1] / "src/openbiliclaw/api/app.py"
     share_roster = _literal_module_assignment(app_path, "_SOURCE_SHARE_ORDER")
     init_roster = _literal_module_assignment(app_path, "_INIT_SOURCE_ORDER")
 
     assert "weibo" in share_roster
-    assert "weibo" not in init_roster
-    assert tuple(source for source in share_roster if source != "weibo") == init_roster
+    assert "weibo" in init_roster
+    assert init_roster == share_roster

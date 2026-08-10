@@ -52,7 +52,7 @@
    请按照 https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docs/agent-install.md 的说明帮我部署 OpenBiliClaw 后端(务必用 Bash 的 curl 下载这个文档,不要用 WebFetch — 会丢关键指令)
    ```
 
-3. **连接来源** —— 在装了插件的浏览器登录 [B 站](https://www.bilibili.com)（默认初始化来源），或改选小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Linux.do / V2EX；Linux.do、Bangumi、V2EX 与微博均可做公开发现，登录 Linux.do 或 V2EX 后还能只读导入个人信号，Bangumi 可用公开用户名初始化画像，微博为后端匿名 discovery-only 来源。
+3. **连接来源** —— 在装了插件的浏览器登录 [B 站](https://www.bilibili.com)（默认初始化来源），或改选小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Linux.do / V2EX / 微博；Linux.do、Bangumi、V2EX 与微博均可做公开发现，登录 Linux.do、V2EX 或微博后还能在初始化时只读导入个人信号，Bangumi 可用公开用户名初始化画像。微博公开发现无需登录，个人收藏 / 关注 / 互动初始化需要已登录微博浏览器态。
 4. **打开界面** —— 浏览器访问 `http://127.0.0.1:8420/web`；手机扫插件二维码打开 `http://<电脑局域网 IP>:8420/m/`，保存到主屏幕即可当 App 用。
 
 ## 用户交流群
@@ -213,7 +213,7 @@
 
 - **Linux.do 成为完整只读来源** —— 公开发现无需登录，登录后可导入书签、点赞和阅读记录，所有站内请求保持同源 GET。
 - **V2EX 接入公开发现与四类个人信号** —— 支持匿名 API / Feed、可选 PAT 验证和账号隔离的收藏 / Node 偏好。
-- **微博加入后端匿名发现** —— search / hot / creator 进入统一候选池，不增加插件权限或 Cookie 读取。
+- **微博接入公开发现与登录态初始化** —— search / hot / creator 进入统一候选池；初始化时经微博同源任务只读导入收藏、关注和互动，后端不接收 Cookie，个人事件目前为 init-only。
 - **浏览器任务更可靠** —— 跨扩展单飞、MV3 重载恢复、部分结果保留和真实空结果判定统一加固。
 
 完整变更详见 [docs/changelog.md](docs/changelog.md)。
@@ -224,7 +224,7 @@
 
 ### 1. 安装浏览器插件
 
-插件是主要入口：它会在受支持站点显示侧边栏、采集你的反馈，并承接知乎、Reddit、Linux.do、V2EX 等登录态只读任务。Linux.do 与 V2EX 的任务 tab 和普通行为采集隔离；微博 discovery 由后端独立完成，不增加微博插件权限、页面行为采集或任务桥。
+插件是主要入口：它会在受支持站点显示侧边栏、采集你的反馈，并承接知乎、Reddit、Linux.do、V2EX、微博等登录态只读任务。Linux.do、V2EX 与微博的任务 tab 和普通行为采集隔离；微博公开 discovery 由后端独立完成，个人初始化才使用微博 host permission 和同源任务桥。
 
 插件基于 Manifest V3，支持所有兼容 Chrome 插件的浏览器，包括 **Chrome、Edge、Brave、Arc、Vivaldi、Opera** 等。
 
@@ -313,7 +313,7 @@ npm run package:firefox        # 额外打成未签名 openbiliclaw-extension-v*
 请按照 https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docs/agent-install.md 的说明帮我部署 OpenBiliClaw 后端(务必用 Bash 的 curl 下载这个文档,不要用 WebFetch — 会丢关键指令)
 ```
 
-AI 助手会克隆仓库、安装依赖、用局域网可访问的默认绑定启动后端（`0.0.0.0:8420`）、做健康检查，并问几个有默认值的问题。自动初始化前会真实验证全局 LLM 实例链和独立 embedding 服务；有一个不通就先停下让你修配置。小红书、抖音、YouTube、X、知乎、Reddit、Linux.do 与 V2EX 数据只有你明确同意才会进入初始画像；Bangumi 需公开用户名或有效令牌，微博是无需登录且不参与初始化的 discovery-only 来源。
+AI 助手会克隆仓库、安装依赖、用局域网可访问的默认绑定启动后端（`0.0.0.0:8420`）、做健康检查，并问几个有默认值的问题。自动初始化前会真实验证全局 LLM 实例链和独立 embedding 服务；有一个不通就先停下让你修配置。小红书、抖音、YouTube、X、知乎、Reddit、Linux.do、V2EX 与微博数据只有你明确同意才会进入初始画像；微博个人事件需要已登录微博浏览器和扩展，公开发现仍可匿名进行。
 
 Chrome Web Store / AMO 发布包默认只声明本机后端权限。让插件连接局域网另一台机器或远程域名时，在设置里选择协议并填写地址，浏览器会请求该 `scheme://host/*` 的可选权限；WebExtension host permission 无法跨浏览器限定端口，但实际请求仍固定到配置端口。公网地址强制 HTTPS。后端需先用 `ext-key generate` 和 `ext-key enable` 开启默认关闭的设备认证。
 
@@ -355,7 +355,7 @@ Windows 原生（PowerShell，不需要 Docker / WSL2）：
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; iwr https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/scripts/install.ps1 -UseBasicParsing | iex
 ```
 
-脚本依赖 `git` 和 Python 3.11+。它会自动克隆仓库，然后先在终端向导里收集首选 LLM 实例、embedding、B 站 Cookie，以及小红书 / 抖音 / YouTube 的 opt-in 决策，再安装依赖、启动后端和健康检查；确认齐全后会先验证全局 LLM 实例链和 embedding 服务都能真实响应，再自动运行 init，完成画像生成和首轮发现。X / 知乎 / Reddit / Linux.do / Bangumi / V2EX 可在启动后的 `/setup/` 或设置页显式开启；Linux.do、Bangumi 与 V2EX 的公开 discovery 无需登录，个人初始化则分别需要浏览器登录或 Bangumi 公开用户名。微博可在设置页开启，但只参与匿名 discovery。不确定的选项直接回车或选默认。
+脚本依赖 `git` 和 Python 3.11+。它会自动克隆仓库，然后先在终端向导里收集首选 LLM 实例、embedding、B 站 Cookie，以及小红书 / 抖音 / YouTube 的 opt-in 决策，再安装依赖、启动后端和健康检查；确认齐全后会先验证全局 LLM 实例链和 embedding 服务都能真实响应，再自动运行 init，完成画像生成和首轮发现。X / 知乎 / Reddit / Linux.do / Bangumi / V2EX / 微博可在启动后的 `/setup/` 或设置页显式开启；Linux.do、Bangumi、V2EX 与微博的公开 discovery 无需登录，微博个人初始化需要已登录微博浏览器和扩展，Bangumi 个人初始化需要公开用户名。不确定的选项直接回车或选默认。
 
 </details>
 
@@ -483,7 +483,7 @@ openbiliclaw discover-linuxdo --limit 30
 # 可选：独立调试抖音 search / hot / feed 召回
 openbiliclaw discover-douyin --keyword 机械键盘 --source search,feed --no-cache --no-evaluate
 
-# 可选：微博匿名公开 discovery（需先启用 [sources.weibo]；不写画像）
+# 可选：微博公开 discovery（需先启用 [sources.weibo]；公开读取不写画像）
 openbiliclaw discover --source weibo
 openbiliclaw discover-weibo 机械键盘
 openbiliclaw discover-weibo-hot
@@ -828,7 +828,7 @@ OpenBiliClaw/
 │   ├── bilibili/              # B 站接入层 (WBI 签名 · 速率控制)
 │   ├── llm/                   # 多模型 LLM 适配 + 结构化 JSON 容错
 │   └── storage/               # 数据存储层
-├── extension/                 # Chrome/Firefox 插件（含 Linux.do / V2EX 只读任务桥；微博无权限/任务）
+├── extension/                 # Chrome/Firefox 插件（含 Linux.do / V2EX / 微博只读任务桥）
 ├── skills/                    # 内置 Skill 定义
 ├── docs/                      # 项目文档
 └── tests/                     # 测试 (1900+)

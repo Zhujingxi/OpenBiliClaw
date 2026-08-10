@@ -21,6 +21,7 @@ _TASK_TABLES = frozenset(
         "reddit_tasks",
         "linuxdo_tasks",
         "v2ex_tasks",
+        "weibo_tasks",
     }
 )
 

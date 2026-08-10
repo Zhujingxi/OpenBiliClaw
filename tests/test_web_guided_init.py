@@ -242,7 +242,7 @@ def test_setup_init_sources_are_explicit_opt_in_without_settings_enable_block() 
     ):
         assert f'"{source}"' in shared
         assert f'key: "{source}"' in app_js
-    assert "weibo: Object.freeze({ guidedInit: false })" in shared
+    assert "weibo: Object.freeze({ guidedInit: true })" in shared
 
 
 def test_guided_init_web_docs_belong_to_v03110_release_block() -> None:

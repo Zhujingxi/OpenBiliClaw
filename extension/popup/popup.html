@@ -6613,7 +6613,7 @@
           <button class="settings-secondary-btn source-verify-btn" type="button">查看接入状态</button>
           <span class="settings-probe-status source-verify-status" aria-live="polite"></span>
         </div>
-        <p class="settings-hint">使用后端内存中的匿名访客会话读取公开微博，无需用户 Cookie，也不会读取、上传或保存登录凭据。首版仅用于 discovery，不参与初始化画像；网页接口并非官方稳定 API，可能随微博调整而变化。</p>
+        <p class="settings-hint">公开 search / 热榜 / 作者 discovery 使用匿名访客会话，无需用户 Cookie。显式 guided init 时，扩展会在已登录微博的同源任务页只读收藏、关注和互动，并回传规范化事件；后端不接收或保存 Cookie。网页接口并非官方稳定 API，可能随微博调整而变化。</p>
         <div class="settings-field">
           <label>微博 discovery 分支</label>
           <div class="settings-field-row">

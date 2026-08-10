@@ -52,14 +52,14 @@ OpenBiliClaw 不代替用户登录——需要账号态的来源复用**你**当
 - **知乎**：如果要启用知乎初始化或 discovery，必须在装了扩展的宿主机浏览器里登录 https://www.zhihu.com；事件、初始化和 search / hot / feed / creator / related discovery 都走插件任务。
 - **Reddit**：如果要启用 Reddit 初始化或 discovery，必须在装了扩展的宿主机浏览器里登录 https://www.reddit.com，插件读取 saved / upvoted / subscribed，并把 `reddit_session` 同步到容器 volume 内的 rdt-cli credential store。日常 discovery 默认使用容器内随 OpenBiliClaw 安装的 `rdt-cli`；插件不可用时可在容器里手动运行 `rdt login`，未登录或命令后端不可用时会自动 fallback 到宿主机浏览器插件任务。
 - **Bangumi**：匿名 search / ranked / 按日期 discovery 直接使用官方只读 API，无需登录、Cookie、token 或扩展 host permission。若要让公开收藏参与初始化画像，请在 `/setup/` 或设置页显式填写公开用户名；未填用户名时 Bangumi 不能作为唯一画像初始化来源。
-- **微博**：后端以项目自有 `httpx` client 和仅存内存的匿名 visitor 会话读取公开 search / hot-as-query-seed / creator 内容；无需用户登录或 Cookie，也不增加扩展 host permission。微博默认关闭且仅用于 discovery，不出现在 guided init，也不读取账号行为或执行站内写回。
+- **微博**：后端以项目自有 `httpx` client 和仅存内存的匿名 visitor 会话读取公开 search / hot-as-query-seed / creator 内容；公开路径无需登录。若在 guided init 选择微博，宿主机浏览器需登录 `m.weibo.cn`，扩展在隔离同源任务页只读收藏、关注和 mentions，并仅回传布尔登录态、uid 与规范化事件；Cookie 不进入容器，个人 bootstrap 当前为 init-only。
 - **CDP 说明**：小红书、抖音、YouTube、知乎和 Reddit 插件 fallback 都走 Chrome 插件任务链路，不需要额外启动 CDP 调试 Chrome。`[sources.browser].cdp_url` 只保留给通用 Web / 自定义网页源的浏览器抓取场景。
 
 详见 [配置参考 / sources.browser 段](modules/config.md#sourcesbrowser)。
 
 ## 快速开始
 
-三种方式按省事程度排序。**无论选哪种，启动后端后都建议打开图形化引导页 `http://127.0.0.1:8420/setup/` 完成 AI 配置与前置检查**——它和桌面安装包是同一套向导：配置 LLM / embedding、选择初始化来源（B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Bangumi）、真实校验前置条件。Bangumi 无需登录，但只有填写公开用户名后才能提供画像信号；微博是 discovery-only 来源，只在初始化完成后的设置页开启，因此不在这份初始化来源列表中。
+三种方式按省事程度排序。**无论选哪种，启动后端后都建议打开图形化引导页 `http://127.0.0.1:8420/setup/` 完成 AI 配置与前置检查**——它和桌面安装包是同一套向导：配置 LLM / embedding、选择初始化来源（B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Linux.do / Bangumi / V2EX / 微博）、真实校验前置条件。Bangumi 无需登录，但只有填写公开用户名后才能提供画像信号；微博公开 discovery 无需登录，但选择微博个人初始化必须让宿主机浏览器登录微博并保持扩展在线。
 
 > ⚠️ **容器内「开始初始化」按钮不可用**：Docker 运行时后端会拒绝网页发起的图形化初始化（`unsupported_runtime`），向导页会直接给出替代命令。在 `/setup/` 完成配置和前置检查后，初始化本身在宿主机执行：
 >
@@ -139,7 +139,7 @@ AI agent 一句话部署时，`agent_bootstrap.py` 会在 auto-init 期间额外
 - 默认 embedding 是 `ollama` + `bge-m3`，Docker 里写成 compose 网络地址 `http://ollama:11434/v1`，指向随 compose 启动的 sidecar。如果你手动填了其他 embedding endpoint，不会被覆盖。
 - **后端不再等 sidecar 拉完模型才启动**：`bge-m3` 首次下载（~568MB）期间后端已经可用，`/setup/` 的前置检查会显示 embedding 尚未就绪，拉取完成后自动通过。模型下载失败时 sidecar 守护进程仍在，重启 compose 会自动重试。
 - B 站登录态推荐用浏览器扩展：扩展装在**宿主机浏览器**里，不在容器里。你登录 bilibili.com 后，扩展会把 Cookie 自动 POST 到 `127.0.0.1:8420` 的后端接口。
-- 小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Bangumi / 微博都默认关闭，只有你在 `/setup/` 或设置页明确开启才会进入适用链路；前六者启用时需在宿主机浏览器里装扩展并登录对应站点，Bangumi 使用官方匿名只读 API，微博使用后端匿名公开请求且只参与 discovery。镜像通过 pip 安装项目，X 的 `twitter-cli` 和 Reddit 的 `rdt-cli` 已内置。
+- 小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Bangumi / V2EX / 微博都默认关闭，只有你在 `/setup/` 或设置页明确开启才会进入适用链路；需要个人信号的来源启用时需在宿主机浏览器里装扩展并登录对应站点，Bangumi 使用官方匿名只读 API，微博公开请求匿名、个人 bootstrap 走扩展同源任务。镜像通过 pip 安装项目，X 的 `twitter-cli` 和 Reddit 的 `rdt-cli` 已内置。
 
 ### 可选公网域名自动 HTTPS（最简方案）
 

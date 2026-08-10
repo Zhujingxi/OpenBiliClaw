@@ -173,6 +173,8 @@ from openbiliclaw.api.models import (
     WatchLaterItem,
     WatchLaterListResponse,
     WatchLaterStateResponse,
+    WeiboLoginStateIn,
+    WeiboLoginStateResponse,
     WeiboSourceConfigOut,
     XCookieIn,
     XCookieResponse,
@@ -498,6 +500,7 @@ _INIT_SOURCE_ORDER = (
     "bangumi",
     "linuxdo",
     "v2ex",
+    "weibo",
 )
 _PROBE_MODES = {"near", "lateral", "bridge", "wildcard"}
 _PROBE_CHALLENGE_MODES = {"lateral", "bridge", "wildcard"}
@@ -2593,6 +2596,8 @@ def create_app(
             "/api/sources/v2ex/identity",
             "/api/sources/v2ex/login-state",
             "/api/sources/v2ex/credential",
+            "/api/sources/weibo/login-state",
+            "/api/sources/weibo/credential",
         }
     )
 
@@ -3168,7 +3173,7 @@ def create_app(
         account_key: str = "",
     ) -> None:
         """Persist bootstrap keys that already entered the source event path."""
-        if not keys and not (source == "linuxdo" and account_key):
+        if not keys and not (source in {"linuxdo", "weibo"} and account_key):
             return
         from datetime import UTC, datetime
 
@@ -3191,6 +3196,8 @@ def create_app(
             )
             if source == "linuxdo" and account_key:
                 state["linuxdo_account_key"] = account_key
+            if source == "weibo" and account_key:
+                state["weibo_account_key"] = account_key
             state["last_source_bootstrap_sync_at"] = datetime.now(UTC).isoformat()
             return state
 
@@ -5089,6 +5096,7 @@ def create_app(
                 include_v2ex="v2ex" in effective,
                 include_bangumi="bangumi" in effective,
                 include_linuxdo="linuxdo" in effective,
+                include_weibo="weibo" in effective,
                 bangumi_username=bangumi_username,
                 bangumi_token=bangumi_token,
                 v2ex_username=v2ex_username,
@@ -5102,10 +5110,18 @@ def create_app(
             dy_degraded = dy_status == "degraded"
             linuxdo_status = str(getattr(result, "linuxdo_status", "skipped") or "skipped")
             linuxdo_degraded = linuxdo_status == "degraded"
-            partial_success = discovery_partial or dy_degraded or linuxdo_degraded
+            weibo_status = str(getattr(result, "weibo_status", "skipped") or "skipped")
+            weibo_degraded = weibo_status in {"failed", "timeout", "login_required"}
+            partial_success = discovery_partial or dy_degraded or linuxdo_degraded or weibo_degraded
             v2ex_status = str(getattr(result, "v2ex_status", "skipped") or "skipped")
             v2ex_partial = v2ex_status == "partial"
-            partial_success = discovery_partial or dy_degraded or v2ex_partial
+            partial_success = (
+                discovery_partial
+                or dy_degraded
+                or linuxdo_degraded
+                or v2ex_partial
+                or weibo_degraded
+            )
             reason = getattr(result, "discovery_reason", None)
             detail = str(getattr(result, "discovery_detail", "") or "").strip()
             if dy_degraded:
@@ -5138,6 +5154,16 @@ def create_app(
                 detail = " ".join(part for part in (detail, v2ex_detail) if part)
                 if not discovery_partial and not dy_degraded:
                     reason = "v2ex_partial"
+            if weibo_degraded:
+                weibo_event_count = len(getattr(result, "weibo_events", []) or [])
+                weibo_detail = (
+                    f"微博采集状态 weibo_status={weibo_status}："
+                    f"已保留 {weibo_event_count} 条已采事件；"
+                    "请确认当前浏览器登录态和扩展连接后重试。"
+                )
+                detail = " ".join(part for part in (detail, weibo_detail) if part)
+                if not discovery_partial and not dy_degraded and not v2ex_partial:
+                    reason = "weibo_degraded"
             await coord.complete(
                 run_id,
                 partial_success=partial_success,
@@ -5375,6 +5401,30 @@ def create_app(
                 warnings.append(
                     "Linux.do 个人信号未就绪：本次初始化跳过收藏、"
                     "点赞和阅读记录；公开发现保持启用。"
+                )
+        weibo_capability_readiness = capability_readiness
+        if "weibo" in effective_sources and callable(weibo_capability_readiness):
+            weibo_profile_readiness = str(
+                weibo_capability_readiness("weibo", "profile") or "unverified"
+            )
+            if weibo_profile_readiness != "ready":
+                if effective_sources == {"weibo"}:
+                    return JSONResponse(
+                        {
+                            "error": "no_profile_signal_sources",
+                            "detail": (
+                                "微博公开发现无需登录，但初始化本人收藏、关注和互动记录"
+                                "需要当前浏览器已登录微博并连接扩展。请先登录 weibo.com 或"
+                                "m.weibo.cn 后重试。"
+                            ),
+                            "capability": "profile",
+                            "readiness": weibo_profile_readiness,
+                        },
+                        status_code=409,
+                    )
+                effective_sources.discard("weibo")
+                warnings.append(
+                    "微博个人信号未就绪：本次初始化跳过收藏、关注和互动记录；公开发现保持启用。"
                 )
         configured_bangumi_username = str(
             getattr(
@@ -12615,6 +12665,24 @@ def create_app(
             "updated_at": updated_at,
         }
 
+    @app.post(
+        "/api/sources/weibo/login-state",
+        response_model=WeiboLoginStateResponse,
+        deprecated=True,
+    )
+    async def update_weibo_login_state(payload: WeiboLoginStateIn) -> WeiboLoginStateResponse:
+        """Persist only the extension's Weibo login boolean, never a Cookie."""
+        if not hasattr(ctx.database, "set_weibo_login_state"):
+            raise HTTPException(status_code=503, detail="database not configured")
+        result = await _write_source_credential(
+            "weibo", kind="login_state", value=payload.logged_in, source="extension"
+        )
+        return WeiboLoginStateResponse(
+            ok=True,
+            logged_in=payload.logged_in,
+            updated_at=result.updated_at,
+        )
+
     @app.post("/api/sources/v2ex/identity")
     async def ingest_v2ex_identity(payload: dict[str, Any]) -> dict[str, Any]:
         """Persist an observed username or an explicit user acceptance."""
@@ -13704,10 +13772,13 @@ def create_app(
             "Literal['disabled', 'unverified', 'ready', 'partial', 'error', 'rate_limited']",
             raw_discovery_state,
         )
+        status_detail = str(status.get("detail") or "微博公开发现可匿名。")
+        if enabled:
+            status_detail += " 初始化本人事件需要浏览器登录态。"
         return SourceStatusItem(
             enabled=enabled,
             state="no_auth",
-            detail=str(status.get("detail") or "微博匿名访客源。"),
+            detail=status_detail,
             logged_in=True,
             feed_paused=discovery_state == "rate_limited",
             discovery_state=discovery_state,
@@ -14287,9 +14358,10 @@ def create_app(
             ),
             weibo=item(
                 "weibo",
-                "匿名访客会话",
+                "微博浏览器登录态",
                 "",
-                "微博访客会话仅保存在后端内存中，不读取或保存用户 Cookie。",
+                "微博公开发现无需登录；初始化本人收藏、关注和互动时，插件只同步布尔登录状态，"
+                "实际只读请求在微博页面内执行，不读取或保存用户 Cookie。",
             ),
         )
 
@@ -14517,6 +14589,11 @@ def create_app(
         v2ex_bootstrap_items_to_events,
         v2ex_snapshot_effects_to_events,
     )
+    from openbiliclaw.sources.weibo_tasks import (
+        WeiboTaskQueue,
+        weibo_bootstrap_item_key,
+        weibo_bootstrap_items_to_events,
+    )
     from openbiliclaw.sources.yt_tasks import (
         YtTaskQueue,
         yt_bootstrap_item_key,
@@ -14532,6 +14609,7 @@ def create_app(
     _reddit_task_queue: RedditTaskQueue | None = None
     _linuxdo_task_queue: LinuxdoTaskQueue | None = None
     _v2ex_task_queue: V2EXTaskQueue | None = None
+    _weibo_task_queue: WeiboTaskQueue | None = None
     _v2ex_snapshot_store: V2EXFavoriteSnapshotStore | None = None
     db_conn = getattr(ctx.database, "conn", None)
     if hasattr(db_conn, "executescript"):
@@ -14539,6 +14617,7 @@ def create_app(
         _reddit_task_queue = RedditTaskQueue(ctx.database)
         _linuxdo_task_queue = LinuxdoTaskQueue(ctx.database)
         _v2ex_task_queue = V2EXTaskQueue(ctx.database)
+        _weibo_task_queue = WeiboTaskQueue(ctx.database)
         _v2ex_snapshot_store = V2EXFavoriteSnapshotStore(ctx.database)
 
     @app.get("/api/sources/reddit/next-task")
@@ -15114,6 +15193,188 @@ def create_app(
     async def zhihu_task_kick() -> dict[str, Any]:
         """Broadcast `zhihu_task_available` over runtime-stream."""
         return await _kick_source_task("zhihu")
+
+    @app.get("/api/sources/weibo/next-task")
+    def weibo_next_task(response: Any = None) -> Any:
+        """Return the oldest pending logged-in Weibo task, or 204."""
+        from starlette.responses import Response
+
+        if _weibo_task_queue is None:
+            return Response(status_code=204)
+        runtime_config = getattr(ctx, "config", None)
+        if runtime_config is None:
+            from openbiliclaw.config import load_config
+
+            runtime_config = load_config()
+        weibo_cfg = getattr(
+            getattr(runtime_config, "sources", None),
+            "weibo",
+            None,
+        )
+        if not bool(getattr(weibo_cfg, "enabled", False)):
+            return Response(status_code=204)
+        task = _weibo_task_queue.next_pending(only_ids=_init_owned_ids_filter())
+        if task is None:
+            return Response(status_code=204)
+        payload = json.loads(task["payload_json"]) if task.get("payload_json") else {}
+        return {
+            "id": task["id"],
+            "type": task["type"],
+            "claim_token": task.get("claim_token", ""),
+            **payload,
+        }
+
+    @app.post("/api/sources/weibo/task-result")
+    async def weibo_task_result(payload: dict[str, Any]) -> dict[str, Any]:
+        """Stage and ingest read-only Weibo account signals from the extension."""
+        task_id = str(payload.get("task_id", "") or "").strip()
+        if not task_id:
+            raise HTTPException(status_code=422, detail="task_id is required")
+        claim_token = str(payload.get("claim_token", "") or "").strip()
+        status = str(payload.get("status", "") or "").strip()
+        raw_items = payload.get("items", [])
+        if not isinstance(raw_items, list) or any(
+            not isinstance(value, dict) for value in raw_items
+        ):
+            raise HTTPException(status_code=422, detail="invalid_task_items")
+        items = list(raw_items)
+        scope_counts = payload.get("scope_counts")
+        if not isinstance(scope_counts, dict):
+            scope_counts = None
+        debug = payload.get("debug")
+        if not isinstance(debug, dict):
+            debug = {}
+        queue = _weibo_task_queue
+        if queue is None:
+            raise HTTPException(status_code=409, detail="task_result_conflict")
+        task = _require_legacy_task(queue, task_id)
+        if str(task.get("status", "") or "").strip() in {"completed", "failed"}:
+            return {"ok": True, "ignored": True}
+        task_claim_token = str(task.get("claim_token", "") or "").strip()
+        if task_claim_token and not queue.claim_token_matches(task_id, claim_token):
+            raise HTTPException(status_code=409, detail="task_claim_conflict")
+        effective_claim_token = claim_token if task_claim_token else None
+        task_payload: dict[str, Any] = {}
+        with suppress(Exception):
+            parsed_payload = json.loads(str(task.get("payload_json") or "{}"))
+            if isinstance(parsed_payload, dict):
+                task_payload = parsed_payload
+        profile_update = bool(task_payload.get("profile_update"))
+        incremental = bool(task_payload.get("incremental"))
+        from openbiliclaw.sources.weibo_tasks import (
+            is_weibo_account_key,
+            weibo_account_key,
+        )
+
+        raw_user_id = str(debug.get("user_id") or "").strip()
+        raw_account_key = str(debug.get("account_key") or "").strip()
+        # The task tab proves a real uid. Convert it at the backend boundary
+        # into the stable opaque partition key used by event metadata and the
+        # durable seen-key projection; never persist a raw uid as an account
+        # binding. Accept an already-canonical key for staged retries from a
+        # newer extension, but reject arbitrary caller-supplied identities.
+        if raw_user_id:
+            account_key = weibo_account_key(raw_user_id)
+        elif is_weibo_account_key(raw_account_key):
+            account_key = raw_account_key
+        else:
+            account_key = ""
+        if account_key:
+            debug = dict(debug)
+            debug["account_key"] = account_key
+        if (
+            str(task.get("type", "") or "").strip() == "bootstrap_events"
+            and (profile_update or incremental)
+            and not account_key
+            and status in {"ok", "empty", "partial"}
+        ):
+            queue.fail(
+                task_id,
+                claim_token=effective_claim_token,
+                error="weibo_identity_required",
+                debug=debug,
+            )
+            raise HTTPException(status_code=409, detail="weibo_identity_required")
+        if account_key:
+            bound = str(_load_source_bootstrap_state().get("weibo_account_key", "") or "").strip()
+            if bound and bound != account_key:
+                raise HTTPException(status_code=409, detail="weibo_account_switch_requires_reset")
+
+        from openbiliclaw.sources.task_result_protocol import (
+            parse_task_result,
+            staged_terminal_status,
+        )
+
+        canonical_result = parse_task_result(task.get("result_json"))
+        staged_status = staged_terminal_status(canonical_result)
+        if staged_status or status in {"partial", "ok", "empty"}:
+            is_final = bool(staged_status) or status in {"ok", "empty"}
+            if staged_status:
+                canonical_result = parse_task_result(task.get("result_json"))
+            elif is_final:
+                canonical_result = queue.stage_final_result(
+                    task_id,
+                    terminal_status=status,
+                    claim_token=effective_claim_token,
+                    items=items if items else None,
+                    scope_counts=scope_counts,
+                    debug=debug,
+                )
+            else:
+                queue.merge_result(
+                    task_id,
+                    claim_token=effective_claim_token,
+                    items=items if items else None,
+                    scope_counts=scope_counts,
+                    debug=debug,
+                )
+                canonical_result = parse_task_result((queue.get(task_id) or {}).get("result_json"))
+            canonical_items = [
+                value for value in canonical_result.get("items", []) if isinstance(value, dict)
+            ]
+            init_busy = _init_active_now()
+            skip_profile = init_busy and not _init_owns_task(task_id)
+            if (
+                str(task.get("type", "")).strip() == "bootstrap_events"
+                and (profile_update or incremental)
+                and canonical_items
+                and not skip_profile
+            ):
+                fresh_items, item_keys_by_index = _filter_new_source_bootstrap_items(
+                    "weibo",
+                    canonical_items,
+                    lambda item: weibo_bootstrap_item_key(item, account_key=account_key),
+                )
+                events_with_keys: list[tuple[dict[str, Any], str]] = []
+                for index, item in enumerate(fresh_items):
+                    for event in weibo_bootstrap_items_to_events([item], account_key=account_key):
+                        events_with_keys.append((event, item_keys_by_index.get(index, "")))
+                accepted_keys = await _accept_source_profile_events(
+                    source="weibo",
+                    task_id=task_id,
+                    events_with_keys=events_with_keys,
+                    generic_owner=not init_busy,
+                )
+                _mark_source_bootstrap_keys("weibo", accepted_keys, account_key=account_key)
+            if account_key and staged_terminal_status(canonical_result) in {"ok", "empty"}:
+                _mark_source_bootstrap_keys("weibo", [], account_key=account_key)
+            if is_final:
+                queue.complete_staged_result(task_id, claim_token=effective_claim_token)
+        elif status == "failed":
+            queue.fail(
+                task_id,
+                claim_token=effective_claim_token,
+                error=str(payload.get("error", "") or ""),
+                debug=debug,
+            )
+        else:
+            raise HTTPException(status_code=422, detail="invalid_result_status")
+        return {"ok": True}
+
+    @app.post("/api/sources/weibo/kick")
+    async def weibo_task_kick() -> dict[str, Any]:
+        """Broadcast ``weibo_task_available`` over runtime-stream."""
+        return await _kick_source_task("weibo")
 
     @app.get("/api/sources/linuxdo/next-task")
     def linuxdo_next_task(response: Any = None) -> Any:

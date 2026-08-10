@@ -59,6 +59,12 @@ import {
   pollZhihuTaskNow,
 } from "./zhihu-task-dispatcher.js";
 import {
+  startWeiboTaskPolling,
+  handleWeiboTaskAlarm,
+  handleWeiboTaskResult,
+  pollWeiboTaskNow,
+} from "./weibo-task-dispatcher.ts";
+import {
   startRedditTaskPolling,
   handleRedditTaskAlarm,
   handleRedditTaskResult,
@@ -93,6 +99,7 @@ import {
 } from "./bili-task-dispatcher.js";
 import type { YtScopeResult } from "../content/yt/task-executor.js";
 import type { ZhihuTaskResult } from "../content/zhihu/task-executor.js";
+import type { WeiboTaskResult } from "../content/weibo/task-executor.ts";
 import type { RedditTaskResult } from "../content/reddit/task-executor.ts";
 import type { LinuxdoTaskResult } from "../content/linuxdo/task-executor.ts";
 import type { V2EXScopeResult } from "../content/v2ex/task-executor.ts";
@@ -293,6 +300,10 @@ async function handleRuntimeEvent(event: Record<string, unknown>): Promise<void>
   }
   if (eventType === "zhihu_task_available") {
     pollZhihuTaskNow();
+    return;
+  }
+  if (eventType === "weibo_task_available") {
+    pollWeiboTaskNow();
     return;
   }
   if (eventType === "reddit_task_available") {
@@ -583,6 +594,7 @@ function startPlatformTaskPolling(): void {
   startDyTaskPolling();
   startYtTaskPolling();
   startZhihuTaskPolling();
+  startWeiboTaskPolling();
   startRedditTaskPolling();
   startLinuxdoTaskPolling();
   startV2EXTaskPolling();
@@ -758,6 +770,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       });
     return true;
   }
+  if (message.action === "WEIBO_TASK_RESULT") {
+    void handleWeiboTaskResult(message.data as WeiboTaskResult)
+      .then(() => {
+        sendResponse({ ok: true });
+      })
+      .catch((error: unknown) => {
+        sendResponse({ ok: false, error: String(error) });
+      });
+    return true;
+  }
   if (message.action === "REDDIT_TASK_RESULT") {
     void handleRedditTaskResult(message.data as RedditTaskResult)
       .then(() => {
@@ -816,6 +838,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   handleDyTaskAlarm(alarm.name);
   handleYtTaskAlarm(alarm.name);
   handleZhihuTaskAlarm(alarm.name);
+  handleWeiboTaskAlarm(alarm.name);
   void handleRedditTaskAlarm(alarm.name);
   void handleLinuxdoTaskAlarm(alarm.name);
   handleV2EXTaskAlarm(alarm.name);

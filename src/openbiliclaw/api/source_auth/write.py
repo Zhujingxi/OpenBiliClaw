@@ -323,13 +323,17 @@ CREDENTIAL_SPECS: dict[str, CredentialSpec] = {
     ),
     "weibo": CredentialSpec(
         slug="weibo",
-        kinds=(),
-        unverified_reason="微博发现使用进程内匿名访客会话，不需要也不接受用户凭据。",
+        kinds=("login_state",),
+        opaque_credential=True,
+        unverified_reason=(
+            "微博公开发现可匿名；个人收藏、关注和互动初始化只接受浏览器登录状态布尔值，"
+            "后端不读取或保存 Cookie。"
+        ),
         form_kind="none",
-        form_label="微博匿名访客",
+        form_label="微博浏览器登录态",
         help_text=(
-            "无需粘贴微博 Cookie。OpenBiliClaw 只申请短期匿名访客会话并进行只读发现，"
-            "不会把访客会话当作账号登录态或写入配置。"
+            "公开发现无需登录；要在初始化时导入本人收藏、关注和互动，请登录微博并连接插件。"
+            "插件只同步是否登录，实际只读请求在微博页面内执行，不上传 Cookie。"
         ),
     ),
 }
@@ -740,6 +744,7 @@ def persist_credential(
             "zhihu": "zhihu",
             "linuxdo": "linuxdo",
             "v2ex": "v2ex",
+            "weibo": "weibo",
         }.get(slug, slug)
         setter = f"set_{prefix}_login_state"
         getter = f"get_{prefix}_login_state"

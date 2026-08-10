@@ -203,7 +203,7 @@ test("settings source tab separates every platform into its own block", () => {
   assert.match(sourcesPanel, /id="cfgXhsMinInterval"[^>]*placeholder="20"/);
   assert.match(sourcesPanel, /id="cfgWeiboEnabled" type="checkbox"/);
   assert.match(sourcesPanel, /无需用户 Cookie/);
-  assert.match(sourcesPanel, /不参与初始化画像/);
+  assert.match(sourcesPanel, /guided init/);
   assert.match(sourcesPanel, /并非官方稳定 API/);
   assert.doesNotMatch(sourcesPanel, /id="cfgWeiboCookie"/);
   assert.match(popupJs, /weiboEnabled\.checked = cfg\.sources\?\.weibo\?\.enabled === true/);
@@ -218,12 +218,13 @@ test("settings source tab separates every platform into its own block", () => {
   assert.match(popupJs, /min_interval_minutes: getInt\("cfgWeiboMinInterval", 10\)/);
 });
 
-test("Weibo stays backend-only without extension permissions or native writeback", () => {
+test("Weibo init bridge is read-only and never syncs cookies or native writes", () => {
   const manifest = JSON.parse(readFileSync(resolve("manifest.json"), "utf8"));
   const manifestText = JSON.stringify(manifest);
   const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
 
-  assert.doesNotMatch(manifestText, /weibo|sinaimg/i);
+  assert.match(manifestText, /weibo\.com/);
+  assert.match(manifestText, /weibo\.cn/);
   assert.doesNotMatch(popupJs, /weibo_cookie_synced|cfgWeiboCookie|syncWeibo/i);
 });
 

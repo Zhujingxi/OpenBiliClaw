@@ -71,7 +71,7 @@
     bilibili: Object.freeze({ guidedInit: true }),
     xiaohongshu: Object.freeze({ guidedInit: true }),
     douyin: Object.freeze({ guidedInit: true }),
-    weibo: Object.freeze({ guidedInit: false }),
+    weibo: Object.freeze({ guidedInit: true }),
     youtube: Object.freeze({ guidedInit: true }),
     twitter: Object.freeze({ guidedInit: true }),
     zhihu: Object.freeze({ guidedInit: true }),

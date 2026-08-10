@@ -706,7 +706,7 @@ discovery 不是“把整个找片过程都交给 LLM”。当前实现里，LLM
 | v0.3.0 deficit-source 合并并行 | ✅ | `_build_source_replenishment_plan` 把 B 站平台缺口合并到一次 `discover()` 并行 fan-out，单轮多策略混排，告别"每轮一种 source"的 60s 串行 |
 | v0.3.0 share-aware trim_pool | ✅ | `trim_pool_to_target_count(source_share_quotas=...)` 用三段桶（protected / negotiable_untracked / negotiable_tracked），保证 under-quota 源不会被 score-only 修剪误伤 |
 | v0.3.0 suppressed 重发现复活 | ✅ | `cache_content` UPSERT 时把 `pool_status='suppressed'` 自动复位为 `'fresh'`；slow-churning 源（trending）从此不再被旧 trim 决定终生淘汰 |
-| v0.3.69 平台级来源配比 | ✅ | `_SOURCE_TARGET_SHARES` 硬编码策略配比改为配置项 `[scheduler.pool_source_shares]`；`source_policy` 会按九个平台的 `sources.<platform>.enabled` 生成有效配比，避免关闭源占 quota；配置页可更新开关与比例，init 仍只写回已接入初始化画像的来源（微博明确排除） |
+| v0.3.69 平台级来源配比 | ✅ | `_SOURCE_TARGET_SHARES` 硬编码策略配比改为配置项 `[scheduler.pool_source_shares]`；`source_policy` 会按已注册平台的 `sources.<platform>.enabled` 生成有效配比，避免关闭源占 quota；配置页可更新开关与比例。历史版本曾排除微博 init；当前微博由登录态 heartbeat + 同源只读任务导入个人事件 |
 | Pool distribution snapshot | ✅ | `build_pool_distribution_snapshot()` 汇总候选池总量、平台缺口、饱和 topic/style/franchise，为后续 pool-aware discovery prompt 和 rerank 提供轻量输入 |
 | Cold-start pool snapshot | ✅ | `build_cold_start_pool_snapshot()` 在 init 首轮空池和统一 keyword planner 空池时生成 synthetic hints：把画像最高权重兴趣作为 `avoid_topics` 软预算，把次级兴趣 / 兴趣域作为 `prefer_axes`，避免第一批 discovery query / 跨平台 keywords 全部集中在同一强 topic |
 | v0.3.1 trim_topic_group 每 tick 触发 | ✅ | 修复"trim 只在 discover 之后跑"的盲点：`_enforce_pool_cap` 路径上每 tick 都调一次，避免 pool 满 cap 时 topic 配额永远不收敛 |

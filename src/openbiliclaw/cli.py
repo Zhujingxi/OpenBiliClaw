@@ -3312,6 +3312,122 @@ def _enqueue_zhihu_bootstrap_task(
     return result.task_id
 
 
+def _enqueue_weibo_bootstrap_task(
+    *,
+    kick: bool = True,
+    profile_update: bool = False,
+    force: bool = False,
+    incremental: bool = False,
+) -> str | None:
+    """Resolve the runtime database and enqueue the Weibo bootstrap task."""
+    from openbiliclaw.sources import source_bootstrap
+
+    try:
+        database = _get_runtime_database()
+    except Exception as exc:
+        console.print(f"  [yellow]微博个人事件未拉取: 数据库不可用: {exc}[/yellow]")
+        return None
+    if not hasattr(database, "conn"):
+        return None
+    result = source_bootstrap.enqueue_weibo_bootstrap(
+        database,
+        force=force,
+        incremental=incremental,
+        profile_update=profile_update,
+        notify=console.print,
+    )
+    if result.created and result.task_id and kick:
+        _kick_task_dispatcher("weibo")
+    return result.task_id
+
+
+def _collect_weibo_bootstrap_events(
+    task_id: str | None,
+    *,
+    max_wait_seconds: float | None = None,
+    cancel_event: threading.Event | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, int], str]:
+    """Wait for and convert a logged-in Weibo bootstrap task."""
+    import json
+    import time
+
+    from openbiliclaw.sources.weibo_tasks import (
+        WEIBO_BOOTSTRAP_SCOPES,
+        WeiboTaskQueue,
+        weibo_account_key,
+        weibo_bootstrap_items_to_events,
+    )
+
+    counts = {scope: 0 for scope in WEIBO_BOOTSTRAP_SCOPES}
+    if not task_id:
+        return [], counts, "skipped"
+    if max_wait_seconds is None:
+        max_wait_seconds = float(os.environ.get("OPENBILICLAW_WEIBO_BOOTSTRAP_WAIT_SECONDS", "300"))
+    try:
+        database = _get_runtime_database()
+    except Exception:
+        return [], counts, "skipped"
+    if not hasattr(database, "conn"):
+        return [], counts, "skipped"
+    queue = WeiboTaskQueue(database)
+    deadline = time.monotonic() + max(0.0, max_wait_seconds)
+    task: dict[str, Any] | None = None
+    while True:
+        if cancel_event is not None and cancel_event.is_set():
+            return [], counts, "timeout"
+        task = queue.get(task_id)
+        status = str((task or {}).get("status", "")).strip()
+        if status in {"completed", "failed"}:
+            break
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.5)
+    if not task:
+        return [], counts, "timeout"
+    if task.get("status") == "failed":
+        try:
+            result = json.loads(str(task.get("result_json") or "{}"))
+        except json.JSONDecodeError:
+            result = {}
+        error = str(result.get("error", "") if isinstance(result, dict) else "")
+        debug = result.get("debug", {}) if isinstance(result, dict) else {}
+        if error == "weibo_login_required" or (
+            isinstance(debug, dict) and debug.get("login_required") is True
+        ):
+            return [], counts, "login_required"
+        return [], counts, "failed"
+    if task.get("status") != "completed":
+        if str(task.get("status", "")).strip() in {"pending", "in_progress"}:
+            with suppress(Exception):
+                queue.fail(
+                    task_id,
+                    claim_token=str(task.get("claim_token", "") or "").strip() or None,
+                    error="extension_result_timeout",
+                )
+        return [], counts, "timeout"
+    try:
+        result = json.loads(str(task.get("result_json") or "{}"))
+    except json.JSONDecodeError:
+        return [], counts, "failed"
+    items = [value for value in result.get("items", []) if isinstance(value, dict)]
+    raw_counts = result.get("scope_counts")
+    if isinstance(raw_counts, dict):
+        for scope in counts:
+            with suppress(Exception):
+                counts[scope] = int(raw_counts.get(scope, 0) or 0)
+    debug = result.get("debug") if isinstance(result.get("debug"), dict) else {}
+    account_key = weibo_account_key(debug.get("user_id", ""))
+    if not account_key:
+        account_key = str(debug.get("account_key", "") or "").strip()
+    events = weibo_bootstrap_items_to_events(items, account_key=account_key)
+    if not any(counts.values()):
+        for item in items:
+            scope = str(item.get("scope", "")).strip()
+            if scope in counts:
+                counts[scope] += 1
+    return events, counts, "ok" if events else "empty"
+
+
 def _collect_zhihu_bootstrap_events(
     task_id: str | None,
     *,
@@ -4863,6 +4979,27 @@ def _v2ex_events_to_history_items(events: list[dict[str, Any]]) -> list[dict[str
                 "context": str(event.get("context", "")).strip(),
                 "metadata": metadata,
                 "source_platform": "v2ex",
+            }
+        )
+    return [row for row in rows if row.get("title") or row.get("url")]
+
+
+def _weibo_events_to_history_items(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convert logged-in Weibo bootstrap events into profile rows."""
+    rows: list[dict[str, Any]] = []
+    for event in events:
+        metadata = event.get("metadata", {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        rows.append(
+            {
+                "title": str(event.get("title", "")).strip(),
+                "url": str(event.get("url", "")).strip(),
+                "author": str(event.get("author", "") or metadata.get("author", "")).strip(),
+                "event_type": str(event.get("event_type", "")).strip(),
+                "context": str(event.get("context", "")).strip(),
+                "metadata": metadata,
+                "source_platform": "weibo",
             }
         )
     return [row for row in rows if row.get("title") or row.get("url")]
@@ -6651,6 +6788,31 @@ def _ask_v2ex_inclusion() -> bool:
     return True
 
 
+def _ask_weibo_inclusion() -> bool:
+    """Decide whether to enable Weibo discovery and logged-in bootstrap."""
+    if os.environ.get("OPENBILICLAW_NO_WEIBO", "").strip() == "1":
+        console.print("[dim]  跳过微博来源(OPENBILICLAW_NO_WEIBO=1)。[/dim]")
+        return False
+    if not _is_interactive_terminal():
+        return False
+
+    console.print()
+    console.print("[bold]微博数据接入(可选)[/bold]")
+    console.print(
+        "公开内容发现无需登录；初始化本人画像时会通过浏览器扩展读取"
+        "当前微博登录态下的收藏、关注和互动记录。"
+    )
+    console.print(
+        "[dim]扩展只在微博同源页面发起只读请求，不把 Cookie 传给后端，"
+        "也不会点赞、收藏、关注或发布内容。[/dim]"
+    )
+    console.print()
+    if not typer.confirm("启用微博数据接入?", default=False):
+        console.print("[dim]  已选择跳过，本次 init 不会启用微博来源。[/dim]")
+        return False
+    return True
+
+
 def _ask_bangumi_inclusion() -> bool:
     """Decide whether to enable Bangumi discovery and public bootstrap."""
     if os.environ.get("OPENBILICLAW_NO_BANGUMI", "").strip() == "1":
@@ -6761,6 +6923,7 @@ def _persist_init_source_enabled_flags(
     include_bangumi: bool = False,
     include_linuxdo: bool = False,
     include_v2ex: bool = False,
+    include_weibo: bool = False,
     bangumi_username: str = "",
     bangumi_token: str = "",
     v2ex_username: str = "",
@@ -6838,6 +7001,10 @@ def _persist_init_source_enabled_flags(
             and str(getattr(v2ex_cfg, "username", "")) != v2ex_username
         ):
             v2ex_cfg.username = v2ex_username
+            changed = True
+        weibo_cfg = getattr(cfg.sources, "weibo", None)
+        if weibo_cfg is not None and bool(getattr(weibo_cfg, "enabled", False)) != include_weibo:
+            weibo_cfg.enabled = include_weibo
             changed = True
         if changed:
             save_config(cfg)
@@ -7088,6 +7255,9 @@ class InitResult:
     v2ex_events: list[dict[str, Any]] = field(default_factory=list)
     v2ex_scope_counts: dict[str, Any] = field(default_factory=dict)
     v2ex_status: str = "skipped"
+    weibo_events: list[dict[str, Any]] = field(default_factory=list)
+    weibo_scope_counts: dict[str, Any] = field(default_factory=dict)
+    weibo_status: str = "skipped"
 
 
 class GuidedInitError(Exception):
@@ -7517,6 +7687,7 @@ async def run_guided_init(
     include_bangumi: bool = False,
     include_linuxdo: bool = False,
     include_v2ex: bool = False,
+    include_weibo: bool = False,
     bangumi_username: str = "",
     bangumi_token: str = "",
     v2ex_username: str = "",
@@ -7634,6 +7805,7 @@ async def run_guided_init(
             include_bangumi,
             include_linuxdo,
             include_v2ex,
+            include_weibo,
         )
     )
     _stage1_source_done = 0
@@ -8088,6 +8260,54 @@ async def run_guided_init(
     elif zhihu_status == "failed":
         console.print("  [yellow]知乎任务失败 —— 检查扩展日志,或重试 init。[/yellow]")
 
+    weibo_task_id = (
+        (
+            await _enqueue_register_kick(
+                lambda **kwargs: _enqueue_weibo_bootstrap_task(
+                    profile_update=True,
+                    **kwargs,
+                ),
+                "weibo",
+            )
+        )
+        if include_weibo
+        else None
+    )
+    if weibo_task_id:
+        console.print(
+            "  [dim]已请求扩展拉微博收藏 / 关注 / 互动记录（使用当前浏览器登录态，只读）。[/dim]"
+        )
+    if include_weibo:
+        await _stage1_begin_source("微博", wait_hint="扩展未响应会在约 5 分钟后自动跳过")
+        weibo_events, weibo_scope_counts, weibo_status = await _run_extension_collector(
+            _collect_weibo_bootstrap_events,
+            weibo_task_id,
+            label="微博",
+            env_name="OPENBILICLAW_WEIBO_BOOTSTRAP_WAIT_SECONDS",
+            default_wait_seconds=300,
+        )
+        _stage1_finish_source()
+    else:
+        weibo_events, weibo_scope_counts, weibo_status = [], {}, "skipped"
+    if weibo_status == "ok":
+        console.print(
+            "  微博 "
+            f"收藏 [green]{weibo_scope_counts.get('weibo_favorites', 0)}[/green] 条"
+            f" / 关注 [green]{weibo_scope_counts.get('weibo_following', 0)}[/green] 人"
+            f" / 互动 [green]{weibo_scope_counts.get('weibo_mentions', 0)}[/green] 条"
+        )
+    elif weibo_status == "empty":
+        console.print("  [yellow]微博任务跑通但没有读到个人事件记录。[/yellow]")
+    elif weibo_status == "login_required":
+        console.print("  [yellow]微博需要登录 —— 请先在当前浏览器登录微博后重试。[/yellow]")
+    elif weibo_status == "timeout":
+        console.print(
+            "  [dim]微博初始化信号未导入：扩展未连接或任务仍在后台跑。"
+            "可设 OPENBILICLAW_WEIBO_BOOTSTRAP_WAIT_SECONDS=600 延长等待。[/dim]"
+        )
+    elif weibo_status == "failed":
+        console.print("  [yellow]微博任务失败 —— 检查扩展日志后重试 init。[/yellow]")
+
     linuxdo_task_id = (
         (
             await _enqueue_register_kick(
@@ -8287,6 +8507,7 @@ async def run_guided_init(
                 "reddit": reddit_status,
                 "linuxdo": linuxdo_status,
                 "v2ex": v2ex_status,
+                "weibo": weibo_status,
             },
         )
     except Exception:
@@ -8334,6 +8555,7 @@ async def run_guided_init(
     events_to_persist.extend(bangumi_events)
     events_to_persist.extend(linuxdo_events)
     events_to_persist.extend(v2ex_events)
+    events_to_persist.extend(weibo_events)
     events.extend(xhs_events)
     events.extend(dy_events)
     events.extend(yt_events)
@@ -8342,6 +8564,7 @@ async def run_guided_init(
     events.extend(bangumi_events)
     events.extend(linuxdo_events)
     events.extend(v2ex_events)
+    events.extend(weibo_events)
     # With bilibili now optional, the floor is "at least one selected source
     # produced signals" — an all-empty run can't build a meaningful profile.
     if not events:
@@ -8380,6 +8603,7 @@ async def run_guided_init(
                 "bangumi": len(bangumi_events),
                 "linuxdo": len(linuxdo_events),
                 "v2ex": len(v2ex_events),
+                "weibo": len(weibo_events),
             }
         )
     # Re-running init re-fetches the same snapshot; without this the ledger
@@ -8608,6 +8832,8 @@ async def run_guided_init(
         combined_history.extend(_linuxdo_events_to_history_items(linuxdo_events))
     if v2ex_events:
         combined_history.extend(_v2ex_events_to_history_items(v2ex_events))
+    if weibo_events:
+        combined_history.extend(_weibo_events_to_history_items(weibo_events))
     # X likes/bookmarks previously only fed the analyze stage; feeding the
     # profile builder too keeps cross-source flow uniform AND guarantees a
     # non-empty profile input when X is the only selected source.
@@ -8813,6 +9039,9 @@ async def run_guided_init(
         v2ex_events=v2ex_events,
         v2ex_scope_counts=v2ex_scope_counts,
         v2ex_status=v2ex_status,
+        weibo_events=weibo_events,
+        weibo_scope_counts=weibo_scope_counts,
+        weibo_status=weibo_status,
     )
 
 
@@ -8902,6 +9131,16 @@ def init(
         False,
         "--yes-v2ex",
         help="跳过 V2EX 的 y/n 提问,直接启用 V2EX 数据接入(适合脚本化场景)。",
+    ),
+    no_weibo: bool = typer.Option(
+        False,
+        "--no-weibo",
+        help="跳过微博数据接入(默认非交互模式下就是跳过)。",
+    ),
+    skip_weibo_prompt: bool = typer.Option(
+        False,
+        "--yes-weibo",
+        help="跳过微博的 y/n 提问,直接启用微博数据接入(适合脚本化场景)。",
     ),
     v2ex_username: str = typer.Option(
         "",
@@ -9117,6 +9356,17 @@ def init(
     else:
         include_v2ex = _ask_v2ex_inclusion()
 
+    if no_weibo:
+        include_weibo = False
+        console.print("[dim]  跳过微博数据接入(命令行 --no-weibo)。[/dim]")
+    elif os.environ.get("OPENBILICLAW_NO_WEIBO", "").strip() == "1":
+        include_weibo = False
+        console.print("[dim]  跳过微博数据接入(OPENBILICLAW_NO_WEIBO=1)。[/dim]")
+    elif skip_weibo_prompt:
+        include_weibo = True
+    else:
+        include_weibo = _ask_weibo_inclusion()
+
     selected_v2ex_username = ""
     if include_v2ex:
         from openbiliclaw.config import load_config
@@ -9229,6 +9479,7 @@ def init(
         include_v2ex,
         include_bangumi,
         include_linuxdo,
+        include_weibo,
     )
     if not any(selected_sources):
         _print_status_panel(
@@ -9237,7 +9488,7 @@ def init(
             "已跳过 B 站且未启用任何其他平台——init 至少需要一个数据来源。"
             "去掉 --no-bilibili，或配合 --yes-xhs / --yes-douyin / "
             "--yes-youtube / --yes-x / --yes-zhihu "
-            "/ --yes-reddit / --yes-linuxdo / --yes-v2ex / --yes-bangumi "
+            "/ --yes-reddit / --yes-linuxdo / --yes-v2ex / --yes-weibo / --yes-bangumi "
             "启用其他来源。",
         )
         raise typer.Exit(code=1)
@@ -9251,6 +9502,7 @@ def init(
         include_zhihu,
         include_reddit,
         include_linuxdo,
+        include_weibo,
     )
     if include_bangumi and not selected_bangumi_username and not any(profile_signal_sources):
         _print_status_panel(
@@ -9281,6 +9533,7 @@ def init(
         bangumi_username=selected_bangumi_username,
         bangumi_token=selected_bangumi_token,
         v2ex_username=selected_v2ex_username,
+        include_weibo=include_weibo,
     )
 
     # gui-init (B2): the four init stages now run inside the shared async
@@ -9309,6 +9562,7 @@ def init(
                 bangumi_username=selected_bangumi_username,
                 bangumi_token=selected_bangumi_token,
                 v2ex_username=selected_v2ex_username,
+                include_weibo=include_weibo,
                 target_pool_count=_INIT_POOL_TARGET_COUNT,
                 discover_backfill=_run_init_discovery_backfill_async,
             )
@@ -9350,11 +9604,20 @@ def init(
     v2ex_events = list(getattr(result, "v2ex_events", []))
     v2ex_scope_counts = dict(getattr(result, "v2ex_scope_counts", {}))
     v2ex_status = str(getattr(result, "v2ex_status", "skipped"))
+    weibo_events = list(getattr(result, "weibo_events", []))
+    weibo_scope_counts = dict(getattr(result, "weibo_scope_counts", {}))
+    weibo_status = str(getattr(result, "weibo_status", "skipped"))
     discovered_count = result.discovered_count
     discovery_error = result.discovery_error
     dy_degraded = dy_status == "degraded"
     linuxdo_degraded = linuxdo_status == "degraded"
-    partial_success = discovery_error or dy_degraded or linuxdo_degraded or v2ex_status == "partial"
+    partial_success = (
+        discovery_error
+        or dy_degraded
+        or linuxdo_degraded
+        or v2ex_status == "partial"
+        or weibo_status in {"failed", "timeout", "login_required"}
+    )
 
     if result.discover_exc is not None:
         _print_status_panel(
@@ -9382,6 +9645,13 @@ def init(
             "V2EX 采集部分完成",
             "已采集的 V2EX 信号仍已用于画像建模，但至少一个范围未完整返回；"
             "请确认扩展已登录后重试补齐。",
+        )
+    if weibo_status in {"failed", "timeout", "login_required"}:
+        _print_status_panel(
+            "warning",
+            "微博采集未完成",
+            "微博公开发现仍可用；请确认当前浏览器已登录微博、扩展已连接，"
+            "再用 `openbiliclaw init --yes-weibo` 重试。",
         )
 
     _print_status_panel(
@@ -9431,6 +9701,9 @@ def init(
     v2ex_public_replies = int(v2ex_scope_counts.get("public_replies", 0))
     v2ex_favorite_topics = int(v2ex_scope_counts.get("favorite_topics", 0))
     v2ex_favorite_nodes = int(v2ex_scope_counts.get("favorite_nodes", 0))
+    weibo_favorites = int(weibo_scope_counts.get("weibo_favorites", 0))
+    weibo_following = int(weibo_scope_counts.get("weibo_following", 0))
+    weibo_mentions = int(weibo_scope_counts.get("weibo_mentions", 0))
     summary_rows: list[tuple[str, str]] = [
         ("📺 B 站观看历史", f"{len(history)} 条"),
         ("📺 B 站收藏夹", f"{len(favorites_data)} 条"),
@@ -9477,6 +9750,10 @@ def init(
         ("V2EX 参与讨论", f"{v2ex_public_replies} 个主题"),
         ("V2EX 收藏主题 / 节点", f"{v2ex_favorite_topics} / {v2ex_favorite_nodes}"),
         ("🌐 V2EX 入库事件", f"{len(v2ex_events)} 条"),
+        ("微博 收藏", f"{weibo_favorites} 条"),
+        ("微博 关注", f"{weibo_following} 人"),
+        ("微博 互动", f"{weibo_mentions} 条"),
+        ("🌐 微博 入库事件", f"{len(weibo_events)} 条"),
         ("📊 画像建模总事件", f"{len(events)} 条"),
         ("✅ 灵魂画像", "已生成"),
         ("🔍 首轮发现内容", f"{discovered_count} 条"),
@@ -9535,6 +9812,12 @@ def init(
             "[dim]ℹ️  V2EX 没有入库信号。请确认扩展已安装并登录 v2ex.com；"
             "可用 [cyan]openbiliclaw init --yes-v2ex[/cyan] 重试。[/dim]"
         )
+    if weibo_favorites + weibo_following + weibo_mentions == 0 and weibo_status != "skipped":
+        console.print(
+            "[dim]ℹ️  微博 0 条个人信号入库。请确认扩展已安装、浏览器已登录 "
+            "https://weibo.com 或 https://m.weibo.cn，然后重跑 "
+            "[cyan]openbiliclaw init --yes-weibo[/cyan]。[/dim]"
+        )
 
     source_parts = []
     if bilibili_events > 0:
@@ -9555,6 +9838,8 @@ def init(
         source_parts.append(f"[green]{len(linuxdo_events)}[/green] 条 Linux.do 信号")
     if len(v2ex_events) > 0:
         source_parts.append(f"[green]{len(v2ex_events)}[/green] 条 V2EX 信号")
+    if len(weibo_events) > 0:
+        source_parts.append(f"[green]{len(weibo_events)}[/green] 条微博信号")
     if len(source_parts) > 1:
         console.print(
             "[dim]ℹ️  本次画像综合了 "

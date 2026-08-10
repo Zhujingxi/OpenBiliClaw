@@ -1,6 +1,6 @@
 # 微博来源
 
-> 微博是 OpenBiliClaw 的第九个正式平台来源。当前实现只读取公开内容：后端按需建立匿名访客会话，执行搜索、热搜种子扩展和同轮作者发现；它不接收用户 Cookie、不写回微博，也不参与首次画像初始化。
+> 微博是 OpenBiliClaw 的第十一个正式平台来源。公开发现仍由后端匿名访客会话完成；首次画像可选地通过浏览器扩展登录态导入本人收藏、关注和互动事件。后端只接收布尔登录心跳与规范化事件，不接收或保存微博 Cookie。
 
 ## 能力边界
 
@@ -10,13 +10,13 @@
 | 热搜 | `hot`：先读取热搜词，再以热搜词搜索真实微博；热搜词本身不是内容候选 |
 | 作者 | `creator`：只使用本轮 search / hot 已发现的作者 UID，读取其公开微博 |
 | 相关推荐 | 未实现；没有把标签再搜索或作者复用伪装成 `related` |
-| 登录 | 不需要用户登录；移动 H5 请求使用后端主动获取的匿名访客 `SUB` |
-| Cookie | 不读取、不接受、不持久化用户微博 Cookie；匿名 `SUB` 只保存在当前 client 内存中 |
-| 初始化画像 | 不支持。微博不会出现在 guided init 的可选来源中，也不会生成首轮画像事件 |
-| 行为采集 | 不支持。浏览器扩展没有微博 host 权限、content script 或任务桥 |
+| 登录 | 公开发现无需登录；初始化本人事件需要在当前浏览器登录微博并连接扩展。扩展在微博同源任务页读取 `/api/config` 的登录与 uid 证据 |
+| Cookie | 后端不读取、不接受、不持久化用户微博 Cookie；扩展只上报布尔登录状态，个人事件在微博同源页面内完成读取 |
+| 初始化画像 | 支持。guided init 可导入收藏、关注和互动事件；必须有正向 uid 才接受个人事件，并按账号绑定防止混号 |
+| 行为采集 | 仅支持初始化/按需的只读 bootstrap 任务；不监听普通微博浏览，也不做持续增量刷新 |
 | 平台写入 | 不支持收藏、点赞、评论、关注或其他微博写操作；通用本地收藏 / 稍后看只保存 canonical membership，并立即标记为 `unsupported/local_only_source`，不创建 native-save task |
 
-这条边界是有意设计的：微博接入只负责主动补充公开 discovery 原料，不把匿名读取升级成用户账号代理，也不把热搜标题当作可推荐内容。
+这条边界是有意设计的：微博把“公开发现”和“本人信号导入”分成不同能力。登录态只允许同源只读任务，不把后端升级成用户账号代理，也不把热搜标题当作可推荐内容。
 
 ## 数据流
 
@@ -33,12 +33,21 @@ weibo.com hotSearch ── hot words ── search public posts
                                              │
                             discovery_candidates(pending_eval)
                                              │
-                               CandidateEvalCoordinator
+                                     CandidateEvalCoordinator
                                              │
                                       content_cache
+
+Guided init (explicit 微博 opt-in)
+            │
+  browser task: favorites / following / mentions
+            │  (same-origin, current login, positive uid)
+            ▼
+       weibo_tasks ── staged task-result ── account-scoped profile events
 ```
 
 三个分支最终都只产出真实微博正文，分别标记为 `weibo-search`、`weibo-hot`、`weibo-creator`。producer 将它们按 strategy 分组调用 `DiscoveryCandidatePipeline.enqueue_candidates()`；API daemon 下评估由唯一的 `CandidateEvalCoordinator` 认领，手动 CLI 路径可立即 drain。微博 producer 不写自己的阈值；普通候选统一由 `discovery/admission.py` 的全局 policy floor（默认 `0.60`）裁决。
+
+个人 bootstrap 由 `weibo_tasks` 持久化队列承载。扩展任务页先读取 `/api/config`，确认当前会话已登录并能解析 uid，再通过微博移动 H5 的同源只读接口读取收藏（`/api/container/getIndex?containerid=230259`）、关注（`/api/friendships/friends`）和 `@我的` / 评论（`/message/mentionsAt`、`/message/mentionsCmt`）；旧接口只作为兼容性候选，不会把 404 当成空数据。扩展只回传去 HTML 后的正文、作者、URL、时间和计数。API 在 staged final 前按 `weibo:<scope>:<item_id>` 去重，绑定首个确认账号，随后把收藏映射为 `favorite`、关注映射为 `follow`、mentions 映射为 `comment`，供本次画像分析和事件账本使用。账号切换必须先清理/重置旧 bootstrap 状态，不能把两个账号的事件混在一个画像里。
 
 ### search
 
@@ -68,12 +77,23 @@ creator 分支不维护用户订阅，也不猜账号。它只从同一轮 searc
 
 1. GET `https://visitor.passport.weibo.cn/visitor/visitor`，解析 `request_id`、`return_url`，以及页面实际声明的动态 callback / version；
 2. 使用上述 callback / version POST `https://visitor.passport.weibo.cn/visitor/genvisitor2`，只解析与 callback 精确匹配的 inert JSONP 包装并取得匿名 `SUB`；
-3. 只在当前 `WeiboClient` 实例内存中保存该值，并仅随移动 H5请求发送；
+3. 只在当前 `WeiboClient` 实例内存中保存该值，并仅随移动 H5 请求发送；
 4. 访客态被拒时清空并最多刷新一次，避免无限刷新或认证风暴。
 
 client 自建的 `httpx.AsyncClient` 使用 `trust_env=False`，与国内直连来源的网络边界一致。即使测试或调用方注入了带 `Authorization` / `Cookie` 默认头的 client，每次请求也会先剥离这些头，只加入本实例匿名访客值，防止误把已登录会话带入匿名 discovery。
 
-热搜接口不需要该访客 Cookie，只发送公开页面 `Referer: https://weibo.com/`。整个来源没有用户凭据表单、Cookie 同步、凭据导出或落盘路径。
+热搜接口不需要该访客 Cookie，只发送公开页面 `Referer: https://weibo.com/`。匿名访客值仍只在 client 内存中存在；登录态初始化另走下节的布尔 heartbeat 与浏览器任务，不复用匿名 Cookie。
+
+## 登录态初始化
+
+登录态不是公开 discovery 的前置条件，而是 `profile` / `bootstrap` 能力的前置条件。初始化页面或 CLI 选择微博后：
+
+1. 扩展通过 `chrome.cookies` 只上报是否观察到登录 Cookie（`SUBP` + `ALF`）；游客 `SUB` 不算登录凭据，后端只保存布尔值和时间戳。
+2. API `/api/init` 读取本地 heartbeat，未就绪时返回 `no_profile_signal_sources`（微博单独被选中）或把微博从本次画像来源中移除并保留公开发现。
+3. 已就绪时，后端排队 `bootstrap_events`；service worker 创建隐藏的 `m.weibo.cn` 任务页，content script 在同源环境读取收藏、关注、mentions。任务不抓取页面 HTML、不监听普通浏览、不调用点赞/收藏/关注/评论写接口。
+4. 任务结果必须包含当前 uid。后端把账号绑定到 bootstrap state，拒绝不同 uid 的后续结果；结果先 staged，再做事件去重与导入，因此扩展重试不会重复画像信号。
+
+个人事件是 `init-only`：本版本没有定时增量刷新。用户需要补齐新行为时可重新运行微博初始化；公开内容发现仍由独立的匿名 producer cadence 运行。
 
 ## 归一化契约
 
@@ -161,33 +181,34 @@ openbiliclaw discover --source weibo --limit 20 --force
 
 ## API 与来源状态
 
-微博复用平台中立控制面，不新增 source-specific task endpoint：
+微博复用平台中立控制面；个人 bootstrap 另外提供 capability-specific task endpoints：
 
 | 端点 | 微博字段 / 行为 |
 |---|---|
 | `GET /api/config` | `sources.weibo` 全部字段与 `scheduler.pool_source_shares.weibo` |
 | `PUT /api/config` | 校验并保存 enabled、modes、预算、请求间隔、运行间隔和 share，随后走统一热重载 |
-| `GET /api/sources/status` | 只读 `weibo_discovery_runs` 各 mode 最近 reason/error 与 `weibo_discovery_state` cooldown，返回与 auth 正交的 `discovery_state`、detail 和 feed pause；不读 cadence ledger、不建表、不会现场访问微博 |
-| `GET /api/sources/credentials` | 明示“匿名访客仅存后端内存，无用户 Cookie”；没有可写 credential kind |
-| `POST /api/sources/weibo/verify` | 固定 `none`，没有登录态可验证，也不会出网 |
+| `GET /api/sources/status` | 本地读取 discovery health 与微博 capability auth；`discover` 始终匿名 ready，`profile/bootstrap` 根据最近浏览器 heartbeat 显示 login-required / ready；不会现场访问微博 |
+| `GET /api/sources/credentials` | 显示“微博浏览器登录态”，不导出 Cookie；可写 kind 只有 `login_state`，实际由扩展上报布尔值 |
+| `POST /api/sources/weibo/credential` | 接受 `{kind:"login_state",value:boolean}`，写入本地 `weibo_login_state` 时间戳并返回 capability receipt |
+| `GET /api/sources/weibo/next-task` | 扩展领取有界 `bootstrap_events` 任务 |
+| `POST /api/sources/weibo/task-result` | 接收规范化收藏/关注/mentions 结果，按 uid 绑定、staged、去重后导入画像事件 |
+| `POST /api/sources/weibo/verify` | 使用浏览器 heartbeat 能力，不读取或接收 Cookie |
 
-`SourceStatusItem.enabled` 与运行状态分离。为了兼容旧客户端，legacy `state` 保持 `no_auth`；正交 auth 契约为 `auth_required=false`、`credential=none`、`verify_method=none`，并以 detail 说明匿名访客模式。`logged_in=true` 表示该只读来源不被登录前置阻断，不代表持有用户微博账号。
+`SourceStatusItem.enabled` 与运行状态分离。为了兼容旧客户端，legacy `state` 保持 `no_auth`；正交 auth 契约为 `auth_required=false`、`credential=none|present`，并在 `capabilities` 中分别表达匿名 discover 与登录 required 的 profile/bootstrap。收到扩展心跳后 `verify_method=browser_heartbeat`，尚未收到心跳时诚实返回 `verify_method=none`；`logged_in=true` 只表示公开发现不被登录前置阻断，不代表持有用户微博账号。
 
 `discovery_state` 独立返回 `disabled / unverified / ready / partial / error / rate_limited`，所以匿名 auth 仍可诚实显示“无需登录”，首页同时能把最近发现失败或 cooldown 列为 actionable issue。`feed_paused=true` 只在持久化限流 cooldown 生效时出现，并保留给旧前端作为告警 fallback。`detail` 由上述本地 run / cooldown 记录组装，表达未启用、尚未运行、限流退避或 recent run health；`empty` 与 `ok` 都属于“公开路径可用”的 ready 健康态，状态文案不会逐字回显 `empty`。producer 的即时 skip（例如 cadence throttled 或 pool full）不会写 `weibo_discovery_runs`，因此状态页不会把它伪装成一次上游健康结果。状态请求本身始终零上游 I/O。
 
 ## 浏览器扩展与初始化边界
 
-微博在三端来源设置、来源状态、平台身份、作者、文字卡片与本地收藏中出现；平台筛选 / 来源计数当前只属于桌面 Web。移动 Web 与 extension popup 对所有来源都没有 per-platform filter，因此这里是产品级显式排除，不伪造一个只对微博生效的筛选器。三端无封面微博都采用内容驱动的文字卡；popup 的窄屏 surprise 导航允许换行并保留触控命中区，不再强制 16:9 空白槽。扩展侧明确没有：
+微博在三端来源设置、来源状态、平台身份、作者、文字卡片与本地收藏中出现；平台筛选 / 来源计数当前只属于桌面 Web。移动 Web 与 extension popup 对所有来源都没有 per-platform filter，因此这里是产品级显式排除，不伪造一个只对微博生效的筛选器。三端无封面微博都采用内容驱动的文字卡；popup 的窄屏 surprise 导航允许换行并保留触控命中区，不再强制 16:9 空白槽。扩展侧明确支持：
 
-- `weibo.com`、`m.weibo.cn` 或 `sinaimg.cn` host permission；
-- 微博 content script / `PlatformAdapter`；
+- `weibo.com`、`m.weibo.cn` host permission 与微博 content script；
 - `/api/sources/weibo/next-task` / `task-result` 任务桥；
-- Cookie sync、身份桥或登录探测；
-- view / click / like 等微博行为采集；
-- guided init 来源选项或首轮画像事件。
-- 微博 native-save adapter / executor；推荐卡的收藏与稍后看只保存本地 membership，并立即进入 `unsupported/local_only_source` 终态，不创建同步 task，也不展示单项 / 批量同步或重试动作。
+- 只上报布尔登录态的 cookie-sync、同源 `/api/config` + `/api/account/getuid` 身份确认；
+- guided init 来源选项以及收藏、关注、mentions 三类首轮画像事件。
 
-打开微博推荐卡只是普通外链导航。OpenBiliClaw 不观察用户随后在微博页面内做了什么。
+它仍然没有普通微博页面行为监听、response tap、Cookie 回写或平台写操作。打开微博推荐卡只是普通外链导航；OpenBiliClaw 不观察用户随后在微博页面内做了什么。微博也没有 native-save adapter / executor；推荐卡的收藏与稍后看只保存本地 membership，并立即进入 `unsupported/local_only_source` 终态，不创建同步 task，也不展示单项 / 批量同步或重试动作。
+
 
 ## GitHub 调研与许可证边界
 
@@ -206,9 +227,11 @@ openbiliclaw discover --source weibo --limit 20 --force
 - `src/openbiliclaw/sources/weibo_client.py` — 匿名访客 client、节流、错误分类、响应 shape 校验
 - `src/openbiliclaw/sources/weibo.py` — HTML / card / `mblog` 防御性归一化
 - `src/openbiliclaw/runtime/weibo_producer.py` — 三分支编排、预算、cadence、cooldown、pool gate、candidate enqueue
+- `src/openbiliclaw/sources/weibo_tasks.py` — 登录态 bootstrap 任务队列、账号绑定、事件转换
+- `extension/src/content/weibo/task-executor.ts` / `extension/src/background/weibo-task-dispatcher.ts` — 同源只读个人事件任务
 - `tests/test_weibo_client.py` — visitor、header stripping、search / creator / hot、嵌套 cards、retry / 限流 / schema
 - `tests/test_weibo_producer.py` — hot-as-seed、同轮 creator、预算、关键词账本、partial / cooldown、统一候选池
-- `tests/test_weibo_wiring.py` — 配置、平台注册表、runtime、API、CLI、图片代理与 guided-init 排除契约
-- `tests/test_weibo_contract.py` — integration-level、精确 mapping 与全部不适用能力的 exclusion nodeid
+- `tests/test_weibo_wiring.py` — 配置、平台注册表、runtime、API、CLI、图片代理与 guided-init wiring 契约
+- `tests/test_weibo_contract.py` — capability-specific auth、任务桥、精确 mapping 与不适用能力的 exclusion nodeid
 - `tests/fixtures/weibo/*.redacted.json` — success、empty 与 schema-drift 的真实脱敏响应证据
 - `docs/platform-source-contract.weibo.toml` / `docs/platform-source-acceptance.weibo.md` — 可执行来源契约与验收台账

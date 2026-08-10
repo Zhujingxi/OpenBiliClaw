@@ -1304,7 +1304,7 @@ class V2EXSourceConfig:
 
 @dataclass
 class WeiboSourceConfig:
-    """Weibo anonymous-visitor discovery configuration."""
+    """Weibo public discovery and init-only browser bootstrap configuration."""
 
     enabled: bool = False
     source_modes: tuple[str, ...] = ("search", "hot", "creator")

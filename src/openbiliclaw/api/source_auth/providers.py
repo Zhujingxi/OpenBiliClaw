@@ -77,6 +77,13 @@ if TYPE_CHECKING:
 # on 2026-07-18: 71h -> ready, 73h -> stale (spec D2).
 _XHS_LOGIN_FRESH_HOURS = 72
 _ZHIHU_LOGIN_FRESH_HOURS = 72
+_WEIBO_LOGIN_FRESH_HOURS = 72
+_WEIBO_CAPABILITY_AUTH_MODES = {
+    "discover": "anonymous",
+    "profile": "login-required",
+    "bootstrap": "login-required",
+    "cookie-sync": "optional-credential",
+}
 _V2EX_LOGIN_FRESH_HOURS = 72
 _LINUXDO_LOGIN_FRESH_HOURS = 72
 _HEARTBEAT_TTL_SECONDS = 72 * 3600
@@ -648,20 +655,93 @@ def auth_youtube(ctx: SourceAuthContext) -> SourceAuthContract:
 
 
 def auth_weibo(ctx: SourceAuthContext) -> SourceAuthContract:
-    """Weibo: public discovery through an in-memory anonymous guest session."""
+    """Weibo: anonymous public discovery plus browser-backed bootstrap."""
 
+    stored, when, fresh = _login_heartbeat(
+        ctx.database,
+        getter="get_weibo_login_state",
+        fresh_hours=_WEIBO_LOGIN_FRESH_HOURS,
+    )
+    capabilities = _weibo_capabilities(
+        "ready" if stored and fresh else "stale" if stored and when else "login_required"
+    )
+    # An absent heartbeat means there is no browser credential to verify yet.
+    # Keep the legacy contract honest (I3): ``browser_heartbeat`` is only
+    # reported once the extension has actually recorded a login-state check.
+    verify_method = "browser_heartbeat" if stored else "none"
+    heartbeat: dict[str, Any] = {
+        "auth_required": False,
+        "verify_method": verify_method,
+        "verify_ttl_seconds": _HEARTBEAT_TTL_SECONDS if stored else None,
+        "can_verify_now": bool(stored),
+        "capabilities": capabilities,
+        "legacy_state": "no_auth",
+        "legacy_logged_in": True,
+    }
+    if stored and fresh:
+        return SourceAuthContract(
+            **heartbeat,
+            credential="present",
+            credential_origin="extension",
+            verification="verified",
+            verified_at=str(when),
+            detail="微博公开发现可匿名；浏览器已登录，可导入本人只读事件。",
+        )
+    if stored and when:
+        return SourceAuthContract(
+            **heartbeat,
+            credential="present",
+            credential_origin="extension",
+            verification="stale",
+            verified_at=str(when),
+            detail="微博公开发现可匿名；浏览器登录态已过期，请连接插件刷新。",
+        )
     return SourceAuthContract(
-        auth_required=False,
+        **heartbeat,
         credential="none",
         credential_origin="none",
         verification="unverified",
-        verify_method="none",
-        verify_ttl_seconds=None,
-        can_verify_now=False,
-        detail="匿名访客源 · 无需用户登录或 Cookie；访客会话只保存在进程内存中。",
-        legacy_state="no_auth",
-        legacy_logged_in=True,
+        detail="微博公开发现可匿名；初始化本人收藏、关注和互动需要登录微博并连接插件。",
     )
+
+
+def _weibo_capabilities(
+    personal_readiness: CapabilityReadiness,
+) -> dict[str, SourceCapabilityAuth]:
+    """Return Weibo's anonymous-discover/private-bootstrap matrix."""
+
+    return {
+        "discover": SourceCapabilityAuth(
+            mode="anonymous",
+            required=True,
+            readiness="ready",
+            detail="搜索、热搜和公开作者时间线无需登录。",
+        ),
+        "profile": SourceCapabilityAuth(
+            mode="login-required",
+            required=True,
+            readiness=personal_readiness,
+            detail="初始化本人收藏、关注和互动需要微博浏览器登录态。",
+        ),
+        "bootstrap": SourceCapabilityAuth(
+            mode="login-required",
+            required=True,
+            readiness=personal_readiness,
+            detail="个人事件只在微博同源浏览器任务中读取，后端不接收 Cookie。",
+        ),
+        "cookie-sync": SourceCapabilityAuth(
+            mode="optional-credential",
+            required=False,
+            readiness=personal_readiness,
+            detail="插件仅上报布尔登录状态；游客 SUB 不算登录凭据。",
+        ),
+    }
+
+
+def weibo_capability_readiness(ctx: SourceAuthContext) -> dict[str, SourceCapabilityAuth]:
+    """Public readiness helper used by guided init and source status."""
+
+    return auth_weibo(ctx).capabilities
 
 
 # ── X (Twitter) ──────────────────────────────────────────────────────

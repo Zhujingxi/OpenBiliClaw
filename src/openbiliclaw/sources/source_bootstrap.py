@@ -28,6 +28,7 @@ DEFAULT_ZHIHU_BOOTSTRAP_DEDUPE_HOURS = 6.0
 DEFAULT_REDDIT_BOOTSTRAP_DEDUPE_HOURS = 6.0
 DEFAULT_LINUXDO_BOOTSTRAP_DEDUPE_HOURS = 6.0
 DEFAULT_V2EX_BOOTSTRAP_DEDUPE_HOURS = 6.0
+DEFAULT_WEIBO_BOOTSTRAP_DEDUPE_HOURS = 6.0
 
 _RECENT_TASK_STATUSES = ("pending", "in_progress", "completed", "failed")
 Notify = Callable[[str], None]
@@ -47,6 +48,7 @@ _BOOTSTRAP_TASK_TABLES: tuple[tuple[str, str, str], ...] = (
     ("reddit", "reddit_tasks", "bootstrap_events"),
     ("linuxdo", "linuxdo_tasks", "bootstrap_events"),
     ("v2ex", "v2ex_tasks", "bootstrap_profile"),
+    ("weibo", "weibo_tasks", "bootstrap_events"),
 )
 
 
@@ -120,7 +122,6 @@ def _serialized_enqueue(
 
 def _find_active_bootstrap_task(database: Any) -> tuple[str, str] | None:
     """Return one pending/in-progress account bootstrap across all task sources."""
-    """Return one pending/in-progress account bootstrap across all six sources."""
 
     conn = getattr(database, "conn", None)
     execute = getattr(conn, "execute", None)
@@ -712,6 +713,79 @@ def enqueue_reddit_bootstrap(
     return _created_or_budget_result(
         task_id,
         budget_message="  [yellow]Reddit 初始化事件未拉取: 今日任务预算已用完。[/yellow]",
+        notify=notify,
+    )
+
+
+@_serialized_enqueue
+def enqueue_weibo_bootstrap(
+    database: Any,
+    *,
+    force: bool = False,
+    incremental: bool = False,
+    profile_update: bool = False,
+    notify: Notify | None = None,
+) -> BootstrapEnqueueResult:
+    """Enqueue a read-only, logged-in Weibo bootstrap task."""
+    from openbiliclaw.sources.weibo_tasks import WeiboTaskQueue
+
+    max_items = int(
+        os.environ.get(
+            "OPENBILICLAW_WEIBO_BOOTSTRAP_MAX_ITEMS",
+            str(INIT_BOOTSTRAP_MAX_ITEMS_PER_SCOPE),
+        )
+    )
+    try:
+        queue = WeiboTaskQueue(database)
+        with _bootstrap_admission_transaction(database):
+            dedupe_hours = _dedupe_hours(
+                "OPENBILICLAW_WEIBO_BOOTSTRAP_DEDUPE_HOURS",
+                DEFAULT_WEIBO_BOOTSTRAP_DEDUPE_HOURS,
+            )
+            find_recent = getattr(queue, "find_recent_task", None)
+            if not force and dedupe_hours > 0 and callable(find_recent):
+                recent = find_recent(
+                    "bootstrap_events",
+                    recent_hours=dedupe_hours,
+                    statuses=_RECENT_TASK_STATUSES,
+                )
+                if recent is not None:
+                    reused = _recent_reuse_result(
+                        recent,
+                        message=(
+                            "  [dim]复用最近的微博 bootstrap 任务"
+                            "；需要重新拉取可设 "
+                            "OPENBILICLAW_WEIBO_BOOTSTRAP_DEDUPE_HOURS=0。[/dim]"
+                        ),
+                        notify=notify,
+                    )
+                    if reused is not None:
+                        return reused
+
+            active = _active_bootstrap_result(database, notify=notify)
+            if active is not None:
+                return active
+
+            payload = _incremental_payload(
+                {
+                    "scopes": [
+                        "weibo_favorites",
+                        "weibo_following",
+                        "weibo_mentions",
+                    ],
+                    "max_items_per_scope": max(1, max_items),
+                    "profile_update": bool(profile_update),
+                },
+                incremental,
+            )
+            task_id = queue.enqueue_with_id("bootstrap_events", payload, daily_budget=10)
+    except Exception as exc:
+        _notify(notify, f"  [yellow]微博个人事件未拉取: {exc}[/yellow]")
+        return BootstrapEnqueueResult(task_id=None, created=False, reason="enqueue_error")
+
+    return _created_or_budget_result(
+        task_id,
+        budget_message="  [yellow]微博个人事件未拉取: 今日任务预算已用完。[/yellow]",
         notify=notify,
     )
 

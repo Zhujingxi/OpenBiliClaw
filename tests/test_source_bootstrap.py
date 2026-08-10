@@ -125,7 +125,25 @@ _PLATFORMS = (
             "profile_update": False,
         },
     ),
+    (
+        "enqueue_weibo_bootstrap",
+        "openbiliclaw.sources.weibo_tasks.WeiboTaskQueue",
+        "bootstrap_events",
+        {
+            "scopes": ["weibo_favorites", "weibo_following", "weibo_mentions"],
+            "max_items_per_scope": 300,
+            "profile_update": False,
+        },
+    ),
 )
+
+
+def test_weibo_bootstrap_registry_uses_durable_task_table() -> None:
+    from openbiliclaw.sources import source_bootstrap
+    from openbiliclaw.sources.task_result_protocol import _TASK_TABLES
+
+    assert ("weibo", "weibo_tasks", "bootstrap_events") in source_bootstrap._BOOTSTRAP_TASK_TABLES
+    assert "weibo_tasks" in _TASK_TABLES
 
 
 @pytest.mark.parametrize(

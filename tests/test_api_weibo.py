@@ -1,4 +1,4 @@
-"""HTTP-boundary contracts for the discovery-only Weibo source."""
+"""HTTP-boundary contracts for anonymous and logged-in Weibo capabilities."""
 
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ def test_weibo_status_is_local_anonymous_and_enablement_is_orthogonal(
     assert enabled["enabled"] is True
     assert enabled["state"] == "no_auth"
     assert enabled["logged_in"] is True
-    assert enabled["detail"] == "尚未运行微博内容发现。"
+    assert "初始化本人事件需要浏览器登录态" in enabled["detail"]
     assert enabled["feed_paused"] is False
     assert enabled["discovery_state"] == "unverified"
     assert enabled["auth"] == {
@@ -61,10 +61,43 @@ def test_weibo_status_is_local_anonymous_and_enablement_is_orthogonal(
         "verified_at": "",
         "verify_ttl_seconds": None,
         "can_verify_now": False,
-        "detail": "匿名访客源 · 无需用户登录或 Cookie；访客会话只保存在进程内存中。",
+        "detail": "微博公开发现可匿名；初始化本人收藏、关注和互动需要登录微博并连接插件。",
         "legacy_state": "no_auth",
         "legacy_logged_in": True,
-        "capabilities": {},
+        "capabilities": {
+            "discover": {
+                "mode": "anonymous",
+                "required": True,
+                "ready": True,
+                "state": "ready",
+                "readiness": "ready",
+                "detail": "搜索、热搜和公开作者时间线无需登录。",
+            },
+            "profile": {
+                "mode": "login-required",
+                "required": True,
+                "ready": False,
+                "state": "login_required",
+                "readiness": "login_required",
+                "detail": "初始化本人收藏、关注和互动需要微博浏览器登录态。",
+            },
+            "bootstrap": {
+                "mode": "login-required",
+                "required": True,
+                "ready": False,
+                "state": "login_required",
+                "readiness": "login_required",
+                "detail": "个人事件只在微博同源浏览器任务中读取，后端不接收 Cookie。",
+            },
+            "cookie-sync": {
+                "mode": "optional-credential",
+                "required": False,
+                "ready": False,
+                "state": "login_required",
+                "readiness": "login_required",
+                "detail": "插件仅上报布尔登录状态；游客 SUB 不算登录凭据。",
+            },
+        },
     }
 
 
@@ -98,7 +131,10 @@ def test_weibo_status_keeps_auth_and_discovery_health_orthogonal(
     assert item["auth"]["auth_required"] is False
     assert item["discovery_state"] == "error"
     assert item["feed_paused"] is False
-    assert item["detail"] == "微博公开发现最近失败，将按节流策略自动重试。"
+    assert (
+        item["detail"]
+        == "微博公开发现最近失败，将按节流策略自动重试。 初始化本人事件需要浏览器登录态。"
+    )
 
 
 def test_weibo_credentials_never_export_or_claim_a_stored_visitor(
@@ -121,7 +157,7 @@ def test_weibo_credentials_never_export_or_claim_a_stored_visitor(
             "weibo"
         ]
 
-    assert item["label"] == "匿名访客会话"
+    assert item["label"] == "微博浏览器登录态"
     assert item["value"] == ""
     assert item["available"] is False
     assert item["form"]["kind"] == "none"
@@ -129,6 +165,60 @@ def test_weibo_credentials_never_export_or_claim_a_stored_visitor(
     assert item["form"]["env_var"] is None
     assert item["summary"]
     assert "不读取或保存用户 Cookie" in item["detail"]
+
+
+def test_weibo_browser_task_requires_enabled_source_and_claim_token(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from openbiliclaw.sources.weibo_tasks import WeiboTaskQueue
+
+    cfg = _config_with_test_llm()
+    cfg.sources.weibo.enabled = True
+    monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: cfg)
+    database = Database(tmp_path / "weibo-task-claim.db")
+    database.initialize()
+    queue = WeiboTaskQueue(database)
+    task_id = queue.enqueue_with_id(
+        "bootstrap_events",
+        {"profile_update": False, "scopes": ["weibo_favorites"]},
+    )
+    assert task_id
+
+    with TestClient(
+        create_app(memory_manager=object(), database=database, soul_engine=object())
+    ) as client:
+        claimed = client.get("/api/sources/weibo/next-task")
+        assert claimed.status_code == 200
+        task = claimed.json()
+        assert task["id"] == task_id
+        assert task["claim_token"]
+
+        stale = client.post(
+            "/api/sources/weibo/task-result",
+            json={"task_id": task_id, "status": "failed", "items": []},
+        )
+        assert stale.status_code == 409
+        assert stale.json()["detail"] == "task_claim_conflict"
+
+        accepted = client.post(
+            "/api/sources/weibo/task-result",
+            json={
+                "task_id": task_id,
+                "claim_token": task["claim_token"],
+                "status": "failed",
+                "items": [],
+                "error": "weibo_login_required",
+            },
+        )
+        assert accepted.status_code == 200
+        assert queue.get(task_id)["status"] == "failed"
+
+    cfg.sources.weibo.enabled = False
+    with TestClient(
+        create_app(memory_manager=object(), database=database, soul_engine=object())
+    ) as client:
+        assert client.get("/api/sources/weibo/next-task").status_code == 204
 
 
 def test_weibo_config_api_get_put_and_disk_reload_round_trip_every_field(

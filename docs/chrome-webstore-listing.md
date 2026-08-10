@@ -51,7 +51,7 @@ https://github.com/whiteguo233/OpenBiliClaw
 - Linux.do
 - Bangumi
 - V2EX
-- 微博（后端 discovery-only）
+- 微博（公开 discovery 匿名；初始化时可通过已登录浏览器只读导入个人收藏、关注和互动）
 
 这个插件能做什么：
 - 在支持的平台页面识别你授权范围内的内容与互动信号，或执行本地后端下发的来源任务。
@@ -123,7 +123,7 @@ npm run webstore:metadata -- \
 
 ## 提交前检查
 
-- `Short description` 与 `Detailed description` 已粘贴，十一类来源名称完整，并单独解释 Linux.do / V2EX 权限理由、只读边界及微博 backend-only 边界。
+- `Short description` 与 `Detailed description` 已粘贴，十一类来源名称完整，并单独解释 Linux.do / V2EX / 微博任务权限理由、只读边界、Cookie 不回传及微博公开匿名 / 个人初始化的能力边界。
 - 3 张截图已按上面的文件名顺序上传，尺寸均为 1280×800。
 - `Website URL` 使用项目主页：`https://whiteguo233.github.io/OpenBiliClaw/`。
 - `Support URL` 使用 GitHub Issues：`https://github.com/whiteguo233/OpenBiliClaw/issues`。
