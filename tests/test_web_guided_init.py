@@ -227,10 +227,7 @@ def test_setup_init_sources_are_explicit_opt_in_without_settings_enable_block() 
     # The wizard builds its checkbox list from the shared roster instead of a
     # third hand-kept copy, so it can no longer offer a platform the settings
     # pages do not know about (spec I6).
-    assert (
-        "SourceStatus.INIT_SOURCE_KEYS || SourceStatus.SOURCE_KEYS).map" in setup_html
-        or "SourceStatus.SOURCE_KEYS.map" in setup_html
-    )
+    assert "SourceStatus.INIT_SOURCE_KEYS.map" in setup_html
     assert 'src="/shared/source-status.js"' in setup_html
     for source in (
         "bilibili",

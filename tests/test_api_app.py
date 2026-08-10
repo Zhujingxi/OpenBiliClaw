@@ -15033,6 +15033,7 @@ class TestEmbeddingAndCompatProviderE2E:
             "zhihu": 1,
             "reddit": 1,
             "bangumi": 4,
+            "weibo": 1,
             "v2ex": 1,
         }
         assert data["scheduler"]["account_sync_interval_hours"] == 9
@@ -15588,6 +15589,7 @@ class TestEmbeddingAndCompatProviderE2E:
             "zhihu": 1,
             "reddit": 1,
             "bangumi": 1,
+            "weibo": 1,
             "v2ex": 1,
         }
         assert cfg.scheduler.refresh_check_interval_seconds == 75
@@ -15734,6 +15736,7 @@ class TestEmbeddingAndCompatProviderE2E:
                 "twitter": 0,
                 "zhihu": 0,
                 "reddit": 225,
+                "weibo": 0,
                 "v2ex": 0,
                 "bangumi": 0,
             },
@@ -15746,6 +15749,7 @@ class TestEmbeddingAndCompatProviderE2E:
                 "zhihu": False,
                 "reddit": False,
                 "bangumi": False,
+                "weibo": False,
                 "v2ex": False,
             },
             "suggested_shares": {
@@ -15824,6 +15828,7 @@ class TestEmbeddingAndCompatProviderE2E:
                 "twitter": 0,
                 "zhihu": 0,
                 "reddit": 225,
+                "weibo": 0,
                 "v2ex": 0,
                 "bangumi": 0,
             },
@@ -15836,6 +15841,7 @@ class TestEmbeddingAndCompatProviderE2E:
                 "zhihu": False,
                 "reddit": True,
                 "bangumi": False,
+                "weibo": False,
                 "v2ex": False,
             },
             "suggested_shares": {

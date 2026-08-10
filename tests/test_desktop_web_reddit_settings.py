@@ -47,7 +47,7 @@ def test_desktop_reddit_source_status_and_credentials_are_rendered() -> None:
     # this page had two identical copies of it and the side panel a third.
     assert (
         'const SOURCE_KEYS = Object.freeze([\n    "bilibili", "xiaohongshu", '
-        '"douyin", "youtube", "twitter", "zhihu", "reddit",\n'
+        '"douyin", "weibo", "youtube", "twitter", "zhihu", "reddit",\n'
     ) in shared
     # Bangumi and V2EX are in the roster; the roster answers "which sources
     # exist", so dropping one would hide the platform from settings surfaces.

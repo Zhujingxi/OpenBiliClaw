@@ -1125,6 +1125,7 @@ _EXPECTED_VERIFY_METHODS = {
     # method 知乎 has. The action ``VERIFY_ACTIONS['bangumi']`` is still
     # ``live_probe`` (see the bangumi verify tests below, which supply a token).
     "bangumi": "none",
+    "weibo": "none",
     # V2EX is anonymous by default; its optional PAT only becomes probeable
     # after the caller supplies a token.
     "v2ex": "none",

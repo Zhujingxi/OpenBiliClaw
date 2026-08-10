@@ -180,6 +180,7 @@ class TestConfigDefaults:
             "zhihu": 1,
             "reddit": 1,
             "bangumi": 1,
+            "weibo": 1,
             "v2ex": 1,
         }
 
@@ -1337,6 +1338,7 @@ youtube = 3
         "zhihu": 1,
         "reddit": 1,
         "bangumi": 1,
+        "weibo": 1,
         "v2ex": 1,
     }
 
@@ -1811,6 +1813,7 @@ def test_save_config_round_trips_pool_source_shares(tmp_path: Path) -> None:
         "zhihu": 1,
         "reddit": 2,
         "bangumi": 1,
+        "weibo": 1,
         "v2ex": 1,
     }
 
@@ -1826,6 +1829,7 @@ def test_save_config_round_trips_pool_source_shares(tmp_path: Path) -> None:
         "zhihu": 1,
         "reddit": 2,
         "bangumi": 1,
+        "weibo": 1,
         "v2ex": 1,
     }
 
