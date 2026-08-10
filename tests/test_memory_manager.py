@@ -937,6 +937,8 @@ def test_source_bootstrap_state_defaults_when_missing(tmp_path: Path) -> None:
         "linuxdo_seen_item_keys": [],
         "linuxdo_account_key": "",
         "v2ex_seen_item_keys": [],
+        "weibo_seen_item_keys": [],
+        "weibo_account_key": "",
         "last_source_bootstrap_sync_at": "",
         "source_incremental": {
             "cursor": "",
