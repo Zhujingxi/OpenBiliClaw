@@ -198,14 +198,15 @@
       { key: "twitter", label: "X (Twitter)" },
       { key: "zhihu", label: "知乎" },
       { key: "reddit", label: "Reddit" },
-      { key: "bangumi", label: "Bangumi" }
+      { key: "bangumi", label: "Bangumi" },
+      { key: "v2ex", label: "V2EX" }
     ];
     const sourceFilterOrder = sourceFilterDefinitions.map((source) => source.label);
     // 首次成功读到库存快照之前是"未知"，不能把还没读到伪装成 0。
     const PLATFORM_COUNT_UNKNOWN_TEXT = "—";
     const PLATFORM_COUNT_UNKNOWN_LABEL = "库存待读取";
-    const platformLabel = { bilibili: "B 站", youtube: "YouTube", douyin: "抖音", xiaohongshu: "小红书", xhs: "小红书", twitter: "X (Twitter)", x: "X (Twitter)", zhihu: "知乎", reddit: "Reddit", rd: "Reddit", bangumi: "Bangumi", bgm: "Bangumi" };
-    const platformAliases = { bili: "bilibili", bilibili: "bilibili", xhs: "xiaohongshu", xiaohongshu: "xiaohongshu", rednote: "xiaohongshu", dy: "douyin", douyin: "douyin", tiktok: "douyin", yt: "youtube", youtube: "youtube", x: "twitter", twitter: "twitter", zh: "zhihu", zhihu: "zhihu", rd: "reddit", reddit: "reddit", bgm: "bangumi", bangumi: "bangumi" };
+    const platformLabel = { bilibili: "B 站", youtube: "YouTube", douyin: "抖音", xiaohongshu: "小红书", xhs: "小红书", twitter: "X (Twitter)", x: "X (Twitter)", zhihu: "知乎", reddit: "Reddit", rd: "Reddit", bangumi: "Bangumi", bgm: "Bangumi", v2ex: "V2EX", v2: "V2EX" };
+    const platformAliases = { bili: "bilibili", bilibili: "bilibili", xhs: "xiaohongshu", xiaohongshu: "xiaohongshu", rednote: "xiaohongshu", dy: "douyin", douyin: "douyin", tiktok: "douyin", yt: "youtube", youtube: "youtube", x: "twitter", twitter: "twitter", zh: "zhihu", zhihu: "zhihu", rd: "reddit", reddit: "reddit", bgm: "bangumi", bangumi: "bangumi", v2: "v2ex", v2ex: "v2ex" };
     const textCardContentTypes = new Set(["tweet", "thread", "answer", "article", "question", "post", "comment"]);
     // v0.3.118+: bilibili is selectable like every other source — default
     // checked (recommended) but no longer forced. At least one source must
@@ -219,12 +220,12 @@
     // local first-run policy (the backend mirrors it in providers._ENABLED_BY_DEFAULT).
     const INIT_SOURCE_LABEL_FALLBACK = {
       bilibili: "B 站", xiaohongshu: "小红书", douyin: "抖音", youtube: "YouTube",
-      twitter: "X", zhihu: "知乎", reddit: "Reddit", bangumi: "Bangumi"
+      twitter: "X", zhihu: "知乎", reddit: "Reddit", bangumi: "Bangumi", v2ex: "V2EX"
     };
     const INIT_SOURCE_DEFAULT_CHECKED = new Set(["bilibili"]);
     const _initSourceStatus = globalThis.OpenBiliClawSourceStatus || null;
-    const INIT_SOURCE_KEYS = _initSourceStatus?.SOURCE_KEYS
-      ? [..._initSourceStatus.SOURCE_KEYS]
+    const INIT_SOURCE_KEYS = (_initSourceStatus?.INIT_SOURCE_KEYS || _initSourceStatus?.SOURCE_KEYS)
+      ? [...(_initSourceStatus.INIT_SOURCE_KEYS || _initSourceStatus.SOURCE_KEYS)]
       : Object.keys(INIT_SOURCE_LABEL_FALLBACK);
     const INIT_SOURCE_OPTIONS = INIT_SOURCE_KEYS.map((key) => ({
       key,
@@ -4457,7 +4458,9 @@ ${savedCardFeedbackBarHtml(listKind)}
 
     function recommendationCoverClass(item) {
       if (!recommendationIsTextCard(item)) return "";
-      return recommendationTextCardBackdrop(item) ? " is-text-card has-backdrop" : " is-text-card";
+      return recommendationTextCardBackdrop(item)
+        ? " is-text-card has-backdrop"
+        : " is-text-card is-coverless";
     }
 
     function recommendationMediaHtml(item, index = 0) {
@@ -4787,7 +4790,9 @@ ${cardFeedbackBarHtml()}`;
 
     function createRecommendationCard(item, html) {
       const card = document.createElement("article");
-      card.className = "video-card";
+      card.className = recommendationIsTextCard(item) && !recommendationTextCardBackdrop(item)
+        ? "video-card is-text-only"
+        : "video-card";
       card.dataset.bvid = item.bvid || item.id;
       card.innerHTML = html;
       const reason = card.querySelector(".reason");
@@ -7819,6 +7824,13 @@ ${cardFeedbackBarHtml()}`;
       ["music", "bangumiTypeMusic"],
       ["real", "bangumiTypeReal"],
     ];
+    const V2EX_SOURCE_MODE_FIELDS = [
+      ["search", "v2exModeSearch"],
+      ["node", "v2exModeNode"],
+      ["tab", "v2exModeTab"],
+      ["hot", "v2exModeHot"],
+      ["latest", "v2exModeLatest"],
+    ];
 
     function setCheckedValues(fields, rawValues) {
       const fallback = fields.map(([value]) => value);
@@ -7878,9 +7890,9 @@ ${cardFeedbackBarHtml()}`;
     // shape all come from /shared/source-status.js, which the extension side
     // panel and the setup wizard load too. Keeping a private copy here is what
     // let the two surfaces drift into painting `no_auth` and `unverified` the
-    // same colour (spec D6). The roster it exports includes Bangumi, so this
-    // page keeps rendering that row even though the backend sends it no `auth`
-    // contract yet; `describeAccess()` falls back to the legacy `state` for it.
+    // same colour (spec D6). The roster it exports includes Bangumi and V2EX;
+    // Bangumi still uses the legacy `state` fallback, while V2EX has the
+    // optional-PAT auth contract.
     const SourceStatus = globalThis.OpenBiliClawSourceStatus;
     const SOURCE_STATUS_KEYS = SourceStatus.SOURCE_KEYS;
     const SOURCE_STATUS_REFRESH_EVENTS = new Set([
@@ -7901,7 +7913,8 @@ ${cardFeedbackBarHtml()}`;
       twitter: "twitterEnabled",
       zhihu: "zhihuEnabled",
       reddit: "redditEnabled",
-      bangumi: "bangumiEnabled"
+      bangumi: "bangumiEnabled",
+      v2ex: "v2exEnabled"
     };
 
     function collectEnabledSourceIssues(data) {
@@ -8018,6 +8031,79 @@ ${cardFeedbackBarHtml()}`;
       state.sourceStatus = data;
       renderSourcesStatusRows(data);
       renderAccountSyncStatus(state.runtimeStatus);
+      await renderV2exIdentity();
+    }
+
+    const V2EX_IDENTITY_ORIGIN_LABELS = {
+      pat: "PAT",
+      browser: "浏览器",
+      configured: "配置",
+      accepted: "已选择"
+    };
+
+    function renderV2exIdentityResult(identity) {
+      const statusEl = $("#v2exIdentityStatus");
+      const acceptButton = $("#v2exAcceptBrowserIdentity");
+      if (!statusEl || !acceptButton) return;
+      const claims = identity?.claims && typeof identity.claims === "object" ? identity.claims : {};
+      const browser = String(claims.browser || "").trim();
+      const active = String(identity?.active_profile_identity?.username || "").trim();
+      acceptButton.dataset.username = browser;
+      acceptButton.hidden = !(browser && identity?.status === "identity_mismatch");
+      if (!identity) {
+        setProbeStatus(statusEl, "muted", "后端不可达，暂时无法读取身份状态。");
+        return;
+      }
+      if (identity.status === "identity_mismatch") {
+        const detail = Object.entries(claims)
+          .map(([origin, username]) => `${V2EX_IDENTITY_ORIGIN_LABELS[origin] || origin}=${username}`)
+          .join(" · ");
+        setProbeStatus(statusEl, "error", `身份冲突：${detail}。账号初始化已暂停，公开发现仍可用。`);
+        return;
+      }
+      if (identity.identity_switch_required) {
+        setProbeStatus(
+          statusEl,
+          "warning",
+          `当前浏览器账号 ${browser || identity.username}，画像仍属于 ${active}；增量同步已暂停，请运行一次 V2EX 完整初始化完成切换。`
+        );
+        return;
+      }
+      if (identity.status === "resolved") {
+        const suffix = identity.private_bootstrap_available ? "，浏览器四 Scope 初始化可用。" : "；公开发现可用。";
+        setProbeStatus(statusEl, "success", `当前账号 ${identity.username}${suffix}`);
+        return;
+      }
+      setProbeStatus(statusEl, "muted", "尚未识别账号；匿名公开发现仍可用。");
+    }
+
+    async function renderV2exIdentity() {
+      try {
+        renderV2exIdentityResult(await requestJsonStrict("/sources/v2ex/identity", { timeoutMs: 12000 }));
+      } catch {
+        renderV2exIdentityResult(null);
+      }
+    }
+
+    async function acceptCurrentV2exBrowserIdentity(button) {
+      const username = String(button?.dataset?.username || "").trim();
+      const statusEl = $("#v2exIdentityStatus");
+      if (!username || button.disabled) return;
+      button.disabled = true;
+      setProbeStatus(statusEl, "pending", `正在采用浏览器账号 ${username}…`);
+      try {
+        await requestJsonStrict("/sources/v2ex/identity", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username, accept: true }),
+          timeoutMs: 12000
+        });
+        await renderV2exIdentity();
+      } catch (error) {
+        setProbeStatus(statusEl, "error", error?.message || "身份选择失败。");
+      } finally {
+        button.disabled = false;
+      }
     }
 
     function renderVerifyResult(statusEl, result) {
@@ -8056,6 +8142,15 @@ ${cardFeedbackBarHtml()}`;
     }
 
     $("#sourceStatusList")?.addEventListener("click", (event) => {
+      const identityButton = event.target.closest("#v2exAcceptBrowserIdentity");
+      if (identityButton) {
+        void acceptCurrentV2exBrowserIdentity(identityButton);
+        return;
+      }
+      if (event.target.closest("#v2exRefreshIdentity")) {
+        void renderV2exIdentity();
+        return;
+      }
       const button = event.target.closest(".source-verify-btn");
       if (!button || button.disabled) return;
       void runSourceVerify(button.closest(".source-status-row"));
@@ -8113,7 +8208,8 @@ ${cardFeedbackBarHtml()}`;
       twitter: "shareTwitter",
       zhihu: "shareZhihu",
       reddit: "shareReddit",
-      bangumi: "shareBangumi"
+      bangumi: "shareBangumi",
+      v2ex: "shareV2EX"
     };
     const SOURCE_CARD_LABELS = {
       bilibili: "Bilibili",
@@ -8123,7 +8219,8 @@ ${cardFeedbackBarHtml()}`;
       twitter: "X (Twitter)",
       zhihu: "知乎",
       reddit: "Reddit",
-      bangumi: "Bangumi"
+      bangumi: "Bangumi",
+      v2ex: "V2EX"
     };
 
     function sourceCardFor(key) {
@@ -8992,6 +9089,7 @@ ${cardFeedbackBarHtml()}`;
       setInput("shareZhihu", scheduler.pool_source_shares?.zhihu);
       setInput("shareReddit", scheduler.pool_source_shares?.reddit);
       setInput("shareBangumi", scheduler.pool_source_shares?.bangumi);
+      setInput("shareV2EX", scheduler.pool_source_shares?.v2ex);
       setInput("speculationInterval", scheduler.speculation_interval_minutes);
       setInput("speculationTtl", scheduler.speculation_ttl_days);
       setInput("speculationCooldown", scheduler.speculation_cooldown_days);
@@ -9133,6 +9231,30 @@ ${cardFeedbackBarHtml()}`;
       setInput("bangumiRequestInterval", config.sources?.bangumi?.request_interval_seconds);
       setInput("bangumiMinInterval", config.sources?.bangumi?.min_interval_minutes);
       setInput("bangumiBootstrapLimit", config.sources?.bangumi?.bootstrap_limit);
+      setSelect("v2exEnabled", config.sources?.v2ex?.enabled === true ? "on" : "off");
+      setInput("v2exUsername", config.sources?.v2ex?.username);
+      {
+        const v2exToken = document.getElementById("v2exAccessToken");
+        if (v2exToken) {
+          v2exToken.value = "";
+          v2exToken.placeholder = config.sources?.v2ex?.access_token_set
+            ? "已配置（留空保持不变；填写新 PAT 以替换）"
+            : "可留空；匿名公开发现可直接使用";
+        }
+        const v2exClearToken = document.getElementById("v2exClearToken");
+        if (v2exClearToken) {
+          v2exClearToken.checked = false;
+          v2exClearToken.disabled = config.sources?.v2ex?.access_token_set !== true;
+        }
+      }
+      setCheckedValues(V2EX_SOURCE_MODE_FIELDS, config.sources?.v2ex?.source_modes);
+      setInput("v2exDailySearchBudget", config.sources?.v2ex?.daily_search_budget);
+      setInput("v2exDailyNodeBudget", config.sources?.v2ex?.daily_node_budget);
+      setInput("v2exDailyTabBudget", config.sources?.v2ex?.daily_tab_budget);
+      setInput("v2exDailyHotBudget", config.sources?.v2ex?.daily_hot_budget);
+      setInput("v2exDailyLatestBudget", config.sources?.v2ex?.daily_latest_budget);
+      setInput("v2exRequestInterval", config.sources?.v2ex?.request_interval_seconds);
+      setInput("v2exMinInterval", config.sources?.v2ex?.min_interval_minutes);
       if (!state.initBangumiUsernameTouched) {
         state.initBangumiUsername = config.sources?.bangumi?.username || "";
         // A successful prefill populated the field; a later explicit clear is
@@ -10288,6 +10410,23 @@ ${cardFeedbackBarHtml()}`;
             request_interval_seconds: getIntInput("bangumiRequestInterval", 1),
             min_interval_minutes: getIntInput("bangumiMinInterval", 3),
             bootstrap_limit: getIntInput("bangumiBootstrapLimit", 300)
+          },
+          v2ex: {
+            enabled: $("#v2exEnabled").value === "on",
+            username: getInput("v2exUsername"),
+            ...(document.getElementById("v2exClearToken")?.checked
+              ? { access_token: "" }
+              : (getInput("v2exAccessToken") || "") !== ""
+                ? { access_token: getInput("v2exAccessToken") }
+                : {}),
+            source_modes: collectCheckedValues(V2EX_SOURCE_MODE_FIELDS, ["search"]),
+            daily_search_budget: getIntInput("v2exDailySearchBudget", 120),
+            daily_node_budget: getIntInput("v2exDailyNodeBudget", 180),
+            daily_tab_budget: getIntInput("v2exDailyTabBudget", 80),
+            daily_hot_budget: getIntInput("v2exDailyHotBudget", 40),
+            daily_latest_budget: getIntInput("v2exDailyLatestBudget", 40),
+            request_interval_seconds: getIntInput("v2exRequestInterval", 2),
+            min_interval_minutes: getIntInput("v2exMinInterval", 5)
           }
         },
         scheduler: {
@@ -10313,7 +10452,8 @@ ${cardFeedbackBarHtml()}`;
             twitter: getIntInput("shareTwitter", 1),
             zhihu: getIntInput("shareZhihu", 1),
             reddit: getIntInput("shareReddit", 1),
-            bangumi: getIntInput("shareBangumi", 1)
+            bangumi: getIntInput("shareBangumi", 1),
+            v2ex: getIntInput("shareV2EX", 1)
           },
           speculation_interval_minutes: getIntInput("speculationInterval", 10),
           speculation_ttl_days: getIntInput("speculationTtl", 3),
@@ -11067,7 +11207,7 @@ ${cardFeedbackBarHtml()}`;
       safeBind(`#${id}`, "change", () => renderSourcesStatusRows(state.sourceStatus));
     });
     safeBind("#suggestSharesBtn", "click", async () => {
-      const result = await requestJson(ENDPOINTS.sourceShareSuggestion, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled_sources: { bilibili: $("#bilibiliEnabled").value === "on", xiaohongshu: $("#xhsEnabled").value === "on", douyin: $("#douyinEnabled").value === "on", youtube: $("#youtubeEnabled").value === "on", twitter: $("#twitterEnabled").value === "on", zhihu: $("#zhihuEnabled").value === "on", reddit: $("#redditEnabled").value === "on", bangumi: $("#bangumiEnabled").value === "on" }, configured_shares: buildConfigUpdate().scheduler.pool_source_shares }) });
+      const result = await requestJson(ENDPOINTS.sourceShareSuggestion, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled_sources: { bilibili: $("#bilibiliEnabled").value === "on", xiaohongshu: $("#xhsEnabled").value === "on", douyin: $("#douyinEnabled").value === "on", youtube: $("#youtubeEnabled").value === "on", twitter: $("#twitterEnabled").value === "on", zhihu: $("#zhihuEnabled").value === "on", reddit: $("#redditEnabled").value === "on", bangumi: $("#bangumiEnabled").value === "on", v2ex: $("#v2exEnabled").value === "on" }, configured_shares: buildConfigUpdate().scheduler.pool_source_shares }) });
       const shares = result?.pool_source_shares || result?.shares || result?.suggested_shares;
       if (shares) {
         setInput("shareBilibili", shares.bilibili);
@@ -11078,6 +11218,7 @@ ${cardFeedbackBarHtml()}`;
         if (shares.zhihu !== undefined) setInput("shareZhihu", shares.zhihu);
         if (shares.reddit !== undefined) setInput("shareReddit", shares.reddit);
         if (shares.bangumi !== undefined) setInput("shareBangumi", shares.bangumi);
+        if (shares.v2ex !== undefined) setInput("shareV2EX", shares.v2ex);
         renderShareOverview();
         markSettingsDirty();
         showToast("已应用来源占比建议");

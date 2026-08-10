@@ -12,6 +12,7 @@ _ALIASES = {
     "zh": "zhihu",
     "rd": "reddit",
     "bgm": "bangumi",
+    "v2": "v2ex",
 }
 
 

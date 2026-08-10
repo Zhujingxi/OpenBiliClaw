@@ -26,6 +26,7 @@ DEFAULT_DY_BOOTSTRAP_DEDUPE_HOURS = 6.0
 DEFAULT_YT_BOOTSTRAP_DEDUPE_HOURS = 6.0
 DEFAULT_ZHIHU_BOOTSTRAP_DEDUPE_HOURS = 6.0
 DEFAULT_REDDIT_BOOTSTRAP_DEDUPE_HOURS = 6.0
+DEFAULT_V2EX_BOOTSTRAP_DEDUPE_HOURS = 6.0
 
 _RECENT_TASK_STATUSES = ("pending", "in_progress", "completed", "failed")
 Notify = Callable[[str], None]
@@ -43,6 +44,7 @@ _BOOTSTRAP_TASK_TABLES: tuple[tuple[str, str, str], ...] = (
     ("yt", "yt_tasks", "bootstrap_profile"),
     ("zhihu", "zhihu_tasks", "bootstrap_events"),
     ("reddit", "reddit_tasks", "bootstrap_events"),
+    ("v2ex", "v2ex_tasks", "bootstrap_profile"),
 )
 
 
@@ -115,7 +117,7 @@ def _serialized_enqueue(
 
 
 def _find_active_bootstrap_task(database: Any) -> tuple[str, str] | None:
-    """Return one pending/in-progress account bootstrap across all five sources."""
+    """Return one pending/in-progress account bootstrap across all six sources."""
 
     conn = getattr(database, "conn", None)
     execute = getattr(conn, "execute", None)
@@ -240,6 +242,11 @@ def seed_guided_init_attempts(
         # above; keep this distinction explicit so future status refactors do
         # not turn a logged-out result into a successful schedule stamp.
         eligible.append("reddit")
+    if str(statuses.get("v2ex") or "").strip().lower() in {"ok", "empty"}:
+        # V2EX's extension contract proves ``empty`` with a recognized scope
+        # layout and an affirmative login state. ``partial`` deliberately stays
+        # retryable because at least one requested scope was not authoritative.
+        eligible.append("v2ex")
     if not eligible:
         return ()
 
@@ -648,11 +655,141 @@ def enqueue_reddit_bootstrap(
     )
 
 
+@_serialized_enqueue
+def enqueue_v2ex_bootstrap(
+    database: Any,
+    *,
+    username: str = "",
+    config: Any | None = None,
+    force: bool = False,
+    incremental: bool = False,
+    profile_update: bool = False,
+    smoke_only: bool = False,
+    profile_rebuild: bool = False,
+    notify: Notify | None = None,
+) -> BootstrapEnqueueResult:
+    """Enqueue a V2EX browser bootstrap task without reading browser secrets."""
+
+    from openbiliclaw.sources.v2ex_tasks import V2EX_BOOTSTRAP_SCOPES, V2EXTaskQueue
+
+    def configured_limit(name: str, default: int, maximum: int) -> int:
+        try:
+            value = int(getattr(config, name, default))
+        except (TypeError, ValueError):
+            value = default
+        return min(maximum, max(1, value))
+
+    max_topics = configured_limit("bootstrap_topics_limit", 100, 1000)
+    max_replies = configured_limit("bootstrap_replies_limit", 300, 5000)
+    max_favorites = configured_limit("bootstrap_favorites_limit", 300, 5000)
+    max_pages = configured_limit("bootstrap_max_pages_per_scope", 20, 100)
+    normalized_username = str(username or "").strip()
+    try:
+        queue = V2EXTaskQueue(database)
+        with _bootstrap_admission_transaction(database):
+            dedupe_hours = _dedupe_hours(
+                "OPENBILICLAW_V2EX_BOOTSTRAP_DEDUPE_HOURS",
+                DEFAULT_V2EX_BOOTSTRAP_DEDUPE_HOURS,
+            )
+            find_recent = getattr(queue, "find_recent_task", None)
+            if not force and dedupe_hours > 0 and callable(find_recent):
+                recent = find_recent(
+                    "bootstrap_profile",
+                    recent_hours=dedupe_hours,
+                    statuses=_RECENT_TASK_STATUSES,
+                )
+                if recent is not None:
+                    recent_payload: dict[str, Any] = {}
+                    try:
+                        parsed_recent_payload = json.loads(str(recent.get("payload_json") or "{}"))
+                        if isinstance(parsed_recent_payload, dict):
+                            recent_payload = parsed_recent_payload
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        recent_payload = {}
+                    expected_contract = {
+                        "username": normalized_username.casefold(),
+                        "max_topics": max_topics,
+                        "max_replies": max_replies,
+                        "max_favorite_topics": max_favorites,
+                        "max_pages_per_scope": max_pages,
+                        "incremental": bool(incremental),
+                        "profile_update": bool(profile_update),
+                        "smoke_only": bool(smoke_only),
+                        "profile_rebuild": bool(profile_rebuild),
+                    }
+                    recent_contract = {
+                        "username": str(recent_payload.get("username") or "").strip().casefold(),
+                        "max_topics": recent_payload.get("max_topics"),
+                        "max_replies": recent_payload.get("max_replies"),
+                        "max_favorite_topics": recent_payload.get("max_favorite_topics"),
+                        "max_pages_per_scope": recent_payload.get("max_pages_per_scope"),
+                        "incremental": bool(recent_payload.get("incremental")),
+                        "profile_update": bool(recent_payload.get("profile_update")),
+                        "smoke_only": bool(recent_payload.get("smoke_only")),
+                        "profile_rebuild": bool(recent_payload.get("profile_rebuild")),
+                    }
+                    if recent_contract != expected_contract:
+                        recent = None
+                    elif recent is not None:
+                        from openbiliclaw.sources.task_result_protocol import (
+                            staged_terminal_status,
+                        )
+
+                        terminal_status = staged_terminal_status(recent.get("result_json"))
+                        if terminal_status and terminal_status not in {"ok", "empty"}:
+                            # A partial/degraded snapshot is evidence that at
+                            # least one scope was not authoritative. It remains
+                            # retryable and must never satisfy a later full init.
+                            recent = None
+                if recent is not None:
+                    reused = _recent_reuse_result(
+                        recent,
+                        message=(
+                            "  [dim]复用最近的 V2EX bootstrap 任务"
+                            "({status})；需要重新拉取可设置 "
+                            "OPENBILICLAW_V2EX_BOOTSTRAP_DEDUPE_HOURS=0。[/dim]"
+                        ),
+                        notify=notify,
+                    )
+                    if reused is not None:
+                        return reused
+
+            active = _active_bootstrap_result(database, notify=notify)
+            if active is not None:
+                return active
+
+            payload = _incremental_payload(
+                {
+                    "scopes": list(V2EX_BOOTSTRAP_SCOPES),
+                    "username": normalized_username,
+                    "max_topics": max_topics,
+                    "max_replies": max_replies,
+                    "max_favorite_topics": max_favorites,
+                    "max_pages_per_scope": max_pages,
+                    "profile_update": bool(profile_update),
+                    "smoke_only": bool(smoke_only),
+                    "profile_rebuild": bool(profile_rebuild),
+                },
+                incremental,
+            )
+            task_id = queue.enqueue_with_id("bootstrap_profile", payload, daily_budget=10)
+    except Exception as exc:
+        _notify(notify, f"  [yellow]V2EX 初始化事件未拉取: {exc}[/yellow]")
+        return BootstrapEnqueueResult(task_id=None, created=False, reason="enqueue_error")
+
+    return _created_or_budget_result(
+        task_id,
+        budget_message="  [yellow]V2EX 初始化事件未拉取: 今日任务预算已用完。[/yellow]",
+        notify=notify,
+    )
+
+
 __all__ = [
     "BootstrapEnqueueResult",
     "SOURCE_BOOTSTRAP_DECISION_LOCK",
     "enqueue_dy_bootstrap",
     "enqueue_reddit_bootstrap",
+    "enqueue_v2ex_bootstrap",
     "enqueue_xhs_bootstrap",
     "enqueue_yt_bootstrap",
     "enqueue_zhihu_bootstrap",

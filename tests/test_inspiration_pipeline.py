@@ -28,6 +28,7 @@ if TYPE_CHECKING:
 
 _BILI = "bilibili"
 _BANGUMI = "bangumi"
+_V2EX = "v2ex"
 _CLOCK = datetime(2026, 7, 6, 12, 0, tzinfo=UTC)
 
 
@@ -217,6 +218,29 @@ async def test_pipeline_materializes_bangumi_axis_keywords(db: Database) -> None
 
     assert ledger == {_BANGUMI: 1}
     assert host.inserted == [(_BANGUMI, ["时间循环 独立游戏"])]
+
+
+async def test_pipeline_materializes_v2ex_axis_keywords(db: Database) -> None:
+    profile = _profile()
+    host = _FakeHost(profile=profile)
+    payload = _axis_payload()
+    keywords = payload["keywords"]
+    assert isinstance(keywords, list)
+    assert isinstance(keywords[0], dict)
+    keywords[0]["platform"] = _V2EX
+    keywords[0]["core_concept"] = "本地 Agent 上下文管理"
+    keywords[0]["decoration"] = "经验"
+    pipeline = _make_pipeline(
+        db,
+        llm=_FakeLLM(payload=payload),
+        host=host,
+        provider=_FakeProvider(previews_by_query={}),
+    )
+
+    ledger = await pipeline._run_inspiration_stage([_V2EX], profile=profile, digest="d1")
+
+    assert ledger == {_V2EX: 1}
+    assert host.inserted == [(_V2EX, ["本地 Agent 上下文管理 经验"])]
 
 
 async def test_pipeline_llm_failure_falls_back_deterministically(db: Database) -> None:

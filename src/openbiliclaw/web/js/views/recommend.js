@@ -1176,6 +1176,7 @@ function renderCard(rawItem, index = 0) {
   card.className = "card";
   const url = buildContentUrl(item);
   const cardMedia = getRecommendationCardKind(item);
+  if (cardMedia.kind === "text") card.classList.add("is-text-only");
   const imageAttrs = getRecommendationImageLoadingAttrs(index);
   const publishedHtml = publishedTimeHtml(item);
 

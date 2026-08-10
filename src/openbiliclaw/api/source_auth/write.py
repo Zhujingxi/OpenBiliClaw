@@ -286,6 +286,26 @@ CREDENTIAL_SPECS: dict[str, CredentialSpec] = {
             "Bangumi 校验一次。填好后可点「测试连接」用 /v0/me 复验。"
         ),
     ),
+    "v2ex": CredentialSpec(
+        slug="v2ex",
+        # PATs remain config-owned.  The only value accepted here is the
+        # privacy-preserving browser heartbeat: one boolean, never a cookie.
+        kinds=("login_state",),
+        opaque_credential=True,
+        unverified_reason=(
+            "V2EX 登录态只保存浏览器上报的布尔值，后端不读取 Cookie；"
+            "PAT 在 [sources.v2ex] 或环境变量中配置。"
+        ),
+        form_kind="none",
+        form_label="V2EX PAT（可选）",
+        env_var_path="sources.v2ex.token_env",
+        env_var_default="OPENBILICLAW_V2EX_TOKEN",
+        login_url="https://www.v2ex.com/help/api",
+        help_text=(
+            "V2EX 公开发现无需登录。可选 PAT 用于识别账号和增强 API 2.0，"
+            "请在设置 / config.toml 的 [sources.v2ex] 中填写，或使用 token_env 指定环境变量。"
+        ),
+    ),
 }
 
 
@@ -689,8 +709,13 @@ def persist_credential(
     this function stays a dumb writer.
     """
     if kind == "login_state":
-        setter = f"set_{'xhs' if slug == 'xiaohongshu' else 'zhihu'}_login_state"
-        getter = f"get_{'xhs' if slug == 'xiaohongshu' else 'zhihu'}_login_state"
+        login_state_prefix = {
+            "xiaohongshu": "xhs",
+            "zhihu": "zhihu",
+            "v2ex": "v2ex",
+        }.get(slug, "")
+        setter = f"set_{login_state_prefix}_login_state"
+        getter = f"get_{login_state_prefix}_login_state"
         if database is None or not hasattr(database, setter):
             return PersistResult(persisted=False)
         getattr(database, setter)(bool(value))

@@ -106,6 +106,7 @@ _PLANNER_PLATFORMS: tuple[str, ...] = (
     "zhihu",
     "reddit",
     "bangumi",
+    "v2ex",
 )
 _BILIBILI = "bilibili"
 _PLATFORM_QUERY_STYLES: dict[str, dict[str, tuple[str, ...]]] = {
@@ -264,6 +265,11 @@ _PLATFORM_QUERY_STYLES: dict[str, dict[str, tuple[str, ...]]] = {
         ),
         "examples": ("赛博朋克 动画", "独立游戏 时间循环"),
         "avoid_markers": ("爆款", "热议", "速看", "探店"),
+    },
+    "v2ex": {
+        "native_markers": ("讨论", "经验", "折腾", "求助", "实测", "踩坑", "方案", "开源"),
+        "examples": ("本地运行 Agent 讨论", "家庭网络折腾 实测 踩坑"),
+        "avoid_markers": ("短视频", "种草笔记"),
     },
 }
 # The planner reclaims in-flight rows that leaked past the claim lease before

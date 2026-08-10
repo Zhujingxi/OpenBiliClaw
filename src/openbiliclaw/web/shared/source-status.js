@@ -64,13 +64,11 @@
   /** Platform slugs the contract covers, in settings-page display order. */
   const SOURCE_KEYS = Object.freeze([
     "bilibili", "xiaohongshu", "douyin", "youtube", "twitter", "zhihu", "reddit",
-    // Not on the auth contract yet: the backend sends `auth: null` for it and
-    // the legacy-`state` fallback below renders it. It belongs in the roster
-    // regardless — the roster answers "which sources exist", not "which sources
-    // have a contract", and leaving it out would hide the platform from all
-    // three settings surfaces at once.
-    "bangumi",
+    "bangumi", "v2ex",
   ]);
+
+  /** Sources that provide a guided-init signal collector. */
+  const INIT_SOURCE_KEYS = Object.freeze([...SOURCE_KEYS]);
 
   /**
    * Display names for the source *settings* surfaces.
@@ -88,6 +86,7 @@
     zhihu: "知乎",
     reddit: "Reddit",
     bangumi: "Bangumi",
+    v2ex: "V2EX",
   });
 
   function sourceLabel(key) {
@@ -218,6 +217,22 @@
    * panel paint it the same grey as "we have no idea" (spec D6).
    */
   const ACCESS_NO_AUTH = Object.freeze({ tone: "public", label: "无需登录" });
+
+  const CAPABILITY_AUTH_MODES = Object.freeze({
+    anonymous: "匿名可用",
+    "optional-credential": "匿名可用，可选凭据增强",
+    "login-required": "需要浏览器登录",
+  });
+
+  const CAPABILITY_READINESS = Object.freeze({
+    ready: { tone: "ready", label: "已就绪" },
+    login_required: { tone: "warning", label: "需要登录" },
+    identity_required: { tone: "warning", label: "等待识别账号" },
+    identity_mismatch: { tone: "danger", label: "账号冲突" },
+    identity_switch_required: { tone: "warning", label: "需要重新初始化" },
+    stale: { tone: "warning", label: "登录态已过期" },
+    unavailable: { tone: "muted", label: "当前不可用" },
+  });
 
   /**
    * A source needing no login can still carry a verifiable credential.
@@ -507,6 +522,51 @@
   }
 
   /**
+   * Fail-closed descriptor for one entry in ``auth.capabilities``.
+   *
+   * A capability is ready only when the backend sends both ``ready=true`` and
+   * ``state=ready``.  This deliberately refuses to infer private readiness from
+   * a source-wide anonymous verdict.
+   */
+  function describeCapabilityReadiness(value) {
+    if (!value || typeof value !== "object") {
+      return {
+        known: false,
+        ready: false,
+        required: true,
+        mode: "",
+        state: "unavailable",
+        tone: "muted",
+        label: "后端未提供能力状态",
+        detail: "当前后端无法判断这项能力是否可用。",
+      };
+    }
+    const mode = text(value.mode);
+    const state = text(value.state);
+    const spec = CAPABILITY_READINESS[state] || CAPABILITY_READINESS.unavailable;
+    const known = Boolean(CAPABILITY_AUTH_MODES[mode] && CAPABILITY_READINESS[state]);
+    const ready = known && value.ready === true && state === "ready";
+    return {
+      known,
+      ready,
+      required: value.required !== false,
+      mode,
+      state,
+      tone: ready ? "ready" : spec.tone,
+      label: ready ? CAPABILITY_READINESS.ready.label : spec.label,
+      detail: text(value.detail),
+    };
+  }
+
+  function describeSourceCapability(item, capability) {
+    const auth = authContract(item);
+    const capabilities = auth && typeof auth.capabilities === "object"
+      ? auth.capabilities
+      : null;
+    return describeCapabilityReadiness(capabilities && capabilities[text(capability)]);
+  }
+
+  /**
    * Return an actionable problem for an enabled source, or ``null``.
    *
    * This is deliberately narrower than ``describeAccess``: ``unverified`` and
@@ -706,6 +766,8 @@
 
   const api = {
     ACCESS_NO_AUTH,
+    CAPABILITY_AUTH_MODES,
+    CAPABILITY_READINESS,
     EVIDENCE_ABSENT,
     EVIDENCE_HINTS,
     OFFLINE_DETAIL,
@@ -713,6 +775,7 @@
     SOURCE_ACCESS_STATE,
     SOURCE_ACCESS_VERIFICATION,
     SOURCE_KEYS,
+    INIT_SOURCE_KEYS,
     SOURCE_LABELS,
     TONE_COLORS,
     UNKNOWN_ACCESS,
@@ -721,8 +784,10 @@
     VERIFY_TONES,
     WRITABLE_FORM_KINDS,
     describeAccess,
+    describeCapabilityReadiness,
     describeCredential,
     describeSourceIssue,
+    describeSourceCapability,
     describeVerifiedAt,
     describeVerifyError,
     describeVerifyResult,

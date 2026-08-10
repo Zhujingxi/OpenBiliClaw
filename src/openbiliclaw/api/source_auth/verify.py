@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
@@ -81,6 +82,7 @@ VERIFY_ACTIONS: dict[str, VerifyAction] = {
     # makes. With no token the probe returns ``has_credential=False`` and the
     # click resolves to ``indeterminate`` without going out.
     "bangumi": "live_probe",
+    "v2ex": "live_probe",
 }
 
 # ``browser_heartbeat`` is not a generic "everything else is Zhihu" action.
@@ -587,6 +589,91 @@ async def _probe_bangumi(
     )
 
 
+async def _probe_v2ex(
+    cfg: Config, probes: LiveProbeCache, *, cookie: str | None, record: bool
+) -> LiveProbeOutcome:
+    """Live probe V2EX's optional PAT with ``GET /api/v2/member``."""
+
+    from openbiliclaw.api.source_auth.write import credential_fingerprint
+    from openbiliclaw.sources.v2ex_client import V2EXAPIError, V2EXClient, member_username
+
+    if cookie is None:
+        v2ex_cfg = getattr(cfg.sources, "v2ex", None)
+        token_env = str(
+            getattr(v2ex_cfg, "token_env", "OPENBILICLAW_V2EX_TOKEN") or "OPENBILICLAW_V2EX_TOKEN"
+        ).strip()
+        cookie = str(os.environ.get(token_env, "") or "") if token_env else ""
+        if not str(cookie).strip():
+            cookie = str(getattr(v2ex_cfg, "access_token", "") or "")
+    token = str(cookie or "").strip()
+    if not token:
+        if record:
+            probes.clear("v2ex")
+        return LiveProbeOutcome(
+            slug="v2ex",
+            has_credential=False,
+            authenticated=False,
+            network_error=False,
+            message="V2EX 为公开源，未配置 PAT；如需 API 2.0 身份验证，请先填写 PAT。",
+        )
+
+    fingerprint = credential_fingerprint("v2ex", token)
+    try:
+        async with V2EXClient(access_token=token, request_interval_seconds=0) as client:
+            payload = await client.get_member()
+        username = member_username(payload)
+    except V2EXAPIError as exc:
+        if exc.code == "unauthorized":
+            if record:
+                probes.record(
+                    "v2ex",
+                    authenticated=False,
+                    detail=str(exc),
+                    network_error=False,
+                    fingerprint=fingerprint,
+                )
+            return LiveProbeOutcome(
+                slug="v2ex",
+                has_credential=True,
+                authenticated=False,
+                network_error=False,
+                message="V2EX 拒绝了该 PAT（缺失、无效或已过期）。",
+            )
+        if record:
+            probes.record(
+                "v2ex",
+                authenticated=False,
+                detail=str(exc),
+                network_error=True,
+                fingerprint=fingerprint,
+            )
+        return LiveProbeOutcome(
+            slug="v2ex",
+            has_credential=True,
+            authenticated=False,
+            network_error=True,
+            message=f"V2EX PAT 验证未能完成（{exc}），暂时无法判定。",
+        )
+
+    if record:
+        probes.record(
+            "v2ex",
+            authenticated=True,
+            detail=f"已识别 V2EX 账号（{username}）。",
+            network_error=False,
+            fingerprint=fingerprint,
+            username=username,
+        )
+    return LiveProbeOutcome(
+        slug="v2ex",
+        has_credential=True,
+        authenticated=True,
+        network_error=False,
+        message=f"V2EX PAT 有效，已识别账号（{username}）。",
+        username=username,
+    )
+
+
 async def _probe_twitter(
     cfg: Config,
     database: Any,
@@ -751,6 +838,41 @@ async def run_live_probe(
         )
     if slug == "bangumi":
         return await _probe_bangumi(cfg, probes, cookie=cookie, record=record)
+    if slug == "v2ex":
+        outcome = await _probe_v2ex(cfg, probes, cookie=cookie, record=record)
+        token = str(cookie or "").strip()
+        if not token:
+            v2ex_cfg = getattr(cfg.sources, "v2ex", None)
+            token_env = str(
+                getattr(v2ex_cfg, "token_env", "OPENBILICLAW_V2EX_TOKEN")
+                or "OPENBILICLAW_V2EX_TOKEN"
+            ).strip()
+            token = str(os.environ.get(token_env, "") or "").strip() if token_env else ""
+            if not token:
+                token = str(getattr(v2ex_cfg, "access_token", "") or "").strip()
+        from openbiliclaw.api.source_auth.write import credential_fingerprint
+
+        fingerprint = credential_fingerprint("v2ex", token)
+        if (
+            record
+            and outcome.authenticated
+            and outcome.username
+            and hasattr(database, "set_v2ex_pat_identity")
+        ):
+            if fingerprint:
+                database.set_v2ex_pat_identity(
+                    outcome.username,
+                    credential_fingerprint=fingerprint,
+                )
+        elif (
+            record
+            and outcome.has_credential
+            and not outcome.authenticated
+            and not outcome.network_error
+            and hasattr(database, "clear_v2ex_pat_identity")
+        ):
+            database.clear_v2ex_pat_identity(credential_fingerprint=fingerprint)
+        return outcome
     raise KeyError(slug)
 
 

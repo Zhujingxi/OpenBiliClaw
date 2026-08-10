@@ -448,15 +448,18 @@ test("getRecommendationCardKind keeps a cover card for video items with a cover"
   assert.equal(result.text, "");
 });
 
-test("popup recommendation renderer has text-card styles for X items", () => {
+test("popup recommendation renderer distinguishes text cards from image failures", () => {
   const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
   const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
 
-  assert.match(popupJs, /cover\.classList\.add\("is-fallback", "is-text-card"\)/);
+  assert.match(popupJs, /cover\.classList\.add\("is-text-card"\)/);
+  assert.doesNotMatch(popupJs, /cover\.classList\.add\("is-fallback", "is-text-card"\)/);
+  assert.match(popupJs, /card\.classList\.add\("is-text-only"\)/);
   assert.match(popupJs, /textNode\.className = "recommendation-cover-text"/);
   assert.match(popupJs, /source-platform-\$\{platformKey\}/);
   assert.match(popupJs, /twitter: "X"/);
   assert.match(popupHtml, /\.recommendation-cover\.is-text-card/);
+  assert.match(popupHtml, /aspect-ratio: auto/);
   assert.match(popupHtml, /\.recommendation-cover-text/);
 });
 

@@ -260,11 +260,12 @@ const INIT_SOURCE_LABEL_FALLBACK = {
   zhihu: "知乎",
   reddit: "Reddit",
   bangumi: "Bangumi",
+  v2ex: "V2EX",
 };
 const INIT_SOURCE_DEFAULT_CHECKED = new Set(["bilibili"]);
 const _initSourceStatus = globalThis.OpenBiliClawSourceStatus || null;
-const INIT_SOURCE_KEYS = _initSourceStatus?.SOURCE_KEYS
-  ? [..._initSourceStatus.SOURCE_KEYS]
+const INIT_SOURCE_KEYS = (_initSourceStatus?.INIT_SOURCE_KEYS || _initSourceStatus?.SOURCE_KEYS)
+  ? [...(_initSourceStatus.INIT_SOURCE_KEYS || _initSourceStatus.SOURCE_KEYS)]
   : Object.keys(INIT_SOURCE_LABEL_FALLBACK);
 export const INIT_SOURCE_OPTIONS = INIT_SOURCE_KEYS.map((key) => ({
   key,

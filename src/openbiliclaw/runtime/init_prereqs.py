@@ -64,6 +64,7 @@ _PLATFORM_SOURCE_FIELDS = (
     "zhihu",
     "reddit",
     "bangumi",
+    "v2ex",
 )
 
 

@@ -2721,6 +2721,10 @@ PLATFORM_SUPPLY_ADVANTAGES: dict[str, str] = {
         "动画 / 书籍 / 游戏 / 音乐 / 三次元作品目录。优先作品题材、IP、原作、"
         "作者、监督、制作公司、游戏平台等可检索实体,避免社媒热词。"
     ),
+    "v2ex": (
+        "真实技术与生活讨论 / 经验复盘 / 折腾记录 / 求助 / 开源项目。关键词应保留"
+        "问题或主题语义，优先具体 Node 语境，避免泛泛的论坛首页词。"
+    ),
 }
 
 
@@ -2765,7 +2769,7 @@ _MERGED_KEYWORDS_SYSTEM_PROMPT = (
     "<rules>\n"
     "1. 输出必须是严格 JSON 对象,不要附带解释。\n"
     "2. JSON 的 key 必须是 <platforms> 里出现的 platform 标识符"
-    "(bilibili / xiaohongshu / douyin / youtube / twitter / zhihu / reddit / bangumi),"
+    "(bilibili / xiaohongshu / douyin / youtube / twitter / zhihu / reddit / bangumi / v2ex),"
     "每个 key 的值是一个"
     "字符串数组。**只输出本轮 <platforms> 里给到的平台**,不要凭空加平台。"
     "唯一例外:只有 user 消息含 <explore_domains> 时,才可以额外输出"
@@ -2805,6 +2809,7 @@ _MERGED_KEYWORDS_SYSTEM_PROMPT = (
     '  "zhihu": ["AI 工具 经验", "城市规划 问答"],\n'
     '  "reddit": ["local LLM agents", "open source AI tooling"],\n'
     '  "bangumi": ["赛博朋克 动画", "时间循环 独立游戏"],\n'
+    '  "v2ex": ["本地运行 Agent 讨论", "家庭网络折腾 经验"],\n'
     '  "explore_domains": [\n'
     '    {"domain": "城市声音采样", "novelty_level": 0.84, '
     '"queries": ["城市 声音 采样 纪录片", "街头 声音 设计 vlog"]}\n'
@@ -2833,7 +2838,7 @@ Return ONLY a strict JSON object with exactly this shape:
     {
       "interest": "string",
       "axis_id_or_label": "existing axis_id or exact axis_label",
-      "platform": "bilibili|xiaohongshu|douyin|youtube|twitter|zhihu|reddit|bangumi",
+      "platform": "bilibili|xiaohongshu|douyin|youtube|twitter|zhihu|reddit|bangumi|v2ex",
       "core_concept": "short searchable concept",
       "decoration": "optional style marker",
       "recency_sensitivity": "low|medium|high"

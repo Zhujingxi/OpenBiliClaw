@@ -135,6 +135,7 @@ const SOURCE_LABEL_MAP = {
   zhihu: "知乎",
   reddit: "Reddit",
   bangumi: "Bangumi",
+  v2ex: "V2EX",
   web: "Web",
 };
 
@@ -157,6 +158,8 @@ const SOURCE_ALIAS_MAP = {
   reddit: "reddit",
   bgm: "bangumi",
   bangumi: "bangumi",
+  v2: "v2ex",
+  v2ex: "v2ex",
 };
 
 const RUNTIME_TOPIC_LABEL_MAP = {
@@ -204,6 +207,11 @@ const RUNTIME_TOPIC_LABEL_MAP = {
   "bangumi-search": "Bangumi 搜索",
   "bangumi-ranked": "Bangumi 排名",
   "bangumi-latest": "Bangumi 按日期浏览",
+  "v2ex-search": "V2EX 搜索",
+  "v2ex-node": "V2EX Node",
+  "v2ex-tab": "V2EX Tab",
+  "v2ex-hot": "V2EX 热门",
+  "v2ex-latest": "V2EX 最新",
 };
 
 function urlHostMatches(url, hostnames) {
@@ -232,6 +240,7 @@ export function normalizeSourcePlatform(item) {
     if (urlHostMatches(url, ["zhihu.com", "zhuanlan.zhihu.com"])) return "zhihu";
     if (urlHostMatches(url, ["reddit.com", "redd.it"])) return "reddit";
     if (urlHostMatches(url, ["bgm.tv", "bangumi.tv"])) return "bangumi";
+    if (urlHostMatches(url, ["v2ex.com"])) return "v2ex";
     return "web";
   }
   if (normalizeText(item?.bvid)) return "bilibili";
@@ -270,6 +279,7 @@ function formatRuntimeTopicLabel(value) {
   if (key.startsWith("yt-") || key.startsWith("youtube-")) return "YouTube";
   if (key.startsWith("reddit-")) return "Reddit";
   if (key.startsWith("bangumi-")) return "Bangumi";
+  if (key.startsWith("v2ex-")) return "V2EX";
   return text;
 }
 
@@ -316,6 +326,7 @@ export function buildContentUrl(item) {
   if (platform === "youtube") return buildYouTubeUrl(vid);
   if (platform === "twitter") return buildTwitterUrl(vid);
   if (platform === "bangumi") return `https://bgm.tv/subject/${encodeURIComponent(vid)}`;
+  if (platform === "v2ex") return `https://www.v2ex.com/t/${encodeURIComponent(vid)}`;
   if (platform === "zhihu" || platform === "reddit") return "";
   return buildVideoUrl(vid);
 }

@@ -62,6 +62,10 @@ const entrypoints = [
     outfile: resolve(root, `${outDir}/content/reddit.js`),
   },
   {
+    entry: resolve(root, "src/content/v2ex.ts"),
+    outfile: resolve(root, `${outDir}/content/v2ex.js`),
+  },
+  {
     entry: resolve(root, "src/content/x.ts"),
     outfile: resolve(root, `${outDir}/content/x.js`),
   },

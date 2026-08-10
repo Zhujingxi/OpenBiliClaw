@@ -19,11 +19,11 @@
 
 ## OpenBiliClaw in 10 Seconds
 
-A local-first AI discovery agent that learns your taste across Bilibili, Xiaohongshu (RedNote), Douyin (Chinese TikTok), YouTube, X, Zhihu, Reddit, Bangumi, and the open web — without handing your profile to another platform.
+A local-first AI discovery agent that learns your taste across Bilibili, Xiaohongshu (RedNote), Douyin (Chinese TikTok), YouTube, X, Zhihu, Reddit, Bangumi, V2EX, and the open web — without handing your profile to another platform.
 
 | Cross-platform | Local-first | Trainable |
 |---|---|---|
-| Bilibili / Xiaohongshu / Douyin / YouTube / X / Zhihu / Reddit / Bangumi / Web | Data stays in your local SQLite by default | Likes, dislikes, and chat feedback shape future recommendations |
+| Bilibili / Xiaohongshu / Douyin / YouTube / X / Zhihu / Reddit / Bangumi / V2EX / Web | Data stays in your local SQLite by default | Likes, dislikes, and chat feedback shape future recommendations |
 
 <p align="center">
   <a href="https://chromewebstore.google.com/detail/cdfjfkdjjhdaccbldipkjhpibnfbiamg"><b>Install the browser extension</b></a>
@@ -50,12 +50,12 @@ Four steps for most users. Firefox, Docker, scripted, and manual setup paths all
    Please follow https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docs/agent-install.md to deploy the OpenBiliClaw backend for me (use Bash `curl` to fetch the document, NOT WebFetch — WebFetch summarises markdown and drops critical commands).
    ```
 
-3. **Connect a source** — log in to [Bilibili](https://www.bilibili.com) (the default init source), or choose Xiaohongshu / Douyin / YouTube / X / Zhihu / Reddit. Bangumi discovery needs no login; enter a public username only if you want public collections to seed the profile.
+3. **Connect a source** — log in to [Bilibili](https://www.bilibili.com) (the default init source), or choose Xiaohongshu / Douyin / YouTube / X / Zhihu / Reddit. Bangumi and V2EX discovery need no login; enter a Bangumi public username for collection-based profile init, or optionally add a V2EX PAT for API 2.0 read-only enrichment. Guided init can also use the extension to import V2EX topics, replies, favorite topics, and favorite nodes.
 4. **Open the UI** — visit `http://127.0.0.1:8420/web`, or scan the extension QR code to open `http://<your-LAN-IP>:8420/m/` on your phone and save it to your home screen.
 
 ## Why OpenBiliClaw?
 
-> The name comes from Bilibili (`Bili` = Bilibili, `Claw` = "the claw that grabs content for you") — the project started as a Bilibili-only tool. Since v0.3.0 it has evolved into a general cross-platform Agent covering Bilibili / Xiaohongshu / Douyin / YouTube / X / Zhihu / Reddit / Bangumi and the open web, with more platforms on the roadmap.
+> The name comes from Bilibili (`Bili` = Bilibili, `Claw` = "the claw that grabs content for you") — the project started as a Bilibili-only tool. Since v0.3.0 it has evolved into a general cross-platform Agent covering Bilibili / Xiaohongshu / Douyin / YouTube / X / Zhihu / Reddit / Bangumi / V2EX and the open web, with more platforms on the roadmap.
 
 Recommendation systems are essentially a **middleman** — the platform sits between millions of videos and millions of users, matching and distributing content at scale. Modern systems are far more sophisticated than "just optimizing CTR": they jointly weigh click-through rate, completion rate, like/coin probability, dwell time, user retention, creator ecosystem health, ad revenue, and a dozen other objectives, compressing them into a single weighted ranking score. Sounds scientific, but here's the catch: **the weights are set by the platform, and the optimization targets ultimately serve the platform** — user satisfaction is valued as a means to retention and monetization, not as an end in itself. You think you're choosing content, but really the middleman decides what you get to see. The result: recommendations look more and more like what you've already watched, and the occasional surprise is pure luck.
 
@@ -78,7 +78,7 @@ Core behavior, recommendation, and dialogue data lives in SQLite on your disk; c
 > | | Bilibili Official | Keyword Filter Plugins | OpenBiliClaw |
 > |---|---|---|---|
 > | Recommendation logic | Collaborative filtering | Tag matching | Psychological profiling + 5-layer memory |
-> | Content sources | Single platform | Single platform | Cross-platform: Bilibili · Xiaohongshu · Douyin · YouTube · X · Zhihu · Reddit · Bangumi · more |
+> | Content sources | Single platform | Single platform | Cross-platform: Bilibili · Xiaohongshu · Douyin · YouTube · X · Zhihu · Reddit · Bangumi · V2EX · more |
 > | Filter bubble | Gets narrower | Doesn't address it | Speculative interests actively break it |
 > | Data ownership | Platform-owned | Usually cloud | 100% local |
 > | Explains why | "Guess you'll like" | None | Friend-like explanations |
@@ -315,7 +315,7 @@ With a public DNS name, the shortest path is the [`docker-compose.https.yml`](do
 
 ### 3. Log in to content platforms in the same browser
 
-By default, log in to [Bilibili](https://www.bilibili.com) and keep Bilibili selected to build the first profile and recommendations. If you do not want Bilibili, deselect it during init and select another logged-in source such as [Xiaohongshu](https://www.xiaohongshu.com), [Douyin](https://www.douyin.com), [YouTube](https://www.youtube.com), [X](https://x.com), [Zhihu](https://www.zhihu.com), or [Reddit](https://www.reddit.com), or choose Bangumi and enter a public username. Keep at least one source that can return profile signals. Bangumi without a username still supports anonymous discovery, but cannot initialize a profile by itself.
+By default, log in to [Bilibili](https://www.bilibili.com) and keep Bilibili selected to build the first profile and recommendations. If you do not want Bilibili, deselect it during init and select another logged-in source such as [Xiaohongshu](https://www.xiaohongshu.com), [Douyin](https://www.douyin.com), [YouTube](https://www.youtube.com), [X](https://x.com), [Zhihu](https://www.zhihu.com), or [Reddit](https://www.reddit.com), choose Bangumi and enter a public username, or choose V2EX and let the extension read its four read-only bootstrap scopes. Keep at least one source that can return profile signals. Bangumi without a username still supports anonymous discovery, and V2EX without an online extension still supports discovery but produces no browser bootstrap events.
 
 ### 4. Open Desktop or Mobile Web
 
@@ -390,6 +390,7 @@ OpenBiliClaw does not store your platform passwords or bypass login. It reuses t
 | **Zhihu** | Log in normally at https://www.zhihu.com in the same browser | `init --yes-zhihu`, `fetch-zhihu`, `discover --source zhihu`, and `discover-zhihu*` return nothing |
 | **Reddit** | Log in normally at https://www.reddit.com in the same browser; the extension syncs `reddit_session` for backend-installed rdt-cli, and `rdt login` is only a fallback when the extension is unavailable | `fetch-reddit --mode bootstrap` returns no init signals; without a synced rdt credential, the rdt path falls back to extension tasks |
 | **Bangumi** | No login required; optionally enter a public username for public collections, or a personal token for private ones; the extension only does account identity recognition on bgm.tv / bangumi.tv (no cookies, no browsing capture) | Without a username, Bangumi cannot be the only profile-init source, but anonymous search/ranked/date discovery still works |
+| **V2EX** | No login required; optionally configure a PAT; guided init / incremental tasks use the extension to read public rendered fields for topics, replies, favorite topics, and favorite nodes | Anonymous search/node/tab/hot/latest discovery still works without the extension; favorite scopes require an actual logged-in browser session |
 
 Xiaohongshu, Douyin, YouTube, and Zhihu use Chrome extension tasks; Reddit defaults to backend-installed rdt-cli for steady-state discovery and keeps the extension for init signals; X discovery uses server-side cookie replay. None of these read paths needs an extra CDP debugging Chrome. Reddit/X, YouTube, Xiaohongshu, Douyin, and Zhihu native-save executors are wired 6/6 and fixture-tested; in the 2026-07-14 real-account regression, every platform's favorite and watch-later/favorite-fallback path finished `synced/already_synced`. `[sources.browser].cdp_url` remains available only for generic Web / custom webpage fetching.
 
@@ -563,7 +564,7 @@ The whole loop stays local — the agent host just calls the CLI bridge; your pr
 - 🧠 **Five-Layer Soul Profile** — Event → Preference → Awareness → Insight → Soul, inferring MBTI, cognitive style, and deep needs ([details](docs/modules/soul.md))
 - 🔮 **Interest Probes** — psychological bridging guesses domains you might love but have never explored; right guesses become real interests, wrong ones quietly retire
 - 🧭 **Avoidance Probes** — proactively confirms content forms and style boundaries you want to avoid; nothing is filtered until you confirm
-- 🌐 **Cross-Platform Sources** — Bilibili / Xiaohongshu / Douyin / YouTube / X / Zhihu / Reddit / Bangumi / generic Web, so your interests stop being siloed ([details](docs/modules/discovery.md))
+- 🌐 **Cross-Platform Sources** — Bilibili / Xiaohongshu / Douyin / YouTube / X / Zhihu / Reddit / Bangumi / V2EX / generic Web, so your interests stop being siloed ([details](docs/modules/discovery.md))
 - 🎯 **Smart Diversity** — topic quotas + cross-platform interleaving + small-source protection; goodbye to "all AI all day"
 - ⚡ **Instant, deduplicated reshuffle** — ~0.6s; current cards, recommendation history, and the durable seen ledger are excluded by default
 - 💬 **Warm Recommendations** — friend-like explanations of why you'd enjoy something, not "because you watched similar videos"
@@ -669,6 +670,8 @@ images: proxy foreground + refresh prefetch → app-stable lane (total 4 / bg 3,
 │ Source-family registry: alias · strategy · URL host │
 │             → pool accounting · durable seen_items ledger │
 │ Bangumi public API → search/ranked/date producer → shared eval │
+│ V2EX public API/Feed → bounded Topic/Reply enrichment → five modes → shared eval │
+│ V2EX identity ladder: verified PAT > observed browser > accepted user; mismatch pauses only account projection │
 │ Eval clock: published_at + exact UTC evaluated_at → hourly cache invalidation │
 │ Evaluator prefilter stays shadow → privacy-safe decision/raw-score join → read-only gate (no auto-enforce) │
 │ Named cognition views → task gate: compact only for awareness_confusions; others legacy │
@@ -685,9 +688,10 @@ images: proxy foreground + refresh prefetch → app-stable lane (total 4 / bg 3,
 │ Background maintenance: isolated worker → ≤50 rows/batch; unchanged skip / 10m sweep │
 │ /api/saved/* · router · Bilibili native save      │
 │ Six adapters → ExtensionNativeSaveBroker → extension_native_save_jobs │
-│ six-platform source task multiplex: xhs / dy / yt / x / zhihu / reddit │
-│ Extension-online periodic re-pull: Runtime → five bootstrap tasks (global serial) → installed extension │
+│ seven-source task multiplex: xhs / dy / yt / x / zhihu / reddit / v2ex │
+│ Extension-online periodic re-pull: Runtime → six bootstrap sources (global serial) → installed extension │
 │ task-result → staged durable ingress → atomic bounded seen keys (5,000/source) → terminal │
+│ V2EX complete favorite snapshots → two confirmed misses → durable retraction/restore outbox → account-scoped Node affinity │
 │ XHS auto tasks: source/scheduler gate → SQLite pacing/breaker → no new tab while off/limited │
 │ XHS search: inactive tab → MAIN response normalization → isolated replay / DOM fallback │
 │ extension_native_save_jobs -> /api/sources/<slug>/next-task -> installed extension │
@@ -710,7 +714,7 @@ card action → synchronous 200 fast path | 202 processing → popup/mobile/desk
 
 Desktop startup: recommendation hydration │ runtime hydration │ secondary health/profile/activity/config hydration (independent)
 
-Overseas traffic: `[network].mode` → system proxy (default) / direct / custom proxy → LLM, YouTube, X/Reddit CLIs, Bangumi, updater, GitHub project stats; CN clients remain isolated and direct
+Overseas traffic: `[network].mode` → system proxy (default) / direct / custom proxy → LLM, YouTube, X/Reddit CLIs, Bangumi, updater, GitHub project stats; CN clients including V2EX remain isolated and direct
 Manual Douyin discovery: CLI discover → daemon-equivalent producer → per-keyword outcomes → extension search/hot/feed → pending-eval pool
 ```
 
@@ -756,6 +760,7 @@ localhost-only. The two edges are mutually exclusive, and the default HTTP path 
 | **Zhihu** | init import · search · hot · feed · creator · related | Extension reads logged-in tabs; renders as text cards |
 | **Reddit** | init import · search · hot · subreddit · related | Backend rdt-cli for discovery by default; Saved executor is fixture-tested, but the first real write remains uncertain after a 2xx response lacked old-DOM confirmation |
 | **Bangumi** | public-collection init · search · ranked · date browse | Official anonymous read-only API; no cookie/token, and date results may include unreleased subjects |
+| **V2EX** | search · Node · Tab · hot · latest | Official anonymous API / JSON Feed; optional PAT for API 2.0 enrichment; Topic text cards |
 | **Generic Web** | browser + LLM extraction | Adapts to any webpage |
 
 What happens after discovery:
@@ -785,7 +790,7 @@ OpenBiliClaw/
 │   ├── memory/                # Multi-layer memory system
 │   ├── discovery/             # Discovery engine (strategies · candidate pool · quota balancing · diversity)
 │   ├── recommendation/        # Recommendation & expression engine
-│   ├── sources/               # Source adapters, Bangumi API, and XHS/Douyin/YouTube/Zhihu/Reddit task bridges
+│   ├── sources/               # Source adapters, Bangumi/V2EX APIs, and XHS/Douyin/YouTube/Zhihu/Reddit/V2EX task bridges
 │   ├── youtube/               # Google Takeout import parser
 │   ├── api/                   # Local FastAPI (config rollback / degraded mode / popup API)
 │   ├── tls_proxy.py           # Default-off LAN/self-managed HTTPS edge
@@ -814,6 +819,7 @@ OpenBiliClaw/
 | Zhihu | Extension task dispatch reads event-smoke and selected guided-init signals plus search / hot / feed / creator / related candidates in the logged-in browser; answers / articles / questions render as text cards |
 | Reddit | Default-installed rdt-cli reads search / hot / subreddit / related candidates by default; the extension syncs `reddit_session` into rdt credentials and `rdt login` is a manual fallback; extension task dispatch reads discovery when rdt is unavailable, unauthenticated, or explicitly selected, and always reads bootstrap saved / upvoted / subscribed signals in the logged-in browser; posts / comments render as text cards |
 | Bangumi | Official anonymous read-only v0 API; search / ranked / date browsing feed the shared candidate pool, while an optional public username enables public-collection profile init; no cookie, token, or native write-back |
+| V2EX | Official anonymous API / Feed; search / node / tab / hot / latest feed the shared candidate pool, with optional PAT read-only enrichment; the extension runs four read-only bootstrap scopes and sends only a boolean login heartbeat; no site writes |
 | Optional HTTPS | Pinned Caddy Docker overlay with automatic certificates for public domains; Python TLS Proxy + `[tls]` extra and local CA/SAN for LAN/self-managed use; off by default and mutually exclusive |
 | Storage | SQLite + Embedding vector index |
 | Containerization | Docker Compose (backend) |
@@ -837,9 +843,9 @@ The current release is summarized in [Recent Updates](#recent-updates) above; fu
 
 ## 🗺️ Roadmap
 
-OpenBiliClaw aims to be your **personalized entry point to the entire web**. Started on Bilibili, it now covers Xiaohongshu, Douyin, YouTube, X, Zhihu, Reddit, Bangumi, and the generic Web; next:
+OpenBiliClaw aims to be your **personalized entry point to the entire web**. Started on Bilibili, it now covers Xiaohongshu, Douyin, YouTube, X, Zhihu, Reddit, Bangumi, V2EX, and the generic Web; next:
 
-- **More content sources** — V2EX, Weibo, various BBS / forums; each platform is a `SourceAdapter` and the architecture is proven extensible
+- **More content sources** — Weibo and other BBS / forums; each platform is a `SourceAdapter` and the architecture is proven extensible
 - **Cross-platform interest fusion** — your mechanical-keyboard interest from Bilibili + your coffee-gear interest from Xiaohongshu + your short-video taste from Douyin likes/favorites + your long-form watching and subscriptions from YouTube + the news you like/bookmark on X = one complete you. Profile fusion stops your interests from being fragmented across silos
 - **Smarter cross-source discovery** — "you started following coffee gear on Xiaohongshu, here's a hand-drip documentary on Bilibili you might love"
 - **Community ecosystem** — user-defined SourceAdapters, shared discovery strategies, contributed platform adapters

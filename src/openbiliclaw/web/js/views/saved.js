@@ -37,7 +37,7 @@ const PRESENTATION = {
 };
 const PLATFORM_NAMES = {
   bilibili: "B站", youtube: "YouTube", twitter: "X", xiaohongshu: "小红书",
-  douyin: "抖音", zhihu: "知乎", reddit: "Reddit", bangumi: "Bangumi",
+  douyin: "抖音", zhihu: "知乎", reddit: "Reddit", bangumi: "Bangumi", v2ex: "V2EX",
 };
 
 function esc(s) {

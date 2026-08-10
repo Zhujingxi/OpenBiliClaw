@@ -126,6 +126,8 @@ import {
   fetchRuntimeStatus,
   fetchSourceShareSuggestion,
   fetchSourcesStatus,
+  fetchV2exIdentity,
+  acceptV2exBrowserIdentity,
   markDelightSent,
   openPendingConfirmation,
   probeConfigService,
@@ -6752,7 +6754,9 @@ function renderRecommendations(items, { append = false } = {}) {
     } else {
       // No-cover text card (X tweet/thread or empty cover): show the
       // body text instead of a thumbnail — never an <img> node.
-      cover.classList.add("is-fallback", "is-text-card");
+      card.classList.add("is-text-only");
+      preview.classList.add("is-text-only");
+      cover.classList.add("is-text-card");
       const textNode = document.createElement("p");
       textNode.className = "recommendation-cover-text";
       textNode.textContent = cardMedia.text || "先看标题也行";
@@ -6777,7 +6781,7 @@ function renderRecommendations(items, { append = false } = {}) {
     }
     const platformKey = (item.source_platform || "bilibili").toLowerCase();
     const platformLabel =
-      { bilibili: "B 站", xiaohongshu: "小红书", douyin: "抖音", youtube: "YouTube", twitter: "X", zhihu: "知乎", reddit: "Reddit", bangumi: "Bangumi" }[
+      { bilibili: "B 站", xiaohongshu: "小红书", douyin: "抖音", youtube: "YouTube", twitter: "X", zhihu: "知乎", reddit: "Reddit", bangumi: "Bangumi", v2ex: "V2EX" }[
         platformKey
       ] || item.source_platform;
     const sourceCorner = document.createElement("span");
@@ -8303,6 +8307,13 @@ function bindSettings() {
     ["music", "cfgBangumiTypeMusic"],
     ["real", "cfgBangumiTypeReal"],
   ];
+  const V2EX_SOURCE_MODE_FIELDS = [
+    ["search", "cfgV2exModeSearch"],
+    ["node", "cfgV2exModeNode"],
+    ["tab", "cfgV2exModeTab"],
+    ["hot", "cfgV2exModeHot"],
+    ["latest", "cfgV2exModeLatest"],
+  ];
 
   function setCheckedValues(fields, rawValues) {
     const fallback = fields.map(([value]) => value);
@@ -8391,6 +8402,74 @@ function bindSettings() {
       if (dot) dot.style.color = access.color;
       applySourceNetworkHint(row, access.present ? item.network_hint : "", access.enabled);
       row.style.opacity = access.present && !access.enabled ? "0.6" : "1";
+    }
+    await renderV2exIdentity();
+  }
+
+  const V2EX_IDENTITY_ORIGIN_LABELS = {
+    pat: "PAT",
+    browser: "浏览器",
+    configured: "配置",
+    accepted: "已选择",
+  };
+
+  function renderV2exIdentityResult(identity) {
+    const statusEl = document.getElementById("cfgV2exIdentityStatus");
+    const acceptButton = document.getElementById("cfgV2exAcceptBrowserIdentity");
+    if (!statusEl || !acceptButton) return;
+    const claims = identity?.claims && typeof identity.claims === "object" ? identity.claims : {};
+    const browser = String(claims.browser || "").trim();
+    const active = String(identity?.active_profile_identity?.username || "").trim();
+    acceptButton.dataset.username = browser;
+    acceptButton.hidden = !(browser && identity?.status === "identity_mismatch");
+    if (!identity) {
+      setProbeStatus(statusEl, "muted", "后端不可达，暂时无法读取身份状态。");
+      return;
+    }
+    if (identity.status === "identity_mismatch") {
+      const detail = Object.entries(claims)
+        .map(([origin, username]) => `${V2EX_IDENTITY_ORIGIN_LABELS[origin] || origin}=${username}`)
+        .join(" · ");
+      setProbeStatus(statusEl, "error", `身份冲突：${detail}。账号初始化已暂停，公开发现仍可用。`);
+      return;
+    }
+    if (identity.identity_switch_required) {
+      setProbeStatus(
+        statusEl,
+        "warning",
+        `当前浏览器账号 ${browser || identity.username}，画像仍属于 ${active}；增量同步已暂停，请运行一次 V2EX 完整初始化完成切换。`,
+      );
+      return;
+    }
+    if (identity.status === "resolved") {
+      const suffix = identity.private_bootstrap_available ? "，浏览器四 Scope 初始化可用。" : "；公开发现可用。";
+      setProbeStatus(statusEl, "success", `当前账号 ${identity.username}${suffix}`);
+      return;
+    }
+    setProbeStatus(statusEl, "muted", "尚未识别账号；匿名公开发现仍可用。");
+  }
+
+  async function renderV2exIdentity() {
+    try {
+      renderV2exIdentityResult(await fetchV2exIdentity());
+    } catch {
+      renderV2exIdentityResult(null);
+    }
+  }
+
+  async function acceptCurrentV2exBrowserIdentity(button) {
+    const username = String(button?.dataset?.username || "").trim();
+    const statusEl = document.getElementById("cfgV2exIdentityStatus");
+    if (!username || button.disabled) return;
+    button.disabled = true;
+    setProbeStatus(statusEl, "pending", `正在采用浏览器账号 ${username}…`);
+    try {
+      await acceptV2exBrowserIdentity(username);
+      await renderV2exIdentity();
+    } catch (error) {
+      setProbeStatus(statusEl, "error", error?.message || "身份选择失败。");
+    } finally {
+      button.disabled = false;
     }
   }
 
@@ -9262,6 +9341,31 @@ function bindSettings() {
     setVal("cfgBangumiRequestInterval", cfg.sources?.bangumi?.request_interval_seconds);
     setVal("cfgBangumiMinInterval", cfg.sources?.bangumi?.min_interval_minutes);
     setVal("cfgBangumiBootstrapLimit", cfg.sources?.bangumi?.bootstrap_limit);
+    const v2exEnabled = document.getElementById("cfgV2exEnabled");
+    if (v2exEnabled) v2exEnabled.checked = cfg.sources?.v2ex?.enabled === true;
+    setVal("cfgV2exUsername", cfg.sources?.v2ex?.username);
+    {
+      const v2exToken = document.getElementById("cfgV2exAccessToken");
+      if (v2exToken) {
+        v2exToken.value = "";
+        v2exToken.placeholder = cfg.sources?.v2ex?.access_token_set
+          ? "已配置（留空保持不变；填写新 PAT 以替换）"
+          : "可留空；匿名公开发现可直接使用";
+      }
+      const v2exClearToken = document.getElementById("cfgV2exClearToken");
+      if (v2exClearToken) {
+        v2exClearToken.checked = false;
+        v2exClearToken.disabled = cfg.sources?.v2ex?.access_token_set !== true;
+      }
+    }
+    setCheckedValues(V2EX_SOURCE_MODE_FIELDS, cfg.sources?.v2ex?.source_modes);
+    setVal("cfgV2exDailySearchBudget", cfg.sources?.v2ex?.daily_search_budget);
+    setVal("cfgV2exDailyNodeBudget", cfg.sources?.v2ex?.daily_node_budget);
+    setVal("cfgV2exDailyTabBudget", cfg.sources?.v2ex?.daily_tab_budget);
+    setVal("cfgV2exDailyHotBudget", cfg.sources?.v2ex?.daily_hot_budget);
+    setVal("cfgV2exDailyLatestBudget", cfg.sources?.v2ex?.daily_latest_budget);
+    setVal("cfgV2exRequestInterval", cfg.sources?.v2ex?.request_interval_seconds);
+    setVal("cfgV2exMinInterval", cfg.sources?.v2ex?.min_interval_minutes);
     void renderSourcesStatus();
 
     // General
@@ -9328,6 +9432,7 @@ function bindSettings() {
     setVal("cfgPoolShareZhihu", cfg.scheduler?.pool_source_shares?.zhihu);
     setVal("cfgPoolShareReddit", cfg.scheduler?.pool_source_shares?.reddit);
     setVal("cfgPoolShareBangumi", cfg.scheduler?.pool_source_shares?.bangumi);
+    setVal("cfgPoolShareV2ex", cfg.scheduler?.pool_source_shares?.v2ex);
     setVal("cfgSpeculationInterval", cfg.scheduler?.speculation_interval_minutes);
     setVal("cfgSpeculationTtl", cfg.scheduler?.speculation_ttl_days);
     setVal("cfgSpeculationCooldown", cfg.scheduler?.speculation_cooldown_days);
@@ -9494,6 +9599,23 @@ function bindSettings() {
           min_interval_minutes: getInt("cfgBangumiMinInterval", 3),
           bootstrap_limit: getInt("cfgBangumiBootstrapLimit", 300),
         },
+        v2ex: {
+          enabled: checked("cfgV2exEnabled"),
+          username: getVal("cfgV2exUsername"),
+          ...(checked("cfgV2exClearToken")
+            ? { access_token: "" }
+            : (getVal("cfgV2exAccessToken") || "") !== ""
+              ? { access_token: getVal("cfgV2exAccessToken") }
+              : {}),
+          source_modes: collectCheckedValues(V2EX_SOURCE_MODE_FIELDS, ["search"]),
+          daily_search_budget: getInt("cfgV2exDailySearchBudget", 120),
+          daily_node_budget: getInt("cfgV2exDailyNodeBudget", 180),
+          daily_tab_budget: getInt("cfgV2exDailyTabBudget", 80),
+          daily_hot_budget: getInt("cfgV2exDailyHotBudget", 40),
+          daily_latest_budget: getInt("cfgV2exDailyLatestBudget", 40),
+          request_interval_seconds: getInt("cfgV2exRequestInterval", 2),
+          min_interval_minutes: getInt("cfgV2exMinInterval", 5),
+        },
       },
       discovery: {
         ...(state.runtimeConfig?.discovery || {}),
@@ -9535,6 +9657,7 @@ function bindSettings() {
           zhihu: getInt("cfgPoolShareZhihu", 1),
           reddit: getInt("cfgPoolShareReddit", 1),
           bangumi: getInt("cfgPoolShareBangumi", 1),
+          v2ex: getInt("cfgPoolShareV2ex", 1),
         },
         speculation_interval_minutes: getInt("cfgSpeculationInterval", 10),
         speculation_ttl_days: getInt("cfgSpeculationTtl", 3),
@@ -9622,7 +9745,8 @@ function bindSettings() {
     twitter: "cfgTwitterEnabled",
     zhihu: "cfgZhihuEnabled",
     reddit: "cfgRedditEnabled",
-    bangumi: "cfgBangumiEnabled"
+    bangumi: "cfgBangumiEnabled",
+    v2ex: "cfgV2exEnabled",
   };
 
   function setSourceCardOpen(card, open) {
@@ -9748,6 +9872,15 @@ function bindSettings() {
   }
 
   document.getElementById("settingsPanelSources")?.addEventListener("click", (event) => {
+    const identityButton = event.target?.closest?.("#cfgV2exAcceptBrowserIdentity");
+    if (identityButton instanceof HTMLButtonElement) {
+      void acceptCurrentV2exBrowserIdentity(identityButton);
+      return;
+    }
+    if (event.target?.closest?.("#cfgV2exRefreshIdentity")) {
+      void renderV2exIdentity();
+      return;
+    }
     const button = event.target?.closest?.(".source-verify-btn");
     if (!(button instanceof HTMLButtonElement) || button.disabled) return;
     void runSourceVerify(button);
@@ -10075,6 +10208,7 @@ function bindSettings() {
             zhihu: checked("cfgZhihuEnabled"),
             reddit: checked("cfgRedditEnabled"),
             bangumi: checked("cfgBangumiEnabled"),
+            v2ex: checked("cfgV2exEnabled"),
           },
           configured_shares: {
             bilibili: getInt("cfgPoolShareBilibili", 5),
@@ -10085,6 +10219,7 @@ function bindSettings() {
             zhihu: getInt("cfgPoolShareZhihu", 1),
             reddit: getInt("cfgPoolShareReddit", 1),
             bangumi: getInt("cfgPoolShareBangumi", 1),
+            v2ex: getInt("cfgPoolShareV2ex", 1),
           },
         });
         const shares = suggestion?.suggested_shares || {};
@@ -10096,6 +10231,7 @@ function bindSettings() {
         if (shares.zhihu !== undefined) setVal("cfgPoolShareZhihu", shares.zhihu);
         if (shares.reddit !== undefined) setVal("cfgPoolShareReddit", shares.reddit);
         if (shares.bangumi !== undefined) setVal("cfgPoolShareBangumi", shares.bangumi);
+        if (shares.v2ex !== undefined) setVal("cfgPoolShareV2ex", shares.v2ex);
         markSettingsDirty(suggestBtn);
         showToast("已按已有信号填入建议比例，保存后生效。", "success");
       } catch (err) {

@@ -510,6 +510,7 @@ _DEFAULT_DY_BOOTSTRAP_WAIT_SECONDS = 180.0
 _DEFAULT_YT_BOOTSTRAP_WAIT_SECONDS = 240.0
 _DEFAULT_ZHIHU_BOOTSTRAP_WAIT_SECONDS = 180.0
 _DEFAULT_REDDIT_BOOTSTRAP_WAIT_SECONDS = 180.0
+_DEFAULT_V2EX_BOOTSTRAP_WAIT_SECONDS = 300.0
 _EXTENSION_PRESENCE_REQUIRED_WARNING = (
     "WARN extension presence required; backend will pause background LLM work "
     "after grace period if no extension client connects"
@@ -2907,12 +2908,19 @@ def _kick_task_dispatcher(source: str) -> None:
     Failures are silent: if the daemon isn't running the existing
     chrome.alarms 60s poll fallback still picks the task up.
     """
-    if source not in {"xhs", "dy", "yt", "zhihu", "reddit"}:
+    if source not in {"xhs", "dy", "yt", "zhihu", "reddit", "v2ex"}:
         return
     import urllib.error
     import urllib.request
 
-    url = f"http://127.0.0.1:8420/api/sources/{source}/kick"
+    daemon_port = 8420
+    with suppress(Exception):
+        from openbiliclaw.config import load_config
+
+        configured_port = int(load_config().api.port)
+        if 1 <= configured_port <= 65535:
+            daemon_port = configured_port
+    url = f"http://127.0.0.1:{daemon_port}/api/sources/{source}/kick"
     req = urllib.request.Request(url, method="POST", data=b"")
     # Short timeout — kick is best-effort. Daemon-not-running /
     # network blip / connection-refused all degrade silently to the
@@ -3787,6 +3795,157 @@ def _enqueue_reddit_bootstrap_task(
     return result.task_id
 
 
+def _enqueue_v2ex_bootstrap_task(
+    *,
+    username: str = "",
+    kick: bool = True,
+    profile_update: bool = False,
+    smoke_only: bool = False,
+    profile_rebuild: bool = False,
+    force: bool = False,
+    incremental: bool = False,
+) -> str | None:
+    """Resolve the runtime database and enqueue the V2EX browser task."""
+    from openbiliclaw.sources import source_bootstrap
+
+    try:
+        database = _get_runtime_database()
+    except Exception as exc:
+        console.print(f"  [yellow]V2EX 初始化事件未拉取: 数据库不可用: {exc}[/yellow]")
+        return None
+    if not hasattr(database, "conn"):
+        return None
+    v2ex_config: Any | None = None
+    with suppress(Exception):
+        from openbiliclaw.api.source_auth.probe_cache import LIVE_PROBES
+        from openbiliclaw.config import load_config
+        from openbiliclaw.sources.v2ex_identity import resolve_v2ex_identity_state
+
+        cfg = load_config()
+        v2ex_config = cfg.sources.v2ex
+        identity = resolve_v2ex_identity_state(
+            cfg=cfg,
+            database=database,
+            probes=LIVE_PROBES,
+            configured_username=username or None,
+        )
+        if identity.username:
+            username = identity.username
+    result = source_bootstrap.enqueue_v2ex_bootstrap(
+        database,
+        username=username,
+        config=v2ex_config,
+        force=force,
+        incremental=incremental,
+        profile_update=profile_update,
+        smoke_only=smoke_only,
+        profile_rebuild=profile_rebuild,
+        notify=console.print,
+    )
+    if result.created and result.task_id and kick:
+        _kick_task_dispatcher("v2ex")
+    return result.task_id
+
+
+def _collect_v2ex_bootstrap_events(
+    task_id: str | None,
+    *,
+    max_wait_seconds: float | None = None,
+    cancel_event: threading.Event | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, int], str]:
+    """Wait for and convert a V2EX browser-bootstrap task."""
+    import json
+    import time
+
+    from openbiliclaw.config import load_config
+    from openbiliclaw.sources.v2ex_tasks import (
+        V2EX_BOOTSTRAP_SCOPES,
+        V2EXTaskQueue,
+        v2ex_bootstrap_items_to_events,
+    )
+
+    counts = {scope: 0 for scope in V2EX_BOOTSTRAP_SCOPES}
+    if not task_id:
+        return [], counts, "skipped"
+    if max_wait_seconds is None:
+        max_wait_seconds = float(os.environ.get("OPENBILICLAW_V2EX_BOOTSTRAP_WAIT_SECONDS", "300"))
+    try:
+        database = _get_runtime_database()
+    except Exception:
+        return [], counts, "skipped"
+    if not hasattr(database, "conn"):
+        return [], counts, "skipped"
+
+    queue = V2EXTaskQueue(database)
+    deadline = time.monotonic() + max(0.0, max_wait_seconds)
+    task: dict[str, Any] | None = None
+    while True:
+        if cancel_event is not None and cancel_event.is_set():
+            return [], counts, "timeout"
+        task = queue.get(task_id)
+        status = str((task or {}).get("status", "")).strip()
+        if status in {"completed", "failed"}:
+            break
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.5)
+    if not task:
+        return [], counts, "timeout"
+    if task.get("status") == "failed":
+        return [], counts, "failed"
+    if task.get("status") != "completed":
+        return [], counts, "timeout"
+    try:
+        result = json.loads(str(task.get("result_json") or "{}"))
+    except json.JSONDecodeError:
+        return [], counts, "failed"
+    items = [value for value in result.get("items", []) if isinstance(value, dict)]
+    raw_counts = result.get("scope_counts", {})
+    if isinstance(raw_counts, dict):
+        for scope in counts:
+            with suppress(Exception):
+                counts[scope] = int(raw_counts.get(scope, 0) or 0)
+    if not any(counts.values()):
+        for item in items:
+            scope = str(item.get("scope", "")).strip()
+            if scope in counts:
+                counts[scope] += 1
+    task_payload: dict[str, Any] = {}
+    with suppress(Exception):
+        parsed_task_payload = json.loads(str(task.get("payload_json") or "{}"))
+        if isinstance(parsed_task_payload, dict):
+            task_payload = parsed_task_payload
+    debug = result.get("debug")
+    debug = debug if isinstance(debug, dict) else {}
+    from openbiliclaw.api.source_auth.probe_cache import LIVE_PROBES
+    from openbiliclaw.sources.v2ex_identity import resolve_v2ex_identity_state
+
+    identity = resolve_v2ex_identity_state(
+        cfg=load_config(),
+        database=database,
+        probes=LIVE_PROBES,
+        configured_username=task_payload.get("username") or None,
+        observed_username=debug.get("username"),
+        observed_logged_in=(
+            debug.get("logged_in") if isinstance(debug.get("logged_in"), bool) else None
+        ),
+    )
+    if identity.status == "identity_mismatch":
+        return [], counts, "identity_mismatch"
+    if not identity.private_bootstrap_available:
+        return [], counts, "no_profile_signal_sources"
+    events = v2ex_bootstrap_items_to_events(
+        items,
+        identity_username=identity.username,
+    )
+    if not events:
+        return [], counts, "no_profile_signal_sources"
+    raw_status = str(result.get("_openbiliclaw_terminal_status", "") or "").strip()
+    if raw_status == "partial":
+        return events, counts, "partial"
+    return events, counts, "ok" if events else "empty"
+
+
 def _collect_reddit_bootstrap_events(
     task_id: str | None,
     *,
@@ -4494,6 +4653,27 @@ def _bangumi_events_to_history_items(events: list[dict[str, Any]]) -> list[dict[
                 "context": str(event.get("context", "")).strip(),
                 "metadata": metadata,
                 "source_platform": "bangumi",
+            }
+        )
+    return [row for row in rows if row.get("title") or row.get("url")]
+
+
+def _v2ex_events_to_history_items(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convert V2EX topic/node bootstrap events into profile rows."""
+    rows: list[dict[str, Any]] = []
+    for event in events:
+        metadata = event.get("metadata", {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        rows.append(
+            {
+                "title": str(event.get("title", "")).strip(),
+                "url": str(event.get("url", "")).strip(),
+                "author": str(event.get("author", "")).strip(),
+                "event_type": str(event.get("event_type", "")).strip(),
+                "context": str(event.get("context", "")).strip(),
+                "metadata": metadata,
+                "source_platform": "v2ex",
             }
         )
     return [row for row in rows if row.get("title") or row.get("url")]
@@ -6238,6 +6418,28 @@ def _ask_reddit_inclusion() -> bool:
     return True
 
 
+def _ask_v2ex_inclusion() -> bool:
+    """Decide whether to enable V2EX discovery and browser bootstrap."""
+    if os.environ.get("OPENBILICLAW_NO_V2EX", "").strip() == "1":
+        console.print("[dim]  跳过 V2EX 来源(OPENBILICLAW_NO_V2EX=1)。[/dim]")
+        return False
+    if not _is_interactive_terminal():
+        return False
+
+    console.print()
+    console.print("[bold]V2EX 数据接入(可选)[/bold]")
+    console.print(
+        "只读导入你在 V2EX 发布的主题、参与的讨论，以及登录态下的收藏主题和收藏节点；"
+        "同时启用按 Node / 搜索 / Tab / 热门的个性化发现。"
+    )
+    console.print("[dim]插件不会上传 Cookie 值，也不会发帖、回复、收藏或执行任何站内写操作。[/dim]")
+    console.print()
+    if not typer.confirm("启用 V2EX 数据接入?", default=False):
+        console.print("[dim]  已选择跳过，本次 init 不会启用 V2EX 来源。[/dim]")
+        return False
+    return True
+
+
 def _ask_bangumi_inclusion() -> bool:
     """Decide whether to enable Bangumi discovery and public bootstrap."""
     if os.environ.get("OPENBILICLAW_NO_BANGUMI", "").strip() == "1":
@@ -6346,8 +6548,10 @@ def _persist_init_source_enabled_flags(
     include_zhihu: bool = False,
     include_reddit: bool = False,
     include_bangumi: bool = False,
+    include_v2ex: bool = False,
     bangumi_username: str = "",
     bangumi_token: str = "",
+    v2ex_username: str = "",
 ) -> None:
     """Persist init source choices so background discovery obeys them."""
 
@@ -6404,6 +6608,17 @@ def _persist_init_source_enabled_flags(
             and str(getattr(bangumi_cfg, "access_token", "")) != bangumi_token
         ):
             bangumi_cfg.access_token = bangumi_token
+            changed = True
+        v2ex_cfg = getattr(cfg.sources, "v2ex", None)
+        if v2ex_cfg is not None and bool(getattr(v2ex_cfg, "enabled", False)) != include_v2ex:
+            v2ex_cfg.enabled = include_v2ex
+            changed = True
+        if (
+            v2ex_cfg is not None
+            and v2ex_username
+            and str(getattr(v2ex_cfg, "username", "")) != v2ex_username
+        ):
+            v2ex_cfg.username = v2ex_username
             changed = True
         if changed:
             save_config(cfg)
@@ -6648,6 +6863,9 @@ class InitResult:
     bangumi_events: list[dict[str, Any]] = field(default_factory=list)
     bangumi_scope_counts: dict[str, Any] = field(default_factory=dict)
     bangumi_status: str = "skipped"
+    v2ex_events: list[dict[str, Any]] = field(default_factory=list)
+    v2ex_scope_counts: dict[str, Any] = field(default_factory=dict)
+    v2ex_status: str = "skipped"
 
 
 class GuidedInitError(Exception):
@@ -6662,6 +6880,79 @@ class GuidedInitError(Exception):
         self.reason = reason
         self.message = message
         super().__init__(message)
+
+
+def _guided_v2ex_profile_identity(
+    events: list[dict[str, Any]],
+    status: str,
+) -> str:
+    """Return the one account proven by a usable V2EX bootstrap result."""
+
+    if str(status or "").strip().lower() not in {"ok", "partial"} or not events:
+        return ""
+    identities = {
+        str(metadata.get("source_identity") or "").strip()
+        for event in events
+        if isinstance(event, dict)
+        and isinstance((metadata := event.get("metadata")), dict)
+        and str(metadata.get("source_identity") or "").strip()
+    }
+    if len(identities) != 1:
+        raise GuidedInitError(
+            "profile_failed",
+            "V2EX 初始化结果无法归属到唯一账号，已停止画像切换以避免混合账号证据。",
+        )
+    return next(iter(identities))
+
+
+def _stage_guided_v2ex_profile_identity(
+    memory: Any,
+    events: list[dict[str, Any]],
+    status: str,
+) -> str:
+    """Hide a new account's imported rows until stage 3 commits its Soul."""
+
+    identity = _guided_v2ex_profile_identity(events, status)
+    if not identity:
+        return ""
+    database = getattr(memory, "_database", None)
+    get_active = getattr(database, "get_v2ex_profile_identity", None)
+    if not callable(get_active):
+        return identity
+    try:
+        active = str(get_active()[0] or "").strip()
+    except Exception as exc:
+        raise GuidedInitError(
+            "profile_failed",
+            "读取 V2EX 当前画像账号失败，已停止账号切换。",
+        ) from exc
+    if active and active.casefold() != identity.casefold():
+        for event in events:
+            metadata = event.get("metadata")
+            if not isinstance(metadata, dict):
+                continue
+            staged = dict(metadata)
+            staged["profile_inactive"] = True
+            event["metadata"] = staged
+    return identity
+
+
+def _activate_guided_v2ex_profile_identity(memory: Any, identity: str) -> None:
+    """Commit account ownership only after the full profile was saved."""
+
+    if not identity:
+        return
+    database = getattr(memory, "_database", None)
+    activate = getattr(database, "activate_v2ex_profile_identity", None)
+    if not callable(activate):
+        return
+    try:
+        activate(identity)
+    except Exception as exc:
+        raise GuidedInitError(
+            "profile_failed",
+            "画像已生成，但 V2EX 账号证据切换未能安全提交；旧账号仍保持激活，请重试初始化。",
+        ) from exc
 
 
 async def _fetch_bilibili_init_data(
@@ -7002,8 +7293,10 @@ async def run_guided_init(
     include_zhihu: bool = False,
     include_reddit: bool = False,
     include_bangumi: bool = False,
+    include_v2ex: bool = False,
     bangumi_username: str = "",
     bangumi_token: str = "",
+    v2ex_username: str = "",
     target_pool_count: int,
     discover_backfill: Callable[..., Coroutine[Any, Any, int]],
     coordinator: Any = None,
@@ -7116,6 +7409,7 @@ async def run_guided_init(
             include_zhihu,
             include_reddit,
             include_bangumi,
+            include_v2ex,
         )
     )
     _stage1_source_done = 0
@@ -7632,6 +7926,65 @@ async def run_guided_init(
     elif reddit_status == "failed":
         console.print("  [yellow]Reddit 任务失败 —— 检查扩展日志,或重试 init。[/yellow]")
 
+    v2ex_events: list[dict[str, Any]] = []
+    v2ex_scope_counts: dict[str, int] = {}
+    v2ex_status = "skipped"
+    v2ex_task_id = (
+        (
+            await _enqueue_register_kick(
+                lambda **kwargs: _enqueue_v2ex_bootstrap_task(
+                    username=v2ex_username,
+                    profile_rebuild=coordinator is None,
+                    **kwargs,
+                ),
+                "v2ex",
+            )
+        )
+        if include_v2ex
+        else None
+    )
+    if v2ex_task_id:
+        console.print(
+            "  [dim]已请求扩展拉 V2EX 发布主题 / 参与讨论 / 收藏主题 / 收藏节点"
+            "（只读，使用当前浏览器登录态）。[/dim]"
+        )
+    if include_v2ex:
+        await _stage1_begin_source("V2EX", wait_hint="扩展未响应会在约 5 分钟后自动跳过")
+        v2ex_events, v2ex_scope_counts, v2ex_status = await _run_extension_collector(
+            _collect_v2ex_bootstrap_events,
+            v2ex_task_id,
+            label="V2EX",
+            env_name="OPENBILICLAW_V2EX_BOOTSTRAP_WAIT_SECONDS",
+            default_wait_seconds=300,
+        )
+        _stage1_finish_source()
+    if v2ex_status in {"ok", "partial"}:
+        console.print(
+            "  V2EX "
+            f"发布 [green]{v2ex_scope_counts.get('public_topics', 0)}[/green] 条"
+            f" / 讨论 [green]{v2ex_scope_counts.get('public_replies', 0)}[/green] 个主题"
+            f" / 收藏主题 [green]{v2ex_scope_counts.get('favorite_topics', 0)}[/green] 条"
+            f" / 收藏节点 [green]{v2ex_scope_counts.get('favorite_nodes', 0)}[/green] 个"
+        )
+        if v2ex_status == "partial":
+            console.print("  [yellow]V2EX 部分范围未完成，本次按部分导入处理。[/yellow]")
+    elif v2ex_status == "empty":
+        console.print("  [yellow]V2EX 任务跑通但没有读到公开行为或收藏信号。[/yellow]")
+    elif v2ex_status == "identity_mismatch":
+        console.print(
+            "  [yellow]V2EX 身份冲突：PAT、浏览器登录态或配置用户名不一致；"
+            "已暂停账号初始化，公开发现仍可使用。[/yellow]"
+        )
+    elif v2ex_status == "no_profile_signal_sources":
+        console.print("  [dim]V2EX 暂无可归属到已确认账号的画像信号，将仅作为发现来源。[/dim]")
+    elif v2ex_status == "timeout":
+        console.print(
+            "  [dim]V2EX 初始化信号未导入：扩展未连接或任务仍在后台跑。"
+            "可设 OPENBILICLAW_V2EX_BOOTSTRAP_WAIT_SECONDS=600 延长等待。[/dim]"
+        )
+    elif v2ex_status == "failed":
+        console.print("  [yellow]V2EX 任务失败 —— 检查扩展日志,或重试 init。[/yellow]")
+
     # Guided-init collection is a real bootstrap attempt even though profile
     # analysis has not started yet. Seed only evidence-backed terminal states;
     # this is scheduling state and must not change the event/output payload.
@@ -7646,6 +7999,7 @@ async def run_guided_init(
                 "yt": yt_status,
                 "zhihu": zhihu_status,
                 "reddit": reddit_status,
+                "v2ex": v2ex_status,
             },
         )
     except Exception:
@@ -7682,16 +8036,23 @@ async def run_guided_init(
     # still feed *this* run's analyze/profile via the collected ``events`` list
     # below; memory persistence is owned by the handler on both CLI and API
     # paths (gui-init review §5e).
+    v2ex_profile_identity = _stage_guided_v2ex_profile_identity(
+        memory,
+        v2ex_events,
+        v2ex_status,
+    )
     events_to_persist = list(events)
     events_to_persist.extend(zhihu_events)
     events_to_persist.extend(reddit_events)
     events_to_persist.extend(bangumi_events)
+    events_to_persist.extend(v2ex_events)
     events.extend(xhs_events)
     events.extend(dy_events)
     events.extend(yt_events)
     events.extend(zhihu_events)
     events.extend(reddit_events)
     events.extend(bangumi_events)
+    events.extend(v2ex_events)
     # With bilibili now optional, the floor is "at least one selected source
     # produced signals" — an all-empty run can't build a meaningful profile.
     if not events:
@@ -7728,6 +8089,7 @@ async def run_guided_init(
                 "zhihu": len(zhihu_events),
                 "reddit": len(reddit_events),
                 "bangumi": len(bangumi_events),
+                "v2ex": len(v2ex_events),
             }
         )
     # Re-running init re-fetches the same snapshot; without this the ledger
@@ -7749,8 +8111,14 @@ async def run_guided_init(
             await memory.propagate_event(event)
     await _stage_done(
         1,
-        status="warning" if dy_status == "degraded" else "ok",
-        reason="douyin_degraded" if dy_status == "degraded" else None,
+        status="warning" if dy_status == "degraded" or v2ex_status == "partial" else "ok",
+        reason=(
+            "douyin_degraded"
+            if dy_status == "degraded"
+            else "v2ex_partial"
+            if v2ex_status == "partial"
+            else None
+        ),
     )
 
     # ── Stage 2: analyze preferences ──
@@ -7943,6 +8311,8 @@ async def run_guided_init(
         combined_history.extend(_reddit_events_to_history_items(reddit_events))
     if bangumi_events:
         combined_history.extend(_bangumi_events_to_history_items(bangumi_events))
+    if v2ex_events:
+        combined_history.extend(_v2ex_events_to_history_items(v2ex_events))
     # X likes/bookmarks previously only fed the analyze stage; feeding the
     # profile builder too keeps cross-source flow uniform AND guarantees a
     # non-empty profile input when X is the only selected source.
@@ -7996,6 +8366,11 @@ async def run_guided_init(
                 else "画像生成阶段出错。可稍后手动重试 `openbiliclaw init`。"
             )
         raise GuidedInitError("profile_failed", message) from exc
+
+    # The new account's rows were staged inactive before persistence. Only a
+    # successfully committed full profile may atomically make them visible and
+    # hide the previous account's bootstrap evidence.
+    _activate_guided_v2ex_profile_identity(memory, v2ex_profile_identity)
 
     await _report_stage_progress(
         3,
@@ -8137,6 +8512,9 @@ async def run_guided_init(
         bangumi_events=bangumi_events,
         bangumi_scope_counts=bangumi_scope_counts,
         bangumi_status=bangumi_status,
+        v2ex_events=v2ex_events,
+        v2ex_scope_counts=v2ex_scope_counts,
+        v2ex_status=v2ex_status,
     )
 
 
@@ -8206,6 +8584,21 @@ def init(
         False,
         "--yes-reddit",
         help="跳过 Reddit 的 y/n 提问,直接启用 Reddit 数据接入(适合脚本化场景)。",
+    ),
+    no_v2ex: bool = typer.Option(
+        False,
+        "--no-v2ex",
+        help="跳过 V2EX 数据接入(默认非交互模式下就是跳过)。",
+    ),
+    skip_v2ex_prompt: bool = typer.Option(
+        False,
+        "--yes-v2ex",
+        help="跳过 V2EX 的 y/n 提问,直接启用 V2EX 数据接入(适合脚本化场景)。",
+    ),
+    v2ex_username: str = typer.Option(
+        "",
+        "--v2ex-username",
+        help="用于初始化的 V2EX 用户名；留空则读配置或由浏览器扩展识别。",
     ),
     no_bangumi: bool = typer.Option(
         False,
@@ -8395,6 +8788,30 @@ def init(
     else:
         include_reddit = _ask_reddit_inclusion()
 
+    if no_v2ex:
+        include_v2ex = False
+        console.print("[dim]  跳过 V2EX 数据接入(命令行 --no-v2ex)。[/dim]")
+    elif os.environ.get("OPENBILICLAW_NO_V2EX", "").strip() == "1":
+        include_v2ex = False
+        console.print("[dim]  跳过 V2EX 数据接入(OPENBILICLAW_NO_V2EX=1)。[/dim]")
+    elif skip_v2ex_prompt:
+        include_v2ex = True
+    else:
+        include_v2ex = _ask_v2ex_inclusion()
+
+    selected_v2ex_username = ""
+    if include_v2ex:
+        from openbiliclaw.config import load_config
+        from openbiliclaw.sources.v2ex_client import validate_v2ex_username
+
+        configured_v2ex_username = str(load_config().sources.v2ex.username or "").strip()
+        raw_v2ex_username = str(v2ex_username or configured_v2ex_username).strip()
+        if raw_v2ex_username:
+            try:
+                selected_v2ex_username = validate_v2ex_username(raw_v2ex_username)
+            except ValueError as exc:
+                raise typer.BadParameter(str(exc), param_hint="--v2ex-username") from exc
+
     if no_bangumi:
         include_bangumi = False
         console.print("[dim]  跳过 Bangumi 数据接入(命令行 --no-bangumi)。[/dim]")
@@ -8491,6 +8908,7 @@ def init(
         include_x,
         include_zhihu,
         include_reddit,
+        include_v2ex,
         include_bangumi,
     )
     if not any(selected_sources):
@@ -8500,7 +8918,7 @@ def init(
             "已跳过 B 站且未启用任何其他平台——init 至少需要一个数据来源。"
             "去掉 --no-bilibili，或配合 --yes-xhs / --yes-douyin / "
             "--yes-youtube / --yes-x / --yes-zhihu "
-            "/ --yes-reddit / --yes-bangumi 启用其他来源。",
+            "/ --yes-reddit / --yes-v2ex / --yes-bangumi 启用其他来源。",
         )
         raise typer.Exit(code=1)
 
@@ -8528,9 +8946,11 @@ def init(
         include_x=include_x,
         include_zhihu=include_zhihu,
         include_reddit=include_reddit,
+        include_v2ex=include_v2ex,
         include_bangumi=include_bangumi,
         bangumi_username=selected_bangumi_username,
         bangumi_token=selected_bangumi_token,
+        v2ex_username=selected_v2ex_username,
     )
 
     # gui-init (B2): the four init stages now run inside the shared async
@@ -8553,9 +8973,11 @@ def init(
                 include_x=include_x,
                 include_zhihu=include_zhihu,
                 include_reddit=include_reddit,
+                include_v2ex=include_v2ex,
                 include_bangumi=include_bangumi,
                 bangumi_username=selected_bangumi_username,
                 bangumi_token=selected_bangumi_token,
+                v2ex_username=selected_v2ex_username,
                 target_pool_count=_INIT_POOL_TARGET_COUNT,
                 discover_backfill=_run_init_discovery_backfill_async,
             )
@@ -8591,10 +9013,13 @@ def init(
     bangumi_events = list(getattr(result, "bangumi_events", []))
     bangumi_scope_counts = dict(getattr(result, "bangumi_scope_counts", {}))
     bangumi_status = str(getattr(result, "bangumi_status", "skipped"))
+    v2ex_events = list(getattr(result, "v2ex_events", []))
+    v2ex_scope_counts = dict(getattr(result, "v2ex_scope_counts", {}))
+    v2ex_status = str(getattr(result, "v2ex_status", "skipped"))
     discovered_count = result.discovered_count
     discovery_error = result.discovery_error
     dy_degraded = dy_status == "degraded"
-    partial_success = discovery_error or dy_degraded
+    partial_success = discovery_error or dy_degraded or v2ex_status == "partial"
 
     if result.discover_exc is not None:
         _print_status_panel(
@@ -8608,6 +9033,13 @@ def init(
             "抖音采集部分完成",
             "dy_status=degraded：已采到的抖音事件仍已用于画像建模，"
             "但至少一个范围未能证明分页完整；请检查扩展日志后重试补齐。",
+        )
+    if v2ex_status == "partial":
+        _print_status_panel(
+            "warning",
+            "V2EX 采集部分完成",
+            "已采集的 V2EX 信号仍已用于画像建模，但至少一个范围未完整返回；"
+            "请确认扩展已登录后重试补齐。",
         )
 
     _print_status_panel(
@@ -8650,6 +9082,10 @@ def init(
     bangumi_wish_count = int(bangumi_scope_counts.get("wish", 0))
     bangumi_done_count = int(bangumi_scope_counts.get("done", 0))
     bangumi_doing_count = int(bangumi_scope_counts.get("doing", 0))
+    v2ex_public_topics = int(v2ex_scope_counts.get("public_topics", 0))
+    v2ex_public_replies = int(v2ex_scope_counts.get("public_replies", 0))
+    v2ex_favorite_topics = int(v2ex_scope_counts.get("favorite_topics", 0))
+    v2ex_favorite_nodes = int(v2ex_scope_counts.get("favorite_nodes", 0))
     summary_rows: list[tuple[str, str]] = [
         ("📺 B 站观看历史", f"{len(history)} 条"),
         ("📺 B 站收藏夹", f"{len(favorites_data)} 条"),
@@ -8684,6 +9120,10 @@ def init(
         ("Bangumi 看过/读过/玩过", f"{bangumi_done_count} 条"),
         ("Bangumi 在看/在读/在玩", f"{bangumi_doing_count} 条"),
         ("🌐 Bangumi 入库事件", f"{len(bangumi_events)} 条"),
+        ("V2EX 发布主题", f"{v2ex_public_topics} 条"),
+        ("V2EX 参与讨论", f"{v2ex_public_replies} 个主题"),
+        ("V2EX 收藏主题 / 节点", f"{v2ex_favorite_topics} / {v2ex_favorite_nodes}"),
+        ("🌐 V2EX 入库事件", f"{len(v2ex_events)} 条"),
         ("📊 画像建模总事件", f"{len(events)} 条"),
         ("✅ 灵魂画像", "已生成"),
         ("🔍 首轮发现内容", f"{discovered_count} 条"),
@@ -8725,6 +9165,16 @@ def init(
             "[dim]ℹ️  Bangumi 0 条信号入库。请确认用户名存在，且收藏已设为公开。"
             "可用 [cyan]openbiliclaw fetch-bangumi --username <name>[/cyan] 只读验证。[/dim]"
         )
+    if not v2ex_events and v2ex_status not in {
+        "skipped",
+        "empty",
+        "identity_mismatch",
+        "no_profile_signal_sources",
+    }:
+        console.print(
+            "[dim]ℹ️  V2EX 没有入库信号。请确认扩展已安装并登录 v2ex.com；"
+            "可用 [cyan]openbiliclaw init --yes-v2ex[/cyan] 重试。[/dim]"
+        )
 
     source_parts = []
     if bilibili_events > 0:
@@ -8741,6 +9191,8 @@ def init(
         source_parts.append(f"[green]{len(reddit_events)}[/green] 条 Reddit 信号")
     if len(bangumi_events) > 0:
         source_parts.append(f"[green]{len(bangumi_events)}[/green] 条 Bangumi 信号")
+    if len(v2ex_events) > 0:
+        source_parts.append(f"[green]{len(v2ex_events)}[/green] 条 V2EX 信号")
     if len(source_parts) > 1:
         console.print(
             "[dim]ℹ️  本次画像综合了 "
@@ -9418,6 +9870,86 @@ def fetch_youtube(
         wait_seconds=wait_seconds,
         summary_renderer=_render,
     )
+
+
+@app.command("fetch-v2ex")
+def fetch_v2ex(
+    username: str = typer.Option(
+        "",
+        "--username",
+        help="V2EX 用户名；留空时由已登录浏览器顶部导航识别。",
+    ),
+    wait_seconds: float = typer.Option(
+        _DEFAULT_V2EX_BOOTSTRAP_WAIT_SECONDS,
+        "--wait-seconds",
+        "-w",
+        help="等扩展回传四个只读 scope 的最大秒数（默认 300s）。",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="忽略近期 V2EX bootstrap 任务，强制重新执行四个只读 scope。",
+    ),
+) -> None:
+    """只读验证 V2EX 四范围 bootstrap，不写 memory 或重建画像。"""
+    _print_page_title("V2EX 数据拉取", "扩展任务 → canonical 事件 smoke")
+    console.print(f"[dim]入队 V2EX bootstrap 任务，等扩展执行（最多 {wait_seconds:.0f}s）...[/dim]")
+    task_id = _enqueue_v2ex_bootstrap_task(
+        username=username,
+        profile_update=False,
+        smoke_only=True,
+        force=force,
+    )
+    if not task_id:
+        console.print(
+            "[bold red]无法入队 V2EX 任务[/bold red]"
+            " — 看上面的提示（数据库 / 预算 / 串行 bootstrap 门禁）。"
+        )
+        raise typer.Exit(code=1)
+
+    events, scope_counts, status_label = _collect_v2ex_bootstrap_events(
+        task_id,
+        max_wait_seconds=wait_seconds,
+    )
+    if status_label in {"ok", "partial"}:
+        console.print(
+            "  V2EX "
+            f"发布 [green]{scope_counts.get('public_topics', 0)}[/green] 条"
+            f" / 讨论 [green]{scope_counts.get('public_replies', 0)}[/green] 个 Topic"
+            f" / 收藏主题 [green]{scope_counts.get('favorite_topics', 0)}[/green] 条"
+            f" / 收藏 Node [green]{scope_counts.get('favorite_nodes', 0)}[/green] 个"
+        )
+        console.print(
+            f"  共转换 [green]{len(events)}[/green] 条 canonical 事件；"
+            "未写入 memory，未触发画像或 LLM。"
+        )
+        if status_label == "partial":
+            console.print(
+                "  [yellow]至少一个 scope 达到条目 / 页数上限或解析失败；"
+                "已保留其余只读结果，但本次不作为完整收藏快照。[/yellow]"
+            )
+        return
+    if status_label == "empty":
+        console.print("  [yellow]V2EX 任务完成，但四个 scope 都没有可转换事件。[/yellow]")
+        return
+    if status_label == "identity_mismatch":
+        console.print(
+            "  [yellow]V2EX 身份证据不一致；canonical 结果已保存，"
+            "账号画像与 Node 投影已暂停。[/yellow]"
+        )
+    elif status_label == "no_profile_signal_sources":
+        console.print(
+            "  [yellow]没有可归属到当前账号的 V2EX 画像信号；"
+            "请确认浏览器登录态或显式传入 --username。[/yellow]"
+        )
+    elif status_label == "timeout":
+        console.print(
+            "  [yellow]V2EX 任务超时：扩展未连接、后端端口不一致，或任务仍在翻页。"
+            "可加 --wait-seconds 420 重试。[/yellow]"
+        )
+    else:
+        console.print("  [yellow]V2EX 任务失败 —— 请检查扩展后台与任务结果。[/yellow]")
+    raise typer.Exit(code=1)
 
 
 @app.command("fetch-zhihu")
@@ -12014,6 +12546,228 @@ def _run_bangumi_discovery_smoke(*, mode: str, keyword: str = "", limit: int) ->
         _print_discovered_content_preview(item, index)
 
 
+def _run_v2ex_discovery_smoke(
+    *, mode: str, keyword: str = "", node: str = "", tab: str = "", limit: int
+) -> None:
+    """Run one read-only V2EX branch without cache, memory, or LLM writes."""
+
+    import os
+
+    from openbiliclaw.config import load_config
+    from openbiliclaw.sources.v2ex import v2ex_topic_to_content
+    from openbiliclaw.sources.v2ex_client import V2EXAPIError, V2EXClient
+
+    config = load_config()
+    v2ex_cfg = config.sources.v2ex
+    token_env = str(getattr(v2ex_cfg, "token_env", "OPENBILICLAW_V2EX_TOKEN"))
+    token = (
+        str(os.environ.get(token_env, "") or "").strip()
+        or str(getattr(v2ex_cfg, "access_token", "") or "").strip()
+    )
+
+    async def _fetch() -> list[Any]:
+        async with V2EXClient(
+            access_token=token or None,
+            request_interval_seconds=float(v2ex_cfg.request_interval_seconds),
+        ) as client:
+            if mode == "search":
+                page = await client.search_topics(keyword, limit=limit)
+            elif mode == "node":
+                page = await client.get_node_topics(node, limit=limit)
+            elif mode == "tab":
+                page = await client.get_tab(tab, limit=limit)
+            else:
+                page = await getattr(client, f"get_{mode}")(limit=limit)
+        return [
+            item
+            for row in page.data
+            if (item := v2ex_topic_to_content(row, strategy=f"v2ex-{mode}", node_name=node))
+            is not None
+        ]
+
+    subtitle = {
+        "search": f"关键词搜索 · {keyword}",
+        "node": f"Node · {node}",
+        "tab": f"Tab · {tab}",
+        "hot": "全站热门",
+        "latest": "全站最新",
+    }[mode]
+    _print_page_title("V2EX 内容发现 smoke", subtitle)
+    try:
+        items = asyncio.run(_fetch())
+    except (V2EXAPIError, ValueError) as exc:
+        _print_status_panel("warning", "V2EX API / Feed 读取失败", str(exc))
+        raise typer.Exit(code=1) from exc
+    _print_key_value_table(
+        "只读召回摘要",
+        [("模式", mode), ("条目数", str(len(items))), ("本地写入", "0"), ("LLM 调用", "0")],
+    )
+    for index, item in enumerate(items[:5], start=1):
+        _print_discovered_content_preview(item, index)
+
+
+@app.command("discover-v2ex")
+def discover_v2ex(
+    keyword: str = typer.Argument(..., help="V2EX 搜索关键词。"),
+    limit: int = typer.Option(10, "--limit", "-n", min=1, max=50),
+) -> None:
+    """只读验证 V2EX 关键词召回。"""
+    if not keyword.strip():
+        raise typer.BadParameter("搜索关键词不能为空。", param_hint="keyword")
+    _run_v2ex_discovery_smoke(mode="search", keyword=keyword.strip(), limit=limit)
+
+
+@app.command("discover-v2ex-node")
+def discover_v2ex_node(
+    node: str = typer.Argument(..., help="V2EX Node slug，例如 programmer。"),
+    limit: int = typer.Option(10, "--limit", "-n", min=1, max=50),
+) -> None:
+    """只读验证 V2EX Node 主题召回。"""
+    _run_v2ex_discovery_smoke(mode="node", node=node.strip(), limit=limit)
+
+
+@app.command("discover-v2ex-tab")
+def discover_v2ex_tab(
+    tab: str = typer.Argument(..., help="V2EX Tab，例如 tech。"),
+    limit: int = typer.Option(10, "--limit", "-n", min=1, max=50),
+) -> None:
+    """只读验证 V2EX Tab Feed。"""
+    _run_v2ex_discovery_smoke(mode="tab", tab=tab.strip(), limit=limit)
+
+
+@app.command("discover-v2ex-hot")
+def discover_v2ex_hot(limit: int = typer.Option(10, "--limit", "-n", min=1, max=50)) -> None:
+    """只读验证 V2EX 全站热门。"""
+    _run_v2ex_discovery_smoke(mode="hot", limit=limit)
+
+
+@app.command("discover-v2ex-latest")
+def discover_v2ex_latest(limit: int = typer.Option(10, "--limit", "-n", min=1, max=50)) -> None:
+    """只读验证 V2EX 全站最新。"""
+    _run_v2ex_discovery_smoke(mode="latest", limit=limit)
+
+
+def _run_v2ex_discovery(*, limit: int, force: bool = False) -> None:
+    """Run one formal V2EX cycle through the shared candidate pipeline."""
+
+    import os
+
+    from openbiliclaw.config import load_config
+    from openbiliclaw.runtime.keyword_fetch import KeywordFetchCoordinator
+    from openbiliclaw.runtime.v2ex_producer import (
+        V2EXDiscoveryProducer,
+        build_v2ex_external_search_provider,
+    )
+    from openbiliclaw.soul.engine import SoulProfileNotInitializedError
+    from openbiliclaw.sources.v2ex_client import V2EXClient
+
+    _require_runtime_config()
+    config = load_config()
+    v2ex_cfg = config.sources.v2ex
+    if not v2ex_cfg.enabled:
+        _print_status_panel(
+            "warning",
+            "V2EX discovery 未启用",
+            "请在配置页或 config.toml 中启用 [sources.v2ex].enabled。",
+        )
+        raise typer.Exit(code=1)
+    database = _get_runtime_database()
+    soul_engine = _build_soul_engine()
+    try:
+        asyncio.run(soul_engine.get_profile())
+    except SoulProfileNotInitializedError as exc:
+        _print_status_panel("warning", "尚未初始化用户画像", "请先执行 `openbiliclaw init`。")
+        raise typer.Exit(code=1) from exc
+    discovery_engine = _build_discovery_engine()
+    candidate_pipeline = _build_discovery_candidate_pipeline(
+        config=config, database=database, discovery_engine=discovery_engine
+    )
+    keyword_fetch = KeywordFetchCoordinator(database=database, discovery_config=config.discovery)
+    token_env = str(getattr(v2ex_cfg, "token_env", "OPENBILICLAW_V2EX_TOKEN"))
+    token = (
+        str(os.environ.get(token_env, "") or "").strip() or str(v2ex_cfg.access_token or "").strip()
+    )
+    from openbiliclaw.api.source_auth.probe_cache import LIVE_PROBES
+    from openbiliclaw.sources.v2ex_identity import resolve_v2ex_identity_state
+
+    v2ex_identity = resolve_v2ex_identity_state(
+        cfg=config,
+        database=database,
+        probes=LIVE_PROBES,
+    )
+
+    async def _produce() -> dict[str, object]:
+        async with V2EXClient(
+            access_token=token or None,
+            request_interval_seconds=float(v2ex_cfg.request_interval_seconds),
+        ) as client:
+            producer = V2EXDiscoveryProducer(
+                database=database,
+                soul_engine=soul_engine,
+                client=client,
+                access_token=token,
+                identity_username=(
+                    v2ex_identity.username if v2ex_identity.account_bootstrap_allowed else ""
+                ),
+                enabled=True,
+                source_modes=tuple(v2ex_cfg.source_modes),
+                tab_modes=tuple(v2ex_cfg.tab_modes),
+                node_allowlist=tuple(v2ex_cfg.node_allowlist),
+                node_blocklist=tuple(v2ex_cfg.node_blocklist),
+                node_downweight=tuple(v2ex_cfg.node_downweight),
+                daily_search_budget=v2ex_cfg.daily_search_budget,
+                daily_node_budget=v2ex_cfg.daily_node_budget,
+                daily_tab_budget=v2ex_cfg.daily_tab_budget,
+                daily_hot_budget=v2ex_cfg.daily_hot_budget,
+                daily_latest_budget=v2ex_cfg.daily_latest_budget,
+                min_interval_minutes=v2ex_cfg.min_interval_minutes,
+                detail_fetch_limit=v2ex_cfg.detail_fetch_limit,
+                reply_enrichment_limit=v2ex_cfg.reply_enrichment_limit,
+                max_topic_chars=v2ex_cfg.max_topic_chars,
+                max_reply_digest_chars=v2ex_cfg.max_reply_digest_chars,
+                max_profile_nodes=v2ex_cfg.max_profile_nodes,
+                candidate_pipeline=candidate_pipeline,
+                keyword_fetch=keyword_fetch,
+                search_provider=build_v2ex_external_search_provider(config),
+            )
+            return await producer.produce_if_due(limit=limit, force=force)
+
+    result = asyncio.run(_produce())
+    reason = str(result.get("reason") or "")
+    discovered = int(cast("Any", result.get("discovered") or 0))
+    enqueued = int(cast("Any", result.get("enqueued") or 0))
+    modes = ", ".join(v2ex_cfg.source_modes)
+    _print_page_title("V2EX 内容发现", f"正式 discover · {modes}")
+    if reason in {"ok", "partial"}:
+        _print_key_value_table(
+            "发现摘要",
+            [
+                ("发现条数", str(discovered)),
+                ("入池候选", str(enqueued)),
+                ("来源", "v2ex"),
+                ("分支", modes),
+                ("状态", reason),
+            ],
+        )
+        for index, item in enumerate(candidate_pipeline.last_admitted_items[:5], start=1):
+            _print_discovered_content_preview(item, index)
+        return
+    messages = {
+        "disabled": ("warning", "V2EX discovery 已禁用", "请启用 V2EX 来源后重试。"),
+        "no_profile": ("warning", "尚未初始化 V2EX 画像", "请先执行 `openbiliclaw init`。"),
+        "throttled": ("info", "V2EX discovery 尚未到期", "可使用 --force 手动验证。"),
+        "rate_limited": ("warning", "V2EX API 正在冷却", "到期后会自动重试。"),
+        "pool_full": ("info", "候选池已满", "当前无需补充 V2EX 候选。"),
+        "budget_exhausted": ("info", "V2EX discovery 今日预算已用完", "可在配置页调整每日预算。"),
+        "empty": ("info", "V2EX discovery 返回为空", "官方 API / Feed 可达，但本轮无可转换主题。"),
+        "error": ("warning", "V2EX discovery 执行失败", str(result.get("mode_results") or "")),
+    }
+    kind, title, body = messages.get(
+        reason, ("info", "V2EX discovery 未产出内容", reason or "无详细信息")
+    )
+    _print_status_panel(kind, title, body)
+
+
 @app.command("discover-bangumi")
 def discover_bangumi(
     keyword: str = typer.Argument(..., help="Bangumi 搜索关键词。"),
@@ -12187,7 +12941,7 @@ def discover(
         "bilibili",
         "--source",
         "-s",
-        help="触发发现的内容源：bilibili、xiaohongshu、douyin、zhihu、reddit 或 bangumi。",
+        help="触发发现的内容源：bilibili、xiaohongshu、douyin、zhihu、reddit、bangumi 或 v2ex。",
         case_sensitive=False,
     ),
     strategies: list[str] | None = _DISCOVER_STRATEGIES_OPTION,
@@ -12195,7 +12949,7 @@ def discover(
     force: bool = typer.Option(
         False,
         "--force",
-        help="xiaohongshu / bangumi：忽略最小调度间隔强制执行一次。",
+        help="xiaohongshu / bangumi / v2ex：忽略最小调度间隔强制执行一次。",
     ),
 ) -> None:
     """手动触发内容发现（按来源选择渠道）."""
@@ -12253,10 +13007,20 @@ def discover(
         _run_bangumi_discovery(limit=limit, force=force)
         return
 
+    if source_normalized == "v2ex":
+        if strategies:
+            _print_status_panel(
+                "info",
+                "--strategy 仅对 Bilibili 生效",
+                "v2ex 渠道走 source_modes 配置的只读 API / Feed discovery 分支，已忽略策略过滤。",
+            )
+        _run_v2ex_discovery(limit=limit, force=force)
+        return
+
     if source_normalized != "bilibili":
         raise typer.BadParameter(
             f"未知的内容源 `{source}`，当前支持："
-            "bilibili、xiaohongshu、douyin、zhihu、reddit、bangumi。"
+            "bilibili、xiaohongshu、douyin、zhihu、reddit、bangumi、v2ex。"
         )
 
     active_strategies = _normalize_strategy_names(strategies)

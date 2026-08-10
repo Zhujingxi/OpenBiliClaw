@@ -58,6 +58,37 @@ VerifyMethod = Literal[
     "none",  # no verification capability (or none needed)
 ]
 
+# Some sources expose more than one independently authenticated capability.  A
+# V2EX public feed, for example, is usable anonymously while its browser-owned
+# account bootstrap needs a fresh signed-in session.  Keep this axis separate
+# from the source-wide compatibility fields below so a public green light can
+# never be mistaken for proof that private account collection is ready.
+CapabilityAuthMode = Literal[
+    "anonymous",
+    "optional-credential",
+    "login-required",
+]
+
+CapabilityReadinessState = Literal[
+    "ready",
+    "login_required",
+    "identity_required",
+    "identity_mismatch",
+    "identity_switch_required",
+    "stale",
+    "unavailable",
+]
+
+
+class SourceCapabilityAuth(BaseModel):
+    """Authentication/readiness contract for one named source capability."""
+
+    mode: CapabilityAuthMode
+    required: bool = True
+    ready: bool = False
+    state: CapabilityReadinessState = "unavailable"
+    detail: str = ""
+
 
 def normalize_timestamp(value: str) -> str:
     """Return *value* as timezone-qualified ISO-8601, or "" / *value* unchanged.
@@ -118,6 +149,11 @@ class SourceAuthContract(BaseModel):
     # Human-readable, platform-specific note. User-facing copy lives here so the
     # frontends never hardcode per-platform strings (invariant I4).
     detail: str = ""
+    # Empty for legacy single-auth sources.  Mixed-auth sources populate every
+    # active capability declared by their platform-source contract.  Consumers
+    # must use the requested capability (normally ``bootstrap`` during guided
+    # init), not infer private readiness from ``auth_required``.
+    capabilities: dict[str, SourceCapabilityAuth] = Field(default_factory=dict)
 
     # ── Legacy compatibility (Wave A only) ────────────────────────────────
     # The old ``state``/``logged_in`` vocabulary, owned by each provider. The

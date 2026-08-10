@@ -311,7 +311,7 @@
     // Bangumi arrives through the shared roster like every other source, so it
     // appears here without this wizard keeping a list of its own.
     const INIT_DEFAULT_SOURCES = new Set(["bilibili"]);
-    const INIT_SOURCE_OPTIONS = SourceStatus.SOURCE_KEYS.map((key) => ({
+    const INIT_SOURCE_OPTIONS = (SourceStatus.INIT_SOURCE_KEYS || SourceStatus.SOURCE_KEYS).map((key) => ({
       key,
       label: SourceStatus.sourceLabel(key),
       ...(INIT_DEFAULT_SOURCES.has(key) ? { defaultChecked: true } : {}),
@@ -326,6 +326,7 @@
       local_only: "只能在本机发起初始化。",
       no_sources_selected: "至少勾选一个数据来源。",
       no_profile_signal_sources: "只选择 Bangumi 时，请填写个人令牌（推荐）或公开用户名，或先在浏览器登录 bgm.tv 让扩展自动识别账号。",
+      v2ex_bootstrap_not_ready: "V2EX 账号初始化尚未就绪。请在浏览器登录 v2ex.com，并保持 OpenBiliClaw 扩展已连接。",
       invalid_bangumi_access_token: "Bangumi 个人令牌被拒绝（缺失、错误或已过期）。请到 next.bgm.tv/demo/access-token 重新生成后重试。",
       bangumi_token_check_failed: "校验 Bangumi 令牌时无法连接 Bangumi，请稍后重试。",
       analyze_failed: "偏好分析未完成。",
@@ -949,7 +950,7 @@
       const biliOk = Boolean(prereq.bilibili_logged_in);
       const biliState = biliOk ? "B站 已登录" : "B站 登录检测未通过";
       const biliDetail = String(prereq.bilibili_detail || "").trim();
-      return [
+      const rows = [
         {
           key: "bilibili",
           label: biliSelected ? biliState : `${biliState}（未勾选 B 站，可跳过）`,
@@ -1000,6 +1001,22 @@
           hint: "",
         },
       ];
+      const capabilityMatrix = prereq.source_capabilities;
+      if (selectedSources && capabilityMatrix && typeof capabilityMatrix === "object") {
+        for (const source of selectedSources) {
+          const capability = capabilityMatrix?.[source]?.bootstrap;
+          if (!capability) continue;
+          const readiness = SourceStatus.describeCapabilityReadiness(capability);
+          rows.push({
+            key: `${source}-bootstrap`,
+            label: `${SourceStatus.sourceLabel(source)} 账号初始化${readiness.ready ? "已就绪" : "未就绪"}`,
+            ok: readiness.ready,
+            hard: readiness.required,
+            hint: readiness.detail || readiness.label,
+          });
+        }
+      }
+      return rows;
     }
 
     function renderInitSources() {
@@ -1602,6 +1619,25 @@
         $("#startInit").disabled = false;
         $("#startInit").textContent = "开始初始化";
         setInitReason("还没检测到 B站 登录。先登录 bilibili.com，或取消勾选 B 站再开始。");
+        return;
+      }
+      const capabilityMatrix = status?.prerequisites?.source_capabilities;
+      const blockedCapability = selected
+        .map((source) => ({
+          source,
+          view: SourceStatus.describeCapabilityReadiness(
+            capabilityMatrix?.[source]?.bootstrap,
+          ),
+        }))
+        .find(({ view }) => view.known && view.required && !view.ready);
+      if (blockedCapability) {
+        renderInitChecklist(status, selected);
+        $("#startInit").disabled = false;
+        $("#startInit").textContent = "开始初始化";
+        setInitReason(
+          blockedCapability.view.detail
+          || `${SourceStatus.sourceLabel(blockedCapability.source)} 账号初始化尚未就绪。`,
+        );
         return;
       }
       if (!status.can_start) {

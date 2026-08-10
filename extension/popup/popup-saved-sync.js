@@ -98,6 +98,7 @@ const PLATFORM_LABELS = {
   zhihu: "知乎",
   reddit: "Reddit",
   bangumi: "Bangumi",
+  v2ex: "V2EX",
 };
 
 function safeSyncText(value, maxLength = 240) {

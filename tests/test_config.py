@@ -180,6 +180,7 @@ class TestConfigDefaults:
             "zhihu": 1,
             "reddit": 1,
             "bangumi": 1,
+            "v2ex": 1,
         }
 
     def test_bilibili_source_enabled_defaults_true(self) -> None:
@@ -1336,6 +1337,7 @@ youtube = 3
         "zhihu": 1,
         "reddit": 1,
         "bangumi": 1,
+        "v2ex": 1,
     }
 
 
@@ -1443,6 +1445,109 @@ def test_sources_bangumi_defaults() -> None:
     assert config.sources.bangumi.request_interval_seconds == 1
     assert config.sources.bangumi.min_interval_minutes == 3
     assert config.sources.bangumi.bootstrap_limit == 300
+
+
+def test_sources_v2ex_defaults() -> None:
+    config = Config()
+
+    assert config.sources.v2ex.enabled is False
+    assert config.sources.v2ex.username == ""
+    assert config.sources.v2ex.access_token == ""
+    assert config.sources.v2ex.token_env == "OPENBILICLAW_V2EX_TOKEN"
+    assert config.sources.v2ex.source_modes == ("search", "node", "tab", "hot", "latest")
+    assert config.sources.v2ex.tab_modes == ("tech", "creative", "qna")
+    assert config.sources.v2ex.node_blocklist == ("sandbox",)
+    assert config.sources.v2ex.daily_search_budget == 120
+    assert config.sources.v2ex.daily_node_budget == 180
+    assert config.sources.v2ex.request_interval_seconds == 2
+    assert config.sources.v2ex.min_interval_minutes == 5
+
+
+def test_save_config_round_trips_sources_v2ex(tmp_path: Path) -> None:
+    config = Config()
+    config.sources.v2ex.enabled = True
+    config.sources.v2ex.username = "alice"
+    config.sources.v2ex.access_token = "pat-123"
+    config.sources.v2ex.token_env = "V2EX_TOKEN_TEST"
+    config.sources.v2ex.source_modes = ("search", "node", "hot")
+    config.sources.v2ex.tab_modes = ("tech",)
+    config.sources.v2ex.node_allowlist = ("programmer", "python")
+    config.sources.v2ex.node_blocklist = ("sandbox", "deals")
+    config.sources.v2ex.daily_search_budget = 42
+    config.sources.v2ex.request_interval_seconds = 4
+    config.sources.v2ex.min_interval_minutes = 20
+    config.scheduler.pool_source_shares["v2ex"] = 2
+
+    target = tmp_path / "config.toml"
+    save_config(config, target)
+    loaded = load_config(target)
+
+    assert loaded.sources.v2ex == config.sources.v2ex
+    assert loaded.scheduler.pool_source_shares["v2ex"] == 2
+
+
+def test_save_config_rejects_invalid_v2ex_credentials(tmp_path: Path) -> None:
+    from openbiliclaw.config import _collect_config_issues
+
+    config = Config()
+    config.sources.v2ex.username = "bad/name"
+    config.sources.v2ex.access_token = "bad token\nwith newline"
+    target = tmp_path / "config.toml"
+
+    issues = _collect_config_issues(config)
+    assert any(
+        issue.field == "sources.v2ex.username" and issue.severity == "blocking" for issue in issues
+    )
+    assert any(
+        issue.field == "sources.v2ex.access_token" and issue.severity == "blocking"
+        for issue in issues
+    )
+    with pytest.raises(ValueError, match="unsupported"):
+        save_config(config, target)
+    assert not target.exists()
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    (
+        ("node_allowlist", ("programmer", "../private")),
+        ("max_topic_chars", 20_001),
+        ("bootstrap_max_pages_per_scope", 101),
+    ),
+)
+def test_save_config_rejects_unsafe_v2ex_bounds(
+    tmp_path: Path,
+    field_name: str,
+    value: object,
+) -> None:
+    config = Config()
+    setattr(config.sources.v2ex, field_name, value)
+    target = tmp_path / "config.toml"
+
+    with pytest.raises(ValueError, match=field_name):
+        save_config(config, target)
+
+    assert not target.exists()
+
+
+def test_legacy_v2ex_config_is_bounded_and_normalized() -> None:
+    from openbiliclaw.config import V2EXSourceConfig, normalize_v2ex_source_config
+
+    source = V2EXSourceConfig(
+        source_modes=("SEARCH", "unknown", "search"),
+        tab_modes=("Tech",),
+        node_allowlist=("Programmer", "../private", "programmer"),
+        max_topic_chars=999_999,
+        bootstrap_max_pages_per_scope=0,
+    )
+
+    normalize_v2ex_source_config(source, strict=False)
+
+    assert source.source_modes == ("search",)
+    assert source.tab_modes == ("tech",)
+    assert source.node_allowlist == ("programmer",)
+    assert source.max_topic_chars == 20_000
+    assert source.bootstrap_max_pages_per_scope == 1
 
 
 def test_save_config_round_trips_sources_bangumi(tmp_path: Path) -> None:
@@ -1695,6 +1800,7 @@ def test_save_config_round_trips_pool_source_shares(tmp_path: Path) -> None:
         "zhihu": 1,
         "reddit": 2,
         "bangumi": 1,
+        "v2ex": 1,
     }
 
     save_config(config, config_path)
@@ -1709,6 +1815,7 @@ def test_save_config_round_trips_pool_source_shares(tmp_path: Path) -> None:
         "zhihu": 1,
         "reddit": 2,
         "bangumi": 1,
+        "v2ex": 1,
     }
 
 

@@ -52,6 +52,7 @@ _CSRF_GET_EXACT = frozenset(
         "/api/sources/x/next-task",
         "/api/sources/zhihu/next-task",
         "/api/sources/reddit/next-task",
+        "/api/sources/v2ex/next-task",
         "/api/recommendations",
     }
 )

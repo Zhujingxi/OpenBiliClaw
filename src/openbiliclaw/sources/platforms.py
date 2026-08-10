@@ -13,6 +13,7 @@ PLATFORM_TWITTER = "twitter"
 PLATFORM_ZHIHU = "zhihu"
 PLATFORM_REDDIT = "reddit"
 PLATFORM_BANGUMI = "bangumi"
+PLATFORM_V2EX = "v2ex"
 
 
 @dataclass(frozen=True)
@@ -116,6 +117,12 @@ SOURCE_FAMILY_RULES = (
         url_hosts=("bgm.tv", "bangumi.tv"),
         requires_overseas_network=True,
         routed_by_network_mode=True,
+    ),
+    SourceFamilyRule(
+        family=PLATFORM_V2EX,
+        platform_aliases=frozenset({"v2ex", "v2"}),
+        source_prefixes=("v2ex-", "v2ex_"),
+        url_hosts=("v2ex.com",),
     ),
 )
 

@@ -432,6 +432,7 @@ test("init source options: bilibili is default-checked but deselectable, others 
     "zhihu",
     "reddit",
     "bangumi",
+    "v2ex",
   ]);
   // The login reminder copy mentions logging in on this browser.
   assert.ok(INIT_SOURCE_LOGIN_HINT.includes("登录"));
