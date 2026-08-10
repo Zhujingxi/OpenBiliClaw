@@ -188,6 +188,21 @@ test("settings source tab separates every platform into its own block", () => {
   assert.match(sourcesPanel, /id="cfgBilibiliEnabled"/);
   assert.match(sourcesPanel, />启用 Bilibili discovery</);
   assert.match(sourcesPanel, />调试：B 站登录时显示浏览器窗口</);
+
+  // Keep the Linux.do card closed before the V2EX card starts. If either
+  // wrapper is left open, the browser nests every later settings panel under
+  // the hidden sources panel and tabs such as 通用 render as a blank page.
+  const linuxdoStart = popupHtml.indexOf('data-source-card="linuxdo"');
+  const v2exStart = popupHtml.indexOf(
+    '<div class="settings-section settings-source-card" data-source-card="v2ex"',
+  );
+  assert.ok(linuxdoStart >= 0 && v2exStart > linuxdoStart);
+  const linuxdoBlock = popupHtml.slice(linuxdoStart, v2exStart);
+  assert.match(
+    linuxdoBlock,
+    /id="cfgLinuxdoBootstrapLimit"[\s\S]*?\n\s*<\/div>\s*\n\s*<\/div>\s*$/,
+    "Linux.do source body and card must close before V2EX starts",
+  );
   assert.match(popupJs, /bilibiliEnabled\.checked = cfg\.sources\?\.bilibili\?\.enabled !== false/);
   assert.match(popupJs, /xhsEnabled\.checked = cfg\.sources\?\.xiaohongshu\?\.enabled === true/);
   assert.match(popupJs, /bilibili:\s*\{\s*enabled: checked\("cfgBilibiliEnabled", true\)/);
