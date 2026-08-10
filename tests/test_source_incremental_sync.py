@@ -264,12 +264,41 @@ async def test_global_zero_and_per_source_zero_disable_independently(
     scheduler, _db, _memory, _presence, _clock, _kicks = _harness(monkeypatch, config=global_off)
     assert (await scheduler.tick()).reason == "not_due"
 
-    per_source_off = SchedulerConfig(xhs_incremental_hours=0)
+    # Explicit None still exercises shared inheritance; Douyin's production
+    # default is 0 so it never foregrounds an account task by surprise.
+    per_source_off = SchedulerConfig(xhs_incremental_hours=0, douyin_incremental_hours=None)
     scheduler, _db, _memory, _presence, _clock, _kicks = _harness(
         monkeypatch, config=per_source_off
     )
     result = await scheduler.tick()
     assert result.source == "dy"
+
+
+@pytest.mark.asyncio
+async def test_douyin_incremental_sync_is_disabled_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scheduler, _db, _memory, _presence, _clock, _kicks = _harness(
+        monkeypatch,
+        config=SchedulerConfig(),
+        enabled={source: source == "dy" for source in SOURCE_ORDER},
+    )
+
+    assert (await scheduler.tick()).reason == "not_due"
+
+
+@pytest.mark.asyncio
+async def test_douyin_incremental_sync_can_be_explicitly_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scheduler, _db, _memory, _presence, _clock, _kicks = _harness(
+        monkeypatch,
+        config=SchedulerConfig(douyin_incremental_hours=24),
+        enabled={source: source == "dy" for source in SOURCE_ORDER},
+    )
+
+    result = await scheduler.tick()
+    assert (result.reason, result.source, result.created) == ("created", "dy", True)
 
 
 @pytest.mark.asyncio
@@ -513,7 +542,10 @@ async def test_enabled_presence_profile_and_init_gates(monkeypatch: pytest.Monke
 
 @pytest.mark.asyncio
 async def test_round_robin_fairness_uses_persisted_cursor(monkeypatch: pytest.MonkeyPatch) -> None:
-    scheduler, database, _memory, _presence, clock, _kicks = _harness(monkeypatch)
+    scheduler, database, _memory, _presence, clock, _kicks = _harness(
+        monkeypatch,
+        config=SchedulerConfig(douyin_incremental_hours=24),
+    )
     seen: list[str] = []
     for _ in SOURCE_ORDER:
         result = await scheduler.tick()
@@ -565,7 +597,10 @@ async def test_reused_or_none_outcome_does_not_stamp_schedule_state(
 async def test_exhausted_source_budget_does_not_starve_next_due_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    scheduler, database, memory, _presence, clock, kicks = _harness(monkeypatch)
+    scheduler, database, memory, _presence, clock, kicks = _harness(
+        monkeypatch,
+        config=SchedulerConfig(douyin_incremental_hours=24),
+    )
     table, task_type, _ = scheduler_module._TASK_SPECS["xhs"]
 
     def exhausted(_db: Any, *, force: bool, incremental: bool) -> BootstrapEnqueueResult:

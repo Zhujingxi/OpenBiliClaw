@@ -98,6 +98,7 @@ _MAX_EVAL_MAX_WAIT_SECONDS = 600.0
 _DEFAULT_EXTENSION_DISCONNECT_GRACE_SECONDS = 90
 _DEFAULT_EXTENSION_TOKEN_TTL_HOURS = 24
 _DEFAULT_SOURCE_INCREMENTAL_HOURS = 24
+_DEFAULT_DOUYIN_INCREMENTAL_HOURS = 0
 _MIN_SOURCE_INCREMENTAL_HOURS = 0
 _MAX_SOURCE_INCREMENTAL_HOURS = 168
 _DEFAULT_REFRESH_CHECK_INTERVAL_SECONDS = 60
@@ -939,11 +940,12 @@ class SchedulerConfig:
         default_factory=lambda: dict(_DEFAULT_POOL_SOURCE_SHARES)
     )
     account_sync_interval_hours: int = 6
-    # Extension-online periodic account bootstrap refresh.  Zero disables the
-    # global schedule; a source override of ``None`` inherits the global value.
+    # Extension-online periodic account bootstrap refresh. Zero disables the
+    # global schedule. Douyin is default-off because its account bootstrap may
+    # need a foreground tab; users can opt in with an explicit positive value.
     source_incremental_hours: int = _DEFAULT_SOURCE_INCREMENTAL_HOURS
     xhs_incremental_hours: int | None = None
-    douyin_incremental_hours: int | None = None
+    douyin_incremental_hours: int | None = _DEFAULT_DOUYIN_INCREMENTAL_HOURS
     youtube_incremental_hours: int | None = None
     zhihu_incremental_hours: int | None = None
     reddit_incremental_hours: int | None = None
@@ -2392,10 +2394,14 @@ def _build_config(
                         default=None,
                         allow_none=True,
                     ),
-                    "douyin_incremental_hours": _normalize_source_incremental_hours(
-                        sched_raw.get("douyin_incremental_hours"),
-                        default=None,
-                        allow_none=True,
+                    "douyin_incremental_hours": (
+                        _normalize_source_incremental_hours(
+                            sched_raw.get("douyin_incremental_hours"),
+                            default=_DEFAULT_DOUYIN_INCREMENTAL_HOURS,
+                            allow_none=True,
+                        )
+                        if "douyin_incremental_hours" in sched_raw
+                        else _DEFAULT_DOUYIN_INCREMENTAL_HOURS
                     ),
                     "youtube_incremental_hours": _normalize_source_incremental_hours(
                         sched_raw.get("youtube_incremental_hours"),

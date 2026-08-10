@@ -17,6 +17,11 @@ Discovery 配置响应与更新白名单同时公开 `keyword_digest_grace_hours
 `0..168`。`PUT /api/config` 拒绝布尔值、非整数和越界值；合法值进入同一次 TOML 持久化与
 runtime apply。`0` 是只关闭跨 digest 关键词复用的回滚值，不会关闭统一 planner 或删除历史行。
 
+账号增量配置中的 `scheduler.douyin_incremental_hours` 默认返回 `0`。省略该字段或通过
+`PUT /api/config` 发送 `null` 都重置为默认关闭，避免抖音账号 `bootstrap_profile` 在用户未显式
+授权周期运行时打开前台任务页；只有 `1..168` 的整数会开启周期回拉。这个字段不控制手动
+初始化、`fetch-douyin` 或后台 feed / search / hot discovery。
+
 ## 配置保存与后台应用
 
 `PUT /api/config` 把“持久化成功”和“运行时已经切换”分成两个明确阶段。请求仍在 `_CONFIG_SAVE_LOCK` 内完成校验、`config.toml.bak` 快照、`config.toml` 写入和凭据存储，然后统一立即返回 `202 apply_state="queued"`、`apply_revision` 与已脱敏配置快照；运行时 lane 由 app-owned latest-wins 队列在后台安全应用，前端通过 `GET /api/config/apply-status` 或 runtime event 观察终态，不把 202 当作失败。

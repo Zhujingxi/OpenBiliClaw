@@ -2258,7 +2258,7 @@ class SchedulerConfigOut(BaseModel):
     account_sync_interval_hours: int = 6
     source_incremental_hours: int = 24
     xhs_incremental_hours: int | None = None
-    douyin_incremental_hours: int | None = None
+    douyin_incremental_hours: int | None = 0
     youtube_incremental_hours: int | None = None
     zhihu_incremental_hours: int | None = None
     reddit_incremental_hours: int | None = None

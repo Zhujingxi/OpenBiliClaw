@@ -829,7 +829,7 @@ TOML 与显式环境变量覆盖在构造 `SchedulerConfig` 前统一归一为�
 | `account_sync_interval_hours` | int | `6` | 账户侧长期信号同步间隔；运行时会低频拉取 history / favorites / following |
 | `source_incremental_hours` | int | `24` | 已安装扩展在线时，XHS / 抖音 / YouTube / 知乎 / Reddit / Linux.do / V2EX 账号 bootstrap 信号的全局周期（小时），范围 `0..168`；`0` 关闭七源周期回拉。它复用浏览器登录态，不是无浏览器后台同步 |
 | `xhs_incremental_hours` | int 或 null | `null` | 小红书周期覆盖；缺省 / `null` 继承全局，`0` 只关闭小红书，范围 `0..168` |
-| `douyin_incremental_hours` | int 或 null | `null` | 抖音周期覆盖；缺省 / `null` 继承全局，`0` 只关闭抖音，范围 `0..168` |
+| `douyin_incremental_hours` | int 或 null | `0` | 抖音账号周期回拉默认关闭，避免 `bootstrap_profile` 为读取作品 / 收藏 / 点赞 / 关注而主动切到前台并打断浏览；设置 `1..168` 小时可显式开启，`0`、缺省或 API `null` 都恢复默认关闭。手动初始化、`fetch-douyin` 与后台 feed / search / hot discovery 不受影响 |
 | `youtube_incremental_hours` | int 或 null | `null` | YouTube 周期覆盖；缺省 / `null` 继承全局，`0` 只关闭 YouTube，范围 `0..168` |
 | `zhihu_incremental_hours` | int 或 null | `null` | 知乎周期覆盖；缺省 / `null` 继承全局，`0` 只关闭知乎，范围 `0..168` |
 | `reddit_incremental_hours` | int 或 null | `null` | Reddit 周期覆盖；缺省 / `null` 继承全局，`0` 只关闭 Reddit，范围 `0..168` |
@@ -874,7 +874,7 @@ TOML 与显式环境变量覆盖在构造 `SchedulerConfig` 前统一归一为�
 > 后台 refresh 还会使用约 90% 的可换池低水位；池子只是轻微低于 `pool_target_count` 时不跑 discovery。B 站完整四策略补货在小缺口阶段优先只给 `search + related_chain` 预算，`trending/explore` 延后到更深缺口。
 > `pause_on_extension_disconnect` 只约束后端 daemon 自己发起的后台 LLM / embedding 工作；用户手动点击刷新、CLI 显式命令、配置保存和普通读取接口不因为插件离线而被拦截。`runtime-stream` 连接断开由后端 receive-side detector 记录，浏览器 idle disconnect 后不会让 presence 状态卡住。
 >
-> 七源账号周期回拉始终直接检查扩展 presence，不受 `pause_on_extension_disconnect` 的默认值影响。逐源字段在 TOML 中应省略以继承；`config.example.toml` 只把它们作为注释示例。`PUT /api/config` 可用 JSON `null` 恢复继承；设置页热重载后新 scheduler 立即采用新周期，但不会越过已有 active task。
+> 七源账号周期回拉始终直接检查扩展 presence，不受 `pause_on_extension_disconnect` 的默认值影响。除抖音外，逐源字段在 TOML 中应省略以继承，`PUT /api/config` 可用 JSON `null` 恢复继承；抖音在 `config.example.toml` 中显式写为 `0`，缺省或 API `null` 都恢复默认关闭，只有正整数会 opt in。设置页热重载后新 scheduler 立即采用新周期，但不会越过已有 active task。
 
 ### `[scheduler.pool_source_shares]`
 

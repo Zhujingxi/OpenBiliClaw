@@ -16507,7 +16507,7 @@ def create_app(
                 account_sync_interval_hours=cfg.scheduler.account_sync_interval_hours,
                 source_incremental_hours=getattr(cfg.scheduler, "source_incremental_hours", 24),
                 xhs_incremental_hours=getattr(cfg.scheduler, "xhs_incremental_hours", None),
-                douyin_incremental_hours=getattr(cfg.scheduler, "douyin_incremental_hours", None),
+                douyin_incremental_hours=getattr(cfg.scheduler, "douyin_incremental_hours", 0),
                 youtube_incremental_hours=getattr(cfg.scheduler, "youtube_incremental_hours", None),
                 zhihu_incremental_hours=getattr(cfg.scheduler, "zhihu_incremental_hours", None),
                 reddit_incremental_hours=getattr(cfg.scheduler, "reddit_incremental_hours", None),
@@ -18854,11 +18854,19 @@ def create_app(
                         "v2ex_incremental_hours",
                     }:
                         try:
-                            source_interval = _normalize_source_incremental_hours(
-                                sdata[key],
-                                default=None,
-                                allow_none=True,
-                                strict=True,
+                            # Douyin account bootstrap can foreground a task tab.
+                            # Its null/reset value therefore returns to the safe
+                            # default-off policy instead of inheriting the global
+                            # source interval. An explicit 1..168 opts back in.
+                            source_interval = (
+                                0
+                                if key == "douyin_incremental_hours" and sdata[key] is None
+                                else _normalize_source_incremental_hours(
+                                    sdata[key],
+                                    default=None,
+                                    allow_none=True,
+                                    strict=True,
+                                )
                             )
                         except ValueError as exc:
                             raise HTTPException(status_code=400, detail=str(exc)) from exc

@@ -786,7 +786,7 @@ localhost-only. The two edges are mutually exclusive, and the default HTTP path 
 
 What happens after discovery:
 
-- **Safe fetching** — the backend never logs in for you and never crawls content you can't see; every platform reuses the sessions already in your browser, and first-run profile signals are pulled only after you click "Start initialization." Once the profile exists, enabled XHS, Douyin, YouTube, Zhihu, Reddit, and Linux.do account signals are re-pulled on schedule only while the extension is online. Linux.do tasks permit GET only, and `_t` is used solely as a login boolean.
+- **Safe fetching** — the backend never logs in for you and never crawls content you can't see; every platform reuses the sessions already in your browser, and first-run profile signals are pulled only after you click "Start initialization." Once the profile exists, enabled account sources re-pull only on schedule while the extension is online. Douyin account re-pull is off by default and requires an explicit `douyin_incremental_hours=1..168`; background content discovery is unaffected. Linux.do tasks permit GET only, and `_t` is used solely as a login boolean.
 - **Continuous unified evaluation** — raw candidates share one eval pool and are scored against your Soul profile, content text, and recent negative feedback. The default 3×30 workers refill immediately, scheduling counts only durable stock, and serial admission is capped by current headroom. Optional embedding prefiltering starts in shadow mode before enforce may skip clearly low-similarity items.
 - **Diversity selection** — platform quotas → topic dedup → style balancing → cross-platform interleaving → count caps; only Bilibili is enabled out of the box, other platforms are switched on in settings.
 

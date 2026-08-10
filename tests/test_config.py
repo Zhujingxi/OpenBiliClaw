@@ -209,15 +209,17 @@ class TestConfigDefaults:
 
     def test_scheduler_source_incremental_defaults(self) -> None:
         config = Config()
+        loaded_without_override = _build_config({"scheduler": {}})
 
         assert config.scheduler.source_incremental_hours == 24
         assert config.scheduler.xhs_incremental_hours is None
-        assert config.scheduler.douyin_incremental_hours is None
+        assert config.scheduler.douyin_incremental_hours == 0
+        assert loaded_without_override.scheduler.douyin_incremental_hours == 0
         assert config.scheduler.youtube_incremental_hours is None
         assert config.scheduler.zhihu_incremental_hours is None
         assert config.scheduler.reddit_incremental_hours is None
 
-    def test_example_config_keeps_per_source_incremental_intervals_inherited(self) -> None:
+    def test_example_config_disables_douyin_incremental_sync_by_default(self) -> None:
         example_path = Path(__file__).parents[1] / "config.example.toml"
 
         with example_path.open("rb") as handle:
@@ -225,10 +227,18 @@ class TestConfigDefaults:
 
         assert scheduler["source_incremental_hours"] == 24
         assert "xhs_incremental_hours" not in scheduler
-        assert "douyin_incremental_hours" not in scheduler
+        assert scheduler["douyin_incremental_hours"] == 0
         assert "youtube_incremental_hours" not in scheduler
         assert "zhihu_incremental_hours" not in scheduler
         assert "reddit_incremental_hours" not in scheduler
+
+    def test_default_config_persists_douyin_incremental_sync_disabled(self, tmp_path: Path) -> None:
+        target = tmp_path / "config.toml"
+
+        save_config(Config(), target)
+
+        assert "douyin_incremental_hours = 0" in target.read_text(encoding="utf-8")
+        assert load_config(target).scheduler.douyin_incremental_hours == 0
 
     def test_scheduler_source_incremental_config_round_trip(self, tmp_path: Path) -> None:
         config = Config()
@@ -289,12 +299,14 @@ class TestConfigDefaults:
                 "scheduler": {
                     "source_incremental_hours": value,
                     "xhs_incremental_hours": value,
+                    "douyin_incremental_hours": value,
                 }
             }
         )
 
         assert config.scheduler.source_incremental_hours == 24
         assert config.scheduler.xhs_incremental_hours is None
+        assert config.scheduler.douyin_incremental_hours == 0
 
     def test_scheduler_source_incremental_save_rejects_invalid_direct_dataclass_values(
         self, tmp_path: Path

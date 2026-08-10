@@ -445,9 +445,11 @@ account_sync_interval_hours = 6
 # sources. Allowed values: integer 0..168 hours.
 source_incremental_hours = 24
 # Per-source overrides: omit (or set through the API to null) to inherit the
-# global interval; 0 disables only that source. Allowed values: 0..168.
+# global interval; 0 disables only that source. Douyin is the exception: its
+# foreground account bootstrap is default-off; set 1..168 to opt in.
+# Allowed values: 0..168.
 # xhs_incremental_hours = 12
-# douyin_incremental_hours = 24
+douyin_incremental_hours = 0
 # youtube_incremental_hours = 24
 # zhihu_incremental_hours = 24
 # reddit_incremental_hours = 24

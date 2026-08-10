@@ -15342,6 +15342,14 @@ class TestEmbeddingAndCompatProviderE2E:
         assert cfg.scheduler.reddit_incremental_hours == 168
         assert updated.json()["config"]["scheduler"]["xhs_incremental_hours"] is None
 
+        reset_douyin = client.put(
+            "/api/config",
+            json={"scheduler": {"douyin_incremental_hours": None}},
+        )
+        assert reset_douyin.status_code == 202
+        assert cfg.scheduler.douyin_incremental_hours == 0
+        assert reset_douyin.json()["config"]["scheduler"]["douyin_incremental_hours"] == 0
+
     @pytest.mark.parametrize(
         ("field", "value"),
         [
