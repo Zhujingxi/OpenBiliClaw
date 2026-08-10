@@ -484,6 +484,7 @@ SOURCE_TWITTER = "twitter"
 SOURCE_ZHIHU = "zhihu"
 SOURCE_REDDIT = "reddit"
 SOURCE_BANGUMI = "bangumi"
+SOURCE_WEIBO = "weibo"
 SOURCE_V2EX = "v2ex"
 
 # Human-readable platform labels used to render the context string.
@@ -498,6 +499,7 @@ _PLATFORM_LABELS: dict[str, str] = {
     SOURCE_ZHIHU: "知乎",
     SOURCE_REDDIT: "Reddit",
     SOURCE_BANGUMI: "Bangumi",
+    SOURCE_WEIBO: "微博",
     SOURCE_V2EX: "V2EX",
 }
 
