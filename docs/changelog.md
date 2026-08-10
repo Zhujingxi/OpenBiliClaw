@@ -10,6 +10,7 @@
 
 ## v0.3.203：微博登录态初始化与插件可用性修复（2026-08-11）
 
+- **发布与市场状态**：`backend-v0.3.203`、`extension-v0.3.203`、`desktop-v0.3.203` 与聚合 `openbiliclaw-v0.3.203` 均指向提交 `cf5ac276`；聚合 Latest Release 已附两份扩展 ZIP 与四份桌面安装器。Chrome Web Store 已上传 `0.3.203` 并进入 `PENDING_REVIEW`；Firefox AMO 已接受 listed `0.3.203`，文件状态为 `unreviewed`，当前聚合包提供 Firefox 临时加载 ZIP。AMO `eula_policy` API 仍返回 HTTP 406，manifest 数据类别、reviewer notes、商店描述和随包隐私政策已提交。
 - **微博补齐登录态初始化**：微博从 discovery-only 升级为 capability-specific full source；`init --yes-weibo` / `/api/init` 会在扩展确认浏览器登录和当前 uid 后，通过隔离同源任务只读导入收藏、关注和 mentions，后端只保存布尔 heartbeat、账号绑定与规范化事件，不接收 Cookie。个人 bootstrap 暂为 init-only，公开 discovery 仍匿名可用。
 - **修复微博 H5 登录态 bootstrap 路由**：适配当前移动端接口 `/api/container/getIndex?containerid=230259`、`/api/friendships/friends`、`/message/mentionsAt` 与 `/message/mentionsCmt`，旧路径仅作兼容回退；HTTP 404 不再被当作真实空结果，扩展构建与任务回归测试同步更新。
 - **修复桌面 Web 配置页空白**：合并 Linux.do / V2EX 来源卡片时出现的嵌套 HTML 让后续设置面板被错误收进来源卡片；现将两张来源卡恢复为同级节点，并加入 DOM 结构回归测试，确保模型、平台源、调度和高级设置面板都能正常渲染。

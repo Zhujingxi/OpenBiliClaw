@@ -235,7 +235,7 @@ Built on Manifest V3, the extension works in any Chrome-compatible browser — *
 
 > 👉 **[Install OpenBiliClaw on the Chrome Web Store](https://chromewebstore.google.com/detail/cdfjfkdjjhdaccbldipkjhpibnfbiamg)** — click "Add to Chrome".
 
-Extension updates depend on the install channel: Chrome Web Store / Edge Add-ons and the Firefox AMO listed build after approval are updated by the browser; GitHub Release Chrome zips / Firefox signed XPIs / Firefox temporary zips, developer-mode loads, and Firefox temporary installs must download the new package and reload it manually. The public Firefox AMO build now has a dedicated review-submission path; use the signed XPI from Releases until the listing is publicly approved. The backend "auto update" switch only updates the local backend source checkout, not the browser extension.
+Extension updates depend on the install channel: Chrome Web Store / Edge Add-ons and the Firefox AMO listed build after approval are updated by the browser; GitHub Release Chrome zips / Firefox signed XPIs / Firefox temporary zips, developer-mode loads, and Firefox temporary installs must download the new package and reload it manually. Firefox AMO `0.3.203` has been accepted for listed review but is still `unreviewed`; until it is publicly approved, use the `*-firefox.zip` temporary package from Releases. After approval, Firefox will update the listed install natively. The backend "auto update" switch only updates the local backend source checkout, not the browser extension.
 
 <details>
 <summary>Firefox users: regular install and temporary debugging (Firefox 140+)</summary>
