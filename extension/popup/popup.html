@@ -3818,10 +3818,6 @@
       gap: 10px;
     }
 
-    .shell:has(#viewChat:not([hidden])) .footer {
-      display: none;
-    }
-
     .footer-head {
       display: flex;
       align-items: flex-start;
@@ -3904,7 +3900,7 @@
       /* Cap the expanded history height and let it scroll internally so
          the activity feed can hold many entries (or load more pages)
          without pushing the popup body off-screen. */
-      max-height: 360px;
+      max-height: clamp(72px, calc(100dvh - 440px), 360px);
       overflow-y: auto;
       overflow-x: hidden;
       padding-right: 4px;
@@ -6076,11 +6072,11 @@
     </main>
 
     <!-- ── Mobile QR overlay ── -->
-    <div id="mobileQrOverlay" class="mobile-overlay" hidden>
+    <div id="mobileQrOverlay" class="mobile-overlay" role="dialog" aria-modal="true" aria-labelledby="mobileQrTitle" hidden>
       <div class="mobile-header">
         <div>
           <p class="view-kicker">Mobile Web</p>
-          <h2>手机扫码打开</h2>
+          <h2 id="mobileQrTitle">手机扫码打开</h2>
         </div>
         <button id="mobileQrBack" class="settings-back" type="button" title="返回" aria-label="关闭移动端二维码">&larr;</button>
       </div>
@@ -6096,18 +6092,18 @@
     </div>
 
     <!-- ── Messages overlay ── -->
-    <div id="messagesOverlay" class="messages-overlay" hidden>
+    <div id="messagesOverlay" class="messages-overlay" role="dialog" aria-modal="true" aria-labelledby="messagesTitle" hidden>
       <div class="messages-header">
-        <h2>消息</h2>
+        <h2 id="messagesTitle">消息</h2>
         <button id="messagesBack" class="settings-back" type="button" title="返回" aria-label="关闭消息">&larr;</button>
       </div>
       <div id="messagesList"></div>
     </div>
 
     <!-- ── Settings overlay ── -->
-    <div id="settingsOverlay" class="settings-overlay" hidden>
+    <div id="settingsOverlay" class="settings-overlay" role="dialog" aria-modal="true" aria-labelledby="settingsTitle" hidden>
       <div class="settings-header">
-        <h2>后端设置</h2>
+        <h2 id="settingsTitle">后端设置</h2>
         <button id="settingsBack" class="settings-back" type="button" title="返回" aria-label="关闭设置">&larr;</button>
       </div>
 

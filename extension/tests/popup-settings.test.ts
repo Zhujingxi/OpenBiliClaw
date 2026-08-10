@@ -203,6 +203,8 @@ test("settings source tab separates every platform into its own block", () => {
     /id="cfgLinuxdoBootstrapLimit"[\s\S]*?\n\s*<\/div>\s*\n\s*<\/div>\s*$/,
     "Linux.do source body and card must close before V2EX starts",
   );
+  assert.match(popupJs, /face\.tabIndex = on \? 0 : -1/);
+  assert.match(popupJs, /face\.setAttribute\("aria-disabled", on \? "false" : "true"\)/);
   assert.match(popupJs, /bilibiliEnabled\.checked = cfg\.sources\?\.bilibili\?\.enabled !== false/);
   assert.match(popupJs, /xhsEnabled\.checked = cfg\.sources\?\.xiaohongshu\?\.enabled === true/);
   assert.match(popupJs, /bilibili:\s*\{\s*enabled: checked\("cfgBilibiliEnabled", true\)/);

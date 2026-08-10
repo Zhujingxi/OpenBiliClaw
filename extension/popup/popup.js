@@ -363,6 +363,107 @@ const elements = {
   messagesList: document.getElementById("messagesList"),
 };
 
+const POPUP_OVERLAY_FOCUS_SELECTOR = [
+  'button:not([disabled]):not([tabindex="-1"])',
+  'a[href]:not([tabindex="-1"])',
+  'input:not([disabled]):not([tabindex="-1"])',
+  'select:not([disabled]):not([tabindex="-1"])',
+  'textarea:not([disabled]):not([tabindex="-1"])',
+  '[tabindex="0"]',
+].join(",");
+const popupOverlayReturnFocus = new WeakMap();
+const popupOverlayBackgroundState = new Map();
+let activePopupOverlay = null;
+
+function popupOverlayFocusableElements(overlay) {
+  if (!(overlay instanceof HTMLElement)) return [];
+  return Array.from(overlay.querySelectorAll(POPUP_OVERLAY_FOCUS_SELECTOR))
+    .filter((element) => element instanceof HTMLElement && element.getClientRects().length > 0);
+}
+
+function restorePopupOverlayBackground() {
+  for (const [element, previous] of popupOverlayBackgroundState) {
+    element.inert = previous.inert;
+    if (previous.inertAttribute === null) element.removeAttribute("inert");
+    else element.setAttribute("inert", previous.inertAttribute);
+    if (previous.ariaHidden === null) element.removeAttribute("aria-hidden");
+    else element.setAttribute("aria-hidden", previous.ariaHidden);
+  }
+  popupOverlayBackgroundState.clear();
+}
+
+function openPopupOverlay(overlay, { trigger = null, initialFocus = null } = {}) {
+  if (!(overlay instanceof HTMLElement)) return;
+  if (activePopupOverlay && activePopupOverlay !== overlay) {
+    activePopupOverlay.hidden = true;
+    restorePopupOverlayBackground();
+  }
+  const focusReturnTarget = trigger instanceof HTMLElement
+    ? trigger
+    : document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+  if (focusReturnTarget) popupOverlayReturnFocus.set(overlay, focusReturnTarget);
+  overlay.hidden = false;
+  const shell = overlay.parentElement;
+  if (shell) {
+    for (const child of shell.children) {
+      if (!(child instanceof HTMLElement) || child === overlay) continue;
+      popupOverlayBackgroundState.set(child, {
+        inert: child.inert,
+        inertAttribute: child.getAttribute("inert"),
+        ariaHidden: child.getAttribute("aria-hidden"),
+      });
+      child.inert = true;
+      child.setAttribute("inert", "");
+      child.setAttribute("aria-hidden", "true");
+    }
+  }
+  activePopupOverlay = overlay;
+  const focusTarget = initialFocus instanceof HTMLElement
+    ? initialFocus
+    : popupOverlayFocusableElements(overlay)[0];
+  focusTarget?.focus({ preventScroll: true });
+}
+
+function closePopupOverlay(overlay) {
+  if (!(overlay instanceof HTMLElement)) return;
+  overlay.hidden = true;
+  if (activePopupOverlay === overlay) {
+    restorePopupOverlayBackground();
+    activePopupOverlay = null;
+  }
+  const returnFocus = popupOverlayReturnFocus.get(overlay);
+  popupOverlayReturnFocus.delete(overlay);
+  if (returnFocus instanceof HTMLElement && returnFocus.isConnected && !returnFocus.inert) {
+    returnFocus.focus({ preventScroll: true });
+  }
+}
+
+function bindPopupOverlayKeyboard(overlay, close) {
+  if (!(overlay instanceof HTMLElement)) return;
+  overlay.addEventListener("keydown", (event) => {
+    if (event.defaultPrevented) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      close();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = popupOverlayFocusableElements(overlay);
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  });
+}
+
 async function setProxyImageSrc(image, coverUrl) {
   const path = buildImageProxyPath(coverUrl);
   if (!path) return false;
@@ -3386,7 +3487,10 @@ function updateMessageBadge() {
 async function openMessagesPanel() {
   const overlay = elements.messagesOverlay;
   if (!(overlay instanceof HTMLElement)) return;
-  overlay.hidden = false;
+  openPopupOverlay(overlay, {
+    trigger: elements.messagesButton,
+    initialFocus: elements.messagesBack,
+  });
   // Render whatever we have synchronously so the panel doesn't open
   // empty while we refetch.
   renderMessagesList();
@@ -3406,7 +3510,7 @@ async function openMessagesPanel() {
 
 function closeMessagesPanel() {
   const overlay = elements.messagesOverlay;
-  if (overlay instanceof HTMLElement) overlay.hidden = true;
+  closePopupOverlay(overlay);
 }
 
 // ── Mobile QR panel ───────────────────────────────────────────
@@ -3573,13 +3677,15 @@ async function renderMobileQrPanel() {
 async function openMobileQrPanel() {
   const overlay = elements.mobileQrOverlay;
   if (!(overlay instanceof HTMLElement)) return;
-  overlay.hidden = false;
+  openPopupOverlay(overlay, {
+    trigger: elements.mobileQrButton,
+    initialFocus: elements.mobileQrBack,
+  });
   await renderMobileQrPanel();
 }
 
 function closeMobileQrPanel() {
-  const overlay = elements.mobileQrOverlay;
-  if (overlay instanceof HTMLElement) overlay.hidden = true;
+  closePopupOverlay(elements.mobileQrOverlay);
 }
 
 function bindOpenWeb() {
@@ -3609,6 +3715,7 @@ function bindMobileQr() {
   if (elements.mobileQrBack instanceof HTMLElement) {
     elements.mobileQrBack.addEventListener("click", closeMobileQrPanel);
   }
+  bindPopupOverlayKeyboard(elements.mobileQrOverlay, closeMobileQrPanel);
   if (elements.mobileQrCopy instanceof HTMLButtonElement) {
     elements.mobileQrCopy.addEventListener("click", async () => {
       if (!currentMobileWebUrl) await renderMobileQrPanel();
@@ -4349,6 +4456,7 @@ function bindMessages() {
   if (elements.messagesBack instanceof HTMLElement) {
     elements.messagesBack.addEventListener("click", closeMessagesPanel);
   }
+  bindPopupOverlayKeyboard(elements.messagesOverlay, closeMessagesPanel);
 }
 
 function renderActiveInsights(container, items) {
@@ -9857,7 +9965,12 @@ function bindSettings() {
       if (!card) return;
       const input = document.getElementById(inputId);
       const on = input ? input.checked : true;
+      const face = card.querySelector(".source-card-face");
       card.dataset.sourceOff = on ? "false" : "true";
+      if (face instanceof HTMLElement) {
+        face.tabIndex = on ? 0 : -1;
+        face.setAttribute("aria-disabled", on ? "false" : "true");
+      }
       if (!on) setSourceCardOpen(card, false);
     });
   }
@@ -10243,7 +10356,7 @@ function bindSettings() {
 
   gearBtn.addEventListener("click", async () => {
     closeLlmInstanceDialog();
-    overlay.hidden = false;
+    openPopupOverlay(overlay, { trigger: gearBtn, initialFocus: backBtn });
     toast.hidden = true;
     issuesContainer.innerHTML = "";
     hideConfigBanners();
@@ -10283,8 +10396,9 @@ function bindSettings() {
 
   backBtn.addEventListener("click", () => {
     closeLlmInstanceDialog();
-    overlay.hidden = true;
+    closePopupOverlay(overlay);
   });
+  bindPopupOverlayKeyboard(overlay, () => backBtn.click());
 
   const suggestBtn = document.getElementById("cfgSuggestPoolShares");
   if (suggestBtn) {
