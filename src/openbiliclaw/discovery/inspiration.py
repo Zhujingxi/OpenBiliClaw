@@ -100,6 +100,7 @@ _PLATFORM_STYLE_MARKERS: dict[str, tuple[str, ...]] = {
     ),
     "twitter": ("thread", "debate", "reaction", "analysis", "breaking", "takeaways"),
     "zhihu": ("为什么", "如何看待", "经验", "分析", "讨论", "方法", "复盘"),
+    "weibo": ("热议", "话题", "观点", "现场", "回应", "进展", "讨论"),
 }
 
 _ENGLISH_SCRIPT_PLATFORMS = {"youtube", "reddit", "twitter", "x"}

@@ -13,6 +13,7 @@ PLATFORM_TWITTER = "twitter"
 PLATFORM_ZHIHU = "zhihu"
 PLATFORM_REDDIT = "reddit"
 PLATFORM_BANGUMI = "bangumi"
+PLATFORM_WEIBO = "weibo"
 
 
 @dataclass(frozen=True)
@@ -116,6 +117,12 @@ SOURCE_FAMILY_RULES = (
         url_hosts=("bgm.tv", "bangumi.tv"),
         requires_overseas_network=True,
         routed_by_network_mode=True,
+    ),
+    SourceFamilyRule(
+        family=PLATFORM_WEIBO,
+        platform_aliases=frozenset({"weibo", "wb", "微博"}),
+        source_prefixes=("weibo-", "weibo_"),
+        url_hosts=("weibo.com", "weibo.cn"),
     ),
 )
 

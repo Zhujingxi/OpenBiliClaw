@@ -72,7 +72,7 @@ def test_desktop_web_static_contract_exposes_guided_init_cta() -> None:
     # Roster drift lock: the desktop init picker derives WHICH sources exist from
     # the shared roster (/shared/source-status.js), the same list the wizard and
     # side panel build from — no third hand-kept copy that can silently drift.
-    assert "_initSourceStatus?.SOURCE_KEYS" in app_js
+    assert "_initSourceStatus?.INIT_SOURCE_KEYS" in app_js
     assert 'src="/shared/source-status.js"' in Path(
         "src/openbiliclaw/web/desktop/index.html"
     ).read_text(encoding="utf-8")
@@ -177,15 +177,16 @@ def test_setup_init_sources_are_explicit_opt_in_without_settings_enable_block() 
     assert "勾选会同时开启该来源" in setup_html
     assert "selectedSourcesNeedingEnable" not in setup_html
     assert "还没在设置里开启" not in setup_html
-    # The wizard builds its checkbox list from the shared roster instead of a
+    # The wizard builds its checkbox list from the shared capability roster instead of a
     # third hand-kept copy, so it can no longer offer a platform the settings
     # pages do not know about (spec I6).
-    assert "SourceStatus.SOURCE_KEYS.map" in setup_html
+    assert "SourceStatus.INIT_SOURCE_KEYS.map" in setup_html
     assert 'src="/shared/source-status.js"' in setup_html
     for source in (
         "bilibili",
         "xiaohongshu",
         "douyin",
+        "weibo",
         "youtube",
         "twitter",
         "zhihu",
@@ -194,6 +195,7 @@ def test_setup_init_sources_are_explicit_opt_in_without_settings_enable_block() 
     ):
         assert f'"{source}"' in shared
         assert f'key: "{source}"' in app_js
+    assert "weibo: Object.freeze({ guidedInit: false })" in shared
 
 
 def test_guided_init_web_docs_belong_to_v03110_release_block() -> None:

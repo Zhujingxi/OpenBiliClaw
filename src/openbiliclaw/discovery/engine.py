@@ -84,6 +84,7 @@ _CANONICAL_STORAGE_KEY_PLATFORMS = frozenset(
         "twitter",
         "zhihu",
         "reddit",
+        "weibo",
         "web",
     }
 )

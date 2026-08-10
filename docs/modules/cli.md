@@ -74,6 +74,9 @@ openbiliclaw [--log-level DEBUG|INFO|WARNING|ERROR] <命令>
 | `discover-bangumi <keyword>` | 只读验证 Bangumi Subject 搜索 | ✅ |
 | `discover-bangumi-ranked` | 只读验证 Bangumi 排名浏览 | ✅ |
 | `discover-bangumi-latest` | 只读验证 Bangumi 按日期浏览（可能含未播条目） | ✅ |
+| `discover-weibo <keyword>` | 匿名只读验证微博关键词搜索，不写本地状态 | ✅ |
+| `discover-weibo-hot` | 匿名只读验证“热搜词 → 真实微博”链路 | ✅ |
+| `discover-weibo-creator <uid>` | 匿名只读验证数字 UID 的公开微博 | ✅ |
 | `search-douyin` | 通过浏览器插件调试抖音搜索召回 | ✅ |
 | `chat` | 苏格拉底式对话 | ✅ |
 | `ledger` | 查看画像更新台账（`--line` 逐行 / `--days` / `--write-point` 过滤） | ✅ |
@@ -706,6 +709,8 @@ Reddit 导入也复用 `bootstrap_events` 任务。后端入队 `reddit_tasks(ty
 
 Bangumi 初始化不依赖插件或登录态。`init --yes-bangumi --bangumi-username <name>` 会通过官方匿名 API 读取该用户名的公开收藏，转换为统一事件后纳入 `analyze_events()` / `build_initial_profile()`，并写回 `[sources.bangumi].enabled=true` 与用户名。`init --yes-bangumi --bangumi-token <token>` 走个人令牌通道：令牌先经 `GET /v0/me` 实测校验（被拒绝时当场退出并指引到 https://next.bgm.tv/demo/access-token 重新生成），解析出的用户名覆盖显式填写值（不一致时提示），随后带 Bearer 读取该账号收藏（含私密行）；校验通过的令牌与用户名一并写回 `[sources.bangumi]`。令牌与显式用户名皆缺时，init 会回退浏览器扩展自动识别的账号（扩展在已登录的 bgm.tv 页面读取公开 `CHOBITS_UID` + 导航 `/user/<username>` 链接并上报后端持久化；优先级：令牌 `/v0/me` > 显式用户名 > 扩展上报用户名），命中时输出"使用浏览器扩展识别到的账号"。Bangumi 作为唯一来源时三者至少满足一个（报错文案："提供 --bangumi-token（推荐，自动识别当前用户）或 --bangumi-username（公开用户名），或先在浏览器登录 bgm.tv 让扩展自动识别"）；与其它画像来源混用但全部缺失时，初始化会明确警告并只启用后续 Bangumi discovery。匿名路径私有收藏不可见，`updated_at` 不作为收藏行为时间。
 
+微博刻意不属于初始化来源：`init` 没有 `--yes-weibo` / `--no-weibo`、Cookie、UID 或 bootstrap 参数，也不会把公开热搜 / 搜索结果冒充成用户行为信号。请先用现有初始化来源建立画像，再在配置页或 `config.toml` 启用 `[sources.weibo].enabled=true`；该开关只影响后续 discovery。
+
 X (Twitter) 与其它平台不同：init 阶段**没有 bootstrap 导入任务**。X 的发现走服务端 cookie 重放，行为采集走浏览器扩展 MAIN-world tap，两者都在 init 之后才生效，所以 `init --yes-x` **只翻转 `[sources.twitter].enabled = true`**，不会在 init 期间打开 x.com 前台 tab 或拉取数据。启用后，用户登录 x.com → 扩展自动把 `auth_token` + `ct0` 同步到 `data/x_cookie.json` → 后台 `XDiscoveryProducer` 在下一个 refresh tick 按预算补 X 候选。非交互式终端默认跳过 X。
 
 源开关：
@@ -1015,7 +1020,7 @@ $ openbiliclaw import-youtube ~/Downloads/takeout.zip --dry-run
 
 ### `openbiliclaw discover`
 
-读取当前画像并触发一次内容发现。默认跑 Bilibili 的全部策略并将结果写入 `content_cache`，支持通过 `--source` 切换到 xiaohongshu 关键词生产流程、douyin discovery、知乎插件 discovery、Reddit discovery 或 Bangumi 官方 API discovery，或通过 `--strategy` 限定只跑部分 Bilibili 策略。知乎正式流程会复用 runtime `ZhihuDiscoveryProducer`，按配置页 / `config.toml` 的 `[sources.zhihu].source_modes` 入队 search / hot / feed / creator / related 任务并进入统一待评估池；Reddit 正式流程复用 `RedditDiscoveryProducer`，默认用 `[sources.reddit].backend="rdt"` 的 rdt-cli 登录态命令后端，按 `source_modes` 抓 search / hot / subreddit / related 候选，命令后端不可用时自动 fallback 到 OpenBiliClaw 插件任务；Bangumi 正式流程复用 `BangumiDiscoveryProducer`，按 `[sources.bangumi].source_modes`、subject types、分支预算、cursor 与 cooldown 直连官方匿名 API。Reddit、知乎和 Bangumi 候选都只写 `discovery_candidates`，评估由后台统一 evaluator 处理。
+读取当前画像并触发一次内容发现。默认跑 Bilibili 的全部策略并将结果写入 `content_cache`，支持通过 `--source` 切换到 xiaohongshu 关键词生产流程、douyin discovery、知乎插件 discovery、Reddit discovery、Bangumi 官方 API discovery 或微博匿名公开 discovery，或通过 `--strategy` 限定只跑部分 Bilibili 策略。知乎正式流程会复用 runtime `ZhihuDiscoveryProducer`，按配置页 / `config.toml` 的 `[sources.zhihu].source_modes` 入队 search / hot / feed / creator / related 任务并进入统一待评估池；Reddit 正式流程复用 `RedditDiscoveryProducer`，默认用 `[sources.reddit].backend="rdt"` 的 rdt-cli 登录态命令后端，按 `source_modes` 抓 search / hot / subreddit / related 候选，命令后端不可用时自动 fallback 到 OpenBiliClaw 插件任务；Bangumi 正式流程复用 `BangumiDiscoveryProducer`，按 `[sources.bangumi].source_modes`、subject types、分支预算、cursor 与 cooldown 直连官方匿名 API；微博正式流程复用 `WeiboDiscoveryProducer`，按 `[sources.weibo].source_modes`、分支预算、cadence 与 cooldown 通过项目自有匿名 client 读取 search / hot-as-query-seed / creator。Reddit、知乎、Bangumi 和微博候选都只写 `discovery_candidates`，评估由后台统一 evaluator 处理。
 
 手动 `discover` 是一次性进程，其 candidate pipeline 固定 `eval_min_batch_size=1`、`eval_max_wait_seconds=0`，立即 drain 本次已入队候选；只有常驻 API daemon 才读取 `[scheduler]` 的默认 15 / 90 秒聚合策略。这样 CLI 不会在退出时遗失只存在内存里的凑批等待状态。
 
@@ -1084,18 +1089,27 @@ Bangumi 内容发现
   入池候选: 20
   来源: bangumi
   分支: search, ranked, latest
+
+# 触发微博正式 discovery（wb 是等价 alias）
+$ openbiliclaw discover --source weibo --limit 20
+微博内容发现
+发现摘要
+  发现条数: 20
+  入池候选: 20
+  来源: weibo
+  分支: search, hot, creator
 ```
 
-显式 Bangumi discover 要求 `[sources.bangumi].enabled=true`，但即使 `[scheduler].enabled=false` 也会执行；scheduler 总开关只暂停后台自动任务。producer 返回 disabled 或画像尚未初始化时，CLI 会显示对应修复提示，而不是回落为通用“未产出内容”。
+显式 Bangumi / 微博 discover 分别要求对应来源 `enabled=true`，但即使 `[scheduler].enabled=false` 也会执行；scheduler 总开关只暂停后台自动任务。producer 返回 disabled 或画像尚未初始化时，CLI 会显示对应修复提示，而不是回落为通用“未产出内容”。
 
 选项：
 
-- `--source, -s`：`bilibili`（默认）、`xiaohongshu`、`douyin`、`zhihu`、`reddit` 或 `bangumi`
+- `--source, -s`：`bilibili`（默认）、`xiaohongshu`、`douyin`、`zhihu`、`reddit`、`bangumi` 或 `weibo`（也接受 `wb`）
 - `--strategy, -S`：仅对 Bilibili 生效，可多次传或逗号分隔，取值 `search` / `trending` / `explore` / `related_chain`
 - `--limit, -n`：发现结果条数上限，默认 `30`
-- `--force`：xiaohongshu / Bangumi 可用；忽略本地最小调度间隔，但 Bangumi 仍遵循持久化 `429` cooldown
+- `--force`：xiaohongshu / Bangumi / 微博可用；忽略本地最小调度间隔，但 Bangumi / 微博仍遵循持久化 `429` cooldown，微博还继续服从日预算与 pool gate
 
-抖音 discovery 需要 `[sources.douyin].enabled = true`。`discover --source douyin` 现在直接调用与 daemon 相同的正式 `DouyinDiscoveryProducer`：统一关键词 claim、插件 search / hot / feed、`DiscoveryCandidatePipeline` 待评估入池和关键词终态都与后台一致；显式手动命令只绕过 `[scheduler].enabled` 这个后台总开关，来源开关、source mode、预算、候选池上限和 producer cadence 仍然生效。Cookie 解析顺序是：先读 `cookie_env` 指向的环境变量（默认 `OPENBILICLAW_DOUYIN_COOKIE`，适合调试覆盖），再读浏览器扩展同步的 `data/douyin_cookie.json`。初始化画像的 `init --yes-douyin` 不受这个配置影响，仍走浏览器扩展任务桥。知乎 discovery 需要 `[sources.zhihu].enabled = true`，并依赖已登录知乎的浏览器扩展；`discover --source zhihu` 会读取 `[sources.zhihu].source_modes`，不会使用 `--strategy`。Reddit discovery 需要 `[sources.reddit].enabled = true`；默认 `backend="rdt"`，优先使用 rdt-cli 登录态命令后端，不使用 CDP/临时浏览器；rdt / opencli 不可用时自动复用 OpenBiliClaw 插件所在浏览器的 Reddit 登录态，也可在配置页显式切到 `extension`。
+抖音 discovery 需要 `[sources.douyin].enabled = true`。`discover --source douyin` 现在直接调用与 daemon 相同的正式 `DouyinDiscoveryProducer`：统一关键词 claim、插件 search / hot / feed、`DiscoveryCandidatePipeline` 待评估入池和关键词终态都与后台一致；显式手动命令只绕过 `[scheduler].enabled` 这个后台总开关，来源开关、source mode、预算、候选池上限和 producer cadence 仍然生效。Cookie 解析顺序是：先读 `cookie_env` 指向的环境变量（默认 `OPENBILICLAW_DOUYIN_COOKIE`，适合调试覆盖），再读浏览器扩展同步的 `data/douyin_cookie.json`。初始化画像的 `init --yes-douyin` 不受这个配置影响，仍走浏览器扩展任务桥。知乎 discovery 需要 `[sources.zhihu].enabled = true`，并依赖已登录知乎的浏览器扩展；`discover --source zhihu` 会读取 `[sources.zhihu].source_modes`，不会使用 `--strategy`。Reddit discovery 需要 `[sources.reddit].enabled = true`；默认 `backend="rdt"`，优先使用 rdt-cli 登录态命令后端，不使用 CDP/临时浏览器；rdt / opencli 不可用时自动复用 OpenBiliClaw 插件所在浏览器的 Reddit 登录态，也可在配置页显式切到 `extension`。微博 discovery 需要 `[sources.weibo].enabled = true`，不读取用户 Cookie、不依赖插件，`--strategy` 对它无效；内存匿名访客 `SUB` 由 client 自行申请，命令结束即丢弃，不代表用户登录。
 
 `search` 子来源走浏览器插件 DOM-first 链路：CLI 入队 `dy_tasks(type="search")`，扩展后台 tab 先打开抖音首页，再在已登录页面里模拟搜索框输入 / 提交，候选以 `dy-plugin-search` 进入 discovery；fetch tap 兼容 `/general/search/single/`、`/search/item/` 和新版 `/general/search/stream/` chunked JSON。`hot` 子来源同样走插件：后端取 hot board 的 `sentence_id`，并把可用的 `group_id` 作为 `seed_aweme_id` 透传给扩展；扩展从首页点击热榜 / 热点入口和目标热词，靠页面自身加载与被动响应监听回传 `dy_hot`，不足时用已登录页面的 related API bridge 按 seed 拉相关视频，候选以 `dy-plugin-hot-related` 进入 discovery；小批量 hot 请求会展开一个小窗口并优先执行带 seed 的 hot item，在累计达到 `--limit` 后提前结束。`feed` 子来源会入队 `dy_tasks(type="feed")`，扩展在首页推荐流滚动触发加载，候选以 `dy-plugin-feed` 进入 discovery。三条链路都不主动跳 `/search/...`、`/hot/...` 快捷 URL；终态区分真实空结果、超时、失败与预算耗尽，正式命令遇到后三者会返回非零退出码，direct-cookie fallback 只保留给显式诊断路径。search 若真实响应为 `search_nil_info.search_nil_item="hit_shark"` 且没有 `data/aweme_list`，属于抖音反爬空结果，CLI 会显示“完成但没有候选”，并保持成功退出。
 
@@ -1207,6 +1221,20 @@ openbiliclaw discover-bangumi-latest --limit 10
 搜索使用配置中的 `subject_types`；ranked/latest 会按配置类型分配结果窗口。`discover-bangumi-latest` 对应官方 `sort=date`，响应可能含未来或未播条目，因此 CLI 不把它表述为实时更新。单次 `--limit` 限制在 `1..50`。
 
 要让结果进入正式推荐链，使用 `openbiliclaw discover --source bangumi`；它会写 `discovery_candidates(pending_eval)`，由共享 evaluator/admission 决定是否进入可推荐池。每日分支预算按跨分支去重和最终 limit 后实际保留的候选计数，重复/截断条目不扣额度。
+
+### `openbiliclaw discover-weibo*`
+
+三个独立命令是微博公开接口的匿名只读 smoke：不要求来源开关或已初始化画像，不写数据库 / memory / 配置，不调用 LLM，也不读取用户 Cookie。
+
+```bash
+openbiliclaw discover-weibo "开源智能体" --limit 10
+openbiliclaw discover-weibo-hot --limit 10
+openbiliclaw discover-weibo-creator 1234567890 --limit 10
+```
+
+`discover-weibo-hot` 先读少量公开热搜词，再逐词搜索并只展示真实微博；热搜词、排名或热度本身不会伪装成内容。`discover-weibo-creator` 只接受数字 UID。三条命令的 `--limit/-n` 范围为 `1..30`，输出会明确标记“用户 Cookie 未读取、本地写入 0、LLM 调用 0”。匿名 visitor `SUB` 只在 client 内存中维持请求会话，既不持久化也不等于登录。
+
+要进入正式推荐链，请启用 `[sources.weibo]` 后运行 `openbiliclaw discover --source weibo`。正式 producer 会执行 search / hot-as-query-seed / creator，接入统一关键词与 `DiscoveryCandidatePipeline`；它仍没有账号行为读取、guided init、扩展任务或微博站内写回。
 
 ### `openbiliclaw search-douyin`
 

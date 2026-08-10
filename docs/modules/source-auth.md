@@ -13,9 +13,10 @@
 | 能力 | 说明 | 状态 |
 | --- | --- | --- |
 | 正交契约 `SourceAuthContract` | 四个维度互不覆盖：要不要凭据 / 凭据在不在 / 验证结论 / **结论有多硬** | ✅ |
-| 每平台 provider | `providers.py` 的 8 个纯函数取代 424 行 if/elif 聚合器（现 49 行） | ✅ |
+| 每平台 provider | `providers.py` 的 9 个纯函数取代旧 if/elif 聚合器 | ✅ |
 | Bangumi 接入契约 | 第 8 个平台接入：匿名公开 `auth_required=False` + 可选个人令牌 `live_probe` 验证 `/v0/me` | ✅ 见下方「Bangumi 的接入」 |
-| 显式验证动作 | `POST /api/sources/{slug}/verify`，8/8 平台可用，三态结果 | ✅ |
+| 微博接入契约 | 第 9 个平台：纯匿名公开 `auth_required=False`、不接收凭据、verify action 固定 `none` | ✅ 见下方「微博的接入」 |
+| 显式验证动作 | `POST /api/sources/{slug}/verify`，9/9 平台有稳定三态响应；微博诚实返回不可验证且零 I/O | ✅ |
 | 并发安全的本地状态读取 | X 健康表首建单飞，读写使用短生命周期 SQLite connection；状态轮询不共享 connection | ✅ |
 | 统一凭据写入 | `POST /api/sources/{slug}/credential`，写入即校验，7 条老端点转发 | ✅ |
 | 表单描述符 | `forms.py` 下发每平台表单形态，三端零 per-platform 分支 | ✅ |
@@ -51,7 +52,7 @@ class SourceAuthContract(BaseModel):
 | `browser_heartbeat` | 插件报告登录 cookie 存在 | xiaohongshu、zhihu |
 | `local_file` | 只读了本地凭据文件 | reddit |
 | `task_history` | 由历史任务结果反推 | zhihu（无心跳时回落） |
-| `none` | 无验证能力，或不需要 | youtube、bangumi（未配置令牌时） |
+| `none` | 无验证能力，或不需要 | youtube、bangumi（未配置令牌时）、weibo |
 
 ### 三端如何渲染这份契约
 
@@ -105,7 +106,7 @@ class SourceAuthContract(BaseModel):
 
 **凭据读取是状态查询，不是秘密导出。** `GET /api/sources/credentials` 的 `available`、掩码预览、`summary` 与非敏感 Cookie 名称用于回答“是否已保存/由哪里管理”；秘密原值永不返回。历史 `reveal_keys` query 保留为 no-op，`form.actions` 不再包含 `copy`，桌面页面也不渲染复制按钮。新值只能走统一 credential 写入或配置 PUT；空值与掩码回显不会覆盖现有值。
 
-**首页问题分类与设置卡共用同一张表。** `describeSourceIssue()` 只把已启用来源的缺凭据、不完整、过期、失败、受阻、限流和未知契约列为 actionable issue，并原样携带后端 `detail`；`unverified`、`syncing`、无需登录与已验证都不是故障。桌面首页因此能覆盖八个平台并点名具体来源，而不会把每个平台都冒充为 `AccountSyncService` 的账号同步阶段。
+**首页问题分类与设置卡共用同一张表。** `describeSourceIssue()` 把已启用来源的缺凭据、不完整、过期、失败、受阻、限流、未知契约，以及正交 `discovery_state` 的 `partial / error / rate_limited` 列为 actionable issue，并原样携带后端 `detail`；`unverified`、`syncing`、无需登录与已验证都不是故障。桌面首页因此能覆盖九个平台并点名具体来源，而不会把每个平台都冒充为 `AccountSyncService` 的账号同步阶段。微博仍以 `no_auth` 表达匿名可用，同时可独立显示发现失败或 cooldown；旧后端只有 `feed_paused=true` 时也会触发兼容告警。
 
 **任何写入面都没有降低校验强度的开关。** `POST /api/sources/{slug}/credential` 的 `validate_live` 已删——全仓零调用方（扩展、三端前端、CLI 都不发），等于给任何能连上 localhost 的东西一个关掉端点核心承诺的官方途径，不换来任何好处。老端点 `POST /api/bilibili/cookie` 的 `validate_with_bilibili` **仍接受但不再生效**：只删新端点而把隔壁一模一样的开关留着，等于那次删除只是装饰——「装机扩展总是发 true」描述的是扩展，不是所有能连上这个端口的东西；实测传 `false` 会让一份结构完整但已失效的 cookie 在探针零调用的情况下落盘。字段保留在协议上是因为装机扩展每次同步 cookie 都会发它，直接拒绝该键会 422 掉它们的同步；**「接受这个字段」与「这个字段能降低校验」是两件事**。`validate_credential()` 也随之删掉了 `live` 参数——能活体校验的平台一律活体校验，没有"少查一点"的入参。
 
@@ -191,6 +192,20 @@ discovery 健康串落到 `detail`，`token_state` 单独成轴）。Bangumi 的
 端点，所以它的 `CredentialSpec` 是 `kinds=()` + `form_kind='none'`——表单只给「测试连接」
 和「去获取令牌」链接，不给会写到空处的粘贴框。探针缓存要区分不同令牌，故 `CredentialSpec`
 新增 `opaque_credential=True`，指纹覆盖整串令牌而非 cookie 字段名。
+
+## 微博的接入
+
+微博是第 9 个正式来源，但在认证维度比 Bangumi 更简单：它只做匿名公开 discovery，没有可选账号凭据。`auth_weibo()` 返回固定正交契约：
+
+- `auth_required=false`、`credential="none"`、`credential_origin="none"`；
+- `verification="unverified"`、`verify_method="none"`、`verify_ttl_seconds=None`、`can_verify_now=false`；
+- legacy 兼容为 `state="no_auth"` / `logged_in=true`。这里的 `logged_in=true` 只沿用“无需登录即可用”的旧布尔语义，绝不能解释为微博账号已登录。
+
+`WeiboClient` 为移动 H5 search / creator 在进程内申请短期匿名 visitor `SUB`。它是公开接口的防滥用会话材料，不是用户 Cookie、账号 token 或身份信号；不进入 `SourceAuthContract.credential`，也不写配置、数据库、日志或 credentials 响应。重启 / client 关闭后该会话自然丢失。
+
+控制面坚持零上游 I/O：`GET /api/sources/status` 只读 `weibo_discovery_runs` 中每个 mode 最近一次的 `reason/error_code` 与 `weibo_discovery_state.cooldown_until`，据此组装本地 `discovery_state/detail/feed_paused`；它不读取 `source_producer_runs` 来推断健康，也不会为了状态查询创建表。`GET /api/sources/credentials` 返回 `form.kind="none"`、空值且 `available=false`；`POST /api/sources/weibo/credential` 因 `CredentialSpec.kinds=()` 不接受任何用户输入；`POST /api/sources/weibo/verify` 由 `VERIFY_ACTIONS["weibo"]="none"` 返回 `indeterminate`，不创建 client、不申请 visitor、不访问微博。真实请求只更新 discovery run / cooldown 记录；产出大于 0 时另写 `source_producer_runs` 作为跨重启 cadence 地板，但任何一张表都不会把匿名读取升级为 `verified` 登录结论。
+
+微博没有扩展登录心跳、Cookie 同步、guided init、账号行为读取或站内写回，因此也没有剥离“用户态 vs 游客态”的账号验证声明要做。匿名 visitor 握手仍由 client 测试与真实 discovery smoke 验证；一旦公开响应 schema 漂移或访客被拒绝，取数层 fail closed 并报告 typed error，而不是降级读取用户 Cookie。
 
 ## 新增平台的强制契约
 

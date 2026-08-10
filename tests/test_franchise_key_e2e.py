@@ -197,9 +197,7 @@ async def test_evaluator_propagates_llm_franchise_key_through_to_db(
             # Inspect user_input to figure out the input order so the
             # response array order matches.
             input_batch = decode_sparse_evaluation_json(
-                user_input.split("<content_batch>", 1)[1]
-                .rsplit("</content_batch>", 1)[0]
-                .strip()
+                user_input.split("<content_batch>", 1)[1].rsplit("</content_batch>", 1)[0].strip()
             )
             payload = []
             for local_id, item in zip(input_batch.local_ids, input_batch.items, strict=True):
@@ -318,9 +316,7 @@ async def test_evaluate_content_batch_default_size_45_uses_single_llm_call(
         ) -> object:
             self.call_count += 1
             input_batch = decode_sparse_evaluation_json(
-                user_input.split("<content_batch>", 1)[1]
-                .rsplit("</content_batch>", 1)[0]
-                .strip()
+                user_input.split("<content_batch>", 1)[1].rsplit("</content_batch>", 1)[0].strip()
             )
             payload = [
                 {

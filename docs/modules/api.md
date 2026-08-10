@@ -37,6 +37,21 @@ Phase 2 cognition rollout 在配置 API 中也是 task-scoped：`soul` GET/PUT �
 
 guided init 不与待应用配置并行：队列为 `queued/applying` 时 `POST /api/init` 返回 `409 config_applying`；init 已开始时 `PUT /api/config` 仍返回既有 `409 init_running`。
 
+## 微博来源控制面
+
+微博接入复用平台中立配置、状态、凭据与验证 API，没有新建取数或任务端点。真实 discovery 只由 runtime producer / CLI 触发；下面所有 GET 都是本地读取。
+
+| 方法与路径 | 状态 | 微博契约 |
+|---|---|---|
+| `GET /api/config` | ✅ | 返回 `sources.weibo` 的 `enabled`、`source_modes`、三个分支预算、请求间隔与 producer 间隔，以及 `scheduler.pool_source_shares.weibo`；不返回匿名访客 `SUB`，因为该值只存在于 client 内存。 |
+| `PUT /api/config` | ✅ | 局部更新上述字段；mode 只接受去重后的 `search / hot / creator` 非空集合，且 creator 必须搭配 search 或 hot；预算 / 间隔只接受 JSON 中真正的非负整数，布尔值和浮点数不会被隐式转换。持久化成功后走既有 `202 queued` 热重载，旧 `WeiboClient` 会被关闭。 |
+| `GET /api/sources/status` | ✅ | 返回 `weibo.enabled` 与统一 auth contract；后端只读 `weibo_discovery_runs` 的各 mode 最近 `reason/error_code` 和 `weibo_discovery_state.cooldown_until`，将 `disabled / unverified / ready / partial / error / rate_limited` 写入正交 `discovery_state` 并生成 `detail/feed_paused`，不拿 `source_producer_runs` 当健康账本，也不在状态请求中建表或访问微博。`state="no_auth"`、legacy `logged_in=true` 只表达“无需登录”的兼容状态，不是账号登录证明。 |
+| `GET /api/sources/credentials` | ✅ | `weibo` 项的 `form.kind="none"`、`required_keys=[]`、`available=false`、`value=""`；即使 `reveal_keys=true` 也没有 visitor session 可导出。 |
+| `POST /api/sources/weibo/credential` | ✅ | 统一写入口存在，但 credential spec 的可写 kind 为空，因此不会接受或持久化用户 Cookie / token。 |
+| `POST /api/sources/weibo/verify` | ✅ | 固定 verify action 为 `none`，返回后端拥有的 `indeterminate` / no-auth contract，不访问微博，也不把进程内 visitor `SUB` 验成账号。 |
+
+微博没有 `/api/sources/weibo/next-task`、`task-result`、Cookie 同步、guided-init、账号行为或 native-save API。`RecommendationOut` 与 delight item 复用平台中立字段：`source_platform="weibo"`、`content_type="post"`、canonical `content_url`，以及 `view_count / like_count / comment_count / share_count`。其中 view 只来自响应真实 `reads_count`，share 对应真实 `reposts_count`；favorite / danmaku 无来源字段时为结构性 0，前端不展示空指标。微博卡调用通用 `/api/saved/{list_kind}/save` 时只创建本地 membership，并立即返回 `unsupported/local_only_source`；不会创建 native-save task。显式 `/sync` 若选择集全部为 local-only，会在任务账本写入前以 422 拒绝；混合选择只执行具有 native capability 的项。
+
 ## 公开项目统计
 
 | 方法与路径 | 状态 | 契约 |
@@ -85,7 +100,7 @@ ID 字段是严格 JSON string，不接受数字、布尔或其它类型的自�
 
 ## 来源任务结果的两阶段完成
 
-`POST /api/sources/{xhs,dy,yt,zhihu,reddit}/task-result` 的最终回调不再先把任务写成 `completed`。后端先在 `BEGIN IMMEDIATE` 中合并并冻结第一份 canonical result（含 XHS `self_info` 私有快照），任务仍保持非终态；随后只从这份持久结果重放来源事件、seen-key 和来源专属投影，全部成功后才执行不替换 `result_json` 的 terminal flip。若进程分别退出在 canonical merge→event ingress、event ingress→seen-key 或 seen-key→terminal 三个窗口，后续 callback 会忽略变化后的 body，用第一份结果补齐缺口。队列把 staged marker 视为业务 mutation 的逻辑终态：并发/迟到的 partial、final、fail、rate-limit 都不能改写它；但它继续遵守普通 claim lease，丢失非 2xx 响应后会在 15 分钟 lease 过期时由 dispatcher 重新领取，从而自动触发修复。seen-key 通过 `update_source_bootstrap_state()` 原子、严格落盘并按源保留最新 5,000 个身份键，失败会阻止 terminal flip；事件稳定键不含 task ID，因此 ingress 已提交但 marker 未写时的重放只返回 duplicate receipt。Reddit post/comment/subreddit/user 使用各自稳定身份，comment URL fallback 只接受含 comment id 的完整 permalink，不能把 post id 或标题误作 comment key。
+`POST /api/sources/{xhs,dy,yt,zhihu,reddit}/task-result` 的最终回调不再先把任务写成 `completed`。后端先在 `BEGIN IMMEDIATE` 中合并并冻结第一份 canonical result（含 XHS `self_info` 私有快照），任务仍保持非终态；随后只从这份持久结果重放来源事件、seen-key 和来源专属投影，全部成功后才执行不替换 `result_json` 的 terminal flip。若进程分别退出在 canonical merge→event ingress、event ingress→seen-key 或 seen-key→terminal 三个窗口，后续 callback 会忽略变化后的 body，用第一份结果补齐缺口。队列把 staged marker 视为业务 mutation 的逻辑终态：并发/迟到的 partial、final、fail、rate-limit 都不能改写它；但它继续遵守普通 claim lease，丢失非 2xx 响应后会在 15 分钟 lease 过期时由 dispatcher 重新领取，从而自动触发修复。seen-key 通过 `update_source_bootstrap_state()` 原子、严格落盘并按源保留最新 5,000 个身份键，失败会阻止 terminal flip；事件稳定键不含 task ID，因此 ingress 已提交但 marker 未写时的重放只返回 duplicate receipt。Reddit post/comment/subreddit/user 使用各自稳定身份，comment URL fallback 只接受含 comment id 的完整 permalink，不能把 post id 或标题误作 comment key。微博不在该集合内：它是后端自有匿名 HTTP client，没有扩展 task queue / result callback。
 
 周期任务 payload 带 `incremental=true`；五源 handler 在 guided init 外给 durable event 标记 `profile_update_owner="generic"`，在 init-owned 回调中只落事实、由阶段 2/3 统一建模。事件 ingress 成功或 duplicate receipt 后才按响应顺序 checkpoint seen key，再翻 terminal；没有 handler 直接调用画像 pipeline。扩展离线时 runtime 不创建任务，也不推进调度时间。
 
@@ -93,7 +108,7 @@ ID 字段是严格 JSON string，不接受数字、布尔或其它类型的自�
 
 `GET /api/image-proxy?url=...` 先在线程中读取本地 `data/image-cache/`；命中不占网络槽并返回原始图片类型、`Cache-Control`、`nosniff` 与 `X-Image-Cache: hit`。未命中进入 app-owned `ImageFetchCoordinator`：API 前台请求和 `ContinuousRefreshController` 后台预取共用总上限 4，后台最多 3，队列有前台请求时优先放行；同一 `image_cache_key(url)` 只产生一个 upstream task。单个 HTTP waiter 取消不会取消共享抓取，>=500 失败仍会在线程中做一次“并发写入已落盘”的 cache race fallback。成功响应保留 `X-Image-Cache: miss`。
 
-抓取继续复用统一 SSRF 边界：域名白名单、每次 redirect 重验、`image/*`、10MB 上限，以及国内 CDN 直连 / 境外 CDN 继承代理。磁盘写入使用同目录临时文件 `flush + fsync + os.replace`，失败只保留旧文件或无文件，不暴露半写结果。日志只记录 host、cache hash 前缀和错误类别，不记录签名路径/query；`GET /api/runtime-status` 公开 `image_fetch_active/waiting/inflight_keys` 与 `upstream_started/singleflight_joins/peak_active/peak_background`，这些字段只含整数，不含 URL 或 token。协调器不随 `RuntimeContext` 热重载替换；新 controller 在后台任务恢复前重绑同一实例，shutdown 先停 refresh producer 再取消协调器持有的 active/queued upstream task。
+抓取继续复用统一 SSRF 边界：域名白名单、每次 redirect 重验、`image/*`、10MB 上限，以及国内 CDN 直连 / 境外 CDN 继承代理。微博封面只允许域名边界匹配的 `sinaimg.cn` / `*.sinaimg.cn`，并归入国内直连；形如 `evilsinaimg.cn` 的后缀伪装仍被拒绝。真实新浪图床在共享浏览器 UA 下要求防盗链头，因此当前 redirect 目标属于 `sinaimg.cn` 时附 `Referer: https://weibo.com/`，跳到其它白名单 CDN 后立即移除。磁盘写入使用同目录临时文件 `flush + fsync + os.replace`，失败只保留旧文件或无文件，不暴露半写结果。日志只记录 host、cache hash 前缀和错误类别，不记录签名路径/query；`GET /api/runtime-status` 公开 `image_fetch_active/waiting/inflight_keys` 与 `upstream_started/singleflight_joins/peak_active/peak_background`，这些字段只含整数，不含 URL 或 token。协调器不随 `RuntimeContext` 热重载替换；新 controller 在后台任务恢复前重绑同一实例，shutdown 先停 refresh producer 再取消协调器持有的 active/queued upstream task。
 
 ## 降级配置恢复
 

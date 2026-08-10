@@ -12,12 +12,24 @@ _ALIASES = {
     "zh": "zhihu",
     "rd": "reddit",
     "bgm": "bangumi",
+    "wb": "weibo",
 }
+
+# Discovery-only sources may support local membership without implying any
+# write capability on the upstream platform.  Keep this explicit instead of
+# treating a missing adapter as a transient installation problem.
+_LOCAL_ONLY_NATIVE_SAVE_PLATFORMS = frozenset({"weibo"})
 
 
 def canonical_source_platform(value: str) -> str:
     normalized = value.strip().lower()
     return _ALIASES.get(normalized, normalized)
+
+
+def is_native_save_local_only(value: str) -> bool:
+    """Return whether a platform intentionally has no upstream save action."""
+
+    return canonical_source_platform(value) in _LOCAL_ONLY_NATIVE_SAVE_PLATFORMS
 
 
 def _canonical_url(value: str) -> str:

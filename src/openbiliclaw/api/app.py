@@ -155,6 +155,7 @@ from openbiliclaw.api.models import (
     WatchLaterItem,
     WatchLaterListResponse,
     WatchLaterStateResponse,
+    WeiboSourceConfigOut,
     XCookieIn,
     XCookieResponse,
     XhsLoginStateIn,
@@ -400,6 +401,7 @@ _SOURCE_SHARE_ORDER = (
     "zhihu",
     "reddit",
     "bangumi",
+    "weibo",
 )
 _INIT_SOURCE_ORDER = (
     "bilibili",
@@ -1322,6 +1324,8 @@ def _fallback_recommendation_click_url(
         return f"https://www.reddit.com/comments/{quote(reddit_id, safe='')}/"
     if source_platform == "bangumi":
         return f"https://bgm.tv/subject/{quote(item_id, safe='')}"
+    if source_platform == "weibo":
+        return f"https://m.weibo.cn/detail/{quote(item_id, safe='')}"
     if source_platform == "bilibili":
         return f"https://www.bilibili.com/video/{quote(bvid or item_id, safe='')}"
     return ""
@@ -5885,6 +5889,7 @@ def create_app(
                     or 0
                 ),
                 comment_count=int(getattr(item.content, "comment_count", 0) or 0),
+                share_count=int(getattr(item.content, "share_count", 0) or 0),
                 rating_score=float(getattr(item.content, "rating_score", 0.0) or 0.0),
                 rating_count=int(getattr(item.content, "rating_count", 0) or 0),
                 source_rank=int(getattr(item.content, "source_rank", 0) or 0),
@@ -6229,6 +6234,11 @@ def create_app(
         if callable(close_bangumi):
             with suppress(Exception):
                 await close_bangumi()
+        weibo_client = getattr(ctx, "weibo_client", None)
+        close_weibo = getattr(weibo_client, "aclose", None)
+        if callable(close_weibo):
+            with suppress(Exception):
+                await close_weibo()
 
     @app.get("/api/profile-summary", response_model=ProfileSummaryResponse)
     async def profile_summary(
@@ -6822,6 +6832,7 @@ def create_app(
                         row.get("favorite_count", 0) or row.get("collect_count", 0) or 0
                     ),
                     comment_count=int(row.get("comment_count", 0) or 0),
+                    share_count=int(row.get("share_count", 0) or 0),
                     rating_score=float(row.get("rating_score", 0.0) or 0.0),
                     rating_count=int(row.get("rating_count", 0) or 0),
                     source_rank=int(row.get("source_rank", 0) or 0),
@@ -8119,6 +8130,14 @@ def create_app(
                 # readable title for legacy rows still holding answer_<id> (#79).
                 "content_type": str(row.get("content_type", "") or ""),
                 "body_text": str(row.get("body_text", "") or ""),
+                "view_count": int(row.get("view_count", 0) or 0),
+                "like_count": int(row.get("like_count", 0) or 0),
+                "comment_count": int(row.get("comment_count", 0) or 0),
+                "share_count": int(row.get("share_count", 0) or 0),
+                "danmaku_count": int(row.get("danmaku_count", 0) or 0),
+                "favorite_count": int(
+                    row.get("favorite_count", 0) or row.get("collect_count", 0) or 0
+                ),
             }
             with suppress(Exception):
                 await ctx.event_hub.publish(payload_event)
@@ -8209,11 +8228,12 @@ def create_app(
                 # readable title for legacy rows still holding answer_<id> (#79).
                 "content_type": str(row.get("content_type", "") or ""),
                 "body_text": str(row.get("body_text", "") or ""),
-                # Engagement stats so the delight card shows the same ▶/👍/💬 row
+                # Engagement stats so the delight card shows the same ▶/👍/💬/🔁 row
                 # as the grid (0 = not fetched → the card renders nothing for it).
                 "view_count": int(row.get("view_count", 0) or 0),
                 "like_count": int(row.get("like_count", 0) or 0),
                 "comment_count": int(row.get("comment_count", 0) or 0),
+                "share_count": int(row.get("share_count", 0) or 0),
                 "danmaku_count": int(row.get("danmaku_count", 0) or 0),
                 "favorite_count": int(
                     row.get("favorite_count", 0) or row.get("collect_count", 0) or 0
@@ -12896,6 +12916,53 @@ def create_app(
             item.requires_overseas_network = requires_overseas_network(family)
             item.network_hint = overseas_network_hint(family, network_mode=network_mode)
 
+    def _weibo_status_item(cfg: Any, auth_ctx: Any) -> SourceStatusItem:
+        """Combine anonymous auth readiness with the latest local discovery run."""
+
+        from openbiliclaw.api.source_auth.providers import auth_weibo
+        from openbiliclaw.runtime.weibo_producer import weibo_source_status
+
+        enabled = bool(getattr(getattr(cfg.sources, "weibo", None), "enabled", False))
+        status = (
+            weibo_source_status(
+                ctx.database,
+                enabled=enabled,
+                source_modes=getattr(
+                    getattr(cfg.sources, "weibo", None),
+                    "source_modes",
+                    ("search", "hot", "creator"),
+                ),
+            )
+            if hasattr(ctx.database, "conn")
+            else {
+                "state": "unverified" if enabled else "disabled",
+                "detail": "尚未运行微博内容发现。" if enabled else "微博来源未启用。",
+            }
+        )
+        raw_discovery_state = str(status.get("state") or "unverified")
+        if raw_discovery_state not in {
+            "disabled",
+            "unverified",
+            "ready",
+            "partial",
+            "error",
+            "rate_limited",
+        }:
+            raw_discovery_state = "unverified"
+        discovery_state = cast(
+            "Literal['disabled', 'unverified', 'ready', 'partial', 'error', 'rate_limited']",
+            raw_discovery_state,
+        )
+        return SourceStatusItem(
+            enabled=enabled,
+            state="no_auth",
+            detail=str(status.get("detail") or "微博匿名访客源。"),
+            logged_in=True,
+            feed_paused=discovery_state == "rate_limited",
+            discovery_state=discovery_state,
+            auth=auth_weibo(auth_ctx),
+        )
+
     @app.get("/api/sources/status", response_model=SourcesStatusResponse)
     def sources_status() -> SourcesStatusResponse:
         """Unified per-source login / cookie readiness for the settings pages.
@@ -12961,6 +13028,7 @@ def create_app(
         # discovery-health detail and the token_state axis the loop cannot model.
         # Do not delete this line thinking the loop covers it — it does not.
         items["bangumi"] = _bangumi_status_item(cfg, auth_ctx)
+        items["weibo"] = _weibo_status_item(cfg, auth_ctx)
         statuses = SourcesStatusResponse(**items)
         _attach_network_hints(statuses, cfg)
         return statuses
@@ -13433,6 +13501,12 @@ def create_app(
                 secret=False,
             ),
             bangumi=_bangumi_credential_item(srcs, cfg),
+            weibo=item(
+                "weibo",
+                "匿名访客会话",
+                "",
+                "微博访客会话仅保存在后端内存中，不读取或保存用户 Cookie。",
+            ),
         )
 
     # ── Douyin task queue endpoints (extension dispatcher) ──────────
@@ -14741,6 +14815,15 @@ def create_app(
                     request_interval_seconds=cfg.sources.bangumi.request_interval_seconds,
                     min_interval_minutes=cfg.sources.bangumi.min_interval_minutes,
                     bootstrap_limit=cfg.sources.bangumi.bootstrap_limit,
+                ),
+                weibo=WeiboSourceConfigOut(
+                    enabled=cfg.sources.weibo.enabled,
+                    source_modes=list(cfg.sources.weibo.source_modes),
+                    daily_search_budget=cfg.sources.weibo.daily_search_budget,
+                    daily_hot_budget=cfg.sources.weibo.daily_hot_budget,
+                    daily_creator_budget=cfg.sources.weibo.daily_creator_budget,
+                    request_interval_seconds=cfg.sources.weibo.request_interval_seconds,
+                    min_interval_minutes=cfg.sources.weibo.min_interval_minutes,
                 ),
             ),
             scheduler=SchedulerConfigOut(
@@ -16373,6 +16456,48 @@ def create_app(
                                 status_code=400, detail=f"Bangumi {key} 超出允许范围"
                             )
                         setattr(cfg.sources.bangumi, key, value)
+
+                weibo_data = sources_data.get("weibo")
+                if isinstance(weibo_data, dict):
+                    if "enabled" in weibo_data:
+                        cfg.sources.weibo.enabled = _as_bool(weibo_data["enabled"])
+                    if "source_modes" in weibo_data:
+                        raw_modes = weibo_data["source_modes"]
+                        if not isinstance(raw_modes, list):
+                            raise HTTPException(
+                                status_code=400, detail="微博 source_modes 必须是数组"
+                            )
+                        selected_modes = tuple(
+                            dict.fromkeys(str(value).strip().lower() for value in raw_modes)
+                        )
+                        if not selected_modes or any(
+                            value not in {"search", "hot", "creator"} for value in selected_modes
+                        ):
+                            raise HTTPException(
+                                status_code=400, detail="微博 source_modes 包含不支持的值"
+                            )
+                        if selected_modes == ("creator",):
+                            raise HTTPException(
+                                status_code=400,
+                                detail="微博 creator 模式需要同时启用 search 或 hot",
+                            )
+                        cfg.sources.weibo.source_modes = selected_modes
+                    for key in (
+                        "daily_search_budget",
+                        "daily_hot_budget",
+                        "daily_creator_budget",
+                        "request_interval_seconds",
+                        "min_interval_minutes",
+                    ):
+                        if key not in weibo_data:
+                            continue
+                        raw_value = weibo_data[key]
+                        if isinstance(raw_value, bool) or not isinstance(raw_value, int):
+                            raise HTTPException(status_code=400, detail=f"微博 {key} 必须是整数")
+                        value = raw_value
+                        if value < 0:
+                            raise HTTPException(status_code=400, detail=f"微博 {key} 不能为负数")
+                        setattr(cfg.sources.weibo, key, value)
 
         # Apply scheduler updates
         if "scheduler" in update:

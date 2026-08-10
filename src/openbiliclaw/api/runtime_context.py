@@ -439,6 +439,7 @@ class RuntimeContext:
     llm_service: Any = None
     bilibili_client: Any = None
     bangumi_client: Any = None
+    weibo_client: Any = None
     saved_sync_service: Any = None
     soul_engine: Any = None
     dialogue: Any = None
@@ -779,6 +780,14 @@ class RuntimeContext:
                     getattr(bangumi_cfg, "request_interval_seconds", 1.0)
                 ),
             )
+        weibo_cfg = getattr(getattr(new_config, "sources", None), "weibo", None)
+        new_weibo_client: Any = None
+        if bool(getattr(weibo_cfg, "enabled", False)):
+            from openbiliclaw.sources.weibo_client import WeiboClient
+
+            new_weibo_client = WeiboClient(
+                request_interval_seconds=float(getattr(weibo_cfg, "request_interval_seconds", 3.0))
+            )
         new_saved_sync_service = SavedSyncService(
             self.database,
             NativeSaveRouter(
@@ -1093,6 +1102,7 @@ class RuntimeContext:
         new_zhihu_producer: Any = None
         new_reddit_producer: Any = None
         new_bangumi_producer: Any = None
+        new_weibo_producer: Any = None
         if hasattr(self.database, "conn"):
             from openbiliclaw.runtime.bilibili_producer import BilibiliExtensionSearchProducer
             from openbiliclaw.runtime.xhs_producer import XhsTaskProducer
@@ -1224,6 +1234,25 @@ class RuntimeContext:
                     candidate_pipeline=new_candidate_pipeline,
                     keyword_fetch=new_keyword_fetch,
                 )
+            if new_weibo_client is not None:
+                from openbiliclaw.runtime.weibo_producer import WeiboDiscoveryProducer
+
+                new_weibo_producer = WeiboDiscoveryProducer(
+                    database=self.database,
+                    soul_engine=new_soul_engine,
+                    client=new_weibo_client,
+                    enabled=bool(getattr(weibo_cfg, "enabled", False))
+                    and bool(getattr(sched_cfg, "enabled", True)),
+                    source_modes=tuple(
+                        getattr(weibo_cfg, "source_modes", ("search", "hot", "creator"))
+                    ),
+                    daily_search_budget=int(getattr(weibo_cfg, "daily_search_budget", 60)),
+                    daily_hot_budget=int(getattr(weibo_cfg, "daily_hot_budget", 10)),
+                    daily_creator_budget=int(getattr(weibo_cfg, "daily_creator_budget", 30)),
+                    min_interval_minutes=int(getattr(weibo_cfg, "min_interval_minutes", 10)),
+                    candidate_pipeline=new_candidate_pipeline,
+                    keyword_fetch=new_keyword_fetch,
+                )
 
         # P1.6: unified keyword planner — deficit-pulled merged keyword
         # generation. Built as its OWN object (the controller has no
@@ -1250,6 +1279,7 @@ class RuntimeContext:
                     bilibili_client=new_bilibili_client,
                     x_client=new_x_client,
                     bangumi_client=new_bangumi_client,
+                    weibo_client=new_weibo_client,
                 ),
                 platforms_per_probe=int(inspiration_params.platforms_per_probe),
                 riskcontrolled_probe_budget=int(inspiration_params.riskcontrolled_probe_budget),
@@ -1330,6 +1360,7 @@ class RuntimeContext:
             zhihu_producer=new_zhihu_producer,
             reddit_producer=new_reddit_producer,
             bangumi_producer=new_bangumi_producer,
+            weibo_producer=new_weibo_producer,
             scheduler_config=new_config.scheduler,
             presence=self.presence,
             # gui-init D1: pause the controller's background loops while a guided
@@ -1440,6 +1471,7 @@ class RuntimeContext:
             new_youtube_producer,
             new_zhihu_producer,
             new_bangumi_producer,
+            new_weibo_producer,
         ):
             if producer is not None:
                 producer.candidate_evaluation_owned_by_coordinator = True
@@ -1542,6 +1574,8 @@ class RuntimeContext:
         self.bilibili_client = new_bilibili_client
         old_bangumi_client = self.bangumi_client
         self.bangumi_client = new_bangumi_client
+        old_weibo_client = self.weibo_client
+        self.weibo_client = new_weibo_client
         self.saved_sync_service = new_saved_sync_service
         self.soul_engine = new_soul_engine
         self.dialogue = new_dialogue
@@ -1556,6 +1590,11 @@ class RuntimeContext:
             if callable(close):
                 with suppress(RuntimeError):
                     self.task_registry.track("close_old_bangumi_client", close())
+        if old_weibo_client is not None and old_weibo_client is not new_weibo_client:
+            close = getattr(old_weibo_client, "aclose", None)
+            if callable(close):
+                with suppress(RuntimeError):
+                    self.task_registry.track("close_old_weibo_client", close())
         if new_inventory_available is not None:
             new_llm_gate.update_inventory(
                 available=new_inventory_available,

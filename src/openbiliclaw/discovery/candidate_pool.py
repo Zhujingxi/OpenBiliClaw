@@ -96,6 +96,8 @@ def _canonical_platform(raw_platform: object) -> str:
         return "zhihu"
     if raw in {"bangumi", "bgm"}:
         return "bangumi"
+    if raw in {"weibo", "wb", "微博"}:
+        return "weibo"
     return raw or "unknown"
 
 

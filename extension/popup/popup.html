@@ -659,7 +659,7 @@
     .delight-banner-thumb {
       flex-shrink: 0;
       position: relative;
-      width: 160px;
+      width: clamp(108px, 32vw, 136px);
       aspect-ratio: 16 / 9;
       border-radius: 18px;
       overflow: hidden;
@@ -688,8 +688,26 @@
       display: block;
     }
     .delight-banner-thumb.is-fallback {
-      font-size: 36px;
       color: var(--brand-strong);
+    }
+    .delight-banner-thumb.is-text-card {
+      aspect-ratio: auto;
+      min-height: 88px;
+      align-items: flex-start;
+      justify-content: flex-start;
+      padding: 12px 10px 10px;
+    }
+    .delight-banner-thumb-text {
+      display: -webkit-box;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 4;
+      overflow: hidden;
+      color: var(--text-secondary);
+      font-size: 11px;
+      font-weight: 600;
+      line-height: 1.45;
+      overflow-wrap: anywhere;
+      white-space: pre-wrap;
     }
     /* ✨ overlay badge — instant "this one is special" marker. */
     .delight-banner-thumb::before {
@@ -734,6 +752,8 @@
       display: flex;
       align-items: center;
       gap: 6px;
+      flex-wrap: wrap;
+      min-width: 0;
     }
 
     .delight-banner-kicker {
@@ -744,6 +764,10 @@
       border-radius: 999px;
       background: rgba(251, 114, 153, 0.1);
       letter-spacing: 0.02em;
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     .delight-banner-platform {
@@ -753,6 +777,8 @@
       padding: 2px 6px;
       border-radius: 999px;
       background: rgba(0, 0, 0, 0.05);
+      flex: 0 0 auto;
+      white-space: nowrap;
     }
 
     .delight-banner-counter {
@@ -762,6 +788,15 @@
       padding: 1px 5px;
       border-radius: 8px;
       background: rgba(0, 0, 0, 0.04);
+      flex: 0 0 auto;
+      white-space: nowrap;
+    }
+
+    .delight-banner-kicker-line .recommendation-published-time {
+      flex: 0 0 auto;
+      margin-left: 0;
+      white-space: nowrap;
+      color: var(--text-muted);
     }
 
     /* Nav buttons (‹ / ›). 28×28 visible target plus a transparent
@@ -782,6 +817,7 @@
       cursor: pointer;
       padding: 0;
       display: inline-flex;
+      flex: 0 0 28px;
       align-items: center;
       justify-content: center;
       transition: background 0.15s ease, transform 0.1s ease, border-color 0.15s ease;
@@ -902,9 +938,21 @@
 
     .delight-banner-chevron {
       flex-shrink: 0;
+      width: 32px;
+      height: 32px;
+      padding: 0;
+      border: 0;
+      border-radius: 10px;
+      background: transparent;
       font-size: 12px;
       color: var(--text-secondary);
+      cursor: pointer;
       transition: transform 0.2s ease;
+    }
+    .delight-banner-chevron:hover,
+    .delight-banner-chevron:focus-visible {
+      background: rgba(251, 114, 153, 0.1);
+      color: var(--brand-strong);
     }
 
     .delight-banner-dismiss {
@@ -1283,6 +1331,9 @@
 
     /* No-cover text card for text-first sources (X tweet/thread). */
     .recommendation-cover.is-text-card {
+      aspect-ratio: auto;
+      min-height: 124px;
+      max-height: 180px;
       align-items: flex-start;
       justify-content: flex-start;
       text-align: left;
@@ -1395,6 +1446,16 @@
     .recommendation-cover.is-fallback .recommendation-source-corner.source-platform-reddit {
       background: rgba(255, 69, 0, 0.12);
       color: #d93f00;
+    }
+
+    .recommendation-source-corner.source-platform-weibo {
+      background: rgba(230, 22, 45, 0.82);
+      color: #fff;
+    }
+
+    .recommendation-cover.is-fallback .recommendation-source-corner.source-platform-weibo {
+      background: rgba(230, 22, 45, 0.12);
+      color: #e6162d;
     }
 
     .recommendation-source-corner.source-platform-bangumi {
@@ -4916,7 +4977,7 @@
     }
 
     /* 平台源卡片：卡面常驻（标题 / 启用 / 接入状态），配置按需展开。
-       侧栏宽度有限，8 个来源全展开会让这一页长到无法浏览。 */
+       侧栏宽度有限，9 个来源全展开会让这一页长到无法浏览。 */
     .settings-source-card[data-open] {
       padding-bottom: 0;
     }
@@ -5418,9 +5479,31 @@
       object-fit: cover;
       display: block;
     }
+    .saved-card-cover.is-text-source {
+      width: 52px;
+      aspect-ratio: 1;
+      flex-basis: 52px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--brand, #c8553d);
+      font-size: 11px;
+      font-weight: 700;
+    }
     .saved-card-copy {
       min-width: 0;
       flex: 1;
+    }
+    .saved-card-platform {
+      display: inline-flex;
+      align-items: center;
+      margin-bottom: 3px;
+      padding: 2px 6px;
+      border-radius: 999px;
+      background: var(--brand-soft, rgba(200,85,61,0.1));
+      color: var(--brand, #c8553d);
+      font-size: 10px;
+      font-weight: 700;
     }
     .saved-card-title {
       font-size: 13px;
@@ -5693,7 +5776,7 @@
           <h2 data-saved-heading tabindex="-1">稍后再看</h2>
           <p class="view-subtitle">点时钟图标加入临时队列，看完可以随手移除。</p>
           <div class="saved-sync-toolbar">
-            <button id="watchLaterSyncAll" class="action-button action-secondary" data-saved-list-action="sync-all" type="button" disabled>同步未同步内容（0）</button>
+            <button id="watchLaterSyncAll" class="action-button action-secondary" data-saved-list-action="sync-all" type="button" disabled hidden>同步未同步内容（0）</button>
             <span id="watchLaterSyncStatus" class="saved-sync-status" aria-live="polite"></span>
           </div>
         </div>
@@ -5710,7 +5793,7 @@
           <h2 data-saved-heading tabindex="-1">我的收藏</h2>
           <p class="view-subtitle">点星标收藏的内容会长期留在这里，和稍后再看互相独立。</p>
           <div class="saved-sync-toolbar">
-            <button id="favoritesSyncAll" class="action-button action-secondary" data-saved-list-action="sync-all" type="button" disabled>同步未同步内容（0）</button>
+            <button id="favoritesSyncAll" class="action-button action-secondary" data-saved-list-action="sync-all" type="button" disabled hidden>同步未同步内容（0）</button>
             <span id="favoritesSyncStatus" class="saved-sync-status" aria-live="polite"></span>
           </div>
         </div>
@@ -6397,6 +6480,61 @@
       </div>
       </div>
 
+      <div class="settings-section settings-source-card" data-source-card="weibo" data-open="0">
+        <div class="source-card-face" role="button" tabindex="0" aria-expanded="false" aria-controls="sourceCardBody-weibo">
+        <h3><span class="section-icon">微</span> 微博</h3>
+        <div class="settings-field-row">
+          <input id="cfgWeiboEnabled" type="checkbox">
+          <label for="cfgWeiboEnabled">启用微博 discovery</label>
+        </div>
+        <p class="settings-hint source-status-row" id="cfgWeiboStatus" data-source-status="weibo"><span class="src-dot">●</span> <span class="src-detail">微博来源状态加载中…</span></p>
+          <span class="source-card-chev" aria-hidden="true">&#x25BE;</span>
+        </div>
+        <div class="source-card-body" id="sourceCardBody-weibo">
+        <div class="settings-probe-row source-verify-row">
+          <button class="settings-secondary-btn source-verify-btn" type="button">查看接入状态</button>
+          <span class="settings-probe-status source-verify-status" aria-live="polite"></span>
+        </div>
+        <p class="settings-hint">使用后端内存中的匿名访客会话读取公开微博，无需用户 Cookie，也不会读取、上传或保存登录凭据。首版仅用于 discovery，不参与初始化画像；网页接口并非官方稳定 API，可能随微博调整而变化。</p>
+        <div class="settings-field">
+          <label>微博 discovery 分支</label>
+          <div class="settings-field-row">
+            <input id="cfgWeiboModeSearch" type="checkbox">
+            <label for="cfgWeiboModeSearch">搜索</label>
+          </div>
+          <div class="settings-field-row">
+            <input id="cfgWeiboModeHot" type="checkbox">
+            <label for="cfgWeiboModeHot">热榜</label>
+          </div>
+          <div class="settings-field-row">
+            <input id="cfgWeiboModeCreator" type="checkbox">
+            <label for="cfgWeiboModeCreator">作者（需同时启用搜索或热榜）</label>
+          </div>
+        </div>
+        <div class="settings-field">
+          <label for="cfgWeiboDailySearchBudget">微博每日搜索候选条数</label>
+          <input id="cfgWeiboDailySearchBudget" type="number" min="0" step="1" placeholder="60">
+        </div>
+        <div class="settings-field">
+          <label for="cfgWeiboDailyHotBudget">微博每日热榜候选条数</label>
+          <input id="cfgWeiboDailyHotBudget" type="number" min="0" step="1" placeholder="10">
+        </div>
+        <div class="settings-field">
+          <label for="cfgWeiboDailyCreatorBudget">微博每日作者候选条数</label>
+          <input id="cfgWeiboDailyCreatorBudget" type="number" min="0" step="1" placeholder="30">
+        </div>
+        <p class="settings-hint" data-budget-note>预算 = 每日最终保留候选条数上限。匿名接口可能变化，建议保留默认节流并谨慎提高预算。</p>
+        <div class="settings-field">
+          <label for="cfgWeiboRequestInterval">微博请求间隔秒数</label>
+          <input id="cfgWeiboRequestInterval" type="number" min="0" step="1" placeholder="3">
+        </div>
+        <div class="settings-field">
+          <label for="cfgWeiboMinInterval">微博最小调度间隔分钟数</label>
+          <input id="cfgWeiboMinInterval" type="number" min="0" step="1" placeholder="10">
+        </div>
+      </div>
+      </div>
+
       <div class="settings-section settings-source-card" data-source-card="youtube" data-open="0">
         <div class="source-card-face" role="button" tabindex="0" aria-expanded="false" aria-controls="sourceCardBody-youtube">
         <h3><span class="section-icon">&#x25B6;</span> YouTube</h3>
@@ -6705,6 +6843,10 @@
         <div class="settings-field">
           <label for="cfgPoolShareDouyin">候选池抖音占比</label>
           <input id="cfgPoolShareDouyin" type="number" min="1" step="1" placeholder="1">
+        </div>
+        <div class="settings-field">
+          <label for="cfgPoolShareWeibo">候选池微博占比</label>
+          <input id="cfgPoolShareWeibo" type="number" min="1" step="1" placeholder="1">
         </div>
         <div class="settings-field">
           <label for="cfgPoolShareYoutube">候选池 YouTube 占比</label>

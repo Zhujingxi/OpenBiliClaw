@@ -1,9 +1,9 @@
 """Per-platform source-auth providers.
 
 ``GET /api/sources/status`` used to be a 424-line if/elif chain that flattened
-seven heterogeneous platforms by hand (spec D8). Adding a platform meant editing
+heterogeneous platforms by hand (spec D8). Adding a platform meant editing
 that one function, and nothing forced the new branch to answer the same
-questions as the previous seven — which is how the same ``state="ready"`` came
+questions as the previous providers — which is how the same ``state="ready"`` came
 to mean "we counted three cookie field names" for B站 and "a file exists on
 disk" for Reddit.
 
@@ -195,7 +195,7 @@ _BILIBILI_READY_DETAIL: dict[str, str] = {
 #
 # Note this is the contract's own ``detail``; the settings chip renders the
 # discovery-health ``detail`` that ``_bangumi_status_item`` keeps (Bangumi
-# carries a discovery-health axis the seven cookie/heartbeat platforms do not).
+# carries a discovery-health axis the other providers do not).
 _BANGUMI_TOKEN_DETAIL: dict[str, str] = {
     "verified": "个人令牌有效，已识别 Bangumi 账号，可读取你的私密收藏。",
     "failed": (
@@ -588,11 +588,11 @@ def auth_douyin(ctx: SourceAuthContext) -> SourceAuthContract:
 
 
 def auth_youtube(ctx: SourceAuthContext) -> SourceAuthContract:
-    """YouTube: public source, the one platform legitimately needing no login.
+    """YouTube: a public source that legitimately needs no login.
 
     ``verify_method`` must stay ``none`` here — not because verification is
     hard, but because there is nothing to verify. That is the only honest use
-    of ``none`` in the whole table (invariant I3).
+    of ``none`` for a source with no credential to verify (invariant I3).
     """
     return SourceAuthContract(
         auth_required=False,
@@ -603,6 +603,26 @@ def auth_youtube(ctx: SourceAuthContext) -> SourceAuthContract:
         verify_ttl_seconds=None,
         can_verify_now=False,
         detail="公开源 · 无需登录。",
+        legacy_state="no_auth",
+        legacy_logged_in=True,
+    )
+
+
+# ── Weibo ───────────────────────────────────────────────────────────
+
+
+def auth_weibo(ctx: SourceAuthContext) -> SourceAuthContract:
+    """Weibo: public discovery through an in-memory anonymous guest session."""
+
+    return SourceAuthContract(
+        auth_required=False,
+        credential="none",
+        credential_origin="none",
+        verification="unverified",
+        verify_method="none",
+        verify_ttl_seconds=None,
+        can_verify_now=False,
+        detail="匿名访客源 · 无需用户登录或 Cookie；访客会话只保存在进程内存中。",
         legacy_state="no_auth",
         legacy_logged_in=True,
     )
@@ -794,7 +814,7 @@ def auth_zhihu(ctx: SourceAuthContext) -> SourceAuthContract:
         # Timestamp columns feed only the display-only ``verified_at``. The
         # legacy branch never read them, so a row that cannot supply them must
         # cost the timestamp and nothing else — without this guard an unexpected
-        # row shape would raise out of the handler and 500 all seven platforms.
+        # row shape would raise out of the handler and 500 every platform.
         at = ""
         with suppress(Exception):
             at = str(_row_value(row, "completed_at", 4) or _row_value(row, "created_at", 3) or "")
@@ -1161,6 +1181,7 @@ SOURCE_AUTH_PROVIDERS: dict[str, Callable[[SourceAuthContext], SourceAuthContrac
     "zhihu": auth_zhihu,
     "reddit": auth_reddit,
     "bangumi": auth_bangumi,
+    "weibo": auth_weibo,
 }
 
 

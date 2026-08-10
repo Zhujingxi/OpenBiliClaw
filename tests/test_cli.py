@@ -4860,6 +4860,7 @@ def test_select_init_source_shares_accepts_suggested_ratios(
         "zhihu": 1,
         "reddit": 1,
         "bangumi": 1,
+        "weibo": 1,
     }
 
 
@@ -4903,6 +4904,7 @@ def test_select_init_source_shares_accepts_manual_ratios(
         "zhihu": 1,
         "reddit": 1,
         "bangumi": 1,
+        "weibo": 1,
     }
 
 

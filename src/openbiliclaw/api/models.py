@@ -259,6 +259,7 @@ class RecommendationOut(BaseModel):
     # so the card stats row is not left with a lone like count.
     favorite_count: int = 0
     comment_count: int = 0
+    share_count: int = 0
     rating_score: float = 0.0
     rating_count: int = 0
     source_rank: int = 0
@@ -481,11 +482,12 @@ class PendingDelightOut(BaseModel):
     content_type: str = "video"
     body_text: str = ""
     # Engagement stats (from content_cache), so the delight card can show the
-    # same ▶ / 👍 / 💬 metadata row as the recommendation grid. 0 = unknown /
+    # same ▶ / 👍 / 💬 / 🔁 metadata row as the recommendation grid. 0 = unknown /
     # not fetched (platforms that don't populate a metric render nothing).
     view_count: int = 0
     like_count: int = 0
     comment_count: int = 0
+    share_count: int = 0
     danmaku_count: int = 0
     favorite_count: int = 0
     rating_score: float = 0.0
@@ -718,7 +720,7 @@ class SourceStatusItem(BaseModel):
       or its saved credential file is invalid.
     - ``expired`` / ``blocked`` — X live-health states.
     - ``rate_limited`` — X live-health or XHS persisted safety cooldown.
-    - ``no_auth``    — source needs no login (YouTube, public).
+    - ``no_auth``    — source needs no login (YouTube / Weibo public paths).
     - ``disabled``   — source switched off in config (Bangumi only, and only
       until it moves onto ``auth``, where scheduling and credential state are
       separate dimensions rather than two values of one field).
@@ -740,13 +742,20 @@ class SourceStatusItem(BaseModel):
     detail: str = ""
     logged_in: bool = False
     # Discovery sub-feed/task execution is circuit-broken independently of the
-    # login verdict (currently X For-You and XHS platform safety cooldown).
+    # login verdict (X For-You, XHS safety cooldown, and Weibo 429 cooldown).
     feed_paused: bool = False
+    # Discovery health is independent of authentication. Anonymous sources can
+    # remain correctly labelled ``no_auth`` while their most recent fetch is
+    # partial, failed, or cooling down. Empty means the source does not expose a
+    # separate discovery-health projection yet.
+    discovery_state: Literal[
+        "", "disabled", "unverified", "ready", "partial", "error", "rate_limited"
+    ] = ""
     # ``None`` means "this source has no auth contract", the honest answer for a
     # backend older than the contract — not a missing value to be defaulted away
     # (a default-constructed contract reads ``auth_required=True`` +
     # ``credential="none"``, which renders as 「需要登录」 and would be a fabricated
-    # verdict for a public source — the overclaim invariant I3 forbids). All eight
+    # verdict for a public source — the overclaim invariant I3 forbids). All nine
     # sources now ship a real contract: Bangumi resolved the "auth optional" shape
     # by staying ``auth_required=False`` (anonymous-public) while its optional
     # personal token reports ``verify_method='live_probe'`` when configured. The
@@ -785,6 +794,7 @@ class SourcesStatusResponse(BaseModel):
     zhihu: SourceStatusItem = Field(default_factory=SourceStatusItem)
     reddit: SourceStatusItem = Field(default_factory=SourceStatusItem)
     bangumi: SourceStatusItem = Field(default_factory=SourceStatusItem)
+    weibo: SourceStatusItem = Field(default_factory=SourceStatusItem)
 
 
 class SourceVerifyResponse(BaseModel):
@@ -900,7 +910,7 @@ class CredentialFormSpec(BaseModel):
     """How a settings surface should ask for one platform's credential.
 
     The point of shipping this from the backend is invariant I4: with a
-    descriptor, three frontends render seven platforms without a single
+    descriptor, three frontends render nine platforms without a single
     ``key === "xiaohongshu"``. Without it, each surface re-derives "does this
     platform even take a paste box" from platform knowledge it has no business
     holding — and the two that got it wrong disagreed about 小红书.
@@ -955,6 +965,7 @@ class SourcesCredentialsResponse(BaseModel):
     zhihu: SourceCredentialItem = Field(default_factory=SourceCredentialItem)
     reddit: SourceCredentialItem = Field(default_factory=SourceCredentialItem)
     bangumi: SourceCredentialItem = Field(default_factory=SourceCredentialItem)
+    weibo: SourceCredentialItem = Field(default_factory=SourceCredentialItem)
 
 
 class NotificationAckIn(BaseModel):
@@ -2088,6 +2099,16 @@ class BangumiSourceConfigOut(BaseModel):
     bootstrap_limit: int = 300
 
 
+class WeiboSourceConfigOut(BaseModel):
+    enabled: bool = False
+    source_modes: list[str] = Field(default_factory=lambda: ["search", "hot", "creator"])
+    daily_search_budget: int = 60
+    daily_hot_budget: int = 10
+    daily_creator_budget: int = 30
+    request_interval_seconds: int = 3
+    min_interval_minutes: int = 10
+
+
 class SourcesConfigOut(BaseModel):
     browser: SourcesBrowserConfigOut = Field(default_factory=SourcesBrowserConfigOut)
     bilibili: BilibiliSourceConfigOut = Field(default_factory=BilibiliSourceConfigOut)
@@ -2098,6 +2119,7 @@ class SourcesConfigOut(BaseModel):
     zhihu: ZhihuSourceConfigOut = Field(default_factory=ZhihuSourceConfigOut)
     reddit: RedditSourceConfigOut = Field(default_factory=RedditSourceConfigOut)
     bangumi: BangumiSourceConfigOut = Field(default_factory=BangumiSourceConfigOut)
+    weibo: WeiboSourceConfigOut = Field(default_factory=WeiboSourceConfigOut)
 
 
 class SchedulerConfigOut(BaseModel):

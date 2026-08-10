@@ -40,7 +40,7 @@
 | 来源 raw material 统计 | ✅ | `count_pool_raw_material_by_source()` 合并 `content_cache` raw rows 和 `discovery_candidates` 待评估候选，供 raw ceiling headroom 使用。 |
 | 有界库存维护与历史恢复 | ✅ | `maintain_pool_inventory(max_mutations=50)` 在独立短连接 `BEGIN IMMEDIATE` 中先恢复仍合格且能净增 canonical available 的历史 `suppressed` 结果，再统一 stale / explore / topic / source / raw 维护；恢复数受当批 `raw_ceiling - raw_before` headroom 约束，raw 已满或超限时先裁剪、绝不继续恢复。单事务最多修改 50 行，只有确有 deferred victim，或裁剪释放 headroom 后仍可继续恢复时才返回 `has_more=True`；protected/token-owned excess 无可裁剪 victim 时以稳定 WARNING 结束，不再形成恢复/裁剪振荡。已满 topic 不参与恢复，排名窗口试探失败会在同一事务还原。维护连接只等写锁 75ms，交互写入优先；每批仍保护 canonical available 底线并在不变量失败时整体回滚。 |
 | 换批读写隔离 | ✅ | `PoolServeSnapshot` 在专属单线程 serve worker 的一次只读事务中统一读取 readiness、候选、平台补位、持久化已看账本和 curator 信号；同一快照只物化一次 `seen_items`，并按账本最新 event id 缓存结果，写入新浏览事件后自动失效。`persist_pool_serve_async()` 用另一条短事务原子写入 recommendation + shown。serve 与 maintenance 使用不同 executor、不同 SQLite 连接，不把共享 `Database.conn` 直接跨线程并发访问。 |
-| 八平台来源族归一化 | ✅ | `sources.platforms` 以可枚举规则统一 Bilibili、小红书、抖音、YouTube、X、知乎、Reddit、Bangumi 的别名、策略前缀和 URL host；pool accounting、已看身份与 URL 推断共用同一口径。 |
+| 九平台来源族归一化 | ✅ | `sources.platforms` 以可枚举规则统一 Bilibili、小红书、抖音、YouTube、X、知乎、Reddit、Bangumi、微博的别名、策略前缀和 URL host；pool accounting、已看身份与 URL 推断共用同一口径。 |
 | discovery 待评估池 | ✅ | `discovery_candidates` 支持 mixed-source enqueue / claim / evaluation / admission，并持久化 `claim_token`、`score_threshold`、`eval_attempts` 与 batch 级 `batch_eval_attempts`；stale-sensitive 完成和释放都匹配 `id + status + claim_token`。 |
 | evaluator prefilter shadow 审计 | ✅ | `evaluator_prefilter_shadow_audit` 用随机 decision id 连接预过滤决策与最终原始 LLM score / admission 结果；只保存 identity hash、类别、数值和 digest，不保存标题、URL、正文、prompt、画像文本或 provider response。每次 insert 同时执行 30 天和 20,000 行双重 retention；任何写入/回填失败由 discovery fail-open，并以 incomplete telemetry 阻断 enforce gate。 |
 | discovery 历史候选查询 | ✅ | `get_existing_discovery_candidate_keys()` 与 `get_existing_content_cache_ids()` 支持 pipeline 在 enqueue 前过滤历史候选和已缓存内容，避免重复 raw 占住 Evo 前供给窗口。 |
@@ -238,7 +238,7 @@ url_platform = infer_source_platform_from_url(
 )  # "zhihu"
 ```
 
-`CANONICAL_SOURCE_FAMILIES` 固定按 `bilibili / xiaohongshu / douyin / youtube / twitter / zhihu / reddit` 枚举。别名归一包括 `bili`、`xhs/rednote`、`dy/tiktok`、`yt`、`x`、`zh/知乎`、`rd`；strategy 归类使用 B 站精确 key 与其他平台前缀，URL 推断只匹配解析后的精确 host 或其子域，不扫描整条 URL 子串。数据库保留 `_pool_source_family()`、`_normalize_source_platform_key()` 私有兼容入口，但两者均委托该规则表。
+`CANONICAL_SOURCE_FAMILIES` 固定按 `bilibili / xiaohongshu / douyin / youtube / twitter / zhihu / reddit / bangumi / weibo` 枚举。别名归一包括 `bili`、`xhs/rednote`、`dy/tiktok`、`yt`、`x`、`zh/知乎`、`rd`、`bgm` 与 `wb/微博`；strategy 归类使用 B 站精确 key 与其他平台前缀，URL 推断只匹配解析后的精确 host 或其子域，不扫描整条 URL 子串。数据库保留 `_pool_source_family()`、`_normalize_source_platform_key()` 私有兼容入口，但两者均委托该规则表。
 
 ### Saved Memberships And Native State
 
@@ -399,7 +399,13 @@ counts = db.prefilter_shadow_audit_counts()
 
 `bangumi_discovery_runs` 按 mode 记录每轮消费 units、发现数、reason 与稳定 error code，用于 UTC 日预算、本地状态和最小调度间隔；`partial` 行表示本轮后续请求失败但此前候选仍被保留，和 `ok/empty` 一样按最终实际保留数扣预算。`bangumi_discovery_state` 保存 `ranked/latest` 按 subject type 的 cursor/total、每个 mode 的持久化类型轮转起点，以及 `cooldown_until`。两张表属于正常 schema 初始化，不由只读状态接口临时建表。`GET /api/sources/status` 只读这些本地行，打开设置页不会访问 Bangumi。
 
-`source_producer_runs` 是八个来源共用的**节流地板账本**（`platform` / `discovered` / `created_at`），取代抖音 / YouTube / X / 知乎 / Reddit 原先记在进程内的 `_last_run_at`。只写入 `discovered > 0` 的轮次，因此同时解决两个反向缺陷：落库让地板在后端重启后依然有效（实测 Reddit 曾有 5/55 轮穿透 60 分钟地板），只记产出让零产出的轮次不再白白锁死一个完整 `min_interval_minutes`。读写收口在 `runtime/producer_cadence.py`；未接数据库构造的 producer 回落到进程内时间戳。
+### Weibo Producer Ledger
+
+`weibo_discovery_runs` 由 `WeiboDiscoveryProducer` 在首个启用的 `produce_if_due()` 调用中惰性建表，按 mode 记录 `units / discovered / reason / error_code / created_at`。其中 `units` 是最终去重与总 limit 截断后仍保留的该 mode 候选数；UTC 日预算只汇总 `reason IN ('ok', 'empty', 'partial')` 的 units。`GET /api/sources/status` 只读每个 mode 最大 id 对应的 `reason/error_code`，据此判断最近分支是 ready / partial / error；即时的 disabled、cadence throttled、pool full、no-profile 等前置 skip 不写 run 行，不能被误当成上游探测结果。
+
+`weibo_discovery_state` 同样由 producer 惰性建表，当前只保存 `state_key='global'` 的 `cooldown_until / updated_at`。429 的有界 `Retry-After` 写入这里；producer 与状态页只读该时间决定是否返回正交 `discovery_state="rate_limited"` / `feed_paused=true`。只读状态调用在表尚不存在时返回“尚未运行”，不会现场建表，更不会访问微博。
+
+`source_producer_runs` 是来源 producer 共用的**生产性 cadence 地板账本**（`platform` / `discovered` / `created_at`），取代抖音 / YouTube / X / 知乎 / Reddit 等来源原先只记在进程内的 `_last_run_at`，微博也在最终 `discovered > 0` 时写入。它只回答“该来源最近是否实际产出过候选”，不保存各 mode reason/error，也不参与微博来源健康判定。只写生产轮次同时解决两个反向缺陷：落库让地板在后端重启后依然有效（实测 Reddit 曾有 5/55 轮穿透 60 分钟地板），零产出又不会白白锁死一个完整 `min_interval_minutes`。读写收口在 `runtime/producer_cadence.py`；未接数据库构造的 producer 回落到进程内时间戳。
 
 ### Discovery Keywords
 

@@ -47,7 +47,7 @@ def test_desktop_reddit_source_status_and_credentials_are_rendered() -> None:
     # this page had two identical copies of it and the side panel a third.
     assert (
         'const SOURCE_KEYS = Object.freeze([\n    "bilibili", "xiaohongshu", '
-        '"douyin", "youtube", "twitter", "zhihu", "reddit",\n'
+        '"douyin", "weibo", "youtube", "twitter", "zhihu", "reddit",\n'
     ) in shared
     # Bangumi is in the roster even though it has no auth contract yet — the
     # roster answers "which sources exist", so dropping it would hide the

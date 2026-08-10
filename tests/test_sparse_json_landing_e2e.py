@@ -190,10 +190,9 @@ async def test_default_engine_uses_sparse_local_ids_on_cold_and_warm_prompt_path
         "2026-08-04T08:00:00Z",
     ]
     user_input = str(llm.calls[0]["user_input"])
-    evaluation_context = (
-        user_input.split("<evaluation_context>\n\n", 1)[1]
-        .split("\n\n</evaluation_context>", 1)[0]
-    )
+    evaluation_context = user_input.split("<evaluation_context>\n\n", 1)[1].split(
+        "\n\n</evaluation_context>", 1
+    )[0]
     assert json.loads(evaluation_context) == {"evaluated_at": "2026-08-05T12:34:56Z"}
     assert candidate_block.startswith('{"defaults":')
     assert not candidate_block.startswith("ROW-WIRE-V1")

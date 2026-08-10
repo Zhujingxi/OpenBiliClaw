@@ -19,13 +19,24 @@ test("the shared module publishes itself for classic-script consumers", () => {
     // answers "which sources exist", and omitting it would drop the platform
     // from all three settings surfaces at once. It renders off the legacy
     // `state` fallback until it gets a provider — see the test below.
-    "bilibili", "xiaohongshu", "douyin", "youtube", "twitter", "zhihu", "reddit",
+    "bilibili", "xiaohongshu", "douyin", "weibo", "youtube", "twitter", "zhihu", "reddit",
     "bangumi",
   ]);
 });
 
-// Bangumi is the one source the backend sends `auth: null` for. Pinning the
-// fallback here because the honest-looking alternative is the dangerous one: a
+test("guided init is a capability projection and excludes discovery-only Weibo", () => {
+  assert.equal(SourceStatus.SOURCE_CAPABILITIES.weibo.guidedInit, false);
+  assert.deepEqual([...SourceStatus.INIT_SOURCE_KEYS], [
+    "bilibili", "xiaohongshu", "douyin", "youtube", "twitter", "zhihu", "reddit",
+    "bangumi",
+  ]);
+  assert.ok(SourceStatus.SOURCE_KEYS.includes("weibo"));
+  assert.ok(!SourceStatus.INIT_SOURCE_KEYS.includes("weibo"));
+  assert.equal(SourceStatus.sourceLabel("weibo"), "微博");
+});
+
+// Older backends can still send `auth: null` (Bangumi did before its contract
+// migration). Pin the fallback because the honest-looking alternative is dangerous: a
 // default-constructed contract reads auth_required=true + credential="none",
 // which renders as「需要登录」for a source that works anonymously off the public
 // API. Under-reporting is fine; inventing a verdict is not (invariant I3).
@@ -332,6 +343,59 @@ test("dashboard issue classification covers every enabled source without flaggin
   ]) {
     assert.equal(SourceStatus.describeSourceIssue({ enabled: true, ...item }), null, item.state);
   }
+});
+
+test("anonymous Weibo discovery health remains actionable independently of auth", () => {
+  const base = {
+    state: "no_auth",
+    enabled: true,
+    auth: {
+      auth_required: false,
+      credential: "none",
+      verification: "unverified",
+      verify_method: "none",
+    },
+  };
+
+  const failed = SourceStatus.describeSourceIssue({
+    ...base,
+    discovery_state: "error",
+    detail: "微博公开发现最近失败，将按节流策略自动重试。",
+  });
+  assert.deepEqual(failed, {
+    tone: "danger",
+    label: "发现失败",
+    detail: "微博公开发现最近失败，将按节流策略自动重试。",
+  });
+
+  const limited = SourceStatus.describeSourceIssue({
+    ...base,
+    discovery_state: "rate_limited",
+    feed_paused: true,
+    detail: "微博公开接口正在退避冷却，到期后自动重试。",
+  });
+  assert.equal(limited?.tone, "warning");
+  assert.equal(limited?.label, "发现已暂停");
+
+  assert.equal(SourceStatus.describeSourceIssue({
+    ...base,
+    discovery_state: "ready",
+    detail: "微博公开发现正常。",
+  }), null);
+});
+
+test("feed_paused remains an actionable fallback for older health payloads", () => {
+  const issue = SourceStatus.describeSourceIssue({
+    state: "no_auth",
+    enabled: true,
+    feed_paused: true,
+    detail: "后台发现暂时暂停。",
+    auth: { auth_required: false, credential: "none", verification: "unverified" },
+  });
+
+  assert.equal(issue?.tone, "warning");
+  assert.equal(issue?.label, "发现已暂停");
+  assert.equal(issue?.detail, "后台发现暂时暂停。");
 });
 
 // A side panel installed from the store can be pointed at a self-hosted backend

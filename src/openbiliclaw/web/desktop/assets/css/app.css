@@ -83,6 +83,7 @@
       --platform-zhihu: #0f88eb;
       --platform-reddit: #ff4500;
       --platform-bangumi: #6950a1;
+      --platform-weibo: #e6162d;
       --platform-bilibili: #fb7299;
       --platform-xiaohongshu: #ff2442;
       --source-pending: #3898ec;
@@ -187,6 +188,7 @@
       --platform-zhihu: #70bdfb;
       --platform-reddit: #ff8a5c;
       --platform-bangumi: #a99ad5;
+      --platform-weibo: #ff7384;
       --platform-bilibili: #fc9eb9;
       --platform-xiaohongshu: #ff6b7f;
       --source-pending: #70bdfb;
@@ -240,6 +242,7 @@
         --platform-zhihu: #70bdfb;
         --platform-reddit: #ff8a5c;
         --platform-bangumi: #a99ad5;
+        --platform-weibo: #ff7384;
         --platform-bilibili: #fc9eb9;
         --platform-xiaohongshu: #ff6b7f;
         --source-pending: #70bdfb;
@@ -609,6 +612,7 @@
     .delight .thumb.is-text-media[data-platform="zhihu"] { background: color-mix(in oklab, var(--surface), var(--platform-zhihu) 8%); }
     .delight .thumb.is-text-media[data-platform="bilibili"] { background: color-mix(in oklab, var(--surface), var(--platform-bilibili) 8%); }
     .delight .thumb.is-text-media[data-platform="reddit"] { background: color-mix(in oklab, var(--surface), var(--platform-reddit) 8%); }
+    .delight .thumb.is-text-media[data-platform="weibo"] { background: color-mix(in oklab, var(--surface), var(--platform-weibo) 8%); }
     .delight .thumb.is-text-media::before { inset: 0; border: 0; border-radius: inherit; background: color-mix(in oklab, var(--surface), transparent 8%); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); }
     .delight-text-media-copy { position: relative; z-index: 1; margin: 0; padding-right: 70px; color: var(--fg); font-size: var(--text-sm); line-height: 1.65; font-weight: 600; text-align: left; white-space: pre-wrap; word-break: break-word; display: -webkit-box; -webkit-line-clamp: 7; -webkit-box-orient: vertical; overflow: hidden; }
     .thumb.has-image::before { display: none; }
@@ -698,6 +702,7 @@
     .cover:focus-visible { outline: none; box-shadow: var(--focus-ring); }
     .cover[data-platform="youtube"] { background: linear-gradient(135deg, var(--surface-warm), color-mix(in oklab, var(--danger), var(--fg) 30%)); }
     .cover[data-platform="douyin"] { background: linear-gradient(135deg, var(--fg), var(--accent-strong)); }
+    .cover[data-platform="weibo"] { background: linear-gradient(135deg, var(--surface), color-mix(in oklab, var(--platform-weibo), var(--surface-warm) 62%)); }
     .cover[data-platform="xiaohongshu"] { background: linear-gradient(135deg, var(--surface-warm), color-mix(in oklab, var(--platform-xiaohongshu), var(--surface) 30%)); }
     .cover[data-platform="twitter"] { background: linear-gradient(135deg, var(--surface), color-mix(in oklab, var(--fg), var(--surface) 82%)); }
     .cover[data-platform="zhihu"] { background: linear-gradient(135deg, var(--surface), color-mix(in oklab, var(--platform-zhihu), var(--surface-warm) 62%)); }
@@ -731,6 +736,7 @@
     .platform[data-platform="zhihu"] { background: var(--platform-zhihu); color: var(--accent-on); }
     .platform[data-platform="xiaohongshu"] { background: var(--platform-xiaohongshu); color: var(--accent-on); }
     .platform[data-platform="reddit"] { background: var(--platform-reddit); color: var(--accent-on); }
+    .platform[data-platform="weibo"] { background: var(--platform-weibo); color: #fff; }
     .platform[data-platform="bangumi"] { background: var(--platform-bangumi); color: #fff; }
     .platform[data-platform="youtube"] { background: var(--danger); color: var(--accent-on); }
     .platform[data-platform="douyin"] { background: var(--fg); color: var(--surface); }
@@ -1316,6 +1322,7 @@
     .source-card-logo[data-source-logo="bilibili"] { background: #fb7299; }
     .source-card-logo[data-source-logo="xiaohongshu"] { background: #ff2442; }
     .source-card-logo[data-source-logo="douyin"] { background: #161823; }
+    .source-card-logo[data-source-logo="weibo"] { background: #e6162d; }
     .source-card-logo[data-source-logo="youtube"] { background: #ff0033; }
     .source-card-logo[data-source-logo="twitter"] { background: #0f1419; }
     .source-card-logo[data-source-logo="zhihu"] { background: #0084ff; }
@@ -1348,7 +1355,7 @@
     .source-cred-box .source-credential-value { font-family: var(--font-mono); font-size: 12px; }
     .source-cred-box .source-credential-value[hidden] { display: none; }
     .source-card[data-available="true"] .source-credential-summary { color: color-mix(in oklab, var(--success), var(--fg) 36%); }
-    /* 分支表：分支开关和它的每日预算并排，8 个来源共用同一骨架 */
+    /* 分支表：分支开关和它的每日预算并排，9 个来源共用同一骨架 */
     .branch-table { border: 1px solid var(--border-soft); border-radius: var(--radius-md); overflow: hidden; }
     .branch-head, .branch-row { display: grid; align-items: center; gap: var(--space-3); padding: 9px var(--space-3); }
     .branch-table[data-branch-toggles="on"] .branch-head, .branch-table[data-branch-toggles="on"] .branch-row { grid-template-columns: 22px minmax(72px, 1fr) 116px minmax(0, 1.4fr); }
@@ -1373,6 +1380,7 @@
     .share-overview-bar i[data-source-key="bilibili"], .share-overview-legend em[data-source-key="bilibili"] { background: #fb7299; }
     .share-overview-bar i[data-source-key="xiaohongshu"], .share-overview-legend em[data-source-key="xiaohongshu"] { background: #ff2442; }
     .share-overview-bar i[data-source-key="douyin"], .share-overview-legend em[data-source-key="douyin"] { background: #161823; }
+    .share-overview-bar i[data-source-key="weibo"], .share-overview-legend em[data-source-key="weibo"] { background: #e6162d; }
     .share-overview-bar i[data-source-key="youtube"], .share-overview-legend em[data-source-key="youtube"] { background: #ff0033; }
     .share-overview-bar i[data-source-key="twitter"], .share-overview-legend em[data-source-key="twitter"] { background: #0f1419; }
     .share-overview-bar i[data-source-key="zhihu"], .share-overview-legend em[data-source-key="zhihu"] { background: #0084ff; }

@@ -286,6 +286,17 @@ CREDENTIAL_SPECS: dict[str, CredentialSpec] = {
             "Bangumi 校验一次。填好后可点「测试连接」用 /v0/me 复验。"
         ),
     ),
+    "weibo": CredentialSpec(
+        slug="weibo",
+        kinds=(),
+        unverified_reason="微博发现使用进程内匿名访客会话，不需要也不接受用户凭据。",
+        form_kind="none",
+        form_label="微博匿名访客",
+        help_text=(
+            "无需粘贴微博 Cookie。OpenBiliClaw 只申请短期匿名访客会话并进行只读发现，"
+            "不会把访客会话当作账号登录态或写入配置。"
+        ),
+    ),
 }
 
 

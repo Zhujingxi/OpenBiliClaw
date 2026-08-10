@@ -4,6 +4,12 @@
 
 ---
 
+## Unreleased
+
+- **接入微博匿名公开 discovery 来源**：新增第九个平台族与 `WeiboClient / WeiboDiscoveryProducer`，以项目自有 `httpx` client（国内直连）在内存维护匿名 visitor，会合统一关键词 / inspiration axis、search、热搜词到真实微博、同轮作者扩展、份额预算、typed schema drift / `429` cooldown 和共享候选评估链；三端同步来源配置、状态、文字卡与真实阅读 / 点赞 / 评论 / 转发字段，桌面 Web 另提供平台筛选与库存计数。该来源不接收用户 Cookie，不参与 guided init 或行为采集，没有扩展站点权限 / 任务桥 / native-save / 微博账号写回；新增 `discover-weibo*` 只读 smoke 与 `discover --source weibo|wb` 正式入口。
+- **补齐微博真实运行边界**：新浪图床代理按每个 redirect 目标仅对 `*.sinaimg.cn` 附微博 Referer，修复真实封面在浏览器 UA 下的 HTTP 403 且不跨 CDN 泄漏；`SourceStatusItem.discovery_state` 将匿名 auth 与最近 discovery 的 partial / error / cooldown 拆开，首页可行动告警不再被“无需登录”掩盖；creator-only 配置由 API 拒绝、旧 TOML 和两端设置自动补 search，并移除 producer 自建 `0.60` 阈值，统一交给 admission policy；推荐历史的真实数据库 join 补齐 `share_count`，避免候选池中已持久化的转发数在三端 DTO 变回 0。
+- **收紧微博来源 terminal / 调度 / UI 契约**：匿名 endpoint 按 JSON、HTML 与 JSONP 分别校验 MIME，search empty 只认明确零总数 / 已知空容器，未知非空 card 与 malformed hot fail closed；发布时间统一成 UTC，未来与无效值留空，配置数值拒绝 bool / float。关键词只在最终 handoff 后 used，瞬态与 schema / normalizer 故障 rollback；空结果、零保留和基础设施失败使用独立 300 / 120 / 60 秒持久短退避，零供给不再冒充 cadence。微博收藏 / 稍后看立即落 `unsupported/local_only_source` 且不创建 native-save task，三端隐藏同步 / 重试；popup 420px surprise 导航、无封面推荐 / delight / saved 文字卡与微博身份展示同步修复。
+
 ## v0.3.201：探针聊天与 dislike 即时推荐（2026-08-08）
 
 - **探针聊天跨界面对齐**：从消息里的「多聊聊」提交的 `probe` / `avoidance_probe` durable turn 现在也会进入插件、桌面 Web 与移动 Web 的主对话历史；关闭消息面板或切换到「聊聊口味」后仍能找回这段对话，惊喜推荐 `delight` 继续保留在自己的内容卡片内聊中。

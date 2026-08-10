@@ -81,6 +81,7 @@ VERIFY_ACTIONS: dict[str, VerifyAction] = {
     # makes. With no token the probe returns ``has_credential=False`` and the
     # click resolves to ``indeterminate`` without going out.
     "bangumi": "live_probe",
+    "weibo": "none",
 }
 
 # The user-facing tri-state. Deliberately computed here rather than in each
@@ -891,7 +892,7 @@ async def verify_source(
             result = _ActionResult("")  # filled in below from the refreshed contract
         else:
             result = _ActionResult(
-                "YouTube 是公开源，无需登录，因此没有可执行的验证。",
+                "该来源使用公开或匿名访客数据，无需登录，因此没有可执行的账号验证。",
                 # Nothing was verified, because there is nothing to verify. The
                 # one platform where that is the honest answer (invariant I3).
                 conclusive=False,

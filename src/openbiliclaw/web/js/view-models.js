@@ -130,6 +130,7 @@ const SOURCE_LABEL_MAP = {
   bilibili: "Bilibili",
   xiaohongshu: "Xiaohongshu",
   douyin: "Douyin",
+  weibo: "微博",
   youtube: "YouTube",
   twitter: "X (Twitter)",
   zhihu: "知乎",
@@ -147,6 +148,8 @@ const SOURCE_ALIAS_MAP = {
   dy: "douyin",
   douyin: "douyin",
   tiktok: "douyin",
+  wb: "weibo",
+  weibo: "weibo",
   yt: "youtube",
   youtube: "youtube",
   x: "twitter",
@@ -174,6 +177,12 @@ const RUNTIME_TOPIC_LABEL_MAP = {
   "douyin-search": "抖音搜索",
   "douyin-hot": "抖音热点",
   "douyin-feed": "抖音推荐流",
+  weibo_search: "微博搜索",
+  weibo_hot: "微博热榜",
+  weibo_creator: "微博作者",
+  "weibo-search": "微博搜索",
+  "weibo-hot": "微博热榜",
+  "weibo-creator": "微博作者",
   yt_search: "YouTube 搜索",
   yt_trending: "YouTube 热榜",
   yt_channel: "YouTube 频道",
@@ -227,6 +236,7 @@ export function normalizeSourcePlatform(item) {
     if (lowerUrl.includes("bilibili.com") || lowerUrl.includes("b23.tv")) return "bilibili";
     if (lowerUrl.includes("xiaohongshu.com") || lowerUrl.includes("xhslink.com")) return "xiaohongshu";
     if (lowerUrl.includes("douyin.com")) return "douyin";
+    if (urlHostMatches(url, ["weibo.com", "weibo.cn", "sinaimg.cn", "sinaimg.com"])) return "weibo";
     if (lowerUrl.includes("youtube.com") || lowerUrl.includes("youtu.be")) return "youtube";
     if (urlHostMatches(url, ["x.com", "twitter.com"])) return "twitter";
     if (urlHostMatches(url, ["zhihu.com", "zhuanlan.zhihu.com"])) return "zhihu";
@@ -267,6 +277,7 @@ function formatRuntimeTopicLabel(value) {
   if (RUNTIME_TOPIC_LABEL_MAP[key]) return RUNTIME_TOPIC_LABEL_MAP[key];
   if (key.startsWith("xhs-extension-")) return "小红书";
   if (key.startsWith("dy-plugin-") || key.startsWith("douyin-")) return "抖音";
+  if (key.startsWith("weibo-")) return "微博";
   if (key.startsWith("yt-") || key.startsWith("youtube-")) return "YouTube";
   if (key.startsWith("reddit-")) return "Reddit";
   if (key.startsWith("bangumi-")) return "Bangumi";
@@ -316,7 +327,7 @@ export function buildContentUrl(item) {
   if (platform === "youtube") return buildYouTubeUrl(vid);
   if (platform === "twitter") return buildTwitterUrl(vid);
   if (platform === "bangumi") return `https://bgm.tv/subject/${encodeURIComponent(vid)}`;
-  if (platform === "zhihu" || platform === "reddit") return "";
+  if (platform === "zhihu" || platform === "reddit" || platform === "weibo") return "";
   return buildVideoUrl(vid);
 }
 
@@ -363,6 +374,7 @@ export function normalizeRecommendation(item) {
     view_count: Number(item?.view_count ?? 0),
     like_count: Number(item?.like_count ?? 0),
     comment_count: Number(item?.comment_count ?? 0),
+    share_count: Number(item?.share_count ?? 0),
     favorite_count: Number(item?.favorite_count ?? 0),
     danmaku_count: Number(item?.danmaku_count ?? 0),
     rating_score: Number(item?.rating_score ?? 0),
@@ -433,6 +445,7 @@ export function recommendationStats(item) {
   if (item?.view_count > 0) segments.push(`▶ ${formatCountCn(item.view_count)}`);
   if (item?.like_count > 0) segments.push(`👍 ${formatCountCn(item.like_count)}`);
   if (item?.comment_count > 0) segments.push(`💬 ${formatCountCn(item.comment_count)}`);
+  if (item?.share_count > 0) segments.push(`🔁 ${formatCountCn(item.share_count)}`);
   if (item?.favorite_count > 0) segments.push(`⭐ ${formatCountCn(item.favorite_count)}`);
   if (item?.danmaku_count > 0) segments.push(`弹幕 ${formatCountCn(item.danmaku_count)}`);
   if (item?.rating_score > 0) segments.push(`评分 ${Number(item.rating_score).toFixed(1)}`);
@@ -525,6 +538,7 @@ export function normalizeDelightCandidate(item) {
     view_count: Number(item?.view_count ?? 0),
     like_count: Number(item?.like_count ?? 0),
     comment_count: Number(item?.comment_count ?? 0),
+    share_count: Number(item?.share_count ?? 0),
     favorite_count: Number(item?.favorite_count ?? 0),
     danmaku_count: Number(item?.danmaku_count ?? 0),
     rating_score: Number(item?.rating_score ?? 0),

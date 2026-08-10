@@ -31,6 +31,8 @@ function normalizeSourcePlatform(value, url = "") {
     dy: "douyin",
     douyin: "douyin",
     tiktok: "douyin",
+    wb: "weibo",
+    weibo: "weibo",
     yt: "youtube",
     youtube: "youtube",
     x: "twitter",
@@ -48,6 +50,7 @@ function normalizeSourcePlatform(value, url = "") {
   if (lowerUrl.includes("bilibili.com") || lowerUrl.includes("b23.tv")) return "bilibili";
   if (lowerUrl.includes("xiaohongshu.com") || lowerUrl.includes("xhslink.com")) return "xiaohongshu";
   if (lowerUrl.includes("douyin.com")) return "douyin";
+  if (urlHostMatches(url, ["weibo.com", "weibo.cn", "sinaimg.cn", "sinaimg.com"])) return "weibo";
   if (lowerUrl.includes("youtube.com") || lowerUrl.includes("youtu.be")) return "youtube";
   if (urlHostMatches(url, ["x.com", "twitter.com"])) return "twitter";
   if (urlHostMatches(url, ["zhihu.com", "zhuanlan.zhihu.com"])) return "zhihu";
@@ -153,6 +156,8 @@ const PLATFORM_DISPLAY_NAMES = {
   bilibili: "B 站",
   youtube: "YouTube",
   douyin: "抖音",
+  weibo: "微博",
+  wb: "微博",
   xiaohongshu: "小红书",
   xhs: "小红书",
   twitter: "X",
@@ -204,7 +209,7 @@ export function buildContentUrl(item) {
   if (!vid) return "";
   if (platform === "youtube") return buildYouTubeUrl(vid);
   if (platform === "bangumi") return `https://bgm.tv/subject/${encodeURIComponent(vid)}`;
-  if (platform === "zhihu" || platform === "reddit") return "";
+  if (platform === "zhihu" || platform === "reddit" || platform === "weibo") return "";
   return buildVideoUrl(vid);
 }
 
@@ -314,6 +319,7 @@ export function normalizeRecommendation(item) {
     view_count: Number(item?.view_count ?? 0) || 0,
     like_count: Number(item?.like_count ?? 0) || 0,
     comment_count: Number(item?.comment_count ?? 0) || 0,
+    share_count: Number(item?.share_count ?? 0) || 0,
     favorite_count: Number(item?.favorite_count ?? 0) || 0,
     danmaku_count: Number(item?.danmaku_count ?? 0) || 0,
     rating_score: Number(item?.rating_score ?? 0) || 0,
@@ -425,6 +431,7 @@ export function normalizeDelightCandidate(item) {
     view_count: Number(item?.view_count ?? 0),
     like_count: Number(item?.like_count ?? 0),
     comment_count: Number(item?.comment_count ?? 0),
+    share_count: Number(item?.share_count ?? 0),
     favorite_count: Number(item?.favorite_count ?? 0),
     danmaku_count: Number(item?.danmaku_count ?? 0),
     rating_score: Number(item?.rating_score ?? 0),

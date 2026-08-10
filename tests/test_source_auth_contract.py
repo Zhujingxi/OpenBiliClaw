@@ -108,7 +108,7 @@ class _Case:
     enabled: bool
     feed_paused: bool = False
     # Bangumi's optional-token axis (``ok`` / ``rejected`` / ``""``); "" for the
-    # seven cookie/heartbeat platforms, which never set it. Frozen because it is
+    # other source providers, which never set it. Frozen because it is
     # what the frontend overlays as 「令牌已失效」, and a refactor moving Bangumi
     # onto the contract must not silently drop it.
     token_state: str = ""
@@ -260,6 +260,23 @@ def _yt_disabled(env: _Env) -> None:
 def _yt_enabled_with_unrelated_credentials(env: _Env) -> None:
     """Other platforms' credentials must not leak into youtube's verdict."""
     env.cfg.sources.youtube.enabled = True
+    env.cfg.bilibili.cookie = _FULL_BILI_COOKIE
+
+
+# ── weibo preconditions ─────────────────────────────────────────────
+
+
+def _weibo_enabled(env: _Env) -> None:
+    env.cfg.sources.weibo.enabled = True
+
+
+def _weibo_disabled(env: _Env) -> None:
+    env.cfg.sources.weibo.enabled = False
+
+
+def _weibo_enabled_with_unrelated_credentials(env: _Env) -> None:
+    """Account cookies for another source must never affect anonymous Weibo."""
+    env.cfg.sources.weibo.enabled = True
     env.cfg.bilibili.cookie = _FULL_BILI_COOKIE
 
 
@@ -790,6 +807,31 @@ _CASES: dict[str, _Case] = {
         enabled=False,
         token_state="ok",
     ),
+    # weibo — an anonymous guest session is runtime-only and never a credential.
+    "weibo-enabled": _Case(
+        "weibo",
+        _weibo_enabled,
+        "no_auth",
+        True,
+        detail="尚未运行微博内容发现。",
+        enabled=True,
+    ),
+    "weibo-disabled": _Case(
+        "weibo",
+        _weibo_disabled,
+        "no_auth",
+        True,
+        detail="微博来源未启用。",
+        enabled=False,
+    ),
+    "weibo-enabled-with-unrelated-credentials": _Case(
+        "weibo",
+        _weibo_enabled_with_unrelated_credentials,
+        "no_auth",
+        True,
+        detail="尚未运行微博内容发现。",
+        enabled=True,
+    ),
 }
 
 
@@ -897,7 +939,7 @@ def test_sources_status_legacy_fields_are_frozen(case_id: str, contract_env: _En
 
 
 def test_contract_covers_every_platform_with_at_least_three_preconditions() -> None:
-    """Spec Phase 0 gate: 7 platforms x >=3 preconditions = >=21 cases."""
+    """Every status platform keeps at least three frozen preconditions."""
     per_platform: dict[str, int] = {}
     for case in _CASES.values():
         per_platform[case.platform] = per_platform.get(case.platform, 0) + 1
@@ -911,10 +953,11 @@ def test_contract_covers_every_platform_with_at_least_three_preconditions() -> N
         "zhihu",
         "reddit",
         "bangumi",
+        "weibo",
     }
     thin = {platform: n for platform, n in per_platform.items() if n < 3}
     assert not thin, f"platforms with fewer than 3 preconditions: {thin}"
-    assert len(_CASES) >= 24
+    assert len(_CASES) >= 27
 
 
 def test_auth_dimensions_are_orthogonal() -> None:
@@ -1069,6 +1112,7 @@ _EXPECTED_VERIFY_METHODS = {
     # method 知乎 has. The action ``VERIFY_ACTIONS['bangumi']`` is still
     # ``live_probe`` (see the bangumi verify tests below, which supply a token).
     "bangumi": "none",
+    "weibo": "none",
 }
 
 
@@ -1129,11 +1173,11 @@ def test_verify_action_table_covers_every_platform() -> None:
 def test_verify_returns_200_and_declared_method_for_every_platform(
     slug: str, contract_env: _Env
 ) -> None:
-    """7/7 platforms answer the same route with their declared evidence strength.
+    """Every platform answers with its declared evidence strength.
 
     Run with no credentials anywhere, so no platform has anything to probe —
     which is also why the outbound guard can be absolute here: a verify with
-    nothing to verify must not reach for the network on any of the seven.
+    nothing to verify must not reach for the network on any platform.
     """
     attempts: list[str] = []
 
@@ -2274,7 +2318,7 @@ def test_superseded_credential_endpoints_are_marked_deprecated(contract_env: _En
 
 
 # ── Phase 4: credential form descriptors ──────────────────────────────
-# The form descriptor exists so three frontends can render seven platforms
+# The form descriptor exists so three frontends can render every platform
 # with no per-platform branches (invariant I4). These tests guard the two ways
 # that promise can rot: a platform shipping without a descriptor (the branch
 # comes straight back), and a descriptor that advertises more than the write
@@ -2291,7 +2335,7 @@ def _credentials_payload(env: _Env) -> dict[str, Any]:
 
 @pytest.mark.parametrize("slug", sorted(CREDENTIAL_SPECS))
 def test_every_platform_ships_a_credential_form(contract_env: _Env, slug: str) -> None:
-    """7/7 platforms carry a ``form``, so no surface has to invent one."""
+    """Every platform carries a ``form``, so no surface has to invent one."""
     payload = _credentials_payload(contract_env)
     form = payload[slug]["form"]
 

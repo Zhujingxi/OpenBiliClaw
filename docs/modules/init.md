@@ -50,6 +50,17 @@
 
 Bangumi 在前置阶段不做网络或登录探测。显式 `sources` 只有 Bangumi，且本轮有效 username 为空时，会在预约 run 前返回 409 `no_profile_signal_sources`；混合来源没有 username 时仍可启动，202 响应带 warning，Bangumi 只参与后续 discovery。canonical `source_options.bangumi.username` 或兼容顶层字段只要显式出现（包括 `""`）就覆盖已保存 username，并在成功预约混合 init 时同步保存；只有字段完全缺失的旧客户端才回退配置。`source_options` 当前只接受 Bangumi username，未知来源或未知字段返回 400，不污染配置或 init 状态。
 
+### 微博为什么不在 guided init
+
+微博是匿名公开 discovery-only 来源，不提供任何“这个用户做过什么”的账号信号。后端可配置来源集合包含 `weibo`，但权威 `_INIT_SOURCE_ORDER` 刻意只列 `bilibili / xiaohongshu / douyin / youtube / twitter / zhihu / reddit / bangumi`：
+
+- CLI 没有 `--yes-weibo` / `--no-weibo` 或微博 Cookie / UID 初始化参数；
+- `/api/init` 的 `sources=["weibo"]` 不会把公开搜索结果当信号，因没有合法画像来源而走 `no_sources_selected`；混合 payload 中的微博项也不进入 `run_guided_init()`；
+- `source_options` 只接受 Bangumi，微博没有可提交的账号或 visitor 选项；
+- popup、`/setup/`、桌面 `/web` 三个初始化来源选择器都不渲染微博 checkbox，不新增前置探测或阶段 1 collector。
+
+内存匿名 visitor `SUB` 只是后端 client 的公开接口会话，不是登录或行为证据。用户可以在平台源设置里启用 `[sources.weibo].enabled=true`，但它只让已建立画像后的 runtime discovery 参与补池，不能单独满足初始化信号要求，也不会产生 init event / seen-key。
+
 运行中与完成后探针隔离补充：`GET /api/init-status` 在 run 活跃或完整画像已经存在时，对 B 站、chat、embedding readiness 和 embedding diagnosis **全部只读缓存 / 本地配置快照**，不允许状态轮询把真实网络或 provider 探针插进初始化关键路径或完成页。即使阶段 3 已落盘导致 `initialized=true`、阶段 4 仍在执行导致 `running=true`，后端和三端 UI 都先按 running 处理；只有 idle 且未初始化时状态页才做真实前置探测，`POST /api/init`（含 force 重建）仍在占坑后实时复验。
 
 ## API 端点

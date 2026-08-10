@@ -1049,6 +1049,10 @@ function buildSavedCard(listKind, item, { list, empty, toggles }) {
   const title = document.createElement("p");
   title.className = "saved-card-title";
   title.textContent = item.title || item.content_id;
+  const platform = document.createElement("span");
+  platform.className = "saved-card-platform";
+  platform.dataset.source = item.source_platform || "bilibili";
+  platform.textContent = platformDisplayName(item.source_platform || "bilibili");
   const up = document.createElement("p");
   up.className = "saved-card-up";
   up.textContent = item.author_name || item.up_name || "";
@@ -1069,7 +1073,7 @@ function buildSavedCard(listKind, item, { list, empty, toggles }) {
   target.className = "saved-sync-target";
   target.textContent = savedSyncDetail(item);
   syncLine.append(chip, target);
-  copy.append(title, up, syncLine);
+  copy.append(platform, title, up, syncLine);
   body.append(copy);
   body.prepend(media);
   body.addEventListener("click", () => {
@@ -1210,6 +1214,10 @@ function buildSavedCardMedia(item) {
     void setProxyImageSrc(image, item.cover_url);
   } else {
     media.classList.add("is-fallback");
+    if (item.content_type === "post" || item.source_platform === "weibo") {
+      media.classList.add("is-text-source");
+      media.textContent = platformDisplayName(item.source_platform || "weibo");
+    }
   }
   return media;
 }
@@ -3285,6 +3293,7 @@ function recommendationStats(item) {
   if (item?.view_count > 0) segments.push(`▶ ${formatCountCn(item.view_count)}`);
   if (item?.like_count > 0) segments.push(`👍 ${formatCountCn(item.like_count)}`);
   if (item?.comment_count > 0) segments.push(`💬 ${formatCountCn(item.comment_count)}`);
+  if (item?.share_count > 0) segments.push(`🔁 ${formatCountCn(item.share_count)}`);
   if (item?.favorite_count > 0) segments.push(`⭐ ${formatCountCn(item.favorite_count)}`);
   if (item?.danmaku_count > 0) segments.push(`弹幕 ${formatCountCn(item.danmaku_count)}`);
   if (item?.rating_score > 0) segments.push(`评分 ${Number(item.rating_score).toFixed(1)}`);
@@ -5644,31 +5653,36 @@ function renderDelightSlot() {
   banner.dataset.state = delight.state || "pending";
 
   // ── Row (always visible) ────────────────────────────────────────
-  const row = document.createElement("button");
-  row.type = "button";
+  const row = document.createElement("div");
   row.className = "delight-banner-row";
-  row.setAttribute("aria-expanded", isExpanded ? "true" : "false");
-  row.addEventListener("click", () => {
+  const toggleExpanded = () => {
     updateDelightHead({ expanded: !isExpanded });
     renderDelightSlot();
-  });
+  };
+  row.addEventListener("click", toggleExpanded);
 
   // Thumbnail (left)
   const thumb = document.createElement("span");
   thumb.className = "delight-banner-thumb";
+  const renderTextThumb = () => {
+    thumb.replaceChildren();
+    thumb.classList.add("is-fallback", "is-text-card");
+    const excerpt = document.createElement("span");
+    excerpt.className = "delight-banner-thumb-text";
+    excerpt.textContent = delight.body_text || delight.title || "一条文字推荐";
+    thumb.append(excerpt);
+  };
   if (delight.cover_url) {
     const image = document.createElement("img");
     void setProxyImageSrc(image, delight.cover_url);
     image.alt = "";
     image.addEventListener("error", () => {
       image.remove();
-      thumb.classList.add("is-fallback");
-      thumb.textContent = "✨";
+      renderTextThumb();
     });
     thumb.append(image);
   } else {
-    thumb.classList.add("is-fallback");
-    thumb.textContent = "✨";
+    renderTextThumb();
   }
 
   // Text column
@@ -5724,9 +5738,16 @@ function renderDelightSlot() {
 
   textCol.append(kickerLine, titleText);
 
-  const chevron = document.createElement("span");
+  const chevron = document.createElement("button");
+  chevron.type = "button";
   chevron.className = "delight-banner-chevron";
+  chevron.setAttribute("aria-label", isExpanded ? "收起惊喜推荐" : "展开惊喜推荐");
+  chevron.setAttribute("aria-expanded", isExpanded ? "true" : "false");
   chevron.textContent = isExpanded ? "▾" : "▸";
+  chevron.addEventListener("click", (event) => {
+    event.stopPropagation();
+    toggleExpanded();
+  });
 
   row.append(thumb, textCol, chevron);
 
@@ -6274,7 +6295,7 @@ function renderRecommendations(items, { append = false } = {}) {
     }
     const platformKey = (item.source_platform || "bilibili").toLowerCase();
     const platformLabel =
-      { bilibili: "B 站", xiaohongshu: "小红书", douyin: "抖音", youtube: "YouTube", twitter: "X", zhihu: "知乎", reddit: "Reddit", bangumi: "Bangumi" }[
+      { bilibili: "B 站", xiaohongshu: "小红书", douyin: "抖音", weibo: "微博", youtube: "YouTube", twitter: "X", zhihu: "知乎", reddit: "Reddit", bangumi: "Bangumi" }[
         platformKey
       ] || item.source_platform;
     const sourceCorner = document.createElement("span");
@@ -7765,6 +7786,11 @@ function bindSettings() {
     ["ranked", "cfgBangumiModeRanked"],
     ["latest", "cfgBangumiModeLatest"],
   ];
+  const WEIBO_SOURCE_MODE_FIELDS = [
+    ["search", "cfgWeiboModeSearch"],
+    ["hot", "cfgWeiboModeHot"],
+    ["creator", "cfgWeiboModeCreator"],
+  ];
   const BANGUMI_SUBJECT_TYPE_FIELDS = [
     ["anime", "cfgBangumiTypeAnime"],
     ["book", "cfgBangumiTypeBook"],
@@ -7789,6 +7815,24 @@ function bindSettings() {
   function collectCheckedValues(fields, fallback) {
     const selected = fields.filter(([, id]) => checked(id)).map(([value]) => value);
     return selected.length > 0 ? selected : fallback;
+  }
+
+  function setWeiboSourceModes(rawValues) {
+    const selected = Array.isArray(rawValues) ? [...rawValues] : rawValues;
+    if (Array.isArray(selected) && selected.length === 1 && selected[0] === "creator") {
+      selected.unshift("search");
+    }
+    setCheckedValues(WEIBO_SOURCE_MODE_FIELDS, selected);
+  }
+
+  function collectWeiboSourceModes() {
+    const selected = collectCheckedValues(WEIBO_SOURCE_MODE_FIELDS, ["search"]);
+    if (selected.length === 1 && selected[0] === "creator") {
+      const search = document.getElementById("cfgWeiboModeSearch");
+      if (search) search.checked = true;
+      return ["search", "creator"];
+    }
+    return selected;
   }
 
   // Unified per-source login / cookie status from GET /api/sources/status,
@@ -8665,6 +8709,14 @@ function bindSettings() {
     setVal("cfgDouyinDailyFeedBudget", cfg.sources?.douyin?.daily_feed_budget);
     setVal("cfgDouyinRequestInterval", cfg.sources?.douyin?.request_interval_seconds);
     setVal("cfgDouyinMinInterval", cfg.sources?.douyin?.min_interval_minutes);
+    const weiboEnabled = document.getElementById("cfgWeiboEnabled");
+    if (weiboEnabled) weiboEnabled.checked = cfg.sources?.weibo?.enabled === true;
+    setWeiboSourceModes(cfg.sources?.weibo?.source_modes);
+    setVal("cfgWeiboDailySearchBudget", cfg.sources?.weibo?.daily_search_budget);
+    setVal("cfgWeiboDailyHotBudget", cfg.sources?.weibo?.daily_hot_budget);
+    setVal("cfgWeiboDailyCreatorBudget", cfg.sources?.weibo?.daily_creator_budget);
+    setVal("cfgWeiboRequestInterval", cfg.sources?.weibo?.request_interval_seconds);
+    setVal("cfgWeiboMinInterval", cfg.sources?.weibo?.min_interval_minutes);
     const youtubeEnabled = document.getElementById("cfgYoutubeEnabled");
     if (youtubeEnabled) youtubeEnabled.checked = cfg.sources?.youtube?.enabled === true;
     setVal("cfgYoutubeDailySearchBudget", cfg.sources?.youtube?.daily_search_budget);
@@ -8797,6 +8849,7 @@ function bindSettings() {
     setVal("cfgPoolShareZhihu", cfg.scheduler?.pool_source_shares?.zhihu);
     setVal("cfgPoolShareReddit", cfg.scheduler?.pool_source_shares?.reddit);
     setVal("cfgPoolShareBangumi", cfg.scheduler?.pool_source_shares?.bangumi);
+    setVal("cfgPoolShareWeibo", cfg.scheduler?.pool_source_shares?.weibo);
     setVal("cfgSpeculationInterval", cfg.scheduler?.speculation_interval_minutes);
     setVal("cfgSpeculationTtl", cfg.scheduler?.speculation_ttl_days);
     setVal("cfgSpeculationCooldown", cfg.scheduler?.speculation_cooldown_days);
@@ -8898,6 +8951,15 @@ function bindSettings() {
           daily_feed_budget: getInt("cfgDouyinDailyFeedBudget", 0),
           request_interval_seconds: getInt("cfgDouyinRequestInterval", 2),
           min_interval_minutes: getInt("cfgDouyinMinInterval", 3),
+        },
+        weibo: {
+          enabled: checked("cfgWeiboEnabled"),
+          source_modes: collectWeiboSourceModes(),
+          daily_search_budget: getInt("cfgWeiboDailySearchBudget", 60),
+          daily_hot_budget: getInt("cfgWeiboDailyHotBudget", 10),
+          daily_creator_budget: getInt("cfgWeiboDailyCreatorBudget", 30),
+          request_interval_seconds: getInt("cfgWeiboRequestInterval", 3),
+          min_interval_minutes: getInt("cfgWeiboMinInterval", 10),
         },
         youtube: {
           enabled: checked("cfgYoutubeEnabled"),
@@ -9004,6 +9066,7 @@ function bindSettings() {
           zhihu: getInt("cfgPoolShareZhihu", 1),
           reddit: getInt("cfgPoolShareReddit", 1),
           bangumi: getInt("cfgPoolShareBangumi", 1),
+          weibo: getInt("cfgPoolShareWeibo", 1),
         },
         speculation_interval_minutes: getInt("cfgSpeculationInterval", 10),
         speculation_ttl_days: getInt("cfgSpeculationTtl", 3),
@@ -9091,7 +9154,8 @@ function bindSettings() {
     twitter: "cfgTwitterEnabled",
     zhihu: "cfgZhihuEnabled",
     reddit: "cfgRedditEnabled",
-    bangumi: "cfgBangumiEnabled"
+    bangumi: "cfgBangumiEnabled",
+    weibo: "cfgWeiboEnabled"
   };
 
   function setSourceCardOpen(card, open) {
@@ -9539,6 +9603,7 @@ function bindSettings() {
             bilibili: checked("cfgBilibiliEnabled", true),
             xiaohongshu: checked("cfgXhsEnabled"),
             douyin: checked("cfgDouyinEnabled"),
+            weibo: checked("cfgWeiboEnabled"),
             youtube: checked("cfgYoutubeEnabled"),
             twitter: checked("cfgTwitterEnabled"),
             zhihu: checked("cfgZhihuEnabled"),
@@ -9549,6 +9614,7 @@ function bindSettings() {
             bilibili: getInt("cfgPoolShareBilibili", 5),
             xiaohongshu: getInt("cfgPoolShareXhs", 1),
             douyin: getInt("cfgPoolShareDouyin", 1),
+            weibo: getInt("cfgPoolShareWeibo", 1),
             youtube: getInt("cfgPoolShareYoutube", 1),
             twitter: getInt("cfgPoolShareTwitter", 1),
             zhihu: getInt("cfgPoolShareZhihu", 1),
@@ -9560,6 +9626,7 @@ function bindSettings() {
         if (shares.bilibili !== undefined) setVal("cfgPoolShareBilibili", shares.bilibili);
         if (shares.xiaohongshu !== undefined) setVal("cfgPoolShareXhs", shares.xiaohongshu);
         if (shares.douyin !== undefined) setVal("cfgPoolShareDouyin", shares.douyin);
+        if (shares.weibo !== undefined) setVal("cfgPoolShareWeibo", shares.weibo);
         if (shares.youtube !== undefined) setVal("cfgPoolShareYoutube", shares.youtube);
         if (shares.twitter !== undefined) setVal("cfgPoolShareTwitter", shares.twitter);
         if (shares.zhihu !== undefined) setVal("cfgPoolShareZhihu", shares.zhihu);

@@ -63,14 +63,32 @@
 
   /** Platform slugs the contract covers, in settings-page display order. */
   const SOURCE_KEYS = Object.freeze([
-    "bilibili", "xiaohongshu", "douyin", "youtube", "twitter", "zhihu", "reddit",
-    // Not on the auth contract yet: the backend sends `auth: null` for it and
-    // the legacy-`state` fallback below renders it. It belongs in the roster
-    // regardless — the roster answers "which sources exist", not "which sources
-    // have a contract", and leaving it out would hide the platform from all
-    // three settings surfaces at once.
+    "bilibili", "xiaohongshu", "douyin", "weibo", "youtube", "twitter", "zhihu", "reddit",
     "bangumi",
   ]);
+
+  /**
+   * Source capabilities that affect cross-surface navigation.
+   *
+   * A source belonging in settings does not automatically mean it can seed a
+   * first-run profile. Weibo v1 is discovery-only, so every guided-init picker
+   * projects the shared roster through this table instead of growing another
+   * hand-maintained exclusion list.
+   */
+  const SOURCE_CAPABILITIES = Object.freeze({
+    bilibili: Object.freeze({ guidedInit: true }),
+    xiaohongshu: Object.freeze({ guidedInit: true }),
+    douyin: Object.freeze({ guidedInit: true }),
+    weibo: Object.freeze({ guidedInit: false }),
+    youtube: Object.freeze({ guidedInit: true }),
+    twitter: Object.freeze({ guidedInit: true }),
+    zhihu: Object.freeze({ guidedInit: true }),
+    reddit: Object.freeze({ guidedInit: true }),
+    bangumi: Object.freeze({ guidedInit: true }),
+  });
+  const INIT_SOURCE_KEYS = Object.freeze(
+    SOURCE_KEYS.filter((key) => SOURCE_CAPABILITIES[key]?.guidedInit === true),
+  );
 
   /**
    * Display names for the source *settings* surfaces.
@@ -83,6 +101,7 @@
     bilibili: "B 站",
     xiaohongshu: "小红书",
     douyin: "抖音",
+    weibo: "微博",
     youtube: "YouTube",
     twitter: "X",
     zhihu: "知乎",
@@ -168,6 +187,13 @@
    * duplication that let the two status tables drift apart (spec D6).
    */
   const ACCESS_TOKEN_REJECTED = Object.freeze({ tone: "danger", label: "令牌已失效" });
+
+  /** Orthogonal discovery-health states that require user-visible attention. */
+  const DISCOVERY_HEALTH_ISSUES = Object.freeze({
+    partial: { tone: "warning", label: "发现部分异常" },
+    error: { tone: "danger", label: "发现失败" },
+    rate_limited: { tone: "warning", label: "发现已暂停" },
+  });
 
   // ── the orthogonal contract's presentation ─────────────────────────────
   //
@@ -523,14 +549,20 @@
     if (!item || typeof item !== "object" || item.enabled === false) return null;
     const access = describeAccess(item, options);
     const verification = text(item.auth && item.auth.verification);
+    const discoveryState = text(item.discovery_state);
+    const discoveryIssue = DISCOVERY_HEALTH_ISSUES[discoveryState] || null;
+    const pausedFallback = item.feed_paused === true && !discoveryIssue
+      ? { tone: "warning", label: "发现已暂停" }
+      : null;
+    const healthIssue = discoveryIssue || pausedFallback;
     const actionablePending = verification === "rate_limited";
     const actionableTone = access.tone === "warning" || access.tone === "danger";
     const unknownEnabledState = !access.known;
-    if (!actionablePending && !actionableTone && !unknownEnabledState) return null;
+    if (!healthIssue && !actionablePending && !actionableTone && !unknownEnabledState) return null;
     return {
-      tone: access.tone === "danger" ? "danger" : "warning",
-      label: access.label,
-      detail: access.detail || access.label,
+      tone: access.tone === "danger" || healthIssue?.tone === "danger" ? "danger" : "warning",
+      label: healthIssue?.label || access.label,
+      detail: access.detail || healthIssue?.label || access.label,
     };
   }
 
@@ -706,12 +738,15 @@
 
   const api = {
     ACCESS_NO_AUTH,
+    DISCOVERY_HEALTH_ISSUES,
     EVIDENCE_ABSENT,
     EVIDENCE_HINTS,
     OFFLINE_DETAIL,
     SOURCE_ACCESS_CREDENTIAL,
     SOURCE_ACCESS_STATE,
     SOURCE_ACCESS_VERIFICATION,
+    SOURCE_CAPABILITIES,
+    INIT_SOURCE_KEYS,
     SOURCE_KEYS,
     SOURCE_LABELS,
     TONE_COLORS,

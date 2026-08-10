@@ -25,6 +25,7 @@ def test_source_enabled_map_reads_bilibili_switch() -> None:
         "zhihu": False,
         "reddit": False,
         "bangumi": False,
+        "weibo": False,
     }
 
 
@@ -40,6 +41,7 @@ def test_default_enabled_sources_make_xiaohongshu_opt_in() -> None:
         "zhihu": False,
         "reddit": False,
         "bangumi": False,
+        "weibo": False,
     }
     assert effective_pool_source_shares(config) == {"bilibili": 5}
 

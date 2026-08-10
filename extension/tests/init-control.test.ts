@@ -437,15 +437,18 @@ test("init source options: bilibili is default-checked but deselectable, others 
   assert.ok(INIT_SOURCE_LOGIN_HINT.includes("登录"));
 });
 
-test("init source roster derives from the shared SourceStatus.SOURCE_KEYS (drift lock)", () => {
+test("init source roster derives from shared capability-aware INIT_SOURCE_KEYS (drift lock)", () => {
   const shared = (globalThis as Record<string, any>).OpenBiliClawSourceStatus;
   assert.ok(shared, "shared source-status module must be loaded for this test");
-  // Same keys, same order — the picker is a projection of the shared roster,
+  // Same keys, same order — the picker is the shared capability projection,
   // not a parallel hardcoded list that can drift when a platform is added.
   assert.deepEqual(
     INIT_SOURCE_OPTIONS.map((o) => o.key),
-    [...shared.SOURCE_KEYS],
+    [...shared.INIT_SOURCE_KEYS],
   );
+  assert.ok(shared.SOURCE_KEYS.includes("weibo"));
+  assert.ok(!shared.INIT_SOURCE_KEYS.includes("weibo"));
+  assert.ok(!INIT_SOURCE_OPTIONS.some((o) => o.key === "weibo"));
   // Labels come from the shared module too.
   for (const opt of INIT_SOURCE_OPTIONS) {
     assert.equal(opt.label, shared.sourceLabel(opt.key));
