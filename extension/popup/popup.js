@@ -1511,7 +1511,10 @@ function _renderInitSources() {
   });
   const hint = document.createElement("p");
   hint.className = "init-sources-hint";
-  hint.textContent = INIT_SOURCE_LOGIN_HINT;
+  hint.textContent = INIT_SOURCE_LOGIN_HINT.replace(
+    "Bangumi 使用公开 API，无需登录。",
+    "Bangumi 与 Linux.do 的公开发现无需登录；Linux.do 浏览器登录可增强个人信号。",
+  );
   elements.initSources.append(hint);
   elements.initSources.hidden = false;
 }
@@ -6274,7 +6277,7 @@ function renderRecommendations(items, { append = false } = {}) {
     }
     const platformKey = (item.source_platform || "bilibili").toLowerCase();
     const platformLabel =
-      { bilibili: "B 站", xiaohongshu: "小红书", douyin: "抖音", youtube: "YouTube", twitter: "X", zhihu: "知乎", reddit: "Reddit", bangumi: "Bangumi" }[
+      { bilibili: "B 站", xiaohongshu: "小红书", douyin: "抖音", youtube: "YouTube", twitter: "X", zhihu: "知乎", reddit: "Reddit", bangumi: "Bangumi", linuxdo: "Linux.do" }[
         platformKey
       ] || item.source_platform;
     const sourceCorner = document.createElement("span");
@@ -7765,6 +7768,13 @@ function bindSettings() {
     ["ranked", "cfgBangumiModeRanked"],
     ["latest", "cfgBangumiModeLatest"],
   ];
+  const LINUXDO_SOURCE_MODE_FIELDS = [
+    ["search", "cfgLinuxdoModeSearch"],
+    ["hot", "cfgLinuxdoModeHot"],
+    ["feed", "cfgLinuxdoModeFeed"],
+    ["creator", "cfgLinuxdoModeCreator"],
+    ["related", "cfgLinuxdoModeRelated"],
+  ];
   const BANGUMI_SUBJECT_TYPE_FIELDS = [
     ["anime", "cfgBangumiTypeAnime"],
     ["book", "cfgBangumiTypeBook"],
@@ -8731,6 +8741,17 @@ function bindSettings() {
     setVal("cfgBangumiRequestInterval", cfg.sources?.bangumi?.request_interval_seconds);
     setVal("cfgBangumiMinInterval", cfg.sources?.bangumi?.min_interval_minutes);
     setVal("cfgBangumiBootstrapLimit", cfg.sources?.bangumi?.bootstrap_limit);
+    const linuxdoEnabled = document.getElementById("cfgLinuxdoEnabled");
+    if (linuxdoEnabled) linuxdoEnabled.checked = cfg.sources?.linuxdo?.enabled === true;
+    setCheckedValues(LINUXDO_SOURCE_MODE_FIELDS, cfg.sources?.linuxdo?.source_modes);
+    setVal("cfgLinuxdoDailySearchBudget", cfg.sources?.linuxdo?.daily_search_budget);
+    setVal("cfgLinuxdoDailyHotBudget", cfg.sources?.linuxdo?.daily_hot_budget);
+    setVal("cfgLinuxdoDailyFeedBudget", cfg.sources?.linuxdo?.daily_feed_budget);
+    setVal("cfgLinuxdoDailyCreatorBudget", cfg.sources?.linuxdo?.daily_creator_budget);
+    setVal("cfgLinuxdoDailyRelatedBudget", cfg.sources?.linuxdo?.daily_related_budget);
+    setVal("cfgLinuxdoRequestInterval", cfg.sources?.linuxdo?.request_interval_seconds);
+    setVal("cfgLinuxdoMinInterval", cfg.sources?.linuxdo?.min_interval_minutes);
+    setVal("cfgLinuxdoBootstrapLimit", cfg.sources?.linuxdo?.bootstrap_limit);
     void renderSourcesStatus();
 
     // General
@@ -8797,6 +8818,7 @@ function bindSettings() {
     setVal("cfgPoolShareZhihu", cfg.scheduler?.pool_source_shares?.zhihu);
     setVal("cfgPoolShareReddit", cfg.scheduler?.pool_source_shares?.reddit);
     setVal("cfgPoolShareBangumi", cfg.scheduler?.pool_source_shares?.bangumi);
+    setVal("cfgPoolShareLinuxdo", cfg.scheduler?.pool_source_shares?.linuxdo);
     setVal("cfgSpeculationInterval", cfg.scheduler?.speculation_interval_minutes);
     setVal("cfgSpeculationTtl", cfg.scheduler?.speculation_ttl_days);
     setVal("cfgSpeculationCooldown", cfg.scheduler?.speculation_cooldown_days);
@@ -8963,6 +8985,18 @@ function bindSettings() {
           min_interval_minutes: getInt("cfgBangumiMinInterval", 3),
           bootstrap_limit: getInt("cfgBangumiBootstrapLimit", 300),
         },
+        linuxdo: {
+          enabled: checked("cfgLinuxdoEnabled"),
+          source_modes: collectCheckedValues(LINUXDO_SOURCE_MODE_FIELDS, ["search"]),
+          daily_search_budget: getInt("cfgLinuxdoDailySearchBudget", 0),
+          daily_hot_budget: getInt("cfgLinuxdoDailyHotBudget", 0),
+          daily_feed_budget: getInt("cfgLinuxdoDailyFeedBudget", 0),
+          daily_creator_budget: getInt("cfgLinuxdoDailyCreatorBudget", 0),
+          daily_related_budget: getInt("cfgLinuxdoDailyRelatedBudget", 0),
+          request_interval_seconds: getInt("cfgLinuxdoRequestInterval", 3),
+          min_interval_minutes: getInt("cfgLinuxdoMinInterval", 3),
+          bootstrap_limit: getInt("cfgLinuxdoBootstrapLimit", 300),
+        },
       },
       discovery: {
         ...(state.runtimeConfig?.discovery || {}),
@@ -9004,6 +9038,7 @@ function bindSettings() {
           zhihu: getInt("cfgPoolShareZhihu", 1),
           reddit: getInt("cfgPoolShareReddit", 1),
           bangumi: getInt("cfgPoolShareBangumi", 1),
+          linuxdo: getInt("cfgPoolShareLinuxdo", 1),
         },
         speculation_interval_minutes: getInt("cfgSpeculationInterval", 10),
         speculation_ttl_days: getInt("cfgSpeculationTtl", 3),
@@ -9091,7 +9126,8 @@ function bindSettings() {
     twitter: "cfgTwitterEnabled",
     zhihu: "cfgZhihuEnabled",
     reddit: "cfgRedditEnabled",
-    bangumi: "cfgBangumiEnabled"
+    bangumi: "cfgBangumiEnabled",
+    linuxdo: "cfgLinuxdoEnabled"
   };
 
   function setSourceCardOpen(card, open) {
@@ -9544,6 +9580,7 @@ function bindSettings() {
             zhihu: checked("cfgZhihuEnabled"),
             reddit: checked("cfgRedditEnabled"),
             bangumi: checked("cfgBangumiEnabled"),
+            linuxdo: checked("cfgLinuxdoEnabled"),
           },
           configured_shares: {
             bilibili: getInt("cfgPoolShareBilibili", 5),
@@ -9554,6 +9591,7 @@ function bindSettings() {
             zhihu: getInt("cfgPoolShareZhihu", 1),
             reddit: getInt("cfgPoolShareReddit", 1),
             bangumi: getInt("cfgPoolShareBangumi", 1),
+            linuxdo: getInt("cfgPoolShareLinuxdo", 1),
           },
         });
         const shares = suggestion?.suggested_shares || {};
@@ -9565,6 +9603,7 @@ function bindSettings() {
         if (shares.zhihu !== undefined) setVal("cfgPoolShareZhihu", shares.zhihu);
         if (shares.reddit !== undefined) setVal("cfgPoolShareReddit", shares.reddit);
         if (shares.bangumi !== undefined) setVal("cfgPoolShareBangumi", shares.bangumi);
+        if (shares.linuxdo !== undefined) setVal("cfgPoolShareLinuxdo", shares.linuxdo);
         markSettingsDirty(suggestBtn);
         showToast("已按已有信号填入建议比例，保存后生效。", "success");
       } catch (err) {

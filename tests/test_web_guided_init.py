@@ -191,6 +191,7 @@ def test_setup_init_sources_are_explicit_opt_in_without_settings_enable_block() 
         "zhihu",
         "reddit",
         "bangumi",
+        "linuxdo",
     ):
         assert f'"{source}"' in shared
         assert f'key: "{source}"' in app_js

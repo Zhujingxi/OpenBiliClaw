@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 import threading
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -20,6 +21,9 @@ from openbiliclaw.runtime.source_incremental_sync import (
 )
 from openbiliclaw.sources.bootstrap_state import default_source_bootstrap_state
 from openbiliclaw.sources.source_bootstrap import BootstrapEnqueueResult
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 class _FakePresence:
@@ -69,11 +73,12 @@ class _FakeDatabase:
             "yt_tasks",
             "zhihu_tasks",
             "reddit_tasks",
+            "linuxdo_tasks",
         ):
             self.conn.execute(
                 f"CREATE TABLE {table} ("
                 "id TEXT PRIMARY KEY, type TEXT, payload_json TEXT, "
-                "status TEXT, created_at TEXT)"
+                "status TEXT, created_at TEXT, completed_at TEXT, result_json TEXT)"
             )
         self.conn.commit()
 
@@ -98,6 +103,7 @@ def _harness(
         "yt": ("yt_tasks", "bootstrap_profile"),
         "zhihu": ("zhihu_tasks", "bootstrap_events"),
         "reddit": ("reddit_tasks", "bootstrap_events"),
+        "linuxdo": ("linuxdo_tasks", "bootstrap_events"),
     }
 
     def make_enqueue(source: str) -> Any:
@@ -159,6 +165,7 @@ def _complete(database: _FakeDatabase, source: str, task_id: str) -> None:
         "yt": "yt_tasks",
         "zhihu": "zhihu_tasks",
         "reddit": "reddit_tasks",
+        "linuxdo": "linuxdo_tasks",
     }[source]
     database.conn.execute(f"UPDATE {table} SET status = 'completed' WHERE id = ?", (task_id,))
     database.conn.commit()
@@ -219,6 +226,199 @@ async def test_per_source_override_controls_actual_due_time(
 
     clock.advance(hours=1)
     assert (await scheduler.tick()).source == "xhs"
+
+
+@pytest.mark.asyncio
+async def test_linuxdo_interval_override_controls_actual_due_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    table, task_type, enqueue = scheduler_module._TASK_SPECS["linuxdo"]
+    assert (table, task_type) == ("linuxdo_tasks", "bootstrap_events")
+    assert callable(enqueue)
+    config = SchedulerConfig(source_incremental_hours=24, linuxdo_incremental_hours=2)
+    scheduler, database, _memory, _presence, clock, _kicks = _harness(
+        monkeypatch,
+        config=config,
+        enabled={source: source == "linuxdo" for source in SOURCE_ORDER},
+    )
+
+    first = await scheduler.tick()
+    assert first.source == "linuxdo"
+    _complete(database, "linuxdo", str(first.task_id))
+    clock.advance(hours=1)
+    assert (await scheduler.tick()).reason == "not_due"
+
+    clock.advance(hours=1)
+    assert (await scheduler.tick()).source == "linuxdo"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("row_status", "terminal_status"),
+    [("failed", "failed"), ("completed", "degraded")],
+)
+async def test_linuxdo_failed_or_degraded_incremental_stays_immediately_due(
+    monkeypatch: pytest.MonkeyPatch,
+    row_status: str,
+    terminal_status: str,
+) -> None:
+    scheduler, database, memory, _presence, clock, _kicks = _harness(
+        monkeypatch,
+        enabled={source: source == "linuxdo" for source in SOURCE_ORDER},
+    )
+
+    first = await scheduler.tick()
+    assert (first.source, first.task_id) == ("linuxdo", "linuxdo-1")
+    database.conn.execute(
+        "UPDATE linuxdo_tasks SET status = ?, completed_at = ?, result_json = ? WHERE id = ?",
+        (
+            row_status,
+            clock.value.isoformat(),
+            json.dumps({"_openbiliclaw_terminal_status": terminal_status}),
+            first.task_id,
+        ),
+    )
+    database.conn.commit()
+
+    retried = await scheduler.tick()
+
+    assert (retried.source, retried.task_id, retried.created) == (
+        "linuxdo",
+        "linuxdo-2",
+        True,
+    )
+    incremental = memory.state["source_incremental"]
+    assert "linuxdo" not in incremental.get("last_success_at", {})  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
+async def test_linuxdo_incremental_four_table_flow_is_durable_and_idempotent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Task -> event -> seen -> schedule is one executable source contract."""
+    from types import SimpleNamespace
+
+    from fastapi.testclient import TestClient
+
+    from openbiliclaw.api.app import create_app
+    from openbiliclaw.config import Config
+    from openbiliclaw.memory.manager import MemoryManager
+    from openbiliclaw.storage.database import Database
+
+    table, task_type, enqueue = scheduler_module._TASK_SPECS["linuxdo"]
+    assert (table, task_type) == ("linuxdo_tasks", "bootstrap_events")
+    assert callable(enqueue)
+
+    config = Config(data_dir=str(tmp_path / "runtime"))
+    config.sources.linuxdo.enabled = True
+    config.scheduler.source_incremental_hours = 24
+    monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: config)
+
+    database = Database(tmp_path / "incremental.db")
+    database.initialize()
+    memory = MemoryManager(tmp_path / "runtime", database=database)
+    memory.initialize()
+    clock = _FakeClock()
+
+    async def kick(_source: str) -> None:
+        return None
+
+    scheduler = SourceIncrementalSync(
+        database=database,
+        memory_manager=memory,
+        presence=_FakePresence(),
+        source_enabled={source: source == "linuxdo" for source in SOURCE_ORDER},
+        scheduler_config=config.scheduler,
+        profile_ready=lambda: True,
+        init_active=lambda: False,
+        kick=kick,
+        clock=clock,
+    )
+
+    class _ReadySoul:
+        def is_profile_ready(self) -> bool:
+            return True
+
+    app = create_app(
+        database=database,
+        memory_manager=memory,
+        soul_engine=_ReadySoul(),
+        runtime_controller=SimpleNamespace(memory_manager=memory),
+        recommendation_engine=None,
+    )
+    app.state.runtime_context.config = config
+
+    async def complete_one_cycle(client: TestClient, expected_task_id: str) -> None:
+        claimed = client.get("/api/sources/linuxdo/next-task")
+        assert claimed.status_code == 200
+        claim = claimed.json()
+        assert claim["id"] == expected_task_id
+        response = client.post(
+            "/api/sources/linuxdo/task-result",
+            json={
+                "task_id": expected_task_id,
+                "claim_token": claim["claim_token"],
+                "status": "ok",
+                "account_key": "sha256:" + "c" * 64,
+                "response_observed": True,
+                "complete_scopes": [
+                    "linuxdo_bookmarks",
+                    "linuxdo_likes",
+                    "linuxdo_read_history",
+                ],
+                "items": [
+                    {
+                        "scope": "linuxdo_bookmarks",
+                        "content_type": "post",
+                        "topic_id": 4242,
+                        "content_id": "topic:4242",
+                        "title": "durable incremental topic",
+                    }
+                ],
+                "scope_counts": {"linuxdo_bookmarks": 1},
+            },
+        )
+        assert response.status_code == 200, response.text
+
+    with TestClient(app) as client:
+        first = await scheduler.tick()
+        assert (first.source, first.created) == ("linuxdo", True)
+        await complete_one_cycle(client, str(first.task_id))
+
+        assert (
+            database.conn.execute(
+                "SELECT status FROM linuxdo_tasks WHERE id = ?", (first.task_id,)
+            ).fetchone()["status"]
+            == "completed"
+        )
+        assert database.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 1
+        assert (
+            database.conn.execute(
+                "SELECT COUNT(*) FROM seen_items WHERE source_platform = 'linuxdo'"
+            ).fetchone()[0]
+            == 1
+        )
+
+        settled = await scheduler.tick()
+        assert settled.reason == "not_due"
+        state = memory.load_source_bootstrap_state()["source_incremental"]
+        assert state["last_success_at"]["linuxdo"]
+        assert state["active_task"] is None
+
+        clock.advance(hours=24)
+        second = await scheduler.tick()
+        assert (second.source, second.created) == ("linuxdo", True)
+        await complete_one_cycle(client, str(second.task_id))
+        assert (await scheduler.tick()).reason == "not_due"
+
+    assert database.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 1
+    assert (
+        database.conn.execute(
+            "SELECT COUNT(*) FROM seen_items WHERE source_platform = 'linuxdo'"
+        ).fetchone()[0]
+        == 1
+    )
 
 
 @pytest.mark.asyncio

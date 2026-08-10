@@ -403,7 +403,7 @@ _KEYWORD_INSPIRATION_PLATFORMS_OPTION = typer.Option(
     "-p",
     help=(
         "目标平台，可重复传或逗号分隔。默认 bilibili；可选 bilibili/xiaohongshu/"
-        "douyin/youtube/twitter/zhihu/reddit。"
+        "douyin/youtube/twitter/zhihu/reddit/linuxdo。"
     ),
 )
 _KEYWORD_INSPIRATION_KIND_OPTION = typer.Option(
@@ -510,6 +510,9 @@ _DEFAULT_DY_BOOTSTRAP_WAIT_SECONDS = 180.0
 _DEFAULT_YT_BOOTSTRAP_WAIT_SECONDS = 240.0
 _DEFAULT_ZHIHU_BOOTSTRAP_WAIT_SECONDS = 180.0
 _DEFAULT_REDDIT_BOOTSTRAP_WAIT_SECONDS = 180.0
+# Three minutes for the extension to claim the row, followed by the largest
+# legal task execution budget (29 minutes + 30 seconds result grace).
+_DEFAULT_LINUXDO_BOOTSTRAP_WAIT_SECONDS = 32.5 * 60.0
 _EXTENSION_PRESENCE_REQUIRED_WARNING = (
     "WARN extension presence required; backend will pause background LLM work "
     "after grace period if no extension client connects"
@@ -2899,7 +2902,7 @@ def _kick_task_dispatcher(source: str) -> None:
     Failures are silent: if the daemon isn't running the existing
     chrome.alarms 60s poll fallback still picks the task up.
     """
-    if source not in {"xhs", "dy", "yt", "zhihu", "reddit"}:
+    if source not in {"xhs", "dy", "yt", "zhihu", "reddit", "linuxdo"}:
         return
     import urllib.error
     import urllib.request
@@ -3402,6 +3405,170 @@ def _collect_zhihu_bootstrap_events(
                 scope_counts["zhihu_activity_favorite"] += 1
     status_label = "ok" if events else "empty"
     return events, scope_counts, status_label
+
+
+def _enqueue_linuxdo_bootstrap_task(
+    *,
+    kick: bool = True,
+    profile_update: bool = False,
+    force: bool = False,
+    incremental: bool = False,
+) -> str | None:
+    """Resolve the runtime database and enqueue the Linux.do bootstrap task."""
+    from openbiliclaw.sources import source_bootstrap
+
+    try:
+        database = _get_runtime_database()
+    except Exception as exc:
+        console.print(f"  [yellow]Linux.do 事件未拉取: 数据库不可用: {exc}[/yellow]")
+        return None
+    if not hasattr(database, "conn"):
+        return None
+
+    result = source_bootstrap.enqueue_linuxdo_bootstrap(
+        database,
+        force=force,
+        incremental=incremental,
+        profile_update=profile_update,
+        notify=console.print,
+    )
+    if result.created and result.task_id and kick:
+        _kick_task_dispatcher("linuxdo")
+    return result.task_id
+
+
+def _collect_linuxdo_bootstrap_events(
+    task_id: str | None,
+    *,
+    max_wait_seconds: float | None = None,
+    cancel_event: threading.Event | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, int], str]:
+    """Wait for and harvest a Linux.do personal bootstrap task."""
+    import json
+    import time
+
+    from openbiliclaw.sources.linuxdo_tasks import (
+        LINUXDO_BOOTSTRAP_SCOPES,
+        LINUXDO_PENDING_PICKUP_TIMEOUT_SECONDS,
+        LINUXDO_TASK_RESULT_GRACE_SECONDS,
+        LinuxdoTaskQueue,
+        linuxdo_bootstrap_items_to_events,
+        linuxdo_task_timeout_seconds,
+    )
+
+    empty_counts = {scope: 0 for scope in LINUXDO_BOOTSTRAP_SCOPES}
+    if not task_id:
+        return [], empty_counts, "skipped"
+    if max_wait_seconds is None:
+        max_wait_seconds = float(
+            os.environ.get(
+                "OPENBILICLAW_LINUXDO_BOOTSTRAP_WAIT_SECONDS",
+                str(_DEFAULT_LINUXDO_BOOTSTRAP_WAIT_SECONDS),
+            )
+        )
+
+    try:
+        database = _get_runtime_database()
+    except Exception:
+        return [], empty_counts, "skipped"
+    if not hasattr(database, "conn"):
+        return [], empty_counts, "skipped"
+
+    queue = LinuxdoTaskQueue(database)
+    started_at = time.monotonic()
+    configured_deadline = started_at + max(0.0, max_wait_seconds)
+    pending_deadline = min(
+        configured_deadline,
+        started_at + LINUXDO_PENDING_PICKUP_TIMEOUT_SECONDS,
+    )
+    legal_execution_deadline: float | None = None
+    task: dict[str, Any] | None = None
+    while True:
+        if cancel_event is not None and cancel_event.is_set():
+            return [], empty_counts, "timeout"
+        task = queue.get(task_id)
+        status = str((task or {}).get("status", "")).strip()
+        if status in {"completed", "failed"}:
+            break
+        if status == "in_progress" and legal_execution_deadline is None:
+            try:
+                raw_payload = json.loads(str((task or {}).get("payload_json") or "{}"))
+            except json.JSONDecodeError:
+                raw_payload = {}
+            payload = dict(raw_payload) if isinstance(raw_payload, dict) else {}
+            legal_execution_deadline = (
+                time.monotonic()
+                + linuxdo_task_timeout_seconds(str((task or {}).get("type", "")), payload)
+                + LINUXDO_TASK_RESULT_GRACE_SECONDS
+            )
+        deadline = (
+            min(configured_deadline, legal_execution_deadline)
+            if legal_execution_deadline is not None
+            else pending_deadline
+        )
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.5)
+
+    if not task:
+        return [], empty_counts, "timeout"
+    if task.get("status") == "failed":
+        try:
+            result = json.loads(str(task.get("result_json") or "{}"))
+        except json.JSONDecodeError:
+            result = {}
+        error = str(result.get("error", "") if isinstance(result, dict) else "")
+        debug = result.get("debug", {}) if isinstance(result, dict) else {}
+        if "login_required" in error or (
+            isinstance(debug, dict) and debug.get("login_required") is True
+        ):
+            return [], empty_counts, "login_required"
+        return [], empty_counts, "failed"
+    if task.get("status") != "completed":
+        last_status = str(task.get("status", "")).strip()
+        legal_deadline_expired = (
+            legal_execution_deadline is not None and time.monotonic() >= legal_execution_deadline
+        )
+        # An unclaimed task can be safely failed after the pickup budget.  A
+        # claimed task may outlive guided-init's remaining global budget; leave
+        # it recoverable unless its shape-aware execution deadline truly ended.
+        if last_status == "pending" or (last_status == "in_progress" and legal_deadline_expired):
+            error_code = "stale_pending" if last_status == "pending" else "extension_result_timeout"
+            with suppress(Exception):
+                queue.fail(
+                    task_id,
+                    error=error_code,
+                    debug={
+                        "wait_seconds": max_wait_seconds,
+                        "last_status": last_status,
+                    },
+                )
+        return [], empty_counts, "timeout"
+
+    try:
+        result = json.loads(str(task.get("result_json") or "{}"))
+    except json.JSONDecodeError:
+        return [], empty_counts, "failed"
+    items = [value for value in result.get("items", []) if isinstance(value, dict)]
+    events = linuxdo_bootstrap_items_to_events(
+        items,
+        account_key=str(result.get("account_key", "") or ""),
+    )
+    scope_counts = dict(empty_counts)
+    raw_counts = result.get("scope_counts", {})
+    if isinstance(raw_counts, dict):
+        for scope in scope_counts:
+            with suppress(Exception):
+                scope_counts[scope] = int(raw_counts.get(scope, 0) or 0)
+    if not any(scope_counts.values()):
+        for item in items:
+            scope = str(item.get("scope", "")).strip()
+            if scope in scope_counts:
+                scope_counts[scope] += 1
+    terminal_status = str(result.get("_openbiliclaw_terminal_status", "")).strip()
+    if terminal_status == "degraded":
+        return events, scope_counts, "degraded"
+    return events, scope_counts, "ok" if events else "empty"
 
 
 def _event_memory_key(event: dict[str, Any]) -> tuple[str, str, str, str, str]:
@@ -4444,6 +4611,27 @@ def _zhihu_events_to_history_items(events: list[dict[str, Any]]) -> list[dict[st
                 "context": str(event.get("context", "")).strip(),
                 "metadata": metadata,
                 "source_platform": "zhihu",
+            }
+        )
+    return [row for row in rows if row.get("title") or row.get("url")]
+
+
+def _linuxdo_events_to_history_items(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convert Linux.do bootstrap events into profile-builder history rows."""
+    rows: list[dict[str, Any]] = []
+    for event in events:
+        metadata = event.get("metadata", {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        rows.append(
+            {
+                "title": str(event.get("title", "")).strip(),
+                "url": str(event.get("url", "")).strip(),
+                "author": str(metadata.get("author", "")).strip(),
+                "event_type": str(event.get("event_type", "")).strip(),
+                "context": str(event.get("context", "")).strip(),
+                "metadata": metadata,
+                "source_platform": "linuxdo",
             }
         )
     return [row for row in rows if row.get("title") or row.get("url")]
@@ -6165,6 +6353,28 @@ def _ask_reddit_inclusion() -> bool:
     return True
 
 
+def _ask_linuxdo_inclusion() -> bool:
+    """Decide whether to enable Linux.do bootstrap and discovery."""
+    if os.environ.get("OPENBILICLAW_NO_LINUXDO", "").strip() == "1":
+        console.print("[dim]  跳过 Linux.do 来源(OPENBILICLAW_NO_LINUXDO=1)。[/dim]")
+        return False
+    if not _is_interactive_terminal():
+        return False
+
+    console.print()
+    console.print("[bold]Linux.do 数据接入（可选）[/bold]")
+    console.print(
+        "把你的 [bold cyan]书签 / 点赞 / 阅读记录[/bold cyan]混进首轮画像，"
+        "并启用 search / hot / feed / creator / related 内容发现。"
+    )
+    console.print("[dim]扩展只在 linux.do 同源发起只读 GET；Cookie 不会传给后端。[/dim]")
+    console.print()
+    if not typer.confirm("启用 Linux.do 数据接入?", default=False):
+        console.print("[dim]  已选择跳过，本次 init 不会启用 Linux.do 来源。[/dim]")
+        return False
+    return True
+
+
 def _ask_bangumi_inclusion() -> bool:
     """Decide whether to enable Bangumi discovery and public bootstrap."""
     if os.environ.get("OPENBILICLAW_NO_BANGUMI", "").strip() == "1":
@@ -6273,6 +6483,7 @@ def _persist_init_source_enabled_flags(
     include_zhihu: bool = False,
     include_reddit: bool = False,
     include_bangumi: bool = False,
+    include_linuxdo: bool = False,
     bangumi_username: str = "",
     bangumi_token: str = "",
 ) -> None:
@@ -6310,6 +6521,13 @@ def _persist_init_source_enabled_flags(
         reddit_cfg = getattr(cfg.sources, "reddit", None)
         if reddit_cfg is not None and bool(getattr(reddit_cfg, "enabled", False)) != include_reddit:
             reddit_cfg.enabled = include_reddit
+            changed = True
+        linuxdo_cfg = getattr(cfg.sources, "linuxdo", None)
+        if (
+            linuxdo_cfg is not None
+            and bool(getattr(linuxdo_cfg, "enabled", False)) != include_linuxdo
+        ):
+            linuxdo_cfg.enabled = include_linuxdo
             changed = True
         bangumi_cfg = getattr(cfg.sources, "bangumi", None)
         if (
@@ -6575,6 +6793,9 @@ class InitResult:
     bangumi_events: list[dict[str, Any]] = field(default_factory=list)
     bangumi_scope_counts: dict[str, Any] = field(default_factory=dict)
     bangumi_status: str = "skipped"
+    linuxdo_events: list[dict[str, Any]] = field(default_factory=list)
+    linuxdo_scope_counts: dict[str, Any] = field(default_factory=dict)
+    linuxdo_status: str = "skipped"
 
 
 class GuidedInitError(Exception):
@@ -6929,6 +7150,7 @@ async def run_guided_init(
     include_zhihu: bool = False,
     include_reddit: bool = False,
     include_bangumi: bool = False,
+    include_linuxdo: bool = False,
     bangumi_username: str = "",
     bangumi_token: str = "",
     target_pool_count: int,
@@ -7043,13 +7265,26 @@ async def run_guided_init(
             include_zhihu,
             include_reddit,
             include_bangumi,
+            include_linuxdo,
         )
     )
     _stage1_source_done = 0
     _stage1_started_at = asyncio.get_running_loop().time()
+    effective_collection_timeout = collection_timeout_seconds
+    if include_linuxdo and collection_timeout_seconds == _INIT_COLLECTION_TIMEOUT_SECONDS:
+        # The ordinary 30-minute stage budget was calibrated for the existing
+        # short collectors. Linux.do may itself need almost that full window at
+        # the deliberately conservative 30s request interval, so multi-source
+        # init receives one additional shape-aware slot. Explicit caller/test
+        # overrides remain authoritative and are never silently expanded.
+        effective_collection_timeout = (
+            max(effective_collection_timeout, _DEFAULT_LINUXDO_BOOTSTRAP_WAIT_SECONDS)
+            if _stage1_source_total == 1
+            else effective_collection_timeout + _DEFAULT_LINUXDO_BOOTSTRAP_WAIT_SECONDS
+        )
     _stage1_deadline = (
-        _stage1_started_at + collection_timeout_seconds
-        if collection_timeout_seconds > 0
+        _stage1_started_at + effective_collection_timeout
+        if effective_collection_timeout > 0
         else float("inf")
     )
     _stage1_budget_exhausted = False
@@ -7485,6 +7720,56 @@ async def run_guided_init(
     elif zhihu_status == "failed":
         console.print("  [yellow]知乎任务失败 —— 检查扩展日志,或重试 init。[/yellow]")
 
+    linuxdo_task_id = (
+        (
+            await _enqueue_register_kick(
+                lambda **kwargs: _enqueue_linuxdo_bootstrap_task(
+                    profile_update=True,
+                    **kwargs,
+                ),
+                "linuxdo",
+            )
+        )
+        if include_linuxdo
+        else None
+    )
+    if linuxdo_task_id:
+        console.print(
+            "  [dim]已请求扩展拉 Linux.do 书签 / 点赞 / 阅读记录（使用当前浏览器登录态）。[/dim]"
+        )
+    if include_linuxdo:
+        await _stage1_begin_source("Linux.do", wait_hint="扩展未响应会在约 3 分钟后自动跳过")
+        linuxdo_events, linuxdo_scope_counts, linuxdo_status = await _run_extension_collector(
+            _collect_linuxdo_bootstrap_events,
+            linuxdo_task_id,
+            label="Linux.do",
+            env_name="OPENBILICLAW_LINUXDO_BOOTSTRAP_WAIT_SECONDS",
+            default_wait_seconds=_DEFAULT_LINUXDO_BOOTSTRAP_WAIT_SECONDS,
+        )
+        _stage1_finish_source()
+    else:
+        linuxdo_events, linuxdo_scope_counts, linuxdo_status = [], {}, "skipped"
+    if linuxdo_status == "ok":
+        console.print(
+            "  Linux.do "
+            f"书签 [green]{linuxdo_scope_counts.get('linuxdo_bookmarks', 0)}[/green] 条"
+            f" / 点赞 [green]{linuxdo_scope_counts.get('linuxdo_likes', 0)}[/green] 条"
+            f" / 阅读 [green]{linuxdo_scope_counts.get('linuxdo_read_history', 0)}[/green] 条"
+        )
+    elif linuxdo_status == "degraded":
+        console.print(
+            "  [yellow]Linux.do 已导入部分个人信号，但至少一个范围未完成；"
+            "已保留成功结果，请检查扩展日志后重试补齐。[/yellow]"
+        )
+    elif linuxdo_status == "empty":
+        console.print("  [yellow]Linux.do 任务跑通但没有读到个人行为记录。[/yellow]")
+    elif linuxdo_status == "login_required":
+        console.print("  [yellow]Linux.do 需要登录 —— 请先在当前浏览器登录后重试。[/yellow]")
+    elif linuxdo_status == "timeout":
+        console.print("  [dim]Linux.do 初始化信号未导入：扩展未连接或任务仍在后台跑。[/dim]")
+    elif linuxdo_status == "failed":
+        console.print("  [yellow]Linux.do 任务失败 —— 请检查扩展日志后重试。[/yellow]")
+
     # X (Twitter): server-side cookie replay (no extension bootstrap task), so —
     # like B站 — fetch the user's own likes + bookmarks directly here. Skips
     # cleanly when X is disabled or the cookie isn't synced yet.
@@ -7573,6 +7858,7 @@ async def run_guided_init(
                 "yt": yt_status,
                 "zhihu": zhihu_status,
                 "reddit": reddit_status,
+                "linuxdo": linuxdo_status,
             },
         )
     except Exception:
@@ -7613,12 +7899,14 @@ async def run_guided_init(
     events_to_persist.extend(zhihu_events)
     events_to_persist.extend(reddit_events)
     events_to_persist.extend(bangumi_events)
+    events_to_persist.extend(linuxdo_events)
     events.extend(xhs_events)
     events.extend(dy_events)
     events.extend(yt_events)
     events.extend(zhihu_events)
     events.extend(reddit_events)
     events.extend(bangumi_events)
+    events.extend(linuxdo_events)
     # With bilibili now optional, the floor is "at least one selected source
     # produced signals" — an all-empty run can't build a meaningful profile.
     if not events:
@@ -7655,6 +7943,7 @@ async def run_guided_init(
                 "zhihu": len(zhihu_events),
                 "reddit": len(reddit_events),
                 "bangumi": len(bangumi_events),
+                "linuxdo": len(linuxdo_events),
             }
         )
     # Re-running init re-fetches the same snapshot; without this the ledger
@@ -7674,10 +7963,17 @@ async def run_guided_init(
     else:
         for event in events_to_persist:
             await memory.propagate_event(event)
+    stage1_degraded = dy_status == "degraded" or linuxdo_status == "degraded"
     await _stage_done(
         1,
-        status="warning" if dy_status == "degraded" else "ok",
-        reason="douyin_degraded" if dy_status == "degraded" else None,
+        status="warning" if stage1_degraded else "ok",
+        reason=(
+            "douyin_degraded"
+            if dy_status == "degraded"
+            else "linuxdo_degraded"
+            if linuxdo_status == "degraded"
+            else None
+        ),
     )
 
     # ── Stage 2: analyze preferences ──
@@ -7870,6 +8166,8 @@ async def run_guided_init(
         combined_history.extend(_reddit_events_to_history_items(reddit_events))
     if bangumi_events:
         combined_history.extend(_bangumi_events_to_history_items(bangumi_events))
+    if linuxdo_events:
+        combined_history.extend(_linuxdo_events_to_history_items(linuxdo_events))
     # X likes/bookmarks previously only fed the analyze stage; feeding the
     # profile builder too keeps cross-source flow uniform AND guarantees a
     # non-empty profile input when X is the only selected source.
@@ -8055,6 +8353,9 @@ async def run_guided_init(
         reddit_events=reddit_events,
         reddit_scope_counts=reddit_scope_counts,
         reddit_status=reddit_status,
+        linuxdo_events=linuxdo_events,
+        linuxdo_scope_counts=linuxdo_scope_counts,
+        linuxdo_status=linuxdo_status,
         profile_data=profile_data,
         discovered_count=discovered_count,
         discovery_error=discover_exc is not None,
@@ -8133,6 +8434,16 @@ def init(
         False,
         "--yes-reddit",
         help="跳过 Reddit 的 y/n 提问,直接启用 Reddit 数据接入(适合脚本化场景)。",
+    ),
+    no_linuxdo: bool = typer.Option(
+        False,
+        "--no-linuxdo",
+        help="跳过 Linux.do 数据接入（默认非交互模式下就是跳过）。",
+    ),
+    skip_linuxdo_prompt: bool = typer.Option(
+        False,
+        "--yes-linuxdo",
+        help="跳过 Linux.do 的 y/n 提问，直接启用来源。",
     ),
     no_bangumi: bool = typer.Option(
         False,
@@ -8322,6 +8633,17 @@ def init(
     else:
         include_reddit = _ask_reddit_inclusion()
 
+    if no_linuxdo:
+        include_linuxdo = False
+        console.print("[dim]  跳过 Linux.do 数据接入（命令行 --no-linuxdo）。[/dim]")
+    elif os.environ.get("OPENBILICLAW_NO_LINUXDO", "").strip() == "1":
+        include_linuxdo = False
+        console.print("[dim]  跳过 Linux.do 数据接入（OPENBILICLAW_NO_LINUXDO=1）。[/dim]")
+    elif skip_linuxdo_prompt:
+        include_linuxdo = True
+    else:
+        include_linuxdo = _ask_linuxdo_inclusion()
+
     if no_bangumi:
         include_bangumi = False
         console.print("[dim]  跳过 Bangumi 数据接入(命令行 --no-bangumi)。[/dim]")
@@ -8419,6 +8741,7 @@ def init(
         include_zhihu,
         include_reddit,
         include_bangumi,
+        include_linuxdo,
     )
     if not any(selected_sources):
         _print_status_panel(
@@ -8427,11 +8750,20 @@ def init(
             "已跳过 B 站且未启用任何其他平台——init 至少需要一个数据来源。"
             "去掉 --no-bilibili，或配合 --yes-xhs / --yes-douyin / "
             "--yes-youtube / --yes-x / --yes-zhihu "
-            "/ --yes-reddit / --yes-bangumi 启用其他来源。",
+            "/ --yes-reddit / --yes-bangumi / --yes-linuxdo 启用其他来源。",
         )
         raise typer.Exit(code=1)
 
-    profile_signal_sources = selected_sources[:-1]
+    profile_signal_sources = (
+        include_bili,
+        include_xhs,
+        include_dy,
+        include_yt,
+        include_x,
+        include_zhihu,
+        include_reddit,
+        include_linuxdo,
+    )
     if include_bangumi and not selected_bangumi_username and not any(profile_signal_sources):
         _print_status_panel(
             "error",
@@ -8456,6 +8788,7 @@ def init(
         include_zhihu=include_zhihu,
         include_reddit=include_reddit,
         include_bangumi=include_bangumi,
+        include_linuxdo=include_linuxdo,
         bangumi_username=selected_bangumi_username,
         bangumi_token=selected_bangumi_token,
     )
@@ -8481,6 +8814,7 @@ def init(
                 include_zhihu=include_zhihu,
                 include_reddit=include_reddit,
                 include_bangumi=include_bangumi,
+                include_linuxdo=include_linuxdo,
                 bangumi_username=selected_bangumi_username,
                 bangumi_token=selected_bangumi_token,
                 target_pool_count=_INIT_POOL_TARGET_COUNT,
@@ -8518,10 +8852,14 @@ def init(
     bangumi_events = list(getattr(result, "bangumi_events", []))
     bangumi_scope_counts = dict(getattr(result, "bangumi_scope_counts", {}))
     bangumi_status = str(getattr(result, "bangumi_status", "skipped"))
+    linuxdo_events = list(getattr(result, "linuxdo_events", []))
+    linuxdo_scope_counts = dict(getattr(result, "linuxdo_scope_counts", {}))
+    linuxdo_status = str(getattr(result, "linuxdo_status", "skipped"))
     discovered_count = result.discovered_count
     discovery_error = result.discovery_error
     dy_degraded = dy_status == "degraded"
-    partial_success = discovery_error or dy_degraded
+    linuxdo_degraded = linuxdo_status == "degraded"
+    partial_success = discovery_error or dy_degraded or linuxdo_degraded
 
     if result.discover_exc is not None:
         _print_status_panel(
@@ -8535,6 +8873,13 @@ def init(
             "抖音采集部分完成",
             "dy_status=degraded：已采到的抖音事件仍已用于画像建模，"
             "但至少一个范围未能证明分页完整；请检查扩展日志后重试补齐。",
+        )
+    if linuxdo_degraded:
+        _print_status_panel(
+            "warning",
+            "Linux.do 采集部分完成",
+            "已采到的 Linux.do 个人信号仍已用于画像建模，"
+            "但至少一个范围未完成；请检查扩展日志后重试补齐。",
         )
 
     _print_status_panel(
@@ -8577,6 +8922,9 @@ def init(
     bangumi_wish_count = int(bangumi_scope_counts.get("wish", 0))
     bangumi_done_count = int(bangumi_scope_counts.get("done", 0))
     bangumi_doing_count = int(bangumi_scope_counts.get("doing", 0))
+    linuxdo_bookmark_count = int(linuxdo_scope_counts.get("linuxdo_bookmarks", 0))
+    linuxdo_like_count = int(linuxdo_scope_counts.get("linuxdo_likes", 0))
+    linuxdo_read_count = int(linuxdo_scope_counts.get("linuxdo_read_history", 0))
     summary_rows: list[tuple[str, str]] = [
         ("📺 B 站观看历史", f"{len(history)} 条"),
         ("📺 B 站收藏夹", f"{len(favorites_data)} 条"),
@@ -8611,6 +8959,14 @@ def init(
         ("Bangumi 看过/读过/玩过", f"{bangumi_done_count} 条"),
         ("Bangumi 在看/在读/在玩", f"{bangumi_doing_count} 条"),
         ("🌐 Bangumi 入库事件", f"{len(bangumi_events)} 条"),
+        ("Linux.do 书签", f"{linuxdo_bookmark_count} 条"),
+        ("Linux.do 点赞", f"{linuxdo_like_count} 条"),
+        ("Linux.do 阅读", f"{linuxdo_read_count} 条"),
+        ("🌐 Linux.do 入库事件", f"{len(linuxdo_events)} 条"),
+        (
+            "Linux.do 采集状态",
+            "部分完成 (degraded)" if linuxdo_degraded else linuxdo_status,
+        ),
         ("📊 画像建模总事件", f"{len(events)} 条"),
         ("✅ 灵魂画像", "已生成"),
         ("🔍 首轮发现内容", f"{discovered_count} 条"),
@@ -8652,6 +9008,13 @@ def init(
             "[dim]ℹ️  Bangumi 0 条信号入库。请确认用户名存在，且收藏已设为公开。"
             "可用 [cyan]openbiliclaw fetch-bangumi --username <name>[/cyan] 只读验证。[/dim]"
         )
+    if (
+        linuxdo_bookmark_count + linuxdo_like_count + linuxdo_read_count
+    ) == 0 and linuxdo_status != "skipped":
+        console.print(
+            "[dim]ℹ️  Linux.do 0 条信号入库。请确认扩展已安装、浏览器已登录 "
+            "https://linux.do，然后重跑 [cyan]openbiliclaw init --yes-linuxdo[/cyan]。[/dim]"
+        )
 
     source_parts = []
     if bilibili_events > 0:
@@ -8668,6 +9031,8 @@ def init(
         source_parts.append(f"[green]{len(reddit_events)}[/green] 条 Reddit 信号")
     if len(bangumi_events) > 0:
         source_parts.append(f"[green]{len(bangumi_events)}[/green] 条 Bangumi 信号")
+    if len(linuxdo_events) > 0:
+        source_parts.append(f"[green]{len(linuxdo_events)}[/green] 条 Linux.do 信号")
     if len(source_parts) > 1:
         console.print(
             "[dim]ℹ️  本次画像综合了 "
@@ -9487,6 +9852,73 @@ def fetch_zhihu(
             )
         )
         _print_status_panel("success", "完成", "知乎事件已写入并完成画像重建")
+
+
+@app.command("fetch-linuxdo")
+def fetch_linuxdo(
+    wait_seconds: float = typer.Option(
+        _DEFAULT_LINUXDO_BOOTSTRAP_WAIT_SECONDS,
+        "--wait-seconds",
+        "-w",
+        help="等待浏览器扩展结果的最大秒数。",
+    ),
+    force: bool = typer.Option(False, "--force", help="忽略近期任务，强制重新拉取。"),
+    write_memory: bool = typer.Option(
+        False,
+        "--write-memory",
+        help="将本次 Linux.do 事件写入 memory；默认只做只读 smoke。",
+    ),
+) -> None:
+    """只读验证 Linux.do 个人书签、点赞和阅读记录采集。"""
+    previous = os.environ.get("OPENBILICLAW_LINUXDO_BOOTSTRAP_DEDUPE_HOURS")
+    if force or write_memory:
+        os.environ["OPENBILICLAW_LINUXDO_BOOTSTRAP_DEDUPE_HOURS"] = "0"
+    try:
+        # The write path belongs to the staged task-result API so account
+        # affinity, event ingress and seen-key projection remain atomic.
+        task_id = _enqueue_linuxdo_bootstrap_task(profile_update=write_memory)
+    finally:
+        if force or write_memory:
+            if previous is None:
+                os.environ.pop("OPENBILICLAW_LINUXDO_BOOTSTRAP_DEDUPE_HOURS", None)
+            else:
+                os.environ["OPENBILICLAW_LINUXDO_BOOTSTRAP_DEDUPE_HOURS"] = previous
+    if not task_id:
+        _print_status_panel("error", "Linux.do 任务未入队", "请检查数据库与任务预算。")
+        raise typer.Exit(code=1)
+
+    _print_page_title("Linux.do 数据拉取", "扩展同源只读任务")
+    events, counts, status = _collect_linuxdo_bootstrap_events(
+        task_id,
+        max_wait_seconds=wait_seconds,
+    )
+    _print_key_value_table(
+        "采集摘要",
+        [
+            ("状态", status),
+            ("书签", str(counts.get("linuxdo_bookmarks", 0))),
+            ("点赞", str(counts.get("linuxdo_likes", 0))),
+            ("阅读", str(counts.get("linuxdo_read_history", 0))),
+            ("转换事件", str(len(events))),
+        ],
+    )
+    if status not in {"ok", "degraded"}:
+        if status in {"failed", "login_required", "timeout"}:
+            raise typer.Exit(code=1)
+        return
+    if write_memory:
+        console.print(
+            f"  [green]任务结果已按账号原子写入[/green]；采集 {len(events)} 条，"
+            "重复项由事件层幂等过滤。"
+        )
+
+
+@app.command("discover-linuxdo")
+def discover_linuxdo(
+    limit: int = typer.Option(30, "--limit", "-n", min=1, max=300, help="发现结果条数上限。"),
+) -> None:
+    """按配置的 Linux.do source_modes 触发一次正式发现。"""
+    _run_linuxdo_discovery(limit=limit)
 
 
 @app.command("fetch-bangumi")
@@ -10999,6 +11431,7 @@ def keyword_inspiration_dry_run(
         "twitter",
         "zhihu",
         "reddit",
+        "linuxdo",
     }
     selected_platforms = list(split_csv_values(platforms or [])) or ["bilibili"]
     unknown = [platform for platform in selected_platforms if platform not in allowed]
@@ -11197,7 +11630,7 @@ def _run_xhs_discovery(*, force: bool) -> None:
     attempted = int(cast("int", result.get("attempted", 0)))
 
     _print_page_title("小红书关键词生产", "已将关键词写入 xhs_tasks，由浏览器扩展在后台抓取")
-    if reason == "ok":
+    if reason in {"ok", "degraded"}:
         _print_key_value_table(
             "生产摘要",
             [
@@ -11708,7 +12141,7 @@ def _run_zhihu_discovery(*, limit: int) -> None:
     source_modes = ", ".join(str(mode) for mode in getattr(zh_cfg, "source_modes", ()) or ())
 
     _print_page_title("知乎内容发现", f"正式 discover · {source_modes or 'search'}")
-    if reason == "ok":
+    if reason in {"ok", "degraded"}:
         _print_key_value_table(
             "发现摘要",
             [
@@ -11717,10 +12150,17 @@ def _run_zhihu_discovery(*, limit: int) -> None:
                 ("来源", "zhihu"),
                 ("来源分布", source_counts_text or "（无）"),
                 ("分支", source_modes or "search"),
+                ("状态", reason),
             ],
         )
         for index, item in enumerate(candidate_pipeline.last_admitted_items[:5], start=1):
             _print_discovered_content_preview(item, index)
+        if reason == "degraded":
+            _print_status_panel(
+                "warning",
+                "知乎 discovery 部分完成",
+                f"部分分支失败，成功候选已保留：{result.get('branch_errors') or []}",
+            )
         return
 
     messages = {
@@ -11753,6 +12193,125 @@ def _run_zhihu_discovery(*, limit: int) -> None:
     kind, title, body = messages.get(
         reason,
         ("info", "知乎 discovery 未产出内容", reason or "无详细信息"),
+    )
+    _print_status_panel(kind, title, body)
+
+
+def _run_linuxdo_discovery(*, limit: int) -> None:
+    """Run one formal Linux.do discovery cycle through the runtime producer."""
+    from openbiliclaw.config import load_config
+    from openbiliclaw.runtime.keyword_fetch import KeywordFetchCoordinator
+    from openbiliclaw.runtime.linuxdo_producer import build_linuxdo_discovery_producer
+    from openbiliclaw.soul.engine import SoulProfileNotInitializedError
+
+    _require_runtime_config()
+    config = load_config()
+    linuxdo_cfg = getattr(getattr(config, "sources", None), "linuxdo", None)
+    if linuxdo_cfg is None or not bool(getattr(linuxdo_cfg, "enabled", False)):
+        _print_status_panel(
+            "warning",
+            "Linux.do discovery 未启用",
+            "请在配置页或 config.toml 中启用 [sources.linuxdo].enabled。",
+        )
+        raise typer.Exit(code=1)
+
+    database = _get_runtime_database()
+    if not hasattr(database, "conn"):
+        _print_status_panel("warning", "Linux.do 任务表不可用", "当前数据库不支持 linuxdo_tasks。")
+        raise typer.Exit(code=1)
+
+    soul_engine = _build_soul_engine()
+    try:
+        asyncio.run(soul_engine.get_profile())
+    except SoulProfileNotInitializedError as exc:
+        _print_status_panel(
+            "warning",
+            "尚未初始化用户画像",
+            "请先执行 `openbiliclaw init` 拉取历史并生成初始画像。",
+        )
+        raise typer.Exit(code=1) from exc
+
+    discovery_engine = _build_discovery_engine()
+    candidate_pipeline = _build_discovery_candidate_pipeline(
+        config=config,
+        database=database,
+        discovery_engine=discovery_engine,
+    )
+    producer = build_linuxdo_discovery_producer(
+        config=config,
+        database=database,
+        soul_engine=soul_engine,
+        candidate_pipeline=candidate_pipeline,
+        keyword_fetch=KeywordFetchCoordinator(
+            database=database,
+            discovery_config=config.discovery,
+        ),
+        require_scheduler=False,
+    )
+    if producer is None:
+        _print_status_panel(
+            "warning",
+            "Linux.do discovery producer 未启动",
+            "请确认 Linux.do 来源已启用且数据库支持任务队列。",
+        )
+        raise typer.Exit(code=1)
+
+    result = asyncio.run(producer.produce_if_due(limit=limit))
+    reason = str(result.get("reason", ""))
+    discovered = int(cast("int | float | str | bool", result.get("discovered", 0) or 0))
+    enqueued = int(cast("int | float | str | bool", result.get("enqueued", 0) or 0))
+    source_counts_raw = result.get("source_counts", {})
+    source_counts = source_counts_raw if isinstance(source_counts_raw, dict) else {}
+    source_counts_text = ", ".join(
+        f"{source}:{count}" for source, count in sorted(source_counts.items())
+    )
+    source_modes = ", ".join(str(mode) for mode in getattr(linuxdo_cfg, "source_modes", ()) or ())
+
+    _print_page_title("Linux.do 内容发现", f"正式 discover · {source_modes or 'search'}")
+    if reason in {"ok", "degraded"}:
+        _print_key_value_table(
+            "发现摘要",
+            [
+                ("发现条数", str(discovered)),
+                ("入池候选", str(enqueued)),
+                ("来源", "linuxdo"),
+                ("来源分布", source_counts_text or "（无）"),
+                ("分支", source_modes or "search"),
+            ],
+        )
+        for index, item in enumerate(candidate_pipeline.last_admitted_items[:5], start=1):
+            _print_discovered_content_preview(item, index)
+        if reason == "degraded":
+            _print_status_panel(
+                "warning",
+                "Linux.do discovery 部分完成",
+                f"部分分支失败，成功候选已保留：{result.get('branch_errors') or []}",
+            )
+        return
+
+    messages = {
+        "disabled": ("info", "Linux.do discovery 已禁用", "请启用来源后重试。"),
+        "throttled": ("info", "Linux.do discovery 尚未到调度时间", "稍后重试。"),
+        "pool_full": ("info", "候选池已满", "当前无需继续补充 Linux.do 候选。"),
+        "no_profile": ("warning", "尚未初始化 Soul 画像", "请先执行 init。"),
+        "no_keywords": ("info", "没有可用搜索词", "画像兴趣或统一关键词池为空。"),
+        "no_creator_seeds": ("info", "没有作者分支 seed", "先运行 hot/feed/search。"),
+        "no_related_seeds": ("info", "没有相关分支 seed", "先运行 hot/feed/search。"),
+        "budget_exhausted": ("info", "Linux.do 今日预算已用完", "可在配置页调整预算。"),
+        "empty": ("info", "Linux.do discovery 返回为空", "任务完成但没有新候选。"),
+        "login_required": ("warning", "Linux.do 需要登录", "请在扩展所在浏览器登录后重试。"),
+        "rate_limited": ("warning", "Linux.do 正在限流", "请等待冷却后重试。"),
+        "timeout": ("warning", "Linux.do 扩展任务超时", "任务未在合法执行窗口内完成。"),
+        "blocked": ("warning", "Linux.do 请求被拦截", "请在真实浏览器中确认站点可访问。"),
+        "failed": (
+            "warning",
+            "Linux.do discovery 执行失败",
+            str(result.get("branch_errors") or "扩展任务失败。"),
+        ),
+    }
+    kind, title, body = messages.get(
+        reason,
+        ("info", "Linux.do discovery 未产出内容", reason or "无详细信息"),
     )
     _print_status_panel(kind, title, body)
 
@@ -12113,7 +12672,9 @@ def discover(
         "bilibili",
         "--source",
         "-s",
-        help="触发发现的内容源：bilibili、xiaohongshu、douyin、zhihu、reddit 或 bangumi。",
+        help=(
+            "触发发现的内容源：bilibili、xiaohongshu、douyin、zhihu、reddit、bangumi 或 linuxdo。"
+        ),
         case_sensitive=False,
     ),
     strategies: list[str] | None = _DISCOVER_STRATEGIES_OPTION,
@@ -12179,10 +12740,20 @@ def discover(
         _run_bangumi_discovery(limit=limit, force=force)
         return
 
+    if source_normalized == "linuxdo":
+        if strategies:
+            _print_status_panel(
+                "info",
+                "--strategy 仅对 Bilibili 生效",
+                "linuxdo 渠道走 source_modes 配置的浏览器同源分支，已忽略策略过滤。",
+            )
+        _run_linuxdo_discovery(limit=limit)
+        return
+
     if source_normalized != "bilibili":
         raise typer.BadParameter(
             f"未知的内容源 `{source}`，当前支持："
-            "bilibili、xiaohongshu、douyin、zhihu、reddit、bangumi。"
+            "bilibili、xiaohongshu、douyin、zhihu、reddit、bangumi、linuxdo。"
         )
 
     active_strategies = _normalize_strategy_names(strategies)

@@ -48,6 +48,9 @@ from openbiliclaw.sources.platforms import (
     PLATFORM_DOUYIN as PLATFORM_DOUYIN,
 )
 from openbiliclaw.sources.platforms import (
+    PLATFORM_LINUXDO as PLATFORM_LINUXDO,
+)
+from openbiliclaw.sources.platforms import (
     PLATFORM_REDDIT as PLATFORM_REDDIT,
 )
 from openbiliclaw.sources.platforms import (

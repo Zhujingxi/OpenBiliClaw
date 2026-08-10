@@ -49,10 +49,11 @@ def test_desktop_reddit_source_status_and_credentials_are_rendered() -> None:
         'const SOURCE_KEYS = Object.freeze([\n    "bilibili", "xiaohongshu", '
         '"douyin", "youtube", "twitter", "zhihu", "reddit",\n'
     ) in shared
-    # Bangumi is in the roster even though it has no auth contract yet — the
-    # roster answers "which sources exist", so dropping it would hide the
-    # platform from all three settings surfaces at once.
-    assert '"bangumi",\n  ]);' in shared
+    # New sources extend the one shared roster; they do not create another
+    # platform list in either settings bundle.
+    roster = shared.split("]);", 1)[0]
+    assert '"bangumi"' in roster
+    assert '"linuxdo"' in roster
     assert "SOURCE_STATUS_KEYS = SourceStatus.SOURCE_KEYS" in js
     assert 'reddit: $("#redditEnabled").value === "on"' in js
     assert 'if (shares.reddit !== undefined) setInput("shareReddit", shares.reddit)' in js

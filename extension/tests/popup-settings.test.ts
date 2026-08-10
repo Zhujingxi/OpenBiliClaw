@@ -164,6 +164,7 @@ test("settings source tab separates every platform into its own block", () => {
     "zhihu",
     "reddit",
     "bangumi",
+    "linuxdo",
     "browser",
     "pool",
   ]) {
@@ -440,6 +441,44 @@ test("settings page round-trips Bangumi discovery config", () => {
   assert.match(popupJs, /bangumi: getInt\("cfgPoolShareBangumi", 1\)/);
   assert.match(popupJs, /bangumi: checked\("cfgBangumiEnabled"\)/);
   assert.match(popupJs, /if \(shares\.bangumi !== undefined\) setVal\("cfgPoolShareBangumi", shares\.bangumi\)/);
+});
+
+test("settings page round-trips Linux.do config without a cookie field", () => {
+  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+
+  for (const id of [
+    "cfgLinuxdoEnabled",
+    "cfgLinuxdoModeSearch",
+    "cfgLinuxdoModeHot",
+    "cfgLinuxdoModeFeed",
+    "cfgLinuxdoModeCreator",
+    "cfgLinuxdoModeRelated",
+    "cfgLinuxdoDailySearchBudget",
+    "cfgLinuxdoDailyHotBudget",
+    "cfgLinuxdoDailyFeedBudget",
+    "cfgLinuxdoDailyCreatorBudget",
+    "cfgLinuxdoDailyRelatedBudget",
+    "cfgLinuxdoRequestInterval",
+    "cfgLinuxdoMinInterval",
+    "cfgLinuxdoBootstrapLimit",
+    "cfgPoolShareLinuxdo",
+  ]) {
+    assert.match(popupHtml, new RegExp(`id="${id}"`), `${id} should exist`);
+    assert.match(popupJs, new RegExp(`"${id}"`), `${id} should be wired in popup.js`);
+  }
+
+  const card = popupHtml.match(/data-source-card="linuxdo"[\s\S]*?data-source-card="pool"/)?.[0] ?? "";
+  assert.doesNotMatch(card, /id="cfgLinuxdoCookie"|<textarea/);
+  assert.match(card, /公开发现无需登录/);
+  assert.match(card, /浏览器插件后，可增强收藏、点赞和阅读记录/);
+  assert.match(popupJs, /setCheckedValues\(LINUXDO_SOURCE_MODE_FIELDS, cfg\.sources\?\.linuxdo\?\.source_modes\)/);
+  assert.match(popupJs, /source_modes: collectCheckedValues\(LINUXDO_SOURCE_MODE_FIELDS, \["search"\]\)/);
+  assert.match(popupJs, /daily_search_budget: getInt\("cfgLinuxdoDailySearchBudget", 0\)/);
+  assert.match(popupJs, /bootstrap_limit: getInt\("cfgLinuxdoBootstrapLimit", 300\)/);
+  assert.match(popupJs, /linuxdo: getInt\("cfgPoolShareLinuxdo", 1\)/);
+  assert.match(popupJs, /linuxdo: checked\("cfgLinuxdoEnabled"\)/);
+  assert.match(popupJs, /if \(shares\.linuxdo !== undefined\) setVal\("cfgPoolShareLinuxdo", shares\.linuxdo\)/);
 });
 
 test("settings page exposes Bangumi clear-token control and rejected status", () => {
@@ -924,7 +963,7 @@ test("settings page shows the budget-semantics hint for every per-source budget 
     "预算 = 每日任务次数上限；搜索默认每天 20 次，显式填 0 = 不限；创作者预算 0 或留空 = 不限。";
 
   // Every source card that has a daily budget input must carry a note.
-  const budgetCards = ["xiaohongshu", "douyin", "youtube", "twitter", "zhihu", "reddit"];
+  const budgetCards = ["xiaohongshu", "douyin", "youtube", "twitter", "zhihu", "reddit", "linuxdo"];
   for (const card of budgetCards) {
     const start = popupHtml.indexOf(`data-source-card="${card}"`);
     assert.ok(start >= 0, `source card ${card} should exist`);

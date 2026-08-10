@@ -23,6 +23,9 @@
  * /api/sources/xhs/login-state reports only whether xhs's web_session login
  * cookie exists; POST /api/sources/zhihu/login-state does the same for Zhihu's
  * z_c0 login cookie. Neither endpoint receives raw cookie values.
+ * Linux.do follows the same boolean-only channel for its authenticated `_t`
+ * cookie; the content executor separately confirms identity through
+ * `/session/current.json` before collecting personal scopes.
  */
 
 // .ts extension: see service-worker.ts for the node:test resolver rationale.
@@ -38,6 +41,7 @@ const X_COOKIE_SYNC_ALARM = "openbiliclaw-cookie-sync-x";
 const REDDIT_COOKIE_SYNC_ALARM = "openbiliclaw-cookie-sync-reddit";
 const XHS_LOGIN_STATE_SYNC_ALARM = "openbiliclaw-cookie-sync-xhs";
 const ZHIHU_LOGIN_STATE_SYNC_ALARM = "openbiliclaw-cookie-sync-zhihu";
+const LINUXDO_LOGIN_STATE_SYNC_ALARM = "openbiliclaw-cookie-sync-linuxdo";
 // Pre-split shared alarm. chrome.alarms persist across extension updates,
 // so an old install can still fire this name once after upgrading.
 const LEGACY_COOKIE_SYNC_ALARM = "openbiliclaw-cookie-sync";
@@ -91,8 +95,9 @@ const REQUIRED_X_COOKIE_NAMES = ["auth_token", "ct0"];
 const REQUIRED_REDDIT_COOKIE_NAMES = ["reddit_session"];
 const XHS_LOGIN_COOKIE_NAME = "web_session";
 const ZHIHU_LOGIN_COOKIE_NAME = "z_c0";
+const LINUXDO_LOGIN_COOKIE_NAME = "_t";
 
-type CookieSyncPlatform = "bilibili" | "douyin" | "x" | "reddit" | "xhs" | "zhihu";
+type CookieSyncPlatform = "bilibili" | "douyin" | "x" | "reddit" | "xhs" | "zhihu" | "linuxdo";
 
 const debounceTimers: Partial<Record<CookieSyncPlatform, ReturnType<typeof setTimeout>>> = {};
 let cookieSyncStarted = false;
@@ -256,6 +261,16 @@ export async function readZhihuLoginState(): Promise<boolean> {
   const cookies = await chromeApi.cookies.getAll({ domain: "zhihu.com" });
   return cookies.some(
     (cookie) => cookie.name === ZHIHU_LOGIN_COOKIE_NAME && String(cookie.value || "").trim() !== "",
+  );
+}
+
+/** Return whether linux.do has the authenticated `_t` cookie. */
+export async function readLinuxdoLoginState(): Promise<boolean> {
+  const chromeApi = getChromeApi();
+  if (!chromeApi?.cookies?.getAll) return false;
+  const cookies = await chromeApi.cookies.getAll({ domain: "linux.do" });
+  return cookies.some(
+    (cookie) => cookie.name === LINUXDO_LOGIN_COOKIE_NAME && String(cookie.value || "").trim() !== "",
   );
 }
 
@@ -548,6 +563,46 @@ export async function syncZhihuLoginStateToBackend(
   }
 }
 
+export async function syncLinuxdoLoginStateToBackend(
+  source: string = "extension",
+): Promise<boolean> {
+  const loggedIn = await readLinuxdoLoginState();
+  try {
+    const response = await authenticatedFetch(await apiUrl("/sources/linuxdo/login-state"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ logged_in: loggedIn }),
+    });
+    if (!response.ok) {
+      console.warn(`[openbiliclaw] linuxdo login-state sync HTTP ${response.status}`);
+      scheduleCookieSyncAlarm(LINUXDO_LOGIN_STATE_SYNC_ALARM, COOKIE_SYNC_RETRY_MINUTES);
+      return false;
+    }
+    const result = (await response.json()) as {
+      ok: boolean;
+      logged_in: boolean;
+      message?: string;
+    };
+    if (result.ok) {
+      console.log(
+        `[openbiliclaw] linuxdo login-state synced via ${source}` +
+          ` (${result.logged_in ? "logged in" : "logged out"})`,
+      );
+      scheduleHourlyCookieSync(LINUXDO_LOGIN_STATE_SYNC_ALARM);
+      return true;
+    }
+    console.warn(
+      `[openbiliclaw] linuxdo login-state sync rejected (${source}): ${String(result.message || "")}`,
+    );
+    scheduleCookieSyncAlarm(LINUXDO_LOGIN_STATE_SYNC_ALARM, COOKIE_SYNC_RETRY_MINUTES);
+    return false;
+  } catch (err) {
+    console.warn("[openbiliclaw] linuxdo login-state sync failed:", err);
+    scheduleCookieSyncAlarm(LINUXDO_LOGIN_STATE_SYNC_ALARM, COOKIE_SYNC_RETRY_MINUTES);
+    return false;
+  }
+}
+
 /**
  * Handle backend runtime-stream events that explicitly ask the extension
  * to push the current site cookie now.
@@ -578,6 +633,10 @@ export function handleCookieSyncRuntimeEvent(event: Record<string, unknown>): bo
     void syncZhihuLoginStateToBackend("runtime-stream-request");
     return true;
   }
+  if (eventType === "linuxdo_login_state_sync_requested") {
+    void syncLinuxdoLoginStateToBackend("runtime-stream-request");
+    return true;
+  }
   return false;
 }
 
@@ -604,8 +663,10 @@ function scheduleCookieSync(platform: CookieSyncPlatform, source: string): void 
       void syncRedditCookieToBackend(source);
     } else if (platform === "xhs") {
       void syncXhsLoginStateToBackend(source);
-    } else {
+    } else if (platform === "zhihu") {
       void syncZhihuLoginStateToBackend(source);
+    } else {
+      void syncLinuxdoLoginStateToBackend(source);
     }
   }, COOKIE_SYNC_DEBOUNCE_MS);
 }
@@ -637,6 +698,7 @@ export function startCookieSync(): void {
   void syncRedditCookieToBackend("startup");
   void syncXhsLoginStateToBackend("startup");
   void syncZhihuLoginStateToBackend("startup");
+  void syncLinuxdoLoginStateToBackend("startup");
 
   // React to login / logout / refresh.
   chromeApi.cookies.onChanged.addListener((changeInfo) => {
@@ -688,6 +750,14 @@ export function startCookieSync(): void {
         return;
       }
       scheduleCookieSync("zhihu", changeInfo.removed ? "zhihu-logout" : "zhihu-cookies-onchange");
+      return;
+    }
+    if (domain.endsWith("linux.do")) {
+      if (changeInfo.cookie.name !== LINUXDO_LOGIN_COOKIE_NAME) return;
+      scheduleCookieSync(
+        "linuxdo",
+        changeInfo.removed ? "linuxdo-logout" : "linuxdo-cookies-onchange",
+      );
     }
   });
 
@@ -701,6 +771,7 @@ export function startCookieSync(): void {
   scheduleHourlyCookieSync(REDDIT_COOKIE_SYNC_ALARM);
   scheduleHourlyCookieSync(XHS_LOGIN_STATE_SYNC_ALARM);
   scheduleHourlyCookieSync(ZHIHU_LOGIN_STATE_SYNC_ALARM);
+  scheduleHourlyCookieSync(LINUXDO_LOGIN_STATE_SYNC_ALARM);
 }
 
 /**
@@ -733,6 +804,10 @@ export function handleCookieSyncAlarm(alarmName: string): boolean {
     void syncZhihuLoginStateToBackend("hourly-alarm");
     return true;
   }
+  if (alarmName === LINUXDO_LOGIN_STATE_SYNC_ALARM) {
+    void syncLinuxdoLoginStateToBackend("hourly-alarm");
+    return true;
+  }
   if (alarmName === LEGACY_COOKIE_SYNC_ALARM) {
     // One last full round for an alarm persisted by an older version; each
     // sync re-registers its own per-platform alarm on success/failure and
@@ -743,6 +818,7 @@ export function handleCookieSyncAlarm(alarmName: string): boolean {
     void syncRedditCookieToBackend("hourly-alarm");
     void syncXhsLoginStateToBackend("hourly-alarm");
     void syncZhihuLoginStateToBackend("hourly-alarm");
+    void syncLinuxdoLoginStateToBackend("hourly-alarm");
     return true;
   }
   return false;

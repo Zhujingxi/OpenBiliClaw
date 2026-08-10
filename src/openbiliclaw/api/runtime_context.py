@@ -1093,6 +1093,7 @@ class RuntimeContext:
         new_zhihu_producer: Any = None
         new_reddit_producer: Any = None
         new_bangumi_producer: Any = None
+        new_linuxdo_producer: Any = None
         if hasattr(self.database, "conn"):
             from openbiliclaw.runtime.bilibili_producer import BilibiliExtensionSearchProducer
             from openbiliclaw.runtime.xhs_producer import XhsTaskProducer
@@ -1192,6 +1193,24 @@ class RuntimeContext:
                 keyword_fetch=new_keyword_fetch,
                 kick=_kick_zhihu_extension,
             )
+            from openbiliclaw.runtime.linuxdo_producer import (
+                build_linuxdo_discovery_producer,
+            )
+
+            async def _kick_linuxdo_extension() -> None:
+                publish = getattr(getattr(self, "event_hub", None), "publish", None)
+                if callable(publish):
+                    with suppress(Exception):
+                        await publish({"type": "linuxdo_task_available", "source": "task_kick"})
+
+            new_linuxdo_producer = build_linuxdo_discovery_producer(
+                config=new_config,
+                database=self.database,
+                soul_engine=new_soul_engine,
+                candidate_pipeline=new_candidate_pipeline,
+                keyword_fetch=new_keyword_fetch,
+                kick=_kick_linuxdo_extension,
+            )
             from openbiliclaw.runtime.reddit_producer import build_reddit_discovery_producer
 
             new_reddit_producer = build_reddit_discovery_producer(
@@ -1288,6 +1307,7 @@ class RuntimeContext:
                 "yt": _source_enabled("youtube"),
                 "zhihu": _source_enabled("zhihu"),
                 "reddit": _source_enabled("reddit"),
+                "linuxdo": _source_enabled("linuxdo"),
             },
             scheduler_config=new_config.scheduler,
             profile_ready=lambda: bool(new_soul_engine.is_profile_ready()),
@@ -1330,6 +1350,7 @@ class RuntimeContext:
             zhihu_producer=new_zhihu_producer,
             reddit_producer=new_reddit_producer,
             bangumi_producer=new_bangumi_producer,
+            linuxdo_producer=new_linuxdo_producer,
             scheduler_config=new_config.scheduler,
             presence=self.presence,
             # gui-init D1: pause the controller's background loops while a guided
@@ -1440,6 +1461,7 @@ class RuntimeContext:
             new_youtube_producer,
             new_zhihu_producer,
             new_bangumi_producer,
+            new_linuxdo_producer,
         ):
             if producer is not None:
                 producer.candidate_evaluation_owned_by_coordinator = True

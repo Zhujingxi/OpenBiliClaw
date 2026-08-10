@@ -432,6 +432,7 @@ test("init source options: bilibili is default-checked but deselectable, others 
     "zhihu",
     "reddit",
     "bangumi",
+    "linuxdo",
   ]);
   // The login reminder copy mentions logging in on this browser.
   assert.ok(INIT_SOURCE_LOGIN_HINT.includes("登录"));
@@ -481,6 +482,13 @@ test("init source options: Bangumi is anonymous and opt-in", () => {
   assert.ok(INIT_SOURCE_LOGIN_HINT.includes("无需登录"));
 });
 
+test("init source options: Linux.do is public, optional-login and opt-in", () => {
+  const linuxdo = INIT_SOURCE_OPTIONS.find((o) => o.key === "linuxdo");
+  assert.ok(linuxdo, "linuxdo option must exist");
+  assert.ok(!linuxdo?.defaultChecked);
+  assert.equal(linuxdo?.label, "Linux.do");
+});
+
 test("start button allows Reddit as the only profile signal source", () => {
   const state = initStartButtonState(
     statusWith({
@@ -502,12 +510,13 @@ test("start button allows Reddit as the only profile signal source", () => {
 });
 
 test("initSourceLabels maps known keys and passes unknowns through", () => {
-  assert.deepEqual(initSourceLabels(["bilibili", "xiaohongshu", "zhihu", "reddit", "bangumi", "weibo"]), [
+  assert.deepEqual(initSourceLabels(["bilibili", "xiaohongshu", "zhihu", "reddit", "bangumi", "linuxdo", "weibo"]), [
     "B 站",
     "小红书",
     "知乎",
     "Reddit",
     "Bangumi",
+    "Linux.do",
     "weibo",
   ]);
   assert.deepEqual(initSourceLabels(undefined as unknown as string[]), []);

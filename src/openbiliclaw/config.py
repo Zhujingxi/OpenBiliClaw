@@ -175,6 +175,7 @@ _DEFAULT_POOL_SOURCE_SHARES = {
     "zhihu": 1,
     "reddit": 1,
     "bangumi": 1,
+    "linuxdo": 1,
 }
 
 _SOURCE_INCREMENTAL_ENV_FIELDS = {
@@ -184,6 +185,7 @@ _SOURCE_INCREMENTAL_ENV_FIELDS = {
     "OPENBILICLAW_SCHEDULER_YOUTUBE_INCREMENTAL_HOURS": "youtube_incremental_hours",
     "OPENBILICLAW_SCHEDULER_ZHIHU_INCREMENTAL_HOURS": "zhihu_incremental_hours",
     "OPENBILICLAW_SCHEDULER_REDDIT_INCREMENTAL_HOURS": "reddit_incremental_hours",
+    "OPENBILICLAW_SCHEDULER_LINUXDO_INCREMENTAL_HOURS": "linuxdo_incremental_hours",
 }
 _DEFAULT_AUTO_UPDATE_ALLOWED_REMOTES = [
     "https://github.com/whiteguo233/OpenBiliClaw.git",
@@ -942,6 +944,7 @@ class SchedulerConfig:
     youtube_incremental_hours: int | None = None
     zhihu_incremental_hours: int | None = None
     reddit_incremental_hours: int | None = None
+    linuxdo_incremental_hours: int | None = None
     refresh_check_interval_seconds: int = _DEFAULT_REFRESH_CHECK_INTERVAL_SECONDS
     eval_min_batch_size: int = _DEFAULT_EVAL_MIN_BATCH_SIZE
     eval_max_wait_seconds: float = _DEFAULT_EVAL_MAX_WAIT_SECONDS
@@ -1249,6 +1252,22 @@ class BangumiSourceConfig:
 
 
 @dataclass
+class LinuxdoSourceConfig:
+    """Linux.do browser-extension discovery and account-signal configuration."""
+
+    enabled: bool = False
+    source_modes: tuple[str, ...] = ("search", "hot", "feed", "creator", "related")
+    daily_search_budget: int = 0
+    daily_hot_budget: int = 0
+    daily_feed_budget: int = 0
+    daily_creator_budget: int = 0
+    daily_related_budget: int = 0
+    request_interval_seconds: int = 3
+    min_interval_minutes: int = 3
+    bootstrap_limit: int = 300
+
+
+@dataclass
 class BilibiliSourceConfig:
     """Bilibili discovery source switch."""
 
@@ -1285,6 +1304,7 @@ class SourcesConfig:
     zhihu: ZhihuSourceConfig = field(default_factory=ZhihuSourceConfig)
     reddit: RedditSourceConfig = field(default_factory=RedditSourceConfig)
     bangumi: BangumiSourceConfig = field(default_factory=BangumiSourceConfig)
+    linuxdo: LinuxdoSourceConfig = field(default_factory=LinuxdoSourceConfig)
 
 
 @dataclass
@@ -1628,6 +1648,7 @@ def _warn_suspicious_budgets(sources: SourcesConfig) -> None:
         ("zhihu", sources.zhihu),
         ("reddit", sources.reddit),
         ("bangumi", sources.bangumi),
+        ("linuxdo", sources.linuxdo),
     ]
     for source_name, source_config in source_configs:
         for source_field in fields(source_config):
@@ -1975,6 +1996,7 @@ def _build_config(raw: dict[str, Any]) -> Config:
     zhihu_raw = sources_raw.get("zhihu", {})
     reddit_raw = sources_raw.get("reddit", {})
     bangumi_raw = sources_raw.get("bangumi", {})
+    linuxdo_raw = sources_raw.get("linuxdo", {})
     sources = SourcesConfig(
         browser_cdp_url=sources_browser_raw.get("cdp_url", ""),
         browser_headed=sources_browser_raw.get("headed", False),
@@ -2080,6 +2102,27 @@ def _build_config(raw: dict[str, Any]) -> Config:
             min_interval_minutes=max(0, int(bangumi_raw.get("min_interval_minutes", 3))),
             bootstrap_limit=min(1000, max(1, int(bangumi_raw.get("bootstrap_limit", 300)))),
         ),
+        linuxdo=LinuxdoSourceConfig(
+            enabled=bool(linuxdo_raw.get("enabled", False)),
+            source_modes=tuple(
+                mode
+                for mode in _coerce_str_list(
+                    linuxdo_raw.get("source_modes", ["search", "hot", "feed", "creator", "related"])
+                )
+                if mode in {"search", "hot", "feed", "creator", "related"}
+            )
+            or ("search",),
+            daily_search_budget=max(0, int(linuxdo_raw.get("daily_search_budget", 0))),
+            daily_hot_budget=max(0, int(linuxdo_raw.get("daily_hot_budget", 0))),
+            daily_feed_budget=max(0, int(linuxdo_raw.get("daily_feed_budget", 0))),
+            daily_creator_budget=max(0, int(linuxdo_raw.get("daily_creator_budget", 0))),
+            daily_related_budget=max(0, int(linuxdo_raw.get("daily_related_budget", 0))),
+            request_interval_seconds=max(
+                0, min(30, int(linuxdo_raw.get("request_interval_seconds", 3)))
+            ),
+            min_interval_minutes=max(0, int(linuxdo_raw.get("min_interval_minutes", 3))),
+            bootstrap_limit=min(300, max(1, int(linuxdo_raw.get("bootstrap_limit", 300)))),
+        ),
     )
     _warn_suspicious_budgets(sources)
 
@@ -2182,6 +2225,11 @@ def _build_config(raw: dict[str, Any]) -> Config:
                     ),
                     "reddit_incremental_hours": _normalize_source_incremental_hours(
                         sched_raw.get("reddit_incremental_hours"),
+                        default=None,
+                        allow_none=True,
+                    ),
+                    "linuxdo_incremental_hours": _normalize_source_incremental_hours(
+                        sched_raw.get("linuxdo_incremental_hours"),
                         default=None,
                         allow_none=True,
                     ),
@@ -3384,6 +3432,7 @@ def _collect_config_issues(config: Config) -> list[ConfigIssue]:
         ("youtube_incremental_hours", config.scheduler.youtube_incremental_hours, True),
         ("zhihu_incremental_hours", config.scheduler.zhihu_incremental_hours, True),
         ("reddit_incremental_hours", config.scheduler.reddit_incremental_hours, True),
+        ("linuxdo_incremental_hours", config.scheduler.linuxdo_incremental_hours, True),
     )
     for field_name, value, allow_none in incremental_intervals:
         try:
@@ -4341,6 +4390,7 @@ def save_config(
         ("youtube_incremental_hours", True),
         ("zhihu_incremental_hours", True),
         ("reddit_incremental_hours", True),
+        ("linuxdo_incremental_hours", True),
     ):
         _normalize_source_incremental_hours(
             getattr(config.scheduler, field_name),
@@ -4591,6 +4641,18 @@ def _render_config_toml(
             f"min_interval_minutes = {config.sources.bangumi.min_interval_minutes}",
             f"bootstrap_limit = {config.sources.bangumi.bootstrap_limit}",
             "",
+            "[sources.linuxdo]",
+            f"enabled = {_toml_bool(config.sources.linuxdo.enabled)}",
+            f"source_modes = {_toml_str_list(list(config.sources.linuxdo.source_modes))}",
+            f"daily_search_budget = {config.sources.linuxdo.daily_search_budget}",
+            f"daily_hot_budget = {config.sources.linuxdo.daily_hot_budget}",
+            f"daily_feed_budget = {config.sources.linuxdo.daily_feed_budget}",
+            f"daily_creator_budget = {config.sources.linuxdo.daily_creator_budget}",
+            f"daily_related_budget = {config.sources.linuxdo.daily_related_budget}",
+            f"request_interval_seconds = {config.sources.linuxdo.request_interval_seconds}",
+            f"min_interval_minutes = {config.sources.linuxdo.min_interval_minutes}",
+            f"bootstrap_limit = {config.sources.linuxdo.bootstrap_limit}",
+            "",
             "[scheduler]",
             f"enabled = {_toml_bool(config.scheduler.enabled)}",
             "pause_on_extension_disconnect = "
@@ -4625,6 +4687,11 @@ def _render_config_toml(
             *(
                 [f"reddit_incremental_hours = {config.scheduler.reddit_incremental_hours}"]
                 if config.scheduler.reddit_incremental_hours is not None
+                else []
+            ),
+            *(
+                [f"linuxdo_incremental_hours = {config.scheduler.linuxdo_incremental_hours}"]
+                if config.scheduler.linuxdo_incremental_hours is not None
                 else []
             ),
             f"refresh_check_interval_seconds = {config.scheduler.refresh_check_interval_seconds}",
@@ -4690,6 +4757,7 @@ def _render_config_toml(
             f"zhihu = {int(config.scheduler.pool_source_shares.get('zhihu', 1))}",
             f"reddit = {int(config.scheduler.pool_source_shares.get('reddit', 1))}",
             f"bangumi = {int(config.scheduler.pool_source_shares.get('bangumi', 1))}",
+            f"linuxdo = {int(config.scheduler.pool_source_shares.get('linuxdo', 1))}",
             "",
             "[discovery]",
             "unified_keyword_planner_enabled = "

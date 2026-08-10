@@ -4,6 +4,17 @@
 
 ---
 
+## Unreleased
+
+- **新增 Linux.do 只读来源接入**：后端新增 `linuxdo_tasks` durable 队列、`LinuxdoDiscoveryProducer`、统一 topic/event 归一化、capability-specific source-auth 与周期增量同步；公开 discover 匿名可用，个人 profile/bootstrap/incremental 必须由同源会话正面确认。CLI 新增 `fetch-linuxdo` / `discover-linuxdo`，通用 `discover --source linuxdo` 也走同一 producer。五种 discovery 分支为 search / hot / feed / creator / related，三种个人初始化 scope 为 bookmarks / likes / read history。
+- **扩展采用同源、最小回传边界**：Linux.do 请求只在真实 `linux.do` task tab 内以 `GET` + `credentials: include` 访问 JSON endpoint；Cookie `_t` 只转换成登录布尔心跳，Cookie 值、CSRF 字段和未裁剪原始响应都不上传。任务具备 tab/task 隔离、分页与条数上限、超时、2 MiB 响应上限及结构化错误。
+- **真实安装版端到端验证完成（修复后仍保留重跑门禁）**：2026-08-09 在已登录 Linux.do 的 Chrome unpacked extension 上完成热更新与真实只读链路。bootstrap 两轮均返回 bookmarks=2、likes=5、read history=100（共 107 条），第二轮 durable ingress 零重复；search / hot / feed / creator / related 五分支均取得 canonical topic，五种正式 producer 均完成真实模型评估，组合运行继续遵守全局 limit 与候选幂等。测试还在真实 `in_progress` 任务中触发完整扩展重载，复现并修复 MV3 runner 丢失后以同一 task ID 安全恢复的问题。任务结果字段白名单、canonical ID/URL、first-final-wins 与无 Cookie/token/raw-response 均通过数据库断言。旧 `suggested_topics` 可能合法为空且语义是 new/unread/random 站点建议，不是严格相关；related 已改为 topic detail + 官方 `/topics/similar_to.json`，最终安装产物仍需补跑真实 Chrome/Firefox 门禁。
+- **Linux.do 契约审计补漏**：新增 capability-specific auth matrix、账号 key fail-closed 分区、跨扩展实例 single-flight + claim token、backend-owned scope/cap/关键词 ID/交互 action 校验、严格 JSON Content-Type 与 true-empty 证据、partial/failed first-final staged replay、retained-only 日预算、持久分页 cursor、failed/degraded 不推进增量 cadence、guided-init success 时间种子、所有 claimed final 的 durable ACK/MV3 outbox、前台 tab 恢复和平台中性的缺作者文案。冻结 contract、acceptance ledger、自动审计器和 Chrome/Firefox build asset verifier 同步纳入发布门禁。
+- **任务 tab 不再污染被动画像**：真实 E2E 发现 Discourse 会在 `document_idle` 前清掉 hash marker，自动任务页因而被误识别为普通浏览并写入 snapshot。任务入口现改用稳定 query marker，并继续兼容旧 hash 的恢复识别；后台任务页只运行只读 executor，不启动行为 collector。
+- **长任务、重启恢复与部分成功语义**：Linux.do 默认端到端总等待为 32.5 分钟（pending 领取最多约 3 分钟、合法大任务按形状执行约 29 分钟、结果余量 30 秒），显式 CLI/env 等待值是总硬上限；claim lease 为约 35 分钟、共享 mutex stale 窗口为约 36 分钟。真实 `in_progress` 热重载复现了仅靠 `storage.session` 重绑会永久等待的缺口；runner 现把无凭据 task/tab/deadline 临时写入 `storage.local`，恢复后重发同一 task ID，仍存活的 content context 会合并重复执行，完整重载则安全重放只读 GET。bootstrap 部分 scope 或 discovery 分页 / 多输入中途失败以 `degraded` 保留有效 items，bootstrap `failed/degraded` 均不进入 6 小时近期任务复用；guided init 使用默认 Stage-1 预算时，Linux.do-only 至少给 32.5 分钟，多来源并选 Linux.do 时给 62.5 分钟，显式 override 不扩。
+- **Linux.do MV3 恢复与 engagement 分支缺口修复**：runtime stream 现在先于可能等待 mutex 的恢复 barrier 建连；`storage.session` generation 区分普通 worker recycle 与完整 extension reload，完整 reload 会刷新 runner-owned 页面再重放同一只读 task ID。真实 Chrome 中两页 feed 在 `in_progress` 时热重载，约 25 秒后以同一任务行 terminal=ok，返回 37 个唯一 topic；修复全局 result cap 后的隔离复跑再次以同一任务行返回 36/36 唯一 topic。正式 search/related 同时增加 retained-only topic detail hydrate，真站各 2/2 候选均取得主题作者、浏览、总赞和回复，不再缺字段，也不使用匹配回复的作者/点赞冒充主题指标；双关键词 `max_items=1` 真站任务也严格只回传 1 条。两轮个人 bootstrap 各返回 `2 bookmark / 1 like / 20 read`，durable ingress 保持 23 条不重复；真实 404 被分类为 `failed/linuxdo_http_error` 而不是假空。扩展全量 1323/1323、Chrome/Firefox build 与 17/17 资产校验通过；冻结 Firefox 安装版真账号门禁仍单列未执行。
+- **来源状态保留最近任务真值**：Linux.do 浏览器心跳优先；无心跳时，`/api/sources/status` 只读最近 `linuxdo_tasks` 作 `task_history` 间接证据。个人 bootstrap 成功可证明可选会话通路，公开 discovery 成功仍保持 `credential=none`；`login_required`、限流与运行中状态分别表达，不把匿名任务伪造成已登录。
+
 ## v0.3.201：探针聊天与 dislike 即时推荐（2026-08-08）
 
 - **探针聊天跨界面对齐**：从消息里的「多聊聊」提交的 `probe` / `avoidance_probe` durable turn 现在也会进入插件、桌面 Web 与移动 Web 的主对话历史；关闭消息面板或切换到「聊聊口味」后仍能找回这段对话，惊喜推荐 `delight` 继续保留在自己的内容卡片内聊中。

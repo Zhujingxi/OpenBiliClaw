@@ -1,5 +1,6 @@
 const DEFAULT_TITLE = "这条标题还没对上号";
 const DEFAULT_UP_NAME = "这位 UP 还没认出来";
+const DEFAULT_CREATOR_NAME = "这位创作者还没认出来";
 const DEFAULT_PORTRAIT = "画像还在慢慢攒，先多看一阵。";
 const DEFAULT_DELIGHT_TITLE = "这条惊喜推荐还没起好标题";
 const DEFAULT_DELIGHT_REASON = "这条可能会给你一点意外之喜。";
@@ -41,6 +42,8 @@ function normalizeSourcePlatform(value, url = "") {
     reddit: "reddit",
     bgm: "bangumi",
     bangumi: "bangumi",
+    linuxdo: "linuxdo",
+    "linux.do": "linuxdo",
   };
   if (aliases[key]) return aliases[key];
   if (key) return key;
@@ -53,6 +56,7 @@ function normalizeSourcePlatform(value, url = "") {
   if (urlHostMatches(url, ["zhihu.com", "zhuanlan.zhihu.com"])) return "zhihu";
   if (urlHostMatches(url, ["reddit.com", "redd.it"])) return "reddit";
   if (urlHostMatches(url, ["bgm.tv", "bangumi.tv"])) return "bangumi";
+  if (urlHostMatches(url, ["linux.do"])) return "linuxdo";
   return "";
 }
 
@@ -161,6 +165,8 @@ const PLATFORM_DISPLAY_NAMES = {
   reddit: "Reddit",
   bgm: "Bangumi",
   bangumi: "Bangumi",
+  linuxdo: "Linux.do",
+  "linux.do": "Linux.do",
 };
 
 export function platformDisplayName(value) {
@@ -204,6 +210,12 @@ export function buildContentUrl(item) {
   if (!vid) return "";
   if (platform === "youtube") return buildYouTubeUrl(vid);
   if (platform === "bangumi") return `https://bgm.tv/subject/${encodeURIComponent(vid)}`;
+  if (platform === "linuxdo") {
+    const topicId = vid.replace(/^(?:linuxdo:)?topic[:_]/i, "");
+    return /^[1-9]\d*$/.test(topicId)
+      ? `https://linux.do/t/${encodeURIComponent(topicId)}`
+      : "";
+  }
   if (platform === "zhihu" || platform === "reddit") return "";
   return buildVideoUrl(vid);
 }
@@ -295,7 +307,12 @@ export function normalizeRecommendation(item) {
     id: Number(item?.id ?? 0),
     bvid,
     title: normalizeText(item?.title) || DEFAULT_TITLE,
-    up_name: normalizeText(item?.up_name) || (sourcePlatform === "bangumi" ? "" : DEFAULT_UP_NAME),
+    up_name: normalizeText(item?.up_name)
+      || (sourcePlatform === "bangumi"
+        ? ""
+        : sourcePlatform === "bilibili"
+        ? DEFAULT_UP_NAME
+        : DEFAULT_CREATOR_NAME),
     cover_url: normalizeCoverUrl(item?.cover_url),
     expression: normalizeText(item?.expression),
     topic_label: normalizeText(item?.topic_label),

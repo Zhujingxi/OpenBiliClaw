@@ -177,6 +177,8 @@ def discovered_content_to_candidate_write(
     content_id = str(item.content_id or item.bvid or "").strip()
     bvid = str(item.bvid or content_id or "").strip()
     payload = dict(raw_payload or {})
+    if item.engagement_available and "engagement_available" not in payload:
+        payload["engagement_available"] = list(item.engagement_available)
     score_threshold = float(getattr(item, "score_threshold", 0.0) or 0.0)
     if score_threshold > 0 and "score_threshold" not in payload:
         payload["score_threshold"] = score_threshold
@@ -254,6 +256,20 @@ def row_to_discovered_content(row: dict[str, Any]) -> DiscoveredContent:
     content_id = str(row.get("content_id") or row.get("bvid") or "").strip()
     bvid = str(row.get("bvid") or content_id).strip()
     author_name = str(row.get("author_name") or row.get("up_name") or "").strip()
+    raw_payload = row.get("raw_payload")
+    if isinstance(raw_payload, str):
+        try:
+            decoded_payload = json.loads(raw_payload)
+        except json.JSONDecodeError:
+            decoded_payload = {}
+    else:
+        decoded_payload = raw_payload if isinstance(raw_payload, dict) else {}
+    available = decoded_payload.get("engagement_available")
+    engagement_available = (
+        [str(value) for value in available if str(value) in {"view", "like", "comment"}]
+        if isinstance(available, list)
+        else []
+    )
     return DiscoveredContent(
         bvid=bvid,
         title=str(row.get("title") or ""),
@@ -271,6 +287,7 @@ def row_to_discovered_content(row: dict[str, Any]) -> DiscoveredContent:
         reply_count=int(row.get("reply_count") or 0),
         retweet_count=int(row.get("retweet_count") or 0),
         bookmark_count=int(row.get("bookmark_count") or 0),
+        engagement_available=engagement_available,
         rating_score=float(row.get("rating_score") or 0.0),
         rating_count=int(row.get("rating_count") or 0),
         source_rank=int(row.get("source_rank") or 0),

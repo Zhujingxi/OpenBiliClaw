@@ -85,9 +85,20 @@ ID 字段是严格 JSON string，不接受数字、布尔或其它类型的自�
 
 ## 来源任务结果的两阶段完成
 
-`POST /api/sources/{xhs,dy,yt,zhihu,reddit}/task-result` 的最终回调不再先把任务写成 `completed`。后端先在 `BEGIN IMMEDIATE` 中合并并冻结第一份 canonical result（含 XHS `self_info` 私有快照），任务仍保持非终态；随后只从这份持久结果重放来源事件、seen-key 和来源专属投影，全部成功后才执行不替换 `result_json` 的 terminal flip。若进程分别退出在 canonical merge→event ingress、event ingress→seen-key 或 seen-key→terminal 三个窗口，后续 callback 会忽略变化后的 body，用第一份结果补齐缺口。队列把 staged marker 视为业务 mutation 的逻辑终态：并发/迟到的 partial、final、fail、rate-limit 都不能改写它；但它继续遵守普通 claim lease，丢失非 2xx 响应后会在 15 分钟 lease 过期时由 dispatcher 重新领取，从而自动触发修复。seen-key 通过 `update_source_bootstrap_state()` 原子、严格落盘并按源保留最新 5,000 个身份键，失败会阻止 terminal flip；事件稳定键不含 task ID，因此 ingress 已提交但 marker 未写时的重放只返回 duplicate receipt。Reddit post/comment/subreddit/user 使用各自稳定身份，comment URL fallback 只接受含 comment id 的完整 permalink，不能把 post id 或标题误作 comment key。
+`POST /api/sources/{xhs,dy,yt,zhihu,reddit,linuxdo}/task-result` 的最终回调不再先把任务写成 `completed`。后端先在 `BEGIN IMMEDIATE` 中合并并冻结第一份 canonical result（含 XHS `self_info` 私有快照），任务仍保持非终态；随后只从这份持久结果重放来源事件、seen-key 和来源专属投影，全部成功后才执行不替换 `result_json` 的 terminal flip。若进程分别退出在 canonical merge→event ingress、event ingress→seen-key 或 seen-key→terminal 三个窗口，后续 callback 会忽略变化后的 body，用第一份结果补齐缺口。队列把 staged marker 视为业务 mutation 的逻辑终态：并发/迟到的 partial、final、fail、rate-limit 都不能改写它；但它继续遵守各源 claim lease，丢失非 2xx 响应后由 lease reclaim 自动触发修复（Linux.do 长任务为约 35 分钟）。seen-key 通过 `update_source_bootstrap_state()` 原子、严格落盘并按源保留最新 5,000 个身份键，失败会阻止 terminal flip；事件稳定键不含 task ID，因此 ingress 已提交但 marker 未写时的重放只返回 duplicate receipt。Reddit post/comment/subreddit/user 使用各自稳定身份，comment URL fallback 只接受含 comment id 的完整 permalink，不能把 post id 或标题误作 comment key；Linux.do 使用正整数 topic ID，canonical `content_id="topic:<id>"`。
 
-周期任务 payload 带 `incremental=true`；五源 handler 在 guided init 外给 durable event 标记 `profile_update_owner="generic"`，在 init-owned 回调中只落事实、由阶段 2/3 统一建模。事件 ingress 成功或 duplicate receipt 后才按响应顺序 checkpoint seen key，再翻 terminal；没有 handler 直接调用画像 pipeline。扩展离线时 runtime 不创建任务，也不推进调度时间。
+周期任务 payload 带 `incremental=true`；六源 handler 在 guided init 外给 durable event 标记 `profile_update_owner="generic"`，在 init-owned 回调中只落事实、由阶段 2/3 统一建模。事件 ingress 成功或 duplicate receipt 后才按响应顺序 checkpoint seen key，再翻 terminal；没有 handler 直接调用画像 pipeline。扩展离线时 runtime 不创建任务，也不推进调度时间。
+
+### Linux.do 任务与登录态端点
+
+| 方法与路径 | 状态 | 契约 |
+|---|---|---|
+| `GET /api/sources/linuxdo/next-task` | ✅ | 使用 authenticated extension 请求原子领取最早的 pending Linux.do 任务；无任务返回 bodyless 204。约 35 分钟未完成的 claim 才可重领，init active 时只暴露本轮拥有的 task ID。 |
+| `POST /api/sources/linuxdo/task-result` | ✅ | 接受 `task_id/status/items/scope_counts/debug`；discovery 结果只供 waiting producer，明确带 `profile_update` 或 `incremental` 的 `bootstrap_events` 才进入 durable event ingress。部分 bootstrap scope 或 discovery 分页 / 输入失败可用 `degraded` 保留已得 items；零有效 item 的失败才是 `failed`。Cookie 和原始 Linux.do 响应不属于 payload。 |
+| `POST /api/sources/linuxdo/kick` | ✅ | 经 runtime-stream 广播 `linuxdo_task_available`，让在线扩展立即 poll；不直接访问 Linux.do。 |
+| `POST /api/sources/linuxdo/login-state` | ✅（兼容端点） | 只接受 strict boolean `logged_in`，持久化扩展对 `_t` 存在性的观察；不接受 Cookie 字符串。公开 discovery 的 `auth_required` 仍为 false。 |
+
+Linux.do 站点访问全部发生在真实 `linux.do` task tab 内，且只允许同源 JSON `GET`。个人 bootstrap 先以 `/session/current.json` 正面确认 username；`_t=true` 只是 source-auth 心跳，不能替代任务内身份确认。结构化错误只包含 code/status/path，不把 challenge HTML、JSON body、Cookie 或 CSRF 字段带进回调。dispatcher 在执行前把 task/tab/deadline 写入扩展 session storage；MV3 service worker 重启时先恢复 runner，仍存活的任务 tab 可把结果交给恢复后的 handler 重试后端回传，不会重跑上游 GET。完整契约见 [Linux.do 来源文档](linuxdo.md)。
 
 ## 封面代理与抓取状态
 

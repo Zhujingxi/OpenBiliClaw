@@ -37,6 +37,7 @@
         "*://*.zhihu.com/*",
         "*://*.reddit.com/*",
         "*://*.redd.it/*",
+        "https://linux.do/*",
         "*://*.x.com/*",
         "*://*.twitter.com/*",
         "*://*.bgm.tv/*",
@@ -128,6 +129,15 @@
             ],
             "js": [
                 "content/reddit.js"
+            ],
+            "run_at": "document_idle"
+        },
+        {
+            "matches": [
+                "https://linux.do/*"
+            ],
+            "js": [
+                "content/linuxdo.js"
             ],
             "run_at": "document_idle"
         },

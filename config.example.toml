@@ -358,6 +358,21 @@ request_interval_seconds = 1
 min_interval_minutes = 3
 bootstrap_limit = 300
 
+# ── Linux.do（浏览器插件同源只读）──
+# 公开 search/hot/feed/creator/related 无需登录；登录后还可读取本人收藏、点赞和
+# 最近阅读，用于画像初始化与周期增量。Cookie 始终留在浏览器内。
+[sources.linuxdo]
+enabled = false
+source_modes = ["search", "hot", "feed", "creator", "related"]
+daily_search_budget = 0
+daily_hot_budget = 0
+daily_feed_budget = 0
+daily_creator_budget = 0
+daily_related_budget = 0
+request_interval_seconds = 3
+min_interval_minutes = 3
+bootstrap_limit = 300
+
 [scheduler]
 # Enable scheduled content discovery
 enabled = true
@@ -393,6 +408,7 @@ source_incremental_hours = 24
 # youtube_incremental_hours = 24
 # zhihu_incremental_hours = 24
 # reddit_incremental_hours = 24
+# linuxdo_incremental_hours = 24
 # --- Runtime refresh tuning ---
 refresh_check_interval_seconds = 60      # Main loop poll interval; values <15 fallback
 # eval_min_batch_size = 15               # Coalesce trickle candidates into fuller eval batches; 1..90
@@ -457,6 +473,7 @@ twitter = 1
 zhihu = 1
 reddit = 1
 bangumi = 1
+linuxdo = 1
 
 # ── 统一关键词规划器 / Discover 背压 (P1) ──
 # 把"每平台各自定时调 LLM 生成搜索词"换成缺口拉动的双缓冲背压模型：一个关键词

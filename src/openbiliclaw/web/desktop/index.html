@@ -851,6 +851,60 @@
               </div>
             </article>
 
+            <article class="source-status-row source-card" data-source-status="linuxdo" data-source-credential="linuxdo" data-open="0">
+              <div class="source-card-face" role="button" tabindex="0" aria-expanded="false" aria-controls="sourceCardBody-linuxdo">
+                <span class="source-card-logo" data-source-logo="linuxdo" aria-hidden="true" style="background:#1f6f43">L</span>
+                <span class="source-card-head">
+                  <strong class="source-card-name">Linux.do</strong>
+                  <span class="source-status-badges"><span class="source-source-badge">来源：加载中</span><span class="source-access-badge">接入：加载中</span><span class="source-evidence-badge" hidden></span></span>
+                  <p class="src-detail">加载中…</p>
+                  <span class="source-card-hint-slot"></span>
+                </span>
+                <span class="source-card-right">
+                  <label class="source-card-share"><span>占比</span><input id="shareLinuxdo" value="1" inputmode="numeric" aria-label="Linux.do 候选池占比"></label>
+                  <label class="source-card-enable"><span class="sr-only">启用 Linux.do</span><select id="linuxdoEnabled"><option value="on">启用</option><option value="off">停用</option></select></label>
+                  <span class="source-card-chev" aria-hidden="true">▾</span>
+                </span>
+              </div>
+              <div class="source-card-body" id="sourceCardBody-linuxdo">
+                <section class="source-seg">
+                  <h4>接入方式</h4>
+                  <p class="seg-note">公开发现无需登录；连接已登录 Linux.do 的浏览器插件后，可增强收藏、点赞和阅读记录等个人信号。登录态由插件同源读取，后端不接收或保存 Cookie。</p>
+                  <div class="source-cred-box">
+                    <div class="source-cred-line"><span class="source-credential-ro-tag">只读</span><span class="source-credential-summary">加载中…</span></div>
+                    <textarea class="source-credential-value" rows="2" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
+                  </div>
+                </section>
+                <section class="source-seg">
+                  <h4>发现分支与每日预算</h4>
+                  <p class="seg-note">关掉分支即不再调度；预算是该分支每日任务次数上限，0 或留空 = 不限。</p>
+                  <div class="branch-table" data-branch-toggles="on">
+                    <div class="branch-head"><span></span><span>分支</span><span>每日预算</span><span>说明</span></div>
+                    <div class="branch-row"><input id="linuxdoModeSearch" type="checkbox" class="branch-toggle" aria-label="Linux.do 搜索分支"><span class="branch-name">搜索</span><input id="linuxdoDailySearchBudget" class="branch-budget" inputmode="numeric" placeholder="0 = 不限" aria-label="Linux.do 每日搜索预算"><span class="branch-hint">按画像关键词搜索</span></div>
+                    <div class="branch-row"><input id="linuxdoModeHot" type="checkbox" class="branch-toggle" aria-label="Linux.do 热门分支"><span class="branch-name">热门</span><input id="linuxdoDailyHotBudget" class="branch-budget" inputmode="numeric" placeholder="0 = 不限" aria-label="Linux.do 每日热门预算"><span class="branch-hint">社区热门主题</span></div>
+                    <div class="branch-row"><input id="linuxdoModeFeed" type="checkbox" class="branch-toggle" aria-label="Linux.do 最新分支"><span class="branch-name">最新</span><input id="linuxdoDailyFeedBudget" class="branch-budget" inputmode="numeric" placeholder="0 = 不限" aria-label="Linux.do 每日最新预算"><span class="branch-hint">最新主题流</span></div>
+                    <div class="branch-row"><input id="linuxdoModeCreator" type="checkbox" class="branch-toggle" aria-label="Linux.do 作者分支"><span class="branch-name">作者</span><input id="linuxdoDailyCreatorBudget" class="branch-budget" inputmode="numeric" placeholder="0 = 不限" aria-label="Linux.do 每日作者预算"><span class="branch-hint">相关作者主题</span></div>
+                    <div class="branch-row"><input id="linuxdoModeRelated" type="checkbox" class="branch-toggle" aria-label="Linux.do 相关分支"><span class="branch-name">相关</span><input id="linuxdoDailyRelatedBudget" class="branch-budget" inputmode="numeric" placeholder="0 = 不限" aria-label="Linux.do 每日相关预算"><span class="branch-hint">相关主题链</span></div>
+                  </div>
+                </section>
+                <section class="source-seg">
+                  <h4>节流与初始化</h4>
+                  <div class="inline-row">
+                    <label class="settings-field"><span>请求间隔秒数</span><input id="linuxdoRequestInterval" inputmode="numeric" min="0" max="30" placeholder="3"></label>
+                    <label class="settings-field"><span>最小调度间隔分钟</span><input id="linuxdoMinInterval" inputmode="numeric" placeholder="3"></label>
+                    <label class="settings-field"><span>初始化个人信号上限</span><input id="linuxdoBootstrapLimit" inputmode="numeric" min="1" max="300" placeholder="300"></label>
+                  </div>
+                </section>
+                <section class="source-seg">
+                  <h4>验证</h4>
+                  <div class="settings-probe-row source-verify-row">
+                    <button class="pill-btn source-verify-btn" type="button">测试连接</button>
+                    <span class="settings-probe-status source-verify-status" aria-live="polite"></span>
+                  </div>
+                </section>
+              </div>
+            </article>
+
           </div>
 
           <div class="source-aux-card">

@@ -3540,7 +3540,7 @@ def test_init_guides_missing_runtime_config_interactively(
     #   6. "y" — allow LAN access
     #   7-9. "" — accept Bili history/favorite/follow init limits
     #   10+. "n" — skip optional source prompts
-    #               (xhs / douyin / youtube / X / zhihu / reddit / bangumi)
+    #               (xhs / douyin / youtube / X / zhihu / reddit / bangumi / Linux.do)
     wizard_input = (
         "\n".join(
             [
@@ -3553,6 +3553,7 @@ def test_init_guides_missing_runtime_config_interactively(
                 "",
                 "",
                 "",
+                "n",
                 "n",
                 "n",
                 "n",
@@ -3631,12 +3632,12 @@ def test_init_guides_missing_auth_interactively(
     # test exercising the manual-paste path, send "2" first.
     # v0.3.89+: init asks whether to allow LAN access before the source
     # prompts. Answer yes, accept Bili signal-limit defaults, then send "n"
-    # to XHS / Douyin / YouTube / X / Zhihu / Reddit / Bangumi so this test stays focused on the
-    # cookie-prompt path.
+    # to XHS / Douyin / YouTube / X / Zhihu / Reddit / Bangumi / Linux.do so
+    # this test stays focused on the cookie-prompt path.
     result = runner.invoke(
         app,
         ["init"],
-        input="2\nSESSDATA=valid\ny\n\n\n\nn\nn\nn\nn\nn\nn\nn\n",
+        input="2\nSESSDATA=valid\ny\n\n\n\nn\nn\nn\nn\nn\nn\nn\nn\n",
     )
 
     assert result.exit_code == 1
@@ -4860,6 +4861,7 @@ def test_select_init_source_shares_accepts_suggested_ratios(
         "zhihu": 1,
         "reddit": 1,
         "bangumi": 1,
+        "linuxdo": 1,
     }
 
 
@@ -4903,6 +4905,7 @@ def test_select_init_source_shares_accepts_manual_ratios(
         "zhihu": 1,
         "reddit": 1,
         "bangumi": 1,
+        "linuxdo": 1,
     }
 
 
@@ -6737,6 +6740,120 @@ def test_discover_source_reddit_runs_formal_producer(monkeypatch: pytest.MonkeyP
     assert calls == {"limit": 11}
 
 
+def test_discover_source_linuxdo_runs_formal_producer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+    calls: dict[str, int] = {}
+
+    def run_linuxdo_discovery(*, limit: int) -> None:
+        calls["limit"] = limit
+
+    monkeypatch.setattr(cli_module, "_run_linuxdo_discovery", run_linuxdo_discovery)
+
+    result = runner.invoke(app, ["discover", "--source", "linuxdo", "--limit", "11"])
+
+    assert result.exit_code == 0, result.output
+    assert calls == {"limit": 11}
+    assert "discover-linuxdo" not in result.output
+
+
+def test_fetch_linuxdo_write_memory_is_owned_by_staged_task_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+    captured: dict[str, object] = {}
+
+    def enqueue(**kwargs: object) -> str:
+        captured["enqueue"] = kwargs
+        return "linuxdo-task"
+
+    monkeypatch.setattr(cli_module, "_enqueue_linuxdo_bootstrap_task", enqueue)
+    monkeypatch.setattr(
+        cli_module,
+        "_collect_linuxdo_bootstrap_events",
+        lambda task_id, *, max_wait_seconds: (
+            [
+                {
+                    "event_type": "favorite",
+                    "title": "Linux.do 收藏",
+                    "metadata": {"source_platform": "linuxdo"},
+                }
+            ],
+            {
+                "linuxdo_bookmarks": 1,
+                "linuxdo_likes": 0,
+                "linuxdo_read_history": 0,
+            },
+            "ok",
+        ),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_write_events_to_memory",
+        lambda *_args, **_kwargs: pytest.fail(
+            "Linux.do writes must stay inside staged task-result ingestion"
+        ),
+    )
+
+    result = runner.invoke(app, ["fetch-linuxdo", "--write-memory", "--wait-seconds", "5"])
+
+    assert result.exit_code == 0, result.output
+    assert captured["enqueue"] == {"profile_update": True}
+    assert "按账号原子写入" in result.output
+
+
+def test_explicit_linuxdo_discovery_ignores_scheduler_master_switch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = config_module.Config()
+    cfg.sources.linuxdo.enabled = True
+    cfg.scheduler.enabled = False
+    captured: dict[str, object] = {}
+
+    class FakeDatabase:
+        conn = object()
+
+    class FakeSoulEngine:
+        async def get_profile(self) -> dict[str, object]:
+            return {"preferences": {"interests": [{"name": "自托管"}]}}
+
+    class FakeProducer:
+        async def produce_if_due(self, *, limit: int) -> dict[str, object]:
+            captured["limit"] = limit
+            return {"reason": "empty", "discovered": 0, "enqueued": 0}
+
+    def fake_build(**kwargs: object) -> FakeProducer:
+        captured.update(kwargs)
+        return FakeProducer()
+
+    monkeypatch.setattr(config_module, "load_config", lambda: cfg)
+    monkeypatch.setattr(cli_module, "_require_runtime_config", lambda: None)
+    monkeypatch.setattr(cli_module, "_get_runtime_database", FakeDatabase)
+    monkeypatch.setattr(cli_module, "_build_soul_engine", FakeSoulEngine)
+    monkeypatch.setattr(cli_module, "_build_discovery_engine", object)
+    monkeypatch.setattr(
+        cli_module,
+        "_build_discovery_candidate_pipeline",
+        lambda **_kwargs: SimpleNamespace(last_admitted_items=[]),
+    )
+    monkeypatch.setattr(
+        "openbiliclaw.runtime.keyword_fetch.KeywordFetchCoordinator",
+        lambda **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        "openbiliclaw.runtime.linuxdo_producer.build_linuxdo_discovery_producer",
+        fake_build,
+    )
+    monkeypatch.setattr(cli_module, "_print_page_title", lambda *_args: None)
+    monkeypatch.setattr(cli_module, "_print_status_panel", lambda *_args: None)
+
+    cli_module._run_linuxdo_discovery(limit=5)
+
+    assert captured["require_scheduler"] is False
+    assert captured["limit"] == 5
+
+
 def test_explicit_bangumi_discovery_ignores_scheduler_master_switch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -8162,6 +8279,41 @@ def _guided_init_pipeline_doubles(monkeypatch) -> dict[str, Any]:
         raising=False,
     )
 
+    def _enqueue_linuxdo(**kwargs: object) -> str:
+        state["linuxdo_enqueue_kwargs"] = dict(kwargs)
+        return "linuxdo-task-1"
+
+    monkeypatch.setattr(
+        cli_module,
+        "_enqueue_linuxdo_bootstrap_task",
+        _enqueue_linuxdo,
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_collect_linuxdo_bootstrap_events",
+        lambda task_id, **kwargs: (
+            (
+                list(state.get("linuxdo_events", [])),
+                {
+                    "linuxdo_bookmarks": 1,
+                    "linuxdo_likes": 0,
+                    "linuxdo_read_history": 0,
+                },
+                "ok",
+            )
+            if task_id
+            else (
+                [],
+                {
+                    "linuxdo_bookmarks": 0,
+                    "linuxdo_likes": 0,
+                    "linuxdo_read_history": 0,
+                },
+                "skipped",
+            )
+        ),
+    )
+
     async def _fetch_bangumi(*, username: str, token: str = ""):
         state["bangumi_fetch_token"] = token
         events = list(state.get("bangumi_events", []))
@@ -8289,6 +8441,47 @@ def test_run_guided_init_without_bilibili_builds_profile_from_zhihu(monkeypatch)
     assert state["profile_history"]
     assert state["profile_history"][0]["source_platform"] == "zhihu"
     assert state["propagated"] == state["zhihu_events"]
+
+
+def test_run_guided_init_linuxdo_uses_account_owned_staged_ingress(monkeypatch) -> None:
+    import asyncio
+
+    state = _guided_init_pipeline_doubles(monkeypatch)
+    state["linuxdo_events"] = [
+        {
+            "event_type": "favorite",
+            "title": "Linux.do 收藏",
+            "url": "https://linux.do/t/example/42",
+            "context": "在 Linux.do 收藏了《Linux.do 收藏》",
+            "metadata": {
+                "source_platform": "linuxdo",
+                "content_id": "topic:42",
+                "account_key": "linuxdo-user:7",
+            },
+        }
+    ]
+
+    result = asyncio.run(
+        cli_module.run_guided_init(
+            client=None,
+            memory=state["memory"],
+            soul_engine=state["soul"],
+            favorite_limit=0,
+            follow_limit=0,
+            include_bili=False,
+            include_xhs=False,
+            include_dy=False,
+            include_yt=False,
+            include_linuxdo=True,
+            target_pool_count=10,
+            discover_backfill=state["backfill"],
+        )
+    )
+
+    assert result.linuxdo_status == "ok"
+    assert state["linuxdo_enqueue_kwargs"]["profile_update"] is True
+    assert state["analyzed"] == state["linuxdo_events"]
+    assert state["profile_history"][0]["source_platform"] == "linuxdo"
 
 
 def test_run_guided_init_all_sources_empty_raises_empty_signals(monkeypatch) -> None:

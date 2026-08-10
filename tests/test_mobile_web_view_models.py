@@ -294,7 +294,7 @@ class TestMobileWebViewModels:
               title: "A YouTube deep dive",
               recommendation_id: 42,
               topic_label: "",
-              up_name: "这位 UP 还没认出来",
+              up_name: "这位创作者还没认出来",
             });
         """)
         )
@@ -399,7 +399,7 @@ class TestMobileWebViewModels:
               title: "一个知乎回答",
               recommendation_id: 43,
               topic_label: "",
-              up_name: "这位 UP 还没认出来",
+              up_name: "这位创作者还没认出来",
             });
 
             const missingUrl = normalizeRecommendation({
@@ -457,7 +457,7 @@ class TestMobileWebViewModels:
               title: "Local-first agents",
               recommendation_id: 44,
               topic_label: "",
-              up_name: "这位 UP 还没认出来",
+              up_name: "这位创作者还没认出来",
             });
 
             const missingUrl = normalizeRecommendation({
@@ -473,6 +473,52 @@ class TestMobileWebViewModels:
                 content_url: "https://old.reddit.com/r/test/comments/1/post",
               }),
               "reddit",
+            );
+          """)
+        )
+
+    def test_linuxdo_recommendation_uses_canonical_topic_url_and_text_card(self) -> None:
+        _assert_js(
+            dedent("""
+            import assert from "node:assert/strict";
+            import {
+              buildContentUrl,
+              getRecommendationCardKind,
+              getSourceLabel,
+              normalizeRecommendation,
+              normalizeSourcePlatform,
+            } from "./src/openbiliclaw/web/js/view-models.js";
+
+            const post = normalizeRecommendation({
+              id: 45,
+              content_id: "topic:12345",
+              title: "Linux.do 上的一篇主题",
+              source_platform: "linux.do",
+              content_type: "post",
+              body_text: "主题正文摘要",
+              cover_url: "",
+            });
+
+            assert.equal(post.source_platform, "linuxdo");
+            assert.equal(post.up_name, "这位创作者还没认出来");
+            assert.equal(getSourceLabel(post.source_platform), "Linux.do");
+            assert.equal(buildContentUrl(post), "https://linux.do/t/12345");
+            assert.deepEqual(getRecommendationCardKind(post), {
+              kind: "text",
+              coverUrl: "",
+              text: "主题正文摘要",
+            });
+            assert.equal(
+              normalizeSourcePlatform({
+                content_url: "https://linux.do/t/example/67890",
+              }),
+              "linuxdo",
+            );
+            assert.equal(
+              normalizeSourcePlatform({
+                content_url: "https://notlinux.do/t/example/67890",
+              }),
+              "web",
             );
           """)
         )

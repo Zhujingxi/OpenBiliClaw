@@ -94,6 +94,7 @@ test("platformDisplayName maps known platforms and passes through unknown", () =
   assert.equal(platformDisplayName("ZHIHU"), "知乎");
   assert.equal(platformDisplayName("reddit"), "Reddit");
   assert.equal(platformDisplayName("bgm"), "Bangumi");
+  assert.equal(platformDisplayName("linuxdo"), "Linux.do");
   assert.equal(platformDisplayName("newtube"), "newtube");
   assert.equal(platformDisplayName(""), "");
 });
@@ -157,7 +158,7 @@ test("buildContentUrl and click payload keep YouTube items source-aware", () => 
     title: "A YouTube deep dive",
     recommendation_id: 42,
     topic_label: "",
-    up_name: "这位 UP 还没认出来",
+    up_name: "这位创作者还没认出来",
   });
 });
 
@@ -182,7 +183,7 @@ test("normalizeRecommendation keeps Zhihu items source-aware", () => {
     title: "一个知乎回答",
     recommendation_id: 43,
     topic_label: "",
-    up_name: "这位 UP 还没认出来",
+    up_name: "这位创作者还没认出来",
   });
 });
 
@@ -222,7 +223,7 @@ test("normalizeRecommendation keeps Reddit items source-aware and text-card base
     title: "Local-first agents",
     recommendation_id: 44,
     topic_label: "",
-    up_name: "这位 UP 还没认出来",
+    up_name: "这位创作者还没认出来",
   });
 });
 
@@ -236,6 +237,37 @@ test("buildContentUrl does not fabricate Bilibili links for Reddit ids", () => {
 
   assert.equal(item.source_platform, "reddit");
   assert.equal(buildContentUrl(item), "");
+});
+
+test("Linux.do recommendations use canonical topic links and text cards", () => {
+  const item = normalizeRecommendation({
+    id: 45,
+    content_id: "topic:12345",
+    title: "Linux.do 上的一篇主题",
+    source_platform: "linux.do",
+    content_type: "post",
+    body_text: "主题正文摘要",
+    cover_url: "",
+  });
+
+  assert.equal(item.source_platform, "linuxdo");
+  assert.equal(platformDisplayName(item.source_platform), "Linux.do");
+  assert.equal(buildContentUrl(item), "https://linux.do/t/12345");
+  assert.deepEqual(getRecommendationCardKind(item), {
+    kind: "text",
+    coverUrl: "",
+    text: "主题正文摘要",
+  });
+
+  const inferred = normalizeRecommendation({
+    content_id: "topic:67890",
+    content_url: "https://linux.do/t/example/67890",
+    content_type: "post",
+  });
+  assert.equal(inferred.source_platform, "linuxdo");
+
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  assert.match(popupJs, /linuxdo: "Linux\.do"/);
 });
 
 test("probeMessageKey normalizes type and domain", () => {

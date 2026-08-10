@@ -1,6 +1,6 @@
 """Database-only enqueue helpers for browser-extension bootstrap tasks.
 
-The CLI historically owned the five bootstrap enqueue paths.  Keeping that
+The CLI historically owned the bootstrap enqueue paths.  Keeping that
 logic in this module lets runtime code enqueue an already-resolved database
 without importing the Typer/Rich CLI surface.  The helpers deliberately stop
 at the database boundary: dispatch kicks and user-facing rendering belong to
@@ -26,6 +26,7 @@ DEFAULT_DY_BOOTSTRAP_DEDUPE_HOURS = 6.0
 DEFAULT_YT_BOOTSTRAP_DEDUPE_HOURS = 6.0
 DEFAULT_ZHIHU_BOOTSTRAP_DEDUPE_HOURS = 6.0
 DEFAULT_REDDIT_BOOTSTRAP_DEDUPE_HOURS = 6.0
+DEFAULT_LINUXDO_BOOTSTRAP_DEDUPE_HOURS = 6.0
 
 _RECENT_TASK_STATUSES = ("pending", "in_progress", "completed", "failed")
 Notify = Callable[[str], None]
@@ -34,7 +35,7 @@ _P = ParamSpec("_P")
 # All in-process bootstrap producers (runtime, guided init, and CLI fetch)
 # share this re-entrant fast-path lock. The SQLite admission transaction below
 # is the cross-facade/process authority: it holds one write reservation across
-# the five-table active scan and selected insert. The lock additionally closes
+# the cross-source active scan and selected insert. The lock additionally closes
 # cancelled-worker/hot-reload thread overlap without coupling runtime to CLI.
 SOURCE_BOOTSTRAP_DECISION_LOCK = threading.RLock()
 _BOOTSTRAP_TASK_TABLES: tuple[tuple[str, str, str], ...] = (
@@ -43,12 +44,13 @@ _BOOTSTRAP_TASK_TABLES: tuple[tuple[str, str, str], ...] = (
     ("yt", "yt_tasks", "bootstrap_profile"),
     ("zhihu", "zhihu_tasks", "bootstrap_events"),
     ("reddit", "reddit_tasks", "bootstrap_events"),
+    ("linuxdo", "linuxdo_tasks", "bootstrap_events"),
 )
 
 
 @contextmanager
 def _bootstrap_admission_transaction(database: Any) -> Iterator[None]:
-    """Serialize the five-table active scan and insert in SQLite.
+    """Serialize the cross-source active scan and insert in SQLite.
 
     The process-local decision lock keeps ordinary callers cheap, while
     ``BEGIN IMMEDIATE`` is the authority across separate ``Database`` facades
@@ -115,7 +117,7 @@ def _serialized_enqueue(
 
 
 def _find_active_bootstrap_task(database: Any) -> tuple[str, str] | None:
-    """Return one pending/in-progress account bootstrap across all five sources."""
+    """Return one pending/in-progress account bootstrap across all task sources."""
 
     conn = getattr(database, "conn", None)
     execute = getattr(conn, "execute", None)
@@ -188,6 +190,57 @@ def _recent_reuse_result(
     return BootstrapEnqueueResult(task_id=task_id, created=False, reason="reused_recent")
 
 
+def _linuxdo_reusable_recent_task(
+    queue: Any,
+    *,
+    recent_hours: float,
+) -> dict[str, Any] | None:
+    """Return only active or positively completed Linux.do bootstrap work.
+
+    A failed/degraded terminal must never lock a repaired login or transient
+    network recovery behind the six-hour dedupe window.  Compare the latest
+    success and failure explicitly so an older success cannot mask a newer
+    failed attempt.
+    """
+    find_recent = getattr(queue, "find_recent_task", None)
+    if not callable(find_recent):
+        return None
+    active = find_recent(
+        "bootstrap_events",
+        recent_hours=recent_hours,
+        statuses=("pending", "in_progress"),
+    )
+    if isinstance(active, dict):
+        return active
+
+    terminals = [
+        row
+        for row in (
+            find_recent("bootstrap_events", recent_hours=recent_hours, statuses=("completed",)),
+            find_recent("bootstrap_events", recent_hours=recent_hours, statuses=("failed",)),
+        )
+        if isinstance(row, dict)
+    ]
+    if not terminals:
+        return None
+    latest = max(
+        terminals,
+        key=lambda row: (str(row.get("created_at", "")), str(row.get("id", ""))),
+    )
+    if str(latest.get("status", "")) != "completed":
+        return None
+    try:
+        result = json.loads(str(latest.get("result_json") or "{}"))
+    except json.JSONDecodeError:
+        return None
+    terminal_status = (
+        str(result.get("_openbiliclaw_terminal_status", "")).strip()
+        if isinstance(result, dict)
+        else ""
+    )
+    return latest if terminal_status in {"ok", "empty"} else None
+
+
 def _created_or_budget_result(
     task_id: object,
     *,
@@ -222,9 +275,10 @@ def seed_guided_init_attempts(
     XHS, Douyin, YouTube, and Zhihu have ambiguous ``empty`` results: the
     extension can complete the task while the site is logged out or blocked,
     so only ``ok`` is evidence that a usable bootstrap pull completed. Reddit
-    is deliberately different: its bootstrap first positively resolves
-    ``/api/me`` and maps an unauthenticated response to ``login_required``;
-    therefore ``empty`` is a genuine successful-empty pull for Reddit.
+    and Linux.do are deliberately different: their bootstrap tasks first
+    positively resolve the current account and map an unauthenticated response
+    to ``login_required``; therefore ``empty`` is a genuine successful-empty
+    pull for those sources.
     """
     eligible: list[str] = []
     for source, status in (
@@ -235,11 +289,13 @@ def seed_guided_init_attempts(
     ):
         if str(status or "").strip().lower() == "ok":
             eligible.append(source)
-    if str(statuses.get("reddit") or "").strip().lower() in {"ok", "empty"}:
-        # Reddit's ``empty`` is evidence-backed, unlike the four browser pages
-        # above; keep this distinction explicit so future status refactors do
-        # not turn a logged-out result into a successful schedule stamp.
-        eligible.append("reddit")
+    for source in ("reddit", "linuxdo"):
+        if str(statuses.get(source) or "").strip().lower() in {"ok", "empty"}:
+            # These ``empty`` results are evidence-backed, unlike the four
+            # browser pages above; keep this distinction explicit so future
+            # status refactors do not turn a logged-out result into a successful
+            # schedule stamp.
+            eligible.append(source)
     if not eligible:
         return ()
 
@@ -256,9 +312,13 @@ def seed_guided_init_attempts(
         incremental = dict(raw_incremental) if isinstance(raw_incremental, dict) else {}
         raw_attempts = incremental.get("last_attempt_at")
         attempts = dict(raw_attempts) if isinstance(raw_attempts, dict) else {}
+        raw_successes = incremental.get("last_success_at")
+        successes = dict(raw_successes) if isinstance(raw_successes, dict) else {}
         for source in eligible:
             attempts[source] = timestamp
+            successes[source] = timestamp
         incremental["last_attempt_at"] = attempts
+        incremental["last_success_at"] = successes
         state["source_incremental"] = incremental
         return state
 
@@ -648,10 +708,114 @@ def enqueue_reddit_bootstrap(
     )
 
 
+@_serialized_enqueue
+def enqueue_linuxdo_bootstrap(
+    database: Any,
+    *,
+    force: bool = False,
+    incremental: bool = False,
+    profile_update: bool = False,
+    notify: Notify | None = None,
+) -> BootstrapEnqueueResult:
+    """Enqueue the Linux.do ``bootstrap_events`` task without dispatching it."""
+    from openbiliclaw.sources.linuxdo_tasks import LinuxdoTaskQueue
+
+    configured_max_items = INIT_BOOTSTRAP_MAX_ITEMS_PER_SCOPE
+    configured_request_interval = 3.0
+    try:
+        from openbiliclaw.config import load_config
+
+        linuxdo_cfg = getattr(getattr(load_config(), "sources", None), "linuxdo", None)
+        configured_max_items = int(getattr(linuxdo_cfg, "bootstrap_limit", configured_max_items))
+        configured_request_interval = float(
+            getattr(linuxdo_cfg, "request_interval_seconds", configured_request_interval)
+        )
+    except Exception:
+        pass
+    max_items = min(
+        300,
+        max(
+            1,
+            int(
+                os.environ.get(
+                    "OPENBILICLAW_LINUXDO_BOOTSTRAP_MAX_ITEMS",
+                    str(configured_max_items),
+                )
+            ),
+        ),
+    )
+    request_interval_seconds = min(
+        30.0,
+        max(
+            0.0,
+            float(
+                os.environ.get(
+                    "OPENBILICLAW_LINUXDO_REQUEST_INTERVAL_SECONDS",
+                    str(configured_request_interval),
+                )
+            ),
+        ),
+    )
+
+    try:
+        queue = LinuxdoTaskQueue(database)
+        with _bootstrap_admission_transaction(database):
+            dedupe_hours = _dedupe_hours(
+                "OPENBILICLAW_LINUXDO_BOOTSTRAP_DEDUPE_HOURS",
+                DEFAULT_LINUXDO_BOOTSTRAP_DEDUPE_HOURS,
+            )
+            if not force and dedupe_hours > 0:
+                recent = _linuxdo_reusable_recent_task(
+                    queue,
+                    recent_hours=dedupe_hours,
+                )
+                if recent is not None:
+                    reused = _recent_reuse_result(
+                        recent,
+                        message=(
+                            "  [dim]复用最近的 Linux.do bootstrap 任务"
+                            "({status})；需要重新拉取可设 "
+                            "OPENBILICLAW_LINUXDO_BOOTSTRAP_DEDUPE_HOURS=0。[/dim]"
+                        ),
+                        notify=notify,
+                    )
+                    if reused is not None:
+                        return reused
+
+            active = _active_bootstrap_result(database, notify=notify)
+            if active is not None:
+                return active
+
+            payload = _incremental_payload(
+                {
+                    "scopes": [
+                        "linuxdo_bookmarks",
+                        "linuxdo_likes",
+                        "linuxdo_read_history",
+                    ],
+                    "max_items_per_scope": max(1, max_items),
+                    "request_interval_seconds": request_interval_seconds,
+                    "profile_update": bool(profile_update),
+                },
+                incremental,
+            )
+            task_id = queue.enqueue_with_id("bootstrap_events", payload, daily_budget=10)
+    except Exception as exc:
+        _notify(notify, f"  [yellow]Linux.do 初始化事件未拉取: {exc}[/yellow]")
+        return BootstrapEnqueueResult(task_id=None, created=False, reason="enqueue_error")
+
+    return _created_or_budget_result(
+        task_id,
+        budget_message="  [yellow]Linux.do 初始化事件未拉取: 今日任务预算已用完。[/yellow]",
+        notify=notify,
+    )
+
+
 __all__ = [
     "BootstrapEnqueueResult",
     "SOURCE_BOOTSTRAP_DECISION_LOCK",
     "enqueue_dy_bootstrap",
+    "enqueue_linuxdo_bootstrap",
     "enqueue_reddit_bootstrap",
     "enqueue_xhs_bootstrap",
     "enqueue_yt_bootstrap",

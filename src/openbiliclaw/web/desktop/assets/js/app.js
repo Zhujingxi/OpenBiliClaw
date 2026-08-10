@@ -193,14 +193,15 @@
       { key: "twitter", label: "X (Twitter)" },
       { key: "zhihu", label: "知乎" },
       { key: "reddit", label: "Reddit" },
-      { key: "bangumi", label: "Bangumi" }
+      { key: "bangumi", label: "Bangumi" },
+      { key: "linuxdo", label: "Linux.do" }
     ];
     const sourceFilterOrder = sourceFilterDefinitions.map((source) => source.label);
     // 首次成功读到库存快照之前是"未知"，不能把还没读到伪装成 0。
     const PLATFORM_COUNT_UNKNOWN_TEXT = "—";
     const PLATFORM_COUNT_UNKNOWN_LABEL = "库存待读取";
-    const platformLabel = { bilibili: "B 站", youtube: "YouTube", douyin: "抖音", xiaohongshu: "小红书", xhs: "小红书", twitter: "X (Twitter)", x: "X (Twitter)", zhihu: "知乎", reddit: "Reddit", rd: "Reddit", bangumi: "Bangumi", bgm: "Bangumi" };
-    const platformAliases = { bili: "bilibili", bilibili: "bilibili", xhs: "xiaohongshu", xiaohongshu: "xiaohongshu", rednote: "xiaohongshu", dy: "douyin", douyin: "douyin", tiktok: "douyin", yt: "youtube", youtube: "youtube", x: "twitter", twitter: "twitter", zh: "zhihu", zhihu: "zhihu", rd: "reddit", reddit: "reddit", bgm: "bangumi", bangumi: "bangumi" };
+    const platformLabel = { bilibili: "B 站", youtube: "YouTube", douyin: "抖音", xiaohongshu: "小红书", xhs: "小红书", twitter: "X (Twitter)", x: "X (Twitter)", zhihu: "知乎", reddit: "Reddit", rd: "Reddit", bangumi: "Bangumi", bgm: "Bangumi", linuxdo: "Linux.do", "linux.do": "Linux.do" };
+    const platformAliases = { bili: "bilibili", bilibili: "bilibili", xhs: "xiaohongshu", xiaohongshu: "xiaohongshu", rednote: "xiaohongshu", dy: "douyin", douyin: "douyin", tiktok: "douyin", yt: "youtube", youtube: "youtube", x: "twitter", twitter: "twitter", zh: "zhihu", zhihu: "zhihu", rd: "reddit", reddit: "reddit", bgm: "bangumi", bangumi: "bangumi", linuxdo: "linuxdo", "linux.do": "linuxdo" };
     const textCardContentTypes = new Set(["tweet", "thread", "answer", "article", "question", "post", "comment"]);
     // v0.3.118+: bilibili is selectable like every other source — default
     // checked (recommended) but no longer forced. At least one source must
@@ -214,7 +215,7 @@
     // local first-run policy (the backend mirrors it in providers._ENABLED_BY_DEFAULT).
     const INIT_SOURCE_LABEL_FALLBACK = {
       bilibili: "B 站", xiaohongshu: "小红书", douyin: "抖音", youtube: "YouTube",
-      twitter: "X", zhihu: "知乎", reddit: "Reddit", bangumi: "Bangumi"
+      twitter: "X", zhihu: "知乎", reddit: "Reddit", bangumi: "Bangumi", linuxdo: "Linux.do"
     };
     const INIT_SOURCE_DEFAULT_CHECKED = new Set(["bilibili"]);
     const _initSourceStatus = globalThis.OpenBiliClawSourceStatus || null;
@@ -226,7 +227,7 @@
       label: _initSourceStatus?.sourceLabel?.(key) || INIT_SOURCE_LABEL_FALLBACK[key] || key,
       ...(INIT_SOURCE_DEFAULT_CHECKED.has(key) ? { defaultChecked: true } : {})
     }));
-    const INIT_SOURCE_LOGIN_HINT = "勾选要纳入初始化的平台（至少一个）。需要登录的平台请先在当前浏览器登录；Bangumi 使用公开 API，无需登录。勾选会同时开启该来源。";
+    const INIT_SOURCE_LOGIN_HINT = "勾选要纳入初始化的平台（至少一个）。需要登录的平台请先在当前浏览器登录；Bangumi 与 Linux.do 的公开发现无需登录，Linux.do 浏览器登录可增强个人信号。勾选会同时开启该来源。";
     const INIT_REASON_TEXT = {
       unsupported_runtime: "Docker / 容器环境不支持在网页里启动初始化。请在宿主机运行：docker exec -it openbiliclaw-backend openbiliclaw init",
       already_running: "初始化正在进行中。",
@@ -1212,6 +1213,7 @@
         if (urlHostMatches(url, ["x.com", "twitter.com"])) return "twitter";
         if (urlHostMatches(url, ["zhihu.com", "zhuanlan.zhihu.com"])) return "zhihu";
         if (urlHostMatches(url, ["reddit.com", "redd.it"])) return "reddit";
+        if (urlHostMatches(url, ["linux.do"])) return "linuxdo";
         return "web";
       }
       if (String(item?.bvid ?? "").trim()) return "bilibili";
@@ -3491,6 +3493,12 @@ ${savedCardFeedbackBarHtml(listKind)}
       if (platform === "youtube" && item.content_id) return `https://www.youtube.com/watch?v=${encodeURIComponent(item.content_id)}`;
       if (platform === "twitter" && item.content_id) return `https://x.com/i/status/${encodeURIComponent(item.content_id)}`;
       if (platform === "bangumi" && item.content_id) return `https://bgm.tv/subject/${encodeURIComponent(item.content_id)}`;
+      if (platform === "linuxdo" && item.content_id) {
+        const topicId = String(item.content_id).replace(/^(?:linuxdo:)?topic[:_]/i, "");
+        return /^[1-9]\d*$/.test(topicId)
+          ? `https://linux.do/t/${encodeURIComponent(topicId)}`
+          : "";
+      }
       if (platform === "reddit") return "";
       return "";
     }
@@ -6865,6 +6873,13 @@ ${cardFeedbackBarHtml()}`;
       ["ranked", "bangumiModeRanked"],
       ["latest", "bangumiModeLatest"],
     ];
+    const LINUXDO_SOURCE_MODE_FIELDS = [
+      ["search", "linuxdoModeSearch"],
+      ["hot", "linuxdoModeHot"],
+      ["feed", "linuxdoModeFeed"],
+      ["creator", "linuxdoModeCreator"],
+      ["related", "linuxdoModeRelated"],
+    ];
     const BANGUMI_SUBJECT_TYPE_FIELDS = [
       ["anime", "bangumiTypeAnime"],
       ["book", "bangumiTypeBook"],
@@ -6950,7 +6965,8 @@ ${cardFeedbackBarHtml()}`;
       twitter: "twitterEnabled",
       zhihu: "zhihuEnabled",
       reddit: "redditEnabled",
-      bangumi: "bangumiEnabled"
+      bangumi: "bangumiEnabled",
+      linuxdo: "linuxdoEnabled"
     };
 
     function collectEnabledSourceIssues(data) {
@@ -7162,7 +7178,8 @@ ${cardFeedbackBarHtml()}`;
       twitter: "shareTwitter",
       zhihu: "shareZhihu",
       reddit: "shareReddit",
-      bangumi: "shareBangumi"
+      bangumi: "shareBangumi",
+      linuxdo: "shareLinuxdo"
     };
     const SOURCE_CARD_LABELS = {
       bilibili: "Bilibili",
@@ -7172,8 +7189,10 @@ ${cardFeedbackBarHtml()}`;
       twitter: "X (Twitter)",
       zhihu: "知乎",
       reddit: "Reddit",
-      bangumi: "Bangumi"
+      bangumi: "Bangumi",
+      linuxdo: "Linux.do"
     };
+    const SOURCE_CARD_INLINE_COLORS = { linuxdo: "#1f6f43" };
 
     function sourceCardFor(key) {
       return $("#sourceStatusList")?.querySelector(`[data-source-status="${key}"]`) || null;
@@ -7219,6 +7238,7 @@ ${cardFeedbackBarHtml()}`;
         const seg = document.createElement("i");
         seg.dataset.sourceKey = item.key;
         seg.style.width = `${(item.weight / total * 100).toFixed(2)}%`;
+        if (SOURCE_CARD_INLINE_COLORS[item.key]) seg.style.background = SOURCE_CARD_INLINE_COLORS[item.key];
         seg.title = `${item.label}：${item.weight} 份`;
         bar.appendChild(seg);
       });
@@ -7231,6 +7251,7 @@ ${cardFeedbackBarHtml()}`;
         cell.dataset.off = item.enabled ? "false" : "true";
         const swatch = document.createElement("em");
         swatch.dataset.sourceKey = item.key;
+        if (SOURCE_CARD_INLINE_COLORS[item.key]) swatch.style.background = SOURCE_CARD_INLINE_COLORS[item.key];
         const name = document.createElement("span");
         name.textContent = item.label;
         const value = document.createElement("b");
@@ -8041,6 +8062,7 @@ ${cardFeedbackBarHtml()}`;
       setInput("shareZhihu", scheduler.pool_source_shares?.zhihu);
       setInput("shareReddit", scheduler.pool_source_shares?.reddit);
       setInput("shareBangumi", scheduler.pool_source_shares?.bangumi);
+      setInput("shareLinuxdo", scheduler.pool_source_shares?.linuxdo);
       setInput("speculationInterval", scheduler.speculation_interval_minutes);
       setInput("speculationTtl", scheduler.speculation_ttl_days);
       setInput("speculationCooldown", scheduler.speculation_cooldown_days);
@@ -8182,6 +8204,16 @@ ${cardFeedbackBarHtml()}`;
       setInput("bangumiRequestInterval", config.sources?.bangumi?.request_interval_seconds);
       setInput("bangumiMinInterval", config.sources?.bangumi?.min_interval_minutes);
       setInput("bangumiBootstrapLimit", config.sources?.bangumi?.bootstrap_limit);
+      setSelect("linuxdoEnabled", config.sources?.linuxdo?.enabled === true ? "on" : "off");
+      setCheckedValues(LINUXDO_SOURCE_MODE_FIELDS, config.sources?.linuxdo?.source_modes);
+      setInput("linuxdoDailySearchBudget", config.sources?.linuxdo?.daily_search_budget);
+      setInput("linuxdoDailyHotBudget", config.sources?.linuxdo?.daily_hot_budget);
+      setInput("linuxdoDailyFeedBudget", config.sources?.linuxdo?.daily_feed_budget);
+      setInput("linuxdoDailyCreatorBudget", config.sources?.linuxdo?.daily_creator_budget);
+      setInput("linuxdoDailyRelatedBudget", config.sources?.linuxdo?.daily_related_budget);
+      setInput("linuxdoRequestInterval", config.sources?.linuxdo?.request_interval_seconds);
+      setInput("linuxdoMinInterval", config.sources?.linuxdo?.min_interval_minutes);
+      setInput("linuxdoBootstrapLimit", config.sources?.linuxdo?.bootstrap_limit);
       if (!state.initBangumiUsernameTouched) {
         state.initBangumiUsername = config.sources?.bangumi?.username || "";
         // A successful prefill populated the field; a later explicit clear is
@@ -9335,6 +9367,18 @@ ${cardFeedbackBarHtml()}`;
             request_interval_seconds: getIntInput("bangumiRequestInterval", 1),
             min_interval_minutes: getIntInput("bangumiMinInterval", 3),
             bootstrap_limit: getIntInput("bangumiBootstrapLimit", 300)
+          },
+          linuxdo: {
+            enabled: $("#linuxdoEnabled").value === "on",
+            source_modes: collectCheckedValues(LINUXDO_SOURCE_MODE_FIELDS, ["search"]),
+            daily_search_budget: getIntInput("linuxdoDailySearchBudget", 0),
+            daily_hot_budget: getIntInput("linuxdoDailyHotBudget", 0),
+            daily_feed_budget: getIntInput("linuxdoDailyFeedBudget", 0),
+            daily_creator_budget: getIntInput("linuxdoDailyCreatorBudget", 0),
+            daily_related_budget: getIntInput("linuxdoDailyRelatedBudget", 0),
+            request_interval_seconds: getIntInput("linuxdoRequestInterval", 3),
+            min_interval_minutes: getIntInput("linuxdoMinInterval", 3),
+            bootstrap_limit: getIntInput("linuxdoBootstrapLimit", 300)
           }
         },
         scheduler: {
@@ -9360,7 +9404,8 @@ ${cardFeedbackBarHtml()}`;
             twitter: getIntInput("shareTwitter", 1),
             zhihu: getIntInput("shareZhihu", 1),
             reddit: getIntInput("shareReddit", 1),
-            bangumi: getIntInput("shareBangumi", 1)
+            bangumi: getIntInput("shareBangumi", 1),
+            linuxdo: getIntInput("shareLinuxdo", 1)
           },
           speculation_interval_minutes: getIntInput("speculationInterval", 10),
           speculation_ttl_days: getIntInput("speculationTtl", 3),
@@ -10110,7 +10155,7 @@ ${cardFeedbackBarHtml()}`;
       safeBind(`#${id}`, "change", () => renderSourcesStatusRows(state.sourceStatus));
     });
     safeBind("#suggestSharesBtn", "click", async () => {
-      const result = await requestJson(ENDPOINTS.sourceShareSuggestion, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled_sources: { bilibili: $("#bilibiliEnabled").value === "on", xiaohongshu: $("#xhsEnabled").value === "on", douyin: $("#douyinEnabled").value === "on", youtube: $("#youtubeEnabled").value === "on", twitter: $("#twitterEnabled").value === "on", zhihu: $("#zhihuEnabled").value === "on", reddit: $("#redditEnabled").value === "on", bangumi: $("#bangumiEnabled").value === "on" }, configured_shares: buildConfigUpdate().scheduler.pool_source_shares }) });
+      const result = await requestJson(ENDPOINTS.sourceShareSuggestion, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled_sources: { bilibili: $("#bilibiliEnabled").value === "on", xiaohongshu: $("#xhsEnabled").value === "on", douyin: $("#douyinEnabled").value === "on", youtube: $("#youtubeEnabled").value === "on", twitter: $("#twitterEnabled").value === "on", zhihu: $("#zhihuEnabled").value === "on", reddit: $("#redditEnabled").value === "on", bangumi: $("#bangumiEnabled").value === "on", linuxdo: $("#linuxdoEnabled").value === "on" }, configured_shares: buildConfigUpdate().scheduler.pool_source_shares }) });
       const shares = result?.pool_source_shares || result?.shares || result?.suggested_shares;
       if (shares) {
         setInput("shareBilibili", shares.bilibili);
@@ -10121,6 +10166,7 @@ ${cardFeedbackBarHtml()}`;
         if (shares.zhihu !== undefined) setInput("shareZhihu", shares.zhihu);
         if (shares.reddit !== undefined) setInput("shareReddit", shares.reddit);
         if (shares.bangumi !== undefined) setInput("shareBangumi", shares.bangumi);
+        if (shares.linuxdo !== undefined) setInput("shareLinuxdo", shares.linuxdo);
         renderShareOverview();
         markSettingsDirty();
         showToast("已应用来源占比建议");

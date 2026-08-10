@@ -2513,6 +2513,28 @@ class TestBackendAPI:
         assert isinstance(ctx.runtime_controller.reddit_producer, RedditDiscoveryProducer)
         assert ctx.runtime_controller.pool_source_shares["reddit"] == 2
 
+    def test_runtime_context_wires_linuxdo_producer_when_enabled(self, tmp_path: Path) -> None:
+        from openbiliclaw.api.runtime_context import build_runtime_context
+        from openbiliclaw.config import Config
+        from openbiliclaw.runtime.linuxdo_producer import LinuxdoDiscoveryProducer
+
+        config = Config(data_dir=str(tmp_path / "data"))
+        config.llm.default_provider = "ollama"
+        config.llm.ollama.model = "llama3"
+        config.sources.linuxdo.enabled = True
+        config.sources.linuxdo.request_interval_seconds = 7
+        config.scheduler.pool_source_shares["linuxdo"] = 2
+
+        ctx = build_runtime_context(config)
+
+        producer = ctx.runtime_controller.linuxdo_producer
+        assert isinstance(producer, LinuxdoDiscoveryProducer)
+        assert producer.candidate_pipeline is ctx.runtime_controller.discovery_candidate_pipeline
+        assert producer.keyword_fetch is ctx.runtime_controller.keyword_fetch
+        assert producer.candidate_evaluation_owned_by_coordinator is True
+        assert producer.poll_interval_seconds == 7
+        assert ctx.runtime_controller.pool_source_shares["linuxdo"] == 2
+
     def test_runtime_context_delegates_runtime_producer_evaluation_to_shared_coordinator(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -2899,6 +2921,7 @@ class TestBackendAPI:
             "yt": False,
             "zhihu": False,
             "reddit": False,
+            "linuxdo": False,
         }
         assert captured["runtime_controller_kwargs"]["bilibili_producer"] is not None
         assert (
@@ -3102,6 +3125,7 @@ class TestBackendAPI:
             "zhihu",
             "reddit",
             "bangumi",
+            "linuxdo",
         ):
             assert key in body, f"{key} missing from sources status"
             item = body[key]
@@ -3127,6 +3151,9 @@ class TestBackendAPI:
         assert body["bangumi"]["logged_in"] is True
         assert body["bangumi"]["auth"] is not None
         assert body["bangumi"]["auth"]["auth_required"] is False
+        assert body["linuxdo"]["state"] == "no_auth"
+        assert body["linuxdo"]["logged_in"] is True
+        assert body["linuxdo"]["auth"]["auth_required"] is False
 
     def test_bangumi_status_is_no_auth_with_discovery_health_in_detail(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -11187,6 +11214,27 @@ class TestBackendAPI:
             == "https://bgm.tv/subject/326"
         )
 
+    def test_recommendation_click_builds_only_numeric_linuxdo_fallback_url(self) -> None:
+        """Linux.do topic identities map to canonical topic URLs, never Bilibili."""
+        from openbiliclaw.api.app import _fallback_recommendation_click_url
+
+        assert (
+            _fallback_recommendation_click_url(
+                source_platform="linuxdo",
+                content_id="topic:326",
+                bvid="topic:326",
+            )
+            == "https://linux.do/t/326"
+        )
+        assert (
+            _fallback_recommendation_click_url(
+                source_platform="linuxdo",
+                content_id="topic:not-numeric",
+                bvid="topic:not-numeric",
+            )
+            == ""
+        )
+
     def test_recommendation_click_endpoint_persists_dwell_fields(self) -> None:
         """When the extension reports dwell on the click-through, those
         fields flow into the persisted click event so storage can classify
@@ -14895,6 +14943,7 @@ class TestEmbeddingAndCompatProviderE2E:
             "zhihu": 1,
             "reddit": 1,
             "bangumi": 4,
+            "linuxdo": 1,
         }
         assert data["scheduler"]["account_sync_interval_hours"] == 9
         assert data["scheduler"]["refresh_check_interval_seconds"] == 75
@@ -15449,6 +15498,7 @@ class TestEmbeddingAndCompatProviderE2E:
             "zhihu": 1,
             "reddit": 1,
             "bangumi": 1,
+            "linuxdo": 1,
         }
         assert cfg.scheduler.refresh_check_interval_seconds == 75
         assert cfg.scheduler.eval_min_batch_size == 23
@@ -15595,6 +15645,7 @@ class TestEmbeddingAndCompatProviderE2E:
                 "zhihu": 0,
                 "reddit": 225,
                 "bangumi": 0,
+                "linuxdo": 0,
             },
             "enabled_sources": {
                 "bilibili": True,
@@ -15605,6 +15656,7 @@ class TestEmbeddingAndCompatProviderE2E:
                 "zhihu": False,
                 "reddit": False,
                 "bangumi": False,
+                "linuxdo": False,
             },
             "suggested_shares": {
                 "bilibili": 8,
@@ -15683,6 +15735,7 @@ class TestEmbeddingAndCompatProviderE2E:
                 "zhihu": 0,
                 "reddit": 225,
                 "bangumi": 0,
+                "linuxdo": 0,
             },
             "enabled_sources": {
                 "bilibili": True,
@@ -15693,6 +15746,7 @@ class TestEmbeddingAndCompatProviderE2E:
                 "zhihu": False,
                 "reddit": True,
                 "bangumi": False,
+                "linuxdo": False,
             },
             "suggested_shares": {
                 "bilibili": 6,
@@ -16083,11 +16137,13 @@ class _FakeInitPrereqs:
         chat: bool = True,
         platforms=None,
         chat_detail: str = "",
+        capability_readiness: dict[tuple[str, str], str] | None = None,
     ) -> None:
         self._bili = bili
         self._chat = chat
         self._chat_detail = chat_detail
         self._platforms = list(platforms or [])
+        self._capability_readiness = dict(capability_readiness or {})
         self.bilibili_check_calls = 0
         self.chat_ready_calls = 0
 
@@ -16116,6 +16172,9 @@ class _FakeInitPrereqs:
 
     def enabled_platforms(self) -> list[str]:
         return list(self._platforms)
+
+    def source_capability_readiness(self, slug: str, capability: str) -> str:
+        return self._capability_readiness.get((slug, capability), "ready")
 
 
 def test_init_crash_detail_summarizes_exception() -> None:
@@ -16431,6 +16490,51 @@ class TestGuidedInitEndpoints:
         assert captured["include_bili"] is False
         assert captured["include_reddit"] is True
         assert db.get_latest_init_run() is not None
+
+    def test_init_accepts_linuxdo_as_only_profile_signal_source(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["linuxdo"])
+        app, db = self._make_app(tmp_path, prereqs=prereqs)
+        captured = self._capture_run_guided_init(monkeypatch)
+        with TestClient(app) as client:
+            response = client.post("/api/init", json={"sources": ["linuxdo"]})
+            assert response.status_code == 202
+            self._drive_until(client, captured, key="include_linuxdo")
+
+        assert captured["include_bili"] is False
+        assert captured["include_linuxdo"] is True
+        assert db.get_latest_init_run() is not None
+
+    def test_init_rejects_linuxdo_only_when_profile_capability_is_signed_out(
+        self, tmp_path: Path
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        prereqs = _FakeInitPrereqs(
+            bili="ok",
+            chat=True,
+            platforms=["linuxdo"],
+            capability_readiness={("linuxdo", "profile"): "login_required"},
+        )
+        app, db = self._make_app(tmp_path, prereqs=prereqs)
+
+        with TestClient(app) as client:
+            response = client.post("/api/init", json={"sources": ["linuxdo"]})
+
+        assert response.status_code == 409
+        assert response.json() == {
+            "error": "no_profile_signal_sources",
+            "detail": (
+                "Linux.do 公开发现无需登录，但初始化所需的收藏、点赞和阅读记录"
+                "需要已登录的浏览器会话。请先在当前浏览器登录 Linux.do 并连接插件。"
+            ),
+            "capability": "profile",
+            "readiness": "login_required",
+        }
+        assert db.get_latest_init_run() is None
 
     def test_init_records_douyin_degraded_as_partial_success(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

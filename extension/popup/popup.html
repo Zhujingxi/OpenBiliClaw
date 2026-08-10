@@ -6692,6 +6692,42 @@
       </div>
       </div>
 
+      <div class="settings-section settings-source-card" data-source-card="linuxdo" data-open="0">
+        <div class="source-card-face" role="button" tabindex="0" aria-expanded="false" aria-controls="sourceCardBody-linuxdo">
+        <h3><span class="section-icon">L</span> Linux.do</h3>
+        <div class="settings-field-row">
+          <input id="cfgLinuxdoEnabled" type="checkbox">
+          <label for="cfgLinuxdoEnabled">启用 Linux.do 来源</label>
+        </div>
+        <p class="settings-hint source-status-row" id="cfgLinuxdoStatus" data-source-status="linuxdo"><span class="src-dot">●</span> <span class="src-detail">Linux.do 来源状态加载中…</span></p>
+          <span class="source-card-chev" aria-hidden="true">&#x25BE;</span>
+        </div>
+        <div class="source-card-body" id="sourceCardBody-linuxdo">
+        <div class="settings-probe-row source-verify-row">
+          <button class="settings-secondary-btn source-verify-btn" type="button">测试连接</button>
+          <span class="settings-probe-status source-verify-status" aria-live="polite"></span>
+        </div>
+        <p class="settings-hint">公开发现无需登录；连接已登录 Linux.do 的浏览器插件后，可增强收藏、点赞和阅读记录等个人信号。登录态由插件同源读取，不需要也不提供 Cookie 输入。</p>
+        <div class="settings-field">
+          <label>Linux.do discovery 分支</label>
+          <div class="settings-field-row"><input id="cfgLinuxdoModeSearch" type="checkbox"><label for="cfgLinuxdoModeSearch">搜索</label></div>
+          <div class="settings-field-row"><input id="cfgLinuxdoModeHot" type="checkbox"><label for="cfgLinuxdoModeHot">热门</label></div>
+          <div class="settings-field-row"><input id="cfgLinuxdoModeFeed" type="checkbox"><label for="cfgLinuxdoModeFeed">最新</label></div>
+          <div class="settings-field-row"><input id="cfgLinuxdoModeCreator" type="checkbox"><label for="cfgLinuxdoModeCreator">作者</label></div>
+          <div class="settings-field-row"><input id="cfgLinuxdoModeRelated" type="checkbox"><label for="cfgLinuxdoModeRelated">相关</label></div>
+        </div>
+        <div class="settings-field"><label for="cfgLinuxdoDailySearchBudget">Linux.do 每日搜索任务</label><input id="cfgLinuxdoDailySearchBudget" type="number" min="0" step="1" placeholder="0 = 不限"></div>
+        <div class="settings-field"><label for="cfgLinuxdoDailyHotBudget">Linux.do 每日热门任务</label><input id="cfgLinuxdoDailyHotBudget" type="number" min="0" step="1" placeholder="0 = 不限"></div>
+        <div class="settings-field"><label for="cfgLinuxdoDailyFeedBudget">Linux.do 每日最新任务</label><input id="cfgLinuxdoDailyFeedBudget" type="number" min="0" step="1" placeholder="0 = 不限"></div>
+        <div class="settings-field"><label for="cfgLinuxdoDailyCreatorBudget">Linux.do 每日作者任务</label><input id="cfgLinuxdoDailyCreatorBudget" type="number" min="0" step="1" placeholder="0 = 不限"></div>
+        <div class="settings-field"><label for="cfgLinuxdoDailyRelatedBudget">Linux.do 每日相关任务</label><input id="cfgLinuxdoDailyRelatedBudget" type="number" min="0" step="1" placeholder="0 = 不限"></div>
+        <p class="settings-hint" data-budget-note>预算 = 每日任务次数上限，不是开关；填 1 表示每天只允许 1 次。0 或留空 = 不限。</p>
+        <div class="settings-field"><label for="cfgLinuxdoRequestInterval">请求间隔秒数</label><input id="cfgLinuxdoRequestInterval" type="number" min="0" max="30" step="1" placeholder="3"></div>
+        <div class="settings-field"><label for="cfgLinuxdoMinInterval">最小调度间隔分钟</label><input id="cfgLinuxdoMinInterval" type="number" min="0" step="1" placeholder="3"></div>
+        <div class="settings-field"><label for="cfgLinuxdoBootstrapLimit">初始化个人信号上限</label><input id="cfgLinuxdoBootstrapLimit" type="number" min="1" max="300" step="1" placeholder="300"></div>
+      </div>
+      </div>
+
       <div class="settings-section settings-source-card" data-source-card="pool">
         <h3><span class="section-icon">&#x1F4E6;</span> 候选池来源占比</h3>
         <div class="settings-field">
@@ -6725,6 +6761,10 @@
         <div class="settings-field">
           <label for="cfgPoolShareBangumi">候选池 Bangumi 占比</label>
           <input id="cfgPoolShareBangumi" type="number" min="1" step="1" placeholder="1">
+        </div>
+        <div class="settings-field">
+          <label for="cfgPoolShareLinuxdo">候选池 Linux.do 占比</label>
+          <input id="cfgPoolShareLinuxdo" type="number" min="1" step="1" placeholder="1">
         </div>
         <div class="settings-actions">
           <button id="cfgSuggestPoolShares" class="settings-save" type="button">按已有信号建议比例</button>

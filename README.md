@@ -21,11 +21,11 @@
 
 ## 10 秒看懂 OpenBiliClaw
 
-一个纯本地、私有、开源的自进化跨平台内容发现 Agent：从你的跨平台使用、反馈和对话中持续深化心理画像，带着对你的理解主动去 B 站、小红书、抖音、YouTube、X、知乎、Reddit、Bangumi 等来源找内容。
+一个纯本地、私有、开源的自进化跨平台内容发现 Agent：从你的跨平台使用、反馈和对话中持续深化心理画像，带着对你的理解主动去 B 站、小红书、抖音、YouTube、X、知乎、Reddit、Linux.do、Bangumi 等来源找内容。
 
 | 跨平台 | 本地优先 | 可调教 |
 |---|---|---|
-| B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Bangumi / Web | 数据默认留在本机 SQLite | 喜欢、不感兴趣、聊天反馈都会改变后续推荐 |
+| B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Linux.do / Bangumi / Web | 数据默认留在本机 SQLite | 喜欢、不感兴趣、聊天反馈都会改变后续推荐 |
 
 <p align="center">
   <a href="https://chromewebstore.google.com/detail/cdfjfkdjjhdaccbldipkjhpibnfbiamg"><b>安装浏览器插件</b></a>
@@ -52,7 +52,7 @@
    请按照 https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docs/agent-install.md 的说明帮我部署 OpenBiliClaw 后端(务必用 Bash 的 curl 下载这个文档,不要用 WebFetch — 会丢关键指令)
    ```
 
-3. **连接来源** —— 在装了插件的浏览器登录 [B 站](https://www.bilibili.com)（默认初始化来源），或改选小红书 / 抖音 / YouTube / X / 知乎 / Reddit；Bangumi discovery 无需登录，若要用公开收藏初始化画像则填写公开用户名。
+3. **连接来源** —— 在装了插件的浏览器登录 [B 站](https://www.bilibili.com)（默认初始化来源），或改选小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Linux.do；Linux.do 公开 discovery 无需登录，登录后可导入书签、点赞和阅读记录；Bangumi discovery 无需登录，若要用公开收藏初始化画像则填写公开用户名。
 4. **打开界面** —— 浏览器访问 `http://127.0.0.1:8420/web`；手机扫插件二维码打开 `http://<电脑局域网 IP>:8420/m/`，保存到主屏幕即可当 App 用。
 
 ## 用户交流群
@@ -73,13 +73,13 @@
 
 ## 为什么需要 OpenBiliClaw？
 
-> 名字起源于 B 站（`Bili` = Bilibili，`Claw` = 爪子），项目最早只支持 B 站。从 v0.3.0 起已扩展为通用跨平台 Agent，覆盖 B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Bangumi 与通用 Web，持续接入更多内容平台。
+> 名字起源于 B 站（`Bili` = Bilibili，`Claw` = 爪子），项目最早只支持 B 站。从 v0.3.0 起已扩展为通用跨平台 Agent，覆盖 B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Linux.do / Bangumi 与通用 Web，持续接入更多内容平台。
 
 推荐系统本质上是一个**中间商**——平台站在海量内容和海量用户之间做匹配分发。现代推荐系统远比「优化点击率」复杂：它同时权衡点击率、完播率、点赞/投币概率、停留时长、用户留存、创作者生态健康、广告收入等十几个目标，把它们加权压成一个分数来排序。听起来很科学，但问题在于：**这些权重是平台定的，优化目标归根结底是平台的**——用户满意度只是被当作留存和变现的手段，而非目的本身。你以为你在挑内容，其实是中间商在替你决定你能看到什么。结果就是：推荐越来越像你已经看过的东西，偶尔的惊喜全靠运气。
 
 而且每个平台都是一座孤岛。你在 B 站看了三年机械键盘，小红书完全不知道；你在小红书种草的咖啡器具，B 站从来不会推给你。你的兴趣被割裂在不同平台的数据库里，没有人帮你把它们连起来。
 
-**OpenBiliClaw 反过来。** 它是一个本地运行的 AI Agent——先深度理解你，再根据对你的理解**跨平台**主动搜寻你会喜欢的内容。项目从 B 站起步，现已扩展到小红书、抖音、YouTube、X（Twitter）、知乎、Reddit 和 Bangumi，后续还会覆盖更多内容平台：
+**OpenBiliClaw 反过来。** 它是一个本地运行的 AI Agent——先深度理解你，再根据对你的理解**跨平台**主动搜寻你会喜欢的内容。项目从 B 站起步，现已扩展到小红书、抖音、YouTube、X（Twitter）、知乎、Reddit、Linux.do 和 Bangumi，后续还会覆盖更多内容平台：
 
 ### 🧠 先懂你，再找内容
 
@@ -98,7 +98,7 @@
 > | | 各平台官方推荐 | 关键词过滤插件 | OpenBiliClaw |
 > |---|---|---|---|
 > | 推荐逻辑 | 协同过滤 | 标签匹配 | 心理画像 + 五层记忆 |
-> | 内容来源 | 单一平台 | 单一平台 | 跨平台（B 站 · 小红书 · 抖音 · YouTube · X · 知乎 · Reddit · Bangumi · 更多） |
+> | 内容来源 | 单一平台 | 单一平台 | 跨平台（B 站 · 小红书 · 抖音 · YouTube · X · 知乎 · Reddit · Linux.do · Bangumi · 更多） |
 > | 信息茧房 | 越推越窄 | 不解决 | 猜测兴趣主动破茧 |
 > | 数据归属 | 平台所有 | 通常云端 | 100% 本地 |
 > | 推荐解释 | "猜你喜欢" | 无 | 像朋友一样告诉你为什么 |
@@ -222,7 +222,7 @@
 
 ### 1. 安装浏览器插件
 
-插件是主要入口：它会在 B 站、小红书、抖音、YouTube、X 和知乎页面显示侧边栏、采集你的反馈，并把知乎 / Reddit 等登录态任务安全地交给本地后端使用。
+插件是主要入口：它会在 B 站、小红书、抖音、YouTube、X、知乎和 Linux.do 普通页面显示侧边栏、采集你的反馈，并承接知乎 / Reddit 等登录态任务与 Linux.do 同源只读任务。Linux.do 的公开 discovery 无需登录；个人 bootstrap 才复用浏览器登录态。其任务 tab 与普通行为采集隔离，只执行同源只读 GET。
 
 插件基于 Manifest V3，支持所有兼容 Chrome 插件的浏览器，包括 **Chrome、Edge、Brave、Arc、Vivaldi、Opera** 等。
 
@@ -311,7 +311,7 @@ npm run package:firefox        # 额外打成未签名 openbiliclaw-extension-v*
 请按照 https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docs/agent-install.md 的说明帮我部署 OpenBiliClaw 后端(务必用 Bash 的 curl 下载这个文档,不要用 WebFetch — 会丢关键指令)
 ```
 
-AI 助手会克隆仓库、安装依赖、用局域网可访问的默认绑定启动后端（`0.0.0.0:8420`）、做健康检查，并问几个有默认值的问题。自动初始化前会真实验证全局 LLM 实例链和独立 embedding 服务；有一个不通就先停下让你修配置，不会硬跑出空画像。看不懂就选默认；小红书、抖音、YouTube、X、知乎和 Reddit 数据只有你明确同意才会进入初始画像。Bangumi discovery 无需登录；只有你填写公开用户名时，公开收藏才会参与初始化画像。
+AI 助手会克隆仓库、安装依赖、用局域网可访问的默认绑定启动后端（`0.0.0.0:8420`）、做健康检查，并问几个有默认值的问题。自动初始化前会真实验证全局 LLM 实例链和独立 embedding 服务；有一个不通就先停下让你修配置，不会硬跑出空画像。看不懂就选默认；小红书、抖音、YouTube、X、知乎、Reddit 和 Linux.do 数据只有你明确同意才会进入初始画像。Linux.do / Bangumi 公开 discovery 无需登录；Linux.do 个人信号需要同浏览器登录，Bangumi 公开收藏初始化需要公开用户名。
 
 Chrome Web Store / AMO 发布包默认只声明本机后端权限。让插件连接局域网另一台机器或远程域名时，在设置里选择协议并填写地址，浏览器会请求该 `scheme://host/*` 的可选权限；WebExtension host permission 无法跨浏览器限定端口，但实际请求仍固定到配置端口。公网地址强制 HTTPS。后端需先用 `ext-key generate` 和 `ext-key enable` 开启默认关闭的设备认证。
 
@@ -319,7 +319,7 @@ Chrome Web Store / AMO 发布包默认只声明本机后端权限。让插件连
 
 ### 3. 在同一个浏览器登录内容平台
 
-默认登录 [B 站](https://www.bilibili.com) 并勾选 B 站来源即可生成第一版画像和推荐；如果不想接 B 站，也可以在初始化来源选择里取消它，改勾已登录的 [小红书](https://www.xiaohongshu.com) / [抖音](https://www.douyin.com) / [YouTube](https://www.youtube.com) / [X](https://x.com) / [知乎](https://www.zhihu.com) / [Reddit](https://www.reddit.com)，或选择无需登录的 Bangumi 并填写公开用户名。至少保留一个能拉到画像信号的来源；未填用户名的 Bangumi 仍可做匿名 discovery，但不能单独完成画像初始化。
+默认登录 [B 站](https://www.bilibili.com) 并勾选 B 站来源即可生成第一版画像和推荐；如果不想接 B 站，也可以在初始化来源选择里取消它，改勾已登录的 [小红书](https://www.xiaohongshu.com) / [抖音](https://www.douyin.com) / [YouTube](https://www.youtube.com) / [X](https://x.com) / [知乎](https://www.zhihu.com) / [Reddit](https://www.reddit.com) / [Linux.do](https://linux.do)，或选择无需登录的 Bangumi 并填写公开用户名。至少保留一个能拉到画像信号的来源；未登录 Linux.do 仍可做公开 discovery，但不能提供个人 bootstrap 信号；未填用户名的 Bangumi 也不能单独完成画像初始化。
 
 ### 4. 打开桌面端或移动端 Web
 
@@ -353,7 +353,7 @@ Windows 原生（PowerShell，不需要 Docker / WSL2）：
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; iwr https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/scripts/install.ps1 -UseBasicParsing | iex
 ```
 
-脚本依赖 `git` 和 Python 3.11+。它会自动克隆仓库，然后先在终端向导里收集首选 LLM 实例、embedding、B 站 Cookie，以及小红书 / 抖音 / YouTube 的 opt-in 决策，再安装依赖、启动后端和健康检查；确认齐全后会先验证全局 LLM 实例链和 embedding 服务都能真实响应，再自动运行 init，完成画像生成和首轮发现。X / 知乎 / Reddit / Bangumi 可在启动后的 `/setup/` 或设置页显式开启；Bangumi 无需登录，公开收藏初始化需填写公开用户名。不确定的选项直接回车或选默认。
+脚本依赖 `git` 和 Python 3.11+。它会自动克隆仓库，然后先在终端向导里收集首选 LLM 实例、embedding、B 站 Cookie，以及小红书 / 抖音 / YouTube 的 opt-in 决策，再安装依赖、启动后端和健康检查；确认齐全后会先验证全局 LLM 实例链和 embedding 服务都能真实响应，再自动运行 init，完成画像生成和首轮发现。X / 知乎 / Reddit / Linux.do / Bangumi 可在启动后的 `/setup/` 或设置页显式开启；Linux.do 与 Bangumi 的公开 discovery 无需登录，Linux.do 个人初始化信号需浏览器登录，Bangumi 公开收藏初始化需填写公开用户名。不确定的选项直接回车或选默认。
 
 </details>
 
@@ -393,9 +393,10 @@ OpenBiliClaw 不保存你的平台密码，也不替你绕过登录。它复用�
 | **X（Twitter）** | 在同一浏览器打开 https://x.com 正常登录 | `init --yes-x`、`fetch-x` 和 X discovery 拉不到数据（服务端重放需要 `auth_token`+`ct0`，登录后扩展自动同步） |
 | **知乎** | 在同一浏览器打开 https://www.zhihu.com 正常登录 | `init --yes-zhihu`、`fetch-zhihu`、`discover --source zhihu` 和 `discover-zhihu*` 拉不到数据 |
 | **Reddit** | 在同一浏览器打开 https://www.reddit.com 正常登录；插件会同步 `reddit_session` 给日常 discovery 的 rdt-cli，`rdt login` 仅作为插件不可用时的 fallback | `fetch-reddit --mode bootstrap` 拉不到初始化信号；rdt credential 未同步时 rdt 路径会 fallback 到插件任务 |
+| **Linux.do** | 在同一浏览器打开 https://linux.do 正常登录；公开 discovery 无需登录 | 未登录时 `fetch-linuxdo` 和 `init --yes-linuxdo` 拉不到书签 / 点赞 / 阅读记录，但 search / hot / feed / creator / related discovery 仍可用 |
 | **Bangumi** | 无需登录；可选填公开用户名读取公开收藏，或填个人令牌读取私密收藏；插件在 bgm.tv / bangumi.tv 仅做账号身份自动识别（不读 Cookie、不采集浏览行为） | 未填用户名时不能把 Bangumi 作为唯一画像初始化来源，但匿名 search / ranked / 按日期 discovery 仍可用 |
 
-小红书、抖音、YouTube、知乎走 Chrome 插件任务链路，Reddit 日常 discovery 默认走随后端安装的 rdt-cli、初始化信号仍走插件，X 的 discovery 走服务端 cookie 重放；这些读取链路都不需要你额外启动 CDP 调试 Chrome。Reddit/X、YouTube、小红书、抖音与知乎原生保存 executor 已 6/6 接入并通过 fixture 测试；2026-07-14 的真实账号回归中，六平台 favorite 与 watch-later/fallback 均得到 `synced/already_synced`。`[sources.browser].cdp_url` 只保留给通用 Web / 自定义网页源的浏览器抓取场景。
+小红书、抖音、YouTube、知乎和 Linux.do 走 Chrome 插件任务链路，Reddit 日常 discovery 默认走随后端安装的 rdt-cli、初始化信号仍走插件，X 的 discovery 走服务端 cookie 重放；这些读取链路都不需要你额外启动 CDP 调试 Chrome。Linux.do 上游请求全部在真实站点 tab 内以同源 GET 执行，`_t` 只作登录布尔，Cookie 值和原始响应不会上传。Reddit/X、YouTube、小红书、抖音与知乎原生保存 executor 已 6/6 接入并通过 fixture 测试；2026-07-14 的真实账号回归中，六平台 favorite 与 watch-later/fallback 均得到 `synced/already_synced`。Linux.do 不提供任何站内写回。`[sources.browser].cdp_url` 只保留给通用 Web / 自定义网页源的浏览器抓取场景。
 
 </details>
 
@@ -468,6 +469,13 @@ openbiliclaw discover
 
 # 可选：抖音内容发现（需先启用 [sources.douyin]；search / hot / feed 从首页 DOM 操作触发）
 openbiliclaw discover --source douyin
+
+# 可选：Linux.do 书签 / 点赞 / 阅读记录只读 smoke（默认不写 memory）
+openbiliclaw fetch-linuxdo
+
+# 可选：Linux.do 正式发现（search / hot / feed / creator / related）
+openbiliclaw discover-linuxdo --limit 30
+# 等价：openbiliclaw discover --source linuxdo --limit 30
 
 # 可选：独立调试抖音 search / hot / feed 召回
 openbiliclaw discover-douyin --keyword 机械键盘 --source search,feed --no-cache --no-evaluate
@@ -566,7 +574,7 @@ OpenClaw 收到 `interest.probe` 事件（或主动拉取 `next-probe`），发�
 - 🧠 **五层灵魂画像** — 事件→偏好→觉察→洞察→灵魂，推断 MBTI、认知风格和深层需求（[详解](docs/modules/soul.md)）
 - 🔮 **兴趣探针** — 基于心理学桥接主动猜测你可能喜欢的未知领域，猜对升级为正式兴趣，猜错安静退出
 - 🧭 **避雷探针** — 主动确认你想避开的内容形态和风格边界，确认后才写入过滤偏好
-- 🌐 **跨平台内容源** — B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Bangumi / 通用 Web，兴趣不再被单一平台割裂（[详解](docs/modules/discovery.md)）
+- 🌐 **跨平台内容源** — B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Linux.do / Bangumi / 通用 Web，兴趣不再被单一平台割裂（[详解](docs/modules/discovery.md)）
 - 🎯 **智能多样性** — 主题配额 + 跨平台混排 + 小源保护，告别「一刷都是 AI」
 - ⚡ **「换一批」瞬间响应且默认去重** — reshuffle ~0.6s；当前卡、推荐历史和持久化已看账本三层排除，连续刷不卡顿也不靠“忽略当前”开关
 - 💬 **有温度的推荐理由** — 像朋友一样解释为什么你会喜欢，而不是「因为你看过类似视频」
@@ -669,11 +677,12 @@ background ─ background admission (default 3) ──────┘
 │ 后台维护：独立 DB worker → ≤50 行/批 → 释放写锁；未变化跳过 / 10min 巡检 │
 │ /api/saved/* · 保存 Router · B 站原生保存 Adapter      │
 │ 六平台 Adapter → ExtensionNativeSaveBroker → extension_native_save_jobs │
-│ 六平台 source task multiplex：xhs / dy / yt / x / zhihu / reddit       │
-│ 扩展在线周期回拉：Runtime → 五源 bootstrap task（全局串行）→ installed extension │
+│ 七平台 source task multiplex：xhs / dy / yt / x / zhihu / reddit / linuxdo │
+│ 扩展在线周期回拉：Runtime → 六源 bootstrap task（全局串行）→ installed extension │
 │ task-result → staged durable ingress → 原子有界 seen keys（每源5000）→ terminal │
 │ XHS 自动任务：来源/调度领取门 → SQLite 节流/风控冷却 → 关闭或限流时不开新 tab │
 │ XHS 搜索：inactive tab → MAIN 搜索响应归一化 → isolated replay / DOM 兜底   │
+│ Linux.do：isolated task tab → 同源 GET → 五路 discovery / 三路 bootstrap │
 │ extension_native_save_jobs -> /api/sources/<slug>/next-task -> installed extension │
 │ exact OpenBiliClaw / YouTube Watch Later 目标 → 安全 task-result          │
 │ trusted-local E2E 精确授权 → 单 item saved sync → 六字段安全 callback      │
@@ -734,12 +743,13 @@ durable turn → 固定时间/payload → 确认入口（待聊列表/卡片） 
 | **X（Twitter）** | 初始化导入 · 搜索 · For-You · 关注作者 | discovery 使用服务端只读 cookie 重放；原生书签 executor 已接入但未实号验证 |
 | **知乎** | 初始化导入 · 搜索 · 热榜 · 推荐 · 作者 · 相关 | 插件在已登录 tab 内读取，返回文字卡片 |
 | **Reddit** | 初始化导入 · 搜索 · 热门 · Subreddit · 相关 | discovery 默认 rdt-cli；Saved executor 已接入但未实号验证 |
+| **Linux.do** | 书签 / 点赞 / 阅读记录初始化 · 搜索 · 热门 · 最新 · 作者 · 相关 | 插件在真实 `linux.do` 任务 tab 内执行同源只读 GET；公开发现无需登录，不上传 Cookie 或原始响应 |
 | **Bangumi** | 公开收藏初始化 · 搜索 · 排名 · 按日期浏览 | 官方匿名只读 API；无需 Cookie/token，日期结果可能含未播条目 |
 | **通用 Web** | 浏览器 + LLM 抽取 | 适配任意网页 |
 
 发现之后的统一流程：
 
-- **安全取数** — 后端不代登录、不爬你看不到的内容；所有平台复用你浏览器里已有的登录会话，首轮画像信号只在你点「开始初始化」后按所选来源拉取。画像完成后，已启用的小红书、抖音、YouTube、知乎和 Reddit 也只在扩展在线时按配置周期回拉。
+- **安全取数** — 后端不代登录、不爬你看不到的内容；所有平台复用你浏览器里已有的登录会话，首轮画像信号只在你点「开始初始化」后按所选来源拉取。画像完成后，已启用的小红书、抖音、YouTube、知乎、Reddit 和 Linux.do 也只在扩展在线时按配置周期回拉。Linux.do 任务只允许 GET，`_t` 仅作布尔登录提示。
 - **连续统一评估** — 各来源原始候选进入同一待评估池，由共享 evaluator 结合灵魂画像、正文和近期负反馈批量打分；默认 3×30 worker 任一完成即补位，调度只计 durable 库存，串行 admission 按实时 headroom 封顶。可选 embedding 预过滤默认先 shadow 观测，确认无误后才 enforce 跳过明显低相似候选。
 - **多样性选择** — 平台配额 → 主题去重 → 风格均衡 → 跨平台混排 → 数量封顶；开箱只启用 B 站，其余平台在设置里显式打开。
 
@@ -774,6 +784,7 @@ OpenBiliClaw/
 │   │   ├── yt_tasks           # YouTube 插件任务队列 / bootstrap_profile
 │   │   ├── zhihu_tasks        # 知乎插件任务队列 / bootstrap_events + search/hot/feed/creator/related
 │   │   ├── reddit_tasks       # Reddit bootstrap 插件任务 / extension fallback discovery / rdt 默认 discovery helpers
+│   │   ├── linuxdo_tasks      # Linux.do 同源只读 bootstrap / 五路 discovery 任务
 │   │   └── web_adapter        # 通用 Web (Playwright + LLM)
 │   ├── youtube/               # YouTube Takeout 离线导入解析
 │   ├── api/                   # 本地 FastAPI (配置回滚 / 降级模式 / popup API)
@@ -782,7 +793,7 @@ OpenBiliClaw/
 │   ├── bilibili/              # B 站接入层 (WBI 签名 · 速率控制)
 │   ├── llm/                   # 多模型 LLM 适配 + 结构化 JSON 容错
 │   └── storage/               # 数据存储层
-├── extension/                 # Chrome 浏览器插件 (B 站 + 小红书 + 抖音 + YouTube + X + 知乎 + Reddit + 自启动/配置修复)
+├── extension/                 # Chrome/Firefox 插件 (B 站 + 小红书 + 抖音 + YouTube + X + 知乎 + Reddit + Linux.do)
 ├── skills/                    # 内置 Skill 定义
 ├── docs/                      # 项目文档
 └── tests/                     # 测试 (1900+)
@@ -802,6 +813,7 @@ OpenBiliClaw/
 | X 交互 | 服务端 cookie 重放（默认安装内置 `twitter-cli`，只读且 lazy import）；扩展捕获你在 x.com 的互动并同步 cookie；推文为纯文本卡片 |
 | 知乎交互 | 扩展任务调度在已登录浏览器内读取事件 smoke / 初始化画像信号和 search / hot / feed / creator / related 候选；回答 / 文章 / 问题为纯文本卡片 |
 | Reddit 交互 | 默认安装内置 rdt-cli，读取 search / hot / subreddit / related 候选；插件自动同步 `reddit_session` 到 rdt credential，`rdt login` 仅作手动 fallback；rdt 未登录 / 不可用或显式选择 extension 时，扩展任务调度在已登录浏览器内读取 discovery；bootstrap saved/upvoted/subscribed 始终走插件；帖子 / 评论为纯文本卡片 |
+| Linux.do 交互 | 普通页面使用统一行为 adapter；隔离任务 tab 只执行同源 GET，支持 search / hot / feed / creator / related 与 bookmarks / likes / read_history；只回传归一化字段或结构化错误，Cookie 和原始响应不上报 |
 | Bangumi 交互 | 官方匿名只读 v0 API；search / ranked / 按日期浏览进入统一候选池，可选公开用户名读取公开收藏用于初始化；不收 Cookie/token，不做站内写回 |
 | 可选 HTTPS | 公网域名使用固定版本 Caddy Docker overlay 自动管理证书；LAN/self-managed 使用 Python TLS Proxy + `[tls]` extra，本地 CA/SAN；默认关闭且两种入口互斥 |
 | 存储 | SQLite + Embedding 向量索引 |
@@ -826,7 +838,7 @@ OpenBiliClaw/
 
 ## 🗺️ 后续规划
 
-OpenBiliClaw 的目标是做你的**全网个性化内容入口**——从 B 站起步，已覆盖小红书、抖音、YouTube、X、知乎、Reddit、Bangumi 与通用 Web，下一步：
+OpenBiliClaw 的目标是做你的**全网个性化内容入口**——从 B 站起步，已覆盖小红书、抖音、YouTube、X、知乎、Reddit、Linux.do、Bangumi 与通用 Web，下一步：
 
 - **更多内容源** — V2EX、微博、各类 BBS / 论坛……每个平台都是一个 `SourceAdapter`，架构已经验证可扩展
 - **跨平台兴趣融合** — 你在 B 站看的机械键盘 + 小红书种草的咖啡器具 + 抖音点赞收藏的短视频偏好 + YouTube 长视频观看和订阅 + X 点赞收藏的资讯 = 一个完整的你。画像融合让推荐不再割裂
@@ -860,7 +872,7 @@ OpenBiliClaw 的目标是做你的**全网个性化内容入口**——从 B 站
 
 ## 隐私速览
 
-默认数据流向：浏览器插件 → 你配置的本地 OpenBiliClaw 后端 → 本机 SQLite。插件不会把数据发送到 OpenBiliClaw 开发者运营的服务器。若你配置云端 LLM / embedding，相关内容会按你的配置发送给对应服务商。详见 [隐私政策](docs/privacy.md)。
+默认数据流向：浏览器插件 → 你配置的本地 OpenBiliClaw 后端 → 本机 SQLite。插件不会把数据发送到 OpenBiliClaw 开发者运营的服务器。Linux.do 的 `_t` 仅在浏览器内转换为登录布尔，Cookie 值、CSRF 数据和原始站点响应不上传。若你配置云端 LLM / embedding，相关内容会按你的配置发送给对应服务商。详见 [隐私政策](docs/privacy.md)。
 
 ## 📄 License
 

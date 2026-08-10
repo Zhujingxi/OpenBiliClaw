@@ -680,6 +680,20 @@ class ZhihuLoginStateResponse(BaseModel):
     updated_at: str = ""
 
 
+class LinuxdoLoginStateIn(BaseModel):
+    """Privacy-preserving Linux.do login state reported by the extension."""
+
+    logged_in: StrictBool
+
+
+class LinuxdoLoginStateResponse(BaseModel):
+    """Result of persisting the browser-observed Linux.do login state."""
+
+    ok: bool = True
+    logged_in: bool
+    updated_at: str = ""
+
+
 class XStatusResponse(BaseModel):
     """Current X (Twitter) source health (spec §7).
 
@@ -785,6 +799,7 @@ class SourcesStatusResponse(BaseModel):
     zhihu: SourceStatusItem = Field(default_factory=SourceStatusItem)
     reddit: SourceStatusItem = Field(default_factory=SourceStatusItem)
     bangumi: SourceStatusItem = Field(default_factory=SourceStatusItem)
+    linuxdo: SourceStatusItem = Field(default_factory=SourceStatusItem)
 
 
 class SourceVerifyResponse(BaseModel):
@@ -955,6 +970,7 @@ class SourcesCredentialsResponse(BaseModel):
     zhihu: SourceCredentialItem = Field(default_factory=SourceCredentialItem)
     reddit: SourceCredentialItem = Field(default_factory=SourceCredentialItem)
     bangumi: SourceCredentialItem = Field(default_factory=SourceCredentialItem)
+    linuxdo: SourceCredentialItem = Field(default_factory=SourceCredentialItem)
 
 
 class NotificationAckIn(BaseModel):
@@ -2088,6 +2104,21 @@ class BangumiSourceConfigOut(BaseModel):
     bootstrap_limit: int = 300
 
 
+class LinuxdoSourceConfigOut(BaseModel):
+    enabled: bool = False
+    source_modes: list[str] = Field(
+        default_factory=lambda: ["search", "hot", "feed", "creator", "related"]
+    )
+    daily_search_budget: int = 0
+    daily_hot_budget: int = 0
+    daily_feed_budget: int = 0
+    daily_creator_budget: int = 0
+    daily_related_budget: int = 0
+    request_interval_seconds: int = Field(default=3, ge=0, le=30)
+    min_interval_minutes: int = 3
+    bootstrap_limit: int = Field(default=300, ge=1, le=300)
+
+
 class SourcesConfigOut(BaseModel):
     browser: SourcesBrowserConfigOut = Field(default_factory=SourcesBrowserConfigOut)
     bilibili: BilibiliSourceConfigOut = Field(default_factory=BilibiliSourceConfigOut)
@@ -2098,6 +2129,7 @@ class SourcesConfigOut(BaseModel):
     zhihu: ZhihuSourceConfigOut = Field(default_factory=ZhihuSourceConfigOut)
     reddit: RedditSourceConfigOut = Field(default_factory=RedditSourceConfigOut)
     bangumi: BangumiSourceConfigOut = Field(default_factory=BangumiSourceConfigOut)
+    linuxdo: LinuxdoSourceConfigOut = Field(default_factory=LinuxdoSourceConfigOut)
 
 
 class SchedulerConfigOut(BaseModel):
@@ -2115,6 +2147,7 @@ class SchedulerConfigOut(BaseModel):
     youtube_incremental_hours: int | None = None
     zhihu_incremental_hours: int | None = None
     reddit_incremental_hours: int | None = None
+    linuxdo_incremental_hours: int | None = None
     refresh_check_interval_seconds: int = 60
     eval_min_batch_size: int = Field(default=15, ge=1, le=90)
     eval_max_wait_seconds: float = Field(default=90.0, ge=0.0, le=600.0)

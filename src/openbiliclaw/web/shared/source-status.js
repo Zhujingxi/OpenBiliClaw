@@ -64,12 +64,15 @@
   /** Platform slugs the contract covers, in settings-page display order. */
   const SOURCE_KEYS = Object.freeze([
     "bilibili", "xiaohongshu", "douyin", "youtube", "twitter", "zhihu", "reddit",
-    // Not on the auth contract yet: the backend sends `auth: null` for it and
-    // the legacy-`state` fallback below renders it. It belongs in the roster
+    // Bangumi is not on the auth contract yet: the backend sends `auth: null`,
+    // so the legacy-`state` fallback below renders it. It belongs in the roster
     // regardless — the roster answers "which sources exist", not "which sources
     // have a contract", and leaving it out would hide the platform from all
     // three settings surfaces at once.
     "bangumi",
+    // Linux.do uses the full optional-auth contract: anonymous discovery stays
+    // public while an extension heartbeat can describe personal-signal access.
+    "linuxdo",
   ]);
 
   /**
@@ -88,6 +91,7 @@
     zhihu: "知乎",
     reddit: "Reddit",
     bangumi: "Bangumi",
+    linuxdo: "Linux.do",
   });
 
   function sourceLabel(key) {
@@ -218,6 +222,9 @@
    * panel paint it the same grey as "we have no idea" (spec D6).
    */
   const ACCESS_NO_AUTH = Object.freeze({ tone: "public", label: "无需登录" });
+
+  /** Public discovery works, while an optional browser identity adds signals. */
+  const ACCESS_OPTIONAL_AUTH = Object.freeze({ tone: "public", label: "公开发现可用" });
 
   /**
    * A source needing no login can still carry a verifiable credential.
@@ -388,6 +395,13 @@
     // carries a verifiable token (Bangumi) falls through to its verification,
     // so a confirmed token reads as 已验证 rather than a flat 无需登录.
     if (auth.auth_required === false && !hasVerifiableCredential(auth)) return ACCESS_NO_AUTH;
+    // Some public sources also expose optional account signals. A missing
+    // browser identity must not turn the whole source into「需要登录」: discovery
+    // remains available, while the backend-owned detail explains what signing
+    // in would add. Keep this contract-driven rather than naming a platform.
+    if (auth.auth_required === false && text(auth.credential) === "none") {
+      return ACCESS_OPTIONAL_AUTH;
+    }
     return SOURCE_ACCESS_CREDENTIAL[text(auth.credential)]
       || SOURCE_ACCESS_VERIFICATION[text(auth.verification)]
       || UNKNOWN_ACCESS;
@@ -706,6 +720,7 @@
 
   const api = {
     ACCESS_NO_AUTH,
+    ACCESS_OPTIONAL_AUTH,
     EVIDENCE_ABSENT,
     EVIDENCE_HINTS,
     OFFLINE_DETAIL,

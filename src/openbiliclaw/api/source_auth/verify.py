@@ -81,6 +81,13 @@ VERIFY_ACTIONS: dict[str, VerifyAction] = {
     # makes. With no token the probe returns ``has_credential=False`` and the
     # click resolves to ``indeterminate`` without going out.
     "bangumi": "live_probe",
+    "linuxdo": "browser_heartbeat",
+}
+
+_BROWSER_HEARTBEAT_PREFIXES: dict[str, str] = {
+    "xiaohongshu": "xhs",
+    "zhihu": "zhihu",
+    "linuxdo": "linuxdo",
 }
 
 # The user-facing tri-state. Deliberately computed here rather than in each
@@ -766,7 +773,7 @@ async def _verify_browser_heartbeat(slug: str, database: Any, event_hub: Any) ->
     through the browser — which is why their green light can never mean the
     same thing as B站's, and why ``verify_method`` has to exist at all.
     """
-    prefix = "xhs" if slug == "xiaohongshu" else "zhihu"
+    prefix = _BROWSER_HEARTBEAT_PREFIXES[slug]
     getter = f"get_{prefix}_login_state"
     if not hasattr(database, getter):
         return _ActionResult("登录态存储不可用（数据库未就绪）。", conclusive=False)

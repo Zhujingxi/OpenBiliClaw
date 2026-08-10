@@ -23,6 +23,7 @@ from openbiliclaw.sources.source_bootstrap import (
     SOURCE_BOOTSTRAP_DECISION_LOCK,
     BootstrapEnqueueResult,
     enqueue_dy_bootstrap,
+    enqueue_linuxdo_bootstrap,
     enqueue_reddit_bootstrap,
     enqueue_xhs_bootstrap,
     enqueue_yt_bootstrap,
@@ -35,7 +36,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-SOURCE_ORDER = ("xhs", "dy", "yt", "zhihu", "reddit")
+SOURCE_ORDER = ("xhs", "dy", "yt", "zhihu", "reddit", "linuxdo")
 _ACTIVE_STATUSES = frozenset({"pending", "in_progress"})
 _TASK_SPECS: dict[str, tuple[str, str, Callable[..., BootstrapEnqueueResult]]] = {
     "xhs": ("xhs_tasks", "bootstrap_profile", enqueue_xhs_bootstrap),
@@ -43,6 +44,7 @@ _TASK_SPECS: dict[str, tuple[str, str, Callable[..., BootstrapEnqueueResult]]] =
     "yt": ("yt_tasks", "bootstrap_profile", enqueue_yt_bootstrap),
     "zhihu": ("zhihu_tasks", "bootstrap_events", enqueue_zhihu_bootstrap),
     "reddit": ("reddit_tasks", "bootstrap_events", enqueue_reddit_bootstrap),
+    "linuxdo": ("linuxdo_tasks", "bootstrap_events", enqueue_linuxdo_bootstrap),
 }
 _SOURCE_CONFIG_ALIASES: dict[str, tuple[str, ...]] = {
     "xhs": ("xhs", "xiaohongshu"),
@@ -50,6 +52,7 @@ _SOURCE_CONFIG_ALIASES: dict[str, tuple[str, ...]] = {
     "yt": ("yt", "youtube"),
     "zhihu": ("zhihu",),
     "reddit": ("reddit",),
+    "linuxdo": ("linuxdo",),
 }
 _SOURCE_INTERVAL_FIELDS = {
     "xhs": "xhs_incremental_hours",
@@ -57,6 +60,7 @@ _SOURCE_INTERVAL_FIELDS = {
     "yt": "youtube_incremental_hours",
     "zhihu": "zhihu_incremental_hours",
     "reddit": "reddit_incremental_hours",
+    "linuxdo": "linuxdo_incremental_hours",
 }
 
 
@@ -77,6 +81,8 @@ class _ActiveTask:
     status: str
     incremental: bool
     created_at: datetime | None
+    completed_at: datetime | None = None
+    result: dict[str, object] = field(default_factory=dict)
 
 
 def _utc_now(value: datetime) -> datetime:
@@ -223,6 +229,12 @@ class SourceIncrementalSync:
         reconciled = self._reconcile_active_state(state, now=now)
         if reconciled is not None:
             return reconciled
+        # Reconciliation may atomically settle a terminal task in the memory
+        # manager. Reload before the due decision so it observes the newly
+        # written last_success_at rather than the pre-reconcile snapshot.
+        state = self._load_state()
+        if state is None:
+            return SourceIncrementalSyncResult(reason="state_error")
 
         skipped_budget_sources: set[str] = set()
         first_budget_result: SourceIncrementalSyncResult | None = None
@@ -349,8 +361,33 @@ class SourceIncrementalSync:
                 task_id=recorded.task_id,
             )
 
-        # A terminal/missing state record is stale.  Clear it before scanning
-        # the authoritative task tables so a later active row can be adopted.
+        # A terminal state advances cadence only after a complete success.
+        # Failed and degraded runs clear ownership but stay immediately due.
+        if recorded is not None and recorded.status in {"completed", "failed"}:
+            marker = str(recorded.result.get("_openbiliclaw_terminal_status", "") or "").strip()
+            succeeded = (
+                recorded.incremental and recorded.status == "completed" and marker != "degraded"
+            )
+            current_time = _utc_now(now)
+            completed_at = recorded.completed_at or recorded.created_at or current_time
+            if completed_at > current_time:
+                completed_at = current_time
+            try:
+                self._update_state(
+                    lambda current: self._settle_terminal_task(
+                        current,
+                        source=recorded.source,
+                        completed_at=completed_at.isoformat() if succeeded else "",
+                    )
+                )
+            except Exception:
+                logger.warning("source incremental terminal reconciliation failed", exc_info=True)
+                return SourceIncrementalSyncResult(reason="state_error")
+            state = self._load_state() or state
+            raw_active = None
+
+        # A missing state record is stale. Clear it before scanning the
+        # authoritative task tables so a later active row can be adopted.
         if isinstance(raw_active, dict) and raw_active:
             try:
                 self._update_state(
@@ -399,6 +436,23 @@ class SourceIncrementalSync:
         return state
 
     @staticmethod
+    def _settle_terminal_task(
+        state: dict[str, object],
+        *,
+        source: str,
+        completed_at: str,
+    ) -> dict[str, object]:
+        incremental = SourceIncrementalSync._incremental_state(state)
+        if completed_at:
+            raw_successes = incremental.get("last_success_at")
+            successes = dict(raw_successes) if isinstance(raw_successes, dict) else {}
+            successes[source] = completed_at
+            incremental["last_success_at"] = successes
+        incremental["active_task"] = None
+        state["source_incremental"] = incremental
+        return state
+
+    @staticmethod
     def _stamp_created_task(
         state: dict[str, object],
         *,
@@ -439,14 +493,23 @@ class SourceIncrementalSync:
         conn = getattr(self.database, "conn", None)
         if conn is None:
             return []
-        where = "type = ? AND status IN ('pending', 'in_progress')"
+        where = "type = ?"
         params: list[object] = [task_type]
         if task_id is not None:
             where += " AND id = ?"
             params.append(task_id)
+        else:
+            where += " AND status IN ('pending', 'in_progress')"
         try:
+            columns = {
+                str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+            completed_expr = "completed_at" if "completed_at" in columns else "NULL"
+            result_expr = "result_json" if "result_json" in columns else "NULL"
             rows = conn.execute(
-                f"SELECT id, status, payload_json, created_at FROM {table} WHERE {where} "
+                f"SELECT id, status, payload_json, created_at, "
+                f"{completed_expr} AS completed_at, {result_expr} AS result_json "
+                f"FROM {table} WHERE {where} "
                 "ORDER BY created_at ASC",
                 params,
             ).fetchall()
@@ -468,6 +531,8 @@ class SourceIncrementalSync:
                     status=status,
                     incremental=self._payload_flag(payload.get("incremental")),
                     created_at=_parse_task_created_at(_row_value(row, "created_at", 3)),
+                    completed_at=_parse_task_created_at(_row_value(row, "completed_at", 4)),
+                    result=self._parse_payload(_row_value(row, "result_json", 5)),
                 )
             )
         return result
@@ -531,8 +596,8 @@ class SourceIncrementalSync:
             start = (SOURCE_ORDER.index(cursor) + 1) % len(SOURCE_ORDER)
         except ValueError:
             start = 0
-        raw_attempts = incremental.get("last_attempt_at")
-        attempts = raw_attempts if isinstance(raw_attempts, dict) else {}
+        raw_successes = incremental.get("last_success_at")
+        successes = raw_successes if isinstance(raw_successes, dict) else {}
         current = _utc_now(now)
         for offset in range(len(SOURCE_ORDER)):
             source = SOURCE_ORDER[(start + offset) % len(SOURCE_ORDER)]
@@ -543,7 +608,7 @@ class SourceIncrementalSync:
             interval_hours = self._effective_interval_hours(source)
             if interval_hours == 0:
                 continue
-            timestamp = _parse_timestamp(attempts.get(source))
+            timestamp = _parse_timestamp(successes.get(source))
             if (
                 timestamp is None
                 or timestamp > current

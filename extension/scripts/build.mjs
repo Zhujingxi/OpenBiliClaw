@@ -60,6 +60,10 @@ const entrypoints = [
     outfile: resolve(root, `${outDir}/content/reddit.js`),
   },
   {
+    entry: resolve(root, "src/content/linuxdo.ts"),
+    outfile: resolve(root, `${outDir}/content/linuxdo.js`),
+  },
+  {
     entry: resolve(root, "src/content/x.ts"),
     outfile: resolve(root, `${outDir}/content/x.js`),
   },

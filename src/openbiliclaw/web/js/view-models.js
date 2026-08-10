@@ -44,6 +44,7 @@ function round3(value) {
 
 const DEFAULT_TITLE = "这条标题还没对上号";
 const DEFAULT_UP_NAME = "这位 UP 还没认出来";
+const DEFAULT_CREATOR_NAME = "这位创作者还没认出来";
 const DEFAULT_PORTRAIT = "画像还在慢慢攒，先多看一阵。";
 const DEFAULT_DELIGHT_TITLE = "这条惊喜推荐还没起好标题";
 const DEFAULT_DELIGHT_REASON = "这条可能会给你一点意外之喜。";
@@ -135,6 +136,7 @@ const SOURCE_LABEL_MAP = {
   zhihu: "知乎",
   reddit: "Reddit",
   bangumi: "Bangumi",
+  linuxdo: "Linux.do",
   web: "Web",
 };
 
@@ -157,6 +159,8 @@ const SOURCE_ALIAS_MAP = {
   reddit: "reddit",
   bgm: "bangumi",
   bangumi: "bangumi",
+  linuxdo: "linuxdo",
+  "linux.do": "linuxdo",
 };
 
 const RUNTIME_TOPIC_LABEL_MAP = {
@@ -204,6 +208,16 @@ const RUNTIME_TOPIC_LABEL_MAP = {
   "bangumi-search": "Bangumi 搜索",
   "bangumi-ranked": "Bangumi 排名",
   "bangumi-latest": "Bangumi 按日期浏览",
+  linuxdo_search: "Linux.do 搜索",
+  linuxdo_hot: "Linux.do 热门",
+  linuxdo_feed: "Linux.do 最新",
+  linuxdo_creator: "Linux.do 作者",
+  linuxdo_related: "Linux.do 相关",
+  "linuxdo-search": "Linux.do 搜索",
+  "linuxdo-hot": "Linux.do 热门",
+  "linuxdo-feed": "Linux.do 最新",
+  "linuxdo-creator": "Linux.do 作者",
+  "linuxdo-related": "Linux.do 相关",
 };
 
 function urlHostMatches(url, hostnames) {
@@ -232,6 +246,7 @@ export function normalizeSourcePlatform(item) {
     if (urlHostMatches(url, ["zhihu.com", "zhuanlan.zhihu.com"])) return "zhihu";
     if (urlHostMatches(url, ["reddit.com", "redd.it"])) return "reddit";
     if (urlHostMatches(url, ["bgm.tv", "bangumi.tv"])) return "bangumi";
+    if (urlHostMatches(url, ["linux.do"])) return "linuxdo";
     return "web";
   }
   if (normalizeText(item?.bvid)) return "bilibili";
@@ -270,6 +285,7 @@ function formatRuntimeTopicLabel(value) {
   if (key.startsWith("yt-") || key.startsWith("youtube-")) return "YouTube";
   if (key.startsWith("reddit-")) return "Reddit";
   if (key.startsWith("bangumi-")) return "Bangumi";
+  if (key.startsWith("linuxdo-")) return "Linux.do";
   return text;
 }
 
@@ -316,6 +332,12 @@ export function buildContentUrl(item) {
   if (platform === "youtube") return buildYouTubeUrl(vid);
   if (platform === "twitter") return buildTwitterUrl(vid);
   if (platform === "bangumi") return `https://bgm.tv/subject/${encodeURIComponent(vid)}`;
+  if (platform === "linuxdo") {
+    const topicId = vid.replace(/^(?:linuxdo:)?topic[:_]/i, "");
+    return /^[1-9]\d*$/.test(topicId)
+      ? `https://linux.do/t/${encodeURIComponent(topicId)}`
+      : "";
+  }
   if (platform === "zhihu" || platform === "reddit") return "";
   return buildVideoUrl(vid);
 }
@@ -346,7 +368,12 @@ export function normalizeRecommendation(item) {
     id: Number(item?.id ?? 0),
     bvid,
     title: normalizeText(item?.title) || DEFAULT_TITLE,
-    up_name: normalizeText(item?.up_name) || (sourcePlatform === "bangumi" ? "" : DEFAULT_UP_NAME),
+    up_name: normalizeText(item?.up_name)
+      || (sourcePlatform === "bangumi"
+        ? ""
+        : sourcePlatform === "bilibili"
+        ? DEFAULT_UP_NAME
+        : DEFAULT_CREATOR_NAME),
     cover_url: normalizeCoverUrl(item?.cover_url),
     expression: normalizeText(item?.expression),
     topic_label: normalizeText(item?.topic_label),

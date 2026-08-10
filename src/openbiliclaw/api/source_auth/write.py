@@ -286,6 +286,21 @@ CREDENTIAL_SPECS: dict[str, CredentialSpec] = {
             "Bangumi 校验一次。填好后可点「测试连接」用 /v0/me 复验。"
         ),
     ),
+    "linuxdo": CredentialSpec(
+        slug="linuxdo",
+        kinds=("login_state",),
+        unverified_reason=(
+            "Linux.do Cookie 保留在浏览器中，后端只接收登录布尔值；"
+            "公开发现不依赖登录，个人信号同步由插件登录态增强。"
+        ),
+        form_kind="extension_only",
+        form_label="Linux.do 登录态（可选）",
+        login_url="https://linux.do/",
+        help_text=(
+            "公开发现无需登录。要同步本人收藏、点赞和阅读记录，请在浏览器登录 Linux.do；"
+            "插件只上报登录状态，不上传 Cookie。"
+        ),
+    ),
 }
 
 
@@ -689,8 +704,13 @@ def persist_credential(
     this function stays a dumb writer.
     """
     if kind == "login_state":
-        setter = f"set_{'xhs' if slug == 'xiaohongshu' else 'zhihu'}_login_state"
-        getter = f"get_{'xhs' if slug == 'xiaohongshu' else 'zhihu'}_login_state"
+        prefix = {
+            "xiaohongshu": "xhs",
+            "zhihu": "zhihu",
+            "linuxdo": "linuxdo",
+        }.get(slug, slug)
+        setter = f"set_{prefix}_login_state"
+        getter = f"get_{prefix}_login_state"
         if database is None or not hasattr(database, setter):
             return PersistResult(persisted=False)
         getattr(database, setter)(bool(value))

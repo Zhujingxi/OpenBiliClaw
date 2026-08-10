@@ -4,7 +4,7 @@
 
 `src/openbiliclaw/api/source_auth/` 回答一个问题：**每个平台来源的凭据现在能不能用，以及这个结论有多可信。**
 
-它存在的原因是旧实现把四个互相独立的问题挤进了一个 `state` 字符串。结果是七个平台在设置页并排显示同一个「凭据已就绪」，而背后的证据强度天差地别——B 站只是数出 cookie 串里有三个字段名（完全不联网），小红书和知乎是浏览器 72 小时内的心跳，Reddit 是本地文件未超过 7 天（代码注释明说绝不联网），X 既有后台真实请求健康记录，也支持设置页发起只读账户状态探针，YouTube 是一个硬编码常量。而抖音**即使 cookie 完全有效也永远显示「状态待验证」**。用户无从分辨「真的能用」和「只是填了个值」。
+它存在的原因是旧实现把四个互相独立的问题挤进了一个 `state` 字符串。结果是多个平台在设置页并排显示同一个「凭据已就绪」，而背后的证据强度天差地别——B 站只是数出 cookie 串里有三个字段名（完全不联网），小红书、知乎与 Linux.do 是浏览器心跳，Reddit 是本地文件未超过 7 天（代码注释明说绝不联网），X 既有后台真实请求健康记录，也支持设置页发起只读账户状态探针，YouTube 是一个硬编码常量。而抖音**即使 cookie 完全有效也永远显示「状态待验证」**。用户无从分辨「真的能用」和「只是填了个值」。
 
 完整诊断与设计见 [`docs/plans/2026-07-18-source-auth-contract-spec.md`](../plans/2026-07-18-source-auth-contract-spec.md)。
 
@@ -13,9 +13,10 @@
 | 能力 | 说明 | 状态 |
 | --- | --- | --- |
 | 正交契约 `SourceAuthContract` | 四个维度互不覆盖：要不要凭据 / 凭据在不在 / 验证结论 / **结论有多硬** | ✅ |
-| 每平台 provider | `providers.py` 的 8 个纯函数取代 424 行 if/elif 聚合器（现 49 行） | ✅ |
+| 每平台 provider | `providers.py` 的 9 个纯函数取代旧 if/elif 聚合器 | ✅ |
 | Bangumi 接入契约 | 第 8 个平台接入：匿名公开 `auth_required=False` + 可选个人令牌 `live_probe` 验证 `/v0/me` | ✅ 见下方「Bangumi 的接入」 |
-| 显式验证动作 | `POST /api/sources/{slug}/verify`，8/8 平台可用，三态结果 | ✅ |
+| Linux.do 接入契约 | 第 9 个平台接入：legacy `auth_required=False` + capability-specific 公开/个人 admission；`_t` 只上报布尔，Cookie 不进后端 | ✅ 见下方「Linux.do 的接入」 |
+| 显式验证动作 | `POST /api/sources/{slug}/verify`，9/9 平台可用，三态结果 | ✅ |
 | 并发安全的本地状态读取 | X 健康表首建单飞，读写使用短生命周期 SQLite connection；状态轮询不共享 connection | ✅ |
 | 统一凭据写入 | `POST /api/sources/{slug}/credential`，写入即校验，7 条老端点转发 | ✅ |
 | 表单描述符 | `forms.py` 下发每平台表单形态，三端零 per-platform 分支 | ✅ |
@@ -48,14 +49,14 @@ class SourceAuthContract(BaseModel):
 | --- | --- | --- |
 | `live_probe` | 当场出网问平台 | bilibili、douyin、twitter、bangumi（配置了个人令牌时） |
 | `passive_health` | 由真实流量的错误反推 | 暂无当前平台（保留能力） |
-| `browser_heartbeat` | 插件报告登录 cookie 存在 | xiaohongshu、zhihu |
+| `browser_heartbeat` | 插件报告登录 cookie 存在 | xiaohongshu、zhihu、linuxdo（仅 `_t` 布尔存在性） |
 | `local_file` | 只读了本地凭据文件 | reddit |
-| `task_history` | 由历史任务结果反推 | zhihu（无心跳时回落） |
-| `none` | 无验证能力，或不需要 | youtube、bangumi（未配置令牌时） |
+| `task_history` | 由历史任务结果反推 | zhihu、linuxdo（无心跳时回落） |
+| `none` | 无验证能力，或不需要 | youtube、bangumi（未配置令牌时）、linuxdo（无心跳且无任务历史时） |
 
 ### 三端如何渲染这份契约
 
-契约字段若不落到像素上，整个重构对用户不可见。`describeAccess()` 因此**只读 `auth`**，legacy `state` 仅作老后端兜底。判定顺序：`auth_required=false` → `credential`（`none` / `invalid`）→ `verification`。凭据维度先于结论维度，是因为两者正交、可能互相矛盾，此时宁可少报也不点亮一盏兜不住的绿灯。
+契约字段若不落到像素上，整个重构对用户不可见。`describeAccess()` 因此**只读 `auth`**，legacy `state` 仅作老后端兜底。判定先看 `hasVerifiableCredential()`：只有 `auth_required=false` 且没有可验证凭据或个人能力时才直接显示「无需登录」；若匿名源另有 `live_probe` / `browser_heartbeat` / `task_history` 等可选身份能力，则继续按 `credential`（`none` / `invalid`）和 `verification` 渲染。凭据维度先于结论维度，是因为两者正交、可能互相矛盾，此时宁可少报也不点亮一盏兜不住的绿灯。
 
 | verification | 标签 | tone |
 | --- | --- | --- |
@@ -66,7 +67,7 @@ class SourceAuthContract(BaseModel):
 | `rate_limited` | 频率受限 | pending |
 | `blocked` | 接入受阻 | danger |
 
-`auth_required=false` 单独一档：**无需登录**（public 灰），既非已验证也非待验证，且不显示证据徽章——不需要凭据的源没有证据可评级。**Bangumi 的可选令牌是这条规则今天的例外**：它 `auth_required=false`（匿名可用），但配了令牌时 `verification` 会诚实地带上 `verified`/`failed`，只是前端仍按本行渲染成「无需登录」、不出徽章——令牌结论目前经由「测试连接」的消息与 `token_state` 徽章暴露，要把它做成常驻的 ◆ 联网验证 徽章需要给契约加一档「可选凭据」并改前端，见下方「Bangumi 的接入」。
+`auth_required=false` 且 `hasVerifiableCredential()` 为 false 时是**无需登录**档（public 灰），既非已验证也非待验证，且不显示证据徽章。Bangumi 与 Linux.do 是“匿名可用 + 可选个人能力”的例外：Bangumi 配置令牌后有 `live_probe`；Linux.do 把 `/session/current.json` 个人任务终态作为最强证据，缺少该证据时才使用 `_t` 布尔 `browser_heartbeat`，两者都没有时再以最近 `task_history` 作间接证据。共享 UI 不会把它们永远压成「无需登录」：Linux.do 心跳明确为未登录时显示「公开发现可用」，个人任务已确认 / 心跳陈旧时分别按 verified / stale 渲染；无心跳时则如实显示历史个人 bootstrap 或公开 discovery 结果，不会把匿名 discovery 成功伪装成已登录。
 
 证据强度是**独立于结论**的第二维度，同时用三种方式编码，其中没有一种是颜色（色觉障碍用户读不到颜色）：
 
@@ -101,11 +102,11 @@ class SourceAuthContract(BaseModel):
 | `POST /api/sources/{slug}/verify` | 显式验证，返回契约 + `outcome` / `replayed` / `retry_after_seconds` |
 | `POST /api/sources/{slug}/credential` | 统一写入：结构校验 → 活体校验 → 落盘 → 广播 → 返回重算契约 |
 
-7 条老写入端点（`/api/bilibili/cookie`、`/api/sources/{dy,x,reddit}/cookie`、`/api/sources/xhs/tokens`、`/api/sources/{xhs,zhihu}/login-state`）保留为 `deprecated=True` 的内部转发，响应结构**逐字段冻结（值，不只是键集）**——它们有浏览器扩展在调用，而一个键还在、值被掏空的响应对只比对键集的测试是隐形的。`PUT /api/config` 的四处凭据写入同样委托统一校验门。
+8 条老写入端点（`/api/bilibili/cookie`、`/api/sources/{dy,x,reddit}/cookie`、`/api/sources/xhs/tokens`、`/api/sources/{xhs,zhihu,linuxdo}/login-state`）保留为 `deprecated=True` 的内部转发，响应结构**逐字段冻结（值，不只是键集）**——它们有浏览器扩展在调用，而一个键还在、值被掏空的响应对只比对键集的测试是隐形的。`PUT /api/config` 的四处凭据写入同样委托统一校验门。
 
 **凭据读取是状态查询，不是秘密导出。** `GET /api/sources/credentials` 的 `available`、掩码预览、`summary` 与非敏感 Cookie 名称用于回答“是否已保存/由哪里管理”；秘密原值永不返回。历史 `reveal_keys` query 保留为 no-op，`form.actions` 不再包含 `copy`，桌面页面也不渲染复制按钮。新值只能走统一 credential 写入或配置 PUT；空值与掩码回显不会覆盖现有值。
 
-**首页问题分类与设置卡共用同一张表。** `describeSourceIssue()` 只把已启用来源的缺凭据、不完整、过期、失败、受阻、限流和未知契约列为 actionable issue，并原样携带后端 `detail`；`unverified`、`syncing`、无需登录与已验证都不是故障。桌面首页因此能覆盖八个平台并点名具体来源，而不会把每个平台都冒充为 `AccountSyncService` 的账号同步阶段。
+**首页问题分类与设置卡共用同一张表。** `describeSourceIssue()` 只把已启用来源的缺凭据、不完整、过期、失败、受阻、限流和未知契约列为 actionable issue，并原样携带后端 `detail`；`unverified`、`syncing`、无需登录与已验证都不是故障。桌面首页因此能覆盖九个平台并点名具体来源，而不会把每个平台都冒充为 `AccountSyncService` 的账号同步阶段。
 
 **任何写入面都没有降低校验强度的开关。** `POST /api/sources/{slug}/credential` 的 `validate_live` 已删——全仓零调用方（扩展、三端前端、CLI 都不发），等于给任何能连上 localhost 的东西一个关掉端点核心承诺的官方途径，不换来任何好处。老端点 `POST /api/bilibili/cookie` 的 `validate_with_bilibili` **仍接受但不再生效**：只删新端点而把隔壁一模一样的开关留着，等于那次删除只是装饰——「装机扩展总是发 true」描述的是扩展，不是所有能连上这个端口的东西；实测传 `false` 会让一份结构完整但已失效的 cookie 在探针零调用的情况下落盘。字段保留在协议上是因为装机扩展每次同步 cookie 都会发它，直接拒绝该键会 422 掉它们的同步；**「接受这个字段」与「这个字段能降低校验」是两件事**。`validate_credential()` 也随之删掉了 `live` 参数——能活体校验的平台一律活体校验，没有"少查一点"的入参。
 
@@ -115,7 +116,7 @@ class SourceAuthContract(BaseModel):
 
 **旧 `state` 是承袭的，不是推导的。** 原计划写一个 `derive_legacy_state(contract)`，实施时证明不可能：bilibili 与 douyin 的正交字段完全相同（`present` + `unverified` + `live_probe`），旧值却分别是 `ready`/`True` 与 `unverified`/`False`——B 站因「cookie 字段齐全」获得信任推定，抖音因其分支被写成永不声称成功而没有。**这个不可能性本身就是旧字段语义坍塌的最强证据。** 改由 `legacy.py` 的 `check_legacy_consistency()` 断言两套视图互不矛盾（不是相等：`ready` 合法地对应 `verified` 或 `unverified`）。
 
-**状态端点绝不出网，由作用域强制。** `SourceAuthContext` 只持有 config 与 database，**拿不到 HTTP client**。PC Web 收到 `bilibili_cookie_synced`、`douyin_cookie_synced`、`x_cookie_synced` 或 `reddit_cookie_synced` runtime 事件后会立即重读该端点；文档可见时仍每 30 秒轮询一次，作为事件遗漏或 WebSocket 重连空窗的兜底，并同时刷新首页警示与来源卡片。若状态端点自己探测，一个空闲标签页就会每分钟打抖音两次、永不停止——那是自造风控。活体探测只发生在显式的 verify 动作里，状态端点通过 `probe_cache.LiveProbeCache.peek()` 读取上次结论（零 I/O）。
+**状态端点绝不出网，由作用域强制。** `SourceAuthContext` 只持有 config 与 database，**拿不到 HTTP client**。PC Web 收到凭据/登录态同步 runtime 事件（包括 Linux.do 的布尔心跳）后会立即重读该端点；文档可见时仍每 30 秒轮询一次，作为事件遗漏或 WebSocket 重连空窗的兜底，并同时刷新首页警示与来源卡片。若状态端点自己探测，一个空闲标签页就会周期性访问外部平台、永不停止——那是自造风控。活体探测只发生在显式的 verify 动作里，状态端点通过 `probe_cache.LiveProbeCache.peek()` 读取上次结论（零 I/O）。
 
 **verify 动作按固定动作表分派，不按 `verify_method`。** 两者不同：`verify_method` 描述「当前这个结论怎么来的」，随状态变化（知乎无心跳时回落 `task_history`）；而一次点击要做的事是平台的固定属性（知乎永远是「请插件重新上报」）。按前者分派会让知乎**在最需要验证时反而没有可执行动作**，还会凭空造出「重跑历史」这种不存在的操作。
 
@@ -127,7 +128,7 @@ class SourceAuthContract(BaseModel):
 
 **去抖条目随凭据变更失效。** 每平台 10 秒去抖是为了防连点自造风控，但它按**平台**存结果。修复路径恰好会撞上：验一份死 cookie（窗口以 `failed` 武装）→ 粘贴一份能用的 → 10 秒内再点「测试连接」→ 原样回放那条旧的失败。用户读到的是「修了也没用」，下一步多半是把那份真正能用的 cookie 删掉。凭据一旦真正落盘（两条写入路径都会），`note_credential_changed()` 立即清掉该平台的去抖条目。同理，`asyncio.CancelledError` 继承自 `BaseException`，`except Exception` 抓不到——前端 fetch 被取消或上层超时会让 in-flight 标记残留到 60 秒上限，期间每次点击都只回「验证正在进行中」，而那次验证早已停止。
 
-**无法校验的绝不伪造。** 小红书与知乎后端只存一个 bool、零字节 cookie，其写入显式返回 `checked="none"` 加 `unverified_reason`，而不是假装校验过。
+**无法校验的绝不伪造。** 小红书、知乎与 Linux.do 后端只存一个 bool、零字节 cookie，其写入显式返回 `checked="none"` 加 `unverified_reason`，而不是假装校验过。
 
 **活体缓存按凭据判定，不按平台。** 写入门会复用 60 秒内的**正面**结论（抖音 `msToken` 频繁轮换，插件每次启动都重发整个 jar，每次都探测就是自造风控）。但复用只对**同一份凭据**成立：只按平台取缓存时，旧 cookie 的成功结论会替另一份结构完整却已失效的 cookie 背书，于是无效凭据一个网络请求都不发就落了盘——「无效凭据绝不落盘」在用户唯一看不见的那种情况下失效。`ProbeVerdict.credential_fingerprint` 存的是该平台**登录态字段**的 SHA-256（B 站 `SESSDATA`/`bili_jct`/`DedeUserID`，抖音 `sessionid`/`sessionid_ss`/`sid_tt`），字段名直接取自 `CREDENTIAL_SPECS` 的校验门，所以「什么算同一份凭据」与「校验门要求什么」不可能漂移；`msToken` 不在其中，轮换因此仍然命中缓存。写入门用 `peek_matching()`（**严格**：指纹不符或缺失一律重探，因为猜错的代价是死凭据落盘）；状态端点用 `contradicts()`（**宽松**：只有明确不符才丢弃，缺失指纹仍显示；展示仍受 6 小时可见证据窗口约束，而凭据写入绝不会借用这个长窗口）。命中缓存的结论**不重新记录**，否则每次插件重发都会顺延自己的有效期，一份凭据可以永远「刚刚验证过」而实际从未复验。
 
@@ -138,6 +139,25 @@ class SourceAuthContract(BaseModel):
 **X 的显式验证是只读探针。** `POST /api/sources/twitter/verify` 复用统一 `live_probe` 框架，调用 `XClient.probe()` → `twitter-cli.fetch_me()`；成功或明确 401 会写回与 discovery 共用的 `XSourceHealthStore`，403 / 429 与其它传输异常保持 `blocked` / `rate_limited` / 待判定语义，不把无法判定写成 Cookie 失效。保存 Cookie 本身仍只做 `auth_token` / `ct0` 结构校验，避免每次扩展同步都主动出网。
 
 **X 健康表不能在状态请求的共享 connection 上做任何工作。** `/api/sources/status` 是同步 handler，会被 FastAPI 线程池并发执行；`check_same_thread=False` 只允许 connection 跨线程使用，不代表同一个 connection 可以同时 `CREATE/PRAGMA/SELECT`。真实 30 并发请求曾有 3 次返回 500（`sqlite3.Connection returned NULL`）。`XSourceHealthStore` 现对每个 `Database` 实例只单飞执行一次 schema 初始化，且初始化、读取、成功/失败写入、人工冷却覆盖均使用 `Database.open_connection()` 的短连接；`record_error()` 的计数读取与更新位于同一 `BEGIN IMMEDIATE` 事务，既避开共享 connection，也不丢连续 429 计数。
+
+## Linux.do 的接入
+
+Linux.do 是第 9 个 source-auth provider，形态是“公开 discovery 无需登录 + 个人 bootstrap/login-required”。legacy `auth_required` 仍为 `false`，但共享契约新增 `capabilities` 矩阵：discover 永远 `anonymous/ready`，profile/bootstrap/incremental 必须是 `login-required/ready` 才能作为 guided-init 个人信号来源。这样 `_t` 缺失、心跳陈旧或扩展离线不会误伤公开 search / hot / feed / creator / related，也不会让 Linux.do-only 初始化在未登录时先排一个长任务才失败。
+
+扩展读取 `linux.do` Cookie 列表后只计算 `_t` 是否存在且非空，并通过 deprecated-compatible `/api/sources/linuxdo/login-state` 或统一 credential writer 保存 `logged_in: bool`。后端不会收到 `_t` 值，也没有可用于 direct probe 的 Linux.do cookie：
+
+- 新鲜的 `true` 心跳：`credential=present`、`credential_origin=extension`、`verification=unverified`、`verify_method=browser_heartbeat`；它只表示可尝试个人任务，不冒充 `/session/current.json` 身份验证。
+- 陈旧的 `true` 心跳：仍是 `credential=present`，但 `verification=stale`。
+- 新鲜 `false`：`credential=none`、`verification=failed`，detail 明确只说个人信号暂不可用。
+- 从未收到心跳且没有任务历史：`credential=none`、`verification=unverified`、`verify_method=none`，共享 UI 显示「无需登录」，公开发现仍可用。
+
+实时 `/session/current.json` 任务证据强于 Cookie 心跳：72 小时内的个人任务 `login_required` 不会被后到的 `_t`-exists 覆盖，必须由后续个人任务成功恢复；较新的个人成功也会优先于旧心跳。任务证据超过 72 小时后只保留 stale/history 提示，不再永久准入或永久拦截；此时新的浏览器心跳可重新发起一次由 `/session/current.json` 把关的尝试。没有更强的个人终态时才使用心跳。两者都没有时，provider 从 `linuxdo_tasks` 读取最近 bootstrap 与 discovery 终态：新鲜的成功 / 空结果 / 部分成功个人 bootstrap 映射为 `present + verified + task_history`；公开 discovery 成功只证明公开链路可用，仍是 `none + unverified + task_history`；其它失败或进行中任务保守表达为 `none + unverified`。这些都不改变 legacy `auth_required=false`，个人能力 admission 始终看 `capabilities`。
+
+前端可见状态严格跟随 optional-auth 逻辑：新鲜 `true` 显示「已验证（◇ 插件心跳）」；陈旧 `true` 显示「验证已过期」；已收到 `false` 时因仍有 heartbeat 能力而显示「公开发现可用」；无心跳但有任务历史时显示对应的间接证据；两者皆无时才显示基础「无需登录」。这些 badge 只描述个人增强能力或最近公开链路结果，不得反向阻断公开 discovery。
+
+固定 verify 动作是 `browser_heartbeat`：后端经 runtime-stream 发布 `linuxdo_login_state_sync_requested`，在线扩展重新判断 `_t` 并上报 bool；插件未连接、规定时间内没回报或事件通道不可用时 outcome 为 `indeterminate`，绝不把“浏览器没回答”误写成“用户已退出”。即使 bool 为 true，个人任务执行时仍必须由同源 `/session/current.json` 返回 `current_user.username` 正面确认身份；心跳只是能力提示，不是分页授权。
+
+这条契约与 Linux.do 任务的隐私边界一致：站点请求只在真实 `linux.do` tab 内以 GET 执行，Cookie、CSRF 字段和原始 JSON/HTML 响应都不上传。详见 [Linux.do 来源文档](linuxdo.md)。
 
 ## Bangumi 的接入
 
@@ -166,12 +186,10 @@ Bangumi 两者都不是：公开收藏 / 排行**匿名即可发现**（所以�
   `tests/test_source_auth_contract.py::test_bangumi_verify_with_a_valid_token_is_verified`
   等四个用例。
 
-**契约表达不了的那半（如实记录，没硬塞）：** 因为 `auth_required=false`，前端按上面
-「auth_required=false 单独一档」那条规则渲染成「无需登录」并**抑制证据徽章**——所以
-令牌验证结论虽然如实写进了 `verification`/`verified_at`，却不会以常驻的 ◆ 联网验证
-徽章出现。它今天经由两条既有通道对用户可见：「测试连接」按钮的消息，以及 discovery
-在真跑时把死令牌标成 `token_state="rejected"`（前端覆盖成「令牌已失效」）。要把令牌
-结论做成常驻徽章，需要给契约加一档「可选凭据」语义并改前端——本次零前端改动，故未做。
+**可选凭据的前端表达。** 共享 renderer 现在用 `hasVerifiableCredential()` 区分纯匿名源与
+可选身份源：Bangumi 无令牌时仍显示「无需登录」且无徽章；配置令牌后按
+`verification` 显示已验证 / 待验证 / 失败，并展示 `◆ 联网验证` 证据。discovery 运行时的
+`token_state="rejected"` 仍保留为来源健康维度，与 auth badge 相互补充。
 
 **legacy 与两条额外维度。** `legacy_state` 恒为 `no_auth`（保持一致性检查严格；
 discovery 健康串落到 `detail`，`token_state` 单独成轴）。Bangumi 的 `SourceStatusItem`

@@ -94,6 +94,9 @@ from openbiliclaw.api.models import (
     InitStatusOut,
     InsightFeedbackIn,
     InsightFeedbackResponse,
+    LinuxdoLoginStateIn,
+    LinuxdoLoginStateResponse,
+    LinuxdoSourceConfigOut,
     LLMConfigOut,
     LLMInstanceConfigOut,
     LLMProviderConfigOut,
@@ -400,6 +403,7 @@ _SOURCE_SHARE_ORDER = (
     "zhihu",
     "reddit",
     "bangumi",
+    "linuxdo",
 )
 _INIT_SOURCE_ORDER = (
     "bilibili",
@@ -410,6 +414,7 @@ _INIT_SOURCE_ORDER = (
     "zhihu",
     "reddit",
     "bangumi",
+    "linuxdo",
 )
 _PROBE_MODES = {"near", "lateral", "bridge", "wildcard"}
 _PROBE_CHALLENGE_MODES = {"lateral", "bridge", "wildcard"}
@@ -1322,6 +1327,9 @@ def _fallback_recommendation_click_url(
         return f"https://www.reddit.com/comments/{quote(reddit_id, safe='')}/"
     if source_platform == "bangumi":
         return f"https://bgm.tv/subject/{quote(item_id, safe='')}"
+    if source_platform == "linuxdo":
+        topic_id = item_id.removeprefix("topic:")
+        return f"https://linux.do/t/{topic_id}" if topic_id.isdigit() and int(topic_id) > 0 else ""
     if source_platform == "bilibili":
         return f"https://www.bilibili.com/video/{quote(bvid or item_id, safe='')}"
     return ""
@@ -2281,6 +2289,8 @@ def create_app(
             "/api/config/probe-service",
             "/api/bilibili/cookie",
             "/api/sources/bangumi/identity",
+            "/api/sources/linuxdo/login-state",
+            "/api/sources/linuxdo/credential",
         }
     )
 
@@ -2845,9 +2855,14 @@ def create_app(
             fresh.append(item)
         return fresh, fresh_keys_by_index
 
-    def _mark_source_bootstrap_keys(source: str, keys: list[str]) -> None:
+    def _mark_source_bootstrap_keys(
+        source: str,
+        keys: list[str],
+        *,
+        account_key: str = "",
+    ) -> None:
         """Persist bootstrap keys that already entered the source event path."""
-        if not keys:
+        if not keys and not (source == "linuxdo" and account_key):
             return
         from datetime import UTC, datetime
 
@@ -2868,6 +2883,8 @@ def create_app(
                 keys,
                 cap=SOURCE_SEEN_KEY_CAP,
             )
+            if source == "linuxdo" and account_key:
+                state["linuxdo_account_key"] = account_key
             state["last_source_bootstrap_sync_at"] = datetime.now(UTC).isoformat()
             return state
 
@@ -4733,6 +4750,7 @@ def create_app(
                 include_zhihu="zhihu" in effective,
                 include_reddit="reddit" in effective,
                 include_bangumi="bangumi" in effective,
+                include_linuxdo="linuxdo" in effective,
                 bangumi_username=bangumi_username,
                 bangumi_token=bangumi_token,
                 target_pool_count=_INIT_POOL_TARGET_COUNT,
@@ -4743,7 +4761,9 @@ def create_app(
             discovery_partial = bool(result.discovery_error)
             dy_status = str(getattr(result, "dy_status", "skipped") or "skipped")
             dy_degraded = dy_status == "degraded"
-            partial_success = discovery_partial or dy_degraded
+            linuxdo_status = str(getattr(result, "linuxdo_status", "skipped") or "skipped")
+            linuxdo_degraded = linuxdo_status == "degraded"
+            partial_success = discovery_partial or dy_degraded or linuxdo_degraded
             reason = getattr(result, "discovery_reason", None)
             detail = str(getattr(result, "discovery_detail", "") or "").strip()
             if dy_degraded:
@@ -4756,6 +4776,16 @@ def create_app(
                 detail = " ".join(part for part in (detail, dy_detail) if part)
                 if not discovery_partial:
                     reason = "douyin_degraded"
+            if linuxdo_degraded:
+                linuxdo_event_count = len(getattr(result, "linuxdo_events", []) or [])
+                linuxdo_detail = (
+                    "Linux.do 采集状态 degraded："
+                    f"已保留并用于画像建模 {linuxdo_event_count} 条已采事件，"
+                    "但至少一个个人范围未完成。"
+                )
+                detail = " ".join(part for part in (detail, linuxdo_detail) if part)
+                if not discovery_partial and not dy_degraded:
+                    reason = "linuxdo_degraded"
             await coord.complete(
                 run_id,
                 partial_success=partial_success,
@@ -4921,6 +4951,41 @@ def create_app(
                 {"error": "no_sources_selected", "detail": "至少选择一个有效数据来源"},
                 status_code=409,
             )
+        # Preserve the explicit opt-in independently from this run's profile
+        # capability admission. A signed-out optional source may stay enabled
+        # for public discovery, but it must not be scheduled as a personal
+        # profile source until its capability-specific prerequisite is ready.
+        sources_to_persist = set(effective_sources)
+        warnings: list[str] = []
+        capability_readiness = getattr(
+            ctx.init_prereqs,
+            "source_capability_readiness",
+            None,
+        )
+        if "linuxdo" in effective_sources and callable(capability_readiness):
+            linuxdo_profile_readiness = str(
+                capability_readiness("linuxdo", "profile") or "unverified"
+            )
+            if linuxdo_profile_readiness != "ready":
+                if effective_sources == {"linuxdo"}:
+                    return JSONResponse(
+                        {
+                            "error": "no_profile_signal_sources",
+                            "detail": (
+                                "Linux.do 公开发现无需登录，但初始化所需的"
+                                "收藏、点赞和阅读记录需要已登录的浏览器会话。"
+                                "请先在当前浏览器登录 Linux.do 并连接插件。"
+                            ),
+                            "capability": "profile",
+                            "readiness": linuxdo_profile_readiness,
+                        },
+                        status_code=409,
+                    )
+                effective_sources.discard("linuxdo")
+                warnings.append(
+                    "Linux.do 个人信号未就绪：本次初始化跳过收藏、"
+                    "点赞和阅读记录；公开发现保持启用。"
+                )
         configured_bangumi_username = str(
             getattr(
                 getattr(
@@ -4953,7 +5018,6 @@ def create_app(
         effective_bangumi_token = (
             configured_bangumi_token if selected_bangumi_token is None else selected_bangumi_token
         )
-        warnings: list[str] = []
         # A personal access token identifies the account via /v0/me, so validate
         # it live and resolve the username BEFORE reserving a run or persisting —
         # reject a bad/expired token with its real cause (project rule 7) instead
@@ -5066,7 +5130,7 @@ def create_app(
                 effective_bangumi_username if effective_bangumi_token else selected_bangumi_username
             )
             setup_runtime_suspended = await _persist_guided_init_source_opt_in(
-                effective_sources,
+                sources_to_persist,
                 bangumi_username=username_to_persist,
                 bangumi_token=selected_bangumi_token,
             )
@@ -11906,6 +11970,26 @@ def create_app(
             updated_at=result.updated_at,
         )
 
+    @app.post(
+        "/api/sources/linuxdo/login-state",
+        response_model=LinuxdoLoginStateResponse,
+        deprecated=True,
+    )
+    async def update_linuxdo_login_state(
+        payload: LinuxdoLoginStateIn,
+    ) -> LinuxdoLoginStateResponse:
+        """Persist the extension-observed optional Linux.do session state."""
+        if not hasattr(ctx.database, "set_linuxdo_login_state"):
+            raise HTTPException(status_code=503, detail="database not configured")
+        result = await _write_source_credential(
+            "linuxdo", kind="login_state", value=payload.logged_in, source="extension"
+        )
+        return LinuxdoLoginStateResponse(
+            ok=True,
+            logged_in=payload.logged_in,
+            updated_at=result.updated_at,
+        )
+
     # ── Bangumi extension identity channel ──────────────────────────
     # The content script on bgm.tv / bangumi.tv reads the page's public
     # ``CHOBITS_UID`` global (MAIN-world bridge) plus the nav's own
@@ -13433,6 +13517,13 @@ def create_app(
                 secret=False,
             ),
             bangumi=_bangumi_credential_item(srcs, cfg),
+            linuxdo=item(
+                "linuxdo",
+                "浏览器登录态",
+                "",
+                "Linux.do 公开发现无需登录；个人收藏、点赞和阅读记录由浏览器插件"
+                "同源读取，后端不保存 Cookie。",
+            ),
         )
 
     # ── Douyin task queue endpoints (extension dispatcher) ──────────
@@ -13639,6 +13730,13 @@ def create_app(
         return await _kick_source_task("x")
 
     # ── YouTube bootstrap endpoints ────────────────────────────────
+    from openbiliclaw.sources.linuxdo_tasks import (
+        LinuxdoTaskQueue,
+        LinuxdoTaskResultValidationError,
+        linuxdo_bootstrap_item_key,
+        linuxdo_bootstrap_items_to_events,
+        validate_linuxdo_task_result,
+    )
     from openbiliclaw.sources.reddit_tasks import (
         RedditTaskQueue,
         reddit_bootstrap_item_key,
@@ -13657,10 +13755,12 @@ def create_app(
 
     _zhihu_task_queue: ZhihuTaskQueue | None = None
     _reddit_task_queue: RedditTaskQueue | None = None
+    _linuxdo_task_queue: LinuxdoTaskQueue | None = None
     db_conn = getattr(ctx.database, "conn", None)
     if hasattr(db_conn, "executescript"):
         _zhihu_task_queue = ZhihuTaskQueue(ctx.database)
         _reddit_task_queue = RedditTaskQueue(ctx.database)
+        _linuxdo_task_queue = LinuxdoTaskQueue(ctx.database)
 
     @app.get("/api/sources/reddit/next-task")
     def reddit_next_task(response: Any = None) -> Any:
@@ -13943,6 +14043,274 @@ def create_app(
     async def zhihu_task_kick() -> dict[str, Any]:
         """Broadcast `zhihu_task_available` over runtime-stream."""
         return await _kick_source_task("zhihu")
+
+    @app.get("/api/sources/linuxdo/next-task")
+    def linuxdo_next_task(response: Any = None) -> Any:
+        """Return the oldest pending Linux.do browser task, or 204 if none."""
+        from starlette.responses import Response
+
+        if _linuxdo_task_queue is None:
+            return Response(status_code=204)
+        linuxdo_cfg = getattr(
+            getattr(getattr(ctx, "config", None), "sources", None),
+            "linuxdo",
+            None,
+        )
+        if not bool(getattr(linuxdo_cfg, "enabled", False)):
+            return Response(status_code=204)
+        task = _linuxdo_task_queue.next_pending(only_ids=_init_owned_ids_filter())
+        if task is None:
+            return Response(status_code=204)
+
+        import json as _json
+
+        payload = _json.loads(task["payload_json"]) if task.get("payload_json") else {}
+        return {
+            "id": task["id"],
+            "type": task["type"],
+            "claim_token": task["claim_token"],
+            **payload,
+        }
+
+    @app.post("/api/sources/linuxdo/task-result")
+    async def linuxdo_task_result(payload: dict[str, Any]) -> dict[str, Any]:
+        """Persist Linux.do task rows and ingest authorized personal signals.
+
+        Discovery tasks only feed their waiting producer. ``bootstrap_events``
+        tasks explicitly marked ``profile_update`` or ``incremental`` also
+        traverse the durable event-ingress and bounded seen-key path before the
+        first staged terminal result becomes immutable.
+        """
+        task_id = str(payload.get("task_id", "") or "").strip()
+        if not task_id:
+            raise HTTPException(status_code=422, detail="task_id is required")
+        claim_token = str(payload.get("claim_token", "") or "").strip()
+
+        status = str(payload.get("status", "") or "").strip()
+        raw_items = payload.get("items", [])
+        if not isinstance(raw_items, list) or any(
+            not isinstance(value, dict) for value in raw_items
+        ):
+            raise HTTPException(status_code=422, detail="invalid_task_items")
+        items = list(raw_items)
+        scope_counts = payload.get("scope_counts")
+        if not isinstance(scope_counts, dict):
+            scope_counts = None
+        debug = payload.get("debug")
+        if not isinstance(debug, dict):
+            debug = None
+        account_key = str(payload.get("account_key", "") or "").strip()
+        response_observed = payload.get("response_observed") is True
+        raw_complete_scopes = payload.get("complete_scopes", [])
+        if not isinstance(raw_complete_scopes, list) or any(
+            not isinstance(scope, str) for scope in raw_complete_scopes
+        ):
+            raise HTTPException(status_code=422, detail="invalid_complete_scopes")
+        complete_scopes = [
+            str(scope).strip() for scope in raw_complete_scopes if str(scope).strip()
+        ]
+        raw_next_cursors = payload.get("next_cursors", {})
+        if not isinstance(raw_next_cursors, dict):
+            raise HTTPException(status_code=422, detail="invalid_next_cursors")
+        next_cursors = dict(raw_next_cursors)
+        result_error = str(payload.get("error", "") or "").strip()
+
+        legacy_queue = _linuxdo_task_queue
+        if legacy_queue is None:
+            raise HTTPException(status_code=409, detail="task_result_conflict")
+        task = _require_legacy_task(legacy_queue, task_id)
+        if not legacy_queue.claim_token_matches(task_id, claim_token):
+            raise HTTPException(status_code=409, detail="task_claim_conflict")
+        task_type = str(task.get("type", "")).strip()
+        if str(task.get("status", "")).strip() in {"completed", "failed"}:
+            return {"ok": True, "ignored": True}
+
+        task_payload: dict[str, Any] = {}
+        if task.get("payload_json"):
+            with suppress(Exception):
+                parsed_payload = json.loads(str(task.get("payload_json") or "{}"))
+                if isinstance(parsed_payload, dict):
+                    task_payload = parsed_payload
+        profile_update = bool(task_payload.get("profile_update"))
+        incremental = bool(task_payload.get("incremental"))
+
+        from openbiliclaw.sources.task_result_protocol import (
+            parse_task_result,
+            staged_terminal_status,
+        )
+
+        def _validate_linuxdo_canonical(canonical: dict[str, Any]) -> None:
+            canonical_items = [
+                value for value in canonical.get("items", []) if isinstance(value, dict)
+            ]
+            validate_linuxdo_task_result(
+                task_type=task_type,
+                task_payload=task_payload,
+                status=status,
+                items=canonical_items,
+                scope_counts=(
+                    canonical.get("scope_counts")
+                    if isinstance(canonical.get("scope_counts"), dict)
+                    else None
+                ),
+                account_key=str(canonical.get("account_key", "") or ""),
+                response_observed=bool(canonical.get("response_observed")),
+                complete_scopes=[
+                    str(scope)
+                    for scope in canonical.get("complete_scopes", [])
+                    if isinstance(scope, str)
+                ],
+                next_cursors=(
+                    canonical.get("next_cursors")
+                    if isinstance(canonical.get("next_cursors"), dict)
+                    else None
+                ),
+            )
+
+        canonical_result = parse_task_result(task.get("result_json"))
+        staged_status = staged_terminal_status(canonical_result)
+        if (
+            not staged_status
+            and task_type == "bootstrap_events"
+            and (profile_update or incremental)
+            and account_key
+        ):
+            bound_account_key = str(
+                _load_source_bootstrap_state().get("linuxdo_account_key", "") or ""
+            ).strip()
+            if bound_account_key and bound_account_key != account_key:
+                raise HTTPException(
+                    status_code=409,
+                    detail="linuxdo_account_switch_requires_reset",
+                )
+        if not staged_status:
+            try:
+                prospective = legacy_queue.preview_result(
+                    task_id,
+                    items=items if items else None,
+                    scope_counts=scope_counts,
+                    debug=debug,
+                    account_key=account_key,
+                    response_observed=response_observed,
+                    complete_scopes=complete_scopes,
+                    next_cursors=next_cursors,
+                    error=result_error,
+                )
+                _validate_linuxdo_canonical(prospective)
+            except LinuxdoTaskResultValidationError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if staged_status or status in {"partial", "ok", "empty", "degraded", "failed"}:
+            is_final = bool(staged_status) or status in {"ok", "empty", "degraded", "failed"}
+            if staged_status:
+                canonical_result = parse_task_result(task.get("result_json"))
+            elif is_final:
+                try:
+                    canonical_result = legacy_queue.stage_final_result(
+                        task_id,
+                        terminal_status=status,
+                        items=items if items else None,
+                        scope_counts=scope_counts,
+                        debug=debug,
+                        account_key=account_key,
+                        response_observed=response_observed,
+                        complete_scopes=complete_scopes,
+                        next_cursors=next_cursors,
+                        error=result_error,
+                        expected_claim_token=claim_token,
+                        validate=_validate_linuxdo_canonical,
+                    )
+                except PermissionError as exc:
+                    raise HTTPException(status_code=409, detail="task_claim_conflict") from exc
+                except LinuxdoTaskResultValidationError as exc:
+                    raise HTTPException(status_code=422, detail=str(exc)) from exc
+            else:
+                try:
+                    legacy_queue.merge_result(
+                        task_id,
+                        items=items if items else None,
+                        scope_counts=scope_counts,
+                        debug=debug,
+                        account_key=account_key,
+                        response_observed=response_observed,
+                        complete_scopes=complete_scopes,
+                        next_cursors=next_cursors,
+                        complete=False,
+                        expected_claim_token=claim_token,
+                        validate=_validate_linuxdo_canonical,
+                    )
+                except PermissionError as exc:
+                    raise HTTPException(status_code=409, detail="task_claim_conflict") from exc
+                except LinuxdoTaskResultValidationError as exc:
+                    raise HTTPException(status_code=422, detail=str(exc)) from exc
+                canonical_task = legacy_queue.get(task_id) or {}
+                canonical_result = parse_task_result(canonical_task.get("result_json"))
+
+            canonical_items = [
+                value for value in canonical_result.get("items", []) if isinstance(value, dict)
+            ]
+            canonical_account_key = str(canonical_result.get("account_key", "") or "")
+            init_busy = _init_active_now()
+            skip_profile = init_busy and not _init_owns_task(task_id)
+            if (
+                task_type == "bootstrap_events"
+                and (profile_update or incremental)
+                and canonical_items
+                and not skip_profile
+            ):
+                fresh_items, item_keys_by_index = _filter_new_source_bootstrap_items(
+                    "linuxdo",
+                    canonical_items,
+                    lambda item: linuxdo_bootstrap_item_key(
+                        item,
+                        account_key=canonical_account_key,
+                    ),
+                )
+                events_with_keys: list[tuple[dict[str, Any], str]] = []
+                for index, item in enumerate(fresh_items):
+                    for event in linuxdo_bootstrap_items_to_events(
+                        [item],
+                        account_key=canonical_account_key,
+                    ):
+                        events_with_keys.append((event, item_keys_by_index.get(index, "")))
+                accepted_keys = await _accept_source_profile_events(
+                    source="linuxdo",
+                    task_id=task_id,
+                    events_with_keys=events_with_keys,
+                    generic_owner=not init_busy,
+                )
+                _mark_source_bootstrap_keys(
+                    "linuxdo",
+                    accepted_keys,
+                    account_key=canonical_account_key,
+                )
+            if (
+                task_type == "bootstrap_events"
+                and (profile_update or incremental)
+                and canonical_account_key
+                and staged_terminal_status(canonical_result) in {"ok", "empty", "degraded"}
+            ):
+                _mark_source_bootstrap_keys(
+                    "linuxdo",
+                    [],
+                    account_key=canonical_account_key,
+                )
+            if is_final:
+                try:
+                    legacy_queue.complete_staged_result(
+                        task_id,
+                        expected_claim_token=claim_token,
+                    )
+                except PermissionError as exc:
+                    raise HTTPException(status_code=409, detail="task_claim_conflict") from exc
+        else:
+            raise HTTPException(status_code=422, detail="invalid_result_status")
+
+        return {"ok": True}
+
+    @app.post("/api/sources/linuxdo/kick")
+    async def linuxdo_task_kick() -> dict[str, Any]:
+        """Broadcast `linuxdo_task_available` over runtime-stream."""
+        return await _kick_source_task("linuxdo")
 
     _yt_task_queue: YtTaskQueue | None = None
     if hasattr(ctx.database, "conn"):
@@ -14742,6 +15110,18 @@ def create_app(
                     min_interval_minutes=cfg.sources.bangumi.min_interval_minutes,
                     bootstrap_limit=cfg.sources.bangumi.bootstrap_limit,
                 ),
+                linuxdo=LinuxdoSourceConfigOut(
+                    enabled=cfg.sources.linuxdo.enabled,
+                    source_modes=list(cfg.sources.linuxdo.source_modes),
+                    daily_search_budget=cfg.sources.linuxdo.daily_search_budget,
+                    daily_hot_budget=cfg.sources.linuxdo.daily_hot_budget,
+                    daily_feed_budget=cfg.sources.linuxdo.daily_feed_budget,
+                    daily_creator_budget=cfg.sources.linuxdo.daily_creator_budget,
+                    daily_related_budget=cfg.sources.linuxdo.daily_related_budget,
+                    request_interval_seconds=cfg.sources.linuxdo.request_interval_seconds,
+                    min_interval_minutes=cfg.sources.linuxdo.min_interval_minutes,
+                    bootstrap_limit=cfg.sources.linuxdo.bootstrap_limit,
+                ),
             ),
             scheduler=SchedulerConfigOut(
                 enabled=cfg.scheduler.enabled,
@@ -14760,6 +15140,7 @@ def create_app(
                 youtube_incremental_hours=getattr(cfg.scheduler, "youtube_incremental_hours", None),
                 zhihu_incremental_hours=getattr(cfg.scheduler, "zhihu_incremental_hours", None),
                 reddit_incremental_hours=getattr(cfg.scheduler, "reddit_incremental_hours", None),
+                linuxdo_incremental_hours=getattr(cfg.scheduler, "linuxdo_incremental_hours", None),
                 refresh_check_interval_seconds=cfg.scheduler.refresh_check_interval_seconds,
                 eval_min_batch_size=cfg.scheduler.eval_min_batch_size,
                 eval_max_wait_seconds=cfg.scheduler.eval_max_wait_seconds,
@@ -16374,6 +16755,60 @@ def create_app(
                             )
                         setattr(cfg.sources.bangumi, key, value)
 
+                linuxdo_data = sources_data.get("linuxdo")
+                if isinstance(linuxdo_data, dict):
+                    if "enabled" in linuxdo_data:
+                        cfg.sources.linuxdo.enabled = _as_bool(linuxdo_data["enabled"])
+                    if "source_modes" in linuxdo_data:
+                        raw_modes = linuxdo_data["source_modes"]
+                        if not isinstance(raw_modes, list):
+                            raise HTTPException(
+                                status_code=400, detail="Linux.do source_modes 必须是数组"
+                            )
+                        selected_modes = tuple(
+                            dict.fromkeys(str(value).strip().lower() for value in raw_modes)
+                        )
+                        if not selected_modes or any(
+                            value not in {"search", "hot", "feed", "creator", "related"}
+                            for value in selected_modes
+                        ):
+                            raise HTTPException(
+                                status_code=400,
+                                detail="Linux.do source_modes 包含不支持的值",
+                            )
+                        cfg.sources.linuxdo.source_modes = selected_modes
+                    for key in (
+                        "daily_search_budget",
+                        "daily_hot_budget",
+                        "daily_feed_budget",
+                        "daily_creator_budget",
+                        "daily_related_budget",
+                        "request_interval_seconds",
+                        "min_interval_minutes",
+                        "bootstrap_limit",
+                    ):
+                        if key not in linuxdo_data:
+                            continue
+                        try:
+                            value = int(linuxdo_data[key])
+                        except (TypeError, ValueError) as exc:
+                            raise HTTPException(
+                                status_code=400, detail=f"Linux.do {key} 必须是整数"
+                            ) from exc
+                        minimum = 1 if key == "bootstrap_limit" else 0
+                        maximum = (
+                            300
+                            if key == "bootstrap_limit"
+                            else 30
+                            if key == "request_interval_seconds"
+                            else None
+                        )
+                        if value < minimum or (maximum is not None and value > maximum):
+                            raise HTTPException(
+                                status_code=400, detail=f"Linux.do {key} 超出允许范围"
+                            )
+                        setattr(cfg.sources.linuxdo, key, value)
+
         # Apply scheduler updates
         if "scheduler" in update:
             sdata = update["scheduler"]
@@ -16433,6 +16868,7 @@ def create_app(
                 "youtube_incremental_hours",
                 "zhihu_incremental_hours",
                 "reddit_incremental_hours",
+                "linuxdo_incremental_hours",
                 "refresh_check_interval_seconds",
                 "eval_min_batch_size",
                 "eval_max_wait_seconds",
@@ -16485,6 +16921,7 @@ def create_app(
                         "youtube_incremental_hours",
                         "zhihu_incremental_hours",
                         "reddit_incremental_hours",
+                        "linuxdo_incremental_hours",
                     }:
                         try:
                             source_interval = _normalize_source_incremental_hours(

@@ -57,6 +57,41 @@ VerifyMethod = Literal[
     "none",  # no verification capability (or none needed)
 ]
 
+CapabilityAuthMode = Literal[
+    "anonymous",
+    "optional-credential",
+    "login-required",
+]
+
+CapabilityReadiness = Literal[
+    "ready",
+    "login_required",
+    "unverified",
+    "stale",
+    "rate_limited",
+    "blocked",
+]
+
+
+class SourceCapabilityAuth(BaseModel):
+    """Machine-readable auth admission for one source capability.
+
+    ``SourceAuthContract.auth_required`` remains as a legacy source-wide
+    projection. Mixed sources must use this map for setup/init admission so a
+    public discover route never disguises a login-required profile route.
+    Evidence strength stays on the enclosing contract; ``readiness`` answers
+    only whether this capability may be attempted now.
+    """
+
+    mode: CapabilityAuthMode
+    required: bool = True
+    readiness: CapabilityReadiness = "unverified"
+    detail: str = ""
+
+    @property
+    def ready(self) -> bool:
+        return self.readiness == "ready"
+
 
 def normalize_timestamp(value: str) -> str:
     """Return *value* as timezone-qualified ISO-8601, or "" / *value* unchanged.
@@ -117,6 +152,7 @@ class SourceAuthContract(BaseModel):
     # Human-readable, platform-specific note. User-facing copy lives here so the
     # frontends never hardcode per-platform strings (invariant I4).
     detail: str = ""
+    capabilities: dict[str, SourceCapabilityAuth] = Field(default_factory=dict)
 
     # ── Legacy compatibility (Wave A only) ────────────────────────────────
     # The pre-existing ``state``/``logged_in`` values, carried verbatim from the
@@ -138,3 +174,18 @@ class SourceAuthContract(BaseModel):
         time (CLAUDE.md pitfall #5: shared logic in the backend).
         """
         return normalize_timestamp(value)
+
+    def capability_ready(self, capability: str) -> bool:
+        """Return admission readiness for *capability*.
+
+        Sources without a capability map retain the legacy source-wide
+        behaviour. Capability-specific sources always populate the map and
+        therefore cannot accidentally fall back to ``auth_required=False``.
+        """
+
+        state = self.capabilities.get(str(capability).strip())
+        if state is not None:
+            return state.ready
+        return not self.auth_required or (
+            self.credential == "present" and self.verification == "verified"
+        )

@@ -20,7 +20,7 @@ test("the shared module publishes itself for classic-script consumers", () => {
     // from all three settings surfaces at once. It renders off the legacy
     // `state` fallback until it gets a provider — see the test below.
     "bilibili", "xiaohongshu", "douyin", "youtube", "twitter", "zhihu", "reddit",
-    "bangumi",
+    "bangumi", "linuxdo",
   ]);
 });
 
@@ -211,6 +211,38 @@ test("auth_required=false is its own tier, not a shade of verified", () => {
   assert.equal(youtube.evidence.rank, "none");
   // `credential: "none"` must not drag it into 需要登录: auth_required wins.
   assert.notEqual(youtube.label, "需要登录");
+});
+
+test("optional browser login never hides Linux.do public discovery", () => {
+  const detail =
+    "Linux.do 公开发现可用；浏览器当前未登录，个人信号同步暂不可用。";
+  const loggedOut = {
+    state: "ready",
+    enabled: true,
+    detail,
+    auth: {
+      auth_required: false,
+      credential: "none",
+      verification: "failed",
+      verify_method: "browser_heartbeat",
+      verified_at: "2026-07-18T09:57:00+00:00",
+    },
+  };
+  const access = SourceStatus.describeAccess(loggedOut, { now: NOW });
+
+  assert.equal(SourceStatus.sourceLabel("linuxdo"), "Linux.do");
+  assert.equal(access.label, "公开发现可用");
+  assert.equal(access.tone, "public");
+  assert.equal(access.detail, detail);
+  assert.ok(access.evidence.text.includes("插件心跳"));
+  assert.equal(SourceStatus.describeSourceIssue(loggedOut), null);
+
+  const credential = SourceStatus.describeCredential({
+    available: false,
+    detail: "连接已登录插件后可同步个人收藏、点赞和阅读记录。",
+    form: { kind: "extension_only", label: "Linux.do 登录态（可选）" },
+  });
+  assert.equal(credential.form.writable, false);
 });
 
 test("a capability is not a result: unverified says so, whatever the method", () => {

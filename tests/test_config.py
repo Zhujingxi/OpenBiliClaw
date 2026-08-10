@@ -180,6 +180,7 @@ class TestConfigDefaults:
             "zhihu": 1,
             "reddit": 1,
             "bangumi": 1,
+            "linuxdo": 1,
         }
 
     def test_bilibili_source_enabled_defaults_true(self) -> None:
@@ -1336,6 +1337,7 @@ youtube = 3
         "zhihu": 1,
         "reddit": 1,
         "bangumi": 1,
+        "linuxdo": 1,
     }
 
 
@@ -1357,6 +1359,7 @@ twitter = 1
 
     assert config.scheduler.pool_source_shares["zhihu"] == 1
     assert config.scheduler.pool_source_shares["reddit"] == 1
+    assert config.scheduler.pool_source_shares["linuxdo"] == 1
 
 
 def test_build_config_supports_sources_browser_cdp_url() -> None:
@@ -1443,6 +1446,23 @@ def test_sources_bangumi_defaults() -> None:
     assert config.sources.bangumi.request_interval_seconds == 1
     assert config.sources.bangumi.min_interval_minutes == 3
     assert config.sources.bangumi.bootstrap_limit == 300
+
+
+def test_load_config_clamps_linuxdo_browser_task_limits(tmp_path: Path) -> None:
+    config_path = tmp_path / "linuxdo-limits.toml"
+    config_path.write_text(
+        """
+[sources.linuxdo]
+request_interval_seconds = 31
+bootstrap_limit = 500
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert config.sources.linuxdo.request_interval_seconds == 30
+    assert config.sources.linuxdo.bootstrap_limit == 300
 
 
 def test_save_config_round_trips_sources_bangumi(tmp_path: Path) -> None:
@@ -1695,6 +1715,7 @@ def test_save_config_round_trips_pool_source_shares(tmp_path: Path) -> None:
         "zhihu": 1,
         "reddit": 2,
         "bangumi": 1,
+        "linuxdo": 1,
     }
 
     save_config(config, config_path)
@@ -1709,6 +1730,7 @@ def test_save_config_round_trips_pool_source_shares(tmp_path: Path) -> None:
         "zhihu": 1,
         "reddit": 2,
         "bangumi": 1,
+        "linuxdo": 1,
     }
 
 

@@ -6,7 +6,7 @@
 
 ## 1. 项目定位
 
-OpenBiliClaw 是一个**本地优先、开源的跨平台个性化内容发现 AI Agent**。它像一个深度了解你的朋友或专属内容编辑——不仅知道你喜欢看什么，更理解你**为什么**喜欢，你**是一个什么样的人**，然后主动去 B 站、小红书、抖音、YouTube、X、知乎、Reddit、Bangumi 和通用 Web 等来源帮你发现那些你会喜欢但自己找不到的内容。
+OpenBiliClaw 是一个**本地优先、开源的跨平台个性化内容发现 AI Agent**。它像一个深度了解你的朋友或专属内容编辑——不仅知道你喜欢看什么，更理解你**为什么**喜欢，你**是一个什么样的人**，然后主动去 B 站、小红书、抖音、YouTube、X、知乎、Reddit、Linux.do、Bangumi 和通用 Web 等来源帮你发现那些你会喜欢但自己找不到的内容。
 
 **核心理念**：
 - 不是冷冰冰的推荐算法，而是一个**有温度的 AI 朋友**
@@ -34,7 +34,7 @@ OpenBiliClaw 是一个**本地优先、开源的跨平台个性化内容发现 A
 #### 2.1.1 行为数据采集
 
 **浏览器插件（核心采集入口）**：
-- 通过统一 `PlatformAdapter` 捕捉 B 站 / 小红书 / 抖音 / YouTube / X / 知乎的交互行为；Reddit 初始化 saved/upvoted/subscribed 信号复用插件登录态任务桥，日常 discovery 默认使用 rdt-cli 登录态命令后端，不可用时 fallback 到插件任务：点击、滚动、停留、评论、点赞、收藏、分享、关注、搜索，以及 B 站特有投币；click 在 capture 阶段记录，scroll 同时覆盖页面和内部 feed / modal 滚动容器
+- 通过统一 `PlatformAdapter` 捕捉 B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Linux.do 普通页面的交互行为；Reddit 初始化 saved/upvoted/subscribed 信号复用插件登录态任务桥，日常 discovery 默认使用 rdt-cli 登录态命令后端，不可用时 fallback 到插件任务。Linux.do 的隔离任务 tab 只运行同源只读 executor、不会启动普通 collector：公开 discovery 支持 search/hot/feed/creator/related，个人 bootstrap 支持 bookmarks/likes/read_history。其余行为链覆盖点击、滚动、停留、评论、点赞、收藏、分享、关注、搜索，以及 B 站特有投币；click 在 capture 阶段记录，scroll 同时覆盖页面和内部 feed / modal 滚动容器
 - 记录行为发生时的**完整上下文**：对应的 DOM 页面快照、当前浏览路径、时间戳、平台内容 ID
 - 捕捉用户的**微行为**：鼠标悬停、视频进度条跳转、视频暂停 / 继续、页面导航等
 - 采集用户亲手写的**评论 / 弹幕正文**（最强的兴趣表达之一）：X 回复正文与 B 站评论 / 弹幕正文均经 MAIN-world 网络 tap 在**提交成功后**采集（业务码校验），双端截断 200 字符 + 剥离控制字符后进入 `metadata.comment_text`（弹幕 `comment_kind="danmaku"`）
@@ -49,6 +49,28 @@ OpenBiliClaw 是一个**本地优先、开源的跨平台个性化内容发现 A
 **B 站数据接口**：
 - 通过 B 站 API 获取结构化数据（历史记录、收藏夹、关注列表等）
 - 作为浏览器插件采集的补充和验证
+
+**Linux.do 只读扩展任务源**：
+
+```mermaid
+flowchart LR
+    H[backend producer / init] --> Q[(linuxdo_tasks)]
+    Q --> E[authenticated extension dispatcher]
+    E --> T[isolated real linux.do tab]
+    T --> G[same-origin GET only]
+    G --> N[normalized topics / counts<br/>or structured error]
+    N --> R[/api/sources/linuxdo/task-result]
+    R --> P[events or pending-eval candidates]
+```
+
+- 上游网络请求必须全部使用 GET；不得发帖、点赞、收藏、关注、编辑或执行任何状态变更。
+- 五个 discovery mode 固定为 `search / hot / feed / creator / related`；三个 bootstrap scope 固定为 `linuxdo_bookmarks / linuxdo_likes / linuxdo_read_history`，分别映射 `favorite / like / view`。
+- 公开 discovery 的登录为 optional；个人 bootstrap 必须由 `GET /session/current.json` 正面确认 `current_user.username`。`_t` 只能作为“可能已登录”的布尔提示，其值不得上传。
+- 扩展只回传白名单归一化字段与结构化错误；Cookie、CSRF 数据、原始 JSON/HTML、挑战页正文都不得离开浏览器。canonical 内容身份为 `content_id="topic:<topic_id>"`，`content_type="post"`。
+- Linux.do executor 必须在扩展自己创建并持有的任务 tab 中隔离运行。生产 payload 的单请求超时默认且最多 30 秒；discovery 默认且最多 5 页，bootstrap 按每页 20 条和 limit 自动扩页（300 条为 15 页）且最多 15 页，输入列表最多 5 个、每分支最多 300 项、单响应最多 2 MiB。content executor 的 120 秒 / 50 页 / 20 输入 cap 只作第二层绝对防御，dispatcher 不允许合法后端任务触达。任务完成后只关闭自己的 tab。pending 领取等待约 3 分钟；`in_progress` 按任务形状最长约 29 分钟，再留 30 秒结果余量，后端 claim lease 约 35 分钟，共享 dispatcher mutex stale 窗口约 36 分钟。dispatcher 对已领取的非法 payload 必须立即回传失败；执行前必须把 task/tab/deadline 写入 session storage，MV3 重启必须先恢复 runner 再 polling，使存活 task tab 可继续回传而无需重跑站点请求。
+- Linux.do bootstrap 的部分 scope 失败必须返回 `degraded`，保留已成功 scope 的事件与有界 `scope_errors`；discovery 分页或多输入中途失败也必须保留已得 topic 并返回 `degraded/input_errors`，让 producer 以部分完成入候选管线；零有效 item 的失败才返回 `failed`。bootstrap 的 `failed/degraded` 都不得进入默认 6 小时近期任务复用。
+- guided init Stage-1 基础预算保持 30 分钟；使用默认预算时，Linux.do-only 至少给 32.5 分钟，Linux.do 与至少一个其它来源并选时给 62.5 分钟。显式 `collection_timeout_seconds` override 必须原样生效，不得静默扩容。
+- `https://linux.do/*` host permission 只用于普通页面的统一行为 adapter，以及扩展创建的真实站点 task tab 中上述同源 GET；公开 discovery 不要求登录，个人 bootstrap 才复用登录会话。自动化任务协议、分页、cap、错误与隔离测试是合入门槛；真实已登录账号 E2E 当前尚未完成，发布前必须补做并记录结果。
 
 #### 2.1.2 多层网状记忆架构 (Memory Architecture)
 
@@ -161,6 +183,8 @@ Discovery 可以继续宽搜，普通 dislike 不撤销关键词或来源任务�
 | **跨领域探索** | 刻意推荐用户从未接触过但心理画像暗示可能喜欢的领域；当统一 `KeywordPlanner` 已有 merged keyword 调用、`explore_refresh_hours` 到期或即将到期且 B 站仍有补货空间时，默认会把 `explore_domains` 合并进同一次关键词生成，把探索 query 写入 B 站 `keyword_kind="explore"` query cache。开启 inspiration-only 替换模式后，这部分也改由 search-backed inspiration flow 生成 `query_kind="explore"` 的 B 站探索词。`ExploreStrategy` 后续从该 explore 候选池 claim query 搜索；池为空时不再单独打一次 explore 计划 LLM |
 | **热点关联** | 追踪热点话题，判断是否与用户深层兴趣相关 |
 
+Linux.do 同样纳入统一关键词 planner 的九平台目标与 `platform_guides.query_style`；其 search query 使用社区话题风格，候选仍只进入统一待评估池。Linux.do 不是 inspiration grounding 的后端直连来源：真实取数依旧由扩展 task tab 完成。
+
 #### 内容评估
 
 > 评估的核心依据是**用户的 Soul（灵魂画像）和深层兴趣**，而非通用指标。
@@ -246,11 +270,11 @@ config recovery control plane (normal or degraded; business APIs stay gated)
                           → editable model list + local effort advisory (no config write)
 config save control plane: persist first → HTTP 202 queued/apply_revision → latest-wins queue → runtime receipt/status
 XHS hidden search tab → MAIN search-response normalizer → isolated replay/DOM fallback → task final
-XHS/DY/YT/Zhihu/Reddit task final: canonical staged result (XHS bootstrap payload caps enforced) → durable event receipt
-                                 → atomic bounded seen-key → terminal flip
+XHS/DY/YT/Zhihu/Reddit/Linux.do task final: canonical staged result (XHS bootstrap payload caps enforced)
+                                          → durable event receipt → atomic bounded seen-key → terminal flip
                                  stale lease reclaim replays first write; staged row rejects late mutation
 extension-online periodic re-pull: presence + profile/init/config gates → persisted round-robin
-                                 → one active bootstrap across five task tables → EventHub → extension
+                                 → one active bootstrap across six task tables → EventHub → extension
 
 cover images: proxy foreground ─┐
               refresh prefetch ─┴→ app-stable coordinator(total 4 / bg 3, fg priority)
@@ -416,7 +440,7 @@ trusted LAN ─ HTTPS（可选）──→ TLS Proxy :8443 ─ loopback/Compose 
 │  └──────────────┘ └──────────────┘ └────────────────┘      │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │     PoolCurator + 双轴 fatigue + per-group 窗口 + 新兴趣放大保护 │ │
-│  │     request_replenishment + 定时/手动补货 + B/XHS/DY/YT/X/Zhihu/Reddit/Bangumi=5/1/1/1/1/1/1/1 │ │
+│  │     request_replenishment + 定时/手动补货 + B/XHS/DY/YT/X/Zhihu/Reddit/Linux.do/Bangumi=5/1/1/1/1/1/1/1/1 │ │
 │  │     raw断供 → 欠份额 producer 即时并行唤醒 → 真实新增计数 / 无产出阶梯退避 │ │
 │  │ API CandidateEvalCoordinator: durable projected -> 3×30 workers -> serial headroom admit │ │
 │  │ OpenClaw refresh: first source/eval <=4 -> copy <=4/no split retry -> canonical subset; both hosts recover first │ │
@@ -434,7 +458,7 @@ trusted LAN ─ HTTPS（可选）──→ TLS Proxy :8443 ─ loopback/Compose 
 │  │       + confusions FIFO(≤5/队头 fencing/12h 补扫) + 冻结/held 重放 + 深层门控 │ │
 │  │       (off/shadow 默认/enforce · 两接入点: 深层对话候选/soul 重建; 管线 VALUES·CORE 已封死) │ │
 │  │     Autostart: user login item + Ollama preflight/self-heal + Ollama.app runtime 校验 │ │
-│  │     Bili DOM fallback + XHS/Douyin/YouTube/X/Zhihu/Reddit/Bangumi producers: 按平台缺口独立补池 │ │
+│  │     Bili DOM fallback + XHS/Douyin/YouTube/X/Zhihu/Reddit/Linux.do/Bangumi producers: 按平台缺口独立补池 │ │
 │  │     CLI discover --source douyin -> 同一正式 producer -> 统一关键词终态 -> pending eval │ │
 │  │     Hot reload one-shots: interest/avoidance force_tick │   │
 │  │     Probe arbiter: interest / avoidance 每轮最多推送一条   │   │
@@ -445,7 +469,7 @@ trusted LAN ─ HTTPS（可选）──→ TLS Proxy :8443 ─ loopback/Compose 
 │  │     Pool readiness: servable/raw/pending 统一库存口径       │   │
 │  │     Atomic maintenance: canonical protected -> topic/source/raw -> invariant/rollback │ │
 │  │     Source bootstrap seen-key guard -> Memory/Profile      │   │
-│  │     Extension-online re-pull -> five bootstrap tables (global serial) -> installed extension │ │
+│  │     Extension-online re-pull -> six bootstrap tables (global serial) -> installed extension │ │
 │  │       -> staged durable ingress -> atomic seen keys (5000/source) -> terminal │ │
 │  │     Profile overrides overlay: 用户编辑 -> profile_overrides.json │ │
 │  │       -> get_profile()/sync_profile_files 读时叠加（抗画像重建）│ │
@@ -475,12 +499,12 @@ trusted LAN ─ HTTPS（可选）──→ TLS Proxy :8443 ─ loopback/Compose 
 ├──────────────────────────────────────────────────────────────┤
 │           多源适配层 (SourceAdapter Protocol, v0.3.0+)         │
 │  ┌──────────────┐  ┌──────────────────┐  ┌─────────────┐    │
-│  │ B 站 Adapter  │  │ Bili/小红书/抖音/YouTube/知乎/Reddit任务桥│ │ Web Adapter │  │
+│  │ B 站 Adapter  │  │ Bili/小红书/抖音/YT/知乎/Reddit/Linux.do任务桥│ │ Web Adapter │  │
 │  │ (WBI API+DOM兜底)│ │ (扩展代理 + DOM-first + XHS持久熔断)│  │ (Playwright │    │
 │  │              │  │ + profile/search/feed/yt/zhihu)│ │ + LLM 抽取)│    │
 │  └──────────────┘  └──────────────────┘  └─────────────┘    │
 │  ┌──────────────────────────────────────────────────────┐   │
-│  │ sources.platforms：八平台 alias / strategy / URL host      │ │
+│  │ sources.platforms：九平台 alias / strategy / URL host      │ │
 │  │                  → 统一 pool accounting / viewed identity │ │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
@@ -502,6 +526,10 @@ trusted LAN ─ HTTPS（可选）──→ TLS Proxy :8443 ─ loopback/Compose 
 │  │ RedditDiscoveryProducer: rdt-cli 默认 + 插件 fallback search/hot/subreddit/related -> pending eval │ │
 │  │ [network].mode -> X twitter-cli / Reddit rdt-cli·OpenCLI；插件 fallback 跟随浏览器网络设置       │ │
 │  │   Reddit bootstrap_events: saved/upvoted/subscribed -> 首版画像信号 │   │
+│  └──────────────────────────────────────────────────────┘   │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │ LinuxdoDiscoveryProducer: 插件同源 GET search/hot/feed/creator/related -> pending eval │ │
+│  │   bookmarks/likes/read_history -> favorite/like/view；Cookie/raw response 不上传 │ │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │ BangumiDiscoveryProducer: 默认匿名 API search/ranked/latest；可选个人令牌读私密收藏(401降级) │ │
@@ -635,7 +663,7 @@ localhost。两个入口互斥，默认 HTTP 不变。
 - [ ] 完善的安装和使用文档
 - [ ] 插件商店发布
 - [ ] 社区 Skill 市场
-- [x] 跨平台内容发现（已落地 B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Bangumi / 通用 Web，后续继续扩展更多 adapter）
+- [x] 跨平台内容发现（已落地 B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Linux.do / Bangumi / 通用 Web，后续继续扩展更多 adapter）
 
 ---
 

@@ -19,11 +19,11 @@
 
 ## OpenBiliClaw in 10 Seconds
 
-A local-first AI discovery agent that learns your taste across Bilibili, Xiaohongshu (RedNote), Douyin (Chinese TikTok), YouTube, X, Zhihu, Reddit, Bangumi, and the open web — without handing your profile to another platform.
+A local-first AI discovery agent that learns your taste across Bilibili, Xiaohongshu (RedNote), Douyin (Chinese TikTok), YouTube, X, Zhihu, Reddit, Linux.do, Bangumi, and the open web — without handing your profile to another platform.
 
 | Cross-platform | Local-first | Trainable |
 |---|---|---|
-| Bilibili / Xiaohongshu / Douyin / YouTube / X / Zhihu / Reddit / Bangumi / Web | Data stays in your local SQLite by default | Likes, dislikes, and chat feedback shape future recommendations |
+| Bilibili / Xiaohongshu / Douyin / YouTube / X / Zhihu / Reddit / Linux.do / Bangumi / Web | Data stays in your local SQLite by default | Likes, dislikes, and chat feedback shape future recommendations |
 
 <p align="center">
   <a href="https://chromewebstore.google.com/detail/cdfjfkdjjhdaccbldipkjhpibnfbiamg"><b>Install the browser extension</b></a>
@@ -50,12 +50,12 @@ Four steps for most users. Firefox, Docker, scripted, and manual setup paths all
    Please follow https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docs/agent-install.md to deploy the OpenBiliClaw backend for me (use Bash `curl` to fetch the document, NOT WebFetch — WebFetch summarises markdown and drops critical commands).
    ```
 
-3. **Connect a source** — log in to [Bilibili](https://www.bilibili.com) (the default init source), or choose Xiaohongshu / Douyin / YouTube / X / Zhihu / Reddit. Bangumi discovery needs no login; enter a public username only if you want public collections to seed the profile.
+3. **Connect a source** — log in to [Bilibili](https://www.bilibili.com) (the default init source), or choose Xiaohongshu / Douyin / YouTube / X / Zhihu / Reddit / Linux.do. Linux.do public discovery needs no login; signing in adds bookmark, like, and read-history signals. Bangumi discovery also needs no login; enter a public username only if you want public collections to seed the profile.
 4. **Open the UI** — visit `http://127.0.0.1:8420/web`, or scan the extension QR code to open `http://<your-LAN-IP>:8420/m/` on your phone and save it to your home screen.
 
 ## Why OpenBiliClaw?
 
-> The name comes from Bilibili (`Bili` = Bilibili, `Claw` = "the claw that grabs content for you") — the project started as a Bilibili-only tool. Since v0.3.0 it has evolved into a general cross-platform Agent covering Bilibili / Xiaohongshu / Douyin / YouTube / X / Zhihu / Reddit / Bangumi and the open web, with more platforms on the roadmap.
+> The name comes from Bilibili (`Bili` = Bilibili, `Claw` = "the claw that grabs content for you") — the project started as a Bilibili-only tool. Since v0.3.0 it has evolved into a general cross-platform Agent covering Bilibili / Xiaohongshu / Douyin / YouTube / X / Zhihu / Reddit / Linux.do / Bangumi and the open web, with more platforms on the roadmap.
 
 Recommendation systems are essentially a **middleman** — the platform sits between millions of videos and millions of users, matching and distributing content at scale. Modern systems are far more sophisticated than "just optimizing CTR": they jointly weigh click-through rate, completion rate, like/coin probability, dwell time, user retention, creator ecosystem health, ad revenue, and a dozen other objectives, compressing them into a single weighted ranking score. Sounds scientific, but here's the catch: **the weights are set by the platform, and the optimization targets ultimately serve the platform** — user satisfaction is valued as a means to retention and monetization, not as an end in itself. You think you're choosing content, but really the middleman decides what you get to see. The result: recommendations look more and more like what you've already watched, and the occasional surprise is pure luck.
 
@@ -78,7 +78,7 @@ All data lives in a single SQLite file on your disk. LLM calls use your own API 
 > | | Bilibili Official | Keyword Filter Plugins | OpenBiliClaw |
 > |---|---|---|---|
 > | Recommendation logic | Collaborative filtering | Tag matching | Psychological profiling + 5-layer memory |
-> | Content sources | Single platform | Single platform | Cross-platform: Bilibili · Xiaohongshu · Douyin · YouTube · X · Zhihu · Reddit · Bangumi · more |
+> | Content sources | Single platform | Single platform | Cross-platform: Bilibili · Xiaohongshu · Douyin · YouTube · X · Zhihu · Reddit · Linux.do · Bangumi · more |
 > | Filter bubble | Gets narrower | Doesn't address it | Speculative interests actively break it |
 > | Data ownership | Platform-owned | Usually cloud | 100% local |
 > | Explains why | "Guess you'll like" | None | Friend-like explanations |
@@ -218,7 +218,7 @@ For most users, setup is four steps: install the extension, ask an AI coding age
 
 ### 1. Install the browser extension
 
-The extension is the main interface. It shows the sidebar on Bilibili, Xiaohongshu, Douyin, YouTube, X, and Zhihu, records your feedback, and lets the local backend safely reuse browser sessions for logged-in tasks such as Zhihu and Reddit init / discovery.
+The extension is the main interface. It shows the sidebar on Bilibili, Xiaohongshu, Douyin, YouTube, X, Zhihu, and regular Linux.do pages, records your feedback, and handles signed-in Zhihu / Reddit tasks plus Linux.do same-origin read-only tasks. Public Linux.do discovery needs no login; only personal bootstrap reuses the browser session. Linux.do task tabs are isolated from normal behavior collection and only make same-origin read-only GET requests.
 
 Built on Manifest V3, the extension works in any Chrome-compatible browser — **Chrome, Edge, Brave, Arc, Vivaldi, Opera**, and more.
 
@@ -307,7 +307,7 @@ Paste this whole prompt into Claude Code, Codex CLI, Cursor, Windsurf, or anothe
 Please follow https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docs/agent-install.md to deploy the OpenBiliClaw backend for me (use Bash `curl` to fetch the document, NOT WebFetch — WebFetch summarises markdown and drops critical commands).
 ```
 
-The agent will clone the repo, install dependencies, start the backend with the LAN-accessible default bind (`0.0.0.0:8420`), run a health check, and ask a few questions with defaults. Before auto-init, it verifies that the ordered global LLM instance chain and the independent embedding service answer real lightweight calls; if either fails, init is blocked until you fix the service. If unsure, pick the default. Xiaohongshu, Douyin, YouTube, X, Zhihu, and Reddit signals are used in the initial profile only when you explicitly opt in. Bangumi discovery needs no login; public collections seed the profile only when you enter a public username.
+The agent will clone the repo, install dependencies, start the backend with the LAN-accessible default bind (`0.0.0.0:8420`), run a health check, and ask a few questions with defaults. Before auto-init, it verifies that the ordered global LLM instance chain and the independent embedding service answer real lightweight calls; if either fails, init is blocked until you fix the service. If unsure, pick the default. Xiaohongshu, Douyin, YouTube, X, Zhihu, Reddit, and Linux.do signals are used in the initial profile only when you explicitly opt in. Linux.do and Bangumi public discovery need no login; Linux.do personal signals require a signed-in browser, while Bangumi public-collection init requires a public username.
 
 Chrome Web Store / AMO builds only declare local-backend permissions by default. When you select a protocol and enter another LAN or remote endpoint, the browser requests `scheme://host/*`; WebExtension host permissions cannot be port-scoped across browsers, while actual requests remain pinned to the configured port. Public hosts require HTTPS. Enable the default-off device flow first with `ext-key generate` and `ext-key enable`.
 
@@ -315,7 +315,7 @@ With a public DNS name, the shortest path is the [`docker-compose.https.yml`](do
 
 ### 3. Log in to content platforms in the same browser
 
-By default, log in to [Bilibili](https://www.bilibili.com) and keep Bilibili selected to build the first profile and recommendations. If you do not want Bilibili, deselect it during init and select another logged-in source such as [Xiaohongshu](https://www.xiaohongshu.com), [Douyin](https://www.douyin.com), [YouTube](https://www.youtube.com), [X](https://x.com), [Zhihu](https://www.zhihu.com), or [Reddit](https://www.reddit.com), or choose Bangumi and enter a public username. Keep at least one source that can return profile signals. Bangumi without a username still supports anonymous discovery, but cannot initialize a profile by itself.
+By default, log in to [Bilibili](https://www.bilibili.com) and keep Bilibili selected to build the first profile and recommendations. If you do not want Bilibili, deselect it during init and select another logged-in source such as [Xiaohongshu](https://www.xiaohongshu.com), [Douyin](https://www.douyin.com), [YouTube](https://www.youtube.com), [X](https://x.com), [Zhihu](https://www.zhihu.com), [Reddit](https://www.reddit.com), or [Linux.do](https://linux.do), or choose Bangumi and enter a public username. Keep at least one source that can return profile signals. Signed-out Linux.do still supports public discovery but cannot provide personal bootstrap signals; Bangumi without a username also cannot initialize a profile by itself.
 
 ### 4. Open Desktop or Mobile Web
 
@@ -349,7 +349,7 @@ Native Windows (PowerShell, no Docker or WSL2 required):
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; iwr https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/scripts/install.ps1 -UseBasicParsing | iex
 ```
 
-The script needs `git` and Python 3.11+. It clones the repo, then asks for the preferred LLM instance, embedding, Bilibili cookie, and Xiaohongshu / Douyin / YouTube opt-ins before installing dependencies or starting the backend. Once confirmed, it starts the backend, verifies the global LLM instance chain and embedding service, then runs init to build the first profile and discovery pool. X, Zhihu, Reddit, and Bangumi can be enabled explicitly afterward in `/setup/` or settings; Bangumi needs no login, while public-collection init requires a public username. If unsure, press Enter or choose the default.
+The script needs `git` and Python 3.11+. It clones the repo, then asks for the preferred LLM instance, embedding, Bilibili cookie, and Xiaohongshu / Douyin / YouTube opt-ins before installing dependencies or starting the backend. Once confirmed, it starts the backend, verifies the global LLM instance chain and embedding service, then runs init to build the first profile and discovery pool. X, Zhihu, Reddit, Linux.do, and Bangumi can be enabled explicitly afterward in `/setup/` or settings. Linux.do and Bangumi public discovery need no login; Linux.do personal init signals need a signed-in browser, while Bangumi public-collection init requires a public username. If unsure, press Enter or choose the default.
 
 </details>
 
@@ -389,9 +389,10 @@ OpenBiliClaw does not store your platform passwords or bypass login. It reuses t
 | **X (Twitter)** | Log in normally at https://x.com in the same browser | `init --yes-x`, `fetch-x`, and X discovery return nothing (server-side replay needs `auth_token`+`ct0`, auto-synced by the extension after login) |
 | **Zhihu** | Log in normally at https://www.zhihu.com in the same browser | `init --yes-zhihu`, `fetch-zhihu`, `discover --source zhihu`, and `discover-zhihu*` return nothing |
 | **Reddit** | Log in normally at https://www.reddit.com in the same browser; the extension syncs `reddit_session` for backend-installed rdt-cli, and `rdt login` is only a fallback when the extension is unavailable | `fetch-reddit --mode bootstrap` returns no init signals; without a synced rdt credential, the rdt path falls back to extension tasks |
+| **Linux.do** | Log in normally at https://linux.do in the same browser; public discovery does not require login | Signed out, `fetch-linuxdo` and `init --yes-linuxdo` cannot read bookmarks / likes / read history, while search / hot / feed / creator / related discovery remains available |
 | **Bangumi** | No login required; optionally enter a public username for public collections, or a personal token for private ones; the extension only does account identity recognition on bgm.tv / bangumi.tv (no cookies, no browsing capture) | Without a username, Bangumi cannot be the only profile-init source, but anonymous search/ranked/date discovery still works |
 
-Xiaohongshu, Douyin, YouTube, and Zhihu use Chrome extension tasks; Reddit defaults to backend-installed rdt-cli for steady-state discovery and keeps the extension for init signals; X discovery uses server-side cookie replay. None of these read paths needs an extra CDP debugging Chrome. Reddit/X, YouTube, Xiaohongshu, Douyin, and Zhihu native-save executors are wired 6/6 and fixture-tested; in the 2026-07-14 real-account regression, every platform's favorite and watch-later/favorite-fallback path finished `synced/already_synced`. `[sources.browser].cdp_url` remains available only for generic Web / custom webpage fetching.
+Xiaohongshu, Douyin, YouTube, Zhihu, and Linux.do use Chrome extension tasks; Reddit defaults to backend-installed rdt-cli for steady-state discovery and keeps the extension for init signals; X discovery uses server-side cookie replay. None of these read paths needs an extra CDP debugging Chrome. Linux.do requests are same-origin GETs inside real site tabs; `_t` is reduced to a login boolean and neither cookie values nor raw responses are uploaded. Reddit/X, YouTube, Xiaohongshu, Douyin, and Zhihu native-save executors are wired 6/6 and fixture-tested; in the 2026-07-14 real-account regression, every platform's favorite and watch-later/favorite-fallback path finished `synced/already_synced`. Linux.do exposes no native write-back. `[sources.browser].cdp_url` remains available only for generic Web / custom webpage fetching.
 
 </details>
 
@@ -464,6 +465,13 @@ openbiliclaw discover
 
 # Optional: Douyin discovery (requires [sources.douyin]; search / hot / feed are triggered from the home page via DOM)
 openbiliclaw discover --source douyin
+
+# Optional: read-only Linux.do bookmarks / likes / read-history smoke (does not write memory by default)
+openbiliclaw fetch-linuxdo
+
+# Optional: formal Linux.do search / hot / feed / creator / related discovery
+openbiliclaw discover-linuxdo --limit 30
+# Equivalent: openbiliclaw discover --source linuxdo --limit 30
 
 # Optional: standalone Douyin search / hot / feed recall debugging
 openbiliclaw discover-douyin --keyword mechanical-keyboard --source search,feed --no-cache --no-evaluate
@@ -562,7 +570,7 @@ The whole loop stays local — OpenClaw just calls the CLI bridge; your profile 
 - 🧠 **Five-Layer Soul Profile** — Event → Preference → Awareness → Insight → Soul, inferring MBTI, cognitive style, and deep needs ([details](docs/modules/soul.md))
 - 🔮 **Interest Probes** — psychological bridging guesses domains you might love but have never explored; right guesses become real interests, wrong ones quietly retire
 - 🧭 **Avoidance Probes** — proactively confirms content forms and style boundaries you want to avoid; nothing is filtered until you confirm
-- 🌐 **Cross-Platform Sources** — Bilibili / Xiaohongshu / Douyin / YouTube / X / Zhihu / Reddit / Bangumi / generic Web, so your interests stop being siloed ([details](docs/modules/discovery.md))
+- 🌐 **Cross-Platform Sources** — Bilibili / Xiaohongshu / Douyin / YouTube / X / Zhihu / Reddit / Linux.do / Bangumi / generic Web, so your interests stop being siloed ([details](docs/modules/discovery.md))
 - 🎯 **Smart Diversity** — topic quotas + cross-platform interleaving + small-source protection; goodbye to "all AI all day"
 - ⚡ **Instant, deduplicated reshuffle** — ~0.6s; current cards, recommendation history, and the durable seen ledger are excluded by default
 - 💬 **Warm Recommendations** — friend-like explanations of why you'd enjoy something, not "because you watched similar videos"
@@ -666,11 +674,12 @@ images: proxy foreground + refresh prefetch → app-stable lane (total 4 / bg 3,
 │ Background maintenance: isolated worker → ≤50 rows/batch; unchanged skip / 10m sweep │
 │ /api/saved/* · router · Bilibili native save      │
 │ Six adapters → ExtensionNativeSaveBroker → extension_native_save_jobs │
-│ six-platform source task multiplex: xhs / dy / yt / x / zhihu / reddit │
-│ Extension-online periodic re-pull: Runtime → five bootstrap tasks (global serial) → installed extension │
+│ seven-platform source task multiplex: xhs / dy / yt / x / zhihu / reddit / linuxdo │
+│ Extension-online periodic re-pull: Runtime → six bootstrap tasks (global serial) → installed extension │
 │ task-result → staged durable ingress → atomic bounded seen keys (5,000/source) → terminal │
 │ XHS auto tasks: source/scheduler gate → SQLite pacing/breaker → no new tab while off/limited │
 │ XHS search: inactive tab → MAIN response normalization → isolated replay / DOM fallback │
+│ Linux.do: isolated task tab → same-origin GET → five discovery / three bootstrap paths │
 │ extension_native_save_jobs -> /api/sources/<slug>/next-task -> installed extension │
 │ exact OpenBiliClaw / YouTube Watch Later targets → safe task-result    │
 │ trusted-local E2E exact auth → one saved-sync item → six-field callback │
@@ -736,12 +745,13 @@ localhost-only. The two edges are mutually exclusive, and the default HTTP path 
 | **X (Twitter)** | init import · search · For-You · followed authors | Server-side read-only cookie replay for discovery; native bookmark executor's first real favorite finished `synced` |
 | **Zhihu** | init import · search · hot · feed · creator · related | Extension reads logged-in tabs; renders as text cards |
 | **Reddit** | init import · search · hot · subreddit · related | Backend rdt-cli for discovery by default; Saved executor is fixture-tested, but the first real write remains uncertain after a 2xx response lacked old-DOM confirmation |
+| **Linux.do** | bookmark / like / read-history init · search · hot · latest feed · creator · related | Extension performs same-origin read-only GETs in a real `linux.do` task tab; public discovery needs no login, and cookies/raw responses are never uploaded |
 | **Bangumi** | public-collection init · search · ranked · date browse | Official anonymous read-only API; no cookie/token, and date results may include unreleased subjects |
 | **Generic Web** | browser + LLM extraction | Adapts to any webpage |
 
 What happens after discovery:
 
-- **Safe fetching** — the backend never logs in for you and never crawls content you can't see; every platform reuses the sessions already in your browser, and first-run profile signals are pulled only after you click "Start initialization." Once the profile exists, enabled XHS, Douyin, YouTube, Zhihu, and Reddit account signals are re-pulled on schedule only while the extension is online.
+- **Safe fetching** — the backend never logs in for you and never crawls content you can't see; every platform reuses the sessions already in your browser, and first-run profile signals are pulled only after you click "Start initialization." Once the profile exists, enabled XHS, Douyin, YouTube, Zhihu, Reddit, and Linux.do account signals are re-pulled on schedule only while the extension is online. Linux.do tasks permit GET only, and `_t` is used solely as a login boolean.
 - **Continuous unified evaluation** — raw candidates share one eval pool and are scored against your Soul profile, content text, and recent negative feedback. The default 3×30 workers refill immediately, scheduling counts only durable stock, and serial admission is capped by current headroom. Optional embedding prefiltering starts in shadow mode before enforce may skip clearly low-similarity items.
 - **Diversity selection** — platform quotas → topic dedup → style balancing → cross-platform interleaving → count caps; only Bilibili is enabled out of the box, other platforms are switched on in settings.
 
@@ -766,7 +776,7 @@ OpenBiliClaw/
 │   ├── memory/                # Multi-layer memory system
 │   ├── discovery/             # Discovery engine (strategies · candidate pool · quota balancing · diversity)
 │   ├── recommendation/        # Recommendation & expression engine
-│   ├── sources/               # Source adapters, Bangumi API, and XHS/Douyin/YouTube/Zhihu/Reddit task bridges
+│   ├── sources/               # Source adapters, Bangumi API, and XHS/Douyin/YouTube/Zhihu/Reddit/Linux.do task bridges
 │   ├── youtube/               # Google Takeout import parser
 │   ├── api/                   # Local FastAPI (config rollback / degraded mode / popup API)
 │   ├── tls_proxy.py           # Default-off LAN/self-managed HTTPS edge
@@ -774,7 +784,7 @@ OpenBiliClaw/
 │   ├── bilibili/              # Bilibili API layer (WBI signing · rate control)
 │   ├── llm/                   # Multi-model LLM adapters + structured JSON tolerance
 │   └── storage/               # Data storage layer
-├── extension/                 # Chrome browser extension (Bilibili + XHS + Douyin + YouTube + X + Zhihu + Reddit + autostart/config recovery)
+├── extension/                 # Chrome/Firefox extension (Bilibili + XHS + Douyin + YouTube + X + Zhihu + Reddit + Linux.do)
 ├── skills/                    # Built-in Skill definitions
 ├── docs/                      # Documentation
 └── tests/                     # Tests (1900+)
@@ -794,6 +804,7 @@ OpenBiliClaw/
 | X (Twitter) | Server-side cookie replay via default-installed `twitter-cli` (lazy-imported, read-only); the extension captures your engagement and syncs the x.com cookie; tweets render as text cards |
 | Zhihu | Extension task dispatch reads event-smoke and selected guided-init signals plus search / hot / feed / creator / related candidates in the logged-in browser; answers / articles / questions render as text cards |
 | Reddit | Default-installed rdt-cli reads search / hot / subreddit / related candidates by default; the extension syncs `reddit_session` into rdt credentials and `rdt login` is a manual fallback; extension task dispatch reads discovery when rdt is unavailable, unauthenticated, or explicitly selected, and always reads bootstrap saved / upvoted / subscribed signals in the logged-in browser; posts / comments render as text cards |
+| Linux.do | Regular pages use the shared behavior adapter; isolated task tabs make same-origin GETs for search / hot / feed / creator / related and bookmarks / likes / read history, returning only normalized fields or structured errors; cookies and raw responses are not uploaded |
 | Bangumi | Official anonymous read-only v0 API; search / ranked / date browsing feed the shared candidate pool, while an optional public username enables public-collection profile init; no cookie, token, or native write-back |
 | Optional HTTPS | Pinned Caddy Docker overlay with automatic certificates for public domains; Python TLS Proxy + `[tls]` extra and local CA/SAN for LAN/self-managed use; off by default and mutually exclusive |
 | Storage | SQLite + Embedding vector index |
@@ -818,7 +829,7 @@ The current release is summarized in [Recent Updates](#recent-updates) above; fu
 
 ## 🗺️ Roadmap
 
-OpenBiliClaw aims to be your **personalized entry point to the entire web**. Started on Bilibili, it now covers Xiaohongshu, Douyin, YouTube, X, Zhihu, Reddit, Bangumi, and the generic Web; next:
+OpenBiliClaw aims to be your **personalized entry point to the entire web**. Started on Bilibili, it now covers Xiaohongshu, Douyin, YouTube, X, Zhihu, Reddit, Linux.do, Bangumi, and the generic Web; next:
 
 - **More content sources** — V2EX, Weibo, various BBS / forums; each platform is a `SourceAdapter` and the architecture is proven extensible
 - **Cross-platform interest fusion** — your mechanical-keyboard interest from Bilibili + your coffee-gear interest from Xiaohongshu + your short-video taste from Douyin likes/favorites + your long-form watching and subscriptions from YouTube + the news you like/bookmark on X = one complete you. Profile fusion stops your interests from being fragmented across silos
@@ -852,7 +863,7 @@ If OpenBiliClaw gave you back control of your feed, [a star](https://github.com/
 
 ## Privacy at a glance
 
-Default data flow: browser extension → your configured local OpenBiliClaw backend → SQLite on your machine. The extension does not send data to servers operated by OpenBiliClaw developers. If you configure a cloud LLM or embedding provider, the relevant content is sent to that provider according to your configuration. See the [Privacy Policy](docs/privacy.md).
+Default data flow: browser extension → your configured local OpenBiliClaw backend → SQLite on your machine. The extension does not send data to servers operated by OpenBiliClaw developers. Linux.do `_t` is reduced to a browser-local login boolean; cookie values, CSRF data, and raw site responses are not uploaded. If you configure a cloud LLM or embedding provider, the relevant content is sent to that provider according to your configuration. See the [Privacy Policy](docs/privacy.md).
 
 ## 📄 License
 

@@ -15282,6 +15282,28 @@ class Database:
             timestamp_key="zhihu_login_state_at",
         )
 
+    def set_linuxdo_login_state(self, logged_in: bool, when_iso: str | None = None) -> None:
+        """Persist whether the extension observed Linux.do's real ``_t`` session."""
+        if not isinstance(logged_in, bool):
+            raise TypeError("logged_in must be bool")
+        if when_iso is None:
+            from datetime import UTC, datetime
+
+            when_iso = datetime.now(UTC).isoformat()
+        self._set_browser_login_state(
+            state_key="linuxdo_login_state",
+            timestamp_key="linuxdo_login_state_at",
+            logged_in=logged_in,
+            when_iso=str(when_iso),
+        )
+
+    def get_linuxdo_login_state(self) -> tuple[bool, str]:
+        """Return ``(logged_in, iso_timestamp)`` for Linux.do, or ``(False, "")``."""
+        return self._get_browser_login_state(
+            state_key="linuxdo_login_state",
+            timestamp_key="linuxdo_login_state_at",
+        )
+
     def bump_auth_epoch(self) -> int:
         """Atomically increment and return the revocation epoch.
 
