@@ -93,7 +93,7 @@ output/
 .cc-connect/
 .claude/*
 !.claude/skills/
-
+.pi-subagents/
 # Local dev caches
 .deps/
 .playwright-mcp/
