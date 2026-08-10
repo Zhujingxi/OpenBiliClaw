@@ -233,7 +233,7 @@
             <h2 data-saved-heading tabindex="-1">稍后再看</h2>
             <p class="video-meta">你加入稍后再看的内容会在这里排队，看完随手移除即可。</p>
           </div>
-          <button class="pill-btn" id="watchLaterSyncAll" data-saved-list-action="sync-all" type="button" disabled>同步未同步内容（0）</button>
+          <button class="pill-btn" id="watchLaterSyncAll" data-saved-list-action="sync-all" type="button" disabled hidden>同步未同步内容（0）</button>
         </div>
         <p class="saved-sync-status" id="watchLaterSyncStatus" aria-live="polite"></p>
         <div class="saved-grid" id="watchLaterList"></div>
@@ -247,7 +247,7 @@
             <h2 data-saved-heading tabindex="-1">我的收藏</h2>
             <p class="video-meta">点 ★ 收藏的内容会长期留在这里，和稍后再看互相独立。</p>
           </div>
-          <button class="pill-btn" id="favoritesSyncAll" data-saved-list-action="sync-all" type="button" disabled>同步未同步内容（0）</button>
+          <button class="pill-btn" id="favoritesSyncAll" data-saved-list-action="sync-all" type="button" disabled hidden>同步未同步内容（0）</button>
         </div>
         <p class="saved-sync-status" id="favoritesSyncStatus" aria-live="polite"></p>
         <div class="saved-grid" id="favoritesList"></div>
@@ -422,7 +422,7 @@
 
         <div id="settingsPanelSources" class="settings-panel" data-settings-panel="sources" role="tabpanel" aria-labelledby="settingsTabSources" hidden>
           <p class="settings-note-inline">每个来源一张卡：卡面是开关、接入状态和候选池占比，展开后是接入方式、发现分支与预算、节流和该平台专属设置。开关改动需要保存配置才会进入或退出调度；接入状态只说明 cookie、令牌或插件任务是否可用。</p>
-          <p class="settings-note-inline">凭据一律脱敏：后端不会把原始 Cookie、令牌或 API Key 回传到页面，也不提供复制原值。手动粘贴入口只提供给后端直接带 Cookie 请求平台接口的源——B 站、抖音、X、Reddit（留空保存不会覆盖）；小红书、知乎由浏览器插件用登录态取数，YouTube 与 Bangumi 使用公开接口，不保存 Cookie。</p>
+          <p class="settings-note-inline">凭据一律脱敏：后端不会把原始 Cookie、令牌或 API Key 回传到页面，也不提供复制原值。手动粘贴入口只提供给后端直接带 Cookie 请求平台接口的源——B 站、抖音、X、Reddit（留空保存不会覆盖）；小红书、知乎由浏览器插件用登录态取数，YouTube、Bangumi 与微博使用公开接口，不保存 Cookie。微博的匿名访客会话只存在后端内存中。</p>
           <div id="sourceStatusList" class="source-card-list">
 
             <article class="source-status-row source-card" data-source-status="bilibili" data-source-credential="bilibili" data-open="0">
@@ -580,6 +580,57 @@
                   <h4>验证</h4>
                   <div class="settings-probe-row source-verify-row">
                     <button class="pill-btn source-verify-btn" type="button">测试连接</button>
+                    <span class="settings-probe-status source-verify-status" aria-live="polite"></span>
+                  </div>
+                </section>
+              </div>
+            </article>
+
+            <article class="source-status-row source-card" data-source-status="weibo" data-source-credential="weibo" data-open="0">
+              <div class="source-card-face" role="button" tabindex="0" aria-expanded="false" aria-controls="sourceCardBody-weibo">
+                <span class="source-card-logo" data-source-logo="weibo" aria-hidden="true">微</span>
+                <span class="source-card-head">
+                  <strong class="source-card-name">微博</strong>
+                  <span class="source-status-badges"><span class="source-source-badge">来源：加载中</span><span class="source-access-badge">接入：加载中</span><span class="source-evidence-badge" hidden></span></span>
+                  <p class="src-detail">加载中…</p>
+                  <span class="source-card-hint-slot"></span>
+                </span>
+                <span class="source-card-right">
+                  <label class="source-card-share"><span>占比</span><input id="shareWeibo" value="1" inputmode="numeric" aria-label="微博候选池占比"></label>
+                  <label class="source-card-enable"><span class="sr-only">启用微博</span><select id="weiboEnabled"><option value="on">启用</option><option value="off" selected>停用</option></select></label>
+                  <span class="source-card-chev" aria-hidden="true">▾</span>
+                </span>
+              </div>
+              <div class="source-card-body" id="sourceCardBody-weibo">
+                <section class="source-seg">
+                  <h4>接入方式</h4>
+                  <p class="seg-note">使用微博匿名访客会话读取公开内容，无需用户 Cookie，也不会读取、上传或保存登录凭据。首版仅用于 discovery，不参与初始化画像；所用网页接口并非官方稳定 API，可能随微博调整而变化。</p>
+                  <div class="source-cred-box">
+                    <div class="source-cred-line"><span class="source-credential-ro-tag">匿名</span><span class="source-credential-summary">加载中…</span></div>
+                    <textarea class="source-credential-value" rows="2" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
+                  </div>
+                </section>
+                <section class="source-seg">
+                  <h4>发现分支与每日预算</h4>
+                  <p class="seg-note">关掉分支即不再调度；预算是该分支每日最终保留候选条数上限。默认值兼顾匿名接口稳定性，请谨慎提高。</p>
+                  <div class="branch-table" data-branch-toggles="on">
+                    <div class="branch-head"><span></span><span>分支</span><span>每日预算</span><span>说明</span></div>
+                    <div class="branch-row"><input id="weiboModeSearch" type="checkbox" class="branch-toggle" aria-label="微博搜索分支"><span class="branch-name">搜索</span><input id="weiboDailySearchBudget" class="branch-budget" inputmode="numeric" placeholder="60" aria-label="微博每日搜索预算"><span class="branch-hint">按画像关键词搜索</span></div>
+                    <div class="branch-row"><input id="weiboModeHot" type="checkbox" class="branch-toggle" aria-label="微博热榜分支"><span class="branch-name">热榜</span><input id="weiboDailyHotBudget" class="branch-budget" inputmode="numeric" placeholder="10" aria-label="微博每日热榜预算"><span class="branch-hint">热榜主题转为正文候选</span></div>
+                    <div class="branch-row"><input id="weiboModeCreator" type="checkbox" class="branch-toggle" aria-label="微博作者分支"><span class="branch-name">作者</span><input id="weiboDailyCreatorBudget" class="branch-budget" inputmode="numeric" placeholder="30" aria-label="微博每日作者预算"><span class="branch-hint">围绕匹配作者扩展；需搜索或热榜种子</span></div>
+                  </div>
+                </section>
+                <section class="source-seg">
+                  <h4>节流</h4>
+                  <div class="inline-row">
+                    <label class="settings-field"><span>请求间隔秒数</span><input id="weiboRequestInterval" inputmode="numeric" placeholder="3"></label>
+                    <label class="settings-field"><span>最小调度间隔分钟</span><input id="weiboMinInterval" inputmode="numeric" placeholder="10"></label>
+                  </div>
+                </section>
+                <section class="source-seg">
+                  <h4>验证</h4>
+                  <div class="settings-probe-row source-verify-row">
+                    <button class="pill-btn source-verify-btn" type="button">查看接入状态</button>
                     <span class="settings-probe-status source-verify-status" aria-live="polite"></span>
                   </div>
                 </section>

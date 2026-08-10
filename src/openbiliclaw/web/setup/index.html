@@ -311,7 +311,7 @@
     // Bangumi arrives through the shared roster like every other source, so it
     // appears here without this wizard keeping a list of its own.
     const INIT_DEFAULT_SOURCES = new Set(["bilibili"]);
-    const INIT_SOURCE_OPTIONS = (SourceStatus.INIT_SOURCE_KEYS || SourceStatus.SOURCE_KEYS).map((key) => ({
+    const INIT_SOURCE_OPTIONS = SourceStatus.INIT_SOURCE_KEYS.map((key) => ({
       key,
       label: SourceStatus.sourceLabel(key),
       ...(INIT_DEFAULT_SOURCES.has(key) ? { defaultChecked: true } : {}),

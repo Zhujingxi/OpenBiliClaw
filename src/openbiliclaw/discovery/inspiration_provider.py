@@ -852,6 +852,42 @@ class V2EXPlatformSearchBackend:
         return _dedupe_previews(previews, limit=max(1, int(limit)))
 
 
+class WeiboPlatformSearchBackend:
+    """Use anonymous Weibo search for inspiration-only grounding."""
+
+    platform = "weibo"
+    risk_controlled = True
+
+    def __init__(self, client: object) -> None:
+        self._client = client
+
+    async def search(self, query: str, *, limit: int, pages: int = 1) -> list[ExaPreviewItem]:
+        search = getattr(self._client, "search_posts", None)
+        if not callable(search):
+            return []
+        page = await search(query, page=1, limit=max(1, int(limit)))
+        rows = getattr(page, "rows", getattr(page, "data", page))
+        if not isinstance(rows, list):
+            return []
+        from openbiliclaw.sources.weibo import weibo_post_to_content
+
+        previews: list[ExaPreviewItem] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            content = weibo_post_to_content(row, strategy="weibo-search")
+            if content is None or not content.content_url:
+                continue
+            previews.append(
+                ExaPreviewItem(
+                    title=_clean_title(content.title),
+                    url=content.content_url,
+                    highlights=tuple(_clean_highlights([content.body_text, content.author_name])),
+                )
+            )
+        return _dedupe_previews(previews, limit=max(1, int(limit)))
+
+
 def _douyin_preview(row: dict[str, Any]) -> ExaPreviewItem | None:
     aweme_id = _first_text(row.get("aweme_id"), row.get("id"), row.get("item_id"))
     title = _first_text(
@@ -1035,6 +1071,7 @@ def build_platform_source_backends(
     zhihu_search: PlatformSearchCallable | None = None,
     bangumi_client: object | None = None,
     v2ex_client: object | None = None,
+    weibo_client: object | None = None,
 ) -> list[PlatformSearchBackend]:
     """Build inspiration-only backends for enabled synchronous platform sources."""
 
@@ -1102,6 +1139,9 @@ def build_platform_source_backends(
     v2ex_cfg = getattr(sources, "v2ex", None)
     if bool(getattr(v2ex_cfg, "enabled", False)) and v2ex_client is not None:
         backends.append(V2EXPlatformSearchBackend(v2ex_client))
+    weibo_cfg = getattr(sources, "weibo", None)
+    if bool(getattr(weibo_cfg, "enabled", False)) and weibo_client is not None:
+        backends.append(WeiboPlatformSearchBackend(weibo_client))
     return backends
 
 

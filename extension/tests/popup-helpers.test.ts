@@ -238,6 +238,43 @@ test("buildContentUrl does not fabricate Bilibili links for Reddit ids", () => {
   assert.equal(buildContentUrl(item), "");
 });
 
+test("Weibo aliases and hosts normalize to text-first post cards", () => {
+  const item = normalizeRecommendation({
+    id: 45,
+    content_id: "5023456789012345",
+    content_url: "https://m.weibo.cn/detail/5023456789012345",
+    title: "一条公开微博",
+    source_platform: "wb",
+    content_type: "post",
+    body_text: "公开微博正文。",
+    share_count: 321,
+  });
+
+  assert.equal(item.source_platform, "weibo");
+  assert.equal(platformDisplayName(item.source_platform), "微博");
+  assert.equal(buildContentUrl(item), "https://m.weibo.cn/detail/5023456789012345");
+  assert.equal(item.share_count, 321);
+  assert.deepEqual(getRecommendationCardKind(item), {
+    kind: "text",
+    coverUrl: "",
+    text: "公开微博正文。",
+  });
+
+  assert.equal(normalizeRecommendation({ content_url: "https://weibo.com/u/123" }).source_platform, "weibo");
+  assert.equal(normalizeRecommendation({ content_url: "https://wx1.sinaimg.cn/large/a.jpg" }).source_platform, "weibo");
+});
+
+test("buildContentUrl does not fabricate Bilibili links for Weibo ids", () => {
+  const item = normalizeRecommendation({
+    content_id: "5023456789012345",
+    title: "缺 URL 的微博",
+    source_platform: "weibo",
+    content_type: "post",
+  });
+
+  assert.equal(buildContentUrl(item), "");
+});
+
 test("probeMessageKey normalizes type and domain", () => {
   assert.equal(normalizeProbeType("avoidance.probe"), "avoidance.probe");
   assert.equal(normalizeProbeType("unknown"), "interest.probe");
@@ -651,6 +688,7 @@ test("normalizeDelightCandidate fills stable fallbacks and upgrades cover urls",
     view_count: 0,
     like_count: 0,
     comment_count: 0,
+    share_count: 0,
     favorite_count: 0,
     danmaku_count: 0,
     rating_score: 0,

@@ -57,6 +57,9 @@ from openbiliclaw.sources.platforms import (
     PLATFORM_V2EX as PLATFORM_V2EX,
 )
 from openbiliclaw.sources.platforms import (
+    PLATFORM_WEIBO as PLATFORM_WEIBO,
+)
+from openbiliclaw.sources.platforms import (
     PLATFORM_XIAOHONGSHU as PLATFORM_XIAOHONGSHU,
 )
 from openbiliclaw.sources.platforms import (

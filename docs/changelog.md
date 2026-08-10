@@ -6,6 +6,8 @@
 
 ## 未发布
 
+- **新增微博匿名公开 discovery 来源**：后端以仅存内存的匿名 visitor 会话执行 search / hot / creator 只读发现，不读取用户 Cookie、不进入 guided init、不增加扩展 host permission，并复用统一候选评估、来源占比与三端文字卡。
+
 - **重构新增平台来源 skill 为证据驱动的阶段门**：复盘本地 Codex session、Git/GitHub 首次接入与后续修复，把 `full / discovery-only / capability-increment / audit-only`、机器可读来源契约、逐能力 hybrid auth、fail-closed E2E 写动作边界、中央注册 audit、required/N/A 与 PASS/FAIL 分离、原子任务准入、MV3 恢复、真假空结果、增量同步、scope completeness、时间语义、双浏览器资产和安装包真机 provenance 固化为完成条件；新增历史失败索引与 skill 镜像/契约审计测试，只有全部 required gate 有证据通过才允许报告 complete，发布 mutation 仍需明确授权。独立盲测还复现并修复了 `browser_heartbeat` 对未知来源默认落到知乎的错源分派，现由 source→prefix 显式 registry 驱动，未知来源 fail closed，新增来源必须成组提供 DB getter、扩展 event handler 与往返测试。
 - **V2EX 已安装扩展真实登录 E2E 通过**：在 `8420` 真实后端热更新开发扩展后，四个只读 scope 于 13 秒内返回发布 4、讨论 Topic 19、收藏主题 1、收藏 Node 0，并转换为 24 条 canonical 事件；登录态、observed identity、稳定 Topic ID / URL、事件 source 与 satisfaction 语义、四 scope 完整证据全部通过。`smoke_only` 未向真实库写入任何 V2EX event、Node Affinity 或收藏快照；隔离库重复写验证为首次 24/0、第二次 0/24。
 - **V2EX 最终构建与 8420 热更新复验**：最终 Chrome 构建通过后端 runtime event 热重载并重新连回真实登录态，四 scope 再次返回 4 / 19 / 1 / 0、24 条 canonical 事件；真实库的 event、seen、Node Affinity 和收藏快照增量均为 0。五路公开读取为 Search / Tab / Hot / Latest 各 3 条、Node 5 条；隔离正式 Node producer 使用用户现有 LLM / Embedding 配置完成发现 3、入池 3、评估 3、准入 1、低分拒绝 2，只记录 1 条脱敏 usage，临时库自动删除。

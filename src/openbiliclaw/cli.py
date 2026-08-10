@@ -403,7 +403,7 @@ _KEYWORD_INSPIRATION_PLATFORMS_OPTION = typer.Option(
     "-p",
     help=(
         "目标平台，可重复传或逗号分隔。默认 bilibili；可选 bilibili/xiaohongshu/"
-        "douyin/youtube/twitter/zhihu/reddit。"
+        "douyin/youtube/twitter/zhihu/reddit/bangumi/weibo。"
     ),
 )
 _KEYWORD_INSPIRATION_KIND_OPTION = typer.Option(
@@ -12902,6 +12902,225 @@ def _run_bangumi_discovery(*, limit: int, force: bool = False) -> None:
     _print_status_panel(kind, title, body)
 
 
+def _weibo_rows(value: object) -> list[dict[str, Any]]:
+    """Read rows from a Weibo page/list without trusting arbitrary schemas."""
+
+    rows = getattr(value, "rows", getattr(value, "data", value))
+    if not isinstance(rows, list):
+        return []
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def _run_weibo_discovery_smoke(
+    *,
+    mode: str,
+    keyword: str = "",
+    uid: str = "",
+    limit: int,
+) -> None:
+    """Run one anonymous Weibo branch without local writes or LLM calls."""
+
+    from openbiliclaw.config import load_config
+    from openbiliclaw.sources.weibo import (
+        weibo_hot_topic_query,
+        weibo_post_to_content,
+    )
+    from openbiliclaw.sources.weibo_client import WeiboClient, WeiboClientError
+
+    cfg = load_config().sources.weibo
+
+    async def _fetch() -> list[Any]:
+        async with WeiboClient(
+            request_interval_seconds=float(cfg.request_interval_seconds)
+        ) as client:
+            rows: list[tuple[dict[str, Any], str, int]] = []
+            if mode == "search":
+                page = await client.search_posts(keyword, page=1, limit=limit)
+                rows.extend((row, "weibo-search", 0) for row in _weibo_rows(page))
+            elif mode == "creator":
+                page = await client.creator_posts(uid, page=1, limit=limit)
+                rows.extend((row, "weibo-creator", 0) for row in _weibo_rows(page))
+            else:
+                topic_limit = min(3, max(1, limit))
+                topics = _weibo_rows(await client.hot_topics(limit=topic_limit))
+                for index, topic in enumerate(topics):
+                    query = weibo_hot_topic_query(topic)
+                    if not query:
+                        continue
+                    per_topic = max(1, (limit + topic_limit - 1) // topic_limit)
+                    page = await client.search_posts(query, page=1, limit=per_topic)
+                    try:
+                        rank = max(1, int(topic.get("realpos") or index + 1))
+                    except (TypeError, ValueError):
+                        rank = index + 1
+                    rows.extend((row, "weibo-hot", rank) for row in _weibo_rows(page))
+
+        items: list[Any] = []
+        seen: set[str] = set()
+        for row, strategy, rank in rows:
+            item = weibo_post_to_content(row, strategy=strategy)
+            if item is None or item.content_id in seen:
+                continue
+            seen.add(item.content_id)
+            if rank:
+                item.source_rank = rank
+            items.append(item)
+            if len(items) >= limit:
+                break
+        return items
+
+    subtitle = {
+        "search": f"关键词搜索 · {keyword}",
+        "hot": "热搜种子 → 真实微博",
+        "creator": f"公开作者 · {uid}",
+    }[mode]
+    _print_page_title("微博内容发现 smoke", subtitle)
+    try:
+        items = asyncio.run(_fetch())
+    except (WeiboClientError, ValueError) as exc:
+        _print_status_panel("warning", "微博匿名读取失败", str(exc))
+        raise typer.Exit(code=1) from exc
+    _print_key_value_table(
+        "只读召回摘要",
+        [
+            ("模式", mode),
+            ("微博条数", str(len(items))),
+            ("用户 Cookie", "未读取"),
+            ("本地写入", "0"),
+            ("LLM 调用", "0"),
+        ],
+    )
+    for index, item in enumerate(items[:5], start=1):
+        _print_discovered_content_preview(item, index)
+
+
+@app.command("discover-weibo")
+def discover_weibo(
+    keyword: str = typer.Argument(..., help="微博搜索关键词。"),
+    limit: int = typer.Option(10, "--limit", "-n", min=1, max=30),
+) -> None:
+    """只读验证微博匿名关键词搜索。"""
+
+    if not keyword.strip():
+        raise typer.BadParameter("搜索关键词不能为空。", param_hint="keyword")
+    _run_weibo_discovery_smoke(mode="search", keyword=keyword.strip(), limit=limit)
+
+
+@app.command("discover-weibo-hot")
+def discover_weibo_hot(
+    limit: int = typer.Option(10, "--limit", "-n", min=1, max=30),
+) -> None:
+    """只读验证微博热搜种子到真实微博的链路。"""
+
+    _run_weibo_discovery_smoke(mode="hot", limit=limit)
+
+
+@app.command("discover-weibo-creator")
+def discover_weibo_creator(
+    uid: str = typer.Argument(..., help="微博数字 UID。"),
+    limit: int = typer.Option(10, "--limit", "-n", min=1, max=30),
+) -> None:
+    """只读验证微博公开作者动态。"""
+
+    selected_uid = uid.strip()
+    if not selected_uid.isdigit():
+        raise typer.BadParameter("微博 UID 必须是数字。", param_hint="uid")
+    _run_weibo_discovery_smoke(mode="creator", uid=selected_uid, limit=limit)
+
+
+def _run_weibo_discovery(*, limit: int, force: bool = False) -> None:
+    """Run one formal Weibo cycle through the shared candidate pipeline."""
+
+    from openbiliclaw.config import load_config
+    from openbiliclaw.runtime.keyword_fetch import KeywordFetchCoordinator
+    from openbiliclaw.runtime.weibo_producer import WeiboDiscoveryProducer
+    from openbiliclaw.soul.engine import SoulProfileNotInitializedError
+    from openbiliclaw.sources.weibo_client import WeiboClient
+
+    _require_runtime_config()
+    config = load_config()
+    source_cfg = config.sources.weibo
+    if not source_cfg.enabled:
+        _print_status_panel(
+            "warning",
+            "微博 discovery 未启用",
+            "请在配置页或 config.toml 中启用 [sources.weibo].enabled。",
+        )
+        raise typer.Exit(code=1)
+    database = _get_runtime_database()
+    soul_engine = _build_soul_engine()
+    try:
+        asyncio.run(soul_engine.get_profile())
+    except SoulProfileNotInitializedError as exc:
+        _print_status_panel("warning", "尚未初始化用户画像", "请先执行 `openbiliclaw init`。")
+        raise typer.Exit(code=1) from exc
+    discovery_engine = _build_discovery_engine()
+    candidate_pipeline = _build_discovery_candidate_pipeline(
+        config=config,
+        database=database,
+        discovery_engine=discovery_engine,
+    )
+    keyword_fetch = KeywordFetchCoordinator(
+        database=database,
+        discovery_config=config.discovery,
+    )
+
+    async def _produce() -> dict[str, object]:
+        async with WeiboClient(
+            request_interval_seconds=float(source_cfg.request_interval_seconds)
+        ) as client:
+            producer = WeiboDiscoveryProducer(
+                database=database,
+                soul_engine=soul_engine,
+                client=client,
+                enabled=True,
+                source_modes=tuple(source_cfg.source_modes),
+                daily_search_budget=source_cfg.daily_search_budget,
+                daily_hot_budget=source_cfg.daily_hot_budget,
+                daily_creator_budget=source_cfg.daily_creator_budget,
+                min_interval_minutes=source_cfg.min_interval_minutes,
+                candidate_pipeline=candidate_pipeline,
+                keyword_fetch=keyword_fetch,
+            )
+            return await producer.produce_if_due(limit=limit, force=force)
+
+    result = asyncio.run(_produce())
+    reason = str(result.get("reason") or "")
+    discovered = int(cast("Any", result.get("discovered") or 0))
+    enqueued = int(cast("Any", result.get("enqueued") or 0))
+    modes = ", ".join(source_cfg.source_modes)
+    _print_page_title("微博内容发现", f"正式 discover · {modes}")
+    if reason in {"ok", "partial"}:
+        _print_key_value_table(
+            "发现摘要",
+            [
+                ("发现条数", str(discovered)),
+                ("入池候选", str(enqueued)),
+                ("来源", "weibo"),
+                ("分支", modes),
+                ("状态", reason),
+            ],
+        )
+        for index, item in enumerate(candidate_pipeline.last_admitted_items[:5], start=1):
+            _print_discovered_content_preview(item, index)
+        return
+    messages = {
+        "throttled": ("info", "微博 discovery 尚未到期", "可使用 --force 手动验证。"),
+        "rate_limited": ("warning", "微博公开接口正在冷却", "到期后会自动重试。"),
+        "pool_full": ("info", "候选池已满", "当前无需补充微博候选。"),
+        "budget_exhausted": ("info", "微博今日预算已用完", "可调整各分支每日预算。"),
+        "no_search_keywords": ("info", "没有微博搜索词", "统一关键词池或画像兴趣为空。"),
+        "no_creator_seeds": ("info", "没有作者种子", "请同时启用 search 或 hot 分支。"),
+        "empty": ("info", "微博 discovery 返回为空", "匿名接口可达，但本轮无可转换微博。"),
+        "error": ("warning", "微博 discovery 执行失败", str(result.get("mode_results") or "")),
+    }
+    kind, title, body = messages.get(
+        reason,
+        ("info", "微博 discovery 未产出内容", reason or "无详细信息"),
+    )
+    _print_status_panel(kind, title, body)
+
+
 @app.command("discover-douyin")
 def discover_douyin(
     keywords: list[str] | None = _DOUYIN_DISCOVERY_KEYWORDS_OPTION,
@@ -12941,7 +13160,10 @@ def discover(
         "bilibili",
         "--source",
         "-s",
-        help="触发发现的内容源：bilibili、xiaohongshu、douyin、zhihu、reddit、bangumi 或 v2ex。",
+        help=(
+            "触发发现的内容源：bilibili、xiaohongshu、douyin、zhihu、reddit、"
+            "bangumi、v2ex 或 weibo。"
+        ),
         case_sensitive=False,
     ),
     strategies: list[str] | None = _DISCOVER_STRATEGIES_OPTION,
@@ -12949,7 +13171,7 @@ def discover(
     force: bool = typer.Option(
         False,
         "--force",
-        help="xiaohongshu / bangumi / v2ex：忽略最小调度间隔强制执行一次。",
+        help="xiaohongshu / bangumi / v2ex / weibo：忽略最小调度间隔强制执行一次。",
     ),
 ) -> None:
     """手动触发内容发现（按来源选择渠道）."""
@@ -13017,10 +13239,20 @@ def discover(
         _run_v2ex_discovery(limit=limit, force=force)
         return
 
+    if source_normalized in {"weibo", "wb"}:
+        if strategies:
+            _print_status_panel(
+                "info",
+                "--strategy 仅对 Bilibili 生效",
+                "weibo 渠道走 source_modes 配置的匿名访客 discovery 分支，已忽略策略过滤。",
+            )
+        _run_weibo_discovery(limit=limit, force=force)
+        return
+
     if source_normalized != "bilibili":
         raise typer.BadParameter(
             f"未知的内容源 `{source}`，当前支持："
-            "bilibili、xiaohongshu、douyin、zhihu、reddit、bangumi、v2ex。"
+            "bilibili、xiaohongshu、douyin、zhihu、reddit、bangumi、v2ex、weibo。"
         )
 
     active_strategies = _normalize_strategy_names(strategies)

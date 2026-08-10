@@ -306,6 +306,17 @@ CREDENTIAL_SPECS: dict[str, CredentialSpec] = {
             "请在设置 / config.toml 的 [sources.v2ex] 中填写，或使用 token_env 指定环境变量。"
         ),
     ),
+    "weibo": CredentialSpec(
+        slug="weibo",
+        kinds=(),
+        unverified_reason="微博发现使用进程内匿名访客会话，不需要也不接受用户凭据。",
+        form_kind="none",
+        form_label="微博匿名访客",
+        help_text=(
+            "无需粘贴微博 Cookie。OpenBiliClaw 只申请短期匿名访客会话并进行只读发现，"
+            "不会把访客会话当作账号登录态或写入配置。"
+        ),
+    ),
 }
 
 

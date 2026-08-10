@@ -1,7 +1,7 @@
 """Orthogonal source-auth contract.
 
 The legacy ``SourceStatusItem.state`` packs four independent questions into one
-string, which is why seven platforms ended up with mutually incomparable green
+string, which is why the original platform set ended up with mutually incomparable green
 lights (see ``docs/plans/2026-07-18-source-auth-contract-spec.md`` D1/D2). This
 module defines the replacement: four dimensions that vary independently, plus
 an explicit statement of *how strong* the evidence behind the verdict is.

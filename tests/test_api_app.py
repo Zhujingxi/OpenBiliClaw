@@ -3112,6 +3112,7 @@ class TestBackendAPI:
             "zhihu",
             "reddit",
             "bangumi",
+            "weibo",
         ):
             assert key in body, f"{key} missing from sources status"
             item = body[key]
@@ -3137,6 +3138,9 @@ class TestBackendAPI:
         assert body["bangumi"]["logged_in"] is True
         assert body["bangumi"]["auth"] is not None
         assert body["bangumi"]["auth"]["auth_required"] is False
+        assert body["weibo"]["state"] == "no_auth"
+        assert body["weibo"]["logged_in"] is True
+        assert body["weibo"]["auth"]["auth_required"] is False
 
     def test_bangumi_status_is_no_auth_with_discovery_health_in_detail(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -6984,6 +6988,7 @@ class TestBackendAPI:
                     "danmaku_count": 890,
                     "favorite_count": 0,
                     "comment_count": 0,
+                    "share_count": 0,
                     "rating_score": 0.0,
                     "rating_count": 0,
                     "source_rank": 0,
@@ -7013,6 +7018,7 @@ class TestBackendAPI:
                     "danmaku_count": 0,
                     "favorite_count": 0,
                     "comment_count": 0,
+                    "share_count": 0,
                     "rating_score": 0.0,
                     "rating_count": 0,
                     "source_rank": 0,
@@ -7311,6 +7317,7 @@ class TestBackendAPI:
                     "danmaku_count": 0,
                     "favorite_count": 0,
                     "comment_count": 0,
+                    "share_count": 0,
                     "rating_score": 0.0,
                     "rating_count": 0,
                     "source_rank": 0,
@@ -11819,6 +11826,7 @@ class TestBackendAPI:
                         "delight_score": 0.95,
                         "published_at": "2026-07-08T06:30:00Z",
                         "published_label": "3 days ago",
+                        "share_count": 321,
                     }
                 ]
 
@@ -11843,6 +11851,7 @@ class TestBackendAPI:
 
         assert response.status_code == 200
         assert_publication(event_hub.events[0])
+        assert event_hub.events[0]["share_count"] == 321
 
     def test_delight_pending_batch_surfaces_body_text_and_content_type(self) -> None:
         """The delight card derives a readable title for legacy answer_<id> rows
@@ -20444,17 +20453,17 @@ def test_reshuffle_and_append_forward_canonical_source_platform() -> None:
 
     reshuffle = client.post(
         "/api/recommendations/reshuffle",
-        json={"excluded_bvids": ["BV1"], "source_platform": "zhihu"},
+        json={"excluded_bvids": ["BV1"], "source_platform": "weibo"},
     )
     append = client.post(
         "/api/recommendations/append",
-        json={"excluded_bvids": ["BV1"], "source_platform": "zhihu"},
+        json={"excluded_bvids": ["BV1"], "source_platform": "weibo"},
     )
 
     assert reshuffle.status_code == 200
     assert append.status_code == 200
-    assert engine.reshuffle_kwargs[0]["source_platform"] == "zhihu"
-    assert engine.append_kwargs[0]["source_platform"] == "zhihu"
+    assert engine.reshuffle_kwargs[0]["source_platform"] == "weibo"
+    assert engine.append_kwargs[0]["source_platform"] == "weibo"
 
 
 def test_recommendation_requests_normalize_platform_aliases() -> None:
@@ -20503,7 +20512,7 @@ def test_recommendation_requests_reject_unknown_platform() -> None:
     client = TestClient(_scoped_app(engine, _ScopedFakeRuntimeController()))
 
     for path in ("/api/recommendations/reshuffle", "/api/recommendations/append"):
-        for bogus in ("weibo", "'; DROP TABLE content_cache; --", "bilibili2"):
+        for bogus in ("'; DROP TABLE content_cache; --", "bilibili2"):
             response = client.post(path, json={"excluded_bvids": [], "source_platform": bogus})
             assert response.status_code == 422, (path, bogus)
 

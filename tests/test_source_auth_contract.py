@@ -261,6 +261,23 @@ def _yt_enabled_with_unrelated_credentials(env: _Env) -> None:
     env.cfg.bilibili.cookie = _FULL_BILI_COOKIE
 
 
+# ── weibo preconditions ─────────────────────────────────────────────
+
+
+def _weibo_enabled(env: _Env) -> None:
+    env.cfg.sources.weibo.enabled = True
+
+
+def _weibo_disabled(env: _Env) -> None:
+    env.cfg.sources.weibo.enabled = False
+
+
+def _weibo_enabled_with_unrelated_credentials(env: _Env) -> None:
+    """Account cookies for another source must never affect anonymous Weibo."""
+    env.cfg.sources.weibo.enabled = True
+    env.cfg.bilibili.cookie = _FULL_BILI_COOKIE
+
+
 # ── twitter preconditions ────────────────────────────────────────────
 
 

@@ -389,6 +389,18 @@ bootstrap_replies_limit = 300
 bootstrap_favorites_limit = 300
 bootstrap_max_pages_per_scope = 20
 
+# ── 微博匿名访客发现（只读）──
+# 后端只在内存中申请短期访客会话，不读取、上传或保存用户登录 Cookie。
+# hot 仅用于生成主题种子，最终仍搜索并入池真实微博正文；不支持初始化画像或写回。
+[sources.weibo]
+enabled = false
+source_modes = ["search", "hot", "creator"]
+daily_search_budget = 60
+daily_hot_budget = 10
+daily_creator_budget = 30
+request_interval_seconds = 3
+min_interval_minutes = 10
+
 [scheduler]
 # Enable scheduled content discovery
 enabled = true
@@ -490,6 +502,7 @@ zhihu = 1
 reddit = 1
 bangumi = 1
 v2ex = 1
+weibo = 1
 
 # ── 统一关键词规划器 / Discover 背压 (P1) ──
 # 把"每平台各自定时调 LLM 生成搜索词"换成缺口拉动的双缓冲背压模型：一个关键词

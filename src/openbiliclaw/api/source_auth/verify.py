@@ -83,6 +83,7 @@ VERIFY_ACTIONS: dict[str, VerifyAction] = {
     # click resolves to ``indeterminate`` without going out.
     "bangumi": "live_probe",
     "v2ex": "live_probe",
+    "weibo": "none",
 }
 
 # ``browser_heartbeat`` is not a generic "everything else is Zhihu" action.
@@ -1027,7 +1028,7 @@ async def verify_source(
             result = _ActionResult("")  # filled in below from the refreshed contract
         else:
             result = _ActionResult(
-                "YouTube 是公开源，无需登录，因此没有可执行的验证。",
+                "该来源使用公开或匿名访客数据，无需登录，因此没有可执行的账号验证。",
                 # Nothing was verified, because there is nothing to verify. The
                 # one platform where that is the honest answer (invariant I3).
                 conclusive=False,

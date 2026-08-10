@@ -14,6 +14,7 @@ PLATFORM_ZHIHU = "zhihu"
 PLATFORM_REDDIT = "reddit"
 PLATFORM_BANGUMI = "bangumi"
 PLATFORM_V2EX = "v2ex"
+PLATFORM_WEIBO = "weibo"
 
 
 @dataclass(frozen=True)
@@ -123,6 +124,12 @@ SOURCE_FAMILY_RULES = (
         platform_aliases=frozenset({"v2ex", "v2"}),
         source_prefixes=("v2ex-", "v2ex_"),
         url_hosts=("v2ex.com",),
+    ),
+    SourceFamilyRule(
+        family=PLATFORM_WEIBO,
+        platform_aliases=frozenset({"weibo", "wb", "微博"}),
+        source_prefixes=("weibo-", "weibo_"),
+        url_hosts=("weibo.com", "weibo.cn"),
     ),
 )
 

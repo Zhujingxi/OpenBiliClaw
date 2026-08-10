@@ -1788,6 +1788,17 @@ def test_save_config_round_trips_bilibili_source_enabled(tmp_path: Path) -> None
     assert loaded.sources.bilibili.enabled is False
 
 
+def test_load_config_repairs_weibo_creator_only_mode(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    config = Config()
+    config.sources.weibo.source_modes = ("creator",)
+
+    save_config(config, config_path)
+    loaded = load_config(config_path)
+
+    assert loaded.sources.weibo.source_modes == ("search", "creator")
+
+
 def test_save_config_round_trips_pool_source_shares(tmp_path: Path) -> None:
     config_path = tmp_path / "config.toml"
     config = Config()

@@ -20,6 +20,7 @@ from openbiliclaw.discovery.inspiration_provider import (
     PlatformSourceInspirationProvider,
     RedditPlatformSearchBackend,
     V2EXPlatformSearchBackend,
+    WeiboPlatformSearchBackend,
     XhsPlatformSearchBackend,
     XPlatformSearchBackend,
     YoutubePlatformSearchBackend,
@@ -1171,6 +1172,33 @@ async def test_v2ex_platform_backend_maps_public_topics_to_previews() -> None:
             title="Agent 上下文管理",
             url="https://www.v2ex.com/t/123",
             highlights=("本地运行与隐私", "程序员", "alice"),
+        )
+    ]
+
+
+async def test_weibo_platform_backend_maps_anonymous_posts_to_previews() -> None:
+    class Client:
+        async def search_posts(self, query: str, **kwargs: object) -> SimpleNamespace:
+            assert query == "AI Agent"
+            assert kwargs == {"page": 1, "limit": 3}
+            return SimpleNamespace(
+                data=[
+                    {
+                        "id": "5190000000000001",
+                        "bid": "P9Example",
+                        "text": "<p>Agent 搜索工作流的新进展</p>",
+                        "user": {"id": 123, "screen_name": "研究员"},
+                    }
+                ]
+            )
+
+    backend = WeiboPlatformSearchBackend(Client())
+
+    assert await backend.search("AI Agent", limit=3) == [
+        ExaPreviewItem(
+            title="Agent 搜索工作流的新进展",
+            url="https://weibo.com/123/P9Example",
+            highlights=("Agent 搜索工作流的新进展", "研究员"),
         )
     ]
 

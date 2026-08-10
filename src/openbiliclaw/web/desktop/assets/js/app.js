@@ -194,6 +194,7 @@
       { key: "bilibili", label: "B 站" },
       { key: "xiaohongshu", label: "小红书" },
       { key: "douyin", label: "抖音" },
+      { key: "weibo", label: "微博" },
       { key: "youtube", label: "YouTube" },
       { key: "twitter", label: "X (Twitter)" },
       { key: "zhihu", label: "知乎" },
@@ -205,8 +206,8 @@
     // 首次成功读到库存快照之前是"未知"，不能把还没读到伪装成 0。
     const PLATFORM_COUNT_UNKNOWN_TEXT = "—";
     const PLATFORM_COUNT_UNKNOWN_LABEL = "库存待读取";
-    const platformLabel = { bilibili: "B 站", youtube: "YouTube", douyin: "抖音", xiaohongshu: "小红书", xhs: "小红书", twitter: "X (Twitter)", x: "X (Twitter)", zhihu: "知乎", reddit: "Reddit", rd: "Reddit", bangumi: "Bangumi", bgm: "Bangumi", v2ex: "V2EX", v2: "V2EX" };
-    const platformAliases = { bili: "bilibili", bilibili: "bilibili", xhs: "xiaohongshu", xiaohongshu: "xiaohongshu", rednote: "xiaohongshu", dy: "douyin", douyin: "douyin", tiktok: "douyin", yt: "youtube", youtube: "youtube", x: "twitter", twitter: "twitter", zh: "zhihu", zhihu: "zhihu", rd: "reddit", reddit: "reddit", bgm: "bangumi", bangumi: "bangumi", v2: "v2ex", v2ex: "v2ex" };
+    const platformLabel = { bilibili: "B 站", youtube: "YouTube", douyin: "抖音", xiaohongshu: "小红书", xhs: "小红书", weibo: "微博", wb: "微博", twitter: "X (Twitter)", x: "X (Twitter)", zhihu: "知乎", reddit: "Reddit", rd: "Reddit", bangumi: "Bangumi", bgm: "Bangumi", v2ex: "V2EX", v2: "V2EX" };
+    const platformAliases = { bili: "bilibili", bilibili: "bilibili", xhs: "xiaohongshu", xiaohongshu: "xiaohongshu", rednote: "xiaohongshu", dy: "douyin", douyin: "douyin", tiktok: "douyin", wb: "weibo", weibo: "weibo", yt: "youtube", youtube: "youtube", x: "twitter", twitter: "twitter", zh: "zhihu", zhihu: "zhihu", rd: "reddit", reddit: "reddit", bgm: "bangumi", bangumi: "bangumi", v2: "v2ex", v2ex: "v2ex" };
     const textCardContentTypes = new Set(["tweet", "thread", "answer", "article", "question", "post", "comment"]);
     // v0.3.118+: bilibili is selectable like every other source — default
     // checked (recommended) but no longer forced. At least one source must
@@ -1332,6 +1333,7 @@
         danmaku_count: Number(item?.danmaku_count ?? 0) || 0,
         favorite_count: Number(item?.favorite_count ?? 0) || 0,
         comment_count: Number(item?.comment_count ?? 0) || 0,
+        share_count: Number(item?.share_count ?? 0) || 0,
         rating_score: Number(item?.rating_score ?? 0) || 0,
         rating_count: Number(item?.rating_count ?? 0) || 0,
         source_rank: Number(item?.source_rank ?? 0) || 0,
@@ -3061,14 +3063,15 @@
         card.className = "video-card saved-card";
         card.dataset.itemKey = item.item_key;
         const url = contentUrl(item);
+        const savedCoverClass = recommendationCoverClass(item);
         const coverContent = `
-            ${coverImg(item)}
+            ${recommendationMediaHtml(item)}
             <span class="platform" data-platform="${escapeHtml(item.source_platform || item.platform || "bilibili")}">${escapeHtml(platformName(item.source_platform || item.platform))}</span>
           `;
         card.innerHTML = `
           ${url
-            ? `<a class="cover" data-platform="${escapeHtml(item.source_platform || item.platform || "bilibili")}" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" aria-label="打开 ${escapeHtml(item.title || item.bvid)}">${coverContent}</a>`
-            : `<button class="cover" data-platform="${escapeHtml(item.source_platform || item.platform || "bilibili")}" type="button" aria-label="打开 ${escapeHtml(item.title || item.bvid)}">${coverContent}</button>`}
+            ? `<a class="cover${savedCoverClass}" data-platform="${escapeHtml(item.source_platform || item.platform || "bilibili")}" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" aria-label="打开 ${escapeHtml(item.title || item.bvid)}">${coverContent}</a>`
+            : `<button class="cover${savedCoverClass}" data-platform="${escapeHtml(item.source_platform || item.platform || "bilibili")}" type="button" aria-label="打开 ${escapeHtml(item.title || item.bvid)}">${coverContent}</button>`}
           <div>
             <p class="video-title">${escapeHtml(item.title || item.content_id)}</p>
             <p class="video-meta">${escapeHtml(item.author_name || "")}</p>
@@ -4510,6 +4513,7 @@ ${savedCardFeedbackBarHtml(listKind)}
       if (item.view_count > 0) segments.push(`▶ ${formatCountCn(item.view_count)}`);
       if (item.like_count > 0) segments.push(`👍 ${formatCountCn(item.like_count)}`);
       if (item.comment_count > 0) segments.push(`💬 ${formatCountCn(item.comment_count)}`);
+      if (item.share_count > 0) segments.push(`🔁 ${formatCountCn(item.share_count)}`);
       if (item.favorite_count > 0) segments.push(`⭐ ${formatCountCn(item.favorite_count)}`);
       if (item.danmaku_count > 0) segments.push(`弹幕 ${formatCountCn(item.danmaku_count)}`);
       if (item.rating_score > 0) segments.push(`评分 ${item.rating_score.toFixed(1)}`);
@@ -7817,6 +7821,11 @@ ${cardFeedbackBarHtml()}`;
       ["ranked", "bangumiModeRanked"],
       ["latest", "bangumiModeLatest"],
     ];
+    const WEIBO_SOURCE_MODE_FIELDS = [
+      ["search", "weiboModeSearch"],
+      ["hot", "weiboModeHot"],
+      ["creator", "weiboModeCreator"],
+    ];
     const BANGUMI_SUBJECT_TYPE_FIELDS = [
       ["anime", "bangumiTypeAnime"],
       ["book", "bangumiTypeBook"],
@@ -7850,6 +7859,24 @@ ${cardFeedbackBarHtml()}`;
         .filter(([, id]) => document.getElementById(id)?.checked === true)
         .map(([value]) => value);
       return selected.length > 0 ? selected : fallback;
+    }
+
+    function setWeiboSourceModes(rawValues) {
+      const selected = Array.isArray(rawValues) ? [...rawValues] : rawValues;
+      if (Array.isArray(selected) && selected.length === 1 && selected[0] === "creator") {
+        selected.unshift("search");
+      }
+      setCheckedValues(WEIBO_SOURCE_MODE_FIELDS, selected);
+    }
+
+    function collectWeiboSourceModes() {
+      const selected = collectCheckedValues(WEIBO_SOURCE_MODE_FIELDS, ["search"]);
+      if (selected.length === 1 && selected[0] === "creator") {
+        const search = document.getElementById("weiboModeSearch");
+        if (search) search.checked = true;
+        return ["search", "creator"];
+      }
+      return selected;
     }
 
     function joinPath(directory, filename) {
@@ -8209,7 +8236,8 @@ ${cardFeedbackBarHtml()}`;
       zhihu: "shareZhihu",
       reddit: "shareReddit",
       bangumi: "shareBangumi",
-      v2ex: "shareV2EX"
+      v2ex: "shareV2EX",
+      weibo: "shareWeibo"
     };
     const SOURCE_CARD_LABELS = {
       bilibili: "Bilibili",
@@ -9090,6 +9118,7 @@ ${cardFeedbackBarHtml()}`;
       setInput("shareReddit", scheduler.pool_source_shares?.reddit);
       setInput("shareBangumi", scheduler.pool_source_shares?.bangumi);
       setInput("shareV2EX", scheduler.pool_source_shares?.v2ex);
+      setInput("shareWeibo", scheduler.pool_source_shares?.weibo);
       setInput("speculationInterval", scheduler.speculation_interval_minutes);
       setInput("speculationTtl", scheduler.speculation_ttl_days);
       setInput("speculationCooldown", scheduler.speculation_cooldown_days);
@@ -9170,6 +9199,13 @@ ${cardFeedbackBarHtml()}`;
       setInput("douyinDailyFeedBudget", config.sources?.douyin?.daily_feed_budget);
       setInput("douyinRequestInterval", config.sources?.douyin?.request_interval_seconds);
       setInput("douyinMinInterval", config.sources?.douyin?.min_interval_minutes);
+      setSelect("weiboEnabled", config.sources?.weibo?.enabled === true ? "on" : "off");
+      setWeiboSourceModes(config.sources?.weibo?.source_modes);
+      setInput("weiboDailySearchBudget", config.sources?.weibo?.daily_search_budget);
+      setInput("weiboDailyHotBudget", config.sources?.weibo?.daily_hot_budget);
+      setInput("weiboDailyCreatorBudget", config.sources?.weibo?.daily_creator_budget);
+      setInput("weiboRequestInterval", config.sources?.weibo?.request_interval_seconds);
+      setInput("weiboMinInterval", config.sources?.weibo?.min_interval_minutes);
       setSelect("youtubeEnabled", config.sources?.youtube?.enabled === true ? "on" : "off");
       setInput("youtubeDailySearchBudget", config.sources?.youtube?.daily_search_budget);
       setInput("youtubeDailyTrendingBudget", config.sources?.youtube?.daily_trending_budget);
@@ -9338,6 +9374,7 @@ ${cardFeedbackBarHtml()}`;
         view_count: Number(item?.view_count ?? 0) || 0,
         like_count: Number(item?.like_count ?? 0) || 0,
         comment_count: Number(item?.comment_count ?? 0) || 0,
+        share_count: Number(item?.share_count ?? 0) || 0,
         danmaku_count: Number(item?.danmaku_count ?? 0) || 0,
         favorite_count: Number(item?.favorite_count ?? 0) || 0,
         rating_score: Number(item?.rating_score ?? 0) || 0,
@@ -10347,6 +10384,15 @@ ${cardFeedbackBarHtml()}`;
             request_interval_seconds: getIntInput("douyinRequestInterval", 2),
             min_interval_minutes: getIntInput("douyinMinInterval", 3)
           },
+          weibo: {
+            enabled: $("#weiboEnabled").value === "on",
+            source_modes: collectWeiboSourceModes(),
+            daily_search_budget: getIntInput("weiboDailySearchBudget", 60),
+            daily_hot_budget: getIntInput("weiboDailyHotBudget", 10),
+            daily_creator_budget: getIntInput("weiboDailyCreatorBudget", 30),
+            request_interval_seconds: getIntInput("weiboRequestInterval", 3),
+            min_interval_minutes: getIntInput("weiboMinInterval", 10)
+          },
           youtube: {
             enabled: $("#youtubeEnabled").value === "on",
             daily_search_budget: getIntInput("youtubeDailySearchBudget", 0),
@@ -10453,7 +10499,8 @@ ${cardFeedbackBarHtml()}`;
             zhihu: getIntInput("shareZhihu", 1),
             reddit: getIntInput("shareReddit", 1),
             bangumi: getIntInput("shareBangumi", 1),
-            v2ex: getIntInput("shareV2EX", 1)
+            v2ex: getIntInput("shareV2EX", 1),
+            weibo: getIntInput("shareWeibo", 1)
           },
           speculation_interval_minutes: getIntInput("speculationInterval", 10),
           speculation_ttl_days: getIntInput("speculationTtl", 3),
@@ -11219,6 +11266,7 @@ ${cardFeedbackBarHtml()}`;
         if (shares.reddit !== undefined) setInput("shareReddit", shares.reddit);
         if (shares.bangumi !== undefined) setInput("shareBangumi", shares.bangumi);
         if (shares.v2ex !== undefined) setInput("shareV2EX", shares.v2ex);
+        if (shares.weibo !== undefined) setInput("shareWeibo", shares.weibo);
         renderShareOverview();
         markSettingsDirty();
         showToast("已应用来源占比建议");

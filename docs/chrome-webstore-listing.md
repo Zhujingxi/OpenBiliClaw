@@ -50,6 +50,7 @@ https://github.com/whiteguo233/OpenBiliClaw
 - Reddit
 - Bangumi
 - V2EX
+- 微博（后端 discovery-only）
 
 这个插件能做什么：
 - 在支持的平台页面识别你授权范围内的内容与互动信号，或执行本地后端下发的来源任务。

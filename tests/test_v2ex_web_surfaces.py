@@ -128,5 +128,5 @@ def test_v2ex_is_available_in_guided_init_and_settings_surfaces() -> None:
     setup = (ROOT / "src/openbiliclaw/web/setup/index.html").read_text(encoding="utf-8")
 
     assert '"bangumi", "v2ex",' in shared
-    assert "const INIT_SOURCE_KEYS = Object.freeze([...SOURCE_KEYS])" in shared
+    assert "v2ex: Object.freeze({ guidedInit: true })" in shared
     assert "INIT_SOURCE_KEYS" in setup

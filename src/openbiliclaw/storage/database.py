@@ -9352,6 +9352,7 @@ class Database:
                 COALESCE(c.danmaku_count, 0) AS danmaku_count,
                 COALESCE(c.favorite_count, 0) AS favorite_count,
                 COALESCE(c.comment_count, 0) AS comment_count,
+                COALESCE(c.share_count, 0) AS share_count,
                 COALESCE(c.rating_score, 0.0) AS rating_score,
                 COALESCE(c.rating_count, 0) AS rating_count,
                 COALESCE(c.source_rank, 0) AS source_rank,

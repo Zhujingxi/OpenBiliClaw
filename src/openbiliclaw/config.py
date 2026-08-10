@@ -176,6 +176,7 @@ _DEFAULT_POOL_SOURCE_SHARES = {
     "reddit": 1,
     "bangumi": 1,
     "v2ex": 1,
+    "weibo": 1,
 }
 
 _SOURCE_INCREMENTAL_ENV_FIELDS = {
@@ -1142,9 +1143,9 @@ class DouyinSourceConfig:
     daily_hot_budget: int = 0
     daily_feed_budget: int = 0
     request_interval_seconds: int = 2
-    # Minimum gap between two producer runs for this source. Aligned to 3
-    # minutes across every source (2026-07-26) so pool replenishment has one
-    # cadence instead of eight; the per-run size is still bounded by
+    # Minimum gap between two producer runs for this source. Most established
+    # sources use a 3-minute cadence; risk-controlled anonymous sources may
+    # choose a larger floor. Per-run size is still bounded by
     # ``[scheduler].discovery_limit`` and each branch's daily budget.
     min_interval_minutes: int = 3
 
@@ -1282,6 +1283,19 @@ class V2EXSourceConfig:
     bootstrap_max_pages_per_scope: int = 20
 
 
+@dataclass
+class WeiboSourceConfig:
+    """Weibo anonymous-visitor discovery configuration."""
+
+    enabled: bool = False
+    source_modes: tuple[str, ...] = ("search", "hot", "creator")
+    daily_search_budget: int = 60
+    daily_hot_budget: int = 10
+    daily_creator_budget: int = 30
+    request_interval_seconds: int = 3
+    min_interval_minutes: int = 10
+
+
 V2EX_ALLOWED_SOURCE_MODES = frozenset({"search", "node", "tab", "hot", "latest"})
 V2EX_CONFIG_INTEGER_LIMITS: dict[str, tuple[int, int]] = {
     "daily_search_budget": (0, 100_000),
@@ -1356,6 +1370,7 @@ class SourcesConfig:
     reddit: RedditSourceConfig = field(default_factory=RedditSourceConfig)
     bangumi: BangumiSourceConfig = field(default_factory=BangumiSourceConfig)
     v2ex: V2EXSourceConfig = field(default_factory=V2EXSourceConfig)
+    weibo: WeiboSourceConfig = field(default_factory=WeiboSourceConfig)
 
 
 @dataclass
@@ -1699,6 +1714,7 @@ def _warn_suspicious_budgets(sources: SourcesConfig) -> None:
         ("zhihu", sources.zhihu),
         ("reddit", sources.reddit),
         ("bangumi", sources.bangumi),
+        ("weibo", sources.weibo),
     ]
     for source_name, source_config in source_configs:
         for source_field in fields(source_config):
@@ -2051,6 +2067,7 @@ def _build_config(
     reddit_raw = sources_raw.get("reddit", {})
     bangumi_raw = sources_raw.get("bangumi", {})
     v2ex_raw = sources_raw.get("v2ex", {})
+    weibo_raw = sources_raw.get("weibo", {})
     sources = SourcesConfig(
         browser_cdp_url=sources_browser_raw.get("cdp_url", ""),
         browser_headed=sources_browser_raw.get("headed", False),
@@ -2223,6 +2240,27 @@ def _build_config(
             ),
             bootstrap_max_pages_per_scope=min(
                 100, max(1, int(v2ex_raw.get("bootstrap_max_pages_per_scope", 20)))
+            ),
+        ),
+        weibo=WeiboSourceConfig(
+            enabled=bool(weibo_raw.get("enabled", False)),
+            source_modes=_normalize_weibo_source_modes(
+                weibo_raw.get("source_modes", ["search", "hot", "creator"])
+            ),
+            daily_search_budget=_normalize_weibo_non_negative_int(
+                weibo_raw.get("daily_search_budget", 60), "daily_search_budget"
+            ),
+            daily_hot_budget=_normalize_weibo_non_negative_int(
+                weibo_raw.get("daily_hot_budget", 10), "daily_hot_budget"
+            ),
+            daily_creator_budget=_normalize_weibo_non_negative_int(
+                weibo_raw.get("daily_creator_budget", 30), "daily_creator_budget"
+            ),
+            request_interval_seconds=_normalize_weibo_non_negative_int(
+                weibo_raw.get("request_interval_seconds", 3), "request_interval_seconds"
+            ),
+            min_interval_minutes=_normalize_weibo_non_negative_int(
+                weibo_raw.get("min_interval_minutes", 10), "min_interval_minutes"
             ),
         ),
     )
@@ -2777,6 +2815,27 @@ def _coerce_str_list(value: object) -> list[str]:
     if isinstance(value, (list, tuple)):
         return [str(item).strip() for item in value if str(item).strip()]
     return []
+
+
+def _normalize_weibo_source_modes(value: object) -> tuple[str, ...]:
+    selected = tuple(
+        dict.fromkeys(
+            mode for mode in _coerce_str_list(value) if mode in {"search", "hot", "creator"}
+        )
+    )
+    if not selected:
+        return ("search",)
+    if selected == ("creator",):
+        return ("search", "creator")
+    return selected
+
+
+def _normalize_weibo_non_negative_int(value: object, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigError(f"sources.weibo.{field_name} 必须是非负整数")
+    if value < 0:
+        raise ConfigError(f"sources.weibo.{field_name} 不能为负数")
+    return value
 
 
 def normalize_v2ex_list_field(
@@ -4971,6 +5030,15 @@ def _render_config_toml(
             f"bootstrap_favorites_limit = {config.sources.v2ex.bootstrap_favorites_limit}",
             f"bootstrap_max_pages_per_scope = {config.sources.v2ex.bootstrap_max_pages_per_scope}",
             "",
+            "[sources.weibo]",
+            f"enabled = {_toml_bool(config.sources.weibo.enabled)}",
+            f"source_modes = {_toml_str_list(list(config.sources.weibo.source_modes))}",
+            f"daily_search_budget = {config.sources.weibo.daily_search_budget}",
+            f"daily_hot_budget = {config.sources.weibo.daily_hot_budget}",
+            f"daily_creator_budget = {config.sources.weibo.daily_creator_budget}",
+            f"request_interval_seconds = {config.sources.weibo.request_interval_seconds}",
+            f"min_interval_minutes = {config.sources.weibo.min_interval_minutes}",
+            "",
             "[scheduler]",
             f"enabled = {_toml_bool(config.scheduler.enabled)}",
             "pause_on_extension_disconnect = "
@@ -5076,6 +5144,7 @@ def _render_config_toml(
             f"reddit = {int(config.scheduler.pool_source_shares.get('reddit', 1))}",
             f"bangumi = {int(config.scheduler.pool_source_shares.get('bangumi', 1))}",
             f"v2ex = {int(config.scheduler.pool_source_shares.get('v2ex', 1))}",
+            f"weibo = {int(config.scheduler.pool_source_shares.get('weibo', 1))}",
             "",
             "[discovery]",
             "unified_keyword_planner_enabled = "
