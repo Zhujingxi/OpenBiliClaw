@@ -47,7 +47,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
-from openbiliclaw.api.source_auth.contract import SourceAuthContract
+from openbiliclaw.api.source_auth.contract import SourceAuthContract, SourceCapabilityAuth
 from openbiliclaw.api.source_auth.probe_cache import (
     LIVE_PROBES,
     PROBE_FAIL_TTL_SECONDS,
@@ -59,6 +59,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from openbiliclaw.api.source_auth.contract import (
+        CapabilityReadinessState,
         Credential,
         CredentialOrigin,
         Verification,
@@ -72,6 +73,7 @@ if TYPE_CHECKING:
 # on 2026-07-18: 71h -> ready, 73h -> stale (spec D2).
 _XHS_LOGIN_FRESH_HOURS = 72
 _ZHIHU_LOGIN_FRESH_HOURS = 72
+_V2EX_LOGIN_FRESH_HOURS = 72
 _HEARTBEAT_TTL_SECONDS = 72 * 3600
 
 # Live-probe verdict windows. Imported rather than redeclared: ``probe_cache``
@@ -209,6 +211,14 @@ _BANGUMI_TOKEN_DETAIL: dict[str, str] = {
 
 # Contract-side ``detail`` for Bangumi with no token — the anonymous default.
 _BANGUMI_ANONYMOUS_DETAIL = "公开源 · 无需登录；可选填个人令牌以识别账号或读取私密收藏。"
+
+_V2EX_TOKEN_DETAIL: dict[str, str] = {
+    "verified": "个人令牌有效，已识别 V2EX 账号，可使用 API 2.0 增强发现。",
+    "failed": "V2EX 个人令牌被拒绝（可能过期或无效）；公开发现不受影响。",
+    "stale": "V2EX 个人令牌上次联网确认已超出有效期，可点「测试连接」重新确认。",
+    "unverified": "已保存 V2EX 个人令牌，尚未联网确认；可点「测试连接」验证。",
+}
+_V2EX_ANONYMOUS_DETAIL = "公开源 · 无需登录；可选填 PAT 以识别账号并增强 Node / Topic API。"
 
 
 @dataclass
@@ -1152,6 +1162,212 @@ def auth_bangumi(ctx: SourceAuthContext) -> SourceAuthContract:
     )
 
 
+V2EX_CAPABILITY_AUTH_MODES: dict[str, tuple[str, bool]] = {
+    "discover": ("optional-credential", True),
+    "profile": ("login-required", True),
+    "bootstrap": ("login-required", True),
+    "incremental": ("login-required", True),
+    "cookie-sync": ("login-required", False),
+}
+
+
+def _v2ex_capability_state(
+    ctx: SourceAuthContext,
+    *,
+    configured_username: object | None = None,
+) -> tuple[dict[str, SourceCapabilityAuth], Any, str]:
+    """Return V2EX capability readiness without performing network I/O."""
+
+    from openbiliclaw.sources.v2ex_identity import (
+        resolve_v2ex_identity_state,
+    )
+
+    browser_logged_in, browser_when, browser_fresh = _login_heartbeat(
+        ctx.database,
+        getter="get_v2ex_login_state",
+        fresh_hours=_V2EX_LOGIN_FRESH_HOURS,
+    )
+    resolution = resolve_v2ex_identity_state(
+        cfg=ctx.cfg,
+        database=ctx.database,
+        probes=ctx.probes,
+        configured_username=configured_username,
+    )
+    browser_detail = ""
+    if browser_logged_in and browser_fresh:
+        browser_detail = "浏览器已登录"
+        browser_username = resolution.claims.get("browser", "")
+        if browser_username:
+            browser_detail += f" · {browser_username}"
+    elif browser_when and not browser_fresh:
+        browser_detail = "浏览器登录态已过期"
+
+    discover = SourceCapabilityAuth(
+        mode="optional-credential",
+        required=True,
+        ready=True,
+        state="ready",
+        detail="公开 API 与 Feed 可匿名发现；PAT 仅用于增强。",
+    )
+    private_state: CapabilityReadinessState
+    if resolution.status == "identity_mismatch":
+        private_state = "identity_mismatch"
+        private_detail = "账号证据冲突；请先确认要使用的 V2EX 账号。"
+    elif not browser_logged_in:
+        private_state = "login_required"
+        private_detail = "浏览器尚未登录 V2EX；公开发现仍可使用。"
+    elif not browser_fresh:
+        private_state = "stale"
+        private_detail = "浏览器登录心跳已过期；请打开 V2EX 后让扩展重新同步。"
+    elif not resolution.claims.get("browser"):
+        private_state = "identity_required"
+        private_detail = "已检测到登录态，但尚未可靠识别当前 V2EX 用户。"
+    elif not resolution.private_bootstrap_available:
+        private_state = "identity_required"
+        private_detail = "浏览器账号尚未通过后端身份解析，账号初始化暂停。"
+    else:
+        private_state = "ready"
+        private_detail = f"浏览器账号 {resolution.username} 已就绪，可只读初始化。"
+
+    private_ready = private_state == "ready"
+    active_profile_username = ""
+    if hasattr(ctx.database, "get_v2ex_profile_identity"):
+        try:
+            active_profile_username = str(
+                ctx.database.get_v2ex_profile_identity()[0] or ""
+            ).strip()
+        except Exception:  # pragma: no cover - defensive storage fallback
+            active_profile_username = ""
+    incremental_switch_required = bool(
+        private_ready
+        and active_profile_username
+        and active_profile_username.casefold() != resolution.username.casefold()
+    )
+    incremental_state: CapabilityReadinessState = (
+        "identity_switch_required" if incremental_switch_required else private_state
+    )
+    incremental_detail = (
+        f"当前画像属于 V2EX 账号 {active_profile_username}；"
+        f"请用账号 {resolution.username} 完整重新初始化后再恢复增量同步。"
+        if incremental_switch_required
+        else private_detail
+    )
+    capabilities = {
+        "discover": discover,
+        "profile": SourceCapabilityAuth(
+            mode="login-required",
+            required=True,
+            ready=private_ready,
+            state=private_state,
+            detail=private_detail,
+        ),
+        "bootstrap": SourceCapabilityAuth(
+            mode="login-required",
+            required=True,
+            ready=private_ready,
+            state=private_state,
+            detail=private_detail,
+        ),
+        "incremental": SourceCapabilityAuth(
+            mode="login-required",
+            required=True,
+            ready=private_ready and not incremental_switch_required,
+            state=incremental_state,
+            detail=incremental_detail,
+        ),
+        "cookie-sync": SourceCapabilityAuth(
+            mode="login-required",
+            required=False,
+            ready=bool(browser_logged_in and browser_fresh),
+            state=(
+                "ready"
+                if browser_logged_in and browser_fresh
+                else "stale"
+                if browser_when and not browser_fresh
+                else "login_required"
+            ),
+            detail=(
+                "浏览器登录状态心跳正常。"
+                if browser_logged_in and browser_fresh
+                else "等待浏览器扩展上报 V2EX 登录状态。"
+            ),
+        ),
+    }
+    return capabilities, resolution, browser_detail
+
+
+def v2ex_capability_readiness(
+    ctx: SourceAuthContext,
+    *,
+    configured_username: object | None = None,
+) -> dict[str, SourceCapabilityAuth]:
+    """Public backend-owned readiness registry used by status and guided init."""
+
+    capabilities, _, _ = _v2ex_capability_state(
+        ctx,
+        configured_username=configured_username,
+    )
+    return capabilities
+
+
+def auth_v2ex(ctx: SourceAuthContext) -> SourceAuthContract:
+    """V2EX: anonymous-public, optional PAT, and separate browser heartbeat."""
+
+    from openbiliclaw.sources.v2ex_identity import v2ex_identity_detail
+
+    cfg = ctx.source_cfg("v2ex")
+    token_env = str(getattr(cfg, "token_env", "OPENBILICLAW_V2EX_TOKEN") or "").strip()
+    env_token = str(os.environ.get(token_env, "") or "").strip() if token_env else ""
+    config_token = str(getattr(cfg, "access_token", "") or "").strip()
+    token = env_token or config_token
+    capabilities, resolution, browser_detail = _v2ex_capability_state(ctx)
+    identity_detail = v2ex_identity_detail(resolution)
+    if not token:
+        detail = _V2EX_ANONYMOUS_DETAIL
+        if browser_detail:
+            detail += f" · {browser_detail}"
+        if identity_detail:
+            detail += f" · {identity_detail}"
+        return SourceAuthContract(
+            auth_required=False,
+            credential="none",
+            credential_origin="none",
+            verification="unverified",
+            verify_method="none",
+            verify_ttl_seconds=None,
+            can_verify_now=False,
+            detail=detail,
+            capabilities=capabilities,
+            legacy_state="no_auth",
+            legacy_logged_in=True,
+        )
+    verification, verified_at = _probe_verdict(
+        ctx,
+        "v2ex",
+        credential="present",
+        cookie=token,
+    )
+    detail = _V2EX_TOKEN_DETAIL.get(verification, _V2EX_TOKEN_DETAIL["unverified"])
+    if browser_detail:
+        detail += f" · {browser_detail}"
+    if identity_detail:
+        detail += f" · {identity_detail}"
+    return SourceAuthContract(
+        auth_required=False,
+        credential="present",
+        credential_origin="env" if env_token else "config",
+        verification=verification,
+        verify_method="live_probe",
+        verified_at=verified_at,
+        verify_ttl_seconds=_probe_ttl(verification),
+        can_verify_now=True,
+        detail=detail,
+        capabilities=capabilities,
+        legacy_state="no_auth",
+        legacy_logged_in=True,
+    )
+
+
 # ── registry ─────────────────────────────────────────────────────────
 
 #: Slug -> provider. Keys and order define the ``SourcesStatusResponse`` fields,
@@ -1166,6 +1382,7 @@ SOURCE_AUTH_PROVIDERS: dict[str, Callable[[SourceAuthContext], SourceAuthContrac
     "zhihu": auth_zhihu,
     "reddit": auth_reddit,
     "bangumi": auth_bangumi,
+    "v2ex": auth_v2ex,
 }
 
 

@@ -365,7 +365,9 @@ body.chat-view-active .back-to-top {
   display: flex;
   align-items: flex-start;
   aspect-ratio: auto;
-  min-height: 96px;
+  box-sizing: border-box;
+  min-height: 88px;
+  max-height: 116px;
   padding: 12px 114px 12px 14px;
   background: var(--surface-soft);
 }
@@ -379,7 +381,7 @@ body.chat-view-active .back-to-top {
   white-space: pre-wrap;
   word-break: break-word;
   display: -webkit-box;
-  -webkit-line-clamp: 6;
+  -webkit-line-clamp: 4;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
@@ -444,6 +446,7 @@ body.chat-view-active .back-to-top {
 .card-source[data-source="zhihu"] { background: rgba(15, 136, 235, 0.1); color: #0f88eb; }
 .card-source[data-source="reddit"] { background: rgba(255, 69, 0, 0.1); color: #d93f00; }
 .card-source[data-source="bangumi"] { background: rgba(105, 80, 161, 0.12); color: #6950a1; }
+.card-source[data-source="v2ex"] { background: rgba(0, 160, 160, 0.12); color: #087f83; }
 
 .card-expression {
   margin-top: 8px;

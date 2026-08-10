@@ -20,7 +20,7 @@ test("the shared module publishes itself for classic-script consumers", () => {
     // from all three settings surfaces at once. It renders off the legacy
     // `state` fallback until it gets a provider — see the test below.
     "bilibili", "xiaohongshu", "douyin", "youtube", "twitter", "zhihu", "reddit",
-    "bangumi",
+    "bangumi", "v2ex",
   ]);
 });
 

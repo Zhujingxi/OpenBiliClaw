@@ -7,6 +7,7 @@ import sqlite3
 import threading
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -69,6 +70,7 @@ class _FakeDatabase:
             "yt_tasks",
             "zhihu_tasks",
             "reddit_tasks",
+            "v2ex_tasks",
         ):
             self.conn.execute(
                 f"CREATE TABLE {table} ("
@@ -84,6 +86,7 @@ def _harness(
     config: SchedulerConfig | None = None,
     enabled: dict[str, bool] | None = None,
     state: dict[str, object] | None = None,
+    runtime_config: Any | None = None,
 ) -> tuple[SourceIncrementalSync, _FakeDatabase, _FakeMemory, _FakePresence, _FakeClock, list[str]]:
     database = _FakeDatabase()
     memory = _FakeMemory(state)
@@ -98,6 +101,7 @@ def _harness(
         "yt": ("yt_tasks", "bootstrap_profile"),
         "zhihu": ("zhihu_tasks", "bootstrap_events"),
         "reddit": ("reddit_tasks", "bootstrap_events"),
+        "v2ex": ("v2ex_tasks", "bootstrap_profile"),
     }
 
     def make_enqueue(source: str) -> Any:
@@ -106,10 +110,13 @@ def _harness(
             *,
             force: bool,
             incremental: bool,
+            **kwargs: Any,
         ) -> BootstrapEnqueueResult:
             assert force is True
             assert incremental is True
             enqueue_calls.append(source)
+            if kwargs:
+                enqueue_kwargs[source] = kwargs
             counters[source] += 1
             task_id = f"{source}-{counters[source]}"
             table, task_type = table_types[source]
@@ -128,6 +135,7 @@ def _harness(
 
         return enqueue
 
+    enqueue_kwargs: dict[str, dict[str, Any]] = {}
     specs = {
         source: (table_types[source][0], table_types[source][1], make_enqueue(source))
         for source in SOURCE_ORDER
@@ -145,10 +153,12 @@ def _harness(
         scheduler_config=config or SchedulerConfig(),
         profile_ready=lambda: True,
         init_active=lambda: False,
+        runtime_config=runtime_config,
         kick=kick,
         clock=clock,
     )
     scheduler._test_enqueue_calls = enqueue_calls  # type: ignore[attr-defined]
+    scheduler._test_enqueue_kwargs = enqueue_kwargs  # type: ignore[attr-defined]
     return scheduler, database, memory, presence, clock, kicks
 
 
@@ -159,9 +169,63 @@ def _complete(database: _FakeDatabase, source: str, task_id: str) -> None:
         "yt": "yt_tasks",
         "zhihu": "zhihu_tasks",
         "reddit": "reddit_tasks",
+        "v2ex": "v2ex_tasks",
     }[source]
     database.conn.execute(f"UPDATE {table} SET status = 'completed' WHERE id = ?", (task_id,))
     database.conn.commit()
+
+
+def test_v2ex_incremental_four_table_registry_is_complete() -> None:
+    assert "v2ex" in SOURCE_ORDER
+    assert scheduler_module._TASK_SPECS["v2ex"][:2] == (
+        "v2ex_tasks",
+        "bootstrap_profile",
+    )
+
+
+@pytest.mark.asyncio
+async def test_v2ex_incremental_requires_private_capability_and_passes_resolved_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    v2ex_config = SimpleNamespace(bootstrap_topics_limit=17)
+    runtime_config = SimpleNamespace(sources=SimpleNamespace(v2ex=v2ex_config))
+    scheduler, _database, _memory, _presence, _clock, _kicks = _harness(
+        monkeypatch,
+        enabled={source: source == "v2ex" for source in SOURCE_ORDER},
+        runtime_config=runtime_config,
+    )
+    monkeypatch.setattr(
+        "openbiliclaw.sources.v2ex_identity.resolve_v2ex_identity_state",
+        lambda **_kwargs: SimpleNamespace(
+            private_bootstrap_available=False,
+            username="alice",
+        ),
+    )
+
+    blocked = await scheduler.tick()
+
+    assert blocked.reason == "capability_not_ready"
+    assert blocked.source == "v2ex"
+    assert scheduler._test_enqueue_calls == []  # type: ignore[attr-defined]
+
+    monkeypatch.setattr(
+        "openbiliclaw.sources.v2ex_identity.resolve_v2ex_identity_state",
+        lambda **_kwargs: SimpleNamespace(
+            private_bootstrap_available=True,
+            username="alice",
+        ),
+    )
+
+    created = await scheduler.tick()
+
+    assert created.reason == "created"
+    assert created.source == "v2ex"
+    assert scheduler._test_enqueue_kwargs["v2ex"] == {  # type: ignore[attr-defined]
+        "username": "alice",
+        "config": v2ex_config,
+    }
+    assert scheduler_module._SOURCE_CONFIG_ALIASES["v2ex"] == ("v2ex",)
+    assert scheduler_module._SOURCE_INTERVAL_FIELDS["v2ex"] == "v2ex_incremental_hours"
 
 
 @pytest.mark.asyncio

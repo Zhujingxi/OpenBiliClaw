@@ -19,6 +19,7 @@ from openbiliclaw.discovery.inspiration_provider import (
     McporterYouInspirationProvider,
     PlatformSourceInspirationProvider,
     RedditPlatformSearchBackend,
+    V2EXPlatformSearchBackend,
     XhsPlatformSearchBackend,
     XPlatformSearchBackend,
     YoutubePlatformSearchBackend,
@@ -1146,6 +1147,34 @@ async def test_bangumi_platform_backend_maps_official_rows_to_previews() -> None
     ]
 
 
+async def test_v2ex_platform_backend_maps_public_topics_to_previews() -> None:
+    class Client:
+        async def search_topics(self, query: str, *, limit: int) -> SimpleNamespace:
+            assert query == "Agent"
+            assert limit == 3
+            return SimpleNamespace(
+                data=[
+                    {
+                        "id": 123,
+                        "title": "Agent 上下文管理",
+                        "content": "本地运行与隐私",
+                        "node": {"name": "programmer", "title": "程序员"},
+                        "member": {"username": "alice"},
+                    }
+                ]
+            )
+
+    backend = V2EXPlatformSearchBackend(Client())
+
+    assert await backend.search("Agent", limit=3) == [
+        ExaPreviewItem(
+            title="Agent 上下文管理",
+            url="https://www.v2ex.com/t/123",
+            highlights=("本地运行与隐私", "程序员", "alice"),
+        )
+    ]
+
+
 def test_build_platform_source_backends_uses_only_enabled_sources() -> None:
     config = SimpleNamespace(
         sources=SimpleNamespace(
@@ -1157,6 +1186,7 @@ def test_build_platform_source_backends_uses_only_enabled_sources() -> None:
             zhihu=SimpleNamespace(enabled=True),
             reddit=SimpleNamespace(enabled=False, backend="rdt"),
             bangumi=SimpleNamespace(enabled=True, subject_types=("anime", "book")),
+            v2ex=SimpleNamespace(enabled=True),
         )
     )
     youtube_client = object()
@@ -1176,6 +1206,7 @@ def test_build_platform_source_backends_uses_only_enabled_sources() -> None:
         x_client=object(),
         zhihu_search=zhihu_search,
         bangumi_client=object(),
+        v2ex_client=object(),
     )
 
     assert [backend.platform for backend in backends] == [
@@ -1186,4 +1217,5 @@ def test_build_platform_source_backends_uses_only_enabled_sources() -> None:
         "twitter",
         "zhihu",
         "bangumi",
+        "v2ex",
     ]

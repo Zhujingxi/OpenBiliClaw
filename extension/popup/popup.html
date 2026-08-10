@@ -1323,8 +1323,16 @@
     .recommendation-cover.is-text-card {
       align-items: flex-start;
       justify-content: flex-start;
+      aspect-ratio: auto;
+      box-sizing: border-box;
+      min-height: 88px;
+      max-height: 118px;
       text-align: left;
       padding: 12px 74px 34px 14px;
+    }
+
+    .recommendation-cover.is-text-card::after {
+      display: none;
     }
 
     .recommendation-cover-text {
@@ -1334,7 +1342,7 @@
       line-height: 1.55;
       color: var(--text-secondary);
       display: -webkit-box;
-      -webkit-line-clamp: 5;
+      -webkit-line-clamp: 4;
       -webkit-box-orient: vertical;
       overflow: hidden;
       white-space: pre-wrap;
@@ -1410,7 +1418,8 @@
       z-index: 2;
     }
 
-    .recommendation-cover.is-fallback .recommendation-source-corner {
+    .recommendation-cover.is-fallback .recommendation-source-corner,
+    .recommendation-cover.is-text-card .recommendation-source-corner {
       background: rgba(18, 22, 32, 0.08);
       color: var(--text-muted);
     }
@@ -1420,7 +1429,8 @@
       color: #fff;
     }
 
-    .recommendation-cover.is-fallback .recommendation-source-corner.source-platform-zhihu {
+    .recommendation-cover.is-fallback .recommendation-source-corner.source-platform-zhihu,
+    .recommendation-cover.is-text-card .recommendation-source-corner.source-platform-zhihu {
       background: rgba(15, 136, 235, 0.12);
       color: #0f88eb;
     }
@@ -1430,7 +1440,8 @@
       color: #fff;
     }
 
-    .recommendation-cover.is-fallback .recommendation-source-corner.source-platform-reddit {
+    .recommendation-cover.is-fallback .recommendation-source-corner.source-platform-reddit,
+    .recommendation-cover.is-text-card .recommendation-source-corner.source-platform-reddit {
       background: rgba(255, 69, 0, 0.12);
       color: #d93f00;
     }
@@ -1440,9 +1451,21 @@
       color: #fff;
     }
 
-    .recommendation-cover.is-fallback .recommendation-source-corner.source-platform-bangumi {
+    .recommendation-cover.is-fallback .recommendation-source-corner.source-platform-bangumi,
+    .recommendation-cover.is-text-card .recommendation-source-corner.source-platform-bangumi {
       background: rgba(105, 80, 161, 0.12);
       color: #6950a1;
+    }
+
+    .recommendation-source-corner.source-platform-v2ex {
+      background: rgba(0, 160, 160, 0.82);
+      color: #fff;
+    }
+
+    .recommendation-cover.is-fallback .recommendation-source-corner.source-platform-v2ex,
+    .recommendation-cover.is-text-card .recommendation-source-corner.source-platform-v2ex {
+      background: rgba(0, 160, 160, 0.12);
+      color: #087f83;
     }
 
     .recommendation-title {
@@ -6812,6 +6835,54 @@
       </div>
       </div>
 
+      <div class="settings-section settings-source-card" data-source-card="v2ex" data-open="0">
+        <div class="source-card-face" role="button" tabindex="0" aria-expanded="false" aria-controls="sourceCardBody-v2ex">
+        <h3><span class="section-icon">V2</span> V2EX</h3>
+        <div class="settings-field-row">
+          <input id="cfgV2exEnabled" type="checkbox">
+          <label for="cfgV2exEnabled">启用 V2EX discovery</label>
+        </div>
+        <p class="settings-hint source-status-row" id="cfgV2exStatus" data-source-status="v2ex"><span class="src-dot">●</span> <span class="src-detail">V2EX 来源状态加载中…</span></p>
+          <span class="source-card-chev" aria-hidden="true">&#x25BE;</span>
+        </div>
+        <div class="source-card-body" id="sourceCardBody-v2ex">
+        <div class="settings-field">
+          <label for="cfgV2exAccessToken">PAT（可留空）</label>
+          <input id="cfgV2exAccessToken" type="password" maxlength="512" autocomplete="off" placeholder="可留空；匿名公开发现可直接使用">
+          <div class="settings-field-row">
+            <input id="cfgV2exClearToken" type="checkbox">
+            <label for="cfgV2exClearToken">清除已保存的 PAT</label>
+          </div>
+          <p class="settings-hint">PAT 只用于识别账号和 API 2.0 增强读取；后端严格只读，不发帖、不回复、不收藏、不关注 Node。guided init / 增量同步可通过当前已登录浏览器只读导入本人主题、本人回复、收藏主题和收藏 Node。</p>
+        </div>
+        <div class="settings-field">
+          <label for="cfgV2exUsername">公开用户名（可选）</label>
+          <input id="cfgV2exUsername" type="text" maxlength="128" autocomplete="off" placeholder="PAT 会自动识别；也可手填作为提示">
+        </div>
+        <div class="settings-probe-row">
+          <button class="settings-secondary-btn" id="cfgV2exAcceptBrowserIdentity" type="button" hidden>采用当前浏览器账号</button>
+          <button class="settings-secondary-btn" id="cfgV2exRefreshIdentity" type="button">刷新身份</button>
+          <span class="settings-probe-status" id="cfgV2exIdentityStatus" aria-live="polite">身份状态加载中…</span>
+        </div>
+        <div class="settings-field">
+          <label>内容发现分支</label>
+          <div class="settings-field-row"><input id="cfgV2exModeSearch" type="checkbox"><label for="cfgV2exModeSearch">搜索</label></div>
+          <div class="settings-field-row"><input id="cfgV2exModeNode" type="checkbox"><label for="cfgV2exModeNode">Node</label></div>
+          <div class="settings-field-row"><input id="cfgV2exModeTab" type="checkbox"><label for="cfgV2exModeTab">Tab</label></div>
+          <div class="settings-field-row"><input id="cfgV2exModeHot" type="checkbox"><label for="cfgV2exModeHot">热门</label></div>
+          <div class="settings-field-row"><input id="cfgV2exModeLatest" type="checkbox"><label for="cfgV2exModeLatest">最新</label></div>
+        </div>
+        <div class="settings-field"><label for="cfgV2exDailySearchBudget">每日搜索条目</label><input id="cfgV2exDailySearchBudget" type="number" min="0" step="1" placeholder="120"></div>
+        <div class="settings-field"><label for="cfgV2exDailyNodeBudget">每日 Node 条目</label><input id="cfgV2exDailyNodeBudget" type="number" min="0" step="1" placeholder="180"></div>
+        <div class="settings-field"><label for="cfgV2exDailyTabBudget">每日 Tab 条目</label><input id="cfgV2exDailyTabBudget" type="number" min="0" step="1" placeholder="80"></div>
+        <div class="settings-field"><label for="cfgV2exDailyHotBudget">每日热门条目</label><input id="cfgV2exDailyHotBudget" type="number" min="0" step="1" placeholder="40"></div>
+        <div class="settings-field"><label for="cfgV2exDailyLatestBudget">每日最新条目</label><input id="cfgV2exDailyLatestBudget" type="number" min="0" step="1" placeholder="40"></div>
+        <div class="settings-field"><label for="cfgV2exRequestInterval">请求间隔秒数</label><input id="cfgV2exRequestInterval" type="number" min="0" step="1" placeholder="2"></div>
+        <div class="settings-field"><label for="cfgV2exMinInterval">最小调度间隔分钟</label><input id="cfgV2exMinInterval" type="number" min="0" step="1" placeholder="5"></div>
+        <p class="settings-hint">V2EX 使用官方公开 API / JSON Feed；匿名即可发现。搜索当前采用有界公开召回，正式候选统一进入共享评估池。</p>
+      </div>
+      </div>
+
       <div class="settings-section settings-source-card" data-source-card="pool">
         <h3><span class="section-icon">&#x1F4E6;</span> 候选池来源占比</h3>
         <div class="settings-field">
@@ -6845,6 +6916,10 @@
         <div class="settings-field">
           <label for="cfgPoolShareBangumi">候选池 Bangumi 占比</label>
           <input id="cfgPoolShareBangumi" type="number" min="1" step="1" placeholder="1">
+        </div>
+        <div class="settings-field">
+          <label for="cfgPoolShareV2ex">候选池 V2EX 占比</label>
+          <input id="cfgPoolShareV2ex" type="number" min="1" step="1" placeholder="1">
         </div>
         <div class="settings-actions">
           <button id="cfgSuggestPoolShares" class="settings-save" type="button">按已有信号建议比例</button>

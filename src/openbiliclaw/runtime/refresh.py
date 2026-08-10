@@ -99,6 +99,8 @@ _PLATFORM_SOURCE_ORDER = (
     "twitter",
     "zhihu",
     "reddit",
+    "bangumi",
+    "v2ex",
 )
 _BILIBILI_DISCOVERY_SOURCES = ("search", "related_chain", "trending", "explore")
 # Pool-share fairness (spec 2026-07-20, Phase 3): max over-share rows evicted
@@ -379,6 +381,7 @@ class ContinuousRefreshController:
     zhihu_producer: Any | None = None
     reddit_producer: Any | None = None
     bangumi_producer: Any | None = None
+    v2ex_producer: Any | None = None
     scheduler_config: Any = field(default_factory=SchedulerConfig)
     presence: PresenceTracker = field(default_factory=PresenceTracker)
     # gui-init D1: optional init-aware gate. When it returns True (a guided init
@@ -1514,6 +1517,7 @@ class ContinuousRefreshController:
             "zhihu": self._tick_zhihu_producer,
             "reddit": self._tick_reddit_producer,
             "bangumi": self._tick_bangumi_producer,
+            "v2ex": self._tick_v2ex_producer,
         }
         raw_results = await asyncio.gather(
             *(ticker() for ticker in tickers.values()),
@@ -1680,6 +1684,7 @@ class ContinuousRefreshController:
             asyncio.create_task(self._loop_zhihu_producer()),
             asyncio.create_task(self._loop_reddit_producer()),
             asyncio.create_task(self._loop_bangumi_producer()),
+            asyncio.create_task(self._loop_v2ex_producer()),
             asyncio.create_task(self._loop_proactive_push()),
             asyncio.create_task(self._loop_keyword_planner()),
             asyncio.create_task(self._loop_image_cache_cleanup()),
@@ -1993,6 +1998,16 @@ class ContinuousRefreshController:
                 await self._tick_bangumi_producer()
             await asyncio.sleep(self.check_interval_seconds)
 
+    async def _loop_v2ex_producer(self) -> None:
+        """V2EX production — anonymous/public discovery with optional PAT."""
+        while True:
+            if not self._llm_work_allowed():
+                await asyncio.sleep(self.check_interval_seconds)
+                continue
+            with suppress(Exception):
+                await self._tick_v2ex_producer()
+            await asyncio.sleep(self.check_interval_seconds)
+
     async def _loop_keyword_planner(self) -> None:
         """P1.6: deficit-pulled merged keyword generation (flag-gated).
 
@@ -2242,6 +2257,14 @@ class ContinuousRefreshController:
         return await self._tick_platform_producer(
             source_family="bangumi",
             producer=self.bangumi_producer,
+        )
+
+    async def _tick_v2ex_producer(self) -> dict[str, object]:
+        """Invoke V2EX discovery when its source-family quota has a deficit."""
+
+        return await self._tick_platform_producer(
+            source_family="v2ex",
+            producer=self.v2ex_producer,
         )
 
     async def _tick_soul_pipeline(self) -> None:
@@ -3630,6 +3653,8 @@ class ContinuousRefreshController:
                 stranded.append("reddit")
             elif source == "bangumi" and self.bangumi_producer is None:
                 stranded.append("bangumi")
+            elif source == "v2ex" and self.v2ex_producer is None:
+                stranded.append("v2ex")
             elif source not in {
                 "bilibili",
                 "xiaohongshu",
@@ -3639,6 +3664,7 @@ class ContinuousRefreshController:
                 "zhihu",
                 "reddit",
                 "bangumi",
+                "v2ex",
             }:
                 # Unknown source family with an explicit share.
                 stranded.append(source)

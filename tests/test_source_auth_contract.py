@@ -404,6 +404,7 @@ def _reddit_credential_without_session(env: _Env) -> None:
 # ``bangumi_discovery_runs`` rows), which every case here uses.
 
 _BANGUMI_TOKEN = "bgm-personal-access-token"
+_V2EX_TOKEN = "v2ex-personal-access-token"
 
 
 def _bangumi_no_token(env: _Env) -> None:
@@ -442,6 +443,23 @@ def _bangumi_token_disabled(env: _Env) -> None:
     """A saved token on a switched-off source — the credential is idle."""
     env.cfg.sources.bangumi.enabled = False
     env.cfg.sources.bangumi.access_token = _BANGUMI_TOKEN
+
+
+def _v2ex_no_token(env: _Env) -> None:
+    """Enabled, anonymous — public V2EX discovery needs no credential."""
+    env.cfg.sources.v2ex.enabled = True
+
+
+def _v2ex_token_unverified(env: _Env) -> None:
+    """An optional PAT is present but has not been live-checked yet."""
+    env.cfg.sources.v2ex.enabled = True
+    env.cfg.sources.v2ex.access_token = _V2EX_TOKEN
+
+
+def _v2ex_token_disabled(env: _Env) -> None:
+    """A saved PAT remains inert while the source is switched off."""
+    env.cfg.sources.v2ex.enabled = False
+    env.cfg.sources.v2ex.access_token = _V2EX_TOKEN
 
 
 # ── the frozen contract ──────────────────────────────────────────────
@@ -788,6 +806,31 @@ _CASES: dict[str, _Case] = {
         enabled=False,
         token_state="ok",
     ),
+    # v2ex — anonymous public discovery with an optional API 2.0 PAT.
+    "v2ex-no-token": _Case(
+        "v2ex",
+        _v2ex_no_token,
+        "no_auth",
+        True,
+        detail="公开源 · 无需登录；可选填 PAT 以识别账号并增强 Node / Topic API。",
+        enabled=True,
+    ),
+    "v2ex-token-unverified": _Case(
+        "v2ex",
+        _v2ex_token_unverified,
+        "no_auth",
+        True,
+        detail="已保存 V2EX 个人令牌，尚未联网确认；可点「测试连接」验证。",
+        enabled=True,
+    ),
+    "v2ex-token-disabled": _Case(
+        "v2ex",
+        _v2ex_token_disabled,
+        "no_auth",
+        True,
+        detail="已保存 V2EX 个人令牌，尚未联网确认；可点「测试连接」验证。",
+        enabled=False,
+    ),
 }
 
 
@@ -895,7 +938,7 @@ def test_sources_status_legacy_fields_are_frozen(case_id: str, contract_env: _En
 
 
 def test_contract_covers_every_platform_with_at_least_three_preconditions() -> None:
-    """Spec Phase 0 gate: 7 platforms x >=3 preconditions = >=21 cases."""
+    """Spec Phase 0 gate: every registered platform has >=3 preconditions."""
     per_platform: dict[str, int] = {}
     for case in _CASES.values():
         per_platform[case.platform] = per_platform.get(case.platform, 0) + 1
@@ -909,10 +952,11 @@ def test_contract_covers_every_platform_with_at_least_three_preconditions() -> N
         "zhihu",
         "reddit",
         "bangumi",
+        "v2ex",
     }
     thin = {platform: n for platform, n in per_platform.items() if n < 3}
     assert not thin, f"platforms with fewer than 3 preconditions: {thin}"
-    assert len(_CASES) >= 24
+    assert len(_CASES) >= 27
 
 
 def test_auth_dimensions_are_orthogonal() -> None:
@@ -1064,6 +1108,9 @@ _EXPECTED_VERIFY_METHODS = {
     # method 知乎 has. The action ``VERIFY_ACTIONS['bangumi']`` is still
     # ``live_probe`` (see the bangumi verify tests below, which supply a token).
     "bangumi": "none",
+    # V2EX is anonymous by default; its optional PAT only becomes probeable
+    # after the caller supplies a token.
+    "v2ex": "none",
 }
 
 
@@ -2045,6 +2092,7 @@ def test_credential_write_states_what_it_could_not_verify(contract_env: _Env) ->
             ("reddit", {"value": "reddit_session=rs; loid=l"}),
             ("xiaohongshu", {"kind": "login_state", "value": True}),
             ("zhihu", {"kind": "login_state", "value": True}),
+            ("v2ex", {"kind": "login_state", "value": True}),
         ):
             response = client.post(f"/api/sources/{slug}/credential", json=body)
             assert response.status_code == 200, response.text
@@ -2064,7 +2112,7 @@ def test_credential_write_states_what_it_could_not_verify(contract_env: _Env) ->
     assert accepted["bilibili"]["checked"] == "live_probe"
     assert accepted["douyin"]["checked"] == "live_probe"
     # ...and the ones that cannot be probed say *that*, with a reason.
-    for slug in ("twitter", "reddit", "xiaohongshu", "zhihu"):
+    for slug in ("twitter", "reddit", "xiaohongshu", "zhihu", "v2ex"):
         assert accepted[slug]["checked"] != "live_probe", slug
         assert accepted[slug]["unverified_reason"], f"{slug} accepted a write without saying why"
 

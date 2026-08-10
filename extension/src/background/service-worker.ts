@@ -65,6 +65,13 @@ import {
   pollRedditTaskNow,
 } from "./reddit-task-dispatcher.ts";
 import {
+  startV2EXTaskPolling,
+  handleV2EXTaskAlarm,
+  handleV2EXScopeResult,
+  ensureV2EXTaskRecovery,
+  pollV2EXTaskNow,
+} from "./v2ex-task-dispatcher.ts";
+import {
   startXTaskPolling,
   handleXTaskAlarm,
   pollXTaskNow,
@@ -80,6 +87,7 @@ import {
 import type { YtScopeResult } from "../content/yt/task-executor.js";
 import type { ZhihuTaskResult } from "../content/zhihu/task-executor.js";
 import type { RedditTaskResult } from "../content/reddit/task-executor.ts";
+import type { V2EXScopeResult } from "../content/v2ex/task-executor.ts";
 import {
   openExtensionUi,
   parseDelightBvid,
@@ -281,6 +289,10 @@ async function handleRuntimeEvent(event: Record<string, unknown>): Promise<void>
   }
   if (eventType === "reddit_task_available") {
     await pollRedditTaskNow();
+    return;
+  }
+  if (eventType === "v2ex_task_available") {
+    pollV2EXTaskNow();
     return;
   }
   if (eventType === "x_task_available") {
@@ -560,6 +572,7 @@ function startPlatformTaskPolling(): void {
   startYtTaskPolling();
   startZhihuTaskPolling();
   startRedditTaskPolling();
+  startV2EXTaskPolling();
   startXTaskPolling();
   startBiliTaskPolling();
 }
@@ -570,6 +583,7 @@ async function startServiceWorkerAfterRecovery(): Promise<void> {
   // can create a new task tab and never scans or closes arbitrary Reddit/X tabs.
   await ensureNativeSaveTaskRecovery();
   await ensureSession();
+  await ensureV2EXTaskRecovery();
   await connectRuntimeStream();
   startPlatformTaskPolling();
   startCookieSync();
@@ -632,7 +646,7 @@ async function postBangumiIdentity(payload: { uid: number; username: string }): 
   }
 }
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === "BGM_IDENTITY_OBSERVED") {
     void postBangumiIdentity(message.data as { uid: number; username: string });
     return;
@@ -737,6 +751,16 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       });
     return true;
   }
+  if (message.action === "V2EX_SCOPE_RESULT") {
+    void handleV2EXScopeResult(message.data as V2EXScopeResult, sender)
+      .then(() => {
+        sendResponse({ ok: true });
+      })
+      .catch((error: unknown) => {
+        sendResponse({ ok: false, error: String(error) });
+      });
+    return true;
+  }
   if (message.action === "BILI_TASK_RESULT") {
     void handleBiliTaskResult(message.data as BiliTaskResult)
       .then(() => {
@@ -766,6 +790,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   handleYtTaskAlarm(alarm.name);
   handleZhihuTaskAlarm(alarm.name);
   void handleRedditTaskAlarm(alarm.name);
+  handleV2EXTaskAlarm(alarm.name);
   void handleXTaskAlarm(alarm.name);
   handleBiliTaskAlarm(alarm.name);
   if (handleCookieSyncAlarm(alarm.name)) {

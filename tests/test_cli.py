@@ -3661,7 +3661,7 @@ def test_init_guides_missing_runtime_config_interactively(
     #   6. "y" — allow LAN access
     #   7-9. "" — accept Bili history/favorite/follow init limits
     #   10+. "n" — skip optional source prompts
-    #               (xhs / douyin / youtube / X / zhihu / reddit / bangumi)
+    #               (xhs / douyin / youtube / X / zhihu / reddit / bangumi / v2ex)
     wizard_input = (
         "\n".join(
             [
@@ -3674,6 +3674,7 @@ def test_init_guides_missing_runtime_config_interactively(
                 "",
                 "",
                 "",
+                "n",
                 "n",
                 "n",
                 "n",
@@ -3752,12 +3753,12 @@ def test_init_guides_missing_auth_interactively(
     # test exercising the manual-paste path, send "2" first.
     # v0.3.89+: init asks whether to allow LAN access before the source
     # prompts. Answer yes, accept Bili signal-limit defaults, then send "n"
-    # to XHS / Douyin / YouTube / X / Zhihu / Reddit / Bangumi so this test stays focused on the
-    # cookie-prompt path.
+    # to XHS / Douyin / YouTube / X / Zhihu / Reddit / Bangumi / V2EX so this
+    # test stays focused on the cookie-prompt path.
     result = runner.invoke(
         app,
         ["init"],
-        input="2\nSESSDATA=valid\ny\n\n\n\nn\nn\nn\nn\nn\nn\nn\n",
+        input="2\nSESSDATA=valid\ny\n\n\n\nn\nn\nn\nn\nn\nn\nn\nn\n",
     )
 
     assert result.exit_code == 1
@@ -4981,6 +4982,7 @@ def test_select_init_source_shares_accepts_suggested_ratios(
         "zhihu": 1,
         "reddit": 1,
         "bangumi": 1,
+        "v2ex": 1,
     }
 
 
@@ -5024,6 +5026,7 @@ def test_select_init_source_shares_accepts_manual_ratios(
         "zhihu": 1,
         "reddit": 1,
         "bangumi": 1,
+        "v2ex": 1,
     }
 
 
@@ -6373,6 +6376,138 @@ def test_fetch_source_commands_default_wait_is_180_seconds(
     assert dy_result.exit_code == 0, dy_result.output
     assert xhs_result.exit_code == 0, xhs_result.output
     assert observed == {"dy": 180.0, "xhs": 180.0}
+
+
+def test_kick_task_dispatcher_uses_configured_api_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested: dict[str, object] = {}
+
+    class FakeResponse:
+        def close(self) -> None:
+            requested["closed"] = True
+
+    def fake_urlopen(request: object, timeout: float) -> FakeResponse:
+        requested["url"] = getattr(request, "full_url", "")
+        requested["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr(
+        "openbiliclaw.config.load_config",
+        lambda: SimpleNamespace(api=SimpleNamespace(port=8422)),
+    )
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    cli_module._kick_task_dispatcher("v2ex")
+
+    assert requested == {
+        "url": "http://127.0.0.1:8422/api/sources/v2ex/kick",
+        "timeout": 1.0,
+        "closed": True,
+    }
+
+
+def test_fetch_v2ex_is_read_only_four_scope_smoke(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+    captured: dict[str, object] = {}
+
+    def fake_enqueue(**kwargs: object) -> str:
+        captured["enqueue"] = kwargs
+        return "v2ex-task"
+
+    def fake_collect(
+        task_id: str,
+        *,
+        max_wait_seconds: float,
+    ) -> tuple[list[dict[str, object]], dict[str, int], str]:
+        captured["collect"] = (task_id, max_wait_seconds)
+        return (
+            [
+                {
+                    "event_type": "publish",
+                    "title": "Topic",
+                    "metadata": {"source_platform": "v2ex"},
+                },
+                {
+                    "event_type": "favorite",
+                    "title": "Saved topic",
+                    "metadata": {"source_platform": "v2ex"},
+                },
+            ],
+            {
+                "public_topics": 1,
+                "public_replies": 2,
+                "favorite_topics": 1,
+                "favorite_nodes": 3,
+            },
+            "partial",
+        )
+
+    monkeypatch.setattr(cli_module, "_enqueue_v2ex_bootstrap_task", fake_enqueue)
+    monkeypatch.setattr(cli_module, "_collect_v2ex_bootstrap_events", fake_collect)
+    monkeypatch.setattr(
+        cli_module,
+        "_prepare_init_runtime",
+        lambda: pytest.fail("fetch-v2ex must not prepare the init runtime"),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_build_memory_manager",
+        lambda: pytest.fail("fetch-v2ex must not open or write memory"),
+    )
+
+    result = runner.invoke(
+        app,
+        ["fetch-v2ex", "--username", "demo", "--force", "--wait-seconds", "5"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["enqueue"] == {
+        "username": "demo",
+        "profile_update": False,
+        "smoke_only": True,
+        "force": True,
+    }
+    assert captured["collect"] == ("v2ex-task", 5.0)
+    assert "发布" in result.output
+    assert "讨论" in result.output
+    assert "收藏主题" in result.output
+    assert "收藏 Node" in result.output
+    assert "未写入 memory" in result.output
+    assert "不作为完整收藏快照" in result.output
+
+
+def test_fetch_v2ex_identity_mismatch_exits_nonzero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = CliRunner()
+    monkeypatch.setattr(
+        cli_module,
+        "_enqueue_v2ex_bootstrap_task",
+        lambda **_kwargs: "v2ex-task",
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_collect_v2ex_bootstrap_events",
+        lambda _task_id, *, max_wait_seconds: (
+            [],
+            {
+                "public_topics": 0,
+                "public_replies": 0,
+                "favorite_topics": 0,
+                "favorite_nodes": 0,
+            },
+            "identity_mismatch",
+        ),
+    )
+
+    result = runner.invoke(app, ["fetch-v2ex"])
+
+    assert result.exit_code == 1
+    assert "身份" in result.output
+    assert "暂停" in result.output
 
 
 def test_fetch_douyin_does_not_call_prepare_init_runtime(

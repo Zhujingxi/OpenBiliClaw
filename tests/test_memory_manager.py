@@ -934,6 +934,7 @@ def test_source_bootstrap_state_defaults_when_missing(tmp_path: Path) -> None:
         "yt_seen_item_keys": [],
         "zhihu_seen_item_keys": [],
         "reddit_seen_item_keys": [],
+        "v2ex_seen_item_keys": [],
         "last_source_bootstrap_sync_at": "",
         "source_incremental": {
             "cursor": "",
@@ -954,6 +955,7 @@ def test_source_bootstrap_state_round_trips_to_json(tmp_path: Path) -> None:
             "yt_seen_item_keys": ["yt_history:yt-1"],
             "zhihu_seen_item_keys": ["zhihu_favorite:zh-1"],
             "reddit_seen_item_keys": ["t3:reddit-1"],
+            "v2ex_seen_item_keys": ["alice:favorite_topics:123"],
             "last_source_bootstrap_sync_at": "2026-05-20T12:00:00",
             "source_incremental": {
                 "cursor": "reddit",
@@ -970,6 +972,7 @@ def test_source_bootstrap_state_round_trips_to_json(tmp_path: Path) -> None:
     assert state["yt_seen_item_keys"] == ["yt_history:yt-1"]
     assert state["zhihu_seen_item_keys"] == ["zhihu_favorite:zh-1"]
     assert state["reddit_seen_item_keys"] == ["t3:reddit-1"]
+    assert state["v2ex_seen_item_keys"] == ["alice:favorite_topics:123"]
     assert state["last_source_bootstrap_sync_at"] == "2026-05-20T12:00:00"
     assert state["source_incremental"] == {
         "cursor": "reddit",

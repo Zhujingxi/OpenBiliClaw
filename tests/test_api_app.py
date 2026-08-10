@@ -2904,6 +2904,7 @@ class TestBackendAPI:
             "yt": False,
             "zhihu": False,
             "reddit": False,
+            "v2ex": False,
         }
         assert captured["runtime_controller_kwargs"]["bilibili_producer"] is not None
         assert (
@@ -4731,6 +4732,61 @@ class TestBackendAPI:
         ev = memory.events[0]
         assert ev["metadata"]["watch_seconds"] == 600
         assert ev["metadata"]["video_duration_seconds"] == 700
+
+    def test_events_endpoint_projects_v2ex_engaged_topic_once_for_active_identity(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.memory.manager import MemoryManager
+        from openbiliclaw.sources.v2ex_affinity import V2EXNodeAffinityStore
+        from openbiliclaw.storage.database import Database
+
+        database = Database(tmp_path / "v2ex-dwell.db")
+        database.initialize()
+        database.activate_v2ex_profile_identity("alice")
+        database.set_v2ex_browser_identity("alice")
+        memory = MemoryManager(tmp_path / "v2ex-dwell", database=database)
+        app = create_app(
+            memory_manager=memory,
+            database=database,
+            soul_engine=_ReadySoulEngine(),
+        )
+        client = TestClient(app)
+        payload = {
+            "events": [
+                {
+                    "event_id": "v2ex-engaged-topic-42",
+                    "type": "click",
+                    "url": "https://www.v2ex.com/t/42",
+                    "title": "Local-first agents",
+                    "timestamp": 1786310400000,
+                    "source_platform": "v2ex",
+                    "context": {"pageType": "topic"},
+                    "metadata": {
+                        "content_id": "42",
+                        "topic_id": "42",
+                        "node_name": "programmer",
+                        "node_title": "程序员",
+                        "dwell_source": "content_page_exit",
+                        "watch_seconds": 45,
+                    },
+                }
+            ]
+        }
+
+        first = client.post("/api/events", json=payload)
+        second = client.post("/api/events", json=payload)
+
+        assert first.status_code == 200, first.text
+        assert first.json()["receipts"][0]["inserted"] is True
+        assert second.status_code == 200, second.text
+        assert second.json()["receipts"][0]["duplicate"] is True
+        scores = V2EXNodeAffinityStore(database).scores(username="alice")
+        assert scores[0]["engaged_view_count"] == 1
+        assert scores[0]["score"] == 0.3
+        assert database.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 1
 
     def test_events_endpoint_normalizes_dislike_to_feedback(self) -> None:
         from fastapi.testclient import TestClient
@@ -12373,6 +12429,70 @@ class TestBackendAPI:
         assert invalid_mode.status_code == 400
         assert "source_modes" in invalid_mode.json()["detail"]
 
+    def test_put_config_bounds_and_normalizes_v2ex_source(self, monkeypatch, tmp_path) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig, save_config
+
+        cfg = Config(
+            llm=LLMConfig(
+                default_provider="ollama",
+                ollama=LLMProviderConfig(model="llama3", base_url="http://localhost:11434"),
+            )
+        )
+        config_path = tmp_path / "config.toml"
+        save_config(cfg, config_path)
+        monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+        monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: cfg)
+        monkeypatch.setattr(
+            "openbiliclaw.config.save_config",
+            lambda c, path=None: save_config(c, config_path),
+        )
+        app = create_app(memory_manager=object(), database=object(), soul_engine=object())
+        client = TestClient(app)
+
+        unsafe_slug = client.put(
+            "/api/config",
+            json={"sources": {"v2ex": {"node_allowlist": ["programmer", "../private"]}}},
+        )
+        assert unsafe_slug.status_code == 400
+        assert "node_allowlist" in unsafe_slug.json()["detail"]
+
+        oversized = client.put(
+            "/api/config",
+            json={"sources": {"v2ex": {"max_topic_chars": 20_001}}},
+        )
+        assert oversized.status_code == 400
+        assert "max_topic_chars" in oversized.json()["detail"]
+
+        unknown = client.put(
+            "/api/config",
+            json={"sources": {"v2ex": {"max_pages": 20}}},
+        )
+        assert unknown.status_code == 400
+        assert "max_pages" in unknown.json()["detail"]
+
+        valid = client.put(
+            "/api/config",
+            json={
+                "sources": {
+                    "v2ex": {
+                        "enabled": True,
+                        "source_modes": ["SEARCH", "node", "search"],
+                        "tab_modes": ["Tech", "QNA"],
+                        "node_allowlist": ["Programmer", "programmer"],
+                        "max_topic_chars": 20_000,
+                    }
+                }
+            },
+        )
+        assert valid.status_code == 202, valid.text
+        source = valid.json()["config"]["sources"]["v2ex"]
+        assert source["source_modes"] == ["search", "node"]
+        assert source["tab_modes"] == ["tech", "qna"]
+        assert source["node_allowlist"] == ["programmer"]
+        assert source["max_topic_chars"] == 20_000
+
     def _bangumi_token_put_app(self, monkeypatch, tmp_path):
         from fastapi.testclient import TestClient
 
@@ -14900,6 +15020,7 @@ class TestEmbeddingAndCompatProviderE2E:
             "zhihu": 1,
             "reddit": 1,
             "bangumi": 4,
+            "v2ex": 1,
         }
         assert data["scheduler"]["account_sync_interval_hours"] == 9
         assert data["scheduler"]["refresh_check_interval_seconds"] == 75
@@ -15454,6 +15575,7 @@ class TestEmbeddingAndCompatProviderE2E:
             "zhihu": 1,
             "reddit": 1,
             "bangumi": 1,
+            "v2ex": 1,
         }
         assert cfg.scheduler.refresh_check_interval_seconds == 75
         assert cfg.scheduler.eval_min_batch_size == 23
@@ -15599,6 +15721,7 @@ class TestEmbeddingAndCompatProviderE2E:
                 "twitter": 0,
                 "zhihu": 0,
                 "reddit": 225,
+                "v2ex": 0,
                 "bangumi": 0,
             },
             "enabled_sources": {
@@ -15610,6 +15733,7 @@ class TestEmbeddingAndCompatProviderE2E:
                 "zhihu": False,
                 "reddit": False,
                 "bangumi": False,
+                "v2ex": False,
             },
             "suggested_shares": {
                 "bilibili": 8,
@@ -15687,6 +15811,7 @@ class TestEmbeddingAndCompatProviderE2E:
                 "twitter": 0,
                 "zhihu": 0,
                 "reddit": 225,
+                "v2ex": 0,
                 "bangumi": 0,
             },
             "enabled_sources": {
@@ -15698,6 +15823,7 @@ class TestEmbeddingAndCompatProviderE2E:
                 "zhihu": False,
                 "reddit": True,
                 "bangumi": False,
+                "v2ex": False,
             },
             "suggested_shares": {
                 "bilibili": 6,

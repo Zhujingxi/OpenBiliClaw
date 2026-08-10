@@ -41,6 +41,8 @@ function normalizeSourcePlatform(value, url = "") {
     reddit: "reddit",
     bgm: "bangumi",
     bangumi: "bangumi",
+    v2: "v2ex",
+    v2ex: "v2ex",
   };
   if (aliases[key]) return aliases[key];
   if (key) return key;
@@ -53,6 +55,7 @@ function normalizeSourcePlatform(value, url = "") {
   if (urlHostMatches(url, ["zhihu.com", "zhuanlan.zhihu.com"])) return "zhihu";
   if (urlHostMatches(url, ["reddit.com", "redd.it"])) return "reddit";
   if (urlHostMatches(url, ["bgm.tv", "bangumi.tv"])) return "bangumi";
+  if (urlHostMatches(url, ["v2ex.com"])) return "v2ex";
   return "";
 }
 
@@ -161,6 +164,8 @@ const PLATFORM_DISPLAY_NAMES = {
   reddit: "Reddit",
   bgm: "Bangumi",
   bangumi: "Bangumi",
+  v2: "V2EX",
+  v2ex: "V2EX",
 };
 
 export function platformDisplayName(value) {
@@ -204,6 +209,7 @@ export function buildContentUrl(item) {
   if (!vid) return "";
   if (platform === "youtube") return buildYouTubeUrl(vid);
   if (platform === "bangumi") return `https://bgm.tv/subject/${encodeURIComponent(vid)}`;
+  if (platform === "v2ex") return `https://www.v2ex.com/t/${encodeURIComponent(vid)}`;
   if (platform === "zhihu" || platform === "reddit") return "";
   return buildVideoUrl(vid);
 }

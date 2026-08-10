@@ -11,7 +11,9 @@ if TYPE_CHECKING:
     from openbiliclaw.storage.database import Database
 
 STAGED_TERMINAL_STATUS_FIELD = "_openbiliclaw_terminal_status"
-_TASK_TABLES = frozenset({"xhs_tasks", "dy_tasks", "yt_tasks", "zhihu_tasks", "reddit_tasks"})
+_TASK_TABLES = frozenset(
+    {"xhs_tasks", "dy_tasks", "yt_tasks", "zhihu_tasks", "reddit_tasks", "v2ex_tasks"}
+)
 
 
 def parse_task_result(raw: object) -> dict[str, Any]:

@@ -284,11 +284,14 @@ migration control plane: local export → checksummed plaintext .obcbackup
                       → local import + request_id validates/stages ↔ status/cancel
                       → restart + runtime lock → journaled config/data replace → applied | rollback
 XHS hidden search tab → MAIN search-response normalizer → isolated replay/DOM fallback → task final
-XHS/DY/YT/Zhihu/Reddit task final: canonical staged result (XHS bootstrap payload caps enforced) → durable event receipt
-                                 → atomic bounded seen-key → terminal flip
+XHS/DY/YT/Zhihu/Reddit/V2EX task final: canonical staged result (source caps/fields enforced)
+                                 → durable event receipt → atomic bounded seen-key → terminal flip
                                  stale lease reclaim replays first write; staged row rejects late mutation
+V2EX identity ladder: PAT verified > browser observed > config/accepted
+                    → mismatch pauses account projection only
+                    → resolved identity-scoped seen/affinity + complete favorite 2-miss outbox
 extension-online periodic re-pull: presence + profile/init/config gates → persisted round-robin
-                                 → one active bootstrap across five task tables → EventHub → extension
+                                 → one active bootstrap across six task tables → EventHub → extension
 Douyin source supply: daemon presence gate (explicit manual call bypasses it)
                      → one shared plugin-cycle wait budget → terminal dy_task → pending_eval
                      absent → zero enqueue; timeout/error/budget → bounded retry floor
@@ -461,7 +464,7 @@ trusted LAN ─ HTTPS（可选）──→ TLS Proxy :8443 ─ loopback/Compose 
 │  └──────────────┘ └──────────────┘ └────────────────┘      │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │     PoolCurator + 双轴 fatigue + per-group 窗口 + 新兴趣放大保护 │ │
-│  │     request_replenishment + 定时/手动补货 + B/XHS/DY/YT/X/Zhihu/Reddit/Bangumi=5/1/1/1/1/1/1/1 │ │
+│  │     request_replenishment + 定时/手动补货 + B/XHS/DY/YT/X/Zhihu/Reddit/Bangumi/V2EX=5/1/1/1/1/1/1/1/1 │ │
 │  │     raw断供 → 欠份额 producer 即时并行唤醒 → 真实新增计数 / 无产出阶梯退避 │ │
 │  │ API CandidateEvalCoordinator: durable projected -> 3×30 workers -> serial headroom admit │ │
 │  │ evaluator: time-neutral relevance + temporal class/confidence/reason -> durable candidate/cache │ │
@@ -481,7 +484,7 @@ trusted LAN ─ HTTPS（可选）──→ TLS Proxy :8443 ─ loopback/Compose 
 │  │       + confusions FIFO(≤5/队头 fencing/12h 补扫) + 冻结/held 重放 + 深层门控 │ │
 │  │       (off/shadow 默认/enforce · 两接入点: 深层对话候选/soul 重建; 管线 VALUES·CORE 已封死) │ │
 │  │     Autostart: user login item + Ollama preflight/self-heal + Ollama.app runtime 校验 │ │
-│  │     Bili DOM fallback + XHS/Douyin/YouTube/X/Zhihu/Reddit/Bangumi producers: 按平台缺口独立补池 │ │
+│  │     Bili DOM fallback + XHS/Douyin/YouTube/X/Zhihu/Reddit/Bangumi/V2EX producers: 按平台缺口独立补池 │ │
 │  │     CLI discover --source douyin -> 同一正式 producer -> 统一关键词终态 -> pending eval │ │
 │  │     Hot reload one-shots: interest/avoidance force_tick │   │
 │  │     Probe arbiter: interest / avoidance 每轮最多推送一条   │   │
@@ -492,7 +495,7 @@ trusted LAN ─ HTTPS（可选）──→ TLS Proxy :8443 ─ loopback/Compose 
 │  │     Pool readiness: servable/raw/pending 统一库存口径       │   │
 │  │     Atomic maintenance: canonical protected -> topic/source/raw -> invariant/rollback │ │
 │  │     Source bootstrap seen-key guard -> Memory/Profile      │   │
-│  │     Extension-online re-pull -> five bootstrap tables (global serial) -> installed extension │ │
+│  │     Extension-online re-pull -> six bootstrap tables (global serial) -> installed extension │ │
 │  │       -> staged durable ingress -> atomic seen keys (5000/source) -> terminal │ │
 │  │     Profile overrides overlay: 用户编辑 -> profile_overrides.json │ │
 │  │       -> get_profile()/sync_profile_files 读时叠加（抗画像重建）│ │
@@ -554,6 +557,12 @@ trusted LAN ─ HTTPS（可选）──→ TLS Proxy :8443 ─ loopback/Compose 
 │  │ BangumiDiscoveryProducer: 默认匿名 API search/ranked/latest；可选个人令牌读私密收藏(401降级) │ │
 │  │   显式公开 username collections -> 首版画像信号；无 Cookie、无站内写入 │ │
 │  │   扩展身份桥(bgm.tv/bangumi.tv): 上报公开 uid+用户名做零配置账号识别，非任务桥/无行为采集 │ │
+│  └──────────────────────────────────────────────────────┘   │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │ V2EXDiscoveryProducer: 匿名 API/Feed search/node/tab/hot/latest；PAT 可选，401/403 降级匿名 │ │
+│  │   有界 Topic 详情 + PAT Reply digest -> v2ex:<topic_id> 文字卡；Reply 不单独入池 │ │
+│  │   四只读 scope + route/耗尽证明 -> staged ingress -> identity gate -> 账号分区 Node affinity │ │
+│  │   首个 complete 收藏 scope 种基线；后续连续两次缺失 -> durable retract/restore │ │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │ Cookie/登录态、runtime-stream presence、任务持久化/claim、seen-key 去重 │ │
@@ -683,7 +692,7 @@ localhost。两个入口互斥，默认 HTTP 不变。
 - [ ] 完善的安装和使用文档
 - [ ] 插件商店发布
 - [ ] 社区 Skill 市场
-- [x] 跨平台内容发现（已落地 B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Bangumi / 通用 Web，后续继续扩展更多 adapter）
+- [x] 跨平台内容发现（已落地 B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Bangumi / V2EX / 通用 Web，后续继续扩展更多 adapter）
 
 ---
 

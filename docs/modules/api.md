@@ -55,6 +55,36 @@ guided init 不与待应用配置并行：队列为 `queued/applying` 时 `POST 
 导入完整校验 manifest、成员类型 / 路径 / 大小、SHA-256、配置和 SQLite 后，才把内容发布到项目根下的私有暂存区。`request_id` 是上传结果的关联 / 对账 ID，不是服务端自动去重键；收到不确定结果时应先 `GET /api/migration/status`，不要盲目重复上传。匹配同一 `request_id` 的 `processing` 表示后端仍在上传或校验，不是失败；断连后的单次瞬时 `idle` 也不能单独作为本次请求的终局。桌面端最多强制查询 3 次，遇到 `idle/cancelled` 会间隔 500ms 再确认，匹配 request ID 的 `processing/staged` 则立即收口；每次打开「通用」还会绕过本地已加载标记重新查询。
 
 配置、SQLite、画像、白名单 UI 偏好和其它数据都要等下一次 `openbiliclaw start`、`openbiliclaw serve-api` 或桌面包启动取得 migration runtime lock 并成功 apply 后才生效；status 的 staged / applied 响应都只可能携带白名单 `frontend`，桌面端会忽略 staged 值。`state="applied"` 后，每个浏览器会把 `migration_id` 记为本地一次性交接回执，只应用该迁移的偏好一次；之后用户修改主题或滚动设置，即使旧 applied status 仍持久存在也不会再次覆盖。详见[存储层的可移植数据迁移](storage.md#可移植数据迁移)。再次提交合法迁移包会替换尚未应用的暂存包，也可在重启前调用 `DELETE /api/migration/pending` 取消。
+## V2EX 配置与来源状态
+
+`GET /api/config` 的 `sources.v2ex` 返回启用状态、公开用户名、PAT 是否已配置、五个
+discovery 分支、Node/Tab 过滤和预算；`access_token` 永远不回传明文。`PUT /api/config` 支持
+保存这些字段，非空 PAT 会先以只读 `GET /api/v2/member` 校验，环境变量
+`OPENBILICLAW_V2EX_TOKEN`（或 `token_env` 指定的变量）优先于配置文件。
+
+`GET /api/sources/status` 通过统一 source-auth provider 返回 V2EX 的匿名 / PAT 状态；无 PAT
+是 `auth_required=false` 的 `no_auth`，有 PAT 时可为 `unverified`、`verified`、`failed` 或
+`rate_limited`。浏览器登录态是独立的布尔心跳和 observed identity，不会被 PAT 状态替代。
+V2EX 任务桥提供 `POST /api/sources/v2ex/login-state`、`GET|POST /identity`、
+`GET /next-task`、`POST /task-result` 和 `POST /kick`；任务结果先合并为 canonical staged
+result，再经过后端身份门禁转换统一事件和账号分区 Node affinity。PAT verified、浏览器 observed、
+配置 / accepted 证据不一致时账号投影暂停但公开 discovery 不停。端点不接收或保存 Cookie 值、
+页面 HTML、私信或 CSRF 字段。
+
+## V2EX 浏览器任务桥
+
+| 方法与路径 | 状态 | 契约 |
+|---|---|---|
+| `POST /api/sources/v2ex/login-state` | ✅ | 只接收 `logged_in` 布尔心跳；扩展本地检查登录 Cookie，但不上传 Cookie 值 |
+| `POST /api/sources/v2ex/identity` | ✅ | 默认接收页面观察到的公开用户名（`observed`）；只有显式 `accept=true` 才保存用户接受的身份（`accepted`），不会伪造 `verified` |
+| `GET /api/sources/v2ex/identity` | ✅ | 本地只读解析 PAT / 浏览器 / 配置 / accepted 身份证据，返回 `resolved / identity_mismatch / unknown`、账号 bootstrap 门禁与私有 scope 可用性；不出网、不返回 token |
+| `GET /api/sources/v2ex/next-task` | ✅ | 从 `v2ex_tasks` 原子领取 `bootstrap_profile`，支持四个只读 scope |
+| `POST /api/sources/v2ex/task-result` | ✅ | 冻结首份 `ok / partial / empty` canonical 结果；服务端净化 DOM 字段、聚合 Reply、执行 identity gate，并只对 `scope_complete=true` 的收藏集合推进双快照 / durable retraction outbox；事件、账号 affinity 和 effect ack 完成后才终结任务 |
+| `POST /api/sources/v2ex/kick` | ✅ | 请求来源任务调度；仍受来源开关、扩展在线状态和全局 bootstrap 串行准入约束 |
+
+四个 scope 是 `public_topics`、`public_replies`、`favorite_topics` 和 `favorite_nodes`。首次完整 guided 收藏 scope 会种下账号基线；之后第一次完整快照缺失只增加 missing streak，连续第二次完整快照仍缺失才生成 `retraction(favorite|follow)`；错误 route、条目 / 页数截断、登录 / 网络 / 解析失败和身份冲突都不会推进。PAT verified identity 最多信任 6 小时，浏览器 observed identity 最多信任 72 小时；明确 PAT 拒绝与浏览器登出分别清理匹配证据。桌面设置页与 popup 会读取 `GET /identity` 展示冲突 claims，并允许用户显式接受当前浏览器账号；账号切换任务只暂存新账号证据，guided init 的 Soul Profile 提交成功后才激活该账号，旧账号事件 / Node Affinity / 收藏快照不会混入。
+
+普通 `POST /api/events` 中，V2EX Topic 的 `content_page_exit` 只有可见阅读时间达到 30 秒、canonical HTTPS Topic URL / Topic ID / Node slug 全部一致且当前 observed 浏览器账号不与 active profile 冲突时，才按 distinct Topic 幂等增加账号分区的 `engaged_view_count`。事件先获得 durable receipt，投影失败时请求失败并由同一 `event_id` 重试修复，不会重复计数。
 
 ## 公开项目统计
 
@@ -118,7 +148,7 @@ ID 字段是严格 JSON string，不接受数字、布尔或其它类型的自�
 
 `POST /api/sources/{xhs,dy,yt,zhihu,reddit}/task-result` 的最终回调不再先把任务写成 `completed`。后端先在 `BEGIN IMMEDIATE` 中合并并冻结第一份 canonical result（含 XHS `self_info` 私有快照），任务仍保持非终态；随后只从这份持久结果重放来源事件、seen-key 和来源专属投影，全部成功后才执行不替换 `result_json` 的 terminal flip。若进程分别退出在 canonical merge→event ingress、event ingress→seen-key 或 seen-key→terminal 三个窗口，后续 callback 会忽略变化后的 body，用第一份结果补齐缺口。队列把 staged marker 视为业务 mutation 的逻辑终态：并发/迟到的 partial、final、fail、rate-limit 都不能改写它；但它继续遵守普通 claim lease，丢失非 2xx 响应后会在 15 分钟 lease 过期时由 dispatcher 重新领取，从而自动触发修复。seen-key 通过 `update_source_bootstrap_state()` 原子、严格落盘并按源保留最新 5,000 个身份键，失败会阻止 terminal flip；事件稳定键不含 task ID，因此 ingress 已提交但 marker 未写时的重放只返回 duplicate receipt。Reddit post/comment/subreddit/user 使用各自稳定身份，comment URL fallback 只接受含 comment id 的完整 permalink，不能把 post id 或标题误作 comment key。
 
-周期任务 payload 带 `incremental=true`；五源 handler 在 guided init 外给 durable event 标记 `profile_update_owner="generic"`，在 init-owned 回调中只落事实、由阶段 2/3 统一建模。事件 ingress 成功或 duplicate receipt 后才按响应顺序 checkpoint seen key，再翻 terminal；没有 handler 直接调用画像 pipeline。扩展离线时 runtime 不创建任务，也不推进调度时间。
+周期任务 payload 带 `incremental=true`；六源 handler（含 V2EX）在 guided init 外给 durable event 标记 `profile_update_owner="generic"`，在 init-owned 回调中只落事实、由阶段 2/3 统一建模。事件 ingress 成功或 duplicate receipt 后才按响应顺序 checkpoint seen key，再翻 terminal；没有 handler 直接调用画像 pipeline。扩展离线时 runtime 不创建任务，也不推进调度时间。
 
 ## B 站与抖音浏览器任务边界
 

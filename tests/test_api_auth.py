@@ -209,6 +209,7 @@ def test_loopback_bypass_denied_for_cross_site_subresource(tmp_path, monkeypatch
         "/api/sources/xhs/next-task",
         "/api/sources/dy/next-task",
         "/api/sources/yt/next-task",
+        "/api/sources/v2ex/next-task",
         "/api/favorites/BV1AUTH",
     ):
         assert _loopback(app).get(path, headers=attack).status_code == 401, path
@@ -324,6 +325,7 @@ def test_mutating_get_task_claim_requires_csrf(tmp_path, monkeypatch) -> None:
         "/api/sources/x/next-task",
         "/api/sources/zhihu/next-task",
         "/api/sources/reddit/next-task",
+        "/api/sources/v2ex/next-task",
         "/api/recommendations",  # serve() bootstrap-writes rows
         "/api/chat/turns/abc123",  # GET resumes a pending turn
     ):

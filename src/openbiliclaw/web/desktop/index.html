@@ -875,6 +875,68 @@
               </div>
             </article>
 
+            <article class="source-status-row source-card" data-source-status="v2ex" data-source-credential="v2ex" data-open="0">
+              <div class="source-card-face" role="button" tabindex="0" aria-expanded="false" aria-controls="sourceCardBody-v2ex">
+                <span class="source-card-logo" data-source-logo="v2ex" aria-hidden="true">V2</span>
+                <span class="source-card-head">
+                  <strong class="source-card-name">V2EX</strong>
+                  <span class="source-status-badges"><span class="source-source-badge">来源：加载中</span><span class="source-access-badge">接入：加载中</span><span class="source-evidence-badge" hidden></span></span>
+                  <p class="src-detail">加载中…</p>
+                  <span class="source-card-hint-slot"></span>
+                </span>
+                <span class="source-card-right">
+                  <label class="source-card-share"><span>占比</span><input id="shareV2EX" value="1" inputmode="numeric" aria-label="V2EX 候选池占比"></label>
+                  <label class="source-card-enable"><span class="sr-only">启用 V2EX</span><select id="v2exEnabled"><option value="on">启用</option><option value="off">停用</option></select></label>
+                  <span class="source-card-chev" aria-hidden="true">▾</span>
+                </span>
+              </div>
+              <div class="source-card-body" id="sourceCardBody-v2ex">
+                <section class="source-seg">
+                  <h4>接入方式</h4>
+                  <p class="seg-note">使用 V2EX 官方公开只读 API、JSON/RSS Feed；不登录也能发现内容。可选 PAT 仅用于识别账号和 API 2.0 增强读取，后端不会发帖、回复、收藏或关注 Node。浏览器任务可按需读取本人主题、回复、收藏主题和收藏 Node 的公开渲染字段。</p>
+                  <div class="source-cred-box">
+                    <div class="source-cred-line"><span class="source-credential-ro-tag">脱敏</span><span class="source-credential-summary">加载中…</span></div>
+                    <textarea class="source-credential-value" rows="2" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
+                  </div>
+                  <div class="inline-row">
+                    <label class="settings-field"><span>PAT（可留空）</span><input id="v2exAccessToken" type="password" maxlength="512" autocomplete="off" placeholder="可留空；匿名公开发现可直接使用"><span class="settings-field-row"><input id="v2exClearToken" type="checkbox"> 清除已保存的 PAT</span></label>
+                    <label class="settings-field"><span>公开用户名（可选）</span><input id="v2exUsername" maxlength="128" autocomplete="off" placeholder="仅作账号提示，PAT 会自动识别"></label>
+                  </div>
+                  <div class="settings-probe-row">
+                    <button class="pill-btn" id="v2exAcceptBrowserIdentity" type="button" hidden>采用当前浏览器账号</button>
+                    <button class="pill-btn" id="v2exRefreshIdentity" type="button">刷新身份</button>
+                    <span class="settings-probe-status" id="v2exIdentityStatus" aria-live="polite">身份状态加载中…</span>
+                  </div>
+                </section>
+                <section class="source-seg">
+                  <h4>发现分支与每日预算</h4>
+                  <p class="seg-note">搜索使用统一关键词规划器；Node、Tab、热门和最新分支共享候选池准入，并按来源占比参与补货。</p>
+                  <div class="branch-table" data-branch-toggles="on">
+                    <div class="branch-head"><span></span><span>分支</span><span>每日预算</span><span>说明</span></div>
+                    <div class="branch-row"><input id="v2exModeSearch" type="checkbox" class="branch-toggle" aria-label="V2EX 搜索分支"><span class="branch-name">搜索</span><input id="v2exDailySearchBudget" class="branch-budget" inputmode="numeric" placeholder="120" aria-label="V2EX 每日搜索条目"><span class="branch-hint">按画像关键词召回主题</span></div>
+                    <div class="branch-row"><input id="v2exModeNode" type="checkbox" class="branch-toggle" aria-label="V2EX Node 分支"><span class="branch-name">Node</span><input id="v2exDailyNodeBudget" class="branch-budget" inputmode="numeric" placeholder="180" aria-label="V2EX 每日 Node 条目"><span class="branch-hint">按 Node 轮转取主题</span></div>
+                    <div class="branch-row"><input id="v2exModeTab" type="checkbox" class="branch-toggle" aria-label="V2EX Tab 分支"><span class="branch-name">Tab</span><input id="v2exDailyTabBudget" class="branch-budget" inputmode="numeric" placeholder="80" aria-label="V2EX 每日 Tab 条目"><span class="branch-hint">tech / creative / qna Feed</span></div>
+                    <div class="branch-row"><input id="v2exModeHot" type="checkbox" class="branch-toggle" aria-label="V2EX 热门分支"><span class="branch-name">热门</span><input id="v2exDailyHotBudget" class="branch-budget" inputmode="numeric" placeholder="40" aria-label="V2EX 每日热门条目"><span class="branch-hint">趋势补充，不替代个性化召回</span></div>
+                    <div class="branch-row"><input id="v2exModeLatest" type="checkbox" class="branch-toggle" aria-label="V2EX 最新分支"><span class="branch-name">最新</span><input id="v2exDailyLatestBudget" class="branch-budget" inputmode="numeric" placeholder="40" aria-label="V2EX 每日最新条目"><span class="branch-hint">少量探索流量</span></div>
+                  </div>
+                </section>
+                <section class="source-seg">
+                  <h4>节流</h4>
+                  <div class="inline-row">
+                    <label class="settings-field"><span>请求间隔秒数</span><input id="v2exRequestInterval" inputmode="numeric" placeholder="2"></label>
+                    <label class="settings-field"><span>最小调度间隔分钟</span><input id="v2exMinInterval" inputmode="numeric" placeholder="5"></label>
+                  </div>
+                </section>
+                <section class="source-seg">
+                  <h4>验证</h4>
+                  <div class="settings-probe-row source-verify-row">
+                    <button class="pill-btn source-verify-btn" type="button">测试 PAT</button>
+                    <span class="settings-probe-status source-verify-status" aria-live="polite"></span>
+                  </div>
+                </section>
+              </div>
+            </article>
+
           </div>
 
           <div class="source-aux-card">

@@ -37,6 +37,7 @@
         "*://*.zhihu.com/*",
         "*://*.reddit.com/*",
         "*://*.redd.it/*",
+        "*://*.v2ex.com/*",
         "*://*.x.com/*",
         "*://*.twitter.com/*",
         "*://*.bgm.tv/*",
@@ -138,6 +139,15 @@
             ],
             "js": [
                 "content/reddit.js"
+            ],
+            "run_at": "document_idle"
+        },
+        {
+            "matches": [
+                "*://*.v2ex.com/*"
+            ],
+            "js": [
+                "content/v2ex.js"
             ],
             "run_at": "document_idle"
         },
