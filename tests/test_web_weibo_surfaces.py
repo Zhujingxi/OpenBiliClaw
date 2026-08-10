@@ -80,7 +80,7 @@ def test_weibo_current_docs_store_metadata_and_release_boundary_are_in_sync() ->
     assert "微博是 discovery-only 来源" in docker
     assert "微博（后端 discovery-only）" in listing
     assert "七平台内容发现 AI Agent" not in listing
-    assert changelog.index("## Unreleased") < changelog.index("## v0.3.201")
+    assert changelog.index("## 未发布") < changelog.index("## v0.3.201")
     assert "微博匿名公开 discovery 来源" in changelog.split("## v0.3.201", 1)[0]
     assert "Weibo is backend-only discovery" in amo["description"]["en-US"]
     assert "插件不申请微博 host permission" in amo["description"]["zh-CN"]
