@@ -6,6 +6,13 @@
 
 ## 未发布
 
+暂无。
+
+## v0.3.203：微博登录态初始化与插件可用性修复（2026-08-11）
+
+- **微博补齐登录态初始化**：微博从 discovery-only 升级为 capability-specific full source；`init --yes-weibo` / `/api/init` 会在扩展确认浏览器登录和当前 uid 后，通过隔离同源任务只读导入收藏、关注和 mentions，后端只保存布尔 heartbeat、账号绑定与规范化事件，不接收 Cookie。个人 bootstrap 暂为 init-only，公开 discovery 仍匿名可用。
+- **修复微博 H5 登录态 bootstrap 路由**：适配当前移动端接口 `/api/container/getIndex?containerid=230259`、`/api/friendships/friends`、`/message/mentionsAt` 与 `/message/mentionsCmt`，旧路径仅作兼容回退；HTTP 404 不再被当作真实空结果，扩展构建与任务回归测试同步更新。
+- **修复桌面 Web 配置页空白**：合并 Linux.do / V2EX 来源卡片时出现的嵌套 HTML 让后续设置面板被错误收进来源卡片；现将两张来源卡恢复为同级节点，并加入 DOM 结构回归测试，确保模型、平台源、调度和高级设置面板都能正常渲染。
 - **抖音账号周期回拉改为默认关闭**：`douyin_incremental_hours` 的缺省值从继承全局 24 小时改为 `0`，避免作品 / 收藏 / 点赞 / 关注的 `bootstrap_profile` 任务定期打开前台抖音页并抢走用户焦点；需要该能力时可显式设置 `1..168` 小时开启，手动初始化、`fetch-douyin` 和后台 feed / search / hot discovery 保持不变。
 - **恢复插件底部「最近发生的事」动态栏**：side panel 的全局活动栏此前在切到「对话」Tab 时被 CSS 整块隐藏，看起来像功能消失；现改为四个一级 Tab 始终可见，聊天记录继续在剩余空间内独立滚动，输入框仍固定在聊天区底部，并加入回归测试防止再次按 Tab 隐藏。
 - **收紧插件覆盖层与短侧栏可用性**：设置、消息和手机二维码覆盖层现在使用 modal 语义、背景 `inert`、Tab 焦点圈定、Esc 关闭与触发点焦点恢复，不再让键盘焦点落到被遮住的主页面或动态栏；动态历史高度随 `dvh` 收缩，避免矮侧栏展开后把底部挤出视口；停用来源的卡面也会退出键盘顺序并标记 `aria-disabled`，但启用开关仍可操作。
@@ -13,7 +20,6 @@
 
 ## v0.3.202：Linux.do、V2EX 与微博来源扩展（2026-08-10）
 
-- **修复桌面 Web 配置页空白**：合并 Linux.do / V2EX 来源卡片时出现的嵌套 HTML 让后续设置面板被错误收进来源卡片；现将两张来源卡恢复为同级节点，并加入 DOM 结构回归测试，确保模型、平台源、调度和高级设置面板都能正常渲染。
 - **发布与市场状态**：`backend-v0.3.202`、`extension-v0.3.202`、`desktop-v0.3.202` 与聚合 `openbiliclaw-v0.3.202` 均指向同一绿提交；聚合 Latest Release 只包含两份扩展包和四份桌面安装器共六个 `0.3.202` 资产。Chrome Web Store 已上传并进入 `PENDING_REVIEW`，Firefox AMO 已接受 listed `0.3.202`，文件状态为 `unreviewed`。AMO 隐私字段 API 仍返回 406，manifest data-collection 声明、reviewer notes、商店描述和包内隐私政策已随提交提供。
 - **新增 Linux.do 只读来源接入**：后端新增 `linuxdo_tasks` durable 队列、`LinuxdoDiscoveryProducer`、统一 topic/event 归一化、capability-specific source-auth 与周期增量同步；公开 discover 匿名可用，个人 profile/bootstrap/incremental 必须由同源会话正面确认。CLI 新增 `fetch-linuxdo` / `discover-linuxdo`，通用 `discover --source linuxdo` 也走同一 producer。五种 discovery 分支为 search / hot / feed / creator / related，三种个人初始化 scope 为 bookmarks / likes / read history。
 - **扩展采用同源、最小回传边界**：Linux.do 请求只在真实 `linux.do` task tab 内以 `GET` + `credentials: include` 访问 JSON endpoint；Cookie `_t` 只转换成登录布尔心跳，Cookie 值、CSRF 字段和未裁剪原始响应都不上传。任务具备 tab/task 隔离、分页与条数上限、超时、2 MiB 响应上限及结构化错误。
@@ -24,9 +30,6 @@
 - **Linux.do MV3 恢复与 engagement 分支缺口修复**：runtime stream 现在先于可能等待 mutex 的恢复 barrier 建连；`storage.session` generation 区分普通 worker recycle 与完整 extension reload，完整 reload 会刷新 runner-owned 页面再重放同一只读 task ID。真实 Chrome 中两页 feed 在 `in_progress` 时热重载，约 25 秒后以同一任务行 terminal=ok，返回 37 个唯一 topic；修复全局 result cap 后的隔离复跑再次以同一任务行返回 36/36 唯一 topic。正式 search/related 同时增加 retained-only topic detail hydrate，真站各 2/2 候选均取得主题作者、浏览、总赞和回复，不再缺字段，也不使用匹配回复的作者/点赞冒充主题指标；双关键词 `max_items=1` 真站任务也严格只回传 1 条。两轮个人 bootstrap 各返回 `2 bookmark / 1 like / 20 read`，durable ingress 保持 23 条不重复；真实 404 被分类为 `failed/linuxdo_http_error` 而不是假空。扩展全量 1323/1323、Chrome/Firefox build 与 17/17 资产校验通过；冻结 Firefox 安装版真账号门禁仍单列未执行。
 - **来源状态保留最近任务真值**：Linux.do 浏览器心跳优先；无心跳时，`/api/sources/status` 只读最近 `linuxdo_tasks` 作 `task_history` 间接证据。个人 bootstrap 成功可证明可选会话通路，公开 discovery 成功仍保持 `credential=none`；`login_required`、限流与运行中状态分别表达，不把匿名任务伪造成已登录。
 - **新增微博匿名公开 discovery 来源**：后端以仅存内存的匿名 visitor 会话执行 search / hot / creator 只读发现，不读取用户 Cookie、不进入 guided init、不增加扩展 host permission，并复用统一候选评估、来源占比与三端文字卡。
-- **微博补齐登录态初始化**：微博从 discovery-only 升级为 capability-specific full source；`init --yes-weibo` / `/api/init` 会在扩展确认浏览器登录和当前 uid 后，通过隔离同源任务只读导入收藏、关注和 mentions，后端只保存布尔 heartbeat、账号绑定与规范化事件，不接收 Cookie。个人 bootstrap 暂为 init-only，公开 discovery 仍匿名可用。
-- **修复微博 H5 登录态 bootstrap 路由**：适配当前移动端接口 `/api/container/getIndex?containerid=230259`、`/api/friendships/friends`、`/message/mentionsAt` 与 `/message/mentionsCmt`，旧路径仅作兼容回退；HTTP 404 不再被当作真实空结果，扩展构建与任务回归测试同步更新。
-
 - **重构新增平台来源 skill 为证据驱动的阶段门**：复盘本地 Codex session、Git/GitHub 首次接入与后续修复，把 `full / discovery-only / capability-increment / audit-only`、机器可读来源契约、逐能力 hybrid auth、fail-closed E2E 写动作边界、中央注册 audit、required/N/A 与 PASS/FAIL 分离、原子任务准入、MV3 恢复、真假空结果、增量同步、scope completeness、时间语义、双浏览器资产和安装包真机 provenance 固化为完成条件；新增历史失败索引与 skill 镜像/契约审计测试，只有全部 required gate 有证据通过才允许报告 complete，发布 mutation 仍需明确授权。独立盲测还复现并修复了 `browser_heartbeat` 对未知来源默认落到知乎的错源分派，现由 source→prefix 显式 registry 驱动，未知来源 fail closed，新增来源必须成组提供 DB getter、扩展 event handler 与往返测试。
 - **V2EX 已安装扩展真实登录 E2E 通过**：在 `8420` 真实后端热更新开发扩展后，四个只读 scope 于 13 秒内返回发布 4、讨论 Topic 19、收藏主题 1、收藏 Node 0，并转换为 24 条 canonical 事件；登录态、observed identity、稳定 Topic ID / URL、事件 source 与 satisfaction 语义、四 scope 完整证据全部通过。`smoke_only` 未向真实库写入任何 V2EX event、Node Affinity 或收藏快照；隔离库重复写验证为首次 24/0、第二次 0/24。
 - **V2EX 最终构建与 8420 热更新复验**：最终 Chrome 构建通过后端 runtime event 热重载并重新连回真实登录态，四 scope 再次返回 4 / 19 / 1 / 0、24 条 canonical 事件；真实库的 event、seen、Node Affinity 和收藏快照增量均为 0。五路公开读取为 Search / Tab / Hot / Latest 各 3 条、Node 5 条；隔离正式 Node producer 使用用户现有 LLM / Embedding 配置完成发现 3、入池 3、评估 3、准入 1、低分拒绝 2，只记录 1 条脱敏 usage，临时库自动删除。

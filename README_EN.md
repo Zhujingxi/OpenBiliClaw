@@ -189,7 +189,7 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.202 (2026-08-10)**
+📌 Latest: **v0.3.203 (2026-08-11)**
 
 - **Linux.do is now a complete read-only source** — public discovery works signed out, while signed-in sessions add bookmarks, likes, and read history through same-origin GETs.
 - **V2EX adds public discovery and four personal-signal scopes** — anonymous API / feeds, optional PAT verification, and account-isolated favorites / Node affinity are supported.
