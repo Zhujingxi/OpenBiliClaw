@@ -403,8 +403,7 @@ _KEYWORD_INSPIRATION_PLATFORMS_OPTION = typer.Option(
     "-p",
     help=(
         "目标平台，可重复传或逗号分隔。默认 bilibili；可选 bilibili/xiaohongshu/"
-        "douyin/youtube/twitter/zhihu/reddit/linuxdo。"
-        "douyin/youtube/twitter/zhihu/reddit/bangumi/weibo。"
+        "douyin/youtube/twitter/zhihu/reddit/bangumi/linuxdo/v2ex/weibo。"
     ),
 )
 _KEYWORD_INSPIRATION_KIND_OPTION = typer.Option(
@@ -12318,7 +12317,10 @@ def keyword_inspiration_dry_run(
         "twitter",
         "zhihu",
         "reddit",
+        "bangumi",
         "linuxdo",
+        "v2ex",
+        "weibo",
     }
     selected_platforms = list(split_csv_values(platforms or [])) or ["bilibili"]
     unknown = [platform for platform in selected_platforms if platform not in allowed]
@@ -12386,39 +12388,60 @@ def keyword_inspiration_dry_run(
             )
         )
 
-    planner = KeywordPlanner(
-        llm_service=llm_service,
-        database=database,
-        config=config,
-        soul_engine=soul_engine,
-        pool_target_count=int(getattr(config.scheduler, "pool_target_count", 300)),
-        signal_event_threshold=int(getattr(config.scheduler, "signal_event_threshold", 6)),
-        inspiration_provider=build_inspiration_search_provider(
-            getattr(config.discovery, "inspiration_search_backends", None),
-            database=database,
-            platform_backends=build_platform_source_backends(
-                config,
-                bilibili_client=(
-                    _build_bilibili_client()
-                    if bool(getattr(getattr(config.sources, "bilibili", None), "enabled", True))
-                    else None
+    async def _preview() -> dict[str, object]:
+        v2ex_client: object | None = None
+        v2ex_cfg = getattr(getattr(config, "sources", None), "v2ex", None)
+        if bool(getattr(v2ex_cfg, "enabled", False)):
+            from openbiliclaw.sources.v2ex_client import V2EXClient
+
+            v2ex_client = V2EXClient(
+                request_interval_seconds=float(getattr(v2ex_cfg, "request_interval_seconds", 2.0))
+            )
+        try:
+            planner = KeywordPlanner(
+                llm_service=llm_service,
+                database=database,
+                config=config,
+                soul_engine=soul_engine,
+                pool_target_count=int(getattr(config.scheduler, "pool_target_count", 300)),
+                signal_event_threshold=int(getattr(config.scheduler, "signal_event_threshold", 6)),
+                inspiration_provider=build_inspiration_search_provider(
+                    getattr(config.discovery, "inspiration_search_backends", None),
+                    database=database,
+                    platform_backends=build_platform_source_backends(
+                        config,
+                        bilibili_client=(
+                            _build_bilibili_client()
+                            if bool(
+                                getattr(
+                                    getattr(config.sources, "bilibili", None),
+                                    "enabled",
+                                    True,
+                                )
+                            )
+                            else None
+                        ),
+                        x_client=x_client,
+                        v2ex_client=v2ex_client,
+                    ),
+                    platforms_per_probe=int(inspiration_params.platforms_per_probe),
+                    riskcontrolled_probe_budget=int(inspiration_params.riskcontrolled_probe_budget),
+                    pages_per_probe=int(inspiration_params.search_pages_per_probe),
                 ),
-                x_client=x_client,
-            ),
-            platforms_per_probe=int(inspiration_params.platforms_per_probe),
-            riskcontrolled_probe_budget=int(inspiration_params.riskcontrolled_probe_budget),
-            pages_per_probe=int(inspiration_params.search_pages_per_probe),
-        ),
-        inspiration_params=inspiration_params,
-    )
-    report = asyncio.run(
-        planner.preview_inspiration_keywords(
-            selected_platforms,
-            profile=profile_data,
-            query_kind=normalized_kind,
-            persist_axes=persist_axes,
-        )
-    )
+                inspiration_params=inspiration_params,
+            )
+            return await planner.preview_inspiration_keywords(
+                selected_platforms,
+                profile=profile_data,
+                query_kind=normalized_kind,
+                persist_axes=persist_axes,
+            )
+        finally:
+            close = getattr(v2ex_client, "aclose", None)
+            if callable(close):
+                await close()
+
+    report = asyncio.run(_preview())
     sys.stdout.write(json.dumps(report, ensure_ascii=False, indent=2))
     sys.stdout.write("\n")
 

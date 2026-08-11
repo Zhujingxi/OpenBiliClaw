@@ -31,8 +31,6 @@ def build_v2ex_external_search_provider(config: object) -> Any | None:
     """Build the configured Exa/You chain used for ``site:v2ex.com/t`` recall."""
 
     discovery = getattr(config, "discovery", None)
-    if not bool(getattr(discovery, "inspiration_search_enabled", False)):
-        return None
     configured = tuple(getattr(discovery, "inspiration_search_backends", ()) or ())
     external = tuple(
         str(value).strip().lower()

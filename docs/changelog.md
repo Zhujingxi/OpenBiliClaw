@@ -6,7 +6,7 @@
 
 ## 未发布
 
-暂无。
+- **修复 V2EX 三种关键词模式的 Search 空召回**：正式 V2EX Search 不再被 inspiration 关键词开关误关；Exa / You 不可用时，匿名 latest/hot fallback 对 planner 多段长词采用整句精确优先、非通用核心词受限放宽，并继续交给共享 evaluator / admission。`keyword-inspiration-preview --platform v2ex` 现可用且在来源启用时注入只读 V2EX grounding client；同步修正 CLI 平台帮助与模块文档。
 
 ## v0.3.203：微博登录态初始化与插件可用性修复（2026-08-11）
 

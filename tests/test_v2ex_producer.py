@@ -14,6 +14,7 @@ from openbiliclaw.runtime.v2ex_producer import (
     V2EX_SOURCE_WEIGHTS,
     V2EXDiscoveryProducer,
     _allocate_weighted,
+    build_v2ex_external_search_provider,
 )
 from openbiliclaw.sources.v2ex_client import V2EXAPIError, V2EXPage
 from openbiliclaw.storage.database import Database
@@ -433,3 +434,41 @@ def test_default_mode_mix_matches_40_40_10_5_5_at_normal_batch_size() -> None:
         value >= 1
         for value in _allocate_weighted(5, V2EX_SOURCE_MODES, V2EX_SOURCE_WEIGHTS).values()
     )
+
+
+def test_external_search_provider_is_independent_of_keyword_generation_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    expected = object()
+
+    def build(backends: object) -> object:
+        captured["backends"] = backends
+        return expected
+
+    monkeypatch.setattr(
+        "openbiliclaw.discovery.inspiration_provider.build_inspiration_search_provider",
+        build,
+    )
+    config = SimpleNamespace(
+        discovery=SimpleNamespace(
+            inspiration_search_enabled=False,
+            inspiration_search_backends=("local_cache", "exa", "you"),
+        )
+    )
+
+    provider = build_v2ex_external_search_provider(config)
+
+    assert provider is expected
+    assert captured["backends"] == ("exa", "you")
+
+
+def test_external_search_provider_is_absent_without_configured_external_backend() -> None:
+    config = SimpleNamespace(
+        discovery=SimpleNamespace(
+            inspiration_search_enabled=True,
+            inspiration_search_backends=("local_cache", "platform_sources"),
+        )
+    )
+
+    assert build_v2ex_external_search_provider(config) is None

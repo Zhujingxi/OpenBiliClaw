@@ -524,6 +524,100 @@ def test_keyword_inspiration_preview_threads_persist_axes(
     assert captured["persist_axes"] is True
 
 
+def test_keyword_inspiration_preview_supports_v2ex_platform_grounding(
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+) -> None:
+    cfg = config_module.Config()
+    cfg.sources.v2ex.enabled = True
+    captured: dict[str, object] = {}
+
+    class FakeLLMService:
+        def __init__(self, **_: object) -> None:
+            pass
+
+    class FakeSoulEngine:
+        async def get_profile(self) -> SoulProfile:
+            return SoulProfile(
+                preferences=PreferenceLayer(
+                    interests=[InterestTag(name="Agent", category="技术", weight=0.9)]
+                )
+            )
+
+    class FakeV2EXClient:
+        def __init__(self, **_: object) -> None:
+            captured["client"] = self
+
+        async def aclose(self) -> None:
+            captured["closed"] = True
+
+    class FakePlanner:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        async def preview_inspiration_keywords(
+            self,
+            platforms: list[str],
+            *,
+            profile: SoulProfile | None = None,
+            query_kind: str = "regular",
+            persist_axes: bool = False,
+        ) -> dict[str, object]:
+            captured["platforms"] = platforms
+            return {"ok": True}
+
+    def build_platform_backends(*_: object, **kwargs: object) -> list[object]:
+        captured["v2ex_client"] = kwargs.get("v2ex_client")
+        return []
+
+    _ignore_runtime_config_error(monkeypatch)
+    monkeypatch.setattr(config_module, "load_config", lambda: cfg, raising=False)
+    monkeypatch.setattr(cli_module, "_require_runtime_config", lambda: None, raising=False)
+    monkeypatch.setattr(cli_module, "_build_memory_manager", lambda: object(), raising=False)
+    monkeypatch.setattr(cli_module, "_get_runtime_database", lambda: object(), raising=False)
+    monkeypatch.setattr(cli_module, "_build_registry", lambda: object(), raising=False)
+    monkeypatch.setattr(cli_module, "_build_usage_recorder", lambda: None, raising=False)
+    monkeypatch.setattr(cli_module, "_build_soul_engine", lambda: FakeSoulEngine(), raising=False)
+    monkeypatch.setattr(cli_module, "_build_bilibili_client", lambda: object(), raising=False)
+    monkeypatch.setattr("openbiliclaw.llm.service.LLMService", FakeLLMService, raising=False)
+    monkeypatch.setattr(
+        "openbiliclaw.llm.service.module_overrides_from_config",
+        lambda loaded_cfg: {},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "openbiliclaw.runtime.keyword_planner.KeywordPlanner",
+        FakePlanner,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "openbiliclaw.sources.v2ex_client.V2EXClient",
+        FakeV2EXClient,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "openbiliclaw.discovery.inspiration_provider.build_inspiration_search_provider",
+        lambda *args, **kwargs: object(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "openbiliclaw.discovery.inspiration_provider.build_platform_source_backends",
+        build_platform_backends,
+        raising=False,
+    )
+
+    result = runner.invoke(
+        app,
+        ["keyword-inspiration-preview", "--platform", "v2ex", "--limit", "1"],
+    )
+
+    assert result.exit_code == 0
+    assert json.loads(result.output) == {"ok": True}
+    assert captured["platforms"] == ["v2ex"]
+    assert captured["v2ex_client"] is captured["client"]
+    assert captured["closed"] is True
+
+
 def test_keyword_inspiration_report_command_is_registered(runner: CliRunner) -> None:
     result = runner.invoke(app, ["keyword-inspiration-report", "--help"])
 

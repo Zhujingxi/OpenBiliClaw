@@ -102,3 +102,16 @@ The static auditor reports `PASS=39`, `MISSING=0`, `N/A=10`, `MANUAL=12`, with c
 - Intentional exclusions: V2EX images, native deep link, native/upstream save and all upstream mutation actions
 - Residual non-blockers: optional real-PAT smoke was not possible without a user-supplied PAT; hidden/challenge pages are deterministic fixture coverage; Firefox ZIP is unsigned until AMO submission
 - Release mutations performed: none
+
+## 2026-08-11 Search 关键词能力增量复验
+
+> Integration level: `capability-increment`。本节追加修复证据，不改写上方首次 full-source 验收 provenance。
+
+- 修复范围：legacy / hybrid / inspiration 三种关键词生成模式进入 V2EX 正式 Search 后的真实召回，不涉及 bootstrap、PAT、扩展任务或任何站内写操作。
+- 回归合同：完整 query 命中始终优先；外部 Exa / You 与关键词生成模式解耦；外部 provider 不可用时仅在匿名 latest/hot 有界窗口内按最多 8 个非通用核心词放宽；结果继续经过统一候选 evaluator / admission。
+- 自动证据：V2EX client 覆盖长词放宽、精确排序；producer 覆盖 legacy 模式仍构建外部 provider；CLI 覆盖 `--platform v2ex` 注册、grounding client 注入和异步关闭。
+- 真实模型：当前默认日日新 `deepseek-v4-flash` 实际返回 `429 insufficient_quota`；只在临时内存配置中改用同一日日新 endpoint / credential 可调用的 `sensenova-6.8-flash-lite` 完成复验，未持久化模型变更。
+- legacy：生成 3 个关键词；正式 Search 发现 / 入池 / 评估 `3 / 3 / 3`，准入 1、低分拒绝 2；4 次 V2EX 请求全为 GET，3 条候选均保留 `source_keyword_id`。
+- hybrid：生成 9 个关键词；正式 Search 发现 / 入池 / 评估 `3 / 3 / 3`，准入 2、低分拒绝 1；8 次 V2EX 请求全为 GET，usage 同时记录 `discovery.keyword_planner`、`discovery.keyword_inspiration` 和 `discovery.evaluate_batch`。
+- inspiration-only：生成 6 个关键词；正式 Search 发现 / 入池 / 评估 `3 / 3 / 3`，模型评分 `0.35 / 0.60 / 0.45`，三条均按 V2EX admission 门槛诚实拒绝；8 次 V2EX 请求全为 GET，usage 只记录 inspiration 与 evaluator caller，不误跑 merged planner。
+- 隔离边界：真实请求复验使用三个独立临时数据库和内存配置覆盖，不修改 8420 配置、真实推荐池或用户事件；关键词报告只保留长度和 SHA-256 短指纹，不落原文；临时目录退出即删除。

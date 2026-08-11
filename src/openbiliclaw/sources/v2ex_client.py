@@ -41,6 +41,22 @@ _V2EX_JSON_CONTENT_TYPES = {
     "application/json",
     "text/json",
 }
+_V2EX_SEARCH_TERM_RE = re.compile(r"[a-z0-9][a-z0-9._+#-]*|[\u3400-\u9fff]{2,}")
+_V2EX_SEARCH_GENERIC_TERMS = {
+    "分享",
+    "讨论",
+    "经验",
+    "实践",
+    "推荐",
+    "求助",
+    "指南",
+    "教程",
+    "避坑",
+    "评测",
+    "对比",
+    "交流",
+    "问题",
+}
 
 
 @dataclass(frozen=True)
@@ -194,6 +210,40 @@ def _strip_markup(value: object) -> str:
     raw = re.sub(r"[ \t\r\f\v]*\n[ \t\r\f\v]*", "\n", raw)
     raw = re.sub(r"\n{3,}", "\n\n", raw)
     return raw.strip()
+
+
+def _bounded_search_terms(query: str) -> tuple[str, ...]:
+    """Extract distinctive terms for the bounded latest/hot fallback.
+
+    Unified keyword generation intentionally emits natural, multi-part queries.
+    Requiring that entire phrase to appear verbatim made the anonymous fallback
+    effectively unusable.  Keep exact phrase matches strongest, but allow a
+    bounded candidate through when at least one non-generic core term matches;
+    the shared evaluator remains the final relevance gate.
+    """
+
+    terms: list[str] = []
+    seen: set[str] = set()
+    for term in _V2EX_SEARCH_TERM_RE.findall(query.casefold()):
+        normalized = term.strip("._+#-")
+        if len(normalized) < 2 or normalized in _V2EX_SEARCH_GENERIC_TERMS:
+            continue
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        terms.append(normalized)
+    return tuple(terms[:8])
+
+
+def _bounded_search_score(
+    haystack: str, query: str, terms: tuple[str, ...]
+) -> tuple[int, int, int]:
+    if query in haystack:
+        return (2, len(terms), sum(len(term) for term in terms))
+    matched = [term for term in terms if term in haystack]
+    if not matched:
+        return (0, 0, 0)
+    return (1, len(matched), sum(len(term) for term in matched))
 
 
 def _feed_item_to_topic(item: Mapping[str, Any], *, node_name: str = "") -> dict[str, Any]:
@@ -450,20 +500,22 @@ class V2EXClient:
         query = str(keyword or "").strip().casefold()
         if not query:
             return V2EXPage([], 0, max(1, int(limit)), 0)
+        terms = _bounded_search_terms(query)
         latest = await self.get_latest(limit=min(100, max(20, int(limit) * 3)))
         hot = await self.get_hot(limit=min(100, max(20, int(limit) * 2)))
-        rows: list[dict[str, Any]] = []
+        scored_rows: list[tuple[tuple[int, int, int], int, dict[str, Any]]] = []
         seen: set[str] = set()
-        for row in [*latest.data, *hot.data]:
+        for position, row in enumerate([*latest.data, *hot.data]):
             identity = _topic_id(row.get("id")) or str(row.get("url") or "")
             if identity in seen:
                 continue
             seen.add(identity)
             haystack = f"{row.get('title', '')}\n{row.get('content', '')}".casefold()
-            if query in haystack:
-                rows.append(row)
-            if len(rows) >= max(1, int(limit)):
-                break
+            score = _bounded_search_score(haystack, query, terms)
+            if score[0] > 0:
+                scored_rows.append((score, position, row))
+        scored_rows.sort(key=lambda item: (-item[0][0], -item[0][1], -item[0][2], item[1]))
+        rows = [row for _, _, row in scored_rows[: max(1, int(limit))]]
         return V2EXPage(rows, len(rows), max(1, int(limit)), 0)
 
     async def _request_feed(self, path: str, *, node_name: str = "") -> list[dict[str, Any]]:

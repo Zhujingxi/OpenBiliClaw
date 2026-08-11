@@ -97,6 +97,92 @@ async def test_anonymous_client_reads_legacy_topics_and_json_feed_without_auth()
 
 
 @pytest.mark.asyncio
+async def test_bounded_search_relaxes_long_queries_to_distinctive_terms() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        if request.url.path == "/api/topics/latest.json":
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": 101,
+                        "title": "本地 Agent 工作流实践",
+                        "content": "分享上下文压缩方案",
+                    },
+                    {
+                        "id": 102,
+                        "title": "旅行经验分享",
+                        "content": "周末路线",
+                    },
+                ],
+            )
+        if request.url.path == "/api/topics/hot.json":
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": 103,
+                        "title": "摄影器材讨论",
+                        "content": "镜头选择",
+                    }
+                ],
+            )
+        raise AssertionError(f"unexpected path: {request.url.path}")
+
+    async with httpx.AsyncClient(
+        base_url=V2EX_BASE_URL, transport=httpx.MockTransport(handler)
+    ) as http_client:
+        client = V2EXClient(http_client=http_client, request_interval_seconds=0)
+        page = await client.search_topics("Agent 上下文管理 实践经验", limit=5)
+
+    assert [row["id"] for row in page.data] == [101]
+
+
+@pytest.mark.asyncio
+async def test_bounded_search_prefers_exact_phrase_over_relaxed_matches() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        rows = [
+            {"id": 201, "title": "Agent 工具推荐", "content": ""},
+            {"id": 202, "title": "Agent 上下文管理", "content": "完整实践"},
+        ]
+        if request.url.path == "/api/topics/latest.json":
+            return httpx.Response(200, json=rows)
+        if request.url.path == "/api/topics/hot.json":
+            return httpx.Response(200, json=[])
+        raise AssertionError(f"unexpected path: {request.url.path}")
+
+    async with httpx.AsyncClient(
+        base_url=V2EX_BASE_URL, transport=httpx.MockTransport(handler)
+    ) as http_client:
+        client = V2EXClient(http_client=http_client, request_interval_seconds=0)
+        page = await client.search_topics("Agent 上下文管理", limit=5)
+
+    assert [row["id"] for row in page.data] == [202, 201]
+
+
+@pytest.mark.asyncio
+async def test_bounded_search_does_not_expand_generic_only_queries() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        rows = [
+            {"id": 301, "title": "一个经验分享", "content": "欢迎讨论"},
+            {"id": 302, "title": "经验 分享", "content": "完整 query 命中仍保留"},
+        ]
+        if request.url.path == "/api/topics/latest.json":
+            return httpx.Response(200, json=rows)
+        if request.url.path == "/api/topics/hot.json":
+            return httpx.Response(200, json=[])
+        raise AssertionError(f"unexpected path: {request.url.path}")
+
+    async with httpx.AsyncClient(
+        base_url=V2EX_BASE_URL, transport=httpx.MockTransport(handler)
+    ) as http_client:
+        client = V2EXClient(http_client=http_client, request_interval_seconds=0)
+        page = await client.search_topics("经验 分享", limit=5)
+
+    assert [row["id"] for row in page.data] == [302]
+
+
+@pytest.mark.asyncio
 async def test_bounded_response_does_not_decode_gzip_twice() -> None:
     payload = json.dumps([{"id": 321, "title": "gzip topic"}]).encode()
 

@@ -1,7 +1,6 @@
 # 内容发现引擎
 
-> 从用户画像出发，在 B 站、小红书、抖音、YouTube、X、知乎、Reddit、Bangumi、Linux.do 和通用 Web 等来源主动寻找潜在会喜欢的内容。
-> 从用户画像出发，在 B 站、小红书、抖音、YouTube、X、知乎、Reddit、Bangumi、V2EX 和通用 Web 等来源主动寻找潜在会喜欢的内容。
+> 从用户画像出发，在 B 站、小红书、抖音、YouTube、X、知乎、Reddit、Bangumi、Linux.do、V2EX、微博和通用 Web 等来源主动寻找潜在会喜欢的内容。
 
 API daemon 的候选 admission 成功后只同步调用轻量 expression `notify()`，不会 inline 或 await 文案 provider；generation-owned coordinator 按 durable `admitted_pending_copy` 连续补齐文案，因此评估 worker 可立即继续补位。OpenClaw direct one-shot 没有 daemon owner：它在 admission commit 后 await `expression-copy(limit=4, max_extra_requests=0)`，首 batch 的有效 subset 立即进入 canonical pool，剩余 pending-copy 留给下一次 operation；若首 batch 全部无效，本次可服务池仍可能为空，但不会留下 copy/provider task。`drain_pending()` 会随原有 metrics 返回结构化 post-admission copy receipt；refresh 仅在本轮没有 callback owner 时执行 copy 兜底，避免同一 durable admission 被 controller 收尾再次调用。
 
@@ -622,10 +621,9 @@ discovery 不是“把整个找片过程都交给 LLM”。当前实现里，LLM
 
 ## 统一关键词 planner / 背压（v0.3.124 起默认开启）
 
-> Discover 背压重构 P1。挂在 `[discovery].unified_keyword_planner_enabled` 后面，**v0.3.124 起默认 `true`**——七个 search 关键词走统一规划器 + 关键词存储；设为 `false` 可逐字回退到各自旧的逐平台 LLM 生成路径（旧路径保留、回退无副作用）。
+> Discover 背压重构 P1。挂在 `[discovery].unified_keyword_planner_enabled` 后面，**v0.3.124 起默认 `true`**——各平台 search 关键词走统一规划器 + 关键词存储；设为 `false` 可逐字回退到各自旧的逐平台 LLM 生成路径（旧路径保留、回退无副作用）。
 
-此前多个 search 关键词生成器（B 站 `search`、小红书 `xhs-search`、抖音 `search`、YouTube `yt_search`、X `x-search`、知乎 `zhihu-search`、Reddit `reddit-search`、Bangumi `bangumi-search`、Linux.do `linuxdo-search`）各自独立调 LLM、各发一份画像。统一 planner 把它们收敛成一套「双缓冲 + 缺口拉动」的背压模型，接管各平台 **search 关键词**，并接管 B 站 `ExploreStrategy` 的 `keyword_kind="explore"` query cache 生成；`trending / related / hot / feed / channel / creator / subreddit / ranked / latest` 及各自的 budget/cadence **原样不动**。
-此前多个 search 关键词生成器（B 站 `search`、小红书 `xhs-search`、抖音 `search`、YouTube `yt_search`、X `x-search`、知乎 `zhihu-search`、Reddit `reddit-search`、Bangumi `bangumi-search`、微博 `weibo-search`）各自独立调 LLM、各发一份画像。统一 planner 把它们收敛成一套「双缓冲 + 缺口拉动」的背压模型，接管各平台 **search 关键词**，并接管 B 站 `ExploreStrategy` 的 `keyword_kind="explore"` query cache 生成；`trending / related / hot / feed / channel / creator / subreddit / ranked / latest` 及各自的 budget/cadence **原样不动**。微博 `hot` 只把公开热搜词变成本轮查询种子，不会把热搜条目本身写成候选。
+此前多个 search 关键词生成器（B 站 `search`、小红书 `xhs-search`、抖音 `search`、YouTube `yt_search`、X `x-search`、知乎 `zhihu-search`、Reddit `reddit-search`、Bangumi `bangumi-search`、Linux.do `linuxdo-search`、V2EX `v2ex-search`、微博 `weibo-search`）各自独立调 LLM、各发一份画像。统一 planner 把它们收敛成一套「双缓冲 + 缺口拉动」的背压模型，接管各平台 **search 关键词**，并接管 B 站 `ExploreStrategy` 的 `keyword_kind="explore"` query cache 生成；`trending / related / hot / feed / channel / creator / subreddit / ranked / latest` 及各自的 budget/cadence **原样不动**。关键词的 legacy / hybrid / inspiration 生成模式只决定词从哪里产生，不关闭 V2EX 正式 Search 的已配置 Exa / You 召回；外部 provider 不可用时，V2EX 才在 latest/hot 上做精确优先、核心词受限放宽的匿名 fallback。微博 `hot` 只把公开热搜词变成本轮查询种子，不会把热搜条目本身写成候选。
 
 **关键词存储**（`storage/database.py`，表 `discovery_keywords` + `discovery_keyword_yield` + CAS 单飞锁 `discovery_planner_lock`）是生成侧的缓存 / 历史 / yield 账本。状态机：`pending → claimed → (内联) used / failed` 或 `→ (异步) executing → used / failed`；任意在途态可经租约回收 / 预算回滚回到 `pending`，小红书任务遇到平台安全验证时也会从 `executing` 无损回到 `pending` 且不增加 attempts。画像 digest 变化时，planner 会先原子整理 `regular/pending`：当前 digest 优先保留；旧 digest 中创建未超过 `keyword_digest_grace_hours`、不命中由当前库存饱和度产生的平台 `avoid_topics`、且未超过动态高水位的词继续可领取，并保留原 digest 与全部生成溯源；过龄、供给饱和、重复或超额才变成 `expired`。普通 user dislike 不参与关键词过期或撤销。设宽限为 `0` 即恢复旧版硬过期。`claimed/executing`、终态行和 `keyword_kind="explore"` 均不参与整理。`keyword_kind` 区分 `regular` 与 `explore`：普通 search 只 claim `regular`，老 B 站 `ExploreStrategy` 在 planner 开启时只 claim `explore`。在途四元组 `(platform, keyword, profile_kw_digest, keyword_kind)` 部分唯一；已经实际搜索后因零产出或全量重复而变成 `expired` 的词保留 `used_at`，在 `history_window_hours` 内继续参与近期词冷却；宽限保留的 pending 也进入生成历史，避免库存尚在时又生成同族关键词。
 
