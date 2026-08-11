@@ -569,7 +569,7 @@ It owns composition, not product behavior.
 | Provider credentials | Provider Access |
 | Provider-native cache | Content Provider |
 | Raw observations | Observation Ingress |
-| User profile and evidence | User Understanding |
+| User profile, evidence, and analyzer checkpoints | User Understanding |
 | Candidate pool and evaluations | Discovery & Recommendation |
 | Recommendation/shown history | Discovery & Recommendation |
 | Dialogue history | Assistant |
