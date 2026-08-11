@@ -22,6 +22,7 @@ from openbiliclaw.config import _normalize_source_incremental_hours
 from openbiliclaw.sources.source_bootstrap import (
     SOURCE_BOOTSTRAP_DECISION_LOCK,
     BootstrapEnqueueResult,
+    cancel_incremental_bootstrap_tasks,
     enqueue_dy_bootstrap,
     enqueue_linuxdo_bootstrap,
     enqueue_reddit_bootstrap,
@@ -159,8 +160,28 @@ class SourceIncrementalSync:
     async def tick(self) -> SourceIncrementalSyncResult:
         """Run one non-blocking scheduling tick."""
         async with self._tick_lock:
-            if not bool(getattr(self.scheduler_config, "enabled", True)):
-                return SourceIncrementalSyncResult(reason="scheduler_disabled")
+            scheduler_enabled = bool(getattr(self.scheduler_config, "enabled", True))
+            incremental_enabled = bool(
+                getattr(self.scheduler_config, "source_incremental_enabled", False)
+            )
+            if not scheduler_enabled or not incremental_enabled:
+                state = self._load_state()
+                scheduler_task_ids = self._scheduler_task_ids(state or {})
+                try:
+                    await asyncio.to_thread(
+                        cancel_incremental_bootstrap_tasks,
+                        self.database,
+                        scheduler_task_ids=scheduler_task_ids,
+                    )
+                except Exception:
+                    logger.warning(
+                        "disabled source incremental task cleanup failed",
+                        exc_info=True,
+                    )
+                reason = (
+                    "scheduler_disabled" if not scheduler_enabled else "source_incremental_disabled"
+                )
+                return SourceIncrementalSyncResult(reason=reason)
 
             try:
                 present = self.presence.is_present(
@@ -259,7 +280,7 @@ class SourceIncrementalSync:
                 )
 
             _table, _task_type, enqueue = _TASK_SPECS[source]
-            enqueue_kwargs: dict[str, Any] = {}
+            enqueue_kwargs: dict[str, Any] = {"incremental_owner": "scheduler"}
             if source == "v2ex" and self.runtime_config is not None:
                 from openbiliclaw.api.source_auth.probe_cache import LIVE_PROBES
                 from openbiliclaw.sources.v2ex_identity import resolve_v2ex_identity_state
@@ -279,14 +300,16 @@ class SourceIncrementalSync:
                     )
                     skipped_capability_sources.add(source)
                     continue
-                enqueue_kwargs = {
-                    "username": identity.username,
-                    "config": getattr(
-                        getattr(self.runtime_config, "sources", None),
-                        "v2ex",
-                        None,
-                    ),
-                }
+                enqueue_kwargs.update(
+                    {
+                        "username": identity.username,
+                        "config": getattr(
+                            getattr(self.runtime_config, "sources", None),
+                            "v2ex",
+                            None,
+                        ),
+                    }
+                )
             try:
                 outcome = enqueue(
                     self.database,
@@ -380,6 +403,14 @@ class SourceIncrementalSync:
     def _incremental_state(state: dict[str, object]) -> dict[str, object]:
         raw = state.get("source_incremental")
         return dict(raw) if isinstance(raw, dict) else {}
+
+    @staticmethod
+    def _scheduler_task_ids(state: dict[str, object]) -> set[str]:
+        raw_active = SourceIncrementalSync._incremental_state(state).get("active_task")
+        if not isinstance(raw_active, dict):
+            return set()
+        task_id = str(raw_active.get("task_id", "") or "").strip()
+        return {task_id} if task_id else set()
 
     def _reconcile_active_state(
         self,

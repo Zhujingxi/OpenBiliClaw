@@ -84,7 +84,7 @@ V2EX Topic 内容页的可见停留达到 30 秒时，扩展只从当前 Topic �
 
 guided init 通过来源选择器启用 V2EX，默认读取配置中的 `bootstrap_*_limit` 和 `bootstrap_max_pages_per_scope`，等待扩展完成任务后把结果并入统一 `events` / Soul Profile。任务失败或部分 scope 不可用时保留已成功的 scope，并返回分 scope 状态，不把缺失数据当成“用户没有行为”。
 
-增量调度由 `scheduler.v2ex_incremental_hours` 控制，扩展在线时复用同一任务队列。首次 guided / 非增量任务的完整收藏 scope 也会种下账号基线，避免“初始化后、第一次增量前取消收藏”的对象永远不可知。之后只有扩展证明 `favorite_topics` / `favorite_nodes` 完整翻页时，后端才比较集合；第一次缺失写 `missing_streak=1`，连续第二次完整快照仍缺失时写 durable pending effect 并生成弱证据 `feedback/retraction`，事件入口接受后才 ack effect。页数截断、登录失败、身份冲突、网络或解析失败不会推进缺失计数。
+增量调度默认由 `scheduler.source_incremental_enabled=false` 全局关闭；显式开启后，`scheduler.v2ex_incremental_hours` 才控制 V2EX 周期，并在扩展在线时复用同一任务队列。首次 guided / 非增量任务的完整收藏 scope 也会种下账号基线，避免“初始化后、第一次增量前取消收藏”的对象永远不可知。之后只有扩展证明 `favorite_topics` / `favorite_nodes` 完整翻页时，后端才比较集合；第一次缺失写 `missing_streak=1`，连续第二次完整快照仍缺失时写 durable pending effect 并生成弱证据 `feedback/retraction`，事件入口接受后才 ack effect。页数截断、登录失败、身份冲突、网络或解析失败不会推进缺失计数。
 
 ## 配置
 

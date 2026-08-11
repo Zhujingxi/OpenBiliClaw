@@ -706,9 +706,9 @@ images: proxy foreground + refresh prefetch → app-stable lane (total 4 / bg 3,
 │ /api/saved/* · router · Bilibili native save      │
 │ Six adapters → ExtensionNativeSaveBroker → extension_native_save_jobs │
 │ seven-platform source task multiplex: xhs / dy / yt / x / zhihu / reddit / linuxdo │
-│ Extension-online periodic re-pull: Runtime → six bootstrap tasks (global serial) → installed extension │
+│ Extension-online periodic re-pull (off by default; explicit opt-in): Runtime → six bootstrap tasks (global serial) → installed extension │
 │ seven-source task multiplex: xhs / dy / yt / x / zhihu / reddit / v2ex │
-│ Extension-online periodic re-pull: Runtime → six bootstrap sources (global serial) → installed extension │
+│ Extension-online periodic re-pull (off by default; explicit opt-in): Runtime → six bootstrap sources (global serial) → installed extension │
 │ task-result → staged durable ingress → atomic bounded seen keys (5,000/source) → terminal │
 │ V2EX complete favorite snapshots → two confirmed misses → durable retraction/restore outbox → account-scoped Node affinity │
 │ XHS auto tasks: source/scheduler gate → SQLite pacing/breaker → no new tab while off/limited │
@@ -786,7 +786,7 @@ localhost-only. The two edges are mutually exclusive, and the default HTTP path 
 
 What happens after discovery:
 
-- **Safe fetching** — the backend never logs in for you and never crawls content you can't see; every platform reuses the sessions already in your browser, and first-run profile signals are pulled only after you click "Start initialization." Once the profile exists, enabled account sources re-pull only on schedule while the extension is online. Douyin account re-pull is off by default and requires an explicit `douyin_incremental_hours=1..168`; background content discovery is unaffected. Linux.do tasks permit GET only, and `_t` is used solely as a login boolean.
+- **Safe fetching** — the backend never logs in for you and never crawls content you can't see; every platform reuses the sessions already in your browser, and first-run profile signals are pulled only after you click "Start initialization." Periodic account re-pull is off by default. It runs only after explicitly setting `source_incremental_enabled=true`, while the extension is online, and does not affect manual initialization, manual fetches, or background discovery. Douyin remains separately default-off. Linux.do tasks permit GET only, and `_t` is used solely as a login boolean.
 - **Continuous unified evaluation** — raw candidates share one eval pool and are scored against your Soul profile, content text, and recent negative feedback. The default 3×30 workers refill immediately, scheduling counts only durable stock, and serial admission is capped by current headroom. Optional embedding prefiltering starts in shadow mode before enforce may skip clearly low-similarity items.
 - **Diversity selection** — platform quotas → topic dedup → style balancing → cross-platform interleaving → count caps; only Bilibili is enabled out of the box, other platforms are switched on in settings.
 

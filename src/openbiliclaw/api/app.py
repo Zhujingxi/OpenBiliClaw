@@ -2557,6 +2557,52 @@ def create_app(
         except Exception:
             return None
 
+    def _cancel_disabled_source_incremental_tasks(source: str) -> None:
+        """Keep a pre-upgrade periodic row from being claimed after opt-out."""
+
+        scheduler_cfg = getattr(getattr(ctx, "config", None), "scheduler", None)
+        if bool(getattr(scheduler_cfg, "enabled", True)) and bool(
+            getattr(scheduler_cfg, "source_incremental_enabled", False)
+        ):
+            return
+        scheduler_task_ids: set[str] = set()
+        try:
+            load_state = getattr(ctx.memory_manager, "load_source_bootstrap_state", None)
+            state = load_state() if callable(load_state) else {}
+            raw_incremental = state.get("source_incremental", {})
+            raw_active = (
+                raw_incremental.get("active_task") if isinstance(raw_incremental, dict) else None
+            )
+            if isinstance(raw_active, dict):
+                task_id = str(raw_active.get("task_id", "") or "").strip()
+                if task_id:
+                    scheduler_task_ids.add(task_id)
+        except Exception:
+            logger.warning("source incremental owner state read failed", exc_info=True)
+        try:
+            from openbiliclaw.sources.source_bootstrap import (
+                cancel_incremental_bootstrap_tasks,
+            )
+
+            cancelled = cancel_incremental_bootstrap_tasks(
+                ctx.database,
+                sources={source},
+                scheduler_task_ids=scheduler_task_ids,
+            )
+        except Exception:
+            logger.warning(
+                "disabled source incremental claim cleanup failed source=%s",
+                source,
+                exc_info=True,
+            )
+            return
+        if cancelled:
+            logger.info(
+                "cancelled disabled source incremental tasks source=%s count=%d",
+                source,
+                len(cancelled),
+            )
+
     # gui-init D1 — DENY-BY-DEFAULT writer gating. While a guided init is active,
     # every mutating request (POST/PUT/PATCH/DELETE) is rejected with 409 unless
     # it is on the small allowlist of init-essential writers below. An allowlist
@@ -13256,6 +13302,7 @@ def create_app(
         background_tasks_enabled = bool(getattr(xhs_cfg, "enabled", False)) and bool(
             getattr(scheduler_cfg, "enabled", True)
         )
+        _cancel_disabled_source_incremental_tasks("xhs")
 
         if _xhs_task_queue is not None:
             cooldown = _xhs_task_queue.cooldown_remaining_seconds()
@@ -14390,6 +14437,8 @@ def create_app(
         if native_task is not None:
             return native_task
 
+        _cancel_disabled_source_incremental_tasks("dy")
+
         if _dy_task_queue is None:
             return Response(status_code=204)
         task = _dy_task_queue.next_pending(only_ids=_init_owned_ids_filter())
@@ -14629,6 +14678,8 @@ def create_app(
         if native_task is not None:
             return native_task
 
+        _cancel_disabled_source_incremental_tasks("reddit")
+
         if _reddit_task_queue is None:
             return Response(status_code=204)
         task = _reddit_task_queue.next_pending(only_ids=_init_owned_ids_filter())
@@ -14773,6 +14824,7 @@ def create_app(
         """Return the oldest pending read-only V2EX browser task, or 204."""
         from starlette.responses import Response
 
+        _cancel_disabled_source_incremental_tasks("v2ex")
         if _v2ex_task_queue is None:
             return Response(status_code=204)
         task = _v2ex_task_queue.next_pending(only_ids=_init_owned_ids_filter())
@@ -15066,6 +15118,8 @@ def create_app(
         native_task = _claim_extension_native_task("zhihu")
         if native_task is not None:
             return native_task
+
+        _cancel_disabled_source_incremental_tasks("zhihu")
 
         if _zhihu_task_queue is None:
             return Response(status_code=204)
@@ -15381,6 +15435,7 @@ def create_app(
         """Return the oldest pending Linux.do browser task, or 204 if none."""
         from starlette.responses import Response
 
+        _cancel_disabled_source_incremental_tasks("linuxdo")
         if _linuxdo_task_queue is None:
             return Response(status_code=204)
         linuxdo_cfg = getattr(
@@ -15656,6 +15711,8 @@ def create_app(
         native_task = _claim_extension_native_task("yt")
         if native_task is not None:
             return native_task
+
+        _cancel_disabled_source_incremental_tasks("yt")
 
         if _yt_task_queue is None:
             return Response(status_code=204)
@@ -16505,6 +16562,9 @@ def create_app(
                     cfg.scheduler.pool_source_shares
                 ),
                 account_sync_interval_hours=cfg.scheduler.account_sync_interval_hours,
+                source_incremental_enabled=getattr(
+                    cfg.scheduler, "source_incremental_enabled", False
+                ),
                 source_incremental_hours=getattr(cfg.scheduler, "source_incremental_hours", 24),
                 xhs_incremental_hours=getattr(cfg.scheduler, "xhs_incremental_hours", None),
                 douyin_incremental_hours=getattr(cfg.scheduler, "douyin_incremental_hours", 0),
@@ -18790,6 +18850,7 @@ def create_app(
                 "pool_target_count",
                 "copy_ready_target_count",
                 "account_sync_interval_hours",
+                "source_incremental_enabled",
                 "source_incremental_hours",
                 "xhs_incremental_hours",
                 "douyin_incremental_hours",

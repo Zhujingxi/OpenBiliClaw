@@ -171,6 +171,74 @@ def _active_bootstrap_result(
     return BootstrapEnqueueResult(task_id=None, created=False, reason="active_task")
 
 
+def cancel_incremental_bootstrap_tasks(
+    database: Any,
+    *,
+    sources: set[str] | None = None,
+    scheduler_task_ids: set[str] | None = None,
+) -> tuple[str, ...]:
+    """Fail queued periodic bootstrap work after its global opt-out.
+
+    Only tasks marked as scheduler-owned (or recorded by the legacy scheduler
+    state) are cancelled. Manual init/fetch and caller-owned incremental tasks
+    are left untouched. Cancelling both pending and stale in-progress rows
+    prevents an upgrade from reclaiming a pre-existing periodic task after the
+    safe default has taken effect.
+    """
+
+    selected = frozenset(sources) if sources is not None else None
+    recorded_ids = frozenset(scheduler_task_ids or ())
+    cancelled: list[str] = []
+    conn = getattr(database, "conn", None)
+    if not isinstance(conn, sqlite3.Connection):
+        return ()
+    terminal = json.dumps(
+        {
+            "status": "failed",
+            "error": "source_incremental_disabled",
+            "cancelled": True,
+        },
+        ensure_ascii=False,
+    )
+    with SOURCE_BOOTSTRAP_DECISION_LOCK, _bootstrap_admission_transaction(database):
+        for source, table, task_type in _BOOTSTRAP_TASK_TABLES:
+            if selected is not None and source not in selected:
+                continue
+            try:
+                rows = conn.execute(
+                    f"SELECT id, payload_json FROM {table} "
+                    "WHERE type = ? AND status IN ('pending', 'in_progress')",
+                    (task_type,),
+                ).fetchall()
+            except sqlite3.OperationalError as exc:
+                if "no such table" in str(exc).lower():
+                    continue
+                raise
+            for row in rows:
+                try:
+                    payload = json.loads(str(row["payload_json"] or "{}"))
+                    task_id = str(row["id"] or "").strip()
+                except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                if not task_id or not isinstance(payload, dict):
+                    continue
+                scheduler_owned = payload.get("incremental_owner") == "scheduler"
+                if payload.get("incremental") is not True or not (
+                    scheduler_owned or task_id in recorded_ids
+                ):
+                    continue
+                cursor = conn.execute(
+                    f"UPDATE {table} "
+                    "SET status = 'failed', result_json = ?, "
+                    "completed_at = CURRENT_TIMESTAMP "
+                    "WHERE id = ? AND status IN ('pending', 'in_progress')",
+                    (terminal, task_id),
+                )
+                if cursor.rowcount:
+                    cancelled.append(task_id)
+    return tuple(cancelled)
+
+
 def _notify(notify: Notify | None, message: str) -> None:
     if notify is not None:
         notify(message)
@@ -262,9 +330,16 @@ def _created_or_budget_result(
     return BootstrapEnqueueResult(task_id=normalized, created=True, reason="created")
 
 
-def _incremental_payload(payload: dict[str, Any], incremental: bool) -> dict[str, Any]:
+def _incremental_payload(
+    payload: dict[str, Any],
+    incremental: bool,
+    incremental_owner: str = "",
+) -> dict[str, Any]:
     if incremental:
         payload["incremental"] = True
+        owner = str(incremental_owner or "").strip().lower()
+        if owner:
+            payload["incremental_owner"] = owner
     return payload
 
 
@@ -341,6 +416,7 @@ def enqueue_xhs_bootstrap(
     *,
     force: bool = False,
     incremental: bool = False,
+    incremental_owner: str = "",
     notify: Notify | None = None,
 ) -> BootstrapEnqueueResult:
     """Enqueue the XHS ``bootstrap_profile`` task without dispatching it."""
@@ -392,6 +468,7 @@ def enqueue_xhs_bootstrap(
                     "max_scroll_rounds": max(0, scroll_rounds),
                 },
                 incremental,
+                incremental_owner,
             )
             task_id = queue.enqueue_with_id("bootstrap_profile", payload, daily_budget=10)
     except Exception as exc:
@@ -411,6 +488,7 @@ def enqueue_dy_bootstrap(
     *,
     force: bool = False,
     incremental: bool = False,
+    incremental_owner: str = "",
     notify: Notify | None = None,
 ) -> BootstrapEnqueueResult:
     """Enqueue the Douyin ``bootstrap_profile`` task without dispatching it."""
@@ -483,6 +561,7 @@ def enqueue_dy_bootstrap(
                     "max_scroll_rounds": max(0, scroll_rounds),
                 },
                 incremental,
+                incremental_owner,
             )
             task_id = queue.enqueue_with_id("bootstrap_profile", payload, daily_budget=10)
     except Exception as exc:
@@ -502,6 +581,7 @@ def enqueue_yt_bootstrap(
     *,
     force: bool = False,
     incremental: bool = False,
+    incremental_owner: str = "",
     notify: Notify | None = None,
 ) -> BootstrapEnqueueResult:
     """Enqueue the YouTube ``bootstrap_profile`` task without dispatching it."""
@@ -553,6 +633,7 @@ def enqueue_yt_bootstrap(
                     "max_scroll_rounds": max(0, scroll_rounds),
                 },
                 incremental,
+                incremental_owner,
             )
             task_id = queue.enqueue_with_id("bootstrap_profile", payload, daily_budget=10)
     except Exception as exc:
@@ -572,6 +653,7 @@ def enqueue_zhihu_bootstrap(
     *,
     force: bool = False,
     incremental: bool = False,
+    incremental_owner: str = "",
     profile_slug: str = "",
     profile_update: bool = False,
     notify: Notify | None = None,
@@ -634,6 +716,7 @@ def enqueue_zhihu_bootstrap(
                     "profile_update": bool(profile_update),
                 },
                 incremental,
+                incremental_owner,
             )
             task_id = queue.enqueue_with_id("bootstrap_events", payload, daily_budget=10)
     except Exception as exc:
@@ -653,6 +736,7 @@ def enqueue_reddit_bootstrap(
     *,
     force: bool = False,
     incremental: bool = False,
+    incremental_owner: str = "",
     profile_update: bool = False,
     notify: Notify | None = None,
 ) -> BootstrapEnqueueResult:
@@ -704,6 +788,7 @@ def enqueue_reddit_bootstrap(
                     "profile_update": bool(profile_update),
                 },
                 incremental,
+                incremental_owner,
             )
             task_id = queue.enqueue_with_id("bootstrap_events", payload, daily_budget=10)
     except Exception as exc:
@@ -723,6 +808,7 @@ def enqueue_weibo_bootstrap(
     *,
     force: bool = False,
     incremental: bool = False,
+    incremental_owner: str = "",
     profile_update: bool = False,
     notify: Notify | None = None,
 ) -> BootstrapEnqueueResult:
@@ -777,6 +863,7 @@ def enqueue_weibo_bootstrap(
                     "profile_update": bool(profile_update),
                 },
                 incremental,
+                incremental_owner,
             )
             task_id = queue.enqueue_with_id("bootstrap_events", payload, daily_budget=10)
     except Exception as exc:
@@ -796,6 +883,7 @@ def enqueue_linuxdo_bootstrap(
     *,
     force: bool = False,
     incremental: bool = False,
+    incremental_owner: str = "",
     profile_update: bool = False,
     notify: Notify | None = None,
 ) -> BootstrapEnqueueResult:
@@ -880,6 +968,7 @@ def enqueue_linuxdo_bootstrap(
                     "profile_update": bool(profile_update),
                 },
                 incremental,
+                incremental_owner,
             )
             task_id = queue.enqueue_with_id("bootstrap_events", payload, daily_budget=10)
     except Exception as exc:
@@ -901,6 +990,7 @@ def enqueue_v2ex_bootstrap(
     config: Any | None = None,
     force: bool = False,
     incremental: bool = False,
+    incremental_owner: str = "",
     profile_update: bool = False,
     smoke_only: bool = False,
     profile_rebuild: bool = False,
@@ -1009,6 +1099,7 @@ def enqueue_v2ex_bootstrap(
                     "profile_rebuild": bool(profile_rebuild),
                 },
                 incremental,
+                incremental_owner,
             )
             task_id = queue.enqueue_with_id("bootstrap_profile", payload, daily_budget=10)
     except Exception as exc:

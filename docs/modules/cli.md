@@ -748,10 +748,10 @@ Reddit 导入也复用 `bootstrap_events` 任务。后端入队 `reddit_tasks(ty
 
 Linux.do 导入复用 `bootstrap_events` 任务。后端入队 `linuxdo_tasks(type="bootstrap_events")`，插件在真实 `https://linux.do` 任务 tab 内先用只读 `GET /session/current.json` 正面确认当前账号，再读取书签、点赞和阅读记录。三类信号分别映射为 `favorite`、`like`、`view`，并加入本轮画像。所有上游请求都是同源 GET；`_t` Cookie 只用于“是否可能登录”的布尔判断，其值、其他 Cookie、CSRF 数据和原始响应都不会上传。未登录只影响个人 bootstrap，公开 search / hot / feed / creator / related discovery 仍可使用。
 
-上述六个扩展账号来源共享 enqueue 核心并供 runtime 使用。完整画像已存在、引导初始化不在运行且扩展 runtime-stream 在线时，runtime 默认每 24 小时按全局串行 round-robin 重新入队一个已启用来源；这不是无浏览器账号同步，离线时不会创建任务。周期与逐源覆盖项见 [配置模块](config.md)。
+上述六个扩展账号来源共享 enqueue 核心并供 runtime 使用，但周期自动入队默认由 `scheduler.source_incremental_enabled=false` 全局关闭。只有显式开启后，完整画像已存在、引导初始化不在运行且扩展 runtime-stream 在线时，runtime 才按默认 24 小时的全局串行 round-robin 重新入队一个已启用来源；这不是无浏览器账号同步。该开关不影响这些显式 CLI 命令，完整配置见 [配置模块](config.md)。
 V2EX 导入使用独立的 `v2ex_tasks(type="bootstrap_profile")`。`init --yes-v2ex` 会入队 `public_topics`、`public_replies`、`favorite_topics`、`favorite_nodes` 四个只读 scope；扩展在 V2EX 页面读取渲染后的公开行，后端按 Topic 聚合回复并转换为 `publish`、`discussion_reply`、`favorite`、`follow` 事件，同时更新账号隔离的 Node affinity。未登录时公开 scope 仍可尝试，收藏 scope 会返回 `login_required`；任务的 `partial` 结果会保留已经成功的 scope。PAT 实测身份、浏览器观察身份和用户接受身份不一致时返回 `identity_mismatch`，暂停本轮账号画像投影但不影响公开 discovery。浏览器心跳只发送登录布尔值，不上传 Cookie、HTML、私信或 CSRF。
 
-上述六个扩展账号来源在 CLI 行为保持不变；共享 enqueue 核心同时供 runtime 使用。完整画像已存在、引导初始化不在运行且扩展 runtime-stream 在线时，runtime 默认每 24 小时按全局串行 round-robin 重新入队一个已启用来源；这不是无浏览器账号同步，离线时不会创建任务。V2EX 只有完整收藏快照才推进缺失计数，连续两次完整快照确认后才通过持久 outbox 生成 `retraction`；重新出现会生成恢复事件。真实登录浏览器 E2E 状态见 [V2EX 模块](v2ex.md)。周期与逐源覆盖项见 [配置模块](config.md)。
+上述六个扩展账号来源在 CLI 行为保持不变；共享 enqueue 核心同时供 runtime 使用，但周期自动入队默认由 `scheduler.source_incremental_enabled=false` 全局关闭。只有显式开启后，完整画像已存在、引导初始化不在运行且扩展 runtime-stream 在线时，runtime 才按默认 24 小时的全局串行 round-robin 重新入队一个已启用来源；这不是无浏览器账号同步。V2EX 只有完整收藏快照才推进缺失计数，连续两次完整快照确认后才通过持久 outbox 生成 `retraction`；重新出现会生成恢复事件。真实登录浏览器 E2E 状态见 [V2EX 模块](v2ex.md)。周期与逐源覆盖项见 [配置模块](config.md)。
 
 Bangumi 初始化不依赖插件或登录态。`init --yes-bangumi --bangumi-username <name>` 会通过官方匿名 API 读取该用户名的公开收藏，转换为统一事件后纳入 `analyze_events()` / `build_initial_profile()`，并写回 `[sources.bangumi].enabled=true` 与用户名。`init --yes-bangumi --bangumi-token <token>` 走个人令牌通道：令牌先经 `GET /v0/me` 实测校验（被拒绝时当场退出并指引到 https://next.bgm.tv/demo/access-token 重新生成），解析出的用户名覆盖显式填写值（不一致时提示），随后带 Bearer 读取该账号收藏（含私密行）；校验通过的令牌与用户名一并写回 `[sources.bangumi]`。令牌与显式用户名皆缺时，init 会回退浏览器扩展自动识别的账号（扩展在已登录的 bgm.tv 页面读取公开 `CHOBITS_UID` + 导航 `/user/<username>` 链接并上报后端持久化；优先级：令牌 `/v0/me` > 显式用户名 > 扩展上报用户名），命中时输出"使用浏览器扩展识别到的账号"。Bangumi 作为唯一来源时三者至少满足一个（报错文案："提供 --bangumi-token（推荐，自动识别当前用户）或 --bangumi-username（公开用户名），或先在浏览器登录 bgm.tv 让扩展自动识别"）；与其它画像来源混用但全部缺失时，初始化会明确警告并只启用后续 Bangumi discovery。匿名路径私有收藏不可见，`updated_at` 不作为收藏行为时间。
 
@@ -1290,7 +1290,7 @@ openbiliclaw discover-linuxdo --limit 30
 openbiliclaw discover --source linuxdo --limit 30
 ```
 
-该命令只有 `--limit, -n` 选项（默认 `30`）；关键词、作者页和相关主题 seed 由共享 producer 根据画像、关键词池与已有候选选择。producer 的默认端到端等待同样是 32.5 分钟：pending 最多约 3 分钟，领取后按任务形状最多约 29 分钟执行，并留 30 秒结果余量。公开 discovery 不强制登录，但依赖在线扩展和 Linux.do host permission。全部站点请求均为同源 GET，插件只回传归一化字段或结构化错误，不回传 Cookie 或原始响应。自动化测试覆盖任务协议、分页、预算、超时和错误映射；2026-08-09 的真实 Chrome E2E 进一步验证了正式 discover、五种任务类型与候选入池。
+该命令只有 `--limit, -n` 选项（默认 `30`）；关键词、作者页和相关主题 seed 由共享 producer 根据画像、关键词池与已有候选选择。producer 的默认端到端等待同样是 32.5 分钟：pending 最多约 3 分钟，领取后按任务形状最多约 29 分钟执行，并留 30 秒结果余量。公开 discovery 不强制登录，但依赖在线扩展和 Linux.do host permission。全部站点请求均为同源 GET，插件只回传归一化字段或结构化错误，不回传 Cookie 或原始响应。发现摘要的计数来自本轮 producer；紧随其后的候选预览还会按 `linuxdo-*` strategy 再过滤一次，避免长驻共享候选管线中其它平台的旧条目混入 Linux.do 输出。自动化测试覆盖任务协议、分页、预算、超时和错误映射；2026-08-11 的真实 Chrome E2E 进一步验证了正式 discover、后台任务、候选入池与配置中的真实 LLM 评估。
 
 ### `openbiliclaw fetch-bangumi`
 

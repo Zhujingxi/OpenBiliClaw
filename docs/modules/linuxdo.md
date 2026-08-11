@@ -83,7 +83,7 @@ flowchart LR
 | `linuxdo_likes` | `/user_actions.json?username=<me>&filter=1&offset=<n>` | `like` | `0.85` |
 | `linuxdo_read_history` | `/read.json?page=<n>` | `view` | `0.35` |
 
-初始化时这三类事件与其它已选择来源一起进入首版画像。画像已存在后，扩展在线的周期回拉使用同一任务类型，并通过 canonical staged result、durable event ingress 和 `linuxdo_seen_item_keys` 去重；每源只保留最新 5,000 个 seen key。`fetch-linuxdo` 默认仅做 smoke，只有显式 `--write-memory` 才把本轮事件写入 memory。
+初始化时这三类事件与其它已选择来源一起进入首版画像。画像已存在后，扩展在线的周期回拉仍使用同一任务类型，但默认由 `scheduler.source_incremental_enabled=false` 全局关闭；显式开启后才按周期运行，并通过 canonical staged result、durable event ingress 和 `linuxdo_seen_item_keys` 去重。每源只保留最新 5,000 个 seen key。`fetch-linuxdo` 默认仅做 smoke，只有显式 `--write-memory` 才把本轮事件写入 memory，且不受周期总开关影响。
 
 三个 scope 都成功但无条目时是 `empty`；部分 scope 成功、部分 scope 返回结构化错误时是 `degraded`，已得到的有效事件仍保留并可参与本轮画像，但该终态不是“完整采集”证据。全部 scope 失败才是 `failed`。默认 6 小时近期任务去重只复用在途任务和成功的 `ok/empty` 终态；`failed/degraded` 不复用，下次会重新入队尝试补齐。
 
@@ -109,6 +109,7 @@ flowchart LR
 - HTTP 200 但正文是 HTML challenge、缺少/错误 JSON `Content-Type`、JSON 解析失败或容器结构不合格时，不把正文回传，只报告结构化失败；只有 route-specific envelope 与终止页证据齐全才允许 `empty`。
 - dispatcher 对任务类型、scope 和数值字段做 allow-list 校验；领取后才发现非法 payload 时，会立即向 `task-result` 回传 `failed / invalid_task_payload`，不让坏任务占满整个长 lease。合法任务使用独立 tab ID、task ID 与绝对超时，结束后只关闭自己创建的标签页。
 - Linux.do dispatcher 在领取后端任务前先获取共享 dispatcher mutex，避免多个扩展任务同时争用浏览器任务标签页；共享 mutex 的 stale 驱逐窗口为 36 分钟，长于合法任务的约 29 分钟执行窗口与 35 分钟 claim lease。
+- 如果同源 task tab 在 Discourse challenge / SPA 初始化窗口里暂时没有 content-script listener，dispatcher 会继续在原 task ID 上做短间隔重试；达到 readiness 窗口后最多重载一次同一标签页，再重新等待 ready。重载仍失败才回传 `sendMessage_failed`，不会释放租约后偷偷领取第二个任务，也不会创建第二个 runner tab。
 - bootstrap 任一 scope 或 discovery 的分页 / 多输入中途失败时，会保留此前已经归一化的 items 并回传 `degraded` 与有界 `scope_errors` / `input_errors`；只有没有任何有效 item 的失败才回传 `failed`。producer 会继续把 degraded discovery 的有效 topic 放入候选管线，并把本轮标成部分完成。
 - 同一 bootstrap 任务里，若 bookmarks / likes / read history 的相同 `topic_id` 有任一路径提供真实 `views` / `like_count` / `reply_count`，executor 会把该任务内已有真值补到其它 scope 的缺失字段；已有值（包括显式 `0`）不覆盖，不跨 topic，也不额外请求详情页。
 

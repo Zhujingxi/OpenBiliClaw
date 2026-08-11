@@ -2256,6 +2256,7 @@ class SchedulerConfigOut(BaseModel):
     copy_ready_target_count: int = Field(default=90, ge=0, le=600)
     pool_source_shares: dict[str, int] = Field(default_factory=dict)
     account_sync_interval_hours: int = 6
+    source_incremental_enabled: bool = False
     source_incremental_hours: int = 24
     xhs_incremental_hours: int | None = None
     douyin_incremental_hours: int | None = 0

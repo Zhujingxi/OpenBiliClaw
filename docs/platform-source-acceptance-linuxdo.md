@@ -6,7 +6,7 @@
 
 - Integration level: `full`
 - Contract: `docs/platform-source-contract-linuxdo.toml`
-- Release branch / commit: `main / a3dbc7065ddcc37dfafde2e85f3d3f67e029c42c`
+- Baseline release / current repair: `main@a3dbc7065ddcc37dfafde2e85f3d3f67e029c42c` / `fix/linuxdo-alarm-dispatch` based on `7123d0d5a56d75c5cbf5c9e6587429ca9b78ce7c`
 - Python import / CLI: `/Users/white/workspace/OpenBiliClaw/.worktrees/linuxdo-source/src/openbiliclaw/__init__.py / shared .venv with explicit PYTHONPATH`
 - Backend bind / data / config root: safe real E2E used an isolated worktree data root; production roots are excluded
 - Browser / extension identity: 2026-08-10 hot-loaded the repaired current-worktree Chrome build into the real unpacked extension path and exercised it against an isolated backend; frozen Chrome/Firefox archives below have not both been installed for a release-candidate rerun
@@ -117,6 +117,14 @@
 - The formal producer ran all five modes against the live extension and retained exactly 10 rows (`2` per mode), proving global limit and branch balancing. No LLM evaluation was run in this isolated rerun because the local environment had no configured usable LLM instance; the prior real-provider evaluation evidence above remains separate.
 - A runner-owned two-page `feed(max_items=40, request_interval_seconds=10)` task entered `in_progress`, received a full `/api/extension/reload`, and terminally completed on the same sole task row with 36/36 unique topics. No task marker tab or active task remained, and ordinary Linux.do event count stayed at 23. A real nonexistent topic (`999999999`) returned `failed/linuxdo_http_error`, not `empty`.
 - No upstream mutation was executed. The three Linux.do tabs that existed before the run were still the only Linux.do tabs after it; task tabs were closed. Temporary build/config/data/backup roots were moved to Trash after restoration.
+
+### 2026-08-11 background-dispatch real Chrome rerun
+
+- The current `fix/linuxdo-alarm-dispatch` worktree build was hashed and hot-loaded into the real logged-in unpacked Chrome extension, then connected to a private isolated project/data root on the normal `8420` endpoint during a bounded backend swap. The original main service worker hash and main backend were restored afterwards; no production task/database row was used.
+- Formal `openbiliclaw discover --source linuxdo --limit 5` created one real `hot` task. The installed extension claimed and completed the task in 14 seconds with terminal `ok`, `response_observed=1`, 5 canonical topics and 5 retained candidates. Candidate preview contained only `linuxdo-*` strategies. Recursive result checks found zero invalid canonical IDs/URLs/types, zero per-task duplicates and zero Cookie/token/raw-response keys.
+- The configured real SenseNova-compatible provider evaluated the five retained candidates with model `deepseek-v4-flash`: one batch, 10,229 input tokens, 3,889 output tokens and about 41.4 seconds. Durable outcomes were 3 cached, 1 rejected for low score and 1 rejected as recently viewed. The local Ollama embedding prefilter was observed separately and is not counted as the remote provider call.
+- Runtime scheduling also completed a real `bootstrap_events` task with 296 canonical signals and a second real `hot` task with 30 raw / 5 retained topics. Bootstrap used a foreground task tab and restored the original Linux.do tab; discovery remained on the inactive-tab path. The explicit hot task completed too quickly for a mid-flight visual marker capture, so the inactive-tab assertion remains backed by the dispatcher test plus real task/tab terminal evidence rather than a screenshot.
+- No Linux.do write endpoint or upstream state-changing action was called. Unrelated runtime cognition jobs later reached provider cooldown in the isolated backend; this happened after the formal discovery evaluation had terminally succeeded and is not counted as Linux.do discovery evidence.
 
 ## 最终结论
 

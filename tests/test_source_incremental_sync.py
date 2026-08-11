@@ -156,7 +156,7 @@ def _harness(
         memory_manager=memory,
         presence=presence,
         source_enabled=enabled or {source: True for source in SOURCE_ORDER},
-        scheduler_config=config or SchedulerConfig(),
+        scheduler_config=config or SchedulerConfig(source_incremental_enabled=True),
         profile_ready=lambda: True,
         init_active=lambda: False,
         runtime_config=runtime_config,
@@ -228,6 +228,7 @@ async def test_v2ex_incremental_requires_private_capability_and_passes_resolved_
     assert created.reason == "created"
     assert created.source == "v2ex"
     assert scheduler._test_enqueue_kwargs["v2ex"] == {  # type: ignore[attr-defined]
+        "incremental_owner": "scheduler",
         "username": "alice",
         "config": v2ex_config,
     }
@@ -257,16 +258,79 @@ async def test_due_tick_creates_one_task_and_not_due_reconciles_after_completion
 
 
 @pytest.mark.asyncio
+async def test_source_incremental_sync_is_globally_disabled_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scheduler, database, memory, presence, _clock, _kicks = _harness(
+        monkeypatch,
+        config=SchedulerConfig(),
+    )
+    database.conn.execute(
+        "INSERT INTO xhs_tasks "
+        "(id, type, payload_json, status, created_at) "
+        "VALUES ('scheduled-xhs', 'bootstrap_profile', "
+        '\'{"incremental": true, "incremental_owner": "scheduler"}\', '
+        "'pending', '2026-08-10T00:00:00+00:00')"
+    )
+    database.conn.execute(
+        "INSERT INTO dy_tasks "
+        "(id, type, payload_json, status, created_at) "
+        "VALUES ('legacy-scheduled-dy', 'bootstrap_profile', "
+        "'{\"incremental\": true}', 'pending', '2026-08-10T00:00:00+00:00')"
+    )
+    memory.state["source_incremental"]["active_task"] = {  # type: ignore[index]
+        "source": "dy",
+        "task_id": "legacy-scheduled-dy",
+    }
+    database.conn.execute(
+        "INSERT INTO reddit_tasks "
+        "(id, type, payload_json, status, created_at) "
+        "VALUES ('manual-reddit', 'bootstrap_events', "
+        "'{\"incremental\": true}', "
+        "'pending', '2026-08-10T00:00:01+00:00')"
+    )
+    database.conn.commit()
+
+    result = await scheduler.tick()
+
+    assert result.reason == "source_incremental_disabled"
+    assert presence.calls == []
+    assert scheduler._test_enqueue_calls == []  # type: ignore[attr-defined]
+    assert (
+        database.conn.execute("SELECT status FROM xhs_tasks WHERE id = 'scheduled-xhs'").fetchone()[
+            "status"
+        ]
+        == "failed"
+    )
+    assert (
+        database.conn.execute(
+            "SELECT status FROM dy_tasks WHERE id = 'legacy-scheduled-dy'"
+        ).fetchone()["status"]
+        == "failed"
+    )
+    assert (
+        database.conn.execute(
+            "SELECT status FROM reddit_tasks WHERE id = 'manual-reddit'"
+        ).fetchone()["status"]
+        == "pending"
+    )
+
+
+@pytest.mark.asyncio
 async def test_global_zero_and_per_source_zero_disable_independently(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    global_off = SchedulerConfig(source_incremental_hours=0)
+    global_off = SchedulerConfig(source_incremental_enabled=True, source_incremental_hours=0)
     scheduler, _db, _memory, _presence, _clock, _kicks = _harness(monkeypatch, config=global_off)
     assert (await scheduler.tick()).reason == "not_due"
 
     # Explicit None still exercises shared inheritance; Douyin's production
     # default is 0 so it never foregrounds an account task by surprise.
-    per_source_off = SchedulerConfig(xhs_incremental_hours=0, douyin_incremental_hours=None)
+    per_source_off = SchedulerConfig(
+        source_incremental_enabled=True,
+        xhs_incremental_hours=0,
+        douyin_incremental_hours=None,
+    )
     scheduler, _db, _memory, _presence, _clock, _kicks = _harness(
         monkeypatch, config=per_source_off
     )
@@ -280,7 +344,7 @@ async def test_douyin_incremental_sync_is_disabled_by_default(
 ) -> None:
     scheduler, _db, _memory, _presence, _clock, _kicks = _harness(
         monkeypatch,
-        config=SchedulerConfig(),
+        config=SchedulerConfig(source_incremental_enabled=True),
         enabled={source: source == "dy" for source in SOURCE_ORDER},
     )
 
@@ -293,7 +357,10 @@ async def test_douyin_incremental_sync_can_be_explicitly_enabled(
 ) -> None:
     scheduler, _db, _memory, _presence, _clock, _kicks = _harness(
         monkeypatch,
-        config=SchedulerConfig(douyin_incremental_hours=24),
+        config=SchedulerConfig(
+            source_incremental_enabled=True,
+            douyin_incremental_hours=24,
+        ),
         enabled={source: source == "dy" for source in SOURCE_ORDER},
     )
 
@@ -305,7 +372,11 @@ async def test_douyin_incremental_sync_can_be_explicitly_enabled(
 async def test_per_source_override_controls_actual_due_time(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    config = SchedulerConfig(source_incremental_hours=24, xhs_incremental_hours=2)
+    config = SchedulerConfig(
+        source_incremental_enabled=True,
+        source_incremental_hours=24,
+        xhs_incremental_hours=2,
+    )
     scheduler, database, _memory, _presence, clock, _kicks = _harness(
         monkeypatch,
         config=config,
@@ -328,7 +399,11 @@ async def test_linuxdo_interval_override_controls_actual_due_time(
     table, task_type, enqueue = scheduler_module._TASK_SPECS["linuxdo"]
     assert (table, task_type) == ("linuxdo_tasks", "bootstrap_events")
     assert callable(enqueue)
-    config = SchedulerConfig(source_incremental_hours=24, linuxdo_incremental_hours=2)
+    config = SchedulerConfig(
+        source_incremental_enabled=True,
+        source_incremental_hours=24,
+        linuxdo_incremental_hours=2,
+    )
     scheduler, database, _memory, _presence, clock, _kicks = _harness(
         monkeypatch,
         config=config,
@@ -405,6 +480,7 @@ async def test_linuxdo_incremental_four_table_flow_is_durable_and_idempotent(
 
     config = Config(data_dir=str(tmp_path / "runtime"))
     config.sources.linuxdo.enabled = True
+    config.scheduler.source_incremental_enabled = True
     config.scheduler.source_incremental_hours = 24
     monkeypatch.setattr("openbiliclaw.config.load_config", lambda *_a, **_kw: config)
 
@@ -516,7 +592,7 @@ async def test_linuxdo_incremental_four_table_flow_is_durable_and_idempotent(
 
 @pytest.mark.asyncio
 async def test_enabled_presence_profile_and_init_gates(monkeypatch: pytest.MonkeyPatch) -> None:
-    disabled = SchedulerConfig(enabled=False)
+    disabled = SchedulerConfig(enabled=False, source_incremental_enabled=True)
     scheduler, _db, _memory, presence, _clock, _kicks = _harness(monkeypatch, config=disabled)
     assert (await scheduler.tick()).reason == "scheduler_disabled"
     assert presence.calls == []
@@ -544,7 +620,10 @@ async def test_enabled_presence_profile_and_init_gates(monkeypatch: pytest.Monke
 async def test_round_robin_fairness_uses_persisted_cursor(monkeypatch: pytest.MonkeyPatch) -> None:
     scheduler, database, _memory, _presence, clock, _kicks = _harness(
         monkeypatch,
-        config=SchedulerConfig(douyin_incremental_hours=24),
+        config=SchedulerConfig(
+            source_incremental_enabled=True,
+            douyin_incremental_hours=24,
+        ),
     )
     seen: list[str] = []
     for _ in SOURCE_ORDER:
@@ -577,8 +656,15 @@ async def test_reused_or_none_outcome_does_not_stamp_schedule_state(
     )
     original = deepcopy(memory.state)
 
-    def outcome(_db: Any, *, force: bool, incremental: bool) -> BootstrapEnqueueResult:
+    def outcome(
+        _db: Any,
+        *,
+        force: bool,
+        incremental: bool,
+        incremental_owner: str,
+    ) -> BootstrapEnqueueResult:
         assert force and incremental
+        assert incremental_owner == "scheduler"
         return BootstrapEnqueueResult(task_id=task_id, created=created, reason=reason)
 
     table, task_type, _ = scheduler_module._TASK_SPECS["xhs"]
@@ -599,12 +685,22 @@ async def test_exhausted_source_budget_does_not_starve_next_due_source(
 ) -> None:
     scheduler, database, memory, _presence, clock, kicks = _harness(
         monkeypatch,
-        config=SchedulerConfig(douyin_incremental_hours=24),
+        config=SchedulerConfig(
+            source_incremental_enabled=True,
+            douyin_incremental_hours=24,
+        ),
     )
     table, task_type, _ = scheduler_module._TASK_SPECS["xhs"]
 
-    def exhausted(_db: Any, *, force: bool, incremental: bool) -> BootstrapEnqueueResult:
+    def exhausted(
+        _db: Any,
+        *,
+        force: bool,
+        incremental: bool,
+        incremental_owner: str,
+    ) -> BootstrapEnqueueResult:
         assert force and incremental
+        assert incremental_owner == "scheduler"
         return BootstrapEnqueueResult(None, False, "enqueue_failed")
 
     monkeypatch.setattr(
@@ -629,8 +725,15 @@ async def test_enqueue_exception_does_not_stamp_schedule_state(
     scheduler, _db, memory, _presence, _clock, kicks = _harness(monkeypatch)
     original = deepcopy(memory.state)
 
-    def enqueue(_db: Any, *, force: bool, incremental: bool) -> BootstrapEnqueueResult:
+    def enqueue(
+        _db: Any,
+        *,
+        force: bool,
+        incremental: bool,
+        incremental_owner: str,
+    ) -> BootstrapEnqueueResult:
         assert force and incremental
+        assert incremental_owner == "scheduler"
         raise RuntimeError("database unavailable")
 
     table, task_type, _ = scheduler_module._TASK_SPECS["xhs"]
@@ -864,8 +967,10 @@ async def test_database_enqueue_runs_off_event_loop(monkeypatch: pytest.MonkeyPa
         *,
         force: bool,
         incremental: bool,
+        incremental_owner: str,
     ) -> BootstrapEnqueueResult:
         assert force and incremental and table and task_type
+        assert incremental_owner == "scheduler"
         worker_threads.append(threading.get_ident())
         database.conn.execute(
             "INSERT INTO xhs_tasks (id, type, payload_json, status, created_at) "

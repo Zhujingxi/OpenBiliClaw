@@ -211,6 +211,8 @@ class TestConfigDefaults:
         config = Config()
         loaded_without_override = _build_config({"scheduler": {}})
 
+        assert config.scheduler.source_incremental_enabled is False
+        assert loaded_without_override.scheduler.source_incremental_enabled is False
         assert config.scheduler.source_incremental_hours == 24
         assert config.scheduler.xhs_incremental_hours is None
         assert config.scheduler.douyin_incremental_hours == 0
@@ -219,12 +221,13 @@ class TestConfigDefaults:
         assert config.scheduler.zhihu_incremental_hours is None
         assert config.scheduler.reddit_incremental_hours is None
 
-    def test_example_config_disables_douyin_incremental_sync_by_default(self) -> None:
+    def test_example_config_disables_all_periodic_source_sync_by_default(self) -> None:
         example_path = Path(__file__).parents[1] / "config.example.toml"
 
         with example_path.open("rb") as handle:
             scheduler = tomllib.load(handle)["scheduler"]
 
+        assert scheduler["source_incremental_enabled"] is False
         assert scheduler["source_incremental_hours"] == 24
         assert "xhs_incremental_hours" not in scheduler
         assert scheduler["douyin_incremental_hours"] == 0
@@ -232,16 +235,22 @@ class TestConfigDefaults:
         assert "zhihu_incremental_hours" not in scheduler
         assert "reddit_incremental_hours" not in scheduler
 
-    def test_default_config_persists_douyin_incremental_sync_disabled(self, tmp_path: Path) -> None:
+    def test_default_config_persists_periodic_source_sync_disabled(self, tmp_path: Path) -> None:
         target = tmp_path / "config.toml"
 
         save_config(Config(), target)
 
-        assert "douyin_incremental_hours = 0" in target.read_text(encoding="utf-8")
-        assert load_config(target).scheduler.douyin_incremental_hours == 0
+        rendered = target.read_text(encoding="utf-8")
+        loaded = load_config(target)
+
+        assert "source_incremental_enabled = false" in rendered
+        assert "douyin_incremental_hours = 0" in rendered
+        assert loaded.scheduler.source_incremental_enabled is False
+        assert loaded.scheduler.douyin_incremental_hours == 0
 
     def test_scheduler_source_incremental_config_round_trip(self, tmp_path: Path) -> None:
         config = Config()
+        config.scheduler.source_incremental_enabled = True
         config.scheduler.source_incremental_hours = 37
         config.scheduler.xhs_incremental_hours = 0
         config.scheduler.douyin_incremental_hours = 168
@@ -254,6 +263,7 @@ class TestConfigDefaults:
         rendered = target.read_text(encoding="utf-8")
         loaded = load_config(target)
 
+        assert loaded.scheduler.source_incremental_enabled is True
         assert loaded.scheduler.source_incremental_hours == 37
         assert loaded.scheduler.xhs_incremental_hours == 0
         assert loaded.scheduler.douyin_incremental_hours == 168
@@ -271,6 +281,7 @@ class TestConfigDefaults:
         target = tmp_path / "config.toml"
         target.write_text("[scheduler]\n", encoding="utf-8")
         values = {
+            "OPENBILICLAW_SCHEDULER_SOURCE_INCREMENTAL_ENABLED": "true",
             "OPENBILICLAW_SCHEDULER_SOURCE_INCREMENTAL_HOURS": "1",
             "OPENBILICLAW_SCHEDULER_XHS_INCREMENTAL_HOURS": "2",
             "OPENBILICLAW_SCHEDULER_DOUYIN_INCREMENTAL_HOURS": "3",
@@ -283,6 +294,7 @@ class TestConfigDefaults:
 
         loaded = load_config(target)
 
+        assert loaded.scheduler.source_incremental_enabled is True
         assert loaded.scheduler.source_incremental_hours == 1
         assert loaded.scheduler.xhs_incremental_hours == 2
         assert loaded.scheduler.douyin_incremental_hours == 3

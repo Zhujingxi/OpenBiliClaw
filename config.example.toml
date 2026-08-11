@@ -439,10 +439,12 @@ pool_target_count = 300
 copy_ready_target_count = 90
 # Low-frequency account sync interval for history / favorites / following
 account_sync_interval_hours = 6
-# Extension-online periodic account bootstrap refresh. This only runs while
-# the OpenBiliClaw browser extension runtime-stream is connected; it does not
-# perform browser-free/private-account synchronization. 0 disables all five
-# sources. Allowed values: integer 0..168 hours.
+# Extension-online periodic account bootstrap refresh is globally disabled by
+# default because browser-backed tasks may foreground a tab and steal focus.
+# Set this to true only when that behavior is acceptable. The interval below
+# takes effect only after this explicit opt-in.
+source_incremental_enabled = false
+# 0 also disables all sources after opt-in. Allowed values: 0..168 hours.
 source_incremental_hours = 24
 # Per-source overrides: omit (or set through the API to null) to inherit the
 # global interval; 0 disables only that source. Douyin is the exception: its
