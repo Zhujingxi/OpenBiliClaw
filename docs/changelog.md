@@ -6,6 +6,10 @@
 
 ## 未发布
 
+暂无。
+
+## v0.3.204：后台来源调度与搜索修复（2026-08-11）
+
 - **修复 V2EX 三种关键词模式的 Search 空召回**：正式 V2EX Search 不再被 inspiration 关键词开关误关；Exa / You 不可用时，匿名 latest/hot fallback 对 planner 多段长词采用整句精确优先、非通用核心词受限放宽，并继续交给共享 evaluator / admission。`keyword-inspiration-preview --platform v2ex` 现可用且在来源启用时注入只读 V2EX grounding client；同步修正 CLI 平台帮助与模块文档。
 - **Linux.do 后台任务瞬时 listener 竞态修复**：同源 task tab 在 Discourse challenge / SPA 初始化期间发送消息失败时，扩展会在同一 task ID 上短间隔重试，并最多重载一次原 runner tab；只有有界恢复失败才回传 `sendMessage_failed`，避免闹钟调度把瞬时 content-script 缺失误判为任务失败后连续制造重复任务。Linux.do CLI 预览同时按 `linuxdo-*` strategy 过滤，避免显示共享候选管线中其它来源的旧条目。
 - **所有扩展账号周期回拉改为默认关闭**：新增 `scheduler.source_incremental_enabled=false` 安全总开关；旧配置即使保留 `source_incremental_hours=24`，未显式 opt-in 也不会检查扩展 presence、创建账号 bootstrap 任务或打开平台标签页。scheduler-owned 任务带独立标记，升级前由调度状态记录的残留任务也会在领取前终止，避免知乎、Reddit、Linux.do 等来源在用户浏览其它页面时切换标签页并抢走焦点；手动增量任务不受误伤。手动初始化、手动 `fetch-*` 和正常 discovery 保持不变；设为 `true` 后才恢复原有全局 / 逐源周期。

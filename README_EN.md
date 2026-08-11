@@ -189,12 +189,11 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.203 (2026-08-11)**
+📌 Latest: **v0.3.204 (2026-08-11)**
 
-- **Linux.do is now a complete read-only source** — public discovery works signed out, while signed-in sessions add bookmarks, likes, and read history through same-origin GETs.
-- **V2EX adds public discovery and four personal-signal scopes** — anonymous API / feeds, optional PAT verification, and account-isolated favorites / Node affinity are supported.
-- **Weibo adds public discovery and init-only personal bootstrap** — search, hot, and creator results enter the shared pool anonymously; a signed-in same-origin task can import favorites, follows, and mentions without sending cookies to the backend.
-- **Browser tasks are more resilient** — cross-extension single-flight, MV3 reload recovery, partial-result preservation, and affirmative-empty checks are now shared safeguards.
+- **Periodic account refresh is now opt-in** — upgrades no longer open platform tabs automatically; manual init, manual sync, and normal discovery are unchanged.
+- **Linux.do background discovery is more resilient** — transient content-script readiness races recover within the same task and tab instead of spawning repeated failures.
+- **V2EX Search works across all three keyword modes** — mixed, inspiration, and traditional keywords now reach formal search and the shared evaluation pipeline.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
