@@ -1,6 +1,8 @@
 # OpenBiliClaw — 项目规格说明书 (SPEC) v0.3
 
 > *你的跨平台 AI 内容朋友，比你更懂你想看什么* 🎯
+>
+> Refactor status: `core/`、`infrastructure/`、`ai/` 与 `access/` target boundaries 已作为未接线模块落地；本 SPEC 下方生产数据流仍描述 legacy composition。Provider Access host/API/config cutover 等待 Plans 13/15，因此当前图不增加尚不存在的生产连线。
 
 ---
 

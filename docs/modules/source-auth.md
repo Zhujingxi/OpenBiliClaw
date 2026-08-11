@@ -1,5 +1,9 @@
 # 平台来源接入契约
 
+> 本文描述**当前生产** `api/source_auth/` 行为。目标 Provider Access typed boundary 已在
+> `src/openbiliclaw/access/` 落地但尚未接线，契约与批准的 host-cutover deviation 见
+> [Provider Access](provider-access.md)。Plan 13 切换前两者不双写，旧 source-auth 仍是唯一用户可见路径。
+
 ## 概述
 
 `src/openbiliclaw/api/source_auth/` 回答一个问题：**每个平台来源的凭据现在能不能用，以及这个结论有多可信。**

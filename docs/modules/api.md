@@ -2,7 +2,7 @@
 
 ## 概述
 
-`src/openbiliclaw/api/` 暴露本地 FastAPI 契约，并把 UI 请求编排到 durable storage、Soul、Dialogue 与 runtime。本文记录配置、迁移、推荐和对话等公开端点；通用鉴权见 [api-auth.md](api-auth.md)，初始化端点见 [init.md](init.md)。
+`src/openbiliclaw/api/` 暴露本地 FastAPI 契约，并把 UI 请求编排到 durable storage、Soul、Dialogue 与 runtime。本文记录配置、迁移、推荐和对话等公开端点；通用鉴权见 [api-auth.md](api-auth.md)，初始化端点见 [init.md](init.md)。目标 [Provider Access](provider-access.md) 已落地 Python boundary，但按批准 deviation 等 Plan 13 host cutover；本阶段没有新增 route/schema，现有 `api/source_auth/` 仍是生产入口。
 
 ## 初始化期间的配置探测
 

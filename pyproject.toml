@@ -180,7 +180,7 @@ module = ["tests.*"]
 disallow_any_explicit = false
 
 [[tool.mypy.overrides]]
-module = ["tests.ai.*", "tests.core.*", "tests.infrastructure.*"]
+module = ["tests.access.*", "tests.ai.*", "tests.core.*", "tests.infrastructure.*"]
 disallow_any_explicit = true
 
 [tool.pytest.ini_options]

@@ -39,6 +39,20 @@ def test_vault_store_resolve_replace_delete_and_restart(
         restarted.resolve(secret_id, bytes)
 
 
+async def test_vault_async_resolution_keeps_scope_then_zeroes_buffer(tmp_path: Path) -> None:
+    vault = CredentialVault(ProtectedFileBackend(tmp_path / "async-secrets.json"))
+    secret_id = vault.store(b"scoped-value")
+    retained: list[memoryview] = []
+
+    async def inspect(value: memoryview) -> bytes:
+        retained.append(value)
+        assert bytes(value) == b"scoped-value"
+        return bytes(value)
+
+    assert await vault.resolve_async(secret_id, inspect) == b"scoped-value"
+    assert bytes(retained[0]) == bytes(len(b"scoped-value"))
+
+
 def test_file_backend_refuses_unsafe_permissions(tmp_path: Path) -> None:
     path = tmp_path / "secrets.json"
     path.write_text("{}", encoding="utf-8")

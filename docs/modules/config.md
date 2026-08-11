@@ -17,8 +17,10 @@ Target Infrastructure 的 `CredentialVault` 只接受形如 `cred_<32 hex>` 的 
 `AppSettings` 只能保存这类 reference，不能保存 secret material。Vault 优先使用 OS keyring，
 不可用时使用仅 owner 可访问（POSIX directory `0700`、file `0600`）的独立 JSON fallback；
 secret 只在 trusted callback 的短暂只读 memory view 内可见，退出后临时 byte buffer 会清零。
-该 vault 当前尚未接入 legacy `Config`，所以不改变现有配置/API 行为；接线时不得把 vault 内容
-写入 `config.toml`、SQLite 通用表、API schema、模型消息或日志。
+Target `access/` 的 manual method 已在未接线 vertical slice 中使用该 vault：form value 直接写 vault，
+`CredentialAccessHandle` 只保存 reference。它仍未接入 legacy `Config` 或生产 composition，因此不新增
+TOML/env 字段，也不改变现有配置/API 行为；Plan 13/15 接线时不得把 vault 内容写入
+`config.toml`、SQLite 通用表、API schema、模型消息或日志。
 
 Target AI Runtime 本阶段不新增 TOML shape：`RouteTable`、capability matrix 与 `RunPolicy` 由未来 model-provider plugins / Composition 显式构造。当前 `[llm]` 和 `LLMRegistry` 配置行为完全不变；新 route 只保存非秘密 instance/provider/capability metadata，不能保存 API Key 或 credential reference。详见 [AI Runtime](ai-runtime.md)。
 

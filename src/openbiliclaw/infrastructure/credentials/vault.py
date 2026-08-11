@@ -7,7 +7,7 @@ import uuid
 from typing import TYPE_CHECKING, TypeVar
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
 
     from .keyring import CredentialBackend
 
@@ -38,6 +38,18 @@ class CredentialVault:
         secret = self._backend.get(secret_id)
         try:
             return callback(memoryview(secret).toreadonly())
+        finally:
+            secret[:] = b"\0" * len(secret)
+
+    async def resolve_async(
+        self, secret_id: str, callback: Callable[[memoryview], Awaitable[T]]
+    ) -> T:
+        """Keep a temporary read-only view alive for one trusted async callback."""
+
+        self._validate_id(secret_id)
+        secret = self._backend.get(secret_id)
+        try:
+            return await callback(memoryview(secret).toreadonly())
         finally:
             secret[:] = b"\0" * len(secret)
 
