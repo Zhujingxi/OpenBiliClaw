@@ -773,7 +773,8 @@ X (Twitter) 与其它平台不同：init 阶段**没有 bootstrap 导入任务**
 - `--bangumi-username <name>`：本次初始化读取的公开用户名，并在启用时写回配置；不提供时可回退 `[sources.bangumi].username`。
 - `--bangumi-token <token>`：Bangumi 个人令牌（推荐，自动识别当前用户并可读私密收藏）；不提供时可回退 `[sources.bangumi].access_token`。经 `/v0/me` 校验通过后写回配置；坏令牌当场拒绝。
 - `--bilibili-favorite-limit N` / `--bilibili-follow-limit N`：覆盖 B 站收藏 / 关注初始化信号上限，默认各 `300`；`0` 表示跳过对应信号。
-- `--force`：已初始化时仍强制重新初始化。默认已初始化时，交互终端会先二次确认（`检测到系统已初始化` + y/N，默认 No，选 No 直接退出、不做任何改动）；`--force` 跳过确认，并按「重新初始化」语义执行——重新拉取所选平台数据、重建完整画像并补足首轮发现池，**现有事件、收藏与对话历史全部保留**，仅覆盖画像与推荐池。非交互（脚本化）终端不弹确认，保持原有「直接重跑」行为；只想基于已有事件重跑画像可优先用 `rebuild-profile`（不重新拉数据，更省）。
+- `--force`：已初始化时仍强制重新初始化。默认已初始化时，交互终端会先二次确认（`检测到系统已初始化` + y/N，默认 No，选 No 直接退出、不做任何改动）；`--force` 跳过确认，并按「重新初始化」语义执行——重新拉取所选平台数据、重建完整画像并补足首轮发现池，**现有事件、收藏与对话历史全部保留**，仅覆盖画像与推荐池（**旧推荐池会被清空并按新画像重建**）。非交互（脚本化）终端不弹确认，保持原有「直接重跑」行为（不传 `--force` 时也不清池）；只想基于已有事件重跑画像可优先用 `rebuild-profile`（不重新拉数据，更省）。
+- `--reset-cognition`：重新初始化时同时清空长期 awareness / insight 认知层（换账号或大改兴趣时建议），仅配合 `--force` 有意义；不清空时旧 LLM 观察继续作为新画像的构建上下文。
 - `OPENBILICLAW_NO_BILIBILI=1` / `OPENBILICLAW_NO_XHS=1` / `OPENBILICLAW_NO_DOUYIN=1` / `OPENBILICLAW_NO_YOUTUBE=1` / `OPENBILICLAW_NO_X=1` / `OPENBILICLAW_NO_ZHIHU=1` / `OPENBILICLAW_NO_REDDIT=1` / `OPENBILICLAW_NO_LINUXDO=1` / `OPENBILICLAW_NO_BANGUMI=1`：永久跳过对应源；作为持久禁用开关，它优先于同一来源的 `--yes-*`。
 - `OPENBILICLAW_XHS_BOOTSTRAP_DEDUPE_HOURS`：小红书 `bootstrap_profile` 近期任务复用窗口，默认 `6` 小时；设为 `0` 可关闭复用。
 - `OPENBILICLAW_DY_BOOTSTRAP_DEDUPE_HOURS` / `OPENBILICLAW_YT_BOOTSTRAP_DEDUPE_HOURS`：抖音 / YouTube `bootstrap_profile` 近期任务复用窗口，默认 `6` 小时；抖音已 `degraded` 的 completed 结果不参与复用；设为 `0` 可关闭复用。

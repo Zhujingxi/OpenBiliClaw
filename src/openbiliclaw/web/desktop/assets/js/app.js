@@ -2836,8 +2836,10 @@
         showToast("系统尚未初始化完成；请先到「推荐」页完成初始化。");
         return;
       }
+      const resetCognition = $("#reinitResetCognition")?.checked === true;
       const confirmed = window.confirm(
-        "将重新拉取所选平台的数据、重建完整画像并补足首轮发现池（现有事件、收藏与对话历史保留），并消耗较多 AI 调用。继续吗？"
+        "将重新拉取所选平台的数据、重建完整画像并补足首轮发现池。现有推荐池会按新画像清空重建；现有事件、收藏、对话历史与手动编辑保留。并消耗较多 AI 调用。继续吗？" +
+        (resetCognition ? "\n\n已勾选「同时清空旧认知观察与洞察」：旧的 LLM 观察笔记与洞察将被删除，本轮重新生成。" : "")
       );
       if (!confirmed) return;
       const btn = $("#reinitBtn");
@@ -2845,10 +2847,12 @@
       if (btn) btn.disabled = true;
       if (statusEl) statusEl.textContent = "正在启动重新初始化…";
       try {
+        const payload = { force: true };
+        if (resetCognition) payload.reset_cognition = true;
         await requestJsonStrict(ENDPOINTS.startInit, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ force: true }),
+          body: JSON.stringify(payload),
           timeoutMs: 60000
         });
         showToast("重新初始化已开始，正在重新拉取数据并重建画像");

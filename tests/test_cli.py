@@ -257,7 +257,9 @@ def test_ledger_command_is_registered(runner: CliRunner) -> None:
 def test_init_command_exposes_force_option(runner: CliRunner) -> None:
     result = runner.invoke(app, ["init", "--help"])
     assert result.exit_code == 0
-    assert "--force" in _registered_option_names("init")
+    options = _registered_option_names("init")
+    assert "--force" in options
+    assert "--reset-cognition" in options
     assert "重新初始化" in result.output
 
 

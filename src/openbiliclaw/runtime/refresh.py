@@ -233,6 +233,7 @@ class SupportsEventDatabase(Protocol):
     def count_recommendations(self) -> int: ...
     def count_unread_recommendations(self) -> int: ...
     def count_pool_candidates(self, *, xhs_self_nickname: str = "") -> int: ...
+    def mark_pool_purged_by_reinit(self) -> int: ...
     def count_pool_readiness(self, *, xhs_self_nickname: str = "") -> dict[str, int]: ...
     def count_pool_candidates_by_source(self) -> dict[str, int]: ...
     def count_pool_available_candidates_by_source(
@@ -765,6 +766,7 @@ class ContinuousRefreshController:
         *,
         fully_parallel: bool = True,
         progress_callback: Callable[[int, int, str], Awaitable[None] | None] | None = None,
+        purge_pool: bool = False,
     ) -> int:
         """Backfill the initial discovery pool for guided init.
 
@@ -779,6 +781,10 @@ class ContinuousRefreshController:
         synchronous expression-copy drain and only succeeds once at least one
         canonical pool row is serviceable. Returns the total number of items
         discovered.
+
+        ``purge_pool`` retires every active pool row first (force re-init):
+        rows scored under the previous profile must stop being served, and the
+        backfill would otherwise top out immediately against the stale pool.
         """
 
         async def _report(done: int, total: int, note: str) -> None:
@@ -795,6 +801,8 @@ class ContinuousRefreshController:
 
         discovered_count = 0
         async with self._refresh_lock:
+            if purge_pool:
+                self.database.mark_pool_purged_by_reinit()
             copy_error: BaseException | None = None
             for strategies in _INIT_DISCOVERY_PLAN:
                 current = self.database.count_pool_candidates()

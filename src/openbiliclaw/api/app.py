@@ -5077,6 +5077,8 @@ def create_app(
         bangumi_username: str = "",
         bangumi_token: str = "",
         v2ex_username: str = "",
+        force: bool = False,
+        reset_cognition: bool = False,
     ) -> None:
         """Sole status/event writer for an API-launched guided init (gui-init
         §5f). Drives the shared ``run_guided_init`` through the coordinator and
@@ -5150,6 +5152,12 @@ def create_app(
                 discover_backfill=_api_discover_backfill,
                 coordinator=coord,
                 run_id=run_id,
+                # Force re-init retires the old recommendation pool so the
+                # fresh profile immediately yields new recommendations.
+                purge_pool=force,
+                # Optional: clear old awareness/insight observations (e.g.
+                # from a previous account) before the new profile build.
+                reset_cognition=reset_cognition,
             )
             discovery_partial = bool(result.discovery_error)
             dy_status = str(getattr(result, "dy_status", "skipped") or "skipped")
@@ -5271,6 +5279,12 @@ def create_app(
         except Exception:
             body = {}
         force = bool(body.get("force", False)) if isinstance(body, dict) else False
+        # Re-init option: clear the long-term awareness / insight layers before
+        # the rebuild so old observations (e.g. from a previous account) do not
+        # leak into the new profile. Only meaningful with ``force``.
+        reset_cognition = (
+            bool(body.get("reset_cognition", False)) if isinstance(body, dict) else False
+        )
         # Optional per-run platform selection from the extension checkboxes. A
         # list (even empty) is an explicit choice; absent → None = use all
         # enabled (CLI / legacy clients). Sent source keys are explicit opt-ins
@@ -5698,6 +5712,8 @@ def create_app(
                     effective_bangumi_username,
                     effective_bangumi_token,
                     effective_v2ex_username,
+                    force=force,
+                    reset_cognition=reset_cognition,
                 ),
             )
         else:
@@ -5708,6 +5724,8 @@ def create_app(
                     effective_bangumi_username,
                     effective_bangumi_token,
                     effective_v2ex_username,
+                    force=force,
+                    reset_cognition=reset_cognition,
                 )
             )
         coord.attach_task(run_id, task)

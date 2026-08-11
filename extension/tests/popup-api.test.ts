@@ -203,7 +203,12 @@ test("popup settings re-init calls POST /api/init with force:true after confirm"
   assert.match(html, /id="cfgReinitStatus"/);
   // A confirm dialog guards the destructive re-pull, then force:true is sent.
   assert.match(source, /window\.confirm\(/);
-  assert.match(source, /startInit\(\{ force: true \}\)/);
+  assert.match(source, /const payload = \{ force: true \};/);
+  // Optional awareness/insight reset checkbox feeds reset_cognition.
+  assert.match(html, /id="cfgReinitResetCognition"/);
+  assert.match(html, /data-settings-ignore-dirty/);
+  assert.match(source, /payload\.reset_cognition = true/);
+  assert.match(source, /startInit\(payload\)/);
   // After a successful start the popup switches to the recommend tab so the
   // existing init progress panel becomes visible.
   assert.match(source, /setActiveTab\("recommend"\)/);

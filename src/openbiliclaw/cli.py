@@ -2777,10 +2777,14 @@ async def _run_init_discovery_backfill_async(
     target_pool_count: int = 100,
     label_suffix: str = "",
     progress_callback: Callable[[int, int, str], Awaitable[None] | None] | None = None,
+    purge_pool: bool = False,
 ) -> int:
     """Build the first serviceable discovery pool from the committed profile."""
     from openbiliclaw.discovery.pool_snapshot import build_cold_start_pool_snapshot
     from openbiliclaw.runtime.refresh import InitialPoolUnavailableError
+
+    if purge_pool:
+        _get_runtime_database().mark_pool_purged_by_reinit()
 
     async def _report(done: int, total: int, note: str) -> None:
         if progress_callback is None:
@@ -7698,6 +7702,8 @@ async def run_guided_init(
     profile_build_timeout_seconds: float = _INIT_PROFILE_BUILD_TIMEOUT_SECONDS,
     discovery_timeout_seconds: float = _INIT_DISCOVERY_TIMEOUT_SECONDS,
     collection_timeout_seconds: float = _INIT_COLLECTION_TIMEOUT_SECONDS,
+    purge_pool: bool = False,
+    reset_cognition: bool = False,
 ) -> InitResult:
     """Shared async init pipeline (gui-init spec §1).
 
@@ -7726,6 +7732,13 @@ async def run_guided_init(
     lock). When ``coordinator``/``run_id`` are supplied, stage transitions
     and enqueued bootstrap task ids are reported for live GUI progress;
     run lifecycle (mark_running / complete / fail) stays with the caller.
+
+    Re-init switches (used by ``init --force`` / ``POST /api/init
+    {force:true}``): ``purge_pool`` retires every active recommendation pool
+    row before stage 4 so the fresh profile immediately yields new
+    recommendations; ``reset_cognition`` clears the long-term awareness /
+    insight layers before stage 2 so old LLM observations (e.g. from a
+    previous account) do not leak into the new profile build.
     """
 
     import logging
@@ -8641,6 +8654,21 @@ async def run_guided_init(
     await _stage_started(2)
     _print_section_title("2/4 分析偏好")
     console.print(f"  总信号量: [green]{len(events)}[/green] 条事件")
+    # Re-init with reset_cognition: retire the long-term awareness / insight
+    # layers BEFORE this run's analysis so old LLM observations (e.g. from a
+    # previous account) do not leak into the new profile build. This run's
+    # fresh drafts are persisted during stage 2 and become the new baseline.
+    if reset_cognition:
+        try:
+            for layer_name in ("awareness", "insight"):
+                layer = memory.get_layer(layer_name)
+                layer.data.clear()
+                layer.save()
+            console.print(
+                "  [dim]--reset-cognition：已清空旧认知观察与洞察层，本轮分析将重新生成。[/dim]"
+            )
+        except Exception:
+            logger.warning("reset_cognition layer clear failed", exc_info=True)
     profile_analysis_concurrency = _profile_analysis_concurrency(soul_engine)
     # Progress-aware deadline: the idle limit is what actually catches a wedged
     # gateway, so the absolute ceiling can stay generous for slow-but-healthy
@@ -8950,13 +8978,20 @@ async def run_guided_init(
         signature = inspect.signature(discover_backfill)
     except (TypeError, ValueError):
         accepts_progress_callback = True
+        accepts_purge_pool = True
     else:
         accepts_progress_callback = "progress_callback" in signature.parameters or any(
             parameter.kind is inspect.Parameter.VAR_KEYWORD
             for parameter in signature.parameters.values()
         )
+        accepts_purge_pool = "purge_pool" in signature.parameters or any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in signature.parameters.values()
+        )
     if accepts_progress_callback:
         backfill_kwargs["progress_callback"] = _stage4_progress
+    if purge_pool and accepts_purge_pool:
+        backfill_kwargs["purge_pool"] = True
 
     # Stage 4 is best-effort once the full profile exists: timeout/failure is
     # terminal *partial success*, and clients may enter the app while the
@@ -9197,6 +9232,14 @@ def init(
             "交互终端会二次确认。"
         ),
     ),
+    reset_cognition: bool = typer.Option(
+        False,
+        "--reset-cognition",
+        help=(
+            "重新初始化时同时清空旧认知观察与洞察层（换账号或大改兴趣时建议）。"
+            "仅配合 --force 有意义。"
+        ),
+    ),
 ) -> None:
     """初始化或重新初始化：拉取历史、生成画像并补足首轮发现池.
 
@@ -9249,6 +9292,14 @@ def init(
             "[yellow]  本次为重新初始化：将重新拉取所选平台数据，并基于最新信号重建完整画像"
             "（现有事件、收藏与对话历史保留）。[/yellow]"
         )
+        console.print(
+            "[dim]  现有推荐池将按新画像重建：旧画像产出的推荐会被清空，"
+            "本轮基于新画像重新发现并生成首轮推荐。[/dim]"
+        )
+        if reset_cognition:
+            console.print(
+                "[dim]  --reset-cognition：将清空旧认知观察与洞察层，本轮分析重新生成。[/dim]"
+            )
     else:
         _print_page_title("初始化 OpenBiliClaw", "首次运行引导")
     stage1_label = (
@@ -9602,6 +9653,8 @@ def init(
                 include_weibo=include_weibo,
                 target_pool_count=_INIT_POOL_TARGET_COUNT,
                 discover_backfill=_run_init_discovery_backfill_async,
+                purge_pool=force,
+                reset_cognition=reset_cognition,
             )
         )
     except GuidedInitError as exc:

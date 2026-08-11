@@ -36,7 +36,8 @@ def test_desktop_reinit_sends_force_payload_after_confirm() -> None:
     assert "handleDesktopReinitClick" in app_js
     assert 'safeBind("#reinitBtn", "click"' in app_js
     # The backend's already-initialized guard is only bypassed by force:true.
-    assert "JSON.stringify({ force: true })" in app_js
+    assert "JSON.stringify(payload)" in app_js
+    assert "force: true" in app_js
     # A confirm dialog guards the destructive re-pull.
     assert "window.confirm(" in app_js
     # After a successful start the user is returned to the recommend tab where
@@ -50,3 +51,15 @@ def test_desktop_reinit_guards_running_and_requires_initialized() -> None:
     assert "系统尚未初始化完成；请先到「推荐」页完成初始化" in app_js
     # The status line reflects the authoritative init-status snapshot.
     assert "renderSettingsReinitStatus" in app_js
+
+
+def test_desktop_reinit_offers_cognition_reset_option() -> None:
+    html = _index_html()
+    app_js = _app_js()
+    # Optional awareness/insight reset checkbox, excluded from the settings
+    # dirty tracker, wired into the force payload.
+    assert 'id="reinitResetCognition"' in html
+    assert "data-settings-ignore-dirty" in html
+    assert "const resetCognition = " in app_js
+    assert "payload.reset_cognition = true" in app_js
+    assert "清空旧认知观察" in app_js

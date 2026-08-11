@@ -1275,6 +1275,8 @@
     .settings-reinit-copy { margin: 0; color: var(--fg-2); line-height: 1.65; overflow-wrap: anywhere; }
     .settings-reinit-actions { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); }
     .settings-reinit-actions button:disabled { opacity: 0.55; cursor: wait; }
+    .settings-reinit-option { display: inline-flex; align-items: center; gap: 6px; color: var(--fg-2); font-size: var(--text-sm); cursor: pointer; }
+    .settings-reinit-option input { accent-color: var(--accent); }
     /* Verification answers in three, not two. "Could not tell" — a dead proxy, a
        closed browser, a throttled platform, YouTube needing no login at all — is
        not a failure, and painting it red sends users off to delete a cookie that

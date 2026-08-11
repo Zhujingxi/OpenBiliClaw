@@ -16504,7 +16504,7 @@ class TestGuidedInitEndpoints:
         prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["bilibili"])
         app, db = self._make_app(tmp_path, profile_ready=True, prereqs=prereqs)
         with TestClient(app) as client:
-            resp = client.post("/api/init", json={"force": True})
+            resp = client.post("/api/init", json={"force": True, "reset_cognition": True})
             assert resp.status_code == 202, resp.text
             body = resp.json()
             assert body["run_id"]

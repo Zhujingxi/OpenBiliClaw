@@ -4542,7 +4542,7 @@ class Database:
                 discovered_at AS created_at
             FROM content_cache
             WHERE ({where})
-              AND COALESCE(pool_status, '') NOT IN ('purged_by_dislike')
+              AND COALESCE(pool_status, '') NOT IN ('purged_by_dislike', 'purged_by_reinit')
               AND datetime(COALESCE(NULLIF(discovered_at, ''), '1970-01-01'))
                   >= datetime('now', ?)
             ORDER BY discovered_at DESC
@@ -8888,6 +8888,29 @@ class Database:
               AND COALESCE(pool_status, 'fresh') = 'fresh'
             """,
             clean,
+        )
+        return cursor.rowcount
+
+    def mark_pool_purged_by_reinit(self) -> int:
+        """Retire every active pool row after a forced re-init.
+
+        A force re-init rebuilds the profile, so rows scored / copy-written
+        under the previous profile must stop being served immediately —
+        otherwise old recommendations linger and (because the backfill only
+        tops up to a small target, ``_INIT_POOL_TARGET_COUNT``) crowd out
+        fresh ones. Follows the ``purged_by_dislike`` precedent: rows stay in
+        ``content_cache`` for audit / dedup but are excluded from the
+        available-pool gate (which requires ``pool_status = 'fresh'``) and
+        from serve / recall paths.
+
+        Returns the number of rows retired.
+        """
+        cursor = self._execute_write(
+            """
+            UPDATE content_cache
+            SET pool_status = 'purged_by_reinit'
+            WHERE COALESCE(pool_status, 'fresh') IN ('fresh', 'shown', 'suppressed')
+            """
         )
         return cursor.rowcount
 

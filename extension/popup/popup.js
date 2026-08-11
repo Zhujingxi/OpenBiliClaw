@@ -10041,6 +10041,7 @@ function bindSettings() {
         if (!(el instanceof Element)) return;
         if (!el.closest(".settings-panel")) return;
         if (el.hasAttribute("readonly")) return;
+        if (el.hasAttribute("data-settings-ignore-dirty")) return;
         markSettingsDirty(el);
       });
     });
@@ -10502,15 +10503,21 @@ function bindSettings() {
         if (reinitStatusEl) reinitStatusEl.textContent = "系统尚未初始化完成；请先到「推荐」页完成初始化。";
         return;
       }
+      const resetCognition = document.getElementById("cfgReinitResetCognition")?.checked === true;
       if (!window.confirm(
-        "将重新拉取所选平台的数据、重建完整画像并补足首轮发现池（现有事件、收藏与对话历史保留），并消耗较多 AI 调用。继续吗？"
+        "将重新拉取所选平台的数据、重建完整画像并补足首轮发现池。现有推荐池会按新画像清空重建；现有事件、收藏、对话历史与手动编辑保留。并消耗较多 AI 调用。继续吗？" +
+        (resetCognition
+          ? "\n\n已勾选「同时清空旧认知观察与洞察」：旧的 LLM 观察笔记与洞察将被删除，本轮重新生成。"
+          : "")
       )) {
         return;
       }
       reinitBtn.disabled = true;
       if (reinitStatusEl) reinitStatusEl.textContent = "正在启动重新初始化…";
       try {
-        await startInit({ force: true });
+        const payload = { force: true };
+        if (resetCognition) payload.reset_cognition = true;
+        await startInit(payload);
         showToast("重新初始化已开始，正在重新拉取数据并重建画像", "success");
         closePopupOverlay(overlay);
         setActiveTab("recommend");
