@@ -4,7 +4,7 @@
 >
 > `src/openbiliclaw/infrastructure/` 也已落地 target schema/migration、显式 SQLite transaction、opaque credential vault、scoped HTTP、bounded files、typed post-commit events 与 redacted telemetry 原语，当前同样未接入生产组合根。Legacy `storage/database.py` 的 aggregate 拆分与删除等待 Plans 05–12 先定义 owner protocols；当前没有双写或 compatibility repository。
 >
-> `src/openbiliclaw/ai/` 已落地 target PydanticAI execution boundary：稳定 AgentId、startup-validated capability routes、Core resource budget、native usage/timeout/retry limits、typed safe failures、bounded/audited messages、usage persistence port，以及 recorded-input offline evaluation mechanics。它目前没有 production caller；现有 `llm/` / `eval/` / agent orchestration 继续单独运行，等待 Plans 09–13 owner conversion 和最终 Composition cutover，不存在 compatibility facade 或双路 model call。
+> `src/openbiliclaw/ai/` 已落地 target PydanticAI execution boundary：稳定 AgentId、startup-validated capability routes、Core resource budget、native usage/timeout/retry limits、typed safe failures、bounded/audited messages、usage persistence port，以及 recorded-input offline evaluation mechanics。`ai/providers/` 进一步提供 CredentialVault-scoped OpenAI/Anthropic/Google/Ollama/OpenRouter model 构造、declared-vs-verified capability records、安全 construction diagnostics，及独立的 typed OpenAI/Google/Ollama embedding transports 和 dimension-safe bounded batching；DashScope chat 明确 unsupported。它目前没有 production caller；现有 `llm/` / `eval/` / agent orchestration 继续单独运行，等待 Plans 09–13 owner conversion 和最终 Composition cutover，不存在 compatibility facade 或双路 model call。
 
 ## 系统概览
 

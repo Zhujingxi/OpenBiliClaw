@@ -23,7 +23,7 @@ def _allowed(module: str) -> bool:
     root = module.split(".", 1)[0]
     return (
         root in sys.stdlib_module_names
-        or root in {"pydantic", "pydantic_ai"}
+        or root in {"pydantic", "pydantic_ai", "httpx"}
         or module.startswith("openbiliclaw.ai")
         or module.startswith("openbiliclaw.core")
         or module == "openbiliclaw.infrastructure.telemetry"

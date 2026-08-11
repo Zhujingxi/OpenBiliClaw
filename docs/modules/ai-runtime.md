@@ -1,6 +1,6 @@
 # AI Runtime（target kernel，尚未接入生产组合根）
 
-`src/openbiliclaw/ai/` 已落地类型化 PydanticAI 执行边界与离线评测原语。当前生产调用仍走
+`src/openbiliclaw/ai/` 已落地类型化 PydanticAI 执行边界、provider plugins 与离线评测原语。当前生产调用仍走
 `src/openbiliclaw/llm/`；新旧实现没有互相调用，也没有双路执行。生产切换和 legacy 删除必须等
 Plans 09–13 的 domain agents/hosts 落地后，再由 Plan 15 Composition 一次完成。
 
@@ -34,7 +34,10 @@ turn，不做总结。单个 tool return 超限会在进入 history 前拒绝。
 
 本阶段没有新增 TOML 字段。`RouteTable`、`ConfiguredModel` 和 capability matrix 由未来 provider
 plugins/Composition 显式构造；现有 `[llm]` 配置和 `LLMRegistry` 行为未变化。凭据不是 route 或
-request 字段，后续 provider adapter 只能在模型边界内通过 CredentialVault 解析。
+request 字段，`ai.providers.ModelFactory` 现已实现该边界：OpenAI/Anthropic/Google/Ollama/OpenRouter 显式构造，
+凭据仅在 `CredentialVault.resolve()` callback 内交给 trusted provider client；DashScope chat 明确不支持。
+完整 model/embedding contract、capability probe 与 safe diagnostics 见 [AI Providers](ai-providers.md)。
+本阶段仍未新增 TOML 字段或 production route wiring。
 
 ## 离线测试与评测
 

@@ -45,7 +45,9 @@
 | 模块 | 文档 | 对应代码 | 状态 |
 |------|------|----------|------|
 | 后端 API | [modules/api.md](modules/api.md) | `src/openbiliclaw/api/` | ✅ durable 对话 + 配置后台应用 + 本机-only 迁移四 API（request ID 对账 / pending 取消） |
-| LLM 多模型支持 | [modules/llm.md](modules/llm.md) | `src/openbiliclaw/llm/` | ✅ v0.3.74 统一结构化 JSON 容错 + Ollama embedding 空凭据静默 |
+| LLM 多模型支持 | [modules/llm.md](modules/llm.md) | `src/openbiliclaw/llm/` | ✅ 当前 production 实现，等待 Composition cutover |
+| Target AI Runtime | [modules/ai-runtime.md](modules/ai-runtime.md) | `src/openbiliclaw/ai/runtime/` | 🚧 typed kernel 已落地，尚未接入 production composition |
+| Target AI Providers | [modules/ai-providers.md](modules/ai-providers.md) | `src/openbiliclaw/ai/providers/` | 🚧 model/embedding plugins 已落地，routes/probe enforcement 尚未接线 |
 | B 站接入层 | [modules/bilibili.md](modules/bilibili.md) | `src/openbiliclaw/bilibili/` | ✅ M3 完成 |
 | 多源适配层 | [modules/discovery.md](modules/discovery.md#多源适配层) | `src/openbiliclaw/sources/` | ✅ v0.3.x 落地 B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Bangumi / Linux.do / 通用 Web 多源 discovery |
 | Bangumi 接入 | [modules/bangumi.md](modules/bangumi.md) | `src/openbiliclaw/sources/bangumi*.py` + `runtime/bangumi_producer.py` | ✅ 官方匿名只读 API + 公开收藏 init + search/ranked/latest discovery |
