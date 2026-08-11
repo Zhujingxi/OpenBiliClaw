@@ -284,12 +284,23 @@ def test_incremental_marker_is_opt_in_and_preserves_profile_update_fields(
 
     assert result.created is True
     assert captured["payload"]["incremental"] is True
+    assert "incremental_owner" not in captured["payload"]
     if helper_name in {
         "enqueue_zhihu_bootstrap",
         "enqueue_reddit_bootstrap",
         "enqueue_linuxdo_bootstrap",
     }:
         assert captured["payload"]["profile_update"] is False
+
+    captured.clear()
+    monkeypatch.setattr(queue_path, _queue_class(captured=captured))
+    getattr(source_bootstrap, helper_name)(
+        _FakeDatabase(),
+        force=True,
+        incremental=True,
+        incremental_owner="scheduler",
+    )
+    assert captured["payload"]["incremental_owner"] == "scheduler"
 
     captured.clear()
     monkeypatch.setattr(queue_path, _queue_class(captured=captured))

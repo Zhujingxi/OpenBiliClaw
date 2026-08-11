@@ -83,7 +83,7 @@ flowchart LR
 | `linuxdo_likes` | `/user_actions.json?username=<me>&filter=1&offset=<n>` | `like` | `0.85` |
 | `linuxdo_read_history` | `/read.json?page=<n>` | `view` | `0.35` |
 
-初始化时这三类事件与其它已选择来源一起进入首版画像。画像已存在后，扩展在线的周期回拉使用同一任务类型，并通过 canonical staged result、durable event ingress 和 `linuxdo_seen_item_keys` 去重；每源只保留最新 5,000 个 seen key。`fetch-linuxdo` 默认仅做 smoke，只有显式 `--write-memory` 才把本轮事件写入 memory。
+初始化时这三类事件与其它已选择来源一起进入首版画像。画像已存在后，扩展在线的周期回拉仍使用同一任务类型，但默认由 `scheduler.source_incremental_enabled=false` 全局关闭；显式开启后才按周期运行，并通过 canonical staged result、durable event ingress 和 `linuxdo_seen_item_keys` 去重。每源只保留最新 5,000 个 seen key。`fetch-linuxdo` 默认仅做 smoke，只有显式 `--write-memory` 才把本轮事件写入 memory，且不受周期总开关影响。
 
 三个 scope 都成功但无条目时是 `empty`；部分 scope 成功、部分 scope 返回结构化错误时是 `degraded`，已得到的有效事件仍保留并可参与本轮画像，但该终态不是“完整采集”证据。全部 scope 失败才是 `failed`。默认 6 小时近期任务去重只复用在途任务和成功的 `ok/empty` 终态；`failed/degraded` 不复用，下次会重新入队尝试补齐。
 

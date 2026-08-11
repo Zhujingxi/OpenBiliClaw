@@ -182,6 +182,7 @@ _DEFAULT_POOL_SOURCE_SHARES = {
 }
 
 _SOURCE_INCREMENTAL_ENV_FIELDS = {
+    "OPENBILICLAW_SCHEDULER_SOURCE_INCREMENTAL_ENABLED": "source_incremental_enabled",
     "OPENBILICLAW_SCHEDULER_SOURCE_INCREMENTAL_HOURS": "source_incremental_hours",
     "OPENBILICLAW_SCHEDULER_XHS_INCREMENTAL_HOURS": "xhs_incremental_hours",
     "OPENBILICLAW_SCHEDULER_DOUYIN_INCREMENTAL_HOURS": "douyin_incremental_hours",
@@ -940,9 +941,9 @@ class SchedulerConfig:
         default_factory=lambda: dict(_DEFAULT_POOL_SOURCE_SHARES)
     )
     account_sync_interval_hours: int = 6
-    # Extension-online periodic account bootstrap refresh. Zero disables the
-    # global schedule. Douyin is default-off because its account bootstrap may
-    # need a foreground tab; users can opt in with an explicit positive value.
+    # Extension-online periodic account bootstrap refresh is globally opt-in:
+    # several browser-backed sources may need a foreground tab and steal focus.
+    source_incremental_enabled: bool = False
     source_incremental_hours: int = _DEFAULT_SOURCE_INCREMENTAL_HOURS
     xhs_incremental_hours: int | None = None
     douyin_incremental_hours: int | None = _DEFAULT_DOUYIN_INCREMENTAL_HOURS
@@ -2383,6 +2384,10 @@ def _build_config(
                     ),
                     "pool_source_shares": _normalize_pool_source_shares(
                         sched_raw.get("pool_source_shares")
+                    ),
+                    "source_incremental_enabled": _coerce_bool(
+                        sched_raw.get("source_incremental_enabled"),
+                        default=False,
                     ),
                     "source_incremental_hours": _normalize_source_incremental_hours(
                         sched_raw.get("source_incremental_hours"),
@@ -5116,6 +5121,8 @@ def _render_config_toml(
             f"pool_target_count = {config.scheduler.pool_target_count}",
             f"copy_ready_target_count = {config.scheduler.copy_ready_target_count}",
             f"account_sync_interval_hours = {config.scheduler.account_sync_interval_hours}",
+            "source_incremental_enabled = "
+            f"{_toml_bool(config.scheduler.source_incremental_enabled)}",
             f"source_incremental_hours = {config.scheduler.source_incremental_hours}",
             *(
                 [f"xhs_incremental_hours = {config.scheduler.xhs_incremental_hours}"]

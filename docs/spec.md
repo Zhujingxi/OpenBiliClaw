@@ -319,7 +319,7 @@ XHS/DY/YT/Zhihu/Reddit/V2EX task final: canonical staged result (source caps/fie
 V2EX identity ladder: PAT verified > browser observed > config/accepted
                     → mismatch pauses account projection only
                     → resolved identity-scoped seen/affinity + complete favorite 2-miss outbox
-extension-online periodic re-pull: presence + profile/init/config gates → persisted round-robin
+extension-online periodic re-pull: explicit opt-in → presence + profile/init/config gates → persisted round-robin
                                  → one active bootstrap across six task tables → EventHub → extension
 Douyin source supply: daemon presence gate (explicit manual call bypasses it)
                      → one shared plugin-cycle wait budget → terminal dy_task → pending_eval

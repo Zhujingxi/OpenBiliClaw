@@ -709,7 +709,7 @@ Agent 宿主（OpenClaw / Hermes / WorkBuddy）
 │ 六平台 Adapter → ExtensionNativeSaveBroker → extension_native_save_jobs │
 │ 七平台 source task multiplex：xhs / dy / yt / x / zhihu / reddit / linuxdo │
 │ 七源 source task multiplex：xhs / dy / yt / x / zhihu / reddit / v2ex  │
-│ 扩展在线周期回拉：Runtime → 六源 bootstrap task（全局串行）→ installed extension │
+│ 扩展在线周期回拉（默认关闭，显式 opt-in）：Runtime → 六源 bootstrap task（全局串行）→ installed extension │
 │ task-result → staged durable ingress → 原子有界 seen keys（每源5000）→ terminal │
 │ V2EX 完整收藏快照 → 连续两次缺失确认 → durable retraction/restore outbox → account-scoped Node affinity │
 │ XHS 自动任务：来源/调度领取门 → SQLite 节流/风控冷却 → 关闭或限流时不开新 tab │
@@ -782,7 +782,7 @@ durable turn → 固定时间/payload → 确认入口（待聊列表/卡片） 
 
 发现之后的统一流程：
 
-- **安全取数** — 后端不代登录、不爬你看不到的内容；所有平台复用你浏览器里已有的登录会话，首轮画像信号只在你点「开始初始化」后按所选来源拉取。画像完成后，已启用来源只在扩展在线时按配置周期回拉；抖音账号回拉默认关闭，需显式设置 `douyin_incremental_hours=1..168` 才启用，不影响后台内容发现。Linux.do 任务只允许 GET，`_t` 仅作布尔登录提示。
+- **安全取数** — 后端不代登录、不爬你看不到的内容；所有平台复用你浏览器里已有的登录会话，首轮画像信号只在你点「开始初始化」后按所选来源拉取。账号周期回拉默认关闭，只有显式设置 `source_incremental_enabled=true` 后，已启用来源才会在扩展在线时按全局 / 逐源周期运行；这不影响手动初始化、手动拉取或后台内容发现。抖音仍额外默认关闭，Linux.do 任务只允许 GET，`_t` 仅作布尔登录提示。
 - **连续统一评估** — 各来源原始候选进入同一待评估池，由共享 evaluator 结合灵魂画像、正文和近期负反馈批量打分；默认 3×30 worker 任一完成即补位，调度只计 durable 库存，串行 admission 按实时 headroom 封顶。可选 embedding 预过滤默认先 shadow 观测，确认无误后才 enforce 跳过明显低相似候选。
 - **多样性选择** — 平台配额 → 主题去重 → 风格均衡 → 跨平台混排 → 数量封顶；开箱只启用 B 站，其余平台在设置里显式打开。
 

@@ -15307,6 +15307,7 @@ class TestEmbeddingAndCompatProviderE2E:
         from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig
 
         cfg = Config(llm=LLMConfig(openai=LLMProviderConfig(api_key="sk-openai")))
+        cfg.scheduler.source_incremental_enabled = False
         cfg.scheduler.source_incremental_hours = 36
         cfg.scheduler.xhs_incremental_hours = 0
         cfg.scheduler.douyin_incremental_hours = 168
@@ -15314,6 +15315,7 @@ class TestEmbeddingAndCompatProviderE2E:
 
         initial = client.get("/api/config")
         assert initial.status_code == 200
+        assert initial.json()["scheduler"]["source_incremental_enabled"] is False
         assert initial.json()["scheduler"]["source_incremental_hours"] == 36
         assert initial.json()["scheduler"]["xhs_incremental_hours"] == 0
         assert initial.json()["scheduler"]["douyin_incremental_hours"] == 168
@@ -15323,6 +15325,7 @@ class TestEmbeddingAndCompatProviderE2E:
             "/api/config",
             json={
                 "scheduler": {
+                    "source_incremental_enabled": True,
                     "source_incremental_hours": 48,
                     "xhs_incremental_hours": None,
                     "douyin_incremental_hours": 12,
@@ -15334,6 +15337,7 @@ class TestEmbeddingAndCompatProviderE2E:
         )
 
         assert updated.status_code == 202
+        assert cfg.scheduler.source_incremental_enabled is True
         assert cfg.scheduler.source_incremental_hours == 48
         assert cfg.scheduler.xhs_incremental_hours is None
         assert cfg.scheduler.douyin_incremental_hours == 12
