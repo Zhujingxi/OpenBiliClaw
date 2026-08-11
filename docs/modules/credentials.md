@@ -1,0 +1,28 @@
+# Credential Infrastructure
+
+## Current landed boundary
+
+`openbiliclaw.infrastructure.credentials.CredentialVault` stores secret bytes behind opaque
+`cred_<32 hex>` references. It never has a read method that returns secret material: trusted provider
+adapters call `resolve(reference, callback)`, receive a read-only memory view for that callback only,
+and the temporary mutable buffer is zeroed on exit. Vault errors, `repr`, telemetry, and tests do not
+include secret values.
+
+The backend selection is explicit:
+
+- `KeyringBackend` delegates to the installed OS `keyring` command without placing secret values in
+  command arguments.
+- `ProtectedFileBackend` is the fallback when the command is unavailable. On POSIX it requires an
+  owner-only parent (`0700`) and credential file (`0600`), writes through fsync + atomic replace, and
+  refuses a file whose group/other permission bits become readable.
+
+The fallback protects local access permissions; it is not presented as encrypted storage. Operators
+should prefer a working OS keyring, protect the account and backup media, and never copy the fallback
+into logs or general migration archives without an explicit secret-transfer decision.
+
+## Composition status
+
+This boundary is not yet wired into production providers. Existing credentials retain their documented
+legacy behavior until Provider Access and Runtime Composition land. Future model-visible, host, and
+frontend modules must not import this package; only trusted provider/access adapters may resolve a
+reference.

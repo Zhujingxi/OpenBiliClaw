@@ -1,6 +1,8 @@
 # 架构设计
 
 > `src/openbiliclaw/core/` 已落地独立 typed kernel（frozen 配置、job/scheduler 契约、资源预算、TaskGroup 监督、lifecycle replacement、健康快照与封闭 extension registration），当前尚未接入生产组合根；旧 runtime/config 的切换与删除留待 Runtime Composition 阶段。
+>
+> `src/openbiliclaw/infrastructure/` 也已落地 target schema/migration、显式 SQLite transaction、opaque credential vault、scoped HTTP、bounded files、typed post-commit events 与 redacted telemetry 原语，当前同样未接入生产组合根。Legacy `storage/database.py` 的 aggregate 拆分与删除等待 Plans 05–12 先定义 owner protocols；当前没有双写或 compatibility repository。
 
 ## 系统概览
 

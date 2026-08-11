@@ -1,5 +1,47 @@
 # 存储层
 
+## Target Infrastructure 原语（尚未接入生产组合根）
+
+`src/openbiliclaw/infrastructure/` 已落地独立的目标基础设施边界：带 WAL、外键、busy timeout
+和单 executor 边界的 `SqliteDatabase` / 显式 `SqliteSession` 事务；版本化 target schema；
+破坏性迁移前经 SQLite online backup、`integrity_check` 和配置 checksum 验证的时间戳备份；
+opaque-reference `CredentialVault`；显式 lifetime/policy 的 HTTP client；root-bounded 原子文件；
+typed post-commit event publisher；以及强制脱敏 telemetry。未版本化数据库会停止并要求明确的
+reset/import 决定，不会把 legacy 表静默当作 target schema。`events/websocket.py` 属于 host
+transport delivery adapter，明确推迟到 Plan 13 的 API host wiring，本阶段不提供空壳或未接线实现。
+
+Target schema 已为 access metadata、content reference/cache、observation、understanding
+profile/evidence、recommendation inventory/history、assistant conversation/message、pending action
+和 AI usage attribution 建立规范化表、外键、唯一性、check 与 idempotency 约束。它当前未指向
+生产 `data/openbiliclaw.db`；生产仍使用下述 legacy `storage/database.py`。
+
+### Legacy 表归属盘点
+
+| Target owner | 当前表 |
+|---|---|
+| Provider Access | `auth_state`, `x_source_health` |
+| Content Providers / Integration | `bangumi_discovery_runs`, `bangumi_discovery_state`, `content_cache`, `source_recipes`, `xhs_observed_urls` |
+| Observation Ingress | `events`, `seen_items`, `seen_items_backfill_state` |
+| User Understanding | `confusions`, `profile_update_ledger`, `user_visual_clusters`, `user_visual_profile_state` |
+| Discovery & Recommendation | `discovery_candidates`, `discovery_inspiration_axis`, `discovery_inspiration_expansion_cache`, `discovery_inspiration_probe_cache`, `discovery_interest_selection_ledger`, `discovery_keywords`, `discovery_keyword_yield`, `discovery_planner_lock`, `evaluator_prefilter_shadow_audit`, `recommendations`, `temporal_ranking_shadow_audit` |
+| Assistant | `card_settlements`, `card_settlements_wave_2`, `chat_turns` |
+| Application Workflows | `extension_native_save_jobs`, `favorites`, `init_runs`, `native_save_states`, `native_save_task_items`, `native_save_tasks`, `saved_item_removals`, `saved_items`, `saved_memberships`, `saved_sync_migrations`, `source_producer_runs`, `watch_later` |
+| AI Runtime | `llm_usage` |
+| Infrastructure schema metadata | `schema_version` |
+
+按已批准的分期，本阶段不机械搬运 18k 行、479 method 的 god object：per-aggregate repository
+必须等待 Plans 05–12 的 owner protocol/domain object 落地后再实现；`storage/database.py` 及旧迁移
+helper 同样留到对应调用者完成切换后删除。没有 compatibility repository 或双写路径。
+
+### Target 破坏性迁移/部署备份规则
+
+调用 target `SchemaMigrator` 时，普通 create-only migration 原子执行；任何标记
+`destructive=True` 的 migration 必须同时提供 `allow_destructive=True` 和 backup directory。
+迁移器先用 SQLite backup API 生成一致副本、跑 `integrity_check`，复制指定配置并逐一比较
+SHA-256，任一步失败就删除不完整备份并中止。部署者必须把时间戳目录移出容器临时层并验证
+可恢复后，才可作 reset/import 决定。当前生产 composition 尚未调用此 migration runner，
+因此现有 `.obcbackup` 部署/迁移流程不变。
+
 ## 概述
 
 `src/openbiliclaw/storage/` 负责本地 SQLite 数据库、schema 初始化、候选池计数和高频读写路径。它不理解 runtime state 或用户画像，只提供确定性的持久化 API。

@@ -173,13 +173,13 @@ module = [
 ]
 disallow_any_explicit = false
 
-# Legacy tests retain explicit Any until their modules migrate; tests.core stays fully enforced.
+# Legacy tests retain explicit Any until their modules migrate; refactored tests stay enforced.
 [[tool.mypy.overrides]]
 module = ["tests.*"]
 disallow_any_explicit = false
 
 [[tool.mypy.overrides]]
-module = ["tests.core.*"]
+module = ["tests.core.*", "tests.infrastructure.*"]
 disallow_any_explicit = true
 
 [tool.pytest.ini_options]

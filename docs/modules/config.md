@@ -13,6 +13,13 @@
 现有配置字段或环境变量行为。生产切换将在 Runtime Composition 阶段一次完成，不提供旧
 Python API compatibility wrapper。
 
+Target Infrastructure 的 `CredentialVault` 只接受形如 `cred_<32 hex>` 的 opaque ID；
+`AppSettings` 只能保存这类 reference，不能保存 secret material。Vault 优先使用 OS keyring，
+不可用时使用仅 owner 可访问（POSIX directory `0700`、file `0600`）的独立 JSON fallback；
+secret 只在 trusted callback 的短暂只读 memory view 内可见，退出后临时 byte buffer 会清零。
+该 vault 当前尚未接入 legacy `Config`，所以不改变现有配置/API 行为；接线时不得把 vault 内容
+写入 `config.toml`、SQLite 通用表、API schema、模型消息或日志。
+
 > `[llm].concurrency` 缺省/非法值为 4；显式正数（含旧值 3）原样保留。后台容量为 `max(1, total-1)`；`candidate_eval_concurrency` 仍默认 3。
 
 > `config.toml` 所有配置段落详解。
