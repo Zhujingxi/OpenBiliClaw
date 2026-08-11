@@ -6,7 +6,7 @@
 
 ## 未发布
 
-暂无。
+- **新增 Flutter 原生移动客户端（独立仓库）**：OpenBiliClaw-mobile 提供 Android / iOS / Web / Linux / macOS / Windows 全平台客户端，连接同一本地后端；推荐 / 对话 / 画像 / 收藏与 30 天历史 / 消息收件箱齐全，B 站封面 CDN 直连省两跳。首个安装包已随其 Latest Release 发布（Android 签名 APK / iOS 未签名 IPA）。README（中英）、项目主页与文档导航同步加入入口链接与下载入口。
 
 ## v0.3.204：后台来源调度与搜索修复（2026-08-11）
 

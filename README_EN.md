@@ -51,7 +51,7 @@ Four steps for most users. Firefox, Docker, scripted, and manual setup paths all
    ```
 
 3. **Connect a source** — log in to [Bilibili](https://www.bilibili.com) (the default init source), or choose Xiaohongshu / Douyin / YouTube / X / Zhihu / Reddit / Linux.do / V2EX / Weibo. Linux.do, Bangumi, V2EX, and Weibo support public discovery; signed-in Linux.do, V2EX, and Weibo add read-only personal signals during initialization, Bangumi can initialize from a public username, and Weibo's public path remains anonymous.
-4. **Open the UI** — visit `http://127.0.0.1:8420/web`, or scan the extension QR code to open `http://<your-LAN-IP>:8420/m/` on your phone and save it to your home screen.
+4. **Open the UI** — visit `http://127.0.0.1:8420/web`, or scan the extension QR code to open `http://<your-LAN-IP>:8420/m/` on your phone and save it to your home screen. For a native app experience, install the [Flutter client](https://github.com/whiteguo233/OpenBiliClaw-mobile) from its separate repo (Android / iOS / Web / desktop; installers on its [Latest Release](https://github.com/whiteguo233/OpenBiliClaw-mobile/releases/latest)) and point it at the same backend in its settings.
 
 ## Why OpenBiliClaw?
 
@@ -86,7 +86,7 @@ Core behavior, recommendation, and dialogue data lives in SQLite on your disk; c
 
 ## 📸 Feature Preview
 
-Three core surfaces: the browser extension handles in-page interaction and login sessions, the Desktop Web (`/web`) gives you a big-screen recommendation home, and the Mobile Web (`/m`) is built for phones. Both web surfaces only call your local API — cookie sync and platform tasks still run through the extension.
+Four core surfaces: the browser extension handles in-page interaction and login sessions, the Desktop Web (`/web`) gives you a big-screen recommendation home, the Mobile Web (`/m`) is built for phones, and a native Flutter client ([OpenBiliClaw-mobile](https://github.com/whiteguo233/OpenBiliClaw-mobile), separate repo) covers Android / iOS / Web / desktop. Every non-extension surface only calls your local API — cookie sync and platform tasks still run through the extension.
 
 <table>
   <tr>
@@ -161,6 +161,8 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
     </td>
   </tr>
 </table>
+
+> 📱 Want a native app? The separate repo [OpenBiliClaw-mobile](https://github.com/whiteguo233/OpenBiliClaw-mobile) (Flutter) ships Android / iOS / Web / Linux / macOS / Windows clients with recommendations, chat, profile, favorites / watch-later / 30-day history, and an inbox — Bilibili covers load straight from the CDN to skip two hops. Grab the signed Android APK or the self-signing iOS IPA from its [Latest Release](https://github.com/whiteguo233/OpenBiliClaw-mobile/releases/latest) (iOS needs re-signing with your own Apple account). Preview build; not yet long-term tested.
 
 <details>
 <summary>More screenshots</summary>
@@ -329,6 +331,7 @@ openbiliclaw start
 
 - **Desktop**: open `http://127.0.0.1:8420/web` (or `http://127.0.0.1:8420/`, auto-redirects). Two-column editorial layout with recommendations, 30-day history, profile, chat, messages, and settings all on one page.
 - **Mobile**: click the phone icon in the extension header to scan the QR code, or type `http://<your-LAN-IP>:8420/m/` manually. Best for browsing recommendations, revisiting 30-day history, profile, and chat on your phone.
+- **Native Flutter client**: download the Android APK (`arm64-v8a` for modern devices, `armeabi-v7a` for older ones) or the unsigned iOS IPA (re-sign with your own Apple account) from the [Latest Release](https://github.com/whiteguo233/OpenBiliClaw-mobile/releases/latest), then enter the backend IP / port in the top-right settings (Web / iOS / macOS default to `127.0.0.1:8420`, the Android emulator to `10.0.2.2:8420`, real devices to your computer's LAN IP, and remote deployments to the server IP with the password gate enabled).
 
 > During `openbiliclaw init`, you'll be asked whether to allow LAN access (default Y). If you chose N or want to change it later, edit `[api].host` in `config.toml` (`0.0.0.0` = LAN-reachable over available IPv4 and IPv6, `127.0.0.1` = local only). QR links prefer IPv4 and automatically use a bracketed IPv6 literal when IPv4 is unavailable.
 
@@ -588,6 +591,7 @@ The whole loop stays local — the agent host just calls the CLI bridge; your pr
 - ⭐ **Local-First Favorites / Watch Later** — cards save to local SQLite first and auto-sync stays off by default; desktop Web hydrates the sidebar count badges on first load; the 2026-07-14 real-account regression completed both actions across all seven platforms as `synced/already_synced`
 - 🕘 **30-Day Content History** — extension, desktop, and mobile share opened, surfaced-but-unopened, and recently removed views; covers are paged and lazy-loaded, and removed local saves can be restored
 - 🧩 **Browser Extension** — Chrome / Edge / Brave / Arc / Firefox; side-panel recommendations + cross-site behavior collection, install and go
+- 📱 **Flutter Native Client** — separate repo [OpenBiliClaw-mobile](https://github.com/whiteguo233/OpenBiliClaw-mobile); Android / iOS / Web / Linux / macOS / Windows against the same local backend, with Bilibili covers hitting the CDN directly to skip two hops
 - 🚀 **Guided Init in the UI** — the packaged `/setup/` wizard, Desktop Web, and the extension can all initialize with one click; no terminal required
 - 📦 **Cross-Machine Migration** — export/import portable config, SQLite, profiles, cookies, and the image cache from Desktop settings; imports are validated and staged, can be inspected or cancelled, then apply on restart with rollback copies. `.obcbackup` contains plaintext secrets but excludes the source machine's API-login password, session-signing secret, and extension device keys
 - 🔬 **Self-Optimizing Eval Loops** — five modules each carry an LLM-as-judge loop that improves prompt quality over rounds
@@ -825,6 +829,8 @@ OpenBiliClaw/
 └── tests/                     # Tests (1900+)
 ```
 
+> The native mobile client (Flutter, Android / iOS / Web / Linux / macOS / Windows) lives in the separate repo [OpenBiliClaw-mobile](https://github.com/whiteguo233/OpenBiliClaw-mobile).
+
 ## 🛠️ Tech Stack
 
 | Module | Technology |
@@ -858,6 +864,7 @@ OpenBiliClaw/
 - [Soul Engine](docs/modules/soul.md) — Deep profiling + MBTI + interest speculation
 - [CLI Reference](docs/modules/cli.md) · [Config Reference](docs/modules/config.md)
 - [Contributing Guide](docs/contributing.md)
+- [Flutter Mobile Client](https://github.com/whiteguo233/OpenBiliClaw-mobile) — native app in a separate repo (Android / iOS / Web / desktop)
 
 ## 📜 Release History
 
