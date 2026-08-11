@@ -20,6 +20,8 @@ secret 只在 trusted callback 的短暂只读 memory view 内可见，退出后
 该 vault 当前尚未接入 legacy `Config`，所以不改变现有配置/API 行为；接线时不得把 vault 内容
 写入 `config.toml`、SQLite 通用表、API schema、模型消息或日志。
 
+Target AI Runtime 本阶段不新增 TOML shape：`RouteTable`、capability matrix 与 `RunPolicy` 由未来 model-provider plugins / Composition 显式构造。当前 `[llm]` 和 `LLMRegistry` 配置行为完全不变；新 route 只保存非秘密 instance/provider/capability metadata，不能保存 API Key 或 credential reference。详见 [AI Runtime](ai-runtime.md)。
+
 > `[llm].concurrency` 缺省/非法值为 4；显式正数（含旧值 3）原样保留。后台容量为 `max(1, total-1)`；`candidate_eval_concurrency` 仍默认 3。
 
 > `config.toml` 所有配置段落详解。
