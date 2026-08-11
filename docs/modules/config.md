@@ -1,5 +1,18 @@
 # 配置参考
 
+## Target Core 配置契约（尚未替换现有 `Config`）
+
+`openbiliclaw.core.config.AppSettings` 是新运行内核的 frozen Pydantic 配置根，按
+`model / access / content / recommendation / host / runtime` 分段，所有层级拒绝未知键。
+它只允许 `credential_ref` 等秘密引用，不保存 API Key、Cookie 或 token；
+`diagnostic_dump()` 连秘密引用标识也输出为 `<redacted-ref>`。
+
+`load_settings()` 的确定性优先级为 **TOML 文件 < 环境变量 < typed CLI overrides**，合并
+完成后统一校验，任何副作用或组件构造必须发生在校验之后。当前生产 CLI、API 配置页与
+`config.toml` 仍使用 `src/openbiliclaw/config.py::Config`；新契约尚未接线，也没有改变下方
+现有配置字段或环境变量行为。生产切换将在 Runtime Composition 阶段一次完成，不提供旧
+Python API compatibility wrapper。
+
 > `[llm].concurrency` 缺省/非法值为 4；显式正数（含旧值 3）原样保留。后台容量为 `max(1, total-1)`；`candidate_eval_concurrency` 仍默认 3。
 
 > `config.toml` 所有配置段落详解。

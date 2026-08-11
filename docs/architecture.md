@@ -1,5 +1,7 @@
 # 架构设计
 
+> `src/openbiliclaw/core/` 已落地独立 typed kernel（frozen 配置、job/scheduler 契约、资源预算、TaskGroup 监督、lifecycle replacement、健康快照与封闭 extension registration），当前尚未接入生产组合根；旧 runtime/config 的切换与删除留待 Runtime Composition 阶段。
+
 ## 系统概览
 
 OpenBiliClaw 采用分层架构设计，从上到下依次为：

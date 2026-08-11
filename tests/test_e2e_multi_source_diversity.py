@@ -477,8 +477,8 @@ class TestMultiSourceDiversityE2E:
 
             try:
                 openbiliclaw.config.load_config = lambda: fake_config
-                openbiliclaw.llm.build_llm_registry = lambda config: "registry"  # type: ignore
-                openbiliclaw.bilibili.auth.resolve_runtime_cookie = lambda **_: ""  # type: ignore
+                openbiliclaw.llm.build_llm_registry = lambda config: "registry"  # type: ignore[assignment]
+                openbiliclaw.bilibili.auth.resolve_runtime_cookie = lambda **_: ""  # type: ignore[assignment]
 
                 db2 = Database(Path(tmpdir) / "test2.db")
                 db2.initialize()

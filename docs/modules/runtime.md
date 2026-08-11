@@ -1,5 +1,24 @@
 # Runtime Module
 
+## 新 Core Runtime（尚未接入生产组合根）
+
+`src/openbiliclaw/core/` 已落地目标架构的独立、强类型运行内核；当前与旧
+`runtime/` 并存，生产 daemon 仍由旧 `RuntimeContext` 组合，切换和旧代码删除留待
+Runtime Composition 阶段。
+
+| 公共 API | 当前实现 |
+|---|---|
+| `JobSpec` / `JobScheduler` | 固定 ID、interval/cron 元数据、timeout、资源类及 overlap/missed-run 策略；typed backend 只把 scheduler tick 委托给监督器准入 |
+| `ResourceBudget` | 基于 `asyncio.Semaphore` 的具名并发预算和取消安全 async context manager |
+| `RuntimeSupervisor` | `TaskGroup` 单一任务所有者，负责准入、timeout、取消、drain 和无 payload 健康统计 |
+| `LifecycleComponent` / `LifecycleManager` | 顺序启动、逆序停止、部分失败回滚、显式 optional 降级和 replacement reload |
+| `HealthSnapshot` | frozen、结构化且不接受自由格式异常文本的组件/任务状态 |
+| `ExtensionRegistration` / `ExtensionRegistry` | 只接受架构列出的九类 typed registration，拒绝重复 ID 和 capability 版本不兼容 |
+
+Core 不导入内容、画像、发现、推荐或 provider 产品模块；架构测试以 AST 守住该边界。
+扩展携带的 job 仍必须交给 `RuntimeSupervisor` 和正常资源预算执行，registry 本身不是
+service locator，也不提供通用 hook bus。
+
 每个 **API daemon** runtime generation 只拥有一个 expression copy coordinator：8 条立即、尾批固定 3 秒、单轮最多 60，零进展退避 15 秒，60 秒仅作 safety wake。停止 generation 会取消 collector、gate waiter 与运行中的 provider callback；状态接口暴露 pending/state/deadline/last completed/error。OpenClaw direct composition 不启动 daemon loop，故不创建该 coordinator；它在 inline admission 后同步 drain 最多 4 条 durable copy，且不在同一交互请求内做 split retry：有效 subset 立即入 canonical pool，剩余行保持 pending 供下次请求处理，返回前没有遗留 provider/copy task。参数来自 2026-07-12 生产日志校准。
 
 > API runtime 启动时创建一套共享 LLM gate 并注入主服务、Soul 与 refresh；在任何 provider 工作可启动前用 canonical database available 初始化 `healthy/refill/empty`，后续 controller readiness、原子维护、推荐池状态与候选 snapshot 持续同步。runtime status 暴露 total/background 以及 refill/maintenance active、waiting 和 inventory state。

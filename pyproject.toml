@@ -110,6 +110,8 @@ select = [
     "F",    # pyflakes
     "I",    # isort
     "N",    # pep8-naming
+    "PGH003", # require error codes on type: ignore
+    "PGH004", # require error codes on noqa
     "UP",   # pyupgrade
     "B",    # flake8-bugbear
     "SIM",  # flake8-simplify
@@ -124,6 +126,7 @@ select = [
 [tool.mypy]
 python_version = "3.11"
 strict = true
+disallow_any_explicit = true
 warn_return_any = true
 warn_unused_configs = true
 
@@ -139,6 +142,45 @@ module = [
     "x_client_transaction.*",
 ]
 ignore_missing_imports = true
+
+# Legacy modules retain explicit Any until their owning refactor phase; core stays fully enforced.
+[[tool.mypy.overrides]]
+module = [
+    "openbiliclaw.agent.*",
+    "openbiliclaw.api.*",
+    "openbiliclaw.auth_core",
+    "openbiliclaw.bilibili.*",
+    "openbiliclaw.cli",
+    "openbiliclaw.config",
+    "openbiliclaw.discovery.*",
+    "openbiliclaw.docker_runtime",
+    "openbiliclaw.eval.*",
+    "openbiliclaw.integrations.*",
+    "openbiliclaw.llm.*",
+    "openbiliclaw.logging_setup",
+    "openbiliclaw.memory.*",
+    "openbiliclaw.network",
+    "openbiliclaw.proc",
+    "openbiliclaw.published_time",
+    "openbiliclaw.recommendation.*",
+    "openbiliclaw.runtime.*",
+    "openbiliclaw.saved_sync.*",
+    "openbiliclaw.soul.*",
+    "openbiliclaw.sources.*",
+    "openbiliclaw.storage.*",
+    "openbiliclaw.tls_proxy",
+    "openbiliclaw.youtube.*",
+]
+disallow_any_explicit = false
+
+# Legacy tests retain explicit Any until their modules migrate; tests.core stays fully enforced.
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+disallow_any_explicit = false
+
+[[tool.mypy.overrides]]
+module = ["tests.core.*"]
+disallow_any_explicit = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

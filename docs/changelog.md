@@ -6,6 +6,7 @@
 
 ## Unreleased
 
+- **目标 Core Runtime 第一阶段落地（尚未接入生产组合根）**：新增 frozen typed `AppSettings`、确定性 TOML/env/CLI precedence、资源预算、`TaskGroup` 任务监督、job admission/timeout/drain、结构化健康快照、replacement lifecycle 和九类封闭 extension registration；旧 `runtime/`、`config.py` 与 `RuntimeContext` 暂不改线，等待最终 Runtime Composition cutover。
 - **新增 Linux.do 只读来源接入**：后端新增 `linuxdo_tasks` durable 队列、`LinuxdoDiscoveryProducer`、统一 topic/event 归一化、capability-specific source-auth 与周期增量同步；公开 discover 匿名可用，个人 profile/bootstrap/incremental 必须由同源会话正面确认。CLI 新增 `fetch-linuxdo` / `discover-linuxdo`，通用 `discover --source linuxdo` 也走同一 producer。五种 discovery 分支为 search / hot / feed / creator / related，三种个人初始化 scope 为 bookmarks / likes / read history。
 - **扩展采用同源、最小回传边界**：Linux.do 请求只在真实 `linux.do` task tab 内以 `GET` + `credentials: include` 访问 JSON endpoint；Cookie `_t` 只转换成登录布尔心跳，Cookie 值、CSRF 字段和未裁剪原始响应都不上传。任务具备 tab/task 隔离、分页与条数上限、超时、2 MiB 响应上限及结构化错误。
 - **真实安装版端到端验证完成（修复后仍保留重跑门禁）**：2026-08-09 在已登录 Linux.do 的 Chrome unpacked extension 上完成热更新与真实只读链路。bootstrap 两轮均返回 bookmarks=2、likes=5、read history=100（共 107 条），第二轮 durable ingress 零重复；search / hot / feed / creator / related 五分支均取得 canonical topic，五种正式 producer 均完成真实模型评估，组合运行继续遵守全局 limit 与候选幂等。测试还在真实 `in_progress` 任务中触发完整扩展重载，复现并修复 MV3 runner 丢失后以同一 task ID 安全恢复的问题。任务结果字段白名单、canonical ID/URL、first-final-wins 与无 Cookie/token/raw-response 均通过数据库断言。旧 `suggested_topics` 可能合法为空且语义是 new/unread/random 站点建议，不是严格相关；related 已改为 topic detail + 官方 `/topics/similar_to.json`，最终安装产物仍需补跑真实 Chrome/Firefox 门禁。
