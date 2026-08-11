@@ -6,7 +6,7 @@
 
 ## 未发布
 
-暂无。
+- **Linux.do 后台任务瞬时 listener 竞态修复**：同源 task tab 在 Discourse challenge / SPA 初始化期间发送消息失败时，扩展会在同一 task ID 上短间隔重试，并最多重载一次原 runner tab；只有有界恢复失败才回传 `sendMessage_failed`，避免闹钟调度把瞬时 content-script 缺失误判为任务失败后连续制造重复任务。Linux.do CLI 预览同时按 `linuxdo-*` strategy 过滤，避免显示共享候选管线中其它来源的旧条目。
 
 ## v0.3.203：微博登录态初始化与插件可用性修复（2026-08-11）
 

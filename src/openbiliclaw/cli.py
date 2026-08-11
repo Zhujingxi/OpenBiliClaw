@@ -13167,7 +13167,17 @@ def _run_linuxdo_discovery(*, limit: int) -> None:
                 ("分支", source_modes or "search"),
             ],
         )
-        for index, item in enumerate(candidate_pipeline.last_admitted_items[:5], start=1):
+        # The candidate pipeline is shared by all producers in a long-lived
+        # runtime and may retain the last admitted rows from another source.
+        # Keep this source-scoped CLI honest: only Linux.do strategies belong
+        # in a Linux.do preview. The counts above already come from this
+        # producer and are not affected by the filtering.
+        preview_items = [
+            item
+            for item in (getattr(candidate_pipeline, "last_admitted_items", []) or [])
+            if str(getattr(item, "source_strategy", "") or "").startswith("linuxdo-")
+        ]
+        for index, item in enumerate(preview_items[:5], start=1):
             _print_discovered_content_preview(item, index)
         if reason == "degraded":
             _print_status_panel(

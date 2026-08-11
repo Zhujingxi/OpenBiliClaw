@@ -24,6 +24,12 @@ const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
 const MAX_TIMEOUT_MS = 29 * 60_000;
 const CONTENT_SCRIPT_RETRY_INTERVAL_MS = 250;
 const CONTENT_SCRIPT_READY_TIMEOUT_MS = 8_000;
+// A task tab can race Discourse's challenge/SPA bootstrap even after the
+// manifest content script has been injected.  Give the same leased task one
+// bounded document restart before reporting a transport failure; never open a
+// second task or release the backend lease while the first runner is still
+// recoverable.
+const MAX_CONTENT_SCRIPT_TAB_RESTARTS = 1;
 const RECOVERY_MUTEX_RETRY_MS = 100;
 const MAX_DISCOVERY_PAGES = 5;
 const MAX_BOOTSTRAP_PAGES = 15;
@@ -274,6 +280,7 @@ let pendingFinalResult: LinuxdoTaskResult | null = null;
 let recoveryPromise: Promise<void> | null = null;
 let runnerStorageMutation: Promise<void> = Promise.resolve();
 let runtimeSessionPromise: Promise<string> | null = null;
+let contentScriptTabRestarts = 0;
 
 function newRuntimeSessionId(): string {
   try {
@@ -447,6 +454,7 @@ function cleanupTask(): void {
   previousActiveTabId = null;
   pendingFinalResult = null;
   taskInFlight = false;
+  contentScriptTabRestarts = 0;
   void clearPersistedTaskRunner();
   releaseDispatcherMutex("linuxdo");
 }
@@ -529,6 +537,33 @@ function scheduleExecuteMessageRetry(task: LinuxdoTask, startedAt: number): void
   }, CONTENT_SCRIPT_RETRY_INTERVAL_MS);
 }
 
+async function restartLinuxdoTaskTab(task: LinuxdoTask): Promise<boolean> {
+  if (
+    contentScriptTabRestarts >= MAX_CONTENT_SCRIPT_TAB_RESTARTS ||
+    !currentTask ||
+    currentTask.id !== task.id ||
+    taskTabId === null
+  ) {
+    return false;
+  }
+  contentScriptTabRestarts += 1;
+  const tabId = taskTabId;
+  if (messageRetryTimeoutId !== null) clearTimeout(messageRetryTimeoutId);
+  messageRetryTimeoutId = null;
+  try {
+    await chrome.tabs.reload(tabId);
+  } catch {
+    try {
+      await chrome.tabs.update(tabId, { url: LINUXDO_TASK_TAB_URL });
+    } catch {
+      return false;
+    }
+  }
+  if (!currentTask || currentTask.id !== task.id || taskTabId !== tabId) return false;
+  onTabReady(tabId, () => sendExecuteMessage(task), 12_000);
+  return true;
+}
+
 function sendExecuteMessage(task: LinuxdoTask, startedAt = Date.now()): void {
   if (!currentTask || currentTask.id !== task.id || taskTabId === null) return;
   const tabId = taskTabId;
@@ -565,14 +600,17 @@ function sendExecuteMessage(task: LinuxdoTask, startedAt = Date.now()): void {
       scheduleExecuteMessageRetry(task, startedAt);
       return;
     }
-    void deliverTaskFinal({
-      task_id: task.id,
-      claim_token: task.claim_token,
-      status: "failed",
-      items: [],
-      scope_counts: {},
-      error: "sendMessage_failed",
-    });
+    void (async () => {
+      if (await restartLinuxdoTaskTab(task)) return;
+      await deliverTaskFinal({
+        task_id: task.id,
+        claim_token: task.claim_token,
+        status: "failed",
+        items: [],
+        scope_counts: {},
+        error: "sendMessage_failed",
+      });
+    })();
   });
 }
 
@@ -584,6 +622,7 @@ async function beginLinuxdoTask(task: LinuxdoTask, mutexAlreadyHeld: boolean): P
   if (!mutexAlreadyHeld && !tryAcquireDispatcherMutex("linuxdo")) return;
   taskInFlight = true;
   currentTask = task;
+  contentScriptTabRestarts = 0;
   pendingFinalResult = null;
   previousActiveTabId = null;
   if (shouldOpenLinuxdoTaskActive(task)) {
@@ -824,6 +863,7 @@ export function resetLinuxdoTaskRuntimeForTest(): void {
   if (resultRetryTimeoutId !== null) clearTimeout(resultRetryTimeoutId);
   resultRetryTimeoutId = null;
   taskInFlight = false;
+  contentScriptTabRestarts = 0;
   taskTabId = null;
   currentTask = null;
   previousActiveTabId = null;

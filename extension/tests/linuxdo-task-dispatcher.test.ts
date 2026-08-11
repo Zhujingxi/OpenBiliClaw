@@ -122,6 +122,49 @@ test("dispatcher isolates discovery in an inactive Linux.do task tab", async () 
   }
 });
 
+test("content-script transport failure restarts the same runner once before failing", async () => {
+  const chromeMock = installChromeMock();
+  let sendAttempts = 0;
+  chromeMock.sendMessageImpl = async () => {
+    sendAttempts += 1;
+    if (chromeMock.reloadedTabs.length === 0) throw new Error("receiver_not_ready");
+    return { status: "ok", actions: [] };
+  };
+  try {
+    const task: LinuxdoTask = {
+      id: "linuxdo-runner-restart",
+      claim_token: CLAIM_TOKEN,
+      type: "hot",
+    };
+    await executeLinuxdoTask(task);
+    await flush();
+    const tabId = chromeMock.sentMessages.at(-1)?.tabId;
+    assert.equal(typeof tabId, "number");
+    assert.equal(sendAttempts, 1);
+
+    // Move beyond the readiness retry window. The next bounded retry must
+    // reload the same task tab, not release the lease and claim a second task.
+    await new Promise((resolve) => setTimeout(resolve, 8_500));
+    assert.deepEqual(chromeMock.reloadedTabs, [tabId]);
+    const attemptsBeforeRestart = sendAttempts;
+    chromeMock.emitTabUpdated(tabId as number, { status: "complete" });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(sendAttempts, attemptsBeforeRestart + 1);
+    assert.equal(chromeMock.createdTabs.length, 1);
+
+    await handleLinuxdoTaskResult({
+      task_id: task.id,
+      claim_token: task.claim_token,
+      status: "empty",
+      items: [],
+      scope_counts: {},
+    });
+  } finally {
+    resetLinuxdoTaskRuntimeForTest();
+    chromeMock.restore();
+  }
+});
+
 test("only bootstrap task tabs are foregrounded for browser login visibility", () => {
   assert.equal(shouldOpenLinuxdoTaskActive({ id: "b", claim_token: CLAIM_TOKEN, type: "bootstrap_events" }), true);
   for (const [index, type] of ["search", "hot", "feed", "creator", "related"].entries()) {

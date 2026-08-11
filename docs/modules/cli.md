@@ -1289,7 +1289,7 @@ openbiliclaw discover-linuxdo --limit 30
 openbiliclaw discover --source linuxdo --limit 30
 ```
 
-该命令只有 `--limit, -n` 选项（默认 `30`）；关键词、作者页和相关主题 seed 由共享 producer 根据画像、关键词池与已有候选选择。producer 的默认端到端等待同样是 32.5 分钟：pending 最多约 3 分钟，领取后按任务形状最多约 29 分钟执行，并留 30 秒结果余量。公开 discovery 不强制登录，但依赖在线扩展和 Linux.do host permission。全部站点请求均为同源 GET，插件只回传归一化字段或结构化错误，不回传 Cookie 或原始响应。自动化测试覆盖任务协议、分页、预算、超时和错误映射；2026-08-09 的真实 Chrome E2E 进一步验证了正式 discover、五种任务类型与候选入池。
+该命令只有 `--limit, -n` 选项（默认 `30`）；关键词、作者页和相关主题 seed 由共享 producer 根据画像、关键词池与已有候选选择。producer 的默认端到端等待同样是 32.5 分钟：pending 最多约 3 分钟，领取后按任务形状最多约 29 分钟执行，并留 30 秒结果余量。公开 discovery 不强制登录，但依赖在线扩展和 Linux.do host permission。全部站点请求均为同源 GET，插件只回传归一化字段或结构化错误，不回传 Cookie 或原始响应。发现摘要的计数来自本轮 producer；紧随其后的候选预览还会按 `linuxdo-*` strategy 再过滤一次，避免长驻共享候选管线中其它平台的旧条目混入 Linux.do 输出。自动化测试覆盖任务协议、分页、预算、超时和错误映射；2026-08-11 的真实 Chrome E2E 进一步验证了正式 discover、后台任务、候选入池与配置中的真实 LLM 评估。
 
 ### `openbiliclaw fetch-bangumi`
 

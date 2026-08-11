@@ -109,6 +109,7 @@ flowchart LR
 - HTTP 200 但正文是 HTML challenge、缺少/错误 JSON `Content-Type`、JSON 解析失败或容器结构不合格时，不把正文回传，只报告结构化失败；只有 route-specific envelope 与终止页证据齐全才允许 `empty`。
 - dispatcher 对任务类型、scope 和数值字段做 allow-list 校验；领取后才发现非法 payload 时，会立即向 `task-result` 回传 `failed / invalid_task_payload`，不让坏任务占满整个长 lease。合法任务使用独立 tab ID、task ID 与绝对超时，结束后只关闭自己创建的标签页。
 - Linux.do dispatcher 在领取后端任务前先获取共享 dispatcher mutex，避免多个扩展任务同时争用浏览器任务标签页；共享 mutex 的 stale 驱逐窗口为 36 分钟，长于合法任务的约 29 分钟执行窗口与 35 分钟 claim lease。
+- 如果同源 task tab 在 Discourse challenge / SPA 初始化窗口里暂时没有 content-script listener，dispatcher 会继续在原 task ID 上做短间隔重试；达到 readiness 窗口后最多重载一次同一标签页，再重新等待 ready。重载仍失败才回传 `sendMessage_failed`，不会释放租约后偷偷领取第二个任务，也不会创建第二个 runner tab。
 - bootstrap 任一 scope 或 discovery 的分页 / 多输入中途失败时，会保留此前已经归一化的 items 并回传 `degraded` 与有界 `scope_errors` / `input_errors`；只有没有任何有效 item 的失败才回传 `failed`。producer 会继续把 degraded discovery 的有效 topic 放入候选管线，并把本轮标成部分完成。
 - 同一 bootstrap 任务里，若 bookmarks / likes / read history 的相同 `topic_id` 有任一路径提供真实 `views` / `like_count` / `reply_count`，executor 会把该任务内已有真值补到其它 scope 的缺失字段；已有值（包括显式 `0`）不覆盖，不跨 topic，也不额外请求详情页。
 
