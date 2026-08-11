@@ -181,6 +181,36 @@ test("startInit omits the token when none is supplied (keep configured)", async 
   });
 });
 
+test("startInit force:true sends the re-init payload", async () => {
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, options });
+    return { ok: true, async json() { return { run_id: "run-reinit" }; } };
+  };
+
+  await startInit({ force: true });
+
+  assert.deepEqual(JSON.parse(calls[0].options.body), { force: true });
+  assert.equal(calls[0].options.method, "POST");
+});
+
+test("popup settings re-init calls POST /api/init with force:true after confirm", () => {
+  const source = readFileSync(resolve("popup/popup.js"), "utf8");
+  const html = readFileSync(resolve("popup/popup.html"), "utf8");
+
+  // The settings overlay owns the re-init entry (gui-init §4 entry convergence).
+  assert.match(html, /id="cfgReinitBtn"/);
+  assert.match(html, /id="cfgReinitStatus"/);
+  // A confirm dialog guards the destructive re-pull, then force:true is sent.
+  assert.match(source, /window\.confirm\(/);
+  assert.match(source, /startInit\(\{ force: true \}\)/);
+  // After a successful start the popup switches to the recommend tab so the
+  // existing init progress panel becomes visible.
+  assert.match(source, /setActiveTab\("recommend"\)/);
+  assert.match(source, /renderInitProgress\(\{ running: true/);
+  assert.match(source, /_startInitProgressPoll\(\)/);
+});
+
 test("popup resolves the Bangumi username omit-vs-clear before sending guided init", () => {
   const source = readFileSync(resolve("popup/popup.js"), "utf8");
 

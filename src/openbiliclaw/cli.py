@@ -9188,8 +9188,20 @@ def init(
         min=0,
         help="B 站关注 UP 初始化信号上限；默认 100，0 表示跳过关注。",
     ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help=(
+            "已初始化时仍强制重新初始化：重新拉取所选平台数据、重建完整画像并"
+            "补足首轮发现池（现有事件、收藏与对话历史保留）。默认已初始化时"
+            "交互终端会二次确认。"
+        ),
+    ),
 ) -> None:
-    """首次运行：拉取历史、生成画像并补足首轮发现池."""
+    """初始化或重新初始化：拉取历史、生成画像并补足首轮发现池.
+
+    已初始化时默认（交互终端）先二次确认，--force 跳过确认并直接按重新初始化执行。
+    """
     _prepare_init_runtime()
 
     # Snapshot the highest llm_usage row id seen at start so the
@@ -9212,7 +9224,33 @@ def init(
     memory = _build_memory_manager()
     soul_engine = _build_soul_engine()
 
-    _print_page_title("初始化 OpenBiliClaw", "首次运行引导")
+    # Re-init awareness: distinguish a first run from a deliberate rebuild so
+    # the copy is honest and the user isn't surprised by a re-pull. Interactive
+    # terminals get a confirmation when a profile already exists and --force
+    # was not passed; non-interactive (scripted) runs keep their historical
+    # behavior of just re-running (backwards compatibility).
+    profile_ready_check = getattr(soul_engine, "is_profile_ready", None)
+    already_initialized = bool(profile_ready_check() if callable(profile_ready_check) else False)
+    if already_initialized and not force and _is_interactive_terminal():
+        console.print("[yellow]检测到系统已初始化。[/yellow]")
+        console.print(
+            "  重新初始化会重新拉取所选平台数据、重建完整画像并补足首轮发现池；"
+            "现有事件、收藏与对话历史都会保留，但会消耗较多 AI 调用。"
+        )
+        if not typer.confirm("确认继续重新初始化？", default=False):
+            console.print("[dim]已取消，未做任何改动。[/dim]")
+            raise typer.Exit(code=0)
+
+    if force or already_initialized:
+        _print_page_title("重新初始化 OpenBiliClaw", "重新拉取数据、重建画像并补足发现池")
+        if force:
+            console.print("[dim]  --force：跳过确认，按重新初始化执行。[/dim]")
+        console.print(
+            "[yellow]  本次为重新初始化：将重新拉取所选平台数据，并基于最新信号重建完整画像"
+            "（现有事件、收藏与对话历史保留）。[/yellow]"
+        )
+    else:
+        _print_page_title("初始化 OpenBiliClaw", "首次运行引导")
     stage1_label = (
         "拉 B 站历史 / 收藏 / 关注（时长看你的列表大小）"
         if include_bili

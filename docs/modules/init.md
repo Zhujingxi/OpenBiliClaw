@@ -77,6 +77,14 @@ v0.3.157+：`/api/embedding/repair` 是有界的「诊断 → 修复 → 重新�
 
 wrapper 的任务句柄另有 done callback 审计终态；若任务已经退出而 DB 仍是 `starting/running`，协调器会补写 `interrupted` 并发布失败事件。30 秒 heartbeat 只刷新 owner lease，阶段 1/2 的 elapsed tick 同样标记为非实质更新；它们都不会伪造 `last_progress_at`。
 
+## 重新初始化（force 重建）
+
+已初始化后的「重新初始化」复用同一条四阶段流水线，不删除任何既有数据（事件、收藏、对话历史保留），只重新拉取所选平台数据、重建完整画像并补足首轮发现池。入口收敛（gui-init §4）：推荐 tab 的「开始初始化」CTA 只服务首跑；已初始化后唯一入口在设置页（桌面 Web 通用 tab「初始化与画像」区、扩展 popup 通用 tab），CLI 用 `init --force`。
+
+- **后端**：`POST /api/init` 的 body `force:true` 绕过 `409 already_initialized` 守卫（`init-status` 的 `can_start=false` 与 `already_initialized` reason 不受影响）；其余前置复验、单飞预约、写者门控与四阶段流水线与首跑完全一致。
+- **CLI**：`openbiliclaw init --force` 跳过已初始化二次确认，标题改为「重新初始化 OpenBiliClaw」；交互终端默认（无 `--force`）在检测到画像已存在时先 y/N 确认（默认 No，选 No 直接退出不改数据）；非交互终端保持原有直接重跑行为。只想基于已有事件重跑画像可用 `rebuild-profile`（不重新拉数据）。
+- **桌面 Web / 扩展 popup**：设置页「重新初始化 / 重建画像」按钮先 `window.confirm` 二次确认，确认后调 `POST /api/init {force:true}`（不传 `sources`，使用全部已开启平台），成功后回到推荐 tab 复用既有进度面板展示四阶段；进行中禁用按钮。
+
 ## init 期间写者门控
 
 防止并发写污染在跑的 init（`init_active()` 为真时）。设计原则是 **deny-by-default**：不是枚举"要拦的写端"（总会漏），而是默认拦截一切变更、只放行 init 必需的少数路径。

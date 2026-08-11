@@ -254,6 +254,13 @@ def test_ledger_command_is_registered(runner: CliRunner) -> None:
     assert "--write-point" in options
 
 
+def test_init_command_exposes_force_option(runner: CliRunner) -> None:
+    result = runner.invoke(app, ["init", "--help"])
+    assert result.exit_code == 0
+    assert "--force" in _registered_option_names("init")
+    assert "重新初始化" in result.output
+
+
 def test_ledger_empty_shows_no_data(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

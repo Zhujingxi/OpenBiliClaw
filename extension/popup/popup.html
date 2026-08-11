@@ -7137,6 +7137,14 @@
           <p class="settings-hint">默认关闭。收藏和稍后再看始终先保存在本地；关闭时仍可在列表页手动同步。</p>
           <p id="cfgSavedAutoSyncStatus" class="settings-probe-status" aria-live="polite"></p>
         </div>
+        <div class="settings-field" id="reinitControlField">
+          <label>重新初始化 / 重建画像</label>
+          <p class="settings-hint">重新拉取所选平台数据、重建完整画像并补足首轮发现池；现有事件、收藏与对话历史保留。适合更换平台账号或画像长期未更新，会消耗较多 AI 调用。</p>
+          <div class="settings-field-row">
+            <button id="cfgReinitBtn" type="button" class="settings-inline-btn">开始重新初始化</button>
+          </div>
+          <p id="cfgReinitStatus" class="settings-probe-status" aria-live="polite">读取初始化状态中…</p>
+        </div>
         <div class="settings-field">
           <label for="cfgLanguage">语言</label>
           <select id="cfgLanguage">

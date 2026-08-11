@@ -42,7 +42,7 @@ openbiliclaw [--log-level DEBUG|INFO|WARNING|ERROR] <命令>
 | `tls-proxy enable [--san HOST_OR_IP]...` | 持久开启可选 LAN/self-managed HTTPS 入口 | ✅ |
 | `tls-proxy disable` | 持久关闭 TLS 入口（不删除证书） | ✅ |
 | `tls-proxy status` | 显示开关、端口、证书目录与 SAN | ✅ |
-| `init` | 首次初始化 | ✅ | stage 1 的 B 站收藏事件补上 `bvid` / url / `fav_time`（2026-07-26+）：此前收藏没有身份，进不了 `seen_items`，收藏过的视频会被当新内容推回；历史事件同时补 `content_id` / 完播秒数 / 时长 / 分区，供偏好分析 prompt 与画像抽样权重区分满播与划走；2026-07-27 起 `view` 也参与满意度判定，但**只判正向**：完播 ≥80% 且观看 ≥15 秒 → `positive/finished_watch`，低完播保持 `unknown` 不判负。收藏还会带上播放量 / 发布时间 / 简介（截 200 字，仅入库不进 prompt），并按 `attr` 丢弃失效视频——它们的标题字面是「已失效视频」，占真实样本 6%，原样进画像等于凭空造出一个兴趣。导入前按 `(事件类型, 内容身份, 时间戳)` 跳过账本已有行：重跑 init 曾让账本 56% 变成重复行；键含时间戳让真实重看仍能落地，无身份的行一律保留 |
+| `init` | 首次初始化 / `--force` 重新初始化 | ✅ | stage 1 的 B 站收藏事件补上 `bvid` / url / `fav_time`（2026-07-26+）：此前收藏没有身份，进不了 `seen_items`，收藏过的视频会被当新内容推回；历史事件同时补 `content_id` / 完播秒数 / 时长 / 分区，供偏好分析 prompt 与画像抽样权重区分满播与划走；2026-07-27 起 `view` 也参与满意度判定，但**只判正向**：完播 ≥80% 且观看 ≥15 秒 → `positive/finished_watch`，低完播保持 `unknown` 不判负。收藏还会带上播放量 / 发布时间 / 简介（截 200 字，仅入库不进 prompt），并按 `attr` 丢弃失效视频——它们的标题字面是「已失效视频」，占真实样本 6%，原样进画像等于凭空造出一个兴趣。导入前按 `(事件类型, 内容身份, 时间戳)` 跳过账本已有行：重跑 init 曾让账本 56% 变成重复行；键含时间戳让真实重看仍能落地，无身份的行一律保留 |
 | `fetch-douyin` | 单独触发抖音 bootstrap 拉取（不重建画像；默认复用近期任务） | ✅ |
 | `fetch-xhs` | 单独触发小红书 bootstrap 拉取（不重建画像；默认复用近期任务） | ✅ |
 | `fetch-youtube` | 单独触发 YouTube bootstrap 拉取（不重建画像；默认复用近期任务） | ✅ |
@@ -668,7 +668,7 @@ $ openbiliclaw profile-consolidate --revert 20260612-031500   # 按 run_id 回�
 
 ### `openbiliclaw init`
 
-首次运行编排命令。会顺序执行：
+首次运行编排命令；已初始化后加 `--force` 即「重新初始化」（重新拉取所选平台数据、重建完整画像并补足首轮发现池，**现有事件、收藏与对话历史保留**；交互终端默认在检测到已初始化时先 y/N 二次确认，`--force` 跳过确认并把标题改为「重新初始化 OpenBiliClaw」，非交互终端保持直接重跑）。会顺序执行：
 
 1. 检查运行时 LLM 配置
 2. 检查 B 站认证（仅当包含 B 站来源时）
@@ -773,6 +773,7 @@ X (Twitter) 与其它平台不同：init 阶段**没有 bootstrap 导入任务**
 - `--bangumi-username <name>`：本次初始化读取的公开用户名，并在启用时写回配置；不提供时可回退 `[sources.bangumi].username`。
 - `--bangumi-token <token>`：Bangumi 个人令牌（推荐，自动识别当前用户并可读私密收藏）；不提供时可回退 `[sources.bangumi].access_token`。经 `/v0/me` 校验通过后写回配置；坏令牌当场拒绝。
 - `--bilibili-favorite-limit N` / `--bilibili-follow-limit N`：覆盖 B 站收藏 / 关注初始化信号上限，默认各 `300`；`0` 表示跳过对应信号。
+- `--force`：已初始化时仍强制重新初始化。默认已初始化时，交互终端会先二次确认（`检测到系统已初始化` + y/N，默认 No，选 No 直接退出、不做任何改动）；`--force` 跳过确认，并按「重新初始化」语义执行——重新拉取所选平台数据、重建完整画像并补足首轮发现池，**现有事件、收藏与对话历史全部保留**，仅覆盖画像与推荐池。非交互（脚本化）终端不弹确认，保持原有「直接重跑」行为；只想基于已有事件重跑画像可优先用 `rebuild-profile`（不重新拉数据，更省）。
 - `OPENBILICLAW_NO_BILIBILI=1` / `OPENBILICLAW_NO_XHS=1` / `OPENBILICLAW_NO_DOUYIN=1` / `OPENBILICLAW_NO_YOUTUBE=1` / `OPENBILICLAW_NO_X=1` / `OPENBILICLAW_NO_ZHIHU=1` / `OPENBILICLAW_NO_REDDIT=1` / `OPENBILICLAW_NO_LINUXDO=1` / `OPENBILICLAW_NO_BANGUMI=1`：永久跳过对应源；作为持久禁用开关，它优先于同一来源的 `--yes-*`。
 - `OPENBILICLAW_XHS_BOOTSTRAP_DEDUPE_HOURS`：小红书 `bootstrap_profile` 近期任务复用窗口，默认 `6` 小时；设为 `0` 可关闭复用。
 - `OPENBILICLAW_DY_BOOTSTRAP_DEDUPE_HOURS` / `OPENBILICLAW_YT_BOOTSTRAP_DEDUPE_HOURS`：抖音 / YouTube `bootstrap_profile` 近期任务复用窗口，默认 `6` 小时；抖音已 `degraded` 的 completed 结果不参与复用；设为 `0` 可关闭复用。

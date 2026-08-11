@@ -2593,6 +2593,7 @@
         const status = await requestJsonStrict(ENDPOINTS.initStatus, { timeoutMs: 60000 });
         state.initStatus = status;
         state.initReason = "";
+        renderSettingsReinitStatus();
         if (status?.running) {
           renderAll(initStatusRenderOptions());
           scheduleInitStatusRefresh(schedule ? INIT_STATUS_POLL_MS : INIT_STATUS_WATCHDOG_MS);
@@ -2770,6 +2771,100 @@
       }
     }
 
+    // Settings-page "重新初始化 / 重建画像" surface (gui-init §4). The
+    // recommend-tab CTA stays first-run-only; once initialized the only
+    // re-init entry is here, guarded by force:true + a confirm dialog.
+    function renderSettingsReinitStatus() {
+      const status = state.initStatus;
+      const badge = $("#reinitStateBadge");
+      if (badge) {
+        if (!status) {
+          badge.hidden = true;
+        } else {
+          badge.hidden = false;
+          if (status.running) {
+            badge.textContent = "正在重新初始化";
+            badge.dataset.tone = "running";
+          } else if (status.initialized) {
+            badge.textContent = status.partial_success ? "初始化部分完成" : "已初始化";
+            badge.dataset.tone = "";
+          } else {
+            badge.textContent = "尚未初始化";
+            badge.dataset.tone = "";
+          }
+        }
+      }
+      const statusEl = $("#reinitStatus");
+      const btn = $("#reinitBtn");
+      if (!status) {
+        if (statusEl) statusEl.textContent = "读取初始化状态中…";
+        if (btn) btn.disabled = false;
+        return;
+      }
+      if (status.running) {
+        if (statusEl) {
+          statusEl.textContent = `初始化进行中（阶段 ${status.current_stage || "?"}/${status.total_stages || 4}）。请等待本轮完成后再重新初始化。`;
+        }
+        if (btn) btn.disabled = true;
+        return;
+      }
+      if (btn) btn.disabled = false;
+      if (statusEl) {
+        statusEl.textContent = status.initialized
+          ? "系统已初始化。重新初始化会重新拉取数据并重建画像，现有事件与收藏保留。"
+          : "系统尚未初始化完成；正常流程请到「推荐」页点击开始初始化。";
+      }
+    }
+
+    async function handleDesktopReinitClick() {
+      // Always fetch a fresh snapshot first — the settings page may open
+      // before the app-wide init-status poll populated state.initStatus.
+      let status = null;
+      try {
+        status = await requestJsonStrict(ENDPOINTS.initStatus, { timeoutMs: 60000 });
+        state.initStatus = status;
+        renderSettingsReinitStatus();
+      } catch (error) {
+        showToast(error?.message || "无法读取初始化状态，请稍后再试。");
+        return;
+      }
+      if (status?.running) {
+        showToast("初始化正在进行中，请等待完成后再重新初始化。");
+        return;
+      }
+      if (!status?.initialized) {
+        showToast("系统尚未初始化完成；请先到「推荐」页完成初始化。");
+        return;
+      }
+      const confirmed = window.confirm(
+        "将重新拉取所选平台的数据、重建完整画像并补足首轮发现池（现有事件、收藏与对话历史保留），并消耗较多 AI 调用。继续吗？"
+      );
+      if (!confirmed) return;
+      const btn = $("#reinitBtn");
+      const statusEl = $("#reinitStatus");
+      if (btn) btn.disabled = true;
+      if (statusEl) statusEl.textContent = "正在启动重新初始化…";
+      try {
+        await requestJsonStrict(ENDPOINTS.startInit, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ force: true }),
+          timeoutMs: 60000
+        });
+        showToast("重新初始化已开始，正在重新拉取数据并重建画像");
+        void refreshInitStatus({ schedule: true });
+        scheduleInitStatusRefresh(INIT_STATUS_START_POLL_MS);
+        // Jump back to the recommend tab so the progress panel is visible.
+        openHomePage();
+      } catch (error) {
+        const code = error?.details?.error || error?.details?.reason;
+        if (statusEl) {
+          statusEl.textContent = describeInitReason(code) || error?.message || "重新初始化没能启动，请稍后重试。";
+        }
+        if (btn) btn.disabled = false;
+      }
+    }
+
     function openPanel(id) {
       const panel = document.getElementById(id);
       if (!panel) return;
@@ -2872,6 +2967,7 @@
       setActiveSettingsPanel(panel || "models");
       showMainPage("settingsPage");
       window.scrollTo({ top: 0, behavior: "smooth" });
+      renderSettingsReinitStatus();
       if (!state.degraded) {
         void renderSourcesStatus();
         void renderSourceCredentials();
@@ -10200,6 +10296,7 @@ ${cardFeedbackBarHtml()}`;
       function applyInitStatusSnapshot(snapshot) {
         if (!snapshot) return;
         state.initStatus = snapshot;
+        renderSettingsReinitStatus();
         renderVideos();
         // Re-attach the init poll if a run is live at load time. Hydrate only
         // fetches init-status once, while the poll observes quiet heartbeats
@@ -11346,6 +11443,7 @@ ${cardFeedbackBarHtml()}`;
       void stageMigrationImport(file).finally(() => { input.value = ""; });
     });
     safeBind("#migrationCancelBtn", "click", () => { void cancelPendingMigration(); });
+    safeBind("#reinitBtn", "click", () => { void handleDesktopReinitClick(); });
 
     function settingsFormHasActiveEditor() {
       const settingsForm = document.getElementById("settingsForm");

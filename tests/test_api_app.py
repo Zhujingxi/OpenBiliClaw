@@ -16475,6 +16475,43 @@ class TestGuidedInitEndpoints:
         assert resp.json()["error"] == "already_initialized"
         assert db.get_latest_init_run() is None
 
+    def test_init_force_bypasses_already_initialized_guard(self, tmp_path: Path) -> None:
+        """``force:true`` must pass the already-initialized guard (re-init entry).
+
+        A later prerequisite failure (here: B 站登录) proves the request actually
+        advanced past the initialized guard instead of being short-circuited by
+        it — the re-init path keeps the normal prerequisite checks.
+        """
+        from fastapi.testclient import TestClient
+
+        prereqs = _FakeInitPrereqs(bili="failed", chat=True, platforms=["bilibili"])
+        app, db = self._make_app(tmp_path, profile_ready=True, prereqs=prereqs)
+        with TestClient(app) as client:
+            resp = client.post("/api/init", json={"force": True})
+        assert resp.status_code == 409
+        assert resp.json()["error"] == "bilibili_not_logged_in"
+        # Guard bypassed: the failure is a later prerequisite, not
+        # already_initialized, and the run was rolled back cleanly.
+        assert resp.json()["error"] != "already_initialized"
+        run = db.get_latest_init_run()
+        assert run["status"] == "idle"
+        assert app.state.runtime_context.init_coordinator.init_active() is False
+
+    def test_init_force_starts_reinit_when_prerequisites_pass(self, tmp_path: Path) -> None:
+        """``force:true`` with healthy prerequisites reserves a real re-init run."""
+        from fastapi.testclient import TestClient
+
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["bilibili"])
+        app, db = self._make_app(tmp_path, profile_ready=True, prereqs=prereqs)
+        with TestClient(app) as client:
+            resp = client.post("/api/init", json={"force": True})
+            assert resp.status_code == 202, resp.text
+            body = resp.json()
+            assert body["run_id"]
+            assert body["status"] in {"starting", "running"}
+            # Clean up the background run so the test exits without a live task.
+            client.post("/api/init/cancel", json={})
+
     def test_init_already_running_returns_409(self, tmp_path: Path) -> None:
         from fastapi.testclient import TestClient
 

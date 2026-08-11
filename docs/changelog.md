@@ -6,6 +6,7 @@
 
 ## 未发布
 
+- **新增「重新初始化 / 重建画像」入口（gui-init §4 收口）**：已初始化后，桌面 Web 设置页「通用 → 初始化与画像」与扩展 popup 通用 tab 提供「重新初始化 / 重建画像」按钮（`window.confirm` 二次确认后调 `POST /api/init {force:true}`，成功后回推荐 tab 展示四阶段进度）；CLI `openbiliclaw init --force` 跳过已初始化二次确认并按重新初始化执行（交互终端默认检测到已初始化时先 y/N 确认，非交互保持直接重跑）。语义为 force 重建：重新拉取所选平台数据、重建完整画像并补足首轮发现池，现有事件 / 收藏 / 对话历史全部保留。后端 `POST /api/init` 的 `force:true` 绕过 `already_initialized` 守卫，其余前置复验与写者门控不变；移动 Web 无设置页，重新初始化入口按四表面契约声明排除。
 - **新增 Flutter 原生移动客户端（独立仓库）**：OpenBiliClaw-mobile 提供 Android / iOS / Web / Linux / macOS / Windows 全平台客户端，连接同一本地后端；推荐 / 对话 / 画像 / 收藏与 30 天历史 / 消息收件箱齐全，B 站封面 CDN 直连省两跳。首个安装包已随其 Latest Release 发布（Android 签名 APK / iOS 未签名 IPA）。README（中英）、项目主页与文档导航同步加入入口链接与下载入口。
 
 ## v0.3.204：后台来源调度与搜索修复（2026-08-11）

@@ -18,6 +18,7 @@
 - run 活跃时 `GET /api/init-status` 只 peek B 站、chat、embedding 与诊断缓存，不发真实探针；热重载取消等待有 1.5 秒硬上限，忽略取消的旧任务保持被 registry 所有且不启动同名重复 loop。
 - 首个完整画像尚未提交时，daemon-owned account-sync / refresh / soul pipeline 同样停在共享 gate，不能在用户点击「开始初始化」之前抢先导入、分析或重复落库 bootstrap 历史；阶段 3 提交后仍由 active run gate 挡到阶段 4 终态。
 - `/setup` 为每个 provider 独立保留 model / Base URL / API flavor，重载会回填当前 provider 的完整非密配置，切换 provider 不得沿用上一家的模型名或残留错误。chat live probe 允许 30 秒覆盖本地 Ollama 冷启动；终态 run 的持久化失败原因优先于随后 prereq 红灯。
+- **§4「设置页重新初始化入口」已实现**：已初始化后，桌面 Web 设置页「通用 → 初始化与画像」与扩展 popup 通用 tab 提供「重新初始化 / 重建画像」按钮（`window.confirm` 二次确认 → `POST /api/init {force:true}` → 回推荐 tab 复用既有进度面板）；CLI 对应 `openbiliclaw init --force`（交互终端默认在检测到已初始化时先 y/N 确认）。force 重建复用同一四阶段流水线，不删除既有数据（事件 / 收藏 / 对话历史保留），仅重新拉取、重建画像并补足首轮发现池。移动 Web 无设置页，入口按四表面契约声明排除。
 
 ## Goal
 

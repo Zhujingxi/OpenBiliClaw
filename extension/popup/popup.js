@@ -10369,6 +10369,7 @@ function bindSettings() {
     void loadBackendUpdateStatus();
     void authControl.reload();
     void autostartControl.reload();
+    void refreshReinitStatus();
     try {
       const cfg = await fetchConfig();
       populateForm(cfg);
@@ -10452,6 +10453,75 @@ function bindSettings() {
         showToast(`生成建议失败: ${err.message}`, "error");
       } finally {
         suggestBtn.disabled = false;
+      }
+    });
+  }
+
+  // ── 重新初始化 / 重建画像 (gui-init §4) ─────────────────────────
+  // The recommend-tab CTA is first-run-only; once initialized the only
+  // re-init entry lives in settings and calls POST /api/init {force:true}.
+  const reinitBtn = document.getElementById("cfgReinitBtn");
+  const reinitStatusEl = document.getElementById("cfgReinitStatus");
+
+  async function refreshReinitStatus() {
+    let status = null;
+    try {
+      status = await fetchInitStatus();
+    } catch {
+      if (reinitStatusEl) reinitStatusEl.textContent = "无法读取初始化状态（后端不可达）。";
+      if (reinitBtn) reinitBtn.disabled = false;
+      return;
+    }
+    if (reinitBtn) reinitBtn.disabled = Boolean(status?.running);
+    if (!reinitStatusEl) return;
+    if (status?.running) {
+      reinitStatusEl.textContent =
+        `初始化进行中（阶段 ${status.current_stage || "?"}/${status.total_stages || 4}）。` +
+        "请等待本轮完成后再重新初始化。";
+    } else if (status?.initialized) {
+      reinitStatusEl.textContent = "系统已初始化。重新初始化会重新拉取数据并重建画像，现有事件与收藏保留。";
+    } else {
+      reinitStatusEl.textContent = "系统尚未初始化完成；正常流程请到「推荐」页点击开始初始化。";
+    }
+  }
+
+  if (reinitBtn) {
+    reinitBtn.addEventListener("click", async () => {
+      let status = null;
+      try {
+        status = await fetchInitStatus();
+      } catch {
+        if (reinitStatusEl) reinitStatusEl.textContent = "无法读取初始化状态（后端不可达）。";
+        return;
+      }
+      if (status?.running) {
+        if (reinitStatusEl) reinitStatusEl.textContent = "初始化正在进行中，请等待完成后再重新初始化。";
+        return;
+      }
+      if (!status?.initialized) {
+        if (reinitStatusEl) reinitStatusEl.textContent = "系统尚未初始化完成；请先到「推荐」页完成初始化。";
+        return;
+      }
+      if (!window.confirm(
+        "将重新拉取所选平台的数据、重建完整画像并补足首轮发现池（现有事件、收藏与对话历史保留），并消耗较多 AI 调用。继续吗？"
+      )) {
+        return;
+      }
+      reinitBtn.disabled = true;
+      if (reinitStatusEl) reinitStatusEl.textContent = "正在启动重新初始化…";
+      try {
+        await startInit({ force: true });
+        showToast("重新初始化已开始，正在重新拉取数据并重建画像", "success");
+        closePopupOverlay(overlay);
+        setActiveTab("recommend");
+        renderInitProgress({ running: true, current_stage: 1, total_stages: 4, stages: [] });
+        _startInitProgressPoll();
+      } catch (err) {
+        if (reinitStatusEl) {
+          reinitStatusEl.textContent =
+            describeInitStartError(err) || err?.message || "重新初始化没能启动，请稍后重试。";
+        }
+        reinitBtn.disabled = false;
       }
     });
   }

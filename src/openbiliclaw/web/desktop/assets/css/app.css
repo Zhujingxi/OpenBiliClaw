@@ -1267,6 +1267,14 @@
     .settings-migration-status[data-tone="pending"] { color: var(--accent-strong); }
     .settings-migration-status[data-tone="success"] { color: var(--success); }
     .settings-migration-status[data-tone="error"] { color: var(--danger); }
+    .settings-reinit-card { grid-column: 1 / -1; display: grid; gap: var(--space-4); min-width: 0; padding: clamp(18px, 2.4vw, 28px); border: 1px solid color-mix(in oklab, var(--warn), var(--border) 72%); border-radius: var(--radius-lg); background: linear-gradient(145deg, color-mix(in oklab, var(--surface), var(--warn) 7%), color-mix(in oklab, var(--surface), var(--bg) 34%)); box-shadow: var(--elev-ring); }
+    .settings-reinit-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4); min-width: 0; }
+    .settings-reinit-head h3 { margin: 0; color: var(--fg); font-size: clamp(20px, 2vw, 25px); line-height: 1.25; }
+    .settings-reinit-badge { flex: 0 0 auto; display: inline-flex; align-items: center; min-height: 28px; padding: 3px 10px; border: 1px solid color-mix(in oklab, var(--warn), var(--border-soft) 55%); border-radius: var(--radius-pill); background: color-mix(in oklab, var(--surface), var(--warn) 10%); color: var(--warn-fg); font-size: 12px; font-weight: 750; white-space: nowrap; }
+    .settings-reinit-badge[data-tone="running"] { color: var(--accent-strong); border-color: color-mix(in oklab, var(--accent), var(--border-soft) 55%); background: color-mix(in oklab, var(--surface), var(--accent) 10%); }
+    .settings-reinit-copy { margin: 0; color: var(--fg-2); line-height: 1.65; overflow-wrap: anywhere; }
+    .settings-reinit-actions { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); }
+    .settings-reinit-actions button:disabled { opacity: 0.55; cursor: wait; }
     /* Verification answers in three, not two. "Could not tell" — a dead proxy, a
        closed browser, a throttled platform, YouTube needing no login at all — is
        not a failure, and painting it red sends users off to delete a cookie that
