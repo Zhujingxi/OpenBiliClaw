@@ -257,11 +257,17 @@ _SCHEMA_V4: Final[tuple[str, ...]] = (
         BEGIN SELECT RAISE(ABORT, 'invalid recommendation candidate transition'); END""",
 )
 
+_SCHEMA_V5: Final[tuple[str, ...]] = (
+    "ALTER TABLE assistant_conversations ADD COLUMN conversation_json TEXT NOT NULL DEFAULT '{}'",
+)
+
+
 DEFAULT_MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(1, _SCHEMA_V1),
     Migration(2, _SCHEMA_V2),
     Migration(3, _SCHEMA_V3),
     Migration(4, _SCHEMA_V4),
+    Migration(5, _SCHEMA_V5),
 )
 
 

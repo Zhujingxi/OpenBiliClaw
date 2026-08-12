@@ -8,6 +8,8 @@ OpenBiliClaw 是一个本地优先的跨平台内容发现 AI Agent。浏览器�
 
 本政策说明 OpenBiliClaw 浏览器插件与本地后端如何处理数据。插件不会把数据发送到 OpenBiliClaw 开发者运营的服务器；Chrome Web Store / AMO 发布包默认只声明本机后端权限，数据流向通常是用户本机运行的 OpenBiliClaw 后端。
 
+目标 Assistant（尚未接入生产组合根）只持久化 provider-neutral、local-user/device-scoped 的 bounded conversation history；credential、credential reference、raw provider payload 和 oversized tool result 在 model/history 边界拒绝。普通对话不自动成为学习证据，只有用户明确 preference/feedback、confirmed edit 或定义过的 dialogue outcome 可产生 typed observation。
+
 ## 处理的数据类型
 
 插件可能处理以下数据，具体取决于用户启用的平台、登录状态和后端配置：

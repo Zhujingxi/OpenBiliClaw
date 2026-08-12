@@ -183,6 +183,7 @@ disallow_any_explicit = false
 module = [
     "tests.access.*",
     "tests.ai.*",
+    "tests.assistant.*",
     "tests.application.*",
     "tests.content.*",
     "tests.core.*",

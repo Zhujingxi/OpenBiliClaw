@@ -71,6 +71,15 @@ class HistoryPolicy:
             raise ValueError("history limits must be positive")
 
 
+_INSTRUCTION_PATTERN = re.compile(r"(?is)<[^>]*>|ignore\s+(all\s+)?previous\s+instructions?")
+
+
+def sanitize_untrusted_text(text: str) -> str:
+    """Strip markup and known instruction-override phrases from untrusted data."""
+
+    return _INSTRUCTION_PATTERN.sub("[untrusted text removed]", text)
+
+
 def audit_text(text: str) -> None:
     """Reject known secret-reference forms before model execution."""
 

@@ -1,5 +1,7 @@
 # 集成适配层 / Agent Bridge
 
+> Target `src/openbiliclaw/assistant/` 已落地但尚未接入 production composition。下述 legacy Agent Bridge/chat 路径继续单独运行至 Plan 15 caller cutover；它不是 target Assistant 的 compatibility facade。Target contract 见 [Assistant](assistant.md)。
+
 API runtime generation 拥有且只拥有一个 `ExpressionCopyCoordinator`，它连接候选 admission、推荐分类 callback 与 daemon 生命周期。OpenClaw direct composition 不启动 daemon loop，因此不构造这个 coordinator：候选 inline admission 后会 await 一次最多 4 条的 durable expression-copy drain，且本次不做 split retry；首个 provider batch 中有效的文案立即持久化，剩余行保留 durable pending 交给下一次 OpenClaw 请求，返回前不留下 notify-only owner 或 provider 后台任务。API、CLI 与 OpenClaw 三个 production composition root 都向推荐引擎注入钳制后的 copy-ready 水位和 `pool_target_count`，因此正数水位会先领取补齐后能进入当前 topic 展示窗口的 pending，再按需维持 unrestricted copy-ready 水位；`0` 继续表示 legacy drain-all。`recommend(refresh_if_needed=True)` 还会把本次 source supply 与 inline evaluation 首批一起限制为 4 条，优先在 adapter 的交互等待窗口内产出可 serve 的有效 subset；若首 batch 全部无效，本次仍可能没有可 serve 行，诊断会如实保留该结果。这不是新的配置项，也不缩小 API daemon 的持续补货波次。
 
 OpenClaw bootstrap 与 API/CLI production composition 使用同一组近期供给常量：`SearchStrategy` 在既有请求预算内把 1 个 query 设为 `order="pubdate"`、最多取 5 条。该 lane 只补检索覆盖并留下 `discovery_lane="recent"` provenance，不改变 evaluator relevance、admission 阈值或推荐排序。
