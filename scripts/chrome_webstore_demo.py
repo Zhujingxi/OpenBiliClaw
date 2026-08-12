@@ -204,9 +204,8 @@ def _config() -> dict[str, Any]:
             "sources": enabled,
             "scheduler": {"enabled": True, "interval_minutes": 30},
             "llm": {
-                "default_provider": "ollama",
-                "ollama": {"model": "qwen3:8b", "base_url": "http://127.0.0.1:11434"},
-                "embedding": {"provider": "ollama", "model": "nomic-embed-text"},
+                "default_provider": "openai",
+                "openai": {"model": "gpt-4o-mini"},
             },
             "recommendation": {"count": 12},
         }

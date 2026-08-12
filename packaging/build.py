@@ -526,132 +526,11 @@ def make_macos_dmg(*, app_bundle: Path, output_dir: Path, version: str) -> Path:
     return dmg_path
 
 
-def find_ollama_binary(explicit: str | None = None) -> Path | None:
-    """Locate an ollama executable to bundle (explicit > env > PATH)."""
-    candidates = [
-        explicit,
-        os.environ.get("OPENBILICLAW_OLLAMA_BIN"),
-        shutil.which("ollama"),
-    ]
-    for candidate in candidates:
-        if not candidate:
-            continue
-        path = Path(candidate).resolve()
-        if path.is_file():
-            return path
-    return None
-
-
-def _macos_ollama_runtime_files(ollama_bin: Path) -> list[Path]:
-    """Return macOS Ollama runtime sidecars required beside ``ollama``."""
-    resources = ollama_bin.parent
-    required = [
-        resources / "llama-server",
-        resources / "libllama-server-impl.dylib",
-    ]
-    missing = [path.name for path in required if not path.is_file()]
-    if missing:
-        raise RuntimeError(
-            "macOS Ollama runtime is incomplete: missing "
-            f"{', '.join(missing)} beside {ollama_bin}. Use the official "
-            "Ollama.app Resources/ollama, not a Homebrew-only ollama binary."
-        )
-
-    runtime_files: list[Path] = []
-    seen: set[Path] = set()
-
-    def add(path: Path) -> None:
-        if path == ollama_bin or not path.is_file() or path in seen:
-            return
-        seen.add(path)
-        runtime_files.append(path)
-
-    for path in required:
-        add(path)
-    for pattern in ("lib*.dylib", "lib*.so", "llama-*"):
-        for path in sorted(resources.glob(pattern)):
-            add(path)
-    return runtime_files
-
-
-def _macos_ollama_runtime_dirs(ollama_bin: Path) -> list[Path]:
-    """Return macOS Ollama runtime data directories to keep beside ``ollama``."""
-    return sorted(path for path in ollama_bin.parent.glob("mlx_metal_*") if path.is_dir())
-
-
-def bundle_ollama_binary(
-    dist_dir: Path,
-    ollama_bin: Path,
-    platform_name: str | None = None,
-) -> list[Path]:
-    """Copy the Ollama runtime into the packaged outputs.
-
-    Ships a self-contained local-embedding runtime so the app does not depend on
-    a user-installed ollama (the fragile brew/winget step). Placed where
-    ``entry.py`` resolves ``bundled_resources``: next to the exe for the onedir
-    layout, and ``Contents/Resources`` for the macOS ``.app`` bundle.
-    """
-    resolved = platform_name or platform.system()
-    exe_name = "ollama.exe" if resolved == "Windows" else "ollama"
-    targets: list[Path] = []
-
-    onedir = dist_dir / "OpenBiliClaw"
-    if onedir.is_dir():
-        targets.append(onedir / exe_name)
-    if resolved == "Darwin":
-        app_resources = dist_dir / "OpenBiliClaw.app" / "Contents" / "Resources"
-        if app_resources.is_dir():
-            targets.append(app_resources / exe_name)
-
-    # Windows ollama is not a single self-contained binary like macOS — it ships
-    # ``ollama.exe`` plus a sibling ``lib/`` of inference runners. Carry that dir
-    # along (CPU runner is enough for bge-m3 embedding) so the bundled exe works.
-    #
-    # macOS 0.30.x is no longer reliably single-binary either: Homebrew's formula
-    # can expose an ``ollama`` executable that starts /api/version but fails every
-    # GGUF embedding because the model runner is missing. The official .app ships
-    # ``llama-server`` plus dynamic libraries and Metal assets beside
-    # ``Contents/Resources/ollama``; require and bundle that runtime as a unit so
-    # the release never contains a half-working daemon.
-    sidecar_files: list[Path] = []
-    sidecar_dirs: list[Path] = []
-    if resolved == "Darwin":
-        sidecar_files = _macos_ollama_runtime_files(ollama_bin)
-        sidecar_dirs = _macos_ollama_runtime_dirs(ollama_bin)
-
-    sibling_lib = ollama_bin.parent / "lib"
-    written: list[Path] = []
-    for dest in targets:
-        shutil.copy2(ollama_bin, dest)
-        os.chmod(dest, 0o755)
-        written.append(dest)
-        for sidecar in sidecar_files:
-            sidecar_dest = dest.parent / sidecar.name
-            shutil.copy2(sidecar, sidecar_dest)
-            if sidecar.name.startswith("llama-"):
-                os.chmod(sidecar_dest, 0o755)
-            written.append(sidecar_dest)
-        for sidecar_dir in sidecar_dirs:
-            sidecar_dir_dest = dest.parent / sidecar_dir.name
-            if sidecar_dir_dest.exists() or sidecar_dir_dest.is_symlink():
-                if sidecar_dir_dest.is_dir() and not sidecar_dir_dest.is_symlink():
-                    shutil.rmtree(sidecar_dir_dest)
-                else:
-                    sidecar_dir_dest.unlink()
-            shutil.copytree(sidecar_dir, sidecar_dir_dest)
-            written.append(sidecar_dir_dest)
-        if sibling_lib.is_dir():
-            dest_lib = dest.parent / "lib"
-            if not dest_lib.exists():
-                shutil.copytree(sibling_lib, dest_lib)
-    return written
-
-
 def repair_macos_ad_hoc_signature(app_bundle: Path) -> None:
     """Re-seal a macOS app bundle with an ad-hoc signature after local mutations.
 
     PyInstaller may leave a macOS bundle ad-hoc signed. The build script then adds
-    resources such as bundled Ollama, which invalidates the sealed resources and
+    resources added after analysis, which invalidate the sealed resources and
     makes Gatekeeper report the app as damaged. Without a Developer ID account we
     still cannot notarize, but a final ad-hoc signature keeps the bundle internally
     consistent for users who explicitly bypass Gatekeeper.
@@ -670,53 +549,11 @@ def repair_macos_ad_hoc_signature(app_bundle: Path) -> None:
     )
 
 
-def stage_embedding_seed(
-    dist_dir: Path,
-    seed_dir: Path,
-    platform_name: str | None = None,
-) -> list[Path]:
-    """Copy the bge-m3 seed (produced by ``make_model_seed.py``) into the
-    packaged outputs, where ``entry.py`` resolves ``bundled_resources`` — next
-    to the exe (onedir) and ``Contents/Resources`` (macOS ``.app``). This is
-    the ``with-embedding`` variant: the model ships in the installer so a fresh
-    machine reaches embedding-ready fully offline (see
-    docs/plans/2026-07-07-bundled-embedding-model-*)."""
-    resolved = platform_name or platform.system()
-    written: list[Path] = []
-    dests: list[Path] = []
-    onedir = dist_dir / "OpenBiliClaw"
-    if onedir.is_dir():
-        dests.append(onedir / "bge-m3-seed")
-    if resolved == "Darwin":
-        app_resources = dist_dir / "OpenBiliClaw.app" / "Contents" / "Resources"
-        if app_resources.is_dir():
-            dests.append(app_resources / "bge-m3-seed")
-    for dest in dests:
-        if dest.exists():
-            shutil.rmtree(dest)
-        shutil.copytree(seed_dir, dest)
-        written.append(dest)
-    return written
-
-
-def _resolve_model_seed_dir(model_seed_dir: str | None) -> Path | None:
-    candidate = Path(
-        model_seed_dir
-        or os.environ.get("OPENBILICLAW_MODEL_SEED_DIR")
-        or (PROJECT_ROOT / "packaging" / "model-seed")
-    )
-    return candidate if (candidate / "seed.manifest.json").is_file() else None
-
-
 def build(
     *,
     archive_version: str | None = None,
-    bundle_ollama: bool = True,
-    ollama_bin: str | None = None,
     bundle_x: bool = True,
     bundle_reddit: bool = True,
-    bundle_embedding: bool = False,
-    model_seed_dir: str | None = None,
 ) -> None:
     """Run PyInstaller."""
     ensure_pyinstaller()
@@ -763,37 +600,6 @@ def build(
         if example.exists():
             shutil.copyfile(example, output / "config.example.toml")
 
-        # Bundle the local-embedding runtime (ollama) so the app ships a
-        # working bge-m3 path without a separate brew/winget install. Must
-        # happen before archive creation so the binary lands in the zip.
-        if bundle_ollama:
-            resolved_ollama = find_ollama_binary(ollama_bin)
-            if resolved_ollama is not None:
-                written = bundle_ollama_binary(DIST_DIR, resolved_ollama)
-                size_mb = resolved_ollama.stat().st_size // (1024 * 1024)
-                print(
-                    f"[build] Bundled ollama ({resolved_ollama}, ~{size_mb}MB) "
-                    f"into {len(written)} target(s)"
-                )
-            else:
-                print(
-                    "[build] WARNING: no ollama binary found (set OPENBILICLAW_OLLAMA_BIN "
-                    "or --ollama-bin); packaged app will fall back to a user-installed ollama"
-                )
-
-        # with-embedding variant: stage the baked bge-m3 seed so the installer
-        # ships the model (offline-ready). Must land before archive creation.
-        if bundle_embedding:
-            seed_dir = _resolve_model_seed_dir(model_seed_dir)
-            if seed_dir is None:
-                print(
-                    "[build] ERROR: --bundle-embedding set but no model seed found "
-                    "(run packaging/make_model_seed.py or set OPENBILICLAW_MODEL_SEED_DIR)"
-                )
-                sys.exit(1)
-            staged = stage_embedding_seed(DIST_DIR, seed_dir)
-            print(f"[build] Staged bge-m3 seed into {len(staged)} target(s): {seed_dir}")
-
         if platform.system() == "Darwin":
             app_bundle = DIST_DIR / "OpenBiliClaw.app"
             if app_bundle.exists():
@@ -817,11 +623,7 @@ def build(
             print(f"    {output / 'OpenBiliClaw'}")
 
         if archive_version:
-            # The with-embedding installer name carries a variant suffix so it
-            # sits next to the lean asset in the Release without clobbering it.
-            asset_version = (
-                f"{archive_version}-with-embedding" if bundle_embedding else archive_version
-            )
+            asset_version = archive_version
             target = detect_target()
             archive_path = create_archive(
                 packaged_root=packaged_root,
@@ -854,15 +656,6 @@ def main() -> None:
         help="Also create a release zip using the given version tag, e.g. v0.1.1",
     )
     parser.add_argument(
-        "--no-bundle-ollama",
-        action="store_true",
-        help="Do not bundle the ollama binary (smaller build; needs user-installed ollama)",
-    )
-    parser.add_argument(
-        "--ollama-bin",
-        help="Path to the ollama executable to bundle (default: $OPENBILICLAW_OLLAMA_BIN or PATH)",
-    )
-    parser.add_argument(
         "--no-bundle-x",
         action="store_true",
         help="Do not bundle the X (Twitter) discovery dependency (twitter-cli + curl_cffi)",
@@ -872,34 +665,14 @@ def main() -> None:
         action="store_true",
         help="Do not bundle the Reddit discovery dependency (rdt-cli)",
     )
-    parser.add_argument(
-        "--bundle-embedding",
-        action="store_true",
-        help="Ship the bge-m3 embedding model in the installer (the 'with-embedding' "
-        "variant; also enabled by OPENBILICLAW_BUNDLE_EMBEDDING=1). Needs a seed from "
-        "packaging/make_model_seed.py (or $OPENBILICLAW_MODEL_SEED_DIR).",
-    )
-    parser.add_argument(
-        "--model-seed-dir",
-        help="Path to the bge-m3 seed dir for --bundle-embedding "
-        "(default: $OPENBILICLAW_MODEL_SEED_DIR or packaging/model-seed)",
-    )
     args = parser.parse_args()
-
-    bundle_embedding = args.bundle_embedding or os.environ.get(
-        "OPENBILICLAW_BUNDLE_EMBEDDING", ""
-    ).strip() in ("1", "true", "True")
 
     if args.clean:
         clean()
     build(
         archive_version=args.archive_version,
-        bundle_ollama=not args.no_bundle_ollama,
-        ollama_bin=args.ollama_bin,
         bundle_x=not args.no_bundle_x,
         bundle_reddit=not args.no_bundle_reddit,
-        bundle_embedding=bundle_embedding,
-        model_seed_dir=args.model_seed_dir,
     )
 
 

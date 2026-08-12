@@ -10,6 +10,9 @@ Vue web / extension ─────── generated typed client
               │
               ▼
       Application workflows ◄──── Assistant (optional model route)
+                                ▲
+                    PydanticAI native providers
+                    (externally served chat + embeddings)
        │       │       │
        ▼       ▼       ▼
  Observations  Understanding  Recommendation
@@ -36,6 +39,7 @@ Vue web / extension ─────── generated typed client
 - Content providers depend on Content Integration and opaque Access handles.
 - Understanding consumes immutable observations and never imports Recommendation.
 - Recommendation is proactive and works without Assistant. Its deterministic baseline evaluates accessible connected-provider content without a model; configured model routes may enrich target analyzers.
+- All chat and embedding models are external services reached through one configuration/factory path and PydanticAI's native providers. OpenBiliClaw does not host, bundle, or supervise model runtimes.
 - Infrastructure owns resource adapters, while domain repositories remain owned by their domain packages.
 - Composition builds, starts, reloads, drains, and closes the concrete graph. No product module treats `Application` as a service locator.
 

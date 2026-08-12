@@ -6,6 +6,9 @@
 
 ## Unreleased
 
+- Unified chat and embedding configuration/construction through PydanticAI's native provider layer. `[model]` and `[embedding]` share provider/model/endpoint/secret-reference shape; chat has one factory/runtime path, embedding reuses the configured native provider client and fails closed where no native embedding capability exists. OpenBiliClaw does not serve models.
+- Removed the local model provider and all bundled local-model runtimes. Future local inference must run as a separate service integrated through the gateway API.
+
 ### Phase 14b (web shell)
 
 - **目标 responsive Vue web shell 落地（尚未接入 production composition）**：`frontend/apps/web/` 新增按 session、sources、recommendations、content、profile、Assistant、runtime/job 与 host-local preferences 拆分的 Pinia stores；server reads 具备 idle/loading/success/empty/error、AbortController 取消，event stream 只有一个 owner 并使用 bounded reconnect backoff。单一 responsive shell 提供 recommendations、provider tabs、search/detail、profile、Assistant、source connection、settings 与 runtime health views，desktop/mobile 使用不同 navigation/density 但不复制业务 UI；补齐 skip/focus/keyboard/reduced-motion/contrast/live-region 基础可访问性。Shared `ApiClient` 新增 generated-operation-typed query/path interpolation，避免 web 硬编码 URL。按计划，production composition、browser E2E、extension cutover 与 legacy JS 删除等待 Phase 14c/Plan 15。

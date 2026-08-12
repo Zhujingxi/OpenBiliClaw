@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import tomllib
-from typing import TYPE_CHECKING, Annotated, TypeAlias
+from typing import TYPE_CHECKING, Annotated, Literal, TypeAlias
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -23,10 +23,18 @@ class _FrozenModel(StrictBaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
 
+ModelProviderName: TypeAlias = Literal["openai", "anthropic", "google", "openrouter"]
+
+
 class ModelSettings(_FrozenModel):
-    provider: str = Field(default="ollama", min_length=1)
+    provider: ModelProviderName = "openai"
     model_name: str = Field(default="", max_length=200)
-    credential_ref: SecretReference | None = None
+    endpoint: str | None = Field(default=None, max_length=2_000, pattern=r"^https?://")
+    secret_ref: SecretReference | None = None
+
+
+class EmbeddingSettings(ModelSettings):
+    output_dimensions: int = Field(default=1_536, gt=0)
 
 
 class ContentProviderSettings(_FrozenModel):
@@ -51,6 +59,7 @@ class AppSettings(_FrozenModel):
     """Validated configuration root containing references, never secret values."""
 
     model: ModelSettings = ModelSettings()
+    embedding: EmbeddingSettings = EmbeddingSettings()
     content: ContentProviderSettings = ContentProviderSettings()
     recommendation: RecommendationSettings = RecommendationSettings()
     host: HostSettings = HostSettings()
@@ -63,9 +72,14 @@ class AppSettings(_FrozenModel):
 
 
 class ModelOverrides(_FrozenModel):
-    provider: str | None = None
+    provider: ModelProviderName | None = None
     model_name: str | None = None
-    credential_ref: SecretReference | None = None
+    endpoint: str | None = None
+    secret_ref: SecretReference | None = None
+
+
+class EmbeddingOverrides(ModelOverrides):
+    output_dimensions: int | None = Field(default=None, gt=0)
 
 
 class ContentOverrides(_FrozenModel):
@@ -90,6 +104,7 @@ class SettingsOverrides(_FrozenModel):
     """Typed CLI overrides applied after file and environment values."""
 
     model: ModelOverrides | None = None
+    embedding: EmbeddingOverrides | None = None
     content: ContentOverrides | None = None
     recommendation: RecommendationOverrides | None = None
     host: HostOverrides | None = None
@@ -99,7 +114,7 @@ class SettingsOverrides(_FrozenModel):
 def _redact_references(values: dict[str, ConfigValue]) -> dict[str, ConfigValue]:
     redacted: dict[str, ConfigValue] = {}
     for key, value in values.items():
-        if key.endswith("credential_ref") and value is not None:
+        if key.endswith("secret_ref") and value is not None:
             redacted[key] = "<redacted-ref>"
         elif isinstance(value, dict):
             redacted[key] = _redact_references(value)
@@ -158,7 +173,12 @@ def _apply_environment(values: dict[str, ConfigValue], environment: Mapping[str,
     string_keys = (
         ("OPENBILICLAW_MODEL_PROVIDER", "model", "provider"),
         ("OPENBILICLAW_MODEL_NAME", "model", "model_name"),
-        ("OPENBILICLAW_MODEL_CREDENTIAL_REF", "model", "credential_ref"),
+        ("OPENBILICLAW_MODEL_ENDPOINT", "model", "endpoint"),
+        ("OPENBILICLAW_MODEL_SECRET_REF", "model", "secret_ref"),
+        ("OPENBILICLAW_EMBEDDING_PROVIDER", "embedding", "provider"),
+        ("OPENBILICLAW_EMBEDDING_MODEL", "embedding", "model_name"),
+        ("OPENBILICLAW_EMBEDDING_ENDPOINT", "embedding", "endpoint"),
+        ("OPENBILICLAW_EMBEDDING_SECRET_REF", "embedding", "secret_ref"),
         ("OPENBILICLAW_API_HOST", "host", "api_host"),
     )
     for environment_key, section_name, key in string_keys:
@@ -179,6 +199,7 @@ def _apply_environment(values: dict[str, ConfigValue], environment: Mapping[str,
         ("OPENBILICLAW_API_PORT", "host", "api_port"),
         ("OPENBILICLAW_POOL_TARGET_COUNT", "recommendation", "pool_target_count"),
         ("OPENBILICLAW_DEFAULT_RESOURCE_LIMIT", "runtime", "default_resource_limit"),
+        ("OPENBILICLAW_EMBEDDING_OUTPUT_DIMENSIONS", "embedding", "output_dimensions"),
     )
     for environment_key, section_name, key in integer_keys:
         integer_value = _parse_int(environment, environment_key)
@@ -196,8 +217,26 @@ def _apply_overrides(values: dict[str, ConfigValue], overrides: SettingsOverride
             _set(values, "model", "provider", overrides.model.provider)
         if overrides.model.model_name is not None:
             _set(values, "model", "model_name", overrides.model.model_name)
-        if overrides.model.credential_ref is not None:
-            _set(values, "model", "credential_ref", overrides.model.credential_ref)
+        if overrides.model.endpoint is not None:
+            _set(values, "model", "endpoint", overrides.model.endpoint)
+        if overrides.model.secret_ref is not None:
+            _set(values, "model", "secret_ref", overrides.model.secret_ref)
+    if overrides.embedding is not None:
+        if overrides.embedding.provider is not None:
+            _set(values, "embedding", "provider", overrides.embedding.provider)
+        if overrides.embedding.model_name is not None:
+            _set(values, "embedding", "model_name", overrides.embedding.model_name)
+        if overrides.embedding.endpoint is not None:
+            _set(values, "embedding", "endpoint", overrides.embedding.endpoint)
+        if overrides.embedding.secret_ref is not None:
+            _set(values, "embedding", "secret_ref", overrides.embedding.secret_ref)
+        if overrides.embedding.output_dimensions is not None:
+            _set(
+                values,
+                "embedding",
+                "output_dimensions",
+                overrides.embedding.output_dimensions,
+            )
     if overrides.content is not None and overrides.content.enabled is not None:
         _set(values, "content", "enabled", list(overrides.content.enabled))
     if (

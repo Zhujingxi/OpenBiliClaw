@@ -1,19 +1,5 @@
-"""Provider-specific typed embedding transports."""
+"""Embedding construction through the shared native model-provider config."""
 
-from .http import (
-    EmbeddingProviderKind,
-    EmbeddingTransportConfig,
-    GoogleEmbeddingTransport,
-    OllamaEmbeddingTransport,
-    OpenAIEmbeddingTransport,
-    build_embedding_transport,
-)
+from .native import NativeEmbeddingTransport, build_embedding_transport
 
-__all__ = [
-    "EmbeddingProviderKind",
-    "EmbeddingTransportConfig",
-    "GoogleEmbeddingTransport",
-    "OllamaEmbeddingTransport",
-    "OpenAIEmbeddingTransport",
-    "build_embedding_transport",
-]
+__all__ = ["NativeEmbeddingTransport", "build_embedding_transport"]

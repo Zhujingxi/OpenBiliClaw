@@ -16,7 +16,6 @@ readonly SOURCE_APP="${OPENBILICLAW_INSTALL_SOURCE_APP:-${SCRIPT_DIR}/${APP_NAME
 readonly TARGET_APP="${OPENBILICLAW_INSTALL_TARGET_APP:-/Applications/${APP_NAME}.app}"
 readonly TARGET_PARENT="${TARGET_APP:h}"
 readonly APP_PROCESS_PATTERN="${OPENBILICLAW_INSTALL_APP_PROCESS_PATTERN:-[/]OpenBiliClaw[.]app/Contents/MacOS/OpenBiliClaw}"
-readonly BUNDLED_RUNTIME_PATTERN="${OPENBILICLAW_INSTALL_BUNDLED_RUNTIME_PATTERN:-[/]OpenBiliClaw[.]app/Contents/Resources/(ollama|llama-server)}"
 readonly GRACEFUL_ATTEMPTS="${OPENBILICLAW_INSTALL_GRACEFUL_ATTEMPTS:-30}"
 readonly TERM_ATTEMPTS="${OPENBILICLAW_INSTALL_TERM_ATTEMPTS:-10}"
 readonly KILL_ATTEMPTS="${OPENBILICLAW_INSTALL_KILL_ATTEMPTS:-10}"
@@ -94,7 +93,7 @@ app_pids() {
 }
 
 bundled_runtime_pids() {
-  /usr/bin/pgrep -f "${BUNDLED_RUNTIME_PATTERN}" 2>/dev/null || true
+  /usr/bin/pgrep -f "${APP_PROCESS_PATTERN}" 2>/dev/null || true
 }
 
 target_app_pids() {

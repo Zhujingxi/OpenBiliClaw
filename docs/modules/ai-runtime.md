@@ -30,12 +30,11 @@ turn，不做总结。单个 tool return 超限会在进入 history 前拒绝。
 
 ## 路由与配置现状
 
-本阶段没有新增 TOML 字段。`RouteTable`、`ConfiguredModel` 和 capability matrix 由未来 provider
-plugins/Composition 显式构造；现有 `[llm]` 配置和 `LLMRegistry` 行为未变化。凭据不是 route 或
-request 字段，`ai.providers.ModelFactory` 现已实现该边界：OpenAI/Anthropic/Google/Ollama/OpenRouter 显式构造，
-凭据仅在 `CredentialVault.resolve()` callback 内交给 trusted provider client；DashScope chat 明确不支持。
-完整 model/embedding contract、capability probe 与 safe diagnostics 见 [AI Providers](ai-providers.md)。
-本阶段仍未新增 TOML 字段或 production route wiring。
+`RouteTable`、`ConfiguredModel` 和 capability matrix 由 Composition 显式构造。凭据不是 route 或
+request 字段；`ai.providers.ModelFactory` 通过单一配置入口构造 PydanticAI native provider，凭据仅在
+`CredentialVault.resolve()` callback 内交给 selected trusted client。模型托管与本地推理均在应用外部。
+完整 model/embedding contract、capability probe 与 safe diagnostics 见
+[AI Providers](ai-providers.md)。
 
 ## 离线测试与评测
 

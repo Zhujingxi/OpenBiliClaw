@@ -1,4 +1,4 @@
-"""PydanticAI model construction plugins."""
+"""Unified construction through PydanticAI's native provider layer."""
 
 from .config import ModelInstanceConfig, ModelOptions, ProviderKind
 from .factory import BuiltModel, ModelFactory

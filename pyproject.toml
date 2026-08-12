@@ -45,9 +45,6 @@ dev = [
     "ruff>=0.8",
     "mypy>=1.13",
 ]
-local-llm = [
-    "ollama>=0.4",
-]
 browser = [
     "playwright>=1.40",
 ]

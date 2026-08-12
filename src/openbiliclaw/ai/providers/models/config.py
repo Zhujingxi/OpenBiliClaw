@@ -1,4 +1,4 @@
-"""Typed non-secret model instance configuration."""
+"""Typed non-secret configuration shared by all native PydanticAI providers."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import hashlib
 import json
 from enum import StrEnum
 
-from pydantic import ConfigDict, Field, model_validator
+from pydantic import ConfigDict, Field
 from pydantic_ai.settings import ModelSettings
 
 from openbiliclaw.ai.runtime.capabilities import ModelCapabilities
@@ -17,9 +17,7 @@ class ProviderKind(StrEnum):
     OPENAI = "openai"
     ANTHROPIC = "anthropic"
     GOOGLE = "google"
-    OLLAMA = "ollama"
     OPENROUTER = "openrouter"
-    DASHSCOPE = "dashscope"
 
 
 class ModelOptions(StrictBaseModel):
@@ -43,27 +41,21 @@ class ModelOptions(StrictBaseModel):
 
 
 class ModelInstanceConfig(StrictBaseModel):
-    """One configured chat model with an opaque credential reference."""
+    """One model reached through PydanticAI's native provider layer."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, arbitrary_types_allowed=True)
 
     provider: ProviderKind
     model_name: str = Field(min_length=1)
-    endpoint: str | None = None
-    secret_ref: str | None = Field(default=None, pattern=r"^cred_[0-9a-f]{32}$")
+    endpoint: str | None = Field(default=None, pattern=r"^https?://")
+    secret_ref: str = Field(pattern=r"^cred_[0-9a-f]{32}$")
     options: ModelOptions = ModelOptions()
     capabilities: ModelCapabilities = ModelCapabilities()
     owner: str = Field(default="ai-runtime", min_length=1)
     provider_version: str = Field(default="1", min_length=1)
 
-    @model_validator(mode="after")
-    def validate_secret(self) -> ModelInstanceConfig:
-        if self.provider is not ProviderKind.OLLAMA and self.secret_ref is None:
-            raise ValueError(f"{self.provider.value} requires a credential reference")
-        return self
-
     def fingerprint(self) -> str:
-        """Stable non-secret configuration fingerprint."""
+        """Stable non-secret provider configuration fingerprint."""
 
         payload = {
             "provider": self.provider.value,

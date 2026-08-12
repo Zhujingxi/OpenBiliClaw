@@ -33,7 +33,7 @@ xattr -dr com.apple.quarantine "$APP"
 
 ### 想用 Docker 部署后端？
 
-不需要克隆源码：下载一个 compose 文件启动预构建镜像（自带 Ollama embedding sidecar），再打开 `http://127.0.0.1:8420/setup/` 完成初始化：
+不需要克隆源码：下载一个 compose 文件启动预构建镜像，然后按 `docker-deployment.md` 完成配置（模型通过 `[model]`/`[embedding]` 的 native provider 配置接入外部服务）：
 
 ```bash
 curl -fsSLO https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docker-compose.prebuilt.yml
@@ -55,11 +55,11 @@ docker compose -f docker-compose.prebuilt.yml up -d
 
 ### 初始化需要哪些前置条件？
 
-三样：① 至少一个已登录且能拉到信号的内容平台（B 站默认勾选，可换成小红书 / 抖音 / YouTube / X / 知乎 / Reddit）；② 一个可用的 LLM provider（自己的 API Key）；③ embedding 服务（桌面包内置，其他安装方式可用 Ollama）。引导初始化会先真实验证 LLM 和 embedding 再开跑，不会硬跑出空画像。
+两样：① 至少一个可访问的内容平台（B 站可匿名接入，其余平台按 provider 文档配置凭据）；② 一个通过 PydanticAI native provider 配置的外部模型服务（`[model]`，可用时再配 `[embedding]`）。本应用不内置或托管任何模型服务。
 
 ### 不想为 embedding 单独配 API Key？
 
-装一次 [Ollama](https://ollama.com/download)，然后运行 `openbiliclaw setup-embedding`，向导会自动拉取 `bge-m3`（约 568MB，CPU 可跑）并写入配置。桌面安装包已内置，无需额外操作。
+Embedding 是可选能力，未配置时其余功能照常工作。需要时，在 `[embedding]` 中配置一个 OpenAI 兼容的 embedding 服务（与聊天模型同一 provider 配置形状），由你自行选择的外部服务提供。
 
 ### 手机打不开移动端 Web（`/m/`）？
 

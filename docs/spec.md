@@ -9,9 +9,11 @@ A local-first cross-platform content discovery application with deterministic le
 ```text
 Desktop/mobile Vue ─┐
 Extension Vue ───────┼─ typed /v1 API ─ Application workflows ─ product modules
-CLI check/serve ─────┘                        │
-                                             ▼
-                       composition → lifecycle/supervisor → infrastructure
+CLI check/serve ─────┘                        │               ▲
+                                             ▼               │
+                       composition → lifecycle/supervisor    │
+                                  │                          │
+                           infrastructure       PydanticAI native providers
 ```
 
 ## Required behavior
@@ -25,7 +27,8 @@ CLI check/serve ─────┘                        │
 7. Run configured Assistant/model work only through typed AI Runtime routes and budgets.
 8. Validate/build/ready/swap/drain atomically; cancellation and shutdown leave no owned task or resource open.
 9. Render provider cards through shared presentation descriptors, including a safe unknown-provider fallback.
-10. Refuse destructive or unversioned database cutover without an explicit backed-up migration/reset decision.
+10. Access every chat and embedding model through one configuration/factory path and PydanticAI native providers; never host or bundle model runtimes in OpenBiliClaw.
+11. Refuse destructive or unversioned database cutover without an explicit backed-up migration/reset decision.
 
 ## Current capability limits
 

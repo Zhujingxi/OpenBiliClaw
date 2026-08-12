@@ -355,8 +355,10 @@ def test_model_configuration_wires_assistant_and_understanding_job(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     config = ModelInstanceConfig(
-        provider=ProviderKind.OLLAMA,
+        provider=ProviderKind.OPENAI,
+        endpoint="https://gateway.example/v1",
         model_name="test",
+        secret_ref="cred_" + "a" * 32,
         capabilities=ModelCapabilities(tools=True, structured_output=True, context_tokens=8192),
     )
     monkeypatch.setattr(
@@ -364,14 +366,22 @@ def test_model_configuration_wires_assistant_and_understanding_job(
         lambda *_args, **_kwargs: BuiltModel(
             model=TestModel(),
             instance_id="test:model",
-            provider="ollama",
+            provider="openai",
             owner="assistant",
             declared_capabilities=config.capabilities,
             verification=VerifiedCapabilities.unverified(config),
         ),
     )
     app = build_application(
-        AppSettings(model={"model_name": "test"}), options=BuildOptions(data_dir=tmp_path)
+        AppSettings(
+            model={
+                "provider": "openai",
+                "endpoint": "https://gateway.example/v1",
+                "model_name": "test",
+                "secret_ref": "vault:cred_" + "a" * 32,
+            }
+        ),
+        options=BuildOptions(data_dir=tmp_path),
     )
     assert app.services.assistant is not None
     jobs_component = next(

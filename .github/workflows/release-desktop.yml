@@ -29,7 +29,7 @@ jobs:
       # fail-fast off so a failing variant doesn't cancel the other.
       fail-fast: false
       matrix:
-        variant: [lean, with-embedding]
+        variant: [lean]
     steps:
       - uses: actions/checkout@v6
 
@@ -58,16 +58,6 @@ jobs:
       - name: Run macOS installer handoff E2E
         run: python -m pytest -q tests/test_macos_installer_e2e.py
 
-      - name: Download official Ollama.app runtime
-        run: |
-          curl -L https://github.com/ollama/ollama/releases/latest/download/Ollama-darwin.zip -o Ollama-darwin.zip
-          unzip -q Ollama-darwin.zip -d ollama-app
-          test -x ollama-app/Ollama.app/Contents/Resources/ollama
-          test -x ollama-app/Ollama.app/Contents/Resources/llama-server
-          test -f ollama-app/Ollama.app/Contents/Resources/libllama-server-impl.dylib
-          test -f ollama-app/Ollama.app/Contents/Resources/libggml.dylib
-          echo "OPENBILICLAW_OLLAMA_BIN=$PWD/ollama-app/Ollama.app/Contents/Resources/ollama" >> "$GITHUB_ENV"
-
       - name: Resolve version
         id: ver
         run: |
@@ -75,23 +65,9 @@ jobs:
           v="${GITHUB_REF_NAME#desktop-}"
           echo "version=$v" >> "$GITHUB_OUTPUT"
 
-      - name: Produce bge-m3 seed (with-embedding only)
-        if: matrix.variant == 'with-embedding'
+      - name: Build .app + .dmg
         run: |
-          export OLLAMA_HOST=127.0.0.1:11500
-          "$OPENBILICLAW_OLLAMA_BIN" serve &
-          for i in $(seq 1 60); do curl -sf http://127.0.0.1:11500/api/version >/dev/null && break; sleep 1; done
-          "$OPENBILICLAW_OLLAMA_BIN" pull bge-m3
-          python packaging/make_model_seed.py --model bge-m3 --out packaging/model-seed \
-            --expect-digest sha256:0c4c9c2a325fb1cdafec606e6809cb745f1cb26a6d919994400d27372303e276 \
-            --expect-digest sha256:daec91ffb5dd0c27411bd71f29932917c49cf529a641d0168496c3a501e3062c \
-            --expect-digest sha256:a406579cd136771c705c521db86ca7d60a6f3de7c9b5460e6193a2df27861bde
-
-      - name: Build .app + .dmg (auto-bundles ollama)
-        run: |
-          flags=""
-          [ "${{ matrix.variant }}" = "with-embedding" ] && flags="--bundle-embedding"
-          python packaging/build.py --clean $flags --archive-version "${{ steps.ver.outputs.version }}-arm64"
+          python packaging/build.py --clean --archive-version "${{ steps.ver.outputs.version }}-arm64"
 
       - name: Enforce GitHub asset size limit (< 2GB)
         run: |
@@ -116,7 +92,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [lean, with-embedding]
+        variant: [lean]
     steps:
       - uses: actions/checkout@v6
 
@@ -143,7 +119,7 @@ jobs:
           pip install -e ".[packaging]" "pytest>=8"
 
       - name: Run real Windows HKCU autostart E2E
-        python -m pytest -q tests/composition/test_composition.py -k entrypoint
+        run: python -m pytest -q tests/composition/test_composition.py -k entrypoint
 
       - name: Resolve version
         id: ver
@@ -154,43 +130,14 @@ jobs:
           echo "bare=${v#v}" >> "$GITHUB_OUTPUT"
           numeric="$(python -c 'import re,sys; m=re.match(r"v?(\d+)\.(\d+)\.(\d+)", sys.argv[1]); print(f"{m.group(1)}.{m.group(2)}.{m.group(3)}.0" if m else "0.0.0.0")' "$v")"
           echo "version_info=$numeric" >> "$GITHUB_OUTPUT"
-          if [ "${{ matrix.variant }}" = "with-embedding" ]; then
-            echo "variant_suffix=-with-embedding" >> "$GITHUB_OUTPUT"
-          else
-            echo "variant_suffix=" >> "$GITHUB_OUTPUT"
-          fi
+          echo "variant_suffix=" >> "$GITHUB_OUTPUT"
 
-      - name: Download Ollama (staged now; also used to produce the seed)
-        id: ollama
-        shell: pwsh
-        run: |
-          $ver = "0.30.6"
-          Invoke-WebRequest "https://github.com/ollama/ollama/releases/download/v$ver/ollama-windows-amd64.zip" -OutFile ollama.zip
-          Expand-Archive ollama.zip -DestinationPath ollama_win -Force
-          $exe = Get-ChildItem ollama_win -Recurse -Filter ollama.exe | Select-Object -First 1
-          if (-not $exe) { throw "ollama.exe not found in ollama-windows-amd64.zip" }
-          "path=$($exe.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-
-      - name: Produce bge-m3 seed (with-embedding only)
-        if: matrix.variant == 'with-embedding'
-        shell: pwsh
-        run: |
-          $env:OLLAMA_HOST = "127.0.0.1:11500"
-          Start-Process -FilePath "${{ steps.ollama.outputs.path }}" -ArgumentList "serve" -NoNewWindow
-          for ($i = 0; $i -lt 60; $i++) { try { Invoke-WebRequest "http://127.0.0.1:11500/api/version" -UseBasicParsing | Out-Null; break } catch { Start-Sleep 1 } }
-          & "${{ steps.ollama.outputs.path }}" pull bge-m3
-          python packaging\make_model_seed.py --model bge-m3 --out packaging\model-seed `
-            --expect-digest sha256:0c4c9c2a325fb1cdafec606e6809cb745f1cb26a6d919994400d27372303e276 `
-            --expect-digest sha256:daec91ffb5dd0c27411bd71f29932917c49cf529a641d0168496c3a501e3062c `
-            --expect-digest sha256:a406579cd136771c705c521db86ca7d60a6f3de7c9b5460e6193a2df27861bde
-
-      - name: PyInstaller onedir build (ollama staged separately below)
+      - name: PyInstaller onedir build
         shell: pwsh
         run: |
           # Build the arg list as an array so the lean variant never passes an
           # empty-string argument (argparse rejects "" as an unrecognized arg).
-          $buildArgs = @("--clean", "--no-bundle-ollama", "--archive-version", "${{ steps.ver.outputs.version }}")
-          if ("${{ matrix.variant }}" -eq "with-embedding") { $buildArgs += "--bundle-embedding" }
+          $buildArgs = @("--clean", "--archive-version", "${{ steps.ver.outputs.version }}")
           python packaging/build.py @buildArgs
 
       - name: Run real frozen-bundle autostart lifecycle E2E
@@ -199,29 +146,6 @@ jobs:
         run: |
           $env:OPENBILICLAW_FROZEN_EXE = (Resolve-Path "dist\OpenBiliClaw\OpenBiliClaw.exe").Path
           python -m pytest -q tests/composition/test_composition.py -k entrypoint
-
-      - name: Stage bundled Ollama (CPU runner only — bge-m3 embedding is CPU)
-        shell: pwsh
-        run: |
-          $exe = Get-Item "${{ steps.ollama.outputs.path }}"
-          Copy-Item $exe.FullName dist\OpenBiliClaw\ollama.exe -Force
-          $lib = Join-Path $exe.Directory.FullName "lib"
-          if (Test-Path $lib) {
-            Copy-Item $lib dist\OpenBiliClaw\lib -Recurse -Force
-            # Drop large GPU runners; keep the installer lean (embedding runs on CPU).
-            Get-ChildItem dist\OpenBiliClaw\lib\ollama -Directory -ErrorAction SilentlyContinue |
-              Where-Object { $_.Name -match 'cuda|rocm' } |
-              Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-          }
-
-      - name: Make bundled ollama windowless (PE subsystem console -> GUI)
-        shell: pwsh
-        run: |
-          # A GUI-subsystem exe never allocates a console, so flip ollama.exe +
-          # every bundled runner exe to GUI to stop the console/conhost flashing.
-          $exes = @("dist\OpenBiliClaw\ollama.exe")
-          $exes += (Get-ChildItem dist\OpenBiliClaw\lib -Recurse -Filter *.exe -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
-          python packaging\patch_pe_subsystem.py @exes
 
       - name: Install Inno Setup
         run: choco install innosetup --no-progress -y
@@ -302,7 +226,7 @@ jobs:
           - 若提示“OpenBiliClaw.app 已损坏，无法打开”，通常是下载隔离属性导致。确认包来源可信后执行：`APP="/Applications/OpenBiliClaw.app"; xattr -dr com.apple.quarantine "$APP"`，然后再次打开应用。
           - **Windows**：SmartScreen 弹窗点「更多信息 → 仍要运行」。
 
-          自带本地 Ollama + `bge-m3` embedding，开箱即用，常驻 macOS 菜单栏 / Windows 系统托盘。数据在 `~/OpenBiliClaw`（macOS / Linux）/ `%USERPROFILE%\OpenBiliClaw`（Windows），升级 / 卸载不动它。Intel mac（x64）.dmg 未自动构建，需要时用手动的 build-installers.yml 产出后补挂。
+          常驻 macOS 菜单栏 / Windows 系统托盘。数据在 `~/OpenBiliClaw`（macOS / Linux）/ `%USERPROFILE%\OpenBiliClaw`（Windows），升级 / 卸载不动它。Intel mac（x64）.dmg 未自动构建，需要时用手动的 build-installers.yml 产出后补挂。
           EOF
 
           ensure_release() {

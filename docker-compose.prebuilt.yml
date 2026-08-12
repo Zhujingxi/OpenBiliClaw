@@ -15,62 +15,21 @@
 # docker-compose.yml at the repository root — see docs/docker-deployment.md.
 
 services:
-  # Ollama sidecar — bundled embedding service so users don't need to
-  # install Ollama on their host. Pulls bge-m3 on first start (~1.1GB,
-  # CPU-only) and keeps the daemon running on the internal Docker
-  # network at http://ollama:11434. The backend's [llm.embedding] gets
-  # seeded to point here automatically on first config bootstrap.
-  #
-  # Prefer a cloud embedding provider instead? Remove this block plus
-  # the backend's depends_on and OPENBILICLAW_SEED_OLLAMA_DEFAULTS.
-  ollama:
-    # Prebuilt multi-arch image with bge-m3 BAKED IN (~1.1GB), published by
-    # .github/workflows/release-docker.yml. Its entrypoint seeds the baked
-    # model into the store before serving — ZERO network pull, offline-ready.
-    image: ghcr.io/whiteguo233/openbiliclaw-ollama:${OPENBILICLAW_VERSION:-latest}
-    container_name: openbiliclaw-ollama
-    volumes:
-      - openbiliclaw_ollama:/root/.ollama
-    # Set OPENBILICLAW_OLLAMA_ALLOW_PULL=1 to opt into a network pull if the
-    # baked seed is ever missing/corrupt (default: fail loud, not degrade).
-    healthcheck:
-      # Healthy = daemon up AND bge-m3 is locally available (seconds with the
-      # baked seed; start_period stays generous only for opt-in runtime pull).
-      test: ["CMD-SHELL", "ollama list 2>/dev/null | grep -q '^bge-m3'"]
-      interval: 30s
-      timeout: 10s
-      retries: 6
-      start_period: 300s
-    restart: unless-stopped
-
   openbiliclaw-backend:
     # Multi-arch image (linux/amd64 + linux/arm64) published by
     # .github/workflows/release-docker.yml on every backend release.
     # Pin a specific version by replacing `latest` with e.g. `0.3.152`.
     image: ghcr.io/whiteguo233/openbiliclaw-backend:latest
     container_name: openbiliclaw-backend
-    depends_on:
-      # service_started (not service_healthy) on purpose: the sidecar is
-      # only "healthy" once bge-m3 finished downloading. A health gate
-      # here would keep the backend from ever starting when the first
-      # pull fails — instead the backend boots immediately and runtime
-      # health remains available while the optional model finishes loading.
-      ollama:
-        condition: service_started
     environment:
       OPENBILICLAW_PROJECT_ROOT: /app/runtime
       OPENBILICLAW_CONFIG_TEMPLATE: /app/config.example.toml
       OPENBILICLAW_PROXY_HOST: ${OPENBILICLAW_PROXY_HOST:-host.docker.internal}
       OPENBILICLAW_PROXY_PORT: ${OPENBILICLAW_PROXY_PORT:-7897}
       OPENBILICLAW_PROXY_TIMEOUT: ${OPENBILICLAW_PROXY_TIMEOUT:-1.0}
-      # On first config bootstrap, seed [llm.ollama] base_url and
       # [llm.embedding] to point at the bundled sidecar above. Existing
       # config.toml is never overwritten.
-      OPENBILICLAW_SEED_OLLAMA_DEFAULTS: "1"
-      OPENBILICLAW_OLLAMA_BASE_URL: "http://ollama:11434/v1"
-      OPENBILICLAW_EMBEDDING_MODEL: "bge-m3"
     # ``host.docker.internal`` resolves the host machine from inside the
-    # container (proxy auto-detect, host-side Ollama). Required on Linux
     # Docker; auto-provided by Docker Desktop on Mac / Windows.
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -92,6 +51,3 @@ volumes:
   openbiliclaw_config:
   openbiliclaw_data:
   openbiliclaw_logs:
-  # Persists ollama models across container recreations so users don't
-  # have to re-pull bge-m3 on every rebuild.
-  openbiliclaw_ollama:

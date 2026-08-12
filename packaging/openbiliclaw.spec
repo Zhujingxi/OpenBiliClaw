@@ -159,7 +159,7 @@ a = Analysis(
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
 # Boot splash (Windows only): the windowed tray app shows nothing for several
-# seconds while Python starts, Ollama preflights and the backend assembles, so
+# seconds while Python starts, the backend assembles, so
 # the first click looks dead. PyInstaller paints this PNG at the OS level the
 # instant the exe starts (before Python loads); entry.py closes it once the tray
 # icon appears. Splash is unsupported on macOS — the .app launch + a "starting"

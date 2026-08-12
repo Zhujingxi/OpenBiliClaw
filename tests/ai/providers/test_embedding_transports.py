@@ -1,107 +1,101 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, TypeVar
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, TypeVar, cast
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
 import httpx
 import pytest
+from openai import APIConnectionError, AsyncOpenAI
+from openai.types import CreateEmbeddingResponse
+from openai.types.create_embedding_response import Usage
+from openai.types.embedding import Embedding
 
 from openbiliclaw.ai.providers.embeddings.protocol import EmbeddingTransportError
 from openbiliclaw.ai.providers.embeddings.providers import (
-    EmbeddingProviderKind,
-    EmbeddingTransportConfig,
-    GoogleEmbeddingTransport,
-    OllamaEmbeddingTransport,
-    OpenAIEmbeddingTransport,
+    NativeEmbeddingTransport,
     build_embedding_transport,
 )
+from openbiliclaw.ai.providers.models import ModelInstanceConfig, ProviderKind
+from openbiliclaw.ai.providers.verification import UnsupportedCapabilityError
 
 T = TypeVar("T")
 
 
 class FakeVault:
     def resolve(self, secret_id: str, callback: Callable[[memoryview], T]) -> T:
-        assert secret_id.startswith("cred_")
+        assert secret_id == "cred_" + "a" * 32
         return callback(memoryview(b"canary-key"))
 
 
-@pytest.mark.parametrize(
-    ("provider", "response", "transport_type", "tokens"),
-    [
-        (
-            EmbeddingProviderKind.OPENAI,
-            {"data": [{"embedding": [1, 2]}], "usage": {"prompt_tokens": 3}},
-            OpenAIEmbeddingTransport,
-            3,
-        ),
-        (
-            EmbeddingProviderKind.GOOGLE,
-            {"embeddings": [{"values": [1, 2]}], "usageMetadata": {"promptTokenCount": 4}},
-            GoogleEmbeddingTransport,
-            4,
-        ),
-        (
-            EmbeddingProviderKind.OLLAMA,
-            {"embeddings": [[1, 2]], "prompt_eval_count": 5},
-            OllamaEmbeddingTransport,
-            5,
-        ),
-    ],
-)
-async def test_configured_transports_parse_typed_responses(
-    provider: EmbeddingProviderKind,
-    response: dict[str, object],
-    transport_type: type[OpenAIEmbeddingTransport]
-    | type[GoogleEmbeddingTransport]
-    | type[OllamaEmbeddingTransport],
-    tokens: int,
-) -> None:
-    async def handler(request: httpx.Request) -> httpx.Response:
-        assert b'"model"' in request.content
-        return httpx.Response(200, json=response)
+def config(provider: ProviderKind = ProviderKind.OPENAI) -> ModelInstanceConfig:
+    return ModelInstanceConfig(
+        provider=provider,
+        model_name="embedding-model",
+        endpoint="https://provider.invalid/v1",
+        secret_ref="cred_" + "a" * 32,
+    )
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        config = EmbeddingTransportConfig(
-            provider=provider,
-            model="m",
-            endpoint="https://provider.invalid/embed",
-            secret_ref=None if provider is EmbeddingProviderKind.OLLAMA else "cred_" + "a" * 32,
-            output_dimensions=2,
+
+@dataclass
+class FakeEmbeddings:
+    calls: list[dict[str, object]]
+    error: Exception | None = None
+
+    async def create(self, **kwargs: object) -> CreateEmbeddingResponse:
+        self.calls.append(kwargs)
+        if self.error:
+            raise self.error
+        return CreateEmbeddingResponse(
+            data=[Embedding(embedding=[1.0, 2.0], index=0, object="embedding")],
+            model="embedding-model",
+            object="list",
+            usage=Usage(prompt_tokens=3, total_tokens=3),
         )
-        transport = build_embedding_transport(config, FakeVault(), client)
-        assert isinstance(transport, transport_type)
-        batch = await transport.embed(("hello",))
-        assert batch.vectors == ((1.0, 2.0),)
-        assert batch.input_tokens == tokens
-        if provider is EmbeddingProviderKind.OPENAI:
-            assert client.headers["authorization"] == "Bearer canary-key"
-        if provider is EmbeddingProviderKind.GOOGLE:
-            assert client.headers["x-goog-api-key"] == "canary-key"
 
 
-async def test_transport_classifies_status_without_leaking_body() -> None:
-    async def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(429, text="secret upstream body")
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        config = EmbeddingTransportConfig(
-            provider=EmbeddingProviderKind.OLLAMA,
-            model="m",
-            output_dimensions=2,
-        )
-        with pytest.raises(EmbeddingTransportError, match="provider failed") as caught:
-            await OllamaEmbeddingTransport(client, config).embed(("hello",))
-        assert caught.value.retryable
-        assert "secret" not in str(caught.value)
+class FakeClient:
+    def __init__(self, embeddings: FakeEmbeddings) -> None:
+        self.embeddings = embeddings
 
 
-def test_remote_embedding_transport_requires_secret() -> None:
-    config = EmbeddingTransportConfig(
-        provider=EmbeddingProviderKind.OPENAI,
-        model="m",
+async def test_embedding_uses_native_provider_client_and_shared_config() -> None:
+    calls: list[dict[str, object]] = []
+    transport = NativeEmbeddingTransport(
+        cast("AsyncOpenAI", FakeClient(FakeEmbeddings(calls))),
+        config(),
         output_dimensions=2,
     )
-    with pytest.raises(ValueError, match="credential"):
-        build_embedding_transport(config, FakeVault(), httpx.AsyncClient())
+    batch = await transport.embed(("hello",))
+    assert calls == [{"model": "embedding-model", "input": ("hello",), "dimensions": 2}]
+    assert batch.vectors == ((1.0, 2.0),)
+    assert batch.input_tokens == 3
+
+
+def test_builder_resolves_secret_and_returns_native_openai_transport() -> None:
+    assert isinstance(
+        build_embedding_transport(config(), FakeVault(), output_dimensions=2),
+        NativeEmbeddingTransport,
+    )
+
+
+@pytest.mark.parametrize(
+    "provider", [ProviderKind.ANTHROPIC, ProviderKind.GOOGLE, ProviderKind.OPENROUTER]
+)
+def test_provider_without_native_embeddings_fails_closed(provider: ProviderKind) -> None:
+    with pytest.raises(UnsupportedCapabilityError, match=f"{provider.value} embeddings"):
+        build_embedding_transport(config(provider), FakeVault(), output_dimensions=2)
+
+
+async def test_native_embedding_errors_are_typed() -> None:
+    error = APIConnectionError(request=httpx.Request("POST", "https://provider.invalid"))
+    transport = NativeEmbeddingTransport(
+        cast("AsyncOpenAI", FakeClient(FakeEmbeddings([], error))),
+        config(),
+        output_dimensions=2,
+    )
+    with pytest.raises(EmbeddingTransportError) as raised:
+        await transport.embed(("hello",))
+    assert raised.value.retryable

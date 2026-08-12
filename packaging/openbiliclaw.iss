@@ -6,9 +6,9 @@
 ;     dist\release\OpenBiliClaw-windows-0.3.201-Setup.exe
 ;
 ; Expects the PyInstaller onedir output at dist\OpenBiliClaw\ with a bundled
-; ollama.exe + lib\ runners already staged inside it. The GitHub Actions
+; runtime files staged inside it. The GitHub Actions
 ; workflow (.github/workflows/build-installers.yml) produces that layout; to
-; build locally, run `python packaging\build.py` then stage ollama into
+; build locally, run `python packaging\build.py` prepare the output in
 ; dist\OpenBiliClaw\ before invoking iscc.
 
 #ifndef MyAppVersion
@@ -19,9 +19,7 @@
   #define MyAppVersionInfoVersion MyAppVersion
 #endif
 
-; Installer filename variant suffix, e.g. iscc /DMyAppVariantSuffix=-with-embedding
-; Lets the lean and with-embedding installers coexist in one Release without
-; clobbering each other. Defaults to empty (lean).
+; Optional installer filename variant suffix; defaults to empty.
 #ifndef MyAppVariantSuffix
   #define MyAppVariantSuffix ""
 #endif
@@ -51,7 +49,7 @@ DisableProgramGroupPage=yes
 ; this keeps install friction as low as possible (SmartScreen may still warn).
 PrivilegesRequired=lowest
 ; Upgrades fail with "files in use" if the previous OpenBiliClaw is still
-; running (it holds OpenBiliClaw.exe + the bundled ollama it spawned open).
+; running (it holds OpenBiliClaw.exe + its child processes open).
 ; Force the Restart Manager to close anything holding our files, and the [Code]
 ; below also taskkills the process tree as a belt-and-suspenders fallback
 ; (PyInstaller console apps don't always cooperate with RM).
@@ -72,7 +70,7 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
-; Whole PyInstaller onedir tree, including the staged ollama.exe + lib\ runners.
+; Whole PyInstaller onedir tree, including all staged runtime files.
 Source: "dist\OpenBiliClaw\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
 
 [Icons]
@@ -100,7 +98,7 @@ var
   ResultCode: Integer;
 begin
   // Best-effort: terminate any running OpenBiliClaw (and its child processes —
-  // the backend, and the bundled ollama it may have spawned) so their open file
+  // the backend, and child processes it may have spawned) so their open file
   // handles release before Setup overwrites {app}. taskkill is a no-op (nonzero
   // exit, ignored) when nothing is running.
   Exec(ExpandConstant('{cmd}'), '/C taskkill /IM "{#MyAppExeName}" /T /F', '',

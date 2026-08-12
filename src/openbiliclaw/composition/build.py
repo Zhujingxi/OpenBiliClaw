@@ -239,9 +239,10 @@ def build_application(
             ModelInstanceConfig(
                 provider=ProviderKind(settings.model.provider),
                 model_name=settings.model.model_name,
-                secret_ref=settings.model.credential_ref.removeprefix("vault:")
-                if settings.model.credential_ref
-                else None,
+                endpoint=settings.model.endpoint,
+                secret_ref=settings.model.secret_ref.removeprefix("vault:")
+                if settings.model.secret_ref
+                else "",
                 capabilities=ModelCapabilities(
                     tools=True, structured_output=True, context_tokens=8_192
                 ),

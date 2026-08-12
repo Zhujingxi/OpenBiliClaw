@@ -1,4 +1,4 @@
-"""Explicit trusted construction boundary for configured PydanticAI models."""
+"""Single trusted construction boundary for native PydanticAI providers."""
 
 from __future__ import annotations
 
@@ -7,10 +7,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol, TypeVar
 
 from openbiliclaw.ai.providers.models.config import ModelInstanceConfig, ProviderKind
-from openbiliclaw.ai.providers.verification import (
-    UnsupportedCapabilityError,
-    VerifiedCapabilities,
-)
+from openbiliclaw.ai.providers.verification import VerifiedCapabilities
 
 if TYPE_CHECKING:
     from pydantic_ai.models import Model
@@ -29,7 +26,7 @@ ModelBuilder = Callable[[ModelInstanceConfig, str], "Model"]
 
 @dataclass(frozen=True, slots=True)
 class BuiltModel:
-    """Constructed model plus stable, non-secret ownership and capability metadata."""
+    """Native model plus stable non-secret ownership and capability metadata."""
 
     model: Model = field(repr=False)
     instance_id: str
@@ -40,7 +37,7 @@ class BuiltModel:
 
 
 class ModelFactory:
-    """One explicit construction branch per supported provider kind."""
+    """Map one configuration shape to PydanticAI's native provider layer."""
 
     def __init__(
         self,
@@ -52,20 +49,13 @@ class ModelFactory:
         self._builders = dict(builders or {})
 
     def build(self, config: ModelInstanceConfig) -> BuiltModel:
-        """Resolve a credential only inside its trusted provider constructor."""
+        """Resolve a secret only inside its trusted native constructor."""
 
-        if config.provider is ProviderKind.DASHSCOPE:
-            raise UnsupportedCapabilityError(
-                "dashscope chat is not natively supported by PydanticAI"
-            )
         builder = self._builders.get(config.provider) or self._native_builder(config.provider)
-        if config.secret_ref is None:
-            model = builder(config, "")
-        else:
-            model = self._vault.resolve(
-                config.secret_ref,
-                lambda secret: builder(config, secret.tobytes().decode("utf-8")),
-            )
+        model = self._vault.resolve(
+            config.secret_ref,
+            lambda secret: builder(config, secret.tobytes().decode("utf-8")),
+        )
         fingerprint = config.fingerprint()
         return BuiltModel(
             model=model,
@@ -79,23 +69,17 @@ class ModelFactory:
     @staticmethod
     def _native_builder(provider: ProviderKind) -> ModelBuilder:
         if provider is ProviderKind.OPENAI:
-            from .openai import build as build_openai
+            from .openai import build as native_build
 
-            return lambda config, key: build_openai(config, key)
+            return native_build
         if provider is ProviderKind.ANTHROPIC:
-            from .anthropic import build as build_anthropic
+            from .anthropic import build as anthropic_build
 
-            return lambda config, key: build_anthropic(config, key)
+            return anthropic_build
         if provider is ProviderKind.GOOGLE:
-            from .google import build as build_google
+            from .google import build as google_build
 
-            return lambda config, key: build_google(config, key)
-        if provider is ProviderKind.OLLAMA:
-            from .ollama import build as build_ollama
+            return google_build
+        from .openrouter import build as openrouter_build
 
-            return lambda config, key: build_ollama(config, key)
-        if provider is ProviderKind.OPENROUTER:
-            from .openrouter import build as build_openrouter
-
-            return lambda config, key: build_openrouter(config, key)
-        raise UnsupportedCapabilityError(f"{provider.value} chat is unsupported")
+        return openrouter_build

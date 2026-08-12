@@ -32,7 +32,11 @@ class FakeTransport:
 
 def info(dimensions: int = 2) -> EmbeddingModelInfo:
     return EmbeddingModelInfo(
-        provider="ollama", model="bge-m3", dimensions=dimensions, normalized=True, version="1"
+        provider="openai",
+        model="embedding-model",
+        dimensions=dimensions,
+        normalized=True,
+        version="1",
     )
 
 
@@ -103,4 +107,10 @@ def test_model_identity_cache_key_has_complete_provenance() -> None:
     assert model.cache_key("hello") != model.cache_key("world")
     assert info(3).identity != model.identity
     with pytest.raises(ValueError):
-        EmbeddingModelInfo(provider="x", model="m", dimensions=0, normalized=False, version="1")
+        EmbeddingModelInfo(
+            provider="openai",
+            model="m",
+            dimensions=0,
+            normalized=False,
+            version="1",
+        )

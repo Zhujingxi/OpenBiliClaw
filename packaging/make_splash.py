@@ -2,7 +2,7 @@
 """Generate the boot splash image shown while the packaged app starts.
 
 The Windows tray app has no window for several seconds after launch — Python has
-to start, the bundled Ollama preflight runs (up to ~15s), and the backend is
+to start, the backend is
 assembled before the system-tray icon appears. Without any feedback the first
 double-click looks dead and users click again. PyInstaller paints this PNG at
 the OS level the instant the exe starts (before Python is even loaded), and

@@ -1,10 +1,23 @@
-# OpenBiliClaw current configuration. Secret values live in the credential vault;
-# this file contains opaque references only.
+# OpenBiliClaw current configuration. Models run outside this application and
+# are reached through PydanticAI's native providers. Secret values live in the
+# credential vault; this file contains opaque references only.
 
 [model]
-provider = "ollama"
+# Empty model_name = no model configured; `openbiliclaw check` validates clean.
+# provider: openai | anthropic | google | openrouter (native PydanticAI providers)
+provider = "openai"
 model_name = ""
-# credential_ref = "keyring:model-primary"
+# endpoint = "https://api.example.com/v1" # optional native-provider override
+# secret_ref = "vault:cred_..." # opaque vault reference, set when configuring a model
+
+[embedding]
+# Embeddings use the same provider configuration shape. Native embedding
+# access is currently supported by the OpenAI provider.
+provider = "openai"
+model_name = "text-embedding-3-small"
+# endpoint = "https://api.example.com/v1"
+secret_ref = "vault:cred_00000000000000000000000000000000"
+output_dimensions = 1536
 
 [content]
 enabled = ["bilibili", "youtube", "bangumi", "v2ex", "reddit", "x", "zhihu", "linuxdo", "weibo", "rednote", "douyin"]
