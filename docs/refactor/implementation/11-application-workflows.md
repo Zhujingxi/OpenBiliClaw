@@ -17,7 +17,6 @@ application/
 ├── search_content.py
 ├── get_content_details.py
 ├── edit_profile.py
-├── handle_dialogue_action.py
 └── errors.py
 ```
 

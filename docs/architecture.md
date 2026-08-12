@@ -551,3 +551,7 @@ embedding 和空向量失败留待下轮重试，成功槽位会复用。已有�
 ### Target Discovery & Recommendation coexistence
 
 The target `openbiliclaw.recommendation` pipeline now owns explicit typed candidate transitions, planning, prefilter, evaluation contracts, deterministic selection, optional expression, persistence, and Core job definitions. It is not composed in production yet; the legacy engines remain isolated until Plan 15.
+
+## Refactor target Application Workflows (landed, not composed)
+
+`src/openbiliclaw/application/` now contains the typed Phase 1–5 workflow boundary for model-free reads, source connection, observation/feedback/profile mutations, supervised refresh admission, and scoped expiring pending actions. Constructor dependencies are narrow protocols; transaction/idempotency/authorization/confirmation boundaries remain ordinary Python. It is not wired into the production graph yet. API/CLI/runtime/Assistant/extension consumer cutover and legacy sequencing deletion remain deferred to Plans 13 and 15.
