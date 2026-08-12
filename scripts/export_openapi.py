@@ -128,22 +128,13 @@ def export(path: Path) -> None:
     schema = create_app(HostDependencies(facade=_SchemaFacade())).openapi()
     # CardData is the canonical presentation DTO even before a dedicated card
     # endpoint lands; include it so generated clients never duplicate it.
-    schema.setdefault("components", {}).setdefault("schemas", {}).update(
-        {
-            name: definition
-            for name, definition in CardData.model_json_schema(
-                ref_template="#/components/schemas/{model}"
-            )
-            .get("$defs", {})
-            .items()
-        }
-    )
+    card_schema = CardData.model_json_schema(ref_template="#/components/schemas/{model}")
+    definitions = card_schema.get("$defs", {})
+    if not isinstance(definitions, dict):
+        raise TypeError("CardData schema definitions must be an object")
+    schema.setdefault("components", {}).setdefault("schemas", {}).update(definitions)
     schema["components"]["schemas"]["CardData"] = {
-        key: value
-        for key, value in CardData.model_json_schema(
-            ref_template="#/components/schemas/{model}"
-        ).items()
-        if key != "$defs"
+        key: value for key, value in card_schema.items() if key != "$defs"
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(schema, ensure_ascii=False, indent=2, sort_keys=True) + "\n")

@@ -37,6 +37,7 @@ TARGET_TABLE_OWNERS: Final[dict[str, str]] = {
     "assistant_conversations": "Assistant",
     "assistant_messages": "Assistant",
     "pending_actions": "Application Workflows",
+    "workflow_idempotency": "Application Workflows",
     "ai_usage_attribution": "AI Runtime",
 }
 
@@ -269,6 +270,14 @@ _SCHEMA_V5: Final[tuple[str, ...]] = (
     "ALTER TABLE assistant_conversations ADD COLUMN conversation_json TEXT NOT NULL DEFAULT '{}'",
 )
 
+_SCHEMA_V6: Final[tuple[str, ...]] = (
+    """CREATE TABLE workflow_idempotency (
+        idempotency_key TEXT PRIMARY KEY,
+        result_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )""",
+)
+
 
 DEFAULT_MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(1, _SCHEMA_V1),
@@ -276,6 +285,7 @@ DEFAULT_MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(3, _SCHEMA_V3),
     Migration(4, _SCHEMA_V4),
     Migration(5, _SCHEMA_V5),
+    Migration(6, _SCHEMA_V6),
 )
 
 

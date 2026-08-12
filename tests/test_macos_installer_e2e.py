@@ -19,6 +19,7 @@ import pytest
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from types import ModuleType
 
 
 pytestmark = pytest.mark.skipif(
@@ -27,7 +28,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _load_build_module():
+def _load_build_module() -> ModuleType:
     project_root = Path(__file__).resolve().parent.parent
     module_path = project_root / "packaging" / "build.py"
     spec = importlib.util.spec_from_file_location(

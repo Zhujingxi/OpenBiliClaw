@@ -31,7 +31,7 @@ Vite output under `frontend/apps/extension/dist/` is ignored generated JavaScrip
 
 ## Legacy contract disposition
 
-This cutover intentionally removes the former native-save/session paths. Historical status keys such as `unsupported_content_type` remain documented in `docs/modules/saved-sync.md`, but the target extension does not execute them. 登录态只存在于已安装扩展 was the legacy rule; the target extension stores no website login state at all. It is not a backend bypass of browser login state（不是后端绕过浏览器登录态）because the capability was removed rather than emulated.
+This cutover intentionally removes the former native-save/session paths. Historical native-save status keys were removed with that subsystem; the target extension does not execute them. 登录态只存在于已安装扩展 was the legacy rule; the target extension stores no website login state at all. It is not a backend bypass of browser login state（不是后端绕过浏览器登录态）because the capability was removed rather than emulated.
 
 User releases are published on the `openbiliclaw-v*` aggregate page. Maintainer component tags remain `extension-v*` / `desktop-v*` / `backend-v*`; 后端源码更新仍只通过 `backend-v*` tag 标记.
 

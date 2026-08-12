@@ -15,20 +15,28 @@ from openbiliclaw.assistant.models import (
     TurnUsage,
 )
 from openbiliclaw.assistant.service import AssistantService, TurnCommand
+from openbiliclaw.assistant.tools import (
+    AssistantIntent,
+    ToolAvailability,
+    ToolResultBudget,
+    build_workflow_tools,
+    select_tools,
+)
 from openbiliclaw.understanding.projections import dialogue_projection
 
 if TYPE_CHECKING:
+    from pydantic_ai import Tool
+
     from openbiliclaw.assistant.models import AssistantOutput
     from openbiliclaw.assistant.repository import SqliteConversationRepository
-    from openbiliclaw.composition.facade import CompositionFacade
-    from openbiliclaw.hosts.api.dependencies import AssistantTurnInput
+    from openbiliclaw.hosts.api.dependencies import AssistantTurnInput, HostFacade
     from openbiliclaw.understanding.service import UnderstandingService
 
 
 class _AssistantToolFacade:
     """Adapt host workflows to the Assistant's narrower safe tool signatures."""
 
-    def __init__(self, facade: CompositionFacade) -> None:
+    def __init__(self, facade: HostFacade) -> None:
         self._facade = facade
 
     async def get_recommendations(self, limit: int) -> object:
@@ -59,6 +67,17 @@ class _AssistantToolFacade:
         raise RuntimeError("Assistant source connection requires a secret-free UI flow")
 
 
+def assistant_workflow_tools(application: HostFacade) -> tuple[Tool[None], ...]:
+    """Build the union of intent-scoped safe workflow tools without duplicates."""
+    tools = build_workflow_tools(_AssistantToolFacade(application), ToolResultBudget())
+    selected = {
+        tool.name: tool
+        for intent in AssistantIntent
+        for tool in select_tools(tools, intent=intent, availability=ToolAvailability())
+    }
+    return tuple(selected.values())
+
+
 class AssistantController:
     """Persist one device-scoped conversation around every bounded model turn."""
 
@@ -67,7 +86,7 @@ class AssistantController:
         service: AssistantService,
         conversations: SqliteConversationRepository,
         understanding: UnderstandingService,
-        application: CompositionFacade,
+        application: HostFacade,
     ) -> None:
         self._service = service
         self._conversations = conversations

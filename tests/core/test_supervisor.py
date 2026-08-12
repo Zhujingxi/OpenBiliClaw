@@ -167,11 +167,11 @@ async def test_shutdown_deadline_bounds_task_suppressing_cancellation() -> None:
     supervisor.trigger(_spec(stubborn_work))
     await entered.wait()
 
-    with pytest.raises(TimeoutError):
-        await supervisor.stop()
+    await supervisor.stop()
 
     assert cancelled.is_set()
     release.set()
+    await asyncio.sleep(0)
     await supervisor.stop()
 
 

@@ -6,11 +6,15 @@ import subprocess
 import tempfile
 import zipfile
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
+if TYPE_CHECKING:
+    from types import ModuleType
 
-def _load_build_module():
+
+def _load_build_module() -> ModuleType:
     project_root = Path(__file__).resolve().parent.parent
     module_path = project_root / "packaging" / "build.py"
     spec = importlib.util.spec_from_file_location("openbiliclaw_packaging_build", module_path)
@@ -211,7 +215,9 @@ def test_macos_installer_command_performs_verified_version_handoff() -> None:
         subprocess.run([zsh, "-n", str(helper)], check=True)
 
 
-def test_make_macos_dmg_stages_first_launch_guidance(tmp_path: Path, monkeypatch) -> None:
+def test_make_macos_dmg_stages_first_launch_guidance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     app_bundle = tmp_path / "OpenBiliClaw.app"
     app_bundle.mkdir()
     stage = tmp_path / "stage"
@@ -264,7 +270,9 @@ def test_make_macos_dmg_stages_first_launch_guidance(tmp_path: Path, monkeypatch
     assert dmg.exists()
 
 
-def test_find_ollama_binary_prefers_explicit_path(tmp_path: Path, monkeypatch) -> None:
+def test_find_ollama_binary_prefers_explicit_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     fake = tmp_path / "ollama"
     fake.write_text("#!/bin/sh\n", encoding="utf-8")
     monkeypatch.delenv("OPENBILICLAW_OLLAMA_BIN", raising=False)
@@ -272,7 +280,9 @@ def test_find_ollama_binary_prefers_explicit_path(tmp_path: Path, monkeypatch) -
     assert build_module.find_ollama_binary(str(fake)) == fake.resolve()
 
 
-def test_find_ollama_binary_uses_env_when_no_explicit(tmp_path: Path, monkeypatch) -> None:
+def test_find_ollama_binary_uses_env_when_no_explicit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     fake = tmp_path / "ollama"
     fake.write_text("#!/bin/sh\n", encoding="utf-8")
     monkeypatch.setenv("OPENBILICLAW_OLLAMA_BIN", str(fake))
@@ -280,7 +290,9 @@ def test_find_ollama_binary_uses_env_when_no_explicit(tmp_path: Path, monkeypatc
     assert build_module.find_ollama_binary() == fake.resolve()
 
 
-def test_find_ollama_binary_returns_none_when_absent(tmp_path: Path, monkeypatch) -> None:
+def test_find_ollama_binary_returns_none_when_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.delenv("OPENBILICLAW_OLLAMA_BIN", raising=False)
     monkeypatch.setenv("PATH", str(tmp_path))  # empty dir → ollama not on PATH
 
@@ -360,7 +372,9 @@ def test_bundle_ollama_binary_rejects_incomplete_macos_runtime(tmp_path: Path) -
         build_module.bundle_ollama_binary(dist, src, platform_name="Darwin")
 
 
-def test_repair_macos_ad_hoc_signature_signs_then_verifies(tmp_path: Path, monkeypatch) -> None:
+def test_repair_macos_ad_hoc_signature_signs_then_verifies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     app_bundle = tmp_path / "OpenBiliClaw.app"
     app_bundle.mkdir()
     calls: list[list[str]] = []

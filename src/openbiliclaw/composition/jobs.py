@@ -6,11 +6,13 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from openbiliclaw.content.integration.capabilities import SearchCapability
+from openbiliclaw.core.jobs import IntervalSchedule, JobSpec, MissedRunPolicy, OverlapPolicy
 from openbiliclaw.recommendation.discovery.planner import DiscoveryPlanner
 from openbiliclaw.recommendation.discovery.service import DiscoveryService
 from openbiliclaw.recommendation.evaluation.agent import CandidateScore, EvaluationBatch
 from openbiliclaw.recommendation.evaluation.prefilter import normalize_and_prefilter
 from openbiliclaw.recommendation.evaluation.service import EvaluationService
+from openbiliclaw.recommendation.expression.service import ExpressionService
 from openbiliclaw.recommendation.jobs import recommendation_jobs
 from openbiliclaw.recommendation.models import (
     Candidate,
@@ -27,7 +29,6 @@ if TYPE_CHECKING:
     from openbiliclaw.composition.providers import ProviderGraph
     from openbiliclaw.composition.repositories import RepositoryGraph
     from openbiliclaw.content.integration.identity import ProviderId
-    from openbiliclaw.core.jobs import JobSpec
     from openbiliclaw.understanding.service import UnderstandingService
 
 
@@ -52,6 +53,7 @@ class RecommendationPipeline:
         self._discovery = DiscoveryService(self._resolve)
         self._evaluation = EvaluationService(self._evaluate_model_free, lambda: datetime.now(UTC))
         self._selection = SelectionService(threshold=0.5)
+        self._expression = ExpressionService(None, lambda: datetime.now(UTC))
 
     def _resolve(self, provider_id: ProviderId) -> tuple[SearchCapability, AccessHandle]:
         provider = self._providers.registry.provider(provider_id)
@@ -150,18 +152,27 @@ class RecommendationPipeline:
             admissions,
             selections,
         )
+        for expression in await self._expression.express(selections):
+            await self._repositories.recommendations.save_expression(expression)
 
     async def expire(self) -> None:
         await self._repositories.recommendations.expire_due(now=datetime.now(UTC).isoformat())
 
 
 def build_recommendation_jobs(pipeline: RecommendationPipeline) -> tuple[JobSpec, ...]:
-    # Discovery, deterministic evaluation and selection are one atomic bounded
-    # replenishment pipeline. Register it once; keep only genuinely independent expiry.
-    discovery, _evaluation, expiry, _replenishment = recommendation_jobs(
-        discovery=pipeline.replenish,
-        evaluation=pipeline.replenish,
-        expiry=pipeline.expire,
-        replenishment=pipeline.replenish,
+    return recommendation_jobs(replenishment=pipeline.replenish, expiry=pipeline.expire)
+
+
+def build_understanding_job(understanding: UnderstandingService) -> JobSpec:
+    async def process() -> None:
+        await understanding.process("default")
+
+    return JobSpec(
+        "understanding.analysis",
+        IntervalSchedule(60),
+        55,
+        "model",
+        OverlapPolicy.REJECT,
+        MissedRunPolicy.SKIP,
+        process,
     )
-    return discovery, expiry

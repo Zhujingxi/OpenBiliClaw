@@ -16,7 +16,7 @@ Runtime Composition is the only production assembly and process entrypoint. `ope
 - Core-owned recommendation jobs with resource budgets, timeout, cancellation and health;
 - one FastAPI host and the built Vue frontend.
 
-Startup order is infrastructure → services → Core jobs; shutdown reverses it. Atomic reload builds and readies a candidate before swapping, drains the old graph to a deadline, then closes it. Failed candidates never replace the active graph.
+Startup order is infrastructure → services → Core jobs; shutdown reverses it. The composition reload primitive builds and readies a candidate before swapping, drains the old graph to a deadline, then closes it. Failed candidates never replace the active graph. No automatic file watcher is installed; embedders may explicitly invoke this primitive after validating replacement settings.
 
 ## Current reduced baseline
 

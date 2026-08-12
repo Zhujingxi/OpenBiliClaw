@@ -4,9 +4,7 @@
 #
 #   curl -fsSLO https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docker-compose.prebuilt.yml
 #   docker compose -f docker-compose.prebuilt.yml up -d
-#   # then open http://127.0.0.1:8420/setup/ for AI config + prereq checks,
-#   # and run the (container-required) init step from the host:
-#   #   docker exec -it openbiliclaw-backend openbiliclaw init
+#   # then verify http://127.0.0.1:8420/v1/runtime/health and open the web UI.
 #
 # Upgrade to the newest release:
 #
@@ -55,8 +53,8 @@ services:
       # service_started (not service_healthy) on purpose: the sidecar is
       # only "healthy" once bge-m3 finished downloading. A health gate
       # here would keep the backend from ever starting when the first
-      # pull fails — instead the backend boots immediately and /setup/
-      # surfaces "embedding not ready yet" until the pull completes.
+      # pull fails — instead the backend boots immediately and runtime
+      # health remains available while the optional model finishes loading.
       ollama:
         condition: service_started
     environment:

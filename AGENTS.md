@@ -14,7 +14,7 @@ pytest
 pytest --cov=openbiliclaw
 ```
 
-本地体验 CLI 可使用 `openbiliclaw start`、`openbiliclaw profile`、`openbiliclaw recommend`。如修改配置相关逻辑，请同步验证 `openbiliclaw config-show`。`extension/` 当前未声明独立包管理脚本；若修改插件，请在 PR 中写明手动验证步骤。
+本地验证 CLI 使用 `openbiliclaw check`，启动服务使用 `openbiliclaw serve`；产品读写通过 `/v1` API 与 Vue 客户端完成。如修改配置相关逻辑，请同步验证 `openbiliclaw check --config PATH`。插件位于 `frontend/apps/extension/`，修改后运行 frontend 全部检查。
 
 ## 开发顺序与配置约定
 v0.1 开发建议以 `docs/v0.1-todolist.md` 为准，按“连接 -> 理解 -> 发现 -> 推荐 -> 学习 -> 插件 -> 稳定交付”的里程碑顺序推进，避免跳过底层依赖直接做上层体验。配置样例使用 `config.example.toml`；本地调试时基于它生成 `config.toml`，并仅在本机保存 API Key、Cookie 等敏感信息。

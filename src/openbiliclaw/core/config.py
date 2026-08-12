@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import os
 import tomllib
-from typing import TYPE_CHECKING, Annotated, Literal, TypeAlias
+from typing import TYPE_CHECKING, Annotated, TypeAlias
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
     from pathlib import Path
 
-from pydantic import ConfigDict, Field, JsonValue, TypeAdapter, model_validator
+from pydantic import ConfigDict, Field, JsonValue, TypeAdapter
 
 from openbiliclaw.core._pydantic import StrictBaseModel
 
@@ -27,17 +27,6 @@ class ModelSettings(_FrozenModel):
     provider: str = Field(default="ollama", min_length=1)
     model_name: str = Field(default="", max_length=200)
     credential_ref: SecretReference | None = None
-
-
-class AccessSettings(_FrozenModel):
-    method: Literal["anonymous", "manual"] = "anonymous"
-    credential_ref: SecretReference | None = None
-
-    @model_validator(mode="after")
-    def require_manual_credential(self) -> AccessSettings:
-        if self.method == "manual" and self.credential_ref is None:
-            raise ValueError("manual access requires credential_ref")
-        return self
 
 
 class ContentProviderSettings(_FrozenModel):
@@ -62,7 +51,6 @@ class AppSettings(_FrozenModel):
     """Validated configuration root containing references, never secret values."""
 
     model: ModelSettings = ModelSettings()
-    access: AccessSettings = AccessSettings()
     content: ContentProviderSettings = ContentProviderSettings()
     recommendation: RecommendationSettings = RecommendationSettings()
     host: HostSettings = HostSettings()
@@ -77,11 +65,6 @@ class AppSettings(_FrozenModel):
 class ModelOverrides(_FrozenModel):
     provider: str | None = None
     model_name: str | None = None
-    credential_ref: SecretReference | None = None
-
-
-class AccessOverrides(_FrozenModel):
-    method: Literal["anonymous", "manual"] | None = None
     credential_ref: SecretReference | None = None
 
 
@@ -107,7 +90,6 @@ class SettingsOverrides(_FrozenModel):
     """Typed CLI overrides applied after file and environment values."""
 
     model: ModelOverrides | None = None
-    access: AccessOverrides | None = None
     content: ContentOverrides | None = None
     recommendation: RecommendationOverrides | None = None
     host: HostOverrides | None = None
@@ -177,8 +159,6 @@ def _apply_environment(values: dict[str, ConfigValue], environment: Mapping[str,
         ("OPENBILICLAW_MODEL_PROVIDER", "model", "provider"),
         ("OPENBILICLAW_MODEL_NAME", "model", "model_name"),
         ("OPENBILICLAW_MODEL_CREDENTIAL_REF", "model", "credential_ref"),
-        ("OPENBILICLAW_ACCESS_METHOD", "access", "method"),
-        ("OPENBILICLAW_ACCESS_CREDENTIAL_REF", "access", "credential_ref"),
         ("OPENBILICLAW_API_HOST", "host", "api_host"),
     )
     for environment_key, section_name, key in string_keys:
@@ -218,11 +198,6 @@ def _apply_overrides(values: dict[str, ConfigValue], overrides: SettingsOverride
             _set(values, "model", "model_name", overrides.model.model_name)
         if overrides.model.credential_ref is not None:
             _set(values, "model", "credential_ref", overrides.model.credential_ref)
-    if overrides.access is not None:
-        if overrides.access.method is not None:
-            _set(values, "access", "method", overrides.access.method)
-        if overrides.access.credential_ref is not None:
-            _set(values, "access", "credential_ref", overrides.access.credential_ref)
     if overrides.content is not None and overrides.content.enabled is not None:
         _set(values, "content", "enabled", list(overrides.content.enabled))
     if (

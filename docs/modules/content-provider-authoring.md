@@ -53,12 +53,12 @@ Provider 根据调用目的分别生成：
 
 ## Native tool rules
 
-`build_provider_tools()` 只暴露本次 run 的 enabled + advertised capability 交集：
+Provider capabilities are invoked by Application Workflows and Assistant workflow tools rather than direct provider-generated model tools. Direct provider-generated tools were deleted; capability exposure is now controlled by the workflow selection layer:
 
-- search/fetch tool 直接调用 provider capability；deterministic workflows 也直接调用同一方法；
-- provider display text 和 response text 不进入 tool metadata；
-- `ToolBudget` 在结果进入 model history 前限制 items/title/summary；
-- action tool 只生成 `PendingActionDescriptor`。Provider mutation 不得在 Assistant tool 内执行。
+- Search/fetch workflows directly call the same provider capabilities used by deterministic recommendation jobs.
+- Provider display text and response text never become tool metadata.
+- Assistant workflow results are bounded before entering model history.
+- Mutations are proposed as pending actions and never execute inside an Assistant tool.
 
 ## Required provider tests
 
@@ -68,5 +68,5 @@ Provider 根据调用目的分别生成：
 - cursor/provider scope and page limit；
 - projection provenance/timestamp and API serialization；
 - malformed, missing, expired and insufficient-scope access cases；
-- bounded tool result and secret-canary inspection；
+- bounded Assistant workflow result and secret-canary inspection；
 - normalized failures contain no raw provider body or credential。

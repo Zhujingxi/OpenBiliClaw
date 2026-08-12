@@ -7,11 +7,26 @@ from typing import TYPE_CHECKING
 import pytest
 
 from openbiliclaw.application.record_feedback import RecordFeedback, RecordFeedbackCommand
+from openbiliclaw.application.unit_of_work import FeedbackUnitOfWork, ProfileEditUnitOfWork
 from openbiliclaw.content.integration.identity import ContentKind, ContentRef, ProviderId
 from openbiliclaw.infrastructure.sqlite.database import SqliteDatabase
 from openbiliclaw.infrastructure.sqlite.schema import SchemaMigrator
-from openbiliclaw.observations.models import Observation, observation_adapter
+from openbiliclaw.observations.models import (
+    DeterministicProfileEditObservation,
+    Observation,
+    ProfileEditPayload,
+    observation_adapter,
+)
+from openbiliclaw.observations.provenance import (
+    ObservationProvenance,
+    ObservationSource,
+    TrustLevel,
+)
+from openbiliclaw.observations.repository import SqliteObservationRepository
 from openbiliclaw.recommendation.models import FeedbackKind, FeedbackRecord
+from openbiliclaw.recommendation.repositories import SqliteRecommendationRepository
+from openbiliclaw.understanding.overrides import OverrideOperation
+from openbiliclaw.understanding.repository import SqliteUnderstandingRepository
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -126,3 +141,50 @@ async def test_feedback_sequence_rolls_back_together_and_is_restart_idempotent(
     finally:
         if not database.closed:
             await database.close()
+
+
+async def test_production_units_of_work_commit_feedback_and_profile_edit(tmp_path: Path) -> None:
+    path = tmp_path / "production-uow.db"
+    await SchemaMigrator(path).migrate()
+    database = SqliteDatabase(path)
+    await database.open()
+    observations = SqliteObservationRepository(database)
+    recommendations = SqliteRecommendationRepository(database)
+    understanding = SqliteUnderstandingRepository(database)
+    command = RecordFeedbackCommand(
+        idempotency_key="feedback:uow:production",
+        shown_id="shown_" + "2" * 32,
+        content_ref=REF,
+        kind=FeedbackKind.LIKED,
+        account_id="acct",
+    )
+    assert (
+        await RecordFeedback(FeedbackUnitOfWork(recommendations, observations), clock=lambda: NOW)(
+            command
+        )
+    ).inserted
+    provenance = ObservationProvenance(
+        producer_id="application.profile-edit",
+        source=ObservationSource.PROFILE_EDITOR,
+        authenticated=True,
+        trust_level=TrustLevel.HIGH,
+    )
+    edit = DeterministicProfileEditObservation(
+        observation_id="obs_" + "a" * 32,
+        idempotency_key="profile:uow:production",
+        occurred_at=NOW,
+        received_at=NOW,
+        account_id="acct",
+        provenance=provenance,
+        payload=ProfileEditPayload(field="claim", operation="set", value="science"),
+    )
+    profile = await ProfileEditUnitOfWork(understanding, observations).edit_profile(
+        "default",
+        claim_id="claim_" + "b" * 32,
+        operation=OverrideOperation.SET,
+        value="science",
+        observation=edit,
+    )
+    assert profile.revision == 1
+    assert len((await observations.read(after_cursor=None, limit=10)).items) == 2
+    await database.close()

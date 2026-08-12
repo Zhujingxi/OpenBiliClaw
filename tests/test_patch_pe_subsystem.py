@@ -9,9 +9,13 @@ from __future__ import annotations
 import importlib.util
 import struct
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from types import ModuleType
 
 
-def _load_module():
+def _load_module() -> ModuleType:
     root = Path(__file__).resolve().parent.parent
     path = root / "packaging" / "patch_pe_subsystem.py"
     spec = importlib.util.spec_from_file_location("obc_patch_pe_subsystem", path)
@@ -37,7 +41,7 @@ def _fake_pe(subsystem: int) -> bytes:
 
 def _read_subsystem(data: bytes) -> int:
     off = struct.unpack_from("<I", data, 0x3C)[0] + patch_pe._SUBSYSTEM_REL_OFFSET
-    return struct.unpack_from("<H", data, off)[0]
+    return int(struct.unpack_from("<H", data, off)[0])
 
 
 def test_flips_console_subsystem_to_gui(tmp_path: Path) -> None:

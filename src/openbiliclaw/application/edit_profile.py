@@ -18,8 +18,12 @@ from openbiliclaw.observations.provenance import (
     ObservationSource,
     TrustLevel,
 )
-from openbiliclaw.understanding.overrides import OverrideOperation  # noqa: TC001
-from openbiliclaw.understanding.profile import CanonicalProfile  # noqa: TC001
+from openbiliclaw.understanding.overrides import (
+    OverrideOperation,  # noqa: TC001  # Runtime type required by Pydantic model fields.
+)
+from openbiliclaw.understanding.profile import (
+    CanonicalProfile,  # noqa: TC001  # Runtime type required by Pydantic model fields.
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable

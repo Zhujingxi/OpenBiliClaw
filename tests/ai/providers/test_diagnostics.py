@@ -15,3 +15,11 @@ def test_diagnostic_never_echoes_exception_or_secret() -> None:
         provider="openai", instance_id="i", status=DiagnosticStatus.READY
     )
     assert with_secret.detail is None
+    assert construction_diagnostic("openai", "instance").status is DiagnosticStatus.READY
+    for provider, instance in (("", "instance"), ("openai", "")):
+        try:
+            ProviderDiagnostic(provider, instance, DiagnosticStatus.READY)
+        except ValueError as error:
+            assert "must not be empty" in str(error)
+        else:
+            raise AssertionError("empty diagnostic identity accepted")

@@ -6,7 +6,28 @@
 
 ## Unreleased
 
-- **Runtime Composition final cutover**：Composition 现为唯一 `openbiliclaw` / API / Docker production entrypoint；十一项 landed provider packages、anonymous/manual Access、feedback/profile/action workflows 与 supervised model-free recommendation replenishment 已装配。删除 disposition ledger 中的 legacy orchestrator、LLM、source/auth/API/CLI、memory/soul、discovery/recommendation engines、eval、storage/runtime、integration、network/process/config implementations 及其 interface tests。当前明确限制：部分 provider packages 尚无 production transport，Assistant 仅在配置 target model route 后可用，pending actions 已使用 target SQLite adapter；所有限制 fail closed，不保留 legacy fallback。旧版 OS autostart 注册能力已随 legacy runtime 删除，当前版本不提供自动开机启动适配器。
+### Phase 14b (web shell)
+
+- **目标 responsive Vue web shell 落地（尚未接入 production composition）**：`frontend/apps/web/` 新增按 session、sources、recommendations、content、profile、Assistant、runtime/job 与 host-local preferences 拆分的 Pinia stores；server reads 具备 idle/loading/success/empty/error、AbortController 取消，event stream 只有一个 owner 并使用 bounded reconnect backoff。单一 responsive shell 提供 recommendations、provider tabs、search/detail、profile、Assistant、source connection、settings 与 runtime health views，desktop/mobile 使用不同 navigation/density 但不复制业务 UI；补齐 skip/focus/keyboard/reduced-motion/contrast/live-region 基础可访问性。Shared `ApiClient` 新增 generated-operation-typed query/path interpolation，避免 web 硬编码 URL。按计划，production composition、browser E2E、extension cutover 与 legacy JS 删除等待 Phase 14c/Plan 15。
+
+# Phase 14b review fixes
+
+- Recommendation reads now join each persisted selection to its durable ContentRef and CardData projection; generated OpenAPI types expose the feed contract and the web renders it through shared presentation cards.
+- Web source connection, search-to-detail navigation, route-selected detail, and Assistant history/output are functional.
+- Typed API requests require generated query/path parameters, reject unresolved templates, preserve AbortError, and stream with replay cursors.
+- Stores uniformly suppress cancellation and stale commits; runtime streaming deduplicates, caps events, replays from the highest event ID, and bounds reconnect delay.
+- Added distinct desktop/mobile host layouts, safe skip-link focus, semantic provider status list, and preference bootstrap hydration/persistence.
+- Expanded api-client, store, bootstrap, accessibility, and view behavioral tests.
+- Acceptance fixes persist a browser device identity and attach the host-required matching device/CSRF headers to every typed mutation; complete deferred state matrices now cover content/profile/Assistant/sources/runtime, and the responsive shell mounts routed content exactly once.
+
+### Phase 14c (extension shell + JS removal)
+
+- **目标 Extension Vue shell 与 JavaScript cutover 落地（尚未接入 Plan 15 production composition）**：将扩展 popup/sidebar 重写为 Vue 3 + Pinia，保留 loopback backend/device-token connection，消息边界改为 runtime-validated discriminated unions；删除 browser-session、Cookie、页面行为采集与 provider task dispatch。删除 legacy web/popup JavaScript、extension TypeScript/task tests 和 `.mjs` release scripts；Python release tool 只打包 Vite ignored `dist/` 生成物。扩展 manifest 权限收窄为 local backend storage/host access。
+- **Review fix round**: module service-worker manifests, complete manifest asset verification, canonical `artifacts/extension/` release layout, repaired CI block commands, installer/Docker frontend builds, target-host SPA serving, strict extension message validation, hydrated port-8420 typed API connection, shared presentation rendering, and restored non-presentation runtime/degraded tests.
+- Store metadata and current-state docs now describe the reduced shell accurately: no cookies, browsing collection, or provider tasks.
+- **Acceptance follow-up**: fixed AMO signing version fallback, pinned Docker static root, packaged the tray icon, removed the inert extension message/background/content layer and unused storage permission, migrated source-audit evidence paths, and corrected remaining current-state documentation.
+
+- **Runtime Composition final cutover**：Composition 现为唯一 `openbiliclaw` / API / Docker production entrypoint；final coverage repair restored the Phase 10 behavioral pipeline suite and deleted the unreachable direct provider-tool experiment (`content/integration/tools.py`, Bilibili wrapper/tests), with every retained source module now at least 90% branch coverage；十一项 landed provider packages、anonymous/manual Access、feedback/profile/action workflows 与 supervised model-free recommendation replenishment 已装配。删除 disposition ledger 中的 legacy orchestrator、LLM、source/auth/API/CLI、memory/soul、discovery/recommendation engines、eval、storage/runtime、integration、network/process/config implementations 及其 interface tests。最终 polish 同步装配 configured understanding analyzer、Assistant workflow tools、durable source idempotency、host event replay 与 static frontend environment path；CORS 允许本机 configured port 及 extension origins。当前明确限制：部分 provider packages 尚无 production transport，Assistant 仅在配置 target model route 后可用；所有限制 fail closed，不保留 legacy fallback。旧版 OS autostart 注册能力已随 legacy runtime 删除，当前版本不提供自动开机启动适配器。
 
 - **Runtime Composition Phases 1–6（opt-in，尚未 cutover）**：新增唯一了解 concrete target adapters 的 `composition/` frozen `Application` graph、lazy SQLite/repository/vault/HTTP/event/telemetry assembly、explicit first-party provider registration、infra → services → Core jobs → hosts staged lifecycle 与 reverse shutdown、partial-start rollback、request lease 支持的 candidate readiness → atomic swap → bounded old-graph drain，以及 `openbiliclaw-v2 check` / module entrypoint。批准 deviation：legacy production command/host wiring、disposition-ledger deletion、installer/Docker migration 与 release verification 延至 Phase 15b；现有 `openbiliclaw` 不变，`openbiliclaw-v2 serve` 提供 composed `/v1` read/observation host，尚未装配的 optional mutation/Assistant/job 能力显式 unavailable。
 

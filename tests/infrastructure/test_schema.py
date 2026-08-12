@@ -19,8 +19,8 @@ from openbiliclaw.infrastructure.sqlite.schema import (
 async def test_target_schema_has_owned_aggregates_and_constraints(tmp_path: Path) -> None:
     path = tmp_path / "target.db"
     migrator = SchemaMigrator(path)
-    assert await migrator.migrate() == 5
-    assert await migrator.migrate() == 5
+    assert await migrator.migrate() == 6
+    assert await migrator.migrate() == 6
     with sqlite3.connect(path) as conn:
         conn.execute("PRAGMA foreign_keys=ON")
         tables = {

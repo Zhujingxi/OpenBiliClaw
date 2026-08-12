@@ -109,7 +109,7 @@ def test_websocket_handshake_auth_origin_and_admission() -> None:
             "WebSocket",
             WebSocketStub(
                 deps,
-                {"authorization": "Bearer key", "origin": "http://localhost"},
+                {"authorization": "Bearer key", "origin": "http://localhost:8420"},
             ),
         ),
         deps,

@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from openbiliclaw.composition.scheduler import ScheduledJobsLifecycle
+from openbiliclaw.composition.scheduler import AsyncioSchedulerBackend, ScheduledJobsLifecycle
 from openbiliclaw.core.jobs import (
     IntervalSchedule,
     JobSpec,
@@ -58,3 +58,19 @@ async def test_interval_schedule_fires_through_supervisor(monkeypatch: pytest.Mo
     assert sleeps[0] == 5
     assert supervisor.health().jobs[0].runs_completed == 1
     await lifecycle.stop()
+    assert not await lifecycle.ready()
+
+
+@pytest.mark.asyncio
+async def test_scheduler_backend_validation_and_idempotency() -> None:
+    from openbiliclaw.core.jobs import CronSchedule
+
+    backend = AsyncioSchedulerBackend()
+    backend.add_job("one", IntervalSchedule(1), lambda _missed: None)
+    backend.start()
+    backend.start()
+    with pytest.raises(RuntimeError, match="after scheduler start"):
+        backend.add_job("late", IntervalSchedule(1), lambda _missed: None)
+    backend.shutdown()
+    with pytest.raises(ValueError, match="cron"):
+        backend.add_job("cron", CronSchedule("* * * * *"), lambda _missed: None)

@@ -6,14 +6,26 @@ import ast
 import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any, cast
 
 import httpx
 import pytest
+from pydantic_ai.models.test import TestModel
 
+from openbiliclaw.access.models import CredentialAccessHandle, Permission
+from openbiliclaw.ai.providers.models import BuiltModel, ModelInstanceConfig, ProviderKind
+from openbiliclaw.ai.providers.verification import VerifiedCapabilities
+from openbiliclaw.ai.runtime.capabilities import ModelCapabilities
 from openbiliclaw.composition.application import Application, ApplicationServices
 from openbiliclaw.composition.build import BuildOptions, build_application
 from openbiliclaw.composition.entrypoints import main
 from openbiliclaw.composition.lifecycle import ComponentStage, LifecyclePlan, RuntimeComponent
+from openbiliclaw.composition.providers import (
+    _UnavailableCredentialTransport,
+    _UnavailableIdentityClient,
+    _UnavailableProbe,
+    _VaultCredentialResolver,
+)
 from openbiliclaw.composition.reload import ApplicationReference, reload_application
 from openbiliclaw.core.config import AppSettings
 from openbiliclaw.core.health import HealthStatus
@@ -96,6 +108,31 @@ async def test_atomic_reload_swaps_ready_candidate_then_drains_old() -> None:
     assert reference.current.settings.host.api_port == 8420  # test builder owns its settings
     assert events == ["start:old", "start:new:8430", "stop:old"]
     await reference.current.stop()
+
+
+@pytest.mark.asyncio
+async def test_reload_drain_validation_and_timeout_cleanup() -> None:
+    events: list[str] = []
+    old = _application("old", events)
+    await old.start()
+    reference = ApplicationReference(old)
+    with pytest.raises(ValueError, match="positive"):
+        await reference.drain(old, 0)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def hold() -> None:
+        async with reference.lease():
+            entered.set()
+            await release.wait()
+
+    task = asyncio.create_task(hold())
+    await entered.wait()
+    assert not await reference.drain(old, 0.001)
+    release.set()
+    await task
+    assert await reference.drain(old, 1)
+    await old.stop()
 
 
 @pytest.mark.asyncio
@@ -182,12 +219,14 @@ async def test_production_graph_is_lazy_and_leak_free(tmp_path: Path) -> None:
     app = build_application(AppSettings(), options=options)
 
     assert not (tmp_path / "openbiliclaw.db").exists()
+    assert app.providers is not None
     assert app.providers.enabled == ("v2ex",)
     assert app.providers.degraded == ("unknown",)
     await app.start()
     assert (tmp_path / "openbiliclaw.db").exists()
     assert app.lifecycle.health().status is HealthStatus.DEGRADED
     await app.stop()
+    assert app.resources is not None
     assert app.resources.database.closed
     assert app.resources.http.open_client_count == 0
     assert app.resources.events.subscriber_count == 0
@@ -238,6 +277,29 @@ async def test_fresh_composed_host_records_and_reads_without_credentials(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_composed_host_accepts_realistic_web_and_extension_origins(tmp_path: Path) -> None:
+    app = build_application(AppSettings(), options=BuildOptions(data_dir=tmp_path))
+    assert app.hosts.api is not None
+    transport = httpx.ASGITransport(app=app.hosts.api)
+    headers = {"X-Device-ID": "device", "X-CSRF-Token": "device"}
+    async with (
+        httpx.AsyncClient(transport=transport, base_url="http://test") as client,
+        app.hosts.api.router.lifespan_context(app.hosts.api),
+    ):
+        web = await client.post(
+            "/v1/recommendations/refresh",
+            json={"idempotency_key": "origin-web", "maximum_items": 1},
+            headers={**headers, "Origin": "http://127.0.0.1:8420"},
+        )
+        extension = await client.post(
+            "/v1/recommendations/refresh",
+            json={"idempotency_key": "origin-extension", "maximum_items": 1},
+            headers={**headers, "Origin": "chrome-extension://abc123"},
+        )
+    assert web.status_code == extension.status_code == 200
+
+
+@pytest.mark.asyncio
 async def test_facade_diagnostics_and_optional_capabilities_fail_closed(tmp_path: Path) -> None:
     app = build_application(AppSettings(), options=BuildOptions(data_dir=tmp_path))
     facade = app.services.facade
@@ -248,7 +310,7 @@ async def test_facade_diagnostics_and_optional_capabilities_fail_closed(tmp_path
     assert not (await facade.model_diagnostics()).healthy
     assert await facade.start() == StartResult(started=True)
     for operation in (
-        facade.assistant_turn(None, "device"),
+        facade.assistant_turn(object(), "device"),  # type: ignore[arg-type]
         facade.conversation("conv", "device"),
         facade.conversation_messages("conv", "device", 10),
     ):
@@ -259,6 +321,15 @@ async def test_facade_diagnostics_and_optional_capabilities_fail_closed(tmp_path
         assert (await facade.job_health()).health.status is HealthStatus.HEALTHY
     finally:
         await app.stop()
+
+
+def test_frontend_environment_path_rebuilds_only_the_api_host(tmp_path: Path) -> None:
+    index = tmp_path / "index.html"
+    index.write_text("docker-web", encoding="utf-8")
+    application = build_application(AppSettings())
+    replaced = application.with_api_frontend(tmp_path)
+    assert replaced.lifecycle is application.lifecycle
+    assert replaced.hosts.api is not application.hosts.api
 
 
 def test_product_modules_never_import_composition() -> None:
@@ -278,6 +349,71 @@ def test_product_modules_never_import_composition() -> None:
             ):
                 offenders.append(str(path))
     assert not offenders
+
+
+def test_model_configuration_wires_assistant_and_understanding_job(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = ModelInstanceConfig(
+        provider=ProviderKind.OLLAMA,
+        model_name="test",
+        capabilities=ModelCapabilities(tools=True, structured_output=True, context_tokens=8192),
+    )
+    monkeypatch.setattr(
+        "openbiliclaw.composition.build.ModelFactory.build",
+        lambda *_args, **_kwargs: BuiltModel(
+            model=TestModel(),
+            instance_id="test:model",
+            provider="ollama",
+            owner="assistant",
+            declared_capabilities=config.capabilities,
+            verification=VerifiedCapabilities.unverified(config),
+        ),
+    )
+    app = build_application(
+        AppSettings(model={"model_name": "test"}), options=BuildOptions(data_dir=tmp_path)
+    )
+    assert app.services.assistant is not None
+    jobs_component = next(
+        item for item in app.lifecycle._configured if item.component_id == "core.jobs"
+    )
+    component = cast("Any", jobs_component.component)
+    assert "understanding.analysis" in component._scheduler._jobs
+
+
+@pytest.mark.asyncio
+async def test_fail_closed_provider_adapters_raise_without_fake_transport() -> None:
+    transport = _UnavailableCredentialTransport()
+    with pytest.raises(RuntimeError, match="not configured"):
+        await transport.search("q", None, 1, None)
+    with pytest.raises(RuntimeError, match="not configured"):
+        await transport.fetch("1", None)
+    with pytest.raises(RuntimeError, match="not configured"):
+        await _UnavailableProbe()("credential")
+    with pytest.raises(RuntimeError, match="unavailable"):
+        await _UnavailableIdentityClient().identity("token")
+
+    handle = CredentialAccessHandle(
+        provider_id="demo",
+        account_id="local",
+        permissions=frozenset({Permission.READ_PRIVATE}),
+        credential_ref="cred_" + "a" * 32,
+        revision=1,
+    )
+
+    class Vault:
+        def __init__(self, payload: bytes) -> None:
+            self.payload = payload
+
+        def resolve(self, _identity: str, callback):  # type: ignore[no-untyped-def]
+            return callback(memoryview(self.payload))
+
+    assert (
+        await _VaultCredentialResolver(cast("Any", Vault(b'{"cookie":"safe"}')))(handle) == "safe"
+    )
+    for payload in (b"[]", b'{"one":"x","two":"y"}', b'{"cookie":1}'):
+        with pytest.raises(ValueError, match="credential"):
+            await _VaultCredentialResolver(cast("Any", Vault(payload)))(handle)
 
 
 def test_all_explicit_first_party_provider_builders_validate() -> None:
@@ -325,8 +461,26 @@ def test_check_entrypoint(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> No
     assert (tmp_path / "openbiliclaw.db").exists()
 
 
+def test_serve_without_frontend_environment_uses_composed_host(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[object] = []
+    monkeypatch.delenv("OPENBILICLAW_FRONTEND_DIR", raising=False)
+    monkeypatch.setattr("sys.argv", ["openbiliclaw", "serve", "--data-dir", str(tmp_path)])
+    monkeypatch.setattr(
+        "openbiliclaw.composition.entrypoints.uvicorn.run",
+        lambda app, **_options: calls.append(app),
+    )
+    main()
+    assert len(calls) == 1
+
+
 def test_serve_uses_composed_host(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     calls: list[object] = []
+    frontend = tmp_path / "frontend"
+    frontend.mkdir()
+    (frontend / "index.html").write_text("docker frontend", encoding="utf-8")
+    monkeypatch.setenv("OPENBILICLAW_FRONTEND_DIR", str(frontend))
     monkeypatch.setattr("sys.argv", ["openbiliclaw", "serve", "--data-dir", str(tmp_path)])
     monkeypatch.setattr(
         "openbiliclaw.composition.entrypoints.uvicorn.run",

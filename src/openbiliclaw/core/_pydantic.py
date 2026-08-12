@@ -12,6 +12,8 @@ if TYPE_CHECKING:
     class StrictBaseModel:
         """Methods used by Core without inheriting Pydantic's metaclass Any."""
 
+        model_fields: dict[str, object]
+
         def __init__(self, **data: object) -> None: ...
 
         @classmethod
@@ -28,7 +30,9 @@ if TYPE_CHECKING:
         def model_validate_json(cls: type[_Model], value: str | bytes) -> _Model: ...
 
         @classmethod
-        def model_json_schema(cls) -> dict[str, object]: ...
+        def model_json_schema(
+            cls, *, ref_template: str = "#/$defs/{model}"
+        ) -> dict[str, object]: ...
 
         def model_dump(self, *, mode: str = "python") -> dict[str, object]: ...
 

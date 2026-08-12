@@ -821,6 +821,21 @@ async def test_every_mutation_transport_rejects_coercion(
     assert field not in response.text  # safe validation envelope has no input echo
 
 
+async def test_static_frontend_serves_assets_and_spa_fallback(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    (tmp_path / "index.html").write_text("spa-index", encoding="utf-8")
+    (tmp_path / "app.css").write_text("css", encoding="utf-8")
+    app = create_app(HostDependencies(facade=Facade()), frontend_dir=tmp_path)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as api:
+        asset = await api.get("/app.css")
+        route = await api.get("/profile")
+        traversal = await api.get("/../outside")
+    assert asset.text == "css"
+    assert route.text == "spa-index"
+    assert traversal.text == "spa-index"
+
+
 async def test_app_lifespan_is_composition_owned_and_schema_export_is_idle() -> None:
     class Lifespan:
         def __init__(self) -> None:

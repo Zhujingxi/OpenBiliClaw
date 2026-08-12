@@ -100,6 +100,9 @@ def test_registry_rejects_missing_advertised_capability_and_duplicates() -> None
         registry.register(_manifest(CapabilityKind.SEARCH), SearchOnly())
     assert duplicate.value.code is IntegrationErrorCode.PROVIDER_UNAVAILABLE
     assert registry.manifests() == (_manifest(CapabilityKind.SEARCH),)
+    assert registry.manifest(ProviderId(value="demo")) == _manifest(CapabilityKind.SEARCH)
+    with pytest.raises(ContentIntegrationError):
+        registry.manifest(ProviderId(value="missing"))
 
 
 def test_registry_returns_narrow_runtime_checked_capabilities() -> None:

@@ -4,12 +4,24 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
-from openbiliclaw.infrastructure.process import creationflags
-from scripts.export_openapi import export
+_ROOT = Path(__file__).resolve().parents[1]
+_VENV_PYTHON = _ROOT / ".venv" / "bin" / "python"
+if sys.prefix == sys.base_prefix and _VENV_PYTHON.is_file():
+    os.execv(_VENV_PYTHON, (str(_VENV_PYTHON), "-m", "scripts.generate_api_client", *sys.argv[1:]))
+
+# Runnable from the frontend workspace and before an editable install.
+sys.path.insert(0, str(_ROOT / "src"))
+sys.path.insert(0, str(_ROOT))
+
+# Path bootstrapping above must precede project imports in this executable script.
+from openbiliclaw.infrastructure.process import creationflags  # noqa: E402
+from scripts.export_openapi import export  # noqa: E402
 
 
 def generate(output: Path) -> None:

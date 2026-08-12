@@ -7,8 +7,13 @@ from enum import StrEnum
 
 from pydantic import AwareDatetime, ConfigDict, Field, model_validator
 
-from openbiliclaw.content.integration.identity import ContentRef  # noqa: TC001
-from openbiliclaw.content.integration.projections import CardData, ContentPreview  # noqa: TC001
+from openbiliclaw.content.integration.identity import (
+    ContentRef,  # noqa: TC001  # Runtime type required by Pydantic model fields.
+)
+from openbiliclaw.content.integration.projections import (  # noqa: TC001  # Runtime type required by Pydantic model fields.
+    CardData,
+    ContentPreview,
+)
 from openbiliclaw.core._pydantic import StrictBaseModel
 
 

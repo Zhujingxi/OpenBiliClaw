@@ -16,8 +16,8 @@
 | Read capabilities | 分离 Search / Feed / Fetch / Related / Creator / History / Saved protocol；cursor 是 provider-scoped opaque value |
 | Mutation boundary | `ActionRequest` 强制 idempotency + confirmation metadata；`ActionCapability` 与 read protocols 分离 |
 | Registry | Composition 显式注册；拒绝 duplicate provider 和 manifest/implementation capability mismatch；不 import-scan |
-| Agent tools | PydanticAI native search/fetch tools复用相同 capability methods，先裁剪 item/title/summary budget 再进入 model history |
-| Mutation tools | 只返回 `PendingActionDescriptor`，不调用 provider mutation；Plan 11 Application confirmation workflow 才能执行 |
+| Assistant boundary | Application workflow tools reuse the same capability methods and bound results before model history |
+| Mutation tools | Only propose typed pending actions; Application confirmation is the sole execution path |
 | Provider tests | `validate_provider_contract()` 为 Plan 07 provider package 提供可复用 manifest contract check |
 
 ## Public API
@@ -26,7 +26,7 @@
 - 查询与分页：`SearchQuery`、`FeedQuery`、`CreatorQuery`、`ContentFilter`、`PageRequest`、`ProviderCursor`、`ContentPage`
 - capability protocols：`SearchCapability`、`FeedCapability`、`FetchCapability`、`RelatedCapability`、`CreatorCapability`、`HistoryCapability`、`SavedCapability`、`ActionCapability`、`ProjectionCapability`、`ObservationCapability`
 - provider metadata：`ProviderManifest`、`NativeSchemaDescriptor`、`ActionDescriptor`、`CapabilityKind`、`ProviderAvailability`
-- registration/tooling：`ContentProviderRegistry`、`build_provider_tools()`、`ToolBudget`、`PendingActionDescriptor`
+- registration：`ContentProviderRegistry`；Assistant tooling is owned by `assistant/tools.py` over Application Workflows
 - safe failures：`ContentIntegrationError` + closed `IntegrationErrorCode`
 
 ## Invariants

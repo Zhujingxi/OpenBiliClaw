@@ -8,8 +8,8 @@ from pydantic import AwareDatetime, ConfigDict, Field
 
 from openbiliclaw.core._pydantic import StrictBaseModel
 
-from .evidence import EvidenceLink  # noqa: TC001
-from .profile import ProfileClaim  # noqa: TC001
+from .evidence import EvidenceLink  # noqa: TC001  # Runtime type required by Pydantic model fields.
+from .profile import ProfileClaim  # noqa: TC001  # Runtime type required by Pydantic model fields.
 
 
 class ProposalOwner(StrEnum):

@@ -6,11 +6,6 @@ provider = "ollama"
 model_name = ""
 # credential_ref = "keyring:model-primary"
 
-[access]
-method = "anonymous"
-# For method = "manual", provide an opaque vault reference.
-# credential_ref = "keyring:content-account"
-
 [content]
 enabled = ["bilibili", "youtube", "bangumi", "v2ex", "reddit", "x", "zhihu", "linuxdo", "weibo", "rednote", "douyin"]
 

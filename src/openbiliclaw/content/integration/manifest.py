@@ -9,7 +9,10 @@ from pydantic import ConfigDict, Field, model_validator
 from openbiliclaw.core._pydantic import StrictBaseModel
 
 # Pydantic resolves these field types at runtime.
-from .identity import ContentKind, ProviderId  # noqa: TC001
+from .identity import (  # noqa: TC001  # Runtime type required by Pydantic model fields.
+    ContentKind,
+    ProviderId,
+)
 
 
 class CapabilityKind(StrEnum):

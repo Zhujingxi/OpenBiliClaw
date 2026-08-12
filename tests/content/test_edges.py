@@ -5,9 +5,6 @@ from typing import TYPE_CHECKING
 
 import pytest
 from pydantic import ValidationError
-from pydantic_ai import Agent
-from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart
-from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from openbiliclaw.access.models import AnonymousAccessHandle, Permission
 from openbiliclaw.content.integration.capabilities import (
@@ -15,7 +12,6 @@ from openbiliclaw.content.integration.capabilities import (
     FetchCapability,
     ProjectionCapability,
 )
-from openbiliclaw.content.integration.errors import ContentIntegrationError
 from openbiliclaw.content.integration.identity import ContentKind, ContentRef, ProviderId
 from openbiliclaw.content.integration.manifest import (
     ActionDescriptor,
@@ -32,8 +28,6 @@ from openbiliclaw.content.integration.projections import (
     RecommendationCandidate,
     SearchDocument,
 )
-from openbiliclaw.content.integration.registry import ContentProviderRegistry
-from openbiliclaw.content.integration.tools import ToolBudget, build_provider_tools
 from openbiliclaw.core._pydantic import StrictBaseModel
 
 if TYPE_CHECKING:
@@ -187,85 +181,3 @@ def test_projection_protocols_are_runtime_checkable() -> None:
     provider = FetchAndProject()
     assert isinstance(provider, FetchCapability)
     assert isinstance(provider, ProjectionCapability)
-
-
-async def test_generated_fetch_tool_executes_typed_capability_and_bounds_result() -> None:
-    provider = FetchAndProject()
-    manifest = _manifest(CapabilityKind.FETCH, CapabilityKind.PROJECTION)
-    tools = build_provider_tools(
-        manifest,
-        provider,
-        _access(),
-        enabled=frozenset({CapabilityKind.FETCH}),
-        budget=ToolBudget(max_title_chars=4, max_summary_chars=4),
-    )
-    calls = 0
-
-    async def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            return ModelResponse(
-                parts=[
-                    ToolCallPart(
-                        "demo_fetch",
-                        {
-                            "content_kind": "post",
-                            "provider_content_id": "1",
-                            "canonical_url": "https://example.com/1",
-                        },
-                    )
-                ]
-            )
-        return ModelResponse(parts=[TextPart("done")])
-
-    agent: Agent[None, str] = Agent(FunctionModel(respond), tools=tools)
-    result = await agent.run("fetch")
-    assert result.output == "done"
-    assert provider.fetched == [_ref()]
-    tool_return = result.all_messages_json().decode()
-    assert "long title" not in tool_return
-    assert "long summary" not in tool_return
-    assert '"title":"long"' in tool_return
-
-
-def test_tool_builder_rejects_cross_provider_access_handle() -> None:
-    wrong_access = AnonymousAccessHandle(
-        provider_id="other",
-        account_id=None,
-        permissions=frozenset({Permission.READ_PUBLIC}),
-    )
-    with pytest.raises(ContentIntegrationError, match="another provider"):
-        build_provider_tools(
-            _manifest(CapabilityKind.SEARCH),
-            object(),
-            wrong_access,
-            enabled=frozenset({CapabilityKind.SEARCH}),
-            budget=ToolBudget(),
-        )
-
-
-def test_registry_manifest_and_sorting_and_missing_tool_implementations() -> None:
-    registry = ContentProviderRegistry()
-    provider = FetchAndProject()
-    manifest = _manifest(CapabilityKind.FETCH, CapabilityKind.PROJECTION)
-    registry.register(manifest, provider)
-    assert registry.manifest(ProviderId(value="demo")) == manifest
-    with pytest.raises(ContentIntegrationError):
-        registry.manifest(ProviderId(value="missing"))
-    with pytest.raises(ContentIntegrationError, match="search capability"):
-        build_provider_tools(
-            _manifest(CapabilityKind.SEARCH),
-            object(),
-            _access(),
-            enabled=frozenset({CapabilityKind.SEARCH}),
-            budget=ToolBudget(),
-        )
-    with pytest.raises(ContentIntegrationError, match="fetch projection"):
-        build_provider_tools(
-            _manifest(CapabilityKind.FETCH),
-            object(),
-            _access(),
-            enabled=frozenset({CapabilityKind.FETCH}),
-            budget=ToolBudget(),
-        )

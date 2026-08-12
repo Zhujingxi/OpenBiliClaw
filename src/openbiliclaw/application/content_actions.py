@@ -8,8 +8,12 @@ from typing import TYPE_CHECKING, Protocol
 
 from pydantic import AwareDatetime, ConfigDict, Field
 
-from openbiliclaw.content.integration.actions import ActionResult  # noqa: TC001
-from openbiliclaw.content.integration.identity import ContentRef  # noqa: TC001
+from openbiliclaw.content.integration.actions import (
+    ActionResult,  # noqa: TC001  # Runtime type required by Pydantic model fields.
+)
+from openbiliclaw.content.integration.identity import (
+    ContentRef,  # noqa: TC001  # Runtime type required by Pydantic model fields.
+)
 from openbiliclaw.core._pydantic import StrictBaseModel
 
 from .errors import ApplicationError, ApplicationErrorCode

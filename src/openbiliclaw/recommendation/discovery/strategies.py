@@ -6,7 +6,10 @@ from enum import StrEnum
 
 from pydantic import ConfigDict, Field
 
-from openbiliclaw.content.integration.identity import ContentRef, ProviderId  # noqa: TC001
+from openbiliclaw.content.integration.identity import (  # noqa: TC001  # Runtime type required by Pydantic model fields.
+    ContentRef,
+    ProviderId,
+)
 from openbiliclaw.core._pydantic import StrictBaseModel
 
 

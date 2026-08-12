@@ -6,7 +6,6 @@ import pytest
 from pydantic import ValidationError
 
 from openbiliclaw.core.config import (
-    AccessOverrides,
     AppSettings,
     ContentOverrides,
     HostOverrides,
@@ -89,8 +88,6 @@ def test_all_environment_and_override_fields_are_applied() -> None:
     environment = {
         "OPENBILICLAW_MODEL_NAME": "env-model",
         "OPENBILICLAW_MODEL_CREDENTIAL_REF": "vault:env-model",
-        "OPENBILICLAW_ACCESS_METHOD": "manual",
-        "OPENBILICLAW_ACCESS_CREDENTIAL_REF": "vault:env-access",
         "OPENBILICLAW_API_HOST": "0.0.0.0",
         "OPENBILICLAW_CONTENT_PROVIDERS": "bilibili, youtube",
         "OPENBILICLAW_POOL_TARGET_COUNT": "250",
@@ -98,7 +95,6 @@ def test_all_environment_and_override_fields_are_applied() -> None:
     }
     overrides = SettingsOverrides(
         model=ModelOverrides(model_name="cli-model", credential_ref="vault:cli-model"),
-        access=AccessOverrides(method="manual", credential_ref="vault:cli-access"),
         content=ContentOverrides(enabled=("bilibili",)),
         recommendation=RecommendationOverrides(pool_target_count=300),
         host=HostOverrides(api_host="localhost"),
@@ -108,7 +104,6 @@ def test_all_environment_and_override_fields_are_applied() -> None:
     settings = load_settings(None, environ=environment, cli_overrides=overrides)
 
     assert settings.model.model_name == "cli-model"
-    assert settings.access.credential_ref == "vault:cli-access"
     assert settings.content.enabled == ("bilibili",)
     assert settings.recommendation.pool_target_count == 300
     assert settings.host.api_host == "localhost"
@@ -124,7 +119,7 @@ def test_settings_reject_cross_field_and_section_shape_errors(tmp_path: Path) ->
             malformed,
             environ={"OPENBILICLAW_MODEL_PROVIDER": "openai"},
         )
-    with pytest.raises(ValidationError, match="credential_ref"):
+    with pytest.raises(ValidationError, match="access"):
         AppSettings.model_validate({"access": {"method": "manual"}})
     with pytest.raises(ValueError, match="DEFAULT_TIMEOUT_SECONDS"):
         load_settings(
@@ -134,19 +129,11 @@ def test_settings_reject_cross_field_and_section_shape_errors(tmp_path: Path) ->
 
 
 def test_diagnostic_dump_redacts_secret_references() -> None:
-    settings = AppSettings.model_validate(
-        {
-            "model": {"credential_ref": "vault:model-primary"},
-            "access": {"credential_ref": "vault:browser-session"},
-        }
-    )
+    settings = AppSettings.model_validate({"model": {"credential_ref": "vault:model-primary"}})
 
     diagnostic = settings.diagnostic_dump()
     model_diagnostic = diagnostic["model"]
-    access_diagnostic = diagnostic["access"]
 
     assert isinstance(model_diagnostic, dict)
-    assert isinstance(access_diagnostic, dict)
     assert model_diagnostic["credential_ref"] == "<redacted-ref>"
-    assert access_diagnostic["credential_ref"] == "<redacted-ref>"
     assert "vault:" not in repr(diagnostic)

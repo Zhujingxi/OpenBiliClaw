@@ -137,11 +137,12 @@ def test_amo_sign_defaults_to_base_manifest_version(monkeypatch: pytest.MonkeyPa
     import scripts.extension_release as release
 
     captured: list[tuple[Path, Path | None]] = []
-    monkeypatch.setattr(
-        release,
-        "amo_sign",
-        lambda archive, *, output=None: captured.append((archive, output)) or {"ok": True},
-    )
+
+    def fake_sign(archive: Path, *, output: Path | None = None) -> dict[str, bool]:
+        captured.append((archive, output))
+        return {"ok": True}
+
+    monkeypatch.setattr(release, "amo_sign", fake_sign)
     monkeypatch.setattr("sys.argv", ["extension_release.py", "amo-sign", "--no-build"])
 
     release.main()

@@ -9,14 +9,11 @@ from openbiliclaw.core.jobs import IntervalSchedule, JobSpec, MissedRunPolicy, O
 JobRun = Callable[[], Awaitable[None]]
 
 
-def recommendation_jobs(
-    *, discovery: JobRun, evaluation: JobRun, expiry: JobRun, replenishment: JobRun
-) -> tuple[JobSpec, ...]:
+def recommendation_jobs(*, replenishment: JobRun, expiry: JobRun) -> tuple[JobSpec, ...]:
+    """Schedule the two independently executable recommendation operations."""
     return (
-        _job("recommendation.discovery", 300, "network", discovery),
-        _job("recommendation.evaluation", 60, "model", evaluation),
-        _job("recommendation.expiry", 900, "database", expiry),
         _job("recommendation.replenishment", 120, "network", replenishment),
+        _job("recommendation.expiry", 900, "database", expiry),
     )
 
 

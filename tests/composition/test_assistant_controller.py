@@ -15,7 +15,11 @@ from openbiliclaw.assistant.agent import (
     build_assistant_agent,
 )
 from openbiliclaw.assistant.service import AssistantService
-from openbiliclaw.composition.assistant import AssistantController
+from openbiliclaw.composition.assistant import (
+    AssistantController,
+    _AssistantToolFacade,
+    assistant_workflow_tools,
+)
 from openbiliclaw.composition.build import BuildOptions, build_application
 from openbiliclaw.core.config import AppSettings
 from openbiliclaw.core.resources import ResourceBudget
@@ -76,3 +80,40 @@ async def test_controller_persists_scoped_turn_and_messages(tmp_path: Path) -> N
     with pytest.raises(Exception, match="not found"):
         await controller.conversation(conversation_id, "other-device")
     await application.stop()
+
+
+@pytest.mark.asyncio
+async def test_assistant_tool_facade_delegates_reads_and_blocks_mutations(tmp_path: Path) -> None:
+    application = build_application(AppSettings(), options=BuildOptions(data_dir=tmp_path))
+    assert application.services.facade is not None
+    facade = _AssistantToolFacade(application.services.facade)
+    await application.start()
+    try:
+        assert await facade.get_recommendations(1) is not None
+        assert await facade.show_profile() is not None
+        assert await facade.list_sources() is not None
+        for operation in (
+            facade.record_feedback("ref", "liked"),
+            facade.edit_profile("claim", "set", "x"),
+            facade.connect_source("demo"),
+        ):
+            with pytest.raises(RuntimeError, match="require"):
+                await operation
+    finally:
+        await application.stop()
+
+
+def test_composition_attaches_safe_application_workflow_tools(tmp_path: Path) -> None:
+    application = build_application(AppSettings(), options=BuildOptions(data_dir=tmp_path))
+    assert application.services.facade is not None
+    agent = build_assistant_agent(assistant_workflow_tools(application.services.facade))
+    assert set(agent._function_toolset.tools) == {
+        "get_recommendations",
+        "get_content_details",
+        "search_content",
+        "show_profile",
+        "edit_profile",
+        "list_sources",
+        "connect_source",
+        "record_feedback",
+    }

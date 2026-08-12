@@ -9,9 +9,13 @@ from __future__ import annotations
 import importlib.util
 import struct
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from types import ModuleType
 
 
-def _load_module():
+def _load_module() -> ModuleType:
     root = Path(__file__).resolve().parent.parent
     path = root / "packaging" / "make_splash.py"
     spec = importlib.util.spec_from_file_location("obc_make_splash", path)
@@ -46,7 +50,9 @@ def test_make_splash_has_expected_dimensions(tmp_path: Path) -> None:
             make_splash_mod._ICON_X + make_splash_mod._ICON_SIZE // 2,
             make_splash_mod._ICON_Y + make_splash_mod._ICON_SIZE // 2,
         )
-        red, green, blue = img.convert("RGB").getpixel(center)
+        pixel = img.convert("RGB").getpixel(center)
+        assert isinstance(pixel, tuple)
+        red, green, blue = pixel
         assert red > 220
         assert green < 180
         assert blue > 120

@@ -9,9 +9,13 @@ from pydantic_ai import Agent
 
 from openbiliclaw.ai.runtime.budgets import RunPolicy
 from openbiliclaw.ai.runtime.capabilities import AgentId, ModelRequirements
-from openbiliclaw.content.integration.projections import ContentPreview  # noqa: TC001
+from openbiliclaw.content.integration.projections import (
+    ContentPreview,  # noqa: TC001  # Runtime type required by Pydantic model fields.
+)
 from openbiliclaw.core._pydantic import StrictBaseModel
-from openbiliclaw.understanding.projections import RecommendationProfile  # noqa: TC001
+from openbiliclaw.understanding.projections import (
+    RecommendationProfile,  # noqa: TC001  # Runtime type required by Pydantic model fields.
+)
 
 
 class CandidateScore(StrictBaseModel):

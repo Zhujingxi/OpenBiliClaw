@@ -6,7 +6,9 @@ from pydantic import AwareDatetime, ConfigDict, Field, field_validator, model_va
 
 from openbiliclaw.core._pydantic import StrictBaseModel
 
-from .identity import ContentRef  # noqa: TC001  # Pydantic resolves field types at runtime.
+from .identity import (
+    ContentRef,  # noqa: TC001  # Pydantic resolves field types at runtime.  # Runtime type required by Pydantic model fields.
+)
 
 
 class ProjectionProvenance(StrictBaseModel):

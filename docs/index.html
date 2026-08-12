@@ -1246,7 +1246,7 @@
             </div>
             <pre><code id="dockerInstall" data-i18n="dockerInstall">curl -fsSLO https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docker-compose.prebuilt.yml
 docker compose -f docker-compose.prebuilt.yml up -d
-# 然后打开 http://127.0.0.1:8420/setup/ 完成初始化</code></pre>
+# 然后打开 http://127.0.0.1:8420/ 使用 Web 界面</code></pre>
           </div>
 
           <div class="note">
@@ -1259,15 +1259,15 @@ docker compose -f docker-compose.prebuilt.yml up -d
           <div class="note">
             <h3 data-i18n="pluginNoteTitle">插件是主要入口</h3>
             <p data-i18n="pluginNoteText">
-              插件负责侧边栏推荐、行为采集、反馈、聊天，以及 B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit 登录态任务桥和 Linux.do 同源只读任务桥；Linux.do 公开 discovery 无需登录，个人 bootstrap 才复用浏览器登录态，任务只在隔离 tab 内执行同源 GET，Cookie 与原始响应不上传；在 `bgm.tv` / `bangumi.tv` 上它仅做身份识别（读取页面公开的 CHOBITS_UID 与导航栏用户名），不读 Cookie、不采集浏览行为。最新版建议从 GitHub Latest Release 的 openbiliclaw-v* 聚合页下载 openbiliclaw-extension-v*.zip 手动安装（Firefox 用 -firefox.zip）；Chrome 应用商店一键装会自动更新，但受审核排期影响，版本可能滞后几天到一两周。
-              插件负责侧边栏推荐、行为采集、反馈、聊天，以及 B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit / V2EX 登录态任务桥；在 `bgm.tv` / `bangumi.tv` 上它仅做身份识别（读取页面公开的 CHOBITS_UID 与导航栏用户名），不读 Cookie、不采集浏览行为。最新版建议从 GitHub Latest Release 的 openbiliclaw-v* 聚合页下载 openbiliclaw-extension-v*.zip 手动安装（Firefox 用 -firefox.zip）；Chrome 应用商店一键装会自动更新，但受审核排期影响，版本可能滞后几天到一两周。
+              插件提供侧边栏推荐、反馈和聊天；不采集浏览行为、不读取网站 Cookie，也不执行登录态任务。最新版建议从 GitHub Latest Release 的 openbiliclaw-v* 聚合页下载 openbiliclaw-extension-v*.zip 手动安装（Firefox 用 -firefox.zip）；Chrome 应用商店一键装会自动更新，但受审核排期影响，版本可能滞后几天到一两周。
+              插件提供侧边栏推荐、反馈和聊天；不采集浏览行为、不读取网站 Cookie，也不执行登录态任务。最新版建议从 GitHub Latest Release 的 openbiliclaw-v* 聚合页下载 openbiliclaw-extension-v*.zip 手动安装（Firefox 用 -firefox.zip）；Chrome 应用商店一键装会自动更新，但受审核排期影响，版本可能滞后几天到一两周。
             </p>
           </div>
 
           <div class="note">
             <h3 data-i18n="mobileInstallNoteTitle">手机桌面快捷入口</h3>
             <p data-i18n="mobileInstallNoteText">
-              后端允许局域网访问后，点击插件顶部手机图标扫码打开 /m/。iPhone / iPad 用 Safari「分享 → 添加到主屏幕」；Android Chrome / Chromium 浏览器用菜单里的「安装应用」或「添加到主屏幕」。局域网 HTTP 在部分 Android 浏览器上可能只生成快捷方式；HTTPS 反代下完整 PWA 安装提示更稳定。
+              移动设备请直接访问已配置的 OpenBiliClaw Web 地址。
             </p>
           </div>
         </div>
@@ -1593,17 +1593,17 @@ docker compose -f docker-compose.prebuilt.yml up -d
         agentPrompt: "请按照 https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docs/agent-install.md 的说明帮我部署 OpenBiliClaw 后端(务必用 Bash 的 curl 下载这个文档,不要用 WebFetch — 会丢关键指令)",
         shellPromptLabel: "不用 AI 助手时的脚本",
         dockerPromptLabel: "Docker 预构建镜像（自托管）",
-        dockerInstall: "curl -fsSLO https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docker-compose.prebuilt.yml\ndocker compose -f docker-compose.prebuilt.yml up -d\n# 然后打开 http://127.0.0.1:8420/setup/ 完成初始化",
+        dockerInstall: "curl -fsSLO https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docker-compose.prebuilt.yml\ndocker compose -f docker-compose.prebuilt.yml up -d\n# 然后打开 http://127.0.0.1:8420/ 使用 Web 界面",
         copy: "复制",
         copySuccess: "已复制",
         copyFallback: "手动复制",
         desktopNoteTitle: "桌面安装包（最省事）",
         desktopNoteText: "macOS Apple 芯片下载 OpenBiliClaw-macos-v*-arm64.dmg，Intel 下载 x64 包（如发布页提供）；DMG 内推荐双击「安装并启动 Install OpenBiliClaw.command」，它会校验新包、退出旧实例、原子替换并启动刚安装的版本。Windows 下载 OpenBiliClaw-windows-*-Setup.exe，安装或升级成功后同样会结束旧实例并自动启动新版本。可用安装包都附在 openbiliclaw-v* 聚合 Latest Release 里。当前为 ad-hoc signed、未公证的实验性预发布：Mac 首次打开安装助手或应用时请右键 / Control-click → 打开，或到系统设置 → 隐私与安全性点仍要打开；若提示“已损坏”，确认来源后执行 xattr -dr com.apple.quarantine /Applications/OpenBiliClaw.app。",
         pluginNoteTitle: "插件是主要入口",
-        pluginNoteText: "插件负责侧边栏推荐、行为采集、反馈、聊天，以及 B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit 登录态任务桥和 Linux.do 同源只读任务桥；Linux.do 公开 discovery 无需登录，个人 bootstrap 才复用浏览器登录态，任务只在隔离 tab 内执行同源 GET，Cookie 与原始响应不上传；在 bgm.tv / bangumi.tv 上它仅做身份识别（读取页面公开的 CHOBITS_UID 与导航栏用户名），不读 Cookie、不采集浏览行为。最新版建议从 GitHub Latest Release 的 openbiliclaw-v* 聚合页下载 openbiliclaw-extension-v*.zip 手动安装（Firefox 用 -firefox.zip）；Chrome 应用商店一键装会自动更新，但受审核排期影响，版本可能滞后几天到一两周。",
-        pluginNoteText: "插件负责侧边栏推荐、行为采集、反馈、聊天，以及 B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit / V2EX 登录态任务桥；在 bgm.tv / bangumi.tv 上它仅做身份识别（读取页面公开的 CHOBITS_UID 与导航栏用户名），不读 Cookie、不采集浏览行为。最新版建议从 GitHub Latest Release 的 openbiliclaw-v* 聚合页下载 openbiliclaw-extension-v*.zip 手动安装（Firefox 用 -firefox.zip）；Chrome 应用商店一键装会自动更新，但受审核排期影响，版本可能滞后几天到一两周。",
+        pluginNoteText: "插件提供侧边栏推荐、反馈和聊天；不采集浏览行为、不读取网站 Cookie，也不执行登录态任务。最新版建议从 GitHub Latest Release 的 openbiliclaw-v* 聚合页下载 openbiliclaw-extension-v*.zip 手动安装（Firefox 用 -firefox.zip）；Chrome 应用商店一键装会自动更新，但受审核排期影响，版本可能滞后几天到一两周。",
+        pluginNoteText: "插件提供侧边栏推荐、反馈和聊天；不采集浏览行为、不读取网站 Cookie，也不执行登录态任务。最新版建议从 GitHub Latest Release 的 openbiliclaw-v* 聚合页下载 openbiliclaw-extension-v*.zip 手动安装（Firefox 用 -firefox.zip）；Chrome 应用商店一键装会自动更新，但受审核排期影响，版本可能滞后几天到一两周。",
         mobileInstallNoteTitle: "手机桌面快捷入口",
-        mobileInstallNoteText: "后端允许局域网访问后，点击插件顶部手机图标扫码打开 /m/。iPhone / iPad 用 Safari「分享 → 添加到主屏幕」；Android Chrome / Chromium 浏览器用菜单里的「安装应用」或「添加到主屏幕」。局域网 HTTP 在部分 Android 浏览器上可能只生成快捷方式；HTTPS 反代下完整 PWA 安装提示更稳定。",
+        mobileInstallNoteText: "移动设备请直接访问已配置的 OpenBiliClaw Web 地址。",
         whyEyebrow: "Why it matters",
         whyTitle: "推荐顺序反过来：先理解人，再找内容。",
         whyLead: "平台推荐通常先有内容池，再预测你会点什么。OpenBiliClaw 先沉淀对你的理解，再让 Agent 带着这份理解跨平台主动寻找。",
@@ -1753,7 +1753,7 @@ docker compose -f docker-compose.prebuilt.yml up -d
         agentPrompt: "Please follow https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docs/agent-install.md to deploy the OpenBiliClaw backend for me (use Bash `curl` to fetch the document, NOT WebFetch — WebFetch summarises markdown and drops critical commands).",
         shellPromptLabel: "Script without an AI agent",
         dockerPromptLabel: "Docker prebuilt image (self-hosted)",
-        dockerInstall: "curl -fsSLO https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docker-compose.prebuilt.yml\ndocker compose -f docker-compose.prebuilt.yml up -d\n# then open http://127.0.0.1:8420/setup/ to finish initialization",
+        dockerInstall: "curl -fsSLO https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docker-compose.prebuilt.yml\ndocker compose -f docker-compose.prebuilt.yml up -d\n# then open http://127.0.0.1:8420/ to use the web interface",
         copy: "Copy",
         copySuccess: "Copied",
         copyFallback: "Copy manually",
@@ -1763,7 +1763,7 @@ docker compose -f docker-compose.prebuilt.yml up -d
         pluginNoteText: "The extension powers sidebar recommendations, behavior capture, feedback, chat, signed-in task bridges for Bilibili, Xiaohongshu, Douyin, YouTube, X, Zhihu, and Reddit, plus a same-origin read-only task bridge for Linux.do. Public Linux.do discovery needs no login; only personal bootstrap reuses the browser session. Its tasks issue GETs only in isolated tabs and upload neither cookies nor raw responses. On bgm.tv / bangumi.tv it only performs identity recognition (reading the page's public CHOBITS_UID and nav username); it never reads cookies or collects browsing behavior. For the newest build, download openbiliclaw-extension-v*.zip from the openbiliclaw-v* aggregate GitHub Latest Release and load it manually (Firefox: use the -firefox.zip); the Chrome Web Store one-click install auto-updates but can lag by days to a couple of weeks due to review scheduling.",
         pluginNoteText: "The extension powers sidebar recommendations, behavior capture, feedback, chat, and logged-in task bridges for Bilibili, Xiaohongshu, Douyin, YouTube, X, Zhihu, Reddit, and V2EX. On bgm.tv / bangumi.tv it only performs identity recognition (reading the page's public CHOBITS_UID and nav username); it never reads cookies or collects browsing behavior. For the newest build, download openbiliclaw-extension-v*.zip from the openbiliclaw-v* aggregate GitHub Latest Release and load it manually (Firefox: use the -firefox.zip); the Chrome Web Store one-click install auto-updates but can lag by days to a couple of weeks due to review scheduling.",
         mobileInstallNoteTitle: "Phone home-screen shortcut",
-        mobileInstallNoteText: "After enabling LAN access for the backend, click the phone icon in the extension header and scan the QR code for /m/. On iPhone / iPad, open Safari's Share menu and choose Add to Home Screen; on Android Chrome / Chromium browsers, use Install app or Add to Home screen. LAN HTTP may only create a shortcut in some Android browsers; full PWA install prompts are more reliable behind an HTTPS reverse proxy.",
+        mobileInstallNoteText: "On mobile devices, open the configured OpenBiliClaw web address directly.",
         whyEyebrow: "Why it matters",
         whyTitle: "Flip the order: understand the person first, then find content.",
         whyLead: "Platform recommenders usually start with a content pool and predict what you will click. OpenBiliClaw first builds an understanding of you, then lets an Agent search across platforms with that understanding.",

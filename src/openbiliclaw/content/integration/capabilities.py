@@ -11,7 +11,11 @@ from openbiliclaw.core._pydantic import StrictBaseModel
 from .actions import ActionRequest, ActionResult
 
 # Pydantic resolves these field types at runtime.
-from .identity import ContentKind, ContentRef, ProviderId  # noqa: TC001
+from .identity import (  # noqa: TC001  # Runtime type required by Pydantic model fields.
+    ContentKind,
+    ContentRef,
+    ProviderId,
+)
 
 if TYPE_CHECKING:
     from openbiliclaw.access.models import AccessHandle

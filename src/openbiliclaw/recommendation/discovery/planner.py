@@ -6,14 +6,18 @@ from collections.abc import Awaitable, Callable
 
 from pydantic import ConfigDict, Field
 
-from openbiliclaw.content.integration.identity import ProviderId  # noqa: TC001
+from openbiliclaw.content.integration.identity import (
+    ProviderId,  # noqa: TC001  # Runtime type required by Pydantic model fields.
+)
 from openbiliclaw.content.integration.manifest import (
     CapabilityKind,
     ProviderAvailability,
     ProviderManifest,
 )
 from openbiliclaw.core._pydantic import StrictBaseModel
-from openbiliclaw.understanding.projections import DiscoveryProfile  # noqa: TC001
+from openbiliclaw.understanding.projections import (
+    DiscoveryProfile,  # noqa: TC001  # Runtime type required by Pydantic model fields.
+)
 
 from .query_agent import QueryBatch
 from .strategies import StrategyConfig, strategy_query

@@ -82,7 +82,7 @@ class SecurityMiddleware(BaseHTTPMiddleware):
         if length is not None and (not length.isdigit() or int(length) > policy.max_body_bytes):
             return self._error(413, ErrorCode.VALIDATION, "request body too large")
         origin = request.headers.get("origin")
-        if origin is not None and origin not in policy.allowed_origins:
+        if origin is not None and not policy.origin_allowed(origin):
             return self._error(403, ErrorCode.FORBIDDEN, "origin is not allowed")
         if policy.bearer_token is not None:
             expected = f"Bearer {policy.bearer_token}"
@@ -100,6 +100,11 @@ class SecurityMiddleware(BaseHTTPMiddleware):
         bucket = self._requests[client]
         while bucket and now - bucket[0] >= 60:
             bucket.popleft()
+        if not bucket:
+            # Bound memory to clients active in the current rate-limit window.
+            for address, stale in tuple(self._requests.items()):
+                if address != client and (not stale or now - stale[-1] >= 60):
+                    self._requests.pop(address, None)
         if len(bucket) >= policy.requests_per_minute:
             return self._error(429, ErrorCode.RATE_LIMIT, "rate limit exceeded")
         bucket.append(now)
@@ -146,6 +151,7 @@ def create_app(dependencies: HostDependencies, *, frontend_dir: Path | None = No
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(dependencies.security.allowed_origins),
+        allow_origin_regex=r"^(chrome|moz)-extension://[A-Za-z0-9_-]+$",
         allow_credentials=True,
         allow_methods=["GET", "POST"],
         allow_headers=["Authorization", "Content-Type", "X-CSRF-Token", "X-Device-ID"],

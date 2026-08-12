@@ -7,8 +7,12 @@ from typing import TYPE_CHECKING, Protocol
 
 from pydantic import ConfigDict, Field
 
-from openbiliclaw.access.forms import ConnectionForm  # noqa: TC001
-from openbiliclaw.access.models import AccessStatus  # noqa: TC001
+from openbiliclaw.access.forms import (
+    ConnectionForm,  # noqa: TC001  # Runtime type required by Pydantic model fields.
+)
+from openbiliclaw.access.models import (
+    AccessStatus,  # noqa: TC001  # Runtime type required by Pydantic model fields.
+)
 from openbiliclaw.content.integration.capabilities import (
     FetchCapability,
     PageRequest,
@@ -19,13 +23,26 @@ from openbiliclaw.content.integration.errors import (
     ContentIntegrationError,
     IntegrationErrorCode,
 )
-from openbiliclaw.content.integration.identity import ContentRef, ProviderId  # noqa: TC001
-from openbiliclaw.content.integration.native import NativeContent  # noqa: TC001
-from openbiliclaw.content.integration.projections import ContentPreview  # noqa: TC001
+from openbiliclaw.content.integration.identity import (  # noqa: TC001  # Runtime type required by Pydantic model fields.
+    ContentRef,
+    ProviderId,
+)
+from openbiliclaw.content.integration.native import (
+    NativeContent,  # noqa: TC001  # Runtime type required by Pydantic model fields.
+)
+from openbiliclaw.content.integration.projections import (
+    ContentPreview,  # noqa: TC001  # Runtime type required by Pydantic model fields.
+)
 from openbiliclaw.core._pydantic import StrictBaseModel
-from openbiliclaw.core.health import HealthSnapshot  # noqa: TC001
-from openbiliclaw.recommendation.models import RecommendationFeedItem  # noqa: TC001
-from openbiliclaw.understanding.profile import CanonicalProfile  # noqa: TC001
+from openbiliclaw.core.health import (
+    HealthSnapshot,  # noqa: TC001  # Runtime type required by Pydantic model fields.
+)
+from openbiliclaw.recommendation.models import (
+    RecommendationFeedItem,  # noqa: TC001  # Runtime type required by Pydantic model fields.
+)
+from openbiliclaw.understanding.profile import (
+    CanonicalProfile,  # noqa: TC001  # Runtime type required by Pydantic model fields.
+)
 from openbiliclaw.understanding.projections import (
     DialogueProfile,
     dialogue_projection,

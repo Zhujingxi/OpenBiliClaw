@@ -10,7 +10,7 @@ import pytest
 from pydantic import ValidationError
 from pydantic_ai.models.test import TestModel
 
-from openbiliclaw.ai.providers.models.config import ModelInstanceConfig, ProviderKind
+from openbiliclaw.ai.providers.models.config import ModelInstanceConfig, ModelOptions, ProviderKind
 from openbiliclaw.ai.providers.models.factory import ModelFactory
 from openbiliclaw.ai.providers.verification import (
     CapabilityProbe,
@@ -22,6 +22,15 @@ from openbiliclaw.ai.providers.verification import (
 from openbiliclaw.ai.runtime.capabilities import ModelCapabilities
 
 T = TypeVar("T")
+
+
+def test_model_options_map_every_reviewed_setting() -> None:
+    assert ModelOptions().to_settings() == {}
+    assert ModelOptions(temperature=0.2, max_tokens=100, top_p=0.9).to_settings() == {
+        "temperature": 0.2,
+        "max_tokens": 100,
+        "top_p": 0.9,
+    }
 
 
 @dataclass

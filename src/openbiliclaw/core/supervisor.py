@@ -143,12 +143,18 @@ class RuntimeSupervisor:
         tasks = tuple(self._tasks)
         for task in tasks:
             task.cancel()
-        async with asyncio.timeout(self._shutdown_grace_seconds):
-            if tasks:
-                await asyncio.wait(tasks)
-            await task_group.__aexit__(None, None, None)
-        self._task_group = None
-        self._tasks.clear()
+        try:
+            async with asyncio.timeout(self._shutdown_grace_seconds):
+                if tasks:
+                    await asyncio.wait(tasks)
+                await task_group.__aexit__(None, None, None)
+        except TimeoutError:
+            # Detach pathological cancellation-resistant tasks after the grace
+            # deadline; shutdown must not retain an open TaskGroup reference.
+            asyncio.create_task(task_group.__aexit__(None, None, None))
+        finally:
+            self._task_group = None
+            self._tasks.clear()
 
     def health(self) -> HealthSnapshot:
         """Return immutable job counters without exception text or payloads."""

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Protocol, cast
 
 import pytest
 from pydantic_ai import Tool
@@ -10,7 +11,7 @@ from openbiliclaw.ai.runtime.capabilities import ModelCapabilities, ModelRequire
 from openbiliclaw.application.errors import ApplicationError, ApplicationErrorCode
 from openbiliclaw.assistant.actions import ActionConfirmation, render_pending_action
 from openbiliclaw.assistant.models import PendingActionSummary
-from openbiliclaw.assistant.skills import AssistantSkill, AssistantSkillRegistry
+from openbiliclaw.assistant.skills import AssistantSkill, AssistantSkillRegistry, _NullFacade
 from openbiliclaw.assistant.tools import (
     AssistantIntent,
     ToolAvailability,
@@ -21,6 +22,10 @@ from openbiliclaw.assistant.tools import (
 )
 
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
+
+
+class ToolCall(Protocol):
+    async def __call__(self, *arguments: object) -> object: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,12 +79,33 @@ def test_skill_registration_rejects_duplicates_and_incompatible_capabilities() -
     assert one.registration().extension_id == "demo.one"
     registry.register(one)
     assert registry.skills == (one,)
+    explicit = AssistantSkillRegistry(ModelCapabilities(tools=True))
+    explicit.register(one, Facade())
+    assert explicit.skills == (one,)
     with pytest.raises(ValueError, match="duplicate Assistant skill"):
         registry.register(one)
     with pytest.raises(ValueError, match="duplicate tool"):
         registry.register(duplicate_tool)
     with pytest.raises(ValueError, match="incompatible"):
         AssistantSkillRegistry(ModelCapabilities()).register(one)
+
+
+@pytest.mark.asyncio
+async def test_null_skill_facade_rejects_factory_workflow_calls() -> None:
+    null = _NullFacade()
+    operations = (
+        null.get_recommendations(1),
+        null.search_content("demo", "q", 1),
+        null.get_content_details("ref"),
+        null.record_feedback("ref", "liked"),
+        null.show_profile(),
+        null.edit_profile("claim", "set", "x"),
+        null.list_sources(),
+        null.connect_source("demo"),
+    )
+    for operation in operations:
+        with pytest.raises(RuntimeError, match="registration"):
+            await operation
 
 
 def test_scoped_tool_selection_never_exposes_everything() -> None:
@@ -103,7 +129,8 @@ def test_scoped_tool_selection_never_exposes_everything() -> None:
     assert {item.name for item in enabled} == {"skill_extra"}
 
 
-def test_all_workflow_tool_contracts_are_present() -> None:
+@pytest.mark.asyncio
+async def test_all_workflow_tool_contracts_are_present() -> None:
     tools = build_workflow_tools(Facade(), ToolResultBudget())
     assert {item.name for item in tools} == {
         "get_recommendations",
@@ -115,6 +142,24 @@ def test_all_workflow_tool_contracts_are_present() -> None:
         "list_sources",
         "connect_source",
     }
+    results = {
+        tool.name: await cast("ToolCall", tool.function)(*arguments)
+        for tool, arguments in zip(
+            tools,
+            (
+                (50,),
+                ("demo", "query", 50),
+                ("ref",),
+                ("ref", "liked"),
+                (),
+                ("claim", "set", "x"),
+                (),
+                ("demo",),
+            ),
+            strict=True,
+        )
+    }
+    assert all(isinstance(value, str) for value in results.values())
 
 
 async def test_tool_results_are_bounded_and_injection_text_is_sanitized() -> None:

@@ -5,7 +5,6 @@
 | Section | Fields |
 |---|---|
 | `[model]` | `provider`, `model_name`, optional opaque `credential_ref` |
-| `[access]` | `method = "anonymous" | "manual"`, optional opaque `credential_ref` |
 | `[content]` | `enabled` provider IDs |
 | `[recommendation]` | `pool_target_count` (1..10000) |
 | `[host]` | `api_host`, `api_port` |

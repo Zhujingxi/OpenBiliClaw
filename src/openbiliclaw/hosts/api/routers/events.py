@@ -48,7 +48,7 @@ async def stream(
 def _websocket_authorized(websocket: WebSocket, dependencies: HostDependencies) -> bool:
     policy = dependencies.security
     origin = websocket.headers.get("origin")
-    if origin is not None and origin not in policy.allowed_origins:
+    if origin is not None and not policy.origin_allowed(origin):
         return False
     if policy.bearer_token is None:
         return True

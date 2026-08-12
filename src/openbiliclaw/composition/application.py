@@ -6,8 +6,9 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from fastapi import FastAPI
-    from typer import Typer
 
     from openbiliclaw.assistant.service import AssistantService
     from openbiliclaw.core.config import AppSettings
@@ -58,7 +59,6 @@ class ApplicationServices:
 class ApplicationHosts:
     dependencies: HostDependencies | None = None
     api: FastAPI | None = None
-    cli: Typer | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,3 +81,22 @@ class Application:
 
     async def ready(self) -> bool:
         return bool(self.lifecycle.active_component_ids)
+
+    def with_api_frontend(self, frontend_dir: Path) -> Application:
+        """Return this graph with the same dependencies and an explicit static host."""
+        from openbiliclaw.hosts.api.app import create_app
+
+        if self.hosts.dependencies is None:
+            raise RuntimeError("composition did not construct host dependencies")
+        return Application(
+            settings=self.settings,
+            lifecycle=self.lifecycle,
+            services=self.services,
+            resources=self.resources,
+            repositories=self.repositories,
+            providers=self.providers,
+            hosts=ApplicationHosts(
+                dependencies=self.hosts.dependencies,
+                api=create_app(self.hosts.dependencies, frontend_dir=frontend_dir),
+            ),
+        )

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "OpenBiliClaw",
-  "description": "跨平台内容发现 AI Agent — 行为采集、画像与智能推荐",
+  "description": "跨平台内容发现 AI Agent — 画像、推荐、反馈与聊天",
   "browser_specific_settings": {
     "gecko": {
       "id": "openbiliclaw-firefox@whiteguo233.github.io",

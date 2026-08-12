@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 from pydantic import TypeAdapter
-from pydantic_ai import Agent
+from pydantic_ai import Agent, Tool
 from pydantic_ai.output import ToolOutput
 
 from openbiliclaw.ai.runtime.budgets import RunPolicy, RunPriority
@@ -64,10 +66,14 @@ def _validate_output(
     return _OUTPUT_ADAPTER.validate_python(payload)
 
 
-def build_assistant_agent() -> Agent[AssistantDependencies, AssistantOutput]:
+def build_assistant_agent(
+    tools: tuple[Tool[None], ...] = (),
+) -> Agent[AssistantDependencies, AssistantOutput]:
+    """Build the bounded agent with composition-selected workflow tools."""
     return Agent(
         deps_type=AssistantDependencies,
         output_type=ToolOutput(_validate_output, name="assistant_output"),
         instructions=ASSISTANT_INSTRUCTIONS,
+        tools=cast("tuple[Tool[AssistantDependencies], ...]", tools),
         output_retries=0,
     )

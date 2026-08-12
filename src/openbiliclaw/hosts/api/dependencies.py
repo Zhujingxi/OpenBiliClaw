@@ -49,7 +49,8 @@ class HostSecurityPolicy(StrictBaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     bind_host: str = "127.0.0.1"
     bearer_token: str | None = Field(default=None, repr=False, exclude=True)
-    allowed_origins: tuple[str, ...] = ("http://localhost", "http://127.0.0.1")
+    allowed_origins: tuple[str, ...] = ("http://localhost:8420", "http://127.0.0.1:8420")
+    allowed_origin_schemes: tuple[str, ...] = ("chrome-extension://", "moz-extension://")
     max_body_bytes: int = Field(default=1_048_576, ge=1024, le=10_485_760)
     request_timeout_seconds: float = Field(default=30, gt=0, le=120)
     requests_per_minute: int = Field(default=120, ge=1, le=10_000)
@@ -66,6 +67,9 @@ class HostSecurityPolicy(StrictBaseModel):
             if value != "localhost":
                 raise ValueError("bind_host must be an IP address or localhost") from None
         return value
+
+    def origin_allowed(self, origin: str) -> bool:
+        return origin in self.allowed_origins or origin.startswith(self.allowed_origin_schemes)
 
     @model_validator(mode="after")
     def auth_required_off_loopback(self) -> HostSecurityPolicy:

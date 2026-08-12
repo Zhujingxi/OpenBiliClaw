@@ -18,9 +18,10 @@ from openbiliclaw.access.methods import AccessMethodRegistry
 from openbiliclaw.access.service import AccessService
 from openbiliclaw.ai.providers.models import ModelFactory, ModelInstanceConfig, ProviderKind
 from openbiliclaw.ai.runtime.capabilities import ModelCapabilities
-from openbiliclaw.ai.runtime.execution import AIRuntime
+from openbiliclaw.ai.runtime.execution import AgentRunRequest, AIRuntime
 from openbiliclaw.ai.runtime.routes import ConfiguredModel, ModelRoute, RouteTable
 from openbiliclaw.application.edit_profile import EditProfile
+from openbiliclaw.application.idempotency import SqliteIdempotencyJournal
 from openbiliclaw.application.pending_actions import SqlitePendingActionRepository
 from openbiliclaw.application.record_feedback import RecordFeedback
 from openbiliclaw.application.refresh_recommendations import RefreshRecommendations
@@ -37,9 +38,14 @@ from openbiliclaw.composition.application import (
     ApplicationServices,
     InfrastructureResources,
 )
-from openbiliclaw.composition.assistant import AssistantController
+from openbiliclaw.composition.assistant import AssistantController, assistant_workflow_tools
+from openbiliclaw.composition.events import ObservationEventSource
 from openbiliclaw.composition.facade import CompositionFacade
-from openbiliclaw.composition.jobs import RecommendationPipeline, build_recommendation_jobs
+from openbiliclaw.composition.jobs import (
+    RecommendationPipeline,
+    build_recommendation_jobs,
+    build_understanding_job,
+)
 from openbiliclaw.composition.lifecycle import ComponentStage, LifecyclePlan, RuntimeComponent
 from openbiliclaw.composition.providers import ProviderGraph, build_providers
 from openbiliclaw.composition.repositories import build_repositories
@@ -59,7 +65,8 @@ from openbiliclaw.infrastructure.telemetry import TelemetrySink
 from openbiliclaw.observations.service import ObservationIngressService
 from openbiliclaw.observations.validation import ObservationValidator
 from openbiliclaw.recommendation.service import RecommendationService
-from openbiliclaw.understanding.service import UnderstandingService
+from openbiliclaw.understanding.analyzers.contracts import PREFERENCE_ANALYZER
+from openbiliclaw.understanding.service import AnalyzerContract, AnalyzerInput, UnderstandingService
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -67,6 +74,7 @@ if TYPE_CHECKING:
     from openbiliclaw.access.methods import AccessMethod
     from openbiliclaw.core.jobs import JobDecision, JobSpec
     from openbiliclaw.observations.events import ObservationsCommitted
+    from openbiliclaw.understanding.proposals import ProposalBatch
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +131,33 @@ class _HttpLifecycle:
 
     async def ready(self) -> bool:
         return self._running
+
+
+class _RuntimeAnalyzer:
+    def __init__(self, runtime: AIRuntime) -> None:
+        self._runtime = runtime
+        self.contract = AnalyzerContract(
+            agent_id=PREFERENCE_ANALYZER.agent_id,
+            requirements=PREFERENCE_ANALYZER.requirements,
+            policy=PREFERENCE_ANALYZER.policy,
+            context_version=PREFERENCE_ANALYZER.context_version,
+        )
+
+    async def analyze(self, data: AnalyzerInput) -> ProposalBatch:
+        result = await self._runtime.run(
+            AgentRunRequest(
+                agent_id=self.contract.agent_id,
+                agent=PREFERENCE_ANALYZER.agent,
+                deps=None,
+                user_input=data.model_dump_json(),
+                history=(),
+                context=(),
+                requirements=self.contract.requirements,
+                policy=self.contract.policy,
+                workflow="understanding.preference",
+            )
+        )
+        return result.output
 
 
 class _RefreshSupervisor:
@@ -187,12 +222,6 @@ def build_application(
         events,
         ObservationValidator(),
     )
-    understanding = UnderstandingService(
-        repositories.observations,
-        repositories.understanding,
-        analyzers=(),
-        clock=lambda: datetime.now(UTC),
-    )
     recommendations = RecommendationService(repositories.recommendations)
     access_methods: list[AccessMethod] = [
         AnonymousAccessMethod(
@@ -204,7 +233,7 @@ def build_application(
         access_methods.append(ManualAccessMethod(vault, providers.manual_specs))
     access_registry = AccessMethodRegistry(tuple(access_methods))
     access = AccessService(AccessBroker(access_registry), access_registry, telemetry=telemetry)
-    assistant = None
+    assistant_runtime = None
     if settings.model.model_name:
         configured = ModelFactory(vault).build(
             ModelInstanceConfig(
@@ -219,26 +248,32 @@ def build_application(
                 owner="assistant",
             )
         )
-        runtime = AIRuntime(
+        routed_model = ConfiguredModel(
+            instance_id=configured.instance_id,
+            provider=configured.provider,
+            model=configured.model,
+            capabilities=configured.declared_capabilities,
+        )
+        assistant_runtime = AIRuntime(
             RouteTable(
                 (
+                    ModelRoute(ASSISTANT_AGENT_ID, ASSISTANT_REQUIREMENTS, (routed_model,)),
                     ModelRoute(
-                        ASSISTANT_AGENT_ID,
-                        ASSISTANT_REQUIREMENTS,
-                        (
-                            ConfiguredModel(
-                                instance_id=configured.instance_id,
-                                provider=configured.provider,
-                                model=configured.model,
-                                capabilities=configured.declared_capabilities,
-                            ),
-                        ),
+                        PREFERENCE_ANALYZER.agent_id,
+                        PREFERENCE_ANALYZER.requirements,
+                        (routed_model,),
                     ),
                 )
             ),
-            ResourceBudget("assistant", settings.runtime.default_resource_limit),
+            ResourceBudget("model", settings.runtime.default_resource_limit),
         )
-        assistant = AssistantService(runtime, build_assistant_agent())
+    analyzers = (_RuntimeAnalyzer(assistant_runtime),) if assistant_runtime is not None else ()
+    understanding = UnderstandingService(
+        repositories.observations,
+        repositories.understanding,
+        analyzers=analyzers,
+        clock=lambda: datetime.now(UTC),
+    )
     pipeline = RecommendationPipeline(
         providers,
         access,
@@ -247,6 +282,8 @@ def build_application(
         target_count=settings.recommendation.pool_target_count,
     )
     jobs = build_recommendation_jobs(pipeline)
+    if assistant_runtime is not None:
+        jobs = (*jobs, build_understanding_job(understanding))
     supervisor = RuntimeSupervisor(
         {
             "network": ResourceBudget("network", settings.runtime.default_resource_limit),
@@ -256,6 +293,7 @@ def build_application(
         shutdown_grace_seconds=settings.runtime.default_timeout_seconds,
     )
     resources = InfrastructureResources(database, vault, http, events, telemetry)
+    host_events = ObservationEventSource(events)
     lifecycle = LifecyclePlan(
         (
             RuntimeComponent(
@@ -272,6 +310,11 @@ def build_application(
                 "infrastructure.http",
                 ComponentStage.INFRASTRUCTURE,
                 _HttpLifecycle(http),
+            ),
+            RuntimeComponent(
+                "host.events",
+                ComponentStage.SERVICE,
+                host_events,
             ),
             RuntimeComponent(
                 "content.providers",
@@ -295,6 +338,7 @@ def build_application(
         understanding=understanding,
         recommendations=recommendations,
         health=lifecycle,
+        idempotency=SqliteIdempotencyJournal(database),
         refresh=RefreshRecommendations(_RefreshSupervisor(supervisor, jobs)),
         feedback=RecordFeedback(
             FeedbackUnitOfWork(repositories.recommendations, repositories.observations),
@@ -306,14 +350,25 @@ def build_application(
         ),
         pending_actions=SqlitePendingActionRepository(database),
     )
-    if assistant is not None:
+    assistant = None
+    if assistant_runtime is not None:
+        assistant = AssistantService(
+            assistant_runtime, build_assistant_agent(assistant_workflow_tools(facade))
+        )
         controller = AssistantController(
             assistant, repositories.conversations, understanding, facade
         )
         facade.set_assistant(controller)
     dependencies = HostDependencies(
         facade=facade,
-        security=HostSecurityPolicy(bind_host=settings.host.api_host),
+        security=HostSecurityPolicy(
+            bind_host=settings.host.api_host,
+            allowed_origins=(
+                f"http://localhost:{settings.host.api_port}",
+                f"http://127.0.0.1:{settings.host.api_port}",
+            ),
+        ),
+        events=host_events,
         lifespan=lifecycle,
     )
     return Application(
@@ -327,6 +382,7 @@ def build_application(
             observations=observations,
             understanding=understanding,
             recommendations=recommendations,
+            assistant=assistant,
         ),
         hosts=ApplicationHosts(dependencies=dependencies, api=create_app(dependencies)),
     )

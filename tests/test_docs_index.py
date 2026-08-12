@@ -19,12 +19,12 @@ def test_docs_homepage_mentions_reddit_bangumi_and_v2ex_sources() -> None:
     assert "V2EX 推荐" in html
     assert "sourceV2exTitle" in html
     assert "sourceV2exText" in html
-    assert "知乎 / Reddit / V2EX 登录态任务桥" in html
+    assert "不采集浏览行为、不读取网站 Cookie，也不执行登录态任务" in html
     assert "Zhihu, Reddit, Bangumi, V2EX, and Web sources" in html
-    # Bangumi host permission IS requested now, for identity-only recognition.
-    # The homepage must describe it truthfully: no cookies, no browsing capture.
-    assert "在 `bgm.tv` / `bangumi.tv` 上它仅做身份识别" in html
-    assert "不读 Cookie、不采集浏览行为" in html
+    # The reduced extension is a backend client only: no login bridge or capture.
+    assert "行为采集" not in html
+    assert "登录态任务桥" not in html
+    assert "/m/" not in html
     assert f'"softwareVersion": "{project_version}"' in html
 
 

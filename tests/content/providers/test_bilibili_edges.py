@@ -229,6 +229,36 @@ async def test_verifier_network_and_not_logged_in() -> None:
     result = await verifier(_credential(Permission.READ_PRIVATE), payload)
     assert result.sanitized_failure is VerificationFailure.EXPIRED
 
+    invalid_cookie = memoryview(json.dumps({"cookie": "x" * 20}).encode())
+    result = await verifier(_credential(Permission.READ_PRIVATE), invalid_cookie)
+    assert result.sanitized_failure is VerificationFailure.INVALID_CREDENTIAL
+
+    class AccessDeniedTransport:
+        async def __call__(
+            self,
+            method: str,
+            path: str,
+            query: str,
+            cookie: str | None,
+            body: bytes,
+        ) -> bytes:
+            del method, path, query, cookie, body
+            raise ContentIntegrationError(IntegrationErrorCode.ACCESS_DENIED, "denied")
+
+    result = await BilibiliCredentialVerifier(BilibiliClient(AccessDeniedTransport(), _resolve))(
+        _credential(Permission.READ_PRIVATE), payload
+    )
+    assert result.sanitized_failure is VerificationFailure.EXPIRED
+
+    successful = json.dumps(
+        {"code": 0, "message": "0", "data": {"is_login": True, "mid": "42", "name": "safe"}}
+    ).encode()
+    result = await BilibiliCredentialVerifier(
+        BilibiliClient(Routes({"/x/web-interface/nav": successful}), _resolve)
+    )(_credential(Permission.READ_PRIVATE, Permission.WRITE), payload)
+    assert result.safe_account_identity == "safe"
+    assert result.granted_permissions == frozenset({Permission.READ_PRIVATE, Permission.WRITE})
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", [500, 429])
