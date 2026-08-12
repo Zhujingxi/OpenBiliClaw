@@ -5109,6 +5109,21 @@ def create_app(
             # otherwise silently skip the purge, see field report 2026-08-12).
             return int(ctx.database.mark_pool_purged_by_reinit() or 0)
 
+        reinit_backup_dir: str | None = None
+        if force:
+            # Snapshot DB + memory layers before the rebuild so nothing the
+            # re-init replaces or deletes (soul profile, and with
+            # reset_cognition the awareness/insight layers) is unrecoverable.
+            try:
+                from openbiliclaw.cli import _create_reinit_backup
+
+                backup_path = _create_reinit_backup()
+                if backup_path is not None:
+                    reinit_backup_dir = str(backup_path)
+                    logger.info("re-init backup created at %s", reinit_backup_dir)
+            except Exception:
+                logger.warning("re-init backup failed in wrapper", exc_info=True)
+
         async def _api_discover_backfill(
             profile: Any,
             *,

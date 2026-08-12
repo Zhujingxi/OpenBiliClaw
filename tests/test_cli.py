@@ -260,7 +260,47 @@ def test_init_command_exposes_force_option(runner: CliRunner) -> None:
     options = _registered_option_names("init")
     assert "--force" in options
     assert "--reset-cognition" in options
+    assert "--no-backup" in options
     assert "重新初始化" in result.output
+
+
+def test_create_reinit_backup_snapshots_db_and_memory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Force re-init backup must capture the DB + memory layers, skip .lock."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    db_path = data_dir / "openbiliclaw.db"
+    db_path.write_bytes(b"fake-sqlite-bytes")
+    mem = data_dir / "memory"
+    mem.mkdir()
+    (mem / "soul.json").write_text('{"personality_portrait":"旧画像"}', encoding="utf-8")
+    (mem / "awareness.json").write_text('{"notes":[]}', encoding="utf-8")
+    (mem / "soul_profile.json.lock").write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(cli_module, "_runtime_database_path", lambda: db_path)
+    monkeypatch.setattr(cli_module, "_runtime_backup_dir", lambda: data_dir / "backups")
+
+    backup_dir = cli_module._create_reinit_backup()
+    assert backup_dir is not None
+    assert backup_dir.name.startswith("reinit-")
+    db_copies = list(backup_dir.glob("*.db"))
+    assert len(db_copies) == 1
+    assert db_copies[0].read_bytes() == b"fake-sqlite-bytes"
+    mem_backup = backup_dir / "memory"
+    assert (mem_backup / "soul.json").exists()
+    assert (mem_backup / "awareness.json").exists()
+    assert not (mem_backup / "soul_profile.json.lock").exists()
+
+
+def test_create_reinit_backup_returns_none_without_database(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No DB yet → no backup (fresh install), returns None quietly."""
+    db_path = tmp_path / "nope.db"
+    monkeypatch.setattr(cli_module, "_runtime_database_path", lambda: db_path)
+    monkeypatch.setattr(cli_module, "_runtime_backup_dir", lambda: tmp_path / "backups")
+    assert cli_module._create_reinit_backup() is None
 
 
 def test_ledger_empty_shows_no_data(
@@ -3748,6 +3788,15 @@ def test_init_guides_missing_runtime_config_interactively(
         lambda: FakeBilibiliClient(),
         raising=False,
     )
+    # Hermetic: the ambient data dir may hold a real profile (e.g. after a
+    # local E2E run), which would otherwise flip init into the re-init
+    # confirm branch and consume an extra prompt.
+    monkeypatch.setattr(
+        cli_module,
+        "_build_soul_engine",
+        lambda: SimpleNamespace(is_profile_ready=lambda: False),
+        raising=False,
+    )
     monkeypatch.setattr(cli_module, "_initialize_logging", lambda log_level_override=None: None)
     monkeypatch.setattr(
         cli_module,
@@ -3851,6 +3900,15 @@ def test_init_guides_missing_auth_interactively(
         cli_module,
         "_build_bilibili_client",
         lambda: FakeBilibiliClient(),
+        raising=False,
+    )
+    # Hermetic: the ambient data dir may hold a real profile (e.g. after a
+    # local E2E run), which would otherwise flip init into the re-init
+    # confirm branch and consume an extra prompt.
+    monkeypatch.setattr(
+        cli_module,
+        "_build_soul_engine",
+        lambda: SimpleNamespace(is_profile_ready=lambda: False),
         raising=False,
     )
     monkeypatch.setattr(cli_module, "_initialize_logging", lambda log_level_override=None: None)

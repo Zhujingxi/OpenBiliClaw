@@ -63,3 +63,6 @@ def test_desktop_reinit_offers_cognition_reset_option() -> None:
     assert "const resetCognition = " in app_js
     assert "payload.reset_cognition = true" in app_js
     assert "清空旧认知观察" in app_js
+    # The confirm dialog advertises the automatic pre-re-init backup.
+    assert "自动创建备份" in app_js
+    assert "data/backups/" in app_js

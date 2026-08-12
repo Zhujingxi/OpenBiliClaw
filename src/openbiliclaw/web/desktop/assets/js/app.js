@@ -2838,8 +2838,8 @@
       }
       const resetCognition = $("#reinitResetCognition")?.checked === true;
       const confirmed = window.confirm(
-        "将重新拉取所选平台的数据、重建完整画像并补足首轮发现池。现有推荐池会按新画像清空重建；现有事件、收藏、对话历史与手动编辑保留。并消耗较多 AI 调用。继续吗？" +
-        (resetCognition ? "\n\n已勾选「同时清空旧认知观察与洞察」：旧的 LLM 观察笔记与洞察将被删除，本轮重新生成。" : "")
+        "将重新拉取所选平台的数据、重建完整画像并补足首轮发现池。现有推荐池会按新画像清空重建；现有事件、收藏、对话历史与手动编辑保留。重新初始化前会自动创建备份（数据库 + 画像/认知层）到 data/backups/。并消耗较多 AI 调用。继续吗？" +
+        (resetCognition ? "\n\n已勾选「同时清空旧认知观察与洞察」：旧的 LLM 观察笔记与洞察将被删除（已包含在自动备份中），本轮重新生成。" : "")
       );
       if (!confirmed) return;
       const btn = $("#reinitBtn");

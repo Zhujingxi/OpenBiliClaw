@@ -85,7 +85,8 @@ wrapper 的任务句柄另有 done callback 审计终态；若任务已经退出
 - **旧推荐池自动清空（force 专属）**：force 重初始化在 stage 4 开始前把 `content_cache` 中所有活跃行（`fresh / shown / suppressed`）标记为 `pool_status='purged_by_reinit'`（沿用 `purged_by_dislike` 先例：行保留用于审计 / 去重，但退出可用池门禁与 serve / recall）。否则旧画像打分的推荐会继续被推荐，且 backfill 目标只有 15 条（`_INIT_POOL_TARGET_COUNT`），旧池几乎总是 ≥15 → stage 4 直接跳过，重初始化对推荐完全无效。清空后 stage 4 按新画像重新发现、评估并生成首轮推荐。
 - **认知层可选清空（`reset_cognition`）**：换账号或大改兴趣时，建议同时清空长期 awareness / insight 层，避免旧账号的 LLM 观察笔记混入新画像构建上下文。CLI 用 `init --force --reset-cognition`，API body 加 `reset_cognition:true`，桌面 Web / 扩展设置页提供「同时清空旧认知观察与洞察」复选框；不清空时旧观察继续作为画像构建上下文（普通画像刷新更合适）。清理发生在 stage 2 之前，本轮分析新生成的草稿仍会落库成为新基线。
 - **扩展平台 bootstrap 6 小时复用窗**：xhs / dy / yt / zhihu / reddit / linuxdo 的 bootstrap 采集任务在 6 小时内复用近期结果（防重复入库），因此紧接上次 init 的 force 重初始化，这些平台可能复用近期任务结果而非重新采集；B 站 / X 是服务端直拉，不受复用窗影响。换账号场景下账号 identity key 变化通常能避免误复用，但期望"立刻重新采集全部平台"时应留意该窗口（`OPENBILICLAW_*_BOOTSTRAP_DEDUPE_HOURS=0` 可临时关闭复用）。
-- **CLI**：`openbiliclaw init --force` 跳过已初始化二次确认，标题改为「重新初始化 OpenBiliClaw」；交互终端默认（无 `--force`）在检测到画像已存在时先 y/N 确认（默认 No，选 No 直接退出不改数据）；非交互终端保持原有直接重跑行为（不传 `--force` 时也不清池）。只想基于已有事件重跑画像可用 `rebuild-profile`（不重新拉数据、不清池）。
+- **自动备份（force 专属）**：force 重初始化开始前自动创建快照到 `data/backups/reinit-<时间戳>/`——SQLite 冷备（含 WAL）+ `data/memory/` 全部 JSON 层（soul / awareness / insight / preference / overrides / speculative…，`.lock` 跳过），这样重建覆盖的画像、以及 `reset_cognition` 删除的认知层都是可恢复的。CLI 用 `--no-backup` 跳过；API 路径默认备份（备份路径记录在 daemon 日志）。备份失败仅 WARNING、不阻断重初始化。
+- **CLI**：`openbiliclaw init --force` 跳过已初始化二次确认，标题改为「重新初始化 OpenBiliClaw」；交互终端默认（无 `--force`）在检测到画像已存在时先 y/N 确认（默认 No，选 No 直接退出不改数据）；非交互终端保持原有直接重跑行为（不传 `--force` 时也不清池、不备份）。只想基于已有事件重跑画像可用 `rebuild-profile`（不重新拉数据、不清池、不备份）。
 - **桌面 Web / 扩展 popup**：设置页「重新初始化 / 重建画像」按钮先 `window.confirm` 二次确认（文案说明旧推荐池会清空重建），确认后调 `POST /api/init {force:true}`（不传 `sources`，使用全部已开启平台），成功后回到推荐 tab 复用既有进度面板展示四阶段；进行中禁用按钮。
 
 ## init 期间写者门控

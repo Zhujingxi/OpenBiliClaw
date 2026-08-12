@@ -775,6 +775,7 @@ X (Twitter) 与其它平台不同：init 阶段**没有 bootstrap 导入任务**
 - `--bilibili-favorite-limit N` / `--bilibili-follow-limit N`：覆盖 B 站收藏 / 关注初始化信号上限，默认各 `300`；`0` 表示跳过对应信号。
 - `--force`：已初始化时仍强制重新初始化。默认已初始化时，交互终端会先二次确认（`检测到系统已初始化` + y/N，默认 No，选 No 直接退出、不做任何改动）；`--force` 跳过确认，并按「重新初始化」语义执行——重新拉取所选平台数据、重建完整画像并补足首轮发现池，**现有事件、收藏与对话历史全部保留**，仅覆盖画像与推荐池（**旧推荐池会被清空并按新画像重建**）。非交互（脚本化）终端不弹确认，保持原有「直接重跑」行为（不传 `--force` 时也不清池）；只想基于已有事件重跑画像可优先用 `rebuild-profile`（不重新拉数据，更省）。
 - `--reset-cognition`：重新初始化时同时清空长期 awareness / insight 认知层（换账号或大改兴趣时建议），仅配合 `--force` 有意义；不清空时旧 LLM 观察继续作为新画像的构建上下文。
+- `--no-backup`：force 重初始化前跳过自动备份。默认 `init --force` 会先把数据库与 `data/memory/` 全部画像/认知层快照到 `data/backups/reinit-<时间戳>/`，再开始重建（覆盖的画像、`--reset-cognition` 删除的认知层因此可恢复）。
 - `OPENBILICLAW_NO_BILIBILI=1` / `OPENBILICLAW_NO_XHS=1` / `OPENBILICLAW_NO_DOUYIN=1` / `OPENBILICLAW_NO_YOUTUBE=1` / `OPENBILICLAW_NO_X=1` / `OPENBILICLAW_NO_ZHIHU=1` / `OPENBILICLAW_NO_REDDIT=1` / `OPENBILICLAW_NO_LINUXDO=1` / `OPENBILICLAW_NO_BANGUMI=1`：永久跳过对应源；作为持久禁用开关，它优先于同一来源的 `--yes-*`。
 - `OPENBILICLAW_XHS_BOOTSTRAP_DEDUPE_HOURS`：小红书 `bootstrap_profile` 近期任务复用窗口，默认 `6` 小时；设为 `0` 可关闭复用。
 - `OPENBILICLAW_DY_BOOTSTRAP_DEDUPE_HOURS` / `OPENBILICLAW_YT_BOOTSTRAP_DEDUPE_HOURS`：抖音 / YouTube `bootstrap_profile` 近期任务复用窗口，默认 `6` 小时；抖音已 `degraded` 的 completed 结果不参与复用；设为 `0` 可关闭复用。

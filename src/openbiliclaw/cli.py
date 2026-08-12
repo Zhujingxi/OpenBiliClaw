@@ -1238,6 +1238,51 @@ def _maybe_create_runtime_database_backup() -> None:
     maybe_create_scheduled_backup(db_path, _runtime_backup_dir())
 
 
+def _create_reinit_backup() -> Path | None:
+    """Snapshot the DB + memory layers before a forced re-init.
+
+    Force re-init overwrites the soul profile, retires the recommendation
+    pool, and — with ``reset_cognition`` — permanently clears the long-term
+    awareness / insight layers. A point-in-time backup is therefore taken
+    before the pipeline runs, so the user can restore what a rebuild would
+    otherwise replace or delete. It captures the cold SQLite copy (same
+    mechanism as the scheduled backup) plus every ``data/memory`` JSON layer
+    (soul / awareness / insight / preference / overrides / speculative …);
+    ``.lock`` files are skipped.
+
+    Best-effort: a failure logs WARNING and returns ``None`` — the re-init
+    still proceeds (the caller decides how prominently to surface this).
+    """
+    import shutil
+    from datetime import datetime
+
+    try:
+        db_path = _runtime_database_path()
+        if not db_path.exists():
+            return None
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        backup_root = _runtime_backup_dir() / f"reinit-{stamp}"
+        backup_root.mkdir(parents=True, exist_ok=True)
+
+        from openbiliclaw.storage.maintenance import create_database_backup
+
+        create_database_backup(db_path, backup_root, timestamp=stamp)
+
+        memory_dir = db_path.parent / "memory"
+        if memory_dir.exists():
+            memory_backup = backup_root / "memory"
+            memory_backup.mkdir(parents=True, exist_ok=True)
+            for src in memory_dir.glob("*"):
+                if src.is_file() and not src.name.endswith(".lock"):
+                    shutil.copy2(src, memory_backup / src.name)
+        return backup_root
+    except Exception:
+        import logging
+
+        logging.getLogger("openbiliclaw.cli").warning("re-init backup failed", exc_info=True)
+        return None
+
+
 def _ensure_runtime_database_healthy() -> None:
     from openbiliclaw.storage.maintenance import check_database_integrity
 
@@ -9245,6 +9290,11 @@ def init(
             "仅配合 --force 有意义。"
         ),
     ),
+    no_backup: bool = typer.Option(
+        False,
+        "--no-backup",
+        help="force 重初始化前不创建备份（默认会自动备份数据库与画像/认知层到 data/backups/）。",
+    ),
 ) -> None:
     """初始化或重新初始化：拉取历史、生成画像并补足首轮发现池.
 
@@ -9285,7 +9335,9 @@ def init(
             "  重新初始化会重新拉取所选平台数据、重建完整画像并补足首轮发现池；"
             "现有事件、收藏与对话历史都会保留，但会消耗较多 AI 调用。"
         )
-        if not typer.confirm("确认继续重新初始化？", default=False):
+        if not typer.confirm(
+            "确认继续重新初始化？（开始前会自动创建备份到 data/backups/）", default=False
+        ):
             console.print("[dim]已取消，未做任何改动。[/dim]")
             raise typer.Exit(code=0)
 
@@ -9304,6 +9356,10 @@ def init(
         if reset_cognition:
             console.print(
                 "[dim]  --reset-cognition：将清空旧认知观察与洞察层，本轮分析重新生成。[/dim]"
+            )
+        if not no_backup:
+            console.print(
+                "[dim]  重初始化前将自动创建备份（数据库 + 画像/认知层）到 data/backups/。[/dim]"
             )
     else:
         _print_page_title("初始化 OpenBiliClaw", "首次运行引导")
@@ -9633,6 +9689,17 @@ def init(
     # pipeline run_guided_init so the API can reuse them without nesting
     # event loops. The CLI injects the one-shot discovery backfill and
     # renders the summary below from the returned InitResult.
+    # Force re-init snapshots the DB + memory layers first so a rebuild can
+    # never silently destroy what the user cannot regenerate (soul profile,
+    # and with --reset-cognition the awareness/insight layers).
+    if force and not no_backup:
+        reinit_backup_path = _create_reinit_backup()
+        if reinit_backup_path is not None:
+            console.print(
+                f"  [green]已创建重初始化前备份：[/green][cyan]{reinit_backup_path}[/cyan]"
+            )
+        else:
+            console.print("  [yellow]备份创建失败（详见日志），重初始化仍将继续。[/yellow]")
     try:
         result = asyncio.run(
             run_guided_init(
