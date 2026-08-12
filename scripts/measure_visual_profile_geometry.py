@@ -93,14 +93,20 @@ async def _run(k: int, drop_margin: float) -> dict[str, Any]:
         for j, n in enumerate(neg_c):
             sim = cosine_similarity(p, n)
             pairs.append({"pos": i, "neg": j, "cosine": round(sim, 4)})
-    contested_threshold = 0.45  # centroid-vs-centroid; live pairs split 0.674/0.576 vs 0.377-0.219, gap at ~0.45
+    contested_threshold = (
+        0.45  # centroid-vs-centroid; live pairs split 0.674/0.576 vs 0.377-0.219, gap at ~0.45
+    )
     result["contested_pairs"] = pairs
     result["contested_count"] = sum(1 for pr in pairs if pr["cosine"] >= contested_threshold)
     result["contested_threshold"] = contested_threshold
 
     # 2. CROSS-CLEAN — feedback covers in enemy territory.
     lookup = getattr(engine._embedding_service, "lookup_cached_image", None)
-    rows = db.get_feedback_covers(limit=500) if callable(getattr(db, "get_feedback_covers", None)) else []
+    rows = (
+        db.get_feedback_covers(limit=500)
+        if callable(getattr(db, "get_feedback_covers", None))
+        else []
+    )
     pos_vecs: list[dict[str, Any]] = []  # {vec, bvid, cover_url}
     neg_vecs: list[dict[str, Any]] = []
     if callable(lookup):
@@ -128,11 +134,16 @@ async def _run(k: int, drop_margin: float) -> dict[str, Any]:
             nn_opp = _knn_avg(g["vec"], [o["vec"] for o in opp], k)
             # Drop only on a CLEAR margin: enemy territory beats own by drop_margin.
             if nn_opp > nn_own + drop_margin:
-                dropped.append({
-                    "bvid": g["bvid"], "cover_url": g["cover_url"], "ftype": g["ftype"],
-                    "nn_own": round(nn_own, 4), "nn_opp": round(nn_opp, 4),
-                    "diff": round(nn_opp - nn_own, 4),
-                })
+                dropped.append(
+                    {
+                        "bvid": g["bvid"],
+                        "cover_url": g["cover_url"],
+                        "ftype": g["ftype"],
+                        "nn_own": round(nn_own, 4),
+                        "nn_opp": round(nn_opp, 4),
+                        "diff": round(nn_opp - nn_own, 4),
+                    }
+                )
             else:
                 kept += 1
         return dropped, kept
@@ -140,8 +151,12 @@ async def _run(k: int, drop_margin: float) -> dict[str, Any]:
     pos_dropped, pos_kept = _clean(pos_vecs, pos_vecs, neg_vecs, "pos")
     neg_dropped, neg_kept = _clean(neg_vecs, neg_vecs, pos_vecs, "neg")
     result["cross_clean"] = {
-        "pos_total": len(pos_vecs), "pos_kept": pos_kept, "pos_dropped": pos_dropped,
-        "neg_total": len(neg_vecs), "neg_kept": neg_kept, "neg_dropped": neg_dropped,
+        "pos_total": len(pos_vecs),
+        "pos_kept": pos_kept,
+        "pos_dropped": pos_dropped,
+        "neg_total": len(neg_vecs),
+        "neg_kept": neg_kept,
+        "neg_dropped": neg_dropped,
     }
 
     # 3. MARGIN — s_pos / s_neg / net distribution over pool candidate covers.
@@ -183,11 +198,15 @@ async def _run(k: int, drop_margin: float) -> dict[str, Any]:
 def _print(r: dict[str, Any]) -> None:
     lines: list[str] = []
     lines.append("=" * 70)
-    lines.append(f"centroids: pos={r['centroids']['pos']} neg={r['centroids']['neg']}  "
-                 f"(k={r['k']}, drop_margin={r['drop_margin']})")
+    lines.append(
+        f"centroids: pos={r['centroids']['pos']} neg={r['centroids']['neg']}  "
+        f"(k={r['k']}, drop_margin={r['drop_margin']})"
+    )
     lines.append("")
-    lines.append("1. CONTESTED (pos x neg centroid pairwise cosine, threshold "
-                 f">= {r['contested_threshold']}):")
+    lines.append(
+        "1. CONTESTED (pos x neg centroid pairwise cosine, threshold "
+        f">= {r['contested_threshold']}):"
+    )
     if r["centroids"]["pos"] and r["centroids"]["neg"]:
         for pr in r["contested_pairs"]:
             flag = "  <-- CONTESTED" if pr["cosine"] >= r["contested_threshold"] else ""
@@ -198,16 +217,22 @@ def _print(r: dict[str, Any]) -> None:
     lines.append("")
     lines.append("2. CROSS-CLEAN (feedback covers in enemy territory):")
     cc = r["cross_clean"]
-    lines.append(f"   pos: {cc['pos_kept']} kept / {cc['pos_total']} total, "
-                 f"{len(cc['pos_dropped'])} dropped")
+    lines.append(
+        f"   pos: {cc['pos_kept']} kept / {cc['pos_total']} total, {len(cc['pos_dropped'])} dropped"
+    )
     for d in cc["pos_dropped"]:
-        lines.append(f"     DROP pos {d['bvid']}  nn_own={d['nn_own']:.3f} nn_opp={d['nn_opp']:.3f} "
-                     f"diff={d['diff']:.3f}  {d['cover_url'][:60]}")
-    lines.append(f"   neg: {cc['neg_kept']} kept / {cc['neg_total']} total, "
-                 f"{len(cc['neg_dropped'])} dropped")
+        lines.append(
+            f"     DROP pos {d['bvid']}  nn_own={d['nn_own']:.3f} nn_opp={d['nn_opp']:.3f} "
+            f"diff={d['diff']:.3f}  {d['cover_url'][:60]}"
+        )
+    lines.append(
+        f"   neg: {cc['neg_kept']} kept / {cc['neg_total']} total, {len(cc['neg_dropped'])} dropped"
+    )
     for d in cc["neg_dropped"]:
-        lines.append(f"     DROP neg {d['bvid']}  nn_own={d['nn_own']:.3f} nn_opp={d['nn_opp']:.3f} "
-                     f"diff={d['diff']:.3f}  {d['cover_url'][:60]}")
+        lines.append(
+            f"     DROP neg {d['bvid']}  nn_own={d['nn_own']:.3f} nn_opp={d['nn_opp']:.3f} "
+            f"diff={d['diff']:.3f}  {d['cover_url'][:60]}"
+        )
     lines.append("")
     lines.append("3. MARGIN (s_pos / s_neg / net over pool candidate covers):")
     m = r["margin"]
@@ -215,10 +240,13 @@ def _print(r: dict[str, Any]) -> None:
 
     def _fmt(d):
         return "  ".join(f"p{p}={d[p]:.3f}" for p in sorted(d))
+
     lines.append(f"   s_pos : {_fmt(m['s_pos'])}")
     lines.append(f"   s_neg : {_fmt(m['s_neg'])}")
     lines.append(f"   net   : {_fmt(m['net_pos_minus_neg'])}")
-    lines.append(f"   net>0 share: {m['net_positive_share']}   net<0 share: {m['net_negative_share']}")
+    lines.append(
+        f"   net>0 share: {m['net_positive_share']}   net<0 share: {m['net_negative_share']}"
+    )
     lines.append("=" * 70)
     sys.stdout.buffer.write(("\n".join(lines) + "\n").encode("utf-8"))
 
@@ -226,8 +254,12 @@ def _print(r: dict[str, Any]) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--k", type=int, default=3, help="kNN neighbors (default 3)")
-    ap.add_argument("--drop-margin", type=float, default=0.05,
-                    help="clear-margin to drop a noisy label (default 0.05)")
+    ap.add_argument(
+        "--drop-margin",
+        type=float,
+        default=0.05,
+        help="clear-margin to drop a noisy label (default 0.05)",
+    )
     args = ap.parse_args()
     r = asyncio.run(_run(args.k, args.drop_margin))
     _print(r)

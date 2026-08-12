@@ -58,8 +58,7 @@ async def run_update_pipeline(
                 "title": str(e.get("title", "")),
                 "history": {"bvid": str((e.get("metadata") or {}).get("bvid", ""))},
                 "author_name": str(
-                    e.get("up_name", "")
-                    or (e.get("metadata") or {}).get("up_name", "")
+                    e.get("up_name", "") or (e.get("metadata") or {}).get("up_name", "")
                 ),
             }
             for e in init_events
@@ -84,7 +83,8 @@ async def main() -> None:
     parser.add_argument("--batch", type=int, default=2)
     parser.add_argument("--explore-rate", type=float, default=0.2)
     parser.add_argument(
-        "--reuse-personas", action="store_true",
+        "--reuse-personas",
+        action="store_true",
         help="Reuse cached personas from pool instead of generating new ones",
     )
     args = parser.parse_args()
@@ -117,14 +117,34 @@ async def main() -> None:
 
     # Persona pool for diversity
     personas_pool = [
-        {"mbti": "INTJ", "depth": "hardcore", "interest_breadth": "specialist",
-         "shift": "new_interest", "shift_desc": "用户开始关注一个全新领域"},
-        {"mbti": "ENFP", "depth": "casual", "interest_breadth": "generalist",
-         "shift": "deepen", "shift_desc": "用户对已有兴趣大幅加深"},
-        {"mbti": "ISTP", "depth": "moderate", "interest_breadth": "specialist",
-         "shift": "abandon", "shift_desc": "用户放弃了一个之前很喜欢的领域"},
-        {"mbti": "INFJ", "depth": "hardcore", "interest_breadth": "generalist",
-         "shift": "life_change", "shift_desc": "用户生活阶段发生了变化"},
+        {
+            "mbti": "INTJ",
+            "depth": "hardcore",
+            "interest_breadth": "specialist",
+            "shift": "new_interest",
+            "shift_desc": "用户开始关注一个全新领域",
+        },
+        {
+            "mbti": "ENFP",
+            "depth": "casual",
+            "interest_breadth": "generalist",
+            "shift": "deepen",
+            "shift_desc": "用户对已有兴趣大幅加深",
+        },
+        {
+            "mbti": "ISTP",
+            "depth": "moderate",
+            "interest_breadth": "specialist",
+            "shift": "abandon",
+            "shift_desc": "用户放弃了一个之前很喜欢的领域",
+        },
+        {
+            "mbti": "INFJ",
+            "depth": "hardcore",
+            "interest_breadth": "generalist",
+            "shift": "life_change",
+            "shift_desc": "用户生活阶段发生了变化",
+        },
     ]
 
     logger.info("=" * 60)
@@ -138,7 +158,8 @@ async def main() -> None:
         logger.info("━" * 60)
 
         batch_constraints = random.sample(
-            personas_pool, min(args.batch, len(personas_pool)),
+            personas_pool,
+            min(args.batch, len(personas_pool)),
         )
 
         train_reports = []
@@ -146,7 +167,9 @@ async def main() -> None:
         for i, constraints in enumerate(batch_constraints, 1):
             shift = constraints.get("shift", "new_interest")
             shift_desc = constraints.get("shift_desc", "")
-            logger.info("[%d.%d] Persona: %s %s", epoch, i, constraints["mbti"], constraints["depth"])
+            logger.info(
+                "[%d.%d] Persona: %s %s", epoch, i, constraints["mbti"], constraints["depth"]
+            )
             logger.info("  兴趣变化类型: %s — %s", shift, shift_desc)
 
             # 1. Generate or reuse ground truth: initial + evolved persona
@@ -264,7 +287,9 @@ async def main() -> None:
                     max_retries=2,
                 )
                 init_events = [e for e in events_data.get("init_events", []) if isinstance(e, dict)]
-                update_events = [e for e in events_data.get("update_events", []) if isinstance(e, dict)]
+                update_events = [
+                    e for e in events_data.get("update_events", []) if isinstance(e, dict)
+                ]
                 logger.info("  ✅ 初始事件: %d, 增量事件: %d", len(init_events), len(update_events))
                 ps.save_json("init_events.json", init_events)
                 ps.save_json("update_events.json", update_events)
@@ -330,8 +355,7 @@ async def main() -> None:
                 "changes_applied": 0,
                 "summary": "Baseline evaluation (no optimization)",
                 "worst": [
-                    {"field": f"{f.layer}.{f.field}", "score": f.score}
-                    for f in worst_fields[:3]
+                    {"field": f"{f.layer}.{f.field}", "score": f.score} for f in worst_fields[:3]
                 ],
                 "accepted": True,
             }
@@ -349,14 +373,13 @@ async def main() -> None:
             "task": "incremental_update",
             "train_mean": train_mean,
             "worst_fields": [
-                {"layer": f.layer, "field": f.field, "score": f.score,
-                 "deviation": f.deviation}
+                {"layer": f.layer, "field": f.field, "score": f.score, "deviation": f.deviation}
                 for f in worst_fields
             ],
             "action": action,
             "note": "这是增量更新任务的优化。关注 pipeline 的分层更新逻辑、"
-                    "layer_updaters.py 的 update_surface/update_interest，"
-                    "以及 prompts.py 中 build_preference_analysis_prompt 的质量。",
+            "layer_updaters.py 的 update_surface/update_interest，"
+            "以及 prompts.py 中 build_preference_analysis_prompt 的质量。",
             "pipeline_hints": {
                 f.layer + "." + f.field: FIELD_TO_PIPELINE.get(f"{f.layer}.{f.field}", "")
                 for f in worst_fields
@@ -423,8 +446,7 @@ async def main() -> None:
             "changes_applied": applied_count,
             "summary": summary,
             "worst": [
-                {"field": f"{f.layer}.{f.field}", "score": f.score}
-                for f in worst_fields[:3]
+                {"field": f"{f.layer}.{f.field}", "score": f.score} for f in worst_fields[:3]
             ],
         }
 
@@ -442,9 +464,17 @@ async def main() -> None:
             epoch_result["accepted"] = False
             if applied_count > 0:
                 optimizer.rollback()
-                logger.info("↩️ ROLLBACK (%d 处) — (%.3f <= %.3f), patience=%d/3", applied_count, train_mean, best_score, patience)
+                logger.info(
+                    "↩️ ROLLBACK (%d 处) — (%.3f <= %.3f), patience=%d/3",
+                    applied_count,
+                    train_mean,
+                    best_score,
+                    patience,
+                )
             else:
-                logger.info("↩️ 未超越最佳 (%.3f <= %.3f), patience=%d/3", train_mean, best_score, patience)
+                logger.info(
+                    "↩️ 未超越最佳 (%.3f <= %.3f), patience=%d/3", train_mean, best_score, patience
+                )
 
         history_log.append(epoch_result)
 

@@ -55,8 +55,7 @@ async def run_init_pipeline(
                 "title": str(e.get("title", "")),
                 "history": {"bvid": str((e.get("metadata") or {}).get("bvid", ""))},
                 "author_name": str(
-                    e.get("up_name", "")
-                    or (e.get("metadata") or {}).get("up_name", "")
+                    e.get("up_name", "") or (e.get("metadata") or {}).get("up_name", "")
                 ),
             }
             for e in events
@@ -73,7 +72,8 @@ async def main() -> None:
     parser.add_argument("--batch", type=int, default=2)
     parser.add_argument("--explore-rate", type=float, default=0.2)
     parser.add_argument(
-        "--reuse-personas", action="store_true",
+        "--reuse-personas",
+        action="store_true",
         help="Reuse cached personas from pool instead of generating new ones",
     )
     args = parser.parse_args()
@@ -116,7 +116,9 @@ async def main() -> None:
 
     logger.info("=" * 60)
     logger.info("自动优化循环 — init 画像任务")
-    logger.info("轮次: %d, 每轮 batch: %d, 探索率: %.1f", args.rounds, args.batch, args.explore_rate)
+    logger.info(
+        "轮次: %d, 每轮 batch: %d, 探索率: %.1f", args.rounds, args.batch, args.explore_rate
+    )
     logger.info("=" * 60)
 
     for epoch in range(1, args.rounds + 1):
@@ -126,7 +128,8 @@ async def main() -> None:
 
         # 1. Sample mini-batch of personas
         batch_constraints = random.sample(
-            personas_pool, min(args.batch, len(personas_pool)),
+            personas_pool,
+            min(args.batch, len(personas_pool)),
         )
 
         train_reports = []
@@ -277,8 +280,7 @@ async def main() -> None:
                 "changes_applied": 0,
                 "summary": "Baseline evaluation (no optimization)",
                 "worst": [
-                    {"field": f"{f.layer}.{f.field}", "score": f.score}
-                    for f in worst_fields[:3]
+                    {"field": f"{f.layer}.{f.field}", "score": f.score} for f in worst_fields[:3]
                 ],
                 "accepted": True,
             }
@@ -296,8 +298,7 @@ async def main() -> None:
         combined_report = {
             "train_mean": train_mean,
             "worst_fields": [
-                {"layer": f.layer, "field": f.field, "score": f.score,
-                 "deviation": f.deviation}
+                {"layer": f.layer, "field": f.field, "score": f.score, "deviation": f.deviation}
                 for f in worst_fields
             ],
             "action": action,
@@ -364,8 +365,7 @@ async def main() -> None:
             "changes_applied": applied_count,
             "summary": summary,
             "worst": [
-                {"field": f"{f.layer}.{f.field}", "score": f.score}
-                for f in worst_fields[:3]
+                {"field": f"{f.layer}.{f.field}", "score": f.score} for f in worst_fields[:3]
             ],
         }
 
@@ -383,9 +383,17 @@ async def main() -> None:
             epoch_result["accepted"] = False
             if applied_count > 0:
                 optimizer.rollback()
-                logger.info("↩️ ROLLBACK (%d 处) — (%.3f <= %.3f), patience=%d/3", applied_count, train_mean, best_score, patience)
+                logger.info(
+                    "↩️ ROLLBACK (%d 处) — (%.3f <= %.3f), patience=%d/3",
+                    applied_count,
+                    train_mean,
+                    best_score,
+                    patience,
+                )
             else:
-                logger.info("↩️ 未超越最佳 (%.3f <= %.3f), patience=%d/3", train_mean, best_score, patience)
+                logger.info(
+                    "↩️ 未超越最佳 (%.3f <= %.3f), patience=%d/3", train_mean, best_score, patience
+                )
 
         history_log.append(epoch_result)
 

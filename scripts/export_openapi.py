@@ -37,6 +37,7 @@ from openbiliclaw.application.sources import (
 )
 from openbiliclaw.assistant.models import AssistantOutput, Conversation, ConversationMessage
 from openbiliclaw.content.integration.actions import ActionResult
+from openbiliclaw.content.integration.projections import CardData
 from openbiliclaw.hosts.api import HostDependencies, create_app
 from openbiliclaw.hosts.api.dependencies import (
     AssistantTurnInput,
@@ -125,6 +126,25 @@ class _SchemaFacade:
 
 def export(path: Path) -> None:
     schema = create_app(HostDependencies(facade=_SchemaFacade())).openapi()
+    # CardData is the canonical presentation DTO even before a dedicated card
+    # endpoint lands; include it so generated clients never duplicate it.
+    schema.setdefault("components", {}).setdefault("schemas", {}).update(
+        {
+            name: definition
+            for name, definition in CardData.model_json_schema(
+                ref_template="#/components/schemas/{model}"
+            )
+            .get("$defs", {})
+            .items()
+        }
+    )
+    schema["components"]["schemas"]["CardData"] = {
+        key: value
+        for key, value in CardData.model_json_schema(
+            ref_template="#/components/schemas/{model}"
+        ).items()
+        if key != "$defs"
+    }
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(schema, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
 

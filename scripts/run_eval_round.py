@@ -142,7 +142,11 @@ async def main() -> None:
 
     semantic_eval = await run_eval_agent(ground_truth_profile, current_profile)
     semantic_score = semantic_eval.get("overall_score", 0)
-    print(f"  语义评分: {semantic_score:.3f}" if isinstance(semantic_score, (int, float)) else f"  语义评分: {semantic_score}")
+    print(
+        f"  语义评分: {semantic_score:.3f}"
+        if isinstance(semantic_score, (int, float))
+        else f"  语义评分: {semantic_score}"
+    )
 
     semantic_attrs = semantic_eval.get("attributions", [])
     if semantic_attrs:
@@ -180,14 +184,19 @@ async def main() -> None:
 
     report_path = report_dir / f"real_eval_{timestamp}.json"
     with open(report_path, "w", encoding="utf-8") as f:
-        json.dump({
-            "timestamp": timestamp,
-            "event_count": event_count,
-            "eval_report": combined_report,
-            "optimization": optimization,
-            "ground_truth_portrait": ground_truth_profile.personality_portrait[:500],
-            "current_portrait": current_profile.personality_portrait[:500],
-        }, f, ensure_ascii=False, indent=2)
+        json.dump(
+            {
+                "timestamp": timestamp,
+                "event_count": event_count,
+                "eval_report": combined_report,
+                "optimization": optimization,
+                "ground_truth_portrait": ground_truth_profile.personality_portrait[:500],
+                "current_portrait": current_profile.personality_portrait[:500],
+            },
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
 
     print(f"\n{'=' * 60}")
     print(f"评估完成！报告已保存到: {report_path}")
@@ -195,6 +204,7 @@ async def main() -> None:
 
     # Print summary
     from openbiliclaw.eval.report import render_eval_report
+
     print("\n" + render_eval_report(eval_report.to_dict()))
 
 

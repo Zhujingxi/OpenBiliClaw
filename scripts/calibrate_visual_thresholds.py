@@ -278,9 +278,9 @@ def _report(state: dict[str, Any]) -> None:
     for p, v in _percentiles(all_pairs, pts).items():
         print(f"  p{p:<3d}: {v:.4f}")
     if same:
-        print(f"  same-category  mean={sum(same)/len(same):.4f} (n={len(same)})")
+        print(f"  same-category  mean={sum(same) / len(same):.4f} (n={len(same)})")
     if cross:
-        print(f"  cross-category mean={sum(cross)/len(cross):.4f} (n={len(cross)})")
+        print(f"  cross-category mean={sum(cross) / len(cross):.4f} (n={len(cross)})")
 
     if anchors:
         best_per_cover: list[float] = []
@@ -341,7 +341,7 @@ async def _run_batch(batch_index: int, per_region: int) -> None:
         )
         added = await _embed_covers(svc, items, state)
         print(
-            f"[batch {batch_index}] new covers embedded={added} " f"(total={len(state['covers'])})",
+            f"[batch {batch_index}] new covers embedded={added} (total={len(state['covers'])})",
             flush=True,
         )
     _save_state(state)

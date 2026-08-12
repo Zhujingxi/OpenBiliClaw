@@ -129,16 +129,20 @@ async def _run(limit: int, measure_only: bool) -> dict[str, Any]:
             for fv in frame_vecs:
                 if fv:
                     s = cosine_similarity(fv, c)
-                    if s > best: best = s
-            if best > bps: bps, bpi = best, idx
+                    if s > best:
+                        best = s
+            if best > bps:
+                bps, bpi = best, idx
         bni, bns = -1, 0.0
         for idx, c in enumerate(neg_centroids):
             best = 0.0
             for fv in frame_vecs:
                 if fv:
                     s = cosine_similarity(fv, c)
-                    if s > best: best = s
-            if best > bns: bns, bni = best, idx
+                    if s > best:
+                        best = s
+            if best > bns:
+                bns, bni = best, idx
         p = bps if bpi >= 0 else 0.0
         n = bns if bni >= 0 else 0.0
         pos_best.append(p)

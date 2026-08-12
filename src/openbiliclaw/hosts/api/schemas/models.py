@@ -29,7 +29,7 @@ from openbiliclaw.assistant.models import (
 from openbiliclaw.content.integration.actions import ActionResult
 from openbiliclaw.content.integration.identity import ContentRef
 from openbiliclaw.content.integration.native import NativeContent
-from openbiliclaw.content.integration.projections import ContentPreview
+from openbiliclaw.content.integration.projections import CardData, ContentPreview
 from openbiliclaw.core._pydantic import StrictBaseModel
 from openbiliclaw.core.health import HealthSnapshot
 from openbiliclaw.observations.models import Observation
@@ -110,6 +110,12 @@ class ProfileResponse(TransportModel):
 
 class SearchResponse(TransportModel):
     items: tuple[ContentPreview, ...]
+
+
+class CardDataResponse(TransportModel):
+    """Canonical provider presentation DTO exposed for generated clients."""
+
+    card: CardData
 
 
 class ContentResponse(TransportModel):

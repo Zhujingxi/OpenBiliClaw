@@ -59,7 +59,10 @@ config.local.toml.*
 .env
 .env.local
 
-# Node (Chrome extension)
+# Node workspaces and generated browser output
+frontend/**/node_modules/
+frontend/**/dist/
+frontend/**/coverage/
 extension/node_modules/
 extension/dist/
 extension/openbiliclaw-extension-*.zip

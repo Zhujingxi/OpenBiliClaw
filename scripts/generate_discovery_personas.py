@@ -21,18 +21,42 @@ logger = logging.getLogger("eval.persona_gen")
 
 # Diverse persona archetypes — cover different interest domains, depth levels, MBTI types
 PERSONA_ARCHETYPES: list[dict[str, str]] = [
-    {"mbti": "INTJ", "depth": "hardcore", "interest_breadth": "specialist",
-     "hint": "重度知识类用户，偏好深度解析、纪录片、历史、科技，exploration_openness 低(0.3)"},
-    {"mbti": "ENFP", "depth": "casual", "interest_breadth": "generalist",
-     "hint": "轻度娱乐用户，喜欢综艺、搞笑、生活vlog、美食，exploration_openness 高(0.9)"},
-    {"mbti": "ISTP", "depth": "moderate", "interest_breadth": "specialist",
-     "hint": "技术宅，偏好编程、DIY、电子、游戏攻略，exploration_openness 中(0.5)"},
-    {"mbti": "INFJ", "depth": "hardcore", "interest_breadth": "generalist",
-     "hint": "人文爱好者，偏好哲学、心理学、文学、独立电影、纪录片，exploration_openness 高(0.7)"},
-    {"mbti": "ESTJ", "depth": "casual", "interest_breadth": "specialist",
-     "hint": "时事关注者，偏好国际新闻、财经、军事、时政评论，exploration_openness 低(0.2)"},
-    {"mbti": "ENTP", "depth": "moderate", "interest_breadth": "generalist",
-     "hint": "跨界探索者，偏好科普、AI、哲学、商业分析、辩论，exploration_openness 极高(0.95)"},
+    {
+        "mbti": "INTJ",
+        "depth": "hardcore",
+        "interest_breadth": "specialist",
+        "hint": "重度知识类用户，偏好深度解析、纪录片、历史、科技，exploration_openness 低(0.3)",
+    },
+    {
+        "mbti": "ENFP",
+        "depth": "casual",
+        "interest_breadth": "generalist",
+        "hint": "轻度娱乐用户，喜欢综艺、搞笑、生活vlog、美食，exploration_openness 高(0.9)",
+    },
+    {
+        "mbti": "ISTP",
+        "depth": "moderate",
+        "interest_breadth": "specialist",
+        "hint": "技术宅，偏好编程、DIY、电子、游戏攻略，exploration_openness 中(0.5)",
+    },
+    {
+        "mbti": "INFJ",
+        "depth": "hardcore",
+        "interest_breadth": "generalist",
+        "hint": "人文爱好者，偏好哲学、心理学、文学、独立电影、纪录片，exploration_openness 高(0.7)",
+    },
+    {
+        "mbti": "ESTJ",
+        "depth": "casual",
+        "interest_breadth": "specialist",
+        "hint": "时事关注者，偏好国际新闻、财经、军事、时政评论，exploration_openness 低(0.2)",
+    },
+    {
+        "mbti": "ENTP",
+        "depth": "moderate",
+        "interest_breadth": "generalist",
+        "hint": "跨界探索者，偏好科普、AI、哲学、商业分析、辩论，exploration_openness 极高(0.95)",
+    },
 ]
 
 
@@ -58,8 +82,7 @@ async def generate_one(
                 "personality_portrait 必须是自然语言段落，不是列表。"
             ),
             user_input=(
-                f"画像约束:\n{json.dumps(constraints, ensure_ascii=False)}\n\n"
-                f"用户特征: {hint}"
+                f"画像约束:\n{json.dumps(constraints, ensure_ascii=False)}\n\n用户特征: {hint}"
             ),
             temperature=0.9,
             max_tokens=4096,
@@ -126,7 +149,7 @@ async def main(args: argparse.Namespace) -> None:
     persona_pool = PersonaPool(PROJECT_ROOT / "data" / "eval" / "persona_pool")
     scenario_pool = ScenarioPool(PROJECT_ROOT / "data" / "eval" / "scenario_pool")
 
-    archetypes = PERSONA_ARCHETYPES[:args.count]
+    archetypes = PERSONA_ARCHETYPES[: args.count]
 
     logger.info("=== Generating %d diverse personas + scenarios ===", len(archetypes))
 

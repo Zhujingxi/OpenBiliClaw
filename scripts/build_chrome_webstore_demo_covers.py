@@ -134,7 +134,9 @@ def _nodes(draw: ImageDraw.ImageDraw, spec: CoverSpec) -> None:
         draw.line((*points[first], *points[second]), fill=_mix(accent, pale, 0.45), width=5)
     for index, (x, y) in enumerate(points):
         radius = 33 if index in {0, 3} else 24
-        draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=pale, outline=accent, width=5)
+        draw.ellipse(
+            (x - radius, y - radius, x + radius, y + radius), fill=pale, outline=accent, width=5
+        )
         draw.ellipse((x - 7, y - 7, x + 7, y + 7), fill=accent)
 
 
@@ -142,7 +144,13 @@ def _cards(draw: ImageDraw.ImageDraw, spec: CoverSpec) -> None:
     accent, pale = spec.palette[1], spec.palette[2]
     for index in range(3):
         x, y = 390 + index * 38, 70 + index * 54
-        draw.rounded_rectangle((x, y, x + 164, y + 116), radius=18, fill=_mix(pale, "#FFFFFF", 0.12), outline=accent, width=3)
+        draw.rounded_rectangle(
+            (x, y, x + 164, y + 116),
+            radius=18,
+            fill=_mix(pale, "#FFFFFF", 0.12),
+            outline=accent,
+            width=3,
+        )
         draw.rounded_rectangle((x + 18, y + 20, x + 76, y + 36), radius=8, fill=accent)
         draw.line((x + 18, y + 58, x + 136, y + 58), fill=spec.palette[0], width=7)
         draw.line((x + 18, y + 80, x + 108, y + 80), fill=_mix(spec.palette[0], pale, 0.5), width=5)
@@ -152,7 +160,11 @@ def _orbit(draw: ImageDraw.ImageDraw, spec: CoverSpec) -> None:
     accent, pale = spec.palette[1], spec.palette[2]
     center = (500, 178)
     for radius in (54, 94, 132):
-        draw.ellipse((center[0] - radius, center[1] - radius, center[0] + radius, center[1] + radius), outline=_mix(accent, pale, 0.25), width=3)
+        draw.ellipse(
+            (center[0] - radius, center[1] - radius, center[0] + radius, center[1] + radius),
+            outline=_mix(accent, pale, 0.25),
+            width=3,
+        )
     draw.ellipse((456, 134, 544, 222), fill=pale)
     draw.ellipse((480, 158, 520, 198), fill=accent)
     for x, y in ((500, 46), (594, 178), (432, 246), (555, 98)):
@@ -164,7 +176,9 @@ def _device(draw: ImageDraw.ImageDraw, spec: CoverSpec) -> None:
     draw.rounded_rectangle((372, 78, 568, 224), radius=18, fill=pale, outline=accent, width=5)
     draw.rounded_rectangle((390, 98, 550, 204), radius=9, fill=spec.palette[0])
     draw.rectangle((350, 228, 590, 244), fill=pale)
-    draw.rounded_rectangle((514, 154, 602, 286), radius=18, fill=spec.palette[0], outline=pale, width=5)
+    draw.rounded_rectangle(
+        (514, 154, 602, 286), radius=18, fill=spec.palette[0], outline=pale, width=5
+    )
     draw.rounded_rectangle((526, 172, 590, 258), radius=8, fill=accent)
     draw.ellipse((554, 270, 562, 278), fill=pale)
 
@@ -174,7 +188,13 @@ def _funnel(draw: ImageDraw.ImageDraw, spec: CoverSpec) -> None:
     for index, width in enumerate((210, 162, 112)):
         x = 498 - width // 2
         y = 72 + index * 64
-        draw.rounded_rectangle((x, y, x + width, y + 38), radius=19, fill=_mix(pale, accent, index * 0.26), outline=accent, width=2)
+        draw.rounded_rectangle(
+            (x, y, x + width, y + 38),
+            radius=19,
+            fill=_mix(pale, accent, index * 0.26),
+            outline=accent,
+            width=2,
+        )
     draw.polygon(((466, 238), (530, 238), (512, 290), (484, 290)), fill=accent)
     draw.ellipse((482, 300, 514, 332), fill=pale, outline=accent, width=4)
 
@@ -184,7 +204,13 @@ def _layers(draw: ImageDraw.ImageDraw, spec: CoverSpec) -> None:
     for index in range(4):
         inset = index * 18
         y = 78 + index * 54
-        draw.rounded_rectangle((374 + inset, y, 602 - inset, y + 42), radius=14, fill=_mix(pale, accent, index * 0.18), outline=accent, width=2)
+        draw.rounded_rectangle(
+            (374 + inset, y, 602 - inset, y + 42),
+            radius=14,
+            fill=_mix(pale, accent, index * 0.18),
+            outline=accent,
+            width=2,
+        )
         draw.ellipse((392 + inset, y + 13, 408 + inset, y + 29), fill=spec.palette[0])
         draw.line((422 + inset, y + 21, 558 - inset, y + 21), fill=spec.palette[0], width=5)
 
@@ -236,7 +262,9 @@ def _draw_cover(spec: CoverSpec) -> Image.Image:
     image = _background(spec)
     draw = ImageDraw.Draw(image)
     _draw_grid(draw, _mix(spec.palette[0], spec.palette[2], 0.13))
-    draw.rounded_rectangle((28, 28, 326, 332), radius=26, fill=_mix(spec.palette[0], "#000000", 0.08))
+    draw.rounded_rectangle(
+        (28, 28, 326, 332), radius=26, fill=_mix(spec.palette[0], "#000000", 0.08)
+    )
     eyebrow_font = _font(14, bold=True)
     eyebrow_box = draw.textbbox((0, 0), spec.eyebrow, font=eyebrow_font)
     eyebrow_width = eyebrow_box[2] - eyebrow_box[0] + 28

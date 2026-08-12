@@ -59,18 +59,21 @@ async def main() -> None:
     favorites_data: list[dict[str, Any]] = []
     try:
         fav_folders = await client.get_all_favorites(
-            max_folders=20, max_items_per_folder=200,
+            max_folders=20,
+            max_items_per_folder=200,
         )
         for folder in fav_folders:
             folder_title = folder.folder.title if hasattr(folder, "folder") else "未知"
             count = len(folder.items) if hasattr(folder, "items") else 0
             print(f"  📁 {folder_title}: {count} 项")
-            for item in (folder.items if hasattr(folder, "items") else []):
-                favorites_data.append({
-                    "title": getattr(item, "title", str(item)),
-                    "upper": getattr(item, "upper", ""),
-                    "folder": folder_title,
-                })
+            for item in folder.items if hasattr(folder, "items") else []:
+                favorites_data.append(
+                    {
+                        "title": getattr(item, "title", str(item)),
+                        "upper": getattr(item, "upper", ""),
+                        "folder": folder_title,
+                    }
+                )
         print(f"  ✅ 共 {len(favorites_data)} 个收藏")
     except Exception as exc:
         print(f"  ⚠️ 收藏夹拉取失败: {exc}")
@@ -106,27 +109,36 @@ async def main() -> None:
     for item in history:
         h = item.get("history", {}) or {}
         bvid = str(h.get("bvid", ""))
-        events.append({
-            "event_type": "view",
-            "title": str(item.get("title", "")),
-            "url": f"https://www.bilibili.com/video/{bvid}" if bvid else "",
-            "metadata": {
-                "bvid": bvid,
-                "author": str(item.get("author_name", item.get("author", ""))),
-            },
-        })
+        events.append(
+            {
+                "event_type": "view",
+                "title": str(item.get("title", "")),
+                "url": f"https://www.bilibili.com/video/{bvid}" if bvid else "",
+                "metadata": {
+                    "bvid": bvid,
+                    "author": str(item.get("author_name", item.get("author", ""))),
+                },
+            }
+        )
     for fav in favorites_data:
-        events.append({
-            "event_type": "favorite",
-            "title": str(fav.get("title", "")),
-            "metadata": {"folder": str(fav.get("folder", "")), "upper": str(fav.get("upper", ""))},
-        })
+        events.append(
+            {
+                "event_type": "favorite",
+                "title": str(fav.get("title", "")),
+                "metadata": {
+                    "folder": str(fav.get("folder", "")),
+                    "upper": str(fav.get("upper", "")),
+                },
+            }
+        )
     pref_step.save_json("events_input.json", events[:50])  # Save sample
 
     # Log the preference analysis prompt
     from openbiliclaw.llm.prompts import build_preference_analysis_prompt
+
     pref_prompt_msgs = build_preference_analysis_prompt(
-        events=events[:20], existing_preference={},
+        events=events[:20],
+        existing_preference={},
     )
     pref_step.save_prompt(pref_prompt_msgs)
 
@@ -147,25 +159,32 @@ async def main() -> None:
 
     combined_history = list(history)
     if favorites_data:
-        combined_history.append({
-            "title": "[收藏夹汇总]",
-            "_favorites": favorites_data,
-            "_favorites_summary": f"共 {len(favorites_data)} 个收藏，"
-            + "涵盖: " + ", ".join(
-                set(f.get("folder", "") for f in favorites_data[:100] if f.get("folder"))
-            ),
-        })
+        combined_history.append(
+            {
+                "title": "[收藏夹汇总]",
+                "_favorites": favorites_data,
+                "_favorites_summary": f"共 {len(favorites_data)} 个收藏，"
+                + "涵盖: "
+                + ", ".join(
+                    set(f.get("folder", "") for f in favorites_data[:100] if f.get("folder"))
+                ),
+            }
+        )
     if following_data:
-        combined_history.append({
-            "title": "[关注列表汇总]",
-            "_following": following_data,
-            "_following_summary": f"共关注 {len(following_data)} 人，"
-            + "包括: " + ", ".join(f["name"] for f in following_data[:100]),
-        })
+        combined_history.append(
+            {
+                "title": "[关注列表汇总]",
+                "_following": following_data,
+                "_following_summary": f"共关注 {len(following_data)} 人，"
+                + "包括: "
+                + ", ".join(f["name"] for f in following_data[:100]),
+            }
+        )
 
     # Log the profile generation prompt
     from openbiliclaw.llm.prompts import build_soul_profile_prompt
     from openbiliclaw.soul.profile_builder import ProfileBuilder
+
     profile_prompt_msgs = build_soul_profile_prompt(
         history_summary=ProfileBuilder._summarize_history(combined_history),
         preference_summary=pref_result,
@@ -261,7 +280,9 @@ async def main() -> None:
     )
 
     print(f"\n{'=' * 60}")
-    print(f"数据来源: {len(history)} 浏览 + {len(favorites_data)} 收藏 + {len(following_data)} 关注")
+    print(
+        f"数据来源: {len(history)} 浏览 + {len(favorites_data)} 收藏 + {len(following_data)} 关注"
+    )
     print(f"完整日志: {rl.run_dir}")
     print(f"摘要: {summary_path}")
     print("=" * 60)

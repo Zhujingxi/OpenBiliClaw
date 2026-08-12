@@ -608,9 +608,10 @@ The whole loop stays local — the agent host just calls the CLI bridge; your pr
 
 ## 🏛️ Architecture Overview
 
-> Refactor target (not yet wired into production composition): `hosts/api` now provides the strict `/v1` HTTP/OpenAPI boundary, while `hosts/cli` shares the same typed Application/Assistant facade. The legacy API/CLI cutover remains a Plan 15 operation.
+> Refactor target (not yet wired into production composition): `hosts/api` now provides the strict `/v1` HTTP/OpenAPI boundary, while `hosts/cli` shares the same typed Application/Assistant facade. `frontend/` Phase 14A only provides the generated API client and shared safe Vue cards; web/extension shells remain placeholders. The legacy UI/API/CLI cutover remains a Plan 15 operation.
 
 ```text
+Target Presentation A (not wired): generated API client + shared Vue cards
 Target Hosts (not wired yet): Web / Extension / CLI → strict /v1 API + OpenAPI → Application / Assistant
                                                 → Core lifecycle / health
 

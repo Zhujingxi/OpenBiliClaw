@@ -1,18 +1,14 @@
-"""Generate Plan 14's TypeScript API types from deterministic OpenAPI.
-
-The frontend workspace is intentionally absent until Plan 14; this script is
-checked in now so generation has one reproducible entrypoint when that target
-exists.
-"""
+"""Generate TypeScript API types using the workspace-pinned generator."""
 
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 import tempfile
 from pathlib import Path
 
-from openbiliclaw.proc import no_window_kwargs
+from openbiliclaw.infrastructure.process import creationflags
 from scripts.export_openapi import export
 
 
@@ -21,18 +17,67 @@ def generate(output: Path) -> None:
     with tempfile.TemporaryDirectory() as directory:
         schema = Path(directory) / "openapi.json"
         export(schema)
+        _hoist_local_definitions(schema)
         subprocess.run(
             [
-                "npx",
-                "--yes",
-                "openapi-typescript@7.10.1",
+                "npm",
+                "--prefix",
+                "frontend",
+                "exec",
+                "--",
+                "openapi-typescript",
                 str(schema),
                 "--output",
                 str(output),
             ],
             check=True,
-            **no_window_kwargs(),
+            creationflags=creationflags(),
         )
+
+
+def _hoist_local_definitions(path: Path) -> None:
+    """Hoist Pydantic's operation-local ``$defs`` for OpenAPI tooling.
+
+    FastAPI currently leaves the SSE union definitions next to the operation;
+    OpenAPI references are document-root relative, so generators cannot resolve
+    ``#/$defs/...`` there. Moving those definitions into components preserves
+    the schema meaning and makes the export valid for frontend generators.
+    """
+
+    document: object = json.loads(path.read_text())
+    if not isinstance(document, dict):
+        raise ValueError("OpenAPI document must be an object")
+    components = document.setdefault("components", {})
+    if not isinstance(components, dict):
+        raise ValueError("OpenAPI components must be an object")
+    schemas = components.setdefault("schemas", {})
+    if not isinstance(schemas, dict):
+        raise ValueError("OpenAPI schemas must be an object")
+
+    def visit(value: object) -> None:
+        if isinstance(value, dict):
+            definitions = value.pop("$defs", None)
+            if definitions is not None:
+                if not isinstance(definitions, dict):
+                    raise ValueError("OpenAPI $defs must be an object")
+                for name, definition in definitions.items():
+                    schemas.setdefault(name, definition)
+            reference = value.get("$ref")
+            if isinstance(reference, str) and reference.startswith("#/$defs/"):
+                value["$ref"] = reference.replace("#/$defs/", "#/components/schemas/", 1)
+            mapping = value.get("mapping")
+            if isinstance(mapping, dict):
+                for key, target in mapping.items():
+                    if isinstance(target, str) and target.startswith("#/$defs/"):
+                        mapping[key] = target.replace("#/$defs/", "#/components/schemas/", 1)
+            for item in value.values():
+                visit(item)
+        elif isinstance(value, list):
+            for item in value:
+                visit(item)
+
+    visit(document)
+    path.write_text(json.dumps(document, ensure_ascii=False, separators=(",", ":")))
 
 
 def main() -> None:
@@ -40,7 +85,7 @@ def main() -> None:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("frontend/packages/api-client/src/generated.ts"),
+        default=Path("frontend/packages/api-client/generated/schema.ts"),
     )
     args = parser.parse_args()
     generate(args.output)

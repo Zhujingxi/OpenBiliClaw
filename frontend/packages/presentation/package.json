@@ -1,0 +1,18 @@
+{
+  "name": "@openbiliclaw/presentation",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@openbiliclaw/api-client": "0.0.0",
+    "vue": "3.5.25"
+  },
+  "scripts": {
+    "typecheck": "vue-tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "build": "vite build"
+  }
+}

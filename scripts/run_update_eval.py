@@ -94,6 +94,7 @@ async def main() -> None:
     print(f"  获取到 {len(recent_events)} 条事件")
     if recent_events:
         from collections import Counter
+
         types = Counter(str(e.get("event_type", "")) for e in recent_events)
         print(f"  类型分布: {dict(types.most_common(5))}")
         titles = [str(e.get("title", "")) for e in recent_events[:5] if e.get("title")]
@@ -124,11 +125,13 @@ async def main() -> None:
                 meta = json.loads(meta)
             except json.JSONDecodeError:
                 meta = {}
-        norm_events.append({
-            "event_type": str(ev.get("event_type", "")),
-            "title": str(ev.get("title", "")),
-            "metadata": meta,
-        })
+        norm_events.append(
+            {
+                "event_type": str(ev.get("event_type", "")),
+                "title": str(ev.get("title", "")),
+                "metadata": meta,
+            }
+        )
 
     signals = signals_from_events(norm_events)
     result = await pipeline.ingest_batch(signals)
@@ -149,15 +152,22 @@ async def main() -> None:
 
     after_step = rl.step("after")
     after_step.save_json("profile_after.json", after_dict)
-    after_step.save_json("pipeline_result.json", {
-        "signals_accepted": result.signals_accepted,
-        "layers_buffered": result.layers_buffered,
-        "layers_updated": [
-            {"layer": lr.layer.value, "changed": lr.changed,
-             "changes": lr.changes, "signals_consumed": lr.signals_consumed}
-            for lr in layers_updated
-        ],
-    })
+    after_step.save_json(
+        "pipeline_result.json",
+        {
+            "signals_accepted": result.signals_accepted,
+            "layers_buffered": result.layers_buffered,
+            "layers_updated": [
+                {
+                    "layer": lr.layer.value,
+                    "changed": lr.changed,
+                    "changes": lr.changes,
+                    "signals_consumed": lr.signals_consumed,
+                }
+                for lr in layers_updated
+            ],
+        },
+    )
 
     print("\n[4/4] 逐层变化对比 — 请评测")
     print("=" * 60)

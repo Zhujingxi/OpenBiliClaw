@@ -59,7 +59,9 @@ def font(size: int, bold: bool = False) -> ImageFont.ImageFont:
     """Return a readable font across macOS, Linux, and minimal CI images."""
     macos = "/System/Library/Fonts/Supplemental"
     candidates = [
-        "/System/Library/Fonts/STHeiti Medium.ttc" if bold else "/System/Library/Fonts/STHeiti Light.ttc",
+        "/System/Library/Fonts/STHeiti Medium.ttc"
+        if bold
+        else "/System/Library/Fonts/STHeiti Light.ttc",
         f"{macos}/Songti.ttc",
         f"{macos}/Arial Bold.ttf" if bold else f"{macos}/Arial.ttf",
         "/Library/Fonts/Arial Bold.ttf" if bold else "/Library/Fonts/Arial.ttf",
@@ -139,7 +141,9 @@ def draw_chip(
     return rect[2], rect[3]
 
 
-def draw_arrow(draw: ImageDraw.ImageDraw, start: tuple[int, int], end: tuple[int, int], fill: str = LINE) -> None:
+def draw_arrow(
+    draw: ImageDraw.ImageDraw, start: tuple[int, int], end: tuple[int, int], fill: str = LINE
+) -> None:
     sx, sy = start
     ex, ey = end
     draw.line((sx, sy, ex, ey), fill=fill, width=3)
@@ -163,13 +167,17 @@ def draw_panel(
     width = 4 if active else 2
     fill = "#ffffff" if active else "#fbfdff"
 
-    draw.rounded_rectangle((x, y, x + PANEL_W, y + PANEL_H), radius=24, fill=fill, outline=border, width=width)
+    draw.rounded_rectangle(
+        (x, y, x + PANEL_W, y + PANEL_H), radius=24, fill=fill, outline=border, width=width
+    )
     draw.text((x + 20, y + 20), title, font=FONT_PANEL_TITLE, fill=INK)
     draw_wrapped(draw, body, (x + 20, y + 56), 28, FONT_SMALL, MUTED, line_gap=4)
 
     thumb = rounded_thumbnail(screenshot, (PANEL_W - 38, 246))
     base.paste(thumb, (x + 19, y + 112))
-    draw.rounded_rectangle((x + 19, y + 112, x + PANEL_W - 19, y + 358), radius=18, outline="#e5edf5", width=1)
+    draw.rounded_rectangle(
+        (x + 19, y + 112, x + PANEL_W - 19, y + 358), radius=18, outline="#e5edf5", width=1
+    )
 
     chip_y = y + 374
     chip_x = x + 20
@@ -241,7 +249,9 @@ def build_frame(active: int | None = None) -> Image.Image:
     ]
 
     for idx, (title, body, screenshot, accent, overlay) in enumerate(panels):
-        draw_panel(base, idx, title, body, screenshot, accent, active is None or active == idx, overlay)
+        draw_panel(
+            base, idx, title, body, screenshot, accent, active is None or active == idx, overlay
+        )
         if idx < 3:
             arrow_y = PANEL_TOP + PANEL_H // 2
             arrow_x = PANEL_X + idx * (PANEL_W + PANEL_GAP) + PANEL_W + 4
@@ -296,7 +306,12 @@ def build_gif_slide(index: int, lang: str) -> Image.Image:
     screen_x = 1280 - screenshot_size[0] - 72
     screen_y = 210 if index != 3 else 178
     draw.rounded_rectangle(
-        (screen_x - 16, screen_y - 16, screen_x + screenshot_size[0] + 16, screen_y + screenshot_size[1] + 16),
+        (
+            screen_x - 16,
+            screen_y - 16,
+            screen_x + screenshot_size[0] + 16,
+            screen_y + screenshot_size[1] + 16,
+        ),
         radius=28,
         fill="#ffffff",
         outline="#dbe5ef",
@@ -318,7 +333,13 @@ def localized_slides(lang: str) -> list[dict[str, object]]:
                 "accent": BLUE,
                 "screenshot": IMAGE_DIR / "desktop-home.png",
                 "screen_size": (548, 330),
-                "chips": [("B 站", BLUE), ("小红书", RED), ("抖音", INK), ("YouTube", RED), ("Web", PURPLE)],
+                "chips": [
+                    ("B 站", BLUE),
+                    ("小红书", RED),
+                    ("抖音", INK),
+                    ("YouTube", RED),
+                    ("Web", PURPLE),
+                ],
                 "callouts": [("浏览器插件", BLUE), ("本地后端", GREEN), ("SQLite", ORANGE)],
                 "bullets": [
                     "跨平台信号沉淀成你自己的记忆。",
@@ -384,7 +405,13 @@ def localized_slides(lang: str) -> list[dict[str, object]]:
             "accent": BLUE,
             "screenshot": IMAGE_DIR / "desktop-home.png",
             "screen_size": (548, 330),
-            "chips": [("Bilibili", BLUE), ("Xiaohongshu", RED), ("Douyin", INK), ("YouTube", RED), ("Web", PURPLE)],
+            "chips": [
+                ("Bilibili", BLUE),
+                ("Xiaohongshu", RED),
+                ("Douyin", INK),
+                ("YouTube", RED),
+                ("Web", PURPLE),
+            ],
             "callouts": [("Extension", BLUE), ("Local backend", GREEN), ("SQLite", ORANGE)],
             "bullets": [
                 "Cross-source signals become your own memory.",

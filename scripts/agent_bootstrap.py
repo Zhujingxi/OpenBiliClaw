@@ -2480,9 +2480,7 @@ def apply_module_overrides(project_dir: Path, specs: list[str]) -> dict[str, Any
         )
         effective_provider = provider or default_provider
         instance_id = (
-            _llm_instance_id_for_provider(data, effective_provider, model=model)
-            if model
-            else ""
+            _llm_instance_id_for_provider(data, effective_provider, model=model) if model else ""
         )
         if not instance_id:
             instance_id = _llm_instance_id_for_provider(data, effective_provider)

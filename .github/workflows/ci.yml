@@ -58,6 +58,45 @@ jobs:
       - name: Run pytest
         run: python -m pytest -q
 
+  frontend:
+    name: Target frontend gates
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: frontend
+
+      - name: Check formatting
+        run: npm run format:check
+        working-directory: frontend
+
+      - name: Lint and reject handwritten JavaScript
+        run: npm run lint
+        working-directory: frontend
+
+      - name: Type check
+        run: npm run typecheck
+        working-directory: frontend
+
+      - name: Test
+        run: npm run test
+        working-directory: frontend
+
+      - name: Build all workspaces
+        run: npm run build
+        working-directory: frontend
+
   extension-firefox-build:
     name: Smoke-build Firefox extension
     runs-on: ubuntu-latest

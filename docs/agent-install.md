@@ -5,6 +5,10 @@
 > **do NOT use the WebFetch tool.** WebFetch hands the document to an
 > internal summariser model which can silently drop exact commands.
 
+## Frontend contributor prerequisites
+
+Target frontend development (not required for normal Python/Docker installation) uses Node.js 22 and npm 10. From a source checkout run `npm --prefix frontend install`; see [`docs/modules/frontend.md`](modules/frontend.md) for generation and quality gates. Built `dist/` output is local/ignored, and the target shells are not production-wired until later Plan 14 phases.
+
 ## The only thing you actually need to do
 
 Pick the command for the user's shell — **detect the platform from the user's environment, do not let them choose if you can tell**:

@@ -612,9 +612,10 @@ OpenClaw 收到 `interest.probe` 事件（或主动拉取 `next-probe`），发�
 
 ## 🏛️ 架构概览
 
-> Refactor target（尚未接入 production composition）：`hosts/api` 已提供 strict `/v1` HTTP/OpenAPI boundary，`hosts/cli` 与其共享同一 typed Application/Assistant facade；legacy API/CLI 等待 Plan 15 一次切换。
+> Refactor target（尚未接入 production composition）：`hosts/api` 已提供 strict `/v1` HTTP/OpenAPI boundary，`hosts/cli` 与其共享同一 typed Application/Assistant facade；`frontend/` Phase 14A 仅落地 generated API client + shared Vue cards，web/extension shells 仍是 placeholders。legacy UI/API/CLI 等待 Plan 15 一次切换。
 
 ```text
+Target Presentation A（尚未接线）: generated API client + shared Vue cards
 Target Hosts（尚未接线）: Web / Extension / CLI → strict /v1 API + OpenAPI → Application / Assistant
                                                → Core lifecycle / health
 
