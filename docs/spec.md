@@ -2,7 +2,7 @@
 
 > *你的跨平台 AI 内容朋友，比你更懂你想看什么* 🎯
 >
-> Refactor status: `core/`、`infrastructure/`、`ai/` 与 `access/` target boundaries 已作为未接线模块落地；本 SPEC 下方生产数据流仍描述 legacy composition。Provider Access host/API/config cutover 等待 Plans 13/15，因此当前图不增加尚不存在的生产连线。
+> Refactor status: target boundaries through `hosts/` are implemented but not wired into production composition; the production data flow below still describes legacy composition. Target Hosts expose a strict `/v1` FastAPI/OpenAPI contract and matching Typer adapters over Application/Assistant. Legacy API/CLI cutover remains Plan 15, so this document does not draw a production connection that does not yet exist.
 
 ---
 
@@ -284,6 +284,9 @@ descriptor、CLI（适用时）、capability manifest、幂等测试和集成文
 ## 3. 系统架构
 
 ```text
+Target Hosts (not wired): Web / Extension / CLI → strict /v1 API + OpenAPI → Application / Assistant
+                                            → Core lifecycle / health
+
 interactive (dialogue / config probe) ──────────────┐
                                                     ├─ runtime total gate (default 4) ─ ordered instance chain ─ adapter
 background ─ background admission (default 3) ──────┘

@@ -608,7 +608,12 @@ The whole loop stays local — the agent host just calls the CLI bridge; your pr
 
 ## 🏛️ Architecture Overview
 
+> Refactor target (not yet wired into production composition): `hosts/api` now provides the strict `/v1` HTTP/OpenAPI boundary, while `hosts/cli` shares the same typed Application/Assistant facade. The legacy API/CLI cutover remains a Plan 15 operation.
+
 ```text
+Target Hosts (not wired yet): Web / Extension / CLI → strict /v1 API + OpenAPI → Application / Assistant
+                                                → Core lifecycle / health
+
 interactive (dialogue / config probe) ──────────────┐
                                                     ├─ runtime total gate (default 4) ─ ordered instance chain ─ adapter
 background ─ background admission (default 3) ──────┘

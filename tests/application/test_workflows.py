@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from openbiliclaw.access.forms import ConnectionForm
 from openbiliclaw.access.models import (
     AccessRequest,
     AccessStatus,
@@ -443,3 +444,43 @@ def test_context_is_frozen_and_explicit() -> None:
     context = ApplicationContext(access=AccessFake(), workflows=JournalFake())
     with pytest.raises(AttributeError):
         context.access = AccessFake()  # type: ignore[misc]
+
+
+def _connection_form(method_id: str = "builtin.manual") -> ConnectionForm:
+    from openbiliclaw.access.forms import ConnectionForm, FieldKind, FormField
+    from openbiliclaw.access.models import InteractionKind
+
+    return ConnectionForm(
+        provider_id="demo",
+        method_id=method_id,
+        interaction=InteractionKind.SECRET_FORM,
+        fields=(FormField(field_id="token", label="Token", kind=FieldKind.TOKEN, secret=True),),
+    )
+
+
+async def test_get_source_form_selects_real_service_form_port() -> None:
+    from openbiliclaw.application.reads import GetSourceForm, GetSourceFormQuery
+
+    class Forms:
+        def connection_forms(self, provider_id: str) -> tuple[ConnectionForm, ...]:
+            assert provider_id == "demo"
+            return (_connection_form(),)
+
+    result = await GetSourceForm(Forms())(
+        GetSourceFormQuery(provider_id="demo", method_id="builtin.manual")
+    )
+    assert result.form.method_id == "builtin.manual"
+
+
+async def test_get_source_form_not_found_is_stable() -> None:
+    from openbiliclaw.application.reads import GetSourceForm, GetSourceFormQuery
+
+    class Forms:
+        def connection_forms(self, provider_id: str) -> tuple[ConnectionForm, ...]:
+            return ()
+
+    with pytest.raises(ApplicationError) as error:
+        await GetSourceForm(Forms())(
+            GetSourceFormQuery(provider_id="demo", method_id="builtin.manual")
+        )
+    assert error.value.code is ApplicationErrorCode.NOT_FOUND

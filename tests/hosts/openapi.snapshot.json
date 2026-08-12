@@ -1,0 +1,6451 @@
+{
+  "components": {
+    "schemas": {
+      "AccessStatus": {
+        "additionalProperties": false,
+        "description": "Transport-safe current connection state and bounded evidence.",
+        "properties": {
+          "account_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Id"
+          },
+          "method_id": {
+            "anyOf": [
+              {
+                "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)+$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Method Id"
+          },
+          "provider_id": {
+            "pattern": "^[a-z][a-z0-9_-]{0,63}$",
+            "title": "Provider Id",
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/components/schemas/AccessStatusKind"
+          },
+          "verification": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/VerificationResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "provider_id",
+          "account_id",
+          "state"
+        ],
+        "title": "AccessStatus",
+        "type": "object"
+      },
+      "AccessStatusKind": {
+        "enum": [
+          "disconnected",
+          "unverified",
+          "connected",
+          "degraded",
+          "expired",
+          "unavailable"
+        ],
+        "title": "AccessStatusKind",
+        "type": "string"
+      },
+      "ActionResult": {
+        "additionalProperties": false,
+        "description": "Safe result of a completed provider mutation.",
+        "properties": {
+          "action_id": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}$",
+            "title": "Action Id",
+            "type": "string"
+          },
+          "completed_at": {
+            "format": "date-time",
+            "title": "Completed At",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "maxLength": 200,
+            "minLength": 8,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/ContentRef"
+          }
+        },
+        "required": [
+          "action_id",
+          "ref",
+          "idempotency_key",
+          "completed_at"
+        ],
+        "title": "ActionResult",
+        "type": "object"
+      },
+      "ActionResultResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "result": {
+            "$ref": "#/components/schemas/ActionResult"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "title": "ActionResultResponse",
+        "type": "object"
+      },
+      "AssistantClarification": {
+        "additionalProperties": false,
+        "properties": {
+          "choices": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 10,
+            "title": "Choices",
+            "type": "array"
+          },
+          "kind": {
+            "const": "clarification",
+            "default": "clarification",
+            "title": "Kind",
+            "type": "string"
+          },
+          "question": {
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Question",
+            "type": "string"
+          }
+        },
+        "required": [
+          "question"
+        ],
+        "title": "AssistantClarification",
+        "type": "object"
+      },
+      "AssistantFeedbackObservation": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Id"
+          },
+          "content_ref": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ContentRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "event_type": {
+            "const": "assistant_feedback",
+            "default": "assistant_feedback",
+            "title": "Event Type",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "maxLength": 384,
+            "minLength": 1,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "observation_id": {
+            "pattern": "^obs_[0-9a-f]{32}$",
+            "title": "Observation Id",
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/AssistantFeedbackPayload"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/ObservationProvenance"
+          },
+          "received_at": {
+            "format": "date-time",
+            "title": "Received At",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "observation_id",
+          "idempotency_key",
+          "occurred_at",
+          "received_at",
+          "provenance",
+          "payload"
+        ],
+        "title": "AssistantFeedbackObservation",
+        "type": "object"
+      },
+      "AssistantFeedbackPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "comment": {
+            "anyOf": [
+              {
+                "maxLength": 1000,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Comment"
+          },
+          "conversation_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Conversation Id",
+            "type": "string"
+          },
+          "sentiment": {
+            "enum": [
+              "positive",
+              "negative",
+              "neutral"
+            ],
+            "title": "Sentiment",
+            "type": "string"
+          }
+        },
+        "required": [
+          "conversation_id",
+          "sentiment"
+        ],
+        "title": "AssistantFeedbackPayload",
+        "type": "object"
+      },
+      "AssistantMessage": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "message",
+            "default": "message",
+            "title": "Kind",
+            "type": "string"
+          },
+          "text": {
+            "maxLength": 8000,
+            "minLength": 1,
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "title": "AssistantMessage",
+        "type": "object"
+      },
+      "AssistantPendingAction": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/PendingActionSummary"
+          },
+          "kind": {
+            "const": "pending_action",
+            "default": "pending_action",
+            "title": "Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "title": "AssistantPendingAction",
+        "type": "object"
+      },
+      "AssistantRecommendationPresentation": {
+        "additionalProperties": false,
+        "properties": {
+          "intro": {
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Intro",
+            "type": "string"
+          },
+          "kind": {
+            "const": "recommendations",
+            "default": "recommendations",
+            "title": "Kind",
+            "type": "string"
+          },
+          "recommendation_ids": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 20,
+            "minItems": 1,
+            "title": "Recommendation Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "intro",
+          "recommendation_ids"
+        ],
+        "title": "AssistantRecommendationPresentation",
+        "type": "object"
+      },
+      "AssistantTurnRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "conversation_id": {
+            "pattern": "^conv_[0-9a-f]{32}$",
+            "title": "Conversation Id",
+            "type": "string"
+          },
+          "locale": {
+            "default": "en-US",
+            "maxLength": 32,
+            "minLength": 2,
+            "title": "Locale",
+            "type": "string"
+          },
+          "text": {
+            "maxLength": 8000,
+            "minLength": 1,
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "conversation_id",
+          "text"
+        ],
+        "title": "AssistantTurnRequest",
+        "type": "object"
+      },
+      "AssistantTurnResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "output": {
+            "discriminator": {
+              "mapping": {
+                "clarification": "#/components/schemas/AssistantClarification",
+                "message": "#/components/schemas/AssistantMessage",
+                "pending_action": "#/components/schemas/AssistantPendingAction",
+                "recommendations": "#/components/schemas/AssistantRecommendationPresentation"
+              },
+              "propertyName": "kind"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/AssistantMessage"
+              },
+              {
+                "$ref": "#/components/schemas/AssistantRecommendationPresentation"
+              },
+              {
+                "$ref": "#/components/schemas/AssistantClarification"
+              },
+              {
+                "$ref": "#/components/schemas/AssistantPendingAction"
+              }
+            ],
+            "title": "Output"
+          }
+        },
+        "required": [
+          "output"
+        ],
+        "title": "AssistantTurnResponse",
+        "type": "object"
+      },
+      "AvoidanceClaim": {
+        "additionalProperties": false,
+        "properties": {
+          "claim_id": {
+            "pattern": "^claim_[0-9a-f]{32}$",
+            "title": "Claim Id",
+            "type": "string"
+          },
+          "confidence": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Confidence",
+            "type": "number"
+          },
+          "evidence_ids": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 64,
+            "minItems": 1,
+            "title": "Evidence Ids",
+            "type": "array"
+          },
+          "fresh_at": {
+            "format": "date-time",
+            "title": "Fresh At",
+            "type": "string"
+          },
+          "kind": {
+            "const": "avoidance",
+            "default": "avoidance",
+            "title": "Kind",
+            "type": "string"
+          },
+          "lifecycle": {
+            "$ref": "#/components/schemas/ClaimLifecycle",
+            "default": "active"
+          },
+          "value": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "claim_id",
+          "confidence",
+          "fresh_at",
+          "evidence_ids",
+          "value"
+        ],
+        "title": "AvoidanceClaim",
+        "type": "object"
+      },
+      "BaseModel": {
+        "properties": {},
+        "title": "BaseModel",
+        "type": "object"
+      },
+      "CanonicalProfile": {
+        "additionalProperties": false,
+        "description": "The sole durable representation of user understanding.",
+        "properties": {
+          "claims": {
+            "default": [],
+            "items": {
+              "discriminator": {
+                "mapping": {
+                  "avoidance": "#/components/schemas/AvoidanceClaim",
+                  "emerging_interest": "#/components/schemas/EmergingInterestClaim",
+                  "insight": "#/components/schemas/InsightClaim",
+                  "preference": "#/components/schemas/PreferenceClaim",
+                  "stable_interest": "#/components/schemas/StableInterestClaim"
+                },
+                "propertyName": "kind"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/StableInterestClaim"
+                },
+                {
+                  "$ref": "#/components/schemas/EmergingInterestClaim"
+                },
+                {
+                  "$ref": "#/components/schemas/AvoidanceClaim"
+                },
+                {
+                  "$ref": "#/components/schemas/PreferenceClaim"
+                },
+                {
+                  "$ref": "#/components/schemas/InsightClaim"
+                }
+              ]
+            },
+            "maxItems": 500,
+            "title": "Claims",
+            "type": "array"
+          },
+          "overrides": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/UserOverride"
+            },
+            "maxItems": 500,
+            "title": "Overrides",
+            "type": "array"
+          },
+          "profile_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Profile Id",
+            "type": "string"
+          },
+          "revision": {
+            "minimum": 0.0,
+            "title": "Revision",
+            "type": "integer"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "profile_id",
+          "revision",
+          "updated_at"
+        ],
+        "title": "CanonicalProfile",
+        "type": "object"
+      },
+      "ClaimLifecycle": {
+        "enum": [
+          "emerging",
+          "active",
+          "retired"
+        ],
+        "title": "ClaimLifecycle",
+        "type": "string"
+      },
+      "ConfirmActionRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "pending_action_id": {
+            "pattern": "^pending_[0-9a-f]{32}$",
+            "title": "Pending Action Id",
+            "type": "string"
+          },
+          "user_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pending_action_id",
+          "user_id"
+        ],
+        "title": "ConfirmActionRequest",
+        "type": "object"
+      },
+      "ConnectSourceRequest": {
+        "additionalProperties": false,
+        "examples": [],
+        "properties": {
+          "account_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Id"
+          },
+          "credential": {
+            "anyOf": [
+              {
+                "format": "password",
+                "type": "string",
+                "writeOnly": true
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Credential"
+          },
+          "idempotency_key": {
+            "maxLength": 200,
+            "minLength": 8,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "method_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Method Id",
+            "type": "string"
+          },
+          "permissions": {
+            "default": [
+              "read_public"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/Permission"
+            },
+            "title": "Permissions",
+            "type": "array",
+            "uniqueItems": true
+          },
+          "provider_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Provider Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider_id",
+          "method_id",
+          "idempotency_key"
+        ],
+        "title": "ConnectSourceRequest",
+        "type": "object"
+      },
+      "ConnectionForm": {
+        "additionalProperties": false,
+        "description": "Declarative form contributed by a provider auth adapter.",
+        "properties": {
+          "fields": {
+            "items": {
+              "$ref": "#/components/schemas/FormField"
+            },
+            "title": "Fields",
+            "type": "array"
+          },
+          "interaction": {
+            "$ref": "#/components/schemas/InteractionKind"
+          },
+          "method_id": {
+            "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)+$",
+            "title": "Method Id",
+            "type": "string"
+          },
+          "provider_id": {
+            "pattern": "^[a-z][a-z0-9_-]{0,63}$",
+            "title": "Provider Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider_id",
+          "method_id",
+          "interaction",
+          "fields"
+        ],
+        "title": "ConnectionForm",
+        "type": "object"
+      },
+      "ContentKind": {
+        "additionalProperties": false,
+        "description": "Provider-declared stable content-kind identity.",
+        "properties": {
+          "value": {
+            "pattern": "^[a-z][a-z0-9_-]{0,63}$",
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "value"
+        ],
+        "title": "ContentKind",
+        "type": "object"
+      },
+      "ContentOpenedObservation": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Id"
+          },
+          "content_ref": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ContentRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "event_type": {
+            "const": "content_opened",
+            "default": "content_opened",
+            "title": "Event Type",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "maxLength": 384,
+            "minLength": 1,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "observation_id": {
+            "pattern": "^obs_[0-9a-f]{32}$",
+            "title": "Observation Id",
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/HostOpenPayload"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/ObservationProvenance"
+          },
+          "received_at": {
+            "format": "date-time",
+            "title": "Received At",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "observation_id",
+          "idempotency_key",
+          "occurred_at",
+          "received_at",
+          "provenance",
+          "payload"
+        ],
+        "title": "ContentOpenedObservation",
+        "type": "object"
+      },
+      "ContentPreview": {
+        "additionalProperties": false,
+        "description": "Small read/tool preview; not a recommendation or card schema.",
+        "properties": {
+          "creator_label": {
+            "anyOf": [
+              {
+                "maxLength": 300,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Creator Label"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/ProjectionProvenance"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/ContentRef"
+          },
+          "source_timestamp": {
+            "format": "date-time",
+            "title": "Source Timestamp",
+            "type": "string"
+          },
+          "summary": {
+            "maxLength": 4000,
+            "title": "Summary",
+            "type": "string"
+          },
+          "title": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ref",
+          "title",
+          "summary",
+          "source_timestamp",
+          "provenance"
+        ],
+        "title": "ContentPreview",
+        "type": "object"
+      },
+      "ContentRef": {
+        "additionalProperties": false,
+        "description": "Canonical cross-process identity for one provider-native record.\n\nURL normalization remains provider-owned. This layer validates and stores\nthe provider's canonical HTTP(S) result without rewriting it.",
+        "properties": {
+          "canonical_url": {
+            "maxLength": 2048,
+            "pattern": "^https?://[^\\s]+$",
+            "title": "Canonical Url",
+            "type": "string"
+          },
+          "content_kind": {
+            "$ref": "#/components/schemas/ContentKind"
+          },
+          "provider_content_id": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Provider Content Id",
+            "type": "string"
+          },
+          "provider_id": {
+            "$ref": "#/components/schemas/ProviderId"
+          }
+        },
+        "required": [
+          "provider_id",
+          "content_kind",
+          "provider_content_id",
+          "canonical_url"
+        ],
+        "title": "ContentRef",
+        "type": "object"
+      },
+      "ContentResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "$ref": "#/components/schemas/NativeContent"
+          }
+        },
+        "required": [
+          "content"
+        ],
+        "title": "ContentResponse",
+        "type": "object"
+      },
+      "ContentSavedObservation": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Id"
+          },
+          "content_ref": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ContentRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "event_type": {
+            "const": "content_saved",
+            "default": "content_saved",
+            "title": "Event Type",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "maxLength": 384,
+            "minLength": 1,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "observation_id": {
+            "pattern": "^obs_[0-9a-f]{32}$",
+            "title": "Observation Id",
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/EmptyPayload"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/ObservationProvenance"
+          },
+          "received_at": {
+            "format": "date-time",
+            "title": "Received At",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "observation_id",
+          "idempotency_key",
+          "occurred_at",
+          "received_at",
+          "provenance",
+          "payload"
+        ],
+        "title": "ContentSavedObservation",
+        "type": "object"
+      },
+      "Conversation": {
+        "additionalProperties": false,
+        "properties": {
+          "conversation_id": {
+            "pattern": "^conv_[0-9a-f]{32}$",
+            "title": "Conversation Id",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "retention_days": {
+            "default": 30,
+            "maximum": 365.0,
+            "minimum": 1.0,
+            "title": "Retention Days",
+            "type": "integer"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/ConversationScope"
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ConversationSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "conversation_id",
+          "scope",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "Conversation",
+        "type": "object"
+      },
+      "ConversationMessage": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "maxLength": 16000,
+            "title": "Content",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "maxLength": 200,
+            "minLength": 8,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "message_id": {
+            "pattern": "^msg_[0-9a-f]{32}$",
+            "title": "Message Id",
+            "type": "string"
+          },
+          "pending_action": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PendingActionSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "references": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 32,
+            "title": "References",
+            "type": "array"
+          },
+          "role": {
+            "$ref": "#/components/schemas/ConversationRole"
+          },
+          "tool_calls": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ToolCallSummary"
+            },
+            "maxItems": 16,
+            "title": "Tool Calls",
+            "type": "array"
+          },
+          "usage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TurnUsage"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "user_correction": {
+            "default": false,
+            "title": "User Correction",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "message_id",
+          "role",
+          "content",
+          "created_at",
+          "idempotency_key"
+        ],
+        "title": "ConversationMessage",
+        "type": "object"
+      },
+      "ConversationResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "conversation": {
+            "$ref": "#/components/schemas/Conversation"
+          },
+          "messages": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ConversationMessage"
+            },
+            "title": "Messages",
+            "type": "array"
+          }
+        },
+        "required": [
+          "conversation"
+        ],
+        "title": "ConversationResponse",
+        "type": "object"
+      },
+      "ConversationRole": {
+        "enum": [
+          "user",
+          "assistant",
+          "tool"
+        ],
+        "title": "ConversationRole",
+        "type": "string"
+      },
+      "ConversationScope": {
+        "additionalProperties": false,
+        "properties": {
+          "device_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Device Id",
+            "type": "string"
+          },
+          "local_user_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Local User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "local_user_id",
+          "device_id"
+        ],
+        "title": "ConversationScope",
+        "type": "object"
+      },
+      "ConversationSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "confirmed_facts": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 100,
+            "title": "Confirmed Facts",
+            "type": "array"
+          },
+          "model_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Model Id",
+            "type": "string"
+          },
+          "references": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 100,
+            "title": "References",
+            "type": "array"
+          },
+          "text": {
+            "maxLength": 8000,
+            "title": "Text",
+            "type": "string"
+          },
+          "unresolved_actions": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/PendingActionSummary"
+            },
+            "maxItems": 25,
+            "title": "Unresolved Actions",
+            "type": "array"
+          },
+          "user_corrections": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "User Corrections",
+            "type": "array"
+          },
+          "version": {
+            "minimum": 1.0,
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "text",
+          "model_id",
+          "version"
+        ],
+        "title": "ConversationSummary",
+        "type": "object"
+      },
+      "DeterministicProfileEditObservation": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Id"
+          },
+          "content_ref": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ContentRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "event_type": {
+            "const": "deterministic_profile_edit",
+            "default": "deterministic_profile_edit",
+            "title": "Event Type",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "maxLength": 384,
+            "minLength": 1,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "observation_id": {
+            "pattern": "^obs_[0-9a-f]{32}$",
+            "title": "Observation Id",
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ProfileEditPayload"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/ObservationProvenance"
+          },
+          "received_at": {
+            "format": "date-time",
+            "title": "Received At",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "observation_id",
+          "idempotency_key",
+          "occurred_at",
+          "received_at",
+          "provenance",
+          "payload"
+        ],
+        "title": "DeterministicProfileEditObservation",
+        "type": "object"
+      },
+      "DialogueProfile": {
+        "additionalProperties": false,
+        "properties": {
+          "insights": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 10,
+            "title": "Insights",
+            "type": "array"
+          },
+          "preference_summary": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Preference Summary",
+            "type": "array"
+          },
+          "version": {
+            "default": 1,
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "preference_summary",
+          "insights"
+        ],
+        "title": "DialogueProfile",
+        "type": "object"
+      },
+      "DisconnectSourceRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Id"
+          },
+          "idempotency_key": {
+            "maxLength": 200,
+            "minLength": 8,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "provider_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Provider Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider_id",
+          "idempotency_key"
+        ],
+        "title": "DisconnectSourceRequest",
+        "type": "object"
+      },
+      "EditProfileResult": {
+        "additionalProperties": false,
+        "properties": {
+          "observation_id": {
+            "title": "Observation Id",
+            "type": "string"
+          },
+          "profile": {
+            "$ref": "#/components/schemas/CanonicalProfile"
+          }
+        },
+        "required": [
+          "profile",
+          "observation_id"
+        ],
+        "title": "EditProfileResult",
+        "type": "object"
+      },
+      "EmergingInterestClaim": {
+        "additionalProperties": false,
+        "properties": {
+          "claim_id": {
+            "pattern": "^claim_[0-9a-f]{32}$",
+            "title": "Claim Id",
+            "type": "string"
+          },
+          "confidence": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Confidence",
+            "type": "number"
+          },
+          "evidence_ids": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 64,
+            "minItems": 1,
+            "title": "Evidence Ids",
+            "type": "array"
+          },
+          "fresh_at": {
+            "format": "date-time",
+            "title": "Fresh At",
+            "type": "string"
+          },
+          "kind": {
+            "const": "emerging_interest",
+            "default": "emerging_interest",
+            "title": "Kind",
+            "type": "string"
+          },
+          "lifecycle": {
+            "$ref": "#/components/schemas/ClaimLifecycle",
+            "default": "emerging"
+          },
+          "value": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "claim_id",
+          "confidence",
+          "fresh_at",
+          "evidence_ids",
+          "value"
+        ],
+        "title": "EmergingInterestClaim",
+        "type": "object"
+      },
+      "EmptyPayload": {
+        "additionalProperties": false,
+        "properties": {},
+        "title": "EmptyPayload",
+        "type": "object"
+      },
+      "ErrorCode": {
+        "enum": [
+          "validation",
+          "unauthorized",
+          "forbidden",
+          "unavailable_capability",
+          "conflict",
+          "rate_limit",
+          "temporary_failure",
+          "not_found",
+          "method_not_allowed"
+        ],
+        "title": "ErrorCode",
+        "type": "string"
+      },
+      "ErrorDetail": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "$ref": "#/components/schemas/ErrorCode"
+          },
+          "message": {
+            "maxLength": 500,
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "ErrorDetail",
+        "type": "object"
+      },
+      "ErrorEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ErrorDetail"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "title": "ErrorEnvelope",
+        "type": "object"
+      },
+      "FeedbackRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Id"
+          },
+          "content_ref": {
+            "$ref": "#/components/schemas/ContentRef"
+          },
+          "dwell_ms": {
+            "anyOf": [
+              {
+                "maximum": 86400000.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dwell Ms"
+          },
+          "idempotency_key": {
+            "maxLength": 200,
+            "minLength": 8,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "opened",
+              "liked",
+              "disliked",
+              "saved",
+              "dismissed"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "shown_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Shown Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "idempotency_key",
+          "shown_id",
+          "content_ref",
+          "kind"
+        ],
+        "title": "FeedbackRequest",
+        "type": "object"
+      },
+      "FeedbackResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "result": {
+            "$ref": "#/components/schemas/RecordFeedbackResult"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "title": "FeedbackResponse",
+        "type": "object"
+      },
+      "FieldKind": {
+        "enum": [
+          "text",
+          "token",
+          "cookie"
+        ],
+        "title": "FieldKind",
+        "type": "string"
+      },
+      "FormField": {
+        "additionalProperties": false,
+        "description": "A safe field descriptor, never a submitted value.",
+        "properties": {
+          "field_id": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}$",
+            "title": "Field Id",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/FieldKind"
+          },
+          "label": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Label",
+            "type": "string"
+          },
+          "max_length": {
+            "default": 65536,
+            "maximum": 65536.0,
+            "minimum": 1.0,
+            "title": "Max Length",
+            "type": "integer"
+          },
+          "min_length": {
+            "default": 1,
+            "maximum": 65536.0,
+            "minimum": 0.0,
+            "title": "Min Length",
+            "type": "integer"
+          },
+          "pattern": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pattern"
+          },
+          "required": {
+            "default": true,
+            "title": "Required",
+            "type": "boolean"
+          },
+          "secret": {
+            "title": "Secret",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "field_id",
+          "label",
+          "kind",
+          "secret"
+        ],
+        "title": "FormField",
+        "type": "object"
+      },
+      "HealthIssue": {
+        "description": "Safe diagnostic categories; exception messages are intentionally excluded.",
+        "enum": [
+          "component_failure",
+          "optional_component_failure",
+          "job_failure",
+          "job_timeout",
+          "shutdown_timeout"
+        ],
+        "title": "HealthIssue",
+        "type": "string"
+      },
+      "HealthSnapshot": {
+        "additionalProperties": false,
+        "description": "Immutable health report containing no payloads or free-form errors.",
+        "properties": {
+          "checked_at": {
+            "format": "date-time",
+            "title": "Checked At",
+            "type": "string"
+          },
+          "component_id": {
+            "minLength": 1,
+            "title": "Component Id",
+            "type": "string"
+          },
+          "issue": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HealthIssue"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "jobs": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/JobHealth"
+            },
+            "title": "Jobs",
+            "type": "array"
+          },
+          "status": {
+            "$ref": "#/components/schemas/HealthStatus"
+          }
+        },
+        "required": [
+          "component_id",
+          "status",
+          "checked_at"
+        ],
+        "title": "HealthSnapshot",
+        "type": "object"
+      },
+      "HealthStatus": {
+        "description": "Aggregate readiness state for a component.",
+        "enum": [
+          "starting",
+          "healthy",
+          "degraded",
+          "unhealthy",
+          "stopped"
+        ],
+        "title": "HealthStatus",
+        "type": "string"
+      },
+      "HistoryImportPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "progress_seconds": {
+            "anyOf": [
+              {
+                "maximum": 31536000.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Progress Seconds"
+          },
+          "provider_event_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Provider Event Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider_event_id"
+        ],
+        "title": "HistoryImportPayload",
+        "type": "object"
+      },
+      "HostOpenPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "surface": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[a-z0-9_-]+$",
+            "title": "Surface",
+            "type": "string"
+          }
+        },
+        "required": [
+          "surface"
+        ],
+        "title": "HostOpenPayload",
+        "type": "object"
+      },
+      "InsightClaim": {
+        "additionalProperties": false,
+        "properties": {
+          "claim_id": {
+            "pattern": "^claim_[0-9a-f]{32}$",
+            "title": "Claim Id",
+            "type": "string"
+          },
+          "confidence": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Confidence",
+            "type": "number"
+          },
+          "evidence_ids": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 64,
+            "minItems": 1,
+            "title": "Evidence Ids",
+            "type": "array"
+          },
+          "fresh_at": {
+            "format": "date-time",
+            "title": "Fresh At",
+            "type": "string"
+          },
+          "kind": {
+            "const": "insight",
+            "default": "insight",
+            "title": "Kind",
+            "type": "string"
+          },
+          "lifecycle": {
+            "$ref": "#/components/schemas/ClaimLifecycle",
+            "default": "active"
+          },
+          "value": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "claim_id",
+          "confidence",
+          "fresh_at",
+          "evidence_ids",
+          "value"
+        ],
+        "title": "InsightClaim",
+        "type": "object"
+      },
+      "InteractionKind": {
+        "enum": [
+          "none",
+          "secret_form"
+        ],
+        "title": "InteractionKind",
+        "type": "string"
+      },
+      "JobHealth": {
+        "additionalProperties": false,
+        "description": "Bounded execution metadata for one job.",
+        "properties": {
+          "active_runs": {
+            "minimum": 0.0,
+            "title": "Active Runs",
+            "type": "integer"
+          },
+          "job_id": {
+            "minLength": 1,
+            "title": "Job Id",
+            "type": "string"
+          },
+          "last_result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/JobResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "runs_completed": {
+            "minimum": 0.0,
+            "title": "Runs Completed",
+            "type": "integer"
+          },
+          "runs_started": {
+            "minimum": 0.0,
+            "title": "Runs Started",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "job_id",
+          "active_runs",
+          "runs_started",
+          "runs_completed"
+        ],
+        "title": "JobHealth",
+        "type": "object"
+      },
+      "JobResult": {
+        "description": "Payload-free outcome of a supervised job run.",
+        "enum": [
+          "success",
+          "error",
+          "timeout",
+          "cancelled"
+        ],
+        "title": "JobResult",
+        "type": "string"
+      },
+      "NativeContent": {
+        "additionalProperties": false,
+        "description": "Validated provider-native record at the heterogeneous registry boundary.\n\nProviders must validate external JSON into their own Pydantic model before\nconstructing this envelope. Untyped mappings are rejected.",
+        "properties": {
+          "payload": {
+            "$ref": "#/components/schemas/BaseModel"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/ContentRef"
+          },
+          "schema_version": {
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "ref",
+          "schema_version",
+          "payload"
+        ],
+        "title": "NativeContent",
+        "type": "object"
+      },
+      "ObservationProvenance": {
+        "additionalProperties": false,
+        "description": "Producer identity and authentication-derived trust.",
+        "properties": {
+          "authenticated": {
+            "title": "Authenticated",
+            "type": "boolean"
+          },
+          "device_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Device Id"
+          },
+          "producer_id": {
+            "maxLength": 80,
+            "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)+$",
+            "title": "Producer Id",
+            "type": "string"
+          },
+          "source": {
+            "$ref": "#/components/schemas/ObservationSource"
+          },
+          "trust_level": {
+            "$ref": "#/components/schemas/TrustLevel"
+          }
+        },
+        "required": [
+          "producer_id",
+          "source",
+          "authenticated",
+          "trust_level"
+        ],
+        "title": "ObservationProvenance",
+        "type": "object"
+      },
+      "ObservationSource": {
+        "enum": [
+          "recommendation",
+          "host",
+          "assistant",
+          "profile_editor",
+          "provider_import"
+        ],
+        "title": "ObservationSource",
+        "type": "string"
+      },
+      "ObservationsRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "allowed_event_types": {
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "title": "Allowed Event Types",
+            "type": "array"
+          },
+          "idempotency_key": {
+            "maxLength": 200,
+            "minLength": 8,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "observations": {
+            "items": {
+              "discriminator": {
+                "mapping": {
+                  "assistant_feedback": "#/components/schemas/AssistantFeedbackObservation",
+                  "content_opened": "#/components/schemas/ContentOpenedObservation",
+                  "content_saved": "#/components/schemas/ContentSavedObservation",
+                  "deterministic_profile_edit": "#/components/schemas/DeterministicProfileEditObservation",
+                  "preference_statement": "#/components/schemas/PreferenceStatementObservation",
+                  "provider_history_import": "#/components/schemas/ProviderHistoryImportObservation",
+                  "recommendation_disliked": "#/components/schemas/RecommendationDislikedObservation",
+                  "recommendation_dismissed": "#/components/schemas/RecommendationDismissedObservation",
+                  "recommendation_liked": "#/components/schemas/RecommendationLikedObservation",
+                  "recommendation_opened": "#/components/schemas/RecommendationOpenedObservation",
+                  "recommendation_saved": "#/components/schemas/RecommendationSavedObservation",
+                  "recommendation_shown": "#/components/schemas/RecommendationShownObservation"
+                },
+                "propertyName": "event_type"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/RecommendationShownObservation"
+                },
+                {
+                  "$ref": "#/components/schemas/RecommendationOpenedObservation"
+                },
+                {
+                  "$ref": "#/components/schemas/RecommendationLikedObservation"
+                },
+                {
+                  "$ref": "#/components/schemas/RecommendationDislikedObservation"
+                },
+                {
+                  "$ref": "#/components/schemas/RecommendationSavedObservation"
+                },
+                {
+                  "$ref": "#/components/schemas/RecommendationDismissedObservation"
+                },
+                {
+                  "$ref": "#/components/schemas/ContentOpenedObservation"
+                },
+                {
+                  "$ref": "#/components/schemas/ContentSavedObservation"
+                },
+                {
+                  "$ref": "#/components/schemas/AssistantFeedbackObservation"
+                },
+                {
+                  "$ref": "#/components/schemas/PreferenceStatementObservation"
+                },
+                {
+                  "$ref": "#/components/schemas/DeterministicProfileEditObservation"
+                },
+                {
+                  "$ref": "#/components/schemas/ProviderHistoryImportObservation"
+                }
+              ]
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "title": "Observations",
+            "type": "array"
+          }
+        },
+        "required": [
+          "idempotency_key",
+          "observations",
+          "allowed_event_types"
+        ],
+        "title": "ObservationsRequest",
+        "type": "object"
+      },
+      "ObservationsResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "result": {
+            "$ref": "#/components/schemas/RecordBatchResult"
+          }
+        },
+        "required": [
+          "result"
+        ],
+        "title": "ObservationsResponse",
+        "type": "object"
+      },
+      "OpenedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "dwell_ms": {
+            "anyOf": [
+              {
+                "maximum": 86400000.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dwell Ms"
+          }
+        },
+        "title": "OpenedPayload",
+        "type": "object"
+      },
+      "OverrideOperation": {
+        "enum": [
+          "set",
+          "remove"
+        ],
+        "title": "OverrideOperation",
+        "type": "string"
+      },
+      "PendingAction": {
+        "additionalProperties": false,
+        "description": "Safe immutable confirmation record; never stores credentials or executable payloads.",
+        "properties": {
+          "account_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Id"
+          },
+          "action_id": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}$",
+            "title": "Action Id",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "maxLength": 200,
+            "minLength": 8,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "pending_action_id": {
+            "pattern": "^pending_[0-9a-f]{32}$",
+            "title": "Pending Action Id",
+            "type": "string"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/ContentRef"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ActionResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "safe_preview": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Safe Preview",
+            "type": "string"
+          },
+          "user_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pending_action_id",
+          "idempotency_key",
+          "action_id",
+          "ref",
+          "user_id",
+          "safe_preview",
+          "created_at",
+          "expires_at"
+        ],
+        "title": "PendingAction",
+        "type": "object"
+      },
+      "PendingActionResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/PendingAction"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "title": "PendingActionResponse",
+        "type": "object"
+      },
+      "PendingActionSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "effect": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Effect",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "pending_action_id": {
+            "pattern": "^pending_[0-9a-f]{32}$",
+            "title": "Pending Action Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pending_action_id",
+          "effect",
+          "expires_at"
+        ],
+        "title": "PendingActionSummary",
+        "type": "object"
+      },
+      "Permission": {
+        "enum": [
+          "read_public",
+          "read_private",
+          "write"
+        ],
+        "title": "Permission",
+        "type": "string"
+      },
+      "PreferenceClaim": {
+        "additionalProperties": false,
+        "properties": {
+          "claim_id": {
+            "pattern": "^claim_[0-9a-f]{32}$",
+            "title": "Claim Id",
+            "type": "string"
+          },
+          "confidence": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Confidence",
+            "type": "number"
+          },
+          "dimension": {
+            "$ref": "#/components/schemas/PreferenceDimension"
+          },
+          "evidence_ids": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 64,
+            "minItems": 1,
+            "title": "Evidence Ids",
+            "type": "array"
+          },
+          "fresh_at": {
+            "format": "date-time",
+            "title": "Fresh At",
+            "type": "string"
+          },
+          "kind": {
+            "const": "preference",
+            "default": "preference",
+            "title": "Kind",
+            "type": "string"
+          },
+          "lifecycle": {
+            "$ref": "#/components/schemas/ClaimLifecycle",
+            "default": "active"
+          },
+          "value": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "claim_id",
+          "confidence",
+          "fresh_at",
+          "evidence_ids",
+          "dimension",
+          "value"
+        ],
+        "title": "PreferenceClaim",
+        "type": "object"
+      },
+      "PreferenceDimension": {
+        "enum": [
+          "content",
+          "style",
+          "creator",
+          "language",
+          "provider"
+        ],
+        "title": "PreferenceDimension",
+        "type": "string"
+      },
+      "PreferencePayload": {
+        "additionalProperties": false,
+        "properties": {
+          "statement": {
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Statement",
+            "type": "string"
+          }
+        },
+        "required": [
+          "statement"
+        ],
+        "title": "PreferencePayload",
+        "type": "object"
+      },
+      "PreferenceStatementObservation": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Id"
+          },
+          "content_ref": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ContentRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "event_type": {
+            "const": "preference_statement",
+            "default": "preference_statement",
+            "title": "Event Type",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "maxLength": 384,
+            "minLength": 1,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "observation_id": {
+            "pattern": "^obs_[0-9a-f]{32}$",
+            "title": "Observation Id",
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/PreferencePayload"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/ObservationProvenance"
+          },
+          "received_at": {
+            "format": "date-time",
+            "title": "Received At",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "observation_id",
+          "idempotency_key",
+          "occurred_at",
+          "received_at",
+          "provenance",
+          "payload"
+        ],
+        "title": "PreferenceStatementObservation",
+        "type": "object"
+      },
+      "ProfileEditPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "field": {
+            "pattern": "^[a-z][a-z0-9_.-]{0,63}$",
+            "title": "Field",
+            "type": "string"
+          },
+          "operation": {
+            "enum": [
+              "set",
+              "remove"
+            ],
+            "title": "Operation",
+            "type": "string"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "maxLength": 1000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "required": [
+          "field",
+          "operation"
+        ],
+        "title": "ProfileEditPayload",
+        "type": "object"
+      },
+      "ProfileEditRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Account Id",
+            "type": "string"
+          },
+          "claim_id": {
+            "pattern": "^claim_[0-9a-f]{32}$",
+            "title": "Claim Id",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "maxLength": 200,
+            "minLength": 8,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "operation": {
+            "enum": [
+              "set",
+              "remove"
+            ],
+            "title": "Operation",
+            "type": "string"
+          },
+          "profile_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Profile Id",
+            "type": "string"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "required": [
+          "idempotency_key",
+          "profile_id",
+          "account_id",
+          "claim_id",
+          "operation"
+        ],
+        "title": "ProfileEditRequest",
+        "type": "object"
+      },
+      "ProfileResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "$ref": "#/components/schemas/DialogueProfile"
+          }
+        },
+        "required": [
+          "profile"
+        ],
+        "title": "ProfileResponse",
+        "type": "object"
+      },
+      "ProjectionProvenance": {
+        "additionalProperties": false,
+        "description": "Native source identity and projection time.",
+        "properties": {
+          "native_schema_version": {
+            "minimum": 1.0,
+            "title": "Native Schema Version",
+            "type": "integer"
+          },
+          "projected_at": {
+            "format": "date-time",
+            "title": "Projected At",
+            "type": "string"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/ContentRef"
+          }
+        },
+        "required": [
+          "ref",
+          "native_schema_version",
+          "projected_at"
+        ],
+        "title": "ProjectionProvenance",
+        "type": "object"
+      },
+      "ProposeActionRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Id"
+          },
+          "action_id": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}$",
+            "title": "Action Id",
+            "type": "string"
+          },
+          "expires_in_seconds": {
+            "default": 300,
+            "maximum": 3600.0,
+            "minimum": 1.0,
+            "title": "Expires In Seconds",
+            "type": "integer"
+          },
+          "idempotency_key": {
+            "maxLength": 200,
+            "minLength": 8,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/ContentRef"
+          },
+          "safe_preview": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Safe Preview",
+            "type": "string"
+          },
+          "user_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "idempotency_key",
+          "action_id",
+          "ref",
+          "user_id",
+          "safe_preview"
+        ],
+        "title": "ProposeActionRequest",
+        "type": "object"
+      },
+      "ProviderHistoryImportObservation": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Id"
+          },
+          "content_ref": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ContentRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "event_type": {
+            "const": "provider_history_import",
+            "default": "provider_history_import",
+            "title": "Event Type",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "maxLength": 384,
+            "minLength": 1,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "observation_id": {
+            "pattern": "^obs_[0-9a-f]{32}$",
+            "title": "Observation Id",
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/HistoryImportPayload"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/ObservationProvenance"
+          },
+          "received_at": {
+            "format": "date-time",
+            "title": "Received At",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "observation_id",
+          "idempotency_key",
+          "occurred_at",
+          "received_at",
+          "provenance",
+          "payload"
+        ],
+        "title": "ProviderHistoryImportObservation",
+        "type": "object"
+      },
+      "ProviderId": {
+        "additionalProperties": false,
+        "description": "Stable lower-case provider identity; never a display name.",
+        "properties": {
+          "value": {
+            "pattern": "^[a-z][a-z0-9_-]{0,63}$",
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "value"
+        ],
+        "title": "ProviderId",
+        "type": "object"
+      },
+      "ReasonPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          }
+        },
+        "title": "ReasonPayload",
+        "type": "object"
+      },
+      "RecommendationDislikedObservation": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Id"
+          },
+          "content_ref": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ContentRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "event_type": {
+            "const": "recommendation_disliked",
+            "default": "recommendation_disliked",
+            "title": "Event Type",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "maxLength": 384,
+            "minLength": 1,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "observation_id": {
+            "pattern": "^obs_[0-9a-f]{32}$",
+            "title": "Observation Id",
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ReasonPayload"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/ObservationProvenance"
+          },
+          "received_at": {
+            "format": "date-time",
+            "title": "Received At",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "observation_id",
+          "idempotency_key",
+          "occurred_at",
+          "received_at",
+          "provenance",
+          "payload"
+        ],
+        "title": "RecommendationDislikedObservation",
+        "type": "object"
+      },
+      "RecommendationDismissedObservation": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Id"
+          },
+          "content_ref": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ContentRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "event_type": {
+            "const": "recommendation_dismissed",
+            "default": "recommendation_dismissed",
+            "title": "Event Type",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "maxLength": 384,
+            "minLength": 1,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "observation_id": {
+            "pattern": "^obs_[0-9a-f]{32}$",
+            "title": "Observation Id",
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ReasonPayload"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/ObservationProvenance"
+          },
+          "received_at": {
+            "format": "date-time",
+            "title": "Received At",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "observation_id",
+          "idempotency_key",
+          "occurred_at",
+          "received_at",
+          "provenance",
+          "payload"
+        ],
+        "title": "RecommendationDismissedObservation",
+        "type": "object"
+      },
+      "RecommendationLikedObservation": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Id"
+          },
+          "content_ref": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ContentRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "event_type": {
+            "const": "recommendation_liked",
+            "default": "recommendation_liked",
+            "title": "Event Type",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "maxLength": 384,
+            "minLength": 1,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "observation_id": {
+            "pattern": "^obs_[0-9a-f]{32}$",
+            "title": "Observation Id",
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/EmptyPayload"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/ObservationProvenance"
+          },
+          "received_at": {
+            "format": "date-time",
+            "title": "Received At",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "observation_id",
+          "idempotency_key",
+          "occurred_at",
+          "received_at",
+          "provenance",
+          "payload"
+        ],
+        "title": "RecommendationLikedObservation",
+        "type": "object"
+      },
+      "RecommendationOpenedObservation": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Id"
+          },
+          "content_ref": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ContentRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "event_type": {
+            "const": "recommendation_opened",
+            "default": "recommendation_opened",
+            "title": "Event Type",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "maxLength": 384,
+            "minLength": 1,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "observation_id": {
+            "pattern": "^obs_[0-9a-f]{32}$",
+            "title": "Observation Id",
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/OpenedPayload"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/ObservationProvenance"
+          },
+          "received_at": {
+            "format": "date-time",
+            "title": "Received At",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "observation_id",
+          "idempotency_key",
+          "occurred_at",
+          "received_at",
+          "provenance",
+          "payload"
+        ],
+        "title": "RecommendationOpenedObservation",
+        "type": "object"
+      },
+      "RecommendationPage": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/SelectionRecord"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "RecommendationPage",
+        "type": "object"
+      },
+      "RecommendationSavedObservation": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Id"
+          },
+          "content_ref": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ContentRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "event_type": {
+            "const": "recommendation_saved",
+            "default": "recommendation_saved",
+            "title": "Event Type",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "maxLength": 384,
+            "minLength": 1,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "observation_id": {
+            "pattern": "^obs_[0-9a-f]{32}$",
+            "title": "Observation Id",
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/EmptyPayload"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/ObservationProvenance"
+          },
+          "received_at": {
+            "format": "date-time",
+            "title": "Received At",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "observation_id",
+          "idempotency_key",
+          "occurred_at",
+          "received_at",
+          "provenance",
+          "payload"
+        ],
+        "title": "RecommendationSavedObservation",
+        "type": "object"
+      },
+      "RecommendationShownObservation": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Id"
+          },
+          "content_ref": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ContentRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "event_type": {
+            "const": "recommendation_shown",
+            "default": "recommendation_shown",
+            "title": "Event Type",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "maxLength": 384,
+            "minLength": 1,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "observation_id": {
+            "pattern": "^obs_[0-9a-f]{32}$",
+            "title": "Observation Id",
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ShownPayload"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/ObservationProvenance"
+          },
+          "received_at": {
+            "format": "date-time",
+            "title": "Received At",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "observation_id",
+          "idempotency_key",
+          "occurred_at",
+          "received_at",
+          "provenance",
+          "payload"
+        ],
+        "title": "RecommendationShownObservation",
+        "type": "object"
+      },
+      "RecordBatchResult": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/RecordItemResult"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "RecordBatchResult",
+        "type": "object"
+      },
+      "RecordFeedbackResult": {
+        "additionalProperties": false,
+        "properties": {
+          "feedback_id": {
+            "title": "Feedback Id",
+            "type": "string"
+          },
+          "inserted": {
+            "title": "Inserted",
+            "type": "boolean"
+          },
+          "observation_id": {
+            "title": "Observation Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "feedback_id",
+          "observation_id",
+          "inserted"
+        ],
+        "title": "RecordFeedbackResult",
+        "type": "object"
+      },
+      "RecordItemResult": {
+        "properties": {
+          "index": {
+            "title": "Index",
+            "type": "integer"
+          },
+          "observation_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observation Id"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "status": {
+            "$ref": "#/components/schemas/RecordStatus"
+          }
+        },
+        "required": [
+          "index",
+          "status"
+        ],
+        "title": "RecordItemResult",
+        "type": "object"
+      },
+      "RecordStatus": {
+        "enum": [
+          "inserted",
+          "duplicate",
+          "rejected"
+        ],
+        "title": "RecordStatus",
+        "type": "string"
+      },
+      "RefreshRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "idempotency_key": {
+            "maxLength": 200,
+            "minLength": 8,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "maximum_items": {
+            "default": 50,
+            "maximum": 100.0,
+            "minimum": 1.0,
+            "title": "Maximum Items",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "idempotency_key"
+        ],
+        "title": "RefreshRequest",
+        "type": "object"
+      },
+      "RefreshResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "decision": {
+            "title": "Decision",
+            "type": "string"
+          }
+        },
+        "required": [
+          "decision"
+        ],
+        "title": "RefreshResponse",
+        "type": "object"
+      },
+      "RuntimeResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "health": {
+            "$ref": "#/components/schemas/HealthSnapshot"
+          }
+        },
+        "required": [
+          "health"
+        ],
+        "title": "RuntimeResponse",
+        "type": "object"
+      },
+      "ScoreContribution": {
+        "additionalProperties": false,
+        "properties": {
+          "component": {
+            "title": "Component",
+            "type": "string"
+          },
+          "value": {
+            "title": "Value",
+            "type": "number"
+          }
+        },
+        "required": [
+          "component",
+          "value"
+        ],
+        "title": "ScoreContribution",
+        "type": "object"
+      },
+      "SearchResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ContentPreview"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "SearchResponse",
+        "type": "object"
+      },
+      "SelectionRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "candidate_id": {
+            "title": "Candidate Id",
+            "type": "string"
+          },
+          "contributions": {
+            "items": {
+              "$ref": "#/components/schemas/ScoreContribution"
+            },
+            "title": "Contributions",
+            "type": "array"
+          },
+          "rank": {
+            "minimum": 1.0,
+            "title": "Rank",
+            "type": "integer"
+          },
+          "recommendation_id": {
+            "pattern": "^rec_[0-9a-f]{32}$",
+            "title": "Recommendation Id",
+            "type": "string"
+          },
+          "score": {
+            "title": "Score",
+            "type": "number"
+          },
+          "seed": {
+            "title": "Seed",
+            "type": "integer"
+          },
+          "selected_at": {
+            "format": "date-time",
+            "title": "Selected At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "recommendation_id",
+          "candidate_id",
+          "rank",
+          "score",
+          "contributions",
+          "selected_at",
+          "seed"
+        ],
+        "title": "SelectionRecord",
+        "type": "object"
+      },
+      "ShownPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "batch_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Batch Id",
+            "type": "string"
+          },
+          "position": {
+            "maximum": 10000.0,
+            "minimum": 0.0,
+            "title": "Position",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "batch_id",
+          "position"
+        ],
+        "title": "ShownPayload",
+        "type": "object"
+      },
+      "SourceFormResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "form": {
+            "$ref": "#/components/schemas/ConnectionForm"
+          }
+        },
+        "required": [
+          "form"
+        ],
+        "title": "SourceFormResponse",
+        "type": "object"
+      },
+      "SourceListResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/AccessStatus"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "SourceListResponse",
+        "type": "object"
+      },
+      "SourceMutationResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "availability_refreshed": {
+            "default": true,
+            "title": "Availability Refreshed",
+            "type": "boolean"
+          },
+          "recoverable": {
+            "default": false,
+            "title": "Recoverable",
+            "type": "boolean"
+          },
+          "status": {
+            "$ref": "#/components/schemas/AccessStatus"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "SourceMutationResponse",
+        "type": "object"
+      },
+      "StableInterestClaim": {
+        "additionalProperties": false,
+        "properties": {
+          "claim_id": {
+            "pattern": "^claim_[0-9a-f]{32}$",
+            "title": "Claim Id",
+            "type": "string"
+          },
+          "confidence": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Confidence",
+            "type": "number"
+          },
+          "evidence_ids": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 64,
+            "minItems": 1,
+            "title": "Evidence Ids",
+            "type": "array"
+          },
+          "fresh_at": {
+            "format": "date-time",
+            "title": "Fresh At",
+            "type": "string"
+          },
+          "kind": {
+            "const": "stable_interest",
+            "default": "stable_interest",
+            "title": "Kind",
+            "type": "string"
+          },
+          "lifecycle": {
+            "$ref": "#/components/schemas/ClaimLifecycle",
+            "default": "active"
+          },
+          "value": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "claim_id",
+          "confidence",
+          "fresh_at",
+          "evidence_ids",
+          "value"
+        ],
+        "title": "StableInterestClaim",
+        "type": "object"
+      },
+      "ToolCallSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "outcome": {
+            "enum": [
+              "succeeded",
+              "failed",
+              "pending"
+            ],
+            "title": "Outcome",
+            "type": "string"
+          },
+          "safe_summary": {
+            "maxLength": 1000,
+            "title": "Safe Summary",
+            "type": "string"
+          },
+          "tool_name": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}$",
+            "title": "Tool Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tool_name",
+          "outcome",
+          "safe_summary"
+        ],
+        "title": "ToolCallSummary",
+        "type": "object"
+      },
+      "TrustLevel": {
+        "enum": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "title": "TrustLevel",
+        "type": "string"
+      },
+      "TurnUsage": {
+        "additionalProperties": false,
+        "properties": {
+          "input_tokens": {
+            "minimum": 0.0,
+            "title": "Input Tokens",
+            "type": "integer"
+          },
+          "output_tokens": {
+            "minimum": 0.0,
+            "title": "Output Tokens",
+            "type": "integer"
+          },
+          "request_count": {
+            "minimum": 0.0,
+            "title": "Request Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "request_count",
+          "input_tokens",
+          "output_tokens"
+        ],
+        "title": "TurnUsage",
+        "type": "object"
+      },
+      "UserOverride": {
+        "additionalProperties": false,
+        "properties": {
+          "claim_id": {
+            "pattern": "^claim_[0-9a-f]{32}$",
+            "title": "Claim Id",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "operation": {
+            "$ref": "#/components/schemas/OverrideOperation"
+          },
+          "override_id": {
+            "pattern": "^override_[0-9a-f]{32}$",
+            "title": "Override Id",
+            "type": "string"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "required": [
+          "override_id",
+          "claim_id",
+          "operation",
+          "created_at"
+        ],
+        "title": "UserOverride",
+        "type": "object"
+      },
+      "VerificationFailure": {
+        "enum": [
+          "invalid_credential",
+          "expired",
+          "insufficient_scope",
+          "rate_limited",
+          "geo_blocked",
+          "network_unavailable",
+          "session_mode_unsupported"
+        ],
+        "title": "VerificationFailure",
+        "type": "string"
+      },
+      "VerificationResult": {
+        "additionalProperties": false,
+        "description": "Sanitized verification evidence; never carries provider response text.",
+        "properties": {
+          "expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "granted_permissions": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/Permission"
+            },
+            "title": "Granted Permissions",
+            "type": "array",
+            "uniqueItems": true
+          },
+          "safe_account_identity": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^[^\\x00-\\x1f\\x7f]+$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Safe Account Identity"
+          },
+          "sanitized_failure": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/VerificationFailure"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "strength": {
+            "$ref": "#/components/schemas/VerificationStrength"
+          },
+          "verified_at": {
+            "format": "date-time",
+            "title": "Verified At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "strength",
+          "verified_at"
+        ],
+        "title": "VerificationResult",
+        "type": "object"
+      },
+      "VerificationStrength": {
+        "enum": [
+          "none",
+          "local",
+          "live"
+        ],
+        "title": "VerificationStrength",
+        "type": "string"
+      }
+    }
+  },
+  "info": {
+    "title": "OpenBiliClaw API",
+    "version": "1.0.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/v1/assistant/conversations/{conversation_id}": {
+      "get": {
+        "operationId": "conversation_v1_assistant_conversations__conversation_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "conversation_id",
+            "required": true,
+            "schema": {
+              "title": "Conversation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "message_limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Message Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Device-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "title": "X-Device-Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "not_found"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "method_not_allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "validation"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "validation"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "rate_limit"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "unavailable capability or temporary timeout"
+          }
+        },
+        "summary": "Conversation",
+        "tags": [
+          "assistant"
+        ]
+      }
+    },
+    "/v1/assistant/turns": {
+      "post": {
+        "operationId": "turn_v1_assistant_turns_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Device-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "title": "X-Device-Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssistantTurnRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssistantTurnResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "not_found"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "method_not_allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "validation"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "validation"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "rate_limit"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "unavailable capability or temporary timeout"
+          }
+        },
+        "summary": "Turn",
+        "tags": [
+          "assistant"
+        ]
+      }
+    },
+    "/v1/content/actions/confirm": {
+      "post": {
+        "operationId": "confirm_v1_content_actions_confirm_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfirmActionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActionResultResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "not_found"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "method_not_allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "validation"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "validation"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "rate_limit"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "unavailable capability or temporary timeout"
+          }
+        },
+        "summary": "Confirm",
+        "tags": [
+          "content"
+        ]
+      }
+    },
+    "/v1/content/actions/propose": {
+      "post": {
+        "operationId": "propose_v1_content_actions_propose_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProposeActionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PendingActionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "not_found"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "method_not_allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "validation"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "validation"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "rate_limit"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "unavailable capability or temporary timeout"
+          }
+        },
+        "summary": "Propose",
+        "tags": [
+          "content"
+        ]
+      }
+    },
+    "/v1/content/search": {
+      "get": {
+        "operationId": "search_v1_content_search_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "provider_id",
+            "required": true,
+            "schema": {
+              "title": "Provider Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "q",
+            "required": true,
+            "schema": {
+              "maxLength": 1000,
+              "minLength": 1,
+              "title": "Q",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 50,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "not_found"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "method_not_allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "validation"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "validation"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "rate_limit"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "unavailable capability or temporary timeout"
+          }
+        },
+        "summary": "Search",
+        "tags": [
+          "content"
+        ]
+      }
+    },
+    "/v1/content/{reference}": {
+      "get": {
+        "operationId": "detail_v1_content__reference__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "reference",
+            "required": true,
+            "schema": {
+              "title": "Reference",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContentResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "not_found"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "method_not_allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "validation"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "validation"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "rate_limit"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "unavailable capability or temporary timeout"
+          }
+        },
+        "summary": "Detail",
+        "tags": [
+          "content"
+        ]
+      }
+    },
+    "/v1/events/stream": {
+      "get": {
+        "operationId": "stream_v1_events_stream_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "After",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "$defs": {
+                    "AssistantEvent": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "conversation_id": {
+                          "maxLength": 128,
+                          "minLength": 1,
+                          "title": "Conversation Id",
+                          "type": "string"
+                        },
+                        "event_id": {
+                          "minimum": 1,
+                          "title": "Event Id",
+                          "type": "integer"
+                        },
+                        "kind": {
+                          "const": "assistant",
+                          "default": "assistant",
+                          "title": "Kind",
+                          "type": "string"
+                        },
+                        "status": {
+                          "maxLength": 64,
+                          "minLength": 1,
+                          "title": "Status",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "event_id",
+                        "conversation_id",
+                        "status"
+                      ],
+                      "title": "AssistantEvent",
+                      "type": "object"
+                    },
+                    "ConnectionEvent": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "event_id": {
+                          "minimum": 1,
+                          "title": "Event Id",
+                          "type": "integer"
+                        },
+                        "kind": {
+                          "const": "connection",
+                          "default": "connection",
+                          "title": "Kind",
+                          "type": "string"
+                        },
+                        "provider_id": {
+                          "maxLength": 64,
+                          "minLength": 1,
+                          "title": "Provider Id",
+                          "type": "string"
+                        },
+                        "status": {
+                          "maxLength": 64,
+                          "minLength": 1,
+                          "title": "Status",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "event_id",
+                        "provider_id",
+                        "status"
+                      ],
+                      "title": "ConnectionEvent",
+                      "type": "object"
+                    },
+                    "JobEvent": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "component_id": {
+                          "maxLength": 128,
+                          "minLength": 1,
+                          "title": "Component Id",
+                          "type": "string"
+                        },
+                        "event_id": {
+                          "minimum": 1,
+                          "title": "Event Id",
+                          "type": "integer"
+                        },
+                        "kind": {
+                          "const": "job",
+                          "default": "job",
+                          "title": "Kind",
+                          "type": "string"
+                        },
+                        "status": {
+                          "maxLength": 64,
+                          "minLength": 1,
+                          "title": "Status",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "event_id",
+                        "component_id",
+                        "status"
+                      ],
+                      "title": "JobEvent",
+                      "type": "object"
+                    },
+                    "RecommendationEvent": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "event_id": {
+                          "minimum": 1,
+                          "title": "Event Id",
+                          "type": "integer"
+                        },
+                        "kind": {
+                          "const": "recommendation",
+                          "default": "recommendation",
+                          "title": "Kind",
+                          "type": "string"
+                        },
+                        "recommendation_id": {
+                          "maxLength": 128,
+                          "minLength": 1,
+                          "title": "Recommendation Id",
+                          "type": "string"
+                        },
+                        "status": {
+                          "maxLength": 64,
+                          "minLength": 1,
+                          "title": "Status",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "event_id",
+                        "recommendation_id",
+                        "status"
+                      ],
+                      "title": "RecommendationEvent",
+                      "type": "object"
+                    }
+                  },
+                  "discriminator": {
+                    "mapping": {
+                      "assistant": "#/$defs/AssistantEvent",
+                      "connection": "#/$defs/ConnectionEvent",
+                      "job": "#/$defs/JobEvent",
+                      "recommendation": "#/$defs/RecommendationEvent"
+                    },
+                    "propertyName": "kind"
+                  },
+                  "oneOf": [
+                    {
+                      "$ref": "#/$defs/JobEvent"
+                    },
+                    {
+                      "$ref": "#/$defs/RecommendationEvent"
+                    },
+                    {
+                      "$ref": "#/$defs/AssistantEvent"
+                    },
+                    {
+                      "$ref": "#/$defs/ConnectionEvent"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "not_found"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "method_not_allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "validation"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "validation"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "rate_limit"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "unavailable capability or temporary timeout"
+          }
+        },
+        "summary": "Stream",
+        "tags": [
+          "events"
+        ]
+      }
+    },
+    "/v1/feedback": {
+      "post": {
+        "operationId": "feedback_v1_feedback_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FeedbackRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeedbackResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "not_found"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "method_not_allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "validation"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "validation"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "rate_limit"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "unavailable capability or temporary timeout"
+          }
+        },
+        "summary": "Feedback",
+        "tags": [
+          "feedback"
+        ]
+      }
+    },
+    "/v1/observations": {
+      "post": {
+        "operationId": "observations_v1_observations_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ObservationsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ObservationsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "not_found"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "method_not_allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "validation"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "validation"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "rate_limit"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "unavailable capability or temporary timeout"
+          }
+        },
+        "summary": "Observations",
+        "tags": [
+          "feedback"
+        ]
+      }
+    },
+    "/v1/profiles/edit": {
+      "post": {
+        "operationId": "edit_profile_v1_profiles_edit_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProfileEditRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EditProfileResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "not_found"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "method_not_allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "validation"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "validation"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "rate_limit"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "unavailable capability or temporary timeout"
+          }
+        },
+        "summary": "Edit Profile",
+        "tags": [
+          "understanding"
+        ]
+      }
+    },
+    "/v1/profiles/{profile_id}": {
+      "get": {
+        "operationId": "profile_v1_profiles__profile_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "profile_id",
+            "required": true,
+            "schema": {
+              "title": "Profile Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProfileResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "not_found"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "method_not_allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "validation"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "validation"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "rate_limit"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "unavailable capability or temporary timeout"
+          }
+        },
+        "summary": "Profile",
+        "tags": [
+          "understanding"
+        ]
+      }
+    },
+    "/v1/recommendations": {
+      "get": {
+        "operationId": "recommendations_v1_recommendations_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecommendationPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "not_found"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "method_not_allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "validation"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "validation"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "rate_limit"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "unavailable capability or temporary timeout"
+          }
+        },
+        "summary": "Recommendations",
+        "tags": [
+          "recommendations"
+        ]
+      }
+    },
+    "/v1/recommendations/refresh": {
+      "post": {
+        "operationId": "refresh_v1_recommendations_refresh_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RefreshRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RefreshResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "not_found"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "method_not_allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "validation"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "validation"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "rate_limit"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "unavailable capability or temporary timeout"
+          }
+        },
+        "summary": "Refresh",
+        "tags": [
+          "recommendations"
+        ]
+      }
+    },
+    "/v1/runtime/health": {
+      "get": {
+        "operationId": "health_v1_runtime_health_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RuntimeResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "not_found"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "method_not_allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "validation"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "validation"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "rate_limit"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "unavailable capability or temporary timeout"
+          }
+        },
+        "summary": "Health",
+        "tags": [
+          "runtime"
+        ]
+      }
+    },
+    "/v1/sources": {
+      "get": {
+        "operationId": "list_sources_v1_sources_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "account_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Account Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "not_found"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "method_not_allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "validation"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "validation"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "rate_limit"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "unavailable capability or temporary timeout"
+          }
+        },
+        "summary": "List Sources",
+        "tags": [
+          "sources"
+        ]
+      }
+    },
+    "/v1/sources/connect": {
+      "post": {
+        "operationId": "connect_source_v1_sources_connect_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConnectSourceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceMutationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "not_found"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "method_not_allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "validation"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "validation"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "rate_limit"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "unavailable capability or temporary timeout"
+          }
+        },
+        "summary": "Connect Source",
+        "tags": [
+          "sources"
+        ]
+      }
+    },
+    "/v1/sources/disconnect": {
+      "post": {
+        "operationId": "disconnect_source_v1_sources_disconnect_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DisconnectSourceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceMutationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "not_found"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "method_not_allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "validation"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "validation"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "rate_limit"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "unavailable capability or temporary timeout"
+          }
+        },
+        "summary": "Disconnect Source",
+        "tags": [
+          "sources"
+        ]
+      }
+    },
+    "/v1/sources/{provider_id}/forms/{method_id}": {
+      "get": {
+        "operationId": "source_form_v1_sources__provider_id__forms__method_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "provider_id",
+            "required": true,
+            "schema": {
+              "title": "Provider Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "method_id",
+            "required": true,
+            "schema": {
+              "title": "Method Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceFormResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "not_found"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "method_not_allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "validation"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "validation"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "rate_limit"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "unavailable capability or temporary timeout"
+          }
+        },
+        "summary": "Source Form",
+        "tags": [
+          "sources"
+        ]
+      }
+    },
+    "/v1/sources/{provider_id}/status": {
+      "get": {
+        "operationId": "source_status_v1_sources__provider_id__status_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "provider_id",
+            "required": true,
+            "schema": {
+              "title": "Provider Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "account_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Account Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceMutationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "not_found"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "method_not_allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "validation"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "validation"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "rate_limit"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "unavailable capability or temporary timeout"
+          }
+        },
+        "summary": "Source Status",
+        "tags": [
+          "sources"
+        ]
+      }
+    }
+  }
+}

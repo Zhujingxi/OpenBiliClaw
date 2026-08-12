@@ -1,3 +1,13 @@
+# Target CLI Host（尚未接入生产组合根）
+
+`openbiliclaw.hosts.cli.create_cli()` 构造 thin Typer adapter，并与 HTTP 使用同一 `HostFacade`。已保留：`start`、`status`、`config-diagnostics`、`model-diagnostics`、`connect`、`profile`、`recommend`。
+
+命令内部结果保持 structured，Rich 只在 edge render；noninteractive 命令没有 hidden prompt。成功 exit 0，workflow/application error exit 2，unexpected temporary failure exit 1。`connect` credential 仅能显式 option 输入且不回显。
+
+Approved deferral：legacy monolithic `openbiliclaw/cli.py` 等待 Plan 15 cutover 后删除；当前 entrypoint 未切换到 target CLI。
+
+---
+
 # CLI 命令参考
 
 > 所有已实现的 `openbiliclaw` CLI 命令。

@@ -7,12 +7,17 @@ from typing import TYPE_CHECKING, Protocol
 
 from pydantic import ConfigDict, Field
 
+from openbiliclaw.access.forms import ConnectionForm  # noqa: TC001
 from openbiliclaw.access.models import AccessStatus  # noqa: TC001
 from openbiliclaw.content.integration.capabilities import (
     FetchCapability,
     PageRequest,
     SearchCapability,
     SearchQuery,
+)
+from openbiliclaw.content.integration.errors import (
+    ContentIntegrationError,
+    IntegrationErrorCode,
 )
 from openbiliclaw.content.integration.identity import ContentRef, ProviderId  # noqa: TC001
 from openbiliclaw.content.integration.native import NativeContent  # noqa: TC001
@@ -74,6 +79,39 @@ class GetSourceStatus:
         )
 
 
+class GetSourceFormQuery(StrictBaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    provider_id: str = Field(min_length=1, max_length=128)
+    method_id: str = Field(min_length=1, max_length=128)
+
+
+class SourceFormResult(StrictBaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    form: ConnectionForm
+
+
+class AccessFormReads(Protocol):
+    def connection_forms(self, provider_id: str) -> tuple[ConnectionForm, ...]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class GetSourceForm:
+    access: AccessFormReads
+
+    async def __call__(self, query: GetSourceFormQuery) -> SourceFormResult:
+        form = next(
+            (
+                item
+                for item in self.access.connection_forms(query.provider_id)
+                if item.method_id == query.method_id
+            ),
+            None,
+        )
+        if form is None:
+            raise ApplicationError(ApplicationErrorCode.NOT_FOUND, "connection form not found")
+        return SourceFormResult(form=form)
+
+
 class ListSourcesQuery(StrictBaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     account_id: str | None = Field(default=None, min_length=1, max_length=128)
@@ -128,7 +166,6 @@ class SearchContentQuery(StrictBaseModel):
 class SearchContentResult(StrictBaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     items: tuple[ContentPreview, ...]
-    next_cursor: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,19 +174,19 @@ class SearchContent:
     access: AccessReads
 
     async def __call__(self, query: SearchContentQuery) -> SearchContentResult:
-        provider = self.registry.provider(query.provider_id)
-        if not isinstance(provider, SearchCapability):
-            raise ApplicationError(ApplicationErrorCode.UNAVAILABLE, "search unavailable")
-        handle = self.access.connected_handle(query.provider_id.value, query.account_id)
-        if handle is None:
-            raise ApplicationError(ApplicationErrorCode.UNAUTHORIZED, "source is not connected")
-        page = await provider.search(
-            SearchQuery(text=query.text, page=PageRequest(limit=query.limit)), handle
-        )
-        return SearchContentResult(
-            items=page.items,
-            next_cursor=page.next_cursor.value if page.next_cursor is not None else None,
-        )
+        try:
+            provider = self.registry.provider(query.provider_id)
+            if not isinstance(provider, SearchCapability):
+                raise ApplicationError(ApplicationErrorCode.UNAVAILABLE, "search unavailable")
+            handle = self.access.connected_handle(query.provider_id.value, query.account_id)
+            if handle is None:
+                raise ApplicationError(ApplicationErrorCode.UNAUTHORIZED, "source is not connected")
+            page = await provider.search(
+                SearchQuery(text=query.text, page=PageRequest(limit=query.limit)), handle
+            )
+        except ContentIntegrationError as exc:
+            raise _integration_error(exc) from exc
+        return SearchContentResult(items=page.items)
 
 
 class GetContentDetailsQuery(StrictBaseModel):
@@ -169,13 +206,17 @@ class GetContentDetails:
     access: AccessReads
 
     async def __call__(self, query: GetContentDetailsQuery) -> ContentDetailsResult:
-        provider = self.registry.provider(query.ref.provider_id)
-        if not isinstance(provider, FetchCapability):
-            raise ApplicationError(ApplicationErrorCode.UNAVAILABLE, "fetch unavailable")
-        handle = self.access.connected_handle(query.ref.provider_id.value, query.account_id)
-        if handle is None:
-            raise ApplicationError(ApplicationErrorCode.UNAUTHORIZED, "source is not connected")
-        return ContentDetailsResult(content=await provider.fetch(query.ref, handle))
+        try:
+            provider = self.registry.provider(query.ref.provider_id)
+            if not isinstance(provider, FetchCapability):
+                raise ApplicationError(ApplicationErrorCode.UNAVAILABLE, "fetch unavailable")
+            handle = self.access.connected_handle(query.ref.provider_id.value, query.account_id)
+            if handle is None:
+                raise ApplicationError(ApplicationErrorCode.UNAUTHORIZED, "source is not connected")
+            content = await provider.fetch(query.ref, handle)
+        except ContentIntegrationError as exc:
+            raise _integration_error(exc) from exc
+        return ContentDetailsResult(content=content)
 
 
 class ShowProfileQuery(StrictBaseModel):
@@ -195,6 +236,16 @@ class ShowProfile:
     async def __call__(self, query: ShowProfileQuery) -> ProfileResult:
         profile = await self.understanding.profile(query.profile_id)
         return ProfileResult(profile=dialogue_projection(profile))
+
+
+def _integration_error(error: ContentIntegrationError) -> ApplicationError:
+    if error.code is IntegrationErrorCode.ACCESS_DENIED:
+        code = ApplicationErrorCode.FORBIDDEN
+    elif error.code is IntegrationErrorCode.INVALID_CONTENT_REF:
+        code = ApplicationErrorCode.NOT_FOUND
+    else:
+        code = ApplicationErrorCode.UNAVAILABLE
+    return ApplicationError(code, error.safe_message)
 
 
 class JobHealthResult(StrictBaseModel):

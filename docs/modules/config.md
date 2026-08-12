@@ -22,6 +22,8 @@ Target `access/` 的 manual method 已在未接线 vertical slice 中使用该 v
 TOML/env 字段，也不改变现有配置/API 行为；Plan 13/15 接线时不得把 vault 内容写入
 `config.toml`、SQLite 通用表、API schema、模型消息或日志。
 
+Target Hosts 本阶段不新增 legacy TOML shape。`HostSecurityPolicy` 由 Composition 显式构造；non-loopback bind 必须有 bearer token，且 origin/body/timeout/rate/WebSocket limits 在 side effects 前验证。Plan 15 接线时再映射 frozen settings，不能把 bearer token 写入 diagnostics/API response。
+
 Target AI Runtime 本阶段不新增 TOML shape：`RouteTable`、capability matrix 与 `RunPolicy` 由未来 model-provider plugins / Composition 显式构造。当前 `[llm]` 和 `LLMRegistry` 配置行为完全不变；新 route 只保存非秘密 instance/provider/capability metadata，不能保存 API Key 或 credential reference。详见 [AI Runtime](ai-runtime.md)。
 
 > `[llm].concurrency` 缺省/非法值为 4；显式正数（含旧值 3）原样保留。后台容量为 `max(1, total-1)`；`candidate_eval_concurrency` 仍默认 3。

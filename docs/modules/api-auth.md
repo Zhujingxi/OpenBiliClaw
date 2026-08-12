@@ -1,3 +1,19 @@
+# Target API Host Security Policy
+
+`HostSecurityPolicy` 在 app 构建前验证 bind policy：loopback 可无 token；任何 non-loopback bind 必须配置 bearer token。HTTP boundary 还执行：
+
+- Bearer authentication（配置时必须每请求提供）；
+- explicit origin allowlist；
+- 所有 mutation 要求 `X-Device-ID` 与相同值的 `X-CSRF-Token`；
+- request body size、request timeout、per-client minute rate limit；
+- SSE locally-enforced bounded replay + retry metadata；WebSocket 在 `accept()` 前独立校验 configured Bearer 与 Origin，并使用 process-local subscriber semaphore；
+- write-only credential request field，不出现在 response/example；
+- exception/provider body/credential 不进入 safe error envelope。
+
+默认值：loopback `127.0.0.1`、1 MiB body、30 s timeout、120 requests/minute、16 WebSocket subscribers、100 replay events。Composition 可在 Plan 15 从 frozen settings 显式覆盖。
+
+---
+
 # API Auth Module（局域网密码门禁）
 
 ## 概述

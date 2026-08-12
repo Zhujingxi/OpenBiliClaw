@@ -122,7 +122,10 @@ select = [
 [tool.ruff.lint.per-file-ignores]
 "src/openbiliclaw/llm/prompts.py" = ["E501"]  # Prompt templates contain long JSON examples
 "src/openbiliclaw/llm/prompts_pipeline.py" = ["E501"]
-"scripts/*.py" = ["E501"]  # Scripts contain long prompt strings
+"scripts/*.py" = ["E501", "TC001", "TC002", "TC003", "TC004"]  # Executable scripts use runtime annotations and contain long prompt strings.
+"src/openbiliclaw/hosts/**/*.py" = ["B008", "TC001", "TC002", "TC003", "TC004"]  # FastAPI inspects runtime annotations and dependency defaults.
+"tests/hosts/**/*.py" = ["TC001", "TC002", "TC003", "TC004"]  # Runtime DTO aliases are exercised by host contract tests.
+"tests/application/test_workflows.py" = ["TC001"]  # Pydantic form type is required at runtime in workflow contract tests.
 
 [tool.mypy]
 python_version = "3.11"
@@ -179,6 +182,15 @@ disallow_any_explicit = false
 module = ["tests.*"]
 disallow_any_explicit = false
 
+# Legacy utility scripts remain cutover debt; the new host scripts are checked strictly below.
+[[tool.mypy.overrides]]
+module = ["scripts.*"]
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = ["scripts.export_openapi", "scripts.generate_api_client"]
+ignore_errors = false
+
 [[tool.mypy.overrides]]
 module = [
     "tests.access.*",
@@ -188,6 +200,7 @@ module = [
     "tests.content.*",
     "tests.core.*",
     "tests.infrastructure.*",
+    "tests.hosts.*",
     "tests.observations.*",
     "tests.understanding.*",
 ]

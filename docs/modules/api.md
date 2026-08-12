@@ -1,3 +1,15 @@
+# Target API Host（尚未接入生产组合根）
+
+`openbiliclaw.hosts.api` 提供 clean `/v1` FastAPI surface。App factory 只注册 lifespan、middleware、error handlers 与 routers。每个 mutation/read endpoint 调用唯一 owning workflow；Assistant conversation read 组合 Assistant-owned `conversation` 与 `conversation_messages` 两个同 owner reads，不跨产品模块 sequencing。所有 mutation transport requests 都是 strict models，并显式 `to_command()` 转换。
+
+已落地 endpoints：sources list/connect/disconnect、recommendation feed/refresh、profile read/edit、content search/detail、Assistant turn、runtime health、bounded SSE/WebSocket event replay。v0.1 feed/search surface 不接收或返回 cursor；调用方必须用 bounded `limit` 请求最新结果。所有 transport schema 均为 strict Pydantic models；错误统一为 `{"error":{"code","message"}}`，provider access denied/invalid reference 映射为 403/404，rate limit、capability unavailable 与 provider unavailable 映射为稳定 503；未知异常不返回 exception text。
+
+OpenAPI 可用 `python scripts/export_openapi.py --output <path>` 在不启动服务时确定性导出。Plan 14 将其生成到 `frontend/packages/api-client/`；当前不提交 generated frontend output。
+
+Approved deferral：legacy `api/app.py`、`api/models.py`、source-auth routes 与 production callers 等待 Plan 15 composition cutover 后删除。当前 legacy host 继续 serving，target host 无 production caller。
+
+---
+
 # 后端 API
 
 ## 概述
