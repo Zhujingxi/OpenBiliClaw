@@ -68,7 +68,7 @@ ITEM_ADAPTER: TypeAdapter[BilibiliItem] = TypeAdapter(BilibiliItem)
 class BilibiliPageData(StrictBaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    items: tuple[BilibiliItem, ...]
+    items: tuple[BilibiliItem, ...] = Field(max_length=50)
     next_cursor: str | None = Field(default=None, min_length=1, max_length=4096)
 
 

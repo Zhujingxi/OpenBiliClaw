@@ -3,8 +3,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from pydantic_ai import Agent
-from pydantic_ai.models.function import FunctionModel
+from pydantic_ai import Agent, ModelMessage, ModelResponse, TextPart, ToolCallPart
+from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 
 from openbiliclaw.access.models import AnonymousAccessHandle, Permission
@@ -157,9 +157,7 @@ async def test_mutation_tool_invoked_through_agent_returns_pending_action() -> N
         budget=ToolBudget(),
     )
 
-    def call_pending(messages: list[object], info: object) -> object:
-        from pydantic_ai import ModelResponse, TextPart, ToolCallPart
-
+    def call_pending(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         if any(
             getattr(p, "part_kind", None) == "tool-return"
             for m in messages

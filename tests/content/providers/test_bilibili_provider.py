@@ -33,7 +33,7 @@ from openbiliclaw.content.providers.bilibili.manifest import BILIBILI_MANIFEST
 from openbiliclaw.content.providers.bilibili.models import BilibiliResponse
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from openbiliclaw.content.providers.bilibili.client import CredentialResolver
 
 FIXTURES = Path(__file__).with_name("fixtures")
 
@@ -75,15 +75,24 @@ class FixtureTransport:
         return self.routes[path]
 
 
-async def _no_secret(handle: CredentialAccessHandle) -> str:
-    raise AssertionError("credential must not be resolved")
+class Resolver:
+    def __init__(self, value: str | None = None, seen: list[str] | None = None) -> None:
+        self.value = value
+        self.seen = seen
+
+    async def __call__(self, handle: CredentialAccessHandle) -> str:
+        if self.seen is not None:
+            self.seen.append(handle.credential_ref)
+        if self.value is None:
+            raise AssertionError("credential must not be resolved")
+        return self.value
 
 
 def _client(
     transport: FixtureTransport,
-    resolver: Callable[[CredentialAccessHandle], Awaitable[str]] = _no_secret,
+    resolver: CredentialResolver | None = None,
 ) -> BilibiliClient:
-    return BilibiliClient(transport, resolver)
+    return BilibiliClient(transport, resolver or Resolver())
 
 
 def test_manifest_matches_complete_reference_provider_contract() -> None:
@@ -160,7 +169,7 @@ async def test_fetch_video_article_tombstone_and_related() -> None:
         canonical_url="https://www.bilibili.com/video/BV1DEAD12345",
     )
     native = await provider.fetch(video_ref, _anonymous())
-    assert native.payload.availability == "tombstone"
+    assert '"availability":"tombstone"' in native.payload.model_dump_json()
     article_ref = ContentRef(
         provider_id=ProviderId(value="bilibili"),
         content_kind=ContentKind(value="article"),
@@ -168,7 +177,7 @@ async def test_fetch_video_article_tombstone_and_related() -> None:
         canonical_url="https://www.bilibili.com/read/cv123",
     )
     article = await provider.fetch(article_ref, _anonymous())
-    assert article.payload.title == "Typed article"
+    assert '"title":"Typed article"' in article.payload.model_dump_json()
     related = await provider.related(video_ref, PageRequest(limit=1), _anonymous())
     assert related.items[0].title == "Related"
 
@@ -178,17 +187,13 @@ async def test_history_saved_require_private_scope_and_resolve_cookie_only_in_cl
     canary = "SESSDATA=CANARY; bili_jct=csrf"
     seen: list[str] = []
 
-    async def resolve(handle: CredentialAccessHandle) -> str:
-        seen.append(handle.credential_ref)
-        return canary
-
     transport = FixtureTransport(
         {
             "/x/web-interface/history/cursor": _fixture("empty.json"),
             "/x/v3/fav/resource/list": _fixture("empty.json"),
         }
     )
-    provider = BilibiliProvider(_client(transport, resolve))
+    provider = BilibiliProvider(_client(transport, Resolver(canary, seen)))
     with pytest.raises(ContentIntegrationError) as denied:
         await provider.history(PageRequest(), _anonymous())
     assert denied.value.code is IntegrationErrorCode.ACCESS_DENIED
@@ -234,11 +239,8 @@ def test_manual_cookie_form_is_secret_and_shape_validated() -> None:
 async def test_action_requires_write_scope_csrf_and_is_idempotent() -> None:
     canary = "SESSDATA=CANARY; bili_jct=csrf123"
 
-    async def resolve(handle: CredentialAccessHandle) -> str:
-        return canary
-
     transport = FixtureTransport({"/x/v3/fav/resource/deal": _fixture("action_success.json")})
-    provider = BilibiliProvider(_client(transport, resolve))
+    provider = BilibiliProvider(_client(transport, Resolver(canary)))
     ref = ContentRef(
         provider_id=ProviderId(value="bilibili"),
         content_kind=ContentKind(value="video"),
@@ -298,9 +300,9 @@ def test_projections_are_separate_and_card_snapshot_is_stable() -> None:
     card = provider.card_data(native)
     assert preview.provenance.ref == preview.ref
     assert candidate.discovery_reason == "bilibili:public_feed"
-    assert "badge" not in document.model_dump()
-    assert "discovery_reason" not in card.model_dump()
-    assert card.model_dump(mode="json") == {
+    assert '"badge"' not in document.model_dump_json()
+    assert '"discovery_reason"' not in card.model_dump_json()
+    assert json.loads(card.model_dump_json()) == {
         "ref": {
             "provider_id": {"value": "bilibili"},
             "content_kind": {"value": "video"},

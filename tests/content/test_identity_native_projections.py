@@ -155,3 +155,15 @@ def test_api_projection_schema_snapshot() -> None:
         "SearchDocument": "a290339775b5b53934849fd997e8996d247846dc3998f2d8f886d9ace7242a0c",
         "CardData": "d164eb97634b536e412b4cef35a4dfacdf41ab5862e1b36712bf2569958e2b15",
     }
+
+
+def test_projection_summary_truncates_oversized_native_description() -> None:
+    preview = ContentPreview(
+        ref=_ref(),
+        title="t",
+        summary="x" * 20_000,
+        creator_label=None,
+        source_timestamp=datetime.now(UTC),
+        provenance=_provenance(),
+    )
+    assert len(preview.summary) == 4000

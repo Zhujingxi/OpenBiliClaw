@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import AwareDatetime, ConfigDict, Field, model_validator
+from pydantic import AwareDatetime, ConfigDict, Field, field_validator, model_validator
 
 from openbiliclaw.core._pydantic import StrictBaseModel
 
@@ -27,6 +27,16 @@ class ContentPreview(StrictBaseModel):
     ref: ContentRef
     title: str = Field(min_length=1, max_length=500)
     summary: str = Field(max_length=4000)
+
+    @field_validator("summary", mode="before")
+    @classmethod
+    def _truncate_summary(cls, value: object) -> object:
+        # Native payloads may carry longer descriptions; summaries are
+        # display projections, so clamp instead of rejecting valid content.
+        if isinstance(value, str) and len(value) > 4000:
+            return value[:4000]
+        return value
+
     creator_label: str | None = Field(default=None, max_length=300)
     source_timestamp: AwareDatetime
     provenance: ProjectionProvenance
@@ -46,6 +56,16 @@ class RecommendationCandidate(StrictBaseModel):
     ref: ContentRef
     title: str = Field(min_length=1, max_length=500)
     summary: str = Field(max_length=4000)
+
+    @field_validator("summary", mode="before")
+    @classmethod
+    def _truncate_summary(cls, value: object) -> object:
+        # Native payloads may carry longer descriptions; summaries are
+        # display projections, so clamp instead of rejecting valid content.
+        if isinstance(value, str) and len(value) > 4000:
+            return value[:4000]
+        return value
+
     discovery_reason: str = Field(min_length=1, max_length=500)
     source_timestamp: AwareDatetime
     provenance: ProjectionProvenance
@@ -83,6 +103,16 @@ class CardData(StrictBaseModel):
     ref: ContentRef
     title: str = Field(min_length=1, max_length=500)
     summary: str = Field(max_length=4000)
+
+    @field_validator("summary", mode="before")
+    @classmethod
+    def _truncate_summary(cls, value: object) -> object:
+        # Native payloads may carry longer descriptions; summaries are
+        # display projections, so clamp instead of rejecting valid content.
+        if isinstance(value, str) and len(value) > 4000:
+            return value[:4000]
+        return value
+
     badge: str | None = Field(default=None, max_length=100)
     image_url: str | None = Field(default=None, pattern=r"^https?://[^\s]+$", max_length=2048)
     source_timestamp: AwareDatetime

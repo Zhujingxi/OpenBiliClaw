@@ -205,7 +205,14 @@ async def test_verifier_malformed_and_rate_limit(
 @pytest.mark.asyncio
 async def test_verifier_network_and_not_logged_in() -> None:
     class FailedTransport:
-        async def __call__(self, *args: object) -> bytes:
+        async def __call__(
+            self,
+            method: str,
+            path: str,
+            query: str,
+            cookie: str | None,
+            body: bytes,
+        ) -> bytes:
             raise ContentIntegrationError(IntegrationErrorCode.PROVIDER_UNAVAILABLE, "safe failure")
 
     verifier = BilibiliCredentialVerifier(BilibiliClient(FailedTransport(), _resolve))

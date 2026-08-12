@@ -1,5 +1,7 @@
 """Native PydanticAI tools for implemented Bilibili capabilities only."""
 
+from pydantic_ai import Tool
+
 from openbiliclaw.access.models import AccessHandle
 from openbiliclaw.content.integration.manifest import CapabilityKind
 from openbiliclaw.content.integration.tools import ToolBudget, build_provider_tools
@@ -14,7 +16,7 @@ def build_bilibili_tools(
     *,
     enabled: frozenset[CapabilityKind],
     budget: ToolBudget,
-) -> tuple[object, ...]:
+) -> tuple[Tool[None], ...]:
     """Expose integration-generated tools over the same direct capabilities."""
 
     # Tool's concrete generic type is intentionally hidden from provider callers;

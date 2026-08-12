@@ -4,10 +4,11 @@ import ast
 import json
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 from pydantic_ai import Agent, ModelResponse, TextPart, ToolCallPart
-from pydantic_ai.models.function import FunctionModel
+from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from openbiliclaw.access.models import (
     AnonymousAccessHandle,
@@ -22,6 +23,10 @@ from openbiliclaw.content.providers.bilibili.auth import BilibiliCredentialVerif
 from openbiliclaw.content.providers.bilibili.capabilities import BilibiliProvider
 from openbiliclaw.content.providers.bilibili.client import BilibiliClient
 from openbiliclaw.content.providers.bilibili.tools import build_bilibili_tools
+
+if TYPE_CHECKING:
+    from pydantic_ai.messages import ModelMessage
+
 
 FIXTURES = Path(__file__).with_name("fixtures")
 
@@ -92,7 +97,7 @@ async def test_search_tool_uses_same_capability_and_bounds_output() -> None:
         budget=ToolBudget(max_items=1, max_title_chars=5, max_summary_chars=4),
     )
 
-    def model(messages: list[object], info: object) -> ModelResponse:
+    def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         if any(
             getattr(part, "part_kind", None) == "tool-return"
             for message in messages
@@ -103,7 +108,8 @@ async def test_search_tool_uses_same_capability_and_bounds_output() -> None:
             parts=[ToolCallPart("bilibili_search", {"query": "typed", "limit": 99})]
         )
 
-    result = await Agent(FunctionModel(model), tools=tools).run("search")
+    agent: Agent[None, str] = Agent(FunctionModel(model), tools=list(tools))
+    result = await agent.run("search")
     tool_returns = [
         part
         for message in result.all_messages()
