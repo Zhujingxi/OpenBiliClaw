@@ -74,7 +74,7 @@ Full loop on live `openbiliclaw serve` via `/v1` HTTP only: bootstrap → refill
 6. `docs/docker-deployment.md` rewritten to verified reality.
 
 **L7 — Hosts & UI**
-agent_browser session against the live backend: setup, pool view, recommendations, feedback, profile view. Bugs filed/fixed as found. Playwright suite deferred until the UI stabilizes.
+agent_browser session against the live backend: setup, pool view, recommendations, feedback, profile view. Bugs filed/fixed as found. No scripted browser suite — UI testing is driven interactively by the agent.
 
 ## 5. Process per layer
 
