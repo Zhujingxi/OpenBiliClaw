@@ -9,6 +9,8 @@
 > `src/openbiliclaw/access/` 已落地 target Provider Access boundary：secret-free discriminated handles/status、provider-owned declarative forms/verifiers、anonymous public-read method、CredentialVault-backed manual method、typed extension registry/broker，以及有界 verification cache 的 connect/status/replace/disconnect service。它禁止 anonymous write/account identity，也禁止 model-visible package 导入 vault。当前没有 production caller；`api/source_auth/`、`auth_core.py`、legacy config credential reads 和所有 host/frontend 行为保持原样，等待 Plan 13/15 一次切换，不存在双写。
 >
 > `src/openbiliclaw/content/integration/` 已落地 target Content Integration contracts：稳定 content identity/native schema envelope、四种独立 purpose projection、十种 narrow capability protocols、显式 duplicate-safe provider registry、provider contract test utility，以及 bounded PydanticAI search/fetch tools。Mutation tool 只生成 pending action，不能直接执行。`content/providers/bilibili/` 现已作为首个 reference provider 落地：strict video/article native schema、anonymous/manual-cookie access、search/feed/fetch/related/creator/history/saved/action、purpose projections 与安全 observation；browser-session modes 明确 unavailable。它尚无 production caller；legacy `sources/protocol.py`/registry/dispatcher 与 `bilibili/` 仍是唯一生产路径，等待 Plans 10–15 直接替换，不存在 compatibility adapter 或双写。
+>
+> `src/openbiliclaw/observations/` 已落地 target Observation Ingress：12 种 immutable discriminated evidence、producer/source/trust/account/time/content validation、batch bounds、SQLite transaction/idempotency uniqueness、cursor replay 与 committed-ID-only notification。它不写 profile 或 analyzer checkpoint，尚无 production caller；built-in producer wiring 和 legacy `runtime/event_ingress.py` 删除等待 Plans 09/11/15，不存在双写。
 
 ## 系统概览
 
