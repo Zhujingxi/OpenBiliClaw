@@ -27,7 +27,7 @@ jobs:
         with:
           node-version: "22"
           cache: npm
-          cache-dependency-path: extension/package-lock.json
+          cache-dependency-path: frontend/package-lock.json
 
       - name: Verify extension version matches release tag
         env:
@@ -49,15 +49,17 @@ jobs:
 
       - name: Install extension dependencies
         run: npm ci
-        working-directory: extension
+        working-directory: frontend
 
       - name: Build Chrome-compatible extension release archive
-        run: npm run package
-        working-directory: extension
+        run: npm run build --workspace @openbiliclaw/extension
+          python ../scripts/extension_release.py package --no-build
+        working-directory: frontend
 
       - name: Build Firefox extension release archive
-        run: npm run package:firefox
-        working-directory: extension
+        run: npm run build --workspace @openbiliclaw/extension
+          python ../scripts/extension_release.py package --no-build:firefox
+        working-directory: frontend
 
       - name: Detect Firefox signing credentials
         id: firefox-signing
@@ -83,8 +85,8 @@ jobs:
         env:
           AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
           AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
-        run: npm run sign:firefox:only
-        working-directory: extension
+        run: python scripts/extension_release.py amo-sign --no-build
+        working-directory: frontend
 
       - name: Verify extension release archives
         shell: bash

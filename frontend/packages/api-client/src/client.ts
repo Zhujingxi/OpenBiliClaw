@@ -21,6 +21,11 @@ type RequestBody<O> = O extends {
 }
   ? Payload
   : never;
+type Parameters<O> = O extends { parameters: infer Value } ? Value : never;
+type QueryParameters<O> =
+  Parameters<O> extends { query?: infer Value } ? Value : never;
+type PathParameters<O> =
+  Parameters<O> extends { path: infer Value } ? Value : never;
 
 export class ApiError extends Error {
   readonly kind: ApiErrorKind;
@@ -39,8 +44,10 @@ export interface ApiRequest<P extends ApiPath, M extends HttpMethod> {
   readonly method: M;
   readonly validate: Validator<SuccessfulResponse<OperationAt<P, M>>>;
   readonly body?: RequestBody<OperationAt<P, M>>;
+  readonly query?: QueryParameters<OperationAt<P, M>>;
+  readonly pathParams?: PathParameters<OperationAt<P, M>>;
   readonly headers?: Readonly<Record<string, string>>;
-  readonly signal?: AbortSignal;
+  readonly signal?: AbortSignal | undefined;
 }
 
 export class ApiClient {
@@ -62,8 +69,10 @@ export class ApiClient {
       init.body = JSON.stringify(request.body);
       init.headers = { "content-type": "application/json", ...request.headers };
     }
+    const path = interpolatePath(request.path, request.pathParams);
+    const query = encodeQuery(request.query);
     const response = await this.#fetchResponse(
-      request.path,
+      `${path}${query}`,
       init,
       "Network request failed",
     );
@@ -134,7 +143,7 @@ export class ApiClient {
   }
 
   async #fetchResponse(
-    path: ApiPath,
+    path: string,
     init: RequestInit,
     networkMessage: string,
   ): Promise<Response> {
@@ -199,6 +208,26 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isPositiveInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isInteger(value) && value >= 1;
+}
+
+function interpolatePath(path: string, parameters: unknown): string {
+  if (!isRecord(parameters)) return path;
+  return path.replace(/\{([^}]+)\}/g, (placeholder, name: string) => {
+    const value = parameters[name];
+    return value === undefined
+      ? placeholder
+      : encodeURIComponent(String(value));
+  });
+}
+
+function encodeQuery(parameters: unknown): string {
+  if (!isRecord(parameters)) return "";
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(parameters)) {
+    if (value !== undefined && value !== null) query.set(key, String(value));
+  }
+  const encoded = query.toString();
+  return encoded === "" ? "" : `?${encoded}`;
 }
 
 // Keep operation names public for callers that need generated metadata without

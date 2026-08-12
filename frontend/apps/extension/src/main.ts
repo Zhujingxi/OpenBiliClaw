@@ -1,2 +1,2 @@
-// Plan 14 Phase A placeholder; the extension shell lands in its dedicated phase.
-export {};
+export type { ExtensionMessage } from "./shared/messages";
+export { parseExtensionMessage } from "./shared/messages";

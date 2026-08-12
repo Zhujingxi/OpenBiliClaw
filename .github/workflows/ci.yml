@@ -110,19 +110,20 @@ jobs:
         with:
           node-version: "22"
           cache: npm
-          cache-dependency-path: extension/package-lock.json
+          cache-dependency-path: frontend/package-lock.json
 
       - name: Install extension dependencies
         run: npm ci
-        working-directory: extension
+        working-directory: frontend
 
       - name: Build Firefox extension
-        run: npm run build:firefox
-        working-directory: extension
+        run: npm run build --workspace @openbiliclaw/extension
+          python ../scripts/extension_release.py package --firefox --no-build
+        working-directory: frontend
 
       - name: Verify Firefox manifest at dist-firefox root
         shell: bash
-        working-directory: extension
+        working-directory: frontend
         run: |
           test -f dist-firefox/manifest.json
           # Confirm version was injected from manifest.json

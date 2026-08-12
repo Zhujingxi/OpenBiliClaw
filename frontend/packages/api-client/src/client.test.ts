@@ -27,6 +27,41 @@ describe("ApiClient", () => {
     );
   });
 
+  it("serializes generated path and query parameters", async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockImplementation(
+        async () =>
+          new Response(
+            '{"content":{"ref":{"canonical_url":"https://example.test","content_kind":{"value":"video"},"provider_content_id":"1","provider_id":{"value":"demo"}},"schema_version":1,"payload":{}},"items":[]}',
+          ),
+      );
+    const client = new ApiClient("https://api.example.test", fetcher);
+    await client.request({
+      path: "/v1/content/{reference}",
+      method: "get",
+      pathParams: { reference: "demo/video 1" },
+      validate: (value): value is components["schemas"]["ContentResponse"] =>
+        typeof value === "object" && value !== null && "content" in value,
+    });
+    expect(fetcher).toHaveBeenCalledWith(
+      "https://api.example.test/v1/content/demo%2Fvideo%201",
+      { method: "GET" },
+    );
+
+    await client.request({
+      path: "/v1/content/search",
+      method: "get",
+      query: { provider_id: "demo", q: "space query", limit: 5 },
+      validate: (value): value is components["schemas"]["SearchResponse"] =>
+        typeof value === "object" && value !== null,
+    });
+    expect(fetcher).toHaveBeenLastCalledWith(
+      "https://api.example.test/v1/content/search?provider_id=demo&q=space+query&limit=5",
+      { method: "GET" },
+    );
+  });
+
   it("rejects unknown response bodies", async () => {
     const fetcher = vi
       .fn<typeof fetch>()

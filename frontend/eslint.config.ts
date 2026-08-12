@@ -37,6 +37,10 @@ export default [
       "vue/max-attributes-per-line": "off",
       "vue/multi-word-component-names": "off",
       "vue/singleline-html-element-content-newline": "off",
+      // Prettier owns formatting; these vue rules fight it.
+      "vue/html-indent": "off",
+      "vue/html-closing-bracket-newline": "off",
+      "vue/multiline-html-element-content-newline": "off",
     },
   },
 ];

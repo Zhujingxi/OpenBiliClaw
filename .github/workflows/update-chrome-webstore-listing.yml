@@ -58,4 +58,4 @@ jobs:
           if [ "$PUBLISH" = "true" ]; then
             args+=(--publish)
           fi
-          node extension/scripts/chrome-webstore-metadata.mjs "${args[@]}"
+          python scripts/extension_release.py chrome-metadata "${args[@]}"

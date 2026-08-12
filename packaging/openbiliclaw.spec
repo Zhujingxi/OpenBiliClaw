@@ -111,11 +111,9 @@ a = Analysis(
     binaries=[] + _x_binaries + _reddit_binaries,
     datas=[
         (str(project_root / "config.example.toml"), "."),
-        # Web UI + first-run setup wizard. app.py serves these via StaticFiles
-        # at /web, /m, /setup; without bundling them those routes 404 in the
-        # packaged app. Dest mirrors the import path so __file__-relative
-        # resolution (web_dir = .../openbiliclaw/web) works when frozen.
-        (str(project_root / "src" / "openbiliclaw" / "web"), "openbiliclaw/web"),
+        # Vite-generated web host artifacts. Source JavaScript is forbidden;
+        # packaging consumes only the ignored frontend build output.
+        (str(project_root / "frontend" / "apps" / "web" / "dist"), "openbiliclaw/frontend"),
     ]
     + _x_datas
     + _reddit_datas,

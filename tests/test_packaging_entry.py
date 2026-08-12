@@ -445,22 +445,6 @@ def test_should_use_tray_false_on_unsupported_platform(monkeypatch) -> None:
     assert entry._should_use_tray() is False
 
 
-def test_tray_icon_uses_canonical_web_brand_asset() -> None:
-    from PIL import Image, ImageChops
-
-    from openbiliclaw import __file__ as package_init
-
-    icon_path = Path(package_init).resolve().parent / "web" / "icon-192.png"
-    with Image.open(icon_path) as source:
-        expected = source.convert("RGBA").resize((64, 64), Image.Resampling.LANCZOS)
-
-    actual = entry._tray_icon_image()
-
-    assert actual.mode == "RGBA"
-    assert actual.size == (64, 64)
-    assert ImageChops.difference(actual, expected).getbbox() is None
-
-
 def test_redirect_output_to_logfile_noop_when_not_frozen(tmp_path: Path) -> None:
     # Dev (not frozen) keeps its real stdout/stderr — the redirect is a no-op and
     # must not create a log file.

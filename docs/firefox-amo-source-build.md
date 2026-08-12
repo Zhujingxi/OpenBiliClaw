@@ -1,56 +1,24 @@
-# Firefox AMO source build instructions
+# Firefox AMO source build
 
-This archive contains the complete human-readable source needed to reproduce the Firefox
-package submitted to Mozilla Add-ons. No commercial or private build tools are required.
+The Firefox extension is reproducibly built from the shared target workspace.
 
-## Build environment
+## Prerequisites
 
-- Ubuntu 24.04 LTS (the GitHub Actions runner used for submission)
-- Node.js 22
-- npm, using the committed `extension/package-lock.json`
+- Node.js 22 and npm 10
+- Python 3.11+
 
-## Reproduce the submitted package
-
-From the archive root:
+## Build
 
 ```bash
-cd extension
-npm ci
-npm run build:firefox
+npm --prefix frontend ci
+npm --prefix frontend run format:check
+npm --prefix frontend run lint
+npm --prefix frontend run typecheck
+npm --prefix frontend run test
+npm --prefix frontend run build
+python scripts/extension_release.py package --firefox --no-build
 ```
 
-The reviewed extension is written to `extension/dist-firefox/`. The build uses TypeScript and
-the open-source esbuild package declared in `extension/package.json`; it bundles readable
-TypeScript entry points and copies the shared browser UI module from
-`src/openbiliclaw/web/shared/`. Source maps are included in the submitted extension.
+Source lives under `frontend/apps/extension/`. Shared generated OpenAPI types and presentation components live under `frontend/packages/`. Declarative Firefox metadata and icons remain under `extension/`. Vite-generated JavaScript is emitted only to ignored `dist/` directories, then the Python release tool copies it into an ignored artifact tree and release ZIP.
 
-The submission workflow packages this source directly from the same Git commit, builds
-`dist-firefox`, synchronizes `docs/privacy.md`, and invokes `web-ext sign --channel=listed`.
-
-## Privacy-relevant build note
-
-`extension/src/main/xhs-token-sniffer.ts` is bundled as a document-start MAIN-world script for
-Xiaohongshu pages. It observes the page's own fetch/XHR responses without changing requests.
-For the exact web search-notes endpoint it forwards only a bounded, normalized set of public
-card fields and existing per-note access tokens to the same-tab isolated task executor; it never
-forwards raw responses or cookie values. The resulting task payload is sent only to the
-user-configured OpenBiliClaw backend. See `docs/privacy.md` for the complete disclosure.
-
-`https://linux.do/*` is a required host permission for two bounded features: the regular-page
-behavior adapter, and isolated task tabs created by the extension for Linux.do source work. The
-task executor only issues same-origin GET requests for public search/hot/feed/creator/related
-discovery and signed-in bookmarks/likes/read-history bootstrap. It never performs a posting,
-like, bookmark, follow, edit, or other state-changing request. `/session/current.json` positively
-identifies the account for personal scopes; the `_t` cookie is reduced to a boolean login hint,
-and its value is never uploaded. Cookie values, CSRF data, raw JSON/HTML responses, and challenge
-page bodies never enter the task result. Only bounded normalized topic fields, scope counts, or a
-structured error are sent to the user-configured backend. Automated tests cover the protocol,
-pagination/caps, timeout/error mapping, and task-tab isolation; a real installed-extension E2E
-with a signed-in Linux.do account has not yet been completed.
-`extension/src/content/v2ex.ts` and the V2EX task executor run only on declared V2EX hosts.
-Normal Topic collection is passive and read-only. A user-triggered bootstrap or incremental
-task reads only bounded rendered fields from the user's topic, public-reply, favorite-topic,
-and favorite-Node pages. The background login check asks Firefox only whether the `A2` cookie
-exists and sends a boolean plus the public rendered username; it never accesses, stores, or
-sends the cookie value. The build contains no V2EX write client and does not forward page HTML,
-headers, CSRF/once values, private messages, or browser history.
+The target extension has no cross-site provider execution, Cookie extraction, behavior collection, or task dispatch. Its manifest requests only local backend host access and storage. AMO credentials are read from `AMO_JWT_ISSUER` / `AMO_JWT_SECRET` by `scripts/extension_release.py` and are never written to artifacts or logs.

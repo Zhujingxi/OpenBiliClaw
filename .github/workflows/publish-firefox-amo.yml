@@ -20,15 +20,16 @@ jobs:
         with:
           node-version: "22"
           cache: npm
-          cache-dependency-path: extension/package-lock.json
+          cache-dependency-path: frontend/package-lock.json
 
       - name: Install extension dependencies
         run: npm ci
-        working-directory: extension
+        working-directory: frontend
 
       - name: Build Firefox extension
-        run: npm run build:firefox
-        working-directory: extension
+        run: npm run build --workspace @openbiliclaw/extension
+          python ../scripts/extension_release.py package --firefox --no-build
+        working-directory: frontend
 
       - name: Package reproducible reviewer source
         id: source
@@ -54,7 +55,7 @@ jobs:
           AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
           SOURCE_ARCHIVE: ${{ steps.source.outputs.archive }}
         shell: bash
-        working-directory: extension
+        working-directory: frontend
         run: |
           npx web-ext sign \
             --channel=listed \
@@ -72,8 +73,8 @@ jobs:
           AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
           AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
           EXTENSION_VERSION: ${{ steps.source.outputs.version }}
-        run: node scripts/firefox-amo-status.mjs --version "$EXTENSION_VERSION"
-        working-directory: extension
+        run: python scripts/extension_release.py amo-status --version "$EXTENSION_VERSION"
+        working-directory: frontend
 
       - name: Synchronize AMO privacy policy
         id: privacy
@@ -81,8 +82,8 @@ jobs:
         env:
           AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
           AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
-        run: node scripts/firefox-amo-privacy.mjs
-        working-directory: extension
+        run: python scripts/extension_release.py amo-privacy
+        working-directory: frontend
 
       - name: Report AMO privacy policy sync fallback
         if: steps.privacy.outcome == 'failure'

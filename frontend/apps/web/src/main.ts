@@ -1,2 +1,10 @@
-// Plan 14 Phase A placeholder; the web shell lands in its dedicated phase.
-export {};
+import { ApiClient } from "@openbiliclaw/api-client";
+import { createPinia } from "pinia";
+import { createApp } from "vue";
+import App from "./App.vue";
+import { createWebApi } from "./services/api";
+
+const app = createApp(App);
+app.use(createPinia());
+app.provide("api", createWebApi(new ApiClient(location.origin)));
+app.mount("#app");

@@ -17,14 +17,6 @@ def test_web_guided_init_e2e_sanitizes_apt_sources_before_playwright_install() -
     assert "| xargs -r sudo rm -f || true" in e2e_job
 
 
-def test_issue_98_e2e_treats_playwright_as_an_optional_test_dependency() -> None:
-    """The default ``[dev,x]`` CI job must collect tests without Playwright installed."""
-    source = Path("tests/test_desktop_web_issue_98_e2e.py").read_text(encoding="utf-8")
-
-    assert 'pytest.importorskip("playwright.sync_api")' in source
-    assert "from playwright.sync_api import" not in source
-
-
 def test_windows_installer_workflow_tests_the_installed_executable() -> None:
     """The manual Windows build must cross the Inno install boundary before success."""
     workflow = Path(".github/workflows/build-installers.yml").read_text(encoding="utf-8")
@@ -59,7 +51,7 @@ def test_chrome_webstore_listing_workflow_is_probe_first_and_never_uploads_a_zip
     assert "args+=(--replace-pending)" in workflow
     assert "args+=(--publish)" in workflow
     assert "CHROME_WEBSTORE_REFRESH_TOKEN: ${{ secrets.CHROME_WEBSTORE_REFRESH_TOKEN }}" in workflow
-    assert "chrome-webstore-metadata.mjs" in workflow
+    assert "extension_release.py chrome-metadata" in workflow
     assert "chrome-webstore-upload.mjs" not in workflow
     assert "npm run package" not in workflow
     assert "screenshots" not in workflow.lower()

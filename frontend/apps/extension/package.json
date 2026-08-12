@@ -11,6 +11,7 @@
   },
   "scripts": {
     "typecheck": "vue-tsc --noEmit -p tsconfig.json",
-    "build": "vite build"
+    "build": "vite build",
+    "test": "vitest run --environment jsdom"
   }
 }

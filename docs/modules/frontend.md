@@ -1,6 +1,6 @@
-# Target Frontend Workspace（Phase A）
+# Target Frontend Workspace
 
-`frontend/` 是目标 Presentation Contract 的 npm workspace；当前仅落地共享契约与组件，尚未替换生产 web / extension shell。
+`frontend/` 是目标 Presentation Contract 的 npm workspace。共享契约和 responsive Vue web shell 已落地；extension shell 仍等待 Phase 14c。
 
 ## 已落地
 
@@ -26,6 +26,14 @@ npm --prefix frontend run build
 
 生成的 `schema.ts` 可提交、必须可重现；Vite `dist/` 是 ignored build output，不提交。
 
+## Web shell（Phase 14b）
+
+`apps/web/` 是单一 responsive Vue app，而非两套 desktop/mobile 应用。desktop sidebar 和 mobile bottom navigation 保持不同密度与导航方式，共享 recommendations、provider tabs、search/content detail、profile、Assistant、source connection、settings 和 runtime health views。
+
+Pinia 按 durable concern 拆为 session、sources、recommendations、content、profile、assistant、runtime/jobs 与 host-local preferences；每个 server store 明确暴露 idle/loading/success/empty/error，使用 AbortController 取消旧请求。Runtime store 是 event stream 的唯一 owner，采用 100ms→500ms→1s→2s bounded reconnect backoff，并保留最多 50 个 event envelope。Profile edit 等 mutation 不做无 rollback 的 optimistic update，服务端响应始终 authoritative。
+
+可访问性包括 skip link、desktop/mobile nav labels、`aria-current`、form labels、loading/error live announcements、route heading focus、Alt+Left keyboard navigation、明显 focus ring、high-contrast palette 以及系统/用户 reduced-motion policy。Store tests 不 mount app；component tests覆盖 navigation、announcements 和 keyboard path。
+
 ## 明确未落地
 
-Web views/stores/router 属于 Phase 14b；extension shell、legacy JS 删除与 packaging 属于 Phase 14c。两个 app 仅有可编译 placeholder，不能作为产品 UI 使用。Pinia stores、event reconnection ownership、browser E2E 也等待各 host phase。
+Extension shell、legacy JS 删除、browser E2E 与 packaging 属于 Phase 14c/15。Web API query/path interpolation 已在 shared api-client boundary 落地；production composition/base URL activation仍属于 Plan 15。

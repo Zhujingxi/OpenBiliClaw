@@ -1,33 +1,6 @@
 {
-  "name": "openbiliclaw-extension",
+  "name": "openbiliclaw-extension-metadata",
   "version": "0.3.201",
   "private": true,
-  "type": "module",
-  "scripts": {
-    "build": "npm run clean:chrome && npm run build:types && npm run build:bundle",
-    "build:bundle": "node scripts/build.mjs",
-    "build:types": "tsc -p tsconfig.json --emitDeclarationOnly",
-    "build:firefox": "npm run clean:firefox && npm run typecheck && TARGET=firefox npm run build:bundle",
-    "clean": "npm run clean:chrome && npm run clean:firefox",
-    "clean:chrome": "rm -rf dist",
-    "clean:firefox": "rm -rf dist-firefox",
-    "verify:assets": "node scripts/verify-build-assets.mjs --target chrome",
-    "verify:assets:firefox": "node scripts/verify-build-assets.mjs --target firefox",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test --experimental-strip-types tests/*.test.ts",
-    "package": "node scripts/package.mjs",
-    "package:only": "node scripts/package.mjs --no-build",
-    "package:firefox": "node scripts/package-firefox.mjs",
-    "package:firefox:only": "node scripts/package-firefox.mjs --no-build",
-    "sign:firefox": "node scripts/sign-firefox.mjs",
-    "sign:firefox:only": "node scripts/sign-firefox.mjs --no-build",
-    "webstore:upload": "node scripts/chrome-webstore-upload.mjs",
-    "webstore:metadata": "node scripts/chrome-webstore-metadata.mjs"
-  },
-  "devDependencies": {
-    "@types/chrome": "^0.1.29",
-    "esbuild": "^0.25.10",
-    "typescript": "^5.9.2",
-    "web-ext": "^10.4.0"
-  }
+  "description": "Declarative browser metadata; source and build commands live in frontend/ and scripts/extension_release.py"
 }

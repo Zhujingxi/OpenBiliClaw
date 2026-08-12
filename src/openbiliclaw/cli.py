@@ -696,7 +696,7 @@ def _content_author_row(content: Any) -> tuple[str, str]:
       fallback for legacy rows — same order as the backend's
       ``content.author_name or content.up_name``.
     * **Label** — mirrors ``formatRecommendationAuthorLine`` in
-      ``extension/popup/popup-helpers.js``: Bilibili keeps the native
+      the shared frontend presentation contract: Bilibili keeps the native
       "UP 主", every other platform gets the neutral "作者" (a Bangumi
       director or a Zhihu answerer is not an UP). A missing / unknown
       ``source_platform`` falls back to bilibili so legacy rows keep

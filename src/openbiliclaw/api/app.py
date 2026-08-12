@@ -31,13 +31,7 @@ from uuid import UUID
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import (
-    FileResponse,
-    JSONResponse,
-    RedirectResponse,
-    Response,
-    StreamingResponse,
-)
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
 
 from openbiliclaw.api.models import (
@@ -19023,120 +19017,8 @@ def create_app(
                 _existing_self_info.get("nickname", ""),
             )
 
-    # ── Mobile Web UI ───────────────────────────────────────────
-    from pathlib import Path as _Path
-
-    from fastapi.staticfiles import StaticFiles as _StaticFiles
-
-    _web_dir = _Path(__file__).resolve().parent.parent / "web"
-    _shared_web_dir = _web_dir / "shared"
-    if _web_dir.is_dir():
-        _favicon_path = _web_dir / "icon-32.png"
-
-        @app.get("/favicon.ico", include_in_schema=False)
-        def _favicon() -> FileResponse:
-            if not _favicon_path.is_file():
-                raise HTTPException(status_code=404, detail="favicon not found")
-            return FileResponse(_favicon_path, media_type="image/png")
-
-        app.mount("/m", _StaticFiles(directory=_web_dir, html=True), name="mobile-web")
-
-    # ── Shared frontend modules ──────────────────────────────────
-    # Its own mount rather than a subdirectory of an existing one: `/web` is
-    # rooted at `web/desktop`, so a file in `web/shared/` is only reachable
-    # through the *mobile* mount (`/m/shared/…`). Serving cross-surface code
-    # from a surface-specific URL is how it ends up copied instead of shared.
-    if _shared_web_dir.is_dir():
-        app.mount("/shared", _StaticFiles(directory=_shared_web_dir), name="shared-web")
-
-    # ── Desktop Web UI ───────────────────────────────────────────
-    _desktop_dir = _Path(__file__).resolve().parent.parent / "web" / "desktop"
-    if _desktop_dir.is_dir():
-        _desktop_index_path = _desktop_dir / "index.html"
-
-        def _desktop_asset_version() -> str:
-            import hashlib
-
-            digest = hashlib.sha256()
-            # Paths are relative to the desktop root except the shared modules,
-            # which live outside it — an upgrade that only changed
-            # shared renderers would otherwise be served from cache forever.
-            for relative, root in (
-                ("assets/css/app.css", _desktop_dir),
-                ("assets/css/classic.css", _desktop_dir),
-                ("assets/js/app.js", _desktop_dir),
-                ("dialogue-confirmation.js", _shared_web_dir),
-                ("source-status.js", _shared_web_dir),
-            ):
-                path = root / relative
-                if not path.is_file():
-                    continue
-                stat = path.stat()
-                digest.update(relative.encode("utf-8"))
-                digest.update(str(stat.st_mtime_ns).encode("ascii"))
-                digest.update(str(stat.st_size).encode("ascii"))
-            return digest.hexdigest()[:12]
-
-        def _desktop_index_response() -> Response:
-            if not _desktop_index_path.is_file():
-                raise HTTPException(status_code=404, detail="desktop web index not found")
-            version = _desktop_asset_version()
-            html = _desktop_index_path.read_text(encoding="utf-8")
-            html = html.replace(
-                'href="/web/assets/css/app.css"',
-                f'href="/web/assets/css/app.css?v={version}"',
-            )
-            html = html.replace(
-                'href="/web/assets/css/classic.css"',
-                f'href="/web/assets/css/classic.css?v={version}"',
-            )
-            html = html.replace(
-                'src="/web/assets/js/app.js"',
-                f'src="/web/assets/js/app.js?v={version}"',
-            )
-            html = html.replace(
-                'src="/shared/dialogue-confirmation.js"',
-                f'src="/shared/dialogue-confirmation.js?v={version}"',
-            )
-            html = html.replace(
-                'src="/shared/source-status.js"',
-                f'src="/shared/source-status.js?v={version}"',
-            )
-            return Response(
-                html,
-                media_type="text/html; charset=utf-8",
-                headers={"Cache-Control": "no-store"},
-            )
-
-        @app.get("/web", include_in_schema=False)
-        def _desktop_index_no_slash() -> Response:
-            return _desktop_index_response()
-
-        @app.get("/web/", include_in_schema=False)
-        def _desktop_index_slash() -> Response:
-            return _desktop_index_response()
-
-        app.mount("/web", _StaticFiles(directory=_desktop_dir, html=True), name="desktop-web")
-
-        @app.get("/", include_in_schema=False)
-        def _root_redirect() -> RedirectResponse:
-            # Mirror packaging/entry.py's _decide_landing_path for browsers
-            # that reach the port without the packaged launcher (git/docker
-            # installs, manual visits): a degraded backend or one whose init
-            # never completed lands on the setup wizard, not the SPA. Unknown
-            # readiness keeps the /web fallback — the SPA's onboarding gate
-            # is the safety net, not a wall.
-            needs_setup = bool(getattr(ctx, "degraded", False)) or _health_profile_ready() is False
-            if needs_setup and (_web_dir / "setup").is_dir():
-                return RedirectResponse(url="/setup/", status_code=302)
-            return RedirectResponse(url="/web", status_code=302)
-
-    # ── First-run Setup Wizard ──────────────────────────────────
-    # Self-contained onboarding page opened on first launch by the packaged
-    # app (packaging/entry.py). Guides provider/key + B站 + done, then sends
-    # the user to /web. Kept isolated from the main desktop SPA on purpose.
-    _setup_dir = _Path(__file__).resolve().parent.parent / "web" / "setup"
-    if _setup_dir.is_dir():
-        app.mount("/setup", _StaticFiles(directory=_setup_dir, html=True), name="setup-wizard")
+    # Legacy handwritten web assets were removed by Presentation Plan 14.
+    # The target host serves only generated Vite artifacts through the new
+    # hosts/composition adapter; this legacy app deliberately serves no UI.
 
     return app

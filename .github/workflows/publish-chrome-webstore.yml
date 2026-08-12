@@ -36,15 +36,16 @@ jobs:
         with:
           node-version: "22"
           cache: npm
-          cache-dependency-path: extension/package-lock.json
+          cache-dependency-path: frontend/package-lock.json
 
       - name: Install extension dependencies
         run: npm ci
-        working-directory: extension
+        working-directory: frontend
 
       - name: Build Chrome-compatible extension archive
-        run: npm run package
-        working-directory: extension
+        run: npm run build --workspace @openbiliclaw/extension
+          python ../scripts/extension_release.py package --no-build
+        working-directory: frontend
 
       - name: Locate Chrome-compatible extension archive
         id: archive
@@ -83,4 +84,4 @@ jobs:
           if [ "$SHOULD_REPLACE_PENDING" = "true" ]; then
             args+=(--replace-pending)
           fi
-          node extension/scripts/chrome-webstore-upload.mjs "${args[@]}"
+          python scripts/extension_release.py chrome-upload "${args[@]}"
