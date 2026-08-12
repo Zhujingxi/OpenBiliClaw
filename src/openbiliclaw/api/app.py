@@ -5101,6 +5101,14 @@ def create_app(
 
         coord = ctx.init_coordinator
 
+        def _purge_pool_for_reinit() -> int:
+            # Force re-init: retire every active pool row so the fresh profile
+            # immediately yields new recommendations. Called by the shared
+            # pipeline at stage-4 start (unconditionally, not via backfill
+            # signature sniffing — a backfill that omits the flag would
+            # otherwise silently skip the purge, see field report 2026-08-12).
+            return int(ctx.database.mark_pool_purged_by_reinit() or 0)
+
         async def _api_discover_backfill(
             profile: Any,
             *,
@@ -5154,7 +5162,7 @@ def create_app(
                 run_id=run_id,
                 # Force re-init retires the old recommendation pool so the
                 # fresh profile immediately yields new recommendations.
-                purge_pool=force,
+                purge_pool_callback=_purge_pool_for_reinit if force else None,
                 # Optional: clear old awareness/insight observations (e.g.
                 # from a previous account) before the new profile build.
                 reset_cognition=reset_cognition,

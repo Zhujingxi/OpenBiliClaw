@@ -2777,14 +2777,10 @@ async def _run_init_discovery_backfill_async(
     target_pool_count: int = 100,
     label_suffix: str = "",
     progress_callback: Callable[[int, int, str], Awaitable[None] | None] | None = None,
-    purge_pool: bool = False,
 ) -> int:
     """Build the first serviceable discovery pool from the committed profile."""
     from openbiliclaw.discovery.pool_snapshot import build_cold_start_pool_snapshot
     from openbiliclaw.runtime.refresh import InitialPoolUnavailableError
-
-    if purge_pool:
-        _get_runtime_database().mark_pool_purged_by_reinit()
 
     async def _report(done: int, total: int, note: str) -> None:
         if progress_callback is None:
@@ -7702,7 +7698,7 @@ async def run_guided_init(
     profile_build_timeout_seconds: float = _INIT_PROFILE_BUILD_TIMEOUT_SECONDS,
     discovery_timeout_seconds: float = _INIT_DISCOVERY_TIMEOUT_SECONDS,
     collection_timeout_seconds: float = _INIT_COLLECTION_TIMEOUT_SECONDS,
-    purge_pool: bool = False,
+    purge_pool_callback: Callable[[], int] | None = None,
     reset_cognition: bool = False,
 ) -> InitResult:
     """Shared async init pipeline (gui-init spec §1).
@@ -7734,11 +7730,15 @@ async def run_guided_init(
     run lifecycle (mark_running / complete / fail) stays with the caller.
 
     Re-init switches (used by ``init --force`` / ``POST /api/init
-    {force:true}``): ``purge_pool`` retires every active recommendation pool
-    row before stage 4 so the fresh profile immediately yields new
-    recommendations; ``reset_cognition`` clears the long-term awareness /
-    insight layers before stage 2 so old LLM observations (e.g. from a
-    previous account) do not leak into the new profile build.
+    {force:true}``): ``purge_pool_callback`` retires every active
+    recommendation pool row at stage-4 start so the fresh profile immediately
+    yields new recommendations (the caller injects it — CLI uses its runtime
+    database, the API wrapper uses the live daemon database; it runs
+    unconditionally, NOT via backfill signature sniffing, so a backfill that
+    omits the flag cannot silently skip the purge); ``reset_cognition`` clears
+    the long-term awareness / insight layers before stage 2 so old LLM
+    observations (e.g. from a previous account) do not leak into the new
+    profile build.
     """
 
     import logging
@@ -8931,6 +8931,18 @@ async def run_guided_init(
     # ── Stage 4: only the committed full profile may drive discovery ──
     await _stage_started(4)
     _print_section_title("4/4 建立首轮可用内容池")
+    # Force re-init: retire the old recommendation pool BEFORE discovery so
+    # the fresh profile immediately yields new recommendations and the backfill
+    # cannot top out against stale rows. Best-effort: a purge failure must not
+    # fail the run (the backfill still tops up; new rows just mingle with old).
+    if purge_pool_callback is not None:
+        try:
+            purged = purge_pool_callback()
+            console.print(
+                f"  [dim]force 重初始化：已清空 {purged} 条旧推荐，按新画像重新发现。[/dim]"
+            )
+        except Exception:
+            logger.warning("re-init pool purge failed", exc_info=True)
 
     _stage4_live_done = 0
     _stage4_live_total = 4
@@ -8978,20 +8990,13 @@ async def run_guided_init(
         signature = inspect.signature(discover_backfill)
     except (TypeError, ValueError):
         accepts_progress_callback = True
-        accepts_purge_pool = True
     else:
         accepts_progress_callback = "progress_callback" in signature.parameters or any(
             parameter.kind is inspect.Parameter.VAR_KEYWORD
             for parameter in signature.parameters.values()
         )
-        accepts_purge_pool = "purge_pool" in signature.parameters or any(
-            parameter.kind is inspect.Parameter.VAR_KEYWORD
-            for parameter in signature.parameters.values()
-        )
     if accepts_progress_callback:
         backfill_kwargs["progress_callback"] = _stage4_progress
-    if purge_pool and accepts_purge_pool:
-        backfill_kwargs["purge_pool"] = True
 
     # Stage 4 is best-effort once the full profile exists: timeout/failure is
     # terminal *partial success*, and clients may enter the app while the
@@ -9653,7 +9658,11 @@ def init(
                 include_weibo=include_weibo,
                 target_pool_count=_INIT_POOL_TARGET_COUNT,
                 discover_backfill=_run_init_discovery_backfill_async,
-                purge_pool=force,
+                purge_pool_callback=(
+                    (lambda: _get_runtime_database().mark_pool_purged_by_reinit())
+                    if force
+                    else None
+                ),
                 reset_cognition=reset_cognition,
             )
         )

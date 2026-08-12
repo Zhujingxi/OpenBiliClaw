@@ -16662,6 +16662,42 @@ class TestGuidedInitEndpoints:
         assert captured["include_bili"] is False
         assert captured["include_xhs"] is True
 
+    def test_init_force_wires_pool_purge_and_cognition_reset(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Force re-init must inject the pool-purge callback + reset_cognition.
+
+        Regression: the purge used to be forwarded via backfill signature
+        sniffing, and the API wrapper's backfill silently omitted the flag —
+        force re-init on the API path never retired the old pool (field report
+        2026-08-12, caught by real E2E). The pipeline now receives a callback
+        unconditionally and runs it at stage-4 start.
+        """
+        from fastapi.testclient import TestClient
+
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["bilibili"])
+        app, _ = self._make_app(tmp_path, profile_ready=True, prereqs=prereqs)
+        captured = self._capture_run_guided_init(monkeypatch)
+        with TestClient(app) as client:
+            resp = client.post("/api/init", json={"force": True, "reset_cognition": True})
+            assert resp.status_code == 202
+            self._drive_until(client, captured)
+        assert captured["purge_pool_callback"] is not None
+        assert captured["reset_cognition"] is True
+
+    def test_init_first_run_does_not_inject_pool_purge(self, tmp_path: Path, monkeypatch) -> None:
+        """A first (non-force) init has no pool to purge and must not inject."""
+        from fastapi.testclient import TestClient
+
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["bilibili"])
+        app, _ = self._make_app(tmp_path, prereqs=prereqs)
+        captured = self._capture_run_guided_init(monkeypatch)
+        with TestClient(app) as client:
+            resp = client.post("/api/init", json={})
+            assert resp.status_code == 202
+            self._drive_until(client, captured)
+        assert captured["purge_pool_callback"] is None
+
     def test_init_rejects_empty_source_selection(self, tmp_path: Path) -> None:
         from fastapi.testclient import TestClient
 
