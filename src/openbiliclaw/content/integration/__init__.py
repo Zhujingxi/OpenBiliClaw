@@ -1,0 +1,96 @@
+"""Typed content-provider contracts, registry, projections, and tools."""
+
+from .actions import ActionConfirmation, ActionRequest, ActionResult
+from .capabilities import (
+    ActionCapability,
+    ContentFilter,
+    ContentPage,
+    CreatorCapability,
+    CreatorQuery,
+    FeedCapability,
+    FeedQuery,
+    FetchCapability,
+    HistoryCapability,
+    ObservationCapability,
+    PageRequest,
+    ProjectionCapability,
+    ProviderCursor,
+    ProviderObservation,
+    RelatedCapability,
+    SavedCapability,
+    SearchCapability,
+    SearchQuery,
+)
+from .errors import ContentIntegrationError, IntegrationErrorCode
+from .identity import ContentKind, ContentRef, ProviderId
+from .manifest import (
+    ActionDescriptor,
+    CapabilityKind,
+    NativeSchemaDescriptor,
+    ProviderAvailability,
+    ProviderManifest,
+)
+from .native import NativeContent
+from .projections import (
+    CardData,
+    ContentPreview,
+    ProjectionProvenance,
+    RecommendationCandidate,
+    SearchDocument,
+)
+from .registry import ContentProviderRegistry
+from .tools import (
+    PendingActionDescriptor,
+    ToolBudget,
+    ToolPreview,
+    ToolPreviewPage,
+    build_provider_tools,
+    prepare_pending_action,
+)
+
+__all__ = [
+    "ActionCapability",
+    "ActionConfirmation",
+    "ActionDescriptor",
+    "ActionRequest",
+    "ActionResult",
+    "CapabilityKind",
+    "CardData",
+    "ContentFilter",
+    "ContentIntegrationError",
+    "ContentKind",
+    "ContentPage",
+    "ContentPreview",
+    "ContentProviderRegistry",
+    "ContentRef",
+    "CreatorCapability",
+    "CreatorQuery",
+    "FeedCapability",
+    "FeedQuery",
+    "FetchCapability",
+    "HistoryCapability",
+    "IntegrationErrorCode",
+    "NativeContent",
+    "NativeSchemaDescriptor",
+    "ObservationCapability",
+    "PageRequest",
+    "PendingActionDescriptor",
+    "ProjectionCapability",
+    "ProjectionProvenance",
+    "ProviderAvailability",
+    "ProviderCursor",
+    "ProviderId",
+    "ProviderManifest",
+    "ProviderObservation",
+    "RecommendationCandidate",
+    "RelatedCapability",
+    "SavedCapability",
+    "SearchCapability",
+    "SearchDocument",
+    "SearchQuery",
+    "ToolBudget",
+    "ToolPreview",
+    "ToolPreviewPage",
+    "build_provider_tools",
+    "prepare_pending_action",
+]

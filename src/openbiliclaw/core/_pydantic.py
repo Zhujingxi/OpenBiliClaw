@@ -27,6 +27,9 @@ if TYPE_CHECKING:
         @classmethod
         def model_validate_json(cls: type[_Model], value: str | bytes) -> _Model: ...
 
+        @classmethod
+        def model_json_schema(cls) -> dict[str, object]: ...
+
         def model_dump_json(self) -> str: ...
 else:
     from pydantic import BaseModel as StrictBaseModel

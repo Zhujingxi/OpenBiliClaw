@@ -49,6 +49,7 @@
 | Target AI Runtime | [modules/ai-runtime.md](modules/ai-runtime.md) | `src/openbiliclaw/ai/runtime/` | 🚧 typed kernel 已落地，尚未接入 production composition |
 | Target AI Providers | [modules/ai-providers.md](modules/ai-providers.md) | `src/openbiliclaw/ai/providers/` | 🚧 model/embedding plugins 已落地，routes/probe enforcement 尚未接线 |
 | Target Provider Access | [modules/provider-access.md](modules/provider-access.md) | `src/openbiliclaw/access/` | 🚧 anonymous/manual typed boundary 已落地，hosts/composition 尚未接线 |
+| Target Content Integration | [modules/content-integration.md](modules/content-integration.md) / [Provider authoring](modules/content-provider-authoring.md) | `src/openbiliclaw/content/integration/` | 🚧 contracts/registry/tools 已落地，first-party providers/composition 尚未接线 |
 | B 站接入层 | [modules/bilibili.md](modules/bilibili.md) | `src/openbiliclaw/bilibili/` | ✅ M3 完成 |
 | 多源适配层 | [modules/discovery.md](modules/discovery.md#多源适配层) | `src/openbiliclaw/sources/` | ✅ v0.3.x 落地 B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Bangumi / Linux.do / 通用 Web 多源 discovery |
 | Bangumi 接入 | [modules/bangumi.md](modules/bangumi.md) | `src/openbiliclaw/sources/bangumi*.py` + `runtime/bangumi_producer.py` | ✅ 官方匿名只读 API + 公开收藏 init + search/ranked/latest discovery |

@@ -7,6 +7,8 @@
 > `src/openbiliclaw/ai/` 已落地 target PydanticAI execution boundary：稳定 AgentId、startup-validated capability routes、Core resource budget、native usage/timeout/retry limits、typed safe failures、bounded/audited messages、usage persistence port，以及 recorded-input offline evaluation mechanics。`ai/providers/` 进一步提供 CredentialVault-scoped OpenAI/Anthropic/Google/Ollama/OpenRouter model 构造、declared-vs-verified capability records、安全 construction diagnostics，及独立的 typed OpenAI/Google/Ollama embedding transports 和 dimension-safe bounded batching；DashScope chat 明确 unsupported。它目前没有 production caller；现有 `llm/` / `eval/` / agent orchestration 继续单独运行，等待 Plans 09–13 owner conversion 和最终 Composition cutover，不存在 compatibility facade 或双路 model call。
 >
 > `src/openbiliclaw/access/` 已落地 target Provider Access boundary：secret-free discriminated handles/status、provider-owned declarative forms/verifiers、anonymous public-read method、CredentialVault-backed manual method、typed extension registry/broker，以及有界 verification cache 的 connect/status/replace/disconnect service。它禁止 anonymous write/account identity，也禁止 model-visible package 导入 vault。当前没有 production caller；`api/source_auth/`、`auth_core.py`、legacy config credential reads 和所有 host/frontend 行为保持原样，等待 Plan 13/15 一次切换，不存在双写。
+>
+> `src/openbiliclaw/content/integration/` 已落地 target Content Integration contracts：稳定 content identity/native schema envelope、四种独立 purpose projection、十种 narrow capability protocols、显式 duplicate-safe provider registry、provider contract test utility，以及 bounded PydanticAI search/fetch tools。Mutation tool 只生成 pending action，不能直接执行。当前没有 first-party target provider 或 production caller；legacy `sources/protocol.py`/registry/dispatcher 仍是唯一生产路径，等待 Plans 07/15 直接替换，不存在 compatibility adapter 或双写。
 
 ## 系统概览
 
