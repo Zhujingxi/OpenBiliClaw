@@ -90,6 +90,7 @@ packaging = [
 
 [project.scripts]
 openbiliclaw = "openbiliclaw.cli:app"
+openbiliclaw-v2 = "openbiliclaw.composition.entrypoints:main"
 
 [project.urls]
 Homepage = "https://github.com/whiteguo233/OpenBiliClaw"

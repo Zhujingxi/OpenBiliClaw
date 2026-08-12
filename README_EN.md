@@ -608,7 +608,7 @@ The whole loop stays local — the agent host just calls the CLI bridge; your pr
 
 ## 🏛️ Architecture Overview
 
-> Refactor target (not yet wired into production composition): `hosts/api` now provides the strict `/v1` HTTP/OpenAPI boundary, while `hosts/cli` shares the same typed Application/Assistant facade. `frontend/` Phase 14 only provides the generated API client and shared safe Vue cards; web and reduced extension shells are implemented. The legacy UI/API/CLI cutover remains a Plan 15 operation.
+> Refactor target (legacy production is not cut over yet): `hosts/api` provides strict `/v1`, `hosts/cli` shares its typed facade, and Phase 14 provides generated clients and Vue shells. The opt-in Phase 15 `composition/` package now provides a frozen graph, ordered lifecycle, atomic reload, and `openbiliclaw-v2 check`. Legacy UI/API/CLI, installer/Docker cutover, and deletion remain Phase 15b.
 
 ```text
 Target Presentation A (not wired): generated API client + shared Vue cards

@@ -12,6 +12,8 @@
 >
 > `frontend/` Phase 14 workspace 已落地但**未接入 production**：deterministic OpenAPI → generated TypeScript contract → runtime-validating API/SSE client → shared Vue Presentation Contract/cards。`apps/web` 提供 responsive Vue/Pinia shell，`apps/extension` 提供仅连接本地后端的精简 shell；旧 handwritten JavaScript 已删除。production composition 切换仍等待 Plan 15。
 >
+> `src/openbiliclaw/composition/` 已落地 opt-in target graph：frozen `Application` 显式组装 lazy Infrastructure resources、owner repositories、first-party provider registry 与 top-level services；staged lifecycle 按 Infrastructure → Services → Core jobs → Hosts 启动并逆序关闭，partial failure rollback；`ApplicationReference` 以 in-flight lease 支持 candidate readiness、atomic swap 和 bounded drain。`openbiliclaw-v2 check` 可独立验证图；legacy `openbiliclaw`、生产 API/CLI/installer/Docker cutover与旧实现删除明确留给 Phase 15b。
+>
 > **Legacy extension composition disclaimer:** 本文后续仍出现的 `extension-online`、Cookie 同步、content-script collector、task executor、installed-extension broker 等流程仅描述尚未由 Plan 15 删除的 legacy backend schema/队列历史，不是当前 Phase 14 extension shell 的能力。当前插件只有直接连接本地 typed `/v1` API 的 popup/sidebar，无 background/content script、Cookie 权限、行为采集或 provider task。
 >
 >

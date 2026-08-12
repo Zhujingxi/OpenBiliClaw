@@ -2,7 +2,7 @@
 
 > *你的跨平台 AI 内容朋友，比你更懂你想看什么* 🎯
 >
-> Refactor status: target boundaries through `hosts/` and Presentation Phase 14 are implemented but not wired into production composition; the production data flow below still describes legacy composition. Target Hosts expose a strict `/v1` FastAPI/OpenAPI contract and matching Typer adapters over Application/Assistant. The unwired `frontend/` workspace generates TypeScript API contracts and shared safe Vue cards; web and reduced extension shells are implemented; production composition cutover remains Plan 15. Legacy host/presentation cutover remains Plan 15, so this document does not draw a production connection that does not yet exist.
+> Refactor status: target boundaries through Presentation Phase 14 and an opt-in Phase 15 Composition graph are implemented but not wired into legacy production entrypoints; the production data flow below still describes legacy composition. Target Hosts expose a strict `/v1` FastAPI/OpenAPI contract and matching Typer adapters over Application/Assistant. The unwired `frontend/` workspace generates TypeScript API contracts and shared safe Vue cards; web and reduced extension shells are implemented; production composition cutover remains Plan 15. Legacy host/presentation cutover remains Plan 15, so this document does not draw a production connection that does not yet exist.
 
 ---
 
