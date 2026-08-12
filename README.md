@@ -114,7 +114,7 @@
 
 ## 📸 功能预览
 
-核心入口现在有三个：浏览器插件负责平台内交互和登录会话，桌面端 Web（`/web`）提供大屏推荐首页，移动端 Web（`/m`）适合手机使用。桌面端和移动端都只调用本地 API，Cookie 同步和平台任务仍由插件承担。
+核心入口是 responsive Web 与精简浏览器插件：Web 提供推荐、画像和 Assistant；插件 popup 通过 typed API client 直接连接本地后端。插件不注入内容脚本、不读取 Cookie、不采集页面行为，也不执行平台任务。
 
 <table>
   <tr>
@@ -230,8 +230,7 @@
 
 ### 1. 安装浏览器插件
 
-插件是主要入口：它会在 B 站、小红书、抖音、YouTube、X、知乎和 Linux.do 普通页面显示侧边栏、采集你的反馈，并承接知乎 / Reddit 等登录态任务与 Linux.do 同源只读任务。Linux.do 的公开 discovery 无需登录；个人 bootstrap 才复用浏览器登录态。其任务 tab 与普通行为采集隔离，只执行同源只读 GET。
-插件是主要入口：它会在 B 站、小红书、抖音、YouTube、X 和知乎页面显示侧边栏、采集你的反馈，并把知乎 / Reddit 等登录态任务安全地交给本地后端使用。微博 discovery 由后端独立完成，不增加任何微博插件权限、页面行为采集或任务桥。
+插件是精简的本地后端连接入口：popup/sidebar 保存 loopback backend URL 与 opaque device token，并直接调用 typed `/v1` API。它没有 content script、Cookie 权限、浏览行为采集或 provider task bridge。来源登录与采集应使用后端 provider access/CLI 明确支持的方式。
 
 插件基于 Manifest V3，支持所有兼容 Chrome 插件的浏览器，包括 **Chrome、Edge、Brave、Arc、Vivaldi、Opera** 等。
 
@@ -265,7 +264,8 @@ unzip openbiliclaw-extension-v*-firefox.zip -d openbiliclaw-firefox
 git clone https://github.com/whiteguo233/OpenBiliClaw.git
 cd OpenBiliClaw/extension
 npm install
-npm run build:firefox          # 产出 dist-firefox/
+npm --prefix frontend run build --workspace @openbiliclaw/extension
+python scripts/extension_release.py package --firefox --no-build
 npm run package:firefox        # 额外打成未签名 openbiliclaw-extension-v*-firefox.zip
 # AMO 凭据配置后可签名成正式安装包：
 # AMO_JWT_ISSUER=... AMO_JWT_SECRET=... npm run sign:firefox:only
@@ -275,7 +275,7 @@ npm run package:firefox        # 额外打成未签名 openbiliclaw-extension-v*
 
 1. 打开 `about:debugging#/runtime/this-firefox`
 2. 点「Load Temporary Add-on…」
-3. 选解压目录里的 `manifest.json`（或源码构建后的 `extension/dist-firefox/manifest.json`）
+3. 选解压目录里的 `manifest.json`（或源码构建后的 `artifacts/extension/firefox/manifest.json`）
 
 注意：Firefox 临时加载在浏览器重启后会失效；如果 release 提供已签名 `.xpi`，普通用户应优先使用 `.xpi`。
 
@@ -404,12 +404,12 @@ OpenBiliClaw 不保存你的平台密码，也不替你绕过登录。需登录�
 | **YouTube** | 在同一浏览器打开 https://www.youtube.com 正常登录 | `init --yes-youtube` 和 `fetch-youtube` 可能返回 0 条；仍可用 `import-youtube` 从 Takeout 导入 |
 | **X（Twitter）** | 在同一浏览器打开 https://x.com 正常登录 | `init --yes-x`、`fetch-x` 和 X discovery 拉不到数据（服务端重放需要 `auth_token`+`ct0`，登录后扩展自动同步） |
 | **知乎** | 在同一浏览器打开 https://www.zhihu.com 正常登录 | `init --yes-zhihu`、`fetch-zhihu`、`discover --source zhihu` 和 `discover-zhihu*` 拉不到数据 |
-| **Reddit** | 在同一浏览器打开 https://www.reddit.com 正常登录；插件会同步 `reddit_session` 给日常 discovery 的 rdt-cli，`rdt login` 仅作为插件不可用时的 fallback | `fetch-reddit --mode bootstrap` 拉不到初始化信号；rdt credential 未同步时 rdt 路径会 fallback 到插件任务 |
+| **Reddit** | 按 rdt-cli 文档执行 `rdt login` | 未配置 rdt 凭据时，登录态 discovery / bootstrap 不可用；精简插件不会同步会话或承接 fallback 任务 |
 | **Linux.do** | 在同一浏览器打开 https://linux.do 正常登录；公开 discovery 无需登录 | 未登录时 `fetch-linuxdo` 和 `init --yes-linuxdo` 拉不到书签 / 点赞 / 阅读记录，但 search / hot / feed / creator / related discovery 仍可用 |
-| **Bangumi** | 无需登录；可选填公开用户名读取公开收藏，或填个人令牌读取私密收藏；插件在 bgm.tv / bangumi.tv 仅做账号身份自动识别（不读 Cookie、不采集浏览行为） | 未填用户名时不能把 Bangumi 作为唯一画像初始化来源，但匿名 search / ranked / 按日期 discovery 仍可用 |
-| **V2EX** | 无需登录；可选填 PAT；guided init / 增量任务在扩展中读取本人主题、本人回复、收藏主题和收藏 Node 的公开渲染字段 | 未连接扩展时仍可匿名 search / node / tab / hot / latest discovery；收藏 scope 需要实际登录态 |
+| **Bangumi** | 无需登录；可选填公开用户名读取公开收藏，或填个人令牌读取私密收藏 | 未填用户名时不能把 Bangumi 作为唯一画像初始化来源，但匿名 search / ranked / 按日期 discovery 仍可用 |
+| **V2EX** | 无需登录；可选填 PAT 增强 API 2.0 公开读取 | 匿名 search / node / tab / hot / latest discovery 可用；精简插件不执行个人收藏 bootstrap |
 
-小红书、抖音、YouTube、知乎和 Linux.do 走 Chrome 插件任务链路，Reddit 日常 discovery 默认走随后端安装的 rdt-cli、初始化信号仍走插件，X 的 discovery 走服务端 cookie 重放；这些读取链路都不需要你额外启动 CDP 调试 Chrome。Linux.do 上游请求全部在真实站点 tab 内以同源 GET 执行，`_t` 只作登录布尔，Cookie 值和原始响应不会上传。Reddit/X、YouTube、小红书、抖音与知乎原生保存 executor 已 6/6 接入并通过 fixture 测试；2026-07-14 的真实账号回归中，六平台 favorite 与 watch-later/fallback 均得到 `synced/already_synced`。Linux.do 不提供任何站内写回。`[sources.browser].cdp_url` 只保留给通用 Web / 自定义网页源的浏览器抓取场景。
+Phase 14 的精简插件不再提供任何站点任务、Cookie 同步或原生保存 executor。各来源只通过 target provider access/content provider 或明确的后端 CLI/凭据路径工作；不支持的浏览器会话能力会明确报告 unavailable。
 
 </details>
 
@@ -602,8 +602,8 @@ OpenClaw 收到 `interest.probe` 事件（或主动拉取 `next-probe`），发�
 - 🔄 **持续学习** — 苏格拉底式对话 + 行为分析 + 反馈即时生效，越用越懂你
 - ⭐ **本地优先收藏 / 稍后看** — 推荐卡先写本地 SQLite，自动同步默认关闭；桌面 Web 刷新后首屏就显示保存数量徽标；B站和六个扩展平台均支持收藏与原生稍后看/收藏回退，2026-07-14 七平台两类动作真实账号回归均为 `synced/already_synced`
 - 🕘 **30 天内容历史** — 插件、桌面与移动端统一显示点开过、出现未点和最近移除；按页懒加载封面，移除的本地收藏 / 稍后看可一键恢复
-- 🧩 **浏览器插件** — Chrome / Edge / Brave / Arc / Firefox，侧边栏推荐 + 跨站行为采集，装上就能用
-- 🚀 **图形化引导初始化** — 安装包 `/setup/`、桌面 Web 和插件都能点一下完成初始化，不碰命令行
+- 🧩 **浏览器插件** — Chrome / Edge / Brave / Arc / Firefox 的精简本地后端连接 popup，不采集跨站行为
+- 🚀 **图形化工作流** — responsive Web 提供来源连接、推荐、画像、Assistant、设置和 runtime 状态
 - 📦 **跨机器迁移** — 桌面配置页一键导出 / 导入可移植配置、SQLite、画像、Cookie 与图片缓存；导入先校验暂存，可查询 / 取消，重启后带回滚副本应用。`.obcbackup` 含明文敏感信息，但不含源机 API 登录密码 / 会话签名密钥或扩展设备 key
 - 🔬 **自动化评测优化** — 5 个模块各带 LLM-as-judge 自优化循环，prompt 质量随轮次自动提升
 - 🔒 **完全私有** — SQLite、配置、画像与缓存都留在本机，LLM 用你自己的 Key，每个实例只为你一个人构建
@@ -612,7 +612,7 @@ OpenClaw 收到 `interest.probe` 事件（或主动拉取 `next-probe`），发�
 
 ## 🏛️ 架构概览
 
-> Refactor target（尚未接入 production composition）：`hosts/api` 已提供 strict `/v1` HTTP/OpenAPI boundary，`hosts/cli` 与其共享同一 typed Application/Assistant facade；`frontend/` Phase 14A 仅落地 generated API client + shared Vue cards，web/extension shells 仍是 placeholders。legacy UI/API/CLI 等待 Plan 15 一次切换。
+> Refactor target（尚未接入 production composition）：`hosts/api` 已提供 strict `/v1` HTTP/OpenAPI boundary，`hosts/cli` 与其共享同一 typed Application/Assistant facade；`frontend/` Phase 14 仅落地 generated API client + shared Vue cards，web 与精简 extension shell 已实现。legacy UI/API/CLI 等待 Plan 15 一次切换。
 
 ```text
 Target Presentation A（尚未接线）: generated API client + shared Vue cards
@@ -873,7 +873,6 @@ OpenBiliClaw/
 | 存储 | SQLite + Embedding 向量索引 |
 | 容器化 | Docker Compose (后端) |
 | Agent 框架 | 自研轻量框架 |
-
 ## 📖 文档
 
 - [文档导航](docs/index.md) — 一站式文档入口

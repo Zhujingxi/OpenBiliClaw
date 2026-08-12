@@ -8,6 +8,9 @@ import type { WebApi } from "../services/api";
 
 const api: WebApi = {
   listSources: async () => [],
+  connectSource: async () => {
+    throw new Error("unused");
+  },
   recommendations: async () => ({ items: [] }),
   profile: async () => ({
     profile: { version: 1, preference_summary: [], insights: [] },
@@ -65,14 +68,21 @@ describe("web accessibility", () => {
     ).toBe(true);
   });
 
-  it("has skip navigation, labels, distinct responsive nav, and Alt+Left keyboard path", async () => {
+  it("has skip navigation, labels, distinct responsive layouts, and Alt+Left keyboard path", async () => {
+    location.hash = "#/profile";
     const back = vi.spyOn(history, "back").mockImplementation(() => undefined);
     const wrapper = mount(App, {
       attachTo: document.body,
       global: { plugins: [createPinia()], provide: { api } },
     });
-    expect(wrapper.get(".skip-link").attributes("href")).toBe("#main");
-    expect(wrapper.findAll("nav")).toHaveLength(2);
+    const skip = wrapper.get(".skip-link");
+    expect(skip.attributes("href")).toBe("#main");
+    expect(wrapper.find(".responsive-layout").exists()).toBe(true);
+    expect(wrapper.findAll("main")).toHaveLength(1);
+    expect(wrapper.findAllComponents({ name: "ProfileView" })).toHaveLength(1);
+    await skip.trigger("click");
+    expect(location.hash).toBe("#/profile");
+    expect(document.activeElement?.id).toBe("main");
     await wrapper
       .get(".shell")
       .trigger("keydown", { altKey: true, key: "ArrowLeft" });

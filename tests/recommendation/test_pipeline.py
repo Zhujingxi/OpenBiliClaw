@@ -226,7 +226,9 @@ async def test_repository_replay_feed_is_model_free(tmp_path: Path) -> None:
     db2 = SqliteDatabase(path)
     await db2.open()
     feed = await RecommendationService(SqliteRecommendationRepository(db2)).feed()
-    assert feed == selections
+    assert tuple(item.selection for item in feed) == selections
+    assert feed[0].ref == original.preview.ref
+    assert feed[0].card.title == original.preview.title
     assert (
         await SqliteRecommendationRepository(db2).load(original.candidate_id)
     ).state is CandidateState.SHOWN

@@ -1,6 +1,29 @@
 import { describe, expect, it, vi } from "vitest";
 import type { components } from "../generated/schema";
-import { ApiClient, ApiError, parseEventEnvelope } from "./client";
+import {
+  ApiClient,
+  ApiError,
+  deviceIdentity,
+  parseEventEnvelope,
+} from "./client";
+
+const acceptsGeneratedRequest = (client: ApiClient): void => {
+  // @ts-expect-error generated search operation requires query parameters
+  void client.request({
+    path: "/v1/content/search",
+    method: "get",
+    validate: (_value): _value is components["schemas"]["SearchResponse"] =>
+      true,
+  });
+  // @ts-expect-error generated detail operation requires path parameters
+  void client.request({
+    path: "/v1/content/{reference}",
+    method: "get",
+    validate: (_value): _value is components["schemas"]["ContentResponse"] =>
+      true,
+  });
+};
+void acceptsGeneratedRequest;
 
 describe("ApiClient", () => {
   it("binds requests to generated operations and validates JSON", async () => {
@@ -62,6 +85,71 @@ describe("ApiClient", () => {
     );
   });
 
+  it("persists one device identity and attaches the host mutation headers", async () => {
+    const values = new Map<string, string>();
+    const storage = {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+    };
+    const first = deviceIdentity(storage, () => "device-123");
+    expect(deviceIdentity(storage, () => "other")).toBe(first);
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(
+        new Response(
+          '{"availability_refreshed":true,"recoverable":false,"status":{"provider_id":"demo","account_id":null,"state":"connected"}}',
+        ),
+      );
+    await new ApiClient("", fetcher, first).request({
+      path: "/v1/sources/connect",
+      method: "post",
+      body: {
+        provider_id: "demo",
+        method_id: "manual",
+        idempotency_key: "connect:1",
+        permissions: ["read_public"],
+      },
+      validate: (
+        value,
+      ): value is components["schemas"]["SourceMutationResponse"] =>
+        isRecord(value) && "status" in value,
+    });
+    expect(fetcher).toHaveBeenCalledWith("/v1/sources/connect", {
+      method: "POST",
+      body: JSON.stringify({
+        provider_id: "demo",
+        method_id: "manual",
+        idempotency_key: "connect:1",
+        permissions: ["read_public"],
+      }),
+      headers: {
+        "content-type": "application/json",
+        "X-Device-ID": "device-123",
+        "X-CSRF-Token": "device-123",
+      },
+    });
+  });
+
+  it("fails closed when a mutation has no device identity", async () => {
+    const client = new ApiClient("", vi.fn<typeof fetch>());
+    await expect(
+      client.request({
+        path: "/v1/sources/connect",
+        method: "post",
+        body: {
+          provider_id: "demo",
+          method_id: "manual",
+          idempotency_key: "connect:1",
+          permissions: ["read_public"],
+        },
+        validate: (
+          value,
+        ): value is components["schemas"]["SourceMutationResponse"] =>
+          isRecord(value),
+      }),
+    ).rejects.toMatchObject({ kind: "invalid-response" });
+  });
+
   it("rejects unknown response bodies", async () => {
     const fetcher = vi
       .fn<typeof fetch>()
@@ -71,6 +159,30 @@ describe("ApiClient", () => {
         path: "/v1/runtime/health",
         method: "get",
         validate: isHealth,
+      }),
+    ).rejects.toMatchObject({ kind: "invalid-response" });
+  });
+
+  it("preserves cancellation and rejects unresolved path templates", async () => {
+    const cancelled = vi
+      .fn<typeof fetch>()
+      .mockRejectedValue(new DOMException("Aborted", "AbortError"));
+    await expect(
+      new ApiClient("", cancelled).request({
+        path: "/v1/runtime/health",
+        method: "get",
+        validate: isHealth,
+      }),
+    ).rejects.toMatchObject({ name: "AbortError" });
+    const client = new ApiClient("", vi.fn<typeof fetch>());
+    await expect(
+      client.request({
+        path: "/v1/content/{reference}",
+        method: "get",
+        pathParams: { reference: undefined as unknown as string },
+        validate: (
+          _value,
+        ): _value is components["schemas"]["ContentResponse"] => true,
       }),
     ).rejects.toMatchObject({ kind: "invalid-response" });
   });
@@ -110,17 +222,16 @@ describe("ApiClient", () => {
 });
 
 describe("SSE stream", () => {
-  it("parses CRLF and multiline data frames", async () => {
+  it("passes the replay cursor and parses CRLF and multiline data frames", async () => {
     const body = streamOf(
       'data: {"kind":"job",\r\ndata: "event_id":1,"component_id":"core","status":"ok"}\r\n\r\n',
     );
-    const client = new ApiClient(
-      "",
-      vi.fn<typeof fetch>().mockResolvedValue(new Response(body)),
-    );
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(body));
+    const client = new ApiClient("", fetcher);
     const events = [];
-    for await (const event of client.stream("/v1/events/stream"))
+    for await (const event of client.stream("/v1/events/stream", 7))
       events.push(event);
+    expect(fetcher).toHaveBeenCalledWith("/v1/events/stream?after=7", {});
     expect(events).toEqual([
       { kind: "job", event_id: 1, component_id: "core", status: "ok" },
     ]);

@@ -65,7 +65,11 @@ from openbiliclaw.content.integration.capabilities import ContentPage, SearchQue
 from openbiliclaw.content.integration.errors import ContentIntegrationError, IntegrationErrorCode
 from openbiliclaw.content.integration.identity import ContentKind, ContentRef, ProviderId
 from openbiliclaw.content.integration.native import NativeContent
-from openbiliclaw.content.integration.projections import ContentPreview, ProjectionProvenance
+from openbiliclaw.content.integration.projections import (
+    CardData,
+    ContentPreview,
+    ProjectionProvenance,
+)
 from openbiliclaw.core._pydantic import StrictBaseModel
 from openbiliclaw.core.health import HealthSnapshot, HealthStatus
 from openbiliclaw.core.jobs import JobDecision
@@ -88,7 +92,11 @@ from openbiliclaw.observations.provenance import (
     TrustLevel,
 )
 from openbiliclaw.observations.service import RecordBatchResult
-from openbiliclaw.recommendation.models import ScoreContribution, SelectionRecord
+from openbiliclaw.recommendation.models import (
+    RecommendationFeedItem,
+    ScoreContribution,
+    SelectionRecord,
+)
 from openbiliclaw.understanding.profile import CanonicalProfile
 from openbiliclaw.understanding.projections import DialogueProfile
 
@@ -118,6 +126,17 @@ SELECTION = SelectionRecord(
     contributions=(ScoreContribution(component="base", value=1),),
     selected_at=NOW,
     seed=1,
+)
+FEED_ITEM = RecommendationFeedItem(
+    selection=SELECTION,
+    ref=REF,
+    card=CardData(
+        ref=REF,
+        title="One",
+        summary="summary",
+        source_timestamp=NOW,
+        provenance=ProjectionProvenance(ref=REF, native_schema_version=1, projected_at=NOW),
+    ),
 )
 PROFILE = CanonicalProfile.empty("default", NOW)
 DIALOGUE = DialogueProfile(version=1, preference_summary=("science",), insights=())
@@ -184,7 +203,7 @@ class Facade:
 
     async def get_recommendations(self, limit: int) -> RecommendationsResult:
         await self._call("get_recommendations")
-        return RecommendationsResult(items=(SELECTION,))
+        return RecommendationsResult(items=(FEED_ITEM,))
 
     async def refresh_recommendations(
         self, command: RefreshRecommendationsCommand
@@ -312,6 +331,28 @@ def client(
 
 
 MUTATION_HEADERS = {"X-Device-ID": "d", "X-CSRF-Token": "d"}
+
+
+async def test_mutation_double_submit_device_contract() -> None:
+    body = {
+        "provider_id": "demo",
+        "method_id": "builtin.manual",
+        "idempotency_key": "connect:1",
+    }
+    async with client(Facade()) as api:
+        missing = await api.post("/v1/sources/connect", json=body)
+        mismatch = await api.post(
+            "/v1/sources/connect",
+            json=body,
+            headers={"X-Device-ID": "device", "X-CSRF-Token": "other"},
+        )
+        accepted = await api.post(
+            "/v1/sources/connect",
+            json=body,
+            headers={"X-Device-ID": "device", "X-CSRF-Token": "device"},
+        )
+    assert missing.status_code == mismatch.status_code == 403
+    assert accepted.status_code == 200
 
 
 @pytest.mark.parametrize(

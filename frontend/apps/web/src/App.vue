@@ -39,6 +39,8 @@ const views = {
 const view = computed(() => views[current.value]);
 const preferences = usePreferencesStore();
 const goBack = (): void => history.back();
+const focusMain = (): void =>
+  document.querySelector<HTMLElement>("main")?.focus();
 watch(current, async () => {
   await nextTick();
   document.querySelector<HTMLElement>("main h1")?.focus();
@@ -53,11 +55,15 @@ watch(current, async () => {
     ]"
     @keydown.alt.left.prevent="goBack"
   >
-    <a class="skip-link" href="#main">Skip to content</a>
+    <a class="skip-link" href="#main" @click.prevent="focusMain"
+      >Skip to content</a
+    >
     <header><strong>OpenBiliClaw</strong></header>
-    <AppNavigation :current="current" />
-    <main id="main" tabindex="-1"><component :is="view" /></main>
-    <AppNavigation :current="current" mobile />
+    <div class="responsive-layout">
+      <AppNavigation :current="current" />
+      <main id="main" tabindex="-1"><component :is="view" /></main>
+      <AppNavigation :current="current" mobile />
+    </div>
   </div>
 </template>
 <style>
@@ -93,9 +99,10 @@ select:focus-visible {
 }
 .shell {
   min-height: 100vh;
+}
+.responsive-layout {
   display: grid;
   grid-template-columns: 14rem 1fr;
-  grid-template-rows: auto 1fr;
 }
 header {
   grid-column: 1/-1;
@@ -151,8 +158,8 @@ form {
   transition: none !important;
 }
 @media (max-width: 48rem) {
-  .shell {
-    grid-template-columns: 1fr;
+  .responsive-layout {
+    display: block;
     padding-bottom: 4.5rem;
   }
   .desktop-nav {

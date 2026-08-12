@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { CardRenderer } from "@openbiliclaw/presentation";
 import AsyncState from "../components/AsyncState.vue";
 import { inject, onBeforeUnmount, onMounted } from "vue";
 import { useRecommendationsStore } from "../stores/recommendations";
@@ -13,9 +14,9 @@ onBeforeUnmount(store.cancel);
   <section>
     <h1 tabindex="-1">Recommendations</h1>
     <AsyncState :phase="store.phase" :error="store.error">
-      <ol>
-        <li v-for="item in store.page.items" :key="item.recommendation_id">
-          Recommendation {{ item.rank }} · score {{ item.score }}
+      <ol class="card-list">
+        <li v-for="card in store.cards" :key="card.data.ref.canonical_url">
+          <CardRenderer :card="card" />
         </li>
       </ol>
     </AsyncState>

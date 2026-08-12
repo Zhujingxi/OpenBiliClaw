@@ -368,24 +368,12 @@ class DemoServer:
                     if cover_path is None:
                         return self._json({"error": "demo_cover_not_found"}, 404)
                     return self._serve_file(cover_path)
-                if path in {"/web", "/web/", "/web/index.html"}:
-                    return self._serve_file(ROOT / "src/openbiliclaw/web/desktop/index.html")
-                if path.startswith("/web/assets/"):
-                    return self._serve_file(
-                        ROOT
-                        / "src/openbiliclaw/web/desktop/assets"
-                        / path.removeprefix("/web/assets/")
-                    )
-                if path.startswith("/shared/"):
-                    return self._serve_file(
-                        ROOT / "src/openbiliclaw/web/shared" / path.removeprefix("/shared/")
-                    )
-                if path in {"/m", "/m/", "/m/index.html"}:
-                    return self._serve_file(ROOT / "src/openbiliclaw/web/index.html")
-                if path.startswith("/m/"):
-                    return self._serve_file(
-                        ROOT / "src/openbiliclaw/web" / path.removeprefix("/m/")
-                    )
+                frontend = ROOT / "frontend/apps/web/dist"
+                asset = frontend / path.lstrip("/")
+                if asset.is_file() and frontend in asset.resolve().parents:
+                    return self._serve_file(asset)
+                if not path.startswith("/api/"):
+                    return self._serve_file(frontend / "index.html")
                 status, payload = demo_payload(self.path)
                 self._json(payload, status)
 
@@ -445,5 +433,5 @@ class DemoServer:
 
 if __name__ == "__main__":
     with DemoServer() as origin:
-        print(f"Demo server: {origin}/web/")
+        print(f"Demo server: {origin}/")
         threading.Event().wait()

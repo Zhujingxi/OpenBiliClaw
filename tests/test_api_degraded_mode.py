@@ -248,6 +248,34 @@ def test_degraded_config_put_keeps_recovered_runtime_if_background_restart_fails
     assert "sk-new-valid-key" in config_path.read_text(encoding="utf-8")
 
 
+@pytest.mark.parametrize(
+    ("method", "path", "json_payload"),
+    [
+        ("get", "/api/recommendations", None),
+        ("get", "/api/profile-summary", None),
+        ("post", "/api/events", {"events": []}),
+        ("post", "/api/sources/xhs/observed-urls", {"items": []}),
+    ],
+)
+def test_degraded_non_config_endpoints_return_503(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    method: str,
+    path: str,
+    json_payload: dict[str, object] | None,
+) -> None:
+    _clear_llm_env(monkeypatch)
+    _save_project_config(monkeypatch, tmp_path, _invalid_config(tmp_path))
+    client = TestClient(create_app())
+
+    request = getattr(client, method)
+    response = request(path, json=json_payload) if json_payload is not None else request(path)
+
+    assert response.status_code == 503
+    assert response.json()["status"] == "degraded"
+    assert response.json()["reason"] == "llm_registry_unavailable"
+
+
 def test_degraded_mode_allows_llm_independent_repair_surfaces(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,

@@ -1,3 +1,11 @@
+FROM node:22-slim AS frontend-build
+WORKDIR /build
+COPY frontend/package.json frontend/package-lock.json ./frontend/
+COPY frontend/apps ./frontend/apps
+COPY frontend/packages ./frontend/packages
+COPY frontend/tsconfig.base.json frontend/eslint.config.ts frontend/.prettierignore ./frontend/
+RUN npm --prefix frontend ci && npm --prefix frontend run build --workspace @openbiliclaw/web
+
 # Multi-arch image: python:3.11-slim is published on Docker Hub for
 # linux/amd64, linux/arm64, linux/arm/v7, linux/386 and others, so this
 # Dockerfile builds the OpenBiliClaw backend on Intel Macs, Apple Silicon
@@ -16,7 +24,8 @@ LABEL org.opencontainers.image.source="https://github.com/whiteguo233/OpenBiliCl
 # containerd/Kubernetes, so the marker is baked into the image itself.
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    OPENBILICLAW_IN_CONTAINER=1
+    OPENBILICLAW_IN_CONTAINER=1 \
+    OPENBILICLAW_FRONTEND_DIR=/app/frontend
 
 WORKDIR /app
 
@@ -31,6 +40,7 @@ RUN python -c "import tomllib, pathlib; deps = tomllib.load(open('pyproject.toml
 
 COPY README.md config.example.toml ./
 COPY src ./src
+COPY --from=frontend-build /build/frontend/apps/web/dist ./frontend
 
 # Dependencies are already satisfied by the layer above; this only
 # installs the openbiliclaw package itself, so rebuilds after source

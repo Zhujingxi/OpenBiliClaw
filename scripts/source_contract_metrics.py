@@ -157,10 +157,10 @@ def _literal_registry_keys(relative: str, name: str) -> set[str]:
 
 API_DIR = Path("src/openbiliclaw/api")
 APP_PY = Path("src/openbiliclaw/api/app.py")
-DESKTOP_APP_JS = Path("src/openbiliclaw/web/desktop/assets/js/app.js")
-POPUP_JS = Path("extension/popup/popup.js")
-MOBILE_APP_JS = Path("src/openbiliclaw/web/js/app.js")
-SHARED_JS_DIR = Path("src/openbiliclaw/web/shared")
+DESKTOP_APP_JS = Path("frontend/apps/web/src/main.ts")
+POPUP_JS = Path("frontend/apps/extension/src/popup/PopupApp.vue")
+MOBILE_APP_JS = Path("frontend/apps/web/src/main.ts")
+SHARED_JS_DIR = Path("frontend/packages/presentation/src")
 
 # The three HTML surfaces of the four-surface contract (CLAUDE.md pitfall #5).
 # The fourth surface, the CLI, is not a frontend file -- hence the spec's "/3".

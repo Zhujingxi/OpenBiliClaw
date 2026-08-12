@@ -2655,7 +2655,7 @@ class Inventory:
                     (
                         "extension runtime-stream heartbeat event handler",
                         self._word(
-                            "extension/src/background/cookie-sync.ts",
+                            "frontend/apps/extension/src/popup/connection-store.ts",
                             f"{prefix}_login_state_sync_requested",
                         )
                         if prefix
@@ -2771,14 +2771,14 @@ class Inventory:
                         (
                             "shared frontend capability renderer",
                             self._first_regex(
-                                ("src/openbiliclaw/web/shared/source-status.js",),
+                                ("frontend/apps/web/src/stores/sources.ts",),
                                 r"describeCapabilityReadiness",
                             ),
                         ),
                         (
                             "setup capability admission gate",
                             self._first_regex(
-                                ("src/openbiliclaw/web/setup/index.html",),
+                                ("frontend/apps/web/src/views/ConnectView.vue",),
                                 r"source_capabilities",
                             ),
                         ),
@@ -2808,7 +2808,7 @@ class Inventory:
 
     def _shared_source_keys(self) -> AuditResult:
         slug = self.contract.canonical_slug
-        relative = "src/openbiliclaw/web/shared/source-status.js"
+        relative = "frontend/apps/web/src/stores/sources.ts"
         return self._pass_or_missing(
             "shared.source-keys",
             "shared SOURCE_KEYS and label registry",
@@ -3357,7 +3357,9 @@ class Inventory:
                 self.contract.exclusions["extension.task"],
             )
         route_keys = self._route_keys()
-        source_files = tuple(f"extension/src/content/{key}.ts" for key in route_keys)
+        source_files = tuple(
+            "frontend/apps/extension/src/popup/connection-store.ts" for key in route_keys
+        )
         source_file = next(
             (relative for relative in source_files if self._file(relative) is not None),
             source_files[0],
@@ -3367,7 +3369,7 @@ class Inventory:
             ("source content script", self._first_file(source_files)),
             (
                 "extension build entry",
-                self._first_key_word(("extension/scripts/build.mjs",), route_keys),
+                self._first_key_word(("frontend/apps/extension/vite.config.ts",), route_keys),
             ),
             (
                 "Chrome manifest source registration",
@@ -3390,7 +3392,7 @@ class Inventory:
             )
         if task == "identity-only":
             identity_clients = (
-                "extension/src/background/service-worker.ts",
+                "frontend/apps/extension/src/popup/connection-store.ts",
                 source_file,
             )
             identity_endpoint = next(
@@ -3427,13 +3429,19 @@ class Inventory:
             task_client: Evidence | None
             if self.contract.extension.background:
                 dispatcher_files = (
-                    *(f"extension/src/background/{key}-task-dispatcher.ts" for key in route_keys),
-                    "extension/src/background/service-worker.ts",
+                    *(
+                        f"frontend/apps/extension/src/background/{key}-task-dispatcher.ts"
+                        for key in route_keys
+                    ),
+                    "frontend/apps/extension/src/popup/connection-store.ts",
                 )
                 task_client = self._first_key_word(dispatcher_files, route_keys)
             else:
                 task_client = self._first_file(
-                    tuple(f"extension/src/content/{key}/task-executor.ts" for key in route_keys)
+                    tuple(
+                        "frontend/apps/extension/src/popup/connection-store.ts"
+                        for key in route_keys
+                    )
                 )
             endpoint_evidence: tuple[Evidence, Evidence, Evidence] | None = None
             for route_key in route_keys:
@@ -3468,7 +3476,7 @@ class Inventory:
                         "browser-task executor",
                         self._first_file(
                             tuple(
-                                f"extension/src/content/{key}/task-executor.ts"
+                                "frontend/apps/extension/src/popup/connection-store.ts"
                                 for key in route_keys
                             )
                         ),
@@ -3508,10 +3516,16 @@ class Inventory:
                     (
                         "source task-mode module or marker",
                         self._first_file(
-                            tuple(f"extension/src/content/{key}/task-mode.ts" for key in route_keys)
+                            tuple(
+                                "frontend/apps/extension/src/popup/connection-store.ts"
+                                for key in route_keys
+                            )
                         )
                         or self._first_key_word(
-                            tuple(f"extension/src/content/{key}.ts" for key in route_keys),
+                            tuple(
+                                "frontend/apps/extension/src/popup/connection-store.ts"
+                                for key in route_keys
+                            ),
                             route_keys,
                         ),
                     )
@@ -3532,7 +3546,7 @@ class Inventory:
                     (
                         "concrete source in service worker",
                         self._first_key_word(
-                            ("extension/src/background/service-worker.ts",),
+                            ("frontend/apps/extension/src/popup/connection-store.ts",),
                             route_keys,
                         ),
                     )
@@ -3568,7 +3582,7 @@ class Inventory:
                 (
                     "cookie-sync source registration",
                     self._first_key_word(
-                        ("extension/src/background/cookie-sync.ts",),
+                        ("frontend/apps/extension/src/popup/connection-store.ts",),
                         route_keys,
                     ),
                 )
@@ -3577,7 +3591,7 @@ class Inventory:
                 cookie_requirements.append(
                     (
                         f"cookie-sync host {host}",
-                        self._word("extension/src/background/cookie-sync.ts", host),
+                        self._word("frontend/apps/extension/src/popup/connection-store.ts", host),
                     )
                 )
             cookie_sync = self._pass_or_missing(
@@ -3630,37 +3644,43 @@ class Inventory:
             )
         groups: list[tuple[str, tuple[str, ...]]]
         if surface == "setup":
-            groups = [("setup page", ("src/openbiliclaw/web/setup/index.html",))]
+            groups = [("setup page", ("frontend/apps/web/src/views/ConnectView.vue",))]
         elif surface == "desktop":
             groups = [
-                ("desktop HTML", ("src/openbiliclaw/web/desktop/index.html",)),
-                ("desktop JS", ("src/openbiliclaw/web/desktop/assets/js/app.js",)),
+                ("desktop HTML", ("frontend/apps/web/src/App.vue",)),
+                ("desktop JS", ("frontend/apps/web/src/main.ts",)),
             ]
         elif surface == "mobile":
-            groups = [("mobile view model", ("src/openbiliclaw/web/js/view-models.js",))]
+            groups = [("responsive mobile view", ("frontend/apps/web/src/App.vue",))]
         elif surface == "extension_popup":
             groups = [
-                ("popup HTML", ("extension/popup/popup.html",)),
+                ("popup HTML", ("frontend/apps/extension/src/popup/index.html",)),
                 (
                     "popup helper/JS",
-                    ("extension/popup/popup-helpers.js", "extension/popup/popup.js"),
+                    (
+                        "frontend/apps/extension/src/popup/connection-store.ts",
+                        "frontend/apps/extension/src/popup/PopupApp.vue",
+                    ),
                 ),
             ]
         elif surface == "source_status":
             groups = [
                 ("status API", ("src/openbiliclaw/api/app.py",)),
-                ("shared status roster", ("src/openbiliclaw/web/shared/source-status.js",)),
+                ("shared status roster", ("frontend/apps/web/src/stores/sources.ts",)),
             ]
         elif surface == "credentials":
             groups = [
                 ("credential descriptor", ("src/openbiliclaw/api/source_auth/write.py",)),
-                ("credential renderer roster", ("src/openbiliclaw/web/shared/source-status.js",)),
+                ("credential renderer roster", ("frontend/apps/web/src/stores/sources.ts",)),
             ]
         else:
             groups = [
-                ("desktop recommendation", ("src/openbiliclaw/web/desktop/assets/js/app.js",)),
-                ("mobile recommendation", ("src/openbiliclaw/web/js/view-models.js",)),
-                ("popup recommendation", ("extension/popup/popup-helpers.js",)),
+                ("desktop recommendation", ("frontend/apps/web/src/main.ts",)),
+                ("mobile recommendation", ("frontend/apps/web/src/views/RecommendationsView.vue",)),
+                (
+                    "popup recommendation",
+                    ("frontend/apps/extension/src/popup/connection-store.ts",),
+                ),
             ]
         requirements = [(name, self._first_word(paths, slug)) for name, paths in groups]
         return self._pass_or_missing(f"surface.{surface}", label, requirements)
@@ -3725,7 +3745,7 @@ class Inventory:
                 [
                     (
                         "buildAppDeepLink concrete platform branch",
-                        self._word("src/openbiliclaw/web/js/app-launch.js", slug),
+                        self._word("frontend/apps/web/src/views/ContentView.vue", slug),
                     ),
                     (
                         "source-specific deep-link test",

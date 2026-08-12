@@ -24,7 +24,7 @@ from openbiliclaw.content.integration.native import NativeContent  # noqa: TC001
 from openbiliclaw.content.integration.projections import ContentPreview  # noqa: TC001
 from openbiliclaw.core._pydantic import StrictBaseModel
 from openbiliclaw.core.health import HealthSnapshot  # noqa: TC001
-from openbiliclaw.recommendation.models import SelectionRecord  # noqa: TC001
+from openbiliclaw.recommendation.models import RecommendationFeedItem  # noqa: TC001
 from openbiliclaw.understanding.profile import CanonicalProfile  # noqa: TC001
 from openbiliclaw.understanding.projections import (
     DialogueProfile,
@@ -43,7 +43,7 @@ class AccessReads(Protocol):
 
 
 class RecommendationReads(Protocol):
-    async def feed(self, *, limit: int) -> tuple[SelectionRecord, ...]: ...
+    async def feed(self, *, limit: int) -> tuple[RecommendationFeedItem, ...]: ...
 
 
 class ContentRegistryReads(Protocol):
@@ -144,7 +144,7 @@ class GetRecommendationsQuery(StrictBaseModel):
 
 class RecommendationsResult(StrictBaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    items: tuple[SelectionRecord, ...]
+    items: tuple[RecommendationFeedItem, ...]
 
 
 @dataclass(frozen=True, slots=True)

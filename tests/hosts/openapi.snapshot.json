@@ -533,6 +533,68 @@
         "title": "CanonicalProfile",
         "type": "object"
       },
+      "CardData": {
+        "additionalProperties": false,
+        "description": "Presentation-ready content data without recommendation policy fields.",
+        "properties": {
+          "badge": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Badge"
+          },
+          "image_url": {
+            "anyOf": [
+              {
+                "maxLength": 2048,
+                "pattern": "^https?://[^\\s]+$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Image Url"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/ProjectionProvenance"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/ContentRef"
+          },
+          "source_timestamp": {
+            "format": "date-time",
+            "title": "Source Timestamp",
+            "type": "string"
+          },
+          "summary": {
+            "maxLength": 4000,
+            "title": "Summary",
+            "type": "string"
+          },
+          "title": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ref",
+          "title",
+          "summary",
+          "source_timestamp",
+          "provenance"
+        ],
+        "title": "CardData",
+        "type": "object"
+      },
       "ClaimLifecycle": {
         "enum": [
           "emerging",
@@ -2802,6 +2864,28 @@
         "title": "RecommendationDismissedObservation",
         "type": "object"
       },
+      "RecommendationFeedItem": {
+        "additionalProperties": false,
+        "description": "Selected recommendation joined with its durable presentation projection.",
+        "properties": {
+          "card": {
+            "$ref": "#/components/schemas/CardData"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/ContentRef"
+          },
+          "selection": {
+            "$ref": "#/components/schemas/SelectionRecord"
+          }
+        },
+        "required": [
+          "selection",
+          "ref",
+          "card"
+        ],
+        "title": "RecommendationFeedItem",
+        "type": "object"
+      },
       "RecommendationLikedObservation": {
         "additionalProperties": false,
         "properties": {
@@ -2961,7 +3045,7 @@
         "properties": {
           "items": {
             "items": {
-              "$ref": "#/components/schemas/SelectionRecord"
+              "$ref": "#/components/schemas/RecommendationFeedItem"
             },
             "title": "Items",
             "type": "array"

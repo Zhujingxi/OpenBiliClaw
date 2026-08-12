@@ -18,7 +18,7 @@ else:
     from chrome_webstore_demo import DemoServer
 
 ROOT = Path(__file__).resolve().parents[1]
-EXTENSION_ROOT = ROOT / "extension"
+EXTENSION_ROOT = ROOT / "artifacts/extension/chrome"
 EXPECTED = (
     "desktop-recommend.png",
     "desktop-settings.png",
@@ -127,7 +127,7 @@ def _capture_web(
         _install_loopback_guard(context, blocked)
         page = context.new_page()
         _prepare_page(page)
-        page.goto(f"{origin}/web/", wait_until="domcontentloaded")
+        page.goto(f"{origin}/", wait_until="domcontentloaded")
         page.wait_for_function(
             "document.querySelectorAll('#videoGrid .video-card:not(.is-skeleton)').length >= 3",
             timeout=15_000,
@@ -176,7 +176,7 @@ def _capture_web(
             _install_loopback_guard(docs_context, blocked)
             docs_page = docs_context.new_page()
             _prepare_page(docs_page)
-            docs_page.goto(f"{origin}/web/", wait_until="domcontentloaded")
+            docs_page.goto(f"{origin}/", wait_until="domcontentloaded")
             docs_page.wait_for_function(
                 "document.querySelectorAll('#videoGrid .video-card:not(.is-skeleton)').length >= 3",
                 timeout=15_000,
@@ -241,10 +241,12 @@ def _capture_extension(
 ) -> None:
     from playwright.sync_api import sync_playwright
 
-    service_worker = EXTENSION_ROOT / "dist/background/service-worker.js"
-    popup = EXTENSION_ROOT / "popup/popup.html"
+    service_worker = EXTENSION_ROOT / "background/background.js"
+    popup = EXTENSION_ROOT / "popup/index.html"
     if not service_worker.exists() or not popup.exists():
-        raise FileNotFoundError("extension build missing; run `cd extension && npm run build`")
+        raise FileNotFoundError(
+            "extension package missing; run `npm --prefix frontend run build` then extension_release.py package"
+        )
 
     parsed = urlsplit(origin)
     if parsed.hostname != "127.0.0.1" or parsed.port is None:
@@ -271,7 +273,7 @@ def _capture_extension(
         workers = [
             worker
             for worker in context.service_workers
-            if "/dist/background/service-worker.js" in worker.url
+            if "/background/background.js" in worker.url
         ]
         worker = workers[0] if workers else context.wait_for_event("serviceworker", timeout=15_000)
         extension_id = worker.evaluate("chrome.runtime.id")
@@ -286,7 +288,7 @@ def _capture_extension(
         page = context.new_page()
         page.set_viewport_size({"width": 520, "height": 860})
         page.goto(
-            f"chrome-extension://{extension_id}/popup/popup.html",
+            f"chrome-extension://{extension_id}/popup/index.html",
             wait_until="domcontentloaded",
         )
         page.locator("#recommendationList .recommendation-card").first.wait_for(

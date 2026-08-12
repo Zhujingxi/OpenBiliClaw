@@ -109,3 +109,8 @@ backend.err
 
 # Playwright CLI local cache (tool artifact)
 .playwright-cli/
+
+# Generated extension release trees and archives
+/artifacts/extension/
+/openbiliclaw-extension-v*.zip
+/openbiliclaw-extension-v*.xpi

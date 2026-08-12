@@ -52,13 +52,15 @@ jobs:
         working-directory: frontend
 
       - name: Build Chrome-compatible extension release archive
-        run: npm run build --workspace @openbiliclaw/extension
+        run: |
+          npm run build --workspace @openbiliclaw/extension
           python ../scripts/extension_release.py package --no-build
         working-directory: frontend
 
       - name: Build Firefox extension release archive
-        run: npm run build --workspace @openbiliclaw/extension
-          python ../scripts/extension_release.py package --no-build:firefox
+        run: |
+          npm run build --workspace @openbiliclaw/extension
+          python ../scripts/extension_release.py package --firefox --no-build
         working-directory: frontend
 
       - name: Detect Firefox signing credentials
@@ -86,7 +88,6 @@ jobs:
           AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
           AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
         run: python scripts/extension_release.py amo-sign --no-build
-        working-directory: frontend
 
       - name: Verify extension release archives
         shell: bash
@@ -95,9 +96,9 @@ jobs:
           FIREFOX_SIGNING_ACTIVE: ${{ steps.firefox-signing.outputs.enabled }}
         run: |
           expected="${RELEASE_TAG#extension-v}"
-          chrome_archive="extension/openbiliclaw-extension-v${expected}.zip"
-          firefox_archive="extension/openbiliclaw-extension-v${expected}-firefox.zip"
-          firefox_xpi="extension/openbiliclaw-extension-v${expected}-firefox.xpi"
+          chrome_archive="artifacts/extension/openbiliclaw-extension-v${expected}.zip"
+          firefox_archive="artifacts/extension/openbiliclaw-extension-v${expected}-firefox.zip"
+          firefox_xpi="artifacts/extension/openbiliclaw-extension-v${expected}-firefox.xpi"
           if [ ! -f "$chrome_archive" ]; then
             echo "missing Chrome-compatible extension archive: $chrome_archive"
             exit 1
@@ -121,8 +122,8 @@ jobs:
         with:
           name: extension-package
           path: |
-            extension/openbiliclaw-extension-v*.zip
-            extension/openbiliclaw-extension-v*.xpi
+            artifacts/extension/openbiliclaw-extension-v*.zip
+            artifacts/extension/openbiliclaw-extension-v*.xpi
           if-no-files-found: error
 
   publish-release:

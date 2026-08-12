@@ -124,6 +124,5 @@ Issue #113 空库存解环（v0.3.168+）：首次运行时 `soul.preference*` /
 - `extension/tests/init-control.test.ts` — 清单 / 按钮态 / 进度状态机纯函数；覆盖双时钟、确定型 / 不确定型进度、硬超时、account-sync detail-first、离线与 discovery 部分成功文案。
 - `tests/test_web_guided_init.py` — 安装包 `/setup/` 与桌面 `/web` guided-init 接线；覆盖 richer progress、阶段 1 全局 deadline / collector cancel、批次进度、完整画像先于发现、阶段 2/3 超时取消和阶段 4 超时部分成功。
 - `tests/test_desktop_web_init_progress.py` — 桌面 `/web` 与 `/setup/` 镜像契约（双时钟、indeterminate、取消、离线提示、无耗时预估 / 已用时+计数文案 / 无合成 95% 二次等待）。
-- `tests/test_web_guided_init_e2e.py` — Chromium 中覆盖 `initialized=true && running=true` 不提前完成、双真窗口结束后桌面 runtime 非门控补水、三端同语义进度、setup / desktop 取消后可重试。
-- `tests/test_web_guided_init_e2e.py` — Playwright 驱动真实 `/setup/` 与 `/web` 页面，stub 外部 HTTP 响应来覆盖浏览器交互：成功进度、前置失败、启动冲突、终态重试、runtime-stream 静默 watchdog、普通完成直接进入应用、部分完成可见提示，以及 PC Web 与插件一致的未初始化入口判断（已有推荐 / 候选池信号时不再弹引导）；v0.3.168+ 直接断言超时原因、Base URL / 模型设置恢复动作、重试 / 设置入口、`role=alert`，以及 discovery 超时的部分完成 / 后台补池提示。CI 的 `web-guided-init-e2e` job 安装 `[browser]` extra + Chromium 后单独运行。
 - 2026-07-15 已用隔离数据目录、真 B 站登录和真 LLM 完成 GUI init：采集 1100 条信号、6 个偏好批次、完整画像落盘、发现 20 条候选并生成首轮 canonical 推荐，最终四阶段全 `ok`；同轮还验证了阶段 4 双真窗口、进程中断后的 `interrupted` 回收 / 可重试，以及完成后页面状态读取不阻塞。扩展真实完成 Cookie 同步；popup 视觉态由扩展测试覆盖（浏览器自动化安全策略不允许直接打开 `chrome-extension://` 页面）。
+- Phase 14 已删除 legacy Playwright guided-init 文件；target Vue Web 的 route/view/store 行为由 `frontend/apps/web/src/views/views.test.ts`、`stores/state-matrices.test.ts` 与 host ASGI tests 覆盖。精简 extension 不参与 init。

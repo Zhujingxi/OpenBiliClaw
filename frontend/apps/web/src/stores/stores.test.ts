@@ -1,6 +1,6 @@
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { WebApi } from "../services/api";
+import type { RecommendationPage, WebApi } from "../services/api";
 import { useRecommendationsStore } from "./recommendations";
 import { useSourcesStore } from "./sources";
 import { useProfileStore } from "./profile";
@@ -13,9 +13,31 @@ import { useContentStore } from "./content";
 const emptyStream = async function* () {
   yield* [] as never[];
 };
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (reason: unknown) => void;
+} {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((yes, no) => {
+    resolve = yes;
+    reject = no;
+  });
+  return { promise, resolve, reject };
+}
 function api(overrides: Partial<WebApi> = {}): WebApi {
   return {
     listSources: async () => [],
+    connectSource: async (body) => ({
+      availability_refreshed: true,
+      recoverable: false,
+      status: {
+        provider_id: body.provider_id,
+        account_id: null,
+        state: "connected",
+      },
+    }),
     recommendations: async () => ({ items: [] }),
     profile: async () => ({
       profile: { version: 1, preference_summary: [], insights: [] },
@@ -57,6 +79,46 @@ function api(overrides: Partial<WebApi> = {}): WebApi {
     ...overrides,
   };
 }
+const feedItem = {
+  ref: {
+    provider_id: { value: "demo" },
+    content_kind: { value: "video" },
+    provider_content_id: "1",
+    canonical_url: "https://example.test/1",
+  },
+  card: {
+    ref: {
+      provider_id: { value: "demo" },
+      content_kind: { value: "video" },
+      provider_content_id: "1",
+      canonical_url: "https://example.test/1",
+    },
+    title: "One",
+    summary: "Summary",
+    badge: null,
+    image_url: null,
+    source_timestamp: "2030-01-01T00:00:00Z",
+    provenance: {
+      ref: {
+        provider_id: { value: "demo" },
+        content_kind: { value: "video" },
+        provider_content_id: "1",
+        canonical_url: "https://example.test/1",
+      },
+      native_schema_version: 1,
+      projected_at: "2030-01-01T00:00:00Z",
+    },
+  },
+  selection: {
+    candidate_id: "c",
+    recommendation_id: "r",
+    rank: 1,
+    score: 1,
+    seed: 1,
+    selected_at: "2030-01-01T00:00:00Z",
+    contributions: [],
+  },
+} satisfies RecommendationPage["items"][number];
 beforeEach(() => setActivePinia(createPinia()));
 
 describe("durable concern stores", () => {
@@ -66,19 +128,7 @@ describe("durable concern stores", () => {
     expect(recommendations.phase).toBe("empty");
     await recommendations.load(
       api({
-        recommendations: async () => ({
-          items: [
-            {
-              candidate_id: "c",
-              recommendation_id: "r",
-              rank: 1,
-              score: 1,
-              seed: 1,
-              selected_at: "2030-01-01T00:00:00Z",
-              contributions: [],
-            },
-          ],
-        }),
+        recommendations: async () => ({ items: [feedItem] }),
       }),
     );
     expect(recommendations.phase).toBe("success");
@@ -156,20 +206,51 @@ describe("durable concern stores", () => {
     expect(assistant.phase).toBe("empty");
   });
 
-  it("passes AbortSignals and cancels the previous server read", async () => {
+  it("cancels concurrent reads and rejects stale commits", async () => {
+    const first = deferred<{ items: [] }>();
+    const second = deferred<{ items: [] }>();
     const signals: AbortSignal[] = [];
+    let calls = 0;
     const pending = api({
-      recommendations: async (signal) => {
+      recommendations: (signal) => {
         if (signal !== undefined) signals.push(signal);
-        return { items: [] };
+        calls += 1;
+        return calls === 1 ? first.promise : second.promise;
       },
     });
     const store = useRecommendationsStore();
-    await store.load(pending);
-    await store.load(pending);
-    expect(signals).toHaveLength(2);
+    const oldLoad = store.load(pending);
+    const newLoad = store.load(pending);
+    expect(store.phase).toBe("loading");
+    first.resolve({ items: [] });
+    await oldLoad;
+    expect(store.phase).toBe("loading");
+    second.resolve({ items: [] });
+    await newLoad;
+    expect(store.phase).toBe("empty");
     expect(signals[0]?.aborted).toBe(true);
     expect(signals[1]?.aborted).toBe(false);
+  });
+
+  it("ignores cancellation in content, assistant, profile, sources, and runtime stores", async () => {
+    const aborted = async (): Promise<never> => {
+      throw new DOMException("Aborted", "AbortError");
+    };
+    const content = useContentStore();
+    await content.search(api({ search: aborted }), "demo", "q");
+    expect(content.phase).toBe("loading");
+    const assistant = useAssistantStore();
+    await assistant.send(api({ assistantTurn: aborted }), "conv", "d", "q");
+    expect(assistant.phase).toBe("loading");
+    const profile = useProfileStore();
+    await profile.load(api({ profile: aborted }));
+    expect(profile.phase).toBe("loading");
+    const sources = useSourcesStore();
+    await sources.load(api({ listSources: aborted }));
+    expect(sources.phase).toBe("loading");
+    const runtime = useRuntimeStore();
+    await runtime.load(api({ runtimeHealth: aborted }));
+    expect(runtime.phase).toBe("loading");
   });
 
   it("keeps profile server-authoritative after edits", async () => {
@@ -211,14 +292,26 @@ describe("durable concern stores", () => {
     stop();
   });
 
-  it("owns one reconnecting event stream with bounded backoff", async () => {
+  it("replays after the last cursor, deduplicates, caps events, and disconnects", async () => {
     const attempts: number[] = [];
+    const cursors: Array<number | undefined> = [];
     let calls = 0;
     const web = api({
-      events: async function* () {
+      events: async function* (after) {
+        cursors.push(after);
         calls += 1;
-        if (calls === 1) throw new Error("lost");
-        yield { kind: "job", event_id: 1, component_id: "core", status: "ok" };
+        if (calls === 1) {
+          for (let eventId = 1; eventId <= 51; eventId += 1) {
+            yield {
+              kind: "job",
+              event_id: eventId,
+              component_id: "core",
+              status: "ok",
+            };
+          }
+          throw new Error("lost");
+        }
+        yield { kind: "job", event_id: 51, component_id: "core", status: "ok" };
       },
     });
     const delay: Delay = async (ms) => {
@@ -230,7 +323,48 @@ describe("durable concern stores", () => {
     void store.connect(web, delay);
     await first;
     expect(calls).toBe(2);
-    expect(attempts).toEqual([100, 100]);
-    expect(store.events).toHaveLength(1);
+    expect(cursors).toEqual([undefined, 51]);
+    expect(attempts).toEqual([100, 500]);
+    expect(store.events).toHaveLength(50);
+    expect(store.events.filter((event) => event.event_id === 51)).toHaveLength(
+      1,
+    );
+    const endless = store.connect(
+      api({
+        events: (_after, signal) => ({
+          async *[Symbol.asyncIterator]() {
+            yield* [] as never[];
+            if (signal === undefined || signal.aborted) return;
+            await new Promise<void>((resolve) =>
+              signal.addEventListener("abort", () => resolve(), { once: true }),
+            );
+          },
+        }),
+      }),
+      delay,
+    );
+    store.disconnect();
+    await endless;
+    expect(store.streamConnected).toBe(false);
+  });
+
+  it("caps reconnect backoff at two seconds", async () => {
+    const waits: number[] = [];
+    const delay: Delay = async (ms) => {
+      waits.push(ms);
+      if (waits.length === 6) throw new DOMException("Aborted", "AbortError");
+    };
+    await useRuntimeStore().connect(
+      api({
+        events: () => ({
+          async *[Symbol.asyncIterator]() {
+            yield* [] as never[];
+            throw new Error("lost");
+          },
+        }),
+      }),
+      delay,
+    );
+    expect(waits).toEqual([100, 500, 1_000, 2_000, 2_000, 2_000]);
   });
 });

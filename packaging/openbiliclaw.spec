@@ -111,6 +111,7 @@ a = Analysis(
     binaries=[] + _x_binaries + _reddit_binaries,
     datas=[
         (str(project_root / "config.example.toml"), "."),
+        (str(project_root / "packaging" / "openbiliclaw-icon.png"), "."),
         # Vite-generated web host artifacts. Source JavaScript is forbidden;
         # packaging consumes only the ignored frontend build output.
         (str(project_root / "frontend" / "apps" / "web" / "dist"), "openbiliclaw/frontend"),

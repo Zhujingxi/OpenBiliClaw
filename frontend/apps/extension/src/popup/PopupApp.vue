@@ -1,10 +1,41 @@
 <script setup lang="ts">
+import { CardRenderer, type CardView } from "@openbiliclaw/presentation";
 import { storeToRefs } from "pinia";
 import { ref } from "vue";
 import { useConnectionStore } from "./connection-store";
 
 const store = useConnectionStore();
+store.hydrate();
 const { backendUrl, deviceToken, state, error } = storeToRefs(store);
+const connectionCard: CardView = {
+  version: 1,
+  kind: "fallback",
+  providerLabel: "OpenBiliClaw",
+  availability: "available",
+  data: {
+    badge: "Local",
+    image_url: null,
+    provenance: {
+      native_schema_version: 1,
+      projected_at: new Date(0).toISOString(),
+      ref: {
+        provider_id: { value: "bilibili" },
+        provider_content_id: "runtime",
+        content_kind: { value: "article" },
+        canonical_url: "http://127.0.0.1:8420/",
+      },
+    },
+    ref: {
+      provider_id: { value: "bilibili" },
+      provider_content_id: "runtime",
+      content_kind: { value: "article" },
+      canonical_url: "http://127.0.0.1:8420/",
+    },
+    source_timestamp: new Date(0).toISOString(),
+    summary: "Connect this extension to the local OpenBiliClaw backend.",
+    title: "Local companion",
+  },
+};
 const draftUrl = ref(backendUrl.value);
 const draftToken = ref(deviceToken.value);
 const formError = ref<string>();
@@ -26,6 +57,7 @@ function save(): void {
       <h1 id="extension-title">OpenBiliClaw</h1>
       <p>Local recommendation companion</p>
     </header>
+    <CardRenderer :card="connectionCard" />
     <section aria-labelledby="connection-title">
       <h2 id="connection-title">Backend connection</h2>
       <form @submit.prevent="save">

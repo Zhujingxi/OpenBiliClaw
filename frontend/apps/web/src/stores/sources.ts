@@ -1,7 +1,13 @@
 import type { SourceStatus, WebApi } from "../services/api";
+import type { components } from "@openbiliclaw/api-client";
 import { defineStore } from "pinia";
 import { ref } from "vue";
-import { errorMessage, RequestOwner, type LoadPhase } from "./state";
+import {
+  errorMessage,
+  isCancellation,
+  RequestOwner,
+  type LoadPhase,
+} from "./state";
 
 export const useSourcesStore = defineStore("sources", () => {
   const phase = ref<LoadPhase>("idle");
@@ -10,18 +16,44 @@ export const useSourcesStore = defineStore("sources", () => {
   const owner = new RequestOwner();
 
   async function load(api: WebApi): Promise<void> {
+    const signal = owner.next();
     phase.value = "loading";
     error.value = undefined;
     try {
-      items.value = await api.listSources(owner.next());
-      phase.value = items.value.length === 0 ? "empty" : "success";
+      const next = await api.listSources(signal);
+      if (!owner.owns(signal)) return;
+      items.value = next;
+      phase.value = next.length === 0 ? "empty" : "success";
     } catch (caught) {
-      if (caught instanceof DOMException && caught.name === "AbortError")
-        return;
+      if (isCancellation(caught) || !owner.owns(signal)) return;
       error.value = errorMessage(caught);
       phase.value = "error";
     }
   }
 
-  return { phase, items, error, load, cancel: () => owner.cancel() };
+  async function connect(
+    api: WebApi,
+    command: components["schemas"]["ConnectSourceRequest"],
+  ): Promise<void> {
+    const signal = owner.next();
+    phase.value = "loading";
+    error.value = undefined;
+    try {
+      const result = await api.connectSource(command, signal);
+      if (!owner.owns(signal)) return;
+      items.value = [
+        ...items.value.filter(
+          (item) => item.provider_id !== result.status.provider_id,
+        ),
+        result.status,
+      ];
+      phase.value = "success";
+    } catch (caught) {
+      if (isCancellation(caught) || !owner.owns(signal)) return;
+      error.value = errorMessage(caught);
+      phase.value = "error";
+    }
+  }
+
+  return { phase, items, error, load, connect, cancel: () => owner.cancel() };
 });

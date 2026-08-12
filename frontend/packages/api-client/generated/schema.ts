@@ -1419,6 +1419,15 @@ export interface components {
              */
             schema_version: 1;
         };
+        /**
+         * RecommendationFeedItem
+         * @description Selected recommendation joined with its durable presentation projection.
+         */
+        RecommendationFeedItem: {
+            card: components["schemas"]["CardData"];
+            ref: components["schemas"]["ContentRef"];
+            selection: components["schemas"]["SelectionRecord"];
+        };
         /** RecommendationLikedObservation */
         RecommendationLikedObservation: {
             /** Account Id */
@@ -1488,7 +1497,7 @@ export interface components {
         /** RecommendationPage */
         RecommendationPage: {
             /** Items */
-            items: components["schemas"]["SelectionRecord"][];
+            items: components["schemas"]["RecommendationFeedItem"][];
         };
         /** RecommendationSavedObservation */
         RecommendationSavedObservation: {

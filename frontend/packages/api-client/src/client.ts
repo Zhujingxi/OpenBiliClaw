@@ -22,10 +22,18 @@ type RequestBody<O> = O extends {
   ? Payload
   : never;
 type Parameters<O> = O extends { parameters: infer Value } ? Value : never;
-type QueryParameters<O> =
-  Parameters<O> extends { query?: infer Value } ? Value : never;
-type PathParameters<O> =
-  Parameters<O> extends { path: infer Value } ? Value : never;
+type QueryRequest<O> =
+  Parameters<O> extends { query: infer Value }
+    ? { readonly query: Value }
+    : Parameters<O> extends { query?: infer Value }
+      ? [Value] extends [never]
+        ? object
+        : { readonly query?: Value }
+      : object;
+type PathRequest<O> =
+  Parameters<O> extends { path: infer Value }
+    ? { readonly pathParams: Value }
+    : object;
 
 export class ApiError extends Error {
   readonly kind: ApiErrorKind;
@@ -39,35 +47,79 @@ export class ApiError extends Error {
   }
 }
 
-export interface ApiRequest<P extends ApiPath, M extends HttpMethod> {
+type ApiRequestBase<P extends ApiPath, M extends HttpMethod> = {
   readonly path: P;
   readonly method: M;
   readonly validate: Validator<SuccessfulResponse<OperationAt<P, M>>>;
   readonly body?: RequestBody<OperationAt<P, M>>;
-  readonly query?: QueryParameters<OperationAt<P, M>>;
-  readonly pathParams?: PathParameters<OperationAt<P, M>>;
+  readonly query?: unknown;
+  readonly pathParams?: unknown;
   readonly headers?: Readonly<Record<string, string>>;
   readonly signal?: AbortSignal | undefined;
+};
+
+export type ApiRequest<
+  P extends ApiPath,
+  M extends HttpMethod,
+> = ApiRequestBase<P, M> &
+  QueryRequest<OperationAt<P, M>> &
+  PathRequest<OperationAt<P, M>>;
+
+export function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === "AbortError";
+}
+
+export interface DeviceStorage {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+}
+
+const DEVICE_ID_KEY = "obc-device-id";
+
+/** Return the durable browser device identity used by the host's double-submit CSRF policy. */
+export function deviceIdentity(
+  storage: DeviceStorage,
+  create: () => string = () => crypto.randomUUID(),
+): string {
+  const existing = storage.getItem(DEVICE_ID_KEY)?.trim();
+  if (existing) return existing;
+  const generated = create();
+  storage.setItem(DEVICE_ID_KEY, generated);
+  return generated;
 }
 
 export class ApiClient {
   readonly #baseUrl: string;
   readonly #fetch: typeof fetch;
+  readonly #deviceId: string | undefined;
 
-  constructor(baseUrl: string, fetcher: typeof fetch = fetch) {
+  constructor(
+    baseUrl: string,
+    fetcher: typeof fetch = fetch,
+    deviceId?: string,
+  ) {
     this.#baseUrl = baseUrl.replace(/\/$/, "");
     this.#fetch = fetcher;
+    this.#deviceId = deviceId;
   }
 
   async request<P extends ApiPath, M extends HttpMethod>(
     request: ApiRequest<P, M>,
   ): Promise<SuccessfulResponse<OperationAt<P, M>>> {
     const init: RequestInit = { method: request.method.toUpperCase() };
-    if (request.headers !== undefined) init.headers = request.headers;
+    const mutationHeaders =
+      request.method === "get" ? undefined : this.#mutationHeaders();
+    if (request.headers !== undefined || mutationHeaders !== undefined) {
+      init.headers = { ...request.headers, ...mutationHeaders };
+    }
     if (request.signal !== undefined) init.signal = request.signal;
     if (request.body !== undefined) {
       init.body = JSON.stringify(request.body);
-      init.headers = { "content-type": "application/json", ...request.headers };
+      init.headers = {
+        "content-type": "application/json",
+        ...request.headers,
+        ...mutationHeaders,
+      };
     }
     const path = interpolatePath(request.path, request.pathParams);
     const query = encodeQuery(request.query);
@@ -93,10 +145,11 @@ export class ApiClient {
 
   async *stream(
     path: "/v1/events/stream",
+    after?: number,
     signal?: AbortSignal,
   ): AsyncGenerator<EventEnvelope, void, undefined> {
     const response = await this.#fetchResponse(
-      path,
+      `${path}${encodeQuery(after === undefined ? undefined : { after })}`,
       signal === undefined ? {} : { signal },
       "Event stream connection failed",
     );
@@ -135,11 +188,24 @@ export class ApiClient {
         );
       }
     } catch (error) {
-      if (error instanceof ApiError) throw error;
+      if (error instanceof ApiError || isAbortError(error)) throw error;
       throw new ApiError("network", "Event stream interrupted");
     } finally {
       reader.releaseLock();
     }
+  }
+
+  #mutationHeaders(): Readonly<Record<string, string>> {
+    if (this.#deviceId === undefined || this.#deviceId === "") {
+      throw new ApiError(
+        "invalid-response",
+        "A device identity is required for mutations",
+      );
+    }
+    return {
+      "X-Device-ID": this.#deviceId,
+      "X-CSRF-Token": this.#deviceId,
+    };
   }
 
   async #fetchResponse(
@@ -150,7 +216,8 @@ export class ApiClient {
     let response: Response;
     try {
       response = await this.#fetch(`${this.#baseUrl}${path}`, init);
-    } catch {
+    } catch (error) {
+      if (isAbortError(error)) throw error;
       throw new ApiError("network", networkMessage);
     }
     if (!response.ok) {
@@ -211,13 +278,21 @@ function isPositiveInteger(value: unknown): value is number {
 }
 
 function interpolatePath(path: string, parameters: unknown): string {
-  if (!isRecord(parameters)) return path;
-  return path.replace(/\{([^}]+)\}/g, (placeholder, name: string) => {
-    const value = parameters[name];
-    return value === undefined
-      ? placeholder
-      : encodeURIComponent(String(value));
-  });
+  const interpolated = isRecord(parameters)
+    ? path.replace(/\{([^}]+)\}/g, (placeholder, name: string) => {
+        const value = parameters[name];
+        return value === undefined
+          ? placeholder
+          : encodeURIComponent(String(value));
+      })
+    : path;
+  if (/\{[^}]+\}/.test(interpolated)) {
+    throw new ApiError(
+      "invalid-response",
+      "Required path parameter was missing",
+    );
+  }
+  return interpolated;
 }
 
 function encodeQuery(parameters: unknown): string {

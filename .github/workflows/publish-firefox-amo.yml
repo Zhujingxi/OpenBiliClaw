@@ -27,7 +27,8 @@ jobs:
         working-directory: frontend
 
       - name: Build Firefox extension
-        run: npm run build --workspace @openbiliclaw/extension
+        run: |
+          npm run build --workspace @openbiliclaw/extension
           python ../scripts/extension_release.py package --firefox --no-build
         working-directory: frontend
 
@@ -43,7 +44,7 @@ jobs:
             docs/firefox-amo-source-build.md \
             docs/privacy.md \
             extension \
-            src/openbiliclaw/web/shared
+            frontend
           test -s "$archive"
           echo "archive=$archive" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -55,11 +56,10 @@ jobs:
           AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
           SOURCE_ARCHIVE: ${{ steps.source.outputs.archive }}
         shell: bash
-        working-directory: frontend
         run: |
-          npx web-ext sign \
+          npx --prefix frontend web-ext sign \
             --channel=listed \
-            --source-dir=dist-firefox \
+            --source-dir=artifacts/extension/firefox \
             --artifacts-dir=web-ext-artifacts/firefox-listed \
             --api-key="$AMO_JWT_ISSUER" \
             --api-secret="$AMO_JWT_SECRET" \
@@ -74,7 +74,6 @@ jobs:
           AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
           EXTENSION_VERSION: ${{ steps.source.outputs.version }}
         run: python scripts/extension_release.py amo-status --version "$EXTENSION_VERSION"
-        working-directory: frontend
 
       - name: Synchronize AMO privacy policy
         id: privacy
@@ -83,7 +82,6 @@ jobs:
           AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
           AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
         run: python scripts/extension_release.py amo-privacy
-        working-directory: frontend
 
       - name: Report AMO privacy policy sync fallback
         if: steps.privacy.outcome == 'failure'

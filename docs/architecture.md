@@ -10,7 +10,10 @@
 >
 > `src/openbiliclaw/hosts/` 已落地 target thin API/CLI adapters：clean `/v1` routers 与 Typer commands 只调用 typed application/assistant facade；strict transport schemas、safe error envelope、bind/auth/origin/CSRF/device/body/timeout/rate/subscriber policy 与 deterministic OpenAPI export 已实现。legacy host 仍 serving，等待 Plan 15 composition cutover 后一次删除。
 >
-> `frontend/` Phase 14A workspace 已落地但**未接入 production**：deterministic OpenAPI → generated TypeScript contract → runtime-validating API/SSE client → shared Vue Presentation Contract/cards。`apps/web` 与 `apps/extension` 当前仅保留 typed build entry placeholders；Vue routes、Pinia stores、extension runtime、旧 JS 删除和 production static serving 等待 14B/14C/15，不能把此 workspace 画成当前 serving path。
+> `frontend/` Phase 14 workspace 已落地但**未接入 production**：deterministic OpenAPI → generated TypeScript contract → runtime-validating API/SSE client → shared Vue Presentation Contract/cards。`apps/web` 提供 responsive Vue/Pinia shell，`apps/extension` 提供仅连接本地后端的精简 shell；旧 handwritten JavaScript 已删除。production composition 切换仍等待 Plan 15。
+>
+> **Legacy extension composition disclaimer:** 本文后续仍出现的 `extension-online`、Cookie 同步、content-script collector、task executor、installed-extension broker 等流程仅描述尚未由 Plan 15 删除的 legacy backend schema/队列历史，不是当前 Phase 14 extension shell 的能力。当前插件只有直接连接本地 typed `/v1` API 的 popup/sidebar，无 background/content script、Cookie 权限、行为采集或 provider task。
+>
 >
 > `src/openbiliclaw/content/integration/` 已落地 target Content Integration contracts：稳定 content identity/native schema envelope、四种独立 purpose projection、十种 narrow capability protocols、显式 duplicate-safe provider registry、provider contract test utility，以及 bounded PydanticAI search/fetch tools。Mutation tool 只生成 pending action，不能直接执行。`content/providers/bilibili/` 现已作为首个 reference provider 落地：strict video/article native schema、anonymous/manual-cookie access、search/feed/fetch/related/creator/history/saved/action、purpose projections 与安全 observation；browser-session modes 明确 unavailable。它尚无 production caller；legacy `sources/protocol.py`/registry/dispatcher 与 `bilibili/` 仍是唯一生产路径，等待 Plans 10–15 直接替换，不存在 compatibility adapter 或双写。
 >

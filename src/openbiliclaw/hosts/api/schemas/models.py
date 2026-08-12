@@ -34,7 +34,7 @@ from openbiliclaw.core._pydantic import StrictBaseModel
 from openbiliclaw.core.health import HealthSnapshot
 from openbiliclaw.observations.models import Observation
 from openbiliclaw.observations.service import RecordBatchResult
-from openbiliclaw.recommendation.models import FeedbackKind, SelectionRecord
+from openbiliclaw.recommendation.models import FeedbackKind, RecommendationFeedItem
 from openbiliclaw.understanding.overrides import OverrideOperation
 from openbiliclaw.understanding.projections import DialogueProfile
 
@@ -97,7 +97,7 @@ class SourceMutationResponse(TransportModel):
 
 
 class RecommendationPage(TransportModel):
-    items: tuple[SelectionRecord, ...]
+    items: tuple[RecommendationFeedItem, ...]
 
 
 class RefreshResponse(TransportModel):

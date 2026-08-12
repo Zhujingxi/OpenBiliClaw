@@ -2,7 +2,7 @@
 
 > *你的跨平台 AI 内容朋友，比你更懂你想看什么* 🎯
 >
-> Refactor status: target boundaries through `hosts/` and Presentation Phase 14A are implemented but not wired into production composition; the production data flow below still describes legacy composition. Target Hosts expose a strict `/v1` FastAPI/OpenAPI contract and matching Typer adapters over Application/Assistant. The unwired `frontend/` workspace generates TypeScript API contracts and shared safe Vue cards; web/extension shells are placeholders until 14B/14C. Legacy host/presentation cutover remains Plan 15, so this document does not draw a production connection that does not yet exist.
+> Refactor status: target boundaries through `hosts/` and Presentation Phase 14 are implemented but not wired into production composition; the production data flow below still describes legacy composition. Target Hosts expose a strict `/v1` FastAPI/OpenAPI contract and matching Typer adapters over Application/Assistant. The unwired `frontend/` workspace generates TypeScript API contracts and shared safe Vue cards; web and reduced extension shells are implemented; production composition cutover remains Plan 15. Legacy host/presentation cutover remains Plan 15, so this document does not draw a production connection that does not yet exist.
 
 ---
 
@@ -34,49 +34,13 @@ OpenBiliClaw 是一个**本地优先、开源的跨平台个性化内容发现 A
 
 **目标**：从"他做了什么"到"他为什么这样"到"他是一个什么样的人"——建立有深度和温度的用户理解。
 
-#### 2.1.1 行为数据采集
+#### 2.1.1 观察数据入口
 
-**浏览器插件（核心采集入口）**：
-- 通过统一 `PlatformAdapter` 捕捉 B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Linux.do 普通页面的交互行为；Reddit 初始化 saved/upvoted/subscribed 信号复用插件登录态任务桥，日常 discovery 默认使用 rdt-cli 登录态命令后端，不可用时 fallback 到插件任务。Linux.do 的隔离任务 tab 只运行同源只读 executor、不会启动普通 collector：公开 discovery 支持 search/hot/feed/creator/related，个人 bootstrap 支持 bookmarks/likes/read_history。其余行为链覆盖点击、滚动、停留、评论、点赞、收藏、分享、关注、搜索，以及 B 站特有投币；click 在 capture 阶段记录，scroll 同时覆盖页面和内部 feed / modal 滚动容器
-- 通过统一 `PlatformAdapter` 捕捉 B 站 / 小红书 / 抖音 / YouTube / X / 知乎的交互行为；Reddit 初始化 saved/upvoted/subscribed 信号复用插件登录态任务桥，日常 discovery 默认使用 rdt-cli 登录态命令后端，不可用时 fallback 到插件任务：点击、滚动、停留、评论、点赞、收藏、分享、关注、搜索，以及 B 站特有投币；click 在 capture 阶段记录，scroll 同时覆盖页面和内部 feed / modal 滚动容器
-- 微博是后端 discovery-only 来源：插件只渲染来源设置、状态和推荐文字卡，不申请微博 host permission、不注入脚本、不读取 Cookie、不执行任务 / 行为采集 / guided init / native-save
-- 记录行为发生时的**完整上下文**：对应的 DOM 页面快照、当前浏览路径、时间戳、平台内容 ID
-- 捕捉用户的**微行为**：鼠标悬停、视频进度条跳转、视频暂停 / 继续、页面导航等
-- 采集用户亲手写的**评论 / 弹幕正文**（最强的兴趣表达之一）：X 回复正文与 B 站评论 / 弹幕正文均经 MAIN-world 网络 tap 在**提交成功后**采集（业务码校验），双端截断 200 字符 + 剥离控制字符后进入 `metadata.comment_text`（弹幕 `comment_kind="danmaku"`）
-- **小红书赞 / 收藏强信号**由 MAIN-world `xhs-action-tap`（`obc-xhs-action`，与 token sniffer 隔离）在网络层认定：like/dislike/collect/uncollect 写端点业务成功才发，替代此前「按钮文案匹配、图标按钮漏采」的 DOM 路径；xhs adapter 声明 `tapAuthoritativeActions:{like,favorite,retraction}`，kernel 抑制对应 DOM 发射，事件 URL 与后端 note 键型互通以支持赞→撤销折价
-- 记录用户的**主动反馈**：`dislike` 类动作统一规范成 `feedback` 事件，避免各平台负反馈语义分叉
-- 插件 side panel 与桌面 / 移动 Web 使用同一 platform-neutral 保存契约：卡片先本地保存，保存页显式同步并轮询逐项任务；默认关闭自动同步，首次开启提示将修改对应平台账号；本地删除不删除平台记录
-- 插件 side panel 与桌面 / 移动 Web 使用同一 30 天内容历史契约：recommendation-owned click、推荐展示和本地保存移除快照分别投影为「主动点开过 / 出现过但没点开 / 最近移除」，按 canonical identity 去重分页；保存移除项可恢复，封面不做整页预热，只按视口懒加载走现有图片代理缓存
-- 本机调试可通过 `/api/extension/e2e/run` 驱动已安装插件在抖音 / 小红书 / X 真实页面执行白名单 DOM 操作，再由后端校验 `/api/events` 是否自然入库；runner 会把复用 tab 归位到平台入口并在回传结果前 flush 捕捉 buffer，该链路不伪造行为事件，用于验证捕捉层本身。`/api/events` 的每个 `event_id`、`/api/feedback` 与 `/api/recommendation-click` 的 `request_id` 都是 trim 后 1–400 字符的必填稳定键；缺失、空白或超长由请求模型在任何 event/projection 写入前返回 422。同一动作重试必须复用，服务端不补随机键。`/api/events` 在画像明确未初始化时会拒收普通行为事件，首轮画像信号只由 guided init 来源任务拉取；初始化后所有 accepted event 都先经统一 ingress commit，HTTP 只 wake、不等待 pipeline / LLM。app-owned `EventProcessingScheduler` 让 `profile_events` generic consumer 与 `content_feedback` consumer 按各自 durable cursor 扫描显式 owner，以 event row ID 生成稳定 signal，并用 `checkpointed_enqueue_batch()` 在同一个 `pipeline_state.json` snapshot 中原子发布 buffer+cursor，再由 owner 调 `tick_if_buffered()`；独立周期画像维护才调用完整 `tick()`。首次 app startup 只 await owner fence、本地 durable 准备与 scheduler admission，真正 scan/checkpoint/consume 在 scheduler-owned background task 中继续；provider 401、pending buffer LLM 或永不返回调用不能延迟 listener/health。shutdown 取消并 gather；热重载仍同步 pause/drain/recover/rebind，不缩短 owner pass 或破坏 cursor/buffer。5 秒 safety scan 继续覆盖丢 wake。retraction 投影在 generic cursor 前完成，hypothesis/import feedback 由其它 owner 处理或只越过 feedback cursor。两个 owner 首次接管都先按最大 event row id 发布 cutover fence，旧 direct-ingest 行不重学。`feedback_state.json` 只作迁移 provenance/兼容镜像，不是 owner 权威。`pending_signal_events` 仍只是 search / related_chain refresh 的触发水位，不是画像待处理数。`/api/feedback` 另明确采用 event-first 两次 commit：durable event 后才单独更新 recommendation projection，第二步失败由同 `request_id` duplicate retry 校验并补投影，不宣称跨表原子；相同 ID 的不同 payload 维持 409。
+> **Phase 14 cutover:** 当前精简浏览器插件只提供连接本地后端的 popup/sidebar，直接调用 typed `/v1` API；它没有 content script、Cookie 权限、页面行为采集或 provider task bridge。下方 legacy composition 的浏览器任务/采集说明已退出当前插件实现，保留的后端队列会在 Plan 15 composition/cutover 中删除或由明确的新 ingress/provider adapter 替代。
 
-- 上述三个公开事件 ID 字段采用严格 JSON string 校验，不把数字、布尔或其它 JSON 类型自动转成
-  字符串；这类非字符串输入与缺失、空白、超长输入一样在 route 前 422 且零写入。
-
-**B 站数据接口**：
-- 通过 B 站 API 获取结构化数据（历史记录、收藏夹、关注列表等）
-- 作为浏览器插件采集的补充和验证
-
-**Linux.do 只读扩展任务源**：
-
-```mermaid
-flowchart LR
-    H[backend producer / init] --> Q[(linuxdo_tasks)]
-    Q --> E[authenticated extension dispatcher]
-    E --> T[isolated real linux.do tab]
-    T --> G[same-origin GET only]
-    G --> N[normalized topics / counts<br/>or structured error]
-    N --> R[/api/sources/linuxdo/task-result]
-    R --> P[events or pending-eval candidates]
-```
-
-- 上游网络请求必须全部使用 GET；不得发帖、点赞、收藏、关注、编辑或执行任何状态变更。
-- 五个 discovery mode 固定为 `search / hot / feed / creator / related`；三个 bootstrap scope 固定为 `linuxdo_bookmarks / linuxdo_likes / linuxdo_read_history`，分别映射 `favorite / like / view`。
-- 公开 discovery 的登录为 optional；个人 bootstrap 必须由 `GET /session/current.json` 正面确认 `current_user.username`。`_t` 只能作为“可能已登录”的布尔提示，其值不得上传。
-- 扩展只回传白名单归一化字段与结构化错误；Cookie、CSRF 数据、原始 JSON/HTML、挑战页正文都不得离开浏览器。canonical 内容身份为 `content_id="topic:<topic_id>"`，`content_type="post"`。
-- Linux.do executor 必须在扩展自己创建并持有的任务 tab 中隔离运行。生产 payload 的单请求超时默认且最多 30 秒；discovery 默认且最多 5 页，bootstrap 按每页 20 条和 limit 自动扩页（300 条为 15 页）且最多 15 页，输入列表最多 5 个、每分支最多 300 项、单响应最多 2 MiB。content executor 的 120 秒 / 50 页 / 20 输入 cap 只作第二层绝对防御，dispatcher 不允许合法后端任务触达。任务完成后只关闭自己的 tab。pending 领取等待约 3 分钟；`in_progress` 按任务形状最长约 29 分钟，再留 30 秒结果余量，后端 claim lease 约 35 分钟，共享 dispatcher mutex stale 窗口约 36 分钟。dispatcher 对已领取的非法 payload 必须立即回传失败；执行前必须把 task/tab/deadline 写入 session storage，MV3 重启必须先恢复 runner 再 polling，使存活 task tab 可继续回传而无需重跑站点请求。
-- Linux.do bootstrap 的部分 scope 失败必须返回 `degraded`，保留已成功 scope 的事件与有界 `scope_errors`；discovery 分页或多输入中途失败也必须保留已得 topic 并返回 `degraded/input_errors`，让 producer 以部分完成入候选管线；零有效 item 的失败才返回 `failed`。bootstrap 的 `failed/degraded` 都不得进入默认 6 小时近期任务复用。
-- guided init Stage-1 基础预算保持 30 分钟；使用默认预算时，Linux.do-only 至少给 32.5 分钟，Linux.do 与至少一个其它来源并选时给 62.5 分钟。显式 `collection_timeout_seconds` override 必须原样生效，不得静默扩容。
-- `https://linux.do/*` host permission 只用于普通页面的统一行为 adapter，以及扩展创建的真实站点 task tab 中上述同源 GET；公开 discovery 不要求登录，个人 bootstrap 才复用登录会话。自动化任务协议、分页、cap、错误与隔离测试是合入门槛；真实已登录账号 E2E 当前尚未完成，发布前必须补做并记录结果。
+- 当前 observation 入口由 target `observations/` 与显式 application workflows 所有；Presentation 不采集浏览器页面行为。
+- 当前来源能力由 target Provider Access / Content Provider 显式声明；不可重放的浏览器会话能力不能由精简插件暗中补齐。
+- Web 与 extension 只消费 typed host projection，不接收后端提供的可执行 HTML/CSS/component code。
 
 #### 2.1.2 多层网状记忆架构 (Memory Architecture)
 

@@ -17,3 +17,13 @@ export function routeFromHash(hash: string): RouteName {
     ? (candidate as RouteName)
     : "recommendations";
 }
+
+export function routeParameter(hash: string): string | undefined {
+  const [, value] = hash.replace(/^#\/?/, "").split("/", 2);
+  if (value === undefined || value === "") return undefined;
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return undefined;
+  }
+}

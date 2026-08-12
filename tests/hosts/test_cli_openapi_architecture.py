@@ -104,6 +104,7 @@ def _allowed_host_import(module: str) -> bool:
         "hmac",
         "ipaddress",
         "json",
+        "pathlib",
         "time",
         "typing",
     }

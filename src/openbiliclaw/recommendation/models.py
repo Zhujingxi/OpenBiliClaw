@@ -8,7 +8,7 @@ from enum import StrEnum
 from pydantic import AwareDatetime, ConfigDict, Field, model_validator
 
 from openbiliclaw.content.integration.identity import ContentRef  # noqa: TC001
-from openbiliclaw.content.integration.projections import ContentPreview  # noqa: TC001
+from openbiliclaw.content.integration.projections import CardData, ContentPreview  # noqa: TC001
 from openbiliclaw.core._pydantic import StrictBaseModel
 
 
@@ -141,6 +141,21 @@ class SelectionRecord(StrictBaseModel):
     contributions: tuple[ScoreContribution, ...]
     selected_at: AwareDatetime
     seed: int
+
+
+class RecommendationFeedItem(StrictBaseModel):
+    """Selected recommendation joined with its durable presentation projection."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    selection: SelectionRecord
+    ref: ContentRef
+    card: CardData
+
+    @model_validator(mode="after")
+    def matching_identity(self) -> RecommendationFeedItem:
+        if self.ref != self.card.ref:
+            raise ValueError("recommendation feed reference must match card")
+        return self
 
 
 class ShownRecord(StrictBaseModel):

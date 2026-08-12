@@ -1054,11 +1054,11 @@ def test_view_runtime_logs_macos_falls_back_when_terminal_fails(
         (True, False, None, "/setup/"),
         (False, True, None, "/setup/"),
         (True, False, True, "/setup/"),
-        # Configured relaunch that never completed init → wizard, not /web.
+        # Configured relaunch that never completed init → wizard, not the SPA home.
         (False, False, False, "/setup/"),
-        (False, False, True, "/web/"),
-        # Unknown init state (probe failed) keeps the /web fallback.
-        (False, False, None, "/web/"),
+        (False, False, True, "/"),
+        # Unknown init state (probe failed) keeps the SPA fallback.
+        (False, False, None, "/"),
     ],
 )
 def test_decide_landing_path(
@@ -1125,10 +1125,17 @@ def test_open_landing_page_still_opens_web_on_health_timeout(
 
     entry._open_landing_page_when_ready("http://127.0.0.1:8420", seeded=False, repaired=False)
 
-    # Timeout → best-effort open of /web without an init-status probe.
-    assert opened == ["http://127.0.0.1:8420/web/"]
+    # Timeout → best-effort open of the SPA without an init-status probe.
+    assert opened == ["http://127.0.0.1:8420/"]
     assert probed == []
 
 
 if __name__ == "__main__":  # pragma: no cover - convenience
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+def test_tray_icon_uses_packaged_existing_asset() -> None:
+    source = (Path(entry.__file__).resolve().parent / "entry.py").read_text()
+    assert '"openbiliclaw-icon.png"' in source
+    assert "src/openbiliclaw/web" not in source
+    assert (Path(entry.__file__).resolve().parent / "openbiliclaw-icon.png").is_file()

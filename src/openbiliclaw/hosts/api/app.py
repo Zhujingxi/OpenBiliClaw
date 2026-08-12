@@ -7,12 +7,13 @@ import hmac
 import time
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from openbiliclaw.application.errors import ApplicationError
@@ -121,7 +122,7 @@ class SecurityMiddleware(BaseHTTPMiddleware):
             return self._error(500, ErrorCode.TEMPORARY_FAILURE, "temporary failure")
 
 
-def create_app(dependencies: HostDependencies) -> FastAPI:
+def create_app(dependencies: HostDependencies, *, frontend_dir: Path | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         del app
@@ -187,9 +188,29 @@ def create_app(dependencies: HostDependencies) -> FastAPI:
     app.add_exception_handler(HTTPException, http_error)
     app.add_exception_handler(Exception, unexpected_error_handler)
 
+    frontend = frontend_dir
+    if frontend is None:
+        candidates = (
+            Path(__file__).resolve().parents[2] / "frontend",
+            Path.cwd() / "frontend/apps/web/dist",
+        )
+        frontend = next((candidate for candidate in candidates if candidate.is_dir()), None)
+
     @app.exception_handler(404)
-    async def not_found(request: Request, exc: Exception) -> JSONResponse:
-        del request, exc
+    async def not_found(request: Request, exc: Exception) -> Response:
+        del exc
+        if (
+            frontend is not None
+            and request.method == "GET"
+            and not request.url.path.startswith("/v1/")
+        ):
+            relative = request.url.path.lstrip("/")
+            asset = frontend / relative
+            if relative and asset.is_file() and frontend in asset.resolve().parents:
+                return FileResponse(asset)
+            index = frontend / "index.html"
+            if index.is_file():
+                return FileResponse(index)
         envelope = ErrorEnvelope(
             error=ErrorDetail(code=ErrorCode.NOT_FOUND, message="route not found")
         )

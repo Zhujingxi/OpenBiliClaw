@@ -2,7 +2,12 @@ import type { ProfileResponse, WebApi } from "../services/api";
 import type { components } from "@openbiliclaw/api-client";
 import { defineStore } from "pinia";
 import { ref } from "vue";
-import { errorMessage, RequestOwner, type LoadPhase } from "./state";
+import {
+  errorMessage,
+  isCancellation,
+  RequestOwner,
+  type LoadPhase,
+} from "./state";
 
 export const useProfileStore = defineStore("profile", () => {
   const phase = ref<LoadPhase>("idle");
@@ -11,18 +16,20 @@ export const useProfileStore = defineStore("profile", () => {
   const owner = new RequestOwner();
 
   async function load(api: WebApi, profileId = "default"): Promise<void> {
+    const signal = owner.next();
     phase.value = "loading";
     error.value = undefined;
     try {
-      result.value = await api.profile(profileId, owner.next());
+      const next = await api.profile(profileId, signal);
+      if (!owner.owns(signal)) return;
+      result.value = next;
       phase.value =
-        result.value.profile.preference_summary.length === 0 &&
-        result.value.profile.insights.length === 0
+        next.profile.preference_summary.length === 0 &&
+        next.profile.insights.length === 0
           ? "empty"
           : "success";
     } catch (caught) {
-      if (caught instanceof DOMException && caught.name === "AbortError")
-        return;
+      if (isCancellation(caught) || !owner.owns(signal)) return;
       error.value = errorMessage(caught);
       phase.value = "error";
     }
@@ -32,14 +39,18 @@ export const useProfileStore = defineStore("profile", () => {
     api: WebApi,
     command: components["schemas"]["ProfileEditRequest"],
   ): Promise<void> {
+    const signal = owner.next();
     phase.value = "loading";
     error.value = undefined;
     try {
       // Server response is authoritative; reload the bounded projection after mutation.
-      await api.editProfile(command, owner.next());
-      result.value = await api.profile(command.profile_id, owner.next());
+      await api.editProfile(command, signal);
+      const next = await api.profile(command.profile_id, signal);
+      if (!owner.owns(signal)) return;
+      result.value = next;
       phase.value = "success";
     } catch (caught) {
+      if (isCancellation(caught) || !owner.owns(signal)) return;
       error.value = errorMessage(caught);
       phase.value = "error";
     }

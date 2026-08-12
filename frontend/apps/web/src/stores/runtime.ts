@@ -1,7 +1,12 @@
 import type { EventEnvelope, RuntimeResponse, WebApi } from "../services/api";
 import { defineStore } from "pinia";
 import { ref } from "vue";
-import { errorMessage, RequestOwner, type LoadPhase } from "./state";
+import {
+  errorMessage,
+  isCancellation,
+  RequestOwner,
+  type LoadPhase,
+} from "./state";
 
 const delays = [100, 500, 1_000, 2_000] as const;
 export type Delay = (
@@ -32,11 +37,16 @@ export const useRuntimeStore = defineStore("runtime", () => {
   let streamTask: Promise<void> | undefined;
 
   async function load(api: WebApi): Promise<void> {
+    const signal = requests.next();
     phase.value = "loading";
+    error.value = undefined;
     try {
-      health.value = await api.runtimeHealth(requests.next());
+      const next = await api.runtimeHealth(signal);
+      if (!requests.owns(signal)) return;
+      health.value = next;
       phase.value = "success";
     } catch (caught) {
+      if (isCancellation(caught) || !requests.owns(signal)) return;
       error.value = errorMessage(caught);
       phase.value = "error";
     }
@@ -51,7 +61,14 @@ export const useRuntimeStore = defineStore("runtime", () => {
       while (!signal.aborted) {
         try {
           streamConnected.value = true;
-          for await (const event of api.events(signal)) {
+          const after = events.value.at(-1)?.event_id;
+          for await (const event of api.events(after, signal)) {
+            if (
+              events.value.some(
+                (existing) => existing.event_id === event.event_id,
+              )
+            )
+              continue;
             events.value = [...events.value.slice(-49), event];
             attempt = 0;
           }

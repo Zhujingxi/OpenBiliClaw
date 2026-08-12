@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Protocol
 
+from openbiliclaw.content.integration.projections import CardData
+
 from .models import (
     AdmissionRecord,
     Candidate,
@@ -11,6 +13,7 @@ from .models import (
     EvaluationRecord,
     ExpressionRecord,
     FeedbackRecord,
+    RecommendationFeedItem,
     RejectionRecord,
     SelectionRecord,
     ShownRecord,
@@ -41,7 +44,7 @@ class RecommendationRepository(Protocol):
         admission: AdmissionRecord,
         selection: SelectionRecord,
     ) -> Candidate: ...
-    async def feed(self, *, limit: int) -> tuple[SelectionRecord, ...]: ...
+    async def feed(self, *, limit: int) -> tuple[RecommendationFeedItem, ...]: ...
 
 
 class ShownHistoryRepository(Protocol):
@@ -188,16 +191,37 @@ class SqliteRecommendationRepository:
             record.generated_at.isoformat(),
         )
 
-    async def feed(self, *, limit: int) -> tuple[SelectionRecord, ...]:
+    async def feed(self, *, limit: int) -> tuple[RecommendationFeedItem, ...]:
         if not 1 <= limit <= 100:
             raise ValueError("limit must be between 1 and 100")
         async with self.db.transaction() as session:
             rows = await session.fetch_all(
-                "SELECT record_json FROM recommendation_selections "
-                "ORDER BY created_at DESC,recommendation_id LIMIT ?",
+                "SELECT s.record_json,c.candidate_json "
+                "FROM recommendation_selections AS s "
+                "JOIN recommendation_candidates AS c "
+                "ON c.candidate_id=json_extract(s.record_json,'$.candidate_id') "
+                "ORDER BY s.created_at DESC,s.recommendation_id LIMIT ?",
                 (limit,),
             )
-        return tuple(SelectionRecord.model_validate_json(str(row[0])) for row in rows)
+        items = []
+        for row in rows:
+            selection = SelectionRecord.model_validate_json(str(row[0]))
+            candidate = Candidate.model_validate_json(str(row[1]))
+            preview = candidate.preview
+            items.append(
+                RecommendationFeedItem(
+                    selection=selection,
+                    ref=preview.ref,
+                    card=CardData(
+                        ref=preview.ref,
+                        title=preview.title,
+                        summary=preview.summary,
+                        source_timestamp=preview.source_timestamp,
+                        provenance=preview.provenance,
+                    ),
+                )
+            )
+        return tuple(items)
 
     async def _insert(
         self, table: str, key_name: str, key: str, data: str, created_at: str

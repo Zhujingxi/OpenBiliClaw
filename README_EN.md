@@ -94,7 +94,7 @@ Core behavior, recommendation, and dialogue data lives in SQLite on your disk; c
 
 ## 📸 Feature Preview
 
-Three core surfaces: the browser extension handles in-page interaction and login sessions, the Desktop Web (`/web`) gives you a big-screen recommendation home, and the Mobile Web (`/m`) is built for phones. Both web surfaces only call your local API — cookie sync and platform tasks still run through the extension.
+The responsive Web app provides recommendations, profiles, and Assistant. The reduced extension popup connects directly to the local backend through the typed API client; it has no content scripts, cookie access, browsing collection, or provider tasks.
 
 <table>
   <tr>
@@ -226,8 +226,7 @@ For most users, setup is four steps: install the extension, ask an AI coding age
 
 ### 1. Install the browser extension
 
-The extension is the main interface. It shows the sidebar on Bilibili, Xiaohongshu, Douyin, YouTube, X, Zhihu, and regular Linux.do pages, records your feedback, and handles signed-in Zhihu / Reddit tasks plus Linux.do same-origin read-only tasks. Public Linux.do discovery needs no login; only personal bootstrap reuses the browser session. Linux.do task tabs are isolated from normal behavior collection and only make same-origin read-only GET requests.
-The extension is the main interface. It shows the sidebar on Bilibili, Xiaohongshu, Douyin, YouTube, X, and Zhihu, records your feedback, and lets the local backend safely reuse browser sessions for logged-in tasks such as Zhihu and Reddit init / discovery. Weibo discovery runs independently in the backend and adds no Weibo extension permission, page-behavior capture, or task bridge.
+The extension is a reduced local-backend connection surface. Its popup/sidebar stores a loopback backend URL and opaque device token, then calls the typed `/v1` API directly. It has no content script, cookie permission, browsing collection, or provider task bridge. Use each backend provider access/CLI path for source authentication.
 
 Built on Manifest V3, the extension works in any Chrome-compatible browser — **Chrome, Edge, Brave, Arc, Vivaldi, Opera**, and more.
 
@@ -261,7 +260,8 @@ unzip openbiliclaw-extension-v*-firefox.zip -d openbiliclaw-firefox
 git clone https://github.com/whiteguo233/OpenBiliClaw.git
 cd OpenBiliClaw/extension
 npm install
-npm run build:firefox          # writes dist-firefox/
+npm --prefix frontend run build --workspace @openbiliclaw/extension
+python scripts/extension_release.py package --firefox --no-build
 npm run package:firefox        # also produces unsigned openbiliclaw-extension-v*-firefox.zip
 # With AMO credentials configured, sign it into the installable XPI:
 # AMO_JWT_ISSUER=... AMO_JWT_SECRET=... npm run sign:firefox:only
@@ -271,7 +271,7 @@ Then:
 
 1. Open `about:debugging#/runtime/this-firefox`
 2. Click "Load Temporary Add-on…"
-3. Pick `manifest.json` from the unzipped directory, or `extension/dist-firefox/manifest.json` after a source build
+3. Pick `manifest.json` from the unzipped directory, or `artifacts/extension/firefox/manifest.json` after a source build
 
 Caveat: temporary add-ons disappear on Firefox restart; regular users should prefer the signed `.xpi` when the release provides one.
 
@@ -292,7 +292,7 @@ Grab the installer for your OS from the `openbiliclaw-v*` aggregate [Latest Rele
 - **macOS**: download the DMG that matches your Mac: `OpenBiliClaw-macos-v*-arm64.dmg` for Apple silicon, or `OpenBiliClaw-macos-v*-x64.dmg` for Intel when the release provides it. The recommended path is to double-click `安装并启动 Install OpenBiliClaw.command`: it verifies the new bundle, quits the old instance, atomically replaces the app in Applications, and launches the version just installed. Traditional drag-and-drop remains available, but upgrades must quit the old version first and reopen the replacement manually.
 - **Windows**: download `OpenBiliClaw-windows-*-Setup.exe` — double-click to install. After a successful install or upgrade, Setup stops the old instance and automatically launches the newly installed version from the installation directory (including silent installs).
 
-It bundles local Ollama + `bge-m3` embedding (works out of the box) plus the default source dependencies, including X's `twitter-cli` and Reddit's `rdt-cli` (Reddit's rdt command backend prefers the connected extension's synced `reddit_session`; `rdt login` remains a manual fallback, and unauthenticated runs fall back to extension tasks). It lives in the **macOS menu bar / Windows system tray**; right-click for "Open Web UI / View runtime logs / Quit". Data uses the same directory as the AI / script installers: `~/OpenBiliClaw` (macOS / Linux) / `%USERPROFILE%\OpenBiliClaw` (Windows), and survives upgrades and uninstalls. Data from older packaged builds under `~/Library/Application Support/OpenBiliClaw` / `%LOCALAPPDATA%\OpenBiliClaw` is copied back on first launch without overwriting existing files. If a broken `config.toml` / `config.local.toml` prevents startup, the desktop package backs the bad file up as `*.invalid`, regenerates the default config, then opens `/setup/` so initialization can run again; `data/` is left untouched.
+It bundles local Ollama + `bge-m3` embedding (works out of the box) plus default backend source dependencies including X's `twitter-cli` and Reddit's `rdt-cli`; signed-in rdt access uses explicit `rdt login`, not extension session synchronization or task fallback. It lives in the **macOS menu bar / Windows system tray**; right-click for "Open Web UI / View runtime logs / Quit". Data uses the same directory as the AI / script installers: `~/OpenBiliClaw` (macOS / Linux) / `%USERPROFILE%\OpenBiliClaw` (Windows), and survives upgrades and uninstalls. Data from older packaged builds under `~/Library/Application Support/OpenBiliClaw` / `%LOCALAPPDATA%\OpenBiliClaw` is copied back on first launch without overwriting existing files. If a broken `config.toml` / `config.local.toml` prevents startup, the desktop package backs the bad file up as `*.invalid`, regenerates the default config, then opens `/setup/` so initialization can run again; `data/` is left untouched.
 
 > ⚠️ **macOS security blocking (the app isn't signed / notarized yet)**:
 > - The current Release is ad-hoc signed but not notarized. On first launch, if macOS blocks either the install helper or the app, right-click / Control-click that item → "Open" → click "Open" again in the dialog; or allow it under "System Settings → Privacy & Security" with "Open Anyway".
@@ -400,12 +400,12 @@ OpenBiliClaw does not store your platform passwords or bypass login. Login-requi
 | **YouTube** | Log in normally at https://www.youtube.com in the same browser | `init --yes-youtube` and `fetch-youtube` may return 0 items; `import-youtube` can still import Google Takeout data |
 | **X (Twitter)** | Log in normally at https://x.com in the same browser | `init --yes-x`, `fetch-x`, and X discovery return nothing (server-side replay needs `auth_token`+`ct0`, auto-synced by the extension after login) |
 | **Zhihu** | Log in normally at https://www.zhihu.com in the same browser | `init --yes-zhihu`, `fetch-zhihu`, `discover --source zhihu`, and `discover-zhihu*` return nothing |
-| **Reddit** | Log in normally at https://www.reddit.com in the same browser; the extension syncs `reddit_session` for backend-installed rdt-cli, and `rdt login` is only a fallback when the extension is unavailable | `fetch-reddit --mode bootstrap` returns no init signals; without a synced rdt credential, the rdt path falls back to extension tasks |
+| **Reddit** | Run `rdt login` as documented by rdt-cli | Signed-in discovery/bootstrap is unavailable without rdt credentials; the reduced extension does not sync sessions or provide task fallback |
 | **Linux.do** | Log in normally at https://linux.do in the same browser; public discovery does not require login | Signed out, `fetch-linuxdo` and `init --yes-linuxdo` cannot read bookmarks / likes / read history, while search / hot / feed / creator / related discovery remains available |
-| **Bangumi** | No login required; optionally enter a public username for public collections, or a personal token for private ones; the extension only does account identity recognition on bgm.tv / bangumi.tv (no cookies, no browsing capture) | Without a username, Bangumi cannot be the only profile-init source, but anonymous search/ranked/date discovery still works |
-| **V2EX** | No login required; optionally configure a PAT; guided init / incremental tasks use the extension to read public rendered fields for topics, replies, favorite topics, and favorite nodes | Anonymous search/node/tab/hot/latest discovery still works without the extension; favorite scopes require an actual logged-in browser session |
+| **Bangumi** | No login required; optionally enter a public username for public collections, or a personal token for private ones | Without a username, Bangumi cannot be the only profile-init source, but anonymous search/ranked/date discovery still works |
+| **V2EX** | No login required; optionally configure a PAT for API 2.0 public reads | Anonymous search/node/tab/hot/latest discovery works; the reduced extension does not run personal-favorites bootstrap tasks |
 
-Xiaohongshu, Douyin, YouTube, Zhihu, and Linux.do use Chrome extension tasks; Reddit defaults to backend-installed rdt-cli for steady-state discovery and keeps the extension for init signals; X discovery uses server-side cookie replay. None of these read paths needs an extra CDP debugging Chrome. Linux.do requests are same-origin GETs inside real site tabs; `_t` is reduced to a login boolean and neither cookie values nor raw responses are uploaded. Reddit/X, YouTube, Xiaohongshu, Douyin, and Zhihu native-save executors are wired 6/6 and fixture-tested; in the 2026-07-14 real-account regression, every platform's favorite and watch-later/favorite-fallback path finished `synced/already_synced`. Linux.do exposes no native write-back. `[sources.browser].cdp_url` remains available only for generic Web / custom webpage fetching.
+The Phase 14 reduced extension no longer provides site tasks, cookie synchronization, or native-save executors. Sources use target provider access/content providers or explicit backend CLI/credential paths; unsupported browser-session capabilities report unavailable.
 
 </details>
 
@@ -598,8 +598,8 @@ The whole loop stays local — the agent host just calls the CLI bridge; your pr
 - 🔄 **Continuous Learning** — Socratic dialogue + behavioral analysis + instant feedback; it understands you better over time
 - ⭐ **Local-First Favorites / Watch Later** — cards save to local SQLite first and auto-sync stays off by default; desktop Web hydrates the sidebar count badges on first load; the 2026-07-14 real-account regression completed both actions across all seven platforms as `synced/already_synced`
 - 🕘 **30-Day Content History** — extension, desktop, and mobile share opened, surfaced-but-unopened, and recently removed views; covers are paged and lazy-loaded, and removed local saves can be restored
-- 🧩 **Browser Extension** — Chrome / Edge / Brave / Arc / Firefox; side-panel recommendations + cross-site behavior collection, install and go
-- 🚀 **Guided Init in the UI** — the packaged `/setup/` wizard, Desktop Web, and the extension can all initialize with one click; no terminal required
+- 🧩 **Browser Extension** — reduced Chrome / Edge / Brave / Arc / Firefox popup for local-backend connection, with no cross-site collection
+- 🚀 **Responsive Web Workflows** — source connection, recommendations, profile, Assistant, settings, and runtime status in one Vue app
 - 📦 **Cross-Machine Migration** — export/import portable config, SQLite, profiles, cookies, and the image cache from Desktop settings; imports are validated and staged, can be inspected or cancelled, then apply on restart with rollback copies. `.obcbackup` contains plaintext secrets but excludes the source machine's API-login password, session-signing secret, and extension device keys
 - 🔬 **Self-Optimizing Eval Loops** — five modules each carry an LLM-as-judge loop that improves prompt quality over rounds
 - 🔒 **Fully Private** — SQLite, config, profiles, and caches stay local; LLM calls use your own key, and each instance is built for exactly one person
@@ -608,7 +608,7 @@ The whole loop stays local — the agent host just calls the CLI bridge; your pr
 
 ## 🏛️ Architecture Overview
 
-> Refactor target (not yet wired into production composition): `hosts/api` now provides the strict `/v1` HTTP/OpenAPI boundary, while `hosts/cli` shares the same typed Application/Assistant facade. `frontend/` Phase 14A only provides the generated API client and shared safe Vue cards; web/extension shells remain placeholders. The legacy UI/API/CLI cutover remains a Plan 15 operation.
+> Refactor target (not yet wired into production composition): `hosts/api` now provides the strict `/v1` HTTP/OpenAPI boundary, while `hosts/cli` shares the same typed Application/Assistant facade. `frontend/` Phase 14 only provides the generated API client and shared safe Vue cards; web and reduced extension shells are implemented. The legacy UI/API/CLI cutover remains a Plan 15 operation.
 
 ```text
 Target Presentation A (not wired): generated API client + shared Vue cards
@@ -851,20 +851,19 @@ OpenBiliClaw/
 | Browser Extension | TypeScript + Chrome Extension (Manifest V3) |
 | LLM | Multiple independent Base URL / token / model instances per provider type, with ordered global and per-module failover chains; first migration keeps a permanent legacy backup and `config-export-legacy` creates an old-version copy; built-in Gemini / DeepSeek / OpenAI / Claude / OpenRouter / Ollama; any OpenAI-compatible endpoint works; OpenAI can experimentally reuse Codex CLI OAuth |
 | Bilibili API | Custom client (WBI signing · v_voucher auto-recovery · rate control) |
-| Xiaohongshu | Extension DOM/state extraction + task dispatch; search/creator run in background tabs and search uses a MAIN-world page-response bridge when hidden virtual DOM is absent; only scrolling init opens `/explore` in the foreground and clicks the profile entry; no backend crawling |
-| Douyin | Extension DOM + MAIN-world passive fetch tap + task dispatch; init imports post / favorite / like / follow signals; search / hot / feed discovery starts from the Douyin home page and uses DOM interactions to trigger loading; search/feed passively collect page responses / rendered results, and hot can use a hot-board `group_id` seed as a logged-in related fallback; no backend login crawling |
-| YouTube | Extension DOM task dispatch reads watch history / subscriptions / likes; Google Takeout can import older data offline |
-| X (Twitter) | Server-side cookie replay via default-installed `twitter-cli` (lazy-imported, read-only); the extension captures your engagement and syncs the x.com cookie; tweets render as text cards |
-| Zhihu | Extension task dispatch reads event-smoke and selected guided-init signals plus search / hot / feed / creator / related candidates in the logged-in browser; answers / articles / questions render as text cards |
-| Reddit | Default-installed rdt-cli reads search / hot / subreddit / related candidates by default; the extension syncs `reddit_session` into rdt credentials and `rdt login` is a manual fallback; extension task dispatch reads discovery when rdt is unavailable, unauthenticated, or explicitly selected, and always reads bootstrap saved / upvoted / subscribed signals in the logged-in browser; posts / comments render as text cards |
-| Linux.do | Regular pages use the shared behavior adapter; isolated task tabs make same-origin GETs for search / hot / feed / creator / related and bookmarks / likes / read history, returning only normalized fields or structured errors; cookies and raw responses are not uploaded |
+| Xiaohongshu | Target backend provider/access path; the reduced extension supplies no cookie, collection, or task fallback |
+| Douyin | Target backend provider/access path; the reduced extension supplies no cookie, collection, or task fallback |
+| YouTube | Target backend provider/access path; the reduced extension supplies no cookie, collection, or task fallback |
+| X (Twitter) | Target backend provider/access path; the reduced extension supplies no cookie, collection, or task fallback |
+| Zhihu | Target backend provider/access path; the reduced extension supplies no cookie, collection, or task fallback |
+| Reddit | Target backend provider/access path; the reduced extension supplies no cookie, collection, or task fallback |
+| Linux.do | Target backend provider/access path; the reduced extension supplies no cookie, collection, or task fallback |
 | Bangumi | Official anonymous read-only v0 API; search / ranked / date browsing feed the shared candidate pool, while an optional public username enables public-collection profile init; no cookie, token, or native write-back |
-| V2EX | Official anonymous API / Feed; search / node / tab / hot / latest feed the shared candidate pool, with optional PAT read-only enrichment; the extension runs four read-only bootstrap scopes and sends only a boolean login heartbeat; no site writes |
+| V2EX | Target backend provider/access path; the reduced extension supplies no cookie, collection, or task fallback |
 | Optional HTTPS | Pinned Caddy Docker overlay with automatic certificates for public domains; Python TLS Proxy + `[tls]` extra and local CA/SAN for LAN/self-managed use; off by default and mutually exclusive |
 | Storage | SQLite + Embedding vector index |
 | Containerization | Docker Compose (backend) |
 | Agent Framework | Lightweight custom framework |
-
 ## 📖 Documentation
 
 - [Documentation Hub](docs/index.md) — All-in-one entry point

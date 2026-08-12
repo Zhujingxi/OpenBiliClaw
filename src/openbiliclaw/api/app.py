@@ -31,7 +31,7 @@ from uuid import UUID
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
 
 from openbiliclaw.api.models import (
@@ -19017,8 +19017,23 @@ def create_app(
                 _existing_self_info.get("nickname", ""),
             )
 
-    # Legacy handwritten web assets were removed by Presentation Plan 14.
-    # The target host serves only generated Vite artifacts through the new
-    # hosts/composition adapter; this legacy app deliberately serves no UI.
+    # Transitional production composition: serve only generated Vite output.
+    # Plan 15 deletes this legacy host when the target composition root takes over.
+    frontend = Path(os.environ.get("OPENBILICLAW_FRONTEND_DIR", "frontend/apps/web/dist"))
+    if not frontend.is_absolute():
+        frontend = Path(os.environ.get("OPENBILICLAW_PROJECT_ROOT", Path.cwd())) / frontend
+
+    @app.exception_handler(404)
+    async def generated_frontend(request: Request, exc: Exception) -> Response:
+        del exc
+        if request.method == "GET" and not request.url.path.startswith("/api/"):
+            relative = request.url.path.lstrip("/")
+            asset = frontend / relative
+            if relative and asset.is_file() and frontend.resolve() in asset.resolve().parents:
+                return FileResponse(asset)
+            index = frontend / "index.html"
+            if index.is_file():
+                return FileResponse(index)
+        return JSONResponse(status_code=404, content={"detail": "Not Found"})
 
     return app

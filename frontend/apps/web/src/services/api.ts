@@ -16,9 +16,15 @@ export type RuntimeResponse = components["schemas"]["RuntimeResponse"];
 export type SearchResponse = components["schemas"]["SearchResponse"];
 export type ContentResponse = components["schemas"]["ContentResponse"];
 export type EventEnvelope = import("@openbiliclaw/api-client").EventEnvelope;
+export type SourceMutationResponse =
+  components["schemas"]["SourceMutationResponse"];
 
 export interface WebApi {
   listSources(signal?: AbortSignal): Promise<readonly SourceStatus[]>;
+  connectSource(
+    body: components["schemas"]["ConnectSourceRequest"],
+    signal?: AbortSignal,
+  ): Promise<SourceMutationResponse>;
   recommendations(signal?: AbortSignal): Promise<RecommendationPage>;
   profile(profileId: string, signal?: AbortSignal): Promise<ProfileResponse>;
   editProfile(
@@ -42,7 +48,7 @@ export interface WebApi {
     signal?: AbortSignal,
   ): Promise<SearchResponse>;
   content(reference: string, signal?: AbortSignal): Promise<ContentResponse>;
-  events(signal?: AbortSignal): AsyncIterable<EventEnvelope>;
+  events(after?: number, signal?: AbortSignal): AsyncIterable<EventEnvelope>;
 }
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -71,6 +77,14 @@ export function createWebApi(client: ApiClient): WebApi {
       });
       return response.items;
     },
+    connectSource: (body, signal) =>
+      client.request({
+        path: "/v1/sources/connect",
+        method: "post",
+        body,
+        validate: objectValidator<SourceMutationResponse>("status"),
+        signal,
+      }),
     recommendations: (signal) =>
       client.request({
         path: "/v1/recommendations",
@@ -135,6 +149,7 @@ export function createWebApi(client: ApiClient): WebApi {
         validate: objectValidator<ContentResponse>("content"),
         signal,
       }),
-    events: (signal) => client.stream("/v1/events/stream", signal),
+    events: (after, signal) =>
+      client.stream("/v1/events/stream", after, signal),
   };
 }

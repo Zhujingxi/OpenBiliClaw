@@ -1574,6 +1574,762 @@ class TestBackendAPI:
         assert repaired_row["feedback_type"] == "comment"
         assert repaired_row["feedback_note"] == payload["note"]
 
+    @pytest.mark.asyncio
+    async def test_runtime_context_presence_survives_rebuild(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from openbiliclaw.api.runtime_context import RuntimeContext
+        from openbiliclaw.config import Config
+
+        ctx = RuntimeContext()
+        original_presence = ctx.presence
+
+        def _fake_rebuild_components(self: RuntimeContext, new_config: Config) -> None:
+            self.config = new_config
+
+        monkeypatch.setattr(RuntimeContext, "_rebuild_components", _fake_rebuild_components)
+
+        await ctx.rebuild_from_config(Config())
+
+        assert ctx.presence is original_presence
+
+    @pytest.mark.asyncio
+    async def test_runtime_context_skips_startup_one_shots_when_llm_work_blocked(self) -> None:
+        from types import SimpleNamespace
+
+        from openbiliclaw.api.runtime_context import RuntimeContext
+        from openbiliclaw.config import Config
+
+        class FakeSpeculator:
+            def __init__(self) -> None:
+                self.force_tick_calls = 0
+
+            async def force_tick(self, *_args: object, **_kwargs: object) -> None:
+                self.force_tick_calls += 1
+
+        class FakeSoulEngine:
+            def __init__(self) -> None:
+                self._speculator = FakeSpeculator()
+                self.profile_calls = 0
+
+            async def get_profile(self) -> dict[str, object]:
+                self.profile_calls += 1
+                return {"profile": "ok"}
+
+        class FakeRecommendationEngine:
+            def __init__(self) -> None:
+                self.prewarm_calls = 0
+
+            async def prewarm_pool_mmr_embeddings(self) -> int:
+                self.prewarm_calls += 1
+                return 1
+
+        cfg = Config()
+        cfg.scheduler.enabled = False
+        soul = FakeSoulEngine()
+        rec = FakeRecommendationEngine()
+        ctx = RuntimeContext(
+            config=cfg,
+            memory_manager=SimpleNamespace(load_discovery_runtime_state=lambda: {}),
+            runtime_controller=object(),
+            account_sync_service=object(),
+            auto_update_service=object(),
+            soul_engine=soul,
+            recommendation_engine=rec,
+        )
+        app = SimpleNamespace(state=SimpleNamespace())
+
+        await ctx.restart_background_tasks(app)
+
+        assert soul._speculator.force_tick_calls == 0
+        assert rec.prewarm_calls == 0
+
+    @pytest.mark.asyncio
+    async def test_runtime_context_can_suppress_post_reload_llm_one_shots(self) -> None:
+        """Setup config saves must not kick profile/probe/pool LLM work."""
+        from types import SimpleNamespace
+
+        from openbiliclaw.api.runtime_context import RuntimeContext
+        from openbiliclaw.config import Config
+
+        class FakeSpeculator:
+            async def force_tick(self, *_args: object, **_kwargs: object) -> None:
+                raise AssertionError("setup config save must not generate probes")
+
+        class FakeSoulEngine:
+            def __init__(self) -> None:
+                self._speculator = FakeSpeculator()
+                self.profile_calls = 0
+
+            async def get_profile(self) -> dict[str, object]:
+                self.profile_calls += 1
+                return {"profile": "ok"}
+
+        class FakeRecommendationEngine:
+            async def precompute_pool_copy(self, *_args: object, **_kwargs: object) -> None:
+                raise AssertionError("setup config save must not precompute pool copy")
+
+            async def prewarm_pool_mmr_embeddings(self) -> int:
+                raise AssertionError("setup config save must not prewarm embeddings")
+
+        soul = FakeSoulEngine()
+        ctx = RuntimeContext(
+            config=Config(),
+            memory_manager=SimpleNamespace(load_discovery_runtime_state=lambda: {}),
+            runtime_controller=object(),
+            account_sync_service=object(),
+            auto_update_service=object(),
+            soul_engine=soul,
+            recommendation_engine=FakeRecommendationEngine(),
+        )
+        app = SimpleNamespace(state=SimpleNamespace())
+
+        await ctx.restart_background_tasks(app, run_post_reload_llm_work=False)
+
+        assert soul.profile_calls == 0
+        assert ctx.task_registry.stats().get("post_reload_speculate") is None
+        assert ctx.task_registry.stats().get("post_reload_precompute_pool_copy") is None
+        assert ctx.task_registry.stats().get("prewarm_pool_mmr_embeddings") is None
+
+    @pytest.mark.asyncio
+    async def test_runtime_context_replaces_one_independent_source_scheduler_owner(self) -> None:
+        from types import SimpleNamespace
+
+        from openbiliclaw.api.runtime_context import RuntimeContext
+        from openbiliclaw.config import Config
+
+        started: list[str] = []
+        release = asyncio.Event()
+        new_started = asyncio.Event()
+
+        class Controller:
+            def __init__(self, label: str) -> None:
+                self.label = label
+                self.source_incremental_sync = object()
+
+            async def run_forever(self) -> None:
+                started.append(self.label)
+                if self.label == "new":
+                    new_started.set()
+                await release.wait()
+
+        old = Controller("old")
+        new = Controller("new")
+        old_task = asyncio.create_task(old.run_forever())
+        ctx = RuntimeContext(
+            config=Config(),
+            runtime_controller=old,
+            account_sync_service=object(),
+            auto_update_service=object(),
+        )
+        app = SimpleNamespace(state=SimpleNamespace(refresh_task=old_task))
+
+        try:
+            await asyncio.sleep(0)
+            ctx.runtime_controller = new
+            await ctx.restart_background_tasks(app)
+            for _ in range(5):
+                await asyncio.sleep(0)
+                if new_started.is_set():
+                    break
+
+            assert old_task.cancelled()
+            assert started == ["old", "new"]
+            assert app.state.refresh_task is not old_task
+            assert ctx.task_registry.stats().get("refresh_loop") == 1
+        finally:
+            release.set()
+            await ctx.task_registry.cancel_all()
+            if not old_task.done():
+                old_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await old_task
+
+    @pytest.mark.asyncio
+    async def test_guided_init_setup_reload_keeps_whole_controller_suspended(self) -> None:
+        from types import SimpleNamespace
+
+        from openbiliclaw.api.runtime_context import RuntimeContext
+        from openbiliclaw.config import Config
+
+        started = False
+
+        class Controller:
+            source_incremental_sync = object()
+
+            async def run_forever(self) -> None:
+                nonlocal started
+                started = True
+
+        ctx = RuntimeContext(
+            config=Config(),
+            runtime_controller=Controller(),
+            account_sync_service=object(),
+            auto_update_service=object(),
+        )
+        app = SimpleNamespace(state=SimpleNamespace())
+
+        await ctx.restart_background_tasks(app, run_post_reload_llm_work=False)
+        await asyncio.sleep(0)
+
+        assert app.state.refresh_task is None
+        assert started is False
+        assert ctx.task_registry.stats().get("refresh_loop") is None
+
+    @pytest.mark.asyncio
+    async def test_restart_background_tasks_bounds_cancel_ignoring_coroutine(
+        self, monkeypatch
+    ) -> None:
+        """Hot reload must return even when an old provider loop swallows cancel."""
+        from contextlib import suppress
+        from types import SimpleNamespace
+
+        import openbiliclaw.api.runtime_context as runtime_context_module
+        from openbiliclaw.api.runtime_context import RuntimeContext
+        from openbiliclaw.config import Config
+
+        stop = asyncio.Event()
+
+        async def _stubborn() -> None:
+            while not stop.is_set():
+                try:
+                    await stop.wait()
+                except asyncio.CancelledError:
+                    # Simulate a third-party coroutine that consumes cancel.
+                    continue
+
+        stale = asyncio.create_task(_stubborn())
+        app = SimpleNamespace(
+            state=SimpleNamespace(
+                refresh_task=stale,
+                account_sync_task=None,
+                auto_update_task=None,
+            )
+        )
+        ctx = RuntimeContext(
+            config=Config(),
+            runtime_controller=object(),
+            account_sync_service=object(),
+            auto_update_service=object(),
+        )
+        monkeypatch.setattr(
+            runtime_context_module,
+            "_BACKGROUND_TASK_CANCEL_TIMEOUT_SECONDS",
+            0.01,
+        )
+        await asyncio.sleep(0)  # let the coroutine enter its cancel-swallowing loop
+        try:
+            await asyncio.wait_for(
+                ctx.restart_background_tasks(app, run_post_reload_llm_work=False),
+                timeout=0.2,
+            )
+            # The live old task remains owned; no duplicate replacement is
+            # started merely to make the reload look successful.
+            assert app.state.refresh_task is stale
+            assert not stale.done()
+        finally:
+            stop.set()
+            with suppress(asyncio.CancelledError):
+                await asyncio.wait_for(stale, timeout=0.2)
+
+    @pytest.mark.asyncio
+    async def test_restart_background_tasks_accepts_done_task_from_prior_loop(self) -> None:
+        """Embedded/TestClient hosts may preserve app.state across loop lifetimes."""
+        from types import SimpleNamespace
+
+        from openbiliclaw.api.runtime_context import RuntimeContext
+        from openbiliclaw.config import Config
+
+        class PriorLoopTask:
+            def get_loop(self) -> object:
+                return object()
+
+            def done(self) -> bool:
+                return True
+
+            def result(self) -> None:
+                return None
+
+            def cancel(self) -> None:
+                raise AssertionError("a completed foreign-loop task must not be cancelled")
+
+        app = SimpleNamespace(
+            state=SimpleNamespace(
+                refresh_task=PriorLoopTask(),
+                account_sync_task=None,
+                auto_update_task=None,
+            )
+        )
+        ctx = RuntimeContext(
+            config=Config(),
+            runtime_controller=object(),
+            account_sync_service=object(),
+            auto_update_service=object(),
+        )
+
+        await ctx.restart_background_tasks(app, run_post_reload_llm_work=False)
+
+        assert app.state.refresh_task is None
+
+    @pytest.mark.asyncio
+    async def test_restart_tasks_detaches_speculator_tick(self) -> None:
+        from types import SimpleNamespace
+
+        from openbiliclaw.api.runtime_context import RuntimeContext
+        from openbiliclaw.config import Config
+
+        class HangingSpeculator:
+            async def force_tick(self, *_args: object, **_kwargs: object) -> None:
+                await asyncio.sleep(60)
+
+        class FakeSoulEngine:
+            _speculator = HangingSpeculator()
+
+            async def get_profile(self) -> dict[str, object]:
+                return {"profile": "ok"}
+
+        cfg = Config()
+        ctx = RuntimeContext(
+            config=cfg,
+            memory_manager=SimpleNamespace(load_discovery_runtime_state=lambda: {}),
+            runtime_controller=object(),
+            account_sync_service=object(),
+            auto_update_service=object(),
+            soul_engine=FakeSoulEngine(),
+            recommendation_engine=object(),
+        )
+        app = SimpleNamespace(state=SimpleNamespace())
+
+        try:
+            await asyncio.wait_for(ctx.restart_background_tasks(app), timeout=0.5)
+            assert ctx.task_registry.stats().get("post_reload_speculate") == 1
+        finally:
+            await ctx.task_registry.cancel_all()
+
+    @pytest.mark.asyncio
+    async def test_restart_tasks_detaches_avoidance_speculator_tick(self) -> None:
+        from types import SimpleNamespace
+
+        from openbiliclaw.api.runtime_context import RuntimeContext
+        from openbiliclaw.config import Config
+
+        class HangingAvoidanceSpeculator:
+            def __init__(self) -> None:
+                self.started = asyncio.Event()
+                self.calls: list[tuple[object, object | None]] = []
+
+            async def force_tick(
+                self,
+                profile: object,
+                *,
+                feedback_history: object | None = None,
+            ) -> None:
+                self.calls.append((profile, feedback_history))
+                self.started.set()
+                await asyncio.sleep(60)
+
+        class FakeSoulEngine:
+            def __init__(self, avoidance_speculator: HangingAvoidanceSpeculator) -> None:
+                self._avoidance_speculator = avoidance_speculator
+
+            async def get_profile(self) -> dict[str, object]:
+                return {"profile": "ok"}
+
+        feedback_history = [{"domain": "浅层热点复读", "response": "reject"}]
+        avoidance_speculator = HangingAvoidanceSpeculator()
+        cfg = Config()
+        ctx = RuntimeContext(
+            config=cfg,
+            memory_manager=SimpleNamespace(
+                load_discovery_runtime_state=lambda: {
+                    "avoidance_probe_feedback_history": feedback_history,
+                }
+            ),
+            runtime_controller=object(),
+            account_sync_service=object(),
+            auto_update_service=object(),
+            soul_engine=FakeSoulEngine(avoidance_speculator),
+            recommendation_engine=object(),
+        )
+        app = SimpleNamespace(state=SimpleNamespace())
+
+        try:
+            await asyncio.wait_for(ctx.restart_background_tasks(app), timeout=0.5)
+            assert ctx.task_registry.stats().get("post_reload_avoidance_speculate") == 1
+            await asyncio.wait_for(avoidance_speculator.started.wait(), timeout=0.5)
+            assert avoidance_speculator.calls == [
+                ({"profile": "ok"}, feedback_history),
+            ]
+        finally:
+            await ctx.task_registry.cancel_all()
+
+    @pytest.mark.asyncio
+    async def test_restart_tasks_swallows_detached_speculator_failure(self) -> None:
+        from types import SimpleNamespace
+
+        from openbiliclaw.api.runtime_context import RuntimeContext
+        from openbiliclaw.config import Config
+
+        class BrokenSpeculator:
+            async def force_tick(self, *_args: object, **_kwargs: object) -> None:
+                raise RuntimeError("boom")
+
+        class FakeSoulEngine:
+            _speculator = BrokenSpeculator()
+
+            async def get_profile(self) -> dict[str, object]:
+                return {"profile": "ok"}
+
+        cfg = Config()
+        ctx = RuntimeContext(
+            config=cfg,
+            memory_manager=SimpleNamespace(load_discovery_runtime_state=lambda: {}),
+            runtime_controller=object(),
+            account_sync_service=object(),
+            auto_update_service=object(),
+            soul_engine=FakeSoulEngine(),
+            recommendation_engine=object(),
+        )
+        app = SimpleNamespace(state=SimpleNamespace())
+        captured_tasks: list[asyncio.Task[object]] = []
+        original_track = ctx.task_registry.track
+
+        def _track(name: str, coro):
+            task = original_track(name, coro)
+            if name == "post_reload_speculate":
+                captured_tasks.append(task)
+            return task
+
+        ctx.task_registry.track = _track  # type: ignore[method-assign]
+
+        await ctx.restart_background_tasks(app)
+        assert len(captured_tasks) == 1
+        await asyncio.wait_for(captured_tasks[0], timeout=0.5)
+        assert captured_tasks[0].exception() is None
+
+    @pytest.mark.asyncio
+    async def test_restart_tasks_rekicks_pool_precompute_drain(self) -> None:
+        """Lever 2a: hot-reload re-kicks the classify→copy→delight drain.
+
+        ``rebuild_from_config``'s ``cancel_all`` kills any in-flight pool
+        precompute; ``restart_background_tasks`` must re-kick it on the
+        freshly-built engine so a user saving config mid-cold-start doesn't
+        strand pool-fill until the next refresh tick.
+        """
+        from types import SimpleNamespace
+
+        from openbiliclaw.api.runtime_context import RuntimeContext
+        from openbiliclaw.config import Config
+
+        class FakeRecommendationEngine:
+            def __init__(self) -> None:
+                self.calls: list[object] = []
+                self.started = asyncio.Event()
+
+            async def precompute_pool_copy(self, *, profile: object) -> int:
+                self.calls.append(profile)
+                self.started.set()
+                return 0
+
+        class FakeSoulEngine:
+            async def get_profile(self) -> dict[str, object]:
+                return {"profile": "ok"}
+
+        engine = FakeRecommendationEngine()
+        cfg = Config()
+        ctx = RuntimeContext(
+            config=cfg,
+            memory_manager=SimpleNamespace(load_discovery_runtime_state=lambda: {}),
+            runtime_controller=object(),
+            account_sync_service=object(),
+            auto_update_service=object(),
+            soul_engine=FakeSoulEngine(),
+            recommendation_engine=engine,
+        )
+        app = SimpleNamespace(state=SimpleNamespace())
+        captured: dict[str, asyncio.Task[object]] = {}
+        original_track = ctx.task_registry.track
+
+        def _track(name: str, coro: object) -> object:
+            task = original_track(name, coro)
+            captured[name] = task
+            return task
+
+        ctx.task_registry.track = _track  # type: ignore[method-assign]
+
+        try:
+            await asyncio.wait_for(ctx.restart_background_tasks(app), timeout=0.5)
+            assert "post_reload_precompute_pool_copy" in captured
+            await asyncio.wait_for(engine.started.wait(), timeout=0.5)
+            await asyncio.wait_for(captured["post_reload_precompute_pool_copy"], timeout=0.5)
+            assert engine.calls == [{"profile": "ok"}]
+        finally:
+            await ctx.task_registry.cancel_all()
+
+    @pytest.mark.asyncio
+    async def test_e2e_hot_reload_resumes_real_pool_fill(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """E2E (lever 2a): a config reload makes the *real* engine fill copy for
+        a pending pool candidate against a *real* DB — pool-fill actually
+        resumes (the seeded row becomes serveable), not just 'a task was
+        scheduled'. Only the LLM (copy text) is faked.
+        """
+        import json
+        import tempfile
+        from pathlib import Path
+        from types import SimpleNamespace
+
+        from openbiliclaw.api.runtime_context import RuntimeContext
+        from openbiliclaw.config import Config
+        from openbiliclaw.llm.base import LLMResponse
+        from openbiliclaw.recommendation.engine import RecommendationEngine
+        from openbiliclaw.soul.profile import PreferenceLayer, SoulProfile
+        from openbiliclaw.storage.database import Database
+
+        async def no_sleep(_delay: float) -> None:
+            return None
+
+        monkeypatch.setattr(asyncio, "sleep", no_sleep)
+
+        class _CopyLLM:
+            def __init__(self) -> None:
+                self.callers: list[str] = []
+
+            async def complete_structured_task(
+                self, *, caller: str = "", **_kw: object
+            ) -> LLMResponse:
+                self.callers.append(caller)
+                content = json.dumps(
+                    [
+                        {
+                            "bvid": "BVe2e",
+                            "expression": "这条接住你最近的状态。",
+                            "topic_label": "你最近在意的方向",
+                        }
+                    ],
+                    ensure_ascii=False,
+                )
+                return LLMResponse(content=content, provider="test", model="dummy", usage={})
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = Database(Path(tmpdir) / "e2e.db")
+            db.initialize()
+            # Classified but un-copied → "needs copy", not yet serveable.
+            db.cache_content(
+                "BVe2e",
+                title="测试视频",
+                up_name="UP",
+                source="search",
+                style_key="tutorial",
+                topic_group="测试分组",
+                topic_key="测试分组",
+                # Keep this fixture below the delight threshold: this E2E
+                # verifies regular-pool copy refill, not surprise-channel
+                # claiming.
+                relevance_score=0.65,
+                pool_expression="",
+                pool_topic_label="",
+            )
+            assert db.count_pool_candidates() == 0  # gated: copy missing
+
+            profile = SoulProfile(
+                personality_portrait="p",
+                core_traits=["好奇"],
+                preferences=PreferenceLayer(),
+            )
+            llm = _CopyLLM()
+            engine = RecommendationEngine(llm=llm, database=db)
+
+            class FakeSoulEngine:
+                async def get_profile(self) -> object:
+                    return profile
+
+            ctx = RuntimeContext(
+                config=Config(),
+                memory_manager=SimpleNamespace(load_discovery_runtime_state=lambda: {}),
+                runtime_controller=object(),
+                account_sync_service=object(),
+                auto_update_service=object(),
+                soul_engine=FakeSoulEngine(),
+                recommendation_engine=engine,
+            )
+            engine.task_registry = ctx.task_registry  # mirror production wiring
+
+            # Capture the post-reload precompute task so we can await it.
+            captured: dict[str, asyncio.Task[object]] = {}
+            original_track = ctx.task_registry.track
+
+            def _track(name: str, coro: object) -> object:
+                task = original_track(name, coro)
+                captured[name] = task
+                return task
+
+            ctx.task_registry.track = _track  # type: ignore[method-assign]
+
+            app = SimpleNamespace(state=SimpleNamespace())
+            try:
+                await asyncio.wait_for(ctx.restart_background_tasks(app), timeout=2.0)
+                assert "post_reload_precompute_pool_copy" in captured
+                await asyncio.wait_for(captured["post_reload_precompute_pool_copy"], timeout=2.0)
+
+                # The reload drove the REAL engine to write copy for the pending
+                # candidate against the REAL DB — it is now serveable.
+                assert "recommendation.write_expression" in llm.callers
+                assert db.count_pool_candidates() == 1
+            finally:
+                await ctx.task_registry.cancel_all()
+
+    @pytest.mark.asyncio
+    async def test_startup_prewarm_wrapper_skips_retries_on_nothing_to_warm(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Lever 4: the startup prewarm wrapper skips its retry loop when prewarm
+        returns -1 ("nothing to warm" — empty pool / embeddings off), so a fresh
+        deploy no longer emits 5 alarming "warmed=0 — retry" lines that read like
+        a real Ollama outage. A 0 return (candidates present, backend down) still
+        retries.
+        """
+        from openbiliclaw.api.runtime_context import RuntimeContext
+
+        async def no_sleep(_delay: float) -> None:
+            return None
+
+        monkeypatch.setattr(asyncio, "sleep", no_sleep)
+
+        # -1 → benign cold start: called exactly once, no retry loop.
+        benign_calls = 0
+
+        async def _benign() -> int:
+            nonlocal benign_calls
+            benign_calls += 1
+            return -1
+
+        await RuntimeContext._safe_prewarm_pool_mmr_embeddings(_benign)
+        assert benign_calls == 1
+
+        # 0 → backend unreachable: retried up to 5 times before giving up.
+        down_calls = 0
+
+        async def _down() -> int:
+            nonlocal down_calls
+            down_calls += 1
+            return 0
+
+        await RuntimeContext._safe_prewarm_pool_mmr_embeddings(_down)
+        assert down_calls == 5
+
+    @pytest.mark.asyncio
+    async def test_put_config_does_not_block_on_speculator(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        from types import SimpleNamespace
+
+        import httpx
+
+        from openbiliclaw.api.runtime_context import RuntimeContext
+        from openbiliclaw.config import Config, save_config
+
+        config_path = tmp_path / "config.toml"
+        cfg = Config()
+        cfg.llm.default_provider = "openai"
+        cfg.llm.openai.api_key = "sk-test-openai"
+        save_config(cfg, config_path)
+        monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+
+        class HangingSpeculator:
+            async def force_tick(self, *_args: object, **_kwargs: object) -> None:
+                await asyncio.sleep(60)
+
+        class FakeSoulEngine:
+            _speculator = HangingSpeculator()
+
+            async def get_profile(self) -> dict[str, object]:
+                return {"profile": "ok"}
+
+        async def _fake_rebuild(self: RuntimeContext, new_config: Config) -> None:
+            self.config = new_config
+            self.memory_manager = SimpleNamespace(load_discovery_runtime_state=lambda: {})
+            self.runtime_controller = object()
+            self.account_sync_service = object()
+            self.auto_update_service = object()
+            self.soul_engine = FakeSoulEngine()
+            self.recommendation_engine = object()
+
+        monkeypatch.setattr(RuntimeContext, "rebuild_from_config", _fake_rebuild)
+        app = create_app(memory_manager=object(), database=object(), soul_engine=object())
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as client:
+            response = await asyncio.wait_for(
+                client.put("/api/config", json={"language": "zh"}),
+                timeout=0.5,
+            )
+
+        assert response.status_code == 202
+        body = response.json()
+        assert body["apply_state"] == "queued"
+        assert body["reloaded"] is False
+
+    @pytest.mark.asyncio
+    async def test_put_config_setup_suppression_flag_skips_post_reload_llm_work(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        import httpx
+
+        from openbiliclaw.api.runtime_context import RuntimeContext
+        from openbiliclaw.config import Config, save_config
+
+        config_path = tmp_path / "config.toml"
+        cfg = Config()
+        cfg.llm.default_provider = "openai"
+        cfg.llm.openai.api_key = "sk-test-openai"
+        save_config(cfg, config_path)
+        monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+
+        async def _fake_rebuild(self: RuntimeContext, new_config: Config) -> None:
+            self.config = new_config
+
+        restart_flags: list[bool] = []
+
+        async def _fake_restart(
+            self: RuntimeContext,
+            app: object,
+            *,
+            run_post_reload_llm_work: bool = True,
+        ) -> None:
+            restart_flags.append(run_post_reload_llm_work)
+
+        monkeypatch.setattr(RuntimeContext, "rebuild_from_config", _fake_rebuild)
+        monkeypatch.setattr(RuntimeContext, "restart_background_tasks", _fake_restart)
+        app = create_app(memory_manager=object(), database=object(), soul_engine=object())
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as client:
+            response = await client.put(
+                "/api/config",
+                json={"language": "zh", "suppress_background_llm_work": True},
+            )
+            body = response.json()
+            await _wait_for_config_apply_async(
+                client,
+                revision=body["apply_revision"],
+            )
+
+        assert response.status_code == 202
+        assert body["apply_state"] == "queued"
+        assert body["reloaded"] is False
+        assert restart_flags == [False]
+
     def test_create_app_bootstrap_shares_database_with_memory_manager(
         self,
         monkeypatch,

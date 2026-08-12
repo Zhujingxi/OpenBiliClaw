@@ -2,12 +2,16 @@
 import AsyncState from "../components/AsyncState.vue";
 import { inject, onBeforeUnmount, ref } from "vue";
 import { useContentStore } from "../stores/content";
+import type { ContentPreview } from "@openbiliclaw/presentation";
 import type { WebApi } from "../services/api";
 const api = inject<WebApi>("api");
 if (api === undefined) throw new Error("WebApi not provided");
 const store = useContentStore();
 const provider = ref("bilibili");
 const query = ref("");
+function open(item: ContentPreview): void {
+  location.hash = `#/content/${encodeURIComponent(item.ref.canonical_url)}`;
+}
 onBeforeUnmount(store.cancel);
 </script>
 <template>
@@ -17,9 +21,8 @@ onBeforeUnmount(store.cancel);
       <label for="search-provider">Provider</label>
       <input id="search-provider" v-model="provider" required />
       <label for="search-query">Search content</label>
-      <input id="search-query" v-model="query" required /><button type="submit">
-        Search
-      </button>
+      <input id="search-query" v-model="query" required />
+      <button type="submit">Search</button>
     </form>
     <AsyncState :phase="store.phase" :error="store.error">
       <ul>
@@ -27,7 +30,7 @@ onBeforeUnmount(store.cancel);
           v-for="item in store.results.items"
           :key="item.ref.provider_content_id"
         >
-          {{ item.title }}
+          <button type="button" @click="open(item)">{{ item.title }}</button>
         </li>
       </ul>
     </AsyncState>

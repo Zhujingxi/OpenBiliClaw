@@ -778,9 +778,7 @@ def _tray_icon_image() -> Any:
     """Load the canonical app icon for the Windows tray / macOS menu bar."""
     from PIL import Image
 
-    from openbiliclaw import __file__ as package_init
-
-    icon_path = Path(package_init).resolve().parent / "web" / "icon-192.png"
+    icon_path = Path(__file__).resolve().parent / "openbiliclaw-icon.png"
     with Image.open(icon_path) as source:
         return source.convert("RGBA").resize((64, 64), Image.Resampling.LANCZOS)
 
@@ -819,7 +817,7 @@ def _run_server_in_tray(
     import pystray
 
     browser_host = "127.0.0.1" if host == "0.0.0.0" else host  # noqa: S104
-    web_url = f"http://{browser_host}:{port}/web/"
+    web_url = f"http://{browser_host}:{port}/"
     log_path = project_root / "logs" / "desktop.log"
 
     def _serve() -> None:
@@ -894,7 +892,7 @@ def _wait_for_backend_ready(
 ) -> bool:
     """Poll ``/api/health`` until the backend answers.
 
-    The static ``/setup/`` / ``/web/`` shells cannot self-retry a refused
+    The static ``/setup/`` / ``/`` shells cannot self-retry a refused
     first GET, so the browser must only be pointed at a live server.
     """
     deadline = time.monotonic() + timeout_seconds
@@ -931,15 +929,15 @@ def _decide_landing_path(seeded: bool, repaired: bool, initialized: bool | None)
 
     Fresh or repaired config → setup wizard. A configured relaunch whose init
     never completed must land on the wizard too — the old config-existence-only
-    rule sent those users to ``/web/`` and relied entirely on the SPA's
-    onboarding gate. Unknown init state (probe failed) keeps the ``/web/``
+    rule sent those users to ``/`` and relied entirely on the SPA's
+    onboarding gate. Unknown init state (probe failed) keeps the ``/``
     fallback: the SPA gate is the safety net, not a wall.
     """
     if seeded or repaired:
         return "/setup/"
     if initialized is False:
         return "/setup/"
-    return "/web/"
+    return "/"
 
 
 def _open_landing_page_when_ready(base_url: str, *, seeded: bool, repaired: bool) -> None:
@@ -1094,6 +1092,11 @@ def main() -> None:
 
     from openbiliclaw.api.app import create_app
 
+    os.environ.setdefault(
+        "OPENBILICLAW_FRONTEND_DIR",
+        str(bundled_resources / "openbiliclaw/frontend"),
+    )
+
     # Self-test mode: assemble the backend to prove every bundled
     # dependency imports and the app builds, then exit WITHOUT binding a
     # port. Lets CI / a local check smoke-test the packaged build even
@@ -1143,7 +1146,7 @@ def main() -> None:
             _close_splash()
             print("[OpenBiliClaw] 当前数据目录已有后端在运行；本次不启动新实例。")
             with suppress(Exception):
-                webbrowser.open(f"http://{existing_host}:{port}/web/")
+                webbrowser.open(f"http://{existing_host}:{port}/")
             return
         atexit.register(migration_guard.release)
         try:

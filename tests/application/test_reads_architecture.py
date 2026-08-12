@@ -38,7 +38,7 @@ from openbiliclaw.core.health import HealthSnapshot, HealthStatus
 from openbiliclaw.understanding.profile import CanonicalProfile
 
 if TYPE_CHECKING:
-    from openbiliclaw.recommendation.models import SelectionRecord
+    from openbiliclaw.recommendation.models import RecommendationFeedItem
 
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
 REF = ContentRef(
@@ -70,7 +70,7 @@ class AccessFake:
 
 
 class RecommendationsFake:
-    async def feed(self, *, limit: int) -> tuple[SelectionRecord, ...]:
+    async def feed(self, *, limit: int) -> tuple[RecommendationFeedItem, ...]:
         return ()
 
 
