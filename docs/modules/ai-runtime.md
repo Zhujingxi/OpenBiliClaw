@@ -52,3 +52,5 @@ production repository，也不包含 optimizer 或 self-modification。
 - Phase 6 内容迁移：旧 `eval/` scenarios/rubrics 等待对应 domain owner；当前仅有通用 mechanics。
 - Phase 7：`llm/`、`eval/`、`agent/orchestrator.py`、`agent/skill.py` 的删除等待所有生产 caller
   改线；本阶段禁止 compatibility wrapper 或假 tool protocol。
+
+Recommendation now defines stable typed agent identities `recommendation.query`, `recommendation.evaluate`, and `recommendation.expression`; domain evaluation datasets remain deferred to the evaluation sweep.

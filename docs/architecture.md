@@ -547,3 +547,7 @@ embedding 和空向量失败留待下轮重试，成功槽位会复用。已有�
    学习、推荐、反馈回流仍由 `runtime/`、`soul/`、`recommendation/` 等模块负责，`integrations/openclaw/skill.py` 只负责对外暴露稳定 handler；新功能必须同时进入 operation、descriptor、CLI（若适合）和 capability manifest。
 3. **宿主发现走能力协商 + 仓库根目录 `skills/`**
    当前仓库通过 `skills/openbiliclaw-adapter/SKILL.md` 提供真实 workspace skill，再由 skill 内部调用 adapter CLI bridge；`capabilities` 是避免宿主继续使用旧能力子集的权威入口。
+
+### Target Discovery & Recommendation coexistence
+
+The target `openbiliclaw.recommendation` pipeline now owns explicit typed candidate transitions, planning, prefilter, evaluation contracts, deterministic selection, optional expression, persistence, and Core job definitions. It is not composed in production yet; the legacy engines remain isolated until Plan 15.

@@ -1,1 +1,1 @@
-"""Recommendation package — recommendation ranking and expression."""
+"""Target recommendation package."""

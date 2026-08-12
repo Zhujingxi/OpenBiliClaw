@@ -678,3 +678,7 @@ compare-and-clear 旧 tuple，不能清除 new permit。进程 shutdown 的同�
 `ContinuousRefreshController.run_forever()` 当前并行启动 refresh、`CandidateEvalCoordinator`、pool precompute、soul pipeline、各来源 producer（含匿名微博 producer）和 proactive push 等 loop。即时断供补货与周期 loop 共用 per-source lock；微博分支因此不会被同一 tick 重复执行。协调器 worker 只执行 LLM evaluation，不持有 SQLite drain lock；claim、完成提交、重试 admission 与补位由单一协调任务管理。限流按 15/30/60/120/300 秒退避（尊重更长 `Retry-After`），缺 provider / 鉴权失败暂停后只接受精确 `startup` 或 `config_*` / `manual_*` 唤醒，连续 3 个成功但零缓存 batch 触发 60/120/300 秒无进展退避和一次补货。热重载只取消 registry 中的父 `refresh_loop`；父任务 gather 协调器子任务、子任务归还所有未完成 token 后，`RuntimeContext` 才构造新 runtime。
 
 Expression copy 与 candidate evaluation 对 rate-limit、timeout、connection、5xx 使用同一条 15/30/60/120/300 秒 transient ladder；provider 提供更长 `Retry-After` 时优先采用。鉴权失败或无 provider 进入 `paused`，只由 startup、manual_* 或 config_* 通知恢复；成功但零写入至少等待 15 秒，避免 malformed singleton 紧循环。
+
+## Target recommendation jobs (not composed yet)
+
+Plan 10 defines discovery (300s/network), evaluation (60s/model), expiry (900s/database), and replenishment (120s/network) `JobSpec`s. All reject overlap, skip missed runs, and have a 55-second timeout. Composition wiring remains Plan 15.

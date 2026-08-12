@@ -613,3 +613,5 @@ report: PoolHealthReport = curator.check_pool_health()
 21. **新确认兴趣只应被轻推，不应刷屏**：探针确认是用户给出的方向许可，不是 24h 内把同一方向塞满推荐流的理由；滚动预算与同批硬上限必须同时存在，前者降低排序冲动，后者防止最终回填阶段破坏体验。
 22. **文案 malformed 只追缺项且严格有界**：默认 API/daemon 路径中，成功响应的唯一 keyed 文案立即落库，缺失/重复成员共用 depth=3、最多六次额外 provider 请求的预算；永久 malformed singleton 保持 copy-pending，不再递归调用单条表达。OpenClaw one-shot 显式将该预算设为零，保留有效 subset 并把缺项留给下一请求。provider transient 原样交给 coordinator，按 15/30/60/120/300 秒退避。
 23. **LLM 返回的文本字段必须先验类型再落库**：结构化响应偶尔会把整批结果塞进单个标量字段，`str()` 会把它转成 Python repr，非空校验照样通过，于是脏文案直达用户。所有会持久化的 LLM 文本(推荐文案、`relevance_reason`、`topic_group`)都走 `validated_text_field()` 判类型，非字符串按该项失败处理并 WARNING,不做静默兜底。
+
+> Target replacement contracts are documented in [recommendation-target.md](recommendation-target.md). This legacy module remains active until Plan 15 cutover.

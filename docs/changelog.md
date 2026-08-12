@@ -5172,3 +5172,5 @@ AI agent（Claude / Codex / Cursor / OpenClaw）跑一句话装机时会读这�
 - `tomllib` 配置加载
 
 - **Plan 07 Phase 3 (manual-credential content providers)**: added self-contained typed Reddit, X, Zhihu, LinuxDo, and Weibo provider packages with strict native payloads, narrow search/fetch/projection capabilities, exact manual-cookie forms and bounded safe verification (Weibo remains anonymous), injected transports/resolvers, and no unsupported mutation/session capability claims. Legacy `sources/*` implementations remain until Plans 10–15 caller cutover.
+
+- **目标 Discovery & Recommendation pipeline 落地（尚未接入生产组合根）**：新增 explicit candidate state machine、SQLite repositories、deterministic planner/prefilter/ranking/quota/diversity、typed `recommendation.query`/`recommendation.evaluate`/`recommendation.expression` contracts、model-free feed 和四类 Core jobs。批准 deviation：feedback Observation wiring 等待 Plan 11；legacy discovery/recommendation/producers 删除等待 Plan 15；domain evaluation scenarios 等待 evaluation sweep。

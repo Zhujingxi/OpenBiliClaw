@@ -195,9 +195,73 @@ _SCHEMA_V2: Final[tuple[str, ...]] = (
     )""",
 )
 
+_SCHEMA_V3: Final[tuple[str, ...]] = (
+    """CREATE TABLE IF NOT EXISTS recommendation_candidates (
+        candidate_id TEXT PRIMARY KEY,
+        state TEXT NOT NULL CHECK(state IN (
+            'discovered','normalized','prefiltered','evaluated','admitted',
+            'rejected','selected','shown','interacted','expired'
+        )),
+        candidate_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS recommendation_evaluations (
+        evaluation_id TEXT PRIMARY KEY,
+        record_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS recommendation_selections (
+        recommendation_id TEXT PRIMARY KEY,
+        record_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS recommendation_shown (
+        shown_id TEXT PRIMARY KEY,
+        record_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS recommendation_feedback (
+        feedback_id TEXT PRIMARY KEY,
+        record_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS recommendation_expressions (
+        recommendation_id TEXT PRIMARY KEY,
+        record_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )""",
+)
+
+_SCHEMA_V4: Final[tuple[str, ...]] = (
+    """CREATE TABLE IF NOT EXISTS recommendation_rejections (
+        rejection_id TEXT PRIMARY KEY CHECK(rejection_id GLOB 'reject_[0-9a-f]*'),
+        record_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS recommendation_admissions (
+        admission_id TEXT PRIMARY KEY CHECK(admission_id GLOB 'admit_[0-9a-f]*'),
+        record_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )""",
+    """CREATE TRIGGER IF NOT EXISTS recommendation_candidate_valid_transition
+        BEFORE UPDATE OF state ON recommendation_candidates
+        WHEN NOT (
+            (OLD.state='discovered' AND NEW.state IN ('normalized','rejected')) OR
+            (OLD.state='normalized' AND NEW.state IN ('prefiltered','rejected')) OR
+            (OLD.state='prefiltered' AND NEW.state IN ('evaluated','rejected')) OR
+            (OLD.state='evaluated' AND NEW.state IN ('admitted','rejected')) OR
+            (OLD.state='admitted' AND NEW.state IN ('selected','expired')) OR
+            (OLD.state='selected' AND NEW.state IN ('shown','expired')) OR
+            (OLD.state='shown' AND NEW.state IN ('interacted','expired'))
+        )
+        BEGIN SELECT RAISE(ABORT, 'invalid recommendation candidate transition'); END""",
+)
+
 DEFAULT_MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(1, _SCHEMA_V1),
     Migration(2, _SCHEMA_V2),
+    Migration(3, _SCHEMA_V3),
+    Migration(4, _SCHEMA_V4),
 )
 
 
