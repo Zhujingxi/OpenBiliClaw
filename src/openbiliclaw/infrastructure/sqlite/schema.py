@@ -21,6 +21,9 @@ TARGET_TABLE_OWNERS: Final[dict[str, str]] = {
     "observations": "Observation Ingress",
     "understanding_profiles": "User Understanding",
     "understanding_evidence": "User Understanding",
+    "understanding_proposals": "User Understanding",
+    "understanding_ledger": "User Understanding",
+    "understanding_checkpoints": "User Understanding",
     "recommendation_inventory": "Discovery & Recommendation",
     "recommendation_history": "Discovery & Recommendation",
     "assistant_conversations": "Assistant",
@@ -88,6 +91,24 @@ _SCHEMA_V1: Final[tuple[str, ...]] = (
         weight REAL NOT NULL CHECK(weight >= 0 AND weight <= 1),
         created_at TEXT NOT NULL
     )""",
+    """CREATE TABLE understanding_proposals (
+        proposal_id TEXT PRIMARY KEY,
+        profile_id TEXT NOT NULL,
+        analyzer_id TEXT NOT NULL,
+        proposal_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )""",
+    """CREATE TABLE understanding_ledger (
+        ledger_id TEXT PRIMARY KEY,
+        profile_id TEXT NOT NULL REFERENCES understanding_profiles(profile_id) ON DELETE CASCADE,
+        entry_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )""",
+    """CREATE TABLE understanding_checkpoints (
+        analyzer_id TEXT PRIMARY KEY,
+        cursor TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )""",
     """CREATE TABLE recommendation_inventory (
         candidate_id TEXT PRIMARY KEY,
         content_id INTEGER NOT NULL UNIQUE
@@ -153,7 +174,31 @@ class Migration:
     destructive: bool = False
 
 
-DEFAULT_MIGRATIONS: Final[tuple[Migration, ...]] = (Migration(1, _SCHEMA_V1),)
+_SCHEMA_V2: Final[tuple[str, ...]] = (
+    """CREATE TABLE IF NOT EXISTS understanding_proposals (
+        proposal_id TEXT PRIMARY KEY,
+        profile_id TEXT NOT NULL,
+        analyzer_id TEXT NOT NULL,
+        proposal_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS understanding_ledger (
+        ledger_id TEXT PRIMARY KEY,
+        profile_id TEXT NOT NULL REFERENCES understanding_profiles(profile_id) ON DELETE CASCADE,
+        entry_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS understanding_checkpoints (
+        analyzer_id TEXT PRIMARY KEY,
+        cursor TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )""",
+)
+
+DEFAULT_MIGRATIONS: Final[tuple[Migration, ...]] = (
+    Migration(1, _SCHEMA_V1),
+    Migration(2, _SCHEMA_V2),
+)
 
 
 class SchemaMigrator:

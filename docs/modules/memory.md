@@ -1,5 +1,7 @@
-# 记忆系统
+# 记忆系统（legacy）
 
+> 目标 canonical profile owner 已迁移到 [User Understanding](understanding.md)。本 legacy 模块仅在现有 callers 于 Plans 11/15 完成切换前保留；不得新增 profile ownership 或写路径。
+>
 > 五层网状记忆管理，从行为事件到深层画像，为所有 LLM 调用提供用户上下文。
 
 ## 概述

@@ -11,6 +11,8 @@
 > `src/openbiliclaw/content/integration/` 已落地 target Content Integration contracts：稳定 content identity/native schema envelope、四种独立 purpose projection、十种 narrow capability protocols、显式 duplicate-safe provider registry、provider contract test utility，以及 bounded PydanticAI search/fetch tools。Mutation tool 只生成 pending action，不能直接执行。`content/providers/bilibili/` 现已作为首个 reference provider 落地：strict video/article native schema、anonymous/manual-cookie access、search/feed/fetch/related/creator/history/saved/action、purpose projections 与安全 observation；browser-session modes 明确 unavailable。它尚无 production caller；legacy `sources/protocol.py`/registry/dispatcher 与 `bilibili/` 仍是唯一生产路径，等待 Plans 10–15 直接替换，不存在 compatibility adapter 或双写。
 >
 > `src/openbiliclaw/observations/` 已落地 target Observation Ingress：12 种 immutable discriminated evidence、producer/source/trust/account/time/content validation、batch bounds、SQLite transaction/idempotency uniqueness、cursor replay 与 committed-ID-only notification。它不写 profile 或 analyzer checkpoint，尚无 production caller；built-in producer wiring 和 legacy `runtime/event_ingress.py` 删除等待 Plans 09/11/15，不存在双写。
+>
+> `src/openbiliclaw/understanding/` 已落地 target canonical profile、evidence/proposal/ledger/checkpoint repository、四种 typed optional analyzer contract、deterministic commit/override policy 与 Discovery/Recommendation/Dialogue bounded projections。Proposal、decision、profile 和 checkpoint 在单一 SQLite transaction 内提交；其他模块禁止导入 canonical internals。它尚无 production caller；legacy `memory/`/`soul/` 删除等待 Plans 11/15，persona evaluation migration 等待 Plans 12/15，不存在双写。
 
 ## 系统概览
 

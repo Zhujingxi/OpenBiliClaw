@@ -186,6 +186,8 @@ module = [
     "tests.content.*",
     "tests.core.*",
     "tests.infrastructure.*",
+    "tests.observations.*",
+    "tests.understanding.*",
 ]
 disallow_any_explicit = true
 

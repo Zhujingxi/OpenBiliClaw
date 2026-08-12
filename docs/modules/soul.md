@@ -1,5 +1,7 @@
-# 灵魂引擎
+# 灵魂引擎（legacy）
 
+> 目标 canonical profile owner 已迁移到 [User Understanding](understanding.md)。`SoulEngine` 与旧 profile representation 仅在 Plans 11/15 caller cutover 前保留，不得新增 profile ownership。
+>
 > `SoulEngine` 接受 runtime-owned gate，内部服务与主服务共享同一对象；`SocraticDialogue` 优先复用 Soul 服务。Prompt、token 与成本语义未变。
 
 > 用户深度理解核心 — 从行为数据到人格画像的推理引擎。
