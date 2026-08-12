@@ -1,6 +1,6 @@
 # User Understanding
 
-`src/openbiliclaw/understanding/` 是目标架构中 canonical user profile 的唯一 owner。当前包已落地但尚未接入 production composition root。
+`src/openbiliclaw/understanding/` 是 canonical user profile 的唯一 owner，并由 production composition 构造。
 
 ## 已落地
 
@@ -16,6 +16,6 @@
 
 Canonical profile 只存 claim 和 observation evidence reference。原始 provider payload、Cookie、token、credential reference、网页 HTML 和自由 prompt 均不能进入 analyzer input 或 projection。其他 product modules 只能消费 `projections.py` 的 bounded view，不能导入 `profile.py`。
 
-## 当前 deviation
+## Composition
 
-Legacy `memory/`、`soul/`、`SoulEngine`、`MemoryManager` 与旧 JSON state 仍由现有 callers 使用；删除等待 Plans 11/15 的 caller/composition cutover。`eval/` persona/judge scenario migration 等待 Plans 12/15 evaluation sweep。目标 package 没有 production caller、compatibility facade 或双写。
+Application workflows and Assistant consume the bounded projections above. Deleted `memory/`, `soul/`, legacy JSON state, and evaluation paths have no compatibility facade or double-write path.

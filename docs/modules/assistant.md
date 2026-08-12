@@ -1,4 +1,4 @@
-# Assistant（目标模块，尚未接入生产组合根）
+# Assistant
 
 `src/openbiliclaw/assistant/` 是 Application Workflows 之上的 bounded PydanticAI 对话 facade。
 稳定 agent identity 为 `assistant.dialogue`；它只接收 safe application facade、版本化且有界的
@@ -20,9 +20,6 @@ evidence ledger、credential vault、provider secrets 和 repositories 都不进
 Provider/tool/profile 文本一律视为 untrusted data，不是 instructions。已知 secret marker、credential
 reference、oversized message/tool result 在模型调用或持久化前拒绝。
 
-## 尚未落地
+## Composition
 
-Plan 12 Phase 6 的 legacy 删除（`soul/dialogue.py`、dialogue schedulers、`integrations/agent.py`、
-旧 orchestrator/skill/fake-tool plumbing）按批准 deviation 延后至 Plan 15：必须在 callers 切换到唯一
-production composition graph 后一次删除。目前 target Assistant 没有 production caller、双写或
-compatibility facade。API/CLI host routes 在 Plan 13 接入 Application + Assistant。
+`composition/assistant.py` constructs the Assistant dependencies and registers the dialogue agent in the single production graph. Hosts reach it through Application/Assistant facades; deleted legacy dialogue, orchestrator, integration, and fake-tool paths have no compatibility surface.

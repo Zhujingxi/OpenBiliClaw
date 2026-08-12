@@ -26,14 +26,9 @@ pip install -e ".[dev]"
 - 所有公开 API 需要 docstring
 
 ```bash
-# 格式化
-ruff format src/ tests/
-
-# Lint
-ruff check src/ tests/
-
-# 类型检查
-mypy src/
+ruff format src/ tests/ scripts/
+ruff check src/ tests/ scripts/
+mypy src/ tests/
 ```
 
 ## 测试
@@ -42,8 +37,8 @@ mypy src/
 # 运行所有测试
 pytest
 
-# 运行带覆盖率
-pytest --cov=openbiliclaw
+# 运行 branch coverage
+pytest --cov=openbiliclaw --cov-branch
 ```
 
 ## 提交规范
@@ -51,30 +46,31 @@ pytest --cov=openbiliclaw
 使用 [Conventional Commits](https://www.conventionalcommits.org/):
 
 ```
-feat: add new discovery strategy
-fix: correct preference weight decay
-docs: update memory design document
-refactor: extract common LLM interface
-test: add soul engine unit tests
+feat: add provider capability
+fix: preserve recommendation state transition
+docs: update application workflow reference
+refactor: simplify composition lifecycle
+test: add understanding policy coverage
 ```
 
 ## 浏览器插件开发
 
 ```bash
-# 浏览器插件开发
-cd extension
-npm install
-npm run build
-npm test
+npm --prefix frontend ci
+npm --prefix frontend run format:check
+npm --prefix frontend run lint
+npm --prefix frontend run typecheck
+npm --prefix frontend run test
+npm --prefix frontend run build
 ```
 
 ## Skill 开发
 
-Skill 定义为 `skills/<skill-name>/SKILL.md` 格式的 Markdown 文件。可参考 `skills/openbiliclaw-adapter/SKILL.md` 作为示例。
+Skill 定义为 `skills/<skill-name>/SKILL.md` 格式的 Markdown 文件。只保留与当前生产能力相符的 skill；引用已删除命令、模块或历史文档的 skill 必须随 cutover 删除或重写。
 
-仓库 `skills/` 存放 OpenClaw adapter skills；`.claude/skills/` 存放 Claude Code 项目技能，例如 release 发布 runbook 与 writing-specs 规格/计划编写技能。
+仓库 `skills/` 存放当前 workspace skills；`.claude/skills/` 存放 Claude Code 项目技能，例如 release 发布 runbook 与 writing-specs 技能。
 
-Skill 文件描述该 Skill 的能力边界、CLI bridge 命令列表，以及与主系统的集成工作流。参见 `skills/` 目录下的内置 Skill 示例，了解如何创建自定义 Skill。
+Skill 文件描述该 Skill 的能力边界和当前工作流。参见 `skills/` 目录下的内置示例。
 
 ## 文档更新清单
 

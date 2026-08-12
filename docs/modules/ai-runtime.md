@@ -43,11 +43,6 @@ request 字段；`ai.providers.ModelFactory` 通过单一配置入口构造 Pyda
 `ai.evaluation` 只提供 immutable recorded `Dataset`、typed runner、metric/report/comparison；不读取
 production repository，也不包含 optimizer 或 self-modification。
 
-## 明确推迟
+## Domain ownership
 
-- Plan 03 Phase 5：domain agent registry、prompts 与 agent conversion，等待 Plans 09–12 owner。
-- Phase 6 内容迁移：旧 `eval/` scenarios/rubrics 等待对应 domain owner；当前仅有通用 mechanics。
-- Phase 7：`llm/`、`eval/`、`agent/orchestrator.py`、`agent/skill.py` 的删除等待所有生产 caller
-  改线；本阶段禁止 compatibility wrapper 或假 tool protocol。
-
-Recommendation now defines stable typed agent identities `recommendation.query`, `recommendation.evaluate`, and `recommendation.expression`; domain evaluation datasets remain deferred to the evaluation sweep.
+Understanding, Recommendation, and Assistant own their stable agent identities and prompts; all execute through this runtime. Deleted `llm/`, legacy evaluation, orchestrator, and skill implementations have no compatibility wrappers. Recommendation defines `recommendation.query`, `recommendation.evaluate`, and `recommendation.expression`; additional offline domain evaluation datasets remain deferred.

@@ -1,6 +1,6 @@
 # Content Provider Authoring Contract
 
-本文是 Plan 07 first-party provider package 使用当前 `content.integration` 边界的最小契约。它描述已落地接口，不承诺 runtime discovery 或 compatibility adapters。
+本文说明 first-party provider package 使用当前 `content.integration` 边界的最小契约。它描述已落地接口，不承诺 runtime discovery 或 compatibility adapters。
 
 ## Package responsibilities
 

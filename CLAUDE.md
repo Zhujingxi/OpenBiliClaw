@@ -43,7 +43,7 @@ Update on demand based on PR type:
 6. `docs/index.md` — new module docs, module-status changes, highlighted docs
 7. `README.md` / `README_EN.md` — positioning changes, tagline changes, core feature list changes, install flow changes, version releases
 8. GitHub About (`gh repo edit --description`) — when project positioning shifts
-9. `scripts/install.sh` post-install summary, `docs/agent-install.md`, `docs/docker-deployment.md` — installer flow / dependencies / opt-in steps changing
+9. `scripts/install.sh` post-install summary, `docs/agent-install.md`, `docs/agent-deployment.md`, `docs/docker-deployment.md` — installer flow / dependencies / opt-in steps changing
 10. `README.md` / `README_EN.md` 📌 vX.Y.Z highlights callout — keep it a **teaser, not a mini-changelog**. Hard rules:
     - **At most 4 bullets**, each one tight sentence (~60 字 / ~40 words max).
     - Surface only the release's biggest **user-facing** wins: new platform, behaviour change, perf jump, breaking config. Skip internal smokes, test coverage, refactor, default-value tweaks, observability-only changes — those live only in `docs/changelog.md`.
@@ -57,10 +57,10 @@ Pre-merge checklist:
 - [ ] `docs/changelog.md` has a new entry
 - [ ] Architecture changed → `docs/architecture.md` + `docs/spec.md` diagram + README diagrams synced
 - [ ] CLI / config changed → corresponding module doc synced
-- [ ] Installer flow changed → `install.sh` output + agent-install.md + docker-deployment.md synced
+- [ ] Installer flow changed → `install.sh` output + agent-install.md + agent-deployment.md + docker-deployment.md synced
 - [ ] Positioning / tagline changed → README CN/EN + GitHub About synced
 - [ ] New release → README CN/EN 📌 highlights callout **replaced** (not appended), ≤4 bullets, ≤1 sentence each, CN/EN in sync, no internal smokes/test coverage entries
 
 ## Development Order
 
-Follow `docs/v0.1-todolist.md` roadmap: Connect -> Understand -> Discover -> Recommend -> Learn -> Extension -> Stable Delivery. Do not skip lower layers to build upper-layer features.
+Use `docs/architecture.md`, `docs/spec.md`, and `docs/modules/` as the current development baseline. Keep dependency direction and module ownership intact when adding product behavior.

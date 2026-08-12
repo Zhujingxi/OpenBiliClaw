@@ -29,4 +29,4 @@ Open http://127.0.0.1:8420. Docker uses the same `openbiliclaw serve` entrypoint
 - Shared Vue 3/TypeScript presentation across desktop, mobile, and extension.
 - Atomic runtime reload and backup-required destructive database migrations.
 
-See [current architecture](docs/architecture.md), [current specification](docs/spec.md), [configuration](docs/modules/config.md), and [changelog](docs/changelog.md). Historical refactor plans remain under `docs/refactor/`.
+See [current architecture](docs/architecture.md), [current specification](docs/spec.md), [configuration](docs/modules/config.md), and [changelog](docs/changelog.md).

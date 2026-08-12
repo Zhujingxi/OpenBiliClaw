@@ -15,4 +15,4 @@ Supported model provider kinds are `openai`, `anthropic`, `google`, and `openrou
 
 Secrets are never valid inline values. Model and content credentials are referenced through the credential vault. Environment variables use the `OPENBILICLAW_` names implemented in `core.config`; command-line values have highest precedence.
 
-The target database defaults to `<data-dir>/openbiliclaw.db`. An unversioned existing application database stops startup and requires an explicit reset/import decision. Destructive target migrations require a verified backup.
+The database defaults to `<data-dir>/openbiliclaw.db`. An unversioned existing application database stops startup and requires an explicit reset/import decision. Destructive target migrations require a verified backup.

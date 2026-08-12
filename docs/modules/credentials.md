@@ -29,7 +29,4 @@ replacement preserves the reference with a bumped revision, and disconnect revok
 `CredentialVerifier` callbacks are the only website-credential readers. AST tests prohibit model-visible
 `ai/` and future `assistant/` code from importing the credential package.
 
-This path is still not wired into the production composition root. Existing credentials retain their
-documented legacy behavior until Plan 13 host cutover and Plan 15 Runtime Composition. Future
-model-visible, host, and frontend modules must not import this package; only trusted provider/access
-adapters may resolve a reference.
+Production composition owns one `CredentialVault` and supplies it only to trusted Provider Access adapters. Model-visible, host, and frontend modules must not import this package; only trusted provider/access adapters may resolve a reference.

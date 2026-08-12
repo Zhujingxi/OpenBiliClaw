@@ -8,15 +8,9 @@ description: Use when authoring a spec or implementation plan, or planning multi
 Produce an authoritative design spec and an executable implementation plan before changing
 code. Resolve every placeholder against the live repository.
 
-## Name and commit the pair first
+## Keep planning artifacts out of the maintained docs tree
 
-Create both documents with the same dated slug:
-
-- `docs/plans/YYYY-MM-DD-<slug>-spec.md`
-- `docs/plans/YYYY-MM-DD-<slug>-plan.md`
-
-Commit the pair as `docs: add <feature> spec and plan` before implementation. Do not mix code
-into this docs-first commit.
+Draft a spec and implementation plan in the issue/PR or an ignored local workspace. The repository `docs/` tree contains current-state product documentation only; do not recreate a historical plans archive. Once implementation lands, transfer durable decisions into `docs/architecture.md`, `docs/spec.md`, and the affected `docs/modules/` pages.
 
 ## SPEC skeleton
 
@@ -83,8 +77,7 @@ improvement must have a reproduction command.
 ```markdown
 # <Feature> — Implementation Plan
 
-> **For Claude:** REQUIRED SUB-SKILL: superpowers:executing-plans (execute this plan task-by-task).
-> **Spec:** [`YYYY-MM-DD-<slug>-spec.md`](./YYYY-MM-DD-<slug>-spec.md)
+> **Spec:** <issue/PR/local draft reference>
 > **Status:** <revision and review state>
 > **Execution order:** <dependency-ordered tasks and Wave grouping>
 > **Tech:** <runtime, interpreter, focused tests, lint, format, and type-check commands>
@@ -122,9 +115,7 @@ State the production/shadow/canary observation, commands, owner, duration, and r
 - <non-goal>
 ```
 
-Keep the handoff line and checkbox steps verbatim so superpowers/GSD execution conventions
-remain discoverable. Restate every spec invariant at the plan top and require the executor to
-re-read them before each task.
+Keep the checkbox steps intact. Restate every spec invariant at the plan top and require the executor to re-read them before each task.
 
 ## Quantified-gate example
 
@@ -133,7 +124,4 @@ Spearman rank correlation ≥ 0.95 on at least 100 aligned candidates**, verifie
 `scripts/run_profile_diet_ab.py`. The command, dataset provenance, baseline commit, and observed
 values belong in the spec and the task acceptance block—not only in a PR comment.
 
-Use
-[`docs/plans/2026-07-05-llm-token-diet-spec.md`](../../../docs/plans/2026-07-05-llm-token-diet-spec.md)
-as a reference for quantified invariants, D1..Dn diagnosis, risk Waves, phase designs, impact,
-and documentation obligations.
+Use the skeleton above for quantified invariants, D1..Dn diagnosis, risk waves, phase designs, impact, and documentation obligations.

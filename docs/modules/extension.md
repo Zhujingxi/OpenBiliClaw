@@ -1,4 +1,4 @@
-# Extension（目标 Vue shell）
+# Extension
 
 扩展当前源码位于 `frontend/apps/extension/`，由 Vue 3、Pinia、TypeScript 与 Vite 构建。`extension/` 仅保留 Chrome/Firefox manifest、图标和商店元数据；不再是源码/package workspace。
 
@@ -9,7 +9,7 @@
 - popup/sidebar 配置 loopback backend URL 与 opaque device token；
 - 显示 bounded connection state，并通过 typed backend API 使用共享 presentation contract。
 
-浏览器站点 Cookie、登录态抓取、MAIN-world tap、provider task dispatch、browser-session execution 与跨站行为采集已删除。未来浏览器观察必须通过 Plan 08 文档中的签名/device-authenticated `ObservationProvider` 契约重新进入，不能在 presentation shell 中恢复。
+浏览器站点 Cookie、登录态抓取、MAIN-world tap、provider task dispatch、browser-session execution 与跨站行为采集已删除。未来浏览器观察必须通过签名/device-authenticated `ObservationProvider` 契约重新进入，不能在 presentation shell 中恢复。
 
 ## Message boundary
 
@@ -29,12 +29,8 @@ python scripts/extension_release.py package --firefox --no-build
 Vite output under `frontend/apps/extension/dist/` is ignored generated JavaScript. Python packaging copies it with declarative manifests/icons into `artifacts/extension/` and creates release archives. Store status/sign/upload commands use `scripts/extension_release.py`; credentials are environment-only and never logged.
 
 
-## Legacy contract disposition
+## Removed capabilities
 
-This cutover intentionally removes the former native-save/session paths. Historical native-save status keys were removed with that subsystem; the target extension does not execute them. 登录态只存在于已安装扩展 was the legacy rule; the target extension stores no website login state at all. It is not a backend bypass of browser login state（不是后端绕过浏览器登录态）because the capability was removed rather than emulated.
+Native-save/session execution, website login state, provider tasks, and historical saved-state rendering are not extension capabilities. They were deleted rather than emulated; the shared Web/presentation host owns retained product state.
 
-User releases are published on the `openbiliclaw-v*` aggregate page. Maintainer component tags remain `extension-v*` / `desktop-v*` / `backend-v*`; 后端源码更新仍只通过 `backend-v*` tag 标记.
-
-
-Historical native-save statuses (`synced`, `already_synced`, `login_required`, `rate_limited`, `unsupported_content_type`, `unsupported_adapter_missing`, `extension_required`, `failed`) are retained only for audit/document links; the target shell emits none of them. The legacy exact authorization remains documented as 精确命名授权. 桌面安装包仍由 `desktop-v*` workflow 构建.
-Historical saved-state rendering was 后端状态驱动; that responsibility now belongs to the shared target web/presentation host rather than this extension shell.
+User releases are published on the `openbiliclaw-v*` aggregate page. Maintainer component tags remain `extension-v*`, `desktop-v*`, and `backend-v*`; backend source updates use `backend-v*`.

@@ -1,3 +1,4 @@
+import re
 import tomllib
 from pathlib import Path
 
@@ -26,6 +27,33 @@ def test_docs_homepage_mentions_reddit_bangumi_and_v2ex_sources() -> None:
     assert "登录态任务桥" not in html
     assert "/m/" not in html
     assert f'"softwareVersion": "{project_version}"' in html
+
+
+def test_maintained_markdown_links_resolve() -> None:
+    documents = [ROOT / name for name in ("README.md", "README_EN.md", "AGENTS.md", "CLAUDE.md")]
+    documents.extend(
+        path
+        for path in (ROOT / "docs").rglob("*.md")
+        if path.name
+        != "changelog.md"  # release ledger intentionally names removed historical files
+    )
+    markdown_link = re.compile(r"\[[^]]*\]\(([^) ]+)(?:\s+\"[^\"]*\")?\)")
+
+    dangling: list[str] = []
+    for document in documents:
+        for target in markdown_link.findall(document.read_text(encoding="utf-8")):
+            path = target.split("#", 1)[0]
+            if not path or "://" in path or path.startswith(("mailto:", "data:")):
+                continue
+            if not (document.parent / path).resolve().exists():
+                dangling.append(f"{document.relative_to(ROOT)} -> {path}")
+
+    assert dangling == []
+
+
+def test_superseded_document_archives_are_absent() -> None:
+    for name in ("plans", "refactor", "specs", "superpowers", "testing"):
+        assert not (ROOT / "docs" / name).exists()
 
 
 def test_docs_homepage_mentions_macos_first_launch_security_bypass() -> None:

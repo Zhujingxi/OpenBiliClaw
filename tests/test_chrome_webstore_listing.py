@@ -26,11 +26,11 @@ def test_store_listing_names_all_supported_platforms_and_local_backend() -> None
         "V2EX",
     ):
         assert label in text
-    assert "本地后端" in text
-    assert "数据默认保存在你的本机" in text
-    assert "只检查 A2 Cookie 是否存在" in text
-    assert "不访问、存储或发送 Cookie 值" in text
-    assert "不向 V2EX 发帖、回复、感谢、收藏、取消收藏或关注 Node" in text
+    assert "local backend" in text
+    assert "User data remains in the configured local backend data directory" in text
+    assert "No website Cookie access" in text
+    assert "No browsing-history or page-content collection" in text
+    assert "No provider task/background-tab execution" in text
 
 
 def test_store_listing_assets_have_stable_order_dimensions_and_visual_detail() -> None:

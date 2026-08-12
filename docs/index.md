@@ -19,7 +19,9 @@ Current-state documentation:
 - [Assistant](modules/assistant.md)
 - [AI Runtime](modules/ai-runtime.md) and [AI providers](modules/ai-providers.md)
 - [Frontend](modules/frontend.md) and [Extension](modules/extension.md)
-- [Installation](agent-install.md) and [Docker](docker-deployment.md)
+- [Installation](agent-install.md), [deployment](agent-deployment.md), and [Docker](docker-deployment.md)
+- [Privacy](privacy.md), [FAQ](faq.md), and [contributing](contributing.md)
+- [Chrome Web Store](chrome-webstore-listing.md) and [Firefox source build](firefox-amo-source-build.md)
 - [Changelog](changelog.md)
 
-Provider-specific target docs are named `modules/provider-*.md` or `modules/content-provider-*.md`. The plans and refactor directories are historical design/implementation records and may refer to deleted pre-cutover files.
+Provider-specific target docs are named `modules/provider-*.md` or `modules/content-provider-*.md`. Historical plans and superseded pre-cutover documents were removed; this index lists the maintained documentation set.

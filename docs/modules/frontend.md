@@ -1,6 +1,6 @@
 # Target Frontend Workspace
 
-`frontend/` 是目标 Presentation Contract 的 npm workspace。共享契约、responsive Vue web shell 与精简 extension shell 已落地。
+`frontend/` 是 Presentation Contract 的 npm workspace。共享契约、responsive Vue web shell 与精简 extension shell 已落地。
 
 ## 已落地
 
@@ -36,4 +36,4 @@ Pinia 按 durable concern 拆为 session、sources、recommendations、content�
 
 ## Extension shell 与 packaging
 
-`apps/extension` 通过 shared typed API client 连接 `127.0.0.1:8420`，使用 shared presentation fallback card，并只持久化 backend URL 与 opaque device token。popup 通过 shared client 直接请求本地后端，不经过 `chrome.runtime` message relay；它不注册 background/content script、不申请 storage/Cookie 权限、不采集页面行为、不执行 provider task。Chrome/Firefox manifest 使用 module service worker；Python release tool 将生成物统一输出到 ignored `artifacts/extension/`。Web Vite artifact 由 target host 作为 SPA 提供，installer 与 Docker pipeline 都会先构建该 artifact。
+`apps/extension` 通过 shared typed API client 连接 `127.0.0.1:8420`，使用 shared presentation fallback card，并只持久化 backend URL 与 opaque device token。popup 通过 shared client 直接请求本地后端，不经过 `chrome.runtime` message relay；它不注册 background/content script、不申请 storage/Cookie 权限、不采集页面行为、不执行 provider task。Chrome/Firefox manifest 使用 module service worker；Python release tool 将生成物统一输出到 ignored `artifacts/extension/`。Web Vite artifact 由 production host 作为 SPA 提供，installer 与 Docker pipeline 都会先构建该 artifact。
