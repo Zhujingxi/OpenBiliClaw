@@ -221,3 +221,19 @@ headed = false     # 调试时设为 true
 12. **账号写入 fail closed**：收藏/稍后再看在视频信息 lookup 前先验证 `SESSDATA + bili_jct`；BV → aid 通过 `_get_json()` 解析 application code，只有非 bool 的正整数 aid 才允许发写 POST。只有最终 favorite resource-deal POST 的 `11201` 会被 client 包装成 `BilibiliFavoriteDuplicateError`，adapter 还要求 resolved action 为 favorite 才映射 `already_synced`；folder/resolver 的 generic `11201` 及非 favorite route 的 duplicate 异常保持 failed。watch-later 的 `90003` 是视频不可用并固定返回 failed。
 13. **收藏夹并发单飞范围**：每个 `BilibiliAPIClient` 按 exact title 持有实例内 `asyncio.Lock`；进入锁后重新查询再决定创建，只避免同一个 client 实例内的并发调用重复创建 `OpenBiliClaw`。不同 client（即使使用同一账号）、不同进程或 event loop 之间没有协调；不宣称 account/process 级全局单飞。
 14. **近期 lane 不扩张请求预算**：生产 composition 只把既有第 1 个 search query 改为 `pubdate` 并收窄到 5 条，不复制关键词、不新建 source strategy，也不提高候选 admission 配额；其 provenance 只用于回放与诊断，避免把“较新”误当成“更相关”。
+
+## Refactor target provider（尚未接入生产组合根）
+
+`src/openbiliclaw/content/providers/bilibili/` 已落地 Plan 07 Phase 1 reference provider；上文 legacy `bilibili/`、`sources/` 与 runtime producer 仍是当前生产权威，等待 Plans 10–15 搬迁 caller 后删除，本阶段没有 compatibility wrapper 或双写。
+
+| Target capability | Access | 状态 |
+| --- | --- | --- |
+| Search / public popular feed / Fetch / Related / Creator | anonymous `read_public` | strict typed video/article native response、opaque cursor、50-item hard bound |
+| History / Saved | manual Cookie `read_private` | secret 仅在 trusted client authorization scope 解析 |
+| Save action | manual Cookie `write` | confirmed action、CSRF、idempotency；Assistant tool 只产生 pending action |
+| Projections / Observation | no extra access | independent preview/candidate/search/card + safe proposal |
+| Rendered/personalized browser session | — | 明确 unavailable，不实现 extension/browser execution |
+
+Target provider 在 HTTP boundary 立即用 `extra="forbid"` Pydantic schema 校验外部 response；auth/rate-limit/provider failure 只输出 closed integration errors，不保留 response body、Cookie 或 CSRF。Provider-owned `builtin.manual` form 要求 exact-name `SESSDATA` 与 `bili_jct`；Provider Access 将提交值直接存入 CredentialVault，provider 只接收 opaque handle。Schema v1 为 `video` / `article`，恢复 persisted payload 时必须按 schema version 重新验证。Canonical URLs 为 `https://www.bilibili.com/video/<bvid>` 与 `https://www.bilibili.com/read/<cvid>`。
+
+后续 provider 应复用契约而非复制本包结构：transport boundary strict schema；注入 transport/resolver 的小 typed client；只实现 manifest 宣称的 narrow capabilities；I/O 前 exact access scope；provider-local purpose projections；generic Integration tools + pending-only mutation；fixture contract/schema-drift/redaction/architecture tests。不要抽取跨 provider base client。

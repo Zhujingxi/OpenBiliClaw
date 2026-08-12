@@ -55,6 +55,8 @@ class SourceAuthContract(BaseModel):
 | 取值 | 含义 | 当前平台 |
 | --- | --- | --- |
 | `live_probe` | 当场出网问平台 | bilibili、douyin、twitter、bangumi、v2ex（配置了个人令牌时） |
+
+> Refactor target note: `content/providers/bilibili/auth.py` 已声明 target `builtin.manual` secret Cookie form（exact `SESSDATA` + `bili_jct`）与 live nav verifier；提交值由 Provider Access 直接存入 CredentialVault，target provider 只接收 opaque handle。该边界尚未接入 host，以下 legacy source-auth 行为保持生产权威，等待 Plan 13 cutover。
 | `passive_health` | 由真实流量的错误反推 | 暂无当前平台（保留能力） |
 | `browser_heartbeat` | 插件报告登录 cookie 存在 | xiaohongshu、zhihu、linuxdo（仅 `_t` 布尔存在性） |
 | `local_file` | 只读了本地凭据文件 | reddit |

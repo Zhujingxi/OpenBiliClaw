@@ -1,0 +1,1 @@
+{"code":0,"message":"0","data":{"items":[{"kind":"video","id":"BV1REL123456","aid":456,"title":"Related","description":"next","creator":{"id":"43","name":"Other"},"cover_url":null,"published_at":1700000200,"duration_seconds":60,"stats":{"views":20,"likes":2,"favorites":1},"availability":"available"}],"next_cursor":null}}

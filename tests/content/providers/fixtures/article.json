@@ -1,0 +1,1 @@
+{"code":0,"message":"0","data":{"kind":"article","id":"cv123","title":"Typed article","description":"summary","body":"full article body","creator":{"id":"42","name":"Author"},"cover_url":"https://i.example/article.jpg","published_at":1700000100,"stats":{"views":100,"likes":9,"favorites":4},"availability":"available"}}

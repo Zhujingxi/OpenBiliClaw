@@ -1,0 +1,1 @@
+{"code":0,"message":"0","data":{"items":[{"kind":"video","id":"BV1TEST12345","aid":123,"title":"Typed refactor","description":"A useful video","creator":{"id":"42","name":"UP主"},"cover_url":"https://i.example/video.jpg","published_at":1700000000,"duration_seconds":120,"stats":{"views":1000,"likes":80,"favorites":30},"availability":"available"}],"next_cursor":"page:2"}}
