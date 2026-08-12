@@ -547,6 +547,7 @@
                 "type": "null"
               }
             ],
+            "default": null,
             "title": "Badge"
           },
           "image_url": {
@@ -560,6 +561,7 @@
                 "type": "null"
               }
             ],
+            "default": null,
             "title": "Image Url"
           },
           "provenance": {
@@ -2516,7 +2518,7 @@
         "description": "Native source identity and projection time.",
         "properties": {
           "native_schema_version": {
-            "minimum": 1.0,
+            "minimum": 1,
             "title": "Native Schema Version",
             "type": "integer"
           },

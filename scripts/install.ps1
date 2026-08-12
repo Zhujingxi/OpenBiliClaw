@@ -6,7 +6,7 @@
 .DESCRIPTION
     Mirrors scripts/install.sh for users on native Windows who do NOT
     want to use Docker or WSL2. Clones the repo, installs Python deps
-    via uv (preferred) or pip+venv, runs the bootstrap helper, and
+    via pip, runs the composition readiness check, and
     prints the same status block install.sh emits so an AI coding agent
     (Claude Code, Codex, Cursor, OpenClaw, etc.) can drive the rest of
     the install with no shell-style ambiguity.
@@ -33,8 +33,8 @@
     pass --mode docker only if Docker Desktop is configured).
 
 .PARAMETER SkipStart
-    When present, agent_bootstrap.py prepares the install but does not
-    start the backend. Useful for CI pre-bake.
+    Retained for invocation compatibility. The installer validates the graph
+    but never starts a background backend.
 
 .EXAMPLE
     # PowerShell 5.1 (Win10/Win11 default) needs the TLS 1.2 prefix —
@@ -353,362 +353,35 @@ function Ensure-Checkout {
 }
 
 # -----------------------------------------------------------------------------
-# Run bootstrap
+# Install and validate the single composition entrypoint
 
-$script:BootstrapLog = ''
-function Cleanup-BootstrapLog {
-    if ($script:BootstrapLog -and (Test-Path $script:BootstrapLog)) {
-        Remove-Item -Force $script:BootstrapLog -ErrorAction SilentlyContinue
+function Prepare-Install([string]$PythonExe) {
+    Log-Info "Installing OpenBiliClaw from $InstallDir"
+    Push-Location $InstallDir
+    try {
+        & $PythonExe -m pip install -e .
+        if ($LASTEXITCODE -ne 0) { throw 'pip install failed.' }
+        if (-not (Test-Path 'config.toml')) {
+            Copy-Item 'config.example.toml' 'config.toml'
+            Log-Info 'Created config.toml from the current typed example'
+        }
+        & openbiliclaw check --config config.toml --data-dir data
+        if ($LASTEXITCODE -ne 0) { throw 'OpenBiliClaw composition readiness check failed.' }
+    } finally {
+        Pop-Location
     }
 }
 
-function Invoke-Bootstrap([string]$PythonExe) {
-    $bootstrap = Join-Path $InstallDir 'scripts\agent_bootstrap.py'
-    if (-not (Test-Path $bootstrap)) {
-        Log-Err "Bootstrap script missing: $bootstrap"
-        Log-Err "Your checkout may be stale — cd $InstallDir; git pull and retry."
-        exit 1
-    }
-    $args = @(
-        '--project-dir', $InstallDir
-        '--mode',        $Mode
-        '--host',        $ApiHost
-        '--port',        "$Port"
-    )
-    if ($ReuseFrom) { $args += '--reuse-from'; $args += $ReuseFrom }
-    if ($SkipStart) { $args += '--skip-start' }
-    if (-not $env:OPENBILICLAW_NONINTERACTIVE -and -not $env:CI) {
-        $args += '--interactive-confirm'
-        $args += '--wait-for-extension-cookie'
-    }
-
-    $script:BootstrapLog = [IO.Path]::GetTempFileName()
-    Log-Info "Running bootstrap: $PythonExe $bootstrap $($args -join ' ')"
-
-    & $PythonExe $bootstrap @args 2>&1 | Tee-Object -FilePath $script:BootstrapLog
-    $rc = $LASTEXITCODE
-    if ($rc -ne 0) {
-        Log-Err "Bootstrap exited with code $rc."
-        Log-Err "The log above contains [bootstrap] lines and BOOTSTRAP_STATUS JSON events; the 'error' event tells you which step failed."
-        Log-Err 'Once the underlying issue is fixed, re-run this installer.'
-        exit $rc
-    }
-}
-
-# -----------------------------------------------------------------------------
-# Status block (parsed from agent_bootstrap.py's BOOTSTRAP_STATUS lines)
-
-function Print-InstallSummary([string]$PythonExe) {
-    $parser = @'
-import json
-import sys
-from pathlib import Path
-log_path, install_dir, port, host, reuse_from = sys.argv[1:6]
-final = None
-for raw in Path(log_path).read_text(encoding="utf-8", errors="replace").splitlines():
-    marker = "BOOTSTRAP_STATUS:"
-    if marker in raw:
-        try:
-            final = json.loads(raw.split(marker, 1)[1].strip())
-        except json.JSONDecodeError:
-            pass
-if final is None:
-    print("STATUS=unknown")
-    print("HEALTH_URL=")
-    print("MISSING=")
-    sys.exit(0)
-details = final.get("details") or {}
-missing = details.get("missing") or []
-init_decisions = details.get("init_decisions") or {}
-decision_missing = init_decisions.get("missing") or []
-xhs_flag = ((init_decisions.get("xhs") or {}).get("flag") or "")
-douyin_flag = ((init_decisions.get("douyin") or {}).get("flag") or "")
-youtube_flag = ((init_decisions.get("youtube") or {}).get("flag") or "")
-service_checks = details.get("service_checks") or {}
-service_failed = service_checks.get("failed") or []
-service_errors = []
-services = service_checks.get("services") or {}
-for name in service_failed:
-    item = services.get(name) or {}
-    provider = str(item.get("provider") or "").strip()
-    model = str(item.get("model") or "").strip()
-    error = str(item.get("error") or "").strip()
-    label = name
-    if provider:
-        label += f"({provider}{('/' + model) if model else ''})"
-    if error:
-        label += f": {error}"
-    service_errors.append(label)
-print(f"STATUS={final.get('status', 'unknown')}")
-print(f"HEALTH_URL={details.get('health_url', '')}")
-print(f"MISSING={','.join(missing)}")
-print(f"DECISIONS={','.join(decision_missing)}")
-print(f"XHS_FLAG={xhs_flag}")
-print(f"DOUYIN_FLAG={douyin_flag}")
-print(f"YOUTUBE_FLAG={youtube_flag}")
-print(f"SERVICE_FAILED={','.join(service_failed)}")
-print(f"SERVICE_ERRORS={' | '.join(service_errors)}")
-'@
-    # PS 5.1 (Windows 10/11 default) lacks the ?? null-coalescing operator
-    # — that's a PS 7+ feature. Use a defensive fallback instead.
-    $reuseArg = if ($null -ne $ReuseFrom) { $ReuseFrom } else { '' }
-    $summary = & $PythonExe -c $parser $script:BootstrapLog $InstallDir "$Port" $ApiHost $reuseArg
-
-    $status = ''; $healthUrl = ''; $missing = ''; $decisions = ''; $xhsFlag = ''; $douyinFlag = ''; $youtubeFlag = ''; $serviceFailed = ''; $serviceErrors = ''
-    foreach ($line in $summary -split "`r?`n") {
-        if ($line -like 'STATUS=*')     { $status    = $line.Substring(7) }
-        elseif ($line -like 'HEALTH_URL=*') { $healthUrl = $line.Substring(11) }
-        elseif ($line -like 'MISSING=*')    { $missing   = $line.Substring(8) }
-        elseif ($line -like 'DECISIONS=*')  { $decisions = $line.Substring(10) }
-        elseif ($line -like 'XHS_FLAG=*')   { $xhsFlag   = $line.Substring(9) }
-        elseif ($line -like 'DOUYIN_FLAG=*') { $douyinFlag = $line.Substring(12) }
-        elseif ($line -like 'YOUTUBE_FLAG=*') { $youtubeFlag = $line.Substring(13) }
-        elseif ($line -like 'SERVICE_FAILED=*') { $serviceFailed = $line.Substring(15) }
-        elseif ($line -like 'SERVICE_ERRORS=*') { $serviceErrors = $line.Substring(15) }
-    }
-    if (-not $xhsFlag) { $xhsFlag = '--no-xhs' }
-    if (-not $douyinFlag) { $douyinFlag = '--no-douyin' }
-    if (-not $youtubeFlag) { $youtubeFlag = '--no-youtube' }
-    if (-not $healthUrl) {
-        if ($ApiHost -in @('0.0.0.0', '::', '[::]')) {
-            $healthUrl = "http://127.0.0.1:$Port/api/health"
-        } else {
-            $healthUrl = "http://${ApiHost}:$Port/api/health"
-        }
-    }
-
-    # v0.3.20: distinguish "only B站 cookie missing" (the expected state for
-    # users on the recommended browser-extension auto-sync path) from
-    # "still need an LLM key". The yellow + "partial / credentials still
-    # missing" wording on the cookie-only case used to read like an
-    # install failure to users.
-    $missingOnlyCookie = ($missing -eq 'bilibili.cookie')
-
-    Write-Host ''
+function Print-InstallSummary {
+    $healthHost = if ($ApiHost -in @('0.0.0.0', '::', '[::]')) { '127.0.0.1' } else { $ApiHost }
     Write-Host '================================================================'
-    Write-Host ' OpenBiliClaw ' -NoNewline
-    if ($status -eq 'complete') {
-        Write-Host 'install complete' -ForegroundColor Green
-    } elseif ($status -eq 'needs_decisions') {
-        Write-Host 'backend ready - waiting for init choices' -ForegroundColor Green
-    } elseif ($status -eq 'service_check_failed') {
-        Write-Host 'backend ready - AI service check failed before init' -ForegroundColor Yellow
-    } elseif ($missingOnlyCookie) {
-        Write-Host 'backend ready - waiting for browser extension to sync B站 Cookie' -ForegroundColor Green
-    } elseif ($missing) {
-        Write-Host 'install partial (credentials still missing)' -ForegroundColor Yellow
-    } else {
-        Write-Host "install status: $status" -ForegroundColor Yellow
-    }
-    Write-Host '================================================================'
-    Write-Host "Status:      $status"
-    Write-Host "Checkout:    $InstallDir"
-    if ($ReuseFrom) {
-        Write-Host "Reused from: $ReuseFrom"
-        if ($missing -like '*bilibili.cookie (stale*') {
-            # The backend's live probe REJECTED the reused cookie — confirmed
-            # stale, not the generic "not validated" disclaimer below
-            # (init-progress spec Phase 3).
-            Write-Host '             [x] 复用的 B站 Cookie 已失效（后端实测校验未通过）。' -ForegroundColor Yellow
-            Write-Host '                 请在浏览器重新登录 bilibili.com，安装/打开扩展让它自动'
-            Write-Host '                 同步新 Cookie；或用 --bilibili-cookie 手动更新后重跑 bootstrap。'
-            Write-Host '                 Agents: the reused cookie FAILED live validation -'
-            Write-Host '                 ask the user to re-login before running init.'
-        } else {
-            Write-Host '             [i] Reused API keys / B站 cookie are NOT validated.'
-            Write-Host '                 B站 cookies expire within weeks; if the previous'
-            Write-Host '                 install''s cookie is stale, init will silently'
-            Write-Host '                 return 0 history items and the soul profile will'
-            Write-Host '                 be hollow. Agents: surface this reuse to the user'
-            Write-Host '                 (HARD RULE 4 in docs/agent-install.md) before'
-            Write-Host '                 proceeding - do not skip the cookie question just'
-            Write-Host '                 because the file already exists.'
-            Write-Host '                 To skip auto-reuse and supply fresh credentials:'
-            Write-Host '                 install.ps1 -ReuseFrom ""'
-        }
-    }
-    Write-Host "Health URL:  $healthUrl"
-    if ($healthUrl) {
-        $setupUrl = $healthUrl -replace '/api/health$', '/setup/'
-        Write-Host "Setup wizard: $setupUrl"
-        Write-Host '             (open in a browser to configure LLM / embedding and'
-        Write-Host '              run prerequisite checks - same guided page as the desktop app)'
-    }
-    if ($missing) { Write-Host "Missing:     $missing" }
-    else { Write-Host 'Missing:     (none)' }
-    if ($decisions) { Write-Host "Init choices needed: $decisions" }
-    if ($serviceFailed) { Write-Host "AI service check failed: $serviceFailed" }
-    Write-Host ''
-
-    if ($status -eq 'needs_decisions') {
-        Write-Host 'Next steps - ask the user before running init:'
-        Write-Host ''
-        Write-Host '  1. Embedding service (default recommendation):'
-        Write-Host '       Local Ollama bge-m3 - free/offline/no extra API key.'
-        Write-Host '       If they choose Gemini/OpenAI/custom instead, replace'
-        Write-Host '       the --embedding-* flags below.'
-        Write-Host ''
-        Write-Host '  2. Source bootstrap data (privacy choice):'
-        Write-Host '       Ask whether to include Xiaohongshu likes/favorites and'
-        Write-Host '       Douyin post/favorite/like/follow and YouTube history/'
-        Write-Host '       subscriptions/likes in the initial profile.'
-        Write-Host '       Default is NO unless they opt in per source.'
-        Write-Host ''
-        Write-Host '  3. Re-run bootstrap with explicit choices (DO NOT add --skip-init):'
-        Write-Host ''
-        Write-Host "     python $InstallDir\scripts\agent_bootstrap.py ``"
-        Write-Host "         --project-dir $InstallDir ``"
-        if ($decisions -match 'embedding') {
-            Write-Host "         --embedding-provider ollama ``"
-            Write-Host "         --embedding-model bge-m3 ``"
-        }
-        Write-Host "         $xhsFlag ``"
-        Write-Host "         $douyinFlag ``"
-        Write-Host "         $youtubeFlag ``"
-        Write-Host "         --port $Port --host $ApiHost"
-        Write-Host ''
-        Write-Host '     Use --yes-xhs / --yes-douyin / --yes-youtube only after'
-        Write-Host '     the user says yes; otherwise keep the matching --no-* flag.'
-        Write-Host '     This then runs init: B站 history, soul profile, first discovery.'
-    } elseif ($status -eq 'service_check_failed') {
-        Write-Host 'Next steps - init has NOT run because an AI service is not usable:'
-        Write-Host ''
-        if ($serviceErrors) {
-            Write-Host "  Failed check(s): $serviceErrors"
-            Write-Host ''
-        }
-        Write-Host '  1. Fix the failing service:'
-        Write-Host '       - llm: check provider, API key, base_url/model, quota, or Ollama chat model.'
-        Write-Host '       - embedding: check [llm.embedding], API key/base_url/model, or run Ollama + pull bge-m3.'
-        Write-Host '  2. Re-run the same bootstrap command after the fix (DO NOT add --skip-init).'
-        Write-Host '     It will repeat the service checks and only then run openbiliclaw init.'
-        Write-Host ''
-        Write-Host '  Verify the backend is still healthy:'
-        Write-Host "      Invoke-RestMethod $healthUrl"
-    } elseif ($missingOnlyCookie) {
-        Write-Host 'Next step - get your B站 Cookie to the backend (pick ONE):'
-        Write-Host ''
-        Write-Host '  (A) [recommended, zero config]'
-        Write-Host '      Install the browser extension and log in to bilibili.com.'
-        Write-Host '      It auto-syncs your cookie to this backend within seconds.'
-        Write-Host '        Extension: https://github.com/whiteguo233/OpenBiliClaw/releases'
-        Write-Host '      Once the cookie arrives, ask the init choices below and'
-        Write-Host "      re-run bootstrap so it can run 'openbiliclaw init'."
-        Write-Host ''
-        Write-Host '      Required before init:'
-        Write-Host '        - Embedding model/service (default: Ollama bge-m3)'
-        Write-Host '        - Xiaohongshu likes/favorites? (default: no; yes only on opt-in)'
-        Write-Host '        - Douyin post/favorite/like/follow? (default: no; yes only on opt-in)'
-        Write-Host '        - YouTube history/subscriptions/likes? (default: no; yes only on opt-in)'
-        Write-Host ''
-        Write-Host '  (B) [manual fallback]'
-        Write-Host "      F12 -> Network -> copy the 'Cookie' header from any"
-        Write-Host '      bilibili.com request, then run:'
-        Write-Host "        python $InstallDir\scripts\agent_bootstrap.py ``"
-        Write-Host "            --project-dir $InstallDir ``"
-        Write-Host "            --bilibili-cookie '<YOUR_COOKIE>' ``"
-        if ($decisions -match 'embedding') {
-            Write-Host "            --embedding-provider ollama ``"
-            Write-Host "            --embedding-model bge-m3 ``"
-        }
-        Write-Host "            $xhsFlag ``"
-        Write-Host "            $douyinFlag ``"
-        Write-Host "            $youtubeFlag ``"
-        Write-Host "            --port $Port --host $ApiHost"
-        Write-Host '      Use --yes-xhs / --yes-douyin / --yes-youtube only after'
-        Write-Host '      the user opts in; otherwise keep the matching --no-* flag.'
-        Write-Host ''
-        Write-Host '  Verify the backend is healthy any time:'
-        Write-Host "      Invoke-RestMethod $healthUrl"
-    } elseif ($missing) {
-        Write-Host 'Next steps (credentials are missing):'
-        Write-Host ''
-        Write-Host '  1. Choose your LLM chat provider (default: deepseek):'
-        Write-Host '     Supported: deepseek | openai | gemini | claude | openrouter | openai_compatible'
-        Write-Host '     (Local Ollama is embedding-only here - not offered as a chat provider.)'
-        Write-Host ''
-        if ($missing -match 'api_key') {
-            Write-Host '     LLM API key - get one from your chosen provider:'
-            Write-Host '         DeepSeek:   https://platform.deepseek.com/api_keys'
-            Write-Host '         OpenAI:     https://platform.openai.com/api-keys'
-            Write-Host '         Gemini:     https://aistudio.google.com/apikey'
-            Write-Host '         Claude:     https://console.anthropic.com/settings/keys'
-            Write-Host '         OpenRouter: https://openrouter.ai/keys'
-            Write-Host ''
-        }
-        if ($missing -match 'bilibili.cookie') {
-            Write-Host '     For the Bilibili cookie you have TWO options (pick ONE):'
-            Write-Host ''
-            Write-Host '     (A) [recommended] Install the browser extension and let it'
-            Write-Host '         auto-sync - no F12, no copy/paste.'
-            Write-Host '         Download: https://github.com/whiteguo233/OpenBiliClaw/releases'
-            Write-Host '         Log in to bilibili.com if you are not already; the extension'
-            Write-Host '         pushes the cookie to this backend within seconds. You can then'
-            Write-Host '         omit --bilibili-cookie below after the extension syncs.'
-            Write-Host ''
-            Write-Host '     (B) Paste the cookie manually via --bilibili-cookie below.'
-            Write-Host ''
-        }
-        Write-Host '  2. Ask which embedding service to use:'
-        Write-Host '     Default: local Ollama bge-m3 (free/offline/no extra API key).'
-        Write-Host '     Alternatives: Gemini embedding, OpenAI text-embedding-3-small,'
-        Write-Host '     or a custom OpenAI-compatible embedding endpoint.'
-        Write-Host ''
-        Write-Host '  3. Ask whether to include source bootstrap data:'
-        Write-Host '     Xiaohongshu likes/favorites, Douyin post/favorite/like/follow,'
-        Write-Host '     and YouTube history/subscriptions/likes.'
-        Write-Host '     Default: no. Use --yes-* flags only after explicit opt-in.'
-        Write-Host ''
-        Write-Host '  4. Prepare missing values, then run with values filled in (DO NOT add --skip-init):'
-        Write-Host ''
-        Write-Host "     python $InstallDir\scripts\agent_bootstrap.py ``"
-        Write-Host "         --project-dir $InstallDir ``"
-        Write-Host "         --provider <YOUR_PROVIDER> ``"
-        if ($missing -match 'api_key')         { Write-Host "         --llm-api-key '<YOUR_API_KEY>' ``" }
-        if ($decisions -match 'embedding') {
-            Write-Host "         --embedding-provider ollama ``"
-            Write-Host "         --embedding-model bge-m3 ``"
-        }
-        Write-Host "         $xhsFlag ``"
-        Write-Host "         $douyinFlag ``"
-        Write-Host "         $youtubeFlag ``"
-        if ($missing -match 'bilibili.cookie') { Write-Host "         --bilibili-cookie '<YOUR_COOKIE>' ``" }
-        Write-Host "         --port $Port --host $ApiHost"
-        Write-Host ''
-        Write-Host '     Replace the embedding/source flags according to the'
-        Write-Host '     user answers before running the command.'
-        Write-Host ''
-        Write-Host "     This auto-runs 'openbiliclaw init' once credentials check out:"
-        Write-Host '       - pulls your Bilibili history'
-        Write-Host '       - generates the soul profile'
-        Write-Host '       - runs the first content discovery pass'
-        Write-Host '     Takes 2-5 minutes. Without this step the extension shows nothing.'
-        Write-Host '     During init, relay BOOTSTRAP_STATUS init_progress events to the user.'
-        Write-Host ''
-        Write-Host '  3. Verify the backend is healthy:'
-        Write-Host "      Invoke-RestMethod $healthUrl"
-    } else {
-        Write-Host 'All credentials present — init has been run automatically.'
-        Write-Host ''
-        Write-Host '  - Verify the backend is healthy:'
-        Write-Host "      Invoke-RestMethod $healthUrl"
-        Write-Host '  - See recommendations:'
-        Write-Host "      Set-Location $InstallDir ; uv run openbiliclaw recommend"
-        Write-Host '  - View your soul profile:'
-        Write-Host "      Set-Location $InstallDir ; uv run openbiliclaw profile"
-        Write-Host '  - Re-run init manually if needed:'
-        Write-Host "      Set-Location $InstallDir ; uv run openbiliclaw init"
-    }
-    Write-Host ''
-    Write-Host 'Optional: enable local Ollama as the embedding fallback'
-    Write-Host '  (no extra API key needed; useful if your remote embedding quota runs out)'
-    Write-Host '      1. Install Ollama from https://ollama.com/download'
-    Write-Host '      2. Start Ollama (the desktop app launches the local service automatically)'
-    Write-Host '      3. Set-Location ' "$InstallDir" ' ; uv run openbiliclaw setup-embedding'
-    Write-Host ''
-    Write-Host 'Reference docs:'
-    Write-Host "  - $InstallDir\docs\agent-install.md     (install guide)"
-    Write-Host "  - $InstallDir\docs\agent-deployment.md  (troubleshooting)"
+    Write-Host 'OpenBiliClaw installed and composition readiness passed.'
+    Write-Host "Checkout: $InstallDir"
+    Write-Host "Start:    Set-Location $InstallDir ; openbiliclaw serve --config config.toml --data-dir data"
+    Write-Host "Health:   http://${healthHost}:$Port/v1/runtime/health"
+    Write-Host "Web UI:   http://${healthHost}:$Port/"
+    if ($SkipStart) { Write-Host 'SkipStart is retained as a no-op; this installer never starts a background service.' }
+    Write-Host 'Edit config.toml to enable providers/model routes, then rerun openbiliclaw check.'
     Write-Host '================================================================'
 }
 
@@ -721,12 +394,8 @@ function Main {
     $pythonExe = Get-PythonExe
     Detect-ReuseSource
     Ensure-Checkout
-    try {
-        Invoke-Bootstrap $pythonExe
-        Print-InstallSummary $pythonExe
-    } finally {
-        Cleanup-BootstrapLog
-    }
+    Prepare-Install $pythonExe
+    Print-InstallSummary
 }
 
 try {

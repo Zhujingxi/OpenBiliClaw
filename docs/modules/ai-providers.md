@@ -1,7 +1,7 @@
 # AI Model 与 Embedding Providers（target plugins，尚未接入生产组合根）
 
 `src/openbiliclaw/ai/providers/` 为 target AI Runtime 构造 PydanticAI model，并独立提供 typed
-embedding 边界。当前生产仍只使用 `src/openbiliclaw/llm/`；本模块不被生产 composition 导入，
+embedding 边界。当前生产由 Runtime Composition 构造本模块的 typed providers；
 不会双路调用 provider。切换、route startup probe 强制和 legacy 删除留待 Plans 09–15。
 
 ## Chat model 构造

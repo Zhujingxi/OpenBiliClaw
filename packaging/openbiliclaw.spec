@@ -32,55 +32,12 @@ application_icon = (
 )
 
 # --- X (Twitter) discovery dependency collection ---
-# packaging/build.py ensures twitter-cli is installed and sets OPENBILICLAW_BUNDLE_X=1 when
-# the desktop bundle should ship X discovery (the default; spec §8 = always
-# bundle). Because XClient lazy-imports `twitter_cli` / `curl_cffi` only on the
-# enabled path, PyInstaller's static analysis never sees them — so we explicitly
-# collect_all() both packages here. collect_all() pulls submodules + data + the
-# per-OS·arch native binaries (curl_cffi's compiled `_wrapper` extension and any
-# bundled libcurl), which is exactly what's missing from a plain analysis. When
-# the flag is off (or the dependency failed to install) we collect nothing and the
-# bundle is X-free, identical to before.
 _x_datas = []
 _x_binaries = []
 _x_hiddenimports = []
-if os.environ.get("OPENBILICLAW_BUNDLE_X", "") == "1":
-    for _x_pkg in ("twitter_cli", "curl_cffi"):
-        try:
-            _d, _b, _h = collect_all(_x_pkg)
-        except Exception as exc:  # noqa: BLE001 — never let X collection break the build
-            print(f"[spec] X dependency: could not collect {_x_pkg}: {exc}")
-            continue
-        _x_datas += _d
-        _x_binaries += _b
-        _x_hiddenimports += _h
-    print(
-        f"[spec] X dependency bundled: +{len(_x_binaries)} binaries, "
-        f"+{len(_x_datas)} datas, +{len(_x_hiddenimports)} hiddenimports"
-    )
-
-# --- Reddit discovery dependency collection ---
-# packaging/build.py ensures rdt-cli is installed and sets
-# OPENBILICLAW_BUNDLE_REDDIT=1 for the default desktop bundle. The runtime can
-# call bundled rdt_cli in-process when the console-script executable is not on
-# PATH, but PyInstaller needs explicit collection because the import is dynamic.
 _reddit_datas = []
 _reddit_binaries = []
 _reddit_hiddenimports = []
-if os.environ.get("OPENBILICLAW_BUNDLE_REDDIT", "") == "1":
-    for _reddit_pkg in ("rdt_cli", "browser_cookie3"):
-        try:
-            _d, _b, _h = collect_all(_reddit_pkg)
-        except Exception as exc:  # noqa: BLE001 — Reddit can still use extension fallback
-            print(f"[spec] Reddit dependency: could not collect {_reddit_pkg}: {exc}")
-            continue
-        _reddit_datas += _d
-        _reddit_binaries += _b
-        _reddit_hiddenimports += _h
-    print(
-        f"[spec] Reddit dependency bundled: +{len(_reddit_binaries)} binaries, "
-        f"+{len(_reddit_datas)} datas, +{len(_reddit_hiddenimports)} hiddenimports"
-    )
 
 # System-tray desktop mode (packaging/entry.py): the app runs as a tray icon
 # (Windows system tray / macOS menu bar) with no console window. Bundle pystray
@@ -172,31 +129,13 @@ a = Analysis(
         "tomllib",
         # --- Internal modules ---
         "openbiliclaw",
-        "openbiliclaw.api",
-        "openbiliclaw.api.app",
-        "openbiliclaw.api.models",
-        "openbiliclaw.config",
-        "openbiliclaw.cli",
-        "openbiliclaw.llm",
-        "openbiliclaw.soul",
-        "openbiliclaw.soul.engine",
-        "openbiliclaw.soul.dialogue",
-        "openbiliclaw.discovery",
-        "openbiliclaw.discovery.engine",
+        "openbiliclaw.composition",
+        "openbiliclaw.composition.entrypoints",
+        "openbiliclaw.hosts.api",
+        "openbiliclaw.hosts.cli",
         "openbiliclaw.recommendation",
-        "openbiliclaw.recommendation.engine",
-        "openbiliclaw.memory",
-        "openbiliclaw.memory.manager",
-        "openbiliclaw.storage",
-        "openbiliclaw.storage.database",
-        "openbiliclaw.runtime",
-        "openbiliclaw.runtime.refresh",
-        "openbiliclaw.runtime.events",
-        "openbiliclaw.runtime.account_sync",
-        "openbiliclaw.runtime.updater",
-        "openbiliclaw.bilibili",
-        "openbiliclaw.bilibili.api",
-        "openbiliclaw.bilibili.auth",
+        "openbiliclaw.infrastructure.sqlite",
+        "openbiliclaw.content.providers",
     ]
     + _tray_hiddenimports
     + _x_hiddenimports

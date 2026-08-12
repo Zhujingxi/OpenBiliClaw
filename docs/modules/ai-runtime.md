@@ -1,8 +1,6 @@
-# AI Runtime（target kernel，尚未接入生产组合根）
+# AI Runtime
 
-`src/openbiliclaw/ai/` 已落地类型化 PydanticAI 执行边界、provider plugins 与离线评测原语。当前生产调用仍走
-`src/openbiliclaw/llm/`；新旧实现没有互相调用，也没有双路执行。生产切换和 legacy 删除必须等
-Plans 09–13 的 domain agents/hosts 落地后，再由 Plan 15 Composition 一次完成。
+`src/openbiliclaw/ai/` 是当前类型化 PydanticAI 执行边界、provider plugins 与离线评测原语。Runtime Composition 构造配置的 model route；未配置模型时相关能力明确 unavailable，不存在第二套调用栈。
 
 ## 执行边界
 

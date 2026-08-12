@@ -113,8 +113,8 @@ def test_signed_xpi_download_validates_zip(tmp_path: Path) -> None:
         save_signed_xpi(b"html", target)
 
 
-def test_legacy_app_serves_generated_frontend_not_deleted_web_tree() -> None:
-    source = (Path(__file__).parents[1] / "src/openbiliclaw/api/app.py").read_text()
+def test_composed_host_serves_generated_frontend_not_deleted_web_tree() -> None:
+    source = (Path(__file__).parents[1] / "src/openbiliclaw/hosts/api/app.py").read_text()
     assert "frontend/apps/web/dist" in source
     assert "src/openbiliclaw/web" not in source
 

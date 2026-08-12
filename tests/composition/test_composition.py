@@ -14,7 +14,6 @@ from openbiliclaw.composition.application import Application, ApplicationService
 from openbiliclaw.composition.build import BuildOptions, build_application
 from openbiliclaw.composition.entrypoints import main
 from openbiliclaw.composition.lifecycle import ComponentStage, LifecyclePlan, RuntimeComponent
-from openbiliclaw.composition.providers import build_providers
 from openbiliclaw.composition.reload import ApplicationReference, reload_application
 from openbiliclaw.core.config import AppSettings
 from openbiliclaw.core.health import HealthStatus
@@ -249,11 +248,6 @@ async def test_facade_diagnostics_and_optional_capabilities_fail_closed(tmp_path
     assert not (await facade.model_diagnostics()).healthy
     assert await facade.start() == StartResult(started=True)
     for operation in (
-        facade.refresh_recommendations(None),
-        facade.record_feedback(None),
-        facade.edit_profile(None),
-        facade.propose_action(None),
-        facade.confirm_action(None),
         facade.assistant_turn(None, "device"),
         facade.conversation("conv", "device"),
         facade.conversation_messages("conv", "device", 10),
@@ -287,28 +281,53 @@ def test_product_modules_never_import_composition() -> None:
 
 
 def test_all_explicit_first_party_provider_builders_validate() -> None:
-    graph = build_providers(("bangumi", "bilibili", "douyin", "rednote", "v2ex", "youtube", "v2ex"))
+    app = build_application(
+        AppSettings(),
+        options=BuildOptions(
+            enabled_providers=(
+                "bangumi",
+                "bilibili",
+                "douyin",
+                "linuxdo",
+                "reddit",
+                "rednote",
+                "v2ex",
+                "weibo",
+                "x",
+                "youtube",
+                "zhihu",
+                "v2ex",
+            )
+        ),
+    )
+    assert app.providers is not None
+    graph = app.providers
     assert graph.enabled == (
         "bangumi",
         "bilibili",
         "douyin",
+        "linuxdo",
+        "reddit",
         "rednote",
         "v2ex",
+        "weibo",
+        "x",
         "youtube",
+        "zhihu",
     )
     assert graph.degraded == ()
     assert tuple(item.provider_id.value for item in graph.registry.manifests()) == graph.enabled
 
 
-def test_v2_check_entrypoint(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setattr("sys.argv", ["openbiliclaw-v2", "check", "--data-dir", str(tmp_path)])
+def test_check_entrypoint(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("sys.argv", ["openbiliclaw", "check", "--data-dir", str(tmp_path)])
     main()
     assert (tmp_path / "openbiliclaw.db").exists()
 
 
-def test_v2_serve_uses_composed_host(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_serve_uses_composed_host(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     calls: list[object] = []
-    monkeypatch.setattr("sys.argv", ["openbiliclaw-v2", "serve", "--data-dir", str(tmp_path)])
+    monkeypatch.setattr("sys.argv", ["openbiliclaw", "serve", "--data-dir", str(tmp_path)])
     monkeypatch.setattr(
         "openbiliclaw.composition.entrypoints.uvicorn.run",
         lambda app, **_options: calls.append(app),

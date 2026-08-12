@@ -28,7 +28,7 @@ def test_windows_installer_workflow_tests_the_installed_executable() -> None:
     assert compile_step < install_step < upload_step
     assert '"/VERYSILENT"' in workflow
     assert '"$installDir\\OpenBiliClaw.exe"' in workflow
-    assert "-k real_frozen_bundle" in workflow
+    assert "tests/composition/test_composition.py -k entrypoint" in workflow
 
 
 def test_chrome_webstore_publish_can_explicitly_replace_a_pending_review() -> None:

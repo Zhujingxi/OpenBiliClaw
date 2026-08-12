@@ -68,17 +68,10 @@ services:
       OPENBILICLAW_SEED_OLLAMA_DEFAULTS: "1"
       OPENBILICLAW_OLLAMA_BASE_URL: "http://ollama:11434/v1"
       OPENBILICLAW_EMBEDDING_MODEL: "bge-m3"
+      OPENBILICLAW_API_HOST: "0.0.0.0"
+      OPENBILICLAW_API_PORT: "8420"
       # OPENBILICLAW_XHS_SIDECAR_URL: http://xhs-sidecar:5556  # sidecar removed — extension extracts metadata from DOM
-    command:
-      - python
-      - -m
-      - openbiliclaw.docker_runtime
-      - openbiliclaw
-      - serve-api
-      - --host
-      - 0.0.0.0
-      - --port
-      - "8420"
+    command: ["openbiliclaw", "serve", "--data-dir", "/app/runtime"]
     # ``host.docker.internal`` resolves the host machine from inside
     # the container. Used by:
     #   - HTTP proxy auto-detect (OPENBILICLAW_PROXY_HOST)
@@ -96,10 +89,10 @@ services:
       - openbiliclaw_data:/app/runtime/data
       - openbiliclaw_logs:/app/runtime/logs
     # Compose-level healthcheck mirrors the Dockerfile HEALTHCHECK so
-    # ``docker compose ps`` shows ``healthy`` only when /api/health
+    # ``docker compose ps`` shows ``healthy`` only when /v1/runtime/health
     # returns 200, not just when the container process is alive.
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8420/api/health', timeout=4).status==200 else 1)"]
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8420/v1/runtime/health', timeout=4).status==200 else 1)"]
       interval: 30s
       timeout: 5s
       start_period: 20s

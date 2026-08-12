@@ -26,24 +26,10 @@ classifiers = [
 
 dependencies = [
     "httpx[socks]>=0.27",
-    "scrapetube>=2.1",
-    "yt-dlp>=2024.1.0",
-    "bilibili-api-python>=16",
-    # X (Twitter) discovery uses the import package ``twitter_cli``. Keep it in
-    # the default install so enabling [sources.twitter] never fails at runtime.
-    "twitter-cli>=0.8.5",
-    # Reddit steady-state discovery uses the ``rdt`` console command. Keep it in
-    # the default install so [sources.reddit].backend="rdt" works out of the box.
-    "rdt-cli>=0.4.1",
-    # Runtime-stream WebSockets are a core API used by the extension and web UI.
-    "websockets>=13",
-    # Runtime cover-image preprocessing imports PIL directly.
-    "Pillow>=10.0",
     "fastapi>=0.115",
     "rich>=13",
     "typer>=0.12",
     "pydantic>=2.0",
-    "apscheduler>=3.10",
     "uvicorn>=0.32",
     "pydantic-ai-slim[anthropic,google,openai,openrouter]==1.56.0",
     # pydantic-ai 1.56 imports an Anthropic type removed in 0.80.
@@ -61,14 +47,6 @@ dev = [
 ]
 local-llm = [
     "ollama>=0.4",
-]
-x = [
-    # Backwards-compatible alias for users/scripts that already install
-    # ``openbiliclaw[x]``. The dependency is also part of the default runtime set.
-    "twitter-cli>=0.8.5",
-]
-eval = [
-    "claude-agent-sdk>=0.1",
 ]
 browser = [
     "playwright>=1.40",
@@ -89,8 +67,7 @@ packaging = [
 ]
 
 [project.scripts]
-openbiliclaw = "openbiliclaw.cli:app"
-openbiliclaw-v2 = "openbiliclaw.composition.entrypoints:main"
+openbiliclaw = "openbiliclaw.composition.entrypoints:main"
 
 [project.urls]
 Homepage = "https://github.com/whiteguo233/OpenBiliClaw"
@@ -121,8 +98,6 @@ select = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"src/openbiliclaw/llm/prompts.py" = ["E501"]  # Prompt templates contain long JSON examples
-"src/openbiliclaw/llm/prompts_pipeline.py" = ["E501"]
 "scripts/*.py" = ["E501", "TC001", "TC002", "TC003", "TC004"]  # Executable scripts use runtime annotations and contain long prompt strings.
 "src/openbiliclaw/hosts/**/*.py" = ["B008", "TC001", "TC002", "TC003", "TC004"]  # FastAPI inspects runtime annotations and dependency defaults.
 "tests/hosts/**/*.py" = ["TC001", "TC002", "TC003", "TC004"]  # Runtime DTO aliases are exercised by host contract tests.
@@ -138,45 +113,9 @@ warn_unused_configs = true
 [[tool.mypy.overrides]]
 module = [
     "aiohttp",
-    "claude_agent_sdk",
-    "claude_agent_sdk.*",
     "playwright.*",
-    "twitter_cli",
-    "twitter_cli.*",
-    "x_client_transaction",
-    "x_client_transaction.*",
 ]
 ignore_missing_imports = true
-
-# Legacy modules retain explicit Any until their owning refactor phase; core stays fully enforced.
-[[tool.mypy.overrides]]
-module = [
-    "openbiliclaw.agent.*",
-    "openbiliclaw.api.*",
-    "openbiliclaw.auth_core",
-    "openbiliclaw.bilibili.*",
-    "openbiliclaw.cli",
-    "openbiliclaw.config",
-    "openbiliclaw.discovery.*",
-    "openbiliclaw.docker_runtime",
-    "openbiliclaw.eval.*",
-    "openbiliclaw.integrations.*",
-    "openbiliclaw.llm.*",
-    "openbiliclaw.logging_setup",
-    "openbiliclaw.memory.*",
-    "openbiliclaw.network",
-    "openbiliclaw.proc",
-    "openbiliclaw.published_time",
-    "openbiliclaw.recommendation.*",
-    "openbiliclaw.runtime.*",
-    "openbiliclaw.saved_sync.*",
-    "openbiliclaw.soul.*",
-    "openbiliclaw.sources.*",
-    "openbiliclaw.storage.*",
-    "openbiliclaw.tls_proxy",
-    "openbiliclaw.youtube.*",
-]
-disallow_any_explicit = false
 
 # Legacy tests retain explicit Any until their modules migrate; refactored tests stay enforced.
 [[tool.mypy.overrides]]

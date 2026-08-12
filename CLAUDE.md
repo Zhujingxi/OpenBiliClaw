@@ -4,194 +4,23 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-OpenBiliClaw is an AI Agent for personalized Bilibili content recommendation. It builds a deep psychological profile ("Soul") of users through behavioral analysis, then proactively discovers and recommends content with warm, friend-like explanations. The project is bilingual (Chinese primary, English supported) and in pre-alpha (v0.1-dev).
+OpenBiliClaw is a local-first typed content discovery and recommendation application. Current architecture is authoritative in `docs/architecture.md`; Runtime Composition is the sole concrete production graph.
 
 ## Build & Development Commands
 
-### Python Backend
-
 ```bash
-pip install -e ".[dev]"          # Install with dev dependencies
-pytest                           # Run all tests
-pytest tests/test_foo.py         # Run single test file
-pytest tests/test_foo.py::test_bar  # Run single test
-pytest --cov=openbiliclaw        # Tests with coverage
-ruff format src/ tests/          # Format code
-ruff check src/ tests/           # Lint
-mypy src/                        # Type check (strict mode)
+ruff format src/ tests/ scripts/
+ruff check src/ tests/ scripts/
+mypy src/
+ALLOW_MODEL_REQUESTS=False pytest --cov=openbiliclaw
+npm --prefix frontend run format:check
+npm --prefix frontend run lint
+npm --prefix frontend run typecheck
+npm --prefix frontend run test
+npm --prefix frontend run build
+openbiliclaw check
+openbiliclaw serve
 ```
-
-### Browser Extension (extension/)
-
-```bash
-cd extension
-npm run build                    # Full build (clean + types + bundle)
-npm run typecheck                # Type check only
-npm run test                     # Run tests (node --test)
-```
-
-### CLI
-
-```bash
-openbiliclaw start               # Start daemon
-openbiliclaw init                # First-time setup (fetch history + generate profile)
-openbiliclaw recommend           # Show recommendations
-openbiliclaw profile             # View user portrait
-openbiliclaw config-show         # Show current config
-openbiliclaw serve-api           # Start FastAPI server (used by Docker)
-```
-
-### Docker
-
-```bash
-docker compose up -d --build     # Start backend (port 8420)
-# Health check: http://127.0.0.1:8420/api/health
-```
-
-## Architecture
-
-The system follows a pipeline: **Behavioral Data -> Soul Engine -> Discovery -> Recommendation**.
-
-### Core Pipeline
-
-1. **Soul Engine** (`soul/`) - Transforms raw behavioral events into deep user understanding through 5 layers: Event -> Preference -> Awareness -> Insight -> Soul. Each layer feeds bidirectionally into the next. The `SoulEngine` orchestrates analyzers (`preference_analyzer.py`, `insight_analyzer.py`, `awareness_analyzer.py`) and outputs a `SoulProfile`.
-
-2. **Memory Manager** (`memory/manager.py`) - Coordinates 4 memory types (Core, Episodic, Semantic, Working) across a networked architecture with cross-layer updates and self-editing capabilities.
-
-3. **Discovery Engine** (`discovery/engine.py`) - Finds content via 4 strategies defined in `discovery/strategies/strategies.py`:
-   - `SearchStrategy` - generates keywords from soul profile, searches Bilibili
-   - `TrendingStrategy` - scans trending channels
-   - `ExploreStrategy` - cross-domain exploration outside user's comfort zone
-   - `RelatedChainStrategy` - follows related video chains deeply
-
-4. **Recommendation Engine** (`recommendation/engine.py`) - Ranks discovered content against soul profile and generates natural-language explanations for each recommendation.
-
-### Supporting Layers
-
-- **LLM Adapter** (`llm/`) - Multi-provider abstraction. All providers implement `LLMProvider` protocol from `base.py`. `registry.py` handles provider instantiation by name. Supported: OpenAI, Claude, Gemini, DeepSeek, Ollama (local), OpenRouter.
-
-- **Bilibili Integration** (`bilibili/api.py`) - `BilibiliAPIClient` wraps the bilibili-api-python library. Authentication via cookie or QR code (`auth.py`). Browser automation via agent-browser (`browser.py`).
-
-- **FastAPI Backend** (`api/app.py`) - REST API on port 8420 serving the browser extension. Factory function `create_app()` initializes all components. Receives behavior events, serves recommendations, and pushes real-time cognition updates.
-
-- **Storage** (`storage/database.py`) - SQLite with vector index for semantic search. Single database at `data/openbiliclaw.db`.
-
-- **CLI** (`cli.py`) - Typer-based. Entry point: `openbiliclaw.cli:app`.
-
-### Extension <-> Backend Flow
-
-The Chrome extension (`extension/`) captures user behavior on bilibili.com pages via content script (`content/collector.ts`), buffers events in the service worker (`background/service-worker.ts`), and sends them to the FastAPI backend at `http://127.0.0.1:8420`. The popup/side panel (`popup/`) displays recommendations fetched from the same backend.
-
-## Configuration
-
-- Template: `config.example.toml` -> copy to `config.toml` for local use
-- `config.toml` is gitignored; never commit it
-- Key sections: `[llm]` (provider + API keys), `[bilibili]` (auth), `[scheduler]` (discovery cron), `[storage]` (db path)
-- Config logic: `src/openbiliclaw/config.py` with Pydantic validation and env var overrides
-
-## LLM Prompt-Cache Convention (v0.3.28+)
-
-OpenBiliClaw runs many LLM calls per discovery cycle. Provider-side
-prompt caching (DeepSeek 90% off / OpenAI 50% / Claude 90% / Gemini 75%
-on cached tokens) only fires when the **system message prefix is
-byte-identical across calls**. So:
-
-**Rule for every prompt builder in `src/openbiliclaw/llm/prompts.py`**:
-
-1. `system_prompt` MUST be 100% static — define it as a module-level
-   constant `_<NAME>_SYSTEM_PROMPT` and return it as-is. **No f-strings,
-   no concatenation with per-call data, no platform/source/profile
-   substitution.**
-2. ALL per-call variables (profile, content, source_platform, tone, …)
-   live in `user_prompt`, ordered from most stable (persona) to most
-   variable (this batch's items).
-3. JSON serialization MUST be deterministic: normally pass
-   `ensure_ascii=False, indent=2, sort_keys=True` to `json.dumps`. A
-   dict-key reordering is enough to break the cache prefix. The production
-   batch-evaluator candidate block is the deliberate exception: it must use
-   `render_sparse_evaluation_json()` (canonical sorted compact JSON) and must
-   never be reserialized ad hoc at the prompt call site.
-4. Reference the system prompt's "see user message for X / Y / Z"
-   contract explicitly so the LLM knows where to find each variable.
-5. Any prompt that carries the user profile MUST serialize it through a
-   named view in `src/openbiliclaw/soul/profile_views.py`
-   (`build_profile_summary` / `compact_content_prompt_profile_summary` /
-   `build_query_generation_profile_summary`, or a new view added there) —
-   **never hand-roll a profile serializer at the call site**. Views are
-   pure, deterministic functions of the effective profile and the portrait
-   boundary + caps live in one place. Consult `docs/profile-usage.md`
-   first; the structural guard in `tests/test_profile_views.py` fails if a
-   serializer is defined outside that module. The legacy
-   `discovery/strategies/_utils.py` import path is a compat re-export only.
-
-**Batch evaluator transport**: `ContentDiscoveryEngine` defaults to canonical
-`sparse-json`. Its system message is the byte-static module constant
-`_SPARSE_BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT`; profile and candidate data
-remain in the user message, and results bind through request-local IDs.
-`_BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT` plus
-`evaluation_candidate_transport="production"` is the frozen pretty-JSON /
-global-ID rollback contract. `row-wire-v1` is replay-only. Changing either
-production contract requires a cache-namespace bump and a fixed prompt golden.
-
-**Exception**: `build_socratic_dialogue_prompt` keeps tone / friend
-label / core memory in system. That's intentional for OpenBiliClaw's
-single-user model — per-user state is stable across that user's calls,
-so cache still fires. Multi-user deployments would refactor it.
-Note the actual core-memory injection point is
-`LLMService.complete_with_core_memory` in `llm/service.py` (and its
-`complete_with_tools` sibling), **not** the builder: the builder's
-`core_memory_text` parameter is a test-only seam and the dialogue caller
-always passes `""`. There is no `_build_core_memory_block` method on any
-service — do not add a getattr probe for one.
-
-**Enforcement**: `tests/test_llm_prompts.py::test_prompt_builder_system_messages_are_call_invariant`
-calls every covered builder with two distinct inputs and asserts the
-system message is byte-identical. Add new builders to its
-`_builder_test_inputs()` list.
-
-**Observability**: `openbiliclaw cost --by caller` shows per-caller
-cache hit rate (color-coded — red if <30%, almost certainly a builder
-that broke the convention).
-
-## Code Conventions
-
-- Python 3.11+, 4-space indent, 100-char line length
-- Type annotations required on all functions (MyPy strict)
-- Ruff for formatting and linting (rules: E, W, F, I, N, UP, B, SIM, TCH)
-- Test files: `test_<module>.py`, test functions: `test_<behavior>`
-- Integration tests requiring real Bilibili credentials: mark with `@pytest.mark.integration`
-- Async tests use `asyncio_mode = "auto"` (no manual `@pytest.mark.asyncio` needed)
-- Conventional Commits: `feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`, `perf:`, `ci:`
-
-## Hard-Won Pitfall Rules
-
-These history-backed guardrails complement, rather than replace, the
-[LLM Prompt-Cache Convention](#llm-prompt-cache-convention-v0328) and
-[Documentation Requirements](#documentation-requirements).
-
-1. **Set `trust_env=False` for Bilibili, Douyin, XHS, Zhihu, CN-CDN, Ollama, and localhost HTTP clients; make proxy use an explicit opt-in.**
-   Inherited proxies broke Bilibili requests and hid useful login diagnostics (`df626f3f`).
-
-2. **Never cache empty or failed provider results; validate every value before a cache write.**
-   Empty embedding vectors polluted the cache and corrupted later scoring (`90918295`).
-
-3. **Document every algorithmic threshold's calibration provenance in a comment, and reopen calibration after any provider or model swap.**
-   The delight threshold repeatedly moved because its inherited constant lacked stable calibration (`70259c23`).
-
-4. **Validate structured LLM output before persistence: whitelist enums, clamp invalid numbers to field defaults, treat placeholders as missing, and log coercions at WARNING.**
-   Schema-defying taste-profile output was silently persisted until explicit validation was added (`1eef1cd2`).
-
-5. **Treat user-visible features as a four-surface contract: extension popup, desktop web, mobile web, and CLI; cover all four or state the exclusion in the PR, with shared logic in the backend.**
-   Independent implementations let fallback-provider guards drift between popup and desktop (`a03f8f92`).
-
-6. **Verify every install/update-adjacent change in git, Docker, and desktop install modes.**
-   Auto-update needed a cross-mode repair after install paths diverged (`ec9db8b7`).
-
-7. **Propagate failures with their real cause and reject invalid configuration at save time; diagnosable beats “appears to work.”**
-   Dead fallback-provider states were silently accepted until save-time rejection exposed them (`fd4b9390`).
-
-> Before merging, ask: Will this failure be swallowed? Does this constant or cache survive a
-> provider swap? Did the other surfaces and install modes keep up?
 
 ## Documentation Requirements
 

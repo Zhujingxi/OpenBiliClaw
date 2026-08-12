@@ -51,99 +51,6 @@ def clean() -> None:
             shutil.rmtree(d)
 
 
-def build_x_extra_install_command(*, pip_available: bool | None = None) -> list[str]:
-    """Return the command that ensures the X bundle dependency is installed.
-
-    Desktop bundles ship X (Twitter) discovery by default (spec §8 = always
-    bundle), so ``twitter-cli`` + its ``curl_cffi`` native binaries must be
-    present in the build interpreter for PyInstaller to collect them. We install
-    the project's own backwards-compatible ``x`` extra rather than naming the
-    dependency here, so there is a single source of truth for the pin.
-    """
-    resolved_pip_available = (
-        pip_available if pip_available is not None else importlib.util.find_spec("pip") is not None
-    )
-    target = f"{PROJECT_ROOT}[x]"
-    if resolved_pip_available:
-        return [sys.executable, "-m", "pip", "install", target]
-    uv = shutil.which("uv")
-    if uv:
-        return [uv, "pip", "install", target]
-    return [sys.executable, "-m", "pip", "install", target]
-
-
-def project_dependency_spec(package_name: str) -> str:
-    """Return the default runtime dependency spec for one package."""
-
-    data = tomllib.loads(PYPROJECT_FILE.read_text(encoding="utf-8"))
-    normalized = package_name.replace("_", "-").lower()
-    for requirement in data["project"]["dependencies"]:
-        text = str(requirement)
-        name = text.split(";", 1)[0].strip().split("[", 1)[0]
-        name = re.split(r"[<>=!~ ]", name, maxsplit=1)[0]
-        if name.replace("_", "-").lower() == normalized:
-            return text
-    raise RuntimeError(f"missing default dependency spec for {package_name}")
-
-
-def build_reddit_dependency_install_command(*, pip_available: bool | None = None) -> list[str]:
-    """Return the command that ensures the Reddit bundle dependency is installed."""
-
-    resolved_pip_available = (
-        pip_available if pip_available is not None else importlib.util.find_spec("pip") is not None
-    )
-    target = project_dependency_spec("rdt-cli")
-    if resolved_pip_available:
-        return [sys.executable, "-m", "pip", "install", target]
-    uv = shutil.which("uv")
-    if uv:
-        return [uv, "pip", "install", target]
-    return [sys.executable, "-m", "pip", "install", target]
-
-
-def ensure_x_extra() -> bool:
-    """Ensure ``twitter_cli`` (and its ``curl_cffi``) are importable for bundling.
-
-    Returns ``True`` once the X discovery dependency is available in the build
-    interpreter — either because it was already installed or because we just
-    installed the backwards-compatible ``openbiliclaw[x]`` extra. The PyInstaller spec only collects
-    ``twitter_cli`` / ``curl_cffi`` when ``OPENBILICLAW_BUNDLE_X=1`` (set by
-    :func:`build`), so a failed install degrades to an X-free bundle instead of
-    breaking the whole build.
-    """
-    if importlib.util.find_spec("twitter_cli") is not None:
-        return True
-    install_cmd = build_x_extra_install_command()
-    print("[build] Installing default X dependency (twitter-cli) for desktop bundle ...")
-    try:
-        subprocess.check_call(install_cmd)
-    except subprocess.CalledProcessError as exc:
-        print(
-            f"[build] WARNING: could not install the X dependency ({exc}); "
-            "the bundle will ship without X (Twitter) discovery"
-        )
-        return False
-    return importlib.util.find_spec("twitter_cli") is not None
-
-
-def ensure_reddit_dependency() -> bool:
-    """Ensure ``rdt_cli`` is importable for bundling."""
-
-    if importlib.util.find_spec("rdt_cli") is not None:
-        return True
-    install_cmd = build_reddit_dependency_install_command()
-    print("[build] Installing default Reddit dependency (rdt-cli) for desktop bundle ...")
-    try:
-        subprocess.check_call(install_cmd)
-    except subprocess.CalledProcessError as exc:
-        print(
-            f"[build] WARNING: could not install the Reddit dependency ({exc}); "
-            "the bundle will use extension fallback for Reddit discovery"
-        )
-        return False
-    return importlib.util.find_spec("rdt_cli") is not None
-
-
 def read_project_version() -> str:
     """Read the project version from pyproject.toml."""
     data = tomllib.loads(PYPROJECT_FILE.read_text(encoding="utf-8"))
@@ -821,8 +728,7 @@ def build(
     # curl_cffi — including curl_cffi's per-OS·arch native binaries (libcurl /
     # the _wrapper extension) which the lazy `import twitter_cli` path would
     # otherwise hide from the analyzer.
-    bundle_x_resolved = bundle_x and ensure_x_extra()
-    bundle_reddit_resolved = bundle_reddit and ensure_reddit_dependency()
+    del bundle_x, bundle_reddit
 
     cmd = [
         sys.executable,
@@ -838,8 +744,6 @@ def build(
     print(f"[build] Running: {' '.join(cmd)}")
     env = os.environ.copy()
     env["OPENBILICLAW_BUNDLE_VERSION"] = bundle_version
-    env["OPENBILICLAW_BUNDLE_X"] = "1" if bundle_x_resolved else "0"
-    env["OPENBILICLAW_BUNDLE_REDDIT"] = "1" if bundle_reddit_resolved else "0"
     if platform.system() == "Windows":
         version_file = write_windows_version_file(
             PROJECT_ROOT / "build" / "openbiliclaw_version_info.txt",

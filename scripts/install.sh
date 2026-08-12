@@ -7,19 +7,14 @@
 #
 # Environment overrides:
 #     INSTALL_DIR      Target directory (default: $HOME/OpenBiliClaw)
-#     REUSE_FROM       Reuse API keys/cookie from another OpenBiliClaw checkout
-#                      (default: auto-detected under $HOME)
 #     OPENBILICLAW_REPO_URL  Git repository URL (default: public GitHub)
 #     OPENBILICLAW_BRANCH    Git branch to clone (default: main)
-#     SKIP_START       Set to any non-empty value to skip starting the backend
-#     MODE             auto | docker | local (default: auto)
+#     SKIP_START       Compatibility no-op; installer never starts a backend
 #     PORT             API port (default: 8420)
 #     HOST             API host  (default: 0.0.0.0)
 #
 # Examples:
 #     INSTALL_DIR=$HOME/obc curl -fsSL .../install.sh | bash
-#     MODE=docker curl -fsSL .../install.sh | bash
-#     REUSE_FROM=$HOME/workspace/OpenBiliClaw curl -fsSL .../install.sh | bash
 #     SKIP_START=1 curl -fsSL .../install.sh | bash      # prepare only
 #
 # Works on macOS, Linux, and WSL2. Requires git and python3 (3.11+).
@@ -300,437 +295,34 @@ ensure_checkout() {
     git clone --branch "$BRANCH" --depth 1 "$REPO_URL" "$INSTALL_DIR"
 }
 
-BOOTSTRAP_LOG=""
-
-cleanup_bootstrap_log() {
-    if [ -n "$BOOTSTRAP_LOG" ] && [ -f "$BOOTSTRAP_LOG" ]; then
-        rm -f "$BOOTSTRAP_LOG"
-    fi
-}
-trap cleanup_bootstrap_log EXIT
-
-run_bootstrap() {
-    local bootstrap="$INSTALL_DIR/scripts/agent_bootstrap.py"
-    if [ ! -f "$bootstrap" ]; then
-        err "Bootstrap script missing: $bootstrap"
-        err "Your checkout may be stale — run 'git pull' inside $INSTALL_DIR and retry."
-        exit 1
-    fi
-
-    local args=(
-        --project-dir "$INSTALL_DIR"
-        --mode "$MODE"
-        --host "$HOST"
-        --port "$PORT"
+prepare_install() {
+    log "Installing OpenBiliClaw from $INSTALL_DIR"
+    (
+        cd "$INSTALL_DIR"
+        python3 -m pip install -e .
+        if [ ! -f config.toml ]; then
+            cp config.example.toml config.toml
+            log "Created config.toml from the current typed example"
+        fi
+        openbiliclaw check --config config.toml --data-dir data
     )
-    if [ -n "$REUSE_FROM" ]; then
-        args+=(--reuse-from "$REUSE_FROM")
-    fi
-    if [ -n "$SKIP_START" ]; then
-        args+=(--skip-start)
-    fi
-    local interactive_bootstrap=0
-    if [ -z "${OPENBILICLAW_NONINTERACTIVE:-}" ] && [ -z "${CI:-}" ]; then
-        if [ -t 0 ] || [ -r /dev/tty ]; then
-            args+=(--interactive-confirm --wait-for-extension-cookie)
-            interactive_bootstrap=1
-        fi
-    fi
-
-    BOOTSTRAP_LOG=$(mktemp -t openbiliclaw-bootstrap.XXXXXX)
-    log "Running bootstrap: python3 $bootstrap ${args[*]}"
-
-    # Stream stdout to the terminal AND capture it for post-run parsing.
-    # Use PIPESTATUS so `set -e` still sees the real bootstrap exit code.
-    set +e
-    if [ "$interactive_bootstrap" = "1" ] && [ -r /dev/tty ]; then
-        python3 "$bootstrap" "${args[@]}" </dev/tty 2>&1 | tee "$BOOTSTRAP_LOG"
-    else
-        python3 "$bootstrap" "${args[@]}" 2>&1 | tee "$BOOTSTRAP_LOG"
-    fi
-    local rc=${PIPESTATUS[0]}
-    set -e
-
-    if [ "$rc" -ne 0 ]; then
-        err "Bootstrap exited with code $rc."
-        err "The log above contains [bootstrap] lines and BOOTSTRAP_STATUS JSON events; the 'error' event tells you which step failed."
-        err "Once the underlying issue is fixed, re-run this installer."
-        exit "$rc"
-    fi
 }
 
-# Print a human-readable install summary with next-step guidance.
 print_install_summary() {
-    local summary
-    summary=$(python3 - "$BOOTSTRAP_LOG" "$INSTALL_DIR" "$PORT" "$HOST" "$REUSE_FROM" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-log_path, install_dir, port, host, reuse_from = sys.argv[1:6]
-final = None
-for raw in Path(log_path).read_text(encoding="utf-8", errors="replace").splitlines():
-    marker = "BOOTSTRAP_STATUS:"
-    if marker in raw:
-        try:
-            final = json.loads(raw.split(marker, 1)[1].strip())
-        except json.JSONDecodeError:
-            pass
-
-if final is None:
-    print("STATUS=unknown")
-    print("HEALTH_URL=")
-    print("MISSING=")
-    sys.exit(0)
-
-details = final.get("details") or {}
-missing = details.get("missing") or []
-init_decisions = details.get("init_decisions") or {}
-decision_missing = init_decisions.get("missing") or []
-xhs_flag = ((init_decisions.get("xhs") or {}).get("flag") or "")
-douyin_flag = ((init_decisions.get("douyin") or {}).get("flag") or "")
-youtube_flag = ((init_decisions.get("youtube") or {}).get("flag") or "")
-service_checks = details.get("service_checks") or {}
-service_failed = service_checks.get("failed") or []
-service_errors = []
-services = service_checks.get("services") or {}
-for name in service_failed:
-    item = services.get(name) or {}
-    provider = str(item.get("provider") or "").strip()
-    model = str(item.get("model") or "").strip()
-    error = str(item.get("error") or "").strip()
-    label = name
-    if provider:
-        label += f"({provider}{('/' + model) if model else ''})"
-    if error:
-        label += f": {error}"
-    service_errors.append(label)
-print(f"STATUS={final.get('status', 'unknown')}")
-print(f"HEALTH_URL={details.get('health_url', '')}")
-print(f"MISSING={','.join(missing)}")
-print(f"DECISIONS={','.join(decision_missing)}")
-print(f"XHS_FLAG={xhs_flag}")
-print(f"DOUYIN_FLAG={douyin_flag}")
-print(f"YOUTUBE_FLAG={youtube_flag}")
-print(f"SERVICE_FAILED={','.join(service_failed)}")
-print(f"SERVICE_ERRORS={' | '.join(service_errors)}")
-PY
-)
-    # Parse the KEY=VALUE lines back into shell variables.
-    local status health_url missing decisions xhs_flag douyin_flag youtube_flag service_failed service_errors
-    status=$(echo "$summary" | awk -F= '/^STATUS=/{sub(/^STATUS=/, ""); print; exit}')
-    health_url=$(echo "$summary" | awk -F= '/^HEALTH_URL=/{sub(/^HEALTH_URL=/, ""); print; exit}')
-    missing=$(echo "$summary" | awk -F= '/^MISSING=/{sub(/^MISSING=/, ""); print; exit}')
-    decisions=$(echo "$summary" | awk -F= '/^DECISIONS=/{sub(/^DECISIONS=/, ""); print; exit}')
-    xhs_flag=$(echo "$summary" | awk -F= '/^XHS_FLAG=/{sub(/^XHS_FLAG=/, ""); print; exit}')
-    douyin_flag=$(echo "$summary" | awk -F= '/^DOUYIN_FLAG=/{sub(/^DOUYIN_FLAG=/, ""); print; exit}')
-    youtube_flag=$(echo "$summary" | awk -F= '/^YOUTUBE_FLAG=/{sub(/^YOUTUBE_FLAG=/, ""); print; exit}')
-    service_failed=$(echo "$summary" | awk -F= '/^SERVICE_FAILED=/{sub(/^SERVICE_FAILED=/, ""); print; exit}')
-    service_errors=$(echo "$summary" | awk -F= '/^SERVICE_ERRORS=/{sub(/^SERVICE_ERRORS=/, ""); print; exit}')
-    if [ -z "$xhs_flag" ]; then
-        xhs_flag="--no-xhs"
-    fi
-    if [ -z "$douyin_flag" ]; then
-        douyin_flag="--no-douyin"
-    fi
-    if [ -z "$youtube_flag" ]; then
-        youtube_flag="--no-youtube"
-    fi
-
-    if [ -z "$health_url" ]; then
-        if [ "$HOST" = "0.0.0.0" ] || [ "$HOST" = "::" ] || [ "$HOST" = "[::]" ]; then
-            health_url="http://127.0.0.1:${PORT}/api/health"
-        else
-            health_url="http://${HOST}:${PORT}/api/health"
-        fi
-    fi
-
-    # Graphical setup wizard — the same guided page the desktop app and
-    # docker-deployment.md advertise. A human can open it to configure
-    # LLM / embedding and run the real prerequisite checks, instead of
-    # hand-editing config.toml or crafting bootstrap flags.
-    local setup_url
-    if [ "$HOST" = "0.0.0.0" ] || [ "$HOST" = "::" ] || [ "$HOST" = "[::]" ]; then
-        setup_url="http://127.0.0.1:${PORT}/setup/"
-    else
-        setup_url="http://${HOST}:${PORT}/setup/"
-    fi
-
-    # Distinguish "only Bilibili cookie missing" (the expected state for
-    # users on the recommended browser-extension auto-sync path) from
-    # "still need an LLM key" (a genuinely missing prerequisite). The
-    # YELLOW + "partial / credentials still missing" wording on the
-    # cookie-only case used to read like an install failure to users.
-    local missing_only_cookie=0
-    if [ -n "$missing" ] && [ "$missing" = "bilibili.cookie" ]; then
-        missing_only_cookie=1
-    fi
-
-    echo ""
-    echo "================================================================"
-    if [ "$status" = "complete" ]; then
-        printf '%s OpenBiliClaw install complete%s\n' "$C_GREEN" "$C_RESET"
-    elif [ "$status" = "needs_decisions" ]; then
-        printf '%s OpenBiliClaw backend ready — waiting for init choices%s\n' "$C_GREEN" "$C_RESET"
-    elif [ "$status" = "service_check_failed" ]; then
-        printf '%s OpenBiliClaw backend ready — AI service check failed before init%s\n' "$C_YELLOW" "$C_RESET"
-    elif [ "$missing_only_cookie" = "1" ]; then
-        # Backend is up and configured; the extension will deliver the
-        # cookie when the user installs it. This is the happy path, not
-        # a failure — show it green-ish.
-        printf '%s OpenBiliClaw backend ready — waiting for browser extension to sync B站 Cookie%s\n' "$C_GREEN" "$C_RESET"
-    elif [ "$status" = "running_with_missing_secrets" ] || [ "$status" = "needs_secrets" ]; then
-        printf '%s OpenBiliClaw install partial (credentials still missing)%s\n' "$C_YELLOW" "$C_RESET"
-    else
-        printf '%s OpenBiliClaw install status: %s%s\n' "$C_YELLOW" "$status" "$C_RESET"
+    local api_host="$HOST"
+    if [ "$api_host" = "0.0.0.0" ] || [ "$api_host" = "::" ] || [ "$api_host" = "[::]" ]; then
+        api_host="127.0.0.1"
     fi
     echo "================================================================"
-    echo "Status:      $status"
-    echo "Checkout:    $INSTALL_DIR"
-    if [ -n "$REUSE_FROM" ]; then
-        echo "Reused from: $REUSE_FROM"
-        case "$missing" in
-            *"bilibili.cookie (stale"*)
-                # The backend's live probe REJECTED the reused cookie — this
-                # is a confirmed-stale state, not the generic "not validated"
-                # disclaimer below (init-progress spec Phase 3).
-                echo "             ✗ 复用的 B站 Cookie 已失效（后端实测校验未通过）。"
-                echo "               请在浏览器重新登录 bilibili.com，安装/打开扩展让它自动"
-                echo "               同步新 Cookie；或按下方 manual fallback 步骤用"
-                echo "               --bilibili-cookie 手动更新后重跑 bootstrap。"
-                echo "               Agents: the reused cookie FAILED live validation —"
-                echo "               ask the user to re-login before running init."
-                ;;
-            *)
-                # Backend not up / probe indeterminate: keep the generic
-                # can't-validate disclaimer.
-                echo "             ⓘ Reused API keys / B站 cookie are NOT validated."
-                echo "               B站 cookies expire within weeks; if the previous"
-                echo "               install's cookie is stale, init will silently"
-                echo "               return 0 history items and the soul profile will"
-                echo "               be hollow. Agents: surface this reuse to the user"
-                echo "               (HARD RULE 4 in docs/agent-install.md) before"
-                echo "               proceeding — do not skip the cookie question just"
-                echo "               because the file already exists."
-                echo "               To skip auto-reuse and supply fresh credentials:"
-                echo "               REUSE_FROM= curl -fsSL ... | bash"
-                ;;
-        esac
+    echo "OpenBiliClaw installed and composition readiness passed."
+    echo "Checkout: $INSTALL_DIR"
+    echo "Start:    cd $INSTALL_DIR && openbiliclaw serve --config config.toml --data-dir data"
+    echo "Health:   http://${api_host}:${PORT}/v1/runtime/health"
+    echo "Web UI:   http://${api_host}:${PORT}/"
+    if [ -n "$SKIP_START" ]; then
+        echo "SKIP_START is retained as a no-op; this installer never starts a background service."
     fi
-    echo "Health URL:  $health_url"
-    echo "Setup wizard: $setup_url"
-    echo "             (open in a browser to configure LLM / embedding and"
-    echo "              run prerequisite checks — same guided page as the desktop app)"
-    if [ -n "$missing" ]; then
-        echo "Missing:     $missing"
-    else
-        echo "Missing:     (none)"
-    fi
-    if [ -n "$decisions" ]; then
-        echo "Init choices needed: $decisions"
-    fi
-    if [ -n "$service_failed" ]; then
-        echo "AI service check failed: $service_failed"
-    fi
-    echo ""
-
-    if [ "$status" = "needs_decisions" ]; then
-        echo "Next steps — ask the user before running init:"
-        echo ""
-        echo "  1. Embedding service (default recommendation):"
-        echo "       Local Ollama bge-m3 — free/offline/no extra API key."
-        echo "       If they choose Gemini/OpenAI/custom instead, replace the"
-        echo "       --embedding-* flags below with their chosen provider/model."
-        echo ""
-        echo "  2. Source bootstrap data (privacy choice):"
-        echo "       Ask whether to include Xiaohongshu likes/favorites and"
-        echo "       Douyin post/favorite/like/follow and YouTube history/"
-        echo "       subscriptions/likes in the initial profile."
-        echo "       Default is NO unless they explicitly opt in per source."
-        echo ""
-        echo "  3. Re-run bootstrap with explicit choices (DO NOT add --skip-init):"
-        echo ""
-        echo "     python3 $INSTALL_DIR/scripts/agent_bootstrap.py \\"
-        echo "         --project-dir $INSTALL_DIR \\"
-        case "$decisions" in
-            *embedding*)
-                echo "         --embedding-provider ollama \\"
-                echo "         --embedding-model bge-m3 \\"
-                ;;
-        esac
-        echo "         $xhs_flag \\"
-        echo "         $douyin_flag \\"
-        echo "         $youtube_flag \\"
-        echo "         --port $PORT --host $HOST"
-        echo ""
-        echo "     Use --yes-xhs / --yes-douyin / --yes-youtube only after"
-        echo "     the user says yes; otherwise keep the matching --no-* flag."
-        echo "     This then runs init: B站 history, soul profile, first discovery."
-    elif [ "$status" = "service_check_failed" ]; then
-        echo "Next steps — init has NOT run because an AI service is not usable:"
-        echo ""
-        if [ -n "$service_errors" ]; then
-            echo "  Failed check(s): $service_errors"
-            echo ""
-        fi
-        echo "  1. Fix the failing service:"
-        echo "       - llm: check provider, API key, base_url/model, quota, or Ollama chat model."
-        echo "       - embedding: check [llm.embedding], API key/base_url/model, or run Ollama + pull bge-m3."
-        echo "  2. Re-run the same bootstrap command after the fix (DO NOT add --skip-init)."
-        echo "     It will repeat the service checks and only then run openbiliclaw init."
-        echo ""
-        echo "  Verify the backend is still healthy:"
-        echo "      curl -sS $health_url"
-    elif [ "$missing_only_cookie" = "1" ]; then
-        echo "Next step — get your B站 Cookie to the backend (pick ONE):"
-        echo ""
-        echo "  (A) [recommended, zero config]"
-        echo "      Install the browser extension and log in to bilibili.com."
-        echo "      It auto-syncs your cookie to this backend within seconds."
-        echo "        Extension: https://github.com/whiteguo233/OpenBiliClaw/releases"
-        echo "      Once the cookie arrives, ask the init choices below and re-run"
-        echo "      bootstrap so it can run 'openbiliclaw init'."
-        echo ""
-        echo "      Required before init:"
-        echo "        - Embedding model/service (default: Ollama bge-m3)"
-        echo "        - Xiaohongshu likes/favorites? (default: no; yes only on opt-in)"
-        echo "        - Douyin post/favorite/like/follow? (default: no; yes only on opt-in)"
-        echo "        - YouTube history/subscriptions/likes? (default: no; yes only on opt-in)"
-        echo ""
-        echo "  (B) [manual fallback]"
-        echo "      F12 → Network → copy the 'Cookie' header from any"
-        echo "      bilibili.com request, then run:"
-        echo "        python3 $INSTALL_DIR/scripts/agent_bootstrap.py \\"
-        echo "            --project-dir $INSTALL_DIR \\"
-        echo "            --bilibili-cookie '<YOUR_COOKIE>' \\"
-        case "$decisions" in
-            *embedding*)
-                echo "            --embedding-provider ollama \\"
-                echo "            --embedding-model bge-m3 \\"
-                ;;
-        esac
-        echo "            $xhs_flag \\"
-        echo "            $douyin_flag \\"
-        echo "            $youtube_flag \\"
-        echo "            --port $PORT --host $HOST"
-        echo "      Use --yes-xhs / --yes-douyin / --yes-youtube only after"
-        echo "      the user opts in; otherwise keep the matching --no-* flag."
-        echo ""
-        echo "  Verify the backend is healthy any time:"
-        echo "      curl -sS $health_url"
-    elif [ -n "$missing" ]; then
-        echo "Next steps (credentials are missing):"
-        echo ""
-        echo "  1. Choose your LLM chat provider (default: deepseek):"
-        echo "     Supported: deepseek | openai | gemini | claude | openrouter | openai_compatible"
-        echo "     (Local Ollama is embedding-only here — not offered as a chat provider.)"
-        echo ""
-        echo "  2. Ask which embedding service to use:"
-        echo "     Default: local Ollama bge-m3 (free/offline/no extra API key)."
-        echo "     Alternatives: Gemini embedding, OpenAI text-embedding-3-small,"
-        echo "     or a custom OpenAI-compatible embedding endpoint."
-        echo ""
-        echo "  3. Ask whether to include source bootstrap data:"
-        echo "     Xiaohongshu likes/favorites, Douyin post/favorite/like/follow,"
-        echo "     and YouTube history/subscriptions/likes."
-        echo "     Default: no. Use --yes-* flags only after explicit opt-in."
-        echo ""
-        echo "  4. Prepare the missing values:"
-        case "$missing" in
-            *llm.*api_key*)
-                echo "     - LLM API key — get one from your chosen provider:"
-                echo "         OpenAI:     https://platform.openai.com/api-keys"
-                echo "         Gemini:     https://aistudio.google.com/apikey"
-                echo "         DeepSeek:   https://platform.deepseek.com/api_keys"
-                echo "         Claude:     https://console.anthropic.com/settings/keys"
-                echo "         OpenRouter: https://openrouter.ai/keys"
-                ;;
-        esac
-        case "$missing" in
-            *bilibili.cookie*)
-                echo "     - Bilibili cookie. Two ways to provide it (pick ONE):"
-                echo ""
-                echo "       (A) [recommended] Install the browser extension and let"
-                echo "           it auto-sync your cookie — no F12, no copy/paste."
-                echo "           Extension: https://github.com/whiteguo233/OpenBiliClaw/releases"
-                echo "           After install, log in to bilibili.com if you aren't already;"
-                echo "           the extension pushes the cookie to this backend within seconds."
-                echo "           If you go this route, you can SKIP the --bilibili-cookie flag"
-                echo "           below after the extension syncs."
-                echo ""
-                echo "       (B) Manually paste the cookie:"
-                echo "           a. Log in at https://www.bilibili.com"
-                echo "           b. Open DevTools (F12) → Network tab"
-                echo "           c. Refresh the page, click any request"
-                echo "           d. Copy the full 'Cookie' header value"
-                echo "           Then proceed with step 5 below using --bilibili-cookie."
-                ;;
-        esac
-        echo ""
-        echo "  5. Run with your values filled in (DO NOT add --skip-init):"
-        echo ""
-        # Build the command dynamically — only show flags for what's missing.
-        echo "     python3 $INSTALL_DIR/scripts/agent_bootstrap.py \\"
-        echo "         --project-dir $INSTALL_DIR \\"
-        echo "         --provider <YOUR_PROVIDER> \\"
-        case "$missing" in
-            *llm.*api_key*) echo "         --llm-api-key '<YOUR_API_KEY>' \\" ;;
-        esac
-        case "$decisions" in
-            *embedding*)
-                echo "         --embedding-provider ollama \\"
-                echo "         --embedding-model bge-m3 \\"
-                ;;
-        esac
-        echo "         $xhs_flag \\"
-        echo "         $douyin_flag \\"
-        echo "         $youtube_flag \\"
-        case "$missing" in
-            *bilibili.cookie*) echo "         --bilibili-cookie '<YOUR_COOKIE>' \\" ;;
-        esac
-        echo "         --port $PORT --host $HOST"
-        echo ""
-        echo "     Replace the embedding/source flags according to the"
-        echo "     user's answers before running the command."
-        echo ""
-        echo "     This auto-runs 'openbiliclaw init' once credentials check out:"
-        echo "       - pulls your Bilibili history"
-        echo "       - generates the soul profile"
-        echo "       - runs the first content discovery pass"
-        echo "     Takes 2-5 minutes. Without this step the extension shows nothing."
-        echo "     During init, relay BOOTSTRAP_STATUS init_progress events to the user."
-        echo ""
-        echo "  6. Verify the backend is healthy:"
-        echo "      curl -sS $health_url"
-    else
-        echo "All credentials present — init has been run automatically."
-        echo ""
-        echo "  - Verify the backend is healthy:"
-        echo "      curl -sS $health_url"
-        echo "  - See recommendations:"
-        echo "      cd $INSTALL_DIR && uv run openbiliclaw recommend"
-        echo "  - View your soul profile:"
-        echo "      cd $INSTALL_DIR && uv run openbiliclaw profile"
-        echo "  - Re-run init manually if needed:"
-        echo "      cd $INSTALL_DIR && uv run openbiliclaw init"
-    fi
-    echo ""
-    echo "Optional: enable local Ollama as the embedding fallback"
-    echo "  (no extra API key needed; useful when your remote embedding quota runs out)"
-    echo "      Mac:     install and launch official Ollama.app: https://ollama.com/download/mac"
-    echo "      Windows: install from https://ollama.com/download then start the app"
-    echo "      Linux:   curl -fsSL https://ollama.com/install.sh | sh && ollama serve &"
-    echo "  Then:"
-    echo "      cd $INSTALL_DIR && uv run openbiliclaw setup-embedding"
-    echo ""
-    echo "Optional LAN/self-managed HTTPS (disabled by default):"
-    echo "  Ask for the exact client IP/hostname SAN before enabling it;"
-    echo "  without a remote SAN the generated certificate is localhost-only."
-    echo "  See: $INSTALL_DIR/docs/https-deployment.md"
-    echo ""
-    echo "Reference docs:"
-    echo "  - $INSTALL_DIR/docs/agent-install.md     (install guide)"
-    echo "  - $INSTALL_DIR/docs/agent-deployment.md  (troubleshooting)"
+    echo "Edit config.toml to enable providers/model routes, then rerun openbiliclaw check."
     echo "================================================================"
 }
 
@@ -743,7 +335,7 @@ main() {
 
     auto_detect_reuse_source
     ensure_checkout
-    run_bootstrap
+    prepare_install
     print_install_summary
 }
 

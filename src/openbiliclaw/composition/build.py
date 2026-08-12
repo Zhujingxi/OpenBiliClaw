@@ -13,19 +13,40 @@ from openbiliclaw.access.anonymous import (
     AnonymousProbeResult,
 )
 from openbiliclaw.access.broker import AccessBroker
+from openbiliclaw.access.manual import ManualAccessMethod
 from openbiliclaw.access.methods import AccessMethodRegistry
 from openbiliclaw.access.service import AccessService
+from openbiliclaw.ai.providers.models import ModelFactory, ModelInstanceConfig, ProviderKind
+from openbiliclaw.ai.runtime.capabilities import ModelCapabilities
+from openbiliclaw.ai.runtime.execution import AIRuntime
+from openbiliclaw.ai.runtime.routes import ConfiguredModel, ModelRoute, RouteTable
+from openbiliclaw.application.edit_profile import EditProfile
+from openbiliclaw.application.pending_actions import SqlitePendingActionRepository
+from openbiliclaw.application.record_feedback import RecordFeedback
+from openbiliclaw.application.refresh_recommendations import RefreshRecommendations
+from openbiliclaw.application.unit_of_work import FeedbackUnitOfWork, ProfileEditUnitOfWork
+from openbiliclaw.assistant.agent import (
+    ASSISTANT_AGENT_ID,
+    ASSISTANT_REQUIREMENTS,
+    build_assistant_agent,
+)
+from openbiliclaw.assistant.service import AssistantService
 from openbiliclaw.composition.application import (
     Application,
     ApplicationHosts,
     ApplicationServices,
     InfrastructureResources,
 )
+from openbiliclaw.composition.assistant import AssistantController
 from openbiliclaw.composition.facade import CompositionFacade
+from openbiliclaw.composition.jobs import RecommendationPipeline, build_recommendation_jobs
 from openbiliclaw.composition.lifecycle import ComponentStage, LifecyclePlan, RuntimeComponent
 from openbiliclaw.composition.providers import ProviderGraph, build_providers
 from openbiliclaw.composition.repositories import build_repositories
+from openbiliclaw.composition.scheduler import ScheduledJobsLifecycle
 from openbiliclaw.core.config import AppSettings, SettingsOverrides, load_settings
+from openbiliclaw.core.resources import ResourceBudget
+from openbiliclaw.core.supervisor import RuntimeSupervisor
 from openbiliclaw.hosts.api.app import create_app
 from openbiliclaw.hosts.api.dependencies import HostDependencies, HostSecurityPolicy
 from openbiliclaw.infrastructure.credentials.keyring import keyring_or_file
@@ -43,6 +64,8 @@ from openbiliclaw.understanding.service import UnderstandingService
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from openbiliclaw.access.methods import AccessMethod
+    from openbiliclaw.core.jobs import JobDecision, JobSpec
     from openbiliclaw.observations.events import ObservationsCommitted
 
 
@@ -102,6 +125,16 @@ class _HttpLifecycle:
         return self._running
 
 
+class _RefreshSupervisor:
+    def __init__(self, supervisor: RuntimeSupervisor, jobs: tuple[JobSpec, ...]) -> None:
+        self._supervisor = supervisor
+        self._jobs = {job.job_id: job for job in jobs}
+
+    def trigger(self, job_id: str, *, maximum_items: int) -> JobDecision:
+        del maximum_items
+        return self._supervisor.trigger(self._jobs[job_id])
+
+
 class _ProviderReadiness:
     def __init__(self, providers: ProviderGraph) -> None:
         self._providers = providers
@@ -148,7 +181,7 @@ def build_application(
     provider_ids = (
         settings.content.enabled if options.enabled_providers is None else options.enabled_providers
     )
-    providers = build_providers(provider_ids)
+    providers = build_providers(provider_ids, vault)
     observations = ObservationIngressService(
         repositories.observations,
         events,
@@ -161,15 +194,67 @@ def build_application(
         clock=lambda: datetime.now(UTC),
     )
     recommendations = RecommendationService(repositories.recommendations)
-    access_registry = AccessMethodRegistry(
-        (
-            AnonymousAccessMethod(
-                supported_providers=frozenset(providers.enabled),
-                probe=_anonymous_probe,
-            ),
+    access_methods: list[AccessMethod] = [
+        AnonymousAccessMethod(
+            supported_providers=frozenset(providers.enabled),
+            probe=_anonymous_probe,
         )
-    )
+    ]
+    if providers.manual_specs:
+        access_methods.append(ManualAccessMethod(vault, providers.manual_specs))
+    access_registry = AccessMethodRegistry(tuple(access_methods))
     access = AccessService(AccessBroker(access_registry), access_registry, telemetry=telemetry)
+    assistant = None
+    if settings.model.model_name:
+        configured = ModelFactory(vault).build(
+            ModelInstanceConfig(
+                provider=ProviderKind(settings.model.provider),
+                model_name=settings.model.model_name,
+                secret_ref=settings.model.credential_ref.removeprefix("vault:")
+                if settings.model.credential_ref
+                else None,
+                capabilities=ModelCapabilities(
+                    tools=True, structured_output=True, context_tokens=8_192
+                ),
+                owner="assistant",
+            )
+        )
+        runtime = AIRuntime(
+            RouteTable(
+                (
+                    ModelRoute(
+                        ASSISTANT_AGENT_ID,
+                        ASSISTANT_REQUIREMENTS,
+                        (
+                            ConfiguredModel(
+                                instance_id=configured.instance_id,
+                                provider=configured.provider,
+                                model=configured.model,
+                                capabilities=configured.declared_capabilities,
+                            ),
+                        ),
+                    ),
+                )
+            ),
+            ResourceBudget("assistant", settings.runtime.default_resource_limit),
+        )
+        assistant = AssistantService(runtime, build_assistant_agent())
+    pipeline = RecommendationPipeline(
+        providers,
+        access,
+        repositories,
+        understanding,
+        target_count=settings.recommendation.pool_target_count,
+    )
+    jobs = build_recommendation_jobs(pipeline)
+    supervisor = RuntimeSupervisor(
+        {
+            "network": ResourceBudget("network", settings.runtime.default_resource_limit),
+            "model": ResourceBudget("model", settings.runtime.default_resource_limit),
+            "database": ResourceBudget("database", 1),
+        },
+        shutdown_grace_seconds=settings.runtime.default_timeout_seconds,
+    )
     resources = InfrastructureResources(database, vault, http, events, telemetry)
     lifecycle = LifecyclePlan(
         (
@@ -194,6 +279,11 @@ def build_application(
                 _ProviderReadiness(providers),
                 optional=True,
             ),
+            RuntimeComponent(
+                "core.jobs",
+                ComponentStage.CORE_JOBS,
+                ScheduledJobsLifecycle(supervisor, jobs),
+            ),
         )
     )
     facade = CompositionFacade(
@@ -205,7 +295,22 @@ def build_application(
         understanding=understanding,
         recommendations=recommendations,
         health=lifecycle,
+        refresh=RefreshRecommendations(_RefreshSupervisor(supervisor, jobs)),
+        feedback=RecordFeedback(
+            FeedbackUnitOfWork(repositories.recommendations, repositories.observations),
+            clock=lambda: datetime.now(UTC),
+        ),
+        profile_edit=EditProfile(
+            ProfileEditUnitOfWork(repositories.understanding, repositories.observations),
+            clock=lambda: datetime.now(UTC),
+        ),
+        pending_actions=SqlitePendingActionRepository(database),
     )
+    if assistant is not None:
+        controller = AssistantController(
+            assistant, repositories.conversations, understanding, facade
+        )
+        facade.set_assistant(controller)
     dependencies = HostDependencies(
         facade=facade,
         security=HostSecurityPolicy(bind_host=settings.host.api_host),

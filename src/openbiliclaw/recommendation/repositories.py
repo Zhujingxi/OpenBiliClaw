@@ -103,6 +103,22 @@ class SqliteRecommendationRepository:
     async def expire(self, candidate_id: str, expected: CandidateState) -> Candidate:
         return await self.transition(candidate_id, expected, CandidateState.EXPIRED)
 
+    async def expire_due(self, *, now: str) -> int:
+        """Expire selected/admitted candidates whose typed payload deadline passed."""
+        async with self.db.transaction() as session:
+            rows = await session.fetch_all(
+                "SELECT candidate_id,state,candidate_json FROM recommendation_candidates "
+                "WHERE state IN ('admitted','selected')"
+            )
+        expired = 0
+        for candidate_id, state, payload in rows:
+            candidate = Candidate.model_validate_json(str(payload))
+            if candidate.expires_at.isoformat() > now:
+                continue
+            await self.expire(str(candidate_id), CandidateState(str(state)))
+            expired += 1
+        return expired
+
     async def save_evaluation(self, record: EvaluationRecord) -> bool:
         return await self._insert(
             "recommendation_evaluations",

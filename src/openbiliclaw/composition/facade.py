@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol
 
+from openbiliclaw.application.content_actions import PendingAction
 from openbiliclaw.application.errors import ApplicationError, ApplicationErrorCode
 from openbiliclaw.application.reads import (
     ContentDetailsResult,
@@ -41,14 +43,13 @@ from openbiliclaw.application.sources import (
     DisconnectSourceCommand,
 )
 from openbiliclaw.content.integration.identity import ContentRef, ProviderId
-from openbiliclaw.hosts.api.dependencies import DiagnosticResult, StartResult
+from openbiliclaw.hosts.api.dependencies import AssistantTurnInput, DiagnosticResult, StartResult
 
 if TYPE_CHECKING:
     from openbiliclaw.access.forms import ConnectionForm
-    from openbiliclaw.access.models import AccessStatus
+    from openbiliclaw.access.models import AccessHandle, AccessStatus
     from openbiliclaw.application.content_actions import (
         ConfirmContentActionCommand,
-        PendingAction,
         ProposeContentActionCommand,
     )
     from openbiliclaw.application.edit_profile import EditProfileCommand, EditProfileResult
@@ -66,6 +67,7 @@ if TYPE_CHECKING:
         ConversationMessage,
     )
     from openbiliclaw.content.integration.actions import ActionResult
+    from openbiliclaw.content.integration.registry import ContentProviderRegistry
     from openbiliclaw.core.config import AppSettings
     from openbiliclaw.core.health import HealthSnapshot
     from openbiliclaw.observations.service import RecordBatchResult
@@ -91,6 +93,49 @@ class HealthSource(Protocol):
     def health(self) -> HealthSnapshot: ...
 
 
+class _ContentVerifier:
+    def __init__(self, registry: ContentProviderRegistry) -> None:
+        self._registry = registry
+
+    async def available(self, ref: ContentRef, handle: AccessHandle) -> bool:
+        del handle
+        try:
+            self._registry.provider(ref.provider_id)
+        except Exception:
+            return False
+        return True
+
+
+class _ActionExecutor:
+    def __init__(self, registry: ContentProviderRegistry) -> None:
+        self._registry = registry
+
+    async def execute(self, pending: PendingAction, handle: AccessHandle) -> ActionResult:
+        from openbiliclaw.content.integration.actions import (
+            ActionConfirmation,
+            ActionRequest,
+        )
+        from openbiliclaw.content.integration.capabilities import ActionCapability
+
+        if not isinstance(pending, PendingAction):
+            raise TypeError("invalid pending action")
+        provider = self._registry.provider(pending.ref.provider_id)
+        if not isinstance(provider, ActionCapability):
+            raise CompositionFacade._unavailable()
+        result: ActionResult = await provider.execute_action(
+            ActionRequest(
+                action_id=pending.action_id,
+                ref=pending.ref,
+                idempotency_key=pending.idempotency_key,
+                confirmation=ActionConfirmation(
+                    summary=pending.safe_preview, expires_at=pending.expires_at
+                ),
+            ),
+            handle,
+        )
+        return result
+
+
 class CompositionFacade:
     """Transport-complete facade; unavailable optional capabilities fail explicitly."""
 
@@ -105,6 +150,11 @@ class CompositionFacade:
         understanding: object,
         recommendations: object,
         health: HealthSource,
+        refresh: object | None = None,
+        feedback: object | None = None,
+        profile_edit: object | None = None,
+        pending_actions: object | None = None,
+        assistant: object | None = None,
     ) -> None:
         from openbiliclaw.access.service import AccessService
         from openbiliclaw.content.integration.registry import ContentProviderRegistry
@@ -136,6 +186,39 @@ class CompositionFacade:
         self._search = SearchContent(registry, access)
         self._details = GetContentDetails(registry, access)
         self._health = health
+        self._refresh = refresh
+        self._feedback = feedback
+        self._profile_edit = profile_edit
+        self._assistant = assistant
+        self._propose = None
+        self._confirm = None
+        if pending_actions is not None:
+            from openbiliclaw.application.content_actions import (
+                ConfirmContentAction,
+                ProposeContentAction,
+            )
+            from openbiliclaw.application.pending_actions import SqlitePendingActionRepository
+
+            if not isinstance(pending_actions, SqlitePendingActionRepository):
+                raise TypeError("invalid pending action repository")
+
+            def clock() -> datetime:
+                return datetime.now(UTC)
+
+            self._propose = ProposeContentAction(pending_actions, clock)
+            self._confirm = ConfirmContentAction(
+                pending_actions,
+                access,
+                _ContentVerifier(registry),
+                _ActionExecutor(registry),
+                clock,
+            )
+
+    def set_assistant(self, assistant: object) -> None:
+        """Complete the explicit circular tool/controller edge during composition."""
+        if self._assistant is not None:
+            raise RuntimeError("assistant is already configured")
+        self._assistant = assistant
 
     async def source_status(self, provider_id: str, account_id: str | None) -> SourceStatusResult:
         return await self._source_status(
@@ -202,35 +285,55 @@ class CompositionFacade:
     async def refresh_recommendations(
         self, command: RefreshRecommendationsCommand
     ) -> RefreshRecommendationsResult:
-        del command
-        raise self._unavailable()
+        from openbiliclaw.application.refresh_recommendations import RefreshRecommendations
+
+        if not isinstance(self._refresh, RefreshRecommendations):
+            raise self._unavailable()
+        return await self._refresh(command)
 
     async def record_feedback(self, command: RecordFeedbackCommand) -> RecordFeedbackResult:
-        del command
-        raise self._unavailable()
+        from openbiliclaw.application.record_feedback import RecordFeedback
+
+        if not isinstance(self._feedback, RecordFeedback):
+            raise self._unavailable()
+        return await self._feedback(command)
 
     async def edit_profile(self, command: EditProfileCommand) -> EditProfileResult:
-        del command
-        raise self._unavailable()
+        from openbiliclaw.application.edit_profile import EditProfile
+
+        if not isinstance(self._profile_edit, EditProfile):
+            raise self._unavailable()
+        return await self._profile_edit(command)
 
     async def propose_action(self, command: ProposeContentActionCommand) -> PendingAction:
-        del command
-        raise self._unavailable()
+        if self._propose is None:
+            raise self._unavailable()
+        return await self._propose(command)
 
     async def confirm_action(self, command: ConfirmContentActionCommand) -> ActionResult:
-        del command
-        raise self._unavailable()
+        if self._confirm is None:
+            raise self._unavailable()
+        return await self._confirm(command)
 
-    async def assistant_turn(self, request: object, device_id: str) -> AssistantOutput:
-        del request, device_id
-        raise self._unavailable()
+    async def assistant_turn(self, request: AssistantTurnInput, device_id: str) -> AssistantOutput:
+        from openbiliclaw.composition.assistant import AssistantController
+
+        if not isinstance(self._assistant, AssistantController):
+            raise self._unavailable()
+        return await self._assistant.turn(request, device_id)
 
     async def conversation(self, conversation_id: str, device_id: str) -> Conversation:
-        del conversation_id, device_id
-        raise self._unavailable()
+        from openbiliclaw.composition.assistant import AssistantController
+
+        if not isinstance(self._assistant, AssistantController):
+            raise self._unavailable()
+        return await self._assistant.conversation(conversation_id, device_id)
 
     async def conversation_messages(
         self, conversation_id: str, device_id: str, limit: int
     ) -> tuple[ConversationMessage, ...]:
-        del conversation_id, device_id, limit
-        raise self._unavailable()
+        from openbiliclaw.composition.assistant import AssistantController
+
+        if not isinstance(self._assistant, AssistantController):
+            raise self._unavailable()
+        return await self._assistant.messages(conversation_id, device_id, limit)

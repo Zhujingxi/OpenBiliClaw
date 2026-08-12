@@ -1,4 +1,4 @@
-"""Opt-in v2 process entrypoints; legacy commands remain until Phase 15b."""
+"""The single supported OpenBiliClaw process entrypoint."""
 
 from __future__ import annotations
 
@@ -22,10 +22,10 @@ async def _check(config: Path | None, data_dir: Path) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(prog="openbiliclaw-v2")
+    parser = argparse.ArgumentParser(prog="openbiliclaw")
     parser.add_argument("command", choices=("check", "serve"), nargs="?", default="check")
     parser.add_argument("--config", type=Path)
-    parser.add_argument("--data-dir", type=Path, default=Path("data-v2"))
+    parser.add_argument("--data-dir", type=Path, default=Path("data"))
     arguments = parser.parse_args()
     settings = validated_settings(arguments.config)
     if arguments.command == "check":
