@@ -354,6 +354,23 @@ async def test_source_connect_passes_provider_form_submission() -> None:
     assert facade.connected_submission == {"token": "synthetic-secret"}
 
 
+async def test_source_connect_accepts_json_permissions_array() -> None:
+    facade = Facade()
+    async with client(facade) as api:
+        response = await api.post(
+            "/v1/sources/connect",
+            json={
+                "provider_id": "demo",
+                "method_id": "builtin.manual",
+                "idempotency_key": "connect:json-permissions",
+                "permissions": ["read_public"],
+                "submission": {"token": "synthetic-secret"},
+            },
+            headers=MUTATION_HEADERS,
+        )
+    assert response.status_code == 200
+
+
 async def test_mutation_double_submit_device_contract() -> None:
     body = {
         "provider_id": "demo",

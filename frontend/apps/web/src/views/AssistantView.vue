@@ -10,7 +10,16 @@ const api: WebApi = providedApi;
 const store = useAssistantStore();
 const session = useSessionStore();
 const text = ref("");
-const conversationId = "conv_web0000000000000000000000000000";
+const CONVERSATION_KEY = "obc-conversation-id";
+const CONVERSATION_PATTERN = /^conv_[0-9a-f]{32}$/;
+function ensureConversationId(): string {
+  const existing = localStorage.getItem(CONVERSATION_KEY);
+  if (existing !== null && CONVERSATION_PATTERN.test(existing)) return existing;
+  const generated = `conv_${crypto.randomUUID().replaceAll("-", "")}`;
+  localStorage.setItem(CONVERSATION_KEY, generated);
+  return generated;
+}
+const conversationId = ensureConversationId();
 const latestText = computed(() => {
   const output = store.latest?.output;
   if (output === undefined) return undefined;

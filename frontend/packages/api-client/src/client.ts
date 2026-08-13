@@ -99,7 +99,9 @@ export class ApiClient {
     deviceId?: string,
   ) {
     this.#baseUrl = baseUrl.replace(/\/$/, "");
-    this.#fetch = fetcher;
+    // Bind the fetcher: a captured native `fetch` invoked without a
+    // Window receiver throws "Illegal invocation" on Chrome 151+.
+    this.#fetch = fetcher.bind(globalThis);
     this.#deviceId = deviceId;
   }
 

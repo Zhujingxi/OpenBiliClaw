@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Annotated, Literal, TypeAlias
 
-from pydantic import ConfigDict, Field, SecretStr
+from pydantic import ConfigDict, Field, SecretStr, field_validator
 
 from openbiliclaw.access.forms import ConnectionForm
 from openbiliclaw.access.models import AccessStatus, Permission
@@ -82,6 +82,15 @@ class ConnectSourceRequest(TransportModel):
     permissions: frozenset[Permission] = frozenset({Permission.READ_PUBLIC})
     idempotency_key: str = Field(min_length=8, max_length=200)
     submission: dict[str, SecretStr] | None = Field(default=None, repr=False, exclude=True)
+
+    @field_validator("permissions", mode="before")
+    @classmethod
+    def _coerce_permissions(cls, value: object) -> object:
+        """Accept JSON arrays for the strict frozenset field."""
+
+        if isinstance(value, list | set | tuple):
+            return frozenset(Permission(item) for item in value)
+        return value
 
 
 class DisconnectSourceRequest(TransportModel):

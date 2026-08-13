@@ -7,8 +7,10 @@ import pytest
 from pydantic_ai.models.test import TestModel
 
 from openbiliclaw.ai.runtime.capabilities import ModelCapabilities
+from openbiliclaw.ai.runtime.errors import UnavailableError
 from openbiliclaw.ai.runtime.execution import AIRuntime
 from openbiliclaw.ai.runtime.routes import ConfiguredModel, ModelRoute, RouteTable
+from openbiliclaw.application.errors import ApplicationError, ApplicationErrorCode
 from openbiliclaw.assistant.agent import (
     ASSISTANT_AGENT_ID,
     ASSISTANT_REQUIREMENTS,
@@ -79,6 +81,60 @@ async def test_controller_persists_scoped_turn_and_messages(tmp_path: Path) -> N
     assert tuple(message.role.value for message in messages) == ("user", "assistant")
     with pytest.raises(Exception, match="not found"):
         await controller.conversation(conversation_id, "other-device")
+    await application.stop()
+
+
+@pytest.mark.asyncio
+async def test_controller_translates_ai_runtime_failure_to_typed_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    application = build_application(AppSettings(), options=BuildOptions(data_dir=tmp_path))
+    await application.start()
+    assert application.repositories is not None
+    assert application.services.understanding is not None
+    assert application.services.facade is not None
+    runtime = AIRuntime(
+        RouteTable(
+            (
+                ModelRoute(
+                    ASSISTANT_AGENT_ID,
+                    ASSISTANT_REQUIREMENTS,
+                    (
+                        ConfiguredModel(
+                            "assistant-test",
+                            "test",
+                            TestModel(),
+                            ModelCapabilities(
+                                tools=True,
+                                structured_output=True,
+                                context_tokens=16_000,
+                            ),
+                        ),
+                    ),
+                ),
+            )
+        ),
+        ResourceBudget("assistant", 1),
+    )
+    service = AssistantService(runtime, build_assistant_agent())
+
+    async def failing_turn(command: object) -> object:
+        del command
+        raise UnavailableError(model_instance="test:model")
+
+    monkeypatch.setattr(service, "run_turn", failing_turn)
+    controller = AssistantController(
+        service,
+        application.repositories.conversations,
+        application.services.understanding,
+        application.services.facade,
+    )
+    with pytest.raises(ApplicationError) as caught:
+        await controller.turn(
+            AssistantTurnRequest(conversation_id="conv_" + "b" * 32, text="hi", locale="en-US"),
+            "desktop",
+        )
+    assert caught.value.code is ApplicationErrorCode.UNAVAILABLE
     await application.stop()
 
 

@@ -6,6 +6,8 @@ import hashlib
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from openbiliclaw.ai.runtime.errors import AIRuntimeError
+from openbiliclaw.application.errors import ApplicationError, ApplicationErrorCode
 from openbiliclaw.assistant.dependencies import AssistantDependencies, ConversationMetadata
 from openbiliclaw.assistant.models import (
     Conversation,
@@ -111,17 +113,22 @@ class AssistantController:
             )
             await self._conversations.put_conversation(conversation)
         profile = dialogue_projection(await self._understanding.profile(DEFAULT_PROFILE_ID))
-        result = await self._service.run_turn(
-            TurnCommand(
-                text=request.text,
-                deps=AssistantDependencies(
-                    application=self._application,
-                    profile=profile,
-                    locale=request.locale,
-                    conversation=ConversationMetadata(request.conversation_id, scope),
-                ),
+        try:
+            result = await self._service.run_turn(
+                TurnCommand(
+                    text=request.text,
+                    deps=AssistantDependencies(
+                        application=self._application,
+                        profile=profile,
+                        locale=request.locale,
+                        conversation=ConversationMetadata(request.conversation_id, scope),
+                    ),
+                )
             )
-        )
+        except AIRuntimeError as exc:
+            raise ApplicationError(
+                ApplicationErrorCode.UNAVAILABLE, "assistant model unavailable"
+            ) from exc
         user_key = (
             f"turn:{request.conversation_id}:{hashlib.sha256(request.text.encode()).hexdigest()}"
         )

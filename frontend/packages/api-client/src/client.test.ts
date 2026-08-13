@@ -50,6 +50,32 @@ describe("ApiClient", () => {
     );
   });
 
+  it("keeps a valid receiver when the injected fetch requires one", async () => {
+    // Chrome 151+ native fetch throws TypeError("Illegal invocation")
+    // when invoked detached from Window; the client must not lose the
+    // receiver when storing the fetcher.
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(function (
+      this: unknown,
+    ) {
+      if (this !== globalThis) {
+        return Promise.reject(new TypeError("Illegal invocation"));
+      }
+      return Promise.resolve(
+        new Response(
+          '{"health":{"checked_at":"2030-01-01T00:00:00Z","component_id":"core","jobs":[],"status":"healthy"}}',
+        ),
+      );
+    });
+    const client = new ApiClient("https://api.example.test", fetcher);
+    await expect(
+      client.request({
+        path: "/v1/runtime/health",
+        method: "get",
+        validate: isHealth,
+      }),
+    ).resolves.toMatchObject({ health: { component_id: "core" } });
+  });
+
   it("serializes generated path and query parameters", async () => {
     const fetcher = vi
       .fn<typeof fetch>()
