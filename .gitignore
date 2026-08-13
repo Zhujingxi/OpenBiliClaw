@@ -114,3 +114,4 @@ backend.err
 /artifacts/extension/
 /openbiliclaw-extension-v*.zip
 /openbiliclaw-extension-v*.xpi
+data-e2e/
