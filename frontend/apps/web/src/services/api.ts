@@ -19,6 +19,12 @@ export type EventEnvelope = import("@openbiliclaw/api-client").EventEnvelope;
 export type SourceMutationResponse =
   components["schemas"]["SourceMutationResponse"];
 export type FeedbackResponse = components["schemas"]["FeedbackResponse"];
+export type ModelCatalogResponse =
+  components["schemas"]["ModelCatalogResponse"];
+export type ModelConfigurationResponse =
+  components["schemas"]["ModelConfigurationResponse"];
+export type ModelConfigurationRequest =
+  components["schemas"]["ModelConfigurationRequest"];
 
 export interface WebApi {
   listSources(signal?: AbortSignal): Promise<readonly SourceStatus[]>;
@@ -53,6 +59,12 @@ export interface WebApi {
     signal?: AbortSignal,
   ): Promise<SearchResponse>;
   content(reference: string, signal?: AbortSignal): Promise<ContentResponse>;
+  modelCatalog(signal?: AbortSignal): Promise<ModelCatalogResponse>;
+  currentModel(signal?: AbortSignal): Promise<ModelConfigurationResponse>;
+  updateModel(
+    body: ModelConfigurationRequest,
+    signal?: AbortSignal,
+  ): Promise<ModelConfigurationResponse>;
   events(after?: number, signal?: AbortSignal): AsyncIterable<EventEnvelope>;
 }
 
@@ -160,6 +172,28 @@ export function createWebApi(client: ApiClient): WebApi {
         method: "get",
         pathParams: { reference },
         validate: objectValidator<ContentResponse>("content"),
+        signal,
+      }),
+    modelCatalog: (signal) =>
+      client.request({
+        path: "/v1/models/catalog",
+        method: "get",
+        validate: listValidator<ModelCatalogResponse>("providers"),
+        signal,
+      }),
+    currentModel: (signal) =>
+      client.request({
+        path: "/v1/models/current",
+        method: "get",
+        validate: objectValidator<ModelConfigurationResponse>("current"),
+        signal,
+      }),
+    updateModel: (body, signal) =>
+      client.request({
+        path: "/v1/models/current",
+        method: "put",
+        body,
+        validate: objectValidator<ModelConfigurationResponse>("current"),
         signal,
       }),
     events: (after, signal) =>

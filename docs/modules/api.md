@@ -12,7 +12,11 @@ The current FastAPI host is `openbiliclaw.hosts.api`. It exposes strict `/v1` tr
 - `/v1/content/search`, content details, propose/confirm actions
 - `/v1/assistant/turns`, scoped conversation reads
 - `/v1/runtime/health`
+- `/v1/models/catalog` projects models.dev provider/model metadata for configuration UI
+- `/v1/models/current` reads model and embedding settings with credential-presence booleans; `PUT` validates and persists the chat model while accepting API keys write-only into the vault
 - replayable event stream routes
 - `/v1/openapi.json`
+
+Model updates return `reloaded=false` and `restart_required=true`: the production process does not yet host its API through `ApplicationReference`, so it cannot safely swap its own graph in place. The narrow writer atomically replaces only `[model]`, `[model.options]`, and `[model.capabilities]`; comments inside those owned tables are not preserved, while all other sections and comments remain byte-for-byte unchanged. Empty/omitted API key input keeps the existing vault reference. API responses expose only `secret_configured`, never references or secret material.
 
 Mutations require matching `X-Device-ID` and `X-CSRF-Token`. Loopback binding may intentionally run without a bearer token; non-loopback binding requires a bearer resolved from the credential vault through `host.bearer_secret_ref`. When configured, the bearer protects API routes and the served SPA fallback alike. The host enforces body, timeout, rate, origin, bearer, and websocket subscriber bounds and returns typed JSON error envelopes rather than HTML. The Vue SPA is served only for authenticated non-API GET fallback paths. SPA HTML fallback responses use `Cache-Control: no-cache`; fingerprinted `/assets/*` files use `public, max-age=31536000, immutable`.

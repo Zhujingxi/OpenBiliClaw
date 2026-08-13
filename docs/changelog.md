@@ -6,6 +6,8 @@
 
 ## Unreleased
 
+- Added catalog-backed model configuration to `/v1` and the responsive Settings UI. The UI can search models.dev providers/models, select a model, override its endpoint, and submit a write-only API key that is stored only in the credential vault; reads expose presence booleans, resolved protocol, and capabilities without credential references. Fully custom providers require explicit protocol, endpoint, and complete capabilities. The narrow atomic TOML writer owns only the model tables and currently returns `restart_required=true`; all non-model configuration and comments are preserved.
+
 - Replaced the hardcoded chat-provider enum, endpoints, and capabilities with the live models.dev catalog. The validated catalog is cached in the data directory for 24 hours with stale-cache offline fallback and a typed first-use-offline error. Catalog SDK markers select protocol families while PydanticAI's registry owns native provider selection (including DeepSeek's native profile). Fully custom providers require explicit protocol, endpoint, and complete capabilities. Kimi coding now resolves from the catalog to its Anthropic endpoint instead of a project-pinned OpenAI-compatible route.
 
 - Added native DeepSeek chat construction through PydanticAI's `DeepSeekProvider`, preserving its vendor model profile (including reasoning fields and the `deepseek-reasoner` forced-tool caveat) while retaining endpoint overrides for gateways. The real two-provider Assistant matrix now uses native DeepSeek instead of a generic OpenAI endpoint override; `disable_thinking` remains confined to the OpenAI constructor.

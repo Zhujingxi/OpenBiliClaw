@@ -82,6 +82,30 @@ function api(overrides: Partial<WebApi> = {}): WebApi {
     content: async () => {
       throw new Error("unused");
     },
+    modelCatalog: async () => ({ providers: [] }),
+    currentModel: async () => ({
+      current: {
+        model: {
+          provider: "openai",
+          model_name: "",
+          endpoint: null,
+          secret_configured: false,
+          protocol: null,
+          capabilities: null,
+        },
+        embedding: {
+          provider: "openai",
+          model_name: "",
+          endpoint: null,
+          secret_configured: false,
+        },
+      },
+      reloaded: false,
+      restart_required: false,
+    }),
+    updateModel: async () => {
+      throw new Error("unused");
+    },
     events: () => emptyStream(),
     ...overrides,
   };

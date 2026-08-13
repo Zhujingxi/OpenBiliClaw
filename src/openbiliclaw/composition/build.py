@@ -58,6 +58,7 @@ from openbiliclaw.core.resources import ResourceBudget
 from openbiliclaw.core.supervisor import RuntimeSupervisor
 from openbiliclaw.hosts.api.app import create_app
 from openbiliclaw.hosts.api.dependencies import HostDependencies, HostSecurityPolicy
+from openbiliclaw.hosts.api.model_configuration import FileModelConfiguration
 from openbiliclaw.infrastructure.credentials.keyring import keyring_or_file
 from openbiliclaw.infrastructure.credentials.vault import CredentialVault
 from openbiliclaw.infrastructure.events.publisher import EventPublisher
@@ -87,6 +88,7 @@ if TYPE_CHECKING:
 @dataclass(frozen=True, slots=True)
 class BuildOptions:
     data_dir: Path = Path("data-v2")
+    config_path: Path | None = None
     enabled_providers: tuple[str, ...] | None = None
 
 
@@ -451,6 +453,12 @@ def build_application(
         ),
         events=host_events,
         lifespan=lifecycle,
+        models=FileModelConfiguration(
+            settings=settings,
+            config_path=options.config_path,
+            catalog=ModelCatalog(data_dir / "models.dev.json"),
+            vault=vault,
+        ),
     )
     return Application(
         settings=settings,

@@ -31,6 +31,7 @@ from .routers import (
     content,
     events,
     feedback,
+    models,
     recommendations,
     runtime,
     sources,
@@ -153,7 +154,7 @@ def create_app(dependencies: HostDependencies, *, frontend_dir: Path | None = No
         allow_origins=list(dependencies.security.allowed_origins),
         allow_origin_regex=r"^(chrome|moz)-extension://[A-Za-z0-9_-]+$",
         allow_credentials=True,
-        allow_methods=["GET", "POST"],
+        allow_methods=["GET", "POST", "PUT"],
         allow_headers=["Authorization", "Content-Type", "X-CSRF-Token", "X-Device-ID"],
     )
     for item in (
@@ -163,6 +164,7 @@ def create_app(dependencies: HostDependencies, *, frontend_dir: Path | None = No
         assistant.router,
         content.router,
         feedback.router,
+        models.router,
         runtime.router,
         events.router,
     ):

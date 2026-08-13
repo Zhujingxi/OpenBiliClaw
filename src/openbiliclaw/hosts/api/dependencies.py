@@ -42,6 +42,7 @@ from openbiliclaw.content.integration.actions import ActionResult
 from openbiliclaw.core._pydantic import StrictBaseModel
 from openbiliclaw.observations.service import RecordBatchResult
 
+from .model_configuration import ModelConfiguration
 from .schemas.models import EventEnvelope
 
 
@@ -151,6 +152,7 @@ class HostDependencies:
     security: HostSecurityPolicy = HostSecurityPolicy()
     events: EventSource | None = None
     lifespan: HostLifespan | None = None
+    models: ModelConfiguration | None = None
     websocket_slots: asyncio.Semaphore = field(init=False)
 
     def __post_init__(self) -> None:

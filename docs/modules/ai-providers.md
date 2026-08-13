@@ -31,6 +31,10 @@ models.dev identifies `kimi-for-coding` as Anthropic protocol at `https://api.ki
 
 Embedding configuration remains explicit in this pass. `NativeEmbeddingTransport` uses the embeddings resource on PydanticAI's `OpenAIProvider`; unsupported protocol families fail closed. Official OpenAI requests include configured dimensions and custom endpoints omit that vendor-specific parameter while response vectors are still validated.
 
+## Configuration API boundary
+
+The API exposes a UI-safe catalog projection and current configuration. Catalog responses contain provider/model IDs and names, environment variable names, protocol family, capability flags, and context limits only. Current settings replace vault references with credential-presence booleans. Model updates validate catalog membership (or the complete custom-provider contract), store non-empty API keys directly in the vault, and persist only the opaque reference. Omitted/empty keys retain the existing reference.
+
 ## Operational boundary
 
 OpenBiliClaw never downloads, bundles, starts, supervises, or serves model runtimes. Catalog data contains no credentials. Secrets remain opaque vault references and are resolved only by trusted constructors.

@@ -8,6 +8,7 @@ import ContentView from "./ContentView.vue";
 import AssistantView from "./AssistantView.vue";
 import ProvidersView from "./ProvidersView.vue";
 import RecommendationsView from "./RecommendationsView.vue";
+import SettingsView from "./SettingsView.vue";
 
 function api(overrides: Partial<WebApi> = {}): WebApi {
   return {
@@ -63,6 +64,30 @@ function api(overrides: Partial<WebApi> = {}): WebApi {
       throw new Error("unused");
     },
     search: async () => ({ items: [] }),
+    modelCatalog: async () => ({ providers: [] }),
+    currentModel: async () => ({
+      current: {
+        model: {
+          provider: "openai",
+          model_name: "",
+          endpoint: null,
+          secret_configured: false,
+          protocol: null,
+          capabilities: null,
+        },
+        embedding: {
+          provider: "openai",
+          model_name: "",
+          endpoint: null,
+          secret_configured: false,
+        },
+      },
+      reloaded: false,
+      restart_required: false,
+    }),
+    updateModel: async () => {
+      throw new Error("unused");
+    },
     content: async () => ({
       content: {
         ref: {
@@ -165,6 +190,122 @@ describe("web view behavior", () => {
     );
     await vi.waitFor(() => expect(wrapper.text()).toContain("connected"));
     expect(wrapper.find('[role="tab"]').exists()).toBe(false);
+  });
+
+  it("loads catalog model settings and saves a write-only key", async () => {
+    const updateModel = vi.fn(async () => ({
+      current: {
+        model: {
+          provider: "deepseek",
+          model_name: "deepseek-chat",
+          endpoint: null,
+          secret_configured: true,
+          protocol: "openai" as const,
+          capabilities: {
+            tools: true,
+            structured_output: false,
+            vision: false,
+            context_tokens: 128000,
+            streaming: true,
+            reasoning: false,
+          },
+        },
+        embedding: {
+          provider: "openai",
+          model_name: "",
+          endpoint: null,
+          secret_configured: false,
+        },
+      },
+      reloaded: false,
+      restart_required: true,
+    }));
+    const wrapper = mountView(
+      SettingsView,
+      api({
+        modelCatalog: async () => ({
+          providers: [
+            {
+              id: "deepseek",
+              name: "DeepSeek",
+              env: ["DEEPSEEK_API_KEY"],
+              protocol: "openai",
+              models: [
+                {
+                  id: "deepseek-chat",
+                  name: "DeepSeek Chat",
+                  reasoning: false,
+                  tool_call: true,
+                  structured_output: false,
+                  context_limit: 128000,
+                },
+              ],
+            },
+          ],
+        }),
+        currentModel: async () => ({
+          current: {
+            model: {
+              provider: "deepseek",
+              model_name: "deepseek-chat",
+              endpoint: null,
+              secret_configured: false,
+              protocol: "openai",
+              capabilities: null,
+            },
+            embedding: {
+              provider: "openai",
+              model_name: "",
+              endpoint: null,
+              secret_configured: false,
+            },
+          },
+          reloaded: false,
+          restart_required: false,
+        }),
+        updateModel,
+      }),
+    );
+    await vi.waitFor(() =>
+      expect(wrapper.find("#model-provider").exists()).toBe(true),
+    );
+    await wrapper.get("#model-api-key").setValue("write-only-value");
+    await wrapper.get("form").trigger("submit");
+    await vi.waitFor(() => expect(updateModel).toHaveBeenCalledOnce());
+    expect(updateModel).toHaveBeenCalledWith(
+      {
+        provider: "deepseek",
+        model_name: "deepseek-chat",
+        api_key: "write-only-value",
+      },
+      expect.any(AbortSignal),
+    );
+    await vi.waitFor(() =>
+      expect(
+        wrapper.get<HTMLInputElement>("#model-api-key").element.value,
+      ).toBe(""),
+    );
+    expect(wrapper.text()).toContain("Restart OpenBiliClaw");
+  });
+
+  it("renders model catalog loading, empty, and error states", async () => {
+    const pending = new Promise<never>(() => undefined);
+    const loading = mountView(
+      SettingsView,
+      api({ modelCatalog: () => pending, currentModel: () => pending }),
+    );
+    await vi.waitFor(() =>
+      expect(loading.text()).toContain("Loading model catalog"),
+    );
+    const empty = mountView(SettingsView);
+    await vi.waitFor(() =>
+      expect(empty.text()).toContain("No catalog providers"),
+    );
+    const error = mountView(
+      SettingsView,
+      api({ modelCatalog: async () => Promise.reject(new Error("offline")) }),
+    );
+    await vi.waitFor(() => expect(error.text()).toContain("offline"));
   });
 
   it("resolves recommendation content and wires shared card feedback", async () => {

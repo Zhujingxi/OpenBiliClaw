@@ -9,6 +9,7 @@ from pydantic import ConfigDict, Field, SecretStr, field_validator
 
 from openbiliclaw.access.forms import ConnectionForm
 from openbiliclaw.access.models import AccessStatus, Permission
+from openbiliclaw.ai.providers.catalog import Protocol
 from openbiliclaw.application.content_actions import (
     ConfirmContentActionCommand,
     PendingAction,
@@ -31,6 +32,7 @@ from openbiliclaw.content.integration.identity import ContentRef
 from openbiliclaw.content.integration.native import NativeContent
 from openbiliclaw.content.integration.projections import CardData, ContentPreview
 from openbiliclaw.core._pydantic import StrictBaseModel
+from openbiliclaw.core.config import CapabilitySettings
 from openbiliclaw.core.health import HealthSnapshot
 from openbiliclaw.observations.models import Observation
 from openbiliclaw.observations.service import RecordBatchResult
@@ -157,6 +159,72 @@ class ConversationResponse(TransportModel):
 
 class RuntimeResponse(TransportModel):
     health: HealthSnapshot
+
+
+class CapabilityResponse(TransportModel):
+    tools: bool
+    structured_output: bool
+    vision: bool
+    context_tokens: int = Field(ge=0)
+    streaming: bool
+    reasoning: bool
+
+
+class CatalogModelResponse(TransportModel):
+    id: str
+    name: str
+    reasoning: bool
+    tool_call: bool
+    structured_output: bool
+    context_limit: int = Field(ge=0)
+
+
+class CatalogProviderResponse(TransportModel):
+    id: str
+    name: str
+    env: tuple[str, ...]
+    protocol: Protocol
+    models: tuple[CatalogModelResponse, ...]
+
+
+class ModelCatalogResponse(TransportModel):
+    providers: tuple[CatalogProviderResponse, ...]
+
+
+class ModelConfigurationView(TransportModel):
+    provider: str
+    model_name: str
+    endpoint: str | None
+    secret_configured: bool
+    protocol: Protocol | None
+    capabilities: CapabilityResponse | None
+
+
+class EmbeddingConfigurationResponse(TransportModel):
+    provider: str
+    model_name: str
+    endpoint: str | None
+    secret_configured: bool
+
+
+class CurrentModelResponse(TransportModel):
+    model: ModelConfigurationView
+    embedding: EmbeddingConfigurationResponse
+
+
+class ModelConfigurationResponse(TransportModel):
+    current: CurrentModelResponse
+    reloaded: bool
+    restart_required: bool
+
+
+class ModelConfigurationRequest(TransportModel):
+    provider: str = Field(min_length=1, max_length=200)
+    model_name: str = Field(min_length=1, max_length=200)
+    endpoint: str | None = Field(default=None, max_length=2_000, pattern=r"^https?://")
+    api_key: SecretStr | None = Field(default=None, repr=False, exclude=True)
+    protocol: Protocol | None = None
+    capabilities: CapabilitySettings | None = None
 
 
 class FeedbackResponse(TransportModel):

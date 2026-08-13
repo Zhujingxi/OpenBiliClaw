@@ -43,6 +43,9 @@ function api(overrides: Partial<WebApi>): WebApi {
     runtimeHealth: unused,
     search: unused,
     content: unused,
+    modelCatalog: unused,
+    currentModel: unused,
+    updateModel: unused,
     events: async function* () {
       yield* [] as never[];
     },

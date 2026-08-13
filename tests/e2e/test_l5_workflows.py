@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import time
 import uuid
@@ -25,6 +26,47 @@ _ROOT = Path(__file__).resolve().parents[2]
 _DATA_DIR = _ROOT / "data-e2e"
 _BASE_URL = "http://127.0.0.1:8430/v1"
 _MUTATION_HEADERS = {"X-Device-ID": "e2e-l5", "X-CSRF-Token": "e2e-l5"}
+
+
+@contextmanager
+def _model_configuration_server() -> Iterator[Path]:
+    run = uuid.uuid4().hex
+    config = _DATA_DIR / f"config.model-settings.{run}.toml"
+    runtime = _DATA_DIR / f"model-settings-{run}"
+    runtime.mkdir(mode=0o700)
+    shutil.copy2(_DATA_DIR / "config.e2e.deepseek.toml", config)
+    shutil.copy2(_DATA_DIR / "credentials.json", runtime / "credentials.json")
+    shutil.copy2(_DATA_DIR / "models.dev.json", runtime / "models.dev.json")
+    process = subprocess.Popen(
+        [
+            str(_ROOT / ".venv/bin/openbiliclaw"),
+            "serve",
+            "--config",
+            str(config),
+            "--data-dir",
+            str(runtime),
+        ],
+        cwd=_ROOT,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        for _ in range(120):
+            try:
+                if _request("GET", "/runtime/health")[0] == 200:
+                    break
+            except (OSError, URLError):
+                pass
+            time.sleep(0.25)
+        else:
+            pytest.fail("throwaway model-configuration server did not become healthy")
+        yield config
+    finally:
+        process.terminate()
+        process.wait(timeout=15)
+        config.unlink(missing_ok=True)
+        shutil.rmtree(runtime)
 
 
 @contextmanager
@@ -239,6 +281,44 @@ def _derive_run_preference(item: dict[str, object], run: str) -> tuple[str, ...]
         "Kimi retained no run marker after three content-scoped attempts; "
         f"derived summaries={diagnostics!r}"
     )
+
+
+def test_catalog_and_model_configuration_round_trip_uses_throwaway_profile() -> None:
+    key_path = _DATA_DIR / "deepseek_api_key.txt"
+    assert key_path.is_file()
+    key = key_path.read_text(encoding="utf-8").strip()
+    try:
+        with _model_configuration_server() as config:
+            status, catalog = _request("GET", "/models/catalog")
+            assert status == 200
+            providers = catalog.get("providers")
+            assert isinstance(providers, list)
+            provider_ids = {item.get("id") for item in providers if isinstance(item, dict)}
+            assert {"deepseek", "kimi-for-coding"} <= provider_ids
+            status, saved = _request(
+                "PUT",
+                "/models/current",
+                {
+                    "provider": "deepseek",
+                    "model_name": "deepseek-chat",
+                    "api_key": key,
+                },
+            )
+            assert status == 200
+            assert saved.get("restart_required") is True
+            status, current = _request("GET", "/models/current")
+            assert status == 200
+            configured = current.get("current")
+            assert isinstance(configured, dict)
+            model = configured.get("model")
+            assert isinstance(model, dict)
+            assert model.get("provider") == "deepseek"
+            assert model.get("protocol") == "openai"
+            assert model.get("secret_configured") is True
+            assert key not in json.dumps(current)
+            assert key not in config.read_text(encoding="utf-8")
+    finally:
+        key = ""
 
 
 def test_live_http_full_loop_profile_shift_and_errors() -> None:

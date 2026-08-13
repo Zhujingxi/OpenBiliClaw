@@ -261,7 +261,17 @@ async def test_production_graph_is_lazy_and_leak_free(tmp_path: Path) -> None:
     assert app.resources.events.subscriber_count == 0
 
 
-@pytest.mark.asyncio
+def test_composed_model_configuration_uses_runtime_paths(tmp_path: Path) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text('[model]\nmodel_name = ""\n', encoding="utf-8")
+    app = build_application(
+        AppSettings(), options=BuildOptions(data_dir=tmp_path, config_path=config)
+    )
+    dependencies = app.hosts.dependencies
+    assert dependencies is not None and dependencies.models is not None
+    assert dependencies.models.settings() == app.settings
+
+
 async def test_fresh_composed_host_records_and_reads_without_credentials(tmp_path: Path) -> None:
     app = build_application(
         AppSettings(content={"enabled": ("v2ex",)}),

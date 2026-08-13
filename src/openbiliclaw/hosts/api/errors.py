@@ -67,6 +67,10 @@ async def http_error_handler(request: Request, exc: HTTPException) -> JSONRespon
         return response(404, ErrorCode.NOT_FOUND, "route not found")
     if exc.status_code == 405:
         return response(405, ErrorCode.METHOD_NOT_ALLOWED, "method not allowed")
+    if exc.status_code == 422:
+        return response(422, ErrorCode.VALIDATION, "request validation failed")
+    if exc.status_code == 503:
+        return response(503, ErrorCode.UNAVAILABLE, "model catalog is unavailable")
     return response(exc.status_code, ErrorCode.TEMPORARY_FAILURE, "request failed")
 
 

@@ -53,4 +53,6 @@ The catalog cache is `<data-dir>/models.dev.json`, fresh for 24 hours. Refresh f
 
 `model.options.disable_thinking` affects only OpenAI-protocol construction and is off by default. Catalog-routed `kimi-for-coding` uses its declared Anthropic protocol and does not require the option.
 
+The Web Settings Model section is the normal configuration path. Its API key field is write-only: a non-empty value creates a new vault credential and stores only its opaque reference, while an empty field keeps the existing reference. The API atomically rewrites only the model-owned TOML tables and preserves other sections/comments; comments inside the replaced model tables are not retained. The response currently requires a process restart to apply the saved graph.
+
 Secrets are never valid inline values. Model, host bearer, and content credentials are referenced through the credential vault. Environment variables use the `OPENBILICLAW_` names implemented in `core.config`; CLI values have highest precedence.

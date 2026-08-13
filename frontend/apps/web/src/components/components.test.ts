@@ -39,6 +39,13 @@ const api: WebApi = {
   content: async () => {
     throw new Error("unused");
   },
+  modelCatalog: async () => ({ providers: [] }),
+  currentModel: async () => {
+    throw new Error("unused");
+  },
+  updateModel: async () => {
+    throw new Error("unused");
+  },
   events: async function* () {
     yield* [] as never[];
   },

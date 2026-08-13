@@ -30,7 +30,9 @@ npm --prefix frontend run build
 
 `apps/web/` 是单一 responsive Vue app，而非两套 desktop/mobile 应用。desktop sidebar 和 mobile bottom navigation 保持不同密度与导航方式，共享 recommendations、provider tabs、search/content detail、profile、Assistant、source connection、settings 和 runtime health views。
 
-Pinia 按 durable concern 拆为 session、sources、recommendations、content、profile、assistant、runtime/jobs 与 host-local preferences；每个 server store 明确暴露 idle/loading/success/empty/error，使用 AbortController 取消旧请求。Runtime store 是 event stream 的唯一 owner，采用 100ms→500ms→1s→2s bounded reconnect backoff，并保留最多 50 个 event envelope。Profile edit 等 mutation 不做无 rollback 的 optimistic update，服务端响应始终 authoritative。
+Pinia 按 durable concern 拆为 session、sources、recommendations、content、profile、assistant、runtime/jobs、models catalog/configuration 与 host-local preferences；每个 server store 明确暴露 idle/loading/success/empty/error，使用 AbortController 取消旧请求。Runtime store 是 event stream 的唯一 owner，采用 100ms→500ms→1s→2s bounded reconnect backoff，并保留最多 50 个 event envelope。Profile edit 等 mutation 不做无 rollback 的 optimistic update，服务端响应始终 authoritative。
+
+Settings 的 Model 区从 `/v1/models/catalog` 搜索/浏览 provider 和 model，显示 catalog protocol/env metadata，支持 endpoint override 与 write-only password key，并以 `secret_configured` 显示已配置状态；保存后明确提示当前需要重启。高级 custom provider 表单要求 protocol、endpoint 和完整 capabilities，和后端 escape hatch 保持一致。加载、空、错误、保存中与保存失败均有可访问状态。
 
 可访问性包括 skip link、desktop/mobile nav labels、`aria-current`、form labels、loading/error live announcements、route heading focus、Alt+Left keyboard navigation、明显 focus ring、high-contrast palette 以及系统/用户 reduced-motion policy。Store tests 不 mount app；component tests覆盖 navigation、announcements 和 keyboard path。
 

@@ -38,6 +38,7 @@ class CatalogModel(StrictBaseModel):
     model_config = ConfigDict(strict=True, extra="ignore", frozen=True)
 
     id: str = Field(min_length=1)
+    name: str | None = None
     reasoning: bool = False
     tool_call: bool = False
     structured_output: bool = False
@@ -58,6 +59,7 @@ class CatalogProvider(StrictBaseModel):
     model_config = ConfigDict(strict=True, extra="ignore", frozen=True)
 
     id: str = Field(min_length=1)
+    name: str | None = None
     npm: str = Field(min_length=1)
     api: str | None = None
     env: tuple[str, ...] = ()
