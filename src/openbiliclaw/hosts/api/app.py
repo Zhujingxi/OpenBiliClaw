@@ -213,10 +213,15 @@ def create_app(dependencies: HostDependencies, *, frontend_dir: Path | None = No
             relative = request.url.path.lstrip("/")
             asset = frontend / relative
             if relative and asset.is_file() and frontend in asset.resolve().parents:
-                return FileResponse(asset)
+                headers = (
+                    {"Cache-Control": "public, max-age=31536000, immutable"}
+                    if relative.startswith("assets/")
+                    else None
+                )
+                return FileResponse(asset, headers=headers)
             index = frontend / "index.html"
             if index.is_file():
-                return FileResponse(index)
+                return FileResponse(index, headers={"Cache-Control": "no-cache"})
         envelope = ErrorEnvelope(
             error=ErrorDetail(code=ErrorCode.NOT_FOUND, message="route not found")
         )

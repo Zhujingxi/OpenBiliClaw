@@ -52,6 +52,14 @@ it.each(["video", "image", "article", "discussion"] as const)(
   },
 );
 
+it("emits feedback actions with the rendered card", async () => {
+  const wrapper = mount(CardRenderer, { props: { card: base } });
+  await wrapper.get('[aria-label="Like recommendation"]').trigger("click");
+  await wrapper.get('[aria-label="Dismiss recommendation"]').trigger("click");
+  expect(wrapper.emitted("like")).toEqual([[base]]);
+  expect(wrapper.emitted("dismiss")).toEqual([[base]]);
+});
+
 it("uses an observable generic fallback for unknown versions and renderers", () => {
   const unknownVersion = mount(CardRenderer, {
     props: { card: { ...base, version: 99 } },

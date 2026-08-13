@@ -18,6 +18,7 @@ export type ContentResponse = components["schemas"]["ContentResponse"];
 export type EventEnvelope = import("@openbiliclaw/api-client").EventEnvelope;
 export type SourceMutationResponse =
   components["schemas"]["SourceMutationResponse"];
+export type FeedbackResponse = components["schemas"]["FeedbackResponse"];
 
 export interface WebApi {
   listSources(signal?: AbortSignal): Promise<readonly SourceStatus[]>;
@@ -26,6 +27,10 @@ export interface WebApi {
     signal?: AbortSignal,
   ): Promise<SourceMutationResponse>;
   recommendations(signal?: AbortSignal): Promise<RecommendationPage>;
+  feedback(
+    body: components["schemas"]["FeedbackRequest"],
+    signal?: AbortSignal,
+  ): Promise<FeedbackResponse>;
   profile(profileId: string, signal?: AbortSignal): Promise<ProfileResponse>;
   editProfile(
     body: components["schemas"]["ProfileEditRequest"],
@@ -90,6 +95,14 @@ export function createWebApi(client: ApiClient): WebApi {
         path: "/v1/recommendations",
         method: "get",
         validate: listValidator<RecommendationPage>("items"),
+        signal,
+      }),
+    feedback: (body, signal) =>
+      client.request({
+        path: "/v1/feedback",
+        method: "post",
+        body,
+        validate: objectValidator<FeedbackResponse>("result"),
         signal,
       }),
     profile: (profileId, signal) =>

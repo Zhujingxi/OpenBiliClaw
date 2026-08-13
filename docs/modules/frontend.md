@@ -7,9 +7,9 @@
 - 根 workspace 声明 `packages/api-client`、`packages/presentation`、`apps/web`、`apps/extension`，四个 package 的依赖一次写入 lockfile。
 - TypeScript 开启 `strict`、`allowJs=false`、`noUncheckedIndexedAccess`、`exactOptionalPropertyTypes`、`noImplicitOverride`、`useUnknownInCatchVariables`。
 - `api-client/generated/schema.ts` 由 deterministic FastAPI OpenAPI 经 workspace 固定的 `openapi-typescript@7.10.1` 生成；`scripts/generate_api_client.py` 不下载临时工具。
-- `ApiClient` 通过 caller-supplied type guard 验证未知 JSON；HTTP、network、invalid response 为安全 typed failure；SSE event envelope 在边界做 runtime validation。
+- `ApiClient` 通过 caller-supplied type guard 验证未知 JSON；HTTP、network、invalid response 为安全 typed failure；SSE event envelope 在边界做 runtime validation。浏览器 mutation 包括 generated `/v1/feedback` operation，并统一附带 device/CSRF headers。
 - Presentation package 复用 generated API projection types，定义 provider view、card descriptor/action、pagination 与 availability UI contract。
-- video/image/article/discussion/fallback Vue cards 共用可访问 outer frame、反馈 controls 与 provider/status 呈现。URL/media 仅允许 HTTP(S)，文本由 Vue escaping；renderer 只接受 build-time `generic` 标识，不接受 backend HTML/CSS/component name/code。
+- video/image/article/discussion/fallback Vue cards 共用可访问 outer frame、可触发 `like`/`dismiss` event 的反馈 controls 与 provider/status 呈现。Web recommendation store 把 feed `shown_id` 保留在 card view model 中，等待 `/v1/feedback` 成功后才显示结果；404/409 delivery expiry 作为可见错误呈现。URL/media 仅允许 HTTP(S)，文本由 Vue escaping；renderer 只接受 build-time `generic` 标识，不接受 backend HTML/CSS/component name/code。
 - Python CI test 扫描新 workspace，拒绝 checked-in `.js`/`.mjs`/`.cjs`；所有 `dist/` 均在 `.gitignore`。
 
 ## 开发命令
@@ -36,4 +36,4 @@ Pinia 按 durable concern 拆为 session、sources、recommendations、content�
 
 ## Extension shell 与 packaging
 
-`apps/extension` 通过 shared typed API client 连接 `127.0.0.1:8420`，使用 shared presentation fallback card，并只持久化 backend URL 与 opaque device token。popup 通过 shared client 直接请求本地后端，不经过 `chrome.runtime` message relay；它不注册 background/content script、不申请 storage/Cookie 权限、不采集页面行为、不执行 provider task。Chrome/Firefox manifest 使用 module service worker；Python release tool 将生成物统一输出到 ignored `artifacts/extension/`。Web Vite artifact 由 production host 作为 SPA 提供，installer 与 Docker pipeline 都会先构建该 artifact。
+`apps/extension` 通过 shared typed API client 连接 `127.0.0.1:8420`，使用 shared presentation fallback card，并只持久化 backend URL 与 opaque device token。popup 通过 shared client 直接请求本地后端，不经过 `chrome.runtime` message relay；它不注册 background/content script、不申请 storage/Cookie 权限、不采集页面行为、不执行 provider task。Chrome/Firefox manifest 使用 module service worker；Python release tool 将生成物统一输出到 ignored `artifacts/extension/`。Web Vite artifact 由 production host 作为 SPA 提供，installer 与 Docker pipeline 都会先构建该 artifact。SPA `index.html`/route fallback 使用 `Cache-Control: no-cache`，而 Vite `/assets/*` fingerprint artifact 使用一年 immutable cache，避免 rebuild 后旧 HTML 继续引用 stale bundle。

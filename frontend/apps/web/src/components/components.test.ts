@@ -12,6 +12,9 @@ const api: WebApi = {
     throw new Error("unused");
   },
   recommendations: async () => ({ items: [] }),
+  feedback: async () => {
+    throw new Error("unused");
+  },
   profile: async () => ({
     profile: { version: 1, preference_summary: [], insights: [] },
   }),

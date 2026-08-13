@@ -16,7 +16,23 @@ onBeforeUnmount(store.cancel);
     <AsyncState :phase="store.phase" :error="store.error">
       <ol class="card-list">
         <li v-for="card in store.cards" :key="card.data.ref.canonical_url">
-          <CardRenderer :card="card" />
+          <CardRenderer
+            :card="card"
+            @like="store.like(api, $event)"
+            @dismiss="store.dismiss(api, $event)"
+          />
+          <p
+            v-if="card.shownId && store.feedbackState[card.shownId]"
+            role="status"
+          >
+            Feedback recorded: {{ store.feedbackState[card.shownId] }}
+          </p>
+          <p
+            v-if="card.shownId && store.feedbackError[card.shownId]"
+            role="alert"
+          >
+            {{ store.feedbackError[card.shownId] }}
+          </p>
         </li>
       </ol>
     </AsyncState>

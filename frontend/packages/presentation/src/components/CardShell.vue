@@ -7,6 +7,10 @@ const props = defineProps<{
   card: CardView;
   fallbackMessage?: string | undefined;
 }>();
+const emit = defineEmits<{
+  like: [card: CardView];
+  dismiss: [card: CardView];
+}>();
 const titleId = `card-${Math.random().toString(36).slice(2)}-title`;
 const href = computed(() => sanitizeUrl(props.card.data.ref.canonical_url));
 const mediaUrl = computed(() =>
@@ -35,8 +39,20 @@ const status = computed(() => {
     <p data-card-summary>{{ summary }}</p>
     <p aria-label="Provider">{{ card.providerLabel }}</p>
     <div role="group" aria-label="Feedback actions">
-      <button type="button" aria-label="Like recommendation">Like</button>
-      <button type="button" aria-label="Dismiss recommendation">Dismiss</button>
+      <button
+        type="button"
+        aria-label="Like recommendation"
+        @click="emit('like', card)"
+      >
+        Like
+      </button>
+      <button
+        type="button"
+        aria-label="Dismiss recommendation"
+        @click="emit('dismiss', card)"
+      >
+        Dismiss
+      </button>
     </div>
   </article>
 </template>

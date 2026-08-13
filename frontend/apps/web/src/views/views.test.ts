@@ -22,6 +22,13 @@ function api(overrides: Partial<WebApi> = {}): WebApi {
       },
     }),
     recommendations: async () => ({ items: [] }),
+    feedback: async () => ({
+      result: {
+        feedback_id: "feedback_11111111111111111111111111111111",
+        observation_id: "obs_11111111111111111111111111111111",
+        inserted: true,
+      },
+    }),
     profile: async () => ({
       profile: { version: 1, preference_summary: [], insights: [] },
     }),
@@ -160,10 +167,12 @@ describe("web view behavior", () => {
     expect(wrapper.find('[role="tab"]').exists()).toBe(false);
   });
 
-  it("resolves recommendation content into the shared CardRenderer", async () => {
+  it("resolves recommendation content and wires shared card feedback", async () => {
+    const feedback = vi.fn(api().feedback);
     const wrapper = mountView(
       RecommendationsView,
       api({
+        feedback,
         recommendations: async () => ({
           items: [
             {
@@ -214,6 +223,15 @@ describe("web view behavior", () => {
     );
     await vi.waitFor(() =>
       expect(wrapper.find("article.obc-card").exists()).toBe(true),
+    );
+    await wrapper.get('[aria-label="Like recommendation"]').trigger("click");
+    await vi.waitFor(() => expect(feedback).toHaveBeenCalledOnce());
+    expect(feedback).toHaveBeenCalledWith(
+      expect.objectContaining({
+        shown_id: "shown_11111111111111111111111111111111",
+        kind: "liked",
+      }),
+      expect.any(AbortSignal),
     );
   });
 });

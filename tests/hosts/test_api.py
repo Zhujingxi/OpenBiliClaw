@@ -861,17 +861,22 @@ async def test_every_mutation_transport_rejects_coercion(
 
 async def test_static_frontend_serves_assets_and_spa_fallback(tmp_path) -> None:  # type: ignore[no-untyped-def]
     (tmp_path / "index.html").write_text("spa-index", encoding="utf-8")
-    (tmp_path / "app.css").write_text("css", encoding="utf-8")
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    (assets / "app-123.css").write_text("css", encoding="utf-8")
     app = create_app(HostDependencies(facade=Facade()), frontend_dir=tmp_path)
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
     ) as api:
-        asset = await api.get("/app.css")
+        asset = await api.get("/assets/app-123.css")
         route = await api.get("/profile")
         traversal = await api.get("/../outside")
     assert asset.text == "css"
+    assert asset.headers["cache-control"] == "public, max-age=31536000, immutable"
     assert route.text == "spa-index"
+    assert route.headers["cache-control"] == "no-cache"
     assert traversal.text == "spa-index"
+    assert traversal.headers["cache-control"] == "no-cache"
 
 
 async def test_app_lifespan_is_composition_owned_and_schema_export_is_idle() -> None:

@@ -8,6 +8,10 @@ import VideoCard from "../cards/VideoCard.vue";
 import type { CardKind, CardView } from "../contracts";
 
 const props = defineProps<{ card: CardView }>();
+const emit = defineEmits<{
+  like: [card: CardView];
+  dismiss: [card: CardView];
+}>();
 const trustedRenderers: Readonly<Partial<Record<CardKind, Component>>> = {
   video: VideoCard,
   image: ImageCard,
@@ -33,5 +37,7 @@ const fallbackMessage = computed(() =>
     :card="card"
     :fallback-message="fallbackMessage"
     :data-fallback="renderer === FallbackCard ? 'true' : undefined"
+    @like="emit('like', card)"
+    @dismiss="emit('dismiss', card)"
   />
 </template>

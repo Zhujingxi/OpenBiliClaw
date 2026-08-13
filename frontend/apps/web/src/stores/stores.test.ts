@@ -39,6 +39,13 @@ function api(overrides: Partial<WebApi> = {}): WebApi {
       },
     }),
     recommendations: async () => ({ items: [] }),
+    feedback: async () => ({
+      result: {
+        feedback_id: "feedback_11111111111111111111111111111111",
+        observation_id: "obs_11111111111111111111111111111111",
+        inserted: true,
+      },
+    }),
     profile: async () => ({
       profile: { version: 1, preference_summary: [], insights: [] },
     }),
@@ -146,6 +153,41 @@ describe("durable concern stores", () => {
     const sources = useSourcesStore();
     await sources.load(api());
     expect(sources.phase).toBe("empty");
+  });
+
+  it("submits server-authoritative recommendation feedback and exposes typed expiry", async () => {
+    const feedback = vi.fn(api().feedback);
+    const store = useRecommendationsStore();
+    await store.load(
+      api({ recommendations: async () => ({ items: [feedItem] }) }),
+    );
+    const card = store.cards[0];
+    if (card === undefined) throw new Error("expected recommendation card");
+    await store.like(api({ feedback }), card);
+    expect(feedback).toHaveBeenCalledWith(
+      {
+        idempotency_key: `${feedItem.shown_id}:liked`,
+        shown_id: feedItem.shown_id,
+        content_ref: feedItem.ref,
+        kind: "liked",
+      },
+      expect.any(AbortSignal),
+    );
+    expect(store.feedbackState[feedItem.shown_id]).toBe("liked");
+
+    const expired = new Error("Request failed with status 404");
+    Object.assign(expired, { status: 404 });
+    await store.dismiss(
+      api({
+        feedback: async () => {
+          throw expired;
+        },
+      }),
+      card,
+    );
+    expect(store.feedbackError[feedItem.shown_id]).toBe(
+      "This recommendation expired. Refresh the feed and try again.",
+    );
   });
 
   it("tracks session/auth without mirroring backend state", () => {

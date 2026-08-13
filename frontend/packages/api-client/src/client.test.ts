@@ -156,6 +156,52 @@ describe("ApiClient", () => {
     });
   });
 
+  it("posts generated feedback bodies with mutation headers", async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(
+        new Response(
+          '{"result":{"feedback_id":"feedback_11111111111111111111111111111111","observation_id":"obs_11111111111111111111111111111111","inserted":true}}',
+        ),
+      );
+    await new ApiClient("", fetcher, "device-123").request({
+      path: "/v1/feedback",
+      method: "post",
+      body: {
+        idempotency_key: "feedback:shown-1:liked",
+        shown_id: "shown-1",
+        content_ref: {
+          provider_id: { value: "demo" },
+          content_kind: { value: "video" },
+          provider_content_id: "one",
+          canonical_url: "https://example.test/one",
+        },
+        kind: "liked",
+      },
+      validate: (value): value is components["schemas"]["FeedbackResponse"] =>
+        isRecord(value) && "result" in value,
+    });
+    expect(fetcher).toHaveBeenCalledWith("/v1/feedback", {
+      method: "POST",
+      body: JSON.stringify({
+        idempotency_key: "feedback:shown-1:liked",
+        shown_id: "shown-1",
+        content_ref: {
+          provider_id: { value: "demo" },
+          content_kind: { value: "video" },
+          provider_content_id: "one",
+          canonical_url: "https://example.test/one",
+        },
+        kind: "liked",
+      }),
+      headers: {
+        "content-type": "application/json",
+        "X-Device-ID": "device-123",
+        "X-CSRF-Token": "device-123",
+      },
+    });
+  });
+
   it("fails closed when a mutation has no device identity", async () => {
     const client = new ApiClient("", vi.fn<typeof fetch>());
     await expect(

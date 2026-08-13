@@ -35,6 +35,7 @@ function api(overrides: Partial<WebApi>): WebApi {
     listSources: unused,
     connectSource: unused,
     recommendations: unused,
+    feedback: unused,
     profile: unused,
     editProfile: unused,
     assistantTurn: unused,

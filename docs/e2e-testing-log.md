@@ -390,3 +390,35 @@ cat data-e2e/reports/l6.json
 The final real run reported one passed Docker E2E test. No key, bearer, cookie, provider response body, title, profile text, or account identity appears in the report or this log.
 
 8. **Independent review — build-context secret boundary:** image-layer inspection was clean, but `.dockerignore` omitted `data-e2e/` and `model_api_key.txt`; the source Compose default also pointed at the gitignored L0 key path. Docker therefore sent the local E2E vault/key/cookie/database directory to the build daemon even though no Dockerfile instruction copied it into a layer. Fixed both supported secret locations in `.dockerignore`, aligned both Compose defaults to `./model_api_key.txt`, and pinned the exclusion with a static regression test.
+
+## L7 — Agent-driven Web UI
+
+### Trace
+
+1. **Test:** open the live Vue SPA in Chrome and load Recommendations.
+   **Failure:** every API call failed with `TypeError: Illegal invocation`.
+   **Root cause:** `ApiClient` captured native `fetch` and later invoked it without its Window receiver, which Chrome 151 rejects.
+   **Fix:** bind the injected fetcher when constructing the client and pin the receiver requirement in a unit test.
+   **Retest:** Recommendations rendered real feed cards and Profile rendered the derived projection.
+
+2. **Test:** connect Bilibili through the Web source form.
+   **Failure:** the browser's JSON `permissions` array always returned 422 because the strict transport schema accepted only an already-constructed Python `frozenset[Permission]`.
+   **Fix:** validate JSON collections and convert each string member at the transport boundary.
+   **Retest:** anonymous connection succeeded and the Search view returned real provider results.
+
+3. **Test:** send an Assistant message.
+   **Failure:** the hardcoded `conv_web...` ID did not satisfy `conv_[0-9a-f]{32}` and returned 422. After replacing it, real model unavailability escaped as an untyped 500.
+   **Fix:** generate and persist a valid browser conversation ID and translate Assistant `AIRuntimeError` to safe Application `UNAVAILABLE`.
+   **Retest:** request validation passed and the unavailable configured model produced typed 503 instead of 500.
+
+4. **Test:** click Like/Dismiss on a recommendation card.
+   **Failure:** both buttons were presentation-only; no event, Web API operation, store action, or `shown_id` mapping existed, so the L5 feedback workflow was unreachable.
+   **Fix (TDD):** shared cards emit typed `like`/`dismiss` events; the Web card view retains `shown_id`; the recommendation store calls generated `POST /v1/feedback` with `idempotency_key`, `shown_id`, matching `content_ref`, and exact `liked`/`dismissed` kinds. Updates are server-authoritative, and 404/409 delivery expiry is visibly actionable.
+   **Retest:** api-client serialization, presentation event propagation, store success/expiry, and RecommendationsView wiring tests pass.
+
+5. **Test:** rebuild the Vite artifact, then navigate in the existing Chrome session.
+   **Failure:** the host served SPA HTML without cache policy, so Chrome heuristically reused HTML that referenced an old bundle hash.
+   **Fix (TDD):** index/route fallback responses use `Cache-Control: no-cache`; fingerprinted `/assets/*` responses use `public, max-age=31536000, immutable`.
+   **Retest:** host-level static serving coverage pins both response classes.
+
+No secret, provider response body, title, profile text, account identity, cookie, key, or bearer value is recorded in this trace.

@@ -16,6 +16,7 @@ export type Availability = "available" | "deleted" | "provider-unavailable";
 
 /** UI-local shell metadata around canonical CardData. */
 export interface CardView {
+  readonly shownId?: string;
   readonly data: CardData;
   readonly version: number;
   readonly kind: CardKind;
