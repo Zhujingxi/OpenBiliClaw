@@ -6,6 +6,8 @@
 
 ## Unreleased
 
+- Replaced the hardcoded chat-provider enum, endpoints, and capabilities with the live models.dev catalog. The validated catalog is cached in the data directory for 24 hours with stale-cache offline fallback and a typed first-use-offline error. Catalog SDK markers select protocol families while PydanticAI's registry owns native provider selection (including DeepSeek's native profile). Fully custom providers require explicit protocol, endpoint, and complete capabilities. Kimi coding now resolves from the catalog to its Anthropic endpoint instead of a project-pinned OpenAI-compatible route.
+
 - Added native DeepSeek chat construction through PydanticAI's `DeepSeekProvider`, preserving its vendor model profile (including reasoning fields and the `deepseek-reasoner` forced-tool caveat) while retaining endpoint overrides for gateways. The real two-provider Assistant matrix now uses native DeepSeek instead of a generic OpenAI endpoint override; `disable_thinking` remains confined to the OpenAI constructor.
 
 - Fixed Kimi Assistant tool-output compatibility without a generic provider-body escape hatch. The coding endpoint supports tool calls, but its default thinking mode rejects PydanticAI's forced `tool_choice = "required"`; the reviewed `[model.options] disable_thinking` toggle now sends only `thinking: {type: "disabled"}` through the native OpenAI constructor. The Assistant output tool schema now also enumerates its four valid discriminator values instead of advertising an unconstrained string. A two-provider real application-graph matrix verifies both the Kimi opt-in and the untouched standard path: DeepSeek `deepseek-chat` handles forced output tools natively with the option absent.

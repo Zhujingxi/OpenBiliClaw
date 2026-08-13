@@ -1,45 +1,36 @@
-# Unified PydanticAI Providers
+# Catalog-driven PydanticAI Providers
 
-`src/openbiliclaw/ai/providers/` is the single model-construction boundary. “Unified” means one strict configuration shape, one `ModelFactory`, PydanticAI native providers, and one `AIRuntime.run()` execution path. It does not mean forcing every vendor through an OpenAI-compatible proxy.
+`src/openbiliclaw/ai/providers/` is the single model-construction boundary. Chat provider metadata is not maintained in this repository: `ModelCatalog` reads `https://models.dev/api.json`, validates the relevant provider/model fields, and caches the response as `models.dev.json` in the configured data directory.
 
-## Chat model construction
+## Catalog loading and offline behavior
 
-`ModelInstanceConfig` is frozen and rejects unknown fields. It contains provider kind (`openai`, `anthropic`, `deepseek`, `google`, or `openrouter`), model name, optional endpoint override, opaque CredentialVault secret reference, reviewed options, declared capabilities, owner, and provider version.
+A cache younger than 24 hours is used without a request. On an absent or stale cache the service fetches models.dev and atomically replaces the cache after validation. If refresh fails, a valid stale cache remains usable. If no valid cache exists, construction raises a typed `CatalogError` naming the cache path. The normal test suite uses `tests/fixtures/models.dev.small.json`; it never accesses the network.
 
-`ModelFactory` selects only thin native PydanticAI constructors:
+## Resolution and dispatch
 
-- `OpenAIProvider` + `OpenAIChatModel`;
-- `AnthropicProvider` + `AnthropicModel`;
-- `DeepSeekProvider` + `OpenAIChatModel`;
-- `GoogleProvider` + `GoogleModel`;
-- `OpenRouterProvider` + `OpenAIChatModel`.
+`[model].provider` is a models.dev provider ID and `model_name` must exist under that provider. The catalog supplies the endpoint and capabilities (`tool_call`, `structured_output`, `attachment`, reasoning, and context limit). An explicit capability table replaces the complete catalog capability set; partial overrides are rejected.
 
-These modules contain no request logic. Credentials resolve only inside the selected trusted constructor callback. The native DeepSeek provider supplies PydanticAI's vendor model profile (including the `reasoning_content` thinking field and the `deepseek-reasoner` caveat that forced `tool_choice = "required"` is unsupported); optional endpoint overrides retain that profile for gateway deployments. OpenRouter’s native provider does not accept a base URL, so an endpoint override fails explicitly rather than being ignored. The reviewed `disable_thinking` option affects only the OpenAI constructor: it sets PydanticAI `extra_body` to `{"thinking": {"type": "disabled"}}`; when false, no `extra_body` is added. This supports thinking-always-on OpenAI-compatible endpoints whose forced output tools require `tool_choice = "required"`, without exposing a generic request-body escape hatch.
+| models.dev `npm` marker | Protocol family | PydanticAI construction |
+| --- | --- | --- |
+| `@ai-sdk/openai`, `@ai-sdk/openai-compatible` | OpenAI | Native `OpenAIProvider`/`DeepSeekProvider` registry matches; generic `OpenAIProvider` for all other IDs |
+| `@ai-sdk/anthropic` | Anthropic | `AnthropicProvider` |
+| `@ai-sdk/google` | Google | `GoogleProvider` |
+| `@openrouter/ai-sdk-provider` | OpenRouter | `OpenRouterProvider` |
 
-`BuiltModel` preserves a stable non-secret fingerprint and the declared-versus-verified capability distinction. Native tool-call output, native tools, vision, and streaming remain unverified; opt-in probe primitives and an in-memory store exist, but Composition does not run or persist probe results. Understanding achieves validated structured output with PydanticAI `PromptedOutput`: providers return schema-guided JSON as ordinary text, then Pydantic validates a model-friendly draft and the application attaches deterministic IDs/timestamps. Production calls flow from Composition’s configured model through `RouteTable` and `AIRuntime.run()`; no application-owned parallel chat integration remains.
+Unknown markers fail with `UnsupportedProtocolError` containing the marker. Within the OpenAI family, PydanticAI's registry resolves `openai` and `deepseek` to their native constructors, preserving DeepSeek's vendor reasoning profile without an OpenBiliClaw provider-ID switch. Other registry classes—including Alibaba, Hugging Face, Moonshot AI, Nebius, and OVHcloud in the current dependency—fall back to generic `OpenAIProvider` with the catalog endpoint; OpenBiliClaw does not assume that every registry provider exposes the same constructor contract.
 
-### Verified OpenAI-compatible tool matrix
+A provider ID absent from models.dev is accepted only when `[model]` declares `protocol`, `endpoint`, and every field in `[model.capabilities]`. This fully explicit path is the escape hatch for private services or catalog errors; it does not add provider knowledge to the application.
 
-| Provider / endpoint | Model | `tool_choice = "required"` | `disable_thinking` |
-| --- | --- | --- | --- |
-| Kimi coding / `https://api.kimi.com/coding/v1` | `kimi-for-coding` | Yes, when thinking is disabled | Required |
-| Native DeepSeek / `https://api.deepseek.com` | `deepseek-chat` | Yes, with PydanticAI's vendor profile | Not applicable |
-| Other endpoints | Unverified | Unverified | Off by default |
+`ModelInstanceConfig` contains the resolved free-form provider ID, protocol, model, endpoint, opaque vault reference, options, and capabilities. `ModelFactory` resolves credentials only inside the selected constructor. `BuiltModel` preserves a non-secret fingerprint and declared-versus-verified capabilities. Production calls still use `RouteTable` and `AIRuntime.run()`.
 
-OpenAI-compatible endpoints are not assumed to share tool/thinking compatibility. The toggle targets endpoints that force-enable thinking, specifically the verified Kimi coding plan whose thinking mode rejects forced `tool_choice = "required"`. It is not a general model workaround: false/absent sends the standard OpenAI request unchanged, non-OpenAI constructors ignore it, and native DeepSeek handles its quirks through PydanticAI's model profile instead. The coding-plan `kimi-for-coding` endpoint has no PydanticAI preset; the standard Moonshot API is unused, so a `moonshotai` provider kind is deliberately not added.
+## Kimi coding endpoint
+
+models.dev identifies `kimi-for-coding` as Anthropic protocol at `https://api.kimi.com/coding/v1`. Catalog resolution therefore uses `AnthropicProvider` and leaves thinking enabled; no endpoint or disable-thinking exception is configured. The narrow OpenAI `disable_thinking` option remains available only for fully explicit OpenAI-protocol deployments that require it.
 
 ## Embeddings
 
-Embedding configuration uses the same provider/model/endpoint/secret-reference shape as chat. It does not introduce a separately configured HTTP endpoint or custom JSON transport. `NativeEmbeddingTransport` uses the embeddings resource on the client owned by PydanticAI’s configured `OpenAIProvider`. Official OpenAI requests include the configured `dimensions`; custom endpoints omit that vendor-specific request parameter, while `EmbeddingService` still validates every returned vector against `output_dimensions`.
-
-PydanticAI’s Anthropic, Google, and OpenRouter provider abstractions do not currently expose a common native embeddings resource in this dependency version, so those combinations fail closed with `UnsupportedCapabilityError`. The existing embedding service still owns deterministic batching, resource budgets, retry/timeout/cancellation, vector count/dimension validation, usage attribution, and provenance.
-
-Production Composition constructs `EmbeddingService` from `[embedding]` and exposes it as an inspectable `ApplicationServices` boundary. For `BAAI/bge-small-zh-v1.5`, `embed_query()` prepends the model-card Chinese retrieval instruction (`为这个句子生成表示以用于检索相关文章：`); document embeddings are never prefixed. No durable semantic index consumes it yet: L4 confirmed Recommendation discovery is still text-query based and therefore deliberately added no speculative table. Ownership and ingestion design will land only with a concrete semantic retrieval consumer.
+Embedding configuration remains explicit in this pass. `NativeEmbeddingTransport` uses the embeddings resource on PydanticAI's `OpenAIProvider`; unsupported protocol families fail closed. Official OpenAI requests include configured dimensions and custom endpoints omit that vendor-specific parameter while response vectors are still validated.
 
 ## Operational boundary
 
-OpenBiliClaw never downloads, bundles, starts, supervises, or serves model runtimes. Providers connect to externally served models. Future local inference must run as a separate service and be reached through one of the supported native provider APIs.
-
-## Dependencies
-
-The application pins `pydantic-ai-slim[anthropic,google,openai,openrouter]`; PydanticAI's DeepSeek provider reuses its OpenAI client dependency. Vendor SDKs are dependency details of the native PydanticAI provider layer, not independent OpenBiliClaw integrations.
+OpenBiliClaw never downloads, bundles, starts, supervises, or serves model runtimes. Catalog data contains no credentials. Secrets remain opaque vault references and are resolved only by trusted constructors.

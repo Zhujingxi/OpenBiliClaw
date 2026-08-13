@@ -6,7 +6,9 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol, TypeVar
 
-from openbiliclaw.ai.providers.models.config import ModelInstanceConfig, ProviderKind
+from openbiliclaw.ai.providers.catalog import Protocol as ProviderProtocol
+from openbiliclaw.ai.providers.catalog import UnsupportedProtocolError
+from openbiliclaw.ai.providers.models.config import ModelInstanceConfig
 from openbiliclaw.ai.providers.verification import VerifiedCapabilities
 
 if TYPE_CHECKING:
@@ -37,13 +39,13 @@ class BuiltModel:
 
 
 class ModelFactory:
-    """Map one configuration shape to PydanticAI's native provider layer."""
+    """Dispatch catalog protocols through PydanticAI's provider registry."""
 
     def __init__(
         self,
         vault: VaultResolver,
         *,
-        builders: Mapping[ProviderKind, ModelBuilder] | None = None,
+        builders: Mapping[ProviderProtocol, ModelBuilder] | None = None,
     ) -> None:
         self._vault = vault
         self._builders = dict(builders or {})
@@ -51,7 +53,7 @@ class ModelFactory:
     def build(self, config: ModelInstanceConfig) -> BuiltModel:
         """Resolve a secret only inside its trusted native constructor."""
 
-        builder = self._builders.get(config.provider) or self._native_builder(config.provider)
+        builder = self._builders.get(config.protocol) or self._native_builder(config)
         model = self._vault.resolve(
             config.secret_ref,
             lambda secret: builder(config, secret.tobytes().decode("utf-8")),
@@ -59,31 +61,29 @@ class ModelFactory:
         fingerprint = config.fingerprint()
         return BuiltModel(
             model=model,
-            instance_id=f"{config.provider.value}:{config.model_name}:{fingerprint[:12]}",
-            provider=config.provider.value,
+            instance_id=f"{config.provider}:{config.model_name}:{fingerprint[:12]}",
+            provider=config.provider,
             owner=config.owner,
             declared_capabilities=config.capabilities,
             verification=VerifiedCapabilities.unverified(config),
         )
 
     @staticmethod
-    def _native_builder(provider: ProviderKind) -> ModelBuilder:
-        if provider is ProviderKind.OPENAI:
-            from .openai import build as native_build
-
-            return native_build
-        if provider is ProviderKind.ANTHROPIC:
+    def _native_builder(config: ModelInstanceConfig) -> ModelBuilder:
+        if config.protocol == "anthropic":
             from .anthropic import build as anthropic_build
 
             return anthropic_build
-        if provider is ProviderKind.DEEPSEEK:
-            from .deepseek import build as deepseek_build
-
-            return deepseek_build
-        if provider is ProviderKind.GOOGLE:
+        if config.protocol == "google":
             from .google import build as google_build
 
             return google_build
-        from .openrouter import build as openrouter_build
+        if config.protocol == "openrouter":
+            from .openrouter import build as openrouter_build
 
-        return openrouter_build
+            return openrouter_build
+        if config.protocol == "openai":
+            from .openai import build as openai_build
+
+            return openai_build
+        raise UnsupportedProtocolError(f"unsupported provider protocol: {config.protocol}")

@@ -1,19 +1,56 @@
 # Configuration
 
-`config.example.toml` is the authoritative current shape. Unknown sections, fields, and model provider kinds fail validation.
+`config.example.toml` is the authoritative shape. Unknown sections and fields fail validation.
 
 | Section | Fields |
 |---|---|
-| `[model]` | `provider`, `model_name`, optional native-provider `endpoint`, opaque `secret_ref` |
+| `[model]` | models.dev `provider`, `model_name`, opaque `secret_ref`; optional endpoint override; custom-only `protocol` |
+| `[model.capabilities]` | complete override: `tools`, `structured_output`, `vision`, `context_tokens`, `streaming`, `reasoning` |
 | `[model.options]` | `disable_thinking` (default `false`) |
-| `[embedding]` | the same provider fields plus `output_dimensions` |
-| `[content]` | `enabled` provider IDs |
+| `[embedding]` | explicit provider/model/endpoint/secret fields plus `output_dimensions` |
+| `[content]` | enabled provider IDs |
 | `[recommendation]` | `pool_target_count` (1..10000) |
 | `[host]` | `api_host`, `api_port`, optional opaque `bearer_secret_ref` |
 | `[runtime]` | `default_timeout_seconds`, `default_resource_limit` |
 
-Supported model provider kinds are `openai`, `anthropic`, `deepseek`, `google`, and `openrouter`. Both AI sections use the same PydanticAI-native provider configuration. `model.options.disable_thinking` is a narrow OpenAI-constructor compatibility toggle: when enabled it sends `thinking = {type = "disabled"}` in the provider request body. Use it for thinking-always-on OpenAI-compatible endpoints such as `kimi-for-coding` when PydanticAI forces `tool_choice = "required"`; other native provider constructors ignore it. Native embedding access currently requires the OpenAI provider; unsupported providers fail closed. For official OpenAI embedding endpoints, `output_dimensions` is requested from the provider. For custom endpoints it is only the required response-vector dimension, because the OpenAI-specific request parameter is omitted. The application does not host models.
+## Catalog model
 
-Secrets are never valid inline values. Model, host bearer, and content credentials are referenced through the credential vault. `OPENBILICLAW_API_BEARER_SECRET_REF` accepts only an opaque vault reference, never the bearer value. Non-loopback API binding fails closed unless `host.bearer_secret_ref` resolves successfully. Other environment variables use the `OPENBILICLAW_` names implemented in `core.config`; command-line values have highest precedence.
+For a catalog model only the provider ID, model name, and secret reference are required:
 
-The database defaults to `<data-dir>/openbiliclaw.db`. An unversioned existing application database stops startup and requires an explicit reset/import decision. Destructive target migrations require a verified backup.
+```toml
+[model]
+provider = "deepseek"
+model_name = "deepseek-chat"
+secret_ref = "vault:cred_..."
+```
+
+The endpoint, protocol, and capabilities come from models.dev. Provider IDs are free-form strings, so existing `openai`, `anthropic`, `deepseek`, `google`, and `openrouter` configurations remain syntactically valid. The configured model must exist in the current catalog provider entry.
+
+## Fully custom provider
+
+A provider absent from models.dev must declare the complete escape-hatch shape:
+
+```toml
+[model]
+provider = "private-gateway"
+model_name = "private-model"
+protocol = "openai"
+endpoint = "https://gateway.example/v1"
+secret_ref = "vault:cred_..."
+
+[model.capabilities]
+tools = true
+structured_output = true
+vision = false
+context_tokens = 32768
+streaming = true
+reasoning = false
+```
+
+Supported explicit protocols are `openai`, `anthropic`, `google`, and `openrouter`. Omitting any of protocol, endpoint, or the complete capability table fails closed. Catalog capability overrides also require the complete table so catalog truth is never accidentally mixed with a partial declaration.
+
+The catalog cache is `<data-dir>/models.dev.json`, fresh for 24 hours. Refresh failure uses a valid stale cache; first use while offline raises a clear typed error. No catalog snapshot is shipped in production.
+
+`model.options.disable_thinking` affects only OpenAI-protocol construction and is off by default. Catalog-routed `kimi-for-coding` uses its declared Anthropic protocol and does not require the option.
+
+Secrets are never valid inline values. Model, host bearer, and content credentials are referenced through the credential vault. Environment variables use the `OPENBILICLAW_` names implemented in `core.config`; CLI values have highest precedence.

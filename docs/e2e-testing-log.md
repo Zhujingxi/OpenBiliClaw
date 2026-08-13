@@ -2,6 +2,10 @@
 
 This is the durable test → debug → fix → test trace for the real-stack plan. It contains no credentials or external response bodies.
 
+## Catalog-driven provider resolution
+
+models.dev currently declares `kimi-for-coding` with `npm = "@ai-sdk/anthropic"` and `api = "https://api.kimi.com/coding/v1"`; DeepSeek declares the OpenAI-compatible protocol family and `https://api.deepseek.com`. E2E templates now omit project-owned endpoint pins and Kimi's OpenAI-only disable-thinking workaround. Live verification passed 4/4 after resetting the isolated accumulated E2E database: Kimi Assistant and preference analysis succeeded through `AnthropicProvider` with thinking enabled and automatic tool selection, while DeepSeek chat succeeded through the catalog OpenAI-family dispatch and PydanticAI's native `DeepSeekProvider`. The first Kimi attempt exposed that Anthropic's SDK appends `/v1/messages`; catalog base URLs ending in `/v1` are normalized once before provider construction. The matrix identifiers now explicitly describe `kimi-anthropic-thinking-on-prompted` and `deepseek-native-default`. Review follow-up reran the hermetic gates and the reset isolated live L3 matrix (4/4 passed). No credential or response body is written here.
+
 ## L0 — Environment and model connectivity
 
 ### Setup

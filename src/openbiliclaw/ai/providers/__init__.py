@@ -6,7 +6,7 @@ from .diagnostics import (
     ProviderDiagnostic,
     construction_diagnostic,
 )
-from .models import BuiltModel, ModelFactory, ModelInstanceConfig, ModelOptions, ProviderKind
+from .models import BuiltModel, ModelFactory, ModelInstanceConfig, ModelOptions
 from .verification import (
     CapabilityProbe,
     CapabilityResult,
@@ -29,7 +29,6 @@ __all__ = [
     "ModelInstanceConfig",
     "ModelOptions",
     "ProviderDiagnostic",
-    "ProviderKind",
     "UnsupportedCapabilityError",
     "VerifiedCapabilities",
     "construction_diagnostic",

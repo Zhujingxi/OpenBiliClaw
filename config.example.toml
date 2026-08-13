@@ -4,15 +4,15 @@
 
 [model]
 # Empty model_name = no model configured; `openbiliclaw check` validates clean.
-# provider: openai | anthropic | deepseek | google | openrouter (native PydanticAI providers)
+# provider is a models.dev provider ID; protocol, endpoint, and capabilities
+# resolve from its catalog entry. See docs/modules/config.md for custom providers.
 provider = "openai"
 model_name = ""
-# endpoint = "https://api.example.com/v1" # optional native-provider override
 # secret_ref = "vault:cred_..." # opaque vault reference, set when configuring a model
 
 [model.options]
-# Enable for thinking-always-on OpenAI-compatible endpoints such as
-# kimi-for-coding when PydanticAI must force tool_choice = "required".
+# Optional custom OpenAI-protocol compatibility switch; catalog-routed Kimi
+# uses its Anthropic protocol and does not need this.
 disable_thinking = false
 
 [embedding]

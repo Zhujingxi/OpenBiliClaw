@@ -14,7 +14,7 @@ from pydantic_ai.models.test import TestModel
 
 from openbiliclaw.access.models import CredentialAccessHandle, Permission
 from openbiliclaw.ai.providers.embeddings import EmbeddingBatch, EmbeddingService
-from openbiliclaw.ai.providers.models import BuiltModel, ModelInstanceConfig, ProviderKind
+from openbiliclaw.ai.providers.models import BuiltModel, ModelInstanceConfig
 from openbiliclaw.ai.providers.verification import VerifiedCapabilities
 from openbiliclaw.ai.runtime.capabilities import ModelCapabilities
 from openbiliclaw.application.refresh_recommendations import RefreshRecommendationsCommand
@@ -416,7 +416,8 @@ def test_model_configuration_wires_assistant_and_understanding_job(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     config = ModelInstanceConfig(
-        provider=ProviderKind.OPENAI,
+        provider="openai",
+        protocol="openai",
         endpoint="https://gateway.example/v1",
         model_name="test",
         secret_ref="cred_" + "a" * 32,
@@ -436,12 +437,15 @@ def test_model_configuration_wires_assistant_and_understanding_job(
         )
 
     monkeypatch.setattr("openbiliclaw.composition.build.ModelFactory.build", build_model)
+    (tmp_path / "models.dev.json").write_bytes(
+        (Path(__file__).parents[1] / "fixtures" / "models.dev.small.json").read_bytes()
+    )
     app = build_application(
         AppSettings(
             model={
                 "provider": "openai",
                 "endpoint": "https://gateway.example/v1",
-                "model_name": "test",
+                "model_name": "gpt-4o-mini",
                 "secret_ref": "vault:cred_" + "a" * 32,
                 "options": {"disable_thinking": True},
             }

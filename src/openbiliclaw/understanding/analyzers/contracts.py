@@ -52,7 +52,7 @@ PREFERENCE_ANALYZER = AnalyzerDefinition(
         "Copy evidence_id values exactly from the supplied evidence."
     ),
     agent=Agent(output_type=PromptedOutput(PreferenceDraftBatch)),
-    requirements=ModelRequirements(structured_output=True, context_tokens=4_096),
+    requirements=ModelRequirements(context_tokens=4_096),
     policy=RunPolicy(
         request_limit=2,
         input_tokens_limit=4_096,

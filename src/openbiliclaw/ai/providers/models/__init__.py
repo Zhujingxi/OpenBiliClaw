@@ -1,6 +1,6 @@
 """Unified construction through PydanticAI's native provider layer."""
 
-from .config import ModelInstanceConfig, ModelOptions, ProviderKind
+from .config import ModelInstanceConfig, ModelOptions
 from .factory import BuiltModel, ModelFactory
 
-__all__ = ["BuiltModel", "ModelFactory", "ModelInstanceConfig", "ModelOptions", "ProviderKind"]
+__all__ = ["BuiltModel", "ModelFactory", "ModelInstanceConfig", "ModelOptions"]

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from enum import StrEnum
+from typing import Literal, TypeAlias
 
 from pydantic import ConfigDict, Field
 from pydantic_ai.settings import ModelSettings
@@ -12,13 +12,7 @@ from pydantic_ai.settings import ModelSettings
 from openbiliclaw.ai.runtime.capabilities import ModelCapabilities
 from openbiliclaw.core._pydantic import StrictBaseModel
 
-
-class ProviderKind(StrEnum):
-    OPENAI = "openai"
-    ANTHROPIC = "anthropic"
-    DEEPSEEK = "deepseek"
-    GOOGLE = "google"
-    OPENROUTER = "openrouter"
+Protocol: TypeAlias = Literal["openai", "anthropic", "google", "openrouter"]
 
 
 class ModelOptions(StrictBaseModel):
@@ -47,7 +41,8 @@ class ModelInstanceConfig(StrictBaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True, arbitrary_types_allowed=True)
 
-    provider: ProviderKind
+    provider: str = Field(min_length=1)
+    protocol: Protocol
     model_name: str = Field(min_length=1)
     endpoint: str | None = Field(default=None, pattern=r"^https?://")
     secret_ref: str = Field(pattern=r"^cred_[0-9a-f]{32}$")
@@ -60,7 +55,8 @@ class ModelInstanceConfig(StrictBaseModel):
         """Stable non-secret provider configuration fingerprint."""
 
         payload = {
-            "provider": self.provider.value,
+            "provider": self.provider,
+            "protocol": self.protocol,
             "model": self.model_name,
             "endpoint": self.endpoint,
             "options": {

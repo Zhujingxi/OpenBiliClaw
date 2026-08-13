@@ -18,7 +18,7 @@ from openbiliclaw.ai.providers.embeddings.providers import (
     NativeEmbeddingTransport,
     build_embedding_transport,
 )
-from openbiliclaw.ai.providers.models import ModelInstanceConfig, ProviderKind
+from openbiliclaw.ai.providers.models import ModelInstanceConfig
 from openbiliclaw.ai.providers.verification import UnsupportedCapabilityError
 
 T = TypeVar("T")
@@ -30,11 +30,10 @@ class FakeVault:
         return callback(memoryview(b"canary-key"))
 
 
-def config(
-    provider: ProviderKind = ProviderKind.OPENAI, *, endpoint: str | None = None
-) -> ModelInstanceConfig:
+def config(provider: str = "openai", *, endpoint: str | None = None) -> ModelInstanceConfig:
     return ModelInstanceConfig(
         provider=provider,
+        protocol="openai" if provider == "openai" else provider,
         model_name="embedding-model",
         endpoint=endpoint,
         secret_ref="cred_" + "a" * 32,
@@ -94,11 +93,9 @@ def test_builder_resolves_secret_and_returns_native_openai_transport() -> None:
     )
 
 
-@pytest.mark.parametrize(
-    "provider", [ProviderKind.ANTHROPIC, ProviderKind.GOOGLE, ProviderKind.OPENROUTER]
-)
-def test_provider_without_native_embeddings_fails_closed(provider: ProviderKind) -> None:
-    with pytest.raises(UnsupportedCapabilityError, match=f"{provider.value} embeddings"):
+@pytest.mark.parametrize("provider", ["anthropic", "google", "openrouter"])
+def test_provider_without_native_embeddings_fails_closed(provider: str) -> None:
+    with pytest.raises(UnsupportedCapabilityError, match=f"{provider} embeddings"):
         build_embedding_transport(config(provider), FakeVault(), output_dimensions=2)
 
 

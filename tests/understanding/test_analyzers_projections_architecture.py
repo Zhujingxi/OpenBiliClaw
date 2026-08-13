@@ -134,8 +134,9 @@ def test_analyzer_definitions_have_stable_typed_bounded_contracts() -> None:
     )
     assert len({item.agent_id.value for item in definitions}) == 4
     for item in definitions:
-        assert item.requirements.structured_output
         assert item.context_version == 1
+    assert not PREFERENCE_ANALYZER.requirements.structured_output
+    assert all(item.requirements.structured_output for item in definitions[1:])
     assert PREFERENCE_ANALYZER.policy.timeout_seconds == 120
     assert all(item.policy.timeout_seconds == 30 for item in definitions[1:])
     preference_output = PREFERENCE_ANALYZER.agent.output_type

@@ -99,13 +99,11 @@ async def _record_preference(application: Application, statement: str) -> str:
 @pytest.mark.parametrize(
     "profile_name,config_name",
     (
-        ("kimi-thinking-disabled", "config.e2e.toml"),
-        ("deepseek-default", "config.e2e.deepseek.toml"),
+        ("kimi-anthropic-thinking-on-prompted", "config.e2e.toml"),
+        ("deepseek-native-default", "config.e2e.deepseek.toml"),
     ),
 )
-async def test_real_assistant_forced_output_tool_works_across_openai_compatible_profiles(
-    profile_name: str, config_name: str
-) -> None:
+async def test_real_assistant_catalog_provider_matrix(profile_name: str, config_name: str) -> None:
     config_path = _DATA_DIR / config_name
     assert config_path.is_file(), (
         f"missing {profile_name} E2E profile: {config_path}; run scripts/e2e.py l3 "

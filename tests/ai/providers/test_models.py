@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, TypeVar, cast
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from pydantic_ai.models.openai import OpenAIChatModel
     from pydantic_ai.profiles.openai import OpenAIModelProfile
 
 import pytest
@@ -16,7 +17,6 @@ from openbiliclaw.ai.providers.models import (
     ModelFactory,
     ModelInstanceConfig,
     ModelOptions,
-    ProviderKind,
     anthropic,
     deepseek,
     google,
@@ -27,7 +27,6 @@ from openbiliclaw.ai.providers.verification import (
     CapabilityProbe,
     CapabilityStatus,
     CapabilityVerificationStore,
-    UnsupportedCapabilityError,
     verification_key,
 )
 from openbiliclaw.ai.runtime.capabilities import ModelCapabilities
@@ -46,9 +45,10 @@ class FakeVault:
         return callback(memoryview(self.value))
 
 
-def config(provider: ProviderKind = ProviderKind.OPENAI, **updates: object) -> ModelInstanceConfig:
+def config(provider: str = "openai", **updates: object) -> ModelInstanceConfig:
     values: dict[str, object] = {
         "provider": provider,
+        "protocol": "openai" if provider in {"openai", "deepseek"} else provider,
         "model_name": "test-model",
         "secret_ref": "cred_" + "a" * 32,
     }
@@ -65,17 +65,21 @@ def test_options_are_reviewed_and_unknown_fields_fail() -> None:
     assert "extra_body" not in ModelOptions().to_settings()
     with pytest.raises(ValidationError):
         config(options={"mystery": True})
-    with pytest.raises(ValidationError, match="provider"):
+    with pytest.raises(ValidationError, match="protocol"):
         ModelInstanceConfig.model_validate(
             {"provider": "unknown", "model_name": "m", "secret_ref": "cred_" + "a" * 32}
         )
 
 
 def test_disable_thinking_only_changes_openai_model_settings() -> None:
-    assert openai.build(config(options={"temperature": 0.2}), "key").settings == {
-        "temperature": 0.2
-    }
-    model_config = config(options={"temperature": 0.2, "disable_thinking": True})
+    assert openai.build(
+        config("private", protocol="openai", options={"temperature": 0.2}), "key"
+    ).settings == {"temperature": 0.2}
+    model_config = config(
+        "private",
+        protocol="openai",
+        options={"temperature": 0.2, "disable_thinking": True},
+    )
 
     assert openai.build(model_config, "key").settings == {
         "temperature": 0.2,
@@ -88,10 +92,8 @@ def test_disable_thinking_only_changes_openai_model_settings() -> None:
 
 
 def test_deepseek_uses_native_profile_and_supports_endpoint_override() -> None:
-    default = deepseek.build(config(ProviderKind.DEEPSEEK, model_name="deepseek-reasoner"), "key")
-    overridden = deepseek.build(
-        config(ProviderKind.DEEPSEEK, endpoint="https://gateway.example/v1"), "key"
-    )
+    default = deepseek.build(config("deepseek", model_name="deepseek-reasoner"), "key")
+    overridden = deepseek.build(config("deepseek", endpoint="https://gateway.example/v1"), "key")
 
     profile = cast("OpenAIModelProfile", default.profile)
     assert default.client.base_url.host == "api.deepseek.com"
@@ -100,10 +102,10 @@ def test_deepseek_uses_native_profile_and_supports_endpoint_override() -> None:
     assert overridden.client.base_url == "https://gateway.example/v1/"
 
 
-@pytest.mark.parametrize("provider", list(ProviderKind))
-def test_native_factory_constructs_each_provider_without_network(provider: ProviderKind) -> None:
+@pytest.mark.parametrize("provider", ["openai", "anthropic", "deepseek", "google", "openrouter"])
+def test_native_factory_constructs_each_provider_without_network(provider: str) -> None:
     built = ModelFactory(FakeVault()).build(config(provider))
-    assert built.provider == provider.value
+    assert built.provider == provider
 
 
 def test_factory_resolves_secret_only_inside_selected_builder() -> None:
@@ -115,7 +117,7 @@ def test_factory_resolves_secret_only_inside_selected_builder() -> None:
         return TestModel()
 
     model_config = config(owner="recommendation", capabilities=ModelCapabilities(tools=True))
-    factory = ModelFactory(vault, builders={ProviderKind.OPENAI: builder})
+    factory = ModelFactory(vault, builders={"openai": builder})
     first = factory.build(model_config)
     second = factory.build(model_config)
     assert vault.resolved == 2
@@ -128,11 +130,12 @@ def test_factory_resolves_secret_only_inside_selected_builder() -> None:
     assert "secret-canary" not in repr(first)
 
 
-def test_openrouter_endpoint_override_fails_clearly() -> None:
-    with pytest.raises(UnsupportedCapabilityError, match="endpoint override"):
-        ModelFactory(FakeVault()).build(
-            config(ProviderKind.OPENROUTER, endpoint="https://override.example/v1")
-        )
+def test_openrouter_catalog_endpoint_uses_native_provider() -> None:
+    built = ModelFactory(FakeVault()).build(
+        config("openrouter", endpoint="https://openrouter.ai/api/v1")
+    )
+    model = cast("OpenAIChatModel", built.model)
+    assert model.client.base_url == "https://openrouter.ai/api/v1/"
 
 
 def test_fingerprint_and_capability_verification_preserve_identity() -> None:
@@ -145,7 +148,7 @@ def test_fingerprint_and_capability_verification_preserve_identity() -> None:
     assert CapabilityProbe.local_support(base, "tools").status is CapabilityStatus.UNSUPPORTED
 
     record = (
-        ModelFactory(FakeVault(), builders={ProviderKind.OPENAI: lambda *_: TestModel()})
+        ModelFactory(FakeVault(), builders={"openai": lambda *_: TestModel()})
         .build(base)
         .verification
     )

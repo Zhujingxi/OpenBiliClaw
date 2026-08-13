@@ -16,16 +16,11 @@ from openbiliclaw.access.broker import AccessBroker
 from openbiliclaw.access.manual import ManualAccessMethod
 from openbiliclaw.access.methods import AccessMethodRegistry
 from openbiliclaw.access.service import AccessService
+from openbiliclaw.ai.providers.catalog import CapabilityConfig, ModelCatalog, resolve_model
 from openbiliclaw.ai.providers.embeddings import EmbeddingModelInfo, EmbeddingService
 from openbiliclaw.ai.providers.embeddings.providers import build_embedding_transport
 from openbiliclaw.ai.providers.embeddings.service import query_prefix_for_model
-from openbiliclaw.ai.providers.models import (
-    ModelFactory,
-    ModelInstanceConfig,
-    ModelOptions,
-    ProviderKind,
-)
-from openbiliclaw.ai.runtime.capabilities import ModelCapabilities
+from openbiliclaw.ai.providers.models import ModelFactory, ModelInstanceConfig, ModelOptions
 from openbiliclaw.ai.runtime.execution import AgentRunRequest, AIRuntime
 from openbiliclaw.ai.runtime.routes import ConfiguredModel, ModelRoute, RouteTable
 from openbiliclaw.application.edit_profile import EditProfile
@@ -266,10 +261,14 @@ def build_application(
         access_methods.append(ManualAccessMethod(vault, providers.manual_specs))
     access_registry = AccessMethodRegistry(tuple(access_methods))
     access = AccessService(AccessBroker(access_registry), access_registry, telemetry=telemetry)
+    catalog = (
+        ModelCatalog(data_dir / "models.dev.json").load() if settings.model.model_name else None
+    )
     embeddings = None
     if settings.embedding.model_name:
         embedding_config = ModelInstanceConfig(
-            provider=ProviderKind(settings.embedding.provider),
+            provider=settings.embedding.provider,
+            protocol=settings.embedding.protocol or "openai",
             model_name=settings.embedding.model_name,
             endpoint=settings.embedding.endpoint,
             secret_ref=settings.embedding.secret_ref.removeprefix("vault:")
@@ -284,7 +283,7 @@ def build_application(
                 output_dimensions=settings.embedding.output_dimensions,
             ),
             EmbeddingModelInfo(
-                provider=embedding_config.provider.value,
+                provider=embedding_config.provider,
                 model=embedding_config.model_name,
                 dimensions=settings.embedding.output_dimensions,
                 normalized=True,
@@ -296,18 +295,28 @@ def build_application(
         )
     assistant_runtime = None
     if settings.model.model_name:
+        assert catalog is not None
+        resolved = resolve_model(
+            catalog,
+            provider_id=settings.model.provider,
+            model_name=settings.model.model_name,
+            endpoint=settings.model.endpoint,
+            protocol=settings.model.protocol,
+            capabilities=CapabilityConfig.model_validate(settings.model.capabilities.model_dump())
+            if settings.model.capabilities is not None
+            else None,
+        )
         configured = ModelFactory(vault).build(
             ModelInstanceConfig(
-                provider=ProviderKind(settings.model.provider),
+                provider=resolved.provider,
+                protocol=resolved.protocol,
                 model_name=settings.model.model_name,
-                endpoint=settings.model.endpoint,
+                endpoint=resolved.endpoint,
                 secret_ref=settings.model.secret_ref.removeprefix("vault:")
                 if settings.model.secret_ref
                 else "",
                 options=ModelOptions(disable_thinking=settings.model.options.disable_thinking),
-                capabilities=ModelCapabilities(
-                    tools=True, structured_output=True, context_tokens=8_192
-                ),
+                capabilities=resolved.capabilities,
                 owner="assistant",
             )
         )
@@ -416,7 +425,11 @@ def build_application(
     assistant = None
     if assistant_runtime is not None:
         assistant = AssistantService(
-            assistant_runtime, build_assistant_agent(assistant_workflow_tools(facade))
+            assistant_runtime,
+            build_assistant_agent(
+                assistant_workflow_tools(facade),
+                prompted_output=resolved.protocol == "anthropic",
+            ),
         )
         controller = AssistantController(
             assistant, repositories.conversations, understanding, facade

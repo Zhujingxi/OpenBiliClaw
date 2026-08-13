@@ -23,7 +23,16 @@ class _FrozenModel(StrictBaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
 
-ModelProviderName: TypeAlias = Literal["openai", "anthropic", "deepseek", "google", "openrouter"]
+ModelProtocol: TypeAlias = Literal["openai", "anthropic", "google", "openrouter"]
+
+
+class CapabilitySettings(_FrozenModel):
+    tools: bool
+    structured_output: bool
+    vision: bool
+    context_tokens: int = Field(ge=0)
+    streaming: bool
+    reasoning: bool
 
 
 class ModelOptions(_FrozenModel):
@@ -31,10 +40,12 @@ class ModelOptions(_FrozenModel):
 
 
 class ModelSettings(_FrozenModel):
-    provider: ModelProviderName = "openai"
+    provider: str = Field(default="openai", min_length=1, max_length=200)
     model_name: str = Field(default="", max_length=200)
+    protocol: ModelProtocol | None = None
     endpoint: str | None = Field(default=None, max_length=2_000, pattern=r"^https?://")
     secret_ref: SecretReference | None = None
+    capabilities: CapabilitySettings | None = None
     options: ModelOptions = ModelOptions()
 
 
@@ -78,7 +89,7 @@ class AppSettings(_FrozenModel):
 
 
 class ModelOverrides(_FrozenModel):
-    provider: ModelProviderName | None = None
+    provider: str | None = None
     model_name: str | None = None
     endpoint: str | None = None
     secret_ref: SecretReference | None = None

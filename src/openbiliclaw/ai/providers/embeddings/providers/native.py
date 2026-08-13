@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol, TypeVar
 
 from openbiliclaw.ai.providers.embeddings.protocol import EmbeddingBatch, EmbeddingTransportError
-from openbiliclaw.ai.providers.models.config import ModelInstanceConfig, ProviderKind
 from openbiliclaw.ai.providers.verification import UnsupportedCapabilityError
 
 if TYPE_CHECKING:
@@ -13,6 +12,8 @@ if TYPE_CHECKING:
 
     from openai import AsyncOpenAI
     from openai.types import CreateEmbeddingResponse
+
+    from openbiliclaw.ai.providers.models.config import ModelInstanceConfig
 
 T = TypeVar("T")
 
@@ -64,9 +65,9 @@ def build_embedding_transport(
 ) -> NativeEmbeddingTransport:
     """Build embeddings from the shared provider config or fail closed."""
 
-    if config.provider is not ProviderKind.OPENAI:
+    if config.protocol != "openai":
         raise UnsupportedCapabilityError(
-            f"{config.provider.value} embeddings are unsupported by the native provider"
+            f"{config.provider} embeddings are unsupported by the native provider"
         )
 
     from pydantic_ai.providers.openai import OpenAIProvider

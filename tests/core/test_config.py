@@ -21,13 +21,20 @@ def test_settings_are_frozen_and_unknown_fields_fail() -> None:
     settings = AppSettings()
     with pytest.raises(ValidationError):
         settings.host = settings.host.model_copy(update={"api_port": 9000})
-    with pytest.raises(ValidationError):
-        AppSettings.model_validate({"model": {"provider": "unknown"}})
+    assert AppSettings.model_validate({"model": {"provider": "custom"}}).model.provider == "custom"
     with pytest.raises(ValidationError):
         AppSettings.model_validate({"model": {"api_key": "secret"}})
     assert AppSettings.model_validate({"model": {"provider": "deepseek"}}).model.provider == (
         "deepseek"
     )
+
+
+@pytest.mark.parametrize("provider", ["openai", "anthropic", "deepseek", "google", "openrouter"])
+def test_old_provider_shape_still_loads(provider: str) -> None:
+    settings = AppSettings.model_validate({"model": {"provider": provider, "model_name": ""}})
+    assert settings.model.provider == provider
+    assert settings.model.protocol is None
+    assert settings.model.capabilities is None
 
 
 def test_model_and_embedding_share_native_provider_shape() -> None:

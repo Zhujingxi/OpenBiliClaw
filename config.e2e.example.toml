@@ -2,13 +2,10 @@
 # data-e2e/config.e2e.toml and replaces both placeholders with one vault ref.
 
 [model]
-provider = "openai"
+provider = "kimi-for-coding"
 model_name = "kimi-for-coding"
-endpoint = "https://api.kimi.com/coding/v1"
 secret_ref = "vault:E2E_SECRET_REF"
 
-[model.options]
-disable_thinking = true
 
 [embedding]
 provider = "openai"

@@ -7,12 +7,13 @@ from pathlib import Path
 import pytest
 from pydantic_ai import Agent
 
+from openbiliclaw.ai.providers.catalog import ModelCatalog, resolve_model
 from openbiliclaw.ai.providers.embeddings.protocol import EmbeddingModelInfo
 from openbiliclaw.ai.providers.embeddings.providers import build_embedding_transport
 from openbiliclaw.ai.providers.embeddings.service import EmbeddingService
-from openbiliclaw.ai.providers.models import ModelFactory, ModelInstanceConfig, ProviderKind
+from openbiliclaw.ai.providers.models import ModelFactory, ModelInstanceConfig
 from openbiliclaw.ai.runtime.budgets import RunPolicy
-from openbiliclaw.ai.runtime.capabilities import AgentId, ModelCapabilities, ModelRequirements
+from openbiliclaw.ai.runtime.capabilities import AgentId, ModelRequirements
 from openbiliclaw.ai.runtime.execution import AgentRunRequest, AIRuntime
 from openbiliclaw.ai.runtime.routes import ConfiguredModel, ModelRoute, RouteTable
 from openbiliclaw.composition.build import validated_settings
@@ -33,12 +34,21 @@ def _vault() -> CredentialVault:
 def _model_config() -> ModelInstanceConfig:
     settings = validated_settings(CONFIG)
     assert settings.model.secret_ref is not None
-    return ModelInstanceConfig(
-        provider=ProviderKind(settings.model.provider),
+    resolved = resolve_model(
+        ModelCatalog(DATA_DIR / "models.dev.json").load(),
+        provider_id=settings.model.provider,
         model_name=settings.model.model_name,
         endpoint=settings.model.endpoint,
+        protocol=settings.model.protocol,
+        capabilities=None,
+    )
+    return ModelInstanceConfig(
+        provider=resolved.provider,
+        protocol=resolved.protocol,
+        model_name=settings.model.model_name,
+        endpoint=resolved.endpoint,
         secret_ref=settings.model.secret_ref.removeprefix("vault:"),
-        capabilities=ModelCapabilities(context_tokens=8_192),
+        capabilities=resolved.capabilities,
         owner="e2e-l0",
     )
 
@@ -47,7 +57,8 @@ def _embedding_config() -> ModelInstanceConfig:
     settings = validated_settings(CONFIG)
     assert settings.embedding.secret_ref is not None
     return ModelInstanceConfig(
-        provider=ProviderKind(settings.embedding.provider),
+        provider=settings.embedding.provider,
+        protocol=settings.embedding.protocol or "openai",
         model_name=settings.embedding.model_name,
         endpoint=settings.embedding.endpoint,
         secret_ref=settings.embedding.secret_ref.removeprefix("vault:"),

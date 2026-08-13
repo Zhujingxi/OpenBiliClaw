@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 
 import pytest
 from pydantic_ai.models.test import TestModel
+from pydantic_ai.output import PromptedOutput
 
 from openbiliclaw.ai.runtime.capabilities import ModelCapabilities
 from openbiliclaw.ai.runtime.execution import AIRuntime
@@ -70,6 +71,19 @@ def test_output_tool_schema_enumerates_the_supported_kinds() -> None:
         "enum": ["message", "recommendations", "clarification", "pending_action"],
         "type": "string",
     }
+
+
+def test_prompted_output_branch_has_no_forced_output_tool() -> None:
+    agent = build_assistant_agent(prompted_output=True)
+
+    assert isinstance(agent.output_type, PromptedOutput)
+    assert agent._output_toolset is None
+    assert agent.output_type.outputs == (
+        AssistantMessage,
+        AssistantRecommendationPresentation,
+        AssistantClarification,
+        AssistantPendingAction,
+    )
 
 
 def _runtime(output: dict[str, object]) -> AIRuntime:
