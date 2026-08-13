@@ -9,12 +9,13 @@ const api: WebApi = providedApi;
 const store = useSourcesStore();
 const provider = ref("");
 const method = ref("default");
+const fieldId = ref("credential");
 const credential = ref("");
 async function connect(): Promise<void> {
   await store.connect(api, {
     provider_id: provider.value,
     method_id: method.value,
-    credential: credential.value || null,
+    submission: credential.value ? { [fieldId.value]: credential.value } : null,
     idempotency_key: crypto.randomUUID(),
     permissions: ["read_public"],
   });
@@ -29,6 +30,8 @@ onBeforeUnmount(store.cancel);
       <input id="provider-id" v-model="provider" autocomplete="off" required />
       <label for="method-id">Connection method</label>
       <input id="method-id" v-model="method" autocomplete="off" required />
+      <label for="field-id">Credential field ID</label>
+      <input id="field-id" v-model="fieldId" autocomplete="off" required />
       <label for="credential">Credential</label>
       <input
         id="credential"

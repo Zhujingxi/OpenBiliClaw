@@ -48,6 +48,7 @@ class RecommendationSettings(_FrozenModel):
 class HostSettings(_FrozenModel):
     api_host: str = Field(default="127.0.0.1", min_length=1)
     api_port: int = Field(default=8420, ge=1, le=65_535)
+    bearer_secret_ref: SecretReference | None = None
 
 
 class RuntimeSettings(_FrozenModel):
@@ -93,6 +94,7 @@ class RecommendationOverrides(_FrozenModel):
 class HostOverrides(_FrozenModel):
     api_host: str | None = None
     api_port: int | None = None
+    bearer_secret_ref: SecretReference | None = None
 
 
 class RuntimeOverrides(_FrozenModel):
@@ -180,6 +182,7 @@ def _apply_environment(values: dict[str, ConfigValue], environment: Mapping[str,
         ("OPENBILICLAW_EMBEDDING_ENDPOINT", "embedding", "endpoint"),
         ("OPENBILICLAW_EMBEDDING_SECRET_REF", "embedding", "secret_ref"),
         ("OPENBILICLAW_API_HOST", "host", "api_host"),
+        ("OPENBILICLAW_API_BEARER_SECRET_REF", "host", "bearer_secret_ref"),
     )
     for environment_key, section_name, key in string_keys:
         value = environment.get(environment_key)
@@ -254,6 +257,8 @@ def _apply_overrides(values: dict[str, ConfigValue], overrides: SettingsOverride
             _set(values, "host", "api_host", overrides.host.api_host)
         if overrides.host.api_port is not None:
             _set(values, "host", "api_port", overrides.host.api_port)
+        if overrides.host.bearer_secret_ref is not None:
+            _set(values, "host", "bearer_secret_ref", overrides.host.bearer_secret_ref)
     if overrides.runtime is not None:
         if overrides.runtime.default_timeout_seconds is not None:
             _set(

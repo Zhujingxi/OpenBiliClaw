@@ -416,10 +416,15 @@ def build_application(
             assistant, repositories.conversations, understanding, facade
         )
         facade.set_assistant(controller)
+    bearer_token = None
+    if settings.host.bearer_secret_ref is not None:
+        secret_id = settings.host.bearer_secret_ref.removeprefix("vault:")
+        bearer_token = vault.resolve(secret_id, lambda secret: bytes(secret).decode("utf-8"))
     dependencies = HostDependencies(
         facade=facade,
         security=HostSecurityPolicy(
             bind_host=settings.host.api_host,
+            bearer_token=bearer_token,
             allowed_origins=(
                 f"http://localhost:{settings.host.api_port}",
                 f"http://127.0.0.1:{settings.host.api_port}",

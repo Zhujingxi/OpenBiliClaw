@@ -1,0 +1,30 @@
+# Docker runtime template. docker/seed-runtime.py writes the usable config.toml
+# into the persistent runtime volume and replaces this opaque-reference token.
+
+[model]
+provider = "openai"
+model_name = "kimi-for-coding"
+endpoint = "https://api.kimi.com/coding/v1"
+secret_ref = "vault:DOCKER_MODEL_SECRET_REF"
+
+[embedding]
+provider = "openai"
+model_name = "BAAI/bge-small-zh-v1.5"
+endpoint = "http://embedding:7997"
+secret_ref = "vault:DOCKER_MODEL_SECRET_REF"
+output_dimensions = 512
+
+[content]
+enabled = ["bilibili"]
+
+[recommendation]
+pool_target_count = 100
+
+[host]
+api_host = "0.0.0.0"
+api_port = 8420
+bearer_secret_ref = "vault:DOCKER_BEARER_SECRET_REF"
+
+[runtime]
+default_timeout_seconds = 120.0
+default_resource_limit = 2

@@ -347,3 +347,46 @@ cat data-e2e/reports/l5.json
 ```
 
 The real run reported two passed tests. The server fixture invokes `openbiliclaw serve --config data-e2e/config.e2e.toml --data-dir data-e2e`, waits on `/v1/runtime/health`, and terminates it cleanly. No key, cookie, provider body, title, profile text, or account identity is written to the report or this log.
+
+## L6 — Docker deployment
+
+### Trace
+
+1. **Preflight:** Docker Engine 29.7.2 and Compose 5.4.0 were available through the host's Docker group (`sg docker -c 'docker ...'`). The E2E uses project `openbiliclaw-e2e-l6`; setup removes only that project and teardown always executes `down -v --remove-orphans`.
+
+2. **Test:** build a minimal Infinity sidecar with `infinity_emb[torch,server]==0.0.77`.
+   **Failure:** first pip solve rejected the L0 Typer workaround because Infinity declares `typer<0.13`; after installing Infinity first and upgrading Typer without dependency resolution, startup failed with `NameError: BetterTransformerManager` even though Optimum was not installed.
+   **Root cause:** Infinity's optional-dependency guard incorrectly enters the BetterTransformer path without a usable Optimum module. The `[torch,server]` image intentionally avoids Optimum.
+   **Fix:** build only the Torch/server extras, upgrade the CLI Typer separately, and start with `--no-bettertransformer`. No model-serving package enters the application image.
+   **Retest:** the sidecar downloaded `BAAI/bge-small-zh-v1.5`, reached `/health`, and Compose started the dependent backend.
+
+3. **Test:** start the backend on the container-required `0.0.0.0` binding.
+   **Failure:** every backend restart crashed because `HostSecurityPolicy` correctly requires a bearer for non-loopback binding, while configuration/composition had no bearer reference path.
+   **Root cause:** the reviewed security boundary existed but the supported Docker composition could not satisfy it.
+   **Fix (TDD):** `[host].bearer_secret_ref` and `OPENBILICLAW_API_BEARER_SECRET_REF` accept an opaque vault reference; composition resolves it inside the credential boundary. First-start seeding generates a cryptographically random bearer and stores only its reference in runtime config. Docker health resolves it internally without logging it.
+   **Retest:** unauthenticated SPA/API requests returned 401, authenticated health and SPA requests returned 200, and in-container `openbiliclaw check` passed.
+
+4. **Test:** submit the provider-owned Bilibili connection form through `/v1/sources/connect`.
+   **Failure:** the host converted a generic `credential` string into `{"credential": value}`, but Bilibili's advertised form field is `cookie`; the manual verifier could never receive a valid submission over HTTP.
+   **Root cause:** the host invented a generic secret field instead of preserving the provider form contract. L1b called the Application facade directly, so this host-only defect remained hidden.
+   **Fix (TDD):** the request accepts a secret `submission` mapping and passes provider field IDs unchanged. OpenAPI and the generated TypeScript client were regenerated.
+   **Retest:** host regression coverage pins the mapping. The Docker restart contract remains client resubmission because process-local access handles are not reconstructed from the vault.
+
+5. **Test:** containerized anonymous connect → bounded refill → delivered feed → feedback.
+   **Result:** the 20-item refill completed successfully within the 55-second supervised production policy on this host; feed items had stable shown IDs and feedback inserted once. A backend restart retained remaining feed IDs, the profile projection, and feedback idempotency. The interacted item correctly disappeared from the feed, so persistence compares only the still-selected IDs.
+
+6. **Restart probe:** after backend restart, source status is `disconnected`; resubmitting the anonymous connection succeeds. Authenticated credentials are opaque in the vault but no provider/account mapping exists, so clients must resubmit `submission.cookie`. Durable automatic reconnection remains deliberately unimplemented rather than guessed in Docker composition.
+
+7. **Presentation finding:** bearer middleware protects the SPA fallback as well as `/v1`. The extension can store a bearer, but the current Vue Web app cannot enroll one; direct Docker Web use therefore receives 401. This is recorded for L7 instead of weakening non-loopback authentication.
+
+### Reproduction
+
+```bash
+export OPENBILICLAW_MODEL_KEY_FILE="$HOME/.config/openbiliclaw/model_api_key"
+./scripts/e2e.py l6
+cat data-e2e/reports/l6.json
+```
+
+The final real run reported one passed Docker E2E test. No key, bearer, cookie, provider response body, title, profile text, or account identity appears in the report or this log.
+
+8. **Independent review — build-context secret boundary:** image-layer inspection was clean, but `.dockerignore` omitted `data-e2e/` and `model_api_key.txt`; the source Compose default also pointed at the gitignored L0 key path. Docker therefore sent the local E2E vault/key/cookie/database directory to the build daemon even though no Dockerfile instruction copied it into a layer. Fixed both supported secret locations in `.dockerignore`, aligned both Compose defaults to `./model_api_key.txt`, and pinned the exclusion with a static regression test.

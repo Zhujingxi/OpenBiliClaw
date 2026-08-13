@@ -170,6 +170,7 @@ class Facade:
     failure: Exception | None = None
     assistant_kind: str = "message"
     delay: float = 0
+    connected_submission: dict[str, str] | None = None
 
     async def _call(self, name: str) -> None:
         self.calls.append(name)
@@ -196,6 +197,7 @@ class Facade:
         return SourcesResult(items=(STATUS,))
 
     async def connect_source(self, command: ConnectSourceCommand) -> ConnectSourceResult:
+        self.connected_submission = dict(command.submission) if command.submission else None
         await self._call("connect_source")
         return ConnectSourceResult(status=STATUS, availability_refreshed=True)
 
@@ -333,6 +335,23 @@ def client(
 
 
 MUTATION_HEADERS = {"X-Device-ID": "d", "X-CSRF-Token": "d"}
+
+
+async def test_source_connect_passes_provider_form_submission() -> None:
+    facade = Facade()
+    async with client(facade) as api:
+        response = await api.post(
+            "/v1/sources/connect",
+            json={
+                "provider_id": "demo",
+                "method_id": "builtin.manual",
+                "idempotency_key": "connect:secret-form",
+                "submission": {"token": "synthetic-secret"},
+            },
+            headers=MUTATION_HEADERS,
+        )
+    assert response.status_code == 200
+    assert facade.connected_submission == {"token": "synthetic-secret"}
 
 
 async def test_mutation_double_submit_device_contract() -> None:

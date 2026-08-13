@@ -571,8 +571,6 @@ export interface components {
         ConnectSourceRequest: {
             /** Account Id */
             account_id?: string | null;
-            /** Credential */
-            credential?: string | null;
             /** Idempotency Key */
             idempotency_key: string;
             /** Method Id */
@@ -586,6 +584,10 @@ export interface components {
             permissions: components["schemas"]["Permission"][];
             /** Provider Id */
             provider_id: string;
+            /** Submission */
+            submission?: {
+                [key: string]: string;
+            } | null;
         };
         /**
          * ConnectionForm

@@ -115,3 +115,4 @@ backend.err
 /openbiliclaw-extension-v*.zip
 /openbiliclaw-extension-v*.xpi
 data-e2e/
+model_api_key.txt

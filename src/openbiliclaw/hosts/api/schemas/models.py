@@ -81,7 +81,7 @@ class ConnectSourceRequest(TransportModel):
     method_id: str = Field(min_length=1, max_length=128)
     permissions: frozenset[Permission] = frozenset({Permission.READ_PUBLIC})
     idempotency_key: str = Field(min_length=8, max_length=200)
-    credential: SecretStr | None = Field(default=None, repr=False, exclude=True)
+    submission: dict[str, SecretStr] | None = Field(default=None, repr=False, exclude=True)
 
 
 class DisconnectSourceRequest(TransportModel):

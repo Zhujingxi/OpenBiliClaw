@@ -38,7 +38,8 @@ RUN python -c "import tomllib, pathlib; deps = tomllib.load(open('pyproject.toml
     && pip install -r /tmp/requirements.txt \
     && rm /tmp/requirements.txt
 
-COPY README.md config.example.toml ./
+COPY README.md config.example.toml config.docker.toml ./
+COPY docker/seed-runtime.py docker/healthcheck.py ./docker/
 COPY src ./src
 COPY --from=frontend-build /build/frontend/apps/web/dist ./frontend
 
@@ -53,8 +54,6 @@ EXPOSE 8420
 # Hits /v1/runtime/health every 30s after a 20s warmup. Docker / Compose use
 # this to report whether the backend is actually ready, not just running.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD python -c "import urllib.request,sys; \
-sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8420/v1/runtime/health', timeout=4).status == 200 else 1)" \
-    || exit 1
+    CMD python /app/docker/healthcheck.py || exit 1
 
-CMD ["openbiliclaw", "serve", "--data-dir", "/app/runtime"]
+CMD ["/bin/sh", "-ec", "python /app/docker/seed-runtime.py && exec openbiliclaw serve --config /app/runtime/config.toml --data-dir /app/runtime"]

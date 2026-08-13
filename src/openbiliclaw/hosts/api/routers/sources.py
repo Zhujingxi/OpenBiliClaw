@@ -51,8 +51,11 @@ async def connect_source(
     body: ConnectSourceRequest,
     dependencies: HostDependencies = Depends(get_dependencies),
 ) -> SourceMutationResponse:
-    secret = body.credential.get_secret_value() if body.credential is not None else None
-    submission = {"credential": secret} if secret is not None else None
+    submission = (
+        {key: value.get_secret_value() for key, value in body.submission.items()}
+        if body.submission is not None
+        else None
+    )
     result = await dependencies.facade.connect_source(
         ConnectSourceCommand(
             idempotency_key=body.idempotency_key,

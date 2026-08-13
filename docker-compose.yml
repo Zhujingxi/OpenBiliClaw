@@ -1,4 +1,20 @@
 services:
+  embedding:
+    build:
+      context: .
+      dockerfile: docker/infinity-emb.Dockerfile
+    environment:
+      HF_HOME: /models
+    volumes:
+      - embedding_models:/models
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:7997/health', timeout=4).status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      start_period: 5m
+      retries: 6
+    restart: unless-stopped
+
   openbiliclaw-backend:
     build:
       context: .
@@ -10,21 +26,15 @@ services:
       # build a release image, use buildx:
       #   docker buildx build --platform linux/amd64,linux/arm64 \
       #     -t openbiliclaw-backend:vX.Y.Z .
-    container_name: openbiliclaw-backend
+    depends_on:
+      embedding:
+        condition: service_healthy
     environment:
-      OPENBILICLAW_PROJECT_ROOT: /app/runtime
-      OPENBILICLAW_CONFIG_TEMPLATE: /app/config.example.toml
-      OPENBILICLAW_PROXY_HOST: ${OPENBILICLAW_PROXY_HOST:-host.docker.internal}
-      OPENBILICLAW_PROXY_PORT: ${OPENBILICLAW_PROXY_PORT:-7897}
-      OPENBILICLAW_PROXY_TIMEOUT: ${OPENBILICLAW_PROXY_TIMEOUT:-1.0}
-      # [llm.embedding] to point at the bundled sidecar above. Lets
-      # Docker users have local embedding out of the box, even if they
-      # later pick OpenAI / Claude / etc for chat. Existing config.toml
-      # is never overwritten.
-      OPENBILICLAW_API_HOST: "0.0.0.0"
-      OPENBILICLAW_API_PORT: "8420"
-      # OPENBILICLAW_XHS_SIDECAR_URL: http://xhs-sidecar:5556  # sidecar removed — extension extracts metadata from DOM
-    command: ["openbiliclaw", "serve", "--data-dir", "/app/runtime"]
+      OPENBILICLAW_RUNTIME_DIR: /app/runtime
+      OPENBILICLAW_CONFIG_TEMPLATE: /app/config.docker.toml
+      OPENBILICLAW_MODEL_KEY_FILE: /run/secrets/model_api_key
+    secrets:
+      - model_api_key
     # ``host.docker.internal`` resolves the host machine from inside
     # the container. Used by:
     #   - HTTP proxy auto-detect (OPENBILICLAW_PROXY_HOST)
@@ -34,7 +44,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
-      - "8420:8420"
+      - "${OPENBILICLAW_API_PORT:-8420}:8420"
     volumes:
       - openbiliclaw_config:/app/runtime
       - openbiliclaw_data:/app/runtime/data
@@ -43,7 +53,7 @@ services:
     # ``docker compose ps`` shows ``healthy`` only when /v1/runtime/health
     # returns 200, not just when the container process is alive.
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8420/v1/runtime/health', timeout=4).status==200 else 1)"]
+      test: ["CMD", "python", "/app/docker/healthcheck.py"]
       interval: 30s
       timeout: 5s
       start_period: 20s
@@ -96,7 +106,12 @@ services:
       retries: 3
     restart: unless-stopped
 
+secrets:
+  model_api_key:
+    file: ${OPENBILICLAW_MODEL_KEY_FILE:-./model_api_key.txt}
+
 volumes:
+  embedding_models:
   openbiliclaw_config:
   openbiliclaw_data:
   openbiliclaw_logs:

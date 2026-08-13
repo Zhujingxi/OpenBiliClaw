@@ -389,6 +389,29 @@ def test_product_modules_never_import_composition() -> None:
     assert not offenders
 
 
+def test_non_loopback_host_resolves_bearer_from_vault(tmp_path: Path) -> None:
+    from openbiliclaw.infrastructure.credentials.keyring import ProtectedFileBackend
+    from openbiliclaw.infrastructure.credentials.vault import CredentialVault
+
+    secret_id = CredentialVault(ProtectedFileBackend(tmp_path / "credentials.json")).store(
+        b"test-bearer"
+    )
+    application = build_application(
+        AppSettings(
+            host={
+                "api_host": "0.0.0.0",
+                "bearer_secret_ref": f"vault:{secret_id}",
+            }
+        ),
+        options=BuildOptions(data_dir=tmp_path),
+    )
+    assert application.hosts.api is not None
+    override = next(iter(application.hosts.api.dependency_overrides.values()))
+    dependencies = override()
+    assert dependencies.security.bearer_token == "test-bearer"
+    assert "test-bearer" not in repr(dependencies.security)
+
+
 def test_model_configuration_wires_assistant_and_understanding_job(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

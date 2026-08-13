@@ -28,6 +28,8 @@ pool_target_count = 100
 [host]
 api_host = "127.0.0.1"
 api_port = 8420
+# For non-loopback binding, add bearer_secret_ref = "vault:cred_..."
+# after storing the bearer in the credential vault.
 
 [runtime]
 default_timeout_seconds = 30.0

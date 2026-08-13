@@ -70,7 +70,7 @@ Full loop on live `openbiliclaw serve` via `/v1` HTTP only: bootstrap/status and
 3. Core L1–L5 flow re-run against the containerized stack.
 4. Persistence: write → `down && up` → data survives in `/app/runtime` volume.
 5. Secrets injected at runtime (env/file mount → vault inside container), never baked into the image.
-6. Resolve the surfaced restart decision: access connections are process-local and the vault has no provider/account-to-reference mapping, so choose and verify either durable reconnection mapping or client credential resubmission on container start.
+6. Resolved the surfaced restart decision: access connections remain process-local and the vault has no provider/account-to-reference mapping, so clients resubmit provider form credentials after container restart; Docker does not invent a durable mapping.
 7. `docs/docker-deployment.md` rewritten to verified reality.
 
 **L7 — Hosts & UI**
@@ -95,5 +95,5 @@ Implement harness + tests (TDD) → run against real stack → fix bugs → **in
 | L3 understanding | completed | 03a05f42 | 2 real E2E tests passed; composed embeddings, real Kimi profile derivation, persistence, update, inspection/correction verified; durable semantic index deferred to L4 |
 | L4 recommendation | completed | 4356d0c1 | 2 real E2E tests passed; real refill/ranking/reasons/diversity/restart verified; duplicate refill and profile-to-discovery seams fixed; semantic index intentionally not added |
 | L5 workflows | completed | 71c16616 | 2 live-server E2E tests passed; HTTP feed delivery/feedback state machine, typed errors, scheduled profile shift, and restart persistence verified; see testing log |
-| L6 docker | pending | — | |
-| L7 UI | pending | — | |
+| L6 docker | completed | — | 1 real Docker E2E passed; sidecar/build/boot/check/core loop/restart persistence verified; bearer and provider-form host blockers fixed; see testing log |
+| L7 UI | pending | — | Docker bearer protects the SPA fallback, but Vue Web cannot yet enroll/store it; direct browser use returns 401 and must be addressed/tested here |

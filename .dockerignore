@@ -12,6 +12,8 @@ __pycache__
 .DS_Store
 config.toml
 data
+data-e2e/
+model_api_key.txt
 logs
 docs
 tests

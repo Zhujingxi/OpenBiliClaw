@@ -8,11 +8,11 @@
 | `[embedding]` | the same provider fields plus `output_dimensions` |
 | `[content]` | `enabled` provider IDs |
 | `[recommendation]` | `pool_target_count` (1..10000) |
-| `[host]` | `api_host`, `api_port` |
+| `[host]` | `api_host`, `api_port`, optional opaque `bearer_secret_ref` |
 | `[runtime]` | `default_timeout_seconds`, `default_resource_limit` |
 
 Supported model provider kinds are `openai`, `anthropic`, `google`, and `openrouter`. Both AI sections use the same PydanticAI-native provider configuration. Native embedding access currently requires the OpenAI provider; unsupported providers fail closed. For official OpenAI embedding endpoints, `output_dimensions` is requested from the provider. For custom endpoints it is only the required response-vector dimension, because the OpenAI-specific request parameter is omitted. The application does not host models.
 
-Secrets are never valid inline values. Model and content credentials are referenced through the credential vault. Environment variables use the `OPENBILICLAW_` names implemented in `core.config`; command-line values have highest precedence.
+Secrets are never valid inline values. Model, host bearer, and content credentials are referenced through the credential vault. `OPENBILICLAW_API_BEARER_SECRET_REF` accepts only an opaque vault reference, never the bearer value. Non-loopback API binding fails closed unless `host.bearer_secret_ref` resolves successfully. Other environment variables use the `OPENBILICLAW_` names implemented in `core.config`; command-line values have highest precedence.
 
 The database defaults to `<data-dir>/openbiliclaw.db`. An unversioned existing application database stops startup and requires an explicit reset/import decision. Destructive target migrations require a verified backup.
