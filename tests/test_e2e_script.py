@@ -40,6 +40,51 @@ def test_report_is_machine_readable(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     )
 
 
+def test_seed_profile_regenerates_config_while_preserving_live_vault_ref(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = load_script()
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    key_path = data_dir / "key"
+    key_path.write_bytes(b"test-key")
+    config_path = data_dir / "config.toml"
+    config_path.write_text(
+        '[model]\nsecret_ref = "vault:cred_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"\n',
+        encoding="utf-8",
+    )
+    template_path = tmp_path / "template.toml"
+    template_path.write_text(
+        '[model]\nsecret_ref = "vault:E2E_SECRET_REF"\n[model.options]\ndisable_thinking = true\n',
+        encoding="utf-8",
+    )
+
+    class Vault:
+        def __init__(self, _backend: object) -> None:
+            pass
+
+        def resolve(self, secret_ref: str, callback):  # type: ignore[no-untyped-def]
+            assert secret_ref == "cred_" + "a" * 32
+            return callback(memoryview(b"test-key"))
+
+        def store(self, _secret: bytes) -> str:
+            pytest.fail("valid existing reference must be preserved")
+
+    monkeypatch.setattr(script, "DATA_DIR", data_dir)
+    monkeypatch.setattr(script, "REPORT_DIR", data_dir / "reports")
+    monkeypatch.setattr(script, "CONFIG_PATH", config_path)
+    monkeypatch.setattr(script, "TEMPLATE_PATH", template_path)
+    monkeypatch.setattr(script, "KEY_PATH", key_path)
+    monkeypatch.setattr(script, "ProtectedFileBackend", lambda _path: object())
+    monkeypatch.setattr(script, "CredentialVault", Vault)
+
+    script.seed_profile()
+
+    generated = config_path.read_text(encoding="utf-8")
+    assert 'secret_ref = "vault:cred_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' in generated
+    assert "disable_thinking = true" in generated
+
+
 def test_pytest_summary_counts_are_extracted() -> None:
     script = load_script()
     count = cast("int", script._pytest_count("2 failed, 4 passed in 1.00s", "passed"))

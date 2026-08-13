@@ -34,6 +34,7 @@ def test_model_and_embedding_share_native_provider_shape() -> None:
                 "provider": "anthropic",
                 "model_name": "claude",
                 "secret_ref": "vault:chat",
+                "options": {"disable_thinking": True},
             },
             "embedding": {
                 "provider": "openai",
@@ -46,6 +47,7 @@ def test_model_and_embedding_share_native_provider_shape() -> None:
         }
     )
     assert settings.model.provider == "anthropic"
+    assert settings.model.options.disable_thinking is True
     assert settings.embedding.provider == "openai"
     assert settings.embedding.output_dimensions == 1024
     assert settings.host.bearer_secret_ref == "vault:host"

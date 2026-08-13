@@ -62,6 +62,16 @@ def _deps() -> AssistantDependencies:
     )
 
 
+def test_output_tool_schema_enumerates_the_supported_kinds() -> None:
+    toolset = build_assistant_agent()._output_toolset
+    assert toolset is not None
+    tool = toolset._tool_defs[0]
+    assert tool.parameters_json_schema["properties"]["kind"] == {
+        "enum": ["message", "recommendations", "clarification", "pending_action"],
+        "type": "string",
+    }
+
+
 def _runtime(output: dict[str, object]) -> AIRuntime:
     model = TestModel(custom_output_args=output)
     configured = ConfiguredModel(

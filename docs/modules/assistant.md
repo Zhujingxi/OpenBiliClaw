@@ -20,6 +20,10 @@ evidence ledger、credential vault、provider secrets 和 repositories 都不进
 Provider/tool/profile 文本一律视为 untrusted data，不是 instructions。已知 secret marker、credential
 reference、oversized message/tool result 在模型调用或持久化前拒绝。
 
+## Model compatibility
+
+Assistant 的 discriminated output 由 PydanticAI output tool 强制生成，因此 provider request 会使用 `tool_choice = "required"`。Kimi coding endpoint 支持普通 tool call，但默认 thinking 与 forced required tool choice 冲突；为该模型配置 `[model.options] disable_thinking = true` 后，OpenAI-native constructor 会发送 `thinking: {type: "disabled"}`，恢复真实 Assistant output tool 调用。Output tool 的 `kind` schema 同时枚举 message/recommendations/clarification/pending_action 四个合法 discriminator，避免 provider 生成 validator 必然拒绝的任意字符串。此开关不暴露 generic request body，也不影响其他 provider constructor。
+
 ## Composition
 
 `composition/assistant.py` constructs the Assistant dependencies and registers the dialogue agent in the single production graph. Hosts reach it through Application/Assistant facades; deleted legacy dialogue, orchestrator, integration, and fake-tool paths have no compatibility surface.

@@ -26,11 +26,16 @@ class _FrozenModel(StrictBaseModel):
 ModelProviderName: TypeAlias = Literal["openai", "anthropic", "google", "openrouter"]
 
 
+class ModelOptions(_FrozenModel):
+    disable_thinking: bool = False
+
+
 class ModelSettings(_FrozenModel):
     provider: ModelProviderName = "openai"
     model_name: str = Field(default="", max_length=200)
     endpoint: str | None = Field(default=None, max_length=2_000, pattern=r"^https?://")
     secret_ref: SecretReference | None = None
+    options: ModelOptions = ModelOptions()
 
 
 class EmbeddingSettings(ModelSettings):

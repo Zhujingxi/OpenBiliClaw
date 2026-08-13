@@ -19,7 +19,12 @@ from openbiliclaw.access.service import AccessService
 from openbiliclaw.ai.providers.embeddings import EmbeddingModelInfo, EmbeddingService
 from openbiliclaw.ai.providers.embeddings.providers import build_embedding_transport
 from openbiliclaw.ai.providers.embeddings.service import query_prefix_for_model
-from openbiliclaw.ai.providers.models import ModelFactory, ModelInstanceConfig, ProviderKind
+from openbiliclaw.ai.providers.models import (
+    ModelFactory,
+    ModelInstanceConfig,
+    ModelOptions,
+    ProviderKind,
+)
 from openbiliclaw.ai.runtime.capabilities import ModelCapabilities
 from openbiliclaw.ai.runtime.execution import AgentRunRequest, AIRuntime
 from openbiliclaw.ai.runtime.routes import ConfiguredModel, ModelRoute, RouteTable
@@ -299,6 +304,7 @@ def build_application(
                 secret_ref=settings.model.secret_ref.removeprefix("vault:")
                 if settings.model.secret_ref
                 else "",
+                options=ModelOptions(disable_thinking=settings.model.options.disable_thinking),
                 capabilities=ModelCapabilities(
                     tools=True, structured_output=True, context_tokens=8_192
                 ),

@@ -422,17 +422,20 @@ def test_model_configuration_wires_assistant_and_understanding_job(
         secret_ref="cred_" + "a" * 32,
         capabilities=ModelCapabilities(tools=True, structured_output=True, context_tokens=8192),
     )
-    monkeypatch.setattr(
-        "openbiliclaw.composition.build.ModelFactory.build",
-        lambda *_args, **_kwargs: BuiltModel(
+    built_configs: list[ModelInstanceConfig] = []
+
+    def build_model(_factory: object, model_config: ModelInstanceConfig) -> BuiltModel:
+        built_configs.append(model_config)
+        return BuiltModel(
             model=TestModel(),
             instance_id="test:model",
             provider="openai",
             owner="assistant",
             declared_capabilities=config.capabilities,
             verification=VerifiedCapabilities.unverified(config),
-        ),
-    )
+        )
+
+    monkeypatch.setattr("openbiliclaw.composition.build.ModelFactory.build", build_model)
     app = build_application(
         AppSettings(
             model={
@@ -440,11 +443,13 @@ def test_model_configuration_wires_assistant_and_understanding_job(
                 "endpoint": "https://gateway.example/v1",
                 "model_name": "test",
                 "secret_ref": "vault:cred_" + "a" * 32,
+                "options": {"disable_thinking": True},
             }
         ),
         options=BuildOptions(data_dir=tmp_path),
     )
     assert app.services.assistant is not None
+    assert built_configs[0].options.disable_thinking is True
     jobs_component = next(
         item for item in app.lifecycle._configured if item.component_id == "core.jobs"
     )

@@ -10,6 +10,11 @@ model_name = ""
 # endpoint = "https://api.example.com/v1" # optional native-provider override
 # secret_ref = "vault:cred_..." # opaque vault reference, set when configuring a model
 
+[model.options]
+# Enable for thinking-always-on OpenAI-compatible endpoints such as
+# kimi-for-coding when PydanticAI must force tool_choice = "required".
+disable_thinking = false
+
 [embedding]
 # Embeddings use the same provider configuration shape. Native embedding
 # access is currently supported by the OpenAI provider.

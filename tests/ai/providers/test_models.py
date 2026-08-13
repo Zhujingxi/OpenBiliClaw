@@ -15,6 +15,10 @@ from openbiliclaw.ai.providers.models import (
     ModelInstanceConfig,
     ModelOptions,
     ProviderKind,
+    anthropic,
+    google,
+    openai,
+    openrouter,
 )
 from openbiliclaw.ai.providers.verification import (
     CapabilityProbe,
@@ -55,12 +59,28 @@ def test_options_are_reviewed_and_unknown_fields_fail() -> None:
         "max_tokens": 100,
         "top_p": 0.9,
     }
+    assert "extra_body" not in ModelOptions().to_settings()
     with pytest.raises(ValidationError):
         config(options={"mystery": True})
     with pytest.raises(ValidationError, match="provider"):
         ModelInstanceConfig.model_validate(
             {"provider": "unknown", "model_name": "m", "secret_ref": "cred_" + "a" * 32}
         )
+
+
+def test_disable_thinking_only_changes_openai_model_settings() -> None:
+    assert openai.build(config(options={"temperature": 0.2}), "key").settings == {
+        "temperature": 0.2
+    }
+    model_config = config(options={"temperature": 0.2, "disable_thinking": True})
+
+    assert openai.build(model_config, "key").settings == {
+        "temperature": 0.2,
+        "extra_body": {"thinking": {"type": "disabled"}},
+    }
+    assert anthropic.build(model_config, "key").settings == {"temperature": 0.2}
+    assert google.build(model_config, "key").settings == {"temperature": 0.2}
+    assert openrouter.build(model_config, "key").settings == {"temperature": 0.2}
 
 
 @pytest.mark.parametrize("provider", list(ProviderKind))
@@ -101,6 +121,7 @@ def test_openrouter_endpoint_override_fails_clearly() -> None:
 def test_fingerprint_and_capability_verification_preserve_identity() -> None:
     base = config()
     assert base.fingerprint() != config(endpoint="https://other.example/v1").fingerprint()
+    assert base.fingerprint() != config(options={"disable_thinking": True}).fingerprint()
     assert base.fingerprint() != config(model_name="other").fingerprint()
     assert base.fingerprint() != config(provider_version="2").fingerprint()
     assert "cred" not in verification_key(base)

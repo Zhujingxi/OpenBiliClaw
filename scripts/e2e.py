@@ -74,10 +74,10 @@ def seed_profile() -> None:
     try:
         if secret_ref is not None:
             vault.resolve(secret_ref, lambda _secret: None)
-            return
     except KeyError:
-        pass
-    secret_ref = vault.store(KEY_PATH.read_bytes().strip())
+        secret_ref = None
+    if secret_ref is None:
+        secret_ref = vault.store(KEY_PATH.read_bytes().strip())
     template = TEMPLATE_PATH.read_text(encoding="utf-8")
     CONFIG_PATH.write_text(template.replace("E2E_SECRET_REF", secret_ref), encoding="utf-8")
     os.chmod(CONFIG_PATH, 0o600)

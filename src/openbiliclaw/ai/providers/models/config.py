@@ -28,6 +28,7 @@ class ModelOptions(StrictBaseModel):
     temperature: float | None = Field(default=None, ge=0, le=2)
     max_tokens: int | None = Field(default=None, gt=0)
     top_p: float | None = Field(default=None, gt=0, le=1)
+    disable_thinking: bool = False
 
     def to_settings(self) -> ModelSettings:
         settings = ModelSettings()
@@ -65,6 +66,7 @@ class ModelInstanceConfig(StrictBaseModel):
                 "temperature": self.options.temperature,
                 "max_tokens": self.options.max_tokens,
                 "top_p": self.options.top_p,
+                "disable_thinking": self.options.disable_thinking,
             },
             "capabilities": {
                 "tools": self.capabilities.tools,

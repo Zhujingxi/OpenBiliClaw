@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import cast
+from typing import Literal, cast
 
 from pydantic import TypeAdapter
 from pydantic_ai import Agent, Tool
@@ -42,7 +42,7 @@ _OUTPUT_ADAPTER: TypeAdapter[AssistantOutput] = TypeAdapter(AssistantOutput)
 
 
 def _validate_output(
-    kind: str,
+    kind: Literal["message", "recommendations", "clarification", "pending_action"],
     text: str | None = None,
     intro: str | None = None,
     recommendation_ids: tuple[str, ...] = (),

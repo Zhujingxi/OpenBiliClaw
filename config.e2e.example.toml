@@ -7,6 +7,9 @@ model_name = "kimi-for-coding"
 endpoint = "https://api.kimi.com/coding/v1"
 secret_ref = "vault:E2E_SECRET_REF"
 
+[model.options]
+disable_thinking = true
+
 [embedding]
 provider = "openai"
 model_name = "BAAI/bge-small-zh-v1.5"

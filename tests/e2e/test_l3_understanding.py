@@ -14,8 +14,10 @@ from openbiliclaw.access.models import AccessRequest, Permission
 from openbiliclaw.application.edit_profile import EditProfileCommand
 from openbiliclaw.application.record_observation import RecordObservationsCommand
 from openbiliclaw.application.sources import ConnectSourceCommand
+from openbiliclaw.assistant.models import AssistantMessage
 from openbiliclaw.composition.build import BuildOptions, build_application, validated_settings
 from openbiliclaw.composition.jobs import DEFAULT_PROFILE_ID
+from openbiliclaw.hosts.api.schemas.models import AssistantTurnRequest
 from openbiliclaw.observations.models import PreferencePayload, PreferenceStatementObservation
 from openbiliclaw.observations.provenance import (
     ObservationProvenance,
@@ -92,6 +94,26 @@ async def _record_preference(application: Application, statement: str) -> str:
     )
     assert result.items[0].status is RecordStatus.INSERTED
     return observation.observation_id
+
+
+async def test_real_assistant_forced_output_tool_works_with_thinking_disabled() -> None:
+    application = await _application()
+    try:
+        facade = application.services.facade
+        assert facade is not None
+        output = await facade.assistant_turn(
+            AssistantTurnRequest(
+                conversation_id=f"conv_{uuid.uuid4().hex}",
+                text="Reply with one short plain-text greeting and no recommendations.",
+                locale="en-US",
+            ),
+            "e2e-l3-assistant",
+        )
+        assert isinstance(output, AssistantMessage)
+        assert output.kind == "message"
+        assert output.text.strip()
+    finally:
+        await application.stop()
 
 
 async def test_composed_embeddings_apply_query_instruction_and_rank_real_titles() -> None:
