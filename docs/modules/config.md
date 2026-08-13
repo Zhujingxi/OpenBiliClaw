@@ -11,7 +11,7 @@
 | `[host]` | `api_host`, `api_port` |
 | `[runtime]` | `default_timeout_seconds`, `default_resource_limit` |
 
-Supported model provider kinds are `openai`, `anthropic`, `google`, and `openrouter`. Both AI sections use the same PydanticAI-native provider configuration. Native embedding access currently requires the OpenAI provider; unsupported providers fail closed. The application does not host models.
+Supported model provider kinds are `openai`, `anthropic`, `google`, and `openrouter`. Both AI sections use the same PydanticAI-native provider configuration. Native embedding access currently requires the OpenAI provider; unsupported providers fail closed. For official OpenAI embedding endpoints, `output_dimensions` is requested from the provider. For custom endpoints it is only the required response-vector dimension, because the OpenAI-specific request parameter is omitted. The application does not host models.
 
 Secrets are never valid inline values. Model and content credentials are referenced through the credential vault. Environment variables use the `OPENBILICLAW_` names implemented in `core.config`; command-line values have highest precedence.
 

@@ -30,11 +30,13 @@ class FakeVault:
         return callback(memoryview(b"canary-key"))
 
 
-def config(provider: ProviderKind = ProviderKind.OPENAI) -> ModelInstanceConfig:
+def config(
+    provider: ProviderKind = ProviderKind.OPENAI, *, endpoint: str | None = None
+) -> ModelInstanceConfig:
     return ModelInstanceConfig(
         provider=provider,
         model_name="embedding-model",
-        endpoint="https://provider.invalid/v1",
+        endpoint=endpoint,
         secret_ref="cred_" + "a" * 32,
     )
 
@@ -61,7 +63,7 @@ class FakeClient:
         self.embeddings = embeddings
 
 
-async def test_embedding_uses_native_provider_client_and_shared_config() -> None:
+async def test_official_openai_embedding_requests_output_dimensions() -> None:
     calls: list[dict[str, object]] = []
     transport = NativeEmbeddingTransport(
         cast("AsyncOpenAI", FakeClient(FakeEmbeddings(calls))),
@@ -72,6 +74,17 @@ async def test_embedding_uses_native_provider_client_and_shared_config() -> None
     assert calls == [{"model": "embedding-model", "input": ("hello",), "dimensions": 2}]
     assert batch.vectors == ((1.0, 2.0),)
     assert batch.input_tokens == 3
+
+
+async def test_custom_endpoint_embedding_omits_openai_dimensions_parameter() -> None:
+    calls: list[dict[str, object]] = []
+    transport = NativeEmbeddingTransport(
+        cast("AsyncOpenAI", FakeClient(FakeEmbeddings(calls))),
+        config(endpoint="https://provider.invalid/v1"),
+        output_dimensions=2,
+    )
+    await transport.embed(("hello",))
+    assert calls == [{"model": "embedding-model", "input": ("hello",)}]
 
 
 def test_builder_resolves_secret_and_returns_native_openai_transport() -> None:

@@ -145,7 +145,18 @@ disallow_any_explicit = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-m 'not e2e'"
 asyncio_mode = "auto"
 markers = [
     "integration: real Bilibili API checks that require local credentials",
+    "e2e: opt-in tests against real external services",
+    "e2e_l0: environment and model connectivity",
+    "e2e_l1a: anonymous content acquisition",
+    "e2e_l1b: authenticated content acquisition",
+    "e2e_l2: observations",
+    "e2e_l3: understanding",
+    "e2e_l4: recommendation",
+    "e2e_l5: application workflows",
+    "e2e_l6: Docker deployment",
+    "e2e_l7: agent-driven UI",
 ]

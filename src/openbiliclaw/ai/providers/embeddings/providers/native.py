@@ -37,11 +37,17 @@ class NativeEmbeddingTransport:
 
     async def embed(self, texts: tuple[str, ...]) -> EmbeddingBatch:
         try:
-            response: CreateEmbeddingResponse = await self._client.embeddings.create(
-                model=self._config.model_name,
-                input=texts,
-                dimensions=self._output_dimensions,
-            )
+            if self._config.endpoint:
+                response: CreateEmbeddingResponse = await self._client.embeddings.create(
+                    model=self._config.model_name,
+                    input=texts,
+                )
+            else:
+                response = await self._client.embeddings.create(
+                    model=self._config.model_name,
+                    input=texts,
+                    dimensions=self._output_dimensions,
+                )
         except Exception as error:
             raise EmbeddingTransportError(retryable=_is_retryable(error)) from error
         return EmbeddingBatch(

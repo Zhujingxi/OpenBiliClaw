@@ -15,11 +15,11 @@
 
 These modules contain no request logic. Credentials resolve only inside the selected trusted constructor callback. OpenRouter’s native provider does not accept a base URL, so an endpoint override fails explicitly rather than being ignored.
 
-`BuiltModel` preserves a stable non-secret fingerprint and the declared-versus-verified capability distinction. Structured output, native tools, vision, and streaming remain unverified until explicit probes succeed. Production calls flow from Composition’s configured model through `RouteTable` and `AIRuntime.run()`; no application-owned parallel chat integration remains.
+`BuiltModel` preserves a stable non-secret fingerprint and the declared-versus-verified capability distinction. Structured output, native tools, vision, and streaming remain unverified; opt-in probe primitives and an in-memory store exist, but Composition does not run or persist probe results. Production calls flow from Composition’s configured model through `RouteTable` and `AIRuntime.run()`; no application-owned parallel chat integration remains.
 
 ## Embeddings
 
-Embedding configuration uses the same provider/model/endpoint/secret-reference shape as chat. It does not introduce a separately configured HTTP endpoint or custom JSON transport. `NativeEmbeddingTransport` uses the embeddings resource on the client owned by PydanticAI’s configured `OpenAIProvider`.
+Embedding configuration uses the same provider/model/endpoint/secret-reference shape as chat. It does not introduce a separately configured HTTP endpoint or custom JSON transport. `NativeEmbeddingTransport` uses the embeddings resource on the client owned by PydanticAI’s configured `OpenAIProvider`. Official OpenAI requests include the configured `dimensions`; custom endpoints omit that vendor-specific request parameter, while `EmbeddingService` still validates every returned vector against `output_dimensions`.
 
 PydanticAI’s Anthropic, Google, and OpenRouter provider abstractions do not currently expose a common native embeddings resource in this dependency version, so those combinations fail closed with `UnsupportedCapabilityError`. The existing embedding service still owns deterministic batching, resource budgets, retry/timeout/cancellation, vector count/dimension validation, usage attribution, and provenance.
 

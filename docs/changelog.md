@@ -6,6 +6,7 @@
 
 ## Unreleased
 
+- Added the opt-in, layer-marked real-stack E2E harness and completed L0 against Kimi plus a local infinity-emb/BGE service. Custom embedding endpoints now omit OpenAI's optional `dimensions` request parameter while retaining returned-vector validation; the isolated profile, vault seeding, JSON reports, and complete failure/fix trace contain no committed credentials.
 - Removed superseded plans, refactor records, pre-cutover specifications, legacy E2E procedures, deleted-integration guides, obsolete diagrams/assets, and stale source-adapter acceptance documents. The maintained documentation set is now the current architecture/specification, module references, deployment/install guides, release ledger, policy, and project site; repository links and contributor instructions were updated accordingly.
 - Unified chat and embedding configuration/construction through PydanticAI's native provider layer. `[model]` and `[embedding]` share provider/model/endpoint/secret-reference shape; chat has one factory/runtime path, embedding reuses the configured native provider client and fails closed where no native embedding capability exists. OpenBiliClaw does not serve models.
 - Removed the local model provider and all bundled local-model runtimes. Future local inference must run as a separate service integrated through the gateway API.

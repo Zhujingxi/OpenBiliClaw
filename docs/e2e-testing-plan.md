@@ -10,7 +10,7 @@ The refactor is complete (716 hermetic unit tests, all mocked). Nothing has run 
 - `data-e2e/` is gitignored in full. It holds: `kimi_api_key.txt` (the limited test-only Kimi key), `credentials.json` (vault), the test DB, and reports.
 - Bilibili cookies extracted from Chrome stay on this machine: the extraction script reads the local Chrome cookie DB and passes values **directly into the product's own credential API** → vault. No cookie file is ever written to the repo.
 - Config files contain only `secret_ref = "vault:cred_..."` opaque references.
-- A pre-commit audit grep (`sk-`, `SESSDATA=`, `bili_jct=`) runs as part of every layer's gates.
+- A pre-commit audit scans new/changed content for likely secret values; field names and synthetic credential fixtures are allow-listed.
 
 ## 1. Test profile
 
@@ -42,8 +42,8 @@ The legacy `config.toml` / `data-v2/` are never touched.
 ## 4. Layers (strictly sequential)
 
 **L0 — Environment & model connectivity**
-Config validates; vault seeds from `kimi_api_key.txt`; `openbiliclaw check` green; **real Kimi chat round-trip**; **real embedding round-trip** (512-dim, batch invariants); capability verification fingerprints recorded.
-*Expected fix:* `NativeEmbeddingTransport` sends the OpenAI-only `dimensions` param unconditionally — local servers reject it; make conditional (TDD).
+Config validates; vault seeds from `kimi_api_key.txt`; `openbiliclaw check` green; **real Kimi chat round-trip**; **real embedding round-trip** (512-dim, batch invariants). `check` validates startup only; capability probe persistence is not implemented.
+*Completed fix:* `NativeEmbeddingTransport` omits the OpenAI-only `dimensions` parameter for custom endpoints while retaining response-dimension validation in `EmbeddingService`.
 
 **L1a — Content acquisition, anonymous**
 Real Bilibili public APIs: hot/popular, search, video detail, comments/tags → content pool. Assert real BVID rows, identity dedupe on re-fetch, budget/rate rules honored, typed errors on failure.
@@ -56,7 +56,7 @@ View/like/feedback events through the product path against real ingested content
 
 **L3 — Understanding**
 Profile derivation + semantic ingestion with real Kimi + real embeddings. Assert inspectable/correctable profile, embedding index at correct dimension.
-*Expected fix:* wire the first production embedding consumer in composition (contract landed, unwired).
+*Candidate tasks:* wire the first production embedding consumer in composition (contract landed, unwired); decide whether this first real consumer needs durable capability-probe results. BGE asymmetric retrieval should prepend the model's query instruction to query texts; infinity does not add it automatically.
 
 **L4 — Recommendation**
 Ranked recommendations from the real accumulated pool: non-empty ranked output with reasons, diversity/budget rules, refill path.
@@ -66,7 +66,7 @@ Full loop on live `openbiliclaw serve` via `/v1` HTTP only: bootstrap → refill
 
 **L6 — Docker deployment (primary deploy method)**
 
-1. Compose updated to new architecture: `embedding` sidecar (infinity-emb + bge-small-zh, healthchecked), stale sidecar comments removed, config template points at `http://embedding:7997/v1`. App container stays model-serving-free.
+1. Compose updated to new architecture: `embedding` sidecar (infinity-emb + bge-small-zh, healthchecked), stale sidecar comments removed, config template points at `http://embedding:7997`. Build the sidecar with `infinity_emb[torch,server]`, not `[all]`, to keep the image smaller and avoid the optional Optimum dependency. App container stays model-serving-free.
 2. Build + boot: image builds; `/v1/runtime/health` green; `openbiliclaw check` inside container; Vue SPA served.
 3. Core L1–L5 flow re-run against the containerized stack.
 4. Persistence: write → `down && up` → data survives in `/app/runtime` volume.
@@ -82,13 +82,13 @@ Implement harness + tests (TDD) → run against real stack → fix bugs → **in
 
 ## 6. Prerequisites installed at L0
 
-`infinity-emb` (test infrastructure, not an app dependency); bge-small-zh-v1.5 via `hf` CLI. Docker option: if the L6 sidecar pattern proves clean, dev-loop embedding may switch to the same container — decided at L0.
+`infinity-emb` (test infrastructure, not an app dependency); bge-small-zh-v1.5 via `hf` CLI. Local L0 uses infinity-emb 0.0.77 with `optimum<2` and a Typer version compatible with the installed Click. Docker option: if the L6 sidecar pattern proves clean, dev-loop embedding may switch to the same container.
 
 ## Progress
 
 | Layer | Status | Commit | Notes |
 |---|---|---|---|
-| L0 environment | pending | — | |
+| L0 environment | completed | — | 4 real E2E tests passed; harness and local embedding server verified; see testing log |
 | L1a content anonymous | pending | — | |
 | L1b content authenticated | pending | — | |
 | L2 observations | pending | — | |
