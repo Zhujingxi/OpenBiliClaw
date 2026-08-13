@@ -95,5 +95,5 @@ Implement harness + tests (TDD) → run against real stack → fix bugs → **in
 | L3 understanding | completed | 03a05f42 | 2 real E2E tests passed; composed embeddings, real Kimi profile derivation, persistence, update, inspection/correction verified; durable semantic index deferred to L4 |
 | L4 recommendation | completed | 4356d0c1 | 2 real E2E tests passed; real refill/ranking/reasons/diversity/restart verified; duplicate refill and profile-to-discovery seams fixed; semantic index intentionally not added |
 | L5 workflows | completed | 71c16616 | 2 live-server E2E tests passed; HTTP feed delivery/feedback state machine, typed errors, scheduled profile shift, and restart persistence verified; see testing log |
-| L6 docker | completed | — | 1 real Docker E2E passed; sidecar/build/boot/check/core loop/restart persistence verified; bearer and provider-form host blockers fixed; see testing log |
+| L6 docker | completed | 446f055d | 1 real Docker E2E passed; sidecar/build/boot/check/core loop/restart persistence verified; bearer and provider-form host blockers fixed; see testing log |
 | L7 UI | pending | — | Docker bearer protects the SPA fallback, but Vue Web cannot yet enroll/store it; direct browser use returns 401 and must be addressed/tested here |
