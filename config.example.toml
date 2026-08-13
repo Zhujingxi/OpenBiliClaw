@@ -148,6 +148,18 @@ fallback_provider = ""
 # Default off — local ollama/bge-m3 and text-only remote models skip images.
 # Independent of [discovery].multimodal_evaluation_enabled (vision LLM eval).
 multimodal_enabled = false
+# L2 persistent cache (data/embedding_cache.db) 磁盘预算，单位字节；0 = 不设上限。
+# 向量以紧凑 float32 二进制存储（4096 维约 16 KiB/行，而旧 JSON 约 90 KiB/行），
+# 新版本启动时会自动把旧 JSON 行迁移为二进制。设置上限后，缓存占用超过
+# cache_max_bytes * cache_high_watermark 时开始淘汰：先删失效 namespace /
+# 旧 legacy 行，再按最近访问时间淘汰活跃 namespace 中的最旧行，直到降到
+# cache_max_bytes * cache_low_watermark。缓存可重建，淘汰只影响冷数据。
+# 推荐值 536870912 (512 MiB)；需要 4096 维大向量库时再调大。
+cache_max_bytes = 0
+# 淘汰触发水位（占用 / 预算 的比例，0..1）
+cache_high_watermark = 0.9
+# 淘汰停止水位（占用 / 预算 的比例，0..1，需 <= cache_high_watermark）
+cache_low_watermark = 0.7
 
 # Per-module routes. inherit=true 表示完整继承 [llm].default_chain；
 # 需要隔离质量/成本时改为 false，并按优先级填写实例 ID。

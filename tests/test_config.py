@@ -148,6 +148,28 @@ class TestConfigDefaults:
 
         assert load_config(config_path).saved_sync.auto_sync_enabled is True
 
+    def test_embedding_cache_capacity_defaults_unlimited(self) -> None:
+        config = Config()
+
+        # 0 = unlimited: the L2 cache keeps current behavior unless the user
+        # opts into a byte budget (issue #153).
+        assert config.llm.embedding.cache_max_bytes == 0
+        assert config.llm.embedding.cache_high_watermark == 0.9
+        assert config.llm.embedding.cache_low_watermark == 0.7
+
+    def test_embedding_cache_capacity_fields_round_trip(self, tmp_path: Path) -> None:
+        config = Config()
+        config.llm.embedding.cache_max_bytes = 536870912
+        config.llm.embedding.cache_high_watermark = 0.85
+        config.llm.embedding.cache_low_watermark = 0.6
+        config_path = tmp_path / "config.toml"
+        save_config(config, config_path)
+
+        loaded = load_config(config_path)
+        assert loaded.llm.embedding.cache_max_bytes == 536870912
+        assert loaded.llm.embedding.cache_high_watermark == 0.85
+        assert loaded.llm.embedding.cache_low_watermark == 0.6
+
     def test_example_config_disables_saved_auto_sync(self) -> None:
         example_path = Path(__file__).parents[1] / "config.example.toml"
 

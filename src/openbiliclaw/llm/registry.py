@@ -342,11 +342,18 @@ def build_embedding_service(
                 chosen_name,
             )
 
-        # Persistent L2 cache: store embeddings in SQLite alongside main DB
+        # Persistent L2 cache: store embeddings in SQLite alongside main DB.
+        # Vectors are stored as compact float32 blobs; the byte budget
+        # (0 = unlimited) bounds disk growth once configured.
         l2_cache: EmbeddingCache | None = None
         try:
             cache_path = config.data_path / "embedding_cache.db"
-            l2_cache = EmbeddingCache(cache_path)
+            l2_cache = EmbeddingCache(
+                cache_path,
+                max_bytes=max(0, int(getattr(emb_cfg, "cache_max_bytes", 0) or 0)),
+                high_watermark=float(getattr(emb_cfg, "cache_high_watermark", 0.9) or 0.9),
+                low_watermark=float(getattr(emb_cfg, "cache_low_watermark", 0.7) or 0.7),
+            )
             l2_cache.initialize()
         except Exception:
             logger.debug("Failed to init embedding L2 cache", exc_info=True)
@@ -382,6 +389,9 @@ def build_embedding_service(
             persistent_cache=l2_cache,
             multimodal_enabled=bool(getattr(emb_cfg, "multimodal_enabled", False)),
             provenance=provenance,
+            cache_max_bytes=max(0, int(getattr(emb_cfg, "cache_max_bytes", 0) or 0)),
+            cache_high_watermark=float(getattr(emb_cfg, "cache_high_watermark", 0.9) or 0.9),
+            cache_low_watermark=float(getattr(emb_cfg, "cache_low_watermark", 0.7) or 0.7),
         )
     except Exception:
         return None

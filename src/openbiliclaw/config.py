@@ -430,6 +430,14 @@ class EmbeddingConfig:
     # gemini-embedding-2 or dashscope qwen3-vl-embedding. Default off so
     # local bge-m3 / text-only paths pay zero extra cost.
     multimodal_enabled: bool = False
+    # L2 persistent cache byte budget (0 = unlimited). When set, the cache
+    # evicts inactive/legacy namespaces first, then oldest active rows, once
+    # usage crosses high_watermark, and stops at low_watermark. Vectors are
+    # stored as compact float32 blobs regardless; this bounds disk growth for
+    # long-running discovery/warmup cycles.
+    cache_max_bytes: int = 0
+    cache_high_watermark: float = 0.9
+    cache_low_watermark: float = 0.7
 
 
 @dataclass
@@ -4928,6 +4936,9 @@ def _render_config_toml(
             f"fallback_enabled = {_toml_bool(config.llm.embedding.fallback_enabled)}",
             f"fallback_provider = {_toml_string(config.llm.embedding.fallback_provider)}",
             f"multimodal_enabled = {_toml_bool(config.llm.embedding.multimodal_enabled)}",
+            f"cache_max_bytes = {max(0, int(config.llm.embedding.cache_max_bytes))}",
+            f"cache_high_watermark = {config.llm.embedding.cache_high_watermark}",
+            f"cache_low_watermark = {config.llm.embedding.cache_low_watermark}",
             "",
         ]
     )
