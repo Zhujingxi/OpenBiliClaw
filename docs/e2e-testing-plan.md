@@ -52,7 +52,7 @@ Real Bilibili public APIs: popular feed, search, and video detail through the pr
 First fix `ConnectSource` idempotency versus in-memory connection restoration across process restarts (TDD): a cached `CONNECTED` result must not leave `AccessService` disconnected. The L1b test then extracts the required Bilibili session fields from local Chrome in-process → submits through the **product's own manual access path** (auth flow itself is tested, not bypassed) → vault → `nav` identity verified → authenticated history/related fetches. Cookie values stay only in pytest process memory; the standalone script is a structural diagnostic using the same helper.
 
 **L2 — Observations**
-View/like/feedback events through the product path against real ingested content, plus real account signals (history/favorites) as bootstrap. Assert durability, idempotency, replay, and `content_references` landing/dedupe through observation ingress (the architecture's only content-reference persistence path).
+View/like/feedback events through the product path against real ingested content, plus real account history as bootstrap. Assert durability across a rebuilt application graph, producer-key idempotency, deterministic insertion-cursor replay, and `content_references` landing/dedupe through observation ingress (the architecture's only content-reference persistence path). `content_cache` remains empty because observations carry identity, not provider projection bodies.
 
 **L3 — Understanding**
 Profile derivation + semantic ingestion with real Kimi + real embeddings. Assert inspectable/correctable profile, embedding index at correct dimension.
@@ -92,7 +92,7 @@ Implement harness + tests (TDD) → run against real stack → fix bugs → **in
 | L0 environment | completed | f8417db6 | 4 real E2E tests passed; harness and local embedding server verified; see testing log |
 | L1a content anonymous | completed | b369fa08 | 2 real E2E tests passed; real API adapters corrected; see testing log |
 | L1b content authenticated | completed | 3d28bb46 | 2 real E2E tests passed; restart replay and authenticated native adapters corrected; see testing log |
-| L2 observations | pending | — | |
+| L2 observations | completed | — | 2 real E2E tests passed; content landing/dedupe, restart durability, feedback idempotency, cursor replay, and authenticated history import verified; see testing log |
 | L3 understanding | pending | — | |
 | L4 recommendation | pending | — | |
 | L5 workflows | pending | — | |

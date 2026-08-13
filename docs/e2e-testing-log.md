@@ -164,3 +164,39 @@ cat data-e2e/reports/l1b.json
 ```
 
 The real L1b run reported two passed tests; missing authenticated fields fail explicitly rather than skip.
+
+## L2 — Observations
+
+### Trace
+
+1. **Discovery:** traced the public write surface from `POST /v1/observations` through `CompositionFacade.record_observations()` and Application `RecordObservations` to the sole `ObservationIngressService`; feedback uses `CompositionFacade.record_feedback()` and its observation unit of work. `SqliteObservationRepository` is the only writer of `content_references` from acquired content.
+
+2. **Test:** acquire a real Bilibili search result through the production facade, submit host-opened and recommendation-liked observations, then submit the same observations again.
+   **Result:** both initial rows were inserted; retries were typed duplicates under `(producer, idempotency_key)`. Direct database inspection found exactly one `content_references` row for the real provider identity. This confirms identity landing/deduplication without adding persistence to content reads.
+
+3. **Test:** submit saved feedback twice through the Application feedback workflow, stop the graph, and rebuild it over the same `data-e2e/openbiliclaw.db`.
+   **Result:** first feedback inserted and the retry did not; its generated observation plus the explicit opened/liked rows survived restart intact and in insertion order.
+
+4. **Test:** replay observations using the documented insertion cursor.
+   **Result:** the cursor page returned a durable cursor and the next page did not repeat the last consumed row. Replay remains the authoritative recovery path; committed-ID events are only latency hints.
+
+5. **Test:** extract the authenticated Chrome session in memory, reconnect through the real manual verification path, fetch real watch history, and convert the returned identities into typed `provider_history_import` observations.
+   **Failure:** after making history keys stable across runs, a duplicate receipt correctly returned the previously committed observation ID rather than the new retry object's ID; the replay assertion looked for the discarded retry IDs and found no rows.
+   **Root cause:** the test confused caller-proposed observation identity with the ingress idempotency contract: `(producer, idempotency_key)` is authoritative and duplicate receipts point at the original committed observation.
+   **Fix:** replay assertions use the receipt's committed IDs for both inserted and duplicate outcomes.
+   **Retest:** history imports were inserted (or recognized as prior-run duplicates) with authenticated high-trust `provider_import` provenance, content references, and stable event identifiers derived by one-way hash of provider identity plus source timestamp. An immediate retry returned only typed duplicates. Assertions inspected shapes and counts only; no account, title, content identity, or cookie value was logged.
+
+### Observed behavior
+
+- Observation ingress persists content identity in `content_references`; it does not write `content_cache` because the observation contract carries `ContentRef`, not title/body/projection data. This is now explicit in module documentation.
+- The current history capability exposes content timestamp and identity but no watch progress/event identifier. L2 therefore derives a stable one-way event digest from content identity plus source timestamp. A future provider-native history event ID/progress field would preserve multiple same-content watch events more precisely.
+- L2 found no production defect requiring a code fix; the prior L1 adapter and restart fixes held under the observation pipeline.
+
+### Reproduction
+
+```bash
+./scripts/e2e.py l2
+cat data-e2e/reports/l2.json
+```
+
+The real run reported two passed tests and preserved its observations for later layers.
