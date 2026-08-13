@@ -3686,6 +3686,7 @@
           "rate_limited",
           "geo_blocked",
           "network_unavailable",
+          "provider_response_invalid",
           "session_mode_unsupported"
         ],
         "title": "VerificationFailure",

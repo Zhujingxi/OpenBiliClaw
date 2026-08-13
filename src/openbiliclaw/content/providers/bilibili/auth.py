@@ -65,7 +65,9 @@ class BilibiliCredentialVerifier:
                 return self._failure(now, VerificationFailure.EXPIRED)
             if exc.code is IntegrationErrorCode.RATE_LIMITED:
                 return self._failure(now, VerificationFailure.RATE_LIMITED)
-            return self._failure(now, VerificationFailure.NETWORK_UNAVAILABLE)
+            if exc.code is IntegrationErrorCode.NETWORK_UNAVAILABLE:
+                return self._failure(now, VerificationFailure.NETWORK_UNAVAILABLE)
+            return self._failure(now, VerificationFailure.PROVIDER_RESPONSE_INVALID)
         if not nav.is_login:
             return self._failure(now, VerificationFailure.EXPIRED)
         return VerificationResult(
@@ -74,7 +76,7 @@ class BilibiliCredentialVerifier:
             expires_at=now + timedelta(minutes=15),
             safe_account_identity=nav.name,
             granted_permissions=handle.permissions
-            & frozenset({Permission.READ_PRIVATE, Permission.WRITE}),
+            & frozenset({Permission.READ_PUBLIC, Permission.READ_PRIVATE, Permission.WRITE}),
         )
 
     @staticmethod

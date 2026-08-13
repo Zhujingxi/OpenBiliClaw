@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Annotated, Literal
 
-from pydantic import ConfigDict, Field, JsonValue, TypeAdapter
+from pydantic import ConfigDict, Field, JsonValue, TypeAdapter, model_validator
 
 from openbiliclaw.core._pydantic import StrictBaseModel
 
@@ -76,8 +76,14 @@ class BilibiliNavData(StrictBaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     is_login: bool
-    mid: str = Field(min_length=1, max_length=64)
+    mid: int = Field(ge=0)
     name: str = Field(min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def _logged_in_identity(self) -> BilibiliNavData:
+        if self.is_login and self.mid == 0:
+            raise ValueError("logged-in identity requires positive mid")
+        return self
 
 
 class BilibiliActionData(StrictBaseModel):

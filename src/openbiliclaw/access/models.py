@@ -48,6 +48,7 @@ class VerificationFailure(StrEnum):
     RATE_LIMITED = "rate_limited"
     GEO_BLOCKED = "geo_blocked"
     NETWORK_UNAVAILABLE = "network_unavailable"
+    PROVIDER_RESPONSE_INVALID = "provider_response_invalid"
     SESSION_MODE_UNSUPPORTED = "session_mode_unsupported"
 
 

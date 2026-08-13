@@ -7,7 +7,7 @@ from typing import Protocol
 
 from pydantic import ConfigDict, Field
 
-from openbiliclaw.access.models import AccessRequest, AccessStatus
+from openbiliclaw.access.models import AccessHandle, AccessRequest, AccessStatus
 from openbiliclaw.core._pydantic import StrictBaseModel
 
 
@@ -21,6 +21,8 @@ class AccessServicePort(Protocol):
     ) -> AccessStatus: ...
 
     async def disconnect(self, provider_id: str, account_id: str | None) -> AccessStatus: ...
+
+    def connected_handle(self, provider_id: str, account_id: str | None) -> AccessHandle | None: ...
 
 
 class ProviderAvailabilityPort(Protocol):
@@ -62,7 +64,13 @@ class ConnectSource:
 
     async def __call__(self, command: ConnectSourceCommand) -> ConnectSourceResult:
         cached = await self.journal.get(command.idempotency_key)
-        if cached is not None:
+        if (
+            cached is not None
+            and self.access.connected_handle(
+                command.request.provider_id, command.request.account_id
+            )
+            is not None
+        ):
             return ConnectSourceResult.model_validate_json(cached)
         status = await self.access.connect(
             command.request,

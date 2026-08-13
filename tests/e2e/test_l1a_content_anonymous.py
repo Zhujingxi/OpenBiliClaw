@@ -121,4 +121,4 @@ async def test_page_cap_and_unreachable_provider_failure_are_typed() -> None:
     )
     with pytest.raises(ContentIntegrationError) as raised:
         await dead.search(SearchQuery(text="Python", page=PageRequest(limit=1)), access)
-    assert raised.value.code is IntegrationErrorCode.PROVIDER_UNAVAILABLE
+    assert raised.value.code is IntegrationErrorCode.NETWORK_UNAVAILABLE

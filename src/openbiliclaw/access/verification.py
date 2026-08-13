@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 _DEGRADED = {
     VerificationFailure.INSUFFICIENT_SCOPE,
     VerificationFailure.RATE_LIMITED,
+    VerificationFailure.PROVIDER_RESPONSE_INVALID,
     VerificationFailure.SESSION_MODE_UNSUPPORTED,
 }
 _UNAVAILABLE = {

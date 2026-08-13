@@ -35,6 +35,6 @@
 
 ## Bilibili native boundary
 
-The Bilibili client accepts the provider's real endpoint-specific envelopes (`data.list` for popular feeds, `data.result` for search, and raw `data` for video details) and converts native rows into strict `BilibiliVideo` models before returning them. Search HTML markup is removed at this boundary, duration strings are normalized to seconds, and protocol-relative covers become HTTPS URLs. The transport uses browser-compatible public request headers and maps HTTP 412/429 to the typed `RATE_LIMITED` error.
+The Bilibili client accepts the provider's real endpoint-specific envelopes (`data.list` for popular/history feeds, `data.result` for search, a bare `data` array for related videos, nested creator `list.vlist`, and raw `data` for video details) and converts native rows into strict `BilibiliVideo` models before returning them. Search HTML markup is removed at this boundary, digit strings and `MM:SS` durations are normalized, protocol-relative covers become HTTPS URLs, history uses `ps/max/view_at`, and creator paging uses `pn/ps`. Authenticated manual-cookie verification grants the requested public/private/write subset after a successful live nav probe. The transport uses browser-compatible public request headers and maps HTTP 412/429 to the typed `RATE_LIMITED` error.
 
 Search and detail workflows are read-only. They do not populate `content_references` or `content_cache`; durable content-reference creation belongs to Observation Ingress.

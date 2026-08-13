@@ -150,7 +150,7 @@ def _builders(vault: CredentialVault) -> dict[str, Callable[[], _BuiltProvider]]
             _manual(
                 BILIBILI_CONNECTION_FORM,
                 BilibiliCredentialVerifier(client),
-                frozenset({Permission.READ_PRIVATE, Permission.WRITE}),
+                frozenset({Permission.READ_PUBLIC, Permission.READ_PRIVATE, Permission.WRITE}),
             ),
         )
 

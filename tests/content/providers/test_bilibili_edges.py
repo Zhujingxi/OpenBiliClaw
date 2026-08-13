@@ -213,15 +213,23 @@ async def test_verifier_network_and_not_logged_in() -> None:
             cookie: str | None,
             body: bytes,
         ) -> bytes:
-            raise ContentIntegrationError(IntegrationErrorCode.PROVIDER_UNAVAILABLE, "safe failure")
+            raise ContentIntegrationError(IntegrationErrorCode.NETWORK_UNAVAILABLE, "safe failure")
 
     verifier = BilibiliCredentialVerifier(BilibiliClient(FailedTransport(), _resolve))
     payload = memoryview(json.dumps({"cookie": "SESSDATA=value; bili_jct=csrf"}).encode())
     result = await verifier(_credential(Permission.READ_PRIVATE), payload)
     assert result.sanitized_failure is VerificationFailure.NETWORK_UNAVAILABLE
 
+    invalid_response = json.dumps(
+        {"code": 0, "message": "0", "data": {"is_login": True, "mid": "not-an-id", "name": "safe"}}
+    ).encode()
+    result = await BilibiliCredentialVerifier(
+        BilibiliClient(Routes({"/x/web-interface/nav": invalid_response}), _resolve)
+    )(_credential(Permission.READ_PRIVATE), payload)
+    assert result.sanitized_failure is VerificationFailure.PROVIDER_RESPONSE_INVALID
+
     nav = json.dumps(
-        {"code": 0, "message": "0", "data": {"is_login": False, "mid": "0", "name": "guest"}}
+        {"code": 0, "message": "0", "data": {"is_login": False, "mid": 0, "name": "guest"}}
     ).encode()
     verifier = BilibiliCredentialVerifier(
         BilibiliClient(Routes({"/x/web-interface/nav": nav}), _resolve)
@@ -251,7 +259,7 @@ async def test_verifier_network_and_not_logged_in() -> None:
     assert result.sanitized_failure is VerificationFailure.EXPIRED
 
     successful = json.dumps(
-        {"code": 0, "message": "0", "data": {"is_login": True, "mid": "42", "name": "safe"}}
+        {"code": 0, "message": "0", "data": {"is_login": True, "mid": 42, "name": "safe"}}
     ).encode()
     result = await BilibiliCredentialVerifier(
         BilibiliClient(Routes({"/x/web-interface/nav": successful}), _resolve)

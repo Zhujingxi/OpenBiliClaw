@@ -119,3 +119,48 @@ cat data-e2e/reports/l1a.json
 ```
 
 The real run made a small number of requests and reported two passed tests.
+
+## L1b — Authenticated Bilibili acquisition
+
+### Trace
+
+1. **Test:** reuse a completed `ConnectSource` idempotency key after constructing a fresh access service with no live handle.
+   **Failure:** the workflow returned the durable `CONNECTED` result without calling `AccessService.connect`; subsequent content reads reported not connected.
+   **Root cause:** the journal cached the transport-safe result, while the connection and opaque handle are intentionally process-local. The workflow treated durable result replay as proof of live runtime state.
+   **Fix:** reuse a cached connect result only when `connected_handle(provider_id, account_id)` confirms a matching live connection. Otherwise execute the normal connect path; realistic restart tests resubmit the credential through the manual form.
+   **Retest:** the failing unit test reconnects once after restart while same-process idempotency still connects only once.
+
+2. **Test:** feed a real-shaped native Bilibili search row through client normalization.
+   **Failure/debt:** L1a production fixes had live coverage but no hermetic fixture pinning digit-string integers, protocol-relative covers, HTML titles, and `MM:SS` durations together.
+   **Fix:** added one native-shape unit test and removed the unused `_JSON` adapter.
+   **Retest:** strict normalized video fields match the provider-independent model.
+
+3. **Test:** parse authenticated history plus related responses and inspect their outgoing query parameters.
+   **Failure:** history native owner/cover/time fields and nested history aid were not mapped; related returns a bare `data` array rather than a page object; history sent generic paging parameters.
+   **Fix:** normalize history `author_name`/`author_mid`/`cover`/`view_at`/`history.oid`, accept related bare arrays, send history `ps/max/view_at`, and send creator `pn/ps` while parsing its nested `list.vlist`.
+   **Retest:** hermetic real-shape tests pass for history and related; the authenticated E2E layer exercises history, related, nav identity, status, public search on the credential handle, and restart reconnect usability.
+
+4. **Design test:** execute Chrome extraction as a process before a separate pytest process.
+   **Finding:** manual connect vaults the secret but intentionally stores no durable provider/account-to-credential mapping; stopping the script discards the only live handle. A later pytest process cannot reconnect without seeing the cookie again.
+   **Decision:** keep extraction and authenticated tests in one pytest process, with cookie values memory-only. A thin diagnostic script uses the same helper and never prints values. Durable reconnect versus client resubmission is an open product/deployment decision for L6, not invented in L1b.
+
+5. **Test:** run the diagnostic and real L1b layer against Chrome.
+   **Failure:** manual verification returned `unavailable/network_unavailable` even though the provider was reachable.
+   **Root cause:** real nav returns numeric `mid`, while the synthetic schema required a string; the resulting response-contract validation failure was then incorrectly collapsed into `NETWORK_UNAVAILABLE` by the verifier.
+   **Escalation:** another model verified the two-defect diagnosis before the fix.
+   **Fix:** nav identity now normalizes the real `isLogin`/`uname` aliases, accepts non-negative integer `mid`, and requires it positive when logged in; transport failures use the distinct integration `NETWORK_UNAVAILABLE` code, while parse/contract failures project to new sanitized `PROVIDER_RESPONSE_INVALID` degraded evidence.
+   **Retest:** the verifier connected to the real account; the next run exposed and fixed the nav wire aliases (`isLogin`/`uname`) and history's nested `history.bvid`. The final real L1b layer passed both authenticated and restart-reconnect tests.
+
+6. **Credential-output incident:** the first failing pytest assertion rendered the dataclass representation of `BrowserCookies`, exposing the real values in local terminal output. The values were not written to tracked files or git; generated reports contain only test names/counts. `BrowserCookies.__repr__` and `__str__` are now fixed redacted strings with regression coverage, and the E2E invocation does not enable pytest local-variable dumps. The affected Bilibili session should still be rotated at the user's convenience for defense in depth.
+
+7. **Test infrastructure:** installed `secretstorage` and `pycryptodome` into the local `.venv` only. The helper detects Chrome/Chromium databases, takes a SQLite backup (including live WAL state), decrypts Linux v10/v11 AES-CBC values via libsecret, selects only the required/optional Bilibili names, and prints only names plus lengths.
+
+### Reproduction
+
+```bash
+./scripts/e2e_bilibili_cookies.py  # optional structural/verifier diagnostic; never prints values
+./scripts/e2e.py l1b               # extraction + authenticated checks happen in one process
+cat data-e2e/reports/l1b.json
+```
+
+The real L1b run reported two passed tests; missing authenticated fields fail explicitly rather than skip.

@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Protocol
 from urllib.parse import urlencode
 
 import httpx
-from pydantic import JsonValue, TypeAdapter, ValidationError
+from pydantic import JsonValue, ValidationError
 
 from openbiliclaw.content.integration.errors import ContentIntegrationError, IntegrationErrorCode
 from openbiliclaw.infrastructure.http.clients import HttpClientFactory
@@ -110,7 +110,7 @@ class HttpxBilibiliTransport:
                 )
             except httpx.TransportError as exc:
                 raise ContentIntegrationError(
-                    IntegrationErrorCode.PROVIDER_UNAVAILABLE, "provider request failed"
+                    IntegrationErrorCode.NETWORK_UNAVAILABLE, "provider request failed"
                 ) from exc
             if response.status_code in {412, 429}:
                 raise ContentIntegrationError(
@@ -130,7 +130,6 @@ class HttpxBilibiliTransport:
             return response.content
 
 
-_JSON: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
 _TAGS = re.compile(r"<[^>]+>")
 
 
@@ -148,6 +147,11 @@ def _integer(value: JsonValue | None) -> int:
 
 def _text(value: JsonValue | None) -> str:
     return html.unescape(_TAGS.sub("", value)).strip() if isinstance(value, str) else ""
+
+
+def _identifier(value: JsonValue | None) -> str:
+    text = _text(value)
+    return text or (str(value) if isinstance(value, int) and not isinstance(value, bool) else "")
 
 
 def _cover(value: JsonValue | None) -> str | None:
@@ -176,24 +180,25 @@ def _duration(value: JsonValue | None) -> int:
 def _item(row: dict[str, JsonValue]) -> BilibiliItem:
     if row.get("kind") in {"video", "article"}:
         return ITEM_ADAPTER.validate_python(row)
-    bvid = _text(row.get("bvid") or row.get("id"))
+    history = _mapping(row.get("history"))
+    bvid = _text(row.get("bvid") or history.get("bvid") or row.get("id"))
     owner = _mapping(row.get("owner"))
-    creator_id = _text(owner.get("mid") or row.get("mid"))
-    creator_name = _text(owner.get("name") or row.get("author"))
+    creator_id = _identifier(owner.get("mid") or row.get("mid") or row.get("author_mid"))
+    creator_name = _text(owner.get("name") or row.get("author") or row.get("author_name"))
     stat = _mapping(row.get("stat"))
     state = _integer(row.get("state"))
     return ITEM_ADAPTER.validate_python(
         {
             "kind": "video",
             "id": bvid,
-            "aid": _integer(row.get("aid") or row.get("id")),
+            "aid": _integer(row.get("aid") or history.get("oid") or row.get("id")),
             "title": _text(row.get("title")),
             "description": _text(row.get("desc") or row.get("description")),
             "creator": (
                 {"id": creator_id, "name": creator_name} if creator_id and creator_name else None
             ),
-            "cover_url": _cover(row.get("pic")),
-            "published_at": max(0, _integer(row.get("pubdate"))),
+            "cover_url": _cover(row.get("pic") or row.get("cover")),
+            "published_at": max(0, _integer(row.get("pubdate") or row.get("view_at"))),
             "duration_seconds": _duration(row.get("duration")),
             "stats": {
                 "views": max(0, _integer(stat.get("view") or row.get("play"))),
@@ -225,7 +230,15 @@ class BilibiliClient:
             "GET", path, self._endpoint_params(path, params), access=access
         )
         data = _mapping(payload.data)
-        rows = data.get("list") if path != "/x/web-interface/search/type" else data.get("result")
+        rows: JsonValue | None
+        if path == "/x/web-interface/archive/related" and isinstance(payload.data, list):
+            rows = payload.data
+        elif path == "/x/web-interface/search/type":
+            rows = data.get("result")
+        elif path == "/x/space/wbi/arc/search":
+            rows = _mapping(data.get("list")).get("vlist")
+        else:
+            rows = data.get("list")
         rows = rows if rows is not None else data.get("items")
         if not isinstance(rows, list):
             raise self._invalid()
@@ -258,7 +271,14 @@ class BilibiliClient:
     async def nav_with_cookie(self, cookie: str) -> BilibiliNavData:
         payload = await self._request_with_cookie("GET", "/x/web-interface/nav", {}, cookie, b"")
         try:
-            return BilibiliNavData.model_validate(payload.data)
+            data = _mapping(payload.data)
+            return BilibiliNavData.model_validate(
+                {
+                    "is_login": data.get("isLogin", data.get("is_login")),
+                    "mid": data.get("mid"),
+                    "name": data.get("uname", data.get("name")),
+                }
+            )
         except ValidationError as exc:
             raise self._invalid() from exc
 
@@ -329,8 +349,10 @@ class BilibiliClient:
         page = int(cursor) if cursor.isdigit() and int(cursor) > 0 else 1
         if path == "/x/web-interface/search/type":
             values.update(search_type="video", page=page, page_size=limit)
-        elif path == "/x/web-interface/popular":
+        elif path in {"/x/web-interface/popular", "/x/space/wbi/arc/search"}:
             values.update(pn=page, ps=limit)
+        elif path == "/x/web-interface/history/cursor":
+            values.update(ps=limit, max=cursor, view_at=0)
         elif path == "/x/web-interface/view":
             values["bvid"] = values.pop("id")
         return values

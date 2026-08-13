@@ -10,6 +10,7 @@ class IntegrationErrorCode(StrEnum):
     INVALID_CONTENT_REF = "invalid_content_ref"
     ACCESS_DENIED = "access_denied"
     RATE_LIMITED = "rate_limited"
+    NETWORK_UNAVAILABLE = "network_unavailable"
     PROVIDER_UNAVAILABLE = "provider_unavailable"
 
 

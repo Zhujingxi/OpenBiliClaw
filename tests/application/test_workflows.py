@@ -153,6 +153,28 @@ class UnitOfWorkFake:
         return CanonicalProfile.empty(profile_id, NOW)
 
 
+async def test_connect_source_restores_missing_live_connection_on_cached_result() -> None:
+    journal = JournalFake()
+    command = ConnectSourceCommand(
+        idempotency_key="connect:demo:restart",
+        request=AccessRequest(
+            provider_id="demo",
+            permissions=frozenset({Permission.READ_PUBLIC}),
+            supported_method_ids=("builtin.anonymous",),
+        ),
+        allowed_method_ids=frozenset({"builtin.anonymous"}),
+    )
+    first_access = AccessFake()
+    await ConnectSource(first_access, AvailabilityFake(), journal)(command)
+
+    restarted_access = AccessFake()
+    restarted_access.handle = None
+    result = await ConnectSource(restarted_access, AvailabilityFake(), journal)(command)
+
+    assert result.status.state is AccessStatusKind.CONNECTED
+    assert restarted_access.connects == 1
+
+
 async def test_connect_source_is_idempotent_and_reports_recoverable_refresh_failure() -> None:
     access, journal = AccessFake(), JournalFake()
     workflow = ConnectSource(access, AvailabilityFake(fail=True), journal)
