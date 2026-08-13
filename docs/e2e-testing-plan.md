@@ -92,7 +92,7 @@ Implement harness + tests (TDD) → run against real stack → fix bugs → **in
 | L0 environment | completed | f8417db6 | 4 real E2E tests passed; harness and local embedding server verified; see testing log |
 | L1a content anonymous | completed | b369fa08 | 2 real E2E tests passed; real API adapters corrected; see testing log |
 | L1b content authenticated | completed | 3d28bb46 | 2 real E2E tests passed; restart replay and authenticated native adapters corrected; see testing log |
-| L2 observations | completed | — | 2 real E2E tests passed; content landing/dedupe, restart durability, feedback idempotency, cursor replay, and authenticated history import verified; see testing log |
+| L2 observations | completed | f9799dca | 2 real E2E tests passed; content landing/dedupe, restart durability, feedback idempotency, cursor replay, and authenticated history import verified; see testing log |
 | L3 understanding | pending | — | |
 | L4 recommendation | pending | — | |
 | L5 workflows | pending | — | |
