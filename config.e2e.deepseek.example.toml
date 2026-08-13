@@ -1,0 +1,29 @@
+# Real-stack DeepSeek E2E profile template. The runner writes the usable,
+# gitignored data-e2e/config.e2e.deepseek.toml and replaces the placeholder.
+
+[model]
+provider = "openai"
+model_name = "deepseek-chat"
+endpoint = "https://api.deepseek.com"
+secret_ref = "vault:E2E_SECRET_REF"
+
+[embedding]
+provider = "openai"
+model_name = "BAAI/bge-small-zh-v1.5"
+endpoint = "http://127.0.0.1:7997"
+secret_ref = "vault:E2E_SECRET_REF"
+output_dimensions = 512
+
+[content]
+enabled = ["bilibili"]
+
+[recommendation]
+pool_target_count = 100
+
+[host]
+api_host = "127.0.0.1"
+api_port = 8430
+
+[runtime]
+default_timeout_seconds = 120.0
+default_resource_limit = 2

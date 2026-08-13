@@ -40,49 +40,110 @@ def test_report_is_machine_readable(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     )
 
 
-def test_seed_profile_regenerates_config_while_preserving_live_vault_ref(
+def test_seed_profiles_regenerate_configs_while_preserving_live_vault_refs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     script = load_script()
     data_dir = tmp_path / "data"
     data_dir.mkdir()
-    key_path = data_dir / "key"
-    key_path.write_bytes(b"test-key")
-    config_path = data_dir / "config.toml"
-    config_path.write_text(
+    kimi_key_path = data_dir / "kimi-key"
+    kimi_key_path.write_bytes(b"test-kimi-key")
+    deepseek_key_path = data_dir / "deepseek-key"
+    deepseek_key_path.write_bytes(b"test-deepseek-key")
+    kimi_config_path = data_dir / "kimi.toml"
+    kimi_config_path.write_text(
         '[model]\nsecret_ref = "vault:cred_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"\n',
         encoding="utf-8",
     )
-    template_path = tmp_path / "template.toml"
-    template_path.write_text(
+    deepseek_config_path = data_dir / "deepseek.toml"
+    deepseek_config_path.write_text(
+        '[model]\nsecret_ref = "vault:cred_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"\n',
+        encoding="utf-8",
+    )
+    kimi_template_path = tmp_path / "kimi-template.toml"
+    kimi_template_path.write_text(
         '[model]\nsecret_ref = "vault:E2E_SECRET_REF"\n[model.options]\ndisable_thinking = true\n',
         encoding="utf-8",
     )
+    deepseek_template_path = tmp_path / "deepseek-template.toml"
+    deepseek_template_path.write_text(
+        '[model]\nsecret_ref = "vault:E2E_SECRET_REF"\n', encoding="utf-8"
+    )
+    resolved: list[str] = []
 
     class Vault:
         def __init__(self, _backend: object) -> None:
             pass
 
         def resolve(self, secret_ref: str, callback):  # type: ignore[no-untyped-def]
-            assert secret_ref == "cred_" + "a" * 32
+            resolved.append(secret_ref)
             return callback(memoryview(b"test-key"))
 
         def store(self, _secret: bytes) -> str:
-            pytest.fail("valid existing reference must be preserved")
+            pytest.fail("valid existing references must be preserved")
 
     monkeypatch.setattr(script, "DATA_DIR", data_dir)
     monkeypatch.setattr(script, "REPORT_DIR", data_dir / "reports")
-    monkeypatch.setattr(script, "CONFIG_PATH", config_path)
-    monkeypatch.setattr(script, "TEMPLATE_PATH", template_path)
-    monkeypatch.setattr(script, "KEY_PATH", key_path)
+    monkeypatch.setattr(script, "CONFIG_PATH", kimi_config_path)
+    monkeypatch.setattr(script, "TEMPLATE_PATH", kimi_template_path)
+    monkeypatch.setattr(script, "KEY_PATH", kimi_key_path)
+    monkeypatch.setattr(script, "DEEPSEEK_CONFIG_PATH", deepseek_config_path)
+    monkeypatch.setattr(script, "DEEPSEEK_TEMPLATE_PATH", deepseek_template_path)
+    monkeypatch.setattr(script, "DEEPSEEK_KEY_PATH", deepseek_key_path)
     monkeypatch.setattr(script, "ProtectedFileBackend", lambda _path: object())
     monkeypatch.setattr(script, "CredentialVault", Vault)
 
     script.seed_profile()
 
-    generated = config_path.read_text(encoding="utf-8")
-    assert 'secret_ref = "vault:cred_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' in generated
-    assert "disable_thinking = true" in generated
+    kimi_config = kimi_config_path.read_text(encoding="utf-8")
+    deepseek_config = deepseek_config_path.read_text(encoding="utf-8")
+    assert 'secret_ref = "vault:cred_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' in kimi_config
+    assert "disable_thinking = true" in kimi_config
+    assert 'secret_ref = "vault:cred_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"' in deepseek_config
+    assert "disable_thinking" not in deepseek_config
+    assert resolved == ["cred_" + "a" * 32, "cred_" + "b" * 32]
+
+
+def test_seed_profile_stores_both_fake_keys_when_references_are_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = load_script()
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    kimi_key_path = data_dir / "kimi-key"
+    kimi_key_path.write_bytes(b"fake-kimi-key")
+    deepseek_key_path = data_dir / "deepseek-key"
+    deepseek_key_path.write_bytes(b"fake-deepseek-key")
+    kimi_template_path = tmp_path / "kimi-template.toml"
+    kimi_template_path.write_text('secret_ref = "vault:E2E_SECRET_REF"\n', encoding="utf-8")
+    deepseek_template_path = tmp_path / "deepseek-template.toml"
+    deepseek_template_path.write_text('secret_ref = "vault:E2E_SECRET_REF"\n', encoding="utf-8")
+    stored: list[bytes] = []
+
+    class Vault:
+        def __init__(self, _backend: object) -> None:
+            pass
+
+        def store(self, secret: bytes) -> str:
+            stored.append(secret)
+            return "cred_" + ("a" if len(stored) == 1 else "b") * 32
+
+    monkeypatch.setattr(script, "DATA_DIR", data_dir)
+    monkeypatch.setattr(script, "REPORT_DIR", data_dir / "reports")
+    monkeypatch.setattr(script, "CONFIG_PATH", data_dir / "kimi.toml")
+    monkeypatch.setattr(script, "TEMPLATE_PATH", kimi_template_path)
+    monkeypatch.setattr(script, "KEY_PATH", kimi_key_path)
+    monkeypatch.setattr(script, "DEEPSEEK_CONFIG_PATH", data_dir / "deepseek.toml")
+    monkeypatch.setattr(script, "DEEPSEEK_TEMPLATE_PATH", deepseek_template_path)
+    monkeypatch.setattr(script, "DEEPSEEK_KEY_PATH", deepseek_key_path)
+    monkeypatch.setattr(script, "ProtectedFileBackend", lambda _path: object())
+    monkeypatch.setattr(script, "CredentialVault", Vault)
+
+    script.seed_profile()
+
+    assert stored == [b"fake-kimi-key", b"fake-deepseek-key"]
+    assert "cred_" + "a" * 32 in (data_dir / "kimi.toml").read_text(encoding="utf-8")
+    assert "cred_" + "b" * 32 in (data_dir / "deepseek.toml").read_text(encoding="utf-8")
 
 
 def test_pytest_summary_counts_are_extracted() -> None:

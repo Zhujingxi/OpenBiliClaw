@@ -424,6 +424,15 @@ The final real run reported one passed Docker E2E test. No key, bearer, cookie, 
 
 No secret, provider response body, title, profile text, account identity, cookie, key, or bearer value is recorded in this trace.
 
+## OpenAI-compatible Assistant matrix validation
+
+1. **Probe:** call DeepSeek `deepseek-chat` at `https://api.deepseek.com` with ordinary chat and with a forced `tool_choice = "required"`, without `disable_thinking`.
+   **Result:** both returned HTTP 200; the forced request returned a proper tool call. This establishes a native default-path control beside the Kimi thinking-disabled case.
+2. **Test:** run the same production Application Assistant turn with tolerant invariants against both generated E2E profiles.
+   **Result:** Kimi `kimi-for-coding` with `disable_thinking = true` and DeepSeek `deepseek-chat` with the option absent each returned a typed `AssistantMessage` with non-empty text. The toggle is therefore scoped to thinking-forced OpenAI-compatible endpoints rather than required by the shared OpenAI constructor path.
+
+No credential or provider response body is recorded in this matrix trace.
+
 ## L7 closing sweep
 
 - **Full-layer closing sweep (l0-l6) caught one L7-induced assertion drift:** the final all-layer run failed L4 at the rank-contiguity invariant `(2,) != (1,)`. Root cause is correct product behavior, not a product bug: the live L7 Like click transitioned the seed's rank-1 candidate shown→interacted, and later feeds legitimately exclude interacted candidates, leaving the seed's visible ranks a proper subset of 1..n. The L4 invariant had assumed a no-interaction database. Fix: the assertion now requires strictly ascending, duplicate-free visible ranks within a seed (documented inline), instead of a full contiguous prefix. Verified with two consecutive green l4 runs; all other layers green; unit suite 743 passed.

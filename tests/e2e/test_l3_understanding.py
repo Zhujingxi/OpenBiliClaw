@@ -37,8 +37,8 @@ _DATA_DIR = _ROOT / "data-e2e"
 _PROFILE_ID = DEFAULT_PROFILE_ID
 
 
-async def _application() -> Application:
-    settings = validated_settings(_DATA_DIR / "config.e2e.toml")
+async def _application(config_path: Path | None = None) -> Application:
+    settings = validated_settings(config_path or _DATA_DIR / "config.e2e.toml")
     application = build_application(settings, options=BuildOptions(data_dir=_DATA_DIR))
     await application.start()
     return application
@@ -96,8 +96,22 @@ async def _record_preference(application: Application, statement: str) -> str:
     return observation.observation_id
 
 
-async def test_real_assistant_forced_output_tool_works_with_thinking_disabled() -> None:
-    application = await _application()
+@pytest.mark.parametrize(
+    "profile_name,config_name",
+    (
+        ("kimi-thinking-disabled", "config.e2e.toml"),
+        ("deepseek-default", "config.e2e.deepseek.toml"),
+    ),
+)
+async def test_real_assistant_forced_output_tool_works_across_openai_compatible_profiles(
+    profile_name: str, config_name: str
+) -> None:
+    config_path = _DATA_DIR / config_name
+    assert config_path.is_file(), (
+        f"missing {profile_name} E2E profile: {config_path}; run scripts/e2e.py l3 "
+        "after placing the corresponding gitignored key file in data-e2e"
+    )
+    application = await _application(config_path)
     try:
         facade = application.services.facade
         assert facade is not None

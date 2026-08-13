@@ -28,6 +28,9 @@ DATA_DIR = ROOT / "data-e2e"
 CONFIG_PATH = DATA_DIR / "config.e2e.toml"
 TEMPLATE_PATH = ROOT / "config.e2e.example.toml"
 KEY_PATH = DATA_DIR / "kimi_api_key.txt"
+DEEPSEEK_CONFIG_PATH = DATA_DIR / "config.e2e.deepseek.toml"
+DEEPSEEK_TEMPLATE_PATH = ROOT / "config.e2e.deepseek.example.toml"
+DEEPSEEK_KEY_PATH = DATA_DIR / "deepseek_api_key.txt"
 REPORT_DIR = DATA_DIR / "reports"
 LAYERS = ("l0", "l1a", "l1b", "l2", "l3", "l4", "l5", "l6", "l7")
 EMBEDDING_LAYERS = frozenset(("l0", "l3", "l4", "l5", "l6", "l7"))
@@ -48,10 +51,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _read_secret_ref() -> str | None:
-    if not CONFIG_PATH.exists():
+def _read_secret_ref(config_path: Path) -> str | None:
+    if not config_path.exists():
         return None
-    with CONFIG_PATH.open("rb") as stream:
+    with config_path.open("rb") as stream:
         values = tomllib.load(stream)
     model = values.get("model")
     if not isinstance(model, dict):
@@ -62,25 +65,47 @@ def _read_secret_ref() -> str | None:
     return reference.removeprefix("vault:")
 
 
-def seed_profile() -> None:
-    DATA_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
-    REPORT_DIR.mkdir(parents=True, exist_ok=True)
-    if not KEY_PATH.is_file():
-        raise RuntimeError(f"missing test key: {KEY_PATH}")
-    os.chmod(KEY_PATH, 0o600)
-    backend = ProtectedFileBackend(DATA_DIR / "credentials.json")
-    vault = CredentialVault(backend)
-    secret_ref = _read_secret_ref()
+def _seed_config(
+    vault: CredentialVault,
+    *,
+    key_path: Path,
+    config_path: Path,
+    template_path: Path,
+) -> None:
+    os.chmod(key_path, 0o600)
+    secret_ref = _read_secret_ref(config_path)
     try:
         if secret_ref is not None:
             vault.resolve(secret_ref, lambda _secret: None)
     except KeyError:
         secret_ref = None
     if secret_ref is None:
-        secret_ref = vault.store(KEY_PATH.read_bytes().strip())
-    template = TEMPLATE_PATH.read_text(encoding="utf-8")
-    CONFIG_PATH.write_text(template.replace("E2E_SECRET_REF", secret_ref), encoding="utf-8")
-    os.chmod(CONFIG_PATH, 0o600)
+        secret_ref = vault.store(key_path.read_bytes().strip())
+    template = template_path.read_text(encoding="utf-8")
+    config_path.write_text(template.replace("E2E_SECRET_REF", secret_ref), encoding="utf-8")
+    os.chmod(config_path, 0o600)
+
+
+def seed_profile() -> None:
+    DATA_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    if not KEY_PATH.is_file():
+        raise RuntimeError(f"missing test key: {KEY_PATH}")
+    backend = ProtectedFileBackend(DATA_DIR / "credentials.json")
+    vault = CredentialVault(backend)
+    _seed_config(
+        vault,
+        key_path=KEY_PATH,
+        config_path=CONFIG_PATH,
+        template_path=TEMPLATE_PATH,
+    )
+    if DEEPSEEK_KEY_PATH.is_file():
+        _seed_config(
+            vault,
+            key_path=DEEPSEEK_KEY_PATH,
+            config_path=DEEPSEEK_CONFIG_PATH,
+            template_path=DEEPSEEK_TEMPLATE_PATH,
+        )
 
 
 def _embedding_ready() -> bool:
