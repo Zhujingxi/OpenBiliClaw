@@ -17,6 +17,12 @@
 
 </div>
 
+> ### 🆕 Big update: OpenBiliClaw now runs inside DeepSeek Harness
+>
+> New **DSH client plugin** — install OpenBiliClaw into [DeepSeek Harness](https://github.com/deepseek-ai/DeepSeek-Harness): a persistent fourth column (Recommendations / Library / Chat / Profile / Settings) in the DSH web GUI, plus 22 Agent Bridge tools so agents can read recommendations, answer probes, and close the learning loop — browse cross-platform personalized content while you work in DSH. → [`github.com/whiteguo233/dsh-openbiliclaw`](https://github.com/whiteguo233/dsh-openbiliclaw)
+>
+> 📱 Want a native app? The Flutter mobile client (Android / iOS / Web / desktop) lives in the separate repo [`OpenBiliClaw-mobile`](https://github.com/whiteguo233/OpenBiliClaw-mobile): recommendations, chat, profile, favorites / watch-later / 30-day history — all talking to the same local backend.
+
 ## OpenBiliClaw in 10 Seconds
 
 A local-first AI discovery agent that learns your taste across Bilibili, Xiaohongshu (RedNote), Douyin, YouTube, X, Zhihu, Reddit, Linux.do, Bangumi, V2EX, Weibo, and the open web — without handing your profile to another platform.
@@ -86,7 +92,7 @@ Core behavior, recommendation, and dialogue data lives in SQLite on your disk; c
 
 ## 📸 Feature Preview
 
-Four core surfaces: the browser extension handles in-page interaction and login sessions, the Desktop Web (`/web`) gives you a big-screen recommendation home, the Mobile Web (`/m`) is built for phones, and a native Flutter client ([OpenBiliClaw-mobile](https://github.com/whiteguo233/OpenBiliClaw-mobile), separate repo) covers Android / iOS / Web / desktop. Every non-extension surface only calls your local API — cookie sync and platform tasks still run through the extension.
+Five core surfaces: the browser extension handles in-page interaction and login sessions, the Desktop Web (`/web`) gives you a big-screen recommendation home, the Mobile Web (`/m`) is built for phones, a native Flutter client ([OpenBiliClaw-mobile](https://github.com/whiteguo233/OpenBiliClaw-mobile), separate repo) covers Android / iOS / Web / desktop, and a [DSH client plugin](https://github.com/whiteguo233/dsh-openbiliclaw) brings the same panels into the DSH web GUI as a fourth column (plus 22 Agent Bridge tools). Every non-extension surface only calls your local API — cookie sync and platform tasks still run through the extension.
 
 <table>
   <tr>
