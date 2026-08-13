@@ -96,4 +96,4 @@ Implement harness + tests (TDD) → run against real stack → fix bugs → **in
 | L4 recommendation | completed | 4356d0c1 | 2 real E2E tests passed; real refill/ranking/reasons/diversity/restart verified; duplicate refill and profile-to-discovery seams fixed; semantic index intentionally not added |
 | L5 workflows | completed | 71c16616 | 2 live-server E2E tests passed; HTTP feed delivery/feedback state machine, typed errors, scheduled profile shift, and restart persistence verified; see testing log |
 | L6 docker | completed | 446f055d | 1 real Docker E2E passed; sidecar/build/boot/check/core loop/restart persistence verified; bearer and provider-form host blockers fixed; see testing log |
-| L7 UI | in progress | — | Live agent-driven setup/search/feed/profile/Assistant sweep completed; UI feedback wiring and SPA cache policy fixed in the final batch; Docker bearer enrollment remains a deployment follow-up |
+| L7 UI | completed | 5276ac48, 4b85f4ae | agent-driven browser pass: 6 findings, all fixed (fetch receiver, connect 422, conversation id, assistant 503 typing, dead feedback buttons, SPA cache); feedback click verified live; Kimi tool-call gap documented |
