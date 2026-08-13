@@ -446,3 +446,11 @@ No credential or provider response body is recorded in this matrix trace.
 ## L7 closing sweep
 
 - **Full-layer closing sweep (l0-l6) caught one L7-induced assertion drift:** the final all-layer run failed L4 at the rank-contiguity invariant `(2,) != (1,)`. Root cause is correct product behavior, not a product bug: the live L7 Like click transitioned the seed's rank-1 candidate shown→interacted, and later feeds legitimately exclude interacted candidates, leaving the seed's visible ranks a proper subset of 1..n. The L4 invariant had assumed a no-interaction database. Fix: the assertion now requires strictly ascending, duplicate-free visible ranks within a seed (documented inline), instead of a full contiguous prefix. Verified with two consecutive green l4 runs; all other layers green; unit suite 743 passed.
+
+## Catalog integration closing sweep
+
+- **Post-catalog full sweep (l0-l6) found three drift points, all fixed:**
+  1. `config.docker.toml` still pinned `provider="openai"` + `kimi-for-coding`; with catalog-as-truth the model is not listed under that id and the Docker backend failed closed at startup. The template now uses the catalog id `kimi-for-coding` (endpoint/protocol from the catalog); the container fetches models.dev on first start and caches it in the runtime volume. l6 re-verified live (build/boot/flow/persistence green).
+  2. l0's chat assertion expected provider attribution `"openai"`; catalog resolution attributes the catalog id instead. The test now asserts attribution equals the configured provider id (no hardcoding).
+  3. l3's profile-derivation test flaked once with an upstream Kimi account budget error; green on rerun. The Kimi key is a limited test key by design — transient budget_exhausted is expected environmental noise, and reruns are the documented remedy.
+- docs/docker-deployment.md now documents catalog-driven model config and the catalog-bypassing embedding sidecar.

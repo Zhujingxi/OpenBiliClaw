@@ -102,7 +102,9 @@ async def test_real_kimi_chat_round_trip_through_ai_runtime() -> None:
         )
     )
     assert result.output.strip()
-    assert result.provider == "openai"
+    # Provider attribution is the catalog-resolved id (models.dev), not a
+    # hardcoded protocol name — assert it matches the configured provider.
+    assert result.provider == validated_settings(CONFIG).model.provider
 
 
 async def test_real_embedding_single_batch_and_semantic_difference() -> None:

@@ -2,9 +2,10 @@
 # into the persistent runtime volume and replaces this opaque-reference token.
 
 [model]
-provider = "openai"
+# models.dev catalog id; endpoint/protocol/capabilities resolve from the
+# catalog (Anthropic-protocol coding endpoint, thinking enabled).
+provider = "kimi-for-coding"
 model_name = "kimi-for-coding"
-endpoint = "https://api.kimi.com/coding/v1"
 secret_ref = "vault:DOCKER_MODEL_SECRET_REF"
 
 [embedding]

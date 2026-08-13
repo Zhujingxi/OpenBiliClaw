@@ -20,6 +20,8 @@ Compose builds two separate images:
 
 The backend waits for the embedding healthcheck. On its first start, `docker/seed-runtime.py` reads the runtime-mounted model key, stores it in the credential vault, generates a random API bearer, stores that separately in the vault, and writes only opaque references to `/app/runtime/config.toml`. Neither secret is baked into an image, Compose config, nor environment variable. Existing runtime configuration is never overwritten.
 
+The chat model is configured in `config.docker.toml` by models.dev catalog id (default `kimi-for-coding`); endpoint, wire protocol, and capabilities resolve from the catalog at startup, so the container needs network access to models.dev on first start (cached in the runtime volume afterwards). The `[embedding]` section bypasses the catalog: it uses the OpenAI-native embedding transport against the bundled sidecar.
+
 The API listens on host port 8420 (override with `OPENBILICLAW_API_PORT`) and health is `GET /v1/runtime/health`. The backend container's authenticated healthcheck resolves the bearer internally; `docker compose ps` reports healthy only after the API starts.
 
 ## Bearer authentication

@@ -6,6 +6,9 @@
 
 ## Unreleased
 
+- Post-catalog closing sweep fixes: `config.docker.toml` migrated to the catalog provider id (`kimi-for-coding`; endpoint/protocol from the catalog, cached in the runtime volume on first start), and the L0 chat attribution assertion now follows the configured catalog id instead of a hardcoded protocol name. `docs/docker-deployment.md` documents catalog-driven model config and the catalog-bypassing embedding sidecar.
+
+
 - Added catalog-backed model configuration to `/v1` and the responsive Settings UI. The UI can search models.dev providers/models, select a model, override its endpoint, and submit a write-only API key that is stored only in the credential vault; reads expose presence booleans, resolved protocol, and capabilities without credential references. Fully custom providers require explicit protocol, endpoint, and complete capabilities. The narrow atomic TOML writer owns only the model tables and currently returns `restart_required=true`; all non-model configuration and comments are preserved.
 
 - Replaced the hardcoded chat-provider enum, endpoints, and capabilities with the live models.dev catalog. The validated catalog is cached in the data directory for 24 hours with stale-cache offline fallback and a typed first-use-offline error. Catalog SDK markers select protocol families while PydanticAI's registry owns native provider selection (including DeepSeek's native profile). Fully custom providers require explicit protocol, endpoint, and complete capabilities. Kimi coding now resolves from the catalog to its Anthropic endpoint instead of a project-pinned OpenAI-compatible route.
