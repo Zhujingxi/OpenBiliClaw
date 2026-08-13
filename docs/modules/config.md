@@ -338,6 +338,9 @@ Embedding 服务用于多个语义任务：discovery 内容兴趣预过滤、rec
 | `fallback_enabled` | bool | `false` | 旧兼容开关；允许备选类型借用第一个同类型、已启用聊天实例的凭据 |
 | `fallback_provider` | string | `""` | 第二个 embedding 备选 Provider。留空 = 不 fallback；可填 `openai` / `gemini` / `ollama` / `openai_compatible`，不会再自动走 `ollama → gemini → openai` 链 |
 | `multimodal_enabled` | bool | `false` | 是否启用**封面图单独** embedding（image-only 向量，与文本同一模型空间），供 recommendation `precompute_delight_scores` 的封面视觉加成消费。默认关闭。开启后仍需当前 `model` 支持图像（如 `gemini-embedding-2`，或 `dashscope` + `qwen3-vl-embedding`）；本地 `ollama` + `bge-m3` 等纯文本模型会自动跳过，不报错。与 `[discovery].multimodal_evaluation_enabled`（vision LLM 评估）相互独立。**插件设置页与桌面 Web 设置的 Embedding 段均可直接勾选**（`dashscope` 也已加入 provider 下拉），无需手改 TOML |
+| `cache_max_bytes` | int | `0` | L2 持久化缓存（`data/embedding_cache.db`）磁盘预算，单位字节；`0` = 不设上限（默认）。向量本身已按紧凑 float32 二进制存储（4096 维约 16 KiB/行），此上限进一步约束长跑 discovery/warmup 的磁盘增长：占用超过 `cache_max_bytes × cache_high_watermark` 时开始淘汰（先删失效 namespace / 旧 legacy 行，再按最近访问时间淘汰 active namespace 最旧行），直到降到 `cache_max_bytes × cache_low_watermark`。缓存可重建，淘汰只影响冷数据。建议值 `536870912`（512 MiB） |
+| `cache_high_watermark` | float | `0.9` | 容量淘汰触发水位（占用 / 预算 的比例，0..1），需 `>= cache_low_watermark` |
+| `cache_low_watermark` | float | `0.7` | 容量淘汰停止水位（占用 / 预算 的比例，0..1），需 `<= cache_high_watermark` |
 
 #### DashScope / Qwen 多模态 embedding 示例
 

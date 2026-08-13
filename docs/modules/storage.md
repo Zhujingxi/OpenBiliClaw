@@ -27,6 +27,14 @@
 
 图片缓存是刻意包含的用户状态：部分平台的签名图片 URL 会过期，迁移后无法可靠重新下载。导出配置仍来自磁盘 `config.toml` + `config.local.toml`，但数据快照路径固定为当前进程已取得 canonical lock 的 active data dir；在线保存但尚未重启启用的新 `data_dir` 不会成为本次数据来源。manifest 的 `source_omitted_environment_variables` 只记录源机导出时有值、会影响运行结果的环境变量**名称**（`OPENBILICLAW_*`、Gemini 标准 Key、系统代理 / CA），不记录 value；暂存时另采集目标进程当时有值的名称为 `target_active_environment_variables`。前者提示目标机重新提供来源依赖，后者是目标环境可能覆盖导入文件的暂存时快照；实际应用仍以重启时环境为准，两者都不表示值已迁移。前端文件只允许 `theme_mode`、`theme_hue`、`accent_style`、`auto_load_on_scroll`、`side_drawer_open`；后端 endpoint、Bearer / session、通知与缓存状态不进入包。
 
+### L2 embedding 缓存（`data/embedding_cache.db`）
+
+该文件是**可重建派生缓存**，刻意排除在 `.obcbackup` 导出之外（issue #153 整改后）：
+
+- **存储格式**：向量以版本化 little-endian float32 BLOB 存储（`OBLV` 头 + dtype/dimension），4096 维约 16 KiB/行；旧 JSON 行（`encoding=0`）与降级回写的 mixed-format 行仍可透明读取，读取按内容自适应解码，单行损坏降级为 miss。
+- **Schema**：`embedding_cache` 表含 `encoding` / `dimension` / `created_at` / `last_accessed_at` 元数据列，`embedding_cache_meta` 记录 `schema_version` / 最近维护报告。旧 schema 打开时自动升级并保留行。
+- **生命周期**：`EmbeddingService` 构造时注册 active provenance namespace 并做一次/进程/库的运行时准备（JSON→BLOB 迁移 + 容量维护）；配置 `[llm.embedding].cache_max_bytes` 后按高低水位淘汰（非 active namespace → active 最旧行）。物理回收（WAL checkpoint + `VACUUM INTO` + 原子替换）由 CLI `embedding-cache-clean` 显式执行，daemon 不自动替换文件。
+
 ### 校验与暂存
 
 `stage_migration_archive()` 在任何 active 配置或数据库被替换前完成全部验证：

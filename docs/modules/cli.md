@@ -54,6 +54,8 @@ openbiliclaw [--log-level DEBUG|INFO|WARNING|ERROR] <命令>
 | `fetch-v2ex` | 只读验证 V2EX 发布、讨论、收藏主题、收藏 Node 四个 bootstrap scope（不写 memory、不调用 LLM） | ✅ |
 | `import-youtube <path>` | 从 Google Takeout 导入 YouTube 历史 / 订阅 / 点赞 | ✅ |
 | `setup-embedding` | 配置本地 Ollama 作为独立 embedding provider（可选） | ✅ |
+| `embedding-cache-stats` | 查看 embedding L2 持久化缓存诊断（行数、载荷、文件/WAL 大小、namespace 分布、容量水位、最近维护） | ✅ |
+| `embedding-cache-clean` | 清理 embedding L2 缓存：迁移旧 JSON 为二进制 + 回收失效 namespace + 物理回收磁盘（默认 dry-run；`--apply` 生效；`--keep-model` / `--keep-legacy` / `--no-compact` / `--batch-size`） | ✅ |
 | `recommend` | 查看推荐 | ✅ |
 | `feedback <id> <like\|dislike\|comment\|dismiss> [--request-id <stable-id>]` | 对推荐提交反馈；省略 ID 时生成并回显，跨命令重试必须复用 | ✅ |
 | `profile` | 查看用户画像 | ✅ |
@@ -925,6 +927,56 @@ CPU 即可跑，单次 embedding 约 100-200ms，配合后台 prewarmer 实际"�
   Windows: 从 https://ollama.com/download 下载安装包
   装好后重新运行本命令即可启用。
 ```
+
+### `openbiliclaw embedding-cache-stats`
+
+查看 embedding L2 持久化缓存（`data/embedding_cache.db`）的诊断信息，用于确认
+provenance namespace 隔离是否生效、旧 JSON 行是否已迁移为二进制、磁盘占用是否
+在预算内（issue #153）：
+
+```bash
+$ openbiliclaw embedding-cache-stats
+Embedding L2 缓存诊断 · data/embedding_cache.db
+缓存概况
+  数据库文件      …/data/embedding_cache.db
+  总行数          14,419
+  逻辑载荷        230.0 MiB
+  SQLite 主文件   221.0 MiB
+  WAL / SHM       12.0 MiB / 2.0 MiB
+  legacy 行（无 namespace）  0 行 / 0 B
+  namespaced 行   14,419 行 / 230.0 MiB
+  active 行       12,000 行 / 192.0 MiB
+  inactive 行     2,419 行 / 38.0 MiB
+  容量预算        不设上限
+  最近维护        已删除 5,000 行 / 701.8 MiB
+Namespace 分布
+  model  namespace  行数  载荷     状态
+  bge-m3#namespace=abc123  …  12,000  192.0 MiB  active
+  bge-m3#namespace=dead  …     2,419   38.0 MiB  inactive
+```
+
+命令会顺带执行与 daemon 相同的一次性运行时准备（legacy JSON → 二进制迁移，幂等）。
+
+### `openbiliclaw embedding-cache-clean`
+
+手动清理 embedding L2 缓存，默认 dry-run 只报告，加 `--apply` 才执行。三个阶段的
+目的对应 issue #153 的三条整改：
+
+1. **JSON → 二进制迁移**：把 `encoding=0` 的旧 JSON 向量迁移为紧凑 float32 BLOB
+   （幂等、小批量提交、中断可续跑；损坏行标记后跳过）。
+2. **回收失效 namespace**：删除不在当前 active namespace 的行（默认含 legacy 行；
+   `--keep-legacy` 保留 legacy 行，`--keep-model m1,m2` 额外保护指定 L2 model key）。
+3. **物理回收**：WAL checkpoint + `VACUUM INTO` 新文件 + `integrity_check` + 原子替换，
+   让磁盘占用实际下降（仅 `DELETE` 只会进 freelist，主文件不缩小）。
+
+```bash
+$ openbiliclaw embedding-cache-clean            # 预览：将迁移/删除哪些行
+$ openbiliclaw embedding-cache-clean --apply    # 执行迁移 + 删除 + 物理回收
+$ openbiliclaw embedding-cache-clean --apply --keep-legacy --no-compact
+```
+
+清理前请先停止 daemon：物理替换需要独占文件。缓存可重建，删除的只是冷数据，
+不影响推荐正确性。
 
 ### `openbiliclaw recommend`
 
