@@ -89,7 +89,7 @@ Implement harness + tests (TDD) → run against real stack → fix bugs → **in
 | Layer | Status | Commit | Notes |
 |---|---|---|---|
 | L0 environment | completed | f8417db6 | 4 real E2E tests passed; harness and local embedding server verified; see testing log |
-| L1a content anonymous | completed | — | 2 real E2E tests passed; real API adapters corrected; see testing log |
+| L1a content anonymous | completed | b369fa08 | 2 real E2E tests passed; real API adapters corrected; see testing log |
 | L1b content authenticated | pending | — | |
 | L2 observations | pending | — | |
 | L3 understanding | pending | — | |
