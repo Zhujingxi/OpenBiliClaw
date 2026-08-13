@@ -4,9 +4,9 @@
 
 ## Workflow boundary
 
-- model-free reads: source status, recommendation feed, profile projection, provider search, content details, and job health, all with bounded pagination;
+- model-free reads: source status, recommendation feed delivery, profile projection, provider search, content details, and job health, all with bounded pagination; feed delivery atomically records stable shown IDs before returning items;
 - mutations: connect/disconnect, typed observation import, feedback, profile edit, bounded recommendation refresh admission;
-- feedback + observation and profile override + audit observation commit through explicit units of work;
+- feedback validates the delivered shown record/content pair, transitions shown → interacted, and commits its learning observation through an explicit unit of work; profile override + audit observation uses its own unit of work;
 - source connect verifies and stores credentials through Access before refreshing availability;
 - pending actions store only identity, scope, safe preview, expiry, and idempotency metadata; confirmation revalidates all of them;
 - recommendation refresh requests Core-owned job admission and never creates unmanaged tasks.

@@ -2868,7 +2868,7 @@
       },
       "RecommendationFeedItem": {
         "additionalProperties": false,
-        "description": "Selected recommendation joined with its durable presentation projection.",
+        "description": "Delivered recommendation joined with its durable presentation projection.",
         "properties": {
           "card": {
             "$ref": "#/components/schemas/CardData"
@@ -2884,9 +2884,15 @@
           },
           "selection": {
             "$ref": "#/components/schemas/SelectionRecord"
+          },
+          "shown_id": {
+            "pattern": "^shown_[0-9a-f]{32}$",
+            "title": "Shown Id",
+            "type": "string"
           }
         },
         "required": [
+          "shown_id",
           "selection",
           "ref",
           "card",

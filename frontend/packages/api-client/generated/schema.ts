@@ -1421,7 +1421,7 @@ export interface components {
         };
         /**
          * RecommendationFeedItem
-         * @description Selected recommendation joined with its durable presentation projection.
+         * @description Delivered recommendation joined with its durable presentation projection.
          */
         RecommendationFeedItem: {
             card: components["schemas"]["CardData"];
@@ -1429,6 +1429,8 @@ export interface components {
             reason: string;
             ref: components["schemas"]["ContentRef"];
             selection: components["schemas"]["SelectionRecord"];
+            /** Shown Id */
+            shown_id: string;
         };
         /** RecommendationLikedObservation */
         RecommendationLikedObservation: {

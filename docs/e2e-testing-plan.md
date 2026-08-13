@@ -61,7 +61,7 @@ Profile derivation with real Kimi, persistence across graph rebuild, and inspect
 Ranked recommendations from the real accumulated pool: non-empty ranked output with durable reasons, contribution/rank invariants, fixed provider/creator quotas, bounded refill, duplicate-safe repeat refill, and profile-shaped discovery topics. Recommendation discovery is text-query based and has no semantic retrieval consumer or durable projection text, so L4 resolves the L3 deferral by **not** adding a speculative embedding index; one will be designed only when semantic discovery exists.
 
 **L5 — Application workflows**
-Full loop on live `openbiliclaw serve` via `/v1` HTTP only: bootstrap → refill → recommend → feedback → profile shifts.
+Full loop on live `openbiliclaw serve` via `/v1` HTTP only: bootstrap/status and typed errors → supervised refill → delivered recommendations with stable shown IDs → validated/idempotent feedback → content-linked preference observation → scheduled profile shift → restart persistence. The profile read surface exposes bounded preference text but not evidence IDs, so linkage is proved by the accepted observation receipt plus the run-unique profile value rather than a new inspection API.
 
 **L6 — Docker deployment (primary deploy method)**
 
@@ -94,6 +94,6 @@ Implement harness + tests (TDD) → run against real stack → fix bugs → **in
 | L2 observations | completed | f9799dca | 2 real E2E tests passed; content landing/dedupe, restart durability, feedback idempotency, cursor replay, and authenticated history import verified; see testing log |
 | L3 understanding | completed | 03a05f42 | 2 real E2E tests passed; composed embeddings, real Kimi profile derivation, persistence, update, inspection/correction verified; durable semantic index deferred to L4 |
 | L4 recommendation | completed | 4356d0c1 | 2 real E2E tests passed; real refill/ranking/reasons/diversity/restart verified; duplicate refill and profile-to-discovery seams fixed; semantic index intentionally not added |
-| L5 workflows | pending | — | |
+| L5 workflows | completed | — | 2 live-server E2E tests passed; HTTP feed delivery/feedback state machine, typed errors, scheduled profile shift, and restart persistence verified; see testing log |
 | L6 docker | pending | — | |
 | L7 UI | pending | — | |

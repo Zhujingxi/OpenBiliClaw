@@ -149,9 +149,10 @@ class SelectionRecord(StrictBaseModel):
 
 
 class RecommendationFeedItem(StrictBaseModel):
-    """Selected recommendation joined with its durable presentation projection."""
+    """Delivered recommendation joined with its durable presentation projection."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
+    shown_id: str = Field(pattern=r"^shown_[0-9a-f]{32}$")
     selection: SelectionRecord
     ref: ContentRef
     card: CardData

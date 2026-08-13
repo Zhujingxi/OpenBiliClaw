@@ -131,7 +131,10 @@ class UnitOfWorkFake:
         self.edits: list[Observation] = []
         self.cancel = False
 
-    async def record_feedback(self, feedback: FeedbackRecord, observation: Observation) -> bool:
+    async def record_feedback(
+        self, feedback: FeedbackRecord, observation: Observation, content_ref: ContentRef
+    ) -> bool:
+        assert content_ref == REF
         if self.cancel:
             raise asyncio.CancelledError
         if any(item.feedback_id == feedback.feedback_id for item, _ in self.feedback):

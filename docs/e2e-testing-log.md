@@ -306,3 +306,44 @@ cat data-e2e/reports/l4.json
 ```
 
 The real run reported two passed tests. No provider body, title, profile text, account identity, cookie, or key is recorded in reports or this log.
+
+## L5 — Live Application workflows over `/v1`
+
+### Architecture trace and scope decisions
+
+1. The public feed returned `RecommendationFeedItem` without `shown_id` and never called the existing shown-history transition, while `/v1/feedback` required a caller-supplied `shown_id`. The feedback repository accepted arbitrary IDs and never moved shown → interacted. A real client therefore could not submit valid feedback or exercise the documented candidate state machine. The approved fix belongs in the Application feed-delivery/feedback workflows; generating an arbitrary ID in the E2E test was rejected as a fake test.
+2. Understanding is scheduled every 60 seconds, not synchronously triggered by feedback. Ordinary feedback evidence contains provider/content identity only, and the bounded profile API exposes preference summaries but not evidence IDs. L5 therefore submits real feedback and a separate, explicit content-scoped preference statement referencing the same delivered item, waits on the supervised `understanding.analysis` job through health, and proves linkage from the accepted observation receipt plus a run-unique value in `/v1/profiles/default`. No evidence-inspection API was invented.
+
+### Trace
+
+1. **Test:** request the feed as an HTTP client, then submit feedback with the returned delivery identity.
+   **Failure:** feed items had no delivery identity; arbitrary `shown_id` values were accepted and candidate state remained selected.
+   **Root cause:** `GetRecommendations` was modeled as a passive repository read even though the recommendation aggregate already had selected → shown → interacted states and a shown table. The feedback unit of work did not validate its delivery reference.
+   **Fix:** `GetRecommendations` now invokes atomic feed delivery. Selected items receive deterministic shown records and transition to shown before return; repeated reads reuse the same stable ID. Feedback validates the shown row and matching `ContentRef`, rejects unknown IDs with typed `not_found`, transitions shown → interacted, and returns idempotent duplicate success for an already committed feedback ID.
+   **Retest:** hermetic Application/repository/API tests passed; the real HTTP loop received `shown_id`, committed liked feedback, replayed it as `inserted=false`, and rejected an unknown ID with JSON `not_found` rather than a 500/HTML response.
+
+2. **Test:** poll supervised understanding completion after the HTTP observation write.
+   **Failure:** the first real run hit the host's 120 requests/minute limiter while polling every 250ms and received typed HTTP 429.
+   **Root cause:** the test-side poll interval ignored the real host security policy; product behavior was correct.
+   **Fix:** poll once per second, still bounded and without a fixed long sleep.
+   **Retest:** the 60-second understanding tick completed successfully, real Kimi derived the run-unique content preference, and `/v1/profiles/default` exposed it.
+
+3. **Test:** restart the live server over the same isolated data directory.
+   **Result:** recommendation IDs and their stable shown IDs remained available, the bounded profile projection was byte-equivalent, and the feedback observation had already survived through the accepted HTTP receipt/idempotent replay. Server startup and shutdown were managed by the E2E fixture and logs stayed under gitignored `data-e2e/`.
+
+4. **API surface:** loopback reads require no bearer token by design; every mutation still requires matching device/CSRF headers. Invalid query input returns the documented typed `validation` JSON envelope. OpenAPI snapshot and the generated TypeScript client now include `RecommendationFeedItem.shown_id`.
+
+5. **Independent review:** repeat the model-dependent profile assertion nine times.
+   **Failure:** two runs derived a valid content preference but paraphrased away the run token, so the single-shot assertion failed. Successful and failed attempts also permanently accumulated claims on the shared `default` profile; it reached 28 preferences. `DialogueProfile.preference_summary` allows at most 30 entries, while `dialogue_projection()` bounds characters but not count, so the 31st preference would make `/v1/profiles/default` raise a validation error and return 500.
+   **Root cause:** L5 had not reused L4's bounded real-model retry/cleanup discipline, and the projection has a latent count-overflow defect.
+   **Fix:** make at most three content-scoped attempts with distinct markers, match only newly derived summaries, fail loudly with derived-summary diagnostics on exhaustion, and remove failed/successful L5 claims through the real `/v1/profiles/edit` override workflow. The same workflow performs a one-time cleanup of prior `HTTP 工作流测试` claims before testing.
+   **Retest:** three consecutive L5 executions passed without growing the profile. The general product defect remains: any non-E2E profile with more than 30 active preference claims can make `dialogue_projection()` fail; fixing that projection is a follow-up, not an L5 test change.
+
+### Reproduction
+
+```bash
+./scripts/e2e.py l5
+cat data-e2e/reports/l5.json
+```
+
+The real run reported two passed tests. The server fixture invokes `openbiliclaw serve --config data-e2e/config.e2e.toml --data-dir data-e2e`, waits on `/v1/runtime/health`, and terminates it cleanly. No key, cookie, provider body, title, profile text, or account identity is written to the report or this log.

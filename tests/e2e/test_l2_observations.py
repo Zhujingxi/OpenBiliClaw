@@ -142,11 +142,14 @@ async def test_content_landing_dedupe_feedback_durability_and_cursor_replay() ->
             RecordStatus.DUPLICATE,
         )
 
+        delivered = await facade.get_recommendations(20)
+        assert delivered.items
+        feedback_item = delivered.items[0]
         feedback_key = f"e2e:l2:feedback:{run}"
         feedback = RecordFeedbackCommand(
             idempotency_key=feedback_key,
-            shown_id=f"shown-{run}",
-            content_ref=ref,
+            shown_id=feedback_item.shown_id,
+            content_ref=feedback_item.ref,
             kind=FeedbackKind.SAVED,
         )
         first_feedback = await facade.record_feedback(feedback)

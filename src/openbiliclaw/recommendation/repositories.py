@@ -17,9 +17,13 @@ from .models import (
     RejectionRecord,
     SelectionRecord,
     ShownRecord,
+    record_identity,
 )
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
+    from openbiliclaw.content.integration.identity import ContentRef
     from openbiliclaw.infrastructure.sqlite.database import SqliteDatabase, SqliteSession
 
 
@@ -44,15 +48,13 @@ class RecommendationRepository(Protocol):
         admission: AdmissionRecord,
         selection: SelectionRecord,
     ) -> Candidate: ...
-    async def feed(self, *, limit: int) -> tuple[RecommendationFeedItem, ...]: ...
-
-
-class ShownHistoryRepository(Protocol):
-    async def mark_shown(self, record: ShownRecord) -> Candidate: ...
+    async def deliver_feed(
+        self, *, limit: int, shown_at: datetime
+    ) -> tuple[RecommendationFeedItem, ...]: ...
 
 
 class FeedbackRepository(Protocol):
-    async def save_feedback(self, record: FeedbackRecord) -> bool: ...
+    async def save_feedback(self, record: FeedbackRecord, content_ref: ContentRef) -> bool: ...
 
 
 class ExpressionRepository(Protocol):
@@ -172,31 +174,60 @@ class SqliteRecommendationRepository:
             )
         return selected
 
-    async def mark_shown(self, record: ShownRecord) -> Candidate:
-        current = await self.load(record.candidate_id)
-        if current.state is not CandidateState.SELECTED:
-            raise ValueError("shown record requires selected candidate")
-        selected = current.transition(CandidateState.SHOWN)
+    async def save_feedback(self, record: FeedbackRecord, content_ref: ContentRef) -> bool:
         async with self.db.transaction() as session:
-            await self._update_state(session, selected, CandidateState.SELECTED)
-            await self._insert_session(
-                session,
-                "recommendation_shown",
-                "shown_id",
-                record.shown_id,
-                record.model_dump_json(),
-                record.shown_at.isoformat(),
-            )
-        return selected
+            return await self.save_feedback_session(session, record, content_ref)
 
-    async def save_feedback(self, record: FeedbackRecord) -> bool:
-        return await self._insert(
+    async def save_feedback_session(
+        self, session: SqliteSession, record: FeedbackRecord, content_ref: ContentRef
+    ) -> bool:
+        """Validate one delivered recommendation and persist feedback in the caller transaction."""
+
+        shown_row = await session.fetch_one(
+            "SELECT record_json FROM recommendation_shown WHERE shown_id=?",
+            (record.shown_id,),
+        )
+        if shown_row is None:
+            raise KeyError(record.shown_id)
+        shown = ShownRecord.model_validate_json(str(shown_row[0]))
+        selection_row = await session.fetch_one(
+            "SELECT record_json FROM recommendation_selections WHERE recommendation_id=?",
+            (shown.recommendation_id,),
+        )
+        if selection_row is None:
+            raise KeyError(shown.recommendation_id)
+        selection = SelectionRecord.model_validate_json(str(selection_row[0]))
+        if selection.candidate_id != shown.candidate_id:
+            raise ValueError("shown recommendation does not match selection")
+        candidate_row = await session.fetch_one(
+            "SELECT candidate_json FROM recommendation_candidates WHERE candidate_id=?",
+            (shown.candidate_id,),
+        )
+        if candidate_row is None:
+            raise KeyError(shown.candidate_id)
+        candidate = Candidate.model_validate_json(str(candidate_row[0]))
+        if candidate.preview.ref != content_ref:
+            raise ValueError("feedback content does not match shown recommendation")
+        if candidate.state is not CandidateState.SHOWN:
+            existing = await session.fetch_one(
+                "SELECT feedback_id FROM recommendation_feedback WHERE feedback_id=?",
+                (record.feedback_id,),
+            )
+            if existing is not None:
+                return False
+            raise ValueError("feedback requires a shown recommendation")
+        interacted = candidate.transition(CandidateState.INTERACTED)
+        inserted = await self._insert_session(
+            session,
             "recommendation_feedback",
             "feedback_id",
             record.feedback_id,
             record.model_dump_json(),
             record.occurred_at.isoformat(),
         )
+        if inserted:
+            await self._update_state(session, interacted, CandidateState.SHOWN)
+        return inserted
 
     async def save_expression(self, record: ExpressionRecord) -> None:
         await self._insert(
@@ -207,7 +238,9 @@ class SqliteRecommendationRepository:
             record.generated_at.isoformat(),
         )
 
-    async def feed(self, *, limit: int) -> tuple[RecommendationFeedItem, ...]:
+    async def deliver_feed(
+        self, *, limit: int, shown_at: datetime
+    ) -> tuple[RecommendationFeedItem, ...]:
         if not 1 <= limit <= 100:
             raise ValueError("limit must be between 1 and 100")
         async with self.db.transaction() as session:
@@ -218,30 +251,49 @@ class SqliteRecommendationRepository:
                 "ON c.candidate_id=json_extract(s.record_json,'$.candidate_id') "
                 "JOIN recommendation_expressions AS e "
                 "ON e.recommendation_id=s.recommendation_id "
+                "WHERE c.state IN ('selected','shown') "
                 "ORDER BY s.created_at DESC,"
                 "CAST(json_extract(s.record_json,'$.rank') AS INTEGER),s.recommendation_id LIMIT ?",
                 (limit,),
             )
-        items = []
-        for row in rows:
-            selection = SelectionRecord.model_validate_json(str(row[0]))
-            candidate = Candidate.model_validate_json(str(row[1]))
-            expression = ExpressionRecord.model_validate_json(str(row[2]))
-            preview = candidate.preview
-            items.append(
-                RecommendationFeedItem(
-                    selection=selection,
-                    ref=preview.ref,
-                    card=CardData(
-                        ref=preview.ref,
-                        title=preview.title,
-                        summary=preview.summary,
-                        source_timestamp=preview.source_timestamp,
-                        provenance=preview.provenance,
-                    ),
-                    reason=expression.reason,
+            items = []
+            for row in rows:
+                selection = SelectionRecord.model_validate_json(str(row[0]))
+                candidate = Candidate.model_validate_json(str(row[1]))
+                expression = ExpressionRecord.model_validate_json(str(row[2]))
+                shown = ShownRecord(
+                    shown_id=record_identity("shown", selection.recommendation_id),
+                    recommendation_id=selection.recommendation_id,
+                    candidate_id=candidate.candidate_id,
+                    shown_at=shown_at,
                 )
-            )
+                if candidate.state is CandidateState.SELECTED:
+                    delivered = candidate.transition(CandidateState.SHOWN)
+                    await self._update_state(session, delivered, CandidateState.SELECTED)
+                    await self._insert_session(
+                        session,
+                        "recommendation_shown",
+                        "shown_id",
+                        shown.shown_id,
+                        shown.model_dump_json(),
+                        shown.shown_at.isoformat(),
+                    )
+                preview = candidate.preview
+                items.append(
+                    RecommendationFeedItem(
+                        shown_id=shown.shown_id,
+                        selection=selection,
+                        ref=preview.ref,
+                        card=CardData(
+                            ref=preview.ref,
+                            title=preview.title,
+                            summary=preview.summary,
+                            source_timestamp=preview.source_timestamp,
+                            provenance=preview.provenance,
+                        ),
+                        reason=expression.reason,
+                    )
+                )
         return tuple(items)
 
     async def _insert(

@@ -51,6 +51,9 @@ from openbiliclaw.understanding.projections import (
 from .errors import ApplicationError, ApplicationErrorCode
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+    from datetime import datetime
+
     from openbiliclaw.access.models import AccessHandle
 
 
@@ -60,7 +63,9 @@ class AccessReads(Protocol):
 
 
 class RecommendationReads(Protocol):
-    async def feed(self, *, limit: int) -> tuple[RecommendationFeedItem, ...]: ...
+    async def deliver_feed(
+        self, *, limit: int, shown_at: datetime
+    ) -> tuple[RecommendationFeedItem, ...]: ...
 
 
 class ContentRegistryReads(Protocol):
@@ -167,9 +172,12 @@ class RecommendationsResult(StrictBaseModel):
 @dataclass(frozen=True, slots=True)
 class GetRecommendations:
     service: RecommendationReads
+    clock: Callable[[], datetime]
 
     async def __call__(self, query: GetRecommendationsQuery) -> RecommendationsResult:
-        return RecommendationsResult(items=await self.service.feed(limit=query.limit))
+        return RecommendationsResult(
+            items=await self.service.deliver_feed(limit=query.limit, shown_at=self.clock())
+        )
 
 
 class SearchContentQuery(StrictBaseModel):

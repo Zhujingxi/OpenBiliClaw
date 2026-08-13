@@ -30,13 +30,17 @@ from openbiliclaw.observations.provenance import (
 )
 from openbiliclaw.recommendation.models import FeedbackKind, FeedbackRecord, record_identity
 
+from .errors import ApplicationError, ApplicationErrorCode
+
 if TYPE_CHECKING:
     from collections.abc import Callable
     from datetime import datetime
 
 
 class FeedbackObservationUnitOfWork(Protocol):
-    async def record_feedback(self, feedback: FeedbackRecord, observation: Observation) -> bool: ...
+    async def record_feedback(
+        self, feedback: FeedbackRecord, observation: Observation, content_ref: ContentRef
+    ) -> bool: ...
 
 
 class RecordFeedbackCommand(StrictBaseModel):
@@ -103,7 +107,16 @@ class RecordFeedback:
             observation = RecommendationDismissedObservation(
                 **common, payload=ReasonPayload(reason=command.reason)
             )
-        inserted = await self.unit_of_work.record_feedback(feedback, observation)
+        try:
+            inserted = await self.unit_of_work.record_feedback(
+                feedback, observation, command.content_ref
+            )
+        except KeyError as error:
+            raise ApplicationError(
+                ApplicationErrorCode.NOT_FOUND, "shown recommendation not found"
+            ) from error
+        except ValueError as error:
+            raise ApplicationError(ApplicationErrorCode.CONFLICT, str(error)) from error
         return RecordFeedbackResult(
             feedback_id=feedback_id, observation_id=observation_id, inserted=inserted
         )

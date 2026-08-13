@@ -128,6 +128,7 @@ SELECTION = SelectionRecord(
     seed=1,
 )
 FEED_ITEM = RecommendationFeedItem(
+    shown_id="shown_" + "3" * 32,
     selection=SELECTION,
     ref=REF,
     card=CardData(

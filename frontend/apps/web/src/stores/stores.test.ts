@@ -80,6 +80,7 @@ function api(overrides: Partial<WebApi> = {}): WebApi {
   };
 }
 const feedItem = {
+  shown_id: "shown_11111111111111111111111111111111",
   ref: {
     provider_id: { value: "demo" },
     content_kind: { value: "video" },

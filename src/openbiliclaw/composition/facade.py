@@ -164,7 +164,7 @@ class CompositionFacade:
         self._sources = ListSources(provider_ids, access)
         self._connect = ConnectSource(access, _Availability(), idempotency)
         self._disconnect = DisconnectSource(access, idempotency)
-        self._recommendations = GetRecommendations(recommendations)
+        self._recommendations = GetRecommendations(recommendations, clock=lambda: datetime.now(UTC))
         self._record_observations = RecordObservations(observations)
         self._profile = ShowProfile(understanding)
         self._search = SearchContent(registry, access)

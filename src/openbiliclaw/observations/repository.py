@@ -50,36 +50,42 @@ class SqliteObservationRepository:
     async def insert_batch(
         self, observations: tuple[Observation, ...]
     ) -> tuple[RepositoryInsertResult, ...]:
-        results: list[RepositoryInsertResult] = []
         async with self._database.transaction() as session:
-            for event in observations:
-                existing = await session.fetch_one(
-                    "SELECT observation_id FROM observations "
-                    "WHERE producer=? AND idempotency_key=?",
-                    (event.provenance.producer_id, event.idempotency_key),
-                )
-                if existing is not None:
-                    results.append(RepositoryInsertResult(str(existing[0]), InsertStatus.DUPLICATE))
-                    continue
-                await self._ensure_content(session, event)
-                content_id = await self._content_id(session, event)
-                document = observation_adapter.dump_python(event, mode="json")
-                await session.execute(
-                    "INSERT INTO observations("
-                    "observation_id,content_id,kind,occurred_at,strength,producer,"
-                    "idempotency_key,payload_json) VALUES(?,?,?,?,?,?,?,?)",
-                    (
-                        event.observation_id,
-                        content_id,
-                        event.event_type,
-                        event.occurred_at.isoformat(),
-                        _strength(event),
-                        event.provenance.producer_id,
-                        event.idempotency_key,
-                        json.dumps(document, separators=(",", ":"), sort_keys=True),
-                    ),
-                )
-                results.append(RepositoryInsertResult(event.observation_id, InsertStatus.INSERTED))
+            return await self.insert_batch_session(session, observations)
+
+    async def insert_batch_session(
+        self, session: SqliteSession, observations: tuple[Observation, ...]
+    ) -> tuple[RepositoryInsertResult, ...]:
+        """Insert a typed batch inside the caller's existing database transaction."""
+
+        results: list[RepositoryInsertResult] = []
+        for event in observations:
+            existing = await session.fetch_one(
+                "SELECT observation_id FROM observations WHERE producer=? AND idempotency_key=?",
+                (event.provenance.producer_id, event.idempotency_key),
+            )
+            if existing is not None:
+                results.append(RepositoryInsertResult(str(existing[0]), InsertStatus.DUPLICATE))
+                continue
+            await self._ensure_content(session, event)
+            content_id = await self._content_id(session, event)
+            document = observation_adapter.dump_python(event, mode="json")
+            await session.execute(
+                "INSERT INTO observations("
+                "observation_id,content_id,kind,occurred_at,strength,producer,"
+                "idempotency_key,payload_json) VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    event.observation_id,
+                    content_id,
+                    event.event_type,
+                    event.occurred_at.isoformat(),
+                    _strength(event),
+                    event.provenance.producer_id,
+                    event.idempotency_key,
+                    json.dumps(document, separators=(",", ":"), sort_keys=True),
+                ),
+            )
+            results.append(RepositoryInsertResult(event.observation_id, InsertStatus.INSERTED))
         return tuple(results)
 
     async def read(self, *, after_cursor: str | None, limit: int) -> ObservationPage:

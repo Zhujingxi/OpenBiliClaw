@@ -32,6 +32,8 @@ from openbiliclaw.recommendation.models import (
     CandidateState,
     DiscoveryProvenance,
     EvaluationRecord,
+    FeedbackKind,
+    FeedbackRecord,
     RejectionReason,
     SelectionRecord,
     ShownRecord,
@@ -250,17 +252,27 @@ async def test_repository_replay_feed_is_model_free(tmp_path: Path) -> None:
         candidate_id=original.candidate_id,
         shown_at=NOW,
     )
-    assert (await repo.mark_shown(shown)).state is CandidateState.SHOWN
     await db.close()
     db2 = SqliteDatabase(path)
     await db2.open()
-    feed = await RecommendationService(SqliteRecommendationRepository(db2)).feed()
+    feed = await RecommendationService(SqliteRecommendationRepository(db2)).deliver_feed(
+        shown_at=NOW
+    )
     assert tuple(item.selection for item in feed) == selections
+    assert tuple(item.shown_id for item in feed) == (shown.shown_id,)
     assert tuple(item.reason for item in feed) == ("Recommended for relevance and freshness.",)
     assert tuple(item.selection.rank for item in feed) == (1,)
-    assert (
-        await SqliteRecommendationRepository(db2).load(original.candidate_id)
-    ).state is CandidateState.SHOWN
+    restarted_repo = SqliteRecommendationRepository(db2)
+    assert (await restarted_repo.load(original.candidate_id)).state is CandidateState.SHOWN
+    feedback = FeedbackRecord(
+        feedback_id=record_identity("feedback", shown.shown_id),
+        shown_id=shown.shown_id,
+        kind=FeedbackKind.LIKED,
+        occurred_at=NOW,
+    )
+    assert await restarted_repo.save_feedback(feedback, original.preview.ref)
+    assert not await restarted_repo.save_feedback(feedback, original.preview.ref)
+    assert (await restarted_repo.load(original.candidate_id)).state is CandidateState.INTERACTED
     await db2.close()
 
 
@@ -453,17 +465,17 @@ async def test_repository_all_aggregate_writes_and_edges(tmp_path: Path) -> None
     await repo.save_expression(expression)
     feedback = FeedbackRecord(
         feedback_id=record_identity("feedback", item.candidate_id),
-        shown_id="shown_x",
+        shown_id="shown_" + "f" * 32,
         kind=FeedbackKind.LIKED,
         occurred_at=NOW,
     )
-    assert await repo.save_feedback(feedback)
-    assert not await repo.save_feedback(feedback)
+    with pytest.raises(KeyError):
+        await repo.save_feedback(feedback, item.preview.ref)
     with pytest.raises(ValueError, match="unknown"):
         async with db.transaction() as session:
             await repo._insert_session(session, "unknown", "id", "x", "{}", NOW.isoformat())
     with pytest.raises(ValueError):
-        await repo.feed(limit=0)
+        await repo.deliver_feed(limit=0, shown_at=NOW)
     with pytest.raises(ValueError, match="evaluated"):
         await repo.admit_and_select(item, cast("Any", object()), selection)
     evaluated = item.model_copy(update={"state": CandidateState.EVALUATED})
@@ -494,15 +506,6 @@ async def test_repository_all_aggregate_writes_and_edges(tmp_path: Path) -> None
     await repo.add_candidate(future)
     assert await repo.expire_due(now=(NOW + timedelta(seconds=2)).isoformat()) == 1
     assert (await repo.load(expiring.candidate_id)).state is CandidateState.EXPIRED
-    with pytest.raises(ValueError, match="selected"):
-        await repo.mark_shown(
-            ShownRecord(
-                shown_id=record_identity("shown", item.candidate_id),
-                recommendation_id=selection.recommendation_id,
-                candidate_id=item.candidate_id,
-                shown_at=NOW,
-            )
-        )
     await db.close()
 
 

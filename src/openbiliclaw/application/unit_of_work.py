@@ -9,6 +9,7 @@ from openbiliclaw.understanding.overrides import OverrideOperation, UserOverride
 from openbiliclaw.understanding.repository import ledger_identity
 
 if TYPE_CHECKING:
+    from openbiliclaw.content.integration.identity import ContentRef
     from openbiliclaw.observations.models import DeterministicProfileEditObservation, Observation
     from openbiliclaw.observations.repository import SqliteObservationRepository
     from openbiliclaw.recommendation.models import FeedbackRecord
@@ -28,11 +29,18 @@ class FeedbackUnitOfWork:
         self._recommendations = recommendations
         self._observations = observations
 
-    async def record_feedback(self, feedback: FeedbackRecord, observation: Observation) -> bool:
-        # Both repositories share the single serialized database. Insert the
-        # immutable observation first so a retry cannot lose learning evidence.
-        await self._observations.insert_batch((observation,))
-        return await self._recommendations.save_feedback(feedback)
+    async def record_feedback(
+        self, feedback: FeedbackRecord, observation: Observation, content_ref: ContentRef
+    ) -> bool:
+        # Both repositories share one database; the delivery transition, feedback,
+        # and learning evidence therefore commit or roll back together.
+        async with self._recommendations.db.transaction() as session:
+            inserted = await self._recommendations.save_feedback_session(
+                session, feedback, content_ref
+            )
+            if inserted:
+                await self._observations.insert_batch_session(session, (observation,))
+            return inserted
 
 
 class ProfileEditUnitOfWork:

@@ -9,6 +9,7 @@ import pytest
 from openbiliclaw.application.record_feedback import RecordFeedback, RecordFeedbackCommand
 from openbiliclaw.application.unit_of_work import FeedbackUnitOfWork, ProfileEditUnitOfWork
 from openbiliclaw.content.integration.identity import ContentKind, ContentRef, ProviderId
+from openbiliclaw.content.integration.projections import ContentPreview, ProjectionProvenance
 from openbiliclaw.infrastructure.sqlite.database import SqliteDatabase
 from openbiliclaw.infrastructure.sqlite.schema import SchemaMigrator
 from openbiliclaw.observations.models import (
@@ -23,7 +24,19 @@ from openbiliclaw.observations.provenance import (
     TrustLevel,
 )
 from openbiliclaw.observations.repository import SqliteObservationRepository
-from openbiliclaw.recommendation.models import FeedbackKind, FeedbackRecord
+from openbiliclaw.recommendation.models import (
+    AdmissionRecord,
+    Candidate,
+    CandidateState,
+    DiscoveryProvenance,
+    EvaluationRecord,
+    ExpressionRecord,
+    FeedbackKind,
+    FeedbackRecord,
+    SelectionRecord,
+    candidate_identity,
+    record_identity,
+)
 from openbiliclaw.recommendation.repositories import SqliteRecommendationRepository
 from openbiliclaw.understanding.overrides import OverrideOperation
 from openbiliclaw.understanding.repository import SqliteUnderstandingRepository
@@ -47,7 +60,10 @@ class SqliteFeedbackUow:
         self.database = database
         self.fail_after_primary = fail_after_primary
 
-    async def record_feedback(self, feedback: FeedbackRecord, observation: Observation) -> bool:
+    async def record_feedback(
+        self, feedback: FeedbackRecord, observation: Observation, content_ref: ContentRef
+    ) -> bool:
+        assert content_ref == REF
         async with self.database.transaction() as session:
             existing = await session.fetch_one(
                 "SELECT 1 FROM recommendation_feedback WHERE feedback_id=?",
@@ -151,9 +167,63 @@ async def test_production_units_of_work_commit_feedback_and_profile_edit(tmp_pat
     observations = SqliteObservationRepository(database)
     recommendations = SqliteRecommendationRepository(database)
     understanding = SqliteUnderstandingRepository(database)
+    preview = ContentPreview(
+        ref=REF,
+        title="test",
+        summary="summary",
+        source_timestamp=NOW,
+        provenance=ProjectionProvenance(ref=REF, native_schema_version=1, projected_at=NOW),
+    )
+    candidate = Candidate(
+        candidate_id=candidate_identity(REF, "test", "test"),
+        preview=preview,
+        provenance=DiscoveryProvenance(strategy_id="test", query_key="test", discovered_at=NOW),
+        state=CandidateState.EVALUATED,
+        expires_at=NOW.replace(year=2031),
+    )
+    assert await recommendations.add_candidate(candidate)
+    evaluation = EvaluationRecord(
+        evaluation_id=record_identity("eval", candidate.candidate_id),
+        candidate_id=candidate.candidate_id,
+        model_instance="test",
+        rubric_version=1,
+        context_version=1,
+        score=1,
+        rationale="test",
+        uncertainty=0,
+        input_tokens=0,
+        output_tokens=0,
+        evaluated_at=NOW,
+    )
+    assert await recommendations.save_evaluation(evaluation)
+    admission = AdmissionRecord(
+        admission_id=record_identity("admit", candidate.candidate_id),
+        candidate_id=candidate.candidate_id,
+        score=1,
+        admitted_at=NOW,
+    )
+    selection = SelectionRecord(
+        recommendation_id=record_identity("rec", candidate.candidate_id),
+        candidate_id=candidate.candidate_id,
+        rank=1,
+        score=1,
+        contributions=(),
+        selected_at=NOW,
+        seed=1,
+    )
+    await recommendations.admit_and_select(candidate, admission, selection)
+    await recommendations.save_expression(
+        ExpressionRecord(
+            recommendation_id=selection.recommendation_id,
+            reason="test",
+            tone="neutral",
+            generated_at=NOW,
+        )
+    )
+    delivered = await recommendations.deliver_feed(limit=1, shown_at=NOW)
     command = RecordFeedbackCommand(
         idempotency_key="feedback:uow:production",
-        shown_id="shown_" + "2" * 32,
+        shown_id=delivered[0].shown_id,
         content_ref=REF,
         kind=FeedbackKind.LIKED,
         account_id="acct",
