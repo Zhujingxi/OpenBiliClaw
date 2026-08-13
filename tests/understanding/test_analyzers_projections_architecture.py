@@ -6,7 +6,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from pydantic_ai import Agent
+from pydantic_ai import Agent, PromptedOutput
+from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
@@ -16,6 +17,12 @@ from openbiliclaw.understanding.analyzers import (
     PREFERENCE_ANALYZER,
     TOPIC_LIFECYCLE_ANALYZER,
 )
+from openbiliclaw.understanding.analyzers.preference import (
+    PreferenceDraft,
+    PreferenceDraftBatch,
+    adapt_preference_drafts,
+)
+from openbiliclaw.understanding.evidence import EvidenceLink
 from openbiliclaw.understanding.profile import (
     AvoidanceClaim,
     CanonicalProfile,
@@ -128,22 +135,67 @@ def test_analyzer_definitions_have_stable_typed_bounded_contracts() -> None:
     assert len({item.agent_id.value for item in definitions}) == 4
     for item in definitions:
         assert item.requirements.structured_output
-        assert item.policy.timeout_seconds == 30
         assert item.context_version == 1
-        assert item.agent.output_type is ProposalBatch
+    assert PREFERENCE_ANALYZER.policy.timeout_seconds == 120
+    assert all(item.policy.timeout_seconds == 30 for item in definitions[1:])
+    preference_output = PREFERENCE_ANALYZER.agent.output_type
+    assert isinstance(preference_output, PromptedOutput)
+    assert preference_output.outputs is PreferenceDraftBatch
 
 
 async def test_structured_analyzer_runs_with_function_model() -> None:
     def response(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         return ModelResponse(parts=[TextPart('{"proposals":[]}')])
 
-    agent: Agent[None, ProposalBatch] = Agent(
+    agent: Agent[None, PreferenceDraftBatch] = Agent(
         FunctionModel(response),
-        output_type=ProposalBatch,
+        output_type=PromptedOutput(PreferenceDraftBatch),
         instructions=PREFERENCE_ANALYZER.instructions,
     )
     result = await agent.run("Evidence batch contains no supported preference signal")
-    assert result.output == ProposalBatch(proposals=())
+    assert result.output == PreferenceDraftBatch(proposals=())
+
+
+async def test_prompted_analyzer_rejects_invalid_json() -> None:
+    def response(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        return ModelResponse(parts=[TextPart("not json")])
+
+    agent: Agent[None, PreferenceDraftBatch] = Agent(
+        FunctionModel(response), output_type=PromptedOutput(PreferenceDraftBatch)
+    )
+    with pytest.raises(UnexpectedModelBehavior, match="output validation"):
+        await agent.run("Return an empty proposal batch")
+
+
+def test_preference_drafts_gain_deterministic_domain_identity_and_resolve_evidence() -> None:
+    evidence = EvidenceLink(
+        evidence_id="ev_" + "a" * 32,
+        observation_id="obs_" + "a" * 32,
+        summary="Preference statement: practical Python",
+        occurred_at=NOW,
+        trust=1,
+    )
+    batch = PreferenceDraftBatch(
+        proposals=(
+            PreferenceDraft(
+                dimension="content",
+                value="practical Python",
+                confidence=0.9,
+                evidence_ids=(evidence.evidence_id,),
+            ),
+        )
+    )
+    adapted = adapt_preference_drafts(batch, (evidence,), PREFERENCE_ANALYZER.agent_id.value, NOW)
+    assert ProposalBatch.model_validate_json(adapted.model_dump_json()) == adapted
+    assert adapted.proposals[0].claim.claim_id == claim_id("preference", "content:practical Python")
+    hallucinated = batch.model_copy(
+        update={
+            "proposals": (batch.proposals[0].model_copy(update={"evidence_ids": ("invented",)}),)
+        }
+    )
+    assert not adapt_preference_drafts(
+        hallucinated, (evidence,), PREFERENCE_ANALYZER.agent_id.value, NOW
+    ).proposals
 
 
 def _imports(node: ast.AST, package: str) -> tuple[str, ...]:

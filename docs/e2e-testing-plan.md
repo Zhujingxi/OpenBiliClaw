@@ -55,11 +55,10 @@ First fix `ConnectSource` idempotency versus in-memory connection restoration ac
 View/like/feedback events through the product path against real ingested content, plus real account history as bootstrap. Assert durability across a rebuilt application graph, producer-key idempotency, deterministic insertion-cursor replay, and `content_references` landing/dedupe through observation ingress (the architecture's only content-reference persistence path). `content_cache` remains empty because observations carry identity, not provider projection bodies.
 
 **L3 — Understanding**
-Profile derivation + semantic ingestion with real Kimi + real embeddings. Assert inspectable/correctable profile, embedding index at correct dimension.
-*Candidate tasks:* wire the first production embedding consumer in composition (contract landed, unwired); decide whether this first real consumer needs durable capability-probe results. BGE asymmetric retrieval should prepend the model's query instruction to query texts; infinity does not add it automatically.
+Profile derivation with real Kimi, persistence across graph rebuild, and inspect/correct workflows. Composition exposes the configured `EmbeddingService`; a real-title semantic smoke verifies 512 dimensions and BGE query-only instruction behavior. Architecture trace found no durable embedding owner, trigger, document source, or query API in Understanding, so L3 deliberately does not invent an index.
 
 **L4 — Recommendation**
-Ranked recommendations from the real accumulated pool: non-empty ranked output with reasons, diversity/budget rules, refill path.
+Ranked recommendations from the real accumulated pool: non-empty ranked output with reasons, diversity/budget rules, refill path. Design the first durable semantic ingestion/index (for example `content_embeddings`) here, owned by Recommendation discovery and driven by its real consumer; L3 deliberately deferred the speculative persistence design.
 
 **L5 — Application workflows**
 Full loop on live `openbiliclaw serve` via `/v1` HTTP only: bootstrap → refill → recommend → feedback → profile shifts.
@@ -93,7 +92,7 @@ Implement harness + tests (TDD) → run against real stack → fix bugs → **in
 | L1a content anonymous | completed | b369fa08 | 2 real E2E tests passed; real API adapters corrected; see testing log |
 | L1b content authenticated | completed | 3d28bb46 | 2 real E2E tests passed; restart replay and authenticated native adapters corrected; see testing log |
 | L2 observations | completed | f9799dca | 2 real E2E tests passed; content landing/dedupe, restart durability, feedback idempotency, cursor replay, and authenticated history import verified; see testing log |
-| L3 understanding | pending | — | |
+| L3 understanding | completed | — | 2 real E2E tests passed; composed embeddings, real Kimi profile derivation, persistence, update, inspection/correction verified; durable semantic index deferred to L4 |
 | L4 recommendation | pending | — | |
 | L5 workflows | pending | — | |
 | L6 docker | pending | — | |

@@ -16,6 +16,9 @@ from openbiliclaw.access.broker import AccessBroker
 from openbiliclaw.access.manual import ManualAccessMethod
 from openbiliclaw.access.methods import AccessMethodRegistry
 from openbiliclaw.access.service import AccessService
+from openbiliclaw.ai.providers.embeddings import EmbeddingModelInfo, EmbeddingService
+from openbiliclaw.ai.providers.embeddings.providers import build_embedding_transport
+from openbiliclaw.ai.providers.embeddings.service import query_prefix_for_model
 from openbiliclaw.ai.providers.models import ModelFactory, ModelInstanceConfig, ProviderKind
 from openbiliclaw.ai.runtime.capabilities import ModelCapabilities
 from openbiliclaw.ai.runtime.execution import AgentRunRequest, AIRuntime
@@ -66,6 +69,10 @@ from openbiliclaw.observations.service import ObservationIngressService
 from openbiliclaw.observations.validation import ObservationValidator
 from openbiliclaw.recommendation.service import RecommendationService
 from openbiliclaw.understanding.analyzers.contracts import PREFERENCE_ANALYZER
+from openbiliclaw.understanding.analyzers.preference import (
+    PreferenceDraftBatch,
+    adapt_preference_drafts,
+)
 from openbiliclaw.understanding.service import AnalyzerContract, AnalyzerInput, UnderstandingService
 
 if TYPE_CHECKING:
@@ -144,6 +151,7 @@ class _RuntimeAnalyzer:
         )
 
     async def analyze(self, data: AnalyzerInput) -> ProposalBatch:
+        now = datetime.now(UTC)
         result = await self._runtime.run(
             AgentRunRequest(
                 agent_id=self.contract.agent_id,
@@ -157,7 +165,15 @@ class _RuntimeAnalyzer:
                 workflow="understanding.preference",
             )
         )
-        return result.output
+        output = result.output
+        if not isinstance(output, PreferenceDraftBatch):
+            raise TypeError("preference analyzer returned an unexpected output type")
+        return adapt_preference_drafts(
+            output,
+            data.evidence,
+            self.contract.agent_id.value,
+            now,
+        )
 
 
 class _RefreshSupervisor:
@@ -233,6 +249,34 @@ def build_application(
         access_methods.append(ManualAccessMethod(vault, providers.manual_specs))
     access_registry = AccessMethodRegistry(tuple(access_methods))
     access = AccessService(AccessBroker(access_registry), access_registry, telemetry=telemetry)
+    embeddings = None
+    if settings.embedding.model_name:
+        embedding_config = ModelInstanceConfig(
+            provider=ProviderKind(settings.embedding.provider),
+            model_name=settings.embedding.model_name,
+            endpoint=settings.embedding.endpoint,
+            secret_ref=settings.embedding.secret_ref.removeprefix("vault:")
+            if settings.embedding.secret_ref
+            else "",
+            owner="embeddings",
+        )
+        embeddings = EmbeddingService(
+            build_embedding_transport(
+                embedding_config,
+                vault,
+                output_dimensions=settings.embedding.output_dimensions,
+            ),
+            EmbeddingModelInfo(
+                provider=embedding_config.provider.value,
+                model=embedding_config.model_name,
+                dimensions=settings.embedding.output_dimensions,
+                normalized=True,
+                version=embedding_config.provider_version,
+            ),
+            ResourceBudget("embedding", settings.runtime.default_resource_limit),
+            timeout_seconds=settings.runtime.default_timeout_seconds,
+            query_prefix=query_prefix_for_model(embedding_config.model_name),
+        )
     assistant_runtime = None
     if settings.model.model_name:
         configured = ModelFactory(vault).build(
@@ -384,6 +428,7 @@ def build_application(
             understanding=understanding,
             recommendations=recommendations,
             assistant=assistant,
+            embeddings=embeddings,
         ),
         hosts=ApplicationHosts(dependencies=dependencies, api=create_app(dependencies)),
     )

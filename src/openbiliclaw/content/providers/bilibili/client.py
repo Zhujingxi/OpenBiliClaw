@@ -243,7 +243,17 @@ class BilibiliClient:
         if not isinstance(rows, list):
             raise self._invalid()
         try:
-            items = tuple(_item(row) for value in rows if (row := _mapping(value)))
+            # Search occasionally includes legacy archive rows without a BVID. They
+            # cannot form the provider's stable ContentRef, so skip them rather than
+            # rejecting the otherwise valid page.
+            mapped_rows = tuple(row for value in rows if (row := _mapping(value)))
+            items = tuple(
+                _item(row)
+                for row in mapped_rows
+                if path != "/x/web-interface/search/type"
+                or _text(row.get("bvid"))
+                or row.get("kind") in {"video", "article"}
+            )
             cursor = (
                 str(data["next_cursor"])
                 if data.get("next_cursor") is not None

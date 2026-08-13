@@ -19,6 +19,15 @@ if TYPE_CHECKING:
     from openbiliclaw.core.resources import ResourceBudget
 
 
+BGE_SMALL_ZH_QUERY_PREFIX = "为这个句子生成表示以用于检索相关文章："
+
+
+def query_prefix_for_model(model_name: str) -> str:
+    """Return the model-card retrieval instruction applied to queries only."""
+
+    return BGE_SMALL_ZH_QUERY_PREFIX if model_name.casefold().endswith("bge-small-zh-v1.5") else ""
+
+
 class EmbeddingService:
     """Keep embedding execution separate from chat model routing."""
 
@@ -31,6 +40,7 @@ class EmbeddingService:
         batch_size: int = 32,
         retries: int = 1,
         timeout_seconds: float = 30,
+        query_prefix: str = "",
     ) -> None:
         if batch_size < 1 or retries < 0 or timeout_seconds <= 0:
             raise ValueError("embedding execution limits must be positive")
@@ -40,6 +50,7 @@ class EmbeddingService:
         self._batch_size = batch_size
         self._retries = retries
         self._timeout = timeout_seconds
+        self._query_prefix = query_prefix
 
     async def embed_documents(self, texts: tuple[str, ...]) -> EmbeddingResult:
         if not texts or any(not text.strip() for text in texts):
@@ -67,7 +78,7 @@ class EmbeddingService:
         )
 
     async def embed_query(self, text: str) -> Vector:
-        result = await self.embed_documents((text,))
+        result = await self.embed_documents((self._query_prefix + text,))
         return result.vectors[0]
 
     async def _embed_batch(self, texts: tuple[str, ...]) -> EmbeddingBatch:

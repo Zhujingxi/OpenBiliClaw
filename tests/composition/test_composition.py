@@ -13,6 +13,7 @@ import pytest
 from pydantic_ai.models.test import TestModel
 
 from openbiliclaw.access.models import CredentialAccessHandle, Permission
+from openbiliclaw.ai.providers.embeddings import EmbeddingBatch, EmbeddingService
 from openbiliclaw.ai.providers.models import BuiltModel, ModelInstanceConfig, ProviderKind
 from openbiliclaw.ai.providers.verification import VerifiedCapabilities
 from openbiliclaw.ai.runtime.capabilities import ModelCapabilities
@@ -57,6 +58,32 @@ class _Component:
 
     async def ready(self) -> bool:
         return self.running
+
+
+def test_composition_constructs_configured_embedding_service(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class Transport:
+        async def embed(self, texts: tuple[str, ...]) -> EmbeddingBatch:
+            return EmbeddingBatch(vectors=tuple((1.0,) for _ in texts), input_tokens=0)
+
+    monkeypatch.setattr(
+        "openbiliclaw.composition.build.build_embedding_transport",
+        lambda *_args, **_kwargs: Transport(),
+    )
+    application = build_application(
+        AppSettings(
+            embedding={
+                "model_name": "BAAI/bge-small-zh-v1.5",
+                "endpoint": "http://127.0.0.1:7997",
+                "secret_ref": "vault:cred_" + "a" * 32,
+                "output_dimensions": 512,
+            }
+        ),
+        options=BuildOptions(data_dir=tmp_path),
+    )
+
+    assert isinstance(application.services.embeddings, EmbeddingService)
 
 
 def _application(name: str, events: list[str], *, fail: bool = False) -> Application:

@@ -15,7 +15,7 @@
 
 These modules contain no request logic. Credentials resolve only inside the selected trusted constructor callback. OpenRouter’s native provider does not accept a base URL, so an endpoint override fails explicitly rather than being ignored.
 
-`BuiltModel` preserves a stable non-secret fingerprint and the declared-versus-verified capability distinction. Structured output, native tools, vision, and streaming remain unverified; opt-in probe primitives and an in-memory store exist, but Composition does not run or persist probe results. Production calls flow from Composition’s configured model through `RouteTable` and `AIRuntime.run()`; no application-owned parallel chat integration remains.
+`BuiltModel` preserves a stable non-secret fingerprint and the declared-versus-verified capability distinction. Native tool-call output, native tools, vision, and streaming remain unverified; opt-in probe primitives and an in-memory store exist, but Composition does not run or persist probe results. Understanding achieves validated structured output with PydanticAI `PromptedOutput`: providers return schema-guided JSON as ordinary text, then Pydantic validates a model-friendly draft and the application attaches deterministic IDs/timestamps. OpenAI-compatible endpoints are not assumed to support native tool-call output. Production calls flow from Composition’s configured model through `RouteTable` and `AIRuntime.run()`; no application-owned parallel chat integration remains.
 
 ## Embeddings
 
@@ -23,7 +23,7 @@ Embedding configuration uses the same provider/model/endpoint/secret-reference s
 
 PydanticAI’s Anthropic, Google, and OpenRouter provider abstractions do not currently expose a common native embeddings resource in this dependency version, so those combinations fail closed with `UnsupportedCapabilityError`. The existing embedding service still owns deterministic batching, resource budgets, retry/timeout/cancellation, vector count/dimension validation, usage attribution, and provenance.
 
-Note: no production consumer constructs the embedding service from composition yet; the contract and transports are landed and tested, wiring lands with the first semantic-search consumer.
+Production Composition constructs `EmbeddingService` from `[embedding]` and exposes it as an inspectable `ApplicationServices` boundary. For `BAAI/bge-small-zh-v1.5`, `embed_query()` prepends the model-card Chinese retrieval instruction (`为这个句子生成表示以用于检索相关文章：`); document embeddings are never prefixed. No durable semantic index consumes it yet: ownership and ingestion design land with Recommendation discovery in L4, against that real consumer.
 
 ## Operational boundary
 

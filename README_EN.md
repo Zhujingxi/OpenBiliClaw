@@ -25,7 +25,7 @@ Open http://127.0.0.1:8420. Docker uses the same `openbiliclaw serve` entrypoint
 - Explicit anonymous/manual-secret Provider Access; secrets remain in the credential vault.
 - Eleven first-party content provider packages behind validated capabilities.
 - Immutable observations, canonical understanding, and one supervised proactive recommendation pipeline.
-- Optional Assistant/model routing through one unified PydanticAI-native provider path; the app does not serve models.
+- Optional Assistant/model routing and a composition-wired embedding service through one unified PydanticAI-native provider path; the app does not serve models.
 - Shared Vue 3/TypeScript presentation across desktop, mobile, and extension.
 - Atomic runtime reload and backup-required destructive database migrations.
 

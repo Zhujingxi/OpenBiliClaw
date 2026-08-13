@@ -200,3 +200,53 @@ cat data-e2e/reports/l2.json
 ```
 
 The real run reported two passed tests and preserved its observations for later layers.
+
+## L3 — Understanding
+
+### Architecture trace and approved scope
+
+1. Understanding consumes only bounded observation evidence; it has no embedding port or semantic trigger.
+2. L2 intentionally persisted `content_references` only. `content_cache` has no title/body projection to embed.
+3. Before L3, Composition did not construct `EmbeddingService`.
+4. The target schema had no embedding artifact/index table.
+5. Semantic retrieval's first concrete consumer is Recommendation discovery, not the canonical-profile owner.
+
+Adding persistence in L3 would therefore invent table ownership, ingestion triggers, document sourcing, and a query API. The approved narrow scope constructs/exposes `EmbeddingService`, adds the BGE query seam, and runs a real-title in-memory smoke. L4 designs durable ingestion/indexing against Recommendation's actual consumer.
+
+### Trace
+
+1. **Test:** require Composition to expose an embedding service and require a BGE query instruction only on queries.
+   **Failure:** `ApplicationServices` had no embedding boundary and `EmbeddingService.embed_query()` sent the same text as a document.
+   **Fix:** Composition builds the native transport/service from `[embedding]`; `query_prefix_for_model()` selects the exact `BAAI/bge-small-zh-v1.5` model-card instruction `为这个句子生成表示以用于检索相关文章：`. Documents are unchanged.
+   **Retest:** hermetic wiring/prefix tests passed; real Bilibili titles produced 512-float vectors and the queried title ranked first by cosine similarity.
+
+2. **Test:** acquire real titles for semantic smoke.
+   **Failure:** one live search response included a legacy numeric archive row with no BVID. That row cannot form the provider's stable `ContentRef`, and strict page validation rejected every valid row with it.
+   **Fix:** Bilibili search normalization drops only rows without BVID before strict model validation. A real-shape regression fixture pins mixed legacy/valid behavior.
+   **Retest:** live search and L1a/L1b acquisition remained green.
+
+3. **Test:** process an honest preference statement with real Kimi through the production understanding analyzer.
+   **Failure:** native tool-call structured output surfaced as safe `UnavailableError`; changing to PydanticAI `PromptedOutput(ProposalBatch)` then hit the bounded timeout.
+   **Root cause:** the Kimi coding endpoint supports plain chat but does not reliably complete native tool-call output. More importantly, canonical `ProposalBatch` is not a valid model output contract: it requires SHA-256-derived `claim_id`/`proposal_id`, aware timestamps, and canonical evidence objects that an LLM must not invent.
+   **Escalation/experiments:** another model reviewed the schema and identified the deterministic-identity flaw. Direct, secret-safe endpoint probes measured: tiny JSON with `max_tokens=300` 2.56s; the complete 6.6KB canonical schema with an explicitly empty batch and `max_tokens=2048` 4.72s; OpenAI JSON-object response format 2.13s. Thus endpoint/schema latency was not the blocker; asking the model to author canonical domain identities was. PydanticAI's model settings support `max_tokens`/`temperature`, but current `AppSettings` intentionally exposes neither; L3 did not widen configuration solely for this test.
+   **Fix:** the routed preference agent uses `PromptedOutput(PreferenceDraftBatch)`, containing only dimension/value/confidence/evidence ID references. A pure adapter resolves evidence against the supplied batch, drops hallucinated references, and attaches deterministic IDs/timestamps before producing validated `ProposalBatch`. The three currently unrouted analyzer definitions still use canonical output and must receive equivalent draft contracts before production routing.
+   **Retest:** valid/garbage prompted-output parsing and draft adaptation passed hermetically. Real Kimi returned a validated draft; the deterministic policy accepted it and committed the profile.
+
+4. **Test:** persist, inspect, update, and correct the real profile.
+   **Failure:** the first assertion compared an observation ID with canonical evidence IDs (`obs_` versus `ev_`).
+   **Root cause:** test confusion, not product behavior; Understanding deliberately derives a separate evidence identity from each observation.
+   **Fix:** assert the documented deterministic `ev_` identity.
+   **Retest:** profile survived a graph rebuild, a second preference advanced the analyzer checkpoint/update path, public inspection returned a bounded v1 projection, and a remove correction persisted both override and audit observation.
+
+### Reproduction
+
+```bash
+./scripts/e2e.py l3
+cat data-e2e/reports/l3.json
+./scripts/e2e.py l0
+./scripts/e2e.py l1a
+./scripts/e2e.py l1b
+./scripts/e2e.py l2
+```
+
+The real L3 run reported two passed tests. L0–L2 remained green. No provider body, title, profile text, account identity, cookie, or key is recorded in reports or this log.

@@ -14,6 +14,8 @@ CLI check/serve ─────┘                        │               ▲
                        composition → lifecycle/supervisor    │
                                   │                          │
                            infrastructure       PydanticAI native providers
+                                                        │
+                                      configured chat + embedding services
 ```
 
 ## Required behavior

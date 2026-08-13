@@ -6,7 +6,7 @@
 
 - frozen typed canonical profile：stable/emerging interests、avoidances、content/style/creator/language/provider preferences 与 insight；每个 claim 具有 deterministic ID、confidence、freshness、evidence links 与 lifecycle；
 - 显式 user override，优先级高于 inference，remove/set 均产生稳定 audit identity；
-- 四种稳定 analyzer identity（preference、avoidance、topic lifecycle、insight），使用 PydanticAI structured `ProposalBatch`、显式 capability requirement 与 hard `RunPolicy`；模型不可用时 profile read 和 deterministic edit 仍工作；
+- 四种稳定 analyzer identity（preference、avoidance、topic lifecycle、insight）与显式 capability requirement / hard `RunPolicy`；production 路由的 preference analyzer 使用 PydanticAI `PromptedOutput(PreferenceDraftBatch)`，让模型只生成无 ID/时间戳的受限 draft，application 再生成 deterministic claim/proposal identity、解析 evidence reference 并产出 canonical `ProposalBatch`；模型不可用时 profile read 和 deterministic edit 仍工作；
 - deterministic proposal policy 校验 confidence、evidence、freshness、field ownership、override 和 contradiction；不调用模型解决冲突；
 - SQLite proposals/evidence/ledger/profile/checkpoint 同事务提交，proposal 在 decision/profile 前写入；per-analyzer cursor 保证 retry/restart idempotency；
 - versioned `DiscoveryProfile`、`RecommendationProfile`、`DialogueProfile`，按 purpose 裁剪且有字符预算，不暴露 evidence IDs；
@@ -18,4 +18,4 @@ Canonical profile 只存 claim 和 observation evidence reference。原始 provi
 
 ## Composition
 
-Application workflows and Assistant consume the bounded projections above. Deleted `memory/`, `soul/`, legacy JSON state, and evaluation paths have no compatibility facade or double-write path.
+Application workflows and Assistant consume the bounded projections above. Composition also exposes the independently configured embedding service, but Understanding does not own a semantic index or provider projection bodies; Recommendation discovery will define the first durable embedding consumer. Deleted `memory/`, `soul/`, legacy JSON state, and evaluation paths have no compatibility facade or double-write path.

@@ -58,6 +58,11 @@ async def test_real_native_search_fields_are_normalized() -> None:
                 "data": {
                     "result": [
                         {
+                            "id": "26368",
+                            "bvid": "",
+                            "title": "Legacy row without a stable BVID",
+                        },
+                        {
                             "id": "12345",
                             "bvid": "BV1TEST12345",
                             "title": '<em class="keyword">Typed</em> video',
@@ -70,7 +75,7 @@ async def test_real_native_search_fields_are_normalized() -> None:
                             "play": "1234",
                             "like": "56",
                             "favorites": "7",
-                        }
+                        },
                     ]
                 },
             }
@@ -79,6 +84,7 @@ async def test_real_native_search_fields_are_normalized() -> None:
     page = await BilibiliClient(transport, _Resolver()).page(
         "/x/web-interface/search/type", {"keyword": "typed", "limit": 1}
     )
+    assert len(page.items) == 1
     item = page.items[0]
     assert isinstance(item, BilibiliVideo)
     assert item.title == "Typed video"

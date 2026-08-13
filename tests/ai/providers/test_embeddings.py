@@ -60,6 +60,24 @@ async def test_query_requires_one_nonempty_input() -> None:
         await service.embed_documents(())
 
 
+async def test_bge_query_instruction_applies_only_to_queries() -> None:
+    transport = FakeTransport()
+    service = EmbeddingService(
+        transport,
+        info(),
+        ResourceBudget("embedding", 1),
+        query_prefix="为这个句子生成表示以用于检索相关文章：",
+    )
+
+    await service.embed_documents(("一篇文章",))
+    await service.embed_query("相关文章")
+
+    assert transport.calls == [
+        ("一篇文章",),
+        ("为这个句子生成表示以用于检索相关文章：相关文章",),
+    ]
+
+
 async def test_dimension_and_batch_count_are_validated() -> None:
     service = EmbeddingService(FakeTransport(dimensions=2), info(3), ResourceBudget("embedding", 1))
     with pytest.raises(ValueError, match="dimension"):

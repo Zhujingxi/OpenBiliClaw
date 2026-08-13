@@ -10,6 +10,7 @@ if TYPE_CHECKING:
 
     from fastapi import FastAPI
 
+    from openbiliclaw.ai.providers.embeddings import EmbeddingService
     from openbiliclaw.assistant.service import AssistantService
     from openbiliclaw.core.config import AppSettings
     from openbiliclaw.hosts.api.dependencies import HostDependencies, HostFacade
@@ -53,6 +54,7 @@ class ApplicationServices:
     understanding: UnderstandingService | None = None
     recommendations: RecommendationService | None = None
     assistant: AssistantService | None = None
+    embeddings: EmbeddingService | None = None
 
 
 @dataclass(frozen=True, slots=True)
