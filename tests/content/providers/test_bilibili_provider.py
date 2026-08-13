@@ -111,10 +111,11 @@ def test_external_fixtures_validate(fixture: str) -> None:
 
 
 def test_schema_drift_and_malformed_payload_fail_closed() -> None:
+    provider = BilibiliProvider(_client(FixtureTransport({})))
     with pytest.raises(ValidationError):
-        BilibiliResponse.model_validate_json(_fixture("schema_drift.json"))
+        provider.native_from_payload(json.loads(_fixture("schema_drift.json"))["data"]["items"][0])
     with pytest.raises(ValidationError):
-        BilibiliResponse.model_validate({"code": 0, "data": {"kind": "video"}})
+        BilibiliResponse.model_validate({"data": {"kind": "video"}})
 
 
 @pytest.mark.asyncio
@@ -136,7 +137,7 @@ async def test_search_is_bounded_and_cursor_is_opaque() -> None:
     assert page.next_cursor == ProviderCursor(
         provider_id=ProviderId(value="bilibili"), value="page:2"
     )
-    assert "cursor=page%3A7" in transport.requests[0][1]
+    assert "page=1&page_size=1" in transport.requests[0][1]
 
 
 @pytest.mark.asyncio

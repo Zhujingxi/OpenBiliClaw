@@ -46,13 +46,13 @@ Config validates; vault seeds from `kimi_api_key.txt`; `openbiliclaw check` gree
 *Completed fix:* `NativeEmbeddingTransport` omits the OpenAI-only `dimensions` parameter for custom endpoints while retaining response-dimension validation in `EmbeddingService`.
 
 **L1a — Content acquisition, anonymous**
-Real Bilibili public APIs: hot/popular, search, video detail, comments/tags → content pool. Assert real BVID rows, identity dedupe on re-fetch, budget/rate rules honored, typed errors on failure.
+Real Bilibili public APIs: popular feed, search, and video detail through the production composition/facade path. Assert real BVID identity and field invariants, repeated-detail identity stability, the provider's 50-item page cap, and typed rate/network failures. Search and detail are reads and do not persist; comments/tags are not exposed provider capabilities.
 
 **L1b — Content acquisition, authenticated**
-`scripts/e2e_bilibili_cookies.py` extracts `SESSDATA`/`bili_jct` from local Chrome → submits through the **product's own credential API** (auth flow itself is tested, not bypassed) → vault → `nav` identity verified → authenticated fetches.
+First fix `ConnectSource` idempotency versus in-memory connection restoration across process restarts (TDD): a cached `CONNECTED` result must not leave `AccessService` disconnected. Then `scripts/e2e_bilibili_cookies.py` extracts the required Bilibili session fields from local Chrome → submits through the **product's own credential API** (auth flow itself is tested, not bypassed) → vault → `nav` identity verified → authenticated fetches.
 
 **L2 — Observations**
-View/like/feedback events through the product path against real ingested content, plus real account signals (history/favorites) as bootstrap. Assert durability, idempotency, replay.
+View/like/feedback events through the product path against real ingested content, plus real account signals (history/favorites) as bootstrap. Assert durability, idempotency, replay, and `content_references` landing/dedupe through observation ingress (the architecture's only content-reference persistence path).
 
 **L3 — Understanding**
 Profile derivation + semantic ingestion with real Kimi + real embeddings. Assert inspectable/correctable profile, embedding index at correct dimension.
@@ -89,7 +89,7 @@ Implement harness + tests (TDD) → run against real stack → fix bugs → **in
 | Layer | Status | Commit | Notes |
 |---|---|---|---|
 | L0 environment | completed | f8417db6 | 4 real E2E tests passed; harness and local embedding server verified; see testing log |
-| L1a content anonymous | pending | — | |
+| L1a content anonymous | completed | — | 2 real E2E tests passed; real API adapters corrected; see testing log |
 | L1b content authenticated | pending | — | |
 | L2 observations | pending | — | |
 | L3 understanding | pending | — | |

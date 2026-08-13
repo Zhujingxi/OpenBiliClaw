@@ -32,3 +32,9 @@
 5. Tool metadata comes from validated provider IDs, never provider response text.
 6. Tool results are bounded; mutation tools propose and Application confirmation executes.
 7. Content Integration imports neither concrete providers nor Understanding, Recommendation, Assistant, or Hosts.
+
+## Bilibili native boundary
+
+The Bilibili client accepts the provider's real endpoint-specific envelopes (`data.list` for popular feeds, `data.result` for search, and raw `data` for video details) and converts native rows into strict `BilibiliVideo` models before returning them. Search HTML markup is removed at this boundary, duration strings are normalized to seconds, and protocol-relative covers become HTTPS URLs. The transport uses browser-compatible public request headers and maps HTTP 412/429 to the typed `RATE_LIMITED` error.
+
+Search and detail workflows are read-only. They do not populate `content_references` or `content_cache`; durable content-reference creation belongs to Observation Ingress.

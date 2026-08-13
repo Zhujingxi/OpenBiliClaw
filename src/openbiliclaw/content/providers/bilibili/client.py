@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import html
+import re
 from typing import TYPE_CHECKING, Protocol
 from urllib.parse import urlencode
 
 import httpx
-from pydantic import ValidationError
+from pydantic import JsonValue, TypeAdapter, ValidationError
 
 from openbiliclaw.content.integration.errors import ContentIntegrationError, IntegrationErrorCode
 from openbiliclaw.infrastructure.http.clients import HttpClientFactory
+from openbiliclaw.infrastructure.http.policy import HttpPolicy
 
 from .models import (
     ITEM_ADAPTER,
@@ -51,13 +54,23 @@ def cookie_parts(cookie: str) -> tuple[str | None, str | None]:
 
 
 class HttpxBilibiliTransport:
-    """Real network boundary; tests inject MockTransport."""
+    """Real network boundary; tests inject MockTransport or override the base URL."""
 
-    _BASE = "https://api.bilibili.com"
-
-    def __init__(self, transport: httpx.AsyncBaseTransport | None = None) -> None:
-        self._factory = HttpClientFactory()
+    def __init__(
+        self,
+        transport: httpx.AsyncBaseTransport | None = None,
+        *,
+        base_url: str = "https://api.bilibili.com",
+    ) -> None:
+        self._factory = HttpClientFactory(
+            HttpPolicy(
+                user_agent=(
+                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36"
+                )
+            )
+        )
         self._transport = transport
+        self._base_url = base_url.rstrip("/")
 
     @property
     def open_client_count(self) -> int:
@@ -66,14 +79,28 @@ class HttpxBilibiliTransport:
     async def __call__(
         self, method: str, path: str, query: str, cookie: str | None, body: bytes
     ) -> bytes:
-        headers = {"referer": "https://www.bilibili.com"}
+        headers = {
+            "referer": (
+                "https://search.bilibili.com/"
+                if path == "/x/web-interface/search/type"
+                else "https://www.bilibili.com"
+            )
+        }
         if cookie is not None:
             headers["cookie"] = cookie
         if body:
             headers["content-type"] = "application/x-www-form-urlencoded"
-        url = f"{self._BASE}{path}" + (f"?{query}" if query else "")
+        url = f"{self._base_url}{path}" + (f"?{query}" if query else "")
         async with self._factory.client(transport=self._transport) as client:
             try:
+                if cookie is None and path == "/x/web-interface/search/type":
+                    await self._factory.request(
+                        client,
+                        "GET",
+                        "https://www.bilibili.com",
+                        headers=headers,
+                    )
+
                 response = await self._factory.request(
                     client,
                     method,
@@ -103,6 +130,81 @@ class HttpxBilibiliTransport:
             return response.content
 
 
+_JSON: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
+_TAGS = re.compile(r"<[^>]+>")
+
+
+def _mapping(value: JsonValue | None) -> dict[str, JsonValue]:
+    return value if isinstance(value, dict) else {}
+
+
+def _integer(value: JsonValue | None) -> int:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return 0
+
+
+def _text(value: JsonValue | None) -> str:
+    return html.unescape(_TAGS.sub("", value)).strip() if isinstance(value, str) else ""
+
+
+def _cover(value: JsonValue | None) -> str | None:
+    text = _text(value)
+    if not text:
+        return None
+    if text.startswith("//"):
+        return f"https:{text}"
+    return text if text.startswith(("http://", "https://")) else None
+
+
+def _duration(value: JsonValue | None) -> int:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return max(0, value)
+    if not isinstance(value, str):
+        return 0
+    parts = value.split(":")
+    if not all(part.isdigit() for part in parts):
+        return 0
+    total = 0
+    for part in parts:
+        total = total * 60 + int(part)
+    return total
+
+
+def _item(row: dict[str, JsonValue]) -> BilibiliItem:
+    if row.get("kind") in {"video", "article"}:
+        return ITEM_ADAPTER.validate_python(row)
+    bvid = _text(row.get("bvid") or row.get("id"))
+    owner = _mapping(row.get("owner"))
+    creator_id = _text(owner.get("mid") or row.get("mid"))
+    creator_name = _text(owner.get("name") or row.get("author"))
+    stat = _mapping(row.get("stat"))
+    state = _integer(row.get("state"))
+    return ITEM_ADAPTER.validate_python(
+        {
+            "kind": "video",
+            "id": bvid,
+            "aid": _integer(row.get("aid") or row.get("id")),
+            "title": _text(row.get("title")),
+            "description": _text(row.get("desc") or row.get("description")),
+            "creator": (
+                {"id": creator_id, "name": creator_name} if creator_id and creator_name else None
+            ),
+            "cover_url": _cover(row.get("pic")),
+            "published_at": max(0, _integer(row.get("pubdate"))),
+            "duration_seconds": _duration(row.get("duration")),
+            "stats": {
+                "views": max(0, _integer(stat.get("view") or row.get("play"))),
+                "likes": max(0, _integer(stat.get("like") or row.get("like"))),
+                "favorites": max(0, _integer(stat.get("favorite") or row.get("favorites"))),
+            },
+            "availability": "available" if state >= 0 else "tombstone",
+        }
+    )
+
+
 class BilibiliClient:
     """Typed endpoint client; contains no provider-independent policy."""
 
@@ -119,11 +221,24 @@ class BilibiliClient:
         params: Mapping[str, str | int],
         access: CredentialAccessHandle | None = None,
     ) -> BilibiliPageData:
-        payload = await self._request("GET", path, params, access=access)
-        data = payload.data
-        if not isinstance(data, BilibiliPageData):
+        payload = await self._request(
+            "GET", path, self._endpoint_params(path, params), access=access
+        )
+        data = _mapping(payload.data)
+        rows = data.get("list") if path != "/x/web-interface/search/type" else data.get("result")
+        rows = rows if rows is not None else data.get("items")
+        if not isinstance(rows, list):
             raise self._invalid()
-        return data
+        try:
+            items = tuple(_item(row) for value in rows if (row := _mapping(value)))
+            cursor = (
+                str(data["next_cursor"])
+                if data.get("next_cursor") is not None
+                else self._next_cursor(path, data, params)
+            )
+            return BilibiliPageData(items=items, next_cursor=cursor)
+        except (TypeError, ValidationError, ValueError) as exc:
+            raise self._invalid() from exc
 
     async def item(
         self,
@@ -131,18 +246,21 @@ class BilibiliClient:
         params: Mapping[str, str | int],
         access: CredentialAccessHandle | None = None,
     ) -> BilibiliItem:
-        payload = await self._request("GET", path, params, access=access)
-        data = payload.data
+        payload = await self._request(
+            "GET", path, self._endpoint_params(path, params), access=access
+        )
+        data = _mapping(payload.data)
         try:
-            return ITEM_ADAPTER.validate_python(data)
+            return _item(data)
         except ValidationError as exc:
             raise self._invalid() from exc
 
     async def nav_with_cookie(self, cookie: str) -> BilibiliNavData:
         payload = await self._request_with_cookie("GET", "/x/web-interface/nav", {}, cookie, b"")
-        if not isinstance(payload.data, BilibiliNavData):
-            raise self._invalid()
-        return payload.data
+        try:
+            return BilibiliNavData.model_validate(payload.data)
+        except ValidationError as exc:
+            raise self._invalid() from exc
 
     async def action(
         self,
@@ -162,9 +280,10 @@ class BilibiliClient:
         data["idempotency_key"] = idempotency_key
         body = urlencode(data).encode()
         payload = await self._request_with_cookie("POST", path, {}, cookie, body)
-        if not isinstance(payload.data, BilibiliActionData):
-            raise self._invalid()
-        return payload.data
+        try:
+            return BilibiliActionData.model_validate(payload.data)
+        except ValidationError as exc:
+            raise self._invalid() from exc
 
     async def _request(
         self,
@@ -201,6 +320,31 @@ class BilibiliClient:
         raise ContentIntegrationError(
             IntegrationErrorCode.PROVIDER_UNAVAILABLE, "provider request failed"
         )
+
+    @staticmethod
+    def _endpoint_params(path: str, params: Mapping[str, str | int]) -> dict[str, str | int]:
+        values = dict(params)
+        limit = _integer(values.pop("limit", 20))
+        cursor = str(values.pop("cursor", "0"))
+        page = int(cursor) if cursor.isdigit() and int(cursor) > 0 else 1
+        if path == "/x/web-interface/search/type":
+            values.update(search_type="video", page=page, page_size=limit)
+        elif path == "/x/web-interface/popular":
+            values.update(pn=page, ps=limit)
+        elif path == "/x/web-interface/view":
+            values["bvid"] = values.pop("id")
+        return values
+
+    @staticmethod
+    def _next_cursor(
+        path: str, data: Mapping[str, JsonValue], params: Mapping[str, str | int]
+    ) -> str | None:
+        if path == "/x/web-interface/popular" and data.get("no_more") is not True:
+            cursor = str(params.get("cursor", "0"))
+            return str((int(cursor) if cursor.isdigit() else 0) + 1)
+        if path == "/x/web-interface/search/type" and data.get("next") is not None:
+            return str(_integer(data.get("next")))
+        return None
 
     @staticmethod
     def _invalid() -> ContentIntegrationError:

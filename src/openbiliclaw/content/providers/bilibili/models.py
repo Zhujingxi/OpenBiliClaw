@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Annotated, Literal
 
-from pydantic import ConfigDict, Field, TypeAdapter
+from pydantic import ConfigDict, Field, JsonValue, TypeAdapter
 
 from openbiliclaw.core._pydantic import StrictBaseModel
 
@@ -87,10 +87,10 @@ class BilibiliActionData(StrictBaseModel):
 
 
 class BilibiliResponse(StrictBaseModel):
-    """Generic strict API envelope used in fixture drift tests."""
+    """Validated provider envelope; endpoint clients type the native ``data`` shape."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="ignore", frozen=True)
 
     code: int
-    message: str
-    data: BilibiliPageData | BilibiliItem | BilibiliNavData | BilibiliActionData | None
+    message: str = ""
+    data: JsonValue | None

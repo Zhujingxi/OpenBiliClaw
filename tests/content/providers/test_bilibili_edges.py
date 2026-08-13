@@ -261,14 +261,19 @@ async def test_verifier_network_and_not_logged_in() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status", [500, 429])
+@pytest.mark.parametrize("status", [412, 429, 500])
 async def test_http_transport_statuses_and_transport_failure(status: int) -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(status, text="SECRET", request=request)
 
     transport = HttpxBilibiliTransport(httpx.MockTransport(handler))
-    with pytest.raises(ContentIntegrationError):
+    with pytest.raises(ContentIntegrationError) as raised:
         await transport("GET", "/x", "", None, b"")
+    assert raised.value.code is (
+        IntegrationErrorCode.RATE_LIMITED
+        if status in {412, 429}
+        else IntegrationErrorCode.PROVIDER_UNAVAILABLE
+    )
 
     async def broken(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("secret host", request=request)

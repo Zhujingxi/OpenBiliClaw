@@ -72,3 +72,50 @@ The original plan expected `openbiliclaw check` to persist and reuse capability-
 ```
 
 The runner starts the embedding service when it is not healthy and writes the machine-readable result under `data-e2e/reports/`.
+
+## L1a — Anonymous Bilibili acquisition
+
+### Trace
+
+1. **Test:** real popular-feed acquisition through the composed Bilibili provider.
+   **Failure:** the transport rejected the HTTP 200 response as invalid: the synthetic contract expected `data.items`, while the real endpoint returns `data.list` with native Bilibili field names and an extra `ttl` envelope field.
+   **Root cause:** unit fixtures modeled an invented normalized wire schema instead of the provider's actual endpoint schemas.
+   **Fix:** keep the provider-owned strict `BilibiliVideo` model, but move endpoint-specific normalization into `BilibiliClient`: popular `data.list`, search `data.result`, and detail raw `data` now normalize native identity, owner, statistics, duration, cover URL, and availability before entering the integration boundary.
+   **Retest:** popular feed and detail returned typed real videos with BVID identity, title, and positive duration.
+
+2. **Test:** real anonymous search through `CompositionFacade.search_content()`.
+   **Failure:** Bilibili returned an anti-bot HTML page instead of JSON.
+   **Root cause:** the shared application user-agent identifies itself as a service client, while this public search endpoint expects a browser-compatible request context and an anonymous browser cookie established from the site.
+   **Fix:** the Bilibili-owned HTTP transport now supplies a browser-compatible user-agent, search referer, and a bounded homepage bootstrap on the same scoped client before anonymous search. No session credential is stored.
+   **Retest:** real search returned typed results.
+
+3. **Test:** repeat the same live search and assert an identical ordered result set.
+   **Failure:** Bilibili legitimately re-ranked results between adjacent calls.
+   **Root cause:** live search ordering is dynamic; the assertion was a snapshot assumption, not a product invariant.
+   **Fix:** assert BVID/title invariants on both result sets and verify identity stability by fetching the same selected reference twice. No product code changed for live re-ranking.
+   **Retest:** both result sets validated and repeated detail preserved the exact `ContentRef`.
+
+4. **Test:** reconnect anonymous access in a fresh application graph using a fixed idempotency key.
+   **Failure:** the durable idempotency journal returned the prior `CONNECTED` result without recreating the in-memory `AccessService` connection; the next public search reported that the source was not connected.
+   **Root cause:** `ConnectSource` returns the durable idempotency result before checking/restoring the live connection. Exact repro: connect with key K → stop application → build/start a fresh graph on the same data directory → connect with K returns cached `CONNECTED` → `connected_handle()` is `None` and search fails.
+   **L1a containment:** use a unique idempotency key per graph so this acquisition layer tests the intended provider path. This is not considered fixed; L1b must repair restart consistency first, TDD, in the access/idempotency path.
+   **Retest:** each L1a graph acquired its anonymous handle with a unique command key.
+
+5. **Test:** request 100 feed items and point the supported transport seam at a dead loopback port.
+   **Result:** the provider returned no more than its 50-item cap, and the dead endpoint raised typed `PROVIDER_UNAVAILABLE`. Unit coverage also verifies HTTP 412 and 429 map to typed `RATE_LIMITED`.
+
+### Surfaced architecture findings
+
+- The plan assumed search/fetch landed content in `content_references` / `content_cache`. Actual Application search and detail workflows are read-only; `content_references` is persisted only by Observation Ingress. Adding persistence to reads would create a parallel path, so database landing/dedupe moved to L2 where the architecture owns it.
+- No configurable per-provider request budget exists. L1a therefore verifies the landed provider page cap and typed upstream rate-limit behavior rather than inventing budget configuration.
+- Bilibili comments and tags are not exposed capabilities. L1a verifies the available detail enrichment only.
+- Anonymous search may reorder results between calls; tests assert stable identity parsing, not live ordering.
+
+### Reproduction
+
+```bash
+./scripts/e2e.py l1a
+cat data-e2e/reports/l1a.json
+```
+
+The real run made a small number of requests and reported two passed tests.
