@@ -188,7 +188,12 @@ async def test_real_refill_ranking_reasons_diversity_and_profile_query() -> None
         assert feed
         latest_seed = feed[0].selection.seed
         latest = tuple(item for item in feed if item.selection.seed == latest_seed)
-        assert tuple(item.selection.rank for item in latest) == tuple(range(1, len(latest) + 1))
+        # Interacted candidates (feedback recorded, e.g. by L7 UI runs) are
+        # legitimately excluded from later feeds, so a seed's visible ranks
+        # are a strictly ascending, duplicate-free subset of 1..n — not
+        # necessarily the full 1..n contiguous prefix.
+        ranks = tuple(item.selection.rank for item in latest)
+        assert ranks == tuple(sorted(set(ranks))), ranks
         assert tuple(item.selection.score for item in latest) == tuple(
             sorted((item.selection.score for item in latest), reverse=True)
         )

@@ -422,3 +422,7 @@ The final real run reported one passed Docker E2E test. No key, bearer, cookie, 
    **Retest:** host-level static serving coverage pins both response classes.
 
 No secret, provider response body, title, profile text, account identity, cookie, key, or bearer value is recorded in this trace.
+
+## L7 closing sweep
+
+- **Full-layer closing sweep (l0-l6) caught one L7-induced assertion drift:** the final all-layer run failed L4 at the rank-contiguity invariant `(2,) != (1,)`. Root cause is correct product behavior, not a product bug: the live L7 Like click transitioned the seed's rank-1 candidate shown→interacted, and later feeds legitimately exclude interacted candidates, leaving the seed's visible ranks a proper subset of 1..n. The L4 invariant had assumed a no-interaction database. Fix: the assertion now requires strictly ascending, duplicate-free visible ranks within a seed (documented inline), instead of a full contiguous prefix. Verified with two consecutive green l4 runs; all other layers green; unit suite 743 passed.
