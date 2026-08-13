@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -21,7 +22,9 @@ from openbiliclaw.recommendation.models import (
     candidate_identity,
 )
 from openbiliclaw.recommendation.selection.service import SelectionService
-from openbiliclaw.understanding.projections import discovery_projection
+from openbiliclaw.understanding.projections import discovery_projection, recommendation_projection
+
+DEFAULT_PROFILE_ID = "default"
 
 if TYPE_CHECKING:
     from openbiliclaw.access.models import AccessHandle
@@ -30,6 +33,13 @@ if TYPE_CHECKING:
     from openbiliclaw.composition.repositories import RepositoryGraph
     from openbiliclaw.content.integration.identity import ProviderId
     from openbiliclaw.understanding.service import UnderstandingService
+
+
+@dataclass(frozen=True, slots=True)
+class ReplenishmentResult:
+    discovered: int
+    added: int
+    selected: int
 
 
 class RecommendationPipeline:
@@ -85,11 +95,13 @@ class RecommendationPipeline:
             0,
         )
 
-    async def replenish(self) -> None:
+    async def replenish(self, maximum_items: int | None = None) -> ReplenishmentResult:
         now = datetime.now(UTC)
-        profile = await self._understanding.profile("default")
+        limit = min(maximum_items or self._target_count, self._target_count, 20)
+        profile = await self._understanding.profile(DEFAULT_PROFILE_ID)
+        discovery_profile = discovery_projection(profile)
         plans = await self._planner.plan(
-            discovery_projection(profile),
+            discovery_profile,
             self._providers.registry.manifests(),
             inventory_count=0,
             target_inventory=self._target_count,
@@ -100,29 +112,35 @@ class RecommendationPipeline:
             for plan in plans
             if self._access.connected_handle(plan.provider_id.value, None) is not None
         )
-        previews = await self._discovery.discover(connected, limit=min(self._target_count, 20))
+        discovered = await self._discovery.discover(connected, limit=limit)
         candidates = tuple(
             Candidate(
                 candidate_id=candidate_identity(
-                    preview.ref, "scheduled.search", preview.ref.provider_content_id
+                    item.preview.ref,
+                    "scheduled.search",
+                    item.preview.ref.provider_content_id,
                 ),
-                preview=preview,
+                preview=item.preview,
                 provenance=DiscoveryProvenance(
                     strategy_id="scheduled.search",
-                    query_key=preview.ref.provider_content_id,
+                    query_key=item.preview.ref.provider_content_id,
                     discovered_at=now,
                 ),
+                topics=(item.topic,),
                 expires_at=now + timedelta(days=7),
             )
-            for preview in previews
+            for item in discovered
         )
+        added_list: list[Candidate] = []
         for candidate in candidates:
-            await self._repositories.recommendations.add_candidate(candidate)
+            if await self._repositories.recommendations.add_candidate(candidate):
+                added_list.append(candidate)
+        added = tuple(added_list)
         accepted, _rejected = normalize_and_prefilter(
-            candidates,
+            added,
             seen_ids=frozenset(),
             blocked_urls=frozenset(),
-            avoidances=(),
+            avoidances=discovery_profile.avoidances,
             now=now,
         )
         for candidate in accepted:
@@ -144,6 +162,7 @@ class RecommendationPipeline:
             limit=min(self._target_count, 100),
             seed=int(now.timestamp()),
             now=now,
+            negative_preferences=recommendation_projection(profile).negative_topics,
         )
         by_id = {item.candidate_id: item for item in evaluated}
         await self._selection.persist_selection(
@@ -154,18 +173,22 @@ class RecommendationPipeline:
         )
         for expression in await self._expression.express(selections):
             await self._repositories.recommendations.save_expression(expression)
+        return ReplenishmentResult(len(candidates), len(added), len(selections))
 
     async def expire(self) -> None:
         await self._repositories.recommendations.expire_due(now=datetime.now(UTC).isoformat())
 
 
 def build_recommendation_jobs(pipeline: RecommendationPipeline) -> tuple[JobSpec, ...]:
-    return recommendation_jobs(replenishment=pipeline.replenish, expiry=pipeline.expire)
+    async def replenish() -> None:
+        await pipeline.replenish()
+
+    return recommendation_jobs(replenishment=replenish, expiry=pipeline.expire)
 
 
 def build_understanding_job(understanding: UnderstandingService) -> JobSpec:
     async def process() -> None:
-        await understanding.process("default")
+        await understanding.process(DEFAULT_PROFILE_ID)
 
     return JobSpec(
         "understanding.analysis",

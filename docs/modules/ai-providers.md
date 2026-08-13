@@ -23,7 +23,7 @@ Embedding configuration uses the same provider/model/endpoint/secret-reference s
 
 PydanticAI’s Anthropic, Google, and OpenRouter provider abstractions do not currently expose a common native embeddings resource in this dependency version, so those combinations fail closed with `UnsupportedCapabilityError`. The existing embedding service still owns deterministic batching, resource budgets, retry/timeout/cancellation, vector count/dimension validation, usage attribution, and provenance.
 
-Production Composition constructs `EmbeddingService` from `[embedding]` and exposes it as an inspectable `ApplicationServices` boundary. For `BAAI/bge-small-zh-v1.5`, `embed_query()` prepends the model-card Chinese retrieval instruction (`为这个句子生成表示以用于检索相关文章：`); document embeddings are never prefixed. No durable semantic index consumes it yet: ownership and ingestion design land with Recommendation discovery in L4, against that real consumer.
+Production Composition constructs `EmbeddingService` from `[embedding]` and exposes it as an inspectable `ApplicationServices` boundary. For `BAAI/bge-small-zh-v1.5`, `embed_query()` prepends the model-card Chinese retrieval instruction (`为这个句子生成表示以用于检索相关文章：`); document embeddings are never prefixed. No durable semantic index consumes it yet: L4 confirmed Recommendation discovery is still text-query based and therefore deliberately added no speculative table. Ownership and ingestion design will land only with a concrete semantic retrieval consumer.
 
 ## Operational boundary
 

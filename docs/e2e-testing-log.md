@@ -250,3 +250,59 @@ cat data-e2e/reports/l3.json
 ```
 
 The real L3 run reported two passed tests. L0–L2 remained green. No provider body, title, profile text, account identity, cookie, or key is recorded in reports or this log.
+
+## L4 — Recommendation
+
+### Architecture trace and semantic-index decision
+
+Recommendation discovery currently consumes bounded text queries from `DiscoveryProfile` and calls provider search directly. It has no semantic query API, no durable provider projection text (`content_cache` remains empty), and no embedding consumer. Adding `content_embeddings` would still require inventing document ownership, ingestion triggers, and retrieval semantics. L4 therefore resolves the L3 deferral by adding **no table, repository, or embedding wiring**. A durable index will be designed only when semantic discovery is an actual consumer.
+
+### Trace
+
+1. **Test:** refill over the L3 profile and assert the resulting discovery topic.
+   **Failure:** Recommendation hardcoded profile `default`, while L3 wrote `e2e-real`; even after using one canonical `DEFAULT_PROFILE_ID`, the only routed analyzer emits `PreferenceClaim` while both projections consumed only `StableInterestClaim` from an unrouted analyzer.
+   **Root cause:** profile identity and claim-type seams made the landed L3→L4 chain decorative.
+   **Fix:** use the shared `DEFAULT_PROFILE_ID` for understanding jobs, L3, and Recommendation; project content-dimension preferences into discovery interests and recommendation positive topics until the stable-interest analyzer is routed.
+   **Retest:** a real Kimi-derived content preference appears in the discovery projection and shapes the provider query.
+
+2. **Test:** assert that the profile-derived query survives as durable candidate topic provenance and that hard negative preferences reach both exclusion stages.
+   **Failure:** `RecommendationPipeline` discarded `PlannedQuery.topic`, passed no avoidances to prefilter, and passed no negative preferences to selection.
+   **Root cause:** Composition rebuilt candidates from flattened previews after discovery and supplied empty policy arguments.
+   **Fix:** `DiscoveryService` returns each preview with its plan topic; candidates persist that topic; discovery avoidances feed hard prefilter and recommendation negative topics feed selection.
+   **Retest:** hermetic tests pin topic persistence and both exclusion arguments; live rows contain the profile query in `topics[0]`.
+
+3. **Test:** require every feed item to expose the documented reason after restart.
+   **Failure:** expression records were persisted but `RecommendationRepository.feed()` never joined them, so the public feed exposed score contributions but no reason.
+   **Root cause:** the model-free read projection joined selections and candidates only.
+   **Fix:** feed joins the matching immutable expression, returns `RecommendationFeedItem.reason`, and orders each run by stored rank. OpenAPI/client snapshots were regenerated.
+   **Retest:** real and restarted feeds expose non-empty safe fallback reasons plus model/freshness/novelty contributions.
+
+4. **Test:** trigger refill through the public workflow and wait for its supervised outcome.
+   **Failure:** `job_health()` returned Composition lifecycle health, whose job list is always empty; the refresh workflow also discarded `maximum_items`.
+   **Root cause:** Facade was wired to the wrong health source and `_RefreshSupervisor` ignored the bounded caller input.
+   **Fix:** Facade reads `RuntimeSupervisor.health()`; manual replenishment wraps the registered job with the requested bound, while scheduled runs keep the configured target.
+   **Retest:** live refresh reports `RUN`, completes with `SUCCESS`, and uses the bounded discovery limit.
+
+5. **Test:** repeat refill on the accumulated database.
+   **Failure:** the first probe selected 2 of 20 candidates while 18 remained `EVALUATED`, masking a repeat-run defect. A later refresh rediscovered the same deterministic IDs; `add_candidate()` returned false, but the pipeline still attempted `DISCOVERED → NORMALIZED`, so the job errored or ran into its 55-second timeout.
+   **Root cause:** candidate insertion idempotency was ignored.
+   **Fix:** process only newly inserted candidates; an all-known batch completes as an observable `ReplenishmentResult(discovered=N, added=0, selected=0)` no-op. No state is retransited. The 55-second timeout may still be tight for slow live providers at the 20-item ceiling; L6 should observe it under Docker, but L4 does not tune policy.
+   **Retest:** regression tests pin the all-known no-op. The real accumulated run completed successfully and added a new ranked pair without duplicates.
+
+6. **Test:** assert ranking/diversity/profile invariants on live output.
+   **Result:** two L4 tests passed. The latest run has contiguous ranks, non-increasing scores, score equals named contribution sum, non-empty reasons, no duplicate candidate IDs, creator quota ≤1, Bilibili provider quota ≤2, durable profile query topics, and feed persistence across graph restart. Profile influence is intentionally narrow and honest: it shapes provider query/topic; the current 0.65 baseline scorer is not personalized.
+
+7. **Independent review:** repeat L4 from the accumulated profile.
+   **Failure:** the single natural-language statement sometimes produced style-only preferences; historical local attempts were roughly split between style and content. The test also returned `interests[0]` and then asserted that same value was present, so its influence check was tautological and could point at an older claim outside the current run's evidence.
+   **Root cause:** the real model classification is nondeterministic, and the planner intentionally consumes only the first five interests.
+   **Fix:** retry at most three run-unique, explicitly content-scoped statements. Each attempt matches claims by its own evidence ID and accepts only a `CONTENT` claim; exhaustion fails loudly with the derived dimension summary. After success, older content-preference claims are removed through the real override workflow so the run's evidence-backed claim is provably inside `interests[:5]`. The candidate-topic assertion uses that exact claim value. Composition Assistant also reuses `DEFAULT_PROFILE_ID` instead of two remaining magic strings.
+   **Retest:** three consecutive `./scripts/e2e.py l4` executions passed (2 tests each), followed by green L0–L3 regressions. Ruff format check was rerun after the reviewer caught an unformatted test block.
+
+### Reproduction
+
+```bash
+./scripts/e2e.py l4
+cat data-e2e/reports/l4.json
+```
+
+The real run reported two passed tests. No provider body, title, profile text, account identity, cookie, or key is recorded in reports or this log.

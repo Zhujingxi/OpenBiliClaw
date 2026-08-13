@@ -17,6 +17,7 @@ from openbiliclaw.ai.providers.embeddings import EmbeddingBatch, EmbeddingServic
 from openbiliclaw.ai.providers.models import BuiltModel, ModelInstanceConfig, ProviderKind
 from openbiliclaw.ai.providers.verification import VerifiedCapabilities
 from openbiliclaw.ai.runtime.capabilities import ModelCapabilities
+from openbiliclaw.application.refresh_recommendations import RefreshRecommendationsCommand
 from openbiliclaw.composition.application import Application, ApplicationServices
 from openbiliclaw.composition.build import BuildOptions, build_application
 from openbiliclaw.composition.entrypoints import main
@@ -30,6 +31,7 @@ from openbiliclaw.composition.providers import (
 from openbiliclaw.composition.reload import ApplicationReference, reload_application
 from openbiliclaw.core.config import AppSettings
 from openbiliclaw.core.health import HealthStatus
+from openbiliclaw.core.jobs import JobDecision
 from openbiliclaw.hosts.api.dependencies import DiagnosticResult, StartResult
 from openbiliclaw.observations.models import ContentOpenedObservation, HostOpenPayload
 from openbiliclaw.observations.provenance import (
@@ -345,7 +347,16 @@ async def test_facade_diagnostics_and_optional_capabilities_fail_closed(tmp_path
             await operation
     await app.start()
     try:
-        assert (await facade.job_health()).health.status is HealthStatus.HEALTHY
+        health = (await facade.job_health()).health
+        assert health.status is HealthStatus.HEALTHY
+        assert health.component_id == "runtime.supervisor"
+        refreshed = await facade.refresh_recommendations(
+            RefreshRecommendationsCommand(idempotency_key="bounded-refresh-test", maximum_items=1)
+        )
+        assert refreshed.decision is JobDecision.RUN
+        await asyncio.sleep(0)
+        refreshed_health = (await facade.job_health()).health
+        assert refreshed_health.jobs[0].job_id == "recommendation.replenishment"
     finally:
         await app.stop()
 

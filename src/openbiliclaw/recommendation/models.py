@@ -155,6 +155,7 @@ class RecommendationFeedItem(StrictBaseModel):
     selection: SelectionRecord
     ref: ContentRef
     card: CardData
+    reason: str = Field(min_length=1, max_length=300)
 
     @model_validator(mode="after")
     def matching_identity(self) -> RecommendationFeedItem:

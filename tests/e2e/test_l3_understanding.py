@@ -15,6 +15,7 @@ from openbiliclaw.application.edit_profile import EditProfileCommand
 from openbiliclaw.application.record_observation import RecordObservationsCommand
 from openbiliclaw.application.sources import ConnectSourceCommand
 from openbiliclaw.composition.build import BuildOptions, build_application, validated_settings
+from openbiliclaw.composition.jobs import DEFAULT_PROFILE_ID
 from openbiliclaw.observations.models import PreferencePayload, PreferenceStatementObservation
 from openbiliclaw.observations.provenance import (
     ObservationProvenance,
@@ -31,7 +32,7 @@ if TYPE_CHECKING:
 pytestmark = [pytest.mark.e2e, pytest.mark.e2e_l3, pytest.mark.asyncio]
 _ROOT = Path(__file__).resolve().parents[2]
 _DATA_DIR = _ROOT / "data-e2e"
-_PROFILE_ID = "e2e-real"
+_PROFILE_ID = DEFAULT_PROFILE_ID
 
 
 async def _application() -> Application:

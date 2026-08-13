@@ -57,7 +57,10 @@ def _bounded(items: tuple[str, ...], max_chars: int) -> tuple[str, ...]:
 
 def discovery_projection(profile: CanonicalProfile, *, max_chars: int = 2_000) -> DiscoveryProfile:
     interests = tuple(
-        item.value for item in profile.claims if isinstance(item, StableInterestClaim)
+        item.value
+        for item in profile.claims
+        if isinstance(item, StableInterestClaim)
+        or (isinstance(item, PreferenceClaim) and item.dimension.value == "content")
     )
     avoidances = tuple(item.value for item in profile.claims if isinstance(item, AvoidanceClaim))
     providers = tuple(
@@ -75,7 +78,12 @@ def discovery_projection(profile: CanonicalProfile, *, max_chars: int = 2_000) -
 def recommendation_projection(
     profile: CanonicalProfile, *, max_chars: int = 3_000
 ) -> RecommendationProfile:
-    positive = tuple(item.value for item in profile.claims if isinstance(item, StableInterestClaim))
+    positive = tuple(
+        item.value
+        for item in profile.claims
+        if isinstance(item, StableInterestClaim)
+        or (isinstance(item, PreferenceClaim) and item.dimension.value == "content")
+    )
     negative = tuple(item.value for item in profile.claims if isinstance(item, AvoidanceClaim))
     styles = tuple(
         item.value

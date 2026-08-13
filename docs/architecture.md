@@ -37,7 +37,7 @@ Vue web / extension ─────── generated typed client
 - Hosts depend only on Application, Assistant, and Core contracts.
 - Assistant receives safe application tools and bounded understanding projections; it cannot access credentials or repositories.
 - Content providers depend on Content Integration and opaque Access handles.
-- Understanding consumes immutable observations and never imports Recommendation. Composition exposes the configured embedding service separately; the durable semantic index is deferred until Recommendation discovery owns a concrete consumer.
+- Understanding consumes immutable observations and never imports Recommendation. Composition exposes the configured embedding service separately; Recommendation discovery remains text-query based, so no durable semantic index is added until a concrete semantic retrieval consumer exists.
 - Recommendation is proactive and works without Assistant. Its deterministic baseline evaluates accessible connected-provider content without a model; configured model routes may enrich target analyzers.
 - All chat and embedding models are external services reached through one configuration/factory path and PydanticAI's native providers. OpenBiliClaw does not host, bundle, or supervise model runtimes.
 - Infrastructure owns resource adapters, while domain repositories remain owned by their domain packages.

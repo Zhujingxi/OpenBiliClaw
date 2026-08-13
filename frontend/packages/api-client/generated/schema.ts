@@ -1425,6 +1425,8 @@ export interface components {
          */
         RecommendationFeedItem: {
             card: components["schemas"]["CardData"];
+            /** Reason */
+            reason: string;
             ref: components["schemas"]["ContentRef"];
             selection: components["schemas"]["SelectionRecord"];
         };
@@ -1743,7 +1745,7 @@ export interface components {
          * VerificationFailure
          * @enum {string}
          */
-        VerificationFailure: "invalid_credential" | "expired" | "insufficient_scope" | "rate_limited" | "geo_blocked" | "network_unavailable" | "session_mode_unsupported";
+        VerificationFailure: "invalid_credential" | "expired" | "insufficient_scope" | "rate_limited" | "geo_blocked" | "network_unavailable" | "provider_response_invalid" | "session_mode_unsupported";
         /**
          * VerificationResult
          * @description Sanitized verification evidence; never carries provider response text.

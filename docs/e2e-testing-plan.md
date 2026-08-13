@@ -58,7 +58,7 @@ View/like/feedback events through the product path against real ingested content
 Profile derivation with real Kimi, persistence across graph rebuild, and inspect/correct workflows. Composition exposes the configured `EmbeddingService`; a real-title semantic smoke verifies 512 dimensions and BGE query-only instruction behavior. Architecture trace found no durable embedding owner, trigger, document source, or query API in Understanding, so L3 deliberately does not invent an index.
 
 **L4 — Recommendation**
-Ranked recommendations from the real accumulated pool: non-empty ranked output with reasons, diversity/budget rules, refill path. Design the first durable semantic ingestion/index (for example `content_embeddings`) here, owned by Recommendation discovery and driven by its real consumer; L3 deliberately deferred the speculative persistence design.
+Ranked recommendations from the real accumulated pool: non-empty ranked output with durable reasons, contribution/rank invariants, fixed provider/creator quotas, bounded refill, duplicate-safe repeat refill, and profile-shaped discovery topics. Recommendation discovery is text-query based and has no semantic retrieval consumer or durable projection text, so L4 resolves the L3 deferral by **not** adding a speculative embedding index; one will be designed only when semantic discovery exists.
 
 **L5 — Application workflows**
 Full loop on live `openbiliclaw serve` via `/v1` HTTP only: bootstrap → refill → recommend → feedback → profile shifts.
@@ -93,7 +93,7 @@ Implement harness + tests (TDD) → run against real stack → fix bugs → **in
 | L1b content authenticated | completed | 3d28bb46 | 2 real E2E tests passed; restart replay and authenticated native adapters corrected; see testing log |
 | L2 observations | completed | f9799dca | 2 real E2E tests passed; content landing/dedupe, restart durability, feedback idempotency, cursor replay, and authenticated history import verified; see testing log |
 | L3 understanding | completed | 03a05f42 | 2 real E2E tests passed; composed embeddings, real Kimi profile derivation, persistence, update, inspection/correction verified; durable semantic index deferred to L4 |
-| L4 recommendation | pending | — | |
+| L4 recommendation | completed | — | 2 real E2E tests passed; real refill/ranking/reasons/diversity/restart verified; duplicate refill and profile-to-discovery seams fixed; semantic index intentionally not added |
 | L5 workflows | pending | — | |
 | L6 docker | pending | — | |
 | L7 UI | pending | — | |

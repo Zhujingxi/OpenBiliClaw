@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -177,13 +177,25 @@ class _RuntimeAnalyzer:
 
 
 class _RefreshSupervisor:
-    def __init__(self, supervisor: RuntimeSupervisor, jobs: tuple[JobSpec, ...]) -> None:
+    def __init__(
+        self,
+        supervisor: RuntimeSupervisor,
+        jobs: tuple[JobSpec, ...],
+        pipeline: RecommendationPipeline,
+    ) -> None:
         self._supervisor = supervisor
         self._jobs = {job.job_id: job for job in jobs}
+        self._pipeline = pipeline
 
     def trigger(self, job_id: str, *, maximum_items: int) -> JobDecision:
-        del maximum_items
-        return self._supervisor.trigger(self._jobs[job_id])
+        job = self._jobs[job_id]
+        if job_id != "recommendation.replenishment":
+            return self._supervisor.trigger(job)
+
+        async def replenish() -> None:
+            await self._pipeline.replenish(maximum_items)
+
+        return self._supervisor.trigger(replace(job, run=replenish))
 
 
 class _ProviderReadiness:
@@ -382,9 +394,9 @@ def build_application(
         observations=observations,
         understanding=understanding,
         recommendations=recommendations,
-        health=lifecycle,
+        health=supervisor,
         idempotency=SqliteIdempotencyJournal(database),
-        refresh=RefreshRecommendations(_RefreshSupervisor(supervisor, jobs)),
+        refresh=RefreshRecommendations(_RefreshSupervisor(supervisor, jobs, pipeline)),
         feedback=RecordFeedback(
             FeedbackUnitOfWork(repositories.recommendations, repositories.observations),
             clock=lambda: datetime.now(UTC),

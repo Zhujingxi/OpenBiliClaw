@@ -137,6 +137,7 @@ FEED_ITEM = RecommendationFeedItem(
         source_timestamp=NOW,
         provenance=ProjectionProvenance(ref=REF, native_schema_version=1, projected_at=NOW),
     ),
+    reason="Recommended for relevance and freshness.",
 )
 PROFILE = CanonicalProfile.empty("default", NOW)
 DIALOGUE = DialogueProfile(version=1, preference_summary=("science",), insights=())

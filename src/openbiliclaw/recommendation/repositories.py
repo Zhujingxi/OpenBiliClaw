@@ -212,17 +212,21 @@ class SqliteRecommendationRepository:
             raise ValueError("limit must be between 1 and 100")
         async with self.db.transaction() as session:
             rows = await session.fetch_all(
-                "SELECT s.record_json,c.candidate_json "
+                "SELECT s.record_json,c.candidate_json,e.record_json "
                 "FROM recommendation_selections AS s "
                 "JOIN recommendation_candidates AS c "
                 "ON c.candidate_id=json_extract(s.record_json,'$.candidate_id') "
-                "ORDER BY s.created_at DESC,s.recommendation_id LIMIT ?",
+                "JOIN recommendation_expressions AS e "
+                "ON e.recommendation_id=s.recommendation_id "
+                "ORDER BY s.created_at DESC,"
+                "CAST(json_extract(s.record_json,'$.rank') AS INTEGER),s.recommendation_id LIMIT ?",
                 (limit,),
             )
         items = []
         for row in rows:
             selection = SelectionRecord.model_validate_json(str(row[0]))
             candidate = Candidate.model_validate_json(str(row[1]))
+            expression = ExpressionRecord.model_validate_json(str(row[2]))
             preview = candidate.preview
             items.append(
                 RecommendationFeedItem(
@@ -235,6 +239,7 @@ class SqliteRecommendationRepository:
                         source_timestamp=preview.source_timestamp,
                         provenance=preview.provenance,
                     ),
+                    reason=expression.reason,
                 )
             )
         return tuple(items)

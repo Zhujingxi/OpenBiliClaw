@@ -33,7 +33,7 @@ Configuration stores opaque credential references. Secret bytes live behind `Cre
 
 ### Is embedding required?
 
-No. Configure `[embedding]` only when a product capability needs it. In the current composition no production consumer constructs the embedding service; unsupported provider/capability combinations fail closed.
+No. Composition constructs the service only when `[embedding]` is configured, but current Recommendation discovery remains text-query based and has no durable semantic index. Unsupported provider/capability combinations fail closed.
 
 ## Data and upgrades
 

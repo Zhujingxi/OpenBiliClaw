@@ -196,6 +196,7 @@ describe("web view behavior", () => {
                   projected_at: "2030-01-01T00:00:00Z",
                 },
               },
+              reason: "Recommended for relevance and freshness.",
               selection: {
                 candidate_id: "one",
                 recommendation_id: "r1",

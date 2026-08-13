@@ -14,13 +14,9 @@ from openbiliclaw.composition.jobs import (
     build_understanding_job,
 )
 from openbiliclaw.content.integration.identity import ProviderId
+from openbiliclaw.recommendation.discovery.service import DiscoveredPreview
 from openbiliclaw.recommendation.evaluation.agent import EvaluationBatch
-from openbiliclaw.recommendation.models import (
-    CandidateState,
-    EvaluationRecord,
-    record_identity,
-)
-from openbiliclaw.understanding.profile import CanonicalProfile
+from openbiliclaw.understanding.profile import AvoidanceClaim, CanonicalProfile, claim_id
 
 if TYPE_CHECKING:
     from openbiliclaw.content.integration.capabilities import SearchCapability
@@ -57,9 +53,18 @@ async def test_model_free_evaluation_and_empty_pipeline_are_executable() -> None
 
     pipeline = object.__new__(RecommendationPipeline)
     dynamic = cast("Any", pipeline)
+    avoidance = AvoidanceClaim(
+        claim_id=claim_id("avoidance", "blocked"),
+        value="blocked",
+        confidence=0.9,
+        fresh_at=NOW,
+        evidence_ids=("ev_1234567890abcdef1234567890abcdef",),
+    )
     dynamic._understanding = SimpleNamespace(
         profile=AsyncMock(
-            return_value=CanonicalProfile(profile_id="default", revision=0, updated_at=NOW)
+            return_value=CanonicalProfile(
+                profile_id="default", revision=1, updated_at=NOW, claims=(avoidance,)
+            )
         )
     )
     dynamic._providers = SimpleNamespace(registry=SimpleNamespace(manifests=lambda: ()))
@@ -72,39 +77,70 @@ async def test_model_free_evaluation_and_empty_pipeline_are_executable() -> None
         select=lambda *_args, **_kwargs: ((), (), ()), persist_selection=AsyncMock()
     )
     dynamic._expression = SimpleNamespace(express=AsyncMock(return_value=()))
-    dynamic._repositories = SimpleNamespace(recommendations=SimpleNamespace(expire_due=AsyncMock()))
+    dynamic._repositories = SimpleNamespace(
+        recommendations=SimpleNamespace(expire_due=AsyncMock(), add_candidate=AsyncMock())
+    )
 
     await pipeline.replenish()
 
     item = candidate("full")
-    normalized = item.transition(CandidateState.NORMALIZED).transition(CandidateState.PREFILTERED)
-    evaluated = normalized.transition(CandidateState.EVALUATED)
-    record = EvaluationRecord(
-        evaluation_id=record_identity("eval", item.candidate_id, "1"),
-        candidate_id=item.candidate_id,
-        model_instance="baseline",
-        rubric_version=1,
-        context_version=1,
-        score=0.65,
-        rationale="baseline",
-        uncertainty=0.35,
-        input_tokens=0,
-        output_tokens=0,
-        evaluated_at=NOW,
+    blocked = item.preview.model_copy(
+        update={
+            "title": "blocked but otherwise valid",
+            "source_timestamp": datetime(2020, 1, 1, tzinfo=UTC),
+        }
     )
-    preview = item.preview.model_copy(update={"source_timestamp": datetime(2020, 1, 1, tzinfo=UTC)})
-    dynamic._discovery.discover.return_value = (preview,)
-    dynamic._evaluation.evaluate.return_value = ((evaluated,), (record,))
-    dynamic._repositories.recommendations.add_candidate = AsyncMock()
+    accepted_item = candidate("accepted")
+    accepted_preview = accepted_item.preview.model_copy(
+        update={"source_timestamp": datetime(2020, 1, 1, tzinfo=UTC)}
+    )
+    dynamic._planner.plan.return_value = (
+        SimpleNamespace(
+            provider_id=blocked.ref.provider_id,
+            text="science",
+            topic="profile-topic",
+        ),
+    )
+    dynamic._discovery.discover.return_value = (
+        DiscoveredPreview(blocked, "profile-topic"),
+        DiscoveredPreview(accepted_preview, "profile-topic"),
+    )
+    dynamic._evaluation.evaluate.return_value = ((), ())
+    dynamic._repositories.recommendations.add_candidate = AsyncMock(return_value=True)
     dynamic._repositories.recommendations.transition = AsyncMock()
     dynamic._repositories.recommendations.save_evaluation = AsyncMock()
     dynamic._repositories.recommendations.save_expression = AsyncMock()
-    dynamic._selection.select = lambda *_args, **_kwargs: ((), (), ())
+    selection_arguments: dict[str, object] = {}
+
+    def select(*_args: object, **kwargs: object) -> tuple[tuple[()], tuple[()], tuple[()]]:
+        selection_arguments.update(kwargs)
+        return (), (), ()
+
+    dynamic._selection.select = select
     dynamic._expression.express.return_value = (SimpleNamespace(),)
-    await pipeline.replenish()
+    result = await pipeline.replenish()
+    inserted = tuple(
+        call.args[0] for call in dynamic._repositories.recommendations.add_candidate.await_args_list
+    )
+    assert (result.discovered, result.added, result.selected) == (2, 2, 0)
+    assert all(candidate.topics == ("profile-topic",) for candidate in inserted)
+    evaluated_candidates = dynamic._evaluation.evaluate.await_args.args[0]
+    assert len(evaluated_candidates) == 1
+    assert evaluated_candidates[0].preview.title == accepted_preview.title
+    assert selection_arguments["negative_preferences"] == ("blocked",)
     await pipeline.expire()
     assert dynamic._selection.persist_selection.await_count == 2
     assert dynamic._repositories.recommendations.expire_due.await_count == 1
+
+    dynamic._repositories.recommendations.add_candidate.return_value = False
+    dynamic._evaluation.evaluate.reset_mock()
+    duplicate_result = await pipeline.replenish()
+    assert (duplicate_result.discovered, duplicate_result.added, duplicate_result.selected) == (
+        2,
+        0,
+        0,
+    )
+    dynamic._evaluation.evaluate.assert_awaited_once_with(())
 
 
 def test_recommendation_and_understanding_jobs_have_real_callbacks() -> None:

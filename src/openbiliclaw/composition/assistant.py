@@ -22,6 +22,7 @@ from openbiliclaw.assistant.tools import (
     build_workflow_tools,
     select_tools,
 )
+from openbiliclaw.composition.jobs import DEFAULT_PROFILE_ID
 from openbiliclaw.understanding.projections import dialogue_projection
 
 if TYPE_CHECKING:
@@ -49,7 +50,7 @@ class _AssistantToolFacade:
         return await self._facade.get_content_details(reference)
 
     async def show_profile(self) -> object:
-        return await self._facade.show_profile("default")
+        return await self._facade.show_profile(DEFAULT_PROFILE_ID)
 
     async def list_sources(self) -> object:
         return await self._facade.list_sources(None, 50)
@@ -109,7 +110,7 @@ class AssistantController:
                 updated_at=now,
             )
             await self._conversations.put_conversation(conversation)
-        profile = dialogue_projection(await self._understanding.profile("default"))
+        profile = dialogue_projection(await self._understanding.profile(DEFAULT_PROFILE_ID))
         result = await self._service.run_turn(
             TurnCommand(
                 text=request.text,

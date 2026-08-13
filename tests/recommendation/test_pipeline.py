@@ -41,7 +41,17 @@ from openbiliclaw.recommendation.models import (
 from openbiliclaw.recommendation.repositories import SqliteRecommendationRepository
 from openbiliclaw.recommendation.selection.service import SelectionService
 from openbiliclaw.recommendation.service import RecommendationService
-from openbiliclaw.understanding.projections import DiscoveryProfile
+from openbiliclaw.understanding.profile import (
+    CanonicalProfile,
+    PreferenceClaim,
+    PreferenceDimension,
+    claim_id,
+)
+from openbiliclaw.understanding.projections import (
+    DiscoveryProfile,
+    discovery_projection,
+    recommendation_projection,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -163,6 +173,23 @@ async def test_planner_defaults_dedupes_and_enforces_quota() -> None:
     assert [x.text for x in result] == ["high quality recent content"]
 
 
+def test_content_preferences_feed_discovery_and_recommendation_projections() -> None:
+    preference = PreferenceClaim(
+        claim_id=claim_id("preference", "content:Python 编程"),
+        dimension=PreferenceDimension.CONTENT,
+        value="Python 编程",
+        confidence=0.9,
+        fresh_at=NOW,
+        evidence_ids=("ev_1234567890abcdef1234567890abcdef",),
+    )
+    profile = CanonicalProfile(
+        profile_id="default", revision=1, updated_at=NOW, claims=(preference,)
+    )
+
+    assert discovery_projection(profile).interests == ("Python 编程",)
+    assert recommendation_projection(profile).positive_topics == ("Python 编程",)
+
+
 def test_selection_is_deterministic_and_cross_provider_fair() -> None:
     items = tuple(
         candidate(
@@ -215,6 +242,7 @@ async def test_repository_replay_feed_is_model_free(tmp_path: Path) -> None:
     persisted = await SelectionService().persist_selection(
         repo, (original,), admissions, selections
     )
+    await repo.save_expression((await ExpressionService(None, lambda: NOW).express(selections))[0])
     assert persisted == selected and persisted[0].state is CandidateState.SELECTED
     shown = ShownRecord(
         shown_id=record_identity("shown", selections[0].recommendation_id),
@@ -228,6 +256,8 @@ async def test_repository_replay_feed_is_model_free(tmp_path: Path) -> None:
     await db2.open()
     feed = await RecommendationService(SqliteRecommendationRepository(db2)).feed()
     assert tuple(item.selection for item in feed) == selections
+    assert tuple(item.reason for item in feed) == ("Recommended for relevance and freshness.",)
+    assert tuple(item.selection.rank for item in feed) == (1,)
     assert (
         await SqliteRecommendationRepository(db2).load(original.candidate_id)
     ).state is CandidateState.SHOWN
@@ -384,7 +414,7 @@ async def test_discovery_service_calls_search_capability_directly() -> None:
     result = await service.discover(
         (PlannedQuery(provider_id=ProviderId(value="bilibili"), text="science", topic="science"),)
     )
-    assert result == (preview,)
+    assert tuple((item.preview, item.topic) for item in result) == ((preview, "science"),)
     with pytest.raises(ValueError):
         await service.discover((), limit=0)
 

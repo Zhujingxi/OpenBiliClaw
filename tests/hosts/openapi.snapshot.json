@@ -2873,6 +2873,12 @@
           "card": {
             "$ref": "#/components/schemas/CardData"
           },
+          "reason": {
+            "maxLength": 300,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
           "ref": {
             "$ref": "#/components/schemas/ContentRef"
           },
@@ -2883,7 +2889,8 @@
         "required": [
           "selection",
           "ref",
-          "card"
+          "card",
+          "reason"
         ],
         "title": "RecommendationFeedItem",
         "type": "object"
