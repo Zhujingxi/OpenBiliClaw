@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, TypeVar, cast
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from pydantic_ai.profiles.openai import OpenAIModelProfile
 
 import pytest
 from pydantic import ValidationError
@@ -16,6 +18,7 @@ from openbiliclaw.ai.providers.models import (
     ModelOptions,
     ProviderKind,
     anthropic,
+    deepseek,
     google,
     openai,
     openrouter,
@@ -79,8 +82,22 @@ def test_disable_thinking_only_changes_openai_model_settings() -> None:
         "extra_body": {"thinking": {"type": "disabled"}},
     }
     assert anthropic.build(model_config, "key").settings == {"temperature": 0.2}
+    assert deepseek.build(model_config, "key").settings == {"temperature": 0.2}
     assert google.build(model_config, "key").settings == {"temperature": 0.2}
     assert openrouter.build(model_config, "key").settings == {"temperature": 0.2}
+
+
+def test_deepseek_uses_native_profile_and_supports_endpoint_override() -> None:
+    default = deepseek.build(config(ProviderKind.DEEPSEEK, model_name="deepseek-reasoner"), "key")
+    overridden = deepseek.build(
+        config(ProviderKind.DEEPSEEK, endpoint="https://gateway.example/v1"), "key"
+    )
+
+    profile = cast("OpenAIModelProfile", default.profile)
+    assert default.client.base_url.host == "api.deepseek.com"
+    assert profile.openai_chat_thinking_field == "reasoning_content"
+    assert profile.openai_supports_tool_choice_required is False
+    assert overridden.client.base_url == "https://gateway.example/v1/"
 
 
 @pytest.mark.parametrize("provider", list(ProviderKind))

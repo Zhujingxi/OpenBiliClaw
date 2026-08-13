@@ -25,6 +25,9 @@ def test_settings_are_frozen_and_unknown_fields_fail() -> None:
         AppSettings.model_validate({"model": {"provider": "unknown"}})
     with pytest.raises(ValidationError):
         AppSettings.model_validate({"model": {"api_key": "secret"}})
+    assert AppSettings.model_validate({"model": {"provider": "deepseek"}}).model.provider == (
+        "deepseek"
+    )
 
 
 def test_model_and_embedding_share_native_provider_shape() -> None:

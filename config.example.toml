@@ -4,7 +4,7 @@
 
 [model]
 # Empty model_name = no model configured; `openbiliclaw check` validates clean.
-# provider: openai | anthropic | google | openrouter (native PydanticAI providers)
+# provider: openai | anthropic | deepseek | google | openrouter (native PydanticAI providers)
 provider = "openai"
 model_name = ""
 # endpoint = "https://api.example.com/v1" # optional native-provider override
@@ -19,9 +19,9 @@ disable_thinking = false
 # Embeddings use the same provider configuration shape. Native embedding
 # access is currently supported by the OpenAI provider.
 provider = "openai"
-model_name = "text-embedding-3-small"
+model_name = ""
 # endpoint = "https://api.example.com/v1"
-secret_ref = "vault:cred_00000000000000000000000000000000"
+# secret_ref = "vault:cred_..." # opaque vault reference, set when configuring embeddings
 output_dimensions = 1536
 
 [content]

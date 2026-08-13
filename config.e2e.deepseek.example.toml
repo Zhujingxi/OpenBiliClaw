@@ -2,9 +2,8 @@
 # gitignored data-e2e/config.e2e.deepseek.toml and replaces the placeholder.
 
 [model]
-provider = "openai"
+provider = "deepseek"
 model_name = "deepseek-chat"
-endpoint = "https://api.deepseek.com"
 secret_ref = "vault:E2E_SECRET_REF"
 
 [embedding]

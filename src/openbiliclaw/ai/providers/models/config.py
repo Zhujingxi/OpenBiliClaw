@@ -16,6 +16,7 @@ from openbiliclaw.core._pydantic import StrictBaseModel
 class ProviderKind(StrEnum):
     OPENAI = "openai"
     ANTHROPIC = "anthropic"
+    DEEPSEEK = "deepseek"
     GOOGLE = "google"
     OPENROUTER = "openrouter"
 

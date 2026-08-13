@@ -76,6 +76,10 @@ class ModelFactory:
             from .anthropic import build as anthropic_build
 
             return anthropic_build
+        if provider is ProviderKind.DEEPSEEK:
+            from .deepseek import build as deepseek_build
+
+            return deepseek_build
         if provider is ProviderKind.GOOGLE:
             from .google import build as google_build
 

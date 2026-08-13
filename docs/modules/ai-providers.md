@@ -4,16 +4,17 @@
 
 ## Chat model construction
 
-`ModelInstanceConfig` is frozen and rejects unknown fields. It contains provider kind (`openai`, `anthropic`, `google`, or `openrouter`), model name, optional endpoint override, opaque CredentialVault secret reference, reviewed options, declared capabilities, owner, and provider version.
+`ModelInstanceConfig` is frozen and rejects unknown fields. It contains provider kind (`openai`, `anthropic`, `deepseek`, `google`, or `openrouter`), model name, optional endpoint override, opaque CredentialVault secret reference, reviewed options, declared capabilities, owner, and provider version.
 
 `ModelFactory` selects only thin native PydanticAI constructors:
 
 - `OpenAIProvider` + `OpenAIChatModel`;
 - `AnthropicProvider` + `AnthropicModel`;
+- `DeepSeekProvider` + `OpenAIChatModel`;
 - `GoogleProvider` + `GoogleModel`;
 - `OpenRouterProvider` + `OpenAIChatModel`.
 
-These modules contain no request logic. Credentials resolve only inside the selected trusted constructor callback. OpenRouter’s native provider does not accept a base URL, so an endpoint override fails explicitly rather than being ignored. The reviewed `disable_thinking` option affects only the OpenAI constructor: it sets PydanticAI `extra_body` to `{"thinking": {"type": "disabled"}}`; when false, no `extra_body` is added. This supports thinking-always-on OpenAI-compatible endpoints whose forced output tools require `tool_choice = "required"`, without exposing a generic request-body escape hatch.
+These modules contain no request logic. Credentials resolve only inside the selected trusted constructor callback. The native DeepSeek provider supplies PydanticAI's vendor model profile (including the `reasoning_content` thinking field and the `deepseek-reasoner` caveat that forced `tool_choice = "required"` is unsupported); optional endpoint overrides retain that profile for gateway deployments. OpenRouter’s native provider does not accept a base URL, so an endpoint override fails explicitly rather than being ignored. The reviewed `disable_thinking` option affects only the OpenAI constructor: it sets PydanticAI `extra_body` to `{"thinking": {"type": "disabled"}}`; when false, no `extra_body` is added. This supports thinking-always-on OpenAI-compatible endpoints whose forced output tools require `tool_choice = "required"`, without exposing a generic request-body escape hatch.
 
 `BuiltModel` preserves a stable non-secret fingerprint and the declared-versus-verified capability distinction. Native tool-call output, native tools, vision, and streaming remain unverified; opt-in probe primitives and an in-memory store exist, but Composition does not run or persist probe results. Understanding achieves validated structured output with PydanticAI `PromptedOutput`: providers return schema-guided JSON as ordinary text, then Pydantic validates a model-friendly draft and the application attaches deterministic IDs/timestamps. Production calls flow from Composition’s configured model through `RouteTable` and `AIRuntime.run()`; no application-owned parallel chat integration remains.
 
@@ -22,10 +23,10 @@ These modules contain no request logic. Credentials resolve only inside the sele
 | Provider / endpoint | Model | `tool_choice = "required"` | `disable_thinking` |
 | --- | --- | --- | --- |
 | Kimi coding / `https://api.kimi.com/coding/v1` | `kimi-for-coding` | Yes, when thinking is disabled | Required |
-| DeepSeek / `https://api.deepseek.com` | `deepseek-chat` | Yes, natively | Not needed (default path) |
+| Native DeepSeek / `https://api.deepseek.com` | `deepseek-chat` | Yes, with PydanticAI's vendor profile | Not applicable |
 | Other endpoints | Unverified | Unverified | Off by default |
 
-OpenAI-compatible endpoints are not assumed to share tool/thinking compatibility. The toggle targets endpoints that force-enable thinking, specifically the verified Kimi coding plan whose thinking mode rejects forced `tool_choice = "required"`. It is not a general model workaround: false/absent sends the standard OpenAI request unchanged, non-OpenAI constructors ignore it, and the DeepSeek profile verifies the untouched default path.
+OpenAI-compatible endpoints are not assumed to share tool/thinking compatibility. The toggle targets endpoints that force-enable thinking, specifically the verified Kimi coding plan whose thinking mode rejects forced `tool_choice = "required"`. It is not a general model workaround: false/absent sends the standard OpenAI request unchanged, non-OpenAI constructors ignore it, and native DeepSeek handles its quirks through PydanticAI's model profile instead. The coding-plan `kimi-for-coding` endpoint has no PydanticAI preset; the standard Moonshot API is unused, so a `moonshotai` provider kind is deliberately not added.
 
 ## Embeddings
 
@@ -41,4 +42,4 @@ OpenBiliClaw never downloads, bundles, starts, supervises, or serves model runti
 
 ## Dependencies
 
-The application pins `pydantic-ai-slim[anthropic,google,openai,openrouter]`. Vendor SDKs are dependency details of the native PydanticAI provider layer, not independent OpenBiliClaw integrations.
+The application pins `pydantic-ai-slim[anthropic,google,openai,openrouter]`; PydanticAI's DeepSeek provider reuses its OpenAI client dependency. Vendor SDKs are dependency details of the native PydanticAI provider layer, not independent OpenBiliClaw integrations.

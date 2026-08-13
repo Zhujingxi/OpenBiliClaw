@@ -23,7 +23,7 @@ class _FrozenModel(StrictBaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
 
-ModelProviderName: TypeAlias = Literal["openai", "anthropic", "google", "openrouter"]
+ModelProviderName: TypeAlias = Literal["openai", "anthropic", "deepseek", "google", "openrouter"]
 
 
 class ModelOptions(_FrozenModel):

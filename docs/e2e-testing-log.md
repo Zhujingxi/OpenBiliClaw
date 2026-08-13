@@ -430,6 +430,8 @@ No secret, provider response body, title, profile text, account identity, cookie
    **Result:** both returned HTTP 200; the forced request returned a proper tool call. This establishes a native default-path control beside the Kimi thinking-disabled case.
 2. **Test:** run the same production Application Assistant turn with tolerant invariants against both generated E2E profiles.
    **Result:** Kimi `kimi-for-coding` with `disable_thinking = true` and DeepSeek `deepseek-chat` with the option absent each returned a typed `AssistantMessage` with non-empty text. The toggle is therefore scoped to thinking-forced OpenAI-compatible endpoints rather than required by the shared OpenAI constructor path.
+3. **Provider correction:** rerun L3 after changing the DeepSeek profile from generic `openai` plus endpoint override to PydanticAI's native `deepseek` provider.
+   **Result:** 4 passed. The same live Assistant matrix remains green while DeepSeek now inherits PydanticAI's vendor model profile instead of discarding it.
 
 No credential or provider response body is recorded in this matrix trace.
 
