@@ -93,7 +93,7 @@ Implement harness + tests (TDD) → run against real stack → fix bugs → **in
 | L1b content authenticated | completed | 3d28bb46 | 2 real E2E tests passed; restart replay and authenticated native adapters corrected; see testing log |
 | L2 observations | completed | f9799dca | 2 real E2E tests passed; content landing/dedupe, restart durability, feedback idempotency, cursor replay, and authenticated history import verified; see testing log |
 | L3 understanding | completed | 03a05f42 | 2 real E2E tests passed; composed embeddings, real Kimi profile derivation, persistence, update, inspection/correction verified; durable semantic index deferred to L4 |
-| L4 recommendation | completed | — | 2 real E2E tests passed; real refill/ranking/reasons/diversity/restart verified; duplicate refill and profile-to-discovery seams fixed; semantic index intentionally not added |
+| L4 recommendation | completed | 4356d0c1 | 2 real E2E tests passed; real refill/ranking/reasons/diversity/restart verified; duplicate refill and profile-to-discovery seams fixed; semantic index intentionally not added |
 | L5 workflows | pending | — | |
 | L6 docker | pending | — | |
 | L7 UI | pending | — | |
