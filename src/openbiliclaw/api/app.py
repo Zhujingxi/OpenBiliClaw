@@ -8685,6 +8685,59 @@ def create_app(
         payload.update(image_fetch_coordinator.status_payload())
         return RuntimeStatusResponse(**payload)
 
+    @app.post("/api/agent-bridge")
+    async def agent_bridge(payload: dict[str, Any]) -> dict[str, Any]:
+        """Dispatch one OpenClaw agent-bridge command against a warm adapter.
+
+        Mirrors the ``openbiliclaw.integrations.openclaw.cli`` JSON contract
+        (``{ok, data}`` / ``{ok: false, error, error_type}``) but runs inside
+        the warm serve-api process, so agent hosts avoid the per-call Python
+        import cold start.  The adapter is built lazily on first use and cached
+        on ``app.state``.
+        """
+        command = str(payload.get("command") or "").strip()
+        argv = payload.get("argv")
+        if not command:
+            return {"ok": False, "error": "missing command", "error_type": "validation_error"}
+        if not isinstance(argv, list) or not all(isinstance(item, str) for item in argv):
+            return {
+                "ok": False,
+                "error": "argv must be an array of strings",
+                "error_type": "validation_error",
+            }
+
+        adapter = getattr(app.state, "agent_bridge_adapter", None)
+        if adapter is None:
+            lock = getattr(app.state, "agent_bridge_adapter_lock", None)
+            if lock is None:
+                lock = asyncio.Lock()
+                app.state.agent_bridge_adapter_lock = lock
+            async with lock:
+                adapter = getattr(app.state, "agent_bridge_adapter", None)
+                if adapter is None:
+                    from openbiliclaw.integrations.openclaw.bootstrap import (
+                        build_openclaw_adapter,
+                    )
+
+                    adapter = await asyncio.to_thread(build_openclaw_adapter)
+                    app.state.agent_bridge_adapter = adapter
+
+        from openbiliclaw.integrations.openclaw.cli import _build_parser, _run_command
+
+        parser = _build_parser()
+        try:
+            args = parser.parse_args([command, *argv])
+        except SystemExit:
+            return {
+                "ok": False,
+                "error": f"invalid command or arguments: {command!r}",
+                "error_type": "validation_error",
+            }
+        try:
+            return await _run_command(args, adapter)
+        except Exception as exc:  # pragma: no cover - defensive adapter boundary
+            return {"ok": False, "error": str(exc), "error_type": "operation_error"}
+
     def _backend_update_status() -> BackendUpdateStatusOut:
         get_update_status = getattr(ctx.auto_update_service, "get_update_status", None)
         if callable(get_update_status):
