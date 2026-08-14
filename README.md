@@ -685,7 +685,7 @@ Agent 宿主（OpenClaw / Hermes / WorkBuddy）
 │ 旧反馈批：unified_interest_line=false 时启用   │
 │ 初始化屏障：完整画像落盘 → 发现/评估/表达 → 可浏览推荐 │
 │ B站供给：普通相关性搜索 + 预算内 1×5 pubdate recent lane → 统一评估 │
-│ 候选评估：时间中性相关性 + Agent 时效分型 → 发布时间高置信正向 bonus │
+│ 候选评估：时间中性相关性 + Agent 结构化时效证据 → eligible / review hold / expired + 发布时间 bonus │
 │ 推荐时效 shadow：含 bonus vs 无 bonus Top10/50/100 聚合 → class/source/age 审计（不改 serving）│
 │ 封面：proxy前台 + refresh预取 → app-stable 4/3 lane → singleflight/原子缓存 │
 │ Soul 认知纪律：待聊双轨冷却 · 单对话锚 · worker-only 结算 · 轻量 winner receipt · 疑惑 FIFO · 台账 · 深层门控 │
@@ -700,7 +700,7 @@ Agent 宿主（OpenClaw / Hermes / WorkBuddy）
 │ Bangumi 官方匿名 API → search/ranked/latest producer → shared eval │
 │ V2EX 匿名 API/Feed → 有界 Topic/Reply 增强 → 五分支 producer → shared eval │
 │ V2EX 身份梯级：PAT verified > browser observed > user accepted；冲突时只暂停账号画像写入 │
-│ 候选评估时钟：published_at + 精确 UTC evaluated_at → 小时桶缓存失效 │
+│ 时效生命周期：正文逐字证据 + code-owned 复审时钟 → 可展示 / temporal_review_hold / 过期 │
 │ evaluator prefilter 默认 shadow → 隐私安全决策/原始分数 join → 只读质量 gate（不自动 enforce）│
 │ cognition named views → task-scoped gate：仅 awareness_confusions compact；其余 legacy │
 │ token diet：偏好逐段真实装箱；洞察 近期/裁决保底 + 相关/重要/多样性加权≤40 → 完整历史 merge │
@@ -710,7 +710,7 @@ Agent 宿主（OpenClaw / Hermes / WorkBuddy）
 │ API raw 断供 → 欠份额来源即时并行补给 → 真实新增清退避 / 重复空转阶梯退避 │
 │ 惊喜就绪门：正式推荐词/主题就绪 + seen_items 硬过滤 → 打分并原子快照 → 四端 × 写回已看账本 │
 │ 库存 API/OpenClaw 启动钩子 → 历史恢复/原子维护 → 再暴露 LLM │
-│ 换屏快路：当前卡硬排除 → PoolServeSnapshot/seen_items → recommendation+shown 短事务 → 单条 reshuffle 事件 │
+│ 换屏快路：当前卡硬排除 → hold/stale 清退 + PoolServeSnapshot → 最终时效复核+recommendation/shown → reshuffle 事件 │
 │ 平台定向（仅 PC Web Tab）：source_platform → 平台候选（不跨平台补位）→ 同一排序/文案/持久化 │
 │ 平台库存：platform-availability → 同一 canonical 可推集合 → total == Σ by_platform │
 │ 后台维护：独立 DB worker → ≤50 行/批 → 释放写锁；未变化跳过 / 10min 巡检 │

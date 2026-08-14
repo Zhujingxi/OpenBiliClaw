@@ -6,6 +6,7 @@ import asyncio
 import base64
 import binascii
 import copy
+import datetime as datetime_module
 import inspect
 import ipaddress
 import json
@@ -187,6 +188,10 @@ from openbiliclaw.api.models import (
     ZhihuLoginStateResponse,
     ZhihuSourceConfigOut,
     validate_saved_item_key,
+)
+from openbiliclaw.discovery.temporal import (
+    evaluate_temporal_eligibility,
+    is_complete_temporal_evidence_marker,
 )
 from openbiliclaw.llm.base import safe_llm_failure_message
 from openbiliclaw.runtime import embedding_progress
@@ -458,6 +463,65 @@ _FIRST_PAGE_TOPUP_DEBOUNCE_SECONDS = 30.0
 # is intentionally tiny: it is a load-shedding single-flight window, not a
 # user-visible freshness policy. Mutating recommendation routes invalidate it.
 _RECOMMENDATION_SNAPSHOT_TTL_SECONDS = 1.0
+
+
+def _recommendation_snapshot_rows_and_expiry(
+    rows: list[dict[str, Any]],
+    *,
+    now: datetime | None = None,
+    monotonic_now: float | None = None,
+) -> tuple[list[dict[str, Any]], float]:
+    """Recheck rows and cap cache life at the earliest temporal transition."""
+
+    # Anchor the cache deadline before reading wall time.  Sampling these in
+    # the opposite order would add any scheduling delay between the two reads
+    # to a near-transition card's cache lifetime and could cross its review or
+    # hard-expiry boundary.
+    effective_monotonic = time.monotonic() if monotonic_now is None else monotonic_now
+    effective_now = now or datetime.now(UTC)
+    if effective_now.tzinfo is None:
+        effective_now = effective_now.replace(tzinfo=UTC)
+    expires_at = effective_monotonic + _RECOMMENDATION_SNAPSHOT_TTL_SECONDS
+    eligible: list[dict[str, Any]] = []
+    for row in rows:
+        decision = evaluate_temporal_eligibility(
+            temporal_class=row.get("temporal_class", "unknown"),
+            temporal_confidence=row.get("temporal_confidence", 0.0),
+            published_at=row.get("published_at", ""),
+            temporal_validity_mode=row.get("temporal_validity_mode", "none"),
+            temporal_valid_until=row.get("temporal_valid_until", ""),
+            temporal_scope=row.get("temporal_scope", "none"),
+            temporal_evidence=row.get("temporal_evidence", ""),
+            temporal_state=row.get("temporal_state", "unknown"),
+            temporal_next_review_at=row.get("temporal_next_review_at", ""),
+            temporal_evaluated_at=row.get("temporal_evaluated_at", ""),
+            temporal_policy_version=row.get("temporal_policy_version", "v1"),
+            evidence_complete=is_complete_temporal_evidence_marker(
+                row.get("temporal_evidence_complete")
+            ),
+            now=effective_now,
+        )
+        if not decision.eligible:
+            continue
+        eligible.append(row)
+        if not decision.trigger_at:
+            continue
+        try:
+            trigger = datetime_module.datetime.fromisoformat(
+                decision.trigger_at.replace("Z", "+00:00")
+            )
+            if trigger.tzinfo is None:
+                continue
+            remaining_seconds = max(
+                0.0,
+                (trigger.astimezone(effective_now.tzinfo) - effective_now).total_seconds(),
+            )
+        except (OverflowError, OSError, ValueError):
+            continue
+        expires_at = min(expires_at, effective_monotonic + remaining_seconds)
+    return eligible, expires_at
+
+
 # Canonical home is openbiliclaw.sources.x_auth (mirrors douyin_auth);
 # re-exported here because callers historically imported from api.app.
 #
@@ -2166,14 +2230,17 @@ def create_app(
     first_page_topup_attempted_at = 0.0
     recommendation_snapshot_cache: RecommendationListResponse | None = None
     recommendation_snapshot_cached_at = 0.0
+    recommendation_snapshot_expires_at = 0.0
     recommendation_snapshot_dislike_digest = ""
     recommendation_snapshot_lock = asyncio.Lock()
 
     def _invalidate_recommendation_snapshot() -> None:
         nonlocal recommendation_snapshot_cache, recommendation_snapshot_cached_at
+        nonlocal recommendation_snapshot_expires_at
         nonlocal recommendation_snapshot_dislike_digest
         recommendation_snapshot_cache = None
         recommendation_snapshot_cached_at = 0.0
+        recommendation_snapshot_expires_at = 0.0
         recommendation_snapshot_dislike_digest = ""
 
     def _effective_recommendation_dislikes() -> tuple[list[str], str]:
@@ -7377,7 +7444,7 @@ def create_app(
 
     async def _load_recommendations(
         disliked_topics: list[str] | None = None,
-    ) -> RecommendationListResponse:
+    ) -> tuple[RecommendationListResponse, float]:
         nonlocal first_page_topup_attempted_at
 
         def _admission_min_score() -> float:
@@ -7467,6 +7534,7 @@ def create_app(
             from openbiliclaw.recommendation.exclusion import filter_recommendation_rows
 
             rows = filter_recommendation_rows(rows, disliked_topics)
+        rows, snapshot_expires_at = _recommendation_snapshot_rows_and_expiry(rows)
         rows = _cap_by_franchise(rows, max_per_franchise=2)[:20]
         return RecommendationListResponse(
             items=[
@@ -7504,7 +7572,7 @@ def create_app(
                 )
                 for row in rows
             ]
-        )
+        ), snapshot_expires_at
 
     @app.get("/api/recommendations", response_model=RecommendationListResponse)
     async def recommendations() -> RecommendationListResponse:
@@ -7517,6 +7585,7 @@ def create_app(
         mutations immediately visible through explicit invalidation.
         """
         nonlocal recommendation_snapshot_cache, recommendation_snapshot_cached_at
+        nonlocal recommendation_snapshot_expires_at
         nonlocal recommendation_snapshot_dislike_digest
 
         now = time.monotonic()
@@ -7524,6 +7593,7 @@ def create_app(
         if (
             recommendation_snapshot_cache is not None
             and now - recommendation_snapshot_cached_at < _RECOMMENDATION_SNAPSHOT_TTL_SECONDS
+            and now < recommendation_snapshot_expires_at
             and recommendation_snapshot_dislike_digest == dislike_digest
         ):
             return recommendation_snapshot_cache.model_copy(deep=True)
@@ -7534,16 +7604,18 @@ def create_app(
             if (
                 recommendation_snapshot_cache is not None
                 and now - recommendation_snapshot_cached_at < _RECOMMENDATION_SNAPSHOT_TTL_SECONDS
+                and now < recommendation_snapshot_expires_at
                 and recommendation_snapshot_dislike_digest == dislike_digest
             ):
                 return recommendation_snapshot_cache.model_copy(deep=True)
-            snapshot = await _load_recommendations(disliked_topics)
+            snapshot, snapshot_expires_at = await _load_recommendations(disliked_topics)
             latest_topics, latest_digest = _effective_recommendation_dislikes()
             if latest_digest != dislike_digest:
-                snapshot = await _load_recommendations(latest_topics)
+                snapshot, snapshot_expires_at = await _load_recommendations(latest_topics)
                 dislike_digest = latest_digest
             recommendation_snapshot_cache = snapshot.model_copy(deep=True)
             recommendation_snapshot_cached_at = time.monotonic()
+            recommendation_snapshot_expires_at = snapshot_expires_at
             recommendation_snapshot_dislike_digest = dislike_digest
             return snapshot
 

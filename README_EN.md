@@ -683,7 +683,7 @@ images: proxy foreground + refresh prefetch → app-stable lane (total 4 / bg 3,
 │ Legacy batch only when rollback flag=false     │
 │ Init barrier: profile commit → discover/evaluate/copy → ready │
 │ Bilibili supply: relevance search + budgeted 1×5 pubdate recent lane → shared evaluation │
-│ Evaluation: time-neutral relevance + Agent temporal class → high-confidence publication bonus │
+│ Evaluation: time-neutral relevance + grounded temporal evidence → eligible / review hold / expired + publication bonus │
 │ Temporal shadow: bonus vs no-bonus Top10/50/100 aggregates → class/source/age audit (no serving change) │
 │ Images: proxy fg + refresh prefetch → app-stable 4/3 lane → singleflight/atomic cache │
 │ Soul cognition: dual pending cooldown · one anchor · worker-only settlement · winner receipt · confusion FIFO · ledger · deep gate │
@@ -698,7 +698,7 @@ images: proxy foreground + refresh prefetch → app-stable lane (total 4 / bg 3,
 │ Bangumi public API → search/ranked/date producer → shared eval │
 │ V2EX public API/Feed → bounded Topic/Reply enrichment → five modes → shared eval │
 │ V2EX identity ladder: verified PAT > observed browser > accepted user; mismatch pauses only account projection │
-│ Eval clock: published_at + exact UTC evaluated_at → hourly cache invalidation │
+│ Temporal lifecycle: verbatim evidence + code-owned review clock → serve / temporal_review_hold / expired │
 │ Evaluator prefilter stays shadow → privacy-safe decision/raw-score join → read-only gate (no auto-enforce) │
 │ Named cognition views → task gate: compact only for awareness_confusions; others legacy │
 │ Token diet: per-offset preference packing; weighted recent/judged/relevant/important insight≤40 → full merge │
@@ -708,7 +708,7 @@ images: proxy foreground + refresh prefetch → app-stable lane (total 4 / bg 3,
 │ API raw-empty → wake under-share sources now → real progress resets / duplicate-only waves back off │
 │ Delight gate: formal copy/topic ready + seen_items guard → score/snapshot → UI × writes seen ledger │
 │ Inventory API/OpenClaw startup hook → recover/maintain → expose LLM │
-│ Reshuffle: current-card exclusion → PoolServeSnapshot/seen_items → short rec+shown write → one batch event │
+│ Reshuffle: current-card exclusion → hold/stale retirement + PoolServeSnapshot → final temporal recheck + atomic write │
 │ Platform scope (PC Web tabs only): source_platform → scoped candidates, no cross-platform floor → same rank/copy/persist │
 │ Platform inventory: platform-availability → same canonical servable set → total == Σ by_platform │
 │ Background maintenance: isolated worker → ≤50 rows/batch; unchanged skip / 10m sweep │

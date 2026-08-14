@@ -1493,11 +1493,17 @@ class RuntimeContext:
             return CandidateEvalSnapshot(
                 available=int(readiness.get("available", 0)),
                 target=int(new_config.scheduler.pool_target_count),
-                pending_eval=int(status_counts.get("pending_eval", 0)),
+                pending_eval=int(
+                    status_counts.get(
+                        "pending_eval_ready",
+                        status_counts.get("pending_eval", 0),
+                    )
+                ),
                 evaluating=int(status_counts.get("evaluating", 0)),
-                evaluated_pending_admission=int(status_counts.get("evaluated", 0)),
+                evaluated_pending_admission=int(readiness.get("evaluated_pending", 0)),
                 admitted_pending_copy=int(readiness.get("admitted_pending_copy", 0)),
                 admitted_pending_available=int(readiness.get("admitted_pending_available", 0)),
+                evaluated_waiting_total=int(status_counts.get("evaluated", 0)),
             )
 
         async def _request_candidate_supply(reason: str) -> dict[str, object]:
