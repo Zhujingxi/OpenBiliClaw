@@ -6,6 +6,8 @@
 
 ## Unreleased
 
+- Enabled Bangumi public reads through the existing official `api.bgm.tv` transport and global `builtin.anonymous` access path, with no user token required. Added an opt-in `l1bangumi` real-stack layer covering repeat search identity invariants and dynamic search-result detail fetch; enabled Bangumi in the E2E and Docker profiles. First live UI pass caught a real defect: upstream rows with empty-string image URLs failed payload validation and poisoned whole search pages at limit≥11 (503); fixed with `or None` image normalization in the shared `_subject` seam plus a transport test using the real dirty-row shape. The content detail renderer gained provider-agnostic `image_url`/`summary` fallbacks so Bangumi payloads render cover and summary.
+
 - YouTube is enabled end-to-end (anonymous `builtin.anonymous` connect, no credentials) with UI verification: the Search view provider field is now a select populated from `/v1/sources`, content detail renders available provider metadata (title, thumbnail, channel, description, canonical link), and search form state persists across navigation.
 
 

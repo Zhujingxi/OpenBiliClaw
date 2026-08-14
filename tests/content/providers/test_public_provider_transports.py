@@ -49,6 +49,45 @@ async def test_bangumi_transport_maps_search_and_endpoint() -> None:
     assert transport.open_client_count == 0
 
 
+async def test_bangumi_transport_tolerates_empty_image_urls() -> None:
+    """Upstream rows may carry empty-string image URLs; they normalize to None."""
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "id": 504554,
+                        "type": 2,
+                        "name": "Samac",
+                        "name_cn": "孤独",
+                        "summary": "summary",
+                        "date": "1959-01-01",
+                        "images": {
+                            "small": "",
+                            "grid": "",
+                            "large": "",
+                            "medium": "",
+                            "common": "",
+                        },
+                        "rating": {"score": 0, "total": 2},
+                        "collection_total": 4,
+                    }
+                ],
+                "total": 1,
+                "limit": 20,
+                "offset": 0,
+            },
+        )
+
+    transport = HttpxBangumiTransport(httpx.MockTransport(handler))
+    raw = await transport("search", "typed", "0", 20)
+    page = json.loads(raw)
+    assert page["items"][0]["id"] == 504554
+    assert page["items"][0]["image_url"] is None
+
+
 async def test_v2ex_transport_maps_hot_topics_and_endpoint() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/topics/hot.json"

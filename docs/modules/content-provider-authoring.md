@@ -31,6 +31,12 @@ assert validate_provider_contract(manifest, provider) == ()
 
 注册会拒绝 duplicate provider ID、重复 schema/action ID 与 advertised capability mismatch。
 
+## Production transport status
+
+| Provider | Enabled access | Capabilities | Live E2E layer |
+|----------|----------------|--------------|----------------|
+| Bangumi | `builtin.anonymous` public read; optional PAT form retained | search, feed, fetch, projection via official `api.bgm.tv` v0 API | `l1bangumi` (anonymous search → detail) |
+
 ## Capability rules
 
 - 实现最小 protocol，不建立 provider god interface。

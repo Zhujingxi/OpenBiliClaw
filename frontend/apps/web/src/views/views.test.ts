@@ -253,6 +253,39 @@ describe("web view behavior", () => {
     expect(link.attributes("rel")).toContain("noopener");
   });
 
+  it("renders bangumi-shaped payloads via image_url and summary fallbacks", async () => {
+    const ref = {
+      provider_id: { value: "bangumi" },
+      content_kind: { value: "subject" },
+      provider_content_id: "241088",
+      canonical_url: "https://bgm.tv/subject/241088",
+    };
+    location.hash = `#/content/${encodeURIComponent(JSON.stringify(ref))}`;
+    const wrapper = mountView(
+      ContentView,
+      api({
+        content: async () => ({
+          content: {
+            ref,
+            schema_version: 1,
+            payload: {
+              title: "孤独摇滚！",
+              summary: "乐队……那是阴暗角色也能闪耀起来的唯一地方。",
+              image_url: "https://lain.bgm.tv/pic/cover/l/42.jpg",
+              subject_type: "anime",
+            },
+          },
+        }),
+      }),
+    );
+    await vi.waitFor(() => expect(wrapper.get("h2").text()).toBe("孤独摇滚！"));
+    expect(wrapper.text()).toContain("乐队");
+    expect(wrapper.get("img").attributes("src")).toBe(
+      "https://lain.bgm.tv/pic/cover/l/42.jpg",
+    );
+    expect(wrapper.get("a").attributes("href")).toBe(ref.canonical_url);
+  });
+
   it("loads and refetches JSON content references on same-route hash changes", async () => {
     const first = JSON.stringify({
       provider_id: { value: "demo" },

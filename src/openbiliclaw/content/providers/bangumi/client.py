@@ -53,7 +53,7 @@ def _subject(row: dict[str, JsonValue]) -> BangumiSubject:
     title = name_cn if isinstance(name_cn, str) and name_cn.strip() else name
     rating = _mapping(row.get("rating")) or {}
     images = _mapping(row.get("images")) or {}
-    image = images.get("large") or images.get("common")
+    image = images.get("large") or images.get("common") or None
     return BangumiSubject(
         id=_integer(row.get("id")),
         title=title if isinstance(title, str) else "",

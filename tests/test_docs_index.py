@@ -52,8 +52,11 @@ def test_maintained_markdown_links_resolve() -> None:
 
 
 def test_superseded_document_archives_are_absent() -> None:
-    for name in ("plans", "refactor", "specs", "superpowers", "testing"):
+    for name in ("refactor", "specs", "superpowers", "testing"):
         assert not (ROOT / "docs" / name).exists()
+
+    active_plans = (ROOT / "docs" / "plans").glob("*.md")
+    assert [path.name for path in active_plans] == ["2026-08-14-anonymous-provider-ports.md"]
 
 
 def test_docs_homepage_mentions_macos_first_launch_security_bypass() -> None:

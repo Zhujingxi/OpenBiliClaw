@@ -470,3 +470,9 @@ No credential or provider response body is recorded in this matrix trace.
 - **Sweep incident**: the enablement worker generated `data-e2e/config.e2e.toml` pointing its model `secret_ref` at the *DeepSeek* vault entry (35-byte key), so all Kimi-model layers 401'd while direct key probes passed. Root cause: config generated out-of-band from the seeder; `_seed_config` trusts any resolvable ref. Fix: deleted the generated config so the seeder re-stored the correct Kimi key. Diagnosis method: sha256/length comparison of vault entry vs key file (no secrets printed).
 - l0's `content.enabled` assertion updated to `("bilibili", "youtube")`.
 - l3 profile-derivation flaked once immediately after re-seed; green on rerun (35.9s real call).
+
+## Bangumi layer incidents
+
+- **l1bangumi live layer (2/2 green)** and UI search→detail verified against real api.bgm.tv with anonymous connect.
+- **UI pass caught a live defect the small-limit layer missed**: the UI's default `limit=20` search 503'd deterministically while `limit<=10` passed. Root cause: upstream row id 504554 carries empty-string image URLs (`images.large: ""`), which failed the `BangumiSubject.image_url` pattern and — because row parsing runs inside one page-level try — poisoned all 20 results. Fixed at the shared seam: `images.get("large") or images.get("common") or None` in `_subject`, plus a transport test replaying the real dirty-row shape. Lesson recorded: live layers should exercise the UI's default page size, not only small limits.
+- Content detail renderer gained `image_url`/`summary` fallbacks (Bangumi payload field names) — provider-agnostic, covered by a new view test with a Bangumi-shaped payload.

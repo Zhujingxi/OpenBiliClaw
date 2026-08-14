@@ -43,25 +43,30 @@ hermetically. E2e wiring: layer = pyproject marker + `scripts/e2e.py::LAYERS` +
 
 ---
 
-## Phase 1 — Bangumi 🔲
+## Phase 1 — Bangumi ✅ (2026-08-14)
 
 Transport exists; this phase proves it live and wires anonymous access.
 
-- [ ] 1.1 Verify anonymous connect: does the bangumi builder accept
+- [x] 1.1 Verify anonymous connect: does the bangumi builder accept
   `builtin.anonymous` (YouTube precedent)? If the manual PAT form blocks it, make
   anonymous the zero-config path and keep PAT as optional upgrade. TDD: unit test
   that manifest exposes an anonymous connection method.
-- [ ] 1.2 Unit tests (extend `test_public_api_providers.py` / transports if gaps):
+- [x] 1.2 Unit tests (extend `test_public_api_providers.py` / transports if gaps):
   search page normalization, subject-type mapping, cursor/dedupe, typed errors
   (429→RATE_LIMITED, 403→ACCESS_DENIED, timeout→NETWORK_UNAVAILABLE).
-- [ ] 1.3 Live e2e layer `l1bangumi` (marker + LAYERS + `tests/e2e/test_l1_bangumi.py`):
+- [x] 1.3 Live e2e layer `l1bangumi` (marker + LAYERS + `tests/e2e/test_l1_bangumi.py`):
   anonymous connect → search "孤独摇滚" → invariant ids/canonical `bgm.tv/subject/<id>`
   URLs → detail fetch 200-equivalent with title present.
-- [ ] 1.4 Enable `bangumi` in `config.e2e.example.toml`, `config.docker.toml`,
+- [x] 1.4 Enable `bangumi` in `config.e2e.example.toml`, `config.docker.toml`,
   `config.example.toml` (all anonymous).
-- [ ] 1.5 Reviewer PASS → gates → commit. UI spot-check via agent-browser:
+- [x] 1.5 Reviewer PASS → gates → commit. UI spot-check via agent-browser:
   providers view shows bangumi connected; search → detail renders metadata.
-- [ ] 1.6 Docs: `docs/modules/content-provider-authoring.md` capability matrix,
+  **UI check caught a live bug**: `limit=20` searches 503'd because upstream
+  rows with empty-string image URLs failed `image_url` pattern validation and
+  poisoned the whole page → fixed at the shared seam (`... or None`
+  normalization in `_subject`) + transport test with the real dirty-row shape;
+  detail renderer gained `image_url`/`summary` fallbacks (provider-agnostic).
+- [x] 1.6 Docs: `docs/modules/content-provider-authoring.md` capability matrix,
   changelog.
 
 ## Phase 2 — V2EX 🔲

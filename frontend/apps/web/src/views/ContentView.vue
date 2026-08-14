@@ -19,8 +19,10 @@ function text(key: string): string | undefined {
   return typeof value === "string" && value.trim() !== "" ? value : undefined;
 }
 const title = computed(() => text("title"));
-const description = computed(() => text("description"));
-const image = computed(() => text("thumbnail_url") ?? text("cover_url"));
+const description = computed(() => text("description") ?? text("summary"));
+const image = computed(
+  () => text("thumbnail_url") ?? text("cover_url") ?? text("image_url"),
+);
 const creator = computed(() => {
   for (const key of ["channel", "creator"]) {
     const value = payload.value[key];
