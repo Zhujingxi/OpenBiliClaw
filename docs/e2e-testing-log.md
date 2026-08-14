@@ -462,3 +462,11 @@ No credential or provider response body is recorded in this matrix trace.
   2. l0's chat assertion expected provider attribution `"openai"`; catalog resolution attributes the catalog id instead. The test now asserts attribution equals the configured provider id (no hardcoding).
   3. l3's profile-derivation test flaked once with an upstream Kimi account budget error; green on rerun. The Kimi key is a limited test key by design — transient budget_exhausted is expected environmental noise, and reruns are the documented remedy.
 - docs/docker-deployment.md now documents catalog-driven model config and the catalog-bypassing embedding sidecar.
+
+## YouTube layer + post-enable sweep incidents
+
+- **YouTube enabled end-to-end** (`2fd22ed2`, `81aa333f`): yt-dlp transport, anonymous connect, live l1youtube layer (2/2), UI search→detail verified with real data.
+- **First live run caught two real defects**: (1) YouTube removed generic Trending (July 2025) — FEED dropped from the manifest rather than faked; (2) yt-dlp internal tuple fields leaked past JSON validation — fixed with allowlist normalization.
+- **Sweep incident**: the enablement worker generated `data-e2e/config.e2e.toml` pointing its model `secret_ref` at the *DeepSeek* vault entry (35-byte key), so all Kimi-model layers 401'd while direct key probes passed. Root cause: config generated out-of-band from the seeder; `_seed_config` trusts any resolvable ref. Fix: deleted the generated config so the seeder re-stored the correct Kimi key. Diagnosis method: sha256/length comparison of vault entry vs key file (no secrets printed).
+- l0's `content.enabled` assertion updated to `("bilibili", "youtube")`.
+- l3 profile-derivation flaked once immediately after re-seed; green on rerun (35.9s real call).
