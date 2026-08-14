@@ -6,6 +6,7 @@
 
 ## 未发布
 
+- **README 新增 Linux.do 友情链接（折叠）**：主项目 README（中英）顶部原有的「LINUX DO Community」徽章移除，改在 README 底部新增可折叠的「友情链接」区块，内含指向 https://linux.do/ 的 LINUX DO 友情徽章；讨论帖徽章保留。DSH 插件仓库（dsh-openbiliclaw）README 底部同步新增同款折叠友情链接。
 - 修复 `scripts/install.ps1` 在原生 Windows 上的一键安装解析失败（issue #157）：双引号字符串内 `$InstallDir:` 会被解析为作用域限定变量引用，导致整个脚本在 PowerShell parse 阶段直接报错，改为 `${InstallDir}`；同时为脚本补充 UTF-8 BOM，确保 Windows PowerShell 5.1（脚本声明 `#requires -Version 5.1`）按 UTF-8 解码含中文注释与 here-string 的内容；`Invoke-Bootstrap` 内的 `$args` 改名 `$bootstrapArgs`，避免遮蔽自动变量（`PSAvoidAssignmentToAutomaticVariable`）。
 
 ## v0.3.205：证据驱动时效推荐与可靠性升级（2026-08-14）
