@@ -8,7 +8,6 @@ from openbiliclaw.access.models import AccessHandle, Permission
 from openbiliclaw.content.integration.capabilities import (
     ContentPage,
     CreatorQuery,
-    FeedQuery,
     PageRequest,
     ProviderCursor,
     SearchQuery,
@@ -43,10 +42,6 @@ class YouTubeProvider:
     async def search(self, query: SearchQuery, access: AccessHandle) -> ContentPage[ContentPreview]:
         self._access(access)
         return await self._page("search", query.text, query.page)
-
-    async def feed(self, query: FeedQuery, access: AccessHandle) -> ContentPage[ContentPreview]:
-        self._access(access)
-        return await self._page("feed", query.feed_id or "trending", query.page)
 
     async def fetch(self, ref: ContentRef, access: AccessHandle) -> NativeContent:
         self._access(access)

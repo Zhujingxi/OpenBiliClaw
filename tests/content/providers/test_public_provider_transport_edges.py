@@ -1,27 +1,13 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
-from typing import TYPE_CHECKING
 
 import httpx
 import pytest
 
-if TYPE_CHECKING:
-    from pydantic import JsonValue
-
 from openbiliclaw.content.integration.errors import ContentIntegrationError, IntegrationErrorCode
 from openbiliclaw.content.providers.bangumi.client import HttpxBangumiTransport
 from openbiliclaw.content.providers.v2ex.client import HttpxV2EXTransport
-from openbiliclaw.content.providers.youtube.client import (
-    HttpxYouTubeTransport,
-    _channel,
-    _count,
-    _duration,
-    _published,
-    _renderer_video,
-    _thumbnail,
-)
 
 
 def _bangumi_subject() -> dict[str, object]:
@@ -48,89 +34,6 @@ def _v2ex_topic(topic_id: int = 1) -> dict[str, object]:
         "member": {"username": "alice"},
         "node": {"name": "n", "title": "Node"},
     }
-
-
-@pytest.mark.parametrize(
-    ("value", "expected"),
-    [
-        (3, 3),
-        ({"simpleText": "1.2K views"}, 1200),
-        ({"simpleText": "none"}, 0),
-    ],
-)
-def test_youtube_count_shapes(value: JsonValue, expected: int) -> None:
-    assert _count(value) == expected
-
-
-@pytest.mark.parametrize(
-    ("value", "expected"),
-    [
-        ({"simpleText": "12"}, 12),
-        ({"simpleText": "1:02:03"}, 3723),
-        ({"simpleText": "bad"}, 0),
-        ({"simpleText": "1:2:3:4"}, 0),
-    ],
-)
-def test_youtube_duration_shapes(value: JsonValue, expected: int) -> None:
-    assert _duration(value) == expected
-
-
-def test_youtube_helper_fallbacks_and_invalid_renderer() -> None:
-    assert _published(None) == datetime(1970, 1, 1, tzinfo=UTC)
-    assert _thumbnail(None) is None
-    assert _thumbnail({"thumbnails": [{"url": "not-a-url"}]}) is None
-    assert _channel({}) is None
-    assert _renderer_video({"videoId": "bad", "title": "x"}) is None
-
-
-async def test_youtube_continuation_feed_and_invalid_envelope() -> None:
-    requests: list[httpx.Request] = []
-
-    async def handler(request: httpx.Request) -> httpx.Response:
-        requests.append(request)
-        if len(requests) == 1:
-            return httpx.Response(
-                200,
-                json={
-                    "continuationItemRenderer": {
-                        "continuationEndpoint": {"continuationCommand": {"token": "next"}}
-                    }
-                },
-            )
-        return httpx.Response(200, json=[])
-
-    transport = HttpxYouTubeTransport(httpx.MockTransport(handler))
-    page = json.loads(await transport("feed", "trending", "0", 0))
-    assert page["next_cursor"] == "next"
-    assert json.loads(requests[0].content)["browseId"] == "FEtrending"
-    with pytest.raises(ContentIntegrationError) as exc:
-        await transport("creator", "UC1", "next", 1)
-    assert exc.value.code is IntegrationErrorCode.PROVIDER_UNAVAILABLE
-    assert json.loads(requests[1].content)["continuation"] == "next"
-
-
-@pytest.mark.parametrize("status", [401, 500])
-async def test_youtube_http_statuses(status: int) -> None:
-    async def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(status)
-
-    with pytest.raises(ContentIntegrationError) as exc:
-        await HttpxYouTubeTransport(httpx.MockTransport(handler))("feed", "hot", "0", 1)
-    expected = (
-        IntegrationErrorCode.ACCESS_DENIED
-        if status == 401
-        else IntegrationErrorCode.PROVIDER_UNAVAILABLE
-    )
-    assert exc.value.code is expected
-
-
-async def test_youtube_transport_error_is_normalized() -> None:
-    async def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("secret", request=request)
-
-    with pytest.raises(ContentIntegrationError) as exc:
-        await HttpxYouTubeTransport(httpx.MockTransport(handler))("feed", "hot", "0", 1)
-    assert exc.value.code is IntegrationErrorCode.PROVIDER_UNAVAILABLE
 
 
 async def test_bangumi_fetch_feed_invalid_type_and_bad_envelope() -> None:

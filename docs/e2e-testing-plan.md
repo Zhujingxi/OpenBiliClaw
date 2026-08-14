@@ -31,11 +31,11 @@ The legacy `config.toml` / `data-v2/` are never touched.
 |---|---|---|
 | LLM | `kimi-for-coding` @ `https://api.kimi.com/coding/v1` | `provider = "openai"` + endpoint override (native PydanticAI path) |
 | Embedding | `BAAI/bge-small-zh-v1.5` via **infinity-emb** (OpenAI-compatible `/v1`) | separate local service; the app never serves models |
-| Platform | Bilibili — anonymous + authenticated (local Chrome session) | product's own provider + credential API |
+| Platform | Bilibili — anonymous + authenticated (local Chrome session); YouTube — anonymous | product providers; YouTube extraction delegated to yt-dlp |
 
 ## 3. Harness
 
-- `tests/e2e/` with pytest markers `e2e_l0`...`e2e_l7`, **excluded from the default suite** — the 716-test unit suite stays hermetic (`ALLOW_MODEL_REQUESTS=False`).
+- `tests/e2e/` with pytest markers `e2e_l0`...`e2e_l7` plus `e2e_l1youtube`, **excluded from the default suite** — the hermetic unit suite stays offline (`ALLOW_MODEL_REQUESTS=False`).
 - `scripts/e2e.py l<N>` — starts the embedding service if down, loads the e2e profile, runs one layer, writes `data-e2e/reports/l<N>.json` + console summary, non-zero exit on failure.
 - Assertions are **invariants** (shape, non-empty, dimension, dedupe), never snapshots of live content.
 
@@ -50,6 +50,9 @@ Real Bilibili public APIs: popular feed, search, and video detail through the pr
 
 **L1b — Content acquisition, authenticated**
 First fix `ConnectSource` idempotency versus in-memory connection restoration across process restarts (TDD): a cached `CONNECTED` result must not leave `AccessService` disconnected. The L1b test then extracts the required Bilibili session fields from local Chrome in-process → submits through the **product's own manual access path** (auth flow itself is tested, not bypassed) → vault → `nav` identity verified → authenticated history/related fetches. Cookie values stay only in pytest process memory; the standalone script is a structural diagnostic using the same helper.
+
+**L1-YouTube — anonymous acquisition through yt-dlp**
+Real YouTube search, stable-video fetch, and channel creator-page extraction run through production Composition with no API key. Tests assert canonical 11-character IDs, dedupe, bounded page sizes, non-empty metadata, and typed malformed-reference failures. Results are invariant-based, never title snapshots. YouTube removed generic Trending in July 2025, so the provider honestly dropped `FEED` rather than substituting search or music charts; discovery must follow manifest capabilities.
 
 **L2 — Observations**
 View/like/feedback events through the product path against real ingested content, plus real account history as bootstrap. Assert durability across a rebuilt application graph, producer-key idempotency, deterministic insertion-cursor replay, and `content_references` landing/dedupe through observation ingress (the architecture's only content-reference persistence path). `content_cache` remains empty because observations carry identity, not provider projection bodies.
@@ -91,6 +94,7 @@ Implement harness + tests (TDD) → run against real stack → fix bugs → **in
 | L0 environment | completed | f8417db6 | 4 real E2E tests passed; harness and local embedding server verified; see testing log |
 | L1a content anonymous | completed | b369fa08 | 2 real E2E tests passed; real API adapters corrected; see testing log |
 | L1b content authenticated | completed | 3d28bb46 | 2 real E2E tests passed; restart replay and authenticated native adapters corrected; see testing log |
+| L1 YouTube anonymous | completed | pending | 2 real E2E tests passed; yt-dlp search/fetch/creator, identity, page bounds, and typed invalid refs verified |
 | L2 observations | completed | f9799dca | 2 real E2E tests passed; content landing/dedupe, restart durability, feedback idempotency, cursor replay, and authenticated history import verified; see testing log |
 | L3 understanding | completed | 03a05f42 | real E2E covers composed embeddings, profile derivation/persistence/correction, and Kimi Assistant forced-output tools with thinking disabled; durable semantic index deferred to L4 |
 | L4 recommendation | completed | 4356d0c1 | 2 real E2E tests passed; real refill/ranking/reasons/diversity/restart verified; duplicate refill and profile-to-discovery seams fixed; semantic index intentionally not added |

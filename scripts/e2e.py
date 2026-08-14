@@ -32,7 +32,7 @@ DEEPSEEK_CONFIG_PATH = DATA_DIR / "config.e2e.deepseek.toml"
 DEEPSEEK_TEMPLATE_PATH = ROOT / "config.e2e.deepseek.example.toml"
 DEEPSEEK_KEY_PATH = DATA_DIR / "deepseek_api_key.txt"
 REPORT_DIR = DATA_DIR / "reports"
-LAYERS = ("l0", "l1a", "l1b", "l2", "l3", "l4", "l5", "l6", "l7")
+LAYERS = ("l0", "l1a", "l1b", "l1youtube", "l2", "l3", "l4", "l5", "l6", "l7")
 EMBEDDING_LAYERS = frozenset(("l0", "l3", "l4", "l5", "l6", "l7"))
 
 

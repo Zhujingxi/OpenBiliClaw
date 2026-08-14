@@ -1,7 +1,11 @@
 # YouTube Content Provider
 
-目标包 `content/providers/youtube/` 当前提供匿名 `search`、公开 `trending` feed、单视频 fetch 与 channel creator feed。`HttpxYouTubeTransport` 通过 scoped `HttpClientFactory` 调用匿名 InnerTube search/browse/player endpoint，在 HTTP 边界解析 renderer、continuation、canonical 11 字符 video ID、published timestamp、duration、view count 与 channel identity，输出 strict `YouTubePage`；transport/network/status/schema 错误均转换为不含 response body 的 typed integration error。
+`content/providers/youtube/` provides anonymous search, single-video fetch, channel creator pages, strict projections, and Google Takeout parsing. Production Composition registers it under provider id `youtube`; no API key or account cookie is required for public reads.
 
-`takeout.py` 保留并收紧旧 Google Takeout 核心能力：读取 extracted directory 或 zip 内默认 HTML/JSON watch history、subscriptions CSV 和 liked videos CSV，输出 typed、bounded observation proposals，不再返回 legacy raw event dict。缺失文件允许 partial import，schema 错误产生安全 warning。
+`YtDlpYouTubeTransport` delegates YouTube extraction to the actively maintained `yt-dlp` library instead of pinning private InnerTube keys, client versions, or renderer shapes in OpenBiliClaw. Its synchronous extraction API runs through `anyio.to_thread`; search and creator pages use flat extraction while fetch resolves complete metadata. Only normalized identity/title/channel/date/duration/view/thumbnail fields enter strict `YouTubePage` models. Results are bounded to 50 and one-shot, so `next_cursor` is honestly absent rather than fabricated. yt-dlp/network failures are converted to safe typed integration errors without exposing upstream response bodies.
 
-当前未接入 production Composition；旧 `youtube/` 与 runtime producer 在 caller cutover 前保留。浏览器会话、写操作和下载媒体不在 manifest。
+YouTube removed its generic Trending page in July 2025. The provider therefore does **not** advertise `FEED`: mapping it to search or music-only charts would misrepresent product semantics. Search, fetch, creator, and projection remain available; generic discovery must consult the manifest rather than schedule a feed job for this provider.
+
+`takeout.py` reads an extracted directory or zip containing watch-history HTML/JSON, subscriptions CSV, and liked-videos CSV into typed, bounded observation proposals. Missing files allow partial import and schema errors produce safe warnings. Takeout parsing is implemented but no production import UI/API is currently wired.
+
+Browser-session access, write actions, and media downloads are outside the manifest.

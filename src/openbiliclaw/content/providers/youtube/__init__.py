@@ -1,7 +1,7 @@
 """First-party YouTube provider."""
 
 from .capabilities import YouTubeProvider
-from .client import HttpxYouTubeTransport, YouTubeClient, YouTubeTransport
+from .client import YouTubeClient, YouTubeTransport, YtDlpYouTubeTransport
 from .manifest import YOUTUBE_MANIFEST
 from .takeout import TakeoutEvent, TakeoutParseResult, TakeoutStats, parse_takeout
 
@@ -10,7 +10,7 @@ __all__ = [
     "TakeoutEvent",
     "TakeoutParseResult",
     "TakeoutStats",
-    "HttpxYouTubeTransport",
+    "YtDlpYouTubeTransport",
     "YouTubeClient",
     "YouTubeProvider",
     "YouTubeTransport",

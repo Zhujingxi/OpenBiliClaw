@@ -34,6 +34,7 @@ dependencies = [
     "pydantic-ai-slim[anthropic,google,openai,openrouter]==1.56.0",
     # pydantic-ai 1.56 imports an Anthropic type removed in 0.80.
     "anthropic>=0.78,<0.80",
+    "yt-dlp>=2025.1",
 ]
 
 [project.optional-dependencies]
@@ -44,6 +45,7 @@ dev = [
     "pytest-xdist>=3",
     "ruff>=0.8",
     "mypy>=1.13",
+    "types-yt-dlp>=2025.1",
 ]
 browser = [
     "playwright>=1.40",
@@ -153,6 +155,7 @@ markers = [
     "e2e_l0: environment and model connectivity",
     "e2e_l1a: anonymous content acquisition",
     "e2e_l1b: authenticated content acquisition",
+    "e2e_l1youtube: anonymous YouTube acquisition via yt-dlp",
     "e2e_l2: observations",
     "e2e_l3: understanding",
     "e2e_l4: recommendation",

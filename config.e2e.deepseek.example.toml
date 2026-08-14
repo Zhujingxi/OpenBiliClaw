@@ -14,7 +14,7 @@ secret_ref = "vault:E2E_SECRET_REF"
 output_dimensions = 512
 
 [content]
-enabled = ["bilibili"]
+enabled = ["bilibili", "youtube"]
 
 [recommendation]
 pool_target_count = 100

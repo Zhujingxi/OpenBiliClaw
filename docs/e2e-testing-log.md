@@ -2,6 +2,14 @@
 
 This is the durable test → debug → fix → test trace for the real-stack plan. It contains no credentials or external response bodies.
 
+## L1-YouTube — yt-dlp anonymous acquisition
+
+1. **Test first:** transport tests required flat search mapping, full fetch metadata, creator extraction, stable identity/dedupe, one-shot pagination, page caps, and safe typed yt-dlp failures. They initially failed because `YtDlpYouTubeTransport` did not exist.
+2. **Implementation:** replaced the hand-written private InnerTube key/client-version/renderer parser with an injectable `yt-dlp` factory. Synchronous extraction runs off-loop via `anyio.to_thread`; only selected normalized metadata enters strict models. Added `yt-dlp` and its MyPy stubs; no API key or cookie is used.
+3. **Live failure:** the first real layer proved search but `/feed/trending` redirected to YouTube Home. YouTube removed the generic Trending page in July 2025, so yt-dlp correctly rejected it. **Decision/fix:** removed the dishonest `FEED` capability instead of substituting search or music charts; search/fetch/creator remain.
+4. **Live failure:** full yt-dlp video dictionaries include internal tuple-valued fields, so validating the entire dictionary as JSON rejected otherwise valid metadata. **Fix:** select and normalize only the provider contract fields before Pydantic validation.
+5. **Retest:** `scripts/e2e.py l1youtube` passed 2/2 live tests: repeated real search; stable decade-old video fetch; creator page; canonical identity/dedupe; 50-item cap; typed malformed reference. Upstream blocks remain loud failures, never skips.
+
 ## Catalog-backed model configuration
 
 The L5 live HTTP check now reads the catalog and requires both `deepseek` and `kimi-for-coding`, then starts an isolated server against a throwaway config/data copy, submits the DeepSeek key through the write-only PUT contract, and verifies the GET projection resolves `deepseek` through the OpenAI protocol family with `secret_configured=true`. Neither the real E2E profile nor its vault is mutated; assertions and logs contain no key or credential reference. The existing L3 provider matrix remains the runtime construction proof.

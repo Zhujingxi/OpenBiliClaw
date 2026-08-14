@@ -16,7 +16,6 @@ YOUTUBE_MANIFEST = ProviderManifest(
     capabilities=frozenset(
         {
             CapabilityKind.SEARCH,
-            CapabilityKind.FEED,
             CapabilityKind.FETCH,
             CapabilityKind.CREATOR,
             CapabilityKind.PROJECTION,

@@ -967,6 +967,7 @@ dependencies = [
     { name = "rich" },
     { name = "typer" },
     { name = "uvicorn" },
+    { name = "yt-dlp" },
 ]
 
 [package.optional-dependencies]
@@ -980,6 +981,7 @@ dev = [
     { name = "pytest-cov" },
     { name = "pytest-xdist" },
     { name = "ruff" },
+    { name = "types-yt-dlp" },
 ]
 packaging = [
     { name = "pyinstaller" },
@@ -1012,7 +1014,9 @@ requires-dist = [
     { name = "rich", specifier = ">=13" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8" },
     { name = "typer", specifier = ">=0.12" },
+    { name = "types-yt-dlp", marker = "extra == 'dev'", specifier = ">=2025.1" },
     { name = "uvicorn", specifier = ">=0.32" },
+    { name = "yt-dlp", specifier = ">=2025.1" },
 ]
 provides-extras = ["dev", "browser", "tls", "packaging"]
 
@@ -1937,6 +1941,15 @@ wheels = [
 ]
 
 [[package]]
+name = "types-yt-dlp"
+version = "2026.7.4.20260807"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f0/d0/cba65f18be1535a603b87c78568de227e6c8796d40c71899bb1076e0a86f/types_yt_dlp-2026.7.4.20260807.tar.gz", hash = "sha256:6237a3e7f81d7a4e2413c2a83786dd261401969e876253e8b793b205bbc2c3ea", size = 41957, upload-time = "2026-08-07T04:16:42.915Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5c/1f/a04360304e8f010c276ffe47ada482e4450267ec8884319916ddfb6c3cd9/types_yt_dlp-2026.7.4.20260807-py3-none-any.whl", hash = "sha256:610697d156e3fa9f487092ff6c69c89e72a9bb95aed490c491dba4cb39235276", size = 55120, upload-time = "2026-08-07T04:16:41.9Z" },
+]
+
+[[package]]
 name = "typing-extensions"
 version = "4.15.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2036,4 +2049,13 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/a5/8f/aea9c71cc92bf9b6cc0f7f70df8f0b420636b6c96ef4feee1e16f80f75dd/websockets-16.0-pp311-pypy311_pp73-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:0298d07ee155e2e9fda5be8a9042200dd2e3bb0b8a38482156576f863a9d457c", size = 176968, upload-time = "2026-01-10T09:23:41.031Z" },
     { url = "https://files.pythonhosted.org/packages/9a/3f/f70e03f40ffc9a30d817eef7da1be72ee4956ba8d7255c399a01b135902a/websockets-16.0-pp311-pypy311_pp73-win_amd64.whl", hash = "sha256:a653aea902e0324b52f1613332ddf50b00c06fdaf7e92624fbf8c77c78fa5767", size = 178735, upload-time = "2026-01-10T09:23:42.259Z" },
     { url = "https://files.pythonhosted.org/packages/6f/28/258ebab549c2bf3e64d2b0217b973467394a9cea8c42f70418ca2c5d0d2e/websockets-16.0-py3-none-any.whl", hash = "sha256:1637db62fad1dc833276dded54215f2c7fa46912301a24bd94d45d46a011ceec", size = 171598, upload-time = "2026-01-10T09:23:45.395Z" },
+]
+
+[[package]]
+name = "yt-dlp"
+version = "2026.7.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/47/c5/9972af4b472b0d55badf841ebafd2f98944cb0ae0f46e11d01f363ea5b91/yt_dlp-2026.7.4.tar.gz", hash = "sha256:b094813404f87a9dd2186f00815231df32e5fd8a5403be0f807b3bb2d21a4432", size = 3049326, upload-time = "2026-07-04T22:42:14.837Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f9/8a/cd4c9b02c10c563adfe78118310129641900e1cd6de888cfae2452072696/yt_dlp-2026.7.4-py3-none-any.whl", hash = "sha256:f11f2b11d5a8ac4059f9bdf29fa4407dc7c6bb00c5097e95ca22a7a9db518266", size = 3184705, upload-time = "2026-07-04T22:42:12.989Z" },
 ]

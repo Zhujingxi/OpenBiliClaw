@@ -52,9 +52,9 @@ from openbiliclaw.content.providers.x import X_MANIFEST, XProvider
 from openbiliclaw.content.providers.x.auth import X_CONNECTION_FORM, XCredentialVerifier
 from openbiliclaw.content.providers.youtube import (
     YOUTUBE_MANIFEST,
-    HttpxYouTubeTransport,
     YouTubeClient,
     YouTubeProvider,
+    YtDlpYouTubeTransport,
 )
 from openbiliclaw.content.providers.zhihu import ZHIHU_MANIFEST, ZhihuProvider
 from openbiliclaw.content.providers.zhihu.auth import (
@@ -219,7 +219,7 @@ def _builders(vault: CredentialVault) -> dict[str, Callable[[], _BuiltProvider]]
             ),
         ),
         "youtube": lambda: _BuiltProvider(
-            YOUTUBE_MANIFEST, YouTubeProvider(YouTubeClient(HttpxYouTubeTransport()))
+            YOUTUBE_MANIFEST, YouTubeProvider(YouTubeClient(YtDlpYouTubeTransport()))
         ),
         "zhihu": lambda: _BuiltProvider(
             ZHIHU_MANIFEST,

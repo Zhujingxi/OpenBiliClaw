@@ -31,8 +31,11 @@ NOW = datetime(2025, 1, 1, tzinfo=UTC)
 
 
 class PublicProvider(Protocol):
-    async def feed(self, query: FeedQuery, access: AccessHandle) -> ContentPage[ContentPreview]: ...
     async def fetch(self, ref: ContentRef, access: AccessHandle) -> NativeContent: ...
+
+
+class FeedProvider(PublicProvider, Protocol):
+    async def feed(self, query: FeedQuery, access: AccessHandle) -> ContentPage[ContentPreview]: ...
 
 
 class PageDump(Protocol):
@@ -43,11 +46,11 @@ def _youtube(transport: FailureTransport | BytesTransport) -> PublicProvider:
     return YouTubeProvider(YouTubeClient(transport))
 
 
-def _bangumi(transport: FailureTransport | BytesTransport) -> PublicProvider:
+def _bangumi(transport: FailureTransport | BytesTransport) -> FeedProvider:
     return BangumiProvider(BangumiClient(transport))
 
 
-def _v2ex(transport: FailureTransport | BytesTransport) -> PublicProvider:
+def _v2ex(transport: FailureTransport | BytesTransport) -> FeedProvider:
     return V2EXProvider(V2EXClient(transport))
 
 
@@ -76,7 +79,6 @@ def access(provider: str) -> AnonymousAccessHandle:
 @pytest.mark.parametrize(
     ("factory", "provider_id"),
     [
-        (_youtube, "youtube"),
         (_bangumi, "bangumi"),
         (_v2ex, "v2ex"),
     ],
@@ -90,7 +92,7 @@ def access(provider: str) -> AnonymousAccessHandle:
     ],
 )
 async def test_provider_failures_are_safe_and_preserve_classification(
-    factory: Callable[[FailureTransport | BytesTransport], PublicProvider],
+    factory: Callable[[FailureTransport | BytesTransport], FeedProvider],
     provider_id: str,
     code: IntegrationErrorCode,
 ) -> None:
@@ -106,14 +108,13 @@ async def test_provider_failures_are_safe_and_preserve_classification(
 @pytest.mark.parametrize(
     ("page", "factory", "provider_id"),
     [
-        (YouTubePage(items=(), next_cursor=None), _youtube, "youtube"),
         (BangumiPage(items=(), next_cursor=None), _bangumi, "bangumi"),
         (V2EXPage(items=(), next_cursor=None), _v2ex, "v2ex"),
     ],
 )
 async def test_empty_pages_remain_empty(
     page: PageDump,
-    factory: Callable[[FailureTransport | BytesTransport], PublicProvider],
+    factory: Callable[[FailureTransport | BytesTransport], FeedProvider],
     provider_id: str,
 ) -> None:
     instance = factory(BytesTransport(page.model_dump_json().encode()))
@@ -214,7 +215,7 @@ def test_public_provider_packages_import_only_approved_boundaries() -> None:
                     root_name = module.split(".", 1)[0]
                     allowed = (
                         root_name in sys.stdlib_module_names
-                        or root_name in {"pydantic", "httpx"}
+                        or root_name in {"pydantic", "httpx", "anyio", "yt_dlp"}
                         or module.startswith("openbiliclaw.content.integration")
                         or module.startswith(f"openbiliclaw.content.providers.{name}")
                         or module.startswith("openbiliclaw.access")
