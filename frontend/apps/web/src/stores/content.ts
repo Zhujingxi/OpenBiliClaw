@@ -9,53 +9,65 @@ import {
 } from "./state";
 
 export const useContentStore = defineStore("content", () => {
-  const phase = ref<LoadPhase>("idle");
+  const searchPhase = ref<LoadPhase>("idle");
+  const detailPhase = ref<LoadPhase>("idle");
   const results = ref<SearchResponse>({ items: [] });
   const detail = ref<ContentResponse>();
-  const error = ref<string>();
-  const owner = new RequestOwner();
+  const searchError = ref<string>();
+  const detailError = ref<string>();
+  const searchOwner = new RequestOwner();
+  const detailOwner = new RequestOwner();
 
   async function search(
     api: WebApi,
     providerId: string,
     query: string,
   ): Promise<void> {
-    const signal = owner.next();
-    phase.value = "loading";
-    error.value = undefined;
+    const signal = searchOwner.next();
+    searchPhase.value = "loading";
+    searchError.value = undefined;
     try {
       const next = await api.search(providerId, query, signal);
-      if (!owner.owns(signal)) return;
+      if (!searchOwner.owns(signal)) return;
       results.value = next;
-      phase.value = next.items.length === 0 ? "empty" : "success";
+      searchPhase.value = next.items.length === 0 ? "empty" : "success";
     } catch (caught) {
-      if (isCancellation(caught) || !owner.owns(signal)) return;
-      error.value = errorMessage(caught);
-      phase.value = "error";
+      if (isCancellation(caught) || !searchOwner.owns(signal)) return;
+      searchError.value = errorMessage(caught);
+      searchPhase.value = "error";
     }
   }
+
   async function fetchDetail(api: WebApi, reference: string): Promise<void> {
-    const signal = owner.next();
-    phase.value = "loading";
-    error.value = undefined;
+    const signal = detailOwner.next();
+    detailPhase.value = "loading";
+    detailError.value = undefined;
     try {
       const next = await api.content(reference, signal);
-      if (!owner.owns(signal)) return;
+      if (!detailOwner.owns(signal)) return;
       detail.value = next;
-      phase.value = "success";
+      detailPhase.value = "success";
     } catch (caught) {
-      if (isCancellation(caught) || !owner.owns(signal)) return;
-      error.value = errorMessage(caught);
-      phase.value = "error";
+      if (isCancellation(caught) || !detailOwner.owns(signal)) return;
+      detailError.value = errorMessage(caught);
+      detailPhase.value = "error";
     }
   }
+
   return {
-    phase,
+    searchPhase,
+    detailPhase,
     results,
     detail,
-    error,
+    searchError,
+    detailError,
     search,
     fetchDetail,
-    cancel: () => owner.cancel(),
+    cancelSearch: () => searchOwner.cancel(),
+    cancelDetail: () => detailOwner.cancel(),
+    cancel: () => {
+      searchOwner.cancel();
+      detailOwner.cancel();
+    },
   };
 });

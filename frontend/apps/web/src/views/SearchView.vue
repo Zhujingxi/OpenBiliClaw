@@ -10,9 +10,9 @@ const store = useContentStore();
 const provider = ref("bilibili");
 const query = ref("");
 function open(item: ContentPreview): void {
-  location.hash = `#/content/${encodeURIComponent(item.ref.canonical_url)}`;
+  location.hash = `#/content/${encodeURIComponent(JSON.stringify(item.ref))}`;
 }
-onBeforeUnmount(store.cancel);
+onBeforeUnmount(store.cancelSearch);
 </script>
 <template>
   <section>
@@ -24,7 +24,7 @@ onBeforeUnmount(store.cancel);
       <input id="search-query" v-model="query" required />
       <button type="submit">Search</button>
     </form>
-    <AsyncState :phase="store.phase" :error="store.error">
+    <AsyncState :phase="store.searchPhase" :error="store.searchError">
       <ul>
         <li
           v-for="item in store.results.items"

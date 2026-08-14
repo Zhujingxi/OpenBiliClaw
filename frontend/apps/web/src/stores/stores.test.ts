@@ -1,3 +1,4 @@
+import { ApiError } from "@openbiliclaw/api-client";
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { RecommendationPage, WebApi } from "../services/api";
@@ -244,7 +245,7 @@ describe("durable concern stores", () => {
   it("covers content search and detail actions", async () => {
     const content = useContentStore();
     await content.search(api(), "demo", "query");
-    expect(content.phase).toBe("empty");
+    expect(content.searchPhase).toBe("empty");
     await content.fetchDetail(
       api({
         content: async () => ({
@@ -262,7 +263,20 @@ describe("durable concern stores", () => {
       }),
       "ref",
     );
-    expect(content.phase).toBe("success");
+    expect(content.detailPhase).toBe("success");
+  });
+
+  it("keeps content search and detail errors isolated", async () => {
+    const content = useContentStore();
+    await content.fetchDetail(
+      api({ content: async () => Promise.reject(new Error("detail failed")) }),
+      "ref",
+    );
+    expect(content.detailError).toBe("detail failed");
+    expect(content.searchError).toBeUndefined();
+    await content.search(api(), "demo", "query");
+    expect(content.searchPhase).toBe("empty");
+    expect(content.detailError).toBe("detail failed");
   });
 
   it("loads runtime health and conversation history", async () => {
@@ -306,7 +320,7 @@ describe("durable concern stores", () => {
     };
     const content = useContentStore();
     await content.search(api({ search: aborted }), "demo", "q");
-    expect(content.phase).toBe("loading");
+    expect(content.searchPhase).toBe("loading");
     const assistant = useAssistantStore();
     await assistant.send(api({ assistantTurn: aborted }), "conv", "d", "q");
     expect(assistant.phase).toBe("loading");
@@ -338,11 +352,28 @@ describe("durable concern stores", () => {
     expect(profile.result?.profile.preference_summary).toEqual(["server"]);
   });
 
-  it("stores bounded assistant results without optimistic messages", async () => {
+  it("stores the submitted assistant message with its response", async () => {
     const store = useAssistantStore();
     await store.send(api(), "conv", "device", "hello");
+    expect(store.latestUserText).toBe("hello");
     expect(store.latest?.output).toEqual({ kind: "message", text: "hello" });
     expect(store.phase).toBe("success");
+  });
+
+  it("clears a stale stored assistant conversation after a 404", async () => {
+    const missing = new Error("route not found");
+    Object.assign(missing, { status: 404 });
+    const storage = { removeItem: vi.fn() };
+    const found = await useAssistantStore().load(
+      api({ conversation: async () => Promise.reject(missing) }),
+      "conv_missing",
+      "device",
+      storage,
+    );
+    expect(found).toBe(false);
+    expect(storage.removeItem).toHaveBeenCalledWith("obc-conversation-id");
+    expect(useAssistantStore().phase).toBe("empty");
+    expect(useAssistantStore().error).toBeUndefined();
   });
 
   it("hydrates and persists host-local preferences", () => {
@@ -414,6 +445,31 @@ describe("durable concern stores", () => {
     store.disconnect();
     await endless;
     expect(store.streamConnected).toBe(false);
+  });
+
+  it("uses the server SSE retry hint before local reconnect backoff", async () => {
+    const waits: number[] = [];
+    const delay: Delay = async (milliseconds) => {
+      waits.push(milliseconds);
+      throw new DOMException("Aborted", "AbortError");
+    };
+    await useRuntimeStore().connect(
+      api({
+        events: () => ({
+          async *[Symbol.asyncIterator]() {
+            yield* [] as never[];
+            throw new ApiError(
+              "network",
+              "Event stream disconnected",
+              undefined,
+              3_000,
+            );
+          },
+        }),
+      }),
+      delay,
+    );
+    expect(waits).toEqual([3_000]);
   });
 
   it("caps reconnect backoff at two seconds", async () => {

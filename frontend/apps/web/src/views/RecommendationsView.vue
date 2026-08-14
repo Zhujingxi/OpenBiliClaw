@@ -13,6 +13,13 @@ onBeforeUnmount(store.cancel);
 <template>
   <section>
     <h1 tabindex="-1">Recommendations</h1>
+    <button
+      type="button"
+      :disabled="store.phase === 'loading'"
+      @click="store.load(api)"
+    >
+      Refresh feed
+    </button>
     <AsyncState :phase="store.phase" :error="store.error">
       <ol class="card-list">
         <li v-for="card in store.cards" :key="card.data.ref.canonical_url">

@@ -1,3 +1,4 @@
+import { ApiError } from "@openbiliclaw/api-client";
 import type { EventEnvelope, RuntimeResponse, WebApi } from "../services/api";
 import { defineStore } from "pinia";
 import { ref } from "vue";
@@ -59,6 +60,7 @@ export const useRuntimeStore = defineStore("runtime", () => {
     streamTask = (async () => {
       let attempt = 0;
       while (!signal.aborted) {
+        let serverRetry: number | undefined;
         try {
           streamConnected.value = true;
           const after = events.value.at(-1)?.event_id;
@@ -75,11 +77,14 @@ export const useRuntimeStore = defineStore("runtime", () => {
         } catch (caught) {
           if (signal.aborted) break;
           error.value = errorMessage(caught);
+          if (caught instanceof ApiError)
+            serverRetry = caught.retryMilliseconds;
         } finally {
           streamConnected.value = false;
         }
         try {
-          const wait = delays[Math.min(attempt, delays.length - 1)];
+          const wait =
+            serverRetry ?? delays[Math.min(attempt, delays.length - 1)];
           if (wait === undefined) break;
           await delay(wait, signal);
           attempt += 1;

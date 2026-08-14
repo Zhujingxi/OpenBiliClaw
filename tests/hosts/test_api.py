@@ -5,6 +5,7 @@ import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
+from urllib.parse import quote
 
 import httpx
 import pytest
@@ -110,6 +111,7 @@ REF = ContentRef(
     provider_content_id="1",
     canonical_url="https://example.com/1",
 )
+DETAIL_PATH = f"/v1/content/detail?reference={quote(REF.model_dump_json(), safe='')}"
 STATUS = AccessStatus(provider_id="demo", account_id=None, state=AccessStatusKind.DISCONNECTED)
 PREVIEW = ContentPreview(
     ref=REF,
@@ -171,6 +173,7 @@ class Facade:
     assistant_kind: str = "message"
     delay: float = 0
     connected_submission: dict[str, str] | None = None
+    detail_reference: str | None = None
 
     async def _call(self, name: str) -> None:
         self.calls.append(name)
@@ -238,6 +241,7 @@ class Facade:
         return SearchContentResult(items=(PREVIEW,))
 
     async def get_content_details(self, reference: str) -> ContentDetailsResult:
+        self.detail_reference = reference
         await self._call("get_content_details")
         return ContentDetailsResult(
             content=NativeContent(ref=REF, schema_version=1, payload=NativePayload(title="One"))
@@ -322,8 +326,8 @@ class Events:
             RecommendationEvent(event_id=2, recommendation_id="rec", status="selected"),
             AssistantEvent(event_id=3, conversation_id="conv", status="complete"),
             ConnectionEvent(event_id=4, provider_id="demo", status="connected"),
-        )
-        return events * self.count
+        ) * self.count
+        return tuple(event for event in events if event.event_id > after)[:limit]
 
 
 def client(
@@ -432,7 +436,7 @@ async def test_mutation_double_submit_device_contract() -> None:
             "edit_profile",
         ),
         ("GET", "/v1/content/search?provider_id=demo&q=x", None, "search_content"),
-        ("GET", "/v1/content/demo:1", None, "get_content_details"),
+        ("GET", DETAIL_PATH, None, "get_content_details"),
         (
             "POST",
             "/v1/assistant/turns",
@@ -451,6 +455,20 @@ async def test_each_route_calls_its_typed_workflow(
         response = await api.request(method, path, json=body, headers=MUTATION_HEADERS)
     assert response.status_code == 200, response.text
     assert facade.calls[-1] == owner
+
+
+async def test_content_detail_uses_query_reference_and_rejects_malformed_json() -> None:
+    facade = Facade()
+    async with client(facade) as api:
+        valid = await api.get(DETAIL_PATH)
+        malformed = await api.get("/v1/content/detail", params={"reference": "not-json"})
+    assert valid.status_code == 200
+    assert facade.detail_reference == REF.model_dump_json()
+    assert malformed.status_code == 422
+    assert malformed.json()["error"] == {
+        "code": "validation",
+        "message": "request validation failed",
+    }
 
 
 @pytest.mark.parametrize("kind", ["message", "recommendations", "clarification", "pending_action"])
@@ -545,7 +563,7 @@ class ProviderWorkflowFacade(Facade):
         )(GetContentDetailsQuery(ref=REF))
 
 
-@pytest.mark.parametrize("path", ["/v1/content/search?provider_id=demo&q=x", "/v1/content/demo:1"])
+@pytest.mark.parametrize("path", ["/v1/content/search?provider_id=demo&q=x", DETAIL_PATH])
 @pytest.mark.parametrize(
     ("kind", "status", "code"),
     [
@@ -602,15 +620,34 @@ async def test_chunked_oversized_body_is_rejected() -> None:
     assert response.status_code == 413
 
 
-async def test_sse_all_kinds_reconnect_and_local_replay_bound() -> None:
-    async with client(Facade(), events=Events(), replay_limit=3) as api:
-        response = await api.get("/v1/events/stream")
-    assert response.status_code == 200
-    assert "retry: 3000" in response.text
-    assert response.text.count("data: ") == 3
-    assert {
-        json.loads(part.splitlines()[0])["kind"] for part in response.text.split("data: ")[1:]
-    } == {"job", "recommendation", "assistant"}
+async def test_sse_all_kinds_stays_open_and_honors_replay_bound() -> None:
+    from openbiliclaw.hosts.api.routers.events import _event_stream
+
+    checks = 0
+    sleeps: list[float] = []
+
+    async def disconnected() -> bool:
+        nonlocal checks
+        checks += 1
+        return checks >= 4
+
+    async def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    dependencies = HostDependencies(
+        facade=Facade(), security=HostSecurityPolicy(replay_limit=3), events=Events()
+    )
+    chunks = [chunk async for chunk in _event_stream(dependencies, 0, disconnected, sleep)]
+    text = "".join(chunks)
+    assert "retry: 3000\n\n" in text
+    assert text.count("data: ") == 3
+    assert {json.loads(part.splitlines()[0])["kind"] for part in text.split("data: ")[1:]} == {
+        "job",
+        "recommendation",
+        "assistant",
+    }
+    assert sleeps == [3.0]
+    assert ": keep-alive" in text
 
 
 def test_bind_policy_and_strict_transport() -> None:
@@ -715,7 +752,7 @@ async def test_remaining_matrix_endpoints_succeed_through_asgi(
         ),
         ("GET", "/v1/assistant/conversations/conv_" + "a" * 32, None),
         ("GET", "/v1/content/search?provider_id=demo&q=x", None),
-        ("GET", "/v1/content/demo:1", None),
+        ("GET", DETAIL_PATH, None),
         (
             "POST",
             "/v1/content/actions/propose",
@@ -781,7 +818,7 @@ async def test_every_workflow_endpoint_maps_conflicts_through_asgi(
         ("POST", "/v1/assistant/turns"),
         ("GET", "/v1/assistant/conversations/conv_" + "a" * 32),
         ("GET", "/v1/content/search?provider_id=demo&q=x"),
-        ("GET", "/v1/content/demo:1"),
+        ("GET", DETAIL_PATH),
         ("POST", "/v1/content/actions/propose"),
         ("POST", "/v1/content/actions/confirm"),
         ("POST", "/v1/feedback"),

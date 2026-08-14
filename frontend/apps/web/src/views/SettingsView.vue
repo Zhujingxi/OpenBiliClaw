@@ -164,7 +164,7 @@ onBeforeUnmount(() => models.cancel());
             {{ model.name }} ({{ model.id }})
           </option>
         </select>
-        <fieldset v-if="custom">
+        <fieldset v-if="custom" class="capabilities">
           <legend>Custom provider capabilities</legend>
           <label for="custom-context">Context token limit</label>
           <input
@@ -174,20 +174,24 @@ onBeforeUnmount(() => models.cancel());
             min="0"
             required
           />
-          <label><input v-model="customTools" type="checkbox" /> Tools</label>
-          <label
-            ><input v-model="customStructuredOutput" type="checkbox" />
-            Structured output</label
-          >
-          <label><input v-model="customVision" type="checkbox" /> Vision</label>
-          <label
-            ><input v-model="customStreaming" type="checkbox" />
-            Streaming</label
-          >
-          <label
-            ><input v-model="customReasoning" type="checkbox" />
-            Reasoning</label
-          >
+          <div class="capability-options">
+            <label><input v-model="customTools" type="checkbox" /> Tools</label>
+            <label
+              ><input v-model="customStructuredOutput" type="checkbox" />
+              Structured output</label
+            >
+            <label
+              ><input v-model="customVision" type="checkbox" /> Vision</label
+            >
+            <label
+              ><input v-model="customStreaming" type="checkbox" />
+              Streaming</label
+            >
+            <label
+              ><input v-model="customReasoning" type="checkbox" />
+              Reasoning</label
+            >
+          </div>
         </fieldset>
         <p v-if="selectedProvider && !custom" class="model-metadata">
           Protocol: {{ selectedProvider.protocol }} · Environment keys:
@@ -240,3 +244,33 @@ onBeforeUnmount(() => models.cancel());
     </section>
   </section>
 </template>
+<style scoped>
+.capabilities {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(8rem, 1fr);
+  gap: 0.75rem;
+  align-items: center;
+}
+.capability-options {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr));
+  gap: 0.75rem;
+}
+.capability-options label {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+.model-metadata {
+  overflow-wrap: anywhere;
+}
+@media (max-width: 30rem) {
+  .capabilities {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .capability-options {
+    grid-column: 1;
+  }
+}
+</style>

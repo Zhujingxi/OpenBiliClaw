@@ -123,19 +123,19 @@ describe("store state matrices", () => {
   it("covers content loading, success, empty, error, and stale completion", async () => {
     const store = useContentStore();
     await store.search(api({ search: async () => ({ items: [] }) }), "p", "q");
-    expect(store.phase).toBe("empty");
+    expect(store.searchPhase).toBe("empty");
     await store.search(
       api({ search: async () => ({ items: [result] }) }),
       "p",
       "q",
     );
-    expect(store.phase).toBe("success");
+    expect(store.searchPhase).toBe("success");
     await store.search(
       api({ search: async () => Promise.reject(new Error("bad")) }),
       "p",
       "q",
     );
-    expect(store.phase).toBe("error");
+    expect(store.searchPhase).toBe("error");
     const old = deferred<SearchResponse>();
     const fresh = deferred<SearchResponse>();
     let calls = 0;
@@ -144,13 +144,13 @@ describe("store state matrices", () => {
     });
     const first = store.search(web, "p", "old");
     const second = store.search(web, "p", "new");
-    expect(store.phase).toBe("loading");
+    expect(store.searchPhase).toBe("loading");
     old.resolve({ items: [result] });
     await first;
-    expect(store.phase).toBe("loading");
+    expect(store.searchPhase).toBe("loading");
     fresh.resolve({ items: [] });
     await second;
-    expect(store.phase).toBe("empty");
+    expect(store.searchPhase).toBe("empty");
   });
 
   it("covers profile loading, success, empty, error, and stale completion", async () => {

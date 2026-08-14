@@ -11,7 +11,9 @@ const provider = ref("");
 const method = ref("default");
 const fieldId = ref("credential");
 const credential = ref("");
+const connected = ref(false);
 async function connect(): Promise<void> {
+  connected.value = false;
   await store.connect(api, {
     provider_id: provider.value,
     method_id: method.value,
@@ -19,6 +21,7 @@ async function connect(): Promise<void> {
     idempotency_key: crypto.randomUUID(),
     permissions: ["read_public"],
   });
+  connected.value = store.phase === "success";
 }
 onBeforeUnmount(store.cancel);
 </script>
@@ -43,7 +46,7 @@ onBeforeUnmount(store.cancel);
       <p>Credentials are write-only and are never displayed here.</p>
     </form>
     <AsyncState :phase="store.phase" :error="store.error">
-      <p aria-live="polite">Source connected.</p>
+      <p v-if="connected" aria-live="polite">Source connected.</p>
     </AsyncState>
   </section>
 </template>

@@ -6,6 +6,8 @@
 
 ## Unreleased
 
+- Fixed all 12 agent-browser UI findings: content detail now uses a generated-client `GET /v1/content/detail?reference=<JSON ContentRef>` contract with typed malformed/unknown errors and same-route refetch; Search/detail state is isolated; source-connect success is submission-scoped; SSE stays open with replay, keep-alives, disconnect handling, and server-directed reconnect delay; recommendations have refresh; provider status spacing and typed API messages are readable; 390px navigation/forms no longer overflow; Assistant shows user turns, safely preserves model line breaks without raw HTML, and clears stale conversation IDs; custom-provider capabilities use a responsive grid.
+
 - Post-catalog closing sweep fixes: `config.docker.toml` migrated to the catalog provider id (`kimi-for-coding`; endpoint/protocol from the catalog, cached in the runtime volume on first start), and the L0 chat attribution assertion now follows the configured catalog id instead of a hardcoded protocol name. `docs/docker-deployment.md` documents catalog-driven model config and the catalog-bypassing embedding sidecar.
 
 

@@ -72,6 +72,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/content/detail": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Detail
+         * @description Fetch details for a JSON-serialized content reference.
+         */
+        get: operations["detail_v1_content_detail_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/content/search": {
         parameters: {
             query?: never;
@@ -81,23 +101,6 @@ export interface paths {
         };
         /** Search */
         get: operations["search_v1_content_search_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/content/{reference}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Detail */
-        get: operations["detail_v1_content__reference__get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2455,12 +2458,10 @@ export interface operations {
             };
         };
     };
-    search_v1_content_search_get: {
+    detail_v1_content_detail_get: {
         parameters: {
             query: {
-                provider_id: string;
-                q: string;
-                limit?: number;
+                reference: string;
             };
             header?: never;
             path?: never;
@@ -2474,7 +2475,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SearchResponse"];
+                    "application/json": components["schemas"]["ContentResponse"];
                 };
             };
             /** @description unauthorized */
@@ -2569,13 +2570,15 @@ export interface operations {
             };
         };
     };
-    detail_v1_content__reference__get: {
+    search_v1_content_search_get: {
         parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                reference: string;
+            query: {
+                provider_id: string;
+                q: string;
+                limit?: number;
             };
+            header?: never;
+            path?: never;
             cookie?: never;
         };
         requestBody?: never;
@@ -2586,7 +2589,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ContentResponse"];
+                    "application/json": components["schemas"]["SearchResponse"];
                 };
             };
             /** @description unauthorized */

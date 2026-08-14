@@ -79,6 +79,27 @@ watch(current, async () => {
 body {
   margin: 0;
 }
+#app,
+.shell,
+.responsive-layout,
+main,
+section,
+form,
+fieldset {
+  min-width: 0;
+  max-width: 100%;
+}
+p,
+dd,
+label {
+  overflow-wrap: anywhere;
+}
+input:not([type="checkbox"]),
+textarea,
+select {
+  width: 100%;
+  min-width: 0;
+}
 a {
   color: #93c5fd;
 }
@@ -160,23 +181,28 @@ form {
 @media (max-width: 48rem) {
   .responsive-layout {
     display: block;
-    padding-bottom: 4.5rem;
+    padding-bottom: 8rem;
   }
   .desktop-nav {
     display: none;
   }
   .mobile-nav {
-    display: flex;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     position: fixed;
     bottom: 0;
     inset-inline: 0;
-    overflow: auto;
+    padding: 0.5rem;
     background: #111827;
     border-top: 1px solid #4b5563;
     z-index: 1;
   }
   .mobile-nav a {
-    white-space: nowrap;
+    min-width: 0;
+    padding: 0.25rem;
+    text-align: center;
+    font-size: 0.75rem;
+    overflow-wrap: anywhere;
   }
 }
 @media (prefers-reduced-motion: reduce) {

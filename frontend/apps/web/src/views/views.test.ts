@@ -1,6 +1,7 @@
 import { createPinia } from "pinia";
 import { mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { routeParameter } from "../app/routes";
 import type { WebApi } from "../services/api";
 import ConnectView from "./ConnectView.vue";
 import SearchView from "./SearchView.vue";
@@ -113,17 +114,22 @@ function mountView(component: Parameters<typeof mount>[0], web = api()) {
 }
 beforeEach(() => {
   location.hash = "";
+  localStorage.clear();
 });
 
 describe("web view behavior", () => {
   it("connects a source using the typed mutation", async () => {
     const connectSource = vi.fn(api().connectSource);
     const wrapper = mountView(ConnectView, api({ connectSource }));
+    expect(wrapper.text()).not.toContain("Source connected.");
     await wrapper.get("#provider-id").setValue("demo");
     await wrapper.get("form").trigger("submit");
     expect(connectSource).toHaveBeenCalledWith(
       expect.objectContaining({ provider_id: "demo" }),
       expect.any(AbortSignal),
+    );
+    await vi.waitFor(() =>
+      expect(wrapper.text()).toContain("Source connected."),
     );
   });
 
@@ -156,27 +162,62 @@ describe("web view behavior", () => {
     await wrapper.get("#search-query").setValue("result");
     await wrapper.get("form").trigger("submit");
     await wrapper.get("ul button").trigger("click");
-    expect(location.hash).toContain("#/content/https%3A%2F%2Fexample.test");
+    expect(routeParameter(location.hash)).toBe(JSON.stringify(preview.ref));
   });
 
-  it("loads the route-selected content reference", async () => {
-    location.hash = "#/content/demo%2Fvideo%2Fone";
+  it("loads and refetches JSON content references on same-route hash changes", async () => {
+    const first = JSON.stringify({
+      provider_id: { value: "demo" },
+      content_kind: { value: "video" },
+      provider_content_id: "one",
+      canonical_url: "https://example.test/one",
+    });
+    const second = JSON.stringify({
+      provider_id: { value: "demo" },
+      content_kind: { value: "video" },
+      provider_content_id: "two",
+      canonical_url: "https://example.test/two",
+    });
+    location.hash = `#/content/${encodeURIComponent(first)}`;
     const content = vi.fn(api().content);
     mountView(ContentView, api({ content }));
     await vi.waitFor(() =>
-      expect(content).toHaveBeenCalledWith(
-        "demo/video/one",
-        expect.any(AbortSignal),
-      ),
+      expect(content).toHaveBeenCalledWith(first, expect.any(AbortSignal)),
     );
+    location.hash = `#/content/${encodeURIComponent(second)}`;
+    dispatchEvent(new HashChangeEvent("hashchange"));
+    await vi.waitFor(() =>
+      expect(content).toHaveBeenLastCalledWith(second, expect.any(AbortSignal)),
+    );
+    expect(content).toHaveBeenCalledTimes(2);
   });
 
-  it("renders assistant history and complete output", async () => {
-    const wrapper = mountView(AssistantView);
+  it("renders assistant history, submitted user text, and safe plain output", async () => {
+    const wrapper = mountView(
+      AssistantView,
+      api({
+        assistantTurn: async () => ({
+          output: { kind: "message", text: "**answer**\n1. first" },
+        }),
+      }),
+    );
     await vi.waitFor(() => expect(wrapper.text()).toContain("history"));
     await wrapper.get("textarea").setValue("hello");
     await wrapper.get("form").trigger("submit");
     await vi.waitFor(() => expect(wrapper.text()).toContain("answer"));
+    expect(
+      wrapper
+        .findAll("li")
+        .some(
+          (item) =>
+            item.find("strong").text() === "user" &&
+            item.find(".message-content").text() === "hello",
+        ),
+    ).toBe(true);
+    expect(wrapper.text()).not.toContain("**answer**");
+    expect(wrapper.get("[aria-live='polite']").classes()).toContain(
+      "message-content",
+    );
   });
 
   it("renders provider statuses as a list without invalid tab roles", async () => {
@@ -190,6 +231,11 @@ describe("web view behavior", () => {
     );
     await vi.waitFor(() => expect(wrapper.text()).toContain("connected"));
     expect(wrapper.find('[role="tab"]').exists()).toBe(false);
+    const status = wrapper.get(".provider-status");
+    expect(status.findAll(":scope > *").map((item) => item.text())).toEqual([
+      "demo",
+      "connected",
+    ]);
   });
 
   it("loads catalog model settings and saves a write-only key", async () => {
@@ -286,6 +332,9 @@ describe("web view behavior", () => {
       ).toBe(""),
     );
     expect(wrapper.text()).toContain("Restart OpenBiliClaw");
+    await wrapper.get('input[type="checkbox"]').setValue(true);
+    expect(wrapper.find("fieldset.capabilities").exists()).toBe(true);
+    expect(wrapper.findAll(".capability-options label")).toHaveLength(5);
   });
 
   it("renders model catalog loading, empty, and error states", async () => {
@@ -308,63 +357,63 @@ describe("web view behavior", () => {
     await vi.waitFor(() => expect(error.text()).toContain("offline"));
   });
 
-  it("resolves recommendation content and wires shared card feedback", async () => {
+  it("resolves recommendation content, refreshes, and wires shared card feedback", async () => {
     const feedback = vi.fn(api().feedback);
-    const wrapper = mountView(
-      RecommendationsView,
-      api({
-        feedback,
-        recommendations: async () => ({
-          items: [
-            {
-              shown_id: "shown_11111111111111111111111111111111",
+    const recommendations = vi.fn(async () => ({
+      items: [
+        {
+          shown_id: "shown_11111111111111111111111111111111",
+          ref: {
+            provider_id: { value: "demo" },
+            content_kind: { value: "video" },
+            provider_content_id: "one",
+            canonical_url: "https://example.test/one",
+          },
+          card: {
+            ref: {
+              provider_id: { value: "demo" },
+              content_kind: { value: "video" },
+              provider_content_id: "one",
+              canonical_url: "https://example.test/one",
+            },
+            title: "One",
+            summary: "Summary",
+            badge: null,
+            image_url: null,
+            source_timestamp: "2030-01-01T00:00:00Z",
+            provenance: {
               ref: {
                 provider_id: { value: "demo" },
                 content_kind: { value: "video" },
                 provider_content_id: "one",
                 canonical_url: "https://example.test/one",
               },
-              card: {
-                ref: {
-                  provider_id: { value: "demo" },
-                  content_kind: { value: "video" },
-                  provider_content_id: "one",
-                  canonical_url: "https://example.test/one",
-                },
-                title: "One",
-                summary: "Summary",
-                badge: null,
-                image_url: null,
-                source_timestamp: "2030-01-01T00:00:00Z",
-                provenance: {
-                  ref: {
-                    provider_id: { value: "demo" },
-                    content_kind: { value: "video" },
-                    provider_content_id: "one",
-                    canonical_url: "https://example.test/one",
-                  },
-                  native_schema_version: 1,
-                  projected_at: "2030-01-01T00:00:00Z",
-                },
-              },
-              reason: "Recommended for relevance and freshness.",
-              selection: {
-                candidate_id: "one",
-                recommendation_id: "r1",
-                rank: 1,
-                score: 1,
-                seed: 1,
-                selected_at: "2030-01-01T00:00:00Z",
-                contributions: [],
-              },
+              native_schema_version: 1,
+              projected_at: "2030-01-01T00:00:00Z",
             },
-          ],
-        }),
-      }),
+          },
+          reason: "Recommended for relevance and freshness.",
+          selection: {
+            candidate_id: "one",
+            recommendation_id: "r1",
+            rank: 1,
+            score: 1,
+            seed: 1,
+            selected_at: "2030-01-01T00:00:00Z",
+            contributions: [],
+          },
+        },
+      ],
+    }));
+    const wrapper = mountView(
+      RecommendationsView,
+      api({ feedback, recommendations }),
     );
     await vi.waitFor(() =>
       expect(wrapper.find("article.obc-card").exists()).toBe(true),
     );
+    await wrapper.get("button").trigger("click");
+    await vi.waitFor(() => expect(recommendations).toHaveBeenCalledTimes(2));
     await wrapper.get('[aria-label="Like recommendation"]').trigger("click");
     await vi.waitFor(() => expect(feedback).toHaveBeenCalledOnce());
     expect(feedback).toHaveBeenCalledWith(

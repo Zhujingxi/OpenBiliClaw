@@ -168,9 +168,9 @@ export function createWebApi(client: ApiClient): WebApi {
       }),
     content: (reference, signal) =>
       client.request({
-        path: "/v1/content/{reference}",
+        path: "/v1/content/detail",
         method: "get",
-        pathParams: { reference },
+        query: { reference },
         validate: objectValidator<ContentResponse>("content"),
         signal,
       }),

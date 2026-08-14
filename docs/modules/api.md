@@ -9,12 +9,12 @@ The current FastAPI host is `openbiliclaw.hosts.api`. It exposes strict `/v1` tr
 - `/v1/feedback` accepts `idempotency_key`, delivered `shown_id`, matching `content_ref`, and a feedback kind (`liked`/`dismissed` for the Web controls); it transitions the recommendation to interacted and atomically records its learning observation. Unknown shown IDs return the typed `not_found` envelope
 - `/v1/observations` accepts explicit typed observation batches
 - `/v1/profiles/{profile_id}` and profile edit
-- `/v1/content/search`, content details, propose/confirm actions
+- `/v1/content/search`, `GET /v1/content/detail?reference=<JSON ContentRef>`, and propose/confirm actions. Detail references use a query parameter because canonical URLs cannot safely occupy one path segment; malformed JSON/identity returns typed 422 and well-formed unknown content returns typed 404
 - `/v1/assistant/turns`, scoped conversation reads
 - `/v1/runtime/health`
 - `/v1/models/catalog` projects models.dev provider/model metadata for configuration UI
 - `/v1/models/current` reads model and embedding settings with credential-presence booleans; `PUT` validates and persists the chat model while accepting API keys write-only into the vault
-- replayable event stream routes
+- replayable event stream routes; SSE replays from `after`, stays open, polls the bounded event source for new envelopes, emits keep-alives, advertises the configured `retry:` interval, and stops on client disconnect
 - `/v1/openapi.json`
 
 Model updates return `reloaded=false` and `restart_required=true`: the production process does not yet host its API through `ApplicationReference`, so it cannot safely swap its own graph in place. The narrow writer atomically replaces only `[model]`, `[model.options]`, and `[model.capabilities]`; comments inside those owned tables are not preserved, while all other sections and comments remain byte-for-byte unchanged. Empty/omitted API key input keeps the existing vault reference. API responses expose only `secret_configured`, never references or secret material.

@@ -14,11 +14,22 @@ onBeforeUnmount(store.cancel);
     <h1 tabindex="-1">Providers</h1>
     <AsyncState :phase="store.phase" :error="store.error">
       <ul aria-label="Provider connection statuses">
-        <li v-for="item in store.items" :key="item.provider_id">
+        <li
+          v-for="item in store.items"
+          :key="item.provider_id"
+          class="provider-status"
+        >
           <strong>{{ item.provider_id }}</strong>
-          <span> {{ item.state }}</span>
+          <span>{{ item.state }}</span>
         </li>
       </ul>
     </AsyncState>
   </section>
 </template>
+<style scoped>
+.provider-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+</style>

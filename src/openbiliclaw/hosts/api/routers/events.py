@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
-from fastapi import APIRouter, Depends, Query, WebSocket
+from fastapi import APIRouter, Depends, Query, Request, WebSocket
 from fastapi.responses import StreamingResponse
 from pydantic import TypeAdapter
 
@@ -11,7 +11,7 @@ from ..dependencies import HostDependencies, get_dependencies
 from ..schemas.models import EventEnvelope
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Awaitable, Callable
 
 router = APIRouter(prefix="/events", tags=["events"])
 _adapter: TypeAdapter[EventEnvelope] = TypeAdapter(EventEnvelope)
@@ -25,24 +25,46 @@ async def _events(dependencies: HostDependencies, after: int) -> tuple[EventEnve
     return tuple(_adapter.validate_python(item) for item in raw[:limit])
 
 
+async def _event_stream(
+    dependencies: HostDependencies,
+    after: int,
+    disconnected: Callable[[], Awaitable[bool]],
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> AsyncIterator[str]:
+    reconnect_seconds = dependencies.security.reconnect_milliseconds / 1000
+    cursor = after
+    yield f"retry: {dependencies.security.reconnect_milliseconds}\n\n"
+    while not await disconnected():
+        for event in await _events(dependencies, cursor):
+            cursor = event.event_id
+            yield (
+                f"id: {event.event_id}\nevent: {event.kind.value}\n"
+                f"data: {_adapter.dump_json(event).decode()}\n\n"
+            )
+        if await disconnected():
+            return
+        # ponytail: bounded polling avoids a second subscription API; replace it
+        # with an EventSource wait primitive if event latency becomes material.
+        await sleep(reconnect_seconds)
+        if await disconnected():
+            return
+        yield ": keep-alive\n\n"
+
+
 @router.get(
     "/stream",
     response_class=StreamingResponse,
     responses={200: {"content": {"text/event-stream": {"schema": _adapter.json_schema()}}}},
 )
 async def stream(
+    request: Request,
     after: int = Query(default=0, ge=0),
     dependencies: HostDependencies = Depends(get_dependencies),
 ) -> StreamingResponse:
-    async def body() -> AsyncIterator[str]:
-        yield f"retry: {dependencies.security.reconnect_milliseconds}\n"
-        for event in await _events(dependencies, after):
-            yield (
-                f"id: {event.event_id}\nevent: {event.kind.value}\n"
-                f"data: {_adapter.dump_json(event).decode()}\n\n"
-            )
-
-    return StreamingResponse(body(), media_type="text/event-stream")
+    return StreamingResponse(
+        _event_stream(dependencies, after, request.is_disconnected),
+        media_type="text/event-stream",
+    )
 
 
 def _websocket_authorized(websocket: WebSocket, dependencies: HostDependencies) -> bool:

@@ -38,12 +38,19 @@ type PathRequest<O> =
 export class ApiError extends Error {
   readonly kind: ApiErrorKind;
   readonly status: number | undefined;
+  readonly retryMilliseconds: number | undefined;
 
-  constructor(kind: ApiErrorKind, message: string, status?: number) {
+  constructor(
+    kind: ApiErrorKind,
+    message: string,
+    status?: number,
+    retryMilliseconds?: number,
+  ) {
     super(message);
     this.name = "ApiError";
     this.kind = kind;
     this.status = status;
+    this.retryMilliseconds = retryMilliseconds;
   }
 }
 
@@ -164,6 +171,7 @@ export class ApiClient {
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let pending = "";
+    let retryMilliseconds: number | undefined;
     try {
       while (true) {
         const chunk = await reader.read();
@@ -174,8 +182,9 @@ export class ApiClient {
         const frames = pending.split("\n\n");
         pending = frames.pop() ?? "";
         for (const frame of frames) {
-          const data = frame
-            .split("\n")
+          const lines = frame.split("\n");
+          retryMilliseconds = parseRetryHint(lines) ?? retryMilliseconds;
+          const data = lines
             .filter((line) => line.startsWith("data:"))
             .map((line) => line.slice(5).replace(/^ /, ""))
             .join("\n");
@@ -189,6 +198,12 @@ export class ApiClient {
           "Event stream ended with an incomplete frame",
         );
       }
+      throw new ApiError(
+        "network",
+        "Event stream disconnected",
+        undefined,
+        retryMilliseconds,
+      );
     } catch (error) {
       if (error instanceof ApiError || isAbortError(error)) throw error;
       throw new ApiError("network", "Event stream interrupted");
@@ -225,12 +240,42 @@ export class ApiClient {
     if (!response.ok) {
       throw new ApiError(
         "http",
-        `Request failed with status ${response.status}`,
+        await typedErrorMessage(response),
         response.status,
       );
     }
     return response;
   }
+}
+
+function parseRetryHint(lines: readonly string[]): number | undefined {
+  const value = lines
+    .find((line) => line.startsWith("retry:"))
+    ?.slice(6)
+    .trim();
+  if (value === undefined || !/^\d+$/.test(value)) return undefined;
+  const milliseconds = Number(value);
+  return Number.isSafeInteger(milliseconds) && milliseconds <= 60_000
+    ? milliseconds
+    : undefined;
+}
+
+async function typedErrorMessage(response: Response): Promise<string> {
+  try {
+    const payload = (await response.json()) as unknown;
+    if (
+      isRecord(payload) &&
+      isRecord(payload.error) &&
+      typeof payload.error.code === "string" &&
+      typeof payload.error.message === "string" &&
+      payload.error.message.trim() !== ""
+    ) {
+      return payload.error.message.trim().slice(0, 500);
+    }
+  } catch {
+    // Non-JSON error bodies use the stable status fallback below.
+  }
+  return `Request failed with status ${response.status}`;
 }
 
 export function parseEventEnvelope(text: string): EventEnvelope {

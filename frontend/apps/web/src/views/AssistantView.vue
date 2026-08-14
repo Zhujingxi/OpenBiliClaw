@@ -19,7 +19,7 @@ function ensureConversationId(): string {
   localStorage.setItem(CONVERSATION_KEY, generated);
   return generated;
 }
-const conversationId = ensureConversationId();
+const conversationId = ref(ensureConversationId());
 const latestText = computed(() => {
   const output = store.latest?.output;
   if (output === undefined) return undefined;
@@ -36,12 +36,23 @@ const latestText = computed(() => {
       return undefined;
   }
 });
-onMounted(() => store.load(api, conversationId, session.deviceId));
+function plainText(value: string): string {
+  return value.replace(/\*\*(.+?)\*\*/g, "$1");
+}
+onMounted(async () => {
+  const found = await store.load(
+    api,
+    conversationId.value,
+    session.deviceId,
+    localStorage,
+  );
+  if (!found) conversationId.value = ensureConversationId();
+});
 onBeforeUnmount(store.cancel);
 async function send(): Promise<void> {
   const message = text.value;
   text.value = "";
-  await store.send(api, conversationId, session.deviceId, message);
+  await store.send(api, conversationId.value, session.deviceId, message);
 }
 </script>
 <template>
@@ -52,7 +63,12 @@ async function send(): Promise<void> {
         v-for="message in store.conversation?.messages ?? []"
         :key="message.message_id"
       >
-        <strong>{{ message.role }}</strong> {{ message.content }}
+        <strong>{{ message.role }}</strong>
+        <span class="message-content">{{ plainText(message.content) }}</span>
+      </li>
+      <li v-if="store.latestUserText">
+        <strong>user</strong>
+        <span class="message-content">{{ store.latestUserText }}</span>
       </li>
     </ol>
     <form @submit.prevent="send">
@@ -61,7 +77,20 @@ async function send(): Promise<void> {
       <button type="submit">Send</button>
     </form>
     <AsyncState :phase="store.phase" :error="store.error">
-      <div aria-live="polite">{{ latestText }}</div>
+      <div class="message-content" aria-live="polite">
+        {{ latestText ? plainText(latestText) : "" }}
+      </div>
     </AsyncState>
   </section>
 </template>
+<style scoped>
+li {
+  display: grid;
+  gap: 0.25rem;
+  margin-block: 0.75rem;
+}
+.message-content {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+</style>

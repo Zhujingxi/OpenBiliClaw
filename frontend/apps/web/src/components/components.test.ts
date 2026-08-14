@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { createPinia } from "pinia";
 import { mount } from "@vue/test-utils";
 import { describe, expect, it, vi } from "vitest";
@@ -76,6 +77,15 @@ describe("web accessibility", () => {
         .find(`[role="${role}"]`)
         .exists(),
     ).toBe(true);
+  });
+
+  it("uses a wrapping mobile grid and shrinkable controls at narrow widths", () => {
+    const source = readFileSync("src/App.vue", "utf8");
+    expect(source).toContain(
+      "grid-template-columns: repeat(3, minmax(0, 1fr))",
+    );
+    expect(source).toContain('input:not([type="checkbox"])');
+    expect(source).not.toContain("overflow: auto");
   });
 
   it("has skip navigation, labels, distinct responsive layouts, and Alt+Left keyboard path", async () => {

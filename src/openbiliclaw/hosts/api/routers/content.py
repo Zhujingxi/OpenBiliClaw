@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import ValidationError
+
+from openbiliclaw.content.integration.identity import ContentRef
 
 from ..dependencies import HostDependencies, get_dependencies
 from ..schemas.models import (
@@ -26,13 +29,20 @@ async def search(
     return SearchResponse(items=result.items)
 
 
-@router.get("/{reference}", response_model=ContentResponse)
+@router.get("/detail", response_model=ContentResponse)
 async def detail(
-    reference: str,
+    reference: str = Query(min_length=1, max_length=4096),
     dependencies: HostDependencies = Depends(get_dependencies),
 ) -> ContentResponse:
+    """Fetch details for a JSON-serialized content reference."""
+    try:
+        content_ref = ContentRef.model_validate_json(reference)
+    except ValidationError as exc:
+        raise HTTPException(status_code=422) from exc
     return ContentResponse(
-        content=(await dependencies.facade.get_content_details(reference)).content
+        content=(
+            await dependencies.facade.get_content_details(content_ref.model_dump_json())
+        ).content
     )
 
 

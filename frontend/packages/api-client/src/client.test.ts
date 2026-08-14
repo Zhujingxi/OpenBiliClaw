@@ -15,9 +15,9 @@ const acceptsGeneratedRequest = (client: ApiClient): void => {
     validate: (_value): _value is components["schemas"]["SearchResponse"] =>
       true,
   });
-  // @ts-expect-error generated detail operation requires path parameters
+  // @ts-expect-error generated detail operation requires query parameters
   void client.request({
-    path: "/v1/content/{reference}",
+    path: "/v1/content/detail",
     method: "get",
     validate: (_value): _value is components["schemas"]["ContentResponse"] =>
       true,
@@ -86,15 +86,18 @@ describe("ApiClient", () => {
           ),
       );
     const client = new ApiClient("https://api.example.test", fetcher);
+    const reference = JSON.stringify({
+      canonical_url: "https://example.test/1",
+    });
     await client.request({
-      path: "/v1/content/{reference}",
+      path: "/v1/content/detail",
       method: "get",
-      pathParams: { reference: "demo/video 1" },
+      query: { reference },
       validate: (value): value is components["schemas"]["ContentResponse"] =>
         typeof value === "object" && value !== null && "content" in value,
     });
     expect(fetcher).toHaveBeenCalledWith(
-      "https://api.example.test/v1/content/demo%2Fvideo%201",
+      `https://api.example.test/v1/content/detail?${new URLSearchParams({ reference })}`,
       { method: "GET" },
     );
 
@@ -249,12 +252,12 @@ describe("ApiClient", () => {
     const client = new ApiClient("", vi.fn<typeof fetch>());
     await expect(
       client.request({
-        path: "/v1/content/{reference}",
+        path: "/v1/profiles/{profile_id}",
         method: "get",
-        pathParams: { reference: undefined as unknown as string },
+        pathParams: { profile_id: undefined as unknown as string },
         validate: (
           _value,
-        ): _value is components["schemas"]["ContentResponse"] => true,
+        ): _value is components["schemas"]["ProfileResponse"] => true,
       }),
     ).rejects.toMatchObject({ kind: "invalid-response" });
   });
@@ -280,6 +283,25 @@ describe("ApiClient", () => {
         validate: isHealth,
       }),
     ).rejects.toMatchObject({ kind: "http", status: 401 });
+    const typed = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          error: { code: "unauthorized", message: "source is not connected" },
+        }),
+        { status: 401, headers: { "content-type": "application/json" } },
+      ),
+    );
+    await expect(
+      new ApiClient("", typed).request({
+        path: "/v1/runtime/health",
+        method: "get",
+        validate: isHealth,
+      }),
+    ).rejects.toMatchObject({
+      kind: "http",
+      status: 401,
+      message: "source is not connected",
+    });
     const malformed = vi
       .fn<typeof fetch>()
       .mockResolvedValue(new Response("{"));
@@ -300,13 +322,30 @@ describe("SSE stream", () => {
     );
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(body));
     const client = new ApiClient("", fetcher);
-    const events = [];
-    for await (const event of client.stream("/v1/events/stream", 7))
-      events.push(event);
+    const stream = client.stream("/v1/events/stream", 7);
+    await expect(stream.next()).resolves.toEqual({
+      done: false,
+      value: { kind: "job", event_id: 1, component_id: "core", status: "ok" },
+    });
+    await stream.return(undefined);
     expect(fetcher).toHaveBeenCalledWith("/v1/events/stream?after=7", {});
-    expect(events).toEqual([
-      { kind: "job", event_id: 1, component_id: "core", status: "ok" },
-    ]);
+  });
+
+  it("exposes the server retry hint when a stream disconnects", async () => {
+    const body = streamOf(
+      "retry: 3000\n\ndata: " +
+        '{"kind":"job","event_id":1,"component_id":"core","status":"ok"}\n\n',
+    );
+    const client = new ApiClient(
+      "",
+      vi.fn<typeof fetch>().mockResolvedValue(new Response(body)),
+    );
+    const stream = client.stream("/v1/events/stream");
+    await expect(stream.next()).resolves.toMatchObject({ done: false });
+    await expect(stream.next()).rejects.toMatchObject({
+      kind: "network",
+      retryMilliseconds: 3000,
+    });
   });
 
   it.each([

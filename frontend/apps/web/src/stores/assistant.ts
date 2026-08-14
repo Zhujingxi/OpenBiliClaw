@@ -16,6 +16,7 @@ export const useAssistantStore = defineStore("assistant", () => {
   const phase = ref<LoadPhase>("idle");
   const conversation = ref<ConversationResponse>();
   const latest = ref<AssistantTurnResponse>();
+  const latestUserText = ref<string>();
   const error = ref<string>();
   const owner = new RequestOwner();
 
@@ -23,19 +24,32 @@ export const useAssistantStore = defineStore("assistant", () => {
     api: WebApi,
     conversationId: string,
     deviceId: string,
-  ): Promise<void> {
+    storage?: Pick<Storage, "removeItem">,
+  ): Promise<boolean> {
     const signal = owner.next();
+    conversation.value = undefined;
+    latest.value = undefined;
+    latestUserText.value = undefined;
     phase.value = "loading";
     error.value = undefined;
     try {
       const next = await api.conversation(conversationId, deviceId, signal);
-      if (!owner.owns(signal)) return;
+      if (!owner.owns(signal)) return true;
       conversation.value = next;
       phase.value = next.messages.length === 0 ? "empty" : "success";
+      return true;
     } catch (caught) {
-      if (isCancellation(caught) || !owner.owns(signal)) return;
+      if (isCancellation(caught) || !owner.owns(signal)) return true;
+      if (errorStatus(caught) === 404) {
+        storage?.removeItem("obc-conversation-id");
+        conversation.value = undefined;
+        latest.value = undefined;
+        phase.value = "empty";
+        return false;
+      }
       error.value = errorMessage(caught);
       phase.value = "error";
+      return true;
     }
   }
 
@@ -46,6 +60,7 @@ export const useAssistantStore = defineStore("assistant", () => {
     text: string,
   ): Promise<void> {
     const signal = owner.next();
+    latestUserText.value = text;
     phase.value = "loading";
     error.value = undefined;
     try {
@@ -68,9 +83,16 @@ export const useAssistantStore = defineStore("assistant", () => {
     phase,
     conversation,
     latest,
+    latestUserText,
     error,
     load,
     send,
     cancel: () => owner.cancel(),
   };
 });
+
+function errorStatus(value: unknown): number | undefined {
+  if (typeof value !== "object" || value === null || !("status" in value))
+    return undefined;
+  return typeof value.status === "number" ? value.status : undefined;
+}
