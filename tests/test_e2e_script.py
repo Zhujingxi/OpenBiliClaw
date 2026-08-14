@@ -77,7 +77,8 @@ def test_seed_profiles_regenerate_configs_while_preserving_live_vault_refs(
 
         def resolve(self, secret_ref: str, callback):  # type: ignore[no-untyped-def]
             resolved.append(secret_ref)
-            return callback(memoryview(b"test-key"))
+            key = b"test-kimi-key" if secret_ref.endswith("a") else b"test-deepseek-key"
+            return callback(memoryview(key))
 
         def store(self, _secret: bytes) -> str:
             pytest.fail("valid existing references must be preserved")
@@ -102,6 +103,54 @@ def test_seed_profiles_regenerate_configs_while_preserving_live_vault_refs(
     assert 'secret_ref = "vault:cred_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"' in deepseek_config
     assert "disable_thinking" not in deepseek_config
     assert resolved == ["cred_" + "a" * 32, "cred_" + "b" * 32]
+
+
+def test_seed_config_replaces_resolvable_but_mismatched_vault_ref(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A resolvable ref pointing at the WRONG key must be re-stored, not trusted."""
+    script = load_script()
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    kimi_key_path = data_dir / "kimi-key"
+    kimi_key_path.write_bytes(b"test-kimi-key")
+    kimi_config_path = data_dir / "kimi.toml"
+    kimi_config_path.write_text(
+        '[model]\nsecret_ref = "vault:cred_cccccccccccccccccccccccccccccccc"\n',
+        encoding="utf-8",
+    )
+    kimi_template_path = tmp_path / "kimi-template.toml"
+    kimi_template_path.write_text(
+        '[model]\nsecret_ref = "vault:E2E_SECRET_REF"\n', encoding="utf-8"
+    )
+    stored: list[bytes] = []
+
+    class Vault:
+        def __init__(self, _backend: object) -> None:
+            pass
+
+        def resolve(self, secret_ref: str, callback):  # type: ignore[no-untyped-def]
+            return callback(memoryview(b"test-deepseek-key"))  # wrong key, but resolves
+
+        def store(self, secret: bytes) -> str:
+            stored.append(secret)
+            return "cred_" + "d" * 32
+
+    monkeypatch.setattr(script, "DATA_DIR", data_dir)
+    monkeypatch.setattr(script, "REPORT_DIR", data_dir / "reports")
+    monkeypatch.setattr(script, "CONFIG_PATH", kimi_config_path)
+    monkeypatch.setattr(script, "TEMPLATE_PATH", kimi_template_path)
+    monkeypatch.setattr(script, "KEY_PATH", kimi_key_path)
+    monkeypatch.setattr(script, "DEEPSEEK_KEY_PATH", data_dir / "missing")
+    monkeypatch.setattr(script, "ProtectedFileBackend", lambda _path: object())
+    monkeypatch.setattr(script, "CredentialVault", Vault)
+
+    script.seed_profile()
+
+    assert stored == [b"test-kimi-key"]
+    assert 'secret_ref = "vault:cred_' + "d" * 32 + '"' in kimi_config_path.read_text(
+        encoding="utf-8"
+    )
 
 
 def test_seed_profile_stores_both_fake_keys_when_references_are_missing(

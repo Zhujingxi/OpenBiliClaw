@@ -87,14 +87,20 @@ def _seed_config(
     template_path: Path,
 ) -> None:
     os.chmod(key_path, 0o600)
+    expected = key_path.read_bytes().strip()
     secret_ref = _read_secret_ref(config_path)
     try:
         if secret_ref is not None:
-            vault.resolve(secret_ref, lambda _secret: None)
+            # A resolvable ref is not enough: it must wrap THIS key file. A
+            # stale or cross-config ref (e.g. the deepseek key in the kimi
+            # config) is re-stored rather than trusted.
+            matches = vault.resolve(secret_ref, lambda secret: bytes(secret).strip() == expected)
+            if not matches:
+                secret_ref = None
     except KeyError:
         secret_ref = None
     if secret_ref is None:
-        secret_ref = vault.store(key_path.read_bytes().strip())
+        secret_ref = vault.store(expected)
     template = template_path.read_text(encoding="utf-8")
     config_path.write_text(template.replace("E2E_SECRET_REF", secret_ref), encoding="utf-8")
     os.chmod(config_path, 0o600)

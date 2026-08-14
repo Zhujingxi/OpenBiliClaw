@@ -1,6 +1,6 @@
 # Plan: Anonymous Provider Ports — Bangumi · V2EX · Linux.do · Weibo
 
-Status: 🟡 IN PROGRESS · Created: 2026-08-14 · Branch: `refactor/architecture`
+Status: ✅ COMPLETE · Created: 2026-08-14 · Branch: `refactor/architecture`
 Progress manager: this file is the source of truth for task state. Update checkboxes
 in the same commit that completes the task.
 
@@ -146,17 +146,17 @@ login-walled or unreliable (honest-capability precedent).
   capabilities data from Phase 2). Reviewer → commit.
 - [x] 4.7 Docs + changelog (churn taxonomy + FETCH drop documented).
 
-## Phase 5 — All-platform final sweep 🔲
+## Phase 5 — All-platform final sweep ✅ (2026-08-15)
 
-- [ ] 5.1 `content.enabled` e2e assertion updated to all enabled providers.
-- [ ] 5.2 Full e2e run, every platform: `l0 l1a l1b l1youtube l1bangumi l1v2ex
+- [x] 5.1 `content.enabled` e2e assertion updated to all enabled providers.
+- [x] 5.2 Full e2e run, every platform: `l0 l1a l1b l1youtube l1bangumi l1v2ex
   l1weibo l2 l3 l4 l5 l6` (l7 UI pass with all enabled providers visible:
   providers view + per-provider search → detail spot check, traces in
   `data-e2e/ui-traces/<ts>/`).
-- [ ] 5.3 Hermetic unit suite + frontend gates green.
-- [ ] 5.4 `docs/e2e-testing-log.md` incident/results entry; capability matrix in
+- [x] 5.3 Hermetic unit suite + frontend gates green.
+- [x] 5.4 `docs/e2e-testing-log.md` incident/results entry; capability matrix in
   authoring docs lists all enabled providers honestly; changelog finalized.
-- [ ] 5.5 Final reviewer PASS over the whole diff → final atomic commit(s).
+- [x] 5.5 Final reviewer PASS over the whole diff → final atomic commit(s).
 
 ## Done definition
 
