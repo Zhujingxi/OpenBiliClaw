@@ -11,7 +11,7 @@ from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCall
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 
-from openbiliclaw.ai.runtime.budgets import RunPolicy
+from openbiliclaw.ai.runtime.budgets import PolicyBook, RunPolicy
 from openbiliclaw.ai.runtime.capabilities import AgentId, ModelCapabilities, ModelRequirements
 from openbiliclaw.ai.runtime.errors import (
     BudgetExhaustedError,
@@ -407,3 +407,43 @@ def test_request_requires_a_workflow() -> None:
             RunPolicy(),
             "",
         )
+
+
+async def test_policy_book_override_applies_at_execution_choke_point() -> None:
+    requests = 0
+
+    async def request_tool(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        nonlocal requests
+        requests += 1
+        return ModelResponse(parts=[ToolCallPart("lookup", {})])
+
+    agent: Agent[None, str] = Agent(output_type=str)
+
+    @agent.tool_plain
+    def lookup() -> str:
+        return "bounded result"
+
+    agent_id = AgentId("test.budget")
+    configured = ConfiguredModel(
+        "budget-model", "test", FunctionModel(request_tool), ModelCapabilities(tools=True)
+    )
+    runtime = AIRuntime(
+        RouteTable((ModelRoute(agent_id, ModelRequirements(tools=True), (configured,)),)),
+        ResourceBudget("model", 1),
+        policies=PolicyBook.from_overrides({"test.budget": {"request_limit": 1, "retries": 0}}),
+    )
+    request = AgentRunRequest(
+        agent_id,
+        agent,
+        None,
+        "use lookup",
+        (),
+        (),
+        ModelRequirements(tools=True),
+        RunPolicy(),  # code default allows 3 requests; the config override tightens to 1
+        "test",
+    )
+    with pytest.raises(BudgetExhaustedError) as caught:
+        await runtime.run(request)
+    assert caught.value.model_instance == "budget-model"
+    assert requests == 1

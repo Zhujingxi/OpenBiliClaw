@@ -122,3 +122,27 @@ def test_diagnostics_redact_both_secret_references() -> None:
     assert embedding["secret_ref"] == "<redacted-ref>"
     assert host["bearer_secret_ref"] == "<redacted-ref>"
     assert "vault:" not in repr(diagnostic)
+
+
+def test_runtime_agents_policy_table_loads(tmp_path: Path) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(
+        '[runtime.agents."recommendation.evaluate"]\n'
+        "input_tokens_limit = 12288\n"
+        "timeout_seconds = 60.0\n",
+        encoding="utf-8",
+    )
+    settings = load_settings(config, environ={})
+    policy = settings.runtime.agents["recommendation.evaluate"]
+    assert policy.input_tokens_limit == 12_288
+    assert policy.timeout_seconds == 60.0
+    assert policy.retries is None
+
+
+def test_runtime_agents_policy_table_rejects_unknown_fields(tmp_path: Path) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(
+        '[runtime.agents."recommendation.evaluate"]\nbogus_field = 3\n', encoding="utf-8"
+    )
+    with pytest.raises(ValueError):
+        load_settings(config, environ={})

@@ -21,6 +21,7 @@ from openbiliclaw.ai.providers.embeddings import EmbeddingModelInfo, EmbeddingSe
 from openbiliclaw.ai.providers.embeddings.providers import build_embedding_transport
 from openbiliclaw.ai.providers.embeddings.service import query_prefix_for_model
 from openbiliclaw.ai.providers.models import ModelFactory, ModelInstanceConfig, ModelOptions
+from openbiliclaw.ai.runtime.budgets import PolicyBook
 from openbiliclaw.ai.runtime.execution import AgentRunRequest, AIRuntime
 from openbiliclaw.ai.runtime.routes import ConfiguredModel, ModelRoute, RouteTable
 from openbiliclaw.application.edit_profile import EditProfile
@@ -328,6 +329,16 @@ def build_application(
             model=configured.model,
             capabilities=configured.declared_capabilities,
         )
+        policy_book = PolicyBook.from_overrides(
+            {
+                agent: {
+                    key: value
+                    for key, value in policy.model_dump().items()
+                    if isinstance(value, (int, float))
+                }
+                for agent, policy in settings.runtime.agents.items()
+            }
+        )
         assistant_runtime = AIRuntime(
             RouteTable(
                 (
@@ -340,6 +351,7 @@ def build_application(
                 )
             ),
             ResourceBudget("model", settings.runtime.default_resource_limit),
+            policies=policy_book,
         )
     analyzers = (_RuntimeAnalyzer(assistant_runtime),) if assistant_runtime is not None else ()
     understanding = UnderstandingService(

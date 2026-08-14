@@ -14,6 +14,9 @@ production entrypoint。请求携带稳定 `AgentId`、domain-owned typed depend
 - `RunPolicy` 将 request/input/output/total token 和 tool-call 上限直接映射到 PydanticAI
   `UsageLimits`，并限制总 elapsed timeout、retry 次数和四种显式 priority。`RunPriority` 当前仅是
   contract metadata；Core `ResourceBudget` 尚无 priority-aware queue，因此它暂不影响 admission 顺序。
+- `PolicyBook` 在 `AIRuntime.run` 唯一 choke point 应用 config `[runtime.agents."<agent-id>"]`
+  的 per-agent RunPolicy override；override 在构造时校验，非法 budget 在启动时失败而非运行中。
+  composition 的 atomic reload 会重建 runtime，因此 budget 调整无需重启即可生效。
 - 所有执行取得 Core `ResourceBudget`；timeout 转为安全 typed failure，`CancelledError` 原样传播。
 - provider 失败只暴露 unavailable/rate-limited/unauthorized/timeout/invalid-output/
   budget-exhausted 分类与非秘密 model instance ID，不回显上游 body。

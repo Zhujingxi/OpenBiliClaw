@@ -4,8 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import IntEnum
+from typing import TYPE_CHECKING
 
 from pydantic_ai.usage import UsageLimits
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from openbiliclaw.ai.runtime.capabilities import AgentId
 
 
 class RunPriority(IntEnum):
@@ -56,3 +62,62 @@ class RunPolicy:
             total_tokens_limit=self.total_tokens_limit,
             tool_calls_limit=self.tool_calls_limit,
         )
+
+
+_POLICY_OVERRIDABLE_FIELDS = frozenset(
+    {
+        "request_limit",
+        "input_tokens_limit",
+        "output_tokens_limit",
+        "total_tokens_limit",
+        "tool_calls_limit",
+        "tool_result_bytes_limit",
+        "timeout_seconds",
+        "retries",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class PolicyBook:
+    """Config-driven per-agent RunPolicy overrides, resolved at the execution choke point.
+
+    Code keeps named, validated defaults per agent; deployment config may tune them
+    (``[runtime.agents.<agent-id>]``). Overrides are validated at construction, so
+    a bad budget fails at startup, never mid-run.
+    """
+
+    overrides: Mapping[AgentId, RunPolicy]
+
+    @classmethod
+    def from_overrides(cls, overrides: Mapping[str, Mapping[str, int | float]]) -> PolicyBook:
+        """Build validated policies from raw per-agent field overrides."""
+
+        from openbiliclaw.ai.runtime.capabilities import AgentId
+
+        base = RunPolicy()
+        book: dict[AgentId, RunPolicy] = {}
+        for agent, fields in overrides.items():
+            unknown = set(fields) - _POLICY_OVERRIDABLE_FIELDS
+            if unknown:
+                raise ValueError(f"unknown run policy fields for {agent}: {sorted(unknown)}")
+            book[AgentId(agent)] = RunPolicy(
+                request_limit=int(fields.get("request_limit", base.request_limit)),
+                input_tokens_limit=int(fields.get("input_tokens_limit", base.input_tokens_limit)),
+                output_tokens_limit=int(
+                    fields.get("output_tokens_limit", base.output_tokens_limit)
+                ),
+                total_tokens_limit=int(fields.get("total_tokens_limit", base.total_tokens_limit)),
+                tool_calls_limit=int(fields.get("tool_calls_limit", base.tool_calls_limit)),
+                tool_result_bytes_limit=int(
+                    fields.get("tool_result_bytes_limit", base.tool_result_bytes_limit)
+                ),
+                timeout_seconds=float(fields.get("timeout_seconds", base.timeout_seconds)),
+                retries=int(fields.get("retries", base.retries)),
+            )
+        return cls(book)
+
+    def resolve(self, agent_id: AgentId, default: RunPolicy) -> RunPolicy:
+        """Return the configured override for an agent, or its code default."""
+
+        return self.overrides.get(agent_id, default)

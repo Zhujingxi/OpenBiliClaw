@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import asyncio
 from copy import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from time import monotonic
 from typing import TYPE_CHECKING, Generic, TypeAlias, TypeVar
 
 from pydantic_ai.messages import ModelMessage
 from pydantic_ai.usage import RunUsage
 
+from openbiliclaw.ai.runtime.budgets import PolicyBook
 from openbiliclaw.ai.runtime.errors import AIRuntimeError, normalize_error
 from openbiliclaw.ai.runtime.history import (
     ContextProjection,
@@ -87,10 +88,12 @@ class AIRuntime:
         resource_budget: ResourceBudget,
         *,
         usage_sink: UsageSink | None = None,
+        policies: PolicyBook | None = None,
     ) -> None:
         self._routes = routes
         self._resource_budget = resource_budget
         self._usage_sink = usage_sink
+        self._policies = policies if policies is not None else PolicyBook({})
 
     @property
     def active_runs(self) -> int:
@@ -103,6 +106,7 @@ class AIRuntime:
         audit_model_messages(request.history)
         for projection in request.context:
             audit_text(projection.text)
+        request = replace(request, policy=self._policies.resolve(request.agent_id, request.policy))
         route = self._routes.resolve(request.agent_id, request.requirements)
         prompt = _build_prompt(request.user_input, request.context)
         started = monotonic()

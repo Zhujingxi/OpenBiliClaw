@@ -67,9 +67,23 @@ class HostSettings(_FrozenModel):
     bearer_secret_ref: SecretReference | None = None
 
 
+class AgentPolicySettings(_FrozenModel):
+    """Optional per-agent RunPolicy overrides; unset fields keep code defaults."""
+
+    request_limit: int | None = Field(default=None, gt=0)
+    input_tokens_limit: int | None = Field(default=None, gt=0)
+    output_tokens_limit: int | None = Field(default=None, gt=0)
+    total_tokens_limit: int | None = Field(default=None, gt=0)
+    tool_calls_limit: int | None = Field(default=None, gt=0)
+    tool_result_bytes_limit: int | None = Field(default=None, gt=0)
+    timeout_seconds: float | None = Field(default=None, gt=0)
+    retries: int | None = Field(default=None, ge=0)
+
+
 class RuntimeSettings(_FrozenModel):
     default_timeout_seconds: float = Field(default=30.0, gt=0)
     default_resource_limit: int = Field(default=4, ge=1)
+    agents: dict[str, AgentPolicySettings] = {}
 
 
 class AppSettings(_FrozenModel):

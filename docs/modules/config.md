@@ -11,7 +11,7 @@
 | `[content]` | enabled provider IDs |
 | `[recommendation]` | `pool_target_count` (1..10000) |
 | `[host]` | `api_host`, `api_port`, optional opaque `bearer_secret_ref` |
-| `[runtime]` | `default_timeout_seconds`, `default_resource_limit` |
+| `[runtime]` | `default_timeout_seconds`, `default_resource_limit`, optional `[runtime.agents."<agent-id>"]` per-agent run-budget overrides (unset fields keep code defaults) |
 
 ## Catalog model
 

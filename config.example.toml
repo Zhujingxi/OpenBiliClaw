@@ -39,3 +39,8 @@ api_port = 8420
 [runtime]
 default_timeout_seconds = 30.0
 default_resource_limit = 4
+
+# Optional per-agent run-budget overrides; unset fields keep code defaults.
+# [runtime.agents."recommendation.evaluate"]
+# input_tokens_limit = 12288
+# timeout_seconds = 60.0
