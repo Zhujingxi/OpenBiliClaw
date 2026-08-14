@@ -13,7 +13,8 @@
 - 实际支持的 narrow capability implementations；
 - native → purpose-specific projection functions；
 - provider action semantics 与 verification；
-- 可选 observation proposal。
+- 可选 observation proposal；
+- 可选 declarative credential recipe（plugin-assisted access）：domain、artifact 列表（cookie/storage key/header）、可选 warmup URL —— 纯数据，禁止可执行 payload。
 
 Content Integration 只拥有共享 identity、capability contracts、manifest validation、registry 和 tool budgeting。Provider 不得从 registry 发现/调用其他 providers，也不得 import Understanding、Recommendation、Assistant 或 Hosts。
 
@@ -43,6 +44,7 @@ assert validate_provider_contract(manifest, provider) == ()
 ## Capability rules
 
 - 实现最小 protocol，不建立 provider god interface。
+- 提供 recommendation/feed capability 时，manifest 必须为每个 `feed_id` 声明 bias class（`platform-popularity | platform-personalized | subscription-graph | editorial`）与 auth requirement；不得 silently 混同 anonymous 与 credentialed feed。
 - `ProviderCursor.value` 完全 opaque；只有创建它的 provider 可以解析。
 - read methods 接收 scoped `AccessHandle`，不得扩大 provider/account/permission scope。
 - `SearchQuery` / `FeedQuery` / `CreatorQuery` / `PageRequest` 的 limit 是硬上限。

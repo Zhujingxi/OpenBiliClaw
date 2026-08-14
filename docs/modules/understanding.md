@@ -16,6 +16,16 @@
 
 Canonical profile 只存 claim 和 observation evidence reference。原始 provider payload、Cookie、token、credential reference、网页 HTML 和自由 prompt 均不能进入 analyzer input 或 projection。其他 product modules 只能消费 `projections.py` 的 bounded view，不能导入 `profile.py`。
 
+## 方向决策 (decided)
+
+- **No fixed trait taxonomies.** Understanding never adopts MBTI-style trait schemas or soul-style fixed layers (tone/posture/topic state machines). The profile stays an open, evidence-grounded claim set; the LLM chooses which dimensions are salient for this user.
+- **Trust tiers by provenance.** Claims distinguish `user_statement` (explicit, highest trust) from inferred claims; re-synthesis and conflict resolution never let inference override an explicit statement. The deterministic proposal policy enforces this without calling a model.
+- **Chat correction channel.** Users adjust understanding via Assistant dialogue; corrections become proposed profile revisions (pending action) and persist as `user_statement` evidence — the same write path as every other profile change, so dialogue needs no separate learning machinery.
+- **Semantic matching substrate.** The embedding service becomes a first-class matching input: evidence items, profile fragments and candidates are embedded; vector recall feeds LLM rerank. The durable embedding index lands together with the semantic-retrieval consumer in Recommendation, as already anticipated below.
+- **Re-synthesis job.** A bounded periodic job re-synthesizes profile claims from evidence (the honest successor to legacy consolidation); cadence and budget are set when the job lands.
+- **Exploration hypotheses reuse the proposal path.** Likes on exploration-served items enter as low-confidence proposals (~0.2) with exploration provenance and require corroboration before influencing the profile; exploration dismissals decay-adjust the originating selection arm and never create global avoidances. Directional statements about exploration level are decaying claims, not permanent settings.
+- **Two planes.** The user evidence ledger (facts about the user) and the agent policy decision journal (briefs, hypotheses, lessons, outcomes) are separate append-only stores, cross-referenced by ID; policy artifacts never enter the user evidence ledger, and user evidence never carries policy authority.
+
 ## Composition
 
 Application workflows and Assistant consume the bounded projections above. Content-dimension `PreferenceClaim` values appear in discovery interests and recommendation positive topics; this bridges the routed preference analyzer until the stable-interest analyzer is routed. Composition also exposes the independently configured embedding service, but Understanding does not own a semantic index or provider projection bodies. Recommendation discovery remains text-query based, so no durable embedding index exists until a concrete semantic retrieval consumer lands. Deleted `memory/`, `soul/`, legacy JSON state, and evaluation paths have no compatibility facade or double-write path.

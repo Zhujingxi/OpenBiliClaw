@@ -48,8 +48,17 @@ Provider auth adapter 贡献自己的 `ConnectionForm`、capabilities 与 async 
 
 Anonymous handle 不能带 account ID，也不能含 private-read/write permission。成功 verification 的 `granted_permissions` 少于 request 时，AccessService fail-closed 投影为 `degraded/insufficient_scope`。
 
+## Plugin-assisted access (decided direction)
+
+Browser-held credentials are acquired through a `plugin_assisted` AccessMethod rather than a source-aware extension:
+
+- The provider package declares a **credential recipe** as pure data in its manifest/auth adapter: target domain, artifact list (cookie names, storage keys, headers), optional warmup URL. Recipes carry no executable payload; manifest validation rejects anything else.
+- The backend serves the recipe (`GET /sources/{id}/access-recipe`) and accepts the grabbed material (`POST /sources/{id}/access-material`), which flows through the existing `CredentialVerifier` → `CredentialVault` boundary unchanged. The extension never talks to provider semantics.
+- The extension authenticates to the backend with one generated token and contains zero per-source code: ask recipe → run generic primitives → post material. Adding a source never ships an extension update.
+- Browser-executed content fetch (e.g. in-page request signing à la Douyin X-Bogus) is explicitly deferred: only add a proxied-fetch primitive when a real source proves cookie + backend transport insufficient.
+
 ## Composition and exclusions
 
 Composition supplies the credential vault, provider-owned methods, and availability refresh; Application workflows are the only host-facing entrypoint. Deleted host auth helpers and direct config credential reads have no compatibility or double-write path.
 
-Browser-extension session, managed-browser, OAuth, and production CLI/browser credential import are not implemented AccessMethods. The real-stack E2E helper can read a local Chrome cookie into process memory and immediately submit it through the existing manual form/verifier; this is test infrastructure, not a production AccessMethod. Access connections remain process-local: the vault persists opaque secrets but there is no provider/account-to-reference mapping, so a client must resubmit after process restart. Adding durable reconnection, managed-browser, or OAuth support requires an approved replayable typed method and the same secret-resolution boundary; presentation code cannot introduce browser-specific credential payloads.
+Browser-extension session import is superseded by the decided `plugin_assisted` direction above. Managed-browser, OAuth, and production CLI/browser credential import are not implemented AccessMethods. The real-stack E2E helper can read a local Chrome cookie into process memory and immediately submit it through the existing manual form/verifier; this is test infrastructure, not a production AccessMethod. Access connections remain process-local: the vault persists opaque secrets but there is no provider/account-to-reference mapping, so a client must resubmit after process restart. Adding durable reconnection, managed-browser, or OAuth support requires an approved replayable typed method and the same secret-resolution boundary; presentation code cannot introduce browser-specific credential payloads.
