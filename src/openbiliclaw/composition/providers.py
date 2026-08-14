@@ -178,7 +178,7 @@ def _builders(vault: CredentialVault) -> dict[str, Callable[[], _BuiltProvider]]
             ),
         )
 
-    from openbiliclaw.content.providers.linuxdo.client import LinuxDoClient
+    from openbiliclaw.content.providers.linuxdo.client import HttpxLinuxDoTransport, LinuxDoClient
     from openbiliclaw.content.providers.reddit.client import RedditClient
     from openbiliclaw.content.providers.weibo.client import WeiboClient
     from openbiliclaw.content.providers.x.client import XClient
@@ -190,7 +190,7 @@ def _builders(vault: CredentialVault) -> dict[str, Callable[[], _BuiltProvider]]
         "douyin": lambda: _BuiltProvider(DOUYIN_MANIFEST, DouyinProvider()),
         "linuxdo": lambda: _BuiltProvider(
             LINUXDO_MANIFEST,
-            LinuxDoProvider(LinuxDoClient(unavailable, resolver)),
+            LinuxDoProvider(LinuxDoClient(HttpxLinuxDoTransport(), resolver)),
             _manual(
                 LINUXDO_CONNECTION_FORM,
                 LinuxDoCredentialVerifier(_UnavailableProbe()),

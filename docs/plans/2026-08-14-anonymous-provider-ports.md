@@ -94,20 +94,29 @@ feed("hot") + fetch.
   GATE-PROCESS FIX: gates must run unpiped — `cmd | tail` masks failures.
 - [x] 2.6 Docs + changelog.
 
-## Phase 3 — Linux.do 🔲 (new transport)
+## Phase 3 — Linux.do 🚫 BLOCKED UPSTREAM (2026-08-14; transport shipped, not enabled)
 
-- [ ] 3.1 TDD transport: `HttpxLinuxDoTransport` behind the existing
-  `LinuxDoTransport` protocol — Discourse JSON: search `GET /search.json?q=`,
-  latest/top `/latest.json`, topic fetch `/t/<id>.json`. Failing tests first with
-  recorded-shape fixtures (no live calls in unit tests).
-- [ ] 3.2 Typed error mapping (429/403/timeout/invalid) + allowlist payload
+- [x] 3.1 TDD transport: `HttpxLinuxDoTransport` behind the existing
+  `LinuxDoTransport` protocol — Discourse JSON search `GET /search.json?q=` and
+  topic fetch `GET /t/<id>.json`, covered by recorded-shape fixtures. `/latest.json`
+  remains unimplemented because the manifest does not advertise FEED.
+- [x] 3.2 Typed error mapping (429/403/timeout/invalid) + allowlist payload
   normalization (YouTube tuple-leak precedent: only declared fields reach models).
-- [ ] 3.3 `projections.py`: topic → ContentPreview; identity =
-  `linux.do/t/topic/<id>` canonical URL, numeric topic id.
-- [ ] 3.4 Wire in composition (replace `unavailable`); anonymous connect.
-- [ ] 3.5 Live e2e layer `l1linuxdo`: anonymous connect → search → detail.
-- [ ] 3.6 Enable in configs. Reviewer PASS → gates → commit → UI spot-check.
-- [ ] 3.7 Docs + changelog.
+- [x] 3.3 Topic → ContentPreview remains in the existing `capabilities.py` seam;
+  identity is `linux.do/t/topic/<id>` with a numeric topic id. No parallel
+  `projections.py` was added.
+- [x] 3.4 Wire in composition (replace `unavailable`); anonymous connect.
+- [🚫] 3.5 Live e2e layer `l1linuxdo`: **BLOCKED — stop condition hit.** Linux.do
+  Cloudflare-challenges every content-bearing endpoint (`/search.json`,
+  `/latest.json`, `/top.json`, `/t/<id>.json`, `/c/<slug>.json`,
+  `search/query.json`) for non-browser clients: 403 "Just a moment…" with both
+  default and browser User-Agents from a residential IP (2026-08-14). Only
+  `/site.json`/`/site/basic-info.json` metadata passes. Layer deleted (no silent
+  skips); enablement + layer deferred until a viable path exists (browser-context
+  ingestion via the future session-token/extension plan, or an upstream change).
+- [🚫] 3.6 ~~Enable in configs~~ — reverted per stop condition; configs and l0
+  assertion unchanged. Reviewer PASS → gates → commit (no UI check: not enabled).
+- [x] 3.7 Docs + changelog (honest blocked status).
 
 ## Phase 4 — Weibo 🔲 (port old anonymous client)
 
@@ -131,23 +140,25 @@ feed("hot") + fetch.
 
 - [ ] 5.1 `content.enabled` e2e assertion updated to all enabled providers.
 - [ ] 5.2 Full e2e run, every platform: `l0 l1a l1b l1youtube l1bangumi l1v2ex
-  l1linuxdo l1weibo l2 l3 l4 l5 l6` (l7 UI pass with all six providers visible:
+  l1weibo l2 l3 l4 l5 l6` (l7 UI pass with all enabled providers visible:
   providers view + per-provider search → detail spot check, traces in
   `data-e2e/ui-traces/<ts>/`).
 - [ ] 5.3 Hermetic unit suite + frontend gates green.
 - [ ] 5.4 `docs/e2e-testing-log.md` incident/results entry; capability matrix in
-  authoring docs lists all six providers honestly; changelog finalized.
+  authoring docs lists all enabled providers honestly; changelog finalized.
 - [ ] 5.5 Final reviewer PASS over the whole diff → final atomic commit(s).
 
 ## Done definition
 
-Six providers (bilibili, youtube, bangumi, v2ex, linuxdo, weibo) enabled in all
-configs, each with: anonymous connect, hermetic unit coverage, one live e2e layer,
-UI-verified search→detail. All gates + all layers green in one final sweep.
+Five providers (bilibili, youtube, bangumi, v2ex, weibo) enabled in all configs,
+each with: anonymous connect, hermetic unit coverage, one live e2e layer,
+UI-verified search→detail (v2ex: feed→detail). Linux.do ships implemented but
+disabled (upstream Cloudflare block). All gates + all layers green in one final
+sweep.
 
 ## Open risks
 
 - Weibo visitor-flow upstream churn (4.5 stop condition).
 - V2EX rate limits on search endpoint — keep live layer to 2–3 requests.
-- Linux.do Cloudflare challenges non-browser UAs — if seen, set honest
-  User-Agent; if blocked anyway, drop to stub + document (never fake).
+- ~~Linux.do Cloudflare challenges~~ CONFIRMED 2026-08-14: all content endpoints
+  challenged for non-browser clients → Phase 3 blocked per stop condition.

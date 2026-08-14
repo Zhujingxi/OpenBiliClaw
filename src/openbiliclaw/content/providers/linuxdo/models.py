@@ -7,7 +7,7 @@ from openbiliclaw.core._pydantic import StrictBaseModel
 
 class LinuxDoItem(StrictBaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    id: str = Field(min_length=1, max_length=512)
+    id: str = Field(pattern=r"^\d+$", max_length=20)
     title: str = Field(min_length=1, max_length=500)
     body: str = Field(max_length=50_000)
     author: str = Field(max_length=300)

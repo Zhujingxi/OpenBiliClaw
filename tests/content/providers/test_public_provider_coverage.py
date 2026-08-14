@@ -18,6 +18,8 @@ from openbiliclaw.content.integration.errors import ContentIntegrationError, Int
 from openbiliclaw.content.integration.identity import ContentKind, ContentRef, ProviderId
 from openbiliclaw.content.providers.bangumi import BangumiClient, BangumiProvider
 from openbiliclaw.content.providers.bangumi.models import BangumiPage, BangumiSubject
+from openbiliclaw.content.providers.linuxdo import LinuxDoClient, LinuxDoProvider
+from openbiliclaw.content.providers.linuxdo.models import LinuxDoItem, LinuxDoPage
 from openbiliclaw.content.providers.v2ex import V2EXClient, V2EXProvider
 from openbiliclaw.content.providers.v2ex.models import V2EXMember, V2EXNode, V2EXPage, V2EXTopic
 from openbiliclaw.content.providers.youtube import YouTubeClient, YouTubeProvider
@@ -51,6 +53,16 @@ class PublicProvider(Protocol):
     def search_document(self, content: NativeContent) -> SearchDocument: ...
     def card_data(self, content: NativeContent) -> CardData: ...
     def _ref(self, ref: ContentRef) -> None: ...
+
+
+class LinuxTransport:
+    async def search(
+        self, text: str, cursor: str | None, limit: int, credential: str | None
+    ) -> bytes:
+        return LinuxDoPage(items=(linux_topic(),), next_cursor=None).model_dump_json().encode()
+
+    async def fetch(self, content_id: str, credential: str | None) -> bytes:
+        return linux_topic().model_dump_json().encode()
 
 
 class Transport:
@@ -95,6 +107,17 @@ def subject() -> BangumiSubject:
         rating_count=0,
         collection_count=0,
         availability="tombstone",
+    )
+
+
+def linux_topic() -> LinuxDoItem:
+    return LinuxDoItem(
+        id="1",
+        title="topic",
+        body="body",
+        author="a",
+        url="https://linux.do/t/topic/1",
+        published_at=int(NOW.timestamp()),
     )
 
 
@@ -150,6 +173,7 @@ async def test_creator_capability(
             ),
             "bangumi",
         ),
+        (LinuxDoProvider(LinuxDoClient(LinuxTransport())), "linuxdo"),
     ],
 )
 async def test_search_and_all_projections(provider: PublicProvider, provider_id: str) -> None:
@@ -178,6 +202,12 @@ async def test_search_and_all_projections(provider: PublicProvider, provider_id:
             "1",
         ),
         (
+            LinuxDoProvider(LinuxDoClient(LinuxTransport())),
+            "linuxdo",
+            "topic",
+            "1",
+        ),
+        (
             V2EXProvider(V2EXClient(Transport(V2EXPage(items=(), next_cursor=None)))),
             "v2ex",
             "topic",
@@ -188,7 +218,12 @@ async def test_search_and_all_projections(provider: PublicProvider, provider_id:
 def test_native_from_payload_and_wrong_payload_projection(
     provider: PublicProvider, provider_id: str, kind: str, item_id: str
 ) -> None:
-    model: PageDump = {"youtube": video(), "bangumi": subject(), "v2ex": topic()}[provider_id]
+    model: PageDump = {
+        "youtube": video(),
+        "bangumi": subject(),
+        "linuxdo": linux_topic(),
+        "v2ex": topic(),
+    }[provider_id]
     native = provider.native_from_payload(_PAYLOAD.validate_json(model.model_dump_json()))
     assert native.ref.provider_content_id == item_id
     foreign = YouTubeProvider(
@@ -212,6 +247,7 @@ def test_native_from_payload_and_wrong_payload_projection(
             "bangumi",
             "subject",
         ),
+        (LinuxDoProvider(LinuxDoClient(LinuxTransport())), "linuxdo", "topic"),
         (
             V2EXProvider(V2EXClient(Transport(V2EXPage(items=(), next_cursor=None)))),
             "v2ex",

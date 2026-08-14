@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime
 
-from openbiliclaw.access.models import AccessHandle, CredentialAccessHandle, Permission
+from openbiliclaw.access.models import AccessHandle, Permission
 from openbiliclaw.content.integration.capabilities import ContentPage, ProviderCursor, SearchQuery
 from openbiliclaw.content.integration.errors import ContentIntegrationError, IntegrationErrorCode
 from openbiliclaw.content.integration.identity import ContentRef
@@ -48,6 +48,9 @@ class LinuxDoProvider:
     def native_from_bytes(self, raw: bytes) -> NativeContent:
         return self.native(LinuxDoItem.model_validate_json(raw))
 
+    def native_from_payload(self, payload: dict[str, object]) -> NativeContent:
+        return self.native(LinuxDoItem.model_validate(payload))
+
     @staticmethod
     def native(item: LinuxDoItem) -> NativeContent:
         return NativeContent(
@@ -55,7 +58,7 @@ class LinuxDoProvider:
                 provider_id=LINUXDO_ID,
                 content_kind=TOPIC_KIND,
                 provider_content_id=item.id,
-                canonical_url=f"https://linux.do/t/{item.id}",
+                canonical_url=f"https://linux.do/t/topic/{item.id}",
             ),
             schema_version=1,
             payload=item,
@@ -142,13 +145,11 @@ class LinuxDoProvider:
             )
 
     @staticmethod
-    def _access(access: AccessHandle) -> CredentialAccessHandle:
-        if (
-            not isinstance(access, CredentialAccessHandle)
-            or access.provider_id != "linuxdo"
-            or Permission.READ_PRIVATE not in access.permissions
+    def _access(access: AccessHandle) -> AccessHandle:
+        if access.provider_id != "linuxdo" or not (
+            {Permission.READ_PUBLIC, Permission.READ_PRIVATE} & access.permissions
         ):
             raise ContentIntegrationError(
-                IntegrationErrorCode.ACCESS_DENIED, "private read permission required"
+                IntegrationErrorCode.ACCESS_DENIED, "read permission required"
             )
         return access

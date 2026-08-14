@@ -21,6 +21,12 @@ from openbiliclaw.content.integration.manifest import CapabilityKind
 from openbiliclaw.content.integration.testing import validate_provider_contract
 from openbiliclaw.content.providers.bangumi import BANGUMI_MANIFEST, BangumiClient, BangumiProvider
 from openbiliclaw.content.providers.bangumi.models import BangumiPage
+from openbiliclaw.content.providers.linuxdo import (
+    LINUXDO_MANIFEST,
+    LinuxDoClient,
+    LinuxDoProvider,
+)
+from openbiliclaw.content.providers.linuxdo.models import LinuxDoItem, LinuxDoPage
 from openbiliclaw.content.providers.v2ex import V2EX_MANIFEST, V2EXClient, V2EXProvider
 from openbiliclaw.content.providers.v2ex.models import V2EXPage
 from openbiliclaw.content.providers.youtube import YOUTUBE_MANIFEST, YouTubeClient, YouTubeProvider
@@ -42,6 +48,20 @@ class SearchProvider(Protocol):
 
 class PageClient(Protocol):
     async def page(self, operation: str, argument: str, cursor: str, limit: int) -> object: ...
+
+
+class LinuxDoTransport:
+    def __init__(self, search_payload: bytes, fetch_payload: bytes) -> None:
+        self.search_payload = search_payload
+        self.fetch_payload = fetch_payload
+
+    async def search(
+        self, text: str, cursor: str | None, limit: int, credential: str | None
+    ) -> bytes:
+        return self.search_payload
+
+    async def fetch(self, content_id: str, credential: str | None) -> bytes:
+        return self.fetch_payload
 
 
 class Transport:
@@ -111,6 +131,22 @@ def bangumi_page(*, cursor: str | None = "20") -> bytes:
     )
 
 
+def linuxdo_item() -> LinuxDoItem:
+    return LinuxDoItem(
+        id="42",
+        title="Typed Linux.do Topic",
+        body="topic body",
+        author="alice",
+        url="https://linux.do/t/topic/42",
+        published_at=int(NOW.timestamp()),
+        deleted=False,
+    )
+
+
+def linuxdo_page(*, cursor: str | None = "2") -> bytes:
+    return LinuxDoPage(items=(linuxdo_item(),), next_cursor=cursor).model_dump_json().encode()
+
+
 def v2ex_page(*, cursor: str | None = "20") -> bytes:
     return (
         V2EXPage(
@@ -138,6 +174,14 @@ def v2ex_page(*, cursor: str | None = "20") -> bytes:
     [
         (YOUTUBE_MANIFEST, YouTubeProvider(YouTubeClient(Transport({})))),
         (BANGUMI_MANIFEST, BangumiProvider(BangumiClient(Transport({})))),
+        (
+            LINUXDO_MANIFEST,
+            LinuxDoProvider(
+                LinuxDoClient(
+                    LinuxDoTransport(linuxdo_page(), linuxdo_item().model_dump_json().encode())
+                )
+            ),
+        ),
         (V2EX_MANIFEST, V2EXProvider(V2EXClient(Transport({})))),
     ],
 )
@@ -156,6 +200,7 @@ def test_v2ex_does_not_advertise_unofficial_search() -> None:
     [
         (YouTubePage, youtube_page()),
         (BangumiPage, bangumi_page()),
+        (LinuxDoPage, linuxdo_page()),
         (V2EXPage, v2ex_page()),
     ],
 )
@@ -203,6 +248,22 @@ async def test_bangumi_feed_cursor_and_projection() -> None:
     assert provider.card_data(native).badge == "Bangumi · 8.5"
 
 
+async def test_linuxdo_search_canonical_topic_and_all_projections() -> None:
+    provider = LinuxDoProvider(
+        LinuxDoClient(LinuxDoTransport(linuxdo_page(), linuxdo_item().model_dump_json().encode()))
+    )
+    page = await provider.search(
+        SearchQuery(text="typed", page=PageRequest(limit=20)), access("linuxdo")
+    )
+    assert page.items[0].ref.canonical_url == "https://linux.do/t/topic/42"
+    assert page.next_cursor == ProviderCursor(provider_id=ProviderId(value="linuxdo"), value="2")
+    native = await provider.fetch(page.items[0].ref, access("linuxdo"))
+    assert provider.preview(native).ref == native.ref
+    assert provider.recommendation_candidate(native).ref == native.ref
+    assert provider.search_document(native).body == "topic body"
+    assert provider.card_data(native).badge == "LinuxDo"
+
+
 async def test_v2ex_feed_canonical_topic_and_published_time() -> None:
     transport = Transport({("feed", "hot"): v2ex_page(), ("fetch", "99"): v2ex_page(cursor=None)})
     provider = V2EXProvider(V2EXClient(transport))
@@ -227,6 +288,14 @@ async def test_wrong_access_is_rejected() -> None:
     [
         (YouTubeProvider(YouTubeClient(Transport({}))), "youtube"),
         (BangumiProvider(BangumiClient(Transport({}))), "bangumi"),
+        (
+            LinuxDoProvider(
+                LinuxDoClient(
+                    LinuxDoTransport(linuxdo_page(), linuxdo_item().model_dump_json().encode())
+                )
+            ),
+            "linuxdo",
+        ),
     ],
 )
 async def test_foreign_cursor_is_rejected(provider: SearchProvider, provider_id: str) -> None:
