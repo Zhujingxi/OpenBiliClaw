@@ -15,7 +15,6 @@ V2EX_MANIFEST = ProviderManifest(
     display_name="V2EX",
     capabilities=frozenset(
         {
-            CapabilityKind.SEARCH,
             CapabilityKind.FEED,
             CapabilityKind.FETCH,
             CapabilityKind.CREATOR,

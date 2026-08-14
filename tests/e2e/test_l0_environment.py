@@ -70,7 +70,7 @@ def test_real_profile_loads_and_vault_reference_resolves() -> None:
     settings = validated_settings(CONFIG)
     assert settings.model.model_name == "kimi-for-coding"
     assert settings.embedding.output_dimensions == 512
-    assert settings.content.enabled == ("bilibili", "youtube", "bangumi")
+    assert settings.content.enabled == ("bilibili", "youtube", "bangumi", "v2ex")
     assert settings.host.api_port == 8430
     assert settings.model.secret_ref is not None
     secret_id = settings.model.secret_ref.removeprefix("vault:")

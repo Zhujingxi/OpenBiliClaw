@@ -150,7 +150,6 @@ async def test_creator_capability(
             ),
             "bangumi",
         ),
-        (V2EXProvider(V2EXClient(Transport(V2EXPage(items=(topic(),), next_cursor=None)))), "v2ex"),
     ],
 )
 async def test_search_and_all_projections(provider: PublicProvider, provider_id: str) -> None:

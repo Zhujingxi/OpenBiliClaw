@@ -455,11 +455,6 @@
         "title": "AvoidanceClaim",
         "type": "object"
       },
-      "BaseModel": {
-        "properties": {},
-        "title": "BaseModel",
-        "type": "object"
-      },
       "CanonicalProfile": {
         "additionalProperties": false,
         "description": "The sole durable representation of user understanding.",
@@ -1077,7 +1072,7 @@
         "additionalProperties": false,
         "properties": {
           "content": {
-            "$ref": "#/components/schemas/NativeContent"
+            "$ref": "#/components/schemas/NativeContentView"
           }
         },
         "required": [
@@ -2126,6 +2121,7 @@
         "title": "JobResult",
         "type": "string"
       },
+      "JsonValue": {},
       "ModelCatalogResponse": {
         "additionalProperties": false,
         "properties": {
@@ -2307,12 +2303,16 @@
         "title": "ModelConfigurationView",
         "type": "object"
       },
-      "NativeContent": {
+      "NativeContentView": {
         "additionalProperties": false,
-        "description": "Validated provider-native record at the heterogeneous registry boundary.\n\nProviders must validate external JSON into their own Pydantic model before\nconstructing this envelope. Untyped mappings are rejected.",
+        "description": "Transport shape of NativeContent: payload serialized as a plain JSON object.",
         "properties": {
           "payload": {
-            "$ref": "#/components/schemas/BaseModel"
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "title": "Payload",
+            "type": "object"
           },
           "ref": {
             "$ref": "#/components/schemas/ContentRef"
@@ -2328,7 +2328,7 @@
           "schema_version",
           "payload"
         ],
-        "title": "NativeContent",
+        "title": "NativeContentView",
         "type": "object"
       },
       "ObservationProvenance": {
@@ -3894,7 +3894,7 @@
         "properties": {
           "items": {
             "items": {
-              "$ref": "#/components/schemas/AccessStatus"
+              "$ref": "#/components/schemas/SourceStatusEntry"
             },
             "title": "Items",
             "type": "array"
@@ -3927,6 +3927,70 @@
           "status"
         ],
         "title": "SourceMutationResponse",
+        "type": "object"
+      },
+      "SourceStatusEntry": {
+        "additionalProperties": false,
+        "description": "Flat source status plus the provider's declared capability kinds.",
+        "properties": {
+          "account_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Id"
+          },
+          "capabilities": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Capabilities",
+            "type": "array"
+          },
+          "method_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Method Id"
+          },
+          "provider_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Provider Id",
+            "type": "string"
+          },
+          "state": {
+            "maxLength": 32,
+            "minLength": 1,
+            "title": "State",
+            "type": "string"
+          },
+          "verification": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/VerificationResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "provider_id",
+          "state"
+        ],
+        "title": "SourceStatusEntry",
         "type": "object"
       },
       "StableInterestClaim": {

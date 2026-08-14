@@ -38,6 +38,7 @@ LAYERS = (
     "l1b",
     "l1youtube",
     "l1bangumi",
+    "l1v2ex",
     "l2",
     "l3",
     "l4",

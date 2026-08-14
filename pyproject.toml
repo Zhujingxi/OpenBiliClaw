@@ -157,6 +157,7 @@ markers = [
     "e2e_l1b: authenticated content acquisition",
     "e2e_l1youtube: anonymous YouTube acquisition via yt-dlp",
     "e2e_l1bangumi: anonymous Bangumi acquisition via api.bgm.tv",
+    "e2e_l1v2ex: anonymous V2EX acquisition via www.v2ex.com",
     "e2e_l2: observations",
     "e2e_l3: understanding",
     "e2e_l4: recommendation",

@@ -100,10 +100,8 @@ async def test_v2ex_fetch_creator_latest_pagination_and_object_response() -> Non
     assert calls[-1].url.params["username"] == "alice"
     page = json.loads(await transport("feed", "latest", "0", 1))
     assert page["next_cursor"] == "1"
-    searched = json.loads(await transport("search", "topic", "0", 5))
-    assert len(searched["items"]) == 1
-    empty = json.loads(await transport("search", "missing", "0", 5))
-    assert empty["items"] == []
+    with pytest.raises(ValueError, match="unsupported operation"):
+        await transport("search", "topic", "0", 5)
 
 
 async def test_v2ex_invalid_envelope_and_transport_error() -> None:

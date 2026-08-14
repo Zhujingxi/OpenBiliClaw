@@ -69,18 +69,30 @@ Transport exists; this phase proves it live and wires anonymous access.
 - [x] 1.6 Docs: `docs/modules/content-provider-authoring.md` capability matrix,
   changelog.
 
-## Phase 2 — V2EX 🔲
+## Phase 2 — V2EX ✅ (2026-08-14)
 
-Same shape as Phase 1.
+Same shape as Phase 1. **Key decision**: V2EX has no official full-text search
+endpoint — SEARCH was dropped from the manifest (YouTube-FEED precedent) rather
+than keeping local hot-list filtering disguised as search. Layer tests
+feed("hot") + fetch.
 
-- [ ] 2.1 Anonymous connect verification/fix (TDD).
-- [ ] 2.2 Unit-test gaps: topic normalization, `www.v2ex.com/t/<id>` canonical URLs,
-  typed errors.
-- [ ] 2.3 Live e2e layer `l1v2ex`: anonymous connect → search → invariant ids →
-  topic detail with title.
-- [ ] 2.4 Enable in the three configs.
-- [ ] 2.5 Reviewer PASS → gates → commit → UI spot-check.
-- [ ] 2.6 Docs + changelog.
+- [x] 2.1 Anonymous connect verification/fix (TDD).
+- [x] 2.2 Unit-test gaps: topic normalization, `www.v2ex.com/t/<id>` canonical URLs,
+  typed errors. Package coverage is 97% branch-aware.
+- [x] 2.3 Live e2e layer `l1v2ex`: anonymous connect → hot feed at limit 20 →
+  invariant ids → topic detail with title. SEARCH was dropped from the manifest:
+  V2EX has no official full-text search API; the prior implementation only filtered
+  `/api/topics/hot.json` client-side.
+- [x] 2.4 Enable in the three configs (`config.example.toml` already included V2EX).
+- [x] 2.5 Reviewer PASS → gates → commit → UI spot-check. UI found that v2ex
+  (now search-less) still appeared in the Search provider select → fixed at the
+  seam: `/v1/sources` entries now carry declared `capabilities`
+  (facade.provider_capabilities → SourceStatusEntry), SearchView filters to
+  search-capable providers (permissive when metadata absent); pre-existing
+  `NativeContent.payload: BaseModel` → `Record<string, never>` transport-typing
+  defect fixed via `NativeContentView` (payload as plain JSON object).
+  GATE-PROCESS FIX: gates must run unpiped — `cmd | tail` masks failures.
+- [x] 2.6 Docs + changelog.
 
 ## Phase 3 — Linux.do 🔲 (new transport)
 

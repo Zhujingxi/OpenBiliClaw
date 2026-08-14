@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import AsyncState from "../components/AsyncState.vue";
-import { inject, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, inject, onBeforeUnmount, onMounted, ref } from "vue";
 import { useContentStore } from "../stores/content";
 import { useSourcesStore } from "../stores/sources";
 import type { ContentPreview } from "@openbiliclaw/presentation";
@@ -11,12 +11,22 @@ const store = useContentStore();
 const sources = useSourcesStore();
 const provider = ref(store.lastProvider);
 const query = ref(store.lastQuery);
+// Providers without a declared search capability (e.g. v2ex) are not offered;
+// entries without capability metadata stay visible for backward compatibility.
+const searchable = computed(() =>
+  sources.items.filter(
+    (item) =>
+      item.capabilities === undefined ||
+      item.capabilities.length === 0 ||
+      item.capabilities.includes("search"),
+  ),
+);
 onMounted(() => {
   void sources.load(api).then(() => {
-    const first = sources.items[0];
+    const first = searchable.value[0];
     if (
       first !== undefined &&
-      !sources.items.some((item) => item.provider_id === provider.value)
+      !searchable.value.some((item) => item.provider_id === provider.value)
     ) {
       provider.value = first.provider_id;
     }
@@ -34,7 +44,7 @@ onBeforeUnmount(store.cancelSearch);
       <label for="search-provider">Provider</label>
       <select id="search-provider" v-model="provider" required>
         <option
-          v-for="item in sources.items"
+          v-for="item in searchable"
           :key="item.provider_id"
           :value="item.provider_id"
         >

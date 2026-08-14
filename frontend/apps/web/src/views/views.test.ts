@@ -169,6 +169,34 @@ describe("web view behavior", () => {
     expect(routeParameter(location.hash)).toBe(JSON.stringify(preview.ref));
   });
 
+  it("excludes providers that declare no search capability from the select", async () => {
+    const web = api({
+      listSources: async () => [
+        {
+          provider_id: "v2ex",
+          account_id: null,
+          state: "connected",
+          method_id: "builtin.anonymous",
+          verification: null,
+          capabilities: ["creator", "feed", "fetch", "projection"],
+        },
+        {
+          provider_id: "bangumi",
+          account_id: null,
+          state: "connected",
+          method_id: "builtin.anonymous",
+          verification: null,
+          capabilities: ["feed", "fetch", "projection", "search"],
+        },
+      ],
+    });
+    const wrapper = mountView(SearchView, web);
+    await vi.waitFor(() =>
+      expect(wrapper.get("#search-provider").text()).toContain("bangumi"),
+    );
+    expect(wrapper.get("#search-provider").text()).not.toContain("v2ex");
+  });
+
   it("offers connected providers as a select and keeps form state across remounts", async () => {
     const search = vi.fn(api().search);
     const web = api({

@@ -199,6 +199,10 @@ class Facade:
         await self._call("list_sources")
         return SourcesResult(items=(STATUS,))
 
+    def provider_capabilities(self, provider_id: str) -> tuple[str, ...]:
+        assert provider_id == "demo"
+        return ("feed", "fetch")
+
     async def connect_source(self, command: ConnectSourceCommand) -> ConnectSourceResult:
         self.connected_submission = dict(command.submission) if command.submission else None
         await self._call("connect_source")
@@ -395,6 +399,16 @@ async def test_mutation_double_submit_device_contract() -> None:
         )
     assert missing.status_code == mismatch.status_code == 403
     assert accepted.status_code == 200
+
+
+async def test_source_list_includes_provider_capabilities() -> None:
+    facade = Facade()
+    async with client(facade) as api:
+        response = await api.get("/v1/sources")
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["provider_id"] == "demo"
+    assert item["capabilities"] == ["feed", "fetch"]
 
 
 @pytest.mark.parametrize(

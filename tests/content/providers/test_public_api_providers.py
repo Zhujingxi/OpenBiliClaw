@@ -12,10 +12,12 @@ from openbiliclaw.content.integration.capabilities import (
     FeedQuery,
     PageRequest,
     ProviderCursor,
+    SearchCapability,
     SearchQuery,
 )
 from openbiliclaw.content.integration.errors import ContentIntegrationError, IntegrationErrorCode
 from openbiliclaw.content.integration.identity import ProviderId
+from openbiliclaw.content.integration.manifest import CapabilityKind
 from openbiliclaw.content.integration.testing import validate_provider_contract
 from openbiliclaw.content.providers.bangumi import BANGUMI_MANIFEST, BangumiClient, BangumiProvider
 from openbiliclaw.content.providers.bangumi.models import BangumiPage
@@ -143,6 +145,12 @@ def test_manifest_matches_provider(manifest: ProviderManifest, provider: object)
     assert validate_provider_contract(manifest, provider) == ()
 
 
+def test_v2ex_does_not_advertise_unofficial_search() -> None:
+    provider = V2EXProvider(V2EXClient(Transport({})))
+    assert CapabilityKind.SEARCH not in V2EX_MANIFEST.capabilities
+    assert not isinstance(provider, SearchCapability)
+
+
 @pytest.mark.parametrize(
     ("page_type", "payload"),
     [
@@ -202,6 +210,8 @@ async def test_v2ex_feed_canonical_topic_and_published_time() -> None:
     assert page.items[0].ref.canonical_url == "https://www.v2ex.com/t/99"
     assert page.items[0].source_timestamp == NOW
     native = await provider.fetch(page.items[0].ref, access("v2ex"))
+    assert provider.recommendation_candidate(native).ref == native.ref
+    assert provider.search_document(native).body
     assert provider.card_data(native).badge == "V2EX · Python · 7 replies"
 
 
@@ -217,7 +227,6 @@ async def test_wrong_access_is_rejected() -> None:
     [
         (YouTubeProvider(YouTubeClient(Transport({}))), "youtube"),
         (BangumiProvider(BangumiClient(Transport({}))), "bangumi"),
-        (V2EXProvider(V2EXClient(Transport({}))), "v2ex"),
     ],
 )
 async def test_foreign_cursor_is_rejected(provider: SearchProvider, provider_id: str) -> None:

@@ -4,7 +4,10 @@ import {
   type components,
 } from "@openbiliclaw/api-client";
 
-export type SourceStatus = components["schemas"]["AccessStatus"];
+export type SourceStatus = Omit<
+  components["schemas"]["SourceStatusEntry"],
+  "capabilities"
+> & { capabilities?: string[] };
 export type RecommendationPage = components["schemas"]["RecommendationPage"];
 export type ProfileResponse = components["schemas"]["ProfileResponse"];
 export type EditProfileResult = components["schemas"]["EditProfileResult"];

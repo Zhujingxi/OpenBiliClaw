@@ -539,8 +539,6 @@ export interface components {
             /** Value */
             value: string;
         };
-        /** BaseModel */
-        BaseModel: Record<string, never>;
         /**
          * CanonicalProfile
          * @description The sole durable representation of user understanding.
@@ -778,7 +776,7 @@ export interface components {
         };
         /** ContentResponse */
         ContentResponse: {
-            content: components["schemas"]["NativeContent"];
+            content: components["schemas"]["NativeContentView"];
         };
         /** ContentSavedObservation */
         ContentSavedObservation: {
@@ -1184,6 +1182,7 @@ export interface components {
          * @enum {string}
          */
         JobResult: "success" | "error" | "timeout" | "cancelled";
+        JsonValue: unknown;
         /** ModelCatalogResponse */
         ModelCatalogResponse: {
             /** Providers */
@@ -1226,14 +1225,14 @@ export interface components {
             secret_configured: boolean;
         };
         /**
-         * NativeContent
-         * @description Validated provider-native record at the heterogeneous registry boundary.
-         *
-         *     Providers must validate external JSON into their own Pydantic model before
-         *     constructing this envelope. Untyped mappings are rejected.
+         * NativeContentView
+         * @description Transport shape of NativeContent: payload serialized as a plain JSON object.
          */
-        NativeContent: {
-            payload: components["schemas"]["BaseModel"];
+        NativeContentView: {
+            /** Payload */
+            payload: {
+                [key: string]: components["schemas"]["JsonValue"];
+            };
             ref: components["schemas"]["ContentRef"];
             /** Schema Version */
             schema_version: number;
@@ -1821,7 +1820,7 @@ export interface components {
         /** SourceListResponse */
         SourceListResponse: {
             /** Items */
-            items: components["schemas"]["AccessStatus"][];
+            items: components["schemas"]["SourceStatusEntry"][];
         };
         /** SourceMutationResponse */
         SourceMutationResponse: {
@@ -1836,6 +1835,26 @@ export interface components {
              */
             recoverable: boolean;
             status: components["schemas"]["AccessStatus"];
+        };
+        /**
+         * SourceStatusEntry
+         * @description Flat source status plus the provider's declared capability kinds.
+         */
+        SourceStatusEntry: {
+            /** Account Id */
+            account_id?: string | null;
+            /**
+             * Capabilities
+             * @default []
+             */
+            capabilities: string[];
+            /** Method Id */
+            method_id?: string | null;
+            /** Provider Id */
+            provider_id: string;
+            /** State */
+            state: string;
+            verification?: components["schemas"]["VerificationResult"] | null;
         };
         /** StableInterestClaim */
         StableInterestClaim: {

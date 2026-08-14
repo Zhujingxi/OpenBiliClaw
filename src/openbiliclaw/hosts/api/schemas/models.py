@@ -5,10 +5,10 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Annotated, Literal, TypeAlias
 
-from pydantic import ConfigDict, Field, SecretStr, field_validator
+from pydantic import ConfigDict, Field, JsonValue, SecretStr, field_validator
 
 from openbiliclaw.access.forms import ConnectionForm
-from openbiliclaw.access.models import AccessStatus, Permission
+from openbiliclaw.access.models import AccessStatus, Permission, VerificationResult
 from openbiliclaw.ai.providers.catalog import Protocol
 from openbiliclaw.application.content_actions import (
     ConfirmContentActionCommand,
@@ -29,7 +29,6 @@ from openbiliclaw.assistant.models import (
 )
 from openbiliclaw.content.integration.actions import ActionResult
 from openbiliclaw.content.integration.identity import ContentRef
-from openbiliclaw.content.integration.native import NativeContent
 from openbiliclaw.content.integration.projections import CardData, ContentPreview
 from openbiliclaw.core._pydantic import StrictBaseModel
 from openbiliclaw.core.config import CapabilitySettings
@@ -66,8 +65,19 @@ class ErrorEnvelope(TransportModel):
     error: ErrorDetail
 
 
+class SourceStatusEntry(TransportModel):
+    """Flat source status plus the provider's declared capability kinds."""
+
+    provider_id: str = Field(min_length=1, max_length=128)
+    account_id: str | None = None
+    state: str = Field(min_length=1, max_length=32)
+    method_id: str | None = None
+    verification: VerificationResult | None = None
+    capabilities: tuple[str, ...] = ()
+
+
 class SourceListResponse(TransportModel):
-    items: tuple[AccessStatus, ...]
+    items: tuple[SourceStatusEntry, ...]
 
 
 class SourceFormResponse(TransportModel):
@@ -129,8 +139,16 @@ class CardDataResponse(TransportModel):
     card: CardData
 
 
+class NativeContentView(TransportModel):
+    """Transport shape of NativeContent: payload serialized as a plain JSON object."""
+
+    ref: ContentRef
+    schema_version: int = Field(ge=1)
+    payload: dict[str, JsonValue]
+
+
 class ContentResponse(TransportModel):
-    content: NativeContent
+    content: NativeContentView
 
 
 AssistantOutput: TypeAlias = Annotated[

@@ -68,11 +68,12 @@ class HttpxV2EXTransport:
             query = urlencode({"username": argument})
         elif operation == "feed" and argument == "latest":
             path, query = "/api/topics/latest.json", ""
-        else:
-            # V2EX has no official full-text search endpoint. Search and the
-            # default hot feed use the bounded official hot response; the
-            # provider applies query filtering in a future discovery strategy.
+        elif operation == "feed":
+            # V2EX has no official full-text search endpoint; the default feed
+            # is the bounded official hot response.
             path, query = "/api/topics/hot.json", ""
+        else:
+            raise ValueError(f"unsupported operation {operation!r}")
         url = f"{self._BASE}{path}" + (f"?{query}" if query else "")
         async with self._factory.client(transport=self._transport) as client:
             try:
@@ -89,13 +90,6 @@ class HttpxV2EXTransport:
             else:
                 raise ValueError("invalid response")
             all_items = tuple(_topic(row) for value in rows if (row := _mapping(value)) is not None)
-            if operation == "search":
-                needle = argument.strip().casefold()
-                all_items = tuple(
-                    item
-                    for item in all_items
-                    if needle in f"{item.title}\n{item.content}".casefold()
-                )
             page_limit = min(50, max(1, limit))
             items = all_items[offset : offset + page_limit]
             next_offset = offset + len(items)

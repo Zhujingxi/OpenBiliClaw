@@ -11,7 +11,6 @@ from openbiliclaw.content.integration.capabilities import (
     FeedQuery,
     PageRequest,
     ProviderCursor,
-    SearchQuery,
 )
 from openbiliclaw.content.integration.errors import ContentIntegrationError, IntegrationErrorCode
 from openbiliclaw.content.integration.identity import ContentRef
@@ -39,10 +38,6 @@ class V2EXProvider:
 
     def __init__(self, client: V2EXClient) -> None:
         self._client = client
-
-    async def search(self, query: SearchQuery, access: AccessHandle) -> ContentPage[ContentPreview]:
-        self._access(access)
-        return await self._page("search", query.text, query.page)
 
     async def feed(self, query: FeedQuery, access: AccessHandle) -> ContentPage[ContentPreview]:
         self._access(access)

@@ -10,6 +10,7 @@ from ..schemas.models import (
     ActionResultResponse,
     ConfirmActionRequest,
     ContentResponse,
+    NativeContentView,
     PendingActionResponse,
     ProposeActionRequest,
     SearchResponse,
@@ -39,10 +40,14 @@ async def detail(
         content_ref = ContentRef.model_validate_json(reference)
     except ValidationError as exc:
         raise HTTPException(status_code=422) from exc
+    result = await dependencies.facade.get_content_details(content_ref.model_dump_json())
+    native = result.content
     return ContentResponse(
-        content=(
-            await dependencies.facade.get_content_details(content_ref.model_dump_json())
-        ).content
+        content=NativeContentView(
+            ref=native.ref,
+            schema_version=native.schema_version,
+            payload=dict(native.payload.model_dump(mode="json")),
+        )
     )
 
 

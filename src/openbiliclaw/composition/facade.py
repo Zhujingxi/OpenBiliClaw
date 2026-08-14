@@ -169,6 +169,7 @@ class CompositionFacade:
         self._profile = ShowProfile(understanding)
         self._search = SearchContent(registry, access)
         self._details = GetContentDetails(registry, access)
+        self._registry = registry
         self._health = health
         self._refresh = refresh
         self._feedback = feedback
@@ -214,6 +215,10 @@ class CompositionFacade:
 
     async def list_sources(self, account_id: str | None, limit: int) -> SourcesResult:
         return await self._sources(ListSourcesQuery(account_id=account_id, limit=limit))
+
+    def provider_capabilities(self, provider_id: str) -> tuple[str, ...]:
+        manifest = self._registry.manifest(ProviderId(value=provider_id))
+        return tuple(sorted(capability.value for capability in manifest.capabilities))
 
     async def connect_source(self, command: ConnectSourceCommand) -> ConnectSourceResult:
         return await self._connect(command)

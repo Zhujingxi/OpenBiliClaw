@@ -12,6 +12,7 @@ from ..schemas.models import (
     SourceFormResponse,
     SourceListResponse,
     SourceMutationResponse,
+    SourceStatusEntry,
 )
 
 router = APIRouter(prefix="/sources", tags=["sources"])
@@ -24,7 +25,19 @@ async def list_sources(
     dependencies: HostDependencies = Depends(get_dependencies),
 ) -> SourceListResponse:
     result = await dependencies.facade.list_sources(account_id, limit)
-    return SourceListResponse(items=result.items)
+    return SourceListResponse(
+        items=tuple(
+            SourceStatusEntry(
+                provider_id=status.provider_id,
+                account_id=status.account_id,
+                state=status.state.value,
+                method_id=status.method_id,
+                verification=status.verification,
+                capabilities=dependencies.facade.provider_capabilities(status.provider_id),
+            )
+            for status in result.items
+        )
+    )
 
 
 @router.get("/{provider_id}/status", response_model=SourceMutationResponse)

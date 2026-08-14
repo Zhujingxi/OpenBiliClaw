@@ -62,6 +62,9 @@ class _SchemaFacade:
     async def list_sources(self, account_id: str | None, limit: int) -> SourcesResult:
         self._unavailable()
 
+    def provider_capabilities(self, provider_id: str) -> tuple[str, ...]:
+        self._unavailable()
+
     async def connect_source(self, command: ConnectSourceCommand) -> ConnectSourceResult:
         self._unavailable()
 
