@@ -180,7 +180,7 @@ def _builders(vault: CredentialVault) -> dict[str, Callable[[], _BuiltProvider]]
 
     from openbiliclaw.content.providers.linuxdo.client import HttpxLinuxDoTransport, LinuxDoClient
     from openbiliclaw.content.providers.reddit.client import RedditClient
-    from openbiliclaw.content.providers.weibo.client import WeiboClient
+    from openbiliclaw.content.providers.weibo.client import HttpxWeiboTransport, WeiboClient
     from openbiliclaw.content.providers.x.client import XClient
     from openbiliclaw.content.providers.zhihu.client import ZhihuClient
 
@@ -208,7 +208,9 @@ def _builders(vault: CredentialVault) -> dict[str, Callable[[], _BuiltProvider]]
         ),
         "rednote": lambda: _BuiltProvider(REDNOTE_MANIFEST, RednoteProvider()),
         "v2ex": v2ex,
-        "weibo": lambda: _BuiltProvider(WEIBO_MANIFEST, WeiboProvider(WeiboClient(unavailable))),
+        "weibo": lambda: _BuiltProvider(
+            WEIBO_MANIFEST, WeiboProvider(WeiboClient(HttpxWeiboTransport()))
+        ),
         "x": lambda: _BuiltProvider(
             X_MANIFEST,
             XProvider(XClient(unavailable, resolver)),

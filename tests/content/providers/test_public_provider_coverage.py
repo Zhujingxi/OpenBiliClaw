@@ -22,6 +22,8 @@ from openbiliclaw.content.providers.linuxdo import LinuxDoClient, LinuxDoProvide
 from openbiliclaw.content.providers.linuxdo.models import LinuxDoItem, LinuxDoPage
 from openbiliclaw.content.providers.v2ex import V2EXClient, V2EXProvider
 from openbiliclaw.content.providers.v2ex.models import V2EXMember, V2EXNode, V2EXPage, V2EXTopic
+from openbiliclaw.content.providers.weibo import WeiboClient, WeiboProvider
+from openbiliclaw.content.providers.weibo.models import WeiboItem, WeiboPage
 from openbiliclaw.content.providers.youtube import YouTubeClient, YouTubeProvider
 from openbiliclaw.content.providers.youtube.models import YouTubeChannel, YouTubePage, YouTubeVideo
 
@@ -42,17 +44,30 @@ class PageDump(Protocol):
     def model_dump_json(self) -> str: ...
 
 
-class PublicProvider(Protocol):
+class SearchProjections(Protocol):
     async def search(
         self, query: SearchQuery, access: AccessHandle
     ) -> ContentPage[ContentPreview]: ...
-    async def fetch(self, ref: ContentRef, access: AccessHandle) -> NativeContent: ...
     def native_from_payload(self, payload: dict[str, object]) -> NativeContent: ...
     def preview(self, content: NativeContent) -> ContentPreview: ...
     def recommendation_candidate(self, content: NativeContent) -> RecommendationCandidate: ...
     def search_document(self, content: NativeContent) -> SearchDocument: ...
     def card_data(self, content: NativeContent) -> CardData: ...
     def _ref(self, ref: ContentRef) -> None: ...
+
+
+class PublicProvider(SearchProjections, Protocol):
+    async def fetch(self, ref: ContentRef, access: AccessHandle) -> NativeContent: ...
+
+
+class WeiboTransport:
+    async def search(
+        self, text: str, cursor: str | None, limit: int, credential: str | None
+    ) -> bytes:
+        return WeiboPage(items=(weibo_post(),), next_cursor=None).model_dump_json().encode()
+
+    async def fetch(self, content_id: str, credential: str | None) -> bytes:
+        return weibo_post().model_dump_json().encode()
 
 
 class LinuxTransport:
@@ -117,6 +132,17 @@ def linux_topic() -> LinuxDoItem:
         body="body",
         author="a",
         url="https://linux.do/t/topic/1",
+        published_at=int(NOW.timestamp()),
+    )
+
+
+def weibo_post() -> WeiboItem:
+    return WeiboItem(
+        id="5012345678901234",
+        title="post",
+        body="body",
+        author="a",
+        url="https://weibo.com/status/P0stBid",
         published_at=int(NOW.timestamp()),
     )
 
@@ -186,6 +212,19 @@ async def test_search_and_all_projections(provider: PublicProvider, provider_id:
     assert provider.card_data(native).ref == native.ref
 
 
+async def test_weibo_search_and_all_projections_without_fetch() -> None:
+    """Weibo has no anonymous detail endpoint; projections come from search payloads."""
+    provider = WeiboProvider(WeiboClient(WeiboTransport()))
+    result = await provider.search(
+        SearchQuery(text="x", page=PageRequest(limit=1)), access("weibo")
+    )
+    native = provider.native_from_bytes(weibo_post().model_dump_json().encode())
+    assert native.ref == result.items[0].ref
+    assert provider.recommendation_candidate(native).ref == native.ref
+    assert provider.search_document(native).body
+    assert provider.card_data(native).ref == native.ref
+
+
 @pytest.mark.parametrize(
     ("provider", "provider_id", "kind", "item_id"),
     [
@@ -213,16 +252,23 @@ async def test_search_and_all_projections(provider: PublicProvider, provider_id:
             "topic",
             "1",
         ),
+        (
+            WeiboProvider(WeiboClient(WeiboTransport())),
+            "weibo",
+            "post",
+            "5012345678901234",
+        ),
     ],
 )
 def test_native_from_payload_and_wrong_payload_projection(
-    provider: PublicProvider, provider_id: str, kind: str, item_id: str
+    provider: SearchProjections, provider_id: str, kind: str, item_id: str
 ) -> None:
     model: PageDump = {
         "youtube": video(),
         "bangumi": subject(),
         "linuxdo": linux_topic(),
         "v2ex": topic(),
+        "weibo": weibo_post(),
     }[provider_id]
     native = provider.native_from_payload(_PAYLOAD.validate_json(model.model_dump_json()))
     assert native.ref.provider_content_id == item_id
@@ -253,9 +299,10 @@ def test_native_from_payload_and_wrong_payload_projection(
             "v2ex",
             "topic",
         ),
+        (WeiboProvider(WeiboClient(WeiboTransport())), "weibo", "post"),
     ],
 )
-def test_foreign_ref_rejected(provider: PublicProvider, provider_id: str, kind: str) -> None:
+def test_foreign_ref_rejected(provider: SearchProjections, provider_id: str, kind: str) -> None:
     ref = ContentRef(
         provider_id=ProviderId(value="other"),
         content_kind=ContentKind(value=kind),

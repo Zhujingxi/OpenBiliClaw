@@ -20,7 +20,6 @@ from openbiliclaw.content.integration.manifest import ProviderManifest
 from openbiliclaw.content.integration.registry import provider_contract_violations
 from openbiliclaw.content.providers.linuxdo import LINUXDO_MANIFEST, LinuxDoClient, LinuxDoProvider
 from openbiliclaw.content.providers.reddit import REDDIT_MANIFEST, RedditClient, RedditProvider
-from openbiliclaw.content.providers.weibo import WEIBO_MANIFEST, WeiboClient, WeiboProvider
 from openbiliclaw.content.providers.x import X_MANIFEST, XClient, XProvider
 from openbiliclaw.content.providers.zhihu import ZHIHU_MANIFEST, ZhihuClient, ZhihuProvider
 
@@ -115,17 +114,12 @@ def _linuxdo(t: Transport, r: Resolver) -> ManualProvider:
     return LinuxDoProvider(LinuxDoClient(t, r))
 
 
-def _weibo(t: Transport, r: Resolver) -> ManualProvider:
-    return WeiboProvider(WeiboClient(t))
-
-
 Case = tuple[str, str, ProviderManifest, Callable[[Transport, Resolver], ManualProvider], bool]
 PROVIDERS: tuple[Case, ...] = (
     ("reddit", "post", REDDIT_MANIFEST, _reddit, True),
     ("x", "post", X_MANIFEST, _x, True),
     ("zhihu", "answer", ZHIHU_MANIFEST, _zhihu, True),
     ("linuxdo", "topic", LINUXDO_MANIFEST, _linuxdo, True),
-    ("weibo", "post", WEIBO_MANIFEST, _weibo, False),
 )
 
 

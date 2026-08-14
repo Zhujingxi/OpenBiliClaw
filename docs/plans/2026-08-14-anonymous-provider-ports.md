@@ -118,23 +118,33 @@ feed("hot") + fetch.
   assertion unchanged. Reviewer PASS → gates → commit (no UI check: not enabled).
 - [x] 3.7 Docs + changelog (honest blocked status).
 
-## Phase 4 — Weibo 🔲 (port old anonymous client)
+## Phase 4 — Weibo ✅ (2026-08-14; live verification rewrote key assumptions)
 
-- [ ] 4.1 TDD port of `main:src/openbiliclaw/sources/weibo_client.py` into the
+**Live-verification corrections (2026-08-14)**: anonymous search uses
+`100103type=64` (type=1 is anonymously dead); visitor cookies are randomly
+soft-blocked (ok=0 / ok=1-total=0 variants) → bounded fresh-cookie retries with
+1s decorrelation; FETCH dropped — all anonymous detail endpoints are
+login-walled or unreliable (honest-capability precedent).
+
+- [x] 4.1 TDD port of `main:src/openbiliclaw/sources/weibo_client.py` into the
   provider contract: anonymous visitor flow (`visitor.passport.weibo.cn/…/genvisitor2`
   → in-memory `SUB` cookie, never persisted, never user cookies), search via
   `m.weibo.cn/api/container/getIndex`, hot via `weibo.com/ajax/side/hotSearch`.
   Failing tests first (visitor-flow state machine, SUB refresh on 401/403).
-- [ ] 4.2 Typed errors + allowlist normalization; HTML→text extraction for weibo
+- [x] 4.2 Typed errors + allowlist normalization; HTML→text extraction for weibo
   bodies (port `_HTMLTextExtractor` behavior as unit-tested helper).
-- [ ] 4.3 `projections.py`: mblog → ContentPreview; identity = mblog id /
-  `weibo.com/status/<bid>` canonical URL.
-- [ ] 4.4 Wire in composition; anonymous connect.
-- [ ] 4.5 Live e2e layer `l1weibo`: anonymous connect → search → detail. NOTE:
+- [x] 4.3 Existing `capabilities.py` projection seam: mblog → ContentPreview;
+  identity = numeric mblog id / `weibo.com/status/<bid>` canonical URL. No
+  parallel `projections.py` was added.
+- [x] 4.4 Wire in composition; anonymous connect.
+- [x] 4.5 Live e2e layer `l1weibo` (2/2 across three consecutive runs): anonymous connect → search identity + preview completeness (no detail — FETCH dropped). NOTE:
   m.weibo.cn churns (dataabc/weibo-crawler broke 2025-06) — if the visitor flow is
   dead upstream, STOP, report, and re-scope rather than faking.
-- [ ] 4.6 Enable in configs. Reviewer PASS → gates → commit → UI spot-check.
-- [ ] 4.7 Docs + changelog.
+- [x] 4.6 Enabled in configs. UI spot-check: weibo search renders real posts;
+  clicking a fetch-less result dead-ended on "fetch unavailable" → SearchView
+  now opens the canonical URL externally for fetch-less providers (uses the
+  capabilities data from Phase 2). Reviewer → commit.
+- [x] 4.7 Docs + changelog (churn taxonomy + FETCH drop documented).
 
 ## Phase 5 — All-platform final sweep 🔲
 

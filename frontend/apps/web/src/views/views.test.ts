@@ -169,6 +169,64 @@ describe("web view behavior", () => {
     expect(routeParameter(location.hash)).toBe(JSON.stringify(preview.ref));
   });
 
+  it("opens results from fetch-less providers on their canonical URL", async () => {
+    const web = api({
+      listSources: async () => [
+        {
+          provider_id: "weibo",
+          account_id: null,
+          state: "connected",
+          method_id: "builtin.anonymous",
+          verification: null,
+          capabilities: ["projection", "search"],
+        },
+      ],
+      search: async () => ({
+        items: [
+          {
+            ref: {
+              provider_id: { value: "weibo" },
+              content_kind: { value: "post" },
+              provider_content_id: "5012345678901234",
+              canonical_url: "https://weibo.com/status/P0stBid",
+            },
+            title: "A weibo post",
+            summary: "body",
+            source_timestamp: "2025-01-02T00:00:00Z",
+            provenance: {
+              ref: {
+                provider_id: { value: "weibo" },
+                content_kind: { value: "post" },
+                provider_content_id: "5012345678901234",
+                canonical_url: "https://weibo.com/status/P0stBid",
+              },
+              native_schema_version: 1,
+              projected_at: "2025-01-02T00:00:00Z",
+            },
+          },
+        ],
+      }),
+    });
+    const opened: string[] = [];
+    vi.stubGlobal(
+      "open",
+      vi.fn((url: string) => {
+        opened.push(url);
+      }),
+    );
+    const wrapper = mountView(SearchView, web);
+    await vi.waitFor(() =>
+      expect(wrapper.get("#search-provider").text()).toContain("weibo"),
+    );
+    await wrapper.get("#search-query").setValue("anything");
+    await wrapper.get("form").trigger("submit");
+    await vi.waitFor(() => expect(wrapper.text()).toContain("A weibo post"));
+    await wrapper.get("ul button").trigger("click");
+    expect(opened).toEqual(["https://weibo.com/status/P0stBid"]);
+    expect(location.hash).not.toContain("#/content/");
+    vi.unstubAllGlobals();
+  });
+
   it("excludes providers that declare no search capability from the select", async () => {
     const web = api({
       listSources: async () => [

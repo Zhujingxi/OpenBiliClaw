@@ -40,13 +40,11 @@ class WeiboProvider:
             else None,
         )
 
-    async def fetch(self, ref: ContentRef, access: AccessHandle) -> NativeContent:
-        credential = self._access(access)
-        self._ref(ref)
-        return self.native(await self._client.fetch(ref.provider_content_id, credential))
-
     def native_from_bytes(self, raw: bytes) -> NativeContent:
         return self.native(WeiboItem.model_validate_json(raw))
+
+    def native_from_payload(self, payload: dict[str, object]) -> NativeContent:
+        return self.native(WeiboItem.model_validate(payload))
 
     @staticmethod
     def native(item: WeiboItem) -> NativeContent:
@@ -55,7 +53,7 @@ class WeiboProvider:
                 provider_id=WEIBO_ID,
                 content_kind=POST_KIND,
                 provider_content_id=item.id,
-                canonical_url=f"https://m.weibo.cn/detail/{item.id}",
+                canonical_url=item.url,
             ),
             schema_version=1,
             payload=item,

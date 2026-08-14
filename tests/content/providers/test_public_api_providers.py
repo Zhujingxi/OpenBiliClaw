@@ -29,6 +29,8 @@ from openbiliclaw.content.providers.linuxdo import (
 from openbiliclaw.content.providers.linuxdo.models import LinuxDoItem, LinuxDoPage
 from openbiliclaw.content.providers.v2ex import V2EX_MANIFEST, V2EXClient, V2EXProvider
 from openbiliclaw.content.providers.v2ex.models import V2EXPage
+from openbiliclaw.content.providers.weibo import WEIBO_MANIFEST, WeiboClient, WeiboProvider
+from openbiliclaw.content.providers.weibo.models import WeiboItem, WeiboPage
 from openbiliclaw.content.providers.youtube import YOUTUBE_MANIFEST, YouTubeClient, YouTubeProvider
 from openbiliclaw.content.providers.youtube.models import YouTubePage
 
@@ -48,6 +50,16 @@ class SearchProvider(Protocol):
 
 class PageClient(Protocol):
     async def page(self, operation: str, argument: str, cursor: str, limit: int) -> object: ...
+
+
+class WeiboTransport:
+    async def search(
+        self, text: str, cursor: str | None, limit: int, credential: str | None
+    ) -> bytes:
+        return weibo_page()
+
+    async def fetch(self, content_id: str, credential: str | None) -> bytes:
+        return weibo_item().model_dump_json().encode()
 
 
 class LinuxDoTransport:
@@ -147,6 +159,21 @@ def linuxdo_page(*, cursor: str | None = "2") -> bytes:
     return LinuxDoPage(items=(linuxdo_item(),), next_cursor=cursor).model_dump_json().encode()
 
 
+def weibo_item() -> WeiboItem:
+    return WeiboItem(
+        id="5012345678901234",
+        title="Typed Weibo Post",
+        body="post body",
+        author="alice",
+        url="https://weibo.com/status/P0stBid",
+        published_at=int(NOW.timestamp()),
+    )
+
+
+def weibo_page(*, cursor: str | None = "2") -> bytes:
+    return WeiboPage(items=(weibo_item(),), next_cursor=cursor).model_dump_json().encode()
+
+
 def v2ex_page(*, cursor: str | None = "20") -> bytes:
     return (
         V2EXPage(
@@ -183,6 +210,7 @@ def v2ex_page(*, cursor: str | None = "20") -> bytes:
             ),
         ),
         (V2EX_MANIFEST, V2EXProvider(V2EXClient(Transport({})))),
+        (WEIBO_MANIFEST, WeiboProvider(WeiboClient(WeiboTransport()))),
     ],
 )
 def test_manifest_matches_provider(manifest: ProviderManifest, provider: object) -> None:
@@ -195,6 +223,13 @@ def test_v2ex_does_not_advertise_unofficial_search() -> None:
     assert not isinstance(provider, SearchCapability)
 
 
+def test_weibo_does_not_advertise_login_gated_fetch() -> None:
+    """Anonymous detail-by-id is login-walled upstream; fetch stays dropped."""
+    provider = WeiboProvider(WeiboClient(WeiboTransport()))
+    assert CapabilityKind.FETCH not in WEIBO_MANIFEST.capabilities
+    assert not hasattr(provider, "fetch")
+
+
 @pytest.mark.parametrize(
     ("page_type", "payload"),
     [
@@ -202,6 +237,7 @@ def test_v2ex_does_not_advertise_unofficial_search() -> None:
         (BangumiPage, bangumi_page()),
         (LinuxDoPage, linuxdo_page()),
         (V2EXPage, v2ex_page()),
+        (WeiboPage, weibo_page()),
     ],
 )
 def test_native_pages_reject_schema_drift(page_type: type[StrictBaseModel], payload: bytes) -> None:
@@ -264,6 +300,21 @@ async def test_linuxdo_search_canonical_topic_and_all_projections() -> None:
     assert provider.card_data(native).badge == "LinuxDo"
 
 
+async def test_weibo_search_canonical_post_and_all_projections() -> None:
+    provider = WeiboProvider(WeiboClient(WeiboTransport()))
+    page = await provider.search(
+        SearchQuery(text="typed", page=PageRequest(limit=20)), access("weibo")
+    )
+    assert page.items[0].ref.provider_content_id == "5012345678901234"
+    assert page.items[0].ref.canonical_url == "https://weibo.com/status/P0stBid"
+    assert page.next_cursor == ProviderCursor(provider_id=ProviderId(value="weibo"), value="2")
+    native = provider.native_from_bytes(weibo_item().model_dump_json().encode())
+    assert provider.preview(native).ref == native.ref
+    assert provider.recommendation_candidate(native).ref == native.ref
+    assert provider.search_document(native).body == "post body"
+    assert provider.card_data(native).badge == "Weibo"
+
+
 async def test_v2ex_feed_canonical_topic_and_published_time() -> None:
     transport = Transport({("feed", "hot"): v2ex_page(), ("fetch", "99"): v2ex_page(cursor=None)})
     provider = V2EXProvider(V2EXClient(transport))
@@ -296,6 +347,7 @@ async def test_wrong_access_is_rejected() -> None:
             ),
             "linuxdo",
         ),
+        (WeiboProvider(WeiboClient(WeiboTransport())), "weibo"),
     ],
 )
 async def test_foreign_cursor_is_rejected(provider: SearchProvider, provider_id: str) -> None:

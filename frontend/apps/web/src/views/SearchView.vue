@@ -33,6 +33,15 @@ onMounted(() => {
   });
 });
 function open(item: ContentPreview): void {
+  // Providers without a fetch capability (e.g. weibo) have no in-app detail;
+  // their previews are complete, so open the canonical URL instead.
+  const capabilities = sources.items.find(
+    (entry) => entry.provider_id === item.ref.provider_id.value,
+  )?.capabilities;
+  if (capabilities !== undefined && !capabilities.includes("fetch")) {
+    window.open(item.ref.canonical_url, "_blank", "noopener");
+    return;
+  }
   location.hash = `#/content/${encodeURIComponent(JSON.stringify(item.ref))}`;
 }
 onBeforeUnmount(store.cancelSearch);

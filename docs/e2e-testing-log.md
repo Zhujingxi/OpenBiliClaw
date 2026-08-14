@@ -488,3 +488,10 @@ No credential or provider response body is recorded in this matrix trace.
 
 - The `HttpxLinuxDoTransport` implementation passed all hermetic tests (162 provider tests), but the first live probe failed: linux.do Cloudflare-challenges every content-bearing endpoint (`/search.json`, `/latest.json`, `/top.json`, `/t/<id>.json`, `/c/<slug>.json`, `search/query.json`) with 403 "Just a moment…" for non-browser clients — verified with default curl UA and a full browser UA from a residential IP. Only `/site.json`-class metadata endpoints pass.
 - Per the plan's pre-declared stop condition: no enablement, no live layer (no silent skips), transport stays wired in composition (manual-cookie form retained for a future session path), status documented honestly in the capability matrix and changelog.
+
+## Weibo layer incidents (live verification rewrote the port)
+
+- **The old `100103type=1` search container is anonymously dead** (ok=0 "这里还没有内容"). Live probing found `100103type=64` (hot sort) works for visitor cookies; transport switched.
+- **Upstream soft-block taxonomy** (2026-08-14 probes): (a) ok=0 + "这里还没有内容" ≈50% per visitor cookie; (b) ok=1 with total=0 / no mblog cards for queries that actually have results; both re-roll with a fresh visitor cookie. Genuine empty (nonsense query) is ok=1/total=0 — indistinguishable from (b), so soft-empty retries converge to an empty page rather than an error. Transport: bounded 6 attempts with 1s decorrelation delay (rapid-fire retries correlate into block bursts — measured 80%→100% over 10/3 consecutive live runs after the delay).
+- **FETCH dropped (honest capability)**: statuses/show 403s visitor cookies, weibo.com/ajax/statuses/show redirects to login, statuses/extend and the 230413 container are flaky/unreliable. Detail-by-id is login-walled upstream; l1weibo covers search identity + preview completeness instead, with a guard test pinning the drop.
+- l1weibo live: 2/2 green across three consecutive runs.
