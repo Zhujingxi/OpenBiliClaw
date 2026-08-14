@@ -598,7 +598,7 @@ async def test_rejection_admission_constraints_and_transition_trigger(tmp_path: 
     from openbiliclaw.recommendation.evaluation.prefilter import persist_rejections
 
     path = tmp_path / "constraints.db"
-    assert await SchemaMigrator(path).migrate() == 6
+    assert await SchemaMigrator(path).migrate() == 7
     db = SqliteDatabase(path)
     await db.open()
     repo = SqliteRecommendationRepository(db)

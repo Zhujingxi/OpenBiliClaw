@@ -39,6 +39,10 @@ TARGET_TABLE_OWNERS: Final[dict[str, str]] = {
     "pending_actions": "Application Workflows",
     "workflow_idempotency": "Application Workflows",
     "ai_usage_attribution": "AI Runtime",
+    "policy_briefs": "Discovery & Recommendation",
+    "policy_hypotheses": "Discovery & Recommendation",
+    "policy_lessons": "Discovery & Recommendation",
+    "policy_outcomes": "Discovery & Recommendation",
 }
 
 _SCHEMA_V1: Final[tuple[str, ...]] = (
@@ -278,6 +282,57 @@ _SCHEMA_V6: Final[tuple[str, ...]] = (
     )""",
 )
 
+_SCHEMA_V7: Final[tuple[str, ...]] = (
+    """CREATE TABLE IF NOT EXISTS policy_briefs (
+        brief_id TEXT PRIMARY KEY CHECK(brief_id GLOB 'brief_[0-9a-f]*'),
+        episode_id TEXT NOT NULL,
+        record_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS policy_hypotheses (
+        hypothesis_id TEXT PRIMARY KEY CHECK(hypothesis_id GLOB 'hyp_[0-9a-f]*'),
+        arm TEXT NOT NULL,
+        record_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS policy_lessons (
+        lesson_id TEXT PRIMARY KEY CHECK(lesson_id GLOB 'lesson_[0-9a-f]*'),
+        record_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS policy_outcomes (
+        outcome_id TEXT PRIMARY KEY CHECK(outcome_id GLOB 'outcome_[0-9a-f]*'),
+        hypothesis_id TEXT NOT NULL,
+        record_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )""",
+    "CREATE INDEX IF NOT EXISTS policy_outcomes_hypothesis ON policy_outcomes(hypothesis_id)",
+    """CREATE TRIGGER IF NOT EXISTS policy_briefs_append_only_update
+        BEFORE UPDATE ON policy_briefs
+        BEGIN SELECT RAISE(ABORT, 'policy journal is append-only'); END""",
+    """CREATE TRIGGER IF NOT EXISTS policy_briefs_append_only_delete
+        BEFORE DELETE ON policy_briefs
+        BEGIN SELECT RAISE(ABORT, 'policy journal is append-only'); END""",
+    """CREATE TRIGGER IF NOT EXISTS policy_hypotheses_append_only_update
+        BEFORE UPDATE ON policy_hypotheses
+        BEGIN SELECT RAISE(ABORT, 'policy journal is append-only'); END""",
+    """CREATE TRIGGER IF NOT EXISTS policy_hypotheses_append_only_delete
+        BEFORE DELETE ON policy_hypotheses
+        BEGIN SELECT RAISE(ABORT, 'policy journal is append-only'); END""",
+    """CREATE TRIGGER IF NOT EXISTS policy_lessons_append_only_update
+        BEFORE UPDATE ON policy_lessons
+        BEGIN SELECT RAISE(ABORT, 'policy journal is append-only'); END""",
+    """CREATE TRIGGER IF NOT EXISTS policy_lessons_append_only_delete
+        BEFORE DELETE ON policy_lessons
+        BEGIN SELECT RAISE(ABORT, 'policy journal is append-only'); END""",
+    """CREATE TRIGGER IF NOT EXISTS policy_outcomes_append_only_update
+        BEFORE UPDATE ON policy_outcomes
+        BEGIN SELECT RAISE(ABORT, 'policy journal is append-only'); END""",
+    """CREATE TRIGGER IF NOT EXISTS policy_outcomes_append_only_delete
+        BEFORE DELETE ON policy_outcomes
+        BEGIN SELECT RAISE(ABORT, 'policy journal is append-only'); END""",
+)
+
 
 DEFAULT_MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(1, _SCHEMA_V1),
@@ -286,6 +341,7 @@ DEFAULT_MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(4, _SCHEMA_V4),
     Migration(5, _SCHEMA_V5),
     Migration(6, _SCHEMA_V6),
+    Migration(7, _SCHEMA_V7),
 )
 
 
