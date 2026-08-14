@@ -125,6 +125,63 @@ test("Firefox manifest uses the project-owned AMO Gecko ID", () => {
   );
 });
 
+test("Safari manifest uses action popup instead of side panel", () => {
+  const root = process.cwd();
+  const manifest = JSON.parse(
+    readFileSync(join(root, "manifest.safari.json"), "utf8"),
+  ) as {
+    action?: { default_popup?: string };
+    permissions?: string[];
+    side_panel?: { default_path?: string };
+  };
+
+  assert.equal(manifest.permissions?.includes("sidePanel"), false);
+  assert.equal(manifest.permissions?.includes("notifications"), false);
+  assert.equal(manifest.side_panel, undefined);
+  assert.equal(manifest.action?.default_popup, "popup/popup.html");
+});
+
+test("Safari manifest keeps alarms/scripting and uses a service worker", () => {
+  const root = process.cwd();
+  const manifest = JSON.parse(
+    readFileSync(join(root, "manifest.safari.json"), "utf8"),
+  ) as {
+    permissions?: string[];
+    background?: { service_worker?: string; scripts?: string[] };
+    browser_specific_settings?: unknown;
+    content_scripts?: Array<{ world?: string }>;
+  };
+
+  assert.equal(manifest.permissions?.includes("alarms"), true);
+  assert.equal(manifest.permissions?.includes("scripting"), true);
+  assert.equal(manifest.permissions?.includes("cookies"), true);
+  assert.equal(manifest.background?.service_worker, "background/service-worker.js");
+  assert.equal(manifest.background?.scripts, undefined);
+  assert.equal(manifest.browser_specific_settings, undefined);
+  assert.equal(
+    manifest.content_scripts?.some((entry) => entry.world !== undefined),
+    false,
+  );
+});
+
+test("Safari manifest shares host-permission boundaries with Chrome/Firefox", () => {
+  const root = process.cwd();
+  const safari = JSON.parse(
+    readFileSync(join(root, "manifest.safari.json"), "utf8"),
+  ) as {
+    host_permissions?: string[];
+    optional_host_permissions?: string[];
+  };
+
+  assert.equal(safari.host_permissions?.includes("<all_urls>"), false);
+  assert.equal(safari.host_permissions?.includes("http://*/*"), false);
+  assert.equal(safari.host_permissions?.includes("https://*/*"), false);
+  assert.equal(safari.host_permissions?.includes("http://127.0.0.1/*"), true);
+  assert.equal(safari.host_permissions?.includes("http://localhost/*"), true);
+  assert.deepEqual(safari.optional_host_permissions, ["http://*/*", "https://*/*"]);
+  assert.equal(safari.host_permissions?.includes("*://*.bilibili.com/*"), true);
+});
+
 test("Chrome and Firefox manifests avoid all-sites host permission", () => {
   const root = process.cwd();
   const chromeManifest = JSON.parse(readFileSync(join(root, "manifest.json"), "utf8")) as {

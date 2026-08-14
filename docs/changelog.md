@@ -6,6 +6,8 @@
 
 ## 未发布
 
+- **Safari Web Extension 支持（issue #156）**：`extension/` 新增 `manifest.safari.json` 与 `build:safari` / `clean:safari` / `verify:assets:safari` / `convert:safari` 脚本，产出自包含 `dist-safari/`，并由 `scripts/convert-safari.mjs` 调用 Apple `safari-web-extension-converter` 生成 Xcode 工程（仅 macOS + Xcode 可用）。Safari 不支持 `side_panel` / `sidePanel` / `notifications` / `world`（MAIN-world 内容脚本），因此 Safari manifest 改用 `action.default_popup` 承载同一套 popup UI，去掉上述权限与 `world` 字段并保留 `alarms` / `scripting` / `cookies` / `storage`；service worker 对 `chrome.notifications` / `chrome.alarms` 注册加空值守卫（无该 API 时降级为 WS 驱动刷新而不崩溃），Safari 构建额外经 esbuild banner 注入 `browser → chrome` 兼容 shim（在已提供 `chrome` 的环境为 no-op，不影响 Chrome/Firefox 产物）。已验证 `npm run build:safari` → `convert:safari` → `xcodebuild`（macOS target）全链路构建成功，1395 条扩展测试与 `typecheck` 通过；构建/签名/已知限制矩阵见 `docs/safari-extension-build.md`。
+
 ## v0.3.205：证据驱动时效推荐与可靠性升级（2026-08-14）
 
 - **发布与市场状态**：`backend-v0.3.205`、`extension-v0.3.205`、`desktop-v0.3.205` 与聚合 `openbiliclaw-v0.3.205` 均指向提交 `a49af312`；聚合 Latest Release 已附两份扩展 ZIP 与四份桌面安装器。Chrome Web Store 已上传 `0.3.205` 并进入 `PENDING_REVIEW`；Firefox AMO 已接受 listed `0.3.205`，文件状态为 `unreviewed`。AMO `eula_policy` API 仍返回 HTTP 406，manifest 数据类别、reviewer notes、商店描述和随包隐私政策已提交。
