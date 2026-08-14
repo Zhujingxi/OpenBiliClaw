@@ -107,9 +107,13 @@ function api(overrides: Partial<WebApi> = {}): WebApi {
     ...overrides,
   };
 }
-function mountView(component: Parameters<typeof mount>[0], web = api()) {
+function mountView(
+  component: Parameters<typeof mount>[0],
+  web = api(),
+  pinia = createPinia(),
+) {
   return mount(component, {
-    global: { plugins: [createPinia()], provide: { api: web } },
+    global: { plugins: [pinia], provide: { api: web } },
   });
 }
 beforeEach(() => {
@@ -163,6 +167,90 @@ describe("web view behavior", () => {
     await wrapper.get("form").trigger("submit");
     await wrapper.get("ul button").trigger("click");
     expect(routeParameter(location.hash)).toBe(JSON.stringify(preview.ref));
+  });
+
+  it("offers connected providers as a select and keeps form state across remounts", async () => {
+    const search = vi.fn(api().search);
+    const web = api({
+      search,
+      listSources: async () => [
+        {
+          provider_id: "youtube",
+          account_id: null,
+          state: "connected",
+          method_id: "builtin.anonymous",
+          verification: null,
+        },
+        {
+          provider_id: "bilibili",
+          account_id: null,
+          state: "disconnected",
+          method_id: null,
+          verification: null,
+        },
+      ],
+    });
+    const pinia = createPinia();
+    const wrapper = mountView(SearchView, web, pinia);
+    await vi.waitFor(() =>
+      expect(wrapper.get("#search-provider").text()).toContain("youtube"),
+    );
+    await wrapper.get("#search-provider").setValue("youtube");
+    await wrapper.get("#search-query").setValue("kept query");
+    await wrapper.get("form").trigger("submit");
+    await vi.waitFor(() =>
+      expect(search).toHaveBeenCalledWith(
+        "youtube",
+        "kept query",
+        expect.any(AbortSignal),
+      ),
+    );
+    wrapper.unmount();
+    const remounted = mountView(SearchView, web, pinia);
+    expect(
+      (remounted.get("#search-provider").element as HTMLSelectElement).value,
+    ).toBe("youtube");
+    expect(
+      (remounted.get("#search-query").element as HTMLInputElement).value,
+    ).toBe("kept query");
+  });
+
+  it("renders available detail metadata and the canonical link", async () => {
+    const ref = {
+      provider_id: { value: "youtube" },
+      content_kind: { value: "video" },
+      provider_content_id: "ix9cRaBkVe0",
+      canonical_url: "https://www.youtube.com/watch?v=ix9cRaBkVe0",
+    };
+    location.hash = `#/content/${encodeURIComponent(JSON.stringify(ref))}`;
+    const wrapper = mountView(
+      ContentView,
+      api({
+        content: async () => ({
+          content: {
+            ref,
+            schema_version: 1,
+            payload: {
+              title: "A Real Title",
+              channel: { id: "UC1", name: "A Channel" },
+              description: "line one\nline two",
+              thumbnail_url: "https://img.test/thumb.jpg",
+            },
+          },
+        }),
+      }),
+    );
+    await vi.waitFor(() =>
+      expect(wrapper.get("h2").text()).toBe("A Real Title"),
+    );
+    expect(wrapper.text()).toContain("A Channel");
+    expect(wrapper.text()).toContain("line one");
+    expect(wrapper.get("img").attributes("src")).toBe(
+      "https://img.test/thumb.jpg",
+    );
+    const link = wrapper.get("a");
+    expect(link.attributes("href")).toBe(ref.canonical_url);
+    expect(link.attributes("rel")).toContain("noopener");
   });
 
   it("loads and refetches JSON content references on same-route hash changes", async () => {

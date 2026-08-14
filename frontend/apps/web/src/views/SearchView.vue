@@ -1,14 +1,27 @@
 <script setup lang="ts">
 import AsyncState from "../components/AsyncState.vue";
-import { inject, onBeforeUnmount, ref } from "vue";
+import { inject, onBeforeUnmount, onMounted, ref } from "vue";
 import { useContentStore } from "../stores/content";
+import { useSourcesStore } from "../stores/sources";
 import type { ContentPreview } from "@openbiliclaw/presentation";
 import type { WebApi } from "../services/api";
 const api = inject<WebApi>("api");
 if (api === undefined) throw new Error("WebApi not provided");
 const store = useContentStore();
-const provider = ref("bilibili");
-const query = ref("");
+const sources = useSourcesStore();
+const provider = ref(store.lastProvider);
+const query = ref(store.lastQuery);
+onMounted(() => {
+  void sources.load(api).then(() => {
+    const first = sources.items[0];
+    if (
+      first !== undefined &&
+      !sources.items.some((item) => item.provider_id === provider.value)
+    ) {
+      provider.value = first.provider_id;
+    }
+  });
+});
 function open(item: ContentPreview): void {
   location.hash = `#/content/${encodeURIComponent(JSON.stringify(item.ref))}`;
 }
@@ -19,7 +32,15 @@ onBeforeUnmount(store.cancelSearch);
     <h1 tabindex="-1">Search</h1>
     <form role="search" @submit.prevent="store.search(api, provider, query)">
       <label for="search-provider">Provider</label>
-      <input id="search-provider" v-model="provider" required />
+      <select id="search-provider" v-model="provider" required>
+        <option
+          v-for="item in sources.items"
+          :key="item.provider_id"
+          :value="item.provider_id"
+        >
+          {{ item.provider_id }}
+        </option>
+      </select>
       <label for="search-query">Search content</label>
       <input id="search-query" v-model="query" required />
       <button type="submit">Search</button>

@@ -6,6 +6,9 @@
 
 ## Unreleased
 
+- YouTube is enabled end-to-end (anonymous `builtin.anonymous` connect, no credentials) with UI verification: the Search view provider field is now a select populated from `/v1/sources`, content detail renders available provider metadata (title, thumbnail, channel, description, canonical link), and search form state persists across navigation.
+
+
 - Replaced YouTube's stale hand-written InnerTube key/client-version/renderer transport with the actively maintained `yt-dlp` extractor. Anonymous search, full video fetch, and channel creator pages run off-loop through a typed, injectable adapter with bounded one-shot results and safe integration errors; no YouTube key or cookie is required. YouTube removed generic Trending in July 2025, so the provider no longer advertises a dishonest `FEED` capability. A real L1-YouTube layer verifies search, stable-video detail, creator pages, canonical identity/dedupe, page caps, and typed invalid references.
 
 - Fixed all 12 agent-browser UI findings: content detail now uses a generated-client `GET /v1/content/detail?reference=<JSON ContentRef>` contract with typed malformed/unknown errors and same-route refetch; Search/detail state is isolated; source-connect success is submission-scoped; SSE stays open with replay, keep-alives, disconnect handling, and server-directed reconnect delay; recommendations have refresh; provider status spacing and typed API messages are readable; 390px navigation/forms no longer overflow; Assistant shows user turns, safely preserves model line breaks without raw HTML, and clears stale conversation IDs; custom-provider capabilities use a responsive grid.

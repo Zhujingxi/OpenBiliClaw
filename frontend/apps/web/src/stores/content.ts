@@ -17,6 +17,10 @@ export const useContentStore = defineStore("content", () => {
   const detailError = ref<string>();
   const searchOwner = new RequestOwner();
   const detailOwner = new RequestOwner();
+  // Form state lives in the store so navigating to a detail and back does not
+  // wipe the user's last search while the results themselves persist.
+  const lastProvider = ref("bilibili");
+  const lastQuery = ref("");
 
   async function search(
     api: WebApi,
@@ -26,6 +30,8 @@ export const useContentStore = defineStore("content", () => {
     const signal = searchOwner.next();
     searchPhase.value = "loading";
     searchError.value = undefined;
+    lastProvider.value = providerId;
+    lastQuery.value = query;
     try {
       const next = await api.search(providerId, query, signal);
       if (!searchOwner.owns(signal)) return;
@@ -61,6 +67,8 @@ export const useContentStore = defineStore("content", () => {
     detail,
     searchError,
     detailError,
+    lastProvider,
+    lastQuery,
     search,
     fetchDetail,
     cancelSearch: () => searchOwner.cancel(),
