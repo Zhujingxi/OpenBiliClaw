@@ -23,6 +23,7 @@ Current-state documentation:
 - [Privacy](privacy.md), [FAQ](faq.md), and [contributing](contributing.md)
 - [Chrome Web Store](chrome-webstore-listing.md) and [Firefox source build](firefox-amo-source-build.md)
 - [E2E Testing Plan](e2e-testing-plan.md) (active work plan, progress-tracked) and [testing log](e2e-testing-log.md)
+- [Anonymous Provider Ports Plan](plans/2026-08-14-anonymous-provider-ports.md) (Bangumi · V2EX · Linux.do · Weibo; active progress-tracked plan)
 - [Changelog](changelog.md)
 
 Provider-specific target docs are named `modules/provider-*.md` or `modules/content-provider-*.md`. Historical plans and superseded pre-cutover documents were removed; this index lists the maintained documentation set.
