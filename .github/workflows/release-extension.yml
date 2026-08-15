@@ -229,7 +229,7 @@ jobs:
             npm run package:safari
           fi
           expected="${RELEASE_TAG#extension-v}"
-          safari_dmg="extension/openbiliclaw-extension-v${expected}-safari.dmg"
+          safari_dmg="openbiliclaw-extension-v${expected}-safari.dmg"
           if [ ! -f "$safari_dmg" ]; then
             echo "missing Safari extension DMG: $safari_dmg"
             exit 1
