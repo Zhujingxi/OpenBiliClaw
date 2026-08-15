@@ -1,7 +1,11 @@
 from pathlib import Path
 
 from openbiliclaw.core.config import CapabilitySettings, ModelSettings
-from openbiliclaw.core.config_writer import replace_model_section, write_model_settings
+from openbiliclaw.core.config_writer import (
+    replace_host_password,
+    replace_model_section,
+    write_model_settings,
+)
 
 
 def test_replaces_only_model_owned_tables_and_preserves_other_sections(tmp_path: Path) -> None:
@@ -28,6 +32,21 @@ model_name = "embed"
     path.write_text(original, encoding="utf-8")
     write_model_settings(path, settings)
     assert path.read_text(encoding="utf-8") == updated
+
+
+def test_host_password_replaces_only_owned_key() -> None:
+    original = """# retained
+[host]
+api_host = "127.0.0.1"
+password_hash = "old"
+
+[runtime]
+default_resource_limit = 4
+"""
+    updated = replace_host_password(original, "pbkdf2:100000:aa:bb")
+    assert '# retained\n[host]\napi_host = "127.0.0.1"' in updated
+    assert 'password_hash = "pbkdf2:100000:aa:bb"' in updated
+    assert "[runtime]\ndefault_resource_limit = 4" in updated
 
 
 def test_renders_complete_custom_capabilities() -> None:

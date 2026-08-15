@@ -89,3 +89,47 @@ def write_model_settings(path: Path, settings: ModelSettings) -> None:
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def replace_host_password(document: str, password_hash: str) -> str:
+    """Set only ``host.password_hash`` while preserving all unrelated configuration."""
+
+    lines = document.splitlines(keepends=True)
+    host_start: int | None = None
+    host_end = len(lines)
+    password_line: int | None = None
+    for index, line in enumerate(lines):
+        match = _TABLE.match(line.rstrip("\r\n"))
+        if match is not None:
+            table = match.group(1).strip()
+            if table == "host":
+                host_start = index
+                continue
+            if host_start is not None:
+                host_end = index
+                break
+        if host_start is not None and re.match(r"^\s*password_hash\s*=", line):
+            password_line = index
+    rendered = f"password_hash = {json.dumps(password_hash)}\n"
+    if password_line is not None:
+        lines[password_line] = rendered
+        return "".join(lines)
+    if host_start is not None:
+        lines.insert(host_end, rendered)
+        return "".join(lines)
+    separator = "" if not document or document.endswith("\n\n") else "\n"
+    return f"{document}{separator}[host]\n{rendered}"
+
+
+def write_host_password(path: Path, password_hash: str) -> None:
+    """Atomically store a password hash in the host configuration section."""
+
+    document = path.read_text(encoding="utf-8") if path.exists() else ""
+    updated = replace_host_password(document, password_hash)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    try:
+        temporary.write_text(updated, encoding="utf-8")
+        os.chmod(temporary, path.stat().st_mode if path.exists() else 0o600)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)

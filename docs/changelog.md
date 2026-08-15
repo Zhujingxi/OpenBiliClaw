@@ -6,6 +6,8 @@
 
 ## Unreleased
 
+- Landed the backend half of password and extension-token authentication (agentic recommendation plan, Phase A item 4): schema V9 stores only SHA-256 token hashes; PBKDF2-SHA256 password hashes live in `[host]`; `POST /v1/auth/login` mints session tokens; middleware and WebSockets accept static or minted bearer tokens; `openbiliclaw set-password` and `openbiliclaw ext-token` provide local setup. Frontend login and its browser e2e remain pending.
+
 - Landed provider channel registry and candidate provenance (agentic recommendation plan, Phase A item 3): feed-capable manifests must declare unique `feed_id` channels with an explicit bias class and auth requirement; Bilibili `popular`, Bangumi `rank`, and V2EX `hot` are registered as anonymous `platform-popularity` supply. `DiscoveryProvenance` now durably carries the source provider and optional feed channel; search discovery records no channel. Schema V8 backfills provider identity (and a null channel) into existing candidate JSON so upgrades remain readable.
 
 - Landed recommendation decision trace and deterministic replay (agentic recommendation plan, Phase A item 2): repository read ports now assemble candidate/evaluation/admission/selection/expression/exposure/feedback provenance for one recommendation, while model-free replay reloads a persisted seed cohort and reruns `SelectionService` with its original seed, limit, and timestamp to detect input drift or tampering without provider or model calls.

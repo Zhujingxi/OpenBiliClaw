@@ -10,7 +10,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
     from pathlib import Path
 
-from pydantic import ConfigDict, Field, JsonValue, TypeAdapter
+from pydantic import ConfigDict, Field, JsonValue, TypeAdapter, field_validator
 
 from openbiliclaw.core._pydantic import StrictBaseModel
 
@@ -65,6 +65,16 @@ class HostSettings(_FrozenModel):
     api_host: str = Field(default="127.0.0.1", min_length=1)
     api_port: int = Field(default=8420, ge=1, le=65_535)
     bearer_secret_ref: SecretReference | None = None
+    password_hash: str | None = Field(
+        default=None, pattern=r"^pbkdf2:[0-9]+:[0-9a-f]+:[0-9a-f]+$", repr=False
+    )
+
+    @field_validator("password_hash")
+    @classmethod
+    def strong_password_hash(cls, value: str | None) -> str | None:
+        if value is not None and int(value.split(":", 2)[1]) < 100_000:
+            raise ValueError("PBKDF2 iterations must be at least 100000")
+        return value
 
 
 class AgentPolicySettings(_FrozenModel):
@@ -148,6 +158,8 @@ def _redact_references(values: dict[str, ConfigValue]) -> dict[str, ConfigValue]
     for key, value in values.items():
         if key.endswith("secret_ref") and value is not None:
             redacted[key] = "<redacted-ref>"
+        elif key == "password_hash" and value is not None:
+            redacted[key] = "<redacted-hash>"
         elif isinstance(value, dict):
             redacted[key] = _redact_references(value)
         elif isinstance(value, list):

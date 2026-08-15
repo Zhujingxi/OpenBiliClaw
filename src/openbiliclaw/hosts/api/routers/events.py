@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Depends, Query, Request, WebSocket
@@ -67,14 +68,22 @@ async def stream(
     )
 
 
-def _websocket_authorized(websocket: WebSocket, dependencies: HostDependencies) -> bool:
+async def _websocket_authorized(websocket: WebSocket, dependencies: HostDependencies) -> bool:
     policy = dependencies.security
     origin = websocket.headers.get("origin")
     if origin is not None and not policy.origin_allowed(origin):
         return False
-    if policy.bearer_token is None:
+    auth_required = policy.bearer_token is not None or policy.password_hash is not None
+    if not auth_required:
         return True
-    return websocket.headers.get("authorization") == f"Bearer {policy.bearer_token}"
+    authorization = websocket.headers.get("authorization", "")
+    if policy.bearer_token is not None and hmac.compare_digest(
+        authorization.encode(), f"Bearer {policy.bearer_token}".encode()
+    ):
+        return True
+    if not authorization.startswith("Bearer ") or dependencies.auth_tokens is None:
+        return False
+    return await dependencies.auth_tokens.verify(authorization.removeprefix("Bearer ")) is not None
 
 
 @router.websocket("/ws")
@@ -83,7 +92,7 @@ async def websocket(
     after: int = Query(default=0, ge=0),
     dependencies: HostDependencies = Depends(get_dependencies),
 ) -> None:
-    if not _websocket_authorized(websocket, dependencies):
+    if not await _websocket_authorized(websocket, dependencies):
         await websocket.close(code=1008, reason="authentication or origin rejected")
         return
     try:

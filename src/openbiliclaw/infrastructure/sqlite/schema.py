@@ -39,6 +39,7 @@ TARGET_TABLE_OWNERS: Final[dict[str, str]] = {
     "pending_actions": "Application Workflows",
     "workflow_idempotency": "Application Workflows",
     "ai_usage_attribution": "AI Runtime",
+    "auth_tokens": "API & CLI Hosts",
     "policy_briefs": "Discovery & Recommendation",
     "policy_hypotheses": "Discovery & Recommendation",
     "policy_lessons": "Discovery & Recommendation",
@@ -345,6 +346,15 @@ _SCHEMA_V8: Final[tuple[str, ...]] = (
        WHERE json_type(candidate_json, '$.provenance.provider') IS NULL""",
 )
 
+_SCHEMA_V9: Final[tuple[str, ...]] = (
+    """CREATE TABLE auth_tokens (
+        token_id TEXT PRIMARY KEY CHECK(token_id GLOB 'at_[0-9a-f]*'),
+        label TEXT NOT NULL CHECK(label IN ('session', 'extension')),
+        token_hash TEXT NOT NULL UNIQUE,
+        created_at TEXT NOT NULL
+    )""",
+)
+
 
 DEFAULT_MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(1, _SCHEMA_V1),
@@ -355,6 +365,7 @@ DEFAULT_MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(6, _SCHEMA_V6),
     Migration(7, _SCHEMA_V7),
     Migration(8, _SCHEMA_V8),
+    Migration(9, _SCHEMA_V9),
 )
 
 

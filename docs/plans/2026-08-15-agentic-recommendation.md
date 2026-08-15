@@ -33,8 +33,10 @@ Progress: `- [ ]` pending · `- [~]` in progress · `- [x]` done (TDD: red → g
   auth requirement; candidates carry `(provider, channel)` provenance end to end.
   (spec #18; authoring contract rule) — landed: manifest validation + current anonymous
   feed declarations + durable provider/channel candidate provenance
-- [ ] 4. **Auth**: password login for local web/desktop clients; generated token for
-  extension/agent (`openbiliclaw ext-token`). (spec #20)
+- [~] 4. **Auth**: password login for local web/desktop clients; generated token for
+  extension/agent (`openbiliclaw ext-token`). (spec #20) — backend landed (schema V9,
+  PBKDF2 login, session/extension tokens, CLI, HTTP/WebSocket auth); frontend login +
+  AgentBrowser e2e next
 - [ ] 5. **Image proxy**: `/v1` route serving provider images locally; no CDN hotlink leaks.
 - [ ] 6. **Export/import**: versioned SQLite + config dump/restore. CLI `export`/`import`.
 - [ ] 7. **Full thin CLI**: pass-through commands over Application workflows for

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from ipaddress import ip_address
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
 
@@ -45,11 +45,15 @@ from openbiliclaw.observations.service import RecordBatchResult
 from .model_configuration import ModelConfiguration
 from .schemas.models import EventEnvelope
 
+if TYPE_CHECKING:
+    from .auth import AuthTokenService
+
 
 class HostSecurityPolicy(StrictBaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     bind_host: str = "127.0.0.1"
     bearer_token: str | None = Field(default=None, repr=False, exclude=True)
+    password_hash: str | None = Field(default=None, repr=False, exclude=True)
     allowed_origins: tuple[str, ...] = ("http://localhost:8420", "http://127.0.0.1:8420")
     allowed_origin_schemes: tuple[str, ...] = ("chrome-extension://", "moz-extension://")
     max_body_bytes: int = Field(default=1_048_576, ge=1024, le=10_485_760)
@@ -77,9 +81,9 @@ class HostSecurityPolicy(StrictBaseModel):
         if (
             self.bind_host != "localhost"
             and not ip_address(self.bind_host).is_loopback
-            and not self.bearer_token
+            and not (self.bearer_token or self.password_hash)
         ):
-            raise ValueError("bearer_token is required for non-loopback binding")
+            raise ValueError("bearer_token or password_hash is required for non-loopback binding")
         return self
 
 
@@ -154,6 +158,7 @@ class HostDependencies:
     events: EventSource | None = None
     lifespan: HostLifespan | None = None
     models: ModelConfiguration | None = None
+    auth_tokens: AuthTokenService | None = None
     websocket_slots: asyncio.Semaphore = field(init=False)
 
     def __post_init__(self) -> None:

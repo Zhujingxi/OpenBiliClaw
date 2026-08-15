@@ -58,6 +58,7 @@ from openbiliclaw.core.config import AppSettings, SettingsOverrides, load_settin
 from openbiliclaw.core.resources import ResourceBudget
 from openbiliclaw.core.supervisor import RuntimeSupervisor
 from openbiliclaw.hosts.api.app import create_app
+from openbiliclaw.hosts.api.auth import AuthTokenService, SqliteAuthTokenRepository
 from openbiliclaw.hosts.api.dependencies import HostDependencies, HostSecurityPolicy
 from openbiliclaw.hosts.api.model_configuration import FileModelConfiguration
 from openbiliclaw.infrastructure.credentials.keyring import keyring_or_file
@@ -458,6 +459,7 @@ def build_application(
         security=HostSecurityPolicy(
             bind_host=settings.host.api_host,
             bearer_token=bearer_token,
+            password_hash=settings.host.password_hash,
             allowed_origins=(
                 f"http://localhost:{settings.host.api_port}",
                 f"http://127.0.0.1:{settings.host.api_port}",
@@ -465,6 +467,7 @@ def build_application(
         ),
         events=host_events,
         lifespan=lifecycle,
+        auth_tokens=AuthTokenService(SqliteAuthTokenRepository(database)),
         models=FileModelConfiguration(
             settings=settings,
             config_path=options.config_path,

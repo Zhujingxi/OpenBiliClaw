@@ -76,7 +76,7 @@ async def test_migration_backfills_provider_for_existing_candidates(tmp_path: Pa
     """Adding required provenance must not make pre-channel candidate rows unreadable."""
 
     path = tmp_path / "upgrade.db"
-    await SchemaMigrator(path, migrations=DEFAULT_MIGRATIONS[:-1]).migrate()
+    await SchemaMigrator(path, migrations=DEFAULT_MIGRATIONS[:7]).migrate()
     database = SqliteDatabase(path)
     await database.open()
     ref = ContentRef(

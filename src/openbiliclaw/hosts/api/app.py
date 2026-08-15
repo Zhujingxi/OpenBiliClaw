@@ -28,6 +28,7 @@ from .errors import (
 )
 from .routers import (
     assistant,
+    auth,
     content,
     events,
     feedback,
@@ -43,6 +44,18 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
 
     from starlette.types import ASGIApp, Message, Receive
+
+
+async def bearer_authorized(dependencies: HostDependencies, authorization: str) -> bool:
+    """Accept the configured static secret or a durable minted token."""
+
+    policy = dependencies.security
+    expected = f"Bearer {policy.bearer_token or ''}".encode()
+    if policy.bearer_token is not None and hmac.compare_digest(authorization.encode(), expected):
+        return True
+    if not authorization.startswith("Bearer ") or dependencies.auth_tokens is None:
+        return False
+    return await dependencies.auth_tokens.verify(authorization.removeprefix("Bearer ")) is not None
 
 
 class SecurityMiddleware(BaseHTTPMiddleware):
@@ -85,14 +98,20 @@ class SecurityMiddleware(BaseHTTPMiddleware):
         origin = request.headers.get("origin")
         if origin is not None and not policy.origin_allowed(origin):
             return self._error(403, ErrorCode.FORBIDDEN, "origin is not allowed")
-        if policy.bearer_token is not None:
-            expected = f"Bearer {policy.bearer_token}"
-            if not hmac.compare_digest(request.headers.get("authorization", ""), expected):
-                return self._error(401, ErrorCode.UNAUTHORIZED, "authentication required")
+        auth_required = policy.bearer_token is not None or policy.password_hash is not None
+        login = request.url.path == "/v1/auth/login" and request.method == "POST"
+        if (
+            auth_required
+            and not login
+            and not await bearer_authorized(
+                self._dependencies, request.headers.get("authorization", "")
+            )
+        ):
+            return self._error(401, ErrorCode.UNAUTHORIZED, "authentication required")
         if request.method not in {"GET", "HEAD", "OPTIONS"}:
             device = request.headers.get("x-device-id")
             csrf = request.headers.get("x-csrf-token")
-            if not device or not csrf or not hmac.compare_digest(device, csrf):
+            if not device or not csrf or not hmac.compare_digest(device.encode(), csrf.encode()):
                 return self._error(
                     403, ErrorCode.FORBIDDEN, "valid device and CSRF headers required"
                 )
@@ -158,6 +177,7 @@ def create_app(dependencies: HostDependencies, *, frontend_dir: Path | None = No
         allow_headers=["Authorization", "Content-Type", "X-CSRF-Token", "X-Device-ID"],
     )
     for item in (
+        auth.router,
         sources.router,
         recommendations.router,
         understanding.router,

@@ -90,21 +90,21 @@ async def test_feedback_and_action_success_units() -> None:
     assert confirmed.result.action_id == "save"
 
 
-def test_websocket_handshake_auth_origin_and_admission() -> None:
+async def test_websocket_handshake_auth_origin_and_admission() -> None:
     policy = HostDependencies(facade=Facade()).security.model_copy(update={"bearer_token": "key"})
     deps = HostDependencies(facade=Facade(), security=policy)
-    assert not _websocket_authorized(cast("WebSocket", WebSocketStub(deps, {})), deps)
-    assert not _websocket_authorized(
+    assert not await _websocket_authorized(cast("WebSocket", WebSocketStub(deps, {})), deps)
+    assert not await _websocket_authorized(
         cast("WebSocket", WebSocketStub(deps, {"authorization": "Bearer wrong"})), deps
     )
-    assert not _websocket_authorized(
+    assert not await _websocket_authorized(
         cast(
             "WebSocket",
             WebSocketStub(deps, {"authorization": "Bearer key", "origin": "https://evil"}),
         ),
         deps,
     )
-    assert _websocket_authorized(
+    assert await _websocket_authorized(
         cast(
             "WebSocket",
             WebSocketStub(

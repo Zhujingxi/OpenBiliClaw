@@ -19,14 +19,15 @@ from openbiliclaw.infrastructure.sqlite.schema import (
 async def test_target_schema_has_owned_aggregates_and_constraints(tmp_path: Path) -> None:
     path = tmp_path / "target.db"
     migrator = SchemaMigrator(path)
-    assert await migrator.migrate() == 8
-    assert await migrator.migrate() == 8
+    assert await migrator.migrate() == 9
+    assert await migrator.migrate() == 9
     with sqlite3.connect(path) as conn:
         conn.execute("PRAGMA foreign_keys=ON")
         tables = {
             row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
         assert set(TARGET_TABLE_OWNERS) <= tables
+        assert "auth_tokens" in tables
         assert conn.execute("PRAGMA integrity_check").fetchone() == ("ok",)
         conn.execute(
             "INSERT INTO content_references(provider, external_id, kind) VALUES(?,?,?)",
