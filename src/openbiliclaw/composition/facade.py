@@ -61,6 +61,7 @@ if TYPE_CHECKING:
     from openbiliclaw.application.record_feedback import (
         RecordFeedback,
         RecordFeedbackCommand,
+        RecordFeedbackForShown,
         RecordFeedbackResult,
     )
     from openbiliclaw.application.refresh_recommendations import (
@@ -80,6 +81,7 @@ if TYPE_CHECKING:
     from openbiliclaw.core.config import AppSettings
     from openbiliclaw.core.health import HealthSnapshot
     from openbiliclaw.observations.service import ObservationIngressService, RecordBatchResult
+    from openbiliclaw.recommendation.models import FeedbackKind
     from openbiliclaw.recommendation.service import RecommendationService
     from openbiliclaw.understanding.service import UnderstandingService
 
@@ -153,6 +155,7 @@ class CompositionFacade:
         idempotency: IdempotencyJournal,
         refresh: RefreshRecommendations | None = None,
         feedback: RecordFeedback | None = None,
+        feedback_for_shown: RecordFeedbackForShown | None = None,
         profile_edit: EditProfile | None = None,
         pending_actions: SqlitePendingActionRepository | None = None,
         assistant: AssistantController | None = None,
@@ -173,6 +176,7 @@ class CompositionFacade:
         self._health = health
         self._refresh = refresh
         self._feedback = feedback
+        self._feedback_for_shown = feedback_for_shown
         self._profile_edit = profile_edit
         self._assistant = assistant
         self._propose = None
@@ -278,6 +282,15 @@ class CompositionFacade:
         if self._feedback is None:
             raise self._unavailable()
         return await self._feedback(command)
+
+    async def record_feedback_for_shown(
+        self, shown_id: str, kind: FeedbackKind, idempotency_key: str
+    ) -> RecordFeedbackResult:
+        if self._feedback_for_shown is None:
+            raise self._unavailable()
+        return await self._feedback_for_shown(
+            shown_id=shown_id, kind=kind, idempotency_key=idempotency_key
+        )
 
     async def edit_profile(self, command: EditProfileCommand) -> EditProfileResult:
         if self._profile_edit is None:

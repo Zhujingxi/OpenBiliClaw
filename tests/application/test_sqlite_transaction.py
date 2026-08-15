@@ -6,7 +6,12 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from openbiliclaw.application.record_feedback import RecordFeedback, RecordFeedbackCommand
+from openbiliclaw.application.errors import ApplicationError, ApplicationErrorCode
+from openbiliclaw.application.record_feedback import (
+    RecordFeedback,
+    RecordFeedbackCommand,
+    RecordFeedbackForShown,
+)
 from openbiliclaw.application.unit_of_work import FeedbackUnitOfWork, ProfileEditUnitOfWork
 from openbiliclaw.content.integration.identity import ContentKind, ContentRef, ProviderId
 from openbiliclaw.content.integration.projections import ContentPreview, ProjectionProvenance
@@ -227,16 +232,12 @@ async def test_production_units_of_work_commit_feedback_and_profile_edit(tmp_pat
         )
     )
     delivered = await recommendations.deliver_feed(limit=1, shown_at=NOW)
-    command = RecordFeedbackCommand(
-        idempotency_key="feedback:uow:production",
-        shown_id=delivered[0].shown_id,
-        content_ref=REF,
-        kind=FeedbackKind.LIKED,
-        account_id="acct",
-    )
+    feedback = RecordFeedback(FeedbackUnitOfWork(recommendations, observations), clock=lambda: NOW)
     assert (
-        await RecordFeedback(FeedbackUnitOfWork(recommendations, observations), clock=lambda: NOW)(
-            command
+        await RecordFeedbackForShown(recommendations, feedback)(
+            shown_id=delivered[0].shown_id,
+            kind=FeedbackKind.LIKED,
+            idempotency_key="feedback:uow:production",
         )
     ).inserted
     provenance = ObservationProvenance(
@@ -264,3 +265,25 @@ async def test_production_units_of_work_commit_feedback_and_profile_edit(tmp_pat
     assert profile.revision == 1
     assert len((await observations.read(after_cursor=None, limit=10)).items) == 2
     await database.close()
+
+
+async def test_feedback_for_unknown_shown_id_is_typed_not_found(tmp_path: Path) -> None:
+    path = tmp_path / "miss.db"
+    await SchemaMigrator(path).migrate()
+    database = SqliteDatabase(path)
+    await database.open()
+    try:
+        recommendations = SqliteRecommendationRepository(database)
+        observations = SqliteObservationRepository(database)
+        feedback = RecordFeedback(
+            FeedbackUnitOfWork(recommendations, observations), clock=lambda: NOW
+        )
+        with pytest.raises(ApplicationError, match="shown record not found") as caught:
+            await RecordFeedbackForShown(recommendations, feedback)(
+                shown_id="shown_missing",
+                kind=FeedbackKind.LIKED,
+                idempotency_key="feedback:miss:path",
+            )
+        assert caught.value.code is ApplicationErrorCode.NOT_FOUND
+    finally:
+        await database.close()

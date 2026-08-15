@@ -17,7 +17,7 @@
 |---|---|
 | source status/connect/disconnect | `GetSourceStatus`, `ConnectSource`, `DisconnectSource` |
 | profile read/edit | `ShowProfile`, `EditProfile` |
-| recommendation feed/refresh/feedback | `GetRecommendations`, `RefreshRecommendations`, `RecordFeedback` |
+| recommendation feed/refresh/feedback | `GetRecommendations`, `RefreshRecommendations`, `RecordFeedback`, `RecordFeedbackForShown` |
 | observation batches/history imports | `RecordObservations` |
 | provider search/content detail | `SearchContent`, `GetContentDetails` |
 | runtime diagnostics | `GetJobHealth` |

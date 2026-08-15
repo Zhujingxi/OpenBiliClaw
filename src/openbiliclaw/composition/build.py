@@ -27,7 +27,7 @@ from openbiliclaw.ai.runtime.routes import ConfiguredModel, ModelRoute, RouteTab
 from openbiliclaw.application.edit_profile import EditProfile
 from openbiliclaw.application.idempotency import SqliteIdempotencyJournal
 from openbiliclaw.application.pending_actions import SqlitePendingActionRepository
-from openbiliclaw.application.record_feedback import RecordFeedback
+from openbiliclaw.application.record_feedback import RecordFeedback, RecordFeedbackForShown
 from openbiliclaw.application.refresh_recommendations import RefreshRecommendations
 from openbiliclaw.application.unit_of_work import FeedbackUnitOfWork, ProfileEditUnitOfWork
 from openbiliclaw.assistant.agent import (
@@ -417,6 +417,10 @@ def build_application(
             ),
         )
     )
+    feedback = RecordFeedback(
+        FeedbackUnitOfWork(repositories.recommendations, repositories.observations),
+        clock=lambda: datetime.now(UTC),
+    )
     facade = CompositionFacade(
         settings=settings,
         access=access,
@@ -428,10 +432,8 @@ def build_application(
         health=supervisor,
         idempotency=SqliteIdempotencyJournal(database),
         refresh=RefreshRecommendations(_RefreshSupervisor(supervisor, jobs, pipeline)),
-        feedback=RecordFeedback(
-            FeedbackUnitOfWork(repositories.recommendations, repositories.observations),
-            clock=lambda: datetime.now(UTC),
-        ),
+        feedback=feedback,
+        feedback_for_shown=RecordFeedbackForShown(repositories.recommendations, feedback),
         profile_edit=EditProfile(
             ProfileEditUnitOfWork(repositories.understanding, repositories.observations),
             clock=lambda: datetime.now(UTC),

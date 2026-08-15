@@ -6,6 +6,8 @@
 
 ## Unreleased
 
+- Completed Phase A's thin product CLI: JSON-only in-process commands now cover source list/add/remove/status, feed delivery, feedback by shown ID, profile show, assistant turns, and provider-scoped search. Commands build the production graph without binding a socket, call one Application facade workflow, and return typed Application failures as JSON on stderr without tracebacks. Added `RecordFeedbackForShown` so the CLI does not reconstruct content identity outside the Application layer.
+
 - Added versioned local export/import archives (`openbiliclaw export PATH` / `import PATH`): exports use SQLite's backup API for a consistent snapshot, include a format/app-version/table-count manifest, optionally include validated configuration with password verifiers redacted and vault references intact, refuse non-empty restore targets unless `--force`, and migrate older staged snapshots forward before installation.
 
 - Landed the provider-allowlisted image proxy (agentic recommendation plan, Phase A item 5): manifests now declare normalized CDN `image_hosts` plus static `image_headers`; `GET /v1/media` accepts HTTPS only, rejects host/userinfo/IP/port tricks and non-image/oversized/failed upstreams, forwards provider headers through the bounded app HTTP layer, and remains bearer-exempt because it can reach public allowlisted objects only (rate/timeout limits still apply). Bilibili, Bangumi, YouTube, Douyin, and RedNote declare only the CDN families their projections emit. Web cards and content detail rewrite image URLs through the same-origin route, eliminating direct browser CDN hotlinks. No video/audio proxy or server-side cache was added.

@@ -43,8 +43,10 @@ Progress: `- [ ]` pending · `- [~]` in progress · `- [x]` done (TDD: red → g
 - [x] 6. **Export/import**: versioned SQLite + config dump/restore. CLI `export`/`import`.
   — landed: format-v1 zip archive with SQLite backup snapshot, manifest/table counts,
   optional redacted config, non-empty destination guard, and migration-forward restore
-- [ ] 7. **Full thin CLI**: pass-through commands over Application workflows for
-  sources/feed/feedback/profile/assistant; zero business logic in commands. (spec #19)
+- [x] 7. **Full thin CLI**: pass-through commands over Application workflows for
+  sources/feed/feedback/profile/assistant/search; zero business logic in commands.
+  (spec #19) — landed: in-process graph, one workflow call and one JSON document per
+  invocation; expected errors are typed JSON on stderr
 
 Acceptance: replay a recorded feed decision offline with no provider/model calls;
 `openbiliclaw export` → fresh data dir → `import` reproduces profile/ledger state;
@@ -111,6 +113,8 @@ Goal: credentialed depth and content-level quality judgment.
    artifact list, warmup URL — data only); `GET /sources/{id}/access-recipe` +
    `POST /sources/{id}/access-material`; extension = generic grabber, one token,
    zero per-source logic; verification reuses the existing verifier/vault boundary.
+   Must also fix vault-backed access rehydration on startup (found in A7: connections
+   are in-memory only, so one-shot CLI commands and server restarts lose them).
 - [ ] **Personalized feeds**: credentialed channels (Bilibili `rcmd` flagship) land as
    exploit-class supply; per-channel yield learned via the Phase B machinery.
 - [ ] **Saves/history ingestion**: `Saved`/`History` capabilities feed the ledger as

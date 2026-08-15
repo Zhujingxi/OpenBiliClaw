@@ -37,6 +37,10 @@ if TYPE_CHECKING:
     from datetime import datetime
 
 
+class FeedbackTargetReads(Protocol):
+    async def content_ref_for_shown(self, shown_id: str) -> ContentRef: ...
+
+
 class FeedbackObservationUnitOfWork(Protocol):
     async def record_feedback(
         self, feedback: FeedbackRecord, observation: Observation, content_ref: ContentRef
@@ -59,6 +63,32 @@ class RecordFeedbackResult(StrictBaseModel):
     feedback_id: str
     observation_id: str
     inserted: bool
+
+
+@dataclass(frozen=True, slots=True)
+class RecordFeedbackForShown:
+    """Resolve a delivered impression then delegate to the canonical feedback workflow."""
+
+    targets: FeedbackTargetReads
+    record: RecordFeedback
+
+    async def __call__(
+        self, *, shown_id: str, kind: FeedbackKind, idempotency_key: str
+    ) -> RecordFeedbackResult:
+        try:
+            content_ref = await self.targets.content_ref_for_shown(shown_id)
+        except KeyError as exc:
+            raise ApplicationError(
+                ApplicationErrorCode.NOT_FOUND, "shown record not found"
+            ) from exc
+        return await self.record(
+            RecordFeedbackCommand(
+                idempotency_key=idempotency_key,
+                shown_id=shown_id,
+                content_ref=content_ref,
+                kind=kind,
+            )
+        )
 
 
 @dataclass(frozen=True, slots=True)

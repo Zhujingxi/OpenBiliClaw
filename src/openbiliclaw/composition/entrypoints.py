@@ -21,6 +21,7 @@ from openbiliclaw.infrastructure.sqlite.database import SqliteDatabase
 from openbiliclaw.infrastructure.sqlite.schema import SchemaMigrator
 
 from .build import BuildOptions, build_application, validated_settings
+from .product_cli import add_product_parsers, is_product_command, run_product_command
 
 
 async def _mint_extension_token(data_dir: Path) -> str:
@@ -46,22 +47,30 @@ async def _check(config: Path | None, data_dir: Path) -> None:
         await application.stop()
 
 
+def _parser() -> argparse.ArgumentParser:
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--config", type=Path)
+    common.add_argument("--data-dir", type=Path, default=BuildOptions().data_dir)
+    parser = argparse.ArgumentParser(prog="openbiliclaw", parents=[common])
+    commands = parser.add_subparsers(dest="command")
+    commands.add_parser("check", parents=[common])
+    commands.add_parser("serve", parents=[common])
+    commands.add_parser("set-password", parents=[common])
+    commands.add_parser("ext-token", parents=[common])
+    export = commands.add_parser("export", parents=[common])
+    export.add_argument("path", type=Path)
+    export.add_argument("--include-config", action="store_true")
+    imported = commands.add_parser("import", parents=[common])
+    imported.add_argument("path", type=Path)
+    imported.add_argument("--force", action="store_true")
+    add_product_parsers(commands, common)
+    return parser
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(prog="openbiliclaw")
-    parser.add_argument(
-        "command",
-        choices=("check", "serve", "set-password", "ext-token", "export", "import"),
-        nargs="?",
-        default="check",
-    )
-    parser.add_argument("path", type=Path, nargs="?")
-    parser.add_argument("--config", type=Path)
-    parser.add_argument("--data-dir", type=Path, default=BuildOptions().data_dir)
-    parser.add_argument("--include-config", action="store_true")
-    parser.add_argument("--force", action="store_true")
+    parser = _parser()
     arguments = parser.parse_args()
-    if arguments.command in {"export", "import"} and arguments.path is None:
-        parser.error(f"{arguments.command} requires an archive path")
+    arguments.command = arguments.command or "check"
     if arguments.command == "export":
         database_path = arguments.data_dir / "openbiliclaw.db"
         if arguments.path.resolve() == database_path.resolve():
@@ -115,6 +124,10 @@ def main() -> None:
     application = build_application(
         settings, options=BuildOptions(arguments.data_dir, config_path=arguments.config)
     )
+    if is_product_command(arguments.command):
+        if asyncio.run(run_product_command(application, arguments)):
+            raise SystemExit(1)
+        return
     frontend = os.environ.get("OPENBILICLAW_FRONTEND_DIR")
     if frontend:
         application = application.with_api_frontend(Path(frontend))
