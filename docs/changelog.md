@@ -6,6 +6,8 @@
 
 ## 未发布
 
+- **自动打开的任务标签页默认静音（issue #163）**：扩展新增 `background/task-tab.ts` 的共享助手 `createTaskTab()`，B 站搜索兜底、小红书、抖音、知乎、Reddit、Linux.do、V2EX、微博、YouTube 及原生保存/E2E 新开标签页统一在创建后立即 `tabs.update(tabId, { muted: true })`，避免抖音等自动播放内容在电脑无人值守时突然出声。Chrome 的 `tabs.create` 不支持 `muted`，因此跨 Chrome / Firefox / Safari 统一采用「先 create、再 update 静音」；静音跨后续导航保持，用户可在标签栏手动取消，静音失败不阻断任务。复用用户已有标签页的路径保持原样。
+
 ## v0.3.207：补货提速与搜索后端升级（2026-08-15）
 
 - **发布状态**：后端 / 插件 / 桌面安装包与聚合 Release 均发布为 `v0.3.207`，详情见 [Release](https://github.com/whiteguo233/OpenBiliClaw/releases)。
