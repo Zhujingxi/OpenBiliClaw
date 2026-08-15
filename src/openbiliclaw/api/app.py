@@ -975,6 +975,7 @@ _RESETTABLE_CONFIG_FIELDS = {
     "llm.gemini.api_key": ("llm", "gemini", "api_key"),
     "llm.deepseek.api_key": ("llm", "deepseek", "api_key"),
     "llm.openrouter.api_key": ("llm", "openrouter", "api_key"),
+    "llm.orcarouter.api_key": ("llm", "orcarouter", "api_key"),
     "llm.openai_compatible.api_key": ("llm", "openai_compatible", "api_key"),
     "llm.embedding.api_key": ("llm", "embedding", "api_key"),
 }
@@ -16558,6 +16559,7 @@ def create_app(
                 ollama=_provider_out(_legacy_provider_projection("ollama")),
                 openrouter=_provider_out(_legacy_provider_projection("openrouter")),
                 openai_compatible=_provider_out(_legacy_provider_projection("openai_compatible")),
+                orcarouter=_provider_out(_legacy_provider_projection("orcarouter")),
                 embedding=EmbeddingConfigOut(
                     provider=cfg.llm.embedding.provider,
                     model=cfg.llm.embedding.model,
@@ -17439,6 +17441,7 @@ def create_app(
                 "deepseek",
                 "ollama",
                 "openrouter",
+                "orcarouter",
                 "openai_compatible",
             }:
                 return "", None
@@ -17515,6 +17518,7 @@ def create_app(
             "deepseek",
             "ollama",
             "openrouter",
+            "orcarouter",
             "openai_compatible",
         ):
             if provider_name in llm_data and isinstance(llm_data[provider_name], dict):
@@ -17674,7 +17678,7 @@ def create_app(
             ):
                 return []
             return ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
-        if normalized_provider in {"openai_compatible", "openrouter"}:
+        if normalized_provider in {"openai_compatible", "openrouter", "orcarouter"}:
             return ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
         if normalized_provider == "deepseek":
             return ["none", "high", "max"]
@@ -17725,6 +17729,7 @@ def create_app(
             "openai",
             "deepseek",
             "openrouter",
+            "orcarouter",
             "ollama",
             "openai_compatible",
         }:

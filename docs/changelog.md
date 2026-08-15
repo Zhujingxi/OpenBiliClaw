@@ -7,6 +7,7 @@
 ## 未发布
 
 - **自动打开的任务标签页默认静音（issue #163）**：扩展新增 `background/task-tab.ts` 的共享助手 `createTaskTab()`，B 站搜索兜底、小红书、抖音、知乎、Reddit、Linux.do、V2EX、微博、YouTube 及原生保存/E2E 新开标签页统一在创建后立即 `tabs.update(tabId, { muted: true })`，避免抖音等自动播放内容在电脑无人值守时突然出声。Chrome 的 `tabs.create` 不支持 `muted`，因此跨 Chrome / Firefox / Safari 统一采用「先 create、再 update 静音」；静音跨后续导航保持，用户可在标签栏手动取消，静音失败不阻断任务。复用用户已有标签页的路径保持原样。
+- **新增 OrcaRouter 聚合 provider**：`provider_type="orcarouter"` 以 OpenAI 兼容协议接入 OrcaRouter（`https://api.orcarouter.ai/v1`），一个 Key 跑 150+ 模型；复用统一超时 / 重试 / 错误归一化 / JSON mode 与 per-call model 覆盖，`reasoning_effort` 按 OpenAI 风格顶层标量透传、不发送网关拒绝的嵌套 `reasoning` 对象。四表面契约：后端 registry / 配置、API `/api/config`、CLI 向导与 `agent_bootstrap`、桌面 Web 设置页均已接入，`config.example.toml` 提供实例模板。
 
 ## v0.3.207：补货提速与搜索后端升级（2026-08-15）
 

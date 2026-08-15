@@ -8628,6 +8628,7 @@ ${cardFeedbackBarHtml()}`;
       gemini: "Gemini",
       deepseek: "DeepSeek",
       openrouter: "OpenRouter",
+      orcarouter: "OrcaRouter",
       ollama: "Ollama",
       openai_compatible: "OpenAI-compatible"
     };
@@ -8637,6 +8638,7 @@ ${cardFeedbackBarHtml()}`;
       gemini: { model: "gemini-2.5-flash", base_url: "" },
       deepseek: { model: "deepseek-v4-flash", base_url: "https://api.deepseek.com" },
       openrouter: { model: "openai/gpt-4o-mini", base_url: "https://openrouter.ai/api/v1" },
+      orcarouter: { model: "openai/gpt-4o", base_url: "https://api.orcarouter.ai/v1" },
       ollama: { model: "qwen2.5:7b", base_url: "http://127.0.0.1:11434/v1" },
       openai_compatible: { model: "", base_url: "" }
     };
@@ -8644,6 +8646,7 @@ ${cardFeedbackBarHtml()}`;
       "openai",
       "deepseek",
       "openrouter",
+      "orcarouter",
       "ollama",
       "openai_compatible"
     ]);
@@ -8965,7 +8968,7 @@ ${cardFeedbackBarHtml()}`;
         x_title: providerType === "openrouter"
           ? getInput("llmInstanceTitle").trim()
           : "",
-        reasoning_effort: ["openai", "claude", "gemini", "deepseek", "openrouter", "openai_compatible"].includes(providerType)
+        reasoning_effort: ["openai", "claude", "gemini", "deepseek", "openrouter", "orcarouter", "openai_compatible"].includes(providerType)
           ? getInput("llmInstanceReasoning").trim()
           : "",
         num_ctx: providerType === "ollama"
@@ -9041,7 +9044,7 @@ ${cardFeedbackBarHtml()}`;
         const visible =
           (kind === "openai-auth" && providerType === "openai") ||
           (kind === "openai-protocol" && ["openai", "openai_compatible"].includes(providerType)) ||
-          (kind === "reasoning" && ["openai", "claude", "gemini", "deepseek", "openrouter", "openai_compatible"].includes(providerType)) ||
+          (kind === "reasoning" && ["openai", "claude", "gemini", "deepseek", "openrouter", "orcarouter", "openai_compatible"].includes(providerType)) ||
           (kind === "ollama" && providerType === "ollama") ||
           (kind === "openrouter" && providerType === "openrouter");
         field.hidden = !visible;
@@ -9158,7 +9161,7 @@ ${cardFeedbackBarHtml()}`;
         api_flavor: ["openai", "openai_compatible"].includes(providerType) ? getInput("llmInstanceApiFlavor") : "",
         http_referer: providerType === "openrouter" ? getInput("llmInstanceReferer").trim() : "",
         x_title: providerType === "openrouter" ? getInput("llmInstanceTitle").trim() : "",
-        reasoning_effort: ["openai", "claude", "gemini", "deepseek", "openrouter", "openai_compatible"].includes(providerType) ? getInput("llmInstanceReasoning") : "",
+        reasoning_effort: ["openai", "claude", "gemini", "deepseek", "openrouter", "orcarouter", "openai_compatible"].includes(providerType) ? getInput("llmInstanceReasoning") : "",
         num_ctx: providerType === "ollama" ? Math.max(0, getIntInput("llmInstanceNumCtx", 0)) : 0
       };
       closeLlmInstanceDialog();
