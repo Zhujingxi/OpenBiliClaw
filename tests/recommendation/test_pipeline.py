@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from random import Random
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
@@ -15,6 +16,7 @@ from openbiliclaw.content.integration.manifest import (
 from openbiliclaw.content.integration.projections import ContentPreview, ProjectionProvenance
 from openbiliclaw.infrastructure.sqlite.database import SqliteDatabase
 from openbiliclaw.infrastructure.sqlite.schema import SchemaMigrator
+from openbiliclaw.recommendation.allocation import ThompsonAllocator
 from openbiliclaw.recommendation.discovery.planner import DiscoveryPlanner
 from openbiliclaw.recommendation.evaluation.agent import (
     CandidateScore,
@@ -32,6 +34,7 @@ from openbiliclaw.recommendation.models import (
     CandidateState,
     DiscoveryProvenance,
     EvaluationRecord,
+    ExplorationAttribution,
     FeedbackKind,
     FeedbackRecord,
     RejectionReason,
@@ -196,6 +199,81 @@ def test_content_preferences_feed_discovery_and_recommendation_projections() -> 
 
     assert discovery_projection(profile).interests == ("Python 编程",)
     assert recommendation_projection(profile).positive_topics == ("Python 编程",)
+
+
+def test_selection_reserves_exploration_slot_when_matching_supply_exists() -> None:
+    attribution = ExplorationAttribution(
+        hypothesis_id="hyp_" + "a" * 32,
+        arm="source-novel",
+        channel="v2ex:hot",
+    )
+    exploit = candidate(100, state=CandidateState.EVALUATED)
+    exploration = candidate(101, state=CandidateState.EVALUATED).model_copy(
+        update={
+            "provenance": candidate(101).provenance.model_copy(update={"exploration": attribution})
+        }
+    )
+    evaluations = (evaluation(exploit, 0.99), evaluation(exploration, 0.61))
+
+    selected = SelectionService().select(
+        (exploit, exploration),
+        evaluations,
+        limit=1,
+        seed=7,
+        now=NOW,
+        exploration=(attribution,),
+    )[0]
+
+    assert selected[0].candidate_id == exploration.candidate_id
+    assert selected[0].provenance.exploration == attribution
+
+
+def test_selection_soft_degrades_when_exploration_supply_is_missing() -> None:
+    requested = ExplorationAttribution(
+        hypothesis_id="hyp_" + "a" * 32,
+        arm="source-novel",
+    )
+    exploit = candidate(102, state=CandidateState.EVALUATED)
+
+    selected = SelectionService().select(
+        (exploit,),
+        (evaluation(exploit, 0.9),),
+        limit=1,
+        seed=7,
+        now=NOW,
+        exploration=(requested,),
+    )[0]
+
+    assert selected[0].candidate_id == exploit.candidate_id
+
+
+def test_exploit_only_episode_does_not_reserve_exploration_slot() -> None:
+    attribution = ExplorationAttribution(
+        hypothesis_id="hyp_" + "a" * 32,
+        arm="source-novel",
+    )
+    exploit = candidate(103, state=CandidateState.EVALUATED)
+    exploration = candidate(104, state=CandidateState.EVALUATED).model_copy(
+        update={
+            "provenance": candidate(104).provenance.model_copy(update={"exploration": attribution})
+        }
+    )
+
+    decision = ThompsonAllocator(Random(7)).decide(
+        intent="enjoy",
+        hypotheses=((attribution.hypothesis_id, attribution.arm, 0, 0, 0),),
+    )
+    selected = SelectionService().select(
+        (exploit, exploration),
+        (evaluation(exploit, 0.99), evaluation(exploration, 0.61)),
+        limit=1,
+        seed=7,
+        now=NOW,
+        exploration=(attribution,) if decision.explore else (),
+    )[0]
+
+    assert not decision.explore
+    assert selected[0].candidate_id == exploit.candidate_id
 
 
 def test_selection_is_deterministic_and_cross_provider_fair() -> None:

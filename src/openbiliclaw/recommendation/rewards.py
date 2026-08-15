@@ -9,9 +9,10 @@ dislike/dismiss resolves it as failure. Open records an attempt but no Beta reso
 ``RewardLedger.record`` requires the durable ``ShownRecord`` matching the feedback. The
 current delivery pipeline treats newly accepted feedback on that record as proof of
 exposure; callers invoke it only after the idempotent feedback insert succeeds.
-Viewport-level exposure evidence replaces that assumption in Phase B5. Unattributed
-(exploit) signals remain available to guardrail metrics but never update a hypothesis or
-profile. Like-on-explore understanding proposals are also Phase B5 scope.
+Viewport-level exposure evidence replaces that assumption in Phase B5. When composition
+supplies the standing exploit hypothesis, unattributed open/like/save update its funnel
+(and like/save posterior); correction never alters exploit or profile state.
+Like-on-explore understanding proposals are also Phase B5 scope.
 """
 
 from __future__ import annotations
@@ -22,7 +23,12 @@ from typing import TYPE_CHECKING, Literal, Protocol, assert_never
 from pydantic import ConfigDict, Field
 
 from openbiliclaw.core._pydantic import StrictBaseModel
-from openbiliclaw.recommendation.models import FeedbackKind, FeedbackRecord, ShownRecord
+from openbiliclaw.recommendation.models import (
+    ExplorationAttribution,
+    FeedbackKind,
+    FeedbackRecord,
+    ShownRecord,
+)
 
 if TYPE_CHECKING:
     from openbiliclaw.recommendation.policy_journal import JournalOutcome, OutcomeKind
@@ -50,16 +56,6 @@ class RewardKind(StrEnum):
     REPETITION_FATIGUE = "repetition-fatigue"  # derived from longitudinal evidence
 
 
-class ExplorationAttribution(StrictBaseModel):
-    """The single exploration hypothesis/arm that supplied a candidate."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    hypothesis_id: str = Field(pattern=r"^hyp_[0-9a-f]{32}$")
-    arm: str = Field(pattern=r"^[a-z][a-z0-9-]{0,63}$")
-    channel: str | None = Field(default=None, min_length=1, max_length=512)
-
-
 class RewardSignal(StrictBaseModel):
     """One mapped feedback signal and its optional exploration-only credit."""
 
@@ -72,7 +68,7 @@ class RewardSignal(StrictBaseModel):
 
 
 def map_feedback(kind: FeedbackKind, attribution: ExplorationAttribution | None) -> RewardSignal:
-    """Map feedback without side effects; exploit feedback receives no bandit credit."""
+    """Map feedback without side effects; the configured ledger owns exploit credit."""
 
     if kind is FeedbackKind.OPENED:
         return RewardSignal(reward_kind=RewardKind.MEANINGFUL_CONSUMPTION, weight=0.25)
@@ -102,8 +98,14 @@ class _OutcomeRegistry(Protocol):
 class RewardLedger:
     """Credit one newly accepted feedback event through ``HypothesisRegistry``."""
 
-    def __init__(self, registry: _OutcomeRegistry) -> None:
+    def __init__(
+        self,
+        registry: _OutcomeRegistry,
+        *,
+        exploit_hypothesis_id: str | None = None,
+    ) -> None:
         self._registry = registry
+        self._exploit_hypothesis_id = exploit_hypothesis_id
 
     async def record(
         self,
@@ -111,25 +113,39 @@ class RewardLedger:
         shown: ShownRecord,
         attribution: ExplorationAttribution | None,
     ) -> RewardSignal:
-        """Map feedback and credit only its supplying exploration hypothesis."""
+        """Map feedback and credit its supplying hypothesis or configured exploit sink."""
 
         if feedback.shown_id != shown.shown_id:
             raise ValueError("feedback does not match shown record")
         # Late feedback on a hypothesis killed between serve and feedback raises
         # ValueError from the registry (killed is terminal; no partial write occurs).
         signal = map_feedback(feedback.kind, attribution)
-        if attribution is None:
+        target_id = (
+            attribution.hypothesis_id
+            if attribution is not None
+            else (
+                self._exploit_hypothesis_id
+                if feedback.kind in (FeedbackKind.OPENED, FeedbackKind.LIKED, FeedbackKind.SAVED)
+                else None
+            )
+        )
+        if target_id is None:
             return signal
 
         await self._registry.record_outcome(
-            attribution.hypothesis_id,
+            target_id,
             "attempt",
             f"shown {shown.shown_id}: exposure inferred from accepted feedback",
         )
-        if signal.resolution is not None:
+        resolution = signal.resolution
+        if attribution is None and (
+            feedback.kind is FeedbackKind.LIKED or feedback.kind is FeedbackKind.SAVED
+        ):
+            resolution = "success"
+        if resolution is not None:
             await self._registry.record_outcome(
-                attribution.hypothesis_id,
-                signal.resolution,
+                target_id,
+                resolution,
                 f"shown {shown.shown_id}: {feedback.kind.value}",
             )
         return signal

@@ -11,10 +11,11 @@ from ..models import (
     Candidate,
     CandidateState,
     EvaluationRecord,
+    ExplorationAttribution,
     SelectionRecord,
     record_identity,
 )
-from .ranking import rank_candidates
+from .ranking import RankedCandidate, rank_candidates
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -48,6 +49,7 @@ class SelectionService:
         now: datetime,
         seen_ids: frozenset[str] = frozenset(),
         negative_preferences: tuple[str, ...] = (),
+        exploration: tuple[ExplorationAttribution, ...] = (),
     ) -> tuple[tuple[Candidate, ...], tuple[AdmissionRecord, ...], tuple[SelectionRecord, ...]]:
         if not 1 <= limit <= 100:
             raise ValueError("limit must be between 1 and 100")
@@ -73,8 +75,12 @@ class SelectionService:
         creators: Counter[str] = Counter()
         topics: Counter[str] = Counter()
         selected = []
-        for row in ranked:
+        selected_ids: set[str] = set()
+
+        def add(row: RankedCandidate) -> bool:
             candidate = row.candidate
+            if candidate.candidate_id in selected_ids:
+                return False
             provider = candidate.preview.ref.provider_id.value
             creator = candidate.preview.creator_label or ""
             topic = candidate.topics[0] if candidate.topics else ""
@@ -83,13 +89,29 @@ class SelectionService:
                 or (creator and creators[creator] >= self.creator_quota)
                 or (topic and topics[topic] >= self.topic_quota)
             ):
-                continue
+                return False
             selected.append(row)
+            selected_ids.add(candidate.candidate_id)
             providers[provider] += 1
             creators[creator] += 1
             topics[topic] += 1
+            return True
+
+        for slot in exploration[:limit]:
+            for row in ranked:
+                attribution = row.candidate.provenance.exploration
+                matches = (
+                    attribution is not None
+                    and attribution.hypothesis_id == slot.hypothesis_id
+                    and attribution.arm == slot.arm
+                    and (slot.channel is None or attribution.channel == slot.channel)
+                )
+                if matches and add(row):
+                    break
+        for row in ranked:
             if len(selected) >= limit:
                 break
+            add(row)
         admissions = tuple(
             AdmissionRecord(
                 admission_id=record_identity("admit", row.candidate.candidate_id),

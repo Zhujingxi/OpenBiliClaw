@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
@@ -45,6 +46,10 @@ class FeedbackObservationUnitOfWork(Protocol):
     async def record_feedback(
         self, feedback: FeedbackRecord, observation: Observation, content_ref: ContentRef
     ) -> bool: ...
+
+
+class FeedbackRewardSink(Protocol):
+    async def __call__(self, feedback: FeedbackRecord) -> None: ...
 
 
 class RecordFeedbackCommand(StrictBaseModel):
@@ -95,6 +100,7 @@ class RecordFeedbackForShown:
 class RecordFeedback:
     unit_of_work: FeedbackObservationUnitOfWork
     clock: Callable[[], datetime]
+    reward_sink: FeedbackRewardSink | None = None
 
     async def __call__(self, command: RecordFeedbackCommand) -> RecordFeedbackResult:
         now = self.clock()
@@ -147,6 +153,12 @@ class RecordFeedback:
             ) from error
         except ValueError as error:
             raise ApplicationError(ApplicationErrorCode.CONFLICT, str(error)) from error
+        if inserted and self.reward_sink is not None:
+            # The feedback/observation UoW has committed; reward credit is the
+            # learning plane and must never fail an accepted feedback response
+            # (e.g. late feedback on a killed hypothesis raises ValueError there).
+            with contextlib.suppress(Exception):
+                await self.reward_sink(feedback)
         return RecordFeedbackResult(
             feedback_id=feedback_id, observation_id=observation_id, inserted=inserted
         )

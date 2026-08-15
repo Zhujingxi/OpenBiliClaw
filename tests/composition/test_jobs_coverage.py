@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock
@@ -13,12 +13,31 @@ from openbiliclaw.composition.jobs import (
     build_recommendation_jobs,
     build_understanding_job,
 )
-from openbiliclaw.content.integration.identity import ProviderId
+from openbiliclaw.content.integration.capabilities import ContentPage, FeedQuery
+from openbiliclaw.content.integration.identity import ContentKind, ProviderId
+from openbiliclaw.content.integration.manifest import (
+    BiasClass,
+    CapabilityKind,
+    ChannelDescriptor,
+    NativeSchemaDescriptor,
+    ProviderAvailability,
+    ProviderManifest,
+)
+from openbiliclaw.infrastructure.sqlite.database import SqliteDatabase
+from openbiliclaw.infrastructure.sqlite.schema import SchemaMigrator
+from openbiliclaw.recommendation.allocation import AllocationDecision
 from openbiliclaw.recommendation.discovery.service import DiscoveredPreview
 from openbiliclaw.recommendation.evaluation.agent import EvaluationBatch
+from openbiliclaw.recommendation.hypotheses import HypothesisRegistry
+from openbiliclaw.recommendation.models import record_identity
+from openbiliclaw.recommendation.policy_journal import SqlitePolicyJournal
+from openbiliclaw.recommendation.repositories import SqliteRecommendationRepository
+from openbiliclaw.recommendation.service import RecommendationService
 from openbiliclaw.understanding.profile import AvoidanceClaim, CanonicalProfile, claim_id
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from openbiliclaw.content.integration.capabilities import SearchCapability
 
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
@@ -70,6 +89,17 @@ async def test_model_free_evaluation_and_empty_pipeline_are_executable() -> None
     dynamic._providers = SimpleNamespace(registry=SimpleNamespace(manifests=lambda: ()))
     dynamic._access = SimpleNamespace(connected_handle=lambda *_: None)
     dynamic._target_count = 10
+    dynamic._clock = lambda: NOW
+    dynamic._allocate = AsyncMock(
+        return_value=AllocationDecision(
+            intent="uncertain",
+            explore=False,
+            arm=None,
+            hypothesis_id=None,
+            samples=(),
+        )
+    )
+    dynamic._feed_supply = AsyncMock(return_value=())
     dynamic._planner = SimpleNamespace(plan=AsyncMock(return_value=()))
     dynamic._discovery = SimpleNamespace(discover=AsyncMock(return_value=()))
     dynamic._evaluation = SimpleNamespace(evaluate=AsyncMock(return_value=((), ())))
@@ -153,6 +183,95 @@ async def test_model_free_evaluation_and_empty_pipeline_are_executable() -> None
         0,
     )
     dynamic._evaluation.evaluate.assert_awaited_once_with(())
+
+
+@pytest.mark.asyncio
+async def test_replenish_journals_seeded_allocation_and_delivers_attributed_feed_supply(
+    tmp_path: Path,
+) -> None:
+    clock = NOW + timedelta(microseconds=1)  # seed deterministically chooses source-novel
+    path = tmp_path / "replenish.db"
+    await SchemaMigrator(path).migrate()
+    database = SqliteDatabase(path)
+    await database.open()
+    try:
+        recommendations = SqliteRecommendationRepository(database)
+        journal = SqlitePolicyJournal(database)
+        hypotheses = HypothesisRegistry(journal, clock=lambda: clock)
+        preview = candidate("provider-feed").preview
+        manifest = ProviderManifest(
+            provider_id=preview.ref.provider_id,
+            display_name="Demo",
+            capabilities=frozenset({CapabilityKind.FEED}),
+            native_schemas=(
+                NativeSchemaDescriptor(content_kind=ContentKind(value="video"), schema_version=1),
+            ),
+            channels=(
+                ChannelDescriptor(
+                    feed_id="hot",
+                    bias_class=BiasClass.PLATFORM_POPULARITY,
+                    auth_required=False,
+                ),
+            ),
+            availability=ProviderAvailability.AVAILABLE,
+        )
+
+        class FakeFeedProvider:
+            async def feed(self, query: FeedQuery, access: object) -> ContentPage[Any]:
+                assert query.feed_id == "hot"
+                assert access is not None
+                return ContentPage(items=(preview,), next_cursor=None)
+
+        provider = FakeFeedProvider()
+        registry = SimpleNamespace(
+            manifests=lambda: (manifest,),
+            provider=lambda _provider_id: provider,
+        )
+        pipeline = RecommendationPipeline(
+            cast("Any", SimpleNamespace(registry=registry)),
+            cast("Any", SimpleNamespace(connected_handle=lambda *_args: object())),
+            cast("Any", SimpleNamespace(recommendations=recommendations)),
+            cast(
+                "Any",
+                SimpleNamespace(
+                    profile=AsyncMock(
+                        return_value=CanonicalProfile(
+                            profile_id="default",
+                            revision=1,
+                            updated_at=clock,
+                            claims=(),
+                        )
+                    )
+                ),
+            ),
+            target_count=1,
+            hypotheses=hypotheses,
+            policy_journal=journal,
+            clock=lambda: clock,
+        )
+        pipeline._planner = cast("Any", SimpleNamespace(plan=AsyncMock(return_value=())))
+        pipeline._discovery = cast("Any", SimpleNamespace(discover=AsyncMock(return_value=())))
+
+        result = await pipeline.replenish()
+        delivered = await RecommendationService(recommendations).deliver_feed(
+            limit=1, shown_at=clock
+        )
+        selected_candidate = await recommendations.load(delivered[0].selection.candidate_id)
+        allocation = await journal.load_brief(
+            record_identity("brief", f"allocation:{int(clock.timestamp() * 1_000_000)}")
+        )
+
+        assert result == type(result)(discovered=1, added=1, selected=1)
+        assert allocation.payload["explore"] is True
+        assert selected_candidate.provenance.channel == "demo:hot"
+        assert selected_candidate.provenance.exploration is not None
+        assert selected_candidate.provenance.exploration.arm == "source-novel"
+        assert (
+            selected_candidate.provenance.exploration.hypothesis_id
+            == allocation.payload["hypothesis_id"]
+        )
+    finally:
+        await database.close()
 
 
 def test_recommendation_and_understanding_jobs_have_real_callbacks() -> None:

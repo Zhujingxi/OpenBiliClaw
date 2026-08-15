@@ -13,6 +13,7 @@ from openbiliclaw.recommendation.expression.service import ExpressionService
 from openbiliclaw.recommendation.models import (
     Candidate,
     CandidateState,
+    ExplorationAttribution,
     FeedbackKind,
     FeedbackRecord,
     SelectionRecord,
@@ -116,6 +117,65 @@ async def test_replay_selection_after_restart_matches_persisted_order(tmp_path: 
         assert result.actual_ids == expected
     finally:
         await restarted.close()
+
+
+@pytest.mark.asyncio
+async def test_replay_preserves_exploration_constraint(tmp_path: Path) -> None:
+    path = tmp_path / "exploration-replay.db"
+    await SchemaMigrator(path).migrate()
+    db = SqliteDatabase(path)
+    await db.open()
+    try:
+        repo = SqliteRecommendationRepository(db)
+        attribution = ExplorationAttribution(
+            hypothesis_id="hyp_" + "a" * 32,
+            arm="source-novel",
+        )
+        exploit = candidate(20, state=CandidateState.EVALUATED)
+        exploration = candidate(21, state=CandidateState.EVALUATED).model_copy(
+            update={
+                "provenance": candidate(21).provenance.model_copy(
+                    update={"exploration": attribution.model_copy(update={"channel": "v2ex:hot"})}
+                )
+            }
+        )
+        other_channel = candidate(22, state=CandidateState.EVALUATED).model_copy(
+            update={
+                "provenance": candidate(22).provenance.model_copy(
+                    update={
+                        "exploration": attribution.model_copy(update={"channel": "bangumi:rank"})
+                    }
+                )
+            }
+        )
+        candidates = (exploit, exploration, other_channel)
+        evaluations = (
+            evaluation(exploit, 0.99),
+            evaluation(exploration, 0.61),
+            evaluation(other_channel, 0.8),
+        )
+        for item, scored in zip(candidates, evaluations, strict=True):
+            assert await repo.add_candidate(item)
+            assert await repo.save_evaluation(scored)
+        _, admissions, selections = SelectionService().select(
+            candidates,
+            evaluations,
+            limit=3,
+            seed=42,
+            now=NOW,
+            exploration=(attribution,),
+        )
+        by_id = {item.candidate_id: item for item in candidates}
+        await SelectionService().persist_selection(
+            repo,
+            tuple(by_id[row.candidate_id] for row in selections),
+            admissions,
+            selections,
+        )
+
+        assert (await replay_selection(repo, selections[0])).matched
+    finally:
+        await db.close()
 
 
 @pytest.mark.asyncio

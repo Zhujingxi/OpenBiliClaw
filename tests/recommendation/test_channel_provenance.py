@@ -129,5 +129,6 @@ async def test_migration_backfills_provider_for_existing_candidates(tmp_path: Pa
         loaded = await SqliteRecommendationRepository(reopened).load(current.candidate_id)
         assert loaded.provenance.provider == "bilibili"
         assert loaded.provenance.channel is None
+        assert loaded.provenance.exploration is None  # pre-attribution blobs stay valid
     finally:
         await reopened.close()

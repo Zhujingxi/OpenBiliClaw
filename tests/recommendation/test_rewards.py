@@ -124,6 +124,30 @@ async def test_unattributed_feedback_returns_guardrail_signal_without_outcome() 
     assert registry.outcomes == []
 
 
+async def test_unattributed_dismiss_never_updates_configured_exploit_arm() -> None:
+    registry = RecordingRegistry()
+
+    await RewardLedger(registry, exploit_hypothesis_id="hyp_" + "f" * 32).record(
+        _feedback(FeedbackKind.DISMISSED), _shown(), None
+    )
+
+    assert registry.outcomes == []
+
+
+async def test_unattributed_feedback_updates_configured_exploit_posterior() -> None:
+    registry = RecordingRegistry()
+    exploit_id = "hyp_" + "f" * 32
+
+    await RewardLedger(registry, exploit_hypothesis_id=exploit_id).record(
+        _feedback(FeedbackKind.LIKED), _shown(), None
+    )
+
+    assert [row[:2] for row in registry.outcomes] == [
+        (exploit_id, "attempt"),
+        (exploit_id, "success"),
+    ]
+
+
 @pytest.mark.parametrize(
     ("kind", "expected"),
     [
@@ -144,6 +168,31 @@ async def test_exposure_is_logged_before_any_resolution(
     assert [outcome[1] for outcome in registry.outcomes] == expected
     assert {outcome[0] for outcome in registry.outcomes} == {ATTRIBUTION.hypothesis_id}
     assert all(_feedback(kind).shown_id in outcome[2] for outcome in registry.outcomes)
+
+
+async def test_exploit_feedback_updates_persisted_exploit_posterior(tmp_path: Path) -> None:
+    path = tmp_path / "exploit-rewards.db"
+    await SchemaMigrator(path).migrate()
+    database = SqliteDatabase(path)
+    await database.open()
+    try:
+        registry = HypothesisRegistry(SqlitePolicyJournal(database), clock=lambda: NOW)
+        exploit = await registry.ensure_active(
+            arm="exploit",
+            statement="The familiar strategy may satisfy current intent",
+            evidence_refs=("system:feedback",),
+            falsification="resolved failures exceed successes",
+            expires_at=NOW + timedelta(days=7),
+            now=NOW,
+        )
+
+        await RewardLedger(registry, exploit_hypothesis_id=exploit.hypothesis_id).record(
+            _feedback(FeedbackKind.LIKED), _shown(), None
+        )
+
+        assert await registry.posterior(exploit.hypothesis_id) == (1, 1, 0)
+    finally:
+        await database.close()
 
 
 async def test_exposure_precedes_resolution_in_the_policy_journal(tmp_path: Path) -> None:

@@ -54,6 +54,7 @@ class RecommendationRepository(Protocol):
     async def load_selections_for_seed(self, seed: int) -> tuple[SelectionRecord, ...]: ...
     async def load_shown(self, recommendation_id: str) -> ShownRecord: ...
     async def content_ref_for_shown(self, shown_id: str) -> ContentRef: ...
+    async def reward_context(self, shown_id: str) -> tuple[ShownRecord, Candidate]: ...
     async def deliver_feed(
         self, *, limit: int, shown_at: datetime
     ) -> tuple[RecommendationFeedItem, ...]: ...
@@ -235,12 +236,12 @@ class SqliteRecommendationRepository:
             raise KeyError(recommendation_id)
         return ShownRecord.model_validate_json(str(row[0]))
 
-    async def content_ref_for_shown(self, shown_id: str) -> ContentRef:
-        """Resolve the immutable content identity behind one delivered impression."""
+    async def reward_context(self, shown_id: str) -> tuple[ShownRecord, Candidate]:
+        """Resolve the durable exposure and attributed candidate for reward credit."""
 
         async with self.db.transaction() as session:
             row = await session.fetch_one(
-                "SELECT c.candidate_json FROM recommendation_shown s "
+                "SELECT s.record_json,c.candidate_json FROM recommendation_shown s "
                 "JOIN recommendation_candidates c "
                 "ON c.candidate_id=json_extract(s.record_json,'$.candidate_id') "
                 "WHERE s.shown_id=?",
@@ -248,7 +249,16 @@ class SqliteRecommendationRepository:
             )
         if row is None:
             raise KeyError(shown_id)
-        return Candidate.model_validate_json(str(row[0])).preview.ref
+        return (
+            ShownRecord.model_validate_json(str(row[0])),
+            Candidate.model_validate_json(str(row[1])),
+        )
+
+    async def content_ref_for_shown(self, shown_id: str) -> ContentRef:
+        """Resolve the immutable content identity behind one delivered impression."""
+
+        _shown, candidate = await self.reward_context(shown_id)
+        return candidate.preview.ref
 
     async def save_feedback(self, record: FeedbackRecord, content_ref: ContentRef) -> bool:
         async with self.db.transaction() as session:

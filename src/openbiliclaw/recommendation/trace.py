@@ -93,7 +93,7 @@ async def assemble_trace(repo: TraceRepository, recommendation_id: str) -> Decis
 
 
 async def replay_selection(
-    repo: TraceRepository, selection: SelectionRecord, *, threshold: float | None = None
+    repo: TraceRepository, selection: SelectionRecord, *, threshold: float = 0.5
 ) -> ReplayResult:
     """Rerun one persisted cohort with its original seed, limit, and clock.
 
@@ -110,14 +110,28 @@ async def replay_selection(
         (await repo.load(row.candidate_id)).model_copy(update={"state": CandidateState.EVALUATED})
         for row in cohort
     ]
+    attributed = next(
+        (
+            candidate.provenance.exploration
+            for candidate in replay_candidates
+            if candidate.provenance.exploration is not None
+        ),
+        None,
+    )
+    # Production B4 reserves one winning-hypothesis slot; channel is supply
+    # provenance, not a separate reservation.
+    exploration = (
+        (attributed.model_copy(update={"channel": None}),) if attributed is not None else ()
+    )
     evaluations = [await repo.load_evaluation(row.candidate_id) for row in cohort]
-    service = SelectionService() if threshold is None else SelectionService(threshold=threshold)
+    service = SelectionService(threshold=threshold)
     _, _, replayed = service.select(
         tuple(replay_candidates),
         tuple(evaluations),
         limit=len(cohort),
         seed=selection.seed,
         now=selection.selected_at,
+        exploration=exploration,
     )
     expected_ids = tuple(row.recommendation_id for row in cohort)
     actual_ids = tuple(row.recommendation_id for row in replayed)

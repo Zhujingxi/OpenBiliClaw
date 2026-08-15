@@ -73,9 +73,13 @@ learned magnitudes.
   pure replayable allocator: intent deterministically conditions eligible strategies,
   uncertain intent lets exploit and active hypotheses compete, and uniform priors make
   cold-start exploration emerge without a policy percentage. Pipeline wiring remains B4.
-- [ ] 4. **Constrained-MMR slate**: generalize existing provider(2)/creator(1)/topic(2) quotas
-  in `selection/`; exploration slots reserved as hard constraints; explicit high-intent
-  search stays exploit-only.
+- [x] 4. **Constrained slate + allocation wiring**: generalized the existing
+  provider(2)/creator(1)/topic(2) quotas with hard exploration-slot reservation and
+  supply-missing soft degradation. Production replenishment journals seeded Thompson
+  decisions with temporary `intent="uncertain"`, acquires anonymous provider feeds, and
+  preserves hypothesis/channel attribution through delivery and feedback. B2 supplies
+  real intent next; embedding-based MMR waits for Phase C, and dormant-interest supply
+  waits for ledger SQL.
 - [ ] 5. **Evidence discipline**: exploration provenance + arm on observations; dismissals
   count only after viewport exposure; like-on-explore → low-confidence (~0.2)
   corroboration-gated proposal via the existing Understanding path; dismiss decays that

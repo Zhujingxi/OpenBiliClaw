@@ -6,6 +6,8 @@
 
 ## Unreleased
 
+- Wired Phase B allocation into production replenishment: seeded Thompson decisions are journaled with temporary uncertain intent, anonymous provider channels add cross-provider supply, candidate provenance retains hypothesis/arm/channel attribution, and constrained selection reserves exploration supply without blocking when it is unavailable. A standing exploit arm learns from unattributed open/like/save feedback while corrections remain exploration-only; full semantic MMR, real brief intent, viewport evidence, and dormant-interest supply remain deferred to their planned substrate.
+
 - Added Phase B intent-conditioned statistical allocation as a pure replayable `ThompsonAllocator`: uniform Beta priors make cold-start exploration emerge from the active hypothesis set, family evidence supplies priors for unresolved hypotheses, exploit-slot evidence is a first-class learned arm, and every posterior draw is retained for audit. `enjoy`/`accomplish` remain deterministically exploit-only while `deepen`/`explore` choose an exploration hypothesis and `uncertain` lets learned posteriors compete; persistence and pipeline/slate wiring remain deferred to B4.
 
 - Pinned the Phase B reward contract before statistical learning: feedback maps deterministically to explicit satisfaction/correction or weak meaningful consumption, only the supplying exploration hypothesis receives success/failure credit, and exploit/unattributed signals remain guardrail-only. `RewardLedger` verifies the durable shown record and writes exposure before resolution; voluntary-return, repetition-fatigue derivation, viewport evidence, profile proposals, bandits, and pipeline wiring remain deferred to their planned phases.

@@ -53,12 +53,23 @@ def record_identity(prefix: str, *values: str) -> str:
     return prefix + "_" + hashlib.sha256(":".join(values).encode()).hexdigest()[:32]
 
 
+class ExplorationAttribution(StrictBaseModel):
+    """The single exploration hypothesis/arm that supplied a candidate."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    hypothesis_id: str = Field(pattern=r"^hyp_[0-9a-f]{32}$")
+    arm: str = Field(pattern=r"^[a-z][a-z0-9-]{0,63}$")
+    channel: str | None = Field(default=None, min_length=1, max_length=512)
+
+
 class DiscoveryProvenance(StrictBaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     strategy_id: str = Field(pattern=r"^[a-z][a-z0-9_.-]{0,127}$")
     query_key: str = Field(min_length=1, max_length=500)
     provider: str = Field(pattern=r"^[a-z][a-z0-9_.-]{0,127}$")
     channel: str | None = Field(default=None, min_length=1, max_length=512)
+    exploration: ExplorationAttribution | None = None
     discovered_at: AwareDatetime
 
 

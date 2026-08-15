@@ -6,7 +6,7 @@
 
 - model-free reads: source status, recommendation feed delivery, profile projection, provider search, content details, and job health, all with bounded pagination; feed delivery atomically records stable shown IDs before returning items;
 - mutations: connect/disconnect, typed observation import, feedback, profile edit, bounded recommendation refresh admission;
-- feedback validates the delivered shown record/content pair, transitions shown → interacted, and commits its learning observation through an explicit unit of work; profile override + audit observation uses its own unit of work;
+- feedback validates the delivered shown record/content pair, transitions shown → interacted, and commits its learning observation through an explicit unit of work; only a newly inserted feedback record invokes the optional reward sink, preventing duplicate hypothesis/exploit credit; profile override + audit observation uses its own unit of work;
 - source connect verifies and stores credentials through Access before refreshing availability;
 - pending actions store only identity, scope, safe preview, expiry, and idempotency metadata; confirmation revalidates all of them;
 - recommendation refresh requests Core-owned job admission and never creates unmanaged tasks.
@@ -28,4 +28,4 @@ Broad integration facades, direct profile writes, fake source tools, extension c
 
 ## Transaction and notification rules
 
-Workflow contracts expose validation, authorization, idempotency, and audit fields. A unit of work returns only after primary state commits; post-commit publisher failure is recoverable and does not imply rollback. Cancellation is never converted to success. User data is never silently reset or discarded.
+Workflow contracts expose validation, authorization, idempotency, and audit fields. A unit of work returns only after primary state commits; the feedback reward callback is post-insert policy-journal accounting and is never called for an idempotent duplicate. Post-commit publisher failure is recoverable and does not imply rollback. Cancellation is never converted to success. User data is never silently reset or discarded.

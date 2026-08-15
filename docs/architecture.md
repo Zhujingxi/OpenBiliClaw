@@ -18,8 +18,9 @@ Vue web / extension ─────── generated typed client
        │       │       │
        ▼       ▼       ▼
  Observations  Understanding  Recommendation
-                               discovery → prefilter
-                               → evaluation → selection
+                               search/feed acquisition → prefilter
+                               → evaluation → seeded allocation
+                               → constrained selection
        ▲             ▲              ▲
        └──────── Content Integration ┘
                      ▲
@@ -40,7 +41,7 @@ Vue web / extension ─────── generated typed client
 - Assistant receives safe application tools and bounded understanding projections; it cannot access credentials or repositories.
 - Content providers depend on Content Integration and opaque Access handles.
 - Understanding consumes immutable observations and never imports Recommendation. Composition exposes the configured embedding service separately; Recommendation discovery remains text-query based, so no durable semantic index is added until a concrete semantic retrieval consumer exists.
-- Recommendation is proactive and works without Assistant. Its deterministic baseline evaluates accessible connected-provider content without a model; configured model routes may enrich target analyzers.
+- Recommendation is proactive and works without Assistant. Its deterministic baseline evaluates accessible connected-provider search and anonymous feed content without a model; seeded Thompson allocation and constrained selection share the append-only policy journal with post-feedback reward credit. Configured model routes may enrich target analyzers.
 - Chat provider IDs, endpoints, wire protocols, and capabilities resolve from the live models.dev catalog, cached for 24 hours under the data directory with stale-cache offline fallback. PydanticAI's registry selects native implementations within the catalog protocol family. Fully custom providers must explicitly declare protocol, endpoint, and all capabilities. Embeddings retain their existing explicit external-service configuration. OpenBiliClaw does not host, bundle, or supervise model runtimes.
 - Infrastructure owns resource adapters, while domain repositories remain owned by their domain packages.
 - Composition builds, starts, reloads, drains, and closes the concrete graph. No product module treats `Application` as a service locator.

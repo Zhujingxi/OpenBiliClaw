@@ -11,6 +11,7 @@ Expired-but-unkilled hypotheses still accept outcomes (late engagement is valid 
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -39,6 +40,9 @@ class HypothesisRegistry:
     ) -> None:
         self._journal = journal
         self._clock = clock
+        # ponytail: one process-local lock is enough for a single-user journal;
+        # use a durable uniqueness key only if multi-process writers are introduced.
+        self._standing_lock = asyncio.Lock()
 
     async def register(
         self,
@@ -64,6 +68,33 @@ class HypothesisRegistry:
             raise ValueError("hypothesis expiry must be in the future")
         await self._journal.append_hypothesis(record)
         return record
+
+    async def ensure_active(
+        self,
+        *,
+        arm: str,
+        statement: str,
+        evidence_refs: tuple[str, ...],
+        falsification: str,
+        expires_at: datetime,
+        now: datetime | None = None,
+    ) -> JournalHypothesis:
+        """Return the standing active hypothesis for an arm, creating it when absent."""
+
+        async with self._standing_lock:
+            current = next(
+                (hypothesis for hypothesis in await self.active(now) if hypothesis.arm == arm),
+                None,
+            )
+            if current is not None:
+                return current
+            return await self.register(
+                arm=arm,
+                statement=statement,
+                evidence_refs=evidence_refs,
+                falsification=falsification,
+                expires_at=expires_at,
+            )
 
     async def active(self, now: datetime | None = None) -> tuple[JournalHypothesis, ...]:
         """Return unexpired hypotheses that have no explicit kill event."""

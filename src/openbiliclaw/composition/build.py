@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -71,6 +71,10 @@ from openbiliclaw.infrastructure.sqlite.schema import SchemaMigrator
 from openbiliclaw.infrastructure.telemetry import TelemetrySink
 from openbiliclaw.observations.service import ObservationIngressService
 from openbiliclaw.observations.validation import ObservationValidator
+from openbiliclaw.recommendation.hypotheses import HypothesisRegistry
+from openbiliclaw.recommendation.models import FeedbackKind
+from openbiliclaw.recommendation.policy_journal import SqlitePolicyJournal
+from openbiliclaw.recommendation.rewards import RewardLedger
 from openbiliclaw.recommendation.service import RecommendationService
 from openbiliclaw.understanding.analyzers.contracts import PREFERENCE_ANALYZER
 from openbiliclaw.understanding.analyzers.preference import (
@@ -85,6 +89,7 @@ if TYPE_CHECKING:
     from openbiliclaw.access.methods import AccessMethod
     from openbiliclaw.core.jobs import JobDecision, JobSpec
     from openbiliclaw.observations.events import ObservationsCommitted
+    from openbiliclaw.recommendation.models import FeedbackRecord
     from openbiliclaw.understanding.proposals import ProposalBatch
 
 
@@ -362,12 +367,16 @@ def build_application(
         analyzers=analyzers,
         clock=lambda: datetime.now(UTC),
     )
+    policy_journal = SqlitePolicyJournal(database)
+    hypotheses = HypothesisRegistry(policy_journal)
     pipeline = RecommendationPipeline(
         providers,
         access,
         repositories,
         understanding,
         target_count=settings.recommendation.pool_target_count,
+        hypotheses=hypotheses,
+        policy_journal=policy_journal,
     )
     jobs = build_recommendation_jobs(pipeline)
     if assistant_runtime is not None:
@@ -417,9 +426,34 @@ def build_application(
             ),
         )
     )
+
+    async def record_reward(feedback: FeedbackRecord) -> None:
+        shown, candidate = await repositories.recommendations.reward_context(feedback.shown_id)
+        exploit_id = None
+        if candidate.provenance.exploration is None and feedback.kind in (
+            FeedbackKind.OPENED,
+            FeedbackKind.LIKED,
+            FeedbackKind.SAVED,
+        ):
+            now = datetime.now(UTC)
+            exploit = await hypotheses.ensure_active(
+                arm="exploit",
+                statement="The familiar exploit strategy may satisfy current intent",
+                evidence_refs=("system:feedback",),
+                falsification="resolved failures exceed resolved successes",
+                expires_at=now + timedelta(days=365),
+                now=now,
+            )
+            exploit_id = exploit.hypothesis_id
+        await RewardLedger(
+            hypotheses,
+            exploit_hypothesis_id=exploit_id,
+        ).record(feedback, shown, candidate.provenance.exploration)
+
     feedback = RecordFeedback(
         FeedbackUnitOfWork(repositories.recommendations, repositories.observations),
         clock=lambda: datetime.now(UTC),
+        reward_sink=record_reward,
     )
     facade = CompositionFacade(
         settings=settings,

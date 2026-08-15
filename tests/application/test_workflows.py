@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -224,6 +225,44 @@ async def test_record_feedback_builds_each_typed_observation(kind: FeedbackKind)
     )
     assert result.inserted
     assert uow.feedback[0][1].event_type == f"recommendation_{kind.value}"
+
+
+async def test_record_feedback_credits_reward_only_after_new_insert() -> None:
+    uow = UnitOfWorkFake()
+    reward = AsyncMock()
+    workflow = RecordFeedback(uow, clock=lambda: NOW, reward_sink=reward)
+    command = RecordFeedbackCommand(
+        idempotency_key="feedback:reward:001",
+        shown_id="shown_" + "1" * 32,
+        content_ref=REF,
+        kind=FeedbackKind.LIKED,
+    )
+
+    first = await workflow(command)
+    second = await workflow(command)
+
+    assert first.inserted and not second.inserted
+    reward.assert_awaited_once_with(uow.feedback[0][0])
+
+
+async def test_reward_sink_failure_never_fails_a_committed_feedback() -> None:
+    """Learning-plane errors (e.g. killed hypothesis) stay out of the feedback path."""
+
+    uow = UnitOfWorkFake()
+    reward = AsyncMock(side_effect=ValueError("hypothesis is killed"))
+    workflow = RecordFeedback(uow, clock=lambda: NOW, reward_sink=reward)
+
+    result = await workflow(
+        RecordFeedbackCommand(
+            idempotency_key="feedback:reward:sink-failure",
+            shown_id="shown_" + "1" * 32,
+            content_ref=REF,
+            kind=FeedbackKind.LIKED,
+        )
+    )
+
+    assert result.inserted
+    reward.assert_awaited_once()
 
 
 async def test_record_feedback_builds_typed_observation_in_one_uow_and_propagates_cancel() -> None:

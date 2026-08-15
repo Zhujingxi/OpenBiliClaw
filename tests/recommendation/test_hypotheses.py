@@ -94,6 +94,30 @@ async def test_register_load_round_trip_with_sqlite(tmp_path: Path) -> None:
         await database.close()
 
 
+async def test_ensure_active_reuses_one_standing_hypothesis_per_arm() -> None:
+    journal = MemoryPolicyJournal()
+    registry = HypothesisRegistry(journal, clock=lambda: NOW)
+    first = await registry.ensure_active(
+        arm="source-novel",
+        statement="Public feeds may expose useful novelty",
+        evidence_refs=("system:replenishment",),
+        falsification="resolved failures exceed successes",
+        expires_at=NOW + timedelta(days=7),
+        now=NOW,
+    )
+    second = await registry.ensure_active(
+        arm="source-novel",
+        statement="Public feeds may expose useful novelty",
+        evidence_refs=("system:replenishment",),
+        falsification="resolved failures exceed successes",
+        expires_at=NOW + timedelta(days=7),
+        now=NOW,
+    )
+
+    assert second == first
+    assert tuple(journal.hypotheses.values()) == (first,)
+
+
 async def test_active_filters_expired_and_killed_hypotheses() -> None:
     journal = MemoryPolicyJournal()
     registry = HypothesisRegistry(journal, clock=lambda: NOW)

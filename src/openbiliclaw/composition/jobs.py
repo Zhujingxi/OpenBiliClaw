@@ -4,10 +4,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from random import Random
 from typing import TYPE_CHECKING
 
-from openbiliclaw.content.integration.capabilities import SearchCapability
+from openbiliclaw.content.integration.capabilities import (
+    FeedCapability,
+    FeedQuery,
+    PageRequest,
+    SearchCapability,
+)
 from openbiliclaw.core.jobs import IntervalSchedule, JobSpec, MissedRunPolicy, OverlapPolicy
+from openbiliclaw.recommendation.allocation import (
+    AllocationDecision,
+    HypothesisCounts,
+    ThompsonAllocator,
+)
 from openbiliclaw.recommendation.discovery.planner import DiscoveryPlanner
 from openbiliclaw.recommendation.discovery.service import DiscoveryService
 from openbiliclaw.recommendation.evaluation.agent import CandidateScore, EvaluationBatch
@@ -19,19 +30,26 @@ from openbiliclaw.recommendation.models import (
     Candidate,
     CandidateState,
     DiscoveryProvenance,
+    ExplorationAttribution,
     candidate_identity,
+    record_identity,
 )
+from openbiliclaw.recommendation.policy_journal import JournalBrief, PolicyJournal
 from openbiliclaw.recommendation.selection.service import SelectionService
 from openbiliclaw.understanding.projections import discovery_projection, recommendation_projection
 
 DEFAULT_PROFILE_ID = "default"
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from openbiliclaw.access.models import AccessHandle
     from openbiliclaw.access.service import AccessService
     from openbiliclaw.composition.providers import ProviderGraph
     from openbiliclaw.composition.repositories import RepositoryGraph
     from openbiliclaw.content.integration.identity import ProviderId
+    from openbiliclaw.content.integration.projections import ContentPreview
+    from openbiliclaw.recommendation.hypotheses import HypothesisRegistry
     from openbiliclaw.understanding.service import UnderstandingService
 
 
@@ -53,17 +71,23 @@ class RecommendationPipeline:
         understanding: UnderstandingService,
         *,
         target_count: int,
+        hypotheses: HypothesisRegistry,
+        policy_journal: PolicyJournal,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._providers = providers
         self._access = access
         self._repositories = repositories
         self._understanding = understanding
         self._target_count = target_count
+        self._hypotheses = hypotheses
+        self._policy_journal = policy_journal
+        self._clock = clock
         self._planner = DiscoveryPlanner()
         self._discovery = DiscoveryService(self._resolve)
-        self._evaluation = EvaluationService(self._evaluate_model_free, lambda: datetime.now(UTC))
+        self._evaluation = EvaluationService(self._evaluate_model_free, self._clock)
         self._selection = SelectionService(threshold=0.5)
-        self._expression = ExpressionService(None, lambda: datetime.now(UTC))
+        self._expression = ExpressionService(None, self._clock)
 
     def _resolve(self, provider_id: ProviderId) -> tuple[SearchCapability, AccessHandle]:
         provider = self._providers.registry.provider(provider_id)
@@ -95,8 +119,107 @@ class RecommendationPipeline:
             0,
         )
 
+    async def _ensure_hypothesis(self, arm: str, now: datetime) -> str:
+        standing = await self._hypotheses.ensure_active(
+            arm=arm,
+            statement={
+                "source-novel": "Cross-provider public feeds may expose relevant source novelty",
+                "weak-signal": "Public feed signals may reveal an emerging interest",
+                "exploit": "The familiar exploit strategy may satisfy current intent",
+            }[arm],
+            evidence_refs=("system:replenishment",),
+            falsification="resolved failures exceed resolved successes",
+            expires_at=now + timedelta(days=365),
+            now=now,
+        )
+        return standing.hypothesis_id
+
+    async def _allocate(self, seed: int, now: datetime) -> AllocationDecision:
+        await self._ensure_hypothesis("source-novel", now)
+        await self._ensure_hypothesis("weak-signal", now)
+        await self._ensure_hypothesis("exploit", now)
+        active = await self._hypotheses.active(now)
+        counts: list[HypothesisCounts] = []
+        for hypothesis in active:
+            attempts, successes, failures = await self._hypotheses.posterior(
+                hypothesis.hypothesis_id
+            )
+            counts.append(
+                (
+                    hypothesis.hypothesis_id,
+                    hypothesis.arm,
+                    attempts,
+                    successes,
+                    failures,
+                )
+            )
+        decision = ThompsonAllocator(Random(seed)).decide(
+            intent="uncertain",
+            hypotheses=tuple(counts),
+        )
+        payload = {
+            "kind": "allocation",
+            "intent": decision.intent,
+            "explore": decision.explore,
+            "arm": decision.arm,
+            "hypothesis_id": decision.hypothesis_id,
+            "samples": [
+                {
+                    "arm": sample.arm,
+                    "hypothesis_id": sample.hypothesis_id,
+                    "alpha": sample.alpha,
+                    "beta": sample.beta,
+                    "value": sample.value,
+                }
+                for sample in decision.samples
+            ],
+        }
+        await self._policy_journal.append_brief(
+            JournalBrief(
+                brief_id=record_identity("brief", f"allocation:{seed}"),
+                episode_id=f"replenishment:{seed}",
+                status="active",
+                payload=payload,
+                created_at=now,
+            )
+        )
+        return decision
+
+    async def _feed_supply(
+        self,
+        *,
+        limit: int,
+    ) -> tuple[tuple[ContentPreview, str], ...]:
+        supply: list[tuple[ContentPreview, str]] = []
+        manifests = self._providers.registry.manifests()
+        public_channels = tuple(
+            (manifest, channel)
+            for manifest in manifests
+            for channel in manifest.channels
+            if not channel.auth_required
+        )
+        per_channel = max(1, limit // max(1, len(public_channels)))
+        for manifest, channel in public_channels:
+            provider = self._providers.registry.provider(manifest.provider_id)
+            handle = self._access.connected_handle(manifest.provider_id.value, None)
+            if not isinstance(provider, FeedCapability) or handle is None:
+                continue
+            try:
+                page = await provider.feed(
+                    FeedQuery(feed_id=channel.feed_id, page=PageRequest(limit=per_channel)),
+                    handle,
+                )
+            except Exception:
+                continue
+            supply.extend(
+                (preview, f"{manifest.provider_id.value}:{channel.feed_id}")
+                for preview in page.items
+            )
+        return tuple(supply[:limit])
+
     async def replenish(self, maximum_items: int | None = None) -> ReplenishmentResult:
-        now = datetime.now(UTC)
+        now = self._clock()
+        seed = int(now.timestamp() * 1_000_000)
         limit = min(maximum_items or self._target_count, self._target_count, 20)
         profile = await self._understanding.profile(DEFAULT_PROFILE_ID)
         discovery_profile = discovery_projection(profile)
@@ -113,7 +236,17 @@ class RecommendationPipeline:
             if self._access.connected_handle(plan.provider_id.value, None) is not None
         )
         discovered = await self._discovery.discover(connected, limit=limit)
-        candidates = tuple(
+        decision = await self._allocate(seed, now)
+        attribution = (
+            ExplorationAttribution(
+                hypothesis_id=decision.hypothesis_id,
+                arm=decision.arm,
+            )
+            if decision.explore and decision.hypothesis_id is not None and decision.arm is not None
+            else None
+        )
+        feed_supply = await self._feed_supply(limit=limit)
+        search_candidates = tuple(
             Candidate(
                 candidate_id=candidate_identity(
                     item.preview.ref,
@@ -133,6 +266,32 @@ class RecommendationPipeline:
             )
             for item in discovered
         )
+        feed_candidates = tuple(
+            Candidate(
+                candidate_id=candidate_identity(
+                    preview.ref,
+                    "provider.feed",
+                    f"{channel}:{preview.ref.provider_content_id}",
+                ),
+                preview=preview,
+                provenance=DiscoveryProvenance(
+                    strategy_id="provider.feed",
+                    query_key=f"{channel}:{preview.ref.provider_content_id}",
+                    provider=preview.ref.provider_id.value,
+                    channel=channel,
+                    exploration=(
+                        attribution.model_copy(update={"channel": channel})
+                        if attribution is not None
+                        else None
+                    ),
+                    discovered_at=now,
+                ),
+                topics=(channel,),
+                expires_at=now + timedelta(days=7),
+            )
+            for preview, channel in feed_supply
+        )
+        candidates = (*search_candidates, *feed_candidates)
         added_list: list[Candidate] = []
         for candidate in candidates:
             if await self._repositories.recommendations.add_candidate(candidate):
@@ -162,9 +321,10 @@ class RecommendationPipeline:
             evaluated,
             records,
             limit=min(self._target_count, 100),
-            seed=int(now.timestamp()),
+            seed=seed,
             now=now,
             negative_preferences=recommendation_projection(profile).negative_topics,
+            exploration=(attribution,) if attribution is not None else (),
         )
         by_id = {item.candidate_id: item for item in evaluated}
         await self._selection.persist_selection(
