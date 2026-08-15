@@ -10,6 +10,7 @@ from openbiliclaw.ai.runtime.capabilities import ModelCapabilities
 from openbiliclaw.ai.runtime.errors import UnavailableError
 from openbiliclaw.ai.runtime.execution import AIRuntime
 from openbiliclaw.ai.runtime.routes import ConfiguredModel, ModelRoute, RouteTable
+from openbiliclaw.application.content_actions import ConfirmContentActionCommand
 from openbiliclaw.application.errors import ApplicationError, ApplicationErrorCode
 from openbiliclaw.assistant.agent import (
     ASSISTANT_AGENT_ID,
@@ -139,18 +140,42 @@ async def test_controller_translates_ai_runtime_failure_to_typed_unavailable(
 
 
 @pytest.mark.asyncio
-async def test_assistant_tool_facade_delegates_reads_and_blocks_mutations(tmp_path: Path) -> None:
+async def test_assistant_tool_facade_proposes_but_never_applies_profile_mutations(
+    tmp_path: Path,
+) -> None:
     application = build_application(AppSettings(), options=BuildOptions(data_dir=tmp_path))
     assert application.services.facade is not None
+    assert application.services.understanding is not None
     facade = _AssistantToolFacade(application.services.facade)
     await application.start()
     try:
         assert await facade.get_recommendations(1) is not None
         assert await facade.show_profile() is not None
         assert await facade.list_sources() is not None
+        before = await application.services.facade.show_profile("default")
+        pending = await facade.propose_profile_revision(
+            "exploration.disabled", "set", "true", "stop exploring"
+        )
+        after = await application.services.facade.show_profile("default")
+        assert pending.kind == "profile_revision"
+        duplicate = await facade.propose_profile_revision(
+            "exploration.disabled", "set", "true", "same correction, retried"
+        )
+        assert duplicate.pending_action_id == pending.pending_action_id
+        assert after == before
+        assert not hasattr(facade, "edit_profile")
+        await application.services.facade.confirm_action(
+            ConfirmContentActionCommand(
+                pending_action_id=pending.pending_action_id, user_id="local"
+            )
+        )
+        canonical = await application.services.understanding.profile("default")
+        # RecommendationPipeline's B5 branch compiles this explicit flag to
+        # exploit-only allocation; passive behavior cannot produce the override.
+        assert canonical.exploration_disabled()
+        assert not canonical.claims
         for operation in (
             facade.record_feedback("ref", "liked"),
-            facade.edit_profile("claim", "set", "x"),
             facade.connect_source("demo"),
         ):
             with pytest.raises(RuntimeError, match="require"):
@@ -168,7 +193,7 @@ def test_composition_attaches_safe_application_workflow_tools(tmp_path: Path) ->
         "get_content_details",
         "search_content",
         "show_profile",
-        "edit_profile",
+        "propose_profile_revision",
         "list_sources",
         "connect_source",
         "record_feedback",

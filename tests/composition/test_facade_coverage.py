@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
 
+from openbiliclaw.application.content_actions import ConfirmContentActionCommand
 from openbiliclaw.composition.build import BuildOptions, build_application
 from openbiliclaw.composition.facade import _ActionExecutor, _Availability, _ContentVerifier
 from openbiliclaw.content.integration.identity import ContentKind, ContentRef, ProviderId
@@ -57,7 +59,19 @@ async def test_facade_delegates_every_transport_operation(tmp_path) -> None:  # 
     assert await dynamic.record_feedback(cast("Any", object())) == "feedback"
     assert await dynamic.edit_profile(cast("Any", object())) == "edit"
     assert await dynamic.propose_action(cast("Any", object())) == "proposal"
-    assert await dynamic.confirm_action(cast("Any", object())) == "confirmation"
+    dynamic._confirm_profile.repository.get = AsyncMock(return_value=None)
+    command = type("Confirm", (), {"pending_action_id": "pending_" + "a" * 32})()
+    assert await dynamic.confirm_action(cast("Any", command)) == "confirmation"
+    profile_confirm = AsyncMock(return_value="profile-confirmation")
+    profile_confirm.repository.get = AsyncMock(
+        return_value=SimpleNamespace(kind="profile_revision")
+    )
+    dynamic._confirm_profile = profile_confirm
+    profile_command = ConfirmContentActionCommand(
+        pending_action_id="pending_" + "b" * 32, user_id="local"
+    )
+    assert await dynamic.confirm_action(profile_command) == "profile-confirmation"
+    profile_confirm.assert_awaited_once()
 
     assistant = type(
         "Assistant",

@@ -8,7 +8,7 @@
 - mutations: connect/disconnect, typed observation import, feedback, profile edit, bounded recommendation refresh admission;
 - feedback validates the delivered shown record/content pair, resolves exploration attribution from the durable candidate (never client input), transitions shown → interacted, and commits its learning observation through an explicit unit of work; only a newly inserted feedback record invokes the optional reward/Understanding sink, preventing duplicate hypothesis/exploit/proposal credit; profile override + audit observation uses its own unit of work;
 - source connect verifies and stores credentials through Access before refreshing availability;
-- pending actions store only identity, scope, safe preview, expiry, and idempotency metadata; confirmation revalidates all of them;
+- pending actions store only typed declarative effect, identity, scope, safe preview, expiry, decision, and idempotency metadata; confirmation revalidates all of them. Content confirmation revalidates provider state; profile-revision confirmation dispatches to canonical `EditProfile`; `POST /v1/content/actions/reject` durably cancels even an expired pending action but conflicts after approval, and cannot execute either mutation;
 - recommendation refresh requests Core-owned job admission and never creates unmanaged tasks.
 
 ## Operation ownership
@@ -22,6 +22,7 @@
 | provider search/content detail | `SearchContent`, `GetContentDetails` |
 | runtime diagnostics | `GetJobHealth` |
 | content mutation proposal/confirmation | `ProposeContentAction`, `ConfirmContentAction` |
+| profile correction proposal/approval/rejection | `ProposeProfileRevision`, `ConfirmProfileRevision`, `RejectPendingAction` → `EditProfile` |
 | Assistant dialogue | Assistant facade calling these workflows |
 
 Broad integration facades, direct profile writes, fake source tools, extension credential tasks, and other legacy sequencing were deleted. Each retained product operation has one owner.

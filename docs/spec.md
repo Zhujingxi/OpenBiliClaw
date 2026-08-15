@@ -14,6 +14,7 @@ A local-first cross-platform content discovery application with deterministic le
 Desktop/mobile Vue ─┐
 Extension Vue ───────┼─ typed /v1 API ─ Application workflows ─ product modules
 CLI workflows/export/import ─┘               │               ▲
+Assistant correction ─ propose → pending approval → EditProfile ┘
                                              ▼               │
                        composition → lifecycle/supervisor    │
                                   │                          │
@@ -31,7 +32,7 @@ CLI workflows/export/import ─┘               │               ▲
 3. Record typed observations and feedback idempotently; update bounded profile projections.
 4. Discover connected-provider search and feed content, hard-prefilter it, recall adjacent supply from model-specific evidence/claim/candidate embeddings, optionally compile/journal a validated RecommendationBrief in non-executing shadow mode, run seeded/journaled allocation, and build a diversity-constrained slate through the one recommendation pipeline. Normal feeds do not depend on Assistant; missing models, briefs, embeddings, or exploration supply never block delivery.
 5. Search/fetch through provider-native capability contracts and opaque access handles.
-6. Require CSRF/device proof for HTTP mutations. Content actions use propose/confirm, expiry, replay protection, and revalidation.
+6. Require CSRF/device proof for HTTP mutations. Content actions use propose/confirm, expiry, replay protection, and revalidation; Assistant profile corrections are also propose-only pending actions and confirmation alone dispatches canonical `EditProfile`.
 7. Run configured Assistant/model work only through typed AI Runtime routes and budgets.
 8. Validate/build/ready/swap/drain atomically; cancellation and shutdown leave no owned task or resource open.
 9. Render provider cards through shared presentation descriptors, including a safe unknown-provider fallback.

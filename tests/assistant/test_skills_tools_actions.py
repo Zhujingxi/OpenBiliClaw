@@ -45,8 +45,15 @@ class Facade:
     async def show_profile(self) -> object:
         return {"summary": "safe"}
 
-    async def edit_profile(self, claim_id: str, operation: str, value: str | None) -> object:
-        return {"pending": claim_id, "operation": operation, "value": value}
+    async def propose_profile_revision(
+        self, field: str, operation: str, value: str | None, rationale: str
+    ) -> object:
+        return {
+            "pending": field,
+            "operation": operation,
+            "value": value,
+            "rationale": rationale,
+        }
 
     async def list_sources(self) -> object:
         return {"items": ["bilibili"]}
@@ -99,7 +106,7 @@ async def test_null_skill_facade_rejects_factory_workflow_calls() -> None:
         null.get_content_details("ref"),
         null.record_feedback("ref", "liked"),
         null.show_profile(),
-        null.edit_profile("claim", "set", "x"),
+        null.propose_profile_revision("claim", "set", "x", "because"),
         null.list_sources(),
         null.connect_source("demo"),
     )
@@ -126,7 +133,10 @@ def test_scoped_tool_selection_never_exposes_everything() -> None:
         availability=ToolAvailability(enabled_skills=frozenset({"skill_extra"})),
         skill_tools=(_tool("skill_extra"),),
     )
-    assert {item.name for item in enabled} == {"skill_extra"}
+    assert {item.name for item in enabled} == {
+        "propose_profile_revision",
+        "skill_extra",
+    }
 
 
 @pytest.mark.asyncio
@@ -138,7 +148,7 @@ async def test_all_workflow_tool_contracts_are_present() -> None:
         "get_content_details",
         "record_feedback",
         "show_profile",
-        "edit_profile",
+        "propose_profile_revision",
         "list_sources",
         "connect_source",
     }
@@ -152,7 +162,7 @@ async def test_all_workflow_tool_contracts_are_present() -> None:
                 ("ref",),
                 ("ref", "liked"),
                 (),
-                ("claim", "set", "x"),
+                ("claim", "set", "because", "x"),
                 (),
                 ("demo",),
             ),

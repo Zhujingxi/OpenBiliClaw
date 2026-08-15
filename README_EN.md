@@ -4,6 +4,7 @@ A local-first, type-safe cross-platform content discovery and recommendation app
 
 ```text
 Vue web / extension → typed FastAPI /v1 → Application workflows
+Assistant correction → scoped pending approval → EditProfile ─┤
                                       ├→ Observations → Understanding
 Content Providers ← Provider Access ←─└→ Search/Feeds → Semantic Recall → Shadow Brief → Seeded Allocation → Constrained Selection
                     SQLite Semantic Index ← Embeddings ←─┘

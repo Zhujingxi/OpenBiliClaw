@@ -16,7 +16,7 @@ evidence ledger、credential vault、provider secrets 和 repositories 都不进
 - recent-window + typed summary compaction，只在超限时运行，保留 unresolved actions、corrections、references，不能新增 confirmed facts；
 - pending action exact-effect/expiry presentation 与 replay-safe deterministic confirmation；
 - dialogue observation filter 只允许 explicit preference、explicit feedback、confirmed edit 与 defined outcome，普通 assistant message 不学习；
-- profile correction channel（decided）：对话中的理解纠正通过 `propose_profile_revision` 走 pending action，落库为最高信任级 `user_statement` evidence；Assistant 从不直接改写 profile。
+- profile correction channel（landed）：`propose_profile_revision(field, operation, value, rationale)` 只接受现有 claim ID 或 `exploration.disabled`，从 effect tuple 生成 deterministic idempotency key，先持久化 scoped/expiring pending action 且不改变 profile；统一确认端点批准后才调用 canonical `EditProfile`，`POST /v1/content/actions/reject` 显式拒绝。SET 用用户给出的新值生成同 kind、trust-1.0 的 statement claim，REMOVE 只移除；statement evidence 与 accepted claim 由 shared C2 hook best-effort 写入 embedding index；Assistant 不暴露任何 direct-mutation tool。
 
 Provider/tool/profile 文本一律视为 untrusted data，不是 instructions。已知 secret marker、credential
 reference、oversized message/tool result 在模型调用或持久化前拒绝。

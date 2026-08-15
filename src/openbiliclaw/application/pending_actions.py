@@ -7,10 +7,11 @@ from typing import TYPE_CHECKING
 from .errors import ApplicationError, ApplicationErrorCode
 
 if TYPE_CHECKING:
-    from openbiliclaw.content.integration.actions import ActionResult
+    from datetime import datetime
+
     from openbiliclaw.infrastructure.sqlite.database import SqliteDatabase
 
-    from .content_actions import PendingAction
+    from .content_actions import PendingAction, PendingActionResult
 
 
 class SqlitePendingActionRepository:
@@ -50,13 +51,13 @@ class SqlitePendingActionRepository:
             )
         return PendingAction.model_validate_json(str(row[0])) if row is not None else None
 
-    async def complete(self, action: PendingAction, result: ActionResult) -> PendingAction:
+    async def complete(self, action: PendingAction, result: PendingActionResult) -> PendingAction:
         current = await self.get(action.pending_action_id)
         if current is None:
             raise ApplicationError(ApplicationErrorCode.NOT_FOUND, "pending action not found")
         if current.result is not None:
             return current
-        completed = current.model_copy(update={"result": result})
+        completed = current.model_copy(update={"decision": "approved", "result": result})
         async with self._database.transaction() as session:
             changed = await session.execute(
                 "UPDATE pending_actions SET state='completed',payload_json=?,updated_at=? "
@@ -73,3 +74,27 @@ class SqlitePendingActionRepository:
                 raise ApplicationError(ApplicationErrorCode.NOT_FOUND, "pending action not found")
             return reread
         return completed
+
+    async def reject(self, action: PendingAction, *, decided_at: datetime) -> PendingAction:
+        current = await self.get(action.pending_action_id)
+        if current is None:
+            raise ApplicationError(ApplicationErrorCode.NOT_FOUND, "pending action not found")
+        if current.decision != "pending":
+            return current
+        rejected = current.model_copy(update={"decision": "rejected"})
+        async with self._database.transaction() as session:
+            changed = await session.execute(
+                "UPDATE pending_actions SET state='cancelled',payload_json=?,updated_at=? "
+                "WHERE action_id=? AND state='pending'",
+                (
+                    rejected.model_dump_json(),
+                    decided_at.isoformat(),
+                    action.pending_action_id,
+                ),
+            )
+        if changed != 1:
+            reread = await self.get(action.pending_action_id)
+            if reread is None:
+                raise ApplicationError(ApplicationErrorCode.NOT_FOUND, "pending action not found")
+            return reread
+        return rejected

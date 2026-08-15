@@ -5,7 +5,16 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol
 
-from openbiliclaw.application.content_actions import PendingAction
+from openbiliclaw.application.content_actions import (
+    ConfirmProfileRevision,
+    ConfirmProfileRevisionCommand,
+    PendingAction,
+    PendingActionResult,
+    ProposeProfileRevision,
+    ProposeProfileRevisionCommand,
+    RejectPendingAction,
+    RejectPendingActionCommand,
+)
 from openbiliclaw.application.errors import ApplicationError, ApplicationErrorCode
 from openbiliclaw.application.reads import (
     ContentDetailsResult,
@@ -119,7 +128,7 @@ class _ActionExecutor:
         )
         from openbiliclaw.content.integration.capabilities import ActionCapability
 
-        if not isinstance(pending, PendingAction):
+        if not isinstance(pending, PendingAction) or pending.ref is None:
             raise TypeError("invalid pending action")
         provider = self._registry.provider(pending.ref.provider_id)
         if not isinstance(provider, ActionCapability):
@@ -181,6 +190,9 @@ class CompositionFacade:
         self._assistant = assistant
         self._propose = None
         self._confirm = None
+        self._propose_profile = None
+        self._confirm_profile = None
+        self._reject_action = None
         if pending_actions is not None:
             from openbiliclaw.application.content_actions import (
                 ConfirmContentAction,
@@ -198,6 +210,12 @@ class CompositionFacade:
                 _ActionExecutor(registry),
                 clock,
             )
+            self._propose_profile = ProposeProfileRevision(pending_actions, understanding, clock)
+            self._reject_action = RejectPendingAction(pending_actions, clock)
+            if profile_edit is not None:
+                self._confirm_profile = ConfirmProfileRevision(
+                    pending_actions, profile_edit, understanding, clock
+                )
 
     def set_assistant(self, assistant: AssistantController) -> None:
         """Complete the explicit circular tool/controller edge during composition."""
@@ -302,10 +320,27 @@ class CompositionFacade:
             raise self._unavailable()
         return await self._propose(command)
 
-    async def confirm_action(self, command: ConfirmContentActionCommand) -> ActionResult:
-        if self._confirm is None:
+    async def propose_profile_revision(
+        self, command: ProposeProfileRevisionCommand
+    ) -> PendingAction:
+        if self._propose_profile is None:
             raise self._unavailable()
+        return await self._propose_profile(command)
+
+    async def confirm_action(self, command: ConfirmContentActionCommand) -> PendingActionResult:
+        if self._confirm is None or self._confirm_profile is None:
+            raise self._unavailable()
+        pending = await self._confirm_profile.repository.get(command.pending_action_id)
+        if pending is not None and pending.kind == "profile_revision":
+            return await self._confirm_profile(
+                ConfirmProfileRevisionCommand.model_validate(command.model_dump())
+            )
         return await self._confirm(command)
+
+    async def reject_action(self, command: RejectPendingActionCommand) -> PendingAction:
+        if self._reject_action is None:
+            raise self._unavailable()
+        return await self._reject_action(command)
 
     async def assistant_turn(self, request: AssistantTurnInput, device_id: str) -> AssistantOutput:
         if self._assistant is None:

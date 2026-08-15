@@ -23,6 +23,8 @@ from openbiliclaw.application.content_actions import (
     ConfirmContentActionCommand,
     PendingAction,
     ProposeContentActionCommand,
+    ProposeProfileRevisionCommand,
+    RejectPendingActionCommand,
 )
 from openbiliclaw.application.edit_profile import EditProfileCommand, EditProfileResult
 from openbiliclaw.application.errors import ApplicationError, ApplicationErrorCode
@@ -264,9 +266,46 @@ class Facade:
             expires_at=NOW + timedelta(minutes=5),
         )
 
+    async def propose_profile_revision(
+        self, command: ProposeProfileRevisionCommand
+    ) -> PendingAction:
+        await self._call("propose_profile_revision")
+        return PendingAction(
+            pending_action_id="pending_" + "2" * 32,
+            idempotency_key=command.idempotency_key,
+            kind="profile_revision",
+            action_id="profile_revision",
+            revision={
+                "profile_id": command.profile_id,
+                "field": command.field,
+                "operation": command.operation,
+                "value": command.value,
+                "rationale": command.rationale,
+            },
+            user_id=command.user_id,
+            account_id=command.account_id,
+            safe_preview="Awaiting approval",
+            created_at=NOW,
+            expires_at=NOW + timedelta(minutes=5),
+        )
+
     async def confirm_action(self, command: ConfirmContentActionCommand) -> ActionResult:
         await self._call("confirm_action")
         return ActionResult(action_id="save", ref=REF, idempotency_key="action:1", completed_at=NOW)
+
+    async def reject_action(self, command: RejectPendingActionCommand) -> PendingAction:
+        await self._call("reject_action")
+        return PendingAction(
+            pending_action_id=command.pending_action_id,
+            idempotency_key="action:reject",
+            action_id="save",
+            ref=REF,
+            user_id=command.user_id,
+            safe_preview="save",
+            created_at=NOW,
+            expires_at=NOW + timedelta(minutes=5),
+            decision="rejected",
+        )
 
     async def assistant_turn(self, request: AssistantTurnInput, device_id: str) -> AssistantOutput:
         await self._call("assistant_turn")
@@ -730,6 +769,11 @@ def test_bind_policy_and_strict_transport() -> None:
             {"pending_action_id": "pending_" + "1" * 32, "user_id": "u"},
             "confirm_action",
         ),
+        (
+            "/v1/content/actions/reject",
+            {"pending_action_id": "pending_" + "1" * 32, "user_id": "u"},
+            "reject_action",
+        ),
     ],
 )
 async def test_remaining_matrix_endpoints_succeed_through_asgi(
@@ -848,6 +892,7 @@ async def test_every_workflow_endpoint_maps_conflicts_through_asgi(
         ("GET", DETAIL_PATH),
         ("POST", "/v1/content/actions/propose"),
         ("POST", "/v1/content/actions/confirm"),
+        ("POST", "/v1/content/actions/reject"),
         ("POST", "/v1/feedback"),
         ("POST", "/v1/observations"),
         ("GET", "/v1/runtime/health"),

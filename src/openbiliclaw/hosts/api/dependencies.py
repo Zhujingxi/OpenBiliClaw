@@ -14,7 +14,10 @@ from openbiliclaw.access.models import AccessStatus
 from openbiliclaw.application.content_actions import (
     ConfirmContentActionCommand,
     PendingAction,
+    PendingActionResult,
     ProposeContentActionCommand,
+    ProposeProfileRevisionCommand,
+    RejectPendingActionCommand,
 )
 from openbiliclaw.application.edit_profile import EditProfileCommand, EditProfileResult
 from openbiliclaw.application.reads import (
@@ -38,7 +41,6 @@ from openbiliclaw.application.sources import (
     DisconnectSourceCommand,
 )
 from openbiliclaw.assistant.models import AssistantOutput, Conversation, ConversationMessage
-from openbiliclaw.content.integration.actions import ActionResult
 from openbiliclaw.core._pydantic import StrictBaseModel
 from openbiliclaw.observations.service import RecordBatchResult
 
@@ -123,7 +125,11 @@ class HostFacade(Protocol):
     ) -> SearchContentResult: ...
     async def get_content_details(self, reference: str) -> ContentDetailsResult: ...
     async def propose_action(self, command: ProposeContentActionCommand) -> PendingAction: ...
-    async def confirm_action(self, command: ConfirmContentActionCommand) -> ActionResult: ...
+    async def propose_profile_revision(
+        self, command: ProposeProfileRevisionCommand
+    ) -> PendingAction: ...
+    async def confirm_action(self, command: ConfirmContentActionCommand) -> PendingActionResult: ...
+    async def reject_action(self, command: RejectPendingActionCommand) -> PendingAction: ...
     async def assistant_turn(
         self, request: AssistantTurnInput, device_id: str
     ) -> AssistantOutput: ...

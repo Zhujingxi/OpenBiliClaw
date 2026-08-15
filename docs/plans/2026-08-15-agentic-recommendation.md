@@ -110,7 +110,7 @@ Goal: the profile becomes a living, evidence-grounded document and matching goes
 - [x] **Embedding index + semantic retrieval**: durable index over evidence/profile
    fragments/candidates; vector recall feeds LLM rerank. Unlocks the adjacent arm.
    `RecommendationProfile` gains embedding-backed views.
-- [ ] **Correction channel hardening**: assistant `propose_profile_revision` tool → pending
+- [x] **Correction channel hardening**: assistant `propose_profile_revision` tool → pending
    action → `user_statement` evidence; dual-write to ledger + index.
 
 Acceptance: a chat correction measurably shifts the next feed (e2e); re-synthesis fires

@@ -13,6 +13,8 @@ from openbiliclaw.application.content_actions import (
     ConfirmContentActionCommand,
     PendingAction,
     ProposeContentActionCommand,
+    ProposeProfileRevisionCommand,
+    RejectPendingActionCommand,
 )
 from openbiliclaw.application.edit_profile import EditProfileCommand, EditProfileResult
 from openbiliclaw.application.reads import (
@@ -100,7 +102,15 @@ class _SchemaFacade:
     async def propose_action(self, command: ProposeContentActionCommand) -> PendingAction:
         self._unavailable()
 
+    async def propose_profile_revision(
+        self, command: ProposeProfileRevisionCommand
+    ) -> PendingAction:
+        self._unavailable()
+
     async def confirm_action(self, command: ConfirmContentActionCommand) -> ActionResult:
+        self._unavailable()
+
+    async def reject_action(self, command: RejectPendingActionCommand) -> PendingAction:
         self._unavailable()
 
     async def assistant_turn(self, request: AssistantTurnInput, device_id: str) -> AssistantOutput:

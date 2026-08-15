@@ -13,7 +13,9 @@ from openbiliclaw.ai.providers.catalog import Protocol
 from openbiliclaw.application.content_actions import (
     ConfirmContentActionCommand,
     PendingAction,
+    PendingActionResult,
     ProposeContentActionCommand,
+    RejectPendingActionCommand,
 )
 from openbiliclaw.application.edit_profile import (
     EXPLORATION_DISABLED_CLAIM_ID,
@@ -30,7 +32,6 @@ from openbiliclaw.assistant.models import (
     Conversation,
     ConversationMessage,
 )
-from openbiliclaw.content.integration.actions import ActionResult
 from openbiliclaw.content.integration.identity import ContentRef
 from openbiliclaw.content.integration.projections import CardData, ContentPreview
 from openbiliclaw.core._pydantic import StrictBaseModel
@@ -261,7 +262,7 @@ class PendingActionResponse(TransportModel):
 
 
 class ActionResultResponse(TransportModel):
-    result: ActionResult
+    result: PendingActionResult
 
 
 class EventKind(StrEnum):
@@ -389,6 +390,9 @@ class ConfirmActionRequest(TransportModel):
 
     def to_command(self) -> ConfirmContentActionCommand:
         return ConfirmContentActionCommand.model_validate(self.model_dump())
+
+    def to_reject_command(self) -> RejectPendingActionCommand:
+        return RejectPendingActionCommand.model_validate(self.model_dump())
 
 
 class RefreshRequest(TransportModel):

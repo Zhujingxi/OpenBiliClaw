@@ -552,6 +552,7 @@ def build_application(
                 repositories.understanding,
                 repositories.observations,
                 resynthesis=resynthesis,
+                embedding_index=semantic_index,
             ),
             clock=clock,
         ),

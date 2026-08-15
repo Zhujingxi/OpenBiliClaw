@@ -75,7 +75,10 @@ class _NullFacade:
     async def show_profile(self) -> object:
         raise RuntimeError("skill factory called a workflow during registration")
 
-    async def edit_profile(self, claim_id: str, operation: str, value: str | None) -> object:
+    async def propose_profile_revision(
+        self, field: str, operation: str, value: str | None, rationale: str
+    ) -> object:
+        del field, operation, value, rationale
         raise RuntimeError("skill factory called a workflow during registration")
 
     async def list_sources(self) -> object:

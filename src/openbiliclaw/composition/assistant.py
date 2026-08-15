@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from openbiliclaw.ai.runtime.errors import AIRuntimeError
+from openbiliclaw.application.content_actions import PendingAction, ProposeProfileRevisionCommand
 from openbiliclaw.application.errors import ApplicationError, ApplicationErrorCode
 from openbiliclaw.assistant.dependencies import AssistantDependencies, ConversationMetadata
 from openbiliclaw.assistant.models import (
@@ -25,6 +27,7 @@ from openbiliclaw.assistant.tools import (
     select_tools,
 )
 from openbiliclaw.composition.jobs import DEFAULT_PROFILE_ID
+from openbiliclaw.understanding.overrides import OverrideOperation
 from openbiliclaw.understanding.projections import dialogue_projection
 
 if TYPE_CHECKING:
@@ -61,9 +64,28 @@ class _AssistantToolFacade:
         del reference, kind
         raise RuntimeError("Assistant feedback requires explicit UI confirmation")
 
-    async def edit_profile(self, claim_id: str, operation: str, value: str | None) -> object:
-        del claim_id, operation, value
-        raise RuntimeError("Assistant profile edits require explicit UI confirmation")
+    async def propose_profile_revision(
+        self, field: str, operation: str, value: str | None, rationale: str
+    ) -> PendingAction:
+        identity = hashlib.sha256(
+            json.dumps(
+                (DEFAULT_PROFILE_ID, field, operation, value),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        return await self._facade.propose_profile_revision(
+            ProposeProfileRevisionCommand(
+                idempotency_key=f"assistant:profile:{identity}",
+                profile_id=DEFAULT_PROFILE_ID,
+                account_id="local",
+                user_id="local",
+                field=field,
+                operation=OverrideOperation(operation),
+                value=value,
+                rationale=rationale,
+            )
+        )
 
     async def connect_source(self, provider_id: str) -> object:
         del provider_id

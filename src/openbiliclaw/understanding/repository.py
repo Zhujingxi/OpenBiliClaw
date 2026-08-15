@@ -25,6 +25,7 @@ class UnderstandingRepository(Protocol):
         self, profile_id: str, claim_ids: tuple[str, ...]
     ) -> tuple[ClaimProposal, ...]: ...
     async def proposal_exists(self, proposal_id: str) -> bool: ...
+    async def evidence_exists(self, evidence_id: str) -> bool: ...
     async def commit_override(self, profile: CanonicalProfile, entry: LedgerEntry) -> None: ...
     async def commit_analysis(
         self,
@@ -89,6 +90,13 @@ class SqliteUnderstandingRepository:
         async with self._database.transaction() as session:
             row = await session.fetch_one(
                 "SELECT 1 FROM understanding_proposals WHERE proposal_id=?", (proposal_id,)
+            )
+        return row is not None
+
+    async def evidence_exists(self, evidence_id: str) -> bool:
+        async with self._database.transaction() as session:
+            row = await session.fetch_one(
+                "SELECT 1 FROM understanding_evidence WHERE evidence_id=?", (evidence_id,)
             )
         return row is not None
 

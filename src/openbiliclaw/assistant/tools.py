@@ -19,7 +19,9 @@ class ApplicationFacade(Protocol):
     async def get_content_details(self, reference: str) -> object: ...
     async def record_feedback(self, reference: str, kind: str) -> object: ...
     async def show_profile(self) -> object: ...
-    async def edit_profile(self, claim_id: str, operation: str, value: str | None) -> object: ...
+    async def propose_profile_revision(
+        self, field: str, operation: str, value: str | None, rationale: str
+    ) -> object: ...
     async def list_sources(self) -> object: ...
     async def connect_source(self, provider_id: str) -> object: ...
 
@@ -83,9 +85,16 @@ def build_workflow_tools(
         """Show only the bounded dialogue profile projection."""
         return bound_tool_result(await facade.show_profile(), budget)
 
-    async def edit_profile(claim_id: str, operation: str, value: str | None = None) -> str:
-        """Prepare a typed profile edit requiring application validation."""
-        return bound_tool_result(await facade.edit_profile(claim_id, operation, value), budget)
+    async def propose_profile_revision(
+        field: str,
+        operation: str,
+        rationale: str,
+        value: str | None = None,
+    ) -> str:
+        """Propose a profile correction; it never applies without user approval."""
+        return bound_tool_result(
+            await facade.propose_profile_revision(field, operation, value, rationale), budget
+        )
 
     async def list_sources() -> str:
         """List bounded safe source status records."""
@@ -103,7 +112,7 @@ def build_workflow_tools(
             get_content_details,
             record_feedback,
             show_profile,
-            edit_profile,
+            propose_profile_revision,
             list_sources,
             connect_source,
         )
@@ -111,10 +120,10 @@ def build_workflow_tools(
 
 
 _INTENT_TOOLS: dict[AssistantIntent, frozenset[str]] = {
-    AssistantIntent.CHAT: frozenset(),
+    AssistantIntent.CHAT: frozenset({"propose_profile_revision"}),
     AssistantIntent.RECOMMEND: frozenset({"get_recommendations", "get_content_details"}),
     AssistantIntent.SEARCH: frozenset({"search_content", "get_content_details"}),
-    AssistantIntent.PROFILE: frozenset({"show_profile", "edit_profile"}),
+    AssistantIntent.PROFILE: frozenset({"show_profile", "propose_profile_revision"}),
     AssistantIntent.SOURCES: frozenset({"list_sources", "connect_source"}),
     AssistantIntent.FEEDBACK: frozenset({"record_feedback"}),
 }

@@ -11,7 +11,7 @@ The current FastAPI host is `openbiliclaw.hosts.api`. It exposes strict `/v1` tr
 - `/v1/feedback` accepts `idempotency_key`, delivered `shown_id`, matching `content_ref`, and a feedback kind (`liked`/`dismissed` for the Web controls); it transitions the recommendation to interacted and atomically records its learning observation. Unknown shown IDs return the typed `not_found` envelope
 - `/v1/observations` accepts explicit typed observation batches
 - `/v1/profiles/{profile_id}` and profile edit
-- `/v1/content/search`, `GET /v1/content/detail?reference=<JSON ContentRef>`, and propose/confirm actions. Detail references use a query parameter because canonical URLs cannot safely occupy one path segment; malformed JSON/identity returns typed 422 and well-formed unknown content returns typed 404
+- `/v1/content/search`, `GET /v1/content/detail?reference=<JSON ContentRef>`, and propose/confirm/reject actions. `POST /v1/content/actions/reject` scopes by user, durably cancels pending or expired proposals, and conflicts after approval. Detail references use a query parameter because canonical URLs cannot safely occupy one path segment; malformed JSON/identity returns typed 422 and well-formed unknown content returns typed 404
 - `/v1/assistant/turns`, scoped conversation reads
 - `/v1/runtime/health`
 - `/v1/models/catalog` projects models.dev provider/model metadata for configuration UI

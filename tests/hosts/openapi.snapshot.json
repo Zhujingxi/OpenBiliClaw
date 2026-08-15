@@ -106,7 +106,15 @@
         "additionalProperties": false,
         "properties": {
           "result": {
-            "$ref": "#/components/schemas/ActionResult"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ActionResult"
+              },
+              {
+                "$ref": "#/components/schemas/ProfileRevisionActionResult"
+              }
+            ],
+            "title": "Result"
           }
         },
         "required": [
@@ -2612,6 +2620,16 @@
             "title": "Created At",
             "type": "string"
           },
+          "decision": {
+            "default": "pending",
+            "enum": [
+              "pending",
+              "approved",
+              "rejected"
+            ],
+            "title": "Decision",
+            "type": "string"
+          },
           "expires_at": {
             "format": "date-time",
             "title": "Expires At",
@@ -2623,18 +2641,48 @@
             "title": "Idempotency Key",
             "type": "string"
           },
+          "kind": {
+            "default": "content",
+            "enum": [
+              "content",
+              "profile_revision"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
           "pending_action_id": {
             "pattern": "^pending_[0-9a-f]{32}$",
             "title": "Pending Action Id",
             "type": "string"
           },
           "ref": {
-            "$ref": "#/components/schemas/ContentRef"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ContentRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "result": {
             "anyOf": [
               {
                 "$ref": "#/components/schemas/ActionResult"
+              },
+              {
+                "$ref": "#/components/schemas/ProfileRevisionActionResult"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result"
+          },
+          "revision": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProfileRevision"
               },
               {
                 "type": "null"
@@ -2658,7 +2706,6 @@
           "pending_action_id",
           "idempotency_key",
           "action_id",
-          "ref",
           "user_id",
           "safe_preview",
           "created_at",
@@ -3002,6 +3049,86 @@
           "profile"
         ],
         "title": "ProfileResponse",
+        "type": "object"
+      },
+      "ProfileRevision": {
+        "additionalProperties": false,
+        "description": "Declarative profile correction captured for later human approval.",
+        "properties": {
+          "field": {
+            "pattern": "^(claim_[0-9a-f]{32}|exploration\\.disabled)$",
+            "title": "Field",
+            "type": "string"
+          },
+          "operation": {
+            "$ref": "#/components/schemas/OverrideOperation"
+          },
+          "profile_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Profile Id",
+            "type": "string"
+          },
+          "rationale": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Rationale",
+            "type": "string"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "required": [
+          "profile_id",
+          "field",
+          "operation",
+          "rationale"
+        ],
+        "title": "ProfileRevision",
+        "type": "object"
+      },
+      "ProfileRevisionActionResult": {
+        "additionalProperties": false,
+        "properties": {
+          "action_id": {
+            "const": "profile_revision",
+            "default": "profile_revision",
+            "title": "Action Id",
+            "type": "string"
+          },
+          "completed_at": {
+            "format": "date-time",
+            "title": "Completed At",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "maxLength": 200,
+            "minLength": 8,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "observation_id": {
+            "pattern": "^obs_[0-9a-f]{32}$",
+            "title": "Observation Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "idempotency_key",
+          "observation_id",
+          "completed_at"
+        ],
+        "title": "ProfileRevisionActionResult",
         "type": "object"
       },
       "ProjectionProvenance": {
@@ -5145,6 +5272,147 @@
           }
         },
         "summary": "Propose",
+        "tags": [
+          "content"
+        ]
+      }
+    },
+    "/v1/content/actions/reject": {
+      "post": {
+        "operationId": "reject_v1_content_actions_reject_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfirmActionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PendingActionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "not_found"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "method_not_allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "validation"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "validation"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "rate_limit"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "unavailable capability or temporary timeout"
+          }
+        },
+        "summary": "Reject",
         "tags": [
           "content"
         ]

@@ -57,6 +57,9 @@ async def test_pending_action_survives_repository_restart(tmp_path: Path) -> Non
         await repository.complete(missing, result)
     completed = await repository.complete(pending, result)
     assert completed.result == result
+    legacy_payload = completed.model_dump()
+    legacy_payload.pop("decision")
+    assert PendingAction.model_validate(legacy_payload).decision == "approved"
     assert await repository.complete(pending, result) == completed
     await database.close()
 

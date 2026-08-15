@@ -89,6 +89,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/content/actions/reject": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Reject */
+        post: operations["reject_v1_content_actions_reject_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/content/detail": {
         parameters: {
             query?: never;
@@ -440,7 +457,8 @@ export interface components {
         };
         /** ActionResultResponse */
         ActionResultResponse: {
-            result: components["schemas"]["ActionResult"];
+            /** Result */
+            result: components["schemas"]["ActionResult"] | components["schemas"]["ProfileRevisionActionResult"];
         };
         /** AssistantClarification */
         AssistantClarification: {
@@ -1358,16 +1376,30 @@ export interface components {
              */
             created_at: string;
             /**
+             * Decision
+             * @default pending
+             * @enum {string}
+             */
+            decision: "pending" | "approved" | "rejected";
+            /**
              * Expires At
              * Format: date-time
              */
             expires_at: string;
             /** Idempotency Key */
             idempotency_key: string;
+            /**
+             * Kind
+             * @default content
+             * @enum {string}
+             */
+            kind: "content" | "profile_revision";
             /** Pending Action Id */
             pending_action_id: string;
-            ref: components["schemas"]["ContentRef"];
-            result?: components["schemas"]["ActionResult"] | null;
+            ref?: components["schemas"]["ContentRef"] | null;
+            /** Result */
+            result?: components["schemas"]["ActionResult"] | components["schemas"]["ProfileRevisionActionResult"] | null;
+            revision?: components["schemas"]["ProfileRevision"] | null;
             /** Safe Preview */
             safe_preview: string;
             /** User Id */
@@ -1496,6 +1528,39 @@ export interface components {
         /** ProfileResponse */
         ProfileResponse: {
             profile: components["schemas"]["DialogueProfile"];
+        };
+        /**
+         * ProfileRevision
+         * @description Declarative profile correction captured for later human approval.
+         */
+        ProfileRevision: {
+            /** Field */
+            field: string;
+            operation: components["schemas"]["OverrideOperation"];
+            /** Profile Id */
+            profile_id: string;
+            /** Rationale */
+            rationale: string;
+            /** Value */
+            value?: string | null;
+        };
+        /** ProfileRevisionActionResult */
+        ProfileRevisionActionResult: {
+            /**
+             * Action Id
+             * @default profile_revision
+             * @constant
+             */
+            action_id: "profile_revision";
+            /**
+             * Completed At
+             * Format: date-time
+             */
+            completed_at: string;
+            /** Idempotency Key */
+            idempotency_key: string;
+            /** Observation Id */
+            observation_id: string;
         };
         /**
          * ProjectionProvenance
@@ -2613,6 +2678,129 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["ProposeActionRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PendingActionResponse"];
+                };
+            };
+            /** @description unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description not_found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description method_not_allowed */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description validation */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description validation */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description rate_limit */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description temporary_failure */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description temporary_failure */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description unavailable capability or temporary timeout */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    reject_v1_content_actions_reject_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConfirmActionRequest"];
             };
         };
         responses: {

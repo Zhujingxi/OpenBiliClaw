@@ -65,3 +65,13 @@ async def confirm(
     dependencies: HostDependencies = Depends(get_dependencies),
 ) -> ActionResultResponse:
     return ActionResultResponse(result=await dependencies.facade.confirm_action(body.to_command()))
+
+
+@router.post("/actions/reject", response_model=PendingActionResponse)
+async def reject(
+    body: ConfirmActionRequest,
+    dependencies: HostDependencies = Depends(get_dependencies),
+) -> PendingActionResponse:
+    return PendingActionResponse(
+        action=await dependencies.facade.reject_action(body.to_reject_command())
+    )
