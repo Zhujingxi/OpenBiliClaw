@@ -79,9 +79,11 @@ learned magnitudes.
   arm only. Directional chat statements = decaying claims; only explicit statements can
   zero exploration (residual = optionality invariant). Cold start: elevated exploration
   for first N engagements.
-- [ ] 6. **Reward contract before learning**: multi-objective outcome vocabulary (explicit
+- [x] 6. **Reward contract before learning**: multi-objective outcome vocabulary (explicit
   satisfaction/correction, meaningful consumption, voluntary return to a new area,
-  repetition fatigue) — defined and logged before bandits train on it.
+  repetition fatigue) — defined and logged before bandits train on it. Landed: typed
+  vocabulary and deterministic feedback mapping; voluntary-return and repetition-fatigue
+  derivation remain deferred until longitudinal/viewport evidence exists.
 
 Acceptance: shadow briefs validate against the compiler for two weeks of feeds (or e2e
 fixtures); live mode shows intent-conditioned allocation shifting with revealed

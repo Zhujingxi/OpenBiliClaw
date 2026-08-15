@@ -170,7 +170,7 @@ class SqlitePolicyJournal:
         async with self._database.transaction() as session:
             rows = await session.fetch_all(
                 "SELECT record_json FROM policy_outcomes"
-                " WHERE hypothesis_id = ? ORDER BY created_at",
+                " WHERE hypothesis_id = ? ORDER BY created_at, rowid",
                 (hypothesis_id,),
             )
         return tuple(JournalOutcome.model_validate(json.loads(cast("str", row[0]))) for row in rows)

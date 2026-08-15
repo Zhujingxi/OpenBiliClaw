@@ -6,6 +6,8 @@
 
 ## Unreleased
 
+- Pinned the Phase B reward contract before statistical learning: feedback maps deterministically to explicit satisfaction/correction or weak meaningful consumption, only the supplying exploration hypothesis receives success/failure credit, and exploit/unattributed signals remain guardrail-only. `RewardLedger` verifies the durable shown record and writes exposure before resolution; voluntary-return, repetition-fatigue derivation, viewport evidence, profile proposals, bandits, and pipeline wiring remain deferred to their planned phases.
+
 - Added the Phase B hypothesis registry on the agent-owned policy journal: open-format exploration arms carry opaque evidence references, pre-registered falsification text, and expiry; append-only outcome events drive active/kill state and expose raw success/attempt counts for later Thompson allocation. No criterion DSL, user-ledger query, brief agent, or bandit was added.
 
 - Completed Phase A's thin product CLI: JSON-only in-process commands now cover source list/add/remove/status, feed delivery, feedback by shown ID, profile show, assistant turns, and provider-scoped search. Commands build the production graph without binding a socket, call one Application facade workflow, and return typed Application failures as JSON on stderr without tracebacks. Added `RecordFeedbackForShown` so the CLI does not reconstruct content identity outside the Application layer.
