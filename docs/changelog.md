@@ -6,12 +6,15 @@
 
 ## 未发布
 
+- **Safari Web Extension 支持（issue #156）**：`extension/` 新增 `manifest.safari.json` 与 `build:safari` / `clean:safari` / `verify:assets:safari` / `convert:safari` 脚本，产出自包含 `dist-safari/`，并由 `scripts/convert-safari.mjs` 调用 Apple `safari-web-extension-converter` 生成 Xcode 工程（仅 macOS + Xcode 可用）。Safari 不支持 `side_panel` / `sidePanel` / `notifications` / `world`（MAIN-world 内容脚本），因此 Safari manifest 改用 `action.default_popup` 承载同一套 popup UI，去掉上述权限与 `world` 字段并保留 `alarms` / `scripting` / `cookies` / `storage`；service worker 对 `chrome.notifications` / `chrome.alarms` 注册加空值守卫（无该 API 时降级为 WS 驱动刷新而不崩溃），Safari 构建额外经 esbuild banner 注入 `browser → chrome` 兼容 shim（在已提供 `chrome` 的环境为 no-op，不影响 Chrome/Firefox 产物）。**MAIN-world tap 恢复为 page-context 桥接**：`content/safari-page-injector.js` 在 `document_start` 按 hostname 把 B 站 / 小红书 / 抖音 / X / Bangumi 的 `main/*.js` tap 以 `<script src>` 注入页面上下文（已列入 `web_accessible_resources`），隔离世界既有 `window.postMessage` 监听不变，Safari 上的网络层确定性点赞/收藏/评论与登录态识别恢复生效（best-effort，页面 CSP 可能拦截）。**Cookie 同步加固**：`cookie-sync.ts` 改为全量读取 + JS 域过滤，规避 Safari `cookies.getAll({domain})` 的精确域差异，并在 unfiltered `getAll({})` 不可用时逐域回退。已验证 `npm run build:safari` → `convert:safari` → `xcodebuild`（macOS target）全链路构建成功，1402 条扩展测试与 `typecheck` 通过；构建/签名/已知限制矩阵见 `docs/safari-extension-build.md`。
+
 ## v0.3.206：with-embedding 崩溃修复与可靠性提升（2026-08-15）
 
 - **项目首页与 README 重新对齐**：补齐一直遗漏的 YouTube / X 来源卡，使首页明确展示 B 站、小红书、抖音、YouTube、X、知乎、Reddit、Linux.do、Bangumi、V2EX、微博与开放 Web；首屏补回“本地运行、只为一个人构建、反馈可调教”的定位，产品入口从过时的“只有浏览器侧边栏”更新为浏览器插件、桌面 Web、移动 Web、Flutter 与 DSH 五端，并修正中文微博文案误用英文、Firefox、架构分层、聚合 Release 说明以及静态 HTML / 中文词典漂移。
 - **README 新增 Linux.do 友情链接（折叠）**：主项目 README（中英）顶部原有的「LINUX DO Community」徽章移除，改在 README 底部新增可折叠的「友情链接」区块，内含指向 https://linux.do/ 的 LINUX DO 友情徽章；讨论帖徽章保留。DSH 插件仓库（dsh-openbiliclaw）README 底部同步新增同款折叠友情链接。
 - 修复 `scripts/install.ps1` 在原生 Windows 上的一键安装解析失败（issue #157）：双引号字符串内 `$InstallDir:` 会被解析为作用域限定变量引用，导致整个脚本在 PowerShell parse 阶段直接报错，改为 `${InstallDir}`；同时为脚本补充 UTF-8 BOM，确保 Windows PowerShell 5.1（脚本声明 `#requires -Version 5.1`）按 UTF-8 解码含中文注释与 here-string 的内容；`Invoke-Bootstrap` 内的 `$args` 改名 `$bootstrapArgs`，避免遮蔽自动变量（`PSAvoidAssignmentToAutomaticVariable`）。
 - **修复 with-embedding 安装包 bge-m3 调用 500（llama-server `0xc0000005` 访问违规）的诊断与随包版本**：Windows 随包 Ollama 从 `0.30.6` 升到 `0.32.13`（`release-desktop.yml` / `build-installers.yml` / `docker/ollama-bundled.Dockerfile` 同步），降低旧版 llama-server 在 embedding 负载上的崩溃概率；`ollama_diagnostics` 新增 `0xc0000005` / access violation 识别，`model_broken` 文案改为按「一键重拉 → 重启 → 内存/虚拟内存 → 杀软白名单 → 升级安装包」排序排查，不再只说「下载不完整或内存不足」；托管 Ollama 在桌面包启动时（`OPENBILICLAW_PROJECT_ROOT` 已设置）把 `ollama serve` 与 llama-server 的 stdout/stderr 写入 `<project>/logs/ollama-managed.log`，让后续同类崩溃有原生日志可查，CLI / dev / 测试仍保持 DEVNULL。测试补充访问违规分类与日志捕获 / 关闭。
+
 
 ## v0.3.205：证据驱动时效推荐与可靠性升级（2026-08-14）
 

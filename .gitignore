@@ -102,6 +102,8 @@ output/
 *.log
 logs/
 extension/dist-firefox/
+extension/dist-safari/
+extension/safari-project/
 backend.err
 
 # Playwright CLI local cache (tool artifact)

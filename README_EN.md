@@ -227,7 +227,7 @@ For most users, setup is four steps: install the extension, ask an AI coding age
 
 The extension is the main interface. It shows the sidebar on supported sites, records feedback, and runs bounded read-only tasks for sources including Zhihu, Reddit, Linux.do, V2EX, and Weibo. Linux.do, V2EX, and Weibo task tabs are isolated from passive behavior collection; Weibo public discovery still runs independently in the backend.
 
-Built on Manifest V3, the extension works in any Chrome-compatible browser — **Chrome, Edge, Brave, Arc, Vivaldi, Opera**, and more.
+Built on Manifest V3, the extension works in any Chrome-compatible browser — **Chrome, Edge, Brave, Arc, Vivaldi, Opera**, and more; a **Safari (macOS)** build is also provided, converted to an Xcode project via Apple's `safari-web-extension-converter` (see the [Safari build guide](docs/safari-extension-build.md)).
 
 **Recommended · download the latest build from the Latest Release aggregate page** (gets the newest features and fixes — the Chrome Web Store listing usually lags by a few days to a couple of weeks due to review scheduling):
 
@@ -594,7 +594,7 @@ The whole loop stays local — the agent host just calls the CLI bridge; your pr
 - 🔄 **Continuous Learning** — Socratic dialogue + behavioral analysis + instant feedback; it understands you better over time
 - ⭐ **Local-First Favorites / Watch Later** — cards save to local SQLite first and auto-sync stays off by default; desktop Web hydrates the sidebar count badges on first load; the 2026-07-14 real-account regression completed both actions across all seven platforms as `synced/already_synced`
 - 🕘 **30-Day Content History** — extension, desktop, and mobile share opened, surfaced-but-unopened, and recently removed views; covers are paged and lazy-loaded, and removed local saves can be restored
-- 🧩 **Browser Extension** — Chrome / Edge / Brave / Arc / Firefox; side-panel recommendations + cross-site behavior collection, install and go
+- 🧩 **Browser Extension** — Chrome / Edge / Brave / Arc / Firefox / Safari; side-panel recommendations + cross-site behavior collection, install and go
 - 📱 **Flutter Native Client** — separate repo [OpenBiliClaw-mobile](https://github.com/whiteguo233/OpenBiliClaw-mobile); Android / iOS / Web / Linux / macOS / Windows against the same local backend, with Bilibili covers hitting the CDN directly to skip two hops
 - 🚀 **Guided Init in the UI** — the packaged `/setup/` wizard, Desktop Web, and the extension can all initialize with one click; no terminal required
 - 📦 **Cross-Machine Migration** — export/import portable config, SQLite, profiles, cookies, and the image cache from Desktop settings; imports are validated and staged, can be inspected or cancelled, then apply on restart with rollback copies. `.obcbackup` contains plaintext secrets but excludes the source machine's API-login password, session-signing secret, and extension device keys
@@ -654,7 +654,7 @@ images: proxy foreground + refresh prefetch → app-stable lane (total 4 / bg 3,
 
 ```
 ┌────────────────────────────────────────────────┐
-│       Browser Extension (Chrome / Firefox)     │
+│ Browser Extension (Chrome / Firefox / Safari)  │
 │  Behavior capture · MAIN-world taps (comment/  │
 │  danmaku, xhs strong signal) · Cookie · Tasks  │
 └──────────────────────┬─────────────────────────┘
@@ -826,7 +826,7 @@ OpenBiliClaw/
 │   ├── bilibili/              # Bilibili API layer (WBI signing · rate control)
 │   ├── llm/                   # Multi-model LLM adapters + structured JSON tolerance
 │   └── storage/               # Data storage layer
-├── extension/                 # Chrome/Firefox extension (including Linux.do/V2EX/Weibo read-only task bridges)
+├── extension/                 # Chrome/Firefox/Safari extension (including Linux.do/V2EX/Weibo read-only task bridges)
 ├── extension/                 # Chrome extension (Bilibili + XHS + Douyin + YouTube + X + Zhihu + Reddit + Weibo recovery/tasks)
 ├── skills/                    # Built-in Skill definitions
 ├── docs/                      # Documentation
