@@ -6,6 +6,8 @@
 
 ## Unreleased
 
+- Added the Phase B hypothesis registry on the agent-owned policy journal: open-format exploration arms carry opaque evidence references, pre-registered falsification text, and expiry; append-only outcome events drive active/kill state and expose raw success/attempt counts for later Thompson allocation. No criterion DSL, user-ledger query, brief agent, or bandit was added.
+
 - Completed Phase A's thin product CLI: JSON-only in-process commands now cover source list/add/remove/status, feed delivery, feedback by shown ID, profile show, assistant turns, and provider-scoped search. Commands build the production graph without binding a socket, call one Application facade workflow, and return typed Application failures as JSON on stderr without tracebacks. Added `RecordFeedbackForShown` so the CLI does not reconstruct content identity outside the Application layer.
 
 - Added versioned local export/import archives (`openbiliclaw export PATH` / `import PATH`): exports use SQLite's backup API for a consistent snapshot, include a format/app-version/table-count manifest, optionally include validated configuration with password verifiers redacted and vault references intact, refuse non-empty restore targets unless `--force`, and migrate older staged snapshots forward before installation.

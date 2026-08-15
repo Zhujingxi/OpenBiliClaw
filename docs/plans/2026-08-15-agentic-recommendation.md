@@ -57,7 +57,7 @@ password + token gates enforced on `/v1`; CLI covers the same surface as `/v1` r
 Goal: the feed is steered by intent-conditioned, evidence-cited agent strategy with
 learned magnitudes.
 
-- [ ] 1. **Hypothesis registry**: typed hypotheses — evidence IDs, embedding/query seed,
+- [x] 1. **Hypothesis registry**: typed hypotheses — evidence IDs, embedding/query seed,
   falsification criterion, expiry, attempt/outcome counts. Seed arms: weak-signal,
   dormant-interest (pure ledger SQL), source-novel. Adjacent/bridge land with Phase C/D
   substrate. Registry lives in the policy journal, never the user evidence ledger.

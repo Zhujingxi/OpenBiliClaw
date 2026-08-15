@@ -24,6 +24,7 @@ __all__ = [
     "JournalHypothesis",
     "JournalLesson",
     "JournalOutcome",
+    "OutcomeKind",
     "PolicyJournal",
     "SqlitePolicyJournal",
     "record_identity",
@@ -64,12 +65,15 @@ class JournalLesson(_JournalRecord):
     source_refs: tuple[str, ...]
 
 
+OutcomeKind = Literal["attempt", "success", "failure", "killed"]
+
+
 class JournalOutcome(_JournalRecord):
     """One attempt/result event against a hypothesis; feeds statistical allocation."""
 
     outcome_id: str = Field(pattern=r"^outcome_[0-9a-f]{32}$")
     hypothesis_id: str = Field(min_length=1, max_length=200)
-    kind: Literal["attempt", "success", "failure", "killed"]
+    kind: OutcomeKind
     detail: str = Field(default="", max_length=1000)
 
 
@@ -80,6 +84,7 @@ class PolicyJournal(Protocol):
     async def load_brief(self, brief_id: str) -> JournalBrief: ...
     async def append_hypothesis(self, record: JournalHypothesis) -> None: ...
     async def load_hypothesis(self, hypothesis_id: str) -> JournalHypothesis: ...
+    async def list_hypotheses(self) -> tuple[JournalHypothesis, ...]: ...
     async def append_lesson(self, record: JournalLesson) -> None: ...
     async def list_lessons(self) -> tuple[JournalLesson, ...]: ...
     async def append_outcome(self, record: JournalOutcome) -> None: ...
@@ -138,6 +143,15 @@ class SqlitePolicyJournal:
         if row is None:
             raise KeyError(hypothesis_id)
         return JournalHypothesis.model_validate(json.loads(cast("str", row[0])))
+
+    async def list_hypotheses(self) -> tuple[JournalHypothesis, ...]:
+        async with self._database.transaction() as session:
+            rows = await session.fetch_all(
+                "SELECT record_json FROM policy_hypotheses ORDER BY created_at, hypothesis_id"
+            )
+        return tuple(
+            JournalHypothesis.model_validate(json.loads(cast("str", row[0]))) for row in rows
+        )
 
     async def append_lesson(self, record: JournalLesson) -> None:
         await self._append("policy_lessons", record)
