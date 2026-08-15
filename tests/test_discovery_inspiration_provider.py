@@ -208,6 +208,16 @@ async def test_build_provider_defaults_remote_timeout_below_planner_timeout() ->
     assert seen_timeouts == [6.0]
 
 
+def test_build_provider_skips_mcporter_backends_when_cli_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("shutil.which", lambda _name: None)
+
+    provider = build_inspiration_search_provider(["exa", "you"])
+
+    assert provider is None
+
+
 def test_parse_you_search_payload_accepts_structured_results() -> None:
     payload = json.dumps(
         {

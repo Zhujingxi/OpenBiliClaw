@@ -8,6 +8,7 @@ import html
 import json
 import logging
 import re
+import shutil
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, Protocol, cast
@@ -1174,6 +1175,9 @@ def build_inspiration_search_provider(
                     )
                 )
         elif backend == "exa":
+            if runner is None and _mcporter_cli_missing():
+                _warn_mcporter_missing_once("exa")
+                continue
             providers.append(
                 McporterExaInspirationProvider(
                     runner=runner,
@@ -1181,6 +1185,9 @@ def build_inspiration_search_provider(
                 )
             )
         elif backend == "you":
+            if runner is None and _mcporter_cli_missing():
+                _warn_mcporter_missing_once("you")
+                continue
             providers.append(
                 McporterYouInspirationProvider(
                     runner=runner,
@@ -1229,6 +1236,26 @@ def _normalize_search_backends(value: object) -> tuple[str, ...]:
         normalized.append(backend)
         seen.add(backend)
     return tuple(normalized or _DEFAULT_SEARCH_BACKENDS)
+
+
+def _mcporter_cli_missing() -> bool:
+    """Whether the local ``mcporter`` command cannot be found on PATH."""
+    return shutil.which("mcporter") is None
+
+
+_MCPORTER_MISSING_WARNED: set[str] = set()
+
+
+def _warn_mcporter_missing_once(backend: str) -> None:
+    """Log one actionable warning per backend per process."""
+    if backend in _MCPORTER_MISSING_WARNED:
+        return
+    _MCPORTER_MISSING_WARNED.add(backend)
+    logger.warning(
+        "inspiration backend '%s' skipped: mcporter CLI not found on PATH; "
+        "install mcporter or remove it from `discovery.inspiration_search_backends`",
+        backend,
+    )
 
 
 def _backend_cooldown_remaining(backend: object) -> float:

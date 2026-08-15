@@ -289,7 +289,8 @@ class WeiboDiscoveryProducer:
         reason = _overall_reason(items, errors, mode_results)
         if enqueue_error_code and enqueued <= 0:
             reason = "error"
-        ran = bool(run_records or errors)
+        hot_rejected = any(value == "upstream_rejected" for value in mode_results.values())
+        ran = bool(run_records or errors or hot_rejected)
         made_progress = productive_supply > 0
         if made_progress:
             self._clear_outcome_backoff()
@@ -464,7 +465,16 @@ class WeiboDiscoveryProducer:
 
     async def _run_hot(self, limit: int) -> _ModeFetch:
         seed_limit = min(max(1, int(self.max_hot_topic_seeds)), max(1, limit))
-        topics_result = await self.client.hot_topics(limit=seed_limit)
+        try:
+            topics_result = await self.client.hot_topics(limit=seed_limit)
+        except Exception as exc:
+            if _error_code(exc) == "upstream_rejected":
+                # Weibo's anonymous hot-search endpoint intermittently rejects
+                # the visitor session. Treat that as an empty branch instead of
+                # a producer-wide error so search/creator can still run and the
+                # outcome backoff doesn't stall the whole source.
+                return _ModeFetch([], attempted=False, skip_reason="upstream_rejected")
+            raise
         topic_rows = _hot_topic_rows(topics_result)
         seeds = _hot_topic_seeds(topic_rows, limit=seed_limit)
         if not seeds:

@@ -7,6 +7,7 @@
 ## 未发布
 
 - **修复 B 站份额已满时全局库存跑不满**：`_build_refresh_plan` 在“池子低于目标、但 `_build_source_replenishment_plan()` 为空（B 站已达自身份额，缺额来自 V2EX / 微博 / YouTube 等不可用或节流的来源）”时不再直接返回空计划；只要 discovery candidate 管线里没有 `pending_eval/evaluating` 在途工作，就回落到按 `trending_refresh_minutes` / `explore_refresh_minutes` 巡航的 B 站周期计划，让健康超份额来源继续引入新 topic 补全局库存。份额再平衡仍会在欠份额来源恢复后把超份额行退坑，不破坏 pool-share fairness 的长期收敛。
+- **减少来源侧的无效失败与告警**：`build_inspiration_search_provider` 在 `mcporter` CLI 缺失时直接跳过 Exa / You 后端并给出一次性可操作告警，V2EX 搜索不再先触发 `FileNotFoundError` 再回退官方有界搜索；微博 `hot` 分支遇到 `upstream_rejected` 时按“本分支空结果”处理，不再把整轮微博标记为 error / 触发 60 秒 outcome backoff，让 search / creator 分支继续执行。
 
 ## v0.3.206：with-embedding 崩溃修复与可靠性提升（2026-08-15）
 
