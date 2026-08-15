@@ -622,7 +622,7 @@ Bilibili discovery 的平台级开关。B 站账号登录 / Cookie 获取仍由 
 >
 > 换句话说，日常看到的 B 站补货绝大多数不受本字段影响；要调 B 站主发现的节奏请改 `[scheduler]`。
 >
-> **`trending_refresh_minutes` / `explore_refresh_minutes` 也只在池子不缺货时才生效（2026-07-27 实测）**：`_build_refresh_plan` 先看池子是否低于目标——低于时直接返回 `_build_source_replenishment_plan()` 的结果，而那条路径把 B 站四个策略 `search / related_chain / trending / explore` **整组下发、完全不查这两个间隔**；只有池子**不低于**目标时才会走到下面那段按间隔挑选策略的分支。真机采样：B 站有缺口时 `last_trending_refresh_at` / `last_explore_refresh_at` 每 ~1.1 分钟（即每个 refresh tick）同步推进一次，而不是配置的 3 分钟。也就是说这两个字段管的是「池子够用时的巡航节奏」，不是「缺货时的补货节奏」——后者由缺口大小、`discovery_limit` 和 B 站客户端自身的风控冷却决定。
+> **`trending_refresh_minutes` / `explore_refresh_minutes` 通常只在池子不缺货时才生效（2026-07-27 实测，2026-08-15 补充）**：`_build_refresh_plan` 先看池子是否低于目标——低于时优先返回 `_build_source_replenishment_plan()` 的结果，而那条路径把 B 站四个策略 `search / related_chain / trending / explore` **整组下发、完全不查这两个间隔**。只有池子**不低于**目标时才走到按间隔挑选策略的巡航分支。**例外**：当 B 站已达自身份额、`_build_source_replenishment_plan()` 为空，且 discovery candidate 管线没有 `pending_eval/evaluating` 在途工作时，`_build_refresh_plan` 会回落到按 `trending_refresh_minutes` / `explore_refresh_minutes` 的 B 站周期计划，让健康超份额来源在其它来源不可用或节流时继续补全局库存。真机采样：B 站有缺口时 `last_trending_refresh_at` / `last_explore_refresh_at` 每 ~1.1 分钟（即每个 refresh tick）同步推进一次，而不是配置的 3 分钟。也就是说这两个字段管的是「池子够用时的巡航节奏」，不是「缺货时的补货节奏」——后者由缺口大小、`discovery_limit` 和 B 站客户端自身的风控冷却决定。
 > 另有显式绕过：`openbiliclaw discover-xhs --force` 把间隔置 0，Bangumi / 微博的统一
 > `openbiliclaw discover --source <source> --force` 会把 `force=True` 交给 producer；它们都只跳过
 > cadence，不会绕过平台 cooldown、日预算或 pool gate，常驻流程不会强制执行。

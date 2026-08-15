@@ -6,6 +6,8 @@
 
 ## 未发布
 
+- **修复 B 站份额已满时全局库存跑不满**：`_build_refresh_plan` 在“池子低于目标、但 `_build_source_replenishment_plan()` 为空（B 站已达自身份额，缺额来自 V2EX / 微博 / YouTube 等不可用或节流的来源）”时不再直接返回空计划；只要 discovery candidate 管线里没有 `pending_eval/evaluating` 在途工作，就回落到按 `trending_refresh_minutes` / `explore_refresh_minutes` 巡航的 B 站周期计划，让健康超份额来源继续引入新 topic 补全局库存。份额再平衡仍会在欠份额来源恢复后把超份额行退坑，不破坏 pool-share fairness 的长期收敛。
+
 ## v0.3.206：with-embedding 崩溃修复与可靠性提升（2026-08-15）
 
 - **项目首页与 README 重新对齐**：补齐一直遗漏的 YouTube / X 来源卡，使首页明确展示 B 站、小红书、抖音、YouTube、X、知乎、Reddit、Linux.do、Bangumi、V2EX、微博与开放 Web；首屏补回“本地运行、只为一个人构建、反馈可调教”的定位，产品入口从过时的“只有浏览器侧边栏”更新为浏览器插件、桌面 Web、移动 Web、Flutter 与 DSH 五端，并修正中文微博文案误用英文、Firefox、架构分层、聚合 Release 说明以及静态 HTML / 中文词典漂移。
