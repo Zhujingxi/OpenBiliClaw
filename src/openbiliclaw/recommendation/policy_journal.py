@@ -22,8 +22,10 @@ if TYPE_CHECKING:
 __all__ = [
     "JournalBrief",
     "JournalHypothesis",
+    "JournalInspection",
     "JournalLesson",
     "JournalOutcome",
+    "InspectionJournal",
     "OutcomeKind",
     "PolicyJournal",
     "SqlitePolicyJournal",
@@ -57,6 +59,14 @@ class JournalHypothesis(_JournalRecord):
     expires_at: AwareDatetime
 
 
+class JournalInspection(_JournalRecord):
+    """One cached visual judgment keyed by opaque provider content identity."""
+
+    inspection_id: str = Field(pattern=r"^inspect_[0-9a-f]{32}$")
+    content_ref: str = Field(min_length=1, max_length=1024)
+    payload: dict[str, JsonValue]
+
+
 class JournalLesson(_JournalRecord):
     """A distilled, decaying policy lesson with traceable source references."""
 
@@ -77,6 +87,13 @@ class JournalOutcome(_JournalRecord):
     detail: str = Field(default="", max_length=1000)
 
 
+class InspectionJournal(Protocol):
+    """Narrow append-only cache port for visual policy artifacts."""
+
+    async def append_inspection(self, record: JournalInspection) -> None: ...
+    async def load_inspection(self, inspection_id: str) -> JournalInspection: ...
+
+
 class PolicyJournal(Protocol):
     """Append-only persistence port for the agent-owned policy plane."""
 
@@ -95,13 +112,14 @@ class PolicyJournal(Protocol):
 _TABLE_KEYS = {
     "policy_briefs": "brief_id",
     "policy_hypotheses": "hypothesis_id",
+    "policy_inspections": "inspection_id",
     "policy_lessons": "lesson_id",
     "policy_outcomes": "outcome_id",
 }
 
 
 class SqlitePolicyJournal:
-    """SQLite journal over the append-only `policy_*` tables (schema V7)."""
+    """SQLite journal over append-only policy tables (schema V7, inspections in V11)."""
 
     def __init__(self, database: SqliteDatabase) -> None:
         self._database = database
@@ -166,6 +184,19 @@ class SqlitePolicyJournal:
         return tuple(
             JournalHypothesis.model_validate(json.loads(cast("str", row[0]))) for row in rows
         )
+
+    async def append_inspection(self, record: JournalInspection) -> None:
+        await self._append("policy_inspections", record, content_ref=record.content_ref)
+
+    async def load_inspection(self, inspection_id: str) -> JournalInspection:
+        async with self._database.transaction() as session:
+            row = await session.fetch_one(
+                "SELECT record_json FROM policy_inspections WHERE inspection_id = ?",
+                (inspection_id,),
+            )
+        if row is None:
+            raise KeyError(inspection_id)
+        return JournalInspection.model_validate(json.loads(cast("str", row[0])))
 
     async def append_lesson(self, record: JournalLesson) -> None:
         await self._append("policy_lessons", record)

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import pytest
 from pydantic_ai import Agent
 from pydantic_ai.exceptions import ModelHTTPError
-from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart
+from pydantic_ai.messages import ImageUrl, ModelMessage, ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 
@@ -189,6 +189,20 @@ async def test_invalid_structured_output_and_secret_input_are_rejected() -> None
     )
     with pytest.raises(MessageAuditError):
         await runtime.run(secret)
+    secret_image = AgentRunRequest(
+        AgentId("test.answer"),
+        agent,
+        Deps(1),
+        "answer",
+        (),
+        (),
+        ModelRequirements(structured_output=True),
+        RunPolicy(),
+        "test",
+        attachments=(ImageUrl("https://example.com/?api_key=secret"),),
+    )
+    with pytest.raises(MessageAuditError):
+        await runtime.run(secret_image)
 
 
 async def test_retry_limit_and_compatible_fallback_are_enforced() -> None:

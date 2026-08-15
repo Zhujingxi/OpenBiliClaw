@@ -43,6 +43,9 @@ from openbiliclaw.recommendation.selection.service import SelectionService
 from openbiliclaw.recommendation.semantic import adjacent_recall, candidate_embedding_text
 from openbiliclaw.understanding.projections import discovery_projection, recommendation_projection
 
+_INSPECTION_SHORTLIST_CAP = 5  # spec: inspect at most the shortlist top five
+
+
 DEFAULT_PROFILE_ID = "default"
 
 if TYPE_CHECKING:
@@ -55,8 +58,9 @@ if TYPE_CHECKING:
     from openbiliclaw.composition.repositories import RepositoryGraph
     from openbiliclaw.content.integration.identity import ProviderId
     from openbiliclaw.content.integration.projections import ContentPreview
-    from openbiliclaw.recommendation.brief import BriefService
+    from openbiliclaw.recommendation.brief import BriefService, CompiledBrief
     from openbiliclaw.recommendation.hypotheses import HypothesisRegistry
+    from openbiliclaw.recommendation.inspection import InspectionService
     from openbiliclaw.understanding.profile import CanonicalProfile
     from openbiliclaw.understanding.service import UnderstandingService
 
@@ -82,6 +86,7 @@ class RecommendationPipeline:
         hypotheses: HypothesisRegistry,
         policy_journal: PolicyJournal,
         briefs: BriefService | None = None,
+        inspections: InspectionService | None = None,
         semantic_index: EmbeddingIndex | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
@@ -93,6 +98,7 @@ class RecommendationPipeline:
         self._hypotheses = hypotheses
         self._policy_journal = policy_journal
         self._briefs = briefs
+        self._inspections = inspections
         self._semantic_index = semantic_index
         self._clock = clock
         self._planner = DiscoveryPlanner()
@@ -362,15 +368,51 @@ class RecommendationPipeline:
             return frozenset(item[0] for item in matches)
         return frozenset()
 
-    async def _compile_shadow_brief(self, episode_id: str) -> None:
+    async def _compile_shadow_brief(self, episode_id: str) -> CompiledBrief | None:
         if self._briefs is None:
-            return
+            return None
         try:
-            await self._briefs.compile_shadow(episode_id)
+            return await self._briefs.compile_shadow(episode_id)
         except Exception:
             # Shadow policy is observational: compiler or journal failures must not
             # alter the live replenishment path.
+            return None
+
+    async def _inspect_shortlist(
+        self,
+        candidates: tuple[Candidate, ...],
+        *,
+        episode_id: str,
+        brief: CompiledBrief | None,
+    ) -> None:
+        inspections = getattr(self, "_inspections", None)
+        if inspections is None:
             return
+        rubric = (
+            brief.proposal.inspection_plan.quality_rubric
+            if brief is not None and brief.accepted
+            else "Prefer substantive, accurate, clearly presented content."
+        )
+
+        # Calls stay per-candidate while AIRuntime's shared ResourceBudget bounds
+        # concurrency; no visual payload enters the batched evaluator. The local
+        # semaphore keeps inspection from saturating the shared model budget.
+        gate = asyncio.Semaphore(2)
+
+        async def inspect(candidate: Candidate) -> None:
+            async with gate:
+                try:
+                    await inspections.inspect(
+                        candidate,
+                        quality_rubric=rubric,
+                        recommendation_batch=episode_id,
+                    )
+                except Exception:
+                    return
+
+        await asyncio.gather(
+            *(inspect(candidate) for candidate in candidates[:_INSPECTION_SHORTLIST_CAP])
+        )
 
     async def replenish(self, maximum_items: int | None = None) -> ReplenishmentResult:
         now = self._clock()
@@ -391,7 +433,8 @@ class RecommendationPipeline:
             if self._access.connected_handle(plan.provider_id.value, None) is not None
         )
         discovered = await self._discovery.discover(connected, limit=limit)
-        await self._compile_shadow_brief(f"replenishment:{seed}")
+        episode_id = f"replenishment:{seed}"
+        compiled_brief = await self._compile_shadow_brief(episode_id)
         decision = (
             await self._exploit_only(seed, now)
             if profile.exploration_disabled()
@@ -478,11 +521,17 @@ class RecommendationPipeline:
             exploration=(attribution,) if attribution is not None else (),
         )
         by_id = {item.candidate_id: item for item in evaluated}
+        shortlist = tuple(by_id[item.candidate_id] for item in selected)
         await self._selection.persist_selection(
             self._repositories.recommendations,
-            tuple(by_id[item.candidate_id] for item in selected),
+            shortlist,
             admissions,
             selections,
+        )
+        await self._inspect_shortlist(
+            shortlist,
+            episode_id=episode_id,
+            brief=compiled_brief,
         )
         for expression in await self._expression.express(selections):
             await self._repositories.recommendations.save_expression(expression)

@@ -51,7 +51,7 @@ async def open_index(
     provider: FakeEmbeddings | None,
     info: EmbeddingModelInfo | None,
 ) -> tuple[SqliteDatabase, EmbeddingIndex]:
-    assert await SchemaMigrator(path).migrate() == 10
+    assert await SchemaMigrator(path).migrate() == 11
     database = SqliteDatabase(path)
     await database.open()
     return database, EmbeddingIndex(database, provider, info, clock=lambda: NOW)

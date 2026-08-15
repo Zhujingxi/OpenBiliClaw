@@ -22,6 +22,7 @@ Assistant correction ─ propose → pending approval → EditProfile ┘
                                   │                          │
  credentialed history/saves → observations → understanding
               provider feeds → adjacent recall → shadow brief → seeded allocation → constrained selection
+                                                                          → optional visual inspection
                                   │                         ▲
                      SQLite semantic index ←── PydanticAI native embedding provider
                                   │                         │
@@ -33,7 +34,7 @@ Assistant correction ─ propose → pending approval → EditProfile ┘
 1. Start without credentials or a model and expose health, sources, profiles, and an empty feed.
 2. Connect anonymous or provider-owned manual-secret access without exposing submitted secrets.
 3. Record typed observations and feedback idempotently; bounded credentialed history/saves and verified YouTube Takeout watch-history exports use the same deterministic external-evidence normalization and existing Understanding analyzer, with authenticated behavior capped below explicit-statement trust.
-4. Discover connected-provider search and feed content, hard-prefilter it, recall adjacent supply from model-specific evidence/claim/candidate embeddings, optionally compile/journal a validated RecommendationBrief in non-executing shadow mode, run seeded/journaled allocation, and build a diversity-constrained slate through the one recommendation pipeline. Normal feeds do not depend on Assistant; missing models, briefs, embeddings, or exploration supply never block delivery.
+4. Discover connected-provider search and feed content, hard-prefilter it, recall adjacent supply from model-specific evidence/claim/candidate embeddings, optionally compile/journal a validated RecommendationBrief in shadow mode, run seeded/journaled allocation, and build a diversity-constrained slate through the one recommendation pipeline. After durable selection, a separate vision-required per-candidate route may cache visual judgments for at most five shortlisted items and upsert their summaries for future consumers; it never enters the batched evaluator or gates delivery. Normal feeds do not depend on Assistant; missing models, frames, briefs, embeddings, or exploration supply never block delivery.
 5. Search/fetch through provider-native capability contracts and opaque access handles.
 6. Require CSRF/device proof for HTTP mutations. Content actions use propose/confirm, expiry, replay protection, and revalidation; Assistant profile corrections are also propose-only pending actions and confirmation alone dispatches canonical `EditProfile`.
 7. Run configured Assistant/model work only through typed AI Runtime routes and budgets.

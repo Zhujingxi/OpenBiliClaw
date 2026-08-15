@@ -131,12 +131,15 @@ Goal: credentialed depth and content-level quality judgment.
 - [x] **Saves/history ingestion**: `Saved`/`History` capabilities feed the ledger as
    high-trust observations through the plugin path. `openbiliclaw import <provider>`
    for Takeout-style archives.
-- [ ] **Multimodal inspection**: `recommendation.inspect` agent, shortlist-only, per-
+- [x] **Multimodal inspection**: `recommendation.inspect` agent, shortlist-only, per-
    candidate, cached; sampled frames first (any vision model via `ImageUrl`/
    `BinaryContent`), native `VideoUrl` route when a configured model justifies it;
    modality-aware routing via the models.dev catalog; rubric from the brief; structured
    output (`actual_topic, quality, title_mismatch, summary`) feeds evaluation and the
-   embedding index. Fail-open to metadata-only evaluation.
+   embedding index. Fail-open to metadata-only evaluation. Landed with bounded sampled-image
+   acquisition (provider storyboard seam, then allowlisted cover fallback), vision-only catalog
+   routing, schema-V11 append-only per-content caching, and best-effort inspection-summary embedding. Native
+   video input and direct evaluator consumption remain deferred as specified.
 
 Acceptance: plugin connects Bilibili end-to-end without manual cookie paste; personalized
 channel yield is measured per user; inspection runs only on shortlist and its judgments

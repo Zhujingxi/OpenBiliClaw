@@ -61,6 +61,7 @@ from openbiliclaw.composition.lifecycle import ComponentStage, LifecyclePlan, Ru
 from openbiliclaw.composition.providers import ProviderGraph, build_providers
 from openbiliclaw.composition.repositories import build_repositories
 from openbiliclaw.composition.scheduler import ScheduledJobsLifecycle
+from openbiliclaw.content.integration.capabilities import FetchCapability, ProjectionCapability
 from openbiliclaw.core.config import AppSettings, SettingsOverrides, load_settings
 from openbiliclaw.core.resources import ResourceBudget
 from openbiliclaw.core.supervisor import RuntimeSupervisor
@@ -81,7 +82,12 @@ from openbiliclaw.observations.validation import ObservationValidator
 from openbiliclaw.recommendation.brief import BriefCompiler, BriefService
 from openbiliclaw.recommendation.brief_agent import BRIEF_AGENT
 from openbiliclaw.recommendation.hypotheses import HypothesisRegistry
-from openbiliclaw.recommendation.models import FeedbackKind, record_identity
+from openbiliclaw.recommendation.inspection import (
+    INSPECTION_AGENT,
+    FrameAcquirer,
+    InspectionService,
+)
+from openbiliclaw.recommendation.models import Candidate, FeedbackKind, record_identity
 from openbiliclaw.recommendation.policy_journal import SqlitePolicyJournal
 from openbiliclaw.recommendation.rewards import record_supply_reward
 from openbiliclaw.recommendation.service import RecommendationService
@@ -285,6 +291,7 @@ def build_application(
         settings.content.enabled if options.enabled_providers is None else options.enabled_providers
     )
     providers = build_providers(provider_ids, vault)
+    media_proxy = MediaProxy(providers.registry.manifests(), http)
     observations = ObservationIngressService(
         repositories.observations,
         events,
@@ -343,6 +350,7 @@ def build_application(
             query_prefix=query_prefix_for_model(embedding_config.model_name),
         )
     assistant_runtime = None
+    vision_configured = False
     if settings.model.model_name:
         assert catalog is not None
         resolved = resolve_model(
@@ -385,22 +393,30 @@ def build_application(
                 for agent, policy in settings.runtime.agents.items()
             }
         )
-        assistant_runtime = AIRuntime(
-            RouteTable(
-                (
-                    ModelRoute(ASSISTANT_AGENT_ID, ASSISTANT_REQUIREMENTS, (routed_model,)),
-                    ModelRoute(
-                        PREFERENCE_ANALYZER.agent_id,
-                        PREFERENCE_ANALYZER.requirements,
-                        (routed_model,),
-                    ),
-                    ModelRoute(
-                        BRIEF_AGENT.agent_id,
-                        BRIEF_AGENT.requirements,
-                        (routed_model,),
-                    ),
-                )
+        routes = [
+            ModelRoute(ASSISTANT_AGENT_ID, ASSISTANT_REQUIREMENTS, (routed_model,)),
+            ModelRoute(
+                PREFERENCE_ANALYZER.agent_id,
+                PREFERENCE_ANALYZER.requirements,
+                (routed_model,),
             ),
+            ModelRoute(
+                BRIEF_AGENT.agent_id,
+                BRIEF_AGENT.requirements,
+                (routed_model,),
+            ),
+        ]
+        vision_configured = routed_model.capabilities.satisfies(INSPECTION_AGENT.requirements)
+        if vision_configured:
+            routes.append(
+                ModelRoute(
+                    INSPECTION_AGENT.agent_id,
+                    INSPECTION_AGENT.requirements,
+                    (routed_model,),
+                )
+            )
+        assistant_runtime = AIRuntime(
+            RouteTable(tuple(routes)),
             ResourceBudget("model", settings.runtime.default_resource_limit),
             policies=policy_book,
         )
@@ -433,6 +449,30 @@ def build_application(
         if assistant_runtime is not None
         else None
     )
+
+    async def cover_source(candidate: Candidate) -> str | None:
+        provider = providers.registry.provider(candidate.preview.ref.provider_id)
+        handle = access.connected_handle(candidate.preview.ref.provider_id.value, None)
+        if (
+            handle is None
+            or not isinstance(provider, FetchCapability)
+            or not isinstance(provider, ProjectionCapability)
+        ):
+            return None
+        native = await provider.fetch(candidate.preview.ref, handle)
+        return provider.card_data(native).image_url
+
+    inspections = (
+        InspectionService(
+            assistant_runtime,
+            FrameAcquirer(media_proxy, cover=cover_source),
+            policy_journal,
+            semantic_index,
+            clock=clock,
+        )
+        if assistant_runtime is not None and vision_configured
+        else None
+    )
     pipeline = RecommendationPipeline(
         providers,
         access,
@@ -442,6 +482,7 @@ def build_application(
         hypotheses=hypotheses,
         policy_journal=policy_journal,
         briefs=briefs,
+        inspections=inspections,
         semantic_index=semantic_index,
     )
     jobs = (*build_recommendation_jobs(pipeline), build_external_evidence_job(external_evidence))
@@ -610,7 +651,7 @@ def build_application(
         events=host_events,
         lifespan=lifecycle,
         auth_tokens=AuthTokenService(SqliteAuthTokenRepository(database)),
-        media_proxy=MediaProxy(providers.registry.manifests(), http),
+        media_proxy=media_proxy,
         plugin_access=facade,
         models=FileModelConfiguration(
             settings=settings,

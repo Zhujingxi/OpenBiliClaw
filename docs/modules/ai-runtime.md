@@ -6,8 +6,9 @@
 
 `AIRuntime.run(AgentRunRequest[DepsT, OutputT]) -> AgentRunResult[OutputT]` 是新边界唯一的
 production entrypoint。请求携带稳定 `AgentId`、domain-owned typed dependencies、PydanticAI
-`Agent`、有界 history/context、`ModelRequirements`、`RunPolicy` 与 usage attribution；不存在
-`complete(prompt) -> str` 兼容门面。
+`Agent`、有界 history/context、可选 PydanticAI `UserContent` attachments、`ModelRequirements`、
+`RunPolicy` 与 usage attribution；不存在 `complete(prompt) -> str` 兼容门面。attachments 当前仅由
+`recommendation.inspect` 使用，且来自 allowlisted image fetch 后的 `BinaryContent`；不包含 native video。
 
 - `ModelRoute` 在构造时检查 primary 和每个 fallback 的 tools、structured output、vision、
   context、streaming、reasoning 能力；任何不兼容 fallback 令启动失败。
@@ -48,4 +49,4 @@ production repository，也不包含 optimizer 或 self-modification。
 
 ## Domain ownership
 
-Understanding, Recommendation, and Assistant own their stable agent identities and prompts; all execute through this runtime. Deleted `llm/`, legacy evaluation, orchestrator, and skill implementations have no compatibility wrappers. Recommendation defines `recommendation.query`, `recommendation.evaluate`, and `recommendation.expression`; additional offline domain evaluation datasets remain deferred.
+Understanding, Recommendation, and Assistant own their stable agent identities and prompts; all execute through this runtime. Deleted `llm/`, legacy evaluation, orchestrator, and skill implementations have no compatibility wrappers. Recommendation defines the batched `recommendation.evaluate` contract separately from the per-candidate, vision-required `recommendation.inspect` route; configured `[runtime.agents."recommendation.inspect"]` limits resolve through the same `PolicyBook`. Additional offline domain evaluation datasets remain deferred.

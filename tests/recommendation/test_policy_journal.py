@@ -49,6 +49,7 @@ async def test_migration_creates_policy_journal_tables(tmp_path: Path) -> None:
     assert {
         "policy_briefs",
         "policy_hypotheses",
+        "policy_inspections",
         "policy_lessons",
         "policy_outcomes",
     } <= tables
@@ -67,7 +68,7 @@ async def test_journal_plane_has_no_user_evidence_coupling(tmp_path: Path) -> No
         ).fetchall()
     finally:
         connection.close()
-    assert len(rows) == 4
+    assert len(rows) == 5
     for name, sql in rows:
         assert "REFERENCES" not in sql, name
         assert "understanding_" not in sql, name

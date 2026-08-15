@@ -8,7 +8,7 @@ Assistant correction → scoped pending approval → EditProfile ─┤
 Credentialed History/Saves + YouTube Takeout ────────────────┤
                                       ├→ Observations → Understanding
 Content Providers ← Provider Access ←─└→ Search/Feeds → Semantic Recall → Shadow Brief → Seeded Allocation → Constrained Selection
-                    SQLite Semantic Index ← Embeddings ←─┘
+                    SQLite Semantic Index ← Embeddings ←─┘                                      → optional visual inspection
             Infrastructure (SQLite/archive) ← Core lifecycle/jobs ← Composition
 ```
 

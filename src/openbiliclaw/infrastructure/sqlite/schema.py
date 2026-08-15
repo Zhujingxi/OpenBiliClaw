@@ -42,6 +42,7 @@ TARGET_TABLE_OWNERS: Final[dict[str, str]] = {
     "auth_tokens": "API & CLI Hosts",
     "policy_briefs": "Discovery & Recommendation",
     "policy_hypotheses": "Discovery & Recommendation",
+    "policy_inspections": "Discovery & Recommendation",
     "policy_lessons": "Discovery & Recommendation",
     "policy_outcomes": "Discovery & Recommendation",
     "embedding_index": "AI Embedding Providers",
@@ -370,6 +371,21 @@ _SCHEMA_V10: Final[tuple[str, ...]] = (
     "CREATE INDEX embedding_index_model_kind ON embedding_index(model, kind)",
 )
 
+_SCHEMA_V11: Final[tuple[str, ...]] = (
+    """CREATE TABLE policy_inspections (
+        inspection_id TEXT PRIMARY KEY CHECK(inspection_id GLOB 'inspect_[0-9a-f]*'),
+        content_ref TEXT NOT NULL UNIQUE,
+        record_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )""",
+    """CREATE TRIGGER policy_inspections_append_only_update
+        BEFORE UPDATE ON policy_inspections
+        BEGIN SELECT RAISE(ABORT, 'policy journal is append-only'); END""",
+    """CREATE TRIGGER policy_inspections_append_only_delete
+        BEFORE DELETE ON policy_inspections
+        BEGIN SELECT RAISE(ABORT, 'policy journal is append-only'); END""",
+)
+
 
 DEFAULT_MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(1, _SCHEMA_V1),
@@ -382,6 +398,7 @@ DEFAULT_MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(8, _SCHEMA_V8),
     Migration(9, _SCHEMA_V9),
     Migration(10, _SCHEMA_V10),
+    Migration(11, _SCHEMA_V11),
 )
 
 

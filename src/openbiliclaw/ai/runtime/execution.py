@@ -8,7 +8,7 @@ from dataclasses import dataclass, replace
 from time import monotonic
 from typing import TYPE_CHECKING, Generic, TypeAlias, TypeVar
 
-from pydantic_ai.messages import ModelMessage
+from pydantic_ai.messages import BinaryContent, ImageUrl, ModelMessage, UserContent
 from pydantic_ai.usage import RunUsage
 
 from openbiliclaw.ai.runtime.budgets import PolicyBook
@@ -26,6 +26,7 @@ from openbiliclaw.ai.runtime.usage import UsageAttribution, UsageRecord, UsageSi
 DepsT = TypeVar("DepsT")
 OutputT = TypeVar("OutputT")
 ModelMessageList: TypeAlias = list[ModelMessage]
+VisualContent: TypeAlias = ImageUrl | BinaryContent
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -52,6 +53,7 @@ class AgentRunRequest(Generic[DepsT, OutputT]):
     policy: RunPolicy
     workflow: str
     recommendation_batch: str | None = None
+    attachments: tuple[VisualContent, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.workflow:
@@ -103,12 +105,15 @@ class AIRuntime:
         """Execute within capability, concurrency, usage, and time bounds."""
 
         audit_text(request.user_input)
+        for attachment in request.attachments:
+            if isinstance(attachment, ImageUrl):
+                audit_text(attachment.url)
         audit_model_messages(request.history)
         for projection in request.context:
             audit_text(projection.text)
         request = replace(request, policy=self._policies.resolve(request.agent_id, request.policy))
         route = self._routes.resolve(request.agent_id, request.requirements)
-        prompt = _build_prompt(request.user_input, request.context)
+        prompt = _build_prompt(request.user_input, request.context, request.attachments)
         started = monotonic()
         attempted_models: list[ConfiguredModel] = []
         async with self._resource_budget.acquire():
@@ -127,7 +132,7 @@ class AIRuntime:
         self,
         request: AgentRunRequest[DepsT, OutputT],
         route: ModelRoute,
-        prompt: str,
+        prompt: str | Sequence[UserContent],
         started: float,
         attempted_models: list[ConfiguredModel],
     ) -> AgentRunResult[OutputT]:
@@ -187,11 +192,14 @@ class AIRuntime:
         raise last_error
 
 
-def _build_prompt(user_input: str, context: Sequence[ContextProjection]) -> str:
-    if not context:
-        return user_input
+def _build_prompt(
+    user_input: str,
+    context: Sequence[ContextProjection],
+    attachments: tuple[VisualContent, ...],
+) -> str | Sequence[UserContent]:
     projected = "\n".join(f"<context name={item.label!r}>{item.text}</context>" for item in context)
-    return f"{projected}\n{user_input}"
+    text = f"{projected}\n{user_input}" if projected else user_input
+    return (text, *attachments) if attachments else text
 
 
 def _attribution(
