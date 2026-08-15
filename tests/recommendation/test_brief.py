@@ -22,6 +22,7 @@ from openbiliclaw.content.integration.manifest import (
     ProviderAvailability,
     ProviderManifest,
 )
+from openbiliclaw.content.providers.bilibili.manifest import BILIBILI_MANIFEST
 from openbiliclaw.core.resources import ResourceBudget
 from openbiliclaw.infrastructure.sqlite.database import SqliteDatabase
 from openbiliclaw.infrastructure.sqlite.schema import SchemaMigrator
@@ -219,6 +220,17 @@ def test_compiler_rejects_invalid_or_unsafe_plans(candidate: Any, reason: str) -
     assert not compiled.accepted
     assert reason in {diagnostic.code for diagnostic in compiled.diagnostics}
     assert compiled.trace.inspection_shortlist_cap == 2
+
+
+def test_bilibili_rcmd_is_rejected_as_exploration_supply() -> None:
+    personalized = proposal(
+        retrieval_plans=(RetrievalPlan(channel_refs=("bilibili:rcmd",), exploration=True),)
+    )
+
+    compiled = BriefCompiler((BILIBILI_MANIFEST,)).compile(personalized, now=NOW)
+
+    assert not compiled.accepted
+    assert "personalized-exploration" in {diagnostic.code for diagnostic in compiled.diagnostics}
 
 
 def test_valid_brief_compiles_with_replayable_diagnostics() -> None:

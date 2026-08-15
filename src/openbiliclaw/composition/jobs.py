@@ -9,12 +9,14 @@ from datetime import UTC, datetime, timedelta
 from random import Random
 from typing import TYPE_CHECKING
 
+from openbiliclaw.access.models import CredentialAccessHandle
 from openbiliclaw.content.integration.capabilities import (
     FeedCapability,
     FeedQuery,
     PageRequest,
     SearchCapability,
 )
+from openbiliclaw.content.integration.manifest import BiasClass
 from openbiliclaw.core.jobs import IntervalSchedule, JobSpec, MissedRunPolicy, OverlapPolicy
 from openbiliclaw.recommendation.allocation import (
     AllocationDecision,
@@ -155,6 +157,10 @@ class RecommendationPipeline:
         active = await self._hypotheses.active(now)
         counts: list[HypothesisCounts] = []
         for hypothesis in active:
+            # Channel arms measure exploit-supply yield; channel-level allocation is
+            # intentionally deferred and must not turn them into exploration arms.
+            if hypothesis.arm.startswith("channel-"):
+                continue
             attempts, successes, failures = await self._hypotheses.posterior(
                 hypothesis.hypothesis_id
             )
@@ -228,20 +234,20 @@ class RecommendationPipeline:
         self,
         *,
         limit: int,
-    ) -> tuple[tuple[ContentPreview, str], ...]:
-        supply: list[tuple[ContentPreview, str]] = []
-        manifests = self._providers.registry.manifests()
-        public_channels = tuple(
-            (manifest, channel)
-            for manifest in manifests
+    ) -> tuple[tuple[ContentPreview, str, BiasClass], ...]:
+        channels = tuple(
+            (manifest, channel, handle)
+            for manifest in self._providers.registry.manifests()
+            if (handle := self._access.connected_handle(manifest.provider_id.value, None))
+            is not None
             for channel in manifest.channels
-            if not channel.auth_required
+            if not channel.auth_required or isinstance(handle, CredentialAccessHandle)
         )
-        per_channel = max(1, limit // max(1, len(public_channels)))
-        for manifest, channel in public_channels:
+        per_channel = max(1, (limit + len(channels) - 1) // max(1, len(channels)))
+        pages: list[tuple[tuple[ContentPreview, ...], str, BiasClass]] = []
+        for manifest, channel, handle in channels:
             provider = self._providers.registry.provider(manifest.provider_id)
-            handle = self._access.connected_handle(manifest.provider_id.value, None)
-            if not isinstance(provider, FeedCapability) or handle is None:
+            if not isinstance(provider, FeedCapability):
                 continue
             try:
                 page = await provider.feed(
@@ -250,11 +256,80 @@ class RecommendationPipeline:
                 )
             except Exception:
                 continue
-            supply.extend(
-                (preview, f"{manifest.provider_id.value}:{channel.feed_id}")
-                for preview in page.items
+            pages.append(
+                (
+                    page.items,
+                    f"{manifest.provider_id.value}:{channel.feed_id}",
+                    channel.bias_class,
+                )
             )
-        return tuple(supply[:limit])
+        return tuple(
+            (items[index], channel, bias)
+            for index in range(per_channel)
+            for items, channel, bias in pages
+            if index < len(items)
+        )[:limit]
+
+    @staticmethod
+    def _feed_candidates(
+        supply: tuple[tuple[ContentPreview, str, BiasClass], ...],
+        *,
+        now: datetime,
+        attribution: ExplorationAttribution | None,
+    ) -> tuple[Candidate, ...]:
+        return tuple(
+            Candidate(
+                candidate_id=candidate_identity(
+                    preview.ref,
+                    "provider.feed",
+                    f"{channel}:{preview.ref.provider_content_id}",
+                ),
+                preview=preview,
+                provenance=DiscoveryProvenance(
+                    strategy_id="provider.feed",
+                    query_key=f"{channel}:{preview.ref.provider_content_id}",
+                    provider=preview.ref.provider_id.value,
+                    channel=channel,
+                    exploration=(
+                        attribution.model_copy(update={"channel": channel})
+                        if attribution is not None
+                        and attribution.arm != "adjacent"
+                        and bias is not BiasClass.PLATFORM_PERSONALIZED
+                        else None
+                    ),
+                    discovered_at=now,
+                ),
+                topics=(channel,),
+                expires_at=now + timedelta(days=7),
+            )
+            for preview, channel, bias in supply
+        )
+
+    @staticmethod
+    def _attribute_adjacent(
+        candidates: tuple[Candidate, ...],
+        *,
+        candidate_ids: frozenset[str],
+        attribution: ExplorationAttribution,
+        personalized_channels: frozenset[str],
+    ) -> tuple[Candidate, ...]:
+        return tuple(
+            candidate.model_copy(
+                update={
+                    "provenance": candidate.provenance.model_copy(
+                        update={
+                            "exploration": attribution.model_copy(
+                                update={"channel": candidate.provenance.channel}
+                            )
+                        }
+                    )
+                }
+            )
+            if candidate.candidate_id in candidate_ids
+            and candidate.provenance.channel not in personalized_channels
+            else candidate
+            for candidate in candidates
+        )
 
     async def _index_candidates(self, candidates: tuple[Candidate, ...]) -> None:
         index = getattr(self, "_semantic_index", None)
@@ -351,50 +426,22 @@ class RecommendationPipeline:
             )
             for item in discovered
         )
-        feed_candidates = tuple(
-            Candidate(
-                candidate_id=candidate_identity(
-                    preview.ref,
-                    "provider.feed",
-                    f"{channel}:{preview.ref.provider_content_id}",
-                ),
-                preview=preview,
-                provenance=DiscoveryProvenance(
-                    strategy_id="provider.feed",
-                    query_key=f"{channel}:{preview.ref.provider_content_id}",
-                    provider=preview.ref.provider_id.value,
-                    channel=channel,
-                    exploration=(
-                        attribution.model_copy(update={"channel": channel})
-                        if attribution is not None and attribution.arm != "adjacent"
-                        else None
-                    ),
-                    discovered_at=now,
-                ),
-                topics=(channel,),
-                expires_at=now + timedelta(days=7),
-            )
-            for preview, channel in feed_supply
-        )
+        feed_candidates = self._feed_candidates(feed_supply, now=now, attribution=attribution)
         candidates = (*search_candidates, *feed_candidates)
         await self._index_candidates(candidates)
         if attribution is not None and attribution.arm == "adjacent":
             adjacent_ids = await self._adjacent_ids(profile, limit=limit)
-            candidates = tuple(
-                candidate.model_copy(
-                    update={
-                        "provenance": candidate.provenance.model_copy(
-                            update={
-                                "exploration": attribution.model_copy(
-                                    update={"channel": candidate.provenance.channel}
-                                )
-                            }
-                        )
-                    }
-                )
-                if candidate.candidate_id in adjacent_ids
-                else candidate
-                for candidate in candidates
+            personalized_channels = frozenset(
+                f"{manifest.provider_id.value}:{channel.feed_id}"
+                for manifest in self._providers.registry.manifests()
+                for channel in manifest.channels
+                if channel.bias_class is BiasClass.PLATFORM_PERSONALIZED
+            )
+            candidates = self._attribute_adjacent(
+                candidates,
+                candidate_ids=adjacent_ids,
+                attribution=attribution,
+                personalized_channels=personalized_channels,
             )
         added_list: list[Candidate] = []
         for candidate in candidates:

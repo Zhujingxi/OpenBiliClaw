@@ -126,7 +126,7 @@ Goal: credentialed depth and content-level quality judgment.
    zero per-source logic; verification reuses the existing verifier/vault boundary.
    Must also fix vault-backed access rehydration on startup (found in A7: connections
    are in-memory only, so one-shot CLI commands and server restarts lose them).
-- [ ] **Personalized feeds**: credentialed channels (Bilibili `rcmd` flagship) land as
+- [x] **Personalized feeds**: credentialed channels (Bilibili `rcmd` flagship) land as
    exploit-class supply; per-channel yield learned via the Phase B machinery.
 - [ ] **Saves/history ingestion**: `Saved`/`History` capabilities feed the ledger as
    high-trust observations through the plugin path. `openbiliclaw import <provider>`

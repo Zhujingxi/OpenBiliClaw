@@ -143,12 +143,16 @@ def test_all_production_manifests_declare_channels_iff_feed_is_advertised() -> N
     assert BILIBILI_MANIFEST.channel("popular") == ChannelDescriptor(
         feed_id="popular", bias_class=BiasClass.PLATFORM_POPULARITY, auth_required=False
     )
+    assert BILIBILI_MANIFEST.channel("rcmd") == ChannelDescriptor(
+        feed_id="rcmd", bias_class=BiasClass.PLATFORM_PERSONALIZED, auth_required=True
+    )
     assert BANGUMI_MANIFEST.channel("rank").bias_class is BiasClass.PLATFORM_POPULARITY
     assert V2EX_MANIFEST.channel("hot").bias_class is BiasClass.PLATFORM_POPULARITY
     assert {channel.feed_id for manifest in manifests for channel in manifest.channels} == {
         "popular",
         "rank",
         "hot",
+        "rcmd",
     }
     assert BILIBILI_MANIFEST.image_hosts == ("hdslb.com",)
     assert BILIBILI_MANIFEST.image_headers == {"referer": "https://www.bilibili.com"}

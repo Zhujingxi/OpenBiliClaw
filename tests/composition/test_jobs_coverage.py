@@ -9,6 +9,11 @@ import pytest
 from pydantic_ai.models.test import TestModel
 from tests.recommendation.test_prefilter_expression import candidate
 
+from openbiliclaw.access.models import (
+    AnonymousAccessHandle,
+    CredentialAccessHandle,
+    Permission,
+)
 from openbiliclaw.ai.providers.embeddings import (
     EmbeddingModelInfo,
     EmbeddingResult,
@@ -51,7 +56,7 @@ from openbiliclaw.recommendation.brief_agent import BRIEF_AGENT
 from openbiliclaw.recommendation.discovery.service import DiscoveredPreview
 from openbiliclaw.recommendation.evaluation.agent import EvaluationBatch
 from openbiliclaw.recommendation.hypotheses import HypothesisRegistry
-from openbiliclaw.recommendation.models import record_identity
+from openbiliclaw.recommendation.models import ExplorationAttribution, record_identity
 from openbiliclaw.recommendation.policy_journal import SqlitePolicyJournal
 from openbiliclaw.recommendation.repositories import SqliteRecommendationRepository
 from openbiliclaw.recommendation.service import RecommendationService
@@ -246,6 +251,126 @@ async def test_model_free_evaluation_and_empty_pipeline_are_executable() -> None
         0,
     )
     dynamic._evaluation.evaluate.assert_awaited_once_with(())
+
+
+@pytest.mark.asyncio
+async def test_personalized_feed_supply_requires_credentials_and_stays_exploit_only() -> None:
+    popular = candidate("public-feed").preview
+    personalized = candidate("personalized-feed").preview
+    manifest = ProviderManifest(
+        provider_id=popular.ref.provider_id,
+        display_name="Demo",
+        capabilities=frozenset({CapabilityKind.FEED}),
+        native_schemas=(
+            NativeSchemaDescriptor(content_kind=ContentKind(value="video"), schema_version=1),
+        ),
+        channels=(
+            ChannelDescriptor(
+                feed_id="popular",
+                bias_class=BiasClass.PLATFORM_POPULARITY,
+                auth_required=False,
+            ),
+            ChannelDescriptor(
+                feed_id="rcmd",
+                bias_class=BiasClass.PLATFORM_PERSONALIZED,
+                auth_required=True,
+            ),
+        ),
+        availability=ProviderAvailability.AVAILABLE,
+    )
+
+    class FakeFeedProvider:
+        def __init__(self) -> None:
+            self.feed_ids: list[str | None] = []
+
+        async def feed(self, query: FeedQuery, access: object) -> ContentPage[Any]:
+            self.feed_ids.append(query.feed_id)
+            preview = personalized if query.feed_id == "rcmd" else popular
+            return ContentPage(items=(preview,), next_cursor=None)
+
+    provider = FakeFeedProvider()
+    pipeline = object.__new__(RecommendationPipeline)
+    dynamic = cast("Any", pipeline)
+    dynamic._providers = SimpleNamespace(
+        registry=SimpleNamespace(
+            manifests=lambda: (manifest,), provider=lambda _provider_id: provider
+        )
+    )
+    anonymous = AnonymousAccessHandle(
+        provider_id="demo", account_id=None, permissions=frozenset({Permission.READ_PUBLIC})
+    )
+    dynamic._access = SimpleNamespace(connected_handle=lambda *_args: anonymous)
+
+    anonymous_supply = await pipeline._feed_supply(limit=2)
+    assert provider.feed_ids == ["popular"]
+    assert [item[1] for item in anonymous_supply] == ["demo:popular"]
+
+    credential = CredentialAccessHandle(
+        provider_id="demo",
+        account_id=None,
+        permissions=frozenset({Permission.READ_PUBLIC, Permission.READ_PRIVATE}),
+        credential_ref="cred_" + "a" * 32,
+        revision=1,
+    )
+    dynamic._access = SimpleNamespace(connected_handle=lambda *_args: credential)
+    provider.feed_ids.clear()
+    credentialed_supply = await pipeline._feed_supply(limit=2)
+    assert provider.feed_ids == ["popular", "rcmd"]
+
+    attribution = ExplorationAttribution(
+        hypothesis_id="hyp_" + "b" * 32,
+        arm="source-novel",
+    )
+    feed_candidates = pipeline._feed_candidates(
+        credentialed_supply, now=NOW, attribution=attribution
+    )
+    by_channel = {item.provenance.channel: item for item in feed_candidates}
+    assert by_channel["demo:popular"].provenance.exploration is not None
+    assert by_channel["demo:rcmd"].provenance.exploration is None
+
+    adjacent = attribution.model_copy(update={"arm": "adjacent"})
+    adjacent_candidates = pipeline._attribute_adjacent(
+        feed_candidates,
+        candidate_ids=frozenset(item.candidate_id for item in feed_candidates),
+        attribution=adjacent,
+        personalized_channels=frozenset({"demo:rcmd"}),
+    )
+    adjacent_by_channel = {item.provenance.channel: item for item in adjacent_candidates}
+    assert adjacent_by_channel["demo:popular"].provenance.exploration == adjacent.model_copy(
+        update={"channel": "demo:popular"}
+    )
+    assert adjacent_by_channel["demo:rcmd"].provenance.exploration is None
+
+
+@pytest.mark.asyncio
+async def test_channel_yield_arms_stay_out_of_top_level_exploration_allocation(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "channel-allocation.db"
+    await SchemaMigrator(path).migrate()
+    database = SqliteDatabase(path)
+    await database.open()
+    try:
+        journal = SqlitePolicyJournal(database)
+        hypotheses = HypothesisRegistry(journal, clock=lambda: NOW)
+        await hypotheses.ensure_active(
+            arm="channel-bilibili-rcmd",
+            statement="The personalized channel may yield satisfying recommendations",
+            evidence_refs=("channel:bilibili:rcmd",),
+            falsification="resolved failures exceed successes",
+            expires_at=NOW + timedelta(days=1),
+            now=NOW,
+        )
+        pipeline = object.__new__(RecommendationPipeline)
+        dynamic = cast("Any", pipeline)
+        dynamic._hypotheses = hypotheses
+        dynamic._policy_journal = journal
+
+        decision = await pipeline._allocate(1, NOW)
+
+        assert "channel-bilibili-rcmd" not in {sample.arm for sample in decision.samples}
+    finally:
+        await database.close()
 
 
 @pytest.mark.asyncio

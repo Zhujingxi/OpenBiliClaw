@@ -22,6 +22,7 @@ from openbiliclaw.content.integration.capabilities import (
 )
 from openbiliclaw.content.integration.errors import ContentIntegrationError, IntegrationErrorCode
 from openbiliclaw.content.integration.identity import ContentKind, ContentRef, ProviderId
+from openbiliclaw.content.integration.manifest import BiasClass
 from openbiliclaw.content.integration.testing import validate_provider_contract
 from openbiliclaw.content.providers.bilibili.auth import BILIBILI_CONNECTION_FORM
 from openbiliclaw.content.providers.bilibili.capabilities import (
@@ -103,6 +104,9 @@ def test_manifest_matches_complete_reference_provider_contract() -> None:
         "video",
         "article",
     }
+    rcmd = BILIBILI_MANIFEST.channel("rcmd")
+    assert rcmd.bias_class is BiasClass.PLATFORM_PERSONALIZED
+    assert rcmd.auth_required is True
 
 
 @pytest.mark.parametrize("fixture", ["search_success.json", "empty.json", "tombstone.json"])
@@ -151,6 +155,32 @@ async def test_empty_feed_and_explicit_browser_session_degradation() -> None:
         await provider.feed(FeedQuery(feed_id="rendered_homepage"), _anonymous())
     assert exc.value.code is IntegrationErrorCode.UNAVAILABLE_CAPABILITY
     assert "browser" not in exc.value.safe_message.lower()
+
+
+@pytest.mark.asyncio
+async def test_personalized_feed_parses_real_shape_and_requires_credentials() -> None:
+    canary = "SESSDATA=CANARY; bili_jct=csrf"
+    transport = FixtureTransport(
+        {"/x/web-interface/wbi/index/top/feed/rcmd": _fixture("rcmd.json")}
+    )
+    provider = BilibiliProvider(_client(transport, Resolver(canary)))
+
+    with pytest.raises(ContentIntegrationError) as denied:
+        await provider.feed(FeedQuery(feed_id="rcmd"), _anonymous())
+    assert denied.value.code is IntegrationErrorCode.ACCESS_DENIED
+    assert transport.requests == []
+
+    page = await provider.feed(
+        FeedQuery(feed_id="rcmd", page=PageRequest(limit=3)),
+        _credential(Permission.READ_PRIVATE),
+    )
+    assert len(page.items) == 1
+    assert page.items[0].ref.provider_content_id == "BV1RCMD12345"
+    assert page.items[0].title == "Personalized recommendation"
+    method, request, cookie, _body = transport.requests[0]
+    assert method == "GET" and request.startswith("/x/web-interface/wbi/index/top/feed/rcmd?")
+    assert "ps=3" in request and "feed_version=V8" in request
+    assert cookie == canary
 
 
 @pytest.mark.asyncio

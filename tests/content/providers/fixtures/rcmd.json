@@ -1,0 +1,42 @@
+{
+  "code": 0,
+  "message": "0",
+  "ttl": 1,
+  "data": {
+    "item": [
+      {
+        "id": 1,
+        "goto": "ad",
+        "title": "Sponsored card without a stable BVID"
+      },
+      {
+        "id": 987654321,
+        "bvid": "BV1RCMD12345",
+        "cid": 123456789,
+        "goto": "av",
+        "uri": "https://www.bilibili.com/video/BV1RCMD12345",
+        "pic": "//i0.hdslb.com/bfs/archive/rcmd.jpg",
+        "title": "Personalized recommendation",
+        "duration": 245,
+        "pubdate": 1700000000,
+        "owner": {
+          "mid": 42,
+          "name": "rcmd creator",
+          "face": "https://i0.hdslb.com/bfs/face/creator.jpg"
+        },
+        "stat": {
+          "view": 1200,
+          "like": 80,
+          "favorite": 25
+        },
+        "rcmd_reason": {
+          "content": "because you watched similar videos",
+          "corner_mark": 0
+        }
+      }
+    ],
+    "business_card": null,
+    "floor_info": null,
+    "user_feature": null
+  }
+}

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -78,7 +78,7 @@ from openbiliclaw.recommendation.brief_agent import BRIEF_AGENT
 from openbiliclaw.recommendation.hypotheses import HypothesisRegistry
 from openbiliclaw.recommendation.models import FeedbackKind, record_identity
 from openbiliclaw.recommendation.policy_journal import SqlitePolicyJournal
-from openbiliclaw.recommendation.rewards import RewardLedger
+from openbiliclaw.recommendation.rewards import record_supply_reward
 from openbiliclaw.recommendation.service import RecommendationService
 from openbiliclaw.understanding.analyzers.contracts import PREFERENCE_ANALYZER
 from openbiliclaw.understanding.analyzers.preference import (
@@ -528,26 +528,13 @@ def build_application(
                 evidence,
             )
 
-        exploit_id = None
-        if candidate.provenance.exploration is None and feedback.kind in (
-            FeedbackKind.OPENED,
-            FeedbackKind.LIKED,
-            FeedbackKind.SAVED,
-        ):
-            now = datetime.now(UTC)
-            exploit = await hypotheses.ensure_active(
-                arm="exploit",
-                statement="The familiar exploit strategy may satisfy current intent",
-                evidence_refs=("system:feedback",),
-                falsification="resolved failures exceed resolved successes",
-                expires_at=now + timedelta(days=365),
-                now=now,
-            )
-            exploit_id = exploit.hypothesis_id
-        await RewardLedger(
+        await record_supply_reward(
             hypotheses,
-            exploit_hypothesis_id=exploit_id,
-        ).record(feedback, shown, candidate.provenance.exploration)
+            feedback,
+            shown,
+            candidate.provenance,
+            now=observation.occurred_at,
+        )
 
     feedback = RecordFeedback(
         FeedbackUnitOfWork(repositories.recommendations, repositories.observations),

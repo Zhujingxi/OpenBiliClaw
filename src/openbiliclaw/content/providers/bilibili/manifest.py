@@ -46,6 +46,11 @@ BILIBILI_MANIFEST = ProviderManifest(
             bias_class=BiasClass.PLATFORM_POPULARITY,
             auth_required=False,
         ),
+        ChannelDescriptor(
+            feed_id="rcmd",
+            bias_class=BiasClass.PLATFORM_PERSONALIZED,
+            auth_required=True,
+        ),
     ),
     image_hosts=("hdslb.com",),
     image_headers={"referer": "https://www.bilibili.com"},

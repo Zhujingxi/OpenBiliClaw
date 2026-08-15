@@ -68,18 +68,24 @@ class BilibiliProvider:
         return self._preview_page(page.items, page.next_cursor, query.page.limit)
 
     async def feed(self, query: FeedQuery, access: AccessHandle) -> ContentPage[ContentPreview]:
-        self._public_access(access)
-        if query.feed_id not in {None, "popular"}:
-            # Rendered personalized homepage depends on browser-session execution,
-            # intentionally absent from target architecture.
-            raise ContentIntegrationError(
-                IntegrationErrorCode.UNAVAILABLE_CAPABILITY,
-                "requested feed mode is unavailable",
+        if query.feed_id == "rcmd":
+            credential = self._private_access(access, Permission.READ_PRIVATE)
+            page = await self._client.page(
+                "/x/web-interface/wbi/index/top/feed/rcmd",
+                {"limit": self._limit(query.page), "cursor": self._cursor(query.page)},
+                credential,
             )
-        page = await self._client.page(
-            "/x/web-interface/popular",
-            {"limit": self._limit(query.page), "cursor": self._cursor(query.page)},
-        )
+        else:
+            self._public_access(access)
+            if query.feed_id not in {None, "popular"}:
+                raise ContentIntegrationError(
+                    IntegrationErrorCode.UNAVAILABLE_CAPABILITY,
+                    "requested feed mode is unavailable",
+                )
+            page = await self._client.page(
+                "/x/web-interface/popular",
+                {"limit": self._limit(query.page), "cursor": self._cursor(query.page)},
+            )
         return self._preview_page(page.items, page.next_cursor, query.page.limit)
 
     async def fetch(self, ref: ContentRef, access: AccessHandle) -> NativeContent:

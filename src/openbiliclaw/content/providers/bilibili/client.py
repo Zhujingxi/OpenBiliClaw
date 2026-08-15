@@ -235,6 +235,8 @@ class BilibiliClient:
             rows = payload.data
         elif path == "/x/web-interface/search/type":
             rows = data.get("result")
+        elif path == "/x/web-interface/wbi/index/top/feed/rcmd":
+            rows = data.get("item")
         elif path == "/x/space/wbi/arc/search":
             rows = _mapping(data.get("list")).get("vlist")
         else:
@@ -243,14 +245,17 @@ class BilibiliClient:
         if not isinstance(rows, list):
             raise self._invalid()
         try:
-            # Search occasionally includes legacy archive rows without a BVID. They
-            # cannot form the provider's stable ContentRef, so skip them rather than
-            # rejecting the otherwise valid page.
+            # Search can include legacy archives and rcmd can include ad cards.
+            # Rows without a BVID cannot form the provider's stable ContentRef.
             mapped_rows = tuple(row for value in rows if (row := _mapping(value)))
+            bvid_required = path in {
+                "/x/web-interface/search/type",
+                "/x/web-interface/wbi/index/top/feed/rcmd",
+            }
             items = tuple(
                 _item(row)
                 for row in mapped_rows
-                if path != "/x/web-interface/search/type"
+                if not bvid_required
                 or _text(row.get("bvid"))
                 or row.get("kind") in {"video", "article"}
             )
@@ -361,6 +366,17 @@ class BilibiliClient:
             values.update(search_type="video", page=page, page_size=limit)
         elif path in {"/x/web-interface/popular", "/x/space/wbi/arc/search"}:
             values.update(pn=page, ps=limit)
+        elif path == "/x/web-interface/wbi/index/top/feed/rcmd":
+            values.update(
+                ps=limit,
+                fresh_type=3,
+                feed_version="V8",
+                fresh_idx=1,
+                fresh_idx_1h=1,
+                brush=0,
+                homepage_ver=1,
+                web_location=1430650,
+            )
         elif path == "/x/web-interface/history/cursor":
             values.update(ps=limit, max=cursor, view_at=0)
         elif path == "/x/web-interface/view":

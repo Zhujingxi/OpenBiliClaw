@@ -10,13 +10,19 @@ import pytest
 from openbiliclaw.infrastructure.sqlite.database import SqliteDatabase
 from openbiliclaw.infrastructure.sqlite.schema import SchemaMigrator
 from openbiliclaw.recommendation.hypotheses import HypothesisRegistry
-from openbiliclaw.recommendation.models import FeedbackKind, FeedbackRecord, ShownRecord
+from openbiliclaw.recommendation.models import (
+    DiscoveryProvenance,
+    FeedbackKind,
+    FeedbackRecord,
+    ShownRecord,
+)
 from openbiliclaw.recommendation.policy_journal import SqlitePolicyJournal
 from openbiliclaw.recommendation.rewards import (
     ExplorationAttribution,
     RewardKind,
     RewardLedger,
     map_feedback,
+    record_supply_reward,
 )
 
 if TYPE_CHECKING:
@@ -212,6 +218,72 @@ async def test_exploit_feedback_updates_persisted_exploit_posterior(tmp_path: Pa
         )
 
         assert await registry.posterior(exploit.hypothesis_id) == (1, 1, 0)
+    finally:
+        await database.close()
+
+
+async def test_channel_attributed_feedback_updates_its_channel_arm(tmp_path: Path) -> None:
+    path = tmp_path / "channel-rewards.db"
+    await SchemaMigrator(path).migrate()
+    database = SqliteDatabase(path)
+    await database.open()
+    try:
+        journal = SqlitePolicyJournal(database)
+        registry = HypothesisRegistry(journal, clock=lambda: NOW)
+        provenance = DiscoveryProvenance(
+            strategy_id="provider.feed",
+            query_key="bilibili:rcmd:BV1RCMD12345",
+            provider="bilibili",
+            channel="bilibili:rcmd",
+            exploration=None,
+            discovered_at=NOW,
+        )
+
+        await record_supply_reward(
+            registry,
+            _feedback(FeedbackKind.LIKED),
+            _shown(),
+            provenance,
+            now=NOW,
+        )
+
+        channel = next(
+            item for item in await registry.active(NOW) if item.arm == "channel-bilibili-rcmd"
+        )
+        assert channel.evidence_refs == ("channel:bilibili:rcmd",)
+        assert await registry.posterior(channel.hypothesis_id) == (1, 1, 0)
+        assert provenance.exploration is None
+
+        exploration = await registry.ensure_active(
+            arm="source-novel",
+            statement="Cross-provider novelty may satisfy the user",
+            evidence_refs=("system:test",),
+            falsification="resolved failures exceed successes",
+            expires_at=NOW + timedelta(days=1),
+            now=NOW,
+        )
+        await record_supply_reward(
+            registry,
+            _feedback(FeedbackKind.LIKED),
+            _shown(),
+            provenance.model_copy(
+                update={
+                    "channel": "bilibili:popular",
+                    "exploration": ATTRIBUTION.model_copy(
+                        update={
+                            "hypothesis_id": exploration.hypothesis_id,
+                            "channel": "bilibili:popular",
+                        }
+                    ),
+                }
+            ),
+            now=NOW,
+        )
+        popular = next(
+            item for item in await registry.active(NOW) if item.arm == "channel-bilibili-popular"
+        )
+        assert await registry.posterior(exploration.hypothesis_id) == (1, 1, 0)
+        assert await registry.posterior(popular.hypothesis_id) == (1, 1, 0)
     finally:
         await database.close()
 

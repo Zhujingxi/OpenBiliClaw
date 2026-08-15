@@ -37,6 +37,7 @@ assert validate_provider_contract(manifest, provider) == ()
 
 | Provider | Enabled access | Capabilities | Live E2E layer |
 |----------|----------------|--------------|----------------|
+| Bilibili | `builtin.anonymous` public reads; `builtin.manual`/plugin cookie access (`SESSDATA` + `bili_jct`) | search/fetch/related/creator; anonymous `popular` feed; credential-only `rcmd` personalized feed plus history/saved/action. `rcmd` calls `/x/web-interface/wbi/index/top/feed/rcmd` with plain verified cookies and is declared `platform-personalized`, auth-required | `l1a` anonymous and `l1b` authenticated; personalized-feed unit coverage is hermetic |
 | Bangumi | `builtin.anonymous` public read; optional PAT form retained | search, feed, fetch, projection via official `api.bgm.tv` v0 API | `l1bangumi` (anonymous search → detail) |
 | V2EX | `builtin.anonymous` public read; optional PAT form retained | feed, fetch, creator, projection via official `www.v2ex.com/api` endpoints; search not advertised because V2EX has no official full-text search API | `l1v2ex` (anonymous hot feed → detail) |
 | Linux.do | `builtin.anonymous` public read; optional cookie form retained | search, fetch, projection via public Discourse JSON (`/search.json`, `/t/<id>.json`) — **implemented but not enabled**: Cloudflare challenges all content endpoints for non-browser clients (2026-08-14) | none (upstream-blocked; layer deferred until a viable path exists) |
