@@ -196,10 +196,12 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.206 (2026-08-15)**
+📌 Latest: **v0.3.207 (2026-08-15)**
 
-- **More stable with-embedding installer** — fixes the misdiagnosed bge-m3 HTTP 500 / llama-server `0xc0000005` crash path and bumps the bundled Windows Ollama to 0.32.13, with an ordered recovery checklist and managed-Ollama logging.
-- **Windows one-line install fixed** — repairs the native PowerShell 5.1 parse failure and Chinese comment / here-string encoding issue, including the shadowed `$args` automatic variable.
+- **Faster pool replenishment** — healthy sources keep backfilling the global pool when other source quotas stall, fixing the all-day underfill.
+- **Keyless web grounding** — new Bing RSS fallback delivers real search results without Exa / You keys.
+- **Direct Exa / You.com APIs** — set `exa_api_key` / `you_api_key` to call them straight from Python, no mcporter needed.
+- **More resilient sources** — V2EX missing-CLI and Weibo `upstream_rejected` degrade gracefully instead of spamming tracebacks.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 

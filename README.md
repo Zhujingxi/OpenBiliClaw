@@ -217,10 +217,12 @@
 
 ## 最近更新
 
-📌 最新版本：**v0.3.206（2026-08-15）**
+📌 最新版本：**v0.3.207（2026-08-15）**
 
-- **with-embedding 安装包更稳了** —— 修复 bge-m3 调用 500 / llama-server `0xc0000005` 崩溃的误诊与随包版本，Windows 随包 Ollama 升级到 0.32.13，崩溃时给出按序排查清单并保留托管 Ollama 日志。
-- **Windows 一键安装修复** —— 修复原生 PowerShell 5.1 下一键安装脚本的解析失败与中文注释 / here-string 编码问题，`$args` 遮蔽自动变量也一并修正。
+- **补货提速** —— B 站份额已满时不再停摆，健康来源会继续回填全局库存，一天跑不满的问题修复。
+- **免费联网找灵感** —— 新增 Bing RSS 无 key 搜索兜底，没配 Exa / You 也能拿到真实搜索结果。
+- **Exa / You.com 直连** —— 填 `exa_api_key` / `you_api_key` 即走 Python 直连 API，不再依赖 mcporter。
+- **来源更稳** —— V2EX / 微博的缺失 CLI 与 `upstream_rejected` 不再刷 traceback，失败时优雅降级。
 
 完整变更详见 [docs/changelog.md](docs/changelog.md)。
 
