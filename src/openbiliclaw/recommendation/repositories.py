@@ -38,6 +38,7 @@ class InventoryRepository(Protocol):
 
 class EvaluationRepository(Protocol):
     async def save_evaluation(self, record: EvaluationRecord) -> bool: ...
+    async def load_evaluation(self, candidate_id: str) -> EvaluationRecord: ...
     async def save_rejection(self, record: RejectionRecord) -> bool: ...
 
 
@@ -48,6 +49,10 @@ class RecommendationRepository(Protocol):
         admission: AdmissionRecord,
         selection: SelectionRecord,
     ) -> Candidate: ...
+    async def load_admission(self, candidate_id: str) -> AdmissionRecord: ...
+    async def load_selection(self, recommendation_id: str) -> SelectionRecord: ...
+    async def load_selections_for_seed(self, seed: int) -> tuple[SelectionRecord, ...]: ...
+    async def load_shown(self, recommendation_id: str) -> ShownRecord: ...
     async def deliver_feed(
         self, *, limit: int, shown_at: datetime
     ) -> tuple[RecommendationFeedItem, ...]: ...
@@ -55,10 +60,12 @@ class RecommendationRepository(Protocol):
 
 class FeedbackRepository(Protocol):
     async def save_feedback(self, record: FeedbackRecord, content_ref: ContentRef) -> bool: ...
+    async def load_feedback(self, recommendation_id: str) -> tuple[FeedbackRecord, ...]: ...
 
 
 class ExpressionRepository(Protocol):
     async def save_expression(self, record: ExpressionRecord) -> None: ...
+    async def load_expression(self, recommendation_id: str) -> ExpressionRecord: ...
 
 
 class SqliteRecommendationRepository:
@@ -130,6 +137,17 @@ class SqliteRecommendationRepository:
             record.evaluated_at.isoformat(),
         )
 
+    async def load_evaluation(self, candidate_id: str) -> EvaluationRecord:
+        async with self.db.transaction() as session:
+            row = await session.fetch_one(
+                "SELECT record_json FROM recommendation_evaluations "
+                "WHERE json_extract(record_json,'$.candidate_id')=?",
+                (candidate_id,),
+            )
+        if row is None:
+            raise KeyError(candidate_id)
+        return EvaluationRecord.model_validate_json(str(row[0]))
+
     async def save_rejection(self, record: RejectionRecord) -> bool:
         return await self._insert(
             "recommendation_rejections",
@@ -173,6 +191,48 @@ class SqliteRecommendationRepository:
                 selection.selected_at.isoformat(),
             )
         return selected
+
+    async def load_admission(self, candidate_id: str) -> AdmissionRecord:
+        async with self.db.transaction() as session:
+            row = await session.fetch_one(
+                "SELECT record_json FROM recommendation_admissions "
+                "WHERE json_extract(record_json,'$.candidate_id')=?",
+                (candidate_id,),
+            )
+        if row is None:
+            raise KeyError(candidate_id)
+        return AdmissionRecord.model_validate_json(str(row[0]))
+
+    async def load_selection(self, recommendation_id: str) -> SelectionRecord:
+        async with self.db.transaction() as session:
+            row = await session.fetch_one(
+                "SELECT record_json FROM recommendation_selections WHERE recommendation_id=?",
+                (recommendation_id,),
+            )
+        if row is None:
+            raise KeyError(recommendation_id)
+        return SelectionRecord.model_validate_json(str(row[0]))
+
+    async def load_selections_for_seed(self, seed: int) -> tuple[SelectionRecord, ...]:
+        async with self.db.transaction() as session:
+            rows = await session.fetch_all(
+                "SELECT record_json FROM recommendation_selections "
+                "WHERE json_extract(record_json,'$.seed')=? "
+                "ORDER BY CAST(json_extract(record_json,'$.rank') AS INTEGER),recommendation_id",
+                (seed,),
+            )
+        return tuple(SelectionRecord.model_validate_json(str(row[0])) for row in rows)
+
+    async def load_shown(self, recommendation_id: str) -> ShownRecord:
+        async with self.db.transaction() as session:
+            row = await session.fetch_one(
+                "SELECT record_json FROM recommendation_shown "
+                "WHERE json_extract(record_json,'$.recommendation_id')=?",
+                (recommendation_id,),
+            )
+        if row is None:
+            raise KeyError(recommendation_id)
+        return ShownRecord.model_validate_json(str(row[0]))
 
     async def save_feedback(self, record: FeedbackRecord, content_ref: ContentRef) -> bool:
         async with self.db.transaction() as session:
@@ -229,6 +289,18 @@ class SqliteRecommendationRepository:
             await self._update_state(session, interacted, CandidateState.SHOWN)
         return inserted
 
+    async def load_feedback(self, recommendation_id: str) -> tuple[FeedbackRecord, ...]:
+        async with self.db.transaction() as session:
+            rows = await session.fetch_all(
+                "SELECT f.record_json FROM recommendation_feedback AS f "
+                "JOIN recommendation_shown AS s "
+                "ON s.shown_id=json_extract(f.record_json,'$.shown_id') "
+                "WHERE json_extract(s.record_json,'$.recommendation_id')=? "
+                "ORDER BY f.created_at,f.feedback_id",
+                (recommendation_id,),
+            )
+        return tuple(FeedbackRecord.model_validate_json(str(row[0])) for row in rows)
+
     async def save_expression(self, record: ExpressionRecord) -> None:
         await self._insert(
             "recommendation_expressions",
@@ -237,6 +309,16 @@ class SqliteRecommendationRepository:
             record.model_dump_json(),
             record.generated_at.isoformat(),
         )
+
+    async def load_expression(self, recommendation_id: str) -> ExpressionRecord:
+        async with self.db.transaction() as session:
+            row = await session.fetch_one(
+                "SELECT record_json FROM recommendation_expressions WHERE recommendation_id=?",
+                (recommendation_id,),
+            )
+        if row is None:
+            raise KeyError(recommendation_id)
+        return ExpressionRecord.model_validate_json(str(row[0]))
 
     async def deliver_feed(
         self, *, limit: int, shown_at: datetime

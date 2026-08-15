@@ -6,6 +6,8 @@
 
 ## Unreleased
 
+- Landed recommendation decision trace and deterministic replay (agentic recommendation plan, Phase A item 2): repository read ports now assemble candidate/evaluation/admission/selection/expression/exposure/feedback provenance for one recommendation, while model-free replay reloads a persisted seed cohort and reruns `SelectionService` with its original seed, limit, and timestamp to detect input drift or tampering without provider or model calls.
+
 - Landed the two-plane policy journal (agentic recommendation plan, Phase A item 1): schema migration V7 adds append-only `policy_briefs`/`policy_hypotheses`/`policy_lessons`/`policy_outcomes` tables (UPDATE/DELETE blocked by trigger; no foreign keys into the user-evidence plane — cross-references are opaque ID strings), plus `recommendation/policy_journal.py` with frozen records, a `PolicyJournal` port, and `SqlitePolicyJournal`. Storage only; composition wiring lands with the first consumer.
 
 - Fixed the e2e config seeder's wrong-key trap: `_seed_config` kept any resolvable vault ref without verifying it wraps the layer's key file, so a stale/cross-config ref (e.g. the DeepSeek key in the Kimi config) silently persisted and model layers 401'd. The seeder now byte-compares inside the vault callback and re-stores on mismatch, with a regression test.

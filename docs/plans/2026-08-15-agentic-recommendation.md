@@ -22,10 +22,12 @@ Progress: `- [ ]` pending · `- [~]` in progress · `- [x]` done (TDD: red → g
   outcomes) strictly separate from user evidence; cross-reference by ID only.
   (understanding/recommendation-target: two-plane rule) — landed: schema V7 +
   `recommendation/policy_journal.py`; composition wiring lands with the first consumer (B2)
-- [ ] 2. **Decision trace + deterministic replay**: record per decision — candidate snapshot ID,
+- [x] 2. **Decision trace + deterministic replay**: record per decision — candidate snapshot ID,
   evidence/profile version IDs, model/prompt/schema versions, typed proposal, compiled
   result, selection/exposure/outcome provenance. Replay validates that the same snapshot
-  produces a valid auditable decision (not counterfactual user reaction).
+  produces a valid auditable decision (not counterfactual user reaction). — landed:
+  `recommendation/trace.py` assembles existing pipeline provenance and replays the full
+  persisted seed cohort model-free; brief/model/prompt/schema fields join it in B2.
 - [ ] 3. **Channel registry + provenance**: provider manifests declare per-`feed_id` bias class
   (`platform-popularity | platform-personalized | subscription-graph | editorial`) and
   auth requirement; candidates carry `(provider, channel)` provenance end to end.
