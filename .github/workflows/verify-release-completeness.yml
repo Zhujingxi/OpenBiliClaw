@@ -24,6 +24,9 @@ on:
 permissions:
   contents: read
 
+env:
+  SAFARI_SIGNING_ENABLED: ${{ vars.SAFARI_SIGNING_ENABLED != 'false' }}
+
 jobs:
   verify:
     runs-on: ubuntu-latest
@@ -47,6 +50,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           VERSION: ${{ steps.ver.outputs.version }}
+          SAFARI_SIGNING_ENABLED: ${{ vars.SAFARI_SIGNING_ENABLED != 'false' }}
         run: |
           set -uo pipefail
           # Component builds arrive out of order after the aggregate tag fires,
@@ -104,6 +108,12 @@ jobs:
           wait_for "desktop release"  "desktop-v${VERSION}"  ""                                                  || missing+=("desktop-v${VERSION} release")
           wait_for "extension chrome" "extension-v${VERSION}" "openbiliclaw-extension-v${VERSION}.zip"           || missing+=("extension-v${VERSION} chrome zip")
           wait_for "extension firefox" "extension-v${VERSION}" "openbiliclaw-extension-v${VERSION}-firefox.zip"  || missing+=("extension-v${VERSION} firefox zip")
+          if [ "$SAFARI_SIGNING_ENABLED" = "true" ]; then
+            wait_for "extension safari" "extension-v${VERSION}" "openbiliclaw-extension-v${VERSION}-safari.dmg"  || missing+=("extension-v${VERSION} safari dmg")
+            wait_for "aggregate safari dmg" "openbiliclaw-v${VERSION}" "openbiliclaw-extension-v${VERSION}-safari.dmg" || missing+=("aggregate openbiliclaw-v${VERSION} missing safari dmg")
+          else
+            echo "SKIP: Safari signing is disabled — no Safari DMG is expected for this release."
+          fi
           # The aggregate release must carry the extension zip (sync-aggregate-release pulls it in).
           wait_for "aggregate ext zip" "openbiliclaw-v${VERSION}" "openbiliclaw-extension-v${VERSION}.zip"       || missing+=("aggregate openbiliclaw-v${VERSION} missing extension zip")
 

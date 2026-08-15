@@ -43,6 +43,38 @@ xcodebuild -project OpenBiliClaw.xcodeproj -scheme "OpenBiliClaw (macOS)" \
   CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
 ```
 
+## Release 发布（extension-v*）
+
+推 `extension-v*` tag 时，`release-extension.yml` 会在 `macos-14` 上额外执行
+`npm run package:safari -- --notarize`，产出 **Developer ID 签名 + notarized + stapled**
+的 `openbiliclaw-extension-vX.Y.Z-safari.dmg`，并与 Chrome/Firefox 资产一起挂到
+`extension-v*` 和 `openbiliclaw-v*` 聚合 Release。
+
+维护者需要先在仓库 Secrets 配置：
+
+| Secret | 说明 |
+|--------|------|
+| `APPLE_DEVELOPER_ID_CERTIFICATE_BASE64` | Developer ID Application 证书 `.p12` 的 base64 |
+| `APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD` | 该 `.p12` 的密码 |
+| `APPLE_TEAM_ID` | Apple Developer Team ID |
+| `APPLE_NOTARY_USER` | 用于公证的 Apple ID |
+| `APPLE_NOTARY_PASSWORD` | 该 Apple ID 的 app-specific password |
+
+Safari 签名默认开启：缺少任一 Secret 时 `extension-v*` 发布会 **fail-closed**。
+如果某次发布明确不打算带 Safari，先在仓库 Variables 设置
+`SAFARI_SIGNING_ENABLED=false`，`verify-release-completeness.yml` 也会同步跳过 Safari DMG
+完整性门禁。
+
+本地打包（无 Developer ID 时产 ad-hoc 未签名包，仅用于自测，不能当正式分发）：
+
+```bash
+cd extension
+npm run package:safari                    # build → convert → xcodebuild(ad-hoc) → dmg
+npm run package:safari:only               # 复用现有 dist-safari/，跳过 build
+npm run package:safari -- --format zip    # 打包成 zip 而不是 dmg
+npm run package:safari -- --no-package    # 只到 xcodebuild，不打包
+```
+
 ## 与 Chrome / Firefox 的差异矩阵
 
 | 能力 | Chrome / Edge | Firefox | Safari |
@@ -90,6 +122,8 @@ xcodebuild -project OpenBiliClaw.xcodeproj -scheme "OpenBiliClaw (macOS)" \
   `safari18`，并通过 `banner` 注入 `browser → chrome` 兼容 shim（在已暴露 `chrome` 的
   环境里是 no-op；Chrome/Firefox 构建不带 banner，产物字节不变）
 - `extension/scripts/convert-safari.mjs`：封装 `safari-web-extension-converter` 的转换步骤
+- `extension/scripts/package-safari.mjs`：build → convert → xcodebuild → 签名/公证 → dmg/zip
+  的一体化打包脚本（CI 与本地共用）
 - `extension/src/content/safari-page-injector.ts`：Safari 专用 page-context 桥接注入器，
   按 hostname 把 `main/*.js` tap bundle 以 `<script src>` 注入页面上下文
 - `extension/src/background/service-worker.ts`：`chrome.notifications` / `chrome.alarms`
@@ -106,4 +140,5 @@ clean/typecheck 目标隔离；`build-assets.test.ts` 新增 `verifyBuildAssets(
 预检，确保 `dist-safari/` 的所有 manifest 脚本与 WAR 资产存在。
 `extension/tests/safari-page-injector.test.ts` 钉死 hostname → 页面脚本映射；
 `extension/tests/cookie-sync.test.ts` 覆盖 Safari 精确域过滤与 unfiltered `getAll({})`
-回退路径。
+回退路径；`extension/tests/package-safari.test.ts` 钉死 Safari 发布资产命名。
+完整签名/公证链只在本机 macOS + 真实 Apple 凭据或 `extension-v*` CI 上验证。
