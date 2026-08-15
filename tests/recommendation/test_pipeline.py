@@ -84,7 +84,13 @@ def candidate(
         source_timestamp=NOW,
         provenance=ProjectionProvenance(ref=ref, native_schema_version=1, projected_at=NOW),
     )
-    provenance = DiscoveryProvenance(strategy_id="search", query_key="science", discovered_at=NOW)
+    provenance = DiscoveryProvenance(
+        strategy_id="search",
+        query_key="science",
+        provider=provider,
+        channel=None,
+        discovered_at=NOW,
+    )
     return Candidate(
         candidate_id=candidate_identity(ref, "search", "science"),
         preview=preview,
@@ -598,7 +604,7 @@ async def test_rejection_admission_constraints_and_transition_trigger(tmp_path: 
     from openbiliclaw.recommendation.evaluation.prefilter import persist_rejections
 
     path = tmp_path / "constraints.db"
-    assert await SchemaMigrator(path).migrate() == 7
+    assert await SchemaMigrator(path).migrate() == 8
     db = SqliteDatabase(path)
     await db.open()
     repo = SqliteRecommendationRepository(db)

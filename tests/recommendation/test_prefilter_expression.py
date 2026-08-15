@@ -32,7 +32,13 @@ def candidate(identity: str, **changes: object) -> Candidate:
         provider_content_id=identity,
         canonical_url=f"https://example.com/{identity}",
     )
-    provenance = DiscoveryProvenance(strategy_id="test", query_key=identity, discovered_at=NOW)
+    provenance = DiscoveryProvenance(
+        strategy_id="test",
+        query_key=identity,
+        provider="bilibili",
+        channel=None,
+        discovered_at=NOW,
+    )
     value = Candidate(
         candidate_id=candidate_identity(ref, "test", identity),
         preview=ContentPreview(

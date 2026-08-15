@@ -34,6 +34,25 @@ class ProviderAvailability(StrEnum):
     UNAVAILABLE = "unavailable"
 
 
+class BiasClass(StrEnum):
+    """Declared source bias for a provider feed channel."""
+
+    PLATFORM_POPULARITY = "platform-popularity"
+    PLATFORM_PERSONALIZED = "platform-personalized"
+    SUBSCRIPTION_GRAPH = "subscription-graph"
+    EDITORIAL = "editorial"
+
+
+class ChannelDescriptor(StrictBaseModel):
+    """One concrete provider feed and the bias it introduces."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    feed_id: str = Field(min_length=1, max_length=512)
+    bias_class: BiasClass
+    auth_required: bool
+
+
 class NativeSchemaDescriptor(StrictBaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -61,6 +80,7 @@ class ProviderManifest(StrictBaseModel):
     capabilities: frozenset[CapabilityKind]
     native_schemas: tuple[NativeSchemaDescriptor, ...]
     actions: tuple[ActionDescriptor, ...] = ()
+    channels: tuple[ChannelDescriptor, ...] = ()
     availability: ProviderAvailability
 
     @model_validator(mode="after")
@@ -75,4 +95,17 @@ class ProviderManifest(StrictBaseModel):
             raise ValueError("duplicate action ID")
         if bool(self.actions) != (CapabilityKind.ACTION in self.capabilities):
             raise ValueError("action descriptors and advertised action capability must agree")
+        feed_ids = tuple(channel.feed_id for channel in self.channels)
+        if len(feed_ids) != len(set(feed_ids)):
+            raise ValueError("duplicate channel feed_id")
+        if bool(self.channels) != (CapabilityKind.FEED in self.capabilities):
+            raise ValueError("channel declarations and advertised feed capability must agree")
         return self
+
+    def channel(self, feed_id: str) -> ChannelDescriptor:
+        """Return one declared feed channel or raise for an unsupported feed ID."""
+
+        for channel in self.channels:
+            if channel.feed_id == feed_id:
+                return channel
+        raise KeyError(feed_id)

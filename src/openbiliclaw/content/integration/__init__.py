@@ -25,7 +25,9 @@ from .errors import ContentIntegrationError, IntegrationErrorCode
 from .identity import ContentKind, ContentRef, ProviderId
 from .manifest import (
     ActionDescriptor,
+    BiasClass,
     CapabilityKind,
+    ChannelDescriptor,
     NativeSchemaDescriptor,
     ProviderAvailability,
     ProviderManifest,
@@ -46,8 +48,10 @@ __all__ = [
     "ActionDescriptor",
     "ActionRequest",
     "ActionResult",
+    "BiasClass",
     "CapabilityKind",
     "CardData",
+    "ChannelDescriptor",
     "ContentFilter",
     "ContentIntegrationError",
     "ContentKind",

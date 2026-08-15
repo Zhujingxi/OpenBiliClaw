@@ -124,6 +124,8 @@ class RecommendationPipeline:
                 provenance=DiscoveryProvenance(
                     strategy_id="scheduled.search",
                     query_key=item.preview.ref.provider_content_id,
+                    provider=item.preview.ref.provider_id.value,
+                    channel=None,
                     discovered_at=now,
                 ),
                 topics=(item.topic,),

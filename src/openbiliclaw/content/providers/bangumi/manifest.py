@@ -2,7 +2,9 @@
 
 from openbiliclaw.content.integration.identity import ContentKind, ProviderId
 from openbiliclaw.content.integration.manifest import (
+    BiasClass,
     CapabilityKind,
+    ChannelDescriptor,
     NativeSchemaDescriptor,
     ProviderAvailability,
     ProviderManifest,
@@ -22,5 +24,12 @@ BANGUMI_MANIFEST = ProviderManifest(
         }
     ),
     native_schemas=(NativeSchemaDescriptor(content_kind=SUBJECT_KIND, schema_version=1),),
+    channels=(
+        ChannelDescriptor(
+            feed_id="rank",
+            bias_class=BiasClass.PLATFORM_POPULARITY,
+            auth_required=False,
+        ),
+    ),
     availability=ProviderAvailability.AVAILABLE,
 )

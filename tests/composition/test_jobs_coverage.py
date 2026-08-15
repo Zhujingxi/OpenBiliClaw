@@ -91,8 +91,15 @@ async def test_model_free_evaluation_and_empty_pipeline_are_executable() -> None
         }
     )
     accepted_item = candidate("accepted")
+    accepted_ref = accepted_item.preview.ref.model_copy(
+        update={"provider_id": ProviderId(value="v2ex")}
+    )
     accepted_preview = accepted_item.preview.model_copy(
-        update={"source_timestamp": datetime(2020, 1, 1, tzinfo=UTC)}
+        update={
+            "ref": accepted_ref,
+            "provenance": accepted_item.preview.provenance.model_copy(update={"ref": accepted_ref}),
+            "source_timestamp": datetime(2020, 1, 1, tzinfo=UTC),
+        }
     )
     dynamic._planner.plan.return_value = (
         SimpleNamespace(
@@ -124,6 +131,11 @@ async def test_model_free_evaluation_and_empty_pipeline_are_executable() -> None
     )
     assert (result.discovered, result.added, result.selected) == (2, 2, 0)
     assert all(candidate.topics == ("profile-topic",) for candidate in inserted)
+    assert all(
+        candidate.provenance.provider == candidate.preview.ref.provider_id.value
+        and candidate.provenance.channel is None
+        for candidate in inserted
+    )
     evaluated_candidates = dynamic._evaluation.evaluate.await_args.args[0]
     assert len(evaluated_candidates) == 1
     assert evaluated_candidates[0].preview.title == accepted_preview.title

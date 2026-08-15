@@ -3,7 +3,9 @@
 from openbiliclaw.content.integration.identity import ContentKind, ProviderId
 from openbiliclaw.content.integration.manifest import (
     ActionDescriptor,
+    BiasClass,
     CapabilityKind,
+    ChannelDescriptor,
     NativeSchemaDescriptor,
     ProviderAvailability,
     ProviderManifest,
@@ -35,5 +37,12 @@ BILIBILI_MANIFEST = ProviderManifest(
         NativeSchemaDescriptor(content_kind=ARTICLE_KIND, schema_version=1),
     ),
     actions=(ActionDescriptor(action_id="save", label="Save", content_kind=VIDEO_KIND),),
+    channels=(
+        ChannelDescriptor(
+            feed_id="popular",
+            bias_class=BiasClass.PLATFORM_POPULARITY,
+            auth_required=False,
+        ),
+    ),
     availability=ProviderAvailability.AVAILABLE,
 )

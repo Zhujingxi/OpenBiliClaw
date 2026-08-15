@@ -44,7 +44,7 @@ assert validate_provider_contract(manifest, provider) == ()
 ## Capability rules
 
 - 实现最小 protocol，不建立 provider god interface。
-- 提供 recommendation/feed capability 时，manifest 必须为每个 `feed_id` 声明 bias class（`platform-popularity | platform-personalized | subscription-graph | editorial`）与 auth requirement；不得 silently 混同 anonymous 与 credentialed feed。
+- 提供 recommendation/feed capability 时，manifest 必须为每个 `feed_id` 声明 bias class（`platform-popularity | platform-personalized | subscription-graph | editorial`）与 auth requirement；不得 silently 混同 anonymous 与 credentialed feed。**已落地并由 `ProviderManifest` 强制校验**：FEED 无 channel、重复 `feed_id` 均在启动注册前失败。
 - `ProviderCursor.value` 完全 opaque；只有创建它的 provider 可以解析。
 - read methods 接收 scoped `AccessHandle`，不得扩大 provider/account/permission scope。
 - `SearchQuery` / `FeedQuery` / `CreatorQuery` / `PageRequest` 的 limit 是硬上限。

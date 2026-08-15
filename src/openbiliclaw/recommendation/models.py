@@ -57,6 +57,8 @@ class DiscoveryProvenance(StrictBaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     strategy_id: str = Field(pattern=r"^[a-z][a-z0-9_.-]{0,127}$")
     query_key: str = Field(min_length=1, max_length=500)
+    provider: str = Field(pattern=r"^[a-z][a-z0-9_.-]{0,127}$")
+    channel: str | None = Field(default=None, min_length=1, max_length=512)
     discovered_at: AwareDatetime
 
 

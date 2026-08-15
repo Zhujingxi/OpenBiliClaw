@@ -333,6 +333,18 @@ _SCHEMA_V7: Final[tuple[str, ...]] = (
         BEGIN SELECT RAISE(ABORT, 'policy journal is append-only'); END""",
 )
 
+_SCHEMA_V8: Final[tuple[str, ...]] = (
+    """UPDATE recommendation_candidates
+       SET candidate_json = json_set(
+           candidate_json,
+           '$.provenance.provider',
+           json_extract(candidate_json, '$.preview.ref.provider_id.value'),
+           '$.provenance.channel',
+           NULL
+       )
+       WHERE json_type(candidate_json, '$.provenance.provider') IS NULL""",
+)
+
 
 DEFAULT_MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(1, _SCHEMA_V1),
@@ -342,6 +354,7 @@ DEFAULT_MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(5, _SCHEMA_V5),
     Migration(6, _SCHEMA_V6),
     Migration(7, _SCHEMA_V7),
+    Migration(8, _SCHEMA_V8),
 )
 
 

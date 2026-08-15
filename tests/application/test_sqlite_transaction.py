@@ -177,7 +177,13 @@ async def test_production_units_of_work_commit_feedback_and_profile_edit(tmp_pat
     candidate = Candidate(
         candidate_id=candidate_identity(REF, "test", "test"),
         preview=preview,
-        provenance=DiscoveryProvenance(strategy_id="test", query_key="test", discovered_at=NOW),
+        provenance=DiscoveryProvenance(
+            strategy_id="test",
+            query_key="test",
+            provider="test",
+            channel=None,
+            discovered_at=NOW,
+        ),
         state=CandidateState.EVALUATED,
         expires_at=NOW.replace(year=2031),
     )

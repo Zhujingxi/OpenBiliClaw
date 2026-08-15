@@ -6,6 +6,8 @@
 
 ## Unreleased
 
+- Landed provider channel registry and candidate provenance (agentic recommendation plan, Phase A item 3): feed-capable manifests must declare unique `feed_id` channels with an explicit bias class and auth requirement; Bilibili `popular`, Bangumi `rank`, and V2EX `hot` are registered as anonymous `platform-popularity` supply. `DiscoveryProvenance` now durably carries the source provider and optional feed channel; search discovery records no channel. Schema V8 backfills provider identity (and a null channel) into existing candidate JSON so upgrades remain readable.
+
 - Landed recommendation decision trace and deterministic replay (agentic recommendation plan, Phase A item 2): repository read ports now assemble candidate/evaluation/admission/selection/expression/exposure/feedback provenance for one recommendation, while model-free replay reloads a persisted seed cohort and reruns `SelectionService` with its original seed, limit, and timestamp to detect input drift or tampering without provider or model calls.
 
 - Landed the two-plane policy journal (agentic recommendation plan, Phase A item 1): schema migration V7 adds append-only `policy_briefs`/`policy_hypotheses`/`policy_lessons`/`policy_outcomes` tables (UPDATE/DELETE blocked by trigger; no foreign keys into the user-evidence plane — cross-references are opaque ID strings), plus `recommendation/policy_journal.py` with frozen records, a `PolicyJournal` port, and `SqlitePolicyJournal`. Storage only; composition wiring lands with the first consumer.

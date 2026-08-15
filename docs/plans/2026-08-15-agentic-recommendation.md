@@ -28,10 +28,11 @@ Progress: `- [ ]` pending · `- [~]` in progress · `- [x]` done (TDD: red → g
   produces a valid auditable decision (not counterfactual user reaction). — landed:
   `recommendation/trace.py` assembles existing pipeline provenance and replays the full
   persisted seed cohort model-free; brief/model/prompt/schema fields join it in B2.
-- [ ] 3. **Channel registry + provenance**: provider manifests declare per-`feed_id` bias class
+- [x] 3. **Channel registry + provenance**: provider manifests declare per-`feed_id` bias class
   (`platform-popularity | platform-personalized | subscription-graph | editorial`) and
   auth requirement; candidates carry `(provider, channel)` provenance end to end.
-  (spec #18; authoring contract rule)
+  (spec #18; authoring contract rule) — landed: manifest validation + current anonymous
+  feed declarations + durable provider/channel candidate provenance
 - [ ] 4. **Auth**: password login for local web/desktop clients; generated token for
   extension/agent (`openbiliclaw ext-token`). (spec #20)
 - [ ] 5. **Image proxy**: `/v1` route serving provider images locally; no CDN hotlink leaks.
