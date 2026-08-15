@@ -269,4 +269,4 @@ async def test_poison_title_skips_one_row_without_aborting_the_sync() -> None:
     result = await service.sync("bilibili")
 
     assert result.inserted == 1
-    assert [event.content_ref.provider_content_id for event in ingress.events] == ["BVfine"]
+    assert [event.content_ref and event.content_ref.provider_content_id for event in ingress.events] == ["BVfine"]
