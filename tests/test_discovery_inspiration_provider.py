@@ -13,6 +13,7 @@ from openbiliclaw.discovery.inspiration import ExaPreviewItem
 from openbiliclaw.discovery.inspiration_provider import (
     BangumiPlatformSearchBackend,
     BilibiliPlatformSearchBackend,
+    BingRssInspirationProvider,
     DouyinPlatformSearchBackend,
     ExaInspirationProvider,
     FallbackInspirationSearchProvider,
@@ -285,6 +286,46 @@ async def test_you_direct_provider_calls_api_and_parses_hits() -> None:
             url="https://example.test/you",
             highlights=("snippet one", "snippet two"),
         )
+    ]
+
+
+async def test_bing_rss_provider_parses_real_shaped_rss() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "www.bing.com"
+        assert request.url.params["format"] == "rss"
+        assert request.url.params["q"] == "test query"
+        return httpx.Response(
+            200,
+            content=(
+                b'<?xml version="1.0" encoding="utf-8"?>'
+                b'<rss version="2.0"><channel><title>Bing: test query</title>'
+                b"<item><title>Result one</title>"
+                b"<link>https://example.test/one</link>"
+                b"<description><b>bold</b> snippet &amp; more</description></item>"
+                b"<item><title></title><link>https://example.test/bad</link>"
+                b"<description>x</description></item>"
+                b"<item><title>Result three</title>"
+                b"<link>https://example.test/three</link>"
+                b"<description>third snippet</description></item>"
+                b"</channel></rss>"
+            ),
+        )
+
+    provider = BingRssInspirationProvider(transport=httpx.MockTransport(handler))
+
+    items = await provider.search("test query", limit=3)
+
+    assert items == [
+        ExaPreviewItem(
+            title="Result one",
+            url="https://example.test/one",
+            highlights=("bold snippet & more",),
+        ),
+        ExaPreviewItem(
+            title="Result three",
+            url="https://example.test/three",
+            highlights=("third snippet",),
+        ),
     ]
 
 

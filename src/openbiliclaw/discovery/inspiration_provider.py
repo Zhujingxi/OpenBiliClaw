@@ -12,6 +12,7 @@ import shutil
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, Protocol, cast
+from xml.etree import ElementTree
 
 import httpx
 
@@ -20,7 +21,13 @@ from openbiliclaw.proc import no_window_kwargs
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_SEARCH_BACKENDS: tuple[str, ...] = ("local_cache", "platform_sources", "exa", "you")
+_DEFAULT_SEARCH_BACKENDS: tuple[str, ...] = (
+    "local_cache",
+    "platform_sources",
+    "bing_rss",
+    "exa",
+    "you",
+)
 
 
 def _ledger_int(value: object) -> int:
@@ -286,6 +293,74 @@ class YouInspirationProvider:
         )
         response.raise_for_status()
         return parse_you_search_payload(response.json())[:count]
+
+
+def _rss_element_text(element: ElementTree.Element | None) -> str:
+    if element is None:
+        return ""
+    return "".join(element.itertext())
+
+
+class BingRssInspirationProvider:
+    """No-key web-search fallback backed by Bing's RSS endpoint."""
+
+    backend_alias = "bing_rss"
+
+    def __init__(
+        self,
+        *,
+        timeout_seconds: float = 8.0,
+        base_url: str = "https://www.bing.com/search",
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        self._timeout_seconds = max(1.0, float(timeout_seconds))
+        self._base_url = str(base_url or "").strip() or "https://www.bing.com/search"
+        self._client = httpx.AsyncClient(
+            timeout=self._timeout_seconds,
+            trust_env=False,
+            transport=transport,
+            headers={
+                "user-agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+                )
+            },
+        )
+
+    def begin_stage(self) -> None:
+        return None
+
+    async def search(self, query: str, *, limit: int) -> list[ExaPreviewItem]:
+        clean_query = str(query or "").strip()
+        count = max(1, min(10, int(limit)))
+        if not clean_query:
+            return []
+        response = await self._client.get(
+            self._base_url,
+            params={"q": clean_query, "format": "rss", "count": count},
+        )
+        response.raise_for_status()
+        try:
+            root = ElementTree.fromstring(response.content)
+        except ElementTree.ParseError as exc:
+            raise RuntimeError("bing_rss returned invalid XML") from exc
+        previews: list[ExaPreviewItem] = []
+        for item in root.findall(".//item"):
+            title = _clean_title(_rss_element_text(item.find("title")))
+            url = str(_rss_element_text(item.find("link")) or "").strip()
+            if not title or not url:
+                continue
+            description = _clean_title(_rss_element_text(item.find("description")))
+            previews.append(
+                ExaPreviewItem(
+                    title=title,
+                    url=url,
+                    highlights=(description,) if description else (),
+                )
+            )
+            if len(previews) >= count:
+                break
+        return previews
 
 
 class FallbackInspirationSearchProvider:
@@ -1258,6 +1333,12 @@ def build_inspiration_search_provider(
                         pages_per_probe=pages_per_probe,
                     )
                 )
+        elif backend == "bing_rss":
+            providers.append(
+                BingRssInspirationProvider(
+                    timeout_seconds=timeout_seconds,
+                )
+            )
         elif backend == "exa":
             if str(exa_api_key or "").strip():
                 providers.append(
@@ -1311,6 +1392,9 @@ def _normalize_search_backends(value: object) -> tuple[str, ...]:
         raw_values = []
 
     aliases = {
+        "bing": "bing_rss",
+        "bing_rss": "bing_rss",
+        "bing-rss": "bing_rss",
         "exa": "exa",
         "local": "local_cache",
         "cache": "local_cache",

@@ -143,6 +143,7 @@ _DEFAULT_INSPIRATION_BREADTH = "high"
 _DEFAULT_INSPIRATION_SEARCH_BACKENDS: tuple[str, ...] = (
     "local_cache",
     "platform_sources",
+    "bing_rss",
     "exa",
     "you",
 )
@@ -3012,6 +3013,9 @@ def _normalize_inspiration_search_backends(value: object) -> tuple[str, ...]:
         list(_DEFAULT_INSPIRATION_SEARCH_BACKENDS) if value is None else _coerce_str_list(value)
     )
     aliases = {
+        "bing": "bing_rss",
+        "bing_rss": "bing_rss",
+        "bing-rss": "bing_rss",
         "exa": "exa",
         "local": "local_cache",
         "cache": "local_cache",
