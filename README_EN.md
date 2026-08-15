@@ -227,12 +227,12 @@ For most users, setup is four steps: install the extension, ask an AI coding age
 
 The extension is the main interface. It shows the sidebar on supported sites, records feedback, and runs bounded read-only tasks for sources including Zhihu, Reddit, Linux.do, V2EX, and Weibo. Linux.do, V2EX, and Weibo task tabs are isolated from passive behavior collection; Weibo public discovery still runs independently in the backend.
 
-Built on Manifest V3, the extension works in any Chrome-compatible browser — **Chrome, Edge, Brave, Arc, Vivaldi, Opera**, and more; a **Safari (macOS)** build is also provided, converted to an Xcode project via Apple's `safari-web-extension-converter` (see the [Safari build guide](docs/safari-extension-build.md)).
+Built on Manifest V3, the extension works in any Chrome-compatible browser — **Chrome, Edge, Brave, Arc, Vivaldi, Opera**, and more; a **Safari (macOS)** build is also provided. Releases ship a Developer ID-signed and notarized `openbiliclaw-extension-v*-safari.dmg`, and you can also convert the local build to an Xcode project via Apple's `safari-web-extension-converter` (see the [Safari build guide](docs/safari-extension-build.md)).
 
 **Recommended · download the latest build from the Latest Release aggregate page** (gets the newest features and fixes — the Chrome Web Store listing usually lags by a few days to a couple of weeks due to review scheduling):
 
 1. Open [OpenBiliClaw Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest), the newest user-facing aggregate `openbiliclaw-v*` release
-2. Chrome / Edge / Brave users download `openbiliclaw-extension-v*.zip`; Firefox users install `openbiliclaw-extension-v*-firefox.xpi` when it is present, otherwise download `openbiliclaw-extension-v*-firefox.zip` and load it temporarily through `about:debugging`
+2. Chrome / Edge / Brave users download `openbiliclaw-extension-v*.zip`; Firefox users install `openbiliclaw-extension-v*-firefox.xpi` when it is present, otherwise download `openbiliclaw-extension-v*-firefox.zip` and load it temporarily through `about:debugging`; Safari (macOS) users download `openbiliclaw-extension-v*-safari.dmg`, launch the app once, then enable OpenBiliClaw in Safari Settings → Extensions
 3. Open the extensions page (Chrome: `chrome://extensions/` · Edge: `edge://extensions/` · Brave: `brave://extensions/`), enable "Developer mode" in the top right
 4. Chrome / Edge / Brave users drag the downloaded `.zip` file into the page to install; Firefox `.xpi` files install directly, while the temporary zip must be unzipped before loading `manifest.json`
 
@@ -240,7 +240,7 @@ Built on Manifest V3, the extension works in any Chrome-compatible browser — *
 
 > 👉 **[Install OpenBiliClaw on the Chrome Web Store](https://chromewebstore.google.com/detail/cdfjfkdjjhdaccbldipkjhpibnfbiamg)** — click "Add to Chrome".
 
-Extension updates depend on the install channel: Chrome Web Store / Edge Add-ons and the Firefox AMO listed build after approval are updated by the browser; GitHub Release Chrome zips / Firefox signed XPIs / Firefox temporary zips, developer-mode loads, and Firefox temporary installs must download the new package and reload it manually. Firefox AMO listed review is asynchronous; until the listed version is publicly approved, use the `*-firefox.zip` temporary package from Releases. After approval, Firefox will update the listed install natively. The backend "auto update" switch only updates the local backend source checkout, not the browser extension.
+Extension updates depend on the install channel: Chrome Web Store / Edge Add-ons and the Firefox AMO listed build after approval are updated by the browser; GitHub Release Chrome zips / Firefox signed XPIs / Firefox temporary zips / Safari DMGs, developer-mode loads, and Firefox temporary installs must download the new package and reload it manually. Firefox AMO listed review is asynchronous; until the listed version is publicly approved, use the `*-firefox.zip` temporary package from Releases. After approval, Firefox will update the listed install natively. The backend "auto update" switch only updates the local backend source checkout, not the browser extension.
 
 <details>
 <summary>Firefox users: regular install and temporary debugging (Firefox 140+)</summary>
