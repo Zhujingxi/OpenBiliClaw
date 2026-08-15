@@ -6,6 +6,8 @@
 
 ## Unreleased
 
+- Added Phase B intent-conditioned statistical allocation as a pure replayable `ThompsonAllocator`: uniform Beta priors make cold-start exploration emerge from the active hypothesis set, family evidence supplies priors for unresolved hypotheses, exploit-slot evidence is a first-class learned arm, and every posterior draw is retained for audit. `enjoy`/`accomplish` remain deterministically exploit-only while `deepen`/`explore` choose an exploration hypothesis and `uncertain` lets learned posteriors compete; persistence and pipeline/slate wiring remain deferred to B4.
+
 - Pinned the Phase B reward contract before statistical learning: feedback maps deterministically to explicit satisfaction/correction or weak meaningful consumption, only the supplying exploration hypothesis receives success/failure credit, and exploit/unattributed signals remain guardrail-only. `RewardLedger` verifies the durable shown record and writes exposure before resolution; voluntary-return, repetition-fatigue derivation, viewport evidence, profile proposals, bandits, and pipeline wiring remain deferred to their planned phases.
 
 - Added the Phase B hypothesis registry on the agent-owned policy journal: open-format exploration arms carry opaque evidence references, pre-registered falsification text, and expiry; append-only outcome events drive active/kill state and expose raw success/attempt counts for later Thompson allocation. No criterion DSL, user-ledger query, brief agent, or bandit was added.

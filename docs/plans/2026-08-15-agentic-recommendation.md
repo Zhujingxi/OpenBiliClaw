@@ -67,9 +67,12 @@ learned magnitudes.
   guidance, ask/abstain, stop condition. Deterministic compiler validates against
   capabilities/budget/privacy and logs the replayable trace. **Shadow mode first**:
   brief is logged, current policy executes.
-- [ ] 3. **Statistical allocation**: Thompson sampling with Beta posteriors over arms
+- [x] 3. **Statistical allocation**: Thompson sampling with Beta posteriors over arms
   (strategy-family prior → per-hypothesis posterior when data exists); reward =
-  viewed-and-engaged per the reward contract; unseen impressions ignored.
+  viewed-and-engaged per the reward contract; unseen impressions ignored. Landed as a
+  pure replayable allocator: intent deterministically conditions eligible strategies,
+  uncertain intent lets exploit and active hypotheses compete, and uniform priors make
+  cold-start exploration emerge without a policy percentage. Pipeline wiring remains B4.
 - [ ] 4. **Constrained-MMR slate**: generalize existing provider(2)/creator(1)/topic(2) quotas
   in `selection/`; exploration slots reserved as hard constraints; explicit high-intent
   search stays exploit-only.
