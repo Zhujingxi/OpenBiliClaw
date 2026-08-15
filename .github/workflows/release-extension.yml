@@ -125,10 +125,11 @@ jobs:
           if-no-files-found: error
 
   safari:
-    name: Build and notarize Safari extension package
+    name: Build Safari extension package
     runs-on: macos-14
     outputs:
-      safari_packaged: ${{ steps.safari-detect.outputs.enabled }}
+      safari_packaged: ${{ steps.safari-detect.outputs.packaged }}
+      safari_signed: ${{ steps.safari-detect.outputs.signed }}
 
     steps:
       - name: Check out repository
@@ -153,7 +154,7 @@ jobs:
             exit 1
           fi
 
-      - name: Detect Safari signing credentials
+      - name: Decide Safari signing mode
         id: safari-detect
         env:
           SAFARI_SIGNING_ENABLED: ${{ vars.SAFARI_SIGNING_ENABLED != 'false' }}
@@ -163,32 +164,33 @@ jobs:
           APPLE_NOTARY_USER: ${{ secrets.APPLE_NOTARY_USER }}
           APPLE_NOTARY_PASSWORD: ${{ secrets.APPLE_NOTARY_PASSWORD }}
         run: |
+          signed=false
           if [ "$SAFARI_SIGNING_ENABLED" != "true" ]; then
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-            echo "Safari signing disabled by SAFARI_SIGNING_ENABLED; no Safari asset will be attached."
-            exit 0
+            echo "Safari signing disabled by SAFARI_SIGNING_ENABLED; building unsigned ad-hoc Safari DMG."
+          else
+            missing=""
+            [ -z "$APPLE_DEVELOPER_ID_CERTIFICATE_BASE64" ] && missing="$missing APPLE_DEVELOPER_ID_CERTIFICATE_BASE64"
+            [ -z "$APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD" ] && missing="$missing APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD"
+            [ -z "$APPLE_TEAM_ID" ] && missing="$missing APPLE_TEAM_ID"
+            [ -z "$APPLE_NOTARY_USER" ] && missing="$missing APPLE_NOTARY_USER"
+            [ -z "$APPLE_NOTARY_PASSWORD" ] && missing="$missing APPLE_NOTARY_PASSWORD"
+            if [ -n "$missing" ]; then
+              echo "::warning::Apple signing credentials missing:$missing — falling back to unsigned ad-hoc Safari DMG."
+            else
+              signed=true
+              echo "Apple signing credentials detected; building signed and notarized Safari DMG."
+            fi
           fi
-          missing=""
-          [ -z "$APPLE_DEVELOPER_ID_CERTIFICATE_BASE64" ] && missing="$missing APPLE_DEVELOPER_ID_CERTIFICATE_BASE64"
-          [ -z "$APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD" ] && missing="$missing APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD"
-          [ -z "$APPLE_TEAM_ID" ] && missing="$missing APPLE_TEAM_ID"
-          [ -z "$APPLE_NOTARY_USER" ] && missing="$missing APPLE_NOTARY_USER"
-          [ -z "$APPLE_NOTARY_PASSWORD" ] && missing="$missing APPLE_NOTARY_PASSWORD"
-          if [ -n "$missing" ]; then
-            echo "::error::Safari signing is enabled but required secrets are missing:$missing"
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-            exit 1
-          fi
-          echo "enabled=true" >> "$GITHUB_OUTPUT"
-          echo "Safari signing credentials detected; a signed and notarized Safari DMG will be required."
+          echo "packaged=true" >> "$GITHUB_OUTPUT"
+          echo "signed=$signed" >> "$GITHUB_OUTPUT"
 
       - name: Install extension dependencies
-        if: steps.safari-detect.outputs.enabled == 'true'
+        if: steps.safari-detect.outputs.packaged == 'true'
         run: npm ci
         working-directory: extension
 
       - name: Import Apple Developer ID certificate
-        if: steps.safari-detect.outputs.enabled == 'true'
+        if: steps.safari-detect.outputs.signed == 'true'
         env:
           APPLE_DEVELOPER_ID_CERTIFICATE_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE_BASE64 }}
           APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD }}
@@ -212,15 +214,20 @@ jobs:
           echo "APPLE_SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
           echo "Using signing identity: $IDENTITY"
 
-      - name: Build, sign, notarize and package Safari extension
-        if: steps.safari-detect.outputs.enabled == 'true'
+      - name: Build and package Safari extension
+        if: steps.safari-detect.outputs.packaged == 'true'
         env:
           RELEASE_TAG: ${{ github.ref_name }}
+          SAFARI_SIGNED: ${{ steps.safari-detect.outputs.signed }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_NOTARY_USER: ${{ secrets.APPLE_NOTARY_USER }}
           APPLE_NOTARY_PASSWORD: ${{ secrets.APPLE_NOTARY_PASSWORD }}
         run: |
-          npm run package:safari -- --notarize
+          if [ "$SAFARI_SIGNED" = "true" ]; then
+            npm run package:safari -- --notarize
+          else
+            npm run package:safari
+          fi
           expected="${RELEASE_TAG#extension-v}"
           safari_dmg="extension/openbiliclaw-extension-v${expected}-safari.dmg"
           if [ ! -f "$safari_dmg" ]; then
@@ -231,7 +238,7 @@ jobs:
         working-directory: extension
 
       - name: Upload Safari extension artifact
-        if: steps.safari-detect.outputs.enabled == 'true'
+        if: steps.safari-detect.outputs.packaged == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: extension-safari-package

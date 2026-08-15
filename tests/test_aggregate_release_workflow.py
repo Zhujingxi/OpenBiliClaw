@@ -226,11 +226,13 @@ def test_aggregate_release_helper_lists_safari_dmg_when_asset_exists() -> None:
     assert "not available yet for this version" in script
 
 
-def test_extension_release_workflow_builds_signed_safari_dmg() -> None:
+def test_extension_release_workflow_builds_safari_dmg_with_or_without_apple_credentials() -> None:
     workflow = read_text(".github/workflows/release-extension.yml")
 
     assert "runs-on: macos-14" in workflow
     assert "npm run package:safari -- --notarize" in workflow
+    assert "npm run package:safari" in workflow
+    assert "unsigned ad-hoc Safari DMG" in workflow
     assert "openbiliclaw-extension-v${expected}-safari.dmg" in workflow
     assert "APPLE_DEVELOPER_ID_CERTIFICATE_BASE64" in workflow
     assert "APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD" in workflow
@@ -241,12 +243,12 @@ def test_extension_release_workflow_builds_signed_safari_dmg() -> None:
     assert "extension-safari-package" in workflow
 
 
-def test_release_completeness_checks_safari_dmg_when_enabled() -> None:
+def test_release_completeness_always_checks_safari_dmg() -> None:
     workflow = read_text(".github/workflows/verify-release-completeness.yml")
 
-    assert "SAFARI_SIGNING_ENABLED" in workflow
     assert "openbiliclaw-extension-v${VERSION}-safari.dmg" in workflow
     assert "aggregate safari dmg" in workflow
+    assert "SKIP: Safari signing is disabled" not in workflow
 
 
 def test_user_docs_explain_aggregate_release_entrypoint() -> None:
