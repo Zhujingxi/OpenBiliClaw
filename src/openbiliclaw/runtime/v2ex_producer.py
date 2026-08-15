@@ -35,7 +35,7 @@ def build_v2ex_external_search_provider(config: object) -> Any | None:
     external = tuple(
         str(value).strip().lower()
         for value in configured
-        if str(value).strip().lower() in {"exa", "you"}
+        if str(value).strip().lower() in {"bing_rss", "exa", "you"}
     )
     if not external:
         return None

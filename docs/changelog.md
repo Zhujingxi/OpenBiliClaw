@@ -9,7 +9,7 @@
 - **修复 B 站份额已满时全局库存跑不满**：`_build_refresh_plan` 在“池子低于目标、但 `_build_source_replenishment_plan()` 为空（B 站已达自身份额，缺额来自 V2EX / 微博 / YouTube 等不可用或节流的来源）”时不再直接返回空计划；只要 discovery candidate 管线里没有 `pending_eval/evaluating` 在途工作，就回落到按 `trending_refresh_minutes` / `explore_refresh_minutes` 巡航的 B 站周期计划，让健康超份额来源继续引入新 topic 补全局库存。份额再平衡仍会在欠份额来源恢复后把超份额行退坑，不破坏 pool-share fairness 的长期收敛。
 - **减少来源侧的无效失败与告警**：`build_inspiration_search_provider` 在 `mcporter` CLI 缺失时直接跳过 Exa / You 后端并给出一次性可操作告警，V2EX 搜索不再先触发 `FileNotFoundError` 再回退官方有界搜索；微博 `hot` 分支遇到 `upstream_rejected` 时按“本分支空结果”处理，不再把整轮微博标记为 error / 触发 60 秒 outcome backoff，让 search / creator 分支继续执行。
 - **Exa / You.com 改为 Python 直连 API（mcporter 降级为可选 fallback）**：`[discovery]` 新增 `exa_api_key` / `you_api_key`；填写后 `ExaInspirationProvider` / `YouInspirationProvider` 直接通过 `httpx` 调用 Exa `POST /search` 与 You.com `GET /search`（`trust_env=False`），不再依赖本机 `mcporter` Node CLI。未填写 API Key 时仍按原逻辑回退 mcporter（若已安装），两者都没有则跳过对应后端。`build_v2ex_external_search_provider`、API runtime 与 CLI 三处组装同步传入 API Key。
-- **新增无 key 的 Bing RSS 免费搜索兜底**：`BingRssInspirationProvider` 调用 `bing.com/search?format=rss`（标准 RSS 解析，`trust_env=False`），默认后端链变为 `local_cache → platform_sources → bing_rss → exa → you`；即使没有 mcporter、也没有 Exa / You API Key，灵感 grounding 仍有真实全网搜索结果。
+- **新增无 key 的 Bing RSS 免费搜索兜底**：`BingRssInspirationProvider` 调用 `bing.com/search?format=rss`（标准 RSS 解析，`trust_env=False`），默认后端链变为 `local_cache → platform_sources → bing_rss → exa → you`；即使没有 mcporter、也没有 Exa / You API Key，灵感 grounding 仍有真实全网搜索结果。V2EX 的 `site:v2ex.com/t` 外部召回链也接受 `bing_rss`，无 Exa/You Key 时先试 Bing RSS 再回退官方 latest/hot 有界搜索。
 
 ## v0.3.206：with-embedding 崩溃修复与可靠性提升（2026-08-15）
 
