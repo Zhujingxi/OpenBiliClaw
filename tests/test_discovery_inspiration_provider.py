@@ -6,6 +6,7 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from openbiliclaw.discovery.inspiration import ExaPreviewItem
@@ -13,6 +14,7 @@ from openbiliclaw.discovery.inspiration_provider import (
     BangumiPlatformSearchBackend,
     BilibiliPlatformSearchBackend,
     DouyinPlatformSearchBackend,
+    ExaInspirationProvider,
     FallbackInspirationSearchProvider,
     LocalInspirationProvider,
     McporterExaInspirationProvider,
@@ -23,6 +25,7 @@ from openbiliclaw.discovery.inspiration_provider import (
     WeiboPlatformSearchBackend,
     XhsPlatformSearchBackend,
     XPlatformSearchBackend,
+    YouInspirationProvider,
     YoutubePlatformSearchBackend,
     ZhihuPlatformSearchBackend,
     build_inspiration_search_provider,
@@ -216,6 +219,73 @@ def test_build_provider_skips_mcporter_backends_when_cli_missing(
     provider = build_inspiration_search_provider(["exa", "you"])
 
     assert provider is None
+
+
+async def test_exa_direct_provider_calls_api_and_parses_results() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["x-api-key"] == "test-exa-key"
+        assert request.url.host == "api.exa.ai"
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "title": "Direct Exa result",
+                        "url": "https://example.test/exa",
+                        "highlights": ["one", "two"],
+                    }
+                ]
+            },
+        )
+
+    provider = ExaInspirationProvider(
+        api_key="test-exa-key",
+        transport=httpx.MockTransport(handler),
+    )
+
+    items = await provider.search("test query", limit=3)
+
+    assert items == [
+        ExaPreviewItem(
+            title="Direct Exa result",
+            url="https://example.test/exa",
+            highlights=("one", "two"),
+        )
+    ]
+
+
+async def test_you_direct_provider_calls_api_and_parses_hits() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["x-api-key"] == "test-you-key"
+        assert request.url.host == "api.ydc-index.io"
+        assert request.url.params["query"] == "test query"
+        return httpx.Response(
+            200,
+            json={
+                "hits": [
+                    {
+                        "title": "Direct You result",
+                        "url": "https://example.test/you",
+                        "snippets": ["snippet one", "snippet two"],
+                    }
+                ]
+            },
+        )
+
+    provider = YouInspirationProvider(
+        api_key="test-you-key",
+        transport=httpx.MockTransport(handler),
+    )
+
+    items = await provider.search("test query", limit=3)
+
+    assert items == [
+        ExaPreviewItem(
+            title="Direct You result",
+            url="https://example.test/you",
+            highlights=("snippet one", "snippet two"),
+        )
+    ]
 
 
 def test_parse_you_search_payload_accepts_structured_results() -> None:

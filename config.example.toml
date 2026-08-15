@@ -579,6 +579,12 @@ inspiration_search_enabled = true
 # You.com 免费 MCP profile 兜底。远端 MCP 需要在本机 mcporter 配置里有
 # `exa` 和 / 或 `you` server。
 inspiration_search_backends = ["local_cache", "platform_sources", "exa", "you"]
+# Exa / You.com 直连 API Key（可选）。填写后走 Python 直连 HTTP API，
+# 不再依赖本机 mcporter CLI；留空时回退到 mcporter（若已安装）。
+# Exa: https://exa.ai  →  x-api-key
+# You.com: https://you.com  →  x-api-key
+exa_api_key = ""
+you_api_key = ""
 # 实验开关：开启且 inspiration provider 可用时，跳过旧 merged keyword planner，
 # 每轮 due 平台只用 inspiration flow 产词。
 inspiration_replace_merged_keywords = false

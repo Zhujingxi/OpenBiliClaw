@@ -442,7 +442,7 @@ def test_external_search_provider_is_independent_of_keyword_generation_mode(
     captured: dict[str, object] = {}
     expected = object()
 
-    def build(backends: object) -> object:
+    def build(backends: object, **kwargs: object) -> object:
         captured["backends"] = backends
         return expected
 

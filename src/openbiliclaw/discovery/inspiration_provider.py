@@ -13,6 +13,8 @@ import time
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, Protocol, cast
 
+import httpx
+
 from openbiliclaw.discovery.inspiration import ExaPreviewItem
 from openbiliclaw.proc import no_window_kwargs
 
@@ -204,6 +206,86 @@ class McporterYouInspirationProvider:
         output = await self._runner(args, self._timeout_seconds)
         _raise_for_mcporter_error(output, backend="You.com")
         return parse_you_search_payload(output)[:count]
+
+
+class ExaInspirationProvider:
+    """Exa provider implemented through Exa's direct HTTP search API."""
+
+    backend_alias = "exa"
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        timeout_seconds: float = 8.0,
+        base_url: str = "https://api.exa.ai/search",
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        self._api_key = str(api_key or "").strip()
+        self._timeout_seconds = max(1.0, float(timeout_seconds))
+        self._base_url = str(base_url or "").strip() or "https://api.exa.ai/search"
+        self._client = httpx.AsyncClient(
+            timeout=self._timeout_seconds,
+            trust_env=False,
+            transport=transport,
+            headers={"x-api-key": self._api_key, "content-type": "application/json"},
+        )
+
+    def begin_stage(self) -> None:
+        return None
+
+    async def search(self, query: str, *, limit: int) -> list[ExaPreviewItem]:
+        clean_query = str(query or "").strip()
+        count = max(1, min(10, int(limit)))
+        if not clean_query or not self._api_key:
+            return []
+        payload = {
+            "query": clean_query,
+            "numResults": count,
+            "contents": {"text": {"maxCharacters": 400}},
+        }
+        response = await self._client.post(self._base_url, json=payload)
+        response.raise_for_status()
+        return parse_exa_search_payload(response.json())[:count]
+
+
+class YouInspirationProvider:
+    """You.com provider implemented through You.com's direct HTTP search API."""
+
+    backend_alias = "you"
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        timeout_seconds: float = 8.0,
+        base_url: str = "https://api.ydc-index.io/search",
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        self._api_key = str(api_key or "").strip()
+        self._timeout_seconds = max(1.0, float(timeout_seconds))
+        self._base_url = str(base_url or "").strip() or "https://api.ydc-index.io/search"
+        self._client = httpx.AsyncClient(
+            timeout=self._timeout_seconds,
+            trust_env=False,
+            transport=transport,
+            headers={"x-api-key": self._api_key},
+        )
+
+    def begin_stage(self) -> None:
+        return None
+
+    async def search(self, query: str, *, limit: int) -> list[ExaPreviewItem]:
+        clean_query = str(query or "").strip()
+        count = max(1, min(10, int(limit)))
+        if not clean_query or not self._api_key:
+            return []
+        response = await self._client.get(
+            self._base_url,
+            params={"query": clean_query, "limit": count},
+        )
+        response.raise_for_status()
+        return parse_you_search_payload(response.json())[:count]
 
 
 class FallbackInspirationSearchProvider:
@@ -1156,6 +1238,8 @@ def build_inspiration_search_provider(
     platforms_per_probe: int = 2,
     riskcontrolled_probe_budget: int = 4,
     pages_per_probe: int = 1,
+    exa_api_key: str = "",
+    you_api_key: str = "",
 ) -> InspirationSearchProvider | None:
     """Build the configured inspiration search provider chain."""
 
@@ -1175,25 +1259,39 @@ def build_inspiration_search_provider(
                     )
                 )
         elif backend == "exa":
-            if runner is None and _mcporter_cli_missing():
+            if str(exa_api_key or "").strip():
+                providers.append(
+                    ExaInspirationProvider(
+                        api_key=exa_api_key,
+                        timeout_seconds=timeout_seconds,
+                    )
+                )
+            elif runner is not None or not _mcporter_cli_missing():
+                providers.append(
+                    McporterExaInspirationProvider(
+                        runner=runner,
+                        timeout_seconds=timeout_seconds,
+                    )
+                )
+            else:
                 _warn_mcporter_missing_once("exa")
-                continue
-            providers.append(
-                McporterExaInspirationProvider(
-                    runner=runner,
-                    timeout_seconds=timeout_seconds,
-                )
-            )
         elif backend == "you":
-            if runner is None and _mcporter_cli_missing():
-                _warn_mcporter_missing_once("you")
-                continue
-            providers.append(
-                McporterYouInspirationProvider(
-                    runner=runner,
-                    timeout_seconds=timeout_seconds,
+            if str(you_api_key or "").strip():
+                providers.append(
+                    YouInspirationProvider(
+                        api_key=you_api_key,
+                        timeout_seconds=timeout_seconds,
+                    )
                 )
-            )
+            elif runner is not None or not _mcporter_cli_missing():
+                providers.append(
+                    McporterYouInspirationProvider(
+                        runner=runner,
+                        timeout_seconds=timeout_seconds,
+                    )
+                )
+            else:
+                _warn_mcporter_missing_once("you")
     if not providers:
         return None
     if len(providers) == 1:
@@ -1410,6 +1508,7 @@ def _collect_you_result_dicts(data: object) -> list[dict[str, object]]:
     results = []
     for key in (
         "results",
+        "hits",
         "web",
         "news",
         "search_results",

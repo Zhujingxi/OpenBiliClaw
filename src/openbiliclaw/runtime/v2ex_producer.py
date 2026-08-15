@@ -41,7 +41,12 @@ def build_v2ex_external_search_provider(config: object) -> Any | None:
         return None
     from openbiliclaw.discovery.inspiration_provider import build_inspiration_search_provider
 
-    return build_inspiration_search_provider(external)
+    discovery = getattr(config, "discovery", None)
+    return build_inspiration_search_provider(
+        external,
+        exa_api_key=str(getattr(discovery, "exa_api_key", "") or ""),
+        you_api_key=str(getattr(discovery, "you_api_key", "") or ""),
+    )
 
 
 @dataclass
