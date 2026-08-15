@@ -151,8 +151,10 @@ def test_agent_install_llm_menu_numbering_matches_current_options() -> None:
     assert "Present **seven top-level options**" in doc
     assert "Present **three top-level options**" not in doc
     assert 'is folded into "Advanced" further down' not in doc
-    assert "**Hardware caveat for option 7 (Ollama)**" in doc
-    assert "#### Options 3-6 (OpenAI 官方 / Gemini / Claude / OpenRouter)" in doc
+    assert "**Hardware caveat for local Ollama**" in doc
+    assert (
+        "#### Options 3-7 (OpenAI 官方 / Gemini / Claude / OpenRouter / OrcaRouter)"
+    ) in doc
     assert "#### Option 2 (OpenAI 官方 / Gemini / Claude / OpenRouter)" not in doc
 
 

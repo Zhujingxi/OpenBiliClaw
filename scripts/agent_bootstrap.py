@@ -3090,7 +3090,7 @@ config_path = Path("/app/runtime/config.toml")
 cookie_path = Path("/app/runtime/data/bilibili_cookie.json")
 data = tomllib.loads(config_path.read_text(encoding="utf-8")) if config_path.exists() else {}
 llm = data.get("llm", {})
-remote = {"openai", "claude", "gemini", "deepseek", "openrouter", "openai_compatible"}
+remote = {"openai", "claude", "gemini", "deepseek", "openrouter", "orcarouter", "openai_compatible"}
 instances = llm.get("instances", {}) if isinstance(llm.get("instances"), dict) else {}
 chain = llm.get("default_chain", []) if isinstance(llm.get("default_chain"), list) else []
 try:

@@ -2129,6 +2129,7 @@ _SUPPORTED_PROVIDERS: tuple[str, ...] = (
     "deepseek",
     "ollama",
     "openrouter",
+    "orcarouter",
 )
 
 
@@ -2607,8 +2608,8 @@ def _interactive_embedding_setup(default_provider: str, *, auto_if_ready: bool =
             .strip()
             .lower()
         )
-        if target not in _SUPPORTED_PROVIDERS:
-            console.print("[red]未知 provider,跳过 embedding 配置。[/red]")
+        if target not in _SUPPORTED_PROVIDERS or target == "orcarouter":
+            console.print("[red]未知或没有 embedding 接口的 provider,跳过 embedding 配置。[/red]")
             return
         defaults = _PROVIDER_DEFAULTS.get(target, {})
         base_url = typer.prompt(

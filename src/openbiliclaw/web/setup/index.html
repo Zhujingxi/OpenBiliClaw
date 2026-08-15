@@ -147,6 +147,7 @@
           <option value="claude">Claude（Anthropic）</option>
           <option value="gemini">Gemini（Google）</option>
           <option value="openrouter">OpenRouter</option>
+          <option value="orcarouter">OrcaRouter</option>
           <option value="openai_compatible">OpenAI 兼容接口（自建 / 第三方）</option>
         </select>
 
@@ -282,6 +283,7 @@
       claude: ["https://console.anthropic.com/settings/keys", "Anthropic Console"],
       gemini: ["https://aistudio.google.com/app/apikey", "Google AI Studio"],
       openrouter: ["https://openrouter.ai/keys", "OpenRouter"],
+      orcarouter: ["https://www.orcarouter.ai/keys", "OrcaRouter"],
       openai_compatible: ["", ""],
     };
     const DEFAULT_MODELS = {
@@ -290,12 +292,14 @@
       claude: "claude-sonnet-4-6",
       gemini: "gemini-2.5-flash",
       openrouter: "openai/gpt-5-nano",
+      orcarouter: "openai/gpt-4o",
       openai_compatible: "",
     };
     const MODEL_DISCOVERY_PROVIDERS = new Set([
       "openai",
       "deepseek",
       "openrouter",
+      "orcarouter",
       "ollama",
       "openai_compatible",
     ]);
