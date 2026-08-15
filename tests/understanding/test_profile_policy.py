@@ -9,6 +9,7 @@ from openbiliclaw.understanding.evidence import EvidenceLink
 from openbiliclaw.understanding.overrides import OverrideOperation, UserOverride
 from openbiliclaw.understanding.policy import DecisionReason, ProposalPolicy
 from openbiliclaw.understanding.profile import (
+    EXPLORATION_DISABLED_CLAIM_ID,
     AvoidanceClaim,
     CanonicalProfile,
     ClaimLifecycle,
@@ -249,6 +250,24 @@ def test_policy_accepts_and_supersedes_same_claim() -> None:
     assert superseded.accepted
     assert superseded.reason is DecisionReason.SUPERSEDED
     assert superseded.superseded_claim_id == interest().claim_id
+
+
+def test_only_explicit_set_override_can_zero_exploration() -> None:
+    disabled = UserOverride.create(
+        claim_id=EXPLORATION_DISABLED_CLAIM_ID,
+        operation=OverrideOperation.SET,
+        value="true",
+        created_at=NOW,
+    ).apply(CanonicalProfile.empty("default", NOW))
+    assert disabled.exploration_disabled()
+
+    enabled = UserOverride.create(
+        claim_id=EXPLORATION_DISABLED_CLAIM_ID,
+        operation=OverrideOperation.REMOVE,
+        value=None,
+        created_at=NOW + timedelta(seconds=1),
+    ).apply(disabled)
+    assert not enabled.exploration_disabled()
 
 
 def test_override_operation_value_invariants() -> None:

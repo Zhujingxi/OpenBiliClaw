@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Annotated, Literal, TypeAlias
 
-from pydantic import AwareDatetime, ConfigDict, Field, TypeAdapter, field_validator
+from pydantic import AwareDatetime, ConfigDict, Field, TypeAdapter, field_validator, model_validator
 
 from openbiliclaw.content.integration.identity import (
     ContentRef,  # noqa: TC001  # Pydantic runtime field.
@@ -29,13 +29,26 @@ class ShownPayload(StrictBaseModel):
     position: int = Field(ge=0, le=10_000)
 
 
-class OpenedPayload(StrictBaseModel):
+class RecommendationFeedbackPayload(StrictBaseModel):
+    """Feedback evidence with server-resolved exploration provenance."""
+
     model_config = ConfigDict(extra="forbid", frozen=True)
+    exploration_arm: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9-]{0,63}$")
+    exploration_hypothesis_id: str | None = Field(default=None, pattern=r"^hyp_[0-9a-f]{32}$")
+    exposed: bool = False
+
+    @model_validator(mode="after")
+    def complete_exploration_attribution(self) -> RecommendationFeedbackPayload:
+        if (self.exploration_arm is None) != (self.exploration_hypothesis_id is None):
+            raise ValueError("exploration arm and hypothesis must be supplied together")
+        return self
+
+
+class OpenedPayload(RecommendationFeedbackPayload):
     dwell_ms: int | None = Field(default=None, ge=0, le=86_400_000)
 
 
-class ReasonPayload(StrictBaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+class ReasonPayload(RecommendationFeedbackPayload):
     reason: str | None = Field(default=None, min_length=1, max_length=500)
 
     @field_validator("reason")
@@ -123,7 +136,7 @@ class RecommendationOpenedObservation(ObservationBase):
 
 class RecommendationLikedObservation(ObservationBase):
     event_type: Literal["recommendation_liked"] = "recommendation_liked"
-    payload: EmptyPayload
+    payload: RecommendationFeedbackPayload
 
 
 class RecommendationDislikedObservation(ObservationBase):
@@ -133,7 +146,7 @@ class RecommendationDislikedObservation(ObservationBase):
 
 class RecommendationSavedObservation(ObservationBase):
     event_type: Literal["recommendation_saved"] = "recommendation_saved"
-    payload: EmptyPayload
+    payload: RecommendationFeedbackPayload
 
 
 class RecommendationDismissedObservation(ObservationBase):

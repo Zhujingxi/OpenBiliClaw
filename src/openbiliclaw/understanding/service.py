@@ -112,6 +112,29 @@ class UnderstandingService:
         await self._repository.commit_override(updated, entry)
         return updated
 
+    async def consider(
+        self,
+        profile_id: str,
+        proposal: ClaimProposal,
+        evidence: EvidenceLink,
+    ) -> LedgerEntry:
+        """Persist one externally assembled proposal through the canonical policy gate."""
+
+        now = self._clock()
+        profile = await self._repository.load_profile(profile_id, now=now)
+        updated, entries, _accepted, _rejected = self._apply(profile, (proposal,), now)
+        await self._repository.commit_analysis(
+            profile=updated,
+            proposals=(proposal,),
+            decisions=entries,
+            evidence=(evidence,),
+            analyzer_id=proposal.analyzer_id,
+            # consider() is externally driven; store a neutral cursor so a future
+            # analyzer registered under this id never int()-parses an obs_ id.
+            checkpoint="0",
+        )
+        return entries[0]
+
     async def process(self, profile_id: str, *, batch_size: int = 50) -> ProcessResult:
         if not 1 <= batch_size <= 50:
             raise ValueError("batch size must be between 1 and 50")
@@ -154,7 +177,11 @@ class UnderstandingService:
             decision = self._policy.decide(
                 profile.model_copy(update={"claims": tuple(claims)}), proposal, now=now
             )
-            status = LedgerStatus.REJECTED
+            status = (
+                LedgerStatus.PENDING
+                if decision.reason is DecisionReason.LOW_CONFIDENCE
+                else LedgerStatus.REJECTED
+            )
             if decision.accepted:
                 claims = [item for item in claims if item.claim_id != proposal.claim.claim_id]
                 claims.append(proposal.claim)

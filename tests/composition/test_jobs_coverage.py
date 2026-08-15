@@ -49,7 +49,13 @@ from openbiliclaw.recommendation.models import record_identity
 from openbiliclaw.recommendation.policy_journal import SqlitePolicyJournal
 from openbiliclaw.recommendation.repositories import SqliteRecommendationRepository
 from openbiliclaw.recommendation.service import RecommendationService
-from openbiliclaw.understanding.profile import AvoidanceClaim, CanonicalProfile, claim_id
+from openbiliclaw.understanding.overrides import OverrideOperation, UserOverride
+from openbiliclaw.understanding.profile import (
+    EXPLORATION_DISABLED_CLAIM_ID,
+    AvoidanceClaim,
+    CanonicalProfile,
+    claim_id,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -134,6 +140,33 @@ async def test_model_free_evaluation_and_empty_pipeline_are_executable() -> None
     dynamic._briefs.compile_shadow.assert_awaited_once()
     dynamic._allocate.assert_awaited_once()
 
+    disabled = UserOverride.create(
+        claim_id=EXPLORATION_DISABLED_CLAIM_ID,
+        operation=OverrideOperation.SET,
+        value="true",
+        created_at=NOW,
+    ).apply(CanonicalProfile.empty("default", NOW))
+    enabled = UserOverride.create(
+        claim_id=EXPLORATION_DISABLED_CLAIM_ID,
+        operation=OverrideOperation.REMOVE,
+        value=None,
+        created_at=NOW + timedelta(seconds=1),
+    ).apply(disabled)
+    dynamic._exploit_only = AsyncMock(return_value=dynamic._allocate.return_value)
+    dynamic._understanding.profile.return_value = disabled
+    dynamic._allocate.reset_mock()
+    await pipeline.replenish()
+    dynamic._exploit_only.assert_awaited_once()
+    dynamic._allocate.assert_not_awaited()
+
+    dynamic._understanding.profile.return_value = enabled
+    await pipeline.replenish()
+    dynamic._allocate.assert_awaited_once()
+
+    dynamic._understanding.profile.return_value = CanonicalProfile(
+        profile_id="default", revision=1, updated_at=NOW, claims=(avoidance,)
+    )
+    dynamic._selection.persist_selection.reset_mock()
     item = candidate("full")
     blocked = item.preview.model_copy(
         update={
@@ -192,7 +225,7 @@ async def test_model_free_evaluation_and_empty_pipeline_are_executable() -> None
     assert evaluated_candidates[0].preview.title == accepted_preview.title
     assert selection_arguments["negative_preferences"] == ("blocked",)
     await pipeline.expire()
-    assert dynamic._selection.persist_selection.await_count == 2
+    assert dynamic._selection.persist_selection.await_count == 1
     assert dynamic._repositories.recommendations.expire_due.await_count == 1
 
     dynamic._repositories.recommendations.add_candidate.return_value = False
@@ -207,7 +240,7 @@ async def test_model_free_evaluation_and_empty_pipeline_are_executable() -> None
 
 
 @pytest.mark.asyncio
-async def test_replenish_journals_seeded_allocation_and_delivers_attributed_feed_supply(
+async def test_fresh_install_seeded_allocation_explores_and_delivers_attributed_feed_supply(
     tmp_path: Path,
 ) -> None:
     clock = NOW + timedelta(microseconds=1)  # seed deterministically chooses source-novel

@@ -14,8 +14,9 @@ openbiliclaw sources status PROVIDER [--account-id ID]
 openbiliclaw sources add PROVIDER METHOD --permission PERMISSION --idempotency-key KEY [--account-id ID] [--field KEY=VALUE]…
 openbiliclaw sources remove PROVIDER --idempotency-key KEY [--account-id ID]
 openbiliclaw feed [--limit N]
-openbiliclaw feedback SHOWN_ID <like|dismiss|save|open> --idempotency-key KEY
+openbiliclaw feedback SHOWN_ID <like|dismiss|save|open> --idempotency-key KEY [--exposed]
 openbiliclaw profile show [--profile-id ID]
+openbiliclaw profile exploration <disable|enable> --idempotency-key KEY [--profile-id ID] [--account-id ID]
 openbiliclaw assistant MESSAGE [--conversation-id ID] [--device-id ID] [--locale LOCALE]
 openbiliclaw search PROVIDER QUERY [--limit N]
 ```

@@ -47,12 +47,16 @@ class Facade:
         return Result(value="feed")
 
     async def record_feedback_for_shown(
-        self, shown_id: str, kind: str, idempotency_key: str
+        self, shown_id: str, kind: str, idempotency_key: str, exposed: bool = False
     ) -> Result:
-        self.calls.append(("record_feedback_for_shown", (shown_id, kind, idempotency_key)))
+        self.calls.append(("record_feedback_for_shown", (shown_id, kind, idempotency_key, exposed)))
         if shown_id == "bad":
             raise ApplicationError(ApplicationErrorCode.NOT_FOUND, "shown record not found")
         return Result(value="feedback")
+
+    async def edit_profile(self, command: object) -> Result:
+        self.calls.append(("edit_profile", (command,)))
+        return Result(value="profile-edited")
 
     async def show_profile(self, profile_id: str) -> Result:
         self.calls.append(("show_profile", (profile_id,)))
@@ -172,8 +176,23 @@ def test_mutation_commands_emit_json_and_call_one_workflow(
     ) == {"value": "feedback"}
     assert facade.calls[-1] == (
         "record_feedback_for_shown",
-        ("shown_1", "liked", "feedback-123"),
+        ("shown_1", "liked", "feedback-123", False),
     )
+
+    assert invoke(
+        monkeypatch,
+        capsys,
+        facade,
+        tmp_path,
+        "profile",
+        "exploration",
+        "disable",
+        "--idempotency-key",
+        "profile-explore-123",
+    ) == {"value": "profile-edited"}
+    assert facade.calls[-1][0] == "edit_profile"
+    command = cast("Any", facade.calls[-1][1][0])
+    assert command.value == "true"
 
 
 def test_sources_add_and_list_use_real_composition(

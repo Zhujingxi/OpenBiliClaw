@@ -22,6 +22,9 @@ def claim_id(kind: str, value: str) -> str:
     return f"claim_{digest}"
 
 
+EXPLORATION_DISABLED_CLAIM_ID = claim_id("user_statement", "exploration.disabled")
+
+
 class ClaimLifecycle(StrEnum):
     EMERGING = "emerging"
     ACTIVE = "active"
@@ -133,6 +136,16 @@ class CanonicalProfile(StrictBaseModel):
     @classmethod
     def empty(cls, profile_id: str, now: AwareDatetime) -> CanonicalProfile:
         return cls(profile_id=profile_id, revision=0, updated_at=now)
+
+    def exploration_disabled(self) -> bool:
+        """Return whether the latest explicit statement disables exploration."""
+
+        return any(
+            item.claim_id == EXPLORATION_DISABLED_CLAIM_ID
+            and item.operation.value == "set"
+            and item.value == "true"
+            for item in self.overrides
+        )
 
     def lifecycle_for(self, identity: str) -> ClaimLifecycle:
         if any(item.claim_id == identity for item in self.claims):

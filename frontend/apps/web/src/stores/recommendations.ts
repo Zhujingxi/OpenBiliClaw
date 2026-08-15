@@ -18,6 +18,7 @@ export const useRecommendationsStore = defineStore("recommendations", () => {
   const feedbackError = ref<Record<string, string>>({});
   const owner = new RequestOwner();
   const feedbackControllers = new Map<string, AbortController>();
+  const exposed = new Set<string>();
 
   async function load(api: WebApi): Promise<void> {
     const signal = owner.next();
@@ -29,6 +30,7 @@ export const useRecommendationsStore = defineStore("recommendations", () => {
       page.value = nextPage;
       feedbackState.value = {};
       feedbackError.value = {};
+      exposed.clear();
       cards.value = nextPage.items.map((item) => ({
         shownId: item.shown_id,
         version: 1,
@@ -47,6 +49,10 @@ export const useRecommendationsStore = defineStore("recommendations", () => {
 
   async function like(api: WebApi, card: CardView): Promise<void> {
     await submitFeedback(api, card, "liked");
+  }
+
+  function markExposed(card: CardView): void {
+    if (card.shownId !== undefined) exposed.add(card.shownId);
   }
 
   async function dismiss(api: WebApi, card: CardView): Promise<void> {
@@ -71,6 +77,7 @@ export const useRecommendationsStore = defineStore("recommendations", () => {
           shown_id: shownId,
           content_ref: card.data.ref,
           kind,
+          exposed: kind === "dismissed" && exposed.has(shownId),
         },
         controller.signal,
       );
@@ -100,6 +107,7 @@ export const useRecommendationsStore = defineStore("recommendations", () => {
     load,
     like,
     dismiss,
+    markExposed,
     cancel: () => {
       owner.cancel();
       for (const controller of feedbackControllers.values()) controller.abort();

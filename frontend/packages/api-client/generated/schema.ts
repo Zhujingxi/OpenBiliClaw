@@ -1072,6 +1072,11 @@ export interface components {
             content_ref: components["schemas"]["ContentRef"];
             /** Dwell Ms */
             dwell_ms?: number | null;
+            /**
+             * Exposed
+             * @default false
+             */
+            exposed: boolean;
             /** Idempotency Key */
             idempotency_key: string;
             /**
@@ -1323,6 +1328,15 @@ export interface components {
         OpenedPayload: {
             /** Dwell Ms */
             dwell_ms?: number | null;
+            /** Exploration Arm */
+            exploration_arm?: string | null;
+            /** Exploration Hypothesis Id */
+            exploration_hypothesis_id?: string | null;
+            /**
+             * Exposed
+             * @default false
+             */
+            exposed: boolean;
         };
         /**
          * OverrideOperation
@@ -1464,7 +1478,9 @@ export interface components {
             /** Account Id */
             account_id: string;
             /** Claim Id */
-            claim_id: string;
+            claim_id?: string | null;
+            /** Field */
+            field?: "exploration.disabled" | null;
             /** Idempotency Key */
             idempotency_key: string;
             /**
@@ -1557,6 +1573,15 @@ export interface components {
         };
         /** ReasonPayload */
         ReasonPayload: {
+            /** Exploration Arm */
+            exploration_arm?: string | null;
+            /** Exploration Hypothesis Id */
+            exploration_hypothesis_id?: string | null;
+            /**
+             * Exposed
+             * @default false
+             */
+            exposed: boolean;
             /** Reason */
             reason?: string | null;
         };
@@ -1639,6 +1664,21 @@ export interface components {
             /** Shown Id */
             shown_id: string;
         };
+        /**
+         * RecommendationFeedbackPayload
+         * @description Feedback evidence with server-resolved exploration provenance.
+         */
+        RecommendationFeedbackPayload: {
+            /** Exploration Arm */
+            exploration_arm?: string | null;
+            /** Exploration Hypothesis Id */
+            exploration_hypothesis_id?: string | null;
+            /**
+             * Exposed
+             * @default false
+             */
+            exposed: boolean;
+        };
         /** RecommendationLikedObservation */
         RecommendationLikedObservation: {
             /** Account Id */
@@ -1658,7 +1698,7 @@ export interface components {
              * Format: date-time
              */
             occurred_at: string;
-            payload: components["schemas"]["EmptyPayload"];
+            payload: components["schemas"]["RecommendationFeedbackPayload"];
             provenance: components["schemas"]["ObservationProvenance"];
             /**
              * Received At
@@ -1729,7 +1769,7 @@ export interface components {
              * Format: date-time
              */
             occurred_at: string;
-            payload: components["schemas"]["EmptyPayload"];
+            payload: components["schemas"]["RecommendationFeedbackPayload"];
             provenance: components["schemas"]["ObservationProvenance"];
             /**
              * Received At

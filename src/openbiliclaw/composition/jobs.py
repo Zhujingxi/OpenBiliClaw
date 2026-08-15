@@ -160,12 +160,38 @@ class RecommendationPipeline:
             intent="uncertain",
             hypotheses=tuple(counts),
         )
+        await self._journal_decision(seed, now, decision)
+        return decision
+
+    async def _exploit_only(self, seed: int, now: datetime) -> AllocationDecision:
+        """Honor the explicit user statement without training policy from disengagement."""
+
+        await self._ensure_hypothesis("exploit", now)
+        decision = AllocationDecision(
+            intent="uncertain",
+            explore=False,
+            arm=None,
+            hypothesis_id=None,
+            samples=(),
+        )
+        await self._journal_decision(seed, now, decision, explicit_zero=True)
+        return decision
+
+    async def _journal_decision(
+        self,
+        seed: int,
+        now: datetime,
+        decision: AllocationDecision,
+        *,
+        explicit_zero: bool = False,
+    ) -> None:
         payload = {
             "kind": "allocation",
             "intent": decision.intent,
             "explore": decision.explore,
             "arm": decision.arm,
             "hypothesis_id": decision.hypothesis_id,
+            "explicit_exploration_zero": explicit_zero,
             "samples": [
                 {
                     "arm": sample.arm,
@@ -186,7 +212,6 @@ class RecommendationPipeline:
                 created_at=now,
             )
         )
-        return decision
 
     async def _feed_supply(
         self,
@@ -250,7 +275,11 @@ class RecommendationPipeline:
         )
         discovered = await self._discovery.discover(connected, limit=limit)
         await self._compile_shadow_brief(f"replenishment:{seed}")
-        decision = await self._allocate(seed, now)
+        decision = (
+            await self._exploit_only(seed, now)
+            if profile.exploration_disabled()
+            else await self._allocate(seed, now)
+        )
         attribution = (
             ExplorationAttribution(
                 hypothesis_id=decision.hypothesis_id,

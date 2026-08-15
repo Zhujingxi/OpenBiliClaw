@@ -180,6 +180,7 @@ describe("ApiClient", () => {
           canonical_url: "https://example.test/one",
         },
         kind: "liked",
+        exposed: false,
       },
       validate: (value): value is components["schemas"]["FeedbackResponse"] =>
         isRecord(value) && "result" in value,
@@ -196,6 +197,7 @@ describe("ApiClient", () => {
           canonical_url: "https://example.test/one",
         },
         kind: "liked",
+        exposed: false,
       }),
       headers: {
         "content-type": "application/json",

@@ -18,7 +18,12 @@ from openbiliclaw.observations.repository import SqliteObservationRepository
 from openbiliclaw.understanding.evidence import EvidenceLink
 from openbiliclaw.understanding.ledger import LedgerStatus
 from openbiliclaw.understanding.overrides import OverrideOperation
-from openbiliclaw.understanding.profile import CanonicalProfile, StableInterestClaim, claim_id
+from openbiliclaw.understanding.profile import (
+    CanonicalProfile,
+    EmergingInterestClaim,
+    StableInterestClaim,
+    claim_id,
+)
 from openbiliclaw.understanding.proposals import ClaimProposal, ProposalBatch, ProposalOwner
 from openbiliclaw.understanding.repository import SqliteUnderstandingRepository
 from openbiliclaw.understanding.service import AnalyzerContract, AnalyzerInput, UnderstandingService
@@ -137,6 +142,48 @@ async def test_replay_and_restart_are_idempotent(tmp_path: Path) -> None:
     assert await restarted.load_profile("default", now=NOW) == profile
     assert await restarted.ledger("default") == ledger
     await database2.close()
+
+
+async def test_exploration_like_proposal_stays_pending_until_corroborated(
+    tmp_path: Path,
+) -> None:
+    database, observations, repository = await setup(tmp_path / "explore-like.db")
+    event = observation(7)
+    await observations.insert_batch((event,))
+    evidence = EvidenceLink(
+        evidence_id="ev_" + event.observation_id.removeprefix("obs_"),
+        observation_id=event.observation_id,
+        summary="Exploration liked: adjacent science; arm=source-novel",
+        occurred_at=NOW,
+        trust=0.2,
+    )
+    claim = EmergingInterestClaim(
+        claim_id=claim_id("emerging_interest", "adjacent science"),
+        value="adjacent science",
+        confidence=0.2,
+        fresh_at=NOW,
+        evidence_ids=(evidence.evidence_id,),
+    )
+    service = UnderstandingService(observations, repository, analyzers=(), clock=lambda: NOW)
+
+    decision = await service.consider(
+        "default",
+        ClaimProposal(
+            proposal_id="prop_" + "7" * 32,
+            analyzer_id="understanding.exploration.v1",
+            owner=ProposalOwner.TOPIC_LIFECYCLE,
+            claim=claim,
+            evidence=(evidence,),
+            proposed_at=NOW,
+        ),
+        evidence,
+    )
+
+    assert decision.status is LedgerStatus.PENDING
+    assert decision.reason == "low_confidence"
+    assert await repository.proposal_exists("prop_" + "7" * 32)
+    assert (await service.profile("default")).claims == ()
+    await database.close()
 
 
 async def test_models_optional_profile_reads_and_empty_processing(tmp_path: Path) -> None:

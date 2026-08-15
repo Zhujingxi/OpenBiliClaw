@@ -46,6 +46,7 @@ from openbiliclaw.composition.assistant import AssistantController, assistant_wo
 from openbiliclaw.composition.events import ObservationEventSource
 from openbiliclaw.composition.facade import CompositionFacade
 from openbiliclaw.composition.jobs import (
+    DEFAULT_PROFILE_ID,
     RecommendationPipeline,
     build_recommendation_jobs,
     build_understanding_job,
@@ -74,7 +75,7 @@ from openbiliclaw.observations.validation import ObservationValidator
 from openbiliclaw.recommendation.brief import BriefCompiler, BriefService
 from openbiliclaw.recommendation.brief_agent import BRIEF_AGENT
 from openbiliclaw.recommendation.hypotheses import HypothesisRegistry
-from openbiliclaw.recommendation.models import FeedbackKind
+from openbiliclaw.recommendation.models import FeedbackKind, record_identity
 from openbiliclaw.recommendation.policy_journal import SqlitePolicyJournal
 from openbiliclaw.recommendation.rewards import RewardLedger
 from openbiliclaw.recommendation.service import RecommendationService
@@ -83,6 +84,9 @@ from openbiliclaw.understanding.analyzers.preference import (
     PreferenceDraftBatch,
     adapt_preference_drafts,
 )
+from openbiliclaw.understanding.evidence import EvidenceLink
+from openbiliclaw.understanding.profile import EmergingInterestClaim, claim_id
+from openbiliclaw.understanding.proposals import ClaimProposal, ProposalOwner
 from openbiliclaw.understanding.service import AnalyzerContract, AnalyzerInput, UnderstandingService
 
 if TYPE_CHECKING:
@@ -91,6 +95,7 @@ if TYPE_CHECKING:
     from openbiliclaw.access.methods import AccessMethod
     from openbiliclaw.core.jobs import JobDecision, JobSpec
     from openbiliclaw.observations.events import ObservationsCommitted
+    from openbiliclaw.observations.models import Observation
     from openbiliclaw.recommendation.models import FeedbackRecord
     from openbiliclaw.understanding.proposals import ProposalBatch
 
@@ -445,8 +450,48 @@ def build_application(
         )
     )
 
-    async def record_reward(feedback: FeedbackRecord) -> None:
+    async def record_reward(feedback: FeedbackRecord, observation: Observation) -> None:
         shown, candidate = await repositories.recommendations.reward_context(feedback.shown_id)
+        # Understanding evidence first: a killed-hypothesis ValueError from the
+        # ledger below must not skip the exploration interest proposal.
+        if candidate.provenance.exploration is not None and feedback.kind in (
+            FeedbackKind.LIKED,
+            FeedbackKind.SAVED,
+        ):
+            evidence_id = "ev_" + observation.observation_id.removeprefix("obs_")
+            topic = next(
+                (item for item in candidate.topics if item.strip()), candidate.preview.title
+            )[:200]
+            evidence = EvidenceLink(
+                evidence_id=evidence_id,
+                observation_id=observation.observation_id,
+                summary=(
+                    f"Exploration {feedback.kind.value}: {topic}; "
+                    f"arm={candidate.provenance.exploration.arm}; "
+                    f"hypothesis={candidate.provenance.exploration.hypothesis_id}"
+                )[:500],
+                occurred_at=observation.occurred_at,
+                trust=0.2,
+            )
+            await understanding.consider(
+                DEFAULT_PROFILE_ID,
+                ClaimProposal(
+                    proposal_id=record_identity("prop", feedback.feedback_id),
+                    analyzer_id="understanding.exploration.v1",
+                    owner=ProposalOwner.TOPIC_LIFECYCLE,
+                    claim=EmergingInterestClaim(
+                        claim_id=claim_id("emerging_interest", topic),
+                        value=topic,
+                        confidence=0.2,
+                        fresh_at=observation.occurred_at,
+                        evidence_ids=(evidence_id,),
+                    ),
+                    evidence=(evidence,),
+                    proposed_at=observation.occurred_at,
+                ),
+                evidence,
+            )
+
         exploit_id = None
         if candidate.provenance.exploration is None and feedback.kind in (
             FeedbackKind.OPENED,
@@ -471,6 +516,7 @@ def build_application(
     feedback = RecordFeedback(
         FeedbackUnitOfWork(repositories.recommendations, repositories.observations),
         clock=lambda: datetime.now(UTC),
+        targets=repositories.recommendations,
         reward_sink=record_reward,
     )
     facade = CompositionFacade(

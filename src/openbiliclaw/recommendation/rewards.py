@@ -9,10 +9,11 @@ dislike/dismiss resolves it as failure. Open records an attempt but no Beta reso
 ``RewardLedger.record`` requires the durable ``ShownRecord`` matching the feedback. The
 current delivery pipeline treats newly accepted feedback on that record as proof of
 exposure; callers invoke it only after the idempotent feedback insert succeeds.
-Viewport-level exposure evidence replaces that assumption in Phase B5. When composition
-supplies the standing exploit hypothesis, unattributed open/like/save update its funnel
+Dismissal resolution requires viewport exposure; other accepted feedback still proves
+an attempt. When composition supplies the standing exploit hypothesis, unattributed
+open/like/save update its funnel
 (and like/save posterior); correction never alters exploit or profile state.
-Like-on-explore understanding proposals are also Phase B5 scope.
+Like/save on exploration supply may additionally enter Understanding through composition.
 """
 
 from __future__ import annotations
@@ -138,6 +139,8 @@ class RewardLedger:
             f"shown {shown.shown_id}: exposure inferred from accepted feedback",
         )
         resolution = signal.resolution
+        if feedback.kind is FeedbackKind.DISMISSED and not feedback.exposed:
+            resolution = None
         if attribution is None and (
             feedback.kind is FeedbackKind.LIKED or feedback.kind is FeedbackKind.SAVED
         ):
@@ -148,4 +151,6 @@ class RewardLedger:
                 resolution,
                 f"shown {shown.shown_id}: {feedback.kind.value}",
             )
+        if resolution != signal.resolution:
+            signal = signal.model_copy(update={"resolution": resolution})
         return signal

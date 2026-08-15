@@ -1760,6 +1760,11 @@
             ],
             "title": "Dwell Ms"
           },
+          "exposed": {
+            "default": false,
+            "title": "Exposed",
+            "type": "boolean"
+          },
           "idempotency_key": {
             "maxLength": 200,
             "minLength": 8,
@@ -2538,6 +2543,35 @@
               }
             ],
             "title": "Dwell Ms"
+          },
+          "exploration_arm": {
+            "anyOf": [
+              {
+                "pattern": "^[a-z][a-z0-9-]{0,63}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exploration Arm"
+          },
+          "exploration_hypothesis_id": {
+            "anyOf": [
+              {
+                "pattern": "^hyp_[0-9a-f]{32}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exploration Hypothesis Id"
+          },
+          "exposed": {
+            "default": false,
+            "title": "Exposed",
+            "type": "boolean"
           }
         },
         "title": "OpenedPayload",
@@ -2892,9 +2926,28 @@
             "type": "string"
           },
           "claim_id": {
-            "pattern": "^claim_[0-9a-f]{32}$",
-            "title": "Claim Id",
-            "type": "string"
+            "anyOf": [
+              {
+                "pattern": "^claim_[0-9a-f]{32}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Claim Id"
+          },
+          "field": {
+            "anyOf": [
+              {
+                "const": "exploration.disabled",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Field"
           },
           "idempotency_key": {
             "maxLength": 200,
@@ -2933,7 +2986,6 @@
           "idempotency_key",
           "profile_id",
           "account_id",
-          "claim_id",
           "operation"
         ],
         "title": "ProfileEditRequest",
@@ -3134,6 +3186,35 @@
       "ReasonPayload": {
         "additionalProperties": false,
         "properties": {
+          "exploration_arm": {
+            "anyOf": [
+              {
+                "pattern": "^[a-z][a-z0-9-]{0,63}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exploration Arm"
+          },
+          "exploration_hypothesis_id": {
+            "anyOf": [
+              {
+                "pattern": "^hyp_[0-9a-f]{32}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exploration Hypothesis Id"
+          },
+          "exposed": {
+            "default": false,
+            "title": "Exposed",
+            "type": "boolean"
+          },
           "reason": {
             "anyOf": [
               {
@@ -3340,6 +3421,43 @@
         "title": "RecommendationFeedItem",
         "type": "object"
       },
+      "RecommendationFeedbackPayload": {
+        "additionalProperties": false,
+        "description": "Feedback evidence with server-resolved exploration provenance.",
+        "properties": {
+          "exploration_arm": {
+            "anyOf": [
+              {
+                "pattern": "^[a-z][a-z0-9-]{0,63}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exploration Arm"
+          },
+          "exploration_hypothesis_id": {
+            "anyOf": [
+              {
+                "pattern": "^hyp_[0-9a-f]{32}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exploration Hypothesis Id"
+          },
+          "exposed": {
+            "default": false,
+            "title": "Exposed",
+            "type": "boolean"
+          }
+        },
+        "title": "RecommendationFeedbackPayload",
+        "type": "object"
+      },
       "RecommendationLikedObservation": {
         "additionalProperties": false,
         "properties": {
@@ -3389,7 +3507,7 @@
             "type": "string"
           },
           "payload": {
-            "$ref": "#/components/schemas/EmptyPayload"
+            "$ref": "#/components/schemas/RecommendationFeedbackPayload"
           },
           "provenance": {
             "$ref": "#/components/schemas/ObservationProvenance"
@@ -3560,7 +3678,7 @@
             "type": "string"
           },
           "payload": {
-            "$ref": "#/components/schemas/EmptyPayload"
+            "$ref": "#/components/schemas/RecommendationFeedbackPayload"
           },
           "provenance": {
             "$ref": "#/components/schemas/ObservationProvenance"

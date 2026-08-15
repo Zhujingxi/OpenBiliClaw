@@ -52,12 +52,13 @@ def _shown() -> ShownRecord:
     )
 
 
-def _feedback(kind: FeedbackKind) -> FeedbackRecord:
+def _feedback(kind: FeedbackKind, *, exposed: bool = True) -> FeedbackRecord:
     return FeedbackRecord(
         feedback_id="feedback_" + "b" * 32,
         shown_id=_shown().shown_id,
         kind=kind,
         occurred_at=NOW,
+        exposed=exposed,
     )
 
 
@@ -132,6 +133,26 @@ async def test_unattributed_dismiss_never_updates_configured_exploit_arm() -> No
     )
 
     assert registry.outcomes == []
+
+
+async def test_unexposed_exploration_dismiss_records_attempt_without_failure() -> None:
+    registry = RecordingRegistry()
+
+    await RewardLedger(registry).record(
+        _feedback(FeedbackKind.DISMISSED, exposed=False), _shown(), ATTRIBUTION
+    )
+
+    assert [outcome[1] for outcome in registry.outcomes] == ["attempt"]
+
+
+async def test_exposed_exploration_dismiss_records_failure() -> None:
+    registry = RecordingRegistry()
+
+    await RewardLedger(registry).record(
+        _feedback(FeedbackKind.DISMISSED, exposed=True), _shown(), ATTRIBUTION
+    )
+
+    assert [outcome[1] for outcome in registry.outcomes] == ["attempt", "failure"]
 
 
 async def test_unattributed_feedback_updates_configured_exploit_posterior() -> None:

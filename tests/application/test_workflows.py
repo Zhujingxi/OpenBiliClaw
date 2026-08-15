@@ -45,7 +45,12 @@ from openbiliclaw.content.integration.actions import ActionResult
 from openbiliclaw.content.integration.identity import ContentKind, ContentRef, ProviderId
 from openbiliclaw.core.health import HealthSnapshot, HealthStatus
 from openbiliclaw.core.jobs import JobDecision
-from openbiliclaw.recommendation.models import FeedbackKind, FeedbackRecord
+from openbiliclaw.observations.models import RecommendationLikedObservation
+from openbiliclaw.recommendation.models import (
+    ExplorationAttribution,
+    FeedbackKind,
+    FeedbackRecord,
+)
 from openbiliclaw.understanding.overrides import OverrideOperation
 from openbiliclaw.understanding.profile import CanonicalProfile
 
@@ -227,6 +232,29 @@ async def test_record_feedback_builds_each_typed_observation(kind: FeedbackKind)
     assert uow.feedback[0][1].event_type == f"recommendation_{kind.value}"
 
 
+async def test_feedback_observation_carries_server_resolved_exploration_provenance() -> None:
+    attribution = ExplorationAttribution(hypothesis_id="hyp_" + "a" * 32, arm="source-novel")
+    targets = AsyncMock()
+    targets.exploration_for_shown.return_value = attribution
+    uow = UnitOfWorkFake()
+
+    await RecordFeedback(uow, clock=lambda: NOW, targets=targets)(
+        RecordFeedbackCommand(
+            idempotency_key="feedback:explore:liked",
+            shown_id="shown_" + "1" * 32,
+            content_ref=REF,
+            kind=FeedbackKind.LIKED,
+            exposed=True,
+        )
+    )
+
+    observation = uow.feedback[0][1]
+    assert isinstance(observation, RecommendationLikedObservation)
+    assert observation.payload.exploration_arm == attribution.arm
+    assert observation.payload.exploration_hypothesis_id == attribution.hypothesis_id
+    assert observation.payload.exposed is True
+
+
 async def test_record_feedback_credits_reward_only_after_new_insert() -> None:
     uow = UnitOfWorkFake()
     reward = AsyncMock()
@@ -242,7 +270,7 @@ async def test_record_feedback_credits_reward_only_after_new_insert() -> None:
     second = await workflow(command)
 
     assert first.inserted and not second.inserted
-    reward.assert_awaited_once_with(uow.feedback[0][0])
+    reward.assert_awaited_once_with(*uow.feedback[0])
 
 
 async def test_reward_sink_failure_never_fails_a_committed_feedback() -> None:

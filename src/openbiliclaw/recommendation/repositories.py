@@ -11,6 +11,7 @@ from .models import (
     Candidate,
     CandidateState,
     EvaluationRecord,
+    ExplorationAttribution,
     ExpressionRecord,
     FeedbackRecord,
     RecommendationFeedItem,
@@ -259,6 +260,12 @@ class SqliteRecommendationRepository:
 
         _shown, candidate = await self.reward_context(shown_id)
         return candidate.preview.ref
+
+    async def exploration_for_shown(self, shown_id: str) -> ExplorationAttribution | None:
+        """Resolve server-authoritative exploration provenance for feedback evidence."""
+
+        _shown, candidate = await self.reward_context(shown_id)
+        return candidate.provenance.exploration
 
     async def save_feedback(self, record: FeedbackRecord, content_ref: ContentRef) -> bool:
         async with self.db.transaction() as session:

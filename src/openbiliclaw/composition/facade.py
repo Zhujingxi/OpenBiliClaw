@@ -284,12 +284,12 @@ class CompositionFacade:
         return await self._feedback(command)
 
     async def record_feedback_for_shown(
-        self, shown_id: str, kind: FeedbackKind, idempotency_key: str
+        self, shown_id: str, kind: FeedbackKind, idempotency_key: str, exposed: bool = False
     ) -> RecordFeedbackResult:
         if self._feedback_for_shown is None:
             raise self._unavailable()
         return await self._feedback_for_shown(
-            shown_id=shown_id, kind=kind, idempotency_key=idempotency_key
+            shown_id=shown_id, kind=kind, idempotency_key=idempotency_key, exposed=exposed
         )
 
     async def edit_profile(self, command: EditProfileCommand) -> EditProfileResult:

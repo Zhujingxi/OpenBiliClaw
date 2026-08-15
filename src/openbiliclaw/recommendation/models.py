@@ -200,6 +200,7 @@ class FeedbackRecord(StrictBaseModel):
     shown_id: str
     kind: FeedbackKind
     occurred_at: AwareDatetime
+    exposed: bool = False
 
 
 class ExpressionRecord(StrictBaseModel):

@@ -196,10 +196,19 @@ describe("durable concern stores", () => {
         shown_id: feedItem.shown_id,
         content_ref: feedItem.ref,
         kind: "liked",
+        exposed: false,
       },
       expect.any(AbortSignal),
     );
     expect(store.feedbackState[feedItem.shown_id]).toBe("liked");
+
+    store.markExposed(card);
+    const dismissFeedback = vi.fn(api().feedback);
+    await store.dismiss(api({ feedback: dismissFeedback }), card);
+    expect(dismissFeedback).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "dismissed", exposed: true }),
+      expect.any(AbortSignal),
+    );
 
     const expired = new Error("Request failed with status 404");
     Object.assign(expired, { status: 404 });

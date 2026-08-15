@@ -449,6 +449,19 @@ async def test_source_list_includes_provider_capabilities() -> None:
             },
             "edit_profile",
         ),
+        (
+            "POST",
+            "/v1/profiles/edit",
+            {
+                "idempotency_key": "profile:exploration:1",
+                "profile_id": "default",
+                "account_id": "a",
+                "field": "exploration.disabled",
+                "operation": "set",
+                "value": "true",
+            },
+            "edit_profile",
+        ),
         ("GET", "/v1/content/search?provider_id=demo&q=x", None, "search_content"),
         ("GET", DETAIL_PATH, None, "get_content_details"),
         (

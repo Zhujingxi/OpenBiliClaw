@@ -9,10 +9,13 @@ from typing import TYPE_CHECKING, Protocol, cast
 from pydantic import BaseModel
 
 from openbiliclaw.access.models import AccessRequest, Permission
+from openbiliclaw.application.edit_profile import EditProfileCommand
 from openbiliclaw.application.errors import ApplicationError
 from openbiliclaw.application.sources import ConnectSourceCommand, DisconnectSourceCommand
 from openbiliclaw.hosts.api.schemas.models import AssistantTurnRequest
 from openbiliclaw.recommendation.models import FeedbackKind, record_identity
+from openbiliclaw.understanding.overrides import OverrideOperation
+from openbiliclaw.understanding.profile import EXPLORATION_DISABLED_CLAIM_ID
 
 if TYPE_CHECKING:
     import argparse
@@ -27,9 +30,10 @@ class ProductFacade(Protocol):
     async def disconnect_source(self, command: DisconnectSourceCommand) -> object: ...
     async def get_recommendations(self, limit: int) -> object: ...
     async def record_feedback_for_shown(
-        self, shown_id: str, kind: FeedbackKind, idempotency_key: str
+        self, shown_id: str, kind: FeedbackKind, idempotency_key: str, exposed: bool = False
     ) -> object: ...
     async def show_profile(self, profile_id: str) -> object: ...
+    async def edit_profile(self, command: EditProfileCommand) -> object: ...
     async def assistant_turn(self, request: AssistantTurnRequest, device_id: str) -> object: ...
     async def search_content(self, provider_id: str, text: str, limit: int) -> object: ...
 
@@ -78,11 +82,17 @@ def add_product_parsers(
     feedback.add_argument("shown_id")
     feedback.add_argument("kind", choices=tuple(_FEEDBACK_KIND))
     feedback.add_argument("--idempotency-key", required=True)
+    feedback.add_argument("--exposed", action="store_true")
 
     profile = subparsers.add_parser("profile", parents=[common])
     profile_commands = profile.add_subparsers(dest="profile_command", required=True)
     show = profile_commands.add_parser("show", parents=[common])
     show.add_argument("--profile-id", default="default")
+    exploration = profile_commands.add_parser("exploration", parents=[common])
+    exploration.add_argument("state", choices=("disable", "enable"))
+    exploration.add_argument("--profile-id", default="default")
+    exploration.add_argument("--account-id", default="local")
+    exploration.add_argument("--idempotency-key", required=True)
 
     assistant = subparsers.add_parser("assistant", parents=[common])
     assistant.add_argument("message")
@@ -140,10 +150,22 @@ async def _dispatch(facade: ProductFacade, args: argparse.Namespace) -> object:
         return await facade.get_recommendations(args.limit)
     if args.command == "feedback":
         return await facade.record_feedback_for_shown(
-            args.shown_id, _FEEDBACK_KIND[args.kind], args.idempotency_key
+            args.shown_id, _FEEDBACK_KIND[args.kind], args.idempotency_key, args.exposed
         )
     if args.command == "profile":
-        return await facade.show_profile(args.profile_id)
+        if args.profile_command == "show":
+            return await facade.show_profile(args.profile_id)
+        disabled = args.state == "disable"
+        return await facade.edit_profile(
+            EditProfileCommand(
+                idempotency_key=args.idempotency_key,
+                profile_id=args.profile_id,
+                account_id=args.account_id,
+                claim_id=EXPLORATION_DISABLED_CLAIM_ID,
+                operation=OverrideOperation.SET if disabled else OverrideOperation.REMOVE,
+                value="true" if disabled else None,
+            )
+        )
     if args.command == "assistant":
         return await facade.assistant_turn(
             AssistantTurnRequest(

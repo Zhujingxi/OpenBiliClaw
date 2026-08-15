@@ -11,6 +11,7 @@ from openbiliclaw.core._pydantic import StrictBaseModel
 
 class LedgerStatus(StrEnum):
     ACCEPTED = "accepted"
+    PENDING = "pending"
     REJECTED = "rejected"
     SUPERSEDED = "superseded"
     OVERRIDE = "override"

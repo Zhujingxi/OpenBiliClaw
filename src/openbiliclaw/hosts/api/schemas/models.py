@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Annotated, Literal, TypeAlias
 
-from pydantic import ConfigDict, Field, JsonValue, SecretStr, field_validator
+from pydantic import ConfigDict, Field, JsonValue, SecretStr, field_validator, model_validator
 
 from openbiliclaw.access.forms import ConnectionForm
 from openbiliclaw.access.models import AccessStatus, Permission, VerificationResult
@@ -15,7 +15,10 @@ from openbiliclaw.application.content_actions import (
     PendingAction,
     ProposeContentActionCommand,
 )
-from openbiliclaw.application.edit_profile import EditProfileCommand
+from openbiliclaw.application.edit_profile import (
+    EXPLORATION_DISABLED_CLAIM_ID,
+    EditProfileCommand,
+)
 from openbiliclaw.application.record_feedback import RecordFeedbackCommand, RecordFeedbackResult
 from openbiliclaw.application.record_observation import RecordObservationsCommand
 from openbiliclaw.application.refresh_recommendations import RefreshRecommendationsCommand
@@ -310,6 +313,7 @@ class FeedbackRequest(TransportModel):
     account_id: str | None = Field(default=None, min_length=1, max_length=128)
     reason: str | None = Field(default=None, max_length=500)
     dwell_ms: int | None = Field(default=None, ge=0, le=86_400_000)
+    exposed: bool = False
 
     def to_command(self) -> RecordFeedbackCommand:
         data = self.model_dump()
@@ -334,12 +338,34 @@ class ProfileEditRequest(TransportModel):
     idempotency_key: str = Field(min_length=8, max_length=200)
     profile_id: str = Field(min_length=1, max_length=128)
     account_id: str = Field(min_length=1, max_length=128)
-    claim_id: str = Field(pattern=r"^claim_[0-9a-f]{32}$")
+    claim_id: str | None = Field(default=None, pattern=r"^claim_[0-9a-f]{32}$")
+    field: Literal["exploration.disabled"] | None = None
     operation: Literal["set", "remove"]
     value: str | None = Field(default=None, max_length=500)
 
+    @model_validator(mode="after")
+    def resolve_explicit_field(self) -> ProfileEditRequest:
+        if self.claim_id is None and self.field is None:
+            raise ValueError("claim_id or field is required")
+        if self.field is not None and self.claim_id not in (
+            None,
+            EXPLORATION_DISABLED_CLAIM_ID,
+        ):
+            raise ValueError("claim_id does not match field")
+        if (
+            self.field == "exploration.disabled"
+            and self.operation == "set"
+            and self.value != "true"
+        ):
+            raise ValueError("exploration.disabled must be set to true")
+        if self.operation == "remove" and self.value is not None:
+            raise ValueError("remove operation must not carry a value")
+        return self
+
     def to_command(self) -> EditProfileCommand:
         data = self.model_dump()
+        data.pop("field")
+        data["claim_id"] = self.claim_id or EXPLORATION_DISABLED_CLAIM_ID
         data["operation"] = OverrideOperation(self.operation)
         return EditProfileCommand.model_validate(data)
 

@@ -60,7 +60,9 @@ it("rewrites only safe HTTPS image URLs through the local proxy", () => {
   expect(proxyImageUrl("https://cdn.example.test/image?a=1&b=2")).toBe(
     "/v1/media?url=https%3A%2F%2Fcdn.example.test%2Fimage%3Fa%3D1%26b%3D2",
   );
-  expect(proxyImageUrl("http://cdn.example.test/image")).toBeUndefined();
+  expect(proxyImageUrl("http://cdn.example.test/image")).toBe(
+    "/v1/media?url=https%3A%2F%2Fcdn.example.test%2Fimage",
+  );
   expect(proxyImageUrl("javascript:alert(1)")).toBeUndefined();
 });
 

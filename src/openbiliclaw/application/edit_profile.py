@@ -22,6 +22,9 @@ from openbiliclaw.understanding.overrides import (
     OverrideOperation,  # noqa: TC001  # Runtime type required by Pydantic model fields.
 )
 from openbiliclaw.understanding.profile import (
+    EXPLORATION_DISABLED_CLAIM_ID as EXPLORATION_DISABLED_CLAIM_ID,
+)
+from openbiliclaw.understanding.profile import (
     CanonicalProfile,  # noqa: TC001  # Runtime type required by Pydantic model fields.
 )
 

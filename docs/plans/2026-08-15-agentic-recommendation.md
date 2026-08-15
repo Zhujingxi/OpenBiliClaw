@@ -82,7 +82,7 @@ learned magnitudes.
   preserves hypothesis/channel attribution through delivery and feedback. B2 supplies
   real intent next; embedding-based MMR waits for Phase C, and dormant-interest supply
   waits for ledger SQL.
-- [ ] 5. **Evidence discipline**: exploration provenance + arm on observations; dismissals
+- [x] 5. **Evidence discipline**: exploration provenance + arm on observations; dismissals
   count only after viewport exposure; like-on-explore → low-confidence (~0.2)
   corroboration-gated proposal via the existing Understanding path; dismiss decays that
   arm only. Directional chat statements = decaying claims; only explicit statements can
