@@ -232,7 +232,7 @@
 
 插件是主要入口：它会在受支持站点显示侧边栏、采集你的反馈，并承接知乎、Reddit、Linux.do、V2EX、微博等登录态只读任务。Linux.do、V2EX 与微博的任务 tab 和普通行为采集隔离；微博公开 discovery 由后端独立完成，个人初始化才使用微博 host permission 和同源任务桥。
 
-插件基于 Manifest V3，支持所有兼容 Chrome 插件的浏览器，包括 **Chrome、Edge、Brave、Arc、Vivaldi、Opera** 等；另提供 **Safari（macOS）** 构建，Release 提供 Developer ID 签名 + 公证的 `openbiliclaw-extension-v*-safari.dmg`，也可本地经 Apple `safari-web-extension-converter` 转成 Xcode 工程后安装（详见 [Safari 构建文档](docs/safari-extension-build.md)）。
+插件基于 Manifest V3，支持所有兼容 Chrome 插件的浏览器，包括 **Chrome、Edge、Brave、Arc、Vivaldi、Opera** 等；另提供 **Safari（macOS）** 构建，Release 自动附带 `openbiliclaw-extension-v*-safari.dmg`（配置 Apple 凭据时为 Developer ID 签名 + 公证；未配置时为 ad-hoc 实验包，需在 Safari 开启「允许未签名扩展」），也可本地经 Apple `safari-web-extension-converter` 转成 Xcode 工程后安装（详见 [Safari 构建文档](docs/safari-extension-build.md)）。
 
 **推荐方式 · 从 Latest Release 聚合页下载最新版手动安装**（拿到最新功能与修复 —— Chrome 应用商店受审核排期影响，版本通常会滞后几天到一两周）：
 

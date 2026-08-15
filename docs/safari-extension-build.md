@@ -45,12 +45,19 @@ xcodebuild -project OpenBiliClaw.xcodeproj -scheme "OpenBiliClaw (macOS)" \
 
 ## Release 发布（extension-v*）
 
-推 `extension-v*` tag 时，`release-extension.yml` 会在 `macos-14` 上额外执行
-`npm run package:safari -- --notarize`，产出 **Developer ID 签名 + notarized + stapled**
-的 `openbiliclaw-extension-vX.Y.Z-safari.dmg`，并与 Chrome/Firefox 资产一起挂到
-`extension-v*` 和 `openbiliclaw-v*` 聚合 Release。
+推 `extension-v*` tag 时，`release-extension.yml` 会在 `macos-14` 上自动执行
+`npm run package:safari`，产出 `openbiliclaw-extension-vX.Y.Z-safari.dmg`，并与
+Chrome/Firefox 资产一起挂到 `extension-v*` 和 `openbiliclaw-v*` 聚合 Release。
 
-维护者需要先在仓库 Secrets 配置：
+Safari DMG 有两种模式，由 CI 自动选择：
+
+1. **配置了 Apple 凭据**：执行 `npm run package:safari -- --notarize`，产出
+   Developer ID 签名 + notarized + stapled 的正式 DMG。
+2. **没有配置 Apple 凭据**（默认）：产出 ad-hoc 未签名 DMG。它仍会作为实验性资产
+   发布，但安装前用户必须在 Safari 设置 → 开发者 → 勾选「允许未签名扩展」，并且该
+   选项在 Safari 退出后会重置；适合自测，不适合面向普通用户的正式分发。
+
+需要签名模式时，在仓库 Secrets 配置：
 
 | Secret | 说明 |
 |--------|------|
@@ -60,12 +67,11 @@ xcodebuild -project OpenBiliClaw.xcodeproj -scheme "OpenBiliClaw (macOS)" \
 | `APPLE_NOTARY_USER` | 用于公证的 Apple ID |
 | `APPLE_NOTARY_PASSWORD` | 该 Apple ID 的 app-specific password |
 
-Safari 签名默认开启：缺少任一 Secret 时 `extension-v*` 发布会 **fail-closed**。
-如果某次发布明确不打算带 Safari，先在仓库 Variables 设置
-`SAFARI_SIGNING_ENABLED=false`，`verify-release-completeness.yml` 也会同步跳过 Safari DMG
-完整性门禁。
+仓库变量 `SAFARI_SIGNING_ENABLED=false` 可以显式强制 ad-hoc 模式（即使已有部分凭据）。
+`verify-release-completeness.yml` 始终要求 Safari DMG 出现在 `extension-v*` 和聚合
+Release，但不检查它是签名还是 ad-hoc 版本。
 
-本地打包（无 Developer ID 时产 ad-hoc 未签名包，仅用于自测，不能当正式分发）：
+本地打包（同样不需要 Apple 账号）：
 
 ```bash
 cd extension

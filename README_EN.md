@@ -227,7 +227,7 @@ For most users, setup is four steps: install the extension, ask an AI coding age
 
 The extension is the main interface. It shows the sidebar on supported sites, records feedback, and runs bounded read-only tasks for sources including Zhihu, Reddit, Linux.do, V2EX, and Weibo. Linux.do, V2EX, and Weibo task tabs are isolated from passive behavior collection; Weibo public discovery still runs independently in the backend.
 
-Built on Manifest V3, the extension works in any Chrome-compatible browser — **Chrome, Edge, Brave, Arc, Vivaldi, Opera**, and more; a **Safari (macOS)** build is also provided. Releases ship a Developer ID-signed and notarized `openbiliclaw-extension-v*-safari.dmg`, and you can also convert the local build to an Xcode project via Apple's `safari-web-extension-converter` (see the [Safari build guide](docs/safari-extension-build.md)).
+Built on Manifest V3, the extension works in any Chrome-compatible browser — **Chrome, Edge, Brave, Arc, Vivaldi, Opera**, and more; a **Safari (macOS)** build is also provided. Releases automatically attach `openbiliclaw-extension-v*-safari.dmg` (Developer ID-signed and notarized when Apple credentials are configured, otherwise an ad-hoc experimental build that requires Safari's "Allow Unsigned Extensions"), and you can also convert the local build to an Xcode project via Apple's `safari-web-extension-converter` (see the [Safari build guide](docs/safari-extension-build.md)).
 
 **Recommended · download the latest build from the Latest Release aggregate page** (gets the newest features and fixes — the Chrome Web Store listing usually lags by a few days to a couple of weeks due to review scheduling):
 

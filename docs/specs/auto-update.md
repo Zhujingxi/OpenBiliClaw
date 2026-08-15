@@ -21,7 +21,7 @@
 仓库已拆成两条发布通道：
 
 - 后端源码版本用 `backend-vX.Y.Z` tag 标记，`.github/workflows/release-backend.yml` 目前只校验 tag 与 `pyproject.toml` 版本一致，不发布后端桌面包。
-- 浏览器插件用 `extension-vX.Y.Z` tag 发布 GitHub Release，`.github/workflows/release-extension.yml` 会上传 `openbiliclaw-extension-vX.Y.Z.zip`、`openbiliclaw-extension-vX.Y.Z-firefox.zip`，并在 Safari 签名启用时上传 `openbiliclaw-extension-vX.Y.Z-safari.dmg`。
+- 浏览器插件用 `extension-vX.Y.Z` tag 发布 GitHub Release，`.github/workflows/release-extension.yml` 会上传 `openbiliclaw-extension-vX.Y.Z.zip`、`openbiliclaw-extension-vX.Y.Z-firefox.zip`，并始终上传 `openbiliclaw-extension-vX.Y.Z-safari.dmg`（Apple 凭据齐全时签名+公证，否则为 ad-hoc 实验包）。
 - Chrome Web Store 上传已独立为手动 workflow：`.github/workflows/publish-chrome-webstore.yml`。它可以用 GitHub Secrets 上传 Chrome-compatible zip，并在显式 `publish=true` 时提交审核。
 - 后端已有 `src/openbiliclaw/runtime/updater.py`：周期性查询 GitHub `/tags`，过滤 `backend-v*`，忽略 `extension-v*`，REST API 限流时通过 GitHub tags Atom feed 兜底，发现新版本后执行 `git pull --ff-only`、依赖同步和进程重启。
 - 配置已有 `scheduler.auto_update_enabled=false` 和 `scheduler.auto_update_check_interval_hours=6`，默认关闭。

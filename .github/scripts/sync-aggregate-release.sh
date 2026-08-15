@@ -224,7 +224,7 @@ ${asset_list}
 ## Notes
 
 - Chrome Web Store updates can lag GitHub releases because Google review is asynchronous.
-- The Safari \`.dmg\` ships a Developer ID-signed and notarized macOS app; enable the extension in Safari Settings after first launch.
+- The Safari \`.dmg\` is signed and notarized when Apple credentials are configured in CI; otherwise it is an unsigned experimental build and requires Safari Settings → Developer → Allow Unsigned Extensions after first launch.
 - The desktop app is still unsigned and experimental; first launch may need the README bypass steps.
 - Automation channel releases remain available as \`backend-v*\`, \`extension-v*\`, and \`desktop-v*\`; Docker images ride \`backend-v*\` tags to GHCR automatically.
 
