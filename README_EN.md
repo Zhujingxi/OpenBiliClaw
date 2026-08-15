@@ -196,12 +196,10 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.205 (2026-08-14)**
+📌 Latest: **v0.3.206 (2026-08-15)**
 
-- **Evidence-driven temporal admission** — the Evaluation Agent separates durable content, recent content, explicit deadlines, and event/version state; only high-confidence, text-grounded core evidence can hard-block an item, while uncertain cases are scheduled for review instead of being discarded by a universal age cutoff.
-- **Safe profile rebuilding** — desktop Web, the browser extension, and CLI can force reinitialization; OpenBiliClaw backs up the database and memory first, refreshes the old recommendation pool, and can optionally reset higher cognition layers.
-- **Smaller, maintainable embedding cache** — vectors use compact float32 BLOB storage, legacy databases migrate automatically, and new disk-budget, statistics, and safe-cleanup controls prevent unbounded growth.
-- **More client surfaces** — a new DeepSeek Harness client plugin and Flutter native mobile/desktop client entry points connect to the same local OpenBiliClaw backend.
+- **More stable with-embedding installer** — fixes the misdiagnosed bge-m3 HTTP 500 / llama-server `0xc0000005` crash path and bumps the bundled Windows Ollama to 0.32.13, with an ordered recovery checklist and managed-Ollama logging.
+- **Windows one-line install fixed** — repairs the native PowerShell 5.1 parse failure and Chinese comment / here-string encoding issue, including the shadowed `$args` automatic variable.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
@@ -242,7 +240,7 @@ Built on Manifest V3, the extension works in any Chrome-compatible browser — *
 
 > 👉 **[Install OpenBiliClaw on the Chrome Web Store](https://chromewebstore.google.com/detail/cdfjfkdjjhdaccbldipkjhpibnfbiamg)** — click "Add to Chrome".
 
-Extension updates depend on the install channel: Chrome Web Store / Edge Add-ons and the Firefox AMO listed build after approval are updated by the browser; GitHub Release Chrome zips / Firefox signed XPIs / Firefox temporary zips, developer-mode loads, and Firefox temporary installs must download the new package and reload it manually. Firefox AMO `0.3.205` has been accepted for listed review but is still `unreviewed`; until it is publicly approved, use the `*-firefox.zip` temporary package from Releases. After approval, Firefox will update the listed install natively. The backend "auto update" switch only updates the local backend source checkout, not the browser extension.
+Extension updates depend on the install channel: Chrome Web Store / Edge Add-ons and the Firefox AMO listed build after approval are updated by the browser; GitHub Release Chrome zips / Firefox signed XPIs / Firefox temporary zips, developer-mode loads, and Firefox temporary installs must download the new package and reload it manually. Firefox AMO listed review is asynchronous; until the listed version is publicly approved, use the `*-firefox.zip` temporary package from Releases. After approval, Firefox will update the listed install natively. The backend "auto update" switch only updates the local backend source checkout, not the browser extension.
 
 <details>
 <summary>Firefox users: regular install and temporary debugging (Firefox 140+)</summary>
