@@ -112,7 +112,7 @@ def test_all_production_manifests_declare_channels_iff_feed_is_advertised() -> N
         "rank",
         "hot",
     }
-    assert BILIBILI_MANIFEST.image_hosts == ("i0.hdslb.com",)
+    assert BILIBILI_MANIFEST.image_hosts == ("hdslb.com",)
     assert BILIBILI_MANIFEST.image_headers == {"referer": "https://www.bilibili.com"}
     assert BANGUMI_MANIFEST.image_hosts == ("lain.bgm.tv",)
     assert YOUTUBE_MANIFEST.image_hosts == ("i.ytimg.com",)
