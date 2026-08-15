@@ -40,6 +40,7 @@ COMMON_ERROR_RESPONSES: dict[int | str, dict[str, object]] = {
         (422, ErrorCode.VALIDATION),
         (429, ErrorCode.RATE_LIMIT),
         (500, ErrorCode.TEMPORARY_FAILURE),
+        (502, ErrorCode.TEMPORARY_FAILURE),
         (503, ErrorCode.UNAVAILABLE),
     )
 }

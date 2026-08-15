@@ -32,6 +32,7 @@ from .routers import (
     content,
     events,
     feedback,
+    media,
     models,
     recommendations,
     runtime,
@@ -100,11 +101,13 @@ class SecurityMiddleware(BaseHTTPMiddleware):
             return self._error(403, ErrorCode.FORBIDDEN, "origin is not allowed")
         auth_required = policy.bearer_token is not None or policy.password_hash is not None
         login = request.url.path == "/v1/auth/login" and request.method == "POST"
-        # Bearer gates /v1 data only: the static SPA shell (incl. the login page)
-        # carries no user data and must stay reachable.
+        public_media = request.url.path == "/v1/media" and request.method == "GET"
+        # Bearer gates user data only: the static SPA shell and allowlisted public-CDN
+        # images carry no user data and must stay reachable before login.
         if (
             auth_required
             and not login
+            and not public_media
             and request.url.path.startswith("/v1/")
             and not await bearer_authorized(
                 self._dependencies, request.headers.get("authorization", "")
@@ -187,6 +190,7 @@ def create_app(dependencies: HostDependencies, *, frontend_dir: Path | None = No
         assistant.router,
         content.router,
         feedback.router,
+        media.router,
         models.router,
         runtime.router,
         events.router,

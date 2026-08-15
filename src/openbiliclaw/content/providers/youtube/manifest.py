@@ -22,5 +22,6 @@ YOUTUBE_MANIFEST = ProviderManifest(
         }
     ),
     native_schemas=(NativeSchemaDescriptor(content_kind=VIDEO_KIND, schema_version=1),),
+    image_hosts=("i.ytimg.com",),
     availability=ProviderAvailability.AVAILABLE,
 )

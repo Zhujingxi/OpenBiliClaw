@@ -44,5 +44,7 @@ BILIBILI_MANIFEST = ProviderManifest(
             auth_required=False,
         ),
     ),
+    image_hosts=("hdslb.com",),
+    image_headers={"referer": "https://www.bilibili.com"},
     availability=ProviderAvailability.AVAILABLE,
 )

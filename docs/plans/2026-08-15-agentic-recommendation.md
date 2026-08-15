@@ -36,10 +36,10 @@ Progress: `- [ ]` pending · `- [~]` in progress · `- [x]` done (TDD: red → g
 - [x] 4. **Auth**: password login for local web/desktop clients; generated token for
   extension/agent (`openbiliclaw ext-token`). (spec #20) — landed: backend (schema V9,
   login route, set-password/ext-token CLI) + web login page/token flow; bearer gates
-  /v1 only, static SPA shell stays public; browser e2e 5/5 — backend landed (schema V9,
-  PBKDF2 login, session/extension tokens, CLI, HTTP/WebSocket auth); frontend login +
-  AgentBrowser e2e next
-- [ ] 5. **Image proxy**: `/v1` route serving provider images locally; no CDN hotlink leaks.
+  /v1 only, static SPA shell stays public; browser e2e 5/5
+- [x] 5. **Image proxy**: `/v1` route serving provider images locally; no CDN hotlink leaks.
+  — landed: declarative provider `image_hosts`/`image_headers`, HTTPS allowlist + 10 MiB
+  bounded `/v1/media`, and same-origin card/detail rendering; caching intentionally deferred
 - [ ] 6. **Export/import**: versioned SQLite + config dump/restore. CLI `export`/`import`.
 - [ ] 7. **Full thin CLI**: pass-through commands over Application workflows for
   sources/feed/feedback/profile/assistant; zero business logic in commands. (spec #19)

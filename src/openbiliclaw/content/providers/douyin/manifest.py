@@ -16,5 +16,6 @@ DOUYIN_MANIFEST = ProviderManifest(
     display_name="Douyin",
     capabilities=frozenset({CapabilityKind.PROJECTION}),
     native_schemas=(NativeSchemaDescriptor(content_kind=SHORT_VIDEO_KIND, schema_version=1),),
+    image_hosts=("douyinpic.com",),
     availability=ProviderAvailability.DEGRADED,
 )

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import re
 from enum import StrEnum
+from ipaddress import ip_address
+from urllib.parse import urlsplit
 
-from pydantic import ConfigDict, Field, model_validator
+from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from openbiliclaw.core._pydantic import StrictBaseModel
 
@@ -81,7 +84,49 @@ class ProviderManifest(StrictBaseModel):
     native_schemas: tuple[NativeSchemaDescriptor, ...]
     actions: tuple[ActionDescriptor, ...] = ()
     channels: tuple[ChannelDescriptor, ...] = ()
+    image_hosts: tuple[str, ...] = ()
+    image_headers: dict[str, str] = Field(default_factory=dict)
     availability: ProviderAvailability
+
+    @field_validator("image_hosts")
+    @classmethod
+    def _valid_image_hosts(cls, hosts: tuple[str, ...]) -> tuple[str, ...]:
+        for host in hosts:
+            parsed = urlsplit(f"https://{host}")
+            labels = host.split(".")
+            if (
+                host != host.lower()
+                or host.endswith(".")
+                or parsed.hostname != host
+                or parsed.netloc != host
+                or len(host) > 253
+                or any(
+                    not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+                    for label in labels
+                )
+            ):
+                raise ValueError("image hosts must be normalized DNS hostnames")
+            try:
+                ip_address(host)
+            except ValueError:
+                pass
+            else:
+                raise ValueError("image hosts must not be IP literals")
+        if len(hosts) != len(set(hosts)):
+            raise ValueError("duplicate image host")
+        return hosts
+
+    @field_validator("image_headers")
+    @classmethod
+    def _valid_image_headers(cls, headers: dict[str, str]) -> dict[str, str]:
+        for name, value in headers.items():
+            if (
+                not re.fullmatch(r"[!#$%&'*+.^_`|~0-9a-z-]+", name)
+                or "\r" in value
+                or "\n" in value
+            ):
+                raise ValueError("invalid static image header")
+        return headers
 
     @model_validator(mode="after")
     def _contract_consistency(self) -> ProviderManifest:
@@ -100,6 +145,8 @@ class ProviderManifest(StrictBaseModel):
             raise ValueError("duplicate channel feed_id")
         if bool(self.channels) != (CapabilityKind.FEED in self.capabilities):
             raise ValueError("channel declarations and advertised feed capability must agree")
+        if self.image_headers and not self.image_hosts:
+            raise ValueError("image headers require declared image hosts")
         return self
 
     def channel(self, feed_id: str) -> ChannelDescriptor:

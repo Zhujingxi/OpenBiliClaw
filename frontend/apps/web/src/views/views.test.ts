@@ -333,7 +333,7 @@ describe("web view behavior", () => {
     expect(wrapper.text()).toContain("A Channel");
     expect(wrapper.text()).toContain("line one");
     expect(wrapper.get("img").attributes("src")).toBe(
-      "https://img.test/thumb.jpg",
+      "/v1/media?url=https%3A%2F%2Fimg.test%2Fthumb.jpg",
     );
     const link = wrapper.get("a");
     expect(link.attributes("href")).toBe(ref.canonical_url);
@@ -368,7 +368,7 @@ describe("web view behavior", () => {
     await vi.waitFor(() => expect(wrapper.get("h2").text()).toBe("孤独摇滚！"));
     expect(wrapper.text()).toContain("乐队");
     expect(wrapper.get("img").attributes("src")).toBe(
-      "https://lain.bgm.tv/pic/cover/l/42.jpg",
+      "/v1/media?url=https%3A%2F%2Flain.bgm.tv%2Fpic%2Fcover%2Fl%2F42.jpg",
     );
     expect(wrapper.get("a").attributes("href")).toBe(ref.canonical_url);
   });

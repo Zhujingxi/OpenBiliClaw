@@ -16,5 +16,6 @@ REDNOTE_MANIFEST = ProviderManifest(
     display_name="RedNote",
     capabilities=frozenset({CapabilityKind.PROJECTION}),
     native_schemas=(NativeSchemaDescriptor(content_kind=NOTE_KIND, schema_version=1),),
+    image_hosts=("xhscdn.com",),
     availability=ProviderAvailability.DEGRADED,
 )

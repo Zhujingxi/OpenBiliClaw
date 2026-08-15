@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import AsyncState from "../components/AsyncState.vue";
+import { proxyImageUrl } from "@openbiliclaw/presentation";
 import { computed, inject, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { routeParameter } from "../app/routes";
 import { useContentStore } from "../stores/content";
@@ -20,8 +21,10 @@ function text(key: string): string | undefined {
 }
 const title = computed(() => text("title"));
 const description = computed(() => text("description") ?? text("summary"));
-const image = computed(
-  () => text("thumbnail_url") ?? text("cover_url") ?? text("image_url"),
+const image = computed(() =>
+  proxyImageUrl(
+    text("thumbnail_url") ?? text("cover_url") ?? text("image_url"),
+  ),
 );
 const creator = computed(() => {
   for (const key of ["channel", "creator"]) {

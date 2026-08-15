@@ -47,6 +47,7 @@ from .schemas.models import EventEnvelope
 
 if TYPE_CHECKING:
     from .auth import AuthTokenService
+    from .media_proxy import MediaProxy
 
 
 class HostSecurityPolicy(StrictBaseModel):
@@ -159,6 +160,7 @@ class HostDependencies:
     lifespan: HostLifespan | None = None
     models: ModelConfiguration | None = None
     auth_tokens: AuthTokenService | None = None
+    media_proxy: MediaProxy | None = None
     websocket_slots: asyncio.Semaphore = field(init=False)
 
     def __post_init__(self) -> None:

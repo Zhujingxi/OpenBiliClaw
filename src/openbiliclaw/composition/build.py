@@ -60,6 +60,7 @@ from openbiliclaw.core.supervisor import RuntimeSupervisor
 from openbiliclaw.hosts.api.app import create_app
 from openbiliclaw.hosts.api.auth import AuthTokenService, SqliteAuthTokenRepository
 from openbiliclaw.hosts.api.dependencies import HostDependencies, HostSecurityPolicy
+from openbiliclaw.hosts.api.media_proxy import MediaProxy
 from openbiliclaw.hosts.api.model_configuration import FileModelConfiguration
 from openbiliclaw.infrastructure.credentials.keyring import keyring_or_file
 from openbiliclaw.infrastructure.credentials.vault import CredentialVault
@@ -468,6 +469,7 @@ def build_application(
         events=host_events,
         lifespan=lifecycle,
         auth_tokens=AuthTokenService(SqliteAuthTokenRepository(database)),
+        media_proxy=MediaProxy(providers.registry.manifests(), http),
         models=FileModelConfiguration(
             settings=settings,
             config_path=options.config_path,

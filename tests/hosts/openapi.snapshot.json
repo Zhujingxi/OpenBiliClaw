@@ -4428,6 +4428,16 @@
             },
             "description": "temporary_failure"
           },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
           "503": {
             "content": {
               "application/json": {
@@ -4572,6 +4582,16 @@
             },
             "description": "temporary_failure"
           },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
           "503": {
             "content": {
               "application/json": {
@@ -4694,6 +4714,16 @@
             "description": "rate_limit"
           },
           "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
+          "502": {
             "content": {
               "application/json": {
                 "schema": {
@@ -4834,6 +4864,16 @@
             },
             "description": "temporary_failure"
           },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
           "503": {
             "content": {
               "application/json": {
@@ -4956,6 +4996,16 @@
             "description": "rate_limit"
           },
           "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
+          "502": {
             "content": {
               "application/json": {
                 "schema": {
@@ -5091,6 +5141,16 @@
             "description": "rate_limit"
           },
           "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
+          "502": {
             "content": {
               "application/json": {
                 "schema": {
@@ -5246,6 +5306,16 @@
             "description": "rate_limit"
           },
           "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
+          "502": {
             "content": {
               "application/json": {
                 "schema": {
@@ -5553,6 +5623,16 @@
             },
             "description": "temporary_failure"
           },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
           "503": {
             "content": {
               "application/json": {
@@ -5684,6 +5764,16 @@
             },
             "description": "temporary_failure"
           },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
           "503": {
             "content": {
               "application/json": {
@@ -5698,6 +5788,143 @@
         "summary": "Feedback",
         "tags": [
           "feedback"
+        ]
+      }
+    },
+    "/v1/media": {
+      "get": {
+        "operationId": "media_v1_media_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "url",
+            "required": true,
+            "schema": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "title": "Url",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "not_found"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "method_not_allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "validation"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "validation"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "rate_limit"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "unavailable capability or temporary timeout"
+          }
+        },
+        "summary": "Media",
+        "tags": [
+          "media"
         ]
       }
     },
@@ -5796,6 +6023,16 @@
             "description": "rate_limit"
           },
           "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
+          "502": {
             "content": {
               "application/json": {
                 "schema": {
@@ -5926,6 +6163,16 @@
             },
             "description": "temporary_failure"
           },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
           "503": {
             "content": {
               "application/json": {
@@ -6046,6 +6293,16 @@
             "description": "rate_limit"
           },
           "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
+          "502": {
             "content": {
               "application/json": {
                 "schema": {
@@ -6186,6 +6443,16 @@
             },
             "description": "temporary_failure"
           },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
           "503": {
             "content": {
               "application/json": {
@@ -6308,6 +6575,16 @@
             "description": "rate_limit"
           },
           "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
+          "502": {
             "content": {
               "application/json": {
                 "schema": {
@@ -6440,6 +6717,16 @@
             "description": "rate_limit"
           },
           "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
+          "502": {
             "content": {
               "application/json": {
                 "schema": {
@@ -6584,6 +6871,16 @@
             },
             "description": "temporary_failure"
           },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
           "503": {
             "content": {
               "application/json": {
@@ -6715,6 +7012,16 @@
             },
             "description": "temporary_failure"
           },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
           "503": {
             "content": {
               "application/json": {
@@ -6827,6 +7134,16 @@
             "description": "rate_limit"
           },
           "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
+          "502": {
             "content": {
               "application/json": {
                 "schema": {
@@ -6987,6 +7304,16 @@
             },
             "description": "temporary_failure"
           },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
           "503": {
             "content": {
               "application/json": {
@@ -7118,6 +7445,16 @@
             },
             "description": "temporary_failure"
           },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
           "503": {
             "content": {
               "application/json": {
@@ -7240,6 +7577,16 @@
             "description": "rate_limit"
           },
           "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
+          "502": {
             "content": {
               "application/json": {
                 "schema": {
@@ -7390,6 +7737,16 @@
             },
             "description": "temporary_failure"
           },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
           "503": {
             "content": {
               "application/json": {
@@ -7529,6 +7886,16 @@
             "description": "rate_limit"
           },
           "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
+          "502": {
             "content": {
               "application/json": {
                 "schema": {

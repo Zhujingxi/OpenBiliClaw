@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import type { CardView } from "../contracts";
-import { sanitizeUrl } from "../url";
+import { proxyImageUrl, sanitizeUrl } from "../url";
 
 const props = defineProps<{
   card: CardView;
@@ -14,7 +14,7 @@ const emit = defineEmits<{
 const titleId = `card-${Math.random().toString(36).slice(2)}-title`;
 const href = computed(() => sanitizeUrl(props.card.data.ref.canonical_url));
 const mediaUrl = computed(() =>
-  sanitizeUrl(props.card.data.image_url ?? undefined),
+  proxyImageUrl(props.card.data.image_url ?? undefined),
 );
 const summary = computed(() => props.card.data.summary.slice(0, 500));
 const status = computed(() => {

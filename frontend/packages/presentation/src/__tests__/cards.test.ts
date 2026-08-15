@@ -3,6 +3,7 @@ import { expect, it } from "vitest";
 import {
   CardRenderer,
   parseTrustedDescriptor,
+  proxyImageUrl,
   sanitizeUrl,
   type CardView,
 } from "../index";
@@ -46,11 +47,22 @@ it.each(["video", "image", "article", "discussion"] as const)(
     expect(wrapper.get("a").attributes("href")).toBe(
       base.data.ref.canonical_url,
     );
+    expect(wrapper.get("img").attributes("src")).toBe(
+      `/v1/media?url=${encodeURIComponent(base.data.image_url ?? "")}`,
+    );
     expect(wrapper.get('[role="group"]').attributes("aria-label")).toBe(
       "Feedback actions",
     );
   },
 );
+
+it("rewrites only safe HTTPS image URLs through the local proxy", () => {
+  expect(proxyImageUrl("https://cdn.example.test/image?a=1&b=2")).toBe(
+    "/v1/media?url=https%3A%2F%2Fcdn.example.test%2Fimage%3Fa%3D1%26b%3D2",
+  );
+  expect(proxyImageUrl("http://cdn.example.test/image")).toBeUndefined();
+  expect(proxyImageUrl("javascript:alert(1)")).toBeUndefined();
+});
 
 it("emits feedback actions with the rendered card", async () => {
   const wrapper = mount(CardRenderer, { props: { card: base } });

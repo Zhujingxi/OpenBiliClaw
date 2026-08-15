@@ -58,6 +58,32 @@ def test_channel_registry_validates_and_looks_up_feed() -> None:
         _manifest(CapabilityKind.SEARCH, channels=(popular,))
 
 
+def test_manifest_validates_declarative_image_proxy_configuration() -> None:
+    configured = ProviderManifest(
+        provider_id=ProviderId(value="images"),
+        display_name="Images",
+        capabilities=frozenset(),
+        native_schemas=(
+            NativeSchemaDescriptor(content_kind=ContentKind(value="image"), schema_version=1),
+        ),
+        image_hosts=("cdn.example.test",),
+        image_headers={"referer": "https://example.test"},
+        availability=ProviderAvailability.AVAILABLE,
+    )
+    assert configured.image_hosts == ("cdn.example.test",)
+    assert configured.image_headers == {"referer": "https://example.test"}
+    for invalid in ("https://cdn.test", "CDN.test", "cdn.test.", "127.0.0.1", "bad host"):
+        with pytest.raises(ValueError):
+            ProviderManifest(
+                provider_id=ProviderId(value="bad"),
+                display_name="Bad",
+                capabilities=frozenset(),
+                native_schemas=(),
+                image_hosts=(invalid,),
+                availability=ProviderAvailability.AVAILABLE,
+            )
+
+
 def test_all_production_manifests_declare_channels_iff_feed_is_advertised() -> None:
     manifests = (
         BANGUMI_MANIFEST,
@@ -86,3 +112,9 @@ def test_all_production_manifests_declare_channels_iff_feed_is_advertised() -> N
         "rank",
         "hot",
     }
+    assert BILIBILI_MANIFEST.image_hosts == ("i0.hdslb.com",)
+    assert BILIBILI_MANIFEST.image_headers == {"referer": "https://www.bilibili.com"}
+    assert BANGUMI_MANIFEST.image_hosts == ("lain.bgm.tv",)
+    assert YOUTUBE_MANIFEST.image_hosts == ("i.ytimg.com",)
+    assert DOUYIN_MANIFEST.image_hosts == ("douyinpic.com",)
+    assert REDNOTE_MANIFEST.image_hosts == ("xhscdn.com",)

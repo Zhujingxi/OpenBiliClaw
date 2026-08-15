@@ -9,7 +9,7 @@
 - `api-client/generated/schema.ts` 由 deterministic FastAPI OpenAPI 经 workspace 固定的 `openapi-typescript@7.10.1` 生成；`scripts/generate_api_client.py` 不下载临时工具。
 - `ApiClient` 通过 caller-supplied type guard 验证未知 JSON；HTTP、network、invalid response 为安全 typed failure，typed API error envelope 的安全 message 会传给 UI；SSE event envelope 在边界做 runtime validation，并保留 server `retry:` hint 给 reconnect owner。浏览器 mutation 包括 generated `/v1/feedback` operation，并统一附带 device/CSRF headers。
 - Presentation package 复用 generated API projection types，定义 provider view、card descriptor/action、pagination 与 availability UI contract。
-- video/image/article/discussion/fallback Vue cards 共用可访问 outer frame、可触发 `like`/`dismiss` event 的反馈 controls 与 provider/status 呈现。Web recommendation store 把 feed `shown_id` 保留在 card view model 中，等待 `/v1/feedback` 成功后才显示结果；404/409 delivery expiry 作为可见错误呈现。URL/media 仅允许 HTTP(S)，文本由 Vue escaping；renderer 只接受 build-time `generic` 标识，不接受 backend HTML/CSS/component name/code。
+- video/image/article/discussion/fallback Vue cards 共用可访问 outer frame、可触发 `like`/`dismiss` event 的反馈 controls 与 provider/status 呈现。Web recommendation store 把 feed `shown_id` 保留在 card view model 中，等待 `/v1/feedback` 成功后才显示结果；404/409 delivery expiry 作为可见错误呈现。Canonical links 仅允许 HTTP(S)；card 与 content-detail 的 HTTPS image URL 一律重写为同源 `/v1/media?url=…`，浏览器不直接请求 provider CDN（无 Referer/访问 IP 泄漏，provider hotlink header 由 backend manifest 提供）。文本由 Vue escaping；renderer 只接受 build-time `generic` 标识，不接受 backend HTML/CSS/component name/code。
 - Python CI test 扫描新 workspace，拒绝 checked-in `.js`/`.mjs`/`.cjs`；所有 `dist/` 均在 `.gitignore`。
 
 ## 开发命令

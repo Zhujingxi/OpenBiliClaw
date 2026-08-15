@@ -31,5 +31,6 @@ BANGUMI_MANIFEST = ProviderManifest(
             auth_required=False,
         ),
     ),
+    image_hosts=("lain.bgm.tv",),
     availability=ProviderAvailability.AVAILABLE,
 )
