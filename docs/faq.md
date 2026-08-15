@@ -19,7 +19,7 @@ Follow [Docker deployment](docker-deployment.md). The container runs the same `s
 
 ### The browser extension cannot connect
 
-Confirm that `GET http://127.0.0.1:8420/v1/runtime/health` succeeds, then check the backend URL and opaque device token stored by the extension. The reduced extension is a backend client only: it does not read website cookies, collect browsing behavior, or execute provider tasks.
+Confirm that `GET http://127.0.0.1:8420/v1/runtime/health` succeeds, then check the backend URL and opaque extension token stored by the extension. Provider access also requires approving the recipe-declared site origin; the extension reads only the Cookie/site-storage names in that code-shipped recipe and submits them only to the configured loopback backend.
 
 ## Models and credentials
 
@@ -43,7 +43,7 @@ The target runtime stores durable state in SQLite under the configured data dire
 
 ### Does the extension upload website activity?
 
-No. The current extension only stores its backend URL and opaque device token and renders typed backend data. Website login state, cookie extraction, page observation, provider task dispatch, and browser-session execution were removed. See [Privacy](privacy.md).
+It does not upload browsing history, arbitrary page content, or behavior. When the user starts plugin-assisted provider access and approves the declared origin, the extension does transmit only the Cookie/site-storage values named by the code-shipped recipe to the user's configured loopback backend with its opaque extension token. That material is verified and vaulted locally and is not sent to OpenBiliClaw-operated or other third-party services. See [Privacy](privacy.md).
 
 ### Where is the current behavior documented?
 

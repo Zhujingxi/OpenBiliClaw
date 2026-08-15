@@ -23,9 +23,12 @@ into logs or general migration archives without an explicit secret-transfer deci
 
 ## Provider Access usage and composition status
 
-Target `openbiliclaw.access.manual.ManualAccessMethod` now uses this vault directly: validated manual
-form submissions are stored immediately, opaque references alone enter `CredentialAccessHandle`,
-replacement preserves the reference with a bumped revision, and disconnect revokes it. Provider-owned
+Target `openbiliclaw.access.manual.ManualAccessMethod` uses this vault directly: validated manual or
+recipe-collected submissions are stored immediately in a deterministic opaque provider/account slot,
+opaque references alone enter `CredentialAccessHandle`, replacement preserves the reference with a
+bumped revision, disconnect revokes it, and startup can detect/re-verify the default-account slot
+without enumerating or exposing secrets. `stable_reference` derives only the opaque slot ID;
+`put`/`contains` never return secret material. Provider-owned
 `CredentialVerifier` callbacks are the only website-credential readers. AST tests prohibit model-visible
 `ai/` and future `assistant/` code from importing the credential package.
 

@@ -9,8 +9,14 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from .broker import AccessBroker, AccessUnavailableError
-from .methods import AccessMethod, AccessMethodRegistry, ReplacingAccessMethod
-from .models import AccessHandle, AccessRequest, AccessStatus, AccessStatusKind
+from .methods import (
+    AccessMethod,
+    AccessMethodRegistry,
+    ProviderScopedAccessMethod,
+    RehydratingAccessMethod,
+    ReplacingAccessMethod,
+)
+from .models import AccessHandle, AccessRequest, AccessStatus, AccessStatusKind, Permission
 from .verification import cache_is_valid, enforce_requested_permissions, project_status
 
 if TYPE_CHECKING:
@@ -87,6 +93,41 @@ class AccessService:
                     raise
                 self._connections[key] = _Connection(opened.method, opened.handle, status)
                 return status
+
+    async def rehydrate(self) -> None:
+        """Idempotently verify and restore durable single-account connections."""
+
+        async with self._lock:
+            for method in self._registry.methods:
+                if not isinstance(method, RehydratingAccessMethod):
+                    continue
+                for handle in method.stored_handles():
+                    key = self._key(handle.provider_id, handle.account_id)
+                    if key in self._connections:
+                        continue
+                    result = enforce_requested_permissions(
+                        await method.verify(handle), handle.permissions
+                    )
+                    self._connections[key] = _Connection(
+                        method,
+                        handle,
+                        project_status(
+                            handle,
+                            method.descriptor.method_id,
+                            result,
+                            now=self._clock(),
+                        ),
+                    )
+
+    def method_permissions(self, provider_id: str, method_id: str) -> frozenset[Permission]:
+        """Return declared permissions for one provider-supported method."""
+
+        method = self._registry.get(method_id)
+        if method is None or provider_id not in method.descriptor.supported_provider_ids:
+            raise AccessUnavailableError("provider_not_supported")
+        if isinstance(method, ProviderScopedAccessMethod):
+            return method.permissions_for(provider_id)
+        return frozenset(method.descriptor.capabilities)
 
     async def status(self, provider_id: str, account_id: str | None) -> AccessStatus:
         key = self._key(provider_id, account_id)

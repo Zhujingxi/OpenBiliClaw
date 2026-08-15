@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 import uuid
 from typing import TYPE_CHECKING, TypeVar
@@ -30,6 +31,29 @@ class CredentialVault:
         secret_id = f"cred_{uuid.uuid4().hex}"
         self._backend.set(secret_id, secret)
         return secret_id
+
+    def stable_reference(self, scope: str) -> str:
+        """Derive an opaque single-user slot for restart-safe credentials."""
+
+        digest = hashlib.sha256(f"openbiliclaw.access:{scope}".encode()).hexdigest()[:32]
+        return f"cred_{digest}"
+
+    def put(self, secret_id: str, secret: bytes) -> None:
+        """Create or replace a caller-owned opaque slot."""
+
+        self._validate_id(secret_id)
+        self._backend.set(secret_id, secret)
+
+    def contains(self, secret_id: str) -> bool:
+        """Check an opaque slot without exposing its bytes."""
+
+        self._validate_id(secret_id)
+        try:
+            secret = self._backend.get(secret_id)
+        except KeyError:
+            return False
+        secret[:] = b"\0" * len(secret)
+        return True
 
     def resolve(self, secret_id: str, callback: Callable[[memoryview], T]) -> T:
         """Expose a temporary read-only view only inside ``callback``."""

@@ -14,7 +14,7 @@
 - native → purpose-specific projection functions；
 - provider action semantics 与 verification；
 - 可选 observation proposal；
-- 可选 declarative credential recipe（plugin-assisted access）：domain、artifact 列表（cookie/storage key/header）、可选 warmup URL —— 纯数据，禁止可执行 payload。
+- 可选 `ProviderManifest.access_recipe`（plugin-assisted access）：normalized DNS domain 列表、typed artifact 列表（`cookie | local_storage | session_storage` + domain + name）、可选同域 HTTPS warmup URL、已落地 access method ID —— frozen 纯数据，禁止 executable payload/header/script。
 
 Content Integration 只拥有共享 identity、capability contracts、manifest validation、registry 和 tool budgeting。Provider 不得从 registry 发现/调用其他 providers，也不得 import Understanding、Recommendation、Assistant 或 Hosts。
 
@@ -24,7 +24,8 @@ Content Integration 只拥有共享 identity、capability contracts、manifest v
 2. 为每种 persisted native payload 声明 `NativeSchemaDescriptor(content_kind, schema_version)`；schema 变化时显式递增版本。
 3. 将外部 JSON/HTML 先转换为 provider-owned Pydantic model，再放入 `NativeContent.payload`。禁止 raw mapping。持久化记录恢复时，provider 需按 `schema_version` 重新校验自己的 payload model 后再构造 `NativeContent` —— envelope 自身不接受 raw dict。
 4. `ProviderManifest.capabilities` 只声明真实实现的方法；Composition 以 `ContentProviderRegistry.register()` 显式注册。
-5. Provider tests 必须调用：
+5. 仅在 target access method、表单与 verifier 已真实落地且 material 能泛化转换时声明 `access_recipe`。Artifact identity 必须唯一且引用已声明 domain；warmup URL 禁止 userinfo/fragment，必须是已声明域的 HTTPS URL。不得把 provider-specific signing、fetch logic、refresh schedule 或 credential value 放入 manifest；新增 recipe 不得要求 extension 发布 provider-specific code。
+6. Provider tests 必须调用：
 
 ```python
 assert validate_provider_contract(manifest, provider) == ()

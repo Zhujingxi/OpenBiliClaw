@@ -7,7 +7,7 @@
       "id": "openbiliclaw-firefox@whiteguo233.github.io",
       "data_collection_permissions": {
         "required": [
-          "none"
+          "websiteContent"
         ]
       },
       "strict_min_version": "140.0"
@@ -16,9 +16,17 @@
       "strict_min_version": "142.0"
     }
   },
+  "permissions": [
+    "cookies",
+    "scripting",
+    "tabs"
+  ],
   "host_permissions": [
     "http://127.0.0.1/*",
     "http://localhost/*"
+  ],
+  "optional_host_permissions": [
+    "https://*/*"
   ],
   "action": {
     "default_icon": {

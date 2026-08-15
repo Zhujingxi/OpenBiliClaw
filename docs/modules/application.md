@@ -7,7 +7,7 @@
 - model-free reads: source status, recommendation feed delivery, profile projection, provider search, content details, and job health, all with bounded pagination; feed delivery atomically records stable shown IDs before returning items;
 - mutations: connect/disconnect, typed observation import, feedback, profile edit, bounded recommendation refresh admission;
 - feedback validates the delivered shown record/content pair, resolves exploration attribution from the durable candidate (never client input), transitions shown → interacted, and commits its learning observation through an explicit unit of work; only a newly inserted feedback record invokes the optional reward/Understanding sink, preventing duplicate hypothesis/exploit/proposal credit; profile override + audit observation uses its own unit of work;
-- source connect verifies and stores credentials through Access before refreshing availability;
+- source connect verifies and stores credentials through Access before refreshing availability; `PluginAssistedAccess` serves provider recipe data and validates exact browser material before converging on the same connect/replace path;
 - pending actions store only typed declarative effect, identity, scope, safe preview, expiry, decision, and idempotency metadata; confirmation revalidates all of them. Content confirmation revalidates provider state; profile-revision confirmation dispatches to canonical `EditProfile`; `POST /v1/content/actions/reject` durably cancels even an expired pending action but conflicts after approval, and cannot execute either mutation;
 - recommendation refresh requests Core-owned job admission and never creates unmanaged tasks.
 
@@ -16,6 +16,7 @@
 | Surface | Workflow owner |
 |---|---|
 | source status/connect/disconnect | `GetSourceStatus`, `ConnectSource`, `DisconnectSource` |
+| plugin recipe/material | `PluginAssistedAccess.recipe`, `PluginAssistedAccess.submit` |
 | profile read/edit | `ShowProfile`, `EditProfile` |
 | recommendation feed/refresh/feedback | `GetRecommendations`, `RefreshRecommendations`, `RecordFeedback`, `RecordFeedbackForShown` |
 | observation batches/history imports | `RecordObservations` |

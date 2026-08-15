@@ -1,52 +1,61 @@
 <script setup lang="ts">
-import { CardRenderer, type CardView } from "@openbiliclaw/presentation";
 import { storeToRefs } from "pinia";
 import { ref } from "vue";
+import {
+  chromeArtifacts,
+  connectFromRecipe,
+  discoverRecipes,
+  openWarmup,
+  type ProviderRecipe,
+} from "./access-flow";
 import { useConnectionStore } from "./connection-store";
 
 const store = useConnectionStore();
 store.hydrate();
 const { backendUrl, deviceToken, state, error } = storeToRefs(store);
-const connectionCard: CardView = {
-  version: 1,
-  kind: "fallback",
-  providerLabel: "OpenBiliClaw",
-  availability: "available",
-  data: {
-    badge: "Local",
-    image_url: null,
-    provenance: {
-      native_schema_version: 1,
-      projected_at: new Date(0).toISOString(),
-      ref: {
-        provider_id: { value: "bilibili" },
-        provider_content_id: "runtime",
-        content_kind: { value: "article" },
-        canonical_url: "http://127.0.0.1:8420/",
-      },
-    },
-    ref: {
-      provider_id: { value: "bilibili" },
-      provider_content_id: "runtime",
-      content_kind: { value: "article" },
-      canonical_url: "http://127.0.0.1:8420/",
-    },
-    source_timestamp: new Date(0).toISOString(),
-    summary: "Connect this extension to the local OpenBiliClaw backend.",
-    title: "Local companion",
-  },
-};
 const draftUrl = ref(backendUrl.value);
 const draftToken = ref(deviceToken.value);
 const formError = ref<string>();
+const recipes = ref<ProviderRecipe[]>([]);
+const accessError = ref<string>();
+const accessStatus = ref<string>();
+const connecting = ref<string>();
+
+async function refreshRecipes(): Promise<void> {
+  recipes.value = await discoverRecipes(backendUrl.value, deviceToken.value);
+}
+
 function save(): void {
   try {
     store.configure(draftUrl.value, draftToken.value);
     formError.value = undefined;
-    void store.check();
+    void store
+      .check()
+      .then(refreshRecipes)
+      .catch(() => undefined);
   } catch (caught: unknown) {
     formError.value =
       caught instanceof Error ? caught.message : "Invalid connection settings";
+  }
+}
+
+async function connect(provider: ProviderRecipe): Promise<void> {
+  connecting.value = provider.providerId;
+  accessError.value = undefined;
+  accessStatus.value = undefined;
+  try {
+    await connectFromRecipe(
+      backendUrl.value,
+      deviceToken.value,
+      provider,
+      chromeArtifacts,
+    );
+    accessStatus.value = `${provider.providerId} connected`;
+  } catch (caught: unknown) {
+    accessError.value =
+      caught instanceof Error ? caught.message : "Connection failed";
+  } finally {
+    connecting.value = undefined;
   }
 }
 </script>
@@ -57,7 +66,6 @@ function save(): void {
       <h1 id="extension-title">OpenBiliClaw</h1>
       <p>Local recommendation companion</p>
     </header>
-    <CardRenderer :card="connectionCard" />
     <section aria-labelledby="connection-title">
       <h2 id="connection-title">Backend connection</h2>
       <form @submit.prevent="save">
@@ -72,11 +80,11 @@ function save(): void {
           />
         </label>
         <label>
-          Device token
+          Extension token
           <input
             v-model="draftToken"
             name="deviceToken"
-            aria-label="Device token"
+            aria-label="Extension token"
             type="password"
             autocomplete="off"
           />
@@ -85,6 +93,31 @@ function save(): void {
       </form>
       <p role="status" aria-live="polite">Status: {{ state }}</p>
       <p v-if="formError ?? error" role="alert">{{ formError ?? error }}</p>
+    </section>
+    <section v-if="recipes.length" aria-labelledby="provider-access-title">
+      <h2 id="provider-access-title">Provider access</h2>
+      <article v-for="provider in recipes" :key="provider.providerId">
+        <strong>{{ provider.providerId }}</strong>
+        <button
+          v-if="provider.recipe.warmup_url"
+          type="button"
+          class="secondary"
+          @click="openWarmup(provider.recipe, chromeArtifacts)"
+        >
+          Open login
+        </button>
+        <button
+          type="button"
+          :disabled="connecting === provider.providerId"
+          @click="connect(provider)"
+        >
+          {{ connecting === provider.providerId ? "Connecting…" : "Connect" }}
+        </button>
+      </article>
+      <p v-if="accessStatus" role="status" aria-live="polite">
+        {{ accessStatus }}
+      </p>
+      <p v-if="accessError" role="alert">{{ accessError }}</p>
     </section>
   </main>
 </template>
@@ -139,6 +172,19 @@ button {
   background: #3156d3;
   font-weight: 700;
   cursor: pointer;
+}
+article {
+  display: grid;
+  gap: 0.5rem;
+  margin-block: 0.75rem;
+}
+button.secondary {
+  color: #3156d3;
+  background: white;
+}
+button:disabled {
+  cursor: wait;
+  opacity: 0.65;
 }
 button:focus-visible,
 input:focus-visible {

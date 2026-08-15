@@ -12,7 +12,7 @@ import httpx
 import pytest
 from pydantic_ai.models.test import TestModel
 
-from openbiliclaw.access.models import CredentialAccessHandle, Permission
+from openbiliclaw.access.models import AccessStatusKind, CredentialAccessHandle, Permission
 from openbiliclaw.ai.providers.embeddings import EmbeddingBatch, EmbeddingService
 from openbiliclaw.ai.providers.embeddings.index import EmbeddingIndex
 from openbiliclaw.ai.providers.models import BuiltModel, ModelInstanceConfig
@@ -34,6 +34,8 @@ from openbiliclaw.core.config import AppSettings
 from openbiliclaw.core.health import HealthStatus
 from openbiliclaw.core.jobs import JobDecision
 from openbiliclaw.hosts.api.dependencies import DiagnosticResult, StartResult
+from openbiliclaw.infrastructure.credentials.keyring import ProtectedFileBackend
+from openbiliclaw.infrastructure.credentials.vault import CredentialVault
 from openbiliclaw.observations.models import ContentOpenedObservation, HostOpenPayload
 from openbiliclaw.observations.provenance import (
     ObservationProvenance,
@@ -329,6 +331,49 @@ async def test_production_graph_is_lazy_and_leak_free(tmp_path: Path) -> None:
     assert app.resources.database.closed
     assert app.resources.http.open_client_count == 0
     assert app.resources.events.subscriber_count == 0
+
+
+@pytest.mark.asyncio
+async def test_composition_start_rehydrates_preseeded_bilibili_cookie(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    credentials_path = tmp_path / "credentials.json"
+    vault = CredentialVault(ProtectedFileBackend(credentials_path))
+    reference = vault.stable_reference("builtin.manual:bilibili:account:none")
+    vault.put(reference, b'{"cookie":"SESSDATA=session-value; bili_jct=csrf-value"}')
+
+    class Transport:
+        async def __call__(
+            self,
+            method: str,
+            path: str,
+            query: str,
+            cookie: str | None,
+            body: bytes,
+        ) -> bytes:
+            del method, query, body
+            assert path == "/x/web-interface/nav"
+            assert cookie == "SESSDATA=session-value; bili_jct=csrf-value"
+            return b'{"code":0,"data":{"isLogin":true,"mid":1,"uname":"tester"}}'
+
+    monkeypatch.setattr(
+        "openbiliclaw.composition.build.keyring_or_file",
+        lambda path: ProtectedFileBackend(path),
+    )
+    monkeypatch.setattr("openbiliclaw.composition.providers.HttpxBilibiliTransport", Transport)
+    app = build_application(
+        AppSettings(content={"enabled": ("bilibili",)}),
+        options=BuildOptions(data_dir=tmp_path),
+    )
+    await app.start()
+    try:
+        facade = app.services.facade
+        assert facade is not None
+        result = await facade.source_status("bilibili", None)
+        assert result.status.state is AccessStatusKind.CONNECTED
+        assert result.status.method_id == "builtin.manual"
+    finally:
+        await app.stop()
 
 
 def test_composed_model_configuration_uses_runtime_paths(tmp_path: Path) -> None:

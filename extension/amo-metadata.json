@@ -2,8 +2,8 @@
   "categories": {"android": ["photos-music-videos"], "firefox": ["photos-music-videos"]},
   "default_locale": "zh-CN",
   "description": {
-    "en-US": "OpenBiliClaw is a local-first AI content companion. This reduced extension connects only to the loopback OpenBiliClaw backend configured by the user. It does not collect browsing activity, read cookies, execute provider tasks, load remote code, or send telemetry to project-operated servers.",
-    "zh-CN": "OpenBiliClaw 是本地优先的 AI 内容伙伴。此精简插件仅连接用户配置的本机 OpenBiliClaw 后端，不采集浏览行为、不读取 Cookie、不执行平台任务、不加载远程代码，也不向项目运营的服务器发送遥测。"
+    "en-US": "OpenBiliClaw is a local-first AI content companion. For provider access, this generic extension requests user approval for code-shipped recipe domains, reads only the declared Cookie or site-storage values, and sends them only to the user-configured loopback backend with an opaque extension token. It does not collect browsing activity, load remote provider code, or send credential material or telemetry to project-operated or other third-party servers.",
+    "zh-CN": "OpenBiliClaw 是本地优先的 AI 内容伙伴。连接内容平台时，此通用插件仅在用户批准代码内置配方声明的域名后，读取配方点名的 Cookie 或站点存储值，并携带不透明扩展令牌仅发送到用户配置的本机后端；它不采集浏览行为、不加载远程平台代码，也不向项目运营方或其他第三方服务器发送凭据材料或遥测。"
   },
   "homepage": {"en-US": "https://whiteguo233.github.io/OpenBiliClaw/", "zh-CN": "https://whiteguo233.github.io/OpenBiliClaw/"},
   "is_experimental": false,
@@ -12,7 +12,7 @@
   "slug": "openbiliclaw",
   "summary": {"en-US": "Local-first OpenBiliClaw backend companion", "zh-CN": "连接本地 OpenBiliClaw 后端的内容伙伴"},
   "version": {
-    "approval_notes": "The extension only connects to an explicitly configured loopback backend and stores its URL plus an opaque device token. It declares no content scripts and collects no browsing data. Reproducible build: from the repository root run `npm --prefix frontend ci`, `npm --prefix frontend run build --workspace @openbiliclaw/extension`, then `python scripts/extension_release.py package --firefox --no-build`. Review output is `artifacts/extension/firefox`.",
+    "approval_notes": "The extension stores its explicitly configured loopback backend URL plus an opaque extension token. Its generic access flow fetches code-shipped provider recipes from that backend, requests each recipe origin from the user, reads only the Cookie or local/session-storage names declared by the recipe, and submits those values only to the configured loopback backend with the extension token. It declares no content scripts, does not collect browsing history or arbitrary page content, and sends no credential material or telemetry to project-operated or other third-party servers. `websiteContent` honestly covers the recipe-declared Cookie/site-storage values transmitted to the user's own backend. Reproducible build: from the repository root run `npm --prefix frontend ci`, `npm --prefix frontend run build --workspace @openbiliclaw/extension`, then `python scripts/extension_release.py package --firefox --no-build`. Review output is `artifacts/extension/firefox`.",
     "license": "MIT",
     "release_notes": {"en-US": "Replaces the legacy session/task extension with a reduced Vue shell for local backend connection.", "zh-CN": "用仅连接本地后端的精简 Vue shell 替换旧会话/任务插件。"}
   }

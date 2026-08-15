@@ -56,6 +56,73 @@ class ChannelDescriptor(StrictBaseModel):
     auth_required: bool
 
 
+class AccessArtifactKind(StrEnum):
+    """Generic browser primitive required by a credential recipe."""
+
+    COOKIE = "cookie"
+    LOCAL_STORAGE = "local_storage"
+    SESSION_STORAGE = "session_storage"
+
+
+class AccessArtifact(StrictBaseModel):
+    """One declarative browser artifact; never contains a credential value."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: AccessArtifactKind
+    domain: str = Field(min_length=1, max_length=253)
+    name: str = Field(min_length=1, max_length=256, pattern=r"^[^\x00-\x1f\x7f]+$")
+
+
+class AccessRecipe(StrictBaseModel):
+    """Provider-owned data recipe consumed by the generic browser extension."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    domains: tuple[str, ...] = Field(min_length=1)
+    artifacts: tuple[AccessArtifact, ...] = Field(min_length=1)
+    warmup_url: str | None = Field(default=None, max_length=2048)
+    target_method_id: str = Field(pattern=r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)+$")
+
+    @model_validator(mode="after")
+    def _pure_data_contract(self) -> AccessRecipe:
+        if len(self.domains) != len(set(self.domains)):
+            raise ValueError("duplicate access recipe domain")
+        for domain in self.domains:
+            parsed = urlsplit(f"https://{domain}")
+            labels = domain.split(".")
+            if (
+                domain != domain.lower()
+                or domain.endswith(".")
+                or parsed.hostname != domain
+                or parsed.netloc != domain
+                or len(domain) > 253
+                or any(
+                    not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+                    for label in labels
+                )
+            ):
+                raise ValueError("access recipe domains must be normalized DNS hostnames")
+            try:
+                ip_address(domain)
+            except ValueError:
+                pass
+            else:
+                raise ValueError("access recipe domains must not be IP literals")
+        identities = tuple((item.kind, item.domain, item.name) for item in self.artifacts)
+        if len(identities) != len(set(identities)):
+            raise ValueError("duplicate access recipe artifact")
+        if any(item.domain not in self.domains for item in self.artifacts):
+            raise ValueError("access recipe artifact domain must be declared")
+        if self.warmup_url is not None:
+            warmup = urlsplit(self.warmup_url)
+            if warmup.scheme != "https" or warmup.hostname not in self.domains:
+                raise ValueError("access recipe warmup URL must use a declared HTTPS domain")
+            if warmup.username or warmup.password or warmup.fragment:
+                raise ValueError("access recipe warmup URL contains forbidden components")
+        return self
+
+
 class NativeSchemaDescriptor(StrictBaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -86,6 +153,7 @@ class ProviderManifest(StrictBaseModel):
     channels: tuple[ChannelDescriptor, ...] = ()
     image_hosts: tuple[str, ...] = ()
     image_headers: dict[str, str] = Field(default_factory=dict)
+    access_recipe: AccessRecipe | None = None
     availability: ProviderAvailability
 
     @field_validator("image_hosts")

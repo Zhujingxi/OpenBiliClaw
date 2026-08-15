@@ -21,6 +21,7 @@ from openbiliclaw.application.edit_profile import (
     EXPLORATION_DISABLED_CLAIM_ID,
     EditProfileCommand,
 )
+from openbiliclaw.application.plugin_access import SubmittedAccessArtifact
 from openbiliclaw.application.record_feedback import RecordFeedbackCommand, RecordFeedbackResult
 from openbiliclaw.application.record_observation import RecordObservationsCommand
 from openbiliclaw.application.refresh_recommendations import RefreshRecommendationsCommand
@@ -33,6 +34,7 @@ from openbiliclaw.assistant.models import (
     ConversationMessage,
 )
 from openbiliclaw.content.integration.identity import ContentRef
+from openbiliclaw.content.integration.manifest import AccessRecipe
 from openbiliclaw.content.integration.projections import CardData, ContentPreview
 from openbiliclaw.core._pydantic import StrictBaseModel
 from openbiliclaw.core.config import CapabilitySettings
@@ -86,6 +88,19 @@ class SourceListResponse(TransportModel):
 
 class SourceFormResponse(TransportModel):
     form: ConnectionForm
+
+
+class AccessRecipeResponse(TransportModel):
+    recipe: AccessRecipe
+
+
+class AccessMaterialRequest(TransportModel):
+    artifacts: tuple[SubmittedAccessArtifact, ...] = Field(min_length=1, max_length=64)
+
+    @field_validator("artifacts", mode="before")
+    @classmethod
+    def _coerce_artifacts(cls, value: object) -> object:
+        return tuple(value) if isinstance(value, list) else value
 
 
 class ConnectSourceRequest(TransportModel):

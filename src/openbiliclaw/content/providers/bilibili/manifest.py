@@ -2,6 +2,9 @@
 
 from openbiliclaw.content.integration.identity import ContentKind, ProviderId
 from openbiliclaw.content.integration.manifest import (
+    AccessArtifact,
+    AccessArtifactKind,
+    AccessRecipe,
     ActionDescriptor,
     BiasClass,
     CapabilityKind,
@@ -46,5 +49,22 @@ BILIBILI_MANIFEST = ProviderManifest(
     ),
     image_hosts=("hdslb.com",),
     image_headers={"referer": "https://www.bilibili.com"},
+    access_recipe=AccessRecipe(
+        domains=("bilibili.com", "www.bilibili.com"),
+        artifacts=(
+            AccessArtifact(
+                kind=AccessArtifactKind.COOKIE,
+                domain="bilibili.com",
+                name="SESSDATA",
+            ),
+            AccessArtifact(
+                kind=AccessArtifactKind.COOKIE,
+                domain="bilibili.com",
+                name="bili_jct",
+            ),
+        ),
+        warmup_url="https://www.bilibili.com/",
+        target_method_id="builtin.manual",
+    ),
     availability=ProviderAvailability.AVAILABLE,
 )

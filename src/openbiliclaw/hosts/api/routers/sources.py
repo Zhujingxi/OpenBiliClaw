@@ -3,10 +3,14 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Query
 
 from openbiliclaw.access.models import AccessRequest
+from openbiliclaw.application.errors import ApplicationError, ApplicationErrorCode
+from openbiliclaw.application.plugin_access import SubmitAccessMaterialCommand
 from openbiliclaw.application.sources import ConnectSourceCommand, DisconnectSourceCommand
 
 from ..dependencies import HostDependencies, get_dependencies
 from ..schemas.models import (
+    AccessMaterialRequest,
+    AccessRecipeResponse,
     ConnectSourceRequest,
     DisconnectSourceRequest,
     SourceFormResponse,
@@ -57,6 +61,30 @@ async def source_form(
     dependencies: HostDependencies = Depends(get_dependencies),
 ) -> SourceFormResponse:
     return SourceFormResponse(form=await dependencies.facade.source_form(provider_id, method_id))
+
+
+@router.get("/{provider_id}/access-recipe", response_model=AccessRecipeResponse)
+async def access_recipe(
+    provider_id: str,
+    dependencies: HostDependencies = Depends(get_dependencies),
+) -> AccessRecipeResponse:
+    if dependencies.plugin_access is None:
+        raise ApplicationError(ApplicationErrorCode.UNAVAILABLE, "plugin access is unavailable")
+    return AccessRecipeResponse(recipe=dependencies.plugin_access.access_recipe(provider_id))
+
+
+@router.post("/{provider_id}/access-material", response_model=SourceMutationResponse)
+async def submit_access_material(
+    provider_id: str,
+    body: AccessMaterialRequest,
+    dependencies: HostDependencies = Depends(get_dependencies),
+) -> SourceMutationResponse:
+    if dependencies.plugin_access is None:
+        raise ApplicationError(ApplicationErrorCode.UNAVAILABLE, "plugin access is unavailable")
+    status = await dependencies.plugin_access.submit_access_material(
+        SubmitAccessMaterialCommand(provider_id=provider_id, artifacts=body.artifacts)
+    )
+    return SourceMutationResponse(status=status)
 
 
 @router.post("/connect", response_model=SourceMutationResponse)

@@ -91,7 +91,8 @@ class ManualAccessMethod:
         if submission is None:
             raise AccessUnavailableError("manual_submission_required")
         validated = spec.form.validate_submission(submission)
-        credential_ref = self._vault.store(self._encode(validated))
+        credential_ref = self._credential_ref(request.provider_id, request.account_id)
+        self._vault.put(credential_ref, self._encode(validated))
         return CredentialAccessHandle(
             provider_id=request.provider_id,
             account_id=request.account_id,
@@ -146,6 +147,30 @@ class ManualAccessMethod:
             revision=handle.revision + 1,
         )
 
+    def permissions_for(self, provider_id: ProviderId) -> frozenset[Permission]:
+        spec = self._specs.get(provider_id)
+        if spec is None:
+            raise AccessUnavailableError("provider_not_supported")
+        return spec.capabilities
+
+    def stored_handles(self) -> tuple[CredentialAccessHandle, ...]:
+        """Reconstruct single-account handles whose secret slots survived restart."""
+
+        handles: list[CredentialAccessHandle] = []
+        for provider_id, spec in self._specs.items():
+            credential_ref = self._credential_ref(provider_id, None)
+            if self._vault.contains(credential_ref):
+                handles.append(
+                    CredentialAccessHandle(
+                        provider_id=provider_id,
+                        account_id=None,
+                        permissions=spec.capabilities,
+                        credential_ref=credential_ref,
+                        revision=1,
+                    )
+                )
+        return tuple(handles)
+
     async def refresh(self, handle: AccessHandle) -> AccessHandle:
         raise AccessUnavailableError("refresh_not_supported")
 
@@ -158,6 +183,10 @@ class ManualAccessMethod:
         if spec is None:
             raise AccessUnavailableError("provider_not_supported")
         return spec
+
+    def _credential_ref(self, provider_id: str, account_id: str | None) -> str:
+        account_scope = "none" if account_id is None else f"id:{account_id}"
+        return self._vault.stable_reference(f"builtin.manual:{provider_id}:account:{account_scope}")
 
     @staticmethod
     def _encode(submission: ValidatedSubmission) -> bytes:

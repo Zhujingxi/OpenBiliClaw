@@ -4,16 +4,17 @@
 
 ## Scope
 
-扩展保留两项 presentation/host 能力：
+扩展保留 presentation/host 与通用凭据抓取能力：
 
-- popup/sidebar 配置 loopback backend URL 与 opaque device token；
-- 显示 bounded connection state，并通过 typed backend API 使用共享 presentation contract。
+- popup/sidebar 配置 loopback backend URL 与 opaque extension token，并显示 bounded connection state；
+- 通过 typed backend API 使用共享 presentation contract；
+- 从后端发现代码内置的 provider access recipe，在用户逐 origin 批准后，只读取 recipe 点名的 Cookie 或 local/session-storage 值，并仅携带 extension token 回传到该 loopback backend。
 
-浏览器站点 Cookie、登录态抓取、MAIN-world tap、provider task dispatch、browser-session execution 与跨站行为采集已删除。未来浏览器观察必须通过签名/device-authenticated `ObservationProvider` 契约重新进入，不能在 presentation shell 中恢复。
+扩展不包含 provider-specific 分支、远程 provider task 代码、后台浏览自动化、任意页面内容/行为采集或第三方凭据传输。每个 provider 域名权限都是 optional host permission，必须由用户在连接时批准。
 
-## Message boundary
+## API and recipe boundary
 
-`shared/messages.ts` 定义 closed discriminated union：`connection.get`、`connection.set`、`connection.check`、`connection.status`。所有 runtime/window message 先执行 exact-key、discriminator、bounded string 与 loopback URL validation；未知字段、provider task 和 session payload 被拒绝。
+`popup/access-flow.ts` 对 `/v1/sources` 与 `/v1/sources/{id}/access-recipe` 响应执行 bounded 结构校验，并拒绝非规范域名、未声明 artifact、非 HTTPS warmup URL 与未知 artifact kind。`POST /v1/sources/{id}/access-material` 只接受该冻结 recipe 声明的材料；请求携带 opaque extension bearer token，目标 URL 由已验证的 loopback connection setting 构造。扩展不使用 runtime/window message protocol。
 
 ## Build and package
 

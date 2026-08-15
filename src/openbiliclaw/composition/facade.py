@@ -16,6 +16,10 @@ from openbiliclaw.application.content_actions import (
     RejectPendingActionCommand,
 )
 from openbiliclaw.application.errors import ApplicationError, ApplicationErrorCode
+from openbiliclaw.application.plugin_access import (
+    PluginAssistedAccess,
+    SubmitAccessMaterialCommand,
+)
 from openbiliclaw.application.reads import (
     ContentDetailsResult,
     GetContentDetails,
@@ -86,6 +90,7 @@ if TYPE_CHECKING:
     )
     from openbiliclaw.composition.assistant import AssistantController
     from openbiliclaw.content.integration.actions import ActionResult
+    from openbiliclaw.content.integration.manifest import AccessRecipe
     from openbiliclaw.content.integration.registry import ContentProviderRegistry
     from openbiliclaw.core.config import AppSettings
     from openbiliclaw.core.health import HealthSnapshot
@@ -176,6 +181,7 @@ class CompositionFacade:
         self._sources = ListSources(provider_ids, access)
         self._connect = ConnectSource(access, _Availability(), idempotency)
         self._disconnect = DisconnectSource(access, idempotency)
+        self._plugin_access = PluginAssistedAccess(registry, access)
         self._recommendations = GetRecommendations(recommendations, clock=lambda: datetime.now(UTC))
         self._record_observations = RecordObservations(observations)
         self._profile = ShowProfile(understanding)
@@ -244,6 +250,12 @@ class CompositionFacade:
 
     async def connect_source(self, command: ConnectSourceCommand) -> ConnectSourceResult:
         return await self._connect(command)
+
+    def access_recipe(self, provider_id: str) -> AccessRecipe:
+        return self._plugin_access.recipe(provider_id)
+
+    async def submit_access_material(self, command: SubmitAccessMaterialCommand) -> AccessStatus:
+        return await self._plugin_access.submit(command)
 
     async def disconnect_source(self, command: DisconnectSourceCommand) -> AccessStatus:
         return await self._disconnect(command)

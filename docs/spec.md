@@ -13,6 +13,7 @@ A local-first cross-platform content discovery application with deterministic le
 ```text
 Desktop/mobile Vue ─┐
 Extension Vue ───────┼─ typed /v1 API ─ Application workflows ─ product modules
+ recipe-driven grab ─┘         └─ provider form/verifier ─ opaque vault slot
 CLI workflows/export/import ─┘               │               ▲
 Assistant correction ─ propose → pending approval → EditProfile ┘
                                              ▼               │

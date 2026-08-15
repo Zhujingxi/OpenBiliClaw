@@ -4,11 +4,17 @@
   "version": "0.3.201",
   "description": "跨平台内容发现 AI Agent — 画像、推荐、反馈与聊天",
   "permissions": [
-    "sidePanel"
+    "cookies",
+    "scripting",
+    "sidePanel",
+    "tabs"
   ],
   "host_permissions": [
     "http://127.0.0.1/*",
     "http://localhost/*"
+  ],
+  "optional_host_permissions": [
+    "https://*/*"
   ],
   "action": {
     "default_icon": {

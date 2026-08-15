@@ -22,15 +22,9 @@ API keys and provider secrets are stored behind `CredentialVault`, preferably us
 
 ## Browser extension
 
-The current extension is a presentation client for the configured OpenBiliClaw backend. It stores only the backend URL and an opaque device token. It does not:
+The extension is a presentation client and generic credential grabber for the configured loopback OpenBiliClaw backend. It stores the backend URL and an opaque extension token in its own local storage. When the user chooses to connect a provider, it requests that provider origin explicitly, then reads only the Cookie or site-storage entries named by a code-shipped provider recipe. It sends those short-lived values only to the user-configured loopback backend with the extension token; they are not sent to OpenBiliClaw-operated or other third-party services.
 
-- read or transmit website cookies;
-- collect browsing behavior or page contents;
-- inject page scripts or inspect logged-in sessions;
-- execute provider tasks or cross-site requests;
-- serve or download models.
-
-Its declarative manifests request only local backend host access and storage needed for those connection settings.
+The extension does not collect browsing history, observe arbitrary page contents or behavior, run remote provider code, or serve/download models. Its manifest grants the local backend hosts and browser primitives needed by the generic recipe flow; provider-site host access is optional and requires per-origin user approval.
 
 ## Logs and telemetry
 

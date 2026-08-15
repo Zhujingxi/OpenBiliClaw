@@ -14,6 +14,7 @@ if TYPE_CHECKING:
         AccessHandle,
         AccessMethodDescriptor,
         AccessRequest,
+        Permission,
         ProviderId,
         VerificationResult,
     )
@@ -46,6 +47,18 @@ class ReplacingAccessMethod(AccessMethod, Protocol):
         request: AccessRequest,
         submission: Mapping[str, str],
     ) -> AccessHandle: ...
+
+
+@runtime_checkable
+class ProviderScopedAccessMethod(AccessMethod, Protocol):
+    def permissions_for(self, provider_id: ProviderId) -> frozenset[Permission]: ...
+
+
+@runtime_checkable
+class RehydratingAccessMethod(AccessMethod, Protocol):
+    """Method that can reconstruct handles from durable opaque slots."""
+
+    def stored_handles(self) -> tuple[AccessHandle, ...]: ...
 
 
 class AccessMethodRegistry:

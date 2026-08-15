@@ -120,7 +120,7 @@ on triggers only; index recall quality reported against text-query baseline.
 
 Goal: credentialed depth and content-level quality judgment.
 
-- [ ] **Plugin-assisted access**: provider-declared declarative credential recipes (domain,
+- [x] **Plugin-assisted access**: provider-declared declarative credential recipes (domain,
    artifact list, warmup URL — data only); `GET /sources/{id}/access-recipe` +
    `POST /sources/{id}/access-material`; extension = generic grabber, one token,
    zero per-source logic; verification reuses the existing verifier/vault boundary.

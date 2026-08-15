@@ -6,6 +6,9 @@ import pytest
 
 from openbiliclaw.content.integration.identity import ContentKind, ProviderId
 from openbiliclaw.content.integration.manifest import (
+    AccessArtifact,
+    AccessArtifactKind,
+    AccessRecipe,
     BiasClass,
     CapabilityKind,
     ChannelDescriptor,
@@ -82,6 +85,41 @@ def test_manifest_validates_declarative_image_proxy_configuration() -> None:
                 image_hosts=(invalid,),
                 availability=ProviderAvailability.AVAILABLE,
             )
+
+
+def test_access_recipe_rejects_undeclared_domains_and_executable_fields() -> None:
+    with pytest.raises(ValueError, match="domain must be declared"):
+        AccessRecipe(
+            domains=("example.com",),
+            artifacts=(
+                AccessArtifact(
+                    kind=AccessArtifactKind.COOKIE,
+                    domain="other.example",
+                    name="session",
+                ),
+            ),
+            target_method_id="builtin.manual",
+        )
+    with pytest.raises(ValueError, match="Extra inputs"):
+        AccessRecipe.model_validate(
+            {
+                "domains": ["example.com"],
+                "artifacts": [{"kind": "cookie", "domain": "example.com", "name": "session"}],
+                "target_method_id": "builtin.manual",
+                "script": "fetch('https://example.com')",
+            }
+        )
+
+
+def test_bilibili_declares_generic_cookie_access_recipe() -> None:
+    recipe = BILIBILI_MANIFEST.access_recipe
+    assert recipe is not None
+    assert recipe.target_method_id == "builtin.manual"
+    assert recipe.warmup_url == "https://www.bilibili.com/"
+    assert {(item.kind.value, item.domain, item.name) for item in recipe.artifacts} == {
+        ("cookie", "bilibili.com", "SESSDATA"),
+        ("cookie", "bilibili.com", "bili_jct"),
+    }
 
 
 def test_all_production_manifests_declare_channels_iff_feed_is_advertised() -> None:

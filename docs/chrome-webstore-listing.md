@@ -20,9 +20,9 @@ OpenBiliClaw local backend companion: private cross-source recommendations, prof
 ```text
 OpenBiliClaw is a local-first, open-source personalized content discovery application. This extension is its compact browser-side presentation client.
 
-It connects only to the OpenBiliClaw backend address configured by the user, shows typed recommendation/profile/Assistant data, and stores the backend URL plus an opaque device token.
+It connects only to the loopback OpenBiliClaw backend address configured by the user, shows typed recommendation/profile/Assistant data, and stores the backend URL plus an opaque extension token.
 
-The extension does not read website Cookie values, collect browsing behavior, inject provider task scripts, execute cross-site content requests, or serve models. Content providers and external model services are connected by the backend through their explicit typed contracts.
+For plugin-assisted provider access, a code-shipped backend recipe declares the exact provider domains and Cookie or site-storage names required. The extension requests each origin from the user, reads only those declared values after approval, and sends them only to the configured loopback backend with the extension token. It does not collect browsing history or arbitrary page content, load remote provider code, or transfer credential material to OpenBiliClaw-operated or other third-party services.
 
 Supported backend content providers include B站, 小红书, 抖音, YouTube, X, 知乎, Reddit, Linux.do, Bangumi, and V2EX. Individual capabilities depend on each provider's current manifest; degraded providers fail closed rather than emulating unsupported access.
 
@@ -33,12 +33,12 @@ Install and start the backend first, then open the extension and configure its b
 
 ## Privacy declarations
 
-- Data usage: backend connection URL and opaque device token only.
-- Host access: configured local backend only.
-- No website Cookie access.
-- No browsing-history or page-content collection.
-- No advertising, analytics, sale, or unrelated transfer of user data.
-- No provider task/background-tab execution.
+- Data usage: backend connection URL, opaque extension token, and only the provider credential values named by a code-shipped recipe.
+- Host access: configured loopback backend plus recipe-declared provider origins only after user approval.
+- Declared Cookie/site-storage values are transmitted only to the user's loopback backend for provider verification and vault storage.
+- No browsing-history or arbitrary page-content collection.
+- No advertising, analytics, sale, or transfer of credential material to OpenBiliClaw-operated or other third-party services.
+- No remote provider task code or background browsing automation.
 
 ## Screenshot upload order
 

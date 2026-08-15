@@ -3,7 +3,7 @@
 A local-first, type-safe cross-platform content discovery and recommendation application.
 
 ```text
-Vue web / extension → typed FastAPI /v1 → Application workflows
+Vue web / recipe-driven extension → typed FastAPI /v1 → Application workflows
 Assistant correction → scoped pending approval → EditProfile ─┤
                                       ├→ Observations → Understanding
 Content Providers ← Provider Access ←─└→ Search/Feeds → Semantic Recall → Shadow Brief → Seeded Allocation → Constrained Selection
@@ -24,7 +24,7 @@ Open http://127.0.0.1:8420. Docker uses the same `openbiliclaw serve` entrypoint
 
 ## Current features
 
-- Explicit anonymous/manual-secret Provider Access; secrets remain in the credential vault.
+- Explicit anonymous/manual/plugin-assisted Provider Access; generic recipe capture converges on the verifier/vault and reconnects after restart.
 - Eleven first-party content provider packages behind validated capabilities.
 - Immutable observations, canonical understanding, and one supervised proactive recommendation pipeline.
 - Optional Assistant/model routing plus a durable semantic index and adjacent recall through one unified PydanticAI-native provider path; the app does not serve models.

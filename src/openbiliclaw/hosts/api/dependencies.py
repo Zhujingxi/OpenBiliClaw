@@ -20,6 +20,7 @@ from openbiliclaw.application.content_actions import (
     RejectPendingActionCommand,
 )
 from openbiliclaw.application.edit_profile import EditProfileCommand, EditProfileResult
+from openbiliclaw.application.plugin_access import SubmitAccessMaterialCommand
 from openbiliclaw.application.reads import (
     ContentDetailsResult,
     JobHealthResult,
@@ -41,6 +42,7 @@ from openbiliclaw.application.sources import (
     DisconnectSourceCommand,
 )
 from openbiliclaw.assistant.models import AssistantOutput, Conversation, ConversationMessage
+from openbiliclaw.content.integration.manifest import AccessRecipe
 from openbiliclaw.core._pydantic import StrictBaseModel
 from openbiliclaw.observations.service import RecordBatchResult
 
@@ -143,6 +145,13 @@ class HostFacade(Protocol):
     async def start(self) -> StartResult: ...
 
 
+class PluginAccessHost(Protocol):
+    def access_recipe(self, provider_id: str) -> AccessRecipe: ...
+    async def submit_access_material(
+        self, command: SubmitAccessMaterialCommand
+    ) -> AccessStatus: ...
+
+
 class AssistantTurnInput(Protocol):
     conversation_id: str
     text: str
@@ -167,6 +176,7 @@ class HostDependencies:
     models: ModelConfiguration | None = None
     auth_tokens: AuthTokenService | None = None
     media_proxy: MediaProxy | None = None
+    plugin_access: PluginAccessHost | None = None
     websocket_slots: asyncio.Semaphore = field(init=False)
 
     def __post_init__(self) -> None:

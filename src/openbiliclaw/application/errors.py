@@ -4,6 +4,7 @@ from enum import StrEnum
 
 
 class ApplicationErrorCode(StrEnum):
+    VALIDATION = "validation"
     UNAUTHORIZED = "unauthorized"
     FORBIDDEN = "forbidden"
     NOT_FOUND = "not_found"

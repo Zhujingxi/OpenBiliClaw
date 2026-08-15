@@ -217,6 +217,22 @@ class _RefreshSupervisor:
         return self._supervisor.trigger(replace(job, run=replenish))
 
 
+class _AccessRehydration:
+    def __init__(self, access: AccessService) -> None:
+        self._access = access
+        self._running = False
+
+    async def start(self) -> None:
+        await self._access.rehydrate()
+        self._running = True
+
+    async def stop(self) -> None:
+        self._running = False
+
+    async def ready(self) -> bool:
+        return self._running
+
+
 class _ProviderReadiness:
     def __init__(self, providers: ProviderGraph) -> None:
         self._providers = providers
@@ -458,6 +474,11 @@ def build_application(
                 optional=True,
             ),
             RuntimeComponent(
+                "access.rehydration",
+                ComponentStage.SERVICE,
+                _AccessRehydration(access),
+            ),
+            RuntimeComponent(
                 "core.jobs",
                 ComponentStage.CORE_JOBS,
                 ScheduledJobsLifecycle(supervisor, jobs),
@@ -590,6 +611,7 @@ def build_application(
         lifespan=lifecycle,
         auth_tokens=AuthTokenService(SqliteAuthTokenRepository(database)),
         media_proxy=MediaProxy(providers.registry.manifests(), http),
+        plugin_access=facade,
         models=FileModelConfiguration(
             settings=settings,
             config_path=options.config_path,

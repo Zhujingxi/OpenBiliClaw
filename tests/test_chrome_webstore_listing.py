@@ -28,9 +28,10 @@ def test_store_listing_names_all_supported_platforms_and_local_backend() -> None
         assert label in text
     assert "local backend" in text
     assert "User data remains in the configured local backend data directory" in text
-    assert "No website Cookie access" in text
-    assert "No browsing-history or page-content collection" in text
-    assert "No provider task/background-tab execution" in text
+    assert "only the provider credential values named by a code-shipped recipe" in text
+    assert "only to the user's loopback backend" in text
+    assert "No browsing-history or arbitrary page-content collection" in text
+    assert "No remote provider task code or background browsing automation" in text
 
 
 def test_store_listing_assets_have_stable_order_dimensions_and_visual_detail() -> None:

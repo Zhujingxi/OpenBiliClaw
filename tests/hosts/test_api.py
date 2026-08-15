@@ -28,6 +28,7 @@ from openbiliclaw.application.content_actions import (
 )
 from openbiliclaw.application.edit_profile import EditProfileCommand, EditProfileResult
 from openbiliclaw.application.errors import ApplicationError, ApplicationErrorCode
+from openbiliclaw.application.plugin_access import SubmitAccessMaterialCommand
 from openbiliclaw.application.reads import (
     ContentDetailsResult,
     GetContentDetails,
@@ -67,12 +68,14 @@ from openbiliclaw.content.integration.actions import ActionResult
 from openbiliclaw.content.integration.capabilities import ContentPage, SearchQuery
 from openbiliclaw.content.integration.errors import ContentIntegrationError, IntegrationErrorCode
 from openbiliclaw.content.integration.identity import ContentKind, ContentRef, ProviderId
+from openbiliclaw.content.integration.manifest import AccessRecipe
 from openbiliclaw.content.integration.native import NativeContent
 from openbiliclaw.content.integration.projections import (
     CardData,
     ContentPreview,
     ProjectionProvenance,
 )
+from openbiliclaw.content.providers.bilibili.manifest import BILIBILI_MANIFEST
 from openbiliclaw.core._pydantic import StrictBaseModel
 from openbiliclaw.core.health import HealthSnapshot, HealthStatus
 from openbiliclaw.core.jobs import JobDecision
@@ -80,6 +83,7 @@ from openbiliclaw.hosts.api import HostDependencies, HostSecurityPolicy, create_
 from openbiliclaw.hosts.api.dependencies import (
     AssistantTurnInput,
     DiagnosticResult,
+    PluginAccessHost,
     StartResult,
 )
 from openbiliclaw.hosts.api.schemas.models import (
@@ -373,15 +377,88 @@ class Events:
         return tuple(event for event in events if event.event_id > after)[:limit]
 
 
+@dataclass(slots=True)
+class PluginAccess:
+    submitted: SubmitAccessMaterialCommand | None = None
+    missing: bool = False
+
+    def access_recipe(self, provider_id: str) -> AccessRecipe:
+        if self.missing or provider_id != "bilibili":
+            raise ApplicationError(ApplicationErrorCode.NOT_FOUND, "access recipe not found")
+        assert BILIBILI_MANIFEST.access_recipe is not None
+        return BILIBILI_MANIFEST.access_recipe
+
+    async def submit_access_material(self, command: SubmitAccessMaterialCommand) -> AccessStatus:
+        self.submitted = command
+        return STATUS
+
+
 def client(
-    facade: Facade, *, token: str | None = None, events: Events | None = None, **policy: object
+    facade: Facade,
+    *,
+    token: str | None = None,
+    events: Events | None = None,
+    plugin_access: PluginAccessHost | None = None,
+    **policy: object,
 ) -> httpx.AsyncClient:
     security = HostSecurityPolicy(bearer_token=token, **policy)
-    app = create_app(HostDependencies(facade=facade, security=security, events=events or Events()))
+    app = create_app(
+        HostDependencies(
+            facade=facade,
+            security=security,
+            events=events or Events(),
+            plugin_access=plugin_access,
+        )
+    )
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
 
 
 MUTATION_HEADERS = {"X-Device-ID": "d", "X-CSRF-Token": "d"}
+
+
+async def test_plugin_recipe_served_material_forwarded_and_missing_is_typed() -> None:
+    plugin = PluginAccess()
+    async with client(Facade(), plugin_access=plugin) as api:
+        recipe = await api.get("/v1/sources/bilibili/access-recipe")
+        missing = await api.get("/v1/sources/v2ex/access-recipe")
+        submitted = await api.post(
+            "/v1/sources/bilibili/access-material",
+            json={
+                "artifacts": [
+                    {
+                        "kind": "cookie",
+                        "domain": "bilibili.com",
+                        "name": "SESSDATA",
+                        "value": "session",
+                    },
+                    {
+                        "kind": "cookie",
+                        "domain": "bilibili.com",
+                        "name": "bili_jct",
+                        "value": "csrf",
+                    },
+                ]
+            },
+            headers=MUTATION_HEADERS,
+        )
+    assert recipe.status_code == submitted.status_code == 200, submitted.text
+    assert recipe.json()["recipe"]["target_method_id"] == "builtin.manual"
+    assert missing.status_code == 404
+    assert plugin.submitted is not None
+    assert plugin.submitted.artifacts[0].value.get_secret_value() == "session"
+
+
+async def test_plugin_recipe_and_material_require_existing_bearer_auth() -> None:
+    plugin = PluginAccess()
+    async with client(Facade(), token="extension-token", plugin_access=plugin) as api:
+        recipe = await api.get("/v1/sources/bilibili/access-recipe")
+        material = await api.post(
+            "/v1/sources/bilibili/access-material",
+            json={"artifacts": []},
+            headers=MUTATION_HEADERS,
+        )
+    assert recipe.status_code == material.status_code == 401
+    assert plugin.submitted is None
 
 
 async def test_source_connect_passes_provider_form_submission() -> None:

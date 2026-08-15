@@ -5,7 +5,6 @@
   "type": "module",
   "dependencies": {
     "@openbiliclaw/api-client": "0.0.0",
-    "@openbiliclaw/presentation": "0.0.0",
     "pinia": "3.0.4",
     "vue": "3.5.25"
   },

@@ -20,9 +20,11 @@ def test_docs_homepage_mentions_reddit_bangumi_and_v2ex_sources() -> None:
     assert "V2EX 推荐" in html
     assert "sourceV2exTitle" in html
     assert "sourceV2exText" in html
-    assert "不采集浏览行为、不读取网站 Cookie，也不执行登录态任务" in html
+    assert "仅在用户批准配方声明的域名后读取代码内置配方点名的 Cookie" in html
+    assert "只回传到用户配置的本机后端" in html
+    assert "不向项目方或其他第三方发送凭据" in html
     assert "Zhihu, Reddit, Bangumi, V2EX, and Web sources" in html
-    # The reduced extension is a backend client only: no login bridge or capture.
+    # The extension uses declarative credential recipes, not behavior capture or task bridges.
     assert "行为采集" not in html
     assert "登录态任务桥" not in html
     assert "/m/" not in html

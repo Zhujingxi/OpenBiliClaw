@@ -254,6 +254,11 @@ def build_providers(enabled: tuple[str, ...], vault: CredentialVault) -> Provide
             degraded.append(provider_id)
             continue
         built = builder()
+        recipe = built.manifest.access_recipe
+        if recipe is not None and (
+            built.manual is None or built.manual.form.method_id != recipe.target_method_id
+        ):
+            raise ValueError("access recipe target method is not implemented")
         registry.register(built.manifest, built.implementation)
         active.append(provider_id)
         if built.manual is not None:

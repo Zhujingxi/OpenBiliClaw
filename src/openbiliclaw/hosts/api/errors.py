@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from fastapi.exceptions import RequestValidationError
 
 _STATUS: dict[ApplicationErrorCode, tuple[int, ErrorCode]] = {
+    ApplicationErrorCode.VALIDATION: (422, ErrorCode.VALIDATION),
     ApplicationErrorCode.UNAUTHORIZED: (401, ErrorCode.UNAUTHORIZED),
     ApplicationErrorCode.FORBIDDEN: (403, ErrorCode.FORBIDDEN),
     ApplicationErrorCode.NOT_FOUND: (404, ErrorCode.NOT_FOUND),

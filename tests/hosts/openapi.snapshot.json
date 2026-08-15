@@ -1,6 +1,123 @@
 {
   "components": {
     "schemas": {
+      "AccessArtifact": {
+        "additionalProperties": false,
+        "description": "One declarative browser artifact; never contains a credential value.",
+        "properties": {
+          "domain": {
+            "maxLength": 253,
+            "minLength": 1,
+            "title": "Domain",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/AccessArtifactKind"
+          },
+          "name": {
+            "maxLength": 256,
+            "minLength": 1,
+            "pattern": "^[^\\x00-\\x1f\\x7f]+$",
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "domain",
+          "name"
+        ],
+        "title": "AccessArtifact",
+        "type": "object"
+      },
+      "AccessArtifactKind": {
+        "description": "Generic browser primitive required by a credential recipe.",
+        "enum": [
+          "cookie",
+          "local_storage",
+          "session_storage"
+        ],
+        "title": "AccessArtifactKind",
+        "type": "string"
+      },
+      "AccessMaterialRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "artifacts": {
+            "items": {
+              "$ref": "#/components/schemas/SubmittedAccessArtifact"
+            },
+            "maxItems": 64,
+            "minItems": 1,
+            "title": "Artifacts",
+            "type": "array"
+          }
+        },
+        "required": [
+          "artifacts"
+        ],
+        "title": "AccessMaterialRequest",
+        "type": "object"
+      },
+      "AccessRecipe": {
+        "additionalProperties": false,
+        "description": "Provider-owned data recipe consumed by the generic browser extension.",
+        "properties": {
+          "artifacts": {
+            "items": {
+              "$ref": "#/components/schemas/AccessArtifact"
+            },
+            "minItems": 1,
+            "title": "Artifacts",
+            "type": "array"
+          },
+          "domains": {
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "title": "Domains",
+            "type": "array"
+          },
+          "target_method_id": {
+            "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)+$",
+            "title": "Target Method Id",
+            "type": "string"
+          },
+          "warmup_url": {
+            "anyOf": [
+              {
+                "maxLength": 2048,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Warmup Url"
+          }
+        },
+        "required": [
+          "domains",
+          "artifacts",
+          "target_method_id"
+        ],
+        "title": "AccessRecipe",
+        "type": "object"
+      },
+      "AccessRecipeResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "recipe": {
+            "$ref": "#/components/schemas/AccessRecipe"
+          }
+        },
+        "required": [
+          "recipe"
+        ],
+        "title": "AccessRecipeResponse",
+        "type": "object"
+      },
       "AccessStatus": {
         "additionalProperties": false,
         "description": "Transport-safe current connection state and bounded evidence.",
@@ -4329,6 +4446,43 @@
         "title": "StableInterestClaim",
         "type": "object"
       },
+      "SubmittedAccessArtifact": {
+        "additionalProperties": false,
+        "description": "One short-lived artifact value received from the generic extension.",
+        "properties": {
+          "domain": {
+            "maxLength": 253,
+            "minLength": 1,
+            "title": "Domain",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/AccessArtifactKind"
+          },
+          "name": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "value": {
+            "format": "password",
+            "maxLength": 65536,
+            "minLength": 1,
+            "title": "Value",
+            "type": "string",
+            "writeOnly": true
+          }
+        },
+        "required": [
+          "kind",
+          "domain",
+          "name",
+          "value"
+        ],
+        "title": "SubmittedAccessArtifact",
+        "type": "object"
+      },
       "ToolCallSummary": {
         "additionalProperties": false,
         "properties": {
@@ -7994,6 +8148,300 @@
           }
         },
         "summary": "Disconnect Source",
+        "tags": [
+          "sources"
+        ]
+      }
+    },
+    "/v1/sources/{provider_id}/access-material": {
+      "post": {
+        "operationId": "submit_access_material_v1_sources__provider_id__access_material_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "provider_id",
+            "required": true,
+            "schema": {
+              "title": "Provider Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AccessMaterialRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceMutationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "not_found"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "method_not_allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "validation"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "validation"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "rate_limit"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "unavailable capability or temporary timeout"
+          }
+        },
+        "summary": "Submit Access Material",
+        "tags": [
+          "sources"
+        ]
+      }
+    },
+    "/v1/sources/{provider_id}/access-recipe": {
+      "get": {
+        "operationId": "access_recipe_v1_sources__provider_id__access_recipe_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "provider_id",
+            "required": true,
+            "schema": {
+              "title": "Provider Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccessRecipeResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "not_found"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "method_not_allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "validation"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "validation"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "rate_limit"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "unavailable capability or temporary timeout"
+          }
+        },
+        "summary": "Access Recipe",
         "tags": [
           "sources"
         ]
