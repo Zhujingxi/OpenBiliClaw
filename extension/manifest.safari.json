@@ -47,15 +47,6 @@
         },
         {
             "matches": [
-                "*://*.bilibili.com/*"
-            ],
-            "js": [
-                "main/bili-interact-tap.js"
-            ],
-            "run_at": "document_start"
-        },
-        {
-            "matches": [
                 "*://*.xiaohongshu.com/*"
             ],
             "js": [
@@ -65,30 +56,10 @@
         },
         {
             "matches": [
-                "*://*.xiaohongshu.com/*"
-            ],
-            "js": [
-                "main/xhs-token-sniffer.js",
-                "main/xhs-state-bridge.js",
-                "main/xhs-action-tap.js"
-            ],
-            "run_at": "document_start"
-        },
-        {
-            "matches": [
                 "*://*.douyin.com/*"
             ],
             "js": [
                 "content/douyin.js"
-            ],
-            "run_at": "document_start"
-        },
-        {
-            "matches": [
-                "*://*.douyin.com/*"
-            ],
-            "js": [
-                "main/dy-fetch-tap.js"
             ],
             "run_at": "document_start"
         },
@@ -160,16 +131,6 @@
         },
         {
             "matches": [
-                "*://*.x.com/*",
-                "*://*.twitter.com/*"
-            ],
-            "js": [
-                "main/x-graphql-tap.js"
-            ],
-            "run_at": "document_start"
-        },
-        {
-            "matches": [
                 "*://*.bgm.tv/*",
                 "*://*.bangumi.tv/*"
             ],
@@ -180,22 +141,63 @@
         },
         {
             "matches": [
+                "*://*.bilibili.com/*",
+                "*://*.xiaohongshu.com/*",
+                "*://*.douyin.com/*",
+                "*://*.x.com/*",
+                "*://*.twitter.com/*",
                 "*://*.bgm.tv/*",
                 "*://*.bangumi.tv/*"
             ],
             "js": [
-                "main/bgm-identity-bridge.js"
+                "content/safari-page-injector.js"
             ],
-            "run_at": "document_idle"
+            "run_at": "document_start"
         }
     ],
     "web_accessible_resources": [
+        {
+            "resources": [
+                "main/bili-interact-tap.js"
+            ],
+            "matches": [
+                "*://*.bilibili.com/*"
+            ]
+        },
+        {
+            "resources": [
+                "main/xhs-token-sniffer.js",
+                "main/xhs-state-bridge.js",
+                "main/xhs-action-tap.js"
+            ],
+            "matches": [
+                "*://*.xiaohongshu.com/*"
+            ]
+        },
         {
             "resources": [
                 "main/dy-fetch-tap.js"
             ],
             "matches": [
                 "*://*.douyin.com/*"
+            ]
+        },
+        {
+            "resources": [
+                "main/x-graphql-tap.js"
+            ],
+            "matches": [
+                "*://*.x.com/*",
+                "*://*.twitter.com/*"
+            ]
+        },
+        {
+            "resources": [
+                "main/bgm-identity-bridge.js"
+            ],
+            "matches": [
+                "*://*.bgm.tv/*",
+                "*://*.bangumi.tv/*"
             ]
         }
     ],

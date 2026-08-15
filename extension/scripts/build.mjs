@@ -113,6 +113,16 @@ const entrypoints = [
   },
 ];
 
+// Safari has no MAIN-world content scripts, so a dedicated content script
+// injects the main/*.js tap bundles into the page context as <script> tags.
+// It is only built for Safari so Chrome/Firefox dist layouts stay unchanged.
+if (isSafari) {
+  entrypoints.push({
+    entry: resolve(root, "src/content/safari-page-injector.ts"),
+    outfile: resolve(root, `${outDir}/content/safari-page-injector.js`),
+  });
+}
+
 // Frontend logic shared with the desktop page and the setup wizard, which load
 // it over HTTP from the backend's /shared mount. MV3's default CSP
 // (`script-src 'self'`) forbids the side panel doing the same, so the file has

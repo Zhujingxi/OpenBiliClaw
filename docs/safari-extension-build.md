@@ -66,13 +66,22 @@ xcodebuild -project OpenBiliClaw.xcodeproj -scheme "OpenBiliClaw (macOS)" \
   需要「新开标签页打开面板」的路径（如通知点击）会走 `openExtensionUi` 的 tab 兜底。
 - **没有 OS 通知**：`chrome.notifications` 在 Safari 不存在，service worker 已加空值守卫；
   推荐 / 认知 / 惊喜候选仍全部展示在 popup 里（与 Chrome 当前「关闭系统 Toast、只走面板」的行为一致）。
-- **MAIN-world 网络层强信号 tap 失效**：`bili-interact-tap`、`xhs-token-sniffer`、
-  `xhs-action-tap`、`dy-fetch-tap`、`x-graphql-tap`、`bgm-identity-bridge` 依赖
-  `world:"MAIN"` 注入去观察页面自身的 `fetch`/`XMLHttpRequest`。Safari 会把它们降级到隔离
-  世界，无法拦截页面流量，因此这些「网络层确定性点赞/收藏/评论/登录态识别」在 Safari 上
-  不生效；基于 DOM 的普通行为采集（`content/kernel.ts` + 平台适配器）不受影响，仍正常上报。
-- **Cookie 只读同步**：`chrome.cookies` 在 Safari 支持，但 `getAll`/`onChanged` 语义略有差异，
-  登录态心跳 / Cookie 同步可能在个别站点不完整；核心行为采集不依赖它。
+- **MAIN-world 网络层强信号 tap 走 page-context 桥接（best-effort）**：
+  `bili-interact-tap`、`xhs-token-sniffer`、`xhs-action-tap`、`dy-fetch-tap`、
+  `x-graphql-tap`、`bgm-identity-bridge` 在 Chrome/Firefox 里依赖 `world:"MAIN"`
+  注入去观察页面自身的 `fetch`/`XMLHttpRequest` 与页面全局变量。Safari 没有 MAIN-world，
+  因此 `manifest.safari.json` 不再把这些脚本注册为 content script，改为由
+  `content/safari-page-injector.js`（document_start）以 `<script src>` 注入页面上下文，
+  这些 bundle 已列入 `web_accessible_resources`。隔离世界的既有 `window.postMessage`
+  监听不变，因此 B 站 / 小红书 / 抖音 / X / Bangumi 的网络层确定性信号与登录态识别在
+  Safari 上恢复生效。该桥接是 best-effort：页面 CSP 可能拦截 script 注入，异步加载也可能
+  错过页面首个请求；抖音任务态下 `content/douyin.ts` 仍保留二次注入兜底。基于 DOM 的普通
+  行为采集（`content/kernel.ts` + 平台适配器）不受影响，始终正常上报。
+- **Cookie 同步已对 Safari 加固**：`cookie-sync.ts` 不再依赖 `cookies.getAll({domain})`
+  的浏览器差异（Safari 可能只按精确域过滤而漏掉 `.bilibili.com` 这类子域会话 Cookie），
+  改为读取全量可见 Cookie 后在 JS 内按「域或子域」规则过滤，并在 unfiltered `getAll({})`
+  不可用时按站点逐域回退。`onChanged` 语义差异仍存在，但登录态心跳 / Cookie 同步的核心
+  路径不再受域名过滤差异影响。
 
 ## 代码组织
 
@@ -81,13 +90,20 @@ xcodebuild -project OpenBiliClaw.xcodeproj -scheme "OpenBiliClaw (macOS)" \
   `safari18`，并通过 `banner` 注入 `browser → chrome` 兼容 shim（在已暴露 `chrome` 的
   环境里是 no-op；Chrome/Firefox 构建不带 banner，产物字节不变）
 - `extension/scripts/convert-safari.mjs`：封装 `safari-web-extension-converter` 的转换步骤
+- `extension/src/content/safari-page-injector.ts`：Safari 专用 page-context 桥接注入器，
+  按 hostname 把 `main/*.js` tap bundle 以 `<script src>` 注入页面上下文
 - `extension/src/background/service-worker.ts`：`chrome.notifications` / `chrome.alarms`
   注册点加空值守卫，缺失时优雅降级
+- `extension/src/background/cookie-sync.ts`：Cookie 读取统一走「全量读取 + JS 域过滤」，
+  避免 Safari `cookies.getAll({domain})` 的精确域差异；不可用时逐域回退
 
 ## 回归测试
 
 `extension/tests/manifest-assets.test.ts` 与 `extension/tests/build-assets.test.ts` 分别钉死
 Safari manifest 的形态（popup 而非 side panel、保留 alarms/scripting、无 `world`、host
-permission 边界）与 `build:safari` 脚本的 clean/typecheck 目标隔离；`build-assets.test.ts`
-新增 `verifyBuildAssets({ target: "safari" })` 预检，确保 `dist-safari/` 的所有 manifest 脚本
-与 WAR 资产存在。
+permission 边界、page-context 桥接 content script + WAR 资源齐全）与 `build:safari` 脚本的
+clean/typecheck 目标隔离；`build-assets.test.ts` 新增 `verifyBuildAssets({ target: "safari" })`
+预检，确保 `dist-safari/` 的所有 manifest 脚本与 WAR 资产存在。
+`extension/tests/safari-page-injector.test.ts` 钉死 hostname → 页面脚本映射；
+`extension/tests/cookie-sync.test.ts` 覆盖 Safari 精确域过滤与 unfiltered `getAll({})`
+回退路径。
