@@ -26,6 +26,10 @@ from openbiliclaw.ai.runtime.budgets import PolicyBook
 from openbiliclaw.ai.runtime.execution import AgentRunRequest, AIRuntime
 from openbiliclaw.ai.runtime.routes import ConfiguredModel, ModelRoute, RouteTable
 from openbiliclaw.application.edit_profile import EditProfile
+from openbiliclaw.application.external_evidence import (
+    ExternalEvidenceIngestion,
+    build_external_evidence_job,
+)
 from openbiliclaw.application.idempotency import SqliteIdempotencyJournal
 from openbiliclaw.application.pending_actions import SqlitePendingActionRepository
 from openbiliclaw.application.record_feedback import RecordFeedback, RecordFeedbackForShown
@@ -45,6 +49,7 @@ from openbiliclaw.composition.application import (
 )
 from openbiliclaw.composition.assistant import AssistantController, assistant_workflow_tools
 from openbiliclaw.composition.events import ObservationEventSource
+from openbiliclaw.composition.external_evidence import youtube_takeout_import
 from openbiliclaw.composition.facade import CompositionFacade
 from openbiliclaw.composition.jobs import (
     DEFAULT_PROFILE_ID,
@@ -296,6 +301,13 @@ def build_application(
         access_methods.append(ManualAccessMethod(vault, providers.manual_specs))
     access_registry = AccessMethodRegistry(tuple(access_methods))
     access = AccessService(AccessBroker(access_registry), access_registry, telemetry=telemetry)
+    external_evidence = ExternalEvidenceIngestion(
+        providers.registry,
+        access,
+        observations,
+        clock=lambda: datetime.now(UTC),
+        importers={"youtube": youtube_takeout_import},
+    )
     catalog = (
         ModelCatalog(data_dir / "models.dev.json").load() if settings.model.model_name else None
     )
@@ -432,7 +444,7 @@ def build_application(
         briefs=briefs,
         semantic_index=semantic_index,
     )
-    jobs = build_recommendation_jobs(pipeline)
+    jobs = (*build_recommendation_jobs(pipeline), build_external_evidence_job(external_evidence))
     if assistant_runtime is not None:
         jobs = (*jobs, build_understanding_job(understanding))
     supervisor = RuntimeSupervisor(
@@ -555,6 +567,7 @@ def build_application(
         refresh=RefreshRecommendations(_RefreshSupervisor(supervisor, jobs, pipeline)),
         feedback=feedback,
         feedback_for_shown=RecordFeedbackForShown(repositories.recommendations, feedback),
+        external_evidence=external_evidence,
         profile_edit=EditProfile(
             ProfileEditUnitOfWork(
                 repositories.understanding,

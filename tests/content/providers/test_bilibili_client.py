@@ -108,10 +108,12 @@ async def test_authenticated_history_and_related_real_shapes() -> None:
                             "author_mid": 42,
                             "cover": "//i0.hdslb.com/history.jpg",
                             "duration": 60,
+                            "pubdate": 1600000000,
                             "view_at": 1700000000,
                             "history": {"oid": 12345, "bvid": "BV1HIST12345"},
                         }
-                    ]
+                    ],
+                    "cursor": {"max": 987, "view_at": 1699999999},
                 },
             }
         ).encode()
@@ -120,7 +122,16 @@ async def test_authenticated_history_and_related_real_shapes() -> None:
         "/x/web-interface/history/cursor", {"limit": 3, "cursor": "0"}, _handle()
     )
     assert page.items[0].title == "History video"
+    assert page.items[0].published_at == 1700000000
+    assert page.next_cursor == "987,1699999999"
     assert "ps=3" in history.queries[0] and "view_at=0" in history.queries[0]
+
+    await BilibiliClient(history, _Resolver()).page(
+        "/x/web-interface/history/cursor",
+        {"limit": 3, "cursor": page.next_cursor or "0"},
+        _handle(),
+    )
+    assert "max=987" in history.queries[1] and "view_at=1699999999" in history.queries[1]
 
     related = _ResponseTransport(
         json.dumps(

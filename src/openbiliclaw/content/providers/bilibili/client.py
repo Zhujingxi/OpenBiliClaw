@@ -177,6 +177,16 @@ def _duration(value: JsonValue | None) -> int:
     return total
 
 
+def _event_timestamp(path: str, row: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    field = {
+        "/x/web-interface/history/cursor": "view_at",
+        "/x/v3/fav/resource/list": "fav_time",
+    }.get(path)
+    if field is None or not _integer(row.get(field)):
+        return row
+    return {**row, "pubdate": row[field]}
+
+
 def _item(row: dict[str, JsonValue]) -> BilibiliItem:
     if row.get("kind") in {"video", "article"}:
         return ITEM_ADAPTER.validate_python(row)
@@ -247,7 +257,9 @@ class BilibiliClient:
         try:
             # Search can include legacy archives and rcmd can include ad cards.
             # Rows without a BVID cannot form the provider's stable ContentRef.
-            mapped_rows = tuple(row for value in rows if (row := _mapping(value)))
+            mapped_rows = tuple(
+                _event_timestamp(path, row) for value in rows if (row := _mapping(value))
+            )
             bvid_required = path in {
                 "/x/web-interface/search/type",
                 "/x/web-interface/wbi/index/top/feed/rcmd",
@@ -378,7 +390,14 @@ class BilibiliClient:
                 web_location=1430650,
             )
         elif path == "/x/web-interface/history/cursor":
-            values.update(ps=limit, max=cursor, view_at=0)
+            maximum, separator, view_at = cursor.partition(",")
+            values.update(
+                ps=limit,
+                max=maximum if maximum.isdigit() else "0",
+                view_at=view_at if separator and view_at.isdigit() else 0,
+            )
+        elif path == "/x/v3/fav/resource/list":
+            values.update(pn=page, ps=limit)
         elif path == "/x/web-interface/view":
             values["bvid"] = values.pop("id")
         return values
@@ -392,6 +411,14 @@ class BilibiliClient:
             return str((int(cursor) if cursor.isdigit() else 0) + 1)
         if path == "/x/web-interface/search/type" and data.get("next") is not None:
             return str(_integer(data.get("next")))
+        if path == "/x/web-interface/history/cursor":
+            cursor_data = _mapping(data.get("cursor"))
+            maximum = _integer(cursor_data.get("max"))
+            view_at = _integer(cursor_data.get("view_at"))
+            return f"{maximum},{view_at}" if maximum and view_at else None
+        if path == "/x/v3/fav/resource/list" and data.get("has_more") is True:
+            cursor = str(params.get("cursor", "0"))
+            return str((int(cursor) if cursor.isdigit() else 0) + 1)
         return None
 
     @staticmethod

@@ -11,6 +11,8 @@ from .models import (
     ContentOpenedObservation,
     ContentSavedObservation,
     DeterministicProfileEditObservation,
+    ExternalHistoryViewObservation,
+    ExternalSaveObservation,
     Observation,
     ProviderHistoryImportObservation,
 )
@@ -51,6 +53,8 @@ _CONTENT_REQUIRED = frozenset(
         "content_opened",
         "content_saved",
         "provider_history_import",
+        "external_history_view",
+        "external_save",
     }
 )
 
@@ -101,7 +105,10 @@ def _expected_source(event: Observation) -> ObservationSource | None:
         return ObservationSource.HOST
     if isinstance(event, DeterministicProfileEditObservation):
         return ObservationSource.PROFILE_EDITOR
-    if isinstance(event, ProviderHistoryImportObservation):
+    if isinstance(
+        event,
+        (ProviderHistoryImportObservation, ExternalHistoryViewObservation, ExternalSaveObservation),
+    ):
         return ObservationSource.PROVIDER_IMPORT
     if event.event_type in {"assistant_feedback", "preference_statement"}:
         return ObservationSource.ASSISTANT

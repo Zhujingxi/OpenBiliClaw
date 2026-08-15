@@ -4,6 +4,7 @@ OpenBiliClaw is a local-first typed content-understanding and recommendation app
 
 ```text
 Vue web / extension ─────── generated typed client
+CLI YouTube Takeout ──────── verified evidence import
               │
               ▼
        FastAPI /v1 host ─── security, CSRF/device checks, limits
@@ -32,7 +33,7 @@ Vue web / extension ─────── generated typed client
                      ▲
        first-party Content Providers
                      ▲
-               Provider Access
+               Provider Access ── credentialed History/Saved ──→ Observations
                      │
  Infrastructure: SQLite/archive · vault · HTTP · events · telemetry
                      ▲
@@ -45,7 +46,7 @@ Vue web / extension ─────── generated typed client
 
 - Hosts depend only on Application, Assistant, and Core contracts.
 - Assistant receives safe application tools and bounded understanding projections; it cannot access credentials or repositories. Profile corrections are propose-only pending actions: approval dispatches canonical `EditProfile`, while the model has no direct mutation tool.
-- Content providers depend on Content Integration and opaque Access handles. Optional manifest credential recipes are frozen data only; the generic browser extension reads declared artifacts, and Application routes material through the existing form/verifier/vault path. Composition rehydrates default-account opaque credential slots on startup.
+- Content providers depend on Content Integration and opaque Access handles. Optional manifest credential recipes are frozen data only; the generic browser extension reads declared artifacts, and Application routes material through the existing form/verifier/vault path. Composition rehydrates default-account opaque credential slots on startup. A 15-minute supervised job and on-demand workflow read at most two 50-item credentialed `History`/`Saved` pages and normalize them through Observation ingress; verified YouTube Takeout watch history converges on the same path; likes/subscriptions remain ignored.
 - Understanding consumes immutable observations and never imports Recommendation. After canonical commits, Composition's shared AI-provider `EmbeddingIndex` best-effort projects evidence summaries and accepted claim values by opaque ID; embedding failure cannot roll back user evidence.
 - Recommendation is proactive and works without Assistant. Its deterministic baseline evaluates accessible connected-provider search and bias-declared channel feed content (anonymous feeds plus credential-gated `platform-personalized` exploit supply such as Bilibili rcmd) without a model; the optional adjacent arm uses the shared model-specific semantic index to recall candidates near weak claims but below established-interest similarity. Seeded Thompson allocation and constrained selection share the append-only policy journal with post-feedback reward credit. Composition copies server-resolved exploration provenance into feedback observations and routes exploration likes/saves into Understanding's existing corroboration gate; neither domain imports the other. When a model is configured, `recommendation.brief` compiles and journals a capability/budget/privacy-validated shadow strategy before allocation; failures are contained and its intent or plans do not alter execution until a later live switch.
 - Chat provider IDs, endpoints, wire protocols, and capabilities resolve from the live models.dev catalog, cached for 24 hours under the data directory with stale-cache offline fallback. PydanticAI's registry selects native implementations within the catalog protocol family. Fully custom providers must explicitly declare protocol, endpoint, and all capabilities. Embeddings retain their existing explicit external-service configuration. OpenBiliClaw does not host, bundle, or supervise model runtimes.

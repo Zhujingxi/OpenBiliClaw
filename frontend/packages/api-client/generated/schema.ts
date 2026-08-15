@@ -1157,6 +1157,84 @@ export interface components {
         ErrorEnvelope: {
             error: components["schemas"]["ErrorDetail"];
         };
+        /**
+         * ExternalContentPayload
+         * @description Bounded metadata for authenticated external history/save evidence.
+         */
+        ExternalContentPayload: {
+            /** Creator Label */
+            creator_label?: string | null;
+            /** Provider Event Id */
+            provider_event_id: string;
+            /** Title */
+            title: string;
+        };
+        /** ExternalHistoryViewObservation */
+        ExternalHistoryViewObservation: {
+            /** Account Id */
+            account_id?: string | null;
+            content_ref?: components["schemas"]["ContentRef"] | null;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            event_type: "external_history_view";
+            /** Idempotency Key */
+            idempotency_key: string;
+            /** Observation Id */
+            observation_id: string;
+            /**
+             * Occurred At
+             * Format: date-time
+             */
+            occurred_at: string;
+            payload: components["schemas"]["ExternalContentPayload"];
+            provenance: components["schemas"]["ObservationProvenance"];
+            /**
+             * Received At
+             * Format: date-time
+             */
+            received_at: string;
+            /**
+             * Schema Version
+             * @default 1
+             * @constant
+             */
+            schema_version: 1;
+        };
+        /** ExternalSaveObservation */
+        ExternalSaveObservation: {
+            /** Account Id */
+            account_id?: string | null;
+            content_ref?: components["schemas"]["ContentRef"] | null;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            event_type: "external_save";
+            /** Idempotency Key */
+            idempotency_key: string;
+            /** Observation Id */
+            observation_id: string;
+            /**
+             * Occurred At
+             * Format: date-time
+             */
+            occurred_at: string;
+            payload: components["schemas"]["ExternalContentPayload"];
+            provenance: components["schemas"]["ObservationProvenance"];
+            /**
+             * Received At
+             * Format: date-time
+             */
+            received_at: string;
+            /**
+             * Schema Version
+             * @default 1
+             * @constant
+             */
+            schema_version: 1;
+        };
         /** FeedbackRequest */
         FeedbackRequest: {
             /** Account Id */
@@ -1410,7 +1488,7 @@ export interface components {
             /** Idempotency Key */
             idempotency_key: string;
             /** Observations */
-            observations: (components["schemas"]["RecommendationShownObservation"] | components["schemas"]["RecommendationOpenedObservation"] | components["schemas"]["RecommendationLikedObservation"] | components["schemas"]["RecommendationDislikedObservation"] | components["schemas"]["RecommendationSavedObservation"] | components["schemas"]["RecommendationDismissedObservation"] | components["schemas"]["ContentOpenedObservation"] | components["schemas"]["ContentSavedObservation"] | components["schemas"]["AssistantFeedbackObservation"] | components["schemas"]["PreferenceStatementObservation"] | components["schemas"]["DeterministicProfileEditObservation"] | components["schemas"]["ProviderHistoryImportObservation"])[];
+            observations: (components["schemas"]["RecommendationShownObservation"] | components["schemas"]["RecommendationOpenedObservation"] | components["schemas"]["RecommendationLikedObservation"] | components["schemas"]["RecommendationDislikedObservation"] | components["schemas"]["RecommendationSavedObservation"] | components["schemas"]["RecommendationDismissedObservation"] | components["schemas"]["ContentOpenedObservation"] | components["schemas"]["ContentSavedObservation"] | components["schemas"]["AssistantFeedbackObservation"] | components["schemas"]["PreferenceStatementObservation"] | components["schemas"]["DeterministicProfileEditObservation"] | components["schemas"]["ProviderHistoryImportObservation"] | components["schemas"]["ExternalHistoryViewObservation"] | components["schemas"]["ExternalSaveObservation"])[];
         };
         /** ObservationsResponse */
         ObservationsResponse: {

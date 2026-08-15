@@ -61,7 +61,8 @@ def _parser() -> argparse.ArgumentParser:
     export.add_argument("path", type=Path)
     export.add_argument("--include-config", action="store_true")
     imported = commands.add_parser("import", parents=[common])
-    imported.add_argument("path", type=Path)
+    imported.add_argument("provider_id")
+    imported.add_argument("file", type=Path, nargs="?")
     imported.add_argument("--force", action="store_true")
     add_product_parsers(commands, common)
     return parser
@@ -86,10 +87,12 @@ def main() -> None:
             parser.error(str(error))
         print(f"exported format {manifest.format_version} archive to {arguments.path}")
         return
-    if arguments.command == "import":
+    if arguments.command == "import" and arguments.file is None:
         try:
             manifest = asyncio.run(
-                import_archive(arguments.path, arguments.data_dir, force=arguments.force)
+                import_archive(
+                    Path(arguments.provider_id), arguments.data_dir, force=arguments.force
+                )
             )
         except ArchiveError as error:
             parser.error(str(error))

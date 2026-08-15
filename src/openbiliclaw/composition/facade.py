@@ -58,6 +58,8 @@ from openbiliclaw.content.integration.identity import ContentRef, ProviderId
 from openbiliclaw.hosts.api.dependencies import AssistantTurnInput, DiagnosticResult, StartResult
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from openbiliclaw.access.forms import ConnectionForm
     from openbiliclaw.access.models import AccessHandle, AccessStatus
     from openbiliclaw.access.service import AccessService
@@ -69,6 +71,10 @@ if TYPE_CHECKING:
         EditProfile,
         EditProfileCommand,
         EditProfileResult,
+    )
+    from openbiliclaw.application.external_evidence import (
+        ExternalEvidenceIngestion,
+        ExternalEvidenceResult,
     )
     from openbiliclaw.application.pending_actions import SqlitePendingActionRepository
     from openbiliclaw.application.record_feedback import (
@@ -170,6 +176,7 @@ class CompositionFacade:
         refresh: RefreshRecommendations | None = None,
         feedback: RecordFeedback | None = None,
         feedback_for_shown: RecordFeedbackForShown | None = None,
+        external_evidence: ExternalEvidenceIngestion | None = None,
         profile_edit: EditProfile | None = None,
         pending_actions: SqlitePendingActionRepository | None = None,
         assistant: AssistantController | None = None,
@@ -192,6 +199,7 @@ class CompositionFacade:
         self._refresh = refresh
         self._feedback = feedback
         self._feedback_for_shown = feedback_for_shown
+        self._external_evidence = external_evidence
         self._profile_edit = profile_edit
         self._assistant = assistant
         self._propose = None
@@ -321,6 +329,18 @@ class CompositionFacade:
         return await self._feedback_for_shown(
             shown_id=shown_id, kind=kind, idempotency_key=idempotency_key, exposed=exposed
         )
+
+    async def sync_source(self, provider_id: str) -> ExternalEvidenceResult:
+        if self._external_evidence is None:
+            raise self._unavailable()
+        return await self._external_evidence.sync(provider_id)
+
+    async def import_provider_evidence(
+        self, provider_id: str, path: Path
+    ) -> ExternalEvidenceResult:
+        if self._external_evidence is None:
+            raise self._unavailable()
+        return await self._external_evidence.import_file(provider_id, path)
 
     async def edit_profile(self, command: EditProfileCommand) -> EditProfileResult:
         if self._profile_edit is None:

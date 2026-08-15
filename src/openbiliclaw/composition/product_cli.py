@@ -19,6 +19,7 @@ from openbiliclaw.understanding.profile import EXPLORATION_DISABLED_CLAIM_ID
 
 if TYPE_CHECKING:
     import argparse
+    from pathlib import Path
 
     from openbiliclaw.composition.application import Application
 
@@ -28,6 +29,8 @@ class ProductFacade(Protocol):
     async def source_status(self, provider_id: str, account_id: str | None) -> object: ...
     async def connect_source(self, command: ConnectSourceCommand) -> object: ...
     async def disconnect_source(self, command: DisconnectSourceCommand) -> object: ...
+    async def sync_source(self, provider_id: str) -> object: ...
+    async def import_provider_evidence(self, provider_id: str, path: Path) -> object: ...
     async def get_recommendations(self, limit: int) -> object: ...
     async def record_feedback_for_shown(
         self, shown_id: str, kind: FeedbackKind, idempotency_key: str, exposed: bool = False
@@ -38,7 +41,9 @@ class ProductFacade(Protocol):
     async def search_content(self, provider_id: str, text: str, limit: int) -> object: ...
 
 
-_PRODUCT_COMMANDS = frozenset({"sources", "feed", "feedback", "profile", "assistant", "search"})
+_PRODUCT_COMMANDS = frozenset(
+    {"sources", "feed", "feedback", "profile", "assistant", "search", "import"}
+)
 _FEEDBACK_KIND = {
     "like": FeedbackKind.LIKED,
     "dismiss": FeedbackKind.DISMISSED,
@@ -74,6 +79,8 @@ def add_product_parsers(
     remove.add_argument("provider_id")
     remove.add_argument("--account-id")
     remove.add_argument("--idempotency-key", required=True)
+    sync = source_commands.add_parser("sync", parents=[common])
+    sync.add_argument("provider_id")
 
     feed = subparsers.add_parser("feed", parents=[common])
     feed.add_argument("--limit", type=int, default=20)
@@ -126,6 +133,8 @@ async def _dispatch(facade: ProductFacade, args: argparse.Namespace) -> object:
             return await facade.list_sources(args.account_id, args.limit)
         if args.source_command == "status":
             return await facade.source_status(args.provider_id, args.account_id)
+        if args.source_command == "sync":
+            return await facade.sync_source(args.provider_id)
         if args.source_command == "add":
             command = ConnectSourceCommand(
                 idempotency_key=args.idempotency_key,
@@ -175,6 +184,8 @@ async def _dispatch(facade: ProductFacade, args: argparse.Namespace) -> object:
             ),
             args.device_id,
         )
+    if args.command == "import":
+        return await facade.import_provider_evidence(args.provider_id, args.file)
     return await facade.search_content(args.provider_id, args.query, args.limit)
 
 

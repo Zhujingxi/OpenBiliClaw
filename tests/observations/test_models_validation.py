@@ -13,6 +13,8 @@ from openbiliclaw.observations.models import (
     ContentOpenedObservation,
     ContentSavedObservation,
     DeterministicProfileEditObservation,
+    ExternalHistoryViewObservation,
+    ExternalSaveObservation,
     Observation,
     PreferenceStatementObservation,
     ProviderHistoryImportObservation,
@@ -107,6 +109,14 @@ def variants() -> tuple[Observation, ...]:
             **(base | {"provenance": provenance(ObservationSource.PROVIDER_IMPORT)}),
             payload={"provider_event_id": "history-1", "progress_seconds": 120},
         ),
+        ExternalHistoryViewObservation(
+            **(base | {"provenance": provenance(ObservationSource.PROVIDER_IMPORT)}),
+            payload={"provider_event_id": "BV1", "title": "Watched", "creator_label": "A"},
+        ),
+        ExternalSaveObservation(
+            **(base | {"provenance": provenance(ObservationSource.PROVIDER_IMPORT)}),
+            payload={"provider_event_id": "BV1", "title": "Saved"},
+        ),
     )
 
 
@@ -145,11 +155,15 @@ def exhaustive(event: Observation) -> str:
             return "profile-edit"
         case ProviderHistoryImportObservation():
             return "history"
+        case ExternalHistoryViewObservation():
+            return "external-history"
+        case ExternalSaveObservation():
+            return "external-save"
     assert_never(event)
 
 
 def test_union_is_exhaustive_and_not_generic_event_dict() -> None:
-    assert len({exhaustive(item) for item in variants()}) == 12
+    assert len({exhaustive(item) for item in variants()}) == 14
     with pytest.raises(ValidationError):
         observation_adapter.validate_python(common() | {"event_type": "unknown", "payload": {}})
 

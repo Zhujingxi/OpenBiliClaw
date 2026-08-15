@@ -105,6 +105,20 @@ class HistoryImportPayload(StrictBaseModel):
     progress_seconds: int | None = Field(default=None, ge=0, le=31_536_000)
 
 
+class ExternalContentPayload(StrictBaseModel):
+    """Bounded metadata for authenticated external history/save evidence."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    provider_event_id: str = Field(min_length=1, max_length=256)
+    title: str = Field(min_length=1, max_length=500)
+    creator_label: str | None = Field(default=None, max_length=300)
+
+    @field_validator("title", "creator_label")
+    @classmethod
+    def safe_metadata(cls, value: str | None) -> str | None:
+        return _safe_text(value)
+
+
 def _safe_text(value: str | None) -> str | None:
     if value is not None and _SAFE_TEXT.search(value):
         raise ValueError("text contains disallowed secret, markup, or instruction material")
@@ -184,6 +198,16 @@ class ProviderHistoryImportObservation(ObservationBase):
     payload: HistoryImportPayload
 
 
+class ExternalHistoryViewObservation(ObservationBase):
+    event_type: Literal["external_history_view"] = "external_history_view"
+    payload: ExternalContentPayload
+
+
+class ExternalSaveObservation(ObservationBase):
+    event_type: Literal["external_save"] = "external_save"
+    payload: ExternalContentPayload
+
+
 Observation: TypeAlias = Annotated[
     RecommendationShownObservation
     | RecommendationOpenedObservation
@@ -196,7 +220,9 @@ Observation: TypeAlias = Annotated[
     | AssistantFeedbackObservation
     | PreferenceStatementObservation
     | DeterministicProfileEditObservation
-    | ProviderHistoryImportObservation,
+    | ProviderHistoryImportObservation
+    | ExternalHistoryViewObservation
+    | ExternalSaveObservation,
     Field(discriminator="event_type"),
 ]
 

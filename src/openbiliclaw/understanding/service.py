@@ -14,6 +14,8 @@ from openbiliclaw.ai.runtime.capabilities import AgentId, ModelRequirements
 from openbiliclaw.core._pydantic import StrictBaseModel
 from openbiliclaw.observations.models import (
     DeterministicProfileEditObservation,
+    ExternalHistoryViewObservation,
+    ExternalSaveObservation,
     Observation,
     PreferenceStatementObservation,
 )
@@ -333,6 +335,18 @@ def _observation_summary(observation: Observation) -> str:
     if isinstance(observation, PreferenceStatementObservation):
         return f"Preference statement: {observation.payload.statement}"[:500]
     label = observation.event_type.replace("_", " ")
+    if isinstance(observation, (ExternalHistoryViewObservation, ExternalSaveObservation)):
+        ref = observation.content_ref
+        assert ref is not None  # ObservationValidator requires content for these event types.
+        creator = (
+            f" by {observation.payload.creator_label}"
+            if observation.payload.creator_label is not None
+            else ""
+        )
+        return (
+            f"{label}: {observation.payload.title}{creator} "
+            f"({ref.provider_id.value}/{ref.provider_content_id})"
+        )[:500]
     if observation.content_ref is not None:
         ref = observation.content_ref
         return f"{label}: {ref.provider_id.value}/{ref.provider_content_id}"[:500]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import sys
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
@@ -41,6 +42,14 @@ class Facade:
     async def disconnect_source(self, command: object) -> Result:
         self.calls.append(("disconnect_source", (command,)))
         return Result(value="removed")
+
+    async def sync_source(self, provider_id: str) -> Result:
+        self.calls.append(("sync_source", (provider_id,)))
+        return Result(value="synced")
+
+    async def import_provider_evidence(self, provider_id: str, path: Path) -> Result:
+        self.calls.append(("import_provider_evidence", (provider_id, path)))
+        return Result(value="imported")
 
     async def get_recommendations(self, limit: int) -> Result:
         self.calls.append(("get_recommendations", (limit,)))
@@ -168,6 +177,29 @@ def test_mutation_commands_emit_json_and_call_one_workflow(
         capsys,
         facade,
         tmp_path,
+        "sources",
+        "sync",
+        "bilibili",
+    ) == {"value": "synced"}
+    assert facade.calls[-1] == ("sync_source", ("bilibili",))
+
+    takeout = tmp_path / "takeout.zip"
+    assert invoke(
+        monkeypatch,
+        capsys,
+        facade,
+        tmp_path,
+        "import",
+        "youtube",
+        str(takeout),
+    ) == {"value": "imported"}
+    assert facade.calls[-1] == ("import_provider_evidence", ("youtube", takeout))
+
+    assert invoke(
+        monkeypatch,
+        capsys,
+        facade,
+        tmp_path,
         "feedback",
         "shown_1",
         "like",
@@ -193,6 +225,52 @@ def test_mutation_commands_emit_json_and_call_one_workflow(
     assert facade.calls[-1][0] == "edit_profile"
     command = cast("Any", facade.calls[-1][1][0])
     assert command.value == "true"
+
+
+def test_youtube_takeout_import_round_trips_real_composition(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text("[content]\nenabled=[]\n", encoding="utf-8")
+    takeout = tmp_path / "takeout" / "YouTube and YouTube Music" / "history"
+    takeout.mkdir(parents=True)
+    (takeout / "watch-history.json").write_text(
+        json.dumps(
+            [
+                {
+                    "header": "YouTube",
+                    "title": "Watched Typed import",
+                    "titleUrl": "https://www.youtube.com/watch?v=abcdefghijk",
+                    "time": "2025-01-02T03:04:00Z",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    data = tmp_path / "data"
+    argv = [
+        "openbiliclaw",
+        "import",
+        "youtube",
+        str(tmp_path / "takeout"),
+        "--config",
+        str(config),
+        "--data-dir",
+        str(data),
+    ]
+
+    monkeypatch.setattr(sys, "argv", argv)
+    main()
+    assert json.loads(capsys.readouterr().out)["inserted"] == 1
+    monkeypatch.setattr(sys, "argv", argv)
+    main()
+    assert json.loads(capsys.readouterr().out)["duplicates"] == 1
+    with sqlite3.connect(data / "openbiliclaw.db") as connection:
+        row = connection.execute("SELECT kind,payload_json FROM observations").fetchone()
+    assert row is not None and row[0] == "external_history_view"
+    assert json.loads(row[1])["payload"]["title"] == "Typed import"
 
 
 def test_sources_add_and_list_use_real_composition(

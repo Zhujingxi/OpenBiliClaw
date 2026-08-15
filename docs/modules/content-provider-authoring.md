@@ -37,7 +37,7 @@ assert validate_provider_contract(manifest, provider) == ()
 
 | Provider | Enabled access | Capabilities | Live E2E layer |
 |----------|----------------|--------------|----------------|
-| Bilibili | `builtin.anonymous` public reads; `builtin.manual`/plugin cookie access (`SESSDATA` + `bili_jct`) | search/fetch/related/creator; anonymous `popular` feed; credential-only `rcmd` personalized feed plus history/saved/action. `rcmd` calls `/x/web-interface/wbi/index/top/feed/rcmd` with plain verified cookies and is declared `platform-personalized`, auth-required | `l1a` anonymous and `l1b` authenticated; personalized-feed unit coverage is hermetic |
+| Bilibili | `builtin.anonymous` public reads; `builtin.manual`/plugin cookie access (`SESSDATA` + `bili_jct`) | search/fetch/related/creator; anonymous `popular` feed; credential-only `rcmd` personalized feed plus history/saved/action. `rcmd` calls `/x/web-interface/wbi/index/top/feed/rcmd` with plain verified cookies and is declared `platform-personalized`, auth-required. History cursors retain both upstream `max` and `view_at`; history/save previews use interaction timestamps when supplied so evidence occurrence is not confused with publication | `l1a` anonymous and `l1b` authenticated; personalized-feed and ingestion coverage is hermetic |
 | Bangumi | `builtin.anonymous` public read; optional PAT form retained | search, feed, fetch, projection via official `api.bgm.tv` v0 API | `l1bangumi` (anonymous search → detail) |
 | V2EX | `builtin.anonymous` public read; optional PAT form retained | feed, fetch, creator, projection via official `www.v2ex.com/api` endpoints; search not advertised because V2EX has no official full-text search API | `l1v2ex` (anonymous hot feed → detail) |
 | Linux.do | `builtin.anonymous` public read; optional cookie form retained | search, fetch, projection via public Discourse JSON (`/search.json`, `/t/<id>.json`) — **implemented but not enabled**: Cloudflare challenges all content endpoints for non-browser clients (2026-08-14) | none (upstream-blocked; layer deferred until a viable path exists) |
@@ -48,7 +48,7 @@ assert validate_provider_contract(manifest, provider) == ()
 - 实现最小 protocol，不建立 provider god interface。
 - 提供 recommendation/feed capability 时，manifest 必须为每个 `feed_id` 声明 bias class（`platform-popularity | platform-personalized | subscription-graph | editorial`）与 auth requirement；不得 silently 混同 anonymous 与 credentialed feed。**已落地并由 `ProviderManifest` 强制校验**：FEED 无 channel、重复 `feed_id` 均在启动注册前失败。
 - Projection 若会产出 `CardData.image_url`，manifest 必须仅声明真实 CDN DNS allowlist `image_hosts`（精确 hostname；需要覆盖动态前缀时才声明 parent domain），以及该 CDN 确实要求的静态 `image_headers`（纯数据，例如 Bilibili Referer）。禁止 scheme/path、IP literal、尾点、非规范大小写、可执行 header 逻辑或由 payload 扩大 allowlist。Host 只代理 HTTPS `image/*`，不会代理 video/audio。
-- `ProviderCursor.value` 完全 opaque；只有创建它的 provider 可以解析。
+- `ProviderCursor.value` 完全 opaque；只有创建它的 provider 可以解析。Credentialed evidence ingestion may follow it only within a hard two-page bound.
 - read methods 接收 scoped `AccessHandle`，不得扩大 provider/account/permission scope。
 - `SearchQuery` / `FeedQuery` / `CreatorQuery` / `PageRequest` 的 limit 是硬上限。
 - provider-specific failures 只能在 integration boundary 归一为：unavailable capability、invalid content ref、access denied、rate limited、provider unavailable；不得携带 response body、cookie 或 token。

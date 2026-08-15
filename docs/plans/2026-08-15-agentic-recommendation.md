@@ -128,7 +128,7 @@ Goal: credentialed depth and content-level quality judgment.
    are in-memory only, so one-shot CLI commands and server restarts lose them).
 - [x] **Personalized feeds**: credentialed channels (Bilibili `rcmd` flagship) land as
    exploit-class supply; per-channel yield learned via the Phase B machinery.
-- [ ] **Saves/history ingestion**: `Saved`/`History` capabilities feed the ledger as
+- [x] **Saves/history ingestion**: `Saved`/`History` capabilities feed the ledger as
    high-trust observations through the plugin path. `openbiliclaw import <provider>`
    for Takeout-style archives.
 - [ ] **Multimodal inspection**: `recommendation.inspect` agent, shortlist-only, per-

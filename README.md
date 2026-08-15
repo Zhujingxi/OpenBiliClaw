@@ -5,6 +5,7 @@
 ```text
 Vue web / recipe-driven extension → typed FastAPI /v1 → Application workflows
 Assistant correction → scoped pending approval → EditProfile ─┤
+Credentialed History/Saves + YouTube Takeout ────────────────┤
                                       ├→ Observations → Understanding
 Content Providers ← Provider Access ←─└→ Search/Feeds → Semantic Recall → Shadow Brief → Seeded Allocation → Constrained Selection
                     SQLite Semantic Index ← Embeddings ←─┘

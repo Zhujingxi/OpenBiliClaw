@@ -6,6 +6,6 @@
 
 YouTube removed its generic Trending page in July 2025. The provider therefore does **not** advertise `FEED`: mapping it to search or music-only charts would misrepresent product semantics. Search, fetch, creator, and projection remain available; generic discovery must consult the manifest rather than schedule a feed job for this provider.
 
-`takeout.py` reads an extracted directory or zip containing watch-history HTML/JSON, subscriptions CSV, and liked-videos CSV into typed, bounded observation proposals. Missing files allow partial import and schema errors produce safe warnings. Takeout parsing is implemented but no production import UI/API is currently wired.
+`takeout.py` reads an extracted directory or zip containing watch-history HTML/JSON, subscriptions CSV, and liked-videos CSV into typed parse results. Missing files allow partial import and schema errors produce safe warnings. Production `openbiliclaw import youtube TAKEOUT_PATH` now admits watch history through the external-evidence workflow; subscriptions and likes remain parser-visible but are reported as ignored rather than being mislabeled as saves.
 
 Browser-session access, write actions, and media downloads are outside the manifest.

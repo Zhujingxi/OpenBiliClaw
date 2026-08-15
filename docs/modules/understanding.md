@@ -11,7 +11,7 @@
 - SQLite proposals/evidence/ledger/profile/checkpoint 同事务提交，proposal 在 decision/profile 前写入；per-analyzer cursor 保证 retry/restart idempotency；
 - event-triggered claim re-synthesis：显式 correction 只重算被编辑 claim，stable-interest/avoidance 矛盾只重算同 topic 的对立 claim，drift 复用 proposal policy 的 180-day evidence-staleness boundary；每次最多 25 claims、每个 claim 最多保留最新 64 evidence IDs，stale evidence 不进入新 proposal；trust-1.0 仅保留给 high-trust preference/profile-edit statement，authenticated behavioral evidence 最高投影为 0.6，因而 inference 不能覆盖 statement；结果仍经 canonical proposal/evidence/decision transaction 并留下 ledger audit，不存在 scheduled full rebuild；
 - versioned `DiscoveryProfile`、`RecommendationProfile`、`DialogueProfile`，按 purpose 裁剪且有字符预算，不暴露 evidence IDs；`RecommendationProfile` v2 额外提供 bounded `EmbeddingClaimView(ref_id, text, confidence, top_interest)`，让 Recommendation 只消费 opaque claim reference 与匹配文本；
-- analyzer input 仅含最多 50 条 observation 的 500-char evidence summary，不含 provider payload、credential reference 或无界历史。
+- analyzer input 仅含最多 50 条 observation 的 500-char evidence summary，不含 provider payload、credential reference 或无界历史。Credentialed/Takeout external history and saves enter this same analyzer cursor as bounded title/creator/content-reference summaries at behavioral trust `0.6`; there is no parallel profile mutation path.
 
 ## 隐私边界
 

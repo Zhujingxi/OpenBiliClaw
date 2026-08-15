@@ -1853,6 +1853,196 @@
         "title": "ErrorEnvelope",
         "type": "object"
       },
+      "ExternalContentPayload": {
+        "additionalProperties": false,
+        "description": "Bounded metadata for authenticated external history/save evidence.",
+        "properties": {
+          "creator_label": {
+            "anyOf": [
+              {
+                "maxLength": 300,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Creator Label"
+          },
+          "provider_event_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Provider Event Id",
+            "type": "string"
+          },
+          "title": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider_event_id",
+          "title"
+        ],
+        "title": "ExternalContentPayload",
+        "type": "object"
+      },
+      "ExternalHistoryViewObservation": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Id"
+          },
+          "content_ref": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ContentRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "event_type": {
+            "const": "external_history_view",
+            "default": "external_history_view",
+            "title": "Event Type",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "maxLength": 384,
+            "minLength": 1,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "observation_id": {
+            "pattern": "^obs_[0-9a-f]{32}$",
+            "title": "Observation Id",
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ExternalContentPayload"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/ObservationProvenance"
+          },
+          "received_at": {
+            "format": "date-time",
+            "title": "Received At",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "observation_id",
+          "idempotency_key",
+          "occurred_at",
+          "received_at",
+          "provenance",
+          "payload"
+        ],
+        "title": "ExternalHistoryViewObservation",
+        "type": "object"
+      },
+      "ExternalSaveObservation": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Id"
+          },
+          "content_ref": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ContentRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "event_type": {
+            "const": "external_save",
+            "default": "external_save",
+            "title": "Event Type",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "maxLength": 384,
+            "minLength": 1,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "observation_id": {
+            "pattern": "^obs_[0-9a-f]{32}$",
+            "title": "Observation Id",
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ExternalContentPayload"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/ObservationProvenance"
+          },
+          "received_at": {
+            "format": "date-time",
+            "title": "Received At",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "observation_id",
+          "idempotency_key",
+          "occurred_at",
+          "received_at",
+          "provenance",
+          "payload"
+        ],
+        "title": "ExternalSaveObservation",
+        "type": "object"
+      },
       "FeedbackRequest": {
         "additionalProperties": false,
         "properties": {
@@ -2576,6 +2766,8 @@
                   "content_opened": "#/components/schemas/ContentOpenedObservation",
                   "content_saved": "#/components/schemas/ContentSavedObservation",
                   "deterministic_profile_edit": "#/components/schemas/DeterministicProfileEditObservation",
+                  "external_history_view": "#/components/schemas/ExternalHistoryViewObservation",
+                  "external_save": "#/components/schemas/ExternalSaveObservation",
                   "preference_statement": "#/components/schemas/PreferenceStatementObservation",
                   "provider_history_import": "#/components/schemas/ProviderHistoryImportObservation",
                   "recommendation_disliked": "#/components/schemas/RecommendationDislikedObservation",
@@ -2623,6 +2815,12 @@
                 },
                 {
                   "$ref": "#/components/schemas/ProviderHistoryImportObservation"
+                },
+                {
+                  "$ref": "#/components/schemas/ExternalHistoryViewObservation"
+                },
+                {
+                  "$ref": "#/components/schemas/ExternalSaveObservation"
                 }
               ]
             },

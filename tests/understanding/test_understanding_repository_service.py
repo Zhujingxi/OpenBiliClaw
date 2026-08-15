@@ -7,9 +7,12 @@ from typing import TYPE_CHECKING
 import pytest
 
 from openbiliclaw.ai.runtime.capabilities import AgentId
+from openbiliclaw.content.integration.identity import ContentKind, ContentRef, ProviderId
 from openbiliclaw.infrastructure.sqlite.database import SqliteDatabase
 from openbiliclaw.infrastructure.sqlite.schema import SchemaMigrator
 from openbiliclaw.observations.models import (
+    ExternalContentPayload,
+    ExternalSaveObservation,
     PreferenceStatementObservation,
     ReasonPayload,
     RecommendationDislikedObservation,
@@ -155,6 +158,44 @@ def test_only_explicit_observations_project_statement_trust() -> None:
 
     assert _project_observation(statement).trust == 1.0
     assert _project_observation(behavior).trust == 0.6
+
+
+async def test_external_evidence_uses_canonical_analyzer_pipeline(tmp_path: Path) -> None:
+    database, observations, repository = await setup(tmp_path / "external.db")
+    event = ExternalSaveObservation(
+        observation_id="obs_" + "9" * 32,
+        idempotency_key="external_save:bilibili:BVtyped",
+        occurred_at=NOW,
+        received_at=NOW,
+        account_id=None,
+        content_ref=ContentRef(
+            provider_id=ProviderId(value="bilibili"),
+            content_kind=ContentKind(value="video"),
+            provider_content_id="BVtyped",
+            canonical_url="https://www.bilibili.com/video/BVtyped",
+        ),
+        provenance=ObservationProvenance(
+            producer_id="provider.bilibili.evidence",
+            source=ObservationSource.PROVIDER_IMPORT,
+            authenticated=True,
+            trust_level=TrustLevel.HIGH,
+        ),
+        payload=ExternalContentPayload(
+            provider_event_id="BVtyped", title="Typed systems", creator_label="Creator"
+        ),
+    )
+    await observations.insert_batch((event,))
+    analyzer = PreferenceAnalyzer()
+    service = UnderstandingService(
+        observations, repository, analyzers=(analyzer,), clock=lambda: NOW
+    )
+
+    assert (await service.process("default", batch_size=10)).accepted == 1
+    evidence = analyzer.inputs[0].evidence[0]
+    assert evidence.trust == 0.6
+    assert evidence.summary == "external save: Typed systems by Creator (bilibili/BVtyped)"
+    assert (await repository.load_profile("default", now=NOW)).revision == 1
+    await database.close()
 
 
 async def test_atomic_apply_persists_proposal_before_decision_and_checkpoint(
