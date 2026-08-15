@@ -8,6 +8,7 @@ import App from "../App.vue";
 import type { WebApi } from "../services/api";
 
 const api: WebApi = {
+  login: async () => ({ token: "token", label: "session" }),
   listSources: async () => [],
   connectSource: async () => {
     throw new Error("unused");

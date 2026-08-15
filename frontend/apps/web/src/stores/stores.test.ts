@@ -29,6 +29,7 @@ function deferred<T>(): {
 }
 function api(overrides: Partial<WebApi> = {}): WebApi {
   return {
+    login: async () => ({ token: "token", label: "session" }),
     listSources: async () => [],
     connectSource: async (body) => ({
       availability_refreshed: true,

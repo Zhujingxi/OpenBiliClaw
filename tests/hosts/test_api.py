@@ -930,6 +930,25 @@ async def test_static_frontend_serves_assets_and_spa_fallback(tmp_path) -> None:
     assert traversal.headers["cache-control"] == "no-cache"
 
 
+async def test_static_shell_stays_public_when_auth_is_configured(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """The login page must be reachable: bearer gates /v1 data, not the static shell."""
+
+    (tmp_path / "index.html").write_text("spa-index", encoding="utf-8")
+    dependencies = HostDependencies(
+        facade=Facade(), security=HostSecurityPolicy(bearer_token="static")
+    )
+    app = create_app(dependencies, frontend_dir=tmp_path)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as api:
+        shell = await api.get("/")
+        spa_route = await api.get("/login")
+        data = await api.get("/v1/sources")
+    assert shell.status_code == 200
+    assert spa_route.status_code == 200
+    assert data.status_code == 401
+
+
 async def test_app_lifespan_is_composition_owned_and_schema_export_is_idle() -> None:
     class Lifespan:
         def __init__(self) -> None:

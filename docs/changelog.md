@@ -6,7 +6,7 @@
 
 ## Unreleased
 
-- Landed the backend half of password and extension-token authentication (agentic recommendation plan, Phase A item 4): schema V9 stores only SHA-256 token hashes; PBKDF2-SHA256 password hashes live in `[host]`; `POST /v1/auth/login` mints session tokens; middleware and WebSockets accept static or minted bearer tokens; `openbiliclaw set-password` and `openbiliclaw ext-token` provide local setup. Frontend login and its browser e2e remain pending.
+- Landed password and extension-token authentication (agentic recommendation plan, Phase A item 4): schema V9 stores only SHA-256 token hashes; PBKDF2-SHA256 password hashes live in `[host]`; `POST /v1/auth/login` mints session tokens; middleware and WebSockets accept static or minted bearer tokens; `openbiliclaw set-password` and `openbiliclaw ext-token` provide local setup. The web app now probes whether authentication is enabled, guards protected hash routes, provides an accessible password login with loading/error states, persists the session token locally, attaches it to API and event-stream requests, and clears it on 401. Browser e2e remains pending.
 
 - Landed provider channel registry and candidate provenance (agentic recommendation plan, Phase A item 3): feed-capable manifests must declare unique `feed_id` channels with an explicit bias class and auth requirement; Bilibili `popular`, Bangumi `rank`, and V2EX `hot` are registered as anonymous `platform-popularity` supply. `DiscoveryProvenance` now durably carries the source provider and optional feed channel; search discovery records no channel. Schema V8 backfills provider identity (and a null channel) into existing candidate JSON so upgrades remain readable.
 

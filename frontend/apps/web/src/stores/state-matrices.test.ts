@@ -32,6 +32,7 @@ function api(overrides: Partial<WebApi>): WebApi {
     throw new Error("unused");
   };
   return {
+    login: unused,
     listSources: unused,
     connectSource: unused,
     recommendations: unused,

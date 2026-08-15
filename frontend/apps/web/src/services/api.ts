@@ -28,8 +28,10 @@ export type ModelConfigurationResponse =
   components["schemas"]["ModelConfigurationResponse"];
 export type ModelConfigurationRequest =
   components["schemas"]["ModelConfigurationRequest"];
+export type LoginResponse = components["schemas"]["LoginResponse"];
 
 export interface WebApi {
+  login(password: string, signal?: AbortSignal): Promise<LoginResponse>;
   listSources(signal?: AbortSignal): Promise<readonly SourceStatus[]>;
   connectSource(
     body: components["schemas"]["ConnectSourceRequest"],
@@ -87,6 +89,17 @@ const objectValidator = <T>(key: string): Validator<T> =>
 /** Typed host API adapter. Runtime guards validate envelopes; generated types own field shapes. */
 export function createWebApi(client: ApiClient): WebApi {
   return {
+    login: (password, signal) =>
+      client.request({
+        path: "/v1/auth/login",
+        method: "post",
+        body: { password },
+        validate: validator<LoginResponse>(
+          (value) =>
+            typeof value.token === "string" && value.label === "session",
+        ),
+        signal,
+      }),
     async listSources(signal) {
       const response = await client.request({
         path: "/v1/sources",

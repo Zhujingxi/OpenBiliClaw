@@ -18,7 +18,9 @@ import AssistantView from "./views/AssistantView.vue";
 import ConnectView from "./views/ConnectView.vue";
 import SettingsView from "./views/SettingsView.vue";
 import RuntimeView from "./views/RuntimeView.vue";
+import LoginView from "./views/LoginView.vue";
 import { usePreferencesStore } from "./stores/preferences";
+import { useAuthStore } from "./stores/auth";
 const current = ref<RouteName>(routeFromHash(location.hash));
 const update = (): void => {
   current.value = routeFromHash(location.hash);
@@ -35,13 +37,23 @@ const views = {
   connect: ConnectView,
   settings: SettingsView,
   runtime: RuntimeView,
+  login: LoginView,
 } as const;
 const view = computed(() => views[current.value]);
 const preferences = usePreferencesStore();
+const auth = useAuthStore();
 const goBack = (): void => history.back();
 const focusMain = (): void =>
   document.querySelector<HTMLElement>("main")?.focus();
-watch(current, async () => {
+watch(current, async (route) => {
+  if (auth.status === "required" && route !== "login") {
+    location.hash = "#/login";
+    return;
+  }
+  if (auth.status !== "required" && route === "login") {
+    location.hash = "#/recommendations";
+    return;
+  }
   await nextTick();
   document.querySelector<HTMLElement>("main h1")?.focus();
 });
@@ -60,9 +72,9 @@ watch(current, async () => {
     >
     <header><strong>OpenBiliClaw</strong></header>
     <div class="responsive-layout">
-      <AppNavigation :current="current" />
+      <AppNavigation v-if="current !== 'login'" :current="current" />
       <main id="main" tabindex="-1"><component :is="view" /></main>
-      <AppNavigation :current="current" mobile />
+      <AppNavigation v-if="current !== 'login'" :current="current" mobile />
     </div>
   </div>
 </template>

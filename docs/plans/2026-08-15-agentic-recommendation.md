@@ -33,8 +33,10 @@ Progress: `- [ ]` pending · `- [~]` in progress · `- [x]` done (TDD: red → g
   auth requirement; candidates carry `(provider, channel)` provenance end to end.
   (spec #18; authoring contract rule) — landed: manifest validation + current anonymous
   feed declarations + durable provider/channel candidate provenance
-- [~] 4. **Auth**: password login for local web/desktop clients; generated token for
-  extension/agent (`openbiliclaw ext-token`). (spec #20) — backend landed (schema V9,
+- [x] 4. **Auth**: password login for local web/desktop clients; generated token for
+  extension/agent (`openbiliclaw ext-token`). (spec #20) — landed: backend (schema V9,
+  login route, set-password/ext-token CLI) + web login page/token flow; bearer gates
+  /v1 only, static SPA shell stays public; browser e2e 5/5 — backend landed (schema V9,
   PBKDF2 login, session/extension tokens, CLI, HTTP/WebSocket auth); frontend login +
   AgentBrowser e2e next
 - [ ] 5. **Image proxy**: `/v1` route serving provider images locally; no CDN hotlink leaks.

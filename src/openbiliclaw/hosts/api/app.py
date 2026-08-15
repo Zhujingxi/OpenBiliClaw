@@ -100,9 +100,12 @@ class SecurityMiddleware(BaseHTTPMiddleware):
             return self._error(403, ErrorCode.FORBIDDEN, "origin is not allowed")
         auth_required = policy.bearer_token is not None or policy.password_hash is not None
         login = request.url.path == "/v1/auth/login" and request.method == "POST"
+        # Bearer gates /v1 data only: the static SPA shell (incl. the login page)
+        # carries no user data and must stay reachable.
         if (
             auth_required
             and not login
+            and request.url.path.startswith("/v1/")
             and not await bearer_authorized(
                 self._dependencies, request.headers.get("authorization", "")
             )
