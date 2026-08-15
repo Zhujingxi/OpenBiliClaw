@@ -450,6 +450,8 @@ class WeiboDiscoveryProducer:
                         items[:limit],
                         search_claims=tuple(produced_claims.values()),
                     ) from exc
+                if _error_code(exc) == "upstream_rejected":
+                    return _ModeFetch([], attempted=False, skip_reason="upstream_rejected")
                 raise
 
             items.extend(produced)
@@ -495,6 +497,8 @@ class WeiboDiscoveryProducer:
             except Exception as exc:
                 if items:
                     raise _PartialModeError(exc, items[:limit]) from exc
+                if _error_code(exc) == "upstream_rejected":
+                    return _ModeFetch([], attempted=False, skip_reason="upstream_rejected")
                 raise
             produced = _normalize_posts(
                 result,
