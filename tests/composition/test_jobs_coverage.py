@@ -6,8 +6,12 @@ from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
+from pydantic_ai.models.test import TestModel
 from tests.recommendation.test_prefilter_expression import candidate
 
+from openbiliclaw.ai.runtime.capabilities import ModelCapabilities
+from openbiliclaw.ai.runtime.execution import AIRuntime
+from openbiliclaw.ai.runtime.routes import ConfiguredModel, ModelRoute, RouteTable
 from openbiliclaw.composition.jobs import (
     RecommendationPipeline,
     build_recommendation_jobs,
@@ -23,9 +27,21 @@ from openbiliclaw.content.integration.manifest import (
     ProviderAvailability,
     ProviderManifest,
 )
+from openbiliclaw.core.resources import ResourceBudget
 from openbiliclaw.infrastructure.sqlite.database import SqliteDatabase
 from openbiliclaw.infrastructure.sqlite.schema import SchemaMigrator
 from openbiliclaw.recommendation.allocation import AllocationDecision
+from openbiliclaw.recommendation.brief import (
+    BriefCompiler,
+    BriefHypothesis,
+    BriefIntent,
+    BriefService,
+    InspectionPlan,
+    RecommendationBrief,
+    RetrievalPlan,
+    SlateGuidance,
+)
+from openbiliclaw.recommendation.brief_agent import BRIEF_AGENT
 from openbiliclaw.recommendation.discovery.service import DiscoveredPreview
 from openbiliclaw.recommendation.evaluation.agent import EvaluationBatch
 from openbiliclaw.recommendation.hypotheses import HypothesisRegistry
@@ -89,6 +105,9 @@ async def test_model_free_evaluation_and_empty_pipeline_are_executable() -> None
     dynamic._providers = SimpleNamespace(registry=SimpleNamespace(manifests=lambda: ()))
     dynamic._access = SimpleNamespace(connected_handle=lambda *_: None)
     dynamic._target_count = 10
+    dynamic._briefs = SimpleNamespace(
+        compile_shadow=AsyncMock(side_effect=RuntimeError("shadow unavailable"))
+    )
     dynamic._clock = lambda: NOW
     dynamic._allocate = AsyncMock(
         return_value=AllocationDecision(
@@ -112,6 +131,8 @@ async def test_model_free_evaluation_and_empty_pipeline_are_executable() -> None
     )
 
     await pipeline.replenish()
+    dynamic._briefs.compile_shadow.assert_awaited_once()
+    dynamic._allocate.assert_awaited_once()
 
     item = candidate("full")
     blocked = item.preview.model_copy(
@@ -227,6 +248,46 @@ async def test_replenish_journals_seeded_allocation_and_delivers_attributed_feed
             manifests=lambda: (manifest,),
             provider=lambda _provider_id: provider,
         )
+        brief_proposal = RecommendationBrief(
+            intent=BriefIntent.ENJOY,
+            intent_expires_at=clock + timedelta(hours=1),
+            hypotheses=(
+                BriefHypothesis(
+                    statement="The familiar baseline may satisfy this episode",
+                    evidence_refs=("system:replenishment",),
+                    falsification="explicit negative feedback",
+                    expires_at=clock + timedelta(hours=2),
+                ),
+            ),
+            retrieval_plans=(RetrievalPlan(channel_refs=("demo:hot",), exploration=False),),
+            inspection_plan=InspectionPlan(
+                shortlist_targets=(), quality_rubric="Prefer substantive content."
+            ),
+            slate_guidance=SlateGuidance(
+                familiar_relationship="Stay near established interests.",
+                novel_relationship="Allow only a close conceptual bridge.",
+            ),
+            action="recommend",
+            stop_condition="Stop after this slate.",
+            expires_at=clock + timedelta(hours=3),
+        )
+        model = ConfiguredModel(
+            "brief-test",
+            "test",
+            TestModel(custom_output_args=brief_proposal.model_dump(mode="json")),
+            ModelCapabilities(structured_output=True, context_tokens=8192),
+        )
+        runtime = AIRuntime(
+            RouteTable((ModelRoute(BRIEF_AGENT.agent_id, BRIEF_AGENT.requirements, (model,)),)),
+            ResourceBudget("model", 1),
+        )
+        briefs = BriefService(
+            runtime,
+            hypotheses,
+            journal,
+            BriefCompiler((manifest,)),
+            clock=lambda: clock,
+        )
         pipeline = RecommendationPipeline(
             cast("Any", SimpleNamespace(registry=registry)),
             cast("Any", SimpleNamespace(connected_handle=lambda *_args: object())),
@@ -247,6 +308,7 @@ async def test_replenish_journals_seeded_allocation_and_delivers_attributed_feed
             target_count=1,
             hypotheses=hypotheses,
             policy_journal=journal,
+            briefs=briefs,
             clock=lambda: clock,
         )
         pipeline._planner = cast("Any", SimpleNamespace(plan=AsyncMock(return_value=())))
@@ -260,8 +322,17 @@ async def test_replenish_journals_seeded_allocation_and_delivers_attributed_feed
         allocation = await journal.load_brief(
             record_identity("brief", f"allocation:{int(clock.timestamp() * 1_000_000)}")
         )
+        shadow = next(
+            record for record in await journal.list_briefs(limit=5) if record.status == "shadow"
+        )
 
         assert result == type(result)(discovered=1, added=1, selected=1)
+        assert shadow.payload["accepted"] is True
+        shadow_proposal = shadow.payload["proposal"]
+        assert isinstance(shadow_proposal, dict)
+        assert shadow_proposal["intent"] == "enjoy"
+        # Shadow evidence cannot switch the live B4 allocator from its pinned intent.
+        assert allocation.payload["intent"] == "uncertain"
         assert allocation.payload["explore"] is True
         assert selected_candidate.provenance.channel == "demo:hot"
         assert selected_candidate.provenance.exploration is not None

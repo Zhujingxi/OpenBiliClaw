@@ -82,6 +82,7 @@ class PolicyJournal(Protocol):
 
     async def append_brief(self, record: JournalBrief) -> None: ...
     async def load_brief(self, brief_id: str) -> JournalBrief: ...
+    async def list_briefs(self, *, limit: int) -> tuple[JournalBrief, ...]: ...
     async def append_hypothesis(self, record: JournalHypothesis) -> None: ...
     async def load_hypothesis(self, hypothesis_id: str) -> JournalHypothesis: ...
     async def list_hypotheses(self) -> tuple[JournalHypothesis, ...]: ...
@@ -130,6 +131,19 @@ class SqlitePolicyJournal:
         if row is None:
             raise KeyError(brief_id)
         return JournalBrief.model_validate(json.loads(cast("str", row[0])))
+
+    async def list_briefs(self, *, limit: int) -> tuple[JournalBrief, ...]:
+        """Return newest policy decisions first for compact agent context."""
+
+        if limit < 1:
+            raise ValueError("brief limit must be positive")
+        async with self._database.transaction() as session:
+            rows = await session.fetch_all(
+                "SELECT record_json FROM policy_briefs"
+                " ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                (limit,),
+            )
+        return tuple(JournalBrief.model_validate(json.loads(cast("str", row[0]))) for row in rows)
 
     async def append_hypothesis(self, record: JournalHypothesis) -> None:
         await self._append("policy_hypotheses", record, arm=record.arm)

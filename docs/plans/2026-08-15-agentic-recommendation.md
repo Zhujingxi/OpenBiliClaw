@@ -61,12 +61,14 @@ learned magnitudes.
   falsification criterion, expiry, attempt/outcome counts. Seed arms: weak-signal,
   dormant-interest (pure ledger SQL), source-novel. Adjacent/bridge land with Phase C/D
   substrate. Registry lives in the policy journal, never the user evidence ledger.
-- [ ] 2. **RecommendationBrief**: agent compiles typed brief on material context change —
+- [x] 2. **RecommendationBrief**: agent compiles typed brief on material context change —
   intent (`enjoy | accomplish | deepen | explore | uncertain`, ephemeral + expiry),
   hypotheses, retrieval/keyword plans, inspection targets + quality rubric, slate
   guidance, ask/abstain, stop condition. Deterministic compiler validates against
-  capabilities/budget/privacy and logs the replayable trace. **Shadow mode first**:
-  brief is logged, current policy executes.
+  capabilities/budget/privacy and logs the replayable trace. Landed in **shadow mode**:
+  every configured-model replenishment attempts and journals the typed proposal,
+  diagnostics, compiler inputs, and agent provenance while the current uncertain-intent
+  allocator executes unchanged. Live switching waits for shadow evidence.
 - [x] 3. **Statistical allocation**: Thompson sampling with Beta posteriors over arms
   (strategy-family prior → per-hypothesis posterior when data exists); reward =
   viewed-and-engaged per the reward contract; unseen impressions ignored. Landed as a

@@ -38,6 +38,9 @@ class MemoryPolicyJournal:
     async def load_brief(self, brief_id: str) -> JournalBrief:
         raise AssertionError("registry must not load briefs")
 
+    async def list_briefs(self, *, limit: int) -> tuple[JournalBrief, ...]:
+        raise AssertionError("registry must not list briefs")
+
     async def append_hypothesis(self, record: JournalHypothesis) -> None:
         self.hypotheses[record.hypothesis_id] = record
 

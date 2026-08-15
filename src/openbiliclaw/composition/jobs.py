@@ -49,6 +49,7 @@ if TYPE_CHECKING:
     from openbiliclaw.composition.repositories import RepositoryGraph
     from openbiliclaw.content.integration.identity import ProviderId
     from openbiliclaw.content.integration.projections import ContentPreview
+    from openbiliclaw.recommendation.brief import BriefService
     from openbiliclaw.recommendation.hypotheses import HypothesisRegistry
     from openbiliclaw.understanding.service import UnderstandingService
 
@@ -73,6 +74,7 @@ class RecommendationPipeline:
         target_count: int,
         hypotheses: HypothesisRegistry,
         policy_journal: PolicyJournal,
+        briefs: BriefService | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._providers = providers
@@ -82,6 +84,7 @@ class RecommendationPipeline:
         self._target_count = target_count
         self._hypotheses = hypotheses
         self._policy_journal = policy_journal
+        self._briefs = briefs
         self._clock = clock
         self._planner = DiscoveryPlanner()
         self._discovery = DiscoveryService(self._resolve)
@@ -217,6 +220,16 @@ class RecommendationPipeline:
             )
         return tuple(supply[:limit])
 
+    async def _compile_shadow_brief(self, episode_id: str) -> None:
+        if self._briefs is None:
+            return
+        try:
+            await self._briefs.compile_shadow(episode_id)
+        except Exception:
+            # Shadow policy is observational: compiler or journal failures must not
+            # alter the live replenishment path.
+            return
+
     async def replenish(self, maximum_items: int | None = None) -> ReplenishmentResult:
         now = self._clock()
         seed = int(now.timestamp() * 1_000_000)
@@ -236,6 +249,7 @@ class RecommendationPipeline:
             if self._access.connected_handle(plan.provider_id.value, None) is not None
         )
         discovered = await self._discovery.discover(connected, limit=limit)
+        await self._compile_shadow_brief(f"replenishment:{seed}")
         decision = await self._allocate(seed, now)
         attribution = (
             ExplorationAttribution(

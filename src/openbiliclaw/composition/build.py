@@ -71,6 +71,8 @@ from openbiliclaw.infrastructure.sqlite.schema import SchemaMigrator
 from openbiliclaw.infrastructure.telemetry import TelemetrySink
 from openbiliclaw.observations.service import ObservationIngressService
 from openbiliclaw.observations.validation import ObservationValidator
+from openbiliclaw.recommendation.brief import BriefCompiler, BriefService
+from openbiliclaw.recommendation.brief_agent import BRIEF_AGENT
 from openbiliclaw.recommendation.hypotheses import HypothesisRegistry
 from openbiliclaw.recommendation.models import FeedbackKind
 from openbiliclaw.recommendation.policy_journal import SqlitePolicyJournal
@@ -355,6 +357,11 @@ def build_application(
                         PREFERENCE_ANALYZER.requirements,
                         (routed_model,),
                     ),
+                    ModelRoute(
+                        BRIEF_AGENT.agent_id,
+                        BRIEF_AGENT.requirements,
+                        (routed_model,),
+                    ),
                 )
             ),
             ResourceBudget("model", settings.runtime.default_resource_limit),
@@ -369,6 +376,16 @@ def build_application(
     )
     policy_journal = SqlitePolicyJournal(database)
     hypotheses = HypothesisRegistry(policy_journal)
+    briefs = (
+        BriefService(
+            assistant_runtime,
+            hypotheses,
+            policy_journal,
+            BriefCompiler(providers.registry.manifests()),
+        )
+        if assistant_runtime is not None
+        else None
+    )
     pipeline = RecommendationPipeline(
         providers,
         access,
@@ -377,6 +394,7 @@ def build_application(
         target_count=settings.recommendation.pool_target_count,
         hypotheses=hypotheses,
         policy_journal=policy_journal,
+        briefs=briefs,
     )
     jobs = build_recommendation_jobs(pipeline)
     if assistant_runtime is not None:

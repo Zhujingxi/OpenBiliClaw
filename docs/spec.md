@@ -17,8 +17,8 @@ CLI workflows/export/import ─┘               │               ▲
                                              ▼               │
                        composition → lifecycle/supervisor    │
                                   │                          │
-              provider feeds → seeded allocation → constrained selection
-                                  │
+              provider feeds → shadow brief journal → seeded allocation → constrained selection
+                                  │                         ▲
                            infrastructure       PydanticAI native providers
                                                         │
                                       configured chat + embedding services
@@ -29,7 +29,7 @@ CLI workflows/export/import ─┘               │               ▲
 1. Start without credentials or a model and expose health, sources, profiles, and an empty feed.
 2. Connect anonymous or provider-owned manual-secret access without exposing submitted secrets.
 3. Record typed observations and feedback idempotently; update bounded profile projections.
-4. Discover connected-provider search and feed content, hard-prefilter it, run seeded/journaled allocation, and build a diversity-constrained slate through the one recommendation pipeline. Normal feeds do not depend on Assistant; missing exploration supply never blocks delivery.
+4. Discover connected-provider search and feed content, hard-prefilter it, optionally compile/journal a validated RecommendationBrief in non-executing shadow mode, run seeded/journaled allocation, and build a diversity-constrained slate through the one recommendation pipeline. Normal feeds do not depend on Assistant; missing models, briefs, or exploration supply never block delivery.
 5. Search/fetch through provider-native capability contracts and opaque access handles.
 6. Require CSRF/device proof for HTTP mutations. Content actions use propose/confirm, expiry, replay protection, and revalidation.
 7. Run configured Assistant/model work only through typed AI Runtime routes and budgets.
