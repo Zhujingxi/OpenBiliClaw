@@ -22,6 +22,7 @@ import { apiUrl } from "../shared/backend-endpoint.ts";
 import { authenticatedFetch } from "../shared/auth.ts";
 import { isNativeSaveTask, type NativeSaveResult, type NativeSaveTask } from "../shared/native-save.ts";
 import { ensureNativeSaveTaskRecovery, runNativeSaveTask } from "./native-save-task-runner.ts";
+import { createTaskTab } from "./task-tab.ts";
 
 // Cross-source mutex — same field as xhs/dy dispatchers so all three
 // cooperate on a single long-running task slot.
@@ -334,7 +335,7 @@ export async function executeTask(task: YtTask): Promise<void> {
   const firstUrl = YT_SCOPE_URLS[scopes[0]];
   let tab: chrome.tabs.Tab;
   try {
-    tab = await chrome.tabs.create({ url: firstUrl, active: true });
+    tab = await createTaskTab({ url: firstUrl, active: true });
   } catch {
     await postTaskResult({ task_id: task.id, status: "failed", error: "tab_create_failed" });
     cleanupTask();
