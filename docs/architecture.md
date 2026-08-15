@@ -27,7 +27,7 @@ Vue web / extension ─────── generated typed client
                      ▲
                Provider Access
                      │
- Infrastructure: SQLite · vault · HTTP · events · telemetry
+ Infrastructure: SQLite/archive · vault · HTTP · events · telemetry
                      ▲
  Core: settings · lifecycle · resources · supervised jobs · health
                      ▲
@@ -49,7 +49,7 @@ Vue web / extension ─────── generated typed client
 
 Startup is infrastructure → providers/services → supervised jobs → host. Shutdown is exact reverse order. Core owns every background task, timeout, resource budget, cancellation, and health record. Atomic reload validates and readies a replacement before swapping references.
 
-The target SQLite migrator refuses unversioned application tables. Destructive migrations require explicit authorization and a verified backup; existing user data is never silently reset.
+The target SQLite migrator refuses unversioned application tables. Destructive migrations require explicit authorization and a verified backup; existing user data is never silently reset. The versioned local archive adapter snapshots live SQLite through its backup API, optionally carries validated/redacted config, and migrates imported snapshots forward before installation.
 
 ## Delivery
 

@@ -13,7 +13,7 @@ A local-first cross-platform content discovery application with deterministic le
 ```text
 Desktop/mobile Vue ─┐
 Extension Vue ───────┼─ typed /v1 API ─ Application workflows ─ product modules
-CLI check/serve ─────┘                        │               ▲
+CLI workflows/export/import ─┘               │               ▲
                                              ▼               │
                        composition → lifecycle/supervisor    │
                                   │                          │
@@ -44,7 +44,7 @@ CLI check/serve ─────┘                        │               ▲
 18. Treat provider recommendation streams as first-class acquisition channels: provider manifests declare a channel registry where each feed records its bias (`platform-popularity | platform-personalized | subscription-graph | editorial`) and auth requirement; candidates carry channel provenance and per-channel yield is learned per user. Platform-personalized channels are exploit-class supply only — exploration supply comes from cross-provider channels or our own hypothesis channels, never from the same platform's model of the user.
 19. CLI covers basically all product functionality as thin pass-through commands over Application workflows — same contracts as the API host, no business logic in commands. For agents it is a thin request/answer pipe (take a request, return the information needed); agent ecosystems use CLI plus skills, never MCP or an exposed OpenAPI surface.
 20. Hosts authenticate with password login for local clients and generated tokens for extension/plugin and agent access. **Backend landed:** PBKDF2 login, session/extension bearer tokens, CLI setup, and HTTP/WebSocket enforcement; frontend login remains pending. Provider images are served through a local image proxy so provider CDNs never see user requests.
-21. Provide versioned export/import of user data (SQLite + config) as the local-first ownership and backup path.
+21. Provide versioned export/import of user data (SQLite + config) as the local-first ownership and backup path. **Landed:** format-v1 local archives use a consistent SQLite backup snapshot, compatibility/table-count manifest, optional redacted config, non-empty-target guard, and migration-forward restore.
 22. Proactive delivery (push notifications: "found things worth your time") is a wanted product channel; its machinery is justified by the vision, not engagement metrics.
 
 ## Current capability limits

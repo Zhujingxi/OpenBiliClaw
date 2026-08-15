@@ -6,7 +6,7 @@ A local-first, type-safe cross-platform content discovery and recommendation app
 Vue web / extension → typed FastAPI /v1 → Application workflows
                                       ├→ Observations → Understanding
 Content Providers ← Provider Access ←─└→ Discovery → Evaluation → Selection
-                     Infrastructure ← Core lifecycle/jobs ← Composition
+            Infrastructure (SQLite/archive) ← Core lifecycle/jobs ← Composition
 ```
 
 ## Quick start

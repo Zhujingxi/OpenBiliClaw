@@ -40,7 +40,9 @@ Progress: `- [ ]` pending · `- [~]` in progress · `- [x]` done (TDD: red → g
 - [x] 5. **Image proxy**: `/v1` route serving provider images locally; no CDN hotlink leaks.
   — landed: declarative provider `image_hosts`/`image_headers`, HTTPS allowlist + 10 MiB
   bounded `/v1/media`, and same-origin card/detail rendering; caching intentionally deferred
-- [ ] 6. **Export/import**: versioned SQLite + config dump/restore. CLI `export`/`import`.
+- [x] 6. **Export/import**: versioned SQLite + config dump/restore. CLI `export`/`import`.
+  — landed: format-v1 zip archive with SQLite backup snapshot, manifest/table counts,
+  optional redacted config, non-empty destination guard, and migration-forward restore
 - [ ] 7. **Full thin CLI**: pass-through commands over Application workflows for
   sources/feed/feedback/profile/assistant; zero business logic in commands. (spec #19)
 

@@ -16,6 +16,7 @@ from openbiliclaw.hosts.api.auth import (
     SqliteAuthTokenRepository,
     hash_password,
 )
+from openbiliclaw.infrastructure.archive import ArchiveError, export_archive, import_archive
 from openbiliclaw.infrastructure.sqlite.database import SqliteDatabase
 from openbiliclaw.infrastructure.sqlite.schema import SchemaMigrator
 
@@ -49,13 +50,48 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="openbiliclaw")
     parser.add_argument(
         "command",
-        choices=("check", "serve", "set-password", "ext-token"),
+        choices=("check", "serve", "set-password", "ext-token", "export", "import"),
         nargs="?",
         default="check",
     )
+    parser.add_argument("path", type=Path, nargs="?")
     parser.add_argument("--config", type=Path)
     parser.add_argument("--data-dir", type=Path, default=BuildOptions().data_dir)
+    parser.add_argument("--include-config", action="store_true")
+    parser.add_argument("--force", action="store_true")
     arguments = parser.parse_args()
+    if arguments.command in {"export", "import"} and arguments.path is None:
+        parser.error(f"{arguments.command} requires an archive path")
+    if arguments.command == "export":
+        database_path = arguments.data_dir / "openbiliclaw.db"
+        if arguments.path.resolve() == database_path.resolve():
+            parser.error("archive path must not be the live database")
+        config_path = (
+            (arguments.config or Path("config.toml")) if arguments.include_config else None
+        )
+        try:
+            manifest = asyncio.run(
+                export_archive(database_path, arguments.path, config_path=config_path)
+            )
+        except ArchiveError as error:
+            parser.error(str(error))
+        print(f"exported format {manifest.format_version} archive to {arguments.path}")
+        return
+    if arguments.command == "import":
+        try:
+            manifest = asyncio.run(
+                import_archive(arguments.path, arguments.data_dir, force=arguments.force)
+            )
+        except ArchiveError as error:
+            parser.error(str(error))
+        print(f"imported format {manifest.format_version} archive into {arguments.data_dir}")
+        restored_config = arguments.data_dir / "config.toml"
+        if restored_config.is_file():
+            print(
+                f"restored config to {restored_config}; "
+                f"serve/check need --config {restored_config} to load it"
+            )
+        return
     if arguments.command == "set-password":
         config_path = arguments.config or Path("config.toml")
         password = getpass.getpass("Password: ")
