@@ -14,6 +14,7 @@ class LedgerStatus(StrEnum):
     PENDING = "pending"
     REJECTED = "rejected"
     SUPERSEDED = "superseded"
+    RETIRED = "retired"
     OVERRIDE = "override"
 
 

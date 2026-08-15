@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
@@ -10,7 +11,11 @@ from pydantic import ConfigDict, Field
 from openbiliclaw.ai.runtime.budgets import RunPolicy
 from openbiliclaw.ai.runtime.capabilities import AgentId, ModelRequirements
 from openbiliclaw.core._pydantic import StrictBaseModel
-from openbiliclaw.observations.models import Observation, PreferenceStatementObservation
+from openbiliclaw.observations.models import (
+    DeterministicProfileEditObservation,
+    Observation,
+    PreferenceStatementObservation,
+)
 
 from .evidence import EvidenceLink
 from .ledger import LedgerEntry, LedgerStatus
@@ -26,6 +31,7 @@ if TYPE_CHECKING:
 
     from .profile import CanonicalProfile
     from .proposals import ClaimProposal, ProposalBatch
+    from .resynthesis import ResynthesisResult
 
 
 class AnalyzerContract(StrictBaseModel):
@@ -61,6 +67,12 @@ class UnderstandingAnalyzer(Protocol):
     async def analyze(self, data: AnalyzerInput) -> ProposalBatch: ...
 
 
+class ProposalResynthesis(Protocol):
+    async def after_proposals(
+        self, profile_id: str, proposals: tuple[ClaimProposal, ...]
+    ) -> ResynthesisResult: ...
+
+
 @dataclass(frozen=True, slots=True)
 class ProcessResult:
     accepted: int
@@ -76,12 +88,14 @@ class UnderstandingService:
         analyzers: tuple[UnderstandingAnalyzer, ...],
         clock: Callable[[], datetime],
         policy: ProposalPolicy | None = None,
+        resynthesis: ProposalResynthesis | None = None,
     ) -> None:
         self._observations = observations
         self._repository = repository
         self._analyzers = analyzers
         self._clock = clock
         self._policy = policy or ProposalPolicy()
+        self._resynthesis = resynthesis
 
     async def profile(self, profile_id: str) -> CanonicalProfile:
         return await self._repository.load_profile(profile_id, now=self._clock())
@@ -133,6 +147,11 @@ class UnderstandingService:
             # analyzer registered under this id never int()-parses an obs_ id.
             checkpoint="0",
         )
+        if self._resynthesis is not None:
+            # The source transaction is already durable; best-effort follow-up must
+            # not report that committed operation as failed.
+            with suppress(Exception):
+                await self._resynthesis.after_proposals(profile_id, (proposal,))
         return entries[0]
 
     async def process(self, profile_id: str, *, batch_size: int = 50) -> ProcessResult:
@@ -165,65 +184,100 @@ class UnderstandingService:
                 analyzer_id=analyzer.contract.agent_id.value,
                 checkpoint=page.next_cursor or cursor or "0",
             )
+            if self._resynthesis is not None:
+                # Keep later analyzers running after an already-committed batch.
+                with suppress(Exception):
+                    await self._resynthesis.after_proposals(profile_id, batch.proposals)
         return ProcessResult(accepted, rejected)
 
     def _apply(
         self, profile: CanonicalProfile, proposals: tuple[ClaimProposal, ...], now: datetime
     ) -> tuple[CanonicalProfile, tuple[LedgerEntry, ...], int, int]:
-        claims = list(profile.claims)
-        entries: list[LedgerEntry] = []
-        accepted = rejected = 0
-        for proposal in proposals:
-            decision = self._policy.decide(
-                profile.model_copy(update={"claims": tuple(claims)}), proposal, now=now
-            )
+        return apply_proposals(profile, proposals, now=now, policy=self._policy)
+
+
+def apply_proposals(
+    profile: CanonicalProfile,
+    proposals: tuple[ClaimProposal, ...],
+    *,
+    now: datetime,
+    policy: ProposalPolicy,
+    resynthesis_reason: str | None = None,
+) -> tuple[CanonicalProfile, tuple[LedgerEntry, ...], int, int]:
+    """Apply proposals through the one canonical profile/ledger decision path."""
+
+    claims = list(profile.claims)
+    entries: list[LedgerEntry] = []
+    accepted = rejected = 0
+    for proposal in proposals:
+        current_profile = profile.model_copy(update={"claims": tuple(claims)})
+        decision = policy.decide(current_profile, proposal, now=now)
+        status = (
+            LedgerStatus.PENDING
+            if decision.reason is DecisionReason.LOW_CONFIDENCE
+            else LedgerStatus.REJECTED
+        )
+        reason = decision.reason.value
+        has_override = any(
+            item.claim_id == proposal.claim.claim_id for item in current_profile.overrides
+        )
+        if resynthesis_reason is not None and has_override:
+            status = LedgerStatus.REJECTED
+            reason = f"{resynthesis_reason}_override"
+            rejected += 1
+        elif resynthesis_reason is not None and decision.reason is DecisionReason.LOW_CONFIDENCE:
+            claims = [item for item in claims if item.claim_id != proposal.claim.claim_id]
+            status = LedgerStatus.RETIRED
+            reason = resynthesis_reason
+            accepted += 1
+        elif decision.accepted:
+            claims = [item for item in claims if item.claim_id != proposal.claim.claim_id]
+            claims.append(proposal.claim)
             status = (
-                LedgerStatus.PENDING
-                if decision.reason is DecisionReason.LOW_CONFIDENCE
-                else LedgerStatus.REJECTED
+                LedgerStatus.SUPERSEDED
+                if decision.reason is DecisionReason.SUPERSEDED
+                else LedgerStatus.ACCEPTED
             )
-            if decision.accepted:
-                claims = [item for item in claims if item.claim_id != proposal.claim.claim_id]
-                claims.append(proposal.claim)
-                status = (
-                    LedgerStatus.SUPERSEDED
-                    if decision.reason is DecisionReason.SUPERSEDED
-                    else LedgerStatus.ACCEPTED
-                )
-                accepted += 1
-            else:
-                rejected += 1
-            entries.append(
-                LedgerEntry(
-                    ledger_id=ledger_identity(proposal.proposal_id, status.value),
-                    profile_id=profile.profile_id,
-                    proposal_id=proposal.proposal_id,
-                    claim_id=proposal.claim.claim_id,
-                    status=status,
-                    reason=decision.reason.value,
-                    decided_at=now,
-                )
+            reason = resynthesis_reason or reason
+            accepted += 1
+        else:
+            rejected += 1
+        entries.append(
+            LedgerEntry(
+                ledger_id=ledger_identity(proposal.proposal_id, status.value),
+                profile_id=profile.profile_id,
+                proposal_id=proposal.proposal_id,
+                claim_id=proposal.claim.claim_id,
+                status=status,
+                reason=reason,
+                decided_at=now,
             )
-        if proposals:
-            profile = profile.model_copy(
-                update={
-                    "claims": tuple(claims),
-                    "revision": profile.revision + 1,
-                    "updated_at": now,
-                }
-            )
-        return profile, tuple(entries), accepted, rejected
+        )
+    if proposals:
+        profile = profile.model_copy(
+            update={
+                "claims": tuple(claims),
+                "revision": profile.revision + 1,
+                "updated_at": now,
+            }
+        )
+    return profile, tuple(entries), accepted, rejected
 
 
 def _project_observation(observation: Observation) -> EvidenceLink:
     summary = _observation_summary(observation)
     suffix = observation.observation_id.removeprefix("obs_")
+    trust = {"low": 0.25, "medium": 0.6, "high": 0.6}[observation.provenance.trust_level.value]
+    if observation.provenance.trust_level.value == "high" and isinstance(
+        observation, (PreferenceStatementObservation, DeterministicProfileEditObservation)
+    ):
+        trust = 1.0
     return EvidenceLink(
         evidence_id="ev_" + suffix,
         observation_id=observation.observation_id,
         summary=summary,
         occurred_at=observation.occurred_at,
-        trust={"low": 0.25, "medium": 0.6, "high": 1.0}[observation.provenance.trust_level.value],
+        trust=trust,
     )
 
 

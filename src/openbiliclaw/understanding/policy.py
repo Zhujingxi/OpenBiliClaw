@@ -43,6 +43,15 @@ class ProposalPolicy:
         self._minimum_confidence = minimum_confidence
         self._evidence_max_age = evidence_max_age
 
+    def evidence_is_stale(self, occurred_at: object, *, now: object) -> bool:
+        """Use the proposal evidence horizon as the claim drift boundary."""
+
+        from datetime import datetime
+
+        if not isinstance(occurred_at, datetime) or not isinstance(now, datetime):
+            raise TypeError("occurred_at and now must be datetime")
+        return now - occurred_at > self._evidence_max_age
+
     def decide(
         self, profile: CanonicalProfile, proposal: ClaimProposal, *, now: object
     ) -> PolicyDecision:
@@ -54,7 +63,7 @@ class ProposalPolicy:
             return PolicyDecision(False, DecisionReason.LOW_CONFIDENCE)
         if not proposal.evidence:
             return PolicyDecision(False, DecisionReason.MISSING_EVIDENCE)
-        if any(now - item.occurred_at > self._evidence_max_age for item in proposal.evidence):
+        if any(self.evidence_is_stale(item.occurred_at, now=now) for item in proposal.evidence):
             return PolicyDecision(False, DecisionReason.STALE_EVIDENCE)
         if proposal.owner is not _owner_for(proposal.claim):
             return PolicyDecision(False, DecisionReason.WRONG_OWNER)

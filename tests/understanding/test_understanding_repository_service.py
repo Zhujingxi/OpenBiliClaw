@@ -6,9 +6,14 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from openbiliclaw.ai.runtime.capabilities import AgentId
 from openbiliclaw.infrastructure.sqlite.database import SqliteDatabase
 from openbiliclaw.infrastructure.sqlite.schema import SchemaMigrator
-from openbiliclaw.observations.models import PreferenceStatementObservation
+from openbiliclaw.observations.models import (
+    PreferenceStatementObservation,
+    ReasonPayload,
+    RecommendationDislikedObservation,
+)
 from openbiliclaw.observations.provenance import (
     ObservationProvenance,
     ObservationSource,
@@ -19,6 +24,7 @@ from openbiliclaw.understanding.evidence import EvidenceLink
 from openbiliclaw.understanding.ledger import LedgerStatus
 from openbiliclaw.understanding.overrides import OverrideOperation
 from openbiliclaw.understanding.profile import (
+    AvoidanceClaim,
     CanonicalProfile,
     EmergingInterestClaim,
     StableInterestClaim,
@@ -26,7 +32,17 @@ from openbiliclaw.understanding.profile import (
 )
 from openbiliclaw.understanding.proposals import ClaimProposal, ProposalBatch, ProposalOwner
 from openbiliclaw.understanding.repository import SqliteUnderstandingRepository
-from openbiliclaw.understanding.service import AnalyzerContract, AnalyzerInput, UnderstandingService
+from openbiliclaw.understanding.resynthesis import (
+    ResynthesisResult,
+    ResynthesisService,
+    ResynthesisTrigger,
+)
+from openbiliclaw.understanding.service import (
+    AnalyzerContract,
+    AnalyzerInput,
+    UnderstandingService,
+    _project_observation,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -50,6 +66,20 @@ def observation(index: int = 1) -> PreferenceStatementObservation:
         ),
         payload={"statement": "I enjoy practical science explanations"},
     )
+
+
+class ResynthesisSpy:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.calls: list[tuple[str, tuple[ClaimProposal, ...]]] = []
+        self.fail = fail
+
+    async def after_proposals(
+        self, profile_id: str, proposals: tuple[ClaimProposal, ...]
+    ) -> ResynthesisResult:
+        self.calls.append((profile_id, proposals))
+        if self.fail:
+            raise RuntimeError("resynthesis failed")
+        return ResynthesisResult(profile=CanonicalProfile.empty(profile_id, NOW), claim_ids=())
 
 
 class PreferenceAnalyzer:
@@ -91,6 +121,28 @@ async def setup(
     return database, SqliteObservationRepository(database), SqliteUnderstandingRepository(database)
 
 
+def test_only_explicit_observations_project_statement_trust() -> None:
+    statement = observation()
+    behavior = RecommendationDislikedObservation(
+        observation_id="obs_" + "f" * 32,
+        idempotency_key="feedback-disliked",
+        occurred_at=NOW,
+        received_at=NOW,
+        account_id="account-1",
+        content_ref=None,
+        provenance=ObservationProvenance(
+            producer_id="application.feedback",
+            source=ObservationSource.RECOMMENDATION,
+            authenticated=True,
+            trust_level=TrustLevel.HIGH,
+        ),
+        payload=ReasonPayload(reason="not relevant", exposed=True),
+    )
+
+    assert _project_observation(statement).trust == 1.0
+    assert _project_observation(behavior).trust == 0.6
+
+
 async def test_atomic_apply_persists_proposal_before_decision_and_checkpoint(
     tmp_path: Path,
 ) -> None:
@@ -111,11 +163,66 @@ async def test_atomic_apply_persists_proposal_before_decision_and_checkpoint(
     ledger = await repository.ledger("default")
     assert ledger[0].status is LedgerStatus.ACCEPTED
     assert await repository.proposal_exists("prop_" + "a" * 32)
+    assert (await repository.proposals_for_claims("default", (profile.claims[0].claim_id,)))[
+        0
+    ].proposal_id == "prop_" + "a" * 32
     assert (
         analyzer.inputs[0].evidence[0].summary
         == "Preference statement: I enjoy practical science explanations"
     )
     assert len(analyzer.inputs[0].model_dump_json()) < 4_000
+    await database.close()
+
+
+async def test_resynthesis_caps_claim_evidence_and_profile_reloads(tmp_path: Path) -> None:
+    database, observations, repository = await setup(tmp_path / "bounded-evidence.db")
+    events = tuple(observation(index) for index in range(1, 71))
+    await observations.insert_batch(events)
+    links = tuple(
+        EvidenceLink(
+            evidence_id="ev_" + item.observation_id.removeprefix("obs_"),
+            observation_id=item.observation_id,
+            summary=f"statement {index}",
+            occurred_at=NOW,
+            trust=1.0,
+        )
+        for index, item in enumerate(events, start=1)
+    )
+    claim = StableInterestClaim(
+        claim_id=claim_id("stable_interest", "science"),
+        value="science",
+        confidence=0.9,
+        fresh_at=NOW,
+        evidence_ids=(links[0].evidence_id,),
+    )
+    proposals = tuple(
+        ClaimProposal(
+            proposal_id="prop_" + marker * 32,
+            analyzer_id="understanding.preference.v1",
+            owner=ProposalOwner.PREFERENCE,
+            claim=claim,
+            evidence=batch,
+            proposed_at=NOW,
+        )
+        for marker, batch in (("c", links[:64]), ("d", links[64:]))
+    )
+    profile = CanonicalProfile(profile_id="default", revision=1, updated_at=NOW, claims=(claim,))
+    await repository.commit_analysis(
+        profile=profile,
+        proposals=proposals,
+        decisions=(),
+        evidence=links,
+        analyzer_id="understanding.preference.v1",
+        checkpoint="70",
+    )
+
+    await ResynthesisService(repository, clock=lambda: NOW).resynthesize(
+        "default", ResynthesisTrigger.CONTRADICTORY_EVIDENCE, (claim.claim_id,)
+    )
+
+    loaded = await repository.load_profile("default", now=NOW)
+    assert len(loaded.claims[0].evidence_ids) == 64
+    assert loaded == CanonicalProfile.model_validate_json(loaded.model_dump_json())
     await database.close()
 
 
@@ -164,7 +271,14 @@ async def test_exploration_like_proposal_stays_pending_until_corroborated(
         fresh_at=NOW,
         evidence_ids=(evidence.evidence_id,),
     )
-    service = UnderstandingService(observations, repository, analyzers=(), clock=lambda: NOW)
+    resynthesis = ResynthesisSpy()
+    service = UnderstandingService(
+        observations,
+        repository,
+        analyzers=(),
+        clock=lambda: NOW,
+        resynthesis=resynthesis,
+    )
 
     decision = await service.consider(
         "default",
@@ -183,6 +297,132 @@ async def test_exploration_like_proposal_stays_pending_until_corroborated(
     assert decision.reason == "low_confidence"
     assert await repository.proposal_exists("prop_" + "7" * 32)
     assert (await service.profile("default")).claims == ()
+    assert len(resynthesis.calls) == 1
+    assert resynthesis.calls[0][0] == "default"
+    assert resynthesis.calls[0][1][0].proposal_id == "prop_" + "7" * 32
+    await database.close()
+
+
+async def test_resynthesis_failure_does_not_abort_remaining_analyzers(tmp_path: Path) -> None:
+    database, observations, repository = await setup(tmp_path / "analyzer-failure.db")
+    await observations.insert_batch((observation(),))
+    first = PreferenceAnalyzer()
+    second = PreferenceAnalyzer()
+    second.contract = second.contract.model_copy(
+        update={"agent_id": AgentId("understanding.insight.v1")}
+    )
+    service = UnderstandingService(
+        observations,
+        repository,
+        analyzers=(first, second),
+        clock=lambda: NOW,
+        resynthesis=ResynthesisSpy(fail=True),
+    )
+
+    result = await service.process("default", batch_size=1)
+
+    assert result.accepted == 2
+    assert len(first.inputs) == len(second.inputs) == 1
+    assert await repository.checkpoint(second.contract.agent_id.value) == "1"
+    await database.close()
+
+
+async def test_resynthesis_failure_does_not_fail_committed_source_operation(
+    tmp_path: Path,
+) -> None:
+    database, observations, repository = await setup(tmp_path / "resynthesis-failure.db")
+    event = observation(8)
+    await observations.insert_batch((event,))
+    link = EvidenceLink(
+        evidence_id="ev_" + event.observation_id.removeprefix("obs_"),
+        observation_id=event.observation_id,
+        summary="new evidence",
+        occurred_at=NOW,
+        trust=1.0,
+    )
+    claim = EmergingInterestClaim(
+        claim_id=claim_id("emerging_interest", "resilient"),
+        value="resilient",
+        confidence=0.2,
+        fresh_at=NOW,
+        evidence_ids=(link.evidence_id,),
+    )
+    hook = ResynthesisSpy(fail=True)
+    service = UnderstandingService(
+        observations, repository, analyzers=(), clock=lambda: NOW, resynthesis=hook
+    )
+
+    decision = await service.consider(
+        "default",
+        ClaimProposal(
+            proposal_id="prop_" + "8" * 32,
+            analyzer_id="understanding.exploration.v1",
+            owner=ProposalOwner.TOPIC_LIFECYCLE,
+            claim=claim,
+            evidence=(link,),
+            proposed_at=NOW,
+        ),
+        link,
+    )
+
+    assert decision.status is LedgerStatus.PENDING
+    assert await repository.proposal_exists("prop_" + "8" * 32)
+    assert len(hook.calls) == 1
+    await database.close()
+
+
+async def test_committed_contradiction_triggers_audited_resynthesis(tmp_path: Path) -> None:
+    database, observations, repository = await setup(tmp_path / "contradiction.db")
+    medium = ObservationProvenance(
+        producer_id="builtin.assistant",
+        source=ObservationSource.ASSISTANT,
+        authenticated=True,
+        trust_level=TrustLevel.MEDIUM,
+    )
+    first = observation().model_copy(update={"provenance": medium})
+    second = observation(2).model_copy(update={"provenance": medium})
+    await observations.insert_batch((first, second))
+    resynthesis = ResynthesisService(repository, clock=lambda: NOW)
+    service = UnderstandingService(
+        observations,
+        repository,
+        analyzers=(PreferenceAnalyzer(),),
+        clock=lambda: NOW,
+        resynthesis=resynthesis,
+    )
+    assert (await service.process("default", batch_size=1)).accepted == 1
+    link = EvidenceLink(
+        evidence_id="ev_" + second.observation_id.removeprefix("obs_"),
+        observation_id=second.observation_id,
+        summary="User avoids science",
+        occurred_at=NOW,
+        trust=0.6,
+    )
+    opposite = AvoidanceClaim(
+        claim_id=claim_id("avoidance", "science"),
+        value="science",
+        confidence=0.8,
+        fresh_at=NOW,
+        evidence_ids=(link.evidence_id,),
+    )
+
+    decision = await service.consider(
+        "default",
+        ClaimProposal(
+            proposal_id="prop_" + "b" * 32,
+            analyzer_id="understanding.avoidance.v1",
+            owner=ProposalOwner.AVOIDANCE,
+            claim=opposite,
+            evidence=(link,),
+            proposed_at=NOW,
+        ),
+        link,
+    )
+
+    assert decision.reason == "contradiction"
+    profile = await service.profile("default")
+    assert profile.claims[0].confidence == 0.5
+    assert (await repository.ledger("default"))[-1].reason == ("resynthesis_contradictory_evidence")
     await database.close()
 
 

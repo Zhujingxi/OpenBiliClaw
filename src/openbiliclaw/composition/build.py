@@ -87,6 +87,7 @@ from openbiliclaw.understanding.analyzers.preference import (
 from openbiliclaw.understanding.evidence import EvidenceLink
 from openbiliclaw.understanding.profile import EmergingInterestClaim, claim_id
 from openbiliclaw.understanding.proposals import ClaimProposal, ProposalOwner
+from openbiliclaw.understanding.resynthesis import ResynthesisService
 from openbiliclaw.understanding.service import AnalyzerContract, AnalyzerInput, UnderstandingService
 
 if TYPE_CHECKING:
@@ -373,11 +374,17 @@ def build_application(
             policies=policy_book,
         )
     analyzers = (_RuntimeAnalyzer(assistant_runtime),) if assistant_runtime is not None else ()
+
+    def clock() -> datetime:
+        return datetime.now(UTC)
+
+    resynthesis = ResynthesisService(repositories.understanding, clock=clock)
     understanding = UnderstandingService(
         repositories.observations,
         repositories.understanding,
         analyzers=analyzers,
-        clock=lambda: datetime.now(UTC),
+        clock=clock,
+        resynthesis=resynthesis,
     )
     policy_journal = SqlitePolicyJournal(database)
     hypotheses = HypothesisRegistry(policy_journal)
@@ -533,8 +540,12 @@ def build_application(
         feedback=feedback,
         feedback_for_shown=RecordFeedbackForShown(repositories.recommendations, feedback),
         profile_edit=EditProfile(
-            ProfileEditUnitOfWork(repositories.understanding, repositories.observations),
-            clock=lambda: datetime.now(UTC),
+            ProfileEditUnitOfWork(
+                repositories.understanding,
+                repositories.observations,
+                resynthesis=resynthesis,
+            ),
+            clock=clock,
         ),
         pending_actions=SqlitePendingActionRepository(database),
     )

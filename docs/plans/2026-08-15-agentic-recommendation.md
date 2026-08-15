@@ -103,7 +103,7 @@ and passive disengagement only shrinks it.
 
 Goal: the profile becomes a living, evidence-grounded document and matching goes semantic.
 
-- [ ] **Event-triggered re-synthesis**: bounded job re-synthesizes profile claims from
+- [x] **Event-triggered re-synthesis**: bounded job re-synthesizes profile claims from
    evidence on triggers (explicit correction, contradictory evidence, drift); never
    schedule-driven full rebuilds. Trust-tier weighting: explicit user statements always
    outrank inference.

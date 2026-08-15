@@ -45,6 +45,7 @@ from openbiliclaw.recommendation.models import (
 from openbiliclaw.recommendation.repositories import SqliteRecommendationRepository
 from openbiliclaw.understanding.overrides import OverrideOperation
 from openbiliclaw.understanding.repository import SqliteUnderstandingRepository
+from openbiliclaw.understanding.resynthesis import ResynthesisResult, ResynthesisTrigger
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -56,6 +57,26 @@ REF = ContentRef(
     provider_content_id="1",
     canonical_url="https://demo.example/1",
 )
+
+
+class ProfileResynthesisSpy:
+    def __init__(self, repository: SqliteUnderstandingRepository, *, fail: bool = False) -> None:
+        self._repository = repository
+        self._fail = fail
+        self.calls: list[tuple[str, ResynthesisTrigger, tuple[str, ...]]] = []
+
+    async def resynthesize(
+        self,
+        profile_id: str,
+        trigger: ResynthesisTrigger,
+        claim_ids: tuple[str, ...],
+    ) -> ResynthesisResult:
+        self.calls.append((profile_id, trigger, claim_ids))
+        if self._fail:
+            raise RuntimeError("resynthesis failed")
+        return ResynthesisResult(
+            profile=await self._repository.load_profile(profile_id, now=NOW), claim_ids=claim_ids
+        )
 
 
 class SqliteFeedbackUow:
@@ -255,7 +276,10 @@ async def test_production_units_of_work_commit_feedback_and_profile_edit(tmp_pat
         provenance=provenance,
         payload=ProfileEditPayload(field="claim", operation="set", value="science"),
     )
-    profile = await ProfileEditUnitOfWork(understanding, observations).edit_profile(
+    resynthesis = ProfileResynthesisSpy(understanding, fail=True)
+    profile = await ProfileEditUnitOfWork(
+        understanding, observations, resynthesis=resynthesis
+    ).edit_profile(
         "default",
         claim_id="claim_" + "b" * 32,
         operation=OverrideOperation.SET,
@@ -263,6 +287,13 @@ async def test_production_units_of_work_commit_feedback_and_profile_edit(tmp_pat
         observation=edit,
     )
     assert profile.revision == 1
+    assert resynthesis.calls == [
+        (
+            "default",
+            ResynthesisTrigger.EXPLICIT_CORRECTION,
+            ("claim_" + "b" * 32,),
+        )
+    ]
     assert len((await observations.read(after_cursor=None, limit=10)).items) == 2
     await database.close()
 

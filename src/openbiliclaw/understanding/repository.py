@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Protocol
 
 from .ledger import LedgerEntry
 from .profile import CanonicalProfile
+from .proposals import ClaimProposal
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -14,13 +15,15 @@ if TYPE_CHECKING:
     from openbiliclaw.infrastructure.sqlite.database import SqliteDatabase
 
     from .evidence import EvidenceLink
-    from .proposals import ClaimProposal
 
 
 class UnderstandingRepository(Protocol):
     async def load_profile(self, profile_id: str, *, now: datetime) -> CanonicalProfile: ...
     async def checkpoint(self, analyzer_id: str) -> str | None: ...
     async def ledger(self, profile_id: str) -> tuple[LedgerEntry, ...]: ...
+    async def proposals_for_claims(
+        self, profile_id: str, claim_ids: tuple[str, ...]
+    ) -> tuple[ClaimProposal, ...]: ...
     async def proposal_exists(self, proposal_id: str) -> bool: ...
     async def commit_override(self, profile: CanonicalProfile, entry: LedgerEntry) -> None: ...
     async def commit_analysis(
@@ -65,6 +68,22 @@ class SqliteUnderstandingRepository:
                 (profile_id,),
             )
         return tuple(LedgerEntry.model_validate_json(str(row[0])) for row in rows)
+
+    async def proposals_for_claims(
+        self, profile_id: str, claim_ids: tuple[str, ...]
+    ) -> tuple[ClaimProposal, ...]:
+        if not claim_ids:
+            return ()
+        placeholders = ",".join("?" for _ in claim_ids)
+        async with self._database.transaction() as session:
+            rows = await session.fetch_all(
+                "SELECT proposal_json FROM understanding_proposals "
+                "WHERE profile_id=? AND json_extract(proposal_json,'$.claim.claim_id') IN ("
+                + placeholders
+                + ") ORDER BY rowid",
+                (profile_id, *claim_ids),
+            )
+        return tuple(ClaimProposal.model_validate_json(str(row[0])) for row in rows)
 
     async def proposal_exists(self, proposal_id: str) -> bool:
         async with self._database.transaction() as session:

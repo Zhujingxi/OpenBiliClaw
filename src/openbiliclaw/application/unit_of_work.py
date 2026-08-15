@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from contextlib import suppress
+from typing import TYPE_CHECKING, Protocol
 
 from openbiliclaw.understanding.ledger import LedgerEntry, LedgerStatus
 from openbiliclaw.understanding.overrides import OverrideOperation, UserOverride
 from openbiliclaw.understanding.repository import ledger_identity
+from openbiliclaw.understanding.resynthesis import ResynthesisTrigger
 
 if TYPE_CHECKING:
     from openbiliclaw.content.integration.identity import ContentRef
@@ -16,6 +18,16 @@ if TYPE_CHECKING:
     from openbiliclaw.recommendation.repositories import SqliteRecommendationRepository
     from openbiliclaw.understanding.profile import CanonicalProfile
     from openbiliclaw.understanding.repository import SqliteUnderstandingRepository
+    from openbiliclaw.understanding.resynthesis import ResynthesisResult
+
+
+class ProfileResynthesis(Protocol):
+    async def resynthesize(
+        self,
+        profile_id: str,
+        trigger: ResynthesisTrigger,
+        claim_ids: tuple[str, ...],
+    ) -> ResynthesisResult: ...
 
 
 class FeedbackUnitOfWork:
@@ -50,9 +62,12 @@ class ProfileEditUnitOfWork:
         self,
         understanding: SqliteUnderstandingRepository,
         observations: SqliteObservationRepository,
+        *,
+        resynthesis: ProfileResynthesis | None = None,
     ) -> None:
         self._understanding = understanding
         self._observations = observations
+        self._resynthesis = resynthesis
 
     async def edit_profile(
         self,
@@ -84,4 +99,13 @@ class ProfileEditUnitOfWork:
                 decided_at=observation.occurred_at,
             ),
         )
+        if self._resynthesis is None:
+            return updated
+        # The override and its observation are already durable; a best-effort
+        # follow-up must not report the committed edit as failed.
+        with suppress(Exception):
+            result = await self._resynthesis.resynthesize(
+                profile_id, ResynthesisTrigger.EXPLICIT_CORRECTION, (claim_id,)
+            )
+            return result.profile
         return updated
