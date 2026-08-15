@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from random import Random
@@ -36,6 +38,7 @@ from openbiliclaw.recommendation.models import (
 )
 from openbiliclaw.recommendation.policy_journal import JournalBrief, PolicyJournal
 from openbiliclaw.recommendation.selection.service import SelectionService
+from openbiliclaw.recommendation.semantic import adjacent_recall, candidate_embedding_text
 from openbiliclaw.understanding.projections import discovery_projection, recommendation_projection
 
 DEFAULT_PROFILE_ID = "default"
@@ -45,12 +48,14 @@ if TYPE_CHECKING:
 
     from openbiliclaw.access.models import AccessHandle
     from openbiliclaw.access.service import AccessService
+    from openbiliclaw.ai.providers.embeddings.index import EmbeddingIndex
     from openbiliclaw.composition.providers import ProviderGraph
     from openbiliclaw.composition.repositories import RepositoryGraph
     from openbiliclaw.content.integration.identity import ProviderId
     from openbiliclaw.content.integration.projections import ContentPreview
     from openbiliclaw.recommendation.brief import BriefService
     from openbiliclaw.recommendation.hypotheses import HypothesisRegistry
+    from openbiliclaw.understanding.profile import CanonicalProfile
     from openbiliclaw.understanding.service import UnderstandingService
 
 
@@ -75,6 +80,7 @@ class RecommendationPipeline:
         hypotheses: HypothesisRegistry,
         policy_journal: PolicyJournal,
         briefs: BriefService | None = None,
+        semantic_index: EmbeddingIndex | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._providers = providers
@@ -85,6 +91,7 @@ class RecommendationPipeline:
         self._hypotheses = hypotheses
         self._policy_journal = policy_journal
         self._briefs = briefs
+        self._semantic_index = semantic_index
         self._clock = clock
         self._planner = DiscoveryPlanner()
         self._discovery = DiscoveryService(self._resolve)
@@ -128,6 +135,9 @@ class RecommendationPipeline:
             statement={
                 "source-novel": "Cross-provider public feeds may expose relevant source novelty",
                 "weak-signal": "Public feed signals may reveal an emerging interest",
+                "adjacent": (
+                    "Candidates near a weak interest may expand it without repeating top interests"
+                ),
                 "exploit": "The familiar exploit strategy may satisfy current intent",
             }[arm],
             evidence_refs=("system:replenishment",),
@@ -140,6 +150,7 @@ class RecommendationPipeline:
     async def _allocate(self, seed: int, now: datetime) -> AllocationDecision:
         await self._ensure_hypothesis("source-novel", now)
         await self._ensure_hypothesis("weak-signal", now)
+        await self._ensure_hypothesis("adjacent", now)
         await self._ensure_hypothesis("exploit", now)
         active = await self._hypotheses.active(now)
         counts: list[HypothesisCounts] = []
@@ -245,6 +256,37 @@ class RecommendationPipeline:
             )
         return tuple(supply[:limit])
 
+    async def _index_candidates(self, candidates: tuple[Candidate, ...]) -> None:
+        index = getattr(self, "_semantic_index", None)
+        if index is None:
+            return
+        # The provider's ResourceBudget bounds concurrent calls while SQLite serializes writes.
+        await asyncio.gather(
+            *(self._safe_index_candidate(index, candidate) for candidate in candidates)
+        )
+
+    @staticmethod
+    async def _safe_index_candidate(index: EmbeddingIndex, candidate: Candidate) -> None:
+        # Candidate durability and feed availability outrank optional semantic recall.
+        with suppress(Exception):
+            await index.upsert(
+                "candidate", candidate.candidate_id, candidate_embedding_text(candidate)
+            )
+
+    async def _adjacent_ids(
+        self,
+        profile: CanonicalProfile,
+        *,
+        limit: int,
+    ) -> frozenset[str]:
+        index = getattr(self, "_semantic_index", None)
+        if index is None:
+            return frozenset()
+        with suppress(Exception):
+            matches = await adjacent_recall(index, recommendation_projection(profile), limit=limit)
+            return frozenset(item[0] for item in matches)
+        return frozenset()
+
     async def _compile_shadow_brief(self, episode_id: str) -> None:
         if self._briefs is None:
             return
@@ -324,7 +366,7 @@ class RecommendationPipeline:
                     channel=channel,
                     exploration=(
                         attribution.model_copy(update={"channel": channel})
-                        if attribution is not None
+                        if attribution is not None and attribution.arm != "adjacent"
                         else None
                     ),
                     discovered_at=now,
@@ -335,6 +377,25 @@ class RecommendationPipeline:
             for preview, channel in feed_supply
         )
         candidates = (*search_candidates, *feed_candidates)
+        await self._index_candidates(candidates)
+        if attribution is not None and attribution.arm == "adjacent":
+            adjacent_ids = await self._adjacent_ids(profile, limit=limit)
+            candidates = tuple(
+                candidate.model_copy(
+                    update={
+                        "provenance": candidate.provenance.model_copy(
+                            update={
+                                "exploration": attribution.model_copy(
+                                    update={"channel": candidate.provenance.channel}
+                                )
+                            }
+                        )
+                    }
+                )
+                if candidate.candidate_id in adjacent_ids
+                else candidate
+                for candidate in candidates
+            )
         added_list: list[Candidate] = []
         for candidate in candidates:
             if await self._repositories.recommendations.add_candidate(candidate):

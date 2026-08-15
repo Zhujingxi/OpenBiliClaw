@@ -107,7 +107,7 @@ Goal: the profile becomes a living, evidence-grounded document and matching goes
    evidence on triggers (explicit correction, contradictory evidence, drift); never
    schedule-driven full rebuilds. Trust-tier weighting: explicit user statements always
    outrank inference.
-- [ ] **Embedding index + semantic retrieval**: durable index over evidence/profile
+- [x] **Embedding index + semantic retrieval**: durable index over evidence/profile
    fragments/candidates; vector recall feeds LLM rerank. Unlocks the adjacent arm.
    `RecommendationProfile` gains embedding-backed views.
 - [ ] **Correction channel hardening**: assistant `propose_profile_revision` tool → pending

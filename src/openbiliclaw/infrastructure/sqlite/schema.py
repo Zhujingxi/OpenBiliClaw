@@ -44,6 +44,7 @@ TARGET_TABLE_OWNERS: Final[dict[str, str]] = {
     "policy_hypotheses": "Discovery & Recommendation",
     "policy_lessons": "Discovery & Recommendation",
     "policy_outcomes": "Discovery & Recommendation",
+    "embedding_index": "AI Embedding Providers",
 }
 
 _SCHEMA_V1: Final[tuple[str, ...]] = (
@@ -355,6 +356,20 @@ _SCHEMA_V9: Final[tuple[str, ...]] = (
     )""",
 )
 
+_SCHEMA_V10: Final[tuple[str, ...]] = (
+    """CREATE TABLE embedding_index (
+        entry_id TEXT PRIMARY KEY CHECK(entry_id GLOB 'emb_[0-9a-f]*'),
+        kind TEXT NOT NULL CHECK(kind IN ('evidence','claim','candidate')),
+        ref_id TEXT NOT NULL,
+        model TEXT NOT NULL,
+        vector BLOB NOT NULL,
+        text_hash TEXT NOT NULL CHECK(length(text_hash) = 64),
+        created_at TEXT NOT NULL,
+        UNIQUE(kind, ref_id, model)
+    )""",
+    "CREATE INDEX embedding_index_model_kind ON embedding_index(model, kind)",
+)
+
 
 DEFAULT_MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(1, _SCHEMA_V1),
@@ -366,6 +381,7 @@ DEFAULT_MIGRATIONS: Final[tuple[Migration, ...]] = (
     Migration(7, _SCHEMA_V7),
     Migration(8, _SCHEMA_V8),
     Migration(9, _SCHEMA_V9),
+    Migration(10, _SCHEMA_V10),
 )
 
 

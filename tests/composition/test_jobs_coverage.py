@@ -9,6 +9,12 @@ import pytest
 from pydantic_ai.models.test import TestModel
 from tests.recommendation.test_prefilter_expression import candidate
 
+from openbiliclaw.ai.providers.embeddings import (
+    EmbeddingModelInfo,
+    EmbeddingResult,
+    EmbeddingUsage,
+)
+from openbiliclaw.ai.providers.embeddings.index import EmbeddingIndex
 from openbiliclaw.ai.runtime.capabilities import ModelCapabilities
 from openbiliclaw.ai.runtime.execution import AIRuntime
 from openbiliclaw.ai.runtime.routes import ConfiguredModel, ModelRoute, RouteTable
@@ -54,12 +60,15 @@ from openbiliclaw.understanding.profile import (
     EXPLORATION_DISABLED_CLAIM_ID,
     AvoidanceClaim,
     CanonicalProfile,
+    EmergingInterestClaim,
+    StableInterestClaim,
     claim_id,
 )
 
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from openbiliclaw.ai.providers.embeddings import Vector
     from openbiliclaw.content.integration.capabilities import SearchCapability
 
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
@@ -243,7 +252,7 @@ async def test_model_free_evaluation_and_empty_pipeline_are_executable() -> None
 async def test_fresh_install_seeded_allocation_explores_and_delivers_attributed_feed_supply(
     tmp_path: Path,
 ) -> None:
-    clock = NOW + timedelta(microseconds=1)  # seed deterministically chooses source-novel
+    clock = NOW + timedelta(microseconds=2)  # seed deterministically chooses source-novel
     path = tmp_path / "replenish.db"
     await SchemaMigrator(path).migrate()
     database = SqliteDatabase(path)
@@ -374,6 +383,154 @@ async def test_fresh_install_seeded_allocation_explores_and_delivers_attributed_
             selected_candidate.provenance.exploration.hypothesis_id
             == allocation.payload["hypothesis_id"]
         )
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_adjacent_arm_surfaces_semantic_candidate_with_attribution(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "adjacent.db"
+    await SchemaMigrator(path).migrate()
+    database = SqliteDatabase(path)
+    await database.open()
+    try:
+        info = EmbeddingModelInfo(
+            provider="test", model="semantic-v1", dimensions=2, normalized=True, version="1"
+        )
+        preview = candidate("adjacent-video").preview
+        candidate_text = "adjacent-video\nsummary\ndemo:hot"
+
+        class FakeEmbeddings:
+            async def embed_documents(self, texts: tuple[str, ...]) -> EmbeddingResult:
+                vectors = {
+                    "science": (1.0, 0.0),
+                    "robotics": (0.0, 1.0),
+                    candidate_text: (0.0, 1.0),
+                }
+                return EmbeddingResult(
+                    vectors=tuple(vectors[text] for text in texts),
+                    usage=EmbeddingUsage(requests=1, input_tokens=len(texts)),
+                    model=info,
+                )
+
+            async def embed_query(self, text: str) -> Vector:
+                raise AssertionError("adjacent recall uses durable claim vectors")
+
+        index = EmbeddingIndex(database, FakeEmbeddings(), info, clock=lambda: NOW)
+        top = StableInterestClaim(
+            claim_id=claim_id("stable_interest", "science"),
+            value="science",
+            confidence=0.95,
+            fresh_at=NOW,
+            evidence_ids=("ev_" + "1" * 32,),
+        )
+        weak = EmergingInterestClaim(
+            claim_id=claim_id("emerging_interest", "robotics"),
+            value="robotics",
+            confidence=0.4,
+            fresh_at=NOW,
+            evidence_ids=("ev_" + "2" * 32,),
+        )
+        await index.upsert("claim", top.claim_id, top.value)
+        await index.upsert("claim", weak.claim_id, weak.value)
+        manifest = ProviderManifest(
+            provider_id=preview.ref.provider_id,
+            display_name="Demo",
+            capabilities=frozenset({CapabilityKind.FEED}),
+            native_schemas=(
+                NativeSchemaDescriptor(content_kind=ContentKind(value="video"), schema_version=1),
+            ),
+            channels=(
+                ChannelDescriptor(
+                    feed_id="hot",
+                    bias_class=BiasClass.PLATFORM_POPULARITY,
+                    auth_required=False,
+                ),
+            ),
+            availability=ProviderAvailability.AVAILABLE,
+        )
+
+        class FakeFeedProvider:
+            async def feed(self, query: FeedQuery, access: object) -> ContentPage[Any]:
+                assert query.feed_id == "hot" and access is not None
+                return ContentPage(items=(preview,), next_cursor=None)
+
+        registry = SimpleNamespace(
+            manifests=lambda: (manifest,), provider=lambda _provider_id: FakeFeedProvider()
+        )
+        recommendations = SqliteRecommendationRepository(database)
+        journal = SqlitePolicyJournal(database)
+        pipeline = RecommendationPipeline(
+            cast("Any", SimpleNamespace(registry=registry)),
+            cast("Any", SimpleNamespace(connected_handle=lambda *_args: object())),
+            cast("Any", SimpleNamespace(recommendations=recommendations)),
+            cast(
+                "Any",
+                SimpleNamespace(
+                    profile=AsyncMock(
+                        return_value=CanonicalProfile(
+                            profile_id="default",
+                            revision=1,
+                            updated_at=NOW,
+                            claims=(top, weak),
+                        )
+                    )
+                ),
+            ),
+            target_count=1,
+            hypotheses=HypothesisRegistry(journal, clock=lambda: NOW),
+            policy_journal=journal,
+            semantic_index=index,
+            clock=lambda: NOW,
+        )
+        pipeline._planner = cast("Any", SimpleNamespace(plan=AsyncMock(return_value=())))
+        pipeline._discovery = cast("Any", SimpleNamespace(discover=AsyncMock(return_value=())))
+        cast("Any", pipeline)._allocate = AsyncMock(
+            return_value=AllocationDecision(
+                intent="uncertain",
+                explore=True,
+                arm="adjacent",
+                hypothesis_id="hyp_" + "a" * 32,
+                samples=(),
+            )
+        )
+
+        assert (await pipeline.replenish()).selected == 1
+        delivered = await RecommendationService(recommendations).deliver_feed(limit=1, shown_at=NOW)
+        selected = await recommendations.load(delivered[0].selection.candidate_id)
+        assert selected.provenance.exploration is not None
+        assert selected.provenance.exploration.arm == "adjacent"
+        assert selected.provenance.channel == "demo:hot"
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_candidate_embedding_outage_does_not_block_admission_hook(tmp_path: Path) -> None:
+    path = tmp_path / "embedding-outage.db"
+    await SchemaMigrator(path).migrate()
+    database = SqliteDatabase(path)
+    await database.open()
+    try:
+        info = EmbeddingModelInfo(
+            provider="test", model="down", dimensions=2, normalized=True, version="1"
+        )
+
+        class Outage:
+            async def embed_documents(self, texts: tuple[str, ...]) -> EmbeddingResult:
+                raise RuntimeError("embedding provider down")
+
+            async def embed_query(self, text: str) -> Vector:
+                raise RuntimeError("embedding provider down")
+
+        index = EmbeddingIndex(database, Outage(), info, clock=lambda: NOW)
+        pipeline = object.__new__(RecommendationPipeline)
+        dynamic = cast("Any", pipeline)
+        dynamic._semantic_index = index
+        await pipeline._index_candidates((candidate("survives"),))
+        assert await database.fetch_value("SELECT count(*) FROM embedding_index") == 0
     finally:
         await database.close()
 

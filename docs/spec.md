@@ -17,11 +17,11 @@ CLI workflows/export/import ─┘               │               ▲
                                              ▼               │
                        composition → lifecycle/supervisor    │
                                   │                          │
-              provider feeds → shadow brief journal → seeded allocation → constrained selection
+              provider feeds → adjacent recall → shadow brief → seeded allocation → constrained selection
                                   │                         ▲
-                           infrastructure       PydanticAI native providers
-                                                        │
-                                      configured chat + embedding services
+                     SQLite semantic index ←── PydanticAI native embedding provider
+                                  │                         │
+                           infrastructure        configured chat providers
 ```
 
 ## Required behavior
@@ -29,7 +29,7 @@ CLI workflows/export/import ─┘               │               ▲
 1. Start without credentials or a model and expose health, sources, profiles, and an empty feed.
 2. Connect anonymous or provider-owned manual-secret access without exposing submitted secrets.
 3. Record typed observations and feedback idempotently; update bounded profile projections.
-4. Discover connected-provider search and feed content, hard-prefilter it, optionally compile/journal a validated RecommendationBrief in non-executing shadow mode, run seeded/journaled allocation, and build a diversity-constrained slate through the one recommendation pipeline. Normal feeds do not depend on Assistant; missing models, briefs, or exploration supply never block delivery.
+4. Discover connected-provider search and feed content, hard-prefilter it, recall adjacent supply from model-specific evidence/claim/candidate embeddings, optionally compile/journal a validated RecommendationBrief in non-executing shadow mode, run seeded/journaled allocation, and build a diversity-constrained slate through the one recommendation pipeline. Normal feeds do not depend on Assistant; missing models, briefs, embeddings, or exploration supply never block delivery.
 5. Search/fetch through provider-native capability contracts and opaque access handles.
 6. Require CSRF/device proof for HTTP mutations. Content actions use propose/confirm, expiry, replay protection, and revalidation.
 7. Run configured Assistant/model work only through typed AI Runtime routes and budgets.
@@ -38,7 +38,7 @@ CLI workflows/export/import ─┘               │               ▲
 10. Access every chat and embedding model through one configuration/factory path and PydanticAI native providers; never host or bundle model runtimes in OpenBiliClaw.
 11. Refuse destructive or unversioned database cutover without an explicit backed-up migration/reset decision.
 12. Acquire browser-held credentials only through provider-declared declarative recipes: the backend tells the extension what artifact to get and where; the extension is a generic grabber with no per-source logic, and content transport never runs in the extension.
-13. Model the user without fixed trait taxonomies (no MBTI-style or soul-layer schemas): profile claims are LLM-synthesized from evidence with provenance and trust tiers — explicit user statements always outrank inference — and embeddings are the retrieval substrate for matching (vector recall, LLM rerank).
+13. Model the user without fixed trait taxonomies (no MBTI-style or soul-layer schemas): profile claims are LLM-synthesized from evidence with provenance and trust tiers — explicit user statements always outrank inference — and model-specific embeddings are the retrieval substrate for matching. Bounded vector recall is landed; LLM rerank remains a later consumer.
 14. Let users correct the model's understanding through Assistant chat; corrections enter only as proposed profile revisions through the pending-action path and persist as explicit user-statement evidence, dual-written to the ledger and the embedding index.
 15. Treat recommendation/exploration policy as a pluggable strategy module: the pipeline defines the strategy interface and strategies are swappable; the agentic strategy is the first implementation.
 16. Agentic strategy contract: maximal semantic agency, bounded operational delegation, deterministic execution sovereignty. Per material user context the agent autonomously compiles a typed RecommendationBrief — intent, evidence-cited hypotheses with pre-registered kill conditions, query/keyword plans, inspection targets with quality rubric, slate guidance, ask/abstain, expiry. Reversible internal policy auto-applies with audit and rollback; durable user claims use proposal/corroboration; spend, privacy, credentials, and ledger mutation remain invariants below the policy layer. Learned statistics own per-feed magnitudes; user evidence and the agent policy journal are separate append-only planes; there are no unexplained global recommendation constants.

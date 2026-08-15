@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
@@ -27,6 +28,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from datetime import datetime
 
+    from openbiliclaw.ai.providers.embeddings.index import EmbeddingKind
     from openbiliclaw.observations.repository import ObservationRepository
 
     from .profile import CanonicalProfile
@@ -73,6 +75,10 @@ class ProposalResynthesis(Protocol):
     ) -> ResynthesisResult: ...
 
 
+class EmbeddingWriter(Protocol):
+    async def upsert(self, kind: EmbeddingKind, ref_id: str, text: str) -> bool: ...
+
+
 @dataclass(frozen=True, slots=True)
 class ProcessResult:
     accepted: int
@@ -89,6 +95,7 @@ class UnderstandingService:
         clock: Callable[[], datetime],
         policy: ProposalPolicy | None = None,
         resynthesis: ProposalResynthesis | None = None,
+        embedding_index: EmbeddingWriter | None = None,
     ) -> None:
         self._observations = observations
         self._repository = repository
@@ -96,6 +103,7 @@ class UnderstandingService:
         self._clock = clock
         self._policy = policy or ProposalPolicy()
         self._resynthesis = resynthesis
+        self._embedding_index = embedding_index
 
     async def profile(self, profile_id: str) -> CanonicalProfile:
         return await self._repository.load_profile(profile_id, now=self._clock())
@@ -147,6 +155,7 @@ class UnderstandingService:
             # analyzer registered under this id never int()-parses an obs_ id.
             checkpoint="0",
         )
+        await index_understanding_commit(self._embedding_index, updated, (proposal,), (evidence,))
         if self._resynthesis is not None:
             # The source transaction is already durable; best-effort follow-up must
             # not report that committed operation as failed.
@@ -184,6 +193,9 @@ class UnderstandingService:
                 analyzer_id=analyzer.contract.agent_id.value,
                 checkpoint=page.next_cursor or cursor or "0",
             )
+            await index_understanding_commit(
+                self._embedding_index, profile, batch.proposals, evidence
+            )
             if self._resynthesis is not None:
                 # Keep later analyzers running after an already-committed batch.
                 with suppress(Exception):
@@ -194,6 +206,42 @@ class UnderstandingService:
         self, profile: CanonicalProfile, proposals: tuple[ClaimProposal, ...], now: datetime
     ) -> tuple[CanonicalProfile, tuple[LedgerEntry, ...], int, int]:
         return apply_proposals(profile, proposals, now=now, policy=self._policy)
+
+
+async def index_understanding_commit(
+    index: EmbeddingWriter | None,
+    profile: CanonicalProfile,
+    proposals: tuple[ClaimProposal, ...],
+    evidence: tuple[EvidenceLink, ...],
+) -> None:
+    """Best-effort semantic projection after the canonical commit is durable."""
+
+    if index is None:
+        return
+    unique_evidence = {item.evidence_id: item for item in evidence}
+    claims = {item.claim_id: item for item in profile.claims}
+    changed_claims = tuple(
+        claims[identity]
+        for identity in dict.fromkeys(item.claim.claim_id for item in proposals)
+        if identity in claims
+    )
+    await asyncio.gather(
+        *(
+            _safe_embedding_upsert(index, "evidence", item.evidence_id, item.summary)
+            for item in unique_evidence.values()
+        ),
+        *(
+            _safe_embedding_upsert(index, "claim", claim.claim_id, claim.value)
+            for claim in changed_claims
+        ),
+    )
+
+
+async def _safe_embedding_upsert(
+    index: EmbeddingWriter, kind: EmbeddingKind, ref_id: str, text: str
+) -> None:
+    with suppress(Exception):
+        await index.upsert(kind, ref_id, text)
 
 
 def apply_proposals(

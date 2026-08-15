@@ -9,10 +9,13 @@ from openbiliclaw.core._pydantic import StrictBaseModel
 from .profile import (
     AvoidanceClaim,
     CanonicalProfile,
+    EmergingInterestClaim,
     InsightClaim,
     PreferenceClaim,
     StableInterestClaim,
 )
+
+TOP_INTEREST_CONFIDENCE_V1 = 0.7
 
 
 class DiscoveryProfile(StrictBaseModel):
@@ -23,13 +26,24 @@ class DiscoveryProfile(StrictBaseModel):
     provider_preferences: tuple[str, ...] = Field(max_length=10)
 
 
+class EmbeddingClaimView(StrictBaseModel):
+    """Opaque claim reference plus bounded text used by semantic matching."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    ref_id: str = Field(pattern=r"^claim_[0-9a-f]{32}$")
+    text: str = Field(min_length=1, max_length=200)
+    confidence: float = Field(ge=0, le=1)
+    top_interest: bool
+
+
 class RecommendationProfile(StrictBaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    version: int = 1
+    version: int = 2
     positive_topics: tuple[str, ...] = Field(max_length=30)
     negative_topics: tuple[str, ...] = Field(max_length=20)
     style_preferences: tuple[str, ...] = Field(max_length=10)
     language_preferences: tuple[str, ...] = Field(max_length=10)
+    embedding_claims: tuple[EmbeddingClaimView, ...] = Field(default=(), max_length=30)
 
 
 class DialogueProfile(StrictBaseModel):
@@ -95,11 +109,32 @@ def recommendation_projection(
         for item in profile.claims
         if isinstance(item, PreferenceClaim) and item.dimension.value == "language"
     )
+    semantic_claims = tuple(
+        item
+        for item in profile.claims
+        if isinstance(item, (StableInterestClaim, EmergingInterestClaim))
+        or (isinstance(item, PreferenceClaim) and item.dimension.value == "content")
+    )
+    bounded_semantic_text = _bounded(tuple(item.value for item in semantic_claims), max_chars)
+    embedding_claims = tuple(
+        EmbeddingClaimView(
+            ref_id=item.claim_id,
+            text=text,
+            confidence=item.confidence,
+            top_interest=(
+                not isinstance(item, EmergingInterestClaim)
+                and item.lifecycle.value == "active"
+                and item.confidence >= TOP_INTEREST_CONFIDENCE_V1
+            ),
+        )
+        for item, text in zip(semantic_claims, bounded_semantic_text, strict=False)
+    )
     return RecommendationProfile(
         positive_topics=_bounded(positive, max_chars),
         negative_topics=_bounded(negative, max_chars),
         style_preferences=_bounded(styles, max_chars),
         language_preferences=_bounded(languages, max_chars),
+        embedding_claims=embedding_claims,
     )
 
 

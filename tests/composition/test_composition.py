@@ -14,6 +14,7 @@ from pydantic_ai.models.test import TestModel
 
 from openbiliclaw.access.models import CredentialAccessHandle, Permission
 from openbiliclaw.ai.providers.embeddings import EmbeddingBatch, EmbeddingService
+from openbiliclaw.ai.providers.embeddings.index import EmbeddingIndex
 from openbiliclaw.ai.providers.models import BuiltModel, ModelInstanceConfig
 from openbiliclaw.ai.providers.verification import VerifiedCapabilities
 from openbiliclaw.ai.runtime.capabilities import ModelCapabilities
@@ -39,6 +40,9 @@ from openbiliclaw.observations.provenance import (
     ObservationSource,
     TrustLevel,
 )
+from openbiliclaw.understanding.evidence import EvidenceLink
+from openbiliclaw.understanding.profile import StableInterestClaim, claim_id
+from openbiliclaw.understanding.proposals import ClaimProposal, ProposalOwner
 
 
 class _Component:
@@ -86,6 +90,72 @@ def test_composition_constructs_configured_embedding_service(
     )
 
     assert isinstance(application.services.embeddings, EmbeddingService)
+
+
+@pytest.mark.asyncio
+async def test_composed_understanding_embedding_outage_is_fail_open(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[tuple[str, str]] = []
+
+    async def outage(_self: EmbeddingIndex, kind: str, ref_id: str, _text: str) -> bool:
+        calls.append((kind, ref_id))
+        raise RuntimeError("embedding provider down")
+
+    monkeypatch.setattr(EmbeddingIndex, "upsert", outage)
+    application = build_application(AppSettings(), options=BuildOptions(data_dir=tmp_path))
+    await application.start()
+    try:
+        assert application.repositories is not None
+        assert application.services.understanding is not None
+        now = datetime.now(UTC)
+        event = ContentOpenedObservation(
+            observation_id="obs_" + "8" * 32,
+            idempotency_key="embedding-outage-source",
+            occurred_at=now,
+            received_at=now,
+            content_ref=None,
+            provenance=ObservationProvenance(
+                producer_id="host.web",
+                source=ObservationSource.HOST,
+                authenticated=True,
+                trust_level=TrustLevel.HIGH,
+            ),
+            payload=HostOpenPayload(surface="web"),
+        )
+        await application.repositories.observations.insert_batch((event,))
+        evidence = EvidenceLink(
+            evidence_id="ev_" + "8" * 32,
+            observation_id=event.observation_id,
+            summary="User explicitly likes science",
+            occurred_at=now,
+            trust=1.0,
+        )
+        claim = StableInterestClaim(
+            claim_id=claim_id("stable_interest", "science"),
+            value="science",
+            confidence=0.9,
+            fresh_at=now,
+            evidence_ids=(evidence.evidence_id,),
+        )
+        decision = await application.services.understanding.consider(
+            "default",
+            ClaimProposal(
+                proposal_id="prop_" + "8" * 32,
+                analyzer_id="understanding.preference.v1",
+                owner=ProposalOwner.PREFERENCE,
+                claim=claim,
+                evidence=(evidence,),
+                proposed_at=now,
+            ),
+            evidence,
+        )
+
+        assert decision.reason == "accepted"
+        assert {kind for kind, _ref_id in calls} == {"evidence", "claim"}
+        assert (await application.services.understanding.profile("default")).claims == (claim,)
+    finally:
+        await application.stop()
 
 
 def _application(name: str, events: list[str], *, fail: bool = False) -> Application:

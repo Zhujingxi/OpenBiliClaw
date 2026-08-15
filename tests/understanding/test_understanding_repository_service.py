@@ -47,6 +47,8 @@ from openbiliclaw.understanding.service import (
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from openbiliclaw.ai.providers.embeddings.index import EmbeddingKind
+
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
 
 
@@ -66,6 +68,18 @@ def observation(index: int = 1) -> PreferenceStatementObservation:
         ),
         payload={"statement": "I enjoy practical science explanations"},
     )
+
+
+class IndexSpy:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.calls: list[tuple[str, str, str]] = []
+        self.fail = fail
+
+    async def upsert(self, kind: EmbeddingKind, ref_id: str, text: str) -> bool:
+        self.calls.append((kind, ref_id, text))
+        if self.fail:
+            raise RuntimeError("embedding outage")
+        return True
 
 
 class ResynthesisSpy:
@@ -172,6 +186,27 @@ async def test_atomic_apply_persists_proposal_before_decision_and_checkpoint(
     )
     assert len(analyzer.inputs[0].model_dump_json()) < 4_000
     await database.close()
+
+
+async def test_understanding_commit_indexes_evidence_and_accepted_claim_fail_open(
+    tmp_path: Path,
+) -> None:
+    for fail in (False, True):
+        database, observations, repository = await setup(tmp_path / f"index-{fail}.db")
+        await observations.insert_batch((observation(),))
+        index = IndexSpy(fail=fail)
+        service = UnderstandingService(
+            observations,
+            repository,
+            analyzers=(PreferenceAnalyzer(),),
+            clock=lambda: NOW,
+            embedding_index=index,
+        )
+
+        assert (await service.process("default", batch_size=1)).accepted == 1
+        assert {item[0] for item in index.calls} == {"evidence", "claim"}
+        assert (await service.profile("default")).claims[0].value == "science"
+        await database.close()
 
 
 async def test_resynthesis_caps_claim_evidence_and_profile_reloads(tmp_path: Path) -> None:

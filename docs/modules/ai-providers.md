@@ -29,7 +29,9 @@ models.dev identifies `kimi-for-coding` as Anthropic protocol at `https://api.ki
 
 ## Embeddings
 
-Embedding configuration remains explicit in this pass. `NativeEmbeddingTransport` uses the embeddings resource on PydanticAI's `OpenAIProvider`; unsupported protocol families fail closed. Official OpenAI requests include configured dimensions and custom endpoints omit that vendor-specific parameter while response vectors are still validated.
+Embedding configuration remains explicit. `NativeEmbeddingTransport` uses the embeddings resource on PydanticAI's `OpenAIProvider`; unsupported protocol families fail closed. Official OpenAI requests include configured dimensions and custom endpoints omit that vendor-specific parameter while response vectors are still validated.
+
+`EmbeddingIndex` is the durable technical matching boundary. Its public API is `upsert(kind, ref_id, text)`, `vector(kind, ref_id)`, and `query(text | vector, kinds, limit)`. Schema V10 stores little-endian float32 vectors keyed by opaque plane reference and complete `EmbeddingModelInfo.identity`; text hashes suppress unchanged provider work and reads ignore rows from other model identities. Unconfigured mode is an explicit no-op. Cosine ranking scans the bounded local index in pure Python (about 10k entries); measured growth/latency, not speculation, is the trigger for sqlite-vec.
 
 ## Configuration API boundary
 

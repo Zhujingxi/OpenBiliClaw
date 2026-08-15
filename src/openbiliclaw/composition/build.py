@@ -18,6 +18,7 @@ from openbiliclaw.access.methods import AccessMethodRegistry
 from openbiliclaw.access.service import AccessService
 from openbiliclaw.ai.providers.catalog import CapabilityConfig, ModelCatalog, resolve_model
 from openbiliclaw.ai.providers.embeddings import EmbeddingModelInfo, EmbeddingService
+from openbiliclaw.ai.providers.embeddings.index import EmbeddingIndex
 from openbiliclaw.ai.providers.embeddings.providers import build_embedding_transport
 from openbiliclaw.ai.providers.embeddings.service import query_prefix_for_model
 from openbiliclaw.ai.providers.models import ModelFactory, ModelInstanceConfig, ModelOptions
@@ -283,6 +284,7 @@ def build_application(
         ModelCatalog(data_dir / "models.dev.json").load() if settings.model.model_name else None
     )
     embeddings = None
+    embedding_model = None
     if settings.embedding.model_name:
         embedding_config = ModelInstanceConfig(
             provider=settings.embedding.provider,
@@ -294,19 +296,20 @@ def build_application(
             else "",
             owner="embeddings",
         )
+        embedding_model = EmbeddingModelInfo(
+            provider=embedding_config.provider,
+            model=embedding_config.model_name,
+            dimensions=settings.embedding.output_dimensions,
+            normalized=True,
+            version=embedding_config.provider_version,
+        )
         embeddings = EmbeddingService(
             build_embedding_transport(
                 embedding_config,
                 vault,
                 output_dimensions=settings.embedding.output_dimensions,
             ),
-            EmbeddingModelInfo(
-                provider=embedding_config.provider,
-                model=embedding_config.model_name,
-                dimensions=settings.embedding.output_dimensions,
-                normalized=True,
-                version=embedding_config.provider_version,
-            ),
+            embedding_model,
             ResourceBudget("embedding", settings.runtime.default_resource_limit),
             timeout_seconds=settings.runtime.default_timeout_seconds,
             query_prefix=query_prefix_for_model(embedding_config.model_name),
@@ -378,13 +381,17 @@ def build_application(
     def clock() -> datetime:
         return datetime.now(UTC)
 
-    resynthesis = ResynthesisService(repositories.understanding, clock=clock)
+    semantic_index = EmbeddingIndex(database, embeddings, embedding_model, clock=clock)
+    resynthesis = ResynthesisService(
+        repositories.understanding, clock=clock, embedding_index=semantic_index
+    )
     understanding = UnderstandingService(
         repositories.observations,
         repositories.understanding,
         analyzers=analyzers,
         clock=clock,
         resynthesis=resynthesis,
+        embedding_index=semantic_index,
     )
     policy_journal = SqlitePolicyJournal(database)
     hypotheses = HypothesisRegistry(policy_journal)
@@ -407,6 +414,7 @@ def build_application(
         hypotheses=hypotheses,
         policy_journal=policy_journal,
         briefs=briefs,
+        semantic_index=semantic_index,
     )
     jobs = build_recommendation_jobs(pipeline)
     if assistant_runtime is not None:

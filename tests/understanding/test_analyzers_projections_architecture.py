@@ -105,7 +105,8 @@ def test_golden_bounded_projections(profile: CanonicalProfile) -> None:
     assert isinstance(discovery, DiscoveryProfile)
     assert isinstance(recommendation, RecommendationProfile)
     assert isinstance(dialogue, DialogueProfile)
-    assert discovery.version == recommendation.version == dialogue.version == 1
+    assert discovery.version == dialogue.version == 1
+    assert recommendation.version == 2
     assert len(discovery.model_dump_json()) <= 700
     assert len(recommendation.model_dump_json()) <= 900
     assert len(dialogue.model_dump_json()) <= 1100

@@ -33,7 +33,7 @@ Configuration stores opaque credential references. Secret bytes live behind `Cre
 
 ### Is embedding required?
 
-No. Composition constructs the service only when `[embedding]` is configured, but current Recommendation discovery remains text-query based and has no durable semantic index. Unsupported provider/capability combinations fail closed.
+No. Composition constructs the service only when `[embedding]` is configured. With it, evidence, claims, and candidates are embedded into the durable V10 index and the adjacent exploration arm recalls semantically near-but-not-core candidates; without it, discovery stays text-query based and the adjacent arm simply has no supply. Unsupported provider/capability combinations fail closed.
 
 ## Data and upgrades
 

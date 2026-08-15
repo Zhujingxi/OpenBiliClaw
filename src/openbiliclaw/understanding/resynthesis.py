@@ -22,7 +22,7 @@ from .profile import (
     claim_id,
 )
 from .proposals import ClaimProposal, ProposalOwner
-from .service import apply_proposals
+from .service import EmbeddingWriter, apply_proposals, index_understanding_commit
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -109,11 +109,13 @@ class ResynthesisService:
         *,
         clock: Callable[[], datetime],
         policy: ProposalPolicy | None = None,
+        embedding_index: EmbeddingWriter | None = None,
     ) -> None:
         self._repository = repository
         self._clock = clock
         self._policy = policy or ProposalPolicy()
         self._detector = ResynthesisDetector(self._policy)
+        self._embedding_index = embedding_index
 
     async def after_proposals(
         self, profile_id: str, proposals: tuple[ClaimProposal, ...]
@@ -220,6 +222,9 @@ class ResynthesisService:
                 evidence=evidence,
                 analyzer_id=_RESYNTHESIS_ANALYZER,
                 checkpoint="0",
+            )
+            await index_understanding_commit(
+                self._embedding_index, updated, tuple(output_proposals), evidence
             )
         return ResynthesisResult(profile=updated, claim_ids=unique_ids)
 
