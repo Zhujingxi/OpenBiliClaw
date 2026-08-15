@@ -211,7 +211,7 @@ base_url = "https://api.deepseek.com"
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
 | `name` | string | 实例 ID | 设置页显示名称，可重复 |
-| `provider_type` | string | `""` | 适配器类型：`openai` / `claude` / `gemini` / `deepseek` / `ollama` / `openrouter` / `openai_compatible` |
+| `provider_type` | string | `""` | 适配器类型：`openai` / `claude` / `gemini` / `deepseek` / `ollama` / `openrouter` / `orcarouter` / `openai_compatible` |
 | `enabled` | bool | `true` | 是否允许注册和引用；停用实例不能留在任何链里 |
 | `api_key` | string | `""` | 此实例自己的凭据；API 默认只回显掩码 |
 | `model` | string | `""` | 此实例固定使用的聊天模型 |
@@ -297,6 +297,19 @@ base_url = "https://api.deepseek.com"
 | `reasoning_effort` | string | `"medium"` | 通过 OpenRouter `reasoning.effort` 统一映射目标厂商；空渠道调用不发送（adapter 没有 per-model mandatory metadata，不能安全地对强制推理模型发 `none`） |
 
 > `http_referer` 和 `x_title` 都是可选项；留空时不会阻止请求发送。
+
+#### OrcaRouter（`provider_type = "orcarouter"`）
+
+[OrcaRouter](https://www.orcarouter.ai) 是 OpenAI 协议兼容的模型路由网关，一个 Key 即可按需路由 150+ 模型，并在网关层提供默认拒绝的零信任安全。它继承 OpenAI 系 adapter 的超时 / 重试 / 错误归一化 / JSON mode / per-call model 语义。
+
+| 键 | 类型 | 默认值 | 说明 |
+|----|------|--------|------|
+| `api_key` | string | `""` | OrcaRouter API Key |
+| `model` | string | `"openai/gpt-4o"` | OrcaRouter 路由的模型名（`<vendor>/<model>` 或平台别名） |
+| `base_url` | string | `"https://api.orcarouter.ai/v1"` | OrcaRouter API 地址 |
+| `reasoning_effort` | string | `"medium"` | 保留以对齐统一配置面；网关把推理参数原样转发给上游路由，非推理模型会以 HTTP 400 拒绝，因此适配器**不发送** `reasoning_effort` / `reasoning`，推理模型使用自身默认档位 |
+
+> OrcaRouter 没有 embedding 接口；需要向量化时在 `[llm.embedding]` 独立配置 Ollama / Gemini / OpenAI 等。
 
 #### OpenAI-compatible（`provider_type = "openai_compatible"`）
 

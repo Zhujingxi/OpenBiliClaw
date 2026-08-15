@@ -1606,6 +1606,8 @@ _PROVIDER_DEFAULTS: dict[str, dict[str, str]] = {
     "ollama": {"base_url": "http://127.0.0.1:11434/v1", "model": "qwen2.5:7b"},
     # OpenRouter: route to OpenAI's cheapest current-gen by default.
     "openrouter": {"base_url": "https://openrouter.ai/api/v1", "model": "openai/gpt-5-nano"},
+    # OrcaRouter: OpenAI-compatible model routing gateway (sk-orca- key).
+    "orcarouter": {"base_url": "https://api.orcarouter.ai/v1", "model": "openai/gpt-4o"},
 }
 
 
@@ -1616,6 +1618,7 @@ _PROVIDER_HINTS: dict[str, str] = {
     "deepseek": "DeepSeek 官方（OpenAI 兼容协议）",
     "ollama": "本地 Ollama（无需 Key）",
     "openrouter": "OpenRouter 聚合",
+    "orcarouter": "OrcaRouter 聚合（OpenAI 兼容协议）",
 }
 
 
@@ -1647,6 +1650,10 @@ _PROVIDER_MODEL_HINT: dict[str, str] = {
     "openrouter": (
         "默认 openai/gpt-5-nano。OpenRouter 模型名格式: <vendor>/<model>,"
         "如 anthropic/claude-sonnet-4-6 / google/gemini-2.5-flash"
+    ),
+    "orcarouter": (
+        "默认 openai/gpt-4o。OrcaRouter 模型名格式: <vendor>/<model>,"
+        "如 anthropic/claude-opus-4.8 / z-ai/glm-5.2"
     ),
     "ollama": (
         "常见模型: qwen2.5:7b (默认 / 中文好) / llama3.2 (Meta 新版) / "
@@ -2169,6 +2176,11 @@ _LLM_MENU: tuple[tuple[str, str, str], ...] = (
         "openrouter",
         "OpenRouter 聚合",
         "默认 openai/gpt-5-nano。一个 Key 跑多家模型,按调用计费",
+    ),
+    (
+        "orcarouter",
+        "OrcaRouter 聚合",
+        "默认 openai/gpt-4o。一个 Key 跑 150+ 模型,网关级零信任安全",
     ),
 )
 

@@ -2054,6 +2054,8 @@ class LLMConfigOut(BaseModel):
     openrouter: LLMProviderConfigOut = Field(default_factory=LLMProviderConfigOut)
     # v0.3.32+ — generic OpenAI-protocol-compatible provider.
     openai_compatible: LLMProviderConfigOut = Field(default_factory=LLMProviderConfigOut)
+    # OrcaRouter model-routing gateway (OpenAI-compatible).
+    orcarouter: LLMProviderConfigOut = Field(default_factory=LLMProviderConfigOut)
     embedding: EmbeddingConfigOut = Field(default_factory=EmbeddingConfigOut)
     soul: ModuleLLMConfigOut = Field(default_factory=ModuleLLMConfigOut)
     discovery: ModuleLLMConfigOut = Field(default_factory=ModuleLLMConfigOut)

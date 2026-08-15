@@ -89,6 +89,7 @@ SUPPORTED_PROVIDERS = (
     "deepseek",
     "ollama",
     "openrouter",
+    "orcarouter",
     "openai_compatible",
 )
 REMOTE_PROVIDERS = (
@@ -97,6 +98,7 @@ REMOTE_PROVIDERS = (
     "gemini",
     "deepseek",
     "openrouter",
+    "orcarouter",
     "openai_compatible",
 )
 
@@ -106,7 +108,7 @@ REMOTE_PROVIDERS = (
 # pulls the embedding model (otherwise embeddings silently fall back at
 # runtime to whatever the registry can find — see registry.py
 # build_embedding_service).
-PROVIDERS_WITHOUT_EMBED = ("claude", "deepseek", "openrouter")
+PROVIDERS_WITHOUT_EMBED = ("claude", "deepseek", "openrouter", "orcarouter")
 
 
 def ensure_local_no_proxy() -> str:
@@ -184,6 +186,7 @@ HUMAN_LLM_MENU: tuple[tuple[str, str, str], ...] = (
     ("gemini", "Gemini 官方", "gemini-2.5-flash"),
     ("claude", "Claude 官方", "claude-sonnet-4-6"),
     ("openrouter", "OpenRouter 聚合", "openai/gpt-5-nano"),
+    ("orcarouter", "OrcaRouter 聚合", "openai/gpt-4o"),
 )
 
 HUMAN_OPENAI_COMPAT_PRESETS: tuple[str, ...] = (
@@ -204,6 +207,7 @@ PROVIDER_MODEL_DEFAULTS: dict[str, str] = {
     "gemini": "gemini-2.5-flash",
     "claude": "claude-sonnet-4-6",
     "openrouter": "openai/gpt-5-nano",
+    "orcarouter": "openai/gpt-4o",
     "ollama": "qwen2.5:7b",
 }
 
@@ -211,6 +215,7 @@ PROVIDER_BASE_URL_DEFAULTS: dict[str, str] = {
     "deepseek": "https://api.deepseek.com",
     "ollama": "http://127.0.0.1:11434/v1",
     "openrouter": "https://openrouter.ai/api/v1",
+    "orcarouter": "https://api.orcarouter.ai/v1",
 }
 
 
@@ -2028,6 +2033,7 @@ def _ensure_llm_instance(project_dir: Path, provider: str) -> str:
         "deepseek": "DeepSeek",
         "ollama": "Ollama",
         "openrouter": "OpenRouter",
+        "orcarouter": "OrcaRouter",
         "openai_compatible": "OpenAI-compatible",
     }
     update_config_secret(
@@ -2052,6 +2058,7 @@ def _ensure_llm_instance(project_dir: Path, provider: str) -> str:
         "gemini",
         "deepseek",
         "openrouter",
+        "orcarouter",
     }:
         update_config_secret(config_path, section, "reasoning_effort", "medium")
     return instance_id

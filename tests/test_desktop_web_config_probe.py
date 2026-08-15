@@ -70,7 +70,7 @@ def test_desktop_web_instance_editor_persists_deepseek_reasoning_effort() -> Non
     js = (ROOT / "src/openbiliclaw/web/desktop/assets/js/app.js").read_text(encoding="utf-8")
 
     assert (
-        '["openai", "claude", "gemini", "deepseek", "openrouter", '
+        '["openai", "claude", "gemini", "deepseek", "openrouter", "orcarouter", '
         '"openai_compatible"].includes(providerType)'
     ) in js
     assert "reasoning_effort:" in js

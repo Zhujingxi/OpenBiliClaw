@@ -735,6 +735,40 @@ def test_validate_runtime_config_requires_openrouter_api_key() -> None:
         validate_runtime_config(config)
 
 
+def test_build_config_supports_orcarouter_provider() -> None:
+    config = _build_config(
+        {
+            "llm": {
+                "default_provider": "orcarouter",
+                "orcarouter": {
+                    "api_key": "sk-orca-test",
+                    "model": "openai/gpt-4o",
+                    "base_url": "https://api.orcarouter.ai/v1",
+                    "reasoning_effort": "high",
+                },
+            }
+        }
+    )
+
+    assert config.llm.default_provider == "orcarouter"
+    assert config.llm.orcarouter.api_key == "sk-orca-test"
+    assert config.llm.orcarouter.model == "openai/gpt-4o"
+    assert config.llm.orcarouter.base_url == "https://api.orcarouter.ai/v1"
+    assert config.llm.orcarouter.reasoning_effort == "high"
+
+
+def test_validate_runtime_config_requires_orcarouter_api_key() -> None:
+    config = Config(
+        llm=LLMConfig(
+            default_provider="orcarouter",
+            orcarouter=LLMProviderConfig(api_key="", model="openai/gpt-4o"),
+        )
+    )
+
+    with pytest.raises(ConfigError, match="llm.orcarouter.api_key"):
+        validate_runtime_config(config)
+
+
 def test_build_config_supports_openai_compatible_provider() -> None:
     """v0.3.32+ — generic OpenAI-protocol-compatible provider with its
     own [llm.openai_compatible] block. Distinct from [llm.openai]."""

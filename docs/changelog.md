@@ -6,6 +6,8 @@
 
 ## 未发布
 
+- **新增 OrcaRouter 聚合 provider**：`provider_type="orcarouter"` 以 OpenAI 兼容协议接入 OrcaRouter（`https://api.orcarouter.ai/v1`），一个 Key 跑 150+ 模型；复用统一超时 / 重试 / 错误归一化 / JSON mode 与 per-call model 覆盖，`reasoning_effort` 按 OpenAI 风格顶层标量透传、不发送网关拒绝的嵌套 `reasoning` 对象。四表面契约：后端 registry / 配置、API `/api/config`、CLI 向导与 `agent_bootstrap`、桌面 Web 设置页均已接入，`config.example.toml` 提供实例模板。
+
 ## v0.3.206：with-embedding 崩溃修复与可靠性提升（2026-08-15）
 
 - **项目首页与 README 重新对齐**：补齐一直遗漏的 YouTube / X 来源卡，使首页明确展示 B 站、小红书、抖音、YouTube、X、知乎、Reddit、Linux.do、Bangumi、V2EX、微博与开放 Web；首屏补回“本地运行、只为一个人构建、反馈可调教”的定位，产品入口从过时的“只有浏览器侧边栏”更新为浏览器插件、桌面 Web、移动 Web、Flutter 与 DSH 五端，并修正中文微博文案误用英文、Firefox、架构分层、聚合 Release 说明以及静态 HTML / 中文词典漂移。
