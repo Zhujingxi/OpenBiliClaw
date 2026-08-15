@@ -143,6 +143,7 @@ _DEFAULT_INSPIRATION_BREADTH = "high"
 _DEFAULT_INSPIRATION_SEARCH_BACKENDS: tuple[str, ...] = (
     "local_cache",
     "platform_sources",
+    "bing_rss",
     "exa",
     "you",
 )
@@ -1062,6 +1063,12 @@ class DiscoveryConfig:
     # grounded adjacent concepts and metadata-bearing keywords.
     inspiration_search_enabled: bool = True
     inspiration_search_backends: tuple[str, ...] = _DEFAULT_INSPIRATION_SEARCH_BACKENDS
+    # Direct API credentials for the Exa / You.com inspiration backends. When
+    # present, the runtime calls the provider HTTP APIs directly instead of
+    # shelling out to the optional ``mcporter`` Node CLI. Keep empty to use the
+    # mcporter CLI fallback (or skip the backend when neither is available).
+    exa_api_key: str = ""
+    you_api_key: str = ""
     # Optional experiment mode: when true and inspiration search is available,
     # due platforms skip the legacy merged keyword planner and are filled only
     # through the search-inspired flow.
@@ -2673,6 +2680,8 @@ def _build_discovery(discovery_raw: dict[str, Any]) -> DiscoveryConfig:
         inspiration_search_backends=_normalize_inspiration_search_backends(
             discovery_raw.get("inspiration_search_backends")
         ),
+        exa_api_key=str(discovery_raw.get("exa_api_key", "") or "").strip(),
+        you_api_key=str(discovery_raw.get("you_api_key", "") or "").strip(),
         inspiration_replace_merged_keywords=_coerce_bool(
             discovery_raw.get("inspiration_replace_merged_keywords"),
             default=False,
@@ -3004,6 +3013,9 @@ def _normalize_inspiration_search_backends(value: object) -> tuple[str, ...]:
         list(_DEFAULT_INSPIRATION_SEARCH_BACKENDS) if value is None else _coerce_str_list(value)
     )
     aliases = {
+        "bing": "bing_rss",
+        "bing_rss": "bing_rss",
+        "bing-rss": "bing_rss",
         "exa": "exa",
         "local": "local_cache",
         "cache": "local_cache",
@@ -5256,6 +5268,8 @@ def _render_config_toml(
             f"{_toml_bool(config.discovery.inspiration_search_enabled)}",
             "inspiration_search_backends = "
             f"{_toml_str_list(list(config.discovery.inspiration_search_backends))}",
+            f"exa_api_key = {_toml_string(config.discovery.exa_api_key)}",
+            f"you_api_key = {_toml_string(config.discovery.you_api_key)}",
             "inspiration_replace_merged_keywords = "
             f"{_toml_bool(config.discovery.inspiration_replace_merged_keywords)}",
             f"inspiration_breadth = {_toml_string(config.discovery.inspiration_breadth)}",

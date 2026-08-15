@@ -12882,6 +12882,8 @@ def keyword_inspiration_dry_run(
                 inspiration_provider=build_inspiration_search_provider(
                     getattr(config.discovery, "inspiration_search_backends", None),
                     database=database,
+                    exa_api_key=str(getattr(config.discovery, "exa_api_key", "") or ""),
+                    you_api_key=str(getattr(config.discovery, "you_api_key", "") or ""),
                     platform_backends=build_platform_source_backends(
                         config,
                         bilibili_client=(

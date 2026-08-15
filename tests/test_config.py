@@ -2766,6 +2766,7 @@ class TestDiscoveryConfig:
         assert config.discovery.inspiration_search_backends == (
             "local_cache",
             "platform_sources",
+            "bing_rss",
             "exa",
             "you",
         )
@@ -2798,6 +2799,7 @@ class TestDiscoveryConfig:
         assert config.discovery.inspiration_search_backends == (
             "local_cache",
             "platform_sources",
+            "bing_rss",
             "exa",
             "you",
         )
@@ -3153,8 +3155,8 @@ eval_prefilter_mode = "  Shadow  "
         assert "inspiration_search_enabled = true" in rendered
         assert "inspiration_replace_merged_keywords = false" in rendered
         assert (
-            'inspiration_search_backends = ["local_cache", "platform_sources", "exa", "you"]'
-            in rendered
+            'inspiration_search_backends = ["local_cache", "platform_sources", '
+            '"bing_rss", "exa", "you"]' in rendered
         )
         assert 'inspiration_breadth = "high"' in rendered
         assert 'eval_prefilter_mode = "shadow"' in rendered
