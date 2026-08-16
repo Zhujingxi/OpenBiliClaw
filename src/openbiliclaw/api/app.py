@@ -232,6 +232,8 @@ from openbiliclaw.soul.dislike_writeback import (
 )
 from openbiliclaw.sources.platforms import (
     CANONICAL_SOURCE_FAMILIES,
+    SOURCE_CONFIDENCE_EXACT,
+    SOURCE_CONFIDENCE_LEGACY_UNKNOWN,
     normalize_source_platform,
     overseas_network_hint,
     requires_overseas_network,
@@ -7294,7 +7296,22 @@ def create_app(
 
         canonical_events: list[dict[str, Any]] = []
         for item in payload.events:
-            source_platform = (item.source_platform or "bilibili").strip() or "bilibili"
+            raw_source_platform = str(item.source_platform or "").strip()
+            metadata_source_platform = str(
+                item.metadata.get("source_platform", "") or ""
+            ).strip()
+            if raw_source_platform:
+                source_platform = normalize_source_platform(raw_source_platform)
+                source_confidence = SOURCE_CONFIDENCE_EXACT
+            elif metadata_source_platform:
+                source_platform = normalize_source_platform(metadata_source_platform)
+                source_confidence = SOURCE_CONFIDENCE_EXACT
+            else:
+                # Keep the pre-existing B站 behavior for old extension
+                # payloads, but make the fallback explicit so future revoke
+                # logic never mistakes it for a precise source tag.
+                source_platform = "bilibili"
+                source_confidence = SOURCE_CONFIDENCE_LEGACY_UNKNOWN
             raw_event_type = str(item.type or "").strip()
             event_type = "feedback" if raw_event_type == "dislike" else raw_event_type
             # Coerce context to a string for downstream LLM consumers.
@@ -7353,6 +7370,7 @@ def create_app(
                 author=str(metadata.get("author", "") or metadata.get("up_name", "") or ""),
                 context=context_str,
                 metadata=metadata,
+                source_confidence=source_confidence,
             )
             event["ingest_key"] = item.event_id.strip()
             canonical_events.append(event)

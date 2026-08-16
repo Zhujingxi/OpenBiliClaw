@@ -99,7 +99,9 @@ class BehaviorEventIn(BaseModel):
     url: str = ""
     title: str = ""
     timestamp: int
-    source_platform: str = "bilibili"
+    # Empty means the client omitted the field.  The endpoint preserves the
+    # legacy B站 fallback but records that it was not an authoritative tag.
+    source_platform: str = ""
     context: dict[str, object] = Field(default_factory=dict)
     metadata: dict[str, object] = Field(default_factory=dict)
     event_id: IdempotencyKey

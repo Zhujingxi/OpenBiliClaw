@@ -17,6 +17,37 @@ PLATFORM_LINUXDO = "linuxdo"
 PLATFORM_V2EX = "v2ex"
 PLATFORM_WEIBO = "weibo"
 
+# Source attribution is deliberately small.  ``exact`` means the producer
+# supplied the platform, ``inferred`` means it came from a canonical URL, and
+# ``legacy_unknown`` preserves old rows without pretending that a fallback is
+# authoritative.
+SOURCE_CONFIDENCE_EXACT = "exact"
+SOURCE_CONFIDENCE_INFERRED = "inferred"
+SOURCE_CONFIDENCE_LEGACY_UNKNOWN = "legacy_unknown"
+SOURCE_CONFIDENCE_VALUES = frozenset(
+    {
+        SOURCE_CONFIDENCE_EXACT,
+        SOURCE_CONFIDENCE_INFERRED,
+        SOURCE_CONFIDENCE_LEGACY_UNKNOWN,
+    }
+)
+
+_CONTENT_ID_METADATA_KEYS = (
+    "content_id",
+    "bvid",
+    "note_id",
+    "aweme_id",
+    "video_id",
+    "yt_video_id",
+    "post_id",
+    "tweet_id",
+    "status_id",
+    "question_id",
+    "answer_id",
+    "topic_id",
+    "subject_id",
+)
+
 
 @dataclass(frozen=True)
 class SourceFamilyRule:
@@ -217,6 +248,49 @@ def infer_source_platform_from_url(url: object) -> str:
     for rule in SOURCE_FAMILY_RULES:
         if any(host == base or host.endswith(f".{base}") for base in rule.url_hosts):
             return rule.family
+    return ""
+
+
+def resolve_source_attribution(
+    *,
+    explicit_platform: object = "",
+    metadata_platform: object = "",
+    url: object = "",
+    legacy_platform: object = "",
+) -> tuple[str, str]:
+    """Resolve a platform and how confidently it was identified.
+
+    Explicit producer fields win over metadata, and metadata wins over URL
+    inference.  A legacy fallback is returned only when no stronger signal is
+    available; callers can therefore distinguish a real platform tag from a
+    compatibility default without breaking old databases.
+    """
+    for value in (explicit_platform, metadata_platform):
+        normalized = normalize_source_platform(value)
+        if normalized:
+            return normalized, SOURCE_CONFIDENCE_EXACT
+
+    inferred = infer_source_platform_from_url(url)
+    if inferred:
+        return inferred, SOURCE_CONFIDENCE_INFERRED
+
+    fallback = normalize_source_platform(legacy_platform)
+    if fallback:
+        return fallback, SOURCE_CONFIDENCE_LEGACY_UNKNOWN
+    return "", SOURCE_CONFIDENCE_LEGACY_UNKNOWN
+
+
+def extract_source_content_id(metadata: object) -> str:
+    """Return the first stable content identifier in source metadata."""
+    if not isinstance(metadata, dict):
+        return ""
+    for key in _CONTENT_ID_METADATA_KEYS:
+        value = metadata.get(key)
+        if not isinstance(value, (str, int)) or isinstance(value, bool):
+            continue
+        normalized = str(value).strip()
+        if normalized:
+            return normalized
     return ""
 
 

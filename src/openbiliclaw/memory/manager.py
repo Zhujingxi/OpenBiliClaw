@@ -1008,6 +1008,9 @@ class MemoryManager:
             event_type,
             url=event.get("url", ""),
             title=event.get("title", ""),
+            source_platform=event.get("source_platform", ""),
+            content_id=event.get("content_id", ""),
+            source_confidence=event.get("source_confidence", ""),
             # v0.3.23+: ``context`` is a natural-language string from
             # ``event_format.build_event()``. Default to empty string
             # (was ``{}`` in v0.3.22 and earlier) so insert_event's

@@ -145,6 +145,10 @@ ID 字段是严格 JSON string，不接受数字、布尔或其它类型的自�
 
 字段缺失、空串、纯空白或去空白后超过 400 字符均由请求模型返回 HTTP 422；此时 route handler 尚未运行，不会写 `events`、`seen_items`、recommendation feedback 投影或其它数据库状态。服务端不会为这些 HTTP 入口补随机 ID，因为响应丢失后重新生成会把一次动作变成两次 durable fact。扩展、移动 Web 与桌面 Web 会把 pending ID 持久化到动作成功；顶层 `openbiliclaw feedback` 在省略 `--request-id` 时生成并打印一个 ID，跨命令重试必须复用该输出；OpenClaw CLI/skill 则把 `request_id` 设为必填。
 
+### 事件来源字段
+
+`POST /api/events` 的 `source_platform` 是兼容可选字段；新插件事件会发送规范平台名，内容 ID 继续从 `metadata.content_id`、`bvid`、`note_id` 等稳定字段承接。服务端将平台提升到统一事件的顶层 `source_platform`，同时保留 metadata 镜像，并为持久化行写入 `source_confidence`：显式来源为 `exact`，仅由规范 URL 得到的是 `inferred`，旧 payload 省略来源时沿用 B 站兼容默认但标记为 `legacy_unknown`。旧数据库在启动时自动补列并做保守回填；没有足够证据的历史行保持未知，不会根据标题或任务名猜测。
+
 `POST /api/feedback` 的成功边界是 **event-first 的两次 commit**，不是跨表原子事务：先由 `EventIngressService` 把带 `request_id` 幂等键的 `feedback` event 提交到 durable ledger，再单独调用 `update_recommendation_feedback()` 提交 recommendation 展示投影。若进程或数据库故障发生在 event commit → recommendation projection 之间，本次请求会失败；客户端用同一 `request_id` 重试时，event ingress 返回 duplicate receipt，API 校验 durable row 中的 recommendation/type/note 与请求一致后重新执行投影，从而修复间隙。相同 `request_id` 携带不同反馈返回 409，不能驱动投影。之后只唤醒 event scheduler 并立即返回；HTTP 不获取 pipeline lock，也不等待 LLM。
 
 当 `scheduler.unified_interest_line=true`（默认）时，`events` 表是 durable ingress queue：app-owned `EventProcessingScheduler` 先由 generic `profile_events` consumer 领取显式归其所有的普通行为/推荐点击，再由 `content_feedback` consumer 领取 `like/dislike/comment/dismiss` 内容反馈；二者都以 event row ID 派生稳定 signal ID，通过 `checkpointed_enqueue_batch()` 把 buffer 与各自 cursor 原子发布到同一份 `pipeline_state.json`，随后 owner 调用 `tick_if_buffered()`。只有独立周期画像维护调用 `tick()`。首次 app startup 只同步发布 owner cutover fence 并 admission 一个由 scheduler 持有的 recovery task，lifespan 不 await event scan、buffer consume 或 LLM，因而 provider 401、慢响应或永不返回都不能阻止 HTTP listener/health 就绪；scheduler 在 shutdown 负责取消并 gather 该任务。配置热重载仍先 pause+drain，再同步 recover 遗留 event，最后恢复新 runtime 后台任务，保持旧 owner 到新 owner 的顺序屏障。两条生命周期都覆盖 HTTP commit→wake、event scan→checkpoint 或 checkpoint→consume 的崩溃窗口。旧名 `FeedbackBatchScheduler` 仅为兼容 alias。

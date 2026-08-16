@@ -4595,6 +4595,8 @@ class TestBackendAPI:
         # Legacy payload without source_platform defaults to bilibili so the
         # existing extension build keeps working across the upgrade.
         assert memory.events[0]["metadata"]["source_platform"] == "bilibili"
+        assert memory.events[0]["source_platform"] == "bilibili"
+        assert memory.events[0]["source_confidence"] == "legacy_unknown"
 
     def test_events_endpoint_ignores_pre_init_behavior_events(self) -> None:
         from fastapi.testclient import TestClient
@@ -4699,10 +4701,18 @@ class TestBackendAPI:
         assert response.status_code == 200
         assert response.json()["accepted"] == 3
         assert memory.events[0]["metadata"]["source_platform"] == "xiaohongshu"
+        assert memory.events[0]["source_platform"] == "xiaohongshu"
+        assert memory.events[0]["content_id"] == "69dea966000000001a0280ad"
+        assert memory.events[0]["source_confidence"] == "exact"
         assert memory.events[0]["metadata"]["note_id"] == "69dea966000000001a0280ad"
         # Blank source_platform (whitespace only) falls back to bilibili.
         assert memory.events[1]["metadata"]["source_platform"] == "bilibili"
+        assert memory.events[1]["source_platform"] == "bilibili"
+        assert memory.events[1]["source_confidence"] == "legacy_unknown"
         assert memory.events[2]["metadata"]["source_platform"] == "reddit"
+        assert memory.events[2]["source_platform"] == "reddit"
+        assert memory.events[2]["content_id"] == "t3_abc123"
+        assert memory.events[2]["source_confidence"] == "exact"
         assert memory.events[2]["metadata"]["content_id"] == "t3_abc123"
         assert memory.events[2]["metadata"]["post_id"] == "abc123"
 

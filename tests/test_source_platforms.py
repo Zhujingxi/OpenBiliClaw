@@ -7,7 +7,12 @@ from openbiliclaw.runtime.zhihu_producer import ZHIHU_SOURCE_STRATEGIES
 from openbiliclaw.sources.linuxdo_tasks import LINUXDO_DISCOVERY_SCOPE_STRATEGIES
 from openbiliclaw.sources.platforms import (
     CANONICAL_SOURCE_FAMILIES,
+    SOURCE_CONFIDENCE_EXACT,
+    SOURCE_CONFIDENCE_INFERRED,
+    SOURCE_CONFIDENCE_LEGACY_UNKNOWN,
+    extract_source_content_id,
     infer_source_platform_from_url,
+    resolve_source_attribution,
     source_family,
 )
 from openbiliclaw.sources.zhihu_tasks import ZHIHU_DISCOVERY_SCOPE_STRATEGIES
@@ -106,3 +111,29 @@ def test_every_linuxdo_strategy_resolves_without_platform(strategy: str) -> None
 def test_url_inference_does_not_match_registered_host_in_path() -> None:
     url = "https://example.com/https://www.zhihu.com/question/1"
     assert infer_source_platform_from_url(url) == ""
+
+
+def test_source_attribution_prefers_explicit_metadata_then_url() -> None:
+    assert resolve_source_attribution(
+        explicit_platform="x",
+        metadata_platform="youtube",
+        url="https://www.bilibili.com/video/BV1",
+    ) == ("twitter", SOURCE_CONFIDENCE_EXACT)
+    assert resolve_source_attribution(
+        metadata_platform="yt",
+        url="https://www.bilibili.com/video/BV1",
+    ) == ("youtube", SOURCE_CONFIDENCE_EXACT)
+    assert resolve_source_attribution(url="https://x.com/user/status/1") == (
+        "twitter",
+        SOURCE_CONFIDENCE_INFERRED,
+    )
+    assert resolve_source_attribution(legacy_platform="bilibili") == (
+        "bilibili",
+        SOURCE_CONFIDENCE_LEGACY_UNKNOWN,
+    )
+
+
+def test_source_content_id_extraction_uses_stable_metadata_keys() -> None:
+    assert extract_source_content_id({"note_id": "", "content_id": "note-42"}) == "note-42"
+    assert extract_source_content_id({"bvid": "BV1TEST", "title": "视频"}) == "BV1TEST"
+    assert extract_source_content_id({"content_id": None}) == ""

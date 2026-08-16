@@ -97,6 +97,9 @@ def test_build_event_emits_unified_shape() -> None:
     assert event["title"] == "某个 UP 主的视频"
     assert event["url"] == "https://www.bilibili.com/video/BVxxxx"
     assert event["context"]  # non-empty natural-language description
+    assert event["source_platform"] == SOURCE_BILIBILI
+    assert event["content_id"] == "BVxxxx"
+    assert event["source_confidence"] == "exact"
     # Metadata invariants
     assert event["metadata"]["source_platform"] == SOURCE_BILIBILI
     assert event["metadata"]["author"] == "某 UP 主"
@@ -128,6 +131,13 @@ def test_build_event_url_omitted_when_empty() -> None:
     assert "url" not in event
 
 
+def test_build_event_without_source_does_not_claim_exact_attribution() -> None:
+    event = build_event(event_type="view", source_platform="", title="未知来源")
+
+    assert event["source_platform"] == ""
+    assert event["source_confidence"] == "legacy_unknown"
+
+
 def test_build_event_metadata_source_platform_explicit_wins() -> None:
     """If a producer passes source_platform inside metadata, that value
     wins over the parameter — supports edge cases where metadata is
@@ -139,6 +149,19 @@ def test_build_event_metadata_source_platform_explicit_wins() -> None:
         metadata={"source_platform": "web"},
     )
     assert event["metadata"]["source_platform"] == "web"
+    assert event["source_platform"] == "web"
+
+
+def test_build_event_keeps_top_level_content_identity_in_sync() -> None:
+    event = build_event(
+        event_type="view",
+        source_platform=SOURCE_XIAOHONGSHU,
+        title="一条笔记",
+        metadata={"note_id": "note-42"},
+    )
+
+    assert event["content_id"] == "note-42"
+    assert event["metadata"]["note_id"] == "note-42"
 
 
 def test_build_event_adds_default_signal_strength_without_overriding_source_value() -> None:

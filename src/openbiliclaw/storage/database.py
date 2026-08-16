@@ -90,8 +90,14 @@ from openbiliclaw.sources.platforms import (
     PLATFORM_YOUTUBE as _YOUTUBE_SOURCE_FAMILY,
 )
 from openbiliclaw.sources.platforms import (
+    SOURCE_CONFIDENCE_EXACT,
+    SOURCE_CONFIDENCE_INFERRED,
+    SOURCE_CONFIDENCE_LEGACY_UNKNOWN,
+    SOURCE_CONFIDENCE_VALUES,
+    extract_source_content_id,
     infer_source_platform_from_url,
     normalize_source_platform,
+    resolve_source_attribution,
 )
 from openbiliclaw.sources.platforms import (
     source_family as _source_family,
@@ -989,6 +995,9 @@ CREATE TABLE IF NOT EXISTS events (
     event_type            TEXT NOT NULL,        -- click, search, scroll, comment, etc.
     url                   TEXT,
     title                 TEXT,
+    source_platform       TEXT NOT NULL DEFAULT '', -- canonical producer/platform tag
+    content_id            TEXT NOT NULL DEFAULT '', -- stable source-content identity when known
+    source_confidence     TEXT NOT NULL DEFAULT 'legacy_unknown',
     context               TEXT,                 -- JSON: DOM snapshot reference, viewport, etc.
     metadata              TEXT,                 -- JSON: additional event-specific data
     -- v0.3.x event-satisfaction signal: deterministic classification
@@ -2004,6 +2013,7 @@ class Database:
             self._connections_by_thread = {owner_thread_id: self._conn}
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(_SCHEMA_SQL)
+        self._ensure_event_source_columns()
         self._ensure_event_satisfaction_columns()
         self._ensure_event_ingest_key_column()
         self._ensure_recommendation_feedback_columns()
@@ -2654,7 +2664,30 @@ class Database:
             context_text = ""
         else:
             context_text = json.dumps(raw_context, ensure_ascii=False)
-        metadata_payload = kwargs.get("metadata", {})
+        raw_metadata = kwargs.get("metadata", {})
+        metadata_payload = dict(raw_metadata) if isinstance(raw_metadata, Mapping) else {}
+        explicit_platform = kwargs.get("source_platform", "")
+        metadata_platform = metadata_payload.get("source_platform", "")
+        provided_confidence = str(kwargs.get("source_confidence", "") or "").strip()
+        source_platform, detected_confidence = resolve_source_attribution(
+            explicit_platform=explicit_platform,
+            metadata_platform=metadata_platform,
+            url=kwargs.get("url", ""),
+        )
+        source_confidence = (
+            provided_confidence
+            if provided_confidence in SOURCE_CONFIDENCE_VALUES
+            else detected_confidence
+        )
+        if not source_platform:
+            source_platform = normalize_source_platform(explicit_platform or metadata_platform)
+        if source_platform:
+            metadata_payload["source_platform"] = source_platform
+        content_id = str(kwargs.get("content_id", "") or "").strip() or extract_source_content_id(
+            metadata_payload
+        )
+        if content_id:
+            metadata_payload["content_id"] = content_id
         classifier_event: dict[str, Any] = {
             "event_type": event_type,
             "url": kwargs.get("url", ""),
@@ -2672,6 +2705,9 @@ class Database:
             event_type,
             kwargs.get("url", ""),
             kwargs.get("title", ""),
+            source_platform,
+            content_id,
+            source_confidence,
             context_text,
             json.dumps(metadata_payload, ensure_ascii=False),
             inferred_satisfaction,
@@ -2707,14 +2743,15 @@ class Database:
                     seen_changed = False
                     newest_inserted_id = 0
                     for params in rows:
-                        ingest_key = str(params[7])
+                        ingest_key = str(params[10])
                         if ingest_key:
                             cursor = conn.execute(
                                 """
                                 INSERT INTO events (
-                                    event_type, url, title, context, metadata,
+                                    event_type, url, title, source_platform, content_id,
+                                    source_confidence, context, metadata,
                                     inferred_satisfaction, satisfaction_reason, ingest_key
-                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                                 ON CONFLICT(ingest_key) WHERE ingest_key <> '' DO NOTHING
                                 """,
                                 params,
@@ -2723,9 +2760,10 @@ class Database:
                             cursor = conn.execute(
                                 """
                                 INSERT INTO events (
-                                    event_type, url, title, context, metadata,
+                                    event_type, url, title, source_platform, content_id,
+                                    source_confidence, context, metadata,
                                     inferred_satisfaction, satisfaction_reason, ingest_key
-                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                                 """,
                                 params,
                             )
@@ -2739,7 +2777,7 @@ class Database:
                                     self._upsert_seen_items_from_view_event_on(
                                         conn,
                                         event_id=event_id,
-                                        row={"url": params[1], "metadata": params[4]},
+                                        row={"url": params[1], "metadata": params[7]},
                                     )
                                     or seen_changed
                                 )
@@ -3510,10 +3548,11 @@ class Database:
             conn.execute(
                 """
                 INSERT INTO events (
-                    event_type, url, title, context, metadata,
+                    event_type, url, title, source_platform, content_id,
+                    source_confidence, context, metadata,
                     inferred_satisfaction, satisfaction_reason, ingest_key
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 params,
             )
@@ -12355,6 +12394,114 @@ class Database:
             if column_name in existing_columns:
                 continue
             self.conn.execute(f"ALTER TABLE llm_usage ADD COLUMN {column_name} {column_type}")
+
+    def _ensure_event_source_columns(self) -> None:
+        """Add durable event attribution without guessing over legacy rows.
+
+        New producers write canonical columns directly.  Existing databases
+        are backfilled only from explicit metadata or a canonical URL; rows
+        that cannot be identified remain blank/``legacy_unknown`` so a future
+        platform-revocation flow can fail closed instead of deleting the wrong
+        source.
+        """
+        existing_columns = {
+            str(row["name"]) for row in self.conn.execute("PRAGMA table_info(events)").fetchall()
+        }
+        required_columns = {
+            "source_platform": "TEXT NOT NULL DEFAULT ''",
+            "content_id": "TEXT NOT NULL DEFAULT ''",
+            "source_confidence": "TEXT NOT NULL DEFAULT 'legacy_unknown'",
+        }
+        for column_name, column_type in required_columns.items():
+            if column_name not in existing_columns:
+                self.conn.execute(f"ALTER TABLE events ADD COLUMN {column_name} {column_type}")
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_events_source_content "
+            "ON events(source_platform, content_id)"
+        )
+
+        rows = self.conn.execute(
+            """
+            SELECT id, url, metadata, source_platform, content_id, source_confidence
+            FROM events
+            WHERE COALESCE(source_platform, '') = ''
+               OR COALESCE(content_id, '') = ''
+               OR COALESCE(source_confidence, '') NOT IN (?, ?, ?)
+            """,
+            (
+                SOURCE_CONFIDENCE_EXACT,
+                SOURCE_CONFIDENCE_INFERRED,
+                SOURCE_CONFIDENCE_LEGACY_UNKNOWN,
+            ),
+        ).fetchall()
+        updates: list[tuple[str, str, str, int]] = []
+        for row in rows:
+            metadata: dict[str, Any] = {}
+            raw_metadata = row["metadata"]
+            if isinstance(raw_metadata, str) and raw_metadata:
+                try:
+                    decoded = json.loads(raw_metadata)
+                except (TypeError, ValueError):
+                    decoded = {}
+                if isinstance(decoded, dict):
+                    metadata = decoded
+
+            current_confidence = str(row["source_confidence"] or "").strip()
+            current_platform = normalize_source_platform(row["source_platform"])
+            metadata_platform = str(metadata.get("source_platform") or "").strip()
+            legacy_platform = (
+                current_platform
+                if current_confidence == SOURCE_CONFIDENCE_LEGACY_UNKNOWN
+                else ""
+            )
+            # The old API filled missing source_platform with B站. Treat that
+            # particular legacy value as a fallback, while still accepting an
+            # explicit non-B站 metadata tag and URL inference. If there is no
+            # stronger signal, keep B站 as a legacy-unknown attribution rather
+            # than dropping the only source hint entirely.
+            if (
+                current_confidence == SOURCE_CONFIDENCE_LEGACY_UNKNOWN
+                and normalize_source_platform(metadata_platform) == _BILIBILI_SOURCE_FAMILY
+            ):
+                legacy_platform = legacy_platform or _BILIBILI_SOURCE_FAMILY
+                metadata_platform = ""
+            authoritative_platform = (
+                current_platform
+                if current_confidence in {SOURCE_CONFIDENCE_EXACT, SOURCE_CONFIDENCE_INFERRED}
+                else ""
+            )
+            platform, detected_confidence = resolve_source_attribution(
+                explicit_platform=authoritative_platform,
+                metadata_platform=metadata_platform,
+                url=row["url"],
+                legacy_platform=legacy_platform,
+            )
+            if not platform:
+                platform = current_platform
+            confidence = (
+                current_confidence
+                if current_confidence
+                in {SOURCE_CONFIDENCE_EXACT, SOURCE_CONFIDENCE_INFERRED}
+                and current_platform
+                else detected_confidence
+            )
+            content_id = str(row["content_id"] or "").strip() or extract_source_content_id(metadata)
+            if (
+                platform != current_platform
+                or content_id != str(row["content_id"] or "").strip()
+                or confidence != current_confidence
+            ):
+                updates.append((platform, content_id, confidence, int(row["id"])))
+
+        if updates:
+            self.conn.executemany(
+                """
+                UPDATE events
+                SET source_platform = ?, content_id = ?, source_confidence = ?
+                WHERE id = ?
+                """,
+                updates,
+            )
 
     def _ensure_event_satisfaction_columns(self) -> None:
         """Backfill v0.3.x event-satisfaction columns for pre-migration DBs.

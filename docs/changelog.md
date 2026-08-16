@@ -6,6 +6,7 @@
 
 ## 未发布
 
+- **为平台数据撤回补齐事件来源归属**：`events` 新增 `source_platform`、`content_id` 和 `source_confidence` 三个持久化字段；新事件优先使用显式来源，旧库启动时仅按 metadata / 规范 URL 保守回填，无法确认的历史行保持 `legacy_unknown`。旧 metadata 继续保留，未在本次变更中删除事件或实现撤回动作。
 - **修复密码门禁下首次设置模型保存返回 403（issue #171）**：setup 向导的同源请求统一携带既有 `X-OBC-Auth: 1` CSRF 请求头与 Cookie，覆盖模型配置保存、模型发现和向量模型修复；后端 CSRF 策略保持不变。
 - **自动打开的任务标签页默认静音（issue #163）**：扩展新增 `background/task-tab.ts` 的共享助手 `createTaskTab()`，B 站搜索兜底、小红书、抖音、知乎、Reddit、Linux.do、V2EX、微博、YouTube 及原生保存/E2E 新开标签页统一在创建后立即 `tabs.update(tabId, { muted: true })`，避免抖音等自动播放内容在电脑无人值守时突然出声。Chrome 的 `tabs.create` 不支持 `muted`，因此跨 Chrome / Firefox / Safari 统一采用「先 create、再 update 静音」；静音跨后续导航保持，用户可在标签栏手动取消，静音失败不阻断任务。复用用户已有标签页的路径保持原样。
 - **新增 OrcaRouter 聚合 provider**：`provider_type="orcarouter"` 以 OpenAI 兼容协议接入 OrcaRouter（`https://api.orcarouter.ai/v1`），一个 Key 跑 150+ 模型；复用统一超时 / 重试 / 错误归一化 / JSON mode 与 per-call model 覆盖；网关会原样转发推理参数给上游路由、非推理模型会以 HTTP 400 拒绝，因此适配器不发送 `reasoning_effort` 与嵌套 `reasoning` 对象，推理模型使用自身默认档位。后端 registry / 配置、API `/api/config`、CLI 向导与 `agent_bootstrap`、桌面 Web 设置页、首次运行 `/setup/` 向导与扩展 popup 均已接入，`config.example.toml` 提供实例模板。

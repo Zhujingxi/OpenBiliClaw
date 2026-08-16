@@ -11,6 +11,7 @@
 - discovery 待评估池 `discovery_candidates` 的生命周期管理。
 - evaluator prefilter、推荐时效排序的 privacy-safe shadow 审计，以及正式推荐池的时效 eligibility 持久化守卫。
 - 跨平台收藏 / 稍后再看的 canonical 本地 membership、元数据快照、native sync 状态和独立任务快照持久化。
+- 事件来源归属的规范化持久化：平台、稳定内容 ID 与归属置信度；旧事件只做可证明的回填，无法确认时保留 `legacy_unknown`。
 - 事件入口幂等回执，以及小红书 / 抖音 / YouTube / 知乎 / Reddit / Linux.do 来源任务首个终态结果的 crash-safe staging。
 - 事件入口幂等回执，以及小红书 / 抖音 / YouTube / 知乎 / Reddit 来源任务首个终态结果的 crash-safe staging。
 - 跨机器迁移包的一致快照、严格校验、私有暂存和重启期 journaled replace / rollback。
@@ -153,6 +154,12 @@ assert first.duplicate is False
 `Database.insert_events_with_receipts()` 假定调用方已经完成 producer namespace；面向 API / 扩展 / account sync 的入口应调用 `EventIngressService.accept()` / `accept_batch()`，由它验证 `producer`、补 `producer:` 前缀，并返回保留输入位置与逐项 rejection 的 `EventIngressReceipt`。同批非法项在写事务前被剔除；剩余合法项要么在一次事务内全部提交，要么全部回滚。重复键返回数据库中首写行的稳定 id 与 event type，不采用重放请求中变化后的字段。
 
 数据库保留空 `ingest_key` 只为旧库迁移、历史 append-only 调用与不暴露重试语义的内部 direct writer；它不是公开客户端的“可选幂等”契约。新增用户动作入口必须在进入 storage 前取得稳定非空 ID，并为同一动作的响应丢失/网络重试复用该 ID。
+
+### 事件来源归属
+
+`events` 表为每条行为事件保留三列：`source_platform`（规范平台名）、`content_id`（平台内容稳定 ID，可为空）和 `source_confidence`（`exact` / `inferred` / `legacy_unknown`）。新 producer 的显式平台字段优先，其次读取 metadata 中的来源字段，最后才从规范 URL 推断；旧调用方仍可省略来源，系统继续按原有 B 站兼容行为接收，但会标记为 `legacy_unknown`，不会把兼容默认误当成精确归属。旧 `metadata.source_platform` 与 `metadata` 内的 `bvid` / `note_id` 等字段继续保留，供已有画像与回看逻辑兼容使用。
+
+`Database.initialize()` 会在启动时幂等补列和 `(source_platform, content_id)` 索引，并只从明确 metadata 或规范 URL 回填旧行。无法证明的平台保持空值 / `legacy_unknown`，不会凭标题、采集任务或账号信息猜测。该字段集合是后续按平台撤回数据的基础，但本 PR 不删除事件、不实现撤回动作，也不新增账号 ID 或采集任务 ID。
 
 ### 六来源任务结果 staging
 

@@ -26,6 +26,137 @@ def _db(tmp_path: Path) -> Database:
     return db
 
 
+def test_event_source_schema_is_present_in_fresh_database(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+
+    columns = {
+        str(row["name"]): str(row["dflt_value"])
+        for row in db.conn.execute("PRAGMA table_info(events)").fetchall()
+    }
+
+    assert columns["source_platform"] == "''"
+    assert columns["content_id"] == "''"
+    assert columns["source_confidence"] == "'legacy_unknown'"
+    indexes = {
+        str(row["name"])
+        for row in db.conn.execute("PRAGMA index_list(events)").fetchall()
+    }
+    assert "idx_events_source_content" in indexes
+
+
+def test_event_source_schema_migrates_legacy_rows_without_overclaiming(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "legacy-events.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type TEXT NOT NULL,
+            url TEXT,
+            title TEXT,
+            context TEXT,
+            metadata TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT INTO events (event_type, url, title, metadata)
+        VALUES (
+            'view',
+            'https://www.xiaohongshu.com/explore/note-1',
+            '小红书旧事件',
+            '{"source_platform":"xiaohongshu","note_id":"note-1"}'
+        );
+        INSERT INTO events (event_type, url, title, metadata)
+        VALUES (
+            'view',
+            'https://www.bilibili.com/video/BVOLD',
+            'B站旧事件',
+            '{"source_platform":"bilibili","bvid":"BVOLD"}'
+        );
+        INSERT INTO events (event_type, url, title, metadata)
+        VALUES ('view', '', '只有兼容来源提示的旧事件', '{"source_platform":"bilibili"}');
+        INSERT INTO events (event_type, url, title, metadata)
+        VALUES ('view', '', '无法识别的旧事件', '{}');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    db = Database(path)
+    db.initialize()
+
+    rows = {
+        str(row["title"]): row
+        for row in db.conn.execute(
+            """
+            SELECT title, source_platform, content_id, source_confidence
+            FROM events
+            ORDER BY id
+            """
+        ).fetchall()
+    }
+    assert dict(rows["小红书旧事件"]) == {
+        "title": "小红书旧事件",
+        "source_platform": "xiaohongshu",
+        "content_id": "note-1",
+        "source_confidence": "exact",
+    }
+    assert dict(rows["B站旧事件"]) == {
+        "title": "B站旧事件",
+        "source_platform": "bilibili",
+        "content_id": "BVOLD",
+        "source_confidence": "inferred",
+    }
+    assert dict(rows["只有兼容来源提示的旧事件"]) == {
+        "title": "只有兼容来源提示的旧事件",
+        "source_platform": "bilibili",
+        "content_id": "",
+        "source_confidence": "legacy_unknown",
+    }
+    assert dict(rows["无法识别的旧事件"]) == {
+        "title": "无法识别的旧事件",
+        "source_platform": "",
+        "content_id": "",
+        "source_confidence": "legacy_unknown",
+    }
+
+    # Startup migrations are idempotent; a second open does not rewrite the
+    # attribution or fail because the columns/index already exist.
+    db.close()
+    reopened = Database(path)
+    reopened.initialize()
+    assert reopened.conn.execute(
+        "SELECT source_platform, content_id, source_confidence FROM events WHERE id = 1"
+    ).fetchone()["source_platform"] == "xiaohongshu"
+
+
+def test_event_insert_persists_canonical_source_attribution(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+
+    event_id = db.insert_event(
+        "view",
+        url="https://x.com/example/status/123",
+        title="X 旧接口事件",
+        metadata={"tweet_id": "123"},
+    )
+    row = db.conn.execute(
+        """
+        SELECT source_platform, content_id, source_confidence, metadata
+        FROM events
+        WHERE id = ?
+        """,
+        (event_id,),
+    ).fetchone()
+
+    assert row["source_platform"] == "twitter"
+    assert row["content_id"] == "123"
+    assert row["source_confidence"] == "inferred"
+    stored_metadata = json.loads(row["metadata"])
+    assert stored_metadata["source_platform"] == "twitter"
+    assert stored_metadata["content_id"] == "123"
+
+
 def test_chat_turn_payload_schema_is_present_in_fresh_database(tmp_path: Path) -> None:
     db = _db(tmp_path)
 
