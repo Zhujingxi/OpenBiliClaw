@@ -3650,15 +3650,26 @@ def _collect_llm_instance_routing_issues(llm: LLMConfig) -> list[ConfigIssue]:
                 )
             )
         if provider_type == "openai" and auth_mode == "codex_oauth":
-            if not _is_openai_official_base_url(instance.base_url):
+            if not _is_codex_oauth_base_url(instance.base_url):
                 issues.append(
                     ConfigIssue(
                         field=f"{field_prefix}.base_url",
                         message=(
-                            "Codex OAuth 只允许留空 base_url 或使用 OpenAI 官方 API 域名，"
-                            "避免把 ChatGPT token 发送给第三方。"
+                            "Codex OAuth 只允许留空 base_url 或使用官方 Codex 传输端点 "
+                            "`https://chatgpt.com/backend-api`，避免把 ChatGPT token "
+                            "发送给第三方中转站或 OpenAI Platform API。"
                         ),
                         severity="blocking",
+                    )
+                )
+            if flavor and flavor != "responses":
+                issues.append(
+                    ConfigIssue(
+                        field=f"{field_prefix}.api_flavor",
+                        message=(
+                            '`auth_mode = "codex_oauth"` 使用独立的 Codex ChatGPT '
+                            "传输通道，`api_flavor` 会被忽略；无需设置。"
+                        ),
                     )
                 )
             try:
@@ -4122,15 +4133,26 @@ def _collect_config_issues(config: Config) -> list[ConfigIssue]:
                     message='`auth_mode = "codex_oauth"` 时 `api_key` 会被忽略。',
                 )
             )
-        if not _is_openai_official_base_url(config.llm.openai.base_url):
+        if not _is_codex_oauth_base_url(config.llm.openai.base_url):
             issues.append(
                 ConfigIssue(
                     field="llm.openai.base_url",
                     message=(
-                        '`auth_mode = "codex_oauth"` 只允许留空 base_url '
-                        "或使用 OpenAI 官方 API 域名，避免泄露 ChatGPT token。"
+                        '`auth_mode = "codex_oauth"` 只允许留空 base_url 或使用官方 '
+                        "Codex 传输端点 `https://chatgpt.com/backend-api`，避免把 "
+                        "ChatGPT token 发送给第三方中转站或 OpenAI Platform API。"
                     ),
                     severity="blocking",
+                )
+            )
+        if config.llm.openai.api_flavor.strip().lower() not in {"", "responses"}:
+            issues.append(
+                ConfigIssue(
+                    field="llm.openai.api_flavor",
+                    message=(
+                        '`auth_mode = "codex_oauth"` 使用独立的 Codex ChatGPT '
+                        "传输通道，`api_flavor` 会被忽略；无需设置。"
+                    ),
                 )
             )
         try:
@@ -4302,12 +4324,36 @@ def posture_gate_enforce_readiness_issue(
     )
 
 
-def _is_openai_official_base_url(base_url: str) -> bool:
+_CODEX_OAUTH_ALLOWED_BASE_URL_PATHS = {
+    "",
+    "/backend-api",
+    "/backend-api/v1",
+    "/backend-api/codex",
+    "/backend-api/codex/v1",
+    "/backend-api/codex/responses",
+}
+
+
+def _is_codex_oauth_base_url(base_url: str) -> bool:
+    """Return whether *base_url* is a legal Codex OAuth target.
+
+    Codex OAuth (ChatGPT subscription) tokens MUST only go to the official
+    ``chatgpt.com/backend-api`` Codex transport. The old implementation
+    allowed ``api.openai.com``, where ChatGPT tokens fail with ``Missing
+    scopes: api.responses.write`` — that is intentionally rejected here.
+    """
     raw = base_url.strip()
     if not raw:
         return True
     parsed = urlparse(raw if "://" in raw else f"https://{raw}")
-    return parsed.scheme == "https" and (parsed.hostname or "").lower() == "api.openai.com"
+    path = (parsed.path or "").rstrip("/").lower()
+    return (
+        parsed.scheme == "https"
+        and (parsed.hostname or "").lower() == "chatgpt.com"
+        and path in _CODEX_OAUTH_ALLOWED_BASE_URL_PATHS
+        and not parsed.query
+        and not parsed.fragment
+    )
 
 
 def load_config_with_diagnostics(

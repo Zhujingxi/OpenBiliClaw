@@ -770,6 +770,7 @@ def _maybe_openai_provider(config: Config, overrides: dict[str, LLMProvider]) ->
     auth_mode = config.llm.openai.auth_mode.strip().lower()
     if auth_mode == "codex_oauth":
         from openbiliclaw.llm.codex_auth import get_valid_codex_token, load_codex_credentials
+        from openbiliclaw.llm.codex_chatgpt_provider import CodexChatGPTProvider
 
         credentials = load_codex_credentials()
         if credentials is None:
@@ -779,15 +780,13 @@ def _maybe_openai_provider(config: Config, overrides: dict[str, LLMProvider]) ->
         async def _codex_token_provider(force_refresh: bool = False) -> str:
             return await get_valid_codex_token(force_refresh=force_refresh)
 
-        return OpenAIProvider(
-            api_key=credentials.access_token,
-            model=config.llm.openai.model or "gpt-4o",
+        return CodexChatGPTProvider(
+            access_token=credentials.access_token,
+            account_id=credentials.account_id,
+            model=config.llm.openai.model or "gpt-5-nano",
             base_url=config.llm.openai.base_url,
             token_provider=_codex_token_provider,
             timeout=float(config.llm.timeout),
-            api_flavor=config.llm.openai.api_flavor,
-            proxy=_outbound_proxy(config.llm.openai.base_url),
-            trust_env=_outbound_trust_env(config.llm.openai.base_url),
             reasoning_effort=config.llm.openai.reasoning_effort,
         )
     if not config.llm.openai.api_key.strip():

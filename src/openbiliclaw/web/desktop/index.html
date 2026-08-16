@@ -1335,7 +1335,7 @@
             <label class="settings-field full"><span>Base URL</span><input id="llmInstanceBaseUrl" type="url" autocomplete="off" spellcheck="false" placeholder="官方渠道可留空；兼容网关必须填写"></label>
             <label class="settings-field full"><span>API Key</span><input id="llmInstanceApiKey" type="password" autocomplete="new-password" placeholder="留空保留已配置的密钥"></label>
             <label class="settings-field full" id="llmInstanceClearApiKeyField" hidden><span>清除已保存的 API Key</span><input id="llmInstanceClearApiKey" type="checkbox"></label>
-            <label class="settings-field" data-instance-field="openai-auth"><span>OpenAI 认证方式</span><select id="llmInstanceAuthMode"><option value="api_key">API Key</option><option value="codex_oauth">Codex OAuth</option></select></label>
+            <label class="settings-field" data-instance-field="openai-auth"><span>OpenAI 认证方式</span><select id="llmInstanceAuthMode"><option value="api_key">API Key（OpenAI Platform）</option><option value="codex_oauth">Codex OAuth（实验性 · ChatGPT 订阅）</option></select><small class="llm-field-help">Codex OAuth 复用 Codex CLI / ChatGPT 登录态，走官方 Codex 传输通道，无需 Platform API Key；与 API Key 方式互斥。</small></label>
             <label class="settings-field" data-instance-field="openai-protocol"><span>API 协议</span><select id="llmInstanceApiFlavor"><option value="">chat/completions（默认）</option><option value="responses">responses</option></select></label>
             <label class="settings-field" data-instance-field="reasoning">
               <span>Reasoning effort</span>

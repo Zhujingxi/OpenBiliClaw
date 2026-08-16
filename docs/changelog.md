@@ -6,6 +6,7 @@
 
 ## 未发布
 
+- **Codex OAuth 升级为可实际调用的 ChatGPT 订阅传输（issue #170）**：`auth_mode="codex_oauth"` 不再把 ChatGPT/Codex token 当作 OpenAI Platform API Key 发给 `api.openai.com/v1`（该路径因缺少 `api.responses.write` scope 必 401），而是新增 `CodexChatGPTProvider`，请求发往官方 Codex CLI 同款通道 `https://chatgpt.com/backend-api/codex/responses`（SSE Responses 流，`Authorization: Bearer <token>` + `chatgpt-account-id` 头）。`base_url` 校验同步收紧为只允许官方 Codex 域名，第三方中转与 Platform API 组合继续被阻止；401 时自动刷新 token 并重试一次，刷新后仍失败返回稳定可操作的鉴权错误。`openbiliclaw login codex --import` 导入后立即做一次真实 LLM 能力探测（新增 `--status --probe`），结果持久化到本地凭据文件，CLI 状态页与 `/api/health` 新增 `llm_registered` / `llm_callable` 字段以区分「Provider 已注册」与「默认模型链真实可调用」；桌面设置与 `/setup/` 向导把 Codex OAuth 标为实验性可选项，并隐藏 API Key 与 /models 发现入口。
 - **自动打开的任务标签页默认静音（issue #163）**：扩展新增 `background/task-tab.ts` 的共享助手 `createTaskTab()`，B 站搜索兜底、小红书、抖音、知乎、Reddit、Linux.do、V2EX、微博、YouTube 及原生保存/E2E 新开标签页统一在创建后立即 `tabs.update(tabId, { muted: true })`，避免抖音等自动播放内容在电脑无人值守时突然出声。Chrome 的 `tabs.create` 不支持 `muted`，因此跨 Chrome / Firefox / Safari 统一采用「先 create、再 update 静音」；静音跨后续导航保持，用户可在标签栏手动取消，静音失败不阻断任务。复用用户已有标签页的路径保持原样。
 
 ## v0.3.207：补货提速与搜索后端升级（2026-08-15）

@@ -71,7 +71,7 @@
 | v0.3.74 结构化输出共享解析 | ✅ | 新增 `llm/json_utils.py`，统一提供 `extract_llm_json_list()` / `extract_llm_json_object()` / `parse_llm_json_tolerant()`。调用方可传 item/object predicate 和 wrapper aliases，兼容 root array/object、`results/items/data/output/scores/evaluations` 等 wrapper、单行或 pretty-printed 多行 singleton dict、Markdown fenced JSON、JSONL、多 root echo 后最终结果，以及 MiMo 形态的 malformed `{ [ ... ] }` 数组包裹；`allow_singleton=True` 会显式把 root object 包成单元素列表，不再偶然依赖只支持单行的 JSONL fallback |
 | v0.3.74 Ollama embedding 空凭据静默本地默认 | ✅ | `embedding.provider="ollama"` 且 embedding `api_key/base_url` 为空时直接构造本地 Ollama provider，默认 `http://localhost:11434/v1`；如果存在启用的 Ollama chat 实例，会优先复用首个匹配实例的地址并规范化到 `/v1`，旧 `[llm.ollama].base_url` 仍作为兼容来源，且都不会触发 `_emit_embedding_compat_warning()`。远端 embedding provider 留空凭据时仍保留一次性向后兼容 WARNING |
 | v0.3.77 LM Studio JSON mode 兼容 | ✅ | `OpenAIProvider` 的 `json_mode=True` 对普通 OpenAI-compatible 后端默认使用 `json_object`，遇到 `response_format.type` 只允许 `json_schema/text` 时用通用 `json_schema` 重试；对本地 LM Studio（默认 `localhost/127.0.0.1:1234` 或 URL 含 `lmstudio` / `lm-studio`）首次请求即不发送 `response_format`，依赖 prompt 约束 JSON，避免 compat 层在 `json_object` / `json_schema` 下丢失 `message.content` 后再浪费一整次 LLM 调用 |
-| v0.3.78 Codex OAuth 实验认证 | ✅ | OpenAI 实例设置 `auth_mode="codex_oauth"` 时复用 Codex CLI 的 ChatGPT OAuth 凭据；`codex_auth.py` 负责安全导入、落盘和刷新。该路径为非官方实验集成，只允许 OpenAI 官方 `base_url`；旧 `[llm.openai]` 写法继续兼容 |
+| v0.3.78 Codex OAuth 实验认证 | ✅ | OpenAI 实例设置 `auth_mode="codex_oauth"` 时复用 Codex CLI 的 ChatGPT OAuth 凭据；`codex_auth.py` 负责安全导入、落盘和刷新，`codex_chatgpt_provider.py` 走官方 `chatgpt.com/backend-api/codex/responses` SSE 传输（issue #170）。只允许官方 Codex 域名，拒绝把 ChatGPT token 发给第三方或 Platform API；旧 `[llm.openai]` 写法继续兼容 |
 | v0.3.x LLM 限流识别 | ✅ | `is_llm_rate_limit_error()` 会沿异常链识别 `LLMRateLimitError`、cooldown、429 / quota / resource exhausted 文本；discovery / recommendation 批量调用据此跳过逐条 fallback，避免一次 provider 限流放大成 N 个必失败调用和堆栈日志 |
 | v0.3.x 余额 / 账单错误熔断 | ✅ | OpenAI-compatible provider 会把 HTTP 402、`Insufficient Balance`、`payment required`、`billing`、余额不足等 provider 余额 / 账单失败归一为 `LLMRateLimitError`，跳过 provider 内部 retry，并让 registry cooldown 与批量任务的“跳过逐条 fallback”保护生效 |
 | v0.3.x Eval-batch 负样本锚定与跨平台公平 | ✅ | `build_batch_content_evaluation_prompt` 新增可选 `negative_examples` kwarg；非空时在 user prompt `<source_context>` 与 `<content_batch>` 之间插入 `<negative_examples>` 块（`sort_keys=True` 决定性 JSON）。`None` / `[]` 退回原 user 字节形态以保留 cold-start 缓存前缀。`_BATCH_CONTENT_EVALUATION_SYSTEM_PROMPT` 加入永久规则：按话术 / 商业意图 / 标题结构层面 pattern-match 候选与示例，不要看关键词重叠；混源 batch 中不得仅因 `source_platform` 不同而抬高或压低 preference score，只能把平台作为内容语境。规则改动一次后 system message 保持 call-invariant |
@@ -156,6 +156,7 @@ from openbiliclaw.llm.codex_auth import (
     import_codex_credentials,
     load_codex_credentials,
 )
+from openbiliclaw.llm.codex_chatgpt_provider import probe_codex_llm
 
 # 导入官方 Codex CLI 登录态，默认读取 ~/.codex/auth.json，
 # 写入 ~/.openbiliclaw/codex_auth.json。
@@ -164,9 +165,15 @@ print(credentials.account_id)
 
 # Provider 运行时会调用它；临期时自动刷新。
 token = await get_valid_codex_token()
+
+# 真实能力探测：验证 ChatGPT token 能否调用官方 Codex LLM 通道。
+# 结果会持久化到凭据文件，供 CLI --status 与 /api/health 区分
+# "已导入" 与 "可调用"。
+probe = await probe_codex_llm(model="gpt-5-nano")
+print(probe.ok, probe.message)
 ```
 
-Codex OAuth 是实验路径：OpenAI 官方 API 认证仍以 Platform API key 为准；该模块只复用本机 Codex CLI 凭据，不自建 OAuth PKCE 浏览器流程，也不会把 token 打印到 CLI 输出。
+Codex OAuth 是实验路径：OpenAI 官方 API 认证仍以 Platform API key 为稳定入口；该模块只复用本机 Codex CLI 凭据，不自建 OAuth PKCE 浏览器流程，也不会把 token 打印到 CLI 输出。`auth_mode="codex_oauth"` 使用独立的 `CodexChatGPTProvider`，把请求发往 `https://chatgpt.com/backend-api/codex/responses`（官方 Codex CLI 同款通道），不再把 ChatGPT token 当作 Platform API Key 发给 `api.openai.com`。
 
 ### Registry
 
@@ -609,5 +616,5 @@ force-quit 残留场景；收养只做记录、绝不发信号，但让 watchdog
 10. **Prompt-cache 约定**：高频结构化 builder 的 system prompt 必须保持静态；user prompt 按“tone / 画像 / 长期偏好 / 来源上下文 / 本批内容或历史”从稳定到易变排序，并使用确定性 JSON。使用完整 `profile_summary` 的高频链路优先经 `profile_prompt_layers()` 分层渲染，稳定层放前、recent 层放后；调用方不得再把同一份动态画像通过 core memory 追加进 system prompt，便于 DeepSeek / Claude / OpenAI / Gemini 的 provider-side prompt cache 复用前缀
 11. **结构化输出只在 helper 处放宽**：业务模块不再各自手写 JSON 截取逻辑；容错集中在 `json_utils.py`，模块侧用 predicate 收紧语义，避免一个 provider 的异常 shape 修复污染其他任务。
 12. **分模块链不隐式改意图**：默认 `inherit=true`；显式自定义链只在链内降级，引用失效或整链失败都不会偷跑到全局链。旧模块 model override 在迁移时成为独立派生实例，避免修改共享实例或污染其他模块。
-13. **Codex OAuth 只做认证层**：`auth_mode="codex_oauth"` 不注册新 provider，而是给现有 `OpenAIProvider` 注入动态 token provider。该模式只允许 OpenAI 官方 `base_url`，防止 ChatGPT OAuth token 泄露给 OpenAI-compatible 代理。
+13. **Codex OAuth 使用独立官方传输**：`auth_mode="codex_oauth"` 不再给 `OpenAIProvider` 注入 Platform API token，而是构造 `CodexChatGPTProvider`，请求发往 `https://chatgpt.com/backend-api/codex/responses`（官方 Codex CLI 同款通道），401 时安全刷新并重试一次。该模式只允许官方 Codex 域名，防止 ChatGPT OAuth token 泄露给 OpenAI-compatible 代理或 `api.openai.com`。
 14. **失败分类先于批响应解析**：共享 classifier 保持 rate-limit / no-provider / auth / invalid-response 的特定语义优先级，并额外识别连接失败与 HTTP 500/502/503/504；调用方只把 provider transient 交给协调器退避，不把 JSON shape 错误误判成网络失败。

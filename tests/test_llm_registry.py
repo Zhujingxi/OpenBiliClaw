@@ -121,7 +121,8 @@ def test_build_llm_registry_registers_openai_with_codex_oauth(
     assert registry.default_provider == "openai"
     assert registry.available_providers == ["openai"]
     provider = registry.get("openai")
-    assert provider._client.api_key == "access-token"
+    assert provider._access_token == "access-token"
+    assert provider.base_url == "https://chatgpt.com/backend-api/codex"
 
 
 def test_build_llm_registry_registers_openrouter() -> None:
