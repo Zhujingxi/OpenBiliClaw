@@ -15953,6 +15953,12 @@ def create_app(
 
         if _yt_task_queue is None:
             return Response(status_code=204)
+        # Issue #178: recover YouTube tasks whose extension claim outlived the
+        # MV3 service worker timeout. Failing the stale lease here (instead of
+        # handing it back via next_pending's stale-reclaim path) keeps a dead
+        # task from being re-claimed forever and blocking fresh work.
+        with suppress(Exception):
+            _yt_task_queue.expire_stale_in_progress(("bootstrap_profile",))
         task = _yt_task_queue.next_pending(only_ids=_init_owned_ids_filter())
         if task is None:
             return Response(status_code=204)
