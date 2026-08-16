@@ -467,6 +467,14 @@
       return Array.isArray(payload) ? payload : asArray(payload?.items);
     }
 
+    function shouldHydrateRecommendationList({ replaceRecommendations = false } = {}) {
+      // /api/recommendations may top up a thin first page by calling serve(),
+      // so it is not a harmless read. Once this page already has cards, a
+      // background resume/config hydration must remain status-only: fetching a
+      // newer top window can consume the pool even with auto-load disabled.
+      return replaceRecommendations || state.videos.length === 0;
+    }
+
     async function readRuntimeStatusSnapshot() {
       const payload = await requestJsonStrict(ENDPOINTS.runtimeStatus, { timeoutMs: 15000, cache: "no-store" });
       return payload?.status || payload;
@@ -10233,7 +10241,8 @@ ${cardFeedbackBarHtml()}`;
     // 手动刷新。后台再水合（切回标签页、config_reloaded、保存配置、初始化完成）一律
     // 保持 false —— /api/recommendations 只返回最新的 top 窗口，整表覆盖会把用户
     // 滚动加载出来的卡片全部丢掉并按后端最新排序重排（群反馈的「重新排序」）。
-    // replace=false 时 applyDesktopRecommendationSnapshot 只在列表为空时装填。
+    // 列表已有卡片时后台水合连这个 GET 也跳过，因为它在后端可能触发首屏补池；
+    // replace=false 且列表为空时才装填，明确刷新仍可替换。
     async function hydrateFromBackend({ replaceRecommendations = false } = {}) {
       const firstRuntimeGeneration = desktopRuntimeGeneration;
       let runtimeReconciliationGeneration = null;
@@ -10400,11 +10409,17 @@ ${cardFeedbackBarHtml()}`;
       // cards fan out into saved-status reads, otherwise a healthy 10ms request
       // can sit behind the first-screen connection queue for several seconds.
       const pendingConfirmationsPromise = refreshDesktopPendingConfirmations();
-      const recommendationsPromise = readRecommendationSnapshot();
+      const shouldReadRecommendations = shouldHydrateRecommendationList({ replaceRecommendations });
+      const recommendationsPromise = shouldReadRecommendations
+        ? readRecommendationSnapshot()
+        : Promise.resolve(null);
       const runtimePromise = readRuntimeSnapshot();
 
       const recommendationApplicationPromise = recommendationsPromise.then(
-        (items) => applyInitialRecommendations(items),
+        (items) => {
+          if (items === null) return;
+          applyInitialRecommendations(items);
+        },
         (error) => markDesktopRecommendationFailedAndRecover(error),
       );
       const runtimeApplicationPromise = runtimePromise.then(
