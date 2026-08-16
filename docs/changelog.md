@@ -6,6 +6,7 @@
 
 ## 未发布
 
+- **修复非 DeepSeek 安装被默认空 Key 实例拦截（issue #176）**：`agent_bootstrap` 选择其他 LLM provider 时，会自动停用样例中的无 API Key DeepSeek 实例并从 `default_chain` 移除；已有 DeepSeek Key 的备选实例保持不变，`init` 不再要求用户手改 `config.toml`。
 - **修复 Windows PowerShell 5.1 安装器在 clone 成功后静默退出（issue #177）**：`install.ps1` 现在在检查 `$LASTEXITCODE` 前捕获 `git clone` 的 stderr；PS 5.1 不再把 Git 的正常进度输出误判为终止错误，完整 clone 会继续运行 bootstrap，真实 clone 失败仍会显示 Git 原始诊断并清理临时日志。
 - **修复桌面 Web 关闭自动续页后后台仍消耗可换库存（issue #81）**：已有推荐卡片时切回标签页、配置应用和状态水合不再请求可能触发首屏补池的 `/api/recommendations`，只同步 runtime / 库存状态；只有空列表首屏或用户明确手动刷新才读取推荐快照，已显示卡片和库存开关边界保持稳定。
 - **修复 YouTube bootstrap 任务卡在 `in_progress` 无法回收（issue #178）**：Chrome MV3 service worker 休眠会丢失 `setTimeout`，导致扩展 `yt-task-dispatcher.ts` 的任务超时不再触发、`/api/sources/yt/next-task` 被一条 stale `in_progress` 任务长期占住。扩展侧改为 `chrome.alarms` 一次性定时器（`when: deadline_at`）做任务超时，并把 `{task_id, deadline_at, tab_id}` 写入 `chrome.storage.session`（不可用时回退 `chrome.storage.local`）；alarm 触发或 worker 重启后检测到持久化记录时回传 `task_timeout` / `service_worker_restart` 终态并关闭孤儿 tab。后端 `YtTaskQueue` 新增 `expire_stale_in_progress()`，在 `/api/sources/yt/next-task` 领取前与 `enqueue_yt_bootstrap` 入队前把超过阈值（`OPENBILICLAW_YT_STALE_IN_PROGRESS_SECONDS`，默认 600s）且无 staged canonical 结果的 `in_progress` 任务自动置 `failed`；带 `_openbiliclaw_terminal_status` 的结果保留不覆盖，仍走 stale-reclaim 修复投影；`next_pending` 同时把 `claimed_at IS NULL` 的旧 in-progress 行纳入可重领范围。
