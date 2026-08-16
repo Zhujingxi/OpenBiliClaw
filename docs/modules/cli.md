@@ -23,7 +23,7 @@ openbiliclaw [--log-level DEBUG|INFO|WARNING|ERROR] <命令>
 | `health-check` | 检查 LLM Provider 可用性 | ✅ |
 | `auth login` | 设置并验证 B 站 Cookie | ✅ |
 | `auth status` | 查看认证状态 | ✅ |
-| `login codex` | 导入 / 查看 / 删除 Codex CLI 的 ChatGPT OAuth 凭据（实验） | ✅ |
+| `login codex` | 导入 / 探测 / 查看 / 删除 Codex CLI 的 ChatGPT OAuth 凭据（实验） | ✅ |
 | `browser status` | 检查 agent-browser 安装 | ✅ |
 | `browser open <url>` | 通过浏览器打开页面 | ✅ |
 | `browser content <url>` | 获取页面文本内容 | ✅ |
@@ -257,12 +257,21 @@ $ openbiliclaw login codex --import
 # 从指定路径导入
 $ openbiliclaw login codex --import --source ~/.codex/auth.json
 
-# 查看状态；不会显示 token 明文
+# 查看状态；不会显示 token 明文，且会展示最近一次 LLM 能力探测结果
 $ openbiliclaw login codex --status
+
+# 查看状态并立即执行一次真实 LLM 能力探测（结果写回本地凭据文件）
+$ openbiliclaw login codex --status --probe
 
 # 删除 OpenBiliClaw 本地副本，不会删除 Codex CLI 自己的登录态
 $ openbiliclaw login codex --logout
 ```
+
+`login codex --import` 会在导入后自动执行一次真实 LLM 能力探测（模型取自当前
+`[llm.openai].model`；留空时自动从 `chatgpt.com/backend-api/codex/models`
+发现账号可用的 Codex 后端模型，发现失败则回退 `gpt-5.4`），并把结果持久化到
+本地凭据文件；若令牌只能登录 Codex CLI、不能调用 LLM 传输层，CLI 会明确提示
+改用 OpenAI Platform API Key，而不是等到 init 才遇到 401。
 
 启用方式：
 
@@ -274,10 +283,14 @@ enabled = true
 auth_mode = "codex_oauth"
 api_key = ""
 base_url = ""
-model = "gpt-5-nano"
+model = "gpt-5.4"
 ```
 
-这是非官方实验路径，OpenAI / Codex CLI 可能随时调整 token 权限或文件格式。`codex_oauth` 下 `base_url` 只能留空或指向 OpenAI 官方 API 域名，避免把 ChatGPT OAuth token 发给第三方代理。
+> Codex OAuth 通道要求 Codex 后端模型（如 `gpt-5.4` / `gpt-5.5` /
+> `gpt-5.6-*` / `gpt-5.3-codex-spark`），Platform API 模型（如
+> `gpt-5-nano`）会被该通道以 HTTP 400 拒绝。
+
+这是非官方实验路径，OpenAI / Codex CLI 可能随时调整 token 权限或文件格式。`codex_oauth` 下 `base_url` 只能留空或指向官方 Codex 传输端点 `https://chatgpt.com/backend-api`；请求走官方 Codex CLI 同款 `backend-api/codex/responses` 通道，不会把 ChatGPT OAuth token 发给第三方代理或 `api.openai.com`。
 
 ### `openbiliclaw browser status`
 

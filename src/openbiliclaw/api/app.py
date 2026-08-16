@@ -4785,19 +4785,87 @@ def create_app(
         snapshot = await project_stats_service.get_snapshot()
         return ProjectStatsResponse.model_validate(snapshot)
 
+    def _health_llm_registered() -> bool:
+        return not bool(getattr(ctx, "degraded", False))
+
+    def _health_llm_callable() -> bool | None:
+        """Best available signal for whether the default model chain works.
+
+        A full live LLM probe on every /api/health poll would burn tokens, so
+        this reads the persisted Codex OAuth capability probe written by
+        ``openbiliclaw login codex --import`` / ``--probe``. For other
+        providers no cheap live signal exists yet → ``None`` (unknown).
+        """
+        cfg = getattr(ctx, "config", None)
+        if cfg is None:
+            return None
+        llm_cfg = getattr(cfg, "llm", None)
+        if llm_cfg is None:
+            return None
+        codex_auth_mode = False
+        if bool(getattr(llm_cfg, "instance_routing", False)):
+            chain = list(getattr(llm_cfg, "default_chain", []) or [])
+            instances = getattr(llm_cfg, "instances", {}) or {}
+            if chain:
+                instance = instances.get(str(chain[0]).strip().lower())
+                if (
+                    instance is not None
+                    and str(getattr(instance, "provider_type", "") or "").strip().lower()
+                    == "openai"
+                ):
+                    codex_auth_mode = (
+                        str(getattr(instance, "auth_mode", "") or "").strip().lower()
+                        == "codex_oauth"
+                    )
+        else:
+            openai_cfg = getattr(llm_cfg, "openai", None)
+            codex_auth_mode = bool(
+                openai_cfg is not None
+                and str(getattr(openai_cfg, "auth_mode", "") or "").strip().lower() == "codex_oauth"
+            )
+        if not codex_auth_mode:
+            return None
+        try:
+            from openbiliclaw.llm.codex_auth import load_codex_credentials
+
+            credentials = load_codex_credentials()
+        except Exception:
+            return False
+        if credentials is None:
+            return False
+        probe = getattr(credentials, "last_probe", None)
+        if probe is None:
+            return None
+        max_age = 7 * 24 * 3600
+        if time.time() - float(getattr(probe, "checked_at", 0) or 0) > max_age:
+            return None
+        return bool(getattr(probe, "ok", False))
+
     @app.get("/api/health", response_model=HealthResponse, response_model_exclude_none=True)
     async def health() -> HealthResponse | JSONResponse:
         profile_ready = _health_profile_ready()
         lan_ip = _health_lan_ip()
         embedding_ready = await _health_embedding_ready()
-        if bool(getattr(ctx, "degraded", False)):
+        llm_registered = _health_llm_registered()
+        llm_callable = _health_llm_callable() if llm_registered else False
+        if bool(getattr(ctx, "degraded", False)) or llm_callable is False:
             body: dict[str, object] = {
                 "status": "degraded",
                 "service": "openbiliclaw-api",
-                "reason": str(getattr(ctx, "degraded_reason", "")),
-                "issues": _degraded_issues_payload(),
                 "embedding_ready": embedding_ready,
+                "llm_registered": llm_registered,
+                "llm_callable": llm_callable,
             }
+            if bool(getattr(ctx, "degraded", False)):
+                body["reason"] = str(getattr(ctx, "degraded_reason", ""))
+                body["issues"] = _degraded_issues_payload()
+            else:
+                body["reason"] = (
+                    "默认模型链已注册，但最近一次 Codex OAuth 能力探测失败："
+                    "当前 ChatGPT/Codex 令牌无法用于 LLM 调用。请运行 "
+                    "`openbiliclaw login codex --status --probe` 获取详情，"
+                    "或改用 OpenAI Platform API Key。"
+                )
             if profile_ready is not None:
                 body["profile_ready"] = profile_ready
             if lan_ip is not None:
@@ -4809,6 +4877,8 @@ def create_app(
             profile_ready=profile_ready,
             lan_ip=lan_ip,
             embedding_ready=embedding_ready,
+            llm_registered=llm_registered,
+            llm_callable=llm_callable,
         )
 
     @app.get("/api/init-status", response_model=InitStatusOut)

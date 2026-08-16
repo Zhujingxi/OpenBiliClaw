@@ -622,7 +622,7 @@ trusted LAN ─ HTTPS（可选）──→ TLS Proxy :8443 ─ loopback/Compose 
 │    └→ token diet: preference packing + weighted recent/judged/relevant/important insight≤40 → full merge │
 │  discovery evaluator: text + metrics + optional compressed cover image input │
 │    └→ embedding prefilter shadow → privacy-safe decision → raw score/admission join → read-only gate │
-│  OpenAI auth_mode: api_key / experimental Codex CLI OAuth      │
+│  OpenAI auth_mode: api_key / experimental Codex ChatGPT transport│
 │  结构化 JSON helper: wrapper / fenced / JSONL / schema echo / MiMo 容错 │
 ├──────────────────────────────────────────────────────────────┤
 │                    多层网状记忆存储                             │

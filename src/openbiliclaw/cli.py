@@ -450,6 +450,11 @@ _CODEX_LOGIN_LOGOUT_OPTION = typer.Option(
     "--logout",
     help="删除 OpenBiliClaw 本地 Codex 凭据。",
 )
+_CODEX_LOGIN_PROBE_OPTION = typer.Option(
+    False,
+    "--probe",
+    help="导入/查看时执行一次真实 LLM 能力探测，验证令牌是否可用于模型调用。",
+)
 _CONFIG_EXPORT_LEGACY_OUTPUT_OPTION = typer.Option(
     None,
     "--output",
@@ -15084,6 +15089,7 @@ def login_codex(
     source: Path | None = _CODEX_LOGIN_SOURCE_OPTION,
     status: bool = _CODEX_LOGIN_STATUS_OPTION,
     logout: bool = _CODEX_LOGIN_LOGOUT_OPTION,
+    probe: bool = _CODEX_LOGIN_PROBE_OPTION,
 ) -> None:
     """导入或管理 Codex CLI 的 ChatGPT OAuth 凭据."""
     from datetime import datetime
@@ -15100,14 +15106,68 @@ def login_codex(
     def _print_codex_credentials(credentials: CodexCredentials) -> None:
         expires = datetime.fromtimestamp(credentials.expires_at).strftime("%Y-%m-%d %H:%M:%S")
         state = "临期/需刷新" if credentials.is_expired() else "有效"
-        _print_key_value_table(
-            "Codex OAuth",
-            [
-                ("状态", f"已登录（{state}）"),
-                ("账号", credentials.account_id or "（未知）"),
-                ("过期时间", expires),
-            ],
-        )
+        rows = [
+            ("状态", f"已登录（{state}）"),
+            ("账号", credentials.account_id or "（未知）"),
+            ("过期时间", expires),
+        ]
+        if credentials.last_probe is not None:
+            probe_state = credentials.last_probe
+            checked = datetime.fromtimestamp(probe_state.checked_at).strftime("%Y-%m-%d %H:%M:%S")
+            if probe_state.ok:
+                rows.append(
+                    ("LLM 通道", f"可用（{probe_state.model or '未记录模型'}，{checked} 探测）")
+                )
+            else:
+                rows.append(("LLM 通道", f"不可用（{checked} 探测）"))
+                if probe_state.message:
+                    rows.append(("失败原因", probe_state.message))
+        else:
+            rows.append(("LLM 通道", "未探测"))
+        _print_key_value_table("Codex OAuth", rows)
+
+    def _probe_model_from_config() -> tuple[str, str]:
+        try:
+            from openbiliclaw.config import load_config
+
+            cfg = load_config()
+            openai_cfg = cfg.llm.openai
+            if openai_cfg.auth_mode.strip().lower() == "codex_oauth":
+                # 空模型 → 让探测端自动发现账号可用的 Codex 后端模型。
+                return openai_cfg.model.strip(), openai_cfg.base_url.strip()
+        except Exception:
+            pass
+        return "", ""
+
+    def _run_codex_probe(credentials: CodexCredentials) -> None:
+        from openbiliclaw.llm.codex_chatgpt_provider import probe_codex_llm
+
+        model, base_url = _probe_model_from_config()
+        model_label = model or "自动发现账号可用模型"
+        console.print(f"[dim]正在探测 Codex LLM 通道（模型: {model_label}）...[/dim]")
+        result = asyncio.run(probe_codex_llm(model=model, base_url=base_url))
+        if result.ok:
+            _print_status_panel(
+                "success",
+                "Codex LLM 探测",
+                f"令牌可用于 LLM 调用（模型: {result.model or model}，"
+                f"耗时 {result.latency_ms}ms）。",
+            )
+        else:
+            _print_status_panel(
+                "warning",
+                "Codex LLM 探测失败",
+                "令牌已导入，但当前令牌无法调用 Codex LLM 通道。"
+                f"（原因: {result.message}）"
+                '请改用 OpenAI Platform API Key（`auth_mode = "api_key"`），'
+                "或重新登录 Codex CLI 后重试。",
+            )
+        # Reload so the persisted probe state is shown in the table below.
+        refreshed = load_codex_credentials()
+        if refreshed is not None:
+            _print_codex_credentials(refreshed)
+        else:
+            _print_codex_credentials(credentials)
 
     if status:
         credentials = load_codex_credentials()
@@ -15120,6 +15180,13 @@ def login_codex(
             )
             return
         _print_codex_credentials(credentials)
+        if probe:
+            _run_codex_probe(credentials)
+        elif credentials.last_probe is None:
+            console.print(
+                "[dim]尚未进行 LLM 能力探测；运行 `openbiliclaw login codex --status --probe` "
+                "可验证令牌是否真正可调用。[/dim]"
+            )
         return
 
     if logout:
@@ -15144,6 +15211,10 @@ def login_codex(
 
     _print_status_panel("success", "Codex OAuth", "登录凭据已导入。")
     _print_codex_credentials(credentials)
+    # Issue #170: importing a Codex CLI login is only useful when the token
+    # can actually call the Codex ChatGPT LLM transport. Probe immediately so
+    # the user never reaches init before discovering a scope-less token.
+    _run_codex_probe(credentials)
 
 
 @app.command("health-check")
