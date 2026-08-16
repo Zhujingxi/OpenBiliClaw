@@ -220,13 +220,31 @@ function Test-UserDataOnlyRoot([string]$Path) {
     return $true
 }
 
+function Invoke-GitClone([string]$CloneRepoUrl, [string]$CloneBranch, [string]$Destination) {
+    $cloneStderrLog = [IO.Path]::GetTempFileName()
+    try {
+        # Windows PowerShell 5.1 treats native stderr as a terminating error
+        # when $ErrorActionPreference is Stop. Git writes normal clone progress
+        # to stderr, so capture it before inspecting LASTEXITCODE (issue #177).
+        git clone --branch $CloneBranch --depth 1 $CloneRepoUrl $Destination 2> $cloneStderrLog | Out-Host
+        $cloneExitCode = $LASTEXITCODE
+        if ($cloneExitCode -ne 0 -and (Test-Path -LiteralPath $cloneStderrLog)) {
+            Get-Content -LiteralPath $cloneStderrLog -ErrorAction SilentlyContinue |
+                ForEach-Object { if ($_) { Log-Err $_ } }
+        }
+        return [int]$cloneExitCode
+    } finally {
+        Remove-Item -LiteralPath $cloneStderrLog -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Clone-IntoUserDataRoot {
     $parent = Split-Path $InstallDir -Parent
     if ($parent -and -not (Test-Path $parent)) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
     $tmp = Join-Path $parent ("openbiliclaw-clone." + [Guid]::NewGuid().ToString('N'))
     Log-Info "Target contains existing user data only; cloning source into $InstallDir without touching config/data/logs."
-    git clone --branch $Branch --depth 1 $RepoUrl $tmp
-    if ($LASTEXITCODE -ne 0) {
+    $cloneExitCode = Invoke-GitClone $RepoUrl $Branch $tmp
+    if ($cloneExitCode -ne 0) {
         if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue }
         Log-Err 'git clone failed.'
         exit 1
@@ -348,8 +366,8 @@ function Ensure-Checkout {
     $parent = Split-Path $InstallDir -Parent
     if ($parent -and -not (Test-Path $parent)) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
     Log-Info "Cloning $RepoUrl (branch $Branch) into $InstallDir"
-    git clone --branch $Branch --depth 1 $RepoUrl $InstallDir
-    if ($LASTEXITCODE -ne 0) { Log-Err 'git clone failed.'; exit 1 }
+    $cloneExitCode = Invoke-GitClone $RepoUrl $Branch $InstallDir
+    if ($cloneExitCode -ne 0) { Log-Err 'git clone failed.'; exit 1 }
 }
 
 # -----------------------------------------------------------------------------

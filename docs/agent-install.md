@@ -47,6 +47,7 @@ $env:MODE="docker"; [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePo
 
 > The leading `[Net.ServicePointManager]...Tls12` line is **required on PowerShell 5.1** (the default that ships with Windows 10/11). PS 5.1 defaults to TLS 1.0/1.1, but GitHub.com only accepts TLS 1.2+. Without the prefix, `iwr` fails with "underlying connection was closed" and the user blames the installer. Users on PowerShell 7+ can omit the prefix. Compatible from v0.3.9 forward — the script itself also re-applies the same setting once it starts running, so any subsequent HTTPS calls (git, pip, uv) inside the script are also covered.
 > v0.3.71+ also sets `NO_PROXY/no_proxy=localhost,127.0.0.1,::1` in `install.sh`, `install.ps1`, and `agent_bootstrap.py` before local health checks. This keeps corporate/VPN proxies from intercepting `http://127.0.0.1:<port>/api/health` on native Windows.
+> `install.ps1` captures `git clone`'s stderr before checking its exit code. Windows PowerShell 5.1 can otherwise treat Git's normal progress output as a terminating error when `$ErrorActionPreference=Stop`, leaving a complete clone with no bootstrap. A real clone failure still prints Git's captured diagnostics (issue #177).
 
 Either command:
 
