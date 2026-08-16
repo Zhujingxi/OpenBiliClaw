@@ -135,5 +135,7 @@ def test_source_attribution_prefers_explicit_metadata_then_url() -> None:
 
 def test_source_content_id_extraction_uses_stable_metadata_keys() -> None:
     assert extract_source_content_id({"note_id": "", "content_id": "note-42"}) == "note-42"
+    assert extract_source_content_id({"content_id": "topic:4242", "topic_id": 4242}) == "topic:4242"
+    assert extract_source_content_id({"topic_id": 4242}) == "4242"
     assert extract_source_content_id({"bvid": "BV1TEST", "title": "视频"}) == "BV1TEST"
     assert extract_source_content_id({"content_id": None}) == ""

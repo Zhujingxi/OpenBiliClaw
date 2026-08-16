@@ -5468,6 +5468,27 @@ class TestDatabase:
 
             db.close()
 
+    def test_view_event_uses_one_ordered_metadata_identity(self) -> None:
+        with_primary_and_fallback = Database._extract_content_keys_from_view_event(
+            {
+                "url": "https://linux.do/t/topic/4242",
+                "metadata": {
+                    "source_platform": "linuxdo",
+                    "content_id": "topic:4242",
+                    "topic_id": 4242,
+                },
+            }
+        )
+        fallback_only = Database._extract_content_keys_from_view_event(
+            {
+                "url": "https://linux.do/t/topic/4243",
+                "metadata": {"source_platform": "linuxdo", "topic_id": 4243},
+            }
+        )
+
+        assert with_primary_and_fallback == {"linuxdo:topic:4242"}
+        assert fallback_only == {"linuxdo:4243"}
+
     def test_seen_items_backfill_is_unbounded_and_excludes_oldest_legacy_view(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "test.db"

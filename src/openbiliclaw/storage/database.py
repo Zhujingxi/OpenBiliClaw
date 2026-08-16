@@ -77,17 +77,6 @@ from openbiliclaw.saved_sync.models import (
     SavedListKind,
 )
 from openbiliclaw.sources.platforms import (
-    CONTENT_ID_METADATA_KEYS,
-    SOURCE_CONFIDENCE_EXACT,
-    SOURCE_CONFIDENCE_INFERRED,
-    SOURCE_CONFIDENCE_LEGACY_UNKNOWN,
-    SOURCE_CONFIDENCE_VALUES,
-    extract_source_content_id,
-    infer_source_platform_from_url,
-    normalize_source_platform,
-    resolve_source_attribution,
-)
-from openbiliclaw.sources.platforms import (
     PLATFORM_BANGUMI as _BANGUMI_SOURCE_FAMILY,
 )
 from openbiliclaw.sources.platforms import (
@@ -104,6 +93,16 @@ from openbiliclaw.sources.platforms import (
 )
 from openbiliclaw.sources.platforms import (
     PLATFORM_YOUTUBE as _YOUTUBE_SOURCE_FAMILY,
+)
+from openbiliclaw.sources.platforms import (
+    SOURCE_CONFIDENCE_EXACT,
+    SOURCE_CONFIDENCE_INFERRED,
+    SOURCE_CONFIDENCE_LEGACY_UNKNOWN,
+    SOURCE_CONFIDENCE_VALUES,
+    extract_source_content_id,
+    infer_source_platform_from_url,
+    normalize_source_platform,
+    resolve_source_attribution,
 )
 from openbiliclaw.sources.platforms import (
     source_family as _source_family,
@@ -20184,34 +20183,27 @@ class Database:
                 else cls._infer_source_platform_from_url(url)
             )
 
-        content_ids: set[str] = set()
-        for key in CONTENT_ID_METADATA_KEYS:
-            raw_value = metadata.get(key, "")
-            if isinstance(raw_value, (str, int)):
-                value = str(raw_value).strip()
-                if value:
-                    content_ids.add(value)
-                    if (
-                        platform == _REDDIT_SOURCE_FAMILY
-                        and not value.startswith("t3_")
-                        and re.fullmatch(r"[A-Za-z0-9_]+", value)
-                    ):
-                        content_ids.add(f"t3_{value}")
-
-        url_content_id = cls._extract_content_id_from_url(platform, url)
-        if url_content_id:
-            content_ids.add(url_content_id)
-
-        if bvid:
-            content_ids.add(bvid)
+        content_id = extract_source_content_id(metadata)
+        if not content_id:
+            content_id = cls._extract_content_id_from_url(platform, url)
+        if not content_id:
+            content_id = bvid
             platform = platform or _BILIBILI_SOURCE_FAMILY
 
         keys: set[str] = set()
-        for content_id in content_ids:
-            if content_id.startswith("BV"):
-                keys.add(content_id)
-            if platform:
-                keys.add(f"{platform}:{content_id}")
+        if content_id:
+            content_id_aliases: tuple[str, ...] = (content_id,)
+            if (
+                platform == _REDDIT_SOURCE_FAMILY
+                and not content_id.startswith("t3_")
+                and re.fullmatch(r"[A-Za-z0-9_]+", content_id)
+            ):
+                content_id_aliases = (content_id, f"t3_{content_id}")
+            for content_id_alias in content_id_aliases:
+                if content_id_alias.startswith("BV"):
+                    keys.add(content_id_alias)
+                if platform:
+                    keys.add(f"{platform}:{content_id_alias}")
         return keys, bvid
 
     @staticmethod

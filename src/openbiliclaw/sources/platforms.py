@@ -37,7 +37,7 @@ SOURCE_CONFIDENCE_VALUES = frozenset(
     }
 )
 
-# Keep every source-identity reader on the same ordered metadata registry.
+# 按优先级排列的候选字段；同一事件只取第一个有效字段，不能展开成多个内容身份。
 CONTENT_ID_METADATA_KEYS = (
     "content_id",
     "bvid",
