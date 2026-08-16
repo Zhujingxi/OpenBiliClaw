@@ -169,7 +169,7 @@ token = await get_valid_codex_token()
 # 真实能力探测：验证 ChatGPT token 能否调用官方 Codex LLM 通道。
 # 结果会持久化到凭据文件，供 CLI --status 与 /api/health 区分
 # "已导入" 与 "可调用"。
-probe = await probe_codex_llm(model="gpt-5-nano")
+probe = await probe_codex_llm()  # model 留空 → 自动发现账号可用的 Codex 后端模型
 print(probe.ok, probe.message)
 ```
 

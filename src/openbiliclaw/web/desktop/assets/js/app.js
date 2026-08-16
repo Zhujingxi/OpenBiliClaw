@@ -8930,7 +8930,7 @@ ${cardFeedbackBarHtml()}`;
       setLlmModelDiscoveryStatus(
         "neutral",
         codexMode
-          ? "Codex OAuth 走 ChatGPT 订阅通道，不提供 /models 发现；模型名请手填（如 gpt-5-nano）。"
+          ? "Codex OAuth 走 ChatGPT 订阅通道，不提供 /models 发现；模型名请手填（如 gpt-5.4）。"
           : supported
             ? "可从 OpenAI 兼容 /models 获取；接口不支持时仍可手填。"
             : "该 Provider 没有 OpenAI /models 发现契约，模型名请手填。"
@@ -9194,8 +9194,10 @@ ${cardFeedbackBarHtml()}`;
       const isNew = !state.llmEditingInstanceId;
       const model = getInput("llmInstanceModel");
       const baseUrl = getInput("llmInstanceBaseUrl");
+      const codexMode =
+        providerType === "openai" && getInput("llmInstanceAuthMode") === "codex_oauth";
       if (!model || (isNew && model === (previousDefaults.model || ""))) {
-        setInput("llmInstanceModel", defaults.model || "");
+        setInput("llmInstanceModel", codexMode ? "gpt-5.4" : defaults.model || "");
       }
       if (!baseUrl || (isNew && baseUrl === (previousDefaults.base_url || ""))) {
         setInput("llmInstanceBaseUrl", defaults.base_url || "");

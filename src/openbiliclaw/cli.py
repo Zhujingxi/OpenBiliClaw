@@ -15120,16 +15120,18 @@ def login_codex(
             cfg = load_config()
             openai_cfg = cfg.llm.openai
             if openai_cfg.auth_mode.strip().lower() == "codex_oauth":
-                return openai_cfg.model.strip() or "gpt-5-nano", openai_cfg.base_url.strip()
+                # 空模型 → 让探测端自动发现账号可用的 Codex 后端模型。
+                return openai_cfg.model.strip(), openai_cfg.base_url.strip()
         except Exception:
             pass
-        return "gpt-5-nano", ""
+        return "", ""
 
     def _run_codex_probe(credentials: CodexCredentials) -> None:
         from openbiliclaw.llm.codex_chatgpt_provider import probe_codex_llm
 
         model, base_url = _probe_model_from_config()
-        console.print(f"[dim]正在探测 Codex LLM 通道（模型: {model}）...[/dim]")
+        model_label = model or "自动发现账号可用模型"
+        console.print(f"[dim]正在探测 Codex LLM 通道（模型: {model_label}）...[/dim]")
         result = asyncio.run(probe_codex_llm(model=model, base_url=base_url))
         if result.ok:
             _print_status_panel(

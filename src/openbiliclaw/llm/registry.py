@@ -783,7 +783,7 @@ def _maybe_openai_provider(config: Config, overrides: dict[str, LLMProvider]) ->
         return CodexChatGPTProvider(
             access_token=credentials.access_token,
             account_id=credentials.account_id,
-            model=config.llm.openai.model or "gpt-5-nano",
+            model=config.llm.openai.model or "gpt-5.4",
             base_url=config.llm.openai.base_url,
             token_provider=_codex_token_provider,
             timeout=float(config.llm.timeout),

@@ -52,7 +52,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
-_DEFAULT_CODEX_MODEL = "gpt-5-nano"
+_CODEX_MODELS_URL = "https://chatgpt.com/backend-api/codex/models?client_version=1.0.0"
+# ChatGPT-subscription Codex backend accepts Codex-line models (gpt-5.4,
+# gpt-5.5, gpt-5.6-*, gpt-5.3-codex-spark, ...). Platform-API models such as
+# ``gpt-5-nano`` are rejected with HTTP 400 by this transport. When the user
+# hasn't picked a model we default to a stable Codex-backend slug and, for
+# probes, prefer live catalog discovery first.
+_DEFAULT_CODEX_MODEL = "gpt-5.4"
 _CODEX_PROBE_TIMEOUT_SECONDS = 60.0
 _MAX_RETRIES = 3
 _BASE_RETRY_DELAY = 0.25
@@ -115,6 +121,51 @@ def normalize_codex_base_url(base_url: str) -> str:
             endpoint=raw,
         )
     return "https://chatgpt.com/backend-api/codex"
+
+
+async def fetch_codex_models(
+    *,
+    access_token: str,
+    account_id: str = "",
+    timeout: float = 30.0,
+) -> list[str]:
+    """Return visible model slugs from the official Codex backend catalog.
+
+    Uses the same ``chatgpt.com/backend-api/codex/models`` endpoint the
+    official Codex CLI queries. ``visibility="hide"`` entries are filtered
+    out; ``supported_in_api`` is intentionally ignored because it describes
+    the public OpenAI Platform API, not this OAuth-backed Codex route.
+    """
+    headers = {"Authorization": f"Bearer {access_token}"}
+    if account_id.strip():
+        headers["ChatGPT-Account-Id"] = account_id.strip()
+    kwargs = network.httpx_kwargs_for_endpoint(_CODEX_MODELS_URL)
+    kwargs["timeout"] = timeout
+    try:
+        async with httpx.AsyncClient(**kwargs) as client:
+            response = await client.get(_CODEX_MODELS_URL, headers=headers)
+        if response.status_code != 200:
+            return []
+        data = response.json()
+        entries = data.get("models", []) if isinstance(data, dict) else []
+    except Exception:
+        logger.debug("Failed to fetch codex model catalog", exc_info=True)
+        return []
+    sortable: list[tuple[int, str]] = []
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        slug = item.get("slug")
+        if not isinstance(slug, str) or not slug.strip():
+            continue
+        visibility = str(item.get("visibility") or "")
+        if visibility.strip().lower() in {"hide", "hidden"}:
+            continue
+        priority = item.get("priority")
+        rank = int(priority) if isinstance(priority, int | float) else 10_000
+        sortable.append((rank, slug.strip()))
+    sortable.sort(key=lambda entry: (entry[0], entry[1]))
+    return [slug for _rank, slug in sortable]
 
 
 def codex_account_id_from_token(access_token: str) -> str:
@@ -325,8 +376,11 @@ class CodexChatGPTProvider(LLMProvider):
         }
         if instructions:
             body["instructions"] = instructions
-        if max_tokens > 0:
-            body["max_output_tokens"] = max_tokens
+        # ``max_output_tokens`` is deliberately NOT forwarded: the Codex
+        # ChatGPT backend rejects it (HTTP 400 "Unsupported parameter:
+        # max_output_tokens"), matching the official Codex CLI which lets
+        # the backend apply each model's own output budget.
+        del max_tokens
         if json_mode:
             body["text"]["format"] = {"type": "json_object"}
         if reasoning_effort in _OPENAI_REASONING_EFFORTS:
@@ -670,7 +724,7 @@ def _error_body_text(exc: Exception) -> str:
 
 async def probe_codex_llm(
     *,
-    model: str = _DEFAULT_CODEX_MODEL,
+    model: str = "",
     base_url: str = "",
     token_path: str | None = None,
     timeout: float = _CODEX_PROBE_TIMEOUT_SECONDS,
@@ -696,6 +750,15 @@ async def probe_codex_llm(
     except CodexAuthError as exc:
         return CodexProbeResult(ok=False, message=str(exc))
 
+    effective_model = (model or "").strip()
+    if not effective_model:
+        available = await fetch_codex_models(
+            access_token=token,
+            account_id=credentials.account_id,
+            timeout=timeout,
+        )
+        effective_model = available[0] if available else _DEFAULT_CODEX_MODEL
+
     async def _token_provider(force_refresh: bool = False) -> str:
         return await get_valid_codex_token(
             force_refresh=force_refresh,
@@ -705,7 +768,7 @@ async def probe_codex_llm(
     provider = CodexChatGPTProvider(
         access_token=token,
         account_id=credentials.account_id,
-        model=model,
+        model=effective_model,
         base_url=base_url,
         token_provider=_token_provider,
         timeout=timeout,

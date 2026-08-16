@@ -9,6 +9,7 @@ from openbiliclaw.llm.codex_chatgpt_provider import (
     CodexChatGPTProvider,
     _parse_codex_sse_response,
     codex_account_id_from_token,
+    fetch_codex_models,
     normalize_codex_base_url,
 )
 
@@ -82,12 +83,54 @@ def test_build_request_body_uses_responses_contract() -> None:
     assert body["instructions"] == "Be brief."
     assert body["store"] is False
     assert body["stream"] is True
-    assert body["max_output_tokens"] == 16
+    assert "max_output_tokens" not in body
     assert body["input"] == [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}]
     assert body["text"]["verbosity"] == "medium"
     assert body["text"]["format"] == {"type": "json_object"}
     assert "temperature" not in body
     assert "reasoning" not in body
+
+
+@pytest.mark.asyncio
+async def test_fetch_codex_models_filters_hidden_and_sorts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import openbiliclaw.llm.codex_chatgpt_provider as provider_module
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self) -> dict[str, object]:
+            return {
+                "models": [
+                    {"slug": "gpt-5.4", "priority": 16, "visibility": "list"},
+                    {"slug": "codex-auto-review", "priority": 43, "visibility": "hide"},
+                    {"slug": "gpt-5.6-sol", "priority": 1, "visibility": "list"},
+                    {"slug": "gpt-5.3-codex-spark", "priority": 26, "visibility": "list"},
+                ]
+            }
+
+    class FakeClient:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+        async def __aenter__(self) -> FakeClient:
+            return self
+
+        async def __aexit__(self, *exc: object) -> None:
+            return None
+
+        async def get(self, url: str, *, headers: dict[str, str]) -> FakeResponse:
+            assert url == ("https://chatgpt.com/backend-api/codex/models?client_version=1.0.0")
+            assert headers["Authorization"] == "Bearer token"
+            assert headers["ChatGPT-Account-Id"] == "acct"
+            return FakeResponse()
+
+    monkeypatch.setattr(provider_module.httpx, "AsyncClient", FakeClient)
+
+    models = await fetch_codex_models(access_token="token", account_id="acct")
+
+    assert models == ["gpt-5.6-sol", "gpt-5.4", "gpt-5.3-codex-spark"]
 
 
 def test_parse_codex_sse_response_extracts_deltas_and_usage() -> None:
@@ -166,6 +209,37 @@ async def test_complete_posts_to_codex_responses_and_parses(
     assert captured["headers"]["OpenAI-Beta"] == "responses=experimental"
     assert captured["body"]["stream"] is True
     assert "temperature" not in captured["body"]
+
+
+@pytest.mark.asyncio
+async def test_complete_retries_without_text_format_on_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = CodexChatGPTProvider(access_token="token", account_id="acct", model="gpt-5.4")
+    calls: list[dict[str, object]] = []
+
+    async def fake_post_once(
+        url: str, headers: dict[str, str], body: dict[str, object]
+    ) -> tuple[int, str]:
+        calls.append(body)
+        if len(calls) == 1:
+            return 400, '{"detail":"Unsupported parameter: text.format"}'
+        return 200, "data: " + json.dumps(
+            {"type": "response.output_text.delta", "delta": '{"ok": true}'}
+        )
+
+    monkeypatch.setattr(provider, "_post_once", fake_post_once)
+    response = await provider.complete(
+        [{"role": "user", "content": "hi"}],
+        temperature=0,
+        max_tokens=16,
+        json_mode=True,
+        reasoning_effort="",
+    )
+
+    assert response.content == '{"ok": true}'
+    assert len(calls) == 2
+    assert "format" not in str(calls[1].get("text"))
 
 
 @pytest.mark.asyncio

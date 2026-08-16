@@ -425,10 +425,15 @@
         providerDrafts.set(activeProvider, currentProviderFields());
       }
       const cfg = providerDrafts.get(next) || savedProviderConfigs.get(next) || {};
-      $("#model").value = String(cfg.model || DEFAULT_MODELS[next] || "");
+      const nextAuthMode = cfg.auth_mode === "codex_oauth" ? "codex_oauth" : "api_key";
+      const nextDefaultModel =
+        next === "openai" && nextAuthMode === "codex_oauth"
+          ? "gpt-5.4"
+          : DEFAULT_MODELS[next] || "";
+      $("#model").value = String(cfg.model || nextDefaultModel);
       $("#baseUrl").value = String(cfg.base_url || "");
       $("#apiFlavor").value = cfg.api_flavor === "responses" ? "responses" : "";
-      $("#authMode").value = cfg.auth_mode === "codex_oauth" ? "codex_oauth" : "api_key";
+      $("#authMode").value = nextAuthMode;
       $("#reasoningEffort").value = String(cfg.reasoning_effort || "");
       activeProvider = next;
       clearMsg("#msg0");
@@ -453,7 +458,7 @@
       const [url, name] = KEY_LINKS[p] || ["", ""];
       $("#keyHint").innerHTML = url ? `还没有 key？去 <a href="${url}" target="_blank" rel="noopener">${name}</a> 免费申请,粘贴回来即可。` : "";
       const modelInput = $("#model");
-      const defaultModel = DEFAULT_MODELS[p] || "";
+      const defaultModel = codexMode ? "gpt-5.4" : DEFAULT_MODELS[p] || "";
       if (isOpenAI) {
         $("#authMode").onchange = () => renderProvider();
       }
@@ -499,7 +504,7 @@
       setModelDiscoveryStatus(
         "neutral",
         codexMode
-          ? "Codex OAuth 走 ChatGPT 订阅通道，不提供 /models 发现；模型名请手填（如 gpt-5-nano）。"
+          ? "Codex OAuth 走 ChatGPT 订阅通道，不提供 /models 发现；模型名请手填（如 gpt-5.4）。"
           : supported
             ? "可从 OpenAI 兼容 /models 获取；接口不支持时仍可手填。"
             : "该 Provider 没有 OpenAI /models 发现契约，模型名请手填。",

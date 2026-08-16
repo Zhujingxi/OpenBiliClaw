@@ -241,7 +241,7 @@ base_url = "https://api.deepseek.com"
 > - 本地 vLLM → `base_url = "http://localhost:8000/v1"`，`api_key` 任填或留空
 > - OneAPI 网关 → `base_url = "https://your-oneapi.example.com/v1"`
 
-> `auth_mode = "codex_oauth"` 是实验性 / 非官方路径：OpenAI 官方 API 认证仍以 Platform API key 为稳定入口。启用前先运行 `openbiliclaw login codex`，OpenBiliClaw 会从官方 Codex CLI 登录态导入 token 到 `~/.openbiliclaw/codex_auth.json`，并立即做一次真实 LLM 能力探测。该模式下 `api_key` 会被忽略，`api_flavor` 不再需要设置（传输层固定为官方 Codex 通道）；请求发往 `https://chatgpt.com/backend-api/codex/responses`——官方 Codex CLI 同款通道，而不是 `api.openai.com/v1`。`base_url` 只能留空或指向官方 Codex 域名，避免把 ChatGPT OAuth token 发给第三方代理。
+> `auth_mode = "codex_oauth"` 是实验性 / 非官方路径：OpenAI 官方 API 认证仍以 Platform API key 为稳定入口。启用前先运行 `openbiliclaw login codex`，OpenBiliClaw 会从官方 Codex CLI 登录态导入 token 到 `~/.openbiliclaw/codex_auth.json`，并立即做一次真实 LLM 能力探测。该模式下 `api_key` 会被忽略，`api_flavor` 不再需要设置（传输层固定为官方 Codex 通道）；请求发往 `https://chatgpt.com/backend-api/codex/responses`——官方 Codex CLI 同款通道，而不是 `api.openai.com/v1`。`base_url` 只能留空或指向官方 Codex 域名，避免把 ChatGPT OAuth token 发给第三方代理。`model` 必须是 Codex 后端模型（如 `gpt-5.4` / `gpt-5.5` / `gpt-5.6-*` / `gpt-5.3-codex-spark`）；Platform API 模型（如 `gpt-5-nano`）会被该通道以 HTTP 400 拒绝。
 
 #### Claude（`provider_type = "claude"`）
 
