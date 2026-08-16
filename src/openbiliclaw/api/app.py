@@ -1065,10 +1065,16 @@ def _count_events_by_source_platform(database: Any) -> dict[str, int]:
     rows: list[dict[str, Any]] = []
     if hasattr(database, "conn"):
         try:
-            cursor = database.conn.execute("SELECT metadata FROM events")
+            cursor = database.conn.execute("SELECT source_platform, metadata FROM events")
             rows = [dict(row) for row in cursor.fetchall()]
         except Exception:
-            rows = []
+            # Keep injected/legacy databases usable before the additive source
+            # columns have been migrated.
+            try:
+                cursor = database.conn.execute("SELECT metadata FROM events")
+                rows = [dict(row) for row in cursor.fetchall()]
+            except Exception:
+                rows = []
     elif hasattr(database, "get_recent_events"):
         try:
             rows = list(database.get_recent_events(limit=10000))
@@ -1086,7 +1092,11 @@ def _count_events_by_source_platform(database: Any) -> dict[str, int]:
                 metadata = {}
         if not isinstance(metadata, dict):
             metadata = {}
-        source = metadata.get("source_platform", row.get("source_platform", "bilibili"))
+        source = (
+            str(row.get("source_platform") or "").strip()
+            or str(metadata.get("source_platform") or "").strip()
+        )
+        source = source or "bilibili"
         source_key = _normalize_source_platform(source)
         counter[source_key] = counter.get(source_key, 0) + 1
     return {source: counter.get(source, 0) for source in _SOURCE_SHARE_ORDER}

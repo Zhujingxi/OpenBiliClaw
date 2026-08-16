@@ -77,6 +77,17 @@ from openbiliclaw.saved_sync.models import (
     SavedListKind,
 )
 from openbiliclaw.sources.platforms import (
+    CONTENT_ID_METADATA_KEYS,
+    SOURCE_CONFIDENCE_EXACT,
+    SOURCE_CONFIDENCE_INFERRED,
+    SOURCE_CONFIDENCE_LEGACY_UNKNOWN,
+    SOURCE_CONFIDENCE_VALUES,
+    extract_source_content_id,
+    infer_source_platform_from_url,
+    normalize_source_platform,
+    resolve_source_attribution,
+)
+from openbiliclaw.sources.platforms import (
     PLATFORM_BANGUMI as _BANGUMI_SOURCE_FAMILY,
 )
 from openbiliclaw.sources.platforms import (
@@ -93,16 +104,6 @@ from openbiliclaw.sources.platforms import (
 )
 from openbiliclaw.sources.platforms import (
     PLATFORM_YOUTUBE as _YOUTUBE_SOURCE_FAMILY,
-)
-from openbiliclaw.sources.platforms import (
-    SOURCE_CONFIDENCE_EXACT,
-    SOURCE_CONFIDENCE_INFERRED,
-    SOURCE_CONFIDENCE_LEGACY_UNKNOWN,
-    SOURCE_CONFIDENCE_VALUES,
-    extract_source_content_id,
-    infer_source_platform_from_url,
-    normalize_source_platform,
-    resolve_source_attribution,
 )
 from openbiliclaw.sources.platforms import (
     source_family as _source_family,
@@ -477,15 +478,6 @@ _EXTENSION_NATIVE_SAVE_RESULT_MESSAGES = {
 }
 _BVID_PATTERN = re.compile(r"(BV[0-9A-Za-z]+)")
 _LOCAL_EVIDENCE_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
-_VIEW_CONTENT_ID_METADATA_KEYS = (
-    "content_id",
-    "bvid",
-    "note_id",
-    "aweme_id",
-    "video_id",
-    "yt_video_id",
-    "post_id",
-)
 # Event types that prove the user already consumed a piece of content, and so
 # feed the durable seen ledger. ``view`` was the only member until 2026-07-26,
 # which meant a video the user had explicitly favourited (or liked, or coined)
@@ -990,8 +982,9 @@ _EXPLORE_HIGH_RISK_CLUSTERS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 # Schema version for migrations.  V4 adds the atomic temporal-evidence and
-# review lifecycle fields to both discovery candidates and cached content.
-_SCHEMA_VERSION = 5
+# review lifecycle fields to both discovery candidates and cached content; V6
+# records the event source-attribution schema marker.
+_SCHEMA_VERSION = 6
 
 _SCHEMA_SQL = """
 -- Event log (behavioral data from browser extension)
@@ -20192,7 +20185,7 @@ class Database:
             )
 
         content_ids: set[str] = set()
-        for key in _VIEW_CONTENT_ID_METADATA_KEYS:
+        for key in CONTENT_ID_METADATA_KEYS:
             raw_value = metadata.get(key, "")
             if isinstance(raw_value, (str, int)):
                 value = str(raw_value).strip()

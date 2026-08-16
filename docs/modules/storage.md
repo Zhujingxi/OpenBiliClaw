@@ -157,7 +157,7 @@ assert first.duplicate is False
 
 ### 事件来源归属
 
-`events` 表为每条行为事件保留三列：`source_platform`（规范平台名）、`content_id`（平台内容稳定 ID，可为空）和 `source_confidence`（`exact` / `inferred` / `legacy_unknown`）。新 producer 的显式平台字段优先，其次读取 metadata 中的来源字段，最后从规范 URL 推断；旧调用方仍可省略来源，只有没有 URL 等更强证据时才使用 B 站兼容默认并标记为 `legacy_unknown`，不会把兼容默认误当成精确归属。旧 `metadata.source_platform` 与 `metadata` 内的 `bvid` / `note_id` 等字段继续保留，供已有画像与回看逻辑兼容使用。
+`events` 表为每条行为事件保留三列：`source_platform`（规范平台名）、`content_id`（平台内容稳定 ID，可为空）和 `source_confidence`（`exact` / `inferred` / `legacy_unknown`）。新 producer 的显式平台字段优先，其次读取 metadata 中的来源字段，最后从规范 URL 推断；旧调用方仍可省略来源，只有没有 URL 等更强证据时才使用 B 站兼容默认并标记为 `legacy_unknown`，不会把兼容默认误当成精确归属。`content_id`、`bvid`、`note_id`、`tweet_id`、`question_id` 等稳定身份键由 `sources.platforms.CONTENT_ID_METADATA_KEYS` 统一注册，seen ledger 与事件写入不再维护两套字段列表。旧 `metadata.source_platform` 与 `metadata` 内的身份字段继续保留，供已有画像与回看逻辑兼容使用。
 
 `Database.initialize()` 会在启动时幂等补列和 `(source_platform, content_id)` 索引，并只从明确 metadata 或规范 URL 回填旧行。无法证明的平台保持空值 / `legacy_unknown`，不会凭标题、采集任务或账号信息猜测。该字段集合是后续按平台撤回数据的基础，但本 PR 不删除事件、不实现撤回动作，也不新增账号 ID 或采集任务 ID。
 

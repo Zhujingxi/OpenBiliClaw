@@ -5441,6 +5441,18 @@ class TestDatabase:
                 url="https://www.zhihu.com/question/1/answer/42",
                 metadata={"source_platform": "zh", "content_id": "answer:42"},
             )
+            db.insert_event(
+                "view",
+                title="X 帖子",
+                url="https://x.com/example/status/123",
+                metadata={"source_platform": "twitter", "tweet_id": "123"},
+            )
+            db.insert_event(
+                "view",
+                title="知乎问题",
+                url="https://www.zhihu.com/question/99",
+                metadata={"source_platform": "zhihu", "question_id": "99"},
+            )
 
             keys = db.get_recent_viewed_content_keys()
 
@@ -5451,6 +5463,8 @@ class TestDatabase:
             assert "bilibili:BV1SEEN" in keys
             assert "BV1SEEN" in keys
             assert "zhihu:answer:42" in keys
+            assert "twitter:123" in keys
+            assert "zhihu:99" in keys
 
             db.close()
 

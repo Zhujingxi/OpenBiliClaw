@@ -15924,6 +15924,36 @@ class TestEmbeddingAndCompatProviderE2E:
             },
         }
 
+    def test_source_share_fallback_prefers_top_level_source_platform(self) -> None:
+        from openbiliclaw.api.app import _count_events_by_source_platform
+
+        class Cursor:
+            def fetchall(self) -> list[dict[str, str]]:
+                return [
+                    {
+                        "source_platform": "youtube",
+                        "metadata": '{"source_platform":"bilibili"}',
+                    },
+                    {
+                        "source_platform": "",
+                        "metadata": '{"source_platform":"twitter"}',
+                    },
+                ]
+
+        class Connection:
+            def execute(self, query: str) -> Cursor:
+                assert query == "SELECT source_platform, metadata FROM events"
+                return Cursor()
+
+        class DatabaseWithoutCountMethod:
+            conn = Connection()
+
+        counts = _count_events_by_source_platform(DatabaseWithoutCountMethod())
+
+        assert counts["youtube"] == 1
+        assert counts["twitter"] == 1
+        assert counts["bilibili"] == 0
+
     def test_source_share_suggestion_post_uses_form_overrides(self, monkeypatch, tmp_path) -> None:
         """POST /api/config/source-share-suggestion should support the
         extension settings page's unsaved switch/share state."""

@@ -147,7 +147,7 @@ ID 字段是严格 JSON string，不接受数字、布尔或其它类型的自�
 
 ### 事件来源字段
 
-`POST /api/events` 的 `source_platform` 是兼容可选字段；新插件事件会发送规范平台名，内容 ID 继续从 `metadata.content_id`、`bvid`、`note_id` 等稳定字段承接。服务端统一按“显式来源 → metadata 来源 → 规范 URL → B 站兼容默认”解析，并将结果提升到事件顶层 `source_platform`，同时保留 metadata 镜像；`source_confidence` 分别为 `exact`、`inferred` 或 `legacy_unknown`。因此旧 payload 省略来源但带有 X / YouTube 等规范 URL 时不会误归 B 站；只有没有更强证据时才使用 `legacy_unknown`。旧数据库在首次补列时做一次保守回填；没有足够证据的历史行保持未知，不会根据标题或任务名猜测。
+`POST /api/events` 的 `source_platform` 是兼容可选字段；新插件事件会发送规范平台名，内容 ID 继续从统一的 `content_id` / `bvid` / `note_id` / `tweet_id` / `question_id` 等稳定字段注册表承接。服务端统一按“显式来源 → metadata 来源 → 规范 URL → B 站兼容默认”解析，并将结果提升到事件顶层 `source_platform`，同时保留 metadata 镜像；`source_confidence` 分别为 `exact`、`inferred` 或 `legacy_unknown`。因此旧 payload 省略来源但带有 X / YouTube 等规范 URL 时不会误归 B 站；只有没有更强证据时才使用 `legacy_unknown`。来源统计的兼容读取优先使用事件顶层字段，只有旧行顶层为空时才回退 metadata。旧数据库在首次补列时做一次保守回填；没有足够证据的历史行保持未知，不会根据标题或任务名猜测。
 
 `POST /api/feedback` 的成功边界是 **event-first 的两次 commit**，不是跨表原子事务：先由 `EventIngressService` 把带 `request_id` 幂等键的 `feedback` event 提交到 durable ledger，再单独调用 `update_recommendation_feedback()` 提交 recommendation 展示投影。若进程或数据库故障发生在 event commit → recommendation projection 之间，本次请求会失败；客户端用同一 `request_id` 重试时，event ingress 返回 duplicate receipt，API 校验 durable row 中的 recommendation/type/note 与请求一致后重新执行投影，从而修复间隙。相同 `request_id` 携带不同反馈返回 409，不能驱动投影。之后只唤醒 event scheduler 并立即返回；HTTP 不获取 pipeline lock，也不等待 LLM。
 

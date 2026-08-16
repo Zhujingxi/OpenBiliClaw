@@ -37,7 +37,8 @@ SOURCE_CONFIDENCE_VALUES = frozenset(
     }
 )
 
-_CONTENT_ID_METADATA_KEYS = (
+# Keep every source-identity reader on the same ordered metadata registry.
+CONTENT_ID_METADATA_KEYS = (
     "content_id",
     "bvid",
     "note_id",
@@ -289,7 +290,7 @@ def extract_source_content_id(metadata: object) -> str:
     """Return the first stable content identifier in source metadata."""
     if not isinstance(metadata, dict):
         return ""
-    for key in _CONTENT_ID_METADATA_KEYS:
+    for key in CONTENT_ID_METADATA_KEYS:
         value = metadata.get(key)
         if not isinstance(value, (str, int)) or isinstance(value, bool):
             continue
