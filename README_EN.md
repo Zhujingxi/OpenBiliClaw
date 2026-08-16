@@ -742,6 +742,7 @@ durable turn → fixed time/payload → confirmation entry (pending list/cards) 
 card action → synchronous 200 fast path | 202 processing → popup/mobile/desktop poll; CLI has no action
 
 Desktop startup: recommendation hydration │ runtime hydration │ secondary health/profile/activity/config hydration (independent)
+Desktop background resume (cards already loaded): skip the pool-filling recommendation GET │ sync runtime / inventory status only
 
 Overseas traffic: `[network].mode` → system proxy (default) / direct / custom proxy → LLM, YouTube, X/Reddit CLIs, Bangumi, updater, GitHub project stats; CN clients including V2EX remain isolated and direct
 Manual Douyin discovery: CLI discover → daemon-equivalent producer → per-keyword outcomes → extension search/hot/feed → pending-eval pool

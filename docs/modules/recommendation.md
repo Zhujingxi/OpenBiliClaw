@@ -38,12 +38,13 @@ runtime 使用公开 `drain_pending_expression_copy(profile, limit<=60, max_extr
 | M119 风格多样性与快速文案增强 | ✅ | `reshuffle` 现在会同时约束 `topic_key + style_key`，并把快速 fallback 文案润色成更自然的老B友短句 |
 | M120 来源上限与硬配比 | ✅ | `reshuffle` 现在会对 `topic_key + style_key + source` 同时加硬上限，小批次优先保留不同来源，10 条一批时单一来源最多 3 条 |
 | M121 推荐自动续页 | ✅ | popup 与移动 Web 滚到底附近时会调用 `append` 从 discovery pool 再续 10 条，不再只能整组“换一批”；插件 / side panel 与移动 Web 的自动续页都需要用户向下滚动 / 翻页先触发一次意图门闩，后台和推荐消费后的 `refresh.pool_updated` 只刷新池子状态与可换提示，不会重拉 `/api/recommendations` 覆盖已 append 的历史卡片，也不会在加载更多哨兵仍可见时空转消耗候选池；底部「加载更多」按钮仍作为兜底，并会在插入追加卡片前预热封面 |
+| PC Web 后台推荐读取边界 | ✅ | 桌面 Web 已有卡片时，切回标签页、配置应用或其它后台水合只同步 runtime / 库存状态并跳过 `/api/recommendations`；该 GET 在首屏历史较薄时可能触发 `serve()` 补池并消费候选，因此只有首屏空列表或用户明确手动刷新时才读取推荐快照。关闭“滚动到底自动加载推荐”后，滚动与后台状态刷新都不会消费候选池 |
 | PC Web 自动续页滚动稳定 | ✅ | 平台 Tab 即使在用户用滚轮 / 触控板浏览到列表底部后仍持有键盘焦点，续页完成重绘 Tab 库存徽标时也只恢复焦点、不把离屏 Tab 滚回视口；推荐卡增量追加、当前 `scrollY` 与键盘可达性同时保留。 |
 | Web 空失败态恢复 | ✅ | 移动与桌面 Web 会把推荐/库存读取失败与真实空结果分开：瞬时超时进入 1/2/4/8 秒、最多四次的单飞恢复；成功空数组终止推荐重试；`refresh.pool_updated` 只在当前列表仍为空且上次推荐读取失败时触发条件恢复，已有或追加卡片不会被覆盖。库存状态可由含 `pool_available_count` 的实时快照独立恢复，不再把未知状态渲染成零库存。 |
 | M122 来源优先补齐 | ✅ | 推荐选片时会先补齐不同 `source`，再限制重复 `style`，避免 `explore` 把 `search/trending` 挤出同一批结果 |
 | 平台定向推荐（PC Web） | ✅ | `serve / reshuffle / append`（含 `*_with_result`）新增默认空的 keyword-only `source_platform`。非空时只装载该 canonical 平台的候选、跳过跨平台保底补位，其余 curator 打分、amplification guard、embedding/MMR、topic/style/broad-topic 多样性、视觉加成、持久化与 shown 提交全部复用既有实现——平台作用域只缩小候选集合，绝不是"先生成混合批次再过滤结果"。返回前经 `_enforce_platform_scope()` 校验，发现跨平台行记 ERROR 并丢弃，不让泄漏进响应。省略该参数时调用形状与行为与引入前完全一致（对签名不确定的兼容对象也只在真的带平台时才传新关键字）。**仅 PC Web 有该交互**：移动 Web、扩展 popup / side panel 与 CLI 没有平台 Tab，继续走不带平台的兼容路径，行为不变 |
 | 平台库存徽标（PC Web） | ✅ | `GET /api/recommendations/platform-availability` 返回 `{total_available, by_platform}`，来自 storage 的单次隔离快照，`total_available == sum(by_platform)` 恒成立，且与平台定向选片同一 servability 口径。读取失败返回可诊断 5xx，前端保留上一次成功快照，绝不把失败当成全零 |
-| 恢复标签页读取合并 | ✅ | `GET /api/recommendations` 使用最长 1 秒的进程内快照与 `asyncio.Lock` single-flight，把浏览器恢复几十个旧标签页时的同形昂贵历史读取合并为一次；返回前逐行复核 temporal v2 三态，并把快照 deadline 截短到最早一条内容的 deadline 或 `next_review_at`。deadline 先锚定 monotonic clock、再读取 wall clock，两个时钟采样之间的调度延迟只会缩短缓存而不会越过 hold/expiry 边界；返回值 deep-copy，reshuffle / append / feedback 会立即失效快照。逐卡 `/api/saved/{list_kind}/status` 采用同窗口有界短缓存，并在 save/remove 时按 item 失效，不改变交互一致性。 |
+| 恢复标签页读取合并 | ✅ | `GET /api/recommendations` 使用最长 1 秒的进程内快照与 `asyncio.Lock` single-flight，把浏览器恢复几十个旧标签页时的同形昂贵历史读取合并为一次；桌面 Web 本地已有卡片时恢复水合直接跳过该 GET，仅同步 runtime / 库存，避免首屏补池副作用；空列表和明确刷新仍走读取。返回前逐行复核 temporal v2 三态，并把快照 deadline 截短到最早一条内容的 deadline 或 `next_review_at`。deadline 先锚定 monotonic clock、再读取 wall clock，两个时钟采样之间的调度延迟只会缩短缓存而不会越过 hold/expiry 边界；返回值 deep-copy，reshuffle / append / feedback 会立即失效快照。逐卡 `/api/saved/{list_kind}/status` 采用同窗口有界短缓存，并在 save/remove 时按 item 失效，不改变交互一致性。 |
 | M123 上游来源配额补货 | ✅ | discovery pool 低于目标值时，runtime 会按前端可换口径计算来源缺口，并用 raw-material headroom 限制请求量，减少推荐层长期面对“explore 过满、trending 过少”的偏池子 |
 | M124 generate 路径丰富度修正 | ✅ | `generate_recommendations()` 现在也会先对缓存候选做来源均衡，再分阶段放宽 `topic/style/source` 约束，避免高分 `related_chain` 长时间吃掉整批名额 |
 | M125 pool 预生成推荐文案 | ✅ | discovery pool 现在会异步批量预生成 `expression/topic_label`，`reshuffle/append` 只消费预生成结果，缺失时返回空而不是写统一兜底 |
@@ -115,6 +116,8 @@ runtime 使用公开 `drain_pending_expression_copy(profile, limit<=60, max_extr
 cover bonus 仍由前者单独控制。
 
 ## 公开 API
+
+桌面 Web 的后台恢复、配置应用和状态水合在本地已有推荐卡片时只同步 runtime / 库存，跳过可能触发首屏 `serve()` 补池的 `GET /api/recommendations`；空列表首屏与用户明确手动刷新仍读取推荐快照。该边界不改变 `reshuffle` / `append` 的显式消费契约。
 
 ### RecommendationEngine
 
