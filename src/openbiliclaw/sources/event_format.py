@@ -57,6 +57,11 @@ consumers. The database persists the same attribution fields so later
 platform-scoped operations do not have to infer ownership from free-form JSON.
 """
 
+# [INPUT]: 各平台 producer 的行为字段与 canonical source registry
+# [OUTPUT]: build_event()、来源/满意度/上下文规范化函数
+# [POS]: 事件层的统一语义边界，被 API、CLI、任务导入与 MemoryManager 共同消费
+# [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
 from __future__ import annotations
 
 import json
@@ -66,11 +71,10 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 from openbiliclaw.sources.platforms import (
-    SOURCE_CONFIDENCE_EXACT,
     SOURCE_CONFIDENCE_LEGACY_UNKNOWN,
     SOURCE_CONFIDENCE_VALUES,
     extract_source_content_id,
-    normalize_source_platform,
+    resolve_source_attribution,
 )
 
 logger = logging.getLogger(__name__)
@@ -675,7 +679,8 @@ def build_event(
     author: str = "",
     context: str = "",
     metadata: dict[str, Any] | None = None,
-    source_confidence: str = SOURCE_CONFIDENCE_EXACT,
+    legacy_platform: str = "",
+    source_confidence: str = "",
 ) -> dict[str, Any]:
     """Construct a unified event dict.
 
@@ -706,12 +711,19 @@ def build_event(
         Producers that have richer context (e.g. xhs scope, B站 fold
         membership) can override.
     metadata
-        Source-specific extras. ``source_platform`` is auto-populated
-        from the parameter; explicit ``metadata.source_platform`` wins.
-        ``author`` is also synced when not already present.
+        Source-specific extras. The source is resolved in one place using
+        ``source_platform`` first, then ``metadata.source_platform``, then
+        the canonical URL, and finally ``legacy_platform``. ``author`` is
+        synced when not already present.
+    legacy_platform
+        Optional compatibility fallback used only after explicit, metadata,
+        and URL evidence are absent. API compatibility callers pass
+        ``"bilibili"`` for old payloads that omitted the source field.
     source_confidence
         How the caller identified the platform.  Normal producers use
-        ``"exact"``; compatibility callers may pass ``"legacy_unknown"``.
+        the resolved confidence; compatibility callers may pass
+        ``"legacy_unknown"``. An empty value uses the shared resolver's
+        result.
 
     Returns
     -------
@@ -720,8 +732,11 @@ def build_event(
         ``SoulEngine.analyze_events``, etc.
     """
     final_metadata: dict[str, Any] = dict(metadata) if metadata else {}
-    resolved_platform = normalize_source_platform(
-        final_metadata.get("source_platform") or source_platform
+    resolved_platform, detected_confidence = resolve_source_attribution(
+        explicit_platform=source_platform,
+        metadata_platform=final_metadata.get("source_platform"),
+        url=url,
+        legacy_platform=legacy_platform,
     )
     if resolved_platform:
         final_metadata["source_platform"] = resolved_platform
@@ -763,12 +778,8 @@ def build_event(
 
     normalized_confidence = str(source_confidence or "").strip()
     if normalized_confidence not in SOURCE_CONFIDENCE_VALUES:
-        normalized_confidence = (
-            SOURCE_CONFIDENCE_EXACT
-            if resolved_platform
-            else SOURCE_CONFIDENCE_LEGACY_UNKNOWN
-        )
-    elif not resolved_platform and normalized_confidence == SOURCE_CONFIDENCE_EXACT:
+        normalized_confidence = detected_confidence
+    elif not resolved_platform:
         normalized_confidence = SOURCE_CONFIDENCE_LEGACY_UNKNOWN
 
     event: dict[str, Any] = {

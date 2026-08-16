@@ -157,6 +157,39 @@ def test_event_insert_persists_canonical_source_attribution(tmp_path: Path) -> N
     assert stored_metadata["content_id"] == "123"
 
 
+def test_event_insert_downgrades_confidence_without_platform(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+
+    event_id = db.insert_event(
+        "view",
+        title="没有来源标签的事件",
+        source_confidence="exact",
+    )
+    row = db.conn.execute(
+        "SELECT source_platform, source_confidence FROM events WHERE id = ?",
+        (event_id,),
+    ).fetchone()
+
+    assert row["source_platform"] == ""
+    assert row["source_confidence"] == "legacy_unknown"
+
+
+def test_event_source_backfill_is_not_repeated_for_existing_columns(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    db.insert_event("follow", title="没有内容 ID 的关注事件")
+
+    statements: list[str] = []
+    db.conn.set_trace_callback(statements.append)
+    try:
+        db._ensure_event_source_columns()
+    finally:
+        db.conn.set_trace_callback(None)
+
+    assert not any(
+        "SELECT id, url, metadata, source_platform" in statement for statement in statements
+    )
+
+
 def test_chat_turn_payload_schema_is_present_in_fresh_database(tmp_path: Path) -> None:
     db = _db(tmp_path)
 

@@ -4,6 +4,11 @@ Provides async-compatible SQLite operations for event logs,
 content cache, and recommendation history.
 """
 
+# [INPUT]: SQLite 数据库、规范化事件与推荐/来源持久化请求
+# [OUTPUT]: Database facade、事件写入与查询/迁移能力
+# [POS]: 所有 durable 事件字段的最终存储边界，负责兼容迁移而不推断未知来源
+# [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
 from __future__ import annotations
 
 import ast
@@ -2676,9 +2681,14 @@ class Database:
         )
         source_confidence = (
             provided_confidence
-            if provided_confidence in SOURCE_CONFIDENCE_VALUES
+            if provided_confidence in SOURCE_CONFIDENCE_VALUES and source_platform
             else detected_confidence
         )
+        # A confidence value without a resolved platform cannot be evidence
+        # for a source. Keep the row explicitly unknown at the storage
+        # boundary even when a legacy caller supplied "exact".
+        if not source_platform:
+            source_confidence = SOURCE_CONFIDENCE_LEGACY_UNKNOWN
         if not source_platform:
             source_platform = normalize_source_platform(explicit_platform or metadata_platform)
         if source_platform:
@@ -12407,6 +12417,7 @@ class Database:
         existing_columns = {
             str(row["name"]) for row in self.conn.execute("PRAGMA table_info(events)").fetchall()
         }
+        added_columns = False
         required_columns = {
             "source_platform": "TEXT NOT NULL DEFAULT ''",
             "content_id": "TEXT NOT NULL DEFAULT ''",
@@ -12415,10 +12426,19 @@ class Database:
         for column_name, column_type in required_columns.items():
             if column_name not in existing_columns:
                 self.conn.execute(f"ALTER TABLE events ADD COLUMN {column_name} {column_type}")
+                added_columns = True
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_events_source_content "
             "ON events(source_platform, content_id)"
         )
+
+        # Existing rows need this compatibility backfill only when the
+        # additive columns are first introduced. Valid rows with an empty
+        # content_id are legitimate (for example a follow event), so using
+        # that emptiness as a startup trigger would rescan the whole table on
+        # every process start.
+        if not added_columns:
+            return
 
         rows = self.conn.execute(
             """

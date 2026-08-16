@@ -15,6 +15,7 @@ from openbiliclaw.sources.event_format import (
     SOURCE_BILIBILI,
     SOURCE_WEIBO,
     SOURCE_XIAOHONGSHU,
+    SOURCE_YOUTUBE,
     build_event,
     default_signal_strength_for_event,
     format_event_context,
@@ -138,18 +139,29 @@ def test_build_event_without_source_does_not_claim_exact_attribution() -> None:
     assert event["source_confidence"] == "legacy_unknown"
 
 
-def test_build_event_metadata_source_platform_explicit_wins() -> None:
-    """If a producer passes source_platform inside metadata, that value
-    wins over the parameter — supports edge cases where metadata is
-    pre-filled by an upstream layer."""
+def test_build_event_top_level_source_platform_wins_over_metadata() -> None:
+    """The shared resolver uses one priority order at every ingestion layer."""
     event = build_event(
         event_type="view",
         source_platform=SOURCE_BILIBILI,
         title="...",
         metadata={"source_platform": "web"},
     )
-    assert event["metadata"]["source_platform"] == "web"
-    assert event["source_platform"] == "web"
+    assert event["metadata"]["source_platform"] == SOURCE_BILIBILI
+    assert event["source_platform"] == SOURCE_BILIBILI
+
+
+def test_build_event_infers_url_before_legacy_fallback() -> None:
+    event = build_event(
+        event_type="view",
+        source_platform="",
+        legacy_platform=SOURCE_BILIBILI,
+        url="https://www.youtube.com/watch?v=video-42",
+        title="YouTube 视频",
+    )
+
+    assert event["source_platform"] == SOURCE_YOUTUBE
+    assert event["source_confidence"] == "inferred"
 
 
 def test_build_event_keeps_top_level_content_identity_in_sync() -> None:

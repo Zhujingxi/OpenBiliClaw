@@ -4592,11 +4592,12 @@ class TestBackendAPI:
         assert memory.events[0]["event_type"] == "click"
         assert memory.events[0]["url"] == "https://www.bilibili.com/video/BV1TEST"
         assert memory.events[0]["metadata"]["timestamp"] == 1710000000000
-        # Legacy payload without source_platform defaults to bilibili so the
-        # existing extension build keeps working across the upgrade.
+        # A legacy payload without source_platform can still be classified by
+        # its canonical URL, without treating the compatibility fallback as
+        # exact evidence.
         assert memory.events[0]["metadata"]["source_platform"] == "bilibili"
         assert memory.events[0]["source_platform"] == "bilibili"
-        assert memory.events[0]["source_confidence"] == "legacy_unknown"
+        assert memory.events[0]["source_confidence"] == "inferred"
 
     def test_events_endpoint_ignores_pre_init_behavior_events(self) -> None:
         from fastapi.testclient import TestClient
@@ -4694,27 +4695,37 @@ class TestBackendAPI:
                         "context": {"pageType": "post"},
                         "metadata": {"content_id": "t3_abc123", "post_id": "abc123"},
                     },
+                    {
+                        "event_id": "events-source-legacy-fallback",
+                        "type": "search",
+                        "title": "没有来源和 URL 的旧事件",
+                        "timestamp": 1710000000003,
+                    },
                 ]
             },
         )
 
         assert response.status_code == 200
-        assert response.json()["accepted"] == 3
+        assert response.json()["accepted"] == 4
         assert memory.events[0]["metadata"]["source_platform"] == "xiaohongshu"
         assert memory.events[0]["source_platform"] == "xiaohongshu"
         assert memory.events[0]["content_id"] == "69dea966000000001a0280ad"
         assert memory.events[0]["source_confidence"] == "exact"
         assert memory.events[0]["metadata"]["note_id"] == "69dea966000000001a0280ad"
-        # Blank source_platform (whitespace only) falls back to bilibili.
-        assert memory.events[1]["metadata"]["source_platform"] == "bilibili"
-        assert memory.events[1]["source_platform"] == "bilibili"
-        assert memory.events[1]["source_confidence"] == "legacy_unknown"
+        # Blank source_platform is inferred from the canonical URL before the
+        # compatibility B站 fallback.
+        assert memory.events[1]["metadata"]["source_platform"] == "xiaohongshu"
+        assert memory.events[1]["source_platform"] == "xiaohongshu"
+        assert memory.events[1]["source_confidence"] == "inferred"
         assert memory.events[2]["metadata"]["source_platform"] == "reddit"
         assert memory.events[2]["source_platform"] == "reddit"
         assert memory.events[2]["content_id"] == "t3_abc123"
         assert memory.events[2]["source_confidence"] == "exact"
         assert memory.events[2]["metadata"]["content_id"] == "t3_abc123"
         assert memory.events[2]["metadata"]["post_id"] == "abc123"
+        assert memory.events[3]["metadata"]["source_platform"] == "bilibili"
+        assert memory.events[3]["source_platform"] == "bilibili"
+        assert memory.events[3]["source_confidence"] == "legacy_unknown"
 
     def test_events_endpoint_preserves_top_level_dwell_fields(self) -> None:
         """v0.3.x event-satisfaction: top-level watch_seconds /

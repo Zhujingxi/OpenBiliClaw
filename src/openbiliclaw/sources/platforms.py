@@ -1,5 +1,10 @@
 """Canonical source-platform families shared across discovery and storage."""
 
+# [INPUT]: 平台别名、策略前缀与规范 URL
+# [OUTPUT]: 来源族 registry、URL 推断与 resolve_source_attribution()
+# [POS]: 跨 API、事件格式与 storage 共用的唯一来源归属口径
+# [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
 from __future__ import annotations
 
 from dataclasses import dataclass

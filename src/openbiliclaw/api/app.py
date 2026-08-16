@@ -1,5 +1,10 @@
 """FastAPI app for the browser-extension backend."""
 
+# [INPUT]: 配置、MemoryManager、Database 与来源事件规范化器
+# [OUTPUT]: create_app() 及浏览器/桌面 Web 共用的 FastAPI 路由
+# [POS]: API 组合根，负责请求边界与事件入口，不在此复制来源解析规则
+# [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
 from __future__ import annotations
 
 import asyncio
@@ -232,8 +237,6 @@ from openbiliclaw.soul.dislike_writeback import (
 )
 from openbiliclaw.sources.platforms import (
     CANONICAL_SOURCE_FAMILIES,
-    SOURCE_CONFIDENCE_EXACT,
-    SOURCE_CONFIDENCE_LEGACY_UNKNOWN,
     normalize_source_platform,
     overseas_network_hint,
     requires_overseas_network,
@@ -7297,21 +7300,6 @@ def create_app(
         canonical_events: list[dict[str, Any]] = []
         for item in payload.events:
             raw_source_platform = str(item.source_platform or "").strip()
-            metadata_source_platform = str(
-                item.metadata.get("source_platform", "") or ""
-            ).strip()
-            if raw_source_platform:
-                source_platform = normalize_source_platform(raw_source_platform)
-                source_confidence = SOURCE_CONFIDENCE_EXACT
-            elif metadata_source_platform:
-                source_platform = normalize_source_platform(metadata_source_platform)
-                source_confidence = SOURCE_CONFIDENCE_EXACT
-            else:
-                # Keep the pre-existing B站 behavior for old extension
-                # payloads, but make the fallback explicit so future revoke
-                # logic never mistakes it for a precise source tag.
-                source_platform = "bilibili"
-                source_confidence = SOURCE_CONFIDENCE_LEGACY_UNKNOWN
             raw_event_type = str(item.type or "").strip()
             event_type = "feedback" if raw_event_type == "dislike" else raw_event_type
             # Coerce context to a string for downstream LLM consumers.
@@ -7364,13 +7352,16 @@ def create_app(
                 metadata.setdefault("video_duration_seconds", item.video_duration_seconds)
             event = build_event(
                 event_type=event_type,
-                source_platform=source_platform,
+                # Leave source resolution to the shared event formatter.  In
+                # particular, an old payload without a platform must still
+                # allow a YouTube/X/etc. URL to win before the B站 fallback.
+                source_platform=raw_source_platform,
+                legacy_platform="bilibili",
                 title=item.title or "",
                 url=item.url or "",
                 author=str(metadata.get("author", "") or metadata.get("up_name", "") or ""),
                 context=context_str,
                 metadata=metadata,
-                source_confidence=source_confidence,
             )
             event["ingest_key"] = item.event_id.strip()
             canonical_events.append(event)
