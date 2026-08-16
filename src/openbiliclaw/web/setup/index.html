@@ -268,7 +268,12 @@
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeoutMs);
       try {
-        return await fetch(url, { ...options, signal: controller.signal });
+        return await fetch(url, {
+          ...options,
+          credentials: "same-origin",
+          headers: { ...(options.headers || {}), "X-OBC-Auth": "1" },
+          signal: controller.signal,
+        });
       } catch (error) {
         if (error?.name === "AbortError") throw new Error(`请求等待超过 ${Math.ceil(timeoutMs / 1000)} 秒`);
         throw error;
@@ -817,8 +822,10 @@
       btn.disabled = true; btn.innerHTML = '<span class="spin"></span>保存中…';
       clearMsg("#msg0");
       try {
-        const r = await fetch("/api/config", {
-          method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+        const r = await fetchWithTimeout("/api/config", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
         });
         if (r.status === 401) {
           // Remote browser + auth enabled: /api/config is session-gated (only
