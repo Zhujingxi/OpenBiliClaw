@@ -2626,11 +2626,27 @@ def create_app(
             return None
 
     def _cancel_disabled_source_incremental_tasks(source: str) -> None:
-        """Keep a pre-upgrade periodic row from being claimed after opt-out."""
+        """Keep periodic rows from being claimed after global or per-source opt-out."""
 
+        source_config_attr = {
+            "xhs": "xiaohongshu",
+            "dy": "douyin",
+            "yt": "youtube",
+            "zhihu": "zhihu",
+            "reddit": "reddit",
+            "linuxdo": "linuxdo",
+            "v2ex": "v2ex",
+        }.get(source, source)
         scheduler_cfg = getattr(getattr(ctx, "config", None), "scheduler", None)
-        if bool(getattr(scheduler_cfg, "enabled", True)) and bool(
-            getattr(scheduler_cfg, "source_incremental_enabled", False)
+        sources_cfg = getattr(getattr(ctx, "config", None), "sources", None)
+        source_cfg = (
+            getattr(sources_cfg, source_config_attr, None) if sources_cfg is not None else None
+        )
+        source_disabled = source_cfg is not None and not bool(getattr(source_cfg, "enabled", False))
+        if (
+            bool(getattr(scheduler_cfg, "enabled", True))
+            and bool(getattr(scheduler_cfg, "source_incremental_enabled", False))
+            and not source_disabled
         ):
             return
         scheduler_task_ids: set[str] = set()
@@ -15357,6 +15373,14 @@ def create_app(
             return native_task
 
         _cancel_disabled_source_incremental_tasks("zhihu")
+
+        zhihu_cfg = getattr(
+            getattr(getattr(ctx, "config", None), "sources", None),
+            "zhihu",
+            None,
+        )
+        if not bool(getattr(zhihu_cfg, "enabled", False)):
+            return Response(status_code=204)
 
         if _zhihu_task_queue is None:
             return Response(status_code=204)

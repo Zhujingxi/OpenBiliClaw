@@ -429,7 +429,11 @@ class SourceIncrementalSync:
                 if row is not None:
                     recorded = row
 
-        if recorded is not None and recorded.status in _ACTIVE_STATUSES:
+        if (
+            recorded is not None
+            and recorded.status in _ACTIVE_STATUSES
+            and self._source_is_enabled(recorded.source)
+        ):
             return SourceIncrementalSyncResult(
                 reason="active_task",
                 source=recorded.source,
@@ -474,7 +478,9 @@ class SourceIncrementalSync:
                 )
                 return SourceIncrementalSyncResult(reason="state_error")
 
-        active_rows = self._find_active_tasks()
+        active_rows = [
+            row for row in self._find_active_tasks() if self._source_is_enabled(row.source)
+        ]
         if not active_rows:
             return None
 

@@ -771,6 +771,56 @@ async def test_one_pending_bootstrap_in_any_source_table_blocks_new_enqueue(
 
 
 @pytest.mark.asyncio
+async def test_disabled_source_pending_task_does_not_block_scheduler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scheduler, database, memory, _presence, _clock, kicks = _harness(
+        monkeypatch,
+        enabled={source: source == "xhs" for source in SOURCE_ORDER},
+    )
+    database.conn.execute(
+        "INSERT INTO zhihu_tasks (id, type, payload_json, status, created_at) "
+        "VALUES ('disabled-zhihu', 'bootstrap_events', '{}', 'pending', '2026-08-03')"
+    )
+    database.conn.commit()
+
+    result = await scheduler.tick()
+
+    assert (result.reason, result.source) == ("created", "xhs")
+    assert memory.state["source_incremental"]["active_task"]["source"] == "xhs"  # type: ignore[index]
+    assert kicks == ["xhs"]
+
+
+@pytest.mark.asyncio
+async def test_disabled_source_recorded_active_task_is_cleared_before_next_due(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = default_source_bootstrap_state()
+    state["source_incremental"] = {
+        "cursor": "",
+        "last_attempt_at": {},
+        "active_task": {"source": "zhihu", "task_id": "stale-zhihu"},
+    }
+    scheduler, database, memory, _presence, _clock, kicks = _harness(
+        monkeypatch,
+        state=state,
+        enabled={source: source == "xhs" for source in SOURCE_ORDER},
+    )
+    database.conn.execute(
+        "INSERT INTO zhihu_tasks (id, type, payload_json, status, created_at) "
+        "VALUES ('stale-zhihu', 'bootstrap_events', "
+        "'{\"incremental\": true}', 'in_progress', '2026-08-03')"
+    )
+    database.conn.commit()
+
+    result = await scheduler.tick()
+
+    assert (result.reason, result.source) == ("created", "xhs")
+    assert memory.state["source_incremental"]["active_task"]["source"] == "xhs"  # type: ignore[index]
+    assert kicks == ["xhs"]
+
+
+@pytest.mark.asyncio
 async def test_concurrent_ticks_on_one_scheduler_create_only_one_task(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
