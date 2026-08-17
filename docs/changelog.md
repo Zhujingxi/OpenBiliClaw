@@ -6,6 +6,7 @@
 
 ## 未发布
 
+- **修复 `--llm-preset` 写入 `openai` 导致中转站 DeepSeek 推理 token 耗尽（issue #175）**：`agent_bootstrap` 的 OpenAI 兼容 preset（`relay` / `kimi` / `qwen` / ...）现在隐式写入 `provider_type="openai_compatible"`，使通用 OpenAI 兼容适配器能对中转站 DeepSeek 关闭 thinking；历史 `--provider openai` 与 preset 组合自动 remap，显式非兼容 provider 仍冲突报错。同步更新 `docs/agent-install.md` 的 preset 说明。
 - **修复 bootstrap 二次运行追加重复 TOML 实例段（issue #174）**：`agent_bootstrap` 的 section 匹配现在忽略裸键/引号键差异，`[llm.instances.openai]` 与 `[llm.instances."openai"]` 视为同一表，避免 `tomllib` 报 `Cannot declare ... twice`。
 - **补充 PR #182 贡献者致谢**：README 中英文与贡献指南正式记录 [@LHMQ878](https://github.com/LHMQ878) 对 `agent_bootstrap` 引号键 TOML 实例段 section 匹配修复的贡献。
 - **修复非 DeepSeek 安装被默认空 Key 实例拦截（issue #176）**：`agent_bootstrap` 选择其他 LLM provider 时，会自动停用样例中的无 API Key DeepSeek 实例并从 `default_chain` 移除；已有 DeepSeek Key 的备选实例保持不变，`init` 不再要求用户手改 `config.toml`。

@@ -887,8 +887,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help=(
             "Override the chosen provider's base_url. Required for OpenAI-"
             "compatible gateways (Azure / vLLM / LMStudio / OneAPI / 任意 "
-            "OpenAI 兼容服务). The 'openai' provider is a protocol family, "
-            "not a vendor — point it anywhere that speaks /v1/chat/completions."
+            "OpenAI 兼容服务). --llm-preset already implies "
+            "provider=openai_compatible; pass --provider openai only for "
+            "the official OpenAI endpoint."
         ),
     )
     parser.add_argument(
@@ -3888,14 +3889,8 @@ def apply_llm_preset_args(args: Any) -> int | None:
     if not getattr(args, "llm_preset", None):
         return None
     preset = LLM_PRESETS.get(args.llm_preset, {})
-    implied = (
-        "openai_compatible"
-        if args.llm_preset in HUMAN_OPENAI_COMPAT_PRESETS
-        else "openai"
-    )
-    if not args.provider or (
-        args.provider == "openai" and implied == "openai_compatible"
-    ):
+    implied = "openai_compatible" if args.llm_preset in HUMAN_OPENAI_COMPAT_PRESETS else "openai"
+    if not args.provider or (args.provider == "openai" and implied == "openai_compatible"):
         args.provider = implied
     elif args.provider != implied:
         emit(
