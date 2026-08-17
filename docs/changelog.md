@@ -6,6 +6,7 @@
 
 ## 未发布
 
+- **修复停用知乎来源后扩展仍打开知乎任务标签页（issue #187）**：`/api/sources/zhihu/next-task` 现在在领取自动任务前动态检查 `[sources.zhihu].enabled`；来源关闭时返回 bodyless 204，scheduler-owned 增量任务会被清理避免卡住其它来源，手动 pending 任务保留、重新开启后可恢复。`SourceIncrementalSync` 的 active 任务复核同步忽略已停用来源，避免遗留知乎任务阻塞周期调度。
 - **修复 `--llm-preset` 写入 `openai` 导致中转站 DeepSeek 推理 token 耗尽（issue #175）**：`agent_bootstrap` 的 OpenAI 兼容 preset（`relay` / `kimi` / `qwen` / ...）现在隐式写入 `provider_type="openai_compatible"`，使通用 OpenAI 兼容适配器能对中转站 DeepSeek 关闭 thinking；历史 `--provider openai` 与 preset 组合自动 remap，显式非兼容 provider 仍冲突报错。同步更新 `docs/agent-install.md` 的 preset 说明。
 - **修复 bootstrap 二次运行追加重复 TOML 实例段（issue #174）**：`agent_bootstrap` 的 section 匹配现在忽略裸键/引号键差异，`[llm.instances.openai]` 与 `[llm.instances."openai"]` 视为同一表，避免 `tomllib` 报 `Cannot declare ... twice`。
 - **补充 PR #182 贡献者致谢**：README 中英文与贡献指南正式记录 [@LHMQ878](https://github.com/LHMQ878) 对 `agent_bootstrap` 引号键 TOML 实例段 section 匹配修复的贡献。

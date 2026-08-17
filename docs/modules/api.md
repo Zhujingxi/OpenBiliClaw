@@ -199,6 +199,12 @@ Linux.do 站点访问全部发生在真实 `linux.do` task tab 内，且只允�
 | `POST /api/sources/xhs/observed-urls` | ✅ | URL-only 与带 note metadata 两条分支都接受 `/explore/{id}`、旧 `/discovery/item/{id}` 和 `/search_result/{id}` 三种笔记路由；`/search_result?keyword=...` 搜索列表页本身不计入 accepted。metadata 继续进入 `discovery_candidates`，URL-only 继续写 observed ledger 并参与 token 回填。 |
 | `GET /api/sources/status` | ✅ | 来源仍开启且冷却生效时，将小红书 legacy 状态投影为 `state="rate_limited"`、`feed_paused=true` 并显示连续触发轮次和剩余分钟；来源已关闭时不让冷却覆盖 `enabled=false` 的正交配置事实。该端点只读本地状态，不访问小红书。 |
 
+## 知乎任务边界
+
+| 方法与路径 | 状态 | 契约 |
+|---|---|---|
+| `GET /api/sources/zhihu/next-task` | ✅ | native-save job 仍是用户显式动作；自动 bootstrap / discovery 在每次 claim 前动态检查 `sources.zhihu.enabled` 与全局 scheduler / 增量总开关。来源关闭时返回 bodyless 204，scheduler-owned 的增量任务会被标记 `failed`（避免卡住其它来源的调度），手动 pending 任务保留为 `pending`，重新开启后可继续领取；扩展因此不会因已排队任务打开知乎前台页。 |
+
 ## 对话确认端点
 
 ### Turn 级上下文绑定（2026-08-01）
