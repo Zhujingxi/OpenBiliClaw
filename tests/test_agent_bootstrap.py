@@ -1706,3 +1706,42 @@ def test_toml_table_path_equates_bare_and_quoted_keys() -> None:
         "instances",
         "openai-compatible",
     )
+
+
+def test_llm_preset_relay_uses_openai_compatible_provider(tmp_path: Path) -> None:
+    args = bootstrap.build_arg_parser().parse_args(
+        ["--project-dir", str(tmp_path), "--llm-preset", "relay"]
+    )
+    assert bootstrap.apply_llm_preset_args(args) is None
+    assert args.provider == "openai_compatible"
+
+
+def test_llm_preset_relay_remaps_historical_openai_provider(tmp_path: Path) -> None:
+    args = bootstrap.build_arg_parser().parse_args(
+        [
+            "--project-dir",
+            str(tmp_path),
+            "--llm-preset",
+            "relay",
+            "--provider",
+            "openai",
+        ]
+    )
+    assert bootstrap.apply_llm_preset_args(args) is None
+    assert args.provider == "openai_compatible"
+
+
+def test_llm_preset_keeps_explicit_non_compat_provider_as_conflict(
+    tmp_path: Path,
+) -> None:
+    args = bootstrap.build_arg_parser().parse_args(
+        [
+            "--project-dir",
+            str(tmp_path),
+            "--llm-preset",
+            "relay",
+            "--provider",
+            "deepseek",
+        ]
+    )
+    assert bootstrap.apply_llm_preset_args(args) == 2
