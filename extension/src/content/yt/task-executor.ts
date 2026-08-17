@@ -65,6 +65,35 @@ export function isKnownScope(s: string): s is YtScope {
 // ---------------------------------------------------------------------------
 
 /**
+ * Query `selector` inside `root`, falling back to recursively scanning open
+ * shadow roots when the direct light-DOM query misses. YouTube's Lit
+ * components (``yt-lockup-view-model`` / ``yt-video-card-renderer``) sometimes
+ * keep card content inside an open shadow root, where ``Element.querySelector``
+ * returns null and the card would silently be skipped.
+ */
+export function queryIncludingShadow(
+  root: ParentNode,
+  selector: string,
+): Element | null {
+  const direct = root.querySelector(selector);
+  if (direct) return direct;
+  const rootShadow = (root as HTMLElement).shadowRoot;
+  if (rootShadow) {
+    const found = queryIncludingShadow(rootShadow, selector);
+    if (found) return found;
+  }
+  const descendants = Array.from(root.querySelectorAll<HTMLElement>("*"));
+  for (const el of descendants) {
+    const shadow = el.shadowRoot;
+    if (shadow) {
+      const found = queryIncludingShadow(shadow, selector);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+/**
  * Extract items from a watch-history or liked-videos page.
  *
  * YouTube has been migrating from Polymer (``ytd-*``) to Lit (``yt-*`` /
@@ -92,18 +121,21 @@ export function extractVideoItems(scope: YtScope): YtBootstrapItem[] {
   );
 
   for (const el of renderers) {
-    const anchor =
-      el.querySelector<HTMLAnchorElement>(
-        "a#thumbnail, a#video-title-link, a[id='thumbnail']",
-      ) ??
-      el.querySelector<HTMLAnchorElement>('a[href*="/watch"], a[href*="/shorts/"]');
+    const anchor = (queryIncludingShadow(
+      el,
+      "a#thumbnail, a#video-title-link, a[id='thumbnail']",
+    ) ??
+      queryIncludingShadow(el, 'a[href*="/watch"], a[href*="/shorts/"]')) as
+      HTMLAnchorElement | null;
     const href = anchor?.href ?? anchor?.getAttribute("href") ?? "";
     const videoId = extractVideoId(href) || extractShortsId(href);
 
-    const titleEl =
-      el.querySelector<HTMLElement>("#video-title, #video-title-link") ??
-      el.querySelector<HTMLElement>("yt-formatted-string#video-title") ??
-      el.querySelector<HTMLElement>("#video-title yt-formatted-string");
+    const titleEl = (queryIncludingShadow(
+      el,
+      "#video-title, #video-title-link",
+    ) ??
+      queryIncludingShadow(el, "yt-formatted-string#video-title") ??
+      queryIncludingShadow(el, "#video-title yt-formatted-string")) as HTMLElement | null;
     // New cards sometimes render the title only via aria-label / title
     // attribute (text is lazy-rendered or inside a shadow tree).
     const title =
@@ -114,17 +146,18 @@ export function extractVideoItems(scope: YtScope): YtBootstrapItem[] {
 
     if (!title && !videoId) continue;
 
-    const channelEl =
-      el.querySelector<HTMLElement>(
-        "#channel-name a, ytd-channel-name a, .ytd-channel-name a",
-      ) ??
-      el.querySelector<HTMLElement>("#channel-name yt-formatted-string") ??
-      el.querySelector<HTMLElement>("#channel-name");
+    const channelEl = (queryIncludingShadow(
+      el,
+      "#channel-name a, ytd-channel-name a, .ytd-channel-name a",
+    ) ??
+      queryIncludingShadow(el, "#channel-name yt-formatted-string") ??
+      queryIncludingShadow(el, "#channel-name")) as HTMLElement | null;
     const channel = (channelEl?.textContent ?? "").trim();
 
-    const thumbImg = el.querySelector<HTMLImageElement>(
+    const thumbImg = queryIncludingShadow(
+      el,
       "img#img, img.yt-thumbnail-view-model-wiz__image, yt-image img",
-    );
+    ) as HTMLImageElement | null;
     const cover_url = thumbImg?.src ?? "";
 
     const url = videoId
@@ -165,24 +198,28 @@ export function extractChannelItems(scope: YtScope): YtBootstrapItem[] {
   );
 
   for (const el of renderers) {
-    const nameEl =
-      el.querySelector<HTMLElement>("#channel-title, #channel-name, #name") ??
-      el.querySelector<HTMLElement>("yt-formatted-string#channel-title");
+    const nameEl = (queryIncludingShadow(
+      el,
+      "#channel-title, #channel-name, #name",
+    ) ??
+      queryIncludingShadow(el, "yt-formatted-string#channel-title")) as HTMLElement | null;
     const title = (nameEl?.textContent ?? "").trim();
     if (!title) continue;
 
-    const linkEl =
-      el.querySelector<HTMLAnchorElement>(
-        "a#main-link, a#channel-title-link, a.channel-link",
-      ) ??
-      el.querySelector<HTMLAnchorElement>('a[href*="/channel/"], a[href*="/@"]');
+    const linkEl = (queryIncludingShadow(
+      el,
+      "a#main-link, a#channel-title-link, a.channel-link",
+    ) ??
+      queryIncludingShadow(el, 'a[href*="/channel/"], a[href*="/@"]')) as
+      HTMLAnchorElement | null;
     const href = linkEl?.href ?? linkEl?.getAttribute("href") ?? "";
     const channelId = extractChannelId(href);
     const url = href || (channelId ? `https://www.youtube.com/channel/${channelId}` : "");
 
-    const thumbImg = el.querySelector<HTMLImageElement>(
+    const thumbImg = queryIncludingShadow(
+      el,
       "img#img, yt-img-shadow img, yt-image img",
-    );
+    ) as HTMLImageElement | null;
     const cover_url = thumbImg?.src ?? "";
 
     const key = channelId || title;

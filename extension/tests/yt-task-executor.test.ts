@@ -16,6 +16,7 @@ import {
   extractShortsId,
   extractVideoId,
   extractVideoItems,
+  queryIncludingShadow,
 } from "../src/content/yt/task-executor.ts";
 
 type YtScope = "yt_history" | "yt_subscriptions" | "yt_likes";
@@ -27,13 +28,26 @@ interface FakeElement {
   title?: string;
   ariaLabel?: string;
   children: Record<string, FakeElement | null>;
+  shadowRoot?: { children: Record<string, FakeElement | null> };
 }
 
 function makeEl(
-  fields: Partial<Omit<FakeElement, "children">> = {},
+  fields: Partial<Omit<FakeElement, "children" | "shadowRoot">> = {},
   children: Record<string, FakeElement | null> = {},
+  shadowRoot?: { children: Record<string, FakeElement | null> },
 ): FakeElement {
-  return { textContent: "", ...fields, children };
+  return { textContent: "", ...fields, children, shadowRoot };
+}
+
+function collectDescendants(el: FakeElement): FakeElement[] {
+  const out: FakeElement[] = [];
+  for (const child of Object.values(el.children)) {
+    if (child) {
+      out.push(child);
+      out.push(...collectDescendants(child));
+    }
+  }
+  return out;
 }
 
 function asNode(el: FakeElement): any {
@@ -51,6 +65,18 @@ function asNode(el: FakeElement): any {
       const child = el.children[sel];
       return child === undefined ? null : asNode(child);
     },
+    querySelectorAll: (sel: string) =>
+      sel === "*" ? collectDescendants(el).map((c) => asNode(c)) : [],
+    shadowRoot: el.shadowRoot
+      ? {
+          querySelector: (sel: string) => {
+            const children = el.shadowRoot!.children;
+            const child = children[sel];
+            return child === undefined ? null : asNode(child);
+          },
+          querySelectorAll: () => [],
+        }
+      : null,
   };
 }
 
@@ -134,6 +160,44 @@ test("extractVideoItems extracts from yt-video-card-renderer cards", () => {
     assert.equal(items[0].title, "新版卡片标题");
     assert.equal(items[0].channel, "某频道");
     assert.equal(items[0].cover_url, "https://i.ytimg.com/vi/AbCdEfGhIjk/hqdefault.jpg");
+  } finally {
+    restore();
+  }
+});
+
+test("queryIncludingShadow recurses into an open shadow root", () => {
+  const card: FakeElement = makeEl({}, {}, {
+    children: {
+      "#video-title, #video-title-link": makeEl({ textContent: "Shadow 里的标题" }),
+    },
+  });
+  const restore = withDocument([card]);
+  try {
+    const found = queryIncludingShadow(asNode(card), "#video-title, #video-title-link");
+    assert.ok(found, "should find the title inside the open shadow root");
+    assert.equal(found.textContent, "Shadow 里的标题");
+  } finally {
+    restore();
+  }
+});
+
+test("extractVideoItems extracts a card whose content lives in an open shadow root", () => {
+  const restore = withDocument([
+    makeEl({}, {}, {
+      children: {
+        "a#thumbnail, a#video-title-link, a[id='thumbnail']": makeEl({ href: "/watch?v=Shadow12345" }),
+        "#video-title, #video-title-link": makeEl({ textContent: "Shadow 卡片标题" }),
+        "#channel-name a, ytd-channel-name a, .ytd-channel-name a": makeEl({ textContent: "Shadow 频道" }),
+        "img#img, img.yt-thumbnail-view-model-wiz__image, yt-image img": makeEl({ src: "https://i.ytimg.com/vi/Shadow12345/1.jpg" }),
+      },
+    }),
+  ]);
+  try {
+    const items = extractVideoItems("yt_history" as YtScope);
+    assert.equal(items.length, 1);
+    assert.equal(items[0].video_id, "Shadow12345");
+    assert.equal(items[0].title, "Shadow 卡片标题");
+    assert.equal(items[0].channel, "Shadow 频道");
   } finally {
     restore();
   }
