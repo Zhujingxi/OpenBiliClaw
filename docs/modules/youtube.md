@@ -15,7 +15,7 @@ YouTube 模块负责把用户在 YouTube 上的长期兴趣信号接入 OpenBili
 |------|------|------|
 | YouTube bootstrap 队列 | ✅ | `YtTaskQueue` 管理 `yt_tasks` 表，支持 pending / in_progress / completed / failed 状态、每日预算、过期 pending 清理、stale `in_progress` 租约回收（issue #178）和近期任务复用 |
 | 扩展任务回写 | ✅ | 后端 `/api/sources/yt/task-result` 接收 `partial` / `ok` / `empty` / `failed`，单任务内合并去重，并通过 `source_bootstrap_state.json` 跳过跨任务旧条目 |
-| YouTube bootstrap 选择器兼容 | ✅ | 扩展 `yt/task-executor.ts` 同时兼容 Polymer 旧卡片与 Lit 新卡片（`yt-video-card-renderer` / `yt-lockup-view-model` / `ytd-reel-item-renderer` 等），并用 `queryIncludingShadow()` 递归读取 open shadow root 内的标题 / 链接 / 频道 / 封面，避免新版布局拉取 0 条（issue #173） |
+| YouTube bootstrap 选择器兼容 | ✅ | 扩展 `yt/task-executor.ts` 同时兼容 Polymer 旧卡片与 Lit 新卡片（`yt-video-card-renderer` / `yt-lockup-view-model` / `ytd-reel-item-renderer` 等），用 `queryIncludingShadow()` 递归读取 open shadow root 内的标题 / 链接 / 频道 / 封面，并优先匹配当前 `yt-lockup-view-model` 的 light DOM 类名（`a.ytLockupMetadataViewModelTitle` / `yt-content-metadata-view-model span.ytAttributedStringHost` / `yt-thumbnail-view-model img`），避免新版布局拉取 0 条或产生空标题信号（issue #173） |
 | 扩展在线周期回拉 | ✅ | 默认由 `scheduler.source_incremental_enabled=false` 全局关闭；显式开启后，完整画像存在、初始化空闲且扩展 runtime-stream 在线时，runtime 才按 `[scheduler]` 全局/YouTube 间隔把同一 `bootstrap_profile` 任务纳入六来源全局串行 round-robin；手动初始化、手动拉取和 discovery 不受影响 |
 | init 集成 | ✅ | `init --yes-youtube` 在抖音 collect 完成后才入队，避免多个前台 tab 任务争抢焦点 |
 | 单源 smoke | ✅ | `fetch-youtube` 独立验证扩展、登录态和后端任务桥，不隐式重建画像 |

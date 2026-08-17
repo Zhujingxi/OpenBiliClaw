@@ -99,8 +99,11 @@ export function queryIncludingShadow(
  * YouTube has been migrating from Polymer (``ytd-*``) to Lit (``yt-*`` /
  * ``yt-lockup-view-model``) web components, and history/search cards moved
  * from ``ytd-video-renderer`` to ``ytd-video-card-renderer`` / ``yt-video-card-renderer``.
- * We match the old selectors for compatibility and the new ones for current
- * layouts, then fall back to any ``/watch`` / ``/shorts`` anchor inside the card.
+ * Current ``yt-lockup-view-model`` cards keep title/channel/thumbnail in light
+ * DOM under ``ytLockupMetadataViewModel*`` / ``ytContentMetadataViewModel*``
+ * classes (no shadow root), so we match those first, keep the legacy
+ * selectors for compatibility, and fall back to any ``/watch`` / ``/shorts``
+ * anchor inside the card.
  */
 export function extractVideoItems(scope: YtScope): YtBootstrapItem[] {
   const items: YtBootstrapItem[] = [];
@@ -132,8 +135,9 @@ export function extractVideoItems(scope: YtScope): YtBootstrapItem[] {
 
     const titleEl = (queryIncludingShadow(
       el,
-      "#video-title, #video-title-link",
+      "a.ytLockupMetadataViewModelTitle",
     ) ??
+      queryIncludingShadow(el, "#video-title, #video-title-link") ??
       queryIncludingShadow(el, "yt-formatted-string#video-title") ??
       queryIncludingShadow(el, "#video-title yt-formatted-string")) as HTMLElement | null;
     // New cards sometimes render the title only via aria-label / title
@@ -148,16 +152,21 @@ export function extractVideoItems(scope: YtScope): YtBootstrapItem[] {
 
     const channelEl = (queryIncludingShadow(
       el,
-      "#channel-name a, ytd-channel-name a, .ytd-channel-name a",
+      "yt-content-metadata-view-model span.ytAttributedStringHost",
     ) ??
+      queryIncludingShadow(el, "#channel-name a, ytd-channel-name a, .ytd-channel-name a") ??
       queryIncludingShadow(el, "#channel-name yt-formatted-string") ??
       queryIncludingShadow(el, "#channel-name")) as HTMLElement | null;
     const channel = (channelEl?.textContent ?? "").trim();
 
-    const thumbImg = queryIncludingShadow(
+    const thumbImg = (queryIncludingShadow(
       el,
-      "img#img, img.yt-thumbnail-view-model-wiz__image, yt-image img",
-    ) as HTMLImageElement | null;
+      "yt-thumbnail-view-model img, img.ytCoreImageHost",
+    ) ??
+      queryIncludingShadow(
+        el,
+        "img#img, img.yt-thumbnail-view-model-wiz__image, yt-image img",
+      )) as HTMLImageElement | null;
     const cover_url = thumbImg?.src ?? "";
 
     const url = videoId
