@@ -165,6 +165,27 @@ test("extractVideoItems extracts from yt-video-card-renderer cards", () => {
   }
 });
 
+test("extractVideoItems extracts title/channel/cover from current yt-lockup-view-model light DOM classes", () => {
+  const restore = withDocument([
+    makeEl({}, {
+      'a[href*="/watch"], a[href*="/shorts/"]': makeEl({ href: "/watch?v=CurLockup12" }),
+      "a.ytLockupMetadataViewModelTitle": makeEl({ textContent: "当前 Lockup 标题" }),
+      "yt-content-metadata-view-model span.ytAttributedStringHost": makeEl({ textContent: "当前频道" }),
+      "yt-thumbnail-view-model img, img.ytCoreImageHost": makeEl({ src: "https://i.ytimg.com/vi/CurLockup12/hqdefault.jpg" }),
+    }),
+  ]);
+  try {
+    const items = extractVideoItems("yt_history" as YtScope);
+    assert.equal(items.length, 1);
+    assert.equal(items[0].video_id, "CurLockup12");
+    assert.equal(items[0].title, "当前 Lockup 标题");
+    assert.equal(items[0].channel, "当前频道");
+    assert.equal(items[0].cover_url, "https://i.ytimg.com/vi/CurLockup12/hqdefault.jpg");
+  } finally {
+    restore();
+  }
+});
+
 test("queryIncludingShadow recurses into an open shadow root", () => {
   const card: FakeElement = makeEl({}, {}, {
     children: {
