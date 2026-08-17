@@ -132,8 +132,9 @@ def ensure_local_no_proxy() -> str:
 
 # Mirror of cli.py's _OPENAI_COMPAT_PRESETS for non-interactive (AI agent
 # driven) installs. Keep the model defaults in sync with cli.py — when
-# updating one, update the other. Each preset implies provider="openai"
-# (the universal Bearer-auth + /v1/chat/completions client).
+# updating one, update the other. Each preset implies
+# provider="openai_compatible" so DeepSeek-backed relays can disable
+# thinking instead of burning max_tokens on hidden reasoning.
 LLM_PRESETS: dict[str, dict[str, str]] = {
     "kimi": {
         "base_url": "https://api.moonshot.ai/v1",
@@ -886,8 +887,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help=(
             "Override the chosen provider's base_url. Required for OpenAI-"
             "compatible gateways (Azure / vLLM / LMStudio / OneAPI / 任意 "
-            "OpenAI 兼容服务). The 'openai' provider is a protocol family, "
-            "not a vendor — point it anywhere that speaks /v1/chat/completions."
+            "OpenAI 兼容服务). --llm-preset already implies "
+            "provider=openai_compatible; pass --provider openai only for "
+            "the official OpenAI endpoint."
         ),
     )
     parser.add_argument(
@@ -913,7 +915,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "Shortcut for OpenAI-protocol-compatible services. Picks the "
             "preset's canonical Base URL + default model so AI-agent-driven "
             "installs don't have to remember each vendor's endpoint. "
-            "Implies --provider=openai. --llm-base-url / --llm-model still "
+            "Implies --provider=openai_compatible. --llm-base-url / --llm-model still "
             "override the preset on a per-field basis. Presets: "
             "kimi (Moonshot), minimax (M2.7), qwen (DashScope), zhipu (GLM), "
             "yi (零一万物), self-hosted (vLLM/LMStudio), relay (中转站/OneAPI), "
@@ -3876,35 +3878,49 @@ def run(args: argparse.Namespace) -> int:
     return 5
 
 
+def apply_llm_preset_args(args: Any) -> int | None:
+    """Resolve ``--llm-preset`` onto provider / base_url / model.
+
+    Returns an exit code on conflict; ``None`` when args were applied or
+    when no preset was requested. Never overrides an explicit
+    ``--llm-base-url`` / ``--llm-model``.
+    """
+
+    if not getattr(args, "llm_preset", None):
+        return None
+    preset = LLM_PRESETS.get(args.llm_preset, {})
+    implied = "openai_compatible" if args.llm_preset in HUMAN_OPENAI_COMPAT_PRESETS else "openai"
+    if not args.provider or (args.provider == "openai" and implied == "openai_compatible"):
+        args.provider = implied
+    elif args.provider != implied:
+        emit(
+            BootstrapResult(
+                "error",
+                "preset_provider_conflict",
+                {
+                    "reason": (
+                        f"--llm-preset implies provider={implied} but you "
+                        f"passed --provider={args.provider}. Drop one of them."
+                    )
+                },
+            )
+        )
+        return 2
+    if args.llm_base_url is None and preset.get("base_url"):
+        args.llm_base_url = preset["base_url"]
+    if args.llm_model is None and preset.get("model"):
+        args.llm_model = preset["model"]
+    return None
+
+
 def main() -> int:
     parser = build_arg_parser()
     args = parser.parse_args()
     # Resolve --llm-preset before run() so the rest of the pipeline
-    # sees concrete provider/base_url/model values. The preset implies
-    # provider=openai but never overrides explicit user-provided
-    # --llm-base-url / --llm-model.
-    if getattr(args, "llm_preset", None):
-        preset = LLM_PRESETS.get(args.llm_preset, {})
-        if not args.provider:
-            args.provider = "openai"
-        elif args.provider != "openai":
-            emit(
-                BootstrapResult(
-                    "error",
-                    "preset_provider_conflict",
-                    {
-                        "reason": (
-                            f"--llm-preset implies provider=openai but you "
-                            f"passed --provider={args.provider}. Drop one of them."
-                        )
-                    },
-                )
-            )
-            return 2
-        if args.llm_base_url is None and preset.get("base_url"):
-            args.llm_base_url = preset["base_url"]
-        if args.llm_model is None and preset.get("model"):
-            args.llm_model = preset["model"]
+    # sees concrete provider/base_url/model values.
+    preset_error = apply_llm_preset_args(args)
+    if preset_error is not None:
+        return preset_error
     try:
         return run(args)
     except KeyboardInterrupt:

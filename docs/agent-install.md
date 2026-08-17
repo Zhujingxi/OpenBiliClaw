@@ -377,7 +377,7 @@ python3 scripts/agent_bootstrap.py --llm-preset self-hosted \
   --llm-model meta-llama/Llama-3.3-70B-Instruct ...
 ```
 
-`--llm-base-url` / `--llm-model` 单独传时会**覆盖**对应 preset 字段(per-field override),给你 escape hatch 而不强制走 preset 默认。`--llm-preset` 隐式锁 `--provider=openai`,显式传不同 provider 会冲突报错。
+`--llm-base-url` / `--llm-model` 单独传时会**覆盖**对应 preset 字段(per-field override),给你 escape hatch 而不强制走 preset 默认。`--llm-preset` 隐式锁 `--provider=openai_compatible`（这样中转站 DeepSeek 等模型会走“可关闭 thinking”的通用 OpenAI 兼容适配器，避免 `max_tokens` 被隐藏推理耗尽）；显式传不同 provider 会冲突报错，历史遗留的 `--provider openai` 会被自动 remap 为 `openai_compatible`。
 
 **Why DeepSeek default, not Ollama**: previous versions called Ollama
 "推荐新手 / 白嫖" but in practice CPU inference on a 16 GB Mac is slow
