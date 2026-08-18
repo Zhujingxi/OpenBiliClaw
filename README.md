@@ -219,10 +219,9 @@
 
 📌 最新版本：**v0.3.208（2026-08-18）**
 
-- **补货提速** —— B 站份额已满时不再停摆，健康来源会继续回填全局库存，一天跑不满的问题修复。
-- **免费联网找灵感** —— 新增 Bing RSS 无 key 搜索兜底，没配 Exa / You 也能拿到真实搜索结果。
-- **Exa / You.com 直连** —— 填 `exa_api_key` / `you_api_key` 即走 Python 直连 API，不再依赖 mcporter。
-- **来源更稳** —— V2EX / 微博的缺失 CLI 与 `upstream_rejected` 不再刷 traceback，失败时优雅降级。
+- **来源周期回拉默认全关** —— 每个平台可单独开关，避免后台自动弹前台标签页打扰浏览。
+- **后台 LLM 预算 + Embedding 熔断** —— 防止无人值守时持续烧模型额度，embedding 端点异常会自动冷却。
+- **修复来源任务抢焦点** —— 知乎停用后不再打开任务页，defer 暂缓假设也不再错误出现在待确认列表。
 
 完整变更详见 [docs/changelog.md](docs/changelog.md)。
 

@@ -198,10 +198,9 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 📌 Latest: **v0.3.208 (2026-08-18)**
 
-- **Faster pool replenishment** — healthy sources keep backfilling the global pool when other source quotas stall, fixing the all-day underfill.
-- **Keyless web grounding** — new Bing RSS fallback delivers real search results without Exa / You keys.
-- **Direct Exa / You.com APIs** — set `exa_api_key` / `you_api_key` to call them straight from Python, no mcporter needed.
-- **More resilient sources** — V2EX missing-CLI and Weibo `upstream_rejected` degrade gracefully instead of spamming tracebacks.
+- **Per-source sync switches are off by default** — each platform can be toggled independently so background sync no longer steals your foreground tabs.
+- **Background LLM budget + embedding breaker** — prevents runaway model spend and automatically cools down unhealthy embedding endpoints.
+- **Source task focus fixes** — disabled Zhihu no longer opens task tabs, and deferred hypotheses no longer appear as pending confirmations.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
