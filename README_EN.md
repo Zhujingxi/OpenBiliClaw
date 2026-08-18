@@ -196,7 +196,7 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.207 (2026-08-15)**
+📌 Latest: **v0.3.208 (2026-08-18)**
 
 - **Faster pool replenishment** — healthy sources keep backfilling the global pool when other source quotas stall, fixing the all-day underfill.
 - **Keyless web grounding** — new Bing RSS fallback delivers real search results without Exa / You keys.
