@@ -524,7 +524,7 @@ class ContinuousRefreshController:
     # exhausted retries on the first half-hour.
     _init_grace_consumed: bool = False
     _last_llm_gate_allowed: bool = field(default=True, init=False)
-    _last_llm_budget_warned_at: float = field(default=0.0, init=False, repr=False)
+    _last_llm_budget_warned_at: float = field(default=-float("inf"), init=False, repr=False)
     _startup_maintenance_completed: bool = field(default=False, init=False)
     _last_pool_maintenance_succeeded: bool = field(default=False, init=False)
 
