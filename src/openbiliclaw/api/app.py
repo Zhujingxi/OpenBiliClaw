@@ -3419,6 +3419,25 @@ def create_app(
             return parsed.replace(tzinfo=UTC)
         return parsed.astimezone(UTC)
 
+    def _confirmation_deferred_until(
+        state: dict[str, Any],
+        *,
+        ref: str,
+    ) -> datetime | None:
+        objects = state.get("objects", {})
+        raw_item = objects.get(ref, {}) if isinstance(objects, dict) else {}
+        item = raw_item if isinstance(raw_item, dict) else {}
+        return _parse_confirmation_timestamp(item.get("deferred_until", ""))
+
+    def _is_confirmation_deferred(
+        state: dict[str, Any],
+        *,
+        ref: str,
+        now: datetime,
+    ) -> bool:
+        deferred_until = _confirmation_deferred_until(state, ref=ref)
+        return deferred_until is not None and now < deferred_until
+
     def _hypothesis_confirmation_items() -> list[dict[str, Any]]:
         from openbiliclaw.soul.identity import build_hash8_map
 
@@ -3505,7 +3524,17 @@ def create_app(
                 str(item.get("ref", "")),
             )
 
-        hypotheses = sorted(_hypothesis_confirmation_items(), key=rank)
+        confirmation_state = _load_dialogue_confirmation_state()
+        now = datetime.now(UTC)
+        hypotheses = [
+            item
+            for item in sorted(_hypothesis_confirmation_items(), key=rank)
+            if not _is_confirmation_deferred(
+                confirmation_state,
+                ref=item["ref"],
+                now=now,
+            )
+        ]
         confusions: list[dict[str, Any]] = []
         confusion_manager = getattr(ctx.soul_engine, "_confusion_manager", None)
         if confusion_manager is not None:
@@ -3584,12 +3613,11 @@ def create_app(
         ref: str,
         now: datetime,
     ) -> bool:
+        if _is_confirmation_deferred(state, ref=ref, now=now):
+            return False
         objects = state.get("objects", {})
         raw_item = objects.get(ref, {}) if isinstance(objects, dict) else {}
         item = raw_item if isinstance(raw_item, dict) else {}
-        deferred_until = _parse_confirmation_timestamp(item.get("deferred_until", ""))
-        if deferred_until is not None and now < deferred_until:
-            return False
         last = _parse_confirmation_timestamp(item.get("last_asked_at", ""))
         return last is None or now - last >= timedelta(hours=_CONFIRMATION_OBJECT_COOLDOWN_HOURS)
 
