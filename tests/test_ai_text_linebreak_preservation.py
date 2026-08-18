@@ -8,6 +8,7 @@ POPUP_HTML = Path("extension/popup/popup.html")
 def test_mobile_web_preserves_ai_delight_reason_linebreaks() -> None:
     css = MOBILE_CSS.read_text(encoding="utf-8")
     assert ".delight-reason {" in css
+    assert ".card-expression {" in css
     assert "white-space: pre-wrap;" in css
     assert "overflow-wrap: anywhere;" in css
 
