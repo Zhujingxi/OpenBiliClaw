@@ -1188,6 +1188,19 @@
             </div>
             <p class="settings-note-inline">经典：仅用合并关键词生成器；混合：在经典基础上再叠加 search-backed 灵感轴链路（最丰富，但同时跑两套，混合最贵）；灵感：完全用灵感轴链路替代经典。</p>
           </section>
+
+          <section class="settings-advanced-section" aria-labelledby="advancedCognitionHeading">
+            <div class="settings-advanced-section-head">
+              <p class="settings-section-kicker">Cognition cycle budgets</p>
+              <h3 id="advancedCognitionHeading">认知循环预算</h3>
+            </div>
+            <p class="settings-note-inline">觉察 / 洞察每轮 LLM 调用的输入批量与输出 token 上限。默认按 256K 上下文模型设计；80-100K 上下文的本地模型（如 qwen3.8-27B）可调小，无需改源码。</p>
+            <div class="settings-advanced-fields">
+              <label class="settings-field"><span>觉察事件批量大小</span><input id="awarenessEventBatchSize" type="number" min="10" max="900" step="1" placeholder="300" inputmode="numeric"></label>
+              <label class="settings-field"><span>洞察笔记批量大小</span><input id="insightNoteBatchSize" type="number" min="10" max="450" step="1" placeholder="150" inputmode="numeric"></label>
+              <label class="settings-field"><span>认知输出 token 上限</span><input id="cognitionMaxTokens" type="number" min="1024" max="128000" step="1" placeholder="32768" inputmode="numeric"></label>
+            </div>
+          </section>
         </div>
 
         <div id="settingsPanelGeneral" class="settings-panel" data-settings-panel="general" role="tabpanel" aria-labelledby="settingsTabGeneral" hidden>

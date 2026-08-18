@@ -15597,6 +15597,46 @@ class TestEmbeddingAndCompatProviderE2E:
         rendered = (tmp_path / "config.toml").read_text(encoding="utf-8")
         assert "cognition_prompt_view" not in rendered
 
+    def test_cognition_budget_knobs_round_trip_through_config_api(
+        self,
+        monkeypatch,
+        tmp_path,
+    ) -> None:
+        from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig
+
+        cfg = Config(llm=LLMConfig(openai=LLMProviderConfig(api_key="sk-openai")))
+        client = self._make_client(monkeypatch, tmp_path, cfg)
+
+        initial = client.get("/api/config")
+        updated = client.put(
+            "/api/config",
+            json={
+                "soul": {
+                    "awareness_event_batch_size": 80,
+                    "insight_note_batch_size": 40,
+                    "cognition_max_tokens": 8192,
+                }
+            },
+        )
+
+        assert initial.status_code == 200
+        initial_soul = initial.json()["soul"]
+        assert initial_soul["awareness_event_batch_size"] == 300
+        assert initial_soul["insight_note_batch_size"] == 150
+        assert initial_soul["cognition_max_tokens"] == 32768
+        assert updated.status_code == 202
+        updated_soul = updated.json()["config"]["soul"]
+        assert updated_soul["awareness_event_batch_size"] == 80
+        assert updated_soul["insight_note_batch_size"] == 40
+        assert updated_soul["cognition_max_tokens"] == 8192
+        assert cfg.soul.awareness_event_batch_size == 80
+        assert cfg.soul.insight_note_batch_size == 40
+        assert cfg.soul.cognition_max_tokens == 8192
+        rendered = (tmp_path / "config.toml").read_text(encoding="utf-8")
+        assert "awareness_event_batch_size = 80" in rendered
+        assert "insight_note_batch_size = 40" in rendered
+        assert "cognition_max_tokens = 8192" in rendered
+
     @pytest.mark.parametrize(("raw_bool", "bad_grace"), [("true", -1), ("on", 0), ("true", "abc")])
     def test_put_config_updates_scheduler_pause_on_extension_disconnect(
         self,

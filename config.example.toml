@@ -724,6 +724,14 @@ preference_prompt_view = "legacy"
 awareness_prompt_view = "compact-v1"
 insight_prompt_view = "legacy"
 
+# Cognition-cycle prompt/output budgets (issue #169). The defaults are sized
+# for 256k-class providers. Small-context local models (e.g. qwen3.8-27B on a
+# 24G card with 80-100K context) should lower these instead of patching
+# src/openbiliclaw/soul/cognition_cycle.py.
+# awareness_event_batch_size = 300   # events per awareness LLM call (10..900)
+# insight_note_batch_size = 150      # awareness notes per insight LLM call (10..450)
+# cognition_max_tokens = 32768       # max output tokens per cognition call (1024..128000)
+
 [soul.preference]
 # v0.3.x event-satisfaction signal.
 # When true, preference analysis ignores passive negative events such as

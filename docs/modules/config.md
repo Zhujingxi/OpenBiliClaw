@@ -1068,6 +1068,9 @@ TOML 与显式环境变量覆盖在构造 `SchedulerConfig` 前统一归一为�
 | `posture_gate_mode` | string | `"shadow"` | 深层写入一致性门控（认知画像流水线 Phase 3）。`shadow`=判定异步旁路、**零延迟不阻塞原写入**，判定只落台账（`shadow_accept`/`shadow_downgrade`/`shadow_reject`，LLM 异常记 `shadow_error`）；`enforce`=写入前同步判定，reject/downgrade 拦截深层写入（downgrade 转为待验证假设），异常/解析失败保守 downgrade；`off`=完全旁路、与未接门控前逐字节一致。门控作用面仅三处：对话 goal/value/state 深层候选、管线 VALUES/CORE 层、soul 整份重建（interest 快线与 ROLE 层永不过门控） |
 | `posture_gate_force_enforce` | bool | `false` | 逃生门。切到 `enforce` 需满足 save-time 三条件（最早有效 shadow 判定距今 ≥14 天 **且** 近 14 天有效判定 ≥10 条 **且** 近 7 天 ≥1 条），否则保存被 blocking 拒绝。置 `true` 无条件放行——**有风险**：门控尚未校准即启用可能误拦或误放深层写入 |
 | `topic_lifecycle_serialization` | string | `"off"` | topic 状态机的 archived 序列化排除开关（认知画像流水线 Phase 4，本版**唯一最小消费**）。`off`（默认）时 `build_profile_summary` 与未接状态机前**逐字节一致**（回放门）；`on` 时把 `archived` 状态的 topic 排出 LLM 可见画像（domain/tag 两级）。规范 owner 是 `soul.profile_views.set_topic_lifecycle_serialization`；进程启动时由 `create_app` / CLI 设置，旧 `discovery.strategies._utils` 路径仅保留兼容 re-export。仅 `off`/`on` 两值，其余落默认 `off` |
+| `awareness_event_batch_size` | int | `300` | 认知循环觉察每轮 LLM 调用最多携带的未处理事件数（issue #169）。默认按 256k+ 上下文模型设计（~100 token/事件，正常 12h 窗口单次调用）；80-100K 上下文的本地模型（如 qwen3.8-27B）可调小到 80-150。范围 `10..900` |
+| `insight_note_batch_size` | int | `150` | 认知循环洞察每轮 LLM 调用最多携带的新觉察 note 数。默认按 256k+ 上下文模型设计；小上下文模型可调小。范围 `10..450` |
+| `cognition_max_tokens` | int | `32768` | 认知循环觉察/洞察 LLM 调用的输出 token 上限。默认匹配 256k+ 模型的 dense batch；小上下文模型或严格输出限制的 provider 可调小（如 8192）。范围 `1024..128000` |
 
 三个 prompt view 从 TOML、`GET/PUT /api/config`、CLI runtime、API 热重载与 OpenClaw
 bootstrap 一路独立透传到 `SoulEngine`；其中 Awareness 值只进入 with-confusions seam，普通
@@ -1109,6 +1112,7 @@ Awareness seam 固定为 `legacy`。未发布的聚合字段
 - LLM：展示实例、全局调用链与四个模块链摘要，允许调整全局并发 / 超时、测试默认链，并跳转桌面 Web 完整编辑；插件保存其他字段时不会回写或压扁实例路由
 - B 站与多源：`bilibili.browser.*`、`sources.bilibili.enabled`、`sources.browser.*`，以及小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Linux.do / Bangumi / V2EX / 微博的来源配置
 - 调度：`scheduler.enabled`、`pause_on_extension_disconnect`、`extension_disconnect_grace_seconds`、`pool_target_count`、`account_sync_interval_hours`、eval drain 凑批参数、refresh / signal / trending / explore / discovery limit / proactive push / speculator idle 等 runtime 频率参数、十一个平台的 `pool_source_shares`、猜测兴趣参数、不喜欢领域探针参数、自动更新参数；设置页可调用 `/api/config/source-share-suggestion` 按已有事件和当前表单开关填入建议比例
+- 高级功能（桌面 Web 与插件设置页均有「认知循环预算」区块）：`soul.awareness_event_batch_size`、`soul.insight_note_batch_size`、`soul.cognition_max_tokens`（issue #169）
 - 日志：控制台 / 文件级别、完整日志路径（保存时拆回 `directory` / `filename`）、轮转与非托管日志清理参数
 
 `[saved_sync].auto_sync_enabled` 已在桌面 / 移动 Web 和插件设置控件中暴露，也可通过 `config.toml` 或严格校验的 `/api/config` 管理。保留但不单独暴露的字段还包括目前只有一个有效值的内部兼容项，例如 `[sources.douyin].mode = "direct"`；保存时插件会继续按当前支持值写回，不会删除其他高级字段。

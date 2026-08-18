@@ -16975,6 +16975,9 @@ def create_app(
                 posture_gate_mode=cfg.soul.posture_gate_mode,
                 posture_gate_force_enforce=cfg.soul.posture_gate_force_enforce,
                 topic_lifecycle_serialization=cfg.soul.topic_lifecycle_serialization,
+                awareness_event_batch_size=int(cfg.soul.awareness_event_batch_size),
+                insight_note_batch_size=int(cfg.soul.insight_note_batch_size),
+                cognition_max_tokens=int(cfg.soul.cognition_max_tokens),
             ),
             issues=issue_list,
         )
@@ -18296,6 +18299,9 @@ def create_app(
         from openbiliclaw.config import (
             _DEFAULT_ADMISSION_MIN_SCORE,
             _DEFAULT_CANDIDATE_EVAL_CONCURRENCY,
+            _DEFAULT_COGNITION_AWARENESS_EVENT_BATCH_SIZE,
+            _DEFAULT_COGNITION_INSIGHT_NOTE_BATCH_SIZE,
+            _DEFAULT_COGNITION_MAX_TOKENS,
             _DEFAULT_COPY_READY_TARGET_COUNT,
             _DEFAULT_DANMAKU_FETCH_LIMIT,
             _DEFAULT_DANMAKU_MAX_CHARS,
@@ -18320,9 +18326,15 @@ def create_app(
             _DEFAULT_SOURCE_INCREMENTAL_HOURS,
             _DEFAULT_SPECULATOR_IDLE_INTERVAL_MINUTES,
             _DEFAULT_TRENDING_REFRESH_MINUTES,
+            _MAX_COGNITION_AWARENESS_EVENT_BATCH_SIZE,
+            _MAX_COGNITION_INSIGHT_NOTE_BATCH_SIZE,
+            _MAX_COGNITION_MAX_TOKENS,
             _MAX_COPY_READY_TARGET_COUNT,
             _MAX_EVAL_MAX_WAIT_SECONDS,
             _MAX_EVAL_MIN_BATCH_SIZE,
+            _MIN_COGNITION_AWARENESS_EVENT_BATCH_SIZE,
+            _MIN_COGNITION_INSIGHT_NOTE_BATCH_SIZE,
+            _MIN_COGNITION_MAX_TOKENS,
             _MIN_COPY_READY_TARGET_COUNT,
             _MIN_EVAL_MAX_WAIT_SECONDS,
             _MIN_EVAL_MIN_BATCH_SIZE,
@@ -19495,6 +19507,35 @@ def create_app(
                 cfg.soul.posture_gate_mode = str(sdata["posture_gate_mode"]).strip().lower()
             if "posture_gate_force_enforce" in sdata:
                 cfg.soul.posture_gate_force_enforce = bool(sdata["posture_gate_force_enforce"])
+            soul_int_limits = {
+                "awareness_event_batch_size": (
+                    _DEFAULT_COGNITION_AWARENESS_EVENT_BATCH_SIZE,
+                    _MIN_COGNITION_AWARENESS_EVENT_BATCH_SIZE,
+                    _MAX_COGNITION_AWARENESS_EVENT_BATCH_SIZE,
+                ),
+                "insight_note_batch_size": (
+                    _DEFAULT_COGNITION_INSIGHT_NOTE_BATCH_SIZE,
+                    _MIN_COGNITION_INSIGHT_NOTE_BATCH_SIZE,
+                    _MAX_COGNITION_INSIGHT_NOTE_BATCH_SIZE,
+                ),
+                "cognition_max_tokens": (
+                    _DEFAULT_COGNITION_MAX_TOKENS,
+                    _MIN_COGNITION_MAX_TOKENS,
+                    _MAX_COGNITION_MAX_TOKENS,
+                ),
+            }
+            for soul_int_field, (default, min_value, max_value) in soul_int_limits.items():
+                if soul_int_field in sdata:
+                    setattr(
+                        cfg.soul,
+                        soul_int_field,
+                        _normalize_scheduler_int(
+                            sdata[soul_int_field],
+                            default=default,
+                            min_value=min_value,
+                            max_value=max_value,
+                        ),
+                    )
 
         for field in reset_fields:
             target = _RESETTABLE_CONFIG_FIELDS[field]
