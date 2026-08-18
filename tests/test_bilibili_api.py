@@ -310,6 +310,66 @@ async def test_search_passes_order_parameter() -> None:
 
 
 @pytest.mark.asyncio
+async def test_search_passes_strict_publication_timestamp_bounds() -> None:
+    client = BilibiliAPIClient(cookie="SESSDATA=abc")
+    client._client = RouteAsyncClient(
+        {
+            "/x/web-interface/nav": [
+                {
+                    "code": 0,
+                    "data": {
+                        "wbi_img": {
+                            "img_url": "https://i0.hdslb.com/bfs/wbi/7cd084941338484aae1ad9425b84077c.png",
+                            "sub_url": "https://i0.hdslb.com/bfs/wbi/4932caff0ff746eab6f01bf08b70ac45.png",
+                        }
+                    },
+                }
+            ],
+            "/x/web-interface/wbi/search/type": [{"code": 0, "data": {"result": []}}],
+        }
+    )
+
+    await client.search(
+        "纪录片",
+        pubtime_begin=1704067200,
+        pubtime_end=1735689599,
+    )
+
+    params = client._client.calls[1][1]
+    assert params is not None
+    assert params["pubtime_begin"] == "1704067200"
+    assert params["pubtime_end"] == "1735689599"
+
+
+@pytest.mark.asyncio
+async def test_search_omits_open_publication_boundaries() -> None:
+    client = BilibiliAPIClient(cookie="SESSDATA=abc")
+    client._client = RouteAsyncClient(
+        {
+            "/x/web-interface/nav": [
+                {
+                    "code": 0,
+                    "data": {
+                        "wbi_img": {
+                            "img_url": "https://i0.hdslb.com/bfs/wbi/7cd084941338484aae1ad9425b84077c.png",
+                            "sub_url": "https://i0.hdslb.com/bfs/wbi/4932caff0ff746eab6f01bf08b70ac45.png",
+                        }
+                    },
+                }
+            ],
+            "/x/web-interface/wbi/search/type": [{"code": 0, "data": {"result": []}}],
+        }
+    )
+
+    await client.search("纪录片", pubtime_end=1735689599)
+
+    params = client._client.calls[1][1]
+    assert params is not None
+    assert "pubtime_begin" not in params
+    assert params["pubtime_end"] == "1735689599"
+
+
+@pytest.mark.asyncio
 async def test_search_uses_wbi_signed_endpoint_and_search_page_headers() -> None:
     client = BilibiliAPIClient(cookie="SESSDATA=abc")
     client._client = RouteAsyncClient(

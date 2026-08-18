@@ -605,6 +605,9 @@ class BilibiliAPIClient:
         page: int = 1,
         page_size: int = 20,
         order: str = "totalrank",
+        *,
+        pubtime_begin: int | None = None,
+        pubtime_end: int | None = None,
     ) -> list[dict[str, Any]]:
         """Search for videos by keyword.
 
@@ -645,17 +648,22 @@ class BilibiliAPIClient:
         for attempt in range(max_attempts):
             try:
                 img_key, sub_key = await self._get_wbi_keys()
+                search_params: dict[str, object] = {
+                    "keyword": keyword,
+                    "search_type": "video",
+                    "page": page,
+                    "page_size": page_size,
+                    "order": order,
+                    "web_location": self._SEARCH_WEB_LOCATION,
+                }
+                if pubtime_begin is not None:
+                    search_params["pubtime_begin"] = max(0, int(pubtime_begin))
+                if pubtime_end is not None:
+                    search_params["pubtime_end"] = max(0, int(pubtime_end))
                 data = await self._get_json(
                     "/x/web-interface/wbi/search/type",
                     params=self._sign_wbi_params(
-                        {
-                            "keyword": keyword,
-                            "search_type": "video",
-                            "page": page,
-                            "page_size": page_size,
-                            "order": order,
-                            "web_location": self._SEARCH_WEB_LOCATION,
-                        },
+                        search_params,
                         img_key=img_key,
                         sub_key=sub_key,
                     ),

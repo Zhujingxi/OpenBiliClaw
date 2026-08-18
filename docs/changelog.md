@@ -6,18 +6,19 @@
 
 ## 未发布
 
+- **新增 B 站发布日期偏好配置（issue #18）**：配置文件、桌面设置页与 `GET/PUT /api/config` 支持预设或自定义本地日期范围、浮点权重和原子保存；默认权重 `0.5` 对范围外候选降分，`1` 在推荐服务阶段严格忽略，候选仍保留在池中。严格模式把包含式边界下推到 B 站 API 和扩展网页搜索，并让有效库存、来源池闸门和补货判断排除范围外行；配置保存成功后通过 RuntimeContext 热更新 `PoolCurator`，`config-show` 展示最终值。
 - **AI 文案换行保留（issue #184）**：推荐理由、惊喜理由、探针理由等 AI 生成文案在插件 side panel、桌面 Web 与移动 Web 统一使用 `white-space: pre-wrap` 保留换行，不再把多行输出显示成一大坨；聊天回复仍沿用既有的安全 Markdown 渲染。
 
 ## v0.3.208：来源周期回拉逐源开关与发布同步（2026-08-18）
 
 - **修复 LLM 预算首次告警被系统运行时间误吞**：`_last_llm_budget_warned_at` 初值从 `0` 改为 `-inf`，避免在机器启动不足一个预算窗口时，第一次触发后台 LLM 预算暂停不输出 WARNING。
 - **发布状态**：后端 / 插件 / 桌面安装包 / Docker 镜像与聚合 Release 均已发布为 `v0.3.208`，详情见 [Release](https://github.com/whiteguo233/OpenBiliClaw/releases)。Chrome Web Store 已上传并提交 `0.3.208` 审核；Firefox AMO 已提交 listed `0.3.208`。聚合 Latest Release 已附扩展 ZIP / Safari DMG 与四份桌面安装器。
-- **来源周期回拉支持逐源开关（issue #180 相关）**：`[sources.<slug>]` 新增 `incremental_enabled`（默认 `false`），与 `[scheduler].source_incremental_enabled` 总开关组成“总开关 + 每来源开关”两级控制；插件 side panel 与桌面 Web 的「平台源」配置页为 XHS / 抖音 / YouTube / 知乎 / Reddit / Linux.do / V2EX 增加“允许扩展周期回拉”勾选项，调度页暴露总开关。后端只有两级开关都为 `true` 时才入队周期 bootstrap 任务；关闭某来源时其 scheduler-owned pending / stale in-progress 任务会被取消，避免再打开前台标签页。默认所有开关均为关闭，手动初始化、`fetch-*` 与后台 discovery 不受影响。
+- **来源周期回拉支持逐源开关（issue #180 相关）**：`[sources.<slug>]` 新增 `incremental_enabled`（默认 `false`），与 `[scheduler].source_incremental_enabled` 总开关组成”总开关 + 每来源开关”两级控制；插件 side panel 与桌面 Web 的「平台源」配置页为 XHS / 抖音 / YouTube / 知乎 / Reddit / Linux.do / V2EX 增加”允许扩展周期回拉”勾选项，调度页暴露总开关。后端只有两级开关都为 `true` 时才入队周期 bootstrap 任务；关闭某来源时其 scheduler-owned pending / stale in-progress 任务会被取消，避免再打开前台标签页。默认所有开关均为关闭，手动初始化、`fetch-*` 与后台 discovery 不受影响。
 - **后台 LLM 自设预算 + Embedding 熔断（issue #188）**：`[scheduler]` 新增 `llm_budget_max_calls`（默认 120 / 小时）与 `llm_budget_window_seconds`（默认 3600），daemon 通过共享 `LLMConcurrencyGate` 统计后台 LLM 请求，窗口内达到上限即暂停自动发现 / 补池 / 画像等循环并打一条 WARNING，避免无人值守时持续烧 DeepSeek 等付费额度；手动 CLI / API 请求不受影响，`0` 可关闭预算。`EmbeddingService` 新增连续失败熔断：默认连续 3 次异常或空向量后冷却 60 秒，冷却期内不再触碰不可达 embedding 端点、不再逐条打 full-traceback WARN，冷却后自动重探。
 - **修复 defer(暂缓) 后假设仍显示在待聊确认（issue #189）**：`/api/chat/pending-confirmations` 现在读取 `memory/dialogue_confirmation_state.json` 中的 `deferred_until`，冷却结束前已 defer 的假设不再出现在待聊列表；冷却到期后自动恢复。用户主动 open 仍按原契约绕过冷却，不会因列表过滤而误 404。
 - **修复停用知乎来源后扩展仍打开知乎任务标签页（issue #187）**：`/api/sources/zhihu/next-task` 现在在领取自动任务前动态检查 `[sources.zhihu].enabled`；来源关闭时返回 bodyless 204，scheduler-owned 增量任务会被清理避免卡住其它来源，手动 pending 任务保留、重新开启后可恢复。`SourceIncrementalSync` 的 active 任务复核同步忽略已停用来源，避免遗留知乎任务阻塞周期调度。
-- **修复 `--llm-preset` 写入 `openai` 导致中转站 DeepSeek 推理 token 耗尽（issue #175）**：`agent_bootstrap` 的 OpenAI 兼容 preset（`relay` / `kimi` / `qwen` / ...）现在隐式写入 `provider_type="openai_compatible"`，使通用 OpenAI 兼容适配器能对中转站 DeepSeek 关闭 thinking；历史 `--provider openai` 与 preset 组合自动 remap，显式非兼容 provider 仍冲突报错。同步更新 `docs/agent-install.md` 的 preset 说明。
-- **修复 bootstrap 二次运行追加重复 TOML 实例段（issue #174）**：`agent_bootstrap` 的 section 匹配现在忽略裸键/引号键差异，`[llm.instances.openai]` 与 `[llm.instances."openai"]` 视为同一表，避免 `tomllib` 报 `Cannot declare ... twice`。
+- **修复 `--llm-preset` 写入 `openai` 导致中转站 DeepSeek 推理 token 耗尽（issue #175）**：`agent_bootstrap` 的 OpenAI 兼容 preset（`relay` / `kimi` / `qwen` / ...）现在隐式写入 `provider_type=”openai_compatible”`，使通用 OpenAI 兼容适配器能对中转站 DeepSeek 关闭 thinking；历史 `--provider openai` 与 preset 组合自动 remap，显式非兼容 provider 仍冲突报错。同步更新 `docs/agent-install.md` 的 preset 说明。
+- **修复 bootstrap 二次运行追加重复 TOML 实例段（issue #174）**：`agent_bootstrap` 的 section 匹配现在忽略裸键/引号键差异，`[llm.instances.openai]` 与 `[llm.instances.”openai”]` 视为同一表，避免 `tomllib` 报 `Cannot declare ... twice`。
 - **补充 PR #182 贡献者致谢**：README 中英文与贡献指南正式记录 [@LHMQ878](https://github.com/LHMQ878) 对 `agent_bootstrap` 引号键 TOML 实例段 section 匹配修复的贡献。
 - **修复非 DeepSeek 安装被默认空 Key 实例拦截（issue #176）**：`agent_bootstrap` 选择其他 LLM provider 时，会自动停用样例中的无 API Key DeepSeek 实例并从 `default_chain` 移除；已有 DeepSeek Key 的备选实例保持不变，`init` 不再要求用户手改 `config.toml`。
 - **修复 Windows PowerShell 5.1 安装器在 clone 成功后静默退出（issue #177）**：`install.ps1` 现在在检查 `$LASTEXITCODE` 前捕获 `git clone` 的 stderr；PS 5.1 不再把 Git 的正常进度输出误判为终止错误，完整 clone 会继续运行 bootstrap，真实 clone 失败仍会显示 Git 原始诊断并清理临时日志。

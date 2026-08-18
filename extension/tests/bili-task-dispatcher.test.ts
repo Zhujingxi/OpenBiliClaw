@@ -51,6 +51,19 @@ test("buildBiliTaskUrl carries the bounded recent-lane sort", () => {
   );
 });
 
+test("buildBiliTaskUrl carries strict publication timestamp bounds", () => {
+  assert.equal(
+    buildBiliTaskUrl({
+      id: "x",
+      type: "search",
+      query: "猫",
+      pubtime_begin: 1704067200,
+      pubtime_end: 1735689599,
+    }),
+    "https://search.bilibili.com/all?keyword=%E7%8C%AB&pubtime_begin=1704067200&pubtime_end=1735689599",
+  );
+});
+
 test("isValidBiliTask accepts search tasks with a non-empty query", () => {
   assert.equal(
     isValidBiliTask({
@@ -72,6 +85,10 @@ test("isValidBiliTask rejects malformed payloads", () => {
   assert.equal(isValidBiliTask({ id: "x", type: "search", query: "猫", limit: 0 }), false);
   assert.equal(isValidBiliTask({ id: "x", type: "search", query: "猫", order: "click" }), false);
   assert.equal(isValidBiliTask({ id: "x", type: "creator", query: "猫" }), false);
+  assert.equal(
+    isValidBiliTask({ id: "x", type: "search", query: "猫", pubtime_begin: -1 }),
+    false,
+  );
 });
 
 test("computeBiliTaskTimeoutMs gives rendered search pages enough time", () => {

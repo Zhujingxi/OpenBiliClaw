@@ -98,6 +98,7 @@ from openbiliclaw.sources.platforms import (
 )
 
 if TYPE_CHECKING:
+    from openbiliclaw.recommendation.publication_preference import PublicationDatePreference
     from openbiliclaw.saved_sync.extension_broker import ExtensionNativeSaveJob
 
 logger = logging.getLogger(__name__)
@@ -1969,6 +1970,9 @@ class Database:
         self._connection_owner_thread_id: int | None = None
         self._connections_by_thread: dict[int, sqlite3.Connection] = {}
         self._admission_min_score = _DEFAULT_ADMISSION_MIN_SCORE
+        # RuntimeContext updates this immutable policy when configuration is
+        # applied. None preserves the historical platform-neutral pool gate.
+        self._publication_date_preference: object | None = None
         self._preserve_read_transaction = False
         # The two queues must remain separate: a slow/background maintenance
         # batch must never sit in front of an interactive recommendation read.
@@ -1989,6 +1993,35 @@ class Database:
     def set_admission_min_score(self, value: object) -> None:
         """Set the unified recommendation-pool admission floor."""
         self._admission_min_score = _normalize_admission_min_score(value)
+
+    def set_publication_date_preference(self, preference: object | None) -> None:
+        """Set the current Bilibili publication policy used by pool reads."""
+        self._publication_date_preference = preference
+
+    def _publication_date_row_is_eligible(self, row: Mapping[str, Any]) -> bool:
+        """Apply strict Bilibili date preference without deleting stored rows."""
+        preference = self._publication_date_preference
+        if preference is None:
+            return True
+        try:
+            from openbiliclaw.recommendation.publication_preference import (
+                evaluate_publication_preference,
+            )
+
+            decision = evaluate_publication_preference(
+                # Older pool rows may have an empty platform column; derive
+                # their canonical family from the persisted source strategy.
+                source_platform=(
+                    row.get("source_platform")
+                    or _pool_source_family(row.get("source"), row.get("source_platform"))
+                ),
+                published_at=row.get("published_at", ""),
+                preference=cast("PublicationDatePreference", preference),
+            )
+        except (TypeError, ValueError):
+            logger.warning("Ignoring invalid publication preference in pool read", exc_info=True)
+            return True
+        return decision.eligible
 
     def initialize(self) -> None:
         """Initialize the database and run migrations if needed."""
@@ -2248,6 +2281,7 @@ class Database:
         isolated = Database(self._db_path)
         isolated._conn = conn
         isolated._admission_min_score = self._admission_min_score
+        isolated._publication_date_preference = self._publication_date_preference
         isolated._seen_state_lock = self._seen_state_lock
         isolated._seen_state_cache = self._seen_state_cache
         return isolated
@@ -7621,8 +7655,8 @@ class Database:
             max_per_topic_group=max_per_topic_group,
         )
 
-    @staticmethod
     def _filter_available_pool_candidate_rows(
+        self,
         rows: Sequence[Mapping[str, Any]],
         *,
         viewed_content_keys: set[str],
@@ -7636,6 +7670,8 @@ class Database:
             if not str(row_dict.get("bvid", "")).strip():
                 continue
             if not Database._temporal_eligibility_for_row(row_dict, now=now):
+                continue
+            if not self._publication_date_row_is_eligible(row_dict):
                 continue
             if Database._is_viewed_row(row_dict, viewed_content_keys):
                 continue
@@ -7966,7 +8002,8 @@ class Database:
         guard_params = _xhs_self_author_guard_params(xhs_self_nickname)
         raw_cursor = self.conn.execute(
             f"""
-            SELECT bvid, published_at, temporal_class, temporal_confidence,
+            SELECT bvid, published_at, source, source_platform,
+                   temporal_class, temporal_confidence,
                    temporal_policy_version, temporal_validity_mode,
                    temporal_valid_until, temporal_scope, temporal_state, temporal_evidence,
                    temporal_next_review_at, temporal_evaluated_at,
@@ -7989,6 +8026,7 @@ class Database:
             1
             for row in raw_cursor.fetchall()
             if self._temporal_eligibility_for_row(dict(row), now=temporal_now)
+            and self._publication_date_row_is_eligible(dict(row))
         )
         pending_cursor = self.conn.execute(
             f"""
@@ -8036,6 +8074,8 @@ class Database:
         for row in pending_cursor.fetchall():
             item = dict(row)
             if not self._temporal_eligibility_for_row(item, now=temporal_now):
+                continue
+            if not self._publication_date_row_is_eligible(item):
                 continue
             if self._is_viewed_row(item, viewed_content_keys):
                 continue

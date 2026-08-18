@@ -968,6 +968,38 @@ def test_config_show_displays_runtime_pause_fields(
     assert "开启（宽限 45s）" in result.stdout
 
 
+def test_config_show_displays_bilibili_publication_preference(
+    monkeypatch: pytest.MonkeyPatch,
+    runner: CliRunner,
+) -> None:
+    cfg = config_module.Config()
+    cfg.bilibili.recommendation_date_preset = "custom"
+    cfg.bilibili.recommendation_date_start = "2023-01-01"
+    cfg.bilibili.recommendation_date_end = "2023-12-31"
+    cfg.bilibili.recommendation_date_weight = 0.5
+
+    class FakeRegistry:
+        default_provider = "openai"
+        available_providers = ["openai"]
+
+    monkeypatch.setattr(
+        config_module,
+        "load_config_with_diagnostics",
+        lambda: (cfg, config_module.ConfigDiagnostics()),
+        raising=False,
+    )
+    monkeypatch.setattr(cli_module, "_build_registry", lambda: FakeRegistry())
+    monkeypatch.setattr(cli_module, "_initialize_logging", lambda log_level_override=None: None)
+
+    result = runner.invoke(app, ["config-show"])
+
+    assert result.exit_code == 0
+    assert "B站发布日期范围" in result.stdout
+    assert "自定义：2023-01-01 至 2023-12-31" in result.stdout
+    assert "B站发布日期权重" in result.stdout
+    assert "0.5" in result.stdout
+
+
 def test_config_show_displays_saved_auto_sync_status(
     monkeypatch: pytest.MonkeyPatch, runner: CliRunner
 ) -> None:

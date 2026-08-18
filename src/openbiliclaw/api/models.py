@@ -2075,6 +2075,10 @@ class BilibiliConfigOut(BaseModel):
     cookie: str = ""
     browser_executable: str = ""
     browser_headed: bool = False
+    recommendation_date_preset: str = "all"
+    recommendation_date_start: str = ""
+    recommendation_date_end: str = ""
+    recommendation_date_weight: float = 0.5
 
 
 class NetworkConfigOut(BaseModel):

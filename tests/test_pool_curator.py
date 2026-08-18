@@ -13,6 +13,7 @@ from openbiliclaw.recommendation.curator import (
     ScoringContext,
     ScoringWeights,
 )
+from openbiliclaw.recommendation.publication_preference import PublicationDatePreference
 from openbiliclaw.storage.database import Database
 
 
@@ -387,6 +388,110 @@ def test_score_candidates_explore_gets_serendipity_bonus() -> None:
     context = ScoringContext(now=now)
     scores = curator.score_candidates([search, explore], context)
     assert scores["BVE"] > scores["BVS"]
+
+
+def test_publication_preference_penalizes_out_of_range_bilibili_score() -> None:
+    db, _ = _make_db()
+    curator = PoolCurator(
+        db,
+        weights=ScoringWeights(
+            relevance=1.0,
+            freshness=0.0,
+            topic_fatigue=0.0,
+            source_monotony=0.0,
+            serendipity=0.0,
+        ),
+        publication_preference=PublicationDatePreference(
+            preset="custom",
+            start_date="2023-01-01",
+            end_date="2023-12-31",
+            weight=0.5,
+        ),
+    )
+    in_range = DiscoveredContent(
+        bvid="BV_IN",
+        source_platform="bilibili",
+        published_at="2023-06-01T00:00:00Z",
+        relevance_score=0.8,
+    )
+    out_of_range = DiscoveredContent(
+        bvid="BV_OUT",
+        source_platform="bilibili",
+        published_at="2022-06-01T00:00:00Z",
+        relevance_score=0.8,
+    )
+
+    scores = curator.score_candidates(
+        [in_range, out_of_range],
+        ScoringContext(now=datetime(2024, 1, 1, tzinfo=UTC)),
+    )
+
+    assert scores["BV_IN"] == 0.8
+    assert scores["BV_OUT"] == 0.4
+
+
+def test_strict_publication_preference_filters_only_bilibili_candidates() -> None:
+    db, _ = _make_db()
+    curator = PoolCurator(
+        db,
+        publication_preference=PublicationDatePreference(
+            preset="custom",
+            start_date="2023-01-01",
+            end_date="2023-12-31",
+            weight=1.0,
+        ),
+    )
+    candidates = [
+        DiscoveredContent(
+            bvid="BV_KEEP",
+            source_platform="bilibili",
+            published_at="2023-06-01T00:00:00Z",
+        ),
+        DiscoveredContent(
+            bvid="BV_DROP",
+            source_platform="bilibili",
+            published_at="2022-06-01T00:00:00Z",
+        ),
+        DiscoveredContent(
+            bvid="YT_KEEP",
+            source_platform="youtube",
+            published_at="2022-06-01T00:00:00Z",
+        ),
+    ]
+
+    filtered = curator.filter_candidates_for_serving(
+        candidates,
+        now=datetime(2024, 1, 1, tzinfo=UTC),
+    )
+
+    assert [item.bvid for item in filtered] == ["BV_KEEP", "YT_KEEP"]
+
+
+def test_missing_platform_uses_source_strategy_instead_of_bilibili_default() -> None:
+    db, _ = _make_db()
+    curator = PoolCurator(
+        db,
+        publication_preference=PublicationDatePreference(
+            preset="custom",
+            start_date="2023-01-01",
+            end_date="2023-12-31",
+            weight=1.0,
+        ),
+    )
+    youtube_item = DiscoveredContent(
+        bvid="YT_MISSING_PLATFORM",
+        source_strategy="youtube-search",
+        published_at="2022-06-01T00:00:00Z",
+    )
+    # Simulate a legacy row whose platform column was empty after hydration.
+    youtube_item.source_platform = ""
+
+    filtered = curator.filter_candidates_for_serving(
+        [youtube_item],
+        now=datetime(2024, 1, 1, tzinfo=UTC),
+    )
+
+    assert [item.bvid for item in filtered] == ["YT_MISSING_PLATFORM"]
 
 
 def test_score_candidates_penalises_fatigued_topic() -> None:

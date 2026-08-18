@@ -307,6 +307,9 @@ config recovery control plane (normal or degraded; business APIs stay gated)
                           → editable model list + local effort advisory (no config write)
 config save control plane: persist first → HTTP 202 queued/apply_revision → latest-wins queue → runtime receipt/status
                            └─ data_dir changed → restart_required; active locked dir stays until full restart
+publication-date preference: [bilibili] config → RuntimeContext → effective inventory → PoolCurator → serving score/gate
+                             ├─ Bilibili only; out-of-range rows stay in the pool; weight 0.5 default, 1 strict
+                             └─ strict only → Bilibili API / extension search pubtime_begin + pubtime_end
 migration control plane: local export → checksummed plaintext .obcbackup
                       → local import + request_id validates/stages ↔ status/cancel
                       → restart + runtime lock → journaled config/data replace → applied | rollback

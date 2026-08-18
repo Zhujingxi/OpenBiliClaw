@@ -111,6 +111,8 @@ server-owned binding、context preview 与卡片 action 不改变 CLI 的既有�
 配置概览会直接显示「停止后台 LLM 请求」是否启用、「浏览器断开后暂停」是否启用和当前宽限秒数、「开机自启动」配置 / 系统注册状态、海外网络模式与自定义代理地址，以及默认关闭的「收藏自动同步」解析状态，方便确认实际网络路由和 `[saved_sync].auto_sync_enabled` 是否已经写入后端配置。
 推荐引擎构造同样读取 `[discovery]` 的 `keyframe_max_frames`、`keyframe_fetch_limit`、
 `danmaku_fetch_limit` 和 `danmaku_max_chars`；手动 `recommend` 的预热范围与 daemon/API 使用同一配置。
+`config-show` 还会显示 B 站发布日期范围和权重，便于确认最终解析值；权重默认 `0.5`，设为 `1`
+表示严格忽略范围外候选，范围外候选本身不会从池中删除。
 CLI 组合根也会把 `[scheduler].copy_ready_target_count` 规范为
 `min(max(copy_ready_target_count, 0), max(pool_target_count, 0))` 后注入推荐引擎，与 API 和
 OpenClaw 的文案水位语义一致，同时注入 `pool_target_count`：正数 copy 水位会优先补齐当前

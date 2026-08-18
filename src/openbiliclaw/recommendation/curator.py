@@ -21,6 +21,12 @@ from openbiliclaw.discovery.temporal import (
     temporal_bonus_component,
     trusted_publication_datetime,
 )
+from openbiliclaw.recommendation.publication_preference import (
+    PublicationDateDecision,
+    PublicationDatePreference,
+    evaluate_publication_preference,
+)
+from openbiliclaw.sources.platforms import source_family
 
 if TYPE_CHECKING:
     from openbiliclaw.discovery.engine import DiscoveredContent
@@ -189,6 +195,7 @@ _FEEDBACK_DISLIKE_TOPIC_PENALTY: float = 0.10
 # fresh content but doesn't outright suppress.
 _FEEDBACK_DISLIKE_FRANCHISE_PENALTY: float = 0.07
 _FEEDBACK_LIKE_TOPIC_BONUS: float = 0.05
+_AMPLIFICATION_OVER_BUDGET_PENALTY: float = 0.35
 _POOL_LOW_THRESHOLD: int = 50
 _DEFAULT_WEIGHTS = ScoringWeights()
 
@@ -242,10 +249,45 @@ class PoolCurator:
         *,
         weights: ScoringWeights = _DEFAULT_WEIGHTS,
         history_window: int = 30,
+        publication_preference: PublicationDatePreference | None = None,
     ) -> None:
         self._database = database
         self._weights = weights
         self._history_window = history_window
+        self._publication_preference = publication_preference or PublicationDatePreference()
+
+    def publication_date_decision(
+        self,
+        item: DiscoveredContent,
+        *,
+        now: datetime,
+    ) -> PublicationDateDecision:
+        """Evaluate the configured publication preference for one candidate."""
+
+        return evaluate_publication_preference(
+            source_platform=(
+                getattr(item, "source_platform", "")
+                or source_family(getattr(item, "source_strategy", ""), "")
+            ),
+            published_at=getattr(item, "published_at", ""),
+            preference=self._publication_preference,
+            now=now,
+        )
+
+    def filter_candidates_for_serving(
+        self,
+        candidates: list[DiscoveredContent],
+        *,
+        now: datetime | None = None,
+    ) -> list[DiscoveredContent]:
+        """Drop candidates that strict publication preference cannot serve."""
+
+        current = now or datetime.now(UTC)
+        return [
+            item
+            for item in candidates
+            if self.publication_date_decision(item, now=current).eligible
+        ]
 
     # ------------------------------------------------------------------
     # Public API
@@ -390,9 +432,10 @@ class PoolCurator:
             # Feedback adjustments (additive, outside weight system)
             score += self._feedback_adjustment(item, context.feedback)
             if candidate_amplification_keys(item) & context.over_budget_amplification_keys:
-                score -= 0.35
+                score -= _AMPLIFICATION_OVER_BUDGET_PENALTY
 
-            scores[item.bvid] = max(0.0, score)
+            date_decision = self.publication_date_decision(item, now=context.now)
+            scores[item.bvid] = max(0.0, score * date_decision.score_multiplier)
         return scores
 
     def build_temporal_ranking_shadow_audit(
@@ -815,5 +858,6 @@ class PoolCurator:
             else:
                 score += self._feedback_adjustment(item, context.feedback)
 
-            scores[item.bvid] = max(0.0, score)
+            date_decision = self.publication_date_decision(item, now=context.now)
+            scores[item.bvid] = max(0.0, score * date_decision.score_multiplier)
         return scores

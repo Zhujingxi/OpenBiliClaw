@@ -114,6 +114,57 @@ def test_put_config_writes_real_new_chat_provider_model(monkeypatch, tmp_path) -
     assert load_config_from_path(config_path).llm.openai.model == "gpt-4.1-mini"
 
 
+def test_bilibili_publication_preference_round_trips_through_config_api(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    client, _cfg, config_path = _make_client(monkeypatch, tmp_path, _base_config())
+
+    response = client.put(
+        "/api/config",
+        json={
+            "bilibili": {
+                "recommendation_date_preset": "custom",
+                "recommendation_date_start": "2023-01-01",
+                "recommendation_date_end": "2023-12-31",
+                "recommendation_date_weight": 0.5,
+            }
+        },
+    )
+
+    assert response.status_code == 202
+    saved = load_config_from_path(config_path).bilibili
+    assert saved.recommendation_date_preset == "custom"
+    assert saved.recommendation_date_start == "2023-01-01"
+    assert saved.recommendation_date_end == "2023-12-31"
+    assert saved.recommendation_date_weight == 0.5
+
+    visible = client.get("/api/config").json()["bilibili"]
+    assert visible["recommendation_date_preset"] == "custom"
+    assert visible["recommendation_date_start"] == "2023-01-01"
+    assert visible["recommendation_date_end"] == "2023-12-31"
+    assert visible["recommendation_date_weight"] == 0.5
+
+
+def test_bilibili_publication_preference_rejects_invalid_update(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    client, _cfg, config_path = _make_client(monkeypatch, tmp_path, _base_config())
+    before = load_config_from_path(config_path).bilibili
+
+    response = client.put(
+        "/api/config",
+        json={"bilibili": {"recommendation_date_weight": 1.5}},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["error"] == "invalid_bilibili_recommendation_date"
+    after = load_config_from_path(config_path).bilibili
+    assert after.recommendation_date_preset == before.recommendation_date_preset
+    assert after.recommendation_date_weight == before.recommendation_date_weight
+
+
 def test_put_config_persists_data_dir_as_restart_only(monkeypatch, tmp_path) -> None:
     config = _base_config()
     active_data = tmp_path / "active-data"

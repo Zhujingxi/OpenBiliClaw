@@ -16709,6 +16709,10 @@ def create_app(
                 cookie=_mask(cfg.bilibili.cookie),
                 browser_executable=cfg.bilibili.browser_executable,
                 browser_headed=cfg.bilibili.browser_headed,
+                recommendation_date_preset=cfg.bilibili.recommendation_date_preset,
+                recommendation_date_start=cfg.bilibili.recommendation_date_start,
+                recommendation_date_end=cfg.bilibili.recommendation_date_end,
+                recommendation_date_weight=cfg.bilibili.recommendation_date_weight,
             ),
             network=NetworkConfigOut(
                 mode=cfg.network.mode,
@@ -18436,6 +18440,44 @@ def create_app(
         # Apply bilibili updates
         if "bilibili" in update:
             bdata = update["bilibili"]
+            date_preference_fields = {
+                "recommendation_date_preset",
+                "recommendation_date_start",
+                "recommendation_date_end",
+                "recommendation_date_weight",
+            }
+            if date_preference_fields & bdata.keys():
+                from openbiliclaw.recommendation.publication_preference import (
+                    PublicationDatePreference,
+                )
+
+                try:
+                    PublicationDatePreference(
+                        preset=bdata.get(
+                            "recommendation_date_preset",
+                            cfg.bilibili.recommendation_date_preset,
+                        ),
+                        start_date=bdata.get(
+                            "recommendation_date_start",
+                            cfg.bilibili.recommendation_date_start,
+                        ),
+                        end_date=bdata.get(
+                            "recommendation_date_end",
+                            cfg.bilibili.recommendation_date_end,
+                        ),
+                        weight=bdata.get(
+                            "recommendation_date_weight",
+                            cfg.bilibili.recommendation_date_weight,
+                        ),
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise HTTPException(
+                        status_code=400,
+                        detail={
+                            "error": "invalid_bilibili_recommendation_date",
+                            "message": str(exc),
+                        },
+                    ) from exc
             if "auth_method" in bdata:
                 cfg.bilibili.auth_method = str(bdata["auth_method"])
             if "cookie" in bdata:
@@ -18474,6 +18516,16 @@ def create_app(
                 cfg.bilibili.browser_executable = str(bdata["browser_executable"])
             if "browser_headed" in bdata:
                 cfg.bilibili.browser_headed = _as_bool(bdata["browser_headed"])
+            for key in (
+                "recommendation_date_preset",
+                "recommendation_date_start",
+                "recommendation_date_end",
+            ):
+                if key in bdata:
+                    value = bdata[key]
+                    setattr(cfg.bilibili, key, "" if value is None else str(value))
+            if "recommendation_date_weight" in bdata:
+                cfg.bilibili.recommendation_date_weight = bdata["recommendation_date_weight"]
 
         # Apply source updates
         if "sources" in update:

@@ -215,6 +215,14 @@ cookie = ""
 # 导致明明已登录却显示"未登录"。只有你的网络确实无法直连 B站 时才需要填，
 # 例如 "http://127.0.0.1:7890"。
 proxy = ""
+# B站推荐发布日期范围：all | last_7_days | last_30_days |
+# last_6_months | last_1_year | custom。
+recommendation_date_preset = "all"
+# custom 时填写 YYYY-MM-DD；留空表示该边界不限制。
+recommendation_date_start = ""
+recommendation_date_end = ""
+# 范围外候选的分数乘数为 (1 - weight)。默认 0.5；1 = 严格排除。
+recommendation_date_weight = 0.5
 
 [bilibili.browser]
 # agent-browser executable path (leave empty for global install)

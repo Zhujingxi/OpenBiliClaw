@@ -920,8 +920,23 @@ class RuntimeContext:
 
         # 6. Recommendation engine
         from openbiliclaw.recommendation.curator import PoolCurator
+        from openbiliclaw.recommendation.publication_preference import (
+            PublicationDatePreference,
+        )
 
-        new_curator = PoolCurator(self.database)
+        publication_preference = PublicationDatePreference(
+            preset=getattr(new_config.bilibili, "recommendation_date_preset", "all"),
+            start_date=getattr(new_config.bilibili, "recommendation_date_start", ""),
+            end_date=getattr(new_config.bilibili, "recommendation_date_end", ""),
+            weight=getattr(new_config.bilibili, "recommendation_date_weight", 0.5),
+        )
+        set_publication_preference = getattr(self.database, "set_publication_date_preference", None)
+        if callable(set_publication_preference):
+            set_publication_preference(publication_preference)
+        new_curator = PoolCurator(
+            self.database,
+            publication_preference=publication_preference,
+        )
 
         def _xhs_self_info_provider() -> dict[str, object] | None:
             state = self.memory_manager.load_discovery_runtime_state()
@@ -1017,6 +1032,7 @@ class RuntimeContext:
             concurrency=concurrency,
             database=self.database,
             embedding_service=new_embedding_service,
+            publication_preference=publication_preference,
             recent_lane_queries_per_run=RECENT_SUPPLY_LANE_QUERIES,
             recent_lane_page_size=RECENT_SUPPLY_LANE_PAGE_SIZE,
         )
@@ -1168,6 +1184,7 @@ class RuntimeContext:
                 page_size=int(getattr(bili_cfg, "page_size", 20)),
                 recent_lane_tasks_per_cycle=RECENT_SUPPLY_LANE_QUERIES,
                 recent_lane_page_size=RECENT_SUPPLY_LANE_PAGE_SIZE,
+                publication_preference=publication_preference,
                 presence_grace_seconds=int(
                     getattr(sched_cfg, "extension_disconnect_grace_seconds", 90)
                 ),

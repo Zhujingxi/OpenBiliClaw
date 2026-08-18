@@ -9328,6 +9328,16 @@ ${cardFeedbackBarHtml()}`;
       setCookieOverrideInput("biliCookie", config.bilibili?.cookie, " B 站");
       setInput("biliBrowserExecutable", config.bilibili?.browser_executable);
       setSelect("biliBrowserHeaded", config.bilibili?.browser_headed === true ? "on" : "off");
+      const bilibiliDateWeight = Number(config.bilibili?.recommendation_date_weight ?? 0.5);
+      setSelect("biliDatePreset", config.bilibili?.recommendation_date_preset || "all");
+      setInput("biliDateStart", config.bilibili?.recommendation_date_start || "");
+      setInput("biliDateEnd", config.bilibili?.recommendation_date_end || "");
+      setInput("biliDateWeight", Number.isFinite(bilibiliDateWeight) ? bilibiliDateWeight : 0.5);
+      let bilibiliDateMode = "custom";
+      if (bilibiliDateWeight >= 1) bilibiliDateMode = "strict";
+      else if (bilibiliDateWeight === 0.5) bilibiliDateMode = "soft";
+      setSelect("biliDateMode", bilibiliDateMode);
+      syncBilibiliDateFields();
       setSelect("bilibiliEnabled", config.sources?.bilibili?.enabled === false ? "off" : "on");
       setInput("bilibiliMinInterval", config.sources?.bilibili?.min_interval_minutes);
       setInput("sourcesBrowserCdp", config.sources?.browser?.cdp_url);
@@ -10489,6 +10499,27 @@ ${cardFeedbackBarHtml()}`;
       scheduleAutoLoadCheck();
     }
 
+    function syncBilibiliDateFields() {
+      const preset = getInput("biliDatePreset");
+      const mode = getInput("biliDateMode");
+      const customFields = $("#biliDateCustomFields");
+      const weightField = $("#biliDateWeightField");
+      if (customFields) customFields.hidden = preset !== "custom";
+      if (weightField) weightField.hidden = mode !== "custom";
+    }
+
+    safeBind("#biliDatePreset", "change", () => {
+      if (getInput("biliDatePreset") !== "all" && getInput("biliDateMode") === "soft") {
+        setSelect("biliDateMode", "strict");
+      }
+      syncBilibiliDateFields();
+      markSettingsDirty();
+    });
+    safeBind("#biliDateMode", "change", () => {
+      syncBilibiliDateFields();
+      markSettingsDirty();
+    });
+
     function buildConfigUpdate() {
       const logPath = splitLogPath(getInput("logPath"), state.config?.logging);
       const embeddingFallbackProvider = getInput("embeddingFallbackProvider");
@@ -10507,6 +10538,10 @@ ${cardFeedbackBarHtml()}`;
       const douyinCookie = getInput("douyinCookie");
       const twitterCookie = getInput("twitterCookie");
       const redditCookie = getInput("redditCookie");
+      const bilibiliDateMode = getInput("biliDateMode") || "soft";
+      let bilibiliDateWeight = 0.5;
+      if (bilibiliDateMode === "strict") bilibiliDateWeight = 1;
+      else if (bilibiliDateMode === "custom") bilibiliDateWeight = getFloatInput("biliDateWeight", 0.5);
       const llmDraft = state.llmDraft || normalizeLlmDraft(state.config?.llm || {});
       const llm = {
         routing_version: 2,
@@ -10533,7 +10568,11 @@ ${cardFeedbackBarHtml()}`;
           auth_method: $("#biliAuth").value,
           ...(cookie ? { cookie } : {}),
           browser_executable: getInput("biliBrowserExecutable"),
-          browser_headed: $("#biliBrowserHeaded").value === "on"
+          browser_headed: $("#biliBrowserHeaded").value === "on",
+          recommendation_date_preset: getInput("biliDatePreset") || "all",
+          recommendation_date_start: getInput("biliDateStart"),
+          recommendation_date_end: getInput("biliDateEnd"),
+          recommendation_date_weight: Math.min(1, Math.max(0, bilibiliDateWeight))
         },
         sources: {
           browser: {
@@ -11671,6 +11710,14 @@ ${cardFeedbackBarHtml()}`;
       if (submitBtn) {
         submitBtn.textContent = "保存中…";
       }
+      const dateValidationError = validateBilibiliDateSettings();
+      if (dateValidationError) {
+        settingsSaveInFlight = false;
+        renderSettingsDirty();
+        if (submitBtn) submitBtn.textContent = previousText;
+        showToast(dateValidationError);
+        return;
+      }
       $("#configStatus")?.removeAttribute("role");
       const endpoint = persistBackendEndpoint();
       const frontend = persistFrontendSettings();
@@ -11733,6 +11780,17 @@ ${cardFeedbackBarHtml()}`;
         renderSettingsDirty();
       }
     });
+
+    function validateBilibiliDateSettings() {
+      const preset = getInput("biliDatePreset") || "all";
+      const start = getInput("biliDateStart");
+      const end = getInput("biliDateEnd");
+      const weight = getFloatInput("biliDateWeight", 0.5);
+      if (preset === "custom" && !start && !end) return "自定义日期至少需要填写一个边界。";
+      if (start && end && start > end) return "发布日期开始日期不能晚于结束日期。";
+      if (!Number.isFinite(weight) || weight < 0 || weight > 1) return "发布日期权重必须在 0 到 1 之间。";
+      return "";
+    }
     const delightBanner = $("#delightBanner");
     if (delightBanner) {
         delightBanner.addEventListener("mouseenter", _stopDelightAutoAdvance);

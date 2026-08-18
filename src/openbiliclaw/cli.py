@@ -1097,6 +1097,7 @@ def _build_discovery_engine() -> Any:
     )
     from openbiliclaw.llm.concurrency import background_llm_concurrency
     from openbiliclaw.llm.service import LLMService, module_overrides_from_config
+    from openbiliclaw.recommendation.publication_preference import PublicationDatePreference
 
     memory = _build_memory_manager()
     database = _get_runtime_database()
@@ -1104,6 +1105,15 @@ def _build_discovery_engine() -> Any:
     from openbiliclaw.config import load_config
 
     cfg = load_config()
+    publication_preference = PublicationDatePreference(
+        preset=getattr(cfg.bilibili, "recommendation_date_preset", "all"),
+        start_date=getattr(cfg.bilibili, "recommendation_date_start", ""),
+        end_date=getattr(cfg.bilibili, "recommendation_date_end", ""),
+        weight=getattr(cfg.bilibili, "recommendation_date_weight", 0.5),
+    )
+    set_publication_preference = getattr(database, "set_publication_date_preference", None)
+    if callable(set_publication_preference):
+        set_publication_preference(publication_preference)
     # Topic-lifecycle serialization switch (spec Phase 4); default off.
     from openbiliclaw.discovery.strategies._utils import set_topic_lifecycle_serialization
 
@@ -1155,6 +1165,7 @@ def _build_discovery_engine() -> Any:
         concurrency=concurrency,
         database=database,
         embedding_service=embedding_service,
+        publication_preference=publication_preference,
         recent_lane_queries_per_run=RECENT_SUPPLY_LANE_QUERIES,
         recent_lane_page_size=RECENT_SUPPLY_LANE_PAGE_SIZE,
     )
@@ -6089,6 +6100,25 @@ def _format_autostart_config_status(cfg: Any) -> str:
     enabled = "开启" if bool(getattr(cfg.autostart, "enabled", False)) else "关闭"
     registered = "已注册" if state.registered else "未注册"
     return f"{enabled}（{registered}，{state.mechanism}）"
+
+
+def _format_bilibili_date_preference(config: Any) -> str:
+    """Render the Bilibili publication-date range for ``config-show``."""
+
+    preset = str(getattr(config, "recommendation_date_preset", "all") or "all")
+    labels = {
+        "all": "全部日期",
+        "last_7_days": "最近一周",
+        "last_30_days": "最近一个月",
+        "last_6_months": "最近半年",
+        "last_1_year": "最近一年",
+    }
+    if preset != "custom":
+        return labels.get(preset, preset)
+
+    start = str(getattr(config, "recommendation_date_start", "") or "") or "不限"
+    end = str(getattr(config, "recommendation_date_end", "") or "") or "不限"
+    return f"自定义：{start} 至 {end}"
 
 
 def _autostart_manager_or_exit() -> Any:
@@ -14914,6 +14944,11 @@ def config_show() -> None:
         (llm_label, llm_value or "未配置"),
         ("LLM 并发", str(cfg.llm.concurrency)),
         ("B站认证", cfg.bilibili.auth_method),
+        (
+            "B站发布日期范围",
+            _format_bilibili_date_preference(cfg.bilibili),
+        ),
+        ("B站发布日期权重", str(cfg.bilibili.recommendation_date_weight)),
         ("定时任务", "开启" if cfg.scheduler.enabled else "关闭"),
         ("停止后台 LLM 请求", "否" if cfg.scheduler.enabled else "是"),
         (

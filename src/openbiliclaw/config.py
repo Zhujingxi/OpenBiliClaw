@@ -899,7 +899,7 @@ def _gemini_api_key_from_env() -> str:
 
 @dataclass
 class BilibiliConfig:
-    """Bilibili connection configuration."""
+    """Bilibili connection and recommendation-date configuration."""
 
     auth_method: str = "cookie"
     cookie: str = ""
@@ -910,6 +910,12 @@ class BilibiliConfig:
     proxy: str = ""
     browser_executable: str = ""
     browser_headed: bool = False
+    # ``all`` keeps the legacy behavior. Date strings use YYYY-MM-DD and the
+    # weight is the penalty applied to out-of-window Bilibili candidates.
+    recommendation_date_preset: str = "all"
+    recommendation_date_start: str = ""
+    recommendation_date_end: str = ""
+    recommendation_date_weight: float = 0.5
 
 
 @dataclass
@@ -2136,6 +2142,10 @@ def _build_config(
         proxy=bili_raw.get("proxy", ""),
         browser_executable=browser_raw.get("executable", ""),
         browser_headed=browser_raw.get("headed", False),
+        recommendation_date_preset=bili_raw.get("recommendation_date_preset", "all"),
+        recommendation_date_start=bili_raw.get("recommendation_date_start", ""),
+        recommendation_date_end=bili_raw.get("recommendation_date_end", ""),
+        recommendation_date_weight=bili_raw.get("recommendation_date_weight", 0.5),
     )
 
     sources_browser_raw = sources_raw.get("browser", {})
@@ -3834,6 +3844,29 @@ def _collect_llm_instance_routing_issues(llm: LLMConfig) -> list[ConfigIssue]:
     return issues
 
 
+def _bilibili_date_preference_issue(config: Config) -> ConfigIssue | None:
+    """Return a blocking issue when Bilibili date preference is malformed."""
+
+    from openbiliclaw.recommendation.publication_preference import (
+        PublicationDatePreference,
+    )
+
+    try:
+        PublicationDatePreference(
+            preset=config.bilibili.recommendation_date_preset,
+            start_date=config.bilibili.recommendation_date_start,
+            end_date=config.bilibili.recommendation_date_end,
+            weight=config.bilibili.recommendation_date_weight,
+        )
+    except (TypeError, ValueError) as exc:
+        return ConfigIssue(
+            field="bilibili.recommendation_date",
+            message=f"Bilibili 推荐发布日期配置无效: {exc}",
+            severity="blocking",
+        )
+    return None
+
+
 def _collect_config_issues(config: Config) -> list[ConfigIssue]:
     """Collect non-fatal config issues to display as guidance."""
     issues: list[ConfigIssue] = []
@@ -3938,6 +3971,10 @@ def _collect_config_issues(config: Config) -> list[ConfigIssue]:
                 severity="blocking",
             )
         )
+
+    bilibili_date_issue = _bilibili_date_preference_issue(config)
+    if bilibili_date_issue is not None:
+        issues.append(bilibili_date_issue)
 
     if config.bilibili.auth_method not in _SUPPORTED_AUTH_METHODS:
         supported = ", ".join(sorted(_SUPPORTED_AUTH_METHODS))
@@ -4903,6 +4940,10 @@ def save_config(
         validate_bangumi_username,
     )
 
+    bilibili_date_issue = _bilibili_date_preference_issue(config)
+    if bilibili_date_issue is not None:
+        raise ConfigError(f"{bilibili_date_issue.field}: {bilibili_date_issue.message}")
+
     _validate_auto_update_check_interval(config.scheduler.auto_update_check_interval_hours)
     for field_name, allow_none in (
         ("source_incremental_hours", False),
@@ -5101,6 +5142,12 @@ def _render_config_toml(
             f"auth_method = {_toml_string(config.bilibili.auth_method)}",
             f"cookie = {_toml_string(config.bilibili.cookie)}",
             f"proxy = {_toml_string(config.bilibili.proxy)}",
+            "recommendation_date_preset = "
+            f"{_toml_string(config.bilibili.recommendation_date_preset)}",
+            "recommendation_date_start = "
+            f"{_toml_string(config.bilibili.recommendation_date_start)}",
+            f"recommendation_date_end = {_toml_string(config.bilibili.recommendation_date_end)}",
+            f"recommendation_date_weight = {config.bilibili.recommendation_date_weight:g}",
             "",
             "[bilibili.browser]",
             f"executable = {_toml_string(config.bilibili.browser_executable)}",
