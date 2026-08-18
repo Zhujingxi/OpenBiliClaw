@@ -458,6 +458,8 @@ body.chat-view-active .back-to-top {
   -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow: hidden;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 /* ── Recommend Header ─────────────────────────────────────── */
@@ -891,6 +893,7 @@ body.chat-view-active .back-to-top {
   line-height: 1.68;
   letter-spacing: 0.01em;
   margin-top: 2px;
+  white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
