@@ -13159,7 +13159,10 @@ class TestDialogueConfirmationCards:
         assert len(events) == 1
         assert json.loads(events[0]["metadata"])["settlement_ref"] == ref
 
-    def test_defer_persists_cooldown_without_creating_settlement(self, tmp_path: Path) -> None:
+    def test_defer_persists_cooldown_and_hides_from_pending_list(
+        self,
+        tmp_path: Path,
+    ) -> None:
         client, memory, _engine, _dialogue = self._build(tmp_path)
         hypothesis = "用户也许偏爱长视频"
         ref = self._seed_hypothesis(memory, hypothesis)
@@ -13176,6 +13179,34 @@ class TestDialogueConfirmationCards:
         state_path = memory._data_dir / "memory" / "dialogue_confirmation_state.json"
         state = json.loads(state_path.read_text(encoding="utf-8"))
         assert state["objects"][ref]["deferred_until"]
+        pending_refs = {
+            item["ref"] for item in client.get("/api/chat/pending-confirmations").json()["items"]
+        }
+        assert ref not in pending_refs
+
+    def test_defer_expiry_returns_hypothesis_to_pending_list(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        client, memory, _engine, _dialogue = self._build(tmp_path)
+        hypothesis = "冷却结束后可以重新确认"
+        ref = self._seed_hypothesis(memory, hypothesis)
+        self._create_card(client, turn_id="card-defer-expiry", ref=ref, hypothesis=hypothesis)
+
+        deferred = client.post(
+            "/api/chat/cards/card-defer-expiry/action",
+            json={"action": "defer"},
+        )
+        assert deferred.status_code == 200
+        state_path = memory._data_dir / "memory" / "dialogue_confirmation_state.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state["objects"][ref]["deferred_until"] = ""
+        state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+
+        pending_refs = {
+            item["ref"] for item in client.get("/api/chat/pending-confirmations").json()["items"]
+        }
+        assert ref in pending_refs
 
     @pytest.mark.parametrize(
         ("settle_action", "terminal_state"),
