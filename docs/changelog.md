@@ -4,6 +4,8 @@
 
 ---
 
+## 未发布
+
 ## v0.3.208：来源周期回拉逐源开关与发布同步（2026-08-18）
 
 - **发布状态**：后端 / 插件与聚合 Release 已发布为 `v0.3.208`，桌面安装包与 Docker 镜像发布中，详情见 [Release](https://github.com/whiteguo233/OpenBiliClaw/releases)。Chrome Web Store 已上传并提交 `0.3.208` 审核；Firefox AMO 已提交 listed `0.3.208`。聚合 Latest Release 已附扩展 ZIP / Safari DMG。

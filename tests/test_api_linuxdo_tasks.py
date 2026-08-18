@@ -588,6 +588,7 @@ def test_linuxdo_status_credentials_login_state_and_config_round_trip(
     assert config_before.status_code == 200
     assert config_before.json()["sources"]["linuxdo"] == {
         "enabled": True,
+        "incremental_enabled": False,
         "source_modes": ["search", "hot", "feed", "creator", "related"],
         "daily_search_budget": 0,
         "daily_hot_budget": 0,
