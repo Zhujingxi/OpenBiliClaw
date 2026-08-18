@@ -111,6 +111,14 @@ _DEFAULT_DISCOVERY_LIMIT = 30
 _DEFAULT_DELIGHT_QUEUE_LIMIT = 20
 _DEFAULT_PROACTIVE_PUSH_INTERVAL_SECONDS = 120
 _DEFAULT_SPECULATOR_IDLE_INTERVAL_MINUTES = 30
+# Self-imposed daemon LLM budget (issue #188). The scheduler counts background
+# LLM requests through LLMConcurrencyGate and pauses automatic loops when the
+# fixed window is exhausted. ``0`` disables the budget. 120 calls/hour is a
+# conservative engineering ceiling: it stops runaway multi-platform refresh
+# loops from burning paid quota while leaving normal single-user discovery
+# enough headroom (a full all-platform refresh wave is typically tens of calls).
+_DEFAULT_LLM_BUDGET_MAX_CALLS = 120
+_DEFAULT_LLM_BUDGET_WINDOW_SECONDS = 3600
 _DEFAULT_FEEDBACK_BATCH_THRESHOLD = 3
 _MIN_AUTO_UPDATE_CHECK_INTERVAL_HOURS = 1
 _DEFAULT_AUTO_UPDATE_CHECK_INTERVAL_HOURS = 6
@@ -948,6 +956,12 @@ class SchedulerConfig:
     enabled: bool = True
     pause_on_extension_disconnect: bool = False
     extension_disconnect_grace_seconds: int = _DEFAULT_EXTENSION_DISCONNECT_GRACE_SECONDS
+    # Self-imposed per-window cap on daemon-owned background LLM calls. When
+    # the cap is reached, ``ContinuousRefreshController`` pauses automatic
+    # LLM/embedding loops until the window rolls over (or the user raises/clears
+    # the cap / restarts the daemon). ``0`` disables the guard.
+    llm_budget_max_calls: int = _DEFAULT_LLM_BUDGET_MAX_CALLS
+    llm_budget_window_seconds: int = _DEFAULT_LLM_BUDGET_WINDOW_SECONDS
     discovery_cron: str = "0 */8 * * *"
     pool_target_count: int = 300
     copy_ready_target_count: int = _DEFAULT_COPY_READY_TARGET_COUNT
@@ -2395,6 +2409,16 @@ def _build_config(
                     "pause_on_extension_disconnect": _coerce_bool(
                         sched_raw.get("pause_on_extension_disconnect"),
                         default=False,
+                    ),
+                    "llm_budget_max_calls": _normalize_scheduler_int(
+                        sched_raw.get("llm_budget_max_calls"),
+                        default=_DEFAULT_LLM_BUDGET_MAX_CALLS,
+                        min_value=0,
+                    ),
+                    "llm_budget_window_seconds": _normalize_scheduler_int(
+                        sched_raw.get("llm_budget_window_seconds"),
+                        default=_DEFAULT_LLM_BUDGET_WINDOW_SECONDS,
+                        min_value=60,
                     ),
                     "profile_consolidation_enabled": _coerce_bool(
                         sched_raw.get("profile_consolidation_enabled"),
@@ -5190,6 +5214,8 @@ def _render_config_toml(
             "",
             "[scheduler]",
             f"enabled = {_toml_bool(config.scheduler.enabled)}",
+            f"llm_budget_max_calls = {config.scheduler.llm_budget_max_calls}",
+            f"llm_budget_window_seconds = {config.scheduler.llm_budget_window_seconds}",
             "pause_on_extension_disconnect = "
             f"{_toml_bool(config.scheduler.pause_on_extension_disconnect)}",
             "extension_disconnect_grace_seconds = "

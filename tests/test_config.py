@@ -92,6 +92,8 @@ class TestConfigDefaults:
         assert config.bilibili.auth_method == "cookie"
         assert config.bilibili.proxy == ""  # direct connection by default
         assert config.scheduler.enabled is True
+        assert config.scheduler.llm_budget_max_calls == 120
+        assert config.scheduler.llm_budget_window_seconds == 3600
         assert config.scheduler.discovery_cron == "0 */8 * * *"
         assert config.scheduler.pool_target_count == 300
         assert isinstance(config.autostart, AutostartConfig)
@@ -1942,6 +1944,8 @@ def test_save_config_round_trips_advanced_scheduler_and_logging_fields(
     """Popup/API saves must not drop advanced fields that the UI may not edit."""
     config_path = tmp_path / "config.toml"
     config = Config()
+    config.scheduler.llm_budget_max_calls = 30
+    config.scheduler.llm_budget_window_seconds = 1800
     config.scheduler.speculation_interval_minutes = 22
     config.scheduler.speculation_ttl_days = 8
     config.scheduler.speculation_cooldown_days = 9
@@ -1964,6 +1968,8 @@ def test_save_config_round_trips_advanced_scheduler_and_logging_fields(
     save_config(config, config_path)
     loaded = load_config(config_path)
 
+    assert loaded.scheduler.llm_budget_max_calls == 30
+    assert loaded.scheduler.llm_budget_window_seconds == 1800
     assert loaded.scheduler.speculation_interval_minutes == 22
     assert loaded.scheduler.speculation_ttl_days == 8
     assert loaded.scheduler.speculation_cooldown_days == 9

@@ -442,6 +442,14 @@ min_interval_minutes = 10
 [scheduler]
 # Enable scheduled content discovery
 enabled = true
+# Self-imposed background LLM call budget (issue #188). The daemon counts
+# scheduler-owned LLM requests through the shared concurrency gate; when
+# max_calls is reached inside window_seconds, automatic discovery loops pause
+# until the window rolls over (manual CLI/API commands still work). Embedding
+# endpoint outages are handled separately by EmbeddingService's circuit breaker.
+# 0 disables this guard. Defaults are deliberately conservative for paid APIs.
+llm_budget_max_calls = 120
+llm_budget_window_seconds = 3600
 # Optional cost-saving guard for daemon-owned background LLM / embedding work.
 # When true, refresh / pool precompute / account sync / speculation / proactive
 # push only run while the browser extension has an active runtime-stream

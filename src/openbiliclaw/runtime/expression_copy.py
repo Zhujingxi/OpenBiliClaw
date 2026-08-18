@@ -25,11 +25,13 @@ class ExpressionCopyCoordinator:
         drain_limit: int = 60,
         zero_progress_backoff_seconds: float = 15.0,
         safety_wake_seconds: float = 60.0,
+        work_allowed: Any = None,
         time_fn: Any = time.monotonic,
         wait_fn: Any = asyncio.sleep,
     ) -> None:
         self.pending_count_provider = pending_count_provider
         self.drain_callback = drain_callback
+        self.work_allowed = work_allowed
         self.min_items = max(1, int(min_items))
         self.max_wait_seconds = max(0.0, float(max_wait_seconds))
         self.drain_limit = max(1, min(60, int(drain_limit)))
@@ -84,6 +86,10 @@ class ExpressionCopyCoordinator:
                     await self._settle_copy_task()
                     if self._stopping:
                         break
+                if self.work_allowed is not None and not bool(self.work_allowed()):
+                    self.state = "paused"
+                    await self._wait_for_activity(self.safety_wake_seconds)
+                    continue
 
                 pending = self._pending_count()
                 now = float(self.time_fn())
