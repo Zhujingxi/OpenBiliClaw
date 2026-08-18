@@ -1535,6 +1535,7 @@ class RuntimeContext:
             safety_wake_seconds=float(
                 getattr(new_config.scheduler, "refresh_check_interval_seconds", 60)
             ),
+            work_allowed=lambda: new_runtime_controller._llm_work_allowed(),  # noqa: SLF001
         )
         new_runtime_controller.expression_copy_coordinator = expression_coordinator
         set_copy_callback = getattr(new_recommendation_engine, "set_copy_pending_callback", None)

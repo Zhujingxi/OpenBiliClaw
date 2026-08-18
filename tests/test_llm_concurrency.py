@@ -636,3 +636,32 @@ async def test_starvation_relief_does_not_fire_when_refill_makes_progress(
     gate.update_inventory(available=20, target=20)
     await asyncio.wait_for(parked.wait(), timeout=1)
     await parked_task
+
+
+async def test_background_call_budget_counts_only_background_llm_requests() -> None:
+    gate = LLMConcurrencyGate(4)
+
+    async with gate.slot(caller="soul.dialogue"):
+        pass  # interactive; not counted
+    async with gate.slot(caller="soul.preference"):
+        pass  # background; counted
+    async with gate.slot(caller="discovery.keyword_planner"):
+        pass  # background; counted
+
+    assert gate.background_call_count(3600) == 2
+    assert gate.background_call_count(0) == 2
+
+
+async def test_background_call_budget_reset_starts_fresh_window() -> None:
+    gate = LLMConcurrencyGate(4)
+
+    async with gate.slot(caller="soul.preference"):
+        pass
+    assert gate.background_call_count(3600) == 1
+
+    gate.reset_background_budget()
+    assert gate.background_call_count(3600) == 0
+
+    async with gate.slot(caller="soul.preference"):
+        pass
+    assert gate.background_call_count(3600) == 1

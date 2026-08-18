@@ -88,13 +88,15 @@
 | Issue #153 L2 缓存版本化 BLOB | ✅ | `EmbeddingCache` 改为版本化 little-endian float32 二进制存储（`encoding=1`，`OBLV` 头 + dtype/dimension 元数据），4096 维向量从约 90 KiB JSON 降到约 16 KiB。读取对 legacy JSON（`encoding=0`）、BLOB 与 mixed-format（旧版回写）内容自适应解码，单行损坏降级为 cache miss。`migrate_encoding()` 按小批次幂等迁移（中断可续跑，进度即 `encoding` 列本身），损坏行标记 `encoding=-1` 后跳过；schema 升级保留旧行并补齐 `dimension` / `created_at` / `last_accessed_at` 元数据列 |
 | Issue #153 L2 容量策略与 namespace 生命周期 | ✅ | 新增可配置磁盘预算（`[llm.embedding].cache_max_bytes`，默认 0 = 不设上限）与高低水位；超高位后按「非 active namespace（含 legacy 行）→ active namespace 最旧/最近未访问」顺序批量淘汰到低位，写路径按节奏抽样检查避免逐行开销。`last_accessed_at` 每次命中最多每分钟刷新一次。`delete_inactive()`（含 dry-run / keep_legacy）显式回收失效 namespace，`compact()` 执行 WAL checkpoint + `VACUUM INTO` + `integrity_check` + 原子替换做物理回收；`stats()` / `EmbeddingService.l2_cache_stats()` 暴露行数、逻辑载荷、主文件/WAL 大小、namespace 分布、水位与最近维护记录 |
 | Issue #153 L2 运行时准备 | ✅ | `EmbeddingService` 构造时注册自身 provenance namespace 为 active，并执行一次/进程/库的运行时准备（JSON→BLOB 迁移 + 首轮预算维护，`_PREPARED_DB_PATHS` 去重）；任何准备失败只降级为普通缓存，不影响推荐正确性。CLI `embedding-cache-stats` / `embedding-cache-clean`（默认 dry-run，`--apply` 生效，`--keep-model` / `--keep-legacy` / `--no-compact` / `--batch-size`）提供诊断与一键回收入口 |
+| Issue #188 Embedding 熔断 | ✅ | `EmbeddingService` 新增 circuit breaker：连续失败（异常或空向量）达到阈值（默认 3）后进入冷却窗口（默认 60s），冷却期内 `embed` / `embed_document` / `embed_image` / `probe` 直接返回 `[]` / `False`，不再触碰死端点，也不再逐条打 full-traceback WARN；冷却结束自动重探。阈值与冷却秒数可通过构造参数覆盖，便于测试与运维调参 |
 
 ### Embedding provenance API
 
 `EmbeddingService.embedding_fingerprint`、`embedding_model`、`embedding_provider` 和
 `embedding_dimension` 为推荐层提供当前向量命名空间；`embed_document()` 与
 `lookup_cached_document()` 保留完整文档 key，专供弹幕摘要使用。`embed()`、`embed_image()`
-和文档 embedding 在 provider 返回空向量时都不写完成缓存。`EmbeddingService.l2_cache` /
+和文档 embedding 在 provider 返回空向量时都不写完成缓存；连续失败会触发熔断冷却，防止
+不可达 embedding 端点刷日志或反复出网。`EmbeddingService.l2_cache` /
 `l2_cache_stats()` 把 L2 持久化缓存暴露给诊断与维护面（CLI 清理等），namespace 注册保持一致。
 
 ## 公开 API

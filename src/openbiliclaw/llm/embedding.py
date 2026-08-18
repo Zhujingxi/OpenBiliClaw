@@ -1106,10 +1106,16 @@ class EmbeddingService:
         cache_max_bytes: int = 0,
         cache_high_watermark: float = 0.9,
         cache_low_watermark: float = 0.7,
+        breaker_failure_threshold: int = 3,
+        breaker_cooldown_seconds: float = 60.0,
     ) -> None:
         self._provider = provider
         self._model = model
         self._cache_model = cache_model or model
+        self._breaker_failure_threshold = max(1, int(breaker_failure_threshold))
+        self._breaker_cooldown_seconds = max(0.0, float(breaker_cooldown_seconds))
+        self._breaker_failure_count = 0
+        self._breaker_open_until = 0.0
         explicit_provenance = str(provenance or "").strip()
         provider_endpoint = endpoint or _provider_endpoint(provider)
         provider_name = logical_provider or _provider_logical_name(provider)
@@ -1298,6 +1304,42 @@ class EmbeddingService:
             return []
         return self._lookup_cache_key(key)
 
+    def _embedding_breaker_open(self) -> bool:
+        """Return True while the provider is in a cooldown after repeated failures.
+
+        The breaker is a cheap guard against an unreachable embedding endpoint:
+        once the threshold is hit, every call returns ``[]`` without touching
+        the provider until the cooldown elapses, then the next call re-probes
+        naturally.
+        """
+        now = time.monotonic()
+        if now < self._breaker_open_until:
+            return True
+        if self._breaker_open_until:
+            # Cooldown expired: reset failure state so the next call probes
+            # the provider again.
+            self._breaker_open_until = 0.0
+            self._breaker_failure_count = 0
+            logger.info("Embedding breaker closed; provider will be re-probed")
+        return False
+
+    def _register_embedding_failure(self) -> None:
+        """Count a provider failure and open the breaker at the threshold.
+
+        The failure is deliberately logged once per open (without a full
+        traceback) instead of once per call, so an unreachable endpoint cannot
+        flood the log with per-call stack traces.
+        """
+        self._breaker_failure_count += 1
+        if self._breaker_failure_count >= self._breaker_failure_threshold:
+            self._breaker_open_until = time.monotonic() + self._breaker_cooldown_seconds
+            logger.warning(
+                "Embedding provider failed %d consecutive times; opening circuit "
+                "breaker for %.0fs (skipping embedding calls until re-probe).",
+                self._breaker_failure_count,
+                self._breaker_cooldown_seconds,
+            )
+
     async def embed(self, text: str) -> list[float]:
         """Get embedding for text. Checks L1 → L2 → API."""
         key = text.strip().lower()[:200]
@@ -1308,13 +1350,15 @@ class EmbeddingService:
         cached = self.lookup_cached(text)
         if cached:
             return cached
+        if self._embedding_breaker_open():
+            return []
 
         # L3: API call (throttled — see __init__ semaphore comment)
         async with self._provider_semaphore:
             try:
                 vector = await self._provider.embed(key, model=self._model)
             except Exception:
-                logger.warning("Embedding failed for: %s", key[:50], exc_info=True)
+                self._register_embedding_failure()
                 return []
 
         # Never cache an empty vector. Empty means the provider failed
@@ -1324,16 +1368,10 @@ class EmbeddingService:
         # poisoned this way before this guard existed — top user
         # interests like 游戏攻略 / 洛克王国 / 金铲铲之战 were affected
         # and the cascade silently zero'd every embedding-derived
-        # similarity signal for the most relevant content. Surface a
-        # WARN per occurrence so the failure mode is visible at the
-        # service layer, not buried in provider-level logs.
+        # similarity signal for the most relevant content. Treat empty as a
+        # breaker failure so repeated dead-end responses also cool down.
         if not vector:
-            logger.warning(
-                "Embedding service got empty vector for key=%r — "
-                "provider returned [] (likely transient failure). "
-                "Skipping cache write so the next call retries.",
-                key[:80],
-            )
+            self._register_embedding_failure()
             return []
 
         self._store_vector(key, vector)
@@ -1362,18 +1400,16 @@ class EmbeddingService:
         cached = self.lookup_cached_document(text)
         if cached:
             return cached
+        if self._embedding_breaker_open():
+            return []
         async with self._provider_semaphore:
             try:
                 vector = await self._provider.embed(key, model=self._model)
             except Exception:
-                logger.warning("Document embedding failed for: %s", key[:80], exc_info=True)
+                self._register_embedding_failure()
                 return []
         if not vector:
-            logger.warning(
-                "Embedding service got empty document vector for key=%r — "
-                "skipping cache write so the next call retries.",
-                key[:80],
-            )
+            self._register_embedding_failure()
             return []
         self._store_vector(key, vector)
         return vector
@@ -1403,6 +1439,8 @@ class EmbeddingService:
         cached = self._lookup_cache_key(key)
         if cached:
             return cached
+        if self._embedding_breaker_open():
+            return []
 
         embed_image = getattr(self._provider, "embed_image", None)
         if not callable(embed_image):
@@ -1416,21 +1454,12 @@ class EmbeddingService:
                     model=self._model,
                 )
             except Exception:
-                logger.warning(
-                    "Image embedding failed for key=%s",
-                    key[:50],
-                    exc_info=True,
-                )
+                self._register_embedding_failure()
                 return []
 
         vector = _coerce_embedding_vector(raw_vector) or []
         if not vector:
-            logger.warning(
-                "Embedding service got empty image vector for key=%r — "
-                "provider returned [] (likely transient failure). "
-                "Skipping cache write so the next call retries.",
-                key[:80],
-            )
+            self._register_embedding_failure()
             return []
 
         self._store_vector(key, vector)
@@ -1447,13 +1476,18 @@ class EmbeddingService:
         behind its own short TTL + single-flight, so the extra provider
         round-trip happens at most a couple of times a minute.
         """
+        if self._embedding_breaker_open():
+            return False
         async with self._provider_semaphore:
             try:
                 vector = await self._provider.embed(self._PROBE_TEXT, model=self._model)
             except Exception:
-                logger.debug("Embedding readiness probe failed", exc_info=True)
+                self._register_embedding_failure()
                 return False
-        return bool(vector)
+        if not vector:
+            self._register_embedding_failure()
+            return False
+        return True
 
     async def are_similar(self, text_a: str, text_b: str) -> bool:
         """Check if two texts are semantically similar above threshold."""

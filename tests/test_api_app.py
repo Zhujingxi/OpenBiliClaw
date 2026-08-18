@@ -15687,6 +15687,8 @@ class TestEmbeddingAndCompatProviderE2E:
                     "discovery_limit": 17,
                     "delight_queue_limit": 37,
                     "proactive_push_interval_seconds": 155,
+                    "llm_budget_max_calls": 45,
+                    "llm_budget_window_seconds": 1800,
                     "speculator_idle_interval_minutes": 11,
                     "speculation_interval_minutes": 21,
                     "speculation_ttl_days": 8,
@@ -15776,6 +15778,10 @@ class TestEmbeddingAndCompatProviderE2E:
         assert cfg.scheduler.delight_queue_limit == 37
         assert response.json()["config"]["scheduler"]["delight_queue_limit"] == 37
         assert cfg.scheduler.proactive_push_interval_seconds == 155
+        assert cfg.scheduler.llm_budget_max_calls == 45
+        assert cfg.scheduler.llm_budget_window_seconds == 1800
+        assert response.json()["config"]["scheduler"]["llm_budget_max_calls"] == 45
+        assert response.json()["config"]["scheduler"]["llm_budget_window_seconds"] == 1800
         assert cfg.scheduler.speculator_idle_interval_minutes == 11
         assert cfg.scheduler.speculation_interval_minutes == 21
         assert cfg.scheduler.auto_update_enabled is True

@@ -6,6 +6,7 @@
 
 ## 未发布
 
+- **后台 LLM 自设预算 + Embedding 熔断（issue #188）**：`[scheduler]` 新增 `llm_budget_max_calls`（默认 120 / 小时）与 `llm_budget_window_seconds`（默认 3600），daemon 通过共享 `LLMConcurrencyGate` 统计后台 LLM 请求，窗口内达到上限即暂停自动发现 / 补池 / 画像等循环并打一条 WARNING，避免无人值守时持续烧 DeepSeek 等付费额度；手动 CLI / API 请求不受影响，`0` 可关闭预算。`EmbeddingService` 新增连续失败熔断：默认连续 3 次异常或空向量后冷却 60 秒，冷却期内不再触碰不可达 embedding 端点、不再逐条打 full-traceback WARN，冷却后自动重探。
 - **修复 defer(暂缓) 后假设仍显示在待聊确认（issue #189）**：`/api/chat/pending-confirmations` 现在读取 `memory/dialogue_confirmation_state.json` 中的 `deferred_until`，冷却结束前已 defer 的假设不再出现在待聊列表；冷却到期后自动恢复。用户主动 open 仍按原契约绕过冷却，不会因列表过滤而误 404。
 - **修复停用知乎来源后扩展仍打开知乎任务标签页（issue #187）**：`/api/sources/zhihu/next-task` 现在在领取自动任务前动态检查 `[sources.zhihu].enabled`；来源关闭时返回 bodyless 204，scheduler-owned 增量任务会被清理避免卡住其它来源，手动 pending 任务保留、重新开启后可恢复。`SourceIncrementalSync` 的 active 任务复核同步忽略已停用来源，避免遗留知乎任务阻塞周期调度。
 - **修复 `--llm-preset` 写入 `openai` 导致中转站 DeepSeek 推理 token 耗尽（issue #175）**：`agent_bootstrap` 的 OpenAI 兼容 preset（`relay` / `kimi` / `qwen` / ...）现在隐式写入 `provider_type="openai_compatible"`，使通用 OpenAI 兼容适配器能对中转站 DeepSeek 关闭 thinking；历史 `--provider openai` 与 preset 组合自动 remap，显式非兼容 provider 仍冲突报错。同步更新 `docs/agent-install.md` 的 preset 说明。

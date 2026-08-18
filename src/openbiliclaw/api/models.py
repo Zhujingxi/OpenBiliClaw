@@ -2258,6 +2258,8 @@ class SourcesConfigOut(BaseModel):
 
 class SchedulerConfigOut(BaseModel):
     enabled: bool = True
+    llm_budget_max_calls: int = 120
+    llm_budget_window_seconds: int = 3600
     pause_on_extension_disconnect: bool = False
     extension_disconnect_grace_seconds: int = 90
     discovery_cron: str = "0 */8 * * *"
