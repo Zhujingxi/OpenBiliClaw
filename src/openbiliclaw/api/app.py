@@ -16725,6 +16725,7 @@ def create_app(
                 ),
                 xiaohongshu=XiaohongshuSourceConfigOut(
                     enabled=cfg.sources.xiaohongshu.enabled,
+                    incremental_enabled=cfg.sources.xiaohongshu.incremental_enabled,
                     daily_search_budget=cfg.sources.xiaohongshu.daily_search_budget,
                     daily_creator_budget=cfg.sources.xiaohongshu.daily_creator_budget,
                     task_interval_seconds=cfg.sources.xiaohongshu.task_interval_seconds,
@@ -16732,6 +16733,7 @@ def create_app(
                 ),
                 douyin=DouyinSourceConfigOut(
                     enabled=cfg.sources.douyin.enabled,
+                    incremental_enabled=cfg.sources.douyin.incremental_enabled,
                     mode=cfg.sources.douyin.mode,
                     cookie=_mask(dy_cookie),
                     cookie_env=cfg.sources.douyin.cookie_env,
@@ -16743,6 +16745,7 @@ def create_app(
                 ),
                 youtube=YoutubeSourceConfigOut(
                     enabled=cfg.sources.youtube.enabled,
+                    incremental_enabled=cfg.sources.youtube.incremental_enabled,
                     daily_search_budget=cfg.sources.youtube.daily_search_budget,
                     daily_trending_budget=cfg.sources.youtube.daily_trending_budget,
                     daily_channel_budget=cfg.sources.youtube.daily_channel_budget,
@@ -16762,6 +16765,7 @@ def create_app(
                 ),
                 zhihu=ZhihuSourceConfigOut(
                     enabled=cfg.sources.zhihu.enabled,
+                    incremental_enabled=cfg.sources.zhihu.incremental_enabled,
                     source_modes=list(cfg.sources.zhihu.source_modes),
                     daily_search_budget=cfg.sources.zhihu.daily_search_budget,
                     daily_hot_budget=cfg.sources.zhihu.daily_hot_budget,
@@ -16773,6 +16777,7 @@ def create_app(
                 ),
                 reddit=RedditSourceConfigOut(
                     enabled=cfg.sources.reddit.enabled,
+                    incremental_enabled=cfg.sources.reddit.incremental_enabled,
                     backend=cfg.sources.reddit.backend,
                     source_modes=list(cfg.sources.reddit.source_modes),
                     daily_search_budget=cfg.sources.reddit.daily_search_budget,
@@ -16797,6 +16802,7 @@ def create_app(
                 ),
                 linuxdo=LinuxdoSourceConfigOut(
                     enabled=cfg.sources.linuxdo.enabled,
+                    incremental_enabled=cfg.sources.linuxdo.incremental_enabled,
                     source_modes=list(cfg.sources.linuxdo.source_modes),
                     daily_search_budget=cfg.sources.linuxdo.daily_search_budget,
                     daily_hot_budget=cfg.sources.linuxdo.daily_hot_budget,
@@ -16809,6 +16815,7 @@ def create_app(
                 ),
                 v2ex=V2EXSourceConfigOut(
                     enabled=cfg.sources.v2ex.enabled,
+                    incremental_enabled=cfg.sources.v2ex.incremental_enabled,
                     username=cfg.sources.v2ex.username,
                     access_token_set=bool(
                         str(os.environ.get(cfg.sources.v2ex.token_env, "") or "").strip()
@@ -18492,6 +18499,10 @@ def create_app(
                 if isinstance(xhs_data, dict):
                     if "enabled" in xhs_data:
                         cfg.sources.xiaohongshu.enabled = _as_bool(xhs_data["enabled"])
+                    if "incremental_enabled" in xhs_data:
+                        cfg.sources.xiaohongshu.incremental_enabled = _as_bool(
+                            xhs_data["incremental_enabled"]
+                        )
                     for key in (
                         "daily_search_budget",
                         "daily_creator_budget",
@@ -18505,6 +18516,10 @@ def create_app(
                 if isinstance(dy_data, dict):
                     if "enabled" in dy_data:
                         cfg.sources.douyin.enabled = _as_bool(dy_data["enabled"])
+                    if "incremental_enabled" in dy_data:
+                        cfg.sources.douyin.incremental_enabled = _as_bool(
+                            dy_data["incremental_enabled"]
+                        )
                     if "mode" in dy_data:
                         cfg.sources.douyin.mode = str(dy_data["mode"])
                     if "cookie_env" in dy_data:
@@ -18562,6 +18577,10 @@ def create_app(
                 if isinstance(yt_data, dict):
                     if "enabled" in yt_data:
                         cfg.sources.youtube.enabled = _as_bool(yt_data["enabled"])
+                    if "incremental_enabled" in yt_data:
+                        cfg.sources.youtube.incremental_enabled = _as_bool(
+                            yt_data["incremental_enabled"]
+                        )
                     for key in (
                         "daily_search_budget",
                         "daily_trending_budget",
@@ -18635,6 +18654,10 @@ def create_app(
                 if isinstance(zh_data, dict):
                     if "enabled" in zh_data:
                         cfg.sources.zhihu.enabled = _as_bool(zh_data["enabled"])
+                    if "incremental_enabled" in zh_data:
+                        cfg.sources.zhihu.incremental_enabled = _as_bool(
+                            zh_data["incremental_enabled"]
+                        )
                     if "source_modes" in zh_data:
                         raw_modes = zh_data["source_modes"]
                         if isinstance(raw_modes, str):
@@ -18666,6 +18689,10 @@ def create_app(
                 if isinstance(reddit_data, dict):
                     if "enabled" in reddit_data:
                         cfg.sources.reddit.enabled = _as_bool(reddit_data["enabled"])
+                    if "incremental_enabled" in reddit_data:
+                        cfg.sources.reddit.incremental_enabled = _as_bool(
+                            reddit_data["incremental_enabled"]
+                        )
                     if "backend" in reddit_data:
                         backend = str(reddit_data["backend"] or "").strip().lower()
                         if backend in {"openbiliclaw", "plugin"}:
@@ -18882,6 +18909,10 @@ def create_app(
                 if isinstance(linuxdo_data, dict):
                     if "enabled" in linuxdo_data:
                         cfg.sources.linuxdo.enabled = _as_bool(linuxdo_data["enabled"])
+                    if "incremental_enabled" in linuxdo_data:
+                        cfg.sources.linuxdo.incremental_enabled = _as_bool(
+                            linuxdo_data["incremental_enabled"]
+                        )
                     if "source_modes" in linuxdo_data:
                         raw_modes = linuxdo_data["source_modes"]
                         if not isinstance(raw_modes, list):
@@ -18948,6 +18979,7 @@ def create_app(
 
                     allowed_v2ex_fields = {
                         "enabled",
+                        "incremental_enabled",
                         "username",
                         "access_token",
                         "token_env",
@@ -18968,6 +19000,8 @@ def create_app(
                     v2ex_cfg = cfg.sources.v2ex
                     if "enabled" in v2ex_data:
                         v2ex_cfg.enabled = _as_bool(v2ex_data["enabled"])
+                    if "incremental_enabled" in v2ex_data:
+                        v2ex_cfg.incremental_enabled = _as_bool(v2ex_data["incremental_enabled"])
                     if "username" in v2ex_data:
                         try:
                             v2ex_cfg.username = validate_v2ex_username(v2ex_data["username"])

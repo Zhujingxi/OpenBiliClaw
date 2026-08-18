@@ -244,13 +244,24 @@ class TestConfigDefaults:
         assert config.scheduler.youtube_incremental_hours is None
         assert config.scheduler.zhihu_incremental_hours is None
         assert config.scheduler.reddit_incremental_hours is None
+        for source in (
+            config.sources.xiaohongshu,
+            config.sources.douyin,
+            config.sources.youtube,
+            config.sources.zhihu,
+            config.sources.reddit,
+            config.sources.linuxdo,
+            config.sources.v2ex,
+        ):
+            assert source.incremental_enabled is False
 
     def test_example_config_disables_all_periodic_source_sync_by_default(self) -> None:
         example_path = Path(__file__).parents[1] / "config.example.toml"
 
         with example_path.open("rb") as handle:
-            scheduler = tomllib.load(handle)["scheduler"]
+            example = tomllib.load(handle)
 
+        scheduler = example["scheduler"]
         assert scheduler["source_incremental_enabled"] is False
         assert scheduler["source_incremental_hours"] == 24
         assert "xhs_incremental_hours" not in scheduler
@@ -258,6 +269,9 @@ class TestConfigDefaults:
         assert "youtube_incremental_hours" not in scheduler
         assert "zhihu_incremental_hours" not in scheduler
         assert "reddit_incremental_hours" not in scheduler
+        sources = example["sources"]
+        for slug in ("xiaohongshu", "douyin", "youtube", "zhihu", "reddit", "linuxdo", "v2ex"):
+            assert sources[slug]["incremental_enabled"] is False
 
     def test_default_config_persists_periodic_source_sync_disabled(self, tmp_path: Path) -> None:
         target = tmp_path / "config.toml"
@@ -296,6 +310,31 @@ class TestConfigDefaults:
         assert loaded.scheduler.reddit_incremental_hours == 42
         assert "xhs_incremental_hours = 0" in rendered
         assert "youtube_incremental_hours" not in rendered
+
+    def test_source_incremental_enabled_per_source_round_trip(self, tmp_path: Path) -> None:
+        config = Config()
+        config.sources.xiaohongshu.incremental_enabled = True
+        config.sources.douyin.incremental_enabled = True
+        config.sources.youtube.incremental_enabled = False
+        config.sources.zhihu.incremental_enabled = True
+        config.sources.reddit.incremental_enabled = False
+        config.sources.linuxdo.incremental_enabled = True
+        config.sources.v2ex.incremental_enabled = False
+
+        target = tmp_path / "config.toml"
+        save_config(config, target)
+        rendered = target.read_text(encoding="utf-8")
+        loaded = load_config(target)
+
+        assert loaded.sources.xiaohongshu.incremental_enabled is True
+        assert loaded.sources.douyin.incremental_enabled is True
+        assert loaded.sources.youtube.incremental_enabled is False
+        assert loaded.sources.zhihu.incremental_enabled is True
+        assert loaded.sources.reddit.incremental_enabled is False
+        assert loaded.sources.linuxdo.incremental_enabled is True
+        assert loaded.sources.v2ex.incremental_enabled is False
+        assert "incremental_enabled = true" in rendered
+        assert "incremental_enabled = false" in rendered
 
     def test_scheduler_source_incremental_env_fields_are_filtered_to_flat_keys(
         self,

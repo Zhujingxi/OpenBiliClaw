@@ -2096,6 +2096,7 @@ class BilibiliSourceConfigOut(BaseModel):
 
 class XiaohongshuSourceConfigOut(BaseModel):
     enabled: bool = False
+    incremental_enabled: bool = False
     daily_search_budget: int = 20
     daily_creator_budget: int = 0
     task_interval_seconds: int = 1200
@@ -2104,6 +2105,7 @@ class XiaohongshuSourceConfigOut(BaseModel):
 
 class DouyinSourceConfigOut(BaseModel):
     enabled: bool = False
+    incremental_enabled: bool = False
     mode: str = "direct"
     # Resolved Cookie header (env override, else data/douyin_cookie.json).
     # Read-only mirror for settings pages — always masked on API reads.
@@ -2119,6 +2121,7 @@ class DouyinSourceConfigOut(BaseModel):
 
 class YoutubeSourceConfigOut(BaseModel):
     enabled: bool = False
+    incremental_enabled: bool = False
     daily_search_budget: int = 0
     daily_trending_budget: int = 0
     daily_channel_budget: int = 0
@@ -2143,6 +2146,7 @@ class TwitterSourceConfigOut(BaseModel):
 
 class ZhihuSourceConfigOut(BaseModel):
     enabled: bool = False
+    incremental_enabled: bool = False
     source_modes: list[str] = Field(
         default_factory=lambda: ["search", "hot", "feed", "creator", "related"]
     )
@@ -2157,6 +2161,7 @@ class ZhihuSourceConfigOut(BaseModel):
 
 class RedditSourceConfigOut(BaseModel):
     enabled: bool = False
+    incremental_enabled: bool = False
     backend: str = "rdt"
     source_modes: list[str] = Field(
         default_factory=lambda: ["search", "hot", "subreddit", "related"]
@@ -2188,6 +2193,7 @@ class BangumiSourceConfigOut(BaseModel):
 
 class LinuxdoSourceConfigOut(BaseModel):
     enabled: bool = False
+    incremental_enabled: bool = False
     source_modes: list[str] = Field(
         default_factory=lambda: ["search", "hot", "feed", "creator", "related"]
     )
@@ -2203,6 +2209,7 @@ class LinuxdoSourceConfigOut(BaseModel):
 
 class V2EXSourceConfigOut(BaseModel):
     enabled: bool = False
+    incremental_enabled: bool = False
     username: str = ""
     access_token_set: bool = False
     token_env: str = "OPENBILICLAW_V2EX_TOKEN"

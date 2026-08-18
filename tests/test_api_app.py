@@ -15464,6 +15464,58 @@ class TestEmbeddingAndCompatProviderE2E:
         assert cfg.scheduler.douyin_incremental_hours == 0
         assert reset_douyin.json()["config"]["scheduler"]["douyin_incremental_hours"] == 0
 
+    def test_source_incremental_enabled_per_source_api_round_trip(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig
+
+        cfg = Config(llm=LLMConfig(openai=LLMProviderConfig(api_key="sk-openai")))
+        cfg.sources.xiaohongshu.incremental_enabled = True
+        cfg.sources.douyin.incremental_enabled = True
+        cfg.sources.youtube.incremental_enabled = False
+        cfg.sources.zhihu.incremental_enabled = True
+        cfg.sources.reddit.incremental_enabled = False
+        cfg.sources.linuxdo.incremental_enabled = True
+        cfg.sources.v2ex.incremental_enabled = False
+        client = self._make_client(monkeypatch, tmp_path, cfg)
+
+        initial = client.get("/api/config")
+        assert initial.status_code == 200
+        sources = initial.json()["sources"]
+        assert sources["xiaohongshu"]["incremental_enabled"] is True
+        assert sources["douyin"]["incremental_enabled"] is True
+        assert sources["youtube"]["incremental_enabled"] is False
+        assert sources["zhihu"]["incremental_enabled"] is True
+        assert sources["reddit"]["incremental_enabled"] is False
+        assert sources["linuxdo"]["incremental_enabled"] is True
+        assert sources["v2ex"]["incremental_enabled"] is False
+
+        updated = client.put(
+            "/api/config",
+            json={
+                "sources": {
+                    "xiaohongshu": {"incremental_enabled": False},
+                    "douyin": {"incremental_enabled": False},
+                    "youtube": {"incremental_enabled": True},
+                    "zhihu": {"incremental_enabled": False},
+                    "reddit": {"incremental_enabled": True},
+                    "linuxdo": {"incremental_enabled": False},
+                    "v2ex": {"incremental_enabled": True},
+                },
+                "scheduler": {"source_incremental_enabled": True},
+            },
+        )
+
+        assert updated.status_code == 202
+        assert cfg.sources.xiaohongshu.incremental_enabled is False
+        assert cfg.sources.douyin.incremental_enabled is False
+        assert cfg.sources.youtube.incremental_enabled is True
+        assert cfg.sources.zhihu.incremental_enabled is False
+        assert cfg.sources.reddit.incremental_enabled is True
+        assert cfg.sources.linuxdo.incremental_enabled is False
+        assert cfg.sources.v2ex.incremental_enabled is True
+        assert cfg.scheduler.source_incremental_enabled is True
+
     @pytest.mark.parametrize(
         ("field", "value"),
         [

@@ -9426,12 +9426,16 @@ function bindSettings() {
     }
     const xhsEnabled = document.getElementById("cfgXhsEnabled");
     if (xhsEnabled) xhsEnabled.checked = cfg.sources?.xiaohongshu?.enabled === true;
+    const xhsIncremental = document.getElementById("cfgXhsIncremental");
+    if (xhsIncremental) xhsIncremental.checked = cfg.sources?.xiaohongshu?.incremental_enabled === true;
     setVal("cfgXhsDailySearchBudget", cfg.sources?.xiaohongshu?.daily_search_budget);
     setVal("cfgXhsDailyCreatorBudget", cfg.sources?.xiaohongshu?.daily_creator_budget);
     setVal("cfgXhsTaskInterval", cfg.sources?.xiaohongshu?.task_interval_seconds);
     setVal("cfgXhsMinInterval", cfg.sources?.xiaohongshu?.min_interval_minutes);
     const douyinEnabled = document.getElementById("cfgDouyinEnabled");
     if (douyinEnabled) douyinEnabled.checked = cfg.sources?.douyin?.enabled === true;
+    const douyinIncremental = document.getElementById("cfgDouyinIncremental");
+    if (douyinIncremental) douyinIncremental.checked = cfg.sources?.douyin?.incremental_enabled === true;
     setVal("cfgDouyinCookie", cfg.sources?.douyin?.cookie);
     setVal("cfgDouyinCookieEnv", cfg.sources?.douyin?.cookie_env);
     setVal("cfgDouyinDailySearchBudget", cfg.sources?.douyin?.daily_search_budget);
@@ -9449,6 +9453,8 @@ function bindSettings() {
     setVal("cfgWeiboMinInterval", cfg.sources?.weibo?.min_interval_minutes);
     const youtubeEnabled = document.getElementById("cfgYoutubeEnabled");
     if (youtubeEnabled) youtubeEnabled.checked = cfg.sources?.youtube?.enabled === true;
+    const youtubeIncremental = document.getElementById("cfgYoutubeIncremental");
+    if (youtubeIncremental) youtubeIncremental.checked = cfg.sources?.youtube?.incremental_enabled === true;
     setVal("cfgYoutubeDailySearchBudget", cfg.sources?.youtube?.daily_search_budget);
     setVal("cfgYoutubeDailyTrendingBudget", cfg.sources?.youtube?.daily_trending_budget);
     setVal("cfgYoutubeDailyChannelBudget", cfg.sources?.youtube?.daily_channel_budget);
@@ -9465,6 +9471,8 @@ function bindSettings() {
     setVal("cfgTwitterMinInterval", cfg.sources?.twitter?.min_interval_minutes);
     const zhihuEnabled = document.getElementById("cfgZhihuEnabled");
     if (zhihuEnabled) zhihuEnabled.checked = cfg.sources?.zhihu?.enabled === true;
+    const zhihuIncremental = document.getElementById("cfgZhihuIncremental");
+    if (zhihuIncremental) zhihuIncremental.checked = cfg.sources?.zhihu?.incremental_enabled === true;
     setZhihuSourceModes(cfg.sources?.zhihu?.source_modes);
     setVal("cfgZhihuDailySearchBudget", cfg.sources?.zhihu?.daily_search_budget);
     setVal("cfgZhihuDailyHotBudget", cfg.sources?.zhihu?.daily_hot_budget);
@@ -9475,6 +9483,8 @@ function bindSettings() {
     setVal("cfgZhihuMinInterval", cfg.sources?.zhihu?.min_interval_minutes);
     const redditEnabled = document.getElementById("cfgRedditEnabled");
     if (redditEnabled) redditEnabled.checked = cfg.sources?.reddit?.enabled === true;
+    const redditIncremental = document.getElementById("cfgRedditIncremental");
+    if (redditIncremental) redditIncremental.checked = cfg.sources?.reddit?.incremental_enabled === true;
     setVal("cfgRedditBackend", cfg.sources?.reddit?.backend || "rdt");
     setRedditSourceModes(cfg.sources?.reddit?.source_modes);
     setVal("cfgRedditDailySearchBudget", cfg.sources?.reddit?.daily_search_budget);
@@ -9515,6 +9525,8 @@ function bindSettings() {
     setVal("cfgBangumiBootstrapLimit", cfg.sources?.bangumi?.bootstrap_limit);
     const linuxdoEnabled = document.getElementById("cfgLinuxdoEnabled");
     if (linuxdoEnabled) linuxdoEnabled.checked = cfg.sources?.linuxdo?.enabled === true;
+    const linuxdoIncremental = document.getElementById("cfgLinuxdoIncremental");
+    if (linuxdoIncremental) linuxdoIncremental.checked = cfg.sources?.linuxdo?.incremental_enabled === true;
     setCheckedValues(LINUXDO_SOURCE_MODE_FIELDS, cfg.sources?.linuxdo?.source_modes);
     setVal("cfgLinuxdoDailySearchBudget", cfg.sources?.linuxdo?.daily_search_budget);
     setVal("cfgLinuxdoDailyHotBudget", cfg.sources?.linuxdo?.daily_hot_budget);
@@ -9526,6 +9538,8 @@ function bindSettings() {
     setVal("cfgLinuxdoBootstrapLimit", cfg.sources?.linuxdo?.bootstrap_limit);
     const v2exEnabled = document.getElementById("cfgV2exEnabled");
     if (v2exEnabled) v2exEnabled.checked = cfg.sources?.v2ex?.enabled === true;
+    const v2exIncremental = document.getElementById("cfgV2exIncremental");
+    if (v2exIncremental) v2exIncremental.checked = cfg.sources?.v2ex?.incremental_enabled === true;
     setVal("cfgV2exUsername", cfg.sources?.v2ex?.username);
     {
       const v2exToken = document.getElementById("cfgV2exAccessToken");
@@ -9572,6 +9586,10 @@ function bindSettings() {
     const pauseOnDisconnect = document.getElementById("cfgPauseOnDisconnect");
     if (pauseOnDisconnect) {
       pauseOnDisconnect.checked = cfg.scheduler?.pause_on_extension_disconnect === true;
+    }
+    const sourceIncrementalEnabled = document.getElementById("cfgSourceIncrementalEnabled");
+    if (sourceIncrementalEnabled) {
+      sourceIncrementalEnabled.checked = cfg.scheduler?.source_incremental_enabled === true;
     }
     setVal("cfgExtensionDisconnectGrace", cfg.scheduler?.extension_disconnect_grace_seconds);
     setVal("cfgPoolTarget", cfg.scheduler?.pool_target_count);
@@ -9703,6 +9721,7 @@ function bindSettings() {
         // write identical values for an untouched form.
         xiaohongshu: {
           enabled: checked("cfgXhsEnabled"),
+          incremental_enabled: checked("cfgXhsIncremental"),
           daily_search_budget: getInt("cfgXhsDailySearchBudget", 20),
           daily_creator_budget: getInt("cfgXhsDailyCreatorBudget", 0),
           task_interval_seconds: getInt("cfgXhsTaskInterval", 1200),
@@ -9710,6 +9729,7 @@ function bindSettings() {
         },
         douyin: {
           enabled: checked("cfgDouyinEnabled"),
+          incremental_enabled: checked("cfgDouyinIncremental"),
           mode: "direct",
           ...(getVal("cfgDouyinCookie") ? { cookie: getVal("cfgDouyinCookie") } : {}),
           cookie_env: getVal("cfgDouyinCookieEnv"),
@@ -9730,6 +9750,7 @@ function bindSettings() {
         },
         youtube: {
           enabled: checked("cfgYoutubeEnabled"),
+          incremental_enabled: checked("cfgYoutubeIncremental"),
           daily_search_budget: getInt("cfgYoutubeDailySearchBudget", 0),
           daily_trending_budget: getInt("cfgYoutubeDailyTrendingBudget", 0),
           daily_channel_budget: getInt("cfgYoutubeDailyChannelBudget", 0),
@@ -9749,6 +9770,7 @@ function bindSettings() {
         },
         zhihu: {
           enabled: checked("cfgZhihuEnabled"),
+          incremental_enabled: checked("cfgZhihuIncremental"),
           source_modes: collectZhihuSourceModes(),
           daily_search_budget: getInt("cfgZhihuDailySearchBudget", 0),
           daily_hot_budget: getInt("cfgZhihuDailyHotBudget", 0),
@@ -9760,6 +9782,7 @@ function bindSettings() {
         },
         reddit: {
           enabled: checked("cfgRedditEnabled"),
+          incremental_enabled: checked("cfgRedditIncremental"),
           backend: getVal("cfgRedditBackend") || "rdt",
           ...(getVal("cfgRedditCookie") ? { cookie: getVal("cfgRedditCookie") } : {}),
           source_modes: collectRedditSourceModes(),
@@ -9794,6 +9817,7 @@ function bindSettings() {
         },
         linuxdo: {
           enabled: checked("cfgLinuxdoEnabled"),
+          incremental_enabled: checked("cfgLinuxdoIncremental"),
           source_modes: collectCheckedValues(LINUXDO_SOURCE_MODE_FIELDS, ["search"]),
           daily_search_budget: getInt("cfgLinuxdoDailySearchBudget", 0),
           daily_hot_budget: getInt("cfgLinuxdoDailyHotBudget", 0),
@@ -9806,6 +9830,7 @@ function bindSettings() {
         },
         v2ex: {
           enabled: checked("cfgV2exEnabled"),
+          incremental_enabled: checked("cfgV2exIncremental"),
           username: getVal("cfgV2exUsername"),
           ...(checked("cfgV2exClearToken")
             ? { access_token: "" }
@@ -9842,6 +9867,7 @@ function bindSettings() {
       scheduler: {
         enabled: !checked("cfgSchedulerEnabled"),
         pause_on_extension_disconnect: checked("cfgPauseOnDisconnect"),
+        source_incremental_enabled: checked("cfgSourceIncrementalEnabled"),
         extension_disconnect_grace_seconds: getInt("cfgExtensionDisconnectGrace", 90),
         pool_target_count: getInt("cfgPoolTarget", 300),
         account_sync_interval_hours: getInt("cfgAccountSyncInterval", 6),
