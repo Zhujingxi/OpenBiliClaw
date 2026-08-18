@@ -652,6 +652,7 @@ Bilibili discovery 的平台级开关。B 站账号登录 / Cookie 获取仍由 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
 | `enabled` | bool | `false` | 是否启用小红书 discovery 和 init bootstrap；默认关闭，`init` 选 Yes、`--yes-xhs` 或插件设置页打开后才会写回 `true`。关闭后 producer 停止产词，`/api/sources/xhs/next-task` 也不会领取此前已排队的自动 search / creator / bootstrap 任务，因此扩展不会继续打开自动发现页面；任务保留为 pending，重新开启后恢复 |
+| `incremental_enabled` | bool | `false` | 是否允许小红书参与扩展在线周期回拉（`bootstrap_profile`）。默认关闭；需同时开启 `[scheduler].source_incremental_enabled` 才会生效。开启后插件可能短暂打开前台标签页抓取账号数据 |
 | `daily_search_budget` | int | `20` | 每天后端允许入队的 Soul 驱动搜索任务数上限；`0` 表示不设每日上限。默认 20 是保守工程起点，不代表小红书官方阈值 |
 | `daily_creator_budget` | int | `0` | 每天订阅创作者抓取任务上限；`0` 表示不设每日上限 |
 | `task_interval_seconds` | int | `1200` | 后端领取连续 search / creator 任务的**目标间隔**（默认 20 分钟）；每个任务按稳定的 ±25% 抖动得到实际 15–25 分钟窗口，下一次可领取时间持久化在 SQLite，后端重启、MV3 service worker 重启或多个浏览器 profile 都不能绕过。bootstrap 不受普通间隔限制，但仍受来源开关和平台风控冷却约束 |
@@ -668,6 +669,7 @@ Bilibili discovery 的平台级开关。B 站账号登录 / Cookie 获取仍由 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
 | `enabled` | bool | `false` | 是否启用抖音 discovery。默认关闭，必须显式 opt-in |
+| `incremental_enabled` | bool | `false` | 是否允许抖音参与扩展在线周期回拉（`bootstrap_profile`）。默认关闭；需同时开启 `[scheduler].source_incremental_enabled` 才会生效。开启后插件可能短暂打开前台标签页抓取账号数据 |
 | `mode` | string | `"direct"` | 当前仅支持 `direct`，保留字段用于后续 extension/direct 切换 |
 | `cookie_env` | string | `"OPENBILICLAW_DOUYIN_COOKIE"` | douyin.com Cookie header 的环境变量覆盖名；为空时使用扩展同步文件 |
 | `daily_search_budget` | int | `0` | 每日搜索插件任务预算，限制 `dy_tasks(type="search")` 入队次数；`0` 表示不设每日上限 |
@@ -685,6 +687,7 @@ YouTube discovery 配置。初始化画像由浏览器扩展读取观看历史 /
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
 | `enabled` | bool | `false` | 是否让 YouTube 参与候选池配比和后台 discovery；`init --yes-youtube` 会写回 `true`，`--no-youtube` 或 `OPENBILICLAW_NO_YOUTUBE=1` 会写回 `false` |
+| `incremental_enabled` | bool | `false` | 是否允许 YouTube 参与扩展在线周期回拉（`bootstrap_profile`）。默认关闭；需同时开启 `[scheduler].source_incremental_enabled` 才会生效。开启后插件可能短暂打开前台标签页抓取账号数据 |
 | `daily_search_budget` | int | `0` | `yt_search` 每天最多生成 / 执行的 YouTube 搜索 query 数；`0` 表示不设每日上限，本轮 query 数由平台缺口 / `discovery_limit` 决定 |
 | `daily_trending_budget` | int | `0` | `yt_trending` 每天最多拉取的热门候选数；`0` 表示不设每日上限，本轮拉取规模由平台缺口 / `discovery_limit` 决定 |
 | `daily_channel_budget` | int | `0` | `yt_channel` 每天最多选择的订阅频道数；`0` 表示不设每日上限，本轮频道数由平台缺口 / `discovery_limit` 决定 |
@@ -715,6 +718,7 @@ X 源健康状态（`ok` / `missing_cookie` / `expired_cookie` / `rate_limited` 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
 | `enabled` | bool | `false` | 是否让知乎参与候选池配比和后台 discovery。默认关闭，必须显式 opt-in；关闭后 `ZhihuDiscoveryProducer` 不入队任务，`/api/sources/zhihu/next-task` 也不再领取自动任务，扩展不会因已排队任务打开知乎标签页；`pool_source_shares.zhihu` 配额从有效配比中剔除 |
+| `incremental_enabled` | bool | `false` | 是否允许知乎参与扩展在线周期回拉（`bootstrap_events`）。默认关闭；需同时开启 `[scheduler].source_incremental_enabled` 才会生效。开启后插件可能短暂打开前台标签页抓取账号数据 |
 | `source_modes` | list[str] | `["search", "hot", "feed", "creator", "related"]` | 后台和 `openbiliclaw discover --source zhihu` 允许调度的知乎 discovery 分支。插件 side panel 与桌面 Web 配置页都提供五个显式勾选项。`search` 使用统一关键词 planner；`hot` 拉热榜；`feed` 拉首页推荐；`creator` 优先用最近任务结果里的作者主页作种子，没有历史种子时使用本轮 search / hot / feed 返回的作者页；`related` 优先用最近知乎候选 URL，没有历史种子时使用本轮已返回内容 URL 作相关扩展种子 |
 | `daily_search_budget` | int | `0` | 知乎搜索 discovery 每日任务预算；`0` 表示不设每日上限，本轮关键词数由统一关键词 planner / fallback 画像兴趣和平台缺口决定 |
 | `daily_hot_budget` | int | `0` | 知乎热榜 discovery 每日任务预算；`0` 表示不设每日上限 |
@@ -731,6 +735,7 @@ Reddit 来源配置。Reddit 日常 discovery 默认走随 OpenBiliClaw 安装�
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
 | `enabled` | bool | `false` | 是否让 Reddit 参与初始化 opt-in、候选池配比和后台 discovery。默认关闭，必须显式 opt-in；关闭后 `RedditDiscoveryProducer` 不入队任务，`pool_source_shares.reddit` 配额从有效配比中剔除 |
+| `incremental_enabled` | bool | `false` | 是否允许 Reddit 参与扩展在线周期回拉（`bootstrap_events`）。默认关闭；需同时开启 `[scheduler].source_incremental_enabled` 才会生效。开启后插件可能短暂打开前台标签页抓取账号数据 |
 | `backend` | string | `"rdt"` | Reddit 取数后端。`rdt` 使用默认安装的 rdt-cli 登录态命令后端，并优先使用插件同步的 `reddit_session` credential；`rdt login` 仅作为手动 fallback；`extension` 使用 OpenBiliClaw 浏览器插件和当前浏览器登录态，且仍负责 bootstrap 初始化信号；`opencli` / `auto` 为兼容命令路径。命令后端状态不是 `ready` 时，CLI / producer 会自动 fallback 到插件任务 |
 | `source_modes` | list[str] | `["search", "hot", "subreddit", "related"]` | 后台和 `openbiliclaw discover --source reddit` 允许调度的 Reddit discovery 分支。`search` 使用统一关键词 planner，关键词池为空时回退画像兴趣；`hot` 默认拉 `r/all`；`subreddit` 优先用最近 Reddit 候选里的 subreddit 作种子；`related` 优先用最近 Reddit 内容 URL 作相关扩展种子 |
 | `daily_search_budget` | int | `300` | Reddit 搜索 discovery 每日条目预算 |
@@ -767,6 +772,7 @@ Linux.do 通过浏览器扩展在真实 `linux.do` task tab 内执行同源只�
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
 | `enabled` | bool | `false` | 是否让 Linux.do 参与候选池配比、后台 discovery 和扩展在线周期 bootstrap；默认关闭，必须显式 opt-in |
+| `incremental_enabled` | bool | `false` | 是否允许 Linux.do 参与扩展在线周期回拉（`bootstrap_events`）。默认关闭；需同时开启 `[scheduler].source_incremental_enabled` 才会生效。开启后插件可能短暂打开前台标签页抓取账号数据 |
 | `source_modes` | list[str] | `["search", "hot", "feed", "creator", "related"]` | 允许 producer 调度的五种只读分支；`search` claim 统一关键词，`creator` / `related` 使用最近结果或同轮结果作种子 |
 | `daily_search_budget` | int | `0` | search 每 UTC 日任务预算；`0` 表示不设日上限，仍受缺口、关键词和任务条数上限约束 |
 | `daily_hot_budget` | int | `0` | hot 每 UTC 日任务预算；`0` 表示不设日上限 |
@@ -791,6 +797,7 @@ V2EX 是匿名公开 discovery 源，支持官方匿名 JSON API / Feed，以及
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
 | `enabled` | bool | `false` | 是否让 V2EX 参与候选池配比和后台 discovery；默认关闭 |
+| `incremental_enabled` | bool | `false` | 是否允许 V2EX 参与扩展在线周期回拉（`bootstrap_profile`）。默认关闭；需同时开启 `[scheduler].source_incremental_enabled` 才会生效。开启后插件可能短暂打开前台标签页抓取账号数据 |
 | `username` | string | `""` | 可选公开用户名；用于公开 discovery / bootstrap 的身份候选，不等于登录凭据 |
 | `access_token` | string | `""` | 可选 V2EX API 2.0 PAT；设置页只显示是否已配置，保存前用 `/api/v2/member` 做只读校验 |
 | `token_env` | string | `"OPENBILICLAW_V2EX_TOKEN"` | PAT 环境变量名，优先级高于 `access_token` |
@@ -893,7 +900,7 @@ TOML 与显式环境变量覆盖在构造 `SchedulerConfig` 前统一归一为�
 > 后台 refresh 还会使用约 90% 的可换池低水位；池子只是轻微低于 `pool_target_count` 时不跑 discovery。B 站完整四策略补货在小缺口阶段优先只给 `search + related_chain` 预算，`trending/explore` 延后到更深缺口。
 > `pause_on_extension_disconnect` 只约束后端 daemon 自己发起的后台 LLM / embedding 工作；用户手动点击刷新、CLI 显式命令、配置保存和普通读取接口不因为插件离线而被拦截。`runtime-stream` 连接断开由后端 receive-side detector 记录，浏览器 idle disconnect 后不会让 presence 状态卡住。
 >
-> 七源账号周期回拉先检查 `source_incremental_enabled`；默认 `false` 时不会检查扩展 presence、创建任务或打开标签页。scheduler 新建任务带独立 owner 标记；升级前由持久调度状态明确记录的旧任务也可识别，两者都会在 tick 或插件领取前被标记失败，避免 pending / stale in-progress 行再开一次标签页。手动 `incremental=true` 任务不带 scheduler owner，因此不会被误停；已被扩展领取并正在执行的页面无法由后端强制瞬间关闭，但不会再被重领。显式设为 `true` 后才检查 presence 并应用全局 / 逐源周期；除抖音外，逐源字段在 TOML 中应省略以继承，`PUT /api/config` 可用 JSON `null` 恢复继承。抖音仍额外默认 `0`，只有正整数会加入轮转。
+> 七源账号周期回拉先检查 `source_incremental_enabled` 总开关，再检查每个来源自己的 `sources.<slug>.incremental_enabled`；默认两者都为 `false`，因此不会检查扩展 presence、创建任务或打开标签页。总开关为 `true` 但某来源的 `incremental_enabled=false` 时，该来源会被跳过，其 scheduler-owned pending / stale in-progress 任务也会被取消，避免再开一次标签页。scheduler 新建任务带独立 owner 标记；升级前由持久调度状态明确记录的旧任务也可识别，两者都会在 tick 或插件领取前被标记失败。手动 `incremental=true` 任务不带 scheduler owner，因此不会被误停；已被扩展领取并正在执行的页面无法由后端强制瞬间关闭，但不会再被重领。总开关开启后才检查 presence 并应用全局 / 逐源周期；除抖音外，逐源字段在 TOML 中应省略以继承，`PUT /api/config` 可用 JSON `null` 恢复继承。抖音仍额外默认 `douyin_incremental_hours=0`，只有正整数会加入轮转。
 
 ### `[scheduler.pool_source_shares]`
 

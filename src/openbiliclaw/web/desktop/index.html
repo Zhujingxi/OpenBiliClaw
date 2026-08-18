@@ -498,6 +498,11 @@
               </div>
               <div class="source-card-body" id="sourceCardBody-xiaohongshu">
                 <section class="source-seg">
+                  <h4>周期回拉</h4>
+                  <label class="settings-advanced-toggle"><input id="xhsIncremental" type="checkbox"><span>允许扩展周期回拉（可能打开前台标签页）</span></label>
+                  <p class="seg-note">默认关闭；需同时在「调度」页开启总开关。</p>
+                </section>
+                <section class="source-seg">
                   <h4>接入方式</h4>
                   <p class="seg-note">由浏览器插件复用你已登录的 xiaohongshu.com 会话取数，后端不保存 Cookie，也没有手动粘贴入口。</p>
                   <div class="source-cred-box">
@@ -547,6 +552,11 @@
                 </span>
               </div>
               <div class="source-card-body" id="sourceCardBody-douyin">
+                <section class="source-seg">
+                  <h4>周期回拉</h4>
+                  <label class="settings-advanced-toggle"><input id="douyinIncremental" type="checkbox"><span>允许扩展周期回拉（可能打开前台标签页）</span></label>
+                  <p class="seg-note">默认关闭；需同时在「调度」页开启总开关。</p>
+                </section>
                 <section class="source-seg">
                   <h4>接入方式</h4>
                   <p class="seg-note">在浏览器登录抖音后插件会自动同步 cookie；也可在下方手动粘贴，留空保存不会覆盖现有值。</p>
@@ -654,6 +664,11 @@
               </div>
               <div class="source-card-body" id="sourceCardBody-youtube">
                 <section class="source-seg">
+                  <h4>周期回拉</h4>
+                  <label class="settings-advanced-toggle"><input id="youtubeIncremental" type="checkbox"><span>允许扩展周期回拉（可能打开前台标签页）</span></label>
+                  <p class="seg-note">默认关闭；需同时在「调度」页开启总开关。</p>
+                </section>
+                <section class="source-seg">
                   <h4>接入方式</h4>
                   <p class="seg-note">使用公开接口匿名调用，不需要 Cookie 或令牌。需要海外出网，代理设置见「通用」页。</p>
                   <div class="source-cred-box">
@@ -760,6 +775,11 @@
               </div>
               <div class="source-card-body" id="sourceCardBody-zhihu">
                 <section class="source-seg">
+                  <h4>周期回拉</h4>
+                  <label class="settings-advanced-toggle"><input id="zhihuIncremental" type="checkbox"><span>允许扩展周期回拉（可能打开前台标签页）</span></label>
+                  <p class="seg-note">默认关闭；需同时在「调度」页开启总开关。</p>
+                </section>
+                <section class="source-seg">
                   <h4>接入方式</h4>
                   <p class="seg-note">discovery 由已登录的浏览器插件执行搜索 / 热榜 / 首页 / 作者 / 相关任务，后端只入队任务并接收结果，不保存 Cookie。</p>
                   <div class="source-cred-box">
@@ -812,6 +832,11 @@
                 </span>
               </div>
               <div class="source-card-body" id="sourceCardBody-reddit">
+                <section class="source-seg">
+                  <h4>周期回拉</h4>
+                  <label class="settings-advanced-toggle"><input id="redditIncremental" type="checkbox"><span>允许扩展周期回拉（可能打开前台标签页）</span></label>
+                  <p class="seg-note">默认关闭；需同时在「调度」页开启总开关。</p>
+                </section>
                 <section class="source-seg">
                   <h4>接入方式</h4>
                   <p class="seg-note">日常 discovery 默认走 rdt-cli 登录态命令后端；rdt / opencli 不可用时自动 fallback 到 OpenBiliClaw 插件任务。初始化 saved / upvoted / subscribed 信号仍通过插件复用当前浏览器登录态。需要海外出网。</p>
@@ -943,6 +968,11 @@
               </div>
               <div class="source-card-body" id="sourceCardBody-linuxdo">
                 <section class="source-seg">
+                  <h4>周期回拉</h4>
+                  <label class="settings-advanced-toggle"><input id="linuxdoIncremental" type="checkbox"><span>允许扩展周期回拉（可能打开前台标签页）</span></label>
+                  <p class="seg-note">默认关闭；需同时在「调度」页开启总开关。</p>
+                </section>
+                <section class="source-seg">
                   <h4>接入方式</h4>
                   <p class="seg-note">公开发现无需登录；连接已登录 Linux.do 的浏览器插件后，可增强收藏、点赞和阅读记录等个人信号。登录态由插件同源读取，后端不接收或保存 Cookie。</p>
                   <div class="source-cred-box">
@@ -996,6 +1026,11 @@
                 </span>
               </div>
               <div class="source-card-body" id="sourceCardBody-v2ex">
+                <section class="source-seg">
+                  <h4>周期回拉</h4>
+                  <label class="settings-advanced-toggle"><input id="v2exIncremental" type="checkbox"><span>允许扩展周期回拉（可能打开前台标签页）</span></label>
+                  <p class="seg-note">默认关闭；需同时在「调度」页开启总开关。</p>
+                </section>
                 <section class="source-seg">
                   <h4>接入方式</h4>
                   <p class="seg-note">使用 V2EX 官方公开只读 API、JSON/RSS Feed；不登录也能发现内容。可选 PAT 仅用于识别账号和 API 2.0 增强读取，后端不会发帖、回复、收藏或关注 Node。浏览器任务可按需读取本人主题、回复、收藏主题和收藏 Node 的公开渲染字段。</p>
@@ -1065,6 +1100,8 @@
         <div id="settingsPanelScheduler" class="settings-panel" data-settings-panel="scheduler" role="tabpanel" aria-labelledby="settingsTabScheduler" hidden>
           <p class="settings-section-title">调度</p>
           <label class="settings-field"><span>后台 LLM 请求</span><select id="schedulerEnabled"><option value="on">开启</option><option value="off">暂停</option></select></label>
+          <label class="settings-advanced-toggle"><input id="sourceIncrementalEnabled" type="checkbox"><span>启用扩展来源周期回拉（总开关）</span></label>
+          <p class="settings-note-inline">默认关闭。开启后还需在「平台源」页为对应来源单独打开“允许扩展周期回拉”；这些任务可能打开前台标签页。</p>
           <label class="settings-field"><span>浏览器关闭后</span><select id="pauseDisconnect"><option value="pause">暂停后台</option><option value="keep">继续运行</option></select></label>
           <label class="settings-field"><span>断开宽限秒数</span><input id="extensionDisconnectGrace" inputmode="numeric" placeholder="90"></label>
           <label class="settings-field"><span>候选池目标数</span><input id="poolTarget" value="600" inputmode="numeric"></label>

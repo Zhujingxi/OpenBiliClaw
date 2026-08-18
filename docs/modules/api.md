@@ -18,11 +18,12 @@ Discovery 配置响应与更新白名单同时公开 `keyword_digest_grace_hours
 runtime apply。`0` 是只关闭跨 digest 关键词复用的回滚值，不会关闭统一 planner 或删除历史行。
 
 账号增量配置中的 `scheduler.source_incremental_enabled` 默认返回 `false`。旧配置没有该字段时
-也按关闭处理；只有通过 `PUT /api/config` 或 TOML 显式设为 `true`，runtime 才会按
+也按关闭处理；每个来源还公开 `sources.<slug>.incremental_enabled`（默认 `false`）。只有通过
+`PUT /api/config` 或 TOML 显式把总开关设为 `true`，且对应来源开关也为 `true`，runtime 才会按
 `source_incremental_hours` 和逐源覆盖自动创建扩展账号任务。关闭态在 presence 检查前返回，
-不会打开或切换平台标签页；领取端还会把升级前残留的周期任务标记失败，手动任务不受影响。
+不会打开或切换平台标签页；关闭某来源时其 scheduler-owned 待执行任务会被标记失败，手动任务不受影响。
 `scheduler.douyin_incremental_hours` 仍额外默认 `0`，省略或发送
-`null` 都保持抖音关闭。总开关与周期字段都不控制手动初始化、手动 `fetch-*` 或正常 discovery。
+`null` 都保持抖音关闭。总开关、来源开关与周期字段都不控制手动初始化、手动 `fetch-*` 或正常 discovery。
 
 ## 配置保存与后台应用
 

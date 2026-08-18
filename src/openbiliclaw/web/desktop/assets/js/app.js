@@ -9237,6 +9237,10 @@ ${cardFeedbackBarHtml()}`;
       const scheduler = config.scheduler || {};
       setSelect("schedulerEnabled", scheduler.enabled === false ? "off" : "on");
       setSelect("pauseDisconnect", scheduler.pause_on_extension_disconnect === false ? "keep" : "pause");
+      const sourceIncrementalEnabled = document.getElementById("sourceIncrementalEnabled");
+      if (sourceIncrementalEnabled) {
+        sourceIncrementalEnabled.checked = scheduler.source_incremental_enabled === true;
+      }
       setInput("extensionDisconnectGrace", scheduler.extension_disconnect_grace_seconds);
       setInput("poolTarget", scheduler.pool_target_count);
       setInput("accountSyncInterval", scheduler.account_sync_interval_hours);
@@ -9329,11 +9333,15 @@ ${cardFeedbackBarHtml()}`;
       setInput("sourcesBrowserCdp", config.sources?.browser?.cdp_url);
       setSelect("sourcesBrowserHeaded", config.sources?.browser?.headed === true ? "on" : "off");
       setSelect("xhsEnabled", config.sources?.xiaohongshu?.enabled === true ? "on" : "off");
+      const xhsIncremental = document.getElementById("xhsIncremental");
+      if (xhsIncremental) xhsIncremental.checked = config.sources?.xiaohongshu?.incremental_enabled === true;
       setInput("xhsDailySearchBudget", config.sources?.xiaohongshu?.daily_search_budget);
       setInput("xhsDailyCreatorBudget", config.sources?.xiaohongshu?.daily_creator_budget);
       setInput("xhsTaskInterval", config.sources?.xiaohongshu?.task_interval_seconds);
       setInput("xhsMinInterval", config.sources?.xiaohongshu?.min_interval_minutes);
       setSelect("douyinEnabled", config.sources?.douyin?.enabled === true ? "on" : "off");
+      const douyinIncremental = document.getElementById("douyinIncremental");
+      if (douyinIncremental) douyinIncremental.checked = config.sources?.douyin?.incremental_enabled === true;
       setCookieOverrideInput("douyinCookie", config.sources?.douyin?.cookie, "抖音");
       setInput("douyinCookieEnv", config.sources?.douyin?.cookie_env);
       setInput("douyinDailySearchBudget", config.sources?.douyin?.daily_search_budget);
@@ -9349,6 +9357,8 @@ ${cardFeedbackBarHtml()}`;
       setInput("weiboRequestInterval", config.sources?.weibo?.request_interval_seconds);
       setInput("weiboMinInterval", config.sources?.weibo?.min_interval_minutes);
       setSelect("youtubeEnabled", config.sources?.youtube?.enabled === true ? "on" : "off");
+      const youtubeIncremental = document.getElementById("youtubeIncremental");
+      if (youtubeIncremental) youtubeIncremental.checked = config.sources?.youtube?.incremental_enabled === true;
       setInput("youtubeDailySearchBudget", config.sources?.youtube?.daily_search_budget);
       setInput("youtubeDailyTrendingBudget", config.sources?.youtube?.daily_trending_budget);
       setInput("youtubeDailyChannelBudget", config.sources?.youtube?.daily_channel_budget);
@@ -9363,6 +9373,8 @@ ${cardFeedbackBarHtml()}`;
       setInput("twitterRequestInterval", config.sources?.twitter?.request_interval_seconds);
       setInput("twitterMinInterval", config.sources?.twitter?.min_interval_minutes);
       setSelect("zhihuEnabled", config.sources?.zhihu?.enabled === true ? "on" : "off");
+      const zhihuIncremental = document.getElementById("zhihuIncremental");
+      if (zhihuIncremental) zhihuIncremental.checked = config.sources?.zhihu?.incremental_enabled === true;
       setZhihuSourceModes(config.sources?.zhihu?.source_modes);
       setInput("zhihuDailySearchBudget", config.sources?.zhihu?.daily_search_budget);
       setInput("zhihuDailyHotBudget", config.sources?.zhihu?.daily_hot_budget);
@@ -9372,6 +9384,8 @@ ${cardFeedbackBarHtml()}`;
       setInput("zhihuRequestInterval", config.sources?.zhihu?.request_interval_seconds);
       setInput("zhihuMinInterval", config.sources?.zhihu?.min_interval_minutes);
       setSelect("redditEnabled", config.sources?.reddit?.enabled === true ? "on" : "off");
+      const redditIncremental = document.getElementById("redditIncremental");
+      if (redditIncremental) redditIncremental.checked = config.sources?.reddit?.incremental_enabled === true;
       setSelect("redditBackend", config.sources?.reddit?.backend || "rdt");
       setRedditSourceModes(config.sources?.reddit?.source_modes);
       setInput("redditDailySearchBudget", config.sources?.reddit?.daily_search_budget);
@@ -9410,6 +9424,8 @@ ${cardFeedbackBarHtml()}`;
       setInput("bangumiMinInterval", config.sources?.bangumi?.min_interval_minutes);
       setInput("bangumiBootstrapLimit", config.sources?.bangumi?.bootstrap_limit);
       setSelect("linuxdoEnabled", config.sources?.linuxdo?.enabled === true ? "on" : "off");
+      const linuxdoIncremental = document.getElementById("linuxdoIncremental");
+      if (linuxdoIncremental) linuxdoIncremental.checked = config.sources?.linuxdo?.incremental_enabled === true;
       setCheckedValues(LINUXDO_SOURCE_MODE_FIELDS, config.sources?.linuxdo?.source_modes);
       setInput("linuxdoDailySearchBudget", config.sources?.linuxdo?.daily_search_budget);
       setInput("linuxdoDailyHotBudget", config.sources?.linuxdo?.daily_hot_budget);
@@ -9420,6 +9436,8 @@ ${cardFeedbackBarHtml()}`;
       setInput("linuxdoMinInterval", config.sources?.linuxdo?.min_interval_minutes);
       setInput("linuxdoBootstrapLimit", config.sources?.linuxdo?.bootstrap_limit);
       setSelect("v2exEnabled", config.sources?.v2ex?.enabled === true ? "on" : "off");
+      const v2exIncremental = document.getElementById("v2exIncremental");
+      if (v2exIncremental) v2exIncremental.checked = config.sources?.v2ex?.incremental_enabled === true;
       setInput("v2exUsername", config.sources?.v2ex?.username);
       {
         const v2exToken = document.getElementById("v2exAccessToken");
@@ -10528,6 +10546,7 @@ ${cardFeedbackBarHtml()}`;
           },
           xiaohongshu: {
             enabled: $("#xhsEnabled").value === "on",
+            incremental_enabled: Boolean(document.getElementById("xhsIncremental")?.checked),
             daily_search_budget: getIntInput("xhsDailySearchBudget", 20),
             daily_creator_budget: getIntInput("xhsDailyCreatorBudget", 0),
             task_interval_seconds: getIntInput("xhsTaskInterval", 1200),
@@ -10535,6 +10554,7 @@ ${cardFeedbackBarHtml()}`;
           },
           douyin: {
             enabled: $("#douyinEnabled").value === "on",
+            incremental_enabled: Boolean(document.getElementById("douyinIncremental")?.checked),
             mode: "direct",
             ...(douyinCookie ? { cookie: douyinCookie } : {}),
             cookie_env: getInput("douyinCookieEnv"),
@@ -10555,6 +10575,7 @@ ${cardFeedbackBarHtml()}`;
           },
           youtube: {
             enabled: $("#youtubeEnabled").value === "on",
+            incremental_enabled: Boolean(document.getElementById("youtubeIncremental")?.checked),
             daily_search_budget: getIntInput("youtubeDailySearchBudget", 0),
             daily_trending_budget: getIntInput("youtubeDailyTrendingBudget", 0),
             daily_channel_budget: getIntInput("youtubeDailyChannelBudget", 0),
@@ -10574,6 +10595,7 @@ ${cardFeedbackBarHtml()}`;
           },
           zhihu: {
             enabled: $("#zhihuEnabled").value === "on",
+            incremental_enabled: Boolean(document.getElementById("zhihuIncremental")?.checked),
             source_modes: collectZhihuSourceModes(),
             daily_search_budget: getIntInput("zhihuDailySearchBudget", 0),
             daily_hot_budget: getIntInput("zhihuDailyHotBudget", 0),
@@ -10585,6 +10607,7 @@ ${cardFeedbackBarHtml()}`;
           },
           reddit: {
             enabled: $("#redditEnabled").value === "on",
+            incremental_enabled: Boolean(document.getElementById("redditIncremental")?.checked),
             backend: getInput("redditBackend") || "rdt",
             ...(redditCookie ? { cookie: redditCookie } : {}),
             source_modes: collectRedditSourceModes(),
@@ -10619,6 +10642,7 @@ ${cardFeedbackBarHtml()}`;
           },
           linuxdo: {
             enabled: $("#linuxdoEnabled").value === "on",
+            incremental_enabled: Boolean(document.getElementById("linuxdoIncremental")?.checked),
             source_modes: collectCheckedValues(LINUXDO_SOURCE_MODE_FIELDS, ["search"]),
             daily_search_budget: getIntInput("linuxdoDailySearchBudget", 0),
             daily_hot_budget: getIntInput("linuxdoDailyHotBudget", 0),
@@ -10631,6 +10655,7 @@ ${cardFeedbackBarHtml()}`;
           },
           v2ex: {
             enabled: $("#v2exEnabled").value === "on",
+            incremental_enabled: Boolean(document.getElementById("v2exIncremental")?.checked),
             username: getInput("v2exUsername"),
             ...(document.getElementById("v2exClearToken")?.checked
               ? { access_token: "" }
@@ -10650,6 +10675,7 @@ ${cardFeedbackBarHtml()}`;
         scheduler: {
           enabled: $("#schedulerEnabled").value === "on",
           pause_on_extension_disconnect: $("#pauseDisconnect").value === "pause",
+          source_incremental_enabled: Boolean(document.getElementById("sourceIncrementalEnabled")?.checked),
           extension_disconnect_grace_seconds: getIntInput("extensionDisconnectGrace", 90),
           pool_target_count: getIntInput("poolTarget", 300),
           account_sync_interval_hours: getIntInput("accountSyncInterval", 6),

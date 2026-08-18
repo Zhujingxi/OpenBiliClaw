@@ -1153,6 +1153,10 @@ class XiaohongshuSourceConfig:
     # XHS is opt-in because it requires the browser extension and a logged-in
     # browser session. Init --yes-xhs or the settings page can enable it later.
     enabled: bool = False
+    # Extension-online periodic account bootstrap is opt-in per source. It may
+    # open a foreground browser tab, so it defaults to off even when the global
+    # scheduler.source_incremental_enabled master switch is on.
+    incremental_enabled: bool = False
     # Max Soul-driven search tasks the backend may enqueue per day.
     daily_search_budget: int = 20
     # Max creator-subscription fetch tasks per day.
@@ -1177,6 +1181,9 @@ class DouyinSourceConfig:
     """
 
     enabled: bool = False
+    # Per-source periodic account bootstrap switch. Defaults off; the global
+    # scheduler.source_incremental_enabled master must also be enabled.
+    incremental_enabled: bool = False
     mode: str = "direct"
     cookie_env: str = "OPENBILICLAW_DOUYIN_COOKIE"
     daily_search_budget: int = 0
@@ -1200,6 +1207,9 @@ class YoutubeSourceConfig:
     """
 
     enabled: bool = False
+    # Per-source periodic account bootstrap switch. Defaults off; the global
+    # scheduler.source_incremental_enabled master must also be enabled.
+    incremental_enabled: bool = False
     daily_search_budget: int = 0
     daily_trending_budget: int = 0
     daily_channel_budget: int = 0
@@ -1239,6 +1249,9 @@ class ZhihuSourceConfig:
     """
 
     enabled: bool = False
+    # Per-source periodic account bootstrap switch. Defaults off; the global
+    # scheduler.source_incremental_enabled master must also be enabled.
+    incremental_enabled: bool = False
     source_modes: tuple[str, ...] = ("search", "hot", "feed", "creator", "related")
     daily_search_budget: int = 0
     daily_hot_budget: int = 0
@@ -1261,6 +1274,9 @@ class RedditSourceConfig:
     """
 
     enabled: bool = False
+    # Per-source periodic account bootstrap switch. Defaults off; the global
+    # scheduler.source_incremental_enabled master must also be enabled.
+    incremental_enabled: bool = False
     backend: str = "rdt"
     source_modes: tuple[str, ...] = ("search", "hot", "subreddit", "related")
     daily_search_budget: int = 300
@@ -1297,6 +1313,9 @@ class LinuxdoSourceConfig:
     """Linux.do browser-extension discovery and account-signal configuration."""
 
     enabled: bool = False
+    # Per-source periodic account bootstrap switch. Defaults off; the global
+    # scheduler.source_incremental_enabled master must also be enabled.
+    incremental_enabled: bool = False
     source_modes: tuple[str, ...] = ("search", "hot", "feed", "creator", "related")
     daily_search_budget: int = 0
     daily_hot_budget: int = 0
@@ -1313,6 +1332,9 @@ class V2EXSourceConfig:
     """V2EX public discovery configuration with an optional PAT."""
 
     enabled: bool = False
+    # Per-source periodic account bootstrap switch. Defaults off; the global
+    # scheduler.source_incremental_enabled master must also be enabled.
+    incremental_enabled: bool = False
     username: str = ""
     access_token: str = ""
     token_env: str = "OPENBILICLAW_V2EX_TOKEN"
@@ -2137,6 +2159,7 @@ def _build_config(
         ),
         xiaohongshu=XiaohongshuSourceConfig(
             enabled=bool(xhs_raw.get("enabled", False)),
+            incremental_enabled=bool(xhs_raw.get("incremental_enabled", False)),
             daily_search_budget=int(xhs_raw.get("daily_search_budget", 20)),
             daily_creator_budget=int(xhs_raw.get("daily_creator_budget", 0)),
             task_interval_seconds=int(xhs_raw.get("task_interval_seconds", 1200)),
@@ -2144,6 +2167,7 @@ def _build_config(
         ),
         douyin=DouyinSourceConfig(
             enabled=bool(douyin_raw.get("enabled", False)),
+            incremental_enabled=bool(douyin_raw.get("incremental_enabled", False)),
             mode=str(douyin_raw.get("mode", "direct")),
             cookie_env=str(douyin_raw.get("cookie_env", "OPENBILICLAW_DOUYIN_COOKIE")),
             daily_search_budget=int(douyin_raw.get("daily_search_budget", 0)),
@@ -2154,6 +2178,7 @@ def _build_config(
         ),
         youtube=YoutubeSourceConfig(
             enabled=bool(youtube_raw.get("enabled", False)),
+            incremental_enabled=bool(youtube_raw.get("incremental_enabled", False)),
             daily_search_budget=int(youtube_raw.get("daily_search_budget", 0)),
             daily_trending_budget=int(youtube_raw.get("daily_trending_budget", 0)),
             daily_channel_budget=int(youtube_raw.get("daily_channel_budget", 0)),
@@ -2172,6 +2197,7 @@ def _build_config(
         ),
         zhihu=ZhihuSourceConfig(
             enabled=bool(zhihu_raw.get("enabled", False)),
+            incremental_enabled=bool(zhihu_raw.get("incremental_enabled", False)),
             source_modes=tuple(
                 mode
                 for mode in _coerce_str_list(
@@ -2190,6 +2216,7 @@ def _build_config(
         ),
         reddit=RedditSourceConfig(
             enabled=bool(reddit_raw.get("enabled", False)),
+            incremental_enabled=bool(reddit_raw.get("incremental_enabled", False)),
             backend=str(reddit_raw.get("backend", "rdt") or "rdt"),
             source_modes=tuple(
                 mode
@@ -2235,6 +2262,7 @@ def _build_config(
         ),
         linuxdo=LinuxdoSourceConfig(
             enabled=bool(linuxdo_raw.get("enabled", False)),
+            incremental_enabled=bool(linuxdo_raw.get("incremental_enabled", False)),
             source_modes=tuple(
                 mode
                 for mode in _coerce_str_list(
@@ -2256,6 +2284,7 @@ def _build_config(
         ),
         v2ex=V2EXSourceConfig(
             enabled=bool(v2ex_raw.get("enabled", False)),
+            incremental_enabled=bool(v2ex_raw.get("incremental_enabled", False)),
             username=str(v2ex_raw.get("username", "") or "").strip(),
             access_token=str(v2ex_raw.get("access_token", "") or "").strip(),
             token_env=str(v2ex_raw.get("token_env", "OPENBILICLAW_V2EX_TOKEN") or "").strip()
@@ -5097,6 +5126,7 @@ def _render_config_toml(
             "",
             "[sources.xiaohongshu]",
             f"enabled = {_toml_bool(config.sources.xiaohongshu.enabled)}",
+            f"incremental_enabled = {_toml_bool(config.sources.xiaohongshu.incremental_enabled)}",
             f"daily_search_budget = {config.sources.xiaohongshu.daily_search_budget}",
             f"daily_creator_budget = {config.sources.xiaohongshu.daily_creator_budget}",
             f"task_interval_seconds = {config.sources.xiaohongshu.task_interval_seconds}",
@@ -5104,6 +5134,7 @@ def _render_config_toml(
             "",
             "[sources.douyin]",
             f"enabled = {_toml_bool(config.sources.douyin.enabled)}",
+            f"incremental_enabled = {_toml_bool(config.sources.douyin.incremental_enabled)}",
             f"mode = {_toml_string(config.sources.douyin.mode)}",
             f"cookie_env = {_toml_string(config.sources.douyin.cookie_env)}",
             f"daily_search_budget = {config.sources.douyin.daily_search_budget}",
@@ -5114,6 +5145,7 @@ def _render_config_toml(
             "",
             "[sources.youtube]",
             f"enabled = {_toml_bool(config.sources.youtube.enabled)}",
+            f"incremental_enabled = {_toml_bool(config.sources.youtube.incremental_enabled)}",
             f"daily_search_budget = {config.sources.youtube.daily_search_budget}",
             f"daily_trending_budget = {config.sources.youtube.daily_trending_budget}",
             f"daily_channel_budget = {config.sources.youtube.daily_channel_budget}",
@@ -5132,6 +5164,7 @@ def _render_config_toml(
             "",
             "[sources.zhihu]",
             f"enabled = {_toml_bool(config.sources.zhihu.enabled)}",
+            f"incremental_enabled = {_toml_bool(config.sources.zhihu.incremental_enabled)}",
             f"source_modes = {_toml_str_list(list(config.sources.zhihu.source_modes))}",
             f"daily_search_budget = {config.sources.zhihu.daily_search_budget}",
             f"daily_hot_budget = {config.sources.zhihu.daily_hot_budget}",
@@ -5143,6 +5176,7 @@ def _render_config_toml(
             "",
             "[sources.reddit]",
             f"enabled = {_toml_bool(config.sources.reddit.enabled)}",
+            f"incremental_enabled = {_toml_bool(config.sources.reddit.incremental_enabled)}",
             f"backend = {_toml_string(config.sources.reddit.backend)}",
             f"source_modes = {_toml_str_list(list(config.sources.reddit.source_modes))}",
             f"daily_search_budget = {config.sources.reddit.daily_search_budget}",
@@ -5167,6 +5201,7 @@ def _render_config_toml(
             "",
             "[sources.linuxdo]",
             f"enabled = {_toml_bool(config.sources.linuxdo.enabled)}",
+            f"incremental_enabled = {_toml_bool(config.sources.linuxdo.incremental_enabled)}",
             f"source_modes = {_toml_str_list(list(config.sources.linuxdo.source_modes))}",
             f"daily_search_budget = {config.sources.linuxdo.daily_search_budget}",
             f"daily_hot_budget = {config.sources.linuxdo.daily_hot_budget}",
@@ -5178,6 +5213,7 @@ def _render_config_toml(
             f"bootstrap_limit = {config.sources.linuxdo.bootstrap_limit}",
             "[sources.v2ex]",
             f"enabled = {_toml_bool(config.sources.v2ex.enabled)}",
+            f"incremental_enabled = {_toml_bool(config.sources.v2ex.incremental_enabled)}",
             f"username = {_toml_string(config.sources.v2ex.username)}",
             f"access_token = {_toml_string(config.sources.v2ex.access_token)}",
             f"token_env = {_toml_string(config.sources.v2ex.token_env)}",
