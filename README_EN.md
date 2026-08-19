@@ -903,11 +903,13 @@ Contributions welcome! See the [Contributing Guide](docs/contributing.md) to get
 
 If OpenBiliClaw gave you back control of your feed, [a star](https://github.com/whiteguo233/OpenBiliClaw) is the most direct vote for "keep adding platforms".
 
-<a href="https://github.com/whiteguo233/OpenBiliClaw">
-  <img alt="GitHub Stars" src="https://img.shields.io/github/stars/whiteguo233/OpenBiliClaw?style=flat-square&logo=github&label=Stars" />
+<a href="https://star-history.dera.page/#whiteguo233/OpenBiliClaw&type=date">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://star-history.dera.page/svg?repos=whiteguo233/OpenBiliClaw&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://star-history.dera.page/svg?repos=whiteguo233/OpenBiliClaw&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://star-history.dera.page/svg?repos=whiteguo233/OpenBiliClaw&type=date&legend=top-left" />
+ </picture>
 </a>
-
-> ⚠️ The live Star History chart is temporarily replaced by a star badge: since 2026-06-30 GitHub restricts the stargazers API to a repo's admins and collaborators, so star-history charts cannot render for now. We'll restore the live chart once upstream recovers or a new encrypted token is configured.
 
 ## Privacy at a glance
 
