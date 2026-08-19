@@ -1,6 +1,6 @@
 export const routes = [
-  ["recommendations", "Recommendations"],
-  ["providers", "Providers"],
+  ["recommendations", "For you"],
+  ["providers", "Content sources"],
   ["search", "Search"],
   ["content", "Content detail"],
   ["profile", "Profile"],

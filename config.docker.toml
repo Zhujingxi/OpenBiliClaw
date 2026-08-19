@@ -25,6 +25,12 @@ pool_target_count = 100
 api_host = "0.0.0.0"
 api_port = 8420
 bearer_secret_ref = "vault:DOCKER_BEARER_SECRET_REF"
+# Trusted-LAN alternative to the bearer above: remove bearer_secret_ref and set
+# allow_unauthenticated = true. Anyone who can reach the port then has full
+# read/write API access — use only on networks you trust.
+# allow_unauthenticated = true
+# Serving the SPA at a LAN address also needs its Origin allowlisted:
+# allowed_origins = ["http://192.168.1.20:8420"]
 
 [runtime]
 default_timeout_seconds = 120.0

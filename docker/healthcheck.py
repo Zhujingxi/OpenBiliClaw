@@ -13,18 +13,22 @@ from openbiliclaw.infrastructure.credentials.vault import CredentialVault
 runtime = Path("/app/runtime")
 with (runtime / "config.toml").open("rb") as stream:
     settings = tomllib.load(stream)
-reference = settings["host"]["bearer_secret_ref"].removeprefix("vault:")
-vault = CredentialVault(ProtectedFileBackend(runtime / "credentials.json"))
+# Bearer is optional: LAN-trusted deployments run without one.
+reference = settings["host"].get("bearer_secret_ref", "").removeprefix("vault:")
 
 
-def probe(secret: memoryview) -> None:
-    request = urllib.request.Request(
-        "http://127.0.0.1:8420/v1/runtime/health",
-        headers={"Authorization": f"Bearer {bytes(secret).decode()}"},
-    )
+def probe(secret: memoryview | None = None) -> None:
+    headers = {}
+    if secret is not None:
+        headers["Authorization"] = f"Bearer {bytes(secret).decode()}"
+    request = urllib.request.Request("http://127.0.0.1:8420/v1/runtime/health", headers=headers)
     with urllib.request.urlopen(request, timeout=4) as response:
         if response.status != 200:
             raise SystemExit(1)
 
 
-vault.resolve(reference, probe)
+if reference:
+    vault = CredentialVault(ProtectedFileBackend(runtime / "credentials.json"))
+    vault.resolve(reference, probe)
+else:
+    probe()

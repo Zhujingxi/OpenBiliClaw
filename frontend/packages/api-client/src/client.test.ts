@@ -5,6 +5,7 @@ import {
   ApiError,
   deviceIdentity,
   parseEventEnvelope,
+  uuid,
 } from "./client";
 
 const acceptsGeneratedRequest = (client: ApiClient): void => {
@@ -122,6 +123,7 @@ describe("ApiClient", () => {
     };
     const first = deviceIdentity(storage, () => "device-123");
     expect(deviceIdentity(storage, () => "other")).toBe(first);
+    expect(deviceIdentity(storage)).toBe(first);
     const fetcher = vi
       .fn<typeof fetch>()
       .mockResolvedValue(
@@ -314,6 +316,22 @@ describe("ApiClient", () => {
         validate: isHealth,
       }),
     ).rejects.toMatchObject({ kind: "invalid-response" });
+  });
+});
+
+describe("uuid", () => {
+  it("generates RFC 4122 v4 identifiers without a secure context", () => {
+    const cryptoSpy = vi
+      .spyOn(globalThis, "crypto", "get")
+      .mockReturnValue(undefined as unknown as Crypto);
+    try {
+      expect(uuid()).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+      );
+    } finally {
+      cryptoSpy.mockRestore();
+    }
+    expect(uuid()).not.toBe(uuid());
   });
 });
 

@@ -49,7 +49,13 @@ onBeforeUnmount(store.cancelSearch);
 </script>
 <template>
   <section>
-    <h1 tabindex="-1">Search</h1>
+    <div class="page-heading">
+      <div class="page-heading-copy">
+        <p class="eyebrow">Across your sources</p>
+        <h1 tabindex="-1">Search</h1>
+        <p>Choose a connected provider, then search its native catalog.</p>
+      </div>
+    </div>
     <p v-if="sources.phase === 'loading'" role="status" aria-live="polite">
       Loading connected sources…
     </p>
@@ -62,21 +68,31 @@ onBeforeUnmount(store.cancelSearch);
     </p>
     <form
       v-else
+      class="search-form"
       role="search"
       @submit.prevent="store.search(api, provider, query)"
     >
-      <label for="search-provider">Provider</label>
-      <select id="search-provider" v-model="provider" required>
-        <option
-          v-for="item in searchable"
-          :key="item.provider_id"
-          :value="item.provider_id"
-        >
-          {{ item.provider_id }}
-        </option>
-      </select>
-      <label for="search-query">Search content</label>
-      <input id="search-query" v-model="query" required />
+      <div class="field">
+        <label for="search-provider">Provider</label>
+        <select id="search-provider" v-model="provider" required>
+          <option
+            v-for="item in searchable"
+            :key="item.provider_id"
+            :value="item.provider_id"
+          >
+            {{ item.provider_id }}
+          </option>
+        </select>
+      </div>
+      <div class="field search-query">
+        <label for="search-query">Search content</label>
+        <input
+          id="search-query"
+          v-model="query"
+          required
+          placeholder="Topics, creators, or exact titles"
+        />
+      </div>
       <button type="submit">Search</button>
     </form>
     <AsyncState :phase="store.searchPhase" :error="store.searchError">
@@ -93,6 +109,15 @@ onBeforeUnmount(store.cancelSearch);
   </section>
 </template>
 <style scoped>
+.search-form {
+  display: grid;
+  grid-template-columns: minmax(10rem, 0.55fr) minmax(14rem, 1.45fr) auto;
+  gap: 0.75rem;
+  align-items: end;
+}
+.search-form button {
+  min-width: 6rem;
+}
 .card-list {
   list-style: none;
   margin: 0;
@@ -104,5 +129,24 @@ onBeforeUnmount(store.cancelSearch);
 
 .card-list > li {
   min-width: 0;
+}
+.card-list button {
+  width: 100%;
+  min-height: 5rem;
+  border-color: var(--border);
+  padding: 1rem;
+  background: var(--card);
+  color: var(--foreground);
+  text-align: left;
+  box-shadow: var(--shadow-sm);
+}
+.card-list button:hover {
+  border-color: var(--brand);
+  background: var(--brand-soft);
+}
+@media (max-width: 42rem) {
+  .search-form {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 </style>

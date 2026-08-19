@@ -60,15 +60,20 @@ describe("web accessibility", () => {
     expect(desktop.get("nav").attributes("aria-label")).toBe(
       "Primary navigation",
     );
-    expect(desktop.get('[aria-current="page"]').text()).toBe("Profile");
+    expect(desktop.get('[aria-current="page"] span:last-child').text()).toBe(
+      "Taste profile",
+    );
     const mobile = mount(AppNavigation, {
-      props: { current: "profile", mobile: true },
+      props: { current: "settings", mobile: true },
     });
     expect(mobile.get("nav").attributes("aria-label")).toBe(
       "Mobile navigation",
     );
-    const source = readFileSync("src/App.vue", "utf8");
-    expect(source).toContain('nav a[aria-current="page"]');
+    expect(mobile.get('[aria-current="page"] span:last-child').text()).toBe(
+      "Settings",
+    );
+    const source = readFileSync("src/styles.css", "utf8");
+    expect(source).toContain('.mobile-nav a[aria-current="page"]');
     expect(source).toContain("background: var(--brand-soft);");
   });
 
@@ -85,14 +90,15 @@ describe("web accessibility", () => {
   });
 
   it("uses a wrapping mobile grid and shrinkable controls at narrow widths", () => {
-    const source = readFileSync("src/App.vue", "utf8");
+    const source = readFileSync("src/styles.css", "utf8");
     expect(source).toContain(
-      "grid-template-columns: repeat(3, minmax(0, 1fr))",
+      "grid-template-columns: repeat(5, minmax(0, 1fr))",
     );
-    expect(source).toContain('input:not([type="checkbox"])');
-    expect(source).toContain("overflow-wrap: normal");
-    expect(source).toContain("word-break: normal");
-    expect(source).not.toContain("overflow: auto");
+    expect(source).toContain(
+      'input:not([type="checkbox"]):not([type="radio"])',
+    );
+    expect(source).toContain("min-width: 0;");
+    expect(source).toContain("overflow-wrap: anywhere;");
   });
 
   it("has skip navigation, labels, distinct responsive layouts, and Alt+Left keyboard path", async () => {
@@ -125,8 +131,8 @@ describe("web accessibility", () => {
       global: { plugins: [createPinia()], provide: { api } },
     });
     expect(wrapper.get(".route-notice").attributes("role")).toBe("status");
-    expect(wrapper.text()).toContain("Page not found; showing Recommendations");
-    expect(document.title).toBe("Recommendations · OpenBiliClaw");
+    expect(wrapper.text()).toContain("Page not found; showing For you");
+    expect(document.title).toBe("For you · OpenBiliClaw");
     wrapper.unmount();
   });
 });

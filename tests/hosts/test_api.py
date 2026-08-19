@@ -820,6 +820,12 @@ def test_bind_policy_and_strict_transport() -> None:
     with pytest.raises(ValueError):
         HostSecurityPolicy(bind_host="0.0.0.0")
 
+
+def test_bind_policy_allow_unauthenticated_opt_in() -> None:
+    policy = HostSecurityPolicy(bind_host="0.0.0.0", allow_unauthenticated=True)
+    assert policy.bearer_token is None
+    assert policy.password_hash is None
+
     async def check() -> httpx.Response:
         async with client(Facade()) as api:
             return await api.post(

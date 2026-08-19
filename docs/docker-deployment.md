@@ -35,6 +35,16 @@ docker compose exec -T openbiliclaw-backend python -c \
 
 Treat that command's output as a password. Send it as `Authorization: Bearer <token>`. Mutations additionally require matching `X-Device-ID` and `X-CSRF-Token` headers. The browser extension already has a bearer-token enrollment field. The current Vue Web UI has no bearer enrollment/storage plumbing, so opening the Docker-hosted SPA directly returns 401; L7 will test and address that presentation gap rather than weakening the backend boundary.
 
+### Authentication modes
+
+The host supports three mutually exclusive modes, selected in `config.toml`:
+
+- **Bearer token** (default above): `host.bearer_secret_ref` points at the vault.
+- **Password**: set `host.password_hash` via `openbiliclaw set-password` (or hash a password with `openbiliclaw.hosts.api.auth.hash_password`). The Web UI login page and `POST /v1/auth/login` exchange the password for a durable session token; failed attempts are rate-limited.
+- **No authentication** (trusted LAN only): remove `bearer_secret_ref`/`password_hash` and set `host.allow_unauthenticated = true`. Without this explicit opt-in the API refuses to start on a non-loopback bind with no credentials. Anyone who can reach the port has full read/write access — never use this on an untrusted network.
+
+When opening the UI via a LAN address (`http://<lan-ip>:8420`), its origin must also be allowlisted or the browser blocks every API call and the SPA renders blank: set `host.allowed_origins = ["http://<lan-ip>:8420"]`. Loopback origins are always allowed.
+
 ## Persistence and restart behavior
 
 Compose persists `/app/runtime`, database data, logs, and the embedding model cache in named volumes. Restarting or rebuilding retains configuration, vault credentials, observations, profile state, recommendation state, and feedback.

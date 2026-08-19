@@ -31,17 +31,23 @@ const selectedProvider = computed(() =>
 );
 const filteredProviders = computed(() => {
   const needle = query.value.trim().toLowerCase();
-  if (!needle) return models.providers;
-  return models.providers.filter(
-    (provider) =>
-      provider.id === providerId.value ||
-      provider.id.toLowerCase().includes(needle) ||
-      provider.name.toLowerCase().includes(needle) ||
-      provider.models.some(
-        (model) =>
-          model.id.toLowerCase().includes(needle) ||
-          model.name.toLowerCase().includes(needle),
-      ),
+  const matches = needle
+    ? models.providers.filter(
+        (provider) =>
+          provider.id === providerId.value ||
+          provider.id.toLowerCase().includes(needle) ||
+          provider.name.toLowerCase().includes(needle) ||
+          provider.models.some(
+            (model) =>
+              model.id.toLowerCase().includes(needle) ||
+              model.name.toLowerCase().includes(needle),
+          ),
+      )
+    : [...models.providers];
+  return matches.sort(
+    (left, right) =>
+      Number(right.id === providerId.value) -
+      Number(left.id === providerId.value),
   );
 });
 watch(
@@ -67,6 +73,10 @@ watch(providerId, (next) => {
     modelName.value = selectedProvider.value?.models[0]?.id ?? "";
   }
 });
+function chooseProvider(id: string): void {
+  custom.value = false;
+  providerId.value = id;
+}
 async function save(): Promise<void> {
   const provider = custom.value
     ? customProvider.value.trim()
@@ -99,51 +109,78 @@ onBeforeUnmount(() => models.cancel());
 </script>
 
 <template>
-  <section>
-    <h1 tabindex="-1">Settings</h1>
-    <section aria-labelledby="model-settings-heading">
-      <h2 id="model-settings-heading">Model</h2>
-      <p>
-        Provider, endpoint, protocol, and capabilities come from models.dev. API
-        keys are write-only and stored in the local credential vault.
-      </p>
-      <p v-if="models.phase === 'loading'" aria-live="polite">
-        Loading model catalog…
-      </p>
-      <p v-else-if="models.phase === 'error'" role="alert">
-        {{ models.error }}
-      </p>
-      <p v-else-if="models.phase === 'empty'" aria-live="polite">
-        No catalog providers are available.
-      </p>
-      <template v-else-if="models.phase === 'success'">
-        <section
-          v-if="models.current"
-          aria-labelledby="current-model-heading"
-          class="current-configuration"
-        >
-          <h3 id="current-model-heading">Current configuration</h3>
-          <dl>
-            <dt>Model provider</dt>
-            <dd>{{ models.current.current.model.provider }}</dd>
-            <dt>Model</dt>
-            <dd>
-              {{ models.current.current.model.model_name || "Not configured" }}
-            </dd>
-            <dt>Model credential</dt>
-            <dd>
-              {{
-                models.current.current.model.secret_configured
-                  ? "Configured"
-                  : "Not configured"
-              }}
-            </dd>
-            <dt>Restart required</dt>
-            <dd>{{ models.current.restart_required ? "Yes" : "No" }}</dd>
-            <dt>Reloaded in this process</dt>
-            <dd>{{ models.current.reloaded ? "Yes" : "No" }}</dd>
-          </dl>
-          <h4>Embedding</h4>
+  <section class="settings-page">
+    <div class="page-heading">
+      <div class="page-heading-copy">
+        <p class="eyebrow">Configuration</p>
+        <h1 tabindex="-1">Settings</h1>
+        <p>
+          Choose your AI runtime, tune the interface, and see what is active.
+        </p>
+      </div>
+      <a class="button-secondary settings-link" href="#/providers">
+        Manage content sources
+      </a>
+    </div>
+
+    <p v-if="models.phase === 'loading'" aria-live="polite">
+      Loading model catalog…
+    </p>
+    <p v-else-if="models.phase === 'error'" role="alert">
+      {{ models.error }}
+    </p>
+    <p v-else-if="models.phase === 'empty'" aria-live="polite">
+      No catalog providers are available.
+    </p>
+
+    <div v-else-if="models.phase === 'success'" class="settings-layout">
+      <aside
+        v-if="models.current"
+        aria-labelledby="current-model-heading"
+        class="surface-card current-configuration"
+      >
+        <div class="surface-card-header">
+          <div>
+            <p class="eyebrow">In use</p>
+            <h2 id="current-model-heading">Active runtime</h2>
+          </div>
+          <span
+            class="status-badge"
+            :class="
+              models.current.current.model.secret_configured
+                ? 'status-connected'
+                : 'status-disconnected'
+            "
+          >
+            {{
+              models.current.current.model.secret_configured
+                ? "Ready"
+                : "Key needed"
+            }}
+          </span>
+        </div>
+        <dl>
+          <dt>Model provider</dt>
+          <dd>{{ models.current.current.model.provider }}</dd>
+          <dt>Model</dt>
+          <dd>
+            {{ models.current.current.model.model_name || "Not configured" }}
+          </dd>
+          <dt>Model credential</dt>
+          <dd>
+            {{
+              models.current.current.model.secret_configured
+                ? "Configured"
+                : "Not configured"
+            }}
+          </dd>
+          <dt>Restart required</dt>
+          <dd>{{ models.current.restart_required ? "Yes" : "No" }}</dd>
+          <dt>Reloaded in this process</dt>
+          <dd>{{ models.current.reloaded ? "Yes" : "No" }}</dd>
+        </dl>
+        <div class="embedding-summary">
+          <p class="eyebrow">Embedding</p>
           <dl>
             <dt>Provider</dt>
             <dd>
@@ -170,79 +207,179 @@ onBeforeUnmount(() => models.cancel());
               }}
             </dd>
           </dl>
-        </section>
-        <form @submit.prevent="save">
-          <label for="model-search">Search catalog</label>
-          <input
-            id="model-search"
-            v-model="query"
-            type="search"
-            placeholder="Provider or model"
-          />
-          <label>
-            <input v-model="custom" type="checkbox" /> Configure a custom
-            provider
+        </div>
+      </aside>
+
+      <form class="surface-card model-form" @submit.prevent="save">
+        <div class="surface-card-header">
+          <div>
+            <p class="eyebrow">AI provider</p>
+            <h2>Provider & model</h2>
+            <p>Browse the catalog or connect any compatible endpoint.</p>
+          </div>
+        </div>
+
+        <div class="model-toolbar">
+          <div class="field">
+            <label for="model-search">Search providers and models</label>
+            <input
+              id="model-search"
+              v-model="query"
+              type="search"
+              placeholder="Try OpenAI, Claude, DeepSeek…"
+            />
+          </div>
+          <label class="check-row custom-toggle">
+            <input v-model="custom" type="checkbox" />
+            Custom provider
           </label>
-          <template v-if="!custom">
-            <label for="model-provider">Provider</label>
-            <select id="model-provider" v-model="providerId" required>
-              <option value="" disabled>Select a provider</option>
-              <option
-                v-for="provider in filteredProviders"
-                :key="provider.id"
-                :value="provider.id"
+        </div>
+
+        <div
+          v-if="!custom"
+          class="provider-gallery"
+          aria-label="Model providers"
+        >
+          <button
+            v-for="provider in filteredProviders"
+            :key="provider.id"
+            type="button"
+            class="provider-option"
+            :class="{ selected: provider.id === providerId }"
+            :aria-pressed="provider.id === providerId"
+            @click="chooseProvider(provider.id)"
+          >
+            <span class="provider-monogram" aria-hidden="true">
+              {{ provider.name.slice(0, 1).toUpperCase() }}
+            </span>
+            <span>
+              <strong>{{ provider.name }}</strong>
+              <small
+                >{{ provider.models.length }} models ·
+                {{ provider.protocol }}</small
               >
-                {{ provider.name }} ({{ provider.id }})
-              </option>
-            </select>
+            </span>
+            <span
+              v-if="provider.id === providerId"
+              class="selection-mark"
+              aria-hidden="true"
+              >✓</span
+            >
+          </button>
+        </div>
+
+        <div class="form-grid configuration-fields">
+          <template v-if="!custom">
+            <div class="field">
+              <label for="model-provider">Provider</label>
+              <select id="model-provider" v-model="providerId" required>
+                <option value="" disabled>Select a provider</option>
+                <option
+                  v-for="provider in filteredProviders"
+                  :key="provider.id"
+                  :value="provider.id"
+                >
+                  {{ provider.name }} ({{ provider.id }})
+                </option>
+              </select>
+            </div>
           </template>
           <template v-else>
-            <label for="custom-provider">Custom provider ID</label>
-            <input id="custom-provider" v-model="customProvider" required />
-            <label for="custom-protocol">Protocol</label>
-            <select id="custom-protocol" v-model="customProtocol">
-              <option value="openai">OpenAI compatible</option>
-              <option value="anthropic">Anthropic</option>
-              <option value="google">Google</option>
-              <option value="openrouter">OpenRouter</option>
-            </select>
+            <div class="field">
+              <label for="custom-provider">Custom provider ID</label>
+              <input
+                id="custom-provider"
+                v-model="customProvider"
+                required
+                placeholder="my-provider"
+              />
+            </div>
+            <div class="field">
+              <label for="custom-protocol">API protocol</label>
+              <select id="custom-protocol" v-model="customProtocol">
+                <option value="openai">OpenAI compatible</option>
+                <option value="anthropic">Anthropic</option>
+                <option value="google">Google</option>
+                <option value="openrouter">OpenRouter</option>
+              </select>
+            </div>
           </template>
-          <label for="model-name">Model</label>
-          <input
-            v-if="custom"
-            id="model-name"
-            v-model="modelName"
-            required
-            placeholder="Model ID"
-          />
-          <select v-else id="model-name" v-model="modelName" required>
-            <option value="" disabled>Select a model</option>
-            <option
-              v-for="model in selectedProvider?.models ?? []"
-              :key="model.id"
-              :value="model.id"
-            >
-              {{ model.name }} ({{ model.id }})
-            </option>
-          </select>
-          <fieldset v-if="custom" class="capabilities">
-            <legend>Custom provider capabilities</legend>
-            <label for="custom-context">Context token limit</label>
+
+          <div class="field">
+            <label for="model-name">Model</label>
             <input
-              id="custom-context"
-              v-model.number="customContextTokens"
-              type="number"
-              min="0"
+              v-if="custom"
+              id="model-name"
+              v-model="modelName"
               required
+              placeholder="Model ID"
             />
+            <select v-else id="model-name" v-model="modelName" required>
+              <option value="" disabled>Select a model</option>
+              <option
+                v-for="model in selectedProvider?.models ?? []"
+                :key="model.id"
+                :value="model.id"
+              >
+                {{ model.name }} ({{ model.id }})
+              </option>
+            </select>
+          </div>
+
+          <div class="field">
+            <label for="model-endpoint">
+              {{ custom ? "Endpoint" : "Endpoint override" }}
+            </label>
+            <input
+              id="model-endpoint"
+              v-model="endpoint"
+              type="url"
+              :required="custom"
+              :placeholder="
+                custom ? 'https://api.example.com' : 'Use catalog default'
+              "
+            />
+          </div>
+
+          <div class="field field-wide">
+            <label for="model-api-key">API key</label>
+            <input
+              id="model-api-key"
+              v-model="apiKey"
+              type="password"
+              autocomplete="new-password"
+              :placeholder="
+                models.current?.current.model.secret_configured
+                  ? 'Configured — leave blank to keep'
+                  : 'Paste a write-only API key'
+              "
+            />
+            <p class="field-hint">
+              Stored in the local credential vault and never returned to this
+              page.
+            </p>
+          </div>
+
+          <fieldset v-if="custom" class="capabilities">
+            <legend>Provider capabilities</legend>
+            <div class="field">
+              <label for="custom-context">Context token limit</label>
+              <input
+                id="custom-context"
+                v-model.number="customContextTokens"
+                type="number"
+                min="0"
+                required
+              />
+            </div>
             <div class="capability-options">
               <label
                 ><input v-model="customTools" type="checkbox" /> Tools</label
               >
-              <label
-                ><input v-model="customStructuredOutput" type="checkbox" />
-                Structured output</label
-              >
+              <label>
+                <input v-model="customStructuredOutput" type="checkbox" />
+                Structured output
+              </label>
               <label
                 ><input v-model="customVision" type="checkbox" /> Vision</label
               >
@@ -256,34 +393,19 @@ onBeforeUnmount(() => models.cancel());
               >
             </div>
           </fieldset>
-          <p v-if="selectedProvider && !custom" class="model-metadata">
-            Protocol: {{ selectedProvider.protocol }} · Environment keys:
+
+          <p
+            v-if="selectedProvider && !custom"
+            class="model-metadata field-wide"
+          >
+            <strong>{{ selectedProvider.protocol }}</strong> protocol · expected
+            key:
             {{ selectedProvider.env.join(", ") || "none" }}
           </p>
-          <label for="model-endpoint">
-            {{ custom ? "Endpoint" : "Endpoint override (optional)" }}
-          </label>
-          <input
-            id="model-endpoint"
-            v-model="endpoint"
-            type="url"
-            :required="custom"
-            placeholder="Use catalog endpoint"
-          />
-          <label for="model-api-key">API key</label>
-          <input
-            id="model-api-key"
-            v-model="apiKey"
-            type="password"
-            autocomplete="new-password"
-            :placeholder="
-              models.current?.current.model.secret_configured
-                ? 'Configured — leave blank to keep'
-                : 'Enter API key'
-            "
-          />
           <button type="submit" :disabled="models.savePhase === 'loading'">
-            {{ models.savePhase === "loading" ? "Saving…" : "Save model" }}
+            {{
+              models.savePhase === "loading" ? "Saving…" : "Save and use model"
+            }}
           </button>
           <p v-if="models.savePhase === 'error'" role="alert">
             {{ models.error }}
@@ -296,66 +418,187 @@ onBeforeUnmount(() => models.cancel());
                 : "The model is active."
             }}
           </p>
-        </form>
-      </template>
-    </section>
-    <section aria-labelledby="display-settings-heading">
-      <h2 id="display-settings-heading">Display</h2>
-      <label for="density">Display density</label>
-      <select id="density" v-model="preferences.density">
-        <option value="comfortable">Comfortable</option>
-        <option value="compact">Compact</option>
-      </select>
-      <label>
-        <input v-model="preferences.reducedMotion" type="checkbox" /> Reduce
-        motion
-      </label>
+        </div>
+      </form>
+    </div>
+
+    <section aria-labelledby="display-settings-heading" class="appearance-card">
+      <div class="surface-card-header">
+        <div>
+          <p class="eyebrow">Interface</p>
+          <h2 id="display-settings-heading">Appearance</h2>
+          <p>Keep the workspace comfortable without hiding information.</p>
+        </div>
+      </div>
+      <div class="appearance-controls">
+        <div class="field">
+          <label for="density">Display density</label>
+          <select id="density" v-model="preferences.density">
+            <option value="comfortable">Comfortable</option>
+            <option value="compact">Compact</option>
+          </select>
+        </div>
+        <label class="check-row">
+          <input v-model="preferences.reducedMotion" type="checkbox" />
+          Reduce motion
+        </label>
+      </div>
     </section>
   </section>
 </template>
+
 <style scoped>
+.settings-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.5rem;
+  padding: 0.55rem 0.9rem;
+  border-radius: var(--radius-sm);
+  color: var(--foreground);
+  font-size: 0.82rem;
+  font-weight: 650;
+  text-decoration: none;
+}
+.settings-layout {
+  display: grid;
+  grid-template-columns: minmax(15rem, 0.72fr) minmax(0, 2fr);
+  gap: 1rem;
+  align-items: start;
+}
+.current-configuration {
+  position: sticky;
+  top: 5rem;
+}
+.embedding-summary {
+  margin-top: 1.2rem;
+  border-top: 1px solid var(--border);
+  padding-top: 1rem;
+}
+.model-form {
+  display: grid;
+  gap: 1rem;
+}
+.model-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.75rem;
+  align-items: end;
+}
+.custom-toggle {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0 0.75rem;
+  background: var(--muted);
+}
+.provider-gallery {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 12.5rem), 1fr));
+  gap: 0.55rem;
+  max-height: 18rem;
+  overflow: auto;
+  padding: 0.15rem;
+}
+.provider-option {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.65rem;
+  min-height: 4.2rem;
+  border-color: var(--border);
+  padding: 0.65rem;
+  background: var(--card);
+  color: var(--foreground);
+  text-align: left;
+  box-shadow: none;
+}
+.provider-option:hover:not(:disabled) {
+  border-color: #bdb9ae;
+  background: var(--secondary);
+}
+.provider-option.selected {
+  border-color: var(--brand);
+  background: var(--brand-soft);
+}
+.provider-option > span:nth-child(2) {
+  display: grid;
+  gap: 0.15rem;
+  min-width: 0;
+}
+.provider-option strong,
+.provider-option small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.provider-option strong {
+  font-size: 0.8rem;
+}
+.provider-option small {
+  font-size: 0.67rem;
+}
+.provider-monogram {
+  display: grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 0.6rem;
+  background: var(--primary);
+  color: var(--primary-foreground);
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+.selection-mark {
+  color: var(--brand-strong);
+  font-weight: 800;
+}
+.configuration-fields {
+  border-top: 1px solid var(--border);
+  padding-top: 1rem;
+}
 .capabilities {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(8rem, 1fr);
-  gap: 0.75rem;
-  align-items: center;
+  gap: 0.9rem;
 }
 .capability-options {
-  grid-column: 1 / -1;
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr));
-  gap: 0.75rem;
+  gap: 0.65rem;
 }
 .capability-options label {
   display: flex;
-  gap: 0.5rem;
   align-items: center;
+  gap: 0.45rem;
+  font-weight: 550;
 }
 .model-metadata {
-  overflow-wrap: anywhere;
+  margin: 0;
+  border-radius: var(--radius-sm);
+  padding: 0.65rem 0.75rem;
+  background: var(--muted);
+  color: var(--muted-foreground);
+  font-size: 0.76rem;
 }
-.current-configuration {
-  padding: 1rem;
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  background: var(--surface-strong);
-  box-shadow: var(--shadow-sm);
-}
-.current-configuration dl {
+.appearance-controls {
   display: grid;
-  grid-template-columns: minmax(8rem, 1fr) minmax(0, 2fr);
-  gap: 0.35rem 1rem;
-  margin: 0;
+  grid-template-columns: minmax(12rem, 20rem) auto;
+  gap: 1rem;
+  align-items: end;
 }
-.current-configuration dd {
-  margin: 0;
-}
-@media (max-width: 30rem) {
-  .capabilities {
+@media (max-width: 68rem) {
+  .settings-layout {
     grid-template-columns: minmax(0, 1fr);
   }
-  .capability-options {
-    grid-column: 1;
+  .model-form {
+    order: -1;
+  }
+  .current-configuration {
+    position: static;
+  }
+}
+@media (max-width: 36rem) {
+  .model-toolbar,
+  .appearance-controls {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 </style>

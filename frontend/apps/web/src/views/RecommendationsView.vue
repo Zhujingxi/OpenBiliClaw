@@ -33,15 +33,23 @@ onBeforeUnmount(store.cancel);
 </script>
 <template>
   <section>
-    <h1 tabindex="-1">Recommendations</h1>
-    <button
-      type="button"
-      class="secondary-action"
-      :disabled="store.phase === 'loading'"
-      @click="store.refresh(api)"
-    >
-      Refresh feed
-    </button>
+    <div class="page-heading">
+      <div class="page-heading-copy">
+        <p class="eyebrow">Personal feed</p>
+        <h1 tabindex="-1">For you</h1>
+        <p>
+          A focused mix shaped by your sources, profile, and recent feedback.
+        </p>
+      </div>
+      <button
+        type="button"
+        class="secondary-action"
+        :disabled="store.phase === 'loading'"
+        @click="store.refresh(api)"
+      >
+        {{ store.phase === "loading" ? "Refreshing…" : "Refresh feed" }}
+      </button>
+    </div>
     <AsyncState :phase="store.phase" :error="store.error">
       <template #empty>
         No recommendations are available yet.
@@ -74,7 +82,6 @@ onBeforeUnmount(store.cancel);
 </template>
 <style scoped>
 .secondary-action {
-  justify-self: start;
   width: auto;
 }
 

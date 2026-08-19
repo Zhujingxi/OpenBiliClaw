@@ -59,6 +59,7 @@ class HostSecurityPolicy(StrictBaseModel):
     bind_host: str = "127.0.0.1"
     bearer_token: str | None = Field(default=None, repr=False, exclude=True)
     password_hash: str | None = Field(default=None, repr=False, exclude=True)
+    allow_unauthenticated: bool = False
     allowed_origins: tuple[str, ...] = ("http://localhost:8420", "http://127.0.0.1:8420")
     allowed_origin_schemes: tuple[str, ...] = ("chrome-extension://", "moz-extension://")
     max_body_bytes: int = Field(default=1_048_576, ge=1024, le=10_485_760)
@@ -84,11 +85,15 @@ class HostSecurityPolicy(StrictBaseModel):
     @model_validator(mode="after")
     def auth_required_off_loopback(self) -> HostSecurityPolicy:
         if (
-            self.bind_host != "localhost"
+            not self.allow_unauthenticated
+            and self.bind_host != "localhost"
             and not ip_address(self.bind_host).is_loopback
             and not (self.bearer_token or self.password_hash)
         ):
-            raise ValueError("bearer_token or password_hash is required for non-loopback binding")
+            raise ValueError(
+                "bearer_token or password_hash is required for non-loopback binding"
+                " (or set host.allow_unauthenticated on a trusted LAN)"
+            )
         return self
 
 

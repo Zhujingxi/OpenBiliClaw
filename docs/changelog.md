@@ -6,6 +6,8 @@
 
 ## Unreleased
 
+- Rebuilt the responsive web UI around a warm, high-density card system: grouped desktop/mobile navigation, clearly zoned model and appearance settings, browsable provider/model cards, layered per-source setup, source capability cards, and a full-height Assistant chat with message bubbles, prompt suggestions, loading feedback, and a sticky composer.
+
 - Made scheduled recommendation replenishment skip disconnected or non-searchable planned providers, so an all-unusable discovery round completes as a healthy no-op; missing CLI config paths now produce a concise error without a traceback.
 
 - Fixed the end-to-end backend/CLI defects: global config/data flags now work on either side of commands, every command has useful help and `check` confirms success; source connection reports typed provider/method errors and YouTube uses credential-free anonymous access; missing provider dates remain null instead of becoming 1970; model-save failures explain the missing writable config; and Assistant context enforces the requested locale while exposing recommendation titles/links rather than internal delivery IDs.

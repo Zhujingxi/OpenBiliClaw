@@ -4,6 +4,7 @@ import type {
   WebApi,
 } from "../services/api";
 import { computed, ref } from "vue";
+import { uuid } from "@openbiliclaw/api-client";
 import { defineStore } from "pinia";
 import {
   errorMessage,
@@ -72,7 +73,7 @@ export const useAssistantStore = defineStore("assistant", () => {
     text: string,
   ): Promise<void> {
     const signal = owner.next();
-    const id = crypto.randomUUID();
+    const id = uuid();
     localMessages.value = [
       ...localMessages.value,
       { id: `${id}:user`, role: "user", content: text },

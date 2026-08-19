@@ -118,3 +118,4 @@ backend.err
 data-e2e/
 artifacts/e2e/
 model_api_key.txt
+docker-compose.override.yml

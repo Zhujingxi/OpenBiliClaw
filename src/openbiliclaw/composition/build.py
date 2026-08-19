@@ -643,9 +643,11 @@ def build_application(
             bind_host=settings.host.api_host,
             bearer_token=bearer_token,
             password_hash=settings.host.password_hash,
+            allow_unauthenticated=settings.host.allow_unauthenticated,
             allowed_origins=(
                 f"http://localhost:{settings.host.api_port}",
                 f"http://127.0.0.1:{settings.host.api_port}",
+                *settings.host.allowed_origins,
             ),
         ),
         events=host_events,

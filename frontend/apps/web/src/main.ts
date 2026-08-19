@@ -2,6 +2,7 @@ import { ApiClient, deviceIdentity } from "@openbiliclaw/api-client";
 import { createPinia } from "pinia";
 import { createApp } from "vue";
 import App from "./App.vue";
+import "./styles.css";
 import { initializePreferences } from "./app/preferences";
 import { createWebApi } from "./services/api";
 import { authenticatedFetch, useAuthStore } from "./stores/auth";

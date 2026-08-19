@@ -29,6 +29,20 @@ def test_settings_are_frozen_and_unknown_fields_fail() -> None:
     )
 
 
+def test_host_allow_unauthenticated_and_allowed_origins() -> None:
+    settings = AppSettings.model_validate(
+        {
+            "host": {
+                "api_host": "0.0.0.0",
+                "allow_unauthenticated": True,
+                "allowed_origins": ["http://192.168.1.20:8420"],
+            }
+        }
+    )
+    assert settings.host.allow_unauthenticated is True
+    assert settings.host.allowed_origins == ("http://192.168.1.20:8420",)
+
+
 @pytest.mark.parametrize("provider", ["openai", "anthropic", "deepseek", "google", "openrouter"])
 def test_old_provider_shape_still_loads(provider: str) -> None:
     settings = AppSettings.model_validate({"model": {"provider": provider, "model_name": ""}})

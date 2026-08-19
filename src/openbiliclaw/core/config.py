@@ -68,6 +68,14 @@ class HostSettings(_FrozenModel):
     password_hash: str | None = Field(
         default=None, pattern=r"^pbkdf2:[0-9]+:[0-9a-f]+:[0-9a-f]+$", repr=False
     )
+    # Opt-in escape hatch for trusted LANs: allows a non-loopback bind with no
+    # bearer/password. Has no effect on loopback (already unauthenticated).
+    allow_unauthenticated: bool = False
+    # Extra origins allowed to call the API, beyond the loopback defaults.
+    # Required when serving the SPA over a LAN address, e.g.
+    # ("http://192.168.1.20:8420",) — module scripts send Origin even for
+    # same-origin loads.
+    allowed_origins: tuple[str, ...] = ()
 
     @field_validator("password_hash")
     @classmethod

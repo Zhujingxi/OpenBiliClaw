@@ -1,4 +1,5 @@
 import type { RecommendationPage, WebApi } from "../services/api";
+import { uuid } from "@openbiliclaw/api-client";
 import type { CardView } from "@openbiliclaw/presentation";
 import { defineStore } from "pinia";
 import { ref } from "vue";
@@ -56,7 +57,7 @@ export const useRecommendationsStore = defineStore("recommendations", () => {
     error.value = undefined;
     try {
       await api.refreshRecommendations(
-        { idempotency_key: crypto.randomUUID(), maximum_items: 50 },
+        { idempotency_key: uuid(), maximum_items: 50 },
         signal,
       );
       if (!owner.owns(signal)) return;
