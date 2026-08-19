@@ -56,7 +56,7 @@ onBeforeUnmount(() => {
   <section>
     <h1 tabindex="-1">Content detail</h1>
     <p v-if="reference === undefined" role="status">
-      Choose a result from Search.
+      Choose a result from <a href="#/search">Search</a>.
     </p>
     <AsyncState v-else :phase="store.detailPhase" :error="store.detailError">
       <article v-if="store.detail">

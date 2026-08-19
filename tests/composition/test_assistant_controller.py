@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, cast
 
 import pytest
 from pydantic_ai.models.test import TestModel
@@ -21,6 +22,7 @@ from openbiliclaw.assistant.service import AssistantService
 from openbiliclaw.composition.assistant import (
     AssistantController,
     _AssistantToolFacade,
+    assistant_recommendation_context,
     assistant_workflow_tools,
 )
 from openbiliclaw.composition.build import BuildOptions, build_application
@@ -30,6 +32,36 @@ from openbiliclaw.hosts.api.schemas.models import AssistantTurnRequest
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from openbiliclaw.application.reads import RecommendationsResult
+
+
+def test_assistant_recommendation_context_exposes_titles_and_links_not_internal_ids() -> None:
+    result = cast(
+        "RecommendationsResult",
+        SimpleNamespace(
+            items=(
+                SimpleNamespace(
+                    shown_id="shown_" + "1" * 32,
+                    ref=SimpleNamespace(canonical_url="https://example.com/watch/1"),
+                    card=SimpleNamespace(title="Readable title", summary="Readable summary"),
+                    reason="Matches your interests",
+                ),
+            )
+        ),
+    )
+    context = assistant_recommendation_context(result)
+    assert context == {
+        "items": (
+            {
+                "title": "Readable title",
+                "canonical_url": "https://example.com/watch/1",
+                "summary": "Readable summary",
+                "reason": "Matches your interests",
+            },
+        )
+    }
+    assert "shown_" not in str(context)
 
 
 @pytest.mark.asyncio

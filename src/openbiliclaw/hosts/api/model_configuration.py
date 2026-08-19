@@ -69,7 +69,10 @@ class FileModelConfiguration:
 
     def update(self, change: ModelUpdate) -> AppSettings:
         if self._config_path is None:
-            raise ModelConfigurationError("model configuration requires a writable config path")
+            raise ModelConfigurationError(
+                "model settings cannot be saved because the server was started without "
+                "a writable --config PATH"
+            )
         catalog = self.catalog()
         try:
             capability_config = (

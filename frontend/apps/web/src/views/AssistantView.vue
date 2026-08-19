@@ -1,6 +1,5 @@
 <script setup lang="ts">
-import AsyncState from "../components/AsyncState.vue";
-import { computed, inject, onBeforeUnmount, onMounted, ref } from "vue";
+import { inject, onBeforeUnmount, onMounted, ref } from "vue";
 import { useAssistantStore } from "../stores/assistant";
 import { useSessionStore } from "../stores/session";
 import type { WebApi } from "../services/api";
@@ -20,24 +19,11 @@ function ensureConversationId(): string {
   return generated;
 }
 const conversationId = ref(ensureConversationId());
-const latestText = computed(() => {
-  const output = store.latest?.output;
-  if (output === undefined) return undefined;
-  switch (output.kind) {
-    case "message":
-      return output.text;
-    case "clarification":
-      return `${output.question} ${output.choices.join(" · ")}`;
-    case "recommendations":
-      return `${output.intro} ${output.recommendation_ids.join(" · ")}`;
-    case "pending_action":
-      return `Action pending: ${output.action.effect}`;
-    default:
-      return undefined;
-  }
-});
 function plainText(value: string): string {
   return value.replace(/\*\*(.+?)\*\*/g, "$1");
+}
+function isCapabilityError(value: string): boolean {
+  return value.toLowerCase().includes("capability is not configured");
 }
 onMounted(async () => {
   const found = await store.load(
@@ -50,7 +36,8 @@ onMounted(async () => {
 });
 onBeforeUnmount(store.cancel);
 async function send(): Promise<void> {
-  const message = text.value;
+  const message = text.value.trim();
+  if (!message) return;
   text.value = "";
   await store.send(api, conversationId.value, session.deviceId, message);
 }
@@ -58,29 +45,40 @@ async function send(): Promise<void> {
 <template>
   <section>
     <h1 tabindex="-1">Assistant</h1>
+    <p
+      v-if="store.phase === 'loading' && store.messages.length === 0"
+      role="status"
+      aria-live="polite"
+    >
+      Loading conversation…
+    </p>
     <ol aria-label="Conversation history">
-      <li
-        v-for="message in store.conversation?.messages ?? []"
-        :key="message.message_id"
-      >
+      <li v-for="message in store.messages" :key="message.id">
         <strong>{{ message.role }}</strong>
         <span class="message-content">{{ plainText(message.content) }}</span>
-      </li>
-      <li v-if="store.latestUserText">
-        <strong>user</strong>
-        <span class="message-content">{{ store.latestUserText }}</span>
+        <p v-if="message.error" role="alert" class="turn-error">
+          {{ message.error }}
+          <a v-if="isCapabilityError(message.error)" href="#/settings">
+            Configure the assistant in Settings.
+          </a>
+        </p>
       </li>
     </ol>
+    <p
+      v-if="store.error && !store.messages.some((message) => message.error)"
+      role="alert"
+      class="turn-error"
+    >
+      {{ store.error }}
+      <a v-if="isCapabilityError(store.error)" href="#/settings">
+        Configure the assistant in Settings.
+      </a>
+    </p>
     <form @submit.prevent="send">
       <label for="assistant-message">Message</label>
       <textarea id="assistant-message" v-model="text" required />
-      <button type="submit">Send</button>
+      <button type="submit" :disabled="store.phase === 'loading'">Send</button>
     </form>
-    <AsyncState :phase="store.phase" :error="store.error">
-      <div class="message-content" aria-live="polite">
-        {{ latestText ? plainText(latestText) : "" }}
-      </div>
-    </AsyncState>
   </section>
 </template>
 <style scoped>
@@ -92,5 +90,15 @@ li {
 .message-content {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+.turn-error {
+  padding: 0.75rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  background: var(--brand-soft);
+  color: var(--text-main);
+}
+.turn-error a {
+  color: var(--brand-strong);
 }
 </style>

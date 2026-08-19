@@ -247,7 +247,7 @@ class ExternalEvidenceIngestion:
                             ref=item.ref,
                             title=item.title,
                             creator_label=item.creator_label,
-                            occurred_at=item.source_timestamp,
+                            occurred_at=item.source_timestamp or item.provenance.projected_at,
                             event_type=event_type,
                         )
                     )

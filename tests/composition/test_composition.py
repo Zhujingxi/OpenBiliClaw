@@ -21,7 +21,7 @@ from openbiliclaw.ai.runtime.capabilities import ModelCapabilities
 from openbiliclaw.application.refresh_recommendations import RefreshRecommendationsCommand
 from openbiliclaw.composition.application import Application, ApplicationServices
 from openbiliclaw.composition.build import BuildOptions, build_application
-from openbiliclaw.composition.entrypoints import main
+from openbiliclaw.composition.entrypoints import _parser, main
 from openbiliclaw.composition.lifecycle import ComponentStage, LifecyclePlan, RuntimeComponent
 from openbiliclaw.composition.providers import (
     _UnavailableCredentialTransport,
@@ -621,6 +621,34 @@ async def test_fail_closed_provider_adapters_raise_without_fake_transport() -> N
             await _VaultCredentialResolver(cast("Any", Vault(payload)))(handle)
 
 
+@pytest.mark.asyncio
+async def test_youtube_connects_anonymously_without_credentials(tmp_path: Path) -> None:
+    app = build_application(
+        AppSettings(),
+        options=BuildOptions(data_dir=tmp_path, enabled_providers=("youtube",)),
+    )
+    assert app.hosts.api is not None
+    await app.start()
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app.hosts.api), base_url="http://test"
+        ) as client:
+            response = await client.post(
+                "/v1/sources/connect",
+                json={
+                    "provider_id": "youtube",
+                    "method_id": "builtin.anonymous",
+                    "idempotency_key": "connect:youtube:anonymous",
+                },
+                headers={"X-Device-ID": "test", "X-CSRF-Token": "test"},
+            )
+        assert response.status_code == 200
+        assert response.json()["status"]["state"] == "connected"
+        assert response.json()["status"]["method_id"] == "builtin.anonymous"
+    finally:
+        await app.stop()
+
+
 def test_all_explicit_first_party_provider_builders_validate() -> None:
     app = build_application(
         AppSettings(),
@@ -660,10 +688,73 @@ def test_all_explicit_first_party_provider_builders_validate() -> None:
     assert tuple(item.provider_id.value for item in graph.registry.manifests()) == graph.enabled
 
 
-def test_check_entrypoint(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "arguments",
+    (
+        ("--config", "settings.toml", "--data-dir", "state", "serve"),
+        ("serve", "--config", "settings.toml", "--data-dir", "state"),
+    ),
+)
+def test_global_cli_options_work_before_or_after_command(arguments: tuple[str, ...]) -> None:
+    parsed = _parser().parse_args(arguments)
+    assert parsed.config == Path("settings.toml")
+    assert parsed.data_dir == Path("state")
+
+
+@pytest.mark.parametrize(
+    ("arguments", "description"),
+    (
+        (("check",), "Validate configuration"),
+        (("serve",), "Serve the local web"),
+        (("set-password",), "Configure the web login"),
+        (("ext-token",), "Mint a durable"),
+        (("export",), "ZIP archive regardless"),
+        (("import",), "Import a backup"),
+        (("sources",), "List, inspect, connect"),
+        (("sources", "list"), "List source connection"),
+        (("sources", "status"), "Show one source"),
+        (("sources", "add"), "Connect a source"),
+        (("sources", "remove"), "Disconnect a source"),
+        (("sources", "sync"), "Synchronize evidence"),
+        (("feed",), "Show the current recommendation"),
+        (("feedback",), "Record explicit feedback"),
+        (("profile",), "Inspect the profile"),
+        (("profile", "show"), "Show the bounded preference"),
+        (("profile", "exploration"), "Enable or disable"),
+        (("assistant",), "Send one message"),
+        (("search",), "Search content"),
+    ),
+)
+def test_cli_help_describes_every_command(
+    arguments: tuple[str, ...], description: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit, match="0"):
+        _parser().parse_args((*arguments, "--help"))
+    assert description in capsys.readouterr().out
+
+
+def test_check_entrypoint(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     monkeypatch.setattr("sys.argv", ["openbiliclaw", "check", "--data-dir", str(tmp_path)])
     main()
     assert (tmp_path / "openbiliclaw.db").exists()
+    assert capsys.readouterr().out == "configuration and runtime check passed\n"
+
+
+def test_missing_config_reports_clean_cli_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    missing = tmp_path / "missing.toml"
+    monkeypatch.setattr("sys.argv", ["openbiliclaw", "--config", str(missing), "check"])
+
+    with pytest.raises(SystemExit, match="2"):
+        main()
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert str(missing) in captured.err
+    assert "Traceback" not in captured.err
 
 
 def test_serve_without_frontend_environment_uses_composed_host(

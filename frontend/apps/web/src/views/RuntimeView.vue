@@ -18,16 +18,143 @@ onBeforeUnmount(() => {
 <template>
   <section>
     <h1 tabindex="-1">Runtime health</h1>
-    <p role="status" aria-live="polite">
-      Events {{ store.streamConnected ? "connected" : "disconnected" }}
-    </p>
+    <div class="runtime-actions">
+      <p role="status" aria-live="polite">
+        Events {{ store.streamConnected ? "connected" : "disconnected" }}
+      </p>
+      <p v-if="store.error && store.phase !== 'error'" role="alert">
+        Event stream: {{ store.error }}
+      </p>
+      <button
+        type="button"
+        :disabled="store.phase === 'loading'"
+        @click="store.load(api)"
+      >
+        Refresh health
+      </button>
+    </div>
     <AsyncState :phase="store.phase" :error="store.error">
-      <dl v-if="store.health">
-        <dt>Status</dt>
-        <dd>{{ store.health.health.status }}</dd>
-        <dt>Component</dt>
-        <dd>{{ store.health.health.component_id }}</dd>
-      </dl>
+      <section v-if="store.health" aria-labelledby="health-summary-heading">
+        <h2 id="health-summary-heading">Health summary</h2>
+        <p
+          class="health-badge"
+          :class="`health-${store.health.health.status}`"
+          role="status"
+        >
+          {{ store.health.health.status }}
+        </p>
+        <dl>
+          <dt>Component</dt>
+          <dd>{{ store.health.health.component_id }}</dd>
+          <dt>Checked</dt>
+          <dd>
+            <time :datetime="store.health.health.checked_at">
+              {{ new Date(store.health.health.checked_at).toLocaleString() }}
+            </time>
+          </dd>
+          <template v-if="store.health.health.issue">
+            <dt>Issue</dt>
+            <dd>{{ store.health.health.issue }}</dd>
+          </template>
+        </dl>
+        <section aria-labelledby="runtime-jobs-heading">
+          <h3 id="runtime-jobs-heading">Supervised jobs</h3>
+          <p v-if="store.health.health.jobs.length === 0" role="status">
+            No supervised jobs are registered.
+          </p>
+          <div v-else class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Job</th>
+                  <th scope="col">Last result</th>
+                  <th scope="col">Runs</th>
+                  <th scope="col">Active</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="job in store.health.health.jobs" :key="job.job_id">
+                  <th scope="row">{{ job.job_id }}</th>
+                  <td>{{ job.last_result ?? "Not run" }}</td>
+                  <td>{{ job.runs_completed }} / {{ job.runs_started }}</td>
+                  <td>{{ job.active_runs }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </section>
     </AsyncState>
+    <details>
+      <summary>Recent runtime events ({{ store.events.length }})</summary>
+      <p v-if="store.events.length === 0" role="status">No events received.</p>
+      <ol v-else>
+        <li v-for="event in store.events" :key="event.event_id">
+          #{{ event.event_id }} {{ event.kind }} — {{ event.status }}
+        </li>
+      </ol>
+    </details>
   </section>
 </template>
+<style scoped>
+.runtime-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 1rem;
+}
+.runtime-actions button {
+  width: auto;
+}
+.health-badge {
+  justify-self: start;
+  margin: 0;
+  padding: 0.35rem 0.75rem;
+  border-radius: 999px;
+  font-weight: 700;
+  text-transform: capitalize;
+}
+.health-healthy {
+  color: var(--success);
+  border: 1px solid var(--success);
+  background: color-mix(in srgb, var(--success) 14%, transparent);
+}
+.health-degraded,
+.health-unhealthy {
+  color: var(--danger);
+  border: 1px solid var(--danger);
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+}
+dl {
+  display: grid;
+  grid-template-columns: minmax(8rem, auto) minmax(0, 1fr);
+  margin: 0;
+}
+dt {
+  padding: 0.5rem 1rem 0.5rem 0;
+  font-weight: 700;
+  color: var(--text-main);
+}
+dd {
+  margin: 0;
+  padding: 0.5rem 0;
+  color: var(--text-secondary);
+}
+dt:not(:first-of-type),
+dd:not(:first-of-type) {
+  border-top: 1px solid var(--line);
+}
+.table-scroll {
+  overflow-x: auto;
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+th,
+td {
+  padding: 0.5rem;
+  border-bottom: 1px solid var(--line);
+  text-align: start;
+}
+</style>

@@ -53,6 +53,7 @@ from openbiliclaw.recommendation.brief import (
     SlateGuidance,
 )
 from openbiliclaw.recommendation.brief_agent import BRIEF_AGENT
+from openbiliclaw.recommendation.discovery.planner import PlannedQuery
 from openbiliclaw.recommendation.discovery.service import DiscoveredPreview
 from openbiliclaw.recommendation.evaluation.agent import EvaluationBatch
 from openbiliclaw.recommendation.hypotheses import HypothesisRegistry
@@ -122,7 +123,9 @@ async def test_model_free_evaluation_and_empty_pipeline_are_executable() -> None
             )
         )
     )
-    dynamic._providers = SimpleNamespace(registry=SimpleNamespace(manifests=lambda: ()))
+    dynamic._providers = SimpleNamespace(
+        registry=SimpleNamespace(manifests=lambda: (), provider=lambda _provider: object())
+    )
     dynamic._access = SimpleNamespace(connected_handle=lambda *_: None)
     dynamic._target_count = 10
     dynamic._briefs = SimpleNamespace(
@@ -153,6 +156,24 @@ async def test_model_free_evaluation_and_empty_pipeline_are_executable() -> None
     await pipeline.replenish()
     dynamic._briefs.compile_shadow.assert_awaited_once()
     dynamic._allocate.assert_awaited_once()
+
+    searchable = SimpleNamespace(search=AsyncMock())
+    dynamic._providers.registry.provider = lambda provider_id: (
+        searchable if provider_id.value == "disconnected" else object()
+    )
+    dynamic._access.connected_handle = lambda provider_id, _account_id: (
+        object() if provider_id == "unsearchable" else None
+    )
+    dynamic._planner.plan.return_value = (
+        PlannedQuery(provider_id=ProviderId(value="disconnected"), text="topic", topic="topic"),
+        PlannedQuery(provider_id=ProviderId(value="unsearchable"), text="topic", topic="topic"),
+    )
+    dynamic._discovery.discover.reset_mock()
+    await pipeline.replenish()
+    dynamic._discovery.discover.assert_awaited_once_with((), limit=10)
+    dynamic._planner.plan.return_value = ()
+    dynamic._providers.registry.provider = lambda _provider: object()
+    dynamic._access.connected_handle = lambda *_: None
 
     disabled = UserOverride.create(
         claim_id=EXPLORATION_DISABLED_CLAIM_ID,

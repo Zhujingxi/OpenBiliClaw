@@ -771,9 +771,17 @@
             "$ref": "#/components/schemas/ContentRef"
           },
           "source_timestamp": {
-            "format": "date-time",
-            "title": "Source Timestamp",
-            "type": "string"
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Source Timestamp"
           },
           "summary": {
             "maxLength": 4000,
@@ -791,7 +799,6 @@
           "ref",
           "title",
           "summary",
-          "source_timestamp",
           "provenance"
         ],
         "title": "CardData",
@@ -1135,9 +1142,16 @@
             "$ref": "#/components/schemas/ContentRef"
           },
           "source_timestamp": {
-            "format": "date-time",
-            "title": "Source Timestamp",
-            "type": "string"
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Timestamp"
           },
           "summary": {
             "maxLength": 4000,
@@ -1155,7 +1169,6 @@
           "ref",
           "title",
           "summary",
-          "source_timestamp",
           "provenance"
         ],
         "title": "ContentPreview",

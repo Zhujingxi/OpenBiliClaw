@@ -739,9 +739,9 @@ export interface components {
             ref: components["schemas"]["ContentRef"];
             /**
              * Source Timestamp
-             * Format: date-time
+             * @default null
              */
-            source_timestamp: string;
+            source_timestamp: string | null;
             /** Summary */
             summary: string;
             /** Title */
@@ -875,11 +875,8 @@ export interface components {
             creator_label?: string | null;
             provenance: components["schemas"]["ProjectionProvenance"];
             ref: components["schemas"]["ContentRef"];
-            /**
-             * Source Timestamp
-             * Format: date-time
-             */
-            source_timestamp: string;
+            /** Source Timestamp */
+            source_timestamp?: string | null;
             /** Summary */
             summary: string;
             /** Title */

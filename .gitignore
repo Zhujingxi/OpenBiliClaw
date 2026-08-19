@@ -34,6 +34,7 @@ Thumbs.db
 
 # Project-specific
 data/
+data-v2/
 *.db
 *.sqlite
 *.sqlite3
@@ -115,4 +116,5 @@ backend.err
 /openbiliclaw-extension-v*.zip
 /openbiliclaw-extension-v*.xpi
 data-e2e/
+artifacts/e2e/
 model_api_key.txt

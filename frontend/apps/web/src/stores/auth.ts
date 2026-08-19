@@ -17,7 +17,7 @@ interface AuthStorage {
   removeItem(key: string): void;
 }
 
-/** Attach the durable session token and invalidate it on any unauthorized response. */
+/** Attach the durable session token and invalidate it when that token is rejected. */
 export function authenticatedFetch(
   fetcher: typeof fetch,
   storage: AuthStorage = localStorage,
@@ -33,7 +33,7 @@ export function authenticatedFetch(
     const token = storage.getItem(AUTH_TOKEN_KEY)?.trim();
     if (token) headers.set("Authorization", `Bearer ${token}`);
     const response = await bound(input, { ...init, headers });
-    if (response.status === 401) {
+    if (response.status === 401 && token) {
       storage.removeItem(AUTH_TOKEN_KEY);
       onUnauthorized();
     }
@@ -55,7 +55,7 @@ export const useAuthStore = defineStore("auth", () => {
   async function initialize(api: WebApi): Promise<void> {
     const hasToken = Boolean(localStorage.getItem(AUTH_TOKEN_KEY)?.trim());
     try {
-      await api.recommendations();
+      await api.runtimeHealth();
       status.value = hasToken ? "authenticated" : "not-configured";
     } catch (caught) {
       if (caught instanceof ApiError && caught.status === 401) {

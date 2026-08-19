@@ -45,7 +45,7 @@ it.each(["video", "image", "article", "discussion"] as const)(
     expect(wrapper.get("article").attributes("aria-labelledby")).toBeTruthy();
     expect(wrapper.get("h2").text()).toBe(base.data.title);
     expect(wrapper.get("a").attributes("href")).toBe(
-      base.data.ref.canonical_url,
+      `#/content/${encodeURIComponent(JSON.stringify(base.data.ref))}`,
     );
     expect(wrapper.get("img").attributes("src")).toBe(
       `/v1/media?url=${encodeURIComponent(base.data.image_url ?? "")}`,
@@ -103,6 +103,16 @@ it("handles missing media, exact summary truncation, deletion and unavailability
   ).toContain("Provider unavailable");
 });
 
+it.each(["-", "  -  ", "\n\t", "—"])(
+  "hides placeholder summary %j",
+  (summary) => {
+    const wrapper = mount(CardRenderer, {
+      props: { card: { ...base, data: { ...base.data, summary } } },
+    });
+    expect(wrapper.find("[data-card-summary]").exists()).toBe(false);
+  },
+);
+
 it("rejects unsafe URLs, arbitrary descriptor fields and HTML execution", () => {
   expect(sanitizeUrl("javascript:alert(1)")).toBeUndefined();
   expect(sanitizeUrl("data:text/html,boom")).toBeUndefined();
@@ -140,6 +150,23 @@ it("rejects unsafe URLs, arbitrary descriptor fields and HTML execution", () => 
       },
     },
   });
-  expect(wrapper.find("a").exists()).toBe(false);
+  expect(wrapper.get("a").attributes("href")).toContain("#/content/");
   expect(wrapper.html()).not.toContain("<img src=x");
+});
+
+it("hides the epoch timestamp sentinel while keeping real source times", () => {
+  const sentinel = mount(CardRenderer, {
+    props: {
+      card: {
+        ...base,
+        data: { ...base.data, source_timestamp: "1970-01-01T00:00:00Z" },
+      },
+    },
+  });
+  expect(sentinel.find("time").exists()).toBe(false);
+  expect(
+    mount(CardRenderer, { props: { card: base } })
+      .get("time")
+      .attributes("datetime"),
+  ).toBe("2030-01-01T00:00:00Z");
 });

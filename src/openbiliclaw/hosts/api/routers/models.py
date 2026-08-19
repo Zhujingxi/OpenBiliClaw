@@ -10,6 +10,7 @@ from openbiliclaw.ai.providers.catalog import (
     resolve_model,
 )
 from openbiliclaw.ai.runtime.capabilities import ModelCapabilities
+from openbiliclaw.application.errors import ApplicationError, ApplicationErrorCode
 
 from ..dependencies import HostDependencies, get_dependencies
 from ..model_configuration import ModelConfigurationError, ModelUpdate
@@ -152,5 +153,5 @@ def update(
             )
         )
     except ModelConfigurationError as error:
-        raise HTTPException(status_code=422, detail=str(error)) from error
+        raise ApplicationError(ApplicationErrorCode.VALIDATION, str(error)) from error
     return _current(dependencies, restart_required=True)

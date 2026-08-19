@@ -40,7 +40,10 @@ def normalize_and_prefilter(
         if (
             not item.preview.title.strip()
             or not item.preview.ref.provider_content_id.strip()
-            or item.preview.source_timestamp > item.provenance.discovered_at
+            or (
+                item.preview.source_timestamp is not None
+                and item.preview.source_timestamp > item.provenance.discovered_at
+            )
         ):
             reason = RejectionReason.MALFORMED
         elif identity in identities or url in urls:

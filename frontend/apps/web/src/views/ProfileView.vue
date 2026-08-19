@@ -12,7 +12,15 @@ onBeforeUnmount(store.cancel);
 <template>
   <section>
     <h1 tabindex="-1">Profile</h1>
+    <p>
+      This read-only profile is derived automatically from content you view and
+      recommendation feedback you provide.
+      <a href="#/connect">Connect a source</a>
+      to start activity; preferences and insights will appear here as the system
+      learns.
+    </p>
     <AsyncState :phase="store.phase" :error="store.error">
+      <template #empty> No learned preferences or insights yet. </template>
       <h2>Preferences</h2>
       <ul>
         <li

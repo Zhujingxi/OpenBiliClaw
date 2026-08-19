@@ -25,7 +25,7 @@ from openbiliclaw.assistant.models import (
     AssistantRecommendationPresentation,
     ConversationScope,
 )
-from openbiliclaw.assistant.service import AssistantService, TurnCommand
+from openbiliclaw.assistant.service import AssistantService, TurnCommand, turn_context
 from openbiliclaw.core.resources import ResourceBudget
 from openbiliclaw.understanding.projections import DialogueProfile
 
@@ -63,6 +63,14 @@ def _deps() -> AssistantDependencies:
             scope=ConversationScope(local_user_id="local", device_id="desktop"),
         ),
     )
+
+
+def test_turn_context_requires_requested_locale_and_readable_recommendations() -> None:
+    context = turn_context(TurnCommand(text="recommend something", deps=_deps()))
+    requirements = next(item.text for item in context if item.label == "response-requirements")
+    assert "en-US" in requirements
+    assert "human-readable titles and canonical URLs" in requirements
+    assert "Never expose opaque internal IDs" in requirements
 
 
 def test_output_tool_schema_enumerates_the_supported_kinds() -> None:

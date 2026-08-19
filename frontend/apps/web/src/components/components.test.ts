@@ -14,6 +14,7 @@ const api: WebApi = {
     throw new Error("unused");
   },
   recommendations: async () => ({ items: [] }),
+  refreshRecommendations: async () => ({ decision: "run" }),
   feedback: async () => {
     throw new Error("unused");
   },
@@ -66,6 +67,9 @@ describe("web accessibility", () => {
     expect(mobile.get("nav").attributes("aria-label")).toBe(
       "Mobile navigation",
     );
+    const source = readFileSync("src/App.vue", "utf8");
+    expect(source).toContain('nav a[aria-current="page"]');
+    expect(source).toContain("background: var(--brand-soft);");
   });
 
   it.each([
@@ -86,6 +90,8 @@ describe("web accessibility", () => {
       "grid-template-columns: repeat(3, minmax(0, 1fr))",
     );
     expect(source).toContain('input:not([type="checkbox"])');
+    expect(source).toContain("overflow-wrap: normal");
+    expect(source).toContain("word-break: normal");
     expect(source).not.toContain("overflow: auto");
   });
 
@@ -101,6 +107,7 @@ describe("web accessibility", () => {
     expect(wrapper.find(".responsive-layout").exists()).toBe(true);
     expect(wrapper.findAll("main")).toHaveLength(1);
     expect(wrapper.findAllComponents({ name: "ProfileView" })).toHaveLength(1);
+    expect(document.title).toBe("Profile · OpenBiliClaw");
     await skip.trigger("click");
     expect(location.hash).toBe("#/profile");
     expect(document.activeElement?.id).toBe("main");
@@ -110,5 +117,16 @@ describe("web accessibility", () => {
     expect(back).toHaveBeenCalled();
     wrapper.unmount();
     back.mockRestore();
+  });
+
+  it("announces unknown routes while retaining the recommendations fallback", () => {
+    location.hash = "#/missing";
+    const wrapper = mount(App, {
+      global: { plugins: [createPinia()], provide: { api } },
+    });
+    expect(wrapper.get(".route-notice").attributes("role")).toBe("status");
+    expect(wrapper.text()).toContain("Page not found; showing Recommendations");
+    expect(document.title).toBe("Recommendations · OpenBiliClaw");
+    wrapper.unmount();
   });
 });

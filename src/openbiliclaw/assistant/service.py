@@ -23,6 +23,21 @@ class TurnCommand:
     deps: AssistantDependencies
 
 
+def turn_context(command: TurnCommand) -> tuple[ContextProjection, ...]:
+    """Build bounded model context with explicit response-locale requirements."""
+
+    profile = command.deps.profile.model_dump_json()
+    response_requirements = (
+        f"Answer in the language indicated by locale {command.deps.locale}. "
+        "When recommending content, use human-readable titles and canonical URLs. "
+        "Never expose opaque internal IDs."
+    )
+    return (
+        ContextProjection("dialogue-profile", profile, 4_096),
+        ContextProjection("response-requirements", response_requirements, 512),
+    )
+
+
 class AssistantService:
     def __init__(
         self,
@@ -33,7 +48,6 @@ class AssistantService:
         self._agent = agent
 
     async def run_turn(self, command: TurnCommand) -> AgentRunResult[AssistantOutput]:
-        profile = command.deps.profile.model_dump_json()
         return await self._runtime.run(
             AgentRunRequest(
                 agent_id=ASSISTANT_AGENT_ID,
@@ -41,7 +55,7 @@ class AssistantService:
                 deps=command.deps,
                 user_input=command.text,
                 history=(),
-                context=(ContextProjection("dialogue-profile", profile, 4_096),),
+                context=turn_context(command),
                 requirements=ASSISTANT_REQUIREMENTS,
                 policy=ASSISTANT_POLICY,
                 workflow="assistant.turn",

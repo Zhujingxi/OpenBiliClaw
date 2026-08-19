@@ -40,7 +40,7 @@ class ContentPreview(StrictBaseModel):
         return value
 
     creator_label: str | None = Field(default=None, max_length=300)
-    source_timestamp: AwareDatetime
+    source_timestamp: AwareDatetime | None = None
     provenance: ProjectionProvenance
 
     @model_validator(mode="after")
@@ -69,7 +69,7 @@ class RecommendationCandidate(StrictBaseModel):
         return value
 
     discovery_reason: str = Field(min_length=1, max_length=500)
-    source_timestamp: AwareDatetime
+    source_timestamp: AwareDatetime | None = None
     provenance: ProjectionProvenance
 
     @model_validator(mode="after")
@@ -87,7 +87,7 @@ class SearchDocument(StrictBaseModel):
     ref: ContentRef
     title: str = Field(min_length=1, max_length=500)
     body: str = Field(min_length=1, max_length=100_000)
-    source_timestamp: AwareDatetime
+    source_timestamp: AwareDatetime | None = None
     provenance: ProjectionProvenance
 
     @model_validator(mode="after")
@@ -117,7 +117,7 @@ class CardData(StrictBaseModel):
 
     badge: str | None = Field(default=None, max_length=100)
     image_url: str | None = Field(default=None, pattern=r"^https?://[^\s]+$", max_length=2048)
-    source_timestamp: AwareDatetime
+    source_timestamp: AwareDatetime | None = None
     provenance: ProjectionProvenance
 
     @model_validator(mode="after")

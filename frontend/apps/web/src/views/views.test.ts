@@ -6,10 +6,12 @@ import type { WebApi } from "../services/api";
 import ConnectView from "./ConnectView.vue";
 import SearchView from "./SearchView.vue";
 import ContentView from "./ContentView.vue";
+import ProfileView from "./ProfileView.vue";
 import AssistantView from "./AssistantView.vue";
 import ProvidersView from "./ProvidersView.vue";
 import RecommendationsView from "./RecommendationsView.vue";
 import SettingsView from "./SettingsView.vue";
+import RuntimeView from "./RuntimeView.vue";
 
 function api(overrides: Partial<WebApi> = {}): WebApi {
   return {
@@ -25,6 +27,7 @@ function api(overrides: Partial<WebApi> = {}): WebApi {
       },
     }),
     recommendations: async () => ({ items: [] }),
+    refreshRecommendations: async () => ({ decision: "run" }),
     feedback: async () => ({
       result: {
         feedback_id: "feedback_11111111111111111111111111111111",
@@ -125,8 +128,28 @@ beforeEach(() => {
 describe("web view behavior", () => {
   it("connects a source using the typed mutation", async () => {
     const connectSource = vi.fn(api().connectSource);
-    const wrapper = mountView(ConnectView, api({ connectSource }));
+    const wrapper = mountView(
+      ConnectView,
+      api({
+        connectSource,
+        listSources: async () => [
+          { provider_id: "demo", account_id: null, state: "disconnected" },
+          { provider_id: "other", account_id: null, state: "disconnected" },
+        ],
+      }),
+    );
     expect(wrapper.text()).not.toContain("Source connected.");
+    await vi.waitFor(() =>
+      expect(wrapper.find("#provider-id").exists()).toBe(true),
+    );
+    expect(
+      wrapper
+        .findAll(".source-status")
+        .map((item) => [item.get("strong").text(), item.get("span").text()]),
+    ).toEqual([
+      ["demo", "disconnected"],
+      ["other", "disconnected"],
+    ]);
     await wrapper.get("#provider-id").setValue("demo");
     await wrapper.get("form").trigger("submit");
     expect(connectSource).toHaveBeenCalledWith(
@@ -136,6 +159,68 @@ describe("web view behavior", () => {
     await vi.waitFor(() =>
       expect(wrapper.text()).toContain("Source connected."),
     );
+    expect(
+      wrapper
+        .findAll(".source-status")
+        .map((item) => [item.get("strong").text(), item.get("span").text()]),
+    ).toEqual([
+      ["other", "disconnected"],
+      ["demo", "connected"],
+    ]);
+  });
+
+  it("surfaces source connection failures without hiding provider status", async () => {
+    const wrapper = mountView(
+      ConnectView,
+      api({
+        listSources: async () => [
+          { provider_id: "demo", account_id: null, state: "disconnected" },
+        ],
+        connectSource: async () =>
+          Promise.reject(new Error("temporary failure")),
+      }),
+    );
+    await vi.waitFor(() => expect(wrapper.find("form").exists()).toBe(true));
+    await wrapper.get("form").trigger("submit");
+    await vi.waitFor(() =>
+      expect(wrapper.find('[role="alert"]').exists()).toBe(true),
+    );
+    expect(wrapper.get('[role="alert"]').text()).toContain("Try again");
+    expect(wrapper.get(".source-status strong").text()).toBe("demo");
+    expect(wrapper.get(".source-status span").text()).toBe("disconnected");
+  });
+
+  it("turns empty product states into actionable guidance", async () => {
+    const recommendations = mountView(RecommendationsView);
+    await vi.waitFor(() =>
+      expect(recommendations.find('a[href="#/connect"]').exists()).toBe(true),
+    );
+    expect(recommendations.text()).toContain(
+      "No recommendations are available yet",
+    );
+
+    const providers = mountView(
+      ProvidersView,
+      api({
+        listSources: async () => [
+          { provider_id: "demo", account_id: null, state: "disconnected" },
+        ],
+      }),
+    );
+    await vi.waitFor(() =>
+      expect(providers.find('a[href="#/connect"]').exists()).toBe(true),
+    );
+    const noProviders = mountView(ProvidersView);
+    await vi.waitFor(() =>
+      expect(noProviders.find('a[href="#/connect"]').exists()).toBe(true),
+    );
+
+    const profile = mountView(ProfileView);
+    expect(profile.text()).toContain("read-only profile");
+    expect(profile.get('a[href="#/connect"]').text()).toBe("Connect a source");
+
+    const content = mountView(ContentView);
+    expect(content.get('a[href="#/search"]').text()).toBe("Search");
   });
 
   it("navigates from search results to encoded content detail", async () => {
@@ -162,7 +247,15 @@ describe("web view behavior", () => {
     };
     const wrapper = mountView(
       SearchView,
-      api({ search: async () => ({ items: [preview] }) }),
+      api({
+        listSources: async () => [
+          { provider_id: "demo", account_id: null, state: "connected" },
+        ],
+        search: async () => ({ items: [preview] }),
+      }),
+    );
+    await vi.waitFor(() =>
+      expect(wrapper.find("#search-query").exists()).toBe(true),
     );
     await wrapper.get("#search-query").setValue("result");
     await wrapper.get("form").trigger("submit");
@@ -423,9 +516,57 @@ describe("web view behavior", () => {
         ),
     ).toBe(true);
     expect(wrapper.text()).not.toContain("**answer**");
-    expect(wrapper.get("[aria-live='polite']").classes()).toContain(
-      "message-content",
+    expect(
+      wrapper.findAll("li").map((item) => item.find("strong").text()),
+    ).toEqual(["user", "user", "assistant"]);
+  });
+
+  it("keeps assistant turns and attaches actionable capability errors", async () => {
+    let calls = 0;
+    const wrapper = mountView(
+      AssistantView,
+      api({
+        assistantTurn: async () => {
+          calls += 1;
+          if (calls === 2) throw new Error("capability is not configured");
+          return { output: { kind: "message", text: "first answer" } };
+        },
+      }),
     );
+    await vi.waitFor(() => expect(wrapper.text()).toContain("history"));
+    await wrapper.get("textarea").setValue("first question");
+    await wrapper.get("form").trigger("submit");
+    await wrapper.get("textarea").setValue("second question");
+    await wrapper.get("form").trigger("submit");
+    await vi.waitFor(() =>
+      expect(wrapper.find('[role="alert"]').exists()).toBe(true),
+    );
+    expect(wrapper.text()).toContain("first question");
+    expect(wrapper.text()).toContain("first answer");
+    expect(wrapper.text()).toContain("second question");
+    expect(wrapper.get('[role="alert"] a').attributes("href")).toBe(
+      "#/settings",
+    );
+    expect(
+      wrapper
+        .get("ol")
+        .element.compareDocumentPosition(wrapper.get("form").element),
+    ).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+  });
+
+  it("replaces dead search forms with an actionable connected-source explanation", async () => {
+    const wrapper = mountView(
+      SearchView,
+      api({
+        listSources: async () => [
+          { provider_id: "demo", account_id: null, state: "disconnected" },
+        ],
+      }),
+    );
+    await vi.waitFor(() =>
+      expect(wrapper.find('a[href="#/connect"]').exists()).toBe(true),
+    );
+    expect(wrapper.find("form").exists()).toBe(false);
   });
 
   it("renders provider statuses as a list without invalid tab roles", async () => {
@@ -437,7 +578,9 @@ describe("web view behavior", () => {
         ],
       }),
     );
-    await vi.waitFor(() => expect(wrapper.text()).toContain("connected"));
+    await vi.waitFor(() =>
+      expect(wrapper.find(".provider-status").exists()).toBe(true),
+    );
     expect(wrapper.find('[role="tab"]').exists()).toBe(false);
     const status = wrapper.get(".provider-status");
     expect(status.findAll(":scope > *").map((item) => item.text())).toEqual([
@@ -545,6 +688,121 @@ describe("web view behavior", () => {
     expect(wrapper.findAll(".capability-options label")).toHaveLength(5);
   });
 
+  it("keeps the selected catalog pair while filtering and displays server configuration", async () => {
+    const wrapper = mountView(
+      SettingsView,
+      api({
+        modelCatalog: async () => ({
+          providers: [
+            {
+              id: "openai",
+              name: "OpenAI",
+              env: ["OPENAI_API_KEY"],
+              protocol: "openai",
+              models: [
+                {
+                  id: "gpt-4o",
+                  name: "GPT-4o",
+                  reasoning: false,
+                  tool_call: true,
+                  structured_output: true,
+                  context_limit: 128000,
+                },
+              ],
+            },
+            {
+              id: "anthropic",
+              name: "Anthropic",
+              env: ["ANTHROPIC_API_KEY"],
+              protocol: "anthropic",
+              models: [],
+            },
+          ],
+        }),
+        currentModel: async () => ({
+          current: {
+            model: {
+              provider: "openai",
+              model_name: "gpt-4o",
+              endpoint: null,
+              secret_configured: true,
+              protocol: "openai",
+              capabilities: null,
+            },
+            embedding: {
+              provider: "openai",
+              model_name: "text-embedding-3-small",
+              endpoint: "https://api.example.test",
+              secret_configured: true,
+            },
+          },
+          reloaded: true,
+          restart_required: false,
+        }),
+      }),
+    );
+    await vi.waitFor(() =>
+      expect(wrapper.find("#model-provider").exists()).toBe(true),
+    );
+    await wrapper.get("#model-search").setValue("anthropic");
+    expect(
+      wrapper.get<HTMLSelectElement>("#model-provider").element.value,
+    ).toBe("openai");
+    expect(wrapper.get<HTMLSelectElement>("#model-name").element.value).toBe(
+      "gpt-4o",
+    );
+    expect(wrapper.get(".current-configuration").text()).toContain(
+      "text-embedding-3-small",
+    );
+    expect(wrapper.get(".current-configuration").text()).toContain(
+      "Reloaded in this processYes",
+    );
+  });
+
+  it("renders runtime timestamp, supervised jobs, status treatment, and events detail", async () => {
+    const wrapper = mountView(
+      RuntimeView,
+      api({
+        runtimeHealth: async () => ({
+          health: {
+            component_id: "runtime.supervisor",
+            status: "healthy",
+            checked_at: "2030-01-01T00:00:00Z",
+            jobs: [
+              {
+                job_id: "recommendation.replenishment",
+                last_result: "success",
+                runs_started: 7,
+                runs_completed: 7,
+                active_runs: 0,
+              },
+            ],
+          },
+        }),
+        events: async function* () {
+          yield {
+            kind: "job",
+            event_id: 1,
+            component_id: "runtime.supervisor",
+            status: "success",
+          };
+          await new Promise(() => undefined);
+        },
+      }),
+    );
+    await vi.waitFor(() =>
+      expect(wrapper.text()).toContain("recommendation.replenishment"),
+    );
+    expect(wrapper.get("time").attributes("datetime")).toBe(
+      "2030-01-01T00:00:00Z",
+    );
+    expect(wrapper.get(".health-badge").classes()).toContain("health-healthy");
+    await vi.waitFor(() =>
+      expect(wrapper.text()).toContain("Recent runtime events (1)"),
+    );
+    wrapper.unmount();
+  });
+
   it("renders model catalog loading, empty, and error states", async () => {
     const pending = new Promise<never>(() => undefined);
     const loading = mountView(
@@ -613,15 +871,24 @@ describe("web view behavior", () => {
         },
       ],
     }));
+    const refreshRecommendations = vi.fn(async () => ({ decision: "run" }));
     const wrapper = mountView(
       RecommendationsView,
-      api({ feedback, recommendations }),
+      api({ feedback, recommendations, refreshRecommendations }),
     );
     await vi.waitFor(() =>
       expect(wrapper.find("article.obc-card").exists()).toBe(true),
     );
-    await wrapper.get("button").trigger("click");
+    await wrapper.get("button.secondary-action").trigger("click");
+    await vi.waitFor(() =>
+      expect(refreshRecommendations).toHaveBeenCalledOnce(),
+    );
+    expect(refreshRecommendations).toHaveBeenCalledWith(
+      expect.objectContaining({ maximum_items: 50 }),
+      expect.any(AbortSignal),
+    );
     await vi.waitFor(() => expect(recommendations).toHaveBeenCalledTimes(2));
+    expect(wrapper.get("article a").attributes("href")).toContain("#/content/");
     await wrapper.get('[aria-label="Like recommendation"]').trigger("click");
     await vi.waitFor(() => expect(feedback).toHaveBeenCalledOnce());
     expect(feedback).toHaveBeenCalledWith(

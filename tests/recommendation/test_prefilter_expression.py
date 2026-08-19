@@ -54,6 +54,19 @@ def candidate(identity: str, **changes: object) -> Candidate:
     return value.model_copy(update=changes)
 
 
+def test_prefilter_accepts_missing_source_timestamp() -> None:
+    item = candidate("undated")
+    item = item.model_copy(
+        update={"preview": item.preview.model_copy(update={"source_timestamp": None})}
+    )
+    accepted, rejected = normalize_and_prefilter(
+        (item,), seen_ids=frozenset(), blocked_urls=frozenset(), avoidances=(), now=NOW
+    )
+    assert len(accepted) == 1
+    assert accepted[0].preview.source_timestamp is None
+    assert rejected == ()
+
+
 def test_prefilter_accepts_and_covers_every_deterministic_rejection() -> None:
     good = candidate("good")
     variants = (

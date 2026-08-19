@@ -36,12 +36,18 @@ onBeforeUnmount(store.cancel);
     <h1 tabindex="-1">Recommendations</h1>
     <button
       type="button"
+      class="secondary-action"
       :disabled="store.phase === 'loading'"
-      @click="store.load(api)"
+      @click="store.refresh(api)"
     >
       Refresh feed
     </button>
     <AsyncState :phase="store.phase" :error="store.error">
+      <template #empty>
+        No recommendations are available yet.
+        <a href="#/connect">Connect a source</a>
+        to start building your feed.
+      </template>
       <ol class="card-list">
         <li v-for="card in store.cards" :key="card.shownId" v-exposed="card">
           <CardRenderer
@@ -66,3 +72,22 @@ onBeforeUnmount(store.cancel);
     </AsyncState>
   </section>
 </template>
+<style scoped>
+.secondary-action {
+  justify-self: start;
+  width: auto;
+}
+
+.card-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 20rem), 1fr));
+  gap: 1rem;
+}
+
+.card-list > li {
+  min-width: 0;
+}
+</style>

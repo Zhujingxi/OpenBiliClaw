@@ -26,7 +26,7 @@ class YouTubeVideo(StrictBaseModel):
     title: str = Field(min_length=1, max_length=500)
     description: str = Field(max_length=20_000)
     channel: YouTubeChannel | None
-    published_at: AwareDatetime
+    published_at: AwareDatetime | None = None
     duration_seconds: int = Field(ge=0)
     view_count: int = Field(ge=0)
     thumbnail_url: str | None = Field(default=None, pattern=r"^https?://[^\s]+$", max_length=2048)

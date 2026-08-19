@@ -8,6 +8,7 @@ const api = (overrides: Partial<WebApi>): WebApi =>
   ({
     login: vi.fn(),
     recommendations: vi.fn(),
+    runtimeHealth: vi.fn(),
     ...overrides,
   }) as WebApi;
 
@@ -57,12 +58,33 @@ describe("authentication", () => {
     expect(unauthorized).toHaveBeenCalledOnce();
   });
 
+  it("does not redirect for a product-level 401 without a session token", async () => {
+    const unauthorized = vi.fn();
+    const request = vi
+      .fn()
+      .mockResolvedValue(new Response("{}", { status: 401 }));
+    const fetcher = authenticatedFetch(
+      request as typeof fetch,
+      localStorage,
+      unauthorized,
+    );
+
+    const response = await fetcher("https://local.test/v1/content/search");
+
+    expect(response.status).toBe(401);
+    expect(unauthorized).not.toHaveBeenCalled();
+    const init = request.mock.calls[0]?.[1] as RequestInit;
+    expect(new Headers(init.headers).has("Authorization")).toBe(false);
+  });
+
   it("bypasses login when authentication is not configured", async () => {
     const auth = useAuthStore();
-    await auth.initialize(
-      api({ recommendations: vi.fn().mockResolvedValue({ items: [] }) }),
-    );
+    const recommendations = vi.fn();
+    const runtimeHealth = vi.fn().mockResolvedValue({ health: {} });
+    await auth.initialize(api({ runtimeHealth, recommendations }));
     expect(auth.status).toBe("not-configured");
+    expect(runtimeHealth).toHaveBeenCalledOnce();
+    expect(recommendations).not.toHaveBeenCalled();
 
     auth.requireLogin();
     await auth.login(
@@ -101,7 +123,7 @@ describe("authentication", () => {
     const auth = useAuthStore();
     await auth.initialize(
       api({
-        recommendations: vi
+        runtimeHealth: vi
           .fn()
           .mockRejectedValue(new ApiError("http", "unauthorized", 401)),
       }),
@@ -116,7 +138,7 @@ describe("authentication", () => {
     const auth = useAuthStore();
     await auth.initialize(
       api({
-        recommendations: vi
+        runtimeHealth: vi
           .fn()
           .mockRejectedValue(new ApiError("network", "offline")),
       }),

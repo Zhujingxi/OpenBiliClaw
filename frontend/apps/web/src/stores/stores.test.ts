@@ -10,6 +10,7 @@ import { usePreferencesStore } from "./preferences";
 import { useRuntimeStore, type Delay } from "./runtime";
 import { useSessionStore } from "./session";
 import { useContentStore } from "./content";
+import { errorMessage } from "./state";
 
 const emptyStream = async function* () {
   yield* [] as never[];
@@ -41,6 +42,7 @@ function api(overrides: Partial<WebApi> = {}): WebApi {
       },
     }),
     recommendations: async () => ({ items: [] }),
+    refreshRecommendations: async () => ({ decision: "run" }),
     feedback: async () => ({
       result: {
         feedback_id: "feedback_11111111111111111111111111111111",
@@ -157,6 +159,18 @@ const feedItem = {
 beforeEach(() => setActivePinia(createPinia()));
 
 describe("durable concern stores", () => {
+  it("maps common safe API failures to actionable text with original detail", () => {
+    expect(errorMessage(new Error("request validation failed"))).toBe(
+      "Check the submitted fields and try again. (request validation failed)",
+    );
+    expect(errorMessage(new Error("capability is not configured"))).toContain(
+      "AI assistant is not configured",
+    );
+    expect(errorMessage(new Error("specific fallback"))).toBe(
+      "specific fallback",
+    );
+  });
+
   it("exposes loading-empty-success-error states", async () => {
     const recommendations = useRecommendationsStore();
     await recommendations.load(api());
@@ -362,12 +376,112 @@ describe("durable concern stores", () => {
     expect(profile.result?.profile.preference_summary).toEqual(["server"]);
   });
 
-  it("stores the submitted assistant message with its response", async () => {
+  it("appends submitted assistant messages and responses without replacing earlier turns", async () => {
     const store = useAssistantStore();
     await store.send(api(), "conv", "device", "hello");
-    expect(store.latestUserText).toBe("hello");
-    expect(store.latest?.output).toEqual({ kind: "message", text: "hello" });
+    await store.send(api(), "conv", "device", "again");
+    expect(
+      store.messages.map(({ role, content }) => ({ role, content })),
+    ).toEqual([
+      { role: "user", content: "hello" },
+      { role: "assistant", content: "hello" },
+      { role: "user", content: "again" },
+      { role: "assistant", content: "hello" },
+    ]);
     expect(store.phase).toBe("success");
+  });
+
+  it("hydrates structured assistant messages without exposing raw JSON or IDs", async () => {
+    const store = useAssistantStore();
+    await store.load(
+      api({
+        conversation: async () => ({
+          conversation: {
+            conversation_id: "conv",
+            created_at: "2030-01-01T00:00:00Z",
+            updated_at: "2030-01-01T00:00:00Z",
+            retention_days: 30,
+            scope: { local_user_id: "u", device_id: "device" },
+          },
+          messages: [
+            {
+              message_id: "message",
+              idempotency_key: "message-key",
+              role: "assistant",
+              content: JSON.stringify({
+                kind: "message",
+                text: "Welcome back",
+              }),
+              created_at: "2030-01-01T00:00:00Z",
+              references: [],
+              tool_calls: [],
+              user_correction: false,
+            },
+            {
+              message_id: "recommendations",
+              idempotency_key: "recommendations-key",
+              role: "assistant",
+              content: JSON.stringify({
+                kind: "recommendations",
+                intro: "Try these",
+                recommendation_ids: ["shown_secret"],
+                recommendations: [
+                  {
+                    title: "Readable title",
+                    canonical_url: "https://example.test/watch/1",
+                  },
+                ],
+              }),
+              created_at: "2030-01-01T00:00:01Z",
+              references: [],
+              tool_calls: [],
+              user_correction: false,
+            },
+            {
+              message_id: "persisted-recommendations",
+              idempotency_key: "persisted-recommendations-key",
+              role: "assistant",
+              content: JSON.stringify({
+                kind: "recommendations",
+                intro: "More choices",
+                recommendation_ids: ["shown_first", "shown_second"],
+              }),
+              created_at: "2030-01-01T00:00:02Z",
+              references: [],
+              tool_calls: [],
+              user_correction: false,
+            },
+            {
+              message_id: "future-output",
+              idempotency_key: "future-output-key",
+              role: "assistant",
+              content: JSON.stringify({ kind: "future", private: "raw" }),
+              created_at: "2030-01-01T00:00:03Z",
+              references: [],
+              tool_calls: [],
+              user_correction: false,
+            },
+          ],
+        }),
+      }),
+      "conv",
+      "device",
+    );
+
+    expect(store.messages.map((message) => message.content)).toEqual([
+      "Welcome back",
+      "Try these\nReadable title — https://example.test/watch/1",
+      "More choices 2 recommendations are available in your feed.",
+      "Assistant response unavailable.",
+    ]);
+    expect(
+      store.messages.some((message) =>
+        message.content.includes("shown_secret"),
+      ),
+    ).toBe(false);
+    expect(
+      store.messages.some((message) => message.content.includes('"kind"')),
+    ).toBe(false);
   });
 
   it("clears a stale stored assistant conversation after a 404", async () => {

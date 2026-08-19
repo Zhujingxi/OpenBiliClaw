@@ -62,7 +62,7 @@ def build_workflow_tools(
     facade: ApplicationFacade, budget: ToolResultBudget
 ) -> tuple[Tool[None], ...]:
     async def get_recommendations(limit: int = 5) -> str:
-        """Get bounded recommendation previews and opaque IDs."""
+        """Get bounded recommendation titles, summaries, reasons, and canonical links."""
         return bound_tool_result(
             await facade.get_recommendations(max(1, min(limit, budget.max_items))), budget
         )

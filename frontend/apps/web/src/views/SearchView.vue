@@ -16,9 +16,10 @@ const query = ref(store.lastQuery);
 const searchable = computed(() =>
   sources.items.filter(
     (item) =>
-      item.capabilities === undefined ||
-      item.capabilities.length === 0 ||
-      item.capabilities.includes("search"),
+      item.state === "connected" &&
+      (item.capabilities === undefined ||
+        item.capabilities.length === 0 ||
+        item.capabilities.includes("search")),
   ),
 );
 onMounted(() => {
@@ -49,7 +50,21 @@ onBeforeUnmount(store.cancelSearch);
 <template>
   <section>
     <h1 tabindex="-1">Search</h1>
-    <form role="search" @submit.prevent="store.search(api, provider, query)">
+    <p v-if="sources.phase === 'loading'" role="status" aria-live="polite">
+      Loading connected sources…
+    </p>
+    <p v-else-if="sources.phase === 'error'" role="alert">
+      {{ sources.error }}
+    </p>
+    <p v-else-if="searchable.length === 0" role="status">
+      Search needs a connected source with search support.
+      <a href="#/connect">Connect a source</a> to continue.
+    </p>
+    <form
+      v-else
+      role="search"
+      @submit.prevent="store.search(api, provider, query)"
+    >
       <label for="search-provider">Provider</label>
       <select id="search-provider" v-model="provider" required>
         <option
@@ -65,7 +80,8 @@ onBeforeUnmount(store.cancelSearch);
       <button type="submit">Search</button>
     </form>
     <AsyncState :phase="store.searchPhase" :error="store.searchError">
-      <ul>
+      <template #empty>No matching content was found.</template>
+      <ul class="card-list">
         <li
           v-for="item in store.results.items"
           :key="item.ref.provider_content_id"
@@ -76,3 +92,17 @@ onBeforeUnmount(store.cancelSearch);
     </AsyncState>
   </section>
 </template>
+<style scoped>
+.card-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 20rem), 1fr));
+  gap: 1rem;
+}
+
+.card-list > li {
+  min-width: 0;
+}
+</style>

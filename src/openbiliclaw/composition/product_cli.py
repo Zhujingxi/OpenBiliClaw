@@ -58,15 +58,35 @@ def add_product_parsers(
 ) -> None:
     """Register the product workflow command surface."""
 
-    sources = subparsers.add_parser("sources", parents=[common])
+    sources = subparsers.add_parser(
+        "sources",
+        parents=[common],
+        help="manage content source connections",
+        description="List, inspect, connect, disconnect, or synchronize content sources.",
+    )
     source_commands = sources.add_subparsers(dest="source_command", required=True)
-    listing = source_commands.add_parser("list", parents=[common])
+    listing = source_commands.add_parser(
+        "list",
+        parents=[common],
+        help="list source connection states",
+        description="List source connection states.",
+    )
     listing.add_argument("--account-id")
     listing.add_argument("--limit", type=int, default=50)
-    status = source_commands.add_parser("status", parents=[common])
+    status = source_commands.add_parser(
+        "status",
+        parents=[common],
+        help="show one source state",
+        description="Show one source connection state.",
+    )
     status.add_argument("provider_id")
     status.add_argument("--account-id")
-    add = source_commands.add_parser("add", parents=[common])
+    add = source_commands.add_parser(
+        "add",
+        parents=[common],
+        help="connect a source",
+        description="Connect a source using an allowed access method.",
+    )
     add.add_argument("provider_id")
     add.add_argument("method_id")
     add.add_argument("--account-id")
@@ -75,39 +95,81 @@ def add_product_parsers(
     )
     add.add_argument("--field", action="append", default=[], metavar="KEY=VALUE")
     add.add_argument("--idempotency-key", required=True)
-    remove = source_commands.add_parser("remove", parents=[common])
+    remove = source_commands.add_parser(
+        "remove", parents=[common], help="disconnect a source", description="Disconnect a source."
+    )
     remove.add_argument("provider_id")
     remove.add_argument("--account-id")
     remove.add_argument("--idempotency-key", required=True)
-    sync = source_commands.add_parser("sync", parents=[common])
+    sync = source_commands.add_parser(
+        "sync",
+        parents=[common],
+        help="synchronize a source",
+        description="Synchronize evidence from a connected source.",
+    )
     sync.add_argument("provider_id")
 
-    feed = subparsers.add_parser("feed", parents=[common])
+    feed = subparsers.add_parser(
+        "feed",
+        parents=[common],
+        help="show recommendations",
+        description="Show the current recommendation feed.",
+    )
     feed.add_argument("--limit", type=int, default=20)
 
-    feedback = subparsers.add_parser("feedback", parents=[common])
+    feedback = subparsers.add_parser(
+        "feedback",
+        parents=[common],
+        help="record recommendation feedback",
+        description="Record explicit feedback for a delivered recommendation.",
+    )
     feedback.add_argument("shown_id")
     feedback.add_argument("kind", choices=tuple(_FEEDBACK_KIND))
     feedback.add_argument("--idempotency-key", required=True)
     feedback.add_argument("--exposed", action="store_true")
 
-    profile = subparsers.add_parser("profile", parents=[common])
+    profile = subparsers.add_parser(
+        "profile",
+        parents=[common],
+        help="inspect or adjust the profile",
+        description="Inspect the profile or control exploration.",
+    )
     profile_commands = profile.add_subparsers(dest="profile_command", required=True)
-    show = profile_commands.add_parser("show", parents=[common])
+    show = profile_commands.add_parser(
+        "show",
+        parents=[common],
+        help="show the profile",
+        description="Show the bounded preference profile.",
+    )
     show.add_argument("--profile-id", default="default")
-    exploration = profile_commands.add_parser("exploration", parents=[common])
+    exploration = profile_commands.add_parser(
+        "exploration",
+        parents=[common],
+        help="control exploration",
+        description="Enable or disable recommendation exploration.",
+    )
     exploration.add_argument("state", choices=("disable", "enable"))
     exploration.add_argument("--profile-id", default="default")
     exploration.add_argument("--account-id", default="local")
     exploration.add_argument("--idempotency-key", required=True)
 
-    assistant = subparsers.add_parser("assistant", parents=[common])
+    assistant = subparsers.add_parser(
+        "assistant",
+        parents=[common],
+        help="send an Assistant message",
+        description="Send one message to the bounded Assistant workflow.",
+    )
     assistant.add_argument("message")
     assistant.add_argument("--conversation-id", default=record_identity("conv", "cli"))
     assistant.add_argument("--device-id", default="cli")
     assistant.add_argument("--locale", default="en-US")
 
-    search = subparsers.add_parser("search", parents=[common])
+    search = subparsers.add_parser(
+        "search",
+        parents=[common],
+        help="search connected content",
+        description="Search content from one connected provider.",
+    )
     search.add_argument("provider_id")
     search.add_argument("query")
     search.add_argument("--limit", type=int, default=20)

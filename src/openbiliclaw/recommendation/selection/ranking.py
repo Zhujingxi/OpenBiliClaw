@@ -28,7 +28,8 @@ def rank_candidates(
         evaluation = by_id.get(item.candidate_id)
         if evaluation is None:
             continue
-        age = max(0.0, (now - item.preview.source_timestamp).total_seconds() / 86400)
+        timestamp = item.preview.source_timestamp or item.provenance.discovered_at
+        age = max(0.0, (now - timestamp).total_seconds() / 86400)
         freshness = max(0.0, 1 - age / 30)
         novelty = 0.05
         contrib = (

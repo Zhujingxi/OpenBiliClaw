@@ -8,7 +8,12 @@ import {
   watch,
 } from "vue";
 import AppNavigation from "./components/AppNavigation.vue";
-import { routeFromHash, type RouteName } from "./app/routes";
+import {
+  isKnownRouteHash,
+  routeFromHash,
+  routeLabel,
+  type RouteName,
+} from "./app/routes";
 import RecommendationsView from "./views/RecommendationsView.vue";
 import ProvidersView from "./views/ProvidersView.vue";
 import SearchView from "./views/SearchView.vue";
@@ -22,8 +27,11 @@ import LoginView from "./views/LoginView.vue";
 import { usePreferencesStore } from "./stores/preferences";
 import { useAuthStore } from "./stores/auth";
 const current = ref<RouteName>(routeFromHash(location.hash));
+const unknownRoute = ref(!isKnownRouteHash(location.hash));
+document.title = `${routeLabel(current.value)} · OpenBiliClaw`;
 const update = (): void => {
   current.value = routeFromHash(location.hash);
+  unknownRoute.value = !isKnownRouteHash(location.hash);
 };
 onMounted(() => addEventListener("hashchange", update));
 onBeforeUnmount(() => removeEventListener("hashchange", update));
@@ -46,6 +54,7 @@ const goBack = (): void => history.back();
 const focusMain = (): void =>
   document.querySelector<HTMLElement>("main")?.focus();
 watch(current, async (route) => {
+  document.title = `${routeLabel(route)} · OpenBiliClaw`;
   if (auth.status === "required" && route !== "login") {
     location.hash = "#/login";
     return;
@@ -73,23 +82,66 @@ watch(current, async (route) => {
     <header><strong>OpenBiliClaw</strong></header>
     <div class="responsive-layout">
       <AppNavigation v-if="current !== 'login'" :current="current" />
-      <main id="main" tabindex="-1"><component :is="view" /></main>
+      <main id="main" tabindex="-1">
+        <p v-if="unknownRoute" class="route-notice" role="status">
+          Page not found; showing Recommendations.
+        </p>
+        <component :is="view" />
+      </main>
       <AppNavigation v-if="current !== 'login'" :current="current" mobile />
     </div>
   </div>
 </template>
 <style>
 :root {
-  color-scheme: light dark;
-  font-family: system-ui, sans-serif;
-  background: #111827;
-  color: #f9fafb;
+  color-scheme: light;
+  --bg-base: #fffafc;
+  --bg-sky: #f2f8ff;
+  --surface: rgba(255, 255, 255, 0.84);
+  --surface-strong: rgba(255, 255, 255, 0.96);
+  --surface-soft: rgba(255, 255, 255, 0.72);
+  --line: rgba(217, 227, 242, 0.95);
+  --line-strong: rgba(247, 173, 202, 0.46);
+  --text-main: #20304a;
+  --text-secondary: #60708c;
+  --text-muted: #8f9bb0;
+  --brand: #fb7299;
+  --brand-strong: #f65788;
+  --brand-soft: rgba(251, 114, 153, 0.12);
+  --sky: #5aa9ff;
+  --sky-soft: rgba(90, 169, 255, 0.14);
+  --success: #30b980;
+  --danger: #ef7a86;
+  --shadow-lg: 0 20px 40px rgba(56, 76, 112, 0.12);
+  --shadow-sm: 0 10px 22px rgba(73, 93, 130, 0.08);
+  --focus-ring: 0 0 0 3px rgba(90, 169, 255, 0.28);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  font-family:
+    -apple-system, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
+    sans-serif;
+  background: var(--bg-base);
+  color: var(--text-main);
 }
 * {
   box-sizing: border-box;
 }
 body {
   margin: 0;
+  min-height: 100vh;
+  background:
+    radial-gradient(
+      circle at 15% 12%,
+      rgba(251, 114, 153, 0.2),
+      transparent 30%
+    ),
+    radial-gradient(
+      circle at 88% 18%,
+      rgba(90, 169, 255, 0.24),
+      transparent 26%
+    ),
+    linear-gradient(180deg, var(--bg-base) 0%, var(--bg-sky) 100%);
+  background-attachment: fixed;
+  -webkit-tap-highlight-color: transparent;
 }
 #app,
 .shell,
@@ -113,7 +165,7 @@ select {
   min-width: 0;
 }
 a {
-  color: #93c5fd;
+  color: var(--sky);
 }
 button,
 input,
@@ -122,13 +174,38 @@ select {
   font: inherit;
   padding: 0.55rem;
 }
+button {
+  border: none;
+  border-radius: 0.75rem;
+  background: var(--brand);
+  color: #fff;
+  font-weight: 600;
+  box-shadow: var(--shadow-sm);
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+button:active {
+  opacity: 0.7;
+}
+button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+input:not([type="checkbox"]),
+textarea,
+select {
+  background: var(--surface-strong);
+  border: 1px solid var(--line);
+  border-radius: 0.625rem;
+  color: var(--text-main);
+}
 button:focus-visible,
 a:focus-visible,
 input:focus-visible,
 textarea:focus-visible,
 select:focus-visible {
-  outline: 3px solid #fbbf24;
-  outline-offset: 2px;
+  outline: none;
+  box-shadow: var(--focus-ring);
 }
 .shell {
   min-height: 100vh;
@@ -139,8 +216,16 @@ select:focus-visible {
 }
 header {
   grid-column: 1/-1;
-  padding: 1rem;
-  border-bottom: 1px solid #374151;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-strong);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+header strong {
+  color: var(--brand);
+  font-size: 1.05rem;
+  letter-spacing: -0.01em;
 }
 nav {
   padding: 1rem;
@@ -149,6 +234,23 @@ nav {
 }
 .desktop-nav {
   flex-direction: column;
+}
+.desktop-nav a {
+  color: var(--text-secondary);
+  text-decoration: none;
+  border-radius: 0.75rem;
+  padding: 0.4rem 0.55rem;
+}
+.desktop-nav a:hover {
+  background: var(--brand-soft);
+}
+nav a[aria-current="page"] {
+  color: var(--brand-strong);
+  background: var(--brand-soft);
+  border-radius: 0.75rem;
+  font-weight: 700;
+  text-decoration: none;
+  padding: 0.4rem 0.55rem;
 }
 .mobile-nav {
   display: none;
@@ -174,13 +276,24 @@ form {
 }
 .skip-link {
   position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
   transform: translateY(-200%);
 }
 .skip-link:focus {
   transform: none;
   z-index: 2;
-  background: #111827;
+  background: var(--surface-strong);
+  color: var(--brand-strong);
+  border-radius: 0.625rem;
   padding: 0.75rem;
+}
+.route-notice {
+  padding: 0.75rem;
+  border-inline-start: 0.25rem solid var(--brand);
+  border-radius: 0.625rem;
+  background: var(--brand-soft);
+  color: var(--text-secondary);
 }
 .density-compact main {
   padding: 1rem;
@@ -193,7 +306,7 @@ form {
 @media (max-width: 48rem) {
   .responsive-layout {
     display: block;
-    padding-bottom: 8rem;
+    padding-bottom: calc(8rem + var(--safe-bottom));
   }
   .desktop-nav {
     display: none;
@@ -205,8 +318,11 @@ form {
     bottom: 0;
     inset-inline: 0;
     padding: 0.5rem;
-    background: #111827;
-    border-top: 1px solid #4b5563;
+    padding-bottom: calc(0.5rem + var(--safe-bottom));
+    background: var(--surface-strong);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    border-top: 1px solid var(--line);
     z-index: 1;
   }
   .mobile-nav a {
@@ -214,7 +330,15 @@ form {
     padding: 0.25rem;
     text-align: center;
     font-size: 0.75rem;
-    overflow-wrap: anywhere;
+    color: var(--text-secondary);
+    text-decoration: none;
+    border-radius: 0.625rem;
+    overflow-wrap: normal;
+    word-break: normal;
+    hyphens: none;
+  }
+  .mobile-nav a[aria-current="page"] {
+    padding-inline: 0.125rem;
   }
 }
 @media (prefers-reduced-motion: reduce) {

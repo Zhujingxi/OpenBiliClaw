@@ -6,6 +6,10 @@
 
 ## Unreleased
 
+- Made scheduled recommendation replenishment skip disconnected or non-searchable planned providers, so an all-unusable discovery round completes as a healthy no-op; missing CLI config paths now produce a concise error without a traceback.
+
+- Fixed the end-to-end backend/CLI defects: global config/data flags now work on either side of commands, every command has useful help and `check` confirms success; source connection reports typed provider/method errors and YouTube uses credential-free anonymous access; missing provider dates remain null instead of becoming 1970; model-save failures explain the missing writable config; and Assistant context enforces the requested locale while exposing recommendation titles/links rather than internal delivery IDs.
+
 - Completed Phase D multimodal inspection with a separate per-candidate `recommendation.inspect` agent that is routed only to catalog-declared image-capable structured-output models and uses its own configurable RunPolicy. Selected candidates are inspected through a bounded storyboard seam with provider-card cover fallback fetched by the existing allowlisted image boundary; typed topic/quality/title-mismatch/summary results are cached once per provider content identity in schema-V11's append-only `policy_inspections` table and best-effort embedded. Missing frames, text-only configuration, model outages, journal failures, and embedding outages all preserve metadata-only delivery. Native video input and direct evaluator scoring remain deferred.
 
 - Landed Phase D external evidence ingestion: a conservative supervised job and `sources sync PROVIDER` page credentialed `History`/`Saved` capabilities through opaque plugin-acquired handles, normalize deterministic `external_history_view` / `external_save` observations, and feed the existing Understanding analyzer at behavioral trust 0.6. `import youtube TAKEOUT_PATH` reuses the landed real Google Takeout watch-history parser and the same idempotency path while reporting likes/subscriptions as ignored rather than saves; no speculative Bilibili export format or dormant-interest analyzer was added.

@@ -59,6 +59,7 @@ if TYPE_CHECKING:
     from openbiliclaw.content.integration.identity import ProviderId
     from openbiliclaw.content.integration.projections import ContentPreview
     from openbiliclaw.recommendation.brief import BriefService, CompiledBrief
+    from openbiliclaw.recommendation.discovery.planner import PlannedQuery
     from openbiliclaw.recommendation.hypotheses import HypothesisRegistry
     from openbiliclaw.recommendation.inspection import InspectionService
     from openbiliclaw.understanding.profile import CanonicalProfile
@@ -115,6 +116,14 @@ class RecommendationPipeline:
         if handle is None:
             raise RuntimeError("provider is not connected")
         return provider, handle
+
+    def _usable_search_plans(self, plans: tuple[PlannedQuery, ...]) -> tuple[PlannedQuery, ...]:
+        return tuple(
+            plan
+            for plan in plans
+            if isinstance(self._providers.registry.provider(plan.provider_id), SearchCapability)
+            and self._access.connected_handle(plan.provider_id.value, None) is not None
+        )
 
     @staticmethod
     async def _evaluate_model_free(
@@ -427,12 +436,7 @@ class RecommendationPipeline:
             target_inventory=self._target_count,
             provider_quota=1,
         )
-        connected = tuple(
-            plan
-            for plan in plans
-            if self._access.connected_handle(plan.provider_id.value, None) is not None
-        )
-        discovered = await self._discovery.discover(connected, limit=limit)
+        discovered = await self._discovery.discover(self._usable_search_plans(plans), limit=limit)
         episode_id = f"replenishment:{seed}"
         compiled_brief = await self._compile_shadow_brief(episode_id)
         decision = (

@@ -148,12 +148,12 @@ def test_api_projection_schema_snapshot() -> None:
         "SearchDocument": digest(SearchDocument.model_json_schema()),
         "CardData": digest(CardData.model_json_schema()),
     } == {
-        "ContentPreview": "66a05b53601a9cdae3d5ebe24d841841a60c4cbec6b96211ee03f4155bc4cb7c",
+        "ContentPreview": "ecac4f91c30a7037cf942f4b62423d5747ed9686faf71bee27ff7041cafd8d34",
         "RecommendationCandidate": (
-            "9a6f264cfaecbbc90632e573c1a38c906b672cbdf8fecebf74d4511f8013eb32"
+            "9ba4872e9b49ebc2b52f745a3896562c3952c871dccb65e8a64a2bcb94d8b09e"
         ),
-        "SearchDocument": "a290339775b5b53934849fd997e8996d247846dc3998f2d8f886d9ace7242a0c",
-        "CardData": "d164eb97634b536e412b4cef35a4dfacdf41ab5862e1b36712bf2569958e2b15",
+        "SearchDocument": "29e04e1c4217f7677766a34ee6ff0314cea15adf6e733a4a28b9b138a2677d42",
+        "CardData": "f22bd3207c1e9366a734aa73b37f79d07f32f85b694c304205115bf1cb6c3f2a",
     }
 
 

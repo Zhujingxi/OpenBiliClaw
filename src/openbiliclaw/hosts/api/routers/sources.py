@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query
 
+from openbiliclaw.access.broker import AccessUnavailableError
 from openbiliclaw.access.models import AccessRequest
 from openbiliclaw.application.errors import ApplicationError, ApplicationErrorCode
 from openbiliclaw.application.plugin_access import SubmitAccessMaterialCommand
 from openbiliclaw.application.sources import ConnectSourceCommand, DisconnectSourceCommand
+from openbiliclaw.content.integration.errors import ContentIntegrationError
 
 from ..dependencies import HostDependencies, get_dependencies
 from ..schemas.models import (
@@ -97,19 +99,30 @@ async def connect_source(
         if body.submission is not None
         else None
     )
-    result = await dependencies.facade.connect_source(
-        ConnectSourceCommand(
-            idempotency_key=body.idempotency_key,
-            request=AccessRequest(
-                provider_id=body.provider_id,
-                account_id=body.account_id,
-                permissions=body.permissions,
-                supported_method_ids=(body.method_id,),
-            ),
-            allowed_method_ids=frozenset({body.method_id}),
-            submission=submission,
+    try:
+        dependencies.facade.provider_capabilities(body.provider_id)
+        result = await dependencies.facade.connect_source(
+            ConnectSourceCommand(
+                idempotency_key=body.idempotency_key,
+                request=AccessRequest(
+                    provider_id=body.provider_id,
+                    account_id=body.account_id,
+                    permissions=body.permissions,
+                    supported_method_ids=(body.method_id,),
+                ),
+                allowed_method_ids=frozenset({body.method_id}),
+                submission=submission,
+            )
         )
-    )
+    except AccessUnavailableError as error:
+        raise ApplicationError(
+            ApplicationErrorCode.VALIDATION,
+            f"source connection is not supported: {error.reason}",
+        ) from error
+    except ContentIntegrationError as error:
+        raise ApplicationError(
+            ApplicationErrorCode.NOT_FOUND, "provider is not registered"
+        ) from error
     return SourceMutationResponse(
         status=result.status,
         availability_refreshed=result.availability_refreshed,

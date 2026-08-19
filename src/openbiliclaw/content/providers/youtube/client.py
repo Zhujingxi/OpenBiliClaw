@@ -66,7 +66,7 @@ def _integer(value: object) -> int:
     return 0
 
 
-def _published(entry: Mapping[str, object]) -> datetime:
+def _published(entry: Mapping[str, object]) -> datetime | None:
     timestamp = entry.get("timestamp") or entry.get("release_timestamp")
     if isinstance(timestamp, (int, float)) and not isinstance(timestamp, bool):
         try:
@@ -77,7 +77,7 @@ def _published(entry: Mapping[str, object]) -> datetime:
     try:
         return datetime.strptime(upload_date, "%Y%m%d").replace(tzinfo=UTC)
     except ValueError:
-        return datetime(1970, 1, 1, tzinfo=UTC)
+        return None
 
 
 def _thumbnail(entry: Mapping[str, object]) -> str | None:

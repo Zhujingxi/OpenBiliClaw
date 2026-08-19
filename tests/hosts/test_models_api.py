@@ -22,7 +22,9 @@ class Facade:
         raise AssertionError(f"unexpected facade access: {name}")
 
 
-def _dependencies(tmp_path: Path, settings: AppSettings | None = None) -> HostDependencies:
+def _dependencies(
+    tmp_path: Path, settings: AppSettings | None = None, *, writable_config: bool = True
+) -> HostDependencies:
     cache = tmp_path / "models.dev.json"
     cache.write_bytes(_FIXTURE.read_bytes())
     config = tmp_path / "config.toml"
@@ -35,7 +37,7 @@ def _dependencies(tmp_path: Path, settings: AppSettings | None = None) -> HostDe
         facade=Facade(),
         models=FileModelConfiguration(
             settings=selected,
-            config_path=config,
+            config_path=config if writable_config else None,
             catalog=ModelCatalog(cache, fetch=lambda _: _FIXTURE.read_bytes()),
             vault=CredentialVault(ProtectedFileBackend(tmp_path / "credentials.json")),
         ),
@@ -99,6 +101,28 @@ async def test_current_reports_presence_never_secret_references(tmp_path: Path) 
     assert body["current"]["model"]["secret_configured"] is True
     assert body["current"]["model"]["protocol"] == "openai"
     assert body["current"]["embedding"]["secret_configured"] is True
+
+
+async def test_update_without_config_path_returns_actionable_typed_error(tmp_path: Path) -> None:
+    app = create_app(_dependencies(tmp_path, writable_config=False))
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.put(
+            "/v1/models/current",
+            json={"provider": "deepseek", "model_name": "deepseek-chat"},
+            headers=_HEADERS,
+        )
+    assert response.status_code == 422
+    assert response.json() == {
+        "error": {
+            "code": "validation",
+            "message": (
+                "model settings cannot be saved because the server was started without "
+                "a writable --config PATH"
+            ),
+        }
+    }
 
 
 async def test_update_validates_persists_secret_reference_and_requires_restart(

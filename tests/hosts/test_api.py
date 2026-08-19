@@ -478,6 +478,29 @@ async def test_source_connect_passes_provider_form_submission() -> None:
     assert facade.connected_submission == {"token": "synthetic-secret"}
 
 
+async def test_source_connect_unknown_provider_returns_typed_not_found() -> None:
+    class UnknownProviderFacade(Facade):
+        def provider_capabilities(self, provider_id: str) -> tuple[str, ...]:
+            raise ContentIntegrationError(
+                IntegrationErrorCode.PROVIDER_UNAVAILABLE, "provider is not registered"
+            )
+
+    async with client(UnknownProviderFacade()) as api:
+        response = await api.post(
+            "/v1/sources/connect",
+            json={
+                "provider_id": "notarealprovider",
+                "method_id": "builtin.anonymous",
+                "idempotency_key": "connect:unknown-provider",
+            },
+            headers=MUTATION_HEADERS,
+        )
+    assert response.status_code == 404
+    assert response.json() == {
+        "error": {"code": "not_found", "message": "provider is not registered"}
+    }
+
+
 async def test_source_connect_accepts_json_permissions_array() -> None:
     facade = Facade()
     async with client(facade) as api:

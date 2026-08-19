@@ -79,6 +79,7 @@ async def test_ytdlp_search_maps_flat_entries_and_ends_pagination() -> None:
     assert [item.id for item in page.items] == ["abcdefghijk"]
     assert page.items[0].channel is not None
     assert page.items[0].channel.id == "UC123"
+    assert page.items[0].published_at is not None
     assert page.items[0].published_at.isoformat() == "2025-01-02T00:00:00+00:00"
     assert page.next_cursor is None
     options, target = factory.calls[0]
@@ -90,6 +91,18 @@ async def test_ytdlp_search_maps_flat_entries_and_ends_pagination() -> None:
     exhausted = YouTubePage.model_validate_json(await transport("search", "typed query", "1", 5))
     assert exhausted.items == ()
     assert len(factory.calls) == 1
+
+
+async def test_ytdlp_missing_publish_time_is_null_not_epoch() -> None:
+    entry = {key: value for key, value in _ENTRY.items() if key != "upload_date"}
+    factory = FakeFactory({"ytsearch1:undated": {"entries": [entry]}})
+
+    page = YouTubePage.model_validate_json(
+        await YtDlpYouTubeTransport(factory)("search", "undated", "0", 1)
+    )
+
+    assert page.items[0].published_at is None
+    assert '"published_at":null' in page.model_dump_json()
 
 
 async def test_ytdlp_fetch_and_creator_targets_and_mapping() -> None:

@@ -13,7 +13,10 @@ export const useSourcesStore = defineStore("sources", () => {
   const phase = ref<LoadPhase>("idle");
   const items = ref<readonly SourceStatus[]>([]);
   const error = ref<string>();
+  const connectPhase = ref<LoadPhase>("idle");
+  const connectError = ref<string>();
   const owner = new RequestOwner();
+  const connectOwner = new RequestOwner();
 
   async function load(api: WebApi): Promise<void> {
     const signal = owner.next();
@@ -35,12 +38,12 @@ export const useSourcesStore = defineStore("sources", () => {
     api: WebApi,
     command: components["schemas"]["ConnectSourceRequest"],
   ): Promise<void> {
-    const signal = owner.next();
-    phase.value = "loading";
-    error.value = undefined;
+    const signal = connectOwner.next();
+    connectPhase.value = "loading";
+    connectError.value = undefined;
     try {
       const result = await api.connectSource(command, signal);
-      if (!owner.owns(signal)) return;
+      if (!connectOwner.owns(signal)) return;
       items.value = [
         ...items.value.filter(
           (item) => item.provider_id !== result.status.provider_id,
@@ -48,12 +51,25 @@ export const useSourcesStore = defineStore("sources", () => {
         result.status,
       ];
       phase.value = "success";
+      connectPhase.value = "success";
     } catch (caught) {
-      if (isCancellation(caught) || !owner.owns(signal)) return;
-      error.value = errorMessage(caught);
-      phase.value = "error";
+      if (isCancellation(caught) || !connectOwner.owns(signal)) return;
+      connectError.value = errorMessage(caught);
+      connectPhase.value = "error";
     }
   }
 
-  return { phase, items, error, load, connect, cancel: () => owner.cancel() };
+  return {
+    phase,
+    items,
+    error,
+    connectPhase,
+    connectError,
+    load,
+    connect,
+    cancel: () => {
+      owner.cancel();
+      connectOwner.cancel();
+    },
+  };
 });

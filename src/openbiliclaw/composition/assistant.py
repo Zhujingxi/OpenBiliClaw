@@ -33,10 +33,27 @@ from openbiliclaw.understanding.projections import dialogue_projection
 if TYPE_CHECKING:
     from pydantic_ai import Tool
 
+    from openbiliclaw.application.reads import RecommendationsResult
     from openbiliclaw.assistant.models import AssistantOutput
     from openbiliclaw.assistant.repository import SqliteConversationRepository
     from openbiliclaw.hosts.api.dependencies import AssistantTurnInput, HostFacade
     from openbiliclaw.understanding.service import UnderstandingService
+
+
+def assistant_recommendation_context(result: RecommendationsResult) -> dict[str, object]:
+    """Project recommendations to model-visible titles and links without internal IDs."""
+
+    return {
+        "items": tuple(
+            {
+                "title": item.card.title,
+                "canonical_url": item.ref.canonical_url,
+                "summary": item.card.summary,
+                "reason": item.reason,
+            }
+            for item in result.items
+        )
+    }
 
 
 class _AssistantToolFacade:
@@ -46,7 +63,8 @@ class _AssistantToolFacade:
         self._facade = facade
 
     async def get_recommendations(self, limit: int) -> object:
-        return await self._facade.get_recommendations(limit)
+        result = await self._facade.get_recommendations(limit)
+        return assistant_recommendation_context(result)
 
     async def search_content(self, provider_id: str, text: str, limit: int) -> object:
         return await self._facade.search_content(provider_id, text, limit)

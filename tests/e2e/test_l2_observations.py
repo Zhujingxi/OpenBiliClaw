@@ -206,7 +206,10 @@ async def test_authenticated_history_bootstrap_lands_provider_observations() -> 
         run = uuid.uuid4().hex
         provider_event_ids = tuple(
             hashlib.sha256(
-                f"{item.ref.provider_content_id}:{item.source_timestamp.isoformat()}".encode()
+                (
+                    f"{item.ref.provider_content_id}:"
+                    f"{cast('datetime', item.source_timestamp).isoformat()}"
+                ).encode()
             ).hexdigest()
             for item in history.items
         )
@@ -214,7 +217,7 @@ async def test_authenticated_history_bootstrap_lands_provider_observations() -> 
             ProviderHistoryImportObservation(
                 observation_id=_observation_id(),
                 idempotency_key=f"history:{provider_event_ids[index]}",
-                occurred_at=item.source_timestamp,
+                occurred_at=cast("datetime", item.source_timestamp),
                 received_at=now,
                 account_id="bilibili-e2e",
                 content_ref=item.ref,

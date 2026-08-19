@@ -20,26 +20,48 @@ export const useRecommendationsStore = defineStore("recommendations", () => {
   const feedbackControllers = new Map<string, AbortController>();
   const exposed = new Set<string>();
 
+  function applyPage(nextPage: RecommendationPage): void {
+    page.value = nextPage;
+    feedbackState.value = {};
+    feedbackError.value = {};
+    exposed.clear();
+    cards.value = nextPage.items.map((item) => ({
+      shownId: item.shown_id,
+      version: 1,
+      kind: cardKind(item.ref.content_kind.value),
+      providerLabel: item.ref.provider_id.value,
+      availability: "available",
+      data: item.card,
+    }));
+    phase.value = cards.value.length === 0 ? "empty" : "success";
+  }
+
   async function load(api: WebApi): Promise<void> {
     const signal = owner.next();
     phase.value = "loading";
     error.value = undefined;
     try {
       const nextPage = await api.recommendations(signal);
+      if (owner.owns(signal)) applyPage(nextPage);
+    } catch (caught) {
+      if (isCancellation(caught) || !owner.owns(signal)) return;
+      error.value = errorMessage(caught);
+      phase.value = "error";
+    }
+  }
+
+  async function refresh(api: WebApi): Promise<void> {
+    const signal = owner.next();
+    phase.value = "loading";
+    error.value = undefined;
+    try {
+      await api.refreshRecommendations(
+        { idempotency_key: crypto.randomUUID(), maximum_items: 50 },
+        signal,
+      );
       if (!owner.owns(signal)) return;
-      page.value = nextPage;
-      feedbackState.value = {};
-      feedbackError.value = {};
-      exposed.clear();
-      cards.value = nextPage.items.map((item) => ({
-        shownId: item.shown_id,
-        version: 1,
-        kind: cardKind(item.ref.content_kind.value),
-        providerLabel: item.ref.provider_id.value,
-        availability: "available",
-        data: item.card,
-      }));
-      phase.value = cards.value.length === 0 ? "empty" : "success";
+      const nextPage = await api.recommendations(signal);
+      if (owner.owns(signal)) applyPage(nextPage);
     } catch (caught) {
       if (isCancellation(caught) || !owner.owns(signal)) return;
       error.value = errorMessage(caught);
@@ -105,6 +127,7 @@ export const useRecommendationsStore = defineStore("recommendations", () => {
     feedbackState,
     feedbackError,
     load,
+    refresh,
     like,
     dismiss,
     markExposed,
