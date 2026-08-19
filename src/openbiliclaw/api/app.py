@@ -1,5 +1,10 @@
 """FastAPI app for the browser-extension backend."""
 
+# [INPUT]: 配置、MemoryManager、Database 与来源事件规范化器
+# [OUTPUT]: create_app() 及浏览器/桌面 Web 共用的 FastAPI 路由
+# [POS]: API 组合根，负责请求边界与事件入口，不在此复制来源解析规则
+# [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
 from __future__ import annotations
 
 import asyncio
@@ -553,6 +558,9 @@ _SOURCE_SHARE_ORDER = (
     "v2ex",
     "weibo",
 )
+# Unknown/unregistered platform slugs are preserved in the database for future
+# expansion, but they must not silently disappear from source-share counts.
+_SOURCE_COUNT_ORDER = _SOURCE_SHARE_ORDER + ("unknown",)
 _INIT_SOURCE_ORDER = (
     "bilibili",
     "xiaohongshu",
@@ -1046,24 +1054,39 @@ def _posture_gate_enforce_issue(cfg: Any, database: Any | None) -> Any | None:
 
 
 def _count_events_by_source_platform(database: Any) -> dict[str, int]:
-    """Count stored behavior events by normalized source platform."""
+    """Count stored behavior events by normalized source platform.
 
-    counter = {source: 0 for source in _SOURCE_SHARE_ORDER}
+    Unknown or unregistered platform slugs are aggregated under ``"unknown"``
+    so they are not silently dropped from the source-share suggestion.
+    """
+
+    def _bucket(source: object) -> str:
+        source_key = _normalize_source_platform(source)
+        if source_key in _SOURCE_SHARE_ORDER:
+            return source_key
+        return "unknown"
+
+    counter = {source: 0 for source in _SOURCE_COUNT_ORDER}
     if hasattr(database, "count_events_by_source_platform"):
         raw_counts = database.count_events_by_source_platform()
         if isinstance(raw_counts, dict):
             for source, count in raw_counts.items():
-                source_key = _normalize_source_platform(source)
-                counter[source_key] = counter.get(source_key, 0) + int(count)
-            return {source: counter.get(source, 0) for source in _SOURCE_SHARE_ORDER}
+                counter[_bucket(source)] += int(count)
+            return {source: counter.get(source, 0) for source in _SOURCE_COUNT_ORDER}
 
     rows: list[dict[str, Any]] = []
     if hasattr(database, "conn"):
         try:
-            cursor = database.conn.execute("SELECT metadata FROM events")
+            cursor = database.conn.execute("SELECT source_platform, metadata FROM events")
             rows = [dict(row) for row in cursor.fetchall()]
         except Exception:
-            rows = []
+            # Keep injected/legacy databases usable before the additive source
+            # columns have been migrated.
+            try:
+                cursor = database.conn.execute("SELECT metadata FROM events")
+                rows = [dict(row) for row in cursor.fetchall()]
+            except Exception:
+                rows = []
     elif hasattr(database, "get_recent_events"):
         try:
             rows = list(database.get_recent_events(limit=10000))
@@ -1081,10 +1104,13 @@ def _count_events_by_source_platform(database: Any) -> dict[str, int]:
                 metadata = {}
         if not isinstance(metadata, dict):
             metadata = {}
-        source = metadata.get("source_platform", row.get("source_platform", "bilibili"))
-        source_key = _normalize_source_platform(source)
-        counter[source_key] = counter.get(source_key, 0) + 1
-    return {source: counter.get(source, 0) for source in _SOURCE_SHARE_ORDER}
+        source = (
+            str(row.get("source_platform") or "").strip()
+            or str(metadata.get("source_platform") or "").strip()
+        )
+        source = source or "bilibili"
+        counter[_bucket(source)] += 1
+    return {source: counter.get(source, 0) for source in _SOURCE_COUNT_ORDER}
 
 
 def _select_init_platforms(enabled: set[str], selected: set[str] | None) -> set[str]:
@@ -7408,7 +7434,7 @@ def create_app(
 
         canonical_events: list[dict[str, Any]] = []
         for item in payload.events:
-            source_platform = (item.source_platform or "bilibili").strip() or "bilibili"
+            raw_source_platform = str(item.source_platform or "").strip()
             raw_event_type = str(item.type or "").strip()
             event_type = "feedback" if raw_event_type == "dislike" else raw_event_type
             # Coerce context to a string for downstream LLM consumers.
@@ -7461,7 +7487,11 @@ def create_app(
                 metadata.setdefault("video_duration_seconds", item.video_duration_seconds)
             event = build_event(
                 event_type=event_type,
-                source_platform=source_platform,
+                # Leave source resolution to the shared event formatter.  In
+                # particular, an old payload without a platform must still
+                # allow a YouTube/X/etc. URL to win before the B站 fallback.
+                source_platform=raw_source_platform,
+                legacy_platform="bilibili",
                 title=item.title or "",
                 url=item.url or "",
                 author=str(metadata.get("author", "") or metadata.get("up_name", "") or ""),

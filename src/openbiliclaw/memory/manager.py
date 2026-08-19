@@ -4,6 +4,11 @@ Manages the five memory layers and four memory types, handling
 cross-layer updates, bidirectional corrections, and self-editing.
 """
 
+# [INPUT]: 行为事件 payload 与 Database durable writer
+# [OUTPUT]: MemoryManager 的事件落库、记忆层读写与画像状态管理
+# [POS]: 记忆层入口；只负责落事实，不隐式触发画像重建
+# [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
 from __future__ import annotations
 
 import asyncio
@@ -1008,6 +1013,9 @@ class MemoryManager:
             event_type,
             url=event.get("url", ""),
             title=event.get("title", ""),
+            source_platform=event.get("source_platform", ""),
+            content_id=event.get("content_id", ""),
+            source_confidence=event.get("source_confidence", ""),
             # v0.3.23+: ``context`` is a natural-language string from
             # ``event_format.build_event()``. Default to empty string
             # (was ``{}`` in v0.3.22 and earlier) so insert_event's

@@ -36,6 +36,9 @@ The unified contract
     "event_type": str,         # "view" | "favorite" | "like" | "follow" | "dislike" | ...
     "title": str,
     "url": str,                 # optional, may be empty
+    "source_platform": str,     # canonical producer/platform attribution
+    "content_id": str,          # optional stable source-content identity
+    "source_confidence": str,   # exact | inferred | legacy_unknown
     "context": str,             # natural-language sentence; primary input for LLM
     "metadata": {
         "source_platform": str,  # "bilibili" | "xiaohongshu" | "web" | ...
@@ -48,9 +51,16 @@ The unified contract
 The ``context`` string is what matters for LLM prompts. It reads like
 a Chinese sentence: who did what, on which platform, with which content,
 optionally noting the author. Code that filters / weights events should
-look at structured fields (``event_type`` / ``metadata.source_platform``);
-the LLM consumes ``context``.
+use the top-level source fields; ``metadata.source_platform`` and the
+source-specific metadata keys remain compatibility mirrors for existing
+consumers. The database persists the same attribution fields so later
+platform-scoped operations do not have to infer ownership from free-form JSON.
 """
+
+# [INPUT]: 各平台 producer 的行为字段与 canonical source registry
+# [OUTPUT]: build_event()、来源/满意度/上下文规范化函数
+# [POS]: 事件层的统一语义边界，被 API、CLI、任务导入与 MemoryManager 共同消费
+# [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
 
 from __future__ import annotations
 
@@ -59,6 +69,13 @@ import logging
 import unicodedata
 from datetime import UTC, datetime
 from typing import Any, Literal
+
+from openbiliclaw.sources.platforms import (
+    SOURCE_CONFIDENCE_LEGACY_UNKNOWN,
+    constrain_source_confidence,
+    extract_source_content_id,
+    resolve_source_attribution,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -662,6 +679,8 @@ def build_event(
     author: str = "",
     context: str = "",
     metadata: dict[str, Any] | None = None,
+    legacy_platform: str = "",
+    source_confidence: str = "",
 ) -> dict[str, Any]:
     """Construct a unified event dict.
 
@@ -692,9 +711,19 @@ def build_event(
         Producers that have richer context (e.g. xhs scope, B站 fold
         membership) can override.
     metadata
-        Source-specific extras. ``source_platform`` is auto-populated
-        from the parameter; explicit ``metadata.source_platform`` wins.
-        ``author`` is also synced when not already present.
+        Source-specific extras. The source is resolved in one place using
+        ``source_platform`` first, then ``metadata.source_platform``, then
+        the canonical URL, and finally ``legacy_platform``. ``author`` is
+        synced when not already present.
+    legacy_platform
+        Optional compatibility fallback used only after explicit, metadata,
+        and URL evidence are absent. API compatibility callers pass
+        ``"bilibili"`` for old payloads that omitted the source field.
+    source_confidence
+        How the caller identified the platform.  Normal producers use
+        the resolved confidence; compatibility callers may pass
+        ``"legacy_unknown"``. An empty value uses the shared resolver's
+        result.
 
     Returns
     -------
@@ -703,7 +732,14 @@ def build_event(
         ``SoulEngine.analyze_events``, etc.
     """
     final_metadata: dict[str, Any] = dict(metadata) if metadata else {}
-    final_metadata.setdefault("source_platform", source_platform)
+    resolved_platform, detected_confidence = resolve_source_attribution(
+        explicit_platform=source_platform,
+        metadata_platform=final_metadata.get("source_platform"),
+        url=url,
+        legacy_platform=legacy_platform,
+    )
+    if resolved_platform:
+        final_metadata["source_platform"] = resolved_platform
     if author and "author" not in final_metadata:
         final_metadata["author"] = author
     # Comment / danmaku text is the final sanitization defense (invariant 5) and
@@ -726,7 +762,7 @@ def build_event(
     if not context:
         context = format_event_context(
             event_type=event_type,
-            source_platform=source_platform,
+            source_platform=resolved_platform or source_platform,
             title=title,
             author=effective_author,
         )
@@ -740,12 +776,24 @@ def build_event(
             f"{context},评论:『{comment_excerpt}』" if context else f"评论:『{comment_excerpt}』"
         )
 
+    normalized_confidence = constrain_source_confidence(
+        source_confidence,
+        detected_confidence,
+    )
+    if not resolved_platform:
+        normalized_confidence = SOURCE_CONFIDENCE_LEGACY_UNKNOWN
+
     event: dict[str, Any] = {
         "event_type": event_type,
         "title": title,
         "context": context,
         "metadata": final_metadata,
+        "source_platform": resolved_platform,
+        "source_confidence": normalized_confidence,
     }
+    content_id = extract_source_content_id(final_metadata)
+    if content_id:
+        event["content_id"] = content_id
     if url:
         event["url"] = url
     return event

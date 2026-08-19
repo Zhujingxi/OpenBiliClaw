@@ -5441,6 +5441,18 @@ class TestDatabase:
                 url="https://www.zhihu.com/question/1/answer/42",
                 metadata={"source_platform": "zh", "content_id": "answer:42"},
             )
+            db.insert_event(
+                "view",
+                title="X 帖子",
+                url="https://x.com/example/status/123",
+                metadata={"source_platform": "twitter", "tweet_id": "123"},
+            )
+            db.insert_event(
+                "view",
+                title="知乎问题",
+                url="https://www.zhihu.com/question/99",
+                metadata={"source_platform": "zhihu", "question_id": "99"},
+            )
 
             keys = db.get_recent_viewed_content_keys()
 
@@ -5451,8 +5463,31 @@ class TestDatabase:
             assert "bilibili:BV1SEEN" in keys
             assert "BV1SEEN" in keys
             assert "zhihu:answer:42" in keys
+            assert "twitter:123" in keys
+            assert "zhihu:99" in keys
 
             db.close()
+
+    def test_view_event_uses_one_ordered_metadata_identity(self) -> None:
+        with_primary_and_fallback = Database._extract_content_keys_from_view_event(
+            {
+                "url": "https://linux.do/t/topic/4242",
+                "metadata": {
+                    "source_platform": "linuxdo",
+                    "content_id": "topic:4242",
+                    "topic_id": 4242,
+                },
+            }
+        )
+        fallback_only = Database._extract_content_keys_from_view_event(
+            {
+                "url": "https://linux.do/t/topic/4243",
+                "metadata": {"source_platform": "linuxdo", "topic_id": 4243},
+            }
+        )
+
+        assert with_primary_and_fallback == {"linuxdo:topic:4242"}
+        assert fallback_only == {"linuxdo:4243"}
 
     def test_seen_items_backfill_is_unbounded_and_excludes_oldest_legacy_view(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

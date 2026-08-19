@@ -111,6 +111,31 @@ async def test_propagate_event_persists_to_sqlite(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_propagate_event_forwards_top_level_source_attribution(tmp_path: Path) -> None:
+    memory = MemoryManager(tmp_path)
+    memory.initialize()
+
+    await memory.propagate_event(
+        {
+            "event_type": "view",
+            "url": "https://www.youtube.com/watch?v=video-42",
+            "title": "YouTube 事件",
+            "source_platform": "youtube",
+            "content_id": "video-42",
+            "source_confidence": "exact",
+            "metadata": {},
+        }
+    )
+
+    row = memory.query_events(limit=1)[0]
+    assert row["source_platform"] == "youtube"
+    assert row["content_id"] == "video-42"
+    assert row["source_confidence"] == "exact"
+    assert json.loads(str(row["metadata"]))["source_platform"] == "youtube"
+    assert json.loads(str(row["metadata"]))["content_id"] == "video-42"
+
+
+@pytest.mark.asyncio
 async def test_propagate_events_batches_init_imports(tmp_path: Path) -> None:
     memory = MemoryManager(tmp_path)
     memory.initialize()

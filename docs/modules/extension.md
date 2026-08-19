@@ -244,6 +244,7 @@ extension/
 - 发送失败时把事件回填到缓冲区
 - **缓冲持久化（MV3 SW 回收防丢）**：事件缓冲由 `buffer.ts` 持有并以 awaited 写穿方式镜像到 `chrome.storage.local`（key `obc_event_buffer`，无 debounce——挂起的 `setTimeout` 会随 SW 一起被杀）；强信号在网络 flush 开始前就已落盘。SW 冷启动经模块级 `bufferReady()` init gate 恢复镜像事件（所有触碰缓冲的入口先 await 它），内存与镜像合计仍受 `BUFFER_MAX_SIZE` 约束，超限丢最老并记日志
 - **event ID 随 durable buffer 一起恢复**：buffer 在入队/恢复时 trim 既有 `event_id`，缺失时生成一次并写回事件对象；flush 失败、全量 `not_initialized` parking、MV3 worker 回收后的重放都保留同一值。后端不再接受缺 ID 的 `/api/events` item，因此任何新增 producer 都必须在进入 buffer 前或由 buffer normalization 补齐稳定 ID
+- **事件来源归属随事件持久化**：平台适配器写入 `source_platform`，内容适配器把 `content_id` / `bvid` / `note_id` 等稳定身份放入 metadata；后端按“显式来源 → metadata → 规范 URL → B 站兼容默认”统一解析，把平台、内容 ID 和 `source_confidence` 提升到 `events` 顶层列，同时保留 metadata 兼容镜像。旧插件或省略来源的事件若带有 X / YouTube 等规范 URL 会被标记为 `inferred`；真正没有足够证据的兼容事件才是 `legacy_unknown`，不会被撤回逻辑当作精确平台证据
 - **`not_initialized` 停车场**：后端未初始化时整批事件不再消费即弃，而是移入 `obc_parked_events`（上限 500 条 FIFO、48h TTL），后续任一次成功 flush 会按原顺序 drain 回缓冲队首补发——浏览行为类事件（dwell/click）不再在初始化前永久丢失
 - flush 成功后检查一次待发通知
 - 缓冲为空时也会周期轮询高置信通知
