@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import sys
 from typing import TYPE_CHECKING
@@ -35,7 +36,7 @@ def test_export_import_cli_round_trip(
         ["openbiliclaw", "export", str(archive), "--data-dir", str(source)],
     )
     main()
-    assert "exported" in capsys.readouterr().out
+    assert json.loads(capsys.readouterr().out)["exported"] is True
 
     destination = tmp_path / "destination"
     monkeypatch.setattr(
@@ -44,7 +45,7 @@ def test_export_import_cli_round_trip(
         ["openbiliclaw", "import", str(archive), "--data-dir", str(destination)],
     )
     main()
-    assert "imported" in capsys.readouterr().out
+    assert json.loads(capsys.readouterr().out)["imported"] is True
     with sqlite3.connect(destination / "openbiliclaw.db") as connection:
         assert connection.execute("SELECT profile_id FROM understanding_profiles").fetchone() == (
             "p",
@@ -80,6 +81,7 @@ def test_export_cli_include_config(
     )
 
     main()
+    assert json.loads(capsys.readouterr().out)["exported"] is True
 
     with zipfile.ZipFile(archive) as bundle:
         assert "config.toml" in bundle.namelist()
@@ -91,9 +93,8 @@ def test_export_cli_include_config(
         ["openbiliclaw", "import", str(archive), "--data-dir", str(destination)],
     )
     main()
-    output = capsys.readouterr().out
-    assert f"restored config to {destination / 'config.toml'}" in output
-    assert f"--config {destination / 'config.toml'}" in output
+    output = json.loads(capsys.readouterr().out)
+    assert output["restored_config"] == str(destination / "config.toml")
 
 
 def test_export_cli_reports_missing_config_without_traceback(
@@ -122,9 +123,9 @@ def test_export_cli_reports_missing_config_without_traceback(
 
     with pytest.raises(SystemExit, match="2"):
         main()
-    error = capsys.readouterr().err
-    assert "config does not exist" in error
-    assert "Traceback" not in error
+    error = json.loads(capsys.readouterr().err)["error"]
+    assert error["code"] == "archive"
+    assert "config does not exist" in error["message"]
 
 
 def test_import_cli_reports_invalid_archive_without_traceback(
@@ -142,9 +143,9 @@ def test_import_cli_reports_invalid_archive_without_traceback(
 
     with pytest.raises(SystemExit, match="2"):
         main()
-    error = capsys.readouterr().err
-    assert "invalid archive" in error
-    assert "Traceback" not in error
+    error = json.loads(capsys.readouterr().err)["error"]
+    assert error["code"] == "archive"
+    assert "invalid archive" in error["message"]
 
 
 def test_export_cli_refuses_database_as_archive_path(
@@ -165,4 +166,8 @@ def test_export_cli_refuses_database_as_archive_path(
 
     with pytest.raises(SystemExit, match="2"):
         main()
-    assert "archive path must not be the live database" in capsys.readouterr().err
+    error = json.loads(capsys.readouterr().err)["error"]
+    assert error == {
+        "code": "validation",
+        "message": "archive path must not be the live database",
+    }

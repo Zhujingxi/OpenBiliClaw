@@ -35,6 +35,8 @@ curl -fsS http://127.0.0.1:8420/v1/runtime/health
 
 The Web UI is `/`. There is no `/setup/` wizard or legacy bootstrap/status protocol. Edit the strict typed `config.toml`, then rerun `openbiliclaw check` before restart. Unknown keys fail validation; credentials are opaque vault references rather than inline secrets.
 
+Agent harnesses can perform every user operation without starting the API host through the JSON CLI in `docs/modules/cli.md`. Load `skills/openbiliclaw/SKILL.md` and pass credential/model request JSON through stdin (`-`) rather than argv.
+
 ## Environment/install options
 
 - `INSTALL_DIR`: checkout target.

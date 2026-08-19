@@ -6,6 +6,8 @@
 
 ## Unreleased
 
+- Expanded the in-process CLI to full user-operation parity: source forms/recipes/material, refresh, typed feedback/observations/profile edits, content details and pending-action decisions, conversation reads, runtime health/events/diagnostics, model configuration, secret-safe stdin requests, and JSON setup/archive outputs; replaced stale legacy skills with one CLI agent skill.
+
 - Simplified Settings provider selection into a expandable single-column list beside the model configuration, and standardized UI semantics so blue is reserved for interaction while green, yellow, and red mean good, warning, and error.
 
 - Rebuilt the responsive web UI around a warm, high-density card system: grouped desktop/mobile navigation, clearly zoned model and appearance settings, browsable provider/model cards, layered per-source setup, source capability cards, and a full-height Assistant chat with message bubbles, prompt suggestions, loading feedback, and a sticky composer.

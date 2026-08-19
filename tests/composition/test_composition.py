@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -657,6 +658,7 @@ def test_all_explicit_first_party_provider_builders_validate() -> None:
                 "bangumi",
                 "bilibili",
                 "douyin",
+                "hackernews",
                 "linuxdo",
                 "reddit",
                 "rednote",
@@ -675,6 +677,7 @@ def test_all_explicit_first_party_provider_builders_validate() -> None:
         "bangumi",
         "bilibili",
         "douyin",
+        "hackernews",
         "linuxdo",
         "reddit",
         "rednote",
@@ -713,16 +716,42 @@ def test_global_cli_options_work_before_or_after_command(arguments: tuple[str, .
         (("sources",), "List, inspect, connect"),
         (("sources", "list"), "List source connection"),
         (("sources", "status"), "Show one source"),
+        (("sources", "form"), "Show a source connection form"),
+        (("sources", "capabilities"), "Show provider capabilities"),
+        (("sources", "access-recipe"), "Show the provider access recipe"),
+        (("sources", "submit-material"), "Submit plugin-captured access material"),
         (("sources", "add"), "Connect a source"),
         (("sources", "remove"), "Disconnect a source"),
         (("sources", "sync"), "Synchronize evidence"),
         (("feed",), "Show the current recommendation"),
+        (("refresh",), "Request a bounded recommendation refresh"),
         (("feedback",), "Record explicit feedback"),
+        (("record-feedback",), "Record a complete typed feedback request"),
+        (("observations",), "Record a typed observation batch"),
         (("profile",), "Inspect the profile"),
         (("profile", "show"), "Show the bounded preference"),
         (("profile", "exploration"), "Enable or disable"),
+        (("profile", "edit"), "Apply a complete typed profile edit"),
         (("assistant",), "Send one message"),
+        (("conversations",), "Inspect Assistant conversations"),
+        (("conversations", "show"), "Show one Assistant conversation"),
+        (("conversations", "messages"), "Show messages in one Assistant conversation"),
         (("search",), "Search content"),
+        (("content",), "Inspect content details"),
+        (("content", "detail"), "Fetch provider-native content details"),
+        (("actions",), "Propose, confirm, or reject"),
+        (("actions", "propose"), "Propose a pending content action"),
+        (("actions", "confirm"), "Confirm a pending content action"),
+        (("actions", "reject"), "Reject a pending content action"),
+        (("runtime",), "Inspect runtime health"),
+        (("runtime", "health"), "Show supervised runtime health"),
+        (("runtime", "config-diagnostics"), "Show configuration diagnostics"),
+        (("runtime", "model-diagnostics"), "Show model diagnostics"),
+        (("runtime", "events"), "Replay bounded runtime events"),
+        (("models",), "Inspect or update model settings"),
+        (("models", "catalog"), "Show the supported model catalog"),
+        (("models", "current"), "Show current model settings"),
+        (("models", "set"), "Validate and persist model settings"),
     ),
 )
 def test_cli_help_describes_every_command(
@@ -739,7 +768,7 @@ def test_check_entrypoint(
     monkeypatch.setattr("sys.argv", ["openbiliclaw", "check", "--data-dir", str(tmp_path)])
     main()
     assert (tmp_path / "openbiliclaw.db").exists()
-    assert capsys.readouterr().out == "configuration and runtime check passed\n"
+    assert json.loads(capsys.readouterr().out) == {"ready": True}
 
 
 def test_missing_config_reports_clean_cli_error(
@@ -753,8 +782,9 @@ def test_missing_config_reports_clean_cli_error(
 
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert str(missing) in captured.err
-    assert "Traceback" not in captured.err
+    error = json.loads(captured.err)["error"]
+    assert error["code"] == "validation"
+    assert str(missing) in error["message"]
 
 
 def test_serve_without_frontend_environment_uses_composed_host(

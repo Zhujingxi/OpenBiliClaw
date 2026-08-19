@@ -23,66 +23,124 @@ class Result(BaseModel):
     value: str
 
 
+CONTENT_REF = {
+    "provider_id": {"value": "bilibili"},
+    "content_kind": {"value": "video"},
+    "provider_content_id": "BV1test",
+    "canonical_url": "https://www.bilibili.com/video/BV1test",
+}
+
+
 class Facade:
     def __init__(self) -> None:
         self.calls: list[tuple[str, tuple[Any, ...]]] = []
 
+    def _result(self, name: str, value: str, *args: object) -> Result:
+        self.calls.append((name, args))
+        return Result(value=value)
+
     async def list_sources(self, account_id: str | None, limit: int) -> Result:
-        self.calls.append(("list_sources", (account_id, limit)))
-        return Result(value="sources")
+        return self._result("list_sources", "sources", account_id, limit)
 
     async def source_status(self, provider: str, account_id: str | None) -> Result:
-        self.calls.append(("source_status", (provider, account_id)))
-        return Result(value="status")
+        return self._result("source_status", "status", provider, account_id)
+
+    async def source_form(self, provider: str, method: str) -> Result:
+        return self._result("source_form", "form", provider, method)
+
+    def provider_capabilities(self, provider: str) -> Result:
+        return self._result("provider_capabilities", "capabilities", provider)
+
+    def access_recipe(self, provider: str) -> Result:
+        return self._result("access_recipe", "recipe", provider)
+
+    async def submit_access_material(self, command: object) -> Result:
+        return self._result("submit_access_material", "material", command)
 
     async def connect_source(self, command: object) -> Result:
-        self.calls.append(("connect_source", (command,)))
-        return Result(value="added")
+        return self._result("connect_source", "added", command)
 
     async def disconnect_source(self, command: object) -> Result:
-        self.calls.append(("disconnect_source", (command,)))
-        return Result(value="removed")
+        return self._result("disconnect_source", "removed", command)
 
     async def sync_source(self, provider_id: str) -> Result:
-        self.calls.append(("sync_source", (provider_id,)))
-        return Result(value="synced")
+        return self._result("sync_source", "synced", provider_id)
 
     async def import_provider_evidence(self, provider_id: str, path: Path) -> Result:
-        self.calls.append(("import_provider_evidence", (provider_id, path)))
-        return Result(value="imported")
+        return self._result("import_provider_evidence", "imported", provider_id, path)
 
     async def get_recommendations(self, limit: int) -> Result:
-        self.calls.append(("get_recommendations", (limit,)))
-        return Result(value="feed")
+        return self._result("get_recommendations", "feed", limit)
+
+    async def refresh_recommendations(self, command: object) -> Result:
+        return self._result("refresh_recommendations", "refreshed", command)
+
+    async def record_feedback(self, command: object) -> Result:
+        return self._result("record_feedback", "recorded-feedback", command)
 
     async def record_feedback_for_shown(
         self, shown_id: str, kind: str, idempotency_key: str, exposed: bool = False
     ) -> Result:
-        self.calls.append(("record_feedback_for_shown", (shown_id, kind, idempotency_key, exposed)))
         if shown_id == "bad":
             raise ApplicationError(ApplicationErrorCode.NOT_FOUND, "shown record not found")
-        return Result(value="feedback")
+        return self._result(
+            "record_feedback_for_shown", "feedback", shown_id, kind, idempotency_key, exposed
+        )
+
+    async def record_observations(self, command: object) -> Result:
+        return self._result("record_observations", "observations", command)
 
     async def edit_profile(self, command: object) -> Result:
-        self.calls.append(("edit_profile", (command,)))
-        return Result(value="profile-edited")
+        return self._result("edit_profile", "profile-edited", command)
 
     async def show_profile(self, profile_id: str) -> Result:
-        self.calls.append(("show_profile", (profile_id,)))
-        return Result(value="profile")
+        return self._result("show_profile", "profile", profile_id)
 
     async def assistant_turn(self, request: object, device_id: str) -> Result:
-        self.calls.append(("assistant_turn", (request, device_id)))
-        return Result(value="assistant")
+        return self._result("assistant_turn", "assistant", request, device_id)
+
+    async def conversation(self, conversation_id: str, device_id: str) -> Result:
+        return self._result("conversation", "conversation", conversation_id, device_id)
+
+    async def conversation_messages(
+        self, conversation_id: str, device_id: str, limit: int
+    ) -> Result:
+        return self._result("conversation_messages", "messages", conversation_id, device_id, limit)
 
     async def search_content(self, provider: str, query: str, limit: int) -> Result:
-        self.calls.append(("search_content", (provider, query, limit)))
-        return Result(value="search")
+        return self._result("search_content", "search", provider, query, limit)
+
+    async def get_content_details(self, reference: str) -> Result:
+        return self._result("get_content_details", "details", reference)
+
+    async def propose_action(self, command: object) -> Result:
+        return self._result("propose_action", "proposed", command)
+
+    async def confirm_action(self, command: object) -> Result:
+        return self._result("confirm_action", "confirmed", command)
+
+    async def reject_action(self, command: object) -> Result:
+        return self._result("reject_action", "rejected", command)
+
+    async def job_health(self) -> Result:
+        return self._result("job_health", "health")
+
+    async def config_diagnostics(self) -> Result:
+        return self._result("config_diagnostics", "config-diagnostics")
+
+    async def model_diagnostics(self) -> Result:
+        return self._result("model_diagnostics", "model-diagnostics")
+
+
+class Events:
+    async def replay(self, after: int, limit: int) -> tuple[Result, ...]:
+        return (Result(value=f"events:{after}:{limit}"),)
 
 
 class Application:
     def __init__(self, facade: Facade) -> None:
         self.services = SimpleNamespace(facade=facade)
+        self.hosts = SimpleNamespace(dependencies=SimpleNamespace(events=Events(), models=object()))
         self.started = False
 
     async def start(self) -> None:
@@ -98,7 +156,7 @@ def invoke(
     facade: Facade,
     tmp_path: Path,
     *args: str,
-) -> dict[str, object]:
+) -> object:
     application = Application(facade)
     monkeypatch.setattr(
         "openbiliclaw.composition.entrypoints.build_application",
@@ -109,7 +167,7 @@ def invoke(
     assert not application.started
     captured = capsys.readouterr()
     assert captured.err == ""
-    return cast("dict[str, object]", json.loads(captured.out))
+    return json.loads(captured.out)
 
 
 @pytest.mark.parametrize(
@@ -117,10 +175,31 @@ def invoke(
     (
         (("sources", "list"), "list_sources", "sources"),
         (("sources", "status", "bilibili"), "source_status", "status"),
+        (("sources", "form", "bilibili", "manual"), "source_form", "form"),
+        (
+            ("sources", "capabilities", "bilibili"),
+            "provider_capabilities",
+            "capabilities",
+        ),
+        (("sources", "access-recipe", "bilibili"), "access_recipe", "recipe"),
         (("feed", "--limit", "3"), "get_recommendations", "feed"),
         (("profile", "show"), "show_profile", "profile"),
         (("assistant", "hello"), "assistant_turn", "assistant"),
+        (("conversations", "show", "conv_" + "1" * 32), "conversation", "conversation"),
+        (
+            ("conversations", "messages", "conv_" + "1" * 32),
+            "conversation_messages",
+            "messages",
+        ),
         (("search", "bilibili", "typed systems"), "search_content", "search"),
+        (("content", "detail", json.dumps(CONTENT_REF)), "get_content_details", "details"),
+        (("runtime", "health"), "job_health", "health"),
+        (
+            ("runtime", "config-diagnostics"),
+            "config_diagnostics",
+            "config-diagnostics",
+        ),
+        (("runtime", "model-diagnostics"), "model_diagnostics", "model-diagnostics"),
     ),
 )
 def test_read_commands_emit_one_json_document_and_call_one_workflow(
@@ -225,6 +304,261 @@ def test_mutation_commands_emit_json_and_call_one_workflow(
     assert facade.calls[-1][0] == "edit_profile"
     command = cast("Any", facade.calls[-1][1][0])
     assert command.value == "true"
+
+
+def test_complete_user_workflows_accept_typed_json_requests(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    facade = Facade()
+
+    def request(name: str, payload: object) -> str:
+        path = tmp_path / f"{name}.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return str(path)
+
+    fields = request("fields", {"cookie": "secret"})
+    assert invoke(
+        monkeypatch,
+        capsys,
+        facade,
+        tmp_path,
+        "sources",
+        "add",
+        "bilibili",
+        "builtin.manual",
+        "--permission",
+        "read_public",
+        "--fields-file",
+        fields,
+        "--idempotency-key",
+        "connect-json-123",
+    ) == {"value": "added"}
+    assert cast("Any", facade.calls[-1][1][0]).submission == {"cookie": "secret"}
+
+    material = request(
+        "material",
+        {
+            "artifacts": [
+                {
+                    "kind": "cookie",
+                    "domain": "bilibili.com",
+                    "name": "SESSDATA",
+                    "value": "secret",
+                }
+            ]
+        },
+    )
+    assert invoke(
+        monkeypatch,
+        capsys,
+        facade,
+        tmp_path,
+        "sources",
+        "submit-material",
+        "bilibili",
+        material,
+    ) == {"value": "material"}
+    assert facade.calls[-1][0] == "submit_access_material"
+
+    assert invoke(
+        monkeypatch,
+        capsys,
+        facade,
+        tmp_path,
+        "refresh",
+        "--idempotency-key",
+        "refresh-123",
+        "--maximum-items",
+        "25",
+    ) == {"value": "refreshed"}
+    assert facade.calls[-1][0] == "refresh_recommendations"
+
+    feedback = request(
+        "feedback",
+        {
+            "idempotency_key": "feedback-json-123",
+            "shown_id": "shown_1",
+            "content_ref": CONTENT_REF,
+            "kind": "liked",
+        },
+    )
+    assert invoke(monkeypatch, capsys, facade, tmp_path, "record-feedback", feedback) == {
+        "value": "recorded-feedback"
+    }
+    assert facade.calls[-1][0] == "record_feedback"
+
+    observation = {
+        "observation_id": "obs_" + "1" * 32,
+        "idempotency_key": "cli-test-observation",
+        "occurred_at": "2030-01-01T00:00:00Z",
+        "received_at": "2030-01-01T00:00:00Z",
+        "account_id": None,
+        "content_ref": None,
+        "provenance": {
+            "producer_id": "host.cli",
+            "source": "host",
+            "authenticated": False,
+            "trust_level": "low",
+            "device_id": None,
+        },
+        "schema_version": 1,
+        "event_type": "content_opened",
+        "payload": {"surface": "cli"},
+    }
+    observations = request(
+        "observations",
+        {
+            "idempotency_key": "observations-123",
+            "observations": [observation],
+            "allowed_event_types": ["content_opened"],
+        },
+    )
+    assert invoke(monkeypatch, capsys, facade, tmp_path, "observations", observations) == {
+        "value": "observations"
+    }
+    assert facade.calls[-1][0] == "record_observations"
+
+    profile = request(
+        "profile",
+        {
+            "idempotency_key": "profile-json-123",
+            "profile_id": "default",
+            "account_id": "local",
+            "field": "exploration.disabled",
+            "operation": "set",
+            "value": "true",
+        },
+    )
+    assert invoke(monkeypatch, capsys, facade, tmp_path, "profile", "edit", profile) == {
+        "value": "profile-edited"
+    }
+
+    proposal = request(
+        "proposal",
+        {
+            "idempotency_key": "proposal-123",
+            "action_id": "save",
+            "ref": CONTENT_REF,
+            "user_id": "local",
+            "safe_preview": "Save this video",
+        },
+    )
+    assert invoke(monkeypatch, capsys, facade, tmp_path, "actions", "propose", proposal) == {
+        "value": "proposed"
+    }
+    pending_id = "pending_" + "2" * 32
+    assert invoke(monkeypatch, capsys, facade, tmp_path, "actions", "confirm", pending_id) == {
+        "value": "confirmed"
+    }
+    assert invoke(monkeypatch, capsys, facade, tmp_path, "actions", "reject", pending_id) == {
+        "value": "rejected"
+    }
+    assert [name for name, _ in facade.calls[-3:]] == [
+        "propose_action",
+        "confirm_action",
+        "reject_action",
+    ]
+
+
+def test_runtime_events_and_model_configuration_are_json_cli_commands(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    facade = Facade()
+    assert invoke(
+        monkeypatch,
+        capsys,
+        facade,
+        tmp_path,
+        "runtime",
+        "events",
+        "--after",
+        "4",
+        "--limit",
+        "2",
+    ) == [{"value": "events:4:2"}]
+
+    monkeypatch.setattr(
+        "openbiliclaw.composition.product_cli.model_catalog",
+        lambda _dependencies: Result(value="model-catalog"),
+    )
+    monkeypatch.setattr(
+        "openbiliclaw.composition.product_cli.current_model",
+        lambda _dependencies: Result(value="model-current"),
+    )
+    monkeypatch.setattr(
+        "openbiliclaw.composition.product_cli.update_model",
+        lambda _request, _dependencies: Result(value="model-updated"),
+    )
+    assert invoke(monkeypatch, capsys, facade, tmp_path, "models", "catalog") == {
+        "value": "model-catalog"
+    }
+    assert invoke(monkeypatch, capsys, facade, tmp_path, "models", "current") == {
+        "value": "model-current"
+    }
+    model = tmp_path / "model.json"
+    model.write_text(
+        json.dumps({"provider": "openai", "model_name": "gpt-4.1", "api_key": "secret"}),
+        encoding="utf-8",
+    )
+    assert invoke(monkeypatch, capsys, facade, tmp_path, "models", "set", str(model)) == {
+        "value": "model-updated"
+    }
+
+
+def test_secret_bearing_request_validation_never_echoes_input(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    facade = Facade()
+    application = Application(facade)
+    request = tmp_path / "invalid-material.json"
+    request.write_text(
+        json.dumps(
+            {
+                "artifacts": [
+                    {
+                        "kind": "cookie",
+                        "domain": "bilibili.com",
+                        "name": "SESSDATA",
+                        "value": "SECRET_CANARY" + "x" * 70_000,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "openbiliclaw.composition.entrypoints.build_application",
+        lambda *_args, **_kwargs: application,
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "openbiliclaw",
+            "sources",
+            "submit-material",
+            "bilibili",
+            str(request),
+            "--data-dir",
+            str(tmp_path),
+        ],
+    )
+
+    with pytest.raises(SystemExit, match="1"):
+        main()
+
+    error = capsys.readouterr().err
+    assert "SECRET_CANARY" not in error
+    assert json.loads(error) == {
+        "error": {"code": "validation", "message": "request validation failed"}
+    }
+    assert not application.started
 
 
 def test_youtube_takeout_import_round_trips_real_composition(

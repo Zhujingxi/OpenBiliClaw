@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import io
+import json
 import sys
 from typing import TYPE_CHECKING
 
@@ -29,7 +31,33 @@ def test_set_password_writes_hash_without_printing_secret(
 
     output = capsys.readouterr().out
     assert secret not in output
-    assert "password configured" in output
+    assert json.loads(output) == {"configured": True, "config": str(config)}
+    settings = load_settings(config)
+    assert settings.host.password_hash is not None
+    assert verify_password(secret, settings.host.password_hash)
+
+
+def test_set_password_accepts_noninteractive_stdin(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = tmp_path / "config.toml"
+    secret = "stdin-secret"
+    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(f"{secret}\n".encode())))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "openbiliclaw",
+            "set-password",
+            "--password-stdin",
+            "--config",
+            str(config),
+        ],
+    )
+
+    main()
+
+    assert secret not in capsys.readouterr().out
     settings = load_settings(config)
     assert settings.host.password_hash is not None
     assert verify_password(secret, settings.host.password_hash)
@@ -42,12 +70,9 @@ def test_ext_token_cli_prints_once_and_authenticates(
 
     main()
 
-    lines = capsys.readouterr().out.strip().splitlines()
-    assert len(lines) == 2
-    assert lines[0].startswith("token: ")
-    assert "store it now" in lines[1].lower()
-    raw = lines[0].removeprefix("token: ")
-    assert lines[1].count(raw) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["shown_once"] is True
+    raw = output["token"]
 
     async def verify() -> str | None:
         database = SqliteDatabase(tmp_path / "openbiliclaw.db")

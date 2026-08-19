@@ -5,8 +5,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import getpass
+import json
 import os
+import sys
 from pathlib import Path
+from typing import NoReturn
 
 import uvicorn
 
@@ -69,11 +72,16 @@ def _parser() -> argparse.ArgumentParser:
         help="serve the local web application and API",
         description="Serve the local web application and API.",
     )
-    commands.add_parser(
+    password = commands.add_parser(
         "set-password",
         parents=[common],
         help="configure the web login password",
         description="Configure the web login password.",
+    )
+    password.add_argument(
+        "--password-stdin",
+        action="store_true",
+        help="read the password from stdin once for non-interactive automation",
     )
     commands.add_parser(
         "ext-token",
@@ -102,6 +110,28 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _json(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _fail(message: str, *, code: str = "validation") -> NoReturn:
+    print(_json({"error": {"code": code, "message": message}}), file=sys.stderr)
+    raise SystemExit(2)
+
+
+def _stdin_password() -> str:
+    raw = sys.stdin.buffer.read(4097)
+    if len(raw) > 4096:
+        _fail("password exceeds 4096 bytes")
+    try:
+        password = raw.decode("utf-8").rstrip("\r\n")
+    except UnicodeDecodeError:
+        _fail("password must be UTF-8")
+    if not password:
+        _fail("password must not be empty")
+    return password
+
+
 def main() -> None:
     parser = _parser()
     arguments = parser.parse_args()
@@ -109,7 +139,7 @@ def main() -> None:
     if arguments.command == "export":
         database_path = arguments.data_dir / "openbiliclaw.db"
         if arguments.path.resolve() == database_path.resolve():
-            parser.error("archive path must not be the live database")
+            _fail("archive path must not be the live database")
         config_path = (
             (arguments.config or Path("config.toml")) if arguments.include_config else None
         )
@@ -118,8 +148,16 @@ def main() -> None:
                 export_archive(database_path, arguments.path, config_path=config_path)
             )
         except ArchiveError as error:
-            parser.error(str(error))
-        print(f"exported format {manifest.format_version} archive to {arguments.path}")
+            _fail(str(error), code="archive")
+        print(
+            _json(
+                {
+                    "format_version": manifest.format_version,
+                    "archive": str(arguments.path),
+                    "exported": True,
+                }
+            )
+        )
         return
     if arguments.command == "import" and arguments.file is None:
         try:
@@ -129,38 +167,41 @@ def main() -> None:
                 )
             )
         except ArchiveError as error:
-            parser.error(str(error))
-        print(f"imported format {manifest.format_version} archive into {arguments.data_dir}")
+            _fail(str(error), code="archive")
         restored_config = arguments.data_dir / "config.toml"
-        if restored_config.is_file():
-            print(
-                f"restored config to {restored_config}; "
-                f"serve/check need --config {restored_config} to load it"
+        print(
+            _json(
+                {
+                    "format_version": manifest.format_version,
+                    "data_dir": str(arguments.data_dir),
+                    "imported": True,
+                    "restored_config": str(restored_config) if restored_config.is_file() else None,
+                }
             )
+        )
         return
     if arguments.command == "set-password":
         config_path = arguments.config or Path("config.toml")
-        password = getpass.getpass("Password: ")
-        confirmation = getpass.getpass("Confirm password: ")
+        password = _stdin_password() if arguments.password_stdin else getpass.getpass("Password: ")
+        confirmation = (
+            password if arguments.password_stdin else getpass.getpass("Confirm password: ")
+        )
         if password != confirmation:
-            parser.error("passwords do not match")
+            _fail("passwords do not match")
         write_host_password(config_path, hash_password(password))
-        print(f"password configured in {config_path}")
-        if arguments.config is None:
-            print(f"note: serve/check need --config {config_path} to load it")
+        print(_json({"configured": True, "config": str(config_path)}))
         return
     if arguments.command == "ext-token":
         token = asyncio.run(_mint_extension_token(arguments.data_dir))
-        print(f"token: {token}")
-        print("Store it now; this token will not be shown again.")
+        print(_json({"token": token, "shown_once": True}))
         return
     try:
         settings = validated_settings(arguments.config)
     except FileNotFoundError as error:
-        parser.error(str(error))
+        _fail(str(error))
     if arguments.command == "check":
         asyncio.run(_check(arguments.config, arguments.data_dir))
-        print("configuration and runtime check passed")
+        print(_json({"ready": True}))
         return
     application = build_application(
         settings, options=BuildOptions(arguments.data_dir, config_path=arguments.config)
