@@ -43,6 +43,7 @@ def preview(content: NativeContent) -> ContentPreview:
         title=item.desc,
         summary=item.desc,
         creator_label=item.author.nickname if item.author else None,
+        image_url=item.video.cover_url if item.video else None,
         source_timestamp=_timestamp(content),
         provenance=_provenance(content),
     )

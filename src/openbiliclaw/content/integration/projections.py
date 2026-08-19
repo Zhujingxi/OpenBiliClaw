@@ -40,6 +40,7 @@ class ContentPreview(StrictBaseModel):
         return value
 
     creator_label: str | None = Field(default=None, max_length=300)
+    image_url: str | None = Field(default=None, pattern=r"^https?://[^\s]+$", max_length=2048)
     source_timestamp: AwareDatetime | None = None
     provenance: ProjectionProvenance
 

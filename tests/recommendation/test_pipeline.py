@@ -321,7 +321,16 @@ async def test_repository_replay_feed_is_model_free(tmp_path: Path) -> None:
     repo = SqliteRecommendationRepository(db)
     original = candidate(1, state=CandidateState.EVALUATED)
     assert await repo.add_candidate(original)
-    assert not await repo.add_candidate(original)
+    rediscovered = original.model_copy(
+        update={
+            "preview": original.preview.model_copy(
+                update={"image_url": "https://example.test/cover.jpg"}
+            )
+        }
+    )
+    assert not await repo.add_candidate(rediscovered)
+    original = await repo.load(original.candidate_id)
+    assert original.preview.image_url == "https://example.test/cover.jpg"
     selected, admissions, selections = SelectionService().select(
         (original,), (evaluation(original),), limit=1, seed=1, now=NOW
     )
@@ -345,6 +354,7 @@ async def test_repository_replay_feed_is_model_free(tmp_path: Path) -> None:
     assert tuple(item.selection for item in feed) == selections
     assert tuple(item.shown_id for item in feed) == (shown.shown_id,)
     assert tuple(item.reason for item in feed) == ("Recommended for relevance and freshness.",)
+    assert tuple(item.card.image_url for item in feed) == ("https://example.test/cover.jpg",)
     assert tuple(item.selection.rank for item in feed) == (1,)
     restarted_repo = SqliteRecommendationRepository(db2)
     assert (await restarted_repo.load(original.candidate_id)).state is CandidateState.SHOWN
@@ -513,6 +523,40 @@ async def test_discovery_service_calls_search_capability_directly() -> None:
     assert tuple((item.preview, item.topic) for item in result) == ((preview, "science"),)
     with pytest.raises(ValueError):
         await service.discover((), limit=0)
+
+
+@pytest.mark.asyncio
+async def test_discovery_service_isolates_provider_failures() -> None:
+    from openbiliclaw.access.models import AccessHandle, AnonymousAccessHandle, Permission
+    from openbiliclaw.content.integration.capabilities import ContentPage, SearchQuery
+    from openbiliclaw.recommendation.discovery.planner import PlannedQuery
+    from openbiliclaw.recommendation.discovery.service import DiscoveryService
+
+    preview = candidate(9).preview
+
+    class Search:
+        async def search(
+            self, query: SearchQuery, access: AccessHandle
+        ) -> ContentPage[ContentPreview]:
+            if query.text == "broken":
+                raise RuntimeError("provider failed")
+            return ContentPage(items=(preview,), next_cursor=None)
+
+    def resolve(provider_id: ProviderId) -> tuple[Search, AnonymousAccessHandle]:
+        return Search(), AnonymousAccessHandle(
+            provider_id=provider_id.value,
+            account_id=None,
+            permissions=frozenset({Permission.READ_PUBLIC}),
+        )
+
+    service = DiscoveryService(resolve)
+    result = await service.discover(
+        (
+            PlannedQuery(provider_id=ProviderId(value="youtube"), text="broken", topic="video"),
+            PlannedQuery(provider_id=ProviderId(value="bilibili"), text="science", topic="science"),
+        )
+    )
+    assert tuple((item.preview, item.topic) for item in result) == ((preview, "science"),)
 
 
 @pytest.mark.asyncio

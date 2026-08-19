@@ -36,9 +36,12 @@ class DiscoveryService:
             raise ValueError("limit must be between 1 and 50")
         result: list[DiscoveredPreview] = []
         for plan in plans:
-            capability, access = self._resolver(plan.provider_id)
-            page = await capability.search(
-                SearchQuery(text=plan.text, page=PageRequest(limit=limit)), access
-            )
+            try:
+                capability, access = self._resolver(plan.provider_id)
+                page = await capability.search(
+                    SearchQuery(text=plan.text, page=PageRequest(limit=limit)), access
+                )
+            except Exception:
+                continue
             result.extend(DiscoveredPreview(item, plan.topic) for item in page.items)
         return tuple(result[:50])

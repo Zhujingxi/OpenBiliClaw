@@ -148,7 +148,7 @@ def test_api_projection_schema_snapshot() -> None:
         "SearchDocument": digest(SearchDocument.model_json_schema()),
         "CardData": digest(CardData.model_json_schema()),
     } == {
-        "ContentPreview": "ecac4f91c30a7037cf942f4b62423d5747ed9686faf71bee27ff7041cafd8d34",
+        "ContentPreview": "0f0430f8cfe71781dc5f1f7dbe2d1eb4748c6a53d7c574e65abec186f33a33eb",
         "RecommendationCandidate": (
             "9ba4872e9b49ebc2b52f745a3896562c3952c871dccb65e8a64a2bcb94d8b09e"
         ),

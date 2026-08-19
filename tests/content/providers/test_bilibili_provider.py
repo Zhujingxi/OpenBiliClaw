@@ -330,6 +330,7 @@ def test_projections_are_separate_and_card_snapshot_is_stable() -> None:
     document = provider.search_document(native)
     card = provider.card_data(native)
     assert preview.provenance.ref == preview.ref
+    assert preview.image_url == card.image_url
     assert candidate.discovery_reason == "bilibili:public_feed"
     assert '"badge"' not in document.model_dump_json()
     assert '"discovery_reason"' not in card.model_dump_json()

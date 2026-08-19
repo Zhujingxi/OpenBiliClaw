@@ -39,6 +39,7 @@ def preview(content: NativeContent) -> ContentPreview:
         title=p.title,
         summary=p.description,
         creator_label=p.channel.name if p.channel else None,
+        image_url=p.thumbnail_url,
         source_timestamp=p.published_at,
         provenance=_provenance(content),
     )

@@ -46,6 +46,7 @@ def preview(content: NativeContent) -> ContentPreview:
         title=payload.title,
         summary=payload.description,
         creator_label=payload.creator.name if payload.creator else None,
+        image_url=payload.cover_url,
         source_timestamp=_timestamp(content),
         provenance=_provenance(content),
     )

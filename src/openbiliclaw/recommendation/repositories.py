@@ -89,7 +89,28 @@ class SqliteRecommendationRepository:
                     candidate.provenance.discovered_at.isoformat(),
                 ),
             )
-        return rows == 1
+            inserted = rows == 1
+            if not inserted and candidate.preview.image_url is not None:
+                row = await session.fetch_one(
+                    "SELECT candidate_json FROM recommendation_candidates WHERE candidate_id=?",
+                    (candidate.candidate_id,),
+                )
+                if row is not None:
+                    current = Candidate.model_validate_json(str(row[0]))
+                    if current.preview.image_url is None:
+                        current = current.model_copy(
+                            update={
+                                "preview": current.preview.model_copy(
+                                    update={"image_url": candidate.preview.image_url}
+                                )
+                            }
+                        )
+                        await session.execute(
+                            "UPDATE recommendation_candidates SET candidate_json=? "
+                            "WHERE candidate_id=?",
+                            (current.model_dump_json(), candidate.candidate_id),
+                        )
+        return inserted
 
     async def load(self, candidate_id: str) -> Candidate:
         async with self.db.transaction() as session:
@@ -403,6 +424,7 @@ class SqliteRecommendationRepository:
                             ref=preview.ref,
                             title=preview.title,
                             summary=preview.summary,
+                            image_url=preview.image_url,
                             source_timestamp=preview.source_timestamp,
                             provenance=preview.provenance,
                         ),
