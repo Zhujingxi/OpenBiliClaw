@@ -22,6 +22,9 @@ const sourceTimestamp = computed(() => {
 const mediaUrl = computed(() =>
   proxyImageUrl(props.card.data.image_url ?? undefined),
 );
+const providerInitial = computed(
+  () => props.card.providerLabel.trim().charAt(0).toUpperCase() || "•",
+);
 const summary = computed(() => {
   const value = props.card.data.summary.trim();
   return value && !/^[-–—]+$/.test(value) ? value.slice(0, 500) : undefined;
@@ -36,43 +39,67 @@ const status = computed(() => {
 
 <template>
   <article :aria-labelledby="titleId" class="obc-card">
-    <img v-if="mediaUrl" :src="mediaUrl" alt="" loading="lazy" />
-    <p v-if="fallbackMessage" role="status">{{ fallbackMessage }}</p>
-    <p v-if="status" role="status">{{ status }}</p>
-    <h2 :id="titleId">
-      <a v-if="href" :href="href" rel="noopener noreferrer">{{
-        card.data.title
-      }}</a>
-      <span v-else>{{ card.data.title }}</span>
-    </h2>
-    <p v-if="summary" data-card-summary>{{ summary }}</p>
-    <p aria-label="Provider">{{ card.providerLabel }}</p>
-    <time v-if="sourceTimestamp" :datetime="sourceTimestamp">
-      {{ new Date(sourceTimestamp).toLocaleString() }}
-    </time>
-    <div role="group" aria-label="Feedback actions">
-      <button
-        type="button"
-        class="card-like"
-        aria-label="Like recommendation"
-        @click="emit('like', card)"
+    <div
+      class="obc-card__media"
+      :class="{ 'obc-card__media--empty': !mediaUrl }"
+    >
+      <img v-if="mediaUrl" :src="mediaUrl" alt="" loading="lazy" />
+      <span v-else aria-hidden="true">{{ providerInitial }}</span>
+    </div>
+    <div class="obc-card__content">
+      <p v-if="fallbackMessage" role="status">{{ fallbackMessage }}</p>
+      <p v-if="status" role="status">{{ status }}</p>
+      <h2 :id="titleId">
+        <a v-if="href" :href="href" rel="noopener noreferrer">{{
+          card.data.title
+        }}</a>
+        <span v-else>{{ card.data.title }}</span>
+      </h2>
+      <p
+        data-card-summary
+        :aria-hidden="summary === undefined ? 'true' : undefined"
       >
-        Like
-      </button>
-      <button
-        type="button"
-        class="card-dismiss"
-        aria-label="Dismiss recommendation"
-        @click="emit('dismiss', card)"
-      >
-        Dismiss
-      </button>
+        {{ summary ?? "\u00a0" }}
+      </p>
+      <div class="obc-card__meta">
+        <p aria-label="Provider">{{ card.providerLabel }}</p>
+        <time
+          :datetime="sourceTimestamp"
+          :aria-hidden="sourceTimestamp === undefined ? 'true' : undefined"
+        >
+          {{
+            sourceTimestamp
+              ? new Date(sourceTimestamp).toLocaleString()
+              : "\u00a0"
+          }}
+        </time>
+      </div>
+      <div role="group" aria-label="Feedback actions">
+        <button
+          type="button"
+          class="card-like"
+          aria-label="Like recommendation"
+          @click="emit('like', card)"
+        >
+          Like
+        </button>
+        <button
+          type="button"
+          class="card-dismiss"
+          aria-label="Dismiss recommendation"
+          @click="emit('dismiss', card)"
+        >
+          Dismiss
+        </button>
+      </div>
     </div>
   </article>
 </template>
 
 <style scoped>
 .obc-card {
+  height: 100%;
+  min-width: 0;
   background: var(--surface-strong);
   border: 1px solid var(--line);
   border-radius: 18px;
@@ -80,8 +107,6 @@ const status = computed(() => {
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding-bottom: 14px;
   transition:
     transform 0.2s ease,
     box-shadow 0.2s ease;
@@ -92,19 +117,41 @@ const status = computed(() => {
   box-shadow: var(--shadow-lg);
 }
 
-.obc-card > img {
+.obc-card__media {
   width: 100%;
   aspect-ratio: 16 / 9;
-  object-fit: cover;
-  display: block;
+  flex: none;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
   background: var(--surface-soft);
 }
 
-.obc-card > :not(img) {
-  margin-inline: 14px;
+.obc-card__media img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
 }
 
-.obc-card > p[role="status"] {
+.obc-card__media--empty span {
+  color: var(--text-muted);
+  font-size: clamp(2rem, 6vw, 4rem);
+  font-weight: 700;
+  opacity: 0.35;
+}
+
+.obc-card__content {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+}
+
+.obc-card__content > p[role="status"] {
+  margin: 0;
   background: var(--brand-soft);
   border-radius: 10px;
   padding: 8px 10px;
@@ -113,7 +160,9 @@ const status = computed(() => {
   color: var(--brand-strong);
 }
 
-.obc-card > h2 {
+.obc-card__content > h2 {
+  min-height: calc(2 * 1.38em);
+  margin: 0;
   font-size: 15px;
   font-weight: 700;
   line-height: 1.38;
@@ -122,13 +171,16 @@ const status = computed(() => {
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+  overflow-wrap: anywhere;
 }
 
-.obc-card > h2 a {
+.obc-card__content > h2 a {
   color: inherit;
 }
 
-.obc-card > p[data-card-summary] {
+.obc-card__content > p[data-card-summary] {
+  min-height: calc(3 * 1.6em);
+  margin: 0;
   font-size: 13px;
   line-height: 1.6;
   color: var(--text-secondary);
@@ -136,10 +188,19 @@ const status = computed(() => {
   -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow: hidden;
+  overflow-wrap: anywhere;
 }
 
-.obc-card > p[aria-label="Provider"] {
-  align-self: flex-start;
+.obc-card__meta {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.obc-card__meta > p {
+  margin: 0;
   padding: 2px 8px;
   border-radius: 999px;
   background: var(--brand-soft);
@@ -150,18 +211,19 @@ const status = computed(() => {
   text-transform: uppercase;
 }
 
-.obc-card > time {
+.obc-card__meta > time {
+  min-height: 1.5em;
   font-size: 12px;
   color: var(--text-muted);
 }
 
-.obc-card > div[role="group"] {
+.obc-card__content > div[role="group"] {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
-  margin-top: auto;
 }
 
-.obc-card > div[role="group"] button {
+.obc-card__content > div[role="group"] button {
   padding: 6px 14px;
   border-radius: 999px;
   font-size: 12.5px;
@@ -169,19 +231,31 @@ const status = computed(() => {
   box-shadow: none;
 }
 
-.obc-card > div[role="group"] button.card-like {
+.obc-card__content > div[role="group"] button.card-like {
   background: var(--brand-soft);
   color: var(--brand);
 }
 
-.obc-card > div[role="group"] button.card-dismiss {
+.obc-card__content > div[role="group"] button.card-dismiss {
   background: var(--surface);
   border: 1px solid var(--line);
   color: var(--text-secondary);
 }
 
-.obc-card > div[role="group"] button:focus-visible {
+.obc-card__content > div[role="group"] button:focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);
+}
+
+@media (max-width: 640px) {
+  .obc-card__content > h2,
+  .obc-card__content > p[data-card-summary] {
+    min-height: 0;
+  }
+
+  .obc-card__content > p[data-card-summary][aria-hidden="true"],
+  .obc-card__meta > time[aria-hidden="true"] {
+    display: none;
+  }
 }
 </style>

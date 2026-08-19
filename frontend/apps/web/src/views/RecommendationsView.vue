@@ -92,9 +92,11 @@ onBeforeUnmount(store.cancel);
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(min(100%, 20rem), 1fr));
   gap: 1rem;
+  align-items: stretch;
 }
 
 .card-list > li {
   min-width: 0;
+  height: 100%;
 }
 </style>

@@ -43,6 +43,8 @@ it.each(["video", "image", "article", "discussion"] as const)(
   (kind) => {
     const wrapper = mount(CardRenderer, { props: { card: { ...base, kind } } });
     expect(wrapper.get("article").attributes("aria-labelledby")).toBeTruthy();
+    expect(wrapper.find(".obc-card__media").exists()).toBe(true);
+    expect(wrapper.find(".obc-card__content").exists()).toBe(true);
     expect(wrapper.get("h2").text()).toBe(base.data.title);
     expect(wrapper.get("a").attributes("href")).toBe(
       `#/content/${encodeURIComponent(JSON.stringify(base.data.ref))}`,
@@ -94,6 +96,9 @@ it("handles missing media, exact summary truncation, deletion and unavailability
   };
   const wrapper = mount(CardRenderer, { props: { card } });
   expect(wrapper.find("img").exists()).toBe(false);
+  expect(wrapper.get(".obc-card__media").classes()).toContain(
+    "obc-card__media--empty",
+  );
   expect(wrapper.text()).toContain("Content unavailable");
   expect(wrapper.get("[data-card-summary]").text().length).toBe(500);
   expect(
@@ -104,12 +109,14 @@ it("handles missing media, exact summary truncation, deletion and unavailability
 });
 
 it.each(["-", "  -  ", "\n\t", "—"])(
-  "hides placeholder summary %j",
+  "reserves an inaccessible alignment slot for placeholder summary %j",
   (summary) => {
     const wrapper = mount(CardRenderer, {
       props: { card: { ...base, data: { ...base.data, summary } } },
     });
-    expect(wrapper.find("[data-card-summary]").exists()).toBe(false);
+    const slot = wrapper.get("[data-card-summary]");
+    expect(slot.attributes("aria-hidden")).toBe("true");
+    expect(slot.text().trim()).toBe("");
   },
 );
 
@@ -163,7 +170,8 @@ it("hides the epoch timestamp sentinel while keeping real source times", () => {
       },
     },
   });
-  expect(sentinel.find("time").exists()).toBe(false);
+  expect(sentinel.get("time").attributes("aria-hidden")).toBe("true");
+  expect(sentinel.get("time").attributes("datetime")).toBeUndefined();
   expect(
     mount(CardRenderer, { props: { card: base } })
       .get("time")
