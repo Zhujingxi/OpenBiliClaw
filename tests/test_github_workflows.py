@@ -3,6 +3,20 @@
 from pathlib import Path
 
 
+def test_ci_keeps_expensive_platform_tests_manual() -> None:
+    """Pushes and pull requests should run the full hermetic suite without costly smoke jobs."""
+    workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+
+    assert "expensive_tests:" in workflow
+    assert workflow.count(
+        "if: ${{ github.event_name == 'workflow_dispatch' && inputs.expensive_tests }}"
+    ) == 2
+    assert (
+        "run: python -m pytest -q tests/composition/test_composition.py -k entrypoint" in workflow
+    )
+    assert "python -m pytest --cov=openbiliclaw --cov-branch" in workflow
+
+
 def test_web_guided_init_e2e_sanitizes_apt_sources_before_playwright_install() -> None:
     """Playwright --with-deps should not fail on stale Microsoft apt sources."""
     workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")

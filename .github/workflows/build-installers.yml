@@ -8,8 +8,8 @@ name: Build Desktop Installers
 # For an actual published Release, push a `desktop-v*` tag → release-desktop.yml
 # auto-builds (arm64 + Windows) and publishes an experimental pre-release. This
 # manual workflow stays for ad-hoc builds — notably the Intel x64 .dmg, which
-# release-desktop.yml skips because the macos-13 runner queues too long to gate a
-# release on. Build it here on demand and attach it to the release if needed.
+# release-desktop.yml skips to avoid gating releases on a second macOS build.
+# Build it here on demand and attach it to the release if needed.
 on:
   workflow_dispatch:
     inputs:
@@ -38,7 +38,7 @@ jobs:
         include:
           # Native per-arch builds keep platform-specific wheels aligned.
           - { runner: macos-14, arch: arm64 } # Apple Silicon
-          - { runner: macos-13, arch: x64 } # Intel
+          - { runner: macos-15-intel, arch: x64 } # Intel
     steps:
       - uses: actions/checkout@v6
 
