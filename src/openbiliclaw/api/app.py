@@ -558,6 +558,9 @@ _SOURCE_SHARE_ORDER = (
     "v2ex",
     "weibo",
 )
+# Unknown/unregistered platform slugs are preserved in the database for future
+# expansion, but they must not silently disappear from source-share counts.
+_SOURCE_COUNT_ORDER = _SOURCE_SHARE_ORDER + ("unknown",)
 _INIT_SOURCE_ORDER = (
     "bilibili",
     "xiaohongshu",
@@ -1051,16 +1054,25 @@ def _posture_gate_enforce_issue(cfg: Any, database: Any | None) -> Any | None:
 
 
 def _count_events_by_source_platform(database: Any) -> dict[str, int]:
-    """Count stored behavior events by normalized source platform."""
+    """Count stored behavior events by normalized source platform.
 
-    counter = {source: 0 for source in _SOURCE_SHARE_ORDER}
+    Unknown or unregistered platform slugs are aggregated under ``"unknown"``
+    so they are not silently dropped from the source-share suggestion.
+    """
+
+    def _bucket(source: object) -> str:
+        source_key = _normalize_source_platform(source)
+        if source_key in _SOURCE_SHARE_ORDER:
+            return source_key
+        return "unknown"
+
+    counter = {source: 0 for source in _SOURCE_COUNT_ORDER}
     if hasattr(database, "count_events_by_source_platform"):
         raw_counts = database.count_events_by_source_platform()
         if isinstance(raw_counts, dict):
             for source, count in raw_counts.items():
-                source_key = _normalize_source_platform(source)
-                counter[source_key] = counter.get(source_key, 0) + int(count)
-            return {source: counter.get(source, 0) for source in _SOURCE_SHARE_ORDER}
+                counter[_bucket(source)] += int(count)
+            return {source: counter.get(source, 0) for source in _SOURCE_COUNT_ORDER}
 
     rows: list[dict[str, Any]] = []
     if hasattr(database, "conn"):
@@ -1097,9 +1109,8 @@ def _count_events_by_source_platform(database: Any) -> dict[str, int]:
             or str(metadata.get("source_platform") or "").strip()
         )
         source = source or "bilibili"
-        source_key = _normalize_source_platform(source)
-        counter[source_key] = counter.get(source_key, 0) + 1
-    return {source: counter.get(source, 0) for source in _SOURCE_SHARE_ORDER}
+        counter[_bucket(source)] += 1
+    return {source: counter.get(source, 0) for source in _SOURCE_COUNT_ORDER}
 
 
 def _select_init_platforms(enabled: set[str], selected: set[str] | None) -> set[str]:

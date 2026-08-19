@@ -15902,6 +15902,7 @@ class TestEmbeddingAndCompatProviderE2E:
                 "v2ex": 0,
                 "bangumi": 0,
                 "linuxdo": 0,
+                "unknown": 0,
             },
             "enabled_sources": {
                 "bilibili": True,
@@ -15952,6 +15953,36 @@ class TestEmbeddingAndCompatProviderE2E:
 
         assert counts["youtube"] == 1
         assert counts["twitter"] == 1
+        assert counts["bilibili"] == 0
+        assert counts["unknown"] == 0
+
+    def test_source_share_fallback_buckets_unknown_slugs(self) -> None:
+        from openbiliclaw.api.app import _count_events_by_source_platform
+
+        class Cursor:
+            def fetchall(self) -> list[dict[str, str]]:
+                return [
+                    {
+                        "source_platform": "threads",
+                        "metadata": "{}",
+                    },
+                    {
+                        "source_platform": "",
+                        "metadata": '{"source_platform":"future-platform"}',
+                    },
+                ]
+
+        class Connection:
+            def execute(self, query: str) -> Cursor:
+                assert query == "SELECT source_platform, metadata FROM events"
+                return Cursor()
+
+        class DatabaseWithoutCountMethod:
+            conn = Connection()
+
+        counts = _count_events_by_source_platform(DatabaseWithoutCountMethod())
+
+        assert counts["unknown"] == 2
         assert counts["bilibili"] == 0
 
     def test_source_share_suggestion_post_uses_form_overrides(self, monkeypatch, tmp_path) -> None:
@@ -16026,6 +16057,7 @@ class TestEmbeddingAndCompatProviderE2E:
                 "v2ex": 0,
                 "bangumi": 0,
                 "linuxdo": 0,
+                "unknown": 0,
             },
             "enabled_sources": {
                 "bilibili": True,

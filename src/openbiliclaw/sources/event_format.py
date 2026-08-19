@@ -72,7 +72,7 @@ from typing import Any, Literal
 
 from openbiliclaw.sources.platforms import (
     SOURCE_CONFIDENCE_LEGACY_UNKNOWN,
-    SOURCE_CONFIDENCE_VALUES,
+    constrain_source_confidence,
     extract_source_content_id,
     resolve_source_attribution,
 )
@@ -776,10 +776,11 @@ def build_event(
             f"{context},评论:『{comment_excerpt}』" if context else f"评论:『{comment_excerpt}』"
         )
 
-    normalized_confidence = str(source_confidence or "").strip()
-    if normalized_confidence not in SOURCE_CONFIDENCE_VALUES:
-        normalized_confidence = detected_confidence
-    elif not resolved_platform:
+    normalized_confidence = constrain_source_confidence(
+        source_confidence,
+        detected_confidence,
+    )
+    if not resolved_platform:
         normalized_confidence = SOURCE_CONFIDENCE_LEGACY_UNKNOWN
 
     event: dict[str, Any] = {

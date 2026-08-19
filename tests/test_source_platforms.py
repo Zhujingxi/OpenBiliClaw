@@ -10,6 +10,7 @@ from openbiliclaw.sources.platforms import (
     SOURCE_CONFIDENCE_EXACT,
     SOURCE_CONFIDENCE_INFERRED,
     SOURCE_CONFIDENCE_LEGACY_UNKNOWN,
+    constrain_source_confidence,
     extract_source_content_id,
     infer_source_platform_from_url,
     resolve_source_attribution,
@@ -130,6 +131,34 @@ def test_source_attribution_prefers_explicit_metadata_then_url() -> None:
     assert resolve_source_attribution(legacy_platform="bilibili") == (
         "bilibili",
         SOURCE_CONFIDENCE_LEGACY_UNKNOWN,
+    )
+
+
+def test_source_attribution_keeps_unknown_slug_but_not_exact() -> None:
+    assert resolve_source_attribution(explicit_platform="threads") == (
+        "threads",
+        SOURCE_CONFIDENCE_LEGACY_UNKNOWN,
+    )
+    assert resolve_source_attribution(
+        explicit_platform="threads",
+        metadata_platform="youtube",
+        url="https://www.bilibili.com/video/BV1",
+    ) == ("threads", SOURCE_CONFIDENCE_LEGACY_UNKNOWN)
+
+
+def test_constrain_source_confidence_never_upgrades_evidence() -> None:
+    assert constrain_source_confidence(
+        SOURCE_CONFIDENCE_EXACT,
+        SOURCE_CONFIDENCE_INFERRED,
+    ) == SOURCE_CONFIDENCE_INFERRED
+    assert constrain_source_confidence(
+        SOURCE_CONFIDENCE_LEGACY_UNKNOWN,
+        SOURCE_CONFIDENCE_EXACT,
+    ) == SOURCE_CONFIDENCE_LEGACY_UNKNOWN
+    assert constrain_source_confidence("", SOURCE_CONFIDENCE_INFERRED) == SOURCE_CONFIDENCE_INFERRED
+    assert (
+        constrain_source_confidence("invalid", SOURCE_CONFIDENCE_EXACT)
+        == SOURCE_CONFIDENCE_EXACT
     )
 
 

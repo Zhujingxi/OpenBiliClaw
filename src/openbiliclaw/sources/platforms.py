@@ -37,6 +37,16 @@ SOURCE_CONFIDENCE_VALUES = frozenset(
     }
 )
 
+# Callers may ask for a confidence value, but the storage/event boundary must
+# never let a caller claim stronger evidence than the resolver actually had.
+# ``exact`` requires a canonical producer/platform field; URL-only inference is
+# at most ``inferred``; unknown slugs are at most ``legacy_unknown``.
+_SOURCE_CONFIDENCE_RANK = {
+    SOURCE_CONFIDENCE_LEGACY_UNKNOWN: 0,
+    SOURCE_CONFIDENCE_INFERRED: 1,
+    SOURCE_CONFIDENCE_EXACT: 2,
+}
+
 # 按优先级排列的候选字段；同一事件只取第一个有效字段，不能展开成多个内容身份。
 CONTENT_ID_METADATA_KEYS = (
     "content_id",
@@ -270,11 +280,20 @@ def resolve_source_attribution(
     inference.  A legacy fallback is returned only when no stronger signal is
     available; callers can therefore distinguish a real platform tag from a
     compatibility default without breaking old databases.
+
+    Unknown platform slugs are preserved as the platform value, but they are
+    not authoritative evidence: the returned confidence is
+    ``legacy_unknown``. This keeps future platform names from being counted
+    as exact attribution until they are registered in
+    ``SOURCE_FAMILY_RULES``.
     """
     for value in (explicit_platform, metadata_platform):
         normalized = normalize_source_platform(value)
-        if normalized:
+        if not normalized:
+            continue
+        if normalized in CANONICAL_SOURCE_FAMILIES:
             return normalized, SOURCE_CONFIDENCE_EXACT
+        return normalized, SOURCE_CONFIDENCE_LEGACY_UNKNOWN
 
     inferred = infer_source_platform_from_url(url)
     if inferred:
@@ -284,6 +303,22 @@ def resolve_source_attribution(
     if fallback:
         return fallback, SOURCE_CONFIDENCE_LEGACY_UNKNOWN
     return "", SOURCE_CONFIDENCE_LEGACY_UNKNOWN
+
+
+def constrain_source_confidence(requested: object, detected: str) -> str:
+    """Return the more conservative of *requested* and *detected* confidence.
+
+    Callers may suggest a confidence value, but cannot claim stronger
+    evidence than the source resolver observed. Passing an invalid or empty
+    value simply returns the detected confidence.
+    """
+    requested = str(requested or "").strip()
+    if requested not in SOURCE_CONFIDENCE_VALUES:
+        return detected
+    detected = str(detected or "").strip() or SOURCE_CONFIDENCE_LEGACY_UNKNOWN
+    if _SOURCE_CONFIDENCE_RANK[requested] <= _SOURCE_CONFIDENCE_RANK[detected]:
+        return requested
+    return detected
 
 
 def extract_source_content_id(metadata: object) -> str:

@@ -158,6 +158,42 @@ def test_event_insert_persists_canonical_source_attribution(tmp_path: Path) -> N
     assert stored_metadata["content_id"] == "123"
 
 
+def test_event_insert_does_not_upgrade_url_inference_to_exact(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+
+    event_id = db.insert_event(
+        "view",
+        url="https://x.com/example/status/123",
+        title="只有 URL 证据的事件",
+        source_confidence="exact",
+    )
+    row = db.conn.execute(
+        "SELECT source_platform, source_confidence FROM events WHERE id = ?",
+        (event_id,),
+    ).fetchone()
+
+    assert row["source_platform"] == "twitter"
+    assert row["source_confidence"] == "inferred"
+
+
+def test_event_insert_keeps_unknown_slug_but_not_exact(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+
+    event_id = db.insert_event(
+        "view",
+        title="未来平台事件",
+        source_platform="threads",
+        source_confidence="exact",
+    )
+    row = db.conn.execute(
+        "SELECT source_platform, source_confidence FROM events WHERE id = ?",
+        (event_id,),
+    ).fetchone()
+
+    assert row["source_platform"] == "threads"
+    assert row["source_confidence"] == "legacy_unknown"
+
+
 def test_event_insert_downgrades_confidence_without_platform(tmp_path: Path) -> None:
     db = _db(tmp_path)
 

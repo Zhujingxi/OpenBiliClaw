@@ -164,6 +164,19 @@ def test_build_event_infers_url_before_legacy_fallback() -> None:
     assert event["source_confidence"] == "inferred"
 
 
+def test_build_event_cannot_upgrade_url_inference_to_exact() -> None:
+    event = build_event(
+        event_type="view",
+        source_platform="",
+        source_confidence="exact",
+        url="https://x.com/example/status/123",
+        title="X 帖子",
+    )
+
+    assert event["source_platform"] == "twitter"
+    assert event["source_confidence"] == "inferred"
+
+
 def test_build_event_keeps_top_level_content_identity_in_sync() -> None:
     event = build_event(
         event_type="view",

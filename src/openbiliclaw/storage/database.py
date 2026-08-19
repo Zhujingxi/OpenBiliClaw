@@ -98,7 +98,7 @@ from openbiliclaw.sources.platforms import (
     SOURCE_CONFIDENCE_EXACT,
     SOURCE_CONFIDENCE_INFERRED,
     SOURCE_CONFIDENCE_LEGACY_UNKNOWN,
-    SOURCE_CONFIDENCE_VALUES,
+    constrain_source_confidence,
     extract_source_content_id,
     infer_source_platform_from_url,
     normalize_source_platform,
@@ -2671,10 +2671,13 @@ class Database:
             metadata_platform=metadata_platform,
             url=kwargs.get("url", ""),
         )
-        source_confidence = (
-            provided_confidence
-            if provided_confidence in SOURCE_CONFIDENCE_VALUES and source_platform
-            else detected_confidence
+        # Callers may suggest a confidence value, but they cannot claim
+        # stronger evidence than the resolver observed. This keeps a direct
+        # ``insert_event(..., url=x.com, source_confidence="exact")`` from
+        # turning URL inference into exact attribution.
+        source_confidence = constrain_source_confidence(
+            provided_confidence,
+            detected_confidence,
         )
         # A confidence value without a resolved platform cannot be evidence
         # for a source. Keep the row explicitly unknown at the storage
