@@ -16,7 +16,7 @@ secret_ref = "vault:DOCKER_MODEL_SECRET_REF"
 output_dimensions = 512
 
 [content]
-enabled = ["bilibili", "youtube", "bangumi", "v2ex", "weibo"]
+enabled = ["bilibili", "youtube", "bangumi", "v2ex", "hackernews", "weibo"]
 
 [recommendation]
 pool_target_count = 100

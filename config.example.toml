@@ -25,7 +25,7 @@ model_name = ""
 output_dimensions = 1536
 
 [content]
-enabled = ["bilibili", "youtube", "bangumi", "v2ex", "reddit", "x", "zhihu", "linuxdo", "weibo", "rednote", "douyin"]
+enabled = ["bilibili", "youtube", "bangumi", "v2ex", "hackernews", "reddit", "x", "zhihu", "linuxdo", "weibo", "rednote", "douyin"]
 
 [recommendation]
 pool_target_count = 100

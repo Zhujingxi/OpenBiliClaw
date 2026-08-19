@@ -27,6 +27,12 @@ from openbiliclaw.content.providers.bilibili import (
 )
 from openbiliclaw.content.providers.douyin.capabilities import DouyinProvider
 from openbiliclaw.content.providers.douyin.manifest import DOUYIN_MANIFEST
+from openbiliclaw.content.providers.hackernews import (
+    HACKER_NEWS_MANIFEST,
+    HackerNewsClient,
+    HackerNewsProvider,
+    HttpxHackerNewsTransport,
+)
 from openbiliclaw.content.providers.linuxdo import LINUXDO_MANIFEST, LinuxDoProvider
 from openbiliclaw.content.providers.linuxdo.auth import (
     LINUXDO_CONNECTION_FORM,
@@ -188,6 +194,10 @@ def _builders(vault: CredentialVault) -> dict[str, Callable[[], _BuiltProvider]]
         "bangumi": bangumi,
         "bilibili": bilibili,
         "douyin": lambda: _BuiltProvider(DOUYIN_MANIFEST, DouyinProvider()),
+        "hackernews": lambda: _BuiltProvider(
+            HACKER_NEWS_MANIFEST,
+            HackerNewsProvider(HackerNewsClient(HttpxHackerNewsTransport())),
+        ),
         "linuxdo": lambda: _BuiltProvider(
             LINUXDO_MANIFEST,
             LinuxDoProvider(LinuxDoClient(HttpxLinuxDoTransport(), resolver)),
