@@ -9273,6 +9273,11 @@ ${cardFeedbackBarHtml()}`;
       setInput("speculationMaxPrimary", scheduler.speculation_max_primary_interests);
       setInput("speculationMaxSecondary", scheduler.speculation_max_secondary_interests);
 
+      const soul = config.soul || {};
+      setInput("awarenessEventBatchSize", soul.awareness_event_batch_size ?? 300);
+      setInput("insightNoteBatchSize", soul.insight_note_batch_size ?? 150);
+      setInput("cognitionMaxTokens", soul.cognition_max_tokens ?? 32768);
+
       const discovery = config.discovery || {};
       setSelect("keywordGenerationMode", discovery.keyword_generation_mode || "hybrid");
       const multimodalEvaluation = $("#multimodalEvaluationEnabled");
@@ -10710,6 +10715,11 @@ ${cardFeedbackBarHtml()}`;
           speculation_max_secondary_interests: getIntInput("speculationMaxSecondary", 60),
           auto_update_enabled: $("#autoUpdate").value === "on",
           auto_update_check_interval_hours: getIntInput("autoUpdateInterval", 6)
+        },
+        soul: {
+          awareness_event_batch_size: getIntInput("awarenessEventBatchSize", 300),
+          insight_note_batch_size: getIntInput("insightNoteBatchSize", 150),
+          cognition_max_tokens: getIntInput("cognitionMaxTokens", 32768)
         },
         discovery: {
           ...(state.config?.discovery || {}),

@@ -9643,6 +9643,11 @@ function bindSettings() {
     setVal("cfgSpeculationMaxPrimary", cfg.scheduler?.speculation_max_primary_interests);
     setVal("cfgSpeculationMaxSecondary", cfg.scheduler?.speculation_max_secondary_interests);
 
+    // Soul cognition budgets (issue #169)
+    setVal("cfgAwarenessEventBatchSize", cfg.soul?.awareness_event_batch_size ?? 300);
+    setVal("cfgInsightNoteBatchSize", cfg.soul?.insight_note_batch_size ?? 150);
+    setVal("cfgCognitionMaxTokens", cfg.soul?.cognition_max_tokens ?? 32768);
+
     // Logging
     const logLevel = document.getElementById("cfgLogLevel");
     if (logLevel) logLevel.value = cfg.logging?.level || "INFO";
@@ -9900,6 +9905,11 @@ function bindSettings() {
         speculation_max_secondary_interests: getInt("cfgSpeculationMaxSecondary", 60),
         auto_update_enabled: checked("cfgAutoUpdate"),
         auto_update_check_interval_hours: getInt("cfgAutoUpdateInterval", 6),
+      },
+      soul: {
+        awareness_event_batch_size: getInt("cfgAwarenessEventBatchSize", 300),
+        insight_note_batch_size: getInt("cfgInsightNoteBatchSize", 150),
+        cognition_max_tokens: getInt("cfgCognitionMaxTokens", 32768)
       },
       saved_sync: {
         auto_sync_enabled: checked("cfgSavedAutoSync"),

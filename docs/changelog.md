@@ -7,6 +7,8 @@
 ## 未发布
 
 - **AI 文案换行保留（issue #184）**：推荐理由、惊喜理由、探针理由等 AI 生成文案在插件 side panel、桌面 Web 与移动 Web 统一使用 `white-space: pre-wrap` 保留换行，不再把多行输出显示成一大坨；聊天回复仍沿用既有的安全 Markdown 渲染。
+- **认知循环上下文预算可配置（issue #169）**：`[soul]` 新增 `awareness_event_batch_size`（默认 300，范围 10..900）、`insight_note_batch_size`（默认 150，范围 10..450）与 `cognition_max_tokens`（默认 32768，范围 1024..128000），分别对应 `cognition_cycle` 原有的 `_AWARENESS_EVENT_BATCH_SIZE` / `_INSIGHT_NOTE_BATCH_SIZE` / `_COGNITION_MAX_TOKENS` 三处模块常量。默认值不变；80-100K 上下文的本地模型（如 qwen3.8-27B）可在 config.toml 调小这些值，不必再改源码。三处 SoulEngine 构建面（CLI、OpenClaw bootstrap、API 热重载）与 `GET/PUT /api/config` 已同步透传，`docs/modules/config.md` 与 `docs/modules/soul.md` 已更新。
+- **修复有 Key 无模型的 legacy provider 被投影为启用的空实例**：`effective_llm_instances` 不再把 `[llm.<provider>]` 中只填了 `api_key` 但 `model` 为空的固定 provider 块投影为 v2 实例（这些通常是历史模板残留），避免桌面 Web / API 保存时被 blocking「启用的 LLM 实例必须明确填写模型」拦下。默认 provider / fallback / 模块路由显式引用的 provider 仍会投影并由原生 v2 校验给出缺模型提示；每条空模型跳过打一次 WARNING。
 
 ## v0.3.208：来源周期回拉逐源开关与发布同步（2026-08-18）
 

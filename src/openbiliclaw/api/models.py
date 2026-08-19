@@ -2319,6 +2319,9 @@ class SoulConfigOut(BaseModel):
     posture_gate_mode: Literal["shadow", "enforce", "off"] = "shadow"
     posture_gate_force_enforce: bool = False
     topic_lifecycle_serialization: Literal["off", "on"] = "off"
+    awareness_event_batch_size: int = Field(default=300, ge=10, le=900)
+    insight_note_batch_size: int = Field(default=150, ge=10, le=450)
+    cognition_max_tokens: int = Field(default=32768, ge=1024, le=128000)
 
 
 class DiscoveryConfigOut(BaseModel):

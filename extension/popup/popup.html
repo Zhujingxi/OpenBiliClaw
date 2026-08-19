@@ -7467,6 +7467,23 @@
         </div>
         <p class="settings-hint">经典：仅用合并关键词生成器；混合：在经典基础上再叠加 search-backed 灵感轴链路（最丰富，但同时跑两套，混合最贵）；灵感：完全用灵感轴链路替代经典。</p>
       </div>
+
+      <div class="settings-section">
+        <h3>认知循环预算</h3>
+        <p class="settings-hint">觉察 / 洞察每轮 LLM 调用的输入批量与输出 token 上限。默认按 256K 上下文模型设计；80-100K 上下文的本地模型（如 qwen3.8-27B）可调小，无需改源码。</p>
+        <div class="settings-field">
+          <label for="cfgAwarenessEventBatchSize">觉察事件批量大小</label>
+          <input id="cfgAwarenessEventBatchSize" type="number" min="10" max="900" step="1" placeholder="300">
+        </div>
+        <div class="settings-field">
+          <label for="cfgInsightNoteBatchSize">洞察笔记批量大小</label>
+          <input id="cfgInsightNoteBatchSize" type="number" min="10" max="450" step="1" placeholder="150">
+        </div>
+        <div class="settings-field">
+          <label for="cfgCognitionMaxTokens">认知输出 token 上限</label>
+          <input id="cfgCognitionMaxTokens" type="number" min="1024" max="128000" step="1" placeholder="32768">
+        </div>
+      </div>
       </div>
 
       <div id="settingsPanelLogging" class="settings-panel" data-settings-panel="logging" role="tabpanel" aria-labelledby="settingsTabLogging" hidden>

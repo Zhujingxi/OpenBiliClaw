@@ -29,6 +29,15 @@ from openbiliclaw.llm.service import LLMService
 from .avoidance_speculator import AvoidanceSpeculator
 from .awareness_analyzer import AwarenessAnalyzer
 from .cognition_cycle import (
+    _AWARENESS_EVENT_BATCH_SIZE as _DEFAULT_AWARENESS_EVENT_BATCH_SIZE,
+)
+from .cognition_cycle import (
+    _COGNITION_MAX_TOKENS as _DEFAULT_COGNITION_MAX_TOKENS,
+)
+from .cognition_cycle import (
+    _INSIGHT_NOTE_BATCH_SIZE as _DEFAULT_INSIGHT_NOTE_BATCH_SIZE,
+)
+from .cognition_cycle import (
     DEFAULT_MIN_INTERVAL_SECONDS as _DEFAULT_COG_INTERVAL,
 )
 from .cognition_cycle import (
@@ -316,6 +325,9 @@ class SoulEngine:
         *,
         embedding_service: Any | None = None,
         cognition_cycle_interval_seconds: int | None = None,
+        awareness_event_batch_size: int = _DEFAULT_AWARENESS_EVENT_BATCH_SIZE,
+        insight_note_batch_size: int = _DEFAULT_INSIGHT_NOTE_BATCH_SIZE,
+        cognition_max_tokens: int = _DEFAULT_COGNITION_MAX_TOKENS,
         usage_recorder: Any | None = None,
         satisfaction_filter_enabled: bool = True,
         preference_prompt_view: str = "legacy",
@@ -440,6 +452,9 @@ class SoulEngine:
                 if cognition_cycle_interval_seconds is not None
                 else _DEFAULT_COG_INTERVAL
             ),
+            awareness_event_batch_size=awareness_event_batch_size,
+            insight_note_batch_size=insight_note_batch_size,
+            cognition_max_tokens=cognition_max_tokens,
             # 12h-loop fallback trigger for the debounced confirmed-hypotheses
             # rebuild (spec invariant 4). Bound method; only invoked at run time.
             pending_rebuild_hook=self.run_pending_rebuild_if_due,
