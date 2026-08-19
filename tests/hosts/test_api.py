@@ -545,9 +545,17 @@ async def test_source_list_includes_provider_capabilities() -> None:
     async with client(facade) as api:
         response = await api.get("/v1/sources")
     assert response.status_code == 200
-    item = response.json()["items"][0]
+    payload = response.json()
+    item = payload["items"][0]
     assert item["provider_id"] == "demo"
     assert item["capabilities"] == ["feed", "fetch"]
+    assert payload["inventory"] == {
+        "pool_count": 0,
+        "queue_count": 0,
+        "archived_count": 0,
+        "by_provider": [],
+        "by_content_kind": [],
+    }
 
 
 @pytest.mark.parametrize(

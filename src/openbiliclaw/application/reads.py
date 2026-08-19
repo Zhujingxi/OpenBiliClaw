@@ -38,6 +38,7 @@ from openbiliclaw.core.health import (
     HealthSnapshot,  # noqa: TC001  # Runtime type required by Pydantic model fields.
 )
 from openbiliclaw.recommendation.models import (
+    CandidateInventorySummary,  # noqa: TC001  # Runtime type required by Pydantic model fields.
     RecommendationFeedItem,  # noqa: TC001  # Runtime type required by Pydantic model fields.
 )
 from openbiliclaw.understanding.profile import (
@@ -63,6 +64,7 @@ class AccessReads(Protocol):
 
 
 class RecommendationReads(Protocol):
+    async def inventory_summary(self) -> CandidateInventorySummary: ...
     async def deliver_feed(
         self, *, limit: int, shown_at: datetime
     ) -> tuple[RecommendationFeedItem, ...]: ...
@@ -143,19 +145,22 @@ class ListSourcesQuery(StrictBaseModel):
 class SourcesResult(StrictBaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     items: tuple[AccessStatus, ...]
+    inventory: CandidateInventorySummary = CandidateInventorySummary()
 
 
 @dataclass(frozen=True, slots=True)
 class ListSources:
     provider_ids: tuple[str, ...]
     access: AccessReads
+    recommendations: RecommendationReads
 
     async def __call__(self, query: ListSourcesQuery) -> SourcesResult:
         ids = self.provider_ids[: query.limit]
         return SourcesResult(
             items=tuple(
                 [await self.access.status(provider_id, query.account_id) for provider_id in ids]
-            )
+            ),
+            inventory=await self.recommendations.inventory_summary(),
         )
 
 

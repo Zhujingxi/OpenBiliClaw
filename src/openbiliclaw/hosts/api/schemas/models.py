@@ -41,7 +41,11 @@ from openbiliclaw.core.config import CapabilitySettings
 from openbiliclaw.core.health import HealthSnapshot
 from openbiliclaw.observations.models import Observation
 from openbiliclaw.observations.service import RecordBatchResult
-from openbiliclaw.recommendation.models import FeedbackKind, RecommendationFeedItem
+from openbiliclaw.recommendation.models import (
+    CandidateInventorySummary,
+    FeedbackKind,
+    RecommendationFeedItem,
+)
 from openbiliclaw.understanding.overrides import OverrideOperation
 from openbiliclaw.understanding.projections import DialogueProfile
 
@@ -84,6 +88,7 @@ class SourceStatusEntry(TransportModel):
 
 class SourceListResponse(TransportModel):
     items: tuple[SourceStatusEntry, ...]
+    inventory: CandidateInventorySummary
 
 
 class SourceFormResponse(TransportModel):

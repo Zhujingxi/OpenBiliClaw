@@ -358,6 +358,14 @@ async def test_repository_replay_feed_is_model_free(tmp_path: Path) -> None:
     assert tuple(item.selection.rank for item in feed) == (1,)
     restarted_repo = SqliteRecommendationRepository(db2)
     assert (await restarted_repo.load(original.candidate_id)).state is CandidateState.SHOWN
+    inventory = await restarted_repo.inventory_summary()
+    assert (inventory.pool_count, inventory.queue_count, inventory.archived_count) == (1, 1, 0)
+    assert [(item.key, item.pool_count, item.queue_count) for item in inventory.by_provider] == [
+        ("bilibili", 1, 1)
+    ]
+    assert [
+        (item.key, item.pool_count, item.queue_count) for item in inventory.by_content_kind
+    ] == [("video", 1, 1)]
     feedback = FeedbackRecord(
         feedback_id=record_identity("feedback", shown.shown_id),
         shown_id=shown.shown_id,
@@ -367,6 +375,8 @@ async def test_repository_replay_feed_is_model_free(tmp_path: Path) -> None:
     assert await restarted_repo.save_feedback(feedback, original.preview.ref)
     assert not await restarted_repo.save_feedback(feedback, original.preview.ref)
     assert (await restarted_repo.load(original.candidate_id)).state is CandidateState.INTERACTED
+    inventory = await restarted_repo.inventory_summary()
+    assert (inventory.pool_count, inventory.queue_count, inventory.archived_count) == (0, 0, 1)
     await db2.close()
 
 

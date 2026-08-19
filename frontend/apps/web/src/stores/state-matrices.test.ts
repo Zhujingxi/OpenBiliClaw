@@ -1,12 +1,14 @@
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it } from "vitest";
-import type {
-  ConversationResponse,
-  ProfileResponse,
-  RuntimeResponse,
-  SearchResponse,
-  SourceStatus,
-  WebApi,
+import {
+  EMPTY_SOURCE_INVENTORY,
+  type ConversationResponse,
+  type ProfileResponse,
+  type RuntimeResponse,
+  type SearchResponse,
+  type SourceListResponse,
+  type SourceStatus,
+  type WebApi,
 } from "../services/api";
 import { useAssistantStore } from "./assistant";
 import { useContentStore } from "./content";
@@ -26,6 +28,9 @@ function deferred<T>(): {
     reject = no;
   });
   return { promise, resolve, reject };
+}
+function sourceList(items: SourceStatus[] = []): SourceListResponse {
+  return { items, inventory: EMPTY_SOURCE_INVENTORY };
 }
 function api(overrides: Partial<WebApi>): WebApi {
   const unused = async (): Promise<never> => {
@@ -221,16 +226,16 @@ describe("store state matrices", () => {
 
   it("covers sources loading, success, empty, error, and stale completion", async () => {
     const store = useSourcesStore();
-    await store.load(api({ listSources: async () => [] }));
+    await store.load(api({ listSources: async () => sourceList() }));
     expect(store.phase).toBe("empty");
-    await store.load(api({ listSources: async () => [source] }));
+    await store.load(api({ listSources: async () => sourceList([source]) }));
     expect(store.phase).toBe("success");
     await store.load(
       api({ listSources: async () => Promise.reject(new Error("bad")) }),
     );
     expect(store.phase).toBe("error");
-    const old = deferred<readonly SourceStatus[]>();
-    const fresh = deferred<readonly SourceStatus[]>();
+    const old = deferred<SourceListResponse>();
+    const fresh = deferred<SourceListResponse>();
     let calls = 0;
     const web = api({
       listSources: () => (++calls === 1 ? old.promise : fresh.promise),
@@ -238,10 +243,10 @@ describe("store state matrices", () => {
     const first = store.load(web);
     const second = store.load(web);
     expect(store.phase).toBe("loading");
-    old.resolve([source]);
+    old.resolve(sourceList([source]));
     await first;
     expect(store.phase).toBe("loading");
-    fresh.resolve([]);
+    fresh.resolve(sourceList());
     await second;
     expect(store.phase).toBe("empty");
   });

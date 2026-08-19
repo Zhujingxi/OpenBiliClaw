@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, cast
 
 from openbiliclaw.content.integration.projections import CardData
 
 from .models import (
     AdmissionRecord,
     Candidate,
+    CandidateInventoryGroup,
+    CandidateInventorySummary,
     CandidateState,
     EvaluationRecord,
     ExplorationAttribution,
@@ -56,6 +58,7 @@ class RecommendationRepository(Protocol):
     async def load_shown(self, recommendation_id: str) -> ShownRecord: ...
     async def content_ref_for_shown(self, shown_id: str) -> ContentRef: ...
     async def reward_context(self, shown_id: str) -> tuple[ShownRecord, Candidate]: ...
+    async def inventory_summary(self) -> CandidateInventorySummary: ...
     async def deliver_feed(
         self, *, limit: int, shown_at: datetime
     ) -> tuple[RecommendationFeedItem, ...]: ...
@@ -76,6 +79,64 @@ class SqliteRecommendationRepository:
 
     def __init__(self, database: SqliteDatabase) -> None:
         self.db = database
+
+    async def inventory_summary(self) -> CandidateInventorySummary:
+        """Count active pool, feed queue, and terminal records without loading payloads."""
+
+        async with self.db.transaction() as session:
+            rows = await session.fetch_all(
+                "SELECT "
+                "json_extract(candidate_json,'$.preview.ref.provider_id.value'),"
+                "json_extract(candidate_json,'$.preview.ref.content_kind.value'),"
+                "state,COUNT(*) FROM recommendation_candidates GROUP BY 1,2,3"
+            )
+        terminal = {
+            CandidateState.REJECTED,
+            CandidateState.INTERACTED,
+            CandidateState.EXPIRED,
+        }
+        queued = {CandidateState.SELECTED, CandidateState.SHOWN}
+        pool_count = queue_count = archived_count = 0
+        provider_pool: dict[str, int] = {}
+        provider_queue: dict[str, int] = {}
+        kind_pool: dict[str, int] = {}
+        kind_queue: dict[str, int] = {}
+        for raw_provider, raw_kind, raw_state, raw_count in rows:
+            provider = str(raw_provider)
+            kind = str(raw_kind)
+            state = CandidateState(str(raw_state))
+            count = cast("int", raw_count)
+            if state in terminal:
+                archived_count += count
+                continue
+            pool_count += count
+            provider_pool[provider] = provider_pool.get(provider, 0) + count
+            kind_pool[kind] = kind_pool.get(kind, 0) + count
+            if state in queued:
+                queue_count += count
+                provider_queue[provider] = provider_queue.get(provider, 0) + count
+                kind_queue[kind] = kind_queue.get(kind, 0) + count
+        return CandidateInventorySummary(
+            pool_count=pool_count,
+            queue_count=queue_count,
+            archived_count=archived_count,
+            by_provider=tuple(
+                CandidateInventoryGroup(
+                    key=key,
+                    pool_count=count,
+                    queue_count=provider_queue.get(key, 0),
+                )
+                for key, count in sorted(provider_pool.items())
+            ),
+            by_content_kind=tuple(
+                CandidateInventoryGroup(
+                    key=key,
+                    pool_count=count,
+                    queue_count=kind_queue.get(key, 0),
+                )
+                for key, count in sorted(kind_pool.items())
+            ),
+        )
 
     async def add_candidate(self, candidate: Candidate) -> bool:
         async with self.db.transaction() as session:

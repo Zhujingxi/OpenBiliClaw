@@ -1,4 +1,9 @@
-import type { SourceStatus, WebApi } from "../services/api";
+import {
+  EMPTY_SOURCE_INVENTORY,
+  type SourceInventorySummary,
+  type SourceStatus,
+  type WebApi,
+} from "../services/api";
 import type { components } from "@openbiliclaw/api-client";
 import { defineStore } from "pinia";
 import { ref } from "vue";
@@ -12,6 +17,7 @@ import {
 export const useSourcesStore = defineStore("sources", () => {
   const phase = ref<LoadPhase>("idle");
   const items = ref<readonly SourceStatus[]>([]);
+  const inventory = ref<SourceInventorySummary>(EMPTY_SOURCE_INVENTORY);
   const error = ref<string>();
   const connectPhase = ref<LoadPhase>("idle");
   const connectError = ref<string>();
@@ -25,8 +31,9 @@ export const useSourcesStore = defineStore("sources", () => {
     try {
       const next = await api.listSources(signal);
       if (!owner.owns(signal)) return;
-      items.value = next;
-      phase.value = next.length === 0 ? "empty" : "success";
+      items.value = next.items;
+      inventory.value = next.inventory;
+      phase.value = next.items.length === 0 ? "empty" : "success";
     } catch (caught) {
       if (isCancellation(caught) || !owner.owns(signal)) return;
       error.value = errorMessage(caught);
@@ -62,6 +69,7 @@ export const useSourcesStore = defineStore("sources", () => {
   return {
     phase,
     items,
+    inventory,
     error,
     connectPhase,
     connectError,

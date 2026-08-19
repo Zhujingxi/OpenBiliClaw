@@ -5,11 +5,14 @@ import { describe, expect, it, vi } from "vitest";
 import AppNavigation from "./AppNavigation.vue";
 import AsyncState from "./AsyncState.vue";
 import App from "../App.vue";
-import type { WebApi } from "../services/api";
+import { EMPTY_SOURCE_INVENTORY, type WebApi } from "../services/api";
 
 const api: WebApi = {
   login: async () => ({ token: "token", label: "session" }),
-  listSources: async () => [],
+  listSources: async () => ({
+    items: [],
+    inventory: EMPTY_SOURCE_INVENTORY,
+  }),
   connectSource: async () => {
     throw new Error("unused");
   },

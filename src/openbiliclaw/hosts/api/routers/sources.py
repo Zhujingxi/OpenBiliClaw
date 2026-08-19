@@ -42,7 +42,8 @@ async def list_sources(
                 capabilities=dependencies.facade.provider_capabilities(status.provider_id),
             )
             for status in result.items
-        )
+        ),
+        inventory=result.inventory,
     )
 
 

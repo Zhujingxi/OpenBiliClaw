@@ -8,6 +8,19 @@ export type SourceStatus = Omit<
   components["schemas"]["SourceStatusEntry"],
   "capabilities"
 > & { capabilities?: string[] };
+export type SourceInventorySummary =
+  components["schemas"]["CandidateInventorySummary"];
+export type SourceListResponse = Omit<
+  components["schemas"]["SourceListResponse"],
+  "items"
+> & { items: readonly SourceStatus[] };
+export const EMPTY_SOURCE_INVENTORY: SourceInventorySummary = {
+  pool_count: 0,
+  queue_count: 0,
+  archived_count: 0,
+  by_provider: [],
+  by_content_kind: [],
+};
 export type RecommendationPage = components["schemas"]["RecommendationPage"];
 export type ProfileResponse = components["schemas"]["ProfileResponse"];
 export type EditProfileResult = components["schemas"]["EditProfileResult"];
@@ -33,7 +46,7 @@ export type LoginResponse = components["schemas"]["LoginResponse"];
 
 export interface WebApi {
   login(password: string, signal?: AbortSignal): Promise<LoginResponse>;
-  listSources(signal?: AbortSignal): Promise<readonly SourceStatus[]>;
+  listSources(signal?: AbortSignal): Promise<SourceListResponse>;
   connectSource(
     body: components["schemas"]["ConnectSourceRequest"],
     signal?: AbortSignal,
@@ -105,16 +118,15 @@ export function createWebApi(client: ApiClient): WebApi {
         ),
         signal,
       }),
-    async listSources(signal) {
-      const response = await client.request({
+    listSources: (signal) =>
+      client.request({
         path: "/v1/sources",
         method: "get",
-        validate:
-          listValidator<components["schemas"]["SourceListResponse"]>("items"),
+        validate: validator<components["schemas"]["SourceListResponse"]>(
+          (value) => Array.isArray(value.items) && record(value.inventory),
+        ),
         signal,
-      });
-      return response.items;
-    },
+      }),
     connectSource: (body, signal) =>
       client.request({
         path: "/v1/sources/connect",

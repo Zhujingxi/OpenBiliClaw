@@ -185,7 +185,7 @@ class CompositionFacade:
         self._access = access
         self._source_status = GetSourceStatus(access)
         self._source_form = GetSourceForm(access)
-        self._sources = ListSources(provider_ids, access)
+        self._sources = ListSources(provider_ids, access, recommendations)
         self._connect = ConnectSource(access, _Availability(), idempotency)
         self._disconnect = DisconnectSource(access, idempotency)
         self._plugin_access = PluginAssistedAccess(registry, access)

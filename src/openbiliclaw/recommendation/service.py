@@ -2,13 +2,16 @@
 
 from datetime import datetime  # noqa: TC003  # Runtime method annotation.
 
-from .models import RecommendationFeedItem
+from .models import CandidateInventorySummary, RecommendationFeedItem
 from .repositories import RecommendationRepository
 
 
 class RecommendationService:
     def __init__(self, repository: RecommendationRepository) -> None:
         self.repository = repository
+
+    async def inventory_summary(self) -> CandidateInventorySummary:
+        return await self.repository.inventory_summary()
 
     async def deliver_feed(
         self, *, limit: int = 20, shown_at: datetime

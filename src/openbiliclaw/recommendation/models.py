@@ -44,6 +44,28 @@ _ALLOWED: dict[CandidateState, frozenset[CandidateState]] = {
 }
 
 
+class CandidateInventoryGroup(StrictBaseModel):
+    """Active pool and deliverable queue counts for one provider or content kind."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    key: str = Field(min_length=1, max_length=128)
+    pool_count: int = Field(default=0, ge=0)
+    queue_count: int = Field(default=0, ge=0)
+
+
+class CandidateInventorySummary(StrictBaseModel):
+    """Operational recommendation inventory shown on the content-sources page."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    pool_count: int = Field(default=0, ge=0)
+    queue_count: int = Field(default=0, ge=0)
+    archived_count: int = Field(default=0, ge=0)
+    by_provider: tuple[CandidateInventoryGroup, ...] = ()
+    by_content_kind: tuple[CandidateInventoryGroup, ...] = ()
+
+
 def candidate_identity(ref: ContentRef, strategy_id: str, query_key: str) -> str:
     value = f"{ref.provider_id.value}:{ref.provider_content_id}:{strategy_id}:{query_key}"
     return "cand_" + hashlib.sha256(value.encode()).hexdigest()[:32]

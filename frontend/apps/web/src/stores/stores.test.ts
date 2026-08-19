@@ -1,7 +1,13 @@
 import { ApiError } from "@openbiliclaw/api-client";
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { RecommendationPage, WebApi } from "../services/api";
+import {
+  EMPTY_SOURCE_INVENTORY,
+  type RecommendationPage,
+  type SourceListResponse,
+  type SourceStatus,
+  type WebApi,
+} from "../services/api";
 import { useRecommendationsStore } from "./recommendations";
 import { useSourcesStore } from "./sources";
 import { useProfileStore } from "./profile";
@@ -28,10 +34,13 @@ function deferred<T>(): {
   });
   return { promise, resolve, reject };
 }
+function sourceList(items: SourceStatus[] = []): SourceListResponse {
+  return { items, inventory: EMPTY_SOURCE_INVENTORY };
+}
 function api(overrides: Partial<WebApi> = {}): WebApi {
   return {
     login: async () => ({ token: "token", label: "session" }),
-    listSources: async () => [],
+    listSources: async () => sourceList(),
     connectSource: async (body) => ({
       availability_refreshed: true,
       recoverable: false,
@@ -250,9 +259,10 @@ describe("durable concern stores", () => {
     const sources = useSourcesStore();
     await sources.load(
       api({
-        listSources: async () => [
-          { provider_id: "demo", account_id: null, state: "connected" },
-        ],
+        listSources: async () =>
+          sourceList([
+            { provider_id: "demo", account_id: null, state: "connected" },
+          ]),
       }),
     );
     expect(sources.phase).toBe("success");

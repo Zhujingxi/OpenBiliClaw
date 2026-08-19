@@ -2,7 +2,12 @@ import { createPinia } from "pinia";
 import { mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { routeParameter } from "../app/routes";
-import type { WebApi } from "../services/api";
+import {
+  EMPTY_SOURCE_INVENTORY,
+  type SourceListResponse,
+  type SourceStatus,
+  type WebApi,
+} from "../services/api";
 import ConnectView from "./ConnectView.vue";
 import SearchView from "./SearchView.vue";
 import ContentView from "./ContentView.vue";
@@ -13,10 +18,17 @@ import RecommendationsView from "./RecommendationsView.vue";
 import SettingsView from "./SettingsView.vue";
 import RuntimeView from "./RuntimeView.vue";
 
+function sourceList(
+  items: SourceStatus[] = [],
+  inventory = EMPTY_SOURCE_INVENTORY,
+): SourceListResponse {
+  return { items, inventory };
+}
+
 function api(overrides: Partial<WebApi> = {}): WebApi {
   return {
     login: async () => ({ token: "token", label: "session" }),
-    listSources: async () => [],
+    listSources: async () => sourceList(),
     connectSource: async (body) => ({
       availability_refreshed: true,
       recoverable: false,
@@ -132,10 +144,11 @@ describe("web view behavior", () => {
       ConnectView,
       api({
         connectSource,
-        listSources: async () => [
-          { provider_id: "demo", account_id: null, state: "disconnected" },
-          { provider_id: "other", account_id: null, state: "disconnected" },
-        ],
+        listSources: async () =>
+          sourceList([
+            { provider_id: "demo", account_id: null, state: "disconnected" },
+            { provider_id: "other", account_id: null, state: "disconnected" },
+          ]),
       }),
     );
     expect(wrapper.text()).not.toContain("Source connected.");
@@ -173,9 +186,10 @@ describe("web view behavior", () => {
     const wrapper = mountView(
       ConnectView,
       api({
-        listSources: async () => [
-          { provider_id: "demo", account_id: null, state: "disconnected" },
-        ],
+        listSources: async () =>
+          sourceList([
+            { provider_id: "demo", account_id: null, state: "disconnected" },
+          ]),
         connectSource: async () =>
           Promise.reject(new Error("temporary failure")),
       }),
@@ -202,9 +216,10 @@ describe("web view behavior", () => {
     const providers = mountView(
       ProvidersView,
       api({
-        listSources: async () => [
-          { provider_id: "demo", account_id: null, state: "disconnected" },
-        ],
+        listSources: async () =>
+          sourceList([
+            { provider_id: "demo", account_id: null, state: "disconnected" },
+          ]),
       }),
     );
     await vi.waitFor(() =>
@@ -248,9 +263,10 @@ describe("web view behavior", () => {
     const wrapper = mountView(
       SearchView,
       api({
-        listSources: async () => [
-          { provider_id: "demo", account_id: null, state: "connected" },
-        ],
+        listSources: async () =>
+          sourceList([
+            { provider_id: "demo", account_id: null, state: "connected" },
+          ]),
         search: async () => ({ items: [preview] }),
       }),
     );
@@ -265,16 +281,17 @@ describe("web view behavior", () => {
 
   it("opens results from fetch-less providers on their canonical URL", async () => {
     const web = api({
-      listSources: async () => [
-        {
-          provider_id: "weibo",
-          account_id: null,
-          state: "connected",
-          method_id: "builtin.anonymous",
-          verification: null,
-          capabilities: ["projection", "search"],
-        },
-      ],
+      listSources: async () =>
+        sourceList([
+          {
+            provider_id: "weibo",
+            account_id: null,
+            state: "connected",
+            method_id: "builtin.anonymous",
+            verification: null,
+            capabilities: ["projection", "search"],
+          },
+        ]),
       search: async () => ({
         items: [
           {
@@ -323,24 +340,25 @@ describe("web view behavior", () => {
 
   it("excludes providers that declare no search capability from the select", async () => {
     const web = api({
-      listSources: async () => [
-        {
-          provider_id: "v2ex",
-          account_id: null,
-          state: "connected",
-          method_id: "builtin.anonymous",
-          verification: null,
-          capabilities: ["creator", "feed", "fetch", "projection"],
-        },
-        {
-          provider_id: "bangumi",
-          account_id: null,
-          state: "connected",
-          method_id: "builtin.anonymous",
-          verification: null,
-          capabilities: ["feed", "fetch", "projection", "search"],
-        },
-      ],
+      listSources: async () =>
+        sourceList([
+          {
+            provider_id: "v2ex",
+            account_id: null,
+            state: "connected",
+            method_id: "builtin.anonymous",
+            verification: null,
+            capabilities: ["creator", "feed", "fetch", "projection"],
+          },
+          {
+            provider_id: "bangumi",
+            account_id: null,
+            state: "connected",
+            method_id: "builtin.anonymous",
+            verification: null,
+            capabilities: ["feed", "fetch", "projection", "search"],
+          },
+        ]),
     });
     const wrapper = mountView(SearchView, web);
     await vi.waitFor(() =>
@@ -353,22 +371,23 @@ describe("web view behavior", () => {
     const search = vi.fn(api().search);
     const web = api({
       search,
-      listSources: async () => [
-        {
-          provider_id: "youtube",
-          account_id: null,
-          state: "connected",
-          method_id: "builtin.anonymous",
-          verification: null,
-        },
-        {
-          provider_id: "bilibili",
-          account_id: null,
-          state: "disconnected",
-          method_id: null,
-          verification: null,
-        },
-      ],
+      listSources: async () =>
+        sourceList([
+          {
+            provider_id: "youtube",
+            account_id: null,
+            state: "connected",
+            method_id: "builtin.anonymous",
+            verification: null,
+          },
+          {
+            provider_id: "bilibili",
+            account_id: null,
+            state: "disconnected",
+            method_id: null,
+            verification: null,
+          },
+        ]),
     });
     const pinia = createPinia();
     const wrapper = mountView(SearchView, web, pinia);
@@ -558,9 +577,10 @@ describe("web view behavior", () => {
     const wrapper = mountView(
       SearchView,
       api({
-        listSources: async () => [
-          { provider_id: "demo", account_id: null, state: "disconnected" },
-        ],
+        listSources: async () =>
+          sourceList([
+            { provider_id: "demo", account_id: null, state: "disconnected" },
+          ]),
       }),
     );
     await vi.waitFor(() =>
@@ -573,11 +593,12 @@ describe("web view behavior", () => {
     const wrapper = mountView(
       ProvidersView,
       api({
-        listSources: async () => [
-          { provider_id: "ready", account_id: null, state: "connected" },
-          { provider_id: "setup", account_id: null, state: "disconnected" },
-          { provider_id: "broken", account_id: null, state: "error" },
-        ],
+        listSources: async () =>
+          sourceList([
+            { provider_id: "ready", account_id: null, state: "connected" },
+            { provider_id: "setup", account_id: null, state: "disconnected" },
+            { provider_id: "broken", account_id: null, state: "error" },
+          ]),
       }),
     );
     await vi.waitFor(() =>
@@ -592,6 +613,67 @@ describe("web view behavior", () => {
       ["status-dot", "status-disconnected"],
       ["status-dot", "status-error"],
     ]);
+    expect(
+      wrapper
+        .findAll(".verification-line > span:first-child")
+        .every((icon) => icon.text() === "○" && !icon.classes("is-verified")),
+    ).toBe(true);
+  });
+
+  it("shows the candidate pool, feed queue, and per-source inventory", async () => {
+    const wrapper = mountView(
+      ProvidersView,
+      api({
+        listSources: async () =>
+          sourceList(
+            [
+              {
+                provider_id: "youtube",
+                account_id: null,
+                state: "connected",
+                method_id: "builtin.anonymous",
+                capabilities: ["feed", "fetch", "search"],
+                verification: {
+                  granted_permissions: [],
+                  safe_account_identity: "Public access",
+                  strength: "live",
+                  verified_at: "2030-01-02T03:04:00Z",
+                },
+              },
+            ],
+            {
+              pool_count: 12,
+              queue_count: 5,
+              archived_count: 3,
+              by_provider: [
+                { key: "youtube", pool_count: 9, queue_count: 4 },
+                { key: "bilibili", pool_count: 3, queue_count: 1 },
+              ],
+              by_content_kind: [
+                { key: "video", pool_count: 10, queue_count: 4 },
+                { key: "article", pool_count: 2, queue_count: 1 },
+              ],
+            },
+          ),
+      }),
+    );
+    await vi.waitFor(() =>
+      expect(wrapper.findAll(".source-metrics dd")[0]?.text()).toBe("1"),
+    );
+    expect(
+      wrapper.findAll(".source-metrics dd").map((item) => item.text()),
+    ).toEqual(["1", "5", "4", "12"]);
+    expect(wrapper.get(".kind-list").text()).toContain(
+      "Video10 pool · 4 queue",
+    );
+    expect(wrapper.get(".queue-provider-list").text()).toContain("youtube4");
+    expect(
+      wrapper.findAll(".provider-facts dd").map((item) => item.text()),
+    ).toEqual(["9", "4", "Live"]);
+    expect(wrapper.get(".verification-line").text()).toContain("Verified");
+    expect(
+      wrapper.get(".verification-line > span:first-child").classes(),
+    ).toContain("is-verified");
   });
 
   it("loads catalog model settings and saves a write-only key", async () => {

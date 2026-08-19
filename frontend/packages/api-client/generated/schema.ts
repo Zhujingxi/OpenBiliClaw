@@ -666,6 +666,55 @@ export interface components {
             value: string;
         };
         /**
+         * CandidateInventoryGroup
+         * @description Active pool and deliverable queue counts for one provider or content kind.
+         */
+        CandidateInventoryGroup: {
+            /** Key */
+            key: string;
+            /**
+             * Pool Count
+             * @default 0
+             */
+            pool_count: number;
+            /**
+             * Queue Count
+             * @default 0
+             */
+            queue_count: number;
+        };
+        /**
+         * CandidateInventorySummary
+         * @description Operational recommendation inventory shown on the content-sources page.
+         */
+        CandidateInventorySummary: {
+            /**
+             * Archived Count
+             * @default 0
+             */
+            archived_count: number;
+            /**
+             * By Content Kind
+             * @default []
+             */
+            by_content_kind: components["schemas"]["CandidateInventoryGroup"][];
+            /**
+             * By Provider
+             * @default []
+             */
+            by_provider: components["schemas"]["CandidateInventoryGroup"][];
+            /**
+             * Pool Count
+             * @default 0
+             */
+            pool_count: number;
+            /**
+             * Queue Count
+             * @default 0
+             */
+            queue_count: number;
+        };
+        /**
          * CanonicalProfile
          * @description The sole durable representation of user understanding.
          */
@@ -873,6 +922,8 @@ export interface components {
         ContentPreview: {
             /** Creator Label */
             creator_label?: string | null;
+            /** Image Url */
+            image_url?: string | null;
             provenance: components["schemas"]["ProjectionProvenance"];
             ref: components["schemas"]["ContentRef"];
             /** Source Timestamp */
@@ -2123,6 +2174,7 @@ export interface components {
         };
         /** SourceListResponse */
         SourceListResponse: {
+            inventory: components["schemas"]["CandidateInventorySummary"];
             /** Items */
             items: components["schemas"]["SourceStatusEntry"][];
         };

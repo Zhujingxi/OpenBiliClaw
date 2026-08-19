@@ -580,6 +580,77 @@
         "title": "AvoidanceClaim",
         "type": "object"
       },
+      "CandidateInventoryGroup": {
+        "additionalProperties": false,
+        "description": "Active pool and deliverable queue counts for one provider or content kind.",
+        "properties": {
+          "key": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Key",
+            "type": "string"
+          },
+          "pool_count": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Pool Count",
+            "type": "integer"
+          },
+          "queue_count": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Queue Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "key"
+        ],
+        "title": "CandidateInventoryGroup",
+        "type": "object"
+      },
+      "CandidateInventorySummary": {
+        "additionalProperties": false,
+        "description": "Operational recommendation inventory shown on the content-sources page.",
+        "properties": {
+          "archived_count": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Archived Count",
+            "type": "integer"
+          },
+          "by_content_kind": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/CandidateInventoryGroup"
+            },
+            "title": "By Content Kind",
+            "type": "array"
+          },
+          "by_provider": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/CandidateInventoryGroup"
+            },
+            "title": "By Provider",
+            "type": "array"
+          },
+          "pool_count": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Pool Count",
+            "type": "integer"
+          },
+          "queue_count": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Queue Count",
+            "type": "integer"
+          }
+        },
+        "title": "CandidateInventorySummary",
+        "type": "object"
+      },
       "CanonicalProfile": {
         "additionalProperties": false,
         "description": "The sole durable representation of user understanding.",
@@ -1134,6 +1205,19 @@
               }
             ],
             "title": "Creator Label"
+          },
+          "image_url": {
+            "anyOf": [
+              {
+                "maxLength": 2048,
+                "pattern": "^https?://[^\\s]+$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Image Url"
           },
           "provenance": {
             "$ref": "#/components/schemas/ProjectionProvenance"
@@ -4501,6 +4585,9 @@
       "SourceListResponse": {
         "additionalProperties": false,
         "properties": {
+          "inventory": {
+            "$ref": "#/components/schemas/CandidateInventorySummary"
+          },
           "items": {
             "items": {
               "$ref": "#/components/schemas/SourceStatusEntry"
@@ -4510,7 +4597,8 @@
           }
         },
         "required": [
-          "items"
+          "items",
+          "inventory"
         ],
         "title": "SourceListResponse",
         "type": "object"
