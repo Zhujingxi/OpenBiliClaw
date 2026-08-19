@@ -1,8 +1,8 @@
 # E2E Testing Plan — Real Stack, Layer by Layer
 
-Status: **active**. Progress is tracked in the table at the bottom; this file is updated at every layer boundary.
+Status: **complete historical execution record**. Every listed layer completed; current test commands and capability truth live in `AGENTS.md` and `docs/modules/`.
 
-The refactor is complete (716 hermetic unit tests, all mocked). Nothing has run against real APIs, real models, or a real database yet. This plan tests the product bottom-up against the real stack: content acquisition first, then layer by layer outward.
+This plan began from a 716-test hermetic baseline and then exercised the product bottom-up against the real stack. Layer descriptions preserve what was observed at each boundary, including gaps that later phases or subsequent work filled; they are not current architecture claims.
 
 ## 0. Credential safety rules (hard constraints)
 
@@ -29,7 +29,7 @@ The legacy `config.toml` / `data-v2/` are never touched.
 
 | Role | What | Integration |
 |---|---|---|
-| LLM | `kimi-for-coding` @ `https://api.kimi.com/coding/v1` | `provider = "openai"` + endpoint override (native PydanticAI path) |
+| LLM | `kimi-for-coding` @ `https://api.kimi.com/coding/v1` | models.dev catalog id `kimi-for-coding`; current catalog declares the Anthropic protocol |
 | Embedding | `BAAI/bge-small-zh-v1.5` via **infinity-emb** (OpenAI-compatible `/v1`) | separate local service; the app never serves models |
 | Platform | Bilibili — anonymous + authenticated (local Chrome session); YouTube — anonymous | product providers; YouTube extraction delegated to yt-dlp |
 
@@ -94,7 +94,7 @@ Implement harness + tests (TDD) → run against real stack → fix bugs → **in
 | L0 environment | completed | f8417db6 | 4 real E2E tests passed; harness and local embedding server verified; see testing log |
 | L1a content anonymous | completed | b369fa08 | 2 real E2E tests passed; real API adapters corrected; see testing log |
 | L1b content authenticated | completed | 3d28bb46 | 2 real E2E tests passed; restart replay and authenticated native adapters corrected; see testing log |
-| L1 YouTube anonymous | completed | pending | 2 real E2E tests passed; yt-dlp search/fetch/creator, identity, page bounds, and typed invalid refs verified |
+| L1 YouTube anonymous | completed | — | 2 real E2E tests passed; yt-dlp search/fetch/creator, identity, page bounds, and typed invalid refs verified |
 | L2 observations | completed | f9799dca | 2 real E2E tests passed; content landing/dedupe, restart durability, feedback idempotency, cursor replay, and authenticated history import verified; see testing log |
 | L3 understanding | completed | 03a05f42 | real E2E covers composed embeddings, profile derivation/persistence/correction, and Kimi Assistant forced-output tools with thinking disabled; durable semantic index deferred to L4 |
 | L4 recommendation | completed | 4356d0c1 | 2 real E2E tests passed; real refill/ranking/reasons/diversity/restart verified; duplicate refill and profile-to-discovery seams fixed; semantic index intentionally not added |

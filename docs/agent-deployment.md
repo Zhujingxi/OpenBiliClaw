@@ -39,11 +39,13 @@ Agent harnesses can perform every user operation without starting the API host t
 
 ## Environment/install options
 
-- `INSTALL_DIR`: checkout target.
-- `BRANCH`: branch to clone/update.
+- `INSTALL_DIR` / PowerShell `InstallDir`: checkout target.
+- `OPENBILICLAW_REPO_URL`: Git repository URL.
+- `OPENBILICLAW_BRANCH` / PowerShell `Branch`: branch to clone/update.
+- `REUSE_FROM` / PowerShell `ReuseFrom`: compatibility/source-discovery hint only; the current installer does not copy credentials or data from it.
 - `HOST` / `PORT` (shell) or `ApiHost` / `Port` (PowerShell): URLs printed in the completion summary. Runtime binding remains owned by `[host]` in `config.toml` or `OPENBILICLAW_API_HOST` / `OPENBILICLAW_API_PORT`.
 - `SKIP_START` / `SkipStart`: retained installer-input compatibility; installers always validate and never start a background service.
-- `FORCE_UPDATE`: permit installer update behavior for an existing checkout.
+- `FORCE_UPDATE=1`: allow the installer to stash local edits, fast-forward an existing checkout, then restore the stash.
 
 ## Troubleshooting
 

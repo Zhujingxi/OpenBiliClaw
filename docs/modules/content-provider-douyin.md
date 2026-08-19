@@ -1,7 +1,7 @@
 # Douyin Content Provider
 
-`content/providers/douyin/` 保留严格的 aweme native schema、canonical video identity、purpose-specific projections 与 presentation descriptor。当前只声明 projection；strict native schema、canonical identity、purpose projections 与 presentation descriptor 保留，供未来可重放 `AccessMethod` 解锁 read capabilities。
+`content/providers/douyin/` retains the strict aweme native schema, canonical video identity, purpose-specific projections, and presentation descriptor. It currently advertises only projection; the strict native schema, canonical identity, purpose projections, and presentation descriptor remain available for a future replayable `AccessMethod` to unlock read capabilities.
 
-Provider manifest 为 `degraded` 且只声明 `projection`。旧 direct-cookie 搜索仍依赖随 session 变化的 msToken/X-Bogus/risk-control 状态，不是可安全重放的匿名或 manual credential 能力；推荐 feed、creator、fetch、个人历史、收藏、写操作、Cookie 登录、browser/extension task dispatch 均不属于当前 provider。未来只有新的可重放 `AccessMethod` 通过独立验证后，才可扩 manifest capability。
+The provider manifest is `degraded` and advertises only `projection`. The old direct-cookie search still depends on session-varying msToken/X-Bogus/risk-control state and is not a safely replayable anonymous or manual-credential capability. Recommendation feeds, creator, fetch, personal history, saved content, writes, Cookie login, and browser/extension task dispatch are outside the current provider. Manifest capabilities may be expanded only after a new replayable `AccessMethod` is independently verified.
 
 The production graph registers this degraded projection-only provider. Deleted direct-cookie/task adapters have no compatibility facade or double-write path.

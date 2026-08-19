@@ -1,7 +1,7 @@
 # Bangumi Content Provider
 
-目标包 `content/providers/bangumi/` 提供匿名 subject search、rank/date feed 与 subject fetch。`HttpxBangumiTransport` 通过 scoped `HttpClientFactory` 调用官方 v0 search/subjects endpoint，映射 type、published date、评分/收藏计数、cover 与 offset cursor，并在 HTTP 边界输出 strict `BangumiPage`；status/network/schema 错误统一安全分类。canonical URL 为 `https://bgm.tv/subject/<id>`，公开读取仅要求 anonymous `READ_PUBLIC`。
+The target package `content/providers/bangumi/` provides anonymous subject search, rank/date feeds, and subject fetch. `HttpxBangumiTransport` uses the scoped `HttpClientFactory` to call the official v0 search/subjects endpoints, maps type, publication date, rating/collection counts, cover, and offset cursor, and emits a strict `BangumiPage` at the HTTP boundary. Status/network/schema errors are uniformly classified into safe categories. The canonical URL is `https://bgm.tv/subject/<id>`, and public reads require only anonymous `READ_PUBLIC` access.
 
-Provider 声明 `builtin.manual` PAT form 与 provider-owned verifier，为后续私有 collection capability 提供可信 credential boundary；当前 manifest 不宣称尚未实现的 private collection/history capability。token 只由 CredentialVault resolver 传给 verifier/client identity callback，不进入 projections/status。
+The provider retains a `builtin.manual` PAT form as a future private-collection boundary, but production Composition currently wires a fail-closed unavailable identity verifier; the supported live path is anonymous public read. The manifest therefore claims no private collection/history capability and no PAT is resolved during public calls.
 
-当前未接入 production Composition，旧 Bangumi source client/producer 暂留至 caller cutover。
+Production Composition registers `BANGUMI_MANIFEST` with `BangumiProvider(BangumiClient(HttpxBangumiTransport()))`. Deleted legacy source clients/producers have no compatibility caller.

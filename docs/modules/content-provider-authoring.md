@@ -1,69 +1,76 @@
 # Content Provider Authoring Contract
 
-本文说明 first-party provider package 使用当前 `content.integration` 边界的最小契约。它描述已落地接口，不承诺 runtime discovery 或 compatibility adapters。
+This document defines the minimum contract for first-party provider packages using the current `content.integration` boundary. It describes implemented interfaces and does not promise runtime discovery or compatibility adapters.
 
 ## Package responsibilities
 
-每个 provider package 自己拥有：
+Each provider package owns:
 
-- provider-native Pydantic payload models 与 schema version；
-- canonical URL normalization；
-- provider API/HTML semantics、pagination cursor interpretation 和错误分类；
-- AccessHandle 到 provider request 的可信适配；
-- 实际支持的 narrow capability implementations；
-- native → purpose-specific projection functions；
-- provider action semantics 与 verification；
-- 可选 observation proposal；
-- 可选 `ProviderManifest.access_recipe`（plugin-assisted access）：normalized DNS domain 列表、typed artifact 列表（`cookie | local_storage | session_storage` + domain + name）、可选同域 HTTPS warmup URL、已落地 access method ID —— frozen 纯数据，禁止 executable payload/header/script。
+- provider-native Pydantic payload models and schema versions;
+- canonical URL normalization;
+- provider API/HTML semantics, pagination cursor interpretation, and error classification;
+- trusted adaptation from `AccessHandle` to provider requests;
+- narrow capability implementations that are actually supported;
+- native → purpose-specific projection functions;
+- provider action semantics and verification;
+- optional observation proposals;
+- optional `ProviderManifest.access_recipe` for plugin-assisted access: normalized DNS domains, typed artifacts (`cookie | local_storage | session_storage` + domain + name), an optional same-domain HTTPS warmup URL, and an implemented access method ID. This is frozen data; executable payloads, headers, and scripts are prohibited.
 
-Content Integration 只拥有共享 identity、capability contracts、manifest validation、registry 和 tool budgeting。Provider 不得从 registry 发现/调用其他 providers，也不得 import Understanding、Recommendation、Assistant 或 Hosts。
+Content Integration owns only shared identity, capability contracts, manifest validation, the registry, and tool budgeting. A provider must not discover or call other providers through the registry, or import Understanding, Recommendation, Assistant, or Hosts.
 
 ## Minimal registration
 
-1. 使用稳定 lowercase `ProviderId` 和 `ContentKind`。
-2. 为每种 persisted native payload 声明 `NativeSchemaDescriptor(content_kind, schema_version)`；schema 变化时显式递增版本。
-3. 将外部 JSON/HTML 先转换为 provider-owned Pydantic model，再放入 `NativeContent.payload`。禁止 raw mapping。持久化记录恢复时，provider 需按 `schema_version` 重新校验自己的 payload model 后再构造 `NativeContent` —— envelope 自身不接受 raw dict。
-4. `ProviderManifest.capabilities` 只声明真实实现的方法；Composition 以 `ContentProviderRegistry.register()` 显式注册。
-5. 仅在 target access method、表单与 verifier 已真实落地且 material 能泛化转换时声明 `access_recipe`。Artifact identity 必须唯一且引用已声明 domain；warmup URL 禁止 userinfo/fragment，必须是已声明域的 HTTPS URL。不得把 provider-specific signing、fetch logic、refresh schedule 或 credential value 放入 manifest；新增 recipe 不得要求 extension 发布 provider-specific code。
-6. Provider tests 必须调用：
+1. Use stable lowercase `ProviderId` and `ContentKind` values.
+2. Declare `NativeSchemaDescriptor(content_kind, schema_version)` for every persisted native payload; increment the version explicitly when the schema changes.
+3. Convert external JSON/HTML to a provider-owned Pydantic model before placing it in `NativeContent.payload`. Raw mappings are prohibited. When restoring persisted records, the provider must revalidate its payload model against `schema_version` before constructing `NativeContent`; the envelope itself does not accept raw dictionaries.
+4. `ProviderManifest.capabilities` advertises only methods that are actually implemented. Composition registers them explicitly with `ContentProviderRegistry.register()`.
+5. Declare `access_recipe` only when the target access method, form, and verifier are implemented and the material can be converted generically. Artifact identities must be unique and reference declared domains. A warmup URL must be HTTPS on a declared domain and contain no userinfo or fragment. Do not put provider-specific signing, fetch logic, refresh schedules, or credential values in a manifest; a new recipe must not require provider-specific extension code.
+6. Provider tests must call:
 
 ```python
 assert validate_provider_contract(manifest, provider) == ()
 ```
 
-注册会拒绝 duplicate provider ID、重复 schema/action ID 与 advertised capability mismatch。
+Registration rejects duplicate provider IDs, duplicate schema/action IDs, and advertised-capability mismatches.
 
 ## Production transport status
 
-| Provider | Enabled access | Capabilities | Live E2E layer |
-|----------|----------------|--------------|----------------|
-| Bilibili | `builtin.anonymous` public reads; `builtin.manual`/plugin cookie access (`SESSDATA` + `bili_jct`) | search/fetch/related/creator; anonymous `popular` feed; credential-only `rcmd` personalized feed plus history/saved/action. `rcmd` calls `/x/web-interface/wbi/index/top/feed/rcmd` with plain verified cookies and is declared `platform-personalized`, auth-required. History cursors retain both upstream `max` and `view_at`; history/save previews use interaction timestamps when supplied so evidence occurrence is not confused with publication | `l1a` anonymous and `l1b` authenticated; personalized-feed and ingestion coverage is hermetic |
-| Bangumi | `builtin.anonymous` public read; optional PAT form retained | search, feed, fetch, projection via official `api.bgm.tv` v0 API | `l1bangumi` (anonymous search → detail) |
-| V2EX | `builtin.anonymous` public read; optional PAT form retained | feed, fetch, creator, projection via official `www.v2ex.com/api` endpoints; search not advertised because V2EX has no official full-text search API | `l1v2ex` (anonymous hot feed → detail) |
-| Linux.do | `builtin.anonymous` public read; optional cookie form retained | search, fetch, projection via public Discourse JSON (`/search.json`, `/t/<id>.json`) — **implemented but not enabled**: Cloudflare challenges all content endpoints for non-browser clients (2026-08-14) | none (upstream-blocked; layer deferred until a viable path exists) |
-| Weibo | `builtin.anonymous` only; generated visitor `SUB` stays in memory and user cookies are never accepted | search, projection via `m.weibo.cn` visitor flow (`100103type=64` container; soft-block retries with fresh visitor cookies); fetch not advertised — anonymous detail endpoints are login-walled (2026-08); canonical identity is numeric mblog id + `weibo.com/status/<bid>` | `l1weibo` (anonymous search identity + preview completeness) |
+| Provider | Production wiring | Manifest capabilities | Live verification |
+|----------|-------------------|-----------------------|------------------|
+| Bilibili | anonymous public reads; verified manual/plugin cookies (`SESSDATA` + `bili_jct`) | Search, Fetch, Related, Creator, Projection, anonymous `popular`, credential-only `rcmd`, History, Saved, Observation, Action | `l1a` anonymous and `l1b` authenticated; personalized-feed/ingestion coverage is hermetic |
+| YouTube | anonymous `yt-dlp` transport; no API key or cookie | Search, Fetch, Creator, Projection; no generic Feed | `l1youtube` |
+| Bangumi | anonymous HTTP transport; PAT form retained but its production identity verifier is fail-closed unavailable | Search, Feed (`rank` channel), Fetch, Projection | `l1bangumi` |
+| V2EX | anonymous HTTP transport; PAT form retained but its production identity verifier is fail-closed unavailable | Feed (`hot` channel), Fetch, Creator, Projection; no Search | `l1v2ex` |
+| Hacker News | anonymous official Firebase transport | Feed (`top` channel), Fetch, Projection; no Search | hermetic transport/provider coverage; no live layer |
+| Weibo | anonymous visitor `SUB` generated in memory; user cookies are not accepted | Search, Projection; no Fetch | `l1weibo` |
+| Linux.do | anonymous Discourse JSON transport; manual cookie verifier is unavailable | Search, Fetch, Projection. The package is enabled by the example config, but Cloudflare may reject non-browser clients | no live layer; upstream-blocked on the verified host |
+| Reddit | manual form registered; production verifier and HTTP transport unavailable | Search, Fetch, Projection contracts register, then live calls fail closed | hermetic contract coverage only |
+| X | manual form registered; production verifier and HTTP transport unavailable | Search, Fetch, Projection contracts register, then live calls fail closed | hermetic contract coverage only |
+| Zhihu | manual form registered; production verifier and HTTP transport unavailable | Search, Fetch, Projection contracts register, then live calls fail closed | hermetic contract coverage only |
+| RedNote | no live read path or production transport | Projection only; manifest availability is `degraded` | hermetic schema/projection coverage only |
+| Douyin | no live read path or production transport | Projection only; manifest availability is `degraded` | hermetic schema/projection coverage only |
 
 ## Capability rules
 
-- 实现最小 protocol，不建立 provider god interface。
-- 提供 recommendation/feed capability 时，manifest 必须为每个 `feed_id` 声明 bias class（`platform-popularity | platform-personalized | subscription-graph | editorial`）与 auth requirement；不得 silently 混同 anonymous 与 credentialed feed。**已落地并由 `ProviderManifest` 强制校验**：FEED 无 channel、重复 `feed_id` 均在启动注册前失败。
-- Projection 若会产出 `CardData.image_url`，manifest 必须仅声明真实 CDN DNS allowlist `image_hosts`（精确 hostname；需要覆盖动态前缀时才声明 parent domain），以及该 CDN 确实要求的静态 `image_headers`（纯数据，例如 Bilibili Referer）。禁止 scheme/path、IP literal、尾点、非规范大小写、可执行 header 逻辑或由 payload 扩大 allowlist。Host 只代理 HTTPS `image/*`，不会代理 video/audio。
-- `ProviderCursor.value` 完全 opaque；只有创建它的 provider 可以解析。Credentialed evidence ingestion may follow it only within a hard two-page bound.
-- read methods 接收 scoped `AccessHandle`，不得扩大 provider/account/permission scope。
-- `SearchQuery` / `FeedQuery` / `CreatorQuery` / `PageRequest` 的 limit 是硬上限。
-- provider-specific failures 只能在 integration boundary 归一为：unavailable capability、invalid content ref、access denied、rate limited、provider unavailable；不得携带 response body、cookie 或 token。
-- `ActionCapability` 只执行已经由 Application 确认的 `ActionRequest`，请求必须包含 idempotency key 与 confirmation metadata。
+- Implement the smallest protocol; do not build a provider god interface.
+- When providing a recommendation/feed capability, the manifest must declare each `feed_id`'s bias class (`platform-popularity | platform-personalized | subscription-graph | editorial`) and authentication requirement. Anonymous and credentialed feeds must not be silently conflated. **Implemented and enforced by `ProviderManifest`**: FEED without a channel and duplicate `feed_id` values fail before startup registration.
+- If a projection can produce `CardData.image_url`, the manifest must declare only the real CDN DNS allowlist in `image_hosts` (exact hostnames; declare a parent domain only when dynamic prefixes require it) and only static `image_headers` truly required by that CDN (pure data, such as Bilibili Referer). Schemes/paths, IP literals, trailing dots, non-canonical case, executable header logic, or payload-expanded allowlists are prohibited. The host proxies only HTTPS `image/*`, never video/audio.
+- `ProviderCursor.value` is fully opaque; only the provider that created it may parse it. Credentialed evidence ingestion may follow it only within a hard two-page bound.
+- Read methods accept a scoped `AccessHandle` and must not expand provider/account/permission scope.
+- Limits in `SearchQuery`, `FeedQuery`, `CreatorQuery`, and `PageRequest` are hard ceilings.
+- Provider-specific failures may be normalized at the integration boundary only to unavailable capability, invalid content ref, access denied, rate limited, or provider unavailable; they must not contain response bodies, cookies, or tokens.
+- `ActionCapability` executes only an `ActionRequest` already confirmed by Application. The request must include an idempotency key and confirmation metadata.
 
 ## Projection rules
 
-Provider 根据调用目的分别生成：
+Providers generate projections according to purpose:
 
-- `ContentPreview`：小型读取/tool result；
-- `RecommendationCandidate`：只含 discovery provenance，不含 presentation fields；
-- `SearchDocument`：只含可索引文本，不含 badge/image 等 presentation fields；
-- `CardData`：presentation data，不含 recommendation reason/score。
+- `ContentPreview`: small read/tool result;
+- `RecommendationCandidate`: discovery provenance only, with no presentation fields;
+- `SearchDocument`: indexable text only, with no badge/image presentation fields;
+- `CardData`: presentation data, with no recommendation reason/score.
 
-每个 projection 必须带 aware `source_timestamp` 和 `ProjectionProvenance`；provenance ref 必须与 projection ref 一致。
+Every projection must carry an aware `source_timestamp` and `ProjectionProvenance`; the provenance ref must match the projection ref.
 
 ## Native tool rules
 
@@ -76,11 +83,11 @@ Provider capabilities are invoked by Application Workflows and Assistant workflo
 
 ## Required provider tests
 
-- manifest/implementation contract validation；
-- each native schema malformed/unknown JSON rejection；
-- schema-version and canonical-reference stability；
-- cursor/provider scope and page limit；
-- projection provenance/timestamp and API serialization；
-- malformed, missing, expired and insufficient-scope access cases；
-- bounded Assistant workflow result and secret-canary inspection；
-- normalized failures contain no raw provider body or credential。
+- manifest/implementation contract validation;
+- rejection of malformed/unknown JSON for each native schema;
+- schema-version and canonical-reference stability;
+- cursor/provider scope and page limits;
+- projection provenance/timestamp and API serialization;
+- malformed, missing, expired, and insufficient-scope access cases;
+- bounded Assistant workflow results and secret-canary inspection;
+- normalized failures contain no raw provider body or credential.

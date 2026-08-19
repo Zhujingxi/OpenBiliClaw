@@ -26,10 +26,10 @@ Open http://127.0.0.1:8420. Docker uses the same `openbiliclaw serve` entrypoint
 ## Current features
 
 - Explicit anonymous/manual/plugin-assisted Provider Access; generic recipe capture converges on the verifier/vault and reconnects after restart.
-- Eleven first-party content provider packages behind validated capabilities.
+- Twelve first-party content provider packages behind validated capabilities.
 - Immutable observations, canonical understanding, and one supervised proactive recommendation pipeline.
 - Optional Assistant/model routing plus a durable semantic index and adjacent recall through one unified PydanticAI-native provider path; the app does not serve models.
-- Shared Vue 3/TypeScript presentation across desktop, mobile, and extension.
+- Shared Vue 3/TypeScript presentation across responsive desktop/mobile Web and the extension.
 - Atomic runtime reload and backup-required destructive database migrations.
 
 See [current architecture](docs/architecture.md), [current specification](docs/spec.md), [configuration](docs/modules/config.md), and [changelog](docs/changelog.md).

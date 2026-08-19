@@ -47,4 +47,4 @@ It does not upload browsing history, arbitrary page content, or behavior. When t
 
 ### Where is the current behavior documented?
 
-Start with [Architecture](architecture.md), [Specification](spec.md), and the [module index](index.md). Historical plans and pre-cutover guides are intentionally not retained.
+Start with [Architecture](architecture.md), [Specification](spec.md), and the [module index](index.md). Completed feature plans and superseded pre-cutover guides are removed after current behavior is captured in maintained docs; the E2E plan/log remain as clearly marked historical verification records.

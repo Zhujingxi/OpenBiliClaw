@@ -1,20 +1,20 @@
 # Observation Ingress
 
-`openbiliclaw.observations` 是用户行为证据的唯一 ingress 边界，并由 production composition 接入 Application 与 Understanding。它拥有 immutable typed observation vocabulary、shared provenance/trust validation、idempotent SQLite persistence、cursor replay 和只携带 committed IDs 的 post-commit notification；它不更新用户画像，也不拥有 analyzer checkpoint。
+`openbiliclaw.observations` is the sole ingress boundary for user-behavior evidence and is wired by production composition into Application and Understanding. It owns an immutable typed observation vocabulary, shared provenance/trust validation, idempotent SQLite persistence, cursor replay, and post-commit notifications containing only committed IDs. It does not update the user profile or own analyzer checkpoints.
 
-## 已落地
+## Implemented
 
-- 14 个 Pydantic discriminated observation variants：recommendation shown/opened/liked/disliked/saved/dismissed、host content opened/saved、assistant feedback/preference、deterministic profile edit、provider-history import，以及 credential/Takeout 共用的 `external_history_view` / `external_save`；schema version 固定为 1。
-- 每条记录包含稳定 observation ID、producer idempotency key、occurred/received timestamp、可选 account/content ref、typed provenance/trust 和 variant-specific payload；不存在 `event_type + dict` fallback。
-- 验证 producer allowlist、event allowlist、source/event pairing、clock skew、required content、account identity 和 trust。未认证 host producer 只能 low-trust 且不得声明 account identity。
-- 单批最多 100 条、单条序列化最多 64KB；逐条 validation rejection 与 duplicate acceptance 分开返回。所有 accepted rows 在一个 SQLite transaction 内提交；rollback 不发布通知。
+- 14 Pydantic discriminated observation variants: recommendation shown/opened/liked/disliked/saved/dismissed, host content opened/saved, Assistant feedback/preference, deterministic profile edit, provider-history import, and shared `external_history_view` / `external_save` for credential and Takeout data; schema version is fixed at 1.
+- Each record contains a stable observation ID, producer idempotency key, occurred/received timestamps, optional account/content refs, typed provenance/trust, and a variant-specific payload; there is no `event_type + dict` fallback.
+- Validation covers the producer allowlist, event allowlist, source/event pairing, clock skew, required content, account identity, and trust. An unauthenticated host producer is limited to low trust and cannot claim account identity.
+- A batch contains at most 100 records and each serialized record at most 64 KB. Per-record validation rejection and duplicate acceptance are returned separately. All accepted rows commit in one SQLite transaction; rollback publishes no notification.
 - Credentialed `History`/`Saved` pages and verified YouTube Takeout watch-history exports normalize to the same bounded external-content payload (title, optional creator, provider event ID). They are authenticated high-tier behavioral observations, so Understanding projects them at `0.6`, never statement-level `1.0`; identity is deterministic by provider content ID + event type and retries deduplicate.
-- SQLite uniqueness `(producer, idempotency_key)`，按 insertion cursor deterministic replay。带 `ContentRef` 的 observation 会以 `(provider, external_id)` 幂等写入 `content_references`；observation 不携带 projection body，因此不写 `content_cache`。Understanding 将自行持有 processing checkpoint。Committed-ID publication 仅是 advisory latency hint；cursor reads 才是权威恢复路径，commit 后的 publish failure 不在 ingress 内重试。
-- Future `ObservationProvider` 使用 Core `ObservationProviderRegistration`。未来浏览器插件必须通过独立的 signed/device-authenticated producer 提交相同 shared observation schema；browser-specific payload、cookie、cross-site tracker、browser session 与 managed browser 均不属于本模块。
+- SQLite uniqueness is `(producer, idempotency_key)`, with deterministic replay by insertion cursor. An observation with a `ContentRef` idempotently writes `(provider, external_id)` to `content_references`. Observations carry no projection body and therefore do not write `content_cache`. Understanding owns its processing checkpoint. Committed-ID publication is only an advisory latency hint; cursor reads are authoritative for recovery, and post-commit publish failures are not retried within ingress.
+- Future `ObservationProvider` implementations use Core `ObservationProviderRegistration`. A future browser extension must submit the same shared observation schema through a separate signed/device-authenticated producer. Browser-specific payloads, cookies, cross-site trackers, browser sessions, and managed browsers are outside this module.
 
-## 安全边界
+## Security boundary
 
-自由文本有严格长度限制，并拒绝 HTML、authorization/cookie canary 与 prompt-instruction 文本。通知只发布 observation IDs；完整 payload 只从 repository 读取。模块不得导入 Understanding、Recommendation、Assistant 或 Hosts。
+Free text has strict length limits and rejects HTML, authorization/cookie canaries, and prompt-instruction text. Notifications publish only observation IDs; full payloads are read only from the repository. This module must not import Understanding, Recommendation, Assistant, or Hosts.
 
 ## Composition
 

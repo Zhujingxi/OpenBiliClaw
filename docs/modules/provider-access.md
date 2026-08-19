@@ -1,23 +1,23 @@
 # Provider Access
 
-## 当前边界
+## Current boundary
 
-`src/openbiliclaw/access/` 是生产组合中匿名与手工凭据接入的 typed vertical slice：
+`src/openbiliclaw/access/` is the typed vertical slice for anonymous and manual-credential access in production composition:
 
-- frozen `AccessRequest`、`AccessMethodDescriptor`、provider/account/permission/method value types；
-- discriminated `AnonymousAccessHandle | CredentialAccessHandle`，handle 只含 provider/account scope、权限和 opaque `cred_<32 hex>` reference；
-- `AccessStatus` 六态与 `VerificationResult`，失败只允许封闭的 sanitized reason，不承载 provider response body；
-- `AccessMethod` protocol、typed registry 与 Core `AccessMethodRegistration` metadata；
-- broker 只从 caller-supported、用户 allowed、provider-supported 且权限足够的方法中按请求顺序选择；
-- anonymous method 只允许 `read_public`，live probe 会把限流、地域限制和网络不可用映射成安全状态，绝不虚构 account identity；
-- provider-owned `ConnectionForm`、字段 shape/长度验证与 `ManualProviderSpec`，中央 Access 模块没有 provider switch；
-- manual/plugin submission 校验后直接写 `CredentialVault` 的 provider/account-scoped opaque slot，只留下 opaque handle；replace 复用 reference 并增加 revision，disconnect 删除 vault secret；
-- `AccessService` 提供 connect/status/replace/disconnect/rehydrate，成功验证缓存同时受 5 分钟默认 TTL 和 provider expiry 限制，credential replacement 必定重新验证；Composition startup 会幂等恢复并重新验证 vault 中的默认单账户连接，重启不再丢失连接；
-- telemetry 只记录 operation/provider/outcome，异常类型和状态均不含 submission value。
+- frozen `AccessRequest`, `AccessMethodDescriptor`, and provider/account/permission/method value types;
+- discriminated `AnonymousAccessHandle | CredentialAccessHandle`; a handle contains only provider/account scope, permissions, and an opaque `cred_<32 hex>` reference;
+- six-state `AccessStatus` and `VerificationResult`; failures allow only closed, sanitized reasons and never carry provider response bodies;
+- the `AccessMethod` protocol, typed registry, and Core `AccessMethodRegistration` metadata;
+- the broker selects in request order only from caller-supported, user-allowed, provider-supported methods with sufficient permissions;
+- anonymous methods permit only `read_public`; live probes map rate limits, regional restrictions, and network unavailability to safe states and never invent account identity;
+- provider-owned `ConnectionForm`, field shape/length validation, and `ManualProviderSpec`; the central Access module has no provider switch;
+- after validating manual/plugin submissions, the service writes directly to a provider/account-scoped opaque slot in `CredentialVault` and retains only the opaque handle. Replace reuses the reference and increments its revision; disconnect deletes the vault secret;
+- `AccessService` provides connect/status/replace/disconnect/rehydrate. Successful-verification caching is bounded by both a five-minute default TTL and provider expiry, and credential replacement always re-verifies. Composition startup idempotently restores and re-verifies the default single-account connections in the vault, so connections survive restart;
+- telemetry records only operation/provider/outcome; exception types and states contain no submitted value.
 
-`access/` 只依赖 Core extension metadata、Infrastructure CredentialVault/telemetry 与标准库/Pydantic。AST gate 禁止它导入 product/host/provider 模块，并禁止 model-visible `ai/`/未来 `assistant/` 导入 credential package。
+`access/` depends only on Core extension metadata, Infrastructure CredentialVault/telemetry, and the standard library/Pydantic. An AST gate prohibits imports from product/host/provider modules and prohibits model-visible `ai/` or future `assistant/` code from importing the credential package.
 
-## 公开 Python 契约
+## Public Python contract
 
 ```text
 AccessMethodDescriptor
@@ -33,20 +33,20 @@ ManualAccessMethod / ManualProviderSpec / CredentialVerifier
 AccessService.connect | status | replace | disconnect
 ```
 
-Provider auth adapter 贡献自己的 `ConnectionForm`、capabilities 与 async `CredentialVerifier`；verifier 只在 vault `resolve_async()` callback 内取得短暂只读 `memoryview`，完成或取消后 buffer 立即清零，不阻塞 event loop。原始 secret submission 不是 Pydantic model、没有 serialization API，secret field 的 ephemeral `ValidatedSubmission.__repr__` 固定 redacted。
+A provider auth adapter contributes its own `ConnectionForm`, capabilities, and async `CredentialVerifier`. The verifier receives a temporary read-only `memoryview` only inside the vault `resolve_async()` callback; the buffer is zeroed immediately after completion or cancellation without blocking the event loop. Raw secret submissions are not Pydantic models and have no serialization API; ephemeral `ValidatedSubmission.__repr__` for secret fields is always redacted.
 
-## 状态语义
+## State semantics
 
-| 状态 | 含义 |
+| State | Meaning |
 |---|---|
-| `disconnected` | 无 handle |
-| `unverified` | credential 无效或尚无可信成功证据 |
-| `connected` | 权限满足、证据仍在 TTL/expiry 内 |
-| `degraded` | scope 不足、rate limit、provider response contract 无效或仅 session-mode 能力超出当前范围 |
-| `expired` | provider 明确过期或 expiry 已到 |
-| `unavailable` | geo block / network unavailable |
+| `disconnected` | No handle |
+| `unverified` | Credential is invalid or has no trusted evidence of success yet |
+| `connected` | Permissions are sufficient and evidence remains within TTL/expiry |
+| `degraded` | Insufficient scope, rate limit, invalid provider response contract, or session-only capability outside the current scope |
+| `expired` | Provider explicitly reported expiry or expiry time has passed |
+| `unavailable` | Geo-blocked or network unavailable |
 
-Anonymous handle 不能带 account ID，也不能含 private-read/write permission。成功 verification 的 `granted_permissions` 少于 request 时，AccessService fail-closed 投影为 `degraded/insufficient_scope`。
+An anonymous handle cannot carry an account ID or private-read/write permission. If successful verification grants fewer permissions than requested, AccessService fails closed to `degraded/insufficient_scope`.
 
 ## Plugin-assisted access (landed)
 

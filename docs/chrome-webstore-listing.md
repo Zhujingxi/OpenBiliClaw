@@ -24,7 +24,7 @@ It connects only to the loopback OpenBiliClaw backend address configured by the 
 
 For plugin-assisted provider access, a code-shipped backend recipe declares the exact provider domains and Cookie or site-storage names required. The extension requests each origin from the user, reads only those declared values after approval, and sends them only to the configured loopback backend with the extension token. It does not collect browsing history or arbitrary page content, load remote provider code, or transfer credential material to OpenBiliClaw-operated or other third-party services.
 
-Supported backend content providers include B站, 小红书, 抖音, YouTube, X, 知乎, Reddit, Linux.do, Bangumi, and V2EX. Individual capabilities depend on each provider's current manifest; degraded providers fail closed rather than emulating unsupported access.
+The backend registers twelve first-party provider packages: B站, YouTube, Bangumi, V2EX, Hacker News, 微博, Linux.do, Reddit, X, 知乎, 小红书, and 抖音. Individual capabilities depend on each provider's current manifest and production transport; projection-only or transport-unavailable providers fail closed rather than emulating unsupported access.
 
 User data remains in the configured local backend data directory. OpenBiliClaw does not send it to a developer-operated analytics service. A user-configured external model service receives only the bounded content needed for that model request.
 

@@ -1,49 +1,46 @@
-# 贡献指南
+# Contributing Guide
 
-感谢你有兴趣为 OpenBiliClaw 做贡献！
+Thank you for your interest in contributing to OpenBiliClaw!
 
-## 开发环境搭建
+## Development Setup
 
 ```bash
-# 克隆项目
+# Clone the project
 git clone https://github.com/whiteguo233/OpenBiliClaw.git
 cd OpenBiliClaw
 
-# 推荐：使用 uv
+# Recommended: use uv
 uv sync
 
-# 或使用 pip
+# Or use pip
 python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
-## 代码规范
+## Code Standards
 
-- 使用 **ruff** 进行代码格式化和 lint
-- 使用 **mypy** 进行类型检查
-- 遵循 PEP 8 命名规范
-- 所有公开 API 需要 docstring
+- Use **ruff** for formatting and linting.
+- Use **mypy** for type checking.
+- Follow PEP 8 naming conventions.
+- Add docstrings to all public APIs.
 
 ```bash
 ruff format src/ tests/ scripts/
 ruff check src/ tests/ scripts/
-mypy src/ tests/
+mypy src/
 ```
 
-## 测试
+## Testing
 
 ```bash
-# 运行所有测试
-pytest
-
-# 运行 branch coverage
-pytest --cov=openbiliclaw --cov-branch
+# Run the offline hermetic suite with branch coverage
+ALLOW_MODEL_REQUESTS=False pytest --cov=openbiliclaw --cov-branch
 ```
 
-## 提交规范
+## Commit Convention
 
-使用 [Conventional Commits](https://www.conventionalcommits.org/):
+Use [Conventional Commits](https://www.conventionalcommits.org/):
 
 ```
 feat: add provider capability
@@ -53,7 +50,7 @@ refactor: simplify composition lifecycle
 test: add understanding policy coverage
 ```
 
-## 浏览器插件开发
+## Browser Extension Development
 
 ```bash
 npm --prefix frontend ci
@@ -64,36 +61,36 @@ npm --prefix frontend run test
 npm --prefix frontend run build
 ```
 
-## Skill 开发
+## Skill Development
 
-Skill 定义为 `skills/<skill-name>/SKILL.md` 格式的 Markdown 文件。只保留与当前生产能力相符的 skill；引用已删除命令、模块或历史文档的 skill 必须随 cutover 删除或重写。
+Skills are Markdown files in the form `skills/<skill-name>/SKILL.md`. Keep only skills that match current production capabilities; skills that reference deleted commands, modules, or historical documentation must be deleted or rewritten during the cutover.
 
-仓库 `skills/` 存放当前 workspace skills；`.claude/skills/` 存放 Claude Code 项目技能，例如 release 发布 runbook 与 writing-specs 技能。
+The repository's `skills/` directory contains current workspace skills. `.claude/skills/` contains Claude Code project skills, such as the release runbook and writing-specs skill.
 
-Skill 文件描述该 Skill 的能力边界和当前工作流。参见 `skills/` 目录下的内置示例。
+A skill file describes that skill's capability boundary and current workflow. See the built-in examples under `skills/`.
 
-## 文档更新清单
+## Documentation Update Checklist
 
-完成功能开发后，合入前请检查以下文档是否需要更新：
+After completing a feature and before merging, check whether these documents need updates:
 
-- [ ] `docs/modules/<模块>.md` — 更新"已实现功能"和"公开 API"
-- [ ] `docs/changelog.md` — 追加变更记录
-- [ ] `docs/modules/cli.md` — 如新增/修改了 CLI 命令
-- [ ] `docs/modules/config.md` — 如新增了配置项
-- [ ] `docs/architecture.md` — 如涉及跨模块交互变化
-- [ ] `docs/index.md` — 如新增模块文档或状态变化
+- [ ] `docs/modules/<module>.md` — update "Implemented Features" and "Public API"
+- [ ] `docs/changelog.md` — append a change entry
+- [ ] `docs/modules/cli.md` — when adding or changing CLI commands
+- [ ] `docs/modules/config.md` — when adding configuration fields
+- [ ] `docs/architecture.md` — when cross-module interactions change
+- [ ] `docs/index.md` — when adding module documentation or changing status
 
-详见 [AGENTS.md](../AGENTS.md) 中的"文档更新要求"段落。
+See "Documentation Update Requirements" in [AGENTS.md](../AGENTS.md) for details.
 
-## 致谢
+## Acknowledgments
 
-主干上的部分功能源自社区贡献者的实现，在此致谢：
+Some features on the main branch originated in community contributions:
 
-- **多模态视觉推荐管线** — [@wuwafly3](https://github.com/wuwafly3) 先在 [#100](https://github.com/whiteguo233/OpenBiliClaw/pull/100) 中贡献 DashScope 多模态 embedding provider 与封面 image-only 向量能力，随后在 [#135](https://github.com/whiteguo233/OpenBiliClaw/pull/135) 中实现用户视觉画像（P1）、B 站弹幕语义（P2）、视频关键帧（P3）及跨平台视觉加权管线；主干在其实现上完成契约加固、失败重试、配置界面和真实环境验收。
-- **远程扩展认证与可选 TLS 入口** — [@RayeLouis](https://github.com/RayeLouis) 在 [#132](https://github.com/whiteguo233/OpenBiliClaw/pull/132) 中修复扩展以服务端认证判决为唯一权威，并在 [#136](https://github.com/whiteguo233/OpenBiliClaw/pull/136) 中实现默认关闭的 TLS 反代初版；主干在其方案上补齐安全、配置、Docker、真实 HTTPS / WebSocket 与扩展二维码链路加固。
-- **全端品牌图标** — [@xiongguixg](https://github.com/xiongguixg) 在 [issue #127](https://github.com/whiteguo233/OpenBiliClaw/issues/127) 中主动提供了移动端图标方案；v0.3.184 在此基础上统一了浏览器扩展、PWA、桌面与移动 Web、官网、安装包及系统托盘的品牌图标。
-- **探针「暂时忽略」搁置状态** — [@15515151](https://github.com/15515151) 在 [#82](https://github.com/whiteguo233/OpenBiliClaw/pull/82) 中提出并实现了中立/忽略态。主干实现（`83654613`）在其基础上改写为跨会话持久化的状态机，PR 因实现路径差异未直接合入，但方案与代码均来自该贡献。
+- **Multimodal visual recommendation pipeline** — [@wuwafly3](https://github.com/wuwafly3) first contributed the DashScope multimodal embedding provider and cover image-only vectors in [#100](https://github.com/whiteguo233/OpenBiliClaw/pull/100), then implemented user visual profiles (P1), Bilibili danmaku semantics (P2), video keyframes (P3), and the cross-platform visually weighted pipeline in [#135](https://github.com/whiteguo233/OpenBiliClaw/pull/135). Main subsequently hardened its contracts, retries, configuration UI, and real-environment acceptance.
+- **Remote extension authentication and optional TLS ingress** — [@RayeLouis](https://github.com/RayeLouis) fixed the extension to treat the server authentication decision as authoritative in [#132](https://github.com/whiteguo233/OpenBiliClaw/pull/132), then implemented the initial opt-in TLS proxy in [#136](https://github.com/whiteguo233/OpenBiliClaw/pull/136). Main subsequently completed security, configuration, Docker, real HTTPS/WebSocket, and extension QR-code hardening.
+- **Brand icons across all clients** — [@xiongguixg](https://github.com/xiongguixg) proactively proposed a mobile icon design in [issue #127](https://github.com/whiteguo233/OpenBiliClaw/issues/127). Building on that proposal, v0.3.184 unified brand icons across the browser extension, PWA, desktop and mobile web, website, installers, and system tray.
+- **Probe "Ignore for now" state** — [@15515151](https://github.com/15515151) proposed and implemented the neutral/ignored state in [#82](https://github.com/whiteguo233/OpenBiliClaw/pull/82). The main implementation (`83654613`) rewrote it as a cross-session persistent state machine. The PR was not merged directly because the implementation path differed, but both the design and code originated in that contribution.
 
-## Target frontend and extension build
+## Target Frontend and Extension Build
 
 Web and extension source share the strict npm workspace in `frontend/`. Run `npm ci` and the format/lint/typecheck/test/build gates there. Browser release archives are created from generated Vite artifacts with `python scripts/extension_release.py package [--firefox] --no-build`; do not add handwritten `.js`, `.mjs`, or `.cjs` sources.

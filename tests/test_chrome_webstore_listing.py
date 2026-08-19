@@ -12,7 +12,7 @@ EXPECTED = [
 ]
 
 
-def test_store_listing_names_all_supported_platforms_and_local_backend() -> None:
+def test_store_listing_names_all_first_party_providers_and_local_backend() -> None:
     text = LISTING.read_text(encoding="utf-8")
     for label in (
         "B站",
@@ -22,8 +22,11 @@ def test_store_listing_names_all_supported_platforms_and_local_backend() -> None
         "X",
         "知乎",
         "Reddit",
+        "Linux.do",
         "Bangumi",
         "V2EX",
+        "Hacker News",
+        "微博",
     ):
         assert label in text
     assert "local backend" in text

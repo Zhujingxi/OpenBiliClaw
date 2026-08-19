@@ -1,23 +1,23 @@
 # User Understanding
 
-`src/openbiliclaw/understanding/` 是 canonical user profile 的唯一 owner，并由 production composition 构造。
+`src/openbiliclaw/understanding/` is the sole owner of the canonical user profile and is constructed by production composition.
 
-## 已落地
+## Implemented
 
-- frozen typed canonical profile：stable/emerging interests、avoidances、content/style/creator/language/provider preferences 与 insight；每个 claim 具有 deterministic ID、confidence、freshness、evidence links 与 lifecycle；
-- 显式 user override，优先级高于 inference，remove/set 均产生稳定 audit identity；
-- 四种稳定 analyzer identity（preference、avoidance、topic lifecycle、insight）与显式 capability requirement / hard `RunPolicy`；production 路由的 preference analyzer 使用 PydanticAI `PromptedOutput(PreferenceDraftBatch)`，让模型只生成无 ID/时间戳的受限 draft，application 再生成 deterministic claim/proposal identity、解析 evidence reference 并产出 canonical `ProposalBatch`；模型不可用时 profile read 和 deterministic edit 仍工作；
-- deterministic proposal policy 校验 confidence、evidence、freshness、field ownership、override 和 contradiction；不调用模型解决冲突；
-- SQLite proposals/evidence/ledger/profile/checkpoint 同事务提交，proposal 在 decision/profile 前写入；per-analyzer cursor 保证 retry/restart idempotency；
-- event-triggered claim re-synthesis：显式 correction 只重算被编辑 claim，stable-interest/avoidance 矛盾只重算同 topic 的对立 claim，drift 复用 proposal policy 的 180-day evidence-staleness boundary；每次最多 25 claims、每个 claim 最多保留最新 64 evidence IDs，stale evidence 不进入新 proposal；trust-1.0 仅保留给 high-trust preference/profile-edit statement，authenticated behavioral evidence 最高投影为 0.6，因而 inference 不能覆盖 statement；结果仍经 canonical proposal/evidence/decision transaction 并留下 ledger audit，不存在 scheduled full rebuild；
-- versioned `DiscoveryProfile`、`RecommendationProfile`、`DialogueProfile`，按 purpose 裁剪且有字符预算，不暴露 evidence IDs；`RecommendationProfile` v2 额外提供 bounded `EmbeddingClaimView(ref_id, text, confidence, top_interest)`，让 Recommendation 只消费 opaque claim reference 与匹配文本；
-- analyzer input 仅含最多 50 条 observation 的 500-char evidence summary，不含 provider payload、credential reference 或无界历史。Credentialed/Takeout external history and saves enter this same analyzer cursor as bounded title/creator/content-reference summaries at behavioral trust `0.6`; there is no parallel profile mutation path.
+- a frozen typed canonical profile with stable/emerging interests, avoidances, content/style/creator/language/provider preferences, and insights; every claim has a deterministic ID, confidence, freshness, evidence links, and lifecycle;
+- explicit user overrides that outrank inference; both remove and set produce stable audit identities;
+- four stable analyzer identities (preference, avoidance, topic lifecycle, insight) with explicit capability requirements and hard `RunPolicy`. The production preference analyzer uses PydanticAI `PromptedOutput(PreferenceDraftBatch)`, allowing the model to produce only bounded drafts without IDs/timestamps; the application then generates deterministic claim/proposal identities, resolves evidence references, and emits canonical `ProposalBatch`. Profile reads and deterministic edits still work when the model is unavailable;
+- deterministic proposal policy validates confidence, evidence, freshness, field ownership, overrides, and contradictions without calling a model to resolve conflicts;
+- SQLite proposals/evidence/ledger/profile/checkpoint commit in one transaction, with proposals written before decisions/profile; per-analyzer cursors guarantee retry/restart idempotency;
+- event-triggered claim re-synthesis: explicit corrections recompute only the edited claim, stable-interest/avoidance contradictions recompute only the opposing claim for the same topic, and drift reuses the proposal policy's 180-day evidence-staleness boundary. Each invocation handles at most 25 claims and retains at most the latest 64 evidence IDs per claim; stale evidence cannot enter a new proposal. Trust 1.0 is reserved for high-trust preference/profile-edit statements, while authenticated behavioral evidence projects at no more than 0.6, so inference cannot override a statement. Results use the canonical proposal/evidence/decision transaction and leave a ledger audit; there is no scheduled full rebuild;
+- versioned `DiscoveryProfile`, `RecommendationProfile`, and `DialogueProfile`, purpose-trimmed and character-bounded, without evidence IDs. `RecommendationProfile` v2 also supplies bounded `EmbeddingClaimView(ref_id, text, confidence, top_interest)` so Recommendation consumes only opaque claim references and matching text;
+- analyzer input contains only up to 50 observation summaries of 500 characters each, with no provider payload, credential reference, or unbounded history. Credentialed/Takeout external history and saves enter the same analyzer cursor as bounded title/creator/content-reference summaries at behavioral trust `0.6`; there is no parallel profile mutation path.
 
-## 隐私边界
+## Privacy boundary
 
-Canonical profile 只存 claim 和 observation evidence reference。原始 provider payload、Cookie、token、credential reference、网页 HTML 和自由 prompt 均不能进入 analyzer input 或 projection。其他 product modules 只能消费 `projections.py` 的 bounded view，不能导入 `profile.py`。
+The canonical profile stores only claims and observation evidence references. Raw provider payloads, Cookies, tokens, credential references, webpage HTML, and free-form prompts cannot enter analyzer input or projections. Other product modules may consume only bounded views from `projections.py` and must not import `profile.py`.
 
-## 方向决策 (decided)
+## Direction decisions (decided)
 
 - **No fixed trait taxonomies.** Understanding never adopts MBTI-style trait schemas or soul-style fixed layers (tone/posture/topic state machines). The profile stays an open, evidence-grounded claim set; the LLM chooses which dimensions are salient for this user.
 - **Trust tiers by provenance.** Claims distinguish `user_statement` (explicit, highest trust) from inferred claims; re-synthesis and conflict resolution never let inference override an explicit statement. The deterministic proposal policy enforces this without calling a model.

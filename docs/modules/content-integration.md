@@ -8,7 +8,7 @@
 | --- | --- |
 | Stable identity | frozen `ProviderId`, `ContentKind`, `ContentRef`; providers normalize canonical HTTP(S) URLs |
 | Native envelope | `NativeContent` requires a positive schema version and provider-owned Pydantic validation |
-| Purpose projections | separate `ContentPreview`, `RecommendationCandidate`, `SearchDocument`, and `CardData` |
+| Purpose projections | separate `ContentPreview`, `RecommendationCandidate`, `SearchDocument`, and `CardData`; previews may carry a validated optional image URL |
 | Reads | distinct Search, Feed, Fetch, Related, Creator, History, and Saved protocols; cursors are provider-scoped opaque values |
 | Mutations | `ActionRequest` requires idempotency and confirmation metadata; action capability is separate from reads |
 | Registry | explicit composition registration; duplicate providers and capability mismatches are rejected |
@@ -21,6 +21,7 @@
 - query/paging: `SearchQuery`, `FeedQuery`, `CreatorQuery`, `ContentFilter`, `PageRequest`, `ProviderCursor`, `ContentPage`;
 - capabilities: Search, Feed, Fetch, Related, Creator, History, Saved, Action, Projection, Observation;
 - metadata: `ProviderManifest`, `NativeSchemaDescriptor`, `ActionDescriptor`, `CapabilityKind`, `ProviderAvailability`;
+- projections: `ContentPreview` carries bounded text, creator, optional image URL, source time, and provenance; `CardData` remains the presentation contract;
 - registration: `ContentProviderRegistry`.
 
 ## Invariants
@@ -38,3 +39,7 @@
 The Bilibili client accepts the provider's real endpoint-specific envelopes (`data.list` for popular/history feeds, `data.result` for search, a bare `data` array for related videos, nested creator `list.vlist`, and raw `data` for video details) and converts native rows into strict `BilibiliVideo` models before returning them. Search HTML markup is removed at this boundary, digit strings and `MM:SS` durations are normalized, protocol-relative covers become HTTPS URLs, history uses `ps/max/view_at`, and creator paging uses `pn/ps`. Authenticated manual-cookie verification grants the requested public/private/write subset after a successful live nav probe. The transport uses browser-compatible public request headers and maps HTTP 412/429 to the typed `RATE_LIMITED` error.
 
 Search and detail workflows are read-only. They do not populate `content_references` or `content_cache`; durable content-reference creation belongs to Observation Ingress.
+
+## Hacker News native boundary
+
+The Hacker News transport reads the official Firebase `topstories` and `item/<id>` endpoints, hydrates only the requested bounded ID slice, filters deleted/dead or non-story records, and validates normalized rows as strict `HackerNewsItem` payloads. Provider identity is the stable item ID with canonical `https://news.ycombinator.com/item?id=<id>` discussion URLs; external story URLs remain native metadata. The provider advertises anonymous Feed, Fetch, and Projection capabilities only because Hacker News exposes no official full-text search endpoint.

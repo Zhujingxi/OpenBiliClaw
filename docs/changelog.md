@@ -6,7 +6,21 @@
 
 ## Unreleased
 
+- Audited current technical documentation against the production graph: corrected the twelve-provider inventory and fail-closed transport matrix, CLI/config/environment/API contracts, model protocol and reload behavior, web authentication, installer options, restart rehydration, and stale provider/extension claims; removed completed plan files after carrying their current behavior into maintained docs.
+
 - Expanded the in-process CLI to full user-operation parity: source forms/recipes/material, refresh, typed feedback/observations/profile edits, content details and pending-action decisions, conversation reads, runtime health/events/diagnostics, model configuration, secret-safe stdin requests, and JSON setup/archive outputs; replaced stale legacy skills with one CLI agent skill.
+
+- Added Hacker News as an anonymous first-party content source using the official Firebase API, with a bounded `top` feed, item detail fetch, stable discussion identity, strict native projections, deleted/dead filtering, and safe typed failures; official search is not claimed because Hacker News does not provide one.
+
+- Rebuilt Content Sources as an operational dashboard with connected-source health, candidate-pool and feed/video-queue totals, content-kind and provider breakdowns, verification details, responsive provider cards, and a typed `/v1/sources` inventory projection backed by SQLite aggregate counts.
+
+- Standardized every provider and content kind on one responsive card shell with equal desktop row heights, consistent media placeholders, bounded title/summary slots, aligned metadata/actions, and compact mobile behavior.
+
+- Repaired GitHub Actions validation, moved costly Windows/Playwright smoke jobs behind a manual opt-in, restored the full hermetic backend coverage gate, and moved ad-hoc Intel installer builds to the supported macOS Intel runner.
+
+- Preserved provider thumbnails from discovery previews through durable recommendation candidates into feed cards, including image backfill when an existing candidate is rediscovered.
+
+- Isolated recommendation discovery per provider so one resolver or search failure no longer aborts candidates returned by healthy providers.
 
 - Simplified Settings provider selection into a expandable single-column list beside the model configuration, and standardized UI semantics so blue is reserved for interaction while green, yellow, and red mean good, warning, and error.
 

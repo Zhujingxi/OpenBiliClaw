@@ -5,7 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_docs_homepage_mentions_reddit_bangumi_and_v2ex_sources() -> None:
+def test_docs_homepage_matches_current_provider_and_extension_boundaries() -> None:
     html = (ROOT / "docs/index.html").read_text(encoding="utf-8")
     project_version = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))[
         "project"
@@ -20,19 +20,22 @@ def test_docs_homepage_mentions_reddit_bangumi_and_v2ex_sources() -> None:
     assert "V2EX 推荐" in html
     assert "sourceV2exTitle" in html
     assert "sourceV2exText" in html
-    assert "仅在用户批准配方声明的域名后读取代码内置配方点名的 Cookie" in html
-    assert "只回传到用户配置的本机后端" in html
-    assert "不向项目方或其他第三方发送凭据" in html
-    assert "Zhihu, Reddit, Bangumi, V2EX, and Web sources" in html
+    assert "sourceHnTitle" in html
+    assert "sourceHnText" in html
+    assert "sourceWeiboTitle" in html
+    assert "sourceWeiboText" in html
+    assert "按后端声明的配方读取指定 Cookie/站点存储" in html
+    assert "只回传到本机" in html
+    assert "不采集浏览行为" in html
     # The extension uses declarative credential recipes, not behavior capture or task bridges.
-    assert "行为采集" not in html
-    assert "登录态任务桥" not in html
+    for stale in ("行为采集", "采集行为", "登录态任务桥", "插件任务桥", "同步登录态", "rdt-cli"):
+        assert stale not in html
     assert "/m/" not in html
     assert f'"softwareVersion": "{project_version}"' in html
 
 
 def test_maintained_markdown_links_resolve() -> None:
-    documents = [ROOT / name for name in ("README.md", "README_EN.md", "AGENTS.md", "CLAUDE.md")]
+    documents = [ROOT / name for name in ("README.md", "README_EN.md", "AGENTS.md")]
     documents.extend(
         path
         for path in (ROOT / "docs").rglob("*.md")
@@ -57,11 +60,7 @@ def test_superseded_document_archives_are_absent() -> None:
     for name in ("refactor", "specs", "superpowers", "testing"):
         assert not (ROOT / "docs" / name).exists()
 
-    active_plans = sorted((ROOT / "docs" / "plans").glob("*.md"))
-    assert [path.name for path in active_plans] == [
-        "2026-08-14-anonymous-provider-ports.md",
-        "2026-08-15-agentic-recommendation.md",
-    ]
+    assert not list((ROOT / "docs" / "plans").glob("*.md"))
 
 
 def test_docs_homepage_mentions_macos_first_launch_security_bypass() -> None:

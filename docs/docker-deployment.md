@@ -37,7 +37,7 @@ Treat that command's output as a password. Send it as `Authorization: Bearer <to
 
 ### Authentication modes
 
-The host supports three mutually exclusive modes, selected in `config.toml`:
+The host supports these authentication configurations in `config.toml` (bearer and password may coexist):
 
 - **Bearer token** (default above): `host.bearer_secret_ref` points at the vault.
 - **Password**: set `host.password_hash` via `openbiliclaw set-password` (or hash a password with `openbiliclaw.hosts.api.auth.hash_password`). The Web UI login page and `POST /v1/auth/login` exchange the password for a durable session token; failed attempts are rate-limited.
@@ -49,7 +49,7 @@ When opening the UI via a LAN address (`http://<lan-ip>:8420`), its origin must 
 
 Compose persists `/app/runtime`, database data, logs, and the embedding model cache in named volumes. Restarting or rebuilding retains configuration, vault credentials, observations, profile state, recommendation state, and feedback.
 
-Access handles are intentionally process-local. The vault currently has no durable provider/account-to-credential-reference mapping, so a Bilibili authenticated connection is **disconnected after container restart** even though its opaque credential remains in the vault. The client must resubmit its provider form (the `/v1/sources/connect` `submission.cookie` field) after restart. Anonymous access must likewise reconnect. Docker does not silently invent a durable reconnection mapping.
+Provider credential slots are durable and keyed by provider/default account. On startup, Composition detects and re-verifies those opaque slots, so a valid Bilibili manual/plugin connection reconnects without resubmitting raw cookies. Anonymous connections are credential-free and can be re-established idempotently. Multi-account indexing is not implemented; durable rehydration intentionally covers only the local default account.
 
 ## Verification and teardown
 

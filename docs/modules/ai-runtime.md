@@ -1,51 +1,29 @@
 # AI Runtime
 
-`src/openbiliclaw/ai/` 是当前类型化 PydanticAI 执行边界、provider plugins 与离线评测原语。Runtime Composition 构造配置的 model route；未配置模型时相关能力明确 unavailable，不存在第二套调用栈。
+`src/openbiliclaw/ai/` is the current typed PydanticAI execution boundary, provider plugins, and offline evaluation primitives. Runtime Composition constructs the configured model route. When no model is configured, related capabilities are explicitly unavailable; there is no second call stack.
 
-## 执行边界
+## Execution boundary
 
-`AIRuntime.run(AgentRunRequest[DepsT, OutputT]) -> AgentRunResult[OutputT]` 是新边界唯一的
-production entrypoint。请求携带稳定 `AgentId`、domain-owned typed dependencies、PydanticAI
-`Agent`、有界 history/context、可选 PydanticAI `UserContent` attachments、`ModelRequirements`、
-`RunPolicy` 与 usage attribution；不存在 `complete(prompt) -> str` 兼容门面。attachments 当前仅由
-`recommendation.inspect` 使用，且来自 allowlisted image fetch 后的 `BinaryContent`；不包含 native video。
+`AIRuntime.run(AgentRunRequest[DepsT, OutputT]) -> AgentRunResult[OutputT]` is the only production entrypoint for the new boundary. A request carries a stable `AgentId`, domain-owned typed dependencies, a PydanticAI `Agent`, bounded history/context, optional PydanticAI `UserContent` attachments, `ModelRequirements`, `RunPolicy`, and usage attribution. There is no `complete(prompt) -> str` compatibility facade. Attachments are currently used only by `recommendation.inspect`; they are allowlisted-image `BinaryContent` and contain no native video.
 
-- `ModelRoute` 在构造时检查 primary 和每个 fallback 的 tools、structured output、vision、
-  context、streaming、reasoning 能力；任何不兼容 fallback 令启动失败。
-- `RunPolicy` 将 request/input/output/total token 和 tool-call 上限直接映射到 PydanticAI
-  `UsageLimits`，并限制总 elapsed timeout、retry 次数和四种显式 priority。`RunPriority` 当前仅是
-  contract metadata；Core `ResourceBudget` 尚无 priority-aware queue，因此它暂不影响 admission 顺序。
-- `PolicyBook` 在 `AIRuntime.run` 唯一 choke point 应用 config `[runtime.agents."<agent-id>"]`
-  的 per-agent RunPolicy override；override 在构造时校验，非法 budget 在启动时失败而非运行中。
-  composition 的 atomic reload 会重建 runtime，因此 budget 调整无需重启即可生效。
-- 所有执行取得 Core `ResourceBudget`；timeout 转为安全 typed failure，`CancelledError` 原样传播。
-- provider 失败只暴露 unavailable/rate-limited/unauthorized/timeout/invalid-output/
-  budget-exhausted 分类与非秘密 model instance ID，不回显上游 body。
-- `UsageRecord` 归因到 agent、workflow、model instance、provider 和可选 recommendation batch；
-  `UsageSink` 只是 persistence port，本阶段没有提前实现 repository。
+- `ModelRoute` checks tools, structured output, vision, context, streaming, and reasoning capabilities for the primary and every fallback at construction time. Any incompatible fallback fails startup.
+- `RunPolicy` maps request/input/output/total token and tool-call ceilings directly to PydanticAI `UsageLimits`, and limits total elapsed timeout, retries, and four explicit priorities. `RunPriority` is currently contract metadata only; Core `ResourceBudget` has no priority-aware queue, so priority does not yet affect admission order.
+- `PolicyBook` applies per-agent RunPolicy overrides from config `[runtime.agents."<agent-id>"]` at the single `AIRuntime.run` choke point. Overrides are validated at construction, so invalid budgets fail at startup rather than at runtime. An explicit Composition reload rebuilds the runtime, but `openbiliclaw serve` has no file watcher and file edits require a process restart unless an embedder invokes that reload primitive.
+- Every execution acquires Core `ResourceBudget`; timeouts become safe typed failures, while `CancelledError` propagates unchanged.
+- Provider failures expose only unavailable/rate-limited/unauthorized/timeout/invalid-output/budget-exhausted categories and a non-secret model instance ID, never an upstream body.
+- `UsageRecord` attributes usage to agent, workflow, model instance, provider, and optional recommendation batch. `UsageSink` is only a persistence port; this phase does not pre-implement a repository.
 
-## 上下文和消息安全
+## Context and message safety
 
-`ContextProjection` 在构造时执行 UTF-8 byte bound；`trim_history()` 只保留能装入预算的最新完整
-turn，不做总结。单个 tool return 超限会在进入 history 前拒绝。运行前审计 input/history/context，
-运行后审计完整 PydanticAI messages；`vault:`、Authorization、API key、password 和 Cookie canary
-不得进入模型消息。稳定 system instructions 继续由 domain-owned `Agent` 定义，volatile projection
-只进入当次 user input。
+`ContextProjection` enforces a UTF-8 byte bound at construction. `trim_history()` retains only the latest complete turns that fit the budget and performs no summarization. An oversized tool return is rejected before entering history. Input/history/context are audited before execution, and complete PydanticAI messages are audited afterward. `vault:`, Authorization, API key, password, and Cookie canaries must not enter model messages. Stable system instructions remain defined by the domain-owned `Agent`; volatile projections enter only the current user input.
 
-## 路由与配置现状
+## Routing and configuration status
 
-`RouteTable`、`ConfiguredModel` 和 capability matrix 由 Composition 显式构造。凭据不是 route 或
-request 字段；`ai.providers.ModelFactory` 通过单一配置入口构造 PydanticAI native provider，凭据仅在
-`CredentialVault.resolve()` callback 内交给 selected trusted client。模型托管与本地推理均在应用外部。
-完整 model/embedding contract、capability probe 与 safe diagnostics 见
-[AI Providers](ai-providers.md)。
+Composition explicitly constructs `RouteTable`, `ConfiguredModel`, and the capability matrix. Credentials are not route or request fields. `ai.providers.ModelFactory` constructs a PydanticAI native provider through one configuration entrypoint, and credentials reach the selected trusted client only inside the `CredentialVault.resolve()` callback. Model hosting and local inference remain external to the application. See [AI Providers](ai-providers.md) for the complete model/embedding contract, capability probes, and safe diagnostics.
 
-## 离线测试与评测
+## Offline testing and evaluation
 
-`ai.runtime.testing` 导出 PydanticAI `TestModel` / `FunctionModel`；测试全局默认
-`ALLOW_MODEL_REQUESTS=False`，真实 provider 测试必须显式 opt-in 并标记 `integration`。
-`ai.evaluation` 只提供 immutable recorded `Dataset`、typed runner、metric/report/comparison；不读取
-production repository，也不包含 optimizer 或 self-modification。
+`ai.runtime.testing` exports PydanticAI `TestModel` / `FunctionModel`. Tests default globally to `ALLOW_MODEL_REQUESTS=False`; real-provider tests must be explicitly opted into and marked `integration`. `ai.evaluation` provides only immutable recorded `Dataset`, a typed runner, metrics/reports/comparison; it does not read production repositories or include optimization or self-modification.
 
 ## Domain ownership
 

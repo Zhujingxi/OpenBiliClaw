@@ -1,36 +1,99 @@
 # Repository Guidelines
 
-## 项目结构与模块组织
-主代码位于 `src/openbiliclaw/`：`core/` 提供生命周期与契约，`composition/` 负责唯一生产组合根，`content/` 与 `access/` 负责来源接入，`observations/`、`understanding/`、`recommendation/`、`application/`、`assistant/` 承载产品链路，`hosts/` 提供 API/CLI。Python 测试位于 `tests/`。Vue 3/Pinia/TypeScript 前端位于 `frontend/`，其中 `apps/web/` 是 responsive Web，`apps/extension/` 是浏览器扩展；`extension/` 仅保留声明式 manifest 与图标。
+## Project Structure and Module Organization
 
-当前设计依据是 `docs/architecture.md`、`docs/spec.md` 与 `docs/modules/`。历史计划和已被 cutover 取代的文档不属于仓库当前规范。
+OpenBiliClaw is currently defined by `docs/architecture.md`, `docs/spec.md`, and `docs/modules/`; do not restore deleted legacy implementations based on historical plans.
 
-## 构建、测试与开发命令
-先创建虚拟环境并安装开发依赖：`pip install -e ".[dev]"`。常用检查命令如下：
+- `src/openbiliclaw/`
+  - `core/`: settings, resource budgets, lifecycle, task supervision, and health state.
+  - `composition/`: the only production composition, lifecycle, reload, and CLI entrypoint; concrete implementations are assembled only here.
+  - `infrastructure/`: SQLite/archive, credential vault, HTTP, file, event, and telemetry adapters.
+  - `access/`: anonymous, manual-secret, and plugin-assisted access plus verifiers; credentials pass through opaque vault handles.
+  - `content/integration/`: cross-source typed contracts, purpose-specific projections, and provider registry; `content/providers/`: provider-owned schemas, transports, and manifests.
+  - `observations/`: immutable observation ingress, validation, repository, and service.
+  - `understanding/`: profile, evidence, ledger, analyzer, resynthesis, and embedding projection.
+  - `recommendation/`: discovery, evaluation, expression, allocation, selection, semantic recall, inspection, policy journal, and reward learning.
+  - `application/`: the only sequencing layer for cross-module product workflows.
+  - `assistant/`: bounded, typed, propose-only Assistant dialogue and tools.
+  - `ai/`: PydanticAI runtime, native provider factory, capability checks, and offline evaluation.
+  - `hosts/api/`: FastAPI `/v1` transport; hosts, CLI, and Assistant all work through Application contracts and do not implement business logic in the transport.
+- `tests/`: Python tests organized by the modules above; `tests/e2e/` contains explicitly opt-in tests against real services.
+- `frontend/`: Vue 3/Pinia/TypeScript workspace; `apps/web/` is the responsive web app, `apps/extension/` is the extension UI, and `packages/api-client/` and `packages/presentation/` are shared packages. The root `extension/` directory contains only declarative manifests and icons.
+
+The current production graph has no legacy/v2 dual track: deleted `runtime/`, `soul/`, old `sources/`, old `storage/`, and compatibility facades must not be rewired. Providers that implement only contracts/projections without live transport must fail closed at the capability boundary rather than copy an old implementation.
+
+## Build, Test, and Development Commands
+
+First create a virtual environment and install development dependencies:
+
+```bash
+pip install -e ".[dev]"
+```
+
+Common backend gates:
 
 ```bash
 ruff format src/ tests/ scripts/
 ruff check src/ tests/ scripts/
-mypy src/ tests/
-pytest
-pytest --cov=openbiliclaw --cov-branch
+mypy src/
+ALLOW_MODEL_REQUESTS=False pytest --cov=openbiliclaw --cov-branch
 ```
 
-本地验证 CLI 使用 `openbiliclaw check`，启动服务使用 `openbiliclaw serve`；产品读写通过 `/v1` API 与 Vue 客户端完成。如修改配置相关逻辑，请同步验证 `openbiliclaw check --config PATH`。修改前端后运行 `frontend/package.json` 中的 format、lint、typecheck、test 与 build gates。
+Run locally:
 
-## 开发顺序与配置约定
-按 `docs/architecture.md` 的依赖方向和 `docs/spec.md` 的产品契约开发，不得绕过 Application workflow 或 production composition 增加平行实现。配置样例使用 `config.example.toml`；本地调试时基于它生成 `config.toml`，并仅在本机保存凭据引用。模型由应用外部服务，通过 PydanticAI native provider 层接入；本应用不托管模型。
+```bash
+openbiliclaw check [--config PATH] [--data-dir PATH]
+openbiliclaw serve [--config PATH] [--data-dir PATH]
+```
 
-## 编码风格与命名约定
-Python 统一使用 4 空格缩进、类型注解和清晰的模块边界；公开 API 与核心数据结构应补充简洁 docstring。格式化与 lint 由 Ruff 管理，静态类型检查使用 MyPy 严格模式。模块文件名使用小写下划线风格；测试函数采用 `test_<behavior>` 命名。前端只提交 TypeScript/Vue 源码，不提交手写 JavaScript。
+`check` performs the full composition/readiness check without listening on a socket; `serve` is the only production service entrypoint. Product CLI commands must be JSON-only pass-throughs to Application workflows on the in-process composition. They must not use an HTTP loopback or add business logic at the command layer.
 
-## 测试要求
-新增功能默认同时补充单元测试；涉及真实内容站点或模型服务的流程，优先拆成可 mock 的单元测试，并将真实调用保留为显式 opt-in 集成测试。仓库要求 aggregate branch coverage 不低于 90%，新增或保留模块也不得以 aggregate coverage 掩盖低覆盖。提交前至少运行 pytest、MyPy 与 Ruff；改动 frontend 时运行全部 frontend gates。
+When changing the frontend, run:
 
-## 提交与 Pull Request 要求
-提交信息遵循 Conventional Commits，例如 `feat: add bilibili auth status command`、`fix: validate missing api key`。PR 说明应包含：变更摘要、测试命令与结果、关联任务或文档入口；如改动 CLI 输出或插件页面，请附终端输出或截图。不要提交真实 `config.toml`、Cookie、API Key 或其他本地敏感数据。
+```bash
+npm --prefix frontend run format:check
+npm --prefix frontend run lint
+npm --prefix frontend run typecheck
+npm --prefix frontend run test
+npm --prefix frontend run build
+```
 
-## 文档更新要求（强制）
-每次提交、合回 main 或发版，以及任何改动接口、模块边界、数据流、配置、CLI、依赖或对外集成的变更，均强制按范围同步模块文档、变更日志、架构图、CLI 与配置文档、安装器文档；权威逐项清单见 [CLAUDE.md「Documentation Requirements」](CLAUDE.md#documentation-requirements)。
+After an API schema change, use `npm --prefix frontend run generate:api` to update the generated client; do not edit generated files manually. Real provider/model calls must be explicitly opted into and marked with the appropriate `integration`/`e2e` marker.
 
-AGENTS.md 面向可能不会自动加载 CLAUDE.md 的非 Claude agent，因此本义务在此独立生效：即使未自动读取 CLAUDE.md，也必须打开上述链接并遵循清单，缺少相应文档更新的分支不得合入。
+## Development Order and Architectural Constraints
+
+- Read the relevant `docs/modules/*.md`, `docs/architecture.md`, and `docs/spec.md` first, then develop in dependency order: Infrastructure/Core → providers/services → Application/Assistant → hosts/frontend. Composition owns concrete assembly.
+- Every product operation has exactly one Application workflow owner. API, CLI, and Assistant tools are thin adapters; service locators, command buses, parallel sequencing, and direct domain repository writes are prohibited.
+- Content Integration consumes only provider-owned typed payloads and purpose-specific projections. It must not read credentials, scrape websites, rank recommendations, or import Understanding/Recommendation/Assistant/Hosts.
+- Observation is the factual ingress. Understanding consumes immutable observations and cannot import Recommendation. Recommendation consumes only the required narrow projections, embedding index, and policy journal.
+- Chat/embedding models may be integrated only through `ai.runtime` and the PydanticAI native provider factory. OpenBiliClaw does not host, package, or supervise model runtimes; do not add a second `complete(prompt) -> str` call stack.
+- Credentials are visible only at Access/Vault boundaries. Provider recipes are frozen declarative data; the browser extension is a generic grabber with no provider business logic.
+- Composition owns validate → ready → swap → drain → close. Core owns background tasks, cancellation, timeouts, resources, and health records. A failed replacement must not replace the active graph.
+- The database rejects unversioned or destructive cutovers. Destructive migrations require explicit authorization and a verified backup; never reset user data silently.
+
+## Coding Style and Naming Conventions
+
+Python uses four-space indentation, complete type annotations, and clear module boundaries; public APIs and core data structures require concise docstrings. Ruff manages formatting/linting, and MyPy uses strict configuration. Module filenames use lowercase underscores; tests use `test_<behavior>`. Commit only TypeScript/Vue frontend sources, never handwritten JavaScript.
+
+Prefer existing contracts, repositories, projections, and the standard library. Do not add speculative abstractions, factories, or compatibility layers for one implementation. Never omit protections for security, permissions, input boundaries, idempotency, cancellation, transactions, or data preservation merely to reduce code.
+
+## Testing Requirements
+
+New features normally include unit tests. Split real-site or model flows into mockable unit tests, and keep real calls only in explicitly opt-in integration/e2e tests. Keep aggregate branch coverage at or above 90%; do not let aggregate coverage hide low coverage in a new module. Non-trivial parsers, branches, transactions, and security logic require at least one runnable regression check.
+
+## Documentation Update Requirements (Mandatory)
+
+Every commit, merge to main, and release, as well as every change to interfaces, module boundaries, data flow, configuration, CLI, dependencies, or external integrations, must update the relevant documentation within the current branch scope. A branch with missing documentation must not be merged.
+
+- When changing module code, update the implemented features and public API in the corresponding `docs/modules/<module>.md`.
+- Add a concise entry to the current version block in `docs/changelog.md` for every PR; add a new version heading and date for releases.
+- For cross-module wiring, module, adapter, dependency block, or data-flow changes, update the system diagrams in `docs/architecture.md` and `docs/spec.md`, plus the architecture diagrams in `README.md`/`README_EN.md`.
+- Update `docs/modules/cli.md` for CLI command changes and `docs/modules/config.md` for configuration field changes.
+- As applicable, update `docs/index.md`, README files, Chinese and English positioning/installation docs, `scripts/install.sh`, `docs/agent-install.md`, `docs/agent-deployment.md`, `docs/docker-deployment.md`, or the corresponding extension/release docs.
+- On release, keep the Chinese and English README version highlights synchronized, with at most four concise user-facing bullets; put full details only in `docs/changelog.md`.
+
+## Commits and Security
+
+Use Conventional Commits, for example `feat: add bilibili auth status command` or `fix: validate missing api key`. PR descriptions include a change summary, test commands and results, and related tasks or documentation. Include terminal output or screenshots for CLI output or extension-page changes.
+
+Never commit a real `config.toml`, Cookie, API key, vault secret, session token, or other local sensitive data; local configuration references only opaque credential refs.

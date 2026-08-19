@@ -10,7 +10,7 @@ Runtime Composition is the only production assembly and process entrypoint. `ope
 
 - validated `core.AppSettings`;
 - SQLite schema/repositories, credential vault, HTTP clients, events, telemetry;
-- all landed first-party provider packages (Bilibili, YouTube, Bangumi, V2EX, Reddit, X, Zhihu, LinuxDo, Weibo, RedNote, Douyin);
+- all twelve landed first-party provider packages (Bilibili, YouTube, Bangumi, V2EX, Hacker News, Reddit, X, Zhihu, LinuxDo, Weibo, RedNote, Douyin);
 - anonymous and provider-owned manual-secret access methods;
 - observation, understanding, deterministic recommendation and application workflows;
 - one model-specific `EmbeddingIndex` shared through narrow post-commit writer and semantic-recall boundaries; unconfigured mode is a no-op and provider failures are contained;
@@ -29,4 +29,5 @@ The final cutover deliberately does not preserve legacy-only behavior. Provider 
 - `build_application(settings, options=...) -> Application`
 - `validated_settings(path, environ=..., overrides=...) -> AppSettings`
 - `ApplicationReference.lease()/swap()/drain()`
-- console command: `openbiliclaw {check,serve}`
+- process entrypoints: `openbiliclaw {check,serve}`;
+- JSON product/setup/archive commands documented in [CLI](cli.md).

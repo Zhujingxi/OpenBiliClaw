@@ -1,10 +1,10 @@
 # Application Workflows
 
-`src/openbiliclaw/application/` 是跨模块产品操作唯一的显式 sequencing 层。每个 workflow 接受 frozen typed command/query 和窄 Protocol 依赖；没有 command bus、workflow DSL、hook choreography、service locator 或 god orchestrator。Composition supplies the concrete repositories and transaction adapters; API, CLI, and Assistant are transport/tool adapters over these workflows.
+`src/openbiliclaw/application/` is the only explicit sequencing layer for cross-module product operations. Each workflow accepts a frozen typed command/query and narrow Protocol dependencies; there is no command bus, workflow DSL, hook choreography, service locator, or god orchestrator. Composition supplies the concrete repositories and transaction adapters; API, CLI, and Assistant are transport/tool adapters over these workflows.
 
 ## Workflow boundary
 
-- model-free reads: source status, recommendation feed delivery, profile projection, provider search, content details, and job health, all with bounded pagination; feed delivery atomically records stable shown IDs before returning items;
+- model-free reads: source status with a joined recommendation-inventory summary, recommendation feed delivery, profile projection, provider search, content details, and job health, all with bounded pagination; feed delivery atomically records stable shown IDs before returning items;
 - mutations: connect/disconnect, typed observation import, bounded credentialed history/save sync, verified provider-export import, feedback, profile edit, bounded recommendation refresh admission;
 - feedback validates the delivered shown record/content pair, resolves exploration attribution from the durable candidate (never client input), transitions shown → interacted, and commits its learning observation through an explicit unit of work; only a newly inserted feedback record invokes the optional reward/Understanding sink, preventing duplicate hypothesis/exploit/proposal credit; profile override + audit observation uses its own unit of work;
 - source connect verifies and stores credentials through Access before refreshing availability; `PluginAssistedAccess` serves provider recipe data and validates exact browser material before converging on the same connect/replace path;
@@ -16,7 +16,7 @@
 
 | Surface | Workflow owner |
 |---|---|
-| source status/connect/disconnect | `GetSourceStatus`, `ConnectSource`, `DisconnectSource` |
+| source list/inventory and status/connect/disconnect | `ListSources`, `GetSourceStatus`, `ConnectSource`, `DisconnectSource` |
 | plugin recipe/material | `PluginAssistedAccess.recipe`, `PluginAssistedAccess.submit` |
 | profile read/edit | `ShowProfile`, `EditProfile` |
 | recommendation feed/refresh/feedback | `GetRecommendations`, `RefreshRecommendations`, `RecordFeedback`, `RecordFeedbackForShown` |
