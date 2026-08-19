@@ -31,6 +31,7 @@ _SUSPICIOUS_BUDGET_LOW = 1
 _SUSPICIOUS_BUDGET_HIGH = 4
 # Guards the once-per-process warning so repeated config reloads don't spam.
 _warned_budget_keys: set[str] = set()
+_warned_legacy_empty_model_providers: set[str] = set()
 
 # Default config search paths
 _CONFIG_FILENAMES = ["config.toml", "config.local.toml"]
@@ -565,17 +566,34 @@ def _legacy_provider_is_visible(
         referenced.add(str(route.provider or "").strip().lower())
     if provider_type in referenced:
         return True
+
+    model = str(provider.model or "").strip()
     if str(provider.api_key or "").strip():
-        return True
+        if model:
+            return True
+        if provider_type not in _warned_legacy_empty_model_providers:
+            _warned_legacy_empty_model_providers.add(provider_type)
+            logger.warning(
+                "config: [llm.%s] has api_key but empty model; "
+                "not projecting it as a legacy instance",
+                provider_type,
+            )
+        return False
     if provider_type == "openai" and str(provider.auth_mode or "").strip().lower() == "codex_oauth":
         return True
     if provider_type == "gemini" and bool(
         os.environ.get("GOOGLE_API_KEY", "").strip() or os.environ.get("GEMINI_API_KEY", "").strip()
     ):
-        return True
-    return provider_type == "ollama" and bool(
-        str(provider.model or "").strip() or str(provider.base_url or "").strip()
-    )
+        if model:
+            return True
+        if provider_type not in _warned_legacy_empty_model_providers:
+            _warned_legacy_empty_model_providers.add(provider_type)
+            logger.warning(
+                "config: [llm.gemini] has environment API key but empty model; "
+                "not projecting it as a legacy instance",
+            )
+        return False
+    return provider_type == "ollama" and bool(model or str(provider.base_url or "").strip())
 
 
 def effective_llm_instances(llm: LLMConfig) -> dict[str, LLMInstanceConfig]:
