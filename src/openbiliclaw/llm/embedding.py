@@ -1340,6 +1340,17 @@ class EmbeddingService:
                 self._breaker_cooldown_seconds,
             )
 
+    def _register_embedding_success(self) -> None:
+        """Reset breaker state after a healthy provider response.
+
+        The breaker is documented as tripping on *consecutive* failures. A
+        successful non-empty response proves the provider is reachable, so the
+        streak restarts at zero rather than accumulating over the lifetime of
+        the service, and an already-open breaker is closed early.
+        """
+        self._breaker_failure_count = 0
+        self._breaker_open_until = 0.0
+
     async def embed(self, text: str) -> list[float]:
         """Get embedding for text. Checks L1 → L2 → API."""
         key = text.strip().lower()[:200]
@@ -1374,6 +1385,7 @@ class EmbeddingService:
             self._register_embedding_failure()
             return []
 
+        self._register_embedding_success()
         self._store_vector(key, vector)
         return vector
 
@@ -1411,6 +1423,7 @@ class EmbeddingService:
         if not vector:
             self._register_embedding_failure()
             return []
+        self._register_embedding_success()
         self._store_vector(key, vector)
         return vector
 
@@ -1462,6 +1475,7 @@ class EmbeddingService:
             self._register_embedding_failure()
             return []
 
+        self._register_embedding_success()
         self._store_vector(key, vector)
         return vector
 
@@ -1487,6 +1501,7 @@ class EmbeddingService:
         if not vector:
             self._register_embedding_failure()
             return False
+        self._register_embedding_success()
         return True
 
     async def are_similar(self, text_a: str, text_b: str) -> bool:
