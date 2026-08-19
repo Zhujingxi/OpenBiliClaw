@@ -37,6 +37,21 @@ class _FakeEmbedProvider:
         return list(self._vector)
 
 
+class _ScriptedEmbedProvider:
+    """``SupportsEmbed`` double that plays a per-call success/failure script."""
+
+    def __init__(self, script: list[list[float] | Exception]) -> None:
+        self._script = script
+        self.calls: list[str] = []
+
+    async def embed(self, text: str, *, model: str = "") -> list[float]:
+        self.calls.append(text)
+        result = self._script.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+
 def test_embedding_endpoint_normalization_redacts_secret_url_parts() -> None:
     endpoint = "HTTPS://user:api-secret@Relay.Example:443/v1/?token=secret#fragment"
 
@@ -928,6 +943,126 @@ async def test_embedding_breaker_counts_empty_vectors_as_failures() -> None:
     assert await service.embed("three") == []
 
     assert len(provider.calls) == 2  # opened after the second empty response
+
+
+async def test_embedding_breaker_resets_streak_after_text_embed_success() -> None:
+    provider = _ScriptedEmbedProvider(
+        [
+            RuntimeError("ConnectError"),
+            [0.1, 0.2, 0.3],
+            RuntimeError("ConnectError"),
+            [0.4, 0.5, 0.6],
+        ]
+    )
+    service = EmbeddingService(
+        provider,
+        model="bge-m3",
+        breaker_failure_threshold=2,
+        breaker_cooldown_seconds=60,
+    )
+
+    assert await service.embed("one") == []
+    assert await service.embed("two") == [0.1, 0.2, 0.3]
+    assert await service.embed("three") == []
+    # The second failure is not consecutive: the success in between reset the
+    # streak, so this call must hit the provider instead of skipping it.
+    assert await service.embed("four") == [0.4, 0.5, 0.6]
+    assert len(provider.calls) == 4
+
+
+async def test_embedding_breaker_resets_streak_after_document_embed_success() -> None:
+    provider = _ScriptedEmbedProvider(
+        [
+            RuntimeError("ConnectError"),
+            [0.1, 0.2, 0.3],
+            RuntimeError("ConnectError"),
+            [0.4, 0.5, 0.6],
+        ]
+    )
+    service = EmbeddingService(
+        provider,
+        model="bge-m3",
+        breaker_failure_threshold=2,
+        breaker_cooldown_seconds=60,
+    )
+
+    assert await service.embed_document("one") == []
+    assert await service.embed_document("two") == [0.1, 0.2, 0.3]
+    assert await service.embed_document("three") == []
+    assert await service.embed_document("four") == [0.4, 0.5, 0.6]
+    assert len(provider.calls) == 4
+
+
+async def test_embedding_breaker_resets_streak_after_probe_success() -> None:
+    provider = _ScriptedEmbedProvider(
+        [
+            RuntimeError("ConnectError"),
+            [0.1, 0.2, 0.3],
+            RuntimeError("ConnectError"),
+            [0.4, 0.5, 0.6],
+        ]
+    )
+    service = EmbeddingService(
+        provider,
+        model="bge-m3",
+        breaker_failure_threshold=2,
+        breaker_cooldown_seconds=60,
+    )
+
+    assert await service.embed("one") == []
+    assert await service.probe() is True
+    assert await service.embed("two") == []
+    assert await service.embed("three") == [0.4, 0.5, 0.6]
+    assert len(provider.calls) == 4
+
+
+async def test_embedding_breaker_resets_streak_after_image_embed_success() -> None:
+    class _ScriptedImageEmbedProvider:
+        supports_image_embedding = True
+
+        def __init__(self) -> None:
+            self.image_calls: list[int] = []
+            self._script: list[list[float] | Exception] = [
+                RuntimeError("ConnectError"),
+                [0.9, 0.1, 0.0],
+                RuntimeError("ConnectError"),
+                [0.8, 0.2, 0.1],
+            ]
+
+        @staticmethod
+        def is_multimodal_embedding_model(model: str) -> bool:
+            return True
+
+        async def embed_image(
+            self,
+            image_bytes: bytes,
+            *,
+            mime_type: str = "image/jpeg",
+            model: str = "",
+        ) -> list[float]:
+            self.image_calls.append(len(image_bytes))
+            result = self._script.pop(0)
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+    provider = _ScriptedImageEmbedProvider()
+    service = EmbeddingService(
+        provider,
+        model="gemini-embedding-2",
+        multimodal_enabled=True,
+        breaker_failure_threshold=2,
+        breaker_cooldown_seconds=60,
+    )
+    # Use a different image for each call so the L1/L2 cache cannot mask a
+    # provider call after the first success.
+    images = [b"cover-one", b"cover-two", b"cover-three", b"cover-four"]
+
+    assert await service.embed_image(images[0]) == []
+    assert await service.embed_image(images[1]) == [0.9, 0.1, 0.0]
+    assert await service.embed_image(images[2]) == []
+    assert await service.embed_image(images[3]) == [0.8, 0.2, 0.1]
+    assert len(provider.image_calls) == 4
 
 
 def test_float32_blob_cosine_error_is_within_convention() -> None:
