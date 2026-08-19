@@ -119,11 +119,15 @@ onBeforeUnmount(() => {
   border: 1px solid var(--success);
   background: color-mix(in srgb, var(--success) 14%, transparent);
 }
-.health-degraded,
+.health-degraded {
+  color: var(--warning);
+  border: 1px solid var(--warning);
+  background: color-mix(in srgb, var(--warning) 14%, transparent);
+}
 .health-unhealthy {
-  color: var(--danger);
-  border: 1px solid var(--danger);
-  background: color-mix(in srgb, var(--danger) 14%, transparent);
+  color: var(--error);
+  border: 1px solid var(--error);
+  background: color-mix(in srgb, var(--error) 14%, transparent);
 }
 dl {
   display: grid;

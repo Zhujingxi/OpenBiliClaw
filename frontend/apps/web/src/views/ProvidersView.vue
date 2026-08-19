@@ -223,10 +223,13 @@ onBeforeUnmount(store.cancel);
 }
 .status-dot.status-connected {
   background: var(--success);
-  box-shadow: 0 0 0 3px rgb(35 122 82 / 0.12);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 12%, transparent);
+}
+.status-dot.status-disconnected {
+  background: var(--warning);
 }
 .status-dot.status-error {
-  background: var(--danger);
+  background: var(--error);
 }
 .capability-list {
   display: flex;

@@ -574,7 +574,9 @@ describe("web view behavior", () => {
       ProvidersView,
       api({
         listSources: async () => [
-          { provider_id: "demo", account_id: null, state: "connected" },
+          { provider_id: "ready", account_id: null, state: "connected" },
+          { provider_id: "setup", account_id: null, state: "disconnected" },
+          { provider_id: "broken", account_id: null, state: "error" },
         ],
       }),
     );
@@ -582,10 +584,13 @@ describe("web view behavior", () => {
       expect(wrapper.find(".provider-status").exists()).toBe(true),
     );
     expect(wrapper.find('[role="tab"]').exists()).toBe(false);
-    const status = wrapper.get(".provider-status");
-    expect(status.findAll(":scope > *").map((item) => item.text())).toEqual([
-      "demo",
-      "connected",
+    expect(
+      wrapper.findAll(".provider-status").map((status) => status.text()),
+    ).toEqual(["readyconnected", "setupdisconnected", "brokenerror"]);
+    expect(wrapper.findAll(".status-dot").map((dot) => dot.classes())).toEqual([
+      ["status-dot", "status-connected"],
+      ["status-dot", "status-disconnected"],
+      ["status-dot", "status-error"],
     ]);
   });
 
@@ -666,6 +671,12 @@ describe("web view behavior", () => {
     await vi.waitFor(() =>
       expect(wrapper.find("#model-provider").exists()).toBe(true),
     );
+    expect(wrapper.findAll("details.settings-section")).toHaveLength(1);
+    expect(
+      wrapper.get("details.settings-section").attributes("open"),
+    ).not.toBeUndefined();
+    expect(wrapper.get(".status-badge").classes()).toContain("status-warning");
+    expect(wrapper.findAll(".provider-option")).toHaveLength(1);
     await wrapper.get("#model-api-key").setValue("write-only-value");
     await wrapper.get("form").trigger("submit");
     await vi.waitFor(() => expect(updateModel).toHaveBeenCalledOnce());

@@ -6,6 +6,8 @@
 
 ## Unreleased
 
+- Simplified Settings provider selection into a expandable single-column list beside the model configuration, and standardized UI semantics so blue is reserved for interaction while green, yellow, and red mean good, warning, and error.
+
 - Rebuilt the responsive web UI around a warm, high-density card system: grouped desktop/mobile navigation, clearly zoned model and appearance settings, browsable provider/model cards, layered per-source setup, source capability cards, and a full-height Assistant chat with message bubbles, prompt suggestions, loading feedback, and a sticky composer.
 
 - Made scheduled recommendation replenishment skip disconnected or non-searchable planned providers, so an all-unusable discovery round completes as a healthy no-op; missing CLI config paths now produce a concise error without a traceback.

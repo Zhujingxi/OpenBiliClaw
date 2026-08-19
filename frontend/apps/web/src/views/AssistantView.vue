@@ -391,9 +391,9 @@ li.message-user .message-body {
 }
 .turn-error {
   margin: 0.45rem 0 0;
-  border-color: rgb(184 61 69 / 0.28);
+  border-color: color-mix(in srgb, var(--error) 28%, transparent);
   background: #fff5f4;
-  color: var(--danger);
+  color: var(--error);
 }
 .global-error {
   max-width: 54rem;

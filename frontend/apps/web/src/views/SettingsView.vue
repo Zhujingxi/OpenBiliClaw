@@ -149,7 +149,7 @@ onBeforeUnmount(() => models.cancel());
             :class="
               models.current.current.model.secret_configured
                 ? 'status-connected'
-                : 'status-disconnected'
+                : 'status-warning'
             "
           >
             {{
@@ -219,56 +219,77 @@ onBeforeUnmount(() => models.cancel());
           </div>
         </div>
 
-        <div class="model-toolbar">
-          <div class="field">
-            <label for="model-search">Search providers and models</label>
-            <input
-              id="model-search"
-              v-model="query"
-              type="search"
-              placeholder="Try OpenAI, Claude, DeepSeek…"
-            />
-          </div>
-          <label class="check-row custom-toggle">
-            <input v-model="custom" type="checkbox" />
-            Custom provider
-          </label>
-        </div>
-
-        <div
-          v-if="!custom"
-          class="provider-gallery"
-          aria-label="Model providers"
-        >
-          <button
-            v-for="provider in filteredProviders"
-            :key="provider.id"
-            type="button"
-            class="provider-option"
-            :class="{ selected: provider.id === providerId }"
-            :aria-pressed="provider.id === providerId"
-            @click="chooseProvider(provider.id)"
-          >
-            <span class="provider-monogram" aria-hidden="true">
-              {{ provider.name.slice(0, 1).toUpperCase() }}
-            </span>
+        <details class="settings-section provider-browser" open>
+          <summary class="settings-section-summary">
             <span>
-              <strong>{{ provider.name }}</strong>
-              <small
-                >{{ provider.models.length }} models ·
-                {{ provider.protocol }}</small
-              >
+              <strong>Choose provider</strong>
+              <small>Search the catalog or use a custom endpoint.</small>
             </span>
-            <span
-              v-if="provider.id === providerId"
-              class="selection-mark"
-              aria-hidden="true"
-              >✓</span
+            <span class="section-count"
+              >{{ filteredProviders.length }} shown</span
             >
-          </button>
-        </div>
+          </summary>
+          <div class="settings-section-content">
+            <div class="model-toolbar">
+              <div class="field">
+                <label for="model-search">Search providers and models</label>
+                <input
+                  id="model-search"
+                  v-model="query"
+                  type="search"
+                  placeholder="Try OpenAI, Claude, DeepSeek…"
+                />
+              </div>
+              <label class="check-row custom-toggle">
+                <input v-model="custom" type="checkbox" />
+                Custom provider
+              </label>
+            </div>
+
+            <div
+              v-if="!custom"
+              class="provider-gallery"
+              aria-label="Model providers"
+            >
+              <button
+                v-for="provider in filteredProviders"
+                :key="provider.id"
+                type="button"
+                class="provider-option"
+                :class="{ selected: provider.id === providerId }"
+                :aria-pressed="provider.id === providerId"
+                @click="chooseProvider(provider.id)"
+              >
+                <span class="provider-monogram" aria-hidden="true">
+                  {{ provider.name.slice(0, 1).toUpperCase() }}
+                </span>
+                <span>
+                  <strong>{{ provider.name }}</strong>
+                  <small
+                    >{{ provider.models.length }} models ·
+                    {{ provider.protocol }}</small
+                  >
+                </span>
+                <span
+                  v-if="provider.id === providerId"
+                  class="selection-mark"
+                  aria-hidden="true"
+                  >✓</span
+                >
+              </button>
+            </div>
+          </div>
+        </details>
 
         <div class="form-grid configuration-fields">
+          <div class="configuration-heading field-wide">
+            <strong>Configure model</strong>
+            <small>{{
+              custom
+                ? "Custom endpoint"
+                : selectedProvider?.name || "Select a provider"
+            }}</small>
+          </div>
           <template v-if="!custom">
             <div class="field">
               <label for="model-provider">Provider</label>
@@ -476,13 +497,58 @@ onBeforeUnmount(() => models.cancel());
 }
 .model-form {
   display: grid;
+  grid-template-columns: minmax(16rem, 0.72fr) minmax(20rem, 1.28fr);
   gap: 1rem;
+  align-items: start;
+}
+.model-form > .surface-card-header {
+  grid-column: 1 / -1;
+  margin-bottom: 0;
+}
+.settings-section {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--card);
+}
+.settings-section-summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 0.75rem;
+  align-items: center;
+  padding: 0.85rem 1rem;
+  list-style: none;
+}
+.settings-section-summary::-webkit-details-marker {
+  display: none;
+}
+.settings-section-summary::after {
+  content: "+";
+  color: var(--muted-foreground);
+  font-size: 1.1rem;
+}
+.settings-section[open] > .settings-section-summary::after {
+  content: "−";
+}
+.settings-section-summary > span:first-child {
+  display: grid;
+  gap: 0.15rem;
+}
+.settings-section-summary small,
+.section-count {
+  color: var(--muted-foreground);
+  font-size: 0.7rem;
+  font-weight: 550;
+}
+.settings-section-content {
+  display: grid;
+  gap: 0.75rem;
+  padding: 0 1rem 1rem;
 }
 .model-toolbar {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
   gap: 0.75rem;
-  align-items: end;
 }
 .custom-toggle {
   border: 1px solid var(--border);
@@ -492,9 +558,9 @@ onBeforeUnmount(() => models.cancel());
 }
 .provider-gallery {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 12.5rem), 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.55rem;
-  max-height: 18rem;
+  max-height: 26rem;
   overflow: auto;
   padding: 0.15rem;
 }
@@ -552,8 +618,19 @@ onBeforeUnmount(() => models.cancel());
   font-weight: 800;
 }
 .configuration-fields {
-  border-top: 1px solid var(--border);
-  padding-top: 1rem;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1rem;
+}
+.configuration-heading {
+  display: grid;
+  gap: 0.15rem;
+}
+.configuration-heading small {
+  color: var(--muted-foreground);
+  font-size: 0.7rem;
+  font-weight: 550;
 }
 .capabilities {
   display: grid;
@@ -585,7 +662,8 @@ onBeforeUnmount(() => models.cancel());
   align-items: end;
 }
 @media (max-width: 68rem) {
-  .settings-layout {
+  .settings-layout,
+  .model-form {
     grid-template-columns: minmax(0, 1fr);
   }
   .model-form {

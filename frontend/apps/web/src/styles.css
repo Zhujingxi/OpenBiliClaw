@@ -11,17 +11,18 @@
   --secondary-foreground: #34312b;
   --muted: #eeece4;
   --muted-foreground: #716d64;
-  --accent: #f1e7df;
-  --accent-foreground: #923f29;
-  --brand: #c65d3d;
-  --brand-strong: #9f4129;
-  --brand-soft: #f7e8e2;
+  --accent: #e8f0fa;
+  --accent-foreground: #174b7a;
+  --brand: #2563a6;
+  --brand-strong: #174b7a;
+  --brand-soft: #e7f0fa;
   --success: #237a52;
-  --warning: #a35b12;
-  --danger: #b83d45;
+  --warning: #946200;
+  --error: #b4232d;
+  --danger: var(--error);
   --border: #dfdcd2;
   --input: #d8d5cb;
-  --ring: #c65d3d;
+  --ring: var(--brand);
   --radius: 0.75rem;
   --radius-sm: 0.5rem;
   --radius-lg: 1rem;
@@ -36,13 +37,13 @@
   --surface-strong: var(--card);
   --surface-soft: var(--muted);
   --line: var(--border);
-  --line-strong: #d9b8ac;
+  --line-strong: #a9bfd7;
   --text-main: var(--foreground);
   --text-secondary: #5e5a52;
   --text-muted: var(--muted-foreground);
   --sky: var(--brand);
   --sky-soft: var(--brand-soft);
-  --focus-ring: 0 0 0 3px rgb(198 93 61 / 0.22);
+  --focus-ring: 0 0 0 3px rgb(37 99 166 / 0.22);
 
   font-family:
     Inter,
@@ -76,7 +77,7 @@ body {
   background:
     radial-gradient(
       circle at 82% -10%,
-      rgb(198 93 61 / 0.08),
+      rgb(37 99 166 / 0.08),
       transparent 28rem
     ),
     var(--background);
@@ -426,7 +427,7 @@ fieldset {
   height: 0.42rem;
   border-radius: 50%;
   background: var(--success);
-  box-shadow: 0 0 0 3px rgb(35 122 82 / 0.12);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 12%, transparent);
 }
 
 .workspace {
@@ -563,17 +564,24 @@ main > section > details {
 
 .status-connected,
 .badge-success {
-  border-color: rgb(35 122 82 / 0.22);
-  background: rgb(35 122 82 / 0.09);
+  border-color: color-mix(in srgb, var(--success) 25%, transparent);
+  background: color-mix(in srgb, var(--success) 9%, transparent);
   color: var(--success);
 }
 
+.status-warning,
 .status-disconnected,
+.badge-warning {
+  border-color: color-mix(in srgb, var(--warning) 25%, transparent);
+  background: color-mix(in srgb, var(--warning) 9%, transparent);
+  color: var(--warning);
+}
+
 .status-error,
 .badge-danger {
-  border-color: rgb(184 61 69 / 0.2);
-  background: rgb(184 61 69 / 0.08);
-  color: var(--danger);
+  border-color: color-mix(in srgb, var(--error) 25%, transparent);
+  background: color-mix(in srgb, var(--error) 8%, transparent);
+  color: var(--error);
 }
 
 .field {
@@ -612,11 +620,11 @@ main > section > details {
 
 .route-notice,
 [role="alert"] {
-  border: 1px solid rgb(184 61 69 / 0.2);
+  border: 1px solid color-mix(in srgb, var(--error) 25%, transparent);
   border-radius: var(--radius);
   padding: 0.7rem 0.85rem;
-  background: rgb(184 61 69 / 0.07);
-  color: #8d2f36;
+  background: color-mix(in srgb, var(--error) 7%, transparent);
+  color: var(--error);
   font-size: 0.83rem;
 }
 
