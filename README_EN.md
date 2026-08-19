@@ -196,12 +196,11 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.207 (2026-08-15)**
+📌 Latest: **v0.3.208 (2026-08-18)**
 
-- **Faster pool replenishment** — healthy sources keep backfilling the global pool when other source quotas stall, fixing the all-day underfill.
-- **Keyless web grounding** — new Bing RSS fallback delivers real search results without Exa / You keys.
-- **Direct Exa / You.com APIs** — set `exa_api_key` / `you_api_key` to call them straight from Python, no mcporter needed.
-- **More resilient sources** — V2EX missing-CLI and Weibo `upstream_rejected` degrade gracefully instead of spamming tracebacks.
+- **Per-source sync switches are off by default** — each platform can be toggled independently so background sync no longer steals your foreground tabs.
+- **Background LLM budget + embedding breaker** — prevents runaway model spend and automatically cools down unhealthy embedding endpoints.
+- **Source task focus fixes** — disabled Zhihu no longer opens task tabs, and deferred hypotheses no longer appear as pending confirmations.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
@@ -742,6 +741,7 @@ durable turn → fixed time/payload → confirmation entry (pending list/cards) 
 card action → synchronous 200 fast path | 202 processing → popup/mobile/desktop poll; CLI has no action
 
 Desktop startup: recommendation hydration │ runtime hydration │ secondary health/profile/activity/config hydration (independent)
+Desktop background resume (cards already loaded): skip the pool-filling recommendation GET │ sync runtime / inventory status only
 
 Overseas traffic: `[network].mode` → system proxy (default) / direct / custom proxy → LLM, YouTube, X/Reddit CLIs, Bangumi, updater, GitHub project stats; CN clients including V2EX remain isolated and direct
 Manual Douyin discovery: CLI discover → daemon-equivalent producer → per-keyword outcomes → extension search/hot/feed → pending-eval pool
@@ -843,7 +843,7 @@ OpenBiliClaw/
 |--------|-----------|
 | Backend | Python 3.11+ |
 | Browser Extension | TypeScript + Chrome Extension (Manifest V3) |
-| LLM | Multiple independent Base URL / token / model instances per provider type, with ordered global and per-module failover chains; first migration keeps a permanent legacy backup and `config-export-legacy` creates an old-version copy; built-in Gemini / DeepSeek / OpenAI / Claude / OpenRouter / OrcaRouter / Ollama; any OpenAI-compatible endpoint works; OpenAI can experimentally reuse Codex CLI OAuth |
+| LLM | Multiple independent Base URL / token / model instances per provider type, with ordered global and per-module failover chains; first migration keeps a permanent legacy backup and `config-export-legacy` creates an old-version copy; built-in Gemini / DeepSeek / OpenAI / Claude / OpenRouter / OrcaRouter / Ollama; any OpenAI-compatible endpoint works; OpenAI can experimentally reuse Codex CLI ChatGPT OAuth via the official Codex transport |
 | Bilibili API | Custom client (WBI signing · v_voucher auto-recovery · rate control) |
 | Xiaohongshu | Extension DOM/state extraction + task dispatch; search/creator run in background tabs and search uses a MAIN-world page-response bridge when hidden virtual DOM is absent; only scrolling init opens `/explore` in the foreground and clicks the profile entry; no backend crawling |
 | Douyin | Extension DOM + MAIN-world passive fetch tap + task dispatch; init imports post / favorite / like / follow signals; search / hot / feed discovery starts from the Douyin home page and uses DOM interactions to trigger loading; search/feed passively collect page responses / rendered results, and hot can use a hot-board `group_id` seed as a logged-in related fallback; no backend login crawling |
@@ -897,6 +897,7 @@ Contributions welcome! See the [Contributing Guide](docs/contributing.md) to get
 - Thanks to [@DongLanQwQ0](https://github.com/DongLanQwQ0) for polishing desktop web interactions — side-drawer collapse animation, a delight-card drag dead zone, and a stacked toast notification system — in [#102](https://github.com/whiteguo233/OpenBiliClaw/pull/102). Merged into main.
 - Thanks to [@DongLanQwQ0](https://github.com/DongLanQwQ0) for the desktop web theme-engine rework to oklch in [#110](https://github.com/whiteguo233/OpenBiliClaw/pull/110) — a single `--hue-primary` control point with a 12-hue tunable color picker, a five-step accent ramp, and unified interaction states. Merged into main.
 - Thanks to [@wuwafly3](https://github.com/wuwafly3) for continued work on multimodal recommendations: [#100](https://github.com/whiteguo233/OpenBiliClaw/pull/100) introduced the DashScope (Alibaba Model Studio) multimodal embedding provider and image-only cover vectors, while [#135](https://github.com/whiteguo233/OpenBiliClaw/pull/135) added the user visual profile (P1), Bilibili danmaku semantics (P2), video keyframes (P3), and cross-platform visual weighting pipeline. Mainline follow-up hardened the contracts and retry behavior, added configuration surfaces, and completed real-environment validation.
+- Thanks to [@LHMQ878](https://github.com/LHMQ878) for fixing the `agent_bootstrap` TOML instance-section matching in [#182](https://github.com/whiteguo233/OpenBiliClaw/pull/182): quoted section headers such as `[llm.instances."openai"]` are now treated as the same table as bare keys, preventing duplicate table declarations and `tomllib` failures when bootstrap is run again. Merged into main.
 
 ## ⭐ Star History
 

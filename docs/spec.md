@@ -394,7 +394,8 @@ admission，而返回 `dialogue_busy` 让 popup/移动/桌面带等待态自动�
 dislike writeback，精确清池与后续语义精判不等待完整画像重建。provider、限流、配置、
 失败/超时与取消都会回滚临时用户历史并保持 durable `pending`，在队头原位有界退避；
 只有显式空/无效响应才持久化安全错因与 `failed / reply=""`。桌面 Web 的推荐、
-runtime 与次级 hydration 是独立分支。
+runtime 与次级 hydration 是独立分支；已有卡片的后台恢复跳过可能补池的推荐 GET，
+只同步 runtime / 库存状态，空列表或明确手动刷新才读取推荐快照。
 
 ```
 LAN clients ─ HTTP（默认）────────────→ IPv4 0.0.0.0 + IPv6 [::] listeners → one uvicorn / FastAPI app
@@ -475,6 +476,7 @@ trusted LAN ─ HTTPS（可选）──→ TLS Proxy :8443 ─ loopback/Compose 
 │  │ runtime status：available/raw/pending 库存 -> 插件/移动/桌面 │   │
 │  │ 补池：available-by-source deficit + raw-material headroom     │   │
 │  │ 推荐消费池后：ServeResult 扣减快照 -> 精确异步复读 -> 三端收敛 │   │
+│  │ 桌面已有卡片后台恢复：跳过可能补池的推荐 GET，只同步库存状态 │   │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │ 画像编辑：编辑面板 -> /api/profile/edit -> 覆盖层（插件/移动/桌面三端） │ │
@@ -622,7 +624,7 @@ trusted LAN ─ HTTPS（可选）──→ TLS Proxy :8443 ─ loopback/Compose 
 │    └→ token diet: preference packing + weighted recent/judged/relevant/important insight≤40 → full merge │
 │  discovery evaluator: text + metrics + optional compressed cover image input │
 │    └→ embedding prefilter shadow → privacy-safe decision → raw score/admission join → read-only gate │
-│  OpenAI auth_mode: api_key / experimental Codex CLI OAuth      │
+│  OpenAI auth_mode: api_key / experimental Codex ChatGPT transport│
 │  结构化 JSON helper: wrapper / fenced / JSONL / schema echo / MiMo 容错 │
 ├──────────────────────────────────────────────────────────────┤
 │                    多层网状记忆存储                             │

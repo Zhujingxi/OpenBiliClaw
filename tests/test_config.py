@@ -92,6 +92,8 @@ class TestConfigDefaults:
         assert config.bilibili.auth_method == "cookie"
         assert config.bilibili.proxy == ""  # direct connection by default
         assert config.scheduler.enabled is True
+        assert config.scheduler.llm_budget_max_calls == 120
+        assert config.scheduler.llm_budget_window_seconds == 3600
         assert config.scheduler.discovery_cron == "0 */8 * * *"
         assert config.scheduler.pool_target_count == 300
         assert isinstance(config.autostart, AutostartConfig)
@@ -242,13 +244,24 @@ class TestConfigDefaults:
         assert config.scheduler.youtube_incremental_hours is None
         assert config.scheduler.zhihu_incremental_hours is None
         assert config.scheduler.reddit_incremental_hours is None
+        for source in (
+            config.sources.xiaohongshu,
+            config.sources.douyin,
+            config.sources.youtube,
+            config.sources.zhihu,
+            config.sources.reddit,
+            config.sources.linuxdo,
+            config.sources.v2ex,
+        ):
+            assert source.incremental_enabled is False
 
     def test_example_config_disables_all_periodic_source_sync_by_default(self) -> None:
         example_path = Path(__file__).parents[1] / "config.example.toml"
 
         with example_path.open("rb") as handle:
-            scheduler = tomllib.load(handle)["scheduler"]
+            example = tomllib.load(handle)
 
+        scheduler = example["scheduler"]
         assert scheduler["source_incremental_enabled"] is False
         assert scheduler["source_incremental_hours"] == 24
         assert "xhs_incremental_hours" not in scheduler
@@ -256,6 +269,9 @@ class TestConfigDefaults:
         assert "youtube_incremental_hours" not in scheduler
         assert "zhihu_incremental_hours" not in scheduler
         assert "reddit_incremental_hours" not in scheduler
+        sources = example["sources"]
+        for slug in ("xiaohongshu", "douyin", "youtube", "zhihu", "reddit", "linuxdo", "v2ex"):
+            assert sources[slug]["incremental_enabled"] is False
 
     def test_default_config_persists_periodic_source_sync_disabled(self, tmp_path: Path) -> None:
         target = tmp_path / "config.toml"
@@ -294,6 +310,31 @@ class TestConfigDefaults:
         assert loaded.scheduler.reddit_incremental_hours == 42
         assert "xhs_incremental_hours = 0" in rendered
         assert "youtube_incremental_hours" not in rendered
+
+    def test_source_incremental_enabled_per_source_round_trip(self, tmp_path: Path) -> None:
+        config = Config()
+        config.sources.xiaohongshu.incremental_enabled = True
+        config.sources.douyin.incremental_enabled = True
+        config.sources.youtube.incremental_enabled = False
+        config.sources.zhihu.incremental_enabled = True
+        config.sources.reddit.incremental_enabled = False
+        config.sources.linuxdo.incremental_enabled = True
+        config.sources.v2ex.incremental_enabled = False
+
+        target = tmp_path / "config.toml"
+        save_config(config, target)
+        rendered = target.read_text(encoding="utf-8")
+        loaded = load_config(target)
+
+        assert loaded.sources.xiaohongshu.incremental_enabled is True
+        assert loaded.sources.douyin.incremental_enabled is True
+        assert loaded.sources.youtube.incremental_enabled is False
+        assert loaded.sources.zhihu.incremental_enabled is True
+        assert loaded.sources.reddit.incremental_enabled is False
+        assert loaded.sources.linuxdo.incremental_enabled is True
+        assert loaded.sources.v2ex.incremental_enabled is False
+        assert "incremental_enabled = true" in rendered
+        assert "incremental_enabled = false" in rendered
 
     def test_scheduler_source_incremental_env_fields_are_filtered_to_flat_keys(
         self,
@@ -464,6 +505,45 @@ manage_ollama = true
         assert cfg.soul.preference_prompt_view == "legacy"
         assert cfg.soul.awareness_prompt_view == "compact-v1"
         assert cfg.soul.insight_prompt_view == "legacy"
+
+    def test_cognition_budget_knobs_round_trip_through_toml(self, tmp_path: Path) -> None:
+        cfg = Config()
+        cfg.soul.awareness_event_batch_size = 80
+        cfg.soul.insight_note_batch_size = 40
+        cfg.soul.cognition_max_tokens = 8192
+        target = tmp_path / "config.toml"
+
+        save_config(cfg, target)
+        rendered = target.read_text(encoding="utf-8")
+        loaded = load_config(target)
+
+        assert "awareness_event_batch_size = 80" in rendered
+        assert "insight_note_batch_size = 40" in rendered
+        assert "cognition_max_tokens = 8192" in rendered
+        assert loaded.soul.awareness_event_batch_size == 80
+        assert loaded.soul.insight_note_batch_size == 40
+        assert loaded.soul.cognition_max_tokens == 8192
+
+    def test_cognition_budget_knobs_default_to_module_constants(self) -> None:
+        cfg = Config()
+
+        assert cfg.soul.awareness_event_batch_size == 300
+        assert cfg.soul.insight_note_batch_size == 150
+        assert cfg.soul.cognition_max_tokens == 32768
+
+    def test_cognition_budget_knobs_reject_invalid_values(self) -> None:
+        from openbiliclaw.config import _collect_config_issues
+
+        cfg = Config()
+        cfg.soul.awareness_event_batch_size = 1
+        cfg.soul.insight_note_batch_size = 9999
+        cfg.soul.cognition_max_tokens = 99
+
+        fields = {issue.field for issue in _collect_config_issues(cfg)}
+
+        assert "soul.awareness_event_batch_size" in fields
+        assert "soul.insight_note_batch_size" in fields
+        assert "soul.cognition_max_tokens" in fields
 
     def test_token_diet_runtime_controls_reject_invalid_values(self) -> None:
         from openbiliclaw.config import _collect_config_issues
@@ -1942,6 +2022,8 @@ def test_save_config_round_trips_advanced_scheduler_and_logging_fields(
     """Popup/API saves must not drop advanced fields that the UI may not edit."""
     config_path = tmp_path / "config.toml"
     config = Config()
+    config.scheduler.llm_budget_max_calls = 30
+    config.scheduler.llm_budget_window_seconds = 1800
     config.scheduler.speculation_interval_minutes = 22
     config.scheduler.speculation_ttl_days = 8
     config.scheduler.speculation_cooldown_days = 9
@@ -1964,6 +2046,8 @@ def test_save_config_round_trips_advanced_scheduler_and_logging_fields(
     save_config(config, config_path)
     loaded = load_config(config_path)
 
+    assert loaded.scheduler.llm_budget_max_calls == 30
+    assert loaded.scheduler.llm_budget_window_seconds == 1800
     assert loaded.scheduler.speculation_interval_minutes == 22
     assert loaded.scheduler.speculation_ttl_days == 8
     assert loaded.scheduler.speculation_cooldown_days == 9

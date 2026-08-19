@@ -216,6 +216,9 @@ class CognitionCycle:
         awareness_analyzer: AwarenessAnalyzer,
         insight_analyzer: InsightAnalyzer,
         min_interval_seconds: int = DEFAULT_MIN_INTERVAL_SECONDS,
+        awareness_event_batch_size: int = _AWARENESS_EVENT_BATCH_SIZE,
+        insight_note_batch_size: int = _INSIGHT_NOTE_BATCH_SIZE,
+        cognition_max_tokens: int = _COGNITION_MAX_TOKENS,
         pending_rebuild_hook: Callable[[], Awaitable[Any]] | None = None,
         confusion_replay_hook: Callable[[], Awaitable[Any]] | None = None,
     ) -> None:
@@ -223,6 +226,12 @@ class CognitionCycle:
         self._awareness_analyzer = awareness_analyzer
         self._insight_analyzer = insight_analyzer
         self._min_interval_seconds = int(min_interval_seconds)
+        # Configurable cognition budgets (issue #169). The module constants are
+        # 256k-provider defaults; small-context local models can lower these
+        # through ``[soul]`` without patching the source.
+        self._awareness_event_batch_size = max(1, int(awareness_event_batch_size))
+        self._insight_note_batch_size = max(1, int(insight_note_batch_size))
+        self._cognition_max_tokens = max(1, int(cognition_max_tokens))
         # 12h-loop fallback trigger for the SoulEngine's debounced confirmed-
         # hypotheses rebuild (spec invariant 4). Optional; best-effort.
         self._pending_rebuild_hook = pending_rebuild_hook
@@ -433,7 +442,7 @@ class CognitionCycle:
         soul_profile_data = self._memory.get_layer("soul").data
 
         total_added = 0
-        for batch_index, batch in enumerate(_chunk(rows, _AWARENESS_EVENT_BATCH_SIZE)):
+        for batch_index, batch in enumerate(_chunk(rows, self._awareness_event_batch_size)):
             events_for_call = (lookback + batch) if batch_index == 0 else batch
             # Evidence chain: attribute produced notes to THIS round's consumed
             # events (the batch), not the read-only lookback context.
@@ -478,7 +487,7 @@ class CognitionCycle:
                 events=events,
                 preference=preference,
                 soul_profile=soul_profile_data,
-                max_tokens=_COGNITION_MAX_TOKENS,
+                max_tokens=self._cognition_max_tokens,
                 source_event_ids=source_event_ids,
             )
         except AwarenessGenerationError:
@@ -487,7 +496,7 @@ class CognitionCycle:
                 events=events,
                 preference=preference,
                 soul_profile=soul_profile_data,
-                max_tokens=_COGNITION_MAX_TOKENS,
+                max_tokens=self._cognition_max_tokens,
                 source_event_ids=source_event_ids,
             )
 
@@ -540,7 +549,7 @@ class CognitionCycle:
 
         total_added = 0
         processed = cursor
-        for batch in _chunk(new_notes, _INSIGHT_NOTE_BATCH_SIZE):
+        for batch in _chunk(new_notes, self._insight_note_batch_size):
             existing = self._load_insights()
             try:
                 prompt_context = _select_insight_prompt_context(
@@ -562,7 +571,7 @@ class CognitionCycle:
                 preference=preference,
                 soul_profile=soul_profile_data,
                 existing_insights=prompt_context,
-                max_tokens=_COGNITION_MAX_TOKENS,
+                max_tokens=self._cognition_max_tokens,
             )
             if new_insights:
                 merged = self._insight_analyzer.merge_insights(existing, new_insights)

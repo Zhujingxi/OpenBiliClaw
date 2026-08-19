@@ -217,12 +217,11 @@
 
 ## 最近更新
 
-📌 最新版本：**v0.3.207（2026-08-15）**
+📌 最新版本：**v0.3.208（2026-08-18）**
 
-- **补货提速** —— B 站份额已满时不再停摆，健康来源会继续回填全局库存，一天跑不满的问题修复。
-- **免费联网找灵感** —— 新增 Bing RSS 无 key 搜索兜底，没配 Exa / You 也能拿到真实搜索结果。
-- **Exa / You.com 直连** —— 填 `exa_api_key` / `you_api_key` 即走 Python 直连 API，不再依赖 mcporter。
-- **来源更稳** —— V2EX / 微博的缺失 CLI 与 `upstream_rejected` 不再刷 traceback，失败时优雅降级。
+- **来源周期回拉默认全关** —— 每个平台可单独开关，避免后台自动弹前台标签页打扰浏览。
+- **后台 LLM 预算 + Embedding 熔断** —— 防止无人值守时持续烧模型额度，embedding 端点异常会自动冷却。
+- **修复来源任务抢焦点** —— 知乎停用后不再打开任务页，defer 暂缓假设也不再错误出现在待确认列表。
 
 完整变更详见 [docs/changelog.md](docs/changelog.md)。
 
@@ -744,6 +743,7 @@ durable turn → 固定时间/payload → 确认入口（待聊列表/卡片） 
 卡片 action → 同步 200（空队列快路）| 202 processing → popup/移动/桌面轮询；CLI 无 action
 
 桌面首屏：推荐 hydration │ runtime hydration │ health/profile/activity/config 次级 hydration（三分支独立）
+桌面后台恢复（已有卡片）：跳过可能补池的推荐 GET │ 只同步 runtime / 库存状态
 
 海外请求：设置页 `[network].mode` → 系统代理（默认）/ 直连 / 自定义代理 → LLM、YouTube、X/Reddit CLI、Bangumi、更新、GitHub 项目统计；国内平台（含 V2EX）保持独立直连
 手动抖音发现：CLI discover → daemon 同款 producer → 统一关键词终态 → 插件 search/hot/feed → 待评估池
@@ -852,7 +852,7 @@ OpenBiliClaw/
 |------|------|
 | 后端 | Python 3.11+ |
 | 浏览器插件 | TypeScript + Chrome Extension (Manifest V3) |
-| LLM | 同一 Provider 类型可建多个独立 Base URL / token / model 实例，并配置全局及模块有序降级链；首次迁移自动保留旧配置备份，`config-export-legacy` 可生成旧版副本；内置 Gemini / DeepSeek / OpenAI / Claude / OpenRouter / OrcaRouter / Ollama，兼容任意 OpenAI 协议服务；OpenAI 可实验性复用 Codex CLI OAuth |
+| LLM | 同一 Provider 类型可建多个独立 Base URL / token / model 实例，并配置全局及模块有序降级链；首次迁移自动保留旧配置备份，`config-export-legacy` 可生成旧版副本；内置 Gemini / DeepSeek / OpenAI / Claude / OpenRouter / OrcaRouter / Ollama，兼容任意 OpenAI 协议服务；OpenAI 可实验性复用 Codex CLI ChatGPT OAuth（官方 Codex 传输） |
 | B 站交互 | 自研 API 客户端 (WBI 签名 · v_voucher 自动恢复 · 速率控制) |
 | 小红书交互 | 扩展 DOM/state 元数据提取 + 插件任务调度；search / creator 在后台标签执行，search 用 MAIN-world 页面响应桥避开隐藏页虚拟 DOM 限制；仅滚动型初始化会前台打开 `/explore` 并点击页面 profile 入口（零后端爬取） |
 | 抖音交互 | 扩展 DOM + MAIN-world 被动 fetch tap + 插件任务调度；初始化导入发布 / 收藏 / 点赞 / 关注信号，search / hot / feed discovery 从抖音首页模拟 DOM 操作触发加载，search/feed 被动收集页面响应 / 渲染结果，hot 可用热榜 `group_id` seed 走已登录页面 related fallback（零后端代登录） |
@@ -906,6 +906,7 @@ OpenBiliClaw 的目标是做你的**全网个性化内容入口**——从 B 站
 - 感谢 [@DongLanQwQ0](https://github.com/DongLanQwQ0) 在 [#102](https://github.com/whiteguo233/OpenBiliClaw/pull/102) 贡献桌面 Web 侧栏折叠动画、delight 卡片拖拽死区、栈式 toast 通知等交互细节打磨，已合入主线。
 - 感谢 [@DongLanQwQ0](https://github.com/DongLanQwQ0) 在 [#110](https://github.com/whiteguo233/OpenBiliClaw/pull/110) 贡献桌面 Web 主题引擎 oklch 化重构，引入 `--hue-primary` 单一控制点与 12 色相可调拾色器、五级强调色阶与统一交互态，已合入主线。
 - 感谢 [@wuwafly3](https://github.com/wuwafly3) 持续贡献多模态推荐能力：在 [#100](https://github.com/whiteguo233/OpenBiliClaw/pull/100) 中实现 DashScope（阿里百炼）多模态 embedding provider 与封面 image-only 向量，并在 [#135](https://github.com/whiteguo233/OpenBiliClaw/pull/135) 中进一步实现用户视觉画像（P1）、B 站弹幕语义（P2）、视频关键帧（P3）及跨平台视觉加权管线；主干在这些实现上完成契约加固、失败重试、配置界面与真实环境验收。
+- 感谢 [@LHMQ878](https://github.com/LHMQ878) 在 [#182](https://github.com/whiteguo233/OpenBiliClaw/pull/182) 修复 `agent_bootstrap` 对引号键 TOML 实例段（如 `[llm.instances."openai"]`）的 section 匹配，避免二次运行 bootstrap 时重复声明表导致 `tomllib` 解析失败，已合入主线。
 
 ## ⭐ Star History
 

@@ -71,6 +71,9 @@ def test_desktop_advanced_panel_owns_all_moved_controls_and_recommendation_field
         "multimodalImageQuality",
         "multimodalImageTimeout",
         "keywordGenerationMode",
+        "awarenessEventBatchSize",
+        "insightNoteBatchSize",
+        "cognitionMaxTokens",
     ):
         assert advanced_html.count(f'id="{element_id}"') == 1
         assert html.count(f'id="{element_id}"') == 1
@@ -102,6 +105,9 @@ def test_desktop_advanced_panel_owns_all_moved_controls_and_recommendation_field
         ("keyframeFetchLimit", "1", "200", "50"),
         ("danmakuFetchLimit", "1", "200", "50"),
         ("danmakuMaxChars", "100", "2000", "500"),
+        ("awarenessEventBatchSize", "10", "900", "300"),
+        ("insightNoteBatchSize", "10", "450", "150"),
+        ("cognitionMaxTokens", "1024", "128000", "32768"),
     ):
         control = re.search(rf'id="{element_id}"[^>]*>', advanced_html)
         assert control is not None
@@ -109,10 +115,11 @@ def test_desktop_advanced_panel_owns_all_moved_controls_and_recommendation_field
         assert f'max="{maximum}"' in control.group(0)
         assert f'placeholder="{default}"' in control.group(0)
 
-    assert advanced_html.count("<section") == 3
+    assert advanced_html.count("<section") == 4
     assert advanced_html.count("推荐增强") >= 1
     assert advanced_html.count("多模态处理") >= 1
     assert advanced_html.count("搜索词生成") >= 1
+    assert advanced_html.count("认知循环预算") >= 1
 
 
 def test_desktop_settings_tabs_have_tabpanel_contract_and_advanced_registration() -> None:

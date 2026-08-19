@@ -872,6 +872,64 @@ async def test_embedding_service_exposes_l2_cache_and_stats(tmp_path: Path) -> N
     assert service.l2_cache.active_models() == {service.cache_model_namespace}
 
 
+async def test_embedding_breaker_skips_dead_provider_after_repeated_failures() -> None:
+    provider = _FakeEmbedProvider(error=RuntimeError("ConnectError: localhost:11434"))
+    service = EmbeddingService(
+        provider,
+        model="bge-m3",
+        breaker_failure_threshold=3,
+        breaker_cooldown_seconds=60,
+    )
+
+    # The first two failures still touch the provider; the third opens the breaker.
+    assert await service.embed("one") == []
+    assert await service.embed("two") == []
+    assert await service.embed("three") == []
+    assert len(provider.calls) == 3
+
+    # During cooldown no provider calls happen; each call returns [] cheaply.
+    assert await service.embed("four") == []
+    assert await service.embed("five") == []
+    assert len(provider.calls) == 3
+
+
+async def test_embedding_breaker_reprobes_after_cooldown() -> None:
+    provider = _FakeEmbedProvider(error=RuntimeError("ConnectError"))
+    service = EmbeddingService(
+        provider,
+        model="bge-m3",
+        breaker_failure_threshold=2,
+        breaker_cooldown_seconds=0.01,
+    )
+
+    assert await service.embed("one") == []
+    assert await service.embed("two") == []
+    assert len(provider.calls) == 2
+
+    # After the cooldown elapses the next call re-probes the provider.
+    import asyncio
+
+    await asyncio.sleep(0.02)
+    assert await service.embed("three") == []
+    assert len(provider.calls) == 3
+
+
+async def test_embedding_breaker_counts_empty_vectors_as_failures() -> None:
+    provider = _FakeEmbedProvider(vector=[])
+    service = EmbeddingService(
+        provider,
+        model="bge-m3",
+        breaker_failure_threshold=2,
+        breaker_cooldown_seconds=60,
+    )
+
+    assert await service.embed("one") == []
+    assert await service.embed("two") == []
+    assert await service.embed("three") == []
+
+    assert len(provider.calls) == 2  # opened after the second empty response
+
+
 def test_float32_blob_cosine_error_is_within_convention() -> None:
     import random
 

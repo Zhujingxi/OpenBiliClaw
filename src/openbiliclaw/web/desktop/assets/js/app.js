@@ -467,6 +467,14 @@
       return Array.isArray(payload) ? payload : asArray(payload?.items);
     }
 
+    function shouldHydrateRecommendationList({ replaceRecommendations = false } = {}) {
+      // /api/recommendations may top up a thin first page by calling serve(),
+      // so it is not a harmless read. Once this page already has cards, a
+      // background resume/config hydration must remain status-only: fetching a
+      // newer top window can consume the pool even with auto-load disabled.
+      return replaceRecommendations || state.videos.length === 0;
+    }
+
     async function readRuntimeStatusSnapshot() {
       const payload = await requestJsonStrict(ENDPOINTS.runtimeStatus, { timeoutMs: 15000, cache: "no-store" });
       return payload?.status || payload;
@@ -8921,7 +8929,9 @@ ${cardFeedbackBarHtml()}`;
     function resetLlmModelDiscovery() {
       renderLlmDatalist("llmInstanceModelOptions", []);
       const providerType = getInput("llmInstanceProviderType");
-      const supported = LLM_MODEL_DISCOVERY_PROVIDERS.has(providerType);
+      const codexMode =
+        providerType === "openai" && getInput("llmInstanceAuthMode") === "codex_oauth";
+      const supported = LLM_MODEL_DISCOVERY_PROVIDERS.has(providerType) && !codexMode;
       const button = $("#refreshLlmInstanceModels");
       if (button) {
         button.hidden = !supported;
@@ -8930,9 +8940,11 @@ ${cardFeedbackBarHtml()}`;
       }
       setLlmModelDiscoveryStatus(
         "neutral",
-        supported
-          ? "可从 OpenAI 兼容 /models 获取；接口不支持时仍可手填。"
-          : "该 Provider 没有 OpenAI /models 发现契约，模型名请手填。"
+        codexMode
+          ? "Codex OAuth 走 ChatGPT 订阅通道，不提供 /models 发现；模型名请手填（如 gpt-5.4）。"
+          : supported
+            ? "可从 OpenAI 兼容 /models 获取；接口不支持时仍可手填。"
+            : "该 Provider 没有 OpenAI /models 发现契约，模型名请手填。"
       );
     }
 
@@ -9193,8 +9205,10 @@ ${cardFeedbackBarHtml()}`;
       const isNew = !state.llmEditingInstanceId;
       const model = getInput("llmInstanceModel");
       const baseUrl = getInput("llmInstanceBaseUrl");
+      const codexMode =
+        providerType === "openai" && getInput("llmInstanceAuthMode") === "codex_oauth";
       if (!model || (isNew && model === (previousDefaults.model || ""))) {
-        setInput("llmInstanceModel", defaults.model || "");
+        setInput("llmInstanceModel", codexMode ? "gpt-5.4" : defaults.model || "");
       }
       if (!baseUrl || (isNew && baseUrl === (previousDefaults.base_url || ""))) {
         setInput("llmInstanceBaseUrl", defaults.base_url || "");
@@ -9223,6 +9237,10 @@ ${cardFeedbackBarHtml()}`;
       const scheduler = config.scheduler || {};
       setSelect("schedulerEnabled", scheduler.enabled === false ? "off" : "on");
       setSelect("pauseDisconnect", scheduler.pause_on_extension_disconnect === false ? "keep" : "pause");
+      const sourceIncrementalEnabled = document.getElementById("sourceIncrementalEnabled");
+      if (sourceIncrementalEnabled) {
+        sourceIncrementalEnabled.checked = scheduler.source_incremental_enabled === true;
+      }
       setInput("extensionDisconnectGrace", scheduler.extension_disconnect_grace_seconds);
       setInput("poolTarget", scheduler.pool_target_count);
       setInput("accountSyncInterval", scheduler.account_sync_interval_hours);
@@ -9254,6 +9272,11 @@ ${cardFeedbackBarHtml()}`;
       setInput("speculationMaxActive", scheduler.speculation_max_active);
       setInput("speculationMaxPrimary", scheduler.speculation_max_primary_interests);
       setInput("speculationMaxSecondary", scheduler.speculation_max_secondary_interests);
+
+      const soul = config.soul || {};
+      setInput("awarenessEventBatchSize", soul.awareness_event_batch_size ?? 300);
+      setInput("insightNoteBatchSize", soul.insight_note_batch_size ?? 150);
+      setInput("cognitionMaxTokens", soul.cognition_max_tokens ?? 32768);
 
       const discovery = config.discovery || {};
       setSelect("keywordGenerationMode", discovery.keyword_generation_mode || "hybrid");
@@ -9315,11 +9338,15 @@ ${cardFeedbackBarHtml()}`;
       setInput("sourcesBrowserCdp", config.sources?.browser?.cdp_url);
       setSelect("sourcesBrowserHeaded", config.sources?.browser?.headed === true ? "on" : "off");
       setSelect("xhsEnabled", config.sources?.xiaohongshu?.enabled === true ? "on" : "off");
+      const xhsIncremental = document.getElementById("xhsIncremental");
+      if (xhsIncremental) xhsIncremental.checked = config.sources?.xiaohongshu?.incremental_enabled === true;
       setInput("xhsDailySearchBudget", config.sources?.xiaohongshu?.daily_search_budget);
       setInput("xhsDailyCreatorBudget", config.sources?.xiaohongshu?.daily_creator_budget);
       setInput("xhsTaskInterval", config.sources?.xiaohongshu?.task_interval_seconds);
       setInput("xhsMinInterval", config.sources?.xiaohongshu?.min_interval_minutes);
       setSelect("douyinEnabled", config.sources?.douyin?.enabled === true ? "on" : "off");
+      const douyinIncremental = document.getElementById("douyinIncremental");
+      if (douyinIncremental) douyinIncremental.checked = config.sources?.douyin?.incremental_enabled === true;
       setCookieOverrideInput("douyinCookie", config.sources?.douyin?.cookie, "抖音");
       setInput("douyinCookieEnv", config.sources?.douyin?.cookie_env);
       setInput("douyinDailySearchBudget", config.sources?.douyin?.daily_search_budget);
@@ -9335,6 +9362,8 @@ ${cardFeedbackBarHtml()}`;
       setInput("weiboRequestInterval", config.sources?.weibo?.request_interval_seconds);
       setInput("weiboMinInterval", config.sources?.weibo?.min_interval_minutes);
       setSelect("youtubeEnabled", config.sources?.youtube?.enabled === true ? "on" : "off");
+      const youtubeIncremental = document.getElementById("youtubeIncremental");
+      if (youtubeIncremental) youtubeIncremental.checked = config.sources?.youtube?.incremental_enabled === true;
       setInput("youtubeDailySearchBudget", config.sources?.youtube?.daily_search_budget);
       setInput("youtubeDailyTrendingBudget", config.sources?.youtube?.daily_trending_budget);
       setInput("youtubeDailyChannelBudget", config.sources?.youtube?.daily_channel_budget);
@@ -9349,6 +9378,8 @@ ${cardFeedbackBarHtml()}`;
       setInput("twitterRequestInterval", config.sources?.twitter?.request_interval_seconds);
       setInput("twitterMinInterval", config.sources?.twitter?.min_interval_minutes);
       setSelect("zhihuEnabled", config.sources?.zhihu?.enabled === true ? "on" : "off");
+      const zhihuIncremental = document.getElementById("zhihuIncremental");
+      if (zhihuIncremental) zhihuIncremental.checked = config.sources?.zhihu?.incremental_enabled === true;
       setZhihuSourceModes(config.sources?.zhihu?.source_modes);
       setInput("zhihuDailySearchBudget", config.sources?.zhihu?.daily_search_budget);
       setInput("zhihuDailyHotBudget", config.sources?.zhihu?.daily_hot_budget);
@@ -9358,6 +9389,8 @@ ${cardFeedbackBarHtml()}`;
       setInput("zhihuRequestInterval", config.sources?.zhihu?.request_interval_seconds);
       setInput("zhihuMinInterval", config.sources?.zhihu?.min_interval_minutes);
       setSelect("redditEnabled", config.sources?.reddit?.enabled === true ? "on" : "off");
+      const redditIncremental = document.getElementById("redditIncremental");
+      if (redditIncremental) redditIncremental.checked = config.sources?.reddit?.incremental_enabled === true;
       setSelect("redditBackend", config.sources?.reddit?.backend || "rdt");
       setRedditSourceModes(config.sources?.reddit?.source_modes);
       setInput("redditDailySearchBudget", config.sources?.reddit?.daily_search_budget);
@@ -9396,6 +9429,8 @@ ${cardFeedbackBarHtml()}`;
       setInput("bangumiMinInterval", config.sources?.bangumi?.min_interval_minutes);
       setInput("bangumiBootstrapLimit", config.sources?.bangumi?.bootstrap_limit);
       setSelect("linuxdoEnabled", config.sources?.linuxdo?.enabled === true ? "on" : "off");
+      const linuxdoIncremental = document.getElementById("linuxdoIncremental");
+      if (linuxdoIncremental) linuxdoIncremental.checked = config.sources?.linuxdo?.incremental_enabled === true;
       setCheckedValues(LINUXDO_SOURCE_MODE_FIELDS, config.sources?.linuxdo?.source_modes);
       setInput("linuxdoDailySearchBudget", config.sources?.linuxdo?.daily_search_budget);
       setInput("linuxdoDailyHotBudget", config.sources?.linuxdo?.daily_hot_budget);
@@ -9406,6 +9441,8 @@ ${cardFeedbackBarHtml()}`;
       setInput("linuxdoMinInterval", config.sources?.linuxdo?.min_interval_minutes);
       setInput("linuxdoBootstrapLimit", config.sources?.linuxdo?.bootstrap_limit);
       setSelect("v2exEnabled", config.sources?.v2ex?.enabled === true ? "on" : "off");
+      const v2exIncremental = document.getElementById("v2exIncremental");
+      if (v2exIncremental) v2exIncremental.checked = config.sources?.v2ex?.incremental_enabled === true;
       setInput("v2exUsername", config.sources?.v2ex?.username);
       {
         const v2exToken = document.getElementById("v2exAccessToken");
@@ -10227,7 +10264,8 @@ ${cardFeedbackBarHtml()}`;
     // 手动刷新。后台再水合（切回标签页、config_reloaded、保存配置、初始化完成）一律
     // 保持 false —— /api/recommendations 只返回最新的 top 窗口，整表覆盖会把用户
     // 滚动加载出来的卡片全部丢掉并按后端最新排序重排（群反馈的「重新排序」）。
-    // replace=false 时 applyDesktopRecommendationSnapshot 只在列表为空时装填。
+    // 列表已有卡片时后台水合连这个 GET 也跳过，因为它在后端可能触发首屏补池；
+    // replace=false 且列表为空时才装填，明确刷新仍可替换。
     async function hydrateFromBackend({ replaceRecommendations = false } = {}) {
       const firstRuntimeGeneration = desktopRuntimeGeneration;
       let runtimeReconciliationGeneration = null;
@@ -10394,11 +10432,17 @@ ${cardFeedbackBarHtml()}`;
       // cards fan out into saved-status reads, otherwise a healthy 10ms request
       // can sit behind the first-screen connection queue for several seconds.
       const pendingConfirmationsPromise = refreshDesktopPendingConfirmations();
-      const recommendationsPromise = readRecommendationSnapshot();
+      const shouldReadRecommendations = shouldHydrateRecommendationList({ replaceRecommendations });
+      const recommendationsPromise = shouldReadRecommendations
+        ? readRecommendationSnapshot()
+        : Promise.resolve(null);
       const runtimePromise = readRuntimeSnapshot();
 
       const recommendationApplicationPromise = recommendationsPromise.then(
-        (items) => applyInitialRecommendations(items),
+        (items) => {
+          if (items === null) return;
+          applyInitialRecommendations(items);
+        },
         (error) => markDesktopRecommendationFailedAndRecover(error),
       );
       const runtimeApplicationPromise = runtimePromise.then(
@@ -10507,6 +10551,7 @@ ${cardFeedbackBarHtml()}`;
           },
           xiaohongshu: {
             enabled: $("#xhsEnabled").value === "on",
+            incremental_enabled: Boolean(document.getElementById("xhsIncremental")?.checked),
             daily_search_budget: getIntInput("xhsDailySearchBudget", 20),
             daily_creator_budget: getIntInput("xhsDailyCreatorBudget", 0),
             task_interval_seconds: getIntInput("xhsTaskInterval", 1200),
@@ -10514,6 +10559,7 @@ ${cardFeedbackBarHtml()}`;
           },
           douyin: {
             enabled: $("#douyinEnabled").value === "on",
+            incremental_enabled: Boolean(document.getElementById("douyinIncremental")?.checked),
             mode: "direct",
             ...(douyinCookie ? { cookie: douyinCookie } : {}),
             cookie_env: getInput("douyinCookieEnv"),
@@ -10534,6 +10580,7 @@ ${cardFeedbackBarHtml()}`;
           },
           youtube: {
             enabled: $("#youtubeEnabled").value === "on",
+            incremental_enabled: Boolean(document.getElementById("youtubeIncremental")?.checked),
             daily_search_budget: getIntInput("youtubeDailySearchBudget", 0),
             daily_trending_budget: getIntInput("youtubeDailyTrendingBudget", 0),
             daily_channel_budget: getIntInput("youtubeDailyChannelBudget", 0),
@@ -10553,6 +10600,7 @@ ${cardFeedbackBarHtml()}`;
           },
           zhihu: {
             enabled: $("#zhihuEnabled").value === "on",
+            incremental_enabled: Boolean(document.getElementById("zhihuIncremental")?.checked),
             source_modes: collectZhihuSourceModes(),
             daily_search_budget: getIntInput("zhihuDailySearchBudget", 0),
             daily_hot_budget: getIntInput("zhihuDailyHotBudget", 0),
@@ -10564,6 +10612,7 @@ ${cardFeedbackBarHtml()}`;
           },
           reddit: {
             enabled: $("#redditEnabled").value === "on",
+            incremental_enabled: Boolean(document.getElementById("redditIncremental")?.checked),
             backend: getInput("redditBackend") || "rdt",
             ...(redditCookie ? { cookie: redditCookie } : {}),
             source_modes: collectRedditSourceModes(),
@@ -10598,6 +10647,7 @@ ${cardFeedbackBarHtml()}`;
           },
           linuxdo: {
             enabled: $("#linuxdoEnabled").value === "on",
+            incremental_enabled: Boolean(document.getElementById("linuxdoIncremental")?.checked),
             source_modes: collectCheckedValues(LINUXDO_SOURCE_MODE_FIELDS, ["search"]),
             daily_search_budget: getIntInput("linuxdoDailySearchBudget", 0),
             daily_hot_budget: getIntInput("linuxdoDailyHotBudget", 0),
@@ -10610,6 +10660,7 @@ ${cardFeedbackBarHtml()}`;
           },
           v2ex: {
             enabled: $("#v2exEnabled").value === "on",
+            incremental_enabled: Boolean(document.getElementById("v2exIncremental")?.checked),
             username: getInput("v2exUsername"),
             ...(document.getElementById("v2exClearToken")?.checked
               ? { access_token: "" }
@@ -10629,6 +10680,7 @@ ${cardFeedbackBarHtml()}`;
         scheduler: {
           enabled: $("#schedulerEnabled").value === "on",
           pause_on_extension_disconnect: $("#pauseDisconnect").value === "pause",
+          source_incremental_enabled: Boolean(document.getElementById("sourceIncrementalEnabled")?.checked),
           extension_disconnect_grace_seconds: getIntInput("extensionDisconnectGrace", 90),
           pool_target_count: getIntInput("poolTarget", 300),
           account_sync_interval_hours: getIntInput("accountSyncInterval", 6),
@@ -10663,6 +10715,11 @@ ${cardFeedbackBarHtml()}`;
           speculation_max_secondary_interests: getIntInput("speculationMaxSecondary", 60),
           auto_update_enabled: $("#autoUpdate").value === "on",
           auto_update_check_interval_hours: getIntInput("autoUpdateInterval", 6)
+        },
+        soul: {
+          awareness_event_batch_size: getIntInput("awarenessEventBatchSize", 300),
+          insight_note_batch_size: getIntInput("insightNoteBatchSize", 150),
+          cognition_max_tokens: getIntInput("cognitionMaxTokens", 32768)
         },
         discovery: {
           ...(state.config?.discovery || {}),

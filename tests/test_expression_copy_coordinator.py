@@ -330,3 +330,23 @@ async def test_stale_generation_notification_cannot_wake_replacement() -> None:
     assert new_calls == []
     await new.stop()
     await new_task
+
+
+@pytest.mark.asyncio
+async def test_work_allowed_false_parks_loop_without_drain() -> None:
+    pending = _Pending(8)
+    calls: list[int] = []
+    coordinator = _coordinator(
+        pending,
+        lambda limit: calls.append(limit) or limit,
+        work_allowed=lambda: False,
+    )
+    task = asyncio.create_task(coordinator.run_forever())
+    coordinator.notify("candidate_admitted")
+    await asyncio.sleep(0.05)
+
+    assert calls == []
+    assert coordinator.status_payload()["expression_batch_state"] == "paused"
+
+    await coordinator.stop()
+    await task

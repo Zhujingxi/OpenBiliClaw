@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import time
 from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -523,6 +524,7 @@ class ContinuousRefreshController:
     # exhausted retries on the first half-hour.
     _init_grace_consumed: bool = False
     _last_llm_gate_allowed: bool = field(default=True, init=False)
+    _last_llm_budget_warned_at: float = field(default=-float("inf"), init=False, repr=False)
     _startup_maintenance_completed: bool = field(default=False, init=False)
     _last_pool_maintenance_succeeded: bool = field(default=False, init=False)
 
@@ -548,6 +550,8 @@ class ContinuousRefreshController:
             except Exception:
                 pass
         allowed = background_llm_work_allowed(self.scheduler_config, self.presence)
+        if allowed:
+            allowed = self._llm_budget_allowed()
         if allowed != self._last_llm_gate_allowed:
             logger.info(
                 "Background LLM work gate %s",
@@ -555,6 +559,47 @@ class ContinuousRefreshController:
             )
             self._last_llm_gate_allowed = allowed
         return allowed
+
+    def _llm_budget_allowed(self) -> bool:
+        """Return whether the daemon's per-window background LLM budget remains.
+
+        The budget is a self-imposed quota (issue #188): scheduler-owned loops
+        count every background LLM request through ``LLMConcurrencyGate`` and
+        pause once the configured window cap is reached. ``max_calls <= 0``
+        disables the guard; a missing gate also keeps the legacy behaviour.
+        """
+        max_calls = int(getattr(self.scheduler_config, "llm_budget_max_calls", 0) or 0)
+        window_seconds = int(
+            getattr(self.scheduler_config, "llm_budget_window_seconds", 3600) or 3600
+        )
+        if max_calls <= 0 or window_seconds <= 0:
+            return True
+        gate = self.llm_concurrency_gate
+        count_getter = getattr(gate, "background_call_count", None)
+        if not callable(count_getter):
+            return True
+        try:
+            count = int(count_getter(window_seconds))
+        except Exception:
+            logger.debug("LLM budget count unavailable; allowing work", exc_info=True)
+            return True
+        if count < max_calls:
+            return True
+
+        now = time.monotonic()
+        if now - self._last_llm_budget_warned_at >= window_seconds:
+            self._last_llm_budget_warned_at = now
+            logger.warning(
+                "Background LLM calls reached %d in the last %d seconds "
+                "(max %d). Automatic discovery/LLM loops are paused until the "
+                "window rolls over; raise scheduler.llm_budget_max_calls or set "
+                "it to 0 to disable this guard, or run manual CLI/API commands "
+                "to continue explicitly.",
+                count,
+                window_seconds,
+                max_calls,
+            )
+        return False
 
     def _xhs_self_nickname(self) -> str:
         """Return the persisted XHS self nickname for pool guards."""

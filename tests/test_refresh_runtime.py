@@ -782,6 +782,46 @@ def test_refresh_controller_llm_work_allowed_delegates_to_shared_gate() -> None:
     assert controller._llm_work_allowed() is False
 
 
+async def test_refresh_controller_pauses_when_background_llm_budget_exceeded(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    gate = LLMConcurrencyGate(4)
+    controller = _controller_with_gate(
+        scheduler_config=SimpleNamespace(
+            enabled=True,
+            pause_on_extension_disconnect=False,
+            llm_budget_max_calls=1,
+            llm_budget_window_seconds=3600,
+        ),
+    )
+    controller.llm_concurrency_gate = gate
+
+    assert controller._llm_work_allowed() is True
+
+    async with gate.slot(caller="soul.preference"):
+        pass
+
+    with caplog.at_level(logging.WARNING):
+        assert controller._llm_work_allowed() is False
+    assert "Background LLM calls reached 1" in caplog.text
+    assert "paused" in caplog.text
+
+
+def test_refresh_controller_budget_disabled_when_max_calls_zero() -> None:
+    gate = LLMConcurrencyGate(4)
+    controller = _controller_with_gate(
+        scheduler_config=SimpleNamespace(
+            enabled=True,
+            pause_on_extension_disconnect=False,
+            llm_budget_max_calls=0,
+            llm_budget_window_seconds=3600,
+        ),
+    )
+    controller.llm_concurrency_gate = gate
+
+    assert controller._llm_work_allowed() is True
+
+
 class _FakeSpeculation:
     def __init__(
         self,

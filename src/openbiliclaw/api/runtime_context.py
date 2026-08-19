@@ -846,6 +846,9 @@ class RuntimeContext:
             preference_prompt_view=str(getattr(soul_cfg, "preference_prompt_view", "legacy")),
             awareness_prompt_view=str(getattr(soul_cfg, "awareness_prompt_view", "compact-v1")),
             insight_prompt_view=str(getattr(soul_cfg, "insight_prompt_view", "legacy")),
+            awareness_event_batch_size=int(getattr(soul_cfg, "awareness_event_batch_size", 300)),
+            insight_note_batch_size=int(getattr(soul_cfg, "insight_note_batch_size", 150)),
+            cognition_max_tokens=int(getattr(soul_cfg, "cognition_max_tokens", 32768)),
             posture_gate_mode=str(getattr(soul_cfg, "posture_gate_mode", "shadow")),
             posture_gate_force_enforce=bool(getattr(soul_cfg, "posture_gate_force_enforce", False)),
             module_overrides=new_module_overrides,
@@ -1535,6 +1538,7 @@ class RuntimeContext:
             safety_wake_seconds=float(
                 getattr(new_config.scheduler, "refresh_check_interval_seconds", 60)
             ),
+            work_allowed=lambda: new_runtime_controller._llm_work_allowed(),  # noqa: SLF001
         )
         new_runtime_controller.expression_copy_coordinator = expression_coordinator
         set_copy_callback = getattr(new_recommendation_engine, "set_copy_pending_callback", None)

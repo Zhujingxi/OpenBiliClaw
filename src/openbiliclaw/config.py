@@ -31,6 +31,7 @@ _SUSPICIOUS_BUDGET_LOW = 1
 _SUSPICIOUS_BUDGET_HIGH = 4
 # Guards the once-per-process warning so repeated config reloads don't spam.
 _warned_budget_keys: set[str] = set()
+_warned_legacy_empty_model_providers: set[str] = set()
 
 # Default config search paths
 _CONFIG_FILENAMES = ["config.toml", "config.local.toml"]
@@ -111,7 +112,29 @@ _DEFAULT_DISCOVERY_LIMIT = 30
 _DEFAULT_DELIGHT_QUEUE_LIMIT = 20
 _DEFAULT_PROACTIVE_PUSH_INTERVAL_SECONDS = 120
 _DEFAULT_SPECULATOR_IDLE_INTERVAL_MINUTES = 30
+# Self-imposed daemon LLM budget (issue #188). The scheduler counts background
+# LLM requests through LLMConcurrencyGate and pauses automatic loops when the
+# fixed window is exhausted. ``0`` disables the budget. 120 calls/hour is a
+# conservative engineering ceiling: it stops runaway multi-platform refresh
+# loops from burning paid quota while leaving normal single-user discovery
+# enough headroom (a full all-platform refresh wave is typically tens of calls).
+_DEFAULT_LLM_BUDGET_MAX_CALLS = 120
+_DEFAULT_LLM_BUDGET_WINDOW_SECONDS = 3600
 _DEFAULT_FEEDBACK_BATCH_THRESHOLD = 3
+# Cognition-cycle context knobs (issue #169). Keep the defaults in sync with
+# the module constants in ``openbiliclaw/soul/cognition_cycle.py``:
+# _AWARENESS_EVENT_BATCH_SIZE, _INSIGHT_NOTE_BATCH_SIZE, _COGNITION_MAX_TOKENS.
+# Small-context local models (e.g. qwen3.8-27B on a 24G card with 80-100K
+# context) should lower these instead of patching the module constants.
+_DEFAULT_COGNITION_AWARENESS_EVENT_BATCH_SIZE = 300
+_MIN_COGNITION_AWARENESS_EVENT_BATCH_SIZE = 10
+_MAX_COGNITION_AWARENESS_EVENT_BATCH_SIZE = 900
+_DEFAULT_COGNITION_INSIGHT_NOTE_BATCH_SIZE = 150
+_MIN_COGNITION_INSIGHT_NOTE_BATCH_SIZE = 10
+_MAX_COGNITION_INSIGHT_NOTE_BATCH_SIZE = 450
+_DEFAULT_COGNITION_MAX_TOKENS = 32768
+_MIN_COGNITION_MAX_TOKENS = 1024
+_MAX_COGNITION_MAX_TOKENS = 128000
 _MIN_AUTO_UPDATE_CHECK_INTERVAL_HOURS = 1
 _DEFAULT_AUTO_UPDATE_CHECK_INTERVAL_HOURS = 6
 # Unified keyword planner (Discover backpressure refactor P1, spec §6).
@@ -543,17 +566,34 @@ def _legacy_provider_is_visible(
         referenced.add(str(route.provider or "").strip().lower())
     if provider_type in referenced:
         return True
+
+    model = str(provider.model or "").strip()
     if str(provider.api_key or "").strip():
-        return True
+        if model:
+            return True
+        if provider_type not in _warned_legacy_empty_model_providers:
+            _warned_legacy_empty_model_providers.add(provider_type)
+            logger.warning(
+                "config: [llm.%s] has api_key but empty model; "
+                "not projecting it as a legacy instance",
+                provider_type,
+            )
+        return False
     if provider_type == "openai" and str(provider.auth_mode or "").strip().lower() == "codex_oauth":
         return True
     if provider_type == "gemini" and bool(
         os.environ.get("GOOGLE_API_KEY", "").strip() or os.environ.get("GEMINI_API_KEY", "").strip()
     ):
-        return True
-    return provider_type == "ollama" and bool(
-        str(provider.model or "").strip() or str(provider.base_url or "").strip()
-    )
+        if model:
+            return True
+        if provider_type not in _warned_legacy_empty_model_providers:
+            _warned_legacy_empty_model_providers.add(provider_type)
+            logger.warning(
+                "config: [llm.gemini] has environment API key but empty model; "
+                "not projecting it as a legacy instance",
+            )
+        return False
+    return provider_type == "ollama" and bool(model or str(provider.base_url or "").strip())
 
 
 def effective_llm_instances(llm: LLMConfig) -> dict[str, LLMInstanceConfig]:
@@ -948,6 +988,12 @@ class SchedulerConfig:
     enabled: bool = True
     pause_on_extension_disconnect: bool = False
     extension_disconnect_grace_seconds: int = _DEFAULT_EXTENSION_DISCONNECT_GRACE_SECONDS
+    # Self-imposed per-window cap on daemon-owned background LLM calls. When
+    # the cap is reached, ``ContinuousRefreshController`` pauses automatic
+    # LLM/embedding loops until the window rolls over (or the user raises/clears
+    # the cap / restarts the daemon). ``0`` disables the guard.
+    llm_budget_max_calls: int = _DEFAULT_LLM_BUDGET_MAX_CALLS
+    llm_budget_window_seconds: int = _DEFAULT_LLM_BUDGET_WINDOW_SECONDS
     discovery_cron: str = "0 */8 * * *"
     pool_target_count: int = 300
     copy_ready_target_count: int = _DEFAULT_COPY_READY_TARGET_COUNT
@@ -1139,6 +1185,10 @@ class XiaohongshuSourceConfig:
     # XHS is opt-in because it requires the browser extension and a logged-in
     # browser session. Init --yes-xhs or the settings page can enable it later.
     enabled: bool = False
+    # Extension-online periodic account bootstrap is opt-in per source. It may
+    # open a foreground browser tab, so it defaults to off even when the global
+    # scheduler.source_incremental_enabled master switch is on.
+    incremental_enabled: bool = False
     # Max Soul-driven search tasks the backend may enqueue per day.
     daily_search_budget: int = 20
     # Max creator-subscription fetch tasks per day.
@@ -1163,6 +1213,9 @@ class DouyinSourceConfig:
     """
 
     enabled: bool = False
+    # Per-source periodic account bootstrap switch. Defaults off; the global
+    # scheduler.source_incremental_enabled master must also be enabled.
+    incremental_enabled: bool = False
     mode: str = "direct"
     cookie_env: str = "OPENBILICLAW_DOUYIN_COOKIE"
     daily_search_budget: int = 0
@@ -1186,6 +1239,9 @@ class YoutubeSourceConfig:
     """
 
     enabled: bool = False
+    # Per-source periodic account bootstrap switch. Defaults off; the global
+    # scheduler.source_incremental_enabled master must also be enabled.
+    incremental_enabled: bool = False
     daily_search_budget: int = 0
     daily_trending_budget: int = 0
     daily_channel_budget: int = 0
@@ -1225,6 +1281,9 @@ class ZhihuSourceConfig:
     """
 
     enabled: bool = False
+    # Per-source periodic account bootstrap switch. Defaults off; the global
+    # scheduler.source_incremental_enabled master must also be enabled.
+    incremental_enabled: bool = False
     source_modes: tuple[str, ...] = ("search", "hot", "feed", "creator", "related")
     daily_search_budget: int = 0
     daily_hot_budget: int = 0
@@ -1247,6 +1306,9 @@ class RedditSourceConfig:
     """
 
     enabled: bool = False
+    # Per-source periodic account bootstrap switch. Defaults off; the global
+    # scheduler.source_incremental_enabled master must also be enabled.
+    incremental_enabled: bool = False
     backend: str = "rdt"
     source_modes: tuple[str, ...] = ("search", "hot", "subreddit", "related")
     daily_search_budget: int = 300
@@ -1283,6 +1345,9 @@ class LinuxdoSourceConfig:
     """Linux.do browser-extension discovery and account-signal configuration."""
 
     enabled: bool = False
+    # Per-source periodic account bootstrap switch. Defaults off; the global
+    # scheduler.source_incremental_enabled master must also be enabled.
+    incremental_enabled: bool = False
     source_modes: tuple[str, ...] = ("search", "hot", "feed", "creator", "related")
     daily_search_budget: int = 0
     daily_hot_budget: int = 0
@@ -1299,6 +1364,9 @@ class V2EXSourceConfig:
     """V2EX public discovery configuration with an optional PAT."""
 
     enabled: bool = False
+    # Per-source periodic account bootstrap switch. Defaults off; the global
+    # scheduler.source_incremental_enabled master must also be enabled.
+    incremental_enabled: bool = False
     username: str = ""
     access_token: str = ""
     token_env: str = "OPENBILICLAW_V2EX_TOKEN"
@@ -1526,6 +1594,12 @@ class SoulConfig:
     # (回放门); ``on`` excludes archived topics from that serialization. This is
     # the only "minimal consumption" of the topic state machine in this version.
     topic_lifecycle_serialization: str = "off"
+    # Cognition-cycle prompt/output budgets (issue #169). These are the runtime
+    # knobs for ``openbiliclaw.soul.cognition_cycle``'s module constants and let
+    # small-context local models (qwen3.8-27B etc.) run without patching code.
+    awareness_event_batch_size: int = _DEFAULT_COGNITION_AWARENESS_EVENT_BATCH_SIZE
+    insight_note_batch_size: int = _DEFAULT_COGNITION_INSIGHT_NOTE_BATCH_SIZE
+    cognition_max_tokens: int = _DEFAULT_COGNITION_MAX_TOKENS
 
 
 @dataclass
@@ -2123,6 +2197,7 @@ def _build_config(
         ),
         xiaohongshu=XiaohongshuSourceConfig(
             enabled=bool(xhs_raw.get("enabled", False)),
+            incremental_enabled=bool(xhs_raw.get("incremental_enabled", False)),
             daily_search_budget=int(xhs_raw.get("daily_search_budget", 20)),
             daily_creator_budget=int(xhs_raw.get("daily_creator_budget", 0)),
             task_interval_seconds=int(xhs_raw.get("task_interval_seconds", 1200)),
@@ -2130,6 +2205,7 @@ def _build_config(
         ),
         douyin=DouyinSourceConfig(
             enabled=bool(douyin_raw.get("enabled", False)),
+            incremental_enabled=bool(douyin_raw.get("incremental_enabled", False)),
             mode=str(douyin_raw.get("mode", "direct")),
             cookie_env=str(douyin_raw.get("cookie_env", "OPENBILICLAW_DOUYIN_COOKIE")),
             daily_search_budget=int(douyin_raw.get("daily_search_budget", 0)),
@@ -2140,6 +2216,7 @@ def _build_config(
         ),
         youtube=YoutubeSourceConfig(
             enabled=bool(youtube_raw.get("enabled", False)),
+            incremental_enabled=bool(youtube_raw.get("incremental_enabled", False)),
             daily_search_budget=int(youtube_raw.get("daily_search_budget", 0)),
             daily_trending_budget=int(youtube_raw.get("daily_trending_budget", 0)),
             daily_channel_budget=int(youtube_raw.get("daily_channel_budget", 0)),
@@ -2158,6 +2235,7 @@ def _build_config(
         ),
         zhihu=ZhihuSourceConfig(
             enabled=bool(zhihu_raw.get("enabled", False)),
+            incremental_enabled=bool(zhihu_raw.get("incremental_enabled", False)),
             source_modes=tuple(
                 mode
                 for mode in _coerce_str_list(
@@ -2176,6 +2254,7 @@ def _build_config(
         ),
         reddit=RedditSourceConfig(
             enabled=bool(reddit_raw.get("enabled", False)),
+            incremental_enabled=bool(reddit_raw.get("incremental_enabled", False)),
             backend=str(reddit_raw.get("backend", "rdt") or "rdt"),
             source_modes=tuple(
                 mode
@@ -2221,6 +2300,7 @@ def _build_config(
         ),
         linuxdo=LinuxdoSourceConfig(
             enabled=bool(linuxdo_raw.get("enabled", False)),
+            incremental_enabled=bool(linuxdo_raw.get("incremental_enabled", False)),
             source_modes=tuple(
                 mode
                 for mode in _coerce_str_list(
@@ -2242,6 +2322,7 @@ def _build_config(
         ),
         v2ex=V2EXSourceConfig(
             enabled=bool(v2ex_raw.get("enabled", False)),
+            incremental_enabled=bool(v2ex_raw.get("incremental_enabled", False)),
             username=str(v2ex_raw.get("username", "") or "").strip(),
             access_token=str(v2ex_raw.get("access_token", "") or "").strip(),
             token_env=str(v2ex_raw.get("token_env", "OPENBILICLAW_V2EX_TOKEN") or "").strip()
@@ -2365,6 +2446,24 @@ def _build_config(
         topic_lifecycle_serialization=(
             raw_lifecycle if raw_lifecycle in _TOPIC_LIFECYCLE_SERIALIZATION_MODES else "off"
         ),
+        awareness_event_batch_size=_normalize_scheduler_int(
+            soul_raw.get("awareness_event_batch_size"),
+            default=_DEFAULT_COGNITION_AWARENESS_EVENT_BATCH_SIZE,
+            min_value=_MIN_COGNITION_AWARENESS_EVENT_BATCH_SIZE,
+            max_value=_MAX_COGNITION_AWARENESS_EVENT_BATCH_SIZE,
+        ),
+        insight_note_batch_size=_normalize_scheduler_int(
+            soul_raw.get("insight_note_batch_size"),
+            default=_DEFAULT_COGNITION_INSIGHT_NOTE_BATCH_SIZE,
+            min_value=_MIN_COGNITION_INSIGHT_NOTE_BATCH_SIZE,
+            max_value=_MAX_COGNITION_INSIGHT_NOTE_BATCH_SIZE,
+        ),
+        cognition_max_tokens=_normalize_scheduler_int(
+            soul_raw.get("cognition_max_tokens"),
+            default=_DEFAULT_COGNITION_MAX_TOKENS,
+            min_value=_MIN_COGNITION_MAX_TOKENS,
+            max_value=_MAX_COGNITION_MAX_TOKENS,
+        ),
     )
 
     api_auth = _build_api_auth(api_raw, consult_environment=consult_environment)
@@ -2395,6 +2494,16 @@ def _build_config(
                     "pause_on_extension_disconnect": _coerce_bool(
                         sched_raw.get("pause_on_extension_disconnect"),
                         default=False,
+                    ),
+                    "llm_budget_max_calls": _normalize_scheduler_int(
+                        sched_raw.get("llm_budget_max_calls"),
+                        default=_DEFAULT_LLM_BUDGET_MAX_CALLS,
+                        min_value=0,
+                    ),
+                    "llm_budget_window_seconds": _normalize_scheduler_int(
+                        sched_raw.get("llm_budget_window_seconds"),
+                        default=_DEFAULT_LLM_BUDGET_WINDOW_SECONDS,
+                        min_value=60,
                     ),
                     "profile_consolidation_enabled": _coerce_bool(
                         sched_raw.get("profile_consolidation_enabled"),
@@ -3656,15 +3765,26 @@ def _collect_llm_instance_routing_issues(llm: LLMConfig) -> list[ConfigIssue]:
                 )
             )
         if provider_type == "openai" and auth_mode == "codex_oauth":
-            if not _is_openai_official_base_url(instance.base_url):
+            if not _is_codex_oauth_base_url(instance.base_url):
                 issues.append(
                     ConfigIssue(
                         field=f"{field_prefix}.base_url",
                         message=(
-                            "Codex OAuth 只允许留空 base_url 或使用 OpenAI 官方 API 域名，"
-                            "避免把 ChatGPT token 发送给第三方。"
+                            "Codex OAuth 只允许留空 base_url 或使用官方 Codex 传输端点 "
+                            "`https://chatgpt.com/backend-api`，避免把 ChatGPT token "
+                            "发送给第三方中转站或 OpenAI Platform API。"
                         ),
                         severity="blocking",
+                    )
+                )
+            if flavor and flavor != "responses":
+                issues.append(
+                    ConfigIssue(
+                        field=f"{field_prefix}.api_flavor",
+                        message=(
+                            '`auth_mode = "codex_oauth"` 使用独立的 Codex ChatGPT '
+                            "传输通道，`api_flavor` 会被忽略；无需设置。"
+                        ),
                     )
                 )
             try:
@@ -3928,6 +4048,29 @@ def _collect_config_issues(config: Config) -> list[ConfigIssue]:
             )
         )
 
+    for soul_field, min_value, max_value in (
+        (
+            "awareness_event_batch_size",
+            _MIN_COGNITION_AWARENESS_EVENT_BATCH_SIZE,
+            _MAX_COGNITION_AWARENESS_EVENT_BATCH_SIZE,
+        ),
+        (
+            "insight_note_batch_size",
+            _MIN_COGNITION_INSIGHT_NOTE_BATCH_SIZE,
+            _MAX_COGNITION_INSIGHT_NOTE_BATCH_SIZE,
+        ),
+        ("cognition_max_tokens", _MIN_COGNITION_MAX_TOKENS, _MAX_COGNITION_MAX_TOKENS),
+    ):
+        raw_value = getattr(config.soul, soul_field)
+        if not min_value <= int(raw_value) <= max_value:
+            issues.append(
+                ConfigIssue(
+                    field=f"soul.{soul_field}",
+                    message=(f"`soul.{soul_field}` 必须在 {min_value}..{max_value} 之间。"),
+                    severity="blocking",
+                )
+            )
+
     # Before the default-provider early return: embedding validation must run
     # even when default_provider itself is broken.
     for emb_field, emb_value in (
@@ -4129,15 +4272,26 @@ def _collect_config_issues(config: Config) -> list[ConfigIssue]:
                     message='`auth_mode = "codex_oauth"` 时 `api_key` 会被忽略。',
                 )
             )
-        if not _is_openai_official_base_url(config.llm.openai.base_url):
+        if not _is_codex_oauth_base_url(config.llm.openai.base_url):
             issues.append(
                 ConfigIssue(
                     field="llm.openai.base_url",
                     message=(
-                        '`auth_mode = "codex_oauth"` 只允许留空 base_url '
-                        "或使用 OpenAI 官方 API 域名，避免泄露 ChatGPT token。"
+                        '`auth_mode = "codex_oauth"` 只允许留空 base_url 或使用官方 '
+                        "Codex 传输端点 `https://chatgpt.com/backend-api`，避免把 "
+                        "ChatGPT token 发送给第三方中转站或 OpenAI Platform API。"
                     ),
                     severity="blocking",
+                )
+            )
+        if config.llm.openai.api_flavor.strip().lower() not in {"", "responses"}:
+            issues.append(
+                ConfigIssue(
+                    field="llm.openai.api_flavor",
+                    message=(
+                        '`auth_mode = "codex_oauth"` 使用独立的 Codex ChatGPT '
+                        "传输通道，`api_flavor` 会被忽略；无需设置。"
+                    ),
                 )
             )
         try:
@@ -4309,12 +4463,36 @@ def posture_gate_enforce_readiness_issue(
     )
 
 
-def _is_openai_official_base_url(base_url: str) -> bool:
+_CODEX_OAUTH_ALLOWED_BASE_URL_PATHS = {
+    "",
+    "/backend-api",
+    "/backend-api/v1",
+    "/backend-api/codex",
+    "/backend-api/codex/v1",
+    "/backend-api/codex/responses",
+}
+
+
+def _is_codex_oauth_base_url(base_url: str) -> bool:
+    """Return whether *base_url* is a legal Codex OAuth target.
+
+    Codex OAuth (ChatGPT subscription) tokens MUST only go to the official
+    ``chatgpt.com/backend-api`` Codex transport. The old implementation
+    allowed ``api.openai.com``, where ChatGPT tokens fail with ``Missing
+    scopes: api.responses.write`` — that is intentionally rejected here.
+    """
     raw = base_url.strip()
     if not raw:
         return True
     parsed = urlparse(raw if "://" in raw else f"https://{raw}")
-    return parsed.scheme == "https" and (parsed.hostname or "").lower() == "api.openai.com"
+    path = (parsed.path or "").rstrip("/").lower()
+    return (
+        parsed.scheme == "https"
+        and (parsed.hostname or "").lower() == "chatgpt.com"
+        and path in _CODEX_OAUTH_ALLOWED_BASE_URL_PATHS
+        and not parsed.query
+        and not parsed.fragment
+    )
 
 
 def load_config_with_diagnostics(
@@ -5027,6 +5205,7 @@ def _render_config_toml(
             "",
             "[sources.xiaohongshu]",
             f"enabled = {_toml_bool(config.sources.xiaohongshu.enabled)}",
+            f"incremental_enabled = {_toml_bool(config.sources.xiaohongshu.incremental_enabled)}",
             f"daily_search_budget = {config.sources.xiaohongshu.daily_search_budget}",
             f"daily_creator_budget = {config.sources.xiaohongshu.daily_creator_budget}",
             f"task_interval_seconds = {config.sources.xiaohongshu.task_interval_seconds}",
@@ -5034,6 +5213,7 @@ def _render_config_toml(
             "",
             "[sources.douyin]",
             f"enabled = {_toml_bool(config.sources.douyin.enabled)}",
+            f"incremental_enabled = {_toml_bool(config.sources.douyin.incremental_enabled)}",
             f"mode = {_toml_string(config.sources.douyin.mode)}",
             f"cookie_env = {_toml_string(config.sources.douyin.cookie_env)}",
             f"daily_search_budget = {config.sources.douyin.daily_search_budget}",
@@ -5044,6 +5224,7 @@ def _render_config_toml(
             "",
             "[sources.youtube]",
             f"enabled = {_toml_bool(config.sources.youtube.enabled)}",
+            f"incremental_enabled = {_toml_bool(config.sources.youtube.incremental_enabled)}",
             f"daily_search_budget = {config.sources.youtube.daily_search_budget}",
             f"daily_trending_budget = {config.sources.youtube.daily_trending_budget}",
             f"daily_channel_budget = {config.sources.youtube.daily_channel_budget}",
@@ -5062,6 +5243,7 @@ def _render_config_toml(
             "",
             "[sources.zhihu]",
             f"enabled = {_toml_bool(config.sources.zhihu.enabled)}",
+            f"incremental_enabled = {_toml_bool(config.sources.zhihu.incremental_enabled)}",
             f"source_modes = {_toml_str_list(list(config.sources.zhihu.source_modes))}",
             f"daily_search_budget = {config.sources.zhihu.daily_search_budget}",
             f"daily_hot_budget = {config.sources.zhihu.daily_hot_budget}",
@@ -5073,6 +5255,7 @@ def _render_config_toml(
             "",
             "[sources.reddit]",
             f"enabled = {_toml_bool(config.sources.reddit.enabled)}",
+            f"incremental_enabled = {_toml_bool(config.sources.reddit.incremental_enabled)}",
             f"backend = {_toml_string(config.sources.reddit.backend)}",
             f"source_modes = {_toml_str_list(list(config.sources.reddit.source_modes))}",
             f"daily_search_budget = {config.sources.reddit.daily_search_budget}",
@@ -5097,6 +5280,7 @@ def _render_config_toml(
             "",
             "[sources.linuxdo]",
             f"enabled = {_toml_bool(config.sources.linuxdo.enabled)}",
+            f"incremental_enabled = {_toml_bool(config.sources.linuxdo.incremental_enabled)}",
             f"source_modes = {_toml_str_list(list(config.sources.linuxdo.source_modes))}",
             f"daily_search_budget = {config.sources.linuxdo.daily_search_budget}",
             f"daily_hot_budget = {config.sources.linuxdo.daily_hot_budget}",
@@ -5108,6 +5292,7 @@ def _render_config_toml(
             f"bootstrap_limit = {config.sources.linuxdo.bootstrap_limit}",
             "[sources.v2ex]",
             f"enabled = {_toml_bool(config.sources.v2ex.enabled)}",
+            f"incremental_enabled = {_toml_bool(config.sources.v2ex.incremental_enabled)}",
             f"username = {_toml_string(config.sources.v2ex.username)}",
             f"access_token = {_toml_string(config.sources.v2ex.access_token)}",
             f"token_env = {_toml_string(config.sources.v2ex.token_env)}",
@@ -5144,6 +5329,8 @@ def _render_config_toml(
             "",
             "[scheduler]",
             f"enabled = {_toml_bool(config.scheduler.enabled)}",
+            f"llm_budget_max_calls = {config.scheduler.llm_budget_max_calls}",
+            f"llm_budget_window_seconds = {config.scheduler.llm_budget_window_seconds}",
             "pause_on_extension_disconnect = "
             f"{_toml_bool(config.scheduler.pause_on_extension_disconnect)}",
             "extension_disconnect_grace_seconds = "
@@ -5338,6 +5525,12 @@ def _render_config_toml(
             "# the LLM-facing profile byte-identical; on excludes archived topics.",
             f"topic_lifecycle_serialization = "
             f"{_toml_string(config.soul.topic_lifecycle_serialization)}",
+            "# Cognition-cycle prompt/output budgets (issue #169). Lower these",
+            "# for small-context local models (qwen3.8-27B etc.); defaults are",
+            "# sized for 256k-class providers.",
+            f"awareness_event_batch_size = {max(0, int(config.soul.awareness_event_batch_size))}",
+            f"insight_note_batch_size = {max(0, int(config.soul.insight_note_batch_size))}",
+            f"cognition_max_tokens = {max(0, int(config.soul.cognition_max_tokens))}",
             "",
             "[soul.preference]",
             "# v0.3.x event-satisfaction signal. When true, preference",

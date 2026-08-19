@@ -47,6 +47,7 @@ $env:MODE="docker"; [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePo
 
 > The leading `[Net.ServicePointManager]...Tls12` line is **required on PowerShell 5.1** (the default that ships with Windows 10/11). PS 5.1 defaults to TLS 1.0/1.1, but GitHub.com only accepts TLS 1.2+. Without the prefix, `iwr` fails with "underlying connection was closed" and the user blames the installer. Users on PowerShell 7+ can omit the prefix. Compatible from v0.3.9 forward — the script itself also re-applies the same setting once it starts running, so any subsequent HTTPS calls (git, pip, uv) inside the script are also covered.
 > v0.3.71+ also sets `NO_PROXY/no_proxy=localhost,127.0.0.1,::1` in `install.sh`, `install.ps1`, and `agent_bootstrap.py` before local health checks. This keeps corporate/VPN proxies from intercepting `http://127.0.0.1:<port>/api/health` on native Windows.
+> `install.ps1` captures `git clone`'s stderr before checking its exit code. Windows PowerShell 5.1 can otherwise treat Git's normal progress output as a terminating error when `$ErrorActionPreference=Stop`, leaving a complete clone with no bootstrap. A real clone failure still prints Git's captured diagnostics (issue #177).
 
 Either command:
 
@@ -61,6 +62,7 @@ Either command:
    - **Optional LAN/self-managed HTTPS**: the installer intentionally leaves the TLS proxy disabled and does not add the local-mode `[tls]` extra. Only enable it after asking which exact IP/hostname clients will use. Local source installs run `uv sync --extra tls`, then `uv run openbiliclaw tls-proxy enable --san <IP_OR_HOST>` and start with `uv run openbiliclaw serve-api`. Source Docker installs set comma-separated `OPENBILICLAW_TLS_SAN_NAMES` before `docker compose --profile tls up -d --build`. No remote SAN means localhost-only; this is not a public-Internet production proxy. Do not combine it with the public Caddy overlay. Follow [`docs/https-deployment.md`](https-deployment.md).
 6. Verifies the configured global LLM instance chain and embedding service with real lightweight calls before init; any healthy chat instance satisfies the chain check, while embedding remains an independent check. If either service is unavailable, bootstrap blocks init with `status=service_check_failed`.
    - The chat probe explicitly disables DeepSeek thinking. Every Ollama chat instance requires an explicit `model`; a Base URL or embedding-only `bge-m3` config never implies `llama3`.
+   - When a non-DeepSeek provider is selected, bootstrap automatically disables the shipped empty-key DeepSeek template instance and removes it from `default_chain`; a DeepSeek instance with a configured key remains available as a fallback.
 7. Automatically runs init after credentials, confirmations, and AI service checks are complete, then prints a self-contained **status block** at the very end of stdout:
 
 ```
@@ -375,7 +377,7 @@ python3 scripts/agent_bootstrap.py --llm-preset self-hosted \
   --llm-model meta-llama/Llama-3.3-70B-Instruct ...
 ```
 
-`--llm-base-url` / `--llm-model` 单独传时会**覆盖**对应 preset 字段(per-field override),给你 escape hatch 而不强制走 preset 默认。`--llm-preset` 隐式锁 `--provider=openai`,显式传不同 provider 会冲突报错。
+`--llm-base-url` / `--llm-model` 单独传时会**覆盖**对应 preset 字段(per-field override),给你 escape hatch 而不强制走 preset 默认。`--llm-preset` 隐式锁 `--provider=openai_compatible`（这样中转站 DeepSeek 等模型会走“可关闭 thinking”的通用 OpenAI 兼容适配器，避免 `max_tokens` 被隐藏推理耗尽）；显式传不同 provider 会冲突报错，历史遗留的 `--provider openai` 会被自动 remap 为 `openai_compatible`。
 
 **Why DeepSeek default, not Ollama**: previous versions called Ollama
 "推荐新手 / 白嫖" but in practice CPU inference on a 16 GB Mac is slow

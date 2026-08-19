@@ -180,6 +180,79 @@ def test_legacy_projection_omits_unused_remote_template_blocks() -> None:
     assert effective_llm_default_chain(config.llm) == ["openai_compatible"]
 
 
+def test_legacy_projection_omits_credentialed_provider_with_empty_model() -> None:
+    """A legacy provider with an api_key but no model is a template block.
+
+    Projecting it as an enabled v2 instance made otherwise valid legacy configs
+    impossible to save (blocking ``model`` error). The default provider remains
+    authoritative; the credentialed-but-empty provider is skipped with a hint.
+    """
+    config = Config(
+        llm=LLMConfig(
+            default_provider="openai_compatible",
+            openai=LLMProviderConfig(api_key="sk-openai", model=""),
+            claude=LLMProviderConfig(api_key="sk-claude", model=""),
+            gemini=LLMProviderConfig(model=""),
+            deepseek=LLMProviderConfig(
+                api_key="sk-deepseek",
+                model="deepseek-v4-flash",
+                base_url="https://api.deepseek.com",
+            ),
+            openai_compatible=LLMProviderConfig(
+                api_key="sk-relay",
+                model="deepseek-v4-flash",
+                base_url="https://relay.example/v1",
+            ),
+        )
+    )
+
+    instances = effective_llm_instances(config.llm)
+    blocking = {
+        issue.field: issue.message
+        for issue in _collect_config_issues(config)
+        if issue.severity == "blocking"
+    }
+
+    assert list(instances) == ["deepseek", "openai_compatible"]
+    assert all(instance.model for instance in instances.values())
+    assert "llm.instances.openai.model" not in blocking
+    assert "llm.instances.claude.model" not in blocking
+    assert "llm.instances.gemini.model" not in blocking
+
+
+def test_legacy_projection_keeps_referenced_empty_model_provider_for_validation() -> None:
+    """A referenced provider with empty model must still surface a blocking issue."""
+    config = Config(
+        llm=LLMConfig(
+            default_provider="openai",
+            openai=LLMProviderConfig(api_key="sk-openai", model=""),
+        )
+    )
+
+    instances = effective_llm_instances(config.llm)
+
+    assert list(instances) == ["openai"]
+    assert instances["openai"].model == ""
+
+    # The projected instance still lands in native v2 validation, so a
+    # desktop/API save that routes through instance_routing reports the
+    # missing model instead of silently dropping the provider.
+    native = Config(
+        llm=LLMConfig(
+            instance_routing=True,
+            instances=instances,
+            default_chain=list(instances),
+        )
+    )
+    blocking = {
+        issue.field: issue.message
+        for issue in _collect_config_issues(native)
+        if issue.severity == "blocking"
+    }
+    assert "llm.instances.openai.model" in blocking
+    assert blocking["llm.instances.openai.model"] == "启用的 LLM 实例必须明确填写模型。"
+
+
 def test_native_route_validation_reports_all_reference_failures() -> None:
     config = Config(
         llm=LLMConfig(

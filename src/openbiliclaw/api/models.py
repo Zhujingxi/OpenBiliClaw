@@ -131,6 +131,13 @@ class HealthResponse(BaseModel):
     # may repeat near-identical content under different ids) — the popup
     # turns this into a one-click "enable local Ollama" banner.
     embedding_ready: bool | None = None
+    # issue #170: distinguish "provider registered" from "default model chain
+    # actually callable". ``llm_registered`` mirrors the startup registry
+    # build; ``llm_callable`` is the latest real capability signal where one
+    # exists (currently persisted by ``login codex --import`` for Codex
+    # OAuth). ``None`` means "no live signal yet", not "broken".
+    llm_registered: bool | None = None
+    llm_callable: bool | None = None
 
 
 class ProjectStatsResponse(BaseModel):
@@ -2091,6 +2098,7 @@ class BilibiliSourceConfigOut(BaseModel):
 
 class XiaohongshuSourceConfigOut(BaseModel):
     enabled: bool = False
+    incremental_enabled: bool = False
     daily_search_budget: int = 20
     daily_creator_budget: int = 0
     task_interval_seconds: int = 1200
@@ -2099,6 +2107,7 @@ class XiaohongshuSourceConfigOut(BaseModel):
 
 class DouyinSourceConfigOut(BaseModel):
     enabled: bool = False
+    incremental_enabled: bool = False
     mode: str = "direct"
     # Resolved Cookie header (env override, else data/douyin_cookie.json).
     # Read-only mirror for settings pages — always masked on API reads.
@@ -2114,6 +2123,7 @@ class DouyinSourceConfigOut(BaseModel):
 
 class YoutubeSourceConfigOut(BaseModel):
     enabled: bool = False
+    incremental_enabled: bool = False
     daily_search_budget: int = 0
     daily_trending_budget: int = 0
     daily_channel_budget: int = 0
@@ -2138,6 +2148,7 @@ class TwitterSourceConfigOut(BaseModel):
 
 class ZhihuSourceConfigOut(BaseModel):
     enabled: bool = False
+    incremental_enabled: bool = False
     source_modes: list[str] = Field(
         default_factory=lambda: ["search", "hot", "feed", "creator", "related"]
     )
@@ -2152,6 +2163,7 @@ class ZhihuSourceConfigOut(BaseModel):
 
 class RedditSourceConfigOut(BaseModel):
     enabled: bool = False
+    incremental_enabled: bool = False
     backend: str = "rdt"
     source_modes: list[str] = Field(
         default_factory=lambda: ["search", "hot", "subreddit", "related"]
@@ -2183,6 +2195,7 @@ class BangumiSourceConfigOut(BaseModel):
 
 class LinuxdoSourceConfigOut(BaseModel):
     enabled: bool = False
+    incremental_enabled: bool = False
     source_modes: list[str] = Field(
         default_factory=lambda: ["search", "hot", "feed", "creator", "related"]
     )
@@ -2198,6 +2211,7 @@ class LinuxdoSourceConfigOut(BaseModel):
 
 class V2EXSourceConfigOut(BaseModel):
     enabled: bool = False
+    incremental_enabled: bool = False
     username: str = ""
     access_token_set: bool = False
     token_env: str = "OPENBILICLAW_V2EX_TOKEN"
@@ -2253,6 +2267,8 @@ class SourcesConfigOut(BaseModel):
 
 class SchedulerConfigOut(BaseModel):
     enabled: bool = True
+    llm_budget_max_calls: int = 120
+    llm_budget_window_seconds: int = 3600
     pause_on_extension_disconnect: bool = False
     extension_disconnect_grace_seconds: int = 90
     discovery_cron: str = "0 */8 * * *"
@@ -2305,6 +2321,9 @@ class SoulConfigOut(BaseModel):
     posture_gate_mode: Literal["shadow", "enforce", "off"] = "shadow"
     posture_gate_force_enforce: bool = False
     topic_lifecycle_serialization: Literal["off", "on"] = "off"
+    awareness_event_batch_size: int = Field(default=300, ge=10, le=900)
+    insight_note_batch_size: int = Field(default=150, ge=10, le=450)
+    cognition_max_tokens: int = Field(default=32768, ge=1024, le=128000)
 
 
 class DiscoveryConfigOut(BaseModel):

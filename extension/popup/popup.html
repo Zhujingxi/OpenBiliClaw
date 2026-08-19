@@ -1240,6 +1240,15 @@
       color: var(--text-secondary);
     }
 
+    .delight-reason,
+    .delight-banner-reason,
+    .message-reason,
+    .spec-reason,
+    .delight-response {
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+
     .delight-response {
       padding: 10px 12px;
       border-radius: 16px;
@@ -6544,6 +6553,11 @@
           <span class="source-card-chev" aria-hidden="true">&#x25BE;</span>
         </div>
         <div class="source-card-body" id="sourceCardBody-xiaohongshu">
+        <div class="settings-field-row">
+          <input id="cfgXhsIncremental" type="checkbox">
+          <label for="cfgXhsIncremental">允许扩展周期回拉（可能打开前台标签页）</label>
+        </div>
+        <p class="settings-hint">默认关闭；需同时在「调度」页开启周期回拉总开关。</p>
         <div class="settings-probe-row source-verify-row">
           <button class="settings-secondary-btn source-verify-btn" type="button">测试连接</button>
           <span class="settings-probe-status source-verify-status" aria-live="polite"></span>
@@ -6579,6 +6593,11 @@
           <span class="source-card-chev" aria-hidden="true">&#x25BE;</span>
         </div>
         <div class="source-card-body" id="sourceCardBody-douyin">
+        <div class="settings-field-row">
+          <input id="cfgDouyinIncremental" type="checkbox">
+          <label for="cfgDouyinIncremental">允许扩展周期回拉（可能打开前台标签页）</label>
+        </div>
+        <p class="settings-hint">默认关闭；需同时在「调度」页开启周期回拉总开关。</p>
         <div class="settings-probe-row source-verify-row">
           <button class="settings-secondary-btn source-verify-btn" type="button">测试连接</button>
           <span class="settings-probe-status source-verify-status" aria-live="polite"></span>
@@ -6681,6 +6700,11 @@
           <span class="source-card-chev" aria-hidden="true">&#x25BE;</span>
         </div>
         <div class="source-card-body" id="sourceCardBody-youtube">
+        <div class="settings-field-row">
+          <input id="cfgYoutubeIncremental" type="checkbox">
+          <label for="cfgYoutubeIncremental">允许扩展周期回拉（可能打开前台标签页）</label>
+        </div>
+        <p class="settings-hint">默认关闭；需同时在「调度」页开启周期回拉总开关。</p>
         <div class="settings-probe-row source-verify-row">
           <button class="settings-secondary-btn source-verify-btn" type="button">测试连接</button>
           <span class="settings-probe-status source-verify-status" aria-live="polite"></span>
@@ -6769,6 +6793,11 @@
           <span class="source-card-chev" aria-hidden="true">&#x25BE;</span>
         </div>
         <div class="source-card-body" id="sourceCardBody-zhihu">
+        <div class="settings-field-row">
+          <input id="cfgZhihuIncremental" type="checkbox">
+          <label for="cfgZhihuIncremental">允许扩展周期回拉（可能打开前台标签页）</label>
+        </div>
+        <p class="settings-hint">默认关闭；需同时在「调度」页开启周期回拉总开关。</p>
         <div class="settings-probe-row source-verify-row">
           <button class="settings-secondary-btn source-verify-btn" type="button">测试连接</button>
           <span class="settings-probe-status source-verify-status" aria-live="polite"></span>
@@ -6840,6 +6869,11 @@
           <span class="source-card-chev" aria-hidden="true">&#x25BE;</span>
         </div>
         <div class="source-card-body" id="sourceCardBody-reddit">
+        <div class="settings-field-row">
+          <input id="cfgRedditIncremental" type="checkbox">
+          <label for="cfgRedditIncremental">允许扩展周期回拉（可能打开前台标签页）</label>
+        </div>
+        <p class="settings-hint">默认关闭；需同时在「调度」页开启周期回拉总开关。</p>
         <div class="settings-probe-row source-verify-row">
           <button class="settings-secondary-btn source-verify-btn" type="button">测试连接</button>
           <span class="settings-probe-status source-verify-status" aria-live="polite"></span>
@@ -6976,6 +7010,11 @@
           <span class="source-card-chev" aria-hidden="true">&#x25BE;</span>
         </div>
         <div class="source-card-body" id="sourceCardBody-linuxdo">
+        <div class="settings-field-row">
+          <input id="cfgLinuxdoIncremental" type="checkbox">
+          <label for="cfgLinuxdoIncremental">允许扩展周期回拉（可能打开前台标签页）</label>
+        </div>
+        <p class="settings-hint">默认关闭；需同时在「调度」页开启周期回拉总开关。</p>
         <div class="settings-probe-row source-verify-row">
           <button class="settings-secondary-btn source-verify-btn" type="button">测试连接</button>
           <span class="settings-probe-status source-verify-status" aria-live="polite"></span>
@@ -7011,6 +7050,11 @@
           <span class="source-card-chev" aria-hidden="true">&#x25BE;</span>
         </div>
         <div class="source-card-body" id="sourceCardBody-v2ex">
+        <div class="settings-field-row">
+          <input id="cfgV2exIncremental" type="checkbox">
+          <label for="cfgV2exIncremental">允许扩展周期回拉（可能打开前台标签页）</label>
+        </div>
+        <p class="settings-hint">默认关闭；需同时在「调度」页开启周期回拉总开关。</p>
         <div class="settings-field">
           <label for="cfgV2exAccessToken">PAT（可留空）</label>
           <input id="cfgV2exAccessToken" type="password" maxlength="512" autocomplete="off" placeholder="可留空；匿名公开发现可直接使用">
@@ -7248,6 +7292,11 @@
         </div>
         <p class="settings-hint">开启后会暂停定时发现、候选池预计算和画像更新中的 LLM / embedding 调用；推荐列表不再自动补充，候选池为空时可能暂时没有推荐，建议初始化完成并已有内容后再开启。</p>
         <div class="settings-field-row">
+          <input id="cfgSourceIncrementalEnabled" type="checkbox">
+          <label for="cfgSourceIncrementalEnabled">启用扩展来源周期回拉（总开关）</label>
+        </div>
+        <p class="settings-hint">默认关闭。开启后仍需要到「平台源」页为对应来源单独打开“允许扩展周期回拉”；这些任务可能打开前台标签页抓取账号数据。</p>
+        <div class="settings-field-row">
           <input id="cfgPauseOnDisconnect" type="checkbox">
           <label for="cfgPauseOnDisconnect">关闭浏览器后停止后台</label>
         </div>
@@ -7417,6 +7466,23 @@
           </select>
         </div>
         <p class="settings-hint">经典：仅用合并关键词生成器；混合：在经典基础上再叠加 search-backed 灵感轴链路（最丰富，但同时跑两套，混合最贵）；灵感：完全用灵感轴链路替代经典。</p>
+      </div>
+
+      <div class="settings-section">
+        <h3>认知循环预算</h3>
+        <p class="settings-hint">觉察 / 洞察每轮 LLM 调用的输入批量与输出 token 上限。默认按 256K 上下文模型设计；80-100K 上下文的本地模型（如 qwen3.8-27B）可调小，无需改源码。</p>
+        <div class="settings-field">
+          <label for="cfgAwarenessEventBatchSize">觉察事件批量大小</label>
+          <input id="cfgAwarenessEventBatchSize" type="number" min="10" max="900" step="1" placeholder="300">
+        </div>
+        <div class="settings-field">
+          <label for="cfgInsightNoteBatchSize">洞察笔记批量大小</label>
+          <input id="cfgInsightNoteBatchSize" type="number" min="10" max="450" step="1" placeholder="150">
+        </div>
+        <div class="settings-field">
+          <label for="cfgCognitionMaxTokens">认知输出 token 上限</label>
+          <input id="cfgCognitionMaxTokens" type="number" min="1024" max="128000" step="1" placeholder="32768">
+        </div>
       </div>
       </div>
 

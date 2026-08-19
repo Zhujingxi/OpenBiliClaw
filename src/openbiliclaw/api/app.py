@@ -2652,11 +2652,27 @@ def create_app(
             return None
 
     def _cancel_disabled_source_incremental_tasks(source: str) -> None:
-        """Keep a pre-upgrade periodic row from being claimed after opt-out."""
+        """Keep periodic rows from being claimed after global or per-source opt-out."""
 
+        source_config_attr = {
+            "xhs": "xiaohongshu",
+            "dy": "douyin",
+            "yt": "youtube",
+            "zhihu": "zhihu",
+            "reddit": "reddit",
+            "linuxdo": "linuxdo",
+            "v2ex": "v2ex",
+        }.get(source, source)
         scheduler_cfg = getattr(getattr(ctx, "config", None), "scheduler", None)
-        if bool(getattr(scheduler_cfg, "enabled", True)) and bool(
-            getattr(scheduler_cfg, "source_incremental_enabled", False)
+        sources_cfg = getattr(getattr(ctx, "config", None), "sources", None)
+        source_cfg = (
+            getattr(sources_cfg, source_config_attr, None) if sources_cfg is not None else None
+        )
+        source_disabled = source_cfg is not None and not bool(getattr(source_cfg, "enabled", False))
+        if (
+            bool(getattr(scheduler_cfg, "enabled", True))
+            and bool(getattr(scheduler_cfg, "source_incremental_enabled", False))
+            and not source_disabled
         ):
             return
         scheduler_task_ids: set[str] = set()
@@ -3429,6 +3445,25 @@ def create_app(
             return parsed.replace(tzinfo=UTC)
         return parsed.astimezone(UTC)
 
+    def _confirmation_deferred_until(
+        state: dict[str, Any],
+        *,
+        ref: str,
+    ) -> datetime | None:
+        objects = state.get("objects", {})
+        raw_item = objects.get(ref, {}) if isinstance(objects, dict) else {}
+        item = raw_item if isinstance(raw_item, dict) else {}
+        return _parse_confirmation_timestamp(item.get("deferred_until", ""))
+
+    def _is_confirmation_deferred(
+        state: dict[str, Any],
+        *,
+        ref: str,
+        now: datetime,
+    ) -> bool:
+        deferred_until = _confirmation_deferred_until(state, ref=ref)
+        return deferred_until is not None and now < deferred_until
+
     def _hypothesis_confirmation_items() -> list[dict[str, Any]]:
         from openbiliclaw.soul.identity import build_hash8_map
 
@@ -3515,7 +3550,17 @@ def create_app(
                 str(item.get("ref", "")),
             )
 
-        hypotheses = sorted(_hypothesis_confirmation_items(), key=rank)
+        confirmation_state = _load_dialogue_confirmation_state()
+        now = datetime.now(UTC)
+        hypotheses = [
+            item
+            for item in sorted(_hypothesis_confirmation_items(), key=rank)
+            if not _is_confirmation_deferred(
+                confirmation_state,
+                ref=item["ref"],
+                now=now,
+            )
+        ]
         confusions: list[dict[str, Any]] = []
         confusion_manager = getattr(ctx.soul_engine, "_confusion_manager", None)
         if confusion_manager is not None:
@@ -3594,12 +3639,11 @@ def create_app(
         ref: str,
         now: datetime,
     ) -> bool:
+        if _is_confirmation_deferred(state, ref=ref, now=now):
+            return False
         objects = state.get("objects", {})
         raw_item = objects.get(ref, {}) if isinstance(objects, dict) else {}
         item = raw_item if isinstance(raw_item, dict) else {}
-        deferred_until = _parse_confirmation_timestamp(item.get("deferred_until", ""))
-        if deferred_until is not None and now < deferred_until:
-            return False
         last = _parse_confirmation_timestamp(item.get("last_asked_at", ""))
         return last is None or now - last >= timedelta(hours=_CONFIRMATION_OBJECT_COOLDOWN_HOURS)
 
@@ -4811,19 +4855,87 @@ def create_app(
         snapshot = await project_stats_service.get_snapshot()
         return ProjectStatsResponse.model_validate(snapshot)
 
+    def _health_llm_registered() -> bool:
+        return not bool(getattr(ctx, "degraded", False))
+
+    def _health_llm_callable() -> bool | None:
+        """Best available signal for whether the default model chain works.
+
+        A full live LLM probe on every /api/health poll would burn tokens, so
+        this reads the persisted Codex OAuth capability probe written by
+        ``openbiliclaw login codex --import`` / ``--probe``. For other
+        providers no cheap live signal exists yet → ``None`` (unknown).
+        """
+        cfg = getattr(ctx, "config", None)
+        if cfg is None:
+            return None
+        llm_cfg = getattr(cfg, "llm", None)
+        if llm_cfg is None:
+            return None
+        codex_auth_mode = False
+        if bool(getattr(llm_cfg, "instance_routing", False)):
+            chain = list(getattr(llm_cfg, "default_chain", []) or [])
+            instances = getattr(llm_cfg, "instances", {}) or {}
+            if chain:
+                instance = instances.get(str(chain[0]).strip().lower())
+                if (
+                    instance is not None
+                    and str(getattr(instance, "provider_type", "") or "").strip().lower()
+                    == "openai"
+                ):
+                    codex_auth_mode = (
+                        str(getattr(instance, "auth_mode", "") or "").strip().lower()
+                        == "codex_oauth"
+                    )
+        else:
+            openai_cfg = getattr(llm_cfg, "openai", None)
+            codex_auth_mode = bool(
+                openai_cfg is not None
+                and str(getattr(openai_cfg, "auth_mode", "") or "").strip().lower() == "codex_oauth"
+            )
+        if not codex_auth_mode:
+            return None
+        try:
+            from openbiliclaw.llm.codex_auth import load_codex_credentials
+
+            credentials = load_codex_credentials()
+        except Exception:
+            return False
+        if credentials is None:
+            return False
+        probe = getattr(credentials, "last_probe", None)
+        if probe is None:
+            return None
+        max_age = 7 * 24 * 3600
+        if time.time() - float(getattr(probe, "checked_at", 0) or 0) > max_age:
+            return None
+        return bool(getattr(probe, "ok", False))
+
     @app.get("/api/health", response_model=HealthResponse, response_model_exclude_none=True)
     async def health() -> HealthResponse | JSONResponse:
         profile_ready = _health_profile_ready()
         lan_ip = _health_lan_ip()
         embedding_ready = await _health_embedding_ready()
-        if bool(getattr(ctx, "degraded", False)):
+        llm_registered = _health_llm_registered()
+        llm_callable = _health_llm_callable() if llm_registered else False
+        if bool(getattr(ctx, "degraded", False)) or llm_callable is False:
             body: dict[str, object] = {
                 "status": "degraded",
                 "service": "openbiliclaw-api",
-                "reason": str(getattr(ctx, "degraded_reason", "")),
-                "issues": _degraded_issues_payload(),
                 "embedding_ready": embedding_ready,
+                "llm_registered": llm_registered,
+                "llm_callable": llm_callable,
             }
+            if bool(getattr(ctx, "degraded", False)):
+                body["reason"] = str(getattr(ctx, "degraded_reason", ""))
+                body["issues"] = _degraded_issues_payload()
+            else:
+                body["reason"] = (
+                    "默认模型链已注册，但最近一次 Codex OAuth 能力探测失败："
+                    "当前 ChatGPT/Codex 令牌无法用于 LLM 调用。请运行 "
+                    "`openbiliclaw login codex --status --probe` 获取详情，"
+                    "或改用 OpenAI Platform API Key。"
+                )
             if profile_ready is not None:
                 body["profile_ready"] = profile_ready
             if lan_ip is not None:
@@ -4835,6 +4947,8 @@ def create_app(
             profile_ready=profile_ready,
             lan_ip=lan_ip,
             embedding_ready=embedding_ready,
+            llm_registered=llm_registered,
+            llm_callable=llm_callable,
         )
 
     @app.get("/api/init-status", response_model=InitStatusOut)
@@ -15318,6 +15432,14 @@ def create_app(
 
         _cancel_disabled_source_incremental_tasks("zhihu")
 
+        zhihu_cfg = getattr(
+            getattr(getattr(ctx, "config", None), "sources", None),
+            "zhihu",
+            None,
+        )
+        if not bool(getattr(zhihu_cfg, "enabled", False)):
+            return Response(status_code=204)
+
         if _zhihu_task_queue is None:
             return Response(status_code=204)
         task = _zhihu_task_queue.next_pending(only_ids=_init_owned_ids_filter())
@@ -15913,6 +16035,12 @@ def create_app(
 
         if _yt_task_queue is None:
             return Response(status_code=204)
+        # Issue #178: recover YouTube tasks whose extension claim outlived the
+        # MV3 service worker timeout. Failing the stale lease here (instead of
+        # handing it back via next_pending's stale-reclaim path) keeps a dead
+        # task from being re-claimed forever and blocking fresh work.
+        with suppress(Exception):
+            _yt_task_queue.expire_stale_in_progress(("bootstrap_profile",))
         task = _yt_task_queue.next_pending(only_ids=_init_owned_ids_filter())
         if task is None:
             return Response(status_code=204)
@@ -16627,6 +16755,7 @@ def create_app(
                 ),
                 xiaohongshu=XiaohongshuSourceConfigOut(
                     enabled=cfg.sources.xiaohongshu.enabled,
+                    incremental_enabled=cfg.sources.xiaohongshu.incremental_enabled,
                     daily_search_budget=cfg.sources.xiaohongshu.daily_search_budget,
                     daily_creator_budget=cfg.sources.xiaohongshu.daily_creator_budget,
                     task_interval_seconds=cfg.sources.xiaohongshu.task_interval_seconds,
@@ -16634,6 +16763,7 @@ def create_app(
                 ),
                 douyin=DouyinSourceConfigOut(
                     enabled=cfg.sources.douyin.enabled,
+                    incremental_enabled=cfg.sources.douyin.incremental_enabled,
                     mode=cfg.sources.douyin.mode,
                     cookie=_mask(dy_cookie),
                     cookie_env=cfg.sources.douyin.cookie_env,
@@ -16645,6 +16775,7 @@ def create_app(
                 ),
                 youtube=YoutubeSourceConfigOut(
                     enabled=cfg.sources.youtube.enabled,
+                    incremental_enabled=cfg.sources.youtube.incremental_enabled,
                     daily_search_budget=cfg.sources.youtube.daily_search_budget,
                     daily_trending_budget=cfg.sources.youtube.daily_trending_budget,
                     daily_channel_budget=cfg.sources.youtube.daily_channel_budget,
@@ -16664,6 +16795,7 @@ def create_app(
                 ),
                 zhihu=ZhihuSourceConfigOut(
                     enabled=cfg.sources.zhihu.enabled,
+                    incremental_enabled=cfg.sources.zhihu.incremental_enabled,
                     source_modes=list(cfg.sources.zhihu.source_modes),
                     daily_search_budget=cfg.sources.zhihu.daily_search_budget,
                     daily_hot_budget=cfg.sources.zhihu.daily_hot_budget,
@@ -16675,6 +16807,7 @@ def create_app(
                 ),
                 reddit=RedditSourceConfigOut(
                     enabled=cfg.sources.reddit.enabled,
+                    incremental_enabled=cfg.sources.reddit.incremental_enabled,
                     backend=cfg.sources.reddit.backend,
                     source_modes=list(cfg.sources.reddit.source_modes),
                     daily_search_budget=cfg.sources.reddit.daily_search_budget,
@@ -16699,6 +16832,7 @@ def create_app(
                 ),
                 linuxdo=LinuxdoSourceConfigOut(
                     enabled=cfg.sources.linuxdo.enabled,
+                    incremental_enabled=cfg.sources.linuxdo.incremental_enabled,
                     source_modes=list(cfg.sources.linuxdo.source_modes),
                     daily_search_budget=cfg.sources.linuxdo.daily_search_budget,
                     daily_hot_budget=cfg.sources.linuxdo.daily_hot_budget,
@@ -16711,6 +16845,7 @@ def create_app(
                 ),
                 v2ex=V2EXSourceConfigOut(
                     enabled=cfg.sources.v2ex.enabled,
+                    incremental_enabled=cfg.sources.v2ex.incremental_enabled,
                     username=cfg.sources.v2ex.username,
                     access_token_set=bool(
                         str(os.environ.get(cfg.sources.v2ex.token_env, "") or "").strip()
@@ -16751,6 +16886,8 @@ def create_app(
             ),
             scheduler=SchedulerConfigOut(
                 enabled=cfg.scheduler.enabled,
+                llm_budget_max_calls=cfg.scheduler.llm_budget_max_calls,
+                llm_budget_window_seconds=cfg.scheduler.llm_budget_window_seconds,
                 pause_on_extension_disconnect=cfg.scheduler.pause_on_extension_disconnect,
                 extension_disconnect_grace_seconds=cfg.scheduler.extension_disconnect_grace_seconds,
                 discovery_cron=cfg.scheduler.discovery_cron,
@@ -16868,6 +17005,9 @@ def create_app(
                 posture_gate_mode=cfg.soul.posture_gate_mode,
                 posture_gate_force_enforce=cfg.soul.posture_gate_force_enforce,
                 topic_lifecycle_serialization=cfg.soul.topic_lifecycle_serialization,
+                awareness_event_batch_size=int(cfg.soul.awareness_event_batch_size),
+                insight_note_batch_size=int(cfg.soul.insight_note_batch_size),
+                cognition_max_tokens=int(cfg.soul.cognition_max_tokens),
             ),
             issues=issue_list,
         )
@@ -18189,6 +18329,9 @@ def create_app(
         from openbiliclaw.config import (
             _DEFAULT_ADMISSION_MIN_SCORE,
             _DEFAULT_CANDIDATE_EVAL_CONCURRENCY,
+            _DEFAULT_COGNITION_AWARENESS_EVENT_BATCH_SIZE,
+            _DEFAULT_COGNITION_INSIGHT_NOTE_BATCH_SIZE,
+            _DEFAULT_COGNITION_MAX_TOKENS,
             _DEFAULT_COPY_READY_TARGET_COUNT,
             _DEFAULT_DANMAKU_FETCH_LIMIT,
             _DEFAULT_DANMAKU_MAX_CHARS,
@@ -18201,6 +18344,8 @@ def create_app(
             _DEFAULT_KEYFRAME_FETCH_LIMIT,
             _DEFAULT_KEYFRAME_MAX_FRAMES,
             _DEFAULT_KEYWORD_DIGEST_GRACE_HOURS,
+            _DEFAULT_LLM_BUDGET_MAX_CALLS,
+            _DEFAULT_LLM_BUDGET_WINDOW_SECONDS,
             _DEFAULT_MULTIMODAL_BATCH_SIZE,
             _DEFAULT_MULTIMODAL_IMAGE_MAX_PX,
             _DEFAULT_MULTIMODAL_IMAGE_QUALITY,
@@ -18211,9 +18356,15 @@ def create_app(
             _DEFAULT_SOURCE_INCREMENTAL_HOURS,
             _DEFAULT_SPECULATOR_IDLE_INTERVAL_MINUTES,
             _DEFAULT_TRENDING_REFRESH_MINUTES,
+            _MAX_COGNITION_AWARENESS_EVENT_BATCH_SIZE,
+            _MAX_COGNITION_INSIGHT_NOTE_BATCH_SIZE,
+            _MAX_COGNITION_MAX_TOKENS,
             _MAX_COPY_READY_TARGET_COUNT,
             _MAX_EVAL_MAX_WAIT_SECONDS,
             _MAX_EVAL_MIN_BATCH_SIZE,
+            _MIN_COGNITION_AWARENESS_EVENT_BATCH_SIZE,
+            _MIN_COGNITION_INSIGHT_NOTE_BATCH_SIZE,
+            _MIN_COGNITION_MAX_TOKENS,
             _MIN_COPY_READY_TARGET_COUNT,
             _MIN_EVAL_MAX_WAIT_SECONDS,
             _MIN_EVAL_MIN_BATCH_SIZE,
@@ -18390,6 +18541,10 @@ def create_app(
                 if isinstance(xhs_data, dict):
                     if "enabled" in xhs_data:
                         cfg.sources.xiaohongshu.enabled = _as_bool(xhs_data["enabled"])
+                    if "incremental_enabled" in xhs_data:
+                        cfg.sources.xiaohongshu.incremental_enabled = _as_bool(
+                            xhs_data["incremental_enabled"]
+                        )
                     for key in (
                         "daily_search_budget",
                         "daily_creator_budget",
@@ -18403,6 +18558,10 @@ def create_app(
                 if isinstance(dy_data, dict):
                     if "enabled" in dy_data:
                         cfg.sources.douyin.enabled = _as_bool(dy_data["enabled"])
+                    if "incremental_enabled" in dy_data:
+                        cfg.sources.douyin.incremental_enabled = _as_bool(
+                            dy_data["incremental_enabled"]
+                        )
                     if "mode" in dy_data:
                         cfg.sources.douyin.mode = str(dy_data["mode"])
                     if "cookie_env" in dy_data:
@@ -18460,6 +18619,10 @@ def create_app(
                 if isinstance(yt_data, dict):
                     if "enabled" in yt_data:
                         cfg.sources.youtube.enabled = _as_bool(yt_data["enabled"])
+                    if "incremental_enabled" in yt_data:
+                        cfg.sources.youtube.incremental_enabled = _as_bool(
+                            yt_data["incremental_enabled"]
+                        )
                     for key in (
                         "daily_search_budget",
                         "daily_trending_budget",
@@ -18533,6 +18696,10 @@ def create_app(
                 if isinstance(zh_data, dict):
                     if "enabled" in zh_data:
                         cfg.sources.zhihu.enabled = _as_bool(zh_data["enabled"])
+                    if "incremental_enabled" in zh_data:
+                        cfg.sources.zhihu.incremental_enabled = _as_bool(
+                            zh_data["incremental_enabled"]
+                        )
                     if "source_modes" in zh_data:
                         raw_modes = zh_data["source_modes"]
                         if isinstance(raw_modes, str):
@@ -18564,6 +18731,10 @@ def create_app(
                 if isinstance(reddit_data, dict):
                     if "enabled" in reddit_data:
                         cfg.sources.reddit.enabled = _as_bool(reddit_data["enabled"])
+                    if "incremental_enabled" in reddit_data:
+                        cfg.sources.reddit.incremental_enabled = _as_bool(
+                            reddit_data["incremental_enabled"]
+                        )
                     if "backend" in reddit_data:
                         backend = str(reddit_data["backend"] or "").strip().lower()
                         if backend in {"openbiliclaw", "plugin"}:
@@ -18780,6 +18951,10 @@ def create_app(
                 if isinstance(linuxdo_data, dict):
                     if "enabled" in linuxdo_data:
                         cfg.sources.linuxdo.enabled = _as_bool(linuxdo_data["enabled"])
+                    if "incremental_enabled" in linuxdo_data:
+                        cfg.sources.linuxdo.incremental_enabled = _as_bool(
+                            linuxdo_data["incremental_enabled"]
+                        )
                     if "source_modes" in linuxdo_data:
                         raw_modes = linuxdo_data["source_modes"]
                         if not isinstance(raw_modes, list):
@@ -18846,6 +19021,7 @@ def create_app(
 
                     allowed_v2ex_fields = {
                         "enabled",
+                        "incremental_enabled",
                         "username",
                         "access_token",
                         "token_env",
@@ -18866,6 +19042,8 @@ def create_app(
                     v2ex_cfg = cfg.sources.v2ex
                     if "enabled" in v2ex_data:
                         v2ex_cfg.enabled = _as_bool(v2ex_data["enabled"])
+                    if "incremental_enabled" in v2ex_data:
+                        v2ex_cfg.incremental_enabled = _as_bool(v2ex_data["incremental_enabled"])
                     if "username" in v2ex_data:
                         try:
                             v2ex_cfg.username = validate_v2ex_username(v2ex_data["username"])
@@ -19027,6 +19205,8 @@ def create_app(
                     30,
                     None,
                 ),
+                "llm_budget_max_calls": (_DEFAULT_LLM_BUDGET_MAX_CALLS, 0, None),
+                "llm_budget_window_seconds": (_DEFAULT_LLM_BUDGET_WINDOW_SECONDS, 60, None),
                 "speculator_idle_interval_minutes": (
                     _DEFAULT_SPECULATOR_IDLE_INTERVAL_MINUTES,
                     5,
@@ -19069,6 +19249,8 @@ def create_app(
                 "discovery_limit",
                 "delight_queue_limit",
                 "proactive_push_interval_seconds",
+                "llm_budget_max_calls",
+                "llm_budget_window_seconds",
                 "speculator_idle_interval_minutes",
                 "speculation_interval_minutes",
                 "speculation_ttl_days",
@@ -19355,6 +19537,35 @@ def create_app(
                 cfg.soul.posture_gate_mode = str(sdata["posture_gate_mode"]).strip().lower()
             if "posture_gate_force_enforce" in sdata:
                 cfg.soul.posture_gate_force_enforce = bool(sdata["posture_gate_force_enforce"])
+            soul_int_limits = {
+                "awareness_event_batch_size": (
+                    _DEFAULT_COGNITION_AWARENESS_EVENT_BATCH_SIZE,
+                    _MIN_COGNITION_AWARENESS_EVENT_BATCH_SIZE,
+                    _MAX_COGNITION_AWARENESS_EVENT_BATCH_SIZE,
+                ),
+                "insight_note_batch_size": (
+                    _DEFAULT_COGNITION_INSIGHT_NOTE_BATCH_SIZE,
+                    _MIN_COGNITION_INSIGHT_NOTE_BATCH_SIZE,
+                    _MAX_COGNITION_INSIGHT_NOTE_BATCH_SIZE,
+                ),
+                "cognition_max_tokens": (
+                    _DEFAULT_COGNITION_MAX_TOKENS,
+                    _MIN_COGNITION_MAX_TOKENS,
+                    _MAX_COGNITION_MAX_TOKENS,
+                ),
+            }
+            for soul_int_field, (default, min_value, max_value) in soul_int_limits.items():
+                if soul_int_field in sdata:
+                    setattr(
+                        cfg.soul,
+                        soul_int_field,
+                        _normalize_scheduler_int(
+                            sdata[soul_int_field],
+                            default=default,
+                            min_value=min_value,
+                            max_value=max_value,
+                        ),
+                    )
 
         for field in reset_fields:
             target = _RESETTABLE_CONFIG_FIELDS[field]

@@ -755,6 +755,10 @@
     .reason:focus-visible { outline: none; box-shadow: var(--focus-ring); }
     .reason.is-expanded { overflow: visible; }
     .reason.is-expanded .reason-text { display: block; -webkit-line-clamp: unset; max-height: none; overflow: visible; }
+    .reason-text,
+    #delightReason,
+    .message-item .video-meta,
+    .edit-drift-hint { white-space: pre-wrap; overflow-wrap: anywhere; }
     .card-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
     .video-card .card-actions { display: grid; grid-template-columns: auto minmax(96px, auto); align-items: center; justify-content: space-between; gap: var(--space-3); margin-top: 0; transition: grid-template-columns var(--motion-base) var(--ease-standard), gap var(--motion-base) var(--ease-standard); }
     .video-card .card-actions.is-composing { grid-template-columns: minmax(0, 1fr) 38px; gap: var(--space-2); }

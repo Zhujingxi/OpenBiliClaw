@@ -269,6 +269,9 @@ min_interval_minutes = 3                 # producer 两次入队之间的最小�
 # pool_source_shares 中的 xiaohongshu 配额会被丢弃（不会让池子卡在低于目标）。
 # 默认 false；init 交互式提示选 Yes、--yes-xhs 或插件设置页打开后才会写回 true。
 enabled = false
+# 扩展在线周期回拉开关。默认 false；需要同时开启 [scheduler] source_incremental_enabled。
+# 开启后可能由插件打开前台标签页抓取账号数据。
+incremental_enabled = false
 # 每天后端允许入队的 Soul 驱动搜索任务数上限；默认 20，0 表示不设每日上限。
 daily_search_budget = 20
 # 每天订阅创作者抓取任务上限；0 表示不设每日上限。
@@ -286,6 +289,8 @@ min_interval_minutes = 20                # producer 两次入队之间的最小�
 # 每轮 discovery_limit、producer 节流与 request_interval_seconds 控制。
 [sources.douyin]
 enabled = false
+# 扩展在线周期回拉开关。默认 false；需要同时开启 [scheduler] source_incremental_enabled。
+incremental_enabled = false
 mode = "direct"
 cookie_env = "OPENBILICLAW_DOUYIN_COOKIE"
 daily_search_budget = 0
@@ -302,6 +307,8 @@ min_interval_minutes = 3                 # producer 两次执行最小间隔
 # bootstrap 画像导入仍走浏览器扩展 yt_tasks。
 [sources.youtube]
 enabled = false
+# 扩展在线周期回拉开关。默认 false；需要同时开启 [scheduler] source_incremental_enabled。
+incremental_enabled = false
 daily_search_budget = 0
 daily_trending_budget = 0
 daily_channel_budget = 0
@@ -331,6 +338,8 @@ min_interval_minutes = 3               # producer 两次执行最小间隔
 # enabled=false 时 pool_source_shares 中的 zhihu 配额会被丢弃。
 [sources.zhihu]
 enabled = false
+# 扩展在线周期回拉开关。默认 false；需要同时开启 [scheduler] source_incremental_enabled。
+incremental_enabled = false
 source_modes = ["search", "hot", "feed", "creator", "related"]
 daily_search_budget = 0                 # 搜索 discovery 每日任务上限，0 = 不设每日上限
 daily_hot_budget = 0                    # 热榜 discovery 每日任务上限，0 = 不设每日上限
@@ -350,6 +359,8 @@ min_interval_minutes = 3               # ZhihuDiscoveryProducer 两次执行最�
 # enabled=false 时 pool_source_shares 中的 reddit 配额会被丢弃。
 [sources.reddit]
 enabled = false
+# 扩展在线周期回拉开关。默认 false；需要同时开启 [scheduler] source_incremental_enabled。
+incremental_enabled = false
 backend = "rdt"
 source_modes = ["search", "hot", "subreddit", "related"]
 daily_search_budget = 300               # 搜索 discovery 每日条目上限
@@ -386,6 +397,8 @@ bootstrap_limit = 300
 # 最近阅读，用于画像初始化与周期增量。Cookie 始终留在浏览器内。
 [sources.linuxdo]
 enabled = false
+# 扩展在线周期回拉开关。默认 false；需要同时开启 [scheduler] source_incremental_enabled。
+incremental_enabled = false
 source_modes = ["search", "hot", "feed", "creator", "related"]
 daily_search_budget = 0
 daily_hot_budget = 0
@@ -401,6 +414,8 @@ bootstrap_limit = 300
 # writes. Browser-login bootstrap/favorites are not part of this backend phase.
 [sources.v2ex]
 enabled = false
+# 扩展在线周期回拉开关。默认 false；需要同时开启 [scheduler] source_incremental_enabled。
+incremental_enabled = false
 username = ""
 access_token = ""
 token_env = "OPENBILICLAW_V2EX_TOKEN"
@@ -442,6 +457,14 @@ min_interval_minutes = 10
 [scheduler]
 # Enable scheduled content discovery
 enabled = true
+# Self-imposed background LLM call budget (issue #188). The daemon counts
+# scheduler-owned LLM requests through the shared concurrency gate; when
+# max_calls is reached inside window_seconds, automatic discovery loops pause
+# until the window rolls over (manual CLI/API commands still work). Embedding
+# endpoint outages are handled separately by EmbeddingService's circuit breaker.
+# 0 disables this guard. Defaults are deliberately conservative for paid APIs.
+llm_budget_max_calls = 120
+llm_budget_window_seconds = 3600
 # Optional cost-saving guard for daemon-owned background LLM / embedding work.
 # When true, refresh / pool precompute / account sync / speculation / proactive
 # push only run while the browser extension has an active runtime-stream
@@ -700,6 +723,14 @@ unmanaged_max_age_days = 30
 preference_prompt_view = "legacy"
 awareness_prompt_view = "compact-v1"
 insight_prompt_view = "legacy"
+
+# Cognition-cycle prompt/output budgets (issue #169). The defaults are sized
+# for 256k-class providers. Small-context local models (e.g. qwen3.8-27B on a
+# 24G card with 80-100K context) should lower these instead of patching
+# src/openbiliclaw/soul/cognition_cycle.py.
+# awareness_event_batch_size = 300   # events per awareness LLM call (10..900)
+# insight_note_batch_size = 150      # awareness notes per insight LLM call (10..450)
+# cognition_max_tokens = 32768       # max output tokens per cognition call (1024..128000)
 
 [soul.preference]
 # v0.3.x event-satisfaction signal.

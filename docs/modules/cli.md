@@ -23,7 +23,7 @@ openbiliclaw [--log-level DEBUG|INFO|WARNING|ERROR] <命令>
 | `health-check` | 检查 LLM Provider 可用性 | ✅ |
 | `auth login` | 设置并验证 B 站 Cookie | ✅ |
 | `auth status` | 查看认证状态 | ✅ |
-| `login codex` | 导入 / 查看 / 删除 Codex CLI 的 ChatGPT OAuth 凭据（实验） | ✅ |
+| `login codex` | 导入 / 探测 / 查看 / 删除 Codex CLI 的 ChatGPT OAuth 凭据（实验） | ✅ |
 | `browser status` | 检查 agent-browser 安装 | ✅ |
 | `browser open <url>` | 通过浏览器打开页面 | ✅ |
 | `browser content <url>` | 获取页面文本内容 | ✅ |
@@ -257,12 +257,21 @@ $ openbiliclaw login codex --import
 # 从指定路径导入
 $ openbiliclaw login codex --import --source ~/.codex/auth.json
 
-# 查看状态；不会显示 token 明文
+# 查看状态；不会显示 token 明文，且会展示最近一次 LLM 能力探测结果
 $ openbiliclaw login codex --status
+
+# 查看状态并立即执行一次真实 LLM 能力探测（结果写回本地凭据文件）
+$ openbiliclaw login codex --status --probe
 
 # 删除 OpenBiliClaw 本地副本，不会删除 Codex CLI 自己的登录态
 $ openbiliclaw login codex --logout
 ```
+
+`login codex --import` 会在导入后自动执行一次真实 LLM 能力探测（模型取自当前
+`[llm.openai].model`；留空时自动从 `chatgpt.com/backend-api/codex/models`
+发现账号可用的 Codex 后端模型，发现失败则回退 `gpt-5.4`），并把结果持久化到
+本地凭据文件；若令牌只能登录 Codex CLI、不能调用 LLM 传输层，CLI 会明确提示
+改用 OpenAI Platform API Key，而不是等到 init 才遇到 401。
 
 启用方式：
 
@@ -274,10 +283,14 @@ enabled = true
 auth_mode = "codex_oauth"
 api_key = ""
 base_url = ""
-model = "gpt-5-nano"
+model = "gpt-5.4"
 ```
 
-这是非官方实验路径，OpenAI / Codex CLI 可能随时调整 token 权限或文件格式。`codex_oauth` 下 `base_url` 只能留空或指向 OpenAI 官方 API 域名，避免把 ChatGPT OAuth token 发给第三方代理。
+> Codex OAuth 通道要求 Codex 后端模型（如 `gpt-5.4` / `gpt-5.5` /
+> `gpt-5.6-*` / `gpt-5.3-codex-spark`），Platform API 模型（如
+> `gpt-5-nano`）会被该通道以 HTTP 400 拒绝。
+
+这是非官方实验路径，OpenAI / Codex CLI 可能随时调整 token 权限或文件格式。`codex_oauth` 下 `base_url` 只能留空或指向官方 Codex 传输端点 `https://chatgpt.com/backend-api`；请求走官方 Codex CLI 同款 `backend-api/codex/responses` 通道，不会把 ChatGPT OAuth token 发给第三方代理或 `api.openai.com`。
 
 ### `openbiliclaw browser status`
 
@@ -855,6 +868,7 @@ Cookie 只存在你本机 data/bilibili_cookie.json，不会上传任何地方�
 
 > **「OpenAI 官方」≠「OpenAI 协议兼容服务」**：向导把这俩拆成独立菜单项。选 3 时只问 API Key，base_url 走 `https://api.openai.com/v1`；选 2 时进入协议兼容 preset 子菜单（中转站 / Kimi / MiniMax / 通义 / 智谱 / Yi / Azure / vLLM / 自定义）。向导会复用同类型且配置一致的现有实例，否则创建新的 `[llm.instances.<id>]`，并把它提升到 `default_chain` 首位；不会删除用户已经配置的其他渠道。
 >
+> 当 `agent_bootstrap` 通过 `--provider` 或 `--llm-preset` 选择非 DeepSeek provider 时，会自动停用样例中无 API Key 的 DeepSeek 实例并将其从 `default_chain` 移除，避免 `init` 因未配置的默认实例失败；已填写 API Key 的 DeepSeek 备选实例会保留。
 > **DeepSeek 排第一**是有意为之：它是当前最低摩擦路径，国内可直连且费用接近忽略不计。
 >
 > **本地 Ollama 不再作为聊天 provider 出现在菜单里（v0.3.176+）**：随装的 Ollama 定位是 embedding（bge-m3），聊天模型需自行 `ollama pull` 且小模型跑内容管线质量不达标。后端注册表与桌面设置页仍支持 Ollama chat 实例，供进阶用户使用；旧 `default_provider = "ollama"` 或显式 flag 也仍被接受，交互式向导只是不再主动提供它。同一口径也适用于 `scripts/agent_bootstrap.py` 的人类安装菜单。

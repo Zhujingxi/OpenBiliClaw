@@ -18,11 +18,12 @@ Discovery 配置响应与更新白名单同时公开 `keyword_digest_grace_hours
 runtime apply。`0` 是只关闭跨 digest 关键词复用的回滚值，不会关闭统一 planner 或删除历史行。
 
 账号增量配置中的 `scheduler.source_incremental_enabled` 默认返回 `false`。旧配置没有该字段时
-也按关闭处理；只有通过 `PUT /api/config` 或 TOML 显式设为 `true`，runtime 才会按
+也按关闭处理；每个来源还公开 `sources.<slug>.incremental_enabled`（默认 `false`）。只有通过
+`PUT /api/config` 或 TOML 显式把总开关设为 `true`，且对应来源开关也为 `true`，runtime 才会按
 `source_incremental_hours` 和逐源覆盖自动创建扩展账号任务。关闭态在 presence 检查前返回，
-不会打开或切换平台标签页；领取端还会把升级前残留的周期任务标记失败，手动任务不受影响。
+不会打开或切换平台标签页；关闭某来源时其 scheduler-owned 待执行任务会被标记失败，手动任务不受影响。
 `scheduler.douyin_incremental_hours` 仍额外默认 `0`，省略或发送
-`null` 都保持抖音关闭。总开关与周期字段都不控制手动初始化、手动 `fetch-*` 或正常 discovery。
+`null` 都保持抖音关闭。总开关、来源开关与周期字段都不控制手动初始化、手动 `fetch-*` 或正常 discovery。
 
 ## 配置保存与后台应用
 
@@ -203,6 +204,12 @@ Linux.do 站点访问全部发生在真实 `linux.do` task tab 内，且只允�
 | `POST /api/sources/xhs/observed-urls` | ✅ | URL-only 与带 note metadata 两条分支都接受 `/explore/{id}`、旧 `/discovery/item/{id}` 和 `/search_result/{id}` 三种笔记路由；`/search_result?keyword=...` 搜索列表页本身不计入 accepted。metadata 继续进入 `discovery_candidates`，URL-only 继续写 observed ledger 并参与 token 回填。 |
 | `GET /api/sources/status` | ✅ | 来源仍开启且冷却生效时，将小红书 legacy 状态投影为 `state="rate_limited"`、`feed_paused=true` 并显示连续触发轮次和剩余分钟；来源已关闭时不让冷却覆盖 `enabled=false` 的正交配置事实。该端点只读本地状态，不访问小红书。 |
 
+## 知乎任务边界
+
+| 方法与路径 | 状态 | 契约 |
+|---|---|---|
+| `GET /api/sources/zhihu/next-task` | ✅ | native-save job 仍是用户显式动作；自动 bootstrap / discovery 在每次 claim 前动态检查 `sources.zhihu.enabled` 与全局 scheduler / 增量总开关。来源关闭时返回 bodyless 204，scheduler-owned 的增量任务会被标记 `failed`（避免卡住其它来源的调度），手动 pending 任务保留为 `pending`，重新开启后可继续领取；扩展因此不会因已排队任务打开知乎前台页。 |
+
 ## 对话确认端点
 
 ### Turn 级上下文绑定（2026-08-01）
@@ -224,7 +231,7 @@ row；相同 `turn_id` 的同一 normalized request 仍幂等，任何 relation/
 | `GET /api/chat/contexts/{reply_to_turn_id}` | ✅ | 只读返回 canonical context preview（target、kind/ref/generation、可读 evidence、digest）。不创建 queue job、anchor、event，也不修改 card；三端只持久化 target ID，并用 preview 校验恢复。 |
 | `GET /api/chat/turns?session=<label>` | ✅ | `session` 只过滤当前 UI 可见 turn；插件、移动 Web、桌面 Web 的主聊天统一使用 `session=popup` 并读取完整 `chat/hypothesis/confusion` 可见历史，因此三端共享普通消息、确认卡和澄清问题；其它 session 仍可用于隔离集成。不同 UI 仍共享一份认知 history。列表中的每个非终态卡片只 submit `card.reconcile` 到唯一结算队列并返回本次 durable 快照；request task 不直接写 card/object/anchor。 |
 | `GET /api/chat/turns/{turn_id}` | ✅ | 返回单个 durable turn。普通 turn 仍为 pending 时只幂等唤醒同一 reply worker，重复轮询不会复制 queued/in-flight/backoff 工作。若读到非终态卡片，只同步 admission `card.reconcile` 并立即返回快照。worker 会为 `applied=1` receipt 补 stable audit、跨 session projection 与 exact-generation 解锚，也会把没有对应 active anchor 的 orphan `discussing` 校正回 `pending`；因此 publication gap 的第一次 GET 可仍见旧态，queue 完成后的下一次 GET 见权威状态。 |
-| `GET /api/chat/pending-confirmations` | ✅ | 读取前在 settlement worker 空闲时扫描 orphan claim：只有 `clarifying` claim 已超过 30 秒创建安全窗、ask-turn identity 未变化、且 durable turn 仍不存在时才释放；worker 正忙时跳过该次修复并直接返回 durable 快照，避免只读 UI 被长 LLM job 卡住，下一次空闲读取/open 会继续修复。随后返回 `{"count":N,"items":[...]}`；只列未结算的高优先级对象且最多 3 条：未验证假设 `confidence>=0.60`、active 疑惑 `interpretation_confidence>=0.50`。无活跃澄清时疑惑固定预留 1 席；已有全局 `clarifying` 时只保留该持有者，隐藏必然无法 claim 的其它 open 疑惑。UI 传 `?session=popup|webui` 后，若该持有者已在本 session 有 turn，则不重复显示；其它 session 仍可打开同一 ref 并获得本地 turn。`?count_only=1` 保留轻量只读响应 `{"count":N}`，供兼容客户端/诊断使用；当前 service worker 明确不调用它，工具栏角标只表达后端不可达或未初始化，待聊数字只在 popup、移动 Web 与桌面 Web 的对话入口显示。`openbiliclaw questions` 读取完整响应且不复制筛选规则。用户主动列表不套用系统冷却。 |
+| `GET /api/chat/pending-confirmations` | ✅ | 读取前在 settlement worker 空闲时扫描 orphan claim：只有 `clarifying` claim 已超过 30 秒创建安全窗、ask-turn identity 未变化、且 durable turn 仍不存在时才释放；worker 正忙时跳过该次修复并直接返回 durable 快照，避免只读 UI 被长 LLM job 卡住，下一次空闲读取/open 会继续修复。随后返回 `{"count":N,"items":[...]}`；只列未结算的高优先级对象且最多 3 条：未验证假设 `confidence>=0.60`、active 疑惑 `interpretation_confidence>=0.50`。已 defer 的假设在 `deferred_until` 到期前不进入该列表，到期后自动恢复；用户主动 open 仍按“手动绕过冷却”处理。无活跃澄清时疑惑固定预留 1 席；已有全局 `clarifying` 时只保留该持有者，隐藏必然无法 claim 的其它 open 疑惑。UI 传 `?session=popup|webui` 后，若该持有者已在本 session 有 turn，则不重复显示；其它 session 仍可打开同一 ref 并获得本地 turn。`?count_only=1` 保留轻量只读响应 `{"count":N}`，供兼容客户端/诊断使用；当前 service worker 明确不调用它，工具栏角标只表达后端不可达或未初始化，待聊数字只在 popup、移动 Web 与桌面 Web 的对话入口显示。`openbiliclaw questions` 读取完整响应且不复制筛选规则。用户主动列表不套用系统冷却。 |
 | `POST /api/chat/pending-confirmations/{ref}/open` | ✅ | body 为 `{"session":"popup|webui|..."}`。若唯一 settlement worker 正在处理长 LLM job 或处于原子交接，端点在任何 claim/turn 写入前返回 `503 detail.code="dialogue_busy"` 与 `Retry-After: 2`；popup、移动 Web 与桌面 Web 共享 helper，最长按安全热重载窗口自动重试并显示等待态。空闲后，假设生成 completed card；疑惑通过 required `confusion.open.sync` 进入 `clarifying`，再由 required `anchor.establish` 以 `pending_open` 建锚，不使用会超时后继续执行的 1 秒 fast path，因此不会留下“claim 已完成、turn 未创建”的半截状态。相同 `(ref,session)` 原子复用，跨 session 各自产 turn；API 不在 request task 执行 protected mutation。 |
 | `POST /api/chat/cards/{turn_id}/action` | ✅ | body 为 `{"action":"confirm|reject|discuss|defer"}`。四动作分别 submit `settle.hypothesis`、`card.discuss`、`card.defer` 到唯一队列；confirm/reject 与锚定 `support/contradict/revise/answer`、普通 chat settles、legacy endpoint 共用 immutable ref winner。discuss 在 worker 内 `pending→discussing→建锚`，建锚失败立即补偿回 pending；defer 只对 pending/discussing 卡在 worker 内更新卡片/冷却，若卡由 pending-open 建锚但仍保持 `pending`，会按 origin turn 精确释放同代锚，若卡已 confirmed/rejected 则返回权威终态的 `already_settled` 且不写 cooldown。HTTP 最多等本地 job 1 秒，完成保持同步 `200`，队头阻塞返回 `202 processing` 且不会取消已入队 job。 |
 | `POST /api/insights/feedback` | deprecated | 保留旧客户端响应结构和 `Deprecation: true`，内部通过共同 façade submit 同一队列，台账 `source="legacy_endpoint"`；1 秒内未完成时同样返回 HTTP `202`，不新增 legacy 专用 executor。**锚冲突返回 `409`**：当另一张卡片持有对话锚时结算会被拒绝（`outcome=stale_anchor` / `anchor_dependency_failed`），此时 `card_settlements` 与台账都没有写入，端点返回 `409` 并在 detail 里说明原因，`Deprecation` / `Link` 头仍然保留。旧行为把这种拒绝包装成 `200 {"ok":true,"matched":false}`，老客户端会误以为确认成功。 |

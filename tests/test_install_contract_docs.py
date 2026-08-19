@@ -152,9 +152,7 @@ def test_agent_install_llm_menu_numbering_matches_current_options() -> None:
     assert "Present **three top-level options**" not in doc
     assert 'is folded into "Advanced" further down' not in doc
     assert "**Hardware caveat for local Ollama**" in doc
-    assert (
-        "#### Options 3-7 (OpenAI 官方 / Gemini / Claude / OpenRouter / OrcaRouter)"
-    ) in doc
+    assert ("#### Options 3-7 (OpenAI 官方 / Gemini / Claude / OpenRouter / OrcaRouter)") in doc
     assert "#### Option 2 (OpenAI 官方 / Gemini / Claude / OpenRouter)" not in doc
 
 
@@ -230,6 +228,23 @@ def test_installers_can_clone_code_into_existing_packaged_data_root() -> None:
     assert "Test-UserDataOnlyRoot" in install_ps1
     assert "Clone-IntoUserDataRoot" in install_ps1
     assert "_is_user_data_only_root" in bootstrap
+
+
+def test_install_ps1_captures_git_clone_stderr_before_exit_code_check() -> None:
+    install_ps1 = _read("scripts/install.ps1")
+
+    # Windows PowerShell 5.1 can terminate a script with
+    # $ErrorActionPreference=Stop when git writes normal progress to stderr.
+    # Keep both clone paths behind the same guarded invocation so a successful
+    # clone reaches bootstrap and a failed clone still exposes Git diagnostics.
+    assert "function Invoke-GitClone" in install_ps1
+    assert (
+        "git clone --branch $CloneBranch --depth 1 $CloneRepoUrl $Destination "
+        "2> $cloneStderrLog | Out-Host"
+    ) in install_ps1
+    assert "$cloneExitCode = $LASTEXITCODE" in install_ps1
+    assert install_ps1.count("Invoke-GitClone $RepoUrl $Branch") == 2
+    assert "Windows PowerShell 5.1 treats native stderr as a terminating error" in install_ps1
 
 
 def test_install_ps1_starts_with_utf8_bom() -> None:

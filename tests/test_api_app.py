@@ -13180,7 +13180,10 @@ class TestDialogueConfirmationCards:
         assert len(events) == 1
         assert json.loads(events[0]["metadata"])["settlement_ref"] == ref
 
-    def test_defer_persists_cooldown_without_creating_settlement(self, tmp_path: Path) -> None:
+    def test_defer_persists_cooldown_and_hides_from_pending_list(
+        self,
+        tmp_path: Path,
+    ) -> None:
         client, memory, _engine, _dialogue = self._build(tmp_path)
         hypothesis = "用户也许偏爱长视频"
         ref = self._seed_hypothesis(memory, hypothesis)
@@ -13197,6 +13200,34 @@ class TestDialogueConfirmationCards:
         state_path = memory._data_dir / "memory" / "dialogue_confirmation_state.json"
         state = json.loads(state_path.read_text(encoding="utf-8"))
         assert state["objects"][ref]["deferred_until"]
+        pending_refs = {
+            item["ref"] for item in client.get("/api/chat/pending-confirmations").json()["items"]
+        }
+        assert ref not in pending_refs
+
+    def test_defer_expiry_returns_hypothesis_to_pending_list(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        client, memory, _engine, _dialogue = self._build(tmp_path)
+        hypothesis = "冷却结束后可以重新确认"
+        ref = self._seed_hypothesis(memory, hypothesis)
+        self._create_card(client, turn_id="card-defer-expiry", ref=ref, hypothesis=hypothesis)
+
+        deferred = client.post(
+            "/api/chat/cards/card-defer-expiry/action",
+            json={"action": "defer"},
+        )
+        assert deferred.status_code == 200
+        state_path = memory._data_dir / "memory" / "dialogue_confirmation_state.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state["objects"][ref]["deferred_until"] = ""
+        state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+
+        pending_refs = {
+            item["ref"] for item in client.get("/api/chat/pending-confirmations").json()["items"]
+        }
+        assert ref in pending_refs
 
     @pytest.mark.parametrize(
         ("settle_action", "terminal_state"),
@@ -15454,6 +15485,58 @@ class TestEmbeddingAndCompatProviderE2E:
         assert cfg.scheduler.douyin_incremental_hours == 0
         assert reset_douyin.json()["config"]["scheduler"]["douyin_incremental_hours"] == 0
 
+    def test_source_incremental_enabled_per_source_api_round_trip(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig
+
+        cfg = Config(llm=LLMConfig(openai=LLMProviderConfig(api_key="sk-openai")))
+        cfg.sources.xiaohongshu.incremental_enabled = True
+        cfg.sources.douyin.incremental_enabled = True
+        cfg.sources.youtube.incremental_enabled = False
+        cfg.sources.zhihu.incremental_enabled = True
+        cfg.sources.reddit.incremental_enabled = False
+        cfg.sources.linuxdo.incremental_enabled = True
+        cfg.sources.v2ex.incremental_enabled = False
+        client = self._make_client(monkeypatch, tmp_path, cfg)
+
+        initial = client.get("/api/config")
+        assert initial.status_code == 200
+        sources = initial.json()["sources"]
+        assert sources["xiaohongshu"]["incremental_enabled"] is True
+        assert sources["douyin"]["incremental_enabled"] is True
+        assert sources["youtube"]["incremental_enabled"] is False
+        assert sources["zhihu"]["incremental_enabled"] is True
+        assert sources["reddit"]["incremental_enabled"] is False
+        assert sources["linuxdo"]["incremental_enabled"] is True
+        assert sources["v2ex"]["incremental_enabled"] is False
+
+        updated = client.put(
+            "/api/config",
+            json={
+                "sources": {
+                    "xiaohongshu": {"incremental_enabled": False},
+                    "douyin": {"incremental_enabled": False},
+                    "youtube": {"incremental_enabled": True},
+                    "zhihu": {"incremental_enabled": False},
+                    "reddit": {"incremental_enabled": True},
+                    "linuxdo": {"incremental_enabled": False},
+                    "v2ex": {"incremental_enabled": True},
+                },
+                "scheduler": {"source_incremental_enabled": True},
+            },
+        )
+
+        assert updated.status_code == 202
+        assert cfg.sources.xiaohongshu.incremental_enabled is False
+        assert cfg.sources.douyin.incremental_enabled is False
+        assert cfg.sources.youtube.incremental_enabled is True
+        assert cfg.sources.zhihu.incremental_enabled is False
+        assert cfg.sources.reddit.incremental_enabled is True
+        assert cfg.sources.linuxdo.incremental_enabled is False
+        assert cfg.sources.v2ex.incremental_enabled is True
+        assert cfg.scheduler.source_incremental_enabled is True
+
     @pytest.mark.parametrize(
         ("field", "value"),
         [
@@ -15534,6 +15617,46 @@ class TestEmbeddingAndCompatProviderE2E:
         assert cfg.soul.insight_prompt_view == "compact-v1"
         rendered = (tmp_path / "config.toml").read_text(encoding="utf-8")
         assert "cognition_prompt_view" not in rendered
+
+    def test_cognition_budget_knobs_round_trip_through_config_api(
+        self,
+        monkeypatch,
+        tmp_path,
+    ) -> None:
+        from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig
+
+        cfg = Config(llm=LLMConfig(openai=LLMProviderConfig(api_key="sk-openai")))
+        client = self._make_client(monkeypatch, tmp_path, cfg)
+
+        initial = client.get("/api/config")
+        updated = client.put(
+            "/api/config",
+            json={
+                "soul": {
+                    "awareness_event_batch_size": 80,
+                    "insight_note_batch_size": 40,
+                    "cognition_max_tokens": 8192,
+                }
+            },
+        )
+
+        assert initial.status_code == 200
+        initial_soul = initial.json()["soul"]
+        assert initial_soul["awareness_event_batch_size"] == 300
+        assert initial_soul["insight_note_batch_size"] == 150
+        assert initial_soul["cognition_max_tokens"] == 32768
+        assert updated.status_code == 202
+        updated_soul = updated.json()["config"]["soul"]
+        assert updated_soul["awareness_event_batch_size"] == 80
+        assert updated_soul["insight_note_batch_size"] == 40
+        assert updated_soul["cognition_max_tokens"] == 8192
+        assert cfg.soul.awareness_event_batch_size == 80
+        assert cfg.soul.insight_note_batch_size == 40
+        assert cfg.soul.cognition_max_tokens == 8192
+        rendered = (tmp_path / "config.toml").read_text(encoding="utf-8")
+        assert "awareness_event_batch_size = 80" in rendered
+        assert "insight_note_batch_size = 40" in rendered
+        assert "cognition_max_tokens = 8192" in rendered
 
     @pytest.mark.parametrize(("raw_bool", "bad_grace"), [("true", -1), ("on", 0), ("true", "abc")])
     def test_put_config_updates_scheduler_pause_on_extension_disconnect(
@@ -15677,6 +15800,8 @@ class TestEmbeddingAndCompatProviderE2E:
                     "discovery_limit": 17,
                     "delight_queue_limit": 37,
                     "proactive_push_interval_seconds": 155,
+                    "llm_budget_max_calls": 45,
+                    "llm_budget_window_seconds": 1800,
                     "speculator_idle_interval_minutes": 11,
                     "speculation_interval_minutes": 21,
                     "speculation_ttl_days": 8,
@@ -15766,6 +15891,10 @@ class TestEmbeddingAndCompatProviderE2E:
         assert cfg.scheduler.delight_queue_limit == 37
         assert response.json()["config"]["scheduler"]["delight_queue_limit"] == 37
         assert cfg.scheduler.proactive_push_interval_seconds == 155
+        assert cfg.scheduler.llm_budget_max_calls == 45
+        assert cfg.scheduler.llm_budget_window_seconds == 1800
+        assert response.json()["config"]["scheduler"]["llm_budget_max_calls"] == 45
+        assert response.json()["config"]["scheduler"]["llm_budget_window_seconds"] == 1800
         assert cfg.scheduler.speculator_idle_interval_minutes == 11
         assert cfg.scheduler.speculation_interval_minutes == 21
         assert cfg.scheduler.auto_update_enabled is True
