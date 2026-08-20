@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from openbiliclaw.access.models import AccessHandle, Permission
@@ -21,7 +22,7 @@ from .manifest import VIDEO_KIND, YOUTUBE_ID
 from .models import YouTubeVideo
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
     from openbiliclaw.content.integration.projections import (
         CardData,
@@ -33,11 +34,16 @@ if TYPE_CHECKING:
     from .client import YouTubeClient
 
 
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
 class YouTubeProvider:
     _MAX_ITEMS = 50
 
-    def __init__(self, client: YouTubeClient) -> None:
+    def __init__(self, client: YouTubeClient, *, clock: Callable[[], datetime] = _utc_now) -> None:
         self._client = client
+        self._clock = clock
 
     async def search(self, query: SearchQuery, access: AccessHandle) -> ContentPage[ContentPreview]:
         self._access(access)
@@ -75,16 +81,16 @@ class YouTubeProvider:
         )
 
     def preview(self, content: NativeContent) -> ContentPreview:
-        return projections.preview(content)
+        return projections.preview(content, self._clock)
 
     def recommendation_candidate(self, content: NativeContent) -> RecommendationCandidate:
-        return projections.recommendation_candidate(content)
+        return projections.recommendation_candidate(content, self._clock)
 
     def search_document(self, content: NativeContent) -> SearchDocument:
-        return projections.search_document(content)
+        return projections.search_document(content, self._clock)
 
     def card_data(self, content: NativeContent) -> CardData:
-        return projections.card_data(content)
+        return projections.card_data(content, self._clock)
 
     async def _page(
         self, operation: str, argument: str, page: PageRequest

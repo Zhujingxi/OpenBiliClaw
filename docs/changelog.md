@@ -6,6 +6,8 @@
 
 ## Unreleased
 
+- Fixed real YouTube search/creator projections for yt-dlp rows without usable publication metadata: documented numeric/`YYYYMMDD` dates stay normalized to aware UTC, unknown dates remain null, and required provenance falls back to the actual UTC projection time.
+
 - Prevented credential replacement after restart from leaving a second exact connection replay available.
 
 - Restored authenticated connections when an exact credential form is resubmitted after graph rebuild: the Access broker now admits one opaque, scope-narrowing replay of a rehydrated handle, re-verifies it, and keeps conflicting or normal duplicate connects rejected.

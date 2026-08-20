@@ -15,6 +15,9 @@ from openbiliclaw.content.integration.projections import (
 from .models import YouTubeVideo
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+    from datetime import datetime
+
     from openbiliclaw.content.integration.native import NativeContent
 
 
@@ -24,15 +27,15 @@ def _payload(content: NativeContent) -> YouTubeVideo:
     return content.payload
 
 
-def _provenance(content: NativeContent) -> ProjectionProvenance:
+def _provenance(content: NativeContent, clock: Callable[[], datetime]) -> ProjectionProvenance:
     return ProjectionProvenance(
         ref=content.ref,
         native_schema_version=content.schema_version,
-        projected_at=_payload(content).published_at,
+        projected_at=_payload(content).published_at or clock(),
     )
 
 
-def preview(content: NativeContent) -> ContentPreview:
+def preview(content: NativeContent, clock: Callable[[], datetime]) -> ContentPreview:
     p = _payload(content)
     return ContentPreview(
         ref=content.ref,
@@ -41,11 +44,13 @@ def preview(content: NativeContent) -> ContentPreview:
         creator_label=p.channel.name if p.channel else None,
         image_url=p.thumbnail_url,
         source_timestamp=p.published_at,
-        provenance=_provenance(content),
+        provenance=_provenance(content, clock),
     )
 
 
-def recommendation_candidate(content: NativeContent) -> RecommendationCandidate:
+def recommendation_candidate(
+    content: NativeContent, clock: Callable[[], datetime]
+) -> RecommendationCandidate:
     p = _payload(content)
     return RecommendationCandidate(
         ref=content.ref,
@@ -53,22 +58,22 @@ def recommendation_candidate(content: NativeContent) -> RecommendationCandidate:
         summary=p.description,
         discovery_reason="youtube:public_api",
         source_timestamp=p.published_at,
-        provenance=_provenance(content),
+        provenance=_provenance(content, clock),
     )
 
 
-def search_document(content: NativeContent) -> SearchDocument:
+def search_document(content: NativeContent, clock: Callable[[], datetime]) -> SearchDocument:
     p = _payload(content)
     return SearchDocument(
         ref=content.ref,
         title=p.title,
         body=p.description or p.title,
         source_timestamp=p.published_at,
-        provenance=_provenance(content),
+        provenance=_provenance(content, clock),
     )
 
 
-def card_data(content: NativeContent) -> CardData:
+def card_data(content: NativeContent, clock: Callable[[], datetime]) -> CardData:
     p = _payload(content)
     return CardData(
         ref=content.ref,
@@ -77,5 +82,5 @@ def card_data(content: NativeContent) -> CardData:
         badge=f"YouTube · {p.duration_seconds}s · {p.view_count} views",
         image_url=p.thumbnail_url,
         source_timestamp=p.published_at,
-        provenance=_provenance(content),
+        provenance=_provenance(content, clock),
     )

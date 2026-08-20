@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Self
 
 if TYPE_CHECKING:
@@ -10,7 +11,8 @@ from yt_dlp.utils import DownloadError
 
 from openbiliclaw.content.integration.errors import ContentIntegrationError, IntegrationErrorCode
 from openbiliclaw.content.integration.manifest import CapabilityKind
-from openbiliclaw.content.providers.youtube.client import YtDlpYouTubeTransport
+from openbiliclaw.content.providers.youtube.capabilities import YouTubeProvider
+from openbiliclaw.content.providers.youtube.client import YouTubeClient, YtDlpYouTubeTransport
 from openbiliclaw.content.providers.youtube.manifest import YOUTUBE_MANIFEST
 from openbiliclaw.content.providers.youtube.models import YouTubePage
 
@@ -81,6 +83,7 @@ async def test_ytdlp_search_maps_flat_entries_and_ends_pagination() -> None:
     assert page.items[0].channel.id == "UC123"
     assert page.items[0].published_at is not None
     assert page.items[0].published_at.isoformat() == "2025-01-02T00:00:00+00:00"
+    assert page.items[0].published_at.utcoffset() is not None
     assert page.next_cursor is None
     options, target = factory.calls[0]
     assert target == "ytsearch5:typed query"
@@ -93,16 +96,57 @@ async def test_ytdlp_search_maps_flat_entries_and_ends_pagination() -> None:
     assert len(factory.calls) == 1
 
 
-async def test_ytdlp_missing_publish_time_is_null_not_epoch() -> None:
-    entry = {key: value for key, value in _ENTRY.items() if key != "upload_date"}
-    factory = FakeFactory({"ytsearch1:undated": {"entries": [entry]}})
+async def test_ytdlp_integer_timestamp_is_normalized_to_utc() -> None:
+    timestamp = 1_735_776_000
+    entry = {**_ENTRY, "timestamp": timestamp, "upload_date": "malformed"}
+    factory = FakeFactory({"ytsearch1:dated": {"entries": [entry]}})
 
     page = YouTubePage.model_validate_json(
-        await YtDlpYouTubeTransport(factory)("search", "undated", "0", 1)
+        await YtDlpYouTubeTransport(factory)("search", "dated", "0", 1)
     )
+
+    assert page.items[0].published_at == datetime.fromtimestamp(timestamp, tz=UTC)
+    assert page.items[0].published_at is not None
+    assert page.items[0].published_at.utcoffset() is not None
+
+
+async def test_ytdlp_missing_publish_time_is_null_with_aware_projection_time() -> None:
+    entry = {key: value for key, value in _ENTRY.items() if key != "upload_date"}
+    factory = FakeFactory({"ytsearch1:undated": {"entries": [entry]}})
+    transport = YtDlpYouTubeTransport(factory)
+    projected_at = datetime(2026, 8, 20, 5, 0, tzinfo=UTC)
+
+    page = YouTubePage.model_validate_json(await transport("search", "undated", "0", 1))
+    provider = YouTubeProvider(YouTubeClient(transport), clock=lambda: projected_at)
+    native = provider.native_from_model(page.items[0])
 
     assert page.items[0].published_at is None
     assert '"published_at":null' in page.model_dump_json()
+    for projection in (
+        provider.preview(native),
+        provider.recommendation_candidate(native),
+        provider.search_document(native),
+        provider.card_data(native),
+    ):
+        assert projection.source_timestamp is None
+        assert projection.provenance.projected_at == projected_at
+        assert projection.provenance.projected_at.utcoffset() is not None
+
+
+async def test_ytdlp_malformed_publish_time_is_not_coerced() -> None:
+    entry = {**_ENTRY, "timestamp": "not-a-timestamp", "upload_date": "2025-01-02"}
+    factory = FakeFactory({"ytsearch1:malformed": {"entries": [entry]}})
+    transport = YtDlpYouTubeTransport(factory)
+    projected_at = datetime(2026, 8, 20, 5, 0, tzinfo=UTC)
+
+    page = YouTubePage.model_validate_json(await transport("search", "malformed", "0", 1))
+    provider = YouTubeProvider(YouTubeClient(transport), clock=lambda: projected_at)
+    preview = provider.preview(provider.native_from_model(page.items[0]))
+
+    assert page.items[0].published_at is None
+    assert preview.source_timestamp is None
+    assert preview.provenance.projected_at == projected_at
+    assert preview.provenance.projected_at.utcoffset() is not None
 
 
 async def test_ytdlp_fetch_and_creator_targets_and_mapping() -> None:
