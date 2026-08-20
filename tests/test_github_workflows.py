@@ -8,9 +8,12 @@ def test_ci_keeps_expensive_platform_tests_manual() -> None:
     workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
 
     assert "expensive_tests:" in workflow
-    assert workflow.count(
-        "if: ${{ github.event_name == 'workflow_dispatch' && inputs.expensive_tests }}"
-    ) == 2
+    assert (
+        workflow.count(
+            "if: ${{ github.event_name == 'workflow_dispatch' && inputs.expensive_tests }}"
+        )
+        == 2
+    )
     assert (
         "run: python -m pytest -q tests/composition/test_composition.py -k entrypoint" in workflow
     )

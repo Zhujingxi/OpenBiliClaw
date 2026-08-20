@@ -6,6 +6,8 @@
 
 ## Unreleased
 
+- Formatted the GitHub Actions regression test to keep the documented Ruff formatting gate green.
+
 - Audited current technical documentation against the production graph: corrected the twelve-provider inventory and fail-closed transport matrix, CLI/config/environment/API contracts, model protocol and reload behavior, web authentication, installer options, restart rehydration, and stale provider/extension claims; removed completed plan files after carrying their current behavior into maintained docs.
 
 - Expanded the in-process CLI to full user-operation parity: source forms/recipes/material, refresh, typed feedback/observations/profile edits, content details and pending-action decisions, conversation reads, runtime health/events/diagnostics, model configuration, secret-safe stdin requests, and JSON setup/archive outputs; replaced stale legacy skills with one CLI agent skill.
