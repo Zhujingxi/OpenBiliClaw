@@ -206,6 +206,7 @@ class AccessService:
                 )
                 connection.handle = handle
                 connection.status = status
+                connection.restored = False
                 return status
 
     async def disconnect(self, provider_id: str, account_id: str | None) -> AccessStatus:

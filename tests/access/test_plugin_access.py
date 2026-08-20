@@ -222,6 +222,29 @@ async def test_rehydrated_service_accepts_one_exact_form_resubmission(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_rehydrated_replace_consumes_exact_connect_replay(tmp_path: Path) -> None:
+    path = tmp_path / "credentials.json"
+    plugin, _first = workflow(path, Verifier())
+    await plugin.submit(material())
+
+    restarted_plugin, restarted = workflow(path, Verifier())
+    await restarted.rehydrate()
+    await restarted_plugin.submit(material(session="replacement"))
+    request = AccessRequest(
+        provider_id="bilibili",
+        permissions=frozenset({Permission.READ_PUBLIC, Permission.READ_PRIVATE, Permission.WRITE}),
+        supported_method_ids=("builtin.manual",),
+    )
+
+    with pytest.raises(AccessUnavailableError, match="already_connected"):
+        await restarted.connect(
+            request,
+            allowed_method_ids=frozenset({"builtin.manual"}),
+            submission={"cookie": "SESSDATA=replacement; bili_jct=csrf-value"},
+        )
+
+
+@pytest.mark.asyncio
 async def test_rehydrated_service_rejects_conflicting_form_resubmission(tmp_path: Path) -> None:
     path = tmp_path / "credentials.json"
     plugin, _first = workflow(path, Verifier())
