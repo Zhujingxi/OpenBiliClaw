@@ -6,7 +6,8 @@
   "dependencies": {
     "@openbiliclaw/api-client": "0.0.0",
     "pinia": "3.0.4",
-    "vue": "3.5.25"
+    "vue": "3.5.25",
+    "vue-i18n": "11.2.8"
   },
   "scripts": {
     "typecheck": "vue-tsc --noEmit -p tsconfig.json",
