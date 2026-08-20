@@ -350,6 +350,7 @@ def build_application(
             query_prefix=query_prefix_for_model(embedding_config.model_name),
         )
     assistant_runtime = None
+    briefs_configured = False
     vision_configured = False
     if settings.model.model_name:
         assert catalog is not None
@@ -400,12 +401,12 @@ def build_application(
                 PREFERENCE_ANALYZER.requirements,
                 (routed_model,),
             ),
-            ModelRoute(
-                BRIEF_AGENT.agent_id,
-                BRIEF_AGENT.requirements,
-                (routed_model,),
-            ),
         ]
+        briefs_configured = routed_model.capabilities.satisfies(BRIEF_AGENT.requirements)
+        if briefs_configured:
+            routes.append(
+                ModelRoute(BRIEF_AGENT.agent_id, BRIEF_AGENT.requirements, (routed_model,))
+            )
         vision_configured = routed_model.capabilities.satisfies(INSPECTION_AGENT.requirements)
         if vision_configured:
             routes.append(
@@ -446,7 +447,7 @@ def build_application(
             policy_journal,
             BriefCompiler(providers.registry.manifests()),
         )
-        if assistant_runtime is not None
+        if assistant_runtime is not None and briefs_configured
         else None
     )
 

@@ -6,6 +6,8 @@
 
 ## Unreleased
 
+- Kept configured models fail-closed on required Assistant and Understanding capabilities while registering optional RecommendationBrief and visual-inspection routes/services only when their declared model requirements are compatible; text-only DeepSeek chat can now build the production graph without pretending structured-output or vision support.
+
 - Aligned the L2 liked-observation helper with the strict recommendation feedback contract by using a neutral payload with no exploration attribution and the default unexposed state.
 
 - Made the sequential L2 E2E harness reuse restored Bilibili access that grants public reads, connecting anonymously only from a disconnected state and failing clearly on insufficient existing scope without replacing credentials.

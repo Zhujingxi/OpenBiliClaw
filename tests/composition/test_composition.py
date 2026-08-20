@@ -589,6 +589,53 @@ def test_model_configuration_wires_assistant_and_understanding_job(
     assert "understanding.analysis" in component._scheduler._jobs
 
 
+def test_deepseek_like_graph_skips_incompatible_optional_model_services(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    capabilities = ModelCapabilities(tools=True, context_tokens=1_000_000, streaming=True)
+
+    def build_model(_factory: object, model_config: ModelInstanceConfig) -> BuiltModel:
+        return BuiltModel(
+            model=TestModel(),
+            instance_id="deepseek:deepseek-chat",
+            provider="deepseek",
+            owner="assistant",
+            declared_capabilities=capabilities,
+            verification=VerifiedCapabilities.unverified(model_config),
+        )
+
+    def optional_service_must_not_be_built(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("incompatible optional service was built")
+
+    monkeypatch.setattr("openbiliclaw.composition.build.ModelFactory.build", build_model)
+    monkeypatch.setattr(
+        "openbiliclaw.composition.build.BriefService", optional_service_must_not_be_built
+    )
+    monkeypatch.setattr(
+        "openbiliclaw.composition.build.InspectionService", optional_service_must_not_be_built
+    )
+    (tmp_path / "models.dev.json").write_bytes(
+        (Path(__file__).parents[1] / "fixtures" / "models.dev.small.json").read_bytes()
+    )
+
+    app = build_application(
+        AppSettings(
+            model={
+                "provider": "deepseek",
+                "model_name": "deepseek-chat",
+                "secret_ref": "vault:cred_" + "a" * 32,
+            }
+        ),
+        options=BuildOptions(data_dir=tmp_path),
+    )
+
+    assert app.services.assistant is not None
+    jobs_component = next(
+        item for item in app.lifecycle._configured if item.component_id == "core.jobs"
+    )
+    assert "understanding.analysis" in cast("Any", jobs_component.component)._scheduler._jobs
+
+
 @pytest.mark.asyncio
 async def test_fail_closed_provider_adapters_raise_without_fake_transport() -> None:
     transport = _UnavailableCredentialTransport()
