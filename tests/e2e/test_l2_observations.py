@@ -7,13 +7,22 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
+from unittest.mock import AsyncMock
 
 import pytest
 
-from openbiliclaw.access.models import AccessRequest, Permission
+from openbiliclaw.access.models import (
+    AccessRequest,
+    AccessStatus,
+    AccessStatusKind,
+    Permission,
+    VerificationResult,
+    VerificationStrength,
+)
+from openbiliclaw.application.reads import SourceStatusResult
 from openbiliclaw.application.record_feedback import RecordFeedbackCommand
 from openbiliclaw.application.record_observation import RecordObservationsCommand
-from openbiliclaw.application.sources import ConnectSourceCommand
+from openbiliclaw.application.sources import ConnectSourceCommand, ConnectSourceResult
 from openbiliclaw.composition.build import BuildOptions, build_application, validated_settings
 from openbiliclaw.content.integration.capabilities import PageRequest
 from openbiliclaw.content.integration.identity import ProviderId
@@ -53,20 +62,32 @@ async def _application() -> Application:
     return application
 
 
-async def _connect_anonymous(application: Application) -> None:
-    facade = application.services.facade
-    assert facade is not None
-    await facade.connect_source(
-        ConnectSourceCommand(
-            idempotency_key=f"e2e:l2:anonymous:{uuid.uuid4().hex}",
-            request=AccessRequest(
-                provider_id="bilibili",
-                permissions=frozenset({Permission.READ_PUBLIC}),
-                supported_method_ids=("builtin.anonymous",),
-            ),
-            allowed_method_ids=frozenset({"builtin.anonymous"}),
+async def _ensure_public_access(facade: CompositionFacade) -> None:
+    status = (await facade.source_status("bilibili", None)).status
+    if status.state is AccessStatusKind.DISCONNECTED:
+        status = (
+            await facade.connect_source(
+                ConnectSourceCommand(
+                    idempotency_key=f"e2e:l2:anonymous:{uuid.uuid4().hex}",
+                    request=AccessRequest(
+                        provider_id="bilibili",
+                        permissions=frozenset({Permission.READ_PUBLIC}),
+                        supported_method_ids=("builtin.anonymous",),
+                    ),
+                    allowed_method_ids=frozenset({"builtin.anonymous"}),
+                )
+            )
+        ).status
+    verification = status.verification
+    if (
+        status.state is not AccessStatusKind.CONNECTED
+        or verification is None
+        or Permission.READ_PUBLIC not in verification.granted_permissions
+    ):
+        raise AssertionError(
+            "L2 requires connected Bilibili access granting read_public; "
+            f"got state={status.state.value}"
         )
-    )
 
 
 def _observation_id() -> str:
@@ -108,12 +129,66 @@ def _liked(ref: ContentRef, key: str, now: datetime) -> RecommendationLikedObser
 
 
 async def _real_public_ref(application: Application) -> ContentRef:
-    await _connect_anonymous(application)
     facade = application.services.facade
     assert facade is not None
+    await _ensure_public_access(cast("CompositionFacade", facade))
     results = await facade.search_content("bilibili", "Python", 1)
     assert results.items
     return results.items[0].ref
+
+
+def _access_status(permissions: frozenset[Permission]) -> AccessStatus:
+    return AccessStatus(
+        provider_id="bilibili",
+        account_id=None,
+        state=AccessStatusKind.CONNECTED,
+        method_id="builtin.manual",
+        verification=VerificationResult(
+            strength=VerificationStrength.LIVE,
+            verified_at=datetime.now(UTC),
+            granted_permissions=permissions,
+        ),
+    )
+
+
+@pytest.mark.parametrize("already_connected", [False, True])
+async def test_public_access_connects_only_when_disconnected(already_connected: bool) -> None:
+    facade = AsyncMock()
+    connected = _access_status(frozenset({Permission.READ_PUBLIC}))
+    facade.source_status.return_value = SourceStatusResult(
+        status=(
+            connected
+            if already_connected
+            else AccessStatus(
+                provider_id="bilibili", account_id=None, state=AccessStatusKind.DISCONNECTED
+            )
+        )
+    )
+    facade.connect_source.return_value = ConnectSourceResult(
+        status=connected, availability_refreshed=True
+    )
+
+    await _ensure_public_access(cast("CompositionFacade", facade))
+
+    if already_connected:
+        facade.connect_source.assert_not_awaited()
+    else:
+        facade.connect_source.assert_awaited_once()
+        command = facade.connect_source.await_args.args[0]
+        assert command.request.permissions == frozenset({Permission.READ_PUBLIC})
+        assert command.allowed_method_ids == frozenset({"builtin.anonymous"})
+
+
+async def test_public_access_rejects_connected_handle_without_public_read() -> None:
+    facade = AsyncMock()
+    facade.source_status.return_value = SourceStatusResult(
+        status=_access_status(frozenset({Permission.READ_PRIVATE}))
+    )
+
+    with pytest.raises(AssertionError, match="granting read_public; got state=connected"):
+        await _ensure_public_access(cast("CompositionFacade", facade))
+
+    facade.connect_source.assert_not_awaited()
 
 
 async def test_content_landing_dedupe_feedback_durability_and_cursor_replay() -> None:

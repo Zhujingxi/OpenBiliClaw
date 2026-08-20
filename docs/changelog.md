@@ -6,6 +6,8 @@
 
 ## Unreleased
 
+- Made the sequential L2 E2E harness reuse restored Bilibili access that grants public reads, connecting anonymously only from a disconnected state and failing clearly on insufficient existing scope without replacing credentials.
+
 - Fixed real YouTube search/creator projections for yt-dlp rows without usable publication metadata: documented numeric/`YYYYMMDD` dates stay normalized to aware UTC, unknown dates remain null, and required provenance falls back to the actual UTC projection time.
 
 - Prevented credential replacement after restart from leaving a second exact connection replay available.
