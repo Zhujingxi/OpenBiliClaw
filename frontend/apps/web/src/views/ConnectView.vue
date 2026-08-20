@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import AsyncState from "../components/AsyncState.vue";
+import LocalizedError from "../components/LocalizedError.vue";
 import { uuid } from "@openbiliclaw/api-client";
 import { inject, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { routeParameter } from "../app/routes";
@@ -156,8 +157,9 @@ onBeforeUnmount(store.cancel);
                   v-model="fieldId"
                   autocomplete="off"
                   required
+                  aria-describedby="field-id-help"
                 />
-                <p class="field-hint">
+                <p id="field-id-help" class="field-hint">
                   {{ t("connect.fieldIdHelp") }}
                 </p>
               </div>
@@ -199,8 +201,11 @@ onBeforeUnmount(store.cancel);
         >
           {{ t("connect.connected") }}
         </p>
-        <p v-else-if="store.connectPhase === 'error'" role="alert">
-          {{ store.connectError }}
+        <p
+          v-else-if="store.connectPhase === 'error' && store.connectError"
+          role="alert"
+        >
+          <LocalizedError :error="store.connectError" />
         </p>
       </form>
     </AsyncState>

@@ -2,6 +2,8 @@ import { createPinia } from "pinia";
 import { mount } from "@vue/test-utils";
 import { expect, it } from "vitest";
 import PopupApp from "../popup/PopupApp.vue";
+import { createExtensionI18n, type SupportedLocale } from "../i18n";
+import { useConnectionStore } from "../popup/connection-store";
 
 it("renders an accessible guided connection shell and switches locale live", async () => {
   const wrapper = mount(PopupApp, { global: { plugins: [createPinia()] } });
@@ -21,6 +23,22 @@ it("renders an accessible guided connection shell and switches locale live", asy
   expect(wrapper.get("#connection-title").text()).toBe("后端连接");
 });
 
+it.each([
+  ["en", "The backend is unavailable (status 503)."],
+  ["zh-CN", "后端不可用（状态 503）。"],
+  ["zh-TW", "後端無法使用（狀態 503）。"],
+] as const)("renders a localized safe failure in %s", (locale, expected) => {
+  const pinia = createPinia();
+  useConnectionStore(pinia).error = {
+    code: "backendUnavailable",
+    status: 503,
+  };
+  const wrapper = mount(PopupApp, {
+    global: { plugins: [pinia, extensionI18n(locale)] },
+  });
+  expect(wrapper.get('[role="alert"]').text()).toBe(expected);
+});
+
 it("does not repopulate a saved write-only token", () => {
   localStorage.setItem(
     "openbiliclaw.connection",
@@ -35,3 +53,11 @@ it("does not repopulate a saved write-only token", () => {
   expect(token.attributes("required")).toBeUndefined();
   localStorage.clear();
 });
+
+function extensionI18n(locale: SupportedLocale) {
+  return createExtensionI18n(
+    { getItem: () => locale, setItem: () => undefined },
+    [locale],
+    { lang: locale },
+  );
+}

@@ -58,8 +58,14 @@ const auth = useAuthStore();
 const goBack = (): void => history.back();
 const focusMain = (): void =>
   document.querySelector<HTMLElement>("main")?.focus();
-watch([current, locale], async ([route]) => {
-  document.title = t("app.title", { page: t(routeTranslationKey(route)) });
+const updateTitle = (): void => {
+  document.title = t("app.title", {
+    page: t(routeTranslationKey(current.value)),
+  });
+};
+watch(locale, updateTitle);
+watch(current, async (route) => {
+  updateTitle();
   if (auth.status === "required" && route !== "login") {
     location.hash = "#/login";
     return;

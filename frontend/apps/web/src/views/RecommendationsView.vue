@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { CardRenderer } from "@openbiliclaw/presentation";
 import AsyncState from "../components/AsyncState.vue";
+import LocalizedError from "../components/LocalizedError.vue";
 import { inject, onBeforeUnmount, onMounted, type Directive } from "vue";
 import { useRecommendationsStore } from "../stores/recommendations";
 import type { WebApi } from "../services/api";
@@ -99,7 +100,7 @@ onBeforeUnmount(store.cancel);
             v-if="card.shownId && store.feedbackError[card.shownId]"
             role="alert"
           >
-            {{ store.feedbackError[card.shownId] }}
+            <LocalizedError :error="store.feedbackError[card.shownId]!" />
           </p>
         </li>
       </ol>

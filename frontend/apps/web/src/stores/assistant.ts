@@ -12,26 +12,41 @@ import {
   isCancellation,
   RequestOwner,
   type LoadPhase,
+  type UiError,
 } from "./state";
+
+export type AssistantPresentation =
+  | "actionPending"
+  | "pendingAction"
+  | "recommendations"
+  | "recommendationsAvailable"
+  | "responseUnavailable";
 
 export interface AssistantDisplayMessage {
   id: string;
   role: "user" | "assistant" | "tool";
   content: string;
-  error?: string;
+  presentation?: AssistantPresentation;
+  count?: number;
+  error?: UiError;
 }
+
+type DisplayContent = Pick<
+  AssistantDisplayMessage,
+  "content" | "presentation" | "count"
+>;
 
 export const useAssistantStore = defineStore("assistant", () => {
   const phase = ref<LoadPhase>("idle");
   const conversation = ref<ConversationResponse>();
   const localMessages = ref<readonly AssistantDisplayMessage[]>([]);
-  const error = ref<string>();
+  const error = ref<UiError>();
   const owner = new RequestOwner();
   const messages = computed<readonly AssistantDisplayMessage[]>(() => [
     ...(conversation.value?.messages.map((message) => ({
       id: message.message_id,
       role: message.role,
-      content: historyText(message.role, message.content),
+      ...historyContent(message.role, message.content),
     })) ?? []),
     ...localMessages.value,
   ]);
@@ -91,7 +106,7 @@ export const useAssistantStore = defineStore("assistant", () => {
       if (!owner.owns(signal)) return;
       localMessages.value = [
         ...localMessages.value,
-        { id: `${id}:assistant`, role: "assistant", content: outputText(next) },
+        { id: `${id}:assistant`, role: "assistant", ...outputContent(next) },
       ];
       phase.value = "success";
     } catch (caught) {
@@ -116,58 +131,61 @@ export const useAssistantStore = defineStore("assistant", () => {
   };
 });
 
-function outputText(response: AssistantTurnResponse): string {
+function outputContent(response: AssistantTurnResponse): DisplayContent {
   const output = response.output;
   switch (output.kind) {
     case "message":
-      return output.text;
+      return { content: output.text };
     case "clarification":
-      return `${output.question} ${output.choices.join(" · ")}`;
+      return { content: `${output.question} ${output.choices.join(" · ")}` };
     case "recommendations":
-      return recommendationText(output);
+      return recommendationContent(output);
     case "pending_action":
-      return `Action pending: ${output.action.effect}`;
+      return { content: output.action.effect, presentation: "pendingAction" };
   }
 }
 
-function historyText(
+function historyContent(
   role: "user" | "assistant" | "tool",
   content: string,
-): string {
-  if (role !== "assistant") return content;
+): DisplayContent {
+  if (role !== "assistant") return { content };
   let output: unknown;
   try {
     output = JSON.parse(content);
   } catch {
-    return content;
+    return { content };
   }
   if (!isRecord(output) || typeof output.kind !== "string")
-    return "Assistant response unavailable.";
+    return { content: "", presentation: "responseUnavailable" };
   switch (output.kind) {
     case "message":
       return typeof output.text === "string"
-        ? output.text
-        : "Assistant response unavailable.";
+        ? { content: output.text }
+        : { content: "", presentation: "responseUnavailable" };
     case "recommendations":
-      return recommendationText(output);
+      return recommendationContent(output);
     case "clarification": {
       const choices = stringArray(output.choices);
       return typeof output.question === "string"
-        ? `${output.question}${choices.length ? ` ${choices.join(" · ")}` : ""}`
-        : "Assistant response unavailable.";
+        ? {
+            content: `${output.question}${choices.length ? ` ${choices.join(" · ")}` : ""}`,
+          }
+        : { content: "", presentation: "responseUnavailable" };
     }
     case "pending_action":
       return isRecord(output.action) && typeof output.action.effect === "string"
-        ? `Action pending: ${output.action.effect}`
-        : "Action pending.";
+        ? { content: output.action.effect, presentation: "pendingAction" }
+        : { content: "", presentation: "actionPending" };
     default:
-      return "Assistant response unavailable.";
+      return { content: "", presentation: "responseUnavailable" };
   }
 }
 
-function recommendationText(output: Record<string, unknown>): string {
-  const intro =
-    typeof output.intro === "string" ? output.intro : "Recommendations";
+function recommendationContent(
+  output: Record<string, unknown>,
+): DisplayContent {
+  const intro = typeof output.intro === "string" ? output.intro : "";
   const items = Array.isArray(output.recommendations)
     ? output.recommendations
     : Array.isArray(output.items)
@@ -183,11 +201,20 @@ function recommendationText(output: Record<string, unknown>): string {
           : undefined;
     return [`${item.title}${url ? ` — ${url}` : ""}`];
   });
-  if (readable.length) return `${intro}\n${readable.join("\n")}`;
+  if (readable.length)
+    return intro
+      ? { content: `${intro}\n${readable.join("\n")}` }
+      : { content: readable.join("\n"), presentation: "recommendations" };
   const count = stringArray(output.recommendation_ids).length;
-  return count
-    ? `${intro} ${count} recommendations are available in your feed.`
-    : intro;
+  if (count)
+    return {
+      content: intro,
+      presentation: "recommendationsAvailable",
+      count,
+    };
+  return intro
+    ? { content: intro }
+    : { content: "", presentation: "recommendations" };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

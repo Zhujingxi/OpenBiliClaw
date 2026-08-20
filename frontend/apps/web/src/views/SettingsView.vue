@@ -5,6 +5,7 @@ import { useModelsStore } from "../stores/models";
 import { usePreferencesStore } from "../stores/preferences";
 import { useI18n } from "vue-i18n";
 import { useLocale } from "../i18n";
+import LocalizedError from "../components/LocalizedError.vue";
 
 const injectedApi = inject<WebApi>("api");
 if (injectedApi === undefined) throw new Error("WebApi was not provided");
@@ -130,8 +131,8 @@ onBeforeUnmount(() => models.cancel());
     <p v-if="models.phase === 'loading'" aria-live="polite">
       {{ t("settings.loadingCatalog") }}
     </p>
-    <p v-else-if="models.phase === 'error'" role="alert">
-      {{ models.error }}
+    <p v-else-if="models.phase === 'error' && models.error" role="alert">
+      <LocalizedError :error="models.error" />
     </p>
     <p v-else-if="models.phase === 'empty'" aria-live="polite">
       {{ t("settings.noCatalog") }}
@@ -272,6 +273,7 @@ onBeforeUnmount(() => models.cancel());
             <div
               v-if="!custom"
               class="provider-gallery"
+              role="group"
               :aria-label="t('settings.modelProviders')"
             >
               <button
@@ -423,8 +425,9 @@ onBeforeUnmount(() => models.cancel());
                   ? t('settings.keyConfigured')
                   : t('settings.keyPlaceholder')
               "
+              aria-describedby="model-api-key-help"
             />
-            <p class="field-hint">
+            <p id="model-api-key-help" class="field-hint">
               {{ t("settings.keyHelp") }}
             </p>
           </div>
@@ -489,8 +492,8 @@ onBeforeUnmount(() => models.cancel());
                 : t("settings.save")
             }}
           </button>
-          <p v-if="models.savePhase === 'error'" role="alert">
-            {{ models.error }}
+          <p v-if="models.savePhase === 'error' && models.error" role="alert">
+            <LocalizedError :error="models.error" />
           </p>
           <p v-if="saved" role="status" aria-live="polite">
             {{ t("settings.saved") }}

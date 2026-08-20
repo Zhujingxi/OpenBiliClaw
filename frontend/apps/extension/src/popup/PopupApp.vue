@@ -10,6 +10,7 @@ import {
   type ProviderRecipe,
 } from "./access-flow";
 import { useConnectionStore } from "./connection-store";
+import { extensionIssue, type ExtensionIssue } from "./errors";
 
 const { t, locale } = useI18n();
 const store = useConnectionStore();
@@ -17,14 +18,19 @@ store.hydrate();
 const { backendUrl, deviceToken, state, error } = storeToRefs(store);
 const draftUrl = ref(backendUrl.value);
 const draftToken = ref("");
-const formError = ref<string>();
+const formError = ref<ExtensionIssue>();
 const recipes = ref<ProviderRecipe[]>([]);
-const accessError = ref<string>();
+const accessError = ref<ExtensionIssue>();
 const accessStatus = ref<string>();
 const connecting = ref<string>();
 
 async function refreshRecipes(): Promise<void> {
   recipes.value = await discoverRecipes(backendUrl.value, deviceToken.value);
+  accessError.value = undefined;
+}
+
+function issueText(issue: ExtensionIssue): string {
+  return t(`error.${issue.code}`, { status: issue.status ?? "" });
 }
 
 function save(): void {
@@ -32,17 +38,17 @@ function save(): void {
     store.configure(draftUrl.value, draftToken.value || deviceToken.value);
     draftToken.value = "";
     formError.value = undefined;
-    void store
-      .check()
-      .then(refreshRecipes)
-      .catch(() => undefined);
+    accessError.value = undefined;
+    void store.check().then(async () => {
+      if (state.value !== "connected") return;
+      try {
+        await refreshRecipes();
+      } catch (caught: unknown) {
+        accessError.value = extensionIssue(caught);
+      }
+    });
   } catch (caught: unknown) {
-    const message = caught instanceof Error ? caught.message : "";
-    formError.value = message.includes("loopback")
-      ? t("invalidUrl")
-      : message.includes("token")
-        ? t("invalidToken")
-        : t("invalidSettings");
+    formError.value = extensionIssue(caught);
   }
 }
 
@@ -59,8 +65,7 @@ async function connect(provider: ProviderRecipe): Promise<void> {
     );
     accessStatus.value = t("connected", { provider: provider.providerId });
   } catch (caught: unknown) {
-    accessError.value =
-      caught instanceof Error ? caught.message : t("connectionFailed");
+    accessError.value = extensionIssue(caught);
   } finally {
     connecting.value = undefined;
   }
@@ -120,9 +125,14 @@ async function connect(provider: ProviderRecipe): Promise<void> {
       <p role="status" aria-live="polite">
         {{ t("status", { state: t(`state.${state}`) }) }}
       </p>
-      <p v-if="formError ?? error" role="alert">{{ formError ?? error }}</p>
+      <p v-if="formError ?? error" role="alert">
+        {{ issueText((formError ?? error)!) }}
+      </p>
     </section>
-    <section v-if="recipes.length" aria-labelledby="provider-access-title">
+    <section
+      v-if="recipes.length || accessError || accessStatus"
+      aria-labelledby="provider-access-title"
+    >
       <h2 id="provider-access-title">{{ t("access") }}</h2>
       <article v-for="provider in recipes" :key="provider.providerId">
         <strong>{{ provider.providerId }}</strong>
@@ -147,7 +157,7 @@ async function connect(provider: ProviderRecipe): Promise<void> {
       <p v-if="accessStatus" role="status" aria-live="polite">
         {{ accessStatus }}
       </p>
-      <p v-if="accessError" role="alert">{{ accessError }}</p>
+      <p v-if="accessError" role="alert">{{ issueText(accessError) }}</p>
     </section>
   </main>
 </template>
@@ -281,7 +291,7 @@ button:disabled {
 button:focus-visible,
 input:focus-visible,
 select:focus-visible {
-  outline: 3px solid #2563a638;
+  outline: 3px solid #2563a6;
   outline-offset: 2px;
   border-color: #2563a6;
 }

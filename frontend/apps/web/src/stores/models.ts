@@ -11,6 +11,7 @@ import {
   isCancellation,
   RequestOwner,
   type LoadPhase,
+  type UiError,
 } from "./state";
 
 export const useModelsStore = defineStore("models", () => {
@@ -18,7 +19,7 @@ export const useModelsStore = defineStore("models", () => {
   const savePhase = ref<LoadPhase>("idle");
   const catalog = ref<ModelCatalogResponse>();
   const current = ref<ModelConfigurationResponse>();
-  const error = ref<string>();
+  const error = ref<UiError>();
   const requests = new RequestOwner();
   const providers = computed(() => catalog.value?.providers ?? []);
 

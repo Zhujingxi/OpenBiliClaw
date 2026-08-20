@@ -40,6 +40,23 @@ describe("web locale bootstrap", () => {
     },
   );
 
+  it.each(["en", "zh-CN", "zh-TW"] as const)(
+    "uses full versioned model endpoint guidance in %s",
+    (selected) => {
+      const i18n = createWebI18n(
+        { getItem: () => selected, setItem: () => undefined },
+        [selected],
+        { lang: "" },
+      );
+      expect(i18n.global.t("settings.endpointHelp")).toContain(
+        "https://api.example.com/v1",
+      );
+      expect(i18n.global.t("settings.endpointPlaceholder")).toBe(
+        "https://api.example.com/v1",
+      );
+    },
+  );
+
   it("prefers, persists, and applies a saved locale", () => {
     const storage = { getItem: vi.fn(() => "zh-TW"), setItem: vi.fn() };
     const root = { lang: "" };

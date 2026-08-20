@@ -39,18 +39,21 @@ export class ApiError extends Error {
   readonly kind: ApiErrorKind;
   readonly status: number | undefined;
   readonly retryMilliseconds: number | undefined;
+  readonly code: string | undefined;
 
   constructor(
     kind: ApiErrorKind,
     message: string,
     status?: number,
     retryMilliseconds?: number,
+    code?: string,
   ) {
     super(message);
     this.name = "ApiError";
     this.kind = kind;
     this.status = status;
     this.retryMilliseconds = retryMilliseconds;
+    this.code = code;
   }
 }
 
@@ -254,10 +257,13 @@ export class ApiClient {
       throw new ApiError("network", networkMessage);
     }
     if (!response.ok) {
+      const error = await typedError(response);
       throw new ApiError(
         "http",
-        await typedErrorMessage(response),
+        error.message,
         response.status,
+        undefined,
+        error.code,
       );
     }
     return response;
@@ -276,7 +282,9 @@ function parseRetryHint(lines: readonly string[]): number | undefined {
     : undefined;
 }
 
-async function typedErrorMessage(response: Response): Promise<string> {
+async function typedError(
+  response: Response,
+): Promise<{ message: string; code?: string }> {
   try {
     const payload = (await response.json()) as unknown;
     if (
@@ -286,12 +294,15 @@ async function typedErrorMessage(response: Response): Promise<string> {
       typeof payload.error.message === "string" &&
       payload.error.message.trim() !== ""
     ) {
-      return payload.error.message.trim().slice(0, 500);
+      return {
+        message: payload.error.message.trim().slice(0, 500),
+        code: payload.error.code,
+      };
     }
   } catch {
     // Non-JSON error bodies use the stable status fallback below.
   }
-  return `Request failed with status ${response.status}`;
+  return { message: `Request failed with status ${response.status}` };
 }
 
 export function parseEventEnvelope(text: string): EventEnvelope {

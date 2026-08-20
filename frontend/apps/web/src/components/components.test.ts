@@ -2,10 +2,14 @@ import { readFileSync } from "node:fs";
 import { createPinia } from "pinia";
 import { mount } from "@vue/test-utils";
 import { describe, expect, it, vi } from "vitest";
+import { ApiError } from "@openbiliclaw/api-client";
 import AppNavigation from "./AppNavigation.vue";
 import AsyncState from "./AsyncState.vue";
+import LocalizedError from "./LocalizedError.vue";
 import App from "../App.vue";
 import { EMPTY_SOURCE_INVENTORY, type WebApi } from "../services/api";
+import { createWebI18n, type SupportedLocale } from "../i18n";
+import { errorMessage } from "../stores/state";
 
 const api: WebApi = {
   login: async () => ({ token: "token", label: "session" }),
@@ -78,6 +82,8 @@ describe("web accessibility", () => {
     const source = readFileSync("src/styles.css", "utf8");
     expect(source).toContain('.mobile-nav a[aria-current="page"]');
     expect(source).toContain("background: var(--brand-soft);");
+    expect(source).toContain("color: var(--muted-foreground);");
+    expect(source).toContain("outline: 3px solid var(--ring);");
   });
 
   it.each([
@@ -86,10 +92,34 @@ describe("web accessibility", () => {
     ["error", "alert"],
   ] as const)("announces %s state", (phase, role) => {
     expect(
-      mount(AsyncState, { props: { phase, error: "failed" } })
+      mount(AsyncState, {
+        props: { phase, error: { key: "errors.requestFailed" } },
+      })
         .find(`[role="${role}"]`)
         .exists(),
     ).toBe(true);
+  });
+
+  it.each([
+    ["en", "This capability is not configured."],
+    ["zh-CN", "尚未配置此功能。"],
+    ["zh-TW", "尚未設定此功能。"],
+  ] as const)("renders stable API failures in %s", (locale, expected) => {
+    const error = errorMessage(
+      new ApiError(
+        "http",
+        "capability is not configured: secret payload",
+        503,
+        undefined,
+        "unavailable_capability",
+      ),
+    );
+    const wrapper = mount(LocalizedError, {
+      props: { error },
+      global: { plugins: [webI18n(locale)] },
+    });
+    expect(wrapper.text()).toBe(expected);
+    expect(wrapper.text()).not.toContain("secret payload");
   });
 
   it("uses a wrapping mobile grid and shrinkable controls at narrow widths", () => {
@@ -128,6 +158,30 @@ describe("web accessibility", () => {
     back.mockRestore();
   });
 
+  it("keeps language-selector focus and scroll while route changes still focus the heading", async () => {
+    location.hash = "#/settings";
+    const wrapper = mount(App, {
+      attachTo: document.body,
+      global: { plugins: [createPinia()], provide: { api } },
+    });
+    const language = wrapper.get<HTMLSelectElement>("#language");
+    language.element.focus();
+    document.documentElement.scrollTop = 123;
+    await language.setValue("zh-CN");
+    expect(document.activeElement).toBe(language.element);
+    expect(document.documentElement.scrollTop).toBe(123);
+    expect(document.title).toBe("设置 · OpenBiliClaw");
+    await language.setValue("en");
+
+    location.hash = "#/profile";
+    dispatchEvent(new HashChangeEvent("hashchange"));
+    await vi.waitFor(() =>
+      expect(document.activeElement).toBe(wrapper.get("main h1").element),
+    );
+    expect(document.documentElement.scrollTop).toBe(0);
+    wrapper.unmount();
+  });
+
   it("announces unknown routes while retaining the recommendations fallback", () => {
     location.hash = "#/missing";
     const wrapper = mount(App, {
@@ -139,3 +193,11 @@ describe("web accessibility", () => {
     wrapper.unmount();
   });
 });
+
+function webI18n(locale: SupportedLocale) {
+  return createWebI18n(
+    { getItem: () => locale, setItem: () => undefined },
+    [locale],
+    { lang: locale },
+  );
+}

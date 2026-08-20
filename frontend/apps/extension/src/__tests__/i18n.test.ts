@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { createExtensionI18n, detectLocale, LOCALE_STORAGE_KEY } from "../i18n";
+import en from "../locales/en";
+import zhCN from "../locales/zh-CN";
+import zhTW from "../locales/zh-TW";
 
 describe("extension locale bootstrap", () => {
   it("detects Simplified and Traditional Chinese and falls back to English", () => {
@@ -21,6 +24,11 @@ describe("extension locale bootstrap", () => {
     expect(i18n.global.t("connection")).toBe(expected);
   });
 
+  it("keeps every extension catalog key in parity", () => {
+    expect(catalogKeys(zhCN)).toEqual(catalogKeys(en));
+    expect(catalogKeys(zhTW)).toEqual(catalogKeys(en));
+  });
+
   it("restores and live-persists the selected locale", () => {
     const storage = { getItem: vi.fn(() => "zh-CN"), setItem: vi.fn() };
     const root = { lang: "" };
@@ -34,3 +42,14 @@ describe("extension locale bootstrap", () => {
     );
   });
 });
+
+function catalogKeys(value: object, prefix = ""): string[] {
+  return Object.entries(value)
+    .flatMap(([key, item]) => {
+      const path = prefix ? `${prefix}.${key}` : key;
+      return typeof item === "object" && item !== null
+        ? catalogKeys(item, path)
+        : [path];
+    })
+    .sort();
+}

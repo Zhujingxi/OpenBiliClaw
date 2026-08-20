@@ -107,7 +107,8 @@ textarea:focus-visible,
 select:focus-visible,
 summary:focus-visible,
 main:focus-visible {
-  outline: none;
+  outline: 3px solid var(--ring);
+  outline-offset: 2px;
   box-shadow: var(--focus-ring);
 }
 
@@ -378,7 +379,7 @@ fieldset {
 
 .nav-group > p {
   margin: 0 0.45rem 0.3rem;
-  color: #979187;
+  color: var(--muted-foreground);
   font-size: 0.65rem;
   font-weight: 750;
   letter-spacing: 0.09em;

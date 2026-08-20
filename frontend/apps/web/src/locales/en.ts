@@ -6,6 +6,20 @@ export default {
     zhCN: "简体中文",
     zhTW: "繁體中文",
   },
+  errors: {
+    conflict: "The request conflicts with the current state.",
+    forbidden: "You do not have permission to complete this request.",
+    invalidResponse: "The server returned an invalid response.",
+    methodNotAllowed: "This operation is not supported.",
+    network: "Could not reach the local server.",
+    notFound: "The requested item was not found.",
+    rateLimit: "Too many requests. Try again shortly.",
+    requestFailed: "The request could not be completed.",
+    temporaryFailure: "The service could not complete the request. Try again.",
+    unauthorized: "Authorization is required for this request.",
+    unavailable: "This capability is not configured.",
+    validation: "Check the submitted fields and try again.",
+  },
   common: {
     states: {
       connected: "Connected",
@@ -76,6 +90,7 @@ export default {
     empty: "No recommendations are available yet.",
     emptyHelp: "to start building your feed.",
     feedback: "Feedback recorded: {state}",
+    expired: "This recommendation expired. Refresh the feed and try again.",
   },
   cards: {
     unavailable: "Content unavailable",
@@ -153,6 +168,12 @@ export default {
     placeholder: "Message OpenBiliClaw…",
     send: "Send",
     composerHelp: "Enter to send · Shift + Enter for a new line",
+    responseUnavailable: "Assistant response unavailable.",
+    pendingAction: "Action pending: {effect}",
+    actionPending: "Action pending.",
+    recommendations: "Recommendations",
+    recommendationsAvailable:
+      "{count} recommendations are available in your feed.",
   },
   connect: {
     eyebrow: "Source setup",
@@ -321,8 +342,8 @@ export default {
     selectModel: "Select a model",
     endpointOverride: "Endpoint override",
     endpointHelp:
-      "Enter the API base URL without /v1. Example: https://api.example.com",
-    endpointPlaceholder: "https://api.example.com",
+      "Enter the provider's full API base URL, including any required version path. Example: https://api.example.com/v1",
+    endpointPlaceholder: "https://api.example.com/v1",
     catalogDefault: "Use catalog default",
     apiKey: "API key",
     keyConfigured: "Configured — leave blank to keep",

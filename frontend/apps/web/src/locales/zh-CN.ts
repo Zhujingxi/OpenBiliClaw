@@ -6,6 +6,20 @@ export default {
     zhCN: "简体中文",
     zhTW: "繁體中文",
   },
+  errors: {
+    conflict: "请求与当前状态冲突。",
+    forbidden: "你没有完成此请求的权限。",
+    invalidResponse: "服务器返回了无效响应。",
+    methodNotAllowed: "不支持此操作。",
+    network: "无法连接本地服务器。",
+    notFound: "未找到请求的项目。",
+    rateLimit: "请求过于频繁，请稍后重试。",
+    requestFailed: "无法完成请求。",
+    temporaryFailure: "服务无法完成请求，请重试。",
+    unauthorized: "此请求需要授权。",
+    unavailable: "尚未配置此功能。",
+    validation: "请检查提交的字段后重试。",
+  },
   common: {
     states: {
       connected: "已连接",
@@ -71,6 +85,7 @@ export default {
     empty: "暂时没有推荐内容。",
     emptyHelp: "即可开始构建信息流。",
     feedback: "已记录反馈：{state}",
+    expired: "此推荐已过期，请刷新信息流后重试。",
   },
   cards: {
     unavailable: "内容不可用",
@@ -144,6 +159,11 @@ export default {
     placeholder: "向 OpenBiliClaw 发送消息…",
     send: "发送",
     composerHelp: "Enter 发送 · Shift + Enter 换行",
+    responseUnavailable: "助手响应不可用。",
+    pendingAction: "待处理操作：{effect}",
+    actionPending: "操作待处理。",
+    recommendations: "推荐",
+    recommendationsAvailable: "你的信息流中有 {count} 条推荐。",
   },
   connect: {
     eyebrow: "来源设置",
@@ -303,8 +323,9 @@ export default {
     modelHelp: "使用提供方接受的准确模型 ID。",
     selectModel: "选择模型",
     endpointOverride: "端点覆盖",
-    endpointHelp: "输入不含 /v1 的 API 基础 URL，例如：https://api.example.com",
-    endpointPlaceholder: "https://api.example.com",
+    endpointHelp:
+      "输入提供方的完整 API 基础 URL，包括所需的版本路径。例如：https://api.example.com/v1",
+    endpointPlaceholder: "https://api.example.com/v1",
     catalogDefault: "使用目录默认值",
     apiKey: "API 密钥",
     keyConfigured: "已配置 — 留空以保留",

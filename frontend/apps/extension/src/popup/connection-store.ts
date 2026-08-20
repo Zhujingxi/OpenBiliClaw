@@ -1,7 +1,8 @@
-import { ApiClient } from "@openbiliclaw/api-client";
+import { ApiClient, ApiError } from "@openbiliclaw/api-client";
 import { defineStore } from "pinia";
 import { ref } from "vue";
 import { isLoopbackUrl, type ConnectionState } from "../shared/connection";
+import { ExtensionFailure, type ExtensionIssue } from "./errors";
 
 interface StorageLike {
   getItem(key: string): string | null;
@@ -36,7 +37,7 @@ export const useConnectionStore = defineStore("extension-connection", () => {
   const backendUrl = ref(DEFAULT_BACKEND);
   const deviceToken = ref("");
   const state = ref<ConnectionState>("disconnected");
-  const error = ref<string>();
+  const error = ref<ExtensionIssue>();
 
   function hydrate(storage: StorageLike = localStorage): void {
     const saved = storage.getItem(STORAGE_KEY);
@@ -63,10 +64,9 @@ export const useConnectionStore = defineStore("extension-connection", () => {
     token: string,
     storage: StorageLike = localStorage,
   ): void {
-    if (!isLoopbackUrl(url))
-      throw new Error("Backend must be a loopback HTTP(S) URL");
+    if (!isLoopbackUrl(url)) throw new ExtensionFailure("invalidUrl");
     if (token.length < 1 || token.length > 512)
-      throw new Error("Invalid device token");
+      throw new ExtensionFailure("invalidToken");
     backendUrl.value = url.replace(/\/$/, "");
     deviceToken.value = token;
     storage.setItem(
@@ -93,14 +93,10 @@ export const useConnectionStore = defineStore("extension-connection", () => {
       state.value = "connected";
     } catch (caught: unknown) {
       state.value = "unavailable";
-      const status =
-        caught instanceof Error && "status" in caught
-          ? caught.status
-          : undefined;
       error.value =
-        typeof status === "number"
-          ? `Backend unavailable (${status})`
-          : "Backend connection failed";
+        caught instanceof ApiError && caught.status !== undefined
+          ? { code: "backendUnavailable", status: caught.status }
+          : { code: "backendConnectionFailed" };
     }
   }
 

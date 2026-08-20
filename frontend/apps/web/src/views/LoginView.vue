@@ -3,6 +3,7 @@ import { inject, ref } from "vue";
 import type { WebApi } from "../services/api";
 import { useAuthStore } from "../stores/auth";
 import { useI18n } from "vue-i18n";
+import LocalizedError from "../components/LocalizedError.vue";
 
 const api = inject<WebApi>("api");
 if (!api) throw new Error("api dependency missing");
@@ -34,7 +35,9 @@ const submit = async (): Promise<void> => {
       <button type="submit" :disabled="auth.loading">
         {{ auth.loading ? t("login.signingIn") : t("login.submit") }}
       </button>
-      <p v-if="auth.error" role="alert">{{ auth.error }}</p>
+      <p v-if="auth.error" role="alert">
+        <LocalizedError :error="auth.error" />
+      </p>
     </form>
   </section>
 </template>

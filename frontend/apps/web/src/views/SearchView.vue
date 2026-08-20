@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import AsyncState from "../components/AsyncState.vue";
+import LocalizedError from "../components/LocalizedError.vue";
 import { computed, inject, onBeforeUnmount, onMounted, ref } from "vue";
 import { useContentStore } from "../stores/content";
 import { useSourcesStore } from "../stores/sources";
@@ -61,8 +62,8 @@ onBeforeUnmount(store.cancelSearch);
     <p v-if="sources.phase === 'loading'" role="status" aria-live="polite">
       {{ t("search.loadingSources") }}
     </p>
-    <p v-else-if="sources.phase === 'error'" role="alert">
-      {{ sources.error }}
+    <p v-else-if="sources.phase === 'error' && sources.error" role="alert">
+      <LocalizedError :error="sources.error" />
     </p>
     <p v-else-if="searchable.length === 0" role="status">
       {{ t("search.noProvider") }}

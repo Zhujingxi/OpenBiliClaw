@@ -7,12 +7,13 @@ import {
   isCancellation,
   RequestOwner,
   type LoadPhase,
+  type UiError,
 } from "./state";
 
 export const useProfileStore = defineStore("profile", () => {
   const phase = ref<LoadPhase>("idle");
   const result = ref<ProfileResponse>();
-  const error = ref<string>();
+  const error = ref<UiError>();
   const owner = new RequestOwner();
 
   async function load(api: WebApi, profileId = "default"): Promise<void> {

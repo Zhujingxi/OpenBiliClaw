@@ -11,7 +11,12 @@ import {
 import { useI18n } from "vue-i18n";
 import { useLocale } from "../i18n";
 import { uuid } from "@openbiliclaw/api-client";
-import { useAssistantStore } from "../stores/assistant";
+import {
+  useAssistantStore,
+  type AssistantDisplayMessage,
+} from "../stores/assistant";
+import type { UiError } from "../stores/state";
+import LocalizedError from "../components/LocalizedError.vue";
 import { useSessionStore } from "../stores/session";
 import type { WebApi } from "../services/api";
 
@@ -41,8 +46,29 @@ const conversationId = ref(ensureConversationId());
 function plainText(value: string): string {
   return value.replace(/\*\*(.+?)\*\*/g, "$1");
 }
-function isCapabilityError(value: string): boolean {
-  return value.toLowerCase().includes("capability is not configured");
+function messageText(message: AssistantDisplayMessage): string {
+  switch (message.presentation) {
+    case "responseUnavailable":
+      return t("assistant.responseUnavailable");
+    case "pendingAction":
+      return t("assistant.pendingAction", { effect: message.content });
+    case "actionPending":
+      return t("assistant.actionPending");
+    case "recommendations":
+      return message.content
+        ? `${t("assistant.recommendations")}\n${message.content}`
+        : t("assistant.recommendations");
+    case "recommendationsAvailable":
+      return `${message.content || t("assistant.recommendations")} ${t(
+        "assistant.recommendationsAvailable",
+        { count: message.count ?? 0 },
+      )}`;
+    default:
+      return message.content;
+  }
+}
+function isCapabilityError(value: UiError): boolean {
+  return value.code === "unavailable_capability" && value.status === 503;
 }
 async function scrollToLatest(): Promise<void> {
   await nextTick();
@@ -146,10 +172,10 @@ async function send(message = text.value): Promise<void> {
                 )
               }}</strong>
               <span class="message-content">{{
-                plainText(message.content)
+                plainText(messageText(message))
               }}</span>
               <p v-if="message.error" role="alert" class="turn-error">
-                {{ message.error }}
+                <LocalizedError :error="message.error" />
                 <a v-if="isCapabilityError(message.error)" href="#/settings">
                   {{ t("assistant.configure") }}
                 </a>
@@ -175,7 +201,7 @@ async function send(message = text.value): Promise<void> {
           role="alert"
           class="turn-error global-error"
         >
-          {{ store.error }}
+          <LocalizedError :error="store.error" />
           <a v-if="isCapabilityError(store.error)" href="#/settings">
             {{ t("assistant.configure") }}
           </a>

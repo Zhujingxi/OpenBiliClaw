@@ -8,15 +8,16 @@ import {
   isCancellation,
   RequestOwner,
   type LoadPhase,
+  type UiError,
 } from "./state";
 
 export const useRecommendationsStore = defineStore("recommendations", () => {
   const phase = ref<LoadPhase>("idle");
   const page = ref<RecommendationPage>({ items: [] });
   const cards = ref<readonly CardView[]>([]);
-  const error = ref<string>();
+  const error = ref<UiError>();
   const feedbackState = ref<Record<string, "liked" | "dismissed">>({});
-  const feedbackError = ref<Record<string, string>>({});
+  const feedbackError = ref<Record<string, UiError>>({});
   const owner = new RequestOwner();
   const feedbackControllers = new Map<string, AbortController>();
   const exposed = new Set<string>();
@@ -111,7 +112,7 @@ export const useRecommendationsStore = defineStore("recommendations", () => {
       if (feedbackControllers.get(shownId) === controller) {
         feedbackError.value[shownId] =
           errorStatus(caught) === 404 || errorStatus(caught) === 409
-            ? "This recommendation expired. Refresh the feed and try again."
+            ? { key: "recommendations.expired" }
             : errorMessage(caught);
       }
     } finally {

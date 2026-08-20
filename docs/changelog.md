@@ -7,6 +7,7 @@
 ## Unreleased
 
 - Added production internationalization for the responsive web app and browser extension (`en`, `zh-CN`, `zh-TW`) with browser detection, English fallback, persisted live switching, localized manifests, synchronized web document language, and selected-locale Assistant turns; polished accessible setup forms with explicit base-URL and write-only secret guidance.
+- Completed localized setup UX: corrected full model API-base guidance, preserved language-selector focus/scroll during live switching, strengthened focus/contrast and form associations, localized stable-code error and Assistant fallback rendering, added extension catalog parity checks, and aligned the static web shell and extension permission documentation.
 
 - Formatted the GitHub Actions regression test to keep the documented Ruff formatting gate green.
 

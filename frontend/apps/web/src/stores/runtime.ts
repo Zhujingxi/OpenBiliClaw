@@ -7,6 +7,7 @@ import {
   isCancellation,
   RequestOwner,
   type LoadPhase,
+  type UiError,
 } from "./state";
 
 const delays = [100, 500, 1_000, 2_000] as const;
@@ -32,7 +33,7 @@ export const useRuntimeStore = defineStore("runtime", () => {
   const health = ref<RuntimeResponse>();
   const events = ref<readonly EventEnvelope[]>([]);
   const streamConnected = ref(false);
-  const error = ref<string>();
+  const error = ref<UiError>();
   const requests = new RequestOwner();
   let streamController: AbortController | undefined;
   let streamTask: Promise<void> | undefined;

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import AsyncState from "../components/AsyncState.vue";
+import LocalizedError from "../components/LocalizedError.vue";
 import { inject, onBeforeUnmount, onMounted } from "vue";
 import { useRuntimeStore } from "../stores/runtime";
 import type { WebApi } from "../services/api";
@@ -31,7 +32,7 @@ onBeforeUnmount(() => {
         }}
       </p>
       <p v-if="store.error && store.phase !== 'error'" role="alert">
-        {{ t("runtime.events") }}: {{ store.error }}
+        {{ t("runtime.events") }}: <LocalizedError :error="store.error" />
       </p>
       <button
         type="button"

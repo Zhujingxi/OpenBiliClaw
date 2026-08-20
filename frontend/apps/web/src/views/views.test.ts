@@ -1,4 +1,5 @@
 import { createPinia } from "pinia";
+import { ApiError } from "@openbiliclaw/api-client";
 import { mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { routeParameter } from "../app/routes";
@@ -17,6 +18,7 @@ import ProvidersView from "./ProvidersView.vue";
 import RecommendationsView from "./RecommendationsView.vue";
 import SettingsView from "./SettingsView.vue";
 import RuntimeView from "./RuntimeView.vue";
+import { createWebI18n, type SupportedLocale } from "../i18n";
 
 function sourceList(
   items: SourceStatus[] = [],
@@ -180,6 +182,12 @@ describe("web view behavior", () => {
       ["other", "Disconnected"],
       ["demo", "Connected"],
     ]);
+    await wrapper
+      .get('input[type="radio"][value="builtin.manual"]')
+      .setValue(true);
+    expect(wrapper.get("#field-id").attributes("aria-describedby")).toBe(
+      "field-id-help",
+    );
   });
 
   it("surfaces source connection failures without hiding provider status", async () => {
@@ -191,7 +199,15 @@ describe("web view behavior", () => {
             { provider_id: "demo", account_id: null, state: "disconnected" },
           ]),
         connectSource: async () =>
-          Promise.reject(new Error("temporary failure")),
+          Promise.reject(
+            new ApiError(
+              "http",
+              "temporary failure",
+              500,
+              undefined,
+              "temporary_failure",
+            ),
+          ),
       }),
     );
     await vi.waitFor(() => expect(wrapper.find("form").exists()).toBe(true));
@@ -540,6 +556,84 @@ describe("web view behavior", () => {
     ).toEqual(["You", "You", "Assistant"]);
   });
 
+  it.each([
+    [
+      "en",
+      [
+        "Action pending: Apply profile update",
+        "Recommendations 2 recommendations are available in your feed.",
+        "Assistant response unavailable.",
+      ],
+    ],
+    [
+      "zh-CN",
+      [
+        "待处理操作：Apply profile update",
+        "推荐 你的信息流中有 2 条推荐。",
+        "助手响应不可用。",
+      ],
+    ],
+    [
+      "zh-TW",
+      [
+        "待處理操作：Apply profile update",
+        "推薦 你的動態消息中有 2 則推薦。",
+        "助理回應無法使用。",
+      ],
+    ],
+  ] as const)(
+    "localizes assistant fallbacks in %s",
+    async (locale, expected) => {
+      const messages = [
+        {
+          kind: "pending_action",
+          action: { effect: "Apply profile update" },
+        },
+        {
+          kind: "recommendations",
+          recommendation_ids: ["shown_one", "shown_two"],
+        },
+        { kind: "future", raw: "hidden" },
+      ].map((output, index) => ({
+        message_id: `message-${index}`,
+        idempotency_key: `key-${index}`,
+        role: "assistant" as const,
+        content: JSON.stringify(output),
+        created_at: "2030-01-01T00:00:00Z",
+        references: [],
+        tool_calls: [],
+        user_correction: false,
+      }));
+      const wrapper = mount(AssistantView, {
+        global: {
+          plugins: [createPinia(), webI18n(locale)],
+          provide: {
+            api: api({
+              conversation: async () => ({
+                conversation: {
+                  conversation_id: "conv",
+                  created_at: "2030-01-01T00:00:00Z",
+                  updated_at: "2030-01-01T00:00:00Z",
+                  retention_days: 30,
+                  scope: { local_user_id: "u", device_id: "web-local" },
+                },
+                messages,
+              }),
+            }),
+          },
+        },
+      });
+      await vi.waitFor(() =>
+        expect(wrapper.findAll(".message-content")).toHaveLength(3),
+      );
+      expect(
+        wrapper.findAll(".message-content").map((item) => item.text()),
+      ).toEqual(expected);
+      expect(wrapper.text()).not.toContain("shown_one");
+      expect(wrapper.text()).not.toContain('"kind"');
+    },
+  );
+
   it("keeps assistant turns and attaches actionable capability errors", async () => {
     let calls = 0;
     const wrapper = mountView(
@@ -547,7 +641,14 @@ describe("web view behavior", () => {
       api({
         assistantTurn: async () => {
           calls += 1;
-          if (calls === 2) throw new Error("capability is not configured");
+          if (calls === 2)
+            throw new ApiError(
+              "http",
+              "capability is not configured",
+              503,
+              undefined,
+              "unavailable_capability",
+            );
           return { output: { kind: "message", text: "first answer" } };
         },
       }),
@@ -754,13 +855,22 @@ describe("web view behavior", () => {
       expect(wrapper.find("#model-provider").exists()).toBe(true),
     );
     expect(wrapper.findAll("details.settings-section")).toHaveLength(1);
-    expect(wrapper.get("#model-endpoint-help").text()).toContain("without /v1");
+    expect(wrapper.get("#model-endpoint-help").text()).toContain(
+      "full API base URL",
+    );
+    expect(wrapper.get("#model-endpoint").attributes("placeholder")).toBe(
+      "Use catalog default",
+    );
     expect(wrapper.get(".field-wide .field-hint").text()).toContain(
       "never returned",
     );
     expect(wrapper.get("#model-endpoint").attributes("aria-describedby")).toBe(
       "model-endpoint-help",
     );
+    expect(wrapper.get("#model-api-key").attributes("aria-describedby")).toBe(
+      "model-api-key-help",
+    );
+    expect(wrapper.get(".provider-gallery").attributes("role")).toBe("group");
     await wrapper.get("#language").setValue("zh-CN");
     expect(wrapper.get("h1").text()).toBe("设置");
     await wrapper.get("#language").setValue("en");
@@ -787,6 +897,9 @@ describe("web view behavior", () => {
     );
     expect(wrapper.text()).toContain("Restart OpenBiliClaw");
     await wrapper.get('input[type="checkbox"]').setValue(true);
+    expect(wrapper.get("#model-endpoint").attributes("placeholder")).toBe(
+      "https://api.example.com/v1",
+    );
     expect(wrapper.find("fieldset.capabilities").exists()).toBe(true);
     expect(wrapper.findAll(".capability-options label")).toHaveLength(5);
   });
@@ -942,7 +1055,9 @@ describe("web view behavior", () => {
       SettingsView,
       api({ modelCatalog: async () => Promise.reject(new Error("offline")) }),
     );
-    await vi.waitFor(() => expect(error.text()).toContain("offline"));
+    await vi.waitFor(() =>
+      expect(error.text()).toContain("request could not be completed"),
+    );
   });
 
   it("resolves recommendation content, refreshes, and wires shared card feedback", async () => {
@@ -1022,3 +1137,11 @@ describe("web view behavior", () => {
     );
   });
 });
+
+function webI18n(locale: SupportedLocale) {
+  return createWebI18n(
+    { getItem: () => locale, setItem: () => undefined },
+    [locale],
+    { lang: locale },
+  );
+}

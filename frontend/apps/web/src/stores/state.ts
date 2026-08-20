@@ -1,17 +1,53 @@
+import { ApiError } from "@openbiliclaw/api-client";
+
 export type LoadPhase = "idle" | "loading" | "success" | "empty" | "error";
 
-export function errorMessage(error: unknown): string {
-  const detail = error instanceof Error ? error.message : "Unexpected failure";
-  const normalized = detail.toLowerCase();
-  if (normalized.includes("request validation failed"))
-    return `Check the submitted fields and try again. (${detail})`;
-  if (normalized.includes("capability is not configured"))
-    return `The AI assistant is not configured. (${detail})`;
-  if (normalized.includes("source is not connected"))
-    return `Connect this source before using it. (${detail})`;
-  if (normalized.includes("temporary failure"))
-    return `The service could not complete the request. Try again. (${detail})`;
-  return detail;
+export type ErrorTranslationKey =
+  | "errors.conflict"
+  | "errors.forbidden"
+  | "errors.invalidResponse"
+  | "errors.methodNotAllowed"
+  | "errors.network"
+  | "errors.notFound"
+  | "errors.rateLimit"
+  | "errors.requestFailed"
+  | "errors.temporaryFailure"
+  | "errors.unauthorized"
+  | "errors.unavailable"
+  | "errors.validation"
+  | "recommendations.expired";
+
+export interface UiError {
+  readonly key: ErrorTranslationKey;
+  readonly code?: string;
+  readonly status?: number;
+}
+
+const ERROR_KEYS: Readonly<Record<string, ErrorTranslationKey>> = {
+  conflict: "errors.conflict",
+  forbidden: "errors.forbidden",
+  method_not_allowed: "errors.methodNotAllowed",
+  not_found: "errors.notFound",
+  rate_limit: "errors.rateLimit",
+  temporary_failure: "errors.temporaryFailure",
+  unauthorized: "errors.unauthorized",
+  unavailable_capability: "errors.unavailable",
+  validation: "errors.validation",
+};
+
+/** Reduce boundary failures to stable, localizable presentation data. */
+export function errorMessage(error: unknown): UiError {
+  if (!(error instanceof ApiError)) return { key: "errors.requestFailed" };
+  if (error.kind === "network") return { key: "errors.network" };
+  if (error.kind === "invalid-response")
+    return { key: "errors.invalidResponse" };
+  return {
+    key: error.code
+      ? (ERROR_KEYS[error.code] ?? "errors.requestFailed")
+      : "errors.requestFailed",
+    ...(error.code === undefined ? {} : { code: error.code }),
+    ...(error.status === undefined ? {} : { status: error.status }),
+  };
 }
 
 export function isCancellation(error: unknown): boolean {
