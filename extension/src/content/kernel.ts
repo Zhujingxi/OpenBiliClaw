@@ -55,6 +55,19 @@ export function startCollector(adapter: PlatformAdapter): void {
   let videoAttachRetryTimer: number | null = null;
   const hoverTimers = new WeakMap<Element, number>();
   const trackedVideos = new WeakSet<HTMLVideoElement>();
+  // Browser <video> elements also fire `seeked` for programmatic seeks
+  // (watch-progress restore on page load, Bilibili player switching
+  // episodes/parts). Those are not user behavior and must not be recorded
+  // as if the user had scrubbed. Only emit `seek` shortly after a real
+  // pointer/keyboard interaction, which is how users initiate seeks.
+  let lastSeekInputAt = 0;
+  const markSeekInput = (): void => {
+    lastSeekInputAt = Date.now();
+  };
+
+  document.addEventListener("pointerdown", markSeekInput, { capture: true });
+  document.addEventListener("pointerup", markSeekInput, { capture: true });
+  document.addEventListener("keydown", markSeekInput, { capture: true });
 
   // v0.3.x event-satisfaction signal: track video-page dwell so the
   // backend can tell meaningful_dwell vs quick_exit on every visit.
@@ -370,6 +383,11 @@ export function startCollector(adapter: PlatformAdapter): void {
       seekStartTime = video.currentTime;
     });
     video.addEventListener("seeked", () => {
+      // Programmatic seeks (watch-progress restore, episode/part switch)
+      // fire `seeked` without any preceding user pointer/keyboard input.
+      // Those are playback mechanics, not the user scrubbing, and would
+      // otherwise be recorded as "每隔 N 秒 seek" behavior.
+      if (lastSeekInputAt === 0 || Date.now() - lastSeekInputAt > 1500) return;
       sendEvent(
         createEvent("seek", {
           ...buildVideoMetadata(),
@@ -416,6 +434,9 @@ export function startCollector(adapter: PlatformAdapter): void {
 
   const rebindPageObservers = (reason: string): void => {
     cancelVideoAttachRetry();
+    // A stale gesture from a navigation click (e.g. "next episode") must
+    // not turn the next video's programmatic seek into a user scrub signal.
+    lastSeekInputAt = 0;
     const attached = attachVideoListeners();
     const url = window.location.href;
     if (!attached && isVideoPage(url)) {

@@ -92,6 +92,15 @@ test("video listeners begin a segment at bind time when the element is already p
   assert.match(kernelSource, /!video\.paused && !video\.ended[\s\S]*?beginSegment\(\)/);
 });
 
+test("seek events are only emitted shortly after a real pointer/keyboard input", () => {
+  // Programmatic seeks (watch-progress restore, episode/part switch) fire
+  // `seeked` without a preceding user gesture and must not be recorded.
+  assert.match(kernelSource, /lastSeekInputAt\s*=\s*0/);
+  assert.match(kernelSource, /addEventListener\(\s*"pointerdown",\s*markSeekInput/);
+  assert.match(kernelSource, /addEventListener\(\s*"keydown",\s*markSeekInput/);
+  assert.match(kernelSource, /Date\.now\(\)\s*-\s*lastSeekInputAt\s*>\s*1500/);
+});
+
 test("late-rendered <video> is retried with a bounded, navigation-cancelled loop", () => {
   assert.match(kernelSource, /_VIDEO_ATTACH_RETRY_MS\s*=\s*500/);
   assert.match(kernelSource, /_VIDEO_ATTACH_MAX_RETRIES\s*=\s*20/);
