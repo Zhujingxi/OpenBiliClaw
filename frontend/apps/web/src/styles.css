@@ -182,6 +182,18 @@ select:hover {
   border-color: #bdb9ae;
 }
 
+input:not([type="checkbox"]):not([type="radio"]):focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  border-color: var(--ring);
+}
+
+input:user-invalid,
+textarea:user-invalid,
+select:user-invalid {
+  border-color: var(--error);
+}
+
 input::placeholder,
 textarea::placeholder {
   color: #928d83;
@@ -590,6 +602,7 @@ main > section > details {
 }
 
 .field-hint {
+  max-width: 68ch;
   margin: 0;
   color: var(--muted-foreground);
   font-size: 0.75rem;

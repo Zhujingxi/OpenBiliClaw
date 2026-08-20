@@ -158,8 +158,8 @@ async function connect(provider: ProviderRecipe): Promise<void> {
 }
 :global(body) {
   margin: 0;
-  color: #172033;
-  background: #f5f7fb;
+  color: #1f1e1b;
+  background: #f5f4ed;
   font:
     14px/1.5 system-ui,
     sans-serif;
@@ -167,59 +167,138 @@ async function connect(provider: ProviderRecipe): Promise<void> {
 .shell {
   min-width: 320px;
   max-width: 520px;
-  padding: 1rem;
+  padding: 0.9rem;
 }
 header,
 section {
-  background: white;
+  margin-bottom: 0.75rem;
+  border: 1px solid #dfdcd2;
   border-radius: 12px;
   padding: 1rem;
-  margin-bottom: 0.75rem;
-  box-shadow: 0 1px 4px #1720331f;
+  background: #fffefa;
+  box-shadow:
+    0 1px 2px #1f1e1b0d,
+    0 6px 18px #1f1e1b0a;
+}
+header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 1rem;
 }
 h1,
 h2 {
-  margin: 0 0 0.5rem;
+  margin: 0 0 0.4rem;
+  line-height: 1.2;
+}
+h1 {
+  font-size: 1.25rem;
+}
+h2 {
+  font-size: 1rem;
 }
 p {
-  margin: 0.25rem 0;
+  margin: 0.3rem 0;
+}
+form {
+  display: grid;
+  gap: 0.15rem;
 }
 label {
   display: grid;
-  gap: 0.25rem;
-  margin-block: 0.75rem;
-  font-weight: 600;
+  gap: 0.3rem;
+  margin-block: 0.65rem;
+  font-weight: 650;
+}
+small {
+  color: #716d64;
+  font-size: 0.75rem;
+  font-weight: 450;
+  line-height: 1.45;
 }
 input,
+select,
 button {
+  width: 100%;
+  min-width: 0;
   min-height: 44px;
-  border: 1px solid #79839a;
+  border: 1px solid #b8b3a8;
   border-radius: 8px;
-  padding: 0.6rem;
+  padding: 0.6rem 0.7rem;
+  background: #fffefa;
+  color: #1f1e1b;
+  font: inherit;
+}
+input:hover,
+select:hover {
+  border-color: #716d64;
+}
+input:user-invalid {
+  border-color: #b4232d;
 }
 button {
+  border-color: #2563a6;
   color: white;
-  background: #3156d3;
+  background: #2563a6;
   font-weight: 700;
   cursor: pointer;
 }
+button:hover:not(:disabled) {
+  background: #174b7a;
+}
+.language-control {
+  width: min(10rem, 44%);
+  margin: 0;
+  font-size: 0.75rem;
+}
+.language-control select {
+  min-height: 38px;
+  padding-block: 0.4rem;
+}
 article {
   display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
   gap: 0.5rem;
   margin-block: 0.75rem;
 }
+article button {
+  width: auto;
+}
 button.secondary {
-  color: #3156d3;
-  background: white;
+  color: #174b7a;
+  background: #fffefa;
 }
 button:disabled {
   cursor: wait;
   opacity: 0.65;
 }
+[role="alert"] {
+  border-left: 3px solid #b4232d;
+  padding-left: 0.65rem;
+  color: #8e1c24;
+}
 button:focus-visible,
-input:focus-visible {
-  outline: 3px solid #ffb000;
+input:focus-visible,
+select:focus-visible {
+  outline: 3px solid #2563a638;
   outline-offset: 2px;
+  border-color: #2563a6;
+}
+@media (max-width: 360px) {
+  header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .language-control {
+    width: 100%;
+  }
+  article {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  article button {
+    width: 100%;
+  }
 }
 @media (prefers-reduced-motion: reduce) {
   * {

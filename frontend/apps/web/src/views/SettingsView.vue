@@ -733,7 +733,7 @@ onBeforeUnmount(() => models.cancel());
 }
 .appearance-controls {
   display: grid;
-  grid-template-columns: minmax(12rem, 20rem) auto;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 12rem), 1fr));
   gap: 1rem;
   align-items: end;
 }

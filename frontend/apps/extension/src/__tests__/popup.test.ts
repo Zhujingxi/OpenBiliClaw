@@ -20,3 +20,18 @@ it("renders an accessible guided connection shell and switches locale live", asy
   await wrapper.get('select[name="locale"]').setValue("zh-CN");
   expect(wrapper.get("#connection-title").text()).toBe("后端连接");
 });
+
+it("does not repopulate a saved write-only token", () => {
+  localStorage.setItem(
+    "openbiliclaw.connection",
+    JSON.stringify({
+      backendUrl: "http://127.0.0.1:8420",
+      deviceToken: "saved-secret",
+    }),
+  );
+  const wrapper = mount(PopupApp, { global: { plugins: [createPinia()] } });
+  const token = wrapper.get<HTMLInputElement>('input[name="deviceToken"]');
+  expect(token.element.value).toBe("");
+  expect(token.attributes("required")).toBeUndefined();
+  localStorage.clear();
+});

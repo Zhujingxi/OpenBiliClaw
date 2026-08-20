@@ -6,6 +6,8 @@
 
 ## Unreleased
 
+- Added production internationalization for the responsive web app and browser extension (`en`, `zh-CN`, `zh-TW`) with browser detection, English fallback, persisted live switching, localized manifests, synchronized web document language, and selected-locale Assistant turns; polished accessible setup forms with explicit base-URL and write-only secret guidance.
+
 - Formatted the GitHub Actions regression test to keep the documented Ruff formatting gate green.
 
 - Audited current technical documentation against the production graph: corrected the twelve-provider inventory and fail-closed transport matrix, CLI/config/environment/API contracts, model protocol and reload behavior, web authentication, installer options, restart rehydration, and stale provider/extension claims; removed completed plan files after carrying their current behavior into maintained docs.

@@ -754,6 +754,16 @@ describe("web view behavior", () => {
       expect(wrapper.find("#model-provider").exists()).toBe(true),
     );
     expect(wrapper.findAll("details.settings-section")).toHaveLength(1);
+    expect(wrapper.get("#model-endpoint-help").text()).toContain("without /v1");
+    expect(wrapper.get(".field-wide .field-hint").text()).toContain(
+      "never returned",
+    );
+    expect(wrapper.get("#model-endpoint").attributes("aria-describedby")).toBe(
+      "model-endpoint-help",
+    );
+    await wrapper.get("#language").setValue("zh-CN");
+    expect(wrapper.get("h1").text()).toBe("设置");
+    await wrapper.get("#language").setValue("en");
     expect(
       wrapper.get("details.settings-section").attributes("open"),
     ).not.toBeUndefined();
@@ -779,6 +789,25 @@ describe("web view behavior", () => {
     await wrapper.get('input[type="checkbox"]').setValue(true);
     expect(wrapper.find("fieldset.capabilities").exists()).toBe(true);
     expect(wrapper.findAll(".capability-options label")).toHaveLength(5);
+  });
+
+  it("gives ambiguous search input nearby guidance", async () => {
+    const wrapper = mountView(
+      SearchView,
+      api({
+        listSources: async () =>
+          sourceList([
+            { provider_id: "demo", account_id: null, state: "connected" },
+          ]),
+      }),
+    );
+    await vi.waitFor(() =>
+      expect(wrapper.find("#search-query").exists()).toBe(true),
+    );
+    expect(wrapper.get("#search-query").attributes("aria-describedby")).toBe(
+      "search-query-help",
+    );
+    expect(wrapper.get("#search-query-help").text()).toContain("topic");
   });
 
   it("keeps the selected catalog pair while filtering and displays server configuration", async () => {
