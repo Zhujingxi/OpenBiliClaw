@@ -26,6 +26,8 @@ export type ProfileResponse = components["schemas"]["ProfileResponse"];
 export type EditProfileResult = components["schemas"]["EditProfileResult"];
 export type AssistantTurnResponse =
   components["schemas"]["AssistantTurnResponse"];
+export type AssistantLifecycleEvent =
+  import("@openbiliclaw/api-client").AssistantLifecycleEvent;
 export type ConversationResponse =
   components["schemas"]["ConversationResponse"];
 export type RuntimeResponse = components["schemas"]["RuntimeResponse"];
@@ -65,11 +67,11 @@ export interface WebApi {
     body: components["schemas"]["ProfileEditRequest"],
     signal?: AbortSignal,
   ): Promise<EditProfileResult>;
-  assistantTurn(
+  assistantTurnStream(
     body: components["schemas"]["AssistantTurnRequest"],
     deviceId: string,
     signal?: AbortSignal,
-  ): Promise<AssistantTurnResponse>;
+  ): AsyncIterable<AssistantLifecycleEvent>;
   conversation(
     conversationId: string,
     deviceId: string,
@@ -176,15 +178,8 @@ export function createWebApi(client: ApiClient): WebApi {
         validate: objectValidator<EditProfileResult>("profile"),
         signal,
       }),
-    assistantTurn: (body, deviceId, signal) =>
-      client.request({
-        path: "/v1/assistant/turns",
-        method: "post",
-        body,
-        headers: { "X-Device-ID": deviceId },
-        validate: objectValidator<AssistantTurnResponse>("output"),
-        signal,
-      }),
+    assistantTurnStream: (body, deviceId, signal) =>
+      client.assistantStream(body, { "X-Device-ID": deviceId }, signal),
     conversation: (conversationId, deviceId, signal) =>
       client.request({
         path: "/v1/assistant/conversations/{conversation_id}",

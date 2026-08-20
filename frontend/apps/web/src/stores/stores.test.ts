@@ -21,6 +21,22 @@ import { errorMessage } from "./state";
 const emptyStream = async function* () {
   yield* [] as never[];
 };
+const meter = {
+  approximate_usage_percent: 25,
+  context_window_tokens: 1000,
+  estimated_input_tokens: 250,
+  excluded_oldest_turns: 0,
+};
+const assistantStream = async function* (text = "hello") {
+  yield { kind: "turn_started" as const, context_meter: meter };
+  yield { kind: "response_delta" as const, delta: text };
+  yield {
+    kind: "turn_finished" as const,
+    context_meter: meter,
+    output: { kind: "message" as const, text },
+    usage: { input_tokens: 10, output_tokens: 2, request_count: 1 },
+  };
+};
 function deferred<T>(): {
   promise: Promise<T>;
   resolve: (value: T) => void;
@@ -72,7 +88,7 @@ function api(overrides: Partial<WebApi> = {}): WebApi {
         overrides: [],
       },
     }),
-    assistantTurn: async () => ({ output: { kind: "message", text: "hello" } }),
+    assistantTurnStream: () => assistantStream(),
     conversation: async () => ({
       conversation: {
         conversation_id: "conv",
@@ -376,8 +392,12 @@ describe("durable concern stores", () => {
     await content.search(api({ search: aborted }), "demo", "q");
     expect(content.searchPhase).toBe("loading");
     const assistant = useAssistantStore();
+    const abortedAssistant = async function* () {
+      yield* [] as never[];
+      throw new DOMException("Aborted", "AbortError");
+    };
     await assistant.send(
-      api({ assistantTurn: aborted }),
+      api({ assistantTurnStream: abortedAssistant }),
       "conv",
       "d",
       "q",
@@ -414,11 +434,13 @@ describe("durable concern stores", () => {
 
   it("appends assistant turns and passes the selected locale verbatim", async () => {
     const store = useAssistantStore();
-    const assistantTurn = vi.fn(api().assistantTurn);
-    const localizedApi = api({ assistantTurn });
+    const assistantTurnStream = vi.fn(api().assistantTurnStream);
+    const localizedApi = api({ assistantTurnStream });
     await store.send(localizedApi, "conv", "device", "hello", "zh-CN");
     await store.send(localizedApi, "conv", "device", "again", "zh-CN");
-    expect(assistantTurn.mock.calls[0]?.[0]).toMatchObject({ locale: "zh-CN" });
+    expect(assistantTurnStream.mock.calls[0]?.[0]).toMatchObject({
+      locale: "zh-CN",
+    });
     expect(
       store.messages.map(({ role, content }) => ({ role, content })),
     ).toEqual([
@@ -428,6 +450,188 @@ describe("durable concern stores", () => {
       { role: "assistant", content: "hello" },
     ]);
     expect(store.phase).toBe("success");
+  });
+
+  it("applies every Assistant lifecycle event without duplicate or unsafe output", async () => {
+    const store = useAssistantStore();
+    const lifecycle = async function* () {
+      yield {
+        kind: "turn_started" as const,
+        context_meter: { ...meter, excluded_oldest_turns: 2 },
+      };
+      yield { kind: "reasoning_started" as const };
+      yield { kind: "reasoning_delta" as const, delta: "Provider reasoning" };
+      yield { kind: "reasoning_finished" as const };
+      yield { kind: "tool_started" as const, name: "Search library" };
+      yield {
+        kind: "tool_finished" as const,
+        name: "Search library",
+        status: "succeeded" as const,
+        summary: "Found two useful results",
+      };
+      yield { kind: "response_delta" as const, delta: "Visible " };
+      yield { kind: "response_delta" as const, delta: "answer" };
+      yield {
+        kind: "turn_finished" as const,
+        context_meter: { ...meter, excluded_oldest_turns: 2 },
+        output: { kind: "message" as const, text: "Visible answer" },
+        usage: { input_tokens: 10, output_tokens: 2, request_count: 1 },
+      };
+    };
+    await store.send(
+      api({ assistantTurnStream: lifecycle }),
+      "conv",
+      "device",
+      "question",
+      "en",
+    );
+    expect(store.messages.map((message) => message.content)).toEqual([
+      "question",
+      "Visible answer",
+    ]);
+    expect(store.reasoning).toEqual({
+      text: "Provider reasoning",
+      active: false,
+    });
+    expect(store.tools).toEqual([
+      expect.objectContaining({
+        name: "Search library",
+        summary: "Found two useful results",
+        status: "succeeded",
+      }),
+    ]);
+    expect(store.contextMeter?.excluded_oldest_turns).toBe(2);
+    expect(JSON.stringify(store.tools)).not.toContain("arguments");
+    expect(store.phase).toBe("success");
+  });
+
+  it("renders a final validated structured response without exposing opaque IDs", async () => {
+    const structured = async function* () {
+      yield { kind: "turn_started" as const, context_meter: meter };
+      yield {
+        kind: "turn_finished" as const,
+        context_meter: meter,
+        output: {
+          kind: "recommendations" as const,
+          intro: "Ready in your feed",
+          recommendation_ids: ["opaque_secret_id"],
+        },
+        usage: { input_tokens: 10, output_tokens: 2, request_count: 1 },
+      };
+    };
+    const store = useAssistantStore();
+    await store.send(
+      api({ assistantTurnStream: structured }),
+      "conv",
+      "device",
+      "question",
+      "en",
+    );
+    expect(store.messages.at(-1)).toMatchObject({
+      content: "Ready in your feed",
+      presentation: "recommendationsAvailable",
+      count: 1,
+    });
+    expect(JSON.stringify(store.messages)).not.toContain("opaque_secret_id");
+  });
+
+  it("fails closed on lifecycle order errors and safe server errors", async () => {
+    const outOfOrder = async function* () {
+      yield { kind: "response_delta" as const, delta: "must not display" };
+    };
+    const store = useAssistantStore();
+    await store.send(
+      api({ assistantTurnStream: outOfOrder }),
+      "conv",
+      "device",
+      "first",
+      "en",
+    );
+    expect(store.phase).toBe("error");
+    expect(store.messages.some((message) => message.role === "assistant")).toBe(
+      false,
+    );
+
+    const safeError = async function* () {
+      yield { kind: "turn_started" as const, context_meter: meter };
+      yield { kind: "response_delta" as const, delta: "partial secret" };
+      yield {
+        kind: "error" as const,
+        code: "temporary_failure" as const,
+        message: "raw server detail",
+      };
+    };
+    await store.send(
+      api({ assistantTurnStream: safeError }),
+      "conv",
+      "device",
+      "second",
+      "en",
+    );
+    expect(store.phase).toBe("error");
+    expect(store.error).toEqual({
+      key: "errors.temporaryFailure",
+      code: "temporary_failure",
+      status: 503,
+    });
+    expect(JSON.stringify(store.messages)).not.toContain("partial secret");
+    expect(
+      JSON.stringify({ messages: store.messages, error: store.error }),
+    ).not.toContain("raw server detail");
+  });
+
+  it("stops only the active stream and clears transient output", async () => {
+    const stream = async function* (
+      _body: unknown,
+      _device: string,
+      signal?: AbortSignal,
+    ) {
+      yield { kind: "turn_started" as const, context_meter: meter };
+      yield { kind: "reasoning_started" as const };
+      yield { kind: "reasoning_delta" as const, delta: "temporary" };
+      yield { kind: "reasoning_finished" as const };
+      yield { kind: "response_delta" as const, delta: "partial" };
+      await new Promise<never>((_resolve, reject) =>
+        signal?.addEventListener("abort", () =>
+          reject(new DOMException("Aborted", "AbortError")),
+        ),
+      );
+    };
+    const store = useAssistantStore();
+    const pending = store.send(
+      api({ assistantTurnStream: stream }),
+      "conv",
+      "device",
+      "question",
+      "en",
+    );
+    await vi.waitFor(() => expect(store.isRunning).toBe(true));
+    await vi.waitFor(() =>
+      expect(store.messages.at(-1)?.content).toBe("partial"),
+    );
+    store.stop();
+    await pending;
+    expect(store.isRunning).toBe(false);
+    expect(store.phase).toBe("idle");
+    expect(store.messages.map((message) => message.content)).toEqual([
+      "question",
+    ]);
+    expect(store.reasoning).toBeUndefined();
+    expect(store.tools).toEqual([]);
+    expect(store.contextMeter).toBeUndefined();
+  });
+
+  it("starts a new chat without retaining transient conversation state", async () => {
+    const store = useAssistantStore();
+    await store.send(api(), "old", "device", "question", "en");
+    expect(store.messages.length).toBeGreaterThan(0);
+    store.newChat();
+    expect(store.messages).toEqual([]);
+    expect(store.conversation).toBeUndefined();
+    expect(store.reasoning).toBeUndefined();
+    expect(store.tools).toEqual([]);
+    expect(store.contextMeter).toBeUndefined();
+    expect(store.phase).toBe("empty");
   });
 
   it("hydrates structured assistant messages without exposing raw JSON or IDs", async () => {

@@ -1,12 +1,13 @@
+import { ApiError, uuid } from "@openbiliclaw/api-client";
+import { computed, ref } from "vue";
+import { defineStore } from "pinia";
+import type { SupportedLocale } from "../i18n";
 import type {
+  AssistantLifecycleEvent,
   AssistantTurnResponse,
   ConversationResponse,
   WebApi,
 } from "../services/api";
-import { computed, ref } from "vue";
-import { uuid } from "@openbiliclaw/api-client";
-import { defineStore } from "pinia";
-import type { SupportedLocale } from "../i18n";
 import {
   errorMessage,
   isCancellation,
@@ -31,16 +32,37 @@ export interface AssistantDisplayMessage {
   error?: UiError;
 }
 
+export interface AssistantReasoning {
+  readonly text: string;
+  readonly active: boolean;
+}
+
+export interface AssistantToolCard {
+  readonly id: string;
+  readonly name: string;
+  readonly summary: string;
+  readonly status: "running" | "succeeded" | "failed";
+}
+
+type ContextMeter = Extract<
+  AssistantLifecycleEvent,
+  { kind: "turn_started" }
+>["context_meter"];
 type DisplayContent = Pick<
   AssistantDisplayMessage,
   "content" | "presentation" | "count"
 >;
+type TurnStage = "awaiting-start" | "active" | "terminal";
 
 export const useAssistantStore = defineStore("assistant", () => {
   const phase = ref<LoadPhase>("idle");
   const conversation = ref<ConversationResponse>();
   const localMessages = ref<readonly AssistantDisplayMessage[]>([]);
+  const reasoning = ref<AssistantReasoning>();
+  const tools = ref<readonly AssistantToolCard[]>([]);
+  const contextMeter = ref<ContextMeter>();
   const error = ref<UiError>();
+  const activeTurnId = ref<string>();
   const owner = new RequestOwner();
   const messages = computed<readonly AssistantDisplayMessage[]>(() => [
     ...(conversation.value?.messages.map((message) => ({
@@ -50,6 +72,7 @@ export const useAssistantStore = defineStore("assistant", () => {
     })) ?? []),
     ...localMessages.value,
   ]);
+  const isRunning = computed(() => activeTurnId.value !== undefined);
 
   async function load(
     api: WebApi,
@@ -58,6 +81,7 @@ export const useAssistantStore = defineStore("assistant", () => {
     storage?: Pick<Storage, "removeItem">,
   ): Promise<boolean> {
     const signal = owner.next();
+    clearTransient();
     phase.value = "loading";
     error.value = undefined;
     try {
@@ -91,43 +115,208 @@ export const useAssistantStore = defineStore("assistant", () => {
   ): Promise<void> {
     const signal = owner.next();
     const id = uuid();
+    activeTurnId.value = id;
+    reasoning.value = undefined;
+    tools.value = [];
+    error.value = undefined;
     localMessages.value = [
       ...localMessages.value,
       { id: `${id}:user`, role: "user", content: text },
     ];
     phase.value = "loading";
-    error.value = undefined;
+    let stage: TurnStage = "awaiting-start";
+    let responseStarted = false;
     try {
-      const next = await api.assistantTurn(
+      for await (const event of api.assistantTurnStream(
         { conversation_id: conversationId, locale, text },
         deviceId,
         signal,
-      );
-      if (!owner.owns(signal)) return;
-      localMessages.value = [
-        ...localMessages.value,
-        { id: `${id}:assistant`, role: "assistant", ...outputContent(next) },
-      ];
-      phase.value = "success";
+      )) {
+        if (!owner.owns(signal)) return;
+        if (event.kind === "error") {
+          failTurn(id, streamError(event.code));
+          stage = "terminal";
+          break;
+        }
+        if (event.kind === "turn_started") {
+          if (stage !== "awaiting-start") invalidOrder();
+          contextMeter.value = event.context_meter;
+          stage = "active";
+          continue;
+        }
+        if (stage !== "active") invalidOrder();
+        switch (event.kind) {
+          case "reasoning_started": {
+            const current = reasoning.value as AssistantReasoning | undefined;
+            if (current?.active) invalidOrder();
+            reasoning.value = { text: current?.text ?? "", active: true };
+            break;
+          }
+          case "reasoning_delta": {
+            const current = reasoning.value as AssistantReasoning | undefined;
+            if (!current?.active) invalidOrder();
+            reasoning.value = {
+              text: current.text + event.delta,
+              active: true,
+            };
+            break;
+          }
+          case "reasoning_finished": {
+            const current = reasoning.value as AssistantReasoning | undefined;
+            if (!current?.active) invalidOrder();
+            reasoning.value = { ...current, active: false };
+            break;
+          }
+          case "tool_started":
+            tools.value = [
+              ...tools.value,
+              {
+                id: `${id}:tool:${tools.value.length}`,
+                name: event.name,
+                summary: "",
+                status: "running",
+              },
+            ];
+            break;
+          case "tool_finished": {
+            const index = findRunningTool(event.name, tools.value);
+            if (index < 0) invalidOrder();
+            tools.value = tools.value.map((tool, toolIndex) =>
+              toolIndex === index
+                ? {
+                    ...tool,
+                    summary: event.summary,
+                    status: event.status,
+                  }
+                : tool,
+            );
+            break;
+          }
+          case "response_delta":
+            if (reasoning.value?.active) invalidOrder();
+            responseStarted = true;
+            appendResponseDelta(id, event.delta);
+            break;
+          case "turn_finished": {
+            if (
+              reasoning.value?.active ||
+              tools.value.some((tool) => tool.status === "running")
+            )
+              invalidOrder();
+            contextMeter.value = event.context_meter;
+            if (!responseStarted) {
+              localMessages.value = [
+                ...localMessages.value,
+                {
+                  id: `${id}:assistant`,
+                  role: "assistant",
+                  ...outputContent({ output: event.output }),
+                },
+              ];
+            }
+            const currentReasoning = reasoning.value as
+              | AssistantReasoning
+              | undefined;
+            reasoning.value = currentReasoning
+              ? { ...currentReasoning, active: false }
+              : undefined;
+            phase.value = "success";
+            stage = "terminal";
+            break;
+          }
+        }
+        if (stage === "terminal") break;
+      }
+      if (stage !== "terminal") invalidOrder();
     } catch (caught) {
       if (isCancellation(caught) || !owner.owns(signal)) return;
-      const message = errorMessage(caught);
-      localMessages.value = localMessages.value.map((item) =>
+      failTurn(id, errorMessage(caught));
+    } finally {
+      if (activeTurnId.value === id) activeTurnId.value = undefined;
+    }
+  }
+
+  function appendResponseDelta(id: string, delta: string): void {
+    const messageId = `${id}:assistant`;
+    const index = localMessages.value.findIndex(
+      (message) => message.id === messageId,
+    );
+    if (index < 0) {
+      localMessages.value = [
+        ...localMessages.value,
+        { id: messageId, role: "assistant", content: delta },
+      ];
+      return;
+    }
+    localMessages.value = localMessages.value.map((message, messageIndex) =>
+      messageIndex === index
+        ? { ...message, content: message.content + delta }
+        : message,
+    );
+  }
+
+  function stop(): void {
+    if (activeTurnId.value === undefined) {
+      owner.cancel();
+      return;
+    }
+    const id = activeTurnId.value;
+    owner.cancel();
+    activeTurnId.value = undefined;
+    localMessages.value = localMessages.value.filter(
+      (message) => message.id !== `${id}:assistant`,
+    );
+    reasoning.value = undefined;
+    tools.value = [];
+    contextMeter.value = undefined;
+    error.value = undefined;
+    phase.value = messages.value.length === 0 ? "empty" : "idle";
+  }
+
+  function newChat(): void {
+    owner.cancel();
+    activeTurnId.value = undefined;
+    conversation.value = undefined;
+    localMessages.value = [];
+    clearTransient();
+    error.value = undefined;
+    phase.value = "empty";
+  }
+
+  function clearTransient(): void {
+    activeTurnId.value = undefined;
+    reasoning.value = undefined;
+    tools.value = [];
+    contextMeter.value = undefined;
+  }
+
+  function failTurn(id: string, message: UiError): void {
+    localMessages.value = localMessages.value
+      .filter((item) => item.id !== `${id}:assistant`)
+      .map((item) =>
         item.id === `${id}:user` ? { ...item, error: message } : item,
       );
-      error.value = message;
-      phase.value = "error";
-    }
+    reasoning.value = reasoning.value
+      ? { ...reasoning.value, active: false }
+      : undefined;
+    error.value = message;
+    phase.value = "error";
   }
 
   return {
     phase,
     conversation,
     messages,
+    reasoning,
+    tools,
+    contextMeter,
     error,
+    isRunning,
     load,
     send,
-    cancel: () => owner.cancel(),
+    stop,
+    newChat,
+    cancel: stop,
   };
 });
 
@@ -215,6 +404,33 @@ function recommendationContent(
   return intro
     ? { content: intro }
     : { content: "", presentation: "recommendations" };
+}
+
+function findRunningTool(
+  name: string,
+  tools: readonly AssistantToolCard[],
+): number {
+  for (let index = tools.length - 1; index >= 0; index -= 1) {
+    const tool = tools[index];
+    if (tool?.name === name && tool.status === "running") return index;
+  }
+  return -1;
+}
+
+function streamError(code: "unavailable" | "temporary_failure"): UiError {
+  return {
+    key:
+      code === "unavailable" ? "errors.unavailable" : "errors.temporaryFailure",
+    code,
+    status: 503,
+  };
+}
+
+function invalidOrder(): never {
+  throw new ApiError(
+    "invalid-response",
+    "Assistant lifecycle events were out of order",
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

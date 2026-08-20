@@ -4,6 +4,7 @@ import {
   ApiClient,
   ApiError,
   deviceIdentity,
+  parseAssistantLifecycleEvent,
   parseEventEnvelope,
   uuid,
 } from "./client";
@@ -337,6 +338,90 @@ describe("uuid", () => {
 });
 
 describe("SSE stream", () => {
+  it("posts Assistant turns and runtime-validates every lifecycle event", async () => {
+    const meter = {
+      approximate_usage_percent: 25,
+      context_window_tokens: 1000,
+      estimated_input_tokens: 250,
+      excluded_oldest_turns: 0,
+    };
+    const events = [
+      { kind: "turn_started", context_meter: meter },
+      { kind: "reasoning_started" },
+      { kind: "reasoning_delta", delta: "Because" },
+      { kind: "reasoning_finished" },
+      { kind: "tool_started", name: "Search" },
+      {
+        kind: "tool_finished",
+        name: "Search",
+        status: "succeeded",
+        summary: "Found relevant items",
+      },
+      { kind: "response_delta", delta: "Answer" },
+      {
+        kind: "turn_finished",
+        context_meter: meter,
+        output: { kind: "message", text: "Answer" },
+        usage: { input_tokens: 10, output_tokens: 2, request_count: 1 },
+      },
+      { kind: "error", code: "temporary_failure", message: "Try later" },
+    ];
+    const body = streamOf(
+      events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""),
+    );
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(body));
+    const request = {
+      conversation_id: "conv_11111111111111111111111111111111",
+      locale: "zh-CN",
+      text: "hello",
+    };
+    const result = await collect(
+      new ApiClient("", fetcher, "device-123").assistantStream(
+        request,
+        { "X-Device-ID": "device-123" },
+        undefined,
+      ),
+    );
+    expect(result.map((event) => event.kind)).toEqual(
+      events.map((event) => event.kind),
+    );
+    expect(fetcher).toHaveBeenCalledWith("/v1/assistant/turns/stream", {
+      method: "POST",
+      body: JSON.stringify(request),
+      headers: {
+        accept: "text/event-stream",
+        "content-type": "application/json",
+        "X-Device-ID": "device-123",
+        "X-CSRF-Token": "device-123",
+      },
+    });
+  });
+
+  it("rejects invalid Assistant lifecycle fields", async () => {
+    expect(() =>
+      parseAssistantLifecycleEvent(
+        '{"kind":"tool_finished","name":"Search","status":"ok","summary":"safe"}',
+      ),
+    ).toThrow(ApiError);
+    const client = new ApiClient(
+      "",
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(
+          new Response(streamOf('data: {"kind":"response_delta"}\n\n')),
+        ),
+      "device-123",
+    );
+    await expect(
+      collect(
+        client.assistantStream(
+          { conversation_id: "conv", locale: "en", text: "hello" },
+          { "X-Device-ID": "device-123" },
+        ),
+      ),
+    ).rejects.toMatchObject({ kind: "invalid-response" });
+  });
+
   it("passes the replay cursor and parses CRLF and multiline data frames", async () => {
     const body = streamOf(
       'data: {"kind":"job",\r\ndata: "event_id":1,"component_id":"core","status":"ok"}\r\n\r\n',

@@ -26,6 +26,22 @@ function sourceList(
 ): SourceListResponse {
   return { items, inventory };
 }
+const meter = {
+  approximate_usage_percent: 25,
+  context_window_tokens: 1000,
+  estimated_input_tokens: 250,
+  excluded_oldest_turns: 0,
+};
+async function* assistantStream(text = "answer") {
+  yield { kind: "turn_started" as const, context_meter: meter };
+  yield { kind: "response_delta" as const, delta: text };
+  yield {
+    kind: "turn_finished" as const,
+    context_meter: meter,
+    output: { kind: "message" as const, text },
+    usage: { input_tokens: 10, output_tokens: 2, request_count: 1 },
+  };
+}
 
 function api(overrides: Partial<WebApi> = {}): WebApi {
   return {
@@ -55,9 +71,7 @@ function api(overrides: Partial<WebApi> = {}): WebApi {
     editProfile: async () => {
       throw new Error("unused");
     },
-    assistantTurn: async () => ({
-      output: { kind: "message", text: "answer" },
-    }),
+    assistantTurnStream: () => assistantStream(),
     conversation: async () => ({
       conversation: {
         conversation_id: "conv",
@@ -532,9 +546,7 @@ describe("web view behavior", () => {
     const wrapper = mountView(
       AssistantView,
       api({
-        assistantTurn: async () => ({
-          output: { kind: "message", text: "**answer**\n1. first" },
-        }),
+        assistantTurnStream: () => assistantStream("**answer**\n1. first"),
       }),
     );
     await vi.waitFor(() => expect(wrapper.text()).toContain("history"));
@@ -554,6 +566,110 @@ describe("web view behavior", () => {
     expect(
       wrapper.findAll("li").map((item) => item.find("strong").text()),
     ).toEqual(["You", "You", "Assistant"]);
+  });
+
+  it("renders accessible live reasoning, context, and sanitized tool states", async () => {
+    const lifecycle = async function* () {
+      yield {
+        kind: "turn_started" as const,
+        context_meter: { ...meter, excluded_oldest_turns: 3 },
+      };
+      yield { kind: "reasoning_started" as const };
+      yield { kind: "reasoning_delta" as const, delta: "Textual rationale" };
+      yield { kind: "reasoning_finished" as const };
+      yield {
+        kind: "tool_started" as const,
+        name: "Search library",
+        arguments: '{"credential":"hidden"}',
+      };
+      yield {
+        kind: "tool_finished" as const,
+        name: "Search library",
+        status: "failed" as const,
+        summary: "No matching items",
+        payload: { opaque_id: "hidden" },
+      };
+      yield { kind: "response_delta" as const, delta: "Safe answer" };
+      yield {
+        kind: "turn_finished" as const,
+        context_meter: { ...meter, excluded_oldest_turns: 3 },
+        output: { kind: "message" as const, text: "Safe answer" },
+        usage: { input_tokens: 10, output_tokens: 2, request_count: 1 },
+      };
+    };
+    const wrapper = mountView(
+      AssistantView,
+      api({ assistantTurnStream: lifecycle }),
+    );
+    await vi.waitFor(() => expect(wrapper.text()).toContain("history"));
+    await wrapper.get("textarea").setValue("hello");
+    await wrapper
+      .get("textarea")
+      .trigger("keydown", { shiftKey: true, key: "Enter" });
+    expect(wrapper.text()).not.toContain("Safe answer");
+    await wrapper.get("textarea").trigger("keydown", { key: "Enter" });
+    await vi.waitFor(() => expect(wrapper.text()).toContain("Safe answer"));
+    expect(wrapper.get(".context-status").attributes("role")).toBe("status");
+    expect(wrapper.text()).toContain("Context ~25%");
+    expect(wrapper.text()).toContain("3 older complete turns");
+    expect(wrapper.get(".reasoning-card").attributes("open")).toBeUndefined();
+    expect(wrapper.get(".reasoning-card").text()).toContain(
+      "Textual rationale",
+    );
+    expect(wrapper.get(".tool-cards").attributes("aria-label")).toBe(
+      "Tools used in this turn",
+    );
+    expect(wrapper.get(".tool-card").text()).toContain(
+      "Search libraryNo matching itemsFailed",
+    );
+    expect(wrapper.text()).not.toContain("credential");
+    expect(wrapper.text()).not.toContain("opaque_id");
+  });
+
+  it("shows an accessible Stop control while a turn owns the request", async () => {
+    const pending = async function* (
+      _body: unknown,
+      _device: string,
+      signal?: AbortSignal,
+    ) {
+      yield { kind: "turn_started" as const, context_meter: meter };
+      await new Promise<never>((_resolve, reject) =>
+        signal?.addEventListener("abort", () =>
+          reject(new DOMException("Aborted", "AbortError")),
+        ),
+      );
+    };
+    const wrapper = mountView(
+      AssistantView,
+      api({ assistantTurnStream: pending }),
+    );
+    await vi.waitFor(() => expect(wrapper.text()).toContain("history"));
+    await wrapper.get("textarea").setValue("hello");
+    await wrapper.get("form").trigger("submit");
+    await vi.waitFor(() =>
+      expect(wrapper.get(".stop-button").text()).toContain("Stop"),
+    );
+    await wrapper.get(".stop-button").trigger("click");
+    await vi.waitFor(() =>
+      expect(wrapper.find(".stop-button").exists()).toBe(false),
+    );
+    expect(wrapper.get('button[type="submit"]').text()).toContain("Send");
+  });
+
+  it("starts a fresh persisted conversation without deleting prior server history", async () => {
+    localStorage.setItem(
+      "obc-conversation-id",
+      "conv_11111111111111111111111111111111",
+    );
+    const conversation = vi.fn(api().conversation);
+    const wrapper = mountView(AssistantView, api({ conversation }));
+    await vi.waitFor(() => expect(wrapper.text()).toContain("history"));
+    await wrapper.get(".header-actions button").trigger("click");
+    const next = localStorage.getItem("obc-conversation-id");
+    expect(next).toMatch(/^conv_[0-9a-f]{32}$/);
+    expect(next).not.toBe("conv_11111111111111111111111111111111");
+    expect(wrapper.findAll("li")).toHaveLength(0);
+    expect(conversation).toHaveBeenCalledTimes(1);
   });
 
   it.each([
@@ -639,7 +755,7 @@ describe("web view behavior", () => {
     const wrapper = mountView(
       AssistantView,
       api({
-        assistantTurn: async () => {
+        assistantTurnStream: async function* () {
           calls += 1;
           if (calls === 2)
             throw new ApiError(
@@ -649,13 +765,14 @@ describe("web view behavior", () => {
               undefined,
               "unavailable_capability",
             );
-          return { output: { kind: "message", text: "first answer" } };
+          yield* assistantStream("first answer");
         },
       }),
     );
     await vi.waitFor(() => expect(wrapper.text()).toContain("history"));
     await wrapper.get("textarea").setValue("first question");
     await wrapper.get("form").trigger("submit");
+    await vi.waitFor(() => expect(wrapper.text()).toContain("first answer"));
     await wrapper.get("textarea").setValue("second question");
     await wrapper.get("form").trigger("submit");
     await vi.waitFor(() =>

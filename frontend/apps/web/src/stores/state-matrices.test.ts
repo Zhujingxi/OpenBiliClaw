@@ -36,6 +36,10 @@ function api(overrides: Partial<WebApi>): WebApi {
   const unused = async (): Promise<never> => {
     throw new Error("unused");
   };
+  const unusedStream = async function* () {
+    yield* [] as never[];
+    throw new Error("unused");
+  };
   return {
     login: unused,
     listSources: unused,
@@ -45,7 +49,7 @@ function api(overrides: Partial<WebApi>): WebApi {
     feedback: unused,
     profile: unused,
     editProfile: unused,
-    assistantTurn: unused,
+    assistantTurnStream: unusedStream,
     conversation: unused,
     runtimeHealth: unused,
     search: unused,

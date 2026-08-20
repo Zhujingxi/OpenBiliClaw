@@ -33,6 +33,12 @@ const suggestions = computed(() => [
   t("assistant.suggestion1"),
   t("assistant.suggestion2"),
 ]);
+const contextPercent = computed(() =>
+  Math.min(
+    100,
+    Math.max(0, Math.round(store.contextMeter?.approximate_usage_percent ?? 0)),
+  ),
+);
 const CONVERSATION_KEY = "obc-conversation-id";
 const CONVERSATION_PATTERN = /^conv_[0-9a-f]{32}$/;
 function ensureConversationId(): string {
@@ -68,7 +74,10 @@ function messageText(message: AssistantDisplayMessage): string {
   }
 }
 function isCapabilityError(value: UiError): boolean {
-  return value.code === "unavailable_capability" && value.status === 503;
+  return (
+    (value.code === "unavailable_capability" || value.code === "unavailable") &&
+    value.status === 503
+  );
 }
 async function scrollToLatest(): Promise<void> {
   await nextTick();
@@ -86,10 +95,17 @@ onMounted(async () => {
   await scrollToLatest();
 });
 onBeforeUnmount(store.cancel);
-watch(() => store.messages.length, scrollToLatest);
+watch(
+  () => [
+    store.messages.map((message) => message.content).join(""),
+    store.reasoning?.text,
+    store.tools.length,
+  ],
+  scrollToLatest,
+);
 async function send(message = text.value): Promise<void> {
   const next = message.trim();
-  if (!next || store.phase === "loading") return;
+  if (!next || store.isRunning) return;
   text.value = "";
   await store.send(
     api,
@@ -98,6 +114,12 @@ async function send(message = text.value): Promise<void> {
     next,
     locale.value,
   );
+}
+function newChat(): void {
+  store.newChat();
+  text.value = "";
+  conversationId.value = `conv_${uuid().replaceAll("-", "")}`;
+  localStorage.setItem(CONVERSATION_KEY, conversationId.value);
 }
 </script>
 
@@ -115,7 +137,12 @@ async function send(message = text.value): Promise<void> {
             </p>
           </div>
         </div>
-        <a href="#/settings">{{ t("assistant.settings") }}</a>
+        <div class="header-actions">
+          <button type="button" @click="newChat">
+            {{ t("assistant.newChat") }}
+          </button>
+          <a href="#/settings">{{ t("assistant.settings") }}</a>
+        </div>
       </header>
 
       <div ref="transcript" class="chat-transcript">
@@ -146,6 +173,19 @@ async function send(message = text.value): Promise<void> {
         >
           {{ t("assistant.loading") }}
         </p>
+
+        <div v-if="store.contextMeter" class="context-status" role="status">
+          <strong>{{
+            t("assistant.contextMeter", { percent: contextPercent })
+          }}</strong>
+          <span v-if="store.contextMeter.excluded_oldest_turns > 0">
+            {{
+              t("assistant.contextExcluded", {
+                count: store.contextMeter.excluded_oldest_turns,
+              })
+            }}
+          </span>
+        </div>
 
         <ol :aria-label="t('assistant.history')">
           <li
@@ -184,8 +224,48 @@ async function send(message = text.value): Promise<void> {
           </li>
         </ol>
 
+        <details
+          v-if="store.reasoning?.text"
+          class="reasoning-card"
+          :open="store.reasoning.active || undefined"
+        >
+          <summary>
+            {{
+              store.reasoning.active
+                ? t("assistant.reasoningLive")
+                : t("assistant.reasoning")
+            }}
+          </summary>
+          <p>{{ store.reasoning.text }}</p>
+        </details>
+
+        <section
+          v-if="store.tools.length"
+          class="tool-cards"
+          :aria-label="t('assistant.tools')"
+        >
+          <article v-for="tool in store.tools" :key="tool.id" class="tool-card">
+            <span class="tool-status-icon" aria-hidden="true">{{
+              tool.status === "running"
+                ? "…"
+                : tool.status === "succeeded"
+                  ? "✓"
+                  : "!"
+            }}</span>
+            <div>
+              <strong>{{ tool.name }}</strong>
+              <p v-if="tool.summary">{{ tool.summary }}</p>
+              <span class="tool-status-text">{{
+                t(
+                  `assistant.tool${tool.status.charAt(0).toUpperCase()}${tool.status.slice(1)}`,
+                )
+              }}</span>
+            </div>
+          </article>
+        </section>
+
         <div
-          v-if="store.phase === 'loading' && store.messages.length > 0"
+          v-if="store.isRunning && store.messages.length > 0"
           class="typing-row"
           role="status"
           aria-live="polite"
@@ -221,8 +301,20 @@ async function send(message = text.value): Promise<void> {
           @keydown.enter.exact.prevent="send()"
         />
         <button
+          v-if="store.isRunning"
+          type="button"
+          class="stop-button"
+          :aria-label="t('assistant.stop')"
+          @click="store.stop"
+        >
+          <span class="send-label">{{ t("assistant.stop") }}</span>
+          <span aria-hidden="true">■</span>
+        </button>
+        <button
+          v-else
           type="submit"
-          :disabled="store.phase === 'loading' || !text.trim()"
+          :disabled="!text.trim()"
+          :aria-label="t('assistant.send')"
         >
           <span class="send-label">{{ t("assistant.send") }}</span>
           <span aria-hidden="true">↑</span>
@@ -290,10 +382,18 @@ async function send(message = text.value): Promise<void> {
   color: var(--muted-foreground);
   font-size: 0.68rem;
 }
-.chat-header > a {
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+.header-actions > a,
+.header-actions > button {
+  min-height: 2.1rem;
   border: 1px solid var(--border);
   border-radius: 999px;
   padding: 0.38rem 0.65rem;
+  background: var(--card);
   color: var(--foreground);
   font-size: 0.7rem;
   font-weight: 650;
@@ -362,6 +462,74 @@ async function send(message = text.value): Promise<void> {
 .loading-conversation {
   margin: 2rem auto;
   text-align: center;
+}
+.context-status,
+.reasoning-card,
+.tool-cards {
+  max-width: 54rem;
+  margin: 0 auto 1rem;
+}
+.context-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.65rem;
+  color: var(--muted-foreground);
+  font-size: 0.7rem;
+}
+.context-status strong {
+  color: var(--foreground);
+}
+.reasoning-card {
+  margin-top: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  padding: 0.65rem 0.8rem;
+  background: var(--muted);
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+}
+.reasoning-card summary {
+  cursor: pointer;
+  color: var(--foreground);
+  font-weight: 700;
+}
+.reasoning-card p {
+  margin: 0.55rem 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.tool-cards {
+  display: grid;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+.tool-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  padding: 0.65rem 0.8rem;
+  background: var(--card);
+  font-size: 0.75rem;
+}
+.tool-status-icon {
+  display: grid;
+  place-items: center;
+  width: 1.4rem;
+  height: 1.4rem;
+  border-radius: 50%;
+  background: var(--muted);
+  font-weight: 800;
+}
+.tool-card p {
+  margin: 0.2rem 0;
+  color: var(--muted-foreground);
+  overflow-wrap: anywhere;
+}
+.tool-status-text {
+  color: var(--muted-foreground);
+  font-size: 0.68rem;
 }
 ol {
   display: grid;
@@ -497,6 +665,11 @@ li.message-user .message-body {
   min-width: 5rem;
   border-radius: 0.85rem;
 }
+.chat-composer .stop-button {
+  border-color: var(--error);
+  background: var(--card);
+  color: var(--error);
+}
 .chat-composer > p {
   grid-column: 1 / -1;
   margin: 0;
@@ -531,7 +704,7 @@ li.message-user .message-body {
     height: calc(100dvh - 3.5rem - 2rem - 4.6rem - var(--safe-bottom));
     min-height: 28rem;
   }
-  .chat-header > a {
+  .header-actions > a {
     display: none;
   }
   .chat-transcript {

@@ -31,7 +31,8 @@ const api: WebApi = {
   editProfile: async () => {
     throw new Error("unused");
   },
-  assistantTurn: async () => {
+  assistantTurnStream: async function* () {
+    yield* [] as never[];
     throw new Error("unused");
   },
   conversation: async () => {
@@ -132,6 +133,10 @@ describe("web accessibility", () => {
     );
     expect(source).toContain("min-width: 0;");
     expect(source).toContain("overflow-wrap: anywhere;");
+    const assistant = readFileSync("src/views/AssistantView.vue", "utf8");
+    expect(assistant).toContain("@media (max-width: 48rem)");
+    expect(assistant).toContain("grid-template-columns: minmax(0, 1fr) auto");
+    expect(assistant).toContain("min-width: 2.8rem");
   });
 
   it("has skip navigation, labels, distinct responsive layouts, and Alt+Left keyboard path", async () => {

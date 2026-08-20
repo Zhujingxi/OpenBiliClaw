@@ -5,6 +5,16 @@ export type EventEnvelope =
   | components["schemas"]["RecommendationEvent"]
   | components["schemas"]["AssistantEvent"]
   | components["schemas"]["ConnectionEvent"];
+export type AssistantLifecycleEvent =
+  | components["schemas"]["TurnStarted"]
+  | components["schemas"]["ReasoningStarted"]
+  | components["schemas"]["ReasoningDelta"]
+  | components["schemas"]["ReasoningFinished"]
+  | components["schemas"]["ToolStarted"]
+  | components["schemas"]["ToolFinished"]
+  | components["schemas"]["ResponseDelta"]
+  | components["schemas"]["TurnFinished"]
+  | components["schemas"]["AssistantStreamError"];
 
 export type Validator<T> = (value: unknown) => value is T;
 export type ApiErrorKind = "network" | "http" | "invalid-response";
@@ -176,9 +186,48 @@ export class ApiClient {
     after?: number,
     signal?: AbortSignal,
   ): AsyncGenerator<EventEnvelope, void, undefined> {
-    const response = await this.#fetchResponse(
+    const init = signal === undefined ? {} : { signal };
+    yield* this.#sse(
       `${path}${encodeQuery(after === undefined ? undefined : { after })}`,
-      signal === undefined ? {} : { signal },
+      init,
+      parseEventEnvelope,
+      true,
+    );
+  }
+
+  async *assistantStream(
+    body: components["schemas"]["AssistantTurnRequest"],
+    headers: Readonly<Record<string, string>>,
+    signal?: AbortSignal,
+  ): AsyncGenerator<AssistantLifecycleEvent, void, undefined> {
+    const init: RequestInit = {
+      method: "POST",
+      body: JSON.stringify(body),
+      headers: {
+        accept: "text/event-stream",
+        "content-type": "application/json",
+        ...headers,
+        ...this.#mutationHeaders(),
+      },
+    };
+    if (signal !== undefined) init.signal = signal;
+    yield* this.#sse(
+      "/v1/assistant/turns/stream",
+      init,
+      parseAssistantLifecycleEvent,
+      false,
+    );
+  }
+
+  async *#sse<T>(
+    path: string,
+    init: RequestInit,
+    parse: (text: string) => T,
+    disconnectIsError: boolean,
+  ): AsyncGenerator<T, void, undefined> {
+    const response = await this.#fetchResponse(
+      path,
+      init,
       "Event stream connection failed",
     );
     if (response.body === null) {
@@ -207,7 +256,7 @@ export class ApiClient {
             .filter((line) => line.startsWith("data:"))
             .map((line) => line.slice(5).replace(/^ /, ""))
             .join("\n");
-          if (data) yield parseEventEnvelope(data);
+          if (data) yield parse(data);
         }
       }
       pending += decoder.decode();
@@ -217,12 +266,14 @@ export class ApiClient {
           "Event stream ended with an incomplete frame",
         );
       }
-      throw new ApiError(
-        "network",
-        "Event stream disconnected",
-        undefined,
-        retryMilliseconds,
-      );
+      if (disconnectIsError) {
+        throw new ApiError(
+          "network",
+          "Event stream disconnected",
+          undefined,
+          retryMilliseconds,
+        );
+      }
     } catch (error) {
       if (error instanceof ApiError || isAbortError(error)) throw error;
       throw new ApiError("network", "Event stream interrupted");
@@ -306,19 +357,109 @@ async function typedError(
 }
 
 export function parseEventEnvelope(text: string): EventEnvelope {
+  return parseSseData(text, isEventEnvelope);
+}
+
+export function parseAssistantLifecycleEvent(
+  text: string,
+): AssistantLifecycleEvent {
+  return parseSseData(text, isAssistantLifecycleEvent);
+}
+
+function parseSseData<T>(text: string, validate: Validator<T>): T {
   let value: unknown;
   try {
     value = JSON.parse(text) as unknown;
   } catch {
     throw new ApiError("invalid-response", "Event data was not valid JSON");
   }
-  if (!isEventEnvelope(value)) {
+  if (!validate(value)) {
     throw new ApiError(
       "invalid-response",
       "Event did not match the expected schema",
     );
   }
   return value;
+}
+
+function isAssistantLifecycleEvent(
+  value: unknown,
+): value is AssistantLifecycleEvent {
+  if (!isRecord(value) || typeof value.kind !== "string") return false;
+  switch (value.kind) {
+    case "turn_started":
+      return isContextMeter(value.context_meter);
+    case "reasoning_started":
+    case "reasoning_finished":
+      return true;
+    case "reasoning_delta":
+    case "response_delta":
+      return typeof value.delta === "string";
+    case "tool_started":
+      return typeof value.name === "string";
+    case "tool_finished":
+      return (
+        typeof value.name === "string" &&
+        typeof value.summary === "string" &&
+        (value.status === "succeeded" || value.status === "failed")
+      );
+    case "turn_finished":
+      return (
+        isContextMeter(value.context_meter) &&
+        isTurnUsage(value.usage) &&
+        isAssistantOutput(value.output)
+      );
+    case "error":
+      return (
+        (value.code === "unavailable" || value.code === "temporary_failure") &&
+        typeof value.message === "string"
+      );
+    default:
+      return false;
+  }
+}
+
+function isContextMeter(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    isNonNegativeNumber(value.approximate_usage_percent) &&
+    isNonNegativeNumber(value.context_window_tokens) &&
+    isNonNegativeNumber(value.estimated_input_tokens) &&
+    isNonNegativeInteger(value.excluded_oldest_turns)
+  );
+}
+
+function isTurnUsage(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    isNonNegativeInteger(value.input_tokens) &&
+    isNonNegativeInteger(value.output_tokens) &&
+    isNonNegativeInteger(value.request_count)
+  );
+}
+
+function isAssistantOutput(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  switch (value.kind) {
+    case "message":
+      return typeof value.text === "string";
+    case "clarification":
+      return typeof value.question === "string" && isStringArray(value.choices);
+    case "recommendations":
+      return (
+        typeof value.intro === "string" &&
+        isStringArray(value.recommendation_ids)
+      );
+    case "pending_action":
+      return (
+        isRecord(value.action) &&
+        typeof value.action.effect === "string" &&
+        typeof value.action.expires_at === "string" &&
+        typeof value.action.pending_action_id === "string"
+      );
+    default:
+      return false;
+  }
 }
 
 function isEventEnvelope(value: unknown): value is EventEnvelope {
@@ -349,6 +490,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isPositiveInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isInteger(value) && value >= 1;
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+
+function isNonNegativeNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) && value.every((item) => typeof item === "string")
+  );
 }
 
 function interpolatePath(path: string, parameters: unknown): string {
