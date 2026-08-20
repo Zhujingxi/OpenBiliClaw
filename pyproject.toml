@@ -45,6 +45,9 @@ dev = [
     "pytest-xdist>=3",
     "ruff>=0.8",
     "mypy>=1.13",
+    "pillow>=10.0",
+    "secretstorage>=3.3.3; sys_platform == 'linux'",
+    "pycryptodome>=3.20; sys_platform == 'linux'",
     "types-yt-dlp>=2025.1",
 ]
 browser = [
