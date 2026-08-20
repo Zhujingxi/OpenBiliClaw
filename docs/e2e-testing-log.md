@@ -4,6 +4,10 @@ This is the durable test → debug → fix → test trace for the real-stack pla
 
 ## L3 refactor regression corrections
 
+The DeepSeek catalog profile built required `assistant.dialogue` and `understanding.preference` compatible routes, then failed startup on the unconditionally registered optional `recommendation.brief` route because `deepseek-chat` does not declare structured output; it also cannot satisfy visual inspection. Composition now validates the required routes as before but registers RecommendationBrief and inspection routes/services only when their full requirements are declared. A text-only, tool-capable, streaming DeepSeek-shaped graph regression proves Assistant and Understanding remain available while both optional services are absent.
+
+The real Kimi thinking-on preference run reported provider-counted output beyond the preference analyzer's 1,024-token ceiling and AIRuntime correctly raised `BudgetExhaustedError`. Only this domain-owned policy now allows 2,048 output / 6,144 total tokens for reasoning plus the bounded `PreferenceDraftBatch`; input (4,096), tool calls (1), timeout (120 seconds), and retries (0) remain unchanged. A fake-model AIRuntime regression reports 1,500 output tokens—above the former limit and below the new bound—and returns the validated typed batch.
+
 The sequential L3 embedding smoke initially attempted a new anonymous Bilibili connection after startup had rehydrated a verified connected handle, so Access correctly rejected it as `already_connected`. The L2 restored-or-anonymous setup is now one shared E2E helper used by L2, L3, and the subsequent L4 refill: it reuses a connected handle only when verification grants `read_public`, connects anonymously only from `disconnected`, and fails clearly rather than replacing insufficient credentials.
 
 ## L7 — Localized Assistant browser journey

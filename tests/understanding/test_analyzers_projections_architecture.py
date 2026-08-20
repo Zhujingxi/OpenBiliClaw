@@ -10,7 +10,12 @@ from pydantic_ai import Agent, PromptedOutput
 from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
+from pydantic_ai.usage import RequestUsage
 
+from openbiliclaw.ai.runtime.capabilities import ModelCapabilities
+from openbiliclaw.ai.runtime.execution import AgentRunRequest, AIRuntime
+from openbiliclaw.ai.runtime.routes import ConfiguredModel, ModelRoute, RouteTable
+from openbiliclaw.core.resources import ResourceBudget
 from openbiliclaw.understanding.analyzers import (
     AVOIDANCE_ANALYZER,
     INSIGHT_ANALYZER,
@@ -143,6 +148,54 @@ def test_analyzer_definitions_have_stable_typed_bounded_contracts() -> None:
     preference_output = PREFERENCE_ANALYZER.agent.output_type
     assert isinstance(preference_output, PromptedOutput)
     assert preference_output.outputs is PreferenceDraftBatch
+
+
+async def test_preference_budget_allows_bounded_prompted_output_with_reasoning_usage() -> None:
+    def response(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        return ModelResponse(
+            parts=[TextPart('{"proposals":[]}')],
+            usage=RequestUsage(input_tokens=100, output_tokens=1_500),
+        )
+
+    model = ConfiguredModel(
+        "thinking-model",
+        "test",
+        FunctionModel(response),
+        ModelCapabilities(context_tokens=4_096),
+    )
+    runtime = AIRuntime(
+        RouteTable(
+            (
+                ModelRoute(
+                    PREFERENCE_ANALYZER.agent_id,
+                    PREFERENCE_ANALYZER.requirements,
+                    (model,),
+                ),
+            )
+        ),
+        ResourceBudget("model", 1),
+    )
+
+    result = await runtime.run(
+        AgentRunRequest(
+            agent_id=PREFERENCE_ANALYZER.agent_id,
+            agent=PREFERENCE_ANALYZER.agent,
+            deps=None,
+            user_input="Evidence batch contains no supported preference signal",
+            history=(),
+            context=(),
+            requirements=PREFERENCE_ANALYZER.requirements,
+            policy=PREFERENCE_ANALYZER.policy,
+            workflow="understanding.preference",
+        )
+    )
+
+    assert result.output == PreferenceDraftBatch(proposals=())
+    assert PREFERENCE_ANALYZER.policy.output_tokens_limit == 2_048
+    assert PREFERENCE_ANALYZER.policy.total_tokens_limit == 6_144
+    assert PREFERENCE_ANALYZER.policy.input_tokens_limit == 4_096
+    assert PREFERENCE_ANALYZER.policy.tool_calls_limit == 1
+    assert PREFERENCE_ANALYZER.policy.timeout_seconds == 120
 
 
 async def test_structured_analyzer_runs_with_function_model() -> None:

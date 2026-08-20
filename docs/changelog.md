@@ -6,6 +6,8 @@
 
 ## Unreleased
 
+- Raised only the Understanding preference analyzer's bounded output/total policy from 1,024/5,120 to 2,048/6,144 tokens so provider-counted Kimi reasoning and the typed `PreferenceDraftBatch` fit, without changing its input, timeout, tool-call, or retry limits.
+
 - Reused the L2 restored-or-anonymous Bilibili access helper across sequential L3/L4 E2E acquisition, accepting an existing connected handle only when verification grants public reads and avoiding duplicate anonymous connects after startup rehydration.
 
 - Kept configured models fail-closed on required Assistant and Understanding capabilities while registering optional RecommendationBrief and visual-inspection routes/services only when their declared model requirements are compatible; text-only DeepSeek chat can now build the production graph without pretending structured-output or vision support.
