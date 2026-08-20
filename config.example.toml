@@ -98,6 +98,10 @@ api_key = ""
 # 旧名 deepseek-chat / deepseek-reasoner 将于 2026/07/24 弃用
 model = "deepseek-v4-flash"
 base_url = "https://api.deepseek.com"
+# 官方 API 对内容安全审核较严，跑 rebuild-profile / init 偏好分析时若遇到
+# HTTP 400 "Content Exists Risk"，说明当前批次内容命中审核；系统会自动拆分
+# 并跳过命中事件，但更省心的做法是给 default_chain 加一个第三方中转
+# （openai_compatible）作为 fallback，或在设置页使用 relay 跑 deepseek-v4-pro。
 # v4 thinking 默认用均衡档 medium（DeepSeek 官方兼容映射为 high）。
 # 渠道的关键词、抽取、评分和短文案任务仍按单次调用传空并关闭 thinking；
 # 需要最深推理时可改为 "max"，完全关闭可改为 ""。

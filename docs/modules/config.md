@@ -204,6 +204,10 @@ base_url = "https://api.deepseek.com"
 
 链只在当前实例出现 Provider 级失败、超时、限流或无有效内容时继续；限流冷却按**实例 ID**隔离，同类型的健康备用渠道不会被一起冷却。保存时会阻止空链、重复引用、不存在或停用的实例，以及缺少必要凭据的启用实例。`PUT /api/config` 遇到 blocking issue 返回 400，并保持磁盘和运行时原状。
 
+> DeepSeek 官方 API 对内容安全审核较严，`rebuild-profile` / `init` 偏好分析遇到
+> HTTP 400 `"Content Exists Risk"` 时，系统会自动拆分并跳过命中事件；更稳的做法是给
+> `default_chain` 加一个第三方中转（`openai_compatible`）作为 fallback。
+
 ### `[llm.instances.<instance_id>]`
 
 实例 ID 必须以小写字母或数字开头，后续只允许小写字母、数字、`_`、`-`，最长 64 个字符；它必须唯一且保存后应保持稳定，调用统计、失败日志、路由和冷却都用它区分具体渠道。

@@ -20,6 +20,7 @@ from openbiliclaw.llm.base import (
     classify_llm_failure_kind,
     classify_llm_unavailability,
     describe_llm_failure,
+    is_llm_moderation_error,
 )
 from openbiliclaw.llm.service import (
     LLMProviderExecutionError,
@@ -366,6 +367,17 @@ def test_describe_llm_failure_content_moderation_500() -> None:
             raise LLMProviderError("openai_compatible request failed") from upstream
     except LLMProviderError as exc:
         reason = describe_llm_failure(exc)
+    assert reason is not None
+    assert "内容合规" in reason
+
+
+def test_describe_llm_failure_deepseek_content_exists_risk() -> None:
+    error = LLMProviderError(
+        "deepseek request failed: HTTP 400: "
+        '{"code": "invalid_request_error", "message": "Content Exists Risk"}'
+    )
+    assert is_llm_moderation_error(error)
+    reason = describe_llm_failure(error)
     assert reason is not None
     assert "内容合规" in reason
 
@@ -1038,7 +1050,7 @@ async def test_complete_with_core_memory_defaults_to_three_concurrent_calls() ->
             service.complete_with_core_memory(
                 system_instruction=str(index),
                 user_input=str(index),
-                caller="recommendation.write_expression",
+                caller="soul.dialogue",
             )
         )
         for index in range(4)

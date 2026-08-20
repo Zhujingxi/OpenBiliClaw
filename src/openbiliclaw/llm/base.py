@@ -110,6 +110,7 @@ _LLM_MODERATION_MARKERS = (
     "content policy",
     "content_filter",
     "content management",
+    "content exists risk",
     "risk_control",
     "10013",
 )
@@ -315,6 +316,24 @@ def classify_llm_failure_kind(exc: BaseException) -> str | None:
     if invalid_response:
         return "invalid_response"
     return None
+
+
+def is_llm_moderation_error(exc: BaseException) -> bool:
+    """Return True when an exception chain carries a content-moderation refusal.
+
+    Callers such as the preference analyzer use this to tell a content-local
+    refusal (split the batch, isolate the offending event, and skip only that
+    event) apart from a genuine provider/configuration failure (raise).
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        message = str(current).lower()
+        if any(marker in message for marker in _LLM_MODERATION_MARKERS):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def describe_llm_failure(exc: BaseException) -> str | None:

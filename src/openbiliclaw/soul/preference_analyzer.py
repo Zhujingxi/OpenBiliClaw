@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
-from openbiliclaw.llm.base import LLMProviderError, LLMResponse
+from openbiliclaw.llm.base import LLMProviderError, LLMResponse, is_llm_moderation_error
 from openbiliclaw.llm.json_utils import (
     DEFAULT_STRUCTURED_MAX_TOKENS,
     format_parse_failure,
@@ -295,6 +295,21 @@ class PreferenceAnalyzer:
                 caller="soul.preference",
             )
         except (LLMProviderError, LLMServiceError) as exc:
+            if is_llm_moderation_error(exc):
+                logger.warning(
+                    "preference analysis blocked by provider content moderation; "
+                    "falling back to chunked isolation: events=%d error=%s",
+                    len(events),
+                    exc,
+                )
+                if len(events) > 0:
+                    return await self._analyze_events_chunked(
+                        events=events,
+                        existing_preference=existing_preference,
+                        chunk_size=max(1, len(events) // 2),
+                        awareness_notes=awareness_notes,
+                        active_insights=active_insights,
+                    )
             raise PreferenceAnalysisError(str(exc)) from exc
 
         raw_preference = self._parse_response(response.content)
@@ -649,8 +664,10 @@ class PreferenceAnalyzer:
             try:
                 return await _run_chunk_once([safe_event])
             except PreferenceAnalysisError as retry_exc:
-                if retry_exc.__cause__ is not None and not self._is_context_overflow_error(
-                    retry_exc
+                if (
+                    retry_exc.__cause__ is not None
+                    and not self._is_context_overflow_error(retry_exc)
+                    and not is_llm_moderation_error(retry_exc)
                 ):
                     raise
                 logger.warning(
@@ -682,7 +699,19 @@ class PreferenceAnalyzer:
                         self.max_prompt_chars,
                     )
                     return []
-                return [await _run_chunk_once([compact])]
+                try:
+                    return [await _run_chunk_once([compact])]
+                except PreferenceAnalysisError as compact_exc:
+                    if is_llm_moderation_error(compact_exc):
+                        logger.warning(
+                            "preference event skipped after provider content moderation "
+                            "refused the compact prompt: title=%r",
+                            str(chunk[0].get("title", ""))
+                            if chunk and isinstance(chunk[0], dict)
+                            else "",
+                        )
+                        return []
+                    raise
             midpoint = max(1, len(chunk) // 2)
             # Recovery must not fan out again underneath the bounded top-level
             # scheduler. Concurrent recursive halves used to queue 4/8/… calls
@@ -716,7 +745,14 @@ class PreferenceAnalyzer:
                             exc,
                         )
                         return await _split_or_compact_chunk(chunk)
-                    raise
+                    if not is_llm_moderation_error(exc):
+                        raise
+                    logger.warning(
+                        "preference chunk refused by provider content moderation; "
+                        "isolating the offending event: events=%d error=%s",
+                        len(chunk),
+                        exc,
+                    )
                 # Invalid JSON / model refusal is often content-local: split
                 # the batch to isolate the offending event, then skip only
                 # that final single event if a title/source-only retry still
