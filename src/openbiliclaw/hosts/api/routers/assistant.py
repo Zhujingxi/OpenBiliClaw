@@ -28,7 +28,7 @@ _event_adapter: TypeAdapter[AssistantTurnLifecycleEvent] = TypeAdapter(Assistant
 async def _prepend_event(
     first: AssistantTurnLifecycleEvent,
     events: AsyncIterator[AssistantTurnLifecycleEvent],
-) -> AsyncIterator[AssistantTurnLifecycleEvent]:
+) -> AsyncGenerator[AssistantTurnLifecycleEvent, None]:
     async with aclosing(cast("AsyncGenerator[AssistantTurnLifecycleEvent, None]", events)):
         yield first
         async for event in events:
@@ -38,7 +38,7 @@ async def _prepend_event(
 async def _turn_event_stream(
     events: AsyncIterator[AssistantTurnLifecycleEvent],
     disconnected: Callable[[], Awaitable[bool]],
-) -> AsyncIterator[str]:
+) -> AsyncGenerator[str, None]:
     try:
         async with aclosing(cast("AsyncGenerator[AssistantTurnLifecycleEvent, None]", events)):
             async for event in events:

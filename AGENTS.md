@@ -36,7 +36,7 @@ Common backend gates:
 ruff format src/ tests/ scripts/
 ruff check src/ tests/ scripts/
 mypy src/
-ALLOW_MODEL_REQUESTS=False pytest --cov=openbiliclaw --cov-branch
+ALLOW_MODEL_REQUESTS=False pytest --cov=openbiliclaw --cov-branch --cov-fail-under=90
 ```
 
 Run locally:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Never
+from typing import TYPE_CHECKING, Never
 
 from openbiliclaw.access.forms import ConnectionForm
 from openbiliclaw.access.models import AccessStatus
@@ -37,7 +37,12 @@ from openbiliclaw.application.sources import (
     ConnectSourceResult,
     DisconnectSourceCommand,
 )
-from openbiliclaw.assistant.models import AssistantOutput, Conversation, ConversationMessage
+from openbiliclaw.assistant.models import (
+    AssistantLifecycleEvent,
+    AssistantOutput,
+    Conversation,
+    ConversationMessage,
+)
 from openbiliclaw.content.integration.actions import ActionResult
 from openbiliclaw.content.integration.projections import CardData
 from openbiliclaw.hosts.api import HostDependencies, create_app
@@ -47,6 +52,9 @@ from openbiliclaw.hosts.api.dependencies import (
     StartResult,
 )
 from openbiliclaw.observations.service import RecordBatchResult
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
 
 
 class _SchemaFacade:
@@ -116,11 +124,16 @@ class _SchemaFacade:
     async def assistant_turn(self, request: AssistantTurnInput, device_id: str) -> AssistantOutput:
         self._unavailable()
 
+    def assistant_turn_stream(
+        self, request: AssistantTurnInput, device_id: str
+    ) -> AsyncIterator[AssistantLifecycleEvent]:
+        self._unavailable()
+
     async def conversation(self, conversation_id: str, device_id: str) -> Conversation:
         self._unavailable()
 
     async def conversation_messages(
-        self, conversation_id: str, device_id: str, limit: int
+        self, conversation_id: str, device_id: str, limit: int | None
     ) -> tuple[ConversationMessage, ...]:
         self._unavailable()
 

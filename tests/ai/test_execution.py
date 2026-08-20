@@ -37,6 +37,8 @@ from openbiliclaw.ai.runtime.routes import ConfiguredModel, ModelRoute, RouteTab
 from openbiliclaw.core.resources import ResourceBudget
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from openbiliclaw.ai.runtime.usage import UsageRecord
 
 
@@ -125,7 +127,9 @@ async def test_stream_normalizes_text_tools_and_validated_result() -> None:
 
 
 async def test_stream_emits_only_textual_provider_reasoning() -> None:
-    async def stream_response(messages: list[ModelMessage], info: AgentInfo):
+    async def stream_response(
+        messages: list[ModelMessage], info: AgentInfo
+    ) -> AsyncIterator[str | dict[int, DeltaThinkingPart]]:
         del messages, info
         yield {0: DeltaThinkingPart(content="provider reasoning")}
         yield "answer"
@@ -155,7 +159,7 @@ async def test_stream_emits_only_textual_provider_reasoning() -> None:
 async def test_stream_never_retries_after_visible_output() -> None:
     attempts = 0
 
-    async def broken_stream(messages: list[ModelMessage], info: AgentInfo):
+    async def broken_stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str]:
         nonlocal attempts
         del messages, info
         attempts += 1
@@ -184,7 +188,7 @@ async def test_stream_cancellation_closes_native_stream_and_releases_resource_sl
     closed = asyncio.Event()
     blocker = asyncio.Event()
 
-    async def stream_response(messages: list[ModelMessage], info: AgentInfo):
+    async def stream_response(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str]:
         del messages, info
         try:
             entered.set()

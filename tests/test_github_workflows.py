@@ -17,7 +17,7 @@ def test_ci_keeps_expensive_platform_tests_manual() -> None:
     assert (
         "run: python -m pytest -q tests/composition/test_composition.py -k entrypoint" in workflow
     )
-    assert "python -m pytest --cov=openbiliclaw --cov-branch" in workflow
+    assert "python -m pytest --cov=openbiliclaw --cov-branch --cov-fail-under=90" in workflow
 
 
 def test_web_guided_init_e2e_sanitizes_apt_sources_before_playwright_install() -> None:

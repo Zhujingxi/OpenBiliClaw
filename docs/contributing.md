@@ -35,7 +35,7 @@ mypy src/
 
 ```bash
 # Run the offline hermetic suite with branch coverage
-ALLOW_MODEL_REQUESTS=False pytest --cov=openbiliclaw --cov-branch
+ALLOW_MODEL_REQUESTS=False pytest --cov=openbiliclaw --cov-branch --cov-fail-under=90
 ```
 
 ## Commit Convention

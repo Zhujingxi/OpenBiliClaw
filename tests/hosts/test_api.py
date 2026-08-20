@@ -56,6 +56,7 @@ from openbiliclaw.application.sources import (
 )
 from openbiliclaw.assistant.models import (
     AssistantClarification,
+    AssistantLifecycleEvent,
     AssistantMessage,
     AssistantOutput,
     AssistantPendingAction,
@@ -114,7 +115,7 @@ from openbiliclaw.understanding.profile import CanonicalProfile
 from openbiliclaw.understanding.projections import DialogueProfile
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncGenerator, AsyncIterator
 
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
 REF = ContentRef(
@@ -335,7 +336,9 @@ class Facade:
             )
         return AssistantMessage(text="Hello")
 
-    async def assistant_turn_stream(self, request: AssistantTurnInput, device_id: str):
+    async def assistant_turn_stream(
+        self, request: AssistantTurnInput, device_id: str
+    ) -> AsyncIterator[AssistantLifecycleEvent]:
         output = await self.assistant_turn(request, device_id)
         meter = ContextMeter(
             estimated_input_tokens=100,
@@ -358,7 +361,7 @@ class Facade:
         )
 
     async def conversation_messages(
-        self, conversation_id: str, device_id: str, limit: int
+        self, conversation_id: str, device_id: str, limit: int | None
     ) -> tuple[ConversationMessage, ...]:
         await self._call("conversation_messages")
         return ()
@@ -688,7 +691,7 @@ async def test_assistant_stream_disconnect_closes_owned_generator() -> None:
         excluded_oldest_turns=0,
     )
 
-    async def events():
+    async def events() -> AsyncGenerator[AssistantLifecycleEvent, None]:
         try:
             yield TurnStarted(context_meter=meter)
             await asyncio.Event().wait()
@@ -713,7 +716,7 @@ async def test_assistant_stream_prefetch_wrapper_closes_inner_on_early_close() -
         excluded_oldest_turns=0,
     )
 
-    async def events():
+    async def events() -> AsyncGenerator[AssistantLifecycleEvent, None]:
         try:
             yield TurnStarted(context_meter=meter)
             await asyncio.Event().wait()
@@ -742,7 +745,7 @@ async def test_assistant_stream_has_no_host_timeout_and_runtime_failure_is_sanit
         excluded_oldest_turns=0,
     )
 
-    async def events():
+    async def events() -> AsyncGenerator[AssistantLifecycleEvent, None]:
         try:
             yield TurnStarted(context_meter=meter)
             raise RuntimeError("authorization: upstream-secret")
@@ -771,7 +774,7 @@ async def test_assistant_stream_cancellation_propagates_and_closes_inner_generat
         excluded_oldest_turns=0,
     )
 
-    async def events():
+    async def events() -> AsyncGenerator[AssistantLifecycleEvent, None]:
         try:
             yield TurnStarted(context_meter=meter)
             await asyncio.Event().wait()
@@ -793,7 +796,9 @@ async def test_assistant_stream_cancellation_propagates_and_closes_inner_generat
 
 async def test_assistant_stream_scope_failure_returns_typed_not_found_before_headers() -> None:
     class MismatchedConversationFacade(Facade):
-        async def assistant_turn_stream(self, request: AssistantTurnInput, device_id: str):
+        async def assistant_turn_stream(
+            self, request: AssistantTurnInput, device_id: str
+        ) -> AsyncIterator[AssistantLifecycleEvent]:
             del request, device_id
             raise ApplicationError(ApplicationErrorCode.NOT_FOUND, "conversation not found")
             yield  # pragma: no cover

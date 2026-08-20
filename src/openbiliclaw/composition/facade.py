@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from contextlib import aclosing
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, Protocol
 
 from openbiliclaw.application.content_actions import (
     ConfirmProfileRevision,
@@ -59,7 +59,7 @@ from openbiliclaw.content.integration.identity import ContentRef, ProviderId
 from openbiliclaw.hosts.api.dependencies import AssistantTurnInput, DiagnosticResult, StartResult
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator
+    from collections.abc import AsyncIterator
     from pathlib import Path
 
     from openbiliclaw.access.forms import ConnectionForm
@@ -387,10 +387,7 @@ class CompositionFacade:
     ) -> AsyncIterator[AssistantLifecycleEvent]:
         if self._assistant is None:
             raise self._unavailable()
-        events = cast(
-            "AsyncGenerator[AssistantLifecycleEvent, None]",
-            self._assistant.stream_turn(request, device_id),
-        )
+        events = self._assistant.stream_turn(request, device_id)
         async with aclosing(events):
             async for event in events:
                 yield event

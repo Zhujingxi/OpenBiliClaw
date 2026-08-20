@@ -41,11 +41,13 @@ from openbiliclaw.core.resources import ResourceBudget
 from openbiliclaw.hosts.api.schemas.models import AssistantTurnRequest
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
     from pathlib import Path
 
     from pydantic_ai.messages import ModelMessage
 
     from openbiliclaw.application.reads import RecommendationsResult
+    from openbiliclaw.assistant.models import AssistantLifecycleEvent, ConversationMessage
 
 
 def test_assistant_recommendation_context_exposes_titles_and_links_not_internal_ids() -> None:
@@ -146,7 +148,9 @@ async def test_controller_persists_scoped_turn_and_messages(
     history_reads = 0
     original_all_messages = application.repositories.conversations.all_messages
 
-    async def tracked_all_messages(target_conversation_id: str):
+    async def tracked_all_messages(
+        target_conversation_id: str,
+    ) -> tuple[ConversationMessage, ...]:
         nonlocal history_reads
         history_reads += 1
         return await original_all_messages(target_conversation_id)
@@ -261,7 +265,9 @@ async def test_controller_close_releases_complete_runtime_stream_chain(tmp_path:
     assert application.services.understanding is not None
     assert application.services.facade is not None
 
-    async def stream_response(messages: list[ModelMessage], info: AgentInfo):
+    async def stream_response(
+        messages: list[ModelMessage], info: AgentInfo
+    ) -> AsyncIterator[dict[int, DeltaThinkingPart]]:
         del messages, info
         yield {0: DeltaThinkingPart(content="thinking")}
         await asyncio.Event().wait()
@@ -367,7 +373,7 @@ async def test_controller_translates_ai_runtime_failure_to_typed_unavailable(
         is None
     )
 
-    async def failing_stream(prepared: object):
+    async def failing_stream(prepared: object) -> AsyncIterator[AssistantLifecycleEvent]:
         del prepared
         raise UnavailableError(model_instance="test:model")
         yield  # pragma: no cover

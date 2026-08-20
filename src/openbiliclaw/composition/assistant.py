@@ -54,7 +54,7 @@ from openbiliclaw.understanding.overrides import OverrideOperation
 from openbiliclaw.understanding.projections import dialogue_projection
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator
+    from collections.abc import AsyncGenerator
 
     from pydantic_ai import Tool
 
@@ -169,10 +169,7 @@ class AssistantController:
     async def turn(self, request: AssistantTurnInput, device_id: str) -> AssistantOutput:
         """Consume the canonical lifecycle workflow for non-streaming callers."""
 
-        events = cast(
-            "AsyncGenerator[AssistantLifecycleEvent, None]",
-            self.stream_turn(request, device_id),
-        )
+        events = self.stream_turn(request, device_id)
         async with aclosing(events):
             async for event in events:
                 if isinstance(event, TurnFinished):
@@ -183,7 +180,7 @@ class AssistantController:
 
     async def stream_turn(
         self, request: AssistantTurnInput, device_id: str
-    ) -> AsyncIterator[AssistantLifecycleEvent]:
+    ) -> AsyncGenerator[AssistantLifecycleEvent, None]:
         """Run, persist, and expose one typed Assistant lifecycle."""
 
         now = datetime.now(UTC)

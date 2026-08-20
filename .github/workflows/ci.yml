@@ -58,7 +58,7 @@ jobs:
       - name: Run pytest
         env:
           ALLOW_MODEL_REQUESTS: "False"
-        run: python -m pytest --cov=openbiliclaw --cov-branch
+        run: python -m pytest --cov=openbiliclaw --cov-branch --cov-fail-under=90
 
   frontend:
     name: Target frontend gates
