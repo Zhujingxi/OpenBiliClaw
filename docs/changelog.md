@@ -6,6 +6,8 @@
 
 ## Unreleased
 
+- Added an opt-in Python Playwright L7 regression journey against production `openbiliclaw serve` and built Vue assets, covering all three locales, a bounded real-model Assistant turn, safe reasoning/tool presentation, persisted hydration, Stop cancellation, console/network cleanliness, and 390×844 mobile overflow/navigation; the runner now has focused L7 selection/report coverage.
+
 - Polished Assistant turn feedback: failed streams now finalize running tools, Stop restores composer focus, singular English counts and empty-composer styling are correct, New chat interaction contrast is clearer, and persisted safe tool summaries return as read-only cards after reload.
 
 - Added the responsive Assistant streaming web experience over the generated lifecycle: validated SSE deltas finalize without duplication, Stop aborts owned work, New chat preserves retained conversations, approximate context exclusions keep the full transcript visible, and transient reasoning/tool cards expose only safe server presentation across all three locales.

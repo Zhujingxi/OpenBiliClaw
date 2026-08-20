@@ -1,8 +1,8 @@
 # E2E Testing Plan — Real Stack, Layer by Layer
 
-Status: **complete historical execution record**. Every listed layer completed; current test commands and capability truth live in `AGENTS.md` and `docs/modules/`.
+Status: **maintained real-stack validation plan**. Layers L0–L6 preserve their completed execution record; L7 now has an automated, opt-in browser journey. Current commands and capability truth live in `AGENTS.md` and `docs/modules/`.
 
-This plan began from a 716-test hermetic baseline and then exercised the product bottom-up against the real stack. Layer descriptions preserve what was observed at each boundary, including gaps that later phases or subsequent work filled; they are not current architecture claims.
+This plan began from a 716-test hermetic baseline and then exercised the product bottom-up against the real stack. Historical layer descriptions preserve what was observed at each boundary, including gaps that later phases or subsequent work filled; they are not current architecture claims.
 
 ## 0. Credential safety rules (hard constraints)
 
@@ -37,7 +37,8 @@ The legacy `config.toml` / `data-v2/` are never touched.
 
 - `tests/e2e/` with pytest markers `e2e_l0`...`e2e_l7` plus `e2e_l1youtube`, **excluded from the default suite** — the hermetic unit suite stays offline (`ALLOW_MODEL_REQUESTS=False`).
 - `scripts/e2e.py l<N>` — starts the embedding service if down, loads the e2e profile, runs one layer, writes `data-e2e/reports/l<N>.json` + console summary, non-zero exit on failure.
-- Assertions are **invariants** (shape, non-empty, dimension, dedupe), never snapshots of live content.
+- L7 uses the optional Python `playwright` extra and installed Chromium against `openbiliclaw serve` plus the built Vue `dist`; it has no alternate app or JavaScript browser-test dependency.
+- Assertions are **invariants** (shape, non-empty, dimension, dedupe), never snapshots of live content or model prose.
 
 ## 4. Layers (strictly sequential)
 
@@ -77,7 +78,9 @@ Full loop on live `openbiliclaw serve` via `/v1` HTTP only: bootstrap/status and
 7. `docs/docker-deployment.md` rewritten to verified reality.
 
 **L7 — Hosts & UI**
-agent_browser session against the live backend: setup, pool view, recommendations, feedback, profile view. Bugs filed/fixed as found. No scripted browser suite — UI testing is driven interactively by the agent.
+`tests/e2e/test_l7_assistant_ui.py` drives Python Playwright against the production composition and built Vue assets. It verifies the localized Assistant journey (`en`, `zh-CN`, `zh-TW`), New chat, one bounded real-model turn, context presentation, safe optional reasoning/tool presentation, server transcript/tool-summary hydration, Stop cancellation, console/page/network cleanliness, and the 390×844 mobile navigation/overflow boundary. The only accepted failed response is the initial conversation lookup 404 for an unsent fresh local conversation. Screenshots, server logs, and the runner report stay under ignored `data-e2e/reports/`.
+
+Interactive browser exploration remains useful for discovery, but it is no longer the L7 regression gate. Run `npm --prefix frontend run build`, install `.[browser]` plus Chromium, then execute `scripts/e2e.py l7`.
 
 ## 5. Process per layer
 
@@ -100,4 +103,4 @@ Implement harness + tests (TDD) → run against real stack → fix bugs → **in
 | L4 recommendation | completed | 4356d0c1 | 2 real E2E tests passed; real refill/ranking/reasons/diversity/restart verified; duplicate refill and profile-to-discovery seams fixed; semantic index intentionally not added |
 | L5 workflows | completed | 71c16616 | 2 live-server E2E tests passed; HTTP feed delivery/feedback state machine, typed errors, scheduled profile shift, and restart persistence verified; see testing log |
 | L6 docker | completed | 446f055d | 1 real Docker E2E passed; sidecar/build/boot/check/core loop/restart persistence verified; bearer and provider-form host blockers fixed; see testing log |
-| L7 UI | completed | 5276ac48, 4b85f4ae | agent-driven browser pass: fetch receiver, connect validation, conversation ID, typed model failures, feedback wiring, and SPA cache fixed; later correction identified Kimi's default-thinking/forced-required conflict and verified the compatibility toggle |
+| L7 UI | completed (automated) | current branch | `scripts/e2e.py l7`: 1 passed against production serve + built Vue + real model; ignored report at `data-e2e/reports/l7.json`; see testing log |

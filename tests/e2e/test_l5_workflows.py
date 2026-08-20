@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import shutil
 import subprocess
 import time
@@ -17,6 +16,8 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 import pytest
+
+from tests.e2e.server import production_server
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -67,50 +68,6 @@ def _model_configuration_server() -> Iterator[Path]:
         process.wait(timeout=15)
         config.unlink(missing_ok=True)
         shutil.rmtree(runtime)
-
-
-@contextmanager
-def _live_server() -> Iterator[None]:
-    log = (_DATA_DIR / "l5-server.log").open("ab")
-    process = subprocess.Popen(
-        [
-            str(_ROOT / ".venv/bin/openbiliclaw"),
-            "serve",
-            "--config",
-            str(_DATA_DIR / "config.e2e.toml"),
-            "--data-dir",
-            str(_DATA_DIR),
-        ],
-        cwd=_ROOT,
-        env={**os.environ, "ALLOW_MODEL_REQUESTS": "True"},
-        stdin=subprocess.DEVNULL,
-        stdout=log,
-        stderr=subprocess.STDOUT,
-    )
-    try:
-        for _ in range(240):
-            if process.poll() is not None:
-                pytest.fail(
-                    f"server exited {process.returncode}; see {_DATA_DIR / 'l5-server.log'}"
-                )
-            try:
-                status, _ = _request("GET", "/runtime/health")
-                if status == 200:
-                    break
-            except (OSError, URLError):
-                pass
-            time.sleep(0.25)
-        else:
-            pytest.fail("server did not become healthy")
-        yield
-    finally:
-        process.terminate()
-        try:
-            process.wait(timeout=15)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=5)
-        log.close()
 
 
 def _request(
@@ -323,7 +280,7 @@ def test_catalog_and_model_configuration_round_trip_uses_throwaway_profile() -> 
 
 def test_live_http_full_loop_profile_shift_and_errors() -> None:
     run = uuid.uuid4().hex
-    with _live_server():
+    with production_server(log_name="l5-server.log"):
         _cleanup_prior_l5_preferences(run)
         status, health = _request("GET", "/runtime/health")
         assert status == 200
@@ -391,7 +348,7 @@ def test_live_http_full_loop_profile_shift_and_errors() -> None:
 
 
 def test_live_http_restart_persists_feed_profile_and_feedback() -> None:
-    with _live_server():
+    with production_server(log_name="l5-server.log"):
         status, before_feed = _request("GET", "/recommendations?limit=20")
         assert status == 200
         before_items = before_feed.get("items")
@@ -405,7 +362,7 @@ def test_live_http_restart_persists_feed_profile_and_feedback() -> None:
         status, before_profile = _request("GET", "/profiles/default")
         assert status == 200
 
-    with _live_server():
+    with production_server(log_name="l5-server.log"):
         status, after_feed = _request("GET", "/recommendations?limit=20")
         assert status == 200
         after_items = after_feed.get("items")

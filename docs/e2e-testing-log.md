@@ -2,6 +2,10 @@
 
 This is the durable test → debug → fix → test trace for the real-stack plan. It contains no credentials or external response bodies.
 
+## L7 — Localized Assistant browser journey
+
+The opt-in Python Playwright test ran through `scripts/e2e.py l7` against the production `openbiliclaw serve` composition, the built Vue artifact, the isolated E2E profile, and its configured real model. Result: **1 passed**, with 28 other E2E tests deselected; the machine report recorded `passed: 1`, `failed: 0` at `data-e2e/reports/l7.json`, and the ignored screenshot/server log were written beside it. The journey checked `en`, `zh-CN`, and `zh-TW`; New chat; one completed model turn and context meter; conditional safe reasoning/tool cards; transcript/tool-summary hydration; immediate Stop without a false Assistant completion; no unexpected page, console, or HTTP failures; and 390×844 navigation/overflow. The sole allowed HTTP failure was the expected initial 404 for an unsent fresh conversation. No response prose, reasoning, payload, opaque identifier, or credential was recorded.
+
 ## L1-YouTube — yt-dlp anonymous acquisition
 
 1. **Test first:** transport tests required flat search mapping, full fetch metadata, creator extraction, stable identity/dedupe, one-shot pagination, page caps, and safe typed yt-dlp failures. They initially failed because `YtDlpYouTubeTransport` did not exist.

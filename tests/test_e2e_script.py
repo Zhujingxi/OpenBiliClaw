@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -193,6 +194,27 @@ def test_seed_profile_stores_both_fake_keys_when_references_are_missing(
     assert stored == [b"fake-kimi-key", b"fake-deepseek-key"]
     assert "cred_" + "a" * 32 in (data_dir / "kimi.toml").read_text(encoding="utf-8")
     assert "cred_" + "b" * 32 in (data_dir / "deepseek.toml").read_text(encoding="utf-8")
+
+
+def test_l7_runner_selects_the_ui_marker_and_writes_its_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = load_script()
+    commands: list[list[str]] = []
+    monkeypatch.setattr(script, "REPORT_DIR", tmp_path)
+    monkeypatch.setattr(script, "seed_profile", lambda: None)
+    monkeypatch.setattr(script, "ensure_embedding_server", lambda: None)
+
+    def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "1 passed in 2.00s\n", "")
+
+    monkeypatch.setattr(script.subprocess, "run", run)
+
+    assert script.run_layer("l7") == 0
+    assert commands[0][-3:-1] == ["-m", "e2e_l7"]
+    assert (tmp_path / "l7.json").is_file()
+    assert '"passed": 1' in (tmp_path / "l7.json").read_text(encoding="utf-8")
 
 
 def test_pytest_summary_counts_are_extracted() -> None:

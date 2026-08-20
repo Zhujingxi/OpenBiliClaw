@@ -24,7 +24,7 @@ npm --prefix frontend run test
 npm --prefix frontend run build
 ```
 
-Generated `schema.ts` may be committed and must be reproducible. Vite `dist/` is ignored build output and must not be committed.
+Generated `schema.ts` may be committed and must be reproducible. Vite `dist/` is ignored build output and must not be committed. The opt-in Python Playwright L7 journey runs the production `openbiliclaw serve` graph against that built web artifact; browser reports stay under ignored `data-e2e/reports/`.
 
 ## Web shell (Phase 14b)
 
