@@ -37,7 +37,13 @@ function normalizeText(value: string | null | undefined): string {
 }
 
 export function inferBilibiliActionType(hint: ActionHint): string | null {
-  const text = `${normalizeText(hint.text)} ${normalizeText(hint.ariaLabel)} ${hint.className}`
+  // Only trust `textContent` as an action label when it is short. Bilibili
+  // video cards / containers carry full descriptions in their textContent,
+  // and a passing mention of "不感兴趣" / "不喜欢" in the copy must not turn
+  // a card click into a dislike signal. Real controls are short labels.
+  const hintText = normalizeText(hint.text);
+  const actionableText = hintText.length <= 20 ? hintText : "";
+  const text = `${actionableText} ${normalizeText(hint.ariaLabel)} ${hint.className}`
     .toLowerCase();
 
   if (!text) return null;

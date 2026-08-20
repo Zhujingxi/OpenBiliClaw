@@ -222,6 +222,25 @@ test("inferBilibiliActionType recognizes negative feedback controls", () => {
   );
 });
 
+test("inferBilibiliActionType ignores negative keywords embedded in long card copy", () => {
+  // Clicking a Bilibili video card gives the kernel an action hint whose
+  // textContent is the card's full description. A passing mention of
+  // "不感兴趣" in that copy must not turn the click into a dislike.
+  assert.equal(
+    inferBilibiliActionType({
+      text: "B站越刷越无聊？你有没有想过：为什么平台总是给你推荐这些内容？点了“不感兴趣”之后，它到底有没有真的记住？",
+      ariaLabel: null,
+      className: "video-container-v1",
+    }),
+    null,
+  );
+  // Short control labels remain authoritative.
+  assert.equal(
+    inferBilibiliActionType({ text: "不感兴趣", ariaLabel: null, className: "" }),
+    "dislike",
+  );
+});
+
 test("collector normalizes dislike actions into feedback events", () => {
   const action = normalizeActionSignal("dislike", {
     targetText: "不感兴趣",
