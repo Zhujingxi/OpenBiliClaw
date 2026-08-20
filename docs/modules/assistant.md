@@ -10,12 +10,13 @@
 - provider-native read tools reuse the bounded Content Integration tool contract; all results are sanitized and clamped before history;
 - `AssistantSkill` contains only a stable ID, tool factory, model requirements, and static instructions; it has no lifecycle, hook, or credential;
 - conversation/message/tool-summary/pending-action/usage models, SQLite restart, retention, scope, and deletion;
-- recent-window plus typed-summary compaction, run only when limits are exceeded; it preserves unresolved actions, corrections, and references and cannot add confirmed facts;
+- full-window transcript projection that reconstructs only persisted complete user/Assistant turns, estimates instructions, tool definitions, profile, history, and current input, reserves about 20% of the configured model window for output/tool work, and excludes only the oldest complete turns when needed;
+- an approximate context meter reports input-window use and the count of oldest turns excluded; excluded transcript remains persisted and readable, with no automatic summarization;
 - exact-effect/expiry presentation for pending actions and replay-safe deterministic confirmation;
 - a dialogue observation filter that permits only explicit preferences, explicit feedback, confirmed edits, and defined outcomes; ordinary Assistant messages are not learned;
 - a landed profile-correction channel: `propose_profile_revision(field, operation, value, rationale)` accepts only an existing claim ID or `exploration.disabled`, derives a deterministic idempotency key from the effect tuple, and first persists a scoped, expiring pending action without changing the profile. Only approval through the unified confirmation endpoint invokes canonical `EditProfile`; `POST /v1/content/actions/reject` rejects explicitly. SET creates a same-kind, trust-1.0 statement claim from the user-supplied new value; REMOVE only removes. Statement evidence and the accepted claim are best-effort indexed by the shared C2 hook. Assistant exposes no direct-mutation tool.
 
-Provider/tool/profile text is always untrusted data, never instructions. Known secret markers, credential references, and oversized messages/tool results are rejected before model execution or persistence.
+Provider/tool/profile text is always untrusted data, never instructions. Known secret markers, credential references, and oversized messages/tool results are rejected before model execution or persistence. Reconstructed history projects structured Assistant responses to visible text and includes only persisted sanitized tool summaries, never native tool payloads or reasoning.
 
 ## Model compatibility
 

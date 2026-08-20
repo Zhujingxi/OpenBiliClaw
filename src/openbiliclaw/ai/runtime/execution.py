@@ -153,6 +153,17 @@ class AIRuntime:
     def active_runs(self) -> int:
         return self._resource_budget.active
 
+    def context_window(self, agent_id: AgentId, requirements: ModelRequirements) -> int:
+        """Return the smallest configured route window, safe for every fallback."""
+
+        route = self._routes.resolve(agent_id, requirements)
+        return min(model.capabilities.context_tokens for model in route.models)
+
+    def policy(self, agent_id: AgentId, default: RunPolicy) -> RunPolicy:
+        """Resolve the configured run policy for preflight context selection."""
+
+        return self._policies.resolve(agent_id, default)
+
     async def run(self, request: AgentRunRequest[DepsT, OutputT]) -> AgentRunResult[OutputT]:
         """Execute within capability, concurrency, usage, and time bounds."""
 

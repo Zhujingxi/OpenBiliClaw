@@ -49,6 +49,16 @@ class PendingActionSummary(StrictBaseModel):
         return value
 
 
+class ContextMeter(StrictBaseModel):
+    """Approximate model-window use for one Assistant turn."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    estimated_input_tokens: int = Field(ge=0)
+    context_window_tokens: int = Field(gt=0)
+    approximate_usage_percent: int = Field(ge=0, le=100)
+    excluded_oldest_turns: int = Field(ge=0)
+
+
 class TurnUsage(StrictBaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     request_count: int = Field(ge=0)

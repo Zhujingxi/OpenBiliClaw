@@ -1,63 +1,126 @@
-"""Bounded Assistant history and fact-preserving compaction."""
+"""Safe Assistant transcript reconstruction and full-window selection."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from pydantic import TypeAdapter, ValidationError
+from pydantic_ai.messages import (
+    ModelMessage,
+    ModelMessagesTypeAdapter,
+    ModelRequest,
+    ModelResponse,
+    TextPart,
+    UserPromptPart,
+)
+
+from .models import (
+    AssistantClarification,
+    AssistantMessage,
+    AssistantOutput,
+    AssistantPendingAction,
+    AssistantRecommendationPresentation,
+    ContextMeter,
+    ConversationRole,
+)
+
 if TYPE_CHECKING:
-    from .models import ConversationMessage, ConversationSummary, PendingActionSummary
+    from .models import ConversationMessage
+
+_OUTPUT_ADAPTER: TypeAdapter[AssistantOutput] = TypeAdapter(AssistantOutput)
 
 
 @dataclass(frozen=True, slots=True)
-class HistoryPolicy:
-    max_messages: int = 20
-    max_chars: int = 16_000
+class HistorySelection:
+    """Safe complete turns selected for one model request."""
 
-    def __post_init__(self) -> None:
-        if self.max_messages < 0 or self.max_chars < 1:
-            raise ValueError("history limits must be non-negative messages and positive chars")
+    messages: tuple[ModelMessage, ...]
+    meter: ContextMeter
 
 
-@dataclass(frozen=True, slots=True)
-class CompactedHistory:
-    messages: tuple[ConversationMessage, ...]
-    summary: ConversationSummary
-    compacted: bool
+def estimate_tokens(text: str) -> int:
+    """Conservatively approximate tokens from UTF-8 bytes."""
+
+    return max(1, (len(text.encode("utf-8")) + 3) // 4)
 
 
-def compact_history(
+def _assistant_text(message: ConversationMessage) -> str:
+    try:
+        output = _OUTPUT_ADAPTER.validate_json(message.content)
+    except ValidationError:
+        # Older persisted Assistant messages may predate the structured output contract.
+        visible = message.content
+    else:
+        if isinstance(output, AssistantMessage):
+            visible = output.text
+        elif isinstance(output, AssistantRecommendationPresentation):
+            visible = output.intro
+        elif isinstance(output, AssistantClarification):
+            visible = "\n".join((output.question, *output.choices))
+        elif isinstance(output, AssistantPendingAction):
+            visible = f"{output.action.effect} (expires {output.action.expires_at.isoformat()})"
+    if message.tool_calls:
+        summaries = "; ".join(
+            f"{item.tool_name.replace('_', ' ')}: {item.outcome} — {item.safe_summary}"
+            for item in message.tool_calls
+        )
+        visible = f"{visible}\nTool activity: {summaries}"
+    return visible
+
+
+def _complete_turns(
+    messages: tuple[ConversationMessage, ...],
+) -> tuple[tuple[ModelMessage, ModelMessage], ...]:
+    turns: list[tuple[ModelMessage, ModelMessage]] = []
+    pending_user: ConversationMessage | None = None
+    for message in messages:
+        if message.role is ConversationRole.USER:
+            pending_user = message
+        elif message.role is ConversationRole.ASSISTANT and pending_user is not None:
+            turns.append(
+                (
+                    ModelRequest(parts=[UserPromptPart(content=pending_user.content)]),
+                    ModelResponse(parts=[TextPart(content=_assistant_text(message))]),
+                )
+            )
+            pending_user = None
+    return tuple(turns)
+
+
+def select_history(
     messages: tuple[ConversationMessage, ...],
     *,
-    previous_summary: ConversationSummary,
-    unresolved_actions: tuple[PendingActionSummary, ...],
-    policy: HistoryPolicy,
-    proposed_summary: ConversationSummary | None = None,
-) -> CompactedHistory:
-    """Compact only over bounds; never let a summary invent confirmed facts."""
+    context_window_tokens: int,
+    base_input_tokens: int,
+    input_tokens_limit: int,
+    output_reserve_ratio: float = 0.2,
+) -> HistorySelection:
+    """Keep newest complete turns within the available input window; never summarize."""
 
-    total_chars = sum(len(item.content) for item in messages)
-    if len(messages) <= policy.max_messages and total_chars <= policy.max_chars:
-        return CompactedHistory(messages, previous_summary, False)
-    if proposed_summary is not None and not set(proposed_summary.confirmed_facts) <= set(
-        previous_summary.confirmed_facts
-    ):
-        raise ValueError("compaction summary cannot introduce confirmed facts")
-    kept: list[ConversationMessage] = []
-    used = 0
-    for message in reversed(messages):
-        if len(kept) >= policy.max_messages or used + len(message.content) > policy.max_chars:
-            continue
-        kept.append(message)
-        used += len(message.content)
-    corrections = tuple(item.content for item in messages if item.user_correction)
-    references = tuple(dict.fromkeys(ref for item in messages for ref in item.references))
-    base = proposed_summary or previous_summary
-    summary = base.model_copy(
-        update={
-            "user_corrections": tuple(dict.fromkeys((*base.user_corrections, *corrections))),
-            "references": tuple(dict.fromkeys((*base.references, *references))),
-            "unresolved_actions": unresolved_actions,
-        }
+    if context_window_tokens < 1 or input_tokens_limit < 1 or base_input_tokens < 0:
+        raise ValueError("context window, input limit, and base estimate must be valid")
+    if not 0 < output_reserve_ratio < 1:
+        raise ValueError("output reserve ratio must be between zero and one")
+    input_capacity = min(
+        input_tokens_limit, int(context_window_tokens * (1 - output_reserve_ratio))
     )
-    return CompactedHistory(tuple(reversed(kept)), summary, True)
+    turns = _complete_turns(messages)
+    selected: list[tuple[ModelMessage, ModelMessage]] = []
+    used = base_input_tokens
+    for turn in reversed(turns):
+        turn_tokens = 8 + (len(ModelMessagesTypeAdapter.dump_json(list(turn))) + 3) // 4
+        if used + turn_tokens > input_capacity:
+            break
+        selected.append(turn)
+        used += turn_tokens
+    selected.reverse()
+    return HistorySelection(
+        messages=tuple(message for turn in selected for message in turn),
+        meter=ContextMeter(
+            estimated_input_tokens=used,
+            context_window_tokens=context_window_tokens,
+            approximate_usage_percent=min(100, round(used * 100 / context_window_tokens)),
+            excluded_oldest_turns=len(turns) - len(selected),
+        ),
+    )

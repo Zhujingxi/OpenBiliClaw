@@ -151,8 +151,8 @@ async def test_controller_translates_ai_runtime_failure_to_typed_unavailable(
     )
     service = AssistantService(runtime, build_assistant_agent())
 
-    async def failing_turn(command: object) -> object:
-        del command
+    async def failing_turn(command: object, messages: object = ()) -> object:
+        del command, messages
         raise UnavailableError(model_instance="test:model")
 
     monkeypatch.setattr(service, "run_turn", failing_turn)

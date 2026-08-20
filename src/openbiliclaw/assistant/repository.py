@@ -21,6 +21,7 @@ class ConversationRepository(Protocol):
     async def messages(
         self, conversation_id: str, *, limit: int
     ) -> tuple[ConversationMessage, ...]: ...
+    async def all_messages(self, conversation_id: str) -> tuple[ConversationMessage, ...]: ...
     async def purge_expired(self, now: datetime) -> int: ...
     async def delete(self, conversation_id: str, scope: ConversationScope) -> bool: ...
 
@@ -93,6 +94,21 @@ class SqliteConversationRepository:
             if isinstance(row[0], str)
         )
         return tuple(reversed(parsed))
+
+    async def all_messages(self, conversation_id: str) -> tuple[ConversationMessage, ...]:
+        """Return the full persisted transcript for model-window selection."""
+
+        async with self._database.transaction() as session:
+            rows = await session.fetch_all(
+                "SELECT content_json FROM assistant_messages WHERE conversation_id=? "
+                "ORDER BY created_at",
+                (conversation_id,),
+            )
+        return tuple(
+            ConversationMessage.model_validate_json(row[0])
+            for row in rows
+            if isinstance(row[0], str)
+        )
 
     async def purge_expired(self, now: datetime) -> int:
         async with self._database.transaction() as session:

@@ -144,7 +144,8 @@ async def test_agent_output_variants(
 ) -> None:
     service = AssistantService(_runtime(raw), build_assistant_agent())
     result = await service.run_turn(TurnCommand(text="help", deps=_deps()))
-    assert isinstance(result.output, expected)
+    assert isinstance(result.result.output, expected)
+    assert result.context_meter.context_window_tokens == 16_000
     assert ASSISTANT_POLICY.tool_calls_limit <= 8
 
 

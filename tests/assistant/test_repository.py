@@ -50,6 +50,7 @@ async def test_sqlite_conversation_restart_retention_and_delete(tmp_path: Path) 
     loaded = await repo2.get_conversation(conversation.conversation_id, conversation.scope)
     assert loaded == conversation
     assert await repo2.messages(conversation.conversation_id, limit=10) == (message,)
+    assert await repo2.all_messages(conversation.conversation_id) == (message,)
     assert (
         await repo2.get_conversation(
             conversation.conversation_id,

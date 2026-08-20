@@ -6,6 +6,8 @@
 
 ## Unreleased
 
+- Replaced Assistant's dormant fixed-count summary compaction contract with full-window context selection: safe complete persisted turns are retained while they fit, about 20% is reserved for output/tools, oldest complete turns alone are excluded, and an approximate usage/exclusion meter is produced without summarization or transcript deletion.
+
 - Added a typed `AIRuntime.stream()` path over PydanticAI native events with textual response/reasoning deltas, payload-free tool lifecycle events, validated terminal results, retries only before visible output, and cancellation-safe resource release; the existing non-streaming runtime remains unchanged.
 
 - Formatted the GitHub Actions regression test to keep the documented Ruff formatting gate green.

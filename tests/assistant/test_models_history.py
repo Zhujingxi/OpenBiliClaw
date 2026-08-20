@@ -4,28 +4,36 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from openbiliclaw.assistant.history import HistoryPolicy, compact_history
+from openbiliclaw.assistant.history import select_history
 from openbiliclaw.assistant.models import (
     Conversation,
     ConversationMessage,
     ConversationRole,
     ConversationScope,
-    ConversationSummary,
-    PendingActionSummary,
+    ToolCallSummary,
 )
 
 NOW = datetime(2030, 1, 1, tzinfo=UTC)
 
 
-def _message(index: int, content: str, *, correction: bool = False) -> ConversationMessage:
+def _message(index: int, role: ConversationRole, content: str) -> ConversationMessage:
     return ConversationMessage(
         message_id=f"msg_{index:032x}",
-        role=ConversationRole.USER,
+        role=role,
         content=content,
         created_at=NOW + timedelta(seconds=index),
         idempotency_key=f"turn:{index:08d}",
-        user_correction=correction,
-        references=("bilibili:video:BV1",) if correction else (),
+    )
+
+
+def _turn(index: int, text: str) -> tuple[ConversationMessage, ConversationMessage]:
+    return (
+        _message(index * 2, ConversationRole.USER, text),
+        _message(
+            index * 2 + 1,
+            ConversationRole.ASSISTANT,
+            f'{{"kind":"message","text":"reply {text}"}}',
+        ),
     )
 
 
@@ -40,70 +48,69 @@ def test_conversation_scope_and_secret_bounds() -> None:
     )
     assert conversation.scope == scope
     with pytest.raises(ValueError, match="forbidden secret"):
-        _message(1, "authorization: CANARY")
+        _message(1, ConversationRole.USER, "authorization: CANARY")
     with pytest.raises(ValueError):
-        _message(1, "x" * 16_001)
+        _message(1, ConversationRole.USER, "x" * 16_001)
 
 
-def test_compaction_only_when_required_and_preserves_audit_state() -> None:
-    unresolved = PendingActionSummary(
-        pending_action_id="pending_" + "b" * 32,
-        effect="save video",
-        expires_at=NOW + timedelta(minutes=5),
-    )
-    summary = ConversationSummary(
-        text="confirmed fact: likes science",
-        model_id="summary-model",
-        version=1,
-        confirmed_facts=("likes science",),
-    )
-    messages = tuple(_message(i, f"message-{i}" * 30, correction=i == 1) for i in range(5))
-    unchanged = compact_history(
+def test_full_window_keeps_all_complete_turns_when_they_fit() -> None:
+    messages = (*_turn(0, "first"), *_turn(1, "second"))
+    selected = select_history(
         messages,
-        previous_summary=summary,
-        unresolved_actions=(unresolved,),
-        policy=HistoryPolicy(max_messages=10, max_chars=10_000),
+        context_window_tokens=1_000,
+        base_input_tokens=100,
+        input_tokens_limit=800,
     )
-    assert unchanged.messages == messages
-    assert not unchanged.compacted
 
-    compacted = compact_history(
+    assert len(selected.messages) == 4
+    assert selected.meter.excluded_oldest_turns == 0
+    assert selected.meter.approximate_usage_percent > 0
+
+
+def test_capacity_excludes_only_oldest_complete_turns() -> None:
+    messages = (*_turn(0, "x" * 200), *_turn(1, "short"), *_turn(2, "newest"))
+    selected = select_history(
         messages,
-        previous_summary=summary,
-        unresolved_actions=(unresolved,),
-        policy=HistoryPolicy(max_messages=2, max_chars=500),
+        context_window_tokens=500,
+        base_input_tokens=0,
+        input_tokens_limit=400,
     )
-    assert compacted.compacted
-    assert len(compacted.messages) <= 2
-    assert compacted.summary.confirmed_facts == ("likes science",)
-    assert compacted.summary.user_corrections
-    assert compacted.summary.references == ("bilibili:video:BV1",)
-    assert compacted.summary.unresolved_actions == (unresolved,)
+
+    assert selected.meter.excluded_oldest_turns == 1
+    assert "short" in str(selected.messages[0])
+    assert "newest" in str(selected.messages[-1])
+    assert "x" * 200 not in str(selected.messages)
 
 
-def test_history_policy_rejects_invalid_limits() -> None:
-    with pytest.raises(ValueError, match="history limits"):
-        HistoryPolicy(max_messages=-1, max_chars=1)
-
-
-def test_summary_cannot_introduce_confirmed_facts() -> None:
-    previous = ConversationSummary(
-        text="safe",
-        model_id="v1",
-        version=1,
-        confirmed_facts=("likes science",),
+def test_incomplete_turns_and_tool_payloads_never_enter_model_history() -> None:
+    user, assistant = _turn(0, "safe")
+    assistant = assistant.model_copy(
+        update={
+            "tool_calls": (
+                ToolCallSummary(
+                    tool_name="search_content",
+                    outcome="succeeded",
+                    safe_summary="Found readable matches",
+                ),
+            )
+        }
     )
-    proposed = ConversationSummary(
-        text="unsafe invention",
-        model_id="v2",
-        version=2,
-        confirmed_facts=("likes science", "owns a yacht"),
+    orphan = _message(2, ConversationRole.USER, "unfinished")
+    tool = _message(3, ConversationRole.TOOL, "internal payload")
+    selected = select_history(
+        (user, assistant, orphan, tool),
+        context_window_tokens=1_000,
+        base_input_tokens=0,
+        input_tokens_limit=800,
     )
-    with pytest.raises(ValueError, match="confirmed facts"):
-        compact_history(
-            (_message(1, "hello"),),
-            previous_summary=previous,
-            proposed_summary=proposed,
-            unresolved_actions=(),
-            policy=HistoryPolicy(max_messages=0, max_chars=1),
-        )
+
+    text = str(selected.messages)
+    assert "Found readable matches" in text
+    assert "internal payload" not in text
+    assert "unfinished" not in text
+    assert selected.meter.excluded_oldest_turns == 0
+
+
+def test_context_policy_rejects_invalid_limits() -> None:
+    with pytest.raises(ValueError, match="context window"):
+        select_history((), context_window_tokens=0, base_input_tokens=0, input_tokens_limit=1)

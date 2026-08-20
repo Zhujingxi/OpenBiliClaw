@@ -16,7 +16,7 @@
 
 ## Context and message safety
 
-`ContextProjection` enforces a UTF-8 byte bound at construction. `trim_history()` retains only the latest complete turns that fit the budget and performs no summarization. An oversized tool return is rejected before entering history. Input/history/context are audited before execution, and complete PydanticAI messages are audited afterward. `vault:`, Authorization, API key, password, and Cookie canaries must not enter model messages. Stable system instructions remain defined by the domain-owned `Agent`; volatile projections enter only the current user input.
+`ContextProjection` enforces a UTF-8 byte bound at construction. `trim_history()` retains only the latest complete turns that fit the budget and performs no summarization. Assistant additionally queries the configured route's smallest context window and resolved input policy before building history, so the selected context is safe for every fallback. An oversized tool return is rejected before entering history. Input/history/context are audited before execution, and complete PydanticAI messages are audited afterward. `vault:`, Authorization, API key, password, and Cookie canaries must not enter model messages. Stable system instructions remain defined by the domain-owned `Agent`; volatile projections enter only the current user input.
 
 ## Routing and configuration status
 

@@ -154,7 +154,7 @@ class AssistantController:
             await self._conversations.put_conversation(conversation)
         profile = dialogue_projection(await self._understanding.profile(DEFAULT_PROFILE_ID))
         try:
-            result = await self._service.run_turn(
+            turn = await self._service.run_turn(
                 TurnCommand(
                     text=request.text,
                     deps=AssistantDependencies(
@@ -163,8 +163,10 @@ class AssistantController:
                         locale=request.locale,
                         conversation=ConversationMetadata(request.conversation_id, scope),
                     ),
-                )
+                ),
+                await self._conversations.all_messages(request.conversation_id),
             )
+            result = turn.result
         except AIRuntimeError as exc:
             raise ApplicationError(
                 ApplicationErrorCode.UNAVAILABLE, "assistant model unavailable"
