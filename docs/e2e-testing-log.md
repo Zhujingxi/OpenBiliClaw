@@ -423,6 +423,8 @@ The final real run reported one passed Docker E2E test. No key, bearer, cookie, 
 
 8. **Independent review — build-context secret boundary:** image-layer inspection was clean, but `.dockerignore` omitted `data-e2e/` and `model_api_key.txt`; the source Compose default also pointed at the gitignored L0 key path. Docker therefore sent the local E2E vault/key/cookie/database directory to the build daemon even though no Dockerfile instruction copied it into a layer. Fixed both supported secret locations in `.dockerignore`, aligned both Compose defaults to `./model_api_key.txt`, and pinned the exclusion with a static regression test.
 
+9. **Harness isolation regression:** Compose auto-discovery loaded an ignored developer `docker-compose.override.yml` that enabled Hugging Face offline mode for a preseeded model volume. L6 correctly deletes its dedicated volume first, so the embedding sidecar restarted unhealthy with `OfflineModeIsEnabled`. Every harness Compose call now passes `--file docker-compose.yml` before the unchanged dedicated project name; the E2E port and runtime model key-file path are unchanged. A unit contract pins the exact command, working directory, environment identity, and key-file path. Failed `up` now captures no-color logs limited by Compose to 200 lines and by the assertion to bounded output before teardown; it does not inspect or print Compose configuration, vault data, or tokens. Focused harness and Docker contract tests are hermetic; the real Docker layer was deliberately not rerun, so a fresh canonical embedding volume still requires a live Hugging Face model download.
+
 ## L7 — Agent-driven Web UI
 
 ### Trace

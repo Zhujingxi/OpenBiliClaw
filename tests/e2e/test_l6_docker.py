@@ -27,7 +27,12 @@ _COMPOSE_ENV = {
 
 
 def _compose(*arguments: str, timeout: float = 900) -> subprocess.CompletedProcess[str]:
-    command = "docker compose --project-name " + _PROJECT + " " + " ".join(arguments)
+    command = (
+        "docker compose --file docker-compose.yml --project-name "
+        + _PROJECT
+        + " "
+        + " ".join(arguments)
+    )
     return subprocess.run(
         ["sg", "docker", "-c", command],
         cwd=_ROOT,
@@ -144,7 +149,10 @@ def _load_bearer_token() -> str:
 def _start() -> None:
     global _BEARER_TOKEN
     result = _compose("up", "-d", "--build", timeout=1800)
-    assert result.returncode == 0, result.stderr
+    if result.returncode != 0:
+        logs = _compose("logs", "--no-color", "--tail", "200", timeout=30)
+        diagnostics = "\n".join((result.stderr[-4000:], logs.stdout[-8000:], logs.stderr[-2000:]))
+        pytest.fail(f"Docker Compose up failed; bounded service logs:\n{diagnostics}")
     _BEARER_TOKEN = _load_bearer_token()
     _wait_healthy()
 

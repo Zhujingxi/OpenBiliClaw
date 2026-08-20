@@ -12,6 +12,7 @@ if TYPE_CHECKING:
 import pytest
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "e2e.py"
+L6_HARNESS = Path(__file__).parent / "e2e" / "test_l6_docker.py"
 
 
 def load_script() -> ModuleType:
@@ -194,6 +195,68 @@ def test_seed_profile_stores_both_fake_keys_when_references_are_missing(
     assert stored == [b"fake-kimi-key", b"fake-deepseek-key"]
     assert "cred_" + "a" * 32 in (data_dir / "kimi.toml").read_text(encoding="utf-8")
     assert "cred_" + "b" * 32 in (data_dir / "deepseek.toml").read_text(encoding="utf-8")
+
+
+def test_l6_compose_explicitly_selects_the_canonical_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = importlib.util.spec_from_file_location("l6_docker_harness", L6_HARNESS)
+    assert spec is not None and spec.loader is not None
+    harness = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(harness)
+    captured: dict[str, object] = {}
+
+    def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        captured["command"] = command
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(harness.subprocess, "run", run)
+
+    assert harness._compose("up", "-d", "--build", timeout=123).returncode == 0
+    assert captured == {
+        "command": [
+            "sg",
+            "docker",
+            "-c",
+            "docker compose --file docker-compose.yml "
+            "--project-name openbiliclaw-e2e-l6 up -d --build",
+        ],
+        "cwd": Path(__file__).parents[1],
+        "env": harness._COMPOSE_ENV,
+        "capture_output": True,
+        "text": True,
+        "timeout": 123,
+        "check": False,
+    }
+    assert harness._COMPOSE_ENV["OPENBILICLAW_MODEL_KEY_FILE"] == str(
+        Path(__file__).parents[1] / "data-e2e/kimi_api_key.txt"
+    )
+
+
+def test_l6_up_failure_captures_bounded_no_color_logs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = importlib.util.spec_from_file_location("l6_docker_failure_harness", L6_HARNESS)
+    assert spec is not None and spec.loader is not None
+    harness = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(harness)
+    calls: list[tuple[tuple[str, ...], float]] = []
+
+    def compose(*arguments: str, timeout: float = 900) -> subprocess.CompletedProcess[str]:
+        calls.append((arguments, timeout))
+        if arguments[0] == "up":
+            return subprocess.CompletedProcess(arguments, 1, "", "up failed")
+        return subprocess.CompletedProcess(arguments, 0, "safe service logs", "")
+
+    monkeypatch.setattr(harness, "_compose", compose)
+
+    with pytest.raises(pytest.fail.Exception, match="safe service logs"):
+        harness._start()
+    assert calls == [
+        (("up", "-d", "--build"), 1800),
+        (("logs", "--no-color", "--tail", "200"), 30),
+    ]
 
 
 def test_l7_runner_selects_the_ui_marker_and_writes_its_report(

@@ -76,6 +76,7 @@ Full loop on live `openbiliclaw serve` via `/v1` HTTP only: bootstrap/status and
 5. Secrets injected at runtime (env/file mount → vault inside container), never baked into the image.
 6. Resolved the surfaced restart decision: access connections remain process-local and the vault has no provider/account-to-reference mapping, so clients resubmit provider form credentials after container restart; Docker does not invent a durable mapping.
 7. `docs/docker-deployment.md` rewritten to verified reality.
+8. The L6 harness explicitly selects tracked `docker-compose.yml` on every Compose call while retaining its dedicated project, volumes, port, and runtime key-file path. Ignored developer overrides therefore cannot change the production-stack validation graph.
 
 **L7 — Hosts & UI**
 `tests/e2e/test_l7_assistant_ui.py` drives Python Playwright against the production composition and built Vue assets. It verifies the localized Assistant journey (`en`, `zh-CN`, `zh-TW`), New chat, one bounded real-model turn, context presentation, safe optional reasoning/tool presentation, server transcript/tool-summary hydration, Stop cancellation, console/page/network cleanliness, and the 390×844 mobile navigation/overflow boundary. The only accepted failed response is the initial conversation lookup 404 for an unsent fresh local conversation. Screenshots, server logs, and the runner report stay under ignored `data-e2e/reports/`.

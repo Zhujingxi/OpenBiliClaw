@@ -6,6 +6,8 @@
 
 ## Unreleased
 
+- Isolated L6 Docker validation from ignored developer Compose overrides by explicitly selecting tracked `docker-compose.yml` on every harness call; failed startup now records bounded no-color service logs before isolated teardown without inspecting configuration or secrets.
+
 - Raised only the Understanding preference analyzer's bounded output/total policy from 1,024/5,120 to 2,048/6,144 tokens so provider-counted Kimi reasoning and the typed `PreferenceDraftBatch` fit, without changing its input, timeout, tool-call, or retry limits.
 
 - Reused the L2 restored-or-anonymous Bilibili access helper across sequential L3/L4 E2E acquisition, accepting an existing connected handle only when verification grants public reads and avoiding duplicate anonymous connects after startup rehydration.
