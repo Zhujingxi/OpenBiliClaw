@@ -19,7 +19,14 @@ from openbiliclaw.ai.runtime.errors import (
     RateLimitedError,
     RunTimedOutError,
 )
-from openbiliclaw.ai.runtime.execution import AgentRunRequest, AIRuntime
+from openbiliclaw.ai.runtime.execution import (
+    AgentRunRequest,
+    AIRuntime,
+    RuntimeRunFinished,
+    RuntimeTextDelta,
+    RuntimeToolFinished,
+    RuntimeToolStarted,
+)
 from openbiliclaw.ai.runtime.history import (
     ContextProjection,
     MessageAuditError,
@@ -83,6 +90,79 @@ async def test_typed_run_returns_output_messages_route_and_usage() -> None:
     assert result.diagnostics.attempted_models == ("test-model",)
     assert result.diagnostics.attempts == 1
     assert sink.records == [result.usage]
+
+
+async def test_stream_normalizes_text_tools_and_validated_result() -> None:
+    agent: Agent[None, str] = Agent(output_type=str)
+
+    @agent.tool_plain
+    def lookup() -> str:
+        return "private payload"
+
+    runtime = _runtime(TestModel(call_tools="all"))
+    request = AgentRunRequest(
+        AgentId("test.answer"),
+        agent,
+        None,
+        "go",
+        (),
+        (),
+        ModelRequirements(structured_output=True),
+        RunPolicy(),
+        "test",
+    )
+    events = [event async for event in runtime.stream(request)]
+
+    assert any(isinstance(event, RuntimeTextDelta) for event in events)
+    assert any(isinstance(event, RuntimeToolStarted) for event in events)
+    assert any(isinstance(event, RuntimeToolFinished) for event in events)
+    assert isinstance(events[-1], RuntimeRunFinished)
+    safe_tool_events = [
+        event for event in events if isinstance(event, RuntimeToolStarted | RuntimeToolFinished)
+    ]
+    assert "private payload" not in repr(safe_tool_events)
+
+
+async def test_stream_cancellation_releases_resource_slot() -> None:
+    entered = asyncio.Event()
+    blocker = asyncio.Event()
+
+    async def stream_response(messages: list[ModelMessage], info: AgentInfo):
+        del messages, info
+        entered.set()
+        await blocker.wait()
+        yield "never"
+
+    model = FunctionModel(stream_function=stream_response)
+    configured = ConfiguredModel("m", "test", model, ModelCapabilities())
+    agent_id = AgentId("test.stream-cancel")
+    runtime = AIRuntime(
+        RouteTable((ModelRoute(agent_id, ModelRequirements(), (configured,)),)),
+        ResourceBudget("model", 1),
+    )
+    request = AgentRunRequest(
+        agent_id,
+        Agent(output_type=str),
+        None,
+        "go",
+        (),
+        (),
+        ModelRequirements(),
+        RunPolicy(timeout_seconds=30),
+        "test",
+    )
+
+    async def consume() -> None:
+        async for _ in runtime.stream(request):
+            pass
+
+    task = asyncio.create_task(consume())
+    await entered.wait()
+    assert runtime.active_runs == 1
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert runtime.active_runs == 0
 
 
 async def test_resource_budget_serializes_runs_without_leaking_slots() -> None:

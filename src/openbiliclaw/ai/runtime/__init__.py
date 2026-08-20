@@ -7,6 +7,11 @@ from openbiliclaw.ai.runtime.execution import (
     AgentRunResult,
     AIRuntime,
     RunDiagnostics,
+    RuntimeRunFinished,
+    RuntimeStreamEvent,
+    RuntimeTextDelta,
+    RuntimeToolFinished,
+    RuntimeToolStarted,
 )
 from openbiliclaw.ai.runtime.routes import ConfiguredModel, ModelRoute, RouteTable
 from openbiliclaw.ai.runtime.usage import UsageAttribution, UsageRecord, UsageSink
@@ -21,6 +26,11 @@ __all__ = [
     "ModelRequirements",
     "ModelRoute",
     "RouteTable",
+    "RuntimeRunFinished",
+    "RuntimeStreamEvent",
+    "RuntimeTextDelta",
+    "RuntimeToolFinished",
+    "RuntimeToolStarted",
     "RunDiagnostics",
     "RunPolicy",
     "RunPriority",
