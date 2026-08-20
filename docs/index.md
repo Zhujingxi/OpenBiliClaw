@@ -23,7 +23,7 @@ Current-state documentation:
 - [Installation](agent-install.md), [deployment](agent-deployment.md), and [Docker](docker-deployment.md)
 - [Privacy](privacy.md), [FAQ](faq.md), and [contributing](contributing.md)
 - [Chrome Web Store](chrome-webstore-listing.md) and [Firefox source build](firefox-amo-source-build.md)
-- [E2E Testing Plan](e2e-testing-plan.md) (completed historical execution record) and [testing log](e2e-testing-log.md)
+- [E2E Testing Plan](e2e-testing-plan.md) (maintained plan preserving the historical L0–L6 layer record and providing an opt-in automated L7 browser journey) and [testing log](e2e-testing-log.md)
 - [Changelog](changelog.md)
 
-Provider-specific target docs are named `modules/provider-*.md` or `modules/content-provider-*.md`. Completed feature plans and superseded pre-cutover documents are removed after current behavior is captured in the specification/module docs; the retained E2E plan/log are historical verification records. This index lists the maintained documentation set.
+Provider-specific target docs are named `modules/provider-*.md` or `modules/content-provider-*.md`. Completed feature plans and superseded pre-cutover documents are removed after current behavior is captured in the specification/module docs; the retained E2E plan/log maintain the validation guidance and historical verification records. This index lists the maintained documentation set.

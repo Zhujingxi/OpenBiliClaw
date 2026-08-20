@@ -28,7 +28,7 @@ pip install -e ".[dev]"
 ```bash
 ruff format src/ tests/ scripts/
 ruff check src/ tests/ scripts/
-mypy src/
+mypy src/ tests/
 ```
 
 ## Testing

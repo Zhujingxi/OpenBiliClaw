@@ -6,6 +6,8 @@
 
 ## Unreleased
 
+- Aligned production validation documentation with the CI MyPy scope, current opt-in L7 browser coverage, and the unresolved non-loopback Web bearer-enrollment gap.
+
 - Enforced the documented 90% aggregate branch-coverage floor in the default backend gate and CI using pytest-cov's native `--cov-fail-under=90`, with workflow regression coverage; repaired stale facade/test typing and annotated the concrete Assistant stream owners as closeable async generators so the full strict MyPy gate is truthful.
 
 - Added an opt-in Python Playwright L7 regression journey against production `openbiliclaw serve` and built Vue assets, covering all three locales, a bounded real-model Assistant turn, safe reasoning/tool presentation, persisted hydration, Stop cancellation, console/network cleanliness, and 390×844 mobile overflow/navigation; the runner now has focused L7 selection/report coverage.

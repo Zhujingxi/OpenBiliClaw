@@ -33,7 +33,7 @@ docker compose exec -T openbiliclaw-backend python -c \
 'import tomllib; from pathlib import Path; from openbiliclaw.infrastructure.credentials.keyring import ProtectedFileBackend; from openbiliclaw.infrastructure.credentials.vault import CredentialVault; c=tomllib.load(open("/app/runtime/config.toml","rb")); r=c["host"]["bearer_secret_ref"].removeprefix("vault:"); CredentialVault(ProtectedFileBackend(Path("/app/runtime/credentials.json"))).resolve(r, lambda s: print(bytes(s).decode()))'
 ```
 
-Treat that command's output as a password. Send it as `Authorization: Bearer <token>`. Mutations additionally require matching `X-Device-ID` and `X-CSRF-Token` headers. The browser extension already has a bearer-token enrollment field. The current Vue Web UI has no bearer enrollment/storage plumbing, so opening the Docker-hosted SPA directly returns 401; L7 will test and address that presentation gap rather than weakening the backend boundary.
+Treat that command's output as a password. Send it as `Authorization: Bearer <token>`. Mutations additionally require matching `X-Device-ID` and `X-CSRF-Token` headers. The browser extension already has a bearer-token enrollment field. The current Vue Web UI has no bearer enrollment/storage plumbing, so opening the Docker-hosted SPA directly returns 401. Non-loopback Web UI bearer enrollment remains an open follow-up; the automated L7 browser journey is loopback-only and does not test or solve this gap.
 
 ### Authentication modes
 
