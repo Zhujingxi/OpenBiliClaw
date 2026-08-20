@@ -6,14 +6,12 @@ import math
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
-from openbiliclaw.access.models import AccessRequest, Permission
 from openbiliclaw.application.edit_profile import EditProfileCommand
 from openbiliclaw.application.record_observation import RecordObservationsCommand
-from openbiliclaw.application.sources import ConnectSourceCommand
 from openbiliclaw.assistant.models import AssistantMessage
 from openbiliclaw.composition.build import BuildOptions, build_application, validated_settings
 from openbiliclaw.composition.jobs import DEFAULT_PROFILE_ID
@@ -27,9 +25,12 @@ from openbiliclaw.observations.provenance import (
 from openbiliclaw.observations.service import RecordStatus
 from openbiliclaw.understanding.overrides import OverrideOperation
 
+from .public_access import ensure_bilibili_public_access
+
 if TYPE_CHECKING:
     from openbiliclaw.ai.providers.embeddings.protocol import Vector
     from openbiliclaw.composition.application import Application
+    from openbiliclaw.composition.facade import CompositionFacade
 
 pytestmark = [pytest.mark.e2e, pytest.mark.e2e_l3, pytest.mark.asyncio]
 _ROOT = Path(__file__).resolve().parents[2]
@@ -42,22 +43,6 @@ async def _application(config_path: Path | None = None) -> Application:
     application = build_application(settings, options=BuildOptions(data_dir=_DATA_DIR))
     await application.start()
     return application
-
-
-async def _connect_anonymous(application: Application) -> None:
-    facade = application.services.facade
-    assert facade is not None
-    await facade.connect_source(
-        ConnectSourceCommand(
-            idempotency_key=f"e2e:l3:anonymous:{uuid.uuid4().hex}",
-            request=AccessRequest(
-                provider_id="bilibili",
-                permissions=frozenset({Permission.READ_PUBLIC}),
-                supported_method_ids=("builtin.anonymous",),
-            ),
-            allowed_method_ids=frozenset({"builtin.anonymous"}),
-        )
-    )
 
 
 def _cosine(left: Vector, right: Vector) -> float:
@@ -131,10 +116,10 @@ async def test_real_assistant_catalog_provider_matrix(profile_name: str, config_
 async def test_composed_embeddings_apply_query_instruction_and_rank_real_titles() -> None:
     application = await _application()
     try:
-        await _connect_anonymous(application)
         facade = application.services.facade
-        embeddings = application.services.embeddings
         assert facade is not None
+        await ensure_bilibili_public_access(cast("CompositionFacade", facade))
+        embeddings = application.services.embeddings
         assert embeddings is not None
         results = await facade.search_content("bilibili", "Python 编程", 5)
         titles = tuple(item.title for item in results.items)

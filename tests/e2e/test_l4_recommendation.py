@@ -8,14 +8,12 @@ import uuid
 from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
-from openbiliclaw.access.models import AccessRequest, Permission
 from openbiliclaw.application.record_observation import RecordObservationsCommand
 from openbiliclaw.application.refresh_recommendations import RefreshRecommendationsCommand
-from openbiliclaw.application.sources import ConnectSourceCommand
 from openbiliclaw.composition.build import BuildOptions, build_application, validated_settings
 from openbiliclaw.composition.jobs import DEFAULT_PROFILE_ID
 from openbiliclaw.core.health import JobResult
@@ -30,8 +28,11 @@ from openbiliclaw.understanding.overrides import OverrideOperation
 from openbiliclaw.understanding.profile import PreferenceClaim, PreferenceDimension
 from openbiliclaw.understanding.projections import discovery_projection
 
+from .public_access import ensure_bilibili_public_access
+
 if TYPE_CHECKING:
     from openbiliclaw.composition.application import Application
+    from openbiliclaw.composition.facade import CompositionFacade
     from openbiliclaw.recommendation.models import RecommendationFeedItem
 
 pytestmark = [pytest.mark.e2e, pytest.mark.e2e_l4, pytest.mark.asyncio]
@@ -46,22 +47,6 @@ async def _application() -> Application:
     )
     await application.start()
     return application
-
-
-async def _connect_anonymous(application: Application) -> None:
-    facade = application.services.facade
-    assert facade is not None
-    await facade.connect_source(
-        ConnectSourceCommand(
-            idempotency_key=f"e2e:l4:anonymous:{uuid.uuid4().hex}",
-            request=AccessRequest(
-                provider_id="bilibili",
-                permissions=frozenset({Permission.READ_PUBLIC}),
-                supported_method_ids=("builtin.anonymous",),
-            ),
-            allowed_method_ids=frozenset({"builtin.anonymous"}),
-        )
-    )
 
 
 _CONTENT_STATEMENTS = (
@@ -179,7 +164,9 @@ async def _refresh(application: Application) -> tuple[RecommendationFeedItem, ..
 async def test_real_refill_ranking_reasons_diversity_and_profile_query() -> None:
     application = await _application()
     try:
-        await _connect_anonymous(application)
+        facade = application.services.facade
+        assert facade is not None
+        await ensure_bilibili_public_access(cast("CompositionFacade", facade))
         preference, preference_evidence_id = await _ensure_content_preference(application)
         assert application.resources is not None
         await _refresh(application)

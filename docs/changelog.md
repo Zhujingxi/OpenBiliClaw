@@ -6,6 +6,8 @@
 
 ## Unreleased
 
+- Reused the L2 restored-or-anonymous Bilibili access helper across sequential L3/L4 E2E acquisition, accepting an existing connected handle only when verification grants public reads and avoiding duplicate anonymous connects after startup rehydration.
+
 - Kept configured models fail-closed on required Assistant and Understanding capabilities while registering optional RecommendationBrief and visual-inspection routes/services only when their declared model requirements are compatible; text-only DeepSeek chat can now build the production graph without pretending structured-output or vision support.
 
 - Aligned the L2 liked-observation helper with the strict recommendation feedback contract by using a neutral payload with no exploration attribution and the default unexposed state.
