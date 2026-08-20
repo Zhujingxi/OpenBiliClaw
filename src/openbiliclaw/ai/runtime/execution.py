@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import aclosing
 from copy import copy
 from dataclasses import dataclass, replace
 from time import monotonic
-from typing import TYPE_CHECKING, Generic, Literal, TypeAlias, TypeVar
+from typing import TYPE_CHECKING, Generic, Literal, TypeAlias, TypeVar, cast
 
 from pydantic_ai.messages import (
     BinaryContent,
@@ -43,7 +44,7 @@ ModelMessageList: TypeAlias = list[ModelMessage]
 VisualContent: TypeAlias = ImageUrl | BinaryContent
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Sequence
+    from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 
     from pydantic_ai import Agent
 
@@ -211,10 +212,13 @@ class AIRuntime:
         async with self._resource_budget.acquire():
             try:
                 async with asyncio.timeout(request.policy.timeout_seconds):
-                    async for event in self._stream_route(
-                        request, route, prompt, started, attempted_models
-                    ):
-                        yield event
+                    events = cast(
+                        "AsyncGenerator[RuntimeStreamEvent[OutputT], None]",
+                        self._stream_route(request, route, prompt, started, attempted_models),
+                    )
+                    async with aclosing(events):
+                        async for event in events:
+                            yield event
             except asyncio.CancelledError:
                 raise
             except (AIRuntimeError, MessageAuditError, ToolResultTooLargeError):
@@ -309,20 +313,25 @@ class AIRuntime:
                 attempted_models.append(configured)
                 try:
                     native_result = None
-                    async for native_event in agent.run_stream_events(
-                        prompt,
-                        deps=request.deps,
-                        model=configured.model,
-                        message_history=request.history,
-                        usage_limits=request.policy.to_usage_limits(),
-                        usage=aggregate_usage,
-                    ):
-                        event = _normalize_stream_event(native_event)
-                        if event is not None:
-                            visible_output = True
-                            yield event
-                        if isinstance(native_event, AgentRunResultEvent):
-                            native_result = native_event.result
+                    native_events = cast(
+                        "AsyncGenerator[object, None]",
+                        agent.run_stream_events(
+                            prompt,
+                            deps=request.deps,
+                            model=configured.model,
+                            message_history=request.history,
+                            usage_limits=request.policy.to_usage_limits(),
+                            usage=aggregate_usage,
+                        ),
+                    )
+                    async with aclosing(native_events):
+                        async for native_event in native_events:
+                            event = _normalize_stream_event(native_event)
+                            if event is not None:
+                                visible_output = True
+                                yield event
+                            if isinstance(native_event, AgentRunResultEvent):
+                                native_result = native_event.result
                 except asyncio.CancelledError:
                     raise
                 except (MessageAuditError, ToolResultTooLargeError):

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 
 import pytest
 from pydantic_ai import Tool
+from pydantic_ai.models.function import AgentInfo, DeltaThinkingPart, FunctionModel
 from pydantic_ai.models.test import TestModel
 
 from openbiliclaw.ai.runtime.capabilities import ModelCapabilities
@@ -21,6 +23,7 @@ from openbiliclaw.assistant.agent import (
 )
 from openbiliclaw.assistant.models import (
     AssistantStreamError,
+    ReasoningStarted,
     ToolFinished,
     ToolStarted,
     TurnFinished,
@@ -39,6 +42,8 @@ from openbiliclaw.hosts.api.schemas.models import AssistantTurnRequest
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from pydantic_ai.messages import ModelMessage
 
     from openbiliclaw.application.reads import RecommendationsResult
 
@@ -246,6 +251,58 @@ async def test_controller_streams_safe_tools_and_persists_only_summaries(tmp_pat
     assert messages[-1].tool_calls[0].safe_summary == "Search Content completed."
     assert "private native payload" not in messages[-1].model_dump_json()
     await application.stop()
+
+
+@pytest.mark.asyncio
+async def test_controller_close_releases_complete_runtime_stream_chain(tmp_path: Path) -> None:
+    application = build_application(AppSettings(), options=BuildOptions(data_dir=tmp_path))
+    await application.start()
+    assert application.repositories is not None
+    assert application.services.understanding is not None
+    assert application.services.facade is not None
+
+    async def stream_response(messages: list[ModelMessage], info: AgentInfo):
+        del messages, info
+        yield {0: DeltaThinkingPart(content="thinking")}
+        await asyncio.Event().wait()
+
+    configured = ConfiguredModel(
+        "assistant-test",
+        "test",
+        FunctionModel(stream_function=stream_response),
+        ModelCapabilities(
+            tools=True,
+            structured_output=True,
+            context_tokens=16_000,
+            streaming=True,
+        ),
+    )
+    runtime = AIRuntime(
+        RouteTable((ModelRoute(ASSISTANT_AGENT_ID, ASSISTANT_REQUIREMENTS, (configured,)),)),
+        ResourceBudget("assistant", 1),
+    )
+    controller = AssistantController(
+        AssistantService(runtime, build_assistant_agent()),
+        application.repositories.conversations,
+        application.services.understanding,
+        application.services.facade,
+    )
+    stream = controller.stream_turn(
+        AssistantTurnRequest(
+            conversation_id="conv_" + "f" * 32,
+            text="think",
+            locale="en-US",
+        ),
+        "desktop",
+    )
+    try:
+        assert (await anext(stream)).kind == "turn_started"
+        assert isinstance(await anext(stream), ReasoningStarted)
+        assert runtime.active_runs == 1
+        await stream.aclose()
+        assert runtime.active_runs == 0
+    finally:
+        await application.stop()
 
 
 @pytest.mark.asyncio

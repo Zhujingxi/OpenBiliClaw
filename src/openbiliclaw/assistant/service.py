@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
+from contextlib import aclosing
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from openbiliclaw.ai.runtime.execution import AgentRunRequest, AgentRunResult, AIRuntime
 from openbiliclaw.ai.runtime.history import ContextProjection
@@ -20,7 +21,7 @@ from .history import estimate_tokens, select_history
 DIALOGUE_PROFILE_MAX_BYTES = 49_152
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncGenerator, AsyncIterator
 
     from pydantic_ai import Agent
 
@@ -125,8 +126,13 @@ class AssistantService:
     ) -> AsyncIterator[RuntimeStreamEvent[AssistantOutput]]:
         """Stream one already-projected turn through the canonical runtime."""
 
-        async for event in self._runtime.stream(prepared.request):
-            yield event
+        events = cast(
+            "AsyncGenerator[RuntimeStreamEvent[AssistantOutput], None]",
+            self._runtime.stream(prepared.request),
+        )
+        async with aclosing(events):
+            async for event in events:
+                yield event
 
     async def run_turn(
         self,

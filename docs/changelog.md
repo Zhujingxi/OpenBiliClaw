@@ -6,7 +6,7 @@
 
 ## Unreleased
 
-- Hardened Assistant streamed turns: cross-device conversation IDs now fail closed without ownership or history leakage, optional turn keys deduplicate retries while repeated text remains complete, mature UTF-8 profiles fit the bounded projection, visible output is audited before atomic persistence, equal timestamps order stably, and SSE timeout/failure/closure paths follow the typed lifecycle.
+- Hardened Assistant streamed turns: cross-device conversation IDs now fail closed without ownership or history leakage, optional turn keys deduplicate retries while repeated text remains complete, mature UTF-8 profiles fit the bounded projection, visible output is audited before atomic persistence, equal timestamps order stably, configured AI Runtime budgets are not preempted by a duplicate SSE timeout, and failure/closure paths follow the typed lifecycle with deterministic generator cleanup.
 
 - Added `POST /v1/assistant/turns/stream` with the approved typed SSE lifecycle over the canonical Assistant controller; supported models.dev native protocols declare streaming capability, disconnect cancellation propagates to PydanticAI, non-streaming turns reuse the same workflow, validated turns persist atomically, and only friendly sanitized tool summaries—not reasoning, arguments, payloads, credential references, or opaque IDs—reach events and transcript metadata.
 

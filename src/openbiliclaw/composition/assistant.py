@@ -6,8 +6,9 @@ import asyncio
 import hashlib
 import json
 import uuid
+from contextlib import aclosing
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from openbiliclaw.ai.runtime.errors import AIRuntimeError
 from openbiliclaw.ai.runtime.execution import (
@@ -53,10 +54,11 @@ from openbiliclaw.understanding.overrides import OverrideOperation
 from openbiliclaw.understanding.projections import dialogue_projection
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncGenerator, AsyncIterator
 
     from pydantic_ai import Tool
 
+    from openbiliclaw.ai.runtime.execution import RuntimeStreamEvent
     from openbiliclaw.application.reads import RecommendationsResult
     from openbiliclaw.assistant.models import AssistantOutput
     from openbiliclaw.assistant.repository import SqliteConversationRepository
@@ -167,11 +169,16 @@ class AssistantController:
     async def turn(self, request: AssistantTurnInput, device_id: str) -> AssistantOutput:
         """Consume the canonical lifecycle workflow for non-streaming callers."""
 
-        async for event in self.stream_turn(request, device_id):
-            if isinstance(event, TurnFinished):
-                return event.output
-            if isinstance(event, AssistantStreamError):
-                raise ApplicationError(ApplicationErrorCode.UNAVAILABLE, event.message)
+        events = cast(
+            "AsyncGenerator[AssistantLifecycleEvent, None]",
+            self.stream_turn(request, device_id),
+        )
+        async with aclosing(events):
+            async for event in events:
+                if isinstance(event, TurnFinished):
+                    return event.output
+                if isinstance(event, AssistantStreamError):
+                    raise ApplicationError(ApplicationErrorCode.UNAVAILABLE, event.message)
         raise ApplicationError(ApplicationErrorCode.UNAVAILABLE, "assistant turn incomplete")
 
     async def stream_turn(
@@ -211,62 +218,67 @@ class AssistantController:
             )
             prepared = self._service.prepare_turn(command, history)
             yield TurnStarted(context_meter=prepared.context_meter)
-            async for runtime_event in self._service.stream_turn(prepared):
-                if isinstance(runtime_event, RuntimeTextDelta):
-                    if runtime_event.kind != "reasoning_delta":
-                        continue  # Structured Assistant output is exposed only after validation.
-                    if not reasoning_open:
-                        reasoning_open = True
-                        yield ReasoningStarted()
-                    yield ReasoningDelta(delta=runtime_event.text)
-                elif isinstance(runtime_event, RuntimeToolStarted):
-                    if reasoning_open:
-                        reasoning_open = False
-                        yield ReasoningFinished()
-                    yield ToolStarted(name=self._friendly_tool_name(runtime_event.tool_name))
-                elif isinstance(runtime_event, RuntimeToolFinished):
-                    friendly_name = self._friendly_tool_name(runtime_event.tool_name)
-                    summary = f"{friendly_name} {runtime_event.summary.lower()}."
-                    tool_calls.append(
-                        ToolCallSummary(
-                            tool_name=friendly_name,
-                            outcome=runtime_event.status,
-                            safe_summary=summary,
+            runtime_events = cast(
+                "AsyncGenerator[RuntimeStreamEvent[AssistantOutput], None]",
+                self._service.stream_turn(prepared),
+            )
+            async with aclosing(runtime_events):
+                async for runtime_event in runtime_events:
+                    if isinstance(runtime_event, RuntimeTextDelta):
+                        if runtime_event.kind != "reasoning_delta":
+                            continue  # Structured output is exposed only after validation.
+                        if not reasoning_open:
+                            reasoning_open = True
+                            yield ReasoningStarted()
+                        yield ReasoningDelta(delta=runtime_event.text)
+                    elif isinstance(runtime_event, RuntimeToolStarted):
+                        if reasoning_open:
+                            reasoning_open = False
+                            yield ReasoningFinished()
+                        yield ToolStarted(name=self._friendly_tool_name(runtime_event.tool_name))
+                    elif isinstance(runtime_event, RuntimeToolFinished):
+                        friendly_name = self._friendly_tool_name(runtime_event.tool_name)
+                        summary = f"{friendly_name} {runtime_event.summary.lower()}."
+                        tool_calls.append(
+                            ToolCallSummary(
+                                tool_name=friendly_name,
+                                outcome=runtime_event.status,
+                                safe_summary=summary,
+                            )
                         )
-                    )
-                    yield ToolFinished(
-                        name=friendly_name,
-                        status=runtime_event.status,
-                        summary=summary,
-                    )
-                elif isinstance(runtime_event, RuntimeRunFinished):
-                    if reasoning_open:
-                        reasoning_open = False
-                        yield ReasoningFinished()
-                    usage = TurnUsage(
-                        request_count=runtime_event.result.usage.requests,
-                        input_tokens=runtime_event.result.usage.input_tokens,
-                        output_tokens=runtime_event.result.usage.output_tokens,
-                    )
-                    visible_event = ResponseDelta(
-                        delta=render_assistant_output(runtime_event.result.output)
-                    )
-                    await self._persist_turn(
-                        conversation,
-                        request.text,
-                        runtime_event.result.output,
-                        usage,
-                        tuple(tool_calls),
-                        now,
-                        request.turn_key,
-                    )
-                    yield visible_event
-                    yield TurnFinished(
-                        output=runtime_event.result.output,
-                        context_meter=prepared.context_meter,
-                        usage=usage,
-                    )
-                    return
+                        yield ToolFinished(
+                            name=friendly_name,
+                            status=runtime_event.status,
+                            summary=summary,
+                        )
+                    elif isinstance(runtime_event, RuntimeRunFinished):
+                        if reasoning_open:
+                            reasoning_open = False
+                            yield ReasoningFinished()
+                        usage = TurnUsage(
+                            request_count=runtime_event.result.usage.requests,
+                            input_tokens=runtime_event.result.usage.input_tokens,
+                            output_tokens=runtime_event.result.usage.output_tokens,
+                        )
+                        visible_event = ResponseDelta(
+                            delta=render_assistant_output(runtime_event.result.output)
+                        )
+                        await self._persist_turn(
+                            conversation,
+                            request.text,
+                            runtime_event.result.output,
+                            usage,
+                            tuple(tool_calls),
+                            now,
+                            request.turn_key,
+                        )
+                        yield visible_event
+                        yield TurnFinished(
+                            output=runtime_event.result.output,
+                            context_meter=prepared.context_meter,
+                            usage=usage,
+                        )
+                        return
         except asyncio.CancelledError:
             raise
         except ApplicationError:

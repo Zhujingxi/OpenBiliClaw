@@ -179,15 +179,19 @@ async def test_stream_never_retries_after_visible_output() -> None:
     assert attempts == 1
 
 
-async def test_stream_cancellation_releases_resource_slot() -> None:
+async def test_stream_cancellation_closes_native_stream_and_releases_resource_slot() -> None:
     entered = asyncio.Event()
+    closed = asyncio.Event()
     blocker = asyncio.Event()
 
     async def stream_response(messages: list[ModelMessage], info: AgentInfo):
         del messages, info
-        entered.set()
-        await blocker.wait()
-        yield "never"
+        try:
+            entered.set()
+            await blocker.wait()
+            yield "never"
+        finally:
+            closed.set()
 
     model = FunctionModel(stream_function=stream_response)
     configured = ConfiguredModel("m", "test", model, ModelCapabilities())
@@ -218,6 +222,7 @@ async def test_stream_cancellation_releases_resource_slot() -> None:
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+    assert closed.is_set()
     assert runtime.active_runs == 0
 
 

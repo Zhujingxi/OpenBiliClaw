@@ -8,7 +8,6 @@ from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import TypeAdapter
 
-from openbiliclaw.assistant.agent import ASSISTANT_POLICY
 from openbiliclaw.assistant.models import AssistantStreamError
 
 from ..dependencies import HostDependencies, get_dependencies
@@ -24,7 +23,6 @@ if TYPE_CHECKING:
 
 router = APIRouter(prefix="/assistant", tags=["assistant"])
 _event_adapter: TypeAdapter[AssistantTurnLifecycleEvent] = TypeAdapter(AssistantTurnLifecycleEvent)
-_ASSISTANT_STREAM_TIMEOUT_SECONDS = float(ASSISTANT_POLICY.timeout_seconds + 5)
 
 
 async def _prepend_event(
@@ -40,22 +38,15 @@ async def _prepend_event(
 async def _turn_event_stream(
     events: AsyncIterator[AssistantTurnLifecycleEvent],
     disconnected: Callable[[], Awaitable[bool]],
-    timeout_seconds: float,
 ) -> AsyncIterator[str]:
     try:
         async with aclosing(cast("AsyncGenerator[AssistantTurnLifecycleEvent, None]", events)):
-            async with asyncio.timeout(timeout_seconds):
-                async for event in events:
-                    if await disconnected():
-                        return
-                    yield (
-                        f"event: {event.kind}\ndata: {_event_adapter.dump_json(event).decode()}\n\n"
-                    )
+            async for event in events:
+                if await disconnected():
+                    return
+                yield f"event: {event.kind}\ndata: {_event_adapter.dump_json(event).decode()}\n\n"
     except asyncio.CancelledError:
         raise
-    except TimeoutError:
-        error = AssistantStreamError(code="temporary_failure", message="assistant stream timed out")
-        yield f"event: error\ndata: {_event_adapter.dump_json(error).decode()}\n\n"
     except Exception:
         error = AssistantStreamError(
             code="temporary_failure", message="assistant stream failed safely"
@@ -89,7 +80,6 @@ async def stream_turn(
         _turn_event_stream(
             _prepend_event(first, events),
             request.is_disconnected,
-            _ASSISTANT_STREAM_TIMEOUT_SECONDS,
         ),
         media_type="text/event-stream",
     )

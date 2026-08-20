@@ -24,7 +24,7 @@ PydanticAI output tools enforce Assistant's discriminated output. The output too
 
 ## Turn lifecycle
 
-The canonical Composition controller emits `turn_started`, textual-provider-reasoning start/delta/finish, sanitized tool start/finish, validated visible response delta, `turn_finished`, or safe `error`. Both streaming HTTP and the existing non-streaming call consume this workflow. Each request may supply a bounded `turn_key` to deduplicate an explicit retry; without one, identical text is retained as a distinct turn. The SSE host allows the 45-second Assistant policy plus a five-second close margin, sanitizes ordinary post-header failures, and deterministically closes the inner generator on timeout, disconnect, early close, or cancellation; cancellation still propagates directly into `AIRuntime.stream`. There is no stop registry or stop endpoint.
+The canonical Composition controller emits `turn_started`, textual-provider-reasoning start/delta/finish, sanitized tool start/finish, validated visible response delta, `turn_finished`, or safe `error`. Both streaming HTTP and the existing non-streaming call consume this workflow. Each request may supply a bounded `turn_key` to deduplicate an explicit retry; without one, identical text is retained as a distinct turn. `AIRuntime` alone owns the configured whole-model lifetime; the SSE host adds no competing stream timeout, sanitizes ordinary post-header failures, and deterministically closes the complete controller/service/runtime generator chain on disconnect, early close, or cancellation. Cancellation still propagates unchanged. There is no stop registry or stop endpoint.
 
 ## Composition
 
