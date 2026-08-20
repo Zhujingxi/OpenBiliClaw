@@ -864,6 +864,9 @@ describe("web view behavior", () => {
     expect(wrapper.get(".field-wide .field-hint").text()).toContain(
       "never returned",
     );
+    expect(wrapper.get("#model-name").attributes("aria-describedby")).toBe(
+      "model-name-help",
+    );
     expect(wrapper.get("#model-endpoint").attributes("aria-describedby")).toBe(
       "model-endpoint-help",
     );

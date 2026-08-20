@@ -294,7 +294,7 @@ export default {
     modelProvider: "模型供應商",
     modelCredential: "模型憑證",
     restartRequired: "需要重啟",
-    reloaded: "已在目前程序重新載入",
+    reloaded: "已在目前程式重新載入",
     embedding: "嵌入模型",
     endpoint: "端點",
     credential: "憑證",

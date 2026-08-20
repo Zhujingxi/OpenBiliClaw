@@ -375,7 +375,13 @@ onBeforeUnmount(() => models.cancel());
               :placeholder="t('settings.modelId')"
               aria-describedby="model-name-help"
             />
-            <select v-else id="model-name" v-model="modelName" required>
+            <select
+              v-else
+              id="model-name"
+              v-model="modelName"
+              required
+              aria-describedby="model-name-help"
+            >
               <option value="" disabled>{{ t("settings.selectModel") }}</option>
               <option
                 v-for="model in selectedProvider?.models ?? []"
