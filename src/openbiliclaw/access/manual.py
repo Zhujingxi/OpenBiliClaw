@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from hmac import compare_digest
 from typing import TYPE_CHECKING, Protocol
 
 from .broker import AccessUnavailableError
@@ -152,6 +153,31 @@ class ManualAccessMethod:
         if spec is None:
             raise AccessUnavailableError("provider_not_supported")
         return spec.capabilities
+
+    def matches_replay(
+        self,
+        handle: AccessHandle,
+        request: AccessRequest,
+        submission: Mapping[str, str] | None,
+    ) -> bool:
+        """Compare a restored slot with a validated submission without exposing either."""
+
+        if (
+            not isinstance(handle, CredentialAccessHandle)
+            or submission is None
+            or handle.provider_id != request.provider_id
+            or handle.account_id != request.account_id
+            or not request.permissions <= handle.permissions
+        ):
+            return False
+        try:
+            encoded = self._encode(self._spec(request).form.validate_submission(submission))
+            return self._vault.resolve(
+                handle.credential_ref,
+                lambda stored: compare_digest(stored, encoded),
+            )
+        except (AccessUnavailableError, KeyError, ValueError):
+            return False
 
     def stored_handles(self) -> tuple[CredentialAccessHandle, ...]:
         """Reconstruct single-account handles whose secret slots survived restart."""

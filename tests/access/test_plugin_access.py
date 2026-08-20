@@ -11,10 +11,11 @@ if TYPE_CHECKING:
 
     from openbiliclaw.content.integration.identity import ProviderId
 
-from openbiliclaw.access.broker import AccessBroker
+from openbiliclaw.access.broker import AccessBroker, AccessUnavailableError
 from openbiliclaw.access.manual import ManualAccessMethod, ManualProviderSpec
 from openbiliclaw.access.methods import AccessMethodRegistry
 from openbiliclaw.access.models import (
+    AccessRequest,
     AccessStatusKind,
     CredentialAccessHandle,
     Permission,
@@ -184,3 +185,62 @@ async def test_fresh_service_rehydrates_and_verifies_durable_connection(tmp_path
     status = await restarted.status("bilibili", None)
     assert status.state is AccessStatusKind.CONNECTED
     assert restarted_verifier.seen == [{"cookie": "SESSDATA=session-value; bili_jct=csrf-value"}]
+
+
+@pytest.mark.asyncio
+async def test_rehydrated_service_accepts_one_exact_form_resubmission(tmp_path: Path) -> None:
+    path = tmp_path / "credentials.json"
+    plugin, _first = workflow(path, Verifier())
+    await plugin.submit(material())
+
+    verifier = Verifier()
+    restarted, _vault = service(path, verifier)
+    await restarted.rehydrate()
+    request = AccessRequest(
+        provider_id="bilibili",
+        permissions=frozenset({Permission.READ_PUBLIC, Permission.READ_PRIVATE}),
+        supported_method_ids=("builtin.manual",),
+    )
+    submission = {"cookie": "SESSDATA=session-value; bili_jct=csrf-value"}
+
+    status = await restarted.connect(
+        request,
+        allowed_method_ids=frozenset({"builtin.manual"}),
+        submission=submission,
+    )
+
+    assert status.state is AccessStatusKind.CONNECTED
+    handle = restarted.connected_handle("bilibili", None)
+    assert handle is not None and handle.permissions == request.permissions
+    assert verifier.seen == [submission, submission]
+    with pytest.raises(AccessUnavailableError, match="already_connected"):
+        await restarted.connect(
+            request,
+            allowed_method_ids=frozenset({"builtin.manual"}),
+            submission=submission,
+        )
+
+
+@pytest.mark.asyncio
+async def test_rehydrated_service_rejects_conflicting_form_resubmission(tmp_path: Path) -> None:
+    path = tmp_path / "credentials.json"
+    plugin, _first = workflow(path, Verifier())
+    await plugin.submit(material())
+
+    verifier = Verifier()
+    restarted, _vault = service(path, verifier)
+    await restarted.rehydrate()
+    request = AccessRequest(
+        provider_id="bilibili",
+        permissions=frozenset({Permission.READ_PUBLIC, Permission.READ_PRIVATE, Permission.WRITE}),
+        supported_method_ids=("builtin.manual",),
+    )
+
+    with pytest.raises(AccessUnavailableError, match="already_connected"):
+        await restarted.connect(
+            request,
+            allowed_method_ids=frozenset({"builtin.manual"}),
+            submission={"cookie": "SESSDATA=different; bili_jct=csrf-value"},
+        )
+
+    assert verifier.seen == [{"cookie": "SESSDATA=session-value; bili_jct=csrf-value"}]

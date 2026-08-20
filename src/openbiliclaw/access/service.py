@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
-from .broker import AccessBroker, AccessUnavailableError
+from .broker import AccessBroker, AccessUnavailableError, OpenedAccess
 from .methods import (
     AccessMethod,
     AccessMethodRegistry,
@@ -32,6 +32,7 @@ class _Connection:
     method: AccessMethod
     handle: AccessHandle
     status: AccessStatus
+    restored: bool = False
 
 
 class AccessService:
@@ -70,8 +71,33 @@ class AccessService:
     ) -> AccessStatus:
         key = self._key(request.provider_id, request.account_id)
         async with self._lock:
-            if key in self._connections:
-                raise AccessUnavailableError("already_connected")
+            connection = self._connections.get(key)
+            if connection is not None:
+                replayed = (
+                    self._broker.replay(
+                        OpenedAccess(connection.method, connection.handle),
+                        request,
+                        allowed_method_ids=allowed_method_ids,
+                        submission=submission,
+                    )
+                    if connection.restored
+                    else None
+                )
+                if replayed is None:
+                    raise AccessUnavailableError("already_connected")
+                with self._trace("access.connect", request.provider_id):
+                    result = enforce_requested_permissions(
+                        await replayed.method.verify(replayed.handle), request.permissions
+                    )
+                    connection.handle = replayed.handle
+                    connection.status = project_status(
+                        replayed.handle,
+                        replayed.method.descriptor.method_id,
+                        result,
+                        now=self._clock(),
+                    )
+                    connection.restored = False
+                    return connection.status
             with self._trace("access.connect", request.provider_id):
                 opened = await self._broker.open(
                     request,
@@ -117,6 +143,7 @@ class AccessService:
                             result,
                             now=self._clock(),
                         ),
+                        restored=True,
                     )
 
     def method_permissions(self, provider_id: str, method_id: str) -> frozenset[Permission]:

@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from .methods import ReplayingAccessMethod
+
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
@@ -64,3 +66,32 @@ class AccessBroker:
             await method.close(handle)
             raise AccessUnavailableError("method_returned_invalid_scope")
         return OpenedAccess(method=method, handle=handle)
+
+    def replay(
+        self,
+        existing: OpenedAccess,
+        request: AccessRequest,
+        *,
+        allowed_method_ids: frozenset[str],
+        submission: Mapping[str, str] | None,
+    ) -> OpenedAccess | None:
+        """Admit only an exact method-owned replay of a restored connection."""
+
+        try:
+            method = self.select(request, allowed_method_ids=allowed_method_ids)
+        except AccessUnavailableError:
+            return None
+        handle = existing.handle
+        if (
+            method is not existing.method
+            or not isinstance(method, ReplayingAccessMethod)
+            or handle.provider_id != request.provider_id
+            or handle.account_id != request.account_id
+            or not request.permissions <= handle.permissions
+            or not method.matches_replay(handle, request, submission)
+        ):
+            return None
+        return OpenedAccess(
+            method=method,
+            handle=handle.model_copy(update={"permissions": request.permissions}),
+        )

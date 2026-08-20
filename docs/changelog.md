@@ -6,6 +6,8 @@
 
 ## Unreleased
 
+- Restored authenticated connections when an exact credential form is resubmitted after graph rebuild: the Access broker now admits one opaque, scope-narrowing replay of a rehydrated handle, re-verifies it, and keeps conflicting or normal duplicate connects rejected.
+
 - Declared Pillow and Linux-only SecretStorage/PyCryptodome test support in the dev extra so clean installs can collect and type-check the full backend test suite.
 
 - Aligned production validation documentation with the CI MyPy scope, current opt-in L7 browser coverage, and the unresolved non-loopback Web bearer-enrollment gap.

@@ -61,6 +61,18 @@ class RehydratingAccessMethod(AccessMethod, Protocol):
     def stored_handles(self) -> tuple[AccessHandle, ...]: ...
 
 
+@runtime_checkable
+class ReplayingAccessMethod(AccessMethod, Protocol):
+    """Method that can recognize an exact submission for a restored handle."""
+
+    def matches_replay(
+        self,
+        handle: AccessHandle,
+        request: AccessRequest,
+        submission: Mapping[str, str] | None,
+    ) -> bool: ...
+
+
 class AccessMethodRegistry:
     """Access-method registry; Core registration remains metadata, not service location."""
 
