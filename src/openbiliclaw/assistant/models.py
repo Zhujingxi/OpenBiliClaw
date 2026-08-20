@@ -25,7 +25,7 @@ class ConversationScope(StrictBaseModel):
 
 class ToolCallSummary(StrictBaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    tool_name: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
+    tool_name: str = Field(min_length=1, max_length=64)
     outcome: Literal["succeeded", "failed", "pending"]
     safe_summary: str = Field(max_length=1000)
 
@@ -64,6 +64,66 @@ class TurnUsage(StrictBaseModel):
     request_count: int = Field(ge=0)
     input_tokens: int = Field(ge=0)
     output_tokens: int = Field(ge=0)
+
+
+class TurnStarted(StrictBaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    kind: Literal["turn_started"] = "turn_started"
+    context_meter: ContextMeter
+
+
+class ReasoningStarted(StrictBaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    kind: Literal["reasoning_started"] = "reasoning_started"
+
+
+class ReasoningDelta(StrictBaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    kind: Literal["reasoning_delta"] = "reasoning_delta"
+    delta: str = Field(min_length=1, max_length=8000)
+
+    @field_validator("delta")
+    @classmethod
+    def audit_delta(cls, value: str) -> str:
+        audit_text(value)
+        return value
+
+
+class ReasoningFinished(StrictBaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    kind: Literal["reasoning_finished"] = "reasoning_finished"
+
+
+class ToolStarted(StrictBaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    kind: Literal["tool_started"] = "tool_started"
+    name: str = Field(min_length=1, max_length=64)
+
+
+class ToolFinished(StrictBaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    kind: Literal["tool_finished"] = "tool_finished"
+    name: str = Field(min_length=1, max_length=64)
+    status: Literal["succeeded", "failed"]
+    summary: str = Field(min_length=1, max_length=1000)
+
+    @field_validator("summary")
+    @classmethod
+    def audit_summary(cls, value: str) -> str:
+        audit_text(value)
+        return value
+
+
+class ResponseDelta(StrictBaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    kind: Literal["response_delta"] = "response_delta"
+    delta: str = Field(min_length=1, max_length=8000)
+
+    @field_validator("delta")
+    @classmethod
+    def audit_delta(cls, value: str) -> str:
+        audit_text(value)
+        return value
 
 
 class ConversationMessage(StrictBaseModel):
@@ -149,5 +209,34 @@ AssistantOutput: TypeAlias = Annotated[
     | AssistantRecommendationPresentation
     | AssistantClarification
     | AssistantPendingAction,
+    Field(discriminator="kind"),
+]
+
+
+class TurnFinished(StrictBaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    kind: Literal["turn_finished"] = "turn_finished"
+    output: AssistantOutput
+    context_meter: ContextMeter
+    usage: TurnUsage
+
+
+class AssistantStreamError(StrictBaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    kind: Literal["error"] = "error"
+    code: Literal["unavailable", "temporary_failure"]
+    message: str = Field(min_length=1, max_length=500)
+
+
+AssistantLifecycleEvent: TypeAlias = Annotated[
+    TurnStarted
+    | ReasoningStarted
+    | ReasoningDelta
+    | ReasoningFinished
+    | ToolStarted
+    | ToolFinished
+    | ResponseDelta
+    | TurnFinished
+    | AssistantStreamError,
     Field(discriminator="kind"),
 ]

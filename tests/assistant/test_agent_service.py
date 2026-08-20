@@ -102,7 +102,9 @@ def _runtime(output: dict[str, object]) -> AIRuntime:
         "assistant-test",
         "test",
         model,
-        ModelCapabilities(tools=True, structured_output=True, context_tokens=16_000),
+        ModelCapabilities(
+            tools=True, structured_output=True, context_tokens=16_000, streaming=True
+        ),
     )
     return AIRuntime(
         RouteTable((ModelRoute(ASSISTANT_AGENT_ID, ASSISTANT_REQUIREMENTS, (configured,)),)),

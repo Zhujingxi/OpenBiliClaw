@@ -18,7 +18,11 @@ from .agent import (
 from .history import estimate_tokens, select_history
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from pydantic_ai import Agent
+
+    from openbiliclaw.ai.runtime.execution import RuntimeStreamEvent
 
     from .dependencies import AssistantDependencies
     from .models import AssistantOutput, ContextMeter, ConversationMessage
@@ -113,6 +117,14 @@ class AssistantService:
             ),
             context_meter=selection.meter,
         )
+
+    async def stream_turn(
+        self, prepared: PreparedTurn
+    ) -> AsyncIterator[RuntimeStreamEvent[AssistantOutput]]:
+        """Stream one already-projected turn through the canonical runtime."""
+
+        async for event in self._runtime.stream(prepared.request):
+            yield event
 
     async def run_turn(
         self,

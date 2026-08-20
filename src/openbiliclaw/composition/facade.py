@@ -58,6 +58,7 @@ from openbiliclaw.content.integration.identity import ContentRef, ProviderId
 from openbiliclaw.hosts.api.dependencies import AssistantTurnInput, DiagnosticResult, StartResult
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
     from pathlib import Path
 
     from openbiliclaw.access.forms import ConnectionForm
@@ -90,6 +91,7 @@ if TYPE_CHECKING:
     )
     from openbiliclaw.application.sources import IdempotencyJournal
     from openbiliclaw.assistant.models import (
+        AssistantLifecycleEvent,
         AssistantOutput,
         Conversation,
         ConversationMessage,
@@ -379,13 +381,21 @@ class CompositionFacade:
             raise self._unavailable()
         return await self._assistant.turn(request, device_id)
 
+    async def assistant_turn_stream(
+        self, request: AssistantTurnInput, device_id: str
+    ) -> AsyncIterator[AssistantLifecycleEvent]:
+        if self._assistant is None:
+            raise self._unavailable()
+        async for event in self._assistant.stream_turn(request, device_id):
+            yield event
+
     async def conversation(self, conversation_id: str, device_id: str) -> Conversation:
         if self._assistant is None:
             raise self._unavailable()
         return await self._assistant.conversation(conversation_id, device_id)
 
     async def conversation_messages(
-        self, conversation_id: str, device_id: str, limit: int
+        self, conversation_id: str, device_id: str, limit: int | None
     ) -> tuple[ConversationMessage, ...]:
         if self._assistant is None:
             raise self._unavailable()

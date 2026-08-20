@@ -8,12 +8,13 @@ import pytest
 from pydantic_ai import Agent
 from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.messages import ImageUrl, ModelMessage, ModelResponse, TextPart, ToolCallPart
-from pydantic_ai.models.function import AgentInfo, FunctionModel
+from pydantic_ai.models.function import AgentInfo, DeltaThinkingPart, FunctionModel
 from pydantic_ai.models.test import TestModel
 
 from openbiliclaw.ai.runtime.budgets import PolicyBook, RunPolicy
 from openbiliclaw.ai.runtime.capabilities import AgentId, ModelCapabilities, ModelRequirements
 from openbiliclaw.ai.runtime.errors import (
+    AIRuntimeError,
     BudgetExhaustedError,
     InvalidOutputError,
     RateLimitedError,
@@ -121,6 +122,61 @@ async def test_stream_normalizes_text_tools_and_validated_result() -> None:
         event for event in events if isinstance(event, RuntimeToolStarted | RuntimeToolFinished)
     ]
     assert "private payload" not in repr(safe_tool_events)
+
+
+async def test_stream_emits_only_textual_provider_reasoning() -> None:
+    async def stream_response(messages: list[ModelMessage], info: AgentInfo):
+        del messages, info
+        yield {0: DeltaThinkingPart(content="provider reasoning")}
+        yield "answer"
+
+    runtime = _runtime(FunctionModel(stream_function=stream_response))
+    request = AgentRunRequest(
+        AgentId("test.answer"),
+        Agent(output_type=str),
+        None,
+        "go",
+        (),
+        (),
+        ModelRequirements(structured_output=True),
+        RunPolicy(),
+        "test",
+    )
+    events = [event async for event in runtime.stream(request)]
+
+    reasoning = [
+        event
+        for event in events
+        if isinstance(event, RuntimeTextDelta) and event.kind == "reasoning_delta"
+    ]
+    assert [event.text for event in reasoning] == ["provider reasoning"]
+
+
+async def test_stream_never_retries_after_visible_output() -> None:
+    attempts = 0
+
+    async def broken_stream(messages: list[ModelMessage], info: AgentInfo):
+        nonlocal attempts
+        del messages, info
+        attempts += 1
+        yield "visible"
+        raise ConnectionError("offline after output")
+
+    runtime = _runtime(FunctionModel(stream_function=broken_stream))
+    request = AgentRunRequest(
+        AgentId("test.answer"),
+        Agent(output_type=str),
+        None,
+        "go",
+        (),
+        (),
+        ModelRequirements(structured_output=True),
+        RunPolicy(retries=2),
+        "test",
+    )
+    with pytest.raises(AIRuntimeError):
+        _ = [event async for event in runtime.stream(request)]
+    assert attempts == 1
 
 
 async def test_stream_cancellation_releases_resource_slot() -> None:

@@ -8,7 +8,7 @@ A cache younger than 24 hours is used without a request. On an absent or stale c
 
 ## Resolution and dispatch
 
-`[model].provider` is a models.dev provider ID and `model_name` must exist under that provider. The catalog supplies the endpoint and capabilities (`tool_call`, `structured_output`, `attachment`, reasoning, and context limit). An explicit capability table replaces the complete catalog capability set; partial overrides are rejected.
+`[model].provider` is a models.dev provider ID and `model_name` must exist under that provider. The catalog supplies the endpoint and model-specific capabilities (`tool_call`, `structured_output`, `attachment`, reasoning, and context limit). Streaming is true for models.dev entries routed through the supported native protocol families because those PydanticAI provider APIs implement streamed requests; fully custom providers must still declare streaming explicitly. An explicit capability table replaces the complete catalog capability set; partial overrides are rejected.
 
 | models.dev `npm` marker | Protocol family | PydanticAI construction |
 | --- | --- | --- |
@@ -21,7 +21,7 @@ Unknown markers fail with `UnsupportedProtocolError` containing the marker. With
 
 A provider ID absent from models.dev is accepted only when `[model]` declares `protocol`, `endpoint`, and every field in `[model.capabilities]`. This fully explicit path is the escape hatch for private services or catalog errors; it does not add provider knowledge to the application.
 
-`ModelInstanceConfig` contains the resolved free-form provider ID, protocol, model, endpoint, opaque vault reference, options, and capabilities. `ModelFactory` resolves credentials only inside the selected constructor. `BuiltModel` preserves a non-secret fingerprint and declared-versus-verified capabilities. Production calls still use `RouteTable` and `AIRuntime.run()`.
+`ModelInstanceConfig` contains the resolved free-form provider ID, protocol, model, endpoint, opaque vault reference, options, and capabilities. `ModelFactory` resolves credentials only inside the selected constructor. `BuiltModel` preserves a non-secret fingerprint and declared-versus-verified capabilities. Production calls still use `RouteTable` and `AIRuntime.run()` / `AIRuntime.stream()`.
 
 ## Kimi coding endpoint
 

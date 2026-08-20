@@ -19,7 +19,6 @@ from .models import (
     AssistantClarification,
     AssistantMessage,
     AssistantOutput,
-    AssistantPendingAction,
     AssistantRecommendationPresentation,
     ContextMeter,
     ConversationRole,
@@ -45,6 +44,18 @@ def estimate_tokens(text: str) -> int:
     return max(1, (len(text.encode("utf-8")) + 3) // 4)
 
 
+def render_assistant_output(output: AssistantOutput) -> str:
+    """Project validated structured output to user-visible text without opaque IDs."""
+
+    if isinstance(output, AssistantMessage):
+        return output.text
+    if isinstance(output, AssistantRecommendationPresentation):
+        return output.intro
+    if isinstance(output, AssistantClarification):
+        return "\n".join((output.question, *output.choices))
+    return f"{output.action.effect} (expires {output.action.expires_at.isoformat()})"
+
+
 def _assistant_text(message: ConversationMessage) -> str:
     try:
         output = _OUTPUT_ADAPTER.validate_json(message.content)
@@ -52,14 +63,7 @@ def _assistant_text(message: ConversationMessage) -> str:
         # Older persisted Assistant messages may predate the structured output contract.
         visible = message.content
     else:
-        if isinstance(output, AssistantMessage):
-            visible = output.text
-        elif isinstance(output, AssistantRecommendationPresentation):
-            visible = output.intro
-        elif isinstance(output, AssistantClarification):
-            visible = "\n".join((output.question, *output.choices))
-        elif isinstance(output, AssistantPendingAction):
-            visible = f"{output.action.effect} (expires {output.action.expires_at.isoformat()})"
+        visible = render_assistant_output(output)
     if message.tool_calls:
         summaries = "; ".join(
             f"{item.tool_name.replace('_', ' ')}: {item.outcome} — {item.safe_summary}"

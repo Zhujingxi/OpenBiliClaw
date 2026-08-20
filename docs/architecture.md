@@ -7,7 +7,7 @@ Vue web / extension ─────── generated typed client
 CLI YouTube Takeout ──────── verified evidence import
               │
               ▼
-       FastAPI /v1 host ─── security, CSRF/device checks, limits
+       FastAPI /v1 host ─── security, CSRF/device checks, limits, Assistant SSE
               │
               ▼
       Application workflows ◄──── Assistant (optional model route)
@@ -44,7 +44,7 @@ CLI YouTube Takeout ──────── verified evidence import
 
 ## Boundaries
 
-- Hosts depend only on Application, Assistant, and Core contracts.
+- Hosts depend only on Application, Assistant, and Core contracts. Assistant SSE and the existing non-streaming route consume one Composition-owned lifecycle; HTTP cancellation closes the owned PydanticAI run, and only validated completion atomically persists the visible turn plus sanitized tool summaries.
 - Assistant receives safe application tools and bounded understanding projections; it cannot access credentials or repositories. It reconstructs only complete persisted user/Assistant turns, reserves about 20% of the configured model window, drops only oldest complete turns from model context, and never summarizes or deletes the retained transcript. Profile corrections are propose-only pending actions: approval dispatches canonical `EditProfile`, while the model has no direct mutation tool.
 - Content providers depend on Content Integration and opaque Access handles. Optional manifest credential recipes are frozen data only; the generic browser extension reads declared artifacts, and Application routes material through the existing form/verifier/vault path. Composition rehydrates default-account opaque credential slots on startup. A 15-minute supervised job and on-demand workflow read at most two 50-item credentialed `History`/`Saved` pages and normalize them through Observation ingress; verified YouTube Takeout watch history converges on the same path; likes/subscriptions remain ignored.
 - Understanding consumes immutable observations and never imports Recommendation. After canonical commits, Composition's shared AI-provider `EmbeddingIndex` best-effort projects evidence summaries and accepted claim values by opaque ID; embedding failure cannot roll back user evidence.

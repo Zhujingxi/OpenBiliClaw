@@ -51,6 +51,7 @@ class CatalogModel(StrictBaseModel):
             structured_output=self.structured_output,
             vision=self.attachment,
             context_tokens=self.limit.context,
+            streaming=True,
             reasoning=self.reasoning,
         )
 

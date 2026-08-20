@@ -2,20 +2,40 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from openbiliclaw.ai.runtime.errors import AIRuntimeError
+from openbiliclaw.ai.runtime.execution import (
+    RuntimeRunFinished,
+    RuntimeTextDelta,
+    RuntimeToolFinished,
+    RuntimeToolStarted,
+)
+from openbiliclaw.ai.runtime.history import MessageAuditError, ToolResultTooLargeError
 from openbiliclaw.application.content_actions import PendingAction, ProposeProfileRevisionCommand
 from openbiliclaw.application.errors import ApplicationError, ApplicationErrorCode
 from openbiliclaw.assistant.dependencies import AssistantDependencies, ConversationMetadata
+from openbiliclaw.assistant.history import render_assistant_output
 from openbiliclaw.assistant.models import (
+    AssistantLifecycleEvent,
+    AssistantStreamError,
     Conversation,
     ConversationMessage,
     ConversationRole,
     ConversationScope,
+    ReasoningDelta,
+    ReasoningFinished,
+    ReasoningStarted,
+    ResponseDelta,
+    ToolCallSummary,
+    ToolFinished,
+    ToolStarted,
+    TurnFinished,
+    TurnStarted,
     TurnUsage,
 )
 from openbiliclaw.assistant.service import AssistantService, TurnCommand
@@ -31,6 +51,8 @@ from openbiliclaw.understanding.overrides import OverrideOperation
 from openbiliclaw.understanding.projections import dialogue_projection
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from pydantic_ai import Tool
 
     from openbiliclaw.application.reads import RecommendationsResult
@@ -141,6 +163,20 @@ class AssistantController:
         return ConversationScope(local_user_id="local", device_id=device_id)
 
     async def turn(self, request: AssistantTurnInput, device_id: str) -> AssistantOutput:
+        """Consume the canonical lifecycle workflow for non-streaming callers."""
+
+        async for event in self.stream_turn(request, device_id):
+            if isinstance(event, TurnFinished):
+                return event.output
+            if isinstance(event, AssistantStreamError):
+                raise ApplicationError(ApplicationErrorCode.UNAVAILABLE, event.message)
+        raise ApplicationError(ApplicationErrorCode.UNAVAILABLE, "assistant turn incomplete")
+
+    async def stream_turn(
+        self, request: AssistantTurnInput, device_id: str
+    ) -> AsyncIterator[AssistantLifecycleEvent]:
+        """Run, persist, and expose one typed Assistant lifecycle."""
+
         now = datetime.now(UTC)
         scope = self._scope(device_id)
         conversation = await self._conversations.get_conversation(request.conversation_id, scope)
@@ -153,50 +189,117 @@ class AssistantController:
             )
             await self._conversations.put_conversation(conversation)
         profile = dialogue_projection(await self._understanding.profile(DEFAULT_PROFILE_ID))
-        try:
-            turn = await self._service.run_turn(
-                TurnCommand(
-                    text=request.text,
-                    deps=AssistantDependencies(
-                        application=self._application,
-                        profile=profile,
-                        locale=request.locale,
-                        conversation=ConversationMetadata(request.conversation_id, scope),
-                    ),
-                ),
-                await self._conversations.all_messages(request.conversation_id),
-            )
-            result = turn.result
-        except AIRuntimeError as exc:
-            raise ApplicationError(
-                ApplicationErrorCode.UNAVAILABLE, "assistant model unavailable"
-            ) from exc
-        user_key = (
-            f"turn:{request.conversation_id}:{hashlib.sha256(request.text.encode()).hexdigest()}"
-        )
-        await self._conversations.append_message(
-            request.conversation_id,
-            self._message(ConversationRole.USER, request.text, user_key, now),
-        )
-        output_text = result.output.model_dump_json()
-        await self._conversations.append_message(
-            request.conversation_id,
-            self._message(
-                ConversationRole.ASSISTANT,
-                output_text,
-                user_key + ":assistant",
-                datetime.now(UTC),
-                usage=TurnUsage(
-                    request_count=result.usage.requests,
-                    input_tokens=result.usage.input_tokens,
-                    output_tokens=result.usage.output_tokens,
-                ),
+        command = TurnCommand(
+            text=request.text,
+            deps=AssistantDependencies(
+                application=self._application,
+                profile=profile,
+                locale=request.locale,
+                conversation=ConversationMetadata(request.conversation_id, scope),
             ),
         )
-        await self._conversations.put_conversation(
-            conversation.model_copy(update={"updated_at": datetime.now(UTC)})
+        prepared = self._service.prepare_turn(
+            command, await self._conversations.all_messages(request.conversation_id)
         )
-        return result.output
+        yield TurnStarted(context_meter=prepared.context_meter)
+        reasoning_open = False
+        tool_calls: list[ToolCallSummary] = []
+        try:
+            async for runtime_event in self._service.stream_turn(prepared):
+                if isinstance(runtime_event, RuntimeTextDelta):
+                    if runtime_event.kind != "reasoning_delta":
+                        continue  # Structured Assistant output is exposed only after validation.
+                    if not reasoning_open:
+                        reasoning_open = True
+                        yield ReasoningStarted()
+                    yield ReasoningDelta(delta=runtime_event.text)
+                elif isinstance(runtime_event, RuntimeToolStarted):
+                    if reasoning_open:
+                        reasoning_open = False
+                        yield ReasoningFinished()
+                    yield ToolStarted(name=self._friendly_tool_name(runtime_event.tool_name))
+                elif isinstance(runtime_event, RuntimeToolFinished):
+                    friendly_name = self._friendly_tool_name(runtime_event.tool_name)
+                    summary = f"{friendly_name} {runtime_event.summary.lower()}."
+                    tool_calls.append(
+                        ToolCallSummary(
+                            tool_name=friendly_name,
+                            outcome=runtime_event.status,
+                            safe_summary=summary,
+                        )
+                    )
+                    yield ToolFinished(
+                        name=friendly_name,
+                        status=runtime_event.status,
+                        summary=summary,
+                    )
+                elif isinstance(runtime_event, RuntimeRunFinished):
+                    if reasoning_open:
+                        reasoning_open = False
+                        yield ReasoningFinished()
+                    usage = TurnUsage(
+                        request_count=runtime_event.result.usage.requests,
+                        input_tokens=runtime_event.result.usage.input_tokens,
+                        output_tokens=runtime_event.result.usage.output_tokens,
+                    )
+                    await self._persist_turn(
+                        conversation,
+                        request.text,
+                        runtime_event.result.output,
+                        usage,
+                        tuple(tool_calls),
+                        now,
+                    )
+                    visible = render_assistant_output(runtime_event.result.output)
+                    yield ResponseDelta(delta=visible)
+                    yield TurnFinished(
+                        output=runtime_event.result.output,
+                        context_meter=prepared.context_meter,
+                        usage=usage,
+                    )
+                    return
+        except asyncio.CancelledError:
+            raise
+        except (AIRuntimeError, MessageAuditError, ToolResultTooLargeError):
+            if reasoning_open:
+                yield ReasoningFinished()
+            yield AssistantStreamError(code="unavailable", message="assistant model unavailable")
+        except Exception:
+            if reasoning_open:
+                yield ReasoningFinished()
+            yield AssistantStreamError(
+                code="temporary_failure", message="assistant turn failed safely"
+            )
+
+    async def _persist_turn(
+        self,
+        conversation: Conversation,
+        user_text: str,
+        output: AssistantOutput,
+        usage: TurnUsage,
+        tool_calls: tuple[ToolCallSummary, ...],
+        started_at: datetime,
+    ) -> None:
+        user_key = (
+            f"turn:{conversation.conversation_id}:{hashlib.sha256(user_text.encode()).hexdigest()}"
+        )
+        updated = datetime.now(UTC)
+        await self._conversations.append_turn(
+            conversation.model_copy(update={"updated_at": updated}),
+            self._message(ConversationRole.USER, user_text, user_key, started_at),
+            self._message(
+                ConversationRole.ASSISTANT,
+                output.model_dump_json(),
+                user_key + ":assistant",
+                updated,
+                usage=usage,
+                tool_calls=tool_calls,
+            ),
+        )
+
+    @staticmethod
+    def _friendly_tool_name(tool_name: str) -> str:
+        return tool_name.replace("_", " ").strip().title() or "Tool"
 
     async def conversation(self, conversation_id: str, device_id: str) -> Conversation:
         conversation = await self._conversations.get_conversation(
@@ -209,9 +312,11 @@ class AssistantController:
         return conversation
 
     async def messages(
-        self, conversation_id: str, device_id: str, limit: int
+        self, conversation_id: str, device_id: str, limit: int | None
     ) -> tuple[ConversationMessage, ...]:
         await self.conversation(conversation_id, device_id)
+        if limit is None:
+            return await self._conversations.all_messages(conversation_id)
         return await self._conversations.messages(conversation_id, limit=limit)
 
     @staticmethod
@@ -222,6 +327,7 @@ class AssistantController:
         created_at: datetime,
         *,
         usage: TurnUsage | None = None,
+        tool_calls: tuple[ToolCallSummary, ...] = (),
     ) -> ConversationMessage:
         identity = hashlib.sha256(f"{role.value}:{idempotency_key}".encode()).hexdigest()[:32]
         return ConversationMessage(
@@ -231,4 +337,5 @@ class AssistantController:
             created_at=created_at,
             idempotency_key=idempotency_key[:200],
             usage=usage,
+            tool_calls=tool_calls,
         )

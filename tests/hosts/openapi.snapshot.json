@@ -4800,7 +4800,8 @@
             "type": "string"
           },
           "tool_name": {
-            "pattern": "^[a-z][a-z0-9_]{0,63}$",
+            "maxLength": 64,
+            "minLength": 1,
             "title": "Tool Name",
             "type": "string"
           }
@@ -5006,11 +5007,17 @@
             "name": "message_limit",
             "required": false,
             "schema": {
-              "default": 20,
-              "maximum": 100,
-              "minimum": 1,
-              "title": "Message Limit",
-              "type": "integer"
+              "anyOf": [
+                {
+                  "maximum": 100,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Message Limit"
             }
           },
           {
@@ -5302,6 +5309,628 @@
           }
         },
         "summary": "Turn",
+        "tags": [
+          "assistant"
+        ]
+      }
+    },
+    "/v1/assistant/turns/stream": {
+      "post": {
+        "operationId": "stream_turn_v1_assistant_turns_stream_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Device-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "title": "X-Device-Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssistantTurnRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "$defs": {
+                    "AssistantClarification": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "choices": {
+                          "default": [],
+                          "items": {
+                            "type": "string"
+                          },
+                          "maxItems": 10,
+                          "title": "Choices",
+                          "type": "array"
+                        },
+                        "kind": {
+                          "const": "clarification",
+                          "default": "clarification",
+                          "title": "Kind",
+                          "type": "string"
+                        },
+                        "question": {
+                          "maxLength": 1000,
+                          "minLength": 1,
+                          "title": "Question",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "question"
+                      ],
+                      "title": "AssistantClarification",
+                      "type": "object"
+                    },
+                    "AssistantMessage": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "kind": {
+                          "const": "message",
+                          "default": "message",
+                          "title": "Kind",
+                          "type": "string"
+                        },
+                        "text": {
+                          "maxLength": 8000,
+                          "minLength": 1,
+                          "title": "Text",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "text"
+                      ],
+                      "title": "AssistantMessage",
+                      "type": "object"
+                    },
+                    "AssistantPendingAction": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "action": {
+                          "$ref": "#/$defs/PendingActionSummary"
+                        },
+                        "kind": {
+                          "const": "pending_action",
+                          "default": "pending_action",
+                          "title": "Kind",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "action"
+                      ],
+                      "title": "AssistantPendingAction",
+                      "type": "object"
+                    },
+                    "AssistantRecommendationPresentation": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "intro": {
+                          "maxLength": 1000,
+                          "minLength": 1,
+                          "title": "Intro",
+                          "type": "string"
+                        },
+                        "kind": {
+                          "const": "recommendations",
+                          "default": "recommendations",
+                          "title": "Kind",
+                          "type": "string"
+                        },
+                        "recommendation_ids": {
+                          "items": {
+                            "type": "string"
+                          },
+                          "maxItems": 20,
+                          "minItems": 1,
+                          "title": "Recommendation Ids",
+                          "type": "array"
+                        }
+                      },
+                      "required": [
+                        "intro",
+                        "recommendation_ids"
+                      ],
+                      "title": "AssistantRecommendationPresentation",
+                      "type": "object"
+                    },
+                    "AssistantStreamError": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "code": {
+                          "enum": [
+                            "unavailable",
+                            "temporary_failure"
+                          ],
+                          "title": "Code",
+                          "type": "string"
+                        },
+                        "kind": {
+                          "const": "error",
+                          "default": "error",
+                          "title": "Kind",
+                          "type": "string"
+                        },
+                        "message": {
+                          "maxLength": 500,
+                          "minLength": 1,
+                          "title": "Message",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "title": "AssistantStreamError",
+                      "type": "object"
+                    },
+                    "ContextMeter": {
+                      "additionalProperties": false,
+                      "description": "Approximate model-window use for one Assistant turn.",
+                      "properties": {
+                        "approximate_usage_percent": {
+                          "maximum": 100,
+                          "minimum": 0,
+                          "title": "Approximate Usage Percent",
+                          "type": "integer"
+                        },
+                        "context_window_tokens": {
+                          "exclusiveMinimum": 0,
+                          "title": "Context Window Tokens",
+                          "type": "integer"
+                        },
+                        "estimated_input_tokens": {
+                          "minimum": 0,
+                          "title": "Estimated Input Tokens",
+                          "type": "integer"
+                        },
+                        "excluded_oldest_turns": {
+                          "minimum": 0,
+                          "title": "Excluded Oldest Turns",
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "estimated_input_tokens",
+                        "context_window_tokens",
+                        "approximate_usage_percent",
+                        "excluded_oldest_turns"
+                      ],
+                      "title": "ContextMeter",
+                      "type": "object"
+                    },
+                    "PendingActionSummary": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "effect": {
+                          "maxLength": 500,
+                          "minLength": 1,
+                          "title": "Effect",
+                          "type": "string"
+                        },
+                        "expires_at": {
+                          "format": "date-time",
+                          "title": "Expires At",
+                          "type": "string"
+                        },
+                        "pending_action_id": {
+                          "pattern": "^pending_[0-9a-f]{32}$",
+                          "title": "Pending Action Id",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "pending_action_id",
+                        "effect",
+                        "expires_at"
+                      ],
+                      "title": "PendingActionSummary",
+                      "type": "object"
+                    },
+                    "ReasoningDelta": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "delta": {
+                          "maxLength": 8000,
+                          "minLength": 1,
+                          "title": "Delta",
+                          "type": "string"
+                        },
+                        "kind": {
+                          "const": "reasoning_delta",
+                          "default": "reasoning_delta",
+                          "title": "Kind",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "delta"
+                      ],
+                      "title": "ReasoningDelta",
+                      "type": "object"
+                    },
+                    "ReasoningFinished": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "kind": {
+                          "const": "reasoning_finished",
+                          "default": "reasoning_finished",
+                          "title": "Kind",
+                          "type": "string"
+                        }
+                      },
+                      "title": "ReasoningFinished",
+                      "type": "object"
+                    },
+                    "ReasoningStarted": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "kind": {
+                          "const": "reasoning_started",
+                          "default": "reasoning_started",
+                          "title": "Kind",
+                          "type": "string"
+                        }
+                      },
+                      "title": "ReasoningStarted",
+                      "type": "object"
+                    },
+                    "ResponseDelta": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "delta": {
+                          "maxLength": 8000,
+                          "minLength": 1,
+                          "title": "Delta",
+                          "type": "string"
+                        },
+                        "kind": {
+                          "const": "response_delta",
+                          "default": "response_delta",
+                          "title": "Kind",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "delta"
+                      ],
+                      "title": "ResponseDelta",
+                      "type": "object"
+                    },
+                    "ToolFinished": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "kind": {
+                          "const": "tool_finished",
+                          "default": "tool_finished",
+                          "title": "Kind",
+                          "type": "string"
+                        },
+                        "name": {
+                          "maxLength": 64,
+                          "minLength": 1,
+                          "title": "Name",
+                          "type": "string"
+                        },
+                        "status": {
+                          "enum": [
+                            "succeeded",
+                            "failed"
+                          ],
+                          "title": "Status",
+                          "type": "string"
+                        },
+                        "summary": {
+                          "maxLength": 1000,
+                          "minLength": 1,
+                          "title": "Summary",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "name",
+                        "status",
+                        "summary"
+                      ],
+                      "title": "ToolFinished",
+                      "type": "object"
+                    },
+                    "ToolStarted": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "kind": {
+                          "const": "tool_started",
+                          "default": "tool_started",
+                          "title": "Kind",
+                          "type": "string"
+                        },
+                        "name": {
+                          "maxLength": 64,
+                          "minLength": 1,
+                          "title": "Name",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "name"
+                      ],
+                      "title": "ToolStarted",
+                      "type": "object"
+                    },
+                    "TurnFinished": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "context_meter": {
+                          "$ref": "#/$defs/ContextMeter"
+                        },
+                        "kind": {
+                          "const": "turn_finished",
+                          "default": "turn_finished",
+                          "title": "Kind",
+                          "type": "string"
+                        },
+                        "output": {
+                          "discriminator": {
+                            "mapping": {
+                              "clarification": "#/$defs/AssistantClarification",
+                              "message": "#/$defs/AssistantMessage",
+                              "pending_action": "#/$defs/AssistantPendingAction",
+                              "recommendations": "#/$defs/AssistantRecommendationPresentation"
+                            },
+                            "propertyName": "kind"
+                          },
+                          "oneOf": [
+                            {
+                              "$ref": "#/$defs/AssistantMessage"
+                            },
+                            {
+                              "$ref": "#/$defs/AssistantRecommendationPresentation"
+                            },
+                            {
+                              "$ref": "#/$defs/AssistantClarification"
+                            },
+                            {
+                              "$ref": "#/$defs/AssistantPendingAction"
+                            }
+                          ],
+                          "title": "Output"
+                        },
+                        "usage": {
+                          "$ref": "#/$defs/TurnUsage"
+                        }
+                      },
+                      "required": [
+                        "output",
+                        "context_meter",
+                        "usage"
+                      ],
+                      "title": "TurnFinished",
+                      "type": "object"
+                    },
+                    "TurnStarted": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "context_meter": {
+                          "$ref": "#/$defs/ContextMeter"
+                        },
+                        "kind": {
+                          "const": "turn_started",
+                          "default": "turn_started",
+                          "title": "Kind",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "context_meter"
+                      ],
+                      "title": "TurnStarted",
+                      "type": "object"
+                    },
+                    "TurnUsage": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "input_tokens": {
+                          "minimum": 0,
+                          "title": "Input Tokens",
+                          "type": "integer"
+                        },
+                        "output_tokens": {
+                          "minimum": 0,
+                          "title": "Output Tokens",
+                          "type": "integer"
+                        },
+                        "request_count": {
+                          "minimum": 0,
+                          "title": "Request Count",
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "request_count",
+                        "input_tokens",
+                        "output_tokens"
+                      ],
+                      "title": "TurnUsage",
+                      "type": "object"
+                    }
+                  },
+                  "discriminator": {
+                    "mapping": {
+                      "error": "#/$defs/AssistantStreamError",
+                      "reasoning_delta": "#/$defs/ReasoningDelta",
+                      "reasoning_finished": "#/$defs/ReasoningFinished",
+                      "reasoning_started": "#/$defs/ReasoningStarted",
+                      "response_delta": "#/$defs/ResponseDelta",
+                      "tool_finished": "#/$defs/ToolFinished",
+                      "tool_started": "#/$defs/ToolStarted",
+                      "turn_finished": "#/$defs/TurnFinished",
+                      "turn_started": "#/$defs/TurnStarted"
+                    },
+                    "propertyName": "kind"
+                  },
+                  "oneOf": [
+                    {
+                      "$ref": "#/$defs/TurnStarted"
+                    },
+                    {
+                      "$ref": "#/$defs/ReasoningStarted"
+                    },
+                    {
+                      "$ref": "#/$defs/ReasoningDelta"
+                    },
+                    {
+                      "$ref": "#/$defs/ReasoningFinished"
+                    },
+                    {
+                      "$ref": "#/$defs/ToolStarted"
+                    },
+                    {
+                      "$ref": "#/$defs/ToolFinished"
+                    },
+                    {
+                      "$ref": "#/$defs/ResponseDelta"
+                    },
+                    {
+                      "$ref": "#/$defs/TurnFinished"
+                    },
+                    {
+                      "$ref": "#/$defs/AssistantStreamError"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "not_found"
+          },
+          "405": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "method_not_allowed"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "validation"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "validation"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "rate_limit"
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "temporary_failure"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "unavailable capability or temporary timeout"
+          }
+        },
+        "summary": "Stream Turn",
         "tags": [
           "assistant"
         ]

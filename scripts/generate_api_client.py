@@ -73,6 +73,7 @@ def _hoist_local_definitions(path: Path) -> None:
                 if not isinstance(definitions, dict):
                     raise ValueError("OpenAPI $defs must be an object")
                 for name, definition in definitions.items():
+                    visit(definition)
                     schemas.setdefault(name, definition)
             reference = value.get("$ref")
             if isinstance(reference, str) and reference.startswith("#/$defs/"):

@@ -41,7 +41,12 @@ from openbiliclaw.application.sources import (
     ConnectSourceResult,
     DisconnectSourceCommand,
 )
-from openbiliclaw.assistant.models import AssistantOutput, Conversation, ConversationMessage
+from openbiliclaw.assistant.models import (
+    AssistantLifecycleEvent,
+    AssistantOutput,
+    Conversation,
+    ConversationMessage,
+)
 from openbiliclaw.content.integration.manifest import AccessRecipe
 from openbiliclaw.core._pydantic import StrictBaseModel
 from openbiliclaw.observations.service import RecordBatchResult
@@ -50,6 +55,8 @@ from .model_configuration import ModelConfiguration
 from .schemas.models import EventEnvelope
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from .auth import AuthTokenService
     from .media_proxy import MediaProxy
 
@@ -140,9 +147,12 @@ class HostFacade(Protocol):
     async def assistant_turn(
         self, request: AssistantTurnInput, device_id: str
     ) -> AssistantOutput: ...
+    def assistant_turn_stream(
+        self, request: AssistantTurnInput, device_id: str
+    ) -> AsyncIterator[AssistantLifecycleEvent]: ...
     async def conversation(self, conversation_id: str, device_id: str) -> Conversation: ...
     async def conversation_messages(
-        self, conversation_id: str, device_id: str, limit: int
+        self, conversation_id: str, device_id: str, limit: int | None
     ) -> tuple[ConversationMessage, ...]: ...
     async def job_health(self) -> JobHealthResult: ...
     async def config_diagnostics(self) -> DiagnosticResult: ...

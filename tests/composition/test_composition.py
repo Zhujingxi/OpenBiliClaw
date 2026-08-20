@@ -547,7 +547,9 @@ def test_model_configuration_wires_assistant_and_understanding_job(
         endpoint="https://gateway.example/v1",
         model_name="test",
         secret_ref="cred_" + "a" * 32,
-        capabilities=ModelCapabilities(tools=True, structured_output=True, context_tokens=8192),
+        capabilities=ModelCapabilities(
+            tools=True, structured_output=True, context_tokens=8192, streaming=True
+        ),
     )
     built_configs: list[ModelInstanceConfig] = []
 

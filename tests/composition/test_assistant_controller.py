@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 
 import pytest
+from pydantic_ai import Tool
 from pydantic_ai.models.test import TestModel
 
 from openbiliclaw.ai.runtime.capabilities import ModelCapabilities
@@ -18,6 +19,7 @@ from openbiliclaw.assistant.agent import (
     ASSISTANT_REQUIREMENTS,
     build_assistant_agent,
 )
+from openbiliclaw.assistant.models import ToolFinished, ToolStarted, TurnFinished
 from openbiliclaw.assistant.service import AssistantService
 from openbiliclaw.composition.assistant import (
     AssistantController,
@@ -87,6 +89,7 @@ async def test_controller_persists_scoped_turn_and_messages(tmp_path: Path) -> N
                                 tools=True,
                                 structured_output=True,
                                 context_tokens=16_000,
+                                streaming=True,
                             ),
                         ),
                     ),
@@ -118,6 +121,75 @@ async def test_controller_persists_scoped_turn_and_messages(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_controller_streams_safe_tools_and_persists_only_summaries(tmp_path: Path) -> None:
+    application = build_application(AppSettings(), options=BuildOptions(data_dir=tmp_path))
+    await application.start()
+    assert application.repositories is not None
+    assert application.services.understanding is not None
+    assert application.services.facade is not None
+
+    async def search_content() -> str:
+        return "private native payload"
+
+    model = TestModel(
+        call_tools="all", custom_output_args={"kind": "message", "text": "Safe answer"}
+    )
+    runtime = AIRuntime(
+        RouteTable(
+            (
+                ModelRoute(
+                    ASSISTANT_AGENT_ID,
+                    ASSISTANT_REQUIREMENTS,
+                    (
+                        ConfiguredModel(
+                            "assistant-test",
+                            "test",
+                            model,
+                            ModelCapabilities(
+                                tools=True,
+                                structured_output=True,
+                                context_tokens=16_000,
+                                streaming=True,
+                            ),
+                        ),
+                    ),
+                ),
+            )
+        ),
+        ResourceBudget("assistant", 1),
+    )
+    controller = AssistantController(
+        AssistantService(
+            runtime,
+            build_assistant_agent((Tool(search_content, name="search_content"),)),
+        ),
+        application.repositories.conversations,
+        application.services.understanding,
+        application.services.facade,
+    )
+    conversation_id = "conv_" + "c" * 32
+    events = [
+        event
+        async for event in controller.stream_turn(
+            AssistantTurnRequest(
+                conversation_id=conversation_id, text="find something", locale="en-US"
+            ),
+            "desktop",
+        )
+    ]
+
+    assert any(isinstance(event, ToolStarted) for event in events)
+    assert any(isinstance(event, ToolFinished) for event in events)
+    assert isinstance(events[-1], TurnFinished)
+    assert "private native payload" not in repr(events)
+    messages = await controller.messages(conversation_id, "desktop", 20)
+    assert messages[-1].tool_calls[0].tool_name == "Search Content"
+    assert messages[-1].tool_calls[0].safe_summary == "Search Content completed."
+    assert "private native payload" not in messages[-1].model_dump_json()
+    await application.stop()
+
+
+@pytest.mark.asyncio
 async def test_controller_translates_ai_runtime_failure_to_typed_unavailable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -141,6 +213,7 @@ async def test_controller_translates_ai_runtime_failure_to_typed_unavailable(
                                 tools=True,
                                 structured_output=True,
                                 context_tokens=16_000,
+                                streaming=True,
                             ),
                         ),
                     ),
@@ -151,11 +224,12 @@ async def test_controller_translates_ai_runtime_failure_to_typed_unavailable(
     )
     service = AssistantService(runtime, build_assistant_agent())
 
-    async def failing_turn(command: object, messages: object = ()) -> object:
-        del command, messages
+    async def failing_stream(prepared: object):
+        del prepared
         raise UnavailableError(model_instance="test:model")
+        yield  # pragma: no cover
 
-    monkeypatch.setattr(service, "run_turn", failing_turn)
+    monkeypatch.setattr(service, "stream_turn", failing_stream)
     controller = AssistantController(
         service,
         application.repositories.conversations,

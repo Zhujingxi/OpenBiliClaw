@@ -21,7 +21,7 @@ from .models import (
 )
 
 ASSISTANT_AGENT_ID = AgentId("assistant.dialogue")
-ASSISTANT_REQUIREMENTS = ModelRequirements(tools=True, context_tokens=8_000)
+ASSISTANT_REQUIREMENTS = ModelRequirements(tools=True, context_tokens=8_000, streaming=True)
 ASSISTANT_POLICY = RunPolicy(
     request_limit=4,
     input_tokens_limit=12_000,

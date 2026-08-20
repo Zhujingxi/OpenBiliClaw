@@ -18,6 +18,12 @@ class ConversationRepository(Protocol):
         self, conversation_id: str, scope: ConversationScope
     ) -> Conversation | None: ...
     async def append_message(self, conversation_id: str, message: ConversationMessage) -> bool: ...
+    async def append_turn(
+        self,
+        conversation: Conversation,
+        user_message: ConversationMessage,
+        assistant_message: ConversationMessage,
+    ) -> None: ...
     async def messages(
         self, conversation_id: str, *, limit: int
     ) -> tuple[ConversationMessage, ...]: ...
@@ -76,6 +82,41 @@ class SqliteConversationRepository:
                 ),
             )
         return changed == 1
+
+    async def append_turn(
+        self,
+        conversation: Conversation,
+        user_message: ConversationMessage,
+        assistant_message: ConversationMessage,
+    ) -> None:
+        """Atomically persist one validated complete turn and conversation timestamp."""
+
+        if user_message.role.value != "user" or assistant_message.role.value != "assistant":
+            raise ValueError("append_turn requires user and assistant messages")
+        async with self._database.transaction() as session:
+            for message in (user_message, assistant_message):
+                await session.execute(
+                    "INSERT OR IGNORE INTO assistant_messages("
+                    "message_id,conversation_id,role,content_json,created_at,idempotency_key"
+                    ") VALUES(?,?,?,?,?,?)",
+                    (
+                        message.message_id,
+                        conversation.conversation_id,
+                        message.role.value,
+                        message.model_dump_json(),
+                        message.created_at.isoformat(),
+                        message.idempotency_key,
+                    ),
+                )
+            await session.execute(
+                "UPDATE assistant_conversations SET updated_at=?,conversation_json=? "
+                "WHERE conversation_id=?",
+                (
+                    conversation.updated_at.isoformat(),
+                    conversation.model_dump_json(),
+                    conversation.conversation_id,
+                ),
+            )
 
     async def messages(
         self, conversation_id: str, *, limit: int

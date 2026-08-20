@@ -9,7 +9,7 @@
 - eight native workflow tool contracts selected by intent, connected provider, and skill/capability; global exposure is prohibited;
 - provider-native read tools reuse the bounded Content Integration tool contract; all results are sanitized and clamped before history;
 - `AssistantSkill` contains only a stable ID, tool factory, model requirements, and static instructions; it has no lifecycle, hook, or credential;
-- conversation/message/tool-summary/pending-action/usage models, SQLite restart, retention, scope, and deletion;
+- conversation/message/tool-summary/pending-action/usage models, SQLite restart, retention, scope, and deletion; successful validated turns atomically persist the user message, structured Assistant response, friendly sanitized tool summaries, and conversation timestamp, while reasoning and native tool payloads are never stored;
 - full-window transcript projection that reconstructs only persisted complete user/Assistant turns, estimates instructions, tool definitions, profile, history, and current input, reserves about 20% of the configured model window for output/tool work, and excludes only the oldest complete turns when needed;
 - an approximate context meter reports input-window use and the count of oldest turns excluded; excluded transcript remains persisted and readable, with no automatic summarization;
 - exact-effect/expiry presentation for pending actions and replay-safe deterministic confirmation;
@@ -21,6 +21,10 @@ Provider/tool/profile text is always untrusted data, never instructions. Known s
 ## Model compatibility
 
 PydanticAI output tools enforce Assistant's discriminated output. The output tool's `kind` schema enumerates the four valid discriminators—message, recommendations, clarification, and pending_action—so providers cannot generate arbitrary strings that the validator must reject. Provider protocol and capability routing come from the models.dev catalog or a complete custom declaration; catalog-routed `kimi-for-coding` uses its declared Anthropic protocol. `[model.options].disable_thinking` affects only explicit OpenAI-protocol construction and does not alter Anthropic, Google, or OpenRouter providers.
+
+## Turn lifecycle
+
+The canonical Composition controller emits `turn_started`, textual-provider-reasoning start/delta/finish, sanitized tool start/finish, validated visible response delta, `turn_finished`, or safe `error`. Both streaming HTTP and the existing non-streaming call consume this workflow. Cancelling the consumer propagates directly into `AIRuntime.stream`; there is no stop registry or stop endpoint.
 
 ## Composition
 

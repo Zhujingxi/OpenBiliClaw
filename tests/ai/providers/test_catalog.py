@@ -87,6 +87,7 @@ def test_catalog_resolves_protocol_endpoint_and_capabilities() -> None:
     assert kimi.protocol == "anthropic"
     assert kimi.endpoint == "https://api.kimi.com/coding/v1"
     assert kimi.capabilities.tools
+    assert kimi.capabilities.streaming
     assert kimi.capabilities.reasoning
 
     deepseek = resolve_model(

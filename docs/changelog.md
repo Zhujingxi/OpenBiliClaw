@@ -6,6 +6,8 @@
 
 ## Unreleased
 
+- Added `POST /v1/assistant/turns/stream` with the approved typed SSE lifecycle over the canonical Assistant controller; supported models.dev native protocols declare streaming capability, disconnect cancellation propagates to PydanticAI, non-streaming turns reuse the same workflow, validated turns persist atomically, and only friendly sanitized tool summaries—not reasoning, arguments, payloads, credential references, or opaque IDs—reach events and transcript metadata.
+
 - Replaced Assistant's dormant fixed-count summary compaction contract with full-window context selection: safe complete persisted turns are retained while they fit, about 20% is reserved for output/tools, oldest complete turns alone are excluded, and an approximate usage/exclusion meter is produced without summarization or transcript deletion.
 
 - Added a typed `AIRuntime.stream()` path over PydanticAI native events with textual response/reasoning deltas, payload-free tool lifecycle events, validated terminal results, retries only before visible output, and cancellation-safe resource release; the existing non-streaming runtime remains unchanged.

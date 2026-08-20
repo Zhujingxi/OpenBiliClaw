@@ -30,8 +30,17 @@ from openbiliclaw.assistant.models import (
     AssistantMessage,
     AssistantPendingAction,
     AssistantRecommendationPresentation,
+    AssistantStreamError,
     Conversation,
     ConversationMessage,
+    ReasoningDelta,
+    ReasoningFinished,
+    ReasoningStarted,
+    ResponseDelta,
+    ToolFinished,
+    ToolStarted,
+    TurnFinished,
+    TurnStarted,
 )
 from openbiliclaw.content.integration.identity import ContentRef
 from openbiliclaw.content.integration.manifest import AccessRecipe
@@ -192,6 +201,20 @@ class AssistantTurnRequest(TransportModel):
 
 class AssistantTurnResponse(TransportModel):
     output: AssistantOutput
+
+
+AssistantTurnLifecycleEvent: TypeAlias = Annotated[
+    TurnStarted
+    | ReasoningStarted
+    | ReasoningDelta
+    | ReasoningFinished
+    | ToolStarted
+    | ToolFinished
+    | ResponseDelta
+    | TurnFinished
+    | AssistantStreamError,
+    Field(discriminator="kind"),
+]
 
 
 class ConversationResponse(TransportModel):

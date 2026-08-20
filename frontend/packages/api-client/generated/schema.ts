@@ -38,6 +38,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/assistant/turns/stream": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Stream Turn */
+        post: operations["stream_turn_v1_assistant_turns_stream_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/auth/login": {
         parameters: {
             query?: never;
@@ -2324,6 +2341,119 @@ export interface components {
          * @enum {string}
          */
         VerificationStrength: "none" | "local" | "live";
+        /** AssistantStreamError */
+        AssistantStreamError: {
+            /**
+             * Code
+             * @enum {string}
+             */
+            code: "unavailable" | "temporary_failure";
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "error";
+            /** Message */
+            message: string;
+        };
+        /**
+         * ContextMeter
+         * @description Approximate model-window use for one Assistant turn.
+         */
+        ContextMeter: {
+            /** Approximate Usage Percent */
+            approximate_usage_percent: number;
+            /** Context Window Tokens */
+            context_window_tokens: number;
+            /** Estimated Input Tokens */
+            estimated_input_tokens: number;
+            /** Excluded Oldest Turns */
+            excluded_oldest_turns: number;
+        };
+        /** ReasoningDelta */
+        ReasoningDelta: {
+            /** Delta */
+            delta: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "reasoning_delta";
+        };
+        /** ReasoningFinished */
+        ReasoningFinished: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "reasoning_finished";
+        };
+        /** ReasoningStarted */
+        ReasoningStarted: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "reasoning_started";
+        };
+        /** ResponseDelta */
+        ResponseDelta: {
+            /** Delta */
+            delta: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "response_delta";
+        };
+        /** ToolFinished */
+        ToolFinished: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "tool_finished";
+            /** Name */
+            name: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "succeeded" | "failed";
+            /** Summary */
+            summary: string;
+        };
+        /** ToolStarted */
+        ToolStarted: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "tool_started";
+            /** Name */
+            name: string;
+        };
+        /** TurnFinished */
+        TurnFinished: {
+            context_meter: components["schemas"]["ContextMeter"];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "turn_finished";
+            /** Output */
+            output: components["schemas"]["AssistantMessage"] | components["schemas"]["AssistantRecommendationPresentation"] | components["schemas"]["AssistantClarification"] | components["schemas"]["AssistantPendingAction"];
+            usage: components["schemas"]["TurnUsage"];
+        };
+        /** TurnStarted */
+        TurnStarted: {
+            context_meter: components["schemas"]["ContextMeter"];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "turn_started";
+        };
         /** AssistantEvent */
         AssistantEvent: {
             /** Conversation Id */
@@ -2392,7 +2522,7 @@ export interface operations {
     conversation_v1_assistant_conversations__conversation_id__get: {
         parameters: {
             query?: {
-                message_limit?: number;
+                message_limit?: number | null;
             };
             header: {
                 "X-Device-ID": string;
@@ -2536,6 +2666,131 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AssistantTurnResponse"];
+                };
+            };
+            /** @description unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description not_found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description method_not_allowed */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description validation */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description validation */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description rate_limit */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description temporary_failure */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description temporary_failure */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description unavailable capability or temporary timeout */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    stream_turn_v1_assistant_turns_stream_post: {
+        parameters: {
+            query?: never;
+            header: {
+                "X-Device-ID": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AssistantTurnRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/event-stream": components["schemas"]["TurnStarted"] | components["schemas"]["ReasoningStarted"] | components["schemas"]["ReasoningDelta"] | components["schemas"]["ReasoningFinished"] | components["schemas"]["ToolStarted"] | components["schemas"]["ToolFinished"] | components["schemas"]["ResponseDelta"] | components["schemas"]["TurnFinished"] | components["schemas"]["AssistantStreamError"];
                 };
             };
             /** @description unauthorized */

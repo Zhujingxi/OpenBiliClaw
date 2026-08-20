@@ -59,10 +59,15 @@ from openbiliclaw.assistant.models import (
     AssistantOutput,
     AssistantPendingAction,
     AssistantRecommendationPresentation,
+    ContextMeter,
     Conversation,
     ConversationMessage,
     ConversationScope,
     PendingActionSummary,
+    ResponseDelta,
+    TurnFinished,
+    TurnStarted,
+    TurnUsage,
 )
 from openbiliclaw.content.integration.actions import ActionResult
 from openbiliclaw.content.integration.capabilities import ContentPage, SearchQuery
@@ -328,6 +333,19 @@ class Facade:
                 )
             )
         return AssistantMessage(text="Hello")
+
+    async def assistant_turn_stream(self, request: AssistantTurnInput, device_id: str):
+        output = await self.assistant_turn(request, device_id)
+        meter = ContextMeter(
+            estimated_input_tokens=100,
+            context_window_tokens=1000,
+            approximate_usage_percent=10,
+            excluded_oldest_turns=0,
+        )
+        usage = TurnUsage(request_count=1, input_tokens=100, output_tokens=10)
+        yield TurnStarted(context_meter=meter)
+        yield ResponseDelta(delta="Hello")
+        yield TurnFinished(output=output, context_meter=meter, usage=usage)
 
     async def conversation(self, conversation_id: str, device_id: str) -> Conversation:
         await self._call("conversation")
@@ -656,6 +674,56 @@ async def test_assistant_all_output_variants(kind: str) -> None:
         )
     assert response.status_code == 200
     assert response.json()["output"]["kind"] == kind
+
+
+async def test_assistant_stream_disconnect_closes_owned_generator() -> None:
+    from openbiliclaw.hosts.api.routers.assistant import _turn_event_stream
+
+    closed = asyncio.Event()
+    meter = ContextMeter(
+        estimated_input_tokens=1,
+        context_window_tokens=100,
+        approximate_usage_percent=1,
+        excluded_oldest_turns=0,
+    )
+
+    async def events():
+        try:
+            yield TurnStarted(context_meter=meter)
+            await asyncio.Event().wait()
+        finally:
+            closed.set()
+
+    async def disconnected() -> bool:
+        return True
+
+    assert [
+        item async for item in _turn_event_stream(events(), disconnected, timeout_seconds=30)
+    ] == []
+    assert closed.is_set()
+
+
+async def test_assistant_stream_exposes_typed_sse_lifecycle() -> None:
+    async with client(Facade()) as api:
+        response = await api.post(
+            "/v1/assistant/turns/stream",
+            json={"conversation_id": "conv_" + "a" * 32, "text": "hi"},
+            headers=MUTATION_HEADERS,
+        )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    payloads = [
+        json.loads(line.removeprefix("data: "))
+        for line in response.text.splitlines()
+        if line.startswith("data: ")
+    ]
+    assert [payload["kind"] for payload in payloads] == [
+        "turn_started",
+        "response_delta",
+        "turn_finished",
+    ]
+    assert payloads[0]["context_meter"]["excluded_oldest_turns"] == 0
 
 
 @pytest.mark.parametrize(
