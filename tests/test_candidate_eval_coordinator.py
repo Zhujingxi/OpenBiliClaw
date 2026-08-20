@@ -200,6 +200,34 @@ async def test_coordinator_caps_worker_claims_at_three_batches_and_ninety_raw() 
     await task
 
 
+@pytest.mark.asyncio
+async def test_run_forever_can_be_reentered_after_stop() -> None:
+    pipeline = _FakeStagedPipeline(candidate_count=90)
+    coordinator = _coordinator(pipeline)
+
+    first = asyncio.create_task(coordinator.run_forever())
+    coordinator.notify("first-run")
+    await pipeline.wait_for_started(3)
+    assert len(pipeline.started) == 3
+
+    await coordinator.stop()
+    await first
+    assert coordinator._stopping is True  # noqa: SLF001
+
+    # Re-entering the same coordinator after a stop must self-heal instead of
+    # exiting immediately at the first ``while not self._stopping`` check.
+    second = asyncio.create_task(coordinator.run_forever())
+    coordinator.notify("second-run")
+    await pipeline.wait_for_started(6)
+
+    assert len(pipeline.started) == 6
+    assert coordinator._stopping is False  # noqa: SLF001
+    assert coordinator.state != "stopping"
+
+    await coordinator.stop()
+    await second
+
+
 def test_projected_inventory_excludes_unscored_raw() -> None:
     snapshot = CandidateEvalSnapshot(
         available=2,
