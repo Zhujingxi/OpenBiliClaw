@@ -160,8 +160,8 @@ describe("web view behavior", () => {
         .findAll(".source-status")
         .map((item) => [item.get("strong").text(), item.get("span").text()]),
     ).toEqual([
-      ["demo", "disconnected"],
-      ["other", "disconnected"],
+      ["demo", "Disconnected"],
+      ["other", "Disconnected"],
     ]);
     await wrapper.get("#provider-id").setValue("demo");
     await wrapper.get("form").trigger("submit");
@@ -177,8 +177,8 @@ describe("web view behavior", () => {
         .findAll(".source-status")
         .map((item) => [item.get("strong").text(), item.get("span").text()]),
     ).toEqual([
-      ["other", "disconnected"],
-      ["demo", "connected"],
+      ["other", "Disconnected"],
+      ["demo", "Connected"],
     ]);
   });
 
@@ -201,7 +201,7 @@ describe("web view behavior", () => {
     );
     expect(wrapper.get('[role="alert"]').text()).toContain("Try again");
     expect(wrapper.get(".source-status strong").text()).toBe("demo");
-    expect(wrapper.get(".source-status span").text()).toBe("disconnected");
+    expect(wrapper.get(".source-status span").text()).toBe("Disconnected");
   });
 
   it("turns empty product states into actionable guidance", async () => {
@@ -530,14 +530,14 @@ describe("web view behavior", () => {
         .findAll("li")
         .some(
           (item) =>
-            item.find("strong").text() === "user" &&
+            item.find("strong").text() === "You" &&
             item.find(".message-content").text() === "hello",
         ),
     ).toBe(true);
     expect(wrapper.text()).not.toContain("**answer**");
     expect(
       wrapper.findAll("li").map((item) => item.find("strong").text()),
-    ).toEqual(["user", "user", "assistant"]);
+    ).toEqual(["You", "You", "Assistant"]);
   });
 
   it("keeps assistant turns and attaches actionable capability errors", async () => {
@@ -607,7 +607,7 @@ describe("web view behavior", () => {
     expect(wrapper.find('[role="tab"]').exists()).toBe(false);
     expect(
       wrapper.findAll(".provider-status").map((status) => status.text()),
-    ).toEqual(["readyconnected", "setupdisconnected", "brokenerror"]);
+    ).toEqual(["readyConnected", "setupDisconnected", "brokenError"]);
     expect(wrapper.findAll(".status-dot").map((dot) => dot.classes())).toEqual([
       ["status-dot", "status-connected"],
       ["status-dot", "status-disconnected"],

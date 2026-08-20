@@ -76,6 +76,9 @@ def build_extension_tree(root: Path = ROOT, *, firefox: bool) -> Path:
     shutil.copy2(popup_source, popup_target)
     shutil.rmtree(output / "src")
     shutil.copytree(extension / "icons", output / "icons")
+    locales = extension / "_locales"
+    if locales.is_dir():
+        shutil.copytree(locales, output / "_locales")
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     missing = verify_manifest_assets(output)
     if missing:

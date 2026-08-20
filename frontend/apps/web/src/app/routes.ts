@@ -28,9 +28,11 @@ export function isKnownRouteHash(hash: string): boolean {
   );
 }
 
-export function routeLabel(route: RouteName): string {
-  if (route === "login") return "Login";
-  return routes.find(([name]) => name === route)?.[1] ?? "Recommendations";
+export function routeTranslationKey(route: RouteName): string {
+  if (route === "login") return "nav.login";
+  if (route === "recommendations") return "nav.recommendations";
+  if (route === "profile") return "profile.title";
+  return `nav.${route}`;
 }
 
 export function routeParameter(hash: string): string | undefined {

@@ -356,7 +356,13 @@ describe("durable concern stores", () => {
     await content.search(api({ search: aborted }), "demo", "q");
     expect(content.searchPhase).toBe("loading");
     const assistant = useAssistantStore();
-    await assistant.send(api({ assistantTurn: aborted }), "conv", "d", "q");
+    await assistant.send(
+      api({ assistantTurn: aborted }),
+      "conv",
+      "d",
+      "q",
+      "en",
+    );
     expect(assistant.phase).toBe("loading");
     const profile = useProfileStore();
     await profile.load(api({ profile: aborted }));
@@ -386,10 +392,13 @@ describe("durable concern stores", () => {
     expect(profile.result?.profile.preference_summary).toEqual(["server"]);
   });
 
-  it("appends submitted assistant messages and responses without replacing earlier turns", async () => {
+  it("appends assistant turns and passes the selected locale verbatim", async () => {
     const store = useAssistantStore();
-    await store.send(api(), "conv", "device", "hello");
-    await store.send(api(), "conv", "device", "again");
+    const assistantTurn = vi.fn(api().assistantTurn);
+    const localizedApi = api({ assistantTurn });
+    await store.send(localizedApi, "conv", "device", "hello", "zh-CN");
+    await store.send(localizedApi, "conv", "device", "again", "zh-CN");
+    expect(assistantTurn.mock.calls[0]?.[0]).toMatchObject({ locale: "zh-CN" });
     expect(
       store.messages.map(({ role, content }) => ({ role, content })),
     ).toEqual([

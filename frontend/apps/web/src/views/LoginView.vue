@@ -2,9 +2,11 @@
 import { inject, ref } from "vue";
 import type { WebApi } from "../services/api";
 import { useAuthStore } from "../stores/auth";
+import { useI18n } from "vue-i18n";
 
 const api = inject<WebApi>("api");
 if (!api) throw new Error("api dependency missing");
+const { t } = useI18n();
 const auth = useAuthStore();
 const password = ref("");
 
@@ -15,10 +17,10 @@ const submit = async (): Promise<void> => {
 
 <template>
   <section aria-labelledby="login-title">
-    <h1 id="login-title" tabindex="-1">Sign in</h1>
-    <p>Enter the password configured for this local OpenBiliClaw instance.</p>
+    <h1 id="login-title" tabindex="-1">{{ t("login.title") }}</h1>
+    <p>{{ t("login.intro") }}</p>
     <form @submit.prevent="submit">
-      <label for="password">Password</label>
+      <label for="password">{{ t("login.password") }}</label>
       <input
         id="password"
         v-model="password"
@@ -26,9 +28,11 @@ const submit = async (): Promise<void> => {
         required
         autocomplete="current-password"
         :disabled="auth.loading"
+        aria-describedby="password-help"
       />
+      <p id="password-help" class="field-hint">{{ t("login.passwordHelp") }}</p>
       <button type="submit" :disabled="auth.loading">
-        {{ auth.loading ? "Signing in…" : "Sign in" }}
+        {{ auth.loading ? t("login.signingIn") : t("login.submit") }}
       </button>
       <p v-if="auth.error" role="alert">{{ auth.error }}</p>
     </form>

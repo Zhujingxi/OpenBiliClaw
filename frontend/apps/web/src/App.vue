@@ -11,7 +11,7 @@ import AppNavigation from "./components/AppNavigation.vue";
 import {
   isKnownRouteHash,
   routeFromHash,
-  routeLabel,
+  routeTranslationKey,
   type RouteName,
 } from "./app/routes";
 import RecommendationsView from "./views/RecommendationsView.vue";
@@ -26,10 +26,14 @@ import RuntimeView from "./views/RuntimeView.vue";
 import LoginView from "./views/LoginView.vue";
 import { usePreferencesStore } from "./stores/preferences";
 import { useAuthStore } from "./stores/auth";
+import { useI18n } from "vue-i18n";
 
+const { t, locale } = useI18n();
 const current = ref<RouteName>(routeFromHash(location.hash));
 const unknownRoute = ref(!isKnownRouteHash(location.hash));
-document.title = `${routeLabel(current.value)} · OpenBiliClaw`;
+document.title = t("app.title", {
+  page: t(routeTranslationKey(current.value)),
+});
 const update = (): void => {
   current.value = routeFromHash(location.hash);
   unknownRoute.value = !isKnownRouteHash(location.hash);
@@ -54,8 +58,8 @@ const auth = useAuthStore();
 const goBack = (): void => history.back();
 const focusMain = (): void =>
   document.querySelector<HTMLElement>("main")?.focus();
-watch(current, async (route) => {
-  document.title = `${routeLabel(route)} · OpenBiliClaw`;
+watch([current, locale], async ([route]) => {
+  document.title = t("app.title", { page: t(routeTranslationKey(route)) });
   if (auth.status === "required" && route !== "login") {
     location.hash = "#/login";
     return;
@@ -81,40 +85,36 @@ watch(current, async (route) => {
     @keydown.alt.left.prevent="goBack"
   >
     <a class="skip-link" href="#main" @click.prevent="focusMain">
-      Skip to content
+      {{ t("app.skip") }}
     </a>
     <div
       class="responsive-layout"
       :class="{ 'login-layout': current === 'login' }"
     >
       <aside v-if="current !== 'login'" class="sidebar">
-        <a
-          class="brand"
-          href="#/recommendations"
-          aria-label="OpenBiliClaw home"
-        >
+        <a class="brand" href="#/recommendations" :aria-label="t('app.home')">
           <span class="brand-mark" aria-hidden="true">O</span>
           <span>
             <strong>OpenBiliClaw</strong>
-            <small>Personal discovery</small>
+            <small>{{ t("app.tagline") }}</small>
           </span>
         </a>
         <AppNavigation :current="current" />
         <p class="local-note">
-          <span aria-hidden="true"></span> Local-first workspace
+          <span aria-hidden="true"></span> {{ t("app.local") }}
         </p>
       </aside>
       <div class="workspace">
         <header v-if="current !== 'login'" class="topbar">
           <div>
-            <span class="topbar-kicker">Workspace</span>
-            <strong>{{ routeLabel(current) }}</strong>
+            <span class="topbar-kicker">{{ t("nav.workspace") }}</span>
+            <strong>{{ t(routeTranslationKey(current)) }}</strong>
           </div>
-          <a class="topbar-action" href="#/settings">Settings</a>
+          <a class="topbar-action" href="#/settings">{{ t("app.settings") }}</a>
         </header>
         <main id="main" tabindex="-1">
           <p v-if="unknownRoute" class="route-notice" role="status">
-            Page not found; showing For you.
+            {{ t("app.notFound") }}
           </p>
           <component :is="view" />
         </main>

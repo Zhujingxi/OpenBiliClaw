@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { storeToRefs } from "pinia";
 import { ref } from "vue";
+import { useI18n } from "vue-i18n";
 import {
   chromeArtifacts,
   connectFromRecipe,
@@ -10,11 +11,12 @@ import {
 } from "./access-flow";
 import { useConnectionStore } from "./connection-store";
 
+const { t, locale } = useI18n();
 const store = useConnectionStore();
 store.hydrate();
 const { backendUrl, deviceToken, state, error } = storeToRefs(store);
 const draftUrl = ref(backendUrl.value);
-const draftToken = ref(deviceToken.value);
+const draftToken = ref("");
 const formError = ref<string>();
 const recipes = ref<ProviderRecipe[]>([]);
 const accessError = ref<string>();
@@ -27,15 +29,20 @@ async function refreshRecipes(): Promise<void> {
 
 function save(): void {
   try {
-    store.configure(draftUrl.value, draftToken.value);
+    store.configure(draftUrl.value, draftToken.value || deviceToken.value);
+    draftToken.value = "";
     formError.value = undefined;
     void store
       .check()
       .then(refreshRecipes)
       .catch(() => undefined);
   } catch (caught: unknown) {
-    formError.value =
-      caught instanceof Error ? caught.message : "Invalid connection settings";
+    const message = caught instanceof Error ? caught.message : "";
+    formError.value = message.includes("loopback")
+      ? t("invalidUrl")
+      : message.includes("token")
+        ? t("invalidToken")
+        : t("invalidSettings");
   }
 }
 
@@ -50,10 +57,10 @@ async function connect(provider: ProviderRecipe): Promise<void> {
       provider,
       chromeArtifacts,
     );
-    accessStatus.value = `${provider.providerId} connected`;
+    accessStatus.value = t("connected", { provider: provider.providerId });
   } catch (caught: unknown) {
     accessError.value =
-      caught instanceof Error ? caught.message : "Connection failed";
+      caught instanceof Error ? caught.message : t("connectionFailed");
   } finally {
     connecting.value = undefined;
   }
@@ -63,39 +70,60 @@ async function connect(provider: ProviderRecipe): Promise<void> {
 <template>
   <main aria-labelledby="extension-title" class="shell">
     <header>
-      <h1 id="extension-title">OpenBiliClaw</h1>
-      <p>Local recommendation companion</p>
+      <div>
+        <h1 id="extension-title">{{ t("title") }}</h1>
+        <p>{{ t("tagline") }}</p>
+      </div>
+      <label class="language-control">
+        <span>{{ t("locale.label") }}</span>
+        <select v-model="locale" name="locale" :aria-label="t('locale.label')">
+          <option value="en">{{ t("locale.en") }}</option>
+          <option value="zh-CN">{{ t("locale.zhCN") }}</option>
+          <option value="zh-TW">{{ t("locale.zhTW") }}</option>
+        </select>
+      </label>
     </header>
     <section aria-labelledby="connection-title">
-      <h2 id="connection-title">Backend connection</h2>
+      <h2 id="connection-title">{{ t("connection") }}</h2>
       <form @submit.prevent="save">
         <label>
-          Backend URL
+          {{ t("backendUrl") }}
           <input
             v-model="draftUrl"
             name="backendUrl"
-            aria-label="Backend URL"
+            :aria-label="t('backendUrl')"
             inputmode="url"
+            type="url"
+            required
             autocomplete="url"
+            :placeholder="t('backendPlaceholder')"
+            aria-describedby="backend-help"
           />
+          <small id="backend-help">{{ t("backendHelp") }}</small>
         </label>
         <label>
-          Extension token
+          {{ t("token") }}
           <input
             v-model="draftToken"
             name="deviceToken"
-            aria-label="Extension token"
+            :aria-label="t('token')"
             type="password"
-            autocomplete="off"
+            :required="!deviceToken"
+            autocomplete="new-password"
+            :placeholder="t('tokenPlaceholder')"
+            aria-describedby="token-help"
           />
+          <small id="token-help">{{ t("tokenHelp") }}</small>
         </label>
-        <button type="submit">Save and connect</button>
+        <button type="submit">{{ t("save") }}</button>
       </form>
-      <p role="status" aria-live="polite">Status: {{ state }}</p>
+      <p role="status" aria-live="polite">
+        {{ t("status", { state: t(`state.${state}`) }) }}
+      </p>
       <p v-if="formError ?? error" role="alert">{{ formError ?? error }}</p>
     </section>
     <section v-if="recipes.length" aria-labelledby="provider-access-title">
-      <h2 id="provider-access-title">Provider access</h2>
+      <h2 id="provider-access-title">{{ t("access") }}</h2>
       <article v-for="provider in recipes" :key="provider.providerId">
         <strong>{{ provider.providerId }}</strong>
         <button
@@ -104,14 +132,16 @@ async function connect(provider: ProviderRecipe): Promise<void> {
           class="secondary"
           @click="openWarmup(provider.recipe, chromeArtifacts)"
         >
-          Open login
+          {{ t("openLogin") }}
         </button>
         <button
           type="button"
           :disabled="connecting === provider.providerId"
           @click="connect(provider)"
         >
-          {{ connecting === provider.providerId ? "Connecting…" : "Connect" }}
+          {{
+            connecting === provider.providerId ? t("connecting") : t("connect")
+          }}
         </button>
       </article>
       <p v-if="accessStatus" role="status" aria-live="polite">

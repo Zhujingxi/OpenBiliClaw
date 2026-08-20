@@ -1,7 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "OpenBiliClaw",
-  "description": "跨平台内容发现 AI Agent — 画像、推荐、反馈与聊天",
+  "name": "__MSG_extensionName__",
+  "description": "__MSG_extensionDescription__",
+  "default_locale": "en",
   "browser_specific_settings": {
     "gecko": {
       "id": "openbiliclaw-firefox@whiteguo233.github.io",
@@ -38,7 +39,7 @@
     "default_popup": "popup/index.html"
   },
   "sidebar_action": {
-    "default_title": "OpenBiliClaw",
+    "default_title": "__MSG_extensionName__",
     "default_panel": "popup/index.html",
     "default_icon": {
       "16": "icons/icon16.png",

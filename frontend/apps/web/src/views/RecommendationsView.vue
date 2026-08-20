@@ -4,9 +4,28 @@ import AsyncState from "../components/AsyncState.vue";
 import { inject, onBeforeUnmount, onMounted, type Directive } from "vue";
 import { useRecommendationsStore } from "../stores/recommendations";
 import type { WebApi } from "../services/api";
+import { useI18n } from "vue-i18n";
 const api = inject<WebApi>("api");
 if (api === undefined) throw new Error("WebApi not provided");
 const store = useRecommendationsStore();
+const { t, te, locale } = useI18n();
+const stateLabel = (value: string | undefined): string => {
+  if (!value) return "";
+  const key = `common.states.${value}`;
+  return te(key) ? t(key) : value;
+};
+const cardLabels = () => ({
+  unavailable: t("cards.unavailable"),
+  providerUnavailable: t("cards.providerUnavailable"),
+  provider: t("cards.provider"),
+  feedbackActions: t("cards.feedbackActions"),
+  like: t("cards.like"),
+  likeAria: t("cards.likeAria"),
+  dismiss: t("cards.dismiss"),
+  dismissAria: t("cards.dismissAria"),
+  unsupported: t("cards.unsupported"),
+  locale: locale.value,
+});
 const observers = new WeakMap<Element, IntersectionObserver>();
 const vExposed: Directive<
   HTMLElement,
@@ -35,11 +54,9 @@ onBeforeUnmount(store.cancel);
   <section>
     <div class="page-heading">
       <div class="page-heading-copy">
-        <p class="eyebrow">Personal feed</p>
-        <h1 tabindex="-1">For you</h1>
-        <p>
-          A focused mix shaped by your sources, profile, and recent feedback.
-        </p>
+        <p class="eyebrow">{{ t("recommendations.eyebrow") }}</p>
+        <h1 tabindex="-1">{{ t("recommendations.title") }}</h1>
+        <p>{{ t("recommendations.intro") }}</p>
       </div>
       <button
         type="button"
@@ -47,19 +64,24 @@ onBeforeUnmount(store.cancel);
         :disabled="store.phase === 'loading'"
         @click="store.refresh(api)"
       >
-        {{ store.phase === "loading" ? "Refreshing…" : "Refresh feed" }}
+        {{
+          store.phase === "loading"
+            ? t("recommendations.refreshing")
+            : t("recommendations.refresh")
+        }}
       </button>
     </div>
     <AsyncState :phase="store.phase" :error="store.error">
       <template #empty>
-        No recommendations are available yet.
-        <a href="#/connect">Connect a source</a>
-        to start building your feed.
+        {{ t("recommendations.empty") }}
+        <a href="#/connect">{{ t("common.connectSource") }}</a>
+        {{ t("recommendations.emptyHelp") }}
       </template>
       <ol class="card-list">
         <li v-for="card in store.cards" :key="card.shownId" v-exposed="card">
           <CardRenderer
             :card="card"
+            :labels="cardLabels()"
             @like="store.like(api, $event)"
             @dismiss="store.dismiss(api, $event)"
           />
@@ -67,7 +89,11 @@ onBeforeUnmount(store.cancel);
             v-if="card.shownId && store.feedbackState[card.shownId]"
             role="status"
           >
-            Feedback recorded: {{ store.feedbackState[card.shownId] }}
+            {{
+              t("recommendations.feedback", {
+                state: stateLabel(store.feedbackState[card.shownId]),
+              })
+            }}
           </p>
           <p
             v-if="card.shownId && store.feedbackError[card.shownId]"

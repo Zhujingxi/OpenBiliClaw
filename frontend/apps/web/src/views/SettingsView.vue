@@ -3,10 +3,14 @@ import { computed, inject, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { WebApi } from "../services/api";
 import { useModelsStore } from "../stores/models";
 import { usePreferencesStore } from "../stores/preferences";
+import { useI18n } from "vue-i18n";
+import { useLocale } from "../i18n";
 
 const injectedApi = inject<WebApi>("api");
 if (injectedApi === undefined) throw new Error("WebApi was not provided");
 const api: WebApi = injectedApi;
+const { t } = useI18n();
+const { locale } = useLocale();
 const preferences = usePreferencesStore();
 const models = useModelsStore();
 const query = ref("");
@@ -112,25 +116,25 @@ onBeforeUnmount(() => models.cancel());
   <section class="settings-page">
     <div class="page-heading">
       <div class="page-heading-copy">
-        <p class="eyebrow">Configuration</p>
-        <h1 tabindex="-1">Settings</h1>
+        <p class="eyebrow">{{ t("settings.eyebrow") }}</p>
+        <h1 tabindex="-1">{{ t("settings.title") }}</h1>
         <p>
-          Choose your AI runtime, tune the interface, and see what is active.
+          {{ t("settings.intro") }}
         </p>
       </div>
       <a class="button-secondary settings-link" href="#/providers">
-        Manage content sources
+        {{ t("settings.manageSources") }}
       </a>
     </div>
 
     <p v-if="models.phase === 'loading'" aria-live="polite">
-      Loading model catalog…
+      {{ t("settings.loadingCatalog") }}
     </p>
     <p v-else-if="models.phase === 'error'" role="alert">
       {{ models.error }}
     </p>
     <p v-else-if="models.phase === 'empty'" aria-live="polite">
-      No catalog providers are available.
+      {{ t("settings.noCatalog") }}
     </p>
 
     <div v-else-if="models.phase === 'success'" class="settings-layout">
@@ -141,8 +145,10 @@ onBeforeUnmount(() => models.cancel());
       >
         <div class="surface-card-header">
           <div>
-            <p class="eyebrow">In use</p>
-            <h2 id="current-model-heading">Active runtime</h2>
+            <p class="eyebrow">{{ t("settings.inUse") }}</p>
+            <h2 id="current-model-heading">
+              {{ t("settings.activeRuntime") }}
+            </h2>
           </div>
           <span
             class="status-badge"
@@ -154,56 +160,67 @@ onBeforeUnmount(() => models.cancel());
           >
             {{
               models.current.current.model.secret_configured
-                ? "Ready"
-                : "Key needed"
+                ? t("settings.ready")
+                : t("settings.keyNeeded")
             }}
           </span>
         </div>
         <dl>
-          <dt>Model provider</dt>
+          <dt>{{ t("settings.modelProvider") }}</dt>
           <dd>{{ models.current.current.model.provider }}</dd>
-          <dt>Model</dt>
+          <dt>{{ t("settings.model") }}</dt>
           <dd>
-            {{ models.current.current.model.model_name || "Not configured" }}
+            {{
+              models.current.current.model.model_name ||
+              t("common.notConfigured")
+            }}
           </dd>
-          <dt>Model credential</dt>
+          <dt>{{ t("settings.modelCredential") }}</dt>
           <dd>
             {{
               models.current.current.model.secret_configured
-                ? "Configured"
-                : "Not configured"
+                ? t("common.configured")
+                : t("common.notConfigured")
             }}
           </dd>
-          <dt>Restart required</dt>
-          <dd>{{ models.current.restart_required ? "Yes" : "No" }}</dd>
-          <dt>Reloaded in this process</dt>
-          <dd>{{ models.current.reloaded ? "Yes" : "No" }}</dd>
+          <dt>{{ t("settings.restartRequired") }}</dt>
+          <dd>
+            {{
+              t(models.current.restart_required ? "common.yes" : "common.no")
+            }}
+          </dd>
+          <dt>{{ t("settings.reloaded") }}</dt>
+          <dd>{{ t(models.current.reloaded ? "common.yes" : "common.no") }}</dd>
         </dl>
         <div class="embedding-summary">
-          <p class="eyebrow">Embedding</p>
+          <p class="eyebrow">{{ t("settings.embedding") }}</p>
           <dl>
-            <dt>Provider</dt>
+            <dt>{{ t("settings.provider") }}</dt>
             <dd>
               {{
-                models.current.current.embedding.provider || "Not configured"
+                models.current.current.embedding.provider ||
+                t("common.notConfigured")
               }}
             </dd>
-            <dt>Model</dt>
+            <dt>{{ t("settings.model") }}</dt>
             <dd>
               {{
-                models.current.current.embedding.model_name || "Not configured"
+                models.current.current.embedding.model_name ||
+                t("common.notConfigured")
               }}
             </dd>
-            <dt>Endpoint</dt>
+            <dt>{{ t("settings.endpoint") }}</dt>
             <dd>
-              {{ models.current.current.embedding.endpoint || "Default" }}
+              {{
+                models.current.current.embedding.endpoint || t("common.default")
+              }}
             </dd>
-            <dt>Credential</dt>
+            <dt>{{ t("settings.credential") }}</dt>
             <dd>
               {{
                 models.current.current.embedding.secret_configured
-                  ? "Configured"
-                  : "Not configured"
+                  ? t("common.configured")
+                  : t("common.notConfigured")
               }}
             </dd>
           </dl>
@@ -213,43 +230,49 @@ onBeforeUnmount(() => models.cancel());
       <form class="surface-card model-form" @submit.prevent="save">
         <div class="surface-card-header">
           <div>
-            <p class="eyebrow">AI provider</p>
-            <h2>Provider & model</h2>
-            <p>Browse the catalog or connect any compatible endpoint.</p>
+            <p class="eyebrow">{{ t("settings.aiProvider") }}</p>
+            <h2>{{ t("settings.providerModel") }}</h2>
+            <p>{{ t("settings.providerIntro") }}</p>
           </div>
         </div>
 
         <details class="settings-section provider-browser" open>
           <summary class="settings-section-summary">
             <span>
-              <strong>Choose provider</strong>
-              <small>Search the catalog or use a custom endpoint.</small>
+              <strong>{{ t("settings.chooseProvider") }}</strong>
+              <small>{{ t("settings.chooseProviderHelp") }}</small>
             </span>
-            <span class="section-count"
-              >{{ filteredProviders.length }} shown</span
-            >
+            <span class="section-count">{{
+              t("settings.shown", { count: filteredProviders.length })
+            }}</span>
           </summary>
           <div class="settings-section-content">
             <div class="model-toolbar">
               <div class="field">
-                <label for="model-search">Search providers and models</label>
+                <label for="model-search">{{
+                  t("settings.searchModels")
+                }}</label>
                 <input
                   id="model-search"
                   v-model="query"
                   type="search"
-                  placeholder="Try OpenAI, Claude, DeepSeek…"
+                  :placeholder="t('settings.searchPlaceholder')"
+                  aria-describedby="model-search-help"
                 />
+                <p id="model-search-help" class="field-hint">
+                  {{ t("settings.searchHelp") }}
+                </p>
               </div>
               <label class="check-row custom-toggle">
                 <input v-model="custom" type="checkbox" />
-                Custom provider
+                {{ t("settings.customProvider") }}
               </label>
             </div>
 
             <div
               v-if="!custom"
               class="provider-gallery"
-              aria-label="Model providers"
+              :aria-label="t('settings.modelProviders')"
             >
               <button
                 v-for="provider in filteredProviders"
@@ -265,10 +288,12 @@ onBeforeUnmount(() => models.cancel());
                 </span>
                 <span>
                   <strong>{{ provider.name }}</strong>
-                  <small
-                    >{{ provider.models.length }} models ·
-                    {{ provider.protocol }}</small
-                  >
+                  <small>{{
+                    t("settings.modelsCount", {
+                      count: provider.models.length,
+                      protocol: provider.protocol,
+                    })
+                  }}</small>
                 </span>
                 <span
                   v-if="provider.id === providerId"
@@ -283,18 +308,20 @@ onBeforeUnmount(() => models.cancel());
 
         <div class="form-grid configuration-fields">
           <div class="configuration-heading field-wide">
-            <strong>Configure model</strong>
+            <strong>{{ t("settings.configureModel") }}</strong>
             <small>{{
               custom
-                ? "Custom endpoint"
-                : selectedProvider?.name || "Select a provider"
+                ? t("settings.customEndpoint")
+                : selectedProvider?.name || t("settings.selectProvider")
             }}</small>
           </div>
           <template v-if="!custom">
             <div class="field">
-              <label for="model-provider">Provider</label>
+              <label for="model-provider">{{ t("settings.provider") }}</label>
               <select id="model-provider" v-model="providerId" required>
-                <option value="" disabled>Select a provider</option>
+                <option value="" disabled>
+                  {{ t("settings.selectProvider") }}
+                </option>
                 <option
                   v-for="provider in filteredProviders"
                   :key="provider.id"
@@ -307,18 +334,28 @@ onBeforeUnmount(() => models.cancel());
           </template>
           <template v-else>
             <div class="field">
-              <label for="custom-provider">Custom provider ID</label>
+              <label for="custom-provider">{{
+                t("settings.customProviderId")
+              }}</label>
               <input
                 id="custom-provider"
                 v-model="customProvider"
                 required
                 placeholder="my-provider"
+                aria-describedby="custom-provider-help"
               />
+              <p id="custom-provider-help" class="field-hint">
+                {{ t("settings.customProviderHelp") }}
+              </p>
             </div>
             <div class="field">
-              <label for="custom-protocol">API protocol</label>
+              <label for="custom-protocol">{{
+                t("settings.apiProtocol")
+              }}</label>
               <select id="custom-protocol" v-model="customProtocol">
-                <option value="openai">OpenAI compatible</option>
+                <option value="openai">
+                  {{ t("settings.openaiCompatible") }}
+                </option>
                 <option value="anthropic">Anthropic</option>
                 <option value="google">Google</option>
                 <option value="openrouter">OpenRouter</option>
@@ -327,16 +364,17 @@ onBeforeUnmount(() => models.cancel());
           </template>
 
           <div class="field">
-            <label for="model-name">Model</label>
+            <label for="model-name">{{ t("settings.model") }}</label>
             <input
               v-if="custom"
               id="model-name"
               v-model="modelName"
               required
-              placeholder="Model ID"
+              :placeholder="t('settings.modelId')"
+              aria-describedby="model-name-help"
             />
             <select v-else id="model-name" v-model="modelName" required>
-              <option value="" disabled>Select a model</option>
+              <option value="" disabled>{{ t("settings.selectModel") }}</option>
               <option
                 v-for="model in selectedProvider?.models ?? []"
                 :key="model.id"
@@ -345,11 +383,16 @@ onBeforeUnmount(() => models.cancel());
                 {{ model.name }} ({{ model.id }})
               </option>
             </select>
+            <p id="model-name-help" class="field-hint">
+              {{ t("settings.modelHelp") }}
+            </p>
           </div>
 
           <div class="field">
             <label for="model-endpoint">
-              {{ custom ? "Endpoint" : "Endpoint override" }}
+              {{
+                custom ? t("settings.endpoint") : t("settings.endpointOverride")
+              }}
             </label>
             <input
               id="model-endpoint"
@@ -357,13 +400,19 @@ onBeforeUnmount(() => models.cancel());
               type="url"
               :required="custom"
               :placeholder="
-                custom ? 'https://api.example.com' : 'Use catalog default'
+                custom
+                  ? t('settings.endpointPlaceholder')
+                  : t('settings.catalogDefault')
               "
+              aria-describedby="model-endpoint-help"
             />
+            <p id="model-endpoint-help" class="field-hint">
+              {{ t("settings.endpointHelp") }}
+            </p>
           </div>
 
           <div class="field field-wide">
-            <label for="model-api-key">API key</label>
+            <label for="model-api-key">{{ t("settings.apiKey") }}</label>
             <input
               id="model-api-key"
               v-model="apiKey"
@@ -371,46 +420,53 @@ onBeforeUnmount(() => models.cancel());
               autocomplete="new-password"
               :placeholder="
                 models.current?.current.model.secret_configured
-                  ? 'Configured — leave blank to keep'
-                  : 'Paste a write-only API key'
+                  ? t('settings.keyConfigured')
+                  : t('settings.keyPlaceholder')
               "
             />
             <p class="field-hint">
-              Stored in the local credential vault and never returned to this
-              page.
+              {{ t("settings.keyHelp") }}
             </p>
           </div>
 
           <fieldset v-if="custom" class="capabilities">
-            <legend>Provider capabilities</legend>
+            <legend>{{ t("settings.capabilities") }}</legend>
             <div class="field">
-              <label for="custom-context">Context token limit</label>
+              <label for="custom-context">{{
+                t("settings.contextLimit")
+              }}</label>
               <input
                 id="custom-context"
                 v-model.number="customContextTokens"
                 type="number"
                 min="0"
                 required
+                aria-describedby="custom-context-help"
               />
+              <p id="custom-context-help" class="field-hint">
+                {{ t("settings.contextHelp") }}
+              </p>
             </div>
             <div class="capability-options">
               <label
-                ><input v-model="customTools" type="checkbox" /> Tools</label
+                ><input v-model="customTools" type="checkbox" />
+                {{ t("settings.tools") }}</label
               >
               <label>
                 <input v-model="customStructuredOutput" type="checkbox" />
-                Structured output
+                {{ t("settings.structured") }}
               </label>
               <label
-                ><input v-model="customVision" type="checkbox" /> Vision</label
+                ><input v-model="customVision" type="checkbox" />
+                {{ t("settings.vision") }}</label
               >
               <label
                 ><input v-model="customStreaming" type="checkbox" />
-                Streaming</label
+                {{ t("settings.streaming") }}</label
               >
               <label
                 ><input v-model="customReasoning" type="checkbox" />
-                Reasoning</label
+                {{ t("settings.reasoning") }}</label
               >
             </div>
           </fieldset>
@@ -419,24 +475,29 @@ onBeforeUnmount(() => models.cancel());
             v-if="selectedProvider && !custom"
             class="model-metadata field-wide"
           >
-            <strong>{{ selectedProvider.protocol }}</strong> protocol · expected
-            key:
-            {{ selectedProvider.env.join(", ") || "none" }}
+            {{
+              t("settings.expectedKey", {
+                protocol: selectedProvider.protocol,
+                keys: selectedProvider.env.join(", ") || t("settings.none"),
+              })
+            }}
           </p>
           <button type="submit" :disabled="models.savePhase === 'loading'">
             {{
-              models.savePhase === "loading" ? "Saving…" : "Save and use model"
+              models.savePhase === "loading"
+                ? t("settings.saving")
+                : t("settings.save")
             }}
           </button>
           <p v-if="models.savePhase === 'error'" role="alert">
             {{ models.error }}
           </p>
           <p v-if="saved" role="status" aria-live="polite">
-            Saved.
+            {{ t("settings.saved") }}
             {{
               models.current?.restart_required
-                ? "Restart OpenBiliClaw to apply this model."
-                : "The model is active."
+                ? t("settings.restart")
+                : t("settings.active")
             }}
           </p>
         </div>
@@ -446,22 +507,37 @@ onBeforeUnmount(() => models.cancel());
     <section aria-labelledby="display-settings-heading" class="appearance-card">
       <div class="surface-card-header">
         <div>
-          <p class="eyebrow">Interface</p>
-          <h2 id="display-settings-heading">Appearance</h2>
-          <p>Keep the workspace comfortable without hiding information.</p>
+          <p class="eyebrow">{{ t("settings.interface") }}</p>
+          <h2 id="display-settings-heading">{{ t("settings.appearance") }}</h2>
+          <p>{{ t("settings.appearanceIntro") }}</p>
         </div>
       </div>
       <div class="appearance-controls">
         <div class="field">
-          <label for="density">Display density</label>
+          <label for="language">{{ t("settings.language") }}</label>
+          <select
+            id="language"
+            v-model="locale"
+            aria-describedby="language-help"
+          >
+            <option value="en">{{ t("locale.en") }}</option>
+            <option value="zh-CN">{{ t("locale.zhCN") }}</option>
+            <option value="zh-TW">{{ t("locale.zhTW") }}</option>
+          </select>
+          <p id="language-help" class="field-hint">
+            {{ t("settings.languageHelp") }}
+          </p>
+        </div>
+        <div class="field">
+          <label for="density">{{ t("settings.density") }}</label>
           <select id="density" v-model="preferences.density">
-            <option value="comfortable">Comfortable</option>
-            <option value="compact">Compact</option>
+            <option value="comfortable">{{ t("settings.comfortable") }}</option>
+            <option value="compact">{{ t("settings.compact") }}</option>
           </select>
         </div>
         <label class="check-row">
           <input v-model="preferences.reducedMotion" type="checkbox" />
-          Reduce motion
+          {{ t("settings.reduceMotion") }}
         </label>
       </div>
     </section>

@@ -1,5 +1,15 @@
 <script setup lang="ts">
-import { inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import {
+  computed,
+  inject,
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  ref,
+  watch,
+} from "vue";
+import { useI18n } from "vue-i18n";
+import { useLocale } from "../i18n";
 import { uuid } from "@openbiliclaw/api-client";
 import { useAssistantStore } from "../stores/assistant";
 import { useSessionStore } from "../stores/session";
@@ -8,15 +18,16 @@ import type { WebApi } from "../services/api";
 const providedApi = inject<WebApi>("api");
 if (providedApi === undefined) throw new Error("WebApi not provided");
 const api: WebApi = providedApi;
+const { t } = useI18n();
+const { locale } = useLocale();
 const store = useAssistantStore();
 const session = useSessionStore();
 const text = ref("");
 const transcript = ref<HTMLElement>();
-const suggestions = [
-  "What should I watch next?",
-  "Summarize my recent interests",
-  "Help me refine my taste profile",
-];
+const suggestions = computed(() => [
+  t("assistant.suggestion1"),
+  t("assistant.suggestion2"),
+]);
 const CONVERSATION_KEY = "obc-conversation-id";
 const CONVERSATION_PATTERN = /^conv_[0-9a-f]{32}$/;
 function ensureConversationId(): string {
@@ -54,7 +65,13 @@ async function send(message = text.value): Promise<void> {
   const next = message.trim();
   if (!next || store.phase === "loading") return;
   text.value = "";
-  await store.send(api, conversationId.value, session.deviceId, next);
+  await store.send(
+    api,
+    conversationId.value,
+    session.deviceId,
+    next,
+    locale.value,
+  );
 }
 </script>
 
@@ -65,14 +82,14 @@ async function send(message = text.value): Promise<void> {
         <div class="assistant-identity">
           <span class="assistant-avatar" aria-hidden="true">✦</span>
           <div>
-            <h1 tabindex="-1">Assistant</h1>
+            <h1 tabindex="-1">{{ t("assistant.title") }}</h1>
             <p>
-              <span class="online-dot" aria-hidden="true"></span> Uses your
-              local taste profile
+              <span class="online-dot" aria-hidden="true"></span>
+              {{ t("assistant.localProfile") }}
             </p>
           </div>
         </div>
-        <a href="#/settings">Model settings</a>
+        <a href="#/settings">{{ t("assistant.settings") }}</a>
       </header>
 
       <div ref="transcript" class="chat-transcript">
@@ -81,12 +98,9 @@ async function send(message = text.value): Promise<void> {
           class="chat-welcome"
         >
           <span class="welcome-mark" aria-hidden="true">✦</span>
-          <h2>What are you in the mood for?</h2>
-          <p>
-            Ask for recommendations, explore a topic, or correct what
-            OpenBiliClaw understands about you.
-          </p>
-          <div class="suggestion-list" aria-label="Suggested prompts">
+          <h2>{{ t("assistant.promptTitle") }}</h2>
+          <p>{{ t("assistant.promptIntro") }}</p>
+          <div class="suggestion-list" :aria-label="t('assistant.suggestions')">
             <button
               v-for="suggestion in suggestions"
               :key="suggestion"
@@ -104,10 +118,10 @@ async function send(message = text.value): Promise<void> {
           role="status"
           aria-live="polite"
         >
-          Loading conversation…
+          {{ t("assistant.loading") }}
         </p>
 
-        <ol aria-label="Conversation history">
+        <ol :aria-label="t('assistant.history')">
           <li
             v-for="message in store.messages"
             :key="message.id"
@@ -126,14 +140,18 @@ async function send(message = text.value): Promise<void> {
               }}
             </span>
             <div class="message-body">
-              <strong>{{ message.role }}</strong>
+              <strong>{{
+                t(
+                  `assistant.role${message.role.charAt(0).toUpperCase()}${message.role.slice(1)}`,
+                )
+              }}</strong>
               <span class="message-content">{{
                 plainText(message.content)
               }}</span>
               <p v-if="message.error" role="alert" class="turn-error">
                 {{ message.error }}
                 <a v-if="isCapabilityError(message.error)" href="#/settings">
-                  Configure the assistant in Settings.
+                  {{ t("assistant.configure") }}
                 </a>
               </p>
             </div>
@@ -147,7 +165,7 @@ async function send(message = text.value): Promise<void> {
           aria-live="polite"
         >
           <span class="message-avatar" aria-hidden="true">✦</span>
-          <span class="typing-indicator" aria-label="Assistant is thinking">
+          <span class="typing-indicator" :aria-label="t('assistant.thinking')">
             <i></i><i></i><i></i>
           </span>
         </div>
@@ -159,29 +177,31 @@ async function send(message = text.value): Promise<void> {
         >
           {{ store.error }}
           <a v-if="isCapabilityError(store.error)" href="#/settings">
-            Configure the assistant in Settings.
+            {{ t("assistant.configure") }}
           </a>
         </p>
       </div>
 
       <form class="chat-composer" @submit.prevent="send()">
-        <label class="visually-hidden" for="assistant-message">Message</label>
+        <label class="visually-hidden" for="assistant-message">{{
+          t("assistant.message")
+        }}</label>
         <textarea
           id="assistant-message"
           v-model="text"
           required
           rows="1"
-          placeholder="Message OpenBiliClaw…"
+          :placeholder="t('assistant.placeholder')"
           @keydown.enter.exact.prevent="send()"
         />
         <button
           type="submit"
           :disabled="store.phase === 'loading' || !text.trim()"
         >
-          <span class="send-label">Send</span>
+          <span class="send-label">{{ t("assistant.send") }}</span>
           <span aria-hidden="true">↑</span>
         </button>
-        <p>Enter to send · Shift + Enter for a new line</p>
+        <p>{{ t("assistant.composerHelp") }}</p>
       </form>
     </div>
   </section>

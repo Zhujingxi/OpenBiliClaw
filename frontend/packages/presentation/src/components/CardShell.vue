@@ -1,12 +1,20 @@
 <script setup lang="ts">
-import { computed } from "vue";
-import type { CardView } from "../contracts";
+import { computed, inject, type ComputedRef } from "vue";
+import {
+  defaultCardLabels,
+  type CardLabels,
+  type CardView,
+} from "../contracts";
 import { proxyImageUrl } from "../url";
 
 const props = defineProps<{
   card: CardView;
   fallbackMessage?: string | undefined;
 }>();
+const labels = inject<ComputedRef<CardLabels>>(
+  "card-labels",
+  computed(() => defaultCardLabels),
+);
 const emit = defineEmits<{
   like: [card: CardView];
   dismiss: [card: CardView];
@@ -30,9 +38,9 @@ const summary = computed(() => {
   return value && !/^[-–—]+$/.test(value) ? value.slice(0, 500) : undefined;
 });
 const status = computed(() => {
-  if (props.card.availability === "deleted") return "Content unavailable";
+  if (props.card.availability === "deleted") return labels.value.unavailable;
   if (props.card.availability === "provider-unavailable")
-    return "Provider unavailable";
+    return labels.value.providerUnavailable;
   return undefined;
 });
 </script>
@@ -62,34 +70,34 @@ const status = computed(() => {
         {{ summary ?? "\u00a0" }}
       </p>
       <div class="obc-card__meta">
-        <p aria-label="Provider">{{ card.providerLabel }}</p>
+        <p :aria-label="labels.provider">{{ card.providerLabel }}</p>
         <time
           :datetime="sourceTimestamp"
           :aria-hidden="sourceTimestamp === undefined ? 'true' : undefined"
         >
           {{
             sourceTimestamp
-              ? new Date(sourceTimestamp).toLocaleString()
+              ? new Date(sourceTimestamp).toLocaleString(labels.locale)
               : "\u00a0"
           }}
         </time>
       </div>
-      <div role="group" aria-label="Feedback actions">
+      <div role="group" :aria-label="labels.feedbackActions">
         <button
           type="button"
           class="card-like"
-          aria-label="Like recommendation"
+          :aria-label="labels.likeAria"
           @click="emit('like', card)"
         >
-          Like
+          {{ labels.like }}
         </button>
         <button
           type="button"
           class="card-dismiss"
-          aria-label="Dismiss recommendation"
+          :aria-label="labels.dismissAria"
           @click="emit('dismiss', card)"
         >
-          Dismiss
+          {{ labels.dismiss }}
         </button>
       </div>
     </div>

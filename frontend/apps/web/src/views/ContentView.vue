@@ -5,8 +5,10 @@ import { computed, inject, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { routeParameter } from "../app/routes";
 import { useContentStore } from "../stores/content";
 import type { WebApi } from "../services/api";
+import { useI18n } from "vue-i18n";
 const api = inject<WebApi>("api");
 if (api === undefined) throw new Error("WebApi not provided");
+const { t } = useI18n();
 const store = useContentStore();
 const reference = ref(routeParameter(location.hash));
 
@@ -54,9 +56,10 @@ onBeforeUnmount(() => {
 </script>
 <template>
   <section>
-    <h1 tabindex="-1">Content detail</h1>
+    <h1 tabindex="-1">{{ t("content.title") }}</h1>
     <p v-if="reference === undefined" role="status">
-      Choose a result from <a href="#/search">Search</a>.
+      {{ t("content.choose") }} <a href="#/search">{{ t("common.search") }}</a
+      >.
     </p>
     <AsyncState v-else :phase="store.detailPhase" :error="store.detailError">
       <article v-if="store.detail">
@@ -69,15 +72,19 @@ onBeforeUnmount(() => {
             :href="store.detail.content.ref.canonical_url"
             target="_blank"
             rel="noopener noreferrer"
-            >Open on {{ store.detail.content.ref.provider_id.value }}</a
+            >{{
+              t("content.canonical", {
+                provider: store.detail.content.ref.provider_id.value,
+              })
+            }}</a
           >
         </p>
         <dl>
-          <dt>Provider</dt>
+          <dt>{{ t("content.provider") }}</dt>
           <dd>{{ store.detail.content.ref.provider_id.value }}</dd>
-          <dt>Content ID</dt>
+          <dt>{{ t("content.contentId") }}</dt>
           <dd>{{ store.detail.content.ref.provider_content_id }}</dd>
-          <dt>Kind</dt>
+          <dt>{{ t("content.kind") }}</dt>
           <dd>{{ store.detail.content.ref.content_kind.value }}</dd>
         </dl>
       </article>

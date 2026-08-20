@@ -6,6 +6,7 @@ import type {
 import { computed, ref } from "vue";
 import { uuid } from "@openbiliclaw/api-client";
 import { defineStore } from "pinia";
+import type { SupportedLocale } from "../i18n";
 import {
   errorMessage,
   isCancellation,
@@ -71,6 +72,7 @@ export const useAssistantStore = defineStore("assistant", () => {
     conversationId: string,
     deviceId: string,
     text: string,
+    locale: SupportedLocale,
   ): Promise<void> {
     const signal = owner.next();
     const id = uuid();
@@ -82,7 +84,7 @@ export const useAssistantStore = defineStore("assistant", () => {
     error.value = undefined;
     try {
       const next = await api.assistantTurn(
-        { conversation_id: conversationId, locale: "en-US", text },
+        { conversation_id: conversationId, locale, text },
         deviceId,
         signal,
       );

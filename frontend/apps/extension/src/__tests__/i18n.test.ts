@@ -8,6 +8,19 @@ describe("extension locale bootstrap", () => {
     expect(detectLocale(null, ["de"])).toBe("en");
   });
 
+  it.each([
+    ["en", "Backend connection"],
+    ["zh-CN", "后端连接"],
+    ["zh-TW", "後端連線"],
+  ] as const)("renders extension output for %s", (selected, expected) => {
+    const i18n = createExtensionI18n(
+      { getItem: () => selected, setItem: () => undefined },
+      ["en"],
+      { lang: "" },
+    );
+    expect(i18n.global.t("connection")).toBe(expected);
+  });
+
   it("restores and live-persists the selected locale", () => {
     const storage = { getItem: vi.fn(() => "zh-CN"), setItem: vi.fn() };
     const root = { lang: "" };
