@@ -6,6 +6,8 @@
 
 ## Unreleased
 
+- Polished Assistant turn feedback: failed streams now finalize running tools, Stop restores composer focus, singular English counts and empty-composer styling are correct, New chat interaction contrast is clearer, and persisted safe tool summaries return as read-only cards after reload.
+
 - Added the responsive Assistant streaming web experience over the generated lifecycle: validated SSE deltas finalize without duplication, Stop aborts owned work, New chat preserves retained conversations, approximate context exclusions keep the full transcript visible, and transient reasoning/tool cards expose only safe server presentation across all three locales.
 
 - Hardened Assistant streamed turns: cross-device conversation IDs now fail closed without ownership or history leakage, optional turn keys deduplicate retries while repeated text remains complete, mature UTF-8 profiles fit the bounded projection, visible output is audited before atomic persistence, equal timestamps order stably, configured AI Runtime budgets are not preempted by a duplicate SSE timeout, and failure/closure paths follow the typed lifecycle with deterministic generator cleanup.

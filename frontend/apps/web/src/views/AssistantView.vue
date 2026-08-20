@@ -28,6 +28,7 @@ const { locale } = useLocale();
 const store = useAssistantStore();
 const session = useSessionStore();
 const text = ref("");
+const composer = ref<HTMLTextAreaElement>();
 const transcript = ref<HTMLElement>();
 const suggestions = computed(() => [
   t("assistant.suggestion1"),
@@ -67,7 +68,7 @@ function messageText(message: AssistantDisplayMessage): string {
     case "recommendationsAvailable":
       return `${message.content || t("assistant.recommendations")} ${t(
         "assistant.recommendationsAvailable",
-        { count: message.count ?? 0 },
+        message.count ?? 0,
       )}`;
     default:
       return message.content;
@@ -114,6 +115,11 @@ async function send(message = text.value): Promise<void> {
     next,
     locale.value,
   );
+}
+async function stop(): Promise<void> {
+  store.stop();
+  await nextTick();
+  composer.value?.focus();
 }
 function newChat(): void {
   store.newChat();
@@ -180,9 +186,10 @@ function newChat(): void {
           }}</strong>
           <span v-if="store.contextMeter.excluded_oldest_turns > 0">
             {{
-              t("assistant.contextExcluded", {
-                count: store.contextMeter.excluded_oldest_turns,
-              })
+              t(
+                "assistant.contextExcluded",
+                store.contextMeter.excluded_oldest_turns,
+              )
             }}
           </span>
         </div>
@@ -214,6 +221,30 @@ function newChat(): void {
               <span class="message-content">{{
                 plainText(messageText(message))
               }}</span>
+              <section
+                v-if="message.toolCalls?.length"
+                class="tool-cards persisted-tool-cards"
+                :aria-label="t('assistant.tools')"
+              >
+                <article
+                  v-for="tool in message.toolCalls"
+                  :key="tool.id"
+                  class="tool-card"
+                >
+                  <span class="tool-status-icon" aria-hidden="true">{{
+                    tool.status === "succeeded" ? "✓" : "!"
+                  }}</span>
+                  <div>
+                    <strong>{{ tool.name }}</strong>
+                    <p v-if="tool.summary">{{ tool.summary }}</p>
+                    <span class="tool-status-text">{{
+                      t(
+                        `assistant.tool${tool.status.charAt(0).toUpperCase()}${tool.status.slice(1)}`,
+                      )
+                    }}</span>
+                  </div>
+                </article>
+              </section>
               <p v-if="message.error" role="alert" class="turn-error">
                 <LocalizedError :error="message.error" />
                 <a v-if="isCapabilityError(message.error)" href="#/settings">
@@ -294,8 +325,8 @@ function newChat(): void {
         }}</label>
         <textarea
           id="assistant-message"
+          ref="composer"
           v-model="text"
-          required
           rows="1"
           :placeholder="t('assistant.placeholder')"
           @keydown.enter.exact.prevent="send()"
@@ -305,7 +336,7 @@ function newChat(): void {
           type="button"
           class="stop-button"
           :aria-label="t('assistant.stop')"
-          @click="store.stop"
+          @click="stop"
         >
           <span class="send-label">{{ t("assistant.stop") }}</span>
           <span aria-hidden="true">■</span>
@@ -398,6 +429,12 @@ function newChat(): void {
   font-size: 0.7rem;
   font-weight: 650;
   text-decoration: none;
+}
+.header-actions > button:hover:not(:disabled),
+.header-actions > button:active:not(:disabled) {
+  border-color: var(--primary);
+  background: var(--primary);
+  color: var(--primary-foreground);
 }
 .online-dot {
   width: 0.4rem;
@@ -502,6 +539,10 @@ function newChat(): void {
   display: grid;
   gap: 0.5rem;
   margin-top: 1rem;
+}
+.persisted-tool-cards {
+  width: min(36rem, 100%);
+  margin: 0.3rem 0 0;
 }
 .tool-card {
   display: grid;

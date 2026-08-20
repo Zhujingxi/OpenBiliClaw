@@ -57,6 +57,20 @@ describe("web locale bootstrap", () => {
     },
   );
 
+  it("uses singular English Assistant feedback for count one", () => {
+    const i18n = createWebI18n(
+      { getItem: () => "en", setItem: () => undefined },
+      ["en"],
+      { lang: "" },
+    );
+    expect(i18n.global.t("assistant.contextExcluded", 1)).toContain(
+      "1 older complete turn is",
+    );
+    expect(i18n.global.t("assistant.recommendationsAvailable", 1)).toBe(
+      "1 recommendation is available in your feed.",
+    );
+  });
+
   it("prefers, persists, and applies a saved locale", () => {
     const storage = { getItem: vi.fn(() => "zh-TW"), setItem: vi.fn() };
     const root = { lang: "" };

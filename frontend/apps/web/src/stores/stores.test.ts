@@ -554,6 +554,7 @@ describe("durable concern stores", () => {
 
     const safeError = async function* () {
       yield { kind: "turn_started" as const, context_meter: meter };
+      yield { kind: "tool_started" as const, name: "Search library" };
       yield { kind: "response_delta" as const, delta: "partial secret" };
       yield {
         kind: "error" as const,
@@ -578,6 +579,25 @@ describe("durable concern stores", () => {
     expect(
       JSON.stringify({ messages: store.messages, error: store.error }),
     ).not.toContain("raw server detail");
+    expect(store.tools).toEqual([
+      expect.objectContaining({ name: "Search library", status: "failed" }),
+    ]);
+
+    const networkFailure = async function* () {
+      yield { kind: "turn_started" as const, context_meter: meter };
+      yield { kind: "tool_started" as const, name: "Inspect profile" };
+      throw new ApiError("network", "connection lost");
+    };
+    await store.send(
+      api({ assistantTurnStream: networkFailure }),
+      "conv",
+      "device",
+      "third",
+      "en",
+    );
+    expect(store.tools).toEqual([
+      expect.objectContaining({ name: "Inspect profile", status: "failed" }),
+    ]);
   });
 
   it("stops only the active stream and clears transient output", async () => {
@@ -657,7 +677,18 @@ describe("durable concern stores", () => {
               }),
               created_at: "2030-01-01T00:00:00Z",
               references: [],
-              tool_calls: [],
+              tool_calls: [
+                {
+                  tool_name: "Search library",
+                  safe_summary: "Found saved items",
+                  outcome: "succeeded",
+                },
+                {
+                  tool_name: "Inspect profile",
+                  safe_summary: "Profile unavailable",
+                  outcome: "failed",
+                },
+              ],
               user_correction: false,
             },
             {
@@ -734,6 +765,18 @@ describe("durable concern stores", () => {
         presentation: "responseUnavailable",
         count: undefined,
       },
+    ]);
+    expect(store.messages[0]?.toolCalls).toEqual([
+      expect.objectContaining({
+        name: "Search library",
+        summary: "Found saved items",
+        status: "succeeded",
+      }),
+      expect.objectContaining({
+        name: "Inspect profile",
+        summary: "Profile unavailable",
+        status: "failed",
+      }),
     ]);
     expect(
       store.messages.some((message) =>

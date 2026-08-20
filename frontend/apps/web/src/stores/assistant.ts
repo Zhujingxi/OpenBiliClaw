@@ -30,6 +30,7 @@ export interface AssistantDisplayMessage {
   presentation?: AssistantPresentation;
   count?: number;
   error?: UiError;
+  toolCalls?: readonly AssistantToolCard[];
 }
 
 export interface AssistantReasoning {
@@ -69,6 +70,22 @@ export const useAssistantStore = defineStore("assistant", () => {
       id: message.message_id,
       role: message.role,
       ...historyContent(message.role, message.content),
+      ...(message.role === "assistant"
+        ? {
+            toolCalls: message.tool_calls.flatMap((tool, index) =>
+              tool.outcome === "pending"
+                ? []
+                : [
+                    {
+                      id: `${message.message_id}:tool:${index}`,
+                      name: tool.tool_name,
+                      summary: tool.safe_summary,
+                      status: tool.outcome,
+                    },
+                  ],
+            ),
+          }
+        : {}),
     })) ?? []),
     ...localMessages.value,
   ]);
@@ -299,6 +316,9 @@ export const useAssistantStore = defineStore("assistant", () => {
     reasoning.value = reasoning.value
       ? { ...reasoning.value, active: false }
       : undefined;
+    tools.value = tools.value.map((tool) =>
+      tool.status === "running" ? { ...tool, status: "failed" } : tool,
+    );
     error.value = message;
     phase.value = "error";
   }

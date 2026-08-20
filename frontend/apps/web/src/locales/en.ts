@@ -167,7 +167,7 @@ export default {
     thinking: "Assistant is thinking",
     contextMeter: "Context ~{percent}%",
     contextExcluded:
-      "Approximate: {count} older complete turns are outside active context; the full transcript remains visible.",
+      "Approximate: {count} older complete turn is outside active context; the full transcript remains visible. | Approximate: {count} older complete turns are outside active context; the full transcript remains visible.",
     reasoningLive: "Reasoning (live)",
     reasoning: "Reasoning",
     tools: "Tools used in this turn",
@@ -184,7 +184,7 @@ export default {
     actionPending: "Action pending.",
     recommendations: "Recommendations",
     recommendationsAvailable:
-      "{count} recommendations are available in your feed.",
+      "{count} recommendation is available in your feed. | {count} recommendations are available in your feed.",
   },
   connect: {
     eyebrow: "Source setup",

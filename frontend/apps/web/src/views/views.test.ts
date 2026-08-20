@@ -563,6 +563,7 @@ describe("web view behavior", () => {
         ),
     ).toBe(true);
     expect(wrapper.text()).not.toContain("**answer**");
+    expect(wrapper.get("textarea").attributes("required")).toBeUndefined();
     expect(
       wrapper.findAll("li").map((item) => item.find("strong").text()),
     ).toEqual(["You", "You", "Assistant"]);
@@ -626,6 +627,62 @@ describe("web view behavior", () => {
     expect(wrapper.text()).not.toContain("opaque_id");
   });
 
+  it("rehydrates persisted safe tool summaries on their assistant turn", async () => {
+    const wrapper = mountView(
+      AssistantView,
+      api({
+        conversation: async () => ({
+          conversation: {
+            conversation_id: "conv",
+            created_at: "2030-01-01T00:00:00Z",
+            updated_at: "2030-01-01T00:00:00Z",
+            retention_days: 30,
+            scope: { local_user_id: "u", device_id: "web-local" },
+          },
+          messages: [
+            {
+              message_id: "assistant-message",
+              idempotency_key: "assistant-key",
+              role: "assistant",
+              content: JSON.stringify({
+                kind: "message",
+                text: "Welcome back",
+              }),
+              created_at: "2030-01-01T00:00:00Z",
+              references: [],
+              tool_calls: [
+                {
+                  tool_name: "Search library",
+                  safe_summary: "Found saved items",
+                  outcome: "succeeded",
+                },
+                {
+                  tool_name: "Inspect profile",
+                  safe_summary: "Profile unavailable",
+                  outcome: "failed",
+                },
+              ],
+              user_correction: false,
+            },
+          ],
+        }),
+      }),
+    );
+    await vi.waitFor(() =>
+      expect(wrapper.findAll(".persisted-tool-cards .tool-card")).toHaveLength(
+        2,
+      ),
+    );
+    const assistantTurn = wrapper.get("li.message-assistant");
+    expect(assistantTurn.text()).toContain(
+      "Search libraryFound saved itemsSucceeded",
+    );
+    expect(assistantTurn.text()).toContain(
+      "Inspect profileProfile unavailableFailed",
+    );
+    expect(wrapper.findAll(".tool-card")).toHaveLength(2);
+  });
+
   it("shows an accessible Stop control while a turn owns the request", async () => {
     const pending = async function* (
       _body: unknown,
@@ -649,10 +706,15 @@ describe("web view behavior", () => {
     await vi.waitFor(() =>
       expect(wrapper.get(".stop-button").text()).toContain("Stop"),
     );
+    const focus = vi.spyOn(
+      wrapper.get("textarea").element as HTMLTextAreaElement,
+      "focus",
+    );
     await wrapper.get(".stop-button").trigger("click");
     await vi.waitFor(() =>
       expect(wrapper.find(".stop-button").exists()).toBe(false),
     );
+    expect(focus).toHaveBeenCalledOnce();
     expect(wrapper.get('button[type="submit"]').text()).toContain("Send");
   });
 
@@ -669,6 +731,7 @@ describe("web view behavior", () => {
     expect(next).toMatch(/^conv_[0-9a-f]{32}$/);
     expect(next).not.toBe("conv_11111111111111111111111111111111");
     expect(wrapper.findAll("li")).toHaveLength(0);
+    expect(wrapper.get("textarea").attributes("required")).toBeUndefined();
     expect(conversation).toHaveBeenCalledTimes(1);
   });
 
