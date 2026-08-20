@@ -6,6 +6,8 @@
 
 ## Unreleased
 
+- Batched fresh-state combined search/feed recommendation evaluation at the evaluator's declared 20-candidate boundary while preserving every accepted candidate in deterministic order and applying selection across the complete evaluated set.
+
 - Isolated L6 Docker validation from ignored developer Compose overrides by explicitly selecting tracked `docker-compose.yml` on every harness call; failed startup now records bounded no-color service logs before isolated teardown without inspecting configuration or secrets.
 
 - Raised only the Understanding preference analyzer's bounded output/total policy from 1,024/5,120 to 2,048/6,144 tokens so provider-counted Kimi reasoning and the typed `PreferenceDraftBatch` fit, without changing its input, timeout, tool-call, or retry limits.

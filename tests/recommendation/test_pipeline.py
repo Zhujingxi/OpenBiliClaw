@@ -19,6 +19,7 @@ from openbiliclaw.infrastructure.sqlite.schema import SchemaMigrator
 from openbiliclaw.recommendation.allocation import ThompsonAllocator
 from openbiliclaw.recommendation.discovery.planner import DiscoveryPlanner
 from openbiliclaw.recommendation.evaluation.agent import (
+    MAX_EVALUATION_BATCH_SIZE,
     CandidateScore,
     EvaluationBatch,
     validate_complete,
@@ -668,15 +669,62 @@ def test_agent_validators_and_evaluation_batch_bound() -> None:
             candidate_ids=(),
         )
 
-    async def unused(items: tuple[Candidate, ...]) -> tuple[EvaluationBatch, str, int, int]:
-        raise AssertionError
 
-    with pytest.raises(ValueError, match="20"):
-        import asyncio
-
-        asyncio.run(
-            EvaluationService(unused, lambda: NOW).evaluate(tuple(candidate(i) for i in range(21)))
+@pytest.mark.asyncio
+async def test_combined_supply_evaluation_batches_without_starving_selection() -> None:
+    pending_items = []
+    for index in range(MAX_EVALUATION_BATCH_SIZE + 5):
+        item = candidate(index, state=CandidateState.PREFILTERED)
+        pending_items.append(
+            item.model_copy(
+                update={
+                    "provenance": item.provenance.model_copy(
+                        update={"channel": None if index < MAX_EVALUATION_BATCH_SIZE else "popular"}
+                    )
+                }
+            )
         )
+    pending = tuple(pending_items)
+    calls: list[tuple[str, ...]] = []
+
+    async def evaluator(items: tuple[Candidate, ...]) -> tuple[EvaluationBatch, str, int, int]:
+        calls.append(tuple(item.candidate_id for item in items))
+        return (
+            EvaluationBatch(
+                results=tuple(
+                    CandidateScore(
+                        candidate_id=item.candidate_id,
+                        score=0.99 if item == pending[-1] else 0.6,
+                        rationale="bounded test",
+                        uncertainty=0.1,
+                    )
+                    for item in items
+                )
+            ),
+            "model-a",
+            10,
+            2,
+        )
+
+    evaluated, records = await EvaluationService(evaluator, lambda: NOW).evaluate(pending)
+
+    assert tuple(map(len, calls)) == (MAX_EVALUATION_BATCH_SIZE, 5)
+    assert tuple(candidate_id for call in calls for candidate_id in call) == tuple(
+        item.candidate_id for item in pending
+    )
+    assert len({candidate_id for call in calls for candidate_id in call}) == len(pending)
+    assert tuple(item.candidate_id for item in evaluated) == tuple(
+        item.candidate_id for item in pending
+    )
+    assert tuple(record.candidate_id for record in records) == tuple(
+        item.candidate_id for item in pending
+    )
+    assert sum(item.provenance.channel is None for item in evaluated) == MAX_EVALUATION_BATCH_SIZE
+    selected, _, _ = SelectionService(threshold=0.5).select(
+        evaluated, records, limit=1, seed=1, now=NOW
+    )
+    assert selected[0].candidate_id == pending[-1].candidate_id
+    assert selected[0].provenance.channel == "popular"
 
 
 def test_strategy_dispatch_covers_all_proven_kinds() -> None:

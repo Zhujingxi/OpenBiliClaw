@@ -17,6 +17,8 @@ from openbiliclaw.understanding.projections import (
     RecommendationProfile,  # noqa: TC001  # Runtime type required by Pydantic model fields.
 )
 
+MAX_EVALUATION_BATCH_SIZE = 20
+
 
 class CandidateScore(StrictBaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -28,7 +30,7 @@ class CandidateScore(StrictBaseModel):
 
 class EvaluationBatch(StrictBaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    results: tuple[CandidateScore, ...] = Field(max_length=20)
+    results: tuple[CandidateScore, ...] = Field(max_length=MAX_EVALUATION_BATCH_SIZE)
 
     @model_validator(mode="after")
     def unique_ids(self) -> EvaluationBatch:
@@ -41,8 +43,8 @@ class EvaluationBatch(StrictBaseModel):
 class EvaluationInput(StrictBaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     profile: RecommendationProfile
-    candidates: tuple[ContentPreview, ...] = Field(max_length=20)
-    candidate_ids: tuple[str, ...] = Field(max_length=20)
+    candidates: tuple[ContentPreview, ...] = Field(max_length=MAX_EVALUATION_BATCH_SIZE)
+    candidate_ids: tuple[str, ...] = Field(max_length=MAX_EVALUATION_BATCH_SIZE)
     rubric_version: int = 1
 
     @model_validator(mode="after")
