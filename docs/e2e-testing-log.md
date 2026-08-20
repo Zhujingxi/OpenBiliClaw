@@ -208,6 +208,8 @@ The real L1b run reported two passed tests; missing authenticated fields fail ex
 
 6. **Sequential-state regression:** a later L2 rerun started after durable plugin-access rehydration had correctly restored the verified Bilibili manual connection. The content test nevertheless issued a new `builtin.anonymous` connect for the same provider/default account, and the Access duplicate guard correctly raised `already_connected`. The search workflow consumes `AccessService.connected_handle()`, and Bilibili search accepts any matching handle granting `read_public`; anonymous identity is not required. **Classification/fix:** harness state-order coupling, not a product defect. L2 now inspects the safe source status, reuses a connected status granting `read_public`, connects anonymously only when disconnected, and fails clearly for any existing unusable scope. Hermetic regressions cover disconnected connect, connected reuse, and insufficient permission without touching durable credentials.
 
+7. **Feedback-contract regression:** after the strict recommendation feedback contract landed, the L2 `_liked` helper still supplied `EmptyPayload`, so Pydantic rejected the observation before ingress. **Classification/fix:** harness contract drift, not a product defect. The helper now supplies the canonical neutral `RecommendationFeedbackPayload`: no exploration arm or hypothesis is invented, and `exposed` retains its false default. A credential-free focused assertion pins those semantics.
+
 ### Observed behavior
 
 - Observation ingress persists content identity in `content_references`; it does not write `content_cache` because the observation contract carries `ContentRef`, not title/body/projection data. This is now explicit in module documentation.

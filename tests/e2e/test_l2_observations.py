@@ -25,14 +25,14 @@ from openbiliclaw.application.record_observation import RecordObservationsComman
 from openbiliclaw.application.sources import ConnectSourceCommand, ConnectSourceResult
 from openbiliclaw.composition.build import BuildOptions, build_application, validated_settings
 from openbiliclaw.content.integration.capabilities import PageRequest
-from openbiliclaw.content.integration.identity import ProviderId
+from openbiliclaw.content.integration.identity import ContentKind, ContentRef, ProviderId
 from openbiliclaw.content.providers.bilibili.capabilities import BilibiliProvider
 from openbiliclaw.observations.models import (
     ContentOpenedObservation,
-    EmptyPayload,
     HistoryImportPayload,
     HostOpenPayload,
     ProviderHistoryImportObservation,
+    RecommendationFeedbackPayload,
     RecommendationLikedObservation,
 )
 from openbiliclaw.observations.provenance import (
@@ -48,7 +48,6 @@ from .bilibili_chrome import BrowserCookies, connect_command, extract_bilibili_c
 if TYPE_CHECKING:
     from openbiliclaw.composition.application import Application
     from openbiliclaw.composition.facade import CompositionFacade
-    from openbiliclaw.content.integration.identity import ContentRef
 
 pytestmark = [pytest.mark.e2e, pytest.mark.e2e_l2, pytest.mark.asyncio]
 _ROOT = Path(__file__).resolve().parents[2]
@@ -124,8 +123,26 @@ def _liked(ref: ContentRef, key: str, now: datetime) -> RecommendationLikedObser
             authenticated=False,
             trust_level=TrustLevel.LOW,
         ),
-        payload=EmptyPayload(),
+        payload=RecommendationFeedbackPayload(),
     )
+
+
+async def test_liked_uses_neutral_recommendation_feedback_payload() -> None:
+    liked = _liked(
+        ContentRef(
+            provider_id=ProviderId(value="bilibili"),
+            content_kind=ContentKind(value="video"),
+            provider_content_id="BV1contract",
+            canonical_url="https://www.bilibili.com/video/BV1contract",
+        ),
+        "e2e:l2:liked:contract",
+        datetime(2030, 1, 1, tzinfo=UTC),
+    )
+
+    assert isinstance(liked.payload, RecommendationFeedbackPayload)
+    assert liked.payload.exploration_arm is None
+    assert liked.payload.exploration_hypothesis_id is None
+    assert liked.payload.exposed is False
 
 
 async def _real_public_ref(application: Application) -> ContentRef:
