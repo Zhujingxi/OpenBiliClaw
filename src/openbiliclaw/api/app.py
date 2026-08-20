@@ -5287,6 +5287,7 @@ def create_app(
         v2ex_username: str = "",
         force: bool = False,
         reset_cognition: bool = False,
+        llm_concurrency: int | None = None,
     ) -> None:
         """Sole status/event writer for an API-launched guided init (gui-init
         §5f). Drives the shared ``run_guided_init`` through the coordinator and
@@ -5389,6 +5390,7 @@ def create_app(
                 # Optional: clear old awareness/insight observations (e.g.
                 # from a previous account) before the new profile build.
                 reset_cognition=reset_cognition,
+                llm_concurrency=llm_concurrency,
             )
             discovery_partial = bool(result.discovery_error)
             dy_status = str(getattr(result, "dy_status", "skipped") or "skipped")
@@ -5516,6 +5518,31 @@ def create_app(
         reset_cognition = (
             bool(body.get("reset_cognition", False)) if isinstance(body, dict) else False
         )
+        # Optional per-run LLM concurrency for the preference-analysis stage.
+        # The init page sends an explicit value (default 4 in the UI); older
+        # clients omit it and the backend keeps the configured llm.concurrency.
+        raw_llm_concurrency = body.get("llm_concurrency") if isinstance(body, dict) else None
+        if raw_llm_concurrency is None:
+            llm_concurrency: int | None = None
+        else:
+            try:
+                llm_concurrency = int(raw_llm_concurrency)
+            except (TypeError, ValueError):
+                return JSONResponse(
+                    {
+                        "error": "invalid_llm_concurrency",
+                        "detail": "llm_concurrency 必须是 1-16 的整数",
+                    },
+                    status_code=400,
+                )
+            if not (1 <= llm_concurrency <= 16):
+                return JSONResponse(
+                    {
+                        "error": "invalid_llm_concurrency",
+                        "detail": "llm_concurrency 必须是 1-16 的整数",
+                    },
+                    status_code=400,
+                )
         # Optional per-run platform selection from the extension checkboxes. A
         # list (even empty) is an explicit choice; absent → None = use all
         # enabled (CLI / legacy clients). Sent source keys are explicit opt-ins
@@ -5945,6 +5972,7 @@ def create_app(
                     effective_v2ex_username,
                     force=force,
                     reset_cognition=reset_cognition,
+                    llm_concurrency=llm_concurrency,
                 ),
             )
         else:
@@ -5957,6 +5985,7 @@ def create_app(
                     effective_v2ex_username,
                     force=force,
                     reset_cognition=reset_cognition,
+                    llm_concurrency=llm_concurrency,
                 )
             )
         coord.attach_task(run_id, task)
@@ -16707,7 +16736,7 @@ def create_app(
                     for bucket in ("soul", "discovery", "recommendation", "evaluation")
                 },
                 default_provider=legacy_default_provider,
-                concurrency=int(getattr(cfg.llm, "concurrency", 4)),
+                concurrency=int(getattr(cfg.llm, "concurrency", 3)),
                 timeout=int(getattr(cfg.llm, "timeout", 1200)),
                 fallback_provider=legacy_fallback_provider,
                 openai=_provider_out(_legacy_provider_projection("openai")),

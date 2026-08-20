@@ -87,7 +87,7 @@ class TestConfigDefaults:
         assert config.api.host == "0.0.0.0"
         assert config.api.port == 8420
         assert config.llm.default_provider == "deepseek"
-        assert config.llm.concurrency == 4
+        assert config.llm.concurrency == 3
         assert config.llm.timeout == 1200
         assert config.bilibili.auth_method == "cookie"
         assert config.bilibili.proxy == ""  # direct connection by default

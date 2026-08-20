@@ -167,6 +167,7 @@ class PreferenceAnalyzer:
         progress_callback: ProgressCallback | None = None,
         awareness_notes: list[dict[str, object]] | None = None,
         active_insights: list[dict[str, object]] | None = None,
+        llm_concurrency: int | None = None,
     ) -> dict[str, object]:
         """Run structured extraction and merge the result with existing preference state.
 
@@ -189,6 +190,7 @@ class PreferenceAnalyzer:
                 progress_callback=progress_callback,
                 awareness_notes=awareness_notes,
                 active_insights=active_insights,
+                llm_concurrency=llm_concurrency,
             )
 
         whole_batch_prompt = build_preference_analysis_prompt(
@@ -214,6 +216,7 @@ class PreferenceAnalyzer:
                 progress_callback=progress_callback,
                 awareness_notes=awareness_notes,
                 active_insights=active_insights,
+                llm_concurrency=llm_concurrency,
             )
         result = await self._analyze_events_single(
             events=events,
@@ -514,6 +517,7 @@ class PreferenceAnalyzer:
         progress_callback: ProgressCallback | None = None,
         awareness_notes: list[dict[str, object]] | None = None,
         active_insights: list[dict[str, object]] | None = None,
+        llm_concurrency: int | None = None,
     ) -> dict[str, object]:
         """Split events into bounded concurrent chunk batches, then fold."""
         import asyncio as _asyncio
@@ -786,7 +790,11 @@ class PreferenceAnalyzer:
             await self._emit_progress(progress_callback, done_chunks, total_chunks)
             return result
 
-        configured_concurrency = getattr(self.registry, "concurrency", None)
+        configured_concurrency = (
+            llm_concurrency
+            if llm_concurrency is not None
+            else getattr(self.registry, "concurrency", None)
+        )
         try:
             configured_chunk_limit = (
                 int(configured_concurrency)
@@ -797,9 +805,10 @@ class PreferenceAnalyzer:
             configured_chunk_limit = MAX_CONCURRENT_PREFERENCE_CHUNKS
         chunk_limit = max(1, min(MAX_CONCURRENT_PREFERENCE_CHUNKS, configured_chunk_limit))
         logger.info(
-            "preference chunk fanout bounded at %d (configured LLM concurrency=%r)",
+            "preference chunk fanout bounded at %d (configured LLM concurrency=%r%s)",
             chunk_limit,
             configured_concurrency,
+            " [init override]" if llm_concurrency is not None else "",
         )
         outcome_groups: list[list[tuple[dict[str, object], dict[str, object]]]] = []
         for batch_start in range(0, len(chunks), chunk_limit):

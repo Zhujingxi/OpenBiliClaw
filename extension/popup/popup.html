@@ -6171,7 +6171,7 @@
         </div>
         <div class="settings-field">
           <label for="cfgLlmConcurrencyV2">LLM 并发数</label>
-          <input id="cfgLlmConcurrencyV2" type="number" min="1" max="16" step="1" placeholder="4">
+          <input id="cfgLlmConcurrencyV2" type="number" min="1" max="16" step="1" placeholder="3">
         </div>
         <div class="settings-field">
           <label for="cfgLlmTimeoutV2">单实例超时（秒）</label>
@@ -6200,7 +6200,7 @@
         </div>
         <div class="settings-field">
           <label for="cfgLlmConcurrency">LLM 并发数</label>
-          <input id="cfgLlmConcurrency" type="number" min="1" max="16" step="1" placeholder="4">
+          <input id="cfgLlmConcurrency" type="number" min="1" max="16" step="1" placeholder="3">
         </div>
         <div class="settings-field">
           <label for="cfgLlmTimeout">LLM 超时 (秒)</label>
@@ -7211,6 +7211,11 @@
           <div class="settings-field-row">
             <input id="cfgReinitResetCognition" type="checkbox" data-settings-ignore-dirty>
             <label for="cfgReinitResetCognition">同时清空旧认知观察与洞察（换账号 / 大改兴趣时建议）</label>
+          </div>
+          <div class="settings-field-row">
+            <label for="cfgReinitLlmConcurrency">初始化 LLM 并发</label>
+            <input id="cfgReinitLlmConcurrency" type="number" min="1" max="16" step="1" inputmode="numeric" value="3" data-settings-ignore-dirty>
+            <span class="settings-hint">默认 3；限流严重时可降到 1-2</span>
           </div>
           <p id="cfgReinitStatus" class="settings-probe-status" aria-live="polite">读取初始化状态中…</p>
         </div>

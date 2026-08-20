@@ -2049,7 +2049,7 @@ class LLMConfigOut(BaseModel):
     default_chain: list[str] = Field(default_factory=list)
     routes: dict[str, ModuleLLMConfigOut] = Field(default_factory=dict)
     default_provider: str = "deepseek"
-    concurrency: int = 4
+    concurrency: int = 3
     timeout: int = 1200
     # Non-empty fallback_provider = chat fallback on (the legacy
     # fallback_enabled bool was never consulted and is no longer echoed;

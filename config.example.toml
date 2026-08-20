@@ -57,8 +57,8 @@ routing_version = 2
 default_chain = ["deepseek"]
 # Shared max concurrency for LLM requests. Higher values replenish faster but
 # may hit provider/local-proxy rate limits sooner.
-# 总并发 4；后台派生为 3
-concurrency = 4
+# 总并发 3；后台派生为 2
+concurrency = 3
 # Global request timeout for all LLM providers (seconds).
 # Applies to OpenAI / Claude / Gemini / DeepSeek / Ollama / OpenRouter /
 # OrcaRouter / openai_compatible. Allowed range: 10..1200. Default 1200s (20 minutes).

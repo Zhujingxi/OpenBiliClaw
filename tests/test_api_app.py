@@ -15160,7 +15160,7 @@ class TestEmbeddingAndCompatProviderE2E:
         data = response.json()
 
         assert data["data_dir"] == "runtime-data"
-        assert data["llm"]["concurrency"] == 4
+        assert data["llm"]["concurrency"] == 3
         assert data["llm"]["deepseek"]["reasoning_effort"] == "high"
         assert data["llm"]["openrouter"]["http_referer"] == "https://example.com"
         assert data["llm"]["openrouter"]["x_title"] == "Example App"
@@ -16741,6 +16741,37 @@ class TestGuidedInitEndpoints:
             resp = client.post("/api/init", json={})
         assert resp.status_code == 403
         assert resp.json()["error"] == "local_only"
+
+    def test_init_rejects_invalid_llm_concurrency(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        app, db = self._make_app(tmp_path)
+        with TestClient(app) as client:
+            for bad in (0, 17, "not-an-int"):
+                resp = client.post(
+                    "/api/init",
+                    json={"sources": ["xiaohongshu"], "llm_concurrency": bad},
+                )
+                assert resp.status_code == 400
+                assert resp.json()["error"] == "invalid_llm_concurrency"
+        assert db.get_latest_init_run() is None
+
+    def test_init_passes_llm_concurrency_to_pipeline(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["douyin"])
+        app, _ = self._make_app(tmp_path, prereqs=prereqs)
+        captured = self._capture_run_guided_init(monkeypatch)
+        with TestClient(app) as client:
+            resp = client.post(
+                "/api/init",
+                json={"sources": ["douyin"], "llm_concurrency": 2},
+            )
+            assert resp.status_code == 202, resp.text
+            self._drive_until(client, captured, key="llm_concurrency")
+        assert captured["llm_concurrency"] == 2
 
     def test_init_rejects_docker_runtime(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

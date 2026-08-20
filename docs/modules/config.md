@@ -1,6 +1,6 @@
 # 配置参考
 
-> `[llm].concurrency` 缺省/非法值为 4；显式正数（含旧值 3）原样保留。后台容量为 `max(1, total-1)`；`candidate_eval_concurrency` 仍默认 3。
+> `[llm].concurrency` 缺省/非法值为 3；显式正数原样保留。后台容量为 `max(1, total-1)`（默认 2）；`candidate_eval_concurrency` 仍默认 3。
 
 > `config.toml` 所有配置段落详解。
 
@@ -165,7 +165,7 @@ auto_sync_enabled = false
 |----|------|--------|------|
 | `routing_version` | int | `2` | LLM 实例路由配置版本。新配置固定为 `2` |
 | `default_chain` | list[string] | `["deepseek"]` | 全局有序实例链。每一项引用一个 `[llm.instances.<id>]`；请求按从左到右的顺序尝试 |
-| `concurrency` | int | `4` | 单 runtime 的 LLM 总并发上限；后台容量派生为 `max(1, total-1)`（默认 3）。合法范围 `1..16` |
+| `concurrency` | int | `3` | 单 runtime 的 LLM 总并发上限；后台容量派生为 `max(1, total-1)`（默认 2）。合法范围 `1..16` |
 | `timeout` | int | `1200` | 每个实例请求的超时秒数，默认 20 分钟，合法范围 `10..1200` |
 
 `default_chain` 里的元素是**实例 ID**，不是 Provider 类型。一个实例是一套完整、可独立调用的端点配置，因此可以同时存在两个 `provider_type = "openai_compatible"` 的中转渠道、两个 OpenAI 账号，或同一网关上的不同模型：
@@ -174,7 +174,7 @@ auto_sync_enabled = false
 [llm]
 routing_version = 2
 default_chain = ["relay-primary", "relay-backup", "deepseek"]
-concurrency = 4
+concurrency = 3
 timeout = 1200
 
 [llm.instances.relay-primary]

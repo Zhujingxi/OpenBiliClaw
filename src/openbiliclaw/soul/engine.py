@@ -334,7 +334,7 @@ class SoulEngine:
         awareness_prompt_view: str = "compact-v1",
         insight_prompt_view: str = "legacy",
         module_overrides: Mapping[str, ModuleOverride] | None = None,
-        llm_concurrency: int = 4,
+        llm_concurrency: int = 3,
         llm_concurrency_gate: Any | None = None,
         speculation_interval_minutes: int = 10,
         speculation_ttl_days: int = 3,
@@ -591,6 +591,7 @@ class SoulEngine:
         *,
         event_chunk_size: int = 0,
         progress_callback: Callable[[int, int], Awaitable[None]] | None = None,
+        llm_concurrency: int | None = None,
     ) -> None:
         """Analyze new behavioral events and update all memory layers.
 
@@ -619,6 +620,7 @@ class SoulEngine:
             existing_preference=preference_layer.data,
             event_chunk_size=event_chunk_size,
             progress_callback=progress_callback,
+            llm_concurrency=llm_concurrency,
         )
         init_cognition = updated_preference.pop(INIT_COGNITION_CONTEXT_KEY, None)
         self._init_cognition_context = init_cognition if isinstance(init_cognition, dict) else {}
