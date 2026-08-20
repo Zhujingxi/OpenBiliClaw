@@ -9,7 +9,7 @@
 - eight native workflow tool contracts selected by intent, connected provider, and skill/capability; global exposure is prohibited;
 - provider-native read tools reuse the bounded Content Integration tool contract; all results are sanitized and clamped before history;
 - `AssistantSkill` contains only a stable ID, tool factory, model requirements, and static instructions; it has no lifecycle, hook, or credential;
-- conversation/message/tool-summary/pending-action/usage models, SQLite restart, retention, scope, and deletion; successful validated turns atomically persist the user message, structured Assistant response, friendly sanitized tool summaries, and conversation timestamp, while reasoning and native tool payloads are never stored;
+- conversation/message/tool-summary/pending-action/usage models, SQLite restart, retention, scope, and deletion; a caller-supplied conversation identity owned by another device is indistinguishable from not found and is never reassigned or loaded as model history; successful validated and render-audited turns atomically persist the user message, structured Assistant response, friendly sanitized tool summaries, and conversation timestamp, while reasoning and native tool payloads are never stored;
 - full-window transcript projection that reconstructs only persisted complete user/Assistant turns, estimates instructions, tool definitions, profile, history, and current input, reserves about 20% of the configured model window for output/tool work, and excludes only the oldest complete turns when needed;
 - an approximate context meter reports input-window use and the count of oldest turns excluded; excluded transcript remains persisted and readable, with no automatic summarization;
 - exact-effect/expiry presentation for pending actions and replay-safe deterministic confirmation;
@@ -24,7 +24,7 @@ PydanticAI output tools enforce Assistant's discriminated output. The output too
 
 ## Turn lifecycle
 
-The canonical Composition controller emits `turn_started`, textual-provider-reasoning start/delta/finish, sanitized tool start/finish, validated visible response delta, `turn_finished`, or safe `error`. Both streaming HTTP and the existing non-streaming call consume this workflow. Cancelling the consumer propagates directly into `AIRuntime.stream`; there is no stop registry or stop endpoint.
+The canonical Composition controller emits `turn_started`, textual-provider-reasoning start/delta/finish, sanitized tool start/finish, validated visible response delta, `turn_finished`, or safe `error`. Both streaming HTTP and the existing non-streaming call consume this workflow. Each request may supply a bounded `turn_key` to deduplicate an explicit retry; without one, identical text is retained as a distinct turn. The SSE host allows the 45-second Assistant policy plus a five-second close margin, sanitizes ordinary post-header failures, and deterministically closes the inner generator on timeout, disconnect, early close, or cancellation; cancellation still propagates directly into `AIRuntime.stream`. There is no stop registry or stop endpoint.
 
 ## Composition
 

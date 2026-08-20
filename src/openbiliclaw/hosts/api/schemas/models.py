@@ -197,6 +197,9 @@ class AssistantTurnRequest(TransportModel):
     conversation_id: str = Field(pattern=r"^conv_[0-9a-f]{32}$")
     text: str = Field(min_length=1, max_length=8000)
     locale: str = Field(default="en-US", min_length=2, max_length=32)
+    turn_key: str | None = Field(
+        default=None, min_length=8, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$"
+    )
 
 
 class AssistantTurnResponse(TransportModel):

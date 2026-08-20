@@ -480,6 +480,20 @@
             "minLength": 1,
             "title": "Text",
             "type": "string"
+          },
+          "turn_key": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 8,
+                "pattern": "^[A-Za-z0-9._:-]+$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Turn Key"
           }
         },
         "required": [

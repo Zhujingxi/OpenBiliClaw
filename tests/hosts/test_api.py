@@ -703,6 +703,139 @@ async def test_assistant_stream_disconnect_closes_owned_generator() -> None:
     assert closed.is_set()
 
 
+async def test_assistant_stream_prefetch_wrapper_closes_inner_on_early_close() -> None:
+    from openbiliclaw.hosts.api.routers.assistant import _prepend_event
+
+    closed = asyncio.Event()
+    meter = ContextMeter(
+        estimated_input_tokens=1,
+        context_window_tokens=100,
+        approximate_usage_percent=1,
+        excluded_oldest_turns=0,
+    )
+
+    async def events():
+        try:
+            yield TurnStarted(context_meter=meter)
+            await asyncio.Event().wait()
+        finally:
+            closed.set()
+
+    inner = events()
+    first = await anext(inner)
+    stream = _prepend_event(first, inner)
+    assert await anext(stream) == first
+    await stream.aclose()
+    assert closed.is_set()
+
+
+async def test_assistant_stream_failure_is_sanitized_and_closes_inner_generator() -> None:
+    from openbiliclaw.hosts.api.routers.assistant import _turn_event_stream
+
+    closed = asyncio.Event()
+    meter = ContextMeter(
+        estimated_input_tokens=1,
+        context_window_tokens=100,
+        approximate_usage_percent=1,
+        excluded_oldest_turns=0,
+    )
+
+    async def events():
+        try:
+            yield TurnStarted(context_meter=meter)
+            raise RuntimeError("authorization: upstream-secret")
+        finally:
+            closed.set()
+
+    async def connected() -> bool:
+        return False
+
+    payload = "".join(
+        [item async for item in _turn_event_stream(events(), connected, timeout_seconds=30)]
+    )
+    assert '"kind":"turn_started"' in payload
+    assert '"kind":"error"' in payload
+    assert '"code":"temporary_failure"' in payload
+    assert "upstream-secret" not in payload
+    assert closed.is_set()
+
+
+async def test_assistant_stream_cancellation_propagates_and_closes_inner_generator() -> None:
+    from openbiliclaw.hosts.api.routers.assistant import _turn_event_stream
+
+    closed = asyncio.Event()
+    meter = ContextMeter(
+        estimated_input_tokens=1,
+        context_window_tokens=100,
+        approximate_usage_percent=1,
+        excluded_oldest_turns=0,
+    )
+
+    async def events():
+        try:
+            yield TurnStarted(context_meter=meter)
+            await asyncio.Event().wait()
+        finally:
+            closed.set()
+
+    async def connected() -> bool:
+        return False
+
+    stream = _turn_event_stream(events(), connected, timeout_seconds=30)
+    assert "turn_started" in await anext(stream)
+    pending = asyncio.create_task(anext(stream))
+    await asyncio.sleep(0)
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    assert closed.is_set()
+
+
+async def test_assistant_stream_timeout_uses_runtime_margin_and_closes_inner() -> None:
+    from openbiliclaw.assistant.agent import ASSISTANT_POLICY
+    from openbiliclaw.hosts.api.routers.assistant import (
+        _ASSISTANT_STREAM_TIMEOUT_SECONDS,
+        _turn_event_stream,
+    )
+
+    assert ASSISTANT_POLICY.timeout_seconds < _ASSISTANT_STREAM_TIMEOUT_SECONDS
+    closed = asyncio.Event()
+
+    async def events():
+        try:
+            await asyncio.Event().wait()
+            yield  # pragma: no cover
+        finally:
+            closed.set()
+
+    async def connected() -> bool:
+        return False
+
+    payload = "".join(
+        [item async for item in _turn_event_stream(events(), connected, timeout_seconds=0.001)]
+    )
+    assert '"message":"assistant stream timed out"' in payload
+    assert closed.is_set()
+
+
+async def test_assistant_stream_scope_failure_returns_typed_not_found_before_headers() -> None:
+    class MismatchedConversationFacade(Facade):
+        async def assistant_turn_stream(self, request: AssistantTurnInput, device_id: str):
+            del request, device_id
+            raise ApplicationError(ApplicationErrorCode.NOT_FOUND, "conversation not found")
+            yield  # pragma: no cover
+
+    async with client(MismatchedConversationFacade()) as api:
+        response = await api.post(
+            "/v1/assistant/turns/stream",
+            json={"conversation_id": "conv_" + "a" * 32, "text": "hi"},
+            headers=MUTATION_HEADERS,
+        )
+
+    assert response.status_code == 404
+    assert response.json() == {"error": {"code": "not_found", "message": "conversation not found"}}
+
+
 async def test_assistant_stream_exposes_typed_sse_lifecycle() -> None:
     async with client(Facade()) as api:
         response = await api.post(

@@ -17,6 +17,8 @@ from .agent import (
 )
 from .history import estimate_tokens, select_history
 
+DIALOGUE_PROFILE_MAX_BYTES = 49_152
+
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
@@ -56,7 +58,7 @@ def turn_context(command: TurnCommand) -> tuple[ContextProjection, ...]:
         "Never expose opaque internal IDs."
     )
     return (
-        ContextProjection("dialogue-profile", profile, 4_096),
+        ContextProjection("dialogue-profile", profile, DIALOGUE_PROFILE_MAX_BYTES),
         ContextProjection("response-requirements", response_requirements, 512),
     )
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -38,6 +39,7 @@ from openbiliclaw.assistant.models import (
     TurnStarted,
     TurnUsage,
 )
+from openbiliclaw.assistant.repository import ConversationScopeMismatchError
 from openbiliclaw.assistant.service import AssistantService, TurnCommand
 from openbiliclaw.assistant.tools import (
     AssistantIntent,
@@ -179,32 +181,36 @@ class AssistantController:
 
         now = datetime.now(UTC)
         scope = self._scope(device_id)
-        conversation = await self._conversations.get_conversation(request.conversation_id, scope)
-        if conversation is None:
-            conversation = Conversation(
-                conversation_id=request.conversation_id,
-                scope=scope,
-                created_at=now,
-                updated_at=now,
-            )
-            await self._conversations.put_conversation(conversation)
-        profile = dialogue_projection(await self._understanding.profile(DEFAULT_PROFILE_ID))
-        command = TurnCommand(
-            text=request.text,
-            deps=AssistantDependencies(
-                application=self._application,
-                profile=profile,
-                locale=request.locale,
-                conversation=ConversationMetadata(request.conversation_id, scope),
-            ),
-        )
-        prepared = self._service.prepare_turn(
-            command, await self._conversations.all_messages(request.conversation_id)
-        )
-        yield TurnStarted(context_meter=prepared.context_meter)
         reasoning_open = False
         tool_calls: list[ToolCallSummary] = []
         try:
+            conversation = await self._conversations.get_conversation_unscoped(
+                request.conversation_id
+            )
+            if conversation is not None and conversation.scope != scope:
+                raise ApplicationError(ApplicationErrorCode.NOT_FOUND, "conversation not found")
+            if conversation is None:
+                conversation = Conversation(
+                    conversation_id=request.conversation_id,
+                    scope=scope,
+                    created_at=now,
+                    updated_at=now,
+                )
+                history: tuple[ConversationMessage, ...] = ()
+            else:
+                history = await self._conversations.all_messages(request.conversation_id)
+            profile = dialogue_projection(await self._understanding.profile(DEFAULT_PROFILE_ID))
+            command = TurnCommand(
+                text=request.text,
+                deps=AssistantDependencies(
+                    application=self._application,
+                    profile=profile,
+                    locale=request.locale,
+                    conversation=ConversationMetadata(request.conversation_id, scope),
+                ),
+            )
+            prepared = self._service.prepare_turn(command, history)
+            yield TurnStarted(context_meter=prepared.context_meter)
             async for runtime_event in self._service.stream_turn(prepared):
                 if isinstance(runtime_event, RuntimeTextDelta):
                     if runtime_event.kind != "reasoning_delta":
@@ -242,6 +248,9 @@ class AssistantController:
                         input_tokens=runtime_event.result.usage.input_tokens,
                         output_tokens=runtime_event.result.usage.output_tokens,
                     )
+                    visible_event = ResponseDelta(
+                        delta=render_assistant_output(runtime_event.result.output)
+                    )
                     await self._persist_turn(
                         conversation,
                         request.text,
@@ -249,9 +258,9 @@ class AssistantController:
                         usage,
                         tuple(tool_calls),
                         now,
+                        request.turn_key,
                     )
-                    visible = render_assistant_output(runtime_event.result.output)
-                    yield ResponseDelta(delta=visible)
+                    yield visible_event
                     yield TurnFinished(
                         output=runtime_event.result.output,
                         context_meter=prepared.context_meter,
@@ -260,6 +269,12 @@ class AssistantController:
                     return
         except asyncio.CancelledError:
             raise
+        except ApplicationError:
+            raise
+        except ConversationScopeMismatchError as exc:
+            raise ApplicationError(
+                ApplicationErrorCode.NOT_FOUND, "conversation not found"
+            ) from exc
         except (AIRuntimeError, MessageAuditError, ToolResultTooLargeError):
             if reasoning_open:
                 yield ReasoningFinished()
@@ -279,9 +294,11 @@ class AssistantController:
         usage: TurnUsage,
         tool_calls: tuple[ToolCallSummary, ...],
         started_at: datetime,
+        client_turn_key: str | None,
     ) -> None:
+        identity = client_turn_key or uuid.uuid4().hex
         user_key = (
-            f"turn:{conversation.conversation_id}:{hashlib.sha256(user_text.encode()).hexdigest()}"
+            f"turn:{conversation.conversation_id}:{hashlib.sha256(identity.encode()).hexdigest()}"
         )
         updated = datetime.now(UTC)
         await self._conversations.append_turn(

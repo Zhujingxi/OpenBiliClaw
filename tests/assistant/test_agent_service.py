@@ -73,6 +73,28 @@ def test_turn_context_requires_requested_locale_and_readable_recommendations() -
     assert "Never expose opaque internal IDs" in requirements
 
 
+def test_turn_context_accepts_full_bounded_cjk_dialogue_profile() -> None:
+    profile = DialogueProfile(
+        preference_summary=tuple("界" * 200 for _ in range(20)),
+        insights=tuple("界" * 500 for _ in range(8)),
+    )
+    deps = _deps()
+    command = TurnCommand(
+        text="继续",
+        deps=AssistantDependencies(
+            application=deps.application,
+            profile=profile,
+            locale=deps.locale,
+            conversation=deps.conversation,
+        ),
+    )
+
+    projection = next(item for item in turn_context(command) if item.label == "dialogue-profile")
+
+    assert len(projection.text.encode("utf-8")) > 4_096
+    assert len(projection.text.encode("utf-8")) <= projection.max_bytes
+
+
 def test_output_tool_schema_enumerates_the_supported_kinds() -> None:
     toolset = build_assistant_agent()._output_toolset
     assert toolset is not None

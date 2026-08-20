@@ -12,8 +12,13 @@ if TYPE_CHECKING:
     from openbiliclaw.infrastructure.sqlite.database import SqliteDatabase
 
 
+class ConversationScopeMismatchError(RuntimeError):
+    """A conversation identity already belongs to another scope."""
+
+
 class ConversationRepository(Protocol):
     async def put_conversation(self, conversation: Conversation) -> None: ...
+    async def get_conversation_unscoped(self, conversation_id: str) -> Conversation | None: ...
     async def get_conversation(
         self, conversation_id: str, scope: ConversationScope
     ) -> Conversation | None: ...
@@ -53,9 +58,9 @@ class SqliteConversationRepository:
                 ),
             )
 
-    async def get_conversation(
-        self, conversation_id: str, scope: ConversationScope
-    ) -> Conversation | None:
+    async def get_conversation_unscoped(self, conversation_id: str) -> Conversation | None:
+        """Load by identity so orchestration can distinguish absence from scope mismatch."""
+
         async with self._database.transaction() as session:
             row = await session.fetch_one(
                 "SELECT conversation_json FROM assistant_conversations WHERE conversation_id=?",
@@ -63,8 +68,13 @@ class SqliteConversationRepository:
             )
         if row is None or not isinstance(row[0], str):
             return None
-        conversation = Conversation.model_validate_json(row[0])
-        return conversation if conversation.scope == scope else None
+        return Conversation.model_validate_json(row[0])
+
+    async def get_conversation(
+        self, conversation_id: str, scope: ConversationScope
+    ) -> Conversation | None:
+        conversation = await self.get_conversation_unscoped(conversation_id)
+        return conversation if conversation is not None and conversation.scope == scope else None
 
     async def append_message(self, conversation_id: str, message: ConversationMessage) -> bool:
         async with self._database.transaction() as session:
@@ -94,6 +104,25 @@ class SqliteConversationRepository:
         if user_message.role.value != "user" or assistant_message.role.value != "assistant":
             raise ValueError("append_turn requires user and assistant messages")
         async with self._database.transaction() as session:
+            await session.execute(
+                "INSERT OR IGNORE INTO assistant_conversations("
+                "conversation_id,created_at,updated_at,conversation_json) VALUES(?,?,?,?)",
+                (
+                    conversation.conversation_id,
+                    conversation.created_at.isoformat(),
+                    conversation.updated_at.isoformat(),
+                    conversation.model_dump_json(),
+                ),
+            )
+            row = await session.fetch_one(
+                "SELECT conversation_json FROM assistant_conversations WHERE conversation_id=?",
+                (conversation.conversation_id,),
+            )
+            if row is None or not isinstance(row[0], str):
+                raise RuntimeError("assistant conversation insert failed")
+            stored = Conversation.model_validate_json(row[0])
+            if stored.scope != conversation.scope:
+                raise ConversationScopeMismatchError("conversation scope mismatch")
             for message in (user_message, assistant_message):
                 await session.execute(
                     "INSERT OR IGNORE INTO assistant_messages("
@@ -126,7 +155,7 @@ class SqliteConversationRepository:
         async with self._database.transaction() as session:
             rows = await session.fetch_all(
                 "SELECT content_json FROM assistant_messages WHERE conversation_id=? "
-                "ORDER BY created_at DESC LIMIT ?",
+                "ORDER BY created_at DESC, rowid DESC LIMIT ?",
                 (conversation_id, limit),
             )
         parsed = tuple(
@@ -142,7 +171,7 @@ class SqliteConversationRepository:
         async with self._database.transaction() as session:
             rows = await session.fetch_all(
                 "SELECT content_json FROM assistant_messages WHERE conversation_id=? "
-                "ORDER BY created_at",
+                "ORDER BY created_at, rowid",
                 (conversation_id,),
             )
         return tuple(

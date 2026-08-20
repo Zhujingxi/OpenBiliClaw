@@ -19,7 +19,12 @@ from openbiliclaw.assistant.agent import (
     ASSISTANT_REQUIREMENTS,
     build_assistant_agent,
 )
-from openbiliclaw.assistant.models import ToolFinished, ToolStarted, TurnFinished
+from openbiliclaw.assistant.models import (
+    AssistantStreamError,
+    ToolFinished,
+    ToolStarted,
+    TurnFinished,
+)
 from openbiliclaw.assistant.service import AssistantService
 from openbiliclaw.composition.assistant import (
     AssistantController,
@@ -67,7 +72,9 @@ def test_assistant_recommendation_context_exposes_titles_and_links_not_internal_
 
 
 @pytest.mark.asyncio
-async def test_controller_persists_scoped_turn_and_messages(tmp_path: Path) -> None:
+async def test_controller_persists_scoped_turn_and_messages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     application = build_application(AppSettings(), options=BuildOptions(data_dir=tmp_path))
     await application.start()
     assert application.repositories is not None
@@ -105,18 +112,70 @@ async def test_controller_persists_scoped_turn_and_messages(tmp_path: Path) -> N
         application.services.facade,
     )
     conversation_id = "conv_" + "a" * 32
-    output = await controller.turn(
-        AssistantTurnRequest(conversation_id=conversation_id, text="hi", locale="en-US"),
-        "desktop",
-    )
+    request = AssistantTurnRequest(conversation_id=conversation_id, text="hi", locale="en-US")
+    output = await controller.turn(request, "desktop")
     assert output.kind == "message"
-    assert (await controller.conversation(conversation_id, "desktop")).updated_at <= datetime.now(
-        UTC
+    await controller.turn(request, "desktop")
+    assert len(await controller.messages(conversation_id, "desktop", 20)) == 4
+    retry = AssistantTurnRequest(
+        conversation_id=conversation_id,
+        text="hi",
+        locale="en-US",
+        turn_key="client-retry-0001",
     )
+    await controller.turn(retry, "desktop")
+    await controller.turn(retry, "desktop")
+
+    owner_conversation = await controller.conversation(conversation_id, "desktop")
+    assert owner_conversation.updated_at <= datetime.now(UTC)
     messages = await controller.messages(conversation_id, "desktop", 20)
-    assert tuple(message.role.value for message in messages) == ("user", "assistant")
-    with pytest.raises(Exception, match="not found"):
-        await controller.conversation(conversation_id, "other-device")
+    assert tuple(message.role.value for message in messages) == (
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+    )
+
+    history_reads = 0
+    original_all_messages = application.repositories.conversations.all_messages
+
+    async def tracked_all_messages(target_conversation_id: str):
+        nonlocal history_reads
+        history_reads += 1
+        return await original_all_messages(target_conversation_id)
+
+    monkeypatch.setattr(
+        application.repositories.conversations, "all_messages", tracked_all_messages
+    )
+    with pytest.raises(ApplicationError) as caught:
+        await controller.turn(request, "other-device")
+    assert caught.value.code is ApplicationErrorCode.NOT_FOUND
+    assert history_reads == 0
+    assert (
+        await application.repositories.conversations.get_conversation_unscoped(conversation_id)
+        == owner_conversation
+    )
+    assert await application.repositories.conversations.all_messages(conversation_id) == messages
+
+    monkeypatch.setattr(
+        "openbiliclaw.composition.assistant.render_assistant_output",
+        lambda output: "cookie: never-visible",
+    )
+    rejected_id = "conv_" + "d" * 32
+    rejected_events = [
+        event
+        async for event in controller.stream_turn(
+            AssistantTurnRequest(conversation_id=rejected_id, text="audit me", locale="en-US"),
+            "desktop",
+        )
+    ]
+    assert isinstance(rejected_events[-1], AssistantStreamError)
+    assert (
+        await application.repositories.conversations.get_conversation_unscoped(rejected_id) is None
+    )
+    assert await application.repositories.conversations.all_messages(rejected_id) == ()
     await application.stop()
 
 
@@ -223,6 +282,33 @@ async def test_controller_translates_ai_runtime_failure_to_typed_unavailable(
         ResourceBudget("assistant", 1),
     )
     service = AssistantService(runtime, build_assistant_agent())
+    controller = AssistantController(
+        service,
+        application.repositories.conversations,
+        application.services.understanding,
+        application.services.facade,
+    )
+
+    def failing_prepare(command: object, messages: object) -> object:
+        del command, messages
+        raise ValueError("projection is oversized")
+
+    prepare_failure_id = "conv_" + "e" * 32
+    with monkeypatch.context() as patch:
+        patch.setattr(service, "prepare_turn", failing_prepare)
+        events = [
+            event
+            async for event in controller.stream_turn(
+                AssistantTurnRequest(conversation_id=prepare_failure_id, text="hi", locale="en-US"),
+                "desktop",
+            )
+        ]
+    assert len(events) == 1
+    assert isinstance(events[0], AssistantStreamError)
+    assert (
+        await application.repositories.conversations.get_conversation_unscoped(prepare_failure_id)
+        is None
+    )
 
     async def failing_stream(prepared: object):
         del prepared
@@ -230,12 +316,6 @@ async def test_controller_translates_ai_runtime_failure_to_typed_unavailable(
         yield  # pragma: no cover
 
     monkeypatch.setattr(service, "stream_turn", failing_stream)
-    controller = AssistantController(
-        service,
-        application.repositories.conversations,
-        application.services.understanding,
-        application.services.facade,
-    )
     with pytest.raises(ApplicationError) as caught:
         await controller.turn(
             AssistantTurnRequest(conversation_id="conv_" + "b" * 32, text="hi", locale="en-US"),

@@ -171,6 +171,7 @@ class AssistantTurnInput(Protocol):
     conversation_id: str
     text: str
     locale: str
+    turn_key: str | None
 
 
 class EventSource(Protocol):

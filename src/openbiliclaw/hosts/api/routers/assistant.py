@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
+from contextlib import aclosing
+from typing import TYPE_CHECKING, cast
 
 from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import TypeAdapter
 
+from openbiliclaw.assistant.agent import ASSISTANT_POLICY
 from openbiliclaw.assistant.models import AssistantStreamError
 
 from ..dependencies import HostDependencies, get_dependencies
@@ -18,10 +20,21 @@ from ..schemas.models import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable
+    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 
 router = APIRouter(prefix="/assistant", tags=["assistant"])
 _event_adapter: TypeAdapter[AssistantTurnLifecycleEvent] = TypeAdapter(AssistantTurnLifecycleEvent)
+_ASSISTANT_STREAM_TIMEOUT_SECONDS = float(ASSISTANT_POLICY.timeout_seconds + 5)
+
+
+async def _prepend_event(
+    first: AssistantTurnLifecycleEvent,
+    events: AsyncIterator[AssistantTurnLifecycleEvent],
+) -> AsyncIterator[AssistantTurnLifecycleEvent]:
+    async with aclosing(cast("AsyncGenerator[AssistantTurnLifecycleEvent, None]", events)):
+        yield first
+        async for event in events:
+            yield event
 
 
 async def _turn_event_stream(
@@ -30,18 +43,24 @@ async def _turn_event_stream(
     timeout_seconds: float,
 ) -> AsyncIterator[str]:
     try:
-        async with asyncio.timeout(timeout_seconds):
-            async for event in events:
-                if await disconnected():
-                    return
-                yield (f"event: {event.kind}\ndata: {_event_adapter.dump_json(event).decode()}\n\n")
+        async with aclosing(cast("AsyncGenerator[AssistantTurnLifecycleEvent, None]", events)):
+            async with asyncio.timeout(timeout_seconds):
+                async for event in events:
+                    if await disconnected():
+                        return
+                    yield (
+                        f"event: {event.kind}\ndata: {_event_adapter.dump_json(event).decode()}\n\n"
+                    )
+    except asyncio.CancelledError:
+        raise
     except TimeoutError:
         error = AssistantStreamError(code="temporary_failure", message="assistant stream timed out")
         yield f"event: error\ndata: {_event_adapter.dump_json(error).decode()}\n\n"
-    finally:
-        close = getattr(events, "aclose", None)
-        if close is not None:
-            await close()
+    except Exception:
+        error = AssistantStreamError(
+            code="temporary_failure", message="assistant stream failed safely"
+        )
+        yield f"event: error\ndata: {_event_adapter.dump_json(error).decode()}\n\n"
 
 
 @router.post("/turns", response_model=AssistantTurnResponse)
@@ -64,11 +83,13 @@ async def stream_turn(
     device_id: str = Header(alias="X-Device-ID", min_length=1, max_length=128),
     dependencies: HostDependencies = Depends(get_dependencies),
 ) -> StreamingResponse:
+    events = dependencies.facade.assistant_turn_stream(body, device_id)
+    first = await anext(events)
     return StreamingResponse(
         _turn_event_stream(
-            dependencies.facade.assistant_turn_stream(body, device_id),
+            _prepend_event(first, events),
             request.is_disconnected,
-            dependencies.security.request_timeout_seconds,
+            _ASSISTANT_STREAM_TIMEOUT_SECONDS,
         ),
         media_type="text/event-stream",
     )

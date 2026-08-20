@@ -653,6 +653,8 @@ export interface components {
             locale: string;
             /** Text */
             text: string;
+            /** Turn Key */
+            turn_key?: string | null;
         };
         /** AssistantTurnResponse */
         AssistantTurnResponse: {

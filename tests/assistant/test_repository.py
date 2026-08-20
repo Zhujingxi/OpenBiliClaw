@@ -39,8 +39,16 @@ async def test_sqlite_conversation_restart_retention_and_delete(tmp_path: Path) 
         created_at=NOW,
         idempotency_key="turn:00000001",
     )
+    second_message = ConversationMessage(
+        message_id="msg_" + "c" * 32,
+        role=ConversationRole.ASSISTANT,
+        content='{"kind":"message","text":"hello"}',
+        created_at=NOW,
+        idempotency_key="turn:00000001:assistant",
+    )
     await repo.put_conversation(conversation)
     assert await repo.append_message(conversation.conversation_id, message)
+    assert await repo.append_message(conversation.conversation_id, second_message)
     assert not await repo.append_message(conversation.conversation_id, message)
     await db.close()
 
@@ -49,8 +57,12 @@ async def test_sqlite_conversation_restart_retention_and_delete(tmp_path: Path) 
     repo2 = SqliteConversationRepository(restarted)
     loaded = await repo2.get_conversation(conversation.conversation_id, conversation.scope)
     assert loaded == conversation
-    assert await repo2.messages(conversation.conversation_id, limit=10) == (message,)
-    assert await repo2.all_messages(conversation.conversation_id) == (message,)
+    assert await repo2.get_conversation_unscoped(conversation.conversation_id) == conversation
+    assert await repo2.messages(conversation.conversation_id, limit=10) == (
+        message,
+        second_message,
+    )
+    assert await repo2.all_messages(conversation.conversation_id) == (message, second_message)
     assert (
         await repo2.get_conversation(
             conversation.conversation_id,
