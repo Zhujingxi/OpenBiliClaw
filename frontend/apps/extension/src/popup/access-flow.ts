@@ -1,3 +1,5 @@
+import { ExtensionFailure } from "./errors";
+
 export type ArtifactKind = "cookie" | "local_storage" | "session_storage";
 
 export interface AccessArtifact {
@@ -128,9 +130,11 @@ export async function discoverRecipes(
   const sourcesResponse = await fetcher(`${origin}/v1/sources`, {
     headers: headers(token),
   });
-  if (!sourcesResponse.ok) throw new Error("Backend connection failed");
+  if (!sourcesResponse.ok)
+    throw new ExtensionFailure("backendUnavailable", sourcesResponse.status);
   const sources: unknown = await sourcesResponse.json();
-  if (!isSourceList(sources)) throw new Error("Invalid source response");
+  if (!isSourceList(sources))
+    throw new ExtensionFailure("invalidSourceResponse");
   const recipes = await Promise.all(
     sources.items.map(async ({ provider_id }) => {
       const response = await fetcher(
@@ -138,9 +142,10 @@ export async function discoverRecipes(
         { headers: headers(token) },
       );
       if (response.status === 404) return undefined;
-      if (!response.ok) throw new Error("Recipe lookup failed");
+      if (!response.ok)
+        throw new ExtensionFailure("recipeLookupFailed", response.status);
       const value: unknown = await response.json();
-      if (!isRecipe(value)) throw new Error("Invalid recipe response");
+      if (!isRecipe(value)) throw new ExtensionFailure("invalidRecipeResponse");
       return { providerId: provider_id, recipe: value.recipe };
     }),
   );
@@ -165,7 +170,7 @@ export async function connectFromRecipe(
     (domain) => `https://*.${domain}/*`,
   );
   if (!(await browser.requestOrigins(origins)))
-    throw new Error("Site permission denied");
+    throw new ExtensionFailure("sitePermissionDenied");
   const artifacts = await Promise.all(
     provider.recipe.artifacts.map(async (artifact) => {
       const value =
@@ -177,7 +182,7 @@ export async function connectFromRecipe(
               artifact.name,
             );
       if (value === undefined || value === "")
-        throw new Error(`Required artifact unavailable: ${artifact.name}`);
+        throw new ExtensionFailure("requiredArtifactUnavailable");
       return { ...artifact, value };
     }),
   );
@@ -189,7 +194,8 @@ export async function connectFromRecipe(
       body: JSON.stringify({ artifacts }),
     },
   );
-  if (!response.ok) throw new Error(`Connection failed (${response.status})`);
+  if (!response.ok)
+    throw new ExtensionFailure("connectionFailed", response.status);
   const result: unknown = await response.json();
   const status =
     typeof result === "object" && result !== null
@@ -200,9 +206,7 @@ export async function connectFromRecipe(
       ? (status as { state?: unknown }).state
       : undefined;
   if (state !== "connected")
-    throw new Error(
-      `Credential verification failed${typeof state === "string" ? ` (${state})` : ""}`,
-    );
+    throw new ExtensionFailure("credentialVerificationFailed");
 }
 
 interface ChromeApi {
@@ -230,7 +234,7 @@ interface ChromeApi {
 
 function chromeApi(): ChromeApi {
   const api = (globalThis as { chrome?: ChromeApi }).chrome;
-  if (api === undefined) throw new Error("Browser extension API unavailable");
+  if (api === undefined) throw new ExtensionFailure("extensionApiUnavailable");
   return api;
 }
 

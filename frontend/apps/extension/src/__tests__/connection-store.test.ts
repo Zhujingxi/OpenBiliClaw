@@ -42,7 +42,7 @@ describe("connection store", () => {
     fetcher.mockResolvedValue(new Response("secret body", { status: 503 }));
     await store.check(fetcher);
     expect(store.state).toBe("unavailable");
-    expect(store.error).toBe("Backend unavailable (503)");
+    expect(store.error).toEqual({ code: "backendUnavailable", status: 503 });
   });
 });
 

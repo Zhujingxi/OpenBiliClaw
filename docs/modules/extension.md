@@ -6,11 +6,15 @@ The current extension source is in `frontend/apps/extension/` and is built with 
 
 The extension retains presentation/host and generic credential-capture capabilities:
 
-- the popup/sidebar configures the loopback backend URL and opaque extension token and displays bounded connection state;
+- the popup/sidebar configures the loopback backend base URL (without `/v1`) and an opaque, write-only extension token, and displays bounded connection state;
 - it uses the shared presentation contract through the typed backend API;
 - it discovers provider access recipes built into the backend, and after the user approves each origin, reads only the Cookie or local/session-storage values named by the recipe and sends them only to that loopback backend with the extension token.
 
 The extension contains no provider-specific branches, remote provider-task code, background browsing automation, arbitrary page content/behavior collection, or third-party credential transmission. Every provider-domain permission is an optional host permission that the user must approve when connecting.
+
+## Locale and setup UX
+
+The popup supports `en`, `zh-CN`, and `zh-TW` with browser detection, English fallback, a visible selector, local persistence, and live switching. Static UI, guidance, states, and accessibility text use the popup catalog; provider IDs remain provider data. Chrome and Firefox manifest-facing names/descriptions use standard `_locales`, which the existing Python release packager copies into each artifact. The token value is retained for authenticated requests but is never populated back into the input after hydration or save; leaving the write-only field blank preserves the stored token.
 
 ## API and recipe boundary
 
@@ -27,7 +31,7 @@ python scripts/extension_release.py package --no-build
 python scripts/extension_release.py package --firefox --no-build
 ```
 
-Vite output under `frontend/apps/extension/dist/` is ignored generated JavaScript. Python packaging copies it with declarative manifests/icons into `artifacts/extension/` and creates release archives. Store status/sign/upload commands use `scripts/extension_release.py`; credentials are environment-only and never logged.
+Vite output under `frontend/apps/extension/dist/` is ignored generated JavaScript. Python packaging copies it with declarative manifests, icons, and standard `_locales` into `artifacts/extension/` and creates release archives. Store status/sign/upload commands use `scripts/extension_release.py`; credentials are environment-only and never logged.
 
 ## Removed capabilities
 

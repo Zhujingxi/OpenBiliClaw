@@ -6,6 +6,7 @@ import {
   isCancellation,
   RequestOwner,
   type LoadPhase,
+  type UiError,
 } from "./state";
 
 export const useContentStore = defineStore("content", () => {
@@ -13,8 +14,8 @@ export const useContentStore = defineStore("content", () => {
   const detailPhase = ref<LoadPhase>("idle");
   const results = ref<SearchResponse>({ items: [] });
   const detail = ref<ContentResponse>();
-  const searchError = ref<string>();
-  const detailError = ref<string>();
+  const searchError = ref<UiError>();
+  const detailError = ref<UiError>();
   const searchOwner = new RequestOwner();
   const detailOwner = new RequestOwner();
   // Form state lives in the store so navigating to a detail and back does not

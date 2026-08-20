@@ -7,6 +7,7 @@ import { initializePreferences } from "./app/preferences";
 import { createWebApi } from "./services/api";
 import { authenticatedFetch, useAuthStore } from "./stores/auth";
 import { useSessionStore } from "./stores/session";
+import { createWebI18n } from "./i18n";
 
 async function bootstrap(): Promise<void> {
   const pinia = createPinia();
@@ -24,6 +25,9 @@ async function bootstrap(): Promise<void> {
 
   const app = createApp(App);
   app.use(pinia);
+  app.use(
+    createWebI18n(localStorage, navigator.languages, document.documentElement),
+  );
   app.provide("api", api);
   app.mount("#app");
 }

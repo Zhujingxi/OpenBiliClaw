@@ -12,15 +12,16 @@ import {
   isCancellation,
   RequestOwner,
   type LoadPhase,
+  type UiError,
 } from "./state";
 
 export const useSourcesStore = defineStore("sources", () => {
   const phase = ref<LoadPhase>("idle");
   const items = ref<readonly SourceStatus[]>([]);
   const inventory = ref<SourceInventorySummary>(EMPTY_SOURCE_INVENTORY);
-  const error = ref<string>();
+  const error = ref<UiError>();
   const connectPhase = ref<LoadPhase>("idle");
-  const connectError = ref<string>();
+  const connectError = ref<UiError>();
   const owner = new RequestOwner();
   const connectOwner = new RequestOwner();
 

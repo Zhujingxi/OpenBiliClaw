@@ -107,7 +107,8 @@ textarea:focus-visible,
 select:focus-visible,
 summary:focus-visible,
 main:focus-visible {
-  outline: none;
+  outline: 3px solid var(--ring);
+  outline-offset: 2px;
   box-shadow: var(--focus-ring);
 }
 
@@ -180,6 +181,18 @@ input:not([type="checkbox"]):not([type="radio"]):hover,
 textarea:hover,
 select:hover {
   border-color: #bdb9ae;
+}
+
+input:not([type="checkbox"]):not([type="radio"]):focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  border-color: var(--ring);
+}
+
+input:user-invalid,
+textarea:user-invalid,
+select:user-invalid {
+  border-color: var(--error);
 }
 
 input::placeholder,
@@ -366,7 +379,7 @@ fieldset {
 
 .nav-group > p {
   margin: 0 0.45rem 0.3rem;
-  color: #979187;
+  color: var(--muted-foreground);
   font-size: 0.65rem;
   font-weight: 750;
   letter-spacing: 0.09em;
@@ -590,6 +603,7 @@ main > section > details {
 }
 
 .field-hint {
+  max-width: 68ch;
   margin: 0;
   color: var(--muted-foreground);
   font-size: 0.75rem;

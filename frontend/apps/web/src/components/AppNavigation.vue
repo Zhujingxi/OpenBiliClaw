@@ -1,45 +1,46 @@
 <script setup lang="ts">
+import { useI18n } from "vue-i18n";
 import type { RouteName } from "../app/routes";
 
 defineProps<{ current: RouteName; mobile?: boolean }>();
+const { t } = useI18n();
 
 const groups = [
   {
-    label: "Discover",
+    label: "nav.discover",
     routes: [
-      ["recommendations", "For you", "✦"],
-      ["search", "Search", "⌕"],
+      ["recommendations", "nav.recommendations", "✦"],
+      ["search", "nav.search", "⌕"],
     ],
   },
   {
-    label: "Workspace",
+    label: "nav.workspace",
     routes: [
-      ["assistant", "Assistant", "◈"],
-      ["providers", "Content sources", "▦"],
-      ["profile", "Taste profile", "◎"],
+      ["assistant", "nav.assistant", "◈"],
+      ["providers", "nav.providers", "▦"],
+      ["profile", "nav.profile", "◎"],
     ],
   },
   {
-    label: "System",
+    label: "nav.system",
     routes: [
-      ["settings", "Settings", "⚙"],
-      ["runtime", "Runtime health", "●"],
+      ["settings", "nav.settings", "⚙"],
+      ["runtime", "nav.runtime", "●"],
     ],
   },
 ] as const;
-
 const mobileRoutes = [
-  ["recommendations", "Home", "✦"],
-  ["search", "Search", "⌕"],
-  ["assistant", "Assistant", "◈"],
-  ["providers", "Sources", "▦"],
-  ["settings", "Settings", "⚙"],
+  ["recommendations", "nav.home", "✦"],
+  ["search", "nav.search", "⌕"],
+  ["assistant", "nav.assistant", "◈"],
+  ["providers", "nav.sources", "▦"],
+  ["settings", "nav.settings", "⚙"],
 ] as const;
 </script>
 
 <template>
   <nav
-    :aria-label="mobile ? 'Mobile navigation' : 'Primary navigation'"
+    :aria-label="t(mobile ? 'nav.mobile' : 'nav.primary')"
     :class="mobile ? 'mobile-nav' : 'desktop-nav'"
   >
     <template v-if="mobile">
@@ -49,21 +50,21 @@ const mobileRoutes = [
         :href="`#/${name}`"
         :aria-current="current === name ? 'page' : undefined"
       >
-        <span class="nav-icon" aria-hidden="true">{{ icon }}</span>
-        <span>{{ label }}</span>
+        <span class="nav-icon" aria-hidden="true">{{ icon }}</span
+        ><span>{{ t(label) }}</span>
       </a>
     </template>
     <template v-else>
       <div v-for="group in groups" :key="group.label" class="nav-group">
-        <p>{{ group.label }}</p>
+        <p>{{ t(group.label) }}</p>
         <a
           v-for="[name, label, icon] in group.routes"
           :key="name"
           :href="`#/${name}`"
           :aria-current="current === name ? 'page' : undefined"
         >
-          <span class="nav-icon" aria-hidden="true">{{ icon }}</span>
-          <span>{{ label }}</span>
+          <span class="nav-icon" aria-hidden="true">{{ icon }}</span
+          ><span>{{ t(label) }}</span>
         </a>
       </div>
     </template>

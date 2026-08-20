@@ -3,15 +3,12 @@ import { computed, inject, onBeforeUnmount, onMounted } from "vue";
 import AsyncState from "../components/AsyncState.vue";
 import type { WebApi } from "../services/api";
 import { useSourcesStore } from "../stores/sources";
+import { useI18n } from "vue-i18n";
 
 const api = inject<WebApi>("api");
 if (api === undefined) throw new Error("WebApi not provided");
 const store = useSourcesStore();
-const numberFormatter = new Intl.NumberFormat();
-const dateFormatter = new Intl.DateTimeFormat(undefined, {
-  dateStyle: "medium",
-  timeStyle: "short",
-});
+const { t, locale } = useI18n();
 const connectedCount = computed(
   () => store.items.filter((item) => item.state === "connected").length,
 );
@@ -53,7 +50,7 @@ function label(value: string): string {
     .replace(/\b\w/g, (character) => character.toUpperCase());
 }
 function formatCount(value: number): string {
-  return numberFormatter.format(value);
+  return new Intl.NumberFormat(locale.value).format(value);
 }
 function displayCount(value: number): string {
   return store.phase === "success" || store.phase === "empty"
@@ -66,11 +63,16 @@ function poolShare(value: number): string {
     : `${Math.round((value / store.inventory.pool_count) * 100)}%`;
 }
 function verifiedAt(value: string | null | undefined): string {
-  if (!value) return "Not verified yet";
+  if (!value) return t("providers.notVerified");
   const date = new Date(value);
   return Number.isNaN(date.getTime())
-    ? "Verification time unavailable"
-    : `Verified ${dateFormatter.format(date)}`;
+    ? t("providers.verificationUnavailable")
+    : t("providers.verified", {
+        date: new Intl.DateTimeFormat(locale.value, {
+          dateStyle: "medium",
+          timeStyle: "short",
+        }).format(date),
+      });
 }
 
 onMounted(() => store.load(api));
@@ -81,110 +83,123 @@ onBeforeUnmount(store.cancel);
   <section class="sources-page">
     <div class="page-heading">
       <div class="page-heading-copy">
-        <p class="eyebrow">Content operations</p>
-        <h1 tabindex="-1">Content sources</h1>
-        <p>
-          See what is connected, what OpenBiliClaw has discovered, and what is
-          ready for your feed.
-        </p>
+        <p class="eyebrow">{{ t("providers.eyebrow") }}</p>
+        <h1 tabindex="-1">{{ t("providers.title") }}</h1>
+        <p>{{ t("providers.intro") }}</p>
       </div>
-      <a class="connect-action" href="#/connect">Add or update a source</a>
+      <a class="connect-action" href="#/connect">{{ t("providers.add") }}</a>
     </div>
 
-    <dl class="source-metrics surface-card" aria-label="Source overview">
+    <dl
+      class="source-metrics surface-card"
+      :aria-label="t('providers.overview')"
+    >
       <div>
-        <dt>Connected</dt>
+        <dt>{{ t("providers.connected") }}</dt>
         <dd>{{ displayCount(connectedCount) }}</dd>
-        <small
-          >of {{ displayCount(store.items.length) }} available sources</small
-        >
+        <small>{{
+          t("providers.available", { count: displayCount(store.items.length) })
+        }}</small>
       </div>
       <div>
-        <dt>Feed queue</dt>
+        <dt>{{ t("providers.feedQueue") }}</dt>
         <dd>{{ displayCount(store.inventory.queue_count) }}</dd>
-        <small>selected or already served</small>
+        <small>{{ t("providers.feedHelp") }}</small>
       </div>
       <div>
-        <dt>Videos queued</dt>
+        <dt>{{ t("providers.videos") }}</dt>
         <dd>{{ displayCount(videoQueueCount) }}</dd>
-        <small>video items in the feed queue</small>
+        <small>{{ t("providers.videosHelp") }}</small>
       </div>
       <div>
-        <dt>Candidate pool</dt>
+        <dt>{{ t("providers.pool") }}</dt>
         <dd>{{ displayCount(store.inventory.pool_count) }}</dd>
-        <small>active discovered resources</small>
+        <small>{{ t("providers.poolHelp") }}</small>
       </div>
     </dl>
 
     <AsyncState :phase="store.phase" :error="store.error">
       <template #empty>
-        No providers are available in this server configuration.
-        <a href="#/connect">Review source connection options</a>.
+        {{ t("providers.emptyProviders") }}
+        <a href="#/connect">{{ t("providers.review") }}</a
+        >.
       </template>
 
       <p v-if="!hasConnectedSource" class="empty-guidance" role="status">
-        No sources are connected. <a href="#/connect">Connect a source</a> to
-        search and personalize recommendations.
+        {{ t("providers.noConnected") }}
+        <a href="#/connect">{{ t("providers.connect") }}</a>
+        {{ t("providers.noConnectedTail") }}
       </p>
 
-      <div class="inventory-grid" aria-label="Content inventory">
+      <div class="inventory-grid" :aria-label="t('providers.inventory')">
         <section class="inventory-card surface-card">
           <div class="inventory-heading">
             <div>
-              <p class="eyebrow">Resource pool</p>
-              <h2>What has been discovered</h2>
+              <p class="eyebrow">{{ t("providers.resourcePool") }}</p>
+              <h2>{{ t("providers.discovered") }}</h2>
             </div>
-            <span class="inventory-total"
-              >{{ formatCount(store.inventory.pool_count) }} active</span
-            >
+            <span class="inventory-total">{{
+              t("providers.active", {
+                count: formatCount(store.inventory.pool_count),
+              })
+            }}</span>
           </div>
           <p class="inventory-description">
-            Candidates stay here while they are normalized, evaluated, or
-            available to the recommendation pipeline.
+            {{ t("providers.poolDescription") }}
           </p>
           <ul v-if="contentKinds.length" class="kind-list">
             <li v-for="item in contentKinds" :key="item.key">
               <div class="kind-row-heading">
                 <strong>{{ label(item.key) }}</strong>
                 <span>
-                  {{ formatCount(item.pool_count) }} pool ·
-                  {{ formatCount(item.queue_count) }} queue
+                  {{
+                    t("providers.poolRow", {
+                      pool: formatCount(item.pool_count),
+                      queue: formatCount(item.queue_count),
+                    })
+                  }}
                 </span>
               </div>
               <div
                 class="kind-track"
                 role="img"
-                :aria-label="`${label(item.key)}: ${formatCount(item.pool_count)} of ${formatCount(store.inventory.pool_count)} active candidates`"
+                :aria-label="
+                  t('providers.candidatesAria', {
+                    label: label(item.key),
+                    count: formatCount(item.pool_count),
+                    total: formatCount(store.inventory.pool_count),
+                  })
+                "
               >
                 <span :style="{ width: poolShare(item.pool_count) }"></span>
               </div>
             </li>
           </ul>
           <p v-else class="inventory-empty">
-            The pool is empty. A recommendation refresh will discover content
-            from connected sources.
+            {{ t("providers.poolEmpty") }}
           </p>
         </section>
 
         <section class="inventory-card queue-card surface-card">
           <div class="inventory-heading">
             <div>
-              <p class="eyebrow">Feed queue</p>
-              <h2>What is ready to browse</h2>
+              <p class="eyebrow">{{ t("providers.feedQueue") }}</p>
+              <h2>{{ t("providers.ready") }}</h2>
             </div>
-            <span class="inventory-total queue-total"
-              >{{ formatCount(store.inventory.queue_count) }} items</span
-            >
+            <span class="inventory-total queue-total">{{
+              t("providers.items", {
+                count: formatCount(store.inventory.queue_count),
+              })
+            }}</span>
           </div>
           <p class="inventory-description">
-            The queue contains selected items that are ready or have already
-            been served in the current feed.
+            {{ t("providers.queueDescription") }}
           </p>
           <div class="queue-highlight">
             <span aria-hidden="true">▶</span>
             <div>
               <strong>{{ formatCount(videoQueueCount) }}</strong>
-              <small>videos in queue</small>
+              <small>{{ t("providers.videosInQueue") }}</small>
             </div>
           </div>
           <ul v-if="queuedProviders.length" class="queue-provider-list">
@@ -194,25 +209,27 @@ onBeforeUnmount(store.cancel);
             </li>
           </ul>
           <p v-else class="inventory-empty">
-            Nothing is queued yet. Refresh recommendations after connecting a
-            source.
+            {{ t("providers.queueEmpty") }}
           </p>
           <p class="archive-note">
-            {{ formatCount(store.inventory.archived_count) }} terminal items are
-            archived outside the active pool.
+            {{
+              t("providers.archive", {
+                count: formatCount(store.inventory.archived_count),
+              })
+            }}
           </p>
         </section>
       </div>
 
       <div class="provider-section-heading">
         <div>
-          <p class="eyebrow">Source health</p>
-          <h2>Providers and access</h2>
+          <p class="eyebrow">{{ t("providers.sourceHealth") }}</p>
+          <h2>{{ t("providers.providersAccess") }}</h2>
         </div>
-        <p>Connection, inventory, verification, and supported operations.</p>
+        <p>{{ t("providers.healthIntro") }}</p>
       </div>
 
-      <ul class="provider-grid" aria-label="Provider connection statuses">
+      <ul class="provider-grid" :aria-label="t('providers.statuses')">
         <li
           v-for="item in store.items"
           :key="`${item.provider_id}:${item.account_id ?? 'default'}`"
@@ -227,14 +244,14 @@ onBeforeUnmount(store.cancel);
               <div class="provider-status">
                 <strong>{{ item.provider_id }}</strong>
                 <span class="status-badge" :class="`status-${item.state}`">
-                  {{ item.state }}
+                  {{ t(`common.states.${item.state}`, item.state) }}
                 </span>
               </div>
               <small>
                 {{
                   item.verification?.safe_account_identity ||
                   item.account_id ||
-                  "Default account"
+                  t("providers.defaultAccount")
                 }}
               </small>
             </div>
@@ -247,7 +264,7 @@ onBeforeUnmount(store.cancel);
 
           <dl class="provider-facts">
             <div>
-              <dt>In pool</dt>
+              <dt>{{ t("providers.inPool") }}</dt>
               <dd>
                 {{
                   formatCount(providerStats(item.provider_id)?.pool_count ?? 0)
@@ -255,7 +272,7 @@ onBeforeUnmount(store.cancel);
               </dd>
             </div>
             <div>
-              <dt>In queue</dt>
+              <dt>{{ t("providers.inQueue") }}</dt>
               <dd>
                 {{
                   formatCount(providerStats(item.provider_id)?.queue_count ?? 0)
@@ -263,26 +280,26 @@ onBeforeUnmount(store.cancel);
               </dd>
             </div>
             <div>
-              <dt>Verification</dt>
+              <dt>{{ t("providers.verification") }}</dt>
               <dd>{{ label(item.verification?.strength ?? "none") }}</dd>
             </div>
           </dl>
 
           <div class="capability-block">
             <div class="card-label-row">
-              <span>Capabilities</span>
+              <span>{{ t("providers.capabilities") }}</span>
               <small>{{ item.capabilities?.length ?? 0 }}</small>
             </div>
-            <div class="capability-list" aria-label="Supported capabilities">
+            <div class="capability-list" :aria-label="t('providers.supported')">
               <span
                 v-for="capability in item.capabilities ?? []"
                 :key="capability"
               >
                 {{ label(capability) }}
               </span>
-              <span v-if="!item.capabilities?.length"
-                >Capabilities unavailable</span
-              >
+              <span v-if="!item.capabilities?.length">{{
+                t("providers.capabilitiesUnavailable")
+              }}</span>
             </div>
           </div>
 
@@ -296,9 +313,17 @@ onBeforeUnmount(store.cancel);
           </div>
 
           <div class="provider-card-footer">
-            <span>{{ label(item.method_id || "No access method") }}</span>
+            <span>{{
+              item.method_id ? label(item.method_id) : t("providers.noMethod")
+            }}</span>
             <a :href="`#/connect/${encodeURIComponent(item.provider_id)}`">
-              {{ item.state === "connected" ? "Manage" : "Configure" }}
+              {{
+                t(
+                  item.state === "connected"
+                    ? "providers.manage"
+                    : "providers.configure",
+                )
+              }}
             </a>
           </div>
         </li>

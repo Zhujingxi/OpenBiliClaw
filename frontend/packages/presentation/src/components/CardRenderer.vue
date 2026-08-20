@@ -1,13 +1,20 @@
 <script setup lang="ts">
-import { computed, type Component } from "vue";
+import { computed, provide, type Component } from "vue";
 import ArticleCard from "../cards/ArticleCard.vue";
 import DiscussionCard from "../cards/DiscussionCard.vue";
 import FallbackCard from "../cards/FallbackCard.vue";
 import ImageCard from "../cards/ImageCard.vue";
 import VideoCard from "../cards/VideoCard.vue";
-import type { CardKind, CardView } from "../contracts";
+import {
+  defaultCardLabels,
+  type CardKind,
+  type CardLabels,
+  type CardView,
+} from "../contracts";
 
-const props = defineProps<{ card: CardView }>();
+const props = defineProps<{ card: CardView; labels?: CardLabels }>();
+const labels = computed(() => props.labels ?? defaultCardLabels);
+provide("card-labels", labels);
 const emit = defineEmits<{
   like: [card: CardView];
   dismiss: [card: CardView];
@@ -26,9 +33,7 @@ const renderer = computed(() =>
     : FallbackCard,
 );
 const fallbackMessage = computed(() =>
-  versionSupported.value
-    ? undefined
-    : "Unsupported card version; showing fallback.",
+  versionSupported.value ? undefined : labels.value.unsupported,
 );
 </script>
 <template>

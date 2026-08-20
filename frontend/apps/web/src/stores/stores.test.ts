@@ -168,16 +168,36 @@ const feedItem = {
 beforeEach(() => setActivePinia(createPinia()));
 
 describe("durable concern stores", () => {
-  it("maps common safe API failures to actionable text with original detail", () => {
-    expect(errorMessage(new Error("request validation failed"))).toBe(
-      "Check the submitted fields and try again. (request validation failed)",
-    );
-    expect(errorMessage(new Error("capability is not configured"))).toContain(
-      "AI assistant is not configured",
-    );
-    expect(errorMessage(new Error("specific fallback"))).toBe(
-      "specific fallback",
-    );
+  it("maps API failures to stable localizable presentation data", () => {
+    expect(
+      errorMessage(
+        new ApiError(
+          "http",
+          "request validation failed",
+          422,
+          undefined,
+          "validation",
+        ),
+      ),
+    ).toEqual({ key: "errors.validation", code: "validation", status: 422 });
+    expect(
+      errorMessage(
+        new ApiError(
+          "http",
+          "capability is not configured",
+          503,
+          undefined,
+          "unavailable_capability",
+        ),
+      ),
+    ).toEqual({
+      key: "errors.unavailable",
+      code: "unavailable_capability",
+      status: 503,
+    });
+    expect(errorMessage(new Error("specific fallback"))).toEqual({
+      key: "errors.requestFailed",
+    });
   });
 
   it("exposes loading-empty-success-error states", async () => {
@@ -198,7 +218,7 @@ describe("durable concern stores", () => {
       }),
     );
     expect(recommendations.phase).toBe("error");
-    expect(recommendations.error).toBe("offline");
+    expect(recommendations.error).toEqual({ key: "errors.requestFailed" });
     const sources = useSourcesStore();
     await sources.load(api());
     expect(sources.phase).toBe("empty");
@@ -243,9 +263,9 @@ describe("durable concern stores", () => {
       }),
       card,
     );
-    expect(store.feedbackError[feedItem.shown_id]).toBe(
-      "This recommendation expired. Refresh the feed and try again.",
-    );
+    expect(store.feedbackError[feedItem.shown_id]).toEqual({
+      key: "recommendations.expired",
+    });
   });
 
   it("tracks session/auth without mirroring backend state", () => {
@@ -306,11 +326,11 @@ describe("durable concern stores", () => {
       api({ content: async () => Promise.reject(new Error("detail failed")) }),
       "ref",
     );
-    expect(content.detailError).toBe("detail failed");
+    expect(content.detailError).toEqual({ key: "errors.requestFailed" });
     expect(content.searchError).toBeUndefined();
     await content.search(api(), "demo", "query");
     expect(content.searchPhase).toBe("empty");
-    expect(content.detailError).toBe("detail failed");
+    expect(content.detailError).toEqual({ key: "errors.requestFailed" });
   });
 
   it("loads runtime health and conversation history", async () => {
@@ -356,7 +376,13 @@ describe("durable concern stores", () => {
     await content.search(api({ search: aborted }), "demo", "q");
     expect(content.searchPhase).toBe("loading");
     const assistant = useAssistantStore();
-    await assistant.send(api({ assistantTurn: aborted }), "conv", "d", "q");
+    await assistant.send(
+      api({ assistantTurn: aborted }),
+      "conv",
+      "d",
+      "q",
+      "en",
+    );
     expect(assistant.phase).toBe("loading");
     const profile = useProfileStore();
     await profile.load(api({ profile: aborted }));
@@ -386,10 +412,13 @@ describe("durable concern stores", () => {
     expect(profile.result?.profile.preference_summary).toEqual(["server"]);
   });
 
-  it("appends submitted assistant messages and responses without replacing earlier turns", async () => {
+  it("appends assistant turns and passes the selected locale verbatim", async () => {
     const store = useAssistantStore();
-    await store.send(api(), "conv", "device", "hello");
-    await store.send(api(), "conv", "device", "again");
+    const assistantTurn = vi.fn(api().assistantTurn);
+    const localizedApi = api({ assistantTurn });
+    await store.send(localizedApi, "conv", "device", "hello", "zh-CN");
+    await store.send(localizedApi, "conv", "device", "again", "zh-CN");
+    expect(assistantTurn.mock.calls[0]?.[0]).toMatchObject({ locale: "zh-CN" });
     expect(
       store.messages.map(({ role, content }) => ({ role, content })),
     ).toEqual([
@@ -478,11 +507,29 @@ describe("durable concern stores", () => {
       "device",
     );
 
-    expect(store.messages.map((message) => message.content)).toEqual([
-      "Welcome back",
-      "Try these\nReadable title — https://example.test/watch/1",
-      "More choices 2 recommendations are available in your feed.",
-      "Assistant response unavailable.",
+    expect(
+      store.messages.map(({ content, presentation, count }) => ({
+        content,
+        presentation,
+        count,
+      })),
+    ).toEqual([
+      { content: "Welcome back", presentation: undefined, count: undefined },
+      {
+        content: "Try these\nReadable title — https://example.test/watch/1",
+        presentation: undefined,
+        count: undefined,
+      },
+      {
+        content: "More choices",
+        presentation: "recommendationsAvailable",
+        count: 2,
+      },
+      {
+        content: "",
+        presentation: "responseUnavailable",
+        count: undefined,
+      },
     ]);
     expect(
       store.messages.some((message) =>

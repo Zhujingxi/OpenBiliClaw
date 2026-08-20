@@ -30,6 +30,8 @@ def test_build_extension_tree_copies_generated_assets_and_packages(tmp_path: Pat
     extension = root / "extension"
     extension.joinpath("icons").mkdir(parents=True)
     extension.joinpath("icons/icon16.png").write_bytes(b"png")
+    extension.joinpath("_locales/en").mkdir(parents=True)
+    extension.joinpath("_locales/en/messages.json").write_text("{}")
     manifest = {
         "version": "1.2.3",
         "side_panel": {"default_path": "popup/index.html"},
@@ -42,6 +44,7 @@ def test_build_extension_tree_copies_generated_assets_and_packages(tmp_path: Pat
     with zipfile.ZipFile(archive) as bundle:
         assert "manifest.json" in bundle.namelist()
         assert bundle.read("popup/popup.js") == b"generated"
+        assert "_locales/en/messages.json" in bundle.namelist()
 
 
 def test_manifest_asset_verification_rejects_missing_or_traversal(tmp_path: Path) -> None:

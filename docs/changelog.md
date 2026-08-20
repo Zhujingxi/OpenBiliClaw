@@ -14,6 +14,12 @@
 
 - Added a typed `AIRuntime.stream()` path over PydanticAI native events with textual response/reasoning deltas, payload-free tool lifecycle events, validated terminal results, retries only before visible output, and cancellation-safe resource release; the existing non-streaming runtime remains unchanged.
 
+- Added production internationalization for the responsive web app and browser extension (`en`, `zh-CN`, `zh-TW`) with browser detection, English fallback, persisted live switching, localized manifests, synchronized web document language, and selected-locale Assistant turns; polished accessible setup forms with explicit base-URL and write-only secret guidance.
+
+- Completed localized setup UX: corrected full model API-base guidance, preserved language-selector focus/scroll during live switching, strengthened focus/contrast and form associations, localized stable-code error and Assistant fallback rendering, added extension catalog parity checks, and aligned the static web shell and extension permission documentation.
+
+- Refined localized form semantics by associating catalog model selection with its visible help text and using idiomatic Traditional Chinese for the active-process status.
+
 - Formatted the GitHub Actions regression test to keep the documented Ruff formatting gate green.
 
 - Audited current technical documentation against the production graph: corrected the twelve-provider inventory and fail-closed transport matrix, CLI/config/environment/API contracts, model protocol and reload behavior, web authentication, installer options, restart rehydration, and stale provider/extension claims; removed completed plan files after carrying their current behavior into maintained docs.

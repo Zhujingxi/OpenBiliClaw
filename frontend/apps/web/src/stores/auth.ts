@@ -2,7 +2,7 @@ import { ApiError } from "@openbiliclaw/api-client";
 import { defineStore } from "pinia";
 import { ref } from "vue";
 import type { WebApi } from "../services/api";
-import { errorMessage } from "./state";
+import { errorMessage, type UiError } from "./state";
 
 export const AUTH_TOKEN_KEY = "openbiliclaw.auth-token";
 export type AuthStatus =
@@ -43,7 +43,7 @@ export function authenticatedFetch(
 
 export const useAuthStore = defineStore("auth", () => {
   const status = ref<AuthStatus>("checking");
-  const error = ref<string>();
+  const error = ref<UiError>();
   const loading = ref(false);
 
   function requireLogin(): void {

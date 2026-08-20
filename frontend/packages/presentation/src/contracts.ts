@@ -6,6 +6,32 @@ export type ContentRef = components["schemas"]["ContentRef"];
 export type ActionResult = components["schemas"]["ActionResult"];
 export type CardData = components["schemas"]["CardData"];
 
+export interface CardLabels {
+  unavailable: string;
+  providerUnavailable: string;
+  provider: string;
+  feedbackActions: string;
+  like: string;
+  likeAria: string;
+  dismiss: string;
+  dismissAria: string;
+  unsupported: string;
+  locale: string;
+}
+
+export const defaultCardLabels: CardLabels = {
+  unavailable: "Content unavailable",
+  providerUnavailable: "Provider unavailable",
+  provider: "Provider",
+  feedbackActions: "Feedback actions",
+  like: "Like",
+  likeAria: "Like recommendation",
+  dismiss: "Dismiss",
+  dismissAria: "Dismiss recommendation",
+  unsupported: "Unsupported card version; showing fallback.",
+  locale: "en",
+};
+
 export type CardKind =
   | "video"
   | "image"

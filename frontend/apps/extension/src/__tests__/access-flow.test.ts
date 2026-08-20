@@ -125,7 +125,7 @@ describe("recipe-driven access", () => {
         browser,
         fetcher,
       ),
-    ).rejects.toThrow("Required artifact unavailable");
+    ).rejects.toMatchObject({ code: "requiredArtifactUnavailable" });
     expect(fetcher).not.toHaveBeenCalled();
   });
 });

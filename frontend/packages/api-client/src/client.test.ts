@@ -304,6 +304,7 @@ describe("ApiClient", () => {
     ).rejects.toMatchObject({
       kind: "http",
       status: 401,
+      code: "unauthorized",
       message: "source is not connected",
     });
     const malformed = vi

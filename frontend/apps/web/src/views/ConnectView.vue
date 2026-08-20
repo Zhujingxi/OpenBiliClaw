@@ -1,14 +1,17 @@
 <script setup lang="ts">
 import AsyncState from "../components/AsyncState.vue";
+import LocalizedError from "../components/LocalizedError.vue";
 import { uuid } from "@openbiliclaw/api-client";
 import { inject, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { routeParameter } from "../app/routes";
 import { useSourcesStore } from "../stores/sources";
 import type { WebApi } from "../services/api";
+import { useI18n } from "vue-i18n";
 
 const providedApi = inject<WebApi>("api");
 if (providedApi === undefined) throw new Error("WebApi not provided");
 const api: WebApi = providedApi;
+const { t } = useI18n();
 const store = useSourcesStore();
 const provider = ref("");
 const method = ref("builtin.anonymous");
@@ -46,18 +49,16 @@ onBeforeUnmount(store.cancel);
   <section class="connect-page">
     <div class="page-heading">
       <div class="page-heading-copy">
-        <p class="eyebrow">Source setup</p>
-        <h1 tabindex="-1">Connect content source</h1>
-        <p>
-          Choose a provider, its access method, then supply only what it needs.
-        </p>
+        <p class="eyebrow">{{ t("connect.eyebrow") }}</p>
+        <h1 tabindex="-1">{{ t("connect.title") }}</h1>
+        <p>{{ t("connect.intro") }}</p>
       </div>
-      <a class="back-link" href="#/providers">← All content sources</a>
+      <a class="back-link" href="#/providers">{{ t("connect.all") }}</a>
     </div>
 
     <AsyncState :phase="store.phase" :error="store.error">
       <template #empty>
-        No source providers are available in this server configuration.
+        {{ t("connect.empty") }}
       </template>
       <form
         v-if="store.items.length"
@@ -69,22 +70,21 @@ onBeforeUnmount(store.cancel);
           <div class="step-content">
             <div class="surface-card-header">
               <div>
-                <p class="eyebrow">Provider</p>
-                <h2>Choose the content network</h2>
-                <p>
-                  Each source keeps its own connection and capability state.
-                </p>
+                <p class="eyebrow">{{ t("connect.providerStep") }}</p>
+                <h2>{{ t("connect.chooseProvider") }}</h2>
+                <p>{{ t("connect.providerHelp") }}</p>
               </div>
             </div>
             <div class="field">
-              <label for="provider-id">Content provider</label>
+              <label for="provider-id">{{ t("connect.provider") }}</label>
               <select id="provider-id" v-model="provider" required>
                 <option
                   v-for="item in store.items"
                   :key="item.provider_id"
                   :value="item.provider_id"
                 >
-                  {{ item.provider_id }} — {{ item.state }}
+                  {{ item.provider_id }} —
+                  {{ t(`common.states.${item.state}`, item.state) }}
                 </option>
               </select>
             </div>
@@ -96,11 +96,9 @@ onBeforeUnmount(store.cancel);
           <div class="step-content">
             <div class="surface-card-header">
               <div>
-                <p class="eyebrow">Access</p>
-                <h2>Select a connection method</h2>
-                <p>
-                  Use anonymous access when the provider supports public reads.
-                </p>
+                <p class="eyebrow">{{ t("connect.accessStep") }}</p>
+                <h2>{{ t("connect.chooseMethod") }}</h2>
+                <p>{{ t("connect.accessHelp") }}</p>
               </div>
             </div>
             <div class="method-grid">
@@ -111,21 +109,21 @@ onBeforeUnmount(store.cancel);
                   value="builtin.anonymous"
                 />
                 <span>
-                  <strong>Anonymous</strong>
-                  <small>No credential · public content only</small>
+                  <strong>{{ t("connect.anonymous") }}</strong>
+                  <small>{{ t("connect.anonymousHelp") }}</small>
                 </span>
               </label>
               <label :class="{ selected: method === 'builtin.manual' }">
                 <input v-model="method" type="radio" value="builtin.manual" />
                 <span>
-                  <strong>Credential</strong>
-                  <small>Cookie or token · stored in local vault</small>
+                  <strong>{{ t("connect.credential") }}</strong>
+                  <small>{{ t("connect.credentialHelp") }}</small>
                 </span>
               </label>
             </div>
-            <label class="visually-hidden" for="method-id"
-              >Connection method</label
-            >
+            <label class="visually-hidden" for="method-id">{{
+              t("connect.method")
+            }}</label>
             <select
               id="method-id"
               v-model="method"
@@ -133,9 +131,9 @@ onBeforeUnmount(store.cancel);
               required
             >
               <option value="builtin.anonymous">
-                Anonymous (no credential)
+                {{ t("connect.anonymousOption") }}
               </option>
-              <option value="builtin.manual">Credential / cookie</option>
+              <option value="builtin.manual">{{ t("connect.manual") }}</option>
             </select>
           </div>
         </div>
@@ -145,36 +143,39 @@ onBeforeUnmount(store.cancel);
           <div class="step-content credential-step">
             <div class="surface-card-header">
               <div>
-                <p class="eyebrow">Credential</p>
-                <h2>Secure provider access</h2>
-                <p>
-                  Values are write-only and never displayed after submission.
-                </p>
+                <p class="eyebrow">{{ t("connect.credentialStep") }}</p>
+                <h2>{{ t("connect.secure") }}</h2>
+                <p>{{ t("connect.secureHelp") }}</p>
               </div>
-              <span class="badge">Local vault</span>
+              <span class="badge">{{ t("connect.vault") }}</span>
             </div>
             <div class="form-grid">
               <div class="field">
-                <label for="field-id">Provider field ID</label>
+                <label for="field-id">{{ t("connect.fieldId") }}</label>
                 <input
                   id="field-id"
                   v-model="fieldId"
                   autocomplete="off"
                   required
+                  aria-describedby="field-id-help"
                 />
-                <p class="field-hint">
-                  Use the exact field requested by this provider.
+                <p id="field-id-help" class="field-hint">
+                  {{ t("connect.fieldIdHelp") }}
                 </p>
               </div>
               <div class="field">
-                <label for="credential">Credential value</label>
+                <label for="credential">{{ t("connect.value") }}</label>
                 <input
                   id="credential"
                   v-model="credential"
                   type="password"
                   autocomplete="off"
-                  placeholder="Paste credential"
+                  :placeholder="t('connect.paste')"
+                  aria-describedby="credential-help"
                 />
+                <p id="credential-help" class="field-hint">
+                  {{ t("connect.valueHelp") }}
+                </p>
               </div>
             </div>
           </div>
@@ -182,14 +183,14 @@ onBeforeUnmount(store.cancel);
 
         <div class="connection-submit">
           <div>
-            <strong>Ready to connect {{ provider }}</strong>
-            <small>Requested permission: read public content</small>
+            <strong>{{ t("connect.ready", { provider }) }}</strong>
+            <small>{{ t("connect.permission") }}</small>
           </div>
           <button type="submit" :disabled="store.connectPhase === 'loading'">
             {{
               store.connectPhase === "loading"
-                ? "Connecting…"
-                : "Connect source"
+                ? t("connect.connecting")
+                : t("connect.submit")
             }}
           </button>
         </div>
@@ -198,10 +199,13 @@ onBeforeUnmount(store.cancel);
           role="status"
           aria-live="polite"
         >
-          Source connected.
+          {{ t("connect.connected") }}
         </p>
-        <p v-else-if="store.connectPhase === 'error'" role="alert">
-          {{ store.connectError }}
+        <p
+          v-else-if="store.connectPhase === 'error' && store.connectError"
+          role="alert"
+        >
+          <LocalizedError :error="store.connectError" />
         </p>
       </form>
     </AsyncState>
@@ -209,13 +213,13 @@ onBeforeUnmount(store.cancel);
     <section v-if="store.items.length" aria-labelledby="source-status-heading">
       <div class="surface-card-header">
         <div>
-          <p class="eyebrow">Overview</p>
-          <h2 id="source-status-heading">Source status</h2>
+          <p class="eyebrow">{{ t("connect.overview") }}</p>
+          <h2 id="source-status-heading">{{ t("connect.status") }}</h2>
         </div>
       </div>
       <ul
         class="status-list"
-        aria-label="Source connection statuses"
+        :aria-label="t('connect.statuses')"
         aria-live="polite"
       >
         <li
@@ -224,10 +228,10 @@ onBeforeUnmount(store.cancel);
         >
           <div class="source-status">
             <strong>{{ item.provider_id }}</strong>
-            <span>{{ item.state }}</span>
+            <span>{{ t(`common.states.${item.state}`, item.state) }}</span>
           </div>
           <span class="status-badge" :class="`status-${item.state}`">{{
-            item.method_id || "Not configured"
+            item.method_id || t("connect.notConfigured")
           }}</span>
         </li>
       </ul>

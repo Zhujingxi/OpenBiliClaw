@@ -1,12 +1,15 @@
 <script setup lang="ts">
 import AsyncState from "../components/AsyncState.vue";
+import LocalizedError from "../components/LocalizedError.vue";
 import { computed, inject, onBeforeUnmount, onMounted, ref } from "vue";
 import { useContentStore } from "../stores/content";
 import { useSourcesStore } from "../stores/sources";
 import type { ContentPreview } from "@openbiliclaw/presentation";
 import type { WebApi } from "../services/api";
+import { useI18n } from "vue-i18n";
 const api = inject<WebApi>("api");
 if (api === undefined) throw new Error("WebApi not provided");
+const { t } = useI18n();
 const store = useContentStore();
 const sources = useSourcesStore();
 const provider = ref(store.lastProvider);
@@ -51,20 +54,21 @@ onBeforeUnmount(store.cancelSearch);
   <section>
     <div class="page-heading">
       <div class="page-heading-copy">
-        <p class="eyebrow">Across your sources</p>
-        <h1 tabindex="-1">Search</h1>
-        <p>Choose a connected provider, then search its native catalog.</p>
+        <p class="eyebrow">{{ t("search.eyebrow") }}</p>
+        <h1 tabindex="-1">{{ t("search.title") }}</h1>
+        <p>{{ t("search.intro") }}</p>
       </div>
     </div>
     <p v-if="sources.phase === 'loading'" role="status" aria-live="polite">
-      Loading connected sources…
+      {{ t("search.loadingSources") }}
     </p>
-    <p v-else-if="sources.phase === 'error'" role="alert">
-      {{ sources.error }}
+    <p v-else-if="sources.phase === 'error' && sources.error" role="alert">
+      <LocalizedError :error="sources.error" />
     </p>
     <p v-else-if="searchable.length === 0" role="status">
-      Search needs a connected source with search support.
-      <a href="#/connect">Connect a source</a> to continue.
+      {{ t("search.noProvider") }}
+      <a href="#/connect">{{ t("common.connectSource") }}</a>
+      {{ t("search.continue") }}
     </p>
     <form
       v-else
@@ -73,7 +77,7 @@ onBeforeUnmount(store.cancelSearch);
       @submit.prevent="store.search(api, provider, query)"
     >
       <div class="field">
-        <label for="search-provider">Provider</label>
+        <label for="search-provider">{{ t("search.provider") }}</label>
         <select id="search-provider" v-model="provider" required>
           <option
             v-for="item in searchable"
@@ -85,18 +89,22 @@ onBeforeUnmount(store.cancelSearch);
         </select>
       </div>
       <div class="field search-query">
-        <label for="search-query">Search content</label>
+        <label for="search-query">{{ t("search.query") }}</label>
         <input
           id="search-query"
           v-model="query"
           required
-          placeholder="Topics, creators, or exact titles"
+          :placeholder="t('search.placeholder')"
+          aria-describedby="search-query-help"
         />
+        <p id="search-query-help" class="field-hint">
+          {{ t("search.queryHelp") }}
+        </p>
       </div>
-      <button type="submit">Search</button>
+      <button type="submit">{{ t("search.submit") }}</button>
     </form>
     <AsyncState :phase="store.searchPhase" :error="store.searchError">
-      <template #empty>No matching content was found.</template>
+      <template #empty>{{ t("search.empty") }}</template>
       <ul class="card-list">
         <li
           v-for="item in store.results.items"
