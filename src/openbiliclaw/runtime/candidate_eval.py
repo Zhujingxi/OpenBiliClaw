@@ -168,6 +168,13 @@ class CandidateEvalCoordinator:
         if self._running:
             return
         self._running = True
+        # Self-heal a previous stop/error unwind. ``_running`` still guards
+        # concurrent entry, but a completed run's ``finally`` (and ``stop()``)
+        # leaves ``_stopping`` True; without this reset, re-entering
+        # ``run_forever()`` on the same coordinator would exit immediately at
+        # the first loop check and candidate evaluation would stay parked in
+        # the "stopping" state until the process restarts.
+        self._stopping = False
         self.notify("startup")
         try:
             while not self._stopping:
