@@ -581,7 +581,9 @@ def test_setup_wizard_e2e_starts_guided_init_and_finishes_on_runtime_event(
     chromium_page.wait_for_function(
         "() => document.querySelector('#initProgress')?.hidden === false"
     )
-    assert stub.init_posts == [{"sources": ["bilibili", "youtube"]}]
+    assert stub.init_posts == [
+        {"sources": ["bilibili", "youtube"], "llm_concurrency": 3}
+    ]
     socket_url = chromium_page.evaluate("() => window.__obcSockets[0].url")
     assert socket_url.endswith("/api/runtime-stream")
 
@@ -960,7 +962,9 @@ def test_setup_wizard_e2e_selected_sources_do_not_require_prior_settings_enable(
     chromium_page.locator("#startInit").click()
 
     chromium_page.wait_for_function("() => window.__obcInitPosted === true")
-    assert stub.init_posts == [{"sources": ["bilibili", "xiaohongshu", "douyin"]}]
+    assert stub.init_posts == [
+        {"sources": ["bilibili", "xiaohongshu", "douyin"], "llm_concurrency": 3}
+    ]
 
 
 def test_desktop_web_e2e_shows_init_cta_and_starts_same_init_endpoint(
@@ -979,7 +983,9 @@ def test_desktop_web_e2e_shows_init_cta_and_starts_same_init_endpoint(
     chromium_page.locator('[data-init-action="start"]').click()
     chromium_page.wait_for_function("() => window.__obcInitPosted === true")
 
-    assert stub.init_posts == [{"sources": ["bilibili", "youtube"]}]
+    assert stub.init_posts == [
+        {"sources": ["bilibili", "youtube"], "llm_concurrency": 3}
+    ]
     chromium_page.wait_for_function(
         "() => document.querySelector('.init-progress')?.innerText.includes('1/4')"
     )
@@ -1196,7 +1202,7 @@ def test_desktop_web_e2e_surfaces_init_start_conflict(
     chromium_page.locator('[data-init-action="start"]').click()
     chromium_page.wait_for_function("() => window.__obcInitPosted === true")
 
-    assert stub.init_posts == [{"sources": ["bilibili"]}]
+    assert stub.init_posts == [{"sources": ["bilibili"], "llm_concurrency": 3}]
     chromium_page.wait_for_function(
         "() => document.querySelector('.init-reason')?.innerText.includes('初始化正在进行中')"
     )
@@ -1227,7 +1233,7 @@ def test_desktop_web_e2e_surfaces_post_init_prereq_race_errors(
     chromium_page.locator('[data-init-action="start"]').click()
     chromium_page.wait_for_function("() => window.__obcInitPosted === true")
 
-    assert stub.init_posts == [{"sources": ["bilibili"]}]
+    assert stub.init_posts == [{"sources": ["bilibili"], "llm_concurrency": 3}]
     chromium_page.wait_for_function(
         "(expected) => document.querySelector('.init-reason')?.innerText.includes(expected)",
         arg=expected,
@@ -1481,7 +1487,7 @@ def test_web_e2e_bangumi_only_without_username_still_reaches_backend(
     start.click()
 
     chromium_page.wait_for_function("() => window.__obcInitPosted === true")
-    assert stub.init_posts == [{"sources": ["bangumi"]}]
+    assert stub.init_posts == [{"sources": ["bangumi"], "llm_concurrency": 3}]
 
 
 @pytest.mark.parametrize("surface", ["setup", "desktop"])
@@ -1514,7 +1520,7 @@ def test_web_e2e_bangumi_only_renders_backend_rejection_naming_the_extension(
     start.click()
 
     chromium_page.wait_for_function("() => window.__obcInitPosted === true")
-    assert stub.init_posts == [{"sources": ["bangumi"]}]
+    assert stub.init_posts == [{"sources": ["bangumi"], "llm_concurrency": 3}]
     chromium_page.wait_for_function("() => document.body.innerText.includes('bgm.tv')")
     text = reason.inner_text()
     assert "Bangumi" in text
