@@ -22,6 +22,7 @@ from openbiliclaw.discovery.inspiration_provider import (
     McporterYouInspirationProvider,
     PlatformSourceInspirationProvider,
     RedditPlatformSearchBackend,
+    SerplyInspirationProvider,
     V2EXPlatformSearchBackend,
     WeiboPlatformSearchBackend,
     XhsPlatformSearchBackend,
@@ -32,6 +33,7 @@ from openbiliclaw.discovery.inspiration_provider import (
     build_inspiration_search_provider,
     build_platform_source_backends,
     parse_exa_search_payload,
+    parse_serply_search_payload,
     parse_you_search_payload,
 )
 
@@ -212,6 +214,16 @@ async def test_build_provider_defaults_remote_timeout_below_planner_timeout() ->
     assert seen_timeouts == [6.0]
 
 
+def test_build_provider_skips_serply_backend_when_key_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("shutil.which", lambda _name: None)
+
+    provider = build_inspiration_search_provider(["serply"])
+
+    assert provider is None
+
+
 def test_build_provider_skips_mcporter_backends_when_cli_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -286,6 +298,83 @@ async def test_you_direct_provider_calls_api_and_parses_hits() -> None:
             url="https://example.test/you",
             highlights=("snippet one", "snippet two"),
         )
+    ]
+
+
+async def test_serply_direct_provider_calls_api_and_parses_results() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["x-api-key"] == "test-serply-key"
+        assert request.url.host == "api.serply.io"
+        # Serply expects the standard query-string form
+        # GET /v1/search?q=...&num=..., not a path-encoded variant.
+        assert request.url.path == "/v1/search"
+        assert request.url.params["q"] == "test query"
+        assert request.url.params["num"] == "3"
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "title": "Direct Serply result",
+                        "link": "https://example.test/serply",
+                        "description": "a snippet",
+                    }
+                ]
+            },
+        )
+
+    provider = SerplyInspirationProvider(
+        api_key="test-serply-key",
+        transport=httpx.MockTransport(handler),
+    )
+
+    items = await provider.search("test query", limit=3)
+
+    assert items == [
+        ExaPreviewItem(
+            title="Direct Serply result",
+            url="https://example.test/serply",
+            highlights=("a snippet",),
+        )
+    ]
+
+
+def test_parse_serply_search_payload_accepts_structured_results() -> None:
+    payload = {
+        "results": [
+            {
+                "title": "Serply structured result",
+                "link": "https://example.test/structured",
+                "description": "Structured snippet.",
+            },
+            {"title": "", "link": "https://example.test/no-title"},
+            "not-a-dict",
+        ]
+    }
+
+    assert parse_serply_search_payload(payload) == [
+        ExaPreviewItem(
+            title="Serply structured result",
+            url="https://example.test/structured",
+            highlights=("Structured snippet.",),
+        )
+    ]
+
+
+def test_parse_serply_search_payload_accepts_json_text() -> None:
+    text = json.dumps(
+        {
+            "results": [
+                {
+                    "title": "Serply json result",
+                    "link": "https://example.test/json",
+                }
+            ]
+        }
+    )
+
+    assert parse_serply_search_payload(text) == [
+        ExaPreviewItem(title="Serply json result", url="https://example.test/json")
     ]
 
 

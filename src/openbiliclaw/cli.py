@@ -12931,6 +12931,7 @@ def keyword_inspiration_dry_run(
                     database=database,
                     exa_api_key=str(getattr(config.discovery, "exa_api_key", "") or ""),
                     you_api_key=str(getattr(config.discovery, "you_api_key", "") or ""),
+                    serply_api_key=str(getattr(config.discovery, "serply_api_key", "") or ""),
                     platform_backends=build_platform_source_backends(
                         config,
                         bilibili_client=(

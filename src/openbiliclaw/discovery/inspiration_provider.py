@@ -27,6 +27,7 @@ _DEFAULT_SEARCH_BACKENDS: tuple[str, ...] = (
     "bing_rss",
     "exa",
     "you",
+    "serply",
 )
 
 
@@ -293,6 +294,51 @@ class YouInspirationProvider:
         )
         response.raise_for_status()
         return parse_you_search_payload(response.json())[:count]
+
+
+class SerplyInspirationProvider:
+    """Serply provider implemented through Serply's direct HTTP search API."""
+
+    backend_alias = "serply"
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        timeout_seconds: float = 8.0,
+        base_url: str = "https://api.serply.io/v1/search",
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        self._api_key = str(api_key or "").strip()
+        self._timeout_seconds = max(1.0, float(timeout_seconds))
+        self._base_url = str(base_url or "").strip() or "https://api.serply.io/v1/search"
+        self._client = httpx.AsyncClient(
+            timeout=self._timeout_seconds,
+            trust_env=False,
+            transport=transport,
+            headers={
+                "X-Api-Key": self._api_key,
+                "Accept": "application/json",
+                # Serply sits behind Cloudflare, which rejects the default
+                # httpx User-Agent, so send an explicit one.
+                "User-Agent": "OpenBiliClaw",
+            },
+        )
+
+    def begin_stage(self) -> None:
+        return None
+
+    async def search(self, query: str, *, limit: int) -> list[ExaPreviewItem]:
+        clean_query = str(query or "").strip()
+        count = max(1, min(10, int(limit)))
+        if not clean_query or not self._api_key:
+            return []
+        response = await self._client.get(
+            self._base_url,
+            params={"q": clean_query, "num": count},
+        )
+        response.raise_for_status()
+        return parse_serply_search_payload(response.json())[:count]
 
 
 def _rss_element_text(element: ElementTree.Element | None) -> str:
@@ -1315,6 +1361,7 @@ def build_inspiration_search_provider(
     pages_per_probe: int = 1,
     exa_api_key: str = "",
     you_api_key: str = "",
+    serply_api_key: str = "",
 ) -> InspirationSearchProvider | None:
     """Build the configured inspiration search provider chain."""
 
@@ -1373,6 +1420,13 @@ def build_inspiration_search_provider(
                 )
             else:
                 _warn_mcporter_missing_once("you")
+        elif backend == "serply" and str(serply_api_key or "").strip():
+            providers.append(
+                SerplyInspirationProvider(
+                    api_key=serply_api_key,
+                    timeout_seconds=timeout_seconds,
+                )
+            )
     if not providers:
         return None
     if len(providers) == 1:
@@ -1408,6 +1462,8 @@ def _normalize_search_backends(value: object) -> tuple[str, ...]:
         "youcom": "you",
         "you-search": "you",
         "you_search": "you",
+        "serply": "serply",
+        "serply.io": "serply",
     }
     normalized: list[str] = []
     seen: set[str] = set()
@@ -1520,6 +1576,35 @@ def parse_you_search_payload(payload: object) -> list[ExaPreviewItem]:
     else:
         data = payload
     return _parse_you_data_results(data)
+
+
+def parse_serply_search_payload(payload: object) -> list[ExaPreviewItem]:
+    """Parse Serply search JSON output into preview items."""
+
+    if isinstance(payload, str):
+        try:
+            data = json.loads(payload)
+        except (TypeError, ValueError):
+            return []
+    else:
+        data = payload
+    raw_results: object = data.get("results", []) if isinstance(data, dict) else data
+    if not isinstance(raw_results, list):
+        return []
+
+    previews: list[ExaPreviewItem] = []
+    for item in raw_results:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        url = str(item.get("link") or "").strip()
+        if not title or not url:
+            continue
+        description = str(item.get("description") or "").strip()
+        previews.append(
+            ExaPreviewItem(title=title, url=url, highlights=(description,) if description else ())
+        )
+    return previews
 
 
 def _parse_you_text_results(text: str) -> list[ExaPreviewItem]:
