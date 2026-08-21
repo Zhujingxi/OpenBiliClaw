@@ -12,7 +12,6 @@ import shutil
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, Protocol, cast
-from urllib.parse import urlencode
 from xml.etree import ElementTree
 
 import httpx
@@ -334,8 +333,10 @@ class SerplyInspirationProvider:
         count = max(1, min(10, int(limit)))
         if not clean_query or not self._api_key:
             return []
-        path = urlencode({"q": clean_query, "num": count})
-        response = await self._client.get(f"{self._base_url}/{path}")
+        response = await self._client.get(
+            self._base_url,
+            params={"q": clean_query, "num": count},
+        )
         response.raise_for_status()
         return parse_serply_search_payload(response.json())[:count]
 
@@ -1419,14 +1420,13 @@ def build_inspiration_search_provider(
                 )
             else:
                 _warn_mcporter_missing_once("you")
-        elif backend == "serply":
-            if str(serply_api_key or "").strip():
-                providers.append(
-                    SerplyInspirationProvider(
-                        api_key=serply_api_key,
-                        timeout_seconds=timeout_seconds,
-                    )
+        elif backend == "serply" and str(serply_api_key or "").strip():
+            providers.append(
+                SerplyInspirationProvider(
+                    api_key=serply_api_key,
+                    timeout_seconds=timeout_seconds,
                 )
+            )
     if not providers:
         return None
     if len(providers) == 1:
