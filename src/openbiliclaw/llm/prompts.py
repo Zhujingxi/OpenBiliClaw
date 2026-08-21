@@ -808,6 +808,7 @@ _AWARENESS_SYSTEM_PROMPT = """
 4. 如果证据不足，可以返回空数组。
 5. 每条事件自带 `context` 字段（v0.3.22+ 跨源统一），是中文自然语言摘要——优先以 context 来理解事件本身，配合 metadata.source_platform 区分平台。所有平台信号都参与觉察推断,不区别对待。
 6. 如果 recent_events 出现 `feedback_type=dislike`、`reaction=thumbs_down` 或 `inferred_satisfaction=negative`，把它当作用户最近开始避开某类内容的信号；可以生成“最近开始避开 X”这类保守观察，但不要把单次 dislike 上升成人格结论。
+7. 负反馈一致性：笔记中描述「点踩 / dislike / 不感兴趣」等明确负反馈行为时，recent_events 里必须真的存在这类事件（`feedback_type=dislike` 或 `inferred_satisfaction=negative`）；没有就绝不能在笔记中声称用户点踩了——只能描述实际观察到的浏览行为。
 </rules>
 
 <output_schema>
@@ -939,7 +940,9 @@ _AWARENESS_WITH_CONFUSIONS_SYSTEM_PROMPT = """
    - evidence_refs：相关的事件线索（可为空数组）。
 4. 每条事件自带 `context` 字段（跨源统一中文摘要），优先据此理解事件，配合 metadata.source_platform 区分平台；所有平台信号一视同仁。
 5. 如果没有真正看不懂的地方，confusions 返回空数组——不要为凑数制造疑惑。
-6. 详细输入（画像 / 偏好摘要 / 近期事件）见 user message 的 X / Y / Z 各段。
+6. 如果 recent_events 出现 `feedback_type=dislike`、`reaction=thumbs_down` 或 `inferred_satisfaction=negative`，把它当作用户最近开始避开某类内容的信号；可以生成“最近开始避开 X”这类保守观察，但不要把单次 dislike 上升成人格结论。
+7. 负反馈一致性：笔记中描述「点踩 / dislike / 不感兴趣」等明确负反馈行为时，该条 source_event_ids 必须至少包含一条对应的事件（`feedback_type=dislike` 或 `inferred_satisfaction=negative`）；recent_events 里没有这类事件，就绝不能在笔记中声称用户点踩了——只能描述实际观察到的浏览行为。
+8. 详细输入（画像 / 偏好摘要 / 近期事件）见 user message 的 X / Y / Z 各段。
 </rules>
 
 <output_schema>

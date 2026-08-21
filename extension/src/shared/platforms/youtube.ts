@@ -3,6 +3,11 @@
  */
 
 import type { ActionHint, PageType, PlatformAdapter } from "../types.js";
+import {
+  actionClassTokens,
+  matchesWord,
+  shortActionLabel,
+} from "../behavior.ts";
 import { queryParam } from "./search-query.ts";
 
 const WATCH_ID_PATTERN = /[?&]v=([A-Za-z0-9_-]{6,})/;
@@ -47,20 +52,38 @@ function normalizeText(value: string | null | undefined): string {
 }
 
 export function inferYoutubeActionType(hint: ActionHint): string | null {
-  const text = `${normalizeText(hint.text)} ${normalizeText(hint.ariaLabel)} ${hint.className}`
+  // #205 calibration for YouTube's English DOM: real control labels are long
+  // sentences ("like this video along with 1,234 others") or single words up
+  // to "Subscribe" (9 chars), so aria-labels cannot be length-capped and the
+  // text cap is 12 — keywords must instead match as whole words. Card copy /
+  // video titles are still capped: a card whose title mentions "like" or
+  // "dislike" is a click, not feedback. Class names match per token.
+  const text = `${shortActionLabel(hint.text, 12)} ${normalizeText(hint.ariaLabel)}`
     .toLowerCase();
-
-  if (!text) return null;
-  if (text.includes("dislike") || text.includes("不喜欢") || text.includes("不感兴趣")) {
+  const classes = actionClassTokens(hint.className);
+  if (!text.trim() && classes.length === 0) return null;
+  const hasToken = (keyword: string): boolean =>
+    classes.some((token) => token.includes(keyword));
+  if (
+    matchesWord(text, "dislike") ||
+    text.includes("不喜欢") ||
+    text.includes("不感兴趣") ||
+    hasToken("dislike")
+  ) {
     return "dislike";
   }
-  if (text.includes("like") || text.includes("点赞")) return "like";
-  if (text.includes("save") || text.includes("收藏") || text.includes("稍后观看")) {
+  if (matchesWord(text, "like") || hasToken("like") || text.includes("点赞")) return "like";
+  if (matchesWord(text, "save") || hasToken("save") || text.includes("收藏") || text.includes("稍后观看")) {
     return "favorite";
   }
-  if (text.includes("comment") || text.includes("评论")) return "comment";
-  if (text.includes("share") || text.includes("分享")) return "share";
-  if (text.includes("subscribe") || text.includes("订阅") || text.includes("关注")) {
+  if (matchesWord(text, "comment") || text.includes("评论") || hasToken("comment")) return "comment";
+  if (matchesWord(text, "share") || text.includes("分享") || hasToken("share")) return "share";
+  if (
+    matchesWord(text, "subscribe") ||
+    text.includes("订阅") ||
+    text.includes("关注") ||
+    hasToken("subscribe")
+  ) {
     return "follow";
   }
   return null;

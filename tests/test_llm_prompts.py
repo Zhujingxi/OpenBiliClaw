@@ -437,6 +437,17 @@ def test_awareness_prompt_mentions_dislike_as_awareness_signal() -> None:
     assert "最近开始避开" in messages[0]["content"]
 
 
+def test_awareness_prompts_require_evidence_for_dislike_claims() -> None:
+    """Issue #205: notes claimed 点踩 without any dislike event in evidence.
+    Both awareness system prompts must forbid dislike claims unless a real
+    negative-feedback event exists in recent_events."""
+    from openbiliclaw.llm.prompts import _AWARENESS_WITH_CONFUSIONS_SYSTEM_PROMPT
+
+    for system_prompt in (_AWARENESS_SYSTEM_PROMPT, _AWARENESS_WITH_CONFUSIONS_SYSTEM_PROMPT):
+        assert "负反馈一致性" in system_prompt
+        assert "绝不能在笔记中声称用户点踩" in system_prompt
+
+
 def test_build_awareness_prompt_user_block_ends_with_recent_events() -> None:
     """Recent events is the most-variable block and must be the suffix.
     Anything stable after it would shrink the cache prefix on every call."""

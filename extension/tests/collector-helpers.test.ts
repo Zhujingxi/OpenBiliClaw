@@ -43,6 +43,93 @@ function makeEvent(
   };
 }
 
+test("inferBilibiliActionType ignores dislike keywords in long titles and copy (issue 205)", () => {
+  // Long `title` attribute carrying a full video title that merely mentions
+  // the keyword — clicking the card is a view, not a dislike (#205).
+  assert.equal(
+    inferBilibiliActionType({
+      text: "",
+      ariaLabel: "不喜欢可以不看！红磷结构深度解析完整版",
+      className: "",
+    }),
+    null,
+  );
+  // Long card copy mentioning 不感兴趣 must stay null (#200 regression).
+  assert.equal(
+    inferBilibiliActionType({
+      text: "盘点UP主们不感兴趣却爆火的选题：从选题数据看流量密码，完整统计与复盘分析全在这里",
+      ariaLabel: null,
+      className: "",
+    }),
+    null,
+  );
+  // A long aria-label must not leak the keyword through the class path either.
+  assert.equal(
+    inferBilibiliActionType({
+      text: "",
+      ariaLabel: "不喜欢可以不看！红磷结构深度解析完整版",
+      className: "video-page-card",
+    }),
+    null,
+  );
+});
+
+test("inferBilibiliActionType still recognizes real short dislike controls (issue 205)", () => {
+  assert.equal(
+    inferBilibiliActionType({ text: "不感兴趣", ariaLabel: null, className: "" }),
+    "dislike",
+  );
+  assert.equal(
+    inferBilibiliActionType({ text: "不喜欢", ariaLabel: null, className: "" }),
+    "dislike",
+  );
+  // Bilibili's video-page dislike button is class-only (e.g. video-dislike).
+  assert.equal(
+    inferBilibiliActionType({ text: "", ariaLabel: "", className: "video-dislike" }),
+    "dislike",
+  );
+});
+
+test("other zh platforms ignore negative keywords in card copy but keep short controls (issue 205)", async () => {
+  const { inferDouyinActionType } = await import("../src/shared/platforms/douyin.ts");
+  const { inferZhihuActionType } = await import("../src/shared/platforms/zhihu.ts");
+
+  // Long card copy mentioning the keyword is a click, not feedback.
+  assert.equal(
+    inferDouyinActionType({ text: "大家都表示不喜欢这种标题党视频，完整盘点", ariaLabel: null, className: "" }),
+    null,
+  );
+  assert.equal(
+    inferZhihuActionType({ text: "为什么很多人不喜欢小提琴入门教材中的这首曲子", ariaLabel: null, className: "" }),
+    null,
+  );
+  // Real control labels still work.
+  assert.equal(inferDouyinActionType({ text: "不感兴趣", ariaLabel: null, className: "" }), "dislike");
+  assert.equal(inferZhihuActionType({ text: "反对", ariaLabel: null, className: "" }), "dislike");
+  assert.equal(inferZhihuActionType({ text: "赞同", ariaLabel: null, className: "" }), "like");
+});
+
+test("reddit and youtube match English keywords as whole words only (issue 205)", async () => {
+  const { inferRedditActionType } = await import("../src/shared/platforms/reddit.ts");
+  const { inferYoutubeActionType } = await import("../src/shared/platforms/youtube.ts");
+
+  // Post/video titles containing inflected or compound forms are clicks.
+  assert.equal(
+    inferRedditActionType({ text: "This post got downvoted to oblivion", ariaLabel: null, className: "" }),
+    null,
+  );
+  assert.equal(
+    inferYoutubeActionType({ text: "This is unlikely to work", ariaLabel: null, className: "" }),
+    null,
+  );
+  // Real controls still work, including count labels and sentence aria-labels.
+  assert.equal(inferRedditActionType({ text: "32 comments", ariaLabel: null, className: "" }), "comment");
+  assert.equal(inferRedditActionType({ text: "", ariaLabel: "downvote", className: "" }), "dislike");
+  assert.equal(inferYoutubeActionType({ text: "Like", ariaLabel: "Like this video", className: "" }), "like");
+  assert.equal(inferYoutubeActionType({ text: "", ariaLabel: "Dislike this video", className: "" }), "dislike");
+  assert.equal(inferYoutubeActionType({ text: "Subscribe", ariaLabel: null, className: "" }), "follow");
+});
+
 test("detectBilibiliPageType classifies common bilibili pages", () => {
   assert.equal(
     detectBilibiliPageType("https://www.bilibili.com/video/BV1AB411c7mD"),

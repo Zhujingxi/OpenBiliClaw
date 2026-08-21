@@ -3,6 +3,7 @@
  */
 
 import type { ActionHint, PageType, PlatformAdapter } from "../types.js";
+import { matchesWord } from "../behavior.ts";
 import { queryParam } from "./search-query.ts";
 
 const COMMENT_POST_PATTERN = /(?:reddit\.com\/r\/[^/]+\/comments\/|redd\.it\/)([A-Za-z0-9_]+)/;
@@ -55,15 +56,23 @@ function normalizeText(value: string | null | undefined): string {
 }
 
 export function inferRedditActionType(hint: ActionHint): string | null {
-  const text = `${normalizeText(hint.text)} ${normalizeText(hint.ariaLabel)} ${hint.className}`
+  // Reddit has no MAIN-world tap, so every action flows through this DOM path.
+  // Post titles ride into hint.text / title attributes, so keywords must match
+  // as whole words only (#205): a post titled "downvoted to oblivion" is a
+  // click, not a dislike. Real vote controls use exactly "downvote"/"upvote".
+  const text = `${normalizeText(hint.text)} ${normalizeText(hint.ariaLabel)}`
     .toLowerCase();
-  if (!text) return null;
-  if (text.includes("downvote")) return "dislike";
-  if (text.includes("upvote")) return "like";
-  if (text.includes("save") || text.includes("bookmark")) return "favorite";
-  if (text.includes("comment") || text.includes("reply")) return "comment";
-  if (text.includes("share")) return "share";
-  if (text.includes("join") || text.includes("follow")) return "follow";
+  const classes = hint.className.toLowerCase();
+  if (!text.trim() && !classes) return null;
+  const hit = (word: string): boolean =>
+    matchesWord(text, word) || matchesWord(classes, word);
+  if (hit("downvote")) return "dislike";
+  if (hit("upvote")) return "like";
+  if (hit("save") || hit("bookmark")) return "favorite";
+  // Real count labels are plural ("32 comments") — tolerate the plural form.
+  if (hit("comments?") || hit("repl(?:y|ies)")) return "comment";
+  if (hit("shares?")) return "share";
+  if (hit("join") || hit("follow")) return "follow";
   return null;
 }
 
