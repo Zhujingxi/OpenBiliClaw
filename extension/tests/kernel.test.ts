@@ -28,6 +28,15 @@ test("click path treats a pressed like/favorite/follow control as a retraction",
   assert.match(kernelSource, /retracted_action:/);
 });
 
+test("DOM dislikes track click parity: even clicks are retractions, not new dislikes (issue 205)", () => {
+  // Bilibili dislike controls expose no pressed state, so the kernel tracks
+  // per-control click parity: odd = dislike, even = cancellation retraction.
+  assert.match(kernelSource, /feedback_type === "dislike"/);
+  assert.match(kernelSource, /DISLIKE_TOGGLE_RESET_MS/);
+  assert.match(kernelSource, /state\.clicks % 2 === 0/);
+  assert.match(kernelSource, /retracted_action: actionType/);
+});
+
 test("click path suppresses tap-authoritative actions on both the retraction and positive branches", () => {
   // On X the GraphQL tap emits the authoritative like/favorite/share/comment
   // AND retraction; the DOM path must only suppress, never double-emit — this
