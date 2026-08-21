@@ -118,6 +118,20 @@ test("reddit and youtube match English keywords as whole words only (issue 205)"
     inferRedditActionType({ text: "This post got downvoted to oblivion", ariaLabel: null, className: "" }),
     null,
   );
+  // Real reddit post titles carry the standalone verb — only anchored vote
+  // controls (aria/class) may fire votes, never bare title text (#205).
+  assert.equal(
+    inferRedditActionType({ text: "Should I downvote this?", ariaLabel: null, className: "" }),
+    null,
+  );
+  assert.equal(
+    inferRedditActionType({ text: "", ariaLabel: "Downvote", className: "" }),
+    "dislike",
+  );
+  assert.equal(
+    inferRedditActionType({ text: "", ariaLabel: null, className: "arrow upvote" }),
+    "like",
+  );
   assert.equal(
     inferYoutubeActionType({ text: "This is unlikely to work", ariaLabel: null, className: "" }),
     null,
@@ -128,6 +142,34 @@ test("reddit and youtube match English keywords as whole words only (issue 205)"
   assert.equal(inferYoutubeActionType({ text: "Like", ariaLabel: "Like this video", className: "" }), "like");
   assert.equal(inferYoutubeActionType({ text: "", ariaLabel: "Dislike this video", className: "" }), "dislike");
   assert.equal(inferYoutubeActionType({ text: "Subscribe", ariaLabel: null, className: "" }), "follow");
+});
+
+test("youtube result-card aria-labels (full video titles) never fire votes (issue 205)", async () => {
+  const { inferYoutubeActionType } = await import("../src/shared/platforms/youtube.ts");
+  // Live-verified shape: search-result anchors carry aria-label =
+  // "<full title> by <author> <duration>" — titles containing the verb must
+  // not become feedback even as whole words.
+  assert.equal(
+    inferYoutubeActionType({
+      text: "Why Do So Many People Dislike Cops?",
+      ariaLabel: "Why Do So Many People Dislike Cops? 26分钟",
+      className: "yt-simple-endpoint",
+    }),
+    null,
+  );
+  assert.equal(
+    inferYoutubeActionType({
+      text: "Utsu-P - dislike feat. 狐子",
+      ariaLabel: "Utsu-P - dislike feat. 狐子 2分钟33秒钟",
+      className: "yt-simple-endpoint",
+    }),
+    null,
+  );
+  // Verb-first aria-labels (watch-page controls) still fire.
+  assert.equal(
+    inferYoutubeActionType({ text: "", ariaLabel: "不喜欢此视频", className: "yt-spec-button-shape-next" }),
+    "dislike",
+  );
 });
 
 test("detectBilibiliPageType classifies common bilibili pages", () => {
