@@ -230,7 +230,10 @@ export async function reshuffleRecommendations(excludedBvids = []) {
 }
 
 export async function appendRecommendations(excludedBvids = []) {
-  const data = await requestJson("/recommendations/append", json({ excluded_bvids: excludedBvids }));
+  const data = await requestJson(
+    "/recommendations/append",
+    { ...json({ excluded_bvids: excludedBvids }), timeoutMs: DEFAULT_READ_TIMEOUT_MS },
+  );
   return { ...data, items: Array.isArray(data.items) ? data.items : [] };
 }
 
