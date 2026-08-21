@@ -1380,6 +1380,7 @@ class RuntimeContext:
                 database=self.database,
                 exa_api_key=str(getattr(discovery_cfg, "exa_api_key", "") or ""),
                 you_api_key=str(getattr(discovery_cfg, "you_api_key", "") or ""),
+                serply_api_key=str(getattr(discovery_cfg, "serply_api_key", "") or ""),
                 platform_backends=build_platform_source_backends(
                     new_config,
                     bilibili_client=new_bilibili_client,

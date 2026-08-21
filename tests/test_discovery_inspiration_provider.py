@@ -22,6 +22,7 @@ from openbiliclaw.discovery.inspiration_provider import (
     McporterYouInspirationProvider,
     PlatformSourceInspirationProvider,
     RedditPlatformSearchBackend,
+    SerplyInspirationProvider,
     V2EXPlatformSearchBackend,
     WeiboPlatformSearchBackend,
     XhsPlatformSearchBackend,
@@ -32,6 +33,7 @@ from openbiliclaw.discovery.inspiration_provider import (
     build_inspiration_search_provider,
     build_platform_source_backends,
     parse_exa_search_payload,
+    parse_serply_search_payload,
     parse_you_search_payload,
 )
 
@@ -285,6 +287,39 @@ async def test_you_direct_provider_calls_api_and_parses_hits() -> None:
             title="Direct You result",
             url="https://example.test/you",
             highlights=("snippet one", "snippet two"),
+        )
+    ]
+
+
+async def test_serply_direct_provider_calls_api_and_parses_results() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["x-api-key"] == "test-serply-key"
+        assert request.url.host == "api.serply.io"
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "title": "Direct Serply result",
+                        "link": "https://example.test/serply",
+                        "description": "a snippet",
+                    }
+                ]
+            },
+        )
+
+    provider = SerplyInspirationProvider(
+        api_key="test-serply-key",
+        transport=httpx.MockTransport(handler),
+    )
+
+    items = await provider.search("test query", limit=3)
+
+    assert items == [
+        ExaPreviewItem(
+            title="Direct Serply result",
+            url="https://example.test/serply",
+            highlights=("a snippet",),
         )
     ]
 

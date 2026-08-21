@@ -6,6 +6,7 @@
 
 ## 未发布
 
+- **新增 Serply 作为 query inspiration 搜索后端**：`[discovery]` 新增 `serply_api_key`，填写后 `SerplyInspirationProvider` 直连 [serply.io](https://serply.io) 的 `GET /v1/search`；`inspiration_search_backends` 默认追加 `serply`，留空 Key 时该后端直接跳过，不影响现有 Exa / You.com / mcporter 链路。
 - **为平台数据撤回补齐事件来源归属**：`events` 新增 `source_platform`、`content_id` 和 `source_confidence` 三个持久化字段；新事件统一按显式来源 → metadata → 规范 URL → 兼容默认解析，无法确认的事件保持 `legacy_unknown`。旧库只在首次补列时按 metadata / 规范 URL 保守回填，旧 metadata 继续保留，未在本次变更中删除事件或实现撤回动作。
 - **收紧事件来源兼容读取**：来源统计优先读取事件顶层归属；事件 identity 的稳定内容 ID 改由跨模块共享注册表提取，覆盖 X / 知乎等非 B 站事件；schema 版本提升至 6。
 - **修复候选内容身份重复**：共享身份清单按优先级选择每条事件的第一个有效字段；例如同时存在 `content_id` 与 `topic_id` 时只保留规范 `content_id`，缺失时才使用备用字段，避免 seen ledger 为同一内容写入多个键。
