@@ -980,6 +980,45 @@ class DiscoveryStrategy(ABC):
         """Strategy name."""
         ...
 
+    def filter_candidates_for_eval(
+        self,
+        candidates: list[DiscoveredContent],
+        *,
+        now: Any | None = None,
+    ) -> list[DiscoveredContent]:
+        """Apply this source's date preference before LLM evaluation.
+
+        Out-of-window candidates are removed regardless of ``weight`` so the
+        evaluator never spends tokens on content the user explicitly excluded.
+        """
+
+        preference = getattr(self, "date_preference", None) or getattr(
+            self, "publication_preference", None
+        )
+        if preference is None:
+            return candidates
+        from datetime import UTC, datetime
+
+        from openbiliclaw.recommendation.publication_preference import (
+            PRESET_ALL,
+            evaluate_source_publication_preference,
+        )
+
+        if getattr(preference, "preset", PRESET_ALL) == PRESET_ALL:
+            return candidates
+
+        current = (now or datetime.now(UTC)).astimezone(UTC)
+        platform = getattr(self, "source_platform", "bilibili")
+        return [
+            item
+            for item in candidates
+            if evaluate_source_publication_preference(
+                published_at=getattr(item, "published_at", ""),
+                preference=preference,
+                now=current,
+            ).in_range
+        ]
+
     @abstractmethod
     async def discover(self, profile: SoulProfile, limit: int = 20) -> list[DiscoveredContent]:
         """Execute the discovery strategy.

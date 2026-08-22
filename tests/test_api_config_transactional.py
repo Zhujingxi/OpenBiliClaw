@@ -127,11 +127,13 @@ async def test_put_bilibili_date_preference_hot_reloads_curator(
         response = await client.put(
             "/api/config",
             json={
-                "bilibili": {
-                    "recommendation_date_preset": "custom",
-                    "recommendation_date_start": "2023-01-01",
-                    "recommendation_date_end": "2023-12-31",
-                    "recommendation_date_weight": 0.5,
+                "sources": {
+                    "bilibili": {
+                        "recommendation_date_preset": "custom",
+                        "recommendation_date_start": "2023-01-01",
+                        "recommendation_date_end": "2023-12-31",
+                        "recommendation_date_weight": 0.5,
+                    }
                 }
             },
         )

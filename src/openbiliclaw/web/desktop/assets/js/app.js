@@ -9328,10 +9328,10 @@ ${cardFeedbackBarHtml()}`;
       setCookieOverrideInput("biliCookie", config.bilibili?.cookie, " B 站");
       setInput("biliBrowserExecutable", config.bilibili?.browser_executable);
       setSelect("biliBrowserHeaded", config.bilibili?.browser_headed === true ? "on" : "off");
-      const bilibiliDateWeight = Number(config.bilibili?.recommendation_date_weight ?? 0.5);
-      setSelect("biliDatePreset", config.bilibili?.recommendation_date_preset || "all");
-      setInput("biliDateStart", config.bilibili?.recommendation_date_start || "");
-      setInput("biliDateEnd", config.bilibili?.recommendation_date_end || "");
+      const bilibiliDateWeight = Number(config.sources?.bilibili?.recommendation_date_weight ?? 0.5);
+      setSelect("biliDatePreset", config.sources?.bilibili?.recommendation_date_preset || "all");
+      setInput("biliDateStart", config.sources?.bilibili?.recommendation_date_start || "");
+      setInput("biliDateEnd", config.sources?.bilibili?.recommendation_date_end || "");
       setInput("biliDateWeight", Number.isFinite(bilibiliDateWeight) ? bilibiliDateWeight : 0.5);
       let bilibiliDateMode = "custom";
       if (bilibiliDateWeight >= 1) bilibiliDateMode = "strict";
@@ -10568,11 +10568,7 @@ ${cardFeedbackBarHtml()}`;
           auth_method: $("#biliAuth").value,
           ...(cookie ? { cookie } : {}),
           browser_executable: getInput("biliBrowserExecutable"),
-          browser_headed: $("#biliBrowserHeaded").value === "on",
-          recommendation_date_preset: getInput("biliDatePreset") || "all",
-          recommendation_date_start: getInput("biliDateStart"),
-          recommendation_date_end: getInput("biliDateEnd"),
-          recommendation_date_weight: Math.min(1, Math.max(0, bilibiliDateWeight))
+          browser_headed: $("#biliBrowserHeaded").value === "on"
         },
         sources: {
           browser: {
@@ -10581,7 +10577,11 @@ ${cardFeedbackBarHtml()}`;
           },
           bilibili: {
             enabled: $("#bilibiliEnabled").value === "on",
-            min_interval_minutes: getIntInput("bilibiliMinInterval", 3)
+            min_interval_minutes: getIntInput("bilibiliMinInterval", 3),
+            recommendation_date_preset: getInput("biliDatePreset") || "all",
+            recommendation_date_start: getInput("biliDateStart"),
+            recommendation_date_end: getInput("biliDateEnd"),
+            recommendation_date_weight: Math.min(1, Math.max(0, bilibiliDateWeight))
           },
           xiaohongshu: {
             enabled: $("#xhsEnabled").value === "on",

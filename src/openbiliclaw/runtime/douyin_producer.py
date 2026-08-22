@@ -15,7 +15,9 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from openbiliclaw.config import publication_date_preference_for_source
 from openbiliclaw.discovery.douyin import DouyinDiscoveryOptions, DouyinDiscoveryResult
+from openbiliclaw.recommendation.publication_preference import PublicationDatePreference
 from openbiliclaw.runtime.keyword_fetch import PLATFORM_DOUYIN as _PLATFORM_DOUYIN
 from openbiliclaw.runtime.pool_gate import candidate_pool_full_for_source
 from openbiliclaw.runtime.producer_cadence import (
@@ -79,6 +81,7 @@ class DouyinDiscoveryProducer:
     # inline drain path.
     candidate_evaluation_owned_by_coordinator: bool = False
     per_source_limit: int = 20
+    date_preference: PublicationDatePreference | None = None
     # Unified keyword planner fetch coordinator (P1.7). When wired AND the flag
     # is on, the producer's search source claims words from the keyword store
     # and walks each word through its own used / failed / transient-requeue /
@@ -153,6 +156,7 @@ class DouyinDiscoveryProducer:
             evaluate=False if use_candidate_pipeline else self.evaluate,
             per_source_limit=per_source_limit,
             keywords_per_run=self.keywords_per_run,
+            date_preference=self.date_preference,
             keywords=tuple(item.keyword for item in claimed) if claimed else (),
             # P1.8: thread the producing word's id onto each search candidate for
             # admit-time yield backfill.
@@ -456,4 +460,5 @@ def build_douyin_discovery_producer(
         candidate_pipeline=candidate_pipeline,
         per_source_limit=20,
         keyword_fetch=keyword_fetch,
+        date_preference=publication_date_preference_for_source(dy_cfg),
     )

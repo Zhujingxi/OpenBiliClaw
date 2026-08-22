@@ -217,40 +217,42 @@ class TestConfigDefaults:
     def test_bilibili_publication_preference_defaults_to_legacy_behavior(self) -> None:
         config = Config()
 
-        assert config.bilibili.recommendation_date_preset == "all"
-        assert config.bilibili.recommendation_date_start == ""
-        assert config.bilibili.recommendation_date_end == ""
-        assert config.bilibili.recommendation_date_weight == 0.5
+        assert config.sources.bilibili.recommendation_date_preset == "all"
+        assert config.sources.bilibili.recommendation_date_start == ""
+        assert config.sources.bilibili.recommendation_date_end == ""
+        assert config.sources.bilibili.recommendation_date_weight == 0.5
 
     def test_bilibili_publication_preference_round_trips(self, tmp_path: Path) -> None:
         config = Config()
-        config.bilibili.recommendation_date_preset = "custom"
-        config.bilibili.recommendation_date_start = "2023-01-01"
-        config.bilibili.recommendation_date_end = "2023-12-31"
-        config.bilibili.recommendation_date_weight = 0.5
+        config.sources.bilibili.recommendation_date_preset = "custom"
+        config.sources.bilibili.recommendation_date_start = "2023-01-01"
+        config.sources.bilibili.recommendation_date_end = "2023-12-31"
+        config.sources.bilibili.recommendation_date_weight = 0.5
 
         config_path = tmp_path / "config.toml"
         save_config(config, config_path)
         loaded = load_config(config_path)
 
-        assert loaded.bilibili.recommendation_date_preset == "custom"
-        assert loaded.bilibili.recommendation_date_start == "2023-01-01"
-        assert loaded.bilibili.recommendation_date_end == "2023-12-31"
-        assert loaded.bilibili.recommendation_date_weight == 0.5
+        assert loaded.sources.bilibili.recommendation_date_preset == "custom"
+        assert loaded.sources.bilibili.recommendation_date_start == "2023-01-01"
+        assert loaded.sources.bilibili.recommendation_date_end == "2023-12-31"
+        assert loaded.sources.bilibili.recommendation_date_weight == 0.5
 
     @pytest.mark.parametrize(
         "raw",
         [
-            {"bilibili": {"recommendation_date_preset": "invalid"}},
-            {"bilibili": {"recommendation_date_start": "2023-02-30"}},
+            {"sources": {"bilibili": {"recommendation_date_preset": "invalid"}}},
+            {"sources": {"bilibili": {"recommendation_date_start": "2023-02-30"}}},
             {
-                "bilibili": {
-                    "recommendation_date_preset": "custom",
-                    "recommendation_date_start": "2023-01-01",
-                    "recommendation_date_end": "2022-01-01",
+                "sources": {
+                    "bilibili": {
+                        "recommendation_date_preset": "custom",
+                        "recommendation_date_start": "2023-01-01",
+                        "recommendation_date_end": "2022-01-01",
+                    }
                 }
             },
-            {"bilibili": {"recommendation_date_weight": 1.1}},
+            {"sources": {"bilibili": {"recommendation_date_weight": 1.1}}},
         ],
     )
     def test_invalid_bilibili_publication_preference_is_blocking(
@@ -261,15 +263,16 @@ class TestConfigDefaults:
         issues = config_module._collect_config_issues(config)
 
         assert any(
-            issue.field == "bilibili.recommendation_date" and issue.severity == "blocking"
+            issue.field == "sources.bilibili.recommendation_date"
+            and issue.severity == "blocking"
             for issue in issues
         )
 
     def test_save_rejects_invalid_bilibili_publication_preference(self, tmp_path: Path) -> None:
         config = Config()
-        config.bilibili.recommendation_date_weight = 1.1
+        config.sources.bilibili.recommendation_date_weight = 1.1
 
-        with pytest.raises(ConfigError, match="bilibili.recommendation_date"):
+        with pytest.raises(ConfigError, match="sources.bilibili.recommendation_date"):
             save_config(config, tmp_path / "config.toml")
 
     def test_scheduler_pause_on_extension_disconnect_defaults(self) -> None:

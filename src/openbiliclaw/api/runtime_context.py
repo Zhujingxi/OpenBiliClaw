@@ -31,7 +31,10 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 
-from openbiliclaw.config import llm_concurrency_from_config as _llm_concurrency_from_config
+from openbiliclaw.config import (
+    llm_concurrency_from_config as _llm_concurrency_from_config,
+    publication_date_preference_for_source,
+)
 from openbiliclaw.runtime.presence import PresenceTracker
 from openbiliclaw.runtime.presence import background_llm_work_allowed as _gate
 from openbiliclaw.runtime.source_policy import effective_pool_source_shares
@@ -80,6 +83,7 @@ def build_youtube_discovery_strategies(
     )
 
     yt_cfg = getattr(getattr(config, "sources", None), "youtube", None)
+    yt_date_preference = publication_date_preference_for_source(yt_cfg)
     budgets = strategy_unit_budget or {}
     scheduler = getattr(config, "scheduler", None)
     default_run_budget = max(1, int(getattr(scheduler, "discovery_limit", 30)))
@@ -100,6 +104,7 @@ def build_youtube_discovery_strategies(
             concurrency=concurrency,
             database=database,
             queries_per_run=max(0, search_budget),
+            date_preference=yt_date_preference,
         ),
         YoutubeTrendingStrategy(
             client=client,
@@ -107,6 +112,7 @@ def build_youtube_discovery_strategies(
             concurrency=concurrency,
             database=database,
             fetch_limit=max(0, trending_budget),
+            date_preference=yt_date_preference,
         ),
         YoutubeChannelStrategy(
             client=client,
@@ -115,6 +121,7 @@ def build_youtube_discovery_strategies(
             concurrency=concurrency,
             database=database,
             max_channels=max(0, channel_budget),
+            date_preference=yt_date_preference,
         ),
     ]
 
@@ -920,15 +927,9 @@ class RuntimeContext:
 
         # 6. Recommendation engine
         from openbiliclaw.recommendation.curator import PoolCurator
-        from openbiliclaw.recommendation.publication_preference import (
-            PublicationDatePreference,
-        )
 
-        publication_preference = PublicationDatePreference(
-            preset=getattr(new_config.bilibili, "recommendation_date_preset", "all"),
-            start_date=getattr(new_config.bilibili, "recommendation_date_start", ""),
-            end_date=getattr(new_config.bilibili, "recommendation_date_end", ""),
-            weight=getattr(new_config.bilibili, "recommendation_date_weight", 0.5),
+        publication_preference = publication_date_preference_for_source(
+            getattr(getattr(new_config, "sources", None), "bilibili", None)
         )
         set_publication_preference = getattr(self.database, "set_publication_date_preference", None)
         if callable(set_publication_preference):
@@ -1042,6 +1043,7 @@ class RuntimeContext:
             concurrency=concurrency,
             database=self.database,
             embedding_service=new_embedding_service,
+            date_preference=publication_preference,
         )
         related_strategy = RelatedChainStrategy(
             bilibili_client=new_bilibili_client,
@@ -1051,6 +1053,7 @@ class RuntimeContext:
             trending_strategy=trending_strategy,
             concurrency=concurrency,
             database=self.database,
+            date_preference=publication_preference,
         )
         explore_strategy = ExploreStrategy(
             llm_service=new_llm_service,
@@ -1059,6 +1062,7 @@ class RuntimeContext:
             embedding_service=new_embedding_service,
             database=cast("Any", self.database),
             keyword_fetch=new_keyword_fetch,
+            date_preference=publication_preference,
         )
         new_discovery_engine.register_strategy(search_strategy)
         new_discovery_engine.register_strategy(trending_strategy)

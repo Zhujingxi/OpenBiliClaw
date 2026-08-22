@@ -215,14 +215,6 @@ cookie = ""
 # 导致明明已登录却显示"未登录"。只有你的网络确实无法直连 B站 时才需要填，
 # 例如 "http://127.0.0.1:7890"。
 proxy = ""
-# B站推荐发布日期范围：all | last_7_days | last_30_days |
-# last_6_months | last_1_year | custom。
-recommendation_date_preset = "all"
-# custom 时填写 YYYY-MM-DD；留空表示该边界不限制。
-recommendation_date_start = ""
-recommendation_date_end = ""
-# 范围外候选的分数乘数为 (1 - weight)。默认 0.5；1 = 严格排除。
-recommendation_date_weight = 0.5
 
 [bilibili.browser]
 # agent-browser executable path (leave empty for global install)
@@ -267,6 +259,15 @@ enabled = true
 # 仅作用于「B 站 API 搜索被风控冷却」时接管的扩展搜索兜底 producer；
 # 主发现路径（search / trending / explore / related）的节奏在 [scheduler]。
 min_interval_minutes = 3                 # producer 两次入队之间的最小间隔
+# B站推荐发布日期范围：all | last_7_days | last_30_days |
+# last_6_months | last_1_year | custom。默认 all = 不按日期过滤。
+# 所有 [sources.*] 来源都支持这四个字段。
+recommendation_date_preset = "all"
+# custom 时填写 YYYY-MM-DD；留空表示该边界不限制。
+recommendation_date_start = ""
+recommendation_date_end = ""
+# 范围外候选的分数乘数为 (1 - weight)。默认 0.5；1 = 严格排除。
+recommendation_date_weight = 0.5
 
 # ── 小红书（xhs）专用配置 ──
 # 内容发现和元数据提取完全由浏览器扩展在真实登录态下完成：

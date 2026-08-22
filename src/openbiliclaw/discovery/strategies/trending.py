@@ -8,6 +8,7 @@ import re
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
+from openbiliclaw.recommendation.publication_preference import PublicationDatePreference
 from openbiliclaw.discovery.engine import (
     ContentDiscoveryEngine,
     DiscoveredContent,
@@ -45,6 +46,7 @@ class TrendingStrategy(DiscoveryStrategy):
     database: Database | None = None
     embedding_service: SupportsEmbeddingService | None = None
     score_threshold: float = 0.60
+    date_preference: PublicationDatePreference | None = None
     llm_evaluation: bool = True
     max_related_rids: int = 4
     # Broader default RIDs covering more top-level categories:
@@ -167,6 +169,7 @@ class TrendingStrategy(DiscoveryStrategy):
         if not self.llm_evaluation or discovery_raw_candidate_mode_enabled():
             return candidates[:limit]
 
+        candidates = self.filter_candidates_for_eval(candidates)
         scores = await evaluator.evaluate_content_batch(candidates, profile)
         results: list[DiscoveredContent] = []
         for content, score in zip(candidates, scores, strict=True):

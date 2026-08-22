@@ -973,10 +973,10 @@ def test_config_show_displays_bilibili_publication_preference(
     runner: CliRunner,
 ) -> None:
     cfg = config_module.Config()
-    cfg.bilibili.recommendation_date_preset = "custom"
-    cfg.bilibili.recommendation_date_start = "2023-01-01"
-    cfg.bilibili.recommendation_date_end = "2023-12-31"
-    cfg.bilibili.recommendation_date_weight = 0.5
+    cfg.sources.bilibili.recommendation_date_preset = "custom"
+    cfg.sources.bilibili.recommendation_date_start = "2023-01-01"
+    cfg.sources.bilibili.recommendation_date_end = "2023-12-31"
+    cfg.sources.bilibili.recommendation_date_weight = 0.5
 
     class FakeRegistry:
         default_provider = "openai"

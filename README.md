@@ -746,7 +746,7 @@ durable turn → 固定时间/payload → 确认入口（待聊列表/卡片） 
 桌面后台恢复（已有卡片）：跳过可能补池的推荐 GET │ 只同步 runtime / 库存状态
 
 海外请求：设置页 `[network].mode` → 系统代理（默认）/ 直连 / 自定义代理 → LLM、YouTube、X/Reddit CLI、Bangumi、更新、GitHub 项目统计；国内平台（含 V2EX）保持独立直连
-B站发布日期偏好：`[bilibili]` 配置 → 有效库存 → PoolCurator → 范围外软降分 / 严格 serving 忽略（候选保留）；严格模式下推 B 站搜索边界
+发布日期偏好：`[sources.<name>].recommendation_date_*` 按来源配置 → 发现阶段 LLM 评估前硬过滤范围外候选 → 有效库存 → PoolCurator → 范围外软降分 / 严格 serving 忽略（候选保留）；严格模式下推 B 站搜索边界
 手动抖音发现：CLI discover → daemon 同款 producer → 统一关键词终态 → 插件 search/hot/feed → 待评估池
 ```
 

@@ -123,23 +123,25 @@ def test_bilibili_publication_preference_round_trips_through_config_api(
     response = client.put(
         "/api/config",
         json={
-            "bilibili": {
-                "recommendation_date_preset": "custom",
-                "recommendation_date_start": "2023-01-01",
-                "recommendation_date_end": "2023-12-31",
-                "recommendation_date_weight": 0.5,
+            "sources": {
+                "bilibili": {
+                    "recommendation_date_preset": "custom",
+                    "recommendation_date_start": "2023-01-01",
+                    "recommendation_date_end": "2023-12-31",
+                    "recommendation_date_weight": 0.5,
+                }
             }
         },
     )
 
     assert response.status_code == 202
-    saved = load_config_from_path(config_path).bilibili
+    saved = load_config_from_path(config_path).sources.bilibili
     assert saved.recommendation_date_preset == "custom"
     assert saved.recommendation_date_start == "2023-01-01"
     assert saved.recommendation_date_end == "2023-12-31"
     assert saved.recommendation_date_weight == 0.5
 
-    visible = client.get("/api/config").json()["bilibili"]
+    visible = client.get("/api/config").json()["sources"]["bilibili"]
     assert visible["recommendation_date_preset"] == "custom"
     assert visible["recommendation_date_start"] == "2023-01-01"
     assert visible["recommendation_date_end"] == "2023-12-31"
@@ -151,16 +153,16 @@ def test_bilibili_publication_preference_rejects_invalid_update(
     tmp_path,
 ) -> None:
     client, _cfg, config_path = _make_client(monkeypatch, tmp_path, _base_config())
-    before = load_config_from_path(config_path).bilibili
+    before = load_config_from_path(config_path).sources.bilibili
 
     response = client.put(
         "/api/config",
-        json={"bilibili": {"recommendation_date_weight": 1.5}},
+        json={"sources": {"bilibili": {"recommendation_date_weight": 1.5}}},
     )
 
     assert response.status_code == 400
     assert response.json()["detail"]["error"] == "invalid_bilibili_recommendation_date"
-    after = load_config_from_path(config_path).bilibili
+    after = load_config_from_path(config_path).sources.bilibili
     assert after.recommendation_date_preset == before.recommendation_date_preset
     assert after.recommendation_date_weight == before.recommendation_date_weight
 

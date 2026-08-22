@@ -2075,10 +2075,6 @@ class BilibiliConfigOut(BaseModel):
     cookie: str = ""
     browser_executable: str = ""
     browser_headed: bool = False
-    recommendation_date_preset: str = "all"
-    recommendation_date_start: str = ""
-    recommendation_date_end: str = ""
-    recommendation_date_weight: float = 0.5
 
 
 class NetworkConfigOut(BaseModel):
@@ -2093,12 +2089,19 @@ class SourcesBrowserConfigOut(BaseModel):
     headed: bool = False
 
 
-class BilibiliSourceConfigOut(BaseModel):
+class SourceDatePreferenceOut(BaseModel):
+    recommendation_date_preset: str = "all"
+    recommendation_date_start: str = ""
+    recommendation_date_end: str = ""
+    recommendation_date_weight: float = 0.5
+
+
+class BilibiliSourceConfigOut(SourceDatePreferenceOut):
     enabled: bool = True
     min_interval_minutes: int = 3
 
 
-class XiaohongshuSourceConfigOut(BaseModel):
+class XiaohongshuSourceConfigOut(SourceDatePreferenceOut):
     enabled: bool = False
     incremental_enabled: bool = False
     daily_search_budget: int = 20
@@ -2107,7 +2110,7 @@ class XiaohongshuSourceConfigOut(BaseModel):
     min_interval_minutes: int = 20
 
 
-class DouyinSourceConfigOut(BaseModel):
+class DouyinSourceConfigOut(SourceDatePreferenceOut):
     enabled: bool = False
     incremental_enabled: bool = False
     mode: str = "direct"
@@ -2123,7 +2126,7 @@ class DouyinSourceConfigOut(BaseModel):
     min_interval_minutes: int = 3
 
 
-class YoutubeSourceConfigOut(BaseModel):
+class YoutubeSourceConfigOut(SourceDatePreferenceOut):
     enabled: bool = False
     incremental_enabled: bool = False
     daily_search_budget: int = 0
@@ -2133,7 +2136,7 @@ class YoutubeSourceConfigOut(BaseModel):
     min_interval_minutes: int = 3
 
 
-class TwitterSourceConfigOut(BaseModel):
+class TwitterSourceConfigOut(SourceDatePreferenceOut):
     enabled: bool = False
     mode: str = "cookie"
     # Resolved Cookie header (env override, else data/x_cookie.json).
@@ -2148,7 +2151,7 @@ class TwitterSourceConfigOut(BaseModel):
     min_interval_minutes: int = 3
 
 
-class ZhihuSourceConfigOut(BaseModel):
+class ZhihuSourceConfigOut(SourceDatePreferenceOut):
     enabled: bool = False
     incremental_enabled: bool = False
     source_modes: list[str] = Field(
@@ -2163,7 +2166,7 @@ class ZhihuSourceConfigOut(BaseModel):
     min_interval_minutes: int = 3
 
 
-class RedditSourceConfigOut(BaseModel):
+class RedditSourceConfigOut(SourceDatePreferenceOut):
     enabled: bool = False
     incremental_enabled: bool = False
     backend: str = "rdt"
@@ -2178,7 +2181,7 @@ class RedditSourceConfigOut(BaseModel):
     min_interval_minutes: int = 3
 
 
-class BangumiSourceConfigOut(BaseModel):
+class BangumiSourceConfigOut(SourceDatePreferenceOut):
     enabled: bool = False
     username: str = ""
     # The personal access token itself is a secret and is NEVER echoed back;
@@ -2195,7 +2198,7 @@ class BangumiSourceConfigOut(BaseModel):
     bootstrap_limit: int = 300
 
 
-class LinuxdoSourceConfigOut(BaseModel):
+class LinuxdoSourceConfigOut(SourceDatePreferenceOut):
     enabled: bool = False
     incremental_enabled: bool = False
     source_modes: list[str] = Field(
@@ -2211,7 +2214,7 @@ class LinuxdoSourceConfigOut(BaseModel):
     bootstrap_limit: int = Field(default=300, ge=1, le=300)
 
 
-class V2EXSourceConfigOut(BaseModel):
+class V2EXSourceConfigOut(SourceDatePreferenceOut):
     enabled: bool = False
     incremental_enabled: bool = False
     username: str = ""
@@ -2242,7 +2245,7 @@ class V2EXSourceConfigOut(BaseModel):
     bootstrap_max_pages_per_scope: int = 20
 
 
-class WeiboSourceConfigOut(BaseModel):
+class WeiboSourceConfigOut(SourceDatePreferenceOut):
     enabled: bool = False
     source_modes: list[str] = Field(default_factory=lambda: ["search", "hot", "creator"])
     daily_search_budget: int = 60

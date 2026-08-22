@@ -432,10 +432,12 @@ from openbiliclaw.recommendation.curator import PoolCurator
 
 `PoolCurator` 提供推荐侧的独立评分。它从候选池读取 Evaluation Agent 已持久化的语义特征，并按照一套专属权重对每条候选打分。相关性始终保持时间中性；时效分成两层：证据驱动三态 eligibility 负责可展示、待复审与确定过期的生命周期，publication bonus 只负责合格内容之间的优先级。
 
-发布时间偏好由 `PublicationDatePreference` 提供独立覆盖层，仅作用于 B 站候选。`all` 保持旧行为；
-其它预设或 `custom` 按用户本地自然日解析为包含式 UTC 边界。范围外候选的最终分数乘以
+发布时间偏好由 `PublicationDatePreference` 提供独立覆盖层，按来源配置
+（`[sources.<name>].recommendation_date_*`）。`all` 保持旧行为；其它预设或 `custom`
+按用户本地自然日解析为包含式 UTC 边界。发现策略在 LLM 评估之前会直接过滤掉范围外候选，
+不消耗评估预算。候选池打分保留 `weight` 语义：范围外候选的最终分数乘以
 `1 - weight`，默认 `weight=0.5`；`weight=1` 时，`RecommendationEngine` 在 MMR 和最终选择前
-忽略这些候选。候选不会因此从数据库或候选池删除，B 站以外内容保持原分数。缺失发布时间在活动范围
+忽略这些候选。候选不会因此从数据库或候选池删除。缺失发布时间在活动范围
 下视为范围外，不会拿发现时间冒充发布时间。
 
 数据库的有效库存读取也复用严格 eligibility：物理 `content_cache` 行保持不变，`count_pool_candidates()`、

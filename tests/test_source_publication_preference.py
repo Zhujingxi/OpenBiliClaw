@@ -1,0 +1,116 @@
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+from openbiliclaw.config import Config, load_config, save_config
+from openbiliclaw.discovery.engine import DiscoveredContent, DiscoveryStrategy
+from openbiliclaw.recommendation.publication_preference import (
+    PRESET_LAST_7_DAYS,
+    PublicationDatePreference,
+    evaluate_source_publication_preference,
+)
+
+
+class _FakeStrategy(DiscoveryStrategy):
+    name = "fake"
+    source_platform = "youtube"
+    date_preference: PublicationDatePreference | None = None
+
+    async def discover(self, profile: object, limit: int = 20) -> list[DiscoveredContent]:
+        return []
+
+
+def test_all_source_configs_expose_date_preference_defaults() -> None:
+    config = Config()
+
+    for slug in (
+        "bilibili",
+        "xiaohongshu",
+        "douyin",
+        "youtube",
+        "twitter",
+        "zhihu",
+        "reddit",
+        "bangumi",
+        "linuxdo",
+        "v2ex",
+        "weibo",
+    ):
+        source_cfg = getattr(config.sources, slug)
+        assert source_cfg.recommendation_date_preset == "all"
+        assert source_cfg.recommendation_date_start == ""
+        assert source_cfg.recommendation_date_end == ""
+        assert source_cfg.recommendation_date_weight == 0.5
+
+
+def test_non_bilibili_source_date_preference_round_trips(tmp_path: Path) -> None:
+    config = Config()
+    config.sources.youtube.recommendation_date_preset = "custom"
+    config.sources.youtube.recommendation_date_start = "2024-01-01"
+    config.sources.youtube.recommendation_date_end = "2024-12-31"
+    config.sources.youtube.recommendation_date_weight = 0.5
+
+    path = tmp_path / "config.toml"
+    save_config(config, path)
+    loaded = load_config(path)
+
+    assert loaded.sources.youtube.recommendation_date_preset == "custom"
+    assert loaded.sources.youtube.recommendation_date_start == "2024-01-01"
+    assert loaded.sources.youtube.recommendation_date_end == "2024-12-31"
+    assert loaded.sources.youtube.recommendation_date_weight == 0.5
+
+
+def test_filter_candidates_for_eval_removes_out_of_window_before_eval() -> None:
+    now = datetime(2026, 8, 17, 12, 0, tzinfo=UTC)
+    recent = DiscoveredContent(
+        bvid="recent",
+        source_platform="youtube",
+        published_at=(now - timedelta(days=1)).isoformat(),
+    )
+    old = DiscoveredContent(
+        bvid="old",
+        source_platform="youtube",
+        published_at="2000-01-01T00:00:00Z",
+    )
+    strategy = _FakeStrategy()
+    strategy.date_preference = PublicationDatePreference(
+        preset=PRESET_LAST_7_DAYS,
+        weight=1.0,
+    )
+
+    filtered = strategy.filter_candidates_for_eval([recent, old], now=now)
+
+    assert [item.bvid for item in filtered] == ["recent"]
+
+
+def test_filter_candidates_for_eval_all_preset_keeps_candidates() -> None:
+    now = datetime(2026, 8, 17, 12, 0, tzinfo=UTC)
+    recent = DiscoveredContent(
+        bvid="recent",
+        source_platform="youtube",
+        published_at=(now - timedelta(days=1)).isoformat(),
+    )
+    old = DiscoveredContent(
+        bvid="old",
+        source_platform="youtube",
+        published_at="2000-01-01T00:00:00Z",
+    )
+    strategy = _FakeStrategy()
+    strategy.date_preference = PublicationDatePreference()
+
+    filtered = strategy.filter_candidates_for_eval([recent, old], now=now)
+
+    assert [item.bvid for item in filtered] == ["recent", "old"]
+
+
+def test_evaluate_source_publication_preference_does_not_platform_gate() -> None:
+    now = datetime(2026, 8, 17, 12, 0, tzinfo=UTC)
+    decision = evaluate_source_publication_preference(
+        published_at="2000-01-01T00:00:00Z",
+        preference=PublicationDatePreference(preset=PRESET_LAST_7_DAYS, weight=1.0),
+        now=now,
+    )
+
+    assert decision.in_range is False
+    assert decision.eligible is False

@@ -23,6 +23,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
 
+from openbiliclaw.recommendation.publication_preference import PublicationDatePreference
 from openbiliclaw.discovery.engine import (
     ContentDiscoveryEngine,
     DiscoveredContent,
@@ -83,6 +84,7 @@ class YoutubeSearchStrategy(DiscoveryStrategy):
     queries_per_run: int = 6
     results_per_query: int = 15
     score_threshold: float = 0.60
+    date_preference: PublicationDatePreference | None = None
     llm_evaluation: bool = True
     last_intermediates: dict[str, object] = field(default_factory=dict)
 
@@ -195,6 +197,7 @@ class YoutubeSearchStrategy(DiscoveryStrategy):
             database=self.database,
             concurrency=self.concurrency,
         )
+        candidates = self.filter_candidates_for_eval(candidates)
         trimmed = trim_candidates_for_llm(candidates, limit=limit, source_context=self.name)
         scores = await evaluator.evaluate_content_batch(trimmed, profile)
         results: list[DiscoveredContent] = []
@@ -222,6 +225,7 @@ class YoutubeTrendingStrategy(DiscoveryStrategy):
     database: Database | None = None
     fetch_limit: int = 50
     score_threshold: float = 0.60
+    date_preference: PublicationDatePreference | None = None
     llm_evaluation: bool = True
     last_intermediates: dict[str, object] = field(default_factory=dict)
 
@@ -258,6 +262,7 @@ class YoutubeTrendingStrategy(DiscoveryStrategy):
             database=self.database,
             concurrency=self.concurrency,
         )
+        candidates = self.filter_candidates_for_eval(candidates)
         trimmed = trim_candidates_for_llm(candidates, limit=limit, source_context=self.name)
         scores = await evaluator.evaluate_content_batch(trimmed, profile)
         results: list[DiscoveredContent] = []
@@ -301,6 +306,7 @@ class YoutubeChannelStrategy(DiscoveryStrategy):
     max_channels: int = 10
     videos_per_channel: int = 5
     score_threshold: float = 0.60
+    date_preference: PublicationDatePreference | None = None
     llm_evaluation: bool = True
     last_intermediates: dict[str, object] = field(default_factory=dict)
 
@@ -352,6 +358,7 @@ class YoutubeChannelStrategy(DiscoveryStrategy):
             database=self.database,
             concurrency=self.concurrency,
         )
+        candidates = self.filter_candidates_for_eval(candidates)
         trimmed = trim_candidates_for_llm(candidates, limit=limit, source_context=self.name)
         scores = await evaluator.evaluate_content_batch(trimmed, profile)
         results: list[DiscoveredContent] = []

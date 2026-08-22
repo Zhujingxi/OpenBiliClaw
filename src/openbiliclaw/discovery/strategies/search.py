@@ -268,7 +268,7 @@ class SearchStrategy(DiscoveryStrategy):
             database=self.database,
             concurrency=self.concurrency,
         )
-        eval_candidates = ordered_candidates
+        eval_candidates = self.filter_candidates_for_eval(ordered_candidates)
         eval_candidates = trim_candidates_for_llm(
             eval_candidates,
             limit=limit,

@@ -240,25 +240,14 @@ def resolve_publication_window(
     return _window_for_dates(start, local_today, local_tz=timezone)
 
 
-def evaluate_publication_preference(
+def _evaluate_window(
     *,
-    source_platform: object,
     published_at: object,
     preference: PublicationDatePreference,
     now: datetime | None = None,
     local_tz: tzinfo | None = None,
 ) -> PublicationDateDecision:
-    """Evaluate one candidate without mutating its relevance score.
-
-    Non-Bilibili candidates are always neutral.  Missing or malformed
-    publication timestamps are treated as out of range only when a Bilibili
-    date window is active.
-    """
-
-    platform = normalize_source_platform(source_platform)
-    # 本期需求只作用于 B 站；其它来源必须保持原分数和可服务状态。
-    if platform != PLATFORM_BILIBILI:
-        return PublicationDateDecision(in_range=True, score_multiplier=1.0, eligible=True)
+    """Evaluate a candidate against an active date window."""
 
     window = resolve_publication_window(preference, now=now, local_tz=local_tz)
     if window is None:
@@ -276,4 +265,54 @@ def evaluate_publication_preference(
         in_range=in_range,
         score_multiplier=multiplier,
         eligible=eligible,
+    )
+
+
+def evaluate_publication_preference(
+    *,
+    source_platform: object,
+    published_at: object,
+    preference: PublicationDatePreference,
+    now: datetime | None = None,
+    local_tz: tzinfo | None = None,
+) -> PublicationDateDecision:
+    """Evaluate a Bilibili candidate without mutating its relevance score.
+
+    Non-Bilibili candidates are always neutral (historical pool-scoring
+    contract). Missing or malformed publication timestamps are treated as
+    out of range only when a Bilibili date window is active.
+    """
+
+    platform = normalize_source_platform(source_platform)
+    # 池子评分/库存统计沿用“只作用于 B 站”的历史契约。
+    if platform != PLATFORM_BILIBILI:
+        return PublicationDateDecision(in_range=True, score_multiplier=1.0, eligible=True)
+
+    return _evaluate_window(
+        published_at=published_at,
+        preference=preference,
+        now=now,
+        local_tz=local_tz,
+    )
+
+
+def evaluate_source_publication_preference(
+    *,
+    published_at: object,
+    preference: PublicationDatePreference,
+    now: datetime | None = None,
+    local_tz: tzinfo | None = None,
+) -> PublicationDateDecision:
+    """Evaluate a candidate for a caller-selected source date preference.
+
+    Discovery strategies pass only candidates from their own source and use
+    this variant before LLM evaluation, so out-of-window items are filtered
+    out before spending any evaluation budget.
+    """
+
+    return _evaluate_window(
+        published_at=published_at,
+        preference=preference,
+        now=now,
+        local_tz=local_tz,
     )

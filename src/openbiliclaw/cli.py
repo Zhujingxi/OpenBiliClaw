@@ -1097,19 +1097,15 @@ def _build_discovery_engine() -> Any:
     )
     from openbiliclaw.llm.concurrency import background_llm_concurrency
     from openbiliclaw.llm.service import LLMService, module_overrides_from_config
-    from openbiliclaw.recommendation.publication_preference import PublicationDatePreference
 
     memory = _build_memory_manager()
     database = _get_runtime_database()
     bilibili_client = _build_bilibili_client()
-    from openbiliclaw.config import load_config
+    from openbiliclaw.config import load_config, publication_date_preference_for_source
 
     cfg = load_config()
-    publication_preference = PublicationDatePreference(
-        preset=getattr(cfg.bilibili, "recommendation_date_preset", "all"),
-        start_date=getattr(cfg.bilibili, "recommendation_date_start", ""),
-        end_date=getattr(cfg.bilibili, "recommendation_date_end", ""),
-        weight=getattr(cfg.bilibili, "recommendation_date_weight", 0.5),
+    publication_preference = publication_date_preference_for_source(
+        getattr(getattr(cfg, "sources", None), "bilibili", None)
     )
     set_publication_preference = getattr(database, "set_publication_date_preference", None)
     if callable(set_publication_preference):
@@ -1175,6 +1171,7 @@ def _build_discovery_engine() -> Any:
         concurrency=concurrency,
         database=database,
         embedding_service=embedding_service,
+        date_preference=publication_preference,
     )
     related_strategy = RelatedChainStrategy(
         bilibili_client=bilibili_client,
@@ -1184,6 +1181,7 @@ def _build_discovery_engine() -> Any:
         trending_strategy=trending_strategy,
         concurrency=concurrency,
         database=database,
+        date_preference=publication_preference,
     )
     explore_strategy = ExploreStrategy(
         llm_service=llm_service,
@@ -1191,6 +1189,7 @@ def _build_discovery_engine() -> Any:
         concurrency=concurrency,
         embedding_service=embedding_service,
         database=database,
+        date_preference=publication_preference,
     )
 
     engine.register_strategy(search_strategy)
@@ -6102,8 +6101,8 @@ def _format_autostart_config_status(cfg: Any) -> str:
     return f"{enabled}（{registered}，{state.mechanism}）"
 
 
-def _format_bilibili_date_preference(config: Any) -> str:
-    """Render the Bilibili publication-date range for ``config-show``."""
+def _format_source_date_preference(config: Any) -> str:
+    """Render a source publication-date range for ``config-show``."""
 
     preset = str(getattr(config, "recommendation_date_preset", "all") or "all")
     labels = {
@@ -13268,6 +13267,7 @@ def _run_douyin_discovery(
                     cache=cache,
                     evaluate=evaluate,
                     per_source_limit=max(1, min(limit, 30)),
+                    date_preference=config_module.publication_date_preference_for_source(dy_cfg),
                 ),
             )
 
@@ -14946,9 +14946,9 @@ def config_show() -> None:
         ("B站认证", cfg.bilibili.auth_method),
         (
             "B站发布日期范围",
-            _format_bilibili_date_preference(cfg.bilibili),
+            _format_source_date_preference(cfg.sources.bilibili),
         ),
-        ("B站发布日期权重", str(cfg.bilibili.recommendation_date_weight)),
+        ("B站发布日期权重", str(cfg.sources.bilibili.recommendation_date_weight)),
         ("定时任务", "开启" if cfg.scheduler.enabled else "关闭"),
         ("停止后台 LLM 请求", "否" if cfg.scheduler.enabled else "是"),
         (
