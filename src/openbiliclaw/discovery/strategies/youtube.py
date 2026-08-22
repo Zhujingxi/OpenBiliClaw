@@ -23,7 +23,6 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
 
-from openbiliclaw.recommendation.publication_preference import PublicationDatePreference
 from openbiliclaw.discovery.engine import (
     ContentDiscoveryEngine,
     DiscoveredContent,
@@ -38,6 +37,7 @@ from openbiliclaw.llm.task_options import without_core_memory_kwargs
 from openbiliclaw.youtube.client import YtScraperClient, normalize_yt_video
 
 if TYPE_CHECKING:
+    from openbiliclaw.recommendation.publication_preference import PublicationDatePreference
     from openbiliclaw.soul.profile import SoulProfile
     from openbiliclaw.storage.database import Database
 

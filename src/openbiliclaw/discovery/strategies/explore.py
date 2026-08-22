@@ -11,7 +11,6 @@ import time
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
-from openbiliclaw.recommendation.publication_preference import PublicationDatePreference
 from openbiliclaw.discovery.engine import (
     ContentDiscoveryEngine,
     DiscoveredContent,
@@ -41,6 +40,7 @@ from openbiliclaw.runtime.keyword_fetch import (
 
 if TYPE_CHECKING:
     from openbiliclaw.llm.embedding import SupportsEmbeddingService
+    from openbiliclaw.recommendation.publication_preference import PublicationDatePreference
     from openbiliclaw.soul.profile import SoulProfile
     from openbiliclaw.storage.database import Database
 

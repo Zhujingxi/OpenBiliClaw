@@ -1008,7 +1008,6 @@ class DiscoveryStrategy(ABC):
             return candidates
 
         current = (now or datetime.now(UTC)).astimezone(UTC)
-        platform = getattr(self, "source_platform", "bilibili")
         return [
             item
             for item in candidates

@@ -8,7 +8,6 @@ import re
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
-from openbiliclaw.recommendation.publication_preference import PublicationDatePreference
 from openbiliclaw.discovery.engine import (
     ContentDiscoveryEngine,
     DiscoveredContent,
@@ -31,6 +30,7 @@ from openbiliclaw.discovery.strategies._utils import (
 from openbiliclaw.published_time import normalize_published_time
 
 if TYPE_CHECKING:
+    from openbiliclaw.recommendation.publication_preference import PublicationDatePreference
     from openbiliclaw.soul.profile import SoulProfile
     from openbiliclaw.storage.database import Database
 

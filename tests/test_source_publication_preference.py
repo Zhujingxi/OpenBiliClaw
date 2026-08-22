@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from openbiliclaw.config import Config, load_config, save_config
+
+if TYPE_CHECKING:
+    from pathlib import Path
 from openbiliclaw.discovery.candidate_pool import discovered_content_to_candidate_write
 from openbiliclaw.discovery.engine import DiscoveredContent, DiscoveryStrategy
-from openbiliclaw.storage.database import Database
 from openbiliclaw.recommendation.publication_preference import (
     PRESET_LAST_7_DAYS,
     PublicationDatePreference,
     evaluate_source_publication_preference,
 )
+from openbiliclaw.storage.database import Database
 
 
 class _FakeStrategy(DiscoveryStrategy):

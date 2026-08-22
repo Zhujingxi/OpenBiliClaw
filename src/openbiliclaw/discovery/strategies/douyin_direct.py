@@ -8,7 +8,6 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol
 
-from openbiliclaw.recommendation.publication_preference import PublicationDatePreference
 from openbiliclaw.discovery.engine import (
     ContentDiscoveryEngine,
     DiscoveredContent,
@@ -27,6 +26,7 @@ from openbiliclaw.sources.douyin_plugin_search import DouyinBudgetExhausted
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable
 
+    from openbiliclaw.recommendation.publication_preference import PublicationDatePreference
     from openbiliclaw.soul.profile import SoulProfile
     from openbiliclaw.storage.database import Database
 

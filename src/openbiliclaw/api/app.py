@@ -16797,7 +16797,7 @@ def create_app(
                 bilibili=BilibiliSourceConfigOut(
                     enabled=cfg.sources.bilibili.enabled,
                     min_interval_minutes=cfg.sources.bilibili.min_interval_minutes,
-                
+
                     **_source_date_pref_out_kwargs(cfg.sources.bilibili),
                 ),
                 xiaohongshu=XiaohongshuSourceConfigOut(
@@ -16807,7 +16807,7 @@ def create_app(
                     daily_creator_budget=cfg.sources.xiaohongshu.daily_creator_budget,
                     task_interval_seconds=cfg.sources.xiaohongshu.task_interval_seconds,
                     min_interval_minutes=cfg.sources.xiaohongshu.min_interval_minutes,
-                
+
                     **_source_date_pref_out_kwargs(cfg.sources.xiaohongshu),
                 ),
                 douyin=DouyinSourceConfigOut(
@@ -16821,7 +16821,7 @@ def create_app(
                     daily_feed_budget=cfg.sources.douyin.daily_feed_budget,
                     request_interval_seconds=cfg.sources.douyin.request_interval_seconds,
                     min_interval_minutes=cfg.sources.douyin.min_interval_minutes,
-                
+
                     **_source_date_pref_out_kwargs(cfg.sources.douyin),
                 ),
                 youtube=YoutubeSourceConfigOut(
@@ -16832,7 +16832,7 @@ def create_app(
                     daily_channel_budget=cfg.sources.youtube.daily_channel_budget,
                     request_interval_seconds=cfg.sources.youtube.request_interval_seconds,
                     min_interval_minutes=cfg.sources.youtube.min_interval_minutes,
-                
+
                     **_source_date_pref_out_kwargs(cfg.sources.youtube),
                 ),
                 twitter=TwitterSourceConfigOut(
@@ -16845,7 +16845,7 @@ def create_app(
                     daily_creator_budget=cfg.sources.twitter.daily_creator_budget,
                     request_interval_seconds=cfg.sources.twitter.request_interval_seconds,
                     min_interval_minutes=cfg.sources.twitter.min_interval_minutes,
-                
+
                     **_source_date_pref_out_kwargs(cfg.sources.twitter),
                 ),
                 zhihu=ZhihuSourceConfigOut(
@@ -16859,7 +16859,7 @@ def create_app(
                     daily_related_budget=cfg.sources.zhihu.daily_related_budget,
                     request_interval_seconds=cfg.sources.zhihu.request_interval_seconds,
                     min_interval_minutes=cfg.sources.zhihu.min_interval_minutes,
-                
+
                     **_source_date_pref_out_kwargs(cfg.sources.zhihu),
                 ),
                 reddit=RedditSourceConfigOut(
@@ -16873,7 +16873,7 @@ def create_app(
                     daily_related_budget=cfg.sources.reddit.daily_related_budget,
                     request_interval_seconds=cfg.sources.reddit.request_interval_seconds,
                     min_interval_minutes=cfg.sources.reddit.min_interval_minutes,
-                
+
                     **_source_date_pref_out_kwargs(cfg.sources.reddit),
                 ),
                 bangumi=BangumiSourceConfigOut(
@@ -16888,7 +16888,7 @@ def create_app(
                     request_interval_seconds=cfg.sources.bangumi.request_interval_seconds,
                     min_interval_minutes=cfg.sources.bangumi.min_interval_minutes,
                     bootstrap_limit=cfg.sources.bangumi.bootstrap_limit,
-                
+
                     **_source_date_pref_out_kwargs(cfg.sources.bangumi),
                 ),
                 linuxdo=LinuxdoSourceConfigOut(
@@ -16903,7 +16903,7 @@ def create_app(
                     request_interval_seconds=cfg.sources.linuxdo.request_interval_seconds,
                     min_interval_minutes=cfg.sources.linuxdo.min_interval_minutes,
                     bootstrap_limit=cfg.sources.linuxdo.bootstrap_limit,
-                
+
                     **_source_date_pref_out_kwargs(cfg.sources.linuxdo),
                 ),
                 v2ex=V2EXSourceConfigOut(
@@ -16936,7 +16936,7 @@ def create_app(
                     bootstrap_replies_limit=cfg.sources.v2ex.bootstrap_replies_limit,
                     bootstrap_favorites_limit=cfg.sources.v2ex.bootstrap_favorites_limit,
                     bootstrap_max_pages_per_scope=cfg.sources.v2ex.bootstrap_max_pages_per_scope,
-                
+
                     **_source_date_pref_out_kwargs(cfg.sources.v2ex),
                 ),
                 weibo=WeiboSourceConfigOut(
@@ -16947,7 +16947,7 @@ def create_app(
                     daily_creator_budget=cfg.sources.weibo.daily_creator_budget,
                     request_interval_seconds=cfg.sources.weibo.request_interval_seconds,
                     min_interval_minutes=cfg.sources.weibo.min_interval_minutes,
-                
+
                     **_source_date_pref_out_kwargs(cfg.sources.weibo),
                 ),
             ),

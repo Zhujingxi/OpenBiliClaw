@@ -10,10 +10,13 @@ from typing import Any, cast
 from openbiliclaw.api.runtime_context import build_youtube_discovery_producer
 from openbiliclaw.bilibili.api import BilibiliAPIClient
 from openbiliclaw.bilibili.auth import resolve_runtime_cookie
-from openbiliclaw.config import Config, load_config
+from openbiliclaw.config import (
+    Config,
+    load_config,
+    source_date_preferences,
+)
 from openbiliclaw.config import (
     llm_concurrency_from_config as _llm_concurrency_from_config,
-    source_date_preferences,
 )
 from openbiliclaw.discovery.candidate_pipeline import DiscoveryCandidatePipeline
 from openbiliclaw.discovery.engine import ContentDiscoveryEngine

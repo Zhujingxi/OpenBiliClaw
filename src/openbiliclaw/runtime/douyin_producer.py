@@ -13,11 +13,10 @@ import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from openbiliclaw.config import publication_date_preference_for_source
 from openbiliclaw.discovery.douyin import DouyinDiscoveryOptions, DouyinDiscoveryResult
-from openbiliclaw.recommendation.publication_preference import PublicationDatePreference
 from openbiliclaw.runtime.keyword_fetch import PLATFORM_DOUYIN as _PLATFORM_DOUYIN
 from openbiliclaw.runtime.pool_gate import candidate_pool_full_for_source
 from openbiliclaw.runtime.producer_cadence import (
@@ -28,6 +27,9 @@ from openbiliclaw.runtime.producer_cadence import (
 from openbiliclaw.sources.douyin_plugin_search import (
     DouyinBudgetExhausted as _DouyinBudgetExhausted,
 )
+
+if TYPE_CHECKING:
+    from openbiliclaw.recommendation.publication_preference import PublicationDatePreference
 
 logger = logging.getLogger(__name__)
 

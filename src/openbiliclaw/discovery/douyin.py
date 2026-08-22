@@ -16,9 +16,9 @@ from openbiliclaw.discovery.strategies.douyin_direct import (
     DouyinDirectStrategy,
     SupportsDouyinDirectClient,
 )
-from openbiliclaw.recommendation.publication_preference import PublicationDatePreference
 
 if TYPE_CHECKING:
+    from openbiliclaw.recommendation.publication_preference import PublicationDatePreference
     from openbiliclaw.soul.profile import SoulProfile
 
 
