@@ -15191,6 +15191,10 @@ class TestEmbeddingAndCompatProviderE2E:
             "related",
         ]
         assert data["sources"]["bangumi"] == {
+            "recommendation_date_preset": "all",
+            "recommendation_date_start": "",
+            "recommendation_date_end": "",
+            "recommendation_date_weight": 0.5,
             "enabled": True,
             "username": "sai",
             "subject_types": ["anime", "book"],

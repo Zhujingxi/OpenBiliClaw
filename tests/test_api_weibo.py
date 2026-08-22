@@ -268,6 +268,10 @@ def test_weibo_config_api_get_put_and_disk_reload_round_trip_every_field(
         after = client.get("/api/config").json()
 
     assert initial["sources"]["weibo"] == {
+        "recommendation_date_preset": "all",
+        "recommendation_date_start": "",
+        "recommendation_date_end": "",
+        "recommendation_date_weight": 0.5,
         "enabled": False,
         "source_modes": ["search", "hot", "creator"],
         "daily_search_budget": 60,
@@ -278,6 +282,10 @@ def test_weibo_config_api_get_put_and_disk_reload_round_trip_every_field(
     }
     assert response.status_code == 202
     expected = {
+        "recommendation_date_preset": "all",
+        "recommendation_date_start": "",
+        "recommendation_date_end": "",
+        "recommendation_date_weight": 0.5,
         "enabled": True,
         "source_modes": ["creator", "search", "hot"],
         "daily_search_budget": 41,

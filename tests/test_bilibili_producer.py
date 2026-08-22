@@ -8,7 +8,10 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from openbiliclaw.recommendation.publication_preference import PublicationDatePreference
+from openbiliclaw.recommendation.publication_preference import (
+    PublicationDatePreference,
+    resolve_publication_window,
+)
 from openbiliclaw.runtime.bilibili_producer import BilibiliExtensionSearchProducer
 from openbiliclaw.runtime.keyword_fetch import KeywordFetchCoordinator
 from openbiliclaw.sources.bili_tasks import BiliTaskQueue
@@ -281,9 +284,10 @@ def test_bilibili_producer_pushes_strict_date_bounds_to_extension_task(
     )
 
     payload = producer._task_payload("纪录片")
-
-    assert payload["pubtime_begin"] == 1767196800
-    assert payload["pubtime_end"] == 1798732799
+    window = resolve_publication_window(producer.publication_preference)
+    assert window is not None
+    assert payload["pubtime_begin"] == int(window.start_utc.timestamp())
+    assert payload["pubtime_end"] == int(window.end_utc.timestamp())
 
 
 @pytest.mark.asyncio

@@ -3994,8 +3994,11 @@ def publication_date_preference_for_source(source_cfg: object) -> Any:
 def source_date_preferences(config: Config) -> dict[str, Any]:
     """Build the per-source publication-date preference map used by discovery."""
 
+    sources = getattr(config, "sources", None)
+    if sources is None:
+        return {}
     return {
-        slug: publication_date_preference_for_source(getattr(config.sources, slug, None))
+        slug: publication_date_preference_for_source(getattr(sources, slug, None))
         for slug in _SOURCE_DATE_PREFERENCE_SLUGS
     }
 
