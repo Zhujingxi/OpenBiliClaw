@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING, Any, cast
 from openbiliclaw.config import (
     llm_concurrency_from_config as _llm_concurrency_from_config,
     publication_date_preference_for_source,
+    source_date_preferences,
 )
 from openbiliclaw.runtime.presence import PresenceTracker
 from openbiliclaw.runtime.presence import background_llm_work_allowed as _gate
@@ -934,6 +935,11 @@ class RuntimeContext:
         set_publication_preference = getattr(self.database, "set_publication_date_preference", None)
         if callable(set_publication_preference):
             set_publication_preference(publication_preference)
+        set_source_preferences = getattr(
+            self.database, "set_source_publication_date_preferences", None
+        )
+        if callable(set_source_preferences):
+            set_source_preferences(source_date_preferences(new_config))
         new_curator = PoolCurator(
             self.database,
             publication_preference=publication_preference,

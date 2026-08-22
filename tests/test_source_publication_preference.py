@@ -4,7 +4,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from openbiliclaw.config import Config, load_config, save_config
+from openbiliclaw.discovery.candidate_pool import discovered_content_to_candidate_write
 from openbiliclaw.discovery.engine import DiscoveredContent, DiscoveryStrategy
+from openbiliclaw.storage.database import Database
 from openbiliclaw.recommendation.publication_preference import (
     PRESET_LAST_7_DAYS,
     PublicationDatePreference,
@@ -114,3 +116,41 @@ def test_evaluate_source_publication_preference_does_not_platform_gate() -> None
 
     assert decision.in_range is False
     assert decision.eligible is False
+
+
+def test_database_enqueue_filters_raw_candidates_by_source_date_preference(tmp_path: Path) -> None:
+    """All source adapters share database.enqueue_discovery_candidates."""
+
+    db = Database(tmp_path / "enqueue-date-filter.db")
+    db.initialize()
+    db.set_source_publication_date_preferences(
+        {
+            "youtube": PublicationDatePreference(
+                preset=PRESET_LAST_7_DAYS,
+                weight=1.0,
+            )
+        }
+    )
+
+    now = datetime(2026, 8, 17, 12, 0, tzinfo=UTC)
+    recent = DiscoveredContent(
+        bvid="recent-yt",
+        content_id="recent-yt",
+        source_platform="youtube",
+        published_at=(now - timedelta(days=1)).isoformat(),
+    )
+    old = DiscoveredContent(
+        bvid="old-yt",
+        content_id="old-yt",
+        source_platform="youtube",
+        published_at="2000-01-01T00:00:00Z",
+    )
+
+    inserted = db.enqueue_discovery_candidates(
+        [
+            discovered_content_to_candidate_write(recent, source_context="yt_search"),
+            discovered_content_to_candidate_write(old, source_context="yt_search"),
+        ]
+    )
+
+    assert inserted == 1

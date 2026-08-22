@@ -1101,7 +1101,11 @@ def _build_discovery_engine() -> Any:
     memory = _build_memory_manager()
     database = _get_runtime_database()
     bilibili_client = _build_bilibili_client()
-    from openbiliclaw.config import load_config, publication_date_preference_for_source
+    from openbiliclaw.config import (
+        load_config,
+        publication_date_preference_for_source,
+        source_date_preferences,
+    )
 
     cfg = load_config()
     publication_preference = publication_date_preference_for_source(
@@ -1110,6 +1114,9 @@ def _build_discovery_engine() -> Any:
     set_publication_preference = getattr(database, "set_publication_date_preference", None)
     if callable(set_publication_preference):
         set_publication_preference(publication_preference)
+    set_source_preferences = getattr(database, "set_source_publication_date_preferences", None)
+    if callable(set_source_preferences):
+        set_source_preferences(source_date_preferences(cfg))
     # Topic-lifecycle serialization switch (spec Phase 4); default off.
     from openbiliclaw.discovery.strategies._utils import set_topic_lifecycle_serialization
 
@@ -1205,12 +1212,15 @@ def _get_runtime_database() -> Any:
     if cached is not None:
         return cached
 
-    from openbiliclaw.config import load_config
+    from openbiliclaw.config import load_config, source_date_preferences
     from openbiliclaw.storage.database import Database
 
     config = load_config()
     database = Database(config.data_path / "openbiliclaw.db")
     database.initialize()
+    set_source_preferences = getattr(database, "set_source_publication_date_preferences", None)
+    if callable(set_source_preferences):
+        set_source_preferences(source_date_preferences(config))
     _RUNTIME_COMPONENTS["database"] = database
     return database
 

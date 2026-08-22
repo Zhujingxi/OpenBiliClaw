@@ -3929,6 +3929,15 @@ def publication_date_preference_for_source(source_cfg: object) -> object:
     )
 
 
+def source_date_preferences(config: Config) -> dict[str, object]:
+    """Build the per-source publication-date preference map used by discovery."""
+
+    return {
+        slug: publication_date_preference_for_source(getattr(config.sources, slug, None))
+        for slug in _SOURCE_DATE_PREFERENCE_SLUGS
+    }
+
+
 def _source_date_preference_issues(config: Config) -> list[ConfigIssue]:
     """Return blocking issues for malformed per-source date preferences."""
 

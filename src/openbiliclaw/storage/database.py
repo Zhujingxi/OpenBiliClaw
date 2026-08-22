@@ -1973,6 +1973,9 @@ class Database:
         # RuntimeContext updates this immutable policy when configuration is
         # applied. None preserves the historical platform-neutral pool gate.
         self._publication_date_preference: object | None = None
+        # Per-source publication-date preferences for raw candidate enqueue
+        # filtering (discovery_candidates). None / empty = platform-neutral.
+        self._source_publication_date_preferences: dict[str, object] | None = None
         self._preserve_read_transaction = False
         # The two queues must remain separate: a slow/background maintenance
         # batch must never sit in front of an interactive recommendation read.
@@ -1997,6 +2000,46 @@ class Database:
     def set_publication_date_preference(self, preference: object | None) -> None:
         """Set the current Bilibili publication policy used by pool reads."""
         self._publication_date_preference = preference
+
+    def set_source_publication_date_preferences(
+        self,
+        preferences: dict[str, object] | None,
+    ) -> None:
+        """Set the per-source publication policy used by raw candidate enqueue."""
+        if preferences is None:
+            self._source_publication_date_preferences = None
+        elif isinstance(preferences, dict):
+            self._source_publication_date_preferences = dict(preferences)
+        else:
+            self._source_publication_date_preferences = None
+
+    def _source_publication_date_candidate_is_eligible(
+        self,
+        source_platform: str,
+        published_at: object,
+    ) -> bool:
+        """Apply a source date preference before a raw candidate is enqueued."""
+        preferences = self._source_publication_date_preferences
+        if not preferences:
+            return True
+        preference = preferences.get(source_platform)
+        if preference is None:
+            return True
+        try:
+            from openbiliclaw.recommendation.publication_preference import (
+                evaluate_source_publication_preference,
+            )
+
+            return evaluate_source_publication_preference(
+                published_at=published_at,
+                preference=preference,
+            ).in_range
+        except (TypeError, ValueError):
+            logger.warning(
+                "Ignoring invalid publication preference during candidate enqueue",
+                exc_info=True,
+            )
+            return True
 
     def _publication_date_row_is_eligible(self, row: Mapping[str, Any]) -> bool:
         """Apply strict Bilibili date preference without deleting stored rows."""
@@ -2282,6 +2325,7 @@ class Database:
         isolated._conn = conn
         isolated._admission_min_score = self._admission_min_score
         isolated._publication_date_preference = self._publication_date_preference
+        isolated._source_publication_date_preferences = self._source_publication_date_preferences
         isolated._seen_state_lock = self._seen_state_lock
         isolated._seen_state_cache = self._seen_state_cache
         return isolated
@@ -5641,12 +5685,19 @@ class Database:
         """
 
         inserted = 0
+        filtered_by_date = 0
         touched_sources: set[str] = set()
         for candidate in candidates:
             candidate_key = str(self._candidate_value(candidate, "candidate_key", "") or "").strip()
             if not candidate_key:
                 continue
             source_platform = str(self._candidate_value(candidate, "source_platform", "") or "")
+            if not self._source_publication_date_candidate_is_eligible(
+                source_platform,
+                self._candidate_value(candidate, "published_at", ""),
+            ):
+                filtered_by_date += 1
+                continue
             tags = self._candidate_json_payload(
                 self._candidate_value(candidate, "tags", []),
                 default=[],
@@ -5785,6 +5836,11 @@ class Database:
                     max(0, int(self._candidate_value(candidate, "source_rank", 0) or 0)),
                     candidate_key,
                 ),
+            )
+        if filtered_by_date:
+            logger.info(
+                "candidate enqueue: filtered %d raw candidate(s) by publication date",
+                filtered_by_date,
             )
         if max_pending_per_source is not None:
             max_pending = max(0, int(max_pending_per_source))
