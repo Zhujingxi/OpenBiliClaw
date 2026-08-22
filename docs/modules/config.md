@@ -1,6 +1,6 @@
 # 配置参考
 
-> `[llm].concurrency` 缺省/非法值为 4；显式正数（含旧值 3）原样保留。后台容量为 `max(1, total-1)`；`candidate_eval_concurrency` 仍默认 3。
+> `[llm].concurrency` 缺省/非法值为 3；显式正数原样保留。后台容量为 `max(1, total-1)`（默认 2）；`candidate_eval_concurrency` 仍默认 3。
 
 > `config.toml` 所有配置段落详解。
 
@@ -165,7 +165,7 @@ auto_sync_enabled = false
 |----|------|--------|------|
 | `routing_version` | int | `2` | LLM 实例路由配置版本。新配置固定为 `2` |
 | `default_chain` | list[string] | `["deepseek"]` | 全局有序实例链。每一项引用一个 `[llm.instances.<id>]`；请求按从左到右的顺序尝试 |
-| `concurrency` | int | `4` | 单 runtime 的 LLM 总并发上限；后台容量派生为 `max(1, total-1)`（默认 3）。合法范围 `1..16` |
+| `concurrency` | int | `3` | 单 runtime 的 LLM 总并发上限；后台容量派生为 `max(1, total-1)`（默认 2）。合法范围 `1..16` |
 | `timeout` | int | `1200` | 每个实例请求的超时秒数，默认 20 分钟，合法范围 `10..1200` |
 
 `default_chain` 里的元素是**实例 ID**，不是 Provider 类型。一个实例是一套完整、可独立调用的端点配置，因此可以同时存在两个 `provider_type = "openai_compatible"` 的中转渠道、两个 OpenAI 账号，或同一网关上的不同模型：
@@ -174,7 +174,7 @@ auto_sync_enabled = false
 [llm]
 routing_version = 2
 default_chain = ["relay-primary", "relay-backup", "deepseek"]
-concurrency = 4
+concurrency = 3
 timeout = 1200
 
 [llm.instances.relay-primary]
@@ -203,6 +203,10 @@ base_url = "https://api.deepseek.com"
 ```
 
 链只在当前实例出现 Provider 级失败、超时、限流或无有效内容时继续；限流冷却按**实例 ID**隔离，同类型的健康备用渠道不会被一起冷却。保存时会阻止空链、重复引用、不存在或停用的实例，以及缺少必要凭据的启用实例。`PUT /api/config` 遇到 blocking issue 返回 400，并保持磁盘和运行时原状。
+
+> DeepSeek 官方 API 对内容安全审核较严，`rebuild-profile` / `init` 偏好分析遇到
+> HTTP 400 `"Content Exists Risk"` 时，系统会自动拆分并跳过命中事件；更稳的做法是给
+> `default_chain` 加一个第三方中转（`openai_compatible`）作为 fallback。
 
 ### `[llm.instances.<instance_id>]`
 
@@ -585,7 +589,7 @@ daemon，保留当前 v2 文件和自动备份，再由操作者显式把导出�
 
 ### `[network]` (v0.3.164+，v0.3.165 路由模式补强，v0.3.166 国内网关豁免)
 
-海外网络路由。仅作用于**海外客户端**：OpenAI / Claude / Gemini / OpenRouter / openai_compatible 的 chat + embedding SDK、YouTube（yt-dlp、scrapetube、InnerTube / 页面 fallback）、X 的服务端 `twitter-cli`、Reddit 的 `rdt-cli` / OpenCLI 命令后端、Bangumi（`api.bgm.tv` 与封面 CDN `lain.bgm.tv` 均为海外 Cloudflare，实测 2026-07-18 国内网络直连超时、走代理正常）、GitHub 自动更新、Codex OAuth 令牌刷新。X / Reddit 回落到浏览器扩展任务时，请求由浏览器发出并沿用浏览器自己的网络设置；微博的项目自有 `httpx` client 固定 `trust_env=false` 国内直连，也不读取本段。**注意**：`openai_compatible` / `openai` 若指向的是国内网关或本机地址，则按下方「国内网关豁免」强制直连，不受本节代理影响。
+海外网络路由。仅作用于**海外客户端**：OpenAI / Claude / Gemini / OpenRouter / openai_compatible 的 chat + embedding SDK、YouTube（yt-dlp、scrapetube、InnerTube / 页面 fallback）、X 的服务端 `twitter-cli`、Reddit 的 `rdt-cli` / OpenCLI 命令后端、Bangumi（`api.bgm.tv` 与封面 CDN `lain.bgm.tv` 均为海外 Cloudflare，实测 2026-07-18 国内网络直连超时、走代理正常）、封面图片代理的境外 CDN（`i.ytimg.com` / `ggpht.com`；v0.3.209 起跟随本节策略，此前硬编码 `trust_env=true` 在 `custom` 模式下拿不到代理、国内直连超时致 YouTube 封面全裂）、GitHub 自动更新、Codex OAuth 令牌刷新、discovery 灵感搜索的海外后端（Exa `api.exa.ai` / You.com `api.ydc-index.io` / Serply `api.serply.io` 的直连 HTTP 客户端与 mcporter 子进程；v0.3.209 起跟随本节策略，此前硬编码 `trust_env=false` 在 custom 模式下拿不到代理，实测 api.exa.ai 国内直连超时；Bing RSS 属国内可达服务保持恒直连）。X / Reddit 回落到浏览器扩展任务时，请求由浏览器发出并沿用浏览器自己的网络设置；微博的项目自有 `httpx` client 固定 `trust_env=false` 国内直连，也不读取本段。**注意**：`openai_compatible` / `openai` 若指向的是国内网关或本机地址，则按下方「国内网关豁免」强制直连，不受本节代理影响。
 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
@@ -989,9 +993,10 @@ TOML 与显式环境变量覆盖在构造 `SchedulerConfig` 前统一归一为�
 | `eval_prefilter_mode` | string | `"shadow"` | discovery evaluator 的 embedding 预过滤模式：`"off"` 不计算相似度；`"shadow"` 只记录 `prefilter-shadow` would-filter 日志但仍送 LLM；`"enforce"` 对 top-256 recall-visible 兴趣与 compact 兴趣域均低相似的非 explore 候选缓存低分并跳过 LLM。余弦值先夹到 `0..1`，单批过滤超过 50% 时 fail-open。非法值会被运行时配置校验拦截；OpenClaw、GET/PUT 配置接口与 daemon 热重载均透传该字段。上线时先用 shadow 观察 would-filter 中是否仍有高于 `admission_min_score` 的候选，再切 enforce |
 | `candidate_eval_concurrency` | int | `3` | 候选 LLM 评估的期望 worker 数，合法范围 `1..3`；每个 worker 最多 30 条，因此总 raw 在途上限为 90。超出范围的手工 TOML / API 值按本段既有整型规则回退默认 `3`。有效值为 `min(本值, max(1, llm.concurrency-1))`，为聊天等交互保留一个全局 LLM 槽位；插件与桌面 Web 设置页可修改，CLI `config-show` 自动显示。移动 Web 没有配置面板，不适用。 |
 | `inspiration_search_enabled` | bool | `true` | 是否启用 query inspiration 脑暴阶段。默认与 merged keyword planner 并行组成“混合”模式；`KeywordPlanner` 会通过搜索 provider 链获取搜索预览，再让 `discovery.keyword_inspiration` LLM caller 做 Profile Curator / Detail Expander，最终把带 `aspect_id/inspiration_id/expansion_id` 元数据的关键词写入 `discovery_keywords` |
-| `inspiration_search_backends` | list[str] | `["local_cache", "platform_sources", "bing_rss", "exa", "you"]` | query inspiration 搜索后端顺序。`local_cache` 会先从本地 `content_cache` 抽取相关标题 / URL / 摘要作为 evidence，本地命中不消耗外部 grounding 预算；证据不足时才 fallback。`platform_sources` 会从用户已启用且当前可同步/可注入 bridge 的平台源里抽样做 inspiration-only grounding（B站 / YouTube / X / Reddit；抖音 direct client；小红书 / 知乎 bridge 可用时），只把标题 / URL / 摘要作为灵感证据，不写候选池；`bing_rss` 是无 key 免费全网搜索兜底（`bing.com/search?format=rss`，仅供个人本地 grounding，请遵守 Bing RSS 使用条款）；`exa` 优先用 `exa_api_key` 直连 Exa `POST /search`，未填 API Key 才回退 `mcporter call exa.web_search_exa`；`you` 优先用 `you_api_key` 直连 You.com `GET /search`，未填才回退 `mcporter call you.you-search`。某个后端报错 / 限流 / 返回空结果时会继续尝试后面的后端。mcporter 路径仍需要本机安装 Node CLI 并写入 `config/mcporter.json` |
+| `inspiration_search_backends` | list[str] | `["local_cache", "platform_sources", "bing_rss", "exa", "you", "serply"]` | query inspiration 搜索后端顺序。`local_cache` 会先从本地 `content_cache` 抽取相关标题 / URL / 摘要作为 evidence，本地命中不消耗外部 grounding 预算；证据不足时才 fallback。`platform_sources` 会从用户已启用且当前可同步/可注入 bridge 的平台源里抽样做 inspiration-only grounding（B站 / YouTube / X / Reddit；抖音 direct client；小红书 / 知乎 bridge 可用时），只把标题 / URL / 摘要作为灵感证据，不写候选池；`bing_rss` 是无 key 免费全网搜索兜底（`bing.com/search?format=rss`，仅供个人本地 grounding，请遵守 Bing RSS 使用条款）；`exa` 优先用 `exa_api_key` 直连 Exa `POST /search`，未填 API Key 才回退 `mcporter call exa.web_search_exa`；`you` 优先用 `you_api_key` 直连 You.com `GET /search`，未填才回退 `mcporter call you.you-search`；`serply` 需要 `serply_api_key`，直连 Serply（[serply.io](https://serply.io)，文档见 [serply.io/docs](https://serply.io/docs)）的 `GET /v1/search`，没有 mcporter 兜底，留空即跳过该后端。某个后端报错 / 限流 / 返回空结果时会继续尝试后面的后端。mcporter 路径仍需要本机安装 Node CLI 并写入 `config/mcporter.json` |
 | `exa_api_key` | string | `""` | Exa 直连 API Key（可选）。填写后 `ExaInspirationProvider` 直接调用 `https://api.exa.ai/search`（`x-api-key`），不再依赖 mcporter。留空时回退 mcporter（若已安装）；两者都没有则跳过该后端 |
 | `you_api_key` | string | `""` | You.com 直连 API Key（可选）。填写后 `YouInspirationProvider` 直接调用 `https://api.ydc-index.io/search`（`x-api-key`），不再依赖 mcporter。留空时回退 mcporter（若已安装）；两者都没有则跳过该后端 |
+| `serply_api_key` | string | `""` | Serply 直连 API Key（可选）。填写后 `SerplyInspirationProvider` 直接调用 `https://api.serply.io/v1/search`（`X-Api-Key`）。留空则跳过该后端（无 mcporter 兜底） |
 | `inspiration_replace_merged_keywords` | bool | `false` | 实验性替换模式。仅在 `inspiration_search_enabled=true` 且 inspiration provider 可用时生效：due 平台跳过旧 `discovery.keyword_planner` merged call，只通过 search-backed inspiration flow 产词；当 B 站 explore 到期且有补货空间时，也会用同一轮共享 brainstorm / grounding stage 写入 `keyword_kind="explore"` 的探索词池。开 replace 前应先用 `keyword-inspiration-report` 跑 cohort 门禁，避免无质量数据直接替换 |
 | `inspiration_breadth` | str | `"high"` | 探索广度档位（Phase 2 config 收敛，13→4）：`low` / `medium` / `high`。旧的 10 个 `inspiration_*` 细粒度旋钮已删除，其派生成内部常量的有效值由本档位决定（见下表）。**默认 `high`（更宽的素材/轴/关键词产量）**；`medium` 逐项等于旧的 `_DEFAULT_INSPIRATION_*` 默认值，需与收敛前行为逐项对齐时显式设 `medium`。注意 `high` 会把每轮真实 probe 搜索与 LLM 用量放大（daemon 常驻），成本敏感可设 `medium`/`low`。非法档位（非 `low`/`medium`/`high`）→ 配置错误（`ConfigError`），未设置回退 `high` |
 | `eval_prefilter_mode` | string | `"shadow"` | discovery evaluator 的 embedding 预过滤模式：`"off"` 不计算相似度；`"shadow"` 只记录 `prefilter-shadow` would-filter 日志但仍送 LLM；`"enforce"` 将低于相似度阈值的非 explore 候选以低分缓存并跳过 LLM。非法值会被运行时配置校验拦截。上线时先用 shadow 观察 would-filter 中是否仍有高于 `admission_min_score` 的候选，再切 enforce |
@@ -1090,6 +1095,9 @@ TOML 与显式环境变量覆盖在构造 `SchedulerConfig` 前统一归一为�
 | `posture_gate_mode` | string | `"shadow"` | 深层写入一致性门控（认知画像流水线 Phase 3）。`shadow`=判定异步旁路、**零延迟不阻塞原写入**，判定只落台账（`shadow_accept`/`shadow_downgrade`/`shadow_reject`，LLM 异常记 `shadow_error`）；`enforce`=写入前同步判定，reject/downgrade 拦截深层写入（downgrade 转为待验证假设），异常/解析失败保守 downgrade；`off`=完全旁路、与未接门控前逐字节一致。门控作用面仅三处：对话 goal/value/state 深层候选、管线 VALUES/CORE 层、soul 整份重建（interest 快线与 ROLE 层永不过门控） |
 | `posture_gate_force_enforce` | bool | `false` | 逃生门。切到 `enforce` 需满足 save-time 三条件（最早有效 shadow 判定距今 ≥14 天 **且** 近 14 天有效判定 ≥10 条 **且** 近 7 天 ≥1 条），否则保存被 blocking 拒绝。置 `true` 无条件放行——**有风险**：门控尚未校准即启用可能误拦或误放深层写入 |
 | `topic_lifecycle_serialization` | string | `"off"` | topic 状态机的 archived 序列化排除开关（认知画像流水线 Phase 4，本版**唯一最小消费**）。`off`（默认）时 `build_profile_summary` 与未接状态机前**逐字节一致**（回放门）；`on` 时把 `archived` 状态的 topic 排出 LLM 可见画像（domain/tag 两级）。规范 owner 是 `soul.profile_views.set_topic_lifecycle_serialization`；进程启动时由 `create_app` / CLI 设置，旧 `discovery.strategies._utils` 路径仅保留兼容 re-export。仅 `off`/`on` 两值，其余落默认 `off` |
+| `awareness_event_batch_size` | int | `300` | 认知循环觉察每轮 LLM 调用最多携带的未处理事件数（issue #169）。默认按 256k+ 上下文模型设计（~100 token/事件，正常 12h 窗口单次调用）；80-100K 上下文的本地模型（如 qwen3.8-27B）可调小到 80-150。范围 `10..900` |
+| `insight_note_batch_size` | int | `150` | 认知循环洞察每轮 LLM 调用最多携带的新觉察 note 数。默认按 256k+ 上下文模型设计；小上下文模型可调小。范围 `10..450` |
+| `cognition_max_tokens` | int | `32768` | 认知循环觉察/洞察 LLM 调用的输出 token 上限。默认匹配 256k+ 模型的 dense batch；小上下文模型或严格输出限制的 provider 可调小（如 8192）。范围 `1024..128000` |
 
 三个 prompt view 从 TOML、`GET/PUT /api/config`、CLI runtime、API 热重载与 OpenClaw
 bootstrap 一路独立透传到 `SoulEngine`；其中 Awareness 值只进入 with-confusions seam，普通
@@ -1131,6 +1139,7 @@ Awareness seam 固定为 `legacy`。未发布的聚合字段
 - LLM：展示实例、全局调用链与四个模块链摘要，允许调整全局并发 / 超时、测试默认链，并跳转桌面 Web 完整编辑；插件保存其他字段时不会回写或压扁实例路由
 - B 站与多源：`bilibili.browser.*`、`sources.bilibili.enabled`、`sources.browser.*`，以及小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Linux.do / Bangumi / V2EX / 微博的来源配置
 - 调度：`scheduler.enabled`、`pause_on_extension_disconnect`、`extension_disconnect_grace_seconds`、`pool_target_count`、`account_sync_interval_hours`、eval drain 凑批参数、refresh / signal / trending / explore / discovery limit / proactive push / speculator idle 等 runtime 频率参数、十一个平台的 `pool_source_shares`、猜测兴趣参数、不喜欢领域探针参数、自动更新参数；设置页可调用 `/api/config/source-share-suggestion` 按已有事件和当前表单开关填入建议比例
+- 高级功能（桌面 Web 与插件设置页均有「认知循环预算」区块）：`soul.awareness_event_batch_size`、`soul.insight_note_batch_size`、`soul.cognition_max_tokens`（issue #169）
 - 日志：控制台 / 文件级别、完整日志路径（保存时拆回 `directory` / `filename`）、轮转与非托管日志清理参数
 
 `[saved_sync].auto_sync_enabled` 已在桌面 / 移动 Web 和插件设置控件中暴露，也可通过 `config.toml` 或严格校验的 `/api/config` 管理。保留但不单独暴露的字段还包括目前只有一个有效值的内部兼容项，例如 `[sources.douyin].mode = "direct"`；保存时插件会继续按当前支持值写回，不会删除其他高级字段。

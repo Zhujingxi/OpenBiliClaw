@@ -439,8 +439,12 @@ export async function startInit({
   sources,
   bangumiUsername = null,
   bangumiToken = null,
+  llmConcurrency = null,
 } = {}) {
   const payload = { force };
+  if (Number.isFinite(Number(llmConcurrency)) && Number(llmConcurrency) >= 1 && Number(llmConcurrency) <= 16) {
+    payload.llm_concurrency = Number(llmConcurrency);
+  }
   // Only attach an explicit per-run platform selection when given; omitting it
   // lets the backend fall back to all config-enabled sources (legacy behaviour).
   if (Array.isArray(sources)) {

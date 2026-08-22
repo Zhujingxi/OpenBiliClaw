@@ -87,7 +87,7 @@ class TestConfigDefaults:
         assert config.api.host == "0.0.0.0"
         assert config.api.port == 8420
         assert config.llm.default_provider == "deepseek"
-        assert config.llm.concurrency == 4
+        assert config.llm.concurrency == 3
         assert config.llm.timeout == 1200
         assert config.bilibili.auth_method == "cookie"
         assert config.bilibili.proxy == ""  # direct connection by default
@@ -566,6 +566,45 @@ manage_ollama = true
         assert cfg.soul.preference_prompt_view == "legacy"
         assert cfg.soul.awareness_prompt_view == "compact-v1"
         assert cfg.soul.insight_prompt_view == "legacy"
+
+    def test_cognition_budget_knobs_round_trip_through_toml(self, tmp_path: Path) -> None:
+        cfg = Config()
+        cfg.soul.awareness_event_batch_size = 80
+        cfg.soul.insight_note_batch_size = 40
+        cfg.soul.cognition_max_tokens = 8192
+        target = tmp_path / "config.toml"
+
+        save_config(cfg, target)
+        rendered = target.read_text(encoding="utf-8")
+        loaded = load_config(target)
+
+        assert "awareness_event_batch_size = 80" in rendered
+        assert "insight_note_batch_size = 40" in rendered
+        assert "cognition_max_tokens = 8192" in rendered
+        assert loaded.soul.awareness_event_batch_size == 80
+        assert loaded.soul.insight_note_batch_size == 40
+        assert loaded.soul.cognition_max_tokens == 8192
+
+    def test_cognition_budget_knobs_default_to_module_constants(self) -> None:
+        cfg = Config()
+
+        assert cfg.soul.awareness_event_batch_size == 300
+        assert cfg.soul.insight_note_batch_size == 150
+        assert cfg.soul.cognition_max_tokens == 32768
+
+    def test_cognition_budget_knobs_reject_invalid_values(self) -> None:
+        from openbiliclaw.config import _collect_config_issues
+
+        cfg = Config()
+        cfg.soul.awareness_event_batch_size = 1
+        cfg.soul.insight_note_batch_size = 9999
+        cfg.soul.cognition_max_tokens = 99
+
+        fields = {issue.field for issue in _collect_config_issues(cfg)}
+
+        assert "soul.awareness_event_batch_size" in fields
+        assert "soul.insight_note_batch_size" in fields
+        assert "soul.cognition_max_tokens" in fields
 
     def test_token_diet_runtime_controls_reject_invalid_values(self) -> None:
         from openbiliclaw.config import _collect_config_issues
@@ -2909,6 +2948,7 @@ class TestDiscoveryConfig:
             "bing_rss",
             "exa",
             "you",
+            "serply",
         )
         assert config.discovery.inspiration_breadth == "high"
         assert config.discovery.eval_prefilter_mode == "shadow"
@@ -2942,6 +2982,7 @@ class TestDiscoveryConfig:
             "bing_rss",
             "exa",
             "you",
+            "serply",
         )
         assert config.discovery.inspiration_breadth == "high"
         assert config.discovery.eval_prefilter_mode == "shadow"
@@ -3296,7 +3337,7 @@ eval_prefilter_mode = "  Shadow  "
         assert "inspiration_replace_merged_keywords = false" in rendered
         assert (
             'inspiration_search_backends = ["local_cache", "platform_sources", '
-            '"bing_rss", "exa", "you"]' in rendered
+            '"bing_rss", "exa", "you", "serply"]' in rendered
         )
         assert 'inspiration_breadth = "high"' in rendered
         assert 'eval_prefilter_mode = "shadow"' in rendered

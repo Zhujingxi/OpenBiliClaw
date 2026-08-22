@@ -57,8 +57,8 @@ routing_version = 2
 default_chain = ["deepseek"]
 # Shared max concurrency for LLM requests. Higher values replenish faster but
 # may hit provider/local-proxy rate limits sooner.
-# 总并发 4；后台派生为 3
-concurrency = 4
+# 总并发 3；后台派生为 2
+concurrency = 3
 # Global request timeout for all LLM providers (seconds).
 # Applies to OpenAI / Claude / Gemini / DeepSeek / Ollama / OpenRouter /
 # OrcaRouter / openai_compatible. Allowed range: 10..1200. Default 1200s (20 minutes).
@@ -98,6 +98,10 @@ api_key = ""
 # 旧名 deepseek-chat / deepseek-reasoner 将于 2026/07/24 弃用
 model = "deepseek-v4-flash"
 base_url = "https://api.deepseek.com"
+# 官方 API 对内容安全审核较严，跑 rebuild-profile / init 偏好分析时若遇到
+# HTTP 400 "Content Exists Risk"，说明当前批次内容命中审核；系统会自动拆分
+# 并跳过命中事件，但更省心的做法是给 default_chain 加一个第三方中转
+# （openai_compatible）作为 fallback，或在设置页使用 relay 跑 deepseek-v4-pro。
 # v4 thinking 默认用均衡档 medium（DeepSeek 官方兼容映射为 high）。
 # 渠道的关键词、抽取、评分和短文案任务仍按单次调用传空并关闭 thinking；
 # 需要最深推理时可改为 "max"，完全关闭可改为 ""。
@@ -619,15 +623,19 @@ inspiration_search_enabled = true
 # 本地证据不足时再用已启用的平台源做 inspiration-only grounding（当前同步支持
 # B站 / YouTube / X / Reddit，抖音 direct client；小红书 / 知乎 bridge 可用时
 # 也会加入；不写候选池），再用 Bing RSS 无 key 全网搜索兜底；之后用 Exa，
-# Exa 不可用/返回空时再用 You.com 兜底。远端 MCP 需要在本机 mcporter 配置里有
-# `exa` 和 / 或 `you` server；填写 exa_api_key / you_api_key 后则直连 HTTP API。
-inspiration_search_backends = ["local_cache", "platform_sources", "bing_rss", "exa", "you"]
-# Exa / You.com 直连 API Key（可选）。填写后走 Python 直连 HTTP API，
-# 不再依赖本机 mcporter CLI；留空时回退到 mcporter（若已安装）。
+# Exa 不可用/返回空时再用 You.com 兜底，最后是 Serply。远端 MCP 需要在本机
+# mcporter 配置里有 `exa` 和 / 或 `you` server；填写 exa_api_key / you_api_key /
+# serply_api_key 后则直连 HTTP API。
+inspiration_search_backends = ["local_cache", "platform_sources", "bing_rss", "exa", "you", "serply"]
+# Exa / You.com / Serply 直连 API Key（可选）。填写后走 Python 直连 HTTP API，
+# 不再依赖本机 mcporter CLI；留空时回退到 mcporter（若已安装，Serply 无 mcporter
+# 兜底，留空即跳过该后端）。
 # Exa: https://exa.ai  →  x-api-key
 # You.com: https://you.com  →  x-api-key
+# Serply: https://serply.io（文档 https://serply.io/docs）→ X-Api-Key
 exa_api_key = ""
 you_api_key = ""
+serply_api_key = ""
 # 实验开关：开启且 inspiration provider 可用时，跳过旧 merged keyword planner，
 # 每轮 due 平台只用 inspiration flow 产词。
 inspiration_replace_merged_keywords = false
@@ -732,6 +740,14 @@ unmanaged_max_age_days = 30
 preference_prompt_view = "legacy"
 awareness_prompt_view = "compact-v1"
 insight_prompt_view = "legacy"
+
+# Cognition-cycle prompt/output budgets (issue #169). The defaults are sized
+# for 256k-class providers. Small-context local models (e.g. qwen3.8-27B on a
+# 24G card with 80-100K context) should lower these instead of patching
+# src/openbiliclaw/soul/cognition_cycle.py.
+# awareness_event_batch_size = 300   # events per awareness LLM call (10..900)
+# insight_note_batch_size = 150      # awareness notes per insight LLM call (10..450)
+# cognition_max_tokens = 32768       # max output tokens per cognition call (1024..128000)
 
 [soul.preference]
 # v0.3.x event-satisfaction signal.

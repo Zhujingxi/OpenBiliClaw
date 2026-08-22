@@ -22,6 +22,8 @@
 >
 > 📱 Want a native app? The Flutter mobile client (Android / iOS / Web / desktop) lives in the separate repo [`OpenBiliClaw-mobile`](https://github.com/whiteguo233/OpenBiliClaw-mobile): recommendations, chat, profile, favorites / watch-later / 30-day history — all talking to the same local backend.
 
+> 🇨🇳 **Mainland China downloads (current v0.3.209)**: the large macOS / Windows installers that exceed Gitee's 100 MB attachment limit are available from [123 Cloud domestic download](https://4001474255.share.123pan.cn/123pan/IxbZMh-hhhR3), with a permanent share that supports downloads without signing in; get the extension, smaller installers, and source from the [Gitee v0.3.209 release](https://gitee.com/whiteguo233/openbiliclaw/releases/tag/openbiliclaw-v0.3.209).
+
 ## OpenBiliClaw in 10 Seconds
 
 A local-first AI discovery agent that learns your taste across Bilibili, Xiaohongshu (RedNote), Douyin, YouTube, X, Zhihu, Reddit, Linux.do, Bangumi, V2EX, Weibo, and the open web — without handing your profile to another platform.
@@ -49,7 +51,7 @@ A local-first AI discovery agent that learns your taste across Bilibili, Xiaohon
 Four steps for most users. Firefox, Docker, scripted, and manual setup paths all live in [Setup Details](#setup-details).
 
 1. **Install the extension** — one-click from the [Chrome Web Store](https://chromewebstore.google.com/detail/cdfjfkdjjhdaccbldipkjhpibnfbiamg) (auto-updates), or download the zip from [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) for the newest build (the store listing can lag a few days behind).
-2. **Install the backend** — grab the desktop installer from the same [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) (macOS `.dmg` / Windows `.exe`, works out of the box, lives in the menu bar / tray). Each platform ships two variants: the **lean** installer (default; downloads the bge-m3 embedding model on first launch) and the **`-with-embedding`** installer (bge-m3 baked in, ~1.1GB, offline-ready) — pick with-embedding for a poor / offline network, lean otherwise. Or, to customize or edit the source, paste this into Claude Code / Codex CLI / Cursor or another AI coding agent:
+2. **Install the backend** — grab the desktop installer from the same [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest) (macOS `.dmg` / Windows `.exe`, works out of the box, lives in the menu bar / tray). Each platform ships two variants: the **lean** installer (default; downloads the bge-m3 embedding model on first launch) and the **`-with-embedding`** installer (bge-m3 baked in, ~1.1GB, offline-ready) — pick with-embedding for a poor / offline network, lean otherwise. **Mainland China users can also download the large macOS / Windows packages from [123 Cloud (v0.3.209)](https://4001474255.share.123pan.cn/123pan/IxbZMh-hhhR3) without signing in.** Or, to customize or edit the source, paste this into Claude Code / Codex CLI / Cursor or another AI coding agent:
 
    ```text
    Please follow https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docs/agent-install.md to deploy the OpenBiliClaw backend for me (use Bash `curl` to fetch the document, NOT WebFetch — WebFetch summarises markdown and drops critical commands).
@@ -196,11 +198,12 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.208 (2026-08-18)**
+📌 Latest: **v0.3.209 (2026-08-22)**
 
-- **Per-source sync switches are off by default** — each platform can be toggled independently so background sync no longer steals your foreground tabs.
-- **Background LLM budget + embedding breaker** — prevents runaway model spend and automatically cools down unhealthy embedding endpoints.
-- **Source task focus fixes** — disabled Zhihu no longer opens task tabs, and deferred hypotheses no longer appear as pending confirmations.
+- **Ordinary card clicks no longer count as dislikes** — videos whose titles contain "dislike" no longer poison your profile, and a second click retracts the feedback.
+- **Mobile Web "load more" no longer stutters** — cards render first while covers warm up in the background; failures show a hint and can be retried.
+- **Configurable cognition context budget** — local models with 80-100K contexts can now run the cognition loop without touching source code.
+- **New Serply inspiration search backend** — set `serply_api_key` to go direct; without a key it is skipped and existing chains are unaffected.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
@@ -283,6 +286,8 @@ Most users: the **desktop installer** is the least effort. Want to edit the sour
 #### Option A: Download the desktop installer (experimental, easiest)
 
 Grab the installer for your OS from the `openbiliclaw-v*` aggregate [Latest Release](https://github.com/whiteguo233/OpenBiliClaw/releases/latest). The aggregate page shows:
+
+> 🇨🇳 For large-package downloads from mainland China, use [123 Cloud (current v0.3.209)](https://4001474255.share.123pan.cn/123pan/IxbZMh-hhhR3); the permanent share works without signing in and contains the regular Apple-silicon macOS build, the embedding-enabled Apple-silicon macOS build, and the embedding-enabled Windows build. The extension, regular Windows installer, and source remain available from GitHub / the [Gitee release](https://gitee.com/whiteguo233/openbiliclaw/releases/tag/openbiliclaw-v0.3.209).
 
 - Current backend source tag: `backend-v*`
 - Current extension release: `extension-v*`, with `openbiliclaw-extension-v*.zip` / `openbiliclaw-extension-v*-firefox.zip` (Firefox temporary debugging); AMO signing-enabled releases also include `openbiliclaw-extension-v*-firefox.xpi` (regular Firefox install)
@@ -606,147 +611,11 @@ The whole loop stays local — the agent host just calls the CLI bridge; your pr
 
 ## 🏛️ Architecture Overview
 
-```text
-interactive (dialogue / config probe) ──────────────┐
-                                                    ├─ runtime total gate (default 4) ─ ordered instance chain ─ adapter
-background ─ background admission (default 3) ──────┘
-             ├─ refill: expression > evaluation > supply
-             │  ├─ low-stock supply includes explore queries / source extraction
-             │  └─ while queued: guarantee 2, may borrow all 3
-             │     expression owner: 8 immediate / 3s fixed tail / 60 drain / 30×2 provider
-             └─ maintenance: at most 1 while refill waits;
-                parked when canonical available = 0
+The full architecture overview ASCII diagrams (runtime concurrency gates, agent orchestration, source adapters, discovery / recommendation / saved-sync pipelines) have been moved to a separate document to keep the README compact:
 
-guided init: signals → preferences → full profile commit → discover → evaluate → copy → canonical ready
-                                                              └→ optional probes after terminal state
+Publication date preference: `[sources.<name>].recommendation_date_*` per source → out-of-window candidates are filtered before LLM evaluation → effective inventory → PoolCurator soft/strict serving semantics.
 
-Agent hosts (OpenClaw / Hermes / WorkBuddy)
-        → capabilities(agent-bridge/v2) + JSON CLI / skill descriptors
-        → integrations.agent alias / integrations.openclaw compatibility adapter
-        → runtime / soul / recommendation / saved_sync owners
-
-config recovery draft (normal or degraded; business APIs remain gated)
-             ├→ /api/config/probe-service → temporary registry → total gate
-             └→ /api/config/discover-models → exact instance GET /models (no write)
-                                           → editable model list + local effort advisory
-Douyin supply: daemon presence gate (explicit manual calls bypass it) → one shared plugin-cycle budget
-              → terminal dy_task → pending_eval; absent means zero enqueue, failures back off
-local migration: export → config minus api.auth + online SQLite snapshot + portable files → plaintext .obcbackup
-                 import(request_id) → processing(upload/validate) → private stage ↔ status/cancel
-                                    ↘ General-open force reconcile; applied prefs once/browser/migration_id
-                                    → restart + project/canonical data-dir locks → replace | rollback
-durable reply: reply_to_turn_id + fixed time/payload → POST-time frozen binding → pending SQLite → rowid-serial reply worker → visible completion CAS (app-stable dialogue lease)
-post-reply learning/object settlement: independent 11-kind typed queue → actual worker + guard
-confirmation entry (pending list/cards) → one anchor(kind+ref+generation) → frozen admission / relation matrix
-                          ├→ pending≤3 · user no cooldown / system 12h+object 72h · confirmation-first attachment
-                          ├→ busy worker: dialogue_busy + Retry-After → waiting UI auto-retry
-                          ├→ active confusion: current holder only; hidden once this session has its turn
-                          ├→ frozen kind/ref/generation → worker-only apply → event/object/derived/marker → applied
-                          │                                                └→ publication-only retry → projection / exact release
-                          ├→ one context digest → prompt/history/event/learn/settlement provenance
-                          ├→ action local≤1s: completed 200 / blocked 202 → popup/mobile/desktop poll 1/2/5s, ≤30s
-                          └→ confusion FIFO≤5 / head fencing / 12h recovery
-config save: persist → HTTP 202 queued/apply_revision → latest-wins background apply queue → apply-status / final receipt; data_dir is persisted only and switches after a full restart
-config hot reload: accepting drain old worker → atomic pause/revoke → new worker; 25m safety window
-realtime: runtime-stream 20s idle heartbeat → transient close shows reconnecting and retries
-images: proxy foreground + refresh prefetch → app-stable lane (total 4 / bg 3, fg priority)
-                                            → cache-key singleflight → whitelist fetch → atomic cache
-```
-
-```
-┌────────────────────────────────────────────────┐
-│ Browser Extension (Chrome / Firefox / Safari)  │
-│  Behavior capture · MAIN-world taps (comment/  │
-│  danmaku, xhs strong signal) · Cookie · Tasks  │
-└──────────────────────┬─────────────────────────┘
-                       │ HTTP default: IPv4 0.0.0.0 + IPv6 [::] → REST / WebSocket
-                       │ Optional HTTPS: public Caddy :443 / LAN TLS Proxy :8443 → loopback HTTP → same API
-                       │ + Desktop Web (/web) · Mobile Web (/m) · QR LAN-IP
-                       │ + ping preflight → /web · /setup · /m → config + in-process recovery
-┌──────────────────────▼─────────────────────────┐
-│               Agent Orchestration               │
-│ Skills · Dialogue · Runtime · 10s undo barrier   │
-├─────────┬──────────┬───────────┬───────────────┤
-│  Soul   │  Memory  │ Discovery │ Recommendation │
-│ Engine  │  System  │Discovery +│     Engine     │
-│         │          │ Admission │                │
-├─────────┴──────────┴───────────┴───────────────┤
-│ Events/recommendation clicks → generic durable cursor ─┐ │
-│ Content feedback → content_feedback durable cursor ────┴→ atomic buffer+cursor checkpoint │
-│ 30-day history: click events + recommendations + saved_item_removals → paged/lazy UI │
-│ dislike: exact card hides synchronously; durable topic → final history/serve/push recheck │
-│ discovery may keep broad search; async semantic purge optimizes inventory, not correctness │
-│ cold start fence+task admission → listener; background recovery → tick_if_buffered │
-│ hot reload pause/drain/recover then rebind; periodic maintenance alone calls tick │
-│ Dialogue → typed settlement worker → learning       │
-│ Legacy batch only when rollback flag=false     │
-│ Init barrier: profile commit → discover/evaluate/copy → ready │
-│ Bilibili supply: relevance search + budgeted 1×5 pubdate recent lane → shared evaluation │
-│ Evaluation: time-neutral relevance + grounded temporal evidence → eligible / review hold / expired + publication bonus │
-│ Temporal shadow: bonus vs no-bonus Top10/50/100 aggregates → class/source/age audit (no serving change) │
-│ Images: proxy fg + refresh prefetch → app-stable 4/3 lane → singleflight/atomic cache │
-│ Soul cognition: dual pending cooldown · one anchor · worker-only settlement · winner receipt · confusion FIFO · ledger · deep gate │
-│   LLM adapters · Source adapters (SourceAdapter) │
-│ Module route → LLM instance chain → adapter · SourceAdapter │
-│ Optional visual prewarm: covers / profile centroids / keyframes + danmaku │
-│ provenance (provider/model/dim/sampling) → empty-success / retryable fail │
-│ Config recovery draft (normal/degraded) → temp probe / exact /models (no write) │
-│ Local migration: checksummed .obcbackup → request-id pending ↔ status/cancel → restart replace/rollback │
-│ Source-family registry: alias · strategy · URL host │
-│             → pool accounting · durable seen_items ledger │
-│ Bangumi public API → search/ranked/date producer → shared eval │
-│ V2EX public API/Feed → bounded Topic/Reply enrichment → five modes → shared eval │
-│ V2EX identity ladder: verified PAT > observed browser > accepted user; mismatch pauses only account projection │
-│ Temporal lifecycle: verbatim evidence + code-owned review clock → serve / temporal_review_hold / expired │
-│ Evaluator prefilter stays shadow → privacy-safe decision/raw-score join → read-only gate (no auto-enforce) │
-│ Named cognition views → task gate: compact only for awareness_confusions; others legacy │
-│ Token diet: per-offset preference packing; weighted recent/judged/relevant/important insight≤40 → full merge │
-│ Keyword planner → safe 24h cross-digest pending reconcile → deficit/generate/claim (0=hard expiry) │
-│ Admitted backlog → copy watermark ∪ visible topic-slot gap → eligible-first copy (0=legacy drain-all) │
-│ API projected=available+eligible copy-pending+evaluated → 3×30 workers → serial admit → UI │
-│ API raw-empty → wake under-share sources now → real progress resets / duplicate-only waves back off │
-│ Delight gate: formal copy/topic ready + seen_items guard → score/snapshot → UI × writes seen ledger │
-│ Inventory API/OpenClaw startup hook → recover/maintain → expose LLM │
-│ Reshuffle: current-card exclusion → hold/stale retirement + PoolServeSnapshot → final temporal recheck + atomic write │
-│ Platform scope (PC Web tabs only): source_platform → scoped candidates, no cross-platform floor → same rank/copy/persist │
-│ Platform inventory: platform-availability → same canonical servable set → total == Σ by_platform │
-│ Background maintenance: isolated worker → ≤50 rows/batch; unchanged skip / 10m sweep │
-│ /api/saved/* · router · Bilibili native save      │
-│ Six adapters → ExtensionNativeSaveBroker → extension_native_save_jobs │
-│ seven-platform source task multiplex: xhs / dy / yt / x / zhihu / reddit / linuxdo │
-│ Extension-online periodic re-pull (off by default; explicit opt-in): Runtime → six bootstrap tasks (global serial) → installed extension │
-│ seven-source task multiplex: xhs / dy / yt / x / zhihu / reddit / v2ex │
-│ Extension-online periodic re-pull (off by default; explicit opt-in): Runtime → six bootstrap sources (global serial) → installed extension │
-│ task-result → staged durable ingress → atomic bounded seen keys (5,000/source) → terminal │
-│ V2EX complete favorite snapshots → two confirmed misses → durable retraction/restore outbox → account-scoped Node affinity │
-│ XHS auto tasks: source/scheduler gate → SQLite pacing/breaker → no new tab while off/limited │
-│ XHS search: inactive tab → MAIN response normalization → isolated replay / DOM fallback │
-│ Linux.do: isolated task tab → same-origin GET → five discovery / three bootstrap paths │
-│ extension_native_save_jobs -> /api/sources/<slug>/next-task -> installed extension │
-│ exact OpenBiliClaw / YouTube Watch Later targets → safe task-result    │
-│ trusted-local E2E exact auth → one saved-sync item → six-field callback │
-│ unsupported_adapter_missing retryable · unsupported_content_type local-only │
-│ Canonical ID · Local-first sync · Task poll · SQLite (events · seen ledger · pool · recs · saved/tasks · removal snapshots)│
-│ Six adapters → broker → shared MV3 recovery barrier → Reddit/X/YT/XHS/DY/Zhihu executors (6/6 fixture + real-account)│
-└────────────────────────────────────────────────┘
-
-Web/API durable → rowid reply worker → app-stable dialogue lease(max active 1) → SocraticDialogue(queued) → visible CAS
-delight/legacy/interest-probe/avoidance chat ───────────────────────────────┘ (reply + required effects share the lease)
-post-reply 11-kind learning/settlement → independent typed settlement worker (not reply backlog)
-CLI/OpenClaw → SocraticDialogue(legacy_direct) → user+agent history → direct learning outside queue/guard
-learning → bypass background admission; keep total gate ── new dislike: shared purge → content_cache
-transient/provider/timeout/cancel → rollback provisional history → durable pending + head retry; explicit invalid/empty → failed CAS
-durable turn → fixed time/payload → confirmation entry (pending list/cards) → frozen anchor admission → relation matrix
-                                                  └→ card/anchor/chat/probe/confusion/replay/legacy all worker-only
-card action → synchronous 200 fast path | 202 processing → popup/mobile/desktop poll; CLI has no action
-
-Desktop startup: recommendation hydration │ runtime hydration │ secondary health/profile/activity/config hydration (independent)
-Desktop background resume (cards already loaded): skip the pool-filling recommendation GET │ sync runtime / inventory status only
-
-Overseas traffic: `[network].mode` → system proxy (default) / direct / custom proxy → LLM, YouTube, X/Reddit CLIs, Bangumi, updater, GitHub project stats; CN clients including V2EX remain isolated and direct
-Bilibili publication preference: `[bilibili]` config → effective inventory → PoolCurator → soft score penalty / strict serving gate (rows retained); strict mode also pushes bounds to Bilibili search
-Manual Douyin discovery: CLI discover → daemon-equivalent producer → per-keyword outcomes → extension search/hot/feed → pending-eval pool
-```
+> 📖 [Architecture Overview](docs/architecture-overview.md)
 
 ### Optional visual and danmaku prewarming
 
@@ -899,16 +768,20 @@ Contributions welcome! See the [Contributing Guide](docs/contributing.md) to get
 - Thanks to [@DongLanQwQ0](https://github.com/DongLanQwQ0) for the desktop web theme-engine rework to oklch in [#110](https://github.com/whiteguo233/OpenBiliClaw/pull/110) — a single `--hue-primary` control point with a 12-hue tunable color picker, a five-step accent ramp, and unified interaction states. Merged into main.
 - Thanks to [@wuwafly3](https://github.com/wuwafly3) for continued work on multimodal recommendations: [#100](https://github.com/whiteguo233/OpenBiliClaw/pull/100) introduced the DashScope (Alibaba Model Studio) multimodal embedding provider and image-only cover vectors, while [#135](https://github.com/whiteguo233/OpenBiliClaw/pull/135) added the user visual profile (P1), Bilibili danmaku semantics (P2), video keyframes (P3), and cross-platform visual weighting pipeline. Mainline follow-up hardened the contracts and retry behavior, added configuration surfaces, and completed real-environment validation.
 - Thanks to [@LHMQ878](https://github.com/LHMQ878) for fixing the `agent_bootstrap` TOML instance-section matching in [#182](https://github.com/whiteguo233/OpenBiliClaw/pull/182): quoted section headers such as `[llm.instances."openai"]` are now treated as the same table as bare keys, preventing duplicate table declarations and `tomllib` failures when bootstrap is run again. Merged into main.
+- Thanks to [@Patrick5D](https://github.com/Patrick5D) for the event source-attribution persistence in [#179](https://github.com/whiteguo233/OpenBiliClaw/pull/179): top-level `events.source_platform` / `content_id` / `source_confidence` columns, the unified source-resolution priority, and the schema v6 incremental migration — the data foundation for platform-scoped data revocation and profile rebuild. Mainline added follow-up hardening for unknown platform slugs and confidence-evidence enforcement. Merged into main.
+- Thanks to [@OctoBored](https://github.com/OctoBored) for restoring the live Star History chart in the Chinese and English READMEs in [#196](https://github.com/whiteguo233/OpenBiliClaw/pull/196), replacing the dead badge and temporary notice; mainline also escaped the URL ampersands during merge. Merged into main.
 
 ## ⭐ Star History
 
 If OpenBiliClaw gave you back control of your feed, [a star](https://github.com/whiteguo233/OpenBiliClaw) is the most direct vote for "keep adding platforms".
 
-<a href="https://github.com/whiteguo233/OpenBiliClaw">
-  <img alt="GitHub Stars" src="https://img.shields.io/github/stars/whiteguo233/OpenBiliClaw?style=flat-square&logo=github&label=Stars" />
+<a href="https://star-history.dera.page/#whiteguo233/OpenBiliClaw&amp;type=date">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://star-history.dera.page/svg?repos=whiteguo233/OpenBiliClaw&amp;type=date&amp;theme=dark&amp;legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://star-history.dera.page/svg?repos=whiteguo233/OpenBiliClaw&amp;type=date&amp;legend=top-left" />
+   <img alt="Star History Chart" src="https://star-history.dera.page/svg?repos=whiteguo233/OpenBiliClaw&amp;type=date&amp;legend=top-left" />
+ </picture>
 </a>
-
-> ⚠️ The live Star History chart is temporarily replaced by a star badge: since 2026-06-30 GitHub restricts the stargazers API to a repo's admins and collaborators, so star-history charts cannot render for now. We'll restore the live chart once upstream recovers or a new encrypted token is configured.
 
 ## Privacy at a glance
 

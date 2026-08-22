@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_TOTAL_LLM_CONCURRENCY = 4
+DEFAULT_TOTAL_LLM_CONCURRENCY = 3
 
 # How long an empty content pool may park maintenance traffic before it is
 # admitted anyway. Calibrated against the observed cost of the failure it

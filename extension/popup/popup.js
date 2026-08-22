@@ -210,6 +210,7 @@ const state = {
   initBangumiUsernameTouched: false,
   initBangumiUsernamePrefilled: false,
   initBangumiToken: "",
+  initLlmConcurrency: 3,
   backendUpdateStatus: null,
   activityFeed: null,
   activityExpanded: false,
@@ -2050,6 +2051,24 @@ function _renderInitSources() {
     row.append(box, span);
     elements.initSources.append(row);
   }
+  const llmConcurrencyRow = document.createElement("label");
+  llmConcurrencyRow.className = "init-source-row";
+  const llmConcurrencyLabel = document.createElement("span");
+  llmConcurrencyLabel.textContent = "初始化 LLM 并发（1-16，默认 3；越小越不容易限流）";
+  const llmConcurrencyInput = document.createElement("input");
+  llmConcurrencyInput.id = "initLlmConcurrency";
+  llmConcurrencyInput.type = "number";
+  llmConcurrencyInput.min = "1";
+  llmConcurrencyInput.max = "16";
+  llmConcurrencyInput.step = "1";
+  llmConcurrencyInput.inputMode = "numeric";
+  llmConcurrencyInput.value = String(state.initLlmConcurrency);
+  llmConcurrencyInput.addEventListener("input", () => {
+    const value = Number(llmConcurrencyInput.value);
+    state.initLlmConcurrency = Number.isFinite(value) && value >= 1 && value <= 16 ? value : 3;
+  });
+  llmConcurrencyRow.append(llmConcurrencyLabel, llmConcurrencyInput);
+  elements.initSources.append(llmConcurrencyRow);
   const bangumiRow = document.createElement("label");
   bangumiRow.className = "init-source-row";
   const bangumiLabel = document.createElement("span");
@@ -2154,6 +2173,13 @@ function _readInitBangumiToken() {
     document.getElementById("initBangumiToken")?.value || "",
   ).trim();
   return state.initBangumiToken;
+}
+
+function _readInitLlmConcurrency() {
+  const input = document.getElementById("initLlmConcurrency");
+  const value = Number(input ? input.value : state.initLlmConcurrency);
+  state.initLlmConcurrency = Number.isFinite(value) && value >= 1 && value <= 16 ? value : 4;
+  return state.initLlmConcurrency;
 }
 
 // Decide what Bangumi username (if any) guided init should send, delegating the
@@ -2500,6 +2526,7 @@ async function handleStartInitClick() {
       sources: selectedSources,
       bangumiUsername: bangumiUsernameOption,
       bangumiToken: bangumiTokenOption,
+      llmConcurrency: _readInitLlmConcurrency(),
     });
   } catch (error) {
     _renderInitChecklist(status, selectedSources);
@@ -9422,9 +9449,9 @@ function bindSettings() {
     // LLM
     providerSelect.value = cfg.llm?.default_provider || "openai";
     showProviderFields(providerSelect.value);
-    setVal("cfgLlmConcurrency", cfg.llm?.concurrency ?? 4);
+    setVal("cfgLlmConcurrency", cfg.llm?.concurrency ?? 3);
     setVal("cfgLlmTimeout", cfg.llm?.timeout ?? 1200);
-    setVal("cfgLlmConcurrencyV2", cfg.llm?.concurrency ?? 4);
+    setVal("cfgLlmConcurrencyV2", cfg.llm?.concurrency ?? 3);
     setVal("cfgLlmTimeoutV2", cfg.llm?.timeout ?? 1200);
     state.llmProbeResults.clear();
     renderLlmRoutingSummary(cfg.llm || {});
@@ -9731,6 +9758,11 @@ function bindSettings() {
     setVal("cfgSpeculationMaxPrimary", cfg.scheduler?.speculation_max_primary_interests);
     setVal("cfgSpeculationMaxSecondary", cfg.scheduler?.speculation_max_secondary_interests);
 
+    // Soul cognition budgets (issue #169)
+    setVal("cfgAwarenessEventBatchSize", cfg.soul?.awareness_event_batch_size ?? 300);
+    setVal("cfgInsightNoteBatchSize", cfg.soul?.insight_note_batch_size ?? 150);
+    setVal("cfgCognitionMaxTokens", cfg.soul?.cognition_max_tokens ?? 32768);
+
     // Logging
     const logLevel = document.getElementById("cfgLogLevel");
     if (logLevel) logLevel.value = cfg.logging?.level || "INFO";
@@ -9772,7 +9804,7 @@ function bindSettings() {
             },
           ]),
         ),
-        concurrency: getInt("cfgLlmConcurrencyV2", 4),
+        concurrency: getInt("cfgLlmConcurrencyV2", 3),
         timeout: getInt("cfgLlmTimeoutV2", 1200),
         embedding: {
           ...(state.runtimeConfig?.llm?.embedding || {}),
@@ -10005,6 +10037,11 @@ function bindSettings() {
         speculation_max_secondary_interests: getInt("cfgSpeculationMaxSecondary", 60),
         auto_update_enabled: checked("cfgAutoUpdate"),
         auto_update_check_interval_hours: getInt("cfgAutoUpdateInterval", 6),
+      },
+      soul: {
+        awareness_event_batch_size: getInt("cfgAwarenessEventBatchSize", 300),
+        insight_note_batch_size: getInt("cfgInsightNoteBatchSize", 150),
+        cognition_max_tokens: getInt("cfgCognitionMaxTokens", 32768)
       },
       saved_sync: {
         auto_sync_enabled: checked("cfgSavedAutoSync"),
@@ -10655,6 +10692,10 @@ function bindSettings() {
       try {
         const payload = { force: true };
         if (resetCognition) payload.reset_cognition = true;
+        const reinitLlmConcurrency = Number(document.getElementById("cfgReinitLlmConcurrency")?.value || 3);
+        if (Number.isFinite(reinitLlmConcurrency) && reinitLlmConcurrency >= 1 && reinitLlmConcurrency <= 16) {
+          payload.llm_concurrency = reinitLlmConcurrency;
+        }
         await startInit(payload);
         showToast("重新初始化已开始，正在重新拉取数据并重建画像", "success");
         closePopupOverlay(overlay);

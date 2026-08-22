@@ -1,5 +1,10 @@
 """FastAPI app for the browser-extension backend."""
 
+# [INPUT]: 配置、MemoryManager、Database 与来源事件规范化器
+# [OUTPUT]: create_app() 及浏览器/桌面 Web 共用的 FastAPI 路由
+# [POS]: API 组合根，负责请求边界与事件入口，不在此复制来源解析规则
+# [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+
 from __future__ import annotations
 
 import asyncio
@@ -553,6 +558,9 @@ _SOURCE_SHARE_ORDER = (
     "v2ex",
     "weibo",
 )
+# Unknown/unregistered platform slugs are preserved in the database for future
+# expansion, but they must not silently disappear from source-share counts.
+_SOURCE_COUNT_ORDER = _SOURCE_SHARE_ORDER + ("unknown",)
 _INIT_SOURCE_ORDER = (
     "bilibili",
     "xiaohongshu",
@@ -1046,24 +1054,39 @@ def _posture_gate_enforce_issue(cfg: Any, database: Any | None) -> Any | None:
 
 
 def _count_events_by_source_platform(database: Any) -> dict[str, int]:
-    """Count stored behavior events by normalized source platform."""
+    """Count stored behavior events by normalized source platform.
 
-    counter = {source: 0 for source in _SOURCE_SHARE_ORDER}
+    Unknown or unregistered platform slugs are aggregated under ``"unknown"``
+    so they are not silently dropped from the source-share suggestion.
+    """
+
+    def _bucket(source: object) -> str:
+        source_key = _normalize_source_platform(source)
+        if source_key in _SOURCE_SHARE_ORDER:
+            return source_key
+        return "unknown"
+
+    counter = {source: 0 for source in _SOURCE_COUNT_ORDER}
     if hasattr(database, "count_events_by_source_platform"):
         raw_counts = database.count_events_by_source_platform()
         if isinstance(raw_counts, dict):
             for source, count in raw_counts.items():
-                source_key = _normalize_source_platform(source)
-                counter[source_key] = counter.get(source_key, 0) + int(count)
-            return {source: counter.get(source, 0) for source in _SOURCE_SHARE_ORDER}
+                counter[_bucket(source)] += int(count)
+            return {source: counter.get(source, 0) for source in _SOURCE_COUNT_ORDER}
 
     rows: list[dict[str, Any]] = []
     if hasattr(database, "conn"):
         try:
-            cursor = database.conn.execute("SELECT metadata FROM events")
+            cursor = database.conn.execute("SELECT source_platform, metadata FROM events")
             rows = [dict(row) for row in cursor.fetchall()]
         except Exception:
-            rows = []
+            # Keep injected/legacy databases usable before the additive source
+            # columns have been migrated.
+            try:
+                cursor = database.conn.execute("SELECT metadata FROM events")
+                rows = [dict(row) for row in cursor.fetchall()]
+            except Exception:
+                rows = []
     elif hasattr(database, "get_recent_events"):
         try:
             rows = list(database.get_recent_events(limit=10000))
@@ -1081,10 +1104,13 @@ def _count_events_by_source_platform(database: Any) -> dict[str, int]:
                 metadata = {}
         if not isinstance(metadata, dict):
             metadata = {}
-        source = metadata.get("source_platform", row.get("source_platform", "bilibili"))
-        source_key = _normalize_source_platform(source)
-        counter[source_key] = counter.get(source_key, 0) + 1
-    return {source: counter.get(source, 0) for source in _SOURCE_SHARE_ORDER}
+        source = (
+            str(row.get("source_platform") or "").strip()
+            or str(metadata.get("source_platform") or "").strip()
+        )
+        source = source or "bilibili"
+        counter[_bucket(source)] += 1
+    return {source: counter.get(source, 0) for source in _SOURCE_COUNT_ORDER}
 
 
 def _select_init_platforms(enabled: set[str], selected: set[str] | None) -> set[str]:
@@ -5261,6 +5287,7 @@ def create_app(
         v2ex_username: str = "",
         force: bool = False,
         reset_cognition: bool = False,
+        llm_concurrency: int | None = None,
     ) -> None:
         """Sole status/event writer for an API-launched guided init (gui-init
         §5f). Drives the shared ``run_guided_init`` through the coordinator and
@@ -5363,6 +5390,7 @@ def create_app(
                 # Optional: clear old awareness/insight observations (e.g.
                 # from a previous account) before the new profile build.
                 reset_cognition=reset_cognition,
+                llm_concurrency=llm_concurrency,
             )
             discovery_partial = bool(result.discovery_error)
             dy_status = str(getattr(result, "dy_status", "skipped") or "skipped")
@@ -5490,6 +5518,31 @@ def create_app(
         reset_cognition = (
             bool(body.get("reset_cognition", False)) if isinstance(body, dict) else False
         )
+        # Optional per-run LLM concurrency for the preference-analysis stage.
+        # The init page sends an explicit value (default 4 in the UI); older
+        # clients omit it and the backend keeps the configured llm.concurrency.
+        raw_llm_concurrency = body.get("llm_concurrency") if isinstance(body, dict) else None
+        if raw_llm_concurrency is None:
+            llm_concurrency: int | None = None
+        else:
+            try:
+                llm_concurrency = int(raw_llm_concurrency)
+            except (TypeError, ValueError):
+                return JSONResponse(
+                    {
+                        "error": "invalid_llm_concurrency",
+                        "detail": "llm_concurrency 必须是 1-16 的整数",
+                    },
+                    status_code=400,
+                )
+            if not (1 <= llm_concurrency <= 16):
+                return JSONResponse(
+                    {
+                        "error": "invalid_llm_concurrency",
+                        "detail": "llm_concurrency 必须是 1-16 的整数",
+                    },
+                    status_code=400,
+                )
         # Optional per-run platform selection from the extension checkboxes. A
         # list (even empty) is an explicit choice; absent → None = use all
         # enabled (CLI / legacy clients). Sent source keys are explicit opt-ins
@@ -5919,6 +5972,7 @@ def create_app(
                     effective_v2ex_username,
                     force=force,
                     reset_cognition=reset_cognition,
+                    llm_concurrency=llm_concurrency,
                 ),
             )
         else:
@@ -5931,6 +5985,7 @@ def create_app(
                     effective_v2ex_username,
                     force=force,
                     reset_cognition=reset_cognition,
+                    llm_concurrency=llm_concurrency,
                 )
             )
         coord.attach_task(run_id, task)
@@ -7408,7 +7463,7 @@ def create_app(
 
         canonical_events: list[dict[str, Any]] = []
         for item in payload.events:
-            source_platform = (item.source_platform or "bilibili").strip() or "bilibili"
+            raw_source_platform = str(item.source_platform or "").strip()
             raw_event_type = str(item.type or "").strip()
             event_type = "feedback" if raw_event_type == "dislike" else raw_event_type
             # Coerce context to a string for downstream LLM consumers.
@@ -7461,7 +7516,11 @@ def create_app(
                 metadata.setdefault("video_duration_seconds", item.video_duration_seconds)
             event = build_event(
                 event_type=event_type,
-                source_platform=source_platform,
+                # Leave source resolution to the shared event formatter.  In
+                # particular, an old payload without a platform must still
+                # allow a YouTube/X/etc. URL to win before the B站 fallback.
+                source_platform=raw_source_platform,
+                legacy_platform="bilibili",
                 title=item.title or "",
                 url=item.url or "",
                 author=str(metadata.get("author", "") or metadata.get("up_name", "") or ""),
@@ -16693,7 +16752,7 @@ def create_app(
                     for bucket in ("soul", "discovery", "recommendation", "evaluation")
                 },
                 default_provider=legacy_default_provider,
-                concurrency=int(getattr(cfg.llm, "concurrency", 4)),
+                concurrency=int(getattr(cfg.llm, "concurrency", 3)),
                 timeout=int(getattr(cfg.llm, "timeout", 1200)),
                 fallback_provider=legacy_fallback_provider,
                 openai=_provider_out(_legacy_provider_projection("openai")),
@@ -17013,6 +17072,9 @@ def create_app(
                 posture_gate_mode=cfg.soul.posture_gate_mode,
                 posture_gate_force_enforce=cfg.soul.posture_gate_force_enforce,
                 topic_lifecycle_serialization=cfg.soul.topic_lifecycle_serialization,
+                awareness_event_batch_size=int(cfg.soul.awareness_event_batch_size),
+                insight_note_batch_size=int(cfg.soul.insight_note_batch_size),
+                cognition_max_tokens=int(cfg.soul.cognition_max_tokens),
             ),
             issues=issue_list,
         )
@@ -18334,6 +18396,9 @@ def create_app(
         from openbiliclaw.config import (
             _DEFAULT_ADMISSION_MIN_SCORE,
             _DEFAULT_CANDIDATE_EVAL_CONCURRENCY,
+            _DEFAULT_COGNITION_AWARENESS_EVENT_BATCH_SIZE,
+            _DEFAULT_COGNITION_INSIGHT_NOTE_BATCH_SIZE,
+            _DEFAULT_COGNITION_MAX_TOKENS,
             _DEFAULT_COPY_READY_TARGET_COUNT,
             _DEFAULT_DANMAKU_FETCH_LIMIT,
             _DEFAULT_DANMAKU_MAX_CHARS,
@@ -18358,9 +18423,15 @@ def create_app(
             _DEFAULT_SOURCE_INCREMENTAL_HOURS,
             _DEFAULT_SPECULATOR_IDLE_INTERVAL_MINUTES,
             _DEFAULT_TRENDING_REFRESH_MINUTES,
+            _MAX_COGNITION_AWARENESS_EVENT_BATCH_SIZE,
+            _MAX_COGNITION_INSIGHT_NOTE_BATCH_SIZE,
+            _MAX_COGNITION_MAX_TOKENS,
             _MAX_COPY_READY_TARGET_COUNT,
             _MAX_EVAL_MAX_WAIT_SECONDS,
             _MAX_EVAL_MIN_BATCH_SIZE,
+            _MIN_COGNITION_AWARENESS_EVENT_BATCH_SIZE,
+            _MIN_COGNITION_INSIGHT_NOTE_BATCH_SIZE,
+            _MIN_COGNITION_MAX_TOKENS,
             _MIN_COPY_READY_TARGET_COUNT,
             _MIN_EVAL_MAX_WAIT_SECONDS,
             _MIN_EVAL_MIN_BATCH_SIZE,
@@ -19618,6 +19689,35 @@ def create_app(
                 cfg.soul.posture_gate_mode = str(sdata["posture_gate_mode"]).strip().lower()
             if "posture_gate_force_enforce" in sdata:
                 cfg.soul.posture_gate_force_enforce = bool(sdata["posture_gate_force_enforce"])
+            soul_int_limits = {
+                "awareness_event_batch_size": (
+                    _DEFAULT_COGNITION_AWARENESS_EVENT_BATCH_SIZE,
+                    _MIN_COGNITION_AWARENESS_EVENT_BATCH_SIZE,
+                    _MAX_COGNITION_AWARENESS_EVENT_BATCH_SIZE,
+                ),
+                "insight_note_batch_size": (
+                    _DEFAULT_COGNITION_INSIGHT_NOTE_BATCH_SIZE,
+                    _MIN_COGNITION_INSIGHT_NOTE_BATCH_SIZE,
+                    _MAX_COGNITION_INSIGHT_NOTE_BATCH_SIZE,
+                ),
+                "cognition_max_tokens": (
+                    _DEFAULT_COGNITION_MAX_TOKENS,
+                    _MIN_COGNITION_MAX_TOKENS,
+                    _MAX_COGNITION_MAX_TOKENS,
+                ),
+            }
+            for soul_int_field, (default, min_value, max_value) in soul_int_limits.items():
+                if soul_int_field in sdata:
+                    setattr(
+                        cfg.soul,
+                        soul_int_field,
+                        _normalize_scheduler_int(
+                            sdata[soul_int_field],
+                            default=default,
+                            min_value=min_value,
+                            max_value=max_value,
+                        ),
+                    )
 
         for field in reset_fields:
             target = _RESETTABLE_CONFIG_FIELDS[field]

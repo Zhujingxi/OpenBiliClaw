@@ -344,7 +344,7 @@
               <button class="pill-btn" id="probeLlmChain" type="button">测试整条链</button>
             </div>
             <div class="llm-runtime-tuning">
-              <label class="settings-field"><span>LLM 并发数</span><input id="llmConcurrency" type="number" min="1" max="16" inputmode="numeric" placeholder="4"></label>
+              <label class="settings-field"><span>LLM 并发数</span><input id="llmConcurrency" type="number" min="1" max="16" inputmode="numeric" placeholder="3"></label>
               <label class="settings-field"><span>单实例超时（秒）</span><input id="llmTimeout" type="number" min="10" max="1200" inputmode="numeric" placeholder="1200"></label>
             </div>
             <ol class="llm-chain-list" id="llmDefaultChain" aria-label="默认 LLM 调用链"></ol>
@@ -1214,6 +1214,19 @@
             </div>
             <p class="settings-note-inline">经典：仅用合并关键词生成器；混合：在经典基础上再叠加 search-backed 灵感轴链路（最丰富，但同时跑两套，混合最贵）；灵感：完全用灵感轴链路替代经典。</p>
           </section>
+
+          <section class="settings-advanced-section" aria-labelledby="advancedCognitionHeading">
+            <div class="settings-advanced-section-head">
+              <p class="settings-section-kicker">Cognition cycle budgets</p>
+              <h3 id="advancedCognitionHeading">认知循环预算</h3>
+            </div>
+            <p class="settings-note-inline">觉察 / 洞察每轮 LLM 调用的输入批量与输出 token 上限。默认按 256K 上下文模型设计；80-100K 上下文的本地模型（如 qwen3.8-27B）可调小，无需改源码。</p>
+            <div class="settings-advanced-fields">
+              <label class="settings-field"><span>觉察事件批量大小</span><input id="awarenessEventBatchSize" type="number" min="10" max="900" step="1" placeholder="300" inputmode="numeric"></label>
+              <label class="settings-field"><span>洞察笔记批量大小</span><input id="insightNoteBatchSize" type="number" min="10" max="450" step="1" placeholder="150" inputmode="numeric"></label>
+              <label class="settings-field"><span>认知输出 token 上限</span><input id="cognitionMaxTokens" type="number" min="1024" max="128000" step="1" placeholder="32768" inputmode="numeric"></label>
+            </div>
+          </section>
         </div>
 
         <div id="settingsPanelGeneral" class="settings-panel" data-settings-panel="general" role="tabpanel" aria-labelledby="settingsTabGeneral" hidden>
@@ -1262,6 +1275,10 @@
               <label class="settings-reinit-option" title="换账号或大改兴趣时建议勾选：会删除旧的 LLM 观察笔记与洞察，本轮重新生成">
                 <input id="reinitResetCognition" type="checkbox" data-settings-ignore-dirty>
                 <span>同时清空旧认知观察与洞察</span>
+              </label>
+              <label class="settings-reinit-option" title="本次重建画像时使用的 LLM 并发数，默认 3；限流严重时可降到 1-2">
+                <span>初始化 LLM 并发</span>
+                <input id="reinitLlmConcurrency" type="number" min="1" max="16" step="1" inputmode="numeric" value="3" data-settings-ignore-dirty>
               </label>
               <span class="settings-probe-status" id="reinitStatus" aria-live="polite">读取初始化状态中…</span>
             </div>

@@ -19,6 +19,26 @@ import httpx
 from openbiliclaw.discovery.inspiration import ExaPreviewItem
 from openbiliclaw.proc import no_window_kwargs
 
+
+def _overseas_routing_kwargs(transport: httpx.AsyncBaseTransport | None) -> dict[str, Any]:
+    """Routing kwargs for an overseas search-API ``httpx.AsyncClient``.
+
+    Exa / You.com / Serply are overseas SaaS endpoints, so they follow the
+    process-wide ``[network]`` routing policy (``custom`` passes the explicit
+    proxy, ``system`` inherits environment proxies, ``direct`` forces off).
+    Hardwiring ``trust_env=False`` here left them direct-connected even when
+    the user configured a proxy — api.exa.ai times out from CN networks
+    without one, the same failure shape as the ytimg cover bug. Tests that
+    inject a transport keep full determinism: no global policy is merged on
+    that path.
+    """
+    if transport is not None:
+        return {"transport": transport}
+    from openbiliclaw.network import outbound_httpx_kwargs
+
+    return outbound_httpx_kwargs()
+
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_SEARCH_BACKENDS: tuple[str, ...] = (
@@ -27,6 +47,7 @@ _DEFAULT_SEARCH_BACKENDS: tuple[str, ...] = (
     "bing_rss",
     "exa",
     "you",
+    "serply",
 )
 
 
@@ -233,8 +254,7 @@ class ExaInspirationProvider:
         self._base_url = str(base_url or "").strip() or "https://api.exa.ai/search"
         self._client = httpx.AsyncClient(
             timeout=self._timeout_seconds,
-            trust_env=False,
-            transport=transport,
+            **_overseas_routing_kwargs(transport),
             headers={"x-api-key": self._api_key, "content-type": "application/json"},
         )
 
@@ -274,8 +294,7 @@ class YouInspirationProvider:
         self._base_url = str(base_url or "").strip() or "https://api.ydc-index.io/search"
         self._client = httpx.AsyncClient(
             timeout=self._timeout_seconds,
-            trust_env=False,
-            transport=transport,
+            **_overseas_routing_kwargs(transport),
             headers={"x-api-key": self._api_key},
         )
 
@@ -293,6 +312,50 @@ class YouInspirationProvider:
         )
         response.raise_for_status()
         return parse_you_search_payload(response.json())[:count]
+
+
+class SerplyInspirationProvider:
+    """Serply provider implemented through Serply's direct HTTP search API."""
+
+    backend_alias = "serply"
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        timeout_seconds: float = 8.0,
+        base_url: str = "https://api.serply.io/v1/search",
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        self._api_key = str(api_key or "").strip()
+        self._timeout_seconds = max(1.0, float(timeout_seconds))
+        self._base_url = str(base_url or "").strip() or "https://api.serply.io/v1/search"
+        self._client = httpx.AsyncClient(
+            timeout=self._timeout_seconds,
+            **_overseas_routing_kwargs(transport),
+            headers={
+                "X-Api-Key": self._api_key,
+                "Accept": "application/json",
+                # Serply sits behind Cloudflare, which rejects the default
+                # httpx User-Agent, so send an explicit one.
+                "User-Agent": "OpenBiliClaw",
+            },
+        )
+
+    def begin_stage(self) -> None:
+        return None
+
+    async def search(self, query: str, *, limit: int) -> list[ExaPreviewItem]:
+        clean_query = str(query or "").strip()
+        count = max(1, min(10, int(limit)))
+        if not clean_query or not self._api_key:
+            return []
+        response = await self._client.get(
+            self._base_url,
+            params={"q": clean_query, "num": count},
+        )
+        response.raise_for_status()
+        return parse_serply_search_payload(response.json())[:count]
 
 
 def _rss_element_text(element: ElementTree.Element | None) -> str:
@@ -317,6 +380,10 @@ class BingRssInspirationProvider:
         self._base_url = str(base_url or "").strip() or "https://www.bing.com/search"
         self._client = httpx.AsyncClient(
             timeout=self._timeout_seconds,
+            # Bing is reachable directly from CN networks (cn.bing.com edge);
+            # routing it through an overseas ladder would only add latency.
+            # Deliberately NOT wired to openbiliclaw.network — same split as
+            # the image cache's CN-CDN branch.
             trust_env=False,
             transport=transport,
             headers={
@@ -1315,6 +1382,7 @@ def build_inspiration_search_provider(
     pages_per_probe: int = 1,
     exa_api_key: str = "",
     you_api_key: str = "",
+    serply_api_key: str = "",
 ) -> InspirationSearchProvider | None:
     """Build the configured inspiration search provider chain."""
 
@@ -1373,6 +1441,13 @@ def build_inspiration_search_provider(
                 )
             else:
                 _warn_mcporter_missing_once("you")
+        elif backend == "serply" and str(serply_api_key or "").strip():
+            providers.append(
+                SerplyInspirationProvider(
+                    api_key=serply_api_key,
+                    timeout_seconds=timeout_seconds,
+                )
+            )
     if not providers:
         return None
     if len(providers) == 1:
@@ -1408,6 +1483,8 @@ def _normalize_search_backends(value: object) -> tuple[str, ...]:
         "youcom": "you",
         "you-search": "you",
         "you_search": "you",
+        "serply": "serply",
+        "serply.io": "serply",
     }
     normalized: list[str] = []
     seen: set[str] = set()
@@ -1520,6 +1597,35 @@ def parse_you_search_payload(payload: object) -> list[ExaPreviewItem]:
     else:
         data = payload
     return _parse_you_data_results(data)
+
+
+def parse_serply_search_payload(payload: object) -> list[ExaPreviewItem]:
+    """Parse Serply search JSON output into preview items."""
+
+    if isinstance(payload, str):
+        try:
+            data = json.loads(payload)
+        except (TypeError, ValueError):
+            return []
+    else:
+        data = payload
+    raw_results: object = data.get("results", []) if isinstance(data, dict) else data
+    if not isinstance(raw_results, list):
+        return []
+
+    previews: list[ExaPreviewItem] = []
+    for item in raw_results:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        url = str(item.get("link") or "").strip()
+        if not title or not url:
+            continue
+        description = str(item.get("description") or "").strip()
+        previews.append(
+            ExaPreviewItem(title=title, url=url, highlights=(description,) if description else ())
+        )
+    return previews
 
 
 def _parse_you_text_results(text: str) -> list[ExaPreviewItem]:
@@ -1754,10 +1860,17 @@ def _clean_highlights(value: object) -> list[str]:
 
 
 async def _run_command(args: list[str], timeout_seconds: float) -> str:
+    # mcporter dials the same overseas APIs as the direct providers above;
+    # route the subprocess through the [network] policy exactly like reddit's
+    # rdt-cli / OpenCLI backends (custom injects the proxy vars, system
+    # preserves the caller env, direct strips them).
+    from openbiliclaw.network import outbound_cli_environment
+
     proc = await asyncio.create_subprocess_exec(
         *args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        env=outbound_cli_environment(),
         **no_window_kwargs(),
     )
     try:

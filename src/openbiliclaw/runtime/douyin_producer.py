@@ -434,6 +434,12 @@ def build_douyin_discovery_producer(
                     # exhaustion as a distinguishable signal so the claimed
                     # keyword rolls back instead of being burned (P1.7).
                     raise_on_budget=bool(getattr(options, "raise_on_budget", False)),
+                    # The runtime config is ``mode = "direct"`` and a cookie is
+                    # required to get here, so when the browser-plugin task
+                    # returns empty/failed (extension permission missing,
+                    # Douyin risk-control page, etc.) fall back to the direct
+                    # cookie client instead of producing zero candidates.
+                    allow_direct_fallback=True,
                 )
             service = DouyinDiscoveryService(
                 client=client,

@@ -194,6 +194,30 @@ test("startInit force:true sends the re-init payload", async () => {
   assert.equal(calls[0].options.method, "POST");
 });
 
+test("startInit sends llm_concurrency when supplied", async () => {
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, options });
+    return { ok: true, async json() { return { run_id: "run-1" }; } };
+  };
+
+  await startInit({ llmConcurrency: 2 });
+
+  assert.deepEqual(JSON.parse(calls[0].options.body), { force: false, llm_concurrency: 2 });
+});
+
+test("startInit omits llm_concurrency for legacy clients", async () => {
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, options });
+    return { ok: true, async json() { return { run_id: "run-1" }; } };
+  };
+
+  await startInit({});
+
+  assert.deepEqual(JSON.parse(calls[0].options.body), { force: false });
+});
+
 test("popup settings re-init calls POST /api/init with force:true after confirm", () => {
   const source = readFileSync(resolve("popup/popup.js"), "utf8");
   const html = readFileSync(resolve("popup/popup.html"), "utf8");

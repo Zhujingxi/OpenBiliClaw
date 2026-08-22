@@ -103,6 +103,7 @@
       initBangumiUsernameTouched: false,
       initBangumiUsernamePrefilled: false,
       initBangumiToken: "",
+      initLlmConcurrency: 3,
       activity: null,
       activityItems: [],
       activityCursor: "",
@@ -245,6 +246,7 @@
       already_initialized: "已经初始化过了；如需重建，请到设置页。",
       local_only: "只能在本机发起初始化。",
       no_sources_selected: "至少勾选一个数据来源。",
+      invalid_llm_concurrency: "初始化 LLM 并发必须是 1-16 的整数。",
       no_profile_signal_sources: "只选择 Bangumi 时，请填写个人令牌（推荐）或公开用户名，或先在浏览器登录 bgm.tv 让扩展自动识别账号。",
       invalid_bangumi_access_token: "Bangumi 个人令牌被拒绝（缺失、错误或已过期）。请到 next.bgm.tv/demo/access-token 重新生成后重试。",
       bangumi_token_check_failed: "校验 Bangumi 令牌时无法连接 Bangumi，请稍后重试。",
@@ -2372,6 +2374,10 @@
       const selected = state.initSelectedSources
         ? new Set(state.initSelectedSources)
         : new Set(INIT_SOURCE_OPTIONS.filter((opt) => opt.defaultChecked).map((opt) => opt.key));
+      const llmConcurrencyValue = Number.isFinite(Number(state.initLlmConcurrency))
+        ? Number(state.initLlmConcurrency)
+        : 3;
+      const llmConcurrencyRow = `<label class="init-source-row"><span>初始化 LLM 并发（1-16，默认 3；越小越不容易限流）</span><input id="initLlmConcurrency" type="number" min="1" max="16" step="1" inputmode="numeric" value="${llmConcurrencyValue}"></label>`;
       const rows = INIT_SOURCE_OPTIONS.map((opt) => {
         const checked = selected.has(opt.key) ? " checked" : "";
         const label = opt.defaultChecked ? `${opt.label}（推荐）` : opt.label;
@@ -2386,7 +2392,7 @@
       // reads private collections; when set, the username above is auto-resolved.
       const bangumiTokenInput = `<label class="init-source-row"><span>Bangumi 个人令牌（可留空，推荐：自动识别当前用户，可读私密收藏）</span><input id="initBangumiToken" type="password" maxlength="512" autocomplete="off" value="${escapeHtml(state.initBangumiToken || "")}"${bangumiDisabled}></label>`;
       const bangumiTokenHint = `<p class="init-sources-hint">Bangumi 账号三选一：个人令牌最完整（自动识别当前登录账号，可读私密收藏）；公开用户名次之（只读公开收藏）；两者都留空时，只要浏览器已登录 bgm.tv，扩展会自动识别账号（只拿到账号名，可能未经校验）。<a href="https://next.bgm.tv/demo/access-token" target="_blank" rel="noopener noreferrer">生成个人令牌</a>（约 1 年有效，视同密码保管）·<a href="https://github.com/whiteguo233/OpenBiliClaw/blob/main/docs/modules/bangumi.md#获取-bangumi-个人令牌" target="_blank" rel="noopener noreferrer">取令牌步骤</a></p>`;
-      return `<div class="init-sources"><p class="init-sources-title">选择初始化数据来源（至少一个）</p>${rows}${bangumiInput}${bangumiTokenInput}${bangumiTokenHint}<p class="init-sources-hint">${escapeHtml(INIT_SOURCE_LOGIN_HINT)}</p></div>`;
+      return `<div class="init-sources"><p class="init-sources-title">选择初始化数据来源（至少一个）</p>${rows}${llmConcurrencyRow}${bangumiInput}${bangumiTokenInput}${bangumiTokenHint}<p class="init-sources-hint">${escapeHtml(INIT_SOURCE_LOGIN_HINT)}</p></div>`;
     }
 
     function initOnboardingPhase(status, progress) {
@@ -2559,6 +2565,10 @@
       grid.querySelector("#initBangumiToken")?.addEventListener("input", (event) => {
         state.initBangumiToken = event.currentTarget.value || "";
       });
+      grid.querySelector("#initLlmConcurrency")?.addEventListener("input", (event) => {
+        const value = Number(event.currentTarget.value);
+        state.initLlmConcurrency = Number.isFinite(value) && value >= 1 && value <= 16 ? value : 3;
+      });
     }
 
     function clearInitPolling() {
@@ -2720,7 +2730,11 @@
         return;
       }
       try {
+        const initLlmConcurrency = Number($("#initLlmConcurrency")?.value || state.initLlmConcurrency || 3);
         const payload = { sources: selected };
+        if (Number.isFinite(initLlmConcurrency) && initLlmConcurrency >= 1 && initLlmConcurrency <= 16) {
+          payload.llm_concurrency = initLlmConcurrency;
+        }
         if (selected.includes("bangumi") && (sendBangumiUsername || bangumiToken)) {
           const bangumi = {};
           if (sendBangumiUsername) bangumi.username = bangumiUsername;
@@ -2857,6 +2871,10 @@
       try {
         const payload = { force: true };
         if (resetCognition) payload.reset_cognition = true;
+        const reinitLlmConcurrency = Number($("#reinitLlmConcurrency")?.value || 3);
+        if (Number.isFinite(reinitLlmConcurrency) && reinitLlmConcurrency >= 1 && reinitLlmConcurrency <= 16) {
+          payload.llm_concurrency = reinitLlmConcurrency;
+        }
         await requestJsonStrict(ENDPOINTS.startInit, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -9274,6 +9292,11 @@ ${cardFeedbackBarHtml()}`;
       setInput("speculationMaxPrimary", scheduler.speculation_max_primary_interests);
       setInput("speculationMaxSecondary", scheduler.speculation_max_secondary_interests);
 
+      const soul = config.soul || {};
+      setInput("awarenessEventBatchSize", soul.awareness_event_batch_size ?? 300);
+      setInput("insightNoteBatchSize", soul.insight_note_batch_size ?? 150);
+      setInput("cognitionMaxTokens", soul.cognition_max_tokens ?? 32768);
+
       const discovery = config.discovery || {};
       setSelect("keywordGenerationMode", discovery.keyword_generation_mode || "hybrid");
       const multimodalEvaluation = $("#multimodalEvaluationEnabled");
@@ -9310,7 +9333,7 @@ ${cardFeedbackBarHtml()}`;
       if ($("#savedAutoSyncText")) $("#savedAutoSyncText").textContent = savedAutoSync?.checked ? "开启" : "关闭";
 
       const llm = config.llm || {};
-      setInput("llmConcurrency", llm.concurrency ?? 4);
+      setInput("llmConcurrency", llm.concurrency ?? 3);
       setInput("llmTimeout", llm.timeout);
       state.llmDraft = normalizeLlmDraft(llm);
       state.llmProbeResults.clear();
@@ -10621,7 +10644,7 @@ ${cardFeedbackBarHtml()}`;
             }
           ])
         ),
-        concurrency: getIntInput("llmConcurrency", 4),
+        concurrency: getIntInput("llmConcurrency", 3),
         timeout: getIntInput("llmTimeout", 1200),
         embedding: { ...(state.config?.llm?.embedding || {}), ...embedding }
       };
@@ -10824,6 +10847,11 @@ ${cardFeedbackBarHtml()}`;
           speculation_max_secondary_interests: getIntInput("speculationMaxSecondary", 60),
           auto_update_enabled: $("#autoUpdate").value === "on",
           auto_update_check_interval_hours: getIntInput("autoUpdateInterval", 6)
+        },
+        soul: {
+          awareness_event_batch_size: getIntInput("awarenessEventBatchSize", 300),
+          insight_note_batch_size: getIntInput("insightNoteBatchSize", 150),
+          cognition_max_tokens: getIntInput("cognitionMaxTokens", 32768)
         },
         discovery: {
           ...(state.config?.discovery || {}),

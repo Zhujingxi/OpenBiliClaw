@@ -5,9 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 
 import httpx
 import pytest
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
 
 from openbiliclaw.discovery.inspiration import ExaPreviewItem
 from openbiliclaw.discovery.inspiration_provider import (
@@ -22,6 +26,7 @@ from openbiliclaw.discovery.inspiration_provider import (
     McporterYouInspirationProvider,
     PlatformSourceInspirationProvider,
     RedditPlatformSearchBackend,
+    SerplyInspirationProvider,
     V2EXPlatformSearchBackend,
     WeiboPlatformSearchBackend,
     XhsPlatformSearchBackend,
@@ -32,6 +37,7 @@ from openbiliclaw.discovery.inspiration_provider import (
     build_inspiration_search_provider,
     build_platform_source_backends,
     parse_exa_search_payload,
+    parse_serply_search_payload,
     parse_you_search_payload,
 )
 
@@ -212,6 +218,16 @@ async def test_build_provider_defaults_remote_timeout_below_planner_timeout() ->
     assert seen_timeouts == [6.0]
 
 
+def test_build_provider_skips_serply_backend_when_key_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("shutil.which", lambda _name: None)
+
+    provider = build_inspiration_search_provider(["serply"])
+
+    assert provider is None
+
+
 def test_build_provider_skips_mcporter_backends_when_cli_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -286,6 +302,83 @@ async def test_you_direct_provider_calls_api_and_parses_hits() -> None:
             url="https://example.test/you",
             highlights=("snippet one", "snippet two"),
         )
+    ]
+
+
+async def test_serply_direct_provider_calls_api_and_parses_results() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["x-api-key"] == "test-serply-key"
+        assert request.url.host == "api.serply.io"
+        # Serply expects the standard query-string form
+        # GET /v1/search?q=...&num=..., not a path-encoded variant.
+        assert request.url.path == "/v1/search"
+        assert request.url.params["q"] == "test query"
+        assert request.url.params["num"] == "3"
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "title": "Direct Serply result",
+                        "link": "https://example.test/serply",
+                        "description": "a snippet",
+                    }
+                ]
+            },
+        )
+
+    provider = SerplyInspirationProvider(
+        api_key="test-serply-key",
+        transport=httpx.MockTransport(handler),
+    )
+
+    items = await provider.search("test query", limit=3)
+
+    assert items == [
+        ExaPreviewItem(
+            title="Direct Serply result",
+            url="https://example.test/serply",
+            highlights=("a snippet",),
+        )
+    ]
+
+
+def test_parse_serply_search_payload_accepts_structured_results() -> None:
+    payload = {
+        "results": [
+            {
+                "title": "Serply structured result",
+                "link": "https://example.test/structured",
+                "description": "Structured snippet.",
+            },
+            {"title": "", "link": "https://example.test/no-title"},
+            "not-a-dict",
+        ]
+    }
+
+    assert parse_serply_search_payload(payload) == [
+        ExaPreviewItem(
+            title="Serply structured result",
+            url="https://example.test/structured",
+            highlights=("Structured snippet.",),
+        )
+    ]
+
+
+def test_parse_serply_search_payload_accepts_json_text() -> None:
+    text = json.dumps(
+        {
+            "results": [
+                {
+                    "title": "Serply json result",
+                    "link": "https://example.test/json",
+                }
+            ]
+        }
+    )
+
+    assert parse_serply_search_payload(text) == [
+        ExaPreviewItem(title="Serply json result", url="https://example.test/json")
     ]
 
 
@@ -1368,3 +1461,128 @@ def test_build_platform_source_backends_uses_only_enabled_sources() -> None:
         "bangumi",
         "v2ex",
     ]
+
+
+# ── Overseas search backends follow the [network] routing policy ─────────
+#
+# Regression: Exa / You.com / Serply hardwired trust_env=False, so under a
+# configured proxy ([network] mode="custom") they still dialed direct — and
+# api.exa.ai times out from CN networks without a proxy (same failure shape
+# as the ytimg cover bug). Bing stays CN-direct on purpose.
+
+
+_GUARD_PROXY = "socks5://127.0.0.1:9999"
+
+
+@pytest.fixture
+def _reset_outbound_network() -> Iterator[None]:
+    from openbiliclaw import network
+
+    try:
+        yield
+    finally:
+        network.reset_outbound_proxy_for_tests()
+
+
+def _capture_client_kwargs(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
+    captured: list[dict[str, object]] = []
+    orig_init = httpx.AsyncClient.__init__
+
+    def _recording_init(self: httpx.AsyncClient, *args: object, **kwargs: object) -> None:
+        captured.append(dict(kwargs))
+        orig_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.AsyncClient, "__init__", _recording_init)
+    return captured
+
+
+@pytest.mark.usefixtures("_reset_outbound_network")
+@pytest.mark.parametrize(
+    ("provider_name", "factory"),
+    [
+        pytest.param("exa", lambda: ExaInspirationProvider(api_key="k"), id="exa"),
+        pytest.param("you", lambda: YouInspirationProvider(api_key="k"), id="you"),
+        pytest.param("serply", lambda: SerplyInspirationProvider(api_key="k"), id="serply"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [
+        pytest.param(
+            "custom",
+            {"proxy": _GUARD_PROXY, "trust_env": False},
+            id="custom-explicit-proxy",
+        ),
+        pytest.param("system", {"trust_env": True}, id="system-inherits-env"),
+        pytest.param("direct", {"trust_env": False}, id="direct-forces-off"),
+    ],
+)
+async def test_overseas_search_backends_follow_network_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    provider_name: str,
+    factory: Callable[[], object],
+    mode: str,
+    expected: dict[str, object],
+) -> None:
+    from openbiliclaw import network
+
+    network.set_outbound_proxy(_GUARD_PROXY if mode == "custom" else "", mode=mode)
+    captured = _capture_client_kwargs(monkeypatch)
+    factory()
+
+    assert captured, f"{provider_name} did not construct an httpx client"
+    kwargs = captured[0]
+    for key, value in expected.items():
+        assert kwargs.get(key) == value, f"{provider_name}: {key} mismatch under {mode}"
+    if "proxy" not in expected:
+        assert "proxy" not in kwargs
+
+
+@pytest.mark.usefixtures("_reset_outbound_network")
+async def test_bing_rss_stays_direct_under_custom_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw import network
+
+    network.set_outbound_proxy(_GUARD_PROXY, mode="custom")
+    captured = _capture_client_kwargs(monkeypatch)
+    BingRssInspirationProvider()
+
+    assert captured[0].get("trust_env") is False
+    assert "proxy" not in captured[0]
+
+
+@pytest.mark.usefixtures("_reset_outbound_network")
+async def test_mcporter_subprocess_env_follows_network_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_run_command routes mcporter through the same [network] env as rdt-cli."""
+    import openbiliclaw.discovery.inspiration_provider as ip
+    from openbiliclaw import network
+
+    network.set_outbound_proxy(_GUARD_PROXY, mode="custom")
+
+    received: dict[str, object] = {}
+
+    class _FakeProc:
+        def __init__(self) -> None:
+            self.returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"ok", b""
+
+    def _fake_exec(*args: object, **kwargs: object) -> object:
+        received["env"] = kwargs.get("env")
+        future: asyncio.Future[_FakeProc] = asyncio.Future()
+        future.set_result(_FakeProc())
+        return future
+
+    monkeypatch.setattr(ip.asyncio, "create_subprocess_exec", _fake_exec)
+    monkeypatch.setattr(ip, "no_window_kwargs", dict)
+
+    output = await ip._run_command(["mcporter", "call"], 5.0)
+
+    assert output == "ok"
+    env = received["env"]
+    assert isinstance(env, dict)
+    assert env.get("HTTPS_PROXY") == _GUARD_PROXY

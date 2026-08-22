@@ -888,6 +888,9 @@ def _build_soul_engine() -> Any:
         preference_prompt_view=str(getattr(cfg.soul, "preference_prompt_view", "legacy")),
         awareness_prompt_view=str(getattr(cfg.soul, "awareness_prompt_view", "compact-v1")),
         insight_prompt_view=str(getattr(cfg.soul, "insight_prompt_view", "legacy")),
+        awareness_event_batch_size=int(getattr(cfg.soul, "awareness_event_batch_size", 300)),
+        insight_note_batch_size=int(getattr(cfg.soul, "insight_note_batch_size", 150)),
+        cognition_max_tokens=int(getattr(cfg.soul, "cognition_max_tokens", 32768)),
         posture_gate_mode=cfg.soul.posture_gate_mode,
         posture_gate_force_enforce=cfg.soul.posture_gate_force_enforce,
         module_overrides=module_overrides_from_config(cfg),
@@ -8109,6 +8112,7 @@ async def run_guided_init(
     collection_timeout_seconds: float = _INIT_COLLECTION_TIMEOUT_SECONDS,
     purge_pool_callback: Callable[[], int] | None = None,
     reset_cognition: bool = False,
+    llm_concurrency: int | None = None,
 ) -> InitResult:
     """Shared async init pipeline (gui-init spec §1).
 
@@ -8148,6 +8152,11 @@ async def run_guided_init(
     the long-term awareness / insight layers before stage 2 so old LLM
     observations (e.g. from a previous account) do not leak into the new
     profile build.
+
+    ``llm_concurrency`` is the per-run override for the preference-analysis
+    fan-out (init page field). ``None`` keeps the configured
+    ``llm.concurrency``; the CLI option and the GUI init pages always send an
+    explicit validated value or omit it entirely.
     """
 
     import logging
@@ -9078,7 +9087,15 @@ async def run_guided_init(
             )
         except Exception:
             logger.warning("reset_cognition layer clear failed", exc_info=True)
-    profile_analysis_concurrency = _profile_analysis_concurrency(soul_engine)
+    if llm_concurrency is None:
+        profile_analysis_concurrency = _profile_analysis_concurrency(soul_engine)
+    else:
+        from openbiliclaw.config import _MAX_LLM_CONCURRENCY
+
+        profile_analysis_concurrency = max(
+            1,
+            min(_MAX_LLM_CONCURRENCY, int(llm_concurrency)),
+        )
     # Progress-aware deadline: the idle limit is what actually catches a wedged
     # gateway, so the absolute ceiling can stay generous for slow-but-healthy
     # ones. ``profile_analysis_budget`` remains the number published to the GUI
@@ -9163,6 +9180,7 @@ async def run_guided_init(
                         events,
                         event_chunk_size=DEFAULT_PREFERENCE_EVENT_CHUNK_SIZE,
                         progress_callback=_stage2_progress,
+                        llm_concurrency=llm_concurrency,
                     ),
                     label="分析偏好（分片批处理）",
                     eta_seconds=180,
@@ -9654,6 +9672,16 @@ def init(
             "仅配合 --force 有意义。"
         ),
     ),
+    llm_concurrency: int | None = typer.Option(
+        None,
+        "--init-llm-concurrency",
+        min=1,
+        max=16,
+        help=(
+            "本次初始化使用的 LLM 并发数（默认读取配置的 llm.concurrency，"
+            "未配置时默认 4）。降低可减少限流，提高可加速但更容易触发限流。"
+        ),
+    ),
     no_backup: bool = typer.Option(
         False,
         "--no-backup",
@@ -10095,6 +10123,7 @@ def init(
                     else None
                 ),
                 reset_cognition=reset_cognition,
+                llm_concurrency=llm_concurrency,
             )
         )
     except GuidedInitError as exc:
@@ -12941,6 +12970,7 @@ def keyword_inspiration_dry_run(
                     database=database,
                     exa_api_key=str(getattr(config.discovery, "exa_api_key", "") or ""),
                     you_api_key=str(getattr(config.discovery, "you_api_key", "") or ""),
+                    serply_api_key=str(getattr(config.discovery, "serply_api_key", "") or ""),
                     platform_backends=build_platform_source_backends(
                         config,
                         bilibili_client=(

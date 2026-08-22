@@ -28,7 +28,7 @@ def test_background_concurrency_reserves_one_total_slot() -> None:
     assert background_llm_concurrency(4) == 3
     assert background_llm_concurrency(3) == 2
     assert background_llm_concurrency(1) == 1
-    assert background_llm_concurrency("invalid") == 3
+    assert background_llm_concurrency("invalid") == 2
 
 
 def test_two_services_share_exact_gate_object() -> None:

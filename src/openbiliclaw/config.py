@@ -31,6 +31,7 @@ _SUSPICIOUS_BUDGET_LOW = 1
 _SUSPICIOUS_BUDGET_HIGH = 4
 # Guards the once-per-process warning so repeated config reloads don't spam.
 _warned_budget_keys: set[str] = set()
+_warned_legacy_empty_model_providers: set[str] = set()
 
 # Default config search paths
 _CONFIG_FILENAMES = ["config.toml", "config.local.toml"]
@@ -120,6 +121,20 @@ _DEFAULT_SPECULATOR_IDLE_INTERVAL_MINUTES = 30
 _DEFAULT_LLM_BUDGET_MAX_CALLS = 120
 _DEFAULT_LLM_BUDGET_WINDOW_SECONDS = 3600
 _DEFAULT_FEEDBACK_BATCH_THRESHOLD = 3
+# Cognition-cycle context knobs (issue #169). Keep the defaults in sync with
+# the module constants in ``openbiliclaw/soul/cognition_cycle.py``:
+# _AWARENESS_EVENT_BATCH_SIZE, _INSIGHT_NOTE_BATCH_SIZE, _COGNITION_MAX_TOKENS.
+# Small-context local models (e.g. qwen3.8-27B on a 24G card with 80-100K
+# context) should lower these instead of patching the module constants.
+_DEFAULT_COGNITION_AWARENESS_EVENT_BATCH_SIZE = 300
+_MIN_COGNITION_AWARENESS_EVENT_BATCH_SIZE = 10
+_MAX_COGNITION_AWARENESS_EVENT_BATCH_SIZE = 900
+_DEFAULT_COGNITION_INSIGHT_NOTE_BATCH_SIZE = 150
+_MIN_COGNITION_INSIGHT_NOTE_BATCH_SIZE = 10
+_MAX_COGNITION_INSIGHT_NOTE_BATCH_SIZE = 450
+_DEFAULT_COGNITION_MAX_TOKENS = 32768
+_MIN_COGNITION_MAX_TOKENS = 1024
+_MAX_COGNITION_MAX_TOKENS = 128000
 _MIN_AUTO_UPDATE_CHECK_INTERVAL_HOURS = 1
 _DEFAULT_AUTO_UPDATE_CHECK_INTERVAL_HOURS = 6
 # Unified keyword planner (Discover backpressure refactor P1, spec §6).
@@ -156,6 +171,7 @@ _DEFAULT_INSPIRATION_SEARCH_BACKENDS: tuple[str, ...] = (
     "bing_rss",
     "exa",
     "you",
+    "serply",
 )
 _DEFAULT_ADMISSION_MIN_SCORE = 0.60
 _DEFAULT_CANDIDATE_EVAL_CONCURRENCY = 3
@@ -170,7 +186,7 @@ _DEFAULT_KEYFRAME_MAX_FRAMES = 4
 _DEFAULT_KEYFRAME_FETCH_LIMIT = 50
 _DEFAULT_DANMAKU_FETCH_LIMIT = 50
 _DEFAULT_DANMAKU_MAX_CHARS = 500
-DEFAULT_LLM_CONCURRENCY = 4
+DEFAULT_LLM_CONCURRENCY = 3
 _MIN_LLM_CONCURRENCY = 1
 _MAX_LLM_CONCURRENCY = 16
 # Slow reasoning / OpenAI-compatible relays can legitimately take well over
@@ -551,17 +567,34 @@ def _legacy_provider_is_visible(
         referenced.add(str(route.provider or "").strip().lower())
     if provider_type in referenced:
         return True
+
+    model = str(provider.model or "").strip()
     if str(provider.api_key or "").strip():
-        return True
+        if model:
+            return True
+        if provider_type not in _warned_legacy_empty_model_providers:
+            _warned_legacy_empty_model_providers.add(provider_type)
+            logger.warning(
+                "config: [llm.%s] has api_key but empty model; "
+                "not projecting it as a legacy instance",
+                provider_type,
+            )
+        return False
     if provider_type == "openai" and str(provider.auth_mode or "").strip().lower() == "codex_oauth":
         return True
     if provider_type == "gemini" and bool(
         os.environ.get("GOOGLE_API_KEY", "").strip() or os.environ.get("GEMINI_API_KEY", "").strip()
     ):
-        return True
-    return provider_type == "ollama" and bool(
-        str(provider.model or "").strip() or str(provider.base_url or "").strip()
-    )
+        if model:
+            return True
+        if provider_type not in _warned_legacy_empty_model_providers:
+            _warned_legacy_empty_model_providers.add(provider_type)
+            logger.warning(
+                "config: [llm.gemini] has environment API key but empty model; "
+                "not projecting it as a legacy instance",
+            )
+        return False
+    return provider_type == "ollama" and bool(model or str(provider.base_url or "").strip())
 
 
 def effective_llm_instances(llm: LLMConfig) -> dict[str, LLMInstanceConfig]:
@@ -1088,6 +1121,7 @@ class DiscoveryConfig:
     # mcporter CLI fallback (or skip the backend when neither is available).
     exa_api_key: str = ""
     you_api_key: str = ""
+    serply_api_key: str = ""
     # Optional experiment mode: when true and inspiration search is available,
     # due platforms skip the legacy merged keyword planner and are filled only
     # through the search-inspired flow.
@@ -1578,6 +1612,12 @@ class SoulConfig:
     # (回放门); ``on`` excludes archived topics from that serialization. This is
     # the only "minimal consumption" of the topic state machine in this version.
     topic_lifecycle_serialization: str = "off"
+    # Cognition-cycle prompt/output budgets (issue #169). These are the runtime
+    # knobs for ``openbiliclaw.soul.cognition_cycle``'s module constants and let
+    # small-context local models (qwen3.8-27B etc.) run without patching code.
+    awareness_event_batch_size: int = _DEFAULT_COGNITION_AWARENESS_EVENT_BATCH_SIZE
+    insight_note_batch_size: int = _DEFAULT_COGNITION_INSIGHT_NOTE_BATCH_SIZE
+    cognition_max_tokens: int = _DEFAULT_COGNITION_MAX_TOKENS
 
 
 @dataclass
@@ -2439,6 +2479,24 @@ def _build_config(
         topic_lifecycle_serialization=(
             raw_lifecycle if raw_lifecycle in _TOPIC_LIFECYCLE_SERIALIZATION_MODES else "off"
         ),
+        awareness_event_batch_size=_normalize_scheduler_int(
+            soul_raw.get("awareness_event_batch_size"),
+            default=_DEFAULT_COGNITION_AWARENESS_EVENT_BATCH_SIZE,
+            min_value=_MIN_COGNITION_AWARENESS_EVENT_BATCH_SIZE,
+            max_value=_MAX_COGNITION_AWARENESS_EVENT_BATCH_SIZE,
+        ),
+        insight_note_batch_size=_normalize_scheduler_int(
+            soul_raw.get("insight_note_batch_size"),
+            default=_DEFAULT_COGNITION_INSIGHT_NOTE_BATCH_SIZE,
+            min_value=_MIN_COGNITION_INSIGHT_NOTE_BATCH_SIZE,
+            max_value=_MAX_COGNITION_INSIGHT_NOTE_BATCH_SIZE,
+        ),
+        cognition_max_tokens=_normalize_scheduler_int(
+            soul_raw.get("cognition_max_tokens"),
+            default=_DEFAULT_COGNITION_MAX_TOKENS,
+            min_value=_MIN_COGNITION_MAX_TOKENS,
+            max_value=_MAX_COGNITION_MAX_TOKENS,
+        ),
     )
 
     api_auth = _build_api_auth(api_raw, consult_environment=consult_environment)
@@ -2772,6 +2830,7 @@ def _build_discovery(discovery_raw: dict[str, Any]) -> DiscoveryConfig:
         ),
         exa_api_key=str(discovery_raw.get("exa_api_key", "") or "").strip(),
         you_api_key=str(discovery_raw.get("you_api_key", "") or "").strip(),
+        serply_api_key=str(discovery_raw.get("serply_api_key", "") or "").strip(),
         inspiration_replace_merged_keywords=_coerce_bool(
             discovery_raw.get("inspiration_replace_merged_keywords"),
             default=False,
@@ -3119,6 +3178,8 @@ def _normalize_inspiration_search_backends(value: object) -> tuple[str, ...]:
         "youcom": "you",
         "you-search": "you",
         "you_search": "you",
+        "serply": "serply",
+        "serply.io": "serply",
     }
     normalized: list[str] = []
     seen: set[str] = set()
@@ -4118,6 +4179,29 @@ def _collect_config_issues(config: Config) -> list[ConfigIssue]:
                 severity="blocking",
             )
         )
+
+    for soul_field, min_value, max_value in (
+        (
+            "awareness_event_batch_size",
+            _MIN_COGNITION_AWARENESS_EVENT_BATCH_SIZE,
+            _MAX_COGNITION_AWARENESS_EVENT_BATCH_SIZE,
+        ),
+        (
+            "insight_note_batch_size",
+            _MIN_COGNITION_INSIGHT_NOTE_BATCH_SIZE,
+            _MAX_COGNITION_INSIGHT_NOTE_BATCH_SIZE,
+        ),
+        ("cognition_max_tokens", _MIN_COGNITION_MAX_TOKENS, _MAX_COGNITION_MAX_TOKENS),
+    ):
+        raw_value = getattr(config.soul, soul_field)
+        if not min_value <= int(raw_value) <= max_value:
+            issues.append(
+                ConfigIssue(
+                    field=f"soul.{soul_field}",
+                    message=(f"`soul.{soul_field}` 必须在 {min_value}..{max_value} 之间。"),
+                    severity="blocking",
+                )
+            )
 
     # Before the default-provider early return: embedding validation must run
     # even when default_provider itself is broken.
@@ -5550,6 +5634,7 @@ def _render_config_toml(
             f"{_toml_str_list(list(config.discovery.inspiration_search_backends))}",
             f"exa_api_key = {_toml_string(config.discovery.exa_api_key)}",
             f"you_api_key = {_toml_string(config.discovery.you_api_key)}",
+            f"serply_api_key = {_toml_string(config.discovery.serply_api_key)}",
             "inspiration_replace_merged_keywords = "
             f"{_toml_bool(config.discovery.inspiration_replace_merged_keywords)}",
             f"inspiration_breadth = {_toml_string(config.discovery.inspiration_breadth)}",
@@ -5610,6 +5695,12 @@ def _render_config_toml(
             "# the LLM-facing profile byte-identical; on excludes archived topics.",
             f"topic_lifecycle_serialization = "
             f"{_toml_string(config.soul.topic_lifecycle_serialization)}",
+            "# Cognition-cycle prompt/output budgets (issue #169). Lower these",
+            "# for small-context local models (qwen3.8-27B etc.); defaults are",
+            "# sized for 256k-class providers.",
+            f"awareness_event_batch_size = {max(0, int(config.soul.awareness_event_batch_size))}",
+            f"insight_note_batch_size = {max(0, int(config.soul.insight_note_batch_size))}",
+            f"cognition_max_tokens = {max(0, int(config.soul.cognition_max_tokens))}",
             "",
             "[soul.preference]",
             "# v0.3.x event-satisfaction signal. When true, preference",

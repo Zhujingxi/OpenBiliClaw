@@ -35,7 +35,7 @@ def build_v2ex_external_search_provider(config: object) -> Any | None:
     external = tuple(
         str(value).strip().lower()
         for value in configured
-        if str(value).strip().lower() in {"bing_rss", "exa", "you"}
+        if str(value).strip().lower() in {"bing_rss", "exa", "you", "serply"}
     )
     if not external:
         return None
@@ -46,6 +46,7 @@ def build_v2ex_external_search_provider(config: object) -> Any | None:
         external,
         exa_api_key=str(getattr(discovery, "exa_api_key", "") or ""),
         you_api_key=str(getattr(discovery, "you_api_key", "") or ""),
+        serply_api_key=str(getattr(discovery, "serply_api_key", "") or ""),
     )
 
 

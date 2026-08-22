@@ -29,6 +29,15 @@ from openbiliclaw.llm.service import LLMService
 from .avoidance_speculator import AvoidanceSpeculator
 from .awareness_analyzer import AwarenessAnalyzer
 from .cognition_cycle import (
+    _AWARENESS_EVENT_BATCH_SIZE as _DEFAULT_AWARENESS_EVENT_BATCH_SIZE,
+)
+from .cognition_cycle import (
+    _COGNITION_MAX_TOKENS as _DEFAULT_COGNITION_MAX_TOKENS,
+)
+from .cognition_cycle import (
+    _INSIGHT_NOTE_BATCH_SIZE as _DEFAULT_INSIGHT_NOTE_BATCH_SIZE,
+)
+from .cognition_cycle import (
     DEFAULT_MIN_INTERVAL_SECONDS as _DEFAULT_COG_INTERVAL,
 )
 from .cognition_cycle import (
@@ -316,13 +325,16 @@ class SoulEngine:
         *,
         embedding_service: Any | None = None,
         cognition_cycle_interval_seconds: int | None = None,
+        awareness_event_batch_size: int = _DEFAULT_AWARENESS_EVENT_BATCH_SIZE,
+        insight_note_batch_size: int = _DEFAULT_INSIGHT_NOTE_BATCH_SIZE,
+        cognition_max_tokens: int = _DEFAULT_COGNITION_MAX_TOKENS,
         usage_recorder: Any | None = None,
         satisfaction_filter_enabled: bool = True,
         preference_prompt_view: str = "legacy",
         awareness_prompt_view: str = "compact-v1",
         insight_prompt_view: str = "legacy",
         module_overrides: Mapping[str, ModuleOverride] | None = None,
-        llm_concurrency: int = 4,
+        llm_concurrency: int = 3,
         llm_concurrency_gate: Any | None = None,
         speculation_interval_minutes: int = 10,
         speculation_ttl_days: int = 3,
@@ -440,6 +452,9 @@ class SoulEngine:
                 if cognition_cycle_interval_seconds is not None
                 else _DEFAULT_COG_INTERVAL
             ),
+            awareness_event_batch_size=awareness_event_batch_size,
+            insight_note_batch_size=insight_note_batch_size,
+            cognition_max_tokens=cognition_max_tokens,
             # 12h-loop fallback trigger for the debounced confirmed-hypotheses
             # rebuild (spec invariant 4). Bound method; only invoked at run time.
             pending_rebuild_hook=self.run_pending_rebuild_if_due,
@@ -576,6 +591,7 @@ class SoulEngine:
         *,
         event_chunk_size: int = 0,
         progress_callback: Callable[[int, int], Awaitable[None]] | None = None,
+        llm_concurrency: int | None = None,
     ) -> None:
         """Analyze new behavioral events and update all memory layers.
 
@@ -604,6 +620,7 @@ class SoulEngine:
             existing_preference=preference_layer.data,
             event_chunk_size=event_chunk_size,
             progress_callback=progress_callback,
+            llm_concurrency=llm_concurrency,
         )
         init_cognition = updated_preference.pop(INIT_COGNITION_CONTEXT_KEY, None)
         self._init_cognition_context = init_cognition if isinstance(init_cognition, dict) else {}

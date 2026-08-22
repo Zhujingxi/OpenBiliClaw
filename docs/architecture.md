@@ -496,6 +496,7 @@ embedding 和空向量失败留待下轮重试，成功槽位会复用。已有�
 - `Database` facade 按调用线程分配 WAL connection：初始化/event-loop 线程保留 primary，status、对话锚与其它 worker 不再同时 step 同一条 `check_same_thread=False` 连接；普通 facade 连接保持 legacy foreign-key PRAGMA，只有 `open_connection()` 显式短事务开启外键约束。写锁仍交给 SQLite `busy_timeout` 串行，失败事务 rollback 后才 lock retry；direct DML 即使零行命中也必须 commit，异常必须 rollback，避免永久线程连接遗留 writer lock。关闭时先 drain 自有 worker、再回收全部 thread-affine connections。
 - 冷备份、完整性检查与显式修复
 - 候选质量信号持久化与数据迁移；`events` 行写入 `inferred_satisfaction` / `satisfaction_reason`，支持 `query_events(satisfaction_modes=...)`
+- 事件来源归属持久化；`events.source_platform` / `content_id` / `source_confidence` 为后续按平台撤回提供 durable 边界，旧行只按 metadata / 规范 URL 保守回填，未知归属保持 `legacy_unknown`
 - `seen_items` 是 discovery / recommendation 共用的无界已看身份账本；`insert_event` 与 `insert_events_batch` 同事务维护，`seen_items_backfill_state` 让升级回填幂等且增量
 - `get_pool_candidates` 与 canonical availability loader 共用每个 `topic_group` ≤3 条的窗口：先执行 durable seen / linkability gate，再按 topic 内 relevance / score time / view / bvid 排名选前三，最后恢复全局 candidate-tier / relevance 顺序。这样长尾 group 能进入窗口，已看或不可打开的高分行也不会先占掉公开槽位
 - `discovery_candidates` 持久化所有来源 raw candidates 的 lifecycle：`pending_eval`、`evaluating`、`evaluated`、`cached`、`rejected_low_score`、`rejected_duplicate`、`rejected_cache_admission`、`rejected_temporal_stale`、`rejected_recently_viewed`、`rejected_franchise_quota`、`failed_eval`、`trimmed_capacity`；容量 victim 与时效拒绝都保留 terminal 行和 `eval_error` 原因，不做物理删除。

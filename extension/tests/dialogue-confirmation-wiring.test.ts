@@ -76,7 +76,7 @@ test("all visible clients hydrate and reconnect the pending-confirmation badge",
 
   assert.match(
     desktop,
-    /const pendingConfirmationsPromise = refreshDesktopPendingConfirmations\(\);[\s\S]*const recommendationsPromise = readRecommendationSnapshot\(\)/,
+    /const pendingConfirmationsPromise = refreshDesktopPendingConfirmations\(\);[\s\S]*const recommendationsPromise = shouldReadRecommendations\s*\? readRecommendationSnapshot\(\)/,
     "desktop must start the badge request before the recommendation-card request fan-out",
   );
   assert.match(desktop, /const secondaryPromises = \[\s*pendingConfirmationsPromise,/);

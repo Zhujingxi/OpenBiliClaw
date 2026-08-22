@@ -68,6 +68,11 @@ const feedbackDone = new Map(); // recId -> "like" | "dislike" | "comment"
 const savedMutations = createSavedMutationRegistry();
 const COVER_PRELOAD_BATCH_SIZE = 12;
 const COVER_PRELOAD_WAIT_TIMEOUT_MS = 3000;
+// Only the first few cards in a freshly rendered list load their covers eagerly.
+// The rest use loading="lazy" and are preheated by observeScrollPreheat as they
+// approach the viewport. This keeps a page append from issuing 10 eager image
+// fetches at once (the main source of load-more scroll jank).
+const CARD_EAGER_COVER_COUNT = 4;
 const AUTO_APPEND_ROOT_MARGIN = "700px 0px 1400px 0px";
 const SCROLL_PREHEAT_LOOKAHEAD = 16;
 const SCROLL_PREHEAT_ROOT_MARGIN = "0px 0px 2400px 0px";
@@ -1178,7 +1183,9 @@ function renderCard(rawItem, index = 0) {
   const url = buildContentUrl(item);
   const cardMedia = getRecommendationCardKind(item);
   if (cardMedia.kind === "text") card.classList.add("is-text-only");
-  const imageAttrs = getRecommendationImageLoadingAttrs(index);
+  const imageAttrs = getRecommendationImageLoadingAttrs(index, {
+    eagerCount: CARD_EAGER_COVER_COUNT,
+  });
   const publishedHtml = publishedTimeHtml(item);
 
   let coverHtml;
@@ -1532,7 +1539,9 @@ async function handleReshuffle() {
 async function handleAppend() {
   if (loading) return;
   loading = true;
+  resetAutoAppendIntent();
   let clearedActionMessage = false;
+  let appendFailed = false;
 
   // Disable the button inline instead of full re-render.
   const loadMoreRow = $root.querySelector(".load-more-row");
@@ -1549,10 +1558,12 @@ async function handleAppend() {
       recommendationActionMessage = "";
       clearedActionMessage = true;
     }
-    await warmRecommendationCovers(newItems, { limit: newItems.length, waitForDecode: true });
     patchState({ recommendations: [...state.recommendations, ...newItems] });
 
     // Append new cards before the load-more row without rebuilding existing ones.
+    // Do not wait for cover images to decode before inserting: that made both
+    // tap-to-load-more and scroll auto-append feel stuck for up to 3 extra
+    // seconds after the API returned.
     if (loadMoreRow) {
       for (const [offset, item] of newItems.entries()) {
         const card = renderCard(item, startIndex + offset);
@@ -1560,12 +1571,20 @@ async function handleAppend() {
         if (scrollPreheatObserver) scrollPreheatObserver.observe(card);
       }
     }
+
+    // Warm only the first few new covers in the background; the tail is
+    // loading="lazy" and will be preheated as it approaches the viewport.
+    void warmRecommendationCovers(newItems, { limit: CARD_EAGER_COVER_COUNT });
   } catch {
-    autoAppendExhausted = true;
+    // Transient failures should not permanently disable auto-append. Show the
+    // error in the header and let the next scroll/click retry.
+    autoAppendExhausted = false;
+    appendFailed = true;
+    recommendationActionMessage = "\u52A0\u8F7D\u66F4\u591A\u5931\u8D25\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5\u3002";
   }
 
   loading = false;
-  if (clearedActionMessage) rerenderHeaderOnly();
+  if (clearedActionMessage || appendFailed) rerenderHeaderOnly();
   // Restore button state.
   if (appendBtnEl) {
     appendBtnEl.disabled = false;

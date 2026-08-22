@@ -4592,9 +4592,12 @@ class TestBackendAPI:
         assert memory.events[0]["event_type"] == "click"
         assert memory.events[0]["url"] == "https://www.bilibili.com/video/BV1TEST"
         assert memory.events[0]["metadata"]["timestamp"] == 1710000000000
-        # Legacy payload without source_platform defaults to bilibili so the
-        # existing extension build keeps working across the upgrade.
+        # A legacy payload without source_platform can still be classified by
+        # its canonical URL, without treating the compatibility fallback as
+        # exact evidence.
         assert memory.events[0]["metadata"]["source_platform"] == "bilibili"
+        assert memory.events[0]["source_platform"] == "bilibili"
+        assert memory.events[0]["source_confidence"] == "inferred"
 
     def test_events_endpoint_ignores_pre_init_behavior_events(self) -> None:
         from fastapi.testclient import TestClient
@@ -4692,19 +4695,37 @@ class TestBackendAPI:
                         "context": {"pageType": "post"},
                         "metadata": {"content_id": "t3_abc123", "post_id": "abc123"},
                     },
+                    {
+                        "event_id": "events-source-legacy-fallback",
+                        "type": "search",
+                        "title": "没有来源和 URL 的旧事件",
+                        "timestamp": 1710000000003,
+                    },
                 ]
             },
         )
 
         assert response.status_code == 200
-        assert response.json()["accepted"] == 3
+        assert response.json()["accepted"] == 4
         assert memory.events[0]["metadata"]["source_platform"] == "xiaohongshu"
+        assert memory.events[0]["source_platform"] == "xiaohongshu"
+        assert memory.events[0]["content_id"] == "69dea966000000001a0280ad"
+        assert memory.events[0]["source_confidence"] == "exact"
         assert memory.events[0]["metadata"]["note_id"] == "69dea966000000001a0280ad"
-        # Blank source_platform (whitespace only) falls back to bilibili.
-        assert memory.events[1]["metadata"]["source_platform"] == "bilibili"
+        # Blank source_platform is inferred from the canonical URL before the
+        # compatibility B站 fallback.
+        assert memory.events[1]["metadata"]["source_platform"] == "xiaohongshu"
+        assert memory.events[1]["source_platform"] == "xiaohongshu"
+        assert memory.events[1]["source_confidence"] == "inferred"
         assert memory.events[2]["metadata"]["source_platform"] == "reddit"
+        assert memory.events[2]["source_platform"] == "reddit"
+        assert memory.events[2]["content_id"] == "t3_abc123"
+        assert memory.events[2]["source_confidence"] == "exact"
         assert memory.events[2]["metadata"]["content_id"] == "t3_abc123"
         assert memory.events[2]["metadata"]["post_id"] == "abc123"
+        assert memory.events[3]["metadata"]["source_platform"] == "bilibili"
+        assert memory.events[3]["source_platform"] == "bilibili"
+        assert memory.events[3]["source_confidence"] == "legacy_unknown"
 
     def test_events_endpoint_preserves_top_level_dwell_fields(self) -> None:
         """v0.3.x event-satisfaction: top-level watch_seconds /
@@ -15139,7 +15160,7 @@ class TestEmbeddingAndCompatProviderE2E:
         data = response.json()
 
         assert data["data_dir"] == "runtime-data"
-        assert data["llm"]["concurrency"] == 4
+        assert data["llm"]["concurrency"] == 3
         assert data["llm"]["deepseek"]["reasoning_effort"] == "high"
         assert data["llm"]["openrouter"]["http_referer"] == "https://example.com"
         assert data["llm"]["openrouter"]["x_title"] == "Example App"
@@ -15597,6 +15618,46 @@ class TestEmbeddingAndCompatProviderE2E:
         rendered = (tmp_path / "config.toml").read_text(encoding="utf-8")
         assert "cognition_prompt_view" not in rendered
 
+    def test_cognition_budget_knobs_round_trip_through_config_api(
+        self,
+        monkeypatch,
+        tmp_path,
+    ) -> None:
+        from openbiliclaw.config import Config, LLMConfig, LLMProviderConfig
+
+        cfg = Config(llm=LLMConfig(openai=LLMProviderConfig(api_key="sk-openai")))
+        client = self._make_client(monkeypatch, tmp_path, cfg)
+
+        initial = client.get("/api/config")
+        updated = client.put(
+            "/api/config",
+            json={
+                "soul": {
+                    "awareness_event_batch_size": 80,
+                    "insight_note_batch_size": 40,
+                    "cognition_max_tokens": 8192,
+                }
+            },
+        )
+
+        assert initial.status_code == 200
+        initial_soul = initial.json()["soul"]
+        assert initial_soul["awareness_event_batch_size"] == 300
+        assert initial_soul["insight_note_batch_size"] == 150
+        assert initial_soul["cognition_max_tokens"] == 32768
+        assert updated.status_code == 202
+        updated_soul = updated.json()["config"]["soul"]
+        assert updated_soul["awareness_event_batch_size"] == 80
+        assert updated_soul["insight_note_batch_size"] == 40
+        assert updated_soul["cognition_max_tokens"] == 8192
+        assert cfg.soul.awareness_event_batch_size == 80
+        assert cfg.soul.insight_note_batch_size == 40
+        assert cfg.soul.cognition_max_tokens == 8192
+        rendered = (tmp_path / "config.toml").read_text(encoding="utf-8")
+        assert "awareness_event_batch_size = 80" in rendered
+        assert "insight_note_batch_size = 40" in rendered
+        assert "cognition_max_tokens = 8192" in rendered
+
     @pytest.mark.parametrize(("raw_bool", "bad_grace"), [("true", -1), ("on", 0), ("true", "abc")])
     def test_put_config_updates_scheduler_pause_on_extension_disconnect(
         self,
@@ -15970,6 +16031,7 @@ class TestEmbeddingAndCompatProviderE2E:
                 "v2ex": 0,
                 "bangumi": 0,
                 "linuxdo": 0,
+                "unknown": 0,
             },
             "enabled_sources": {
                 "bilibili": True,
@@ -15991,6 +16053,66 @@ class TestEmbeddingAndCompatProviderE2E:
                 "youtube": 5,
             },
         }
+
+    def test_source_share_fallback_prefers_top_level_source_platform(self) -> None:
+        from openbiliclaw.api.app import _count_events_by_source_platform
+
+        class Cursor:
+            def fetchall(self) -> list[dict[str, str]]:
+                return [
+                    {
+                        "source_platform": "youtube",
+                        "metadata": '{"source_platform":"bilibili"}',
+                    },
+                    {
+                        "source_platform": "",
+                        "metadata": '{"source_platform":"twitter"}',
+                    },
+                ]
+
+        class Connection:
+            def execute(self, query: str) -> Cursor:
+                assert query == "SELECT source_platform, metadata FROM events"
+                return Cursor()
+
+        class DatabaseWithoutCountMethod:
+            conn = Connection()
+
+        counts = _count_events_by_source_platform(DatabaseWithoutCountMethod())
+
+        assert counts["youtube"] == 1
+        assert counts["twitter"] == 1
+        assert counts["bilibili"] == 0
+        assert counts["unknown"] == 0
+
+    def test_source_share_fallback_buckets_unknown_slugs(self) -> None:
+        from openbiliclaw.api.app import _count_events_by_source_platform
+
+        class Cursor:
+            def fetchall(self) -> list[dict[str, str]]:
+                return [
+                    {
+                        "source_platform": "threads",
+                        "metadata": "{}",
+                    },
+                    {
+                        "source_platform": "",
+                        "metadata": '{"source_platform":"future-platform"}',
+                    },
+                ]
+
+        class Connection:
+            def execute(self, query: str) -> Cursor:
+                assert query == "SELECT source_platform, metadata FROM events"
+                return Cursor()
+
+        class DatabaseWithoutCountMethod:
+            conn = Connection()
+
+        counts = _count_events_by_source_platform(DatabaseWithoutCountMethod())
+
+        assert counts["unknown"] == 2
+        assert counts["bilibili"] == 0
 
     def test_source_share_suggestion_post_uses_form_overrides(self, monkeypatch, tmp_path) -> None:
         """POST /api/config/source-share-suggestion should support the
@@ -16064,6 +16186,7 @@ class TestEmbeddingAndCompatProviderE2E:
                 "v2ex": 0,
                 "bangumi": 0,
                 "linuxdo": 0,
+                "unknown": 0,
             },
             "enabled_sources": {
                 "bilibili": True,
@@ -16618,6 +16741,37 @@ class TestGuidedInitEndpoints:
             resp = client.post("/api/init", json={})
         assert resp.status_code == 403
         assert resp.json()["error"] == "local_only"
+
+    def test_init_rejects_invalid_llm_concurrency(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        app, db = self._make_app(tmp_path)
+        with TestClient(app) as client:
+            for bad in (0, 17, "not-an-int"):
+                resp = client.post(
+                    "/api/init",
+                    json={"sources": ["xiaohongshu"], "llm_concurrency": bad},
+                )
+                assert resp.status_code == 400
+                assert resp.json()["error"] == "invalid_llm_concurrency"
+        assert db.get_latest_init_run() is None
+
+    def test_init_passes_llm_concurrency_to_pipeline(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["douyin"])
+        app, _ = self._make_app(tmp_path, prereqs=prereqs)
+        captured = self._capture_run_guided_init(monkeypatch)
+        with TestClient(app) as client:
+            resp = client.post(
+                "/api/init",
+                json={"sources": ["douyin"], "llm_concurrency": 2},
+            )
+            assert resp.status_code == 202, resp.text
+            self._drive_until(client, captured, key="llm_concurrency")
+        assert captured["llm_concurrency"] == 2
 
     def test_init_rejects_docker_runtime(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

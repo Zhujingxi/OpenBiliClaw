@@ -637,8 +637,8 @@ test("settings page round-trips multimodal discovery evaluation controls", () =>
     popupJs,
     /candidate_eval_concurrency: getInt\("cfgCandidateEvalConcurrency", 3\)/,
   );
-  assert.match(popupJs, /setVal\("cfgLlmConcurrencyV2", cfg\.llm\?\.concurrency \?\? 4\)/);
-  assert.match(popupJs, /concurrency: getInt\("cfgLlmConcurrencyV2", 4\)/);
+  assert.match(popupJs, /setVal\("cfgLlmConcurrencyV2", cfg\.llm\?\.concurrency \?\? 3\)/);
+  assert.match(popupJs, /concurrency: getInt\("cfgLlmConcurrencyV2", 3\)/);
   assert.match(popupJs, /multimodal_batch_size: getInt\("cfgMultimodalBatchSize", 8\)/);
   assert.match(popupJs, /multimodal_image_max_px: getInt\("cfgMultimodalImageMaxPx", 384\)/);
   assert.match(popupJs, /multimodal_image_quality: getInt\("cfgMultimodalImageQuality", 72\)/);
@@ -658,7 +658,7 @@ test("advanced settings keep recommendation signals together and preserve disabl
   const modelsPanel =
     popupHtml.match(/<div id="settingsPanelModels"[\s\S]*?<div id="settingsPanelSources"/)?.[0] ?? "";
 
-  assert.equal((advancedPanel.match(/<div class="settings-section">/g) ?? []).length, 3);
+  assert.equal((advancedPanel.match(/<div class="settings-section">/g) ?? []).length, 4);
   for (const id of [
     "cfgVisualProfileEnabled",
     "cfgKeyframeEnabled",

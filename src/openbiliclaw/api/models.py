@@ -99,7 +99,9 @@ class BehaviorEventIn(BaseModel):
     url: str = ""
     title: str = ""
     timestamp: int
-    source_platform: str = "bilibili"
+    # Empty means the client omitted the field.  The endpoint preserves the
+    # legacy B站 fallback but records that it was not an authoritative tag.
+    source_platform: str = ""
     context: dict[str, object] = Field(default_factory=dict)
     metadata: dict[str, object] = Field(default_factory=dict)
     event_id: IdempotencyKey
@@ -2047,7 +2049,7 @@ class LLMConfigOut(BaseModel):
     default_chain: list[str] = Field(default_factory=list)
     routes: dict[str, ModuleLLMConfigOut] = Field(default_factory=dict)
     default_provider: str = "deepseek"
-    concurrency: int = 4
+    concurrency: int = 3
     timeout: int = 1200
     # Non-empty fallback_provider = chat fallback on (the legacy
     # fallback_enabled bool was never consulted and is no longer echoed;
@@ -2326,6 +2328,9 @@ class SoulConfigOut(BaseModel):
     posture_gate_mode: Literal["shadow", "enforce", "off"] = "shadow"
     posture_gate_force_enforce: bool = False
     topic_lifecycle_serialization: Literal["off", "on"] = "off"
+    awareness_event_batch_size: int = Field(default=300, ge=10, le=900)
+    insight_note_batch_size: int = Field(default=150, ge=10, le=450)
+    cognition_max_tokens: int = Field(default=32768, ge=1024, le=128000)
 
 
 class DiscoveryConfigOut(BaseModel):

@@ -4,16 +4,19 @@
 
 ---
 
-## 未发布
+## v0.3.209：负反馈误报修复、移动端提速与依赖加固（2026-08-22）
 
-- **新增 B 站发布日期偏好配置（issue #18）**：配置文件、桌面设置页与 `GET/PUT /api/config` 支持预设或自定义本地日期范围、浮点权重和原子保存；默认权重 `0.5` 对范围外候选降分，`1` 在推荐服务阶段严格忽略，候选仍保留在池中。严格模式把包含式边界下推到 B 站 API 和扩展网页搜索，并让有效库存、来源池闸门和补货判断排除范围外行；配置保存成功后通过 RuntimeContext 热更新 `PoolCurator`，`config-show` 展示最终值。
+- **新增按来源发布日期偏好过滤（issue #18）**：`[sources.<name>]` 支持 `recommendation_date_preset` / `recommendation_date_start` / `recommendation_date_end` / `recommendation_date_weight`（默认 `all` = 不启用），桌面设置页与插件 popup 的每个平台源卡片都提供日期范围与权重控件；发现阶段在 LLM 评估前硬过滤范围外候选，候选池打分与推荐服务保留 `weight` 语义，严格模式还把包含式边界下推到 B 站 API 和扩展网页搜索；`GET/PUT /api/config`、配置校验与热更新均已覆盖。
 - **AI 文案换行保留（issue #184）**：推荐理由、惊喜理由、探针理由等 AI 生成文案在插件 side panel、桌面 Web 与移动 Web 统一使用 `white-space: pre-wrap` 保留换行，不再把多行输出显示成一大坨；聊天回复仍沿用既有的安全 Markdown 渲染。
+- **认知循环上下文预算可配置（issue #169）**：`[soul]` 新增 `awareness_event_batch_size`（默认 300，范围 10..900）、`insight_note_batch_size`（默认 150，范围 10..450）与 `cognition_max_tokens`（默认 32768，范围 1024..128000），分别对应 `cognition_cycle` 原有的 `_AWARENESS_EVENT_BATCH_SIZE` / `_INSIGHT_NOTE_BATCH_SIZE` / `_COGNITION_MAX_TOKENS` 三处模块常量。默认值不变；80-100K 上下文的本地模型（如 qwen3.8-27B）可在 config.toml 调小这些值，不必再改源码。三处 SoulEngine 构建面（CLI、OpenClaw bootstrap、API 热重载）与 `GET/PUT /api/config` 已同步透传，`docs/modules/config.md` 与 `docs/modules/soul.md` 已更新。
+- **修复有 Key 无模型的 legacy provider 被投影为启用的空实例**：`effective_llm_instances` 不再把 `[llm.<provider>]` 中只填了 `api_key` 但 `model` 为空的固定 provider 块投影为 v2 实例（这些通常是历史模板残留），避免桌面 Web / API 保存时被 blocking「启用的 LLM 实例必须明确填写模型」拦下。默认 provider / fallback / 模块路由显式引用的 provider 仍会投影并由原生 v2 校验给出缺模型提示；每条空模型跳过打一次 WARNING。
 
 ## v0.3.208：来源周期回拉逐源开关与发布同步（2026-08-18）
 
 - **修复 LLM 预算首次告警被系统运行时间误吞**：`_last_llm_budget_warned_at` 初值从 `0` 改为 `-inf`，避免在机器启动不足一个预算窗口时，第一次触发后台 LLM 预算暂停不输出 WARNING。
 - **发布状态**：后端 / 插件 / 桌面安装包 / Docker 镜像与聚合 Release 均已发布为 `v0.3.208`，详情见 [Release](https://github.com/whiteguo233/OpenBiliClaw/releases)。Chrome Web Store 已上传并提交 `0.3.208` 审核；Firefox AMO 已提交 listed `0.3.208`。聚合 Latest Release 已附扩展 ZIP / Safari DMG 与四份桌面安装器。
-- **来源周期回拉支持逐源开关（issue #180 相关）**：`[sources.<slug>]` 新增 `incremental_enabled`（默认 `false`），与 `[scheduler].source_incremental_enabled` 总开关组成”总开关 + 每来源开关”两级控制；插件 side panel 与桌面 Web 的「平台源」配置页为 XHS / 抖音 / YouTube / 知乎 / Reddit / Linux.do / V2EX 增加”允许扩展周期回拉”勾选项，调度页暴露总开关。后端只有两级开关都为 `true` 时才入队周期 bootstrap 任务；关闭某来源时其 scheduler-owned pending / stale in-progress 任务会被取消，避免再打开前台标签页。默认所有开关均为关闭，手动初始化、`fetch-*` 与后台 discovery 不受影响。
+- **国内下载入口**：README、GitHub Pages 首页、文档导航与 Gitee v0.3.208 发行说明均补充 123 云盘国内下载入口；当前分享永久有效并支持免登录下载超过 Gitee 100 MB 附件上限的 macOS / Windows 大安装包。
+- **来源周期回拉支持逐源开关（issue #180 相关）**：`[sources.<slug>]` 新增 `incremental_enabled`（默认 `false`），与 `[scheduler].source_incremental_enabled` 总开关组成“总开关 + 每来源开关”两级控制；插件 side panel 与桌面 Web 的「平台源」配置页为 XHS / 抖音 / YouTube / 知乎 / Reddit / Linux.do / V2EX 增加“允许扩展周期回拉”勾选项，调度页暴露总开关。后端只有两级开关都为 `true` 时才入队周期 bootstrap 任务；关闭某来源时其 scheduler-owned pending / stale in-progress 任务会被取消，避免再打开前台标签页。默认所有开关均为关闭，手动初始化、`fetch-*` 与后台 discovery 不受影响。
 - **后台 LLM 自设预算 + Embedding 熔断（issue #188）**：`[scheduler]` 新增 `llm_budget_max_calls`（默认 120 / 小时）与 `llm_budget_window_seconds`（默认 3600），daemon 通过共享 `LLMConcurrencyGate` 统计后台 LLM 请求，窗口内达到上限即暂停自动发现 / 补池 / 画像等循环并打一条 WARNING，避免无人值守时持续烧 DeepSeek 等付费额度；手动 CLI / API 请求不受影响，`0` 可关闭预算。`EmbeddingService` 新增连续失败熔断：默认连续 3 次异常或空向量后冷却 60 秒，冷却期内不再触碰不可达 embedding 端点、不再逐条打 full-traceback WARN，冷却后自动重探。
 - **修复 defer(暂缓) 后假设仍显示在待聊确认（issue #189）**：`/api/chat/pending-confirmations` 现在读取 `memory/dialogue_confirmation_state.json` 中的 `deferred_until`，冷却结束前已 defer 的假设不再出现在待聊列表；冷却到期后自动恢复。用户主动 open 仍按原契约绕过冷却，不会因列表过滤而误 404。
 - **修复停用知乎来源后扩展仍打开知乎任务标签页（issue #187）**：`/api/sources/zhihu/next-task` 现在在领取自动任务前动态检查 `[sources.zhihu].enabled`；来源关闭时返回 bodyless 204，scheduler-owned 增量任务会被清理避免卡住其它来源，手动 pending 任务保留、重新开启后可恢复。`SourceIncrementalSync` 的 active 任务复核同步忽略已停用来源，避免遗留知乎任务阻塞周期调度。

@@ -854,6 +854,9 @@ class RuntimeContext:
             preference_prompt_view=str(getattr(soul_cfg, "preference_prompt_view", "legacy")),
             awareness_prompt_view=str(getattr(soul_cfg, "awareness_prompt_view", "compact-v1")),
             insight_prompt_view=str(getattr(soul_cfg, "insight_prompt_view", "legacy")),
+            awareness_event_batch_size=int(getattr(soul_cfg, "awareness_event_batch_size", 300)),
+            insight_note_batch_size=int(getattr(soul_cfg, "insight_note_batch_size", 150)),
+            cognition_max_tokens=int(getattr(soul_cfg, "cognition_max_tokens", 32768)),
             posture_gate_mode=str(getattr(soul_cfg, "posture_gate_mode", "shadow")),
             posture_gate_force_enforce=bool(getattr(soul_cfg, "posture_gate_force_enforce", False)),
             module_overrides=new_module_overrides,
@@ -1404,6 +1407,7 @@ class RuntimeContext:
                 database=self.database,
                 exa_api_key=str(getattr(discovery_cfg, "exa_api_key", "") or ""),
                 you_api_key=str(getattr(discovery_cfg, "you_api_key", "") or ""),
+                serply_api_key=str(getattr(discovery_cfg, "serply_api_key", "") or ""),
                 platform_backends=build_platform_source_backends(
                     new_config,
                     bilibili_client=new_bilibili_client,
