@@ -9351,8 +9351,74 @@ function bindSettings() {
     if (customFields) customFields.hidden = presetEl?.value !== "custom";
   }
 
+  const POPUP_SOURCE_DATE_SLUGS = [
+    "bilibili",
+    "xiaohongshu",
+    "douyin",
+    "weibo",
+    "youtube",
+    "twitter",
+    "zhihu",
+    "reddit",
+    "bangumi",
+    "linuxdo",
+    "v2ex",
+  ];
+
+  function ensurePopupSourceDateFields() {
+    for (const slug of POPUP_SOURCE_DATE_SLUGS) {
+      if (slug === "bilibili") continue;
+      const body = document.getElementById("sourceCardBody-" + slug);
+      if (!body || body.querySelector('[data-date-source="' + slug + '"]')) continue;
+      const html = '<section class="settings-field" data-date-source="' + slug + '">'
+        + '<label for="cfg' + slug + 'DatePreset">发布日期范围</label>'
+        + '<select id="cfg' + slug + 'DatePreset">'
+        + '<option value="all">全部日期</option>'
+        + '<option value="last_7_days">最近一周</option>'
+        + '<option value="last_30_days">最近一个月</option>'
+        + '<option value="last_6_months">最近半年</option>'
+        + '<option value="last_1_year">最近一年</option>'
+        + '<option value="custom">自定义</option>'
+        + '</select>'
+        + '<div id="cfg' + slug + 'DateCustomFields" hidden>'
+        + '<label for="cfg' + slug + 'DateStart">开始日期（YYYY-MM-DD，留空不限）</label>'
+        + '<input id="cfg' + slug + 'DateStart" type="date">'
+        + '<label for="cfg' + slug + 'DateEnd">结束日期（YYYY-MM-DD，留空不限）</label>'
+        + '<input id="cfg' + slug + 'DateEnd" type="date">'
+        + '</div>'
+        + '<label for="cfg' + slug + 'DateWeight">范围外权重（0 到 1；1 = 严格排除）</label>'
+        + '<input id="cfg' + slug + 'DateWeight" type="number" min="0" max="1" step="0.01" inputmode="decimal" placeholder="0.5">'
+        + '</section>';
+      body.insertAdjacentHTML("beforeend", html);
+      const presetEl = document.getElementById("cfg" + slug + "DatePreset");
+      presetEl?.addEventListener("change", () => {
+        syncPopupSourceDateFields(slug);
+        markSettingsDirty();
+      });
+    }
+  }
+
+  function syncPopupSourceDateFields(slug) {
+    const customFields = document.getElementById("cfg" + slug + "DateCustomFields");
+    const preset = getVal("cfg" + slug + "DatePreset");
+    if (customFields) customFields.hidden = preset !== "custom";
+  }
+
+  function popupSourceDateFieldsForUpdate(slug) {
+    return {
+      recommendation_date_preset: getVal("cfg" + slug + "DatePreset") || "all",
+      recommendation_date_start: getVal("cfg" + slug + "DateStart"),
+      recommendation_date_end: getVal("cfg" + slug + "DateEnd"),
+      recommendation_date_weight: Math.min(
+        1,
+        Math.max(0, getFloat("cfg" + slug + "DateWeight", 0.5))
+      ),
+    };
+  }
+
   function populateForm(cfg) {
     applyRuntimeConfig(cfg);
+    ensurePopupSourceDateFields();
     // LLM
     providerSelect.value = cfg.llm?.default_provider || "openai";
     showProviderFields(providerSelect.value);
@@ -9429,6 +9495,16 @@ function bindSettings() {
     setVal("cfgBiliDateEnd", cfg.sources?.bilibili?.recommendation_date_end);
     setVal("cfgBiliDateWeight", cfg.sources?.bilibili?.recommendation_date_weight ?? 0.5);
     syncBiliDateFields();
+    for (const slug of POPUP_SOURCE_DATE_SLUGS) {
+      if (slug === "bilibili") continue;
+      const sourceCfg = cfg.sources?.[slug] || {};
+      const presetEl = document.getElementById("cfg" + slug + "DatePreset");
+      if (presetEl) presetEl.value = sourceCfg.recommendation_date_preset || "all";
+      setVal("cfg" + slug + "DateStart", sourceCfg.recommendation_date_start);
+      setVal("cfg" + slug + "DateEnd", sourceCfg.recommendation_date_end);
+      setVal("cfg" + slug + "DateWeight", sourceCfg.recommendation_date_weight ?? 0.5);
+      syncPopupSourceDateFields(slug);
+    }
 
     // Sources
     setVal("cfgSourcesBrowserCdp", cfg.sources?.browser?.cdp_url);
@@ -9745,6 +9821,7 @@ function bindSettings() {
           daily_creator_budget: getInt("cfgXhsDailyCreatorBudget", 0),
           task_interval_seconds: getInt("cfgXhsTaskInterval", 1200),
           min_interval_minutes: getInt("cfgXhsMinInterval", 20),
+          ...popupSourceDateFieldsForUpdate("xiaohongshu")
         },
         douyin: {
           enabled: checked("cfgDouyinEnabled"),
@@ -9757,6 +9834,7 @@ function bindSettings() {
           daily_feed_budget: getInt("cfgDouyinDailyFeedBudget", 0),
           request_interval_seconds: getInt("cfgDouyinRequestInterval", 2),
           min_interval_minutes: getInt("cfgDouyinMinInterval", 3),
+          ...popupSourceDateFieldsForUpdate("douyin")
         },
         weibo: {
           enabled: checked("cfgWeiboEnabled"),
@@ -9766,6 +9844,7 @@ function bindSettings() {
           daily_creator_budget: getInt("cfgWeiboDailyCreatorBudget", 30),
           request_interval_seconds: getInt("cfgWeiboRequestInterval", 3),
           min_interval_minutes: getInt("cfgWeiboMinInterval", 10),
+          ...popupSourceDateFieldsForUpdate("weibo")
         },
         youtube: {
           enabled: checked("cfgYoutubeEnabled"),
@@ -9775,6 +9854,7 @@ function bindSettings() {
           daily_channel_budget: getInt("cfgYoutubeDailyChannelBudget", 0),
           request_interval_seconds: getInt("cfgYoutubeRequestInterval", 2),
           min_interval_minutes: getInt("cfgYoutubeMinInterval", 3),
+          ...popupSourceDateFieldsForUpdate("youtube")
         },
         twitter: {
           enabled: checked("cfgTwitterEnabled"),
@@ -9786,6 +9866,7 @@ function bindSettings() {
           daily_creator_budget: getInt("cfgTwitterDailyCreatorBudget", 0),
           request_interval_seconds: getInt("cfgTwitterRequestInterval", 3),
           min_interval_minutes: getInt("cfgTwitterMinInterval", 3),
+          ...popupSourceDateFieldsForUpdate("twitter")
         },
         zhihu: {
           enabled: checked("cfgZhihuEnabled"),
@@ -9798,6 +9879,7 @@ function bindSettings() {
           daily_related_budget: getInt("cfgZhihuDailyRelatedBudget", 0),
           request_interval_seconds: getInt("cfgZhihuRequestInterval", 3),
           min_interval_minutes: getInt("cfgZhihuMinInterval", 3),
+          ...popupSourceDateFieldsForUpdate("zhihu")
         },
         reddit: {
           enabled: checked("cfgRedditEnabled"),
@@ -9811,6 +9893,7 @@ function bindSettings() {
           daily_related_budget: getInt("cfgRedditDailyRelatedBudget", 300),
           request_interval_seconds: getInt("cfgRedditRequestInterval", 3),
           min_interval_minutes: getInt("cfgRedditMinInterval", 3),
+          ...popupSourceDateFieldsForUpdate("reddit")
         },
         bangumi: {
           enabled: checked("cfgBangumiEnabled"),
@@ -9833,6 +9916,7 @@ function bindSettings() {
           request_interval_seconds: getInt("cfgBangumiRequestInterval", 1),
           min_interval_minutes: getInt("cfgBangumiMinInterval", 3),
           bootstrap_limit: getInt("cfgBangumiBootstrapLimit", 300),
+          ...popupSourceDateFieldsForUpdate("bangumi")
         },
         linuxdo: {
           enabled: checked("cfgLinuxdoEnabled"),
@@ -9846,6 +9930,7 @@ function bindSettings() {
           request_interval_seconds: getInt("cfgLinuxdoRequestInterval", 3),
           min_interval_minutes: getInt("cfgLinuxdoMinInterval", 3),
           bootstrap_limit: getInt("cfgLinuxdoBootstrapLimit", 300),
+          ...popupSourceDateFieldsForUpdate("linuxdo")
         },
         v2ex: {
           enabled: checked("cfgV2exEnabled"),
@@ -9864,6 +9949,7 @@ function bindSettings() {
           daily_latest_budget: getInt("cfgV2exDailyLatestBudget", 40),
           request_interval_seconds: getInt("cfgV2exRequestInterval", 2),
           min_interval_minutes: getInt("cfgV2exMinInterval", 5),
+          ...popupSourceDateFieldsForUpdate("v2ex")
         },
       },
       discovery: {

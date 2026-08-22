@@ -195,6 +195,25 @@ test("settings source tab separates every platform into its own block", () => {
   assert.match(sourcesPanel, />B站发布日期范围</);
   assert.match(popupJs, /recommendation_date_preset: getVal\("cfgBiliDatePreset"\) \|\| "all"/);
   assert.match(popupJs, /recommendation_date_weight: Math\.min\(/);
+  assert.match(popupJs, /ensurePopupSourceDateFields/);
+  assert.match(popupJs, /popupSourceDateFieldsForUpdate/);
+  for (const slug of [
+    "xiaohongshu",
+    "douyin",
+    "weibo",
+    "youtube",
+    "twitter",
+    "zhihu",
+    "reddit",
+    "bangumi",
+    "linuxdo",
+    "v2ex",
+  ]) {
+    assert.ok(
+      popupJs.includes(`popupSourceDateFieldsForUpdate("${slug}")`),
+      `${slug} date fields should be wired`,
+    );
+  }
   assert.match(sourcesPanel, />调试：B 站登录时显示浏览器窗口</);
 
   // Keep the Linux.do card closed before the V2EX card starts. If either

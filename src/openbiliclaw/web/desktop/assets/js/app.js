@@ -9232,6 +9232,7 @@ ${cardFeedbackBarHtml()}`;
 
     function applyConfig(config) {
       if (!config || typeof config !== "object") return;
+      ensureSourceDateFields();
       state.degraded = config.degraded === true;
       state.config = config;
       const scheduler = config.scheduler || {};
@@ -9338,6 +9339,16 @@ ${cardFeedbackBarHtml()}`;
       else if (bilibiliDateWeight === 0.5) bilibiliDateMode = "soft";
       setSelect("biliDateMode", bilibiliDateMode);
       syncBilibiliDateFields();
+      for (const slug of DESKTOP_SOURCE_DATE_SLUGS) {
+        if (slug === "bilibili") continue;
+        const sourceCfg = config.sources?.[slug] || {};
+        setSelect(slug + "DatePreset", sourceCfg.recommendation_date_preset || "all");
+        setInput(slug + "DateStart", sourceCfg.recommendation_date_start || "");
+        setInput(slug + "DateEnd", sourceCfg.recommendation_date_end || "");
+        const sourceDateWeight = Number(sourceCfg.recommendation_date_weight ?? 0.5);
+        setInput(slug + "DateWeight", Number.isFinite(sourceDateWeight) ? sourceDateWeight : 0.5);
+        syncSourceDateFields(slug);
+      }
       setSelect("bilibiliEnabled", config.sources?.bilibili?.enabled === false ? "off" : "on");
       setInput("bilibiliMinInterval", config.sources?.bilibili?.min_interval_minutes);
       setInput("sourcesBrowserCdp", config.sources?.browser?.cdp_url);
@@ -10508,6 +10519,60 @@ ${cardFeedbackBarHtml()}`;
       if (weightField) weightField.hidden = mode !== "custom";
     }
 
+    const DESKTOP_SOURCE_DATE_SLUGS = ["bilibili", "xiaohongshu", "douyin", "weibo", "youtube", "twitter", "zhihu", "reddit", "bangumi", "linuxdo", "v2ex"];
+
+    function ensureSourceDateFields() {
+      for (const slug of DESKTOP_SOURCE_DATE_SLUGS) {
+        if (slug === "bilibili") continue;
+        const body = document.getElementById("sourceCardBody-" + slug);
+        if (!body || body.querySelector('[data-date-source="' + slug + '"]')) continue;
+        const html = '<section class="source-seg" data-date-source="' + slug + '">'
+          + '<h4>发布日期偏好</h4>'
+          + '<p class="seg-note">默认「全部日期」；设置后会在 LLM 评估前过滤该来源的范围外候选。</p>'
+          + '<div class="inline-row">'
+          + '<label class="settings-field"><span>日期范围</span><select id="' + slug + 'DatePreset">'
+          + '<option value="all">全部日期</option>'
+          + '<option value="last_7_days">最近一周</option>'
+          + '<option value="last_30_days">最近一个月</option>'
+          + '<option value="last_6_months">最近半年</option>'
+          + '<option value="last_1_year">最近一年</option>'
+          + '<option value="custom">自定义</option>'
+          + '</select></label>'
+          + '<label class="settings-field"><span>范围外权重（0 到 1）</span><input id="' + slug + 'DateWeight" type="number" min="0" max="1" step="0.01" inputmode="decimal"></label>'
+          + '</div>'
+          + '<div class="inline-row" id="' + slug + 'DateCustomFields" hidden>'
+          + '<label class="settings-field"><span>开始日期</span><input id="' + slug + 'DateStart" type="date"></label>'
+          + '<label class="settings-field"><span>结束日期</span><input id="' + slug + 'DateEnd" type="date"></label>'
+          + '</div>'
+          + '</section>';
+        body.insertAdjacentHTML("beforeend", html);
+        const presetEl = document.getElementById(slug + "DatePreset");
+        presetEl?.addEventListener("change", () => {
+          syncSourceDateFields(slug);
+          markSettingsDirty();
+        });
+      }
+    }
+
+    function syncSourceDateFields(slug) {
+      const customFields = document.getElementById(slug + "DateCustomFields");
+      const preset = getInput(slug + "DatePreset");
+      if (customFields) customFields.hidden = preset !== "custom";
+    }
+
+    function sourceDateFieldsForUpdate(slug) {
+      return {
+        recommendation_date_preset: getInput(slug + "DatePreset") || "all",
+        recommendation_date_start: getInput(slug + "DateStart"),
+        recommendation_date_end: getInput(slug + "DateEnd"),
+        recommendation_date_weight: Math.min(
+          1,
+          Math.max(0, getFloatInput(slug + "DateWeight", 0.5))
+        ),
+      };
+    }
+
+
     safeBind("#biliDatePreset", "change", () => {
       if (getInput("biliDatePreset") !== "all" && getInput("biliDateMode") === "soft") {
         setSelect("biliDateMode", "strict");
@@ -10589,7 +10654,8 @@ ${cardFeedbackBarHtml()}`;
             daily_search_budget: getIntInput("xhsDailySearchBudget", 20),
             daily_creator_budget: getIntInput("xhsDailyCreatorBudget", 0),
             task_interval_seconds: getIntInput("xhsTaskInterval", 1200),
-            min_interval_minutes: getIntInput("xhsMinInterval", 20)
+            min_interval_minutes: getIntInput("xhsMinInterval", 20),
+            ...sourceDateFieldsForUpdate("xiaohongshu")
           },
           douyin: {
             enabled: $("#douyinEnabled").value === "on",
@@ -10601,7 +10667,8 @@ ${cardFeedbackBarHtml()}`;
             daily_hot_budget: getIntInput("douyinDailyHotBudget", 0),
             daily_feed_budget: getIntInput("douyinDailyFeedBudget", 0),
             request_interval_seconds: getIntInput("douyinRequestInterval", 2),
-            min_interval_minutes: getIntInput("douyinMinInterval", 3)
+            min_interval_minutes: getIntInput("douyinMinInterval", 3),
+            ...sourceDateFieldsForUpdate("douyin")
           },
           weibo: {
             enabled: $("#weiboEnabled").value === "on",
@@ -10610,7 +10677,8 @@ ${cardFeedbackBarHtml()}`;
             daily_hot_budget: getIntInput("weiboDailyHotBudget", 10),
             daily_creator_budget: getIntInput("weiboDailyCreatorBudget", 30),
             request_interval_seconds: getIntInput("weiboRequestInterval", 3),
-            min_interval_minutes: getIntInput("weiboMinInterval", 10)
+            min_interval_minutes: getIntInput("weiboMinInterval", 10),
+            ...sourceDateFieldsForUpdate("weibo")
           },
           youtube: {
             enabled: $("#youtubeEnabled").value === "on",
@@ -10619,7 +10687,8 @@ ${cardFeedbackBarHtml()}`;
             daily_trending_budget: getIntInput("youtubeDailyTrendingBudget", 0),
             daily_channel_budget: getIntInput("youtubeDailyChannelBudget", 0),
             request_interval_seconds: getIntInput("youtubeRequestInterval", 2),
-            min_interval_minutes: getIntInput("youtubeMinInterval", 3)
+            min_interval_minutes: getIntInput("youtubeMinInterval", 3),
+            ...sourceDateFieldsForUpdate("youtube")
           },
           twitter: {
             enabled: $("#twitterEnabled").value === "on",
@@ -10630,7 +10699,8 @@ ${cardFeedbackBarHtml()}`;
             daily_feed_budget: getIntInput("twitterDailyFeedBudget", 0),
             daily_creator_budget: getIntInput("twitterDailyCreatorBudget", 0),
             request_interval_seconds: getIntInput("twitterRequestInterval", 3),
-            min_interval_minutes: getIntInput("twitterMinInterval", 3)
+            min_interval_minutes: getIntInput("twitterMinInterval", 3),
+            ...sourceDateFieldsForUpdate("twitter")
           },
           zhihu: {
             enabled: $("#zhihuEnabled").value === "on",
@@ -10642,7 +10712,8 @@ ${cardFeedbackBarHtml()}`;
             daily_creator_budget: getIntInput("zhihuDailyCreatorBudget", 0),
             daily_related_budget: getIntInput("zhihuDailyRelatedBudget", 0),
             request_interval_seconds: getIntInput("zhihuRequestInterval", 3),
-            min_interval_minutes: getIntInput("zhihuMinInterval", 3)
+            min_interval_minutes: getIntInput("zhihuMinInterval", 3),
+            ...sourceDateFieldsForUpdate("zhihu")
           },
           reddit: {
             enabled: $("#redditEnabled").value === "on",
@@ -10655,7 +10726,8 @@ ${cardFeedbackBarHtml()}`;
             daily_subreddit_budget: getIntInput("redditDailySubredditBudget", 300),
             daily_related_budget: getIntInput("redditDailyRelatedBudget", 300),
             request_interval_seconds: getIntInput("redditRequestInterval", 3),
-            min_interval_minutes: getIntInput("redditMinInterval", 3)
+            min_interval_minutes: getIntInput("redditMinInterval", 3),
+            ...sourceDateFieldsForUpdate("reddit")
           },
           bangumi: {
             enabled: $("#bangumiEnabled").value === "on",
@@ -10677,7 +10749,8 @@ ${cardFeedbackBarHtml()}`;
             daily_latest_budget: getIntInput("bangumiDailyLatestBudget", 100),
             request_interval_seconds: getIntInput("bangumiRequestInterval", 1),
             min_interval_minutes: getIntInput("bangumiMinInterval", 3),
-            bootstrap_limit: getIntInput("bangumiBootstrapLimit", 300)
+            bootstrap_limit: getIntInput("bangumiBootstrapLimit", 300),
+            ...sourceDateFieldsForUpdate("bangumi")
           },
           linuxdo: {
             enabled: $("#linuxdoEnabled").value === "on",
@@ -10690,7 +10763,8 @@ ${cardFeedbackBarHtml()}`;
             daily_related_budget: getIntInput("linuxdoDailyRelatedBudget", 0),
             request_interval_seconds: getIntInput("linuxdoRequestInterval", 3),
             min_interval_minutes: getIntInput("linuxdoMinInterval", 3),
-            bootstrap_limit: getIntInput("linuxdoBootstrapLimit", 300)
+            bootstrap_limit: getIntInput("linuxdoBootstrapLimit", 300),
+            ...sourceDateFieldsForUpdate("linuxdo")
           },
           v2ex: {
             enabled: $("#v2exEnabled").value === "on",
@@ -10708,7 +10782,8 @@ ${cardFeedbackBarHtml()}`;
             daily_hot_budget: getIntInput("v2exDailyHotBudget", 40),
             daily_latest_budget: getIntInput("v2exDailyLatestBudget", 40),
             request_interval_seconds: getIntInput("v2exRequestInterval", 2),
-            min_interval_minutes: getIntInput("v2exMinInterval", 5)
+            min_interval_minutes: getIntInput("v2exMinInterval", 5),
+            ...sourceDateFieldsForUpdate("v2ex")
           }
         },
         scheduler: {
