@@ -1981,7 +1981,7 @@ class Database:
         self._publication_date_preference: object | None = None
         # Per-source publication-date preferences for raw candidate enqueue
         # filtering (discovery_candidates). None / empty = platform-neutral.
-        self._source_publication_date_preferences: dict[str, object] | None = None
+        self._source_publication_date_preferences: dict[str, Any] | None = None
         self._preserve_read_transaction = False
         # The two queues must remain separate: a slow/background maintenance
         # batch must never sit in front of an interactive recommendation read.
@@ -2009,7 +2009,7 @@ class Database:
 
     def set_source_publication_date_preferences(
         self,
-        preferences: dict[str, object] | None,
+        preferences: dict[str, Any] | None,
     ) -> None:
         """Set the per-source publication policy used by raw candidate enqueue."""
         if preferences is None:

@@ -3954,7 +3954,8 @@ def _apply_source_date_preferences_from_raw(sources: SourcesConfig, **raws: obje
     legacy_bilibili_raw = raws.get("legacy_bilibili")
     for slug in _SOURCE_DATE_PREFERENCE_SLUGS:
         source_cfg = getattr(sources, slug)
-        raw = raws.get(slug) if isinstance(raws.get(slug), dict) else {}
+        raw_value = raws.get(slug)
+        raw: dict[str, Any] = raw_value if isinstance(raw_value, dict) else {}
         # 兼容旧 PR 草案里的 `[bilibili].recommendation_date_*` 位置：保存时
         # 会统一写到 `[sources.bilibili]`，但加载时仍读取旧字段避免配置丢失。
         if (
@@ -3975,7 +3976,7 @@ def _apply_source_date_preferences_from_raw(sources: SourcesConfig, **raws: obje
         source_cfg.recommendation_date_weight = raw.get("recommendation_date_weight", 0.5)
 
 
-def publication_date_preference_for_source(source_cfg: object) -> object:
+def publication_date_preference_for_source(source_cfg: object) -> Any:
     """Build a ``PublicationDatePreference`` from a source config object."""
 
     from openbiliclaw.recommendation.publication_preference import (
@@ -3990,7 +3991,7 @@ def publication_date_preference_for_source(source_cfg: object) -> object:
     )
 
 
-def source_date_preferences(config: Config) -> dict[str, object]:
+def source_date_preferences(config: Config) -> dict[str, Any]:
     """Build the per-source publication-date preference map used by discovery."""
 
     return {

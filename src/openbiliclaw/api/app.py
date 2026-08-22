@@ -16677,7 +16677,7 @@ def create_app(
                     return instance
             return getattr(cfg.llm, provider_type)
 
-        def _source_date_pref_out_kwargs(source_cfg: Any) -> dict[str, object]:
+        def _source_date_pref_out_kwargs(source_cfg: Any) -> dict[str, Any]:
             return {
                 "recommendation_date_preset": getattr(
                     source_cfg, "recommendation_date_preset", "all"
@@ -18544,7 +18544,7 @@ def create_app(
 
         def _apply_source_date_preference_update(
             source_cfg: Any,
-            source_data: dict[str, object],
+            source_data: dict[str, Any],
             source_name: str,
         ) -> None:
             """Validate and apply per-source recommendation date fields."""
