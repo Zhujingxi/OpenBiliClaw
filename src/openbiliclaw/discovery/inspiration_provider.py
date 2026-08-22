@@ -19,6 +19,26 @@ import httpx
 from openbiliclaw.discovery.inspiration import ExaPreviewItem
 from openbiliclaw.proc import no_window_kwargs
 
+
+def _overseas_routing_kwargs(transport: httpx.AsyncBaseTransport | None) -> dict[str, Any]:
+    """Routing kwargs for an overseas search-API ``httpx.AsyncClient``.
+
+    Exa / You.com / Serply are overseas SaaS endpoints, so they follow the
+    process-wide ``[network]`` routing policy (``custom`` passes the explicit
+    proxy, ``system`` inherits environment proxies, ``direct`` forces off).
+    Hardwiring ``trust_env=False`` here left them direct-connected even when
+    the user configured a proxy — api.exa.ai times out from CN networks
+    without one, the same failure shape as the ytimg cover bug. Tests that
+    inject a transport keep full determinism: no global policy is merged on
+    that path.
+    """
+    if transport is not None:
+        return {"transport": transport}
+    from openbiliclaw.network import outbound_httpx_kwargs
+
+    return outbound_httpx_kwargs()
+
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_SEARCH_BACKENDS: tuple[str, ...] = (
@@ -234,8 +254,7 @@ class ExaInspirationProvider:
         self._base_url = str(base_url or "").strip() or "https://api.exa.ai/search"
         self._client = httpx.AsyncClient(
             timeout=self._timeout_seconds,
-            trust_env=False,
-            transport=transport,
+            **_overseas_routing_kwargs(transport),
             headers={"x-api-key": self._api_key, "content-type": "application/json"},
         )
 
@@ -275,8 +294,7 @@ class YouInspirationProvider:
         self._base_url = str(base_url or "").strip() or "https://api.ydc-index.io/search"
         self._client = httpx.AsyncClient(
             timeout=self._timeout_seconds,
-            trust_env=False,
-            transport=transport,
+            **_overseas_routing_kwargs(transport),
             headers={"x-api-key": self._api_key},
         )
 
@@ -314,8 +332,7 @@ class SerplyInspirationProvider:
         self._base_url = str(base_url or "").strip() or "https://api.serply.io/v1/search"
         self._client = httpx.AsyncClient(
             timeout=self._timeout_seconds,
-            trust_env=False,
-            transport=transport,
+            **_overseas_routing_kwargs(transport),
             headers={
                 "X-Api-Key": self._api_key,
                 "Accept": "application/json",
@@ -363,6 +380,10 @@ class BingRssInspirationProvider:
         self._base_url = str(base_url or "").strip() or "https://www.bing.com/search"
         self._client = httpx.AsyncClient(
             timeout=self._timeout_seconds,
+            # Bing is reachable directly from CN networks (cn.bing.com edge);
+            # routing it through an overseas ladder would only add latency.
+            # Deliberately NOT wired to openbiliclaw.network — same split as
+            # the image cache's CN-CDN branch.
             trust_env=False,
             transport=transport,
             headers={
@@ -1839,10 +1860,17 @@ def _clean_highlights(value: object) -> list[str]:
 
 
 async def _run_command(args: list[str], timeout_seconds: float) -> str:
+    # mcporter dials the same overseas APIs as the direct providers above;
+    # route the subprocess through the [network] policy exactly like reddit's
+    # rdt-cli / OpenCLI backends (custom injects the proxy vars, system
+    # preserves the caller env, direct strips them).
+    from openbiliclaw.network import outbound_cli_environment
+
     proc = await asyncio.create_subprocess_exec(
         *args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        env=outbound_cli_environment(),
         **no_window_kwargs(),
     )
     try:
