@@ -132,7 +132,7 @@ def test_database_enqueue_filters_raw_candidates_by_source_date_preference(tmp_p
         }
     )
 
-    now = datetime(2026, 8, 17, 12, 0, tzinfo=UTC)
+    now = datetime.now(UTC)
     recent = DiscoveredContent(
         bvid="recent-yt",
         content_id="recent-yt",

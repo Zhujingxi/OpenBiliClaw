@@ -19085,6 +19085,10 @@ def create_app(
                         "node_allowlist",
                         "node_blocklist",
                         "node_downweight",
+                        "recommendation_date_preset",
+                        "recommendation_date_start",
+                        "recommendation_date_end",
+                        "recommendation_date_weight",
                         *V2EX_CONFIG_INTEGER_LIMITS,
                     }
                     unknown_v2ex_fields = sorted(set(v2ex_data) - allowed_v2ex_fields)
