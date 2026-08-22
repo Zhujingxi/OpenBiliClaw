@@ -43,6 +43,10 @@ test("settings page exposes advanced config fields from backend schema", () => {
     "cfgSourcesBrowserCdp",
     "cfgSourcesBrowserHeaded",
     "cfgBilibiliEnabled",
+    "cfgBiliDatePreset",
+    "cfgBiliDateStart",
+    "cfgBiliDateEnd",
+    "cfgBiliDateWeight",
     "cfgXhsEnabled",
     "cfgXhsDailySearchBudget",
     "cfgXhsDailyCreatorBudget",
@@ -187,6 +191,10 @@ test("settings source tab separates every platform into its own block", () => {
   }
   assert.match(sourcesPanel, /id="cfgBilibiliEnabled"/);
   assert.match(sourcesPanel, />启用 Bilibili discovery</);
+  assert.match(sourcesPanel, /id="cfgBiliDatePreset"/);
+  assert.match(sourcesPanel, />B站发布日期范围</);
+  assert.match(popupJs, /recommendation_date_preset: getVal\("cfgBiliDatePreset"\) \|\| "all"/);
+  assert.match(popupJs, /recommendation_date_weight: Math\.min\(/);
   assert.match(sourcesPanel, />调试：B 站登录时显示浏览器窗口</);
 
   // Keep the Linux.do card closed before the V2EX card starts. If either

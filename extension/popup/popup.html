@@ -6532,6 +6532,27 @@
           <input id="cfgBilibiliMinInterval" type="number" min="0" step="1" placeholder="3">
         </div>
         <div class="settings-field">
+          <label for="cfgBiliDatePreset">B站发布日期范围</label>
+          <select id="cfgBiliDatePreset">
+            <option value="all">全部日期</option>
+            <option value="last_7_days">最近一周</option>
+            <option value="last_30_days">最近一个月</option>
+            <option value="last_6_months">最近半年</option>
+            <option value="last_1_year">最近一年</option>
+            <option value="custom">自定义</option>
+          </select>
+        </div>
+        <div class="settings-field" id="cfgBiliDateCustomFields" hidden>
+          <label for="cfgBiliDateStart">开始日期（YYYY-MM-DD，留空不限）</label>
+          <input id="cfgBiliDateStart" type="date">
+          <label for="cfgBiliDateEnd">结束日期（YYYY-MM-DD，留空不限）</label>
+          <input id="cfgBiliDateEnd" type="date">
+        </div>
+        <div class="settings-field">
+          <label for="cfgBiliDateWeight">范围外权重（0 到 1；1 = 严格排除）</label>
+          <input id="cfgBiliDateWeight" type="number" min="0" max="1" step="0.01" inputmode="decimal" placeholder="0.5">
+        </div>
+        <div class="settings-field">
           <label for="cfgBiliBrowserExecutable">agent-browser 路径</label>
           <input id="cfgBiliBrowserExecutable" type="text" placeholder="留空使用全局安装">
         </div>

@@ -9345,6 +9345,12 @@ function bindSettings() {
     renderLlmInstances();
   }
 
+  function syncBiliDateFields() {
+    const presetEl = document.getElementById("cfgBiliDatePreset");
+    const customFields = document.getElementById("cfgBiliDateCustomFields");
+    if (customFields) customFields.hidden = presetEl?.value !== "custom";
+  }
+
   function populateForm(cfg) {
     applyRuntimeConfig(cfg);
     // LLM
@@ -9417,6 +9423,12 @@ function bindSettings() {
     const bilibiliEnabled = document.getElementById("cfgBilibiliEnabled");
     if (bilibiliEnabled) bilibiliEnabled.checked = cfg.sources?.bilibili?.enabled !== false;
     setVal("cfgBilibiliMinInterval", cfg.sources?.bilibili?.min_interval_minutes);
+    const biliDatePreset = document.getElementById("cfgBiliDatePreset");
+    if (biliDatePreset) biliDatePreset.value = cfg.sources?.bilibili?.recommendation_date_preset || "all";
+    setVal("cfgBiliDateStart", cfg.sources?.bilibili?.recommendation_date_start);
+    setVal("cfgBiliDateEnd", cfg.sources?.bilibili?.recommendation_date_end);
+    setVal("cfgBiliDateWeight", cfg.sources?.bilibili?.recommendation_date_weight ?? 0.5);
+    syncBiliDateFields();
 
     // Sources
     setVal("cfgSourcesBrowserCdp", cfg.sources?.browser?.cdp_url);
@@ -9715,6 +9727,13 @@ function bindSettings() {
         bilibili: {
           enabled: checked("cfgBilibiliEnabled", true),
           min_interval_minutes: getInt("cfgBilibiliMinInterval", 3),
+          recommendation_date_preset: getVal("cfgBiliDatePreset") || "all",
+          recommendation_date_start: getVal("cfgBiliDateStart"),
+          recommendation_date_end: getVal("cfgBiliDateEnd"),
+          recommendation_date_weight: Math.min(
+            1,
+            Math.max(0, getFloat("cfgBiliDateWeight", 0.5))
+          ),
         },
         // Empty-field fallbacks mirror the backend dataclass defaults
         // (budgets: 0 = uncapped) so the popup and the web settings page
@@ -10084,6 +10103,7 @@ function bindSettings() {
   // parsed by the time this runs.
   initSourceCards();
   initSettingsDirtyTracking();
+  document.getElementById("cfgBiliDatePreset")?.addEventListener("change", syncBiliDateFields);
 
   const sourceVerifyInFlight = new Set();
 
