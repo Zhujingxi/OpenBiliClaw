@@ -7,6 +7,8 @@
 
 ## v0.3.210：海外代理路由统一修复与来源日期过滤（2026-08-23）
 
+- **发布状态**：后端 / 插件 / 桌面安装包（macOS arm64 普通 + embedding、Windows 普通 + embedding）/ Docker 多架构镜像与聚合 Release 均已发布为 `v0.3.210`，完整性门禁全绿，详情见 [Release](https://github.com/whiteguo233/OpenBiliClaw/releases)。Chrome Web Store 已上传并提交 `0.3.210` 审核；Firefox AMO 已提交 listed `0.3.210`；Gitee 镜像已同步 main 与四个频道 tag，发行说明见 Gitee Release 页。
+
 - **修复 custom 代理下国内网络 YouTube 封面全裂**：`/api/image-proxy` 的境外 CDN 抓取硬编码 `trust_env=True`，但 `[network] mode="custom"` 的代理只存于 `openbiliclaw.network` 模块全局、从不写 `os.environ`，trust_env 读到空值，i.ytimg.com / ggpht.com 实际从国内网络直连、全部超时成裂图（youtube/client 等其它海外客户端都经 `outbound_httpx_kwargs()` 拿代理，唯独 image_cache 漏接）。`fetch_cover_bytes` 改为按主机分流：国内 CDN（hdslb / xhscdn 等）恒直连不变，境外 CDN（ytimg / ggpht / lain.bgm.tv）跟随进程级 `[network]` 出口策略（custom 显式传代理 / system 继承环境变量 / direct 强制直连），按次查询策略使配置热更新对下一张封面即时生效；测试覆盖三种模式的分流断言，`docs/modules/runtime.md` 与 `docs/modules/config.md` 已同步。
 - **灵感搜索海外后端接入 `[network]` 出口策略（同类问题排查）**：全量审计 31 个 httpx 客户端构造点后发现 discovery 灵感搜索的 Exa / You.com / Serply 直连 HTTP 后端硬编码 `trust_env=false` 且不接代理，mcporter 子进程也不注入代理环境——custom 模式下全部绕过配置代理，实测 api.exa.ai 从国内直连超时（与 ytimg 同症状），且 V2EX 正式 search 的 Exa/You 召回同样受害。三个后端改经 `outbound_httpx_kwargs()` 跟随策略，mcporter 子进程改用 Reddit rdt-cli 同款 `outbound_cli_environment()`；Bing RSS 属国内可达服务保持恒直连并加注释。测试新增三后端 × 三模式分流断言、Bing 直连守卫与 mcporter env 注入断言。
 - **新增按来源发布日期偏好过滤（issue #18）**：`[sources.<name>]` 支持 `recommendation_date_preset` / `recommendation_date_start` / `recommendation_date_end` / `recommendation_date_weight`（默认 `all` = 不启用），桌面设置页与插件 popup 的每个平台源卡片都提供日期范围与权重控件；发现阶段在 LLM 评估前硬过滤范围外候选，候选池打分与推荐服务保留 `weight` 语义，严格模式还把包含式边界下推到 B 站 API 和扩展网页搜索；`GET/PUT /api/config`、配置校验与热更新均已覆盖。
