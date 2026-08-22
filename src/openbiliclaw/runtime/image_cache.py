@@ -35,7 +35,7 @@ import tempfile
 import time
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 import httpx
 
@@ -288,15 +288,20 @@ ALLOWED_IMAGE_HOST_SUFFIXES: tuple[str, ...] = (
     "lain.bgm.tv",
     "sinaimg.cn",
 )
-# CN CDNs must be fetched DIRECT: env/system proxies (Clash & co.) route them
-# through exit IPs their risk control blocks or throttles — the same failure
-# mode that broke the Bilibili login probe (see bilibili/api.py
-# trust_env=False). Overseas CDNs (YouTube thumbnails) stay on trust_env so
-# users who NEED the proxy to reach them keep working.
+# CN CDNs must be fetched DIRECT, unconditionally: env/system proxies (Clash
+# & co.) route them through exit IPs their risk control blocks or throttles —
+# the same failure mode that broke the Bilibili login probe (see
+# bilibili/api.py trust_env=False). Overseas CDNs (YouTube thumbnails,
+# Bangumi covers) follow the process-wide ``[network]`` routing policy via
+# ``outbound_httpx_kwargs()``. Hardwiring ``trust_env=True`` here broke custom
+# mode: that proxy lives in openbiliclaw.network module state and is never
+# written to os.environ, so trust_env saw no HTTP(S)_PROXY, i.ytimg.com was
+# silently contacted direct from a CN network, and every cover fetch timed out.
 # lain.bgm.tv (Bangumi covers) is deliberately NOT here: it is Cloudflare-
 # fronted and resolves overseas, so a 2026-07-18 curl showed direct fetch
-# timing out while the env/system proxy returned 200 in ~0.5s — the ytimg
-# overseas pattern, not the CN-CDN risk-control pattern. It stays on trust_env.
+# timing out while the proxy returned 200 in ~0.5s — the ytimg overseas
+# pattern, not the CN-CDN risk-control pattern. It rides the overseas
+# ``[network]`` policy branch above.
 _DIRECT_FETCH_HOST_SUFFIXES: tuple[str, ...] = (
     "hdslb.com",
     "xhscdn.com",
@@ -343,6 +348,24 @@ def _is_direct_fetch_host(hostname: str) -> bool:
     return any(
         host == suffix or host.endswith(f".{suffix}") for suffix in _DIRECT_FETCH_HOST_SUFFIXES
     )
+
+
+def _httpx_client_kwargs(hostname: str) -> dict[str, Any]:
+    """Build ``httpx.AsyncClient`` kwargs for one cover-fetch host.
+
+    CN CDN hosts bypass every env/system proxy unconditionally; that branch
+    deliberately never imports :mod:`openbiliclaw.network` (CN-direct
+    isolation). Overseas hosts follow the process-wide ``[network]`` routing
+    policy — ``custom`` passes the explicit proxy URL, ``system`` inherits
+    environment proxies, ``direct`` forces a direct connection. The helper is
+    consulted per fetch (not per process), so ``PUT /api/config`` hot-reload
+    takes effect on the next cover without any client rebuild.
+    """
+    if _is_direct_fetch_host(hostname):
+        return {"trust_env": False}
+    from openbiliclaw.network import outbound_httpx_kwargs
+
+    return outbound_httpx_kwargs()
 
 
 def _upstream_headers_for_host(hostname: str) -> dict[str, str]:
@@ -495,7 +518,7 @@ async def fetch_cover_bytes(url: str) -> tuple[bytes, str]:
         async with httpx.AsyncClient(
             timeout=_FETCH_TIMEOUT_SECONDS,
             follow_redirects=False,
-            trust_env=not _is_direct_fetch_host(str(parsed.host or "")),
+            **_httpx_client_kwargs(str(parsed.host or "")),
         ) as client:
             response = await _send_with_redirects(client, parsed)
             try:
