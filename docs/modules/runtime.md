@@ -404,7 +404,7 @@ Windows 回归不是只 mock `winreg`：`tests/test_windows_autostart_e2e.py` �
 
 #### 发现即缓存（封面预取）
 
-白名单 / redirect / 大小 / 类型校验的抓取核心 `fetch_cover_bytes` 是唯一真源；失败抛 `CoverFetchError`（携带 400/403/413/502/504），proxy 路由再映射回对应 HTTP 状态。v0.3.153+：抓取按主机分流代理——国内 CDN（hdslb / xhscdn / pstatp / douyinpic / douyinvod / sinaimg）恒直连（`trust_env=False`，代理出口 IP 易被风控，与 B站 登录探测同因），境外 CDN（ytimg / ggpht）保持继承环境 / 系统代理，需要代理才能拉 YouTube 封面的用户不受影响。`get_or_fetch_cover_bytes` 是多模态 discovery evaluator 的兼容缓存优先入口；磁盘读写同样卸载到线程，因此小红书已缓存头图即使原 CDN token 过期，也能继续参与封面图评估。
+白名单 / redirect / 大小 / 类型校验的抓取核心 `fetch_cover_bytes` 是唯一真源；失败抛 `CoverFetchError`（携带 400/403/413/502/504），proxy 路由再映射回对应 HTTP 状态。v0.3.153+：抓取按主机分流代理——国内 CDN（hdslb / xhscdn / pstatp / douyinpic / douyinvod / sinaimg）恒直连（`trust_env=False`，代理出口 IP 易被风控，与 B站 登录探测同因），境外 CDN（ytimg / ggpht / lain.bgm.tv）跟随进程级 `[network]` 出口策略（经 `openbiliclaw.network.outbound_httpx_kwargs`：`custom` 显式传代理、`system` 继承环境变量、`direct` 强制直连）。此前境外侧硬编码 `trust_env=True` 在 custom 模式下失效：config 代理只存于 `openbiliclaw.network` 模块全局、从不写 `os.environ`，导致国内网络直连 i.ytimg.com 每次超时（YouTube 封面全裂图）；改为按次查询策略后，`PUT /api/config` 热更新对下一张封面即时生效。`get_or_fetch_cover_bytes` 是多模态 discovery evaluator 的兼容缓存优先入口；磁盘读写同样卸载到线程，因此小红书已缓存头图即使原 CDN token 过期，也能继续参与封面图评估。
 
 API daemon 中，proxy miss 与 refresh prefetch 进一步共用 app-owned `ImageFetchCoordinator`。Condition gate 保证总 upstream active≤4、background≤3；前台请求可占保留槽，任一前台排队时 background 不得抢刚释放的槽。按 `image_cache_key(url)` singleflight，所有 waiter `shield` shared task；一个 HTTP request 取消不会取消其它 waiter/owned upstream。前台加入尚未启动的 background 同 key 时会把它提升为 foreground，并用前台携带的更新签名 URL 抓取。cache hit 在 gate 外；同步 glob/read/write 用 `asyncio.to_thread`，落盘使用同目录临时文件 `flush+fsync+os.replace`，所以观察者只会看到旧文件或完整新文件。
 
