@@ -4,7 +4,9 @@
 
 ---
 
-## 未发布
+## v0.3.209：负反馈误报修复、移动端提速与依赖加固（2026-08-22）
+
+- **发布状态**：后端 / 插件 / 桌面安装包 / Docker 镜像与聚合 Release 发布流程进行中，完成后见 [Release](https://github.com/whiteguo233/OpenBiliClaw/releases)。Chrome Web Store 与 Firefox AMO 提交后在本节同步审核状态。
 
 - **锁定 openai<3 / anthropic<1，修复全新安装的 LLM 代理支持被新版 SDK 破坏**：openai 3.x 与 anthropic 1.0 把 httpx 以 `httpx2` 名字 vendor 进包内，客户端构造时的 isinstance 守卫会拒绝外部传入的 `httpx.AsyncClient`，导致 `openai_provider` / `claude_provider` 的代理与 `trust_env=False` 路径在全新安装（CI / pip 新解析）下直接 TypeError。两个依赖分别加上界 `<3` / `<1` 并同步 uv.lock，待 provider 适配 vendored httpx2 后再放开；本地已装 2.x / 0.x 的环境不受影响。
 - **修复 main 分支 CI 自 8 月 20 日起持续红灯的测试问题**：架构总览图迁出 README（80eb6d92）后，文档一致性测试同步改为读取 `docs/architecture-overview(.en).md`；`test_mobile_web_view_models` 修复一处 E501 超长行；`soul_engine` / `web_guided_init` 的测试桩补齐 d8f63745 新增的 `llm_concurrency` 参数。纯测试改动，无运行时行为变化。
