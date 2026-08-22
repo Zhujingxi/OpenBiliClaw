@@ -198,12 +198,10 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.209 (2026-08-22)**
+📌 Latest: **v0.3.210 (2026-08-23)**
 
-- **Ordinary card clicks no longer count as dislikes** — videos whose titles contain "dislike" no longer poison your profile, and a second click retracts the feedback.
-- **Mobile Web "load more" no longer stutters** — cards render first while covers warm up in the background; failures show a hint and can be retried.
-- **Configurable cognition context budget** — local models with 80-100K contexts can now run the cognition loop without touching source code.
-- **New Serply inspiration search backend** — set `serply_api_key` to go direct; without a key it is skipped and existing chains are unaffected.
+- **Fixed YouTube covers breaking under custom proxy** — overseas cover CDNs and inspiration search backends no longer bypass the `[network]` proxy and time out.
+- **Per-source release-date filtering (issue #18)** — each platform source accepts a date range and weight; stale candidates are hard-filtered before LLM evaluation.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
