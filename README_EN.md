@@ -613,7 +613,9 @@ The whole loop stays local — the agent host just calls the CLI bridge; your pr
 
 The full architecture overview ASCII diagrams (runtime concurrency gates, agent orchestration, source adapters, discovery / recommendation / saved-sync pipelines) have been moved to a separate document to keep the README compact:
 
-> 📖 [Architecture Overview Diagrams](docs/architecture-overview.en.md)
+Publication date preference: `[sources.<name>].recommendation_date_*` per source → out-of-window candidates are filtered before LLM evaluation → effective inventory → PoolCurator soft/strict serving semantics.
+
+> 📖 [Architecture Overview](docs/architecture-overview.md)
 
 ### Optional visual and danmaku prewarming
 

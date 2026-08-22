@@ -20,12 +20,14 @@ from openbiliclaw.discovery.strategies._utils import build_profile_summary
 from openbiliclaw.llm.base import LLMFallbackError, LLMProviderError, LLMRateLimitError, LLMResponse
 from openbiliclaw.llm.prompts import build_batch_expression_prompt
 from openbiliclaw.llm.service import LLMProviderExecutionError
+from openbiliclaw.recommendation.curator import PoolCurator
 from openbiliclaw.recommendation.engine import (
     ExpressionBatchMalformed,
     ExpressionCopyTransientError,
     RecommendationEngine,
     _recommendation_profile_summary,
 )
+from openbiliclaw.recommendation.publication_preference import PublicationDatePreference
 from openbiliclaw.runtime.expression_copy import ExpressionCopyCoordinator
 from openbiliclaw.soul.profile import (
     AwarenessNote,
@@ -5960,6 +5962,55 @@ async def test_serve_rejects_cross_platform_rows_leaked_by_the_snapshot(
     assert [item.content.bvid for item in recommendations] == ["ZH01"]
     assert "BV99" in caplog.text
     assert "zhihu" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_snapshot_serving_applies_strict_publication_date_filter() -> None:
+    """The real snapshot path must enforce strict Bilibili date eligibility."""
+    in_range = _pool_row("BVINRANGE", "bilibili")
+    in_range["published_at"] = "2026-01-15T12:00:00+00:00"
+    out_of_range = _pool_row("BVOUTOFRANGE", "bilibili")
+    out_of_range["published_at"] = "2025-12-31T12:00:00+00:00"
+    stub = _SnapshotSpyDB(_snapshot_with([in_range, out_of_range]))
+    curator = PoolCurator(
+        object(),  # type: ignore[arg-type]
+        publication_preference=PublicationDatePreference(
+            preset="custom",
+            start_date="2026-01-01",
+            end_date="2026-01-31",
+            weight=1.0,
+        ),
+    )
+    engine = RecommendationEngine(
+        llm=_DummyLLM(),
+        database=stub,  # type: ignore[arg-type]
+        curator=curator,
+    )
+
+    result = await engine.serve_with_result(_build_profile(), limit=2)
+
+    assert [item.content.bvid for item in result.items] == ["BVINRANGE"]
+    assert stub.snapshot_kwargs
+
+
+def test_pool_rows_derive_platform_from_source_when_platform_is_missing() -> None:
+    engine = RecommendationEngine(
+        llm=_DummyLLM(),
+        database=object(),  # type: ignore[arg-type]
+    )
+
+    [item] = engine._rows_to_discovered(
+        [
+            {
+                "bvid": "YT_LEGACY",
+                "source": "youtube-search",
+                "source_platform": "",
+            }
+        ]
+    )
+
+    assert item.source_platform == "youtube"
+    assert item.source_strategy == "youtube-search"
 
 
 class _LegacyCompatDB:

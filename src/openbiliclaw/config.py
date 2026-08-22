@@ -1176,7 +1176,23 @@ class AutostartConfig:
 
 
 @dataclass
-class XiaohongshuSourceConfig:
+class SourceDatePreferenceConfig:
+    """Per-source recommendation publication-date filter fields.
+
+    ``recommendation_date_preset = "all"`` keeps the legacy behavior for
+    that source. Date strings use YYYY-MM-DD and the weight is the penalty
+    applied to out-of-window candidates (kept for pool scoring/serving;
+    discovery filters out-of-window candidates before LLM evaluation).
+    """
+
+    recommendation_date_preset: str = "all"
+    recommendation_date_start: str = ""
+    recommendation_date_end: str = ""
+    recommendation_date_weight: float = 0.5
+
+
+@dataclass
+class XiaohongshuSourceConfig(SourceDatePreferenceConfig):
     """Xiaohongshu source-specific configuration.
 
     Content discovery and metadata extraction happens entirely in the
@@ -1206,7 +1222,7 @@ class XiaohongshuSourceConfig:
 
 
 @dataclass
-class DouyinSourceConfig:
+class DouyinSourceConfig(SourceDatePreferenceConfig):
     """Douyin direct-cookie discovery configuration.
 
     Initialization bootstrap still uses the browser extension. These
@@ -1232,7 +1248,7 @@ class DouyinSourceConfig:
 
 
 @dataclass
-class YoutubeSourceConfig:
+class YoutubeSourceConfig(SourceDatePreferenceConfig):
     """YouTube source-specific configuration.
 
     YouTube steady-state discovery runs through a backend-direct runtime
@@ -1252,7 +1268,7 @@ class YoutubeSourceConfig:
 
 
 @dataclass
-class TwitterSourceConfig:
+class TwitterSourceConfig(SourceDatePreferenceConfig):
     """X (Twitter) direct-cookie discovery configuration.
 
     Steady-state discovery is server-side cookie replay (search / For-You /
@@ -1274,7 +1290,7 @@ class TwitterSourceConfig:
 
 
 @dataclass
-class ZhihuSourceConfig:
+class ZhihuSourceConfig(SourceDatePreferenceConfig):
     """Zhihu plugin-backed discovery configuration.
 
     Zhihu discovery runs in the browser extension so it can reuse the user's
@@ -1297,7 +1313,7 @@ class ZhihuSourceConfig:
 
 
 @dataclass
-class RedditSourceConfig:
+class RedditSourceConfig(SourceDatePreferenceConfig):
     """Reddit discovery configuration.
 
     Reddit currently depends on a logged-in session instead of a reliable
@@ -1322,7 +1338,7 @@ class RedditSourceConfig:
 
 
 @dataclass
-class BangumiSourceConfig:
+class BangumiSourceConfig(SourceDatePreferenceConfig):
     """Bangumi official anonymous API discovery configuration."""
 
     enabled: bool = False
@@ -1343,7 +1359,7 @@ class BangumiSourceConfig:
 
 
 @dataclass
-class LinuxdoSourceConfig:
+class LinuxdoSourceConfig(SourceDatePreferenceConfig):
     """Linux.do browser-extension discovery and account-signal configuration."""
 
     enabled: bool = False
@@ -1362,7 +1378,7 @@ class LinuxdoSourceConfig:
 
 
 @dataclass
-class V2EXSourceConfig:
+class V2EXSourceConfig(SourceDatePreferenceConfig):
     """V2EX public discovery configuration with an optional PAT."""
 
     enabled: bool = False
@@ -1396,7 +1412,7 @@ class V2EXSourceConfig:
 
 
 @dataclass
-class WeiboSourceConfig:
+class WeiboSourceConfig(SourceDatePreferenceConfig):
     """Weibo public discovery and init-only browser bootstrap configuration."""
 
     enabled: bool = False
@@ -1445,7 +1461,7 @@ _V2EX_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
 
 @dataclass
-class BilibiliSourceConfig:
+class BilibiliSourceConfig(SourceDatePreferenceConfig):
     """Bilibili discovery source switch."""
 
     enabled: bool = True
@@ -2415,6 +2431,21 @@ def _build_config(
         ),
     )
     normalize_v2ex_source_config(sources.v2ex, strict=False)
+    _apply_source_date_preferences_from_raw(
+        sources,
+        bilibili=bilibili_source_raw,
+        legacy_bilibili=bili_raw,
+        xiaohongshu=xhs_raw,
+        douyin=douyin_raw,
+        youtube=youtube_raw,
+        twitter=twitter_raw,
+        zhihu=zhihu_raw,
+        reddit=reddit_raw,
+        bangumi=bangumi_raw,
+        linuxdo=linuxdo_raw,
+        v2ex=v2ex_raw,
+        weibo=weibo_raw,
+    )
     _warn_suspicious_budgets(sources)
 
     soul_raw = raw.get("soul", {}) if isinstance(raw.get("soul"), dict) else {}
@@ -3895,6 +3926,104 @@ def _collect_llm_instance_routing_issues(llm: LLMConfig) -> list[ConfigIssue]:
     return issues
 
 
+_SOURCE_DATE_PREFERENCE_KEYS = (
+    "recommendation_date_preset",
+    "recommendation_date_start",
+    "recommendation_date_end",
+    "recommendation_date_weight",
+)
+
+_SOURCE_DATE_PREFERENCE_SLUGS = (
+    "bilibili",
+    "xiaohongshu",
+    "douyin",
+    "youtube",
+    "twitter",
+    "zhihu",
+    "reddit",
+    "bangumi",
+    "linuxdo",
+    "v2ex",
+    "weibo",
+)
+
+
+def _apply_source_date_preferences_from_raw(sources: SourcesConfig, **raws: object) -> None:
+    """Populate per-source publication-date fields from raw TOML sections."""
+
+    legacy_bilibili_raw = raws.get("legacy_bilibili")
+    for slug in _SOURCE_DATE_PREFERENCE_SLUGS:
+        source_cfg = getattr(sources, slug)
+        raw_value = raws.get(slug)
+        raw: dict[str, Any] = raw_value if isinstance(raw_value, dict) else {}
+        # 兼容旧 PR 草案里的 `[bilibili].recommendation_date_*` 位置：保存时
+        # 会统一写到 `[sources.bilibili]`，但加载时仍读取旧字段避免配置丢失。
+        if (
+            slug == "bilibili"
+            and isinstance(legacy_bilibili_raw, dict)
+            and "recommendation_date_preset" not in raw
+        ):
+            raw = {**legacy_bilibili_raw, **raw}
+        source_cfg.recommendation_date_preset = str(
+            raw.get("recommendation_date_preset", "all") or "all"
+        )
+        source_cfg.recommendation_date_start = str(
+            raw.get("recommendation_date_start", "") or ""
+        )
+        source_cfg.recommendation_date_end = str(
+            raw.get("recommendation_date_end", "") or ""
+        )
+        source_cfg.recommendation_date_weight = raw.get("recommendation_date_weight", 0.5)
+
+
+def publication_date_preference_for_source(source_cfg: object) -> Any:
+    """Build a ``PublicationDatePreference`` from a source config object."""
+
+    from openbiliclaw.recommendation.publication_preference import (
+        PublicationDatePreference,
+    )
+
+    return PublicationDatePreference(
+        preset=getattr(source_cfg, "recommendation_date_preset", "all"),
+        start_date=getattr(source_cfg, "recommendation_date_start", ""),
+        end_date=getattr(source_cfg, "recommendation_date_end", ""),
+        weight=getattr(source_cfg, "recommendation_date_weight", 0.5),
+    )
+
+
+def source_date_preferences(config: Config) -> dict[str, Any]:
+    """Build the per-source publication-date preference map used by discovery."""
+
+    sources = getattr(config, "sources", None)
+    if sources is None:
+        return {}
+    return {
+        slug: publication_date_preference_for_source(getattr(sources, slug, None))
+        for slug in _SOURCE_DATE_PREFERENCE_SLUGS
+    }
+
+
+def _source_date_preference_issues(config: Config) -> list[ConfigIssue]:
+    """Return blocking issues for malformed per-source date preferences."""
+
+    issues: list[ConfigIssue] = []
+    for slug in _SOURCE_DATE_PREFERENCE_SLUGS:
+        source_cfg = getattr(config.sources, slug, None)
+        if source_cfg is None:
+            continue
+        try:
+            publication_date_preference_for_source(source_cfg)
+        except (TypeError, ValueError) as exc:
+            issues.append(
+                ConfigIssue(
+                    field=f"sources.{slug}.recommendation_date",
+                    message=f"{slug} 推荐发布日期配置无效: {exc}",
+                    severity="blocking",
+                )
+            )
+    return issues
+
+
 def _collect_config_issues(config: Config) -> list[ConfigIssue]:
     """Collect non-fatal config issues to display as guidance."""
     issues: list[ConfigIssue] = []
@@ -3999,6 +4128,8 @@ def _collect_config_issues(config: Config) -> list[ConfigIssue]:
                 severity="blocking",
             )
         )
+
+    issues.extend(_source_date_preference_issues(config))
 
     if config.bilibili.auth_method not in _SUPPORTED_AUTH_METHODS:
         supported = ", ".join(sorted(_SUPPORTED_AUTH_METHODS))
@@ -4987,6 +5118,11 @@ def save_config(
         validate_bangumi_username,
     )
 
+    date_preference_issues = _source_date_preference_issues(config)
+    if date_preference_issues:
+        first_issue = date_preference_issues[0]
+        raise ConfigError(f"{first_issue.field}: {first_issue.message}")
+
     _validate_auto_update_check_interval(config.scheduler.auto_update_check_interval_hours)
     for field_name, allow_none in (
         ("source_incremental_hours", False),
@@ -5052,6 +5188,27 @@ def save_config(
         _create_llm_migration_backup(path)
     path.write_text(rendered, encoding="utf-8")
     return path
+
+
+def _render_source_date_preference_lines(source_cfg: object) -> list[str]:
+    """Render per-source recommendation date fields when non-default."""
+
+    preset = str(getattr(source_cfg, "recommendation_date_preset", "all") or "all")
+    start = str(getattr(source_cfg, "recommendation_date_start", "") or "")
+    end = str(getattr(source_cfg, "recommendation_date_end", "") or "")
+    weight = getattr(source_cfg, "recommendation_date_weight", 0.5)
+    try:
+        weight_value = float(weight)
+    except (TypeError, ValueError):
+        weight_value = 0.5
+    if preset == "all" and not start and not end and weight_value == 0.5:
+        return []
+    return [
+        "recommendation_date_preset = " + _toml_string(preset),
+        "recommendation_date_start = " + _toml_string(start),
+        "recommendation_date_end = " + _toml_string(end),
+        f"recommendation_date_weight = {weight_value:g}",
+    ]
 
 
 def _render_config_toml(
@@ -5207,6 +5364,7 @@ def _render_config_toml(
             "[sources.bilibili]",
             f"enabled = {_toml_bool(config.sources.bilibili.enabled)}",
             f"min_interval_minutes = {config.sources.bilibili.min_interval_minutes}",
+            *_render_source_date_preference_lines(config.sources.bilibili),
             "",
             "[sources.xiaohongshu]",
             f"enabled = {_toml_bool(config.sources.xiaohongshu.enabled)}",
@@ -5215,6 +5373,7 @@ def _render_config_toml(
             f"daily_creator_budget = {config.sources.xiaohongshu.daily_creator_budget}",
             f"task_interval_seconds = {config.sources.xiaohongshu.task_interval_seconds}",
             f"min_interval_minutes = {config.sources.xiaohongshu.min_interval_minutes}",
+            *_render_source_date_preference_lines(config.sources.xiaohongshu),
             "",
             "[sources.douyin]",
             f"enabled = {_toml_bool(config.sources.douyin.enabled)}",
@@ -5226,6 +5385,7 @@ def _render_config_toml(
             f"daily_feed_budget = {config.sources.douyin.daily_feed_budget}",
             f"request_interval_seconds = {config.sources.douyin.request_interval_seconds}",
             f"min_interval_minutes = {config.sources.douyin.min_interval_minutes}",
+            *_render_source_date_preference_lines(config.sources.douyin),
             "",
             "[sources.youtube]",
             f"enabled = {_toml_bool(config.sources.youtube.enabled)}",
@@ -5235,6 +5395,7 @@ def _render_config_toml(
             f"daily_channel_budget = {config.sources.youtube.daily_channel_budget}",
             f"request_interval_seconds = {config.sources.youtube.request_interval_seconds}",
             f"min_interval_minutes = {config.sources.youtube.min_interval_minutes}",
+            *_render_source_date_preference_lines(config.sources.youtube),
             "",
             "[sources.twitter]",
             f"enabled = {_toml_bool(config.sources.twitter.enabled)}",
@@ -5245,6 +5406,7 @@ def _render_config_toml(
             f"daily_creator_budget = {config.sources.twitter.daily_creator_budget}",
             f"request_interval_seconds = {config.sources.twitter.request_interval_seconds}",
             f"min_interval_minutes = {config.sources.twitter.min_interval_minutes}",
+            *_render_source_date_preference_lines(config.sources.twitter),
             "",
             "[sources.zhihu]",
             f"enabled = {_toml_bool(config.sources.zhihu.enabled)}",
@@ -5257,6 +5419,7 @@ def _render_config_toml(
             f"daily_related_budget = {config.sources.zhihu.daily_related_budget}",
             f"request_interval_seconds = {config.sources.zhihu.request_interval_seconds}",
             f"min_interval_minutes = {config.sources.zhihu.min_interval_minutes}",
+            *_render_source_date_preference_lines(config.sources.zhihu),
             "",
             "[sources.reddit]",
             f"enabled = {_toml_bool(config.sources.reddit.enabled)}",
@@ -5269,6 +5432,7 @@ def _render_config_toml(
             f"daily_related_budget = {config.sources.reddit.daily_related_budget}",
             f"request_interval_seconds = {config.sources.reddit.request_interval_seconds}",
             f"min_interval_minutes = {config.sources.reddit.min_interval_minutes}",
+            *_render_source_date_preference_lines(config.sources.reddit),
             "",
             "[sources.bangumi]",
             f"enabled = {_toml_bool(config.sources.bangumi.enabled)}",
@@ -5282,6 +5446,7 @@ def _render_config_toml(
             f"request_interval_seconds = {config.sources.bangumi.request_interval_seconds}",
             f"min_interval_minutes = {config.sources.bangumi.min_interval_minutes}",
             f"bootstrap_limit = {config.sources.bangumi.bootstrap_limit}",
+            *_render_source_date_preference_lines(config.sources.bangumi),
             "",
             "[sources.linuxdo]",
             f"enabled = {_toml_bool(config.sources.linuxdo.enabled)}",
@@ -5295,6 +5460,7 @@ def _render_config_toml(
             f"request_interval_seconds = {config.sources.linuxdo.request_interval_seconds}",
             f"min_interval_minutes = {config.sources.linuxdo.min_interval_minutes}",
             f"bootstrap_limit = {config.sources.linuxdo.bootstrap_limit}",
+            *_render_source_date_preference_lines(config.sources.linuxdo),
             "[sources.v2ex]",
             f"enabled = {_toml_bool(config.sources.v2ex.enabled)}",
             f"incremental_enabled = {_toml_bool(config.sources.v2ex.incremental_enabled)}",
@@ -5322,6 +5488,7 @@ def _render_config_toml(
             f"bootstrap_replies_limit = {config.sources.v2ex.bootstrap_replies_limit}",
             f"bootstrap_favorites_limit = {config.sources.v2ex.bootstrap_favorites_limit}",
             f"bootstrap_max_pages_per_scope = {config.sources.v2ex.bootstrap_max_pages_per_scope}",
+            *_render_source_date_preference_lines(config.sources.v2ex),
             "",
             "[sources.weibo]",
             f"enabled = {_toml_bool(config.sources.weibo.enabled)}",
@@ -5331,6 +5498,7 @@ def _render_config_toml(
             f"daily_creator_budget = {config.sources.weibo.daily_creator_budget}",
             f"request_interval_seconds = {config.sources.weibo.request_interval_seconds}",
             f"min_interval_minutes = {config.sources.weibo.min_interval_minutes}",
+            *_render_source_date_preference_lines(config.sources.weibo),
             "",
             "[scheduler]",
             f"enabled = {_toml_bool(config.scheduler.enabled)}",

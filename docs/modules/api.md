@@ -29,6 +29,11 @@ runtime apply。`0` 是只关闭跨 digest 关键词复用的回滚值，不会�
 
 `PUT /api/config` 把“持久化成功”和“运行时已经切换”分成两个明确阶段。请求仍在 `_CONFIG_SAVE_LOCK` 内完成校验、`config.toml.bak` 快照、`config.toml` 写入和凭据存储，然后统一立即返回 `202 apply_state="queued"`、`apply_revision` 与已脱敏配置快照；运行时 lane 由 app-owned latest-wins 队列在后台安全应用，前端通过 `GET /api/config/apply-status` 或 runtime event 观察终态，不把 202 当作失败。
 
+`GET /api/config` 和 `PUT /api/config` 同时公开 B 站发布日期偏好：`recommendation_date_preset`、
+`recommendation_date_start`、`recommendation_date_end`、`recommendation_date_weight`。PUT 会先把
+合并后的完整值交给同一策略校验器；非法日期、preset 或权重返回 HTTP 400，配置对象、磁盘文件和运行时
+均保持不变。合法保存完成后，RuntimeContext 重建 `PoolCurator`，新偏好在下一次推荐请求中生效。
+
 `general.data_dir` 不支持热切换。若保存值的 canonical 路径与当前 runtime 已打开、已持有进程级锁的 active data dir 不同，磁盘配置仍记录新值，但 202 返回 `restart_required=true`；后台只把其它字段应用到继续绑定旧 active data dir 的 `RuntimeContext`。同一次请求涉及的抖音 / X 外部凭据也读写旧 active 目录，避免在尚未持有新目录锁时写入。完整退出并重新启动、取得新 canonical data-dir lock 后才启用新路径；因此 apply status 的 `applied` 不代表目录已切换。
 
 Phase 2 cognition rollout 在配置 API 中也是 task-scoped：`soul` GET/PUT 模型公开

@@ -111,6 +111,44 @@ async def test_put_config_success_saves_snapshot_then_hot_reloads(
 
 
 @pytest.mark.asyncio
+async def test_put_bilibili_date_preference_hot_reloads_curator(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+    save_config(_valid_config(), config_path)
+    app = create_app(memory_manager=object(), database=object(), soul_engine=object())
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.put(
+            "/api/config",
+            json={
+                "sources": {
+                    "bilibili": {
+                        "recommendation_date_preset": "custom",
+                        "recommendation_date_start": "2023-01-01",
+                        "recommendation_date_end": "2023-12-31",
+                        "recommendation_date_weight": 0.5,
+                    }
+                }
+            },
+        )
+        await _wait_for_apply_state(client, "applied")
+
+    assert response.status_code == 202
+    curator = app.state.runtime_context.recommendation_engine._curator
+    preference = curator._publication_preference
+    assert preference.preset == "custom"
+    assert preference.start_date.isoformat() == "2023-01-01"
+    assert preference.end_date.isoformat() == "2023-12-31"
+    assert preference.weight == 0.5
+
+
+@pytest.mark.asyncio
 async def test_put_config_idle_lane_returns_after_persist_before_rebuild(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

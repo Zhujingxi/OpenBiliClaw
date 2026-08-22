@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from openbiliclaw.discovery.candidate_pool import DiscoveryCandidateWrite
+from openbiliclaw.recommendation.publication_preference import PublicationDatePreference
 from openbiliclaw.storage import database as database_module
 from openbiliclaw.storage.database import Database
 
@@ -27,6 +28,7 @@ def _seed_ready(
     content_url: str | None = None,
     relevance_score: float = 0.9,
     author_name: str = "",
+    published_at: str = "",
 ) -> None:
     db.cache_content(
         bvid,
@@ -40,6 +42,7 @@ def _seed_ready(
         style_key="tutorial",
         topic_group=topic_group,
         author_name=author_name,
+        published_at=published_at,
     )
 
 
@@ -140,6 +143,33 @@ def test_user_a_shape_raw_trim_cannot_erase_sixteen_available(tmp_path: Path) ->
     assert result.raw_before == 618
     assert result.raw_after == 600
     assert result.rolled_back is False
+
+
+def test_strict_publication_preference_counts_effective_inventory_only(tmp_path: Path) -> None:
+    db = _database(tmp_path)
+    _seed_ready(
+        db,
+        "BV_IN_RANGE",
+        topic_group="date",
+        published_at="2026-08-10T12:00:00Z",
+    )
+    _seed_ready(
+        db,
+        "BV_OUT_OF_RANGE",
+        topic_group="date",
+        published_at="2025-08-10T12:00:00Z",
+    )
+    db.set_publication_date_preference(
+        PublicationDatePreference(
+            preset="custom",
+            start_date="2026-01-01",
+            end_date="2026-12-31",
+            weight=1.0,
+        )
+    )
+
+    assert db.count_pool_candidates(max_per_topic_group=0) == 1
+    assert db.conn.execute("SELECT COUNT(*) FROM content_cache").fetchone()[0] == 2
 
 
 def test_user_b_source_trim_defers_to_ten_available_zhihu_rows(tmp_path: Path) -> None:

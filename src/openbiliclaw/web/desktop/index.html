@@ -454,6 +454,32 @@
                   <label class="settings-field full"><span>B 站 Cookie</span><textarea id="biliCookie" rows="2" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="保留空值表示不覆盖现有 cookie"></textarea></label>
                 </section>
                 <section class="source-seg">
+                  <h4>发布日期偏好</h4>
+                  <p class="seg-note">只影响 B 站推荐。范围外候选不会删除；严格模式只在当前推荐和有效库存中忽略它们。</p>
+                  <div class="inline-row">
+                    <label class="settings-field"><span>日期范围</span><select id="biliDatePreset">
+                      <option value="all">全部日期</option>
+                      <option value="last_7_days">最近一周</option>
+                      <option value="last_30_days">最近一个月</option>
+                      <option value="last_6_months">最近半年</option>
+                      <option value="last_1_year">最近一年</option>
+                      <option value="custom">自定义</option>
+                    </select></label>
+                    <label class="settings-field"><span>偏好强度</span><select id="biliDateMode">
+                      <option value="soft">优先推荐该范围</option>
+                      <option value="strict">仅推荐该范围</option>
+                      <option value="custom">自定义权重</option>
+                    </select></label>
+                  </div>
+                  <div class="inline-row" id="biliDateCustomFields" hidden>
+                    <label class="settings-field"><span>开始日期</span><input id="biliDateStart" type="date"></label>
+                    <label class="settings-field"><span>结束日期</span><input id="biliDateEnd" type="date"></label>
+                  </div>
+                  <div class="inline-row" id="biliDateWeightField" hidden>
+                    <label class="settings-field"><span>高级权重（0 到 1）</span><input id="biliDateWeight" type="number" min="0" max="1" step="0.01" inputmode="decimal"></label>
+                  </div>
+                </section>
+                <section class="source-seg">
                   <h4>发现分支与每日预算</h4>
                   <p class="seg-note">B 站的搜索 / 热门 / 探索 / 相关链四个策略由全局调度统一编排，目前没有独立的分支开关和每日预算。调度节奏见「调度」页。</p>
                 </section>

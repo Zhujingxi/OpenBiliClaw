@@ -554,6 +554,28 @@ daemon，保留当前 v2 文件和自动备份，再由操作者显式把导出�
 | `cookie` | string | `""` | 浏览器 Cookie（推荐通过 `auth login` 命令设置） |
 | `proxy` | string | `""` | B站 请求专用代理（v0.3.153+）。留空 = 恒直连：客户端忽略环境变量与系统代理（代理出口 IP 常触发 B站 风控，导致已登录仍显示"未登录"）。仅当网络无法直连 B站 时才填，如 `"http://127.0.0.1:7890"` |
 
+### `[sources.<name>]` 发布日期偏好
+
+所有来源（`bilibili` / `xiaohongshu` / `douyin` / `youtube` / `twitter` / `zhihu` /
+`reddit` / `bangumi` / `linuxdo` / `v2ex` / `weibo`）都支持以下四个字段，默认
+`"all"` = 不按发布日期过滤：
+
+| 键 | 类型 | 默认值 | 说明 |
+|----|------|--------|------|
+| `recommendation_date_preset` | string | `"all"` | 发布日期范围：`all`、`last_7_days`、`last_30_days`、`last_6_months`、`last_1_year` 或 `custom` |
+| `recommendation_date_start` | string | `""` | `custom` 的包含式起始自然日，格式为 `YYYY-MM-DD`；留空表示无下界 |
+| `recommendation_date_end` | string | `""` | `custom` 的包含式结束自然日，格式为 `YYYY-MM-DD`；留空表示无上界 |
+| `recommendation_date_weight` | float | `0.5` | 范围外候选的分数乘数为 `1 - weight`；`1` = 严格排除 |
+
+发布日期范围按用户本地自然日换算为包含式 UTC 边界。发现阶段（LLM 评估之前）会直接过滤掉
+范围外候选，不消耗评估预算；候选池打分与推荐服务阶段保留 `weight` 语义。缺失或无法解析
+发布时间不能用发现时间代替；范围启用时按范围外处理。
+
+配置文件、`GET /api/config` 和 `PUT /api/config` 使用同一组字段。保存阶段会拒绝非法 preset、日期
+或权重，不会先写入再在运行时悄悄修正；合法保存沿用现有备份、原子写入和 RuntimeContext 热更新事务。
+桌面 Web「设置 → 平台源 → Bilibili」提供这些字段的编辑控件；本次切片不在插件 popup 或移动 Web
+重复实现编辑表单，它们继续读取后端生效配置并使用共享推荐行为。
+
 ### `[bilibili.browser]`
 
 | 键 | 类型 | 默认值 | 说明 |

@@ -40,6 +40,7 @@ from openbiliclaw.runtime.keyword_fetch import (
 
 if TYPE_CHECKING:
     from openbiliclaw.llm.embedding import SupportsEmbeddingService
+    from openbiliclaw.recommendation.publication_preference import PublicationDatePreference
     from openbiliclaw.soul.profile import SoulProfile
     from openbiliclaw.storage.database import Database
 
@@ -76,6 +77,7 @@ class ExploreStrategy(DiscoveryStrategy):
     # its purpose is controlled novelty, but it must not become a broad low-
     # score bypass for regular recommendation pool admission.
     score_threshold: float = 0.58
+    date_preference: PublicationDatePreference | None = None
     llm_evaluation: bool = True
     queries_per_domain: int = 3
     max_domains: int = 5
@@ -273,6 +275,12 @@ class ExploreStrategy(DiscoveryStrategy):
         if not self.llm_evaluation or discovery_raw_candidate_mode_enabled():
             return [content for content, _, _ in candidates[:limit]]
 
+        date_eligible_bvids = {
+            item.bvid for item in self.filter_candidates_for_eval(
+                [content for content, _, _ in candidates]
+            )
+        }
+        candidates = [entry for entry in candidates if entry[0].bvid in date_eligible_bvids]
         scores = await evaluator.evaluate_content_batch(
             [content for content, _, _ in candidates],
             profile,

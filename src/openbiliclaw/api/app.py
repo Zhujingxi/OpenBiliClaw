@@ -16677,6 +16677,22 @@ def create_app(
                     return instance
             return getattr(cfg.llm, provider_type)
 
+        def _source_date_pref_out_kwargs(source_cfg: Any) -> dict[str, Any]:
+            return {
+                "recommendation_date_preset": getattr(
+                    source_cfg, "recommendation_date_preset", "all"
+                ),
+                "recommendation_date_start": getattr(
+                    source_cfg, "recommendation_date_start", ""
+                ),
+                "recommendation_date_end": getattr(
+                    source_cfg, "recommendation_date_end", ""
+                ),
+                "recommendation_date_weight": getattr(
+                    source_cfg, "recommendation_date_weight", 0.5
+                ),
+            }
+
         def _legacy_module_out(bucket: str) -> ModuleLLMConfigOut:
             route = routes[bucket]
             provider = str(getattr(route, "provider", "") or "")
@@ -16781,6 +16797,8 @@ def create_app(
                 bilibili=BilibiliSourceConfigOut(
                     enabled=cfg.sources.bilibili.enabled,
                     min_interval_minutes=cfg.sources.bilibili.min_interval_minutes,
+
+                    **_source_date_pref_out_kwargs(cfg.sources.bilibili),
                 ),
                 xiaohongshu=XiaohongshuSourceConfigOut(
                     enabled=cfg.sources.xiaohongshu.enabled,
@@ -16789,6 +16807,8 @@ def create_app(
                     daily_creator_budget=cfg.sources.xiaohongshu.daily_creator_budget,
                     task_interval_seconds=cfg.sources.xiaohongshu.task_interval_seconds,
                     min_interval_minutes=cfg.sources.xiaohongshu.min_interval_minutes,
+
+                    **_source_date_pref_out_kwargs(cfg.sources.xiaohongshu),
                 ),
                 douyin=DouyinSourceConfigOut(
                     enabled=cfg.sources.douyin.enabled,
@@ -16801,6 +16821,8 @@ def create_app(
                     daily_feed_budget=cfg.sources.douyin.daily_feed_budget,
                     request_interval_seconds=cfg.sources.douyin.request_interval_seconds,
                     min_interval_minutes=cfg.sources.douyin.min_interval_minutes,
+
+                    **_source_date_pref_out_kwargs(cfg.sources.douyin),
                 ),
                 youtube=YoutubeSourceConfigOut(
                     enabled=cfg.sources.youtube.enabled,
@@ -16810,6 +16832,8 @@ def create_app(
                     daily_channel_budget=cfg.sources.youtube.daily_channel_budget,
                     request_interval_seconds=cfg.sources.youtube.request_interval_seconds,
                     min_interval_minutes=cfg.sources.youtube.min_interval_minutes,
+
+                    **_source_date_pref_out_kwargs(cfg.sources.youtube),
                 ),
                 twitter=TwitterSourceConfigOut(
                     enabled=cfg.sources.twitter.enabled,
@@ -16821,6 +16845,8 @@ def create_app(
                     daily_creator_budget=cfg.sources.twitter.daily_creator_budget,
                     request_interval_seconds=cfg.sources.twitter.request_interval_seconds,
                     min_interval_minutes=cfg.sources.twitter.min_interval_minutes,
+
+                    **_source_date_pref_out_kwargs(cfg.sources.twitter),
                 ),
                 zhihu=ZhihuSourceConfigOut(
                     enabled=cfg.sources.zhihu.enabled,
@@ -16833,6 +16859,8 @@ def create_app(
                     daily_related_budget=cfg.sources.zhihu.daily_related_budget,
                     request_interval_seconds=cfg.sources.zhihu.request_interval_seconds,
                     min_interval_minutes=cfg.sources.zhihu.min_interval_minutes,
+
+                    **_source_date_pref_out_kwargs(cfg.sources.zhihu),
                 ),
                 reddit=RedditSourceConfigOut(
                     enabled=cfg.sources.reddit.enabled,
@@ -16845,6 +16873,8 @@ def create_app(
                     daily_related_budget=cfg.sources.reddit.daily_related_budget,
                     request_interval_seconds=cfg.sources.reddit.request_interval_seconds,
                     min_interval_minutes=cfg.sources.reddit.min_interval_minutes,
+
+                    **_source_date_pref_out_kwargs(cfg.sources.reddit),
                 ),
                 bangumi=BangumiSourceConfigOut(
                     enabled=cfg.sources.bangumi.enabled,
@@ -16858,6 +16888,8 @@ def create_app(
                     request_interval_seconds=cfg.sources.bangumi.request_interval_seconds,
                     min_interval_minutes=cfg.sources.bangumi.min_interval_minutes,
                     bootstrap_limit=cfg.sources.bangumi.bootstrap_limit,
+
+                    **_source_date_pref_out_kwargs(cfg.sources.bangumi),
                 ),
                 linuxdo=LinuxdoSourceConfigOut(
                     enabled=cfg.sources.linuxdo.enabled,
@@ -16871,6 +16903,8 @@ def create_app(
                     request_interval_seconds=cfg.sources.linuxdo.request_interval_seconds,
                     min_interval_minutes=cfg.sources.linuxdo.min_interval_minutes,
                     bootstrap_limit=cfg.sources.linuxdo.bootstrap_limit,
+
+                    **_source_date_pref_out_kwargs(cfg.sources.linuxdo),
                 ),
                 v2ex=V2EXSourceConfigOut(
                     enabled=cfg.sources.v2ex.enabled,
@@ -16902,6 +16936,8 @@ def create_app(
                     bootstrap_replies_limit=cfg.sources.v2ex.bootstrap_replies_limit,
                     bootstrap_favorites_limit=cfg.sources.v2ex.bootstrap_favorites_limit,
                     bootstrap_max_pages_per_scope=cfg.sources.v2ex.bootstrap_max_pages_per_scope,
+
+                    **_source_date_pref_out_kwargs(cfg.sources.v2ex),
                 ),
                 weibo=WeiboSourceConfigOut(
                     enabled=cfg.sources.weibo.enabled,
@@ -16911,6 +16947,8 @@ def create_app(
                     daily_creator_budget=cfg.sources.weibo.daily_creator_budget,
                     request_interval_seconds=cfg.sources.weibo.request_interval_seconds,
                     min_interval_minutes=cfg.sources.weibo.min_interval_minutes,
+
+                    **_source_date_pref_out_kwargs(cfg.sources.weibo),
                 ),
             ),
             scheduler=SchedulerConfigOut(
@@ -18504,6 +18542,65 @@ def create_app(
         # pending edits); what changes is *when* it runs, not where it lives.
         pending_credential_writes: list[tuple[str, Callable[[], None]]] = []
 
+        def _apply_source_date_preference_update(
+            source_cfg: Any,
+            source_data: dict[str, Any],
+            source_name: str,
+        ) -> None:
+            """Validate and apply per-source recommendation date fields."""
+
+            date_preference_fields = {
+                "recommendation_date_preset",
+                "recommendation_date_start",
+                "recommendation_date_end",
+                "recommendation_date_weight",
+            }
+            if not date_preference_fields & source_data.keys():
+                return
+            from openbiliclaw.recommendation.publication_preference import (
+                PublicationDatePreference,
+            )
+
+            try:
+                PublicationDatePreference(
+                    preset=source_data.get(
+                        "recommendation_date_preset",
+                        getattr(source_cfg, "recommendation_date_preset", "all"),
+                    ),
+                    start_date=source_data.get(
+                        "recommendation_date_start",
+                        getattr(source_cfg, "recommendation_date_start", ""),
+                    ),
+                    end_date=source_data.get(
+                        "recommendation_date_end",
+                        getattr(source_cfg, "recommendation_date_end", ""),
+                    ),
+                    weight=source_data.get(
+                        "recommendation_date_weight",
+                        getattr(source_cfg, "recommendation_date_weight", 0.5),
+                    ),
+                )
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": f"invalid_{source_name}_recommendation_date",
+                        "message": str(exc),
+                    },
+                ) from exc
+            for key in (
+                "recommendation_date_preset",
+                "recommendation_date_start",
+                "recommendation_date_end",
+            ):
+                if key in source_data:
+                    value = source_data[key]
+                    setattr(source_cfg, key, "" if value is None else str(value))
+            if "recommendation_date_weight" in source_data:
+                source_cfg.recommendation_date_weight = source_data[
+                    "recommendation_date_weight"
+                ]
+
         # Apply bilibili updates
         if "bilibili" in update:
             bdata = update["bilibili"]
@@ -19059,6 +19156,10 @@ def create_app(
                         "node_allowlist",
                         "node_blocklist",
                         "node_downweight",
+                        "recommendation_date_preset",
+                        "recommendation_date_start",
+                        "recommendation_date_end",
+                        "recommendation_date_weight",
                         *V2EX_CONFIG_INTEGER_LIMITS,
                     }
                     unknown_v2ex_fields = sorted(set(v2ex_data) - allowed_v2ex_fields)
@@ -19204,6 +19305,28 @@ def create_app(
                         if raw_value < 0:
                             raise HTTPException(status_code=400, detail=f"微博 {key} 不能为负数")
                         setattr(cfg.sources.weibo, key, raw_value)
+
+        # Apply per-source recommendation date preference updates. Validation
+        # happens here, before save_config re-validates and writes.
+        if "sources" in update and isinstance(update.get("sources"), dict):
+            sources_data = update["sources"]
+            source_config_by_slug = {
+                "bilibili": cfg.sources.bilibili,
+                "xiaohongshu": cfg.sources.xiaohongshu,
+                "douyin": cfg.sources.douyin,
+                "youtube": cfg.sources.youtube,
+                "twitter": cfg.sources.twitter,
+                "zhihu": cfg.sources.zhihu,
+                "reddit": cfg.sources.reddit,
+                "bangumi": cfg.sources.bangumi,
+                "linuxdo": cfg.sources.linuxdo,
+                "v2ex": cfg.sources.v2ex,
+                "weibo": cfg.sources.weibo,
+            }
+            for slug, source_cfg in source_config_by_slug.items():
+                source_data = sources_data.get(slug)
+                if isinstance(source_data, dict):
+                    _apply_source_date_preference_update(source_cfg, source_data, slug)
 
         # Apply scheduler updates
         if "scheduler" in update:

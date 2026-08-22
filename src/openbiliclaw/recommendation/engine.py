@@ -16,7 +16,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import partial
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
 from openbiliclaw.discovery.strategies._utils import (
     build_profile_summary,
@@ -812,6 +812,7 @@ class RecommendationEngine:
             if snapshot.seen_bvids:
                 candidates = [item for item in candidates if item.bvid not in snapshot.seen_bvids]
             after_viewed_count = len(candidates)
+            candidates = self._filter_candidates_for_publication_serving(candidates)
             curator_snapshot = (
                 list(snapshot.curator_signals),
                 list(snapshot.feedback_signals),
@@ -5282,7 +5283,10 @@ class RecommendationEngine:
                 last_scored_at=str(row.get("last_scored_at", "")),
                 content_id=str(row.get("content_id", "") or row.get("bvid", "")),
                 content_url=str(row.get("content_url", "")),
-                source_platform=str(row.get("source_platform", "") or "bilibili"),
+                source_platform=source_family(
+                    row.get("source", ""),
+                    row.get("source_platform", ""),
+                ),
                 content_type=str(row.get("content_type", "") or "video"),
                 body_text=str(row.get("body_text", "") or ""),
             )
@@ -5348,6 +5352,7 @@ class RecommendationEngine:
         candidates = self._exclude_disliked_topic_candidates_for_serve(candidates, profile)
         after_disliked_count = len(candidates)
         candidates = self._exclude_recently_viewed(candidates)
+        candidates = self._filter_candidates_for_publication_serving(candidates)
         return (
             candidates,
             loaded_count,
@@ -5355,6 +5360,19 @@ class RecommendationEngine:
             after_disliked_count,
             len(candidates),
         )
+
+    def _filter_candidates_for_publication_serving(
+        self,
+        candidates: list[DiscoveredContent],
+    ) -> list[DiscoveredContent]:
+        """Apply strict publication-date eligibility before ranking."""
+        if self._curator is None:
+            return candidates
+
+        filter_for_serving = getattr(self._curator, "filter_candidates_for_serving", None)
+        if not callable(filter_for_serving):
+            return candidates
+        return cast("list[DiscoveredContent]", filter_for_serving(candidates))
 
     def _score_candidates_with_curator(
         self,
