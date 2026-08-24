@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import tomllib
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -628,6 +629,49 @@ async def test_broken_explicit_module_chain_never_spills_to_global() -> None:
     assert registry.chain_calls == [[]]
     assert registry.global_calls == 0
     assert service.supports_image_input("soul.preference") is False
+
+
+@pytest.mark.asyncio
+async def test_broken_module_route_warns_loudly_with_remediation(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A stale explicit route must be visible at WARNING level, not INFO.
+
+    Issue #213: a soul route referencing deleted/disabled instances parked
+    durable chat turns on ``no_provider`` forever while the only trace was an
+    INFO line operators never saw. The WARNING must name the bucket, the
+    unavailable instance, and the remediation.
+    """
+    config = _native_config()
+    config.llm.soul.chain = ["not-registered"]
+    registry = _RoutingRegistry()
+    service = LLMService(
+        registry=registry,
+        memory=None,  # type: ignore[arg-type]
+        module_overrides=module_overrides_from_config(config),
+    )
+
+    with (
+        caplog.at_level("WARNING", logger="openbiliclaw.llm.service"),
+        pytest.raises(LLMProviderExecutionError, match="No provider was available"),
+    ):
+        await service.complete_with_core_memory(
+            system_instruction="system",
+            user_input="profile",
+            caller="soul.preference",
+        )
+
+    warnings = [
+        record
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+        and "LLM module route contains unavailable instance" in record.getMessage()
+    ]
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert "bucket=soul" in message
+    assert "instance=not-registered" in message
+    assert "keep failing until" in message
 
 
 def test_supports_image_input_recognizes_orcarouter_vision_route() -> None:

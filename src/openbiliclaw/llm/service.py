@@ -337,9 +337,15 @@ class LLMService:
             log_key = (bucket, provider)
             if log_key not in self._logged_unknown_override_keys:
                 self._logged_unknown_override_keys.add(log_key)
-                logger.info(
+                # WARNING (not INFO): a stale override usually means the
+                # referenced instance was deleted/disabled after the route was
+                # written. Silent INFO lines hid this state from operators
+                # debugging stuck dialogue turns (issue #213).
+                logger.warning(
                     "LLM module override ignored: bucket=%s provider=%s "
-                    "is not registered or chat-capable; using default provider.",
+                    "is not registered or chat-capable; using default provider. "
+                    "Fix the module route in the settings page or clear it to "
+                    "inherit the global chain.",
                     bucket,
                     provider,
                 )
@@ -347,7 +353,17 @@ class LLMService:
         return provider, model or None
 
     def _resolve_module_chain(self, caller: str) -> list[str] | None:
-        """Return a module's custom v2 chain; ``None`` means inherit global."""
+        """Return a module's custom v2 chain; ``None`` means inherit global.
+
+        A custom chain whose instances all resolve to nothing still returns
+        ``[]`` (never the global chain): an explicitly configured broken route
+        must fail loudly instead of silently spilling into the default chain.
+        The trade-off is that every call for this bucket keeps failing until
+        the route is repaired, so the unavailable-instance filtering below
+        logs at WARNING with remediation hints (issue #213: a stale soul
+        route permanently parked durable chat turns on ``no_provider`` while
+        the failure itself was only visible as an INFO line).
+        """
         bucket = self._route_bucket_for_caller(caller)
         if bucket is None:
             return None
@@ -363,8 +379,14 @@ class LLMService:
             log_key = (bucket, instance_id)
             if log_key not in self._logged_unknown_override_keys:
                 self._logged_unknown_override_keys.add(log_key)
-                logger.info(
-                    "LLM module route contains unavailable instance: bucket=%s instance=%s",
+                # WARNING (not INFO): see the docstring — a fully filtered
+                # route makes every call for this bucket fail until repaired,
+                # and issue #213 showed operators could not see why.
+                logger.warning(
+                    "LLM module route contains unavailable instance: bucket=%s "
+                    "instance=%s; calls for this bucket will keep failing until "
+                    "the route references enabled instances (or inherits the "
+                    "global chain again).",
                     bucket,
                     instance_id,
                 )

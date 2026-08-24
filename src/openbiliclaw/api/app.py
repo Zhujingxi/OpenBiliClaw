@@ -381,6 +381,15 @@ _TERMINAL_CARD_STATES = frozenset({"confirmed", "rejected", "revised"})
 _PENDING_HYPOTHESIS_MIN_CONFIDENCE = 0.60
 _PENDING_CONFUSION_MIN_CONFIDENCE = 0.50
 _PENDING_CONFIRMATION_LIMIT = 3
+# Issue #213: a ``no_provider`` failure is config-shaped (empty resolved module
+# route / global chain), so retrying it forever only parks the durable turn on
+# the infinite "thinking" spinner and head-of-line blocks every later turn.
+# Three fast failures (≈3s with the scheduler's 1s→2s backoff) escalate the
+# turn to a terminal failed state with remediation copy, while transient
+# windows (a quick settings toggle, hot reload) still get those retries to
+# heal. Recalibrate only alongside the escalation test in
+# tests/test_durable_chat_reply_api.py.
+_CHAT_NO_PROVIDER_TERMINAL_ATTEMPTS = 3
 # Seats reserved for confusions when any qualify. The two kinds score confidence
 # on opposite scales: a hypothesis' confidence means "how sure am I this is
 # true" (higher = more worth asking), while a confusion's
@@ -10905,15 +10914,37 @@ def create_app(
         }
     )
 
+    # Issue #213: ``no_provider`` is a config-shaped failure (the resolved
+    # module route / global chain references no chat-capable instance), so
+    # retrying forever only parks the turn on the infinite "thinking" spinner
+    # and head-of-line blocks every later turn. Escalate to a terminal failed
+    # turn after a few fast no-provider failures (other failure kinds do not
+    # reset the count — mixed transient + no-provider failures still point at
+    # the same broken route); transient windows (a quick settings toggle, hot
+    # reload) still get those retries to heal.
+    _chat_no_provider_streak: dict[str, int] = {}
+
+    def _escalate_persistent_no_provider_failure(turn_id: str, exc: Exception) -> bool:
+        """Count no-provider failures for one durable turn; True when terminal."""
+        from openbiliclaw.llm.base import classify_llm_failure_kind
+
+        if classify_llm_failure_kind(exc) != "no_provider":
+            return False
+        streak = _chat_no_provider_streak.get(turn_id, 0) + 1
+        _chat_no_provider_streak[turn_id] = streak
+        return streak >= _CHAT_NO_PROVIDER_TERMINAL_ATTEMPTS
+
     async def _complete_durable_chat_turn(turn_id: str) -> None:
         row = _get_chat_turn_row(turn_id)
         if row is None or str(row.get("status", "")) != "pending":
+            _chat_no_provider_streak.pop(turn_id, None)
             return
         async with _dialogue_execution_lease() as current_dialogue:
             # The turn may have completed while this worker waited behind hot
             # reload or a synchronous dialogue. Re-read under the stable lease.
             row = _get_chat_turn_row(turn_id)
             if row is None or str(row.get("status", "")) != "pending":
+                _chat_no_provider_streak.pop(turn_id, None)
                 return
             turn = _normalize_chat_turn(row)
             try:
@@ -10932,7 +10963,16 @@ def create_app(
                         safe_llm_failure_message(exc),
                         code="invalid_response",
                     ) from exc
+                if _escalate_persistent_no_provider_failure(turn_id, exc):
+                    _chat_no_provider_streak.pop(turn_id, None)
+                    raise TerminalChatReplyError(
+                        "AI 模块路由连续多次解析不到任何可用实例"
+                        "（常见原因：设置页的模块路由或全局调用链引用了已停用 / 已删除的实例）。"
+                        "本条消息已停止等待，请修正 LLM 路由配置后重新发送。",
+                        code="no_provider",
+                    ) from exc
                 raise
+            _chat_no_provider_streak.pop(turn_id, None)
 
             completed = _complete_chat_turn_row(turn_id, reply=reply)
             if not completed:
