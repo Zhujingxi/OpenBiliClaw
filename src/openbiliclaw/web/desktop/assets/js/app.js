@@ -11368,7 +11368,7 @@ ${cardFeedbackBarHtml()}`;
       if (diagnosticsAlertsLoading) return;
       diagnosticsAlertsLoading = true;
       try {
-        const payload = await requestJson("/api/diagnostics/alerts?limit=50", { timeoutMs: 8000 });
+        const payload = await requestJson("/diagnostics/alerts?limit=50", { timeoutMs: 8000 });
         if (payload) renderDiagnosticsAlerts(payload);
       } catch {
         // 面板里的辅助信息：拉取失败保持现状即可，不打扰用户。

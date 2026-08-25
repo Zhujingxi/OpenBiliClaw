@@ -33,8 +33,10 @@ def test_settings_logging_panel_mounts_diagnostics_alerts_section() -> None:
 def test_app_js_fetches_polls_and_renders_alerts_safely() -> None:
     app_js = APP_JS.read_text(encoding="utf-8")
 
-    # 只读端点 + 页大小上限。
-    assert '"/api/diagnostics/alerts?limit=50"' in app_js
+    # requestJson 会自动拼接 "/api" base，路径绝不能再带前缀
+    # （曾真实复现过 /api/api/diagnostics/alerts → 404）。
+    assert 'requestJson("/diagnostics/alerts?limit=50"' in app_js
+    assert 'requestJson("/api/' not in app_js
 
     # 面板可见时启动 10s 轮询，切走即停止；后台标签页不请求。
     assert 'panelName === "logging") startDiagnosticsAlertFeed();' in app_js
