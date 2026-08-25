@@ -134,20 +134,24 @@ class DiagnosticsAlertBuffer:
         now = time.time()
         payload: dict[str, Any] | None = None
         with self._lock:
-            latest = self._entries[-1] if self._entries else None
-            if (
-                latest is not None
-                and latest.category == category
-                and latest.code == code
-                and latest.source == source
-                and now - latest.last_seen <= self._coalesce_window
-            ):
-                latest.count += 1
-                latest.last_seen = now
+            # Merge into the most recent row sharing this exact identity
+            # (category/code/source), not merely entries[-1]: a single LLM
+            # request writes an alternating pair (per-provider failure then
+            # the chain-terminal error), so tail-only matching would append
+            # a new row for both kinds on every retry instead of bumping
+            # their counts.
+            target: DiagnosticsAlert | None = None
+            for alert in reversed(self._entries):
+                if alert.category == category and alert.code == code and alert.source == source:
+                    target = alert
+                    break
+            if target is not None and now - target.last_seen <= self._coalesce_window:
+                target.count += 1
+                target.last_seen = now
                 if severity == "error":
-                    latest.severity = "error"
-                    latest.message = message
-                payload = latest.to_dict()
+                    target.severity = "error"
+                    target.message = message
+                payload = target.to_dict()
             else:
                 alert = DiagnosticsAlert(
                     id=self._next_id,

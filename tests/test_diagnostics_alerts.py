@@ -89,6 +89,36 @@ def test_identical_alerts_coalesce_within_window() -> None:
     assert snapshot["alerts"][0]["first_seen"] == pytest.approx(payload["first_seen"])
 
 
+def test_alternating_alert_pairs_merge_by_identity_not_tail_only() -> None:
+    """每轮请求写入交替的两条告警时，各自仍应合并而不是无限追加。
+
+    真实场景：LLM 链每次失败先记 per-provider auth_failed，再记
+    all_providers_failed；只看 entries[-1] 的合并会让两类交替互相打断，
+    每次重试都新增两行（真实环境 E2E 发现）。
+    """
+    buffer = DiagnosticsAlertBuffer(coalesce_window_seconds=60.0)
+    for _ in range(3):
+        buffer.record(
+            category="llm",
+            code="auth_failed",
+            message="HTTP 401: Forbidden",
+            source="gw-a",
+        )
+        buffer.record(
+            category="llm",
+            code="all_providers_failed",
+            message="所有 LLM 实例均请求失败（gw-a）",
+            source="gw-a",
+            severity="error",
+        )
+
+    snapshot = buffer.snapshot()
+    assert snapshot["summary"] == {"total": 2, "errors": 1, "warnings": 1}
+    codes = {row["code"]: row for row in snapshot["alerts"]}
+    assert codes["auth_failed"]["count"] == 3
+    assert codes["all_providers_failed"]["count"] == 3
+
+
 def test_different_source_does_not_coalesce() -> None:
     buffer = DiagnosticsAlertBuffer()
     buffer.record(category="llm", code="rate_limited", message="429", source="gw-a")
