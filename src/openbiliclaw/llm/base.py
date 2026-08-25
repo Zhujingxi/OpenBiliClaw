@@ -15,7 +15,23 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
 
+from openbiliclaw.diagnostics_alerts import record_diagnostics_alert
+
 logger = logging.getLogger(__name__)
+
+
+def _classify_llm_error_code(exc: BaseException) -> str:
+    """Map a provider failure to a stable diagnostics alert code."""
+    if isinstance(exc, LLMRateLimitError):
+        return "rate_limited"
+    if isinstance(exc, LLMAuthError):
+        return "auth_failed"
+    if isinstance(exc, LLMTimeoutError):
+        return "timeout"
+    if isinstance(exc, LLMResponseError):
+        return "bad_response"
+    return "provider_error"
+
 
 LLM_CONNECTIVITY_PROBE_MAX_TOKENS = 4096
 # Balanced default for provider-native reasoning controls.  Channel-facing
@@ -752,6 +768,12 @@ class LLMRegistry:
                 last_error = exc
                 self._mark_rate_limited(provider_name)
                 self._log_provider_failure(provider_name, has_next=has_next)
+                record_diagnostics_alert(
+                    category="llm",
+                    code="rate_limited",
+                    message=str(exc) or "LLM provider returned HTTP 429 (rate limited).",
+                    source=provider_name,
+                )
             # LLMResponseError (empty/malformed content — flaky gateways
             # commonly die by returning 200 with no content) falls through to
             # the next provider like any other failure: the provider already
@@ -760,10 +782,23 @@ class LLMRegistry:
             except (LLMProviderError, LLMTimeoutError) as exc:
                 last_error = exc
                 self._log_provider_failure(provider_name, has_next=has_next)
+                record_diagnostics_alert(
+                    category="llm",
+                    code=_classify_llm_error_code(exc),
+                    message=str(exc),
+                    source=provider_name,
+                )
 
         attempted_list = ", ".join(attempted)
         if last_error is None:
             raise LLMFallbackError("No provider was available to process the request.")
+        record_diagnostics_alert(
+            category="llm",
+            code="all_providers_failed",
+            message=f"所有 LLM 实例均请求失败（{attempted_list}），最后错误：{last_error}",
+            source=attempted_list,
+            severity="error",
+        )
         raise LLMFallbackError(
             f"All providers failed ({attempted_list}). Last error: {last_error}"
         ) from last_error
@@ -819,6 +854,12 @@ class LLMRegistry:
         except LLMRateLimitError:
             self._mark_rate_limited(target)
             logger.warning("Provider %s rate-limited exact routed call.", target)
+            record_diagnostics_alert(
+                category="llm",
+                code="rate_limited",
+                message=f"LLM 实例 {target} 被限流（HTTP 429），精确路由调用失败。",
+                source=target,
+            )
             raise
 
     async def health_check_all(self) -> dict[str, HealthCheckResult]:

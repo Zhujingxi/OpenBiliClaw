@@ -5155,6 +5155,114 @@
       font-size: 16px;
     }
 
+    /* ── 异常报警（LLM / Embedding 请求失败等异常事件）── */
+    .diag-alerts-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      min-width: 0;
+    }
+
+    .diag-alert-summary {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: var(--text-secondary);
+      font-size: 11px;
+    }
+
+    .diag-alerts-refresh {
+      flex-shrink: 0;
+    }
+
+    .diag-alerts-empty {
+      margin: 0;
+      color: var(--text-muted);
+      font-size: 11.5px;
+      line-height: 1.5;
+    }
+
+    .diag-alert-list {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-height: 260px;
+      overflow-y: auto;
+    }
+
+    .diag-alert-item {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--surface-soft);
+    }
+
+    .diag-alert-item[data-severity="error"] {
+      border-color: rgba(239, 122, 134, 0.45);
+      background: rgba(239, 122, 134, 0.08);
+    }
+
+    .diag-alert-item-top {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+    }
+
+    .diag-alert-badge {
+      flex-shrink: 0;
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: 0.04em;
+      padding: 1px 7px;
+      border-radius: 999px;
+      white-space: nowrap;
+    }
+
+    .diag-alert-item[data-severity="error"] .diag-alert-badge {
+      background: rgba(239, 122, 134, 0.22);
+      color: #b3475a;
+    }
+
+    .diag-alert-item[data-severity="warning"] .diag-alert-badge {
+      background: var(--warning-soft);
+      color: #9a6b1f;
+    }
+
+    .diag-alert-source {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: var(--text-secondary);
+      font-size: 11px;
+      font-weight: 700;
+    }
+
+    .diag-alert-message {
+      color: var(--text-main);
+      font-size: 11.5px;
+      line-height: 1.5;
+      word-break: break-word;
+    }
+
+    .diag-alert-meta {
+      color: var(--text-muted);
+      font-size: 10.5px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
     .settings-field {
       min-width: 0;
       display: flex;
@@ -7558,6 +7666,17 @@
           <label for="cfgLogUnmanagedMaxAge">非托管日志保留天数</label>
           <input id="cfgLogUnmanagedMaxAge" type="number" min="0" step="1" placeholder="30">
         </div>
+      </div>
+
+      <!-- Diagnostics alerts (LLM / Embedding 请求失败等异常事件) -->
+      <div class="settings-section diag-alerts-section">
+        <h3><span class="section-icon">&#x26A0;&#xFE0F;</span> 异常报警</h3>
+        <div class="diag-alerts-head">
+          <span class="diag-alert-summary" id="cfgDiagAlertSummary" aria-live="polite"></span>
+          <button id="cfgRefreshDiagAlerts" class="settings-secondary-btn diag-alerts-refresh" type="button">刷新</button>
+        </div>
+        <p class="diag-alerts-empty" id="cfgDiagAlertsEmpty">暂无异常报警，LLM / Embedding 请求异常会显示在这里。</p>
+        <ul class="diag-alert-list" id="cfgDiagAlertList" hidden></ul>
       </div>
       </div>
 

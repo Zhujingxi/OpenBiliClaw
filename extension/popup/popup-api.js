@@ -398,6 +398,14 @@ export async function fetchRuntimeStatus() {
   return requestJson("/runtime-status", { method: "GET" });
 }
 
+export async function fetchDiagnosticsAlerts({ limit = 50 } = {}) {
+  const boundedLimit = Number.isFinite(limit) ? Math.max(1, Math.min(Math.trunc(limit), 500)) : 50;
+  return requestJson(`/diagnostics/alerts?limit=${boundedLimit}`, {
+    method: "GET",
+    timeoutMs: 12_000,
+  });
+}
+
 export async function fetchInitStatus() {
   return requestJson("/init-status", { method: "GET", timeoutMs: 45000 });
 }

@@ -30,6 +30,8 @@ from pathlib import Path
 from typing import Protocol
 from urllib.parse import SplitResult, urlsplit, urlunsplit
 
+from openbiliclaw.diagnostics_alerts import record_diagnostics_alert
+
 logger = logging.getLogger(__name__)
 
 _IMAGE_CACHE_KEY_PREFIX = "img:"
@@ -1331,7 +1333,8 @@ class EmbeddingService:
         flood the log with per-call stack traces.
         """
         self._breaker_failure_count += 1
-        if self._breaker_failure_count >= self._breaker_failure_threshold:
+        breaker_tripped = self._breaker_failure_count >= self._breaker_failure_threshold
+        if breaker_tripped:
             self._breaker_open_until = time.monotonic() + self._breaker_cooldown_seconds
             logger.warning(
                 "Embedding provider failed %d consecutive times; opening circuit "
@@ -1339,6 +1342,22 @@ class EmbeddingService:
                 self._breaker_failure_count,
                 self._breaker_cooldown_seconds,
             )
+        # Surface the anomaly in the diagnostics alert feed (Web 控制台 / 插件
+        # 配置页「日志」tab 的异常报警区域)。Breaker trips are error-level;
+        # individual failures stay warnings so a flaky endpoint doesn't
+        # cry wolf while it still recovers on its own.
+        record_diagnostics_alert(
+            category="embedding",
+            code="breaker_open" if breaker_tripped else "provider_error",
+            message=(
+                f"Embedding provider 连续失败 {self._breaker_failure_count} 次，"
+                f"熔断 {self._breaker_cooldown_seconds:.0f}s。"
+                if breaker_tripped
+                else "Embedding provider 请求失败（返回空向量或抛出异常）。"
+            ),
+            source=self._embedding_alert_source(),
+            severity="error" if breaker_tripped else "warning",
+        )
 
     def _register_embedding_success(self) -> None:
         """Reset breaker state after a healthy provider response.
@@ -1350,6 +1369,14 @@ class EmbeddingService:
         """
         self._breaker_failure_count = 0
         self._breaker_open_until = 0.0
+
+    def _embedding_alert_source(self) -> str:
+        """Best-effort label for diagnostics alerts (provider / model)."""
+        name = str(getattr(self._provider, "name", "") or "").strip()
+        model = str(self._cache_model or self._model or "").strip()
+        if name and model:
+            return f"{name}/{model}"
+        return name or model or "embedding"
 
     async def embed(self, text: str) -> list[float]:
         """Get embedding for text. Checks L1 → L2 → API."""

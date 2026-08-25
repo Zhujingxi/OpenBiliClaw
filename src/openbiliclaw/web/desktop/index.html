@@ -1375,6 +1375,15 @@
             <label class="settings-field"><span>非托管日志保留天数</span><input id="logUnmanagedMaxAge" inputmode="numeric" placeholder="30"></label>
           </div>
           <label class="settings-field"><span>非托管日志截断 MB</span><input id="logUnmanagedTruncate" inputmode="numeric" placeholder="200"></label>
+          <div class="diag-alerts" id="diagnosticsAlerts">
+            <div class="diag-alerts-head">
+              <span class="diag-alerts-title">异常报警</span>
+              <span class="diag-alerts-summary" id="diagnosticsAlertsSummary" aria-live="polite"></span>
+              <button type="button" class="pill-btn diag-alerts-refresh" id="refreshDiagnosticsAlertsBtn">刷新</button>
+            </div>
+            <p class="diag-alerts-empty" id="diagnosticsAlertsEmpty">暂无异常报警，LLM / Embedding 请求异常会显示在这里。</p>
+            <ul class="diag-alert-list" id="diagnosticsAlertList" hidden></ul>
+          </div>
         </div>
 
         <label class="settings-field full"><span>配置状态</span><textarea id="configStatus" rows="3" readonly="" aria-live="polite">可连接 FastAPI：/api/health、/api/config、/api/runtime-status。保存后调用 PUT /api/config，并热重载运行时。</textarea></label>

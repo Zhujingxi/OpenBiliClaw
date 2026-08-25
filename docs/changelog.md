@@ -4,6 +4,9 @@
 
 ---
 
+## 未发布
+
+- **新增异常报警（LLM / Embedding 请求异常可视化）**：新顶层模块 `diagnostics_alerts` 维护进程内有界环形缓冲（60s 内同类别/来源/错误码合并为一条并累加计数，上限 100 条），`LLMRegistry` 的限流 / 鉴权失败 / 超时 / 响应异常 / 全部实例失败与 `EmbeddingService` 的单次失败 / 熔断触发都会自动记录（熔断与全部实例失败为 error 级，单次失败为 warning 级）；记录永不抛错、不阻塞热路径。新增只读端点 `GET /api/diagnostics/alerts?since_id=&limit=`（支持增量拉取），新告警同时经 event hub 以 `type="diagnostics.alert"` 实时推送到 `/api/runtime-stream`；桌面 Web 设置页日志 tab 与插件 popup 设置页「日志」tab 均新增「异常报警」区（摘要 + 错误/警告徽标 + 中文错误码说明 + 刷新 + 可见面板时轮询/实时刷新）。**展示面范围**：移动 Web 与 CLI 明确不在本功能范围——移动 Web 没有日志/设置面（views 仅 chat/history/library/login/profile/recommend/saved），CLI 只有 `logs-prune` 等文件维护命令、无运行时 feed 展示面。测试覆盖缓冲合并、快照、发布、LLM 与 embedding 失败钩子，并为插件与桌面 Web 新增异常报警区结构契约测试（`popup-diagnostics-alerts.test.ts` / `test_desktop_web_diagnostics_alerts.py`）；`docs/modules/api.md`、`docs/modules/llm.md` 与 `docs/modules/extension.md` 已同步。
 
 ## v0.3.210：海外代理路由统一修复与来源日期过滤（2026-08-23）
 
