@@ -198,10 +198,10 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.210 (2026-08-23)**
+📌 Latest: **v0.3.211 (2026-08-26)**
 
-- **Fixed YouTube covers breaking under custom proxy** — overseas cover CDNs and inspiration search backends no longer bypass the `[network]` proxy and time out.
-- **Per-source release-date filtering (issue #18)** — each platform source accepts a date range and weight; stale candidates are hard-filtered before LLM evaluation.
+- **Diagnostics alerts** — LLM / Embedding failures (rate limits, auth, circuit-breaker trips) now show up live in the desktop & extension settings log tab; no more digging through log files.
+- **SenseNova free tier (issue #193)** — a built-in `sensenova` one-click preset lets new users try the full recommendation pipeline at zero cost.
 
 Full changelog: [docs/changelog.md](docs/changelog.md).
 
