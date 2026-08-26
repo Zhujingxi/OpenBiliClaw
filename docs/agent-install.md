@@ -305,7 +305,7 @@ user chooses an OpenAI-compatible gateway / preset path.
 | 选项 | 默认模型 | 适合谁 | 是否需要 API Key | 钱 / 速度 |
 |---|---|---|---|---|
 | 1. **DeepSeek** ★第一推荐(极便宜 / 国内可直连) | `deepseek-v4-flash`(可选 `deepseek-v4-pro`;旧 `deepseek-chat`/`deepseek-reasoner` **2026/07/24 弃用**) | 想几毛钱体验完整功能 | ✅ 需要 | ¥0.001 / 千 token,几乎免费 |
-| 2. **★ 中转站 / OpenAI 协议兼容服务** ★第二推荐 | 选 preset 后自动填 | **国内买中转站 / OneAPI Key 的人走这个**;也覆盖 Kimi / MiniMax / 通义 / 智谱 / Yi 官方 + Azure / vLLM / LMStudio | 看服务 | 看服务 |
+| 2. **★ 中转站 / OpenAI 协议兼容服务** ★第二推荐 | 选 preset 后自动填 | **国内买中转站 / OneAPI Key 的人走这个**;也覆盖 Kimi / MiniMax / 通义 / 智谱 / 商汤日日新 / Yi 官方 + Azure / vLLM / LMStudio | 看服务 | 看服务(日日新 / 智谱 GLM-4.7-Flash 有免费额度) |
 | 3. **OpenAI 官方** | `gpt-5-nano`(最便宜的 GPT-5;可选 gpt-5.4-nano / -mini / gpt-5.5 旗舰) | 已有 sk- 开头 Key | ✅ 需要 | $0.05/M(nano) ~ $30/M(5.5-pro) |
 | 4. **Gemini 官方** | `gemini-2.5-flash`(稳定;可选 gemini-3-flash-preview / gemini-3.1-pro-preview 旗舰 Public Preview 需付费项目) | Google AI Studio 申请 Key | ✅ 需要 | 免费档每天 1500 次 |
 | 5. **Claude 官方** | `claude-sonnet-4-6`(1M ctx;可选 claude-haiku-4-5 便宜 / claude-opus-4-7 旗舰) | Anthropic console | ✅ 需要 | $3-$75/M,按 token,质量高 |
@@ -321,7 +321,7 @@ user chooses an OpenAI-compatible gateway / preset path.
 
 **AI agent 决策建议**: **默认引导 #1 DeepSeek**(几毛钱搞定);用户明确说"我有中转站 Key / OneAPI / 通义 / 智谱 / Kimi / MiniMax / Yi / Azure / vLLM 等任何 OpenAI 兼容服务"→ 引导 #2(进子菜单后再细分);用户明确说"用 OpenAI / Gemini / Claude 官方"才走 #3-5;用户提到"OrcaRouter / 一个 Key 跑多家模型 + 安全网关"→ 引导 #7;Ollama 仅在用户明确要求"本地 / 离线"时用显式 `--provider ollama` 走离线路径。
 
-**选项 2 的核心场景:你买了第三方中转站 / OneAPI 的 Key**,想用人民币付钱跑 OpenAI / Claude / 国产模型 —— 这是国内绝大多数用户用这个选项的真正原因。子菜单 9 个 preset 中,**第 1 个就是中转站(默认)**:
+**选项 2 的核心场景:你买了第三方中转站 / OneAPI 的 Key**,想用人民币付钱跑 OpenAI / Claude / 国产模型 —— 这是国内绝大多数用户用这个选项的真正原因。子菜单 10 个 preset 中,**第 1 个就是中转站(默认)**:
 
 | 子菜单# | 服务 | Base URL | 默认模型 / 备选 |
 |---|---|---|---|
@@ -330,14 +330,15 @@ user chooses an OpenAI-compatible gateway / preset path.
 | 3 | **MiniMax 官方** | `https://api.minimax.io/v1` | `MiniMax-M2.7`(4/2026 / 228K ctx / $0.30 ~ $1.20 per M) |
 | 4 | **通义千问 (阿里 DashScope) 官方** | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-plus`(自动跟最新快照,当前 → qwen3.6-plus) / `qwen-flash`(便宜) / `qwen-max`(旗舰) |
 | 5 | **智谱 ChatGLM 官方** | `https://open.bigmodel.cn/api/paas/v4` | `glm-4.7-flash`(1/2026 免费 / 200K ctx) / `glm-5`(2/2026 付费旗舰 / 745B MoE)。注意 base_url 用 `/api/paas/v4` 不是 `/v1` |
-| 6 | **零一万物 (Yi) 官方** | `https://api.lingyiwanwu.com/v1` | `yi-medium` / `yi-spark`(便宜) / `yi-lightning`(快) / `yi-large`(旗舰) |
-| 7 | **Azure OpenAI** | `https://YOUR-RESOURCE.openai.azure.com/openai/deployments/YOUR-DEPLOYMENT` | 用户自填 deployment name(不是底层 gpt-5) |
-| 8 | **自建 vLLM / LMStudio / Ollama 网关** | `http://localhost:8000/v1` | 用户自填 HuggingFace 路径(如 `meta-llama/Llama-3.3-70B-Instruct`) |
-| 9 | **其它(完全手填)** | 用户自填 | 用户自填 |
+| 6 | **商汤日日新 (SenseNova) 官方** | `https://token.sensenova.cn/v1` | `deepseek-v4-flash`(已实测连通)。新用户免费额度，可零成本体验本项目(issue #193)；其它可用模型以控制台清单为准。token 端点未验证 embedding，Phase 3 默认推荐独立 Ollama bge-m3 |
+| 7 | **零一万物 (Yi) 官方** | `https://api.lingyiwanwu.com/v1` | `yi-medium` / `yi-spark`(便宜) / `yi-lightning`(快) / `yi-large`(旗舰) |
+| 8 | **Azure OpenAI** | `https://YOUR-RESOURCE.openai.azure.com/openai/deployments/YOUR-DEPLOYMENT` | 用户自填 deployment name(不是底层 gpt-5) |
+| 9 | **自建 vLLM / LMStudio / Ollama 网关** | `http://localhost:8000/v1` | 用户自填 HuggingFace 路径(如 `meta-llama/Llama-3.3-70B-Instruct`) |
+| 10 | **其它(完全手填)** | 用户自填 | 用户自填 |
 
 > 💡 **AI agent 注意**:
 > - 用户说"我有中转站 / OneAPI / 团队网关 / 公司给的 Key"等(国内最常见)→ 选项 2 子菜单 #1 (relay)
-> - 用户说"我有 Kimi / 通义 / 智谱 / Yi / Moonshot / MiniMax / Qwen / GLM 官方 Key" → 选项 2 子菜单 #2-6 对应 preset
+> - 用户说"我有 Kimi / 通义 / 智谱 / 商汤日日新 / Yi / Moonshot / MiniMax / Qwen / GLM / SenseNova 官方 Key" → 选项 2 子菜单 #2-7 对应 preset
 > - 用户说"Azure OpenAI / 公司 Azure 部署" → 子菜单 #7 (azure)
 > - 用户说"自己跑的 vLLM / LMStudio / Ollama OpenAI 兼容 shim" → 子菜单 #8 (self-hosted)
 >
