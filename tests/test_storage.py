@@ -56,6 +56,37 @@ def _v2_temporal(**overrides: Any) -> dict[str, Any]:
     return fields
 
 
+def _freeze_storage_clock(monkeypatch: Any, frozen: str = "2026-08-12T00:00:00+00:00") -> None:
+    """把 database 模块的墙钟冻结到固定时刻。
+
+    helper 默认 evaluated_at=2026-08-12，存储层重算 next_review=+14d
+    （2026-08-26）。真实时钟越过该日期后，依赖「重算后仍在未来 →
+    eligible」的测试会翻转成 review_due（2026-08-26 当天 CI 实测爆发）。
+    冻结到 evaluated_at 当天，重算结果永远在冻结时钟的 14 天后，
+    测试回归确定性。
+    """
+    import openbiliclaw.storage.database as database_module
+
+    frozen_dt = datetime.fromisoformat(frozen)
+
+    class _FrozenClock:
+        @classmethod
+        def now(cls, tz: object = None) -> datetime:
+            if tz is None:
+                return frozen_dt
+            return frozen_dt.astimezone(tz)  # type: ignore[arg-type]
+
+        @classmethod
+        def fromisoformat(cls, value: str) -> datetime:
+            return datetime.fromisoformat(value)
+
+        @classmethod
+        def strptime(cls, value: str, fmt: str) -> datetime:
+            return datetime.strptime(value, fmt)
+
+    monkeypatch.setattr(database_module, "datetime", _FrozenClock)
+
+
 class TestDatabase:
     """Test SQLite database operations."""
 
@@ -182,7 +213,10 @@ class TestDatabase:
         assert row["temporal_validity_mode"] == "explicit_deadline"
         assert row["temporal_evidence_complete"] == 1
 
-    def test_v2_storage_recomputes_caller_supplied_review_clock(self, tmp_path: Path) -> None:
+    def test_v2_storage_recomputes_caller_supplied_review_clock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _freeze_storage_clock(monkeypatch)
         db = Database(tmp_path / "v2-policy-clock.db")
         db.initialize()
 
@@ -483,7 +517,9 @@ class TestDatabase:
     def test_only_complete_non_neutral_review_restores_hold_to_fresh(
         self,
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        _freeze_storage_clock(monkeypatch)
         db = Database(tmp_path / "v2-review-restore.db")
         db.initialize()
         due = _v2_temporal(
@@ -656,7 +692,9 @@ class TestDatabase:
     def test_final_serve_commit_applies_all_three_temporal_states(
         self,
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        _freeze_storage_clock(monkeypatch)
         db = Database(tmp_path / "v2-final-serve.db")
         db.initialize()
         common = {
@@ -5183,7 +5221,9 @@ class TestDatabase:
     def test_pool_maintenance_holds_newly_due_fresh_rows_in_writer_transaction(
         self,
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        _freeze_storage_clock(monkeypatch)
         db = Database(tmp_path / "maintenance-temporal-due.db")
         db.initialize()
         _seed_visible(db, "BVMAINTDUE", source="search", **_v2_temporal())
