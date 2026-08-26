@@ -152,6 +152,10 @@ LLM_PRESETS: dict[str, dict[str, str]] = {
         "base_url": "https://open.bigmodel.cn/api/paas/v4",
         "model": "glm-4.7-flash",
     },
+    "sensenova": {
+        "base_url": "https://token.sensenova.cn/v1",
+        "model": "deepseek-v4-flash",
+    },
     "yi": {
         "base_url": "https://api.lingyiwanwu.com/v1",
         "model": "yi-medium",
@@ -196,6 +200,7 @@ HUMAN_OPENAI_COMPAT_PRESETS: tuple[str, ...] = (
     "minimax",
     "qwen",
     "zhipu",
+    "sensenova",
     "yi",
     "azure",
     "self-hosted",
@@ -904,6 +909,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "minimax",
             "qwen",
             "zhipu",
+            "sensenova",
             "yi",
             "self-hosted",
             "relay",
@@ -918,8 +924,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "Implies --provider=openai_compatible. --llm-base-url / --llm-model still "
             "override the preset on a per-field basis. Presets: "
             "kimi (Moonshot), minimax (M2.7), qwen (DashScope), zhipu (GLM), "
-            "yi (零一万物), self-hosted (vLLM/LMStudio), relay (中转站/OneAPI), "
-            "azure (Azure OpenAI), custom (no preset)."
+            "sensenova (商汤日日新, 免费额度), yi (零一万物), self-hosted (vLLM/LMStudio), "
+            "relay (中转站/OneAPI), azure (Azure OpenAI), custom (no preset)."
         ),
     )
     parser.add_argument(
@@ -2589,9 +2595,7 @@ def apply_module_overrides(project_dir: Path, specs: list[str]) -> dict[str, Any
         )
         effective_provider = provider or default_provider
         instance_id = (
-            _llm_instance_id_for_provider(data, effective_provider, model=model)
-            if model
-            else ""
+            _llm_instance_id_for_provider(data, effective_provider, model=model) if model else ""
         )
         if not instance_id:
             instance_id = _llm_instance_id_for_provider(data, effective_provider)

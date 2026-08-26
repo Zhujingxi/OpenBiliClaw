@@ -1832,6 +1832,31 @@ _OPENAI_COMPAT_PRESETS: tuple[tuple[str, dict[str, str]], ...] = (
         },
     ),
     (
+        "sensenova",
+        {
+            "label": "商汤日日新 (SenseNova) 官方",
+            "description": (
+                "商汤日日新开放平台,新用户有免费额度,可以零成本体验本项目"
+                "(issue #193)。token 推理端点已按 OpenAI 协议实测连通"
+                "(deepseek-v4-flash 真实请求验证)"
+            ),
+            "signup_url": (
+                "https://console.sensecore.cn （日日新开放平台控制台申请 API Key,"
+                "免费额度以官方页面为准）"
+            ),
+            "supports_embedding": "false",
+            "base_url": "https://token.sensenova.cn/v1",
+            "default_model": "deepseek-v4-flash",
+            "hint": (
+                "deepseek-v4-flash (默认 / 已实测) / 其它可用模型以控制台模型清单为准。"
+                "免费额度适合试用与轻度使用;重度使用建议充值或换 DeepSeek 官方"
+            ),
+            "embedding_alt": (
+                "token 推理端点未验证 /v1/embeddings,Phase 3 默认推荐独立 Ollama bge-m3"
+            ),
+        },
+    ),
+    (
         "yi",
         {
             "label": "零一万物 (Yi) 官方",
