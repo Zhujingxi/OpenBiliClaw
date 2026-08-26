@@ -1297,6 +1297,21 @@
     .llm-section-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4); min-width: 0; }
     .llm-section-head h3, .llm-module-head h4 { margin: 0; color: var(--fg); }
     .settings-section-kicker { margin: 0 0 4px; color: var(--accent); font-family: var(--font-mono); font-size: 11px; font-weight: 750; letter-spacing: .1em; text-transform: uppercase; }
+    .diag-alerts { grid-column: 1 / -1; display: grid; gap: var(--space-2); padding: var(--space-3) var(--space-4); border: 1px solid var(--border-soft); border-radius: var(--radius-lg); background: color-mix(in oklab, var(--surface), var(--bg) 24%); box-shadow: var(--elev-ring); }
+    .diag-alerts-head { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
+    .diag-alerts-title { font-weight: 750; color: var(--fg); }
+    .diag-alerts-summary { flex: 1; font-size: var(--text-sm); color: var(--fg-2); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .diag-alerts-refresh { flex-shrink: 0; }
+    .diag-alerts-empty { margin: 0; color: var(--fg-2); font-size: var(--text-sm); }
+    .diag-alert-list { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-2); max-height: 280px; overflow-y: auto; }
+    .diag-alert-item { display: grid; grid-template-columns: auto auto 1fr auto; align-items: baseline; gap: var(--space-2); padding: var(--space-2) var(--space-3); border-radius: var(--radius-md, 10px); background: color-mix(in oklab, var(--surface), transparent 30%); border: 1px solid var(--border-soft); }
+    .diag-alert-item[data-severity="error"] { border-color: color-mix(in oklab, var(--danger), transparent 55%); }
+    .diag-alert-badge { font-size: 11px; font-weight: 750; letter-spacing: .04em; padding: 1px 8px; border-radius: 999px; white-space: nowrap; }
+    .diag-alert-item[data-severity="error"] .diag-alert-badge { background: color-mix(in oklab, var(--danger), transparent 78%); color: var(--danger-fg, var(--fg)); }
+    .diag-alert-item[data-severity="warning"] .diag-alert-badge { background: color-mix(in oklab, var(--warn), transparent 70%); color: var(--warn-fg); }
+    .diag-alert-source { font-family: var(--font-mono); font-size: 12px; color: var(--fg-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 220px; }
+    .diag-alert-message { min-width: 0; font-size: var(--text-sm); color: var(--fg); word-break: break-word; }
+    .diag-alert-meta { font-size: 11px; color: var(--fg-2); white-space: nowrap; }
     .llm-section-head .settings-note-inline { margin: 6px 0 0; }
     .llm-add-instance { display: inline-flex; align-items: center; gap: 7px; flex: 0 0 auto; cursor: pointer; }
     .llm-add-instance svg, .llm-instance-dialog-head svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }

@@ -194,6 +194,7 @@ from openbiliclaw.api.models import (
     ZhihuSourceConfigOut,
     validate_saved_item_key,
 )
+from openbiliclaw.diagnostics_alerts import get_diagnostics_alert_buffer
 from openbiliclaw.discovery.temporal import (
     evaluate_temporal_eligibility,
     is_complete_temporal_evidence_marker,
@@ -2177,6 +2178,13 @@ def create_app(
         from openbiliclaw.llm.concurrency import LLMConcurrencyGate
 
         ctx.llm_concurrency_gate = LLMConcurrencyGate(llm_concurrency_from_config(config))
+
+    # Fan freshly recorded LLM/embedding anomaly alerts out to the live
+    # runtime stream so the 异常报警 feed updates without a poll round-trip.
+    with suppress(Exception):
+        get_diagnostics_alert_buffer().set_publisher(
+            getattr(ctx.event_hub, "publish", None)
+        )
 
     # The process-lifetime migration guard was acquired for the data directory
     # that was active at startup.  A newly persisted ``data_dir`` must therefore
@@ -9054,6 +9062,16 @@ def create_app(
             )
         status_code, body = await request_apply(tag=payload.tag)
         return JSONResponse(status_code=int(status_code), content=body)
+
+    @app.get("/api/diagnostics/alerts")
+    async def diagnostics_alerts(since_id: int = 0, limit: int = 100) -> dict[str, Any]:
+        """Recent LLM / embedding anomaly alerts for the 异常报警 feed.
+
+        Backs the Web console and browser-extension settings「日志」tab.
+        Pass ``since_id`` to fetch only alerts newer than a previously seen
+        row; ``limit`` caps the page size (server max 500).
+        """
+        return get_diagnostics_alert_buffer().snapshot(since_id=since_id, limit=limit)
 
     @app.get("/api/notifications/pending", response_model=PendingNotificationResponse)
     async def pending_notification() -> PendingNotificationResponse:

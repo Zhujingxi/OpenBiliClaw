@@ -123,6 +123,7 @@ import {
   fetchProjectStats,
   fetchRecommendations,
   fetchContentHistory,
+  fetchDiagnosticsAlerts,
   fetchRuntimeStatus,
   fetchSourceShareSuggestion,
   fetchSourcesStatus,
@@ -7999,6 +8000,145 @@ function bindSettings() {
         panel.setAttribute("aria-hidden", isActive ? "false" : "true");
       }
     }
+    if (activePanel === "logging") startDiagAlertFeed();
+    else stopDiagAlertFeed();
+  }
+
+  // ── 异常报警（LLM / Embedding 请求失败等异常事件）───
+  const DIAG_ALERT_POLL_MS = 15000;
+  let diagAlertPollTimer = null;
+  let diagAlertsLoading = false;
+
+  function describeDiagAlertCode(code, category) {
+    const llmCodes = {
+      rate_limited: "限流 429",
+      auth_failed: "鉴权失败",
+      timeout: "请求超时",
+      bad_response: "响应异常",
+      provider_error: "请求失败",
+      all_providers_failed: "全部实例失败",
+    };
+    const embeddingCodes = {
+      breaker_open: "熔断触发",
+      provider_error: "请求失败",
+    };
+    const table = category === "embedding" ? embeddingCodes : llmCodes;
+    return table[code] || code || "未知异常";
+  }
+
+  function formatDiagAlertTime(epochSeconds) {
+    const ts = Number(epochSeconds || 0) * 1000;
+    if (!Number.isFinite(ts) || ts <= 0) return "";
+    try {
+      return new Date(ts).toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+      });
+    } catch {
+      return "";
+    }
+  }
+
+  function renderDiagAlerts(payload) {
+    const listEl = document.getElementById("cfgDiagAlertList");
+    const emptyEl = document.getElementById("cfgDiagAlertsEmpty");
+    const summaryEl = document.getElementById("cfgDiagAlertSummary");
+    if (!(listEl instanceof HTMLElement) || !(emptyEl instanceof HTMLElement)) return;
+    const alerts = Array.isArray(payload?.alerts) ? payload.alerts : [];
+    if (summaryEl instanceof HTMLElement) {
+      const errors = Number(payload?.summary?.errors || 0);
+      const warnings = Number(payload?.summary?.warnings || 0);
+      summaryEl.textContent =
+        errors + warnings > 0
+          ? `${alerts.length} 条记录 · ${errors} 错误 / ${warnings} 警告`
+          : "";
+    }
+    if (!alerts.length) {
+      listEl.hidden = true;
+      listEl.replaceChildren();
+      emptyEl.hidden = false;
+      return;
+    }
+    emptyEl.hidden = true;
+    listEl.hidden = false;
+    listEl.replaceChildren(
+      ...alerts.map((alert) => {
+        const severity = alert?.severity === "error" ? "error" : "warning";
+        const categoryLabel = alert?.category === "embedding" ? "Embedding" : "LLM";
+        const source = String(alert?.source || "").trim();
+        const count = Number(alert?.count || 1);
+        const timeLabel = formatDiagAlertTime(alert?.last_seen);
+        const item = document.createElement("li");
+        item.className = "diag-alert-item";
+        item.dataset.severity = severity;
+
+        const top = document.createElement("div");
+        top.className = "diag-alert-item-top";
+        const badge = document.createElement("span");
+        badge.className = "diag-alert-badge";
+        badge.textContent = severity === "error" ? "错误" : "警告";
+        const sourceSpan = document.createElement("span");
+        sourceSpan.className = "diag-alert-source";
+        sourceSpan.textContent = source ? `${categoryLabel} · ${source}` : categoryLabel;
+        top.append(badge, sourceSpan);
+
+        const message = document.createElement("div");
+        message.className = "diag-alert-message";
+        message.textContent = String(alert?.message || "");
+        item.append(top, message);
+
+        const metaLabel = [
+          describeDiagAlertCode(alert?.code, alert?.category),
+          count > 1 ? `×${count}` : "",
+          timeLabel,
+        ]
+          .filter(Boolean)
+          .join(" · ");
+        if (metaLabel) {
+          const meta = document.createElement("div");
+          meta.className = "diag-alert-meta";
+          meta.textContent = metaLabel;
+          item.append(meta);
+        }
+        return item;
+      }),
+    );
+  }
+
+  async function refreshDiagAlerts() {
+    if (diagAlertsLoading) return;
+    diagAlertsLoading = true;
+    try {
+      const payload = await fetchDiagnosticsAlerts({ limit: 50 });
+      if (payload) renderDiagAlerts(payload);
+    } catch {
+      // 辅助信息：拉取失败保持现状即可，不打扰用户。
+    } finally {
+      diagAlertsLoading = false;
+    }
+  }
+
+  function startDiagAlertFeed() {
+    void refreshDiagAlerts();
+    if (diagAlertPollTimer !== null) return;
+    diagAlertPollTimer = setInterval(() => {
+      if (document.hidden) return;
+      void refreshDiagAlerts();
+    }, DIAG_ALERT_POLL_MS);
+  }
+
+  function stopDiagAlertFeed() {
+    if (diagAlertPollTimer === null) return;
+    clearInterval(diagAlertPollTimer);
+    diagAlertPollTimer = null;
+  }
+
+  const refreshDiagAlertsBtn = document.getElementById("cfgRefreshDiagAlerts");
+  if (refreshDiagAlertsBtn instanceof HTMLButtonElement) {
+    refreshDiagAlertsBtn.addEventListener("click", () => {
+      void refreshDiagAlerts();
+    });
   }
 
   for (const [name, tab] of settingsTabs) {

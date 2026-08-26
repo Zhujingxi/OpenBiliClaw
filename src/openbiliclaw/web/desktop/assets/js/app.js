@@ -10156,6 +10156,11 @@ ${cardFeedbackBarHtml()}`;
         }
       }
       if (event.type === "notification.pending" && event.bvid) mergeMessages([{ ...event, type: "notification" }]);
+      if (event.type === "diagnostics.alert") {
+        // 异常报警实时推送：仅当日志设置面板可见时才刷新，避免无谓请求。
+        const loggingPanel = document.querySelector('[data-settings-panel="logging"]');
+        if (loggingPanel && !loggingPanel.hidden) void refreshDiagnosticsAlerts();
+      }
       if (event.type === "interest.probe" && event.domain) mergeMessages([{ type: "interest.probe", domain: event.domain, reason: event.reason || event.message || "后端希望确认这个兴趣方向。", specifics: event.specifics || event.examples || [], probe_mode: event.probe_mode || "", challenge: Boolean(event.challenge) }]);
       if (event.type === "avoidance.probe" && event.domain) mergeMessages([{ type: "avoidance.probe", domain: event.domain, reason: event.reason || event.message || "后端希望确认这个避雷方向。", specifics: event.specifics || event.examples || [], probe_mode: event.probe_mode || "", challenge: Boolean(event.challenge) }]);
     }
@@ -11286,6 +11291,105 @@ ${cardFeedbackBarHtml()}`;
         panel.setAttribute("aria-hidden", isActive ? "false" : "true");
       });
       if (panelName === "general") void refreshMigrationStatus({ force: true });
+      if (panelName === "logging") startDiagnosticsAlertFeed();
+      else stopDiagnosticsAlertFeed();
+    }
+
+    // ── 异常报警（LLM / Embedding 请求失败等异常事件）───
+    const DIAGNOSTICS_ALERT_POLL_MS = 10000;
+    let diagnosticsAlertPollTimer = null;
+    let diagnosticsAlertsLoading = false;
+
+    function formatDiagnosticsAlertTime(epochSeconds) {
+      const ts = Number(epochSeconds || 0) * 1000;
+      if (!Number.isFinite(ts) || ts <= 0) return "";
+      try {
+        return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+      } catch {
+        return "";
+      }
+    }
+
+    function describeDiagnosticsAlertCode(code, category) {
+      const llmCodes = {
+        rate_limited: "限流 429",
+        auth_failed: "鉴权失败",
+        timeout: "请求超时",
+        bad_response: "响应异常",
+        provider_error: "请求失败",
+        all_providers_failed: "全部实例失败",
+      };
+      const embeddingCodes = {
+        breaker_open: "熔断触发",
+        provider_error: "请求失败",
+      };
+      const table = category === "embedding" ? embeddingCodes : llmCodes;
+      return table[code] || code || "未知异常";
+    }
+
+    function renderDiagnosticsAlerts(payload) {
+      const listEl = $("#diagnosticsAlertList");
+      const emptyEl = $("#diagnosticsAlertsEmpty");
+      const summaryEl = $("#diagnosticsAlertsSummary");
+      if (!listEl || !emptyEl) return;
+      const alerts = Array.isArray(payload?.alerts) ? payload.alerts : [];
+      if (summaryEl) {
+        const errors = Number(payload?.summary?.errors || 0);
+        const warnings = Number(payload?.summary?.warnings || 0);
+        summaryEl.textContent = errors + warnings > 0
+          ? `${alerts.length} 条记录 · ${errors} 错误 / ${warnings} 警告`
+          : "";
+      }
+      if (!alerts.length) {
+        listEl.hidden = true;
+        listEl.innerHTML = "";
+        emptyEl.hidden = false;
+        return;
+      }
+      emptyEl.hidden = true;
+      listEl.hidden = false;
+      listEl.innerHTML = alerts.map((alert) => {
+        const severity = alert.severity === "error" ? "error" : "warning";
+        const categoryLabel = alert.category === "embedding" ? "Embedding" : "LLM";
+        const codeLabel = describeDiagnosticsAlertCode(alert.code, alert.category);
+        const count = Number(alert.count || 1);
+        const timeLabel = formatDiagnosticsAlertTime(alert.last_seen);
+        const source = String(alert.source || "").trim();
+        return `<li class="diag-alert-item" data-severity="${severity}">`
+          + `<span class="diag-alert-badge">${severity === "error" ? "错误" : "警告"}</span>`
+          + `<span class="diag-alert-source">${escapeHtml(categoryLabel)}${source ? ` · ${escapeHtml(source)}` : ""}</span>`
+          + `<span class="diag-alert-message">${escapeHtml(String(alert.message || ""))}</span>`
+          + `<span class="diag-alert-meta">${escapeHtml(codeLabel)}${count > 1 ? ` ×${count}` : ""}${timeLabel ? ` · ${escapeHtml(timeLabel)}` : ""}</span>`
+          + "</li>";
+      }).join("");
+    }
+
+    async function refreshDiagnosticsAlerts() {
+      if (diagnosticsAlertsLoading) return;
+      diagnosticsAlertsLoading = true;
+      try {
+        const payload = await requestJson("/diagnostics/alerts?limit=50", { timeoutMs: 8000 });
+        if (payload) renderDiagnosticsAlerts(payload);
+      } catch {
+        // 面板里的辅助信息：拉取失败保持现状即可，不打扰用户。
+      } finally {
+        diagnosticsAlertsLoading = false;
+      }
+    }
+
+    function startDiagnosticsAlertFeed() {
+      void refreshDiagnosticsAlerts();
+      if (diagnosticsAlertPollTimer !== null) return;
+      diagnosticsAlertPollTimer = window.setInterval(() => {
+        if (document.hidden) return;
+        void refreshDiagnosticsAlerts();
+      }, DIAGNOSTICS_ALERT_POLL_MS);
+    }
+
+    function stopDiagnosticsAlertFeed() {
+      if (diagnosticsAlertPollTimer === null) return;
+      window.clearInterval(diagnosticsAlertPollTimer);
+      diagnosticsAlertPollTimer = null;
     }
 
     document.querySelectorAll("[data-settings-tab]").forEach((tab) => {
@@ -11306,6 +11410,8 @@ ${cardFeedbackBarHtml()}`;
         nextTab.focus();
       });
     });
+
+    safeBind("#refreshDiagnosticsAlertsBtn", "click", () => void refreshDiagnosticsAlerts());
 
     function setActiveModelSettingsPanel(groupName = "llm", panelName = "default") {
       document.querySelectorAll(`[data-model-settings-tab][data-model-settings-group="${groupName}"]`).forEach((tab) => {

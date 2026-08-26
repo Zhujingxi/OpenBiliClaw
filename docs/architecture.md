@@ -458,6 +458,7 @@ flowchart LR
 - `[llm.instances.<id>]` 为每个端点保存独立 `provider_type` / Base URL / token / model；registry 以实例 ID 注册，同一个 adapter 可实例化多次。`default_chain` 可包含任意数量实例，失败与限流 cooldown 都只影响当前实例
 - `LLMService` 通过 caller bucket 选择 `[llm.routes.soul/discovery/recommendation/evaluation]`：默认继承全局链，`inherit=false` 时执行模块自己的完整链并严格禁止 spill 到全局链。旧 provider/model override 会投影为等价实例或派生实例
 - `LLMRegistry.complete_chain()` 执行有序链，`complete_provider()` 精确探测一个实例；响应携带最终 `instance_id`。Ollama chat 实例必须显式配置 model，仅有服务地址或独立 `bge-m3` embedding 不会注册 chat、更不会猜 `llama3`
+- 异常报警（未发布）：`LLMRegistry` 与 `EmbeddingService` 的每个失败点调用顶层 `diagnostics_alerts.record_diagnostics_alert()` 写入进程内有界环形缓冲；API 层经 `GET /api/diagnostics/alerts` 暴露快照，并把新告警以 `type="diagnostics.alert"` 推到 runtime-stream。记录永不抛错、不改变 fallback / 熔断行为
 - `/api/config/discover-models` 在配置内存副本上构建精确实例并调用 OpenAI-compatible `GET /models`，供 PC Web、插件与 setup 的可编辑模型下拉使用；该支路不保存配置。协议没有 Effort capability 枚举，返回的 Effort 仅是本地 advisory
 - `codex_auth.py` 提供实验性的 Codex CLI ChatGPT OAuth 凭据导入、刷新与能力探测状态持久化；OpenAI 实例设置 `auth_mode="codex_oauth"` 时构造独立的 `CodexChatGPTProvider`，请求发往官方 Codex 传输端点 `https://chatgpt.com/backend-api/codex/responses`（SSE Responses 流），并限制 `base_url` 只能为官方 Codex 域名
 - DeepSeek 的连通性探针显式关闭 thinking；普通请求的 reasoning effort 是 request-local 参数，不修改共享 adapter 状态。每个 DeepSeek 实例的 `base_url` 分别进入 SDK 和 endpoint 代理裁决

@@ -194,6 +194,14 @@ Linux.do 站点访问全部发生在真实 `linux.do` task tab 内，且只允�
 
 抓取继续复用统一 SSRF 边界：域名白名单、每次 redirect 重验、`image/*`、10MB 上限，以及国内 CDN 直连 / 境外 CDN 继承代理。微博封面只允许域名边界匹配的 `sinaimg.cn` / `*.sinaimg.cn`，并归入国内直连；形如 `evilsinaimg.cn` 的后缀伪装仍被拒绝。真实新浪图床在共享浏览器 UA 下要求防盗链头，因此当前 redirect 目标属于 `sinaimg.cn` 时附 `Referer: https://weibo.com/`，跳到其它白名单 CDN 后立即移除。磁盘写入使用同目录临时文件 `flush + fsync + os.replace`，失败只保留旧文件或无文件，不暴露半写结果。日志只记录 host、cache hash 前缀和错误类别，不记录签名路径/query；`GET /api/runtime-status` 公开 `image_fetch_active/waiting/inflight_keys` 与 `upstream_started/singleflight_joins/peak_active/peak_background`，这些字段只含整数，不含 URL 或 token。协调器不随 `RuntimeContext` 热重载替换；新 controller 在后台任务恢复前重绑同一实例，shutdown 先停 refresh producer 再取消协调器持有的 active/queued upstream task。
 
+## 异常报警（LLM / Embedding 请求失败）
+
+| 方法与路径 | 状态 | 契约 |
+|---|---|---|
+| `GET /api/diagnostics/alerts?since_id=&limit=` | ✅ | 只读返回进程内异常报警环形缓冲的快照：`{"alerts":[...],"summary":{"total","errors","warnings"},"generated_at"}`。每条 alert 含 `id`（单调递增）、`category`（`llm\|embedding`）、`code`（LLM：`rate_limited/auth_failed/timeout/bad_response/provider_error/all_providers_failed`；embedding：`provider_error/breaker_open`）、`severity`（`warning\|error`）、`source`（实例名或 provider/model 标签）、`message`、`first_seen/last_seen`（epoch 秒）与 `count`（合并计数）。列表按最新在前排序；`since_id` 只返回更新行（供客户端增量拉取），`limit` 服务端上限 500。数据源是顶层模块 `openbiliclaw.diagnostics_alerts` 的进程内有界缓冲：同类别/来源/错误码在 60 秒窗口内合并为一条并累加 `count`，上限 100 条；`record()` 永不抛错、不阻塞 LLM/embedding 热路径，缓冲随进程重启清空、不落盘。 |
+
+新告警在记录的同时经 event hub 以 `{"type":"diagnostics.alert",...alert 字段}` 发布到 `/api/runtime-stream`，桌面 Web 与插件设置页在日志面板可见时无需轮询即可实时刷新；拉取失败时两端都保持现状静默重试，不打扰用户。展示面为桌面 Web 与扩展 popup 两端：移动 Web 没有日志/设置面，CLI 没有运行时 feed 展示命令，均明确不在范围。
+
 ## 降级配置恢复
 
 `PUT /api/config` 在 `llm_registry_unavailable` 降级态下不再只写盘并要求重启。服务端会复用当前进程已经初始化的数据库、MemoryManager、事件总线、任务注册表和 LLM total gate，通过正常热重载路径原子构造完整的 LLM Registry、Soul、Discovery、Recommendation、来源客户端与 runtime controller。构造全部成功后才解除业务 API 的 503 guard，并在后台应用状态进入 `applied` 后广播 `config_reloaded`；`/setup/` 会等待该终态，插件与桌面设置页也会观察同一状态后继续。
