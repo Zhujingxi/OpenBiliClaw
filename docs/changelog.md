@@ -4,6 +4,10 @@
 
 ---
 
+## v0.3.212：修复 explore 调度堵塞导致的惊喜候选断供（2026-08-26）
+
+- **修复 explore 调度三条堵塞链路**：Planner 生成 explore 词后不再回写 `last_explore_refresh_at`，改为独立的 `last_explore_planned_at`；执行戳只在 ExploreStrategy 真正派发且 `supply attempts > 0` 后更新，避免“没跑也算跑”。`_build_refresh_plan` 不再在 270–299 死区直接 `return []`：水位以下只补 `search + related_chain`，due 的 `trending / explore` 作为独立计划项入队；`refresh_if_needed` 不再因 pool at cap 直接跳过周期探索，`_run_refresh_plan` 的 cap break 只作用于 `search / related_chain`。补充拆钟、270–299 区间、补货拆分与 supply attempts 打戳等测试；真实环境验证 `deepseek-v4-flash` 下 explore 成功发现 2 条并写入 content_cache。
+
 ## v0.3.211：异常报警可视化与商汤日日新零成本上手（2026-08-26）
 
 - **新增商汤日日新（SenseNova）免费额度 preset（issue #193）**：OpenAI 协议兼容子菜单新增 `sensenova` preset（第 6 位，总数 9→10）：`base_url=https://token.sensenova.cn/v1`、默认模型 `deepseek-v4-flash`——该端点已按 OpenAI 协议真实请求验证连通（成功调用 + 401 鉴权失败路径均实测），新用户免费额度可零成本体验本项目；`scripts/agent_bootstrap.py --llm-preset sensenova` 同步支持（`LLM_PRESETS` / `HUMAN_OPENAI_COMPAT_PRESETS` / choices 三处同步）。token 推理端点未验证 `/v1/embeddings`，preset 如实标注 `supports_embedding=false` 并引导 Phase 3 独立 Ollama bge-m3。新增 cli↔bootstrap 两张 preset 表的键/顺序同步测试（新增 preset 时同步文档子菜单清单的提醒也固化在断言里）；`docs/agent-install.md` 与 `docs/openclaw-quickstart.md` 子菜单清单已同步为 10 个 preset。

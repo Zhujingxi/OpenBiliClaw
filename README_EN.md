@@ -198,7 +198,7 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.211 (2026-08-26)**
+📌 Latest: **v0.3.212 (2026-08-26)**
 
 - **Diagnostics alerts** — LLM / Embedding failures (rate limits, auth, circuit-breaker trips) now show up live in the desktop & extension settings log tab; no more digging through log files.
 - **SenseNova free tier (issue #193)** — a built-in `sensenova` one-click preset lets new users try the full recommendation pipeline at zero cost.
