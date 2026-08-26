@@ -787,10 +787,12 @@ class ContinuousRefreshController:
             if not self._is_initialized():
                 return _result({"refreshed": False, "strategies": [], "reason": "not_initialized"})
 
-            pool_at_cap = await self._enforce_pool_cap_async()
+            # Keep the pool at its cap, but do not return early when it is full:
+            # a due explore/trending sweep must still run. ``_build_refresh_plan``
+            # is responsible for excluding replenishment entries (search / related_chain)
+            # when the pool is at or above target.
+            await self._enforce_pool_cap_async()
             await self._publish_pool_status_if_changed()
-            if pool_at_cap:
-                return _result({"refreshed": False, "strategies": [], "reason": "pool_at_cap"})
 
             profile = await self.soul_engine.get_profile()
             plan = self._build_refresh_plan(state)
@@ -2404,33 +2406,55 @@ class ContinuousRefreshController:
         self._update_llm_inventory_state(pool_available)
         pool_below_target = pool_available < self.pool_target_count
 
-        if pool_below_target:
-            if not self._pool_below_replenishment_watermark(pool_available):
-                return []
+        plan: list[tuple[list[str], int]] = []
+
+        if pool_below_target and self._pool_below_replenishment_watermark(pool_available):
             source_plan = self._build_source_replenishment_plan()
             if source_plan:
-                return source_plan
-            # No source has an own-share deficit. That includes the
-            # healthy-source stall seen in production: Bilibili (and often
-            # XHS/Reddit) are already at/over quota while the missing
-            # capacity belongs to sources that are missing, throttled, or
-            # rate-limited (V2EX CLI absent, X unhealthy, YouTube/Weibo
-            # cooling down). If the discovery-candidate pipeline still has
-            # claimed/evaluating work, let it drain first; otherwise fall
-            # through to the periodic Bilibili plan so healthy over-share
-            # sources can keep introducing fresh topics and fill the global
-            # pool. Pool-share rebalancing can still demote them later when
-            # the under-share sources recover.
-            readiness = self._pool_readiness_counts()
-            if int(readiness.get("pending_eval", 0) or 0) > 0:
-                self._log_empty_refresh_plan_diagnostics(pool_available=pool_available)
-                return []
+                # Automatic replenishment only fills the gap with search +
+                # related_chain. Trending and explore are periodic sweeps and
+                # join the plan independently below when their own clocks are
+                # due, so a small gap can never defer them to zero.
+                plan.extend(
+                    (["search", "related_chain"], limit)
+                    if set(strategies) == set(_BILIBILI_DISCOVERY_SOURCES)
+                    else (strategies, limit)
+                    for strategies, limit in source_plan
+                )
+            else:
+                # No source has an own-share deficit. That includes the
+                # healthy-source stall seen in production: Bilibili (and often
+                # XHS/Reddit) are already at/over quota while the missing
+                # capacity belongs to sources that are missing, throttled, or
+                # rate-limited (V2EX CLI absent, X unhealthy, YouTube/Weibo
+                # cooling down). If the discovery-candidate pipeline still has
+                # claimed/evaluating work, let it drain first; otherwise fall
+                # through to the periodic Bilibili plan so healthy over-share
+                # sources can keep introducing fresh topics and fill the global
+                # pool. Pool-share rebalancing can still demote them later when
+                # the under-share sources recover.
+                readiness = self._pool_readiness_counts()
+                if int(readiness.get("pending_eval", 0) or 0) > 0:
+                    self._log_empty_refresh_plan_diagnostics(pool_available=pool_available)
+                    return []
+        # Pool below target but above the replenishment watermark is deliberate:
+        # search / related_chain do not replenish in that band, but due
+        # trending / explore sweeps are still evaluated below.
+
         if "bilibili" not in self._normalized_pool_source_shares():
             self._log_empty_refresh_plan_diagnostics(pool_available=pool_available)
             return []
 
-        plan: list[tuple[list[str], int]] = []
-        if pending_events >= self.signal_event_threshold:
+        # Signal-event search only makes sense when the pool is below the
+        # replenishment watermark; in the 270-299 band (below target but above
+        # watermark) automatic replenishment stays quiet and only due periodic
+        # sweeps are considered.
+        if (
+            pool_below_target
+            and self._pool_below_replenishment_watermark(pool_available)
+            and pending_events >= self.signal_event_threshold
+            and not any("search" in strategies for strategies, _limit in plan)
+        ):
             plan.append((["search", "related_chain"], self.discovery_limit))
         if self._is_due(
             str(state.get("last_trending_refresh_at", "")),
@@ -2713,6 +2737,7 @@ class ContinuousRefreshController:
         all_discovered: list[Any] = []
         pipeline_discovered_count = 0
         flattened_strategies: list[str] = []
+        explore_dispatched_with_budget = False
         replenished_topics: list[str] = []
         post_admission_copy_owned = False
 
@@ -2728,7 +2753,12 @@ class ContinuousRefreshController:
         for strategies, requested_limit in plan:
             current_pool_counts = self._pool_readiness_counts()
             current_pool_count = current_pool_counts["available"]
-            if current_pool_count >= self.pool_target_count:
+            if current_pool_count >= self.pool_target_count and (
+                "search" in strategies or "related_chain" in strategies
+            ):
+                # Replenishment entries stop once the pool is full. Periodic
+                # trending / explore entries are allowed to run even at cap;
+                # post-refresh pool maintenance trims the overflow.
                 break
 
             effective_limit = self._requested_refresh_limit(
@@ -2853,8 +2883,18 @@ class ContinuousRefreshController:
                             if isinstance(supply_result, dict)
                             else 0
                         )
+                        if "explore" in effective_strategies:
+                            supply_attempts = int(
+                                dict(supply_result).get("attempts", 0) or 0
+                                if isinstance(supply_result, dict)
+                                else 0
+                            )
+                            if supply_attempts > 0:
+                                explore_dispatched_with_budget = True
                     else:
                         produced_count = await pipeline.produce_and_enqueue(**produce_kwargs)
+                        if "explore" in effective_strategies:
+                            explore_dispatched_with_budget = True
                     coordinator_notify = getattr(self.candidate_eval_coordinator, "notify", None)
                     if callable(coordinator_notify):
                         # API runtime wires ``pipeline.on_candidates_enqueued`` to
@@ -2897,6 +2937,8 @@ class ContinuousRefreshController:
                     if injected_keyword_ids and _call_accepts_keyword_ids(discover_fn):
                         discover_kwargs["keyword_ids"] = injected_keyword_ids
                     discovered = await discover_fn(profile, **discover_kwargs)
+                    if "explore" in effective_strategies:
+                        explore_dispatched_with_budget = True
                     topic_items = discovered
                     discovered_count = len(discovered)
                     admitted_count = discovered_count
@@ -2985,7 +3027,7 @@ class ContinuousRefreshController:
             runtime_updates["last_processed_event_id"] = latest_event_id
         if "trending" in flattened_strategies:
             runtime_updates["last_trending_refresh_at"] = now
-        if "explore" in flattened_strategies:
+        if "explore" in flattened_strategies and explore_dispatched_with_budget:
             runtime_updates["last_explore_refresh_at"] = now
         after_pool_counts = self._pool_readiness_counts()
         after_pool_count = after_pool_counts["available"]
@@ -3379,6 +3421,8 @@ class ContinuousRefreshController:
             if source == "bilibili":
                 # Bilibili is a platform quota now, but its implementation
                 # still fans out through four established strategy names.
+                # ``_build_refresh_plan`` splits this back out for automatic
+                # replenishment so trending / explore only run when due.
                 plan.append((list(_BILIBILI_DISCOVERY_SOURCES), requested))
         return plan
 
@@ -3608,11 +3652,10 @@ class ContinuousRefreshController:
     def keyword_planner_explore_due_soon(self) -> bool:
         """Whether planner may piggyback B站 exploratory queries this pass.
 
-        This intentionally mirrors refresh-plan timing instead of giving the
-        planner its own clock. The small lead window lets a planner pass that
-        runs just before the refresh tick reuse the merged keyword LLM call for
-        explore, avoiding the later standalone ``discovery.explore.queries``
-        call while still respecting ``explore_refresh_minutes``.
+        The planner tracks its own ``last_explore_planned_at`` clock so it can
+        reuse the merged keyword LLM call for explore without overwriting
+        ``last_explore_refresh_at`` (which is reserved for a completed
+        ExploreStrategy sweep).
         """
         if "bilibili" not in self._normalized_pool_source_shares():
             return False
@@ -3624,7 +3667,7 @@ class ContinuousRefreshController:
             logger.exception("keyword_planner_explore_due_soon state load failed")
             return False
         return self._is_due_soon(
-            str(state.get("last_explore_refresh_at", "")),
+            str(state.get("last_explore_planned_at", "")),
             minutes=self.explore_refresh_minutes,
             lead_seconds=max(0, int(self.check_interval_seconds)),
         )
@@ -3643,10 +3686,16 @@ class ContinuousRefreshController:
             return []
 
     def keyword_planner_mark_explore_planned(self) -> None:
-        """Mark explore refresh consumed after planner inserted explore queries."""
+        """Mark that the planner generated explore keywords this cycle.
+
+        This deliberately does NOT touch ``last_explore_refresh_at``: that
+        timestamp is reserved for a real ExploreStrategy sweep. The planner
+        uses ``last_explore_planned_at`` only to avoid generating explore
+        keywords every pass.
+        """
         now = self._now().isoformat()
         self._update_discovery_runtime_state(
-            lambda runtime_state: runtime_state.update({"last_explore_refresh_at": now})
+            lambda runtime_state: runtime_state.update({"last_explore_planned_at": now})
         )
 
     def _source_requested_count(
