@@ -169,6 +169,22 @@ def settings_save_server() -> Iterator[tuple[str, SettingsSaveStub]]:
                 return _json_response(self, {"items": []})
             if path == "/api/chat/turns":
                 return _json_response(self, {"items": []})
+            if path == "/api/chat/pending-confirmations":
+                return _json_response(
+                    self,
+                    {
+                        "count": 3,
+                        "items": [
+                            {
+                                "kind": "confusion",
+                                "title": f"待聊确认 {index}",
+                                "ref": f"pending-{index}",
+                                "confidence": 0.8,
+                            }
+                            for index in range(1, 4)
+                        ],
+                    },
+                )
             if path == "/api/qr-info":
                 return _json_response(self, {"lan_ip": "127.0.0.1"})
             return _json_response(self, {}, 404)
@@ -669,3 +685,34 @@ def test_migration_request_id_final_fallback_is_rfc4122_uuid(
         request_ids[0],
         re.IGNORECASE,
     )
+
+
+def test_pending_chat_count_toggle_hides_badge(
+    settings_save_server: tuple[str, SettingsSaveStub],
+    chromium_page: Page,
+) -> None:
+    """Issue #217: 关闭「显示待聊未读数」后 chatPendingCountBadge 始终隐藏。"""
+    base_url, _stub = settings_save_server
+    page = chromium_page
+    page.goto(f"{base_url}/web/")
+
+    badge = page.locator("#chatPendingCountBadge")
+    expect(badge).to_have_text("3")
+
+    page.get_by_role("button", name="设置", exact=True).click()
+    page.get_by_role("tab", name="前端").click()
+    toggle = page.locator("#showPendingChatCountSetting")
+    expect(toggle).to_be_checked()
+
+    toggle.uncheck(force=True)
+    expect(badge).to_be_hidden()
+    assert (
+        page.evaluate("localStorage.getItem('openbiliclaw.webui.showPendingChatCount')")
+        == "0"
+    )
+
+    page.reload()
+    page.get_by_role("button", name="设置", exact=True).click()
+    page.get_by_role("tab", name="前端").click()
+    expect(page.locator("#showPendingChatCountSetting")).not_to_be_checked()
+    expect(page.locator("#chatPendingCountBadge")).to_be_hidden()
