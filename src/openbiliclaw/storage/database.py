@@ -895,6 +895,9 @@ def _chunks(values: Sequence[str], size: int) -> list[list[str]]:
 _DELIGHT_CLAIM_MIN_SCORE = 0.75
 _DELIGHT_DYNAMIC_TOP_FRACTION = 0.10
 _DELIGHT_DYNAMIC_MIN_SAMPLE_SIZE = 150
+# Only suppresses the Top 10% boundary for homogeneous pools whose boundary
+# is at/below the floor. A homogeneous above-floor pool still uses the
+# boundary so the regular feed is not starved by the delight claim guard.
 _DELIGHT_DYNAMIC_MIN_STDDEV = 0.08
 _DELIGHT_SCORE_SYNC_EPSILON = 0.000001
 _DEFAULT_ADMISSION_MIN_SCORE = DEFAULT_ADMISSION_MIN_SCORE
@@ -19869,9 +19872,9 @@ class Database:
 
         The dynamic component uses the current formal candidate pool, not raw
         ``discovery_candidates``. The percentile is computed over rows that
-        already have ``delight_score``. When the scored pool is too small or
-        too homogeneous for a meaningful percentile, the caller-provided
-        default is returned unchanged.
+        already have ``delight_score``. When the scored pool is too small, or
+        the Top 10% boundary is at/below the floor (so the floor is already the
+        more selective bar), the caller-provided default is returned unchanged.
         """
         self._ensure_fresh_read()
         return self._dynamic_delight_threshold_on(
@@ -19917,11 +19920,17 @@ class Database:
         ]
         if len(scores) < _DELIGHT_DYNAMIC_MIN_SAMPLE_SIZE:
             return floor
-        if statistics.pstdev(scores) < _DELIGHT_DYNAMIC_MIN_STDDEV:
-            return floor
 
         top_count = max(1, math.ceil(len(scores) * _DELIGHT_DYNAMIC_TOP_FRACTION))
         boundary = min(1.0, max(0.0, scores[top_count - 1]))
+        if statistics.pstdev(scores) < _DELIGHT_DYNAMIC_MIN_STDDEV and boundary <= floor:
+            # A homogeneous score band at/below the floor makes the Top 10%
+            # percentile a no-op: the floor is already more selective, so keep
+            # it. A homogeneous band above the floor must still use the
+            # percentile boundary — otherwise the regular feed's delight-claim
+            # guard would reserve every above-floor row for delight and starve
+            # the normal pool (issue #220).
+            return floor
         return max(floor, boundary)
 
     def get_delight_candidate(

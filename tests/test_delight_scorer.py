@@ -499,9 +499,15 @@ def test_database_dynamic_delight_threshold_keeps_floor_before_min_sample_size(
     assert threshold == pytest.approx(0.75)
 
 
-def test_database_dynamic_delight_threshold_keeps_floor_for_homogeneous_pool(
+def test_database_dynamic_delight_threshold_uses_top_ten_percent_for_homogeneous_high_pool(
     tmp_path: Path,
 ) -> None:
+    """A homogeneous above-floor pool must still use the Top 10% boundary.
+
+    The fixed floor would make every scored row delight-claimed and starve
+    the regular feed (issue #220). With scores 0.91..0.9259 the boundary is
+    the 16th-highest score (0.9244), keeping the other 144 rows servable.
+    """
     database = _make_database(tmp_path)
     _seed_delight_scored_pool(
         database,
@@ -509,6 +515,22 @@ def test_database_dynamic_delight_threshold_keeps_floor_for_homogeneous_pool(
         relevance_score=lambda index: 0.91 + (index * 0.0001),
         delight_score=lambda index: 0.91 + (index * 0.0001),
         prefix="HOMO",
+    )
+
+    assert database.dynamic_delight_threshold(default_threshold=0.75) == pytest.approx(0.9244)
+
+
+def test_database_dynamic_delight_threshold_keeps_floor_for_homogeneous_low_pool(
+    tmp_path: Path,
+) -> None:
+    """A homogeneous below-floor pool keeps the floor: percentile is a no-op."""
+    database = _make_database(tmp_path)
+    _seed_delight_scored_pool(
+        database,
+        160,
+        relevance_score=lambda index: 0.30 + (index * 0.0001),
+        delight_score=lambda index: 0.30 + (index * 0.0001),
+        prefix="HOML",
     )
 
     assert database.dynamic_delight_threshold(default_threshold=0.75) == pytest.approx(0.75)
@@ -632,6 +654,38 @@ def test_pool_candidates_use_dynamic_delight_claim_threshold(tmp_path: Path) -> 
     rows = database.get_pool_candidates(limit=50, max_per_topic_group=0)
 
     assert "BV1MID" in [row["bvid"] for row in rows]
+
+
+def test_pool_candidates_keep_homogeneous_high_delight_pool_servable(
+    tmp_path: Path,
+) -> None:
+    """Regression for issue #220: homogeneous above-floor delight scores
+    must not claim every row and starve the regular pool.
+    """
+    database = _make_database(tmp_path)
+    _seed_delight_scored_pool(
+        database,
+        160,
+        relevance_score=lambda index: 0.91 + (index * 0.0001),
+        delight_score=lambda index: 0.91 + (index * 0.0001),
+        prefix="HOMO",
+    )
+    database.conn.execute(
+        """
+        UPDATE content_cache
+        SET style_key = 'deep_focus',
+            topic_group = 'base'
+        WHERE bvid LIKE 'BV1HOMO%'
+        """
+    )
+    database.conn.commit()
+
+    rows = database.get_pool_candidates(limit=200, max_per_topic_group=0)
+
+    # Top 10% (16 rows, score >= 0.9244) are reserved for delight; the
+    # remaining 144 rows stay available for the regular feed.
+    assert len(rows) == 144
+    assert database.count_pool_candidates(max_per_topic_group=0) == 144
 
 
 def test_database_get_pool_candidates_needing_delight_score(tmp_path: Path) -> None:
