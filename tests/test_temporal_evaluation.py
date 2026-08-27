@@ -437,7 +437,7 @@ def test_grounding_downgrades_nonaffirmative_active_state_evidence(
     [
         ("breaking", "freshness_only", "2026-08-13T12:00:00Z"),
         ("current", "event_state", "2026-08-26T12:00:00Z"),
-        ("versioned", "version_state", "2026-12-10T12:00:00Z"),
+        ("versioned", "version_state", "2026-10-11T12:00:00Z"),
     ],
 )
 def test_schedule_uses_class_review_intervals(
@@ -759,7 +759,10 @@ def test_v2_uncertain_or_malformed_evidence_fails_eligible(changes: dict[str, ob
     assert decision.needs_review is False
 
 
-@pytest.mark.parametrize(("temporal_class", "review_days"), [("breaking", 3), ("current", 60)])
+@pytest.mark.parametrize(
+    ("temporal_class", "review_days"),
+    [("breaking", 3), ("current", 60), ("versioned", 120)],
+)
 def test_legacy_v1_age_window_now_schedules_review_instead_of_expiry(
     temporal_class: str,
     review_days: int,

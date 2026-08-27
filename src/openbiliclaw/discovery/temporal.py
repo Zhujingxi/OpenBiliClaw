@@ -53,7 +53,10 @@ TEMPORAL_REVIEW_INTERVALS: MappingProxyType[str, timedelta] = MappingProxyType(
     {
         "breaking": timedelta(days=1),
         "current": timedelta(days=14),
-        "versioned": timedelta(days=120),
+        # 2026-08: synced to the versioned bonus half-life (60d) so the review
+        # clock re-evaluates version-anchored content at the same cadence its
+        # freshness bonus decays, instead of the old 120d mismatch.
+        "versioned": timedelta(days=60),
     }
 )
 _ALLOWED_VALIDITY_MODES_BY_CLASS: MappingProxyType[str, frozenset[str]] = MappingProxyType(
@@ -88,11 +91,16 @@ class TemporalClassPolicy:
 # The old 3/60 day windows remain only as legacy review schedules.  They no
 # longer assert that content expired.  V2 hard expiry requires grounded,
 # high-confidence, core-value evidence with an explicit deadline.
+#
+# 2026-08 calibration: versioned half-life shortened 120d -> 60d because
+# version-anchored tech content (AI tools, frameworks, hardware, games)
+# loses value faster than the old curve implied; its 120d admission TTL is
+# a deterministic eligibility floor between current (60d) and permanent.
 TEMPORAL_CLASS_POLICIES: MappingProxyType[str, TemporalClassPolicy] = MappingProxyType(
     {
         "breaking": TemporalClassPolicy(1.0, 0.85, 3.0),
         "current": TemporalClassPolicy(14.0, 0.60, 60.0),
-        "versioned": TemporalClassPolicy(120.0, 0.30),
+        "versioned": TemporalClassPolicy(60.0, 0.30, 120.0),
     }
 )
 
@@ -492,9 +500,10 @@ def evaluate_temporal_eligibility(
     V2 only hard-expires high-confidence, complete, core-value evidence with
     a grounded explicit deadline.  A scheduled non-deadline check becomes
     ``review_due`` instead.  Calls using only the old three semantic fields
-    retain the old 3/60 day windows, but those windows now schedule review
-    rather than claiming factual expiry.  Every malformed or uncertain input
-    fails neutral.
+    retain the legacy 3 / 60 day windows for breaking/current and the 120 day
+    admission TTL for versioned, but those windows now schedule review rather
+    than claiming factual expiry.  Every malformed or uncertain input fails
+    neutral.
     """
 
     effective_now = now or datetime.now(UTC)
