@@ -58,7 +58,7 @@ CLI / 源码运行仍按普通错误处理：配置文件损坏时直接暴露�
 | `host` | string | `"0.0.0.0"` | 后端 API 监听地址。默认绑定所有网卡，方便同局域网手机访问 `/m/`；如只允许本机访问可改为 `"127.0.0.1"` |
 | `port` | int | `8420` | 后端 API 监听端口 |
 
-`openbiliclaw start` 和桌面安装包入口默认读取这里的 host / port；显式设置 `OPENBILICLAW_HOST` / `OPENBILICLAW_PORT` 时环境变量优先。默认 `host = "0.0.0.0"` 会创建独立的 IPv4 `0.0.0.0` 与 IPv6 `[::]` listener（系统无 IPv6 时保留 IPv4），避免不同操作系统对 IPv4-mapped IPv6 的行为差异。浏览器插件的手机二维码入口会在后端地址仍是 loopback 时调用轻量端点 `GET /api/qr-info`（不触发 embedding readiness probe）并读取响应中的 `lan_ip` 字段，用局域网 IP 生成 `/m/` 二维码；IPv4 优先，没有可用 IPv4 时回退 ULA / global IPv6，并用方括号生成合法 URL。
+`openbiliclaw start` 和桌面安装包入口默认读取这里的 host / port；显式设置 `OPENBILICLAW_HOST` / `OPENBILICLAW_PORT` 时环境变量优先。默认 `host = "0.0.0.0"` 会创建独立的 IPv4 `0.0.0.0` 与 IPv6 `[::]` listener（系统无 IPv6 时保留 IPv4），避免不同操作系统对 IPv4-mapped IPv6 的行为差异。浏览器插件的手机二维码入口会在后端地址仍是 loopback 时调用轻量端点 `GET /api/qr-info`（不触发 embedding readiness probe）并读取响应中的 `lan_ip` 字段，用局域网 IP 生成 `/m/` 二维码；IPv4 优先，没有可用 IPv4 时回退 ULA / global IPv6，并用方括号生成合法 URL。桌面 Web 的手机二维码会优先使用设置中手动填写的后端地址/端口（若已填写），未填写时才按页面来源或自动探测的局域网 IP 生成。
 
 ### `[api.auth]`
 

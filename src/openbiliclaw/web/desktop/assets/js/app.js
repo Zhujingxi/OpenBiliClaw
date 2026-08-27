@@ -11530,11 +11530,14 @@ ${cardFeedbackBarHtml()}`;
       const typedPort = (storageGet("openbiliclaw.webui.backendPort") || "").trim();
       // A non-loopback page origin is already the address that reached this
       // backend (including a public HTTPS gateway). Keep that origin instead
-      // of replacing it with the backend's private LAN IP. Loopback pages still
-      // need the existing LAN-IP fallback so a phone can reach the machine.
+      // of replacing it with the backend's private LAN IP. An explicitly
+      // configured backend address always wins, so users on campus networks
+      // with AP/client isolation can point the QR at a reachable IP or tunnel
+      // domain instead of the auto-detected LAN IP. Loopback pages still need
+      // the LAN-IP fallback when no manual address is configured.
       const pageHostIsReachable = !qr.isLoopbackMobileHost(def.host);
-      const host = pageHostIsReachable ? def.host : (lanIp || typedHost || def.host);
-      const port = pageHostIsReachable ? def.port : (typedPort || def.port);
+      const host = typedHost || (pageHostIsReachable ? def.host : (lanIp || def.host));
+      const port = typedPort || def.port;
       const scheme = window.location.protocol === "https:" ? "https" : "http";
       const url = qr.buildMobileWebUrl({ scheme, host, port });
       urlEl.textContent = url;
