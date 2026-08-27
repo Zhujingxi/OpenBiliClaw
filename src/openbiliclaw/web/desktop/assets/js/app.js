@@ -843,6 +843,7 @@
     }
 
     const AUTO_LOAD_ON_SCROLL_KEY = "openbiliclaw.webui.autoLoadOnScroll";
+    const SHOW_PENDING_CHAT_COUNT_KEY = "openbiliclaw.webui.showPendingChatCount";
     const AUTO_LOAD_COOLDOWN_MS = 8000;
     // 校准：一行卡片(16:9 封面 + 文案)高约 250–350px，若预载边距接近一行高度，
     // 自动加载会在最后一行(最多 4 张)还没滚进视口时就追加新卡片，用户永远看不全
@@ -851,6 +852,7 @@
     const AUTO_LOAD_ROOT_MARGIN_PX = 50;
     const DESKTOP_EAGER_COVER_COUNT = 4;
     state.autoLoadOnScroll = storageGet(AUTO_LOAD_ON_SCROLL_KEY) !== "0";
+    state.showPendingChatCount = storageGet(SHOW_PENDING_CHAT_COUNT_KEY) !== "0";
     const THEME_STORAGE_KEY = "obc.theme";
     const THEME_HUE_STORAGE_KEY = "obc.themeHue";
     const THEME_OPTIONS = ["auto", "light", "dark"];
@@ -1027,6 +1029,7 @@
       applyAccentStyle(state.accentStyle);
       renderThemeHueControls();
       renderAutoLoadOnScrollToggle();
+      renderShowPendingChatCountToggle();
       syncAutoLoadObserver();
     }
 
@@ -1038,13 +1041,15 @@
       storageSet(THEME_HUE_STORAGE_KEY, String(state.themeHue));
       storageSet(ACCENT_STORAGE_KEY, state.accentStyle);
       storageSet(AUTO_LOAD_ON_SCROLL_KEY, state.autoLoadOnScroll ? "1" : "0");
+      storageSet(SHOW_PENDING_CHAT_COUNT_KEY, state.showPendingChatCount ? "1" : "0");
       applyThemeMode(state.themeMode);
       applyThemeHue(state.themeHue);
       applyAccentStyle(state.accentStyle);
       renderThemeHueControls();
       renderAutoLoadOnScrollToggle();
+      renderShowPendingChatCountToggle();
       syncAutoLoadObserver();
-      return { delightQueueLimit: limit, themeMode: state.themeMode, accentStyle: state.accentStyle, autoLoadOnScroll: state.autoLoadOnScroll };
+      return { delightQueueLimit: limit, themeMode: state.themeMode, accentStyle: state.accentStyle, autoLoadOnScroll: state.autoLoadOnScroll, showPendingChatCount: state.showPendingChatCount };
     }
 
     function getRuntimeStreamUrl() {
@@ -3920,6 +3925,21 @@ ${savedCardFeedbackBarHtml(listKind)}
       if (toggle && toggle.checked !== state.autoLoadOnScroll) toggle.checked = state.autoLoadOnScroll;
       const settingText = $("#autoLoadOnScrollSettingText");
       if (settingText) settingText.textContent = state.autoLoadOnScroll ? "开启" : "关闭";
+    }
+
+    function setShowPendingChatCount(enabled, { persist = true, toast = false } = {}) {
+      state.showPendingChatCount = Boolean(enabled);
+      if (persist) storageSet(SHOW_PENDING_CHAT_COUNT_KEY, state.showPendingChatCount ? "1" : "0");
+      renderShowPendingChatCountToggle();
+      renderDesktopPendingConfirmations();
+      if (toast) showToast(state.showPendingChatCount ? "待聊未读数会显示在「聊聊口味」旁" : "已隐藏「聊聊口味」旁的待聊未读数");
+    }
+
+    function renderShowPendingChatCountToggle() {
+      const toggle = $("#showPendingChatCountSetting");
+      if (toggle && toggle.checked !== state.showPendingChatCount) toggle.checked = state.showPendingChatCount;
+      const settingText = $("#showPendingChatCountSettingText");
+      if (settingText) settingText.textContent = state.showPendingChatCount ? "开启" : "关闭";
     }
 
     function isAutoLoadSentinelInView() {
@@ -7160,7 +7180,15 @@ ${cardFeedbackBarHtml()}`;
     function renderDesktopPendingConfirmations() {
       const pending = state.pendingConfirmations;
       const count = Math.max(0, Number(pending.count) || 0);
-      updateSavedBadge("chatPendingCountBadge", count);
+      if (state.showPendingChatCount) {
+        updateSavedBadge("chatPendingCountBadge", count);
+      } else {
+        const badge = document.getElementById("chatPendingCountBadge");
+        if (badge) {
+          badge.textContent = "";
+          badge.setAttribute("hidden", "");
+        }
+      }
       const toggle = $("#desktopPendingToggle");
       const countLabel = $("#desktopPendingCount");
       const list = $("#desktopPendingConfirmations");
@@ -11574,6 +11602,9 @@ ${cardFeedbackBarHtml()}`;
     safeBind("#autoLoadOnScrollSetting", "change", (event) => {
       setAutoLoadOnScroll(Boolean(event.target.checked), { toast: true });
     });
+    safeBind("#showPendingChatCountSetting", "change", (event) => {
+      setShowPendingChatCount(Boolean(event.target.checked), { toast: true });
+    });
     window.addEventListener("scroll", scheduleAutoLoadCheck, { passive: true });
     window.addEventListener("resize", scheduleAutoLoadCheck);
     safeBind("#reshuffleBtn", "click", reshuffle);
@@ -11930,7 +11961,7 @@ ${cardFeedbackBarHtml()}`;
       $("#configStatus")?.removeAttribute("role");
       const endpoint = persistBackendEndpoint();
       const frontend = persistFrontendSettings();
-      if ($("#configStatus")) $("#configStatus").value = `正在保存到 ${endpoint.host}:${endpoint.port}，惊喜队列加载 ${frontend.delightQueueLimit} 条，主题${THEME_LABELS[frontend.themeMode]}，滚动自动加载${frontend.autoLoadOnScroll ? "已开启" : "已关闭"}，后端热重载可能需要几秒。`;
+      if ($("#configStatus")) $("#configStatus").value = `正在保存到 ${endpoint.host}:${endpoint.port}，惊喜队列加载 ${frontend.delightQueueLimit} 条，主题${THEME_LABELS[frontend.themeMode]}，滚动自动加载${frontend.autoLoadOnScroll ? "已开启" : "已关闭"}，待聊未读数${frontend.showPendingChatCount ? "显示" : "隐藏"}，后端热重载可能需要几秒。`;
       try {
         const payload = buildConfigUpdate();
         const result = await requestJsonStrict(ENDPOINTS.config, {
