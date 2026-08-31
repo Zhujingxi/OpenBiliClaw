@@ -119,7 +119,9 @@ Agent 宿主（OpenClaw / Hermes / WorkBuddy）
 │ XHS 搜索：inactive tab → MAIN 搜索响应归一化 → isolated replay / DOM 兜底   │
 │ Linux.do：isolated task tab → 同源 GET → 五路 discovery / 三路 bootstrap │
 │ extension_native_save_jobs -> /api/sources/<slug>/next-task -> installed extension │
-│ exact OpenBiliClaw / YouTube Watch Later 目标 → 安全 task-result          │
+│ 平台真实目标（YouTube `OpenBiliClaw` / `YouTube Watch Later`；知乎全局收藏）→ 安全 task-result │
+│ runner-owned task tab（首屏/重载均停普通采集）→ 终止并等待旧写入 → 新 document READY → 只读确认 │
+│ exact terminal callback replay → canonical ACK；不同终态仍 409           │
 │ trusted-local E2E 精确授权 → 单 item saved sync → 六字段安全 callback      │
 │ unsupported_adapter_missing 可重试 · unsupported_content_type local-only │
 │ Canonical ID · Local-first SavedSync · Task Poll · SQLite（事件 · 已看账本 · 候选池 · 推荐 · 保存/任务 · 移除快照）│
@@ -142,4 +144,3 @@ durable turn → 固定时间/payload → 确认入口（待聊列表/卡片） 
 海外请求：设置页 `[network].mode` → 系统代理（默认）/ 直连 / 自定义代理 → LLM、YouTube、X/Reddit CLI、Bangumi、更新、GitHub 项目统计；国内平台（含 V2EX）保持独立直连
 手动抖音发现：CLI discover → daemon 同款 producer → 统一关键词终态 → 插件 search/hot/feed → 待评估池
 ```
-

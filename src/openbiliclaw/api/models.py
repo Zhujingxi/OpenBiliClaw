@@ -1290,7 +1290,7 @@ _EXTENSION_NATIVE_SAVE_E2E_TARGETS: dict[str, dict[NativeSaveActionOut, str]] = 
     "xiaohongshu": {"favorite": "小红书收藏", "watch_later": "小红书收藏"},
     "douyin": {"favorite": "抖音收藏", "watch_later": "抖音收藏"},
     "twitter": {"favorite": "X Bookmarks", "watch_later": "X Bookmarks"},
-    "zhihu": {"favorite": "OpenBiliClaw", "watch_later": "OpenBiliClaw"},
+    "zhihu": {"favorite": "知乎收藏", "watch_later": "知乎收藏"},
     "reddit": {"favorite": "Reddit Saved", "watch_later": "Reddit Saved"},
 }
 _EXTENSION_NATIVE_SAVE_E2E_CONTENT_IDS: dict[str, re.Pattern[str]] = {

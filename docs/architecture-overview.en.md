@@ -121,7 +121,9 @@ images: proxy foreground + refresh prefetch → app-stable lane (total 4 / bg 3,
 │ XHS search: inactive tab → MAIN response normalization → isolated replay / DOM fallback │
 │ Linux.do: isolated task tab → same-origin GET → five discovery / three bootstrap paths │
 │ extension_native_save_jobs -> /api/sources/<slug>/next-task -> installed extension │
-│ exact OpenBiliClaw / YouTube Watch Later targets → safe task-result    │
+│ real targets (YouTube `OpenBiliClaw` / `YouTube Watch Later`; Zhihu global favorite) → safe task-result │
+│ runner-owned task tab (collector off on first load/reload) → abort+await old write → fresh document READY → read-only verify │
+│ exact terminal callback replay → canonical ACK; changed terminal remains 409 │
 │ trusted-local E2E exact auth → one saved-sync item → six-field callback │
 │ unsupported_adapter_missing retryable · unsupported_content_type local-only │
 │ Canonical ID · Local-first sync · Task poll · SQLite (events · seen ledger · pool · recs · saved/tasks · removal snapshots)│
@@ -144,4 +146,3 @@ Desktop background resume (cards already loaded): skip the pool-filling recommen
 Overseas traffic: `[network].mode` → system proxy (default) / direct / custom proxy → LLM, YouTube, X/Reddit CLIs, Bangumi, updater, GitHub project stats; CN clients including V2EX remain isolated and direct
 Manual Douyin discovery: CLI discover → daemon-equivalent producer → per-keyword outcomes → extension search/hot/feed → pending-eval pool
 ```
-

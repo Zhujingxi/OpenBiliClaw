@@ -174,16 +174,28 @@ async function postTaskResult(result: YtTaskPayload): Promise<void> {
   }
 }
 
-async function postNativeSaveResult(result: NativeSaveResult): Promise<void> {
-  try {
-    await authenticatedFetch(await apiUrl("/sources/yt/task-result"), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(result),
-    });
-  } catch {
-    // Backend transient unavailability should not crash the service worker.
-  }
+export interface YtNativeSaveResultTransport {
+  resolveUrl: (path: string) => Promise<string>;
+  fetch: (input: string, init: RequestInit) => Promise<{ ok?: boolean }>;
+}
+
+const YT_NATIVE_SAVE_RESULT_TRANSPORT: YtNativeSaveResultTransport = {
+  resolveUrl: apiUrl,
+  fetch: authenticatedFetch,
+};
+
+export async function postYtNativeSaveResult(
+  result: NativeSaveResult,
+  signal?: AbortSignal,
+  transport: YtNativeSaveResultTransport = YT_NATIVE_SAVE_RESULT_TRANSPORT,
+): Promise<void> {
+  const response = await transport.fetch(await transport.resolveUrl("/sources/yt/task-result"), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(result),
+    signal,
+  });
+  if (response.ok !== true) throw new Error("YouTube native-save result was not acknowledged");
 }
 
 // ---------------------------------------------------------------------------
@@ -427,7 +439,7 @@ export async function executeTask(task: YtTask): Promise<void> {
     if (taskInFlight) return;
     taskInFlight = true;
     try {
-      await runNativeSaveTask(task, "yt", postNativeSaveResult);
+      await runNativeSaveTask(task, "yt", postYtNativeSaveResult);
     } finally {
       taskInFlight = false;
     }
@@ -541,6 +553,12 @@ async function pollNextTask(): Promise<void> {
   await executeTask(task);
 }
 
+function pollNextTaskBestEffort(): void {
+  void pollNextTask().catch(() => {
+    // Result delivery is bounded and cleanup has already run; the next alarm can recover the task.
+  });
+}
+
 export function startYtTaskPolling(): void {
   if (typeof chrome === "undefined" || !chrome.alarms) return;
   chrome.alarms.create(POLL_ALARM_NAME, { periodInMinutes: DEFAULT_POLL_INTERVAL_MS / 60_000 });
@@ -548,7 +566,7 @@ export function startYtTaskPolling(): void {
 
 export function handleYtTaskAlarm(alarmName: string): void {
   if (alarmName === POLL_ALARM_NAME) {
-    void pollNextTask();
+    pollNextTaskBestEffort();
     return;
   }
   if (alarmName === YT_TASK_TIMEOUT_ALARM_NAME) {
@@ -557,5 +575,5 @@ export function handleYtTaskAlarm(alarmName: string): void {
 }
 
 export function pollYtTaskNow(): void {
-  void pollNextTask();
+  pollNextTaskBestEffort();
 }

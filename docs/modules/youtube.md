@@ -26,6 +26,7 @@ YouTube 模块负责把用户在 YouTube 上的长期兴趣信号接入 OpenBili
 | `yt_channel` discovery | ✅ | 从 DB 读取 `event_type=follow` 且 `metadata.source_platform="youtube"` 的订阅频道，优先 `scrapetube`（失败或 0 条时 fallback），频道 handle URL 走 `yt-dlp` fallback 拉最新视频 |
 | 后台 discovery producer | ✅ | `YoutubeDiscoveryProducer` 独立调度 `yt_search` / `yt_trending` / `yt_channel`，按 `min_interval_minutes` 与每日执行 ledger 控制频率和预算；注入 `DiscoveryCandidatePipeline` 后只入待评估池并触发统一 batch 评估 / 入池 |
 | 推荐点击回写 | ✅ | YouTube 推荐卡片打开时会把 `content_id / content_url / source_platform` 传给 `/api/recommendation-click`，事件和强画像信号保留 YouTube URL，不再退化成 B 站链接 |
+| 原生保存与持久状态确认 | ✅ | favorite 精确使用 `OpenBiliClaw`，watch-later 只使用 renderer id 为 `WL` 的平台列表。legacy checkbox renderer 与新版 `toggleable-list-item-view-model` 都受支持；新版真实状态和点击点读取内层 `button[role=menuitem][aria-pressed]`，不会误点仅作 presentation 的外层组件。mutation 后页面未及时显示 selected 时，runner 会在终止旧 document sender 后重载同一视频；只有不同 `document_instance_id` 的新页面通过 READY，才执行 `verification_only` exact-row 检查。复核不创建 playlist、不点击 row，正面 membership 证据返回 `already_synced`，其它结果保留 `native_confirmation_not_observed`。任务 tab 从首次导航起禁止普通行为采集。 |
 
 ## 公开 API
 

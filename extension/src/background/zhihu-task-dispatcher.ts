@@ -143,7 +143,7 @@ async function postTaskResult(result: ZhihuTaskResult): Promise<void> {
 
 export interface ZhihuNativeSaveResultTransport {
   resolveUrl: (path: string) => Promise<string>;
-  fetch: (input: string, init: RequestInit) => Promise<unknown>;
+  fetch: (input: string, init: RequestInit) => Promise<{ ok?: boolean }>;
 }
 
 const ZHIHU_NATIVE_SAVE_RESULT_TRANSPORT: ZhihuNativeSaveResultTransport = {
@@ -153,26 +153,25 @@ const ZHIHU_NATIVE_SAVE_RESULT_TRANSPORT: ZhihuNativeSaveResultTransport = {
 
 export async function postZhihuNativeSaveResult(
   result: NativeSaveResult,
+  signal?: AbortSignal,
   transport: ZhihuNativeSaveResultTransport = ZHIHU_NATIVE_SAVE_RESULT_TRANSPORT,
 ): Promise<void> {
-  try {
-    await transport.fetch(await transport.resolveUrl("/sources/zhihu/task-result"), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(result),
-    });
-  } catch {
-    // Backend transient unavailability should not crash the service worker.
-  }
+  const response = await transport.fetch(await transport.resolveUrl("/sources/zhihu/task-result"), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(result),
+    signal,
+  });
+  if (response.ok !== true) throw new Error("Zhihu native-save result was not acknowledged");
 }
 
 export interface ZhihuNativeSaveDispatchDependencies {
   run: (
     task: NativeSaveTask,
     platformSlug: "zhihu",
-    postResult: (result: NativeSaveResult) => Promise<void>,
+    postResult: (result: NativeSaveResult, signal?: AbortSignal) => Promise<void>,
   ) => Promise<void>;
-  postResult: (result: NativeSaveResult) => Promise<void>;
+  postResult: (result: NativeSaveResult, signal?: AbortSignal) => Promise<void>;
 }
 
 export async function dispatchZhihuNativeSaveTask(
@@ -339,6 +338,12 @@ async function pollNextTask(): Promise<void> {
   await executeTask(task);
 }
 
+function pollNextTaskBestEffort(): void {
+  void pollNextTask().catch(() => {
+    // Result delivery is bounded and cleanup has already run; the next alarm can recover the task.
+  });
+}
+
 export function startZhihuTaskPolling(): void {
   if (typeof chrome === "undefined" || !chrome.alarms) return;
   chrome.alarms.create(POLL_ALARM_NAME, { periodInMinutes: DEFAULT_POLL_INTERVAL_MS / 60_000 });
@@ -346,10 +351,10 @@ export function startZhihuTaskPolling(): void {
 
 export function handleZhihuTaskAlarm(alarmName: string): void {
   if (alarmName === POLL_ALARM_NAME) {
-    void pollNextTask();
+    pollNextTaskBestEffort();
   }
 }
 
 export function pollZhihuTaskNow(): void {
-  void pollNextTask();
+  pollNextTaskBestEffort();
 }

@@ -262,7 +262,10 @@ OpenBiliClaw 的当前功能；`integrations/openclaw/skill.py` 是 descriptor �
 当前桥接边界覆盖多源推荐与分页消费、活动流和平台可用性、兴趣 / 避雷四态探针、惊喜反馈、
 带 `turn_id` 的 durable 对话历史、画像编辑，以及 local-first 保存列表。所有写入动作都返回
 稳定 request / turn 标识；外部账号 native-save 只能通过显式授权的 `sync_saved` 触发，不能把
-本地 membership 当成平台同步成功。新增核心功能时必须同步更新 operation DTO / handler、skill
+本地 membership 当成平台同步成功。扩展 mutation 未观察到即时选中态时，只允许同一任务在终止
+旧 document sender 后重载 exact URL；新 document generation 完成 READY 握手后执行只读 persisted-target
+核对，且只有正面状态证据可升级成功。知乎目标是全局 `知乎收藏` 开关而非命名收藏夹，复核绝不点击“已收藏”。task-result 必须得到 2xx，同一 canonical terminal
+payload 可幂等重放，变化后的晚回调不可覆盖首写。新增核心功能时必须同步更新 operation DTO / handler、skill
 descriptor、CLI（适用时）、capability manifest、幂等测试和集成文档，保持宿主不会悄悄落后于内核。
 
 ---
@@ -551,6 +554,9 @@ trusted LAN ─ HTTPS（可选）──→ TLS Proxy :8443 ─ loopback/Compose 
 │  │ -> 插件/桌面/移动 saved UI；CLI config-show（自动同步默认关闭）    │
 │  │ NATIVE_SAVE_EXECUTE/RESULT：tab-launch mutex（XHS exact manual 可越过）+ per-task deadline + bounded replay │
 │  │ shared MV3 recovery barrier 在领取任务前清理全部 runner-owned orphan tabs       │
+│  │ task tab 从 about:blank 起登记 owner，首次加载/重载均停普通 collector；删除失败保留 recovery owner │
+│  │ 未观察到确认：abort+await mutation sender → fresh document READY/不同 ID → read-only verifier │
+│  │ verifier 仅 exact execution 的 already_synced 可升级；exact terminal callback replay 幂等 ACK │
 │  │ final/source URL 与 tab/task/item 严格关联；Reddit/X/YT/XHS/DY/Zhihu 6/6 已接 │
 │  │ （fixture 全覆盖；2026-07-14 六平台 favorite + watch-later/fallback 真实终态均成功）│
 │  │ Zhihu typed ID -> exact identity control/dialog -> OpenBiliClaw checked proof │

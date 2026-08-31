@@ -89,7 +89,10 @@ import {
   handleXTaskAlarm,
   pollXTaskNow,
 } from "./x-task-dispatcher.ts";
-import { ensureNativeSaveTaskRecovery } from "./native-save-task-runner.ts";
+import {
+  ensureNativeSaveTaskRecovery,
+  isNativeSaveTaskTabId,
+} from "./native-save-task-runner.ts";
 import {
   startBiliTaskPolling,
   handleBiliTaskAlarm,
@@ -679,6 +682,12 @@ async function postBangumiIdentity(payload: { uid: number; username: string }): 
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === "NATIVE_SAVE_TASK_TAB_QUERY") {
+    void isNativeSaveTaskTabId(sender.tab?.id).then((nativeSaveTaskTab) => {
+      sendResponse({ native_save_task_tab: nativeSaveTaskTab });
+    });
+    return true;
+  }
   if (message.action === "BGM_IDENTITY_OBSERVED") {
     void postBangumiIdentity(message.data as { uid: number; username: string });
     return;

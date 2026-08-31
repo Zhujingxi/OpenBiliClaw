@@ -17044,7 +17044,7 @@ class Database:
         error_code: str,
         error_message: str,
     ) -> bool:
-        """Complete one claimed job when slug, UUID, and item identity match."""
+        """Complete one claimed job or acknowledge an exact canonical replay."""
         safe_job_id = _validated_extension_native_save_uuid(job_id, "job_id")
         safe_slug = self._validated_extension_native_save_slug(platform_slug)
         safe_item_key = _validated_extension_native_save_text(item_key, "item_key", max_length=768)
@@ -17064,8 +17064,24 @@ class Database:
                 """,
                 (safe_status, safe_code, safe_message, safe_job_id, safe_slug, safe_item_key),
             )
+            accepted = cursor.rowcount == 1
+            if not accepted:
+                existing = conn.execute(
+                    """
+                    SELECT status, last_error_code, last_error_message
+                    FROM extension_native_save_jobs
+                    WHERE job_id = ? AND platform_slug = ? AND item_key = ?
+                    """,
+                    (safe_job_id, safe_slug, safe_item_key),
+                ).fetchone()
+                accepted = bool(
+                    existing is not None
+                    and str(existing["status"]) == safe_status
+                    and str(existing["last_error_code"] or "") == safe_code
+                    and str(existing["last_error_message"] or "") == safe_message
+                )
             conn.commit()
-            return cursor.rowcount == 1
+            return accepted
         finally:
             conn.close()
 

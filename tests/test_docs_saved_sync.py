@@ -132,7 +132,7 @@ def test_six_platform_native_save_docs_define_safe_e2e_contract() -> None:
         "| Xiaohongshu | `小红书收藏` | `小红书收藏` |",
         "| Douyin | `抖音收藏` | `抖音收藏` |",
         "| X/Twitter | `X Bookmarks` | `X Bookmarks` |",
-        "| Zhihu | `OpenBiliClaw` | `OpenBiliClaw` |",
+        "| Zhihu | `知乎收藏` | `知乎收藏` |",
         "| Reddit | `Reddit Saved` | `Reddit Saved` |",
     )
     for row in mapping_rows:
