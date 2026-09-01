@@ -310,6 +310,9 @@ config recovery control plane (normal or degraded; business APIs stay gated)
                           → editable model list + local effort advisory (no config write)
 config save control plane: persist first → HTTP 202 queued/apply_revision → latest-wins queue → runtime receipt/status
                            └─ data_dir changed → restart_required; active locked dir stays until full restart
+embedded tailnet edge (default off): Android/iOS native App tsnet → user's tailnet → desktop Go helper :effective-port
+                                      → strip/rebuild forwarding headers → fixed 127.0.0.1:same-port → FastAPI
+                                      first login URL | optional auth key over stdin; no Funnel/Serve/public URL
 publication-date preference: [bilibili] config → RuntimeContext → effective inventory → PoolCurator → serving score/gate
                              ├─ Bilibili only; out-of-range rows stay in the pool; weight 0.5 default, 1 strict
                              └─ strict only → Bilibili API / extension search pubtime_begin + pubtime_end
@@ -378,6 +381,19 @@ pool maintenance → isolated maintenance DB worker → ≤50 mutations/transact
                  → commit/release lock → unchanged skip / 10m safety sweep
 ```
 
+应用内 Tailnet 的产品边界是“让电脑端应用本身成为一个 tailnet 节点”，而不是要求电脑全局
+开启 Tailscale。`[tailnet].enabled=false` 保持默认；开启时 CLI / 桌面入口在 uvicorn 外层托管
+Go helper。桌面安装包随包携带 helper，源码 checkout 通过 Go 1.26.6 显式构建，Docker 首版
+不内置。节点状态保存在 `data/tailnet/` 并排除跨机器迁移；首次登录走浏览器 URL，自动化 Auth
+Key 只从父环境取出后经 stdin 交付，不进入 config / argv / status / 日志。helper 只监听用户
+tailnet、固定连接 `127.0.0.1:<本次入口有效端口>`；该端口通常来自 `[api].port`，也跟随
+`start` / `serve-api --port` 和桌面 `OPENBILICLAW_PORT` 覆盖，所以 API host 需为
+loopback/localhost/wildcard，失败只降级远程入口。配置优先级为显式 Tailnet 环境变量 > local
+> base，Auth Key / helper path 仅为 runtime-only。本功能不配置 Tailscale Funnel / Serve，不承诺
+浏览器扩展可直接使用 `http://100.x`；首版远端消费面只包括已内嵌 tsnet 的 Android / iOS 原生
+App，不包括 Web / Linux / macOS / Windows Flutter 构建，且建议叠加 API 密码门禁。helper 构建
+会移除 Tailscale logtail 上传和未用的管理 Web UI，但控制面 / DERP 的隐私边界仍保留。
+
 对话回复与其后的 11-kind learning/settlement 是相邻但独立的 lane：Web/API durable runtime
 先由 app-owned 单 worker 按 `chat_turns.rowid` 领取 pending，再在稳定
 execution lease 内使用 `SocraticDialogue(queued)`；成功写入 user+agent 历史并用
@@ -407,6 +423,8 @@ runtime 与次级 hydration 是独立分支；已有卡片的后台恢复跳过�
 LAN clients ─ HTTP（默认）────────────→ IPv4 0.0.0.0 + IPv6 [::] listeners → one uvicorn / FastAPI app
 public clients ─ HTTPS（可选）→ Caddy :443 ─ shared-loopback HTTP ─────────────────────────────┤
 trusted LAN ─ HTTPS（可选）──→ TLS Proxy :8443 ─ loopback/Compose HTTP ───────────────────────┘
+native Android/iOS App（内嵌 tsnet）→ tailnet → app-owned Go tsnet helper :effective-port
+                                                   └─ fixed loopback HTTP → 127.0.0.1:same-port ─┘
 
 ┌──────────────────────────────────────────────────────────────┐
 │                  用户交互层 (浏览器插件)                        │

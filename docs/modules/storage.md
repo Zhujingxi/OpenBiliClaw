@@ -24,7 +24,7 @@
 
 | 包含 | 刻意排除 |
 |---|---|
-| 磁盘 `config.toml` + `config.local.toml` 合并、移除整段 `[api.auth]` 后生成的单份 `config/config.toml`；主数据库和数据目录中的其它可迁移 SQLite；Soul / memory / runtime 用户状态文件；`*_cookie.json` 等平台登录凭据；`data/image-cache/`；白名单桌面偏好 | 来源配置的分层 provenance 与整段 `[api.auth]`（含密码 / hash、session secret、proxy / Origin 策略与设备 key）；`logs/`；`data/backups/`、`data/cache/`、`data/eval/`、`data/embedding_cache.db`；`data/certs/`、`data/autostart/`；WAL / SHM / lock / temp；OpenBiliClaw Web / 扩展访问会话；外部 CLI 凭据；环境变量**值** |
+| 磁盘 `config.toml` + `config.local.toml` 合并、移除整段 `[api.auth]` 后生成的单份 `config/config.toml`；主数据库和数据目录中的其它可迁移 SQLite；Soul / memory / runtime 用户状态文件；`*_cookie.json` 等平台登录凭据；`data/image-cache/`；白名单桌面偏好 | 来源配置的分层 provenance 与整段 `[api.auth]`（含密码 / hash、session secret、proxy / Origin 策略与设备 key）；`logs/`；`data/backups/`、`data/cache/`、`data/eval/`、`data/embedding_cache.db`；`data/certs/`、`data/autostart/`、`data/tailnet/`、`data/bin/`（根目录名按大小写不敏感判定）；WAL / SHM / lock / temp；OpenBiliClaw Web / 扩展访问会话；外部 CLI 凭据；环境变量**值** |
 
 图片缓存是刻意包含的用户状态：部分平台的签名图片 URL 会过期，迁移后无法可靠重新下载。导出配置仍来自磁盘 `config.toml` + `config.local.toml`，但数据快照路径固定为当前进程已取得 canonical lock 的 active data dir；在线保存但尚未重启启用的新 `data_dir` 不会成为本次数据来源。manifest 的 `source_omitted_environment_variables` 只记录源机导出时有值、会影响运行结果的环境变量**名称**（`OPENBILICLAW_*`、Gemini 标准 Key、系统代理 / CA），不记录 value；暂存时另采集目标进程当时有值的名称为 `target_active_environment_variables`。前者提示目标机重新提供来源依赖，后者是目标环境可能覆盖导入文件的暂存时快照；实际应用仍以重启时环境为准，两者都不表示值已迁移。前端文件只允许 `theme_mode`、`theme_hue`、`accent_style`、`auto_load_on_scroll`、`side_drawer_open`；后端 endpoint、Bearer / session、通知与缓存状态不进入包。
 
@@ -42,6 +42,8 @@
 
 - 压缩包不超过 2 GB，成员不超过 20,000 个，目录扫描项目不超过 100,000 个，单成员不超过 4 GB，总解压大小不超过 8 GB；manifest 不超过 16 MB，前端偏好文件不超过 64 KB，成员路径不超过 512 字符 / 16 层；
 - ZIP 成员必须是 manifest 精确列出的普通文件，拒绝绝对路径、`..`、过深 / 过长路径、符号链接、设备 / 特殊文件、重复成员和加密成员；
+- 逻辑路径按 Unicode NFC + casefold 检查；`data/bin/` / `data/tailnet/` 等机器根的任意大小写变体
+  都会被拒绝，不能用 `BIN` / `TaIlNeT` 绕过可执行文件或节点身份排除；
 - 格式版本必须等于当前版本，源 OpenBiliClaw 版本不能高于目标运行版本；
 - 每个文件的实际大小和 SHA-256 必须匹配，TOML 必须能构建无 blocking issue 的 `Config`，每个识别为 SQLite 的文件必须通过 `integrity_check`。
 
@@ -55,7 +57,7 @@
 2. 在 prepared 主库上运行当前 schema 初始化 smoke；读取来源 prepared DB 与目标 active DB 的当前 `auth_epoch`，写入 `max(来源, 目标) + 1` 并删除来源 `password_fingerprint`。新 epoch 严格高于两者，使会话撤销不依赖 session secret 是否被环境变量固定；随后启用导入数据与规范化配置并再次校验 SQLite；
 3. 成功后在 `status.json` 保存不对 API 暴露的活动代际回执（目标路径、配置 SHA-256、严格递增的 DB auth epoch），再删除 pending / journal / 暂存目录；若不支持目录 fsync 的文件系统在断电后复活同一 marker，启动端必须先锁回执中的数据目录并精确验证代际，只清理重复 marker、绝不重放。任何一步失败则按可重复执行的 `rolling_back` journal 恢复原配置和数据，并记录 `failed` 状态；提交确认前出现的 premature applied 回执会先被降为 failed，避免恢复后自锁。
 
-本次成功应用产生的 `pre-import` 回滚副本会保留；完成提交后会清理更早迁移遗留的同类回滚 / failed / prepared artifact，使每个目标只保留本次可恢复副本。启动应用会重新读取目标机的磁盘配置与有效数据路径；`data/certs/` 与 `data/autostart/` 会从应用时目标目录复制到新数据目录，路径、监听端口、日志、网络 / TLS / 自启动和 CDP 等机器专属配置也使用此时目标机现值。整段 `api.auth` 先以目标机应用时的最新磁盘值为基线，来源包既不含也不覆盖任何 auth 字段；随后轮换磁盘 session secret，并把扩展远程访问 key 清空且关闭。prepared DB 的严格递增 `auth_epoch` 同时高于来源与目标当前 epoch，会独立撤销两台机器的旧 Web 会话，即使 `OPENBILICLAW_API_AUTH_SESSION_SECRET` 仍由目标环境固定也不例外；正常启动 reconcile 再记录目标凭据 fingerprint。这样保留目标机的门禁 / 密码 / proxy / Origin 策略，但不保留旧会话和设备配对。白名单桌面偏好也只在这次 apply 成功后由设置页生效，不在上传暂存时提前切换；浏览器按 `migration_id` 只接收一次，同一 applied status 后续不会覆盖用户的新选择。
+本次成功应用产生的 `pre-import` 回滚副本会保留；完成提交后会清理更早迁移遗留的同类回滚 / failed / prepared artifact，使每个目标只保留本次可恢复副本。启动应用会重新读取目标机的磁盘配置与有效数据路径；`data/certs/`、`data/autostart/` 与 `data/tailnet/` 会从应用时目标目录复制到新数据目录，但其中出现任何嵌套 symlink 时整次迁移会 fail closed，既不跟随链接，也不把目录外内容带进新数据代。路径、监听端口、日志、网络 / TLS / Tailnet / 自启动和 CDP 等机器专属配置也使用此时目标机现值。Tailnet 目录保存设备节点私钥，来源包从不携带，导入因此不会把一个 Tailscale 节点身份克隆到另一台机器。`data/bin/` 不做整目录保留；只有目标机已经信任、文件名严格等于当前平台 `openbiliclaw-tailnet-helper[.exe]` 的普通文件才可能复制到 prepared data；POSIX 还要求它原本已有执行位，应用完成后只为这一可信副本恢复 `0700`。symlink、非可执行普通文件或其它文件都跳过，迁移不会把普通文件升级成 executable。整段 `api.auth` 先以目标机应用时的最新磁盘值为基线，来源包既不含也不覆盖任何 auth 字段；随后轮换磁盘 session secret，并把扩展远程访问 key 清空且关闭。prepared DB 的严格递增 `auth_epoch` 同时高于来源与目标当前 epoch，会独立撤销两台机器的旧 Web 会话，即使 `OPENBILICLAW_API_AUTH_SESSION_SECRET` 仍由目标环境固定也不例外；正常启动 reconcile 再记录目标凭据 fingerprint。这样保留目标机的门禁 / 密码 / proxy / Origin 策略，但不保留旧会话和设备配对。白名单桌面偏好也只在这次 apply 成功后由设置页生效，不在上传暂存时提前切换；浏览器按 `migration_id` 只接收一次，同一 applied status 后续不会覆盖用户的新选择。
 
 ### 公开 Python API
 
@@ -72,6 +74,7 @@
 
 | 功能 | 状态 | 说明 |
 |------|------|------|
+| Tailnet 节点身份 / helper 迁移隔离 | ✅ | `data/tailnet/` 同时属于导出排除根与目标应用保留根；`.obcbackup` 不含 tsnet 私钥 / 状态。目标保留根含嵌套 symlink 时 fail closed。`data/bin/` 的任何大小写变体在导出与导入都被排除；只保留目标机 exact native helper 普通文件，POSIX 还要求原文件可执行再恢复 `0700`，来源包不能迁入 executable。 |
 | 观看完播判定（2026-07-27+） | ✅ | `events.inferred_satisfaction` 现在也覆盖 `view`：`sources/event_format._classify_view_completion` **只判正向**——完播 ≥`_FINISHED_WATCH_MIN_RATIO`（0.8）且观看 ≥15 秒记 `positive/finished_watch`，其余保持 `unknown/fallback`。低完播刻意不判负（自动播放 / 误点 / 预告 / 重看进度重置都长这样），否则会污染 `recent_negative_exemplars` 并影响内容评估。阈值校准见常量注释；改动 `watch_seconds` 来源后需重新校准 |
 | SQLite schema 初始化 | ✅ | `Database.initialize()` 自动创建核心表和索引，支持旧库增量补列 / 补索引；成熟库会自动补 `recommendations(bvid)` 与 `events(event_type, id DESC)` 热路径索引，并创建 `seen_items` canonical 已看账本。旧库初始化时按游标增量回填全部历史「已消费」事件（`view` / `favorite` / `like` / `coin`），不受旧版 2000 条窗口限制；类型集扩大时按 `scanned_event_types_version` 自动倒回重扫一次。 |
 | 视觉 / 弹幕 provenance 迁移 | ✅ | 旧 `content_cache` 自动补 keyframe/danmaku fingerprint、维度和采样签名列；旧 `user_visual_clusters` 补 provenance，另建单行 profile state。keyframe/danmaku selector 只对已有向量（`keyframe_count > 0` / `danmaku_text` 非空）响应 provider/model namespace、维度变化；确认 source no-data 的行不会因 namespace 或采样签名变化反复抓取。请求或已存维度为 0 都表示未知，不当作已证实不兼容；只有两个正维度实际不同才重排 |

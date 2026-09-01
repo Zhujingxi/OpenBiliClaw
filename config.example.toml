@@ -759,6 +759,18 @@ satisfaction_filter_enabled = true
 
 
 # ──────────────────────────────────────────────────────────────
+# Embedded Tailnet host
+# ──────────────────────────────────────────────────────────────
+# 让 OpenBiliClaw 自己加入 tailnet，不要求电脑安装系统级 Tailscale。
+# 默认关闭；启用后节点身份保存在本机 data/tailnet，Auth Key 不写入配置文件。
+[tailnet]
+enabled = false
+# 单个 DNS label，1..63 字符；会归一化为小写。首尾只能是字母/数字，
+# 中间可使用字母、数字和连字符，不能填写完整域名或带点名称。
+hostname = "openbiliclaw-host"
+
+
+# ──────────────────────────────────────────────────────────────
 # TLS Proxy
 # ──────────────────────────────────────────────────────────────
 # Optional HTTPS reverse proxy for trusted LAN / self-managed access. When enabled

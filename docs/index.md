@@ -15,6 +15,7 @@
 - [Docker 部署指南](docker-deployment.md) — 手动 Docker / docker compose 部署步骤
 - [Safari Web Extension 构建](safari-extension-build.md) — macOS 上 `build:safari` / `package:safari`、`safari-web-extension-converter` 转 Xcode 工程、Developer ID 签名 + notarization、`extension-v*` 发版链与限制矩阵
 - [可选 HTTPS 部署](https-deployment.md) — 公网域名 Caddy 自动证书，以及可信 LAN 的 TLS profile / 本地 CA 流程
+- [应用内 Tailnet](modules/tailnet.md) — 电脑端内嵌 tsnet helper，与 `OpenBiliClaw-mobile` Android / iOS 原生 App 组成私网远程链路；不覆盖其 Web / 桌面 Flutter 构建，无需系统 Tailscale
 - [OpenClaw 接入最短指南](openclaw-quickstart.md) — 把 OpenBiliClaw 接进 OpenClaw / AI 编码助手
 - [Agent Bridge 能力契约](agent-integration.md) — `agent-bridge/v2` 能力协商、宿主别名与新功能同步清单
 
@@ -71,6 +72,7 @@
 | CLI 命令参考 | [modules/cli.md](modules/cli.md) | `src/openbiliclaw/cli.py` | ✅ 持续更新（含 Linux.do / V2EX / 微博 discover 与 bootstrap smoke） |
 | 配置参考 | [modules/config.md](modules/config.md) | `config.example.toml` | ✅ 持续更新（含 `[sources.linuxdo]`、`[sources.v2ex]`、`[sources.weibo]`、`/api/config` round-trip 与来源占比） |
 | 局域网密码门禁 | [modules/api-auth.md](modules/api-auth.md) | `src/openbiliclaw/auth_core.py` + `src/openbiliclaw/api/auth.py` | ✅ 可选 `[api.auth]` 密码门禁 + `/api/auth/*` + `set-password` |
+| 应用内 Tailnet | [modules/tailnet.md](modules/tailnet.md) | `runtime/tailnet_supervisor.py` + `cmd/openbiliclaw-tailnet/` | ✅ 默认关闭的 Android / iOS tsnet 私网入口；桌面包内置，源码可构建，Docker 首版不内置；macOS helper 需 12+，不改变主应用 10.15+ 目标 |
 | 公网 HTTPS 网关 | [HTTPS 部署](https-deployment.md) | `docker-compose.https.yml` | ✅ 默认关闭的 Caddy 自动证书 + shared-loopback upstream + REST/WebSocket |
 | TLS 反向代理 | [modules/tls-proxy.md](modules/tls-proxy.md) | `src/openbiliclaw/tls_proxy.py` | ✅ 默认关闭的 LAN/self-managed HTTPS + 精确 Origin/Host + WebSocket + SAN 检测 |
 | 集成适配层 | [modules/integrations.md](modules/integrations.md) · [agent-integration.md](agent-integration.md) | `src/openbiliclaw/integrations/` | ✅ Agent Bridge v2；OpenClaw 兼容，Hermes / WorkBuddy 共用能力清单 |

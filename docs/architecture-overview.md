@@ -5,6 +5,11 @@
 
 
 ```text
+Android / iOS 原生 App（内嵌 tsnet）→ 用户 tailnet → 电脑端 Go tsnet helper（默认关闭）
+                                                  → 固定 127.0.0.1:effective-port → 同一 FastAPI
+电脑无需系统 Tailscale；首版无 Funnel/Serve，Tailnet ACL 外建议再开应用密码
+Web / Linux / macOS / Windows Flutter 客户端不在此应用内 tsnet 支持范围
+
 interactive（对话 / 配置探测）───────────────────────┐
                                                     ├─ runtime total gate (default 4) ─ 有序实例链 ─ Provider 适配
 background ─ background admission (default 3) ──────┘
@@ -59,6 +64,7 @@ Agent 宿主（OpenClaw / Hermes / WorkBuddy）
 └──────────────────────┬─────────────────────────┘
                        │ HTTP 默认：IPv4 0.0.0.0 + IPv6 [::] → REST / WebSocket
                        │ HTTPS 可选：公网 Caddy :443 / LAN TLS Proxy :8443 → loopback HTTP → 同一 API
+                       │ Tailnet 可选：Android/iOS App tsnet → 电脑 helper → effective-port loopback → 同一 API
                        │ + 桌面 Web (/web) · 移动 Web (/m) · QR LAN-IP
                        │ + ping 预检降级 → /web · /setup · /m → 配置后原地恢复
 ┌──────────────────────▼─────────────────────────┐

@@ -967,6 +967,67 @@ def _reconcile_packaged_autostart(runtime_config: Any) -> None:
         print(f"[OpenBiliClaw] {warning}")
 
 
+def _packaged_tailnet_event_callback(event: dict[str, object]) -> None:
+    """Surface the embedded tailnet helper lifecycle in desktop logs/browser."""
+
+    def _open_login(url: str) -> None:
+        with suppress(Exception):
+            webbrowser.open(url)
+
+    event_name = str(event.get("event", "")).strip()
+    if event_name == "needs_login":
+        login_url = str(event.get("auth_url", "")).strip()
+        if not login_url:
+            return
+        print("[OpenBiliClaw] Tailnet 需要登录，正在打开一次性登录页面。")
+        threading.Thread(
+            target=_open_login,
+            args=(login_url,),
+            name="obc-tailnet-login",
+            daemon=True,
+        ).start()
+        return
+    if event_name == "ready":
+        dns_name = str(event.get("dns_name", "")).strip()
+        raw_ips = event.get("ips", [])
+        ips = ",".join(str(value) for value in raw_ips) if isinstance(raw_ips, list) else ""
+        port = event.get("port", 8420)
+        print(f"[OpenBiliClaw] Tailnet 已就绪: dns={dns_name or '-'} ips={ips or '-'} port={port}")
+        return
+    if event_name == "error":
+        print(f"[OpenBiliClaw] Tailnet 远程入口不可用: {event.get('message', 'unknown')}")
+
+
+def _start_packaged_tailnet(runtime_config: Any, host: str, port: int) -> Any | None:
+    """Start the optional bundled helper; a failure must not break local use."""
+    if runtime_config is None or not bool(
+        getattr(getattr(runtime_config, "tailnet", None), "enabled", False)
+    ):
+        return None
+    if host.strip().lower() not in {"0.0.0.0", "127.0.0.1", "localhost"}:
+        print(
+            f"[OpenBiliClaw] Tailnet 未启动: API 绑定 {host}，"
+            "helper 只会连接 127.0.0.1；本机服务继续。"
+        )
+        return None
+    if not bool(getattr(getattr(runtime_config.api, "auth", None), "enabled", False)):
+        print(
+            "[OpenBiliClaw] 提醒: Tailnet 已开启但应用密码未开启;"
+            "建议在本机 Web 的设置页开启局域网访问密码。"
+        )
+    from openbiliclaw.runtime.tailnet_supervisor import start_tailnet_if_enabled
+
+    try:
+        return start_tailnet_if_enabled(
+            runtime_config,
+            port,
+            event_callback=_packaged_tailnet_event_callback,
+        )
+    except Exception as exc:  # noqa: BLE001 - local desktop startup must continue
+        print(f"[OpenBiliClaw] Tailnet 未启动（本机服务继续）: {exc}")
+        return None
+
+
 def main() -> None:
     project_root, bundled_resources = _resolve_runtime_paths()
     # Windowed (no-console) build: route output to a log file FIRST, before any
@@ -1217,6 +1278,7 @@ def main() -> None:
     )
 
     listener_sockets = create_wildcard_listener_sockets(host, port)
+    tailnet_supervisor = _start_packaged_tailnet(runtime_config, host, port)
 
     try:
         if use_tray:
@@ -1234,6 +1296,8 @@ def main() -> None:
             else:
                 server.run()
     finally:
+        if tailnet_supervisor is not None:
+            tailnet_supervisor.stop()
         close_listener_sockets(listener_sockets)
         migration_guard.release()
 

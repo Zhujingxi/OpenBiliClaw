@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import shutil
 import subprocess
+import sys
 import tempfile
 import zipfile
 from pathlib import Path
@@ -137,6 +138,67 @@ def test_pyinstaller_spec_collects_reddit_dependency() -> None:
     assert "rdt_cli" in spec
     assert "browser_cookie3" in spec
     assert "_reddit_hiddenimports" in spec
+
+
+def test_tailnet_helper_filename_is_platform_specific() -> None:
+    assert build_module.tailnet_helper_filename("Darwin") == "openbiliclaw-tailnet-helper"
+    assert build_module.tailnet_helper_filename("Windows") == "openbiliclaw-tailnet-helper.exe"
+
+
+def test_build_tailnet_helper_uses_reproducible_pure_go_flags(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "go.mod").write_text("module example.invalid/helper\n", encoding="utf-8")
+    (source / "build-tags.txt").write_text("ts_omit_logtail,ts_omit_webclient\n", encoding="utf-8")
+    captured: dict[str, object] = {}
+    calls: list[list[str]] = []
+
+    def fake_check_call(command, *, cwd, env):
+        calls.append(command)
+        if "-o" in command:
+            captured.update(command=command, cwd=cwd, env=env)
+            Path(command[command.index("-o") + 1]).write_bytes(b"helper")
+
+    monkeypatch.setattr(build_module, "TAILNET_HELPER_SOURCE_DIR", source)
+    monkeypatch.setattr(build_module.subprocess, "check_call", fake_check_call)
+    output = build_module.build_tailnet_helper(
+        output_dir=tmp_path / "out",
+        go_executable="/toolchain/go",
+        platform_name="Darwin",
+    )
+
+    assert output.name == "openbiliclaw-tailnet-helper"
+    assert captured["cwd"] == str(source)
+    assert calls[0] == [
+        "/toolchain/go",
+        "build",
+        "-trimpath",
+        "-tags=ts_omit_logtail,ts_omit_webclient",
+        "-ldflags=-s -w",
+        "-o",
+        str(output),
+        ".",
+    ]
+    assert calls[1] == [str(output), "--self-test"]
+    assert calls[2] == [
+        sys.executable,
+        str(build_module.TAILNET_NOTICES_SCRIPT),
+        "--check",
+    ]
+    assert captured["env"]["CGO_ENABLED"] == "0"
+
+
+def test_pyinstaller_spec_bundles_tailnet_helper_binary() -> None:
+    spec = (Path(__file__).resolve().parent.parent / "packaging" / "openbiliclaw.spec").read_text(
+        encoding="utf-8"
+    )
+
+    assert "OPENBILICLAW_TAILNET_HELPER_BINARY" in spec
+    assert "_tailnet_binaries" in spec
+    assert 'project_root / "LICENSE"' in spec
+    assert "THIRD_PARTY_NOTICES.md" in spec
 
 
 def test_pyinstaller_spec_collects_httpx_socks_dependency() -> None:

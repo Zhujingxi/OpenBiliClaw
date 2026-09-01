@@ -8,6 +8,8 @@ OpenBiliClaw 采用分层架构设计，从上到下依次为：
 LAN clients ─ HTTP（默认）────────────→ IPv4 0.0.0.0 + IPv6 [::] listeners → one uvicorn / FastAPI app
 public clients ─ HTTPS（可选）→ Caddy :443 ─ shared-loopback HTTP ─────────────────────────────┤
 trusted LAN ─ HTTPS（可选）──→ TLS Proxy :8443 ─ loopback/Compose HTTP ───────────────────────┘
+native Android/iOS App（内嵌 tsnet）→ tailnet → app-owned Go tsnet helper :effective-port
+                                                   └─ fixed loopback HTTP → 127.0.0.1:same-port ─┘
 
 interactive (dialogue / config probe) ──────────────┐
                                                     ├─ runtime total gate (default 4) ─ ordered instance chain ─ adapter
@@ -137,7 +139,7 @@ candidate evaluation → effective profile view + exact tail-recall pool + negat
                                embedding/recall degraded ───────────────→ no normal-cache write
 ```
 
-1. **用户交互层** — Chrome / Firefox 插件负责受支持站点的普通行为采集、登录态只读任务与侧边栏；Linux.do / V2EX / 微博使用隔离任务 tab，微博普通页面不做行为采集。插件与移动 Web（`/m`）、桌面 Web（`/web`）共用本地 API；可选密码门禁保护局域网 / 远程访问。
+1. **用户交互层** — Chrome / Firefox 插件负责受支持站点的普通行为采集、登录态只读任务与侧边栏；Linux.do / V2EX / 微博使用隔离任务 tab，微博普通页面不做行为采集。插件与移动 Web（`/m`）、桌面 Web（`/web`）共用本地 API；`OpenBiliClaw-mobile` 的 Android / iOS 原生 App 可通过两端各自内嵌的 tsnet 从同一 tailnet 访问电脑后端，其 Web / Linux / macOS / Windows Flutter 构建不在该路径支持面。可选密码门禁保护局域网 / 远程访问。
 2. **外部集成层** — OpenClaw adapter / skill wrappers / 本地 API / Codex CLI 凭据导入等对外接入边界
 3. **Agent 核心层** — 自研编排器 + Soul Engine + Discovery Engine + Recommendation Engine + Skill System；抖音手动 discovery 与 daemon 共用正式 producer、统一关键词生命周期和待评估候选链，debug-only `discover-douyin` 才直接调用源服务
 4. **LLM 实例路由层** — `config / Web UI -> [llm.instances.<id>] -> 全局或分模块有序实例链 -> LLMRegistry -> Provider adapter`。实例 ID 是路由、健康与 cooldown 身份，adapter 类型只是协议实现，因此同类型的多个 Base URL / token / model 可以同时存在。模块默认继承全局链；自定义链只在链内降级，耗尽后不越界。配置界面另有两条无写入恢复支路：`draft -> /api/config/probe-service -> temporary registry -> stable total gate` 做目标实例/链真实探测，`draft -> /api/config/discover-models -> exact instance GET /models` 只返回模型 ID 与本地 Effort 建议。两者在 active registry 启动失败的 degraded 状态仍精确放行，但不改变配置、不放开业务 API。
@@ -177,6 +179,17 @@ HTTPS 有两个互斥的**可选传输边缘**，都不是新的业务 API 层�
 它精确校验 HTTPS Origin 与 Host、兼容 Chrome/Firefox 扩展 Origin、转发 WebSocket、给 TLS
 cookie 补 `Secure`，并把已验证的 Web Origin 做最小 `https→http` 适配。证书生成依赖可选
 `cryptography`，转发主体使用 Python 标准库。默认 HTTP 仍直接进入 FastAPI。
+
+应用内 Tailnet 是与上述 HTTPS 边缘并列的 **Android / iOS 私网原生 App 路径**，不是第三个
+公网网关：`Android/iOS App tsnet → tailnet → Go tsnet helper → 127.0.0.1:<effective-port> →
+FastAPI`。有效端口来自当前启动入口，通常是 `[api].port`，也跟随 `start` / `serve-api --port`
+与桌面 `OPENBILICLAW_PORT` 覆盖。helper 保留
+外部 Host/Origin、移除用户提供的 forwarded headers，再用 tsnet peer 重建 XFF，使 AuthGate
+始终把请求视为远程；Tailnet ACL 外仍建议开启应用密码。电脑无需系统 `tailscaled`，但
+`[api].host` 必须能接受固定 loopback upstream（`127.0.0.1` / `localhost` / `0.0.0.0`，推荐
+前者）。节点私钥是机器身份，迁移导出排除 `data/tailnet/` 与任何大小写的 `data/bin/`，导入
+保留目标身份与 exact native helper。构建 tags 还会移除 Tailscale 自动 logtail 上传和未用的
+管理 Web UI，但协调控制面 / DERP 元数据边界不变。
 
 海外出口另有一条显式路由边界：`config / Web UI -> [network].mode -> openbiliclaw.network -> 每个 LLM 实例 endpoint / YouTube / X twitter-cli / Reddit rdt-cli·OpenCLI / Bangumi / updater / Codex OAuth`。默认 `system` 继承环境 / OS 代理（CLI 会收到物化后的代理环境变量；海外服务在国内直连必然超时，而这是开箱默认值；没配代理时等价于直连），`direct` 对 SDK 注入 `trust_env=False` 并从 CLI 环境剥离代理变量，`custom` 注入指定 URL；LLM 链中每个实例按自己的 Base URL 独立裁决国内直连或海外代理。X / Reddit 的浏览器扩展 fallback 仍跟随浏览器网络设置。B站 / 抖音 / V2EX / Ollama / 国内 CDN 客户端不读取该边界。
 
@@ -315,6 +328,7 @@ Web durable turn 只在成功 completion CAS 后交接认知与成功事件；�
 - 系统生命周期管理和服务编排
 - `runtime.dialogue_reply_scheduler` — FastAPI app 生命周期内稳定的对话执行 lease 与 durable reply 单 worker。它不属于可替换 `RuntimeContext`：所有 production reply 在 lease admission 后动态解析当前 dialogue/Soul owner，热重载 pause+drain 后才发布新 context；durable turn 以 SQLite pending row 为权威队列，严格 rowid 顺序、瞬态原位退避、startup 全量分页恢复，visible terminal 用 pending CAS 发布一次。它与 reply 后的 `DialogueSettlementQueue` 分属两条独立 lane。
 - `runtime.image_fetch` — FastAPI app 生命周期内稳定的封面抓取 coordinator。proxy foreground miss 与 refresh background prefetch 共用 total 4 / background 3 的 Condition priority gate，按归一化 cache key singleflight；前台加入 queued background 同 key 会 promotion 到前台并采用更新签名 URL。waiter cancellation 不取消 owned upstream；磁盘 I/O 在线程中完成，cache hit 不占网络槽，落盘使用 same-dir tmp+fsync+replace。热重载只给新 controller 重绑同一实例，shutdown 先停 producer 再关闭 lane。
+- `runtime.tailnet_supervisor` + `cmd/openbiliclaw-tailnet` — 默认关闭、位于 FastAPI app 外层的应用内私网传输边缘。Python supervisor 与 CLI / 冻结桌面 server 同生命周期，发现并托管独立 Go `tsnet` helper；helper 在用户 tailnet 监听本次入口的 effective server port，清洗转发头后固定反代到 `127.0.0.1` 同端口。`OPENBILICLAW_TAILNET_ENABLED/HOSTNAME` 显式覆盖 local/base 配置，Auth Key / helper path 仅为 runtime-only。节点身份与脱敏状态留在 `data/tailnet/`，首次登录 URL 经事件回传；Auth Key 只经 stdin bootstrap，不进 child 环境 / argv / config。helper 故障只降级远程入口，不阻止本机 API；不提供 Funnel、Serve 或公网暴露。
 - 降级模式启动：生产 `create_app()` 遇到 LLM registry 配置错误时保留 `/api/ping`、`/api/health`、`/api/qr-info`、`/api/config`、`/api/runtime-status`、`/api/runtime-stream`，精确放行 `/api/config/probe-service`、`/api/config/discover-models`、来源比例建议及 `/`、`/web`、`/setup`、`/m` 静态恢复 surface 与资源；草稿 probe 从提交配置临时建 registry 并经过稳定 total gate，不依赖失败的 active registry。`/api/ping` 仅在降级时附带 reason / issues，桌面 Web 以此先行识别恢复态、停止业务 hydration，再读取配置并自动打开模型设置。修复配置写盘后复用 degraded context 的 stable 层原子构造完整 swappable runtime、同步解除 503 guard 并启动后台任务，无需重启；构造失败则回滚并继续保持恢复态。其他业务 API 在修复前返回 503，避免半初始化 runtime 继续跑推荐/发现链路
 - 配置热重载：`RuntimeContext` 重建 registry / service / engine 时会注入同一份 `[llm.instances]`、`default_chain` 与 `[llm.routes.*]`。设置保存先事务性落盘；受保护对话 / 结算 / event lane 空闲时同步切换，忙时返回 202 并交给 app-owned latest-wins 配置应用队列，所有 rebuild 共享单一 handoff lock。队列成功/失败通过 runtime stream 回执，最新失败恢复 last-good，已有更新修订时不会被旧 rollback 覆盖。`data_dir` 不进入本进程热切换：路径变化时排队配置副本被固定回 active data dir、202 标记需要重启，避免绕开进程已持有的 canonical data-dir lock；其它字段仍可正常应用。热重载后的正向兴趣和避雷 speculator tick 都作为 detached task 注册到 `BackgroundTaskRegistry`，分别读取 `probe_feedback_history` / `avoidance_probe_feedback_history`，不阻塞配置响应
 - `AutoUpdateService` — 后端自动更新只查询 GitHub `/tags` 并过滤 `backend-v*`（兼容 legacy `v*` / 裸 semver），明确忽略 `extension-v*`；当前 GitHub Releases 由扩展 artifact 占用，不能用 `/releases/latest` 判断后端源码是否最新

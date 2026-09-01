@@ -73,6 +73,8 @@ _SUPPORTED_CHAT_PROVIDERS = {
     "openai_compatible",
 }
 _LLM_INSTANCE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+_TAILNET_HOSTNAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+_DEFAULT_TAILNET_HOSTNAME = "openbiliclaw-host"
 _LLM_PROVIDER_DISPLAY_NAMES = {
     "openai": "OpenAI",
     "claude": "Claude",
@@ -1662,6 +1664,19 @@ class TlsProxyConfig:
 
 
 @dataclass
+class TailnetConfig:
+    """Application-owned tailnet listener configuration.
+
+    Persistent identity lives in the machine-local ``data/tailnet`` state
+    directory. Enrollment keys are accepted only as a runtime bootstrap secret;
+    neither belongs in the configuration file.
+    """
+
+    enabled: bool = False
+    hostname: str = _DEFAULT_TAILNET_HOSTNAME
+
+
+@dataclass
 class ApiConfig:
     """Backend API server settings.
 
@@ -1701,6 +1716,7 @@ class Config:
     # provider override): this carries soul-engine behavior toggles.
     soul: SoulConfig = field(default_factory=SoulConfig)
     tls_proxy: TlsProxyConfig = field(default_factory=TlsProxyConfig)
+    tailnet: TailnetConfig = field(default_factory=TailnetConfig)
 
     @property
     def data_path(self) -> Path:
@@ -1792,7 +1808,12 @@ def _apply_env_overrides(raw: dict[str, Any]) -> dict[str, Any]:
         # TypeError when an on-disk plaintext `password` string is descended into.
         # `_build_api_auth` reads every API_AUTH_ENV_VARS var explicitly, so skip
         # them here entirely (review r7#1).
-        if env_key in API_AUTH_ENV_VARS or env_key in TLS_PROXY_ENV_VARS:
+        if (
+            env_key in API_AUTH_ENV_VARS
+            or env_key in TLS_PROXY_ENV_VARS
+            or env_key in TAILNET_ENV_VARS
+            or env_key in _TAILNET_RUNTIME_ENV_VARS
+        ):
             continue
         incremental_field = _SOURCE_INCREMENTAL_ENV_FIELDS.get(env_key)
         if incremental_field is not None:
@@ -1909,6 +1930,26 @@ def normalize_outbound_proxy(value: str) -> str:
         raise ValueError("代理地址缺少主机名,请填写形如 socks5://127.0.0.1:1080 的地址")
     # Preserve userinfo/host/port/path verbatim; only the scheme is lowercased.
     return f"{scheme}{text[len(parsed.scheme) :]}"
+
+
+def normalize_tailnet_hostname(value: object) -> str:
+    """Return a canonical DNS label for the embedded tailnet node.
+
+    Tailscale accepts a hostname rather than a fully-qualified domain name.
+    Keeping this to one strict 1..63-character DNS label prevents dots,
+    underscores, control characters, and ambiguous leading/trailing hyphens
+    from reaching the helper process.
+    """
+
+    if not isinstance(value, str):
+        raise ConfigError("tailnet.hostname: 必须是 1..63 字符的 DNS label")
+    hostname = value.strip().lower()
+    if not _TAILNET_HOSTNAME_RE.fullmatch(hostname):
+        raise ConfigError(
+            "tailnet.hostname: 必须是 1..63 字符的 DNS label，"
+            "首尾只能是字母或数字，中间只能包含字母、数字或连字符"
+        )
+    return hostname
 
 
 def _build_network_config(raw: dict[str, Any]) -> NetworkConfig:
@@ -2753,6 +2794,7 @@ def _build_config(
         ),
         soul=soul,
         tls_proxy=_build_tls_proxy(raw, consult_environment=consult_environment),
+        tailnet=_build_tailnet(raw, consult_environment=consult_environment),
     )
 
 
@@ -3225,6 +3267,27 @@ _TLS_PROXY_ENV_TO_FIELD: dict[str, str] = {
     "OPENBILICLAW_TLS_SAN_NAMES": "san_names",
 }
 
+# Tailnet config overrides are explicit so whole-file saves can preserve the
+# lower-precedence TOML values instead of baking environment-managed state into
+# ``config.toml``. Runtime-only bootstrap/discovery variables are skipped by the
+# generic env loader as well: they are process controls, never config fields.
+TAILNET_ENV_VARS: tuple[str, ...] = (
+    "OPENBILICLAW_TAILNET_ENABLED",
+    "OPENBILICLAW_TAILNET_HOSTNAME",
+)
+
+_TAILNET_ENV_TO_FIELD: dict[str, str] = {
+    "OPENBILICLAW_TAILNET_ENABLED": "enabled",
+    "OPENBILICLAW_TAILNET_HOSTNAME": "hostname",
+}
+
+_TAILNET_RUNTIME_ENV_VARS: frozenset[str] = frozenset(
+    {
+        "OPENBILICLAW_TAILNET_AUTH_KEY",
+        "OPENBILICLAW_TAILNET_HELPER",
+    }
+)
+
 
 def _build_api_auth(
     api_raw: dict[str, Any],
@@ -3408,6 +3471,55 @@ def tls_proxy_enabled_override_source() -> str | None:
     if isinstance(table, dict) and "enabled" in table:
         return "config.local.toml [tls_proxy].enabled"
     return None
+
+
+def tailnet_override_source(field: str) -> str | None:
+    """Return the higher-precedence source shadowing one Tailnet field, if any."""
+    if field not in {"enabled", "hostname"}:
+        raise ValueError(f"unsupported tailnet field: {field}")
+    for env_name, env_field in _TAILNET_ENV_TO_FIELD.items():
+        if env_field == field and (os.environ.get(env_name) or "").strip():
+            return env_name
+    local = _project_root() / "config.local.toml"
+    try:
+        with local.open("rb") as handle:
+            raw = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    table = raw.get("tailnet")
+    if isinstance(table, dict) and field in table:
+        return f"config.local.toml [tailnet].{field}"
+    return None
+
+
+def _build_tailnet(
+    raw: dict[str, Any],
+    *,
+    consult_environment: bool = True,
+) -> TailnetConfig:
+    """Build app-owned Tailnet settings from TOML plus explicit env overrides."""
+    raw_value = raw.get("tailnet")
+    tailnet_raw: dict[str, Any] = raw_value if isinstance(raw_value, dict) else {}
+
+    def env_or_disk(name: str, key: str, default: object) -> object:
+        env_value = os.environ.get(name) if consult_environment else None
+        if env_value is not None and env_value.strip():
+            return env_value
+        return tailnet_raw.get(key, default)
+
+    return TailnetConfig(
+        enabled=_coerce_bool(
+            env_or_disk("OPENBILICLAW_TAILNET_ENABLED", "enabled", False),
+            default=False,
+        ),
+        hostname=normalize_tailnet_hostname(
+            env_or_disk(
+                "OPENBILICLAW_TAILNET_HOSTNAME",
+                "hostname",
+                _DEFAULT_TAILNET_HOSTNAME,
+            )
+        ),
+    )
 
 
 def _build_tls_proxy(
@@ -3967,12 +4079,8 @@ def _apply_source_date_preferences_from_raw(sources: SourcesConfig, **raws: obje
         source_cfg.recommendation_date_preset = str(
             raw.get("recommendation_date_preset", "all") or "all"
         )
-        source_cfg.recommendation_date_start = str(
-            raw.get("recommendation_date_start", "") or ""
-        )
-        source_cfg.recommendation_date_end = str(
-            raw.get("recommendation_date_end", "") or ""
-        )
+        source_cfg.recommendation_date_start = str(raw.get("recommendation_date_start", "") or "")
+        source_cfg.recommendation_date_end = str(raw.get("recommendation_date_end", "") or "")
         source_cfg.recommendation_date_weight = raw.get("recommendation_date_weight", 0.5)
 
 
@@ -4027,6 +4135,17 @@ def _source_date_preference_issues(config: Config) -> list[ConfigIssue]:
 def _collect_config_issues(config: Config) -> list[ConfigIssue]:
     """Collect non-fatal config issues to display as guidance."""
     issues: list[ConfigIssue] = []
+
+    try:
+        normalize_tailnet_hostname(config.tailnet.hostname)
+    except ConfigError as exc:
+        issues.append(
+            ConfigIssue(
+                field="tailnet.hostname",
+                message=str(exc).removeprefix("tailnet.hostname: "),
+                severity="blocking",
+            )
+        )
 
     incremental_intervals = (
         ("source_incremental_hours", config.scheduler.source_incremental_hours, False),
@@ -4805,6 +4924,39 @@ def _config_local_tls_proxy_keys() -> set[str]:
     return set(tls_proxy) if isinstance(tls_proxy, dict) else set()
 
 
+def _config_local_tailnet_keys() -> set[str]:
+    """Return ``[tailnet]`` keys shadowed by project-root config.local.toml."""
+    local = _project_root() / "config.local.toml"
+    try:
+        with local.open("rb") as handle:
+            data = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError):
+        return set()
+    tailnet = data.get("tailnet")
+    return set(tailnet) if isinstance(tailnet, dict) else set()
+
+
+def _tailnet_env_overridden_fields() -> set[str]:
+    """Return ``[tailnet]`` fields currently governed by explicit env vars."""
+    return {
+        field
+        for env_name, field in _TAILNET_ENV_TO_FIELD.items()
+        if (os.environ.get(env_name) or "").strip()
+    }
+
+
+def _tailnet_overridden_fields(
+    *,
+    consult_local: bool,
+    consult_environment: bool = True,
+) -> set[str]:
+    """Return Tailnet fields whose values come from a higher-precedence layer."""
+    overridden = _tailnet_env_overridden_fields() if consult_environment else set()
+    if consult_local:
+        overridden.update(_config_local_tailnet_keys())
+    return overridden
+
+
 def _tls_proxy_overridden_fields(
     *,
     consult_local: bool,
@@ -4826,6 +4978,17 @@ def _read_on_disk_tls_proxy(path: Path) -> dict[str, Any]:
         return {}
     tls_proxy = data.get("tls_proxy")
     return tls_proxy if isinstance(tls_proxy, dict) else {}
+
+
+def _read_on_disk_tailnet(path: Path) -> dict[str, Any]:
+    """Return the raw base-file ``[tailnet]`` table at ``path`` ({} if absent)."""
+    try:
+        with path.open("rb") as handle:
+            data = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError):
+        return {}
+    tailnet = data.get("tailnet")
+    return tailnet if isinstance(tailnet, dict) else {}
 
 
 def _read_on_disk_autostart(path: Path) -> dict[str, Any]:
@@ -5076,6 +5239,35 @@ def _tls_proxy_lines(
     return lines
 
 
+def _tailnet_lines(
+    config: Config,
+    on_disk_tailnet: dict[str, Any] | None,
+    *,
+    consult_local: bool,
+    consult_environment: bool = True,
+) -> list[str]:
+    """Render Tailnet fields without baking override-layer values into the base."""
+    overridden = _tailnet_overridden_fields(
+        consult_local=consult_local,
+        consult_environment=consult_environment,
+    )
+    disk = on_disk_tailnet or {}
+    lines = ["[tailnet]"]
+
+    if "enabled" in overridden:
+        if "enabled" in disk:
+            lines.append(f"enabled = {_toml_bool(_coerce_bool(disk['enabled'], default=False))}")
+    else:
+        lines.append(f"enabled = {_toml_bool(config.tailnet.enabled)}")
+
+    if "hostname" in overridden:
+        if "hostname" in disk:
+            lines.append(f"hostname = {_toml_string(normalize_tailnet_hostname(disk['hostname']))}")
+    else:
+        lines.append(f"hostname = {_toml_string(config.tailnet.hostname)}")
+    return lines
+
+
 def _autostart_lines(
     config: Config,
     on_disk_autostart: dict[str, Any] | None,
@@ -5159,6 +5351,7 @@ def save_config(
     config.tls_proxy.enabled = normalize_tls_enabled(config.tls_proxy.enabled)
     config.tls_proxy.cert_dir = normalize_tls_cert_dir(config.tls_proxy.cert_dir)
     config.tls_proxy.san_names = normalize_tls_san_names(config.tls_proxy.san_names)
+    config.tailnet.hostname = normalize_tailnet_hostname(config.tailnet.hostname)
     path = Path(config_path) if config_path is not None else _default_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     # Capture the on-disk [api.auth] table so the renderer can preserve credential
@@ -5168,6 +5361,7 @@ def save_config(
     # password and flip the reconcile fingerprint basis.
     on_disk_auth = _read_on_disk_auth(path) if path.exists() else None
     on_disk_tls_proxy = _read_on_disk_tls_proxy(path) if path.exists() else None
+    on_disk_tailnet = _read_on_disk_tailnet(path) if path.exists() else None
     on_disk_autostart = _read_on_disk_autostart(path) if path.exists() else None
     # config.local.toml is merged ONLY when load_config runs with no explicit
     # path. Match that invocation contract exactly: even an explicit path that
@@ -5178,6 +5372,7 @@ def save_config(
         config,
         on_disk_auth=on_disk_auth,
         on_disk_tls_proxy=on_disk_tls_proxy,
+        on_disk_tailnet=on_disk_tailnet,
         on_disk_autostart=on_disk_autostart,
         autostart_authoritative=autostart_authoritative,
         consult_local=consult_local,
@@ -5216,6 +5411,7 @@ def _render_config_toml(
     *,
     on_disk_auth: dict[str, Any] | None = None,
     on_disk_tls_proxy: dict[str, Any] | None = None,
+    on_disk_tailnet: dict[str, Any] | None = None,
     on_disk_autostart: dict[str, Any] | None = None,
     autostart_authoritative: bool = False,
     consult_local: bool = False,
@@ -5247,6 +5443,13 @@ def _render_config_toml(
         *_tls_proxy_lines(
             config,
             on_disk_tls_proxy,
+            consult_local=consult_local,
+            consult_environment=consult_environment,
+        ),
+        "",
+        *_tailnet_lines(
+            config,
+            on_disk_tailnet,
             consult_local=consult_local,
             consult_environment=consult_environment,
         ),

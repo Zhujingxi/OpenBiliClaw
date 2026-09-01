@@ -28,6 +28,10 @@ openbiliclaw [--log-level DEBUG|INFO|WARNING|ERROR] <命令>
 | `browser open <url>` | 通过浏览器打开页面 | ✅ |
 | `browser content <url>` | 获取页面文本内容 | ✅ |
 | `start` | 启动本地 API 服务 | ✅ |
+| `tailnet enable [--hostname NAME]` | 持久开启应用内 Tailnet；重启后加入用户自己的 tailnet | ✅ |
+| `tailnet disable` | 持久关闭应用内 Tailnet，保留本机节点身份 | ✅ |
+| `tailnet status` | 查看开关、节点名、helper 路径、最近事件、MagicDNS / Tailnet IP | ✅ |
+| `tailnet build-helper` | 源码安装用 Go 1.26.6 构建并安装当前平台 helper | ✅ |
 | `set-password` | 设置 / 修改局域网访问密码（`--disable` 关闭门禁 / `--logout-all` / `--rotate-secret`） | ✅ |
 | `ext-key generate` | 生成并保存一个扩展设备访问密钥（明文只显示一次） | ✅ |
 | `ext-key enable` | 开启远程扩展设备认证（默认关闭） | ✅ |
@@ -395,6 +399,60 @@ $ openbiliclaw start
 - `POST /api/events`
 - `GET /api/recommendations`
 
+当 `[tailnet].enabled=true` 时，`start` 还会最佳努力启动应用内 helper。首次节点登录会显示并
+打开 Tailscale 登录 URL；ready 后显示 MagicDNS / Tailnet IP。helper 缺失、API host 不兼容或
+登录失败只关闭远程入口，本机 API 继续启动。helper 固定连接 `127.0.0.1:<port>`，因此
+`[api].host` 需为 `127.0.0.1`、`localhost` 或 `0.0.0.0`，推荐 Tailnet-only 场景用
+`127.0.0.1`。helper 使用本次 `start` 的有效端口：通常是 `[api].port`，显式 `--port` 则覆盖。
+应用密码未启用时，桌面包会提示去本机 Web 设置开启；源码用户也可执行
+`openbiliclaw set-password`。
+
+### `openbiliclaw tailnet`
+
+管理默认关闭的应用内 Tailnet 私网入口，远端客户端只支持 `OpenBiliClaw-mobile` 的 Android /
+iOS 原生 App，不包括其 Web / Linux / macOS / Windows Flutter 构建。这组命令属于源码 /
+一句话安装的 Python CLI；
+PyInstaller 桌面托盘可执行文件首版不暴露 CLI 子命令。桌面包虽已内置 helper，但用户需退出
+应用、编辑运行目录 `config.toml` 的 `[tailnet]`，再重新启动。源码 checkout 的完整流程为：
+
+```bash
+# 源码安装：需要 Go 1.26.6
+$ openbiliclaw tailnet build-helper
+
+# 节点名是单个 DNS label；省略时沿用配置值
+$ openbiliclaw tailnet enable --hostname openbiliclaw-host
+# 完整重启 OpenBiliClaw，首次启动按打开的网页登录 Tailscale
+$ openbiliclaw tailnet status
+
+# 关闭下次启动的私网入口，但保留 data/tailnet 节点身份
+$ openbiliclaw tailnet disable
+```
+
+四个命令的语义：
+
+- `enable`：校验并保存 `[tailnet].enabled=true` 与可选 `hostname`，不在当前进程热启动 helper；
+- `disable`：保存关闭意图，不删除 tsnet 私钥；
+- `status`：只读显示配置、helper 发现结果和 `data/tailnet/status.json` 最近脱敏事件；配置端口
+  与最近监听端口分列，MagicDNS URL 使用最近合法 runtime 端口，因此 `start --port` /
+  `serve-api --port` 覆盖后两者可能不同；
+- `build-helper`：在仓库包含 `cmd/openbiliclaw-tailnet` 时使用 Go 1.26.6 构建，将可执行文件
+  安装到当前 `data_dir/bin/`。它固定使用 privacy build tags 并执行 self-test；不加入 tailnet，
+  也不读取 Auth Key。完整第三方 notice 由 CI 与桌面打包流程校验。macOS helper 要求 12+，
+  但主应用仍支持 10.15+。
+
+`enabled` / `hostname` 按字段采用 `OPENBILICLAW_TAILNET_ENABLED` /
+`OPENBILICLAW_TAILNET_HOSTNAME` > `config.local.toml` > `config.toml`。`enable` 若要写的字段或
+`disable` 的 `enabled` 被环境 / local 覆盖，命令会非零退出并提示直接修改真实来源；不会把一个
+重启后仍被遮蔽的 base 改动误报为成功。无关的配置保存也不会把环境或 local 的 Tailnet 值
+固化进 `config.toml`。
+
+无人值守节点注册可在启动父进程中设置 `OPENBILICLAW_TAILNET_AUTH_KEY`。该值只经 stdin
+bootstrap 传给 helper，不出现在 argv、配置、status 或日志；普通首次使用直接走浏览器登录。
+它与 helper 路径覆盖 `OPENBILICLAW_TAILNET_HELPER` 都是 runtime-only，不参加上述配置优先级或
+通用保存。
+完整数据流与安全边界见[应用内 Tailnet 模块](tailnet.md)。Docker 首版镜像不内置 helper，
+容器用户不要把 `build-helper` 当成开箱可用路径。
+
 ### `openbiliclaw serve-api`
 
 启动更适合 Docker / 脚本调用的 API 服务入口。默认监听 `0.0.0.0:8420`。
@@ -415,6 +473,10 @@ TLS enabled 时，证书检查、SSL context 和 socket bind 在 uvicorn 前同�
 `serve-api` 与 `start` 共用上述 migration runtime lock、pending apply / journal recovery 和迁移后实际数据目录补锁流程；容器启动不会绕过迁移事务。它不执行 `start` 专属的 24 小时数据库冷备。
 当 `scheduler.pause_on_extension_disconnect=true` 时，`serve-api` 与 `start` 一样会在 uvicorn 启动前打印 extension presence WARN，提醒容器后端若没有插件客户端连接，后台 LLM 工作会在宽限期后暂停。
 当配置进入降级模式时，`serve-api` 也会打印同一张 `降级模式 / Degraded mode` 面板；容器或脚本可继续通过 `/api/config` 写入修复配置，成功响应会原地启用新 registry，不需要重启服务。
+`serve-api` 与 `start` 共用应用内 Tailnet supervisor；但官方 Docker 镜像首版不携带 helper，
+即使配置开启也只记录“远程入口未启动”，不会让容器 API 退出。Docker 远程部署继续使用
+Caddy HTTPS overlay 或自管 TLS。若自行从源码形态运行，helper 跟随 `serve-api --port` 的本次
+有效端口，而不是强制使用磁盘 `[api].port`。
 
 ### `openbiliclaw tls-proxy`
 

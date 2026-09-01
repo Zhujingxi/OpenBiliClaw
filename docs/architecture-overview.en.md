@@ -5,6 +5,11 @@
 
 
 ```text
+native Android / iOS app (embedded tsnet) → user's tailnet → desktop Go tsnet helper (default off)
+                                                           → fixed 127.0.0.1:effective-port → same FastAPI
+No system Tailscale is required on the computer; no Funnel/Serve; add the app password beyond ACLs
+Web, Linux, macOS, and Windows Flutter clients are outside this embedded-tsnet support scope
+
 interactive (dialogue / config probe) ──────────────┐
                                                     ├─ runtime total gate (default 4) ─ ordered instance chain ─ adapter
 background ─ background admission (default 3) ──────┘
@@ -59,6 +64,7 @@ images: proxy foreground + refresh prefetch → app-stable lane (total 4 / bg 3,
 └──────────────────────┬─────────────────────────┘
                        │ HTTP default: IPv4 0.0.0.0 + IPv6 [::] → REST / WebSocket
                        │ Optional HTTPS: public Caddy :443 / LAN TLS Proxy :8443 → loopback HTTP → same API
+                       │ Optional tailnet: Android/iOS App tsnet → helper → effective-port loopback → same API
                        │ + Desktop Web (/web) · Mobile Web (/m) · QR LAN-IP
                        │ + ping preflight → /web · /setup · /m → config + in-process recovery
 ┌──────────────────────▼─────────────────────────┐

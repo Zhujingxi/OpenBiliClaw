@@ -1,7 +1,7 @@
 # OpenBiliClaw 隐私权政策
 
 生效日期：2026-05-31
-更新日期：2026-08-09
+更新日期：2026-08-31
 
 OpenBiliClaw 是一个本地优先的跨平台内容发现 AI Agent。浏览器插件的单一用途是：在用户访问 Bilibili、小红书、抖音、YouTube、X、知乎、Reddit、Linux.do 等受支持内容平台时，采集用户授权范围内的浏览、互动和内容信号，发送到用户自己配置的 OpenBiliClaw 后端，用于构建个人兴趣画像、改进内容推荐、同步收藏 / 稍后再看状态和展示本地通知。
 OpenBiliClaw 是一个本地优先的跨平台内容发现 AI Agent。浏览器插件的单一用途是：在用户访问 Bilibili、小红书、抖音、YouTube、V2EX 等受支持内容平台时，采集用户授权范围内的浏览、互动和内容信号，发送到用户自己配置的 OpenBiliClaw 后端，用于构建个人兴趣画像、改进内容推荐、同步收藏 / 稍后再看状态和展示本地通知。
@@ -23,6 +23,7 @@ OpenBiliClaw 是一个本地优先的跨平台内容发现 AI Agent。浏览器�
 | 个人通讯 | 用户在 OpenBiliClaw 插件侧边栏聊天框中主动输入的消息；以及用户在受支持平台上**成功提交**的评论正文与 B 站弹幕正文（提交成功后经网络层采集，仅送本机后端） | 与用户配置的本地后端聊天接口交互，帮助查看画像、推荐和设置；用户亲手写的评论 / 弹幕是最强的兴趣表达之一，用于更准确地构建兴趣画像 |
 | 本地配置与 UI 状态 | 后端地址、已关闭提示、插件设置、缓存的后端配置、任务状态 | 保持插件连接、本地偏好和界面状态 |
 | 用户主动创建的迁移包 | 文件配置中的模型 / 来源 API Key 与 token、平台 Cookie、本地 SQLite、画像 / 记忆、历史、图片缓存和白名单桌面偏好；不包含源机整段 API auth（密码 / hash、session secret、设备 key 等） | 仅在用户从本机桌面配置页明确选择导出时，生成供用户自行搬到另一台机器的 `.obcbackup` |
+| 应用内 Tailnet 节点状态 | 电脑端 tsnet 节点私钥 / 注册状态、节点名、Tailnet IP、最近脱敏运行事件 | 仅在用户明确开启 `[tailnet]` 后，让电脑端 OpenBiliClaw 自己加入用户的 tailnet，供 `OpenBiliClaw-mobile` Android / iOS 原生 App 私网访问；Web / Linux / macOS / Windows Flutter 客户端不在此能力范围，也不用于公网 Funnel |
 
 插件不以收集健康信息、财务和付款信息、精确位置数据为目的。如果用户正在访问的网页内容本身包含敏感信息，插件只会在受支持站点和用户启用功能范围内把它作为页面内容信号处理。
 
@@ -48,6 +49,17 @@ OpenBiliClaw 使用上述数据来：
 
 如果用户在设置中明确配置局域网或自托管后端，插件会请求该 `scheme://host/*` 的可选权限，并使用默认关闭的设备密钥认证连接。WebExtension 权限模型无法跨浏览器限定端口，实际网络请求仍固定到用户配置的端口。
 
+如果用户明确开启应用内 Tailnet，电脑端独立 `tsnet` helper 会连接用户选择的 Tailscale
+协调服务，并在用户自己的 tailnet 中建立节点。Tailscale 服务会处理节点身份、Tailnet 地址、
+登录 / 连通性等控制面元数据；业务 HTTP payload 通过 tailnet 的 WireGuard 链路加密，无法
+直连时可能经过 Tailscale DERP 中继。该路径只监听 tailnet 私网，不启用 Funnel / Serve，
+不会因此生成公网 OpenBiliClaw 地址。它只服务 Android / iOS 原生 App，不改变浏览器扩展或
+其它 Flutter 平台对远程 endpoint、HTTPS 和设备 key 的独立要求。helper 使用
+`ts_omit_logtail,ts_omit_webclient` 构建标签，编译移除 Tailscale 自动诊断日志上传与未使用的
+管理 Web UI，因此不会向 `log.tailscale.com` 上传 helper 诊断日志；代价是无法依赖相应上游
+自动日志支持。这不取消前述控制面 / DERP 联系及元数据处理。Tailscale 的处理规则以用户所用
+控制服务及其隐私政策为准。
+
 OpenBiliClaw 插件本身不会把数据发送到 OpenBiliClaw 开发者拥有或运营的远程服务器，也不会内置第三方分析、广告或遥测端点。
 
 数据迁移请求只允许后端验证为本机 loopback 的调用；浏览器请求还必须具备同源意图并明确拒绝扩展 Origin，无 Origin 的本机 CLI / curl 调用仍可通过同一显式请求头契约。导出文件由本机后端返回给本机客户端，导入文件只上传到用户自己的本机后端；OpenBiliClaw 开发者不会接收迁移包。用户后续主动把文件复制到 U 盘、局域网、聊天工具或云盘时，相应传输与保留由用户和所选服务控制。
@@ -58,9 +70,9 @@ OpenBiliClaw 插件本身不会把数据发送到 OpenBiliClaw 开发者拥有�
 
 插件会使用浏览器的本地扩展存储保存设置、连接状态、缓存配置和 UI 状态。OpenBiliClaw 后端会在用户本机或自托管环境中保存配置文件、SQLite 数据库、日志和画像文件。
 
-用户主动导出的 `.obcbackup` 是**未加密的敏感 ZIP 文件**，可能包含模型 / 来源 API Key、平台 Cookie、画像和浏览 / 推荐历史。包内 manifest 带成员大小与 SHA-256，只用于完整性校验，不提供保密性。导出会合并磁盘 `config.toml` / `config.local.toml`、移除整段 `[api.auth]`，再写成包内单份可移植配置；因此源机的登录密码 / hash、session secret、设备访问 key 及其它 auth 策略不会进入包。导出同时刻意排除日志、旧备份、embedding / 评测 / 临时缓存、证书、自启动文件、OpenBiliClaw Web / 扩展访问会话、外部 CLI 凭据和环境变量值；平台登录 Cookie 则属于明确包含的可移植敏感数据。manifest 的 `source_omitted_environment_variables` 只记录源机当时有值、会影响 OpenBiliClaw 的环境变量名称，包括 `OPENBILICLAW_*`、Gemini 标准 Key 变量及系统代理 / CA 变量；导入端另返回 `target_active_environment_variables`，提示目标环境当前仍可能覆盖导入文件。两个列表都不包含变量值。用户应只在可信设备间传递，并及时删除不再需要的副本。
+用户主动导出的 `.obcbackup` 是**未加密的敏感 ZIP 文件**，可能包含模型 / 来源 API Key、平台 Cookie、画像和浏览 / 推荐历史。包内 manifest 带成员大小与 SHA-256，只用于完整性校验，不提供保密性。导出会合并磁盘 `config.toml` / `config.local.toml`、移除整段 `[api.auth]`，再写成包内单份可移植配置；因此源机的登录密码 / hash、session secret、设备访问 key 及其它 auth 策略不会进入包。导出同时刻意排除日志、旧备份、embedding / 评测 / 临时缓存、证书、自启动文件、`data/tailnet/` 节点私钥 / 状态和 `data/bin/` 可执行文件（根目录名按大小写不敏感判定）、OpenBiliClaw Web / 扩展访问会话、外部 CLI 凭据和环境变量值；平台登录 Cookie 则属于明确包含的可移植敏感数据。manifest 的 `source_omitted_environment_variables` 只记录源机当时有值、会影响 OpenBiliClaw 的环境变量名称，包括 `OPENBILICLAW_*`、Gemini 标准 Key 变量及系统代理 / CA 变量；导入端另返回 `target_active_environment_variables`，提示目标环境当前仍可能覆盖导入文件。两个列表都不包含变量值。用户应只在可信设备间传递，并及时删除不再需要的副本。
 
-导入后原配置和数据会按存在情况保留为本机 `pre-import-*.bak` 回滚副本，不会自动上传；下一次成功迁移会清理更早的同类迁移副本。目标机整段 `api.auth` 是导入基线，因此其门禁、密码、proxy 和 Origin 策略不会被源包覆盖；应用时会轮换文件中的会话签名密钥，并把 prepared DB 的会话撤销 epoch 设为来源与目标当前值最大值再加一、移除来源 password fingerprint，再清空、关闭扩展远程访问配对。这样即使 session secret 由目标环境固定，来源 / 目标旧 Web 会话与设备 key 也不会继续有效。导入暂存可在重启前取消，取消只删除私有 pending 副本，不改当前配置或用户数据。
+导入后原配置和数据会按存在情况保留为本机 `pre-import-*.bak` 回滚副本，不会自动上传；下一次成功迁移会清理更早的同类迁移副本。目标机整段 `api.auth` 与 `[tailnet]` 是导入基线，因此其门禁、密码、proxy / Origin 策略、Tailnet 开关 / 节点名和 `data/tailnet/` 机器身份不会被源包覆盖；`certs/`、`autostart/`、`tailnet/` 任一目标保留根含嵌套 symlink 时迁移会拒绝继续，不跟随链接复制目录外数据。应用时只从目标机保留 exact 当前平台 Tailnet helper 的普通非 symlink 文件，POSIX 还要求原文件已有执行位，再为可信副本恢复 `0700`；普通文件不会经迁移升级成 executable。随后会轮换文件中的会话签名密钥，并把 prepared DB 的会话撤销 epoch 设为来源与目标当前值最大值再加一、移除来源 password fingerprint，再清空、关闭扩展远程访问配对。这样即使 session secret 由目标环境固定，来源 / 目标旧 Web 会话与设备 key 也不会继续有效。导入暂存可在重启前取消，取消只删除私有 pending 副本，不改当前配置或用户数据。
 
 用户可以通过以下方式控制或删除数据：
 
@@ -68,6 +80,7 @@ OpenBiliClaw 插件本身不会把数据发送到 OpenBiliClaw 开发者拥有�
 - 停止或删除本地 OpenBiliClaw 后端的数据目录。
 - 在插件设置中修改或清空后端地址。
 - 在后端配置中关闭对应平台 source、调度任务、自动刷新或第三方模型服务。
+- 源码 / 一句话安装可运行 `openbiliclaw tailnet disable` 并重启以停止应用内 Tailnet；桌面安装包需完整退出、把运行目录 `config.toml` 的 `[tailnet].enabled` 改为 `false` 后再启动。两种方式都会为方便再次启用而保留本机节点身份。若要彻底删除，应先退出应用、从 Tailnet 管理台移除节点，再删除 `data/tailnet/`。
 - 退出对应内容平台账号或清除浏览器 cookie，阻止插件继续同步该平台登录态。
 
 ## 权限说明

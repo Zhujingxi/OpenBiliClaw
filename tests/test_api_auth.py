@@ -701,6 +701,33 @@ def test_loopback_caddy_hop_preserves_external_https_auth_contract(tmp_path, mon
 # ── password fingerprint: no false revoke; real change revokes ──────────────
 
 
+def test_embedded_tailnet_proxy_never_inherits_loopback_auth_bypass(tmp_path, monkeypatch) -> None:
+    app, _ = _build_app(tmp_path, monkeypatch)
+    client = TestClient(
+        app,
+        client=("127.0.0.1", 5000),
+        base_url="http://openbiliclaw-host.example.ts.net:8420",
+    )
+    forwarded = {
+        "host": "openbiliclaw-host.example.ts.net:8420",
+        "origin": "http://openbiliclaw-host.example.ts.net:8420",
+        "x-forwarded-for": "100.100.100.25",
+        "x-forwarded-host": "openbiliclaw-host.example.ts.net:8420",
+        "x-forwarded-proto": "http",
+    }
+
+    unauthenticated = client.get("/api/favorites/BV1AUTH", headers=forwarded)
+    assert unauthenticated.status_code == 401
+
+    login = client.post(
+        "/api/auth/login",
+        json={"password": "hunter2"},
+        headers=forwarded,
+    )
+    assert login.status_code == 200
+    assert client.get("/api/favorites/BV1AUTH", headers=forwarded).status_code == 200
+
+
 def test_unchanged_env_password_across_restart_keeps_sessions(tmp_path, monkeypatch) -> None:
     # boot 1: env password -> login
     app1, db = _build_app(tmp_path, monkeypatch, password=None, env_password="envpass")

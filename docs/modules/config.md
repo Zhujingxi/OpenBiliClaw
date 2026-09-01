@@ -23,7 +23,7 @@ CLI / 源码运行仍按普通错误处理：配置文件损坏时直接暴露�
 
 ## 配置页跨机器迁移
 
-桌面 Web 的「设置 → 通用 → 数据迁移」可以在旧机器导出 `.obcbackup`，再到新机器选择该文件导入。这里的“全部信息”指**全部可移植用户状态**：磁盘上的 `config.toml` 与 `config.local.toml` 会先合并（不读取环境变量覆盖），移除 `[api.auth]` 后扁平化为包内单份 `config/config.toml`，其中仍包括文件中保存的模型 Key 与来源凭据；其余还包括当前进程已锁定的 active data dir 中的主 SQLite 和其它数据库、画像 / 记忆、平台 Cookie 文件、图片缓存，以及白名单内的桌面主题与滚动偏好。若刚在线保存了尚待重启的新 `data_dir`，配置快照仍来自磁盘两层，但数据成员不会提前改从新目录读取。它不是系统镜像，也不会复制日志、已有备份、embedding 派生缓存、评测 / 临时缓存、证书、自启动文件、OpenBiliClaw Web / 扩展访问会话、外部 CLI 凭据或环境变量值；平台 Cookie 则是明确包含的敏感登录态。源机器的 API 登录开关、密码 / password hash、session secret、受信代理、Bearer Origin 和扩展设备 key 都属于整段 `[api.auth]`，不会写入包。
+桌面 Web 的「设置 → 通用 → 数据迁移」可以在旧机器导出 `.obcbackup`，再到新机器选择该文件导入。这里的“全部信息”指**全部可移植用户状态**：磁盘上的 `config.toml` 与 `config.local.toml` 会先合并（不读取环境变量覆盖），移除 `[api.auth]` 后扁平化为包内单份 `config/config.toml`，其中仍包括文件中保存的模型 Key 与来源凭据；其余还包括当前进程已锁定的 active data dir 中的主 SQLite 和其它数据库、画像 / 记忆、平台 Cookie 文件、图片缓存，以及白名单内的桌面主题与滚动偏好。若刚在线保存了尚待重启的新 `data_dir`，配置快照仍来自磁盘两层，但数据成员不会提前改从新目录读取。它不是系统镜像，也不会复制日志、已有备份、embedding 派生缓存、评测 / 临时缓存、证书、自启动文件、Tailnet 节点身份 / 状态、`data/bin/` 可执行文件、OpenBiliClaw Web / 扩展访问会话、外部 CLI 凭据或环境变量值；平台 Cookie 则是明确包含的敏感登录态。源机器的 API 登录开关、密码 / password hash、session secret、受信代理、Bearer Origin 和扩展设备 key 都属于整段 `[api.auth]`，不会写入包。
 
 `.obcbackup` 是**未加密的敏感 ZIP**。只有在可信设备之间传递，并像保护 API Key / Cookie 一样保护和及时删除它。manifest 的 `source_omitted_environment_variables` 会列出源机器导出时有值、会影响运行结果的环境变量名称（`OPENBILICLAW_*`、Gemini 标准 Key、系统代理 / CA），但不会写入这些变量的值；如果源机器的有效配置依赖它们，目标机需自行重新提供。导入响应 / staged 状态中的 `target_active_environment_variables` 则是导入当时目标进程有值、重启后仍可能覆盖文件配置的环境变量快照；重启前如果环境改变，应以实际启动环境为准。两者都不是“已迁移的值”。
 
@@ -34,11 +34,11 @@ CLI / 源码运行仍按普通错误处理：配置文件损坏时直接暴露�
 - `general.data_dir` 与 `[storage]`（包括 `db_path`）；
 - `[api].host` / `[api].port`；
 - `[logging].directory` / `[logging].filename`；
-- `[network]`、`[tls_proxy]`、`[autostart]`；
+- `[network]`、`[tls_proxy]`、`[tailnet]`、`[autostart]`；
 - `sources.browser_cdp_url`；
 - `bilibili.proxy` 与 `bilibili.browser_executable`（目标机网络策略和本机浏览器路径）。
 
-`[api.auth]` 也整段以**目标机器应用时的最新磁盘值**为基线：迁移包不提供或覆盖其中任何来源字段，重启应用会重新读取目标机两层配置，不使用暂存时的陈旧 auth 快照。应用时只执行安全收口——生成新的文件 `api.auth.session_secret`，把 `api.auth.extension_access_enabled` 设为 `false` 并清空 `extension_access_keys`；prepared DB 还把 `auth_epoch` 严格提升为 `max(来源 prepared DB epoch, 目标 active DB epoch) + 1`、删除来源 password fingerprint，启动后再按目标凭据 reconcile。因此目标机既有的门禁开关、密码凭据、会话 TTL、loopback / proxy / Origin 策略继续保留，但来源 / 目标旧 Web 会话都会失效（即使 session secret 由目标环境固定），扩展远程设备也需重新生成 key 并配对。目标数据目录里的 `certs/` 与 `autostart/` 文件会保留。详细包格式、校验和回滚流程见[存储层](storage.md#可移植数据迁移)，HTTP 契约见[后端 API](api.md#本机数据迁移)。
+`[api.auth]` 也整段以**目标机器应用时的最新磁盘值**为基线：迁移包不提供或覆盖其中任何来源字段，重启应用会重新读取目标机两层配置，不使用暂存时的陈旧 auth 快照。应用时只执行安全收口——生成新的文件 `api.auth.session_secret`，把 `api.auth.extension_access_enabled` 设为 `false` 并清空 `extension_access_keys`；prepared DB 还把 `auth_epoch` 严格提升为 `max(来源 prepared DB epoch, 目标 active DB epoch) + 1`、删除来源 password fingerprint，启动后再按目标凭据 reconcile。因此目标机既有的门禁开关、密码凭据、会话 TTL、loopback / proxy / Origin 策略继续保留，但来源 / 目标旧 Web 会话都会失效（即使 session secret 由目标环境固定），扩展远程设备也需重新生成 key 并配对。目标数据目录里的 `certs/`、`autostart/` 与 `tailnet/` 会保留；任一保留根含嵌套 symlink 时迁移会 fail closed，来源机的 tsnet 节点私钥不会被克隆到目标机。`data/bin/` 的所有大小写变体都从迁移包排除且在导入校验时拒绝；只保留目标机上 exact 当前平台 helper 文件名的普通文件，POSIX 还要求原文件已可执行再恢复 `0700`，来源包既不能迁入可执行代码，也不能借迁移把普通文件升级成 executable。详细包格式、校验和回滚流程见[存储层](storage.md#可移植数据迁移)，HTTP 契约见[后端 API](api.md#本机数据迁移)。
 
 ## 配置段落
 
@@ -59,6 +59,57 @@ CLI / 源码运行仍按普通错误处理：配置文件损坏时直接暴露�
 | `port` | int | `8420` | 后端 API 监听端口 |
 
 `openbiliclaw start` 和桌面安装包入口默认读取这里的 host / port；显式设置 `OPENBILICLAW_HOST` / `OPENBILICLAW_PORT` 时环境变量优先。默认 `host = "0.0.0.0"` 会创建独立的 IPv4 `0.0.0.0` 与 IPv6 `[::]` listener（系统无 IPv6 时保留 IPv4），避免不同操作系统对 IPv4-mapped IPv6 的行为差异。浏览器插件的手机二维码入口会在后端地址仍是 loopback 时调用轻量端点 `GET /api/qr-info`（不触发 embedding readiness probe）并读取响应中的 `lan_ip` 字段，用局域网 IP 生成 `/m/` 二维码；IPv4 优先，没有可用 IPv4 时回退 ULA / global IPv6，并用方括号生成合法 URL。桌面 Web 的手机二维码会优先使用设置中手动填写的后端地址/端口（若已填写），未填写时才按页面来源或自动探测的局域网 IP 生成。
+
+应用内 Tailnet helper 的 upstream 固定为 `127.0.0.1:<本次有效端口>`。启用 `[tailnet]` 时，`host`
+必须使用 `"127.0.0.1"`、`"localhost"` 或 `"0.0.0.0"`，推荐只需远程 App 的用户设为
+`"127.0.0.1"`，减少不必要的 LAN 暴露。若 API 只绑定某个特定网卡 IP，Tailnet helper 无法
+连接 loopback upstream；该远程入口会明确降级，但本地 API 仍继续启动。
+
+### `[tailnet]`
+
+默认关闭的应用内 Tailscale 私网入口（`TailnetConfig`）。电脑端通过独立 `tsnet` helper
+加入用户自己的 tailnet，把 tailnet 的 HTTP / WebSocket 固定反代到同机
+`127.0.0.1:<本次启动的有效 API 端口>`；不要求安装系统 Tailscale，不启用 Funnel / Serve，
+也不发布公网地址。客户端范围仅包括 `OpenBiliClaw-mobile` 的 Android / iOS 原生 App；其 Web、
+Linux、macOS、Windows Flutter 构建不属于首版内嵌 tsnet 支持面。
+完整生命周期与安全边界见[应用内 Tailnet 模块](tailnet.md)。
+
+```toml
+[tailnet]
+enabled = false
+hostname = "openbiliclaw-host"
+```
+
+| 键 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `enabled` | bool | `false` | 是否在下一次完整启动时托管应用内 Tailnet helper；helper 失败不阻止本机 API |
+| `hostname` | string | `"openbiliclaw-host"` | Tailnet 节点名；1–63 字符单个 DNS label，保存时转小写，首尾只能是字母/数字，中间可含连字符 |
+
+端口不在本表重复配置。通常使用 `[api].port`，但 `openbiliclaw start --port` /
+`openbiliclaw serve-api --port` 或桌面入口 `OPENBILICLAW_PORT` 会把当前入口的有效 server port
+同时交给 helper；`tailnet status` 分开显示配置端口与
+最近监听端口，MagicDNS URL 使用最近运行事件的端口。节点注册状态和私钥保存在
+`{data_dir}/tailnet/`，不写 `config.toml`；`OPENBILICLAW_TAILNET_AUTH_KEY` 仅作为启动父进程的
+一次性注册输入，经 stdin 传给 helper，不持久化。`OPENBILICLAW_TAILNET_HELPER` 可覆盖 helper
+路径，但只面向开发 / 诊断。两者都是 runtime-only，不是配置字段。源码 / 一句话安装可用
+`openbiliclaw tailnet enable|disable` 修改
+配置；桌面安装包虽然内置 helper，但托盘可执行文件首版不提供这些 CLI，需完整退出后编辑
+`~/OpenBiliClaw/config.toml`（Windows 为 `%USERPROFILE%\OpenBiliClaw\config.toml`）。两种方式
+修改后都要完整重启；关闭时保留节点身份。
+
+Tailnet 的完整字段级优先级是：`OPENBILICLAW_TAILNET_ENABLED` /
+`OPENBILICLAW_TAILNET_HOSTNAME` 显式环境覆盖 > `config.local.toml` > `config.toml`。
+`save_config()` 全文件保存会保留 base 文件中被环境或 local 覆盖的 `enabled` / `hostname`
+原值，不把有效覆盖值“烘焙”回 base；删除高优先级来源后会恢复下一层值。CLI 若发现本次要修改
+的字段受环境或 local 覆盖，会拒绝假成功并指出真实来源，此时应直接修改该来源。
+
+#### Config 模块公开 Tailnet API
+
+| API | 说明 |
+|---|---|
+| `TailnetConfig` | 根 `Config.tailnet` 的 typed 配置对象 |
+| `normalize_tailnet_hostname()` | 规范化并校验单个 DNS label；拒绝点、下划线、控制字符和首尾连字符 |
+| `tailnet_override_source()` | 返回某个 `enabled` / `hostname` 字段的显式环境或 `config.local.toml` 覆盖来源，供写入口拒绝 shadowed 修改 |
 
 ### `[api.auth]`
 

@@ -14,12 +14,13 @@ gate 属于 `RuntimeContext` 的稳定部分：热重载构造成功后在同一
 
 ## 概述
 
-`src/openbiliclaw/runtime/` 负责后端 daemon 的长期运行能力：后台刷新、账号同步、扩展在线账号信号周期回拉、反馈批学习调度、运行时事件流、浏览器插件 presence gate、自动更新和任务生命周期管理。FastAPI 启动后会通过 `RuntimeContext` 持有这些 runtime 服务，配置热重载时重建可替换组件。
+`src/openbiliclaw/runtime/` 负责后端 daemon 的长期运行能力：后台刷新、账号同步、扩展在线账号信号周期回拉、反馈批学习调度、运行时事件流、浏览器插件 presence gate、自动更新、应用内 Tailnet helper 和任务生命周期管理。FastAPI 启动后会通过 `RuntimeContext` 持有业务 runtime 服务；Tailnet supervisor 则由 CLI / 冻结桌面入口在 API server 外层托管，避免 `create_app()` 在测试或嵌入调用中产生网络副作用。该私网入口的客户端范围仅为 `OpenBiliClaw-mobile` Android / iOS 原生 App，不包含其 Web 或桌面 Flutter 构建。
 
 ## 已实现功能
 
 | 功能 | 状态 | 说明 |
 |------|------|------|
+| 应用内 Tailnet helper supervisor | ✅ | `[tailnet].enabled=true` 时，`start` / `serve-api` / 冻结桌面入口发现并托管独立 Go `tsnet` helper；节点状态写 `data/tailnet/`，Auth Key 从父环境取出后只经 stdin bootstrap 传入。JSONL 事件脱敏后原子写 `status.json` 并驱动首次浏览器登录 / ready 提示；关闭先 EOF、再有界 terminate/kill。helper 固定反代 `127.0.0.1:<当前入口有效端口>`，显式 `--port` 或桌面 `OPENBILICLAW_PORT` 可覆盖磁盘 `api.port`；远程入口失败不阻止本机 API。构建固定省略 logtail / Web UI，macOS 12 以下只降级此 helper。 |
 | Windows 后台子进程不再弹控制台窗口 | ✅ | 新增 `openbiliclaw/proc.py::no_window_kwargs()`：Windows 下返回 `creationflags=CREATE_NO_WINDOW`，其它平台返回空 dict，可无条件 splat。后端自行发起的全部外部命令都已接入——Reddit 的 `rdt` / `opencli`（含状态探测与每个关键词一条的发现命令）、自动更新的 `git`、`agent-browser` 版本探测与命令、mcporter 灵感检索、SQLite 修复用的 `sqlite3` / `lsof`、托管 ollama 退出用的 `taskkill`。用户在终端主动敲的命令（`openbiliclaw` CLI、`codex login`、dev 用 optimizer）保持原样，它们本来就有自己的控制台且需要交互提示。`tests/test_proc_no_window.py` 用 AST 扫描 `src/` 全量守住这条约定：任何新的 `subprocess.run` / `Popen` / `create_subprocess_exec` 漏掉该 kwarg 即测试失败（`os.name == "nt"` 分支的 else 支路自动豁免）。第三方库自己起的孙进程不在该 flag 覆盖范围内，已知的一处是 rdt-cli 凭据超 TTL 时的 `uv run --with browser-cookie3`，靠 `_RDT_CREDENTIAL_TTL_SECONDS` 比 rdt 阈值提前 6 小时判过期来规避（见 `sources/reddit_tasks.py` 常量注释）。X 的 twitter-cli 与 YouTube 的 yt-dlp 均为进程内库调用，不起子进程。 |
 | 桌面应用统一品牌图标 | ✅ | Windows 安装包 / EXE 使用多尺寸 `packaging/icon.ico`，macOS `.app` 使用完整 iconset 生成的 `packaging/icon.icns`；系统托盘与 macOS 菜单栏从随包 Web 资源 `openbiliclaw/web/icon-192.png` 加载同一官方图标。Windows PyInstaller 启动页直接复用最新品牌源图，并以 560×280 深色渐变卡片展示启动状态、活动进度轨及从 `pyproject.toml` 读取的当前版本号；CJK 字体不可用时保持英文降级。桌面容器与托盘保留去白边后的透明外缘；浏览器标签使用独立 32px 满幅品牌粉 favicon 并以版本 URL 规避旧缓存，页面头图用品牌粉背景承接透明圆角。 |
 | 对话结算单队列生命周期（Wave 1–3） | ✅ | 每个 API runtime generation 只安装一个 `dialogue_settlement_queue`、一个 exhaustive typed dispatcher 与一个 actual worker。11 个 kind 的生产入口已全部 cutover：queued dialogue learning/settles、卡片 confirm/reject/discuss/defer、pending-open/anchor、GET reconcile、probe/confusion reply、confusion open/replay 与 legacy façade 都只 submit；guard 已装到 protected mutator façade，request task 与 inherited-context child 均 fail closed。`card.reconcile` 只在 worker 内补 applied receipt 的 stable audit/projection/exact-generation publication，或把无活锚 orphan discussion 恢复为 pending；没有 restart scanner。队列 self-owned、非 durable、不进入 `BackgroundTaskRegistry`，`create_app()` 注入真实 queued dialogue时采用同一实例。卡片 action 只 shield 等待 1 秒：本地完成返回 200，队头阻塞返回 202 而 job 继续；进程重启丢失未执行 job 后由 action retry/GET reconcile 重新 admission。热重载先保持 old queue 可受理并 drain，最迟等待 25 分钟；队列真正空闲后才无 await 原子切到 paused，再 exact revoke old permit → start/register new → publish new → shutdown old，避免等待期间丢弃用户点击。构造/注册失败只在 permit 单槽为空时用 fresh nonce 恢复 old。CLI/OpenClaw 不属于该 runtime，显式使用 `legacy_direct`，不享受 queue/receipt/guard 保证。上线只观察 queue depth/oldest age、action wait、202 比例与 retry；连续 7 天 `202 >1%` 或 p95 `>5s` 才另开分析，不预埋第二队列。 |
@@ -125,6 +126,40 @@ RuntimeContext 重建 RecommendationEngine 时透传视觉开关、帧数、两�
 后新 embedding provenance 会重新筛选待处理池。
 
 ## 公开 API
+
+### Tailnet helper lifecycle
+
+```python
+from openbiliclaw.runtime.tailnet_supervisor import (
+    TailnetSupervisor,
+    build_tailnet_helper,
+    find_tailnet_helper,
+    start_tailnet_if_enabled,
+    tailnet_runtime,
+)
+
+supervisor = start_tailnet_if_enabled(config, effective_server_port, event_callback=on_event)
+try:
+    ...  # run the API server
+finally:
+    if supervisor is not None:
+        supervisor.stop()
+```
+
+`start_tailnet_if_enabled()` 在开关关闭时无副作用返回 `None`；开启时以当前 data dir 和启动
+入口算出的有效 API 端口构造一个 supervisor。`find_tailnet_helper()` 按显式覆盖、冻结资源、data/bin、源码 build
+目录、PATH 查找。`build_tailnet_helper()` 只供源码 checkout 的显式 CLI 使用，不在普通 daemon
+启动时隐式下载 Go 或编译。源码构建读取统一的 `ts_omit_logtail,ts_omit_webclient` tags 并执行
+helper self-test；CI 与桌面打包流程另行校验根目录第三方 notice。macOS 预检在 12 以下拒绝
+helper，但不阻止最低目标仍为 10.15 的本机应用。
+`TailnetSupervisor.last_event` / `failure` 暴露脱敏的最近状态与异步退出原因，`status_path` 指向
+权限收紧的 `data/tailnet/status.json`。ready 的 `port` 是最近实际监听端口，CLI 不把它与磁盘
+配置端口混为一项。
+
+Supervisor 故意不属于 `RuntimeContext`，也不由 `create_app()` 自动启动：其生命周期覆盖
+uvicorn server，而不是配置热重载 generation。首版 `[tailnet]` 修改需要完整重启。冻结桌面
+入口与 CLI 各自调用同一 API，并把所有异常收口为“本机服务继续、远程入口降级”。完整协议见
+[应用内 Tailnet 模块](tailnet.md)。
 
 ### Durable dialogue execution lane
 
@@ -614,6 +649,8 @@ XHS / 抖音 / YouTube / 知乎 / Reddit / V2EX 的插件任务桥保留两层�
 | `scheduler.avoidance_speculation_max_active` | `5` | 最多同时活跃的不喜欢领域探针数。 |
 | `autostart.enabled` | `false` | 是否期望登录系统后自动拉起 `openbiliclaw start`。 |
 | `autostart.manage_ollama` | `true` | `start` 是否在需要本机默认 Ollama 时尝试后台拉起 `ollama serve`。 |
+| `tailnet.enabled` | `false` | 是否在 API server 外层托管应用内 tsnet helper；修改后完整重启生效。 |
+| `tailnet.hostname` | `"openbiliclaw-host"` | helper 加入 tailnet 时使用的单个 DNS label；端口不单独配置，跟随当前启动入口的有效 server port（通常是 `api.port`）。 |
 
 ## 设计决策
 

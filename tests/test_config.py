@@ -20,6 +20,7 @@ from openbiliclaw.config import (
     SchedulerConfig,
     SoulConfig,
     SoulPreferenceConfig,
+    TailnetConfig,
     _build_config,
     load_config,
     load_config_with_diagnostics,
@@ -99,6 +100,9 @@ class TestConfigDefaults:
         assert isinstance(config.autostart, AutostartConfig)
         assert config.autostart.enabled is False
         assert config.autostart.manage_ollama is True
+        assert isinstance(config.tailnet, TailnetConfig)
+        assert config.tailnet.enabled is False
+        assert config.tailnet.hostname == "openbiliclaw-host"
         assert config.api.auth.extension_access_enabled is False
         assert config.api.auth.extension_access_keys == []
         assert config.api.auth.extension_token_ttl_hours == 24
@@ -263,8 +267,7 @@ class TestConfigDefaults:
         issues = config_module._collect_config_issues(config)
 
         assert any(
-            issue.field == "sources.bilibili.recommendation_date"
-            and issue.severity == "blocking"
+            issue.field == "sources.bilibili.recommendation_date" and issue.severity == "blocking"
             for issue in issues
         )
 
@@ -459,6 +462,8 @@ class TestConfigDefaults:
         assert config.llm.default_provider == "deepseek"
         assert config.autostart.enabled is False
         assert config.autostart.manage_ollama is True
+        assert config.tailnet.enabled is False
+        assert config.tailnet.hostname == "openbiliclaw-host"
 
     def test_load_config_coerces_autostart_env_bool_false(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -508,6 +513,104 @@ manage_ollama = true
         assert "port = 19090" in rendered
         assert loaded.api.host == "127.0.0.1"
         assert loaded.api.port == 19090
+
+    def test_tailnet_config_round_trips_and_normalizes_hostname(self, tmp_path: Path) -> None:
+        config = Config()
+        config.tailnet.enabled = True
+        config.tailnet.hostname = "  OpenBiliClaw-Host-01  "
+
+        target = tmp_path / "config.toml"
+        save_config(config, target)
+        rendered = target.read_text(encoding="utf-8")
+        loaded = load_config(target)
+
+        assert "[tailnet]" in rendered
+        assert "enabled = true" in rendered
+        assert 'hostname = "openbiliclaw-host-01"' in rendered
+        assert "auth_key" not in rendered
+        assert loaded.tailnet.enabled is True
+        assert loaded.tailnet.hostname == "openbiliclaw-host-01"
+
+    @pytest.mark.parametrize("hostname", ["a", "a" * 63, "NODE-01"])
+    def test_tailnet_hostname_accepts_dns_label_boundaries(self, hostname: str) -> None:
+        config = _build_config({"tailnet": {"hostname": hostname}})
+
+        assert config.tailnet.hostname == hostname.lower()
+
+    @pytest.mark.parametrize(
+        "hostname",
+        [
+            "",
+            "-openbiliclaw",
+            "openbiliclaw-",
+            "openbiliclaw.host",
+            "openbiliclaw_host",
+            "openbiliclaw host",
+            "a" * 64,
+            123,
+        ],
+    )
+    def test_tailnet_hostname_is_a_strict_dns_label(self, hostname: object) -> None:
+        with pytest.raises(ConfigError, match="tailnet.hostname"):
+            _build_config({"tailnet": {"hostname": hostname}})
+
+    def test_save_config_rejects_invalid_tailnet_hostname(self, tmp_path: Path) -> None:
+        config = Config()
+        config.tailnet.hostname = "not.a-label"
+
+        with pytest.raises(ConfigError, match="tailnet.hostname"):
+            save_config(config, tmp_path / "config.toml")
+
+    def test_tailnet_config_local_values_are_not_baked_into_base(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("OPENBILICLAW_PROJECT_ROOT", str(tmp_path))
+        base_path = tmp_path / "config.toml"
+        base_path.write_text(
+            '[tailnet]\nenabled = false\nhostname = "base-host"\n',
+            encoding="utf-8",
+        )
+        local_path = tmp_path / "config.local.toml"
+        local_path.write_text(
+            '[tailnet]\nenabled = true\nhostname = "local-host"\n',
+            encoding="utf-8",
+        )
+
+        merged = load_config()
+        assert merged.tailnet == TailnetConfig(enabled=True, hostname="local-host")
+        merged.language = "en"
+        save_config(merged)
+
+        assert tomllib.loads(base_path.read_text(encoding="utf-8"))["tailnet"] == {
+            "enabled": False,
+            "hostname": "base-host",
+        }
+        local_path.unlink()
+        assert load_config().tailnet == TailnetConfig(enabled=False, hostname="base-host")
+
+    def test_tailnet_env_values_are_not_baked_into_base(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        target = tmp_path / "config.toml"
+        target.write_text(
+            '[tailnet]\nenabled = false\nhostname = "base-host"\n',
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("OPENBILICLAW_TAILNET_ENABLED", "true")
+        monkeypatch.setenv("OPENBILICLAW_TAILNET_HOSTNAME", "ENV-HOST")
+
+        merged = load_config(target)
+        assert merged.tailnet == TailnetConfig(enabled=True, hostname="env-host")
+        merged.language = "en"
+        save_config(merged, target)
+
+        assert tomllib.loads(target.read_text(encoding="utf-8"))["tailnet"] == {
+            "enabled": False,
+            "hostname": "base-host",
+        }
+        monkeypatch.delenv("OPENBILICLAW_TAILNET_ENABLED")
+        monkeypatch.delenv("OPENBILICLAW_TAILNET_HOSTNAME")
+        assert load_config(target).tailnet == TailnetConfig(enabled=False, hostname="base-host")
 
     def test_bilibili_proxy_round_trips_through_toml(self, tmp_path: Path) -> None:
         config = Config()

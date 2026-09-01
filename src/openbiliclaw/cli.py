@@ -336,12 +336,14 @@ browser_app = typer.Typer(help="agent-browser 浏览器命令")
 autostart_app = typer.Typer(help="开机自启动命令")
 ext_key_app = typer.Typer(help="浏览器扩展密钥管理命令")
 tls_proxy_app = typer.Typer(help="TLS 反代管理命令（远程设备 HTTPS 访问）")
+tailnet_app = typer.Typer(help="应用内 Tailnet 远程访问命令")
 app.add_typer(auth_app, name="auth")
 app.add_typer(login_app, name="login")
 app.add_typer(browser_app, name="browser")
 app.add_typer(autostart_app, name="autostart")
 app.add_typer(ext_key_app, name="ext-key")
 app.add_typer(tls_proxy_app, name="tls-proxy")
+app.add_typer(tailnet_app, name="tailnet")
 console = Console()
 _APP_CONTEXT: dict[str, Any] = {}
 _DISCOVER_STRATEGIES_OPTION = typer.Option(
@@ -1013,11 +1015,116 @@ def _build_dialogue(soul_engine: Any) -> Any:
     )
 
 
+def _build_tailnet_event_callback() -> Callable[[dict[str, object]], None]:
+    """Render helper lifecycle events and open each interactive login URL once."""
+    opened_login_urls: set[str] = set()
+    opened_lock = threading.Lock()
+
+    def _open_login_url(url: str) -> None:
+        import webbrowser
+
+        with suppress(Exception):
+            webbrowser.open(url)
+
+    def _on_event(event: dict[str, object]) -> None:
+        event_name = str(event.get("event", "")).strip()
+        if event_name == "needs_login":
+            login_url = str(event.get("auth_url", "")).strip()
+            if not login_url:
+                return
+            _print_status_panel(
+                "info",
+                "Tailnet 需要登录",
+                f"浏览器即将打开这个一次性地址：\n{login_url}\n"
+                "登录成功后节点身份会保存在本机，之后无需重复登录。",
+            )
+            with opened_lock:
+                should_open = login_url not in opened_login_urls
+                opened_login_urls.add(login_url)
+            if should_open:
+                threading.Thread(
+                    target=_open_login_url,
+                    args=(login_url,),
+                    name="openbiliclaw-tailnet-login",
+                    daemon=True,
+                ).start()
+            return
+
+        if event_name == "ready":
+            dns_name = str(event.get("dns_name", "")).strip()
+            raw_ips = event.get("ips", [])
+            ips = [str(value) for value in raw_ips] if isinstance(raw_ips, list) else []
+            raw_port = event.get("port", 8420)
+            try:
+                port = int(raw_port) if isinstance(raw_port, (int, str)) else 8420
+            except (TypeError, ValueError):
+                port = 8420
+            endpoint = f"http://{dns_name}:{port}" if dns_name else ""
+            details = ["应用已加入 tailnet，可从移动端连接。"]
+            if endpoint:
+                details.append(f"MagicDNS 地址: {endpoint}")
+            if ips:
+                details.append(f"Tailnet IP: {', '.join(ips)}")
+            _print_status_panel("success", "Tailnet 已就绪", "\n".join(details))
+            return
+
+        if event_name == "error":
+            message = str(event.get("message", "Tailnet helper 运行失败"))
+            _print_status_panel("warning", "Tailnet 远程入口不可用", message)
+
+    return _on_event
+
+
+def _start_tailnet_runtime_best_effort(
+    config: Any,
+    api_port: int,
+    *,
+    api_host: str,
+) -> Any | None:
+    """Start the optional app-scoped tailnet host without blocking local use."""
+    if not bool(getattr(getattr(config, "tailnet", None), "enabled", False)):
+        return None
+
+    if api_host.strip().lower() not in {"0.0.0.0", "127.0.0.1", "localhost"}:
+        _print_status_panel(
+            "warning",
+            "Tailnet 未启动",
+            f"应用内 helper 只会反代到 127.0.0.1，但 API 当前绑定 {api_host}。\n"
+            "请将 [api].host 设为 127.0.0.1 或 0.0.0.0；本机 API 会继续启动。",
+        )
+        return None
+
+    if not bool(getattr(getattr(config.api, "auth", None), "enabled", False)):
+        _print_status_panel(
+            "warning",
+            "Tailnet 访问控制",
+            "当前未启用 OpenBiliClaw 访问密码；Tailnet ACL 仍会限制节点访问，"
+            "但建议再执行 `openbiliclaw set-password`。",
+        )
+
+    from openbiliclaw.runtime.tailnet_supervisor import start_tailnet_if_enabled
+
+    try:
+        return start_tailnet_if_enabled(
+            config,
+            api_port,
+            event_callback=_build_tailnet_event_callback(),
+        )
+    except Exception as exc:
+        _print_status_panel(
+            "warning",
+            "Tailnet 未启动",
+            f"{exc}\n本机 API 会继续启动。源码安装可先执行 `openbiliclaw tailnet build-helper`。",
+        )
+        return None
+
+
 def _run_api_server(*, host: str = "127.0.0.1", port: int = 8420) -> None:
     """Run the local FastAPI service used by the browser extension."""
     import uvicorn
 
     from openbiliclaw.api.app import create_app
+    from openbiliclaw.config import load_config
 
     api_app = create_app()
     state = getattr(api_app, "state", None)
@@ -1040,17 +1147,26 @@ def _run_api_server(*, host: str = "127.0.0.1", port: int = 8420) -> None:
         create_wildcard_listener_sockets,
     )
 
-    listeners = create_wildcard_listener_sockets(host, port)
-    if listeners is None:
-        uvicorn.run(api_app, host=host, port=port, log_level="info")
-        return
-
-    config = uvicorn.Config(api_app, host=host, port=port, log_level="info")
-    server = uvicorn.Server(config)
+    tailnet_supervisor = _start_tailnet_runtime_best_effort(
+        load_config(),
+        port,
+        api_host=host,
+    )
     try:
-        server.run(sockets=listeners)
+        listeners = create_wildcard_listener_sockets(host, port)
+        if listeners is None:
+            uvicorn.run(api_app, host=host, port=port, log_level="info")
+            return
+
+        config = uvicorn.Config(api_app, host=host, port=port, log_level="info")
+        server = uvicorn.Server(config)
+        try:
+            server.run(sockets=listeners)
+        finally:
+            close_listener_sockets(listeners)
     finally:
-        close_listener_sockets(listeners)
+        if tailnet_supervisor is not None:
+            tailnet_supervisor.stop()
 
 
 def _build_memory_manager() -> Any:
@@ -6590,6 +6706,160 @@ def ext_key_revoke(
         "success",
         "设备密钥已撤销",
         f"Key ID {key_id} 已删除；所有 Web 与扩展会话已立即失效。重启后端以重载密钥列表。",
+    )
+
+
+# ── tailnet ────────────────────────────────────────────────────────────────
+
+
+@tailnet_app.command("enable")
+def tailnet_enable(
+    hostname: str | None = typer.Option(
+        None,
+        "--hostname",
+        help="Tailnet 中的节点名（单个 DNS label）",
+    ),
+) -> None:
+    """开启应用内 Tailnet 远程入口。"""
+    from openbiliclaw.config import (
+        load_config,
+        normalize_tailnet_hostname,
+        save_config,
+        tailnet_override_source,
+    )
+
+    enabled_override = tailnet_override_source("enabled")
+    hostname_override = tailnet_override_source("hostname") if hostname is not None else None
+    if enabled_override or hostname_override:
+        sources = ", ".join(value for value in (enabled_override, hostname_override) if value)
+        _print_status_panel(
+            "error",
+            "无法保存 Tailnet 配置",
+            f"当前值由 {sources} 覆盖，请直接修改该文件。",
+        )
+        raise typer.Exit(code=1)
+
+    cfg = load_config()
+    try:
+        if hostname is not None:
+            cfg.tailnet.hostname = normalize_tailnet_hostname(hostname)
+        cfg.tailnet.enabled = True
+        save_config(cfg)
+    except Exception as exc:
+        _print_status_panel("error", "开启 Tailnet 失败", str(exc))
+        raise typer.Exit(code=1) from exc
+
+    _print_status_panel(
+        "success",
+        "Tailnet 已开启",
+        f"节点名: {cfg.tailnet.hostname}\n"
+        "重启 OpenBiliClaw 后生效；首次启动会打开 Tailscale 登录页。\n"
+        "电脑不需要安装或全局启用 Tailscale。",
+    )
+
+
+@tailnet_app.command("disable")
+def tailnet_disable() -> None:
+    """关闭应用内 Tailnet，保留本机节点身份便于下次启用。"""
+    from openbiliclaw.config import load_config, save_config, tailnet_override_source
+
+    override = tailnet_override_source("enabled")
+    if override is not None:
+        _print_status_panel(
+            "error",
+            "无法保存 Tailnet 关闭状态",
+            f"当前开关由 {override} 覆盖，请直接修改该文件。",
+        )
+        raise typer.Exit(code=1)
+
+    cfg = load_config()
+    if not cfg.tailnet.enabled:
+        _print_status_panel("info", "已关闭", "应用内 Tailnet 已是关闭状态。")
+        return
+    cfg.tailnet.enabled = False
+    try:
+        save_config(cfg)
+    except Exception as exc:
+        _print_status_panel("error", "关闭 Tailnet 失败", str(exc))
+        raise typer.Exit(code=1) from exc
+    _print_status_panel(
+        "success",
+        "Tailnet 已关闭",
+        "重启 OpenBiliClaw 后生效；本机节点身份已保留。",
+    )
+
+
+@tailnet_app.command("status")
+def tailnet_status() -> None:
+    """查看应用内 Tailnet 配置、helper 与最近运行状态。"""
+    from openbiliclaw.config import load_config
+    from openbiliclaw.runtime.tailnet_supervisor import find_tailnet_helper
+
+    cfg = load_config()
+    try:
+        helper = str(find_tailnet_helper(cfg))
+    except Exception as exc:
+        helper = f"未找到（{exc}）"
+
+    status_path = cfg.data_path / "tailnet" / "status.json"
+    runtime: dict[str, object] = {}
+    if status_path.is_file():
+        try:
+            decoded = json.loads(status_path.read_text(encoding="utf-8"))
+            if isinstance(decoded, dict):
+                runtime = decoded
+        except (OSError, json.JSONDecodeError):
+            runtime = {"event": "invalid", "message": "最近状态文件无法读取"}
+
+    rows = [
+        ("配置", "开启" if cfg.tailnet.enabled else "关闭"),
+        ("节点名", cfg.tailnet.hostname),
+        ("配置端口", str(cfg.api.port)),
+        ("Helper", helper),
+        ("身份目录", str(cfg.data_path / "tailnet")),
+        ("最近状态", str(runtime.get("event", "暂无"))),
+    ]
+    runtime_port = cfg.api.port
+    raw_runtime_port = runtime.get("port")
+    if isinstance(raw_runtime_port, (int, str)) and not isinstance(raw_runtime_port, bool):
+        try:
+            candidate_port = int(raw_runtime_port)
+        except (TypeError, ValueError):
+            candidate_port = cfg.api.port
+        if 1 <= candidate_port <= 65_535:
+            runtime_port = candidate_port
+            rows.append(("最近监听端口", str(runtime_port)))
+    dns_name = str(runtime.get("dns_name", "")).strip()
+    if dns_name:
+        rows.append(("MagicDNS 地址", f"http://{dns_name}:{runtime_port}"))
+    raw_ips = runtime.get("ips", [])
+    if isinstance(raw_ips, list) and raw_ips:
+        rows.append(("Tailnet IP", ", ".join(str(value) for value in raw_ips)))
+    message = str(runtime.get("message", "")).strip()
+    if message:
+        rows.append(("最近信息", message))
+    _print_key_value_table("应用内 Tailnet", rows)
+
+
+@tailnet_app.command("build-helper")
+def tailnet_build_helper() -> None:
+    """从源码构建并安装当前平台的 Tailnet helper。"""
+    from openbiliclaw.config import load_config
+    from openbiliclaw.runtime.tailnet_supervisor import (
+        TailnetSupervisorError,
+        build_tailnet_helper,
+    )
+
+    cfg = load_config()
+    try:
+        destination = build_tailnet_helper(cfg)
+    except (OSError, TailnetSupervisorError) as exc:
+        _print_status_panel("error", "Tailnet helper 构建失败", str(exc))
+        raise typer.Exit(code=1) from exc
+    _print_status_panel(
+        "success",
+        "Tailnet helper 已安装",
+        f"{destination}\n现在可执行 `openbiliclaw tailnet enable`，然后重启服务。",
     )
 
 
@@ -15032,6 +15302,8 @@ def config_show() -> None:
         ),
         ("海外自定义代理", cfg.network.proxy or "未设置"),
         ("收藏自动同步", "开启" if cfg.saved_sync.auto_sync_enabled else "关闭"),
+        ("应用内 Tailnet", "开启" if cfg.tailnet.enabled else "关闭"),
+        ("Tailnet 节点名", cfg.tailnet.hostname),
         ("数据目录", str(cfg.data_path)),
     ]
     if diagnostics.config_path:

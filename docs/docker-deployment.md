@@ -4,6 +4,12 @@
 
 > 🔒 **局域网访问安全（可选密码门禁）**：容器把后端暴露在 `8420`，同网段设备都能访问。需要为局域网 / 远程设备加登录密码时（本机与浏览器扩展仍免登录），设置环境变量 `OPENBILICLAW_API_AUTH_ENABLED=true` + `OPENBILICLAW_API_AUTH_PASSWORD=…`（或进容器跑 `openbiliclaw set-password`）。若手动套其他反向代理，记得配 `[api.auth].trusted_proxies` 或让代理自行鉴权；仓库自带的 Caddy HTTPS overlay 已把可信代理收紧到共享 loopback。详见 [`docs/modules/api-auth.md`](modules/api-auth.md)。
 
+> 🛜 **应用内 Tailnet 首版不属于 Docker 镜像能力**：macOS / Windows 桌面安装包会内置
+> `tsnet` helper，源码主机可用 Go 1.26.6 显式构建；当前 backend / prebuilt Docker 镜像不
+> 携带 helper。不要只设置 `[tailnet].enabled=true` 并声称容器已加入 tailnet——本机容器 API
+> 会继续运行，但远程入口会报告 helper 缺失。Docker 跨网络访问继续使用下文的 Caddy 公网
+> HTTPS overlay 或自管 TLS。完整边界见[应用内 Tailnet](modules/tailnet.md)。
+
 ## 前置条件
 
 - [Docker](https://docs.docker.com/get-docker/) 20.10+
@@ -140,6 +146,7 @@ AI agent 一句话部署时，`agent_bootstrap.py` 会在 auto-init 期间额外
 - **后端不再等 sidecar 拉完模型才启动**：`bge-m3` 首次下载（~568MB）期间后端已经可用，`/setup/` 的前置检查会显示 embedding 尚未就绪，拉取完成后自动通过。模型下载失败时 sidecar 守护进程仍在，重启 compose 会自动重试。
 - B 站登录态推荐用浏览器扩展：扩展装在**宿主机浏览器**里，不在容器里。你登录 bilibili.com 后，扩展会把 Cookie 自动 POST 到 `127.0.0.1:8420` 的后端接口。
 - 小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Bangumi / V2EX / 微博都默认关闭，只有你在 `/setup/` 或设置页明确开启才会进入适用链路；需要个人信号的来源启用时需在宿主机浏览器里装扩展并登录对应站点，Bangumi 使用官方匿名只读 API，微博公开请求匿名、个人 bootstrap 走扩展同源任务。镜像通过 pip 安装项目，X 的 `twitter-cli` 和 Reddit 的 `rdt-cli` 已内置。
+- `[tailnet]` 也保持默认关闭。即使从宿主机挂载一个自行编译的 helper，容器网络 / 状态目录 / 生命周期仍不属于首版受支持路径；本指南不提供这种半自定义部署的可用性承诺。
 
 ### 可选公网域名自动 HTTPS（最简方案）
 
@@ -238,6 +245,11 @@ docker exec -it openbiliclaw-backend vi /app/runtime/config.toml
 | `OPENBILICLAW_PROXY_HOST` | `host.docker.internal` | 代理主机地址 |
 | `OPENBILICLAW_PROXY_PORT` | `7897` | 代理端口 |
 | `OPENBILICLAW_PROXY_TIMEOUT` | `1.0` | 代理探测超时（秒） |
+
+`OPENBILICLAW_TAILNET_AUTH_KEY` 不是首版 Docker 部署入口：镜像没有 helper，设置它不会让
+容器自动获得 Tailnet 能力，也不应为了绕过该限制把 Auth Key 写进 compose 文件。需要
+`OpenBiliClaw-mobile` Android / iOS 原生 App 私网访问时优先使用桌面 / 源码主机形态；该能力
+不包括 Web / Linux / macOS / Windows Flutter 构建。Docker 使用已记录的 HTTPS 方案。
 
 ### LLM 配置
 

@@ -62,6 +62,17 @@ Four steps for most users. Firefox, Docker, scripted, and manual setup paths all
 3. **Connect a source** — log in to [Bilibili](https://www.bilibili.com) (the default init source), or choose Xiaohongshu / Douyin / YouTube / X / Zhihu / Reddit / Linux.do / V2EX / Weibo. Linux.do, Bangumi, V2EX, and Weibo support public discovery; signed-in Linux.do, V2EX, and Weibo add read-only personal signals during initialization, Bangumi can initialize from a public username, and Weibo's public path remains anonymous.
 4. **Open the UI** — visit `http://127.0.0.1:8420/web`, or scan the extension QR code to open `http://<your-LAN-IP>:8420/m/` on your phone and save it to your home screen. For a native app experience, install the [Flutter client](https://github.com/whiteguo233/OpenBiliClaw-mobile) from its separate repo (Android / iOS / Web / desktop; installers on its [Latest Release](https://github.com/whiteguo233/OpenBiliClaw-mobile/releases/latest)) and point it at the same backend in its settings.
 
+Away from your LAN, the **native Android / iOS apps** from `OpenBiliClaw-mobile` embed `tsnet`, and
+the computer can let OpenBiliClaw itself join the same tailnet. Its Web, Linux, macOS, and Windows
+Flutter builds are outside this feature's support scope. Desktop installers bundle the helper, but the tray app does not expose
+the `tailnet` CLI in this first version: fully quit it, edit `~/OpenBiliClaw/config.toml` (or
+`%USERPROFILE%\OpenBiliClaw\config.toml` on Windows), set `enabled = true` under `[tailnet]`, and
+start it again. Source / scripted installs first run `openbiliclaw tailnet build-helper` with Go
+1.26.6, then `openbiliclaw tailnet enable` and restart. The computer needs no system-wide Tailscale;
+this default-off edge is tailnet-private and enables no Funnel/Serve. Enable the app password in the
+local Web settings as defense in depth (source installs may also use `openbiliclaw set-password`). See
+[Embedded Tailnet](docs/modules/tailnet.md).
+
 ## Why OpenBiliClaw?
 
 > The name comes from Bilibili (`Bili` = Bilibili, `Claw` = "the claw that grabs content for you") — the project started as a Bilibili-only tool. Since v0.3.0 it has evolved into a general cross-platform Agent covering Bilibili / Xiaohongshu / Douyin / YouTube / X / Zhihu / Reddit / Linux.do / Bangumi / V2EX / Weibo and the open web, with more platforms on the roadmap.
@@ -297,7 +308,11 @@ Grab the installer for your OS from the `openbiliclaw-v*` aggregate [Latest Rele
 - **macOS**: download the DMG that matches your Mac: `OpenBiliClaw-macos-v*-arm64.dmg` for Apple silicon, or `OpenBiliClaw-macos-v*-x64.dmg` for Intel when the release provides it. The recommended path is to double-click `安装并启动 Install OpenBiliClaw.command`: it verifies the new bundle, quits the old instance, atomically replaces the app in Applications, and launches the version just installed. Traditional drag-and-drop remains available, but upgrades must quit the old version first and reopen the replacement manually.
 - **Windows**: download `OpenBiliClaw-windows-*-Setup.exe` — double-click to install. After a successful install or upgrade, Setup stops the old instance and automatically launches the newly installed version from the installation directory (including silent installs).
 
-It bundles local Ollama + `bge-m3` embedding (works out of the box) plus the default source dependencies, including X's `twitter-cli` and Reddit's `rdt-cli` (Reddit's rdt command backend prefers the connected extension's synced `reddit_session`; `rdt login` remains a manual fallback, and unauthenticated runs fall back to extension tasks). It lives in the **macOS menu bar / Windows system tray**; right-click for "Open Web UI / View runtime logs / Quit". Data uses the same directory as the AI / script installers: `~/OpenBiliClaw` (macOS / Linux) / `%USERPROFILE%\OpenBiliClaw` (Windows), and survives upgrades and uninstalls. Data from older packaged builds under `~/Library/Application Support/OpenBiliClaw` / `%LOCALAPPDATA%\OpenBiliClaw` is copied back on first launch without overwriting existing files. If a broken `config.toml` / `config.local.toml` prevents startup, the desktop package backs the bad file up as `*.invalid`, regenerates the default config, then opens `/setup/` so initialization can run again; `data/` is left untouched.
+The macOS app still targets 10.15+. Only the optional Tailnet helper built with Go 1.26.6 has a
+measured minimum of macOS 12; on 10.15 / 11 the local app continues normally while this remote edge
+is unavailable.
+
+It bundles local Ollama + `bge-m3` embedding (works out of the box), the default source dependencies including X's `twitter-cli` and Reddit's `rdt-cli`, and the default-off embedded Tailnet helper. The latter lets the desktop app join your tailnet without installing system Tailscale. The desktop tray app does not provide `openbiliclaw tailnet` subcommands in this first version: fully quit it, set `[tailnet].enabled = true` in the runtime directory's `config.toml`, then relaunch and complete the first browser login. Reddit's rdt command backend prefers the connected extension's synced `reddit_session`; `rdt login` remains a manual fallback, and unauthenticated runs fall back to extension tasks. It lives in the **macOS menu bar / Windows system tray**; right-click for "Open Web UI / View runtime logs / Quit". Data uses the same directory as the AI / script installers: `~/OpenBiliClaw` (macOS / Linux) / `%USERPROFILE%\OpenBiliClaw` (Windows), and survives upgrades and uninstalls. Data from older packaged builds under `~/Library/Application Support/OpenBiliClaw` / `%LOCALAPPDATA%\OpenBiliClaw` is copied back on first launch without overwriting existing files. If a broken `config.toml` / `config.local.toml` prevents startup, the desktop package backs the bad file up as `*.invalid`, regenerates the default config, then opens `/setup/` so initialization can run again; `data/` is left untouched.
 
 > ⚠️ **macOS security blocking (the app isn't signed / notarized yet)**:
 > - The current Release is ad-hoc signed but not notarized. On first launch, if macOS blocks either the install helper or the app, right-click / Control-click that item → "Open" → click "Open" again in the dialog; or allow it under "System Settings → Privacy & Security" with "Open Anyway".
@@ -321,8 +336,12 @@ Paste this whole prompt into Claude Code, Codex CLI, Cursor, Windsurf, or anothe
 Please follow https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docs/agent-install.md to deploy the OpenBiliClaw backend for me (use Bash `curl` to fetch the document, NOT WebFetch — WebFetch summarises markdown and drops critical commands).
 ```
 
-The agent will clone the repo, install dependencies, start the backend with the LAN-accessible default bind (`0.0.0.0:8420`), run a health check, and ask a few questions with defaults. Before auto-init, it verifies that the ordered global LLM instance chain and the independent embedding service answer real lightweight calls; if either fails, init is blocked until you fix the service. Xiaohongshu, Douyin, YouTube, X, Zhihu, Reddit, Linux.do, V2EX, and Weibo signals enter the initial profile only when you opt in. Weibo personal signals require a signed-in Weibo browser session and the extension; public discovery remains anonymous.
 The agent will clone the repo, install dependencies, start the backend with the LAN-accessible default bind (`0.0.0.0:8420`), run a health check, and ask a few questions with defaults. Before auto-init, it verifies that the ordered global LLM instance chain and the independent embedding service answer real lightweight calls; if either fails, init is blocked until you fix the service. If unsure, pick the default. Xiaohongshu, Douyin, YouTube, X, Zhihu, Reddit, Linux.do, V2EX, and Weibo signals are used in the initial profile only when you explicitly opt in. Bangumi discovery needs no login; public collections seed the profile only when you enter a public username. Weibo public discovery needs no login, while personal initialization requires a signed-in Weibo browser and extension.
+
+Source installs do not compile the Tailnet helper by default. Only when the user explicitly wants
+native Android / iOS app access away from the LAN, install Go 1.26.6 and run
+`openbiliclaw tailnet build-helper`, then `openbiliclaw tailnet enable`, and fully restart. The first
+Docker image does not bundle this helper.
 
 Chrome Web Store / AMO builds only declare local-backend permissions by default. When you select a protocol and enter another LAN or remote endpoint, the browser requests `scheme://host/*`; WebExtension host permissions cannot be port-scoped across browsers, while actual requests remain pinned to the configured port. Public hosts require HTTPS. Enable the default-off device flow first with `ext-key generate` and `ext-key enable`.
 
@@ -342,7 +361,7 @@ openbiliclaw start
 
 - **Desktop**: open `http://127.0.0.1:8420/web` (or `http://127.0.0.1:8420/`, auto-redirects). Two-column editorial layout with recommendations, 30-day history, profile, chat, messages, and settings all on one page.
 - **Mobile**: click the phone icon in the extension header to scan the QR code, or type `http://<your-LAN-IP>:8420/m/` manually. Best for browsing recommendations, revisiting 30-day history, profile, and chat on your phone.
-- **Native Flutter client**: download the Android APK (`arm64-v8a` for modern devices, `armeabi-v7a` for older ones) or the unsigned iOS IPA (re-sign with your own Apple account) from the [Latest Release](https://github.com/whiteguo233/OpenBiliClaw-mobile/releases/latest), then enter the backend IP / port in the top-right settings (Web / iOS / macOS default to `127.0.0.1:8420`, the Android emulator to `10.0.2.2:8420`, real devices to your computer's LAN IP, and remote deployments to the server IP with the password gate enabled).
+- **Native Flutter client**: download the Android APK (`arm64-v8a` for modern devices, `armeabi-v7a` for older ones) or the unsigned iOS IPA (re-sign with your own Apple account) from the [Latest Release](https://github.com/whiteguo233/OpenBiliClaw-mobile/releases/latest). Use the computer's LAN IP nearby; away from the LAN, the native Android / iOS app's embedded tsnet can pair with the computer's default-off embedded Tailnet path. Join both nodes to the same tailnet, use its MagicDNS name / Tailnet IP, and enable the app password. This does not cover the repo's Web, Linux, macOS, or Windows Flutter builds.
 
 > During `openbiliclaw init`, you'll be asked whether to allow LAN access (default Y). If you chose N or want to change it later, edit `[api].host` in `config.toml` (`0.0.0.0` = LAN-reachable over available IPv4 and IPv6, `127.0.0.1` = local only). QR links prefer IPv4 and automatically use a bracketed IPv6 literal when IPv4 is unavailable.
 
@@ -603,6 +622,7 @@ The whole loop stays local — the agent host just calls the CLI bridge; your pr
 - 🕘 **30-Day Content History** — extension, desktop, and mobile share opened, surfaced-but-unopened, and recently removed views; covers are paged and lazy-loaded, and removed local saves can be restored
 - 🧩 **Browser Extension** — Chrome / Edge / Brave / Arc / Firefox / Safari; side-panel recommendations + cross-site behavior collection, install and go
 - 📱 **Flutter Native Client** — separate repo [OpenBiliClaw-mobile](https://github.com/whiteguo233/OpenBiliClaw-mobile); Android / iOS / Web / Linux / macOS / Windows against the same local backend, with Bilibili covers hitting the CDN directly to skip two hops
+- 🛜 **App-Embedded Tailnet Access** — the native Android / iOS `OpenBiliClaw-mobile` app and computer each embed tsnet, so those mobile clients can reach your backend through your own tailnet without a system Tailscale install or a public Funnel; Web and desktop Flutter builds are not supported by this path
 - 🚀 **Guided Init in the UI** — the packaged `/setup/` wizard, Desktop Web, and the extension can all initialize with one click; no terminal required
 - 📦 **Cross-Machine Migration** — export/import portable config, SQLite, profiles, cookies, and the image cache from Desktop settings; imports are validated and staged, can be inspected or cancelled, then apply on restart with rollback copies. `.obcbackup` contains plaintext secrets but excludes the source machine's API-login password, session-signing secret, and extension device keys
 - 🔬 **Self-Optimizing Eval Loops** — five modules each carry an LLM-as-judge loop that improves prompt quality over rounds
@@ -615,6 +635,8 @@ The whole loop stays local — the agent host just calls the CLI bridge; your pr
 The full architecture overview ASCII diagrams (runtime concurrency gates, agent orchestration, source adapters, discovery / recommendation / saved-sync pipelines) have been moved to a separate document to keep the README compact:
 
 Publication date preference: `[sources.<name>].recommendation_date_*` per source → out-of-window candidates are filtered before LLM evaluation → effective inventory → PoolCurator soft/strict serving semantics.
+
+Remote Android / iOS app: `App (embedded tsnet) → user's tailnet → desktop Go tsnet helper → 127.0.0.1:<effective server port> → FastAPI`. The port normally comes from `[api].port` and follows startup / packaged `OPENBILICLAW_PORT` overrides. This path is default-off, needs no system Tailscale on the computer, exposes no Funnel/Serve, and does not migrate node identity.
 
 > 📖 [Architecture Overview](docs/architecture-overview.md)
 

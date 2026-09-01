@@ -8,6 +8,26 @@
 
 - **修复 YouTube / 知乎平台已收藏但 Web 误报同步失败**：原生保存发出点击后若页面选中态未在短轮询窗口内更新，扩展曾直接回传 `native_confirmation_not_observed`，后端因此持久化为失败。现在 runner 在导航前登记自有 task tab 并禁止普通行为采集；收到不确定结果后先终止并等待 mutation sender，再重载精确内容页，只有新 `document_instance_id` 完成 READY 握手才发送独立 `execution_id` 的 `verification_only`。真实 Chrome 复核进一步确认知乎桌面端已从命名收藏夹弹窗改成条目级全局 `收藏 / 已收藏` 开关：后端目标同步改为 `知乎收藏`、取消 named-collection capability，首次“收藏”只点击一次并等待“已收藏”，初始“已收藏”及所有 verification 路径严格只读，避免重复任务反向取消。YouTube 新版 `toggleable-list-item-view-model` 又把实际状态与点击点移到内层 `button[role=menuitem][aria-pressed]`，外层 `yt-list-item-view-model` 仅为 presentation；执行器现优先读取并点击内层按钮，同时保留旧 renderer 兼容，避免假点击无写入。YouTube verifier 继续只读检查 exact playlist；只有正面 persisted-state 证据才升级为 `already_synced`，其它结果保持原失败。扩展 callback 现要求 2xx、在独立 deadline 内以同一 payload 有界重试；后端只幂等确认完全相同的 canonical terminal replay，变化后的晚回调仍 409。临时 tab 删除结果会区分已删除、已不存在与未知失败，未知失败保留 MV3 恢复记录。新增 runner、平台 verifier、传输、canonical replay、零被动事件与零二次 mutation 回归测试。
 
+- **电脑端应用内 Tailnet 远程入口**：新增默认关闭的 `[tailnet]` 与 Go `tsnet` helper，由
+  Python supervisor 随后端生命周期托管，把用户自己 tailnet 内的 HTTP / WebSocket 固定反代到
+  `127.0.0.1:<本次启动的有效 server port>`；通常使用 `[api].port`，也跟随 `start` /
+  `serve-api --port` 与桌面 `OPENBILICLAW_PORT` 覆盖。电脑不再要求安装或全局开启系统 Tailscale，
+  已内嵌 tsnet 的 `OpenBiliClaw-mobile` Android / iOS 原生 App 可经
+  `App → tailnet → 电脑 helper → FastAPI` 在非局域网访问；Web / Linux / macOS / Windows Flutter
+  构建不在首版支持面。桌面安装包内置 helper，
+  源码安装提供 `tailnet build-helper`（Go 1.26.6）；Docker 首版不内置。节点身份保存在
+  `data/tailnet/` 并排除迁移包；`data/bin/` 的任意大小写变体也不允许随包迁移，导入只保留
+  目标机 exact native helper，POSIX 要求它原本可执行再恢复 `0700`；目标机器保留根含嵌套
+  symlink 时 fail closed，避免跟随链接复制目录外数据。首次登录 URL 自动展示 / 打开，非交互 Auth Key 只经 stdin
+  bootstrap 传递、不写配置、argv、状态或日志。入口仅限 tailnet 私网，不启用 Funnel/Serve，
+  并清洗重建转发头以保持 API 密码门禁的远程请求语义。`config.local.toml` 的 Tailnet 字段级
+  覆盖保留 provenance；`OPENBILICLAW_TAILNET_ENABLED/HOSTNAME` 显式环境覆盖优先于 local/base，
+  通用保存不会烘焙覆盖值，CLI 遇到 env/local shadowed 修改会明确拒绝；Auth Key / helper path
+  保持 runtime-only。helper 固定使用 `ts_omit_logtail,ts_omit_webclient`，不向
+  `log.tailscale.com` 上传自动诊断日志且不携带未用管理 Web UI，控制面 / DERP 边界仍照常披露；
+  完整依赖 notice 由生成脚本产出并由 CI / 桌面构建校验。Go 1.26.6 helper 的 macOS
+  `minos=12.0`，启动前单独 preflight；主应用仍支持 10.15+，旧 macOS 只降级 Tailnet。
+
 - **README 下载与星标徽章**：中英文 README 顶部新增 GitHub Releases 总下载数与仓库 Star 动态徽章，点击可直达对应页面。
 
 - **桌面 Web 手机版二维码优先使用手动配置的后端地址**：校园网等存在 AP/客户端隔离或多网卡选错网卡的场景下，`/api/qr-info` 自动探测的局域网 IP 可能手机不可达，而桌面 Web 设置里手动填写的后端地址此前会被自动探测结果覆盖。现在二维码生成时显式配置的后端 host/port 始终优先，用户可填写手机可达的 IP、域名或内网穿透地址后再扫码；未填写时行为保持不变。更新 `tests/test_desktop_web_mobile_entry.py` 静态契约测试。

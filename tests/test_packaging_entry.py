@@ -729,6 +729,49 @@ def test_main_uses_configured_api_host_when_env_host_unset(
     assert seen["sockets"] is fake_listeners
 
 
+def test_start_packaged_tailnet_uses_runtime_config_and_event_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.runtime import tailnet_supervisor
+
+    expected = object()
+    seen: dict[str, object] = {}
+
+    def _start(config: object, port: int, *, event_callback: object) -> object:
+        seen.update({"config": config, "port": port, "callback": event_callback})
+        return expected
+
+    monkeypatch.setattr(tailnet_supervisor, "start_tailnet_if_enabled", _start)
+    runtime_config = SimpleNamespace(
+        tailnet=SimpleNamespace(enabled=True),
+        api=SimpleNamespace(auth=SimpleNamespace(enabled=True)),
+    )
+
+    assert entry._start_packaged_tailnet(runtime_config, "127.0.0.1", 18420) is expected
+    assert seen == {
+        "config": runtime_config,
+        "port": 18420,
+        "callback": entry._packaged_tailnet_event_callback,
+    }
+
+
+def test_start_packaged_tailnet_failure_does_not_block_local_desktop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openbiliclaw.runtime import tailnet_supervisor
+
+    def _fail(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("helper unavailable")
+
+    monkeypatch.setattr(tailnet_supervisor, "start_tailnet_if_enabled", _fail)
+    runtime_config = SimpleNamespace(
+        tailnet=SimpleNamespace(enabled=True),
+        api=SimpleNamespace(auth=SimpleNamespace(enabled=False)),
+    )
+
+    assert entry._start_packaged_tailnet(runtime_config, "0.0.0.0", 8420) is None
+
+
 def test_main_opens_setup_after_repairing_unloadable_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

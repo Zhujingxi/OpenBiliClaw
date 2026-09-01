@@ -15,6 +15,7 @@
 |------|------|------|
 | 总开关 | ✅ | `[api.auth].enabled=false` 时中间件直接放行；`true` 且无密码视为配置错误（blocking）。 |
 | 信任模型 | ✅ | `trust_loopback=true`（默认）下，loopback 且无 `X-Forwarded-For` / `X-Real-IP` / `Forwarded` 头的请求免登录；带转发头的 loopback fail-closed（要求登录），防同机反代绕过。 |
+| 应用内 Tailnet 反代边界 | ✅ | Go helper 丢弃客户端自带的全部转发头，再从 tsnet peer 重建 `X-Forwarded-For`，同时保留外部 Host / Origin。FastAPI 收到的是“loopback 代理 + 远端来源”，不会继承本机免登录；Tailnet ACL 是外层设备门，仍建议开启应用密码。 |
 | 反代真实 IP 解析 | ✅ | `resolve_client_ip()`：仅当直接对端命中 `trusted_proxies` 才采信 `X-Forwarded-For`，并**从右向左**穿越受信代理链取第一个非受信 IP；任何缺失 / 畸形 / 伪造 loopback 都 fail-closed，绝不 500 / fail-open。 |
 | 无状态 token | ✅ | `sign_token()` / `verify_token()`：`b64url(payload).b64url(HMAC_SHA256)`，payload 含 `v/iat/ep`（限时还含 `exp`）。校验常量时间比对 + 过期检查 + `ep >= 当前 auth_epoch`。 |
 | 记住登录 | ✅ | `session_ttl_hours=0`（默认）签发无 `exp` token + 超长 cookie `Max-Age`，关浏览器 / 重启后端都不失效。 |
@@ -44,6 +45,19 @@
 公网客户端与 HTTPS；auth gate 因此继续按远程客户端执行密码门禁，登录 cookie 带 `Secure`。
 该路径已通过真实 Compose、Caddy TLS、浏览器登录、扩展设备令牌和 WSS 请求验证；公网 ACME
 签发仍需在具有真实 DNS 与入站 `80/443` 的部署主机上完成。
+
+应用内 Tailnet 是第三条、默认关闭的私网传输边缘：`tsnet` helper 只在用户自己的 tailnet
+监听与 `[api].port` 相同的端口，再固定转发到 `127.0.0.1:<port>`。它不启用 Funnel / Serve，
+也不把端口暴露到公网。helper 不信任入站 `Forwarded`、`X-Forwarded-*` 或 `X-Real-IP`，全部
+清除后用实际 tsnet peer 重建 XFF；因此 AuthGate 的 loopback fast path 必定 fail-closed 为远程
+请求。不要为了“让 Tailnet 免登录”关闭该行为。多人 tailnet 或 ACL 较宽时应在本机 Web
+设置中开启应用密码做第二层控制；源码安装也可执行 `openbiliclaw set-password`。移动 App 按
+普通远程 Web/API 客户端登录。
+
+浏览器扩展仍受自己的 remote endpoint、HTTPS 与设备 key 契约约束。首版 Tailnet 入口只服务
+已内嵌 tsnet 的 `OpenBiliClaw-mobile` Android / iOS 原生 App，不包括其 Web / Linux / macOS /
+Windows Flutter 构建；不能由“Tailnet 内 HTTP 已加密”推导出扩展一定接受
+`http://100.x` / MagicDNS endpoint。完整链路见[应用内 Tailnet 模块](tailnet.md)。
 
 ## 端点
 
