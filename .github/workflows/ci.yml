@@ -51,6 +51,9 @@ jobs:
           go test -tags="$TAILNET_BUILD_TAGS" ./...
           go vet -tags="$TAILNET_BUILD_TAGS" ./...
 
+      - name: Prefetch embedded Tailnet modules for every target
+        run: python scripts/generate_tailnet_notices.py --prefetch
+
       - name: Verify embedded Tailnet third-party notices
         run: python scripts/generate_tailnet_notices.py --check
 

@@ -96,6 +96,28 @@ def test_collect_module_usage_unions_targets_and_skips_main_and_standard(
     assert usages[1].package_dirs == frozenset({foo_module / "a", foo_module / "b"})
 
 
+def test_prefetch_target_modules_uses_online_listing_for_every_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str, tuple[str, ...], bool]] = []
+    tags = ("ts_omit_logtail", "ts_omit_webclient")
+
+    monkeypatch.setattr(notices, "read_build_tags", lambda: tags)
+    monkeypatch.setattr(notices, "read_required_go_version", lambda: "go1.26.6")
+    monkeypatch.setattr(notices, "_go_environment", lambda: ("go1.26.6", Path("/go")))
+    monkeypatch.setattr(
+        notices,
+        "_list_target_packages",
+        lambda goos, goarch, build_tags, *, offline=True: calls.append(
+            (goos, goarch, build_tags, offline)
+        ),
+    )
+
+    notices.prefetch_target_modules()
+
+    assert calls == [(*target, tags, False) for target in notices.TARGETS]
+
+
 def test_collect_module_usage_rejects_replacements(tmp_path: Path) -> None:
     packages = [
         {"ImportPath": "example.test/helper", "Module": {"Main": True}},

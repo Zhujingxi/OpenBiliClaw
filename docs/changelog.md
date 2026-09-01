@@ -6,6 +6,8 @@
 
 ## 未发布
 
+- **修复 Tailnet notices 的 CI 冷缓存校验**：生成脚本新增 `--prefetch`，主 CI 在离线生成跨平台第三方依赖清单前，按同一目标矩阵和构建 tags 精确预热所需 Go 模块，避免 Linux helper 测试只下载当前平台依赖后，Windows 专属模块因 `GOPROXY=off` 被误判为 notices 失败；新增目标遍历与工作流顺序回归测试。
+
 - **修复 YouTube / 知乎平台已收藏但 Web 误报同步失败**：原生保存发出点击后若页面选中态未在短轮询窗口内更新，扩展曾直接回传 `native_confirmation_not_observed`，后端因此持久化为失败。现在 runner 在导航前登记自有 task tab 并禁止普通行为采集；收到不确定结果后先终止并等待 mutation sender，再重载精确内容页，只有新 `document_instance_id` 完成 READY 握手才发送独立 `execution_id` 的 `verification_only`。真实 Chrome 复核进一步确认知乎桌面端已从命名收藏夹弹窗改成条目级全局 `收藏 / 已收藏` 开关：后端目标同步改为 `知乎收藏`、取消 named-collection capability，首次“收藏”只点击一次并等待“已收藏”，初始“已收藏”及所有 verification 路径严格只读，避免重复任务反向取消。YouTube 新版 `toggleable-list-item-view-model` 又把实际状态与点击点移到内层 `button[role=menuitem][aria-pressed]`，外层 `yt-list-item-view-model` 仅为 presentation；执行器现优先读取并点击内层按钮，同时保留旧 renderer 兼容，避免假点击无写入。YouTube verifier 继续只读检查 exact playlist；只有正面 persisted-state 证据才升级为 `already_synced`，其它结果保持原失败。扩展 callback 现要求 2xx、在独立 deadline 内以同一 payload 有界重试；后端只幂等确认完全相同的 canonical terminal replay，变化后的晚回调仍 409。临时 tab 删除结果会区分已删除、已不存在与未知失败，未知失败保留 MV3 恢复记录。新增 runner、平台 verifier、传输、canonical replay、零被动事件与零二次 mutation 回归测试。
 
 - **电脑端应用内 Tailnet 远程入口**：新增默认关闭的 `[tailnet]` 与 Go `tsnet` helper，由
