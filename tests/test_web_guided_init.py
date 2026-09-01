@@ -555,7 +555,12 @@ async def test_heartbeat_task_keeps_touching_until_cancelled(tmp_path) -> None:
     seq_before = db.get_latest_init_run()["sequence"]
 
     task = asyncio.create_task(_run_init_heartbeat(coord, "run-1", interval=0.01))
-    await asyncio.sleep(0.06)
+    target_sequence = seq_before + 2
+    for _ in range(100):
+        seq_after = db.get_latest_init_run()["sequence"]
+        if seq_after >= target_sequence:
+            break
+        await asyncio.sleep(0.01)
     task.cancel()
     with suppress(asyncio.CancelledError):
         await task
