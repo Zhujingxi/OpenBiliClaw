@@ -9359,6 +9359,40 @@ ${cardFeedbackBarHtml()}`;
       const savedAutoSync = $("#savedAutoSync");
       if (savedAutoSync) savedAutoSync.checked = config.saved_sync?.auto_sync_enabled === true;
       if ($("#savedAutoSyncText")) $("#savedAutoSyncText").textContent = savedAutoSync?.checked ? "开启" : "关闭";
+      const tailnet = config.tailnet || {};
+      const tailnetEnabled = $("#tailnetEnabled");
+      if (tailnetEnabled) tailnetEnabled.checked = tailnet.enabled === true;
+      if ($("#tailnetEnabledText")) $("#tailnetEnabledText").textContent = tailnetEnabled?.checked ? "开启" : "关闭";
+      setInput("tailnetHostname", tailnet.hostname || "openbiliclaw-host");
+      setInput("tailnetBootstrapCredential", "");
+      const tailnetCredential = $("#tailnetBootstrapCredential");
+      if (tailnetCredential) {
+        tailnetCredential.placeholder = tailnet.bootstrap_credential_staged
+          ? "已暂存（留空保持不变）"
+          : "tskey-auth-… / tskey-client-…";
+      }
+      setInput("tailnetAdvertiseTags", "tag:openbiliclaw");
+      const clearTailnetCredential = $("#tailnetClearCredential");
+      if (clearTailnetCredential) clearTailnetCredential.checked = false;
+      const clearTailnetField = $("#tailnetClearCredentialField");
+      if (clearTailnetField) clearTailnetField.hidden = !tailnet.bootstrap_credential_staged;
+      const tailnetStatus = $("#tailnetStatus");
+      if (tailnetStatus) {
+        const readyAddress = tailnet.dns_name || tailnet.ips?.[0] || "";
+        const descriptions = {
+          disabled: "当前关闭；保存开启后需完整重启应用。",
+          credential_staged: "单次入网凭据已安全暂存；完整重启应用后自动注册。",
+          pending_restart: "配置已开启；请完整重启应用以启动 Tailnet。",
+          starting: "Tailnet helper 正在启动…",
+          needs_login: "等待在浏览器中完成 Tailscale 登录。",
+          ready: readyAddress
+            ? `已连接：${readyAddress}${tailnet.port ? `:${tailnet.port}` : ""}`
+            : "Tailnet 已连接。",
+          error: "Tailnet 最近一次启动失败；请查看运行日志。",
+          stopped: "Tailnet helper 已停止；请完整重启应用。"
+        };
+        tailnetStatus.textContent = descriptions[tailnet.state] || "Tailnet 状态未知。";
+      }
 
       const llm = config.llm || {};
       setInput("llmConcurrency", llm.concurrency ?? 3);
@@ -10904,6 +10938,24 @@ ${cardFeedbackBarHtml()}`;
           danmaku_max_chars: getIntInput("danmakuMaxChars", 500)
         },
         saved_sync: { auto_sync_enabled: Boolean($("#savedAutoSync")?.checked) },
+        tailnet: {
+          enabled: Boolean($("#tailnetEnabled")?.checked),
+          hostname: getInput("tailnetHostname"),
+          ...(getInput("tailnetBootstrapCredential")
+            ? {
+                bootstrap_credential: getInput("tailnetBootstrapCredential"),
+                ...(getInput("tailnetBootstrapCredential").startsWith("tskey-client-")
+                  ? {
+                      advertise_tags: getInput("tailnetAdvertiseTags")
+                        .split(",")
+                        .map((value) => value.trim())
+                        .filter(Boolean)
+                    }
+                  : {})
+              }
+            : {}),
+          clear_bootstrap_credential: Boolean($("#tailnetClearCredential")?.checked)
+        },
         storage: { db_path: getInput("storageDbPath") },
         network: { mode: getInput("networkProxyMode"), proxy: getInput("networkProxy") },
         logging: {
@@ -11440,6 +11492,20 @@ ${cardFeedbackBarHtml()}`;
     });
 
     safeBind("#refreshDiagnosticsAlertsBtn", "click", () => void refreshDiagnosticsAlerts());
+    safeBind("#tailnetEnabled", "change", (event) => {
+      const label = $("#tailnetEnabledText");
+      if (label) label.textContent = event.target.checked ? "开启" : "关闭";
+    });
+    safeBind("#tailnetBootstrapCredential", "input", (event) => {
+      if (!String(event.target.value || "").trim()) return;
+      const clear = $("#tailnetClearCredential");
+      if (clear) clear.checked = false;
+    });
+    safeBind("#tailnetClearCredential", "change", (event) => {
+      if (!event.target.checked) return;
+      const credential = $("#tailnetBootstrapCredential");
+      if (credential) credential.value = "";
+    });
 
     function setActiveModelSettingsPanel(groupName = "llm", panelName = "default") {
       document.querySelectorAll(`[data-model-settings-tab][data-model-settings-group="${groupName}"]`).forEach((tab) => {

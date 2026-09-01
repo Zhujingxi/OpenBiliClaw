@@ -26,7 +26,12 @@
   保持 runtime-only。helper 固定使用 `ts_omit_logtail,ts_omit_webclient`，不向
   `log.tailscale.com` 上传自动诊断日志且不携带未用管理 Web UI，控制面 / DERP 边界仍照常披露；
   完整依赖 notice 由生成脚本产出并由 CI / 桌面构建校验。Go 1.26.6 helper 的 macOS
-  `minos=12.0`，启动前单独 preflight；主应用仍支持 10.15+，旧 macOS 只降级 Tailnet。
+  `minos=12.0`，启动前单独 preflight；主应用仍支持 10.15+，旧 macOS 只降级 Tailnet。桌面 Web
+  与浏览器插件「设置 → 通用」现新增 Tailnet 控制和脱敏状态：可留空走网页登录、提交
+  `tskey-auth-…` Auth Key，或提交 `tskey-client-…` OAuth Client Secret + 已授权设备 tag。
+  入网凭据是只允许真实本机请求写入的 API write-only 字段，不进 TOML / 扩展存储 / 回显；以
+  私有权限原子暂存到下一次完整重启，成功写入 helper stdin 后删除。OAuth helper 注册为持久、
+  预授权、tag-owned 节点；环境输入仍可用于无人值守注册，且环境凭据优先于设置页暂存。
 
 - **README 下载与星标徽章**：中英文 README 顶部新增 GitHub Releases 总下载数与仓库 Star 动态徽章，点击可直达对应页面。
 

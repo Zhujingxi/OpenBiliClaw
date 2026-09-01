@@ -170,6 +170,7 @@ from openbiliclaw.api.models import (
     SourceStatusItem,
     SourceVerifyResponse,
     StorageConfigOut,
+    TailnetConfigOut,
     TwitterSourceConfigOut,
     UpdateApplyIn,
     UpdateCheckIn,
@@ -16793,6 +16794,28 @@ def create_app(
             for i in (issues or [])
         ]
 
+        from openbiliclaw.runtime.tailnet_supervisor import (
+            read_tailnet_status,
+            tailnet_bootstrap_staged,
+        )
+
+        bootstrap_staged = tailnet_bootstrap_staged(cfg)
+        tailnet_status = read_tailnet_status(cfg) or {}
+        tailnet_ips_value = tailnet_status.get("ips", [])
+        tailnet_ips = (
+            [str(value) for value in tailnet_ips_value]
+            if isinstance(tailnet_ips_value, list)
+            else []
+        )
+        tailnet_port_value = tailnet_status.get("port", 0)
+        tailnet_port = tailnet_port_value if isinstance(tailnet_port_value, int) else 0
+        if not cfg.tailnet.enabled:
+            tailnet_state = "disabled"
+        elif bootstrap_staged:
+            tailnet_state = "credential_staged"
+        else:
+            tailnet_state = str(tailnet_status.get("event") or "pending_restart")
+
         return ConfigResponse(
             language=cfg.language,
             data_dir=cfg.data_dir,
@@ -17110,6 +17133,15 @@ def create_app(
             saved_sync=SavedSyncConfigOut(
                 auto_sync_enabled=cfg.saved_sync.auto_sync_enabled,
             ),
+            tailnet=TailnetConfigOut(
+                enabled=cfg.tailnet.enabled,
+                hostname=cfg.tailnet.hostname,
+                bootstrap_credential_staged=bootstrap_staged,
+                state=tailnet_state,
+                dns_name=str(tailnet_status.get("dns_name", "")),
+                ips=tailnet_ips,
+                port=tailnet_port,
+            ),
             storage=StorageConfigOut(db_path=cfg.storage.db_path),
             logging=LoggingConfigOut(
                 level=cfg.logging.level,
@@ -17177,6 +17209,17 @@ def create_app(
             and auth_core.is_trusted_local(client_ip, local_transport)
             and gate._origin_safe_for_local(request)
         )
+
+    def _tailnet_bootstrap_request_allowed(request: Request) -> bool:
+        """Allow write-only enrollment secrets only from this PC's two settings UIs."""
+        from openbiliclaw import auth_core
+
+        gate = _get_auth_gate()
+        client_ip, local_transport = gate.resolve_client(request)
+        if not auth_core.is_trusted_local(client_ip, local_transport):
+            return False
+        origin = request.headers.get("origin")
+        return auth_core.is_extension_origin(origin) or gate._origin_safe_for_local(request)
 
     def _require_local_migration_request(
         request: Request,
@@ -18444,7 +18487,9 @@ def create_app(
         return await _discover_llm_models(cfg, instance_id=payload.instance_id)
 
     @app.put("/api/config", response_model=ConfigUpdateResponse)
-    async def update_config(payload: ConfigUpdateIn) -> ConfigUpdateResponse | JSONResponse:
+    async def update_config(
+        request: Request, payload: ConfigUpdateIn
+    ) -> ConfigUpdateResponse | JSONResponse:
         """Update configuration, persist to config.toml, and hot-reload runtime.
 
         Only the fields included in the request body are modified.
@@ -18505,7 +18550,9 @@ def create_app(
             load_config,
             normalize_outbound_proxy,
             normalize_outbound_proxy_mode,
+            normalize_tailnet_hostname,
             save_config,
+            tailnet_override_source,
         )
 
         cfg = load_config()
@@ -18536,6 +18583,88 @@ def create_app(
             cfg.language = str(update["language"])
         if "data_dir" in update:
             cfg.data_dir = str(update["data_dir"])
+
+        tailnet_restart_required = False
+        tailnet_bootstrap_credential = ""
+        tailnet_advertise_tags: tuple[str, ...] = ()
+        clear_tailnet_credential = False
+        if "tailnet" in update:
+            from openbiliclaw.runtime.tailnet_supervisor import (
+                TailnetSupervisorError,
+                normalize_tailnet_advertise_tags,
+                normalize_tailnet_bootstrap_credential,
+            )
+
+            tailnet_data = update["tailnet"]
+            previous_enabled = cfg.tailnet.enabled
+            previous_hostname = cfg.tailnet.hostname
+            requested_enabled = tailnet_data.get("enabled")
+            requested_hostname = tailnet_data.get("hostname")
+
+            if requested_enabled is not None:
+                enabled_value = bool(requested_enabled)
+                override = tailnet_override_source("enabled")
+                if override and enabled_value != cfg.tailnet.enabled:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"{override} 正在覆盖 Tailnet 开关，请修改真实配置来源。",
+                    )
+                cfg.tailnet.enabled = enabled_value
+            if requested_hostname is not None:
+                try:
+                    hostname_value = normalize_tailnet_hostname(requested_hostname)
+                except Exception as exc:
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
+                override = tailnet_override_source("hostname")
+                if override and hostname_value != cfg.tailnet.hostname:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"{override} 正在覆盖 Tailnet 节点名，请修改真实配置来源。",
+                    )
+                cfg.tailnet.hostname = hostname_value
+
+            try:
+                tailnet_bootstrap_credential = normalize_tailnet_bootstrap_credential(
+                    tailnet_data.get("bootstrap_credential", "")
+                )
+                if tailnet_bootstrap_credential:
+                    tailnet_advertise_tags = normalize_tailnet_advertise_tags(
+                        tailnet_data.get("advertise_tags")
+                    )
+                    if (
+                        tailnet_bootstrap_credential.startswith("tskey-client-")
+                        and not tailnet_advertise_tags
+                    ):
+                        raise TailnetSupervisorError(
+                            "Tailscale OAuth client secrets require at least one allowed device tag"
+                        )
+            except TailnetSupervisorError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+            clear_tailnet_credential = bool(tailnet_data.get("clear_bootstrap_credential", False))
+            if tailnet_bootstrap_credential and clear_tailnet_credential:
+                raise HTTPException(
+                    status_code=400,
+                    detail="不能同时暂存并清除 Tailnet 启动凭据。",
+                )
+            if tailnet_bootstrap_credential and not cfg.tailnet.enabled:
+                raise HTTPException(
+                    status_code=400,
+                    detail="暂存 Tailnet 启动凭据前请先开启应用内 Tailnet。",
+                )
+            if (tailnet_bootstrap_credential or clear_tailnet_credential) and not (
+                _tailnet_bootstrap_request_allowed(request)
+            ):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Tailnet 启动凭据只能在运行后端的电脑上配置。",
+                )
+            tailnet_restart_required = (
+                previous_enabled != cfg.tailnet.enabled
+                or previous_hostname != cfg.tailnet.hostname
+                or bool(tailnet_bootstrap_credential)
+                or clear_tailnet_credential
+            )
 
         # Apply LLM updates
         if "llm" in update:
@@ -19809,6 +19938,7 @@ def create_app(
 
         desired_data_path = _ConfigPath(cfg.data_path).expanduser().resolve()
         data_dir_restart_required = desired_data_path != active_data_path
+        restart_required = data_dir_restart_required or tailnet_restart_required
         async with _CONFIG_SAVE_LOCK:
             # gui-init D1 / spec §5b: re-check inside the lock. The middleware
             # gated this path on init_active before the handler ran, but a run
@@ -19863,6 +19993,34 @@ def create_app(
                     ) from exc
                 landed.append(slug)
 
+            if "tailnet" in update:
+                from openbiliclaw.runtime.tailnet_supervisor import (
+                    clear_tailnet_bootstrap,
+                    stage_tailnet_bootstrap,
+                    tailnet_bootstrap_path,
+                )
+
+                try:
+                    if tailnet_bootstrap_credential:
+                        stage_tailnet_bootstrap(
+                            cfg,
+                            tailnet_bootstrap_credential,
+                            tailnet_advertise_tags,
+                        )
+                    elif clear_tailnet_credential or not cfg.tailnet.enabled:
+                        clear_tailnet_bootstrap(cfg)
+                        active_tailnet_config = _pin_active_runtime_config(cfg)
+                        if tailnet_bootstrap_path(active_tailnet_config) != tailnet_bootstrap_path(
+                            cfg
+                        ):
+                            clear_tailnet_bootstrap(active_tailnet_config)
+                except Exception as exc:
+                    logger.exception("Tailnet bootstrap credential write failed")
+                    raise RuntimeError(
+                        "config.toml 已保存，但 Tailnet 单次启动凭据处理失败；"
+                        "请在本机设置页重新保存。"
+                    ) from exc
+
             nonlocal config_apply_revision
             config_apply_revision += 1
             # The process-lifetime migration guard protects active_data_path.
@@ -19874,7 +20032,7 @@ def create_app(
                 config=runtime_config,
                 saved_path=saved_path,
                 run_post_reload_llm_work=not suppress_background_llm_work,
-                restart_required=data_dir_restart_required,
+                restart_required=restart_required,
             )
 
             # 持久化与运行时应用是两个阶段。统一进入已有 latest-wins 队列，
@@ -19884,14 +20042,21 @@ def create_app(
                 ok=True,
                 config=_config_to_response(cfg, issues, mask_keys=True),
                 message=(
-                    f"配置已保存到 {saved_path}；data_dir 将在完全重启后生效，"
-                    "其余配置正在后台应用。"
-                    if data_dir_restart_required
+                    f"配置已保存到 {saved_path}；"
+                    + (
+                        "data_dir 与应用内 Tailnet 将在完全重启后生效，"
+                        if data_dir_restart_required and tailnet_restart_required
+                        else "data_dir 将在完全重启后生效，"
+                        if data_dir_restart_required
+                        else "应用内 Tailnet 将在完全重启后生效，"
+                    )
+                    + "其余配置正在后台应用。"
+                    if restart_required
                     else f"配置已保存到 {saved_path}，正在后台应用。"
                 ),
                 reloaded=False,
                 rollback_applied=False,
-                restart_required=data_dir_restart_required,
+                restart_required=restart_required,
                 apply_state="queued",
                 apply_revision=item.revision,
             )

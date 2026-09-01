@@ -1252,6 +1252,22 @@
           <p class="settings-note-inline" id="authHint">本机与浏览器插件免登录；开启后局域网 / 远程设备访问需要密码。</p>
           <label class="settings-field"><span>开机自启动</span><input id="autostartEnabled" type="checkbox"></label>
           <p class="settings-note-inline" id="autostartHint">开启后下次登录系统会自动拉起后端（不影响当前进程）。</p>
+          <p class="settings-section-title">应用内 Tailnet 远程访问</p>
+          <label class="settings-field full settings-switch-field">
+            <span>允许手机通过私有 Tailnet 访问</span>
+            <span class="settings-switch-copy">电脑端只为 OpenBiliClaw 内嵌 Tailscale 节点，不会开启系统级 VPN。</span>
+            <span class="reshuffle-toggle settings-toggle-inline">
+              <input id="tailnetEnabled" type="checkbox">
+              <span class="reshuffle-switch" aria-hidden="true"></span>
+              <span id="tailnetEnabledText">关闭</span>
+            </span>
+          </label>
+          <label class="settings-field"><span>电脑节点名</span><input id="tailnetHostname" autocomplete="off" placeholder="openbiliclaw-host"></label>
+          <label class="settings-field"><span>首次入网凭据（可选）</span><input id="tailnetBootstrapCredential" type="password" autocomplete="new-password" placeholder="tskey-auth-… / tskey-client-…"></label>
+          <label class="settings-field full"><span>OAuth 设备标签</span><input id="tailnetAdvertiseTags" autocomplete="off" placeholder="tag:openbiliclaw"><small>使用 <code>tskey-client-…</code> OAuth Client Secret 时必填，且必须是该 OAuth Client 已授权的 tag；普通 Auth Key 或网页登录可留空。</small></label>
+          <label class="settings-field" id="tailnetClearCredentialField" hidden><span>待用凭据</span><span><input id="tailnetClearCredential" type="checkbox"> 清除已暂存的单次凭据</span></label>
+          <p class="settings-note-inline" id="tailnetStatus" aria-live="polite">读取 Tailnet 状态中…</p>
+          <p class="settings-note-inline">凭据仅在本机以私有文件暂存到下次完整重启（POSIX 权限 0600），交给 helper 后立即删除；留空会在首次启动时打开 Tailscale 网页登录。</p>
           <p class="settings-section-title">网络</p>
           <label class="settings-field"><span>海外网络模式</span><select id="networkProxyMode"><option value="direct">直连（忽略系统代理）</option><option value="system" selected>跟随系统代理</option><option value="custom">自定义代理</option></select></label>
           <label class="settings-field full"><span>自定义代理地址</span><input id="networkProxy" placeholder="socks5://127.0.0.1:1080"></label>

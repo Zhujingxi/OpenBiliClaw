@@ -45,7 +45,11 @@ import time
 
 def is_auth_key_name(name):
     normalized = name.upper().replace("-", "_")
-    return "AUTH_KEY" in normalized or "AUTHKEY" in normalized.replace("_", "")
+    return (
+        "AUTH_KEY" in normalized
+        or "AUTHKEY" in normalized.replace("_", "")
+        or "CLIENT_SECRET" in normalized
+    )
 
 
 bootstrap_line = sys.stdin.readline()
@@ -357,6 +361,7 @@ def test_start_sends_secret_only_over_stdin_and_keeps_pipe_open(
     monkeypatch.setenv("OPENBILICLAW_TAILNET_AUTH_KEY", auth_key)
     monkeypatch.setenv("TS_AUTHKEY", "legacy-ts-secret")
     monkeypatch.setenv("TAILSCALE_AUTH_KEY", "another-secret")
+    monkeypatch.setenv("TS_CLIENT_SECRET", "tskey-client-ambient-secret")
 
     ready = threading.Event()
     events: list[supervisor_module.TailnetEvent] = []
@@ -381,7 +386,11 @@ def test_start_sends_secret_only_over_stdin_and_keeps_pipe_open(
         "--backend-port",
         "8420",
     ]
-    assert captured["bootstrap"] == {"protocol": 1, "auth_key": auth_key}
+    assert captured["bootstrap"] == {
+        "protocol": 1,
+        "auth_key": auth_key,
+        "advertise_tags": [],
+    }
     assert captured["auth_env"] == {}
     assert auth_key not in json.dumps(captured["argv"])
     assert supervisor.process is not None
@@ -391,6 +400,67 @@ def test_start_sends_secret_only_over_stdin_and_keeps_pipe_open(
 
     supervisor.stop()
     assert supervisor.wait(1.0) == 0
+
+
+def test_staged_oauth_secret_is_private_consumed_and_tagged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, capture_path = _configure_fake_helper(monkeypatch, tmp_path)
+    secret = "tskey-client-privatebootstrap"
+    staged = supervisor_module.stage_tailnet_bootstrap(
+        config,
+        secret,
+        ["tag:openbiliclaw"],
+    )
+    assert staged.is_file()
+    if os.name != "nt":
+        assert stat.S_IMODE(staged.stat().st_mode) == 0o600
+
+    ready = threading.Event()
+    supervisor = supervisor_module.TailnetSupervisor(
+        config,
+        8420,
+        event_callback=lambda event: ready.set() if event.get("event") == "ready" else None,
+    ).start()
+    assert ready.wait(3.0)
+
+    captured = json.loads(capture_path.read_text(encoding="utf-8"))
+    assert captured["bootstrap"] == {
+        "protocol": 1,
+        "auth_key": secret,
+        "advertise_tags": ["tag:openbiliclaw"],
+    }
+    assert captured["auth_env"] == {}
+    assert not staged.exists()
+    assert not supervisor_module.tailnet_bootstrap_staged(config)
+
+    supervisor.stop()
+
+
+def test_stage_oauth_secret_requires_valid_tag(tmp_path: Path) -> None:
+    config = _Config(data_path=tmp_path / "data", tailnet=_TailnetSettings())
+    with pytest.raises(supervisor_module.TailnetSupervisorError, match="at least one"):
+        supervisor_module.stage_tailnet_bootstrap(
+            config,
+            "tskey-client-privatebootstrap",
+        )
+    with pytest.raises(supervisor_module.TailnetSupervisorError, match="Invalid Tailnet tag"):
+        supervisor_module.stage_tailnet_bootstrap(
+            config,
+            "tskey-client-privatebootstrap",
+            ["tag:1invalid"],
+        )
+
+
+def test_staged_auth_key_does_not_require_tags(tmp_path: Path) -> None:
+    config = _Config(data_path=tmp_path / "data", tailnet=_TailnetSettings())
+    staged = supervisor_module.stage_tailnet_bootstrap(
+        config,
+        "tskey-auth-privatebootstrap",
+    )
+    assert supervisor_module.tailnet_bootstrap_staged(config)
+    supervisor_module.clear_tailnet_bootstrap(config)
+    assert not staged.exists()
 
 
 def test_events_are_persisted_atomically_with_private_permissions(

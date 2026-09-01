@@ -8,6 +8,24 @@
 
 `POST /api/config/probe-service` 只在内存副本上应用设置页草稿并真实探测 LLM、默认链、embedding 或网络策略，不写 `config.toml`、不热重载 runtime。它因此不受 guided init 的 HTTP 写端 409 门控；初始化运行时仍可测试，LLM 请求继续经过进程级稳定 total gate。LLM 实例 / 链探测的 outer deadline 按草稿 `[llm].timeout` 取值并夹在 10–120 秒，超时以 `ok=false` 和稳定错误文案返回；图形客户端使用 125 秒预算，覆盖本地模型冷启动而不允许无界挂起。`PUT /api/config` 仍在初始化期间返回 `409 init_running`，避免替换本轮任务正在使用的组件。
 
+## Tailnet 配置与一次性入网凭据
+
+`GET /api/config` 的 `tailnet` 返回持久字段 `enabled / hostname`，以及只读的
+`bootstrap_credential_staged / state / dns_name / ips / port`。状态读取只采用 helper status 的
+安全白名单，不返回 `auth_url`、原始 error message 或任何 secret。
+
+`PUT /api/config` 的 `tailnet` 对象支持 `enabled / hostname`，以及三个不进入 TOML 的控制字段：
+
+- `bootstrap_credential`：write-only 的 `tskey-auth-…` Auth Key 或 `tskey-client-…` OAuth Client Secret；
+- `advertise_tags`：OAuth Client Secret 必填，最多 16 个合法 `tag:name`；
+- `clear_bootstrap_credential`：删除尚未消费的待用凭据，不删除节点身份。
+
+凭据写入只接受真实 loopback transport 上的同源桌面 Web 或浏览器扩展 Origin；从 LAN、Tailnet、
+反代或其它远程 transport 发起时返回 403。后端原子暂存为配置 data dir 下的私有文件，下一次
+helper 启动成功写入 stdin 后删除，API 响应只返回布尔 staged 状态。Tailnet 开关、节点名或凭据
+变更都会保存后返回 `restart_required=true`；环境变量 / `config.local.toml` 覆盖的持久字段继续
+按 provenance 返回 409，防止设置页显示“已保存”但重启后被高优先级来源盖回。
+
 视觉预热配置也属于同一事务契约：`PUT /api/config` 对 `keyframe_max_frames (1..12)`、
 `keyframe_fetch_limit (1..200)`、`danmaku_fetch_limit (1..200)` 和
 `danmaku_max_chars (100..2000)` 做范围校验，保存后由 RuntimeContext 透传到推荐引擎；配置文件

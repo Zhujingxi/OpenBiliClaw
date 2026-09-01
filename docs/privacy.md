@@ -23,7 +23,7 @@ OpenBiliClaw 是一个本地优先的跨平台内容发现 AI Agent。浏览器�
 | 个人通讯 | 用户在 OpenBiliClaw 插件侧边栏聊天框中主动输入的消息；以及用户在受支持平台上**成功提交**的评论正文与 B 站弹幕正文（提交成功后经网络层采集，仅送本机后端） | 与用户配置的本地后端聊天接口交互，帮助查看画像、推荐和设置；用户亲手写的评论 / 弹幕是最强的兴趣表达之一，用于更准确地构建兴趣画像 |
 | 本地配置与 UI 状态 | 后端地址、已关闭提示、插件设置、缓存的后端配置、任务状态 | 保持插件连接、本地偏好和界面状态 |
 | 用户主动创建的迁移包 | 文件配置中的模型 / 来源 API Key 与 token、平台 Cookie、本地 SQLite、画像 / 记忆、历史、图片缓存和白名单桌面偏好；不包含源机整段 API auth（密码 / hash、session secret、设备 key 等） | 仅在用户从本机桌面配置页明确选择导出时，生成供用户自行搬到另一台机器的 `.obcbackup` |
-| 应用内 Tailnet 节点状态 | 电脑端 tsnet 节点私钥 / 注册状态、节点名、Tailnet IP、最近脱敏运行事件 | 仅在用户明确开启 `[tailnet]` 后，让电脑端 OpenBiliClaw 自己加入用户的 tailnet，供 `OpenBiliClaw-mobile` Android / iOS 原生 App 私网访问；Web / Linux / macOS / Windows Flutter 客户端不在此能力范围，也不用于公网 Funnel |
+| 应用内 Tailnet 节点状态与单次入网材料 | 电脑端 tsnet 节点私钥 / 注册状态、节点名、Tailnet IP、最近脱敏运行事件；用户可在本机设置页单次提交 Auth Key，或 OAuth Client Secret + 设备 tag | 仅在用户明确开启 `[tailnet]` 后，让电脑端 OpenBiliClaw 自己加入用户的 tailnet，供 `OpenBiliClaw-mobile` Android / iOS 原生 App 私网访问；入网凭据只在本机私有暂存到下一次启动并经 stdin 交付，API 不回显；Web / Linux / macOS / Windows Flutter 客户端不在此能力范围，也不用于公网 Funnel |
 
 插件不以收集健康信息、财务和付款信息、精确位置数据为目的。如果用户正在访问的网页内容本身包含敏感信息，插件只会在受支持站点和用户启用功能范围内把它作为页面内容信号处理。
 
@@ -59,6 +59,13 @@ OpenBiliClaw 使用上述数据来：
 管理 Web UI，因此不会向 `log.tailscale.com` 上传 helper 诊断日志；代价是无法依赖相应上游
 自动日志支持。这不取消前述控制面 / DERP 联系及元数据处理。Tailscale 的处理规则以用户所用
 控制服务及其隐私政策为准。
+
+本机桌面 Web / 浏览器插件提交的 Tailnet 入网凭据不会写入普通 `config.toml` 或扩展存储。
+后端只允许真实本机 transport 写入，POSIX 下以 `0700` 目录、`0600` 文件原子暂存；下一次启动
+成功交付 helper stdin 后立即删除。`GET /api/config` 只返回“是否有待用凭据”，不会返回凭据、
+登录 URL 或原始错误。OAuth Client Secret 在 Tailscale 控制面仍是可反复签发带授权 tag 节点的
+长期秘密，本地文件删除不等于撤销 Secret；用户应在 Tailscale 后台采用专用最小权限 Client，
+并在不再需要时撤销。
 
 OpenBiliClaw 插件本身不会把数据发送到 OpenBiliClaw 开发者拥有或运营的远程服务器，也不会内置第三方分析、广告或遥测端点。
 

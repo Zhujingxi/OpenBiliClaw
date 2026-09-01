@@ -64,10 +64,12 @@ Four steps for most users. Firefox, Docker, scripted, and manual setup paths all
 
 Away from your LAN, the **native Android / iOS apps** from `OpenBiliClaw-mobile` embed `tsnet`, and
 the computer can let OpenBiliClaw itself join the same tailnet. Its Web, Linux, macOS, and Windows
-Flutter builds are outside this feature's support scope. Desktop installers bundle the helper, but the tray app does not expose
-the `tailnet` CLI in this first version: fully quit it, edit `~/OpenBiliClaw/config.toml` (or
-`%USERPROFILE%\OpenBiliClaw\config.toml` on Windows), set `enabled = true` under `[tailnet]`, and
-start it again. Source / scripted installs first run `openbiliclaw tailnet build-helper` with Go
+Flutter builds are outside this feature's support scope. Desktop installers bundle the helper. On the
+computer, open either Desktop Web or the browser extension's **Settings → General → Embedded
+Tailnet access**. Enable it, then either leave the credential blank for browser login, enter a
+`tskey-auth-…` Auth Key, or enter a `tskey-client-…` OAuth Client Secret plus one of that client's
+authorized device tags; fully restart the app afterward. The credential is staged privately for the
+next start and is never written to `config.toml`, echoed by the API, or logged. Source / scripted installs first run `openbiliclaw tailnet build-helper` with Go
 1.26.6, then `openbiliclaw tailnet enable` and restart. The computer needs no system-wide Tailscale;
 this default-off edge is tailnet-private and enables no Funnel/Serve. Enable the app password in the
 local Web settings as defense in depth (source installs may also use `openbiliclaw set-password`). See
@@ -312,7 +314,7 @@ The macOS app still targets 10.15+. Only the optional Tailnet helper built with 
 measured minimum of macOS 12; on 10.15 / 11 the local app continues normally while this remote edge
 is unavailable.
 
-It bundles local Ollama + `bge-m3` embedding (works out of the box), the default source dependencies including X's `twitter-cli` and Reddit's `rdt-cli`, and the default-off embedded Tailnet helper. The latter lets the desktop app join your tailnet without installing system Tailscale. The desktop tray app does not provide `openbiliclaw tailnet` subcommands in this first version: fully quit it, set `[tailnet].enabled = true` in the runtime directory's `config.toml`, then relaunch and complete the first browser login. Reddit's rdt command backend prefers the connected extension's synced `reddit_session`; `rdt login` remains a manual fallback, and unauthenticated runs fall back to extension tasks. It lives in the **macOS menu bar / Windows system tray**; right-click for "Open Web UI / View runtime logs / Quit". Data uses the same directory as the AI / script installers: `~/OpenBiliClaw` (macOS / Linux) / `%USERPROFILE%\OpenBiliClaw` (Windows), and survives upgrades and uninstalls. Data from older packaged builds under `~/Library/Application Support/OpenBiliClaw` / `%LOCALAPPDATA%\OpenBiliClaw` is copied back on first launch without overwriting existing files. If a broken `config.toml` / `config.local.toml` prevents startup, the desktop package backs the bad file up as `*.invalid`, regenerates the default config, then opens `/setup/` so initialization can run again; `data/` is left untouched.
+It bundles local Ollama + `bge-m3` embedding (works out of the box), the default source dependencies including X's `twitter-cli` and Reddit's `rdt-cli`, and the default-off embedded Tailnet helper. The latter lets the desktop app join your tailnet without installing system Tailscale. Enable it from Desktop Web or the browser extension's **Settings → General**, choose browser login, an Auth Key, or an OAuth Client Secret plus an authorized device tag, then fully restart the app. Reddit's rdt command backend prefers the connected extension's synced `reddit_session`; `rdt login` remains a manual fallback, and unauthenticated runs fall back to extension tasks. It lives in the **macOS menu bar / Windows system tray**; right-click for "Open Web UI / View runtime logs / Quit". Data uses the same directory as the AI / script installers: `~/OpenBiliClaw` (macOS / Linux) / `%USERPROFILE%\OpenBiliClaw` (Windows), and survives upgrades and uninstalls. Data from older packaged builds under `~/Library/Application Support/OpenBiliClaw` / `%LOCALAPPDATA%\OpenBiliClaw` is copied back on first launch without overwriting existing files. If a broken `config.toml` / `config.local.toml` prevents startup, the desktop package backs the bad file up as `*.invalid`, regenerates the default config, then opens `/setup/` so initialization can run again; `data/` is left untouched.
 
 > ⚠️ **macOS security blocking (the app isn't signed / notarized yet)**:
 > - The current Release is ad-hoc signed but not notarized. On first launch, if macOS blocks either the install helper or the app, right-click / Control-click that item → "Open" → click "Open" again in the dialog; or allow it under "System Settings → Privacy & Security" with "Open Anyway".
@@ -636,7 +638,7 @@ The full architecture overview ASCII diagrams (runtime concurrency gates, agent 
 
 Publication date preference: `[sources.<name>].recommendation_date_*` per source → out-of-window candidates are filtered before LLM evaluation → effective inventory → PoolCurator soft/strict serving semantics.
 
-Remote Android / iOS app: `App (embedded tsnet) → user's tailnet → desktop Go tsnet helper → 127.0.0.1:<effective server port> → FastAPI`. The port normally comes from `[api].port` and follows startup / packaged `OPENBILICLAW_PORT` overrides. This path is default-off, needs no system Tailscale on the computer, exposes no Funnel/Serve, and does not migrate node identity.
+Remote Android / iOS app: `App (embedded tsnet) → user's tailnet → desktop Go tsnet helper → 127.0.0.1:<effective server port> → FastAPI`; enrollment follows `local settings UI → PUT /api/config (write-only credential) → private one-shot staging → stdin → helper`. The port normally comes from `[api].port` and follows startup / packaged `OPENBILICLAW_PORT` overrides. This path is default-off, needs no system Tailscale on the computer, exposes no Funnel/Serve, and migrates neither node identity nor staged credentials.
 
 > 📖 [Architecture Overview](docs/architecture-overview.md)
 

@@ -9834,6 +9834,43 @@ function bindSettings() {
       savedAutoSync.checked = cfg.saved_sync?.auto_sync_enabled === true;
       savedAutoSync.dataset.confirmed = savedAutoSync.checked ? "true" : "false";
     }
+    const tailnet = cfg.tailnet || {};
+    const tailnetEnabled = document.getElementById("cfgTailnetEnabled");
+    if (tailnetEnabled instanceof HTMLInputElement) {
+      tailnetEnabled.checked = tailnet.enabled === true;
+    }
+    setVal("cfgTailnetHostname", tailnet.hostname || "openbiliclaw-host");
+    setVal("cfgTailnetBootstrapCredential", "");
+    const tailnetCredential = document.getElementById("cfgTailnetBootstrapCredential");
+    if (tailnetCredential instanceof HTMLInputElement) {
+      tailnetCredential.placeholder = tailnet.bootstrap_credential_staged
+        ? "已暂存（留空保持不变）"
+        : "tskey-auth-… / tskey-client-…";
+    }
+    setVal("cfgTailnetAdvertiseTags", "tag:openbiliclaw");
+    const clearTailnetCredential = document.getElementById("cfgTailnetClearCredential");
+    if (clearTailnetCredential instanceof HTMLInputElement) {
+      clearTailnetCredential.checked = false;
+    }
+    const clearTailnetField = document.getElementById("cfgTailnetClearCredentialField");
+    if (clearTailnetField) clearTailnetField.hidden = !tailnet.bootstrap_credential_staged;
+    const tailnetStatus = document.getElementById("cfgTailnetStatus");
+    if (tailnetStatus) {
+      const readyAddress = tailnet.dns_name || tailnet.ips?.[0] || "";
+      const descriptions = {
+        disabled: "当前关闭；保存开启后需完整重启应用。",
+        credential_staged: "单次入网凭据已安全暂存；完整重启应用后自动注册。",
+        pending_restart: "配置已开启；请完整重启应用以启动 Tailnet。",
+        starting: "Tailnet helper 正在启动…",
+        needs_login: "等待在浏览器中完成 Tailscale 登录。",
+        ready: readyAddress
+          ? `已连接：${readyAddress}${tailnet.port ? `:${tailnet.port}` : ""}`
+          : "Tailnet 已连接。",
+        error: "Tailnet 最近一次启动失败；请查看后端运行日志。",
+        stopped: "Tailnet helper 已停止；请完整重启应用。",
+      };
+      tailnetStatus.textContent = descriptions[tailnet.state] || "Tailnet 状态未知。";
+    }
 
     // Scheduler
     const schedEnabled = document.getElementById("cfgSchedulerEnabled");
@@ -10185,6 +10222,24 @@ function bindSettings() {
       },
       saved_sync: {
         auto_sync_enabled: checked("cfgSavedAutoSync"),
+      },
+      tailnet: {
+        enabled: checked("cfgTailnetEnabled"),
+        hostname: getVal("cfgTailnetHostname"),
+        ...(getVal("cfgTailnetBootstrapCredential")
+          ? {
+              bootstrap_credential: getVal("cfgTailnetBootstrapCredential"),
+              ...(getVal("cfgTailnetBootstrapCredential").startsWith("tskey-client-")
+                ? {
+                    advertise_tags: getVal("cfgTailnetAdvertiseTags")
+                      .split(",")
+                      .map((value) => value.trim())
+                      .filter(Boolean),
+                  }
+                : {}),
+            }
+          : {}),
+        clear_bootstrap_credential: checked("cfgTailnetClearCredential"),
       },
       storage: {
         db_path: getVal("cfgStorageDbPath"),
@@ -10663,6 +10718,29 @@ function bindSettings() {
       }
       savedAutoSync.dataset.confirmed = "true";
       if (savedAutoSyncStatus) savedAutoSyncStatus.textContent = "已确认；保存配置后开启。";
+    });
+  }
+
+  const tailnetCredentialInput = document.getElementById("cfgTailnetBootstrapCredential");
+  const clearTailnetCredentialInput = document.getElementById("cfgTailnetClearCredential");
+  if (tailnetCredentialInput instanceof HTMLInputElement) {
+    tailnetCredentialInput.addEventListener("input", () => {
+      if (
+        tailnetCredentialInput.value.trim()
+        && clearTailnetCredentialInput instanceof HTMLInputElement
+      ) {
+        clearTailnetCredentialInput.checked = false;
+      }
+    });
+  }
+  if (clearTailnetCredentialInput instanceof HTMLInputElement) {
+    clearTailnetCredentialInput.addEventListener("change", () => {
+      if (
+        clearTailnetCredentialInput.checked
+        && tailnetCredentialInput instanceof HTMLInputElement
+      ) {
+        tailnetCredentialInput.value = "";
+      }
     });
   }
 

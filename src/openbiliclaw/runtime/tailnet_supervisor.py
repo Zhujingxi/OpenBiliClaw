@@ -6,7 +6,9 @@ import json
 import logging
 import os
 import platform
+import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -14,6 +16,7 @@ import threading
 from collections import deque
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, suppress
+from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Protocol, cast
 
@@ -24,6 +27,10 @@ logger = logging.getLogger(__name__)
 _PROTOCOL_VERSION = 1
 _HELPER_ENV = "OPENBILICLAW_TAILNET_HELPER"
 _AUTH_KEY_ENV = "OPENBILICLAW_TAILNET_AUTH_KEY"
+_ADVERTISE_TAGS_ENV = "OPENBILICLAW_TAILNET_ADVERTISE_TAGS"
+_BOOTSTRAP_FILENAME = ".bootstrap-credential.json"
+_BOOTSTRAP_MAX_BYTES = 8_192
+_STATUS_MAX_BYTES = 65_536
 _STDERR_TAIL_LINES = 20
 _STDERR_LINE_LIMIT = 2_000
 _DRAIN_JOIN_TIMEOUT = 1.0
@@ -31,6 +38,17 @@ _SELF_TEST_TIMEOUT = 30.0
 
 TailnetEvent = dict[str, object]
 TailnetEventCallback = Callable[[TailnetEvent], None]
+
+_BOOTSTRAP_CREDENTIAL_PATTERN = re.compile(r"^tskey-(?:auth|client)-[A-Za-z0-9_-]{8,}$")
+_TAILNET_TAG_PATTERN = re.compile(r"^tag:[A-Za-z][A-Za-z0-9-]{0,62}$")
+
+
+@dataclass(frozen=True)
+class TailnetBootstrap:
+    """One-shot enrollment material read from a private staging file."""
+
+    credential: str
+    advertise_tags: tuple[str, ...] = ()
 
 
 class TailnetSettings(Protocol):
@@ -153,15 +171,220 @@ def find_tailnet_helper(config: TailnetRuntimeConfig) -> Path:
     )
 
 
+def normalize_tailnet_bootstrap_credential(value: object) -> str:
+    """Validate a write-only Tailscale Auth Key or OAuth client secret."""
+    credential = str(value or "").strip()
+    if not credential:
+        return ""
+    if len(credential) > 4_096 or not _BOOTSTRAP_CREDENTIAL_PATTERN.fullmatch(credential):
+        raise TailnetSupervisorError(
+            "Tailnet bootstrap credential must be a tskey-auth-… Auth Key or "
+            "tskey-client-… OAuth client secret"
+        )
+    return credential
+
+
+def normalize_tailnet_advertise_tags(values: object) -> tuple[str, ...]:
+    """Return unique ACL tags accepted by Tailscale's current tag grammar."""
+    if values is None:
+        return ()
+    raw_values = values.split(",") if isinstance(values, str) else values
+    if not isinstance(raw_values, (list, tuple)):
+        raise TailnetSupervisorError("Tailnet advertise tags must be a list")
+    tags: list[str] = []
+    for raw_value in raw_values:
+        tag = str(raw_value or "").strip()
+        if not tag:
+            continue
+        if not _TAILNET_TAG_PATTERN.fullmatch(tag):
+            raise TailnetSupervisorError(
+                f"Invalid Tailnet tag {tag!r}; use tag:name with letters, numbers, and dashes"
+            )
+        if tag not in tags:
+            tags.append(tag)
+    if len(tags) > 16:
+        raise TailnetSupervisorError("Tailnet bootstrap accepts at most 16 advertise tags")
+    return tuple(tags)
+
+
+def tailnet_bootstrap_path(config: TailnetRuntimeConfig) -> Path:
+    """Return the machine-local write-only bootstrap staging path."""
+    return Path(config.data_path).expanduser() / "tailnet" / _BOOTSTRAP_FILENAME
+
+
+def _secure_tailnet_state_dir(config: TailnetRuntimeConfig) -> Path:
+    state_dir = Path(config.data_path).expanduser() / "tailnet"
+    state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if state_dir.is_symlink() or not state_dir.is_dir():
+        raise TailnetSupervisorError(
+            "Tailnet state directory must be a real directory, not a file or symlink"
+        )
+    if os.name != "nt":
+        os.chmod(state_dir, 0o700)
+    return state_dir
+
+
+def stage_tailnet_bootstrap(
+    config: TailnetRuntimeConfig,
+    credential: object,
+    advertise_tags: object = None,
+) -> Path:
+    """Atomically stage one enrollment credential for the next helper start."""
+    normalized_credential = normalize_tailnet_bootstrap_credential(credential)
+    if not normalized_credential:
+        raise TailnetSupervisorError("Tailnet bootstrap credential must not be empty")
+    tags = normalize_tailnet_advertise_tags(advertise_tags)
+    if normalized_credential.startswith("tskey-client-") and not tags:
+        raise TailnetSupervisorError(
+            "Tailscale OAuth client secrets require at least one allowed device tag"
+        )
+
+    state_dir = _secure_tailnet_state_dir(config)
+    destination = state_dir / _BOOTSTRAP_FILENAME
+    payload = (
+        json.dumps(
+            {
+                "protocol": _PROTOCOL_VERSION,
+                "credential": normalized_credential,
+                "advertise_tags": list(tags),
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=".bootstrap-", suffix=".tmp", dir=state_dir
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        if os.name != "nt":
+            os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as bootstrap_file:
+            descriptor = -1
+            bootstrap_file.write(payload)
+            bootstrap_file.flush()
+            os.fsync(bootstrap_file.fileno())
+        os.replace(temporary_path, destination)
+        if os.name != "nt":
+            os.chmod(destination, 0o600)
+        return destination
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        with suppress(FileNotFoundError):
+            temporary_path.unlink()
+
+
+def clear_tailnet_bootstrap(config: TailnetRuntimeConfig) -> None:
+    """Remove any staged credential without touching the persistent node identity."""
+    path = tailnet_bootstrap_path(config)
+    if path.is_symlink():
+        raise TailnetSupervisorError("Tailnet bootstrap credential path must not be a symlink")
+    with suppress(FileNotFoundError):
+        path.unlink()
+
+
+def tailnet_bootstrap_staged(config: TailnetRuntimeConfig) -> bool:
+    """Return whether a safe regular bootstrap file awaits the next start."""
+    path = tailnet_bootstrap_path(config)
+    try:
+        info = path.lstat()
+    except OSError:
+        return False
+    if not stat.S_ISREG(info.st_mode) or info.st_size > _BOOTSTRAP_MAX_BYTES:
+        return False
+    return os.name == "nt" or stat.S_IMODE(info.st_mode) & 0o077 == 0
+
+
+def read_tailnet_status(config: TailnetRuntimeConfig) -> TailnetEvent | None:
+    """Read only the safe public fields from the helper's latest status event."""
+    path = Path(config.data_path).expanduser() / "tailnet" / "status.json"
+    try:
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_size > _STATUS_MAX_BYTES:
+            return None
+        decoded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(decoded, dict) or decoded.get("protocol") != _PROTOCOL_VERSION:
+        return None
+    event = str(decoded.get("event", ""))
+    if event not in {"starting", "needs_login", "ready", "error", "stopped"}:
+        return None
+    safe: TailnetEvent = {"protocol": _PROTOCOL_VERSION, "event": event}
+    dns_name = decoded.get("dns_name")
+    if isinstance(dns_name, str):
+        safe["dns_name"] = dns_name[:253]
+    ips = decoded.get("ips")
+    if isinstance(ips, list):
+        safe["ips"] = [str(value)[:64] for value in ips[:16]]
+    port = decoded.get("port")
+    if isinstance(port, int) and 1 <= port <= 65_535:
+        safe["port"] = port
+    return safe
+
+
+def _load_tailnet_bootstrap(path: Path) -> TailnetBootstrap:
+    """Load a staged credential after rejecting links, loose modes, and large files."""
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        raise TailnetSupervisorError(
+            f"Unable to inspect Tailnet bootstrap credential: {exc}"
+        ) from exc
+    if not stat.S_ISREG(info.st_mode) or info.st_size > _BOOTSTRAP_MAX_BYTES:
+        raise TailnetSupervisorError("Tailnet bootstrap credential must be a small regular file")
+    if os.name != "nt" and stat.S_IMODE(info.st_mode) & 0o077:
+        raise TailnetSupervisorError("Tailnet bootstrap credential permissions must be 0600")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+        with os.fdopen(descriptor, "r", encoding="utf-8") as bootstrap_file:
+            opened_info = os.fstat(bootstrap_file.fileno())
+            if (
+                not stat.S_ISREG(opened_info.st_mode)
+                or opened_info.st_dev != info.st_dev
+                or opened_info.st_ino != info.st_ino
+                or opened_info.st_size > _BOOTSTRAP_MAX_BYTES
+                or (os.name != "nt" and stat.S_IMODE(opened_info.st_mode) & 0o077)
+            ):
+                raise TailnetSupervisorError(
+                    "Tailnet bootstrap credential changed during secure open"
+                )
+            decoded = json.load(bootstrap_file)
+    except TailnetSupervisorError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise TailnetSupervisorError(f"Unable to read Tailnet bootstrap credential: {exc}") from exc
+    if not isinstance(decoded, dict) or decoded.get("protocol") != _PROTOCOL_VERSION:
+        raise TailnetSupervisorError("Tailnet bootstrap credential has an unsupported protocol")
+    credential = normalize_tailnet_bootstrap_credential(decoded.get("credential"))
+    if not credential:
+        raise TailnetSupervisorError("Tailnet bootstrap credential must not be empty")
+    tags = normalize_tailnet_advertise_tags(decoded.get("advertise_tags"))
+    if credential.startswith("tskey-client-") and not tags:
+        raise TailnetSupervisorError(
+            "Tailscale OAuth client secrets require at least one allowed device tag"
+        )
+    return TailnetBootstrap(credential=credential, advertise_tags=tags)
+
+
 def _is_auth_key_environment_name(name: str) -> bool:
     normalized = name.upper().replace("-", "_")
     compact = normalized.replace("_", "")
-    return "AUTH_KEY" in normalized or "AUTHKEY" in compact
+    return (
+        "AUTH_KEY" in normalized
+        or "AUTHKEY" in compact
+        or normalized in {"TS_CLIENT_SECRET", "TS_API_CLIENT_SECRET"}
+        or ("TAILNET" in normalized and "CLIENT_SECRET" in normalized)
+    )
 
 
-def _private_child_environment() -> tuple[dict[str, str], str, tuple[str, ...]]:
+def _private_child_environment() -> tuple[dict[str, str], TailnetBootstrap, tuple[str, ...]]:
     environment = dict(os.environ)
-    auth_key = environment.get(_AUTH_KEY_ENV, "")
+    auth_key = normalize_tailnet_bootstrap_credential(environment.get(_AUTH_KEY_ENV, ""))
+    advertise_tags = normalize_tailnet_advertise_tags(environment.get(_ADVERTISE_TAGS_ENV, ""))
     secrets = tuple(
         sorted(
             {
@@ -176,7 +399,12 @@ def _private_child_environment() -> tuple[dict[str, str], str, tuple[str, ...]]:
     for name in tuple(environment):
         if _is_auth_key_environment_name(name):
             environment.pop(name, None)
-    return environment, auth_key, secrets
+    environment.pop(_ADVERTISE_TAGS_ENV, None)
+    return (
+        environment,
+        TailnetBootstrap(credential=auth_key, advertise_tags=advertise_tags),
+        secrets,
+    )
 
 
 def _is_sensitive_event_key(name: str) -> bool:
@@ -256,7 +484,7 @@ def build_tailnet_helper(config: TailnetRuntimeConfig) -> Path:
     )
     os.close(descriptor)
     candidate = Path(candidate_name)
-    child_environment, _auth_key, secrets = _private_child_environment()
+    child_environment, _bootstrap, secrets = _private_child_environment()
     child_environment["CGO_ENABLED"] = "0"
     build_command = [
         go_executable,
@@ -400,8 +628,25 @@ class TailnetSupervisor:
 
         helper_path = find_tailnet_helper(self._config)
         self._ensure_private_state_dir()
-        child_environment, auth_key, secrets = _private_child_environment()
-        self._secrets = secrets
+        child_environment, environment_bootstrap, secrets = _private_child_environment()
+        bootstrap = environment_bootstrap
+        staged_path: Path | None = None
+        candidate_staged_path = tailnet_bootstrap_path(self._config)
+        if not bootstrap.credential and candidate_staged_path.exists():
+            bootstrap = _load_tailnet_bootstrap(candidate_staged_path)
+            staged_path = candidate_staged_path
+        if bootstrap.credential.startswith("tskey-client-") and not bootstrap.advertise_tags:
+            raise TailnetSupervisorError(
+                "Tailscale OAuth client secrets require OPENBILICLAW_TAILNET_ADVERTISE_TAGS "
+                "or staged advertise tags"
+            )
+        self._secrets = tuple(
+            sorted(
+                {value for value in (*secrets, bootstrap.credential) if value},
+                key=len,
+                reverse=True,
+            )
+        )
         arguments = [
             str(helper_path),
             "--state-dir",
@@ -448,10 +693,17 @@ class TailnetSupervisor:
             self._helper_path = helper_path
 
         self._start_background_threads(process)
-        bootstrap = {"protocol": _PROTOCOL_VERSION, "auth_key": auth_key}
+        bootstrap_message = {
+            "protocol": _PROTOCOL_VERSION,
+            "auth_key": bootstrap.credential,
+            "advertise_tags": list(bootstrap.advertise_tags),
+        }
         try:
-            process.stdin.write(json.dumps(bootstrap, separators=(",", ":")) + "\n")
+            process.stdin.write(json.dumps(bootstrap_message, separators=(",", ":")) + "\n")
             process.stdin.flush()
+            if staged_path is not None:
+                with suppress(FileNotFoundError):
+                    staged_path.unlink()
         except (BrokenPipeError, OSError) as exc:
             self._finished.wait(_DRAIN_JOIN_TIMEOUT)
             failure = self.failure

@@ -26,7 +26,9 @@ import (
 	"syscall"
 	"time"
 
+	_ "tailscale.com/feature/oauthkey"
 	"tailscale.com/ipn/ipnstate"
+	"tailscale.com/tailcfg"
 	"tailscale.com/tsnet"
 )
 
@@ -55,8 +57,9 @@ type options struct {
 }
 
 type bootstrapMessage struct {
-	Protocol int    `json:"protocol"`
-	AuthKey  string `json:"auth_key"`
+	Protocol      int      `json:"protocol"`
+	AuthKey       string   `json:"auth_key"`
+	AdvertiseTags []string `json:"advertise_tags,omitempty"`
 }
 
 type protocolEvent struct {
@@ -177,8 +180,17 @@ func runCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		go cancelOnInputEOF(ctx, cancel, bootstrap.reader, diagnostics)
 	}
 
-	err = runTailnet(ctx, opts, bootstrap.message.AuthKey, events, diagnostics, redactor)
+	err = runTailnet(
+		ctx,
+		opts,
+		bootstrap.message.AuthKey,
+		bootstrap.message.AdvertiseTags,
+		events,
+		diagnostics,
+		redactor,
+	)
 	bootstrap.message.AuthKey = ""
+	bootstrap.message.AdvertiseTags = nil
 	if err != nil && !errors.Is(err, context.Canceled) {
 		emitError(events, "runtime_error", err.Error(), redactor)
 		redactor.logf(diagnostics, "runtime error: %v", err)
@@ -257,6 +269,14 @@ func readBootstrap(input io.Reader) (*bootstrapMessage, *bufio.Reader, bool, err
 			protocolVersion,
 		)
 	}
+	for _, tag := range message.AdvertiseTags {
+		if err := tailcfg.CheckTag(tag); err != nil {
+			return nil, reader, atEOF, fmt.Errorf("invalid advertise tag %q: %w", tag, err)
+		}
+	}
+	if strings.HasPrefix(message.AuthKey, "tskey-client-") && len(message.AdvertiseTags) == 0 {
+		return nil, reader, atEOF, errors.New("OAuth client secrets require advertise_tags")
+	}
 	return message, reader, atEOF, nil
 }
 
@@ -297,6 +317,7 @@ func runTailnet(
 	ctx context.Context,
 	opts options,
 	authKey string,
+	advertiseTags []string,
 	events *eventWriter,
 	diagnostics *log.Logger,
 	redactor secretRedactor,
@@ -311,9 +332,10 @@ func runTailnet(
 	seenAuthURLs := make(map[string]struct{})
 	var seenAuthURLsMu sync.Mutex
 	server := &tsnet.Server{
-		Dir:      opts.stateDir,
-		Hostname: opts.hostname,
-		AuthKey:  authKey,
+		Dir:           opts.stateDir,
+		Hostname:      opts.hostname,
+		AuthKey:       durableOAuthCredential(authKey),
+		AdvertiseTags: advertiseTags,
 	}
 	server.UserLogf = func(format string, args ...any) {
 		message := redactor.text(fmt.Sprintf(format, args...))
@@ -406,6 +428,13 @@ func runTailnet(
 		return fmt.Errorf("close tsnet server: %w", tsnetErr)
 	}
 	return nil
+}
+
+func durableOAuthCredential(credential string) string {
+	if strings.HasPrefix(credential, "tskey-client-") && !strings.Contains(credential, "?") {
+		return credential + "?ephemeral=false&preauthorized=true"
+	}
+	return credential
 }
 
 func readyDetails(status *ipnstate.Status, server *tsnet.Server) (string, []string) {

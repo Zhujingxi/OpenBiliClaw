@@ -89,13 +89,20 @@ hostname = "openbiliclaw-host"
 `openbiliclaw serve-api --port` 或桌面入口 `OPENBILICLAW_PORT` 会把当前入口的有效 server port
 同时交给 helper；`tailnet status` 分开显示配置端口与
 最近监听端口，MagicDNS URL 使用最近运行事件的端口。节点注册状态和私钥保存在
-`{data_dir}/tailnet/`，不写 `config.toml`；`OPENBILICLAW_TAILNET_AUTH_KEY` 仅作为启动父进程的
-一次性注册输入，经 stdin 传给 helper，不持久化。`OPENBILICLAW_TAILNET_HELPER` 可覆盖 helper
-路径，但只面向开发 / 诊断。两者都是 runtime-only，不是配置字段。源码 / 一句话安装可用
-`openbiliclaw tailnet enable|disable` 修改
-配置；桌面安装包虽然内置 helper，但托盘可执行文件首版不提供这些 CLI，需完整退出后编辑
-`~/OpenBiliClaw/config.toml`（Windows 为 `%USERPROFILE%\OpenBiliClaw\config.toml`）。两种方式
-修改后都要完整重启；关闭时保留节点身份。
+`{data_dir}/tailnet/`，不写 `config.toml`。桌面 Web 与浏览器插件的「设置 → 通用」都通过
+`PUT /api/config.tailnet` 修改这两个持久字段，并可额外提交 write-only 的
+`bootstrap_credential`、`advertise_tags`、`clear_bootstrap_credential`。前者只接受
+`tskey-auth-…` Auth Key 或 `tskey-client-…` OAuth Client Secret；OAuth 必须同时提交至少一个
+已获授权的 `tag:name`。凭据只允许真实本机请求写入，原子暂存到
+`{data_dir}/tailnet/.bootstrap-credential.json`，POSIX 权限 `0600`，下一次成功写入 helper stdin
+后删除。`GET /api/config.tailnet` 只返回 `bootstrap_credential_staged` 和脱敏运行状态，永不回显
+凭据、登录 URL 或原始错误。
+
+父进程也可用 `OPENBILICLAW_TAILNET_AUTH_KEY` 提供一次性注册输入；若值是 OAuth Client Secret，
+需同时设置逗号分隔的 `OPENBILICLAW_TAILNET_ADVERTISE_TAGS`。环境输入优先于设置页暂存。
+`OPENBILICLAW_TAILNET_HELPER` 可覆盖 helper 路径，但只面向开发 / 诊断。这些都是 runtime-only，
+不是 TOML 配置字段。源码 / 一句话安装可用 `openbiliclaw tailnet enable|disable` 修改配置；所有
+方式修改后都要完整重启，关闭时保留节点身份并清除尚未消费的暂存凭据。
 
 Tailnet 的完整字段级优先级是：`OPENBILICLAW_TAILNET_ENABLED` /
 `OPENBILICLAW_TAILNET_HOSTNAME` 显式环境覆盖 > `config.local.toml` > `config.toml`。

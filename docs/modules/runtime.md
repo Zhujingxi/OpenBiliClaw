@@ -156,6 +156,12 @@ helper，但不阻止最低目标仍为 10.15 的本机应用。
 权限收紧的 `data/tailnet/status.json`。ready 的 `port` 是最近实际监听端口，CLI 不把它与磁盘
 配置端口混为一项。
 
+Supervisor 优先消费父进程一次性输入，否则读取桌面 Web / 浏览器插件设置页写入的私有
+bootstrap 文件。Auth Key 或 OAuth Client Secret + 设备 tags 都只经 stdin 交付，并从 child
+环境剥离；暂存文件在 stdin 成功 flush 后立即删除。helper blank-import Tailscale
+`feature/oauthkey`：`tskey-client-…` 必须带至少一个合法 tag，解析为持久、预授权、tag-owned
+节点；普通 `tskey-auth-…` 与空凭据网页登录保持原行为。
+
 Supervisor 故意不属于 `RuntimeContext`，也不由 `create_app()` 自动启动：其生命周期覆盖
 uvicorn server，而不是配置热重载 generation。首版 `[tailnet]` 修改需要完整重启。冻结桌面
 入口与 CLI 各自调用同一 API，并把所有异常收口为“本机服务继续、远程入口降级”。完整协议见

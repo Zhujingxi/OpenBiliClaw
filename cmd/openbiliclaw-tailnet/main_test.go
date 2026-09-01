@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -94,7 +95,7 @@ func TestVersionUsesProtocolJSONL(t *testing.T) {
 
 func TestReadBootstrap(t *testing.T) {
 	message, reader, atEOF, err := readBootstrap(strings.NewReader(
-		`{"protocol":1,"auth_key":"secret-value"}` + "\nkeep-open",
+		`{"protocol":1,"auth_key":"secret-value","advertise_tags":["tag:openbiliclaw"]}` + "\nkeep-open",
 	))
 	if err != nil {
 		t.Fatalf("readBootstrap() error = %v", err)
@@ -102,7 +103,8 @@ func TestReadBootstrap(t *testing.T) {
 	if atEOF {
 		t.Fatal("readBootstrap() atEOF = true, want false")
 	}
-	if message.Protocol != protocolVersion || message.AuthKey != "secret-value" {
+	if message.Protocol != protocolVersion || message.AuthKey != "secret-value" ||
+		!slices.Equal(message.AdvertiseTags, []string{"tag:openbiliclaw"}) {
 		t.Fatalf("message = %#v", message)
 	}
 	remainder, err := io.ReadAll(reader)
@@ -111,6 +113,34 @@ func TestReadBootstrap(t *testing.T) {
 	}
 	if string(remainder) != "keep-open" {
 		t.Fatalf("remainder = %q", remainder)
+	}
+}
+
+func TestReadBootstrapRejectsOAuthWithoutTags(t *testing.T) {
+	_, _, _, err := readBootstrap(strings.NewReader(
+		`{"protocol":1,"auth_key":"tskey-client-secretvalue"}`,
+	))
+	if err == nil || !strings.Contains(err.Error(), "require advertise_tags") {
+		t.Fatalf("readBootstrap() error = %v", err)
+	}
+}
+
+func TestReadBootstrapRejectsInvalidTag(t *testing.T) {
+	_, _, _, err := readBootstrap(strings.NewReader(
+		`{"protocol":1,"auth_key":"tskey-client-secretvalue","advertise_tags":["tag:1bad"]}`,
+	))
+	if err == nil || !strings.Contains(err.Error(), "invalid advertise tag") {
+		t.Fatalf("readBootstrap() error = %v", err)
+	}
+}
+
+func TestDurableOAuthCredential(t *testing.T) {
+	secret := "tskey-client-secretvalue"
+	if got := durableOAuthCredential(secret); got != secret+"?ephemeral=false&preauthorized=true" {
+		t.Fatalf("durableOAuthCredential() = %q", got)
+	}
+	if got := durableOAuthCredential("tskey-auth-authvalue"); got != "tskey-auth-authvalue" {
+		t.Fatalf("auth key changed to %q", got)
 	}
 }
 

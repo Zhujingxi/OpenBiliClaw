@@ -36,7 +36,8 @@ HTTP endpoint 另有权限与安全限制；本模块首版只支持上述 Andro
 | 源码构建 | ✅ | `openbiliclaw tailnet build-helper` 使用 Go 1.26.6 构建并安装到本机数据目录 |
 | 身份持久化 | ✅ | 节点私钥与 tsnet 状态保存在 `data/tailnet/`；disable 后保留，下一次启用复用身份 |
 | 首次交互登录 | ✅ | helper 发出 `needs_login` 后 CLI / 桌面入口展示并打开 Tailscale 登录 URL |
-| 非交互注册 | ✅ | 可在父进程设置一次性 `OPENBILICLAW_TAILNET_AUTH_KEY`；不写配置、argv、状态文件或日志 |
+| 图形化配置 | ✅ | 桌面 Web 与浏览器插件的「设置 → 通用」可开关、改节点名、查看脱敏状态并提交一次性入网凭据 |
+| 非交互注册 | ✅ | 支持 Auth Key，或 OAuth Client Secret + 已授权设备 tag；可由本机设置页私有暂存，也可从父进程环境一次性注入 |
 | REST / WebSocket 代理 | ✅ | helper 监听当前启动入口的有效 server port，并固定转发到同机同端口的 `127.0.0.1` |
 | 真实来源保护 | ✅ | 丢弃客户端提供的 `Forwarded` / `X-Forwarded-*` / `X-Real-IP`，再由 tsnet peer 重建转发链 |
 | 最佳努力启动 | ✅ | helper 缺失或登录失败只降级远程入口，本机 API 继续启动并给出诊断 |
@@ -48,8 +49,15 @@ HTTP endpoint 另有权限与安全限制；本模块首版只支持上述 Andro
 
 ### 桌面安装包
 
-桌面安装包已经带 helper，但 PyInstaller 托盘程序首版不提供 `openbiliclaw tailnet ...`
-子命令。先完整退出应用，再编辑运行目录的配置：
+桌面安装包已经带 helper。在运行后端的电脑上打开桌面 Web，或打开连接到该本机后端的浏览器
+插件，进入「设置 → 通用 → 应用内 Tailnet 远程访问」：
+
+1. 打开 Tailnet 开关，确认电脑节点名；
+2. 选择下面任一种入网方式；
+3. 保存后**完整退出并重启** OpenBiliClaw。
+
+设置页会显示 `待重启 / 已暂存 / 等待登录 / 已连接 / 失败` 等脱敏状态；不会回显登录 URL、
+凭据或错误详情。若设置页不可用，也可完整退出应用后手工编辑运行目录的配置：
 
 - macOS：`~/OpenBiliClaw/config.toml`
 - Windows：`%USERPROFILE%\OpenBiliClaw\config.toml`
@@ -60,7 +68,7 @@ enabled = true
 hostname = "openbiliclaw-host"
 ```
 
-重新启动后，首次注册会自动打开 Tailscale 登录页。桌面包可在「查看运行日志」以及
+未填写入网凭据时，重新启动后会自动打开 Tailscale 登录页。桌面包可在「查看运行日志」以及
 `data/tailnet/status.json` 查看最近状态；要关闭时把 `enabled` 改回 `false` 并再次完整重启。
 如果同目录 `config.local.toml` 已在 `[tailnet]` 中定义相应字段，它会覆盖 base
 `config.toml`，应直接修改 local 文件。
@@ -68,6 +76,26 @@ hostname = "openbiliclaw-host"
 macOS 主应用仍保持 **10.15+** 的兼容目标；但 Go 1.26.6 生成的 Tailnet helper 实测最低
 `minos=12.0`。启动前会单独检查这一能力：macOS 10.15 / 11 上本机 Web、推荐等应用功能照常，
 只有应用内 Tailnet 不可用；这不表示整个 OpenBiliClaw 的最低系统版本升到 12。
+
+### 三种入网方式
+
+| 方式 | 设置页填写 | 适用场景 |
+|---|---|---|
+| 浏览器登录 | 凭据留空 | 最简单；首次重启后在电脑浏览器确认节点 |
+| Auth Key | `tskey-auth-…`，tag 可留空 | 与移动端当前的 Auth Key 入网方式一致；适合无需网页确认的自动注册 |
+| OAuth Client Secret | `tskey-client-…` + 至少一个 `tag:name` | 适合为 OpenBiliClaw 创建专用、最小权限的自动注册身份 |
+
+OAuth 方式需要在 Tailscale 管理后台创建专用 OAuth Client，授予 `auth_keys` 写权限，并让它
+获准使用填入设置页的设备 tag（例如 `tag:openbiliclaw`）。helper 会把 OAuth Secret 解析成
+**持久、预授权、tag-owned** 的电脑节点，而不是默认的临时节点。OAuth Client Secret 本身是
+长期高权限凭据：建议专用、最小权限，用完后按需要在 Tailscale 后台撤销；设置页中的“单次”
+只表示 OpenBiliClaw 在本机暂存一次，并不改变该 Secret 在 Tailscale 控制面的有效期。
+
+设置页提交的凭据是 API **write-only** 字段，只允许真实 loopback 连接上的桌面 Web 或扩展来源
+写入。它原子暂存为 `{data_dir}/tailnet/.bootstrap-credential.json`；POSIX 权限为 `0600`，
+目录为 `0700`，不写 `config.toml`，`GET /api/config` 只返回是否已暂存。下一次启动成功把
+bootstrap JSON 刷入 helper stdin 后立刻删除文件；如果 helper 尚未接受 stdin，文件保留供重试。
+禁用 Tailnet 或在设置页勾选清除，也会删除待用凭据，但不会删除已建立的节点身份。
 
 ### 源码 / 一句话安装
 
@@ -96,7 +124,7 @@ openbiliclaw tailnet status
 或 `0.0.0.0`；只通过本机与 Tailnet 使用时推荐 `127.0.0.1`。若 API 绑定某个特定网卡 IP，
 helper 会因无法连接 `127.0.0.1` 而降级，启动入口给出警告，但本地 API 不会随之退出。
 
-无人值守环境可在**启动 OpenBiliClaw 的父进程**中提供：
+无人值守环境也可在**启动 OpenBiliClaw 的父进程**中提供 Auth Key：
 
 ```bash
 export OPENBILICLAW_TAILNET_AUTH_KEY='tskey-auth-...'
@@ -106,13 +134,16 @@ openbiliclaw start
 Supervisor 从父环境取出该值后，通过 stdin 的一次性 bootstrap JSON 交给 helper，并从 child
 环境删除所有 auth-key 形态变量；helper 参数、JSONL 事件和 `status.json` 都不含该值。环境变量
 本身仍受 shell / 服务管理器的秘密管理边界约束，应使用短期、最小权限、可撤销的注册 key。
-`OPENBILICLAW_TAILNET_AUTH_KEY` 与 `OPENBILICLAW_TAILNET_HELPER` 都是 runtime-only 进程控制，
-不是配置字段，不参与 TOML 合并，也不会被通用配置保存。
+也可把 `OPENBILICLAW_TAILNET_AUTH_KEY` 设置为 OAuth Client Secret，同时提供逗号分隔的
+`OPENBILICLAW_TAILNET_ADVERTISE_TAGS=tag:openbiliclaw`。环境输入优先于设置页待用凭据。
+这些入网环境变量与 `OPENBILICLAW_TAILNET_HELPER` 都是 runtime-only 进程控制，不是配置字段，
+不参与 TOML 合并，也不会被通用配置保存。
 
 ## 生命周期与协议
 
 `TailnetSupervisor` 与 API server 同生共死：启动时发现 helper、创建权限收紧的状态目录、
-发送 protocol v1 bootstrap，然后持续读取 stdout JSONL。关闭时先关闭 stdin，让 helper 正常
+优先读取环境输入，否则读取设置页暂存凭据，发送 protocol v1 bootstrap 并消费删除暂存文件，
+然后持续读取 stdout JSONL。关闭时先关闭 stdin，让 helper 正常
 退出；超时后才 terminate / kill，避免留下孤儿节点进程。主要事件为：
 
 | 事件 | 含义 |
@@ -151,6 +182,9 @@ Helper 发现顺序为显式 `OPENBILICLAW_TAILNET_HELPER` 覆盖、冻结安装
   且 POSIX 下只接受原本已有执行位的普通非 symlink 文件，再恢复 `0700`，迁移包不能带入或把
   普通文件升级成可执行 helper。目标机保留的 `certs/`、`autostart/`、`tailnet/` 若含任何嵌套
   symlink，迁移会 fail closed，避免跟随链接复制数据目录之外的内容。
+- OAuth Client Secret 可反复创建带指定 tag 的节点，权限通常高于单个设备身份；即使本机暂存
+  文件已经消费删除，也应把 Tailscale 后台中的原始 Secret 当作长期秘密管理。普通 Auth Key
+  同样应采用短期、预授权、最小 tag 权限并及时撤销。
 
 ## 公开 Python API
 
@@ -159,6 +193,10 @@ Helper 发现顺序为显式 `OPENBILICLAW_TAILNET_HELPER` 覆盖、冻结安装
 | `TailnetConfig` | 根 `Config.tailnet` 的 typed 配置，包含 `enabled` / `hostname` |
 | `normalize_tailnet_hostname()` | 规范化并严格校验单个 DNS label |
 | `TailnetSupervisor` | 发现、启动、监控、脱敏记录并关闭一个 helper 进程 |
+| `stage_tailnet_bootstrap()` / `clear_tailnet_bootstrap()` | 原子暂存或清除下一次启动使用的 write-only Auth / OAuth 凭据 |
+| `normalize_tailnet_bootstrap_credential()` | 只接受 `tskey-auth-…` / `tskey-client-…`，拒绝其它秘密形态 |
+| `normalize_tailnet_advertise_tags()` | 规范化、去重并限制 OAuth 设备 tag |
+| `read_tailnet_status()` | 只投影 event / DNS / IP / port 等安全字段，不暴露登录 URL 或错误消息 |
 | `find_tailnet_helper()` | 按受支持顺序定位当前平台 helper |
 | `start_tailnet_if_enabled()` | 配置关闭时无副作用返回 `None`；开启时启动 supervisor |
 | `tailnet_runtime()` | 为非标准入口提供与 context 同生命周期的 supervisor |
@@ -172,8 +210,8 @@ Go helper 的 flags 和 stdout JSONL 是 Python supervisor 的内部 protocol v1
 
 ## 部署边界
 
-- macOS / Windows 桌面安装包：构建流水线使用 Go 1.26.6 生成并随包携带 helper；托盘可执行
-  文件首版不提供 Tailnet CLI，用户通过运行目录 `config.toml` 开关后完整重启。macOS helper
+- macOS / Windows 桌面安装包：构建流水线使用 Go 1.26.6 生成并随包携带 helper；用户优先在
+  桌面 Web / 本机浏览器插件的通用设置中开关和入网，手工 `config.toml` 仍是回退路径。macOS helper
   要求 12+，旧 macOS 只降级此远程入口，不影响仍以 10.15+ 为目标的主应用。
 - 源码 / AI 一句话安装：Python 安装不自动编译 Go；用户明确需要 Tailnet 时运行
   `openbiliclaw tailnet build-helper`。

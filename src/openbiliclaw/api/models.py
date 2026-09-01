@@ -2403,6 +2403,28 @@ class StorageConfigOut(BaseModel):
     db_path: str = "data/openbiliclaw.db"
 
 
+class TailnetConfigOut(BaseModel):
+    """Application-scoped Tailnet configuration plus safe bootstrap status."""
+
+    enabled: bool = False
+    hostname: str = "openbiliclaw-host"
+    bootstrap_credential_staged: bool = False
+    state: str = "disabled"
+    dns_name: str = ""
+    ips: list[str] = Field(default_factory=list)
+    port: int = 0
+
+
+class TailnetConfigUpdateIn(BaseModel):
+    """Partial Tailnet update; bootstrap credentials are write-only."""
+
+    enabled: StrictBool | None = None
+    hostname: str | None = None
+    bootstrap_credential: str | None = None
+    advertise_tags: list[str] | None = None
+    clear_bootstrap_credential: StrictBool | None = None
+
+
 class LoggingConfigOut(BaseModel):
     level: str = "INFO"
     file_level: str = "DEBUG"
@@ -2474,6 +2496,7 @@ class ConfigResponse(BaseModel):
     discovery: DiscoveryConfigOut = Field(default_factory=DiscoveryConfigOut)
     autostart: AutostartConfigOut = Field(default_factory=AutostartConfigOut)
     saved_sync: SavedSyncConfigOut = Field(default_factory=SavedSyncConfigOut)
+    tailnet: TailnetConfigOut = Field(default_factory=TailnetConfigOut)
     storage: StorageConfigOut = Field(default_factory=StorageConfigOut)
     logging: LoggingConfigOut = Field(default_factory=LoggingConfigOut)
     soul: SoulConfigOut = Field(default_factory=SoulConfigOut)
@@ -2494,6 +2517,7 @@ class ConfigUpdateIn(BaseModel):
     scheduler: dict[str, object] | None = None
     discovery: dict[str, object] | None = None
     saved_sync: SavedSyncConfigUpdateIn | None = None
+    tailnet: TailnetConfigUpdateIn | None = None
     storage: dict[str, object] | None = None
     logging: dict[str, object] | None = None
     soul: dict[str, object] | None = None

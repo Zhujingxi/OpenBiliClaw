@@ -10,6 +10,8 @@ public clients ─ HTTPS（可选）→ Caddy :443 ─ shared-loopback HTTP ─�
 trusted LAN ─ HTTPS（可选）──→ TLS Proxy :8443 ─ loopback/Compose HTTP ───────────────────────┘
 native Android/iOS App（内嵌 tsnet）→ tailnet → app-owned Go tsnet helper :effective-port
                                                    └─ fixed loopback HTTP → 127.0.0.1:same-port ─┘
+local Desktop Web / extension Settings → PUT /api/config(write-only Auth/OAuth + tag)
+                                      → private one-shot stage → helper stdin ────────┘
 
 interactive (dialogue / config probe) ──────────────┐
                                                     ├─ runtime total gate (default 4) ─ ordered instance chain ─ adapter
@@ -191,6 +193,12 @@ FastAPI`。有效端口来自当前启动入口，通常是 `[api].port`，也�
 保留目标身份与 exact native helper。构建 tags 还会移除 Tailscale 自动 logtail 上传和未用的
 管理 Web UI，但协调控制面 / DERP 元数据边界不变。
 
+入网控制面只允许真实本机连接：桌面 Web 或浏览器插件的通用设置把 Auth Key，或 OAuth Client
+Secret + 已授权 tag 作为 `/api/config` write-only 字段提交，后端以私有权限原子暂存到下一次
+完整启动，经 stdin 交给 helper 后删除。OAuth 由 helper 的 `feature/oauthkey` 转成持久、预授权、
+tag-owned 节点；`GET /api/config` 只投影 staged 布尔值和安全运行状态。远程请求不能写或清除
+入网秘密，节点身份和待用凭据都不进入迁移包。
+
 海外出口另有一条显式路由边界：`config / Web UI -> [network].mode -> openbiliclaw.network -> 每个 LLM 实例 endpoint / YouTube / X twitter-cli / Reddit rdt-cli·OpenCLI / Bangumi / updater / Codex OAuth`。默认 `system` 继承环境 / OS 代理（CLI 会收到物化后的代理环境变量；海外服务在国内直连必然超时，而这是开箱默认值；没配代理时等价于直连），`direct` 对 SDK 注入 `trust_env=False` 并从 CLI 环境剥离代理变量，`custom` 注入指定 URL；LLM 链中每个实例按自己的 Base URL 独立裁决国内直连或海外代理。X / Reddit 的浏览器扩展 fallback 仍跟随浏览器网络设置。B站 / 抖音 / V2EX / Ollama / 国内 CDN 客户端不读取该边界。
 
 详见 [项目 Spec](spec.md) 中的架构图。模块级可视化图放在 `docs/diagrams/`：
@@ -328,7 +336,7 @@ Web durable turn 只在成功 completion CAS 后交接认知与成功事件；�
 - 系统生命周期管理和服务编排
 - `runtime.dialogue_reply_scheduler` — FastAPI app 生命周期内稳定的对话执行 lease 与 durable reply 单 worker。它不属于可替换 `RuntimeContext`：所有 production reply 在 lease admission 后动态解析当前 dialogue/Soul owner，热重载 pause+drain 后才发布新 context；durable turn 以 SQLite pending row 为权威队列，严格 rowid 顺序、瞬态原位退避、startup 全量分页恢复，visible terminal 用 pending CAS 发布一次。它与 reply 后的 `DialogueSettlementQueue` 分属两条独立 lane。
 - `runtime.image_fetch` — FastAPI app 生命周期内稳定的封面抓取 coordinator。proxy foreground miss 与 refresh background prefetch 共用 total 4 / background 3 的 Condition priority gate，按归一化 cache key singleflight；前台加入 queued background 同 key 会 promotion 到前台并采用更新签名 URL。waiter cancellation 不取消 owned upstream；磁盘 I/O 在线程中完成，cache hit 不占网络槽，落盘使用 same-dir tmp+fsync+replace。热重载只给新 controller 重绑同一实例，shutdown 先停 producer 再关闭 lane。
-- `runtime.tailnet_supervisor` + `cmd/openbiliclaw-tailnet` — 默认关闭、位于 FastAPI app 外层的应用内私网传输边缘。Python supervisor 与 CLI / 冻结桌面 server 同生命周期，发现并托管独立 Go `tsnet` helper；helper 在用户 tailnet 监听本次入口的 effective server port，清洗转发头后固定反代到 `127.0.0.1` 同端口。`OPENBILICLAW_TAILNET_ENABLED/HOSTNAME` 显式覆盖 local/base 配置，Auth Key / helper path 仅为 runtime-only。节点身份与脱敏状态留在 `data/tailnet/`，首次登录 URL 经事件回传；Auth Key 只经 stdin bootstrap，不进 child 环境 / argv / config。helper 故障只降级远程入口，不阻止本机 API；不提供 Funnel、Serve 或公网暴露。
+- `runtime.tailnet_supervisor` + `cmd/openbiliclaw-tailnet` — 默认关闭、位于 FastAPI app 外层的应用内私网传输边缘。Python supervisor 与 CLI / 冻结桌面 server 同生命周期，发现并托管独立 Go `tsnet` helper；helper 在用户 tailnet 监听本次入口的 effective server port，清洗转发头后固定反代到 `127.0.0.1` 同端口。`OPENBILICLAW_TAILNET_ENABLED/HOSTNAME` 显式覆盖 local/base 配置，环境 Auth/OAuth 输入优先于本机设置页私有暂存。节点身份与脱敏状态留在 `data/tailnet/`；浏览器登录 URL 经事件回传，Auth Key 或 OAuth Client Secret + tag 只经 stdin bootstrap，不进 child 环境 / argv / config，暂存文件交付后删除。helper 故障只降级远程入口，不阻止本机 API；不提供 Funnel、Serve 或公网暴露。
 - 降级模式启动：生产 `create_app()` 遇到 LLM registry 配置错误时保留 `/api/ping`、`/api/health`、`/api/qr-info`、`/api/config`、`/api/runtime-status`、`/api/runtime-stream`，精确放行 `/api/config/probe-service`、`/api/config/discover-models`、来源比例建议及 `/`、`/web`、`/setup`、`/m` 静态恢复 surface 与资源；草稿 probe 从提交配置临时建 registry 并经过稳定 total gate，不依赖失败的 active registry。`/api/ping` 仅在降级时附带 reason / issues，桌面 Web 以此先行识别恢复态、停止业务 hydration，再读取配置并自动打开模型设置。修复配置写盘后复用 degraded context 的 stable 层原子构造完整 swappable runtime、同步解除 503 guard 并启动后台任务，无需重启；构造失败则回滚并继续保持恢复态。其他业务 API 在修复前返回 503，避免半初始化 runtime 继续跑推荐/发现链路
 - 配置热重载：`RuntimeContext` 重建 registry / service / engine 时会注入同一份 `[llm.instances]`、`default_chain` 与 `[llm.routes.*]`。设置保存先事务性落盘；受保护对话 / 结算 / event lane 空闲时同步切换，忙时返回 202 并交给 app-owned latest-wins 配置应用队列，所有 rebuild 共享单一 handoff lock。队列成功/失败通过 runtime stream 回执，最新失败恢复 last-good，已有更新修订时不会被旧 rollback 覆盖。`data_dir` 不进入本进程热切换：路径变化时排队配置副本被固定回 active data dir、202 标记需要重启，避免绕开进程已持有的 canonical data-dir lock；其它字段仍可正常应用。热重载后的正向兴趣和避雷 speculator tick 都作为 detached task 注册到 `BackgroundTaskRegistry`，分别读取 `probe_feedback_history` / `avoidance_probe_feedback_history`，不阻塞配置响应
 - `AutoUpdateService` — 后端自动更新只查询 GitHub `/tags` 并过滤 `backend-v*`（兼容 legacy `v*` / 裸 semver），明确忽略 `extension-v*`；当前 GitHub Releases 由扩展 artifact 占用，不能用 `/releases/latest` 判断后端源码是否最新

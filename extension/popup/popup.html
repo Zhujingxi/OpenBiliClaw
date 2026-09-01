@@ -7322,6 +7322,28 @@
           <p class="settings-hint" id="cfgAutostartHint">读取开机自启动状态中…</p>
           <p class="settings-note">只影响下次登录拉起后端，不启停当前进程；本机 Ollama 配置可能随启动预检一起拉起。若依赖 shell 环境变量，建议先写入 config.toml。</p>
         </div>
+        <div class="settings-field" id="tailnetControlField">
+          <label>应用内 Tailnet 远程访问</label>
+          <div class="settings-field-row">
+            <input id="cfgTailnetEnabled" type="checkbox">
+            <label for="cfgTailnetEnabled">允许手机通过私有 Tailnet 访问电脑端</label>
+          </div>
+          <p class="settings-hint">电脑端只为 OpenBiliClaw 内嵌 Tailscale 节点，不会开启系统级 VPN。</p>
+          <label for="cfgTailnetHostname">电脑节点名</label>
+          <input id="cfgTailnetHostname" type="text" autocomplete="off" placeholder="openbiliclaw-host">
+          <label for="cfgTailnetBootstrapCredential">首次入网凭据（可选）</label>
+          <input id="cfgTailnetBootstrapCredential" type="password" autocomplete="new-password" placeholder="tskey-auth-… / tskey-client-…">
+          <p class="settings-hint">可填 Auth Key；也可填具有 <code>auth_keys</code> 写权限的 OAuth Client Secret。留空则首次启动时走网页登录。</p>
+          <label for="cfgTailnetAdvertiseTags">OAuth 设备标签</label>
+          <input id="cfgTailnetAdvertiseTags" type="text" autocomplete="off" placeholder="tag:openbiliclaw">
+          <p class="settings-hint">使用 <code>tskey-client-…</code> 时必填，且必须是该 OAuth Client 已授权的 tag；多个 tag 用逗号分隔。</p>
+          <div class="settings-field-row" id="cfgTailnetClearCredentialField" hidden>
+            <input id="cfgTailnetClearCredential" type="checkbox">
+            <label for="cfgTailnetClearCredential">清除已暂存的单次凭据</label>
+          </div>
+          <p class="settings-probe-status" id="cfgTailnetStatus" aria-live="polite">读取 Tailnet 状态中…</p>
+          <p class="settings-note">凭据只在运行后端的电脑上以私有文件暂存到下次完整重启（POSIX 权限 0600），交给 helper 后立即删除，不会写进 config.toml 或回传插件。</p>
+        </div>
         <div class="settings-field" id="savedSyncControlField">
           <label>保存与平台同步</label>
           <div class="settings-field-row">
