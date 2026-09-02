@@ -21,6 +21,11 @@ import (
 	"time"
 )
 
+const (
+	testAuthCredential  = "tskey-" + "auth-testvalue"
+	testOAuthCredential = "tskey-" + "client-secretvalue"
+)
+
 func TestParseOptions(t *testing.T) {
 	stateDir := filepath.Join(t.TempDir(), "tailnet-state")
 	opts, err := parseOptions([]string{
@@ -118,7 +123,7 @@ func TestReadBootstrap(t *testing.T) {
 
 func TestReadBootstrapRejectsOAuthWithoutTags(t *testing.T) {
 	_, _, _, err := readBootstrap(strings.NewReader(
-		`{"protocol":1,"auth_key":"tskey-client-secretvalue"}`,
+		`{"protocol":1,"auth_key":"` + testOAuthCredential + `"}`,
 	))
 	if err == nil || !strings.Contains(err.Error(), "require advertise_tags") {
 		t.Fatalf("readBootstrap() error = %v", err)
@@ -127,7 +132,7 @@ func TestReadBootstrapRejectsOAuthWithoutTags(t *testing.T) {
 
 func TestReadBootstrapRejectsInvalidTag(t *testing.T) {
 	_, _, _, err := readBootstrap(strings.NewReader(
-		`{"protocol":1,"auth_key":"tskey-client-secretvalue","advertise_tags":["tag:1bad"]}`,
+		`{"protocol":1,"auth_key":"` + testOAuthCredential + `","advertise_tags":["tag:1bad"]}`,
 	))
 	if err == nil || !strings.Contains(err.Error(), "invalid advertise tag") {
 		t.Fatalf("readBootstrap() error = %v", err)
@@ -135,11 +140,11 @@ func TestReadBootstrapRejectsInvalidTag(t *testing.T) {
 }
 
 func TestDurableOAuthCredential(t *testing.T) {
-	secret := "tskey-client-secretvalue"
+	secret := testOAuthCredential
 	if got := durableOAuthCredential(secret); got != secret+"?ephemeral=false&preauthorized=true" {
 		t.Fatalf("durableOAuthCredential() = %q", got)
 	}
-	if got := durableOAuthCredential("tskey-auth-authvalue"); got != "tskey-auth-authvalue" {
+	if got := durableOAuthCredential(testAuthCredential); got != testAuthCredential {
 		t.Fatalf("auth key changed to %q", got)
 	}
 }
@@ -179,7 +184,7 @@ func TestBootstrapEOFStopsWithoutJoiningTailnet(t *testing.T) {
 }
 
 func TestSecretRedactor(t *testing.T) {
-	const secret = "tskey-auth-super-secret"
+	const secret = testAuthCredential
 	got := (secretRedactor{secret: secret}).text("failed with " + secret)
 	if strings.Contains(got, secret) || !strings.Contains(got, "[REDACTED]") {
 		t.Fatalf("redacted text = %q", got)

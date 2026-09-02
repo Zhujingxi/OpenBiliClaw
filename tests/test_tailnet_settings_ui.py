@@ -1,8 +1,23 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_tailnet_test_fixtures_do_not_look_like_live_credentials() -> None:
+    candidate = re.compile(r"tskey-(?:auth|client)-[A-Za-z0-9_-]{8,}")
+    paths = [ROOT / "cmd/openbiliclaw-tailnet/main_test.go"]
+    paths.extend(sorted((ROOT / "tests").glob("test_tailnet*.py")))
+
+    offenders = [
+        str(path.relative_to(ROOT))
+        for path in paths
+        if candidate.search(path.read_text(encoding="utf-8"))
+    ]
+
+    assert offenders == []
 
 
 def test_desktop_and_extension_general_tabs_expose_tailnet_controls() -> None:

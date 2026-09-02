@@ -13,6 +13,9 @@ from openbiliclaw.config import Config
 if TYPE_CHECKING:
     from pathlib import Path
 
+_TEST_AUTH_CREDENTIAL = "tskey-" + "auth-privatebootstrap"
+_TEST_OAUTH_CREDENTIAL = "tskey-" + "client-privatebootstrap"
+
 
 def _build_app(
     monkeypatch,
@@ -81,7 +84,7 @@ def test_config_put_stages_oauth_secret_without_echo_or_config_persistence(
 ) -> None:
     config = Config()
     app = _build_app(monkeypatch, tmp_path, config)
-    secret = "tskey-client-privatebootstrap"
+    secret = _TEST_OAUTH_CREDENTIAL
     status_dir = config.data_path / "tailnet"
     status_dir.mkdir(mode=0o700, parents=True)
     (status_dir / "status.json").write_text(
@@ -140,7 +143,7 @@ def test_config_clear_removes_staged_secret_from_active_and_next_data_dirs(
 
     config = Config()
     app = _build_app(monkeypatch, tmp_path, config)
-    active_staged = stage_tailnet_bootstrap(config, "tskey-auth-activebootstrap")
+    active_staged = stage_tailnet_bootstrap(config, _TEST_AUTH_CREDENTIAL)
     next_data_dir = tmp_path / "next-data"
 
     with _local_client(app) as client:
@@ -173,7 +176,7 @@ def test_config_put_accepts_auth_key_without_oauth_tag(monkeypatch, tmp_path: Pa
                 "tailnet": {
                     "enabled": True,
                     "hostname": "openbiliclaw-host",
-                    "bootstrap_credential": "tskey-auth-privatebootstrap",
+                    "bootstrap_credential": _TEST_AUTH_CREDENTIAL,
                 }
             },
         )
@@ -192,7 +195,7 @@ def test_config_put_rejects_oauth_without_tag_before_saving(monkeypatch, tmp_pat
                 "tailnet": {
                     "enabled": True,
                     "hostname": "openbiliclaw-host",
-                    "bootstrap_credential": "tskey-client-privatebootstrap",
+                    "bootstrap_credential": _TEST_OAUTH_CREDENTIAL,
                 }
             },
         )
@@ -218,7 +221,7 @@ def test_remote_config_cannot_stage_tailnet_secret(monkeypatch, tmp_path: Path) 
                 "tailnet": {
                     "enabled": True,
                     "hostname": "openbiliclaw-host",
-                    "bootstrap_credential": "tskey-auth-privatebootstrap",
+                    "bootstrap_credential": _TEST_AUTH_CREDENTIAL,
                 }
             },
         )

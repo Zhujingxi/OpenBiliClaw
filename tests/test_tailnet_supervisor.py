@@ -14,6 +14,9 @@ import pytest
 
 from openbiliclaw.runtime import tailnet_supervisor as supervisor_module
 
+_TEST_AUTH_CREDENTIAL = "tskey-" + "auth-privatebootstrap"
+_TEST_OAUTH_CREDENTIAL = "tskey-" + "client-privatebootstrap"
+
 
 @dataclass
 class _TailnetSettings:
@@ -357,11 +360,11 @@ def test_start_sends_secret_only_over_stdin_and_keeps_pipe_open(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config, capture_path = _configure_fake_helper(monkeypatch, tmp_path)
-    auth_key = "tskey-auth-private-bootstrap"
+    auth_key = _TEST_AUTH_CREDENTIAL
     monkeypatch.setenv("OPENBILICLAW_TAILNET_AUTH_KEY", auth_key)
     monkeypatch.setenv("TS_AUTHKEY", "legacy-ts-secret")
     monkeypatch.setenv("TAILSCALE_AUTH_KEY", "another-secret")
-    monkeypatch.setenv("TS_CLIENT_SECRET", "tskey-client-ambient-secret")
+    monkeypatch.setenv("TS_CLIENT_SECRET", "test-ambient-oauth-secret")
 
     ready = threading.Event()
     events: list[supervisor_module.TailnetEvent] = []
@@ -406,7 +409,7 @@ def test_staged_oauth_secret_is_private_consumed_and_tagged(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config, capture_path = _configure_fake_helper(monkeypatch, tmp_path)
-    secret = "tskey-client-privatebootstrap"
+    secret = _TEST_OAUTH_CREDENTIAL
     staged = supervisor_module.stage_tailnet_bootstrap(
         config,
         secret,
@@ -442,12 +445,12 @@ def test_stage_oauth_secret_requires_valid_tag(tmp_path: Path) -> None:
     with pytest.raises(supervisor_module.TailnetSupervisorError, match="at least one"):
         supervisor_module.stage_tailnet_bootstrap(
             config,
-            "tskey-client-privatebootstrap",
+            _TEST_OAUTH_CREDENTIAL,
         )
     with pytest.raises(supervisor_module.TailnetSupervisorError, match="Invalid Tailnet tag"):
         supervisor_module.stage_tailnet_bootstrap(
             config,
-            "tskey-client-privatebootstrap",
+            _TEST_OAUTH_CREDENTIAL,
             ["tag:1invalid"],
         )
 
@@ -456,7 +459,7 @@ def test_staged_auth_key_does_not_require_tags(tmp_path: Path) -> None:
     config = _Config(data_path=tmp_path / "data", tailnet=_TailnetSettings())
     staged = supervisor_module.stage_tailnet_bootstrap(
         config,
-        "tskey-auth-privatebootstrap",
+        _TEST_AUTH_CREDENTIAL,
     )
     assert supervisor_module.tailnet_bootstrap_staged(config)
     supervisor_module.clear_tailnet_bootstrap(config)
@@ -516,7 +519,7 @@ def test_nonzero_exit_is_reported_without_leaking_the_auth_key(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config, _capture_path = _configure_fake_helper(monkeypatch, tmp_path, mode="crash")
-    auth_key = "tskey-auth-must-be-redacted"
+    auth_key = _TEST_AUTH_CREDENTIAL
     monkeypatch.setenv("OPENBILICLAW_TAILNET_AUTH_KEY", auth_key)
     monkeypatch.setenv("FAKE_STDERR", f"crashed after reading {auth_key}")
     monkeypatch.setenv("FAKE_EVENT_MESSAGE", f"received {auth_key}")
