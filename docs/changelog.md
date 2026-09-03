@@ -4,9 +4,9 @@
 
 ---
 
-## 未发布
+## v0.3.214：新增 GitHub 内容来源（2026-09-03）
 
-- **新增 GitHub 内容来源（未发布、验收中）**：GitHub 作为第十二个 canonical source 接线，v1 范围是公开 repository 的匿名/可选 PAT 官方 REST API、public starred repositories 初始化、`search / ranked / latest` discovery、统一关键词与 PC / mobile / extension 无封面文字卡。PAT 只用于提额和 `/user` 身份校验，私有仓库在共享 query sanitizer 与 normalizer 两层强制排除；不读取浏览器 Cookie，不执行 star/watch/follow，不将 forks、open issues 或 watchers 伪装成跨平台 engagement。formal / inspiration 共用持久来源 cooldown，status 只聚合当前启用 modes；与当前 PAT 指纹匹配的 discovery 401 会让 profile/bootstrap 状态如实 unavailable，轮换令牌后旧标记自动失效。Star 分页在已有完整页后超时保留此前事件并报 `partial_timeout`，混合 init 会隔离 GitHub 失败并继续其它有效来源。当前卡片可见 owner/name、description 和 stars，topics/language/license/forks/issues/watchers 仅保留在后端 source metadata，尚未由三端 JS 渲染。只读 smoke 已观察到三种 discovery 模式返回公开仓库且没有本地、LLM 或上游写入；匿名 starred 路径曾观察到公开结果/肯定空结果，后续请求也真实遇到匿名 rate limit。有效 PAT、完整初始化终态与浏览器 UI/E2E 仍未完成验收，不据此宣称功能已发布；逐门状态见 [GitHub acceptance ledger](platform-source-acceptance.github.md)。
+- **新增 GitHub 内容来源**：GitHub 作为第十二个 canonical source 接线，v1 范围是公开 repository 的匿名/可选 PAT 官方 REST API、public starred repositories 初始化、`search / ranked / latest` discovery、统一关键词与 PC / mobile / extension 无封面文字卡。PAT 只用于提额和 `/user` 身份校验，私有仓库在共享 query sanitizer 与 normalizer 两层强制排除；不读取浏览器 Cookie，不执行 star/watch/follow，不将 forks、open issues 或 watchers 伪装成跨平台 engagement。formal / inspiration 共用持久来源 cooldown，status 只聚合当前启用 modes；与当前 PAT 指纹匹配的 discovery 401 会让 profile/bootstrap 状态如实 unavailable，轮换令牌后旧标记自动失效。Star 分页在已有完整页后超时保留此前事件并报 `partial_timeout`，混合 init 会隔离 GitHub 失败并继续其它有效来源。当前卡片可见 owner/name、description 和 stars，topics/language/license/forks/issues/watchers 仅保留在后端 source metadata，尚未由三端 JS 渲染。只读 smoke 已观察到三种 discovery 模式返回公开仓库且没有本地、LLM 或上游写入；匿名 starred 路径曾观察到公开结果/肯定空结果，后续请求也真实遇到匿名 rate limit。有效 PAT、完整初始化终态与浏览器 UI/E2E 仍未完成验收，不据此宣称功能已发布；逐门状态见 [GitHub acceptance ledger](platform-source-acceptance.github.md)。
 
 - **避免 Tailnet 测试夹具触发 Secret Scanning**：测试中的 Auth Key 模拟值不再使用形似有效凭据的连续 `tskey-auth-` 字面量；需要验证 OAuth 前缀分支的夹具改为源码中分段构造，并新增仓库回归检查，防止测试数据再次被 GitHub 误报为可能有效的 Tailscale Key。
 
@@ -46,6 +46,10 @@
 - **桌面 Web 手机版二维码优先使用手动配置的后端地址**：校园网等存在 AP/客户端隔离或多网卡选错网卡的场景下，`/api/qr-info` 自动探测的局域网 IP 可能手机不可达，而桌面 Web 设置里手动填写的后端地址此前会被自动探测结果覆盖。现在二维码生成时显式配置的后端 host/port 始终优先，用户可填写手机可达的 IP、域名或内网穿透地址后再扫码；未填写时行为保持不变。更新 `tests/test_desktop_web_mobile_entry.py` 静态契约测试。
 
 - **修复 Windows 下高并发 JSON 原子写入偶发 WinError 5（issue #229）**：`_atomic_write_json()` 在 Windows 上多线程/多进程竞争替换同一状态文件时，`os.replace()` 会短暂抛出 `PermissionError: [WinError 5] 拒绝访问`，导致探索缓冲等状态更新丢失。现在替换阶段对瞬时 `PermissionError` 增加带随机抖动的指数退避重试，重试耗尽才向上抛出。
+
+## 未发布
+
+- **新增 Recommendation Director 完整设计规格（尚未实现）**：新增 `docs/plans/2026-08-31-recommendation-director-spec.md`，定义“LLM 低频编排三-slot 内容路径、现有推荐器高频选片”的目标架构，以及 FeedSession/BatchInstance 生命周期、受控 Proposal→Plan→CompiledPolicy 信任边界、Candidate/Constraint refs、反馈 Gate、并发 fencing、shadow/A-B 评估和分阶段落地顺序。该条仅记录设计与研究结论，默认配置和当前推荐行为均未改变。
 
 ## v0.3.213：推荐供给与时效判断修复（2026-08-27）
 
