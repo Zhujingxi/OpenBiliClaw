@@ -977,6 +977,64 @@
               </div>
             </article>
 
+            <article class="source-status-row source-card" data-source-status="github" data-source-credential="github" data-open="0">
+              <div class="source-card-face" role="button" tabindex="0" aria-expanded="false" aria-controls="sourceCardBody-github">
+                <span class="source-card-logo" data-source-logo="github" aria-hidden="true">GH</span>
+                <span class="source-card-head">
+                  <strong class="source-card-name">GitHub</strong>
+                  <span class="source-status-badges"><span class="source-source-badge">来源：加载中</span><span class="source-access-badge">接入：加载中</span><span class="source-evidence-badge" hidden></span></span>
+                  <p class="src-detail">加载中…</p>
+                  <span class="source-card-hint-slot"></span>
+                </span>
+                <span class="source-card-right">
+                  <label class="source-card-share"><span>占比</span><input id="shareGitHub" value="1" inputmode="numeric" aria-label="GitHub 候选池占比"></label>
+                  <label class="source-card-enable"><span class="sr-only">启用 GitHub</span><select id="githubEnabled"><option value="on">启用</option><option value="off">停用</option></select></label>
+                  <span class="source-card-chev" aria-hidden="true">▾</span>
+                </span>
+              </div>
+              <div class="source-card-body" id="sourceCardBody-github">
+                <section class="source-seg">
+                  <h4>接入方式</h4>
+                  <p class="seg-note">使用 GitHub 官方 REST API，只读取公开 repository。匿名即可发现；公开用户名用于导入该账号的 starred repositories。PAT 是可选项，只用于 <code>GET /user</code> 身份确认和提高 API 限额，不会开放私有仓库。留空保持已有 PAT，勾选清除则本次删除。<a href="https://github.com/whiteguo233/OpenBiliClaw/blob/main/docs/modules/github.md#pat-获取与安全" target="_blank" rel="noopener noreferrer">PAT 与安全说明</a>。需要海外出网。</p>
+                  <div class="source-cred-box">
+                    <div class="source-cred-line"><span class="source-credential-ro-tag">脱敏</span><span class="source-credential-summary">加载中…</span></div>
+                    <textarea class="source-credential-value" rows="2" readonly autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
+                  </div>
+                  <div class="inline-row">
+                    <label class="settings-field"><span>Personal Access Token（可选）</span><input id="githubAccessToken" type="password" maxlength="512" autocomplete="off" placeholder="可留空；不会回显已保存的 PAT"></label>
+                    <label class="settings-field"><span>公开用户名</span><input id="githubUsername" maxlength="39" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="例如 octocat（可留空）"></label>
+                    <label class="settings-field"><span>清除已保存的 PAT</span><input id="githubClearToken" type="checkbox"></label>
+                  </div>
+                </section>
+                <section class="source-seg">
+                  <h4>发现分支与每日预算</h4>
+                  <p class="seg-note">三个分支都使用公开 repository search；排名是按 stars 排序的产品查询，不宣称 GitHub 官方 Trending。</p>
+                  <div class="branch-table" data-branch-toggles="on">
+                    <div class="branch-head"><span></span><span>分支</span><span>每日预算</span><span>说明</span></div>
+                    <div class="branch-row"><input id="githubModeSearch" type="checkbox" class="branch-toggle" aria-label="GitHub 搜索分支"><span class="branch-name">搜索</span><input id="githubDailySearchBudget" class="branch-budget" inputmode="numeric" placeholder="120" aria-label="GitHub 每日搜索条目"><span class="branch-hint">按画像关键词搜索</span></div>
+                    <div class="branch-row"><input id="githubModeRanked" type="checkbox" class="branch-toggle" aria-label="GitHub 排名分支"><span class="branch-name">排名</span><input id="githubDailyRankedBudget" class="branch-budget" inputmode="numeric" placeholder="60" aria-label="GitHub 每日排名条目"><span class="branch-hint">公开仓库按 stars 排序</span></div>
+                    <div class="branch-row"><input id="githubModeLatest" type="checkbox" class="branch-toggle" aria-label="GitHub 最新分支"><span class="branch-name">最新</span><input id="githubDailyLatestBudget" class="branch-budget" inputmode="numeric" placeholder="60" aria-label="GitHub 每日最新条目"><span class="branch-hint">近 30 天创建，按最近更新排序</span></div>
+                  </div>
+                </section>
+                <section class="source-seg">
+                  <h4>节流与初始化</h4>
+                  <div class="inline-row">
+                    <label class="settings-field"><span>请求间隔秒数</span><input id="githubRequestInterval" inputmode="numeric" min="0" max="60" placeholder="6"></label>
+                    <label class="settings-field"><span>最小调度间隔分钟</span><input id="githubMinInterval" inputmode="numeric" min="0" max="1440" placeholder="10"></label>
+                    <label class="settings-field"><span>初始化 star 上限</span><input id="githubBootstrapLimit" inputmode="numeric" min="1" max="1000" placeholder="300"></label>
+                    <label class="settings-field"><span>初始化最多页数</span><input id="githubBootstrapMaxPages" inputmode="numeric" min="1" max="100" placeholder="10"></label>
+                  </div>
+                </section>
+                <section class="source-seg">
+                  <h4>验证</h4>
+                  <div class="settings-probe-row source-verify-row">
+                    <button class="pill-btn source-verify-btn" type="button">测试连接</button>
+                    <span class="settings-probe-status source-verify-status" aria-live="polite"></span>
+                  </div>
+                </section>
+              </div>
+            </article>
+
             <article class="source-status-row source-card" data-source-status="linuxdo" data-source-credential="linuxdo" data-open="0">
               <div class="source-card-face" role="button" tabindex="0" aria-expanded="false" aria-controls="sourceCardBody-linuxdo">
                 <span class="source-card-logo" data-source-logo="linuxdo" aria-hidden="true" style="background:#1f6f43">L</span>

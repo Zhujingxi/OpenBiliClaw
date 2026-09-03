@@ -65,7 +65,7 @@ def test_overseas_platform_list_is_the_verified_one() -> None:
     families must never join them, because pitfall rule 1 forces those to
     ignore proxies entirely.
     """
-    assert {"bangumi", "youtube", "twitter", "reddit"} == OVERSEAS_EGRESS_PLATFORMS
+    assert {"bangumi", "github", "youtube", "twitter", "reddit"} == OVERSEAS_EGRESS_PLATFORMS
     for family in ("bilibili", "xiaohongshu", "douyin", "zhihu"):
         assert not requires_overseas_network(family), f"{family} is CN-direct"
     # Aliases resolve too — a caller passing "bgm" / "x" / "yt" must not slip

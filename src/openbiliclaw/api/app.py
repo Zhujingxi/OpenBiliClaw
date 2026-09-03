@@ -108,6 +108,7 @@ from openbiliclaw.api.models import (
     FavoriteStateResponse,
     FeedbackIn,
     FeedbackResponse,
+    GitHubSourceConfigOut,
     HealthResponse,
     InitPrerequisitesOut,
     InitStageOut,
@@ -562,6 +563,7 @@ _SOURCE_SHARE_ORDER = (
     "douyin",
     "youtube",
     "twitter",
+    "github",
     "zhihu",
     "reddit",
     "bangumi",
@@ -578,6 +580,7 @@ _INIT_SOURCE_ORDER = (
     "douyin",
     "youtube",
     "twitter",
+    "github",
     "zhihu",
     "reddit",
     "bangumi",
@@ -2183,9 +2186,7 @@ def create_app(
     # Fan freshly recorded LLM/embedding anomaly alerts out to the live
     # runtime stream so the 异常报警 feed updates without a poll round-trip.
     with suppress(Exception):
-        get_diagnostics_alert_buffer().set_publisher(
-            getattr(ctx.event_hub, "publish", None)
-        )
+        get_diagnostics_alert_buffer().set_publisher(getattr(ctx.event_hub, "publish", None))
 
     # The process-lifetime migration guard was acquired for the data directory
     # that was active at startup.  A newly persisted ``data_dir`` must therefore
@@ -5210,6 +5211,8 @@ def create_app(
         *,
         bangumi_username: str | None = None,
         bangumi_token: str | None = None,
+        github_username: str | None = None,
+        github_token: str | None = None,
         v2ex_username: str | None = None,
     ) -> bool:
         """Best-effort: checked guided-init sources become enabled settings.
@@ -5242,6 +5245,15 @@ def create_app(
         ):
             bangumi_cfg.username = bangumi_username
             changed = True
+        github_cfg = getattr(sources_cfg, "github", None)
+        if (
+            github_cfg is not None
+            and "github" in effective_sources
+            and github_username is not None
+            and str(getattr(github_cfg, "username", "") or "").strip() != github_username
+        ):
+            github_cfg.username = github_username
+            changed = True
         v2ex_cfg = getattr(sources_cfg, "v2ex", None)
         if (
             v2ex_cfg is not None
@@ -5260,6 +5272,14 @@ def create_app(
             and str(getattr(bangumi_cfg, "access_token", "") or "").strip() != bangumi_token
         ):
             bangumi_cfg.access_token = bangumi_token
+            changed = True
+        if (
+            github_cfg is not None
+            and "github" in effective_sources
+            and github_token is not None
+            and str(getattr(github_cfg, "access_token", "") or "").strip() != github_token
+        ):
+            github_cfg.access_token = github_token
             changed = True
         if not changed:
             return False
@@ -5302,6 +5322,8 @@ def create_app(
         selected_sources: set[str] | None = None,
         bangumi_username: str = "",
         bangumi_token: str = "",
+        github_username: str = "",
+        github_token: str = "",
         v2ex_username: str = "",
         force: bool = False,
         reset_cognition: bool = False,
@@ -5393,10 +5415,13 @@ def create_app(
                 include_reddit="reddit" in effective,
                 include_v2ex="v2ex" in effective,
                 include_bangumi="bangumi" in effective,
+                include_github="github" in effective,
                 include_linuxdo="linuxdo" in effective,
                 include_weibo="weibo" in effective,
                 bangumi_username=bangumi_username,
                 bangumi_token=bangumi_token,
+                github_username=github_username,
+                github_token=github_token,
                 v2ex_username=v2ex_username,
                 target_pool_count=_INIT_POOL_TARGET_COUNT,
                 discover_backfill=_api_discover_backfill,
@@ -5420,11 +5445,14 @@ def create_app(
             partial_success = discovery_partial or dy_degraded or linuxdo_degraded or weibo_degraded
             v2ex_status = str(getattr(result, "v2ex_status", "skipped") or "skipped")
             v2ex_partial = v2ex_status == "partial"
+            github_status = str(getattr(result, "github_status", "skipped") or "skipped")
+            github_partial = github_status == "partial"
             partial_success = (
                 discovery_partial
                 or dy_degraded
                 or linuxdo_degraded
                 or v2ex_partial
+                or github_partial
                 or weibo_degraded
             )
             reason = getattr(result, "discovery_reason", None)
@@ -5459,6 +5487,16 @@ def create_app(
                 detail = " ".join(part for part in (detail, v2ex_detail) if part)
                 if not discovery_partial and not dy_degraded:
                     reason = "v2ex_partial"
+            if github_partial:
+                github_event_count = len(getattr(result, "github_events", []) or [])
+                github_detail = (
+                    "GitHub 采集状态 github_status=partial："
+                    f"已保留并用于画像建模 {github_event_count} 条公开 starred repository 事件，"
+                    "但分页、结果上限或上游响应未能证明完整。"
+                )
+                detail = " ".join(part for part in (detail, github_detail) if part)
+                if not discovery_partial and not dy_degraded and not v2ex_partial:
+                    reason = "github_partial"
             if weibo_degraded:
                 weibo_event_count = len(getattr(result, "weibo_events", []) or [])
                 weibo_detail = (
@@ -5467,7 +5505,12 @@ def create_app(
                     "请确认当前浏览器登录态和扩展连接后重试。"
                 )
                 detail = " ".join(part for part in (detail, weibo_detail) if part)
-                if not discovery_partial and not dy_degraded and not v2ex_partial:
+                if (
+                    not discovery_partial
+                    and not dy_degraded
+                    and not v2ex_partial
+                    and not github_partial
+                ):
                     reason = "weibo_degraded"
             await coord.complete(
                 run_id,
@@ -5574,7 +5617,7 @@ def create_app(
                 status_code=400,
             )
         source_options = source_options or {}
-        unknown_source_options = sorted(set(source_options) - {"bangumi", "v2ex"})
+        unknown_source_options = sorted(set(source_options) - {"bangumi", "github", "v2ex"})
         if unknown_source_options:
             return JSONResponse(
                 {
@@ -5635,6 +5678,50 @@ def create_app(
             except ValueError as exc:
                 return JSONResponse(
                     {"error": "invalid_bangumi_access_token", "detail": str(exc)},
+                    status_code=400,
+                )
+
+        github_options = source_options.get("github", {})
+        if not isinstance(github_options, dict):
+            return JSONResponse(
+                {"error": "invalid_source_options", "detail": "source_options.github 必须是对象"},
+                status_code=400,
+            )
+        unknown_github_options = sorted(set(github_options) - {"username", "access_token"})
+        if unknown_github_options:
+            return JSONResponse(
+                {
+                    "error": "invalid_source_options",
+                    "detail": (
+                        "不支持的 source_options.github 字段: " + ", ".join(unknown_github_options)
+                    ),
+                },
+                status_code=400,
+            )
+        scoped_github_username = "username" in github_options
+        selected_github_username: str | None = None
+        if scoped_github_username:
+            from openbiliclaw.sources.github_client import validate_github_username
+
+            try:
+                selected_github_username = validate_github_username(github_options.get("username"))
+            except ValueError as exc:
+                return JSONResponse(
+                    {"error": "invalid_github_username", "detail": str(exc)},
+                    status_code=400,
+                )
+        scoped_github_token = "access_token" in github_options
+        selected_github_token: str | None = None
+        if scoped_github_token:
+            from openbiliclaw.sources.github_client import validate_github_access_token
+
+            try:
+                selected_github_token = validate_github_access_token(
+                    github_options.get("access_token")
+                )
+            except ValueError as exc:
+                return JSONResponse(
+                    {"error": "invalid_github_access_token", "detail": str(exc)},
                     status_code=400,
                 )
 
@@ -5795,6 +5882,22 @@ def create_app(
             configured_bangumi_token if selected_bangumi_token is None else selected_bangumi_token
         )
         init_runtime_config = ctx.config if ctx.config is not None else config
+        github_cfg = getattr(getattr(init_runtime_config, "sources", None), "github", None)
+        configured_github_username = str(getattr(github_cfg, "username", "") or "").strip()
+        effective_github_username = (
+            configured_github_username
+            if selected_github_username is None
+            else selected_github_username
+        )
+        configured_github_token = str(getattr(github_cfg, "access_token", "") or "").strip()
+        github_token_input = (
+            configured_github_token if selected_github_token is None else selected_github_token
+        )
+        from openbiliclaw.sources.github_client import resolve_github_access_token
+
+        effective_github_token, _github_token_origin = resolve_github_access_token(
+            github_token_input
+        )
         configured_v2ex_username = str(
             getattr(
                 getattr(getattr(init_runtime_config, "sources", None), "v2ex", None),
@@ -5825,6 +5928,80 @@ def create_app(
                     },
                     status_code=409,
                 )
+        if "github" in effective_sources:
+            if not effective_github_username and not effective_github_token:
+                if effective_sources == {"github"}:
+                    return JSONResponse(
+                        {
+                            "error": "no_profile_signal_sources",
+                            "detail": (
+                                "GitHub 公开仓库发现无需登录，但初始化画像需要公开用户名"
+                                "或可用 PAT，以只读导入该账号的公开 starred repositories。"
+                            ),
+                            "capability": "profile",
+                            "readiness": "identity_required",
+                        },
+                        status_code=409,
+                    )
+                effective_sources.discard("github")
+                warnings.append(
+                    "GitHub 未填写公开用户名或 PAT：本次初始化跳过 starred repositories；"
+                    "公开仓库发现保持启用。"
+                )
+            else:
+                from openbiliclaw.sources.github_client import (
+                    GitHubAPIError,
+                    GitHubClient,
+                    resolve_github_bootstrap_identity,
+                )
+
+                try:
+                    async with GitHubClient(
+                        token=effective_github_token,
+                        request_interval_seconds=0.1,
+                    ) as github_client:
+                        github_identity = await resolve_github_bootstrap_identity(
+                            github_client,
+                            username=effective_github_username,
+                        )
+                except GitHubAPIError as exc:
+                    if exc.code == "unauthorized":
+                        error_code = "invalid_github_access_token"
+                        error_detail = (
+                            "GitHub PAT 被拒绝（缺失、错误或已过期）。"
+                            "请更换令牌，或清除 PAT 后使用公开用户名。"
+                        )
+                        error_status = 400
+                    elif exc.code == "identity_mismatch":
+                        error_code = "github_identity_mismatch"
+                        error_detail = "GitHub PAT 所属账号与填写的公开用户名不一致。"
+                        error_status = 409
+                    elif exc.code == "not_found":
+                        error_code = "github_bootstrap_not_ready"
+                        error_detail = "GitHub 公开用户名不存在或当前不可访问。"
+                        error_status = 400
+                    else:
+                        error_code = "github_token_check_failed"
+                        error_detail = str(exc)
+                        error_status = 502
+                    if effective_sources == {"github"}:
+                        return JSONResponse(
+                            {"error": error_code, "detail": error_detail},
+                            status_code=error_status,
+                        )
+                    effective_sources.discard("github")
+                    warnings.append(
+                        f"GitHub 画像初始化已隔离（{error_code}）：{error_detail} "
+                        "其他来源继续初始化；公开仓库发现保持启用。"
+                    )
+                    # Never persist request-scoped identity input that failed
+                    # its official read-only preflight.
+                    selected_github_username = None
+                    selected_github_token = None
+                    effective_github_username = ""
+                    effective_github_token = ""
+                else:
+                    effective_github_username = github_identity.login
         # A personal access token identifies the account via /v0/me, so validate
         # it live and resolve the username BEFORE reserving a run or persisting —
         # reject a bad/expired token with its real cause (project rule 7) instead
@@ -5940,6 +6117,10 @@ def create_app(
                 sources_to_persist,
                 bangumi_username=username_to_persist,
                 bangumi_token=selected_bangumi_token,
+                github_username=(
+                    effective_github_username if "github" in effective_sources else None
+                ),
+                github_token=selected_github_token,
                 v2ex_username=(effective_v2ex_username if "v2ex" in effective_sources else None),
             )
 
@@ -5979,15 +6160,22 @@ def create_app(
             await _maybe_autostart_embedding_pull()
 
         registry = getattr(ctx, "task_registry", None)
+        # Capability admission may remove a discovery-only source from this
+        # one personal-profile run while keeping its explicit opt-in persisted.
+        # Pass that filtered set to the wrapper; recomputing from the original
+        # checkbox payload would silently add the skipped source back.
+        pipeline_sources = effective_sources if selected_sources is not None else None
         if registry is not None:
             task = registry.track(
                 "guided_init",
                 _run_guided_init_wrapper(
                     run_id,
-                    selected_sources,
-                    effective_bangumi_username,
-                    effective_bangumi_token,
-                    effective_v2ex_username,
+                    selected_sources=pipeline_sources,
+                    bangumi_username=effective_bangumi_username,
+                    bangumi_token=effective_bangumi_token,
+                    github_username=effective_github_username,
+                    github_token=effective_github_token,
+                    v2ex_username=effective_v2ex_username,
                     force=force,
                     reset_cognition=reset_cognition,
                     llm_concurrency=llm_concurrency,
@@ -5997,10 +6185,12 @@ def create_app(
             task = asyncio.create_task(
                 _run_guided_init_wrapper(
                     run_id,
-                    selected_sources,
-                    effective_bangumi_username,
-                    effective_bangumi_token,
-                    effective_v2ex_username,
+                    selected_sources=pipeline_sources,
+                    bangumi_username=effective_bangumi_username,
+                    bangumi_token=effective_bangumi_token,
+                    github_username=effective_github_username,
+                    github_token=effective_github_token,
+                    v2ex_username=effective_v2ex_username,
                     force=force,
                     reset_cognition=reset_cognition,
                     llm_concurrency=llm_concurrency,
@@ -6725,6 +6915,15 @@ def create_app(
         await _request_runtime_replenishment(reason="init_completed", force=True)
         return {"ok": True}
 
+    def _fail_closed_source_metadata(value: object) -> dict[str, object]:
+        payload = value
+        if isinstance(value, str):
+            try:
+                payload = json.loads(value)
+            except (TypeError, ValueError):
+                return {}
+        return dict(payload) if isinstance(payload, dict) else {}
+
     def _serialize_recommendation_items(items: list[Any]) -> list[RecommendationOut]:
         def item_key_for(content: Any) -> str:
             explicit = str(getattr(content, "item_key", "") or "").strip()
@@ -6756,6 +6955,9 @@ def create_app(
                 published_label=str(getattr(item.content, "published_label", "") or ""),
                 content_type=str(getattr(item.content, "content_type", "") or "video"),
                 body_text=str(getattr(item.content, "body_text", "") or ""),
+                source_metadata=_fail_closed_source_metadata(
+                    getattr(item.content, "source_metadata", {})
+                ),
                 duration=int(getattr(item.content, "duration", 0) or 0),
                 view_count=int(getattr(item.content, "view_count", 0) or 0),
                 like_count=int(getattr(item.content, "like_count", 0) or 0),
@@ -7728,6 +7930,7 @@ def create_app(
             rows = filter_recommendation_rows(rows, disliked_topics)
         rows, snapshot_expires_at = _recommendation_snapshot_rows_and_expiry(rows)
         rows = _cap_by_franchise(rows, max_per_franchise=2)[:20]
+
         return RecommendationListResponse(
             items=[
                 RecommendationOut(
@@ -7748,6 +7951,7 @@ def create_app(
                     published_label=str(row.get("published_label", "") or ""),
                     content_type=str(row.get("content_type", "") or "video"),
                     body_text=str(row.get("body_text", "") or ""),
+                    source_metadata=_fail_closed_source_metadata(row.get("source_metadata", {})),
                     duration=int(row.get("duration", 0) or 0),
                     view_count=int(row.get("view_count", 0) or 0),
                     like_count=int(row.get("like_count", 0) or 0),
@@ -14231,6 +14435,70 @@ def create_app(
             auth=auth_weibo(auth_ctx),
         )
 
+    def _github_status_item(cfg: Any, auth_ctx: Any) -> SourceStatusItem:
+        """Combine GitHub's anonymous auth contract with local discovery health."""
+
+        from openbiliclaw.api.source_auth.providers import auth_github
+        from openbiliclaw.runtime.github_producer import github_source_status
+        from openbiliclaw.sources.github_client import resolve_github_access_token
+
+        github_cfg = getattr(cfg.sources, "github", None)
+        enabled = bool(getattr(github_cfg, "enabled", False))
+        access_token, _origin = resolve_github_access_token(
+            config_token=str(getattr(github_cfg, "access_token", "") or ""),
+        )
+        status = (
+            github_source_status(
+                ctx.database,
+                enabled=enabled,
+                access_token=access_token,
+                source_modes=getattr(
+                    github_cfg,
+                    "source_modes",
+                    ("search", "ranked", "latest"),
+                ),
+            )
+            if hasattr(ctx.database, "conn")
+            else {
+                "state": "unverified" if enabled else "disabled",
+                "detail": (
+                    "尚未运行 GitHub 仓库发现。"
+                    if enabled
+                    else "已保存 GitHub PAT，但来源未启用；启用并保存后才会使用。"
+                    if access_token
+                    else "GitHub 来源未启用。"
+                ),
+                **({"token_state": "ok"} if access_token else {}),
+            }
+        )
+        raw_discovery_state = str(status.get("state") or "unverified")
+        if raw_discovery_state not in {
+            "disabled",
+            "unverified",
+            "ready",
+            "partial",
+            "error",
+            "rate_limited",
+        }:
+            raw_discovery_state = "unverified"
+        discovery_state = cast(
+            "Literal['disabled', 'unverified', 'ready', 'partial', 'error', 'rate_limited']",
+            raw_discovery_state,
+        )
+        auth_contract = auth_github(auth_ctx)
+        return SourceStatusItem(
+            enabled=enabled,
+            state="no_auth",
+            # Legacy fields stay byte-for-byte provider-owned; discovery
+            # health is carried independently by discovery_state/feed_paused.
+            detail=auth_contract.detail,
+            logged_in=True,
+            feed_paused=discovery_state == "rate_limited",
+            discovery_state=discovery_state,
+            token_state=str(status.get("token_state") or "") if enabled else "",
+            auth=auth_contract,
+        )
+
     @app.get("/api/sources/status", response_model=SourcesStatusResponse)
     def sources_status() -> SourcesStatusResponse:
         """Unified per-source login / cookie readiness for the settings pages.
@@ -14296,6 +14564,7 @@ def create_app(
         # discovery-health detail and the token_state axis the loop cannot model.
         # Do not delete this line thinking the loop covers it — it does not.
         items["bangumi"] = _bangumi_status_item(cfg, auth_ctx)
+        items["github"] = _github_status_item(cfg, auth_ctx)
         items["weibo"] = _weibo_status_item(cfg, auth_ctx)
         statuses = SourcesStatusResponse(**items)
         _attach_network_hints(statuses, cfg)
@@ -14754,6 +15023,34 @@ def create_app(
                 ),
             )
 
+        def _github_credential_item(sources: Any, config: Any) -> SourceCredentialItem:
+            """GitHub's config-only PAT row without any secret echo."""
+
+            github_cfg = getattr(sources, "github", None)
+            token_set = bool(
+                str(os.environ.get("OPENBILICLAW_GITHUB_TOKEN", "") or "").strip()
+                or str(getattr(github_cfg, "access_token", "") or "").strip()
+            )
+            detail = (
+                "GitHub 公开仓库发现无需凭据；可选 PAT 只用于 GET /user 身份确认和提高"
+                "公开 API 限额。后端不读取 GITHUB_TOKEN / GH_TOKEN，也不访问私有仓库。"
+            )
+            form = build_credential_form("github", cfg=config)
+            return SourceCredentialItem(
+                label="可选 PAT",
+                # Never return the token, not even a masked prefix/suffix.
+                value="",
+                available=token_set,
+                detail=detail,
+                form=form,
+                summary=credential_summary(
+                    form,
+                    label="PAT",
+                    available=token_set,
+                    detail=detail,
+                ),
+            )
+
         return SourcesCredentialsResponse(
             bilibili=item("bilibili", "Cookie", bili_cookie, "B 站当前 resolved Cookie。"),
             xiaohongshu=item(
@@ -14785,6 +15082,7 @@ def create_app(
                 secret=False,
             ),
             bangumi=_bangumi_credential_item(srcs, cfg),
+            github=_github_credential_item(srcs, cfg),
             linuxdo=item(
                 "linuxdo",
                 "浏览器登录态",
@@ -16741,12 +17039,8 @@ def create_app(
                 "recommendation_date_preset": getattr(
                     source_cfg, "recommendation_date_preset", "all"
                 ),
-                "recommendation_date_start": getattr(
-                    source_cfg, "recommendation_date_start", ""
-                ),
-                "recommendation_date_end": getattr(
-                    source_cfg, "recommendation_date_end", ""
-                ),
+                "recommendation_date_start": getattr(source_cfg, "recommendation_date_start", ""),
+                "recommendation_date_end": getattr(source_cfg, "recommendation_date_end", ""),
                 "recommendation_date_weight": getattr(
                     source_cfg, "recommendation_date_weight", 0.5
                 ),
@@ -16878,7 +17172,6 @@ def create_app(
                 bilibili=BilibiliSourceConfigOut(
                     enabled=cfg.sources.bilibili.enabled,
                     min_interval_minutes=cfg.sources.bilibili.min_interval_minutes,
-
                     **_source_date_pref_out_kwargs(cfg.sources.bilibili),
                 ),
                 xiaohongshu=XiaohongshuSourceConfigOut(
@@ -16888,7 +17181,6 @@ def create_app(
                     daily_creator_budget=cfg.sources.xiaohongshu.daily_creator_budget,
                     task_interval_seconds=cfg.sources.xiaohongshu.task_interval_seconds,
                     min_interval_minutes=cfg.sources.xiaohongshu.min_interval_minutes,
-
                     **_source_date_pref_out_kwargs(cfg.sources.xiaohongshu),
                 ),
                 douyin=DouyinSourceConfigOut(
@@ -16902,7 +17194,6 @@ def create_app(
                     daily_feed_budget=cfg.sources.douyin.daily_feed_budget,
                     request_interval_seconds=cfg.sources.douyin.request_interval_seconds,
                     min_interval_minutes=cfg.sources.douyin.min_interval_minutes,
-
                     **_source_date_pref_out_kwargs(cfg.sources.douyin),
                 ),
                 youtube=YoutubeSourceConfigOut(
@@ -16913,7 +17204,6 @@ def create_app(
                     daily_channel_budget=cfg.sources.youtube.daily_channel_budget,
                     request_interval_seconds=cfg.sources.youtube.request_interval_seconds,
                     min_interval_minutes=cfg.sources.youtube.min_interval_minutes,
-
                     **_source_date_pref_out_kwargs(cfg.sources.youtube),
                 ),
                 twitter=TwitterSourceConfigOut(
@@ -16926,7 +17216,6 @@ def create_app(
                     daily_creator_budget=cfg.sources.twitter.daily_creator_budget,
                     request_interval_seconds=cfg.sources.twitter.request_interval_seconds,
                     min_interval_minutes=cfg.sources.twitter.min_interval_minutes,
-
                     **_source_date_pref_out_kwargs(cfg.sources.twitter),
                 ),
                 zhihu=ZhihuSourceConfigOut(
@@ -16940,7 +17229,6 @@ def create_app(
                     daily_related_budget=cfg.sources.zhihu.daily_related_budget,
                     request_interval_seconds=cfg.sources.zhihu.request_interval_seconds,
                     min_interval_minutes=cfg.sources.zhihu.min_interval_minutes,
-
                     **_source_date_pref_out_kwargs(cfg.sources.zhihu),
                 ),
                 reddit=RedditSourceConfigOut(
@@ -16954,7 +17242,6 @@ def create_app(
                     daily_related_budget=cfg.sources.reddit.daily_related_budget,
                     request_interval_seconds=cfg.sources.reddit.request_interval_seconds,
                     min_interval_minutes=cfg.sources.reddit.min_interval_minutes,
-
                     **_source_date_pref_out_kwargs(cfg.sources.reddit),
                 ),
                 bangumi=BangumiSourceConfigOut(
@@ -16969,8 +17256,27 @@ def create_app(
                     request_interval_seconds=cfg.sources.bangumi.request_interval_seconds,
                     min_interval_minutes=cfg.sources.bangumi.min_interval_minutes,
                     bootstrap_limit=cfg.sources.bangumi.bootstrap_limit,
-
                     **_source_date_pref_out_kwargs(cfg.sources.bangumi),
+                ),
+                github=GitHubSourceConfigOut(
+                    enabled=cfg.sources.github.enabled,
+                    username=cfg.sources.github.username,
+                    access_token_set=bool(
+                        str(os.environ.get("OPENBILICLAW_GITHUB_TOKEN", "") or "").strip()
+                        or str(cfg.sources.github.access_token or "").strip()
+                    ),
+                    # This field is intentionally invariant. It documents the
+                    # only env credential the runtime is allowed to read.
+                    token_env="OPENBILICLAW_GITHUB_TOKEN",
+                    source_modes=list(cfg.sources.github.source_modes),
+                    daily_search_budget=cfg.sources.github.daily_search_budget,
+                    daily_ranked_budget=cfg.sources.github.daily_ranked_budget,
+                    daily_latest_budget=cfg.sources.github.daily_latest_budget,
+                    request_interval_seconds=cfg.sources.github.request_interval_seconds,
+                    min_interval_minutes=cfg.sources.github.min_interval_minutes,
+                    bootstrap_limit=cfg.sources.github.bootstrap_limit,
+                    bootstrap_max_pages=cfg.sources.github.bootstrap_max_pages,
+                    **_source_date_pref_out_kwargs(cfg.sources.github),
                 ),
                 linuxdo=LinuxdoSourceConfigOut(
                     enabled=cfg.sources.linuxdo.enabled,
@@ -16984,7 +17290,6 @@ def create_app(
                     request_interval_seconds=cfg.sources.linuxdo.request_interval_seconds,
                     min_interval_minutes=cfg.sources.linuxdo.min_interval_minutes,
                     bootstrap_limit=cfg.sources.linuxdo.bootstrap_limit,
-
                     **_source_date_pref_out_kwargs(cfg.sources.linuxdo),
                 ),
                 v2ex=V2EXSourceConfigOut(
@@ -17017,7 +17322,6 @@ def create_app(
                     bootstrap_replies_limit=cfg.sources.v2ex.bootstrap_replies_limit,
                     bootstrap_favorites_limit=cfg.sources.v2ex.bootstrap_favorites_limit,
                     bootstrap_max_pages_per_scope=cfg.sources.v2ex.bootstrap_max_pages_per_scope,
-
                     **_source_date_pref_out_kwargs(cfg.sources.v2ex),
                 ),
                 weibo=WeiboSourceConfigOut(
@@ -17028,7 +17332,6 @@ def create_app(
                     daily_creator_budget=cfg.sources.weibo.daily_creator_budget,
                     request_interval_seconds=cfg.sources.weibo.request_interval_seconds,
                     min_interval_minutes=cfg.sources.weibo.min_interval_minutes,
-
                     **_source_date_pref_out_kwargs(cfg.sources.weibo),
                 ),
             ),
@@ -18784,9 +19087,7 @@ def create_app(
                     value = source_data[key]
                     setattr(source_cfg, key, "" if value is None else str(value))
             if "recommendation_date_weight" in source_data:
-                source_cfg.recommendation_date_weight = source_data[
-                    "recommendation_date_weight"
-                ]
+                source_cfg.recommendation_date_weight = source_data["recommendation_date_weight"]
 
         # Apply bilibili updates
         if "bilibili" in update:
@@ -19260,6 +19561,277 @@ def create_app(
                             )
                         setattr(cfg.sources.bangumi, key, value)
 
+                github_data = sources_data.get("github")
+                if isinstance(github_data, dict):
+                    from openbiliclaw.config import (
+                        GITHUB_ALLOWED_SOURCE_MODES,
+                        GITHUB_CONFIG_INTEGER_LIMITS,
+                        GITHUB_TOKEN_ENV,
+                        normalize_github_source_config,
+                    )
+                    from openbiliclaw.sources.github_client import (
+                        GitHubAPIError,
+                        GitHubClient,
+                        github_user_id,
+                        github_user_login,
+                        resolve_github_access_token,
+                        validate_github_access_token,
+                        validate_github_username,
+                    )
+
+                    allowed_github_fields = {
+                        "enabled",
+                        "username",
+                        "access_token",
+                        "access_token_set",  # read-only GET echo; ignored
+                        "token_env",
+                        "source_modes",
+                        "recommendation_date_preset",
+                        "recommendation_date_start",
+                        "recommendation_date_end",
+                        "recommendation_date_weight",
+                        *GITHUB_CONFIG_INTEGER_LIMITS,
+                    }
+                    unknown_github_fields = sorted(set(github_data) - allowed_github_fields)
+                    if unknown_github_fields:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                "GitHub 包含不支持的配置字段: " + ", ".join(unknown_github_fields)
+                            ),
+                        )
+
+                    github_cfg = cfg.sources.github
+                    original_github_username = str(github_cfg.username or "").strip()
+                    github_username_updated = False
+                    if "enabled" in github_data:
+                        github_cfg.enabled = _as_bool(github_data["enabled"])
+                    if "username" in github_data:
+                        try:
+                            submitted_github_username = validate_github_username(
+                                github_data["username"]
+                            )
+                        except ValueError as exc:
+                            raise HTTPException(status_code=400, detail=str(exc)) from exc
+                        github_username_updated = (
+                            submitted_github_username.casefold()
+                            != original_github_username.casefold()
+                        )
+                        github_cfg.username = submitted_github_username
+                    if "token_env" in github_data:
+                        submitted_token_env = str(github_data["token_env"] or "").strip()
+                        if submitted_token_env != GITHUB_TOKEN_ENV:
+                            raise HTTPException(
+                                status_code=400,
+                                detail=("GitHub token_env 只允许 OPENBILICLAW_GITHUB_TOKEN"),
+                            )
+                        github_cfg.token_env = GITHUB_TOKEN_ENV
+
+                    github_token_updated = False
+                    if "access_token" in github_data and not _is_masked_echo(
+                        str(github_data["access_token"] or "").strip()
+                    ):
+                        github_token_updated = True
+                        try:
+                            new_github_token = validate_github_access_token(
+                                github_data["access_token"]
+                            )
+                        except ValueError as exc:
+                            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+                        if new_github_token:
+                            try:
+                                async with GitHubClient(token=new_github_token) as github_client:
+                                    identity = await github_client.get_user()
+                                    resolved_username = github_user_login(identity)
+                                    resolved_user_id = github_user_id(identity)
+                                    # A renamed account may have a different login but
+                                    # the same durable numeric id. Only a numeric-id
+                                    # conflict is an identity mismatch.
+                                    if (
+                                        github_cfg.username
+                                        and github_cfg.username.casefold()
+                                        != resolved_username.casefold()
+                                    ):
+                                        claimed = await github_client.get_user_profile(
+                                            github_cfg.username
+                                        )
+                                        if github_user_id(claimed) != resolved_user_id:
+                                            return JSONResponse(
+                                                {
+                                                    "error": "github_identity_mismatch",
+                                                    "message": (
+                                                        "GitHub PAT 与填写的公开用户名属于"
+                                                        "不同账号；为避免把他人 Starred "
+                                                        "仓库写入画像，本次配置未保存。"
+                                                    ),
+                                                },
+                                                status_code=400,
+                                            )
+                            except GitHubAPIError as exc:
+                                if exc.code == "unauthorized":
+                                    return JSONResponse(
+                                        {
+                                            "error": "invalid_github_access_token",
+                                            "message": (
+                                                "GitHub PAT 被拒绝（缺失、错误或已过期）。"
+                                            ),
+                                        },
+                                        status_code=400,
+                                    )
+                                return JSONResponse(
+                                    {
+                                        "error": "github_token_check_failed",
+                                        "message": (
+                                            "校验 GitHub PAT 时无法完成只读 GET /user，"
+                                            "请检查网络后重试。"
+                                        ),
+                                    },
+                                    status_code=502,
+                                )
+
+                            github_cfg.access_token = new_github_token
+                            github_cfg.username = resolved_username
+
+                            def _note_github_token(
+                                token: str = new_github_token,
+                                username: str = resolved_username,
+                                user_id: int = resolved_user_id,
+                            ) -> None:
+                                from openbiliclaw.api.source_auth.probe_cache import (
+                                    LIVE_PROBES,
+                                )
+                                from openbiliclaw.api.source_auth.verify import (
+                                    note_credential_changed,
+                                )
+                                from openbiliclaw.api.source_auth.write import (
+                                    credential_fingerprint,
+                                )
+                                from openbiliclaw.runtime.github_producer import (
+                                    clear_github_token_rejection,
+                                )
+
+                                clear_github_token_rejection(ctx.database)
+                                LIVE_PROBES.record(
+                                    "github",
+                                    authenticated=True,
+                                    detail=f"已识别 GitHub 账号（{username}）。",
+                                    network_error=False,
+                                    fingerprint=credential_fingerprint("github", token),
+                                    username=username,
+                                    user_id=user_id,
+                                )
+                                note_credential_changed("github")
+
+                            pending_credential_writes.append(("github", _note_github_token))
+                        else:
+                            github_cfg.access_token = ""
+
+                            def _note_github_token_cleared() -> None:
+                                from openbiliclaw.api.source_auth.probe_cache import (
+                                    LIVE_PROBES,
+                                )
+                                from openbiliclaw.api.source_auth.verify import (
+                                    note_credential_changed,
+                                )
+                                from openbiliclaw.runtime.github_producer import (
+                                    clear_github_token_rejection,
+                                )
+
+                                clear_github_token_rejection(ctx.database)
+                                LIVE_PROBES.clear("github")
+                                note_credential_changed("github")
+
+                            pending_credential_writes.append(("github", _note_github_token_cleared))
+
+                    if github_username_updated and not github_token_updated:
+                        existing_github_token, _existing_origin = resolve_github_access_token(
+                            github_cfg.access_token
+                        )
+                        if existing_github_token and github_cfg.username:
+                            try:
+                                async with GitHubClient(
+                                    token=existing_github_token
+                                ) as github_client:
+                                    authenticated = await github_client.get_user()
+                                    claimed = await github_client.get_user_profile(
+                                        github_cfg.username
+                                    )
+                                if github_user_id(authenticated) != github_user_id(claimed):
+                                    return JSONResponse(
+                                        {
+                                            "error": "github_identity_mismatch",
+                                            "message": (
+                                                "GitHub PAT 与填写的公开用户名属于不同账号；"
+                                                "本次用户名未保存。"
+                                            ),
+                                        },
+                                        status_code=400,
+                                    )
+                            except GitHubAPIError as exc:
+                                if exc.code == "unauthorized":
+                                    return JSONResponse(
+                                        {
+                                            "error": "invalid_github_access_token",
+                                            "message": (
+                                                "现有 GitHub PAT 已失效；请先更新或清除 PAT，"
+                                                "再修改公开用户名。"
+                                            ),
+                                        },
+                                        status_code=400,
+                                    )
+                                return JSONResponse(
+                                    {
+                                        "error": "github_token_check_failed",
+                                        "message": (
+                                            "校验 GitHub PAT 与公开用户名时无法完成官方只读请求，"
+                                            "本次用户名未保存。"
+                                        ),
+                                    },
+                                    status_code=502,
+                                )
+
+                    if "source_modes" in github_data:
+                        raw_modes = github_data["source_modes"]
+                        if not isinstance(raw_modes, list):
+                            raise HTTPException(
+                                status_code=400,
+                                detail="GitHub source_modes 必须是数组",
+                            )
+                        selected_modes = tuple(
+                            dict.fromkeys(str(value).strip().lower() for value in raw_modes)
+                        )
+                        if not selected_modes or any(
+                            value not in GITHUB_ALLOWED_SOURCE_MODES for value in selected_modes
+                        ):
+                            raise HTTPException(
+                                status_code=400,
+                                detail="GitHub source_modes 包含不支持的值",
+                            )
+                        github_cfg.source_modes = selected_modes
+                    for key, (minimum, maximum) in GITHUB_CONFIG_INTEGER_LIMITS.items():
+                        if key not in github_data:
+                            continue
+                        try:
+                            if isinstance(github_data[key], bool):
+                                raise ValueError
+                            value = int(github_data[key])
+                        except (TypeError, ValueError) as exc:
+                            raise HTTPException(
+                                status_code=400,
+                                detail=f"GitHub {key} 必须是整数",
+                            ) from exc
+                        if value < minimum or value > maximum:
+                            raise HTTPException(
+                                status_code=400,
+                                detail=(f"GitHub {key} 必须在 {minimum}..{maximum} 之间"),
+                            )
+                        setattr(github_cfg, key, value)
+                    try:
+                        normalize_github_source_config(github_cfg, strict=True)
+                    except ValueError as exc:
+                        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
                 linuxdo_data = sources_data.get("linuxdo")
                 if isinstance(linuxdo_data, dict):
                     if "enabled" in linuxdo_data:
@@ -19506,6 +20078,7 @@ def create_app(
                 "zhihu": cfg.sources.zhihu,
                 "reddit": cfg.sources.reddit,
                 "bangumi": cfg.sources.bangumi,
+                "github": cfg.sources.github,
                 "linuxdo": cfg.sources.linuxdo,
                 "v2ex": cfg.sources.v2ex,
                 "weibo": cfg.sources.weibo,

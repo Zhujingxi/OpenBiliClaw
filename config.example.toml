@@ -230,7 +230,7 @@ headed = false
 # 作用范围：OpenAI / Claude / Gemini / DeepSeek / OpenRouter / OrcaRouter / openai_compatible
 # 的 chat + embedding、YouTube(yt-dlp)、X(twitter-cli)、Reddit(rdt-cli /
 # OpenCLI)、Bangumi(api.bgm.tv 与封面 CDN lain.bgm.tv 均为海外 Cloudflare,
-# 国内网络直连易超时,需走代理)、GitHub 自动更新、Codex OAuth。
+# 国内网络直连易超时,需走代理)、GitHub 内容来源 / 自动更新、Codex OAuth。
 # X / Reddit 回落到浏览器扩展任务时仍由浏览器自己的网络设置决定。
 # B站 / 抖音 / Ollama 等国内直连请求始终直连,不受此项影响。
 # system(默认) = 继承环境 / 系统代理；direct = 忽略环境 / 系统代理；
@@ -405,6 +405,26 @@ request_interval_seconds = 1
 min_interval_minutes = 3
 bootstrap_limit = 300
 
+# ── GitHub 官方 REST API（公开仓库，只读）──
+# search / ranked / latest 发现无需登录；username 可导入该公开账号的 Starred
+# 仓库作为收藏画像。可选 PAT 只用于 GET /user 身份确认和提高公开 API 限额，
+# 永远不会开放私有仓库，也不会执行 star / follow / watch 等写操作。
+[sources.github]
+enabled = false
+username = ""
+# PAT 可写在这里，或只通过 OPENBILICLAW_GITHUB_TOKEN 注入。不要使用通用
+# GITHUB_TOKEN / GH_TOKEN：OpenBiliClaw 故意不读取它们，避免借用其他工具的权限。
+access_token = ""
+token_env = "OPENBILICLAW_GITHUB_TOKEN" # 固定安全边界，不支持改名
+source_modes = ["search", "ranked", "latest"]
+daily_search_budget = 120
+daily_ranked_budget = 60
+daily_latest_budget = 60
+request_interval_seconds = 6            # 匿名 Search API 10 次/分钟
+min_interval_minutes = 10
+bootstrap_limit = 300
+bootstrap_max_pages = 10
+
 # ── Linux.do（浏览器插件同源只读）──
 # 公开 search/hot/feed/creator/related 无需登录；登录后还可读取本人收藏、点赞和
 # 最近阅读，用于画像初始化与周期增量。Cookie 始终留在浏览器内。
@@ -567,8 +587,9 @@ auto_update_allowed_remotes = [
   # 不敏感）；带凭据的 URL 一律拒绝；走 GitHub 镜像克隆的安装把镜像 URL 加进来即可
 
 [scheduler.pool_source_shares]
-# Candidate-pool source mix by platform family. The saved default 5:1:1:1:1:1
-# keeps B 站 as the main source when optional platforms are enabled.
+# Candidate-pool source mix by platform family. The saved default gives B 站
+# weight 5 and every optional canonical source weight 1; disabled sources are
+# removed before normalization.
 # 关掉的源（[sources.<name>].enabled = false）的配额会被自动剔除，剩余
 # 源按比例重新归一化吃满 pool_target_count——所以这里写多少不重要，重要的
 # 是源本身的 enabled 开关。
@@ -580,6 +601,7 @@ twitter = 1
 zhihu = 1
 reddit = 1
 bangumi = 1
+github = 1
 linuxdo = 1
 v2ex = 1
 weibo = 1

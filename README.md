@@ -31,11 +31,11 @@
 
 ## 10 秒看懂 OpenBiliClaw
 
-一个纯本地、私有、开源的自进化跨平台内容发现 Agent：从你的跨平台使用、反馈和对话中持续深化心理画像，带着对你的理解主动去 B 站、小红书、抖音、YouTube、X、知乎、Reddit、Linux.do、Bangumi、V2EX、微博与开放 Web 找内容。
+一个纯本地、私有、开源的自进化跨平台内容发现 Agent：从你的跨平台使用、反馈和对话中持续深化心理画像，带着对你的理解主动去 B 站、小红书、抖音、YouTube、X、知乎、Reddit、Linux.do、Bangumi、V2EX、微博、GitHub 与开放 Web 找内容。
 
 | 跨平台 | 本地优先 | 可调教 |
 |---|---|---|
-| B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Linux.do / Bangumi / V2EX / 微博 / Web | 数据默认留在本机 SQLite | 喜欢、不感兴趣、聊天反馈都会改变后续推荐 |
+| B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Linux.do / Bangumi / V2EX / 微博 / GitHub / Web | 数据默认留在本机 SQLite | 喜欢、不感兴趣、聊天反馈都会改变后续推荐 |
 
 <p align="center">
   <a href="https://chromewebstore.google.com/detail/cdfjfkdjjhdaccbldipkjhpibnfbiamg"><b>安装浏览器插件</b></a>
@@ -62,7 +62,7 @@
    请按照 https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docs/agent-install.md 的说明帮我部署 OpenBiliClaw 后端(务必用 Bash 的 curl 下载这个文档,不要用 WebFetch — 会丢关键指令)
    ```
 
-3. **连接来源** —— 在装了插件的浏览器登录 [B 站](https://www.bilibili.com)（默认初始化来源），或改选小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Linux.do / V2EX / 微博；Linux.do、Bangumi、V2EX 与微博均可做公开发现，登录 Linux.do、V2EX 或微博后还能在初始化时只读导入个人信号，Bangumi 可用公开用户名初始化画像。微博公开发现无需登录，个人收藏 / 关注 / 互动初始化需要已登录微博浏览器态。
+3. **连接来源** —— 在装了插件的浏览器登录 [B 站](https://www.bilibili.com)（默认初始化来源），或改选小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Linux.do / V2EX / 微博 / GitHub。Linux.do、Bangumi、V2EX、微博与 GitHub 均可公开发现；需要账号态的来源仍复用已安装插件，GitHub 则由后端官方 REST API 匿名读取公开 repository。GitHub 可用公开用户名把 starred repositories 用作初始化信号，PAT 只是可选的提额和身份校验方式。
 4. **打开界面** —— 浏览器访问 `http://127.0.0.1:8420/web`；手机扫插件二维码打开 `http://<电脑局域网 IP>:8420/m/`，保存到主屏幕即可当 App 用；想要原生 App 体验，可安装独立仓库的 [Flutter 客户端](https://github.com/whiteguo233/OpenBiliClaw-mobile)（Android / iOS / Web / 桌面，安装包见 [Latest Release](https://github.com/whiteguo233/OpenBiliClaw-mobile/releases/latest)），在设置里填后端地址即可连接同一后端。
 
 不在同一局域网时，`OpenBiliClaw-mobile` 的 **Android / iOS 原生 App** 已内嵌 `tsnet`，电脑端
@@ -95,13 +95,13 @@
 
 ## 为什么需要 OpenBiliClaw？
 
-> 名字起源于 B 站（`Bili` = Bilibili，`Claw` = 爪子），项目最早只支持 B 站。从 v0.3.0 起已扩展为通用跨平台 Agent，覆盖 B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Linux.do / Bangumi / V2EX / 微博与通用 Web，持续接入更多内容平台。
+> 名字起源于 B 站（`Bili` = Bilibili，`Claw` = 爪子），项目最早只支持 B 站。从 v0.3.0 起已扩展为通用跨平台 Agent，覆盖 B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Linux.do / Bangumi / V2EX / 微博 / GitHub 与通用 Web，持续接入更多内容平台。
 
 推荐系统本质上是一个**中间商**——平台站在海量内容和海量用户之间做匹配分发。现代推荐系统远比「优化点击率」复杂：它同时权衡点击率、完播率、点赞/投币概率、停留时长、用户留存、创作者生态健康、广告收入等十几个目标，把它们加权压成一个分数来排序。听起来很科学，但问题在于：**这些权重是平台定的，优化目标归根结底是平台的**——用户满意度只是被当作留存和变现的手段，而非目的本身。你以为你在挑内容，其实是中间商在替你决定你能看到什么。结果就是：推荐越来越像你已经看过的东西，偶尔的惊喜全靠运气。
 
 而且每个平台都是一座孤岛。你在 B 站看了三年机械键盘，小红书完全不知道；你在小红书种草的咖啡器具，B 站从来不会推给你。你的兴趣被割裂在不同平台的数据库里，没有人帮你把它们连起来。
 
-**OpenBiliClaw 反过来。** 它是一个本地运行的 AI Agent——先深度理解你，再根据对你的理解**跨平台**主动搜寻你会喜欢的内容。项目从 B 站起步，现已覆盖小红书、抖音、YouTube、X（Twitter）、知乎、Reddit、Linux.do、Bangumi、V2EX、微博和开放 Web：
+**OpenBiliClaw 反过来。** 它是一个本地运行的 AI Agent——先深度理解你，再根据对你的理解**跨平台**主动搜寻你会喜欢的内容。项目从 B 站起步，现已覆盖小红书、抖音、YouTube、X（Twitter）、知乎、Reddit、Linux.do、Bangumi、V2EX、微博、GitHub 和开放 Web：
 
 ### 🧠 先懂你，再找内容
 
@@ -120,7 +120,7 @@
 > | | 各平台官方推荐 | 关键词过滤插件 | OpenBiliClaw |
 > |---|---|---|---|
 > | 推荐逻辑 | 协同过滤 | 标签匹配 | 心理画像 + 五层记忆 |
-> | 内容来源 | 单一平台 | 单一平台 | 跨平台（B 站 · 小红书 · 抖音 · YouTube · X · 知乎 · Reddit · Linux.do · Bangumi · V2EX · 微博 · Web） |
+> | 内容来源 | 单一平台 | 单一平台 | 跨平台（B 站 · 小红书 · 抖音 · YouTube · X · 知乎 · Reddit · Linux.do · Bangumi · V2EX · 微博 · GitHub · Web） |
 > | 信息茧房 | 越推越窄 | 不解决 | 猜测兴趣主动破茧 |
 > | 数据归属 | 平台所有 | 通常云端 | 100% 本地 |
 > | 推荐解释 | "猜你喜欢" | 无 | 像朋友一样告诉你为什么 |
@@ -341,7 +341,7 @@ macOS 12+。10.15 / 11 会只降级远程 Tailnet，本机应用功能仍照常�
 请按照 https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/docs/agent-install.md 的说明帮我部署 OpenBiliClaw 后端(务必用 Bash 的 curl 下载这个文档,不要用 WebFetch — 会丢关键指令)
 ```
 
-AI 助手会克隆仓库、安装依赖、用局域网可访问的默认绑定启动后端（`0.0.0.0:8420`）、做健康检查，并问几个有默认值的问题。自动初始化前会真实验证全局 LLM 实例链和独立 embedding 服务；有一个不通就先停下让你修配置。小红书、抖音、YouTube、X、知乎、Reddit、Linux.do、V2EX 与微博数据只有你明确同意才会进入初始画像；微博个人事件需要已登录微博浏览器和扩展，公开发现仍可匿名进行。
+AI 助手会克隆仓库、安装依赖、用局域网可访问的默认绑定启动后端（`0.0.0.0:8420`）、做健康检查，并问几个有默认值的问题。自动初始化前会真实验证全局 LLM 实例链和独立 embedding 服务；有一个不通就先停下让你修配置。小红书、抖音、YouTube、X、知乎、Reddit、Linux.do、Bangumi、V2EX、微博与 GitHub 信号只有你明确同意才会进入初始画像；微博个人事件需要已登录微博浏览器和扩展，Bangumi / GitHub 则需公开用户名或各自可选令牌解析出的身份。三者的公开发现仍可匿名进行。
 
 源码安装默认不编译 Tailnet helper。只有用户明确需要 Android / iOS 原生 App 跨网络访问时，安装 Go 1.26.6
 并在 checkout 中运行 `openbiliclaw tailnet build-helper`、`openbiliclaw tailnet enable`，然后
@@ -353,7 +353,7 @@ Chrome Web Store / AMO 发布包默认只声明本机后端权限。让插件连
 
 ### 3. 在同一个浏览器登录内容平台
 
-默认登录 [B 站](https://www.bilibili.com) 并勾选 B 站来源即可生成第一版画像和推荐；如果不想接 B 站，也可以改勾已登录的小红书 / 抖音 / YouTube / X / 知乎 / Reddit / [Linux.do](https://linux.do) / [V2EX](https://www.v2ex.com)，或选择 Bangumi 并填写公开用户名。至少保留一个能拉到画像信号的来源；未登录 Linux.do / V2EX 和未填身份的 Bangumi 仍可公开 discovery，但不能单独完成画像初始化。
+默认登录 [B 站](https://www.bilibili.com) 并勾选 B 站来源即可生成第一版画像和推荐；如果不想接 B 站，也可以改勾已登录的小红书 / 抖音 / YouTube / X / 知乎 / Reddit / [Linux.do](https://linux.do) / [V2EX](https://www.v2ex.com)，或选择 Bangumi / GitHub 并填写公开用户名。至少保留一个能拉到画像信号的来源；未填身份的 Bangumi / GitHub 仍可公开 discovery，但不能单独完成画像初始化。
 
 ### 4. 打开桌面端或移动端 Web
 
@@ -388,7 +388,7 @@ Windows 原生（PowerShell，不需要 Docker / WSL2）：
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; iwr https://raw.githubusercontent.com/whiteguo233/OpenBiliClaw/main/scripts/install.ps1 -UseBasicParsing | iex
 ```
 
-脚本依赖 `git` 和 Python 3.11+。它会自动克隆仓库，然后先在终端向导里收集首选 LLM 实例、embedding、B 站 Cookie，以及小红书 / 抖音 / YouTube 的 opt-in 决策，再安装依赖、启动后端和健康检查；确认齐全后会先验证全局 LLM 实例链和 embedding 服务都能真实响应，再自动运行 init，完成画像生成和首轮发现。X / 知乎 / Reddit / Linux.do / Bangumi / V2EX / 微博可在启动后的 `/setup/` 或设置页显式开启；Linux.do、Bangumi、V2EX 与微博的公开 discovery 无需登录，微博个人初始化需要已登录微博浏览器和扩展，Bangumi 个人初始化需要公开用户名。不确定的选项直接回车或选默认。
+脚本依赖 `git` 和 Python 3.11+。它会自动克隆仓库，然后先在终端向导里收集首选 LLM 实例、embedding、B 站 Cookie，以及小红书 / 抖音 / YouTube 的 opt-in 决策，再安装依赖、启动后端和健康检查；确认齐全后会先验证全局 LLM 实例链和 embedding 服务都能真实响应，再自动运行 init，完成画像生成和首轮发现。X / 知乎 / Reddit / Linux.do / Bangumi / V2EX / 微博 / GitHub 可在启动后的 `/setup/` 或设置页显式开启；Linux.do、Bangumi、V2EX、微博与 GitHub 的公开 discovery 无需登录，微博个人初始化需要已登录微博浏览器和扩展，Bangumi / GitHub 个人初始化可填写公开用户名，GitHub PAT 仍为可选。不确定的选项直接回车或选默认。
 
 </details>
 
@@ -431,8 +431,9 @@ OpenBiliClaw 不保存你的平台密码，也不替你绕过登录。需登录�
 | **Linux.do** | 在同一浏览器打开 https://linux.do 正常登录；公开 discovery 无需登录 | 未登录时 `fetch-linuxdo` 和 `init --yes-linuxdo` 拉不到书签 / 点赞 / 阅读记录，但 search / hot / feed / creator / related discovery 仍可用 |
 | **Bangumi** | 无需登录；可选填公开用户名读取公开收藏，或填个人令牌读取私密收藏；插件在 bgm.tv / bangumi.tv 仅做账号身份自动识别（不读 Cookie、不采集浏览行为） | 未填用户名时不能把 Bangumi 作为唯一画像初始化来源，但匿名 search / ranked / 按日期 discovery 仍可用 |
 | **V2EX** | 无需登录；可选填 PAT；guided init / 增量任务在扩展中读取本人主题、本人回复、收藏主题和收藏 Node 的公开渲染字段 | 未连接扩展时仍可匿名 search / node / tab / hot / latest discovery；收藏 scope 需要实际登录态 |
+| **GitHub** | 无需登录；可选填公开用户名读取公开 starred repositories，PAT 只用于提额和 `/user` 身份核验 | 未填身份时仍可匿名 search / ranked / latest discovery，但不能把 GitHub 作为唯一画像初始化来源；不读取浏览器 Cookie |
 
-小红书、抖音、YouTube、知乎和 Linux.do 走 Chrome 插件任务链路，Reddit 日常 discovery 默认走随后端安装的 rdt-cli、初始化信号仍走插件，X 的 discovery 走服务端 cookie 重放；这些读取链路都不需要你额外启动 CDP 调试 Chrome。Linux.do 上游请求全部在真实站点 tab 内以同源 GET 执行，`_t` 只作登录布尔，Cookie 值和原始响应不会上传。Reddit/X、YouTube、小红书、抖音与知乎原生保存 executor 已 6/6 接入并通过 fixture 测试。YouTube 使用命名播放列表；当前知乎使用全局 `收藏 / 已收藏` 开关，目标显示为 `知乎收藏`，初始“已收藏”和新文档确认都严格只读，扩展不会盲目再次点击收藏。Linux.do 不提供任何站内写回。`[sources.browser].cdp_url` 只保留给通用 Web / 自定义网页源的浏览器抓取场景。
+小红书、抖音、YouTube、知乎和 Linux.do 走 Chrome 插件任务链路，Reddit 日常 discovery 默认走随后端安装的 rdt-cli、初始化信号仍走插件，X 的 discovery 走服务端 cookie 重放；GitHub 则始终由后端官方 REST client 只读公开 repository，不进入插件任务。Linux.do 上游请求全部在真实站点 tab 内以同源 GET 执行，`_t` 只作登录布尔，Cookie 值和原始响应不会上传。Reddit/X、YouTube、小红书、抖音与知乎原生保存 executor 已 6/6 接入并通过 fixture 测试；2026-07-14 的真实账号回归中，六平台 favorite 与 watch-later/fallback 均得到 `synced/already_synced`。Linux.do 与 GitHub 不提供任何站内写回。`[sources.browser].cdp_url` 只保留给通用 Web / 自定义网页源的浏览器抓取场景。
 
 </details>
 
@@ -617,7 +618,7 @@ OpenClaw 收到 `interest.probe` 事件（或主动拉取 `next-probe`），发�
 - 🧠 **五层灵魂画像** — 事件→偏好→觉察→洞察→灵魂，推断 MBTI、认知风格和深层需求（[详解](docs/modules/soul.md)）
 - 🔮 **兴趣探针** — 基于心理学桥接主动猜测你可能喜欢的未知领域，猜对升级为正式兴趣，猜错安静退出
 - 🧭 **避雷探针** — 主动确认你想避开的内容形态和风格边界，确认后才写入过滤偏好
-- 🌐 **跨平台内容源** — B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Linux.do / Bangumi / V2EX / 微博 / 通用 Web，兴趣不再被单一平台割裂（[详解](docs/modules/discovery.md)）
+- 🌐 **跨平台内容源** — B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Linux.do / Bangumi / V2EX / 微博 / GitHub / 通用 Web，兴趣不再被单一平台割裂（[详解](docs/modules/discovery.md)）
 - 🎯 **智能多样性** — 主题配额 + 跨平台混排 + 小源保护，告别「一刷都是 AI」
 - ⚡ **「换一批」瞬间响应且默认去重** — reshuffle ~0.6s；当前卡、推荐历史和持久化已看账本三层排除，连续刷不卡顿也不靠“忽略当前”开关
 - 💬 **有温度的推荐理由** — 像朋友一样解释为什么你会喜欢，而不是「因为你看过类似视频」
@@ -683,11 +684,12 @@ OpenClaw 收到 `interest.probe` 事件（或主动拉取 `next-probe`），发�
 | **Linux.do** | 书签 / 点赞 / 阅读记录初始化 · 搜索 · 热门 · 最新 · 作者 · 相关 | 插件在真实 `linux.do` 任务 tab 内执行同源只读 GET；公开发现无需登录，不上传 Cookie 或原始响应 |
 | **Bangumi** | 公开收藏初始化 · 搜索 · 排名 · 按日期浏览 | 官方匿名只读 API；无需 Cookie/token，日期结果可能含未播条目 |
 | **V2EX** | 搜索 · Node · Tab · 热门 · 最新 | 官方匿名 API / JSON Feed；PAT 可选增强 API 2.0，Topic 为无封面文字卡 |
+| **GitHub** | starred repositories 初始化 · 搜索 · 排名 · 最新 | 官方 REST API；匿名可用、PAT 可选，强制只读公开 repository，无封面文字卡 |
 | **通用 Web** | 浏览器 + LLM 抽取 | 适配任意网页 |
 
 发现之后的统一流程：
 
-- **安全取数** — 后端不代登录、不爬你看不到的内容；所有平台复用你浏览器里已有的登录会话，首轮画像信号只在你点「开始初始化」后按所选来源拉取。账号周期回拉默认关闭，只有显式设置 `source_incremental_enabled=true` 后，已启用来源才会在扩展在线时按全局 / 逐源周期运行；这不影响手动初始化、手动拉取或后台内容发现。抖音仍额外默认关闭，Linux.do 任务只允许 GET，`_t` 仅作布尔登录提示。
+- **安全取数** — 后端不代登录、不爬你看不到的内容；需要账号态的来源复用浏览器已有会话，GitHub 等公开 API 来源只读公开数据。首轮画像信号只在你点「开始初始化」后按所选来源拉取。账号周期回拉默认关闭；GitHub 明确采用 init-and-on-demand，不加入扩展周期任务。抖音仍额外默认关闭，Linux.do 任务只允许 GET，`_t` 仅作布尔登录提示。
 - **连续统一评估** — 各来源原始候选进入同一待评估池，由共享 evaluator 结合灵魂画像、正文和近期负反馈批量打分；默认 3×30 worker 任一完成即补位，调度只计 durable 库存，串行 admission 按实时 headroom 封顶。可选 embedding 预过滤默认先 shadow 观测，确认无误后才 enforce 跳过明显低相似候选。
 - **多样性选择** — 平台配额 → 主题去重 → 风格均衡 → 跨平台混排 → 数量封顶；开箱只启用 B 站，其余平台在设置里显式打开。
 
@@ -712,10 +714,12 @@ OpenBiliClaw/
 │   ├── memory/                # 多层网状记忆系统
 │   ├── discovery/             # 内容发现引擎 (多源策略 · 待评估池 · 配额均分 · 多样性选择)
 │   ├── recommendation/        # 推荐与表达引擎 (跨平台混排)
-│   ├── sources/               # 多源适配层 (SourceAdapter 协议，含 V2EX 任务桥)
+│   ├── sources/               # 多源适配层 (SourceAdapter 协议，含 GitHub 官方 API)
 │   │   ├── bilibili_adapter   # B 站 (API 直连)
 │   │   ├── bangumi_client     # Bangumi 官方匿名 v0 API 客户端
 │   │   ├── bangumi            # Bangumi 条目 / 公开收藏归一化
+│   │   ├── github_client      # GitHub 官方 REST API 客户端
+│   │   ├── github             # Repository / starred event 归一化
 │   │   ├── v2ex_client        # V2EX 匿名 API/Feed 与可选 PAT 客户端
 │   │   ├── v2ex               # V2EX Topic 归一化
 │   │   ├── xiaohongshu_adapter # 小红书 (扩展代理)
@@ -758,6 +762,7 @@ OpenBiliClaw/
 | Linux.do 交互 | 普通页面使用统一行为 adapter；隔离任务 tab 只执行同源 GET，支持 search / hot / feed / creator / related 与 bookmarks / likes / read_history；只回传归一化字段或结构化错误，Cookie 和原始响应不上报 |
 | Bangumi 交互 | 官方匿名只读 v0 API；search / ranked / 按日期浏览进入统一候选池，可选公开用户名读取公开收藏用于初始化；不收 Cookie/token，不做站内写回 |
 | V2EX 交互 | 官方匿名 API / Feed；search / node / tab / hot / latest 进入统一候选池，可选 PAT 只读增强；扩展按需读取四个只读 bootstrap scope，心跳只回传登录布尔值；不发帖、不回复、不收藏、不关注 Node |
+| GitHub 交互 | 后端官方 REST API；匿名 search / ranked / latest 进入统一候选池，公开 starred repositories 可作为 `favorite` 初始化信号，PAT 可选且固定专用环境变量；无插件权限、Cookie、媒体或站内写入 |
 | 可选 HTTPS | 公网域名使用固定版本 Caddy Docker overlay 自动管理证书；LAN/self-managed 使用 Python TLS Proxy + `[tls]` extra，本地 CA/SAN；默认关闭且两种入口互斥 |
 | 存储 | SQLite + Embedding 向量索引 |
 | 容器化 | Docker Compose (后端) |
@@ -782,7 +787,7 @@ OpenBiliClaw/
 
 ## 🗺️ 后续规划
 
-OpenBiliClaw 的目标是做你的**全网个性化内容入口**——从 B 站起步，已覆盖小红书、抖音、YouTube、X、知乎、Reddit、Linux.do、Bangumi、V2EX、微博与通用 Web，下一步：
+OpenBiliClaw 的目标是做你的**全网个性化内容入口**——从 B 站起步，已覆盖小红书、抖音、YouTube、X、知乎、Reddit、Linux.do、Bangumi、V2EX、微博、GitHub 与通用 Web，下一步：
 
 - **更多内容源** — 各类 BBS / 论坛与垂直社区；每个平台都遵循统一来源契约与验收门禁
 - **跨平台兴趣融合** — 你在 B 站看的机械键盘 + 小红书种草的咖啡器具 + 抖音点赞收藏的短视频偏好 + YouTube 长视频观看和订阅 + X 点赞收藏的资讯 = 一个完整的你。画像融合让推荐不再割裂

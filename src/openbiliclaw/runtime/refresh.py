@@ -28,6 +28,7 @@ from openbiliclaw.runtime.image_cache import (
 )
 from openbiliclaw.runtime.keyword_fetch import PLATFORM_BILIBILI as _KW_PLATFORM_BILIBILI
 from openbiliclaw.runtime.presence import PresenceTracker, background_llm_work_allowed
+from openbiliclaw.runtime.source_policy import SOURCE_ORDER as _PLATFORM_SOURCE_ORDER
 from openbiliclaw.soul.avoidance_speculator import choose_next_avoidance_candidate
 from openbiliclaw.soul.speculator import (
     _normalize_probe_mode,
@@ -92,19 +93,6 @@ _COVER_PREFETCH_MAX_FETCH = 40
 _DEFAULT_PLATFORM_SOURCE_SHARES: dict[str, int] = {
     "bilibili": 5,
 }
-_PLATFORM_SOURCE_ORDER = (
-    "bilibili",
-    "xiaohongshu",
-    "douyin",
-    "youtube",
-    "twitter",
-    "zhihu",
-    "reddit",
-    "linuxdo",
-    "bangumi",
-    "v2ex",
-    "weibo",
-)
 _BILIBILI_DISCOVERY_SOURCES = ("search", "related_chain", "trending", "explore")
 # Pool-share fairness (spec 2026-07-20, Phase 3): max over-share rows evicted
 # per drain tick. Deliberately small so pool composition converges toward the
@@ -388,6 +376,7 @@ class ContinuousRefreshController:
     linuxdo_producer: Any | None = None
     v2ex_producer: Any | None = None
     weibo_producer: Any | None = None
+    github_producer: Any | None = None
     scheduler_config: Any = field(default_factory=SchedulerConfig)
     presence: PresenceTracker = field(default_factory=PresenceTracker)
     # gui-init D1: optional init-aware gate. When it returns True (a guided init
@@ -1583,6 +1572,7 @@ class ContinuousRefreshController:
             "linuxdo": self._tick_linuxdo_producer,
             "v2ex": self._tick_v2ex_producer,
             "weibo": self._tick_weibo_producer,
+            "github": self._tick_github_producer,
         }
         raw_results = await asyncio.gather(
             *(ticker() for ticker in tickers.values()),
@@ -1707,6 +1697,7 @@ class ContinuousRefreshController:
             ├─ _loop_bangumi_producer()  60s   Bangumi official-API discovery when under quota
             ├─ _loop_linuxdo_producer()  60s   Linux.do extension discovery when under quota
             ├─ _loop_weibo_producer()    60s   Weibo guest-session discovery when under quota
+            ├─ _loop_github_producer()   60s   GitHub public repository discovery when under quota
             ├─ _loop_proactive_push()    60s   delight + interest probe
             ├─ _loop_keyword_planner()  120s   P1.6 — merged keyword generation (flag-gated)
             ├─ _loop_source_incremental_sync() 60s  extension account refresh
@@ -1754,6 +1745,7 @@ class ContinuousRefreshController:
             asyncio.create_task(self._loop_linuxdo_producer()),
             asyncio.create_task(self._loop_v2ex_producer()),
             asyncio.create_task(self._loop_weibo_producer()),
+            asyncio.create_task(self._loop_github_producer()),
             asyncio.create_task(self._loop_proactive_push()),
             asyncio.create_task(self._loop_keyword_planner()),
             asyncio.create_task(self._loop_image_cache_cleanup()),
@@ -2098,6 +2090,17 @@ class ContinuousRefreshController:
                 await self._tick_weibo_producer()
             await asyncio.sleep(self.check_interval_seconds)
 
+    async def _loop_github_producer(self) -> None:
+        """Run public GitHub repository discovery when its quota is underfilled."""
+
+        while True:
+            if not self._llm_work_allowed():
+                await asyncio.sleep(self.check_interval_seconds)
+                continue
+            with suppress(Exception):
+                await self._tick_github_producer()
+            await asyncio.sleep(self.check_interval_seconds)
+
     async def _loop_keyword_planner(self) -> None:
         """P1.6: deficit-pulled merged keyword generation (flag-gated).
 
@@ -2371,6 +2374,14 @@ class ContinuousRefreshController:
         return await self._tick_platform_producer(
             source_family="weibo",
             producer=self.weibo_producer,
+        )
+
+    async def _tick_github_producer(self) -> dict[str, object]:
+        """Invoke GitHub discovery when its source-family quota has a deficit."""
+
+        return await self._tick_platform_producer(
+            source_family="github",
+            producer=self.github_producer,
         )
 
     async def _tick_soul_pipeline(self) -> None:
@@ -3812,6 +3823,8 @@ class ContinuousRefreshController:
                 stranded.append("youtube")
             elif source == "twitter" and self.x_producer is None:
                 stranded.append("twitter")
+            elif source == "github" and self.github_producer is None:
+                stranded.append("github")
             elif source == "zhihu" and self.zhihu_producer is None:
                 stranded.append("zhihu")
             elif source == "reddit" and self.reddit_producer is None:
@@ -3830,6 +3843,7 @@ class ContinuousRefreshController:
                 "douyin",
                 "youtube",
                 "twitter",
+                "github",
                 "zhihu",
                 "reddit",
                 "bangumi",

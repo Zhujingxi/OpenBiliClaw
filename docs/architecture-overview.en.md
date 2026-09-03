@@ -99,6 +99,8 @@ images: proxy foreground + refresh prefetch → app-stable lane (total 4 / bg 3,
 │ Source-family registry: alias · strategy · URL host │
 │             → pool accounting · durable seen_items ledger │
 │ Bangumi public API → search/ranked/date producer → shared eval │
+│ GitHub REST API → repository search/ranked/latest → shared eval │
+│ GitHub public starred repositories → favorite events → guided init (no background polling) │
 │ V2EX public API/Feed → bounded Topic/Reply enrichment → five modes → shared eval │
 │ V2EX identity ladder: verified PAT > observed browser > accepted user; mismatch pauses only account projection │
 │ Temporal lifecycle: verbatim evidence + code-owned review clock → serve / temporal_review_hold / expired │
@@ -117,10 +119,8 @@ images: proxy foreground + refresh prefetch → app-stable lane (total 4 / bg 3,
 │ Background maintenance: isolated worker → ≤50 rows/batch; unchanged skip / 10m sweep │
 │ /api/saved/* · router · Bilibili native save      │
 │ Six adapters → ExtensionNativeSaveBroker → extension_native_save_jobs │
-│ seven-platform source task multiplex: xhs / dy / yt / x / zhihu / reddit / linuxdo │
-│ Extension-online periodic re-pull (off by default; explicit opt-in): Runtime → six bootstrap tasks (global serial) → installed extension │
-│ seven-source task multiplex: xhs / dy / yt / x / zhihu / reddit / v2ex │
-│ Extension-online periodic re-pull (off by default; explicit opt-in): Runtime → six bootstrap sources (global serial) → installed extension │
+│ eight-source task multiplex: xhs / dy / yt / zhihu / reddit / linuxdo / v2ex / weibo │
+│ Extension-online periodic re-pull (off by default; explicit opt-in): Runtime → seven bootstrap sources (global serial; excludes weibo / GitHub) → installed extension │
 │ task-result → staged durable ingress → atomic bounded seen keys (5,000/source) → terminal │
 │ V2EX complete favorite snapshots → two confirmed misses → durable retraction/restore outbox → account-scoped Node affinity │
 │ XHS auto tasks: source/scheduler gate → SQLite pacing/breaker → no new tab while off/limited │
@@ -149,6 +149,6 @@ card action → synchronous 200 fast path | 202 processing → popup/mobile/desk
 Desktop startup: recommendation hydration │ runtime hydration │ secondary health/profile/activity/config hydration (independent)
 Desktop background resume (cards already loaded): skip the pool-filling recommendation GET │ sync runtime / inventory status only
 
-Overseas traffic: `[network].mode` → system proxy (default) / direct / custom proxy → LLM, YouTube, X/Reddit CLIs, Bangumi, updater, GitHub project stats; CN clients including V2EX remain isolated and direct
+Overseas traffic: `[network].mode` → system proxy (default) / direct / custom proxy → LLM, YouTube, X/Reddit CLIs, Bangumi, GitHub source/API stats, and updater; CN clients including V2EX remain isolated and direct
 Manual Douyin discovery: CLI discover → daemon-equivalent producer → per-keyword outcomes → extension search/hot/feed → pending-eval pool
 ```

@@ -22,7 +22,7 @@ def _read(relative_path: str) -> str:
     return (_ROOT / relative_path).read_text(encoding="utf-8")
 
 
-def test_source_incremental_docs_cover_configuration_and_six_source_staging() -> None:
+def test_source_incremental_docs_cover_configuration_and_eight_source_staging() -> None:
     config_docs = _read("docs/modules/config.md")
     config_example = _read("config.example.toml")
     storage_docs = _read("docs/modules/storage.md")
@@ -33,7 +33,7 @@ def test_source_incremental_docs_cover_configuration_and_six_source_staging() ->
     assert "source_incremental_enabled = false" in config_example
     assert "douyin_incremental_hours = 0" in config_example
     assert "默认关闭" in config_docs
-    assert "### 六来源任务结果 staging" in storage_docs
+    assert "### 八来源任务结果 staging" in storage_docs
     for queue_name in (
         "XhsTaskQueue",
         "DyTaskQueue",
@@ -42,6 +42,7 @@ def test_source_incremental_docs_cover_configuration_and_six_source_staging() ->
         "RedditTaskQueue",
         "LinuxdoTaskQueue",
         "V2EXTaskQueue",
+        "WeiboTaskQueue",
     ):
         assert queue_name in storage_docs
     assert "### 五来源任务结果 staging" not in storage_docs
@@ -55,8 +56,7 @@ def test_source_incremental_docs_state_online_and_atomic_admission_boundaries() 
     readme_en = _read("docs/architecture-overview.en.md")
 
     assert "BEGIN IMMEDIATE" in architecture
-    assert "XHS→抖音→YouTube→知乎→Reddit→Linux.do" in architecture
-    assert "XHS→抖音→YouTube→知乎→Reddit→V2EX" in architecture
+    assert "XHS→抖音→YouTube→知乎→Reddit→Linux.do→V2EX" in architecture
     assert "不是后端绕过浏览器登录态" in extension_docs
     assert "source_incremental_enabled=false" in extension_docs
     assert "douyin_incremental_hours=0" in extension_docs

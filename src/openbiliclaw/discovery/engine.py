@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import inspect
+import json
 import logging
 import math
 import re
@@ -71,7 +72,7 @@ from openbiliclaw.saved_sync.identity import (
     content_storage_key,
     make_item_key,
 )
-from openbiliclaw.sources.platforms import normalize_source_platform
+from openbiliclaw.sources.platforms import CANONICAL_SOURCE_FAMILIES, normalize_source_platform
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Mapping, Sequence
@@ -128,20 +129,7 @@ _EvalCacheEntry = (
     | _EvalCacheEntryV5
 )
 _BILIBILI_CONTENT_ID_PATTERN = re.compile(r"^BV[0-9A-Za-z]+$")
-_CANONICAL_STORAGE_KEY_PLATFORMS = frozenset(
-    {
-        "bilibili",
-        "xiaohongshu",
-        "douyin",
-        "youtube",
-        "twitter",
-        "zhihu",
-        "reddit",
-        "bangumi",
-        "v2ex",
-        "web",
-    }
-)
+_CANONICAL_STORAGE_KEY_PLATFORMS = frozenset((*CANONICAL_SOURCE_FAMILIES, "web"))
 _EVALUATE_BATCH_HARD_CAP_DEFAULT: int = 90
 _DEFAULT_EVAL_BATCH_SIZE: int = 45
 _DEFAULT_EVAL_BATCH_CONCURRENCY: int = 2
@@ -400,6 +388,32 @@ def trim_candidates_for_llm(
         limit,
     )
     return list(candidates[:eval_limit])
+
+
+def _stored_json_list(value: object) -> list[str]:
+    """Decode a stored JSON string list without stringifying nested values."""
+
+    payload: object = value
+    if isinstance(value, str):
+        try:
+            payload = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(payload, list):
+        return []
+    return [item.strip() for item in payload if isinstance(item, str) and item.strip()]
+
+
+def _stored_json_object(value: object) -> dict[str, object]:
+    """Decode a stored source-metadata object fail closed."""
+
+    payload: object = value
+    if isinstance(value, str):
+        try:
+            payload = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+    return dict(payload) if isinstance(payload, dict) else {}
 
 
 def _parse_batch_evaluation_payload(raw: str) -> list[dict[str, Any]] | None:
@@ -812,6 +826,11 @@ class DiscoveredContent:
     score_threshold: float = 0.0  # Strategy-specific admission floor for raw candidates
     body_text: str = ""  # tweet/thread full text; empty for video sources
     content_type: str = "video"  # shape: "video" | "note" | "tweet" | "thread"
+    # Bounded, normalizer-owned source provenance.  Raw upstream rows must
+    # never be assigned here; adapters expose an explicit allowlist so stable
+    # identifiers and source-specific card metadata can survive the candidate
+    # and content-cache pipeline without widening the shared schema per source.
+    source_metadata: dict[str, object] = field(default_factory=dict)
     # P1.8 yield provenance: the ``discovery_keywords.id`` of the search word
     # that produced this item (unified keyword planner). ``None`` for every
     # non-search / legacy / flag-off path — the admit-time yield backfill is a
@@ -905,6 +924,7 @@ class DiscoveredContent:
             "author_name": self.author_name or self.up_name,
             "body_text": self.body_text,
             "content_type": self.content_type,
+            "source_metadata": self.source_metadata,
             "source_keyword_id": self.source_keyword_id,
         }
 
@@ -4022,7 +4042,7 @@ class ContentDiscoveryEngine:
                     up_name=str(row.get("up_name", "")),
                     up_mid=int(row.get("up_mid", 0) or 0),
                     duration=int(row.get("duration", 0) or 0),
-                    tags=[],
+                    tags=_stored_json_list(row.get("tags", "[]")),
                     topic_key=str(row.get("topic_key", "")),
                     topic_group=str(row.get("topic_group", "")),
                     style_key=str(row.get("style_key", "")),
@@ -4032,6 +4052,17 @@ class ContentDiscoveryEngine:
                     cover_url=str(row.get("cover_url", "")),
                     view_count=int(row.get("view_count", 0) or 0),
                     like_count=int(row.get("like_count", 0) or 0),
+                    favorite_count=int(row.get("favorite_count", 0) or 0),
+                    collect_count=int(row.get("collect_count", 0) or 0),
+                    comment_count=int(row.get("comment_count", 0) or 0),
+                    share_count=int(row.get("share_count", 0) or 0),
+                    danmaku_count=int(row.get("danmaku_count", 0) or 0),
+                    reply_count=int(row.get("reply_count", 0) or 0),
+                    retweet_count=int(row.get("retweet_count", 0) or 0),
+                    bookmark_count=int(row.get("bookmark_count", 0) or 0),
+                    rating_score=float(row.get("rating_score", 0.0) or 0.0),
+                    rating_count=int(row.get("rating_count", 0) or 0),
+                    source_rank=int(row.get("source_rank", 0) or 0),
                     source_strategy=str(row.get("source", "")),
                     relevance_score=self._clamp_score(row.get("relevance_score", 0.0)),
                     relevance_reason=str(row.get("relevance_reason", "")),
@@ -4060,6 +4091,10 @@ class ContentDiscoveryEngine:
                     content_id=str(row.get("content_id", "") or bvid),
                     content_url=str(row.get("content_url", "")),
                     source_platform=str(row.get("source_platform", "") or "bilibili"),
+                    author_name=str(row.get("author_name", "") or ""),
+                    body_text=str(row.get("body_text", "") or ""),
+                    content_type=str(row.get("content_type", "") or "video"),
+                    source_metadata=_stored_json_object(row.get("source_metadata", "{}")),
                 )
             )
             if len(candidates) >= limit:

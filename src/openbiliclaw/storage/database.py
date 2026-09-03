@@ -1090,6 +1090,7 @@ CREATE TABLE IF NOT EXISTS content_cache (
     source      TEXT,                -- Which discovery strategy found it
     body_text   TEXT DEFAULT '',     -- Full text body for text-first sources (X tweet/thread)
     content_type TEXT DEFAULT 'video',  -- Content shape: "video"|"note"|"tweet"|"thread"
+    source_metadata TEXT DEFAULT '{}',  -- JSON allowlist from the source normalizer
     -- P1.8 yield provenance: discovery_keywords.id that produced this row;
     -- NULL for legacy / non-search / flag-off content.
     source_keyword_id INTEGER
@@ -5181,6 +5182,10 @@ class Database:
             "body_text": kwargs.get("body_text", ""),
             "published_label": published.published_label,
         }
+        raw_source_metadata = kwargs.get("source_metadata", {})
+        normalized_source_metadata = (
+            dict(raw_source_metadata) if isinstance(raw_source_metadata, Mapping) else {}
+        )
         incoming_grounding_downgraded = _temporal_grounding_was_downgraded(
             incoming_lifecycle_source,
             content_text=incoming_content_text,
@@ -5383,6 +5388,7 @@ class Database:
                 kwargs.get("author_name", ""),
                 kwargs.get("body_text", ""),
                 kwargs.get("content_type", "video") or "video",
+                self._candidate_json_payload(normalized_source_metadata, default={}),
                 self._coerce_source_keyword_id(kwargs.get("source_keyword_id")),
                 float(kwargs.get("rating_score", 0.0) or 0.0),
                 max(0, int(kwargs.get("rating_count", 0) or 0)),
@@ -5472,6 +5478,7 @@ class Database:
                 author_name,
                 body_text,
                 content_type,
+                source_metadata,
                 source_keyword_id,
                 rating_score,
                 rating_count,
@@ -5481,7 +5488,7 @@ class Database:
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP,
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             ON CONFLICT(bvid) DO UPDATE SET
                 title = excluded.title,
@@ -5670,6 +5677,14 @@ class Database:
                     content_cache.content_type,
                     'video'
                 ),
+                -- Source adapters provide this bounded allowlist. Preserve a
+                -- previously observed payload when a legacy rediscovery path
+                -- has no source-specific metadata to contribute.
+                source_metadata = CASE
+                    WHEN excluded.source_metadata != '{}'
+                    THEN excluded.source_metadata
+                    ELSE COALESCE(content_cache.source_metadata, '{}')
+                END,
                 -- P1.8: keep the producing-keyword provenance once set; a later
                 -- re-ingest from a source that doesn't carry the id (NULL) must
                 -- not wipe it.
@@ -11304,6 +11319,7 @@ class Database:
                 COALESCE(c.content_type, 'video') AS content_type,
                 COALESCE(c.description, '') AS description,
                 COALESCE(c.body_text, '') AS body_text,
+                COALESCE(c.source_metadata, '{{}}') AS source_metadata,
                 COALESCE(c.tags, '[]') AS tags,
                 COALESCE(c.topic_key, '') AS topic_key,
                 COALESCE(c.topic_group, '') AS topic_group,
@@ -12564,9 +12580,7 @@ class Database:
             current_platform = normalize_source_platform(row["source_platform"])
             metadata_platform = str(metadata.get("source_platform") or "").strip()
             legacy_platform = (
-                current_platform
-                if current_confidence == SOURCE_CONFIDENCE_LEGACY_UNKNOWN
-                else ""
+                current_platform if current_confidence == SOURCE_CONFIDENCE_LEGACY_UNKNOWN else ""
             )
             # The old API filled missing source_platform with B站. Treat that
             # particular legacy value as a fallback, while still accepting an
@@ -12594,8 +12608,7 @@ class Database:
                 platform = current_platform
             confidence = (
                 current_confidence
-                if current_confidence
-                in {SOURCE_CONFIDENCE_EXACT, SOURCE_CONFIDENCE_INFERRED}
+                if current_confidence in {SOURCE_CONFIDENCE_EXACT, SOURCE_CONFIDENCE_INFERRED}
                 and current_platform
                 else detected_confidence
             )
@@ -13114,6 +13127,7 @@ class Database:
             "author_name": "TEXT DEFAULT ''",
             "body_text": "TEXT DEFAULT ''",
             "content_type": "TEXT DEFAULT 'video'",
+            "source_metadata": "TEXT DEFAULT '{}'",
             "favorite_count": "INTEGER DEFAULT 0",
             "collect_count": "INTEGER DEFAULT 0",
             "comment_count": "INTEGER DEFAULT 0",

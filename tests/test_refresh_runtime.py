@@ -607,6 +607,7 @@ _LOOP_BODY_ATTRS = [
     ("_loop_douyin_producer", ("_tick_douyin_producer",)),
     ("_loop_youtube_producer", ("_tick_youtube_producer",)),
     ("_loop_x_producer", ("_tick_x_producer",)),
+    ("_loop_github_producer", ("_tick_github_producer",)),
     ("_loop_reddit_producer", ("_tick_reddit_producer",)),
     ("_loop_linuxdo_producer", ("_tick_linuxdo_producer",)),
     (
@@ -4155,6 +4156,42 @@ def test_warn_on_stranded_source_shares_checks_youtube_producer(
     controller._warn_on_stranded_source_shares()
 
     assert "youtube" in caplog.text
+
+
+def test_refresh_source_order_reuses_canonical_policy_order() -> None:
+    from openbiliclaw.runtime import refresh
+    from openbiliclaw.runtime.source_policy import SOURCE_ORDER
+
+    assert refresh._PLATFORM_SOURCE_ORDER is SOURCE_ORDER
+
+
+def test_warn_on_stranded_source_shares_checks_github_producer(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("WARNING")
+
+    def _controller(github_producer: object | None) -> ContinuousRefreshController:
+        return ContinuousRefreshController(
+            memory_manager=_FakeMemoryManager(),
+            database=_FakeDatabase(
+                [],
+                pool_count=80,
+                source_counts={"bilibili": 80, "github": 0},
+            ),
+            soul_engine=_FakeSoulEngine(),
+            discovery_engine=_FakeDiscoveryEngine(),
+            recommendation_engine=_FakeRecommendationEngine(),
+            pool_target_count=100,
+            pool_source_shares={"bilibili": 8, "github": 2},
+            github_producer=github_producer,
+        )
+
+    _controller(None)._warn_on_stranded_source_shares()
+    assert "github" in caplog.text
+
+    caplog.clear()
+    _controller(object())._warn_on_stranded_source_shares()
+    assert "without an active producer" not in caplog.text
 
 
 async def test_xhs_producer_receives_source_deficit_limit() -> None:

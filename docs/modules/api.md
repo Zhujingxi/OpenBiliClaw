@@ -86,6 +86,37 @@ guided init 不与待应用配置并行：队列为 `queued/applying` 时 `POST 
 导入完整校验 manifest、成员类型 / 路径 / 大小、SHA-256、配置和 SQLite 后，才把内容发布到项目根下的私有暂存区。`request_id` 是上传结果的关联 / 对账 ID，不是服务端自动去重键；收到不确定结果时应先 `GET /api/migration/status`，不要盲目重复上传。匹配同一 `request_id` 的 `processing` 表示后端仍在上传或校验，不是失败；断连后的单次瞬时 `idle` 也不能单独作为本次请求的终局。桌面端最多强制查询 3 次，遇到 `idle/cancelled` 会间隔 500ms 再确认，匹配 request ID 的 `processing/staged` 则立即收口；每次打开「通用」还会绕过本地已加载标记重新查询。
 
 配置、SQLite、画像、白名单 UI 偏好和其它数据都要等下一次 `openbiliclaw start`、`openbiliclaw serve-api` 或桌面包启动取得 migration runtime lock 并成功 apply 后才生效；status 的 staged / applied 响应都只可能携带白名单 `frontend`，桌面端会忽略 staged 值。`state="applied"` 后，每个浏览器会把 `migration_id` 记为本地一次性交接回执，只应用该迁移的偏好一次；之后用户修改主题或滚动设置，即使旧 applied status 仍持久存在也不会再次覆盖。详见[存储层的可移植数据迁移](storage.md#可移植数据迁移)。再次提交合法迁移包会替换尚未应用的暂存包，也可在重启前调用 `DELETE /api/migration/pending` 取消。
+
+## GitHub 配置、初始化与推荐 DTO
+
+`GET /api/config` 的 `sources.github` 返回启用状态、公开用户名、固定
+`token_env="OPENBILICLAW_GITHUB_TOKEN"`、三种 discovery mode、预算 / 节流和 bootstrap
+上限；秘密只用 `access_token_set` 表示是否存在，`access_token` 永不回显。`PUT /api/config`
+只接受 write-only PAT，并通过只读 `GET /user` 的验证门；明确空串清除，省略或回传掩码保持不变。
+运行时不会读取 `GITHUB_TOKEN` / `GH_TOKEN`，也不会把 PAT 权限用于读取私有仓库。
+
+`GET /api/sources/status` 与 `GET /api/sources/credentials` 都只读本地 verdict / producer
+ledger，不在轮询时访问 GitHub。无 PAT 时公开 discovery 是正常匿名能力；有 PAT 时另行显示
+`verified / failed / unverified` 与 token rejection。discovery 健康只聚合当前配置的
+`source_modes`，并与正式 / inspiration producer 共用持久限流冷却。正式 discovery 记录的 401
+拒绝标记只匹配当前 PAT 指纹，并同步让 sources/status 与 init-status 的 profile / bootstrap 轴
+显示 unavailable；轮换或清除 PAT 后旧标记不再生效。坏 PAT 不会把独立的匿名公开 discovery
+能力误报成不可用。
+
+`POST /api/init` 的 `sources` 可包含 `github`，`source_options.github` 只接受
+`username` 与 write-only `access_token`。GitHub-only 且二者都缺失时返回
+`409 no_profile_signal_sources`；混合初始化则跳过该画像分支、保留公开 discovery。PAT `/user`
+与公开 username `/users/{username}` 的 numeric id 冲突时返回稳定身份错误，不混合两个账号。
+阶段 1 只把公开 starred repositories 转为 `favorite` 事件；后页超时在已有完整页时保留事件并
+把 init 标成 `github_partial`，零完整页则失败。请求和状态响应都不回传 PAT。
+
+`RecommendationOut.source_metadata` 是 additive、来源 normalizer 拥有的有界对象。GitHub 可在
+这里保留 `node_id`、owner、language、topics、license、forks、issues、watchers 与上游时间字段；
+raw upstream payload 不会直接暴露。当前桌面 / 移动 / popup JavaScript 尚未消费该对象，卡片只
+可见 owner/name、description 与 stars 映射的收藏数。保存输入接受
+`github:repository:<numeric-id>` canonical key，但 GitHub 没有 native-save adapter，保存只在本地
+终结且不创建扩展任务。
+
 ## V2EX 配置与来源状态
 
 `GET /api/config` 的 `sources.v2ex` 返回启用状态、公开用户名、PAT 是否已配置、五个
@@ -181,9 +212,9 @@ ID 字段是严格 JSON string，不接受数字、布尔或其它类型的自�
 
 ## 来源任务结果的两阶段完成
 
-`POST /api/sources/{xhs,dy,yt,zhihu,reddit,linuxdo}/task-result` 的最终回调不再先把任务写成 `completed`。后端先在 `BEGIN IMMEDIATE` 中合并并冻结第一份 canonical result（含 XHS `self_info` 私有快照），任务仍保持非终态；随后只从这份持久结果重放来源事件、seen-key 和来源专属投影，全部成功后才执行不替换 `result_json` 的 terminal flip。若进程分别退出在 canonical merge→event ingress、event ingress→seen-key 或 seen-key→terminal 三个窗口，后续 callback 会忽略变化后的 body，用第一份结果补齐缺口。队列把 staged marker 视为业务 mutation 的逻辑终态：并发/迟到的 partial、final、fail、rate-limit 都不能改写它；但它继续遵守各源 claim lease，丢失非 2xx 响应后由 lease reclaim 自动触发修复（Linux.do 长任务为约 35 分钟）。seen-key 通过 `update_source_bootstrap_state()` 原子、严格落盘并按源保留最新 5,000 个身份键，失败会阻止 terminal flip；事件稳定键不含 task ID，因此 ingress 已提交但 marker 未写时的重放只返回 duplicate receipt。Reddit post/comment/subreddit/user 使用各自稳定身份，comment URL fallback 只接受含 comment id 的完整 permalink，不能把 post id 或标题误作 comment key；Linux.do 使用正整数 topic ID，canonical `content_id="topic:<id>"`。
+`POST /api/sources/{xhs,dy,yt,zhihu,reddit,linuxdo,v2ex,weibo}/task-result` 的最终回调不再先把任务写成 `completed`。后端先在 `BEGIN IMMEDIATE` 中合并并冻结第一份 canonical result（含 XHS `self_info` 私有快照），任务仍保持非终态；随后只从这份持久结果重放来源事件、seen-key 和来源专属投影，全部成功后才执行不替换 `result_json` 的 terminal flip。若进程分别退出在 canonical merge→event ingress、event ingress→seen-key 或 seen-key→terminal 三个窗口，后续 callback 会忽略变化后的 body，用第一份结果补齐缺口。队列把 staged marker 视为业务 mutation 的逻辑终态：并发/迟到的 partial、final、fail、rate-limit 都不能改写它；但它继续遵守各源 claim lease，丢失非 2xx 响应后由 lease reclaim 自动触发修复（Linux.do 长任务为约 35 分钟）。seen-key 通过 `update_source_bootstrap_state()` 原子、严格落盘并按源保留最新 5,000 个身份键，失败会阻止 terminal flip；事件稳定键不含 task ID，因此 ingress 已提交但 marker 未写时的重放只返回 duplicate receipt。Reddit post/comment/subreddit/user 使用各自稳定身份，comment URL fallback 只接受含 comment id 的完整 permalink，不能把 post id 或标题误作 comment key；Linux.do 使用正整数 topic ID，canonical `content_id="topic:<id>"`。GitHub 不创建浏览器任务，公开 Star 直接从官方 REST 转成事件，因此不进入这套 task-result staging。
 
-周期任务 payload 带 `incremental=true`；六源 handler 在 guided init 外给 durable event 标记 `profile_update_owner="generic"`，在 init-owned 回调中只落事实、由阶段 2/3 统一建模。事件 ingress 成功或 duplicate receipt 后才按响应顺序 checkpoint seen key，再翻 terminal；没有 handler 直接调用画像 pipeline。扩展离线时 runtime 不创建任务，也不推进调度时间。
+周期任务 payload 带 `incremental=true`；七个周期来源（XHS / 抖音 / YouTube / 知乎 / Reddit / Linux.do / V2EX）的 handler 在 guided init 外给 durable event 标记 `profile_update_owner="generic"`，在 init-owned 回调中只落事实、由阶段 2/3 统一建模。事件 ingress 成功或 duplicate receipt 后才按响应顺序 checkpoint seen key，再翻 terminal；没有 handler 直接调用画像 pipeline。扩展离线时 runtime 不创建任务，也不推进调度时间。微博与 GitHub 均不加入该周期回拉。
 
 ### Linux.do 任务与登录态端点
 
@@ -195,8 +226,6 @@ ID 字段是严格 JSON string，不接受数字、布尔或其它类型的自�
 | `POST /api/sources/linuxdo/login-state` | ✅（兼容端点） | 只接受 strict boolean `logged_in`，持久化扩展对 `_t` 存在性的观察；不接受 Cookie 字符串。公开 discovery 的 `auth_required` 仍为 false。 |
 
 Linux.do 站点访问全部发生在真实 `linux.do` task tab 内，且只允许同源 JSON `GET`。个人 bootstrap 先以 `/session/current.json` 正面确认 username；`_t=true` 只是 source-auth 心跳，不能替代任务内身份确认。结构化错误只包含 code/status/path，不把 challenge HTML、JSON body、Cookie 或 CSRF 字段带进回调。dispatcher 在执行前把 task/tab/deadline 写入扩展 session storage；MV3 service worker 重启时先恢复 runner，仍存活的任务 tab 可把结果交给恢复后的 handler 重试后端回传，不会重跑上游 GET。完整契约见 [Linux.do 来源文档](linuxdo.md)。
-周期任务 payload 带 `incremental=true`；六源 handler（含 V2EX）在 guided init 外给 durable event 标记 `profile_update_owner="generic"`，在 init-owned 回调中只落事实、由阶段 2/3 统一建模。事件 ingress 成功或 duplicate receipt 后才按响应顺序 checkpoint seen key，再翻 terminal；没有 handler 直接调用画像 pipeline。扩展离线时 runtime 不创建任务，也不推进调度时间。
-
 ## B 站与抖音浏览器任务边界
 
 | 方法与路径 | 状态 | 契约 |

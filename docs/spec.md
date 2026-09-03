@@ -6,8 +6,7 @@
 
 ## 1. 项目定位
 
-OpenBiliClaw 是一个**本地优先、开源的跨平台个性化内容发现 AI Agent**。它像一个深度了解你的朋友或专属内容编辑——不仅知道你喜欢看什么，更理解你**为什么**喜欢，你**是一个什么样的人**，然后主动去 B 站、小红书、抖音、YouTube、X、知乎、Reddit、Linux.do、Bangumi 和通用 Web 等来源帮你发现那些你会喜欢但自己找不到的内容。
-OpenBiliClaw 是一个**本地优先、开源的跨平台个性化内容发现 AI Agent**。它像一个深度了解你的朋友或专属内容编辑——不仅知道你喜欢看什么，更理解你**为什么**喜欢，你**是一个什么样的人**，然后主动去 B 站、小红书、抖音、YouTube、X、知乎、Reddit、Bangumi、微博和通用 Web 等来源帮你发现那些你会喜欢但自己找不到的内容。
+OpenBiliClaw 是一个**本地优先、开源的跨平台个性化内容发现 AI Agent**。它像一个深度了解你的朋友或专属内容编辑——不仅知道你喜欢看什么，更理解你**为什么**喜欢，你**是一个什么样的人**，然后主动去 B 站、小红书、抖音、YouTube、X、知乎、Reddit、Linux.do、Bangumi、V2EX、微博、GitHub 和通用 Web 等来源帮你发现那些你会喜欢但自己找不到的内容。
 
 **核心理念**：
 - 不是冷冰冰的推荐算法，而是一个**有温度的 AI 朋友**
@@ -36,8 +35,8 @@ OpenBiliClaw 是一个**本地优先、开源的跨平台个性化内容发现 A
 
 **浏览器插件（核心采集入口）**：
 - 通过统一 `PlatformAdapter` 捕捉 B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Linux.do 普通页面的交互行为；Reddit 初始化 saved/upvoted/subscribed 信号复用插件登录态任务桥，日常 discovery 默认使用 rdt-cli 登录态命令后端，不可用时 fallback 到插件任务。Linux.do 的隔离任务 tab 只运行同源只读 executor、不会启动普通 collector：公开 discovery 支持 search/hot/feed/creator/related，个人 bootstrap 支持 bookmarks/likes/read_history。其余行为链覆盖点击、滚动、停留、评论、点赞、收藏、分享、关注、搜索，以及 B 站特有投币；click 在 capture 阶段记录，scroll 同时覆盖页面和内部 feed / modal 滚动容器
-- 通过统一 `PlatformAdapter` 捕捉 B 站 / 小红书 / 抖音 / YouTube / X / 知乎的交互行为；Reddit 初始化 saved/upvoted/subscribed 信号复用插件登录态任务桥，日常 discovery 默认使用 rdt-cli 登录态命令后端，不可用时 fallback 到插件任务：点击、滚动、停留、评论、点赞、收藏、分享、关注、搜索，以及 B 站特有投币；click 在 capture 阶段记录，scroll 同时覆盖页面和内部 feed / modal 滚动容器
 - 微博公开 discovery 由后端匿名 visitor 完成；插件只在显式 guided init 时申请微博 host permission，使用隔离同源任务页只读导入收藏、关注和 mentions。后端不接收 Cookie，不做普通行为采集、站内写回或 native-save；个人 bootstrap 当前为 init-only
+- GitHub 由后端调用官方 REST API：匿名即可发现公开 repository，可选 PAT 只增强限额并支持账号核验；公开用户名的 starred repositories 仅在 init/on-demand 映射为 `favorite`。GitHub 不增加浏览器权限、content script、Cookie/任务桥、媒体处理、native-save 或站内写入
 - 记录行为发生时的**完整上下文**：对应的 DOM 页面快照、当前浏览路径、时间戳、平台来源与内容 ID；后端把来源平台、稳定内容 ID 和来源置信度写入 durable event ledger，旧事件无法确认时保留未知，不凭标题或任务名猜测
 - 捕捉用户的**微行为**：鼠标悬停、视频进度条跳转、视频暂停 / 继续、页面导航等
 - 采集用户亲手写的**评论 / 弹幕正文**（最强的兴趣表达之一）：X 回复正文与 B 站评论 / 弹幕正文均经 MAIN-world 网络 tap 在**提交成功后**采集（业务码校验），双端截断 200 字符 + 剥离控制字符后进入 `metadata.comment_text`（弹幕 `comment_kind="danmaku"`）
@@ -179,7 +178,7 @@ Discovery 可以继续宽搜，普通 dislike 不撤销关键词或来源任务�
 | 策略 | 说明 |
 |------|------|
 | **兴趣关键词搜索** | 根据用户画像生成关键词组合搜索；B 站生产路径在既有请求预算内预留 1 个 `pubdate` 请求（最多 5 条），与普通相关性结果交错进入评估窗口，只补近期供给而不改变 relevance/admission |
-| **搜索灵感脑暴** | 可选地从 like 二级兴趣抽样；`OnionProfile.interest.likes` 会优先展开 specifics，一级 domain 只在缺少 specifics 时兜底，并按 parent 计数降权防止小窗口被同一领域占满；结合 recent interest selection count、关键词覆盖频次、raw candidate 数量 / 占比 / dominant content type 和最终候选池占比降权高频兴趣，coverage join 统一走 `_normalize_match_text()` 折叠大小写 / 空白漂移，画像整理会同步迁移 keyword 与 selection ledger 标签，完整 coverage 只在本地控制环使用，LLM payload 只携带 must-cover + 少量 cooldown 摘要；随后由 `discovery.keyword_brainstorm` 脑暴带 `kind_fit=regular|explore|both` 的搜索 probe branch，每兴趣最多 2 条，regular + explore 同轮触发时共用一次 brainstorm 和一次 grounding stage；按 `[discovery].inspiration_search_backends` 通过 search provider 链（默认已启用平台源 → Exa → You.com free MCP）grounding 具体实体 / 社区词 / 讨论点，stage 级搜索预算由 `inspiration_max_probe_searches_per_stage` 控制，平台源扇出由 `inspiration_platforms_per_probe` 控制，每 probe 翻页 / 扩量由 `inspiration_search_pages_per_probe` 控制，B 站 / 抖音 / X 等 risk-controlled 来源受 `inspiration_riskcontrolled_probe_budget` 与 cooldown / 限流约束；`platform_sources` 只把 B站 / YouTube / X / Reddit / Bangumi、抖音 direct client，以及小红书 / 知乎 bridge 可用时的搜索标题 / URL / 摘要作为灵感 evidence，不入候选池；泛词不是硬错误，会交给 curator 结合画像、平台 guide 和覆盖约束判断；再经 `discovery.keyword_inspiration` 做 Profile Curator / Detail Expander，优先生成按平台 keyed 的 `platform_keywords`；`platform_guides.query_style` 明确 B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Bangumi 的平台检索语法；写库前由系统侧执行 must-cover 排序、每平台二级兴趣 / lens family 上限、原样证据标题 / URL / 过长 query / 平台语言不匹配 / 平台检索语法不匹配过滤、grounding hint `source_interest` 校正、explore 横向 lens 校验，缺失 must-cover 兴趣时用 `discovery.keyword_inspiration.repair` 做一次 bounded repair，repair 仍缺词时用 deterministic platform-native backfill 补齐；新配置默认以混合模式开启，与旧 merged keyword planner 并行，admission yield 会回填 inspiration / expansion 反馈计数；实验开关可让 due 平台完全跳过旧 merged keyword planner，只用新流程产词，并在 B 站 explore 到期时写入 `keyword_kind="explore"` 的探索词池；`keyword-inspiration-dry-run` 可真实预览中间链路但不写关键词池，且使用独立 preview selection scope，`keyword-inspiration-report` 对比 inspiration / merged cohort、输出 production / preview 抽中分布并给出 replace 门禁 |
+| **搜索灵感脑暴** | 可选地从 like 二级兴趣抽样；`OnionProfile.interest.likes` 会优先展开 specifics，一级 domain 只在缺少 specifics 时兜底，并按 parent 计数降权防止小窗口被同一领域占满；结合 recent interest selection count、关键词覆盖频次、raw candidate 数量 / 占比 / dominant content type 和最终候选池占比降权高频兴趣，coverage join 统一走 `_normalize_match_text()` 折叠大小写 / 空白漂移，画像整理会同步迁移 keyword 与 selection ledger 标签，完整 coverage 只在本地控制环使用，LLM payload 只携带 must-cover + 少量 cooldown 摘要；随后由 `discovery.keyword_brainstorm` 脑暴带 `kind_fit=regular|explore|both` 的搜索 probe branch，每兴趣最多 2 条，regular + explore 同轮触发时共用一次 brainstorm 和一次 grounding stage；按 `[discovery].inspiration_search_backends` 通过 search provider 链（默认已启用平台源 → Exa → You.com free MCP）grounding 具体实体 / 社区词 / 讨论点，stage 级搜索预算由 `inspiration_max_probe_searches_per_stage` 控制，平台源扇出由 `inspiration_platforms_per_probe` 控制，每 probe 翻页 / 扩量由 `inspiration_search_pages_per_probe` 控制，B 站 / 抖音 / X 等 risk-controlled 来源受 `inspiration_riskcontrolled_probe_budget` 与 cooldown / 限流约束；`platform_sources` 可复用已启用且可同步搜索的 B站 / 小红书 / 抖音 / YouTube / X / GitHub / 知乎 / Reddit / Bangumi / V2EX / 微博后端，只把标题 / URL / 摘要作为灵感 evidence，不入候选池；Linux.do 仍由异步扩展任务取数，不冒充同步 grounding 后端。GitHub formal / inspiration 共用 public query sanitizer 与持久 cooldown，私有行或异常结果 fail closed；泛词不是硬错误，会交给 curator 结合画像、平台 guide 和覆盖约束判断；再经 `discovery.keyword_inspiration` 做 Profile Curator / Detail Expander，优先生成按平台 keyed 的 `platform_keywords`；`platform_guides.query_style` 覆盖全部十二来源；写库前由系统侧执行 must-cover 排序、每平台二级兴趣 / lens family 上限、原样证据标题 / URL / 过长 query / 平台语言不匹配 / 平台检索语法不匹配过滤、grounding hint `source_interest` 校正、explore 横向 lens 校验，缺失 must-cover 兴趣时用 `discovery.keyword_inspiration.repair` 做一次 bounded repair，repair 仍缺词时用 deterministic platform-native backfill 补齐；新配置默认以混合模式开启，与旧 merged keyword planner 并行，admission yield 会回填 inspiration / expansion 反馈计数；实验开关可让 due 平台完全跳过旧 merged keyword planner，只用新流程产词，并在 B 站 explore 到期时写入 `keyword_kind="explore"` 的探索词池；`keyword-inspiration-dry-run` 可真实预览中间链路但不写关键词池，且使用独立 preview selection scope，`keyword-inspiration-report` 对比 inspiration / merged cohort、输出 production / preview 抽中分布并给出 replace 门禁 |
 | **相关推荐链探索** | 从已知好内容出发，沿相关推荐不断深入 |
 | **分区热门/排行榜** | 固定全站榜，并按本地洗牌轮转覆盖非 0 分区榜，结合用户画像筛选 |
 | **UP 主追踪** | 追踪关注的和发现的优质 UP 主的新动态 |
@@ -187,7 +186,9 @@ Discovery 可以继续宽搜，普通 dislike 不撤销关键词或来源任务�
 | **跨领域探索** | 刻意推荐用户从未接触过但心理画像暗示可能喜欢的领域；当统一 `KeywordPlanner` 已有 merged keyword 调用、`explore_refresh_hours` 到期或即将到期且 B 站仍有补货空间时，默认会把 `explore_domains` 合并进同一次关键词生成，把探索 query 写入 B 站 `keyword_kind="explore"` query cache。开启 inspiration-only 替换模式后，这部分也改由 search-backed inspiration flow 生成 `query_kind="explore"` 的 B 站探索词。`ExploreStrategy` 后续从该 explore 候选池 claim query 搜索；池为空时不再单独打一次 explore 计划 LLM |
 | **热点关联** | 追踪热点话题，判断是否与用户深层兴趣相关 |
 
-Linux.do 同样纳入统一关键词 planner 的九平台目标与 `platform_guides.query_style`；其 search query 使用社区话题风格，候选仍只进入统一待评估池。Linux.do 不是 inspiration grounding 的后端直连来源：真实取数依旧由扩展 task tab 完成。
+Linux.do 同样纳入统一关键词 planner 的十二平台目标与 `platform_guides.query_style`；其 search query 使用社区话题风格，候选仍只进入统一待评估池。Linux.do 不是 inspiration grounding 的后端直连来源：真实取数依旧由扩展 task tab 完成。
+
+GitHub 纳入统一关键词 planner 与 `platform_guides.query_style`，使用适合 repository search 的简洁技术主题词；CLI、正式 producer 与 inspiration provider 共用 public query sanitizer，来源级持久 cooldown 也由 formal / inspiration 共用。inspiration 只有在 producer 正常返回且结果仍满足 public-only normalizer 时才提供 evidence，异常、限流、清洗后空 query 或私有行一律 fail closed，不写候选池或推荐池。
 
 #### 内容评估
 
@@ -315,23 +316,25 @@ embedded tailnet edge (default off): Android/iOS native App tsnet → user's tai
                                       first login URL | Auth Key or OAuth Secret + tag over stdin
 local settings enrollment: Desktop Web / extension → write-only PUT /api/config → private one-shot stage ─┘
                            real loopback only; no Funnel/Serve/public URL
-publication-date preference: [bilibili] config → RuntimeContext → effective inventory → PoolCurator → serving score/gate
-                             ├─ Bilibili only; out-of-range rows stay in the pool; weight 0.5 default, 1 strict
-                             └─ strict only → Bilibili API / extension search pubtime_begin + pubtime_end
+publication-date preference: [sources.<name>] config → RuntimeContext → effective inventory → PoolCurator → serving score/gate
+                             ├─ all twelve sources; missing/invalid dates never become discovery time
+                             └─ strict only → pre-eval reject + supported API/task date pushdown
 migration control plane: local export → checksummed plaintext .obcbackup
                       → local import + request_id validates/stages ↔ status/cancel
                       → restart + runtime lock → journaled config/data replace → applied | rollback
 XHS hidden search tab → MAIN search-response normalizer → isolated replay/DOM fallback → task final
-XHS/DY/YT/Zhihu/Reddit/Linux.do task final: canonical staged result (XHS bootstrap payload caps enforced)
-                                          → durable event receipt → atomic bounded seen-key → terminal flip
-XHS/DY/YT/Zhihu/Reddit/V2EX task final: canonical staged result (source caps/fields enforced)
-                                 → durable event receipt → atomic bounded seen-key → terminal flip
-                                 stale lease reclaim replays first write; staged row rejects late mutation
+XHS/DY/YT/Zhihu/Reddit/Linux.do/V2EX/Weibo task final: canonical staged result (source caps/fields enforced)
+                                                     → durable event receipt → atomic bounded seen-key → terminal flip
+                                                     stale lease reclaim replays first write; staged row rejects late mutation
 V2EX identity ladder: PAT verified > browser observed > config/accepted
                     → mismatch pauses account projection only
                     → resolved identity-scoped seen/affinity + complete favorite 2-miss outbox
+GitHub official REST API → public repository search/ranked/latest → raw text-card candidate
+GitHub account scope: PAT `/user` verified > explicit public username accepted
+                    → durable id mismatch pauses personal bootstrap only
+                    → public starred repositories → favorite events → guided init
 extension-online periodic re-pull: explicit opt-in → presence + profile/init/config gates → persisted round-robin
-                                 → one active bootstrap across six task tables → EventHub → extension
+                                 → one active bootstrap across seven periodic task tables → EventHub → extension
 Douyin source supply: daemon presence gate (explicit manual call bypasses it)
                      → one shared plugin-cycle wait budget → terminal dy_task → pending_eval
                      absent → zero enqueue; timeout/error/budget → bounded retry floor
@@ -443,6 +446,7 @@ local Desktop Web / extension Settings → write-only /api/config → private bo
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │ bili/xhs/dy/yt/zhihu/reddit/linuxdo/v2ex/weibo 任务调度 + 源开关/比例配置（后台 tab / 初始化导入 / 配比建议）│ │
 │  │ 微博任务仅在显式 guided init 运行：同源只读导入收藏、关注、mentions；不上传 Cookie、不采集普通行为 │ │
+│  │ GitHub 仅显示配置/状态/init/文字卡；官方 REST 调用全在后端，不加入扩展任务或权限 │ │
 │  │ XHS 自动任务：source/scheduler 领取门 → SQLite 节流/风控冷却 → 关闭/限流时不再开任务 tab │ │
 │  │ XHS search：inactive tab → MAIN 搜索响应归一化 → isolated replay / DOM 兜底          │ │
 │  └──────────────────────────────────────────────────────┘   │
@@ -481,7 +485,7 @@ local Desktop Web / extension Settings → write-only /api/config → private bo
 │  │     → 白名单 CDN → tmp+fsync+replace cache → UI              │ │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
-│  │ 海外网络：config/UI -> direct|system|custom -> LLM/YT/updater/GitHub stats │   │
+│  │ 海外网络：config/UI -> direct|system|custom -> LLM/YT/GitHub 来源/更新/统计 │   │
 │  │ 国内客户端保持独立直连；微博 httpx trust_env=false，不消费海外路由策略 │   │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
@@ -512,7 +516,7 @@ local Desktop Web / extension Settings → write-only /api/config → private bo
 │  │ 画像编辑：编辑面板 -> /api/profile/edit -> 覆盖层（插件/移动/桌面三端） │ │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
-│  │ 引导初始化：来源 + 前置清单 -> /api/init；微博以登录态 heartbeat + uid gate 后导入个人事件 │ │
+│  │ 引导初始化：来源 + 前置清单 -> /api/init；微博经 heartbeat/uid，GitHub 经 username/PAT 导入公开 Star │ │
 │  │ 完整画像提交 -> 发现/评估/表达 -> canonical ready              │ │
 │  └──────────────────────────────────────────────────────┘   │
 ├──────────────────────────────────────────────────────────────┤
@@ -528,8 +532,7 @@ local Desktop Web / extension Settings → write-only /api/config → private bo
 │  └──────────────┘ └──────────────┘ └────────────────┘      │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │     PoolCurator + 双轴 fatigue + per-group 窗口 + 新兴趣放大保护 │ │
-│  │     request_replenishment + 定时/手动补货 + B/XHS/DY/YT/X/Zhihu/Reddit/Linux.do/Bangumi=5/1/1/1/1/1/1/1/1 │ │
-│  │     request_replenishment + 定时/手动补货 + B/XHS/DY/YT/X/Zhihu/Reddit/Bangumi/V2EX=5/1/1/1/1/1/1/1/1 │ │
+│  │     request_replenishment + 定时/手动补货 + B/XHS/DY/YT/X/Zhihu/Reddit/Linux.do/Bangumi/V2EX/Weibo/GitHub=5/1/1/1/1/1/1/1/1/1/1/1 │ │
 │  │     raw断供 → 欠份额 producer 即时并行唤醒 → 真实新增计数 / 无产出阶梯退避 │ │
 │  │ API CandidateEvalCoordinator: available + eligible copy-pending + evaluated -> 3×30 -> serial admit │ │
 │  │ evaluator: time-neutral relevance + atomic grounded temporal evidence -> tri-state eligibility │ │
@@ -549,8 +552,7 @@ local Desktop Web / extension Settings → write-only /api/config → private bo
 │  │       + confusions FIFO(≤5/队头 fencing/12h 补扫) + 冻结/held 重放 + 深层门控 │ │
 │  │       (off/shadow 默认/enforce · 两接入点: 深层对话候选/soul 重建; 管线 VALUES·CORE 已封死) │ │
 │  │     Autostart: user login item + Ollama preflight/self-heal + Ollama.app runtime 校验 │ │
-│  │     Bili DOM fallback + XHS/Douyin/YouTube/X/Zhihu/Reddit/Linux.do/Bangumi producers: 按平台缺口独立补池 │ │
-│  │     Bili DOM fallback + XHS/Douyin/YouTube/X/Zhihu/Reddit/Bangumi/V2EX producers: 按平台缺口独立补池 │ │
+│  │     Bili DOM fallback + XHS/Douyin/YouTube/X/Zhihu/Reddit/Linux.do/Bangumi/V2EX/Weibo/GitHub producers: 按平台缺口独立补池 │ │
 │  │     CLI discover --source douyin -> 同一正式 producer -> 统一关键词终态 -> pending eval │ │
 │  │     Hot reload one-shots: interest/avoidance force_tick │   │
 │  │     Probe arbiter: interest / avoidance 每轮最多推送一条   │   │
@@ -561,7 +563,7 @@ local Desktop Web / extension Settings → write-only /api/config → private bo
 │  │     Pool readiness: servable/raw/pending 统一库存口径       │   │
 │  │     Atomic maintenance: canonical protected -> topic/source/raw -> invariant/rollback │ │
 │  │     Source bootstrap seen-key guard -> Memory/Profile      │   │
-│  │     Extension-online re-pull -> six bootstrap tables (global serial) -> installed extension │ │
+│  │     Extension-online re-pull -> seven periodic bootstrap tables (global serial) -> installed extension │ │
 │  │       -> staged durable ingress -> atomic seen keys (5000/source) -> terminal │ │
 │  │     Profile overrides overlay: 用户编辑 -> profile_overrides.json │ │
 │  │       -> get_profile()/sync_profile_files 读时叠加（抗画像重建）│ │
@@ -574,7 +576,7 @@ local Desktop Web / extension Settings → write-only /api/config → private bo
 │  │ exact OpenBiliClaw / YouTube Watch Later targets -> authenticated safe task-result                 │
 │  │ trusted-local extension E2E exact auth -> single saved sync item -> six-field safe callback        │
 │  │ -> /api/sources/{xhs,dy,yt,x,zhihu,reddit}；unsupported_adapter_missing 可重试 │
-│  │ 微博 membership 仅本地：无 native adapter / 站内写回；个人事件使用独立同源只读任务 │
+│  │ 微博/GitHub membership 仅本地：无 native adapter / 站内写回；GitHub 不创建任何扩展任务 │
 │  │ -> 插件/桌面/移动 saved UI；CLI config-show（自动同步默认关闭）    │
 │  │ NATIVE_SAVE_EXECUTE/RESULT：tab-launch mutex（XHS exact manual 可越过）+ per-task deadline + bounded replay │
 │  │ shared MV3 recovery barrier 在领取任务前清理全部 runner-owned orphan tabs       │
@@ -595,13 +597,13 @@ local Desktop Web / extension Settings → write-only /api/config → private bo
 ├──────────────────────────────────────────────────────────────┤
 │           多源适配层 (SourceAdapter Protocol, v0.3.0+)         │
 │  ┌──────────────┐  ┌──────────────────┐  ┌─────────────┐    │
-│  │ B 站 Adapter  │  │ Bili/小红书/抖音/YT/知乎/Reddit/Linux.do任务桥│ │ Web Adapter │  │
-│  │ B站/微博 HTTP │  │ Bili/小红书/抖音/YouTube/知乎/Reddit任务桥│ │ Web Adapter │  │
-│  │ (WBI API+DOM兜底)│ │ (扩展代理 + DOM-first + XHS持久熔断)│  │ (Playwright │    │
-│  │              │  │ + profile/search/feed/yt/zhihu)│ │ + LLM 抽取)│    │
+│  │ 后端 API 来源 │  │ 登录态扩展任务桥   │  │ Web Adapter │    │
+│  │ Bili/BGM/WB/GH│  │ XHS/DY/YT/ZH/RD   │  │ (Playwright │    │
+│  │ 官方/只读 HTTP│  │ Linux/V2EX/Weibo   │  │ + LLM 抽取) │    │
+│  │ + 各自 producer│ │ bounded task/result│  │             │    │
 │  └──────────────┘  └──────────────────┘  └─────────────┘    │
 │  ┌──────────────────────────────────────────────────────┐   │
-│  │ sources.platforms：十一平台 alias / strategy / URL host      │ │
+│  │ sources.platforms：十二平台 alias / strategy / URL host      │ │
 │  │                  → 统一 pool accounting / viewed identity │ │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
@@ -632,6 +634,11 @@ local Desktop Web / extension Settings → write-only /api/config → private bo
 │  │ BangumiDiscoveryProducer: 默认匿名 API search/ranked/latest；可选个人令牌读私密收藏(401降级) │ │
 │  │   显式公开 username collections -> 首版画像信号；无 Cookie、无站内写入 │ │
 │  │   扩展身份桥(bgm.tv/bangumi.tv): 上报公开 uid+用户名做零配置账号识别，非任务桥/无行为采集 │ │
+│  └──────────────────────────────────────────────────────┘   │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │ GitHubDiscoveryProducer: 官方 REST search/ranked/latest，仅 public repository │ │
+│  │   匿名 discovery + 可选 PAT；公开 starred -> favorite init/on-demand │ │
+│  │   无扩展权限/任务/Cookie/增量账号同步/native-save/站内写入 │ │
 │  └──────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │ V2EXDiscoveryProducer: 匿名 API/Feed search/node/tab/hot/latest；PAT 可选，401/403 降级匿名 │ │
@@ -767,8 +774,7 @@ localhost。两个入口互斥，默认 HTTP 不变。
 - [ ] 完善的安装和使用文档
 - [ ] 插件商店发布
 - [ ] 社区 Skill 市场
-- [x] 跨平台内容发现（已落地 B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Linux.do / Bangumi / 通用 Web，后续继续扩展更多 adapter）
-- [x] 跨平台内容发现（已落地 B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Bangumi / V2EX / 通用 Web，后续继续扩展更多 adapter）
+- [x] 跨平台内容发现（已落地 B 站 / 小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Linux.do / Bangumi / V2EX / 微博 / GitHub / 通用 Web，后续继续扩展更多 adapter；GitHub 分支验收状态以专用 ledger 为准）
 
 ---
 

@@ -3,8 +3,7 @@
 生效日期：2026-05-31
 更新日期：2026-08-31
 
-OpenBiliClaw 是一个本地优先的跨平台内容发现 AI Agent。浏览器插件的单一用途是：在用户访问 Bilibili、小红书、抖音、YouTube、X、知乎、Reddit、Linux.do 等受支持内容平台时，采集用户授权范围内的浏览、互动和内容信号，发送到用户自己配置的 OpenBiliClaw 后端，用于构建个人兴趣画像、改进内容推荐、同步收藏 / 稍后再看状态和展示本地通知。
-OpenBiliClaw 是一个本地优先的跨平台内容发现 AI Agent。浏览器插件的单一用途是：在用户访问 Bilibili、小红书、抖音、YouTube、V2EX 等受支持内容平台时，采集用户授权范围内的浏览、互动和内容信号，发送到用户自己配置的 OpenBiliClaw 后端，用于构建个人兴趣画像、改进内容推荐、同步收藏 / 稍后再看状态和展示本地通知。
+OpenBiliClaw 是一个本地优先的跨平台内容发现 AI Agent。浏览器插件的单一用途是：在用户访问已启用浏览器接入的受支持内容平台时，采集用户授权范围内的浏览、互动和内容信号，发送到用户自己配置的 OpenBiliClaw 后端，用于构建个人兴趣画像、改进内容推荐、同步收藏 / 稍后再看状态和展示本地通知。GitHub v1 来源只由后端通过 GitHub 官方 REST API 读取公开仓库，不在 GitHub 页面运行内容脚本，也不申请 GitHub 主机权限或下发浏览器任务。
 
 本政策说明 OpenBiliClaw 浏览器插件与本地后端如何处理数据。插件不会把数据发送到 OpenBiliClaw 开发者运营的服务器；Chrome Web Store / AMO 发布包默认只声明本机后端权限，数据流向通常是用户本机运行的 OpenBiliClaw 后端。
 
@@ -20,6 +19,7 @@ OpenBiliClaw 是一个本地优先的跨平台内容发现 AI Agent。浏览器�
 | 用户活动 | 点击、搜索、滚动、停留时长、观看时长、喜欢 / 不喜欢、收藏、稍后再看、关注等行为 | 构建和更新兴趣画像，改进推荐排序，过滤不感兴趣内容 |
 | 网站内容 | 页面上可见的文字、封面图 URL、视频 / 笔记标题、作者、标签、描述、链接、统计信息等元数据 | 理解内容主题、生成候选池、去重和解释推荐理由 |
 | V2EX 只读任务字段 | Topic / Node 的公开 ID、标题、URL、作者、Node、时间、回复摘录，以及布尔登录状态 | 执行用户主动触发的四个 bootstrap scope、聚合讨论事件和生成 Node 偏好；不用于站内写操作 |
+| GitHub 后端只读字段 | 公开仓库的数值 ID、`node_id`、名称、作者、公开 URL、描述、topics、语言、许可证、统计与时间字段；初始化时还可使用公开 username 及其公开 starred 仓库 | 通过 GitHub 官方 REST API 完成公开仓库发现、去重、推荐和用户主动触发的画像初始化；服务端查询强制 `is:public`，返回行仍会再次拒绝非公开仓库，不执行 Star 或其他站内写操作 |
 | 个人通讯 | 用户在 OpenBiliClaw 插件侧边栏聊天框中主动输入的消息；以及用户在受支持平台上**成功提交**的评论正文与 B 站弹幕正文（提交成功后经网络层采集，仅送本机后端） | 与用户配置的本地后端聊天接口交互，帮助查看画像、推荐和设置；用户亲手写的评论 / 弹幕是最强的兴趣表达之一，用于更准确地构建兴趣画像 |
 | 本地配置与 UI 状态 | 后端地址、已关闭提示、插件设置、缓存的后端配置、任务状态 | 保持插件连接、本地偏好和界面状态 |
 | 用户主动创建的迁移包 | 文件配置中的模型 / 来源 API Key 与 token、平台 Cookie、本地 SQLite、画像 / 记忆、历史、图片缓存和白名单桌面偏好；不包含源机整段 API auth（密码 / hash、session secret、设备 key 等） | 仅在用户从本机桌面配置页明确选择导出时，生成供用户自行搬到另一台机器的 `.obcbackup` |
@@ -103,8 +103,7 @@ OpenBiliClaw 插件本身不会把数据发送到 OpenBiliClaw 开发者拥有�
 | `scripting` | 在受支持平台页面注入内容脚本，采集页面内容和行为信号 |
 | `sidePanel` | 提供 OpenBiliClaw 侧边栏界面 |
 | `storage` | 保存插件设置、本地 UI 状态和后端连接信息 |
-| 主机权限 | 限定在 Bilibili、小红书、抖音、YouTube、X、知乎、Reddit、Linux.do、Bangumi 以及本机 OpenBiliClaw 后端之间处理必要数据 |
-| 主机权限 | 限定在 Bilibili、小红书、抖音、YouTube、V2EX 以及本机 OpenBiliClaw 后端之间读写必要数据 |
+| 主机权限 | 限定在 Bilibili、小红书、抖音、YouTube、X、知乎、Reddit、Linux.do、V2EX、微博、Bangumi 以及本机 OpenBiliClaw 后端之间处理必要数据；GitHub 不在扩展主机权限中 |
 
 `http://127.0.0.1/*` 和 `http://localhost/*` 用于连接用户自己的本机 OpenBiliClaw 后端。内容采集脚本只声明在受支持内容平台上运行；发布包不声明 `http://*/*`、`https://*/*` 或 `<all_urls>` 这类所有网站权限。
 
@@ -117,6 +116,8 @@ OpenBiliClaw 插件本身不会把数据发送到 OpenBiliClaw 开发者拥有�
 `*://*.bgm.tv/*` 和 `*://*.bangumi.tv/*` 的主机权限仅用于**账号身份识别**：读取页面公开的用户 uid（`CHOBITS_UID`）与导航栏用户名，实现零配置识别你的 Bangumi 账号，供画像初始化时读取你的公开收藏。在这两个站点上插件不读取 Cookie、不采集浏览行为、也不上传任何个人令牌；Bangumi 内容本身由本地后端通过官方匿名只读 API 获取。
 
 `*://*.v2ex.com/*` 的主机权限用于 V2EX 普通页面的只读 Topic / Node 阅读事件，以及用户主动触发的 `bootstrap_profile` / 增量任务。任务页只读取渲染后的公开 DOM：`/member/<username>` 的本人主题、`/member/<username>/replies` 的本人回复、`/my/topics` 的收藏主题和 `/my/nodes` 的收藏 Node。插件会在本地检查 V2EX 的 A2 Cookie 是否存在，但只向用户配置的后端发送 `logged_in` 布尔值，不发送 Cookie 值；可见页面中的用户名作为 `observed` 身份证据单独上报，登出心跳会清除旧 observed username，浏览器证据最多保留 72 小时。V2EX 任务结果只包含经过限制的公开字段（Topic/Node 标识、标题、URL、作者、Node、时间和最多三条代表性回复摘录），不包含页面 HTML、请求头、CSRF/once、私信、密码或浏览器完整历史。扩展只有在确认 route、页面壳和 scope 完整翻页时才上报 complete；本地后端对收藏 Topic / Node 采用连续两次完整快照缺失确认，生成的取消收藏 / 取消关注只作为本地 `retraction` 画像事件，不会向 V2EX 发请求。PAT 验证身份只保存公开 username 与当前 PAT 的单向 fingerprint，最多信任 6 小时；匹配 PAT 被明确拒绝时清除该声明，网络失败不清除。身份冲突时暂停账号数据合并；PAT 原文仍只存在于用户选择的环境变量 / 配置凭据位置。OpenBiliClaw 对 V2EX 严格只读，不发帖、不回复、不感谢、不收藏、不取消收藏、不关注 Node。
+
+GitHub v1 不使用浏览器 Cookie、页面内容脚本、主机权限或任务队列。后端可匿名读取公开仓库；用户主动配置公开 username 时可读取其公开 starred 仓库，也可选用 GitHub PAT 验证 username 并提高官方 API 配额。PAT 只从来源凭据配置或专用环境变量 `OPENBILICLAW_GITHUB_TOKEN` 解析，不读取通用 `GITHUB_TOKEN` / `GH_TOKEN`。写入配置文件的 PAT 可能随用户主动导出的未加密迁移包移动；环境变量值始终不导出。GitHub 数据只用于本地画像、发现与推荐，保存推荐也仅写本地数据库，不会向 GitHub 发出 Star、Unstar 或其他状态变更请求。
 
 ## 远程代码
 

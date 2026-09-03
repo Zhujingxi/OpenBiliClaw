@@ -5289,6 +5289,7 @@ class RecommendationEngine:
                 ),
                 content_type=str(row.get("content_type", "") or "video"),
                 body_text=str(row.get("body_text", "") or ""),
+                source_metadata=self._parse_source_metadata(row.get("source_metadata", "{}")),
             )
             for row in rows
         ]
@@ -5629,6 +5630,20 @@ class RecommendationEngine:
         if not isinstance(payload, list):
             return []
         return [str(item).strip() for item in payload if str(item).strip()]
+
+    @staticmethod
+    def _parse_source_metadata(value: object) -> dict[str, object]:
+        """Decode a normalizer-owned source metadata object fail closed."""
+
+        if isinstance(value, dict):
+            return dict(value)
+        if not isinstance(value, str) or not value.strip():
+            return {}
+        try:
+            payload = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return dict(payload) if isinstance(payload, dict) else {}
 
     @classmethod
     def _build_debug_summary(

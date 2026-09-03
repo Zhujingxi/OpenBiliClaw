@@ -208,6 +208,7 @@ _DEFAULT_POOL_SOURCE_SHARES = {
     "linuxdo": 1,
     "v2ex": 1,
     "weibo": 1,
+    "github": 1,
 }
 
 _SOURCE_INCREMENTAL_ENV_FIELDS = {
@@ -1361,6 +1362,35 @@ class BangumiSourceConfig(SourceDatePreferenceConfig):
 
 
 @dataclass
+class GitHubSourceConfig(SourceDatePreferenceConfig):
+    """GitHub public-repository discovery with an optional personal token.
+
+    Anonymous repository search is always available. ``username`` scopes the
+    public starred-repository bootstrap without proving ownership, while an
+    optional PAT can identify the current account through ``GET /user`` and
+    raise GitHub's public API rate limits. The integration is deliberately
+    public-only: neither the token nor this config unlock private repositories.
+    """
+
+    enabled: bool = False
+    username: str = ""
+    access_token: str = ""
+    # Security boundary: GitHub credentials may come from this one explicitly
+    # namespaced variable only. Generic GITHUB_TOKEN / GH_TOKEN variables often
+    # belong to unrelated developer tooling and must never be captured.
+    token_env: str = "OPENBILICLAW_GITHUB_TOKEN"
+    source_modes: tuple[str, ...] = ("search", "ranked", "latest")
+    daily_search_budget: int = 120
+    daily_ranked_budget: int = 60
+    daily_latest_budget: int = 60
+    # Anonymous repository search is limited to 10 requests/minute.
+    request_interval_seconds: int = 6
+    min_interval_minutes: int = 10
+    bootstrap_limit: int = 300
+    bootstrap_max_pages: int = 10
+
+
+@dataclass
 class LinuxdoSourceConfig(SourceDatePreferenceConfig):
     """Linux.do browser-extension discovery and account-signal configuration."""
 
@@ -1461,6 +1491,18 @@ _V2EX_LIST_MAX_LENGTH = {
 }
 _V2EX_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
+GITHUB_ALLOWED_SOURCE_MODES = frozenset({"search", "ranked", "latest"})
+GITHUB_TOKEN_ENV = "OPENBILICLAW_GITHUB_TOKEN"
+GITHUB_CONFIG_INTEGER_LIMITS: dict[str, tuple[int, int]] = {
+    "daily_search_budget": (0, 100_000),
+    "daily_ranked_budget": (0, 100_000),
+    "daily_latest_budget": (0, 100_000),
+    "request_interval_seconds": (0, 60),
+    "min_interval_minutes": (0, 1440),
+    "bootstrap_limit": (1, 1000),
+    "bootstrap_max_pages": (1, 100),
+}
+
 
 @dataclass
 class BilibiliSourceConfig(SourceDatePreferenceConfig):
@@ -1499,6 +1541,7 @@ class SourcesConfig:
     zhihu: ZhihuSourceConfig = field(default_factory=ZhihuSourceConfig)
     reddit: RedditSourceConfig = field(default_factory=RedditSourceConfig)
     bangumi: BangumiSourceConfig = field(default_factory=BangumiSourceConfig)
+    github: GitHubSourceConfig = field(default_factory=GitHubSourceConfig)
     linuxdo: LinuxdoSourceConfig = field(default_factory=LinuxdoSourceConfig)
     v2ex: V2EXSourceConfig = field(default_factory=V2EXSourceConfig)
     weibo: WeiboSourceConfig = field(default_factory=WeiboSourceConfig)
@@ -1870,6 +1913,7 @@ def _warn_suspicious_budgets(sources: SourcesConfig) -> None:
         ("zhihu", sources.zhihu),
         ("reddit", sources.reddit),
         ("bangumi", sources.bangumi),
+        ("github", sources.github),
         ("linuxdo", sources.linuxdo),
         ("weibo", sources.weibo),
     ]
@@ -2244,6 +2288,7 @@ def _build_config(
     zhihu_raw = sources_raw.get("zhihu", {})
     reddit_raw = sources_raw.get("reddit", {})
     bangumi_raw = sources_raw.get("bangumi", {})
+    github_raw = sources_raw.get("github", {})
     linuxdo_raw = sources_raw.get("linuxdo", {})
     v2ex_raw = sources_raw.get("v2ex", {})
     weibo_raw = sources_raw.get("weibo", {})
@@ -2356,6 +2401,29 @@ def _build_config(
             request_interval_seconds=max(0, int(bangumi_raw.get("request_interval_seconds", 1))),
             min_interval_minutes=max(0, int(bangumi_raw.get("min_interval_minutes", 3))),
             bootstrap_limit=min(1000, max(1, int(bangumi_raw.get("bootstrap_limit", 300)))),
+        ),
+        github=GitHubSourceConfig(
+            enabled=bool(github_raw.get("enabled", False)),
+            username=str(github_raw.get("username", "") or "").strip(),
+            access_token=str(github_raw.get("access_token", "") or "").strip(),
+            token_env=str(github_raw.get("token_env", GITHUB_TOKEN_ENV) or "").strip(),
+            source_modes=tuple(
+                value
+                for value in _coerce_str_list(
+                    github_raw.get("source_modes", ["search", "ranked", "latest"])
+                )
+                if value in GITHUB_ALLOWED_SOURCE_MODES
+            )
+            or ("search", "ranked", "latest"),
+            daily_search_budget=max(0, int(github_raw.get("daily_search_budget", 120))),
+            daily_ranked_budget=max(0, int(github_raw.get("daily_ranked_budget", 60))),
+            daily_latest_budget=max(0, int(github_raw.get("daily_latest_budget", 60))),
+            request_interval_seconds=max(
+                0, min(60, int(github_raw.get("request_interval_seconds", 6)))
+            ),
+            min_interval_minutes=max(0, min(1440, int(github_raw.get("min_interval_minutes", 10)))),
+            bootstrap_limit=min(1000, max(1, int(github_raw.get("bootstrap_limit", 300)))),
+            bootstrap_max_pages=min(100, max(1, int(github_raw.get("bootstrap_max_pages", 10)))),
         ),
         linuxdo=LinuxdoSourceConfig(
             enabled=bool(linuxdo_raw.get("enabled", False)),
@@ -2471,6 +2539,7 @@ def _build_config(
             ),
         ),
     )
+    normalize_github_source_config(sources.github, strict=False)
     normalize_v2ex_source_config(sources.v2ex, strict=False)
     _apply_source_date_preferences_from_raw(
         sources,
@@ -2483,6 +2552,7 @@ def _build_config(
         zhihu=zhihu_raw,
         reddit=reddit_raw,
         bangumi=bangumi_raw,
+        github=github_raw,
         linuxdo=linuxdo_raw,
         v2ex=v2ex_raw,
         weibo=weibo_raw,
@@ -3193,6 +3263,64 @@ def normalize_v2ex_source_config(
         setattr(source, field_name, list_value)
     for field_name, int_value in normalized_ints.items():
         setattr(source, field_name, int_value)
+    source.token_env = token_env
+    return source
+
+
+def normalize_github_source_config(
+    source: GitHubSourceConfig,
+    *,
+    strict: bool = True,
+) -> GitHubSourceConfig:
+    """Validate GitHub config at read and write boundaries.
+
+    The forgiving read path drops unknown discovery modes and clamps legacy
+    numeric values. The write path is strict. In both cases ``token_env`` is
+    pinned to the OpenBiliClaw-specific variable so a GitHub adapter can never
+    consume a generic CI/developer credential by accident.
+    """
+
+    defaults = GitHubSourceConfig()
+    normalized_modes: list[str] = []
+    for raw in _coerce_str_list(source.source_modes):
+        mode = raw.strip().lower()
+        if mode not in GITHUB_ALLOWED_SOURCE_MODES:
+            if strict:
+                raise ValueError("sources.github.source_modes 包含不支持的值")
+            continue
+        if mode not in normalized_modes:
+            normalized_modes.append(mode)
+    if not normalized_modes:
+        if strict:
+            raise ValueError("sources.github.source_modes 不能为空")
+        normalized_modes = list(defaults.source_modes)
+
+    normalized_ints: dict[str, int] = {}
+    for field_name, (minimum, maximum) in GITHUB_CONFIG_INTEGER_LIMITS.items():
+        raw = getattr(source, field_name)
+        try:
+            if isinstance(raw, bool):
+                raise ValueError
+            number = int(raw)
+        except (TypeError, ValueError):
+            if strict:
+                raise ValueError(f"sources.github.{field_name} 必须是整数") from None
+            number = int(getattr(defaults, field_name))
+        if number < minimum or number > maximum:
+            if strict:
+                raise ValueError(f"sources.github.{field_name} 必须在 {minimum}..{maximum} 之间")
+            number = min(maximum, max(minimum, number))
+        normalized_ints[field_name] = number
+
+    token_env = str(source.token_env or "").strip()
+    if token_env != GITHUB_TOKEN_ENV:
+        if strict:
+            raise ValueError("sources.github.token_env 只允许 OPENBILICLAW_GITHUB_TOKEN")
+        token_env = GITHUB_TOKEN_ENV
+
+    source.source_modes = tuple(normalized_modes)
+    for field_name, value in normalized_ints.items():
+        setattr(source, field_name, value)
     source.token_env = token_env
     return source
 
@@ -4054,6 +4182,7 @@ _SOURCE_DATE_PREFERENCE_SLUGS = (
     "zhihu",
     "reddit",
     "bangumi",
+    "github",
     "linuxdo",
     "v2ex",
     "weibo",
@@ -4195,6 +4324,42 @@ def _collect_config_issues(config: Config) -> list[ConfigIssue]:
         issues.append(
             ConfigIssue(
                 field="sources.bangumi.access_token",
+                message=str(exc),
+                severity="blocking",
+            )
+        )
+
+    from openbiliclaw.sources.github_client import (
+        validate_github_access_token,
+        validate_github_username,
+    )
+
+    try:
+        validate_github_username(config.sources.github.username)
+    except ValueError as exc:
+        issues.append(
+            ConfigIssue(
+                field="sources.github.username",
+                message=str(exc),
+                severity="blocking",
+            )
+        )
+    try:
+        validate_github_access_token(config.sources.github.access_token)
+    except ValueError as exc:
+        issues.append(
+            ConfigIssue(
+                field="sources.github.access_token",
+                message=str(exc),
+                severity="blocking",
+            )
+        )
+    try:
+        normalize_github_source_config(deepcopy(config.sources.github), strict=True)
+    except ValueError as exc:
+        issues.append(
+            ConfigIssue(
+                field="sources.github",
                 message=str(exc),
                 severity="blocking",
             )
@@ -5336,6 +5501,16 @@ def save_config(
     config.sources.bangumi.access_token = validate_bangumi_access_token(
         config.sources.bangumi.access_token
     )
+    from openbiliclaw.sources.github_client import (
+        validate_github_access_token,
+        validate_github_username,
+    )
+
+    config.sources.github.username = validate_github_username(config.sources.github.username)
+    config.sources.github.access_token = validate_github_access_token(
+        config.sources.github.access_token
+    )
+    normalize_github_source_config(config.sources.github, strict=True)
     from openbiliclaw.sources.v2ex_client import (
         validate_v2ex_access_token,
         validate_v2ex_username,
@@ -5651,6 +5826,21 @@ def _render_config_toml(
             f"bootstrap_limit = {config.sources.bangumi.bootstrap_limit}",
             *_render_source_date_preference_lines(config.sources.bangumi),
             "",
+            "[sources.github]",
+            f"enabled = {_toml_bool(config.sources.github.enabled)}",
+            f"username = {_toml_string(config.sources.github.username)}",
+            f"access_token = {_toml_string(config.sources.github.access_token)}",
+            f"token_env = {_toml_string(config.sources.github.token_env)}",
+            f"source_modes = {_toml_str_list(list(config.sources.github.source_modes))}",
+            f"daily_search_budget = {config.sources.github.daily_search_budget}",
+            f"daily_ranked_budget = {config.sources.github.daily_ranked_budget}",
+            f"daily_latest_budget = {config.sources.github.daily_latest_budget}",
+            f"request_interval_seconds = {config.sources.github.request_interval_seconds}",
+            f"min_interval_minutes = {config.sources.github.min_interval_minutes}",
+            f"bootstrap_limit = {config.sources.github.bootstrap_limit}",
+            f"bootstrap_max_pages = {config.sources.github.bootstrap_max_pages}",
+            *_render_source_date_preference_lines(config.sources.github),
+            "",
             "[sources.linuxdo]",
             f"enabled = {_toml_bool(config.sources.linuxdo.enabled)}",
             f"incremental_enabled = {_toml_bool(config.sources.linuxdo.incremental_enabled)}",
@@ -5816,6 +6006,7 @@ def _render_config_toml(
             f"zhihu = {int(config.scheduler.pool_source_shares.get('zhihu', 1))}",
             f"reddit = {int(config.scheduler.pool_source_shares.get('reddit', 1))}",
             f"bangumi = {int(config.scheduler.pool_source_shares.get('bangumi', 1))}",
+            f"github = {int(config.scheduler.pool_source_shares.get('github', 1))}",
             f"linuxdo = {int(config.scheduler.pool_source_shares.get('linuxdo', 1))}",
             f"v2ex = {int(config.scheduler.pool_source_shares.get('v2ex', 1))}",
             f"weibo = {int(config.scheduler.pool_source_shares.get('weibo', 1))}",

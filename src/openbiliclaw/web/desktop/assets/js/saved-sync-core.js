@@ -14,6 +14,7 @@
     zh: "zhihu",
     rd: "reddit",
     wb: "weibo",
+    gh: "github",
   });
 
   function text(value) {
@@ -50,6 +51,7 @@
       )) return "weibo";
       if (host.endsWith(".bilibili.com") || host === "b23.tv") return "bilibili";
       if (["bgm.tv", "bangumi.tv"].some((domain) => host === domain || host.endsWith(`.${domain}`))) return "bangumi";
+      if (host === "github.com" || host === "www.github.com") return "github";
       return "web";
     } catch {
       return "bilibili";

@@ -98,6 +98,8 @@ Agent 宿主（OpenClaw / Hermes / WorkBuddy）
 │  来源族注册表：alias · strategy · URL host             │
 │             → pool 统计 · seen_items 持久化已看账本     │
 │ Bangumi 官方匿名 API → search/ranked/latest producer → shared eval │
+│ GitHub 官方 REST API → repository search/ranked/latest → shared eval │
+│ GitHub public starred repositories → favorite events → guided init（不做后台轮询）│
 │ V2EX 匿名 API/Feed → 有界 Topic/Reply 增强 → 五分支 producer → shared eval │
 │ V2EX 身份梯级：PAT verified > browser observed > user accepted；冲突时只暂停账号画像写入 │
 │ 时效生命周期：正文逐字证据 + code-owned 复审时钟 → 可展示 / temporal_review_hold / 过期 │
@@ -116,9 +118,8 @@ Agent 宿主（OpenClaw / Hermes / WorkBuddy）
 │ 后台维护：独立 DB worker → ≤50 行/批 → 释放写锁；未变化跳过 / 10min 巡检 │
 │ /api/saved/* · 保存 Router · B 站原生保存 Adapter      │
 │ 六平台 Adapter → ExtensionNativeSaveBroker → extension_native_save_jobs │
-│ 七平台 source task multiplex：xhs / dy / yt / x / zhihu / reddit / linuxdo │
-│ 七源 source task multiplex：xhs / dy / yt / x / zhihu / reddit / v2ex  │
-│ 扩展在线周期回拉（默认关闭，显式 opt-in）：Runtime → 六源 bootstrap task（全局串行）→ installed extension │
+│ 八来源 source task multiplex：xhs / dy / yt / zhihu / reddit / linuxdo / v2ex / weibo │
+│ 扩展在线周期回拉（默认关闭，显式 opt-in）：Runtime → 七源 bootstrap task（全局串行，不含 weibo / GitHub）→ installed extension │
 │ task-result → staged durable ingress → 原子有界 seen keys（每源5000）→ terminal │
 │ V2EX 完整收藏快照 → 连续两次缺失确认 → durable retraction/restore outbox → account-scoped Node affinity │
 │ XHS 自动任务：来源/调度领取门 → SQLite 节流/风控冷却 → 关闭或限流时不开新 tab │
@@ -147,6 +148,6 @@ durable turn → 固定时间/payload → 确认入口（待聊列表/卡片） 
 桌面首屏：推荐 hydration │ runtime hydration │ health/profile/activity/config 次级 hydration（三分支独立）
 桌面后台恢复（已有卡片）：跳过可能补池的推荐 GET │ 只同步 runtime / 库存状态
 
-海外请求：设置页 `[network].mode` → 系统代理（默认）/ 直连 / 自定义代理 → LLM、YouTube、X/Reddit CLI、Bangumi、更新、GitHub 项目统计；国内平台（含 V2EX）保持独立直连
+海外请求：设置页 `[network].mode` → 系统代理（默认）/ 直连 / 自定义代理 → LLM、YouTube、X/Reddit CLI、Bangumi、GitHub 来源、更新与项目统计；国内平台（含 V2EX）保持独立直连
 手动抖音发现：CLI discover → daemon 同款 producer → 统一关键词终态 → 插件 search/hot/feed → 待评估池
 ```

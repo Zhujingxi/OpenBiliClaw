@@ -2753,6 +2753,10 @@ PLATFORM_SUPPLY_ADVANTAGES: dict[str, str] = {
     "twitter": (
         "实时讨论 / 英文技术 / 观点 / 资讯。1-4 词,技术 / 小众话题尤其优先英文,华语圈话题可用中文。"
     ),
+    "github": (
+        "公开代码仓库 / 开源工具 / 框架 / SDK / 模板 / 工程实践。优先英文技术实体与"
+        "可直接命中 repository name、description 或 README 的 1-5 词短查询；避免社媒热词。"
+    ),
     "zhihu": (
         "知乎中文问答 / 深度回答 / 经验复盘 / 专业解释 / 观点辨析。适合"
         "问题式、场景式或概念 + 经验词的中文关键词。"
@@ -2821,8 +2825,8 @@ _MERGED_KEYWORDS_SYSTEM_PROMPT = (
     "<rules>\n"
     "1. 输出必须是严格 JSON 对象,不要附带解释。\n"
     "2. JSON 的 key 必须是 <platforms> 里出现的 platform 标识符"
-    "(bilibili / xiaohongshu / douyin / youtube / twitter / zhihu / reddit / bangumi / linuxdo),"
-    "(bilibili / xiaohongshu / douyin / youtube / twitter / zhihu / reddit / bangumi / v2ex / weibo),"
+    "(bilibili / xiaohongshu / douyin / youtube / twitter / github / zhihu / reddit / "
+    "bangumi / linuxdo / v2ex / weibo),"
     "每个 key 的值是一个"
     "字符串数组。**只输出本轮 <platforms> 里给到的平台**,不要凭空加平台。"
     "唯一例外:只有 user 消息含 <explore_domains> 时,才可以额外输出"
@@ -2865,6 +2869,7 @@ _MERGED_KEYWORDS_SYSTEM_PROMPT = (
     '  "linuxdo": ["本地大模型 部署 踩坑", "开源自托管 工具 分享"],\n'
     '  "v2ex": ["本地运行 Agent 讨论", "家庭网络折腾 经验"],\n'
     '  "weibo": ["AI Agent 热议", "动画制作 业内回应"],\n'
+    '  "github": ["local llm agent framework", "self hosted knowledge base"],\n'
     '  "explore_domains": [\n'
     '    {"domain": "城市声音采样", "novelty_level": 0.84, '
     '"queries": ["城市 声音 采样 纪录片", "街头 声音 设计 vlog"]}\n'
@@ -2893,8 +2898,7 @@ Return ONLY a strict JSON object with exactly this shape:
     {
       "interest": "string",
       "axis_id_or_label": "existing axis_id or exact axis_label",
-      "platform": "bilibili|xiaohongshu|douyin|youtube|twitter|zhihu|reddit|bangumi|linuxdo",
-      "platform": "bilibili|xiaohongshu|douyin|youtube|twitter|zhihu|reddit|bangumi|v2ex|weibo",
+      "platform": "bilibili|xiaohongshu|douyin|youtube|twitter|github|zhihu|reddit|bangumi|linuxdo|v2ex|weibo",
       "core_concept": "short searchable concept",
       "decoration": "optional style marker",
       "recency_sensitivity": "low|medium|high"

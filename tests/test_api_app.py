@@ -3148,6 +3148,7 @@ class TestBackendAPI:
             "zhihu",
             "reddit",
             "bangumi",
+            "github",
             "linuxdo",
             "weibo",
         ):
@@ -3271,6 +3272,59 @@ class TestBackendAPI:
         assert rejected["token_state"] == "rejected"
         assert "已被拒绝" in rejected["detail"]
 
+    def test_github_status_merges_discovery_health_and_current_pat_rejection(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.config import Config
+        from openbiliclaw.runtime.github_producer import (
+            GitHubDiscoveryProducer,
+            _persist_token_rejection,
+            _token_fingerprint,
+        )
+        from openbiliclaw.storage.database import Database
+
+        cfg = Config()
+        cfg.sources.github.enabled = True
+        cfg.sources.github.access_token = "old-token"
+        monkeypatch.setattr("openbiliclaw.config.load_config", lambda: cfg)
+        database = Database(tmp_path / "github-source-status.db")
+        database.initialize()
+        producer = GitHubDiscoveryProducer(
+            database=database,
+            soul_engine=object(),
+            client=object(),
+        )
+        producer._ensure_tables()
+        _persist_token_rejection(database, _token_fingerprint("old-token"))
+        client = TestClient(
+            create_app(memory_manager=object(), database=database, soul_engine=object())
+        )
+
+        rejected = client.get("/api/sources/status").json()["github"]
+
+        assert rejected["state"] == "no_auth"
+        assert rejected["logged_in"] is True
+        assert rejected["discovery_state"] == "unverified"
+        assert rejected["token_state"] == "rejected"
+        assert rejected["auth"]["verification"] == "failed"
+        assert rejected["auth"]["capabilities"]["profile"]["ready"] is False
+        assert rejected["auth"]["capabilities"]["bootstrap"]["state"] == "unavailable"
+        assert "PAT 已被拒绝" in rejected["detail"]
+
+        producer._set_cooldown(120)
+        cooling = client.get("/api/sources/status").json()["github"]
+        assert cooling["discovery_state"] == "rate_limited"
+        assert cooling["feed_paused"] is True
+        assert cooling["token_state"] == "rejected"
+
+        cfg.sources.github.access_token = "rotated-token"
+        rotated = client.get("/api/sources/status").json()["github"]
+        assert rotated["token_state"] == "ok"
+        assert rotated["auth"]["verification"] == "unverified"
+        assert rotated["auth"]["capabilities"]["bootstrap"]["ready"] is True
+
     def test_bangumi_disabled_status_surfaces_a_saved_credential(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -3365,6 +3419,9 @@ class TestBackendAPI:
         assert body["zhihu"]["available"] is False
         assert body["bangumi"]["available"] is False
         assert body["bangumi"]["label"] == "可选个人令牌"
+        assert body["github"]["available"] is False
+        assert body["github"]["value"] == ""
+        assert body["github"]["label"] == "可选 PAT"
 
         masked = client.get("/api/sources/credentials").json()
         assert masked["bilibili"]["value"] == body["bilibili"]["value"]
@@ -5840,6 +5897,49 @@ class TestBackendAPI:
         assert data["items"][0]["up_mid"] == 112233
         assert_publication(data["items"][0])
 
+    def test_recommendations_endpoint_exposes_fail_closed_github_source_metadata(
+        self,
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        class FakeDatabase:
+            def get_recommendations(
+                self, limit: int = 20, *, exclude_processed: bool = False
+            ) -> list[dict[str, object]]:
+                assert limit == 40
+                assert exclude_processed is True
+                return [
+                    {
+                        "id": 17,
+                        "bvid": "repository:1175278883",
+                        "item_key": "github:repository:1175278883",
+                        "content_id": "repository:1175278883",
+                        "content_url": "https://github.com/whiteguo233/OpenBiliClaw",
+                        "source_platform": "github",
+                        "content_type": "repository",
+                        "title": "whiteguo233/OpenBiliClaw",
+                        "expression": "值得看看",
+                        "topic": "开源项目",
+                        "franchise_key": "",
+                        "source_metadata": json.dumps(
+                            {
+                                "repository_node_id": "R_kgDORg1VIw",
+                                "language": "Python",
+                                "topics": ["ai-agent"],
+                            }
+                        ),
+                    }
+                ]
+
+        response = TestClient(create_app(database=FakeDatabase())).get("/api/recommendations")
+
+        assert response.status_code == 200, response.text
+        assert response.json()["items"][0]["source_metadata"] == {
+            "repository_node_id": "R_kgDORg1VIw",
+            "language": "Python",
+            "topics": ["ai-agent"],
+        }
+
     def test_recommendations_endpoint_coalesces_immediate_duplicate_reads(self) -> None:
         from fastapi.testclient import TestClient
 
@@ -7109,6 +7209,7 @@ class TestBackendAPI:
                     "source_platform": "bilibili",
                     "content_type": "video",
                     "body_text": "",
+                    "source_metadata": {},
                     "duration": 3671,
                     "view_count": 12500,
                     "like_count": 3400,
@@ -7139,6 +7240,7 @@ class TestBackendAPI:
                     "source_platform": "bilibili",
                     "content_type": "video",
                     "body_text": "",
+                    "source_metadata": {},
                     "duration": 0,
                     "view_count": 0,
                     "like_count": 0,
@@ -7438,6 +7540,7 @@ class TestBackendAPI:
                     "source_platform": "bilibili",
                     "content_type": "video",
                     "body_text": "",
+                    "source_metadata": {},
                     "duration": 0,
                     "view_count": 0,
                     "like_count": 0,
@@ -15216,6 +15319,7 @@ class TestEmbeddingAndCompatProviderE2E:
             "zhihu": 1,
             "reddit": 1,
             "bangumi": 4,
+            "github": 1,
             "linuxdo": 1,
             "weibo": 1,
             "v2ex": 1,
@@ -15876,6 +15980,7 @@ class TestEmbeddingAndCompatProviderE2E:
             "douyin": 2,
             "youtube": 1,
             "twitter": 1,
+            "github": 1,
             "zhihu": 1,
             "reddit": 1,
             "bangumi": 1,
@@ -16035,6 +16140,7 @@ class TestEmbeddingAndCompatProviderE2E:
                 "v2ex": 0,
                 "bangumi": 0,
                 "linuxdo": 0,
+                "github": 0,
                 "unknown": 0,
             },
             "enabled_sources": {
@@ -16047,6 +16153,7 @@ class TestEmbeddingAndCompatProviderE2E:
                 "reddit": False,
                 "bangumi": False,
                 "linuxdo": False,
+                "github": False,
                 "weibo": False,
                 "v2ex": False,
             },
@@ -16190,6 +16297,7 @@ class TestEmbeddingAndCompatProviderE2E:
                 "v2ex": 0,
                 "bangumi": 0,
                 "linuxdo": 0,
+                "github": 0,
                 "unknown": 0,
             },
             "enabled_sources": {
@@ -16202,6 +16310,7 @@ class TestEmbeddingAndCompatProviderE2E:
                 "reddit": True,
                 "bangumi": False,
                 "linuxdo": False,
+                "github": False,
                 "weibo": False,
                 "v2ex": False,
             },
@@ -18058,6 +18167,214 @@ class TestGuidedInitEndpoints:
             assert resp.status_code == 202, resp.text
             self._drive_until(client, captured2, key="include_bangumi")
             assert captured2["bangumi_username"] == "typed-name"
+
+    def test_init_rejects_github_only_without_bootstrap_identity(self, tmp_path: Path) -> None:
+        from fastapi.testclient import TestClient
+
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=[])
+        app, db = self._make_app(tmp_path, prereqs=prereqs)
+        with TestClient(app) as client:
+            response = client.post("/api/init", json={"sources": ["github"]})
+
+        assert response.status_code == 409
+        assert response.json()["error"] == "no_profile_signal_sources"
+        assert db.get_latest_init_run() is None
+
+    def test_init_accepts_scoped_github_username(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.sources.github_client import GitHubIdentity
+
+        async def _resolve(client, *, username=""):
+            assert username == "octocat"
+            assert client.has_access_token is False
+            return GitHubIdentity(login="Octocat", user_id=1, evidence="accepted")
+
+        monkeypatch.setattr(
+            "openbiliclaw.sources.github_client.resolve_github_bootstrap_identity",
+            _resolve,
+        )
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=[])
+        app, _ = self._make_app(tmp_path, prereqs=prereqs)
+        captured = self._capture_run_guided_init(monkeypatch)
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/init",
+                json={
+                    "sources": ["github"],
+                    "source_options": {"github": {"username": " octocat "}},
+                },
+            )
+            assert response.status_code == 202, response.text
+            self._drive_until(client, captured, key="include_github")
+
+        assert captured["include_github"] is True
+        assert captured["github_username"] == "Octocat"
+        assert captured["github_token"] == ""
+
+    def test_init_rejects_github_identity_mismatch_before_reservation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.sources.github_client import GitHubAPIError
+
+        async def _resolve(client, *, username=""):
+            assert client.has_access_token is True
+            assert username == "typed-user"
+            raise GitHubAPIError("identity_mismatch", "different numeric ids")
+
+        monkeypatch.setattr(
+            "openbiliclaw.sources.github_client.resolve_github_bootstrap_identity",
+            _resolve,
+        )
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=[])
+        app, db = self._make_app(tmp_path, prereqs=prereqs)
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/init",
+                json={
+                    "sources": ["github"],
+                    "source_options": {
+                        "github": {"username": "typed-user", "access_token": "github-pat"}
+                    },
+                },
+            )
+
+        assert response.status_code == 409
+        assert response.json()["error"] == "github_identity_mismatch"
+        assert db.get_latest_init_run() is None
+
+    def test_init_rejects_invalid_github_pat_before_reservation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.sources.github_client import GitHubAPIError
+
+        async def _resolve(client, *, username=""):
+            raise GitHubAPIError("unauthorized", "denied", status_code=401)
+
+        monkeypatch.setattr(
+            "openbiliclaw.sources.github_client.resolve_github_bootstrap_identity",
+            _resolve,
+        )
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=[])
+        app, db = self._make_app(tmp_path, prereqs=prereqs)
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/init",
+                json={
+                    "sources": ["github"],
+                    "source_options": {"github": {"access_token": "expired-pat"}},
+                },
+            )
+
+        assert response.status_code == 400
+        assert response.json()["error"] == "invalid_github_access_token"
+        assert db.get_latest_init_run() is None
+
+    def test_init_status_honors_discovery_rejection_for_current_github_pat(
+        self, tmp_path: Path
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.config import Config
+        from openbiliclaw.runtime.github_producer import (
+            GitHubDiscoveryProducer,
+            _persist_token_rejection,
+            _token_fingerprint,
+        )
+
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["github"])
+        app, db = self._make_app(
+            tmp_path,
+            profile_ready=True,
+            prereqs=prereqs,
+        )
+        cfg = Config()
+        cfg.sources.github.enabled = True
+        cfg.sources.github.access_token = "rejected-pat"
+        app.state.runtime_context.config = cfg
+        GitHubDiscoveryProducer(
+            database=db,
+            soul_engine=object(),
+            client=object(),
+        )._ensure_tables()
+        _persist_token_rejection(db, _token_fingerprint("rejected-pat"))
+
+        with TestClient(app) as client:
+            rejected = client.get("/api/init-status").json()["prerequisites"][
+                "source_capabilities"
+            ]["github"]
+            cfg.sources.github.access_token = "rotated-pat"
+            rotated = client.get("/api/init-status").json()["prerequisites"]["source_capabilities"][
+                "github"
+            ]
+
+        assert rejected["discover"]["ready"] is True
+        assert rejected["profile"]["ready"] is False
+        assert rejected["bootstrap"]["state"] == "unavailable"
+        assert rotated["profile"]["ready"] is True
+        assert rotated["bootstrap"]["state"] == "ready"
+
+    def test_init_mixed_sources_skip_identityless_github_profile_bootstrap(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["reddit"])
+        app, _ = self._make_app(tmp_path, prereqs=prereqs)
+        captured = self._capture_run_guided_init(monkeypatch)
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/init",
+                json={"sources": ["reddit", "github"]},
+            )
+            assert response.status_code == 202, response.text
+            assert any("GitHub" in warning for warning in response.json()["warnings"])
+            self._drive_until(client, captured, key="include_github")
+
+        assert captured["include_reddit"] is True
+        assert captured["include_github"] is False
+
+    def test_init_mixed_sources_isolates_invalid_github_pat_before_reservation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fastapi.testclient import TestClient
+
+        from openbiliclaw.sources.github_client import GitHubAPIError
+
+        async def _resolve(client, *, username=""):
+            assert client.has_access_token is True
+            raise GitHubAPIError("unauthorized", "denied", status_code=401)
+
+        monkeypatch.setattr(
+            "openbiliclaw.sources.github_client.resolve_github_bootstrap_identity",
+            _resolve,
+        )
+        prereqs = _FakeInitPrereqs(bili="ok", chat=True, platforms=["reddit"])
+        app, _ = self._make_app(tmp_path, prereqs=prereqs)
+        captured = self._capture_run_guided_init(monkeypatch)
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/init",
+                json={
+                    "sources": ["reddit", "github"],
+                    "source_options": {"github": {"access_token": "expired-request-scoped-pat"}},
+                },
+            )
+            assert response.status_code == 202, response.text
+            warnings = response.json()["warnings"]
+            assert any("invalid_github_access_token" in warning for warning in warnings)
+            self._drive_until(client, captured, key="include_github")
+
+        assert captured["include_reddit"] is True
+        assert captured["include_github"] is False
+        assert captured["github_username"] == ""
+        assert captured["github_token"] == ""
 
     def test_init_rejects_unknown_source_options(self, tmp_path: Path) -> None:
         from fastapi.testclient import TestClient

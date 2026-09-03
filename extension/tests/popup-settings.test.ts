@@ -75,6 +75,20 @@ test("settings page exposes advanced config fields from backend schema", () => {
     "cfgYoutubeDailyChannelBudget",
     "cfgYoutubeRequestInterval",
     "cfgYoutubeMinInterval",
+    "cfgGithubEnabled",
+    "cfgGithubUsername",
+    "cfgGithubAccessToken",
+    "cfgGithubClearToken",
+    "cfgGithubModeSearch",
+    "cfgGithubModeRanked",
+    "cfgGithubModeLatest",
+    "cfgGithubDailySearchBudget",
+    "cfgGithubDailyRankedBudget",
+    "cfgGithubDailyLatestBudget",
+    "cfgGithubRequestInterval",
+    "cfgGithubMinInterval",
+    "cfgGithubBootstrapLimit",
+    "cfgGithubBootstrapMaxPages",
     "cfgRedditEnabled",
     "cfgRedditBackend",
     "cfgRedditCookie",
@@ -123,6 +137,7 @@ test("settings page exposes advanced config fields from backend schema", () => {
     "cfgPoolShareDouyin",
     "cfgPoolShareWeibo",
     "cfgPoolShareYoutube",
+    "cfgPoolShareGithub",
     "cfgPoolShareReddit",
     "cfgSuggestPoolShares",
     "cfgSpeculationInterval",
@@ -176,6 +191,7 @@ test("settings source tab separates every platform into its own block", () => {
     "weibo",
     "youtube",
     "twitter",
+    "github",
     "zhihu",
     "reddit",
     "bangumi",
@@ -203,6 +219,7 @@ test("settings source tab separates every platform into its own block", () => {
     "weibo",
     "youtube",
     "twitter",
+    "github",
     "zhihu",
     "reddit",
     "bangumi",
@@ -521,6 +538,48 @@ test("settings page round-trips Bangumi discovery config", () => {
   assert.match(popupJs, /bangumi: getInt\("cfgPoolShareBangumi", 1\)/);
   assert.match(popupJs, /bangumi: checked\("cfgBangumiEnabled"\)/);
   assert.match(popupJs, /if \(shares\.bangumi !== undefined\) setVal\("cfgPoolShareBangumi", shares\.bangumi\)/);
+});
+
+test("settings page round-trips GitHub public-repository config with a write-only PAT", () => {
+  const popupHtml = readFileSync(resolve("popup", "popup.html"), "utf8");
+  const popupJs = readFileSync(resolve("popup", "popup.js"), "utf8");
+  const githubCard =
+    popupHtml.match(/data-source-card="github"[\s\S]*?data-source-card="zhihu"/)?.[0] ?? "";
+
+  for (const id of [
+    "cfgGithubEnabled",
+    "cfgGithubUsername",
+    "cfgGithubAccessToken",
+    "cfgGithubClearToken",
+    "cfgGithubModeSearch",
+    "cfgGithubModeRanked",
+    "cfgGithubModeLatest",
+    "cfgGithubDailySearchBudget",
+    "cfgGithubDailyRankedBudget",
+    "cfgGithubDailyLatestBudget",
+    "cfgGithubRequestInterval",
+    "cfgGithubMinInterval",
+    "cfgGithubBootstrapLimit",
+    "cfgGithubBootstrapMaxPages",
+    "cfgPoolShareGithub",
+  ]) {
+    assert.match(popupHtml, new RegExp(`id="${id}"`), `${id} should exist`);
+    assert.match(popupJs, new RegExp(`"${id}"`), `${id} should be wired in popup.js`);
+  }
+
+  assert.match(githubCard, /官方 REST API/);
+  assert.match(githubCard, /公开 repository/);
+  assert.match(githubCard, /不会开放私有仓库/);
+  assert.doesNotMatch(githubCard, /incremental|Cookie 输入|任务页打开/);
+  assert.match(popupJs, /setCheckedValues\(GITHUB_SOURCE_MODE_FIELDS, cfg\.sources\?\.github\?\.source_modes\)/);
+  assert.match(popupJs, /github:\s*\{\s*enabled: checked\("cfgGithubEnabled"\)/);
+  assert.match(popupJs, /username: getVal\("cfgGithubUsername"\)/);
+  assert.match(popupJs, /daily_search_budget: getInt\("cfgGithubDailySearchBudget", 120\)/);
+  assert.match(popupJs, /bootstrap_max_pages: getInt\("cfgGithubBootstrapMaxPages", 10\)/);
+  assert.match(popupJs, /cfg\.sources\?\.github\?\.access_token_set/);
+  assert.match(popupJs, /checked\("cfgGithubClearToken"\)[\s\S]*?access_token: ""/);
+  assert.match(popupJs, /github: getInt\("cfgPoolShareGithub", 1\)/);
+  assert.match(popupJs, /if \(shares\.github !== undefined\) setVal\("cfgPoolShareGithub", shares\.github\)/);
 });
 
 test("settings page round-trips Linux.do config without a cookie field", () => {
@@ -958,6 +1017,7 @@ test("source-share suggestion button uses settings-scope helpers and form switch
   assert.match(suggestionBlock, /bilibili:\s*checked\("cfgBilibiliEnabled", true\)/);
   assert.match(suggestionBlock, /xiaohongshu:\s*checked\("cfgXhsEnabled"\)/);
   assert.match(suggestionBlock, /youtube:\s*checked\("cfgYoutubeEnabled"\)/);
+  assert.match(suggestionBlock, /github:\s*checked\("cfgGithubEnabled"\)/);
   assert.match(suggestionBlock, /configured_shares:\s*\{/);
 });
 

@@ -615,7 +615,7 @@ daemon，保留当前 v2 文件和自动备份，再由操作者显式把导出�
 ### `[sources.<name>]` 发布日期偏好
 
 所有来源（`bilibili` / `xiaohongshu` / `douyin` / `youtube` / `twitter` / `zhihu` /
-`reddit` / `bangumi` / `linuxdo` / `v2ex` / `weibo`）都支持以下四个字段，默认
+`reddit` / `bangumi` / `github` / `linuxdo` / `v2ex` / `weibo`）都支持以下四个字段，默认
 `"all"` = 不按发布日期过滤：
 
 | 键 | 类型 | 默认值 | 说明 |
@@ -647,7 +647,7 @@ daemon，保留当前 v2 文件和自动备份，再由操作者显式把导出�
 
 ### `[network]` (v0.3.164+，v0.3.165 路由模式补强，v0.3.166 国内网关豁免)
 
-海外网络路由。仅作用于**海外客户端**：OpenAI / Claude / Gemini / OpenRouter / openai_compatible 的 chat + embedding SDK、YouTube（yt-dlp、scrapetube、InnerTube / 页面 fallback）、X 的服务端 `twitter-cli`、Reddit 的 `rdt-cli` / OpenCLI 命令后端、Bangumi（`api.bgm.tv` 与封面 CDN `lain.bgm.tv` 均为海外 Cloudflare，实测 2026-07-18 国内网络直连超时、走代理正常）、封面图片代理的境外 CDN（`i.ytimg.com` / `ggpht.com`；v0.3.209 起跟随本节策略，此前硬编码 `trust_env=true` 在 `custom` 模式下拿不到代理、国内直连超时致 YouTube 封面全裂）、GitHub 自动更新、Codex OAuth 令牌刷新、discovery 灵感搜索的海外后端（Exa `api.exa.ai` / You.com `api.ydc-index.io` / Serply `api.serply.io` 的直连 HTTP 客户端与 mcporter 子进程；v0.3.209 起跟随本节策略，此前硬编码 `trust_env=false` 在 custom 模式下拿不到代理，实测 api.exa.ai 国内直连超时；Bing RSS 属国内可达服务保持恒直连）。X / Reddit 回落到浏览器扩展任务时，请求由浏览器发出并沿用浏览器自己的网络设置；微博的项目自有 `httpx` client 固定 `trust_env=false` 国内直连，也不读取本段。**注意**：`openai_compatible` / `openai` 若指向的是国内网关或本机地址，则按下方「国内网关豁免」强制直连，不受本节代理影响。
+海外网络路由。仅作用于**海外客户端**：OpenAI / Claude / Gemini / OpenRouter / openai_compatible 的 chat + embedding SDK、YouTube（yt-dlp、scrapetube、InnerTube / 页面 fallback）、X 的服务端 `twitter-cli`、Reddit 的 `rdt-cli` / OpenCLI 命令后端、Bangumi（`api.bgm.tv` 与封面 CDN `lain.bgm.tv` 均为海外 Cloudflare，实测 2026-07-18 国内网络直连超时、走代理正常）、GitHub 内容来源（`api.github.com`）与自动更新、封面图片代理的境外 CDN（`i.ytimg.com` / `ggpht.com`；v0.3.209 起跟随本节策略，此前硬编码 `trust_env=true` 在 `custom` 模式下拿不到代理、国内直连超时致 YouTube 封面全裂）、Codex OAuth 令牌刷新、discovery 灵感搜索的海外后端（Exa `api.exa.ai` / You.com `api.ydc-index.io` / Serply `api.serply.io` 的直连 HTTP 客户端与 mcporter 子进程；v0.3.209 起跟随本节策略，此前硬编码 `trust_env=false` 在 custom 模式下拿不到代理，实测 api.exa.ai 国内直连超时；Bing RSS 属国内可达服务保持恒直连）。X / Reddit 回落到浏览器扩展任务时，请求由浏览器发出并沿用浏览器自己的网络设置；GitHub 始终由后端 client 发出，不使用浏览器 Cookie 或插件代理；微博的项目自有 `httpx` client 固定 `trust_env=false` 国内直连，也不读取本段。**注意**：`openai_compatible` / `openai` 若指向的是国内网关或本机地址，则按下方「国内网关豁免」强制直连，不受本节代理影响。
 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
@@ -703,10 +703,9 @@ Bilibili discovery 的平台级开关。B 站账号登录 / Cookie 获取仍由 
 > **`min_interval_minutes` 的作用范围（2026-07-26 实测澄清）**：这道闸只拦 **producer loop** 这一条路径——
 > `ContinuousRefreshController` 每 `[scheduler].refresh_check_interval_seconds`（默认 60 秒）唤醒一次
 > `_loop_<source>_producer`，`_tick_<source>_producer` 先算该来源缺口，再由 producer 的 `_is_due()` 判定是否到点。
-> **非 B 站的 8 个来源，这是稳态补货的唯一路径**，所以配置真实生效。
+> **非 B 站的十一个来源，这是稳态补货的唯一路径**，所以配置真实生效。
 >
-> **节流地板的判定口径（v0.3.186 起统一）**：抖音 / YouTube / X / 知乎 / Reddit 原先把「上次何时跑过」记在进程内属性里，后端一重启就清零、地板当轮失效——在真实数据上量到过：Reddit 25 天 55 轮里有 5 轮间隔是 8 / 10 / 11 / 35 / 40 分钟，而当时配置的是 60 分钟。同一处还有个反向毛病：跑完但零产出的轮次也会写时间戳，把本该立刻重试的情况锁死一个完整周期。现在八个非 B 站 producer 都使用持久 cadence：抖音 / YouTube / X / 知乎 / Reddit / Linux.do 共用 `source_producer_runs`，**只记录真正产出候选的轮次**；XHS 与 Bangumi 继续使用各自的持久 runtime state / run ledger。这样重启不失效，空跑不烧周期。未接数据库构造的共享-cadence producer（单测 / CLI 一次性调用）自动回落到原来的进程内时间戳。
-> **节流地板的判定口径（v0.3.186 起统一）**：抖音 / YouTube / X / 知乎 / Reddit 原先把「上次何时跑过」记在进程内属性里，后端一重启就清零、地板当轮失效——在真实数据上量到过：Reddit 25 天 55 轮里有 5 轮间隔是 8 / 10 / 11 / 35 / 40 分钟，而当时配置的是 60 分钟。同一处还有个反向毛病：跑完但零产出的轮次也会写时间戳，把本该立刻重试的情况锁死一个完整周期。现在九个来源统一以共享账本 `source_producer_runs` 为准，**只记录真正产出候选的轮次**——重启不失效，空跑不烧周期。未接数据库构造的 producer（单测 / CLI 一次性调用）自动回落到原来的进程内时间戳。
+> **节流地板的判定口径（v0.3.186 起统一）**：抖音 / YouTube / X / 知乎 / Reddit / Linux.do / 微博的共享-cadence producer 使用 `source_producer_runs`，且**只记录真正产出候选的轮次**；XHS、Bangumi、V2EX 与 GitHub 分别使用自己的持久 runtime state / run ledger。这样重启不失效，空跑不烧周期。未接数据库构造的共享-cadence producer（单测 / CLI 一次性调用）自动回落到进程内时间戳。
 >
 > B 站不同：它有两条路径，而闸门只管其中较少走的那条。
 >
@@ -849,6 +848,34 @@ Bangumi 使用官方 `https://api.bgm.tv/v0` 只读 API，默认匿名，不需�
 
 用户名不是登录凭据。guided init 的账号解析按三级优先取值：个人令牌 `/v0/me` > 显式/已配置公开用户名 > 浏览器扩展在已登录 bgm.tv 页面自动识别并上报的用户名（`discovery_runtime_state["bangumi_self_info"]`，见 extension 文档）；Bangumi-only guided init 三者至少满足一个，混合初始化全部缺失时只跳过 Bangumi 画像分支并提示“仍可用于 discovery”。init 请求显式发送空 username 时会覆盖并清除旧配置值；只有 username 字段缺失的旧客户端才回退已保存值。令牌存在时以 `/v0/me` 解析出的用户名为准（与显式用户名不一致会 WARNING 并覆盖）；同步期令牌被拒绝（401）时记 WARNING 并降级到匿名公开路径，不静默失败。完整边界见 [Bangumi 来源文档](bangumi.md)。
 
+### `[sources.github]`
+
+GitHub 使用官方 `https://api.github.com` REST API，只把公开 repository 建模为内容。
+`search / ranked / latest` 匿名即可运行；显式公开 `username` 可让 guided init / 手动
+fetch 读取该账号的公开 starred repositories。PAT 只提高公开 API 限额并通过只读
+`GET /user` 形成 verified identity，即使 PAT 具有更高权限，服务端仍固定公开范围并拒绝
+`private=true` 行。首版不读取 GitHub 浏览器 Cookie、不做后台账号增量，也不执行 star、
+watch、follow 或其它上游写操作。
+
+| 键 | 类型 | 默认值 | 说明 |
+|----|------|--------|------|
+| `enabled` | bool | `false` | 是否让 GitHub 参与候选池配比和后台 discovery；关闭时配置值与 credential verdict 保留，但有效 share 中剔除 GitHub |
+| `username` | string | `""` | 可选公开用户名，用于 public starred bootstrap；只证明账号存在，不证明所有权 |
+| `access_token` | string | `""` | 可选 PAT，write-only；配置 GET 不回显明文。保存 / init 时用只读 `GET /user` 校验，明确空字符串表示清除 |
+| `token_env` | string | `"OPENBILICLAW_GITHUB_TOKEN"` | 固定兼容字段。运行时只读取这个专用变量；改成其它名称不会生效，也不会读取 `GITHUB_TOKEN` / `GH_TOKEN` |
+| `source_modes` | list[str] | `["search", "ranked", "latest"]` | 正式 producer 分支；`ranked` 是按 stars 的公开搜索，`latest` 以 `created:>=...` 限定近 30 天创建窗口并按最近更新排序，不冒充 GitHub Trending/feed |
+| `daily_search_budget` | int | `120` | search 每 UTC 日最终保留条目预算 |
+| `daily_ranked_budget` | int | `60` | ranked 每 UTC 日最终保留条目预算 |
+| `daily_latest_budget` | int | `60` | latest 每 UTC 日最终保留条目预算 |
+| `request_interval_seconds` | int | `6` | API 请求的本地最小间隔；默认对齐匿名 repository search 的 10 次/分钟边界 |
+| `min_interval_minutes` | int | `10` | producer 两次到期执行之间的本地最小间隔；显式 force 不绕过持久 rate-limit cooldown |
+| `bootstrap_limit` | int | `300` | init / `fetch-github` 最多接纳的公开 starred repositories 数 |
+| `bootstrap_max_pages` | int | `10` | public starred 分页硬上限；达到上限而仍有 next link 时结果为 partial，不冒充完整 |
+
+PAT 解析顺序固定为专用环境变量优先、`access_token` 次之。PAT `/user` 与公开
+`/users/{username}` 的 numeric user id 冲突时，bootstrap 返回 `identity_mismatch`；公开
+discovery 仍保持匿名可用。CLI、正式 producer 与 inspiration 路径共用 public query sanitizer；正式 / inspiration 限流也共用持久来源 cooldown。来源状态只聚合当前 `source_modes`，关闭分支的旧运行不影响当前结论。完整配置、数据与安全边界见 [GitHub 来源文档](github.md)。
+
 ### `[sources.linuxdo]`
 
 Linux.do 通过浏览器扩展在真实 `linux.do` task tab 内执行同源只读 JSON `GET`；后端不持有 Linux.do Cookie，也不直连站点。公开 search / hot / feed / creator / related discovery 不要求登录；本人 bookmarks / likes / read history 仅在扩展通过 `/session/current.json` 正面确认账号后读取。`_t` 只转换成登录布尔心跳，Cookie 值和原始响应不会上传。完整契约见 [Linux.do 来源文档](linuxdo.md)。
@@ -920,7 +947,7 @@ V2EX 是匿名公开 discovery 源，支持官方匿名 JSON API / Feed，以及
 | `error` | 检查失败 | 本地 credential 文件不可读或格式无效 |
 | `no_auth` | 无需登录 | 公开来源 |
 
-平台特例：抖音只要本地 Cookie 存在即显示 `unverified`，必须由实际抖音任务确认；小红书 / 知乎优先使用插件上报的 `logged_in + updated_at`，知乎仅在从未收到浏览器心跳时回落最近任务历史；Reddit `backend="rdt"` 只读取本地 credential 文件。Bangumi 不探测登录，状态由本地开关与最近 producer run ledger 计算。Linux.do 的公开发现始终匿名可用，扩展 `_t` 布尔心跳只决定个人 bookmarks / likes / read-history 是否可尝试；V2EX 匿名时为 `no_auth`，配置 PAT 后由 live probe 区分验证结论，不会把 PAT 状态误写成浏览器登录态。`xsec_token` 只是小红书内容 URL 的访问令牌，不会据此判断账号已登录。
+平台特例：抖音只要本地 Cookie 存在即显示 `unverified`，必须由实际抖音任务确认；小红书 / 知乎优先使用插件上报的 `logged_in + updated_at`，知乎仅在从未收到浏览器心跳时回落最近任务历史；Reddit `backend="rdt"` 只读取本地 credential 文件。Bangumi 不探测登录，状态由本地开关与最近 producer run ledger 计算。Linux.do 的公开发现始终匿名可用，扩展 `_t` 布尔心跳只决定个人 bookmarks / likes / read-history 是否可尝试；V2EX 匿名时为 `no_auth`，配置 PAT 后由 live probe 区分验证结论，不会把 PAT 状态误写成浏览器登录态。GitHub 匿名时同样为 `no_auth`，PAT 的 live probe 只提高凭据验证强度；当前 PAT 的正式 discovery 401 会让 profile / bootstrap 轴显示 unavailable，但指纹不匹配的旧标记在令牌轮换后失效，且任何 PAT 失败都不得把独立匿名 discovery 误报为不可用。`xsec_token` 只是小红书内容 URL 的访问令牌，不会据此判断账号已登录。
 
 ### `[scheduler]`
 
@@ -988,7 +1015,7 @@ TOML 与显式环境变量覆盖在构造 `SchedulerConfig` 前统一归一为�
 
 ### `[scheduler.pool_source_shares]`
 
-候选池按平台族做保底配比，默认保存的 share 是 `bilibili:xiaohongshu:douyin:youtube:twitter:zhihu:reddit:bangumi:linuxdo:v2ex:weibo = 5:1:1:1:1:1:1:1:1:1:1`。旧配置缺少后续新增的平台 key 时会自动补齐默认 share；关闭的平台保留配置值但从运行时有效配比中剔除，剩余平台重新归一化吃满 `pool_target_count`。默认安装只启用 Bilibili，因此初始有效配比仍只有 Bilibili。
+候选池按平台族做保底配比，默认 Bilibili 权重为 `5`，GitHub 等其余十一个 canonical source 权重均为 `1`。旧配置缺少后续新增的平台 key 时会自动补齐默认 share；关闭的平台保留配置值但从运行时有效配比中剔除，剩余平台重新归一化吃满 `pool_target_count`。默认安装只启用 Bilibili，因此初始有效配比仍只有 Bilibili。
 
 | 键 | 类型 | 默认值 | 说明 |
 |----|------|--------|------|
@@ -997,6 +1024,7 @@ TOML 与显式环境变量覆盖在构造 `SchedulerConfig` 前统一归一为�
 | `douyin` | int | `1` | 抖音平台族占比；`dy-plugin-search` / `dy-plugin-hot-related` / `dy-plugin-feed` 等统一计入该族 |
 | `youtube` | int | `1` | YouTube 平台族占比；`yt_search` / `yt_trending` / `yt_channel` 统一计入该族 |
 | `twitter` | int | `1` | X (Twitter) 平台族占比；`search` / `feed`（For-You）/ `creator`（账号订阅）三个策略统一计入该族 |
+| `github` | int | `1` | GitHub 平台族占比；`github-search` / `github-ranked` / `github-latest` 统一计入该族，`gh` alias 在写入前归一化 |
 | `zhihu` | int | `1` | 知乎平台族占比；插件 `zhihu-search` / `zhihu-hot` / `zhihu-feed` / `zhihu-creator` / `zhihu-related` 候选统一计入该族 |
 | `reddit` | int | `1` | Reddit 平台族占比；插件 / 命令后端 `reddit-search` / `reddit-hot` / `reddit-subreddit` / `reddit-related` 候选统一计入该族 |
 | `bangumi` | int | `1` | Bangumi 平台族占比；`bangumi-search` / `bangumi-ranked` / `bangumi-latest` 统一计入该族 |
@@ -1004,9 +1032,9 @@ TOML 与显式环境变量覆盖在构造 `SchedulerConfig` 前统一归一为�
 | `v2ex` | int | `1` | V2EX 平台族占比；`v2ex-search` / `v2ex-node` / `v2ex-tab` / `v2ex-hot` / `v2ex-latest` 统一计入该族 |
 | `weibo` | int | `1` | 微博平台族占比；`weibo-search` / `weibo-hot` / `weibo-creator` 统一计入该族 |
 
-运行时会拆分两套 quota：前端可换来源目标用于补货和 `reactivate_under_quota_pool_sources()` 的缺口判断；raw ceiling 来源目标用于 `trim_pool_source_overflow()` / `trim_pool_to_target_count()` 的硬成本边界。小平台低于可换目标时，会优先保护 / 复活它们的候选，但不会超过 raw headroom；任一平台族 raw material 高于 raw ceiling 配额时，才会先压回配额内。B 站低于后台低水位且 `[sources.bilibili].enabled=true` 时，才由 B 站 discovery 补货；小缺口优先 `search + related_chain`，更深缺口再跑 `trending/explore`。抖音低于目标且 `[sources.douyin].enabled=true` 时，后台 `DouyinDiscoveryProducer` 会通过 `DouyinDiscoveryService(cache=True)` 触发 search / hot / feed 补池；YouTube 低于目标且 `[sources.youtube].enabled=true` 时，后台 `YoutubeDiscoveryProducer` 会在独立 loop 中触发 `yt_search` / `yt_trending` / `yt_channel`，主 refresh replenishment plan 不再 inline 调度 YouTube；X 低于目标且 `[sources.twitter].enabled=true` 时，后台 `XDiscoveryProducer` 会在独立 loop 中按预算和源健康触发 `search` / `feed` / `creator` 三个策略补池；知乎低于目标且 `[sources.zhihu].enabled=true` 时，后台 `ZhihuDiscoveryProducer` 会通过浏览器插件按 `source_modes` 触发 search / hot / feed / creator / related 补池；Reddit 低于目标且 `[sources.reddit].enabled=true` 时，后台 `RedditDiscoveryProducer` 默认通过 `rdt-cli` 按 `source_modes` 触发 search / hot / subreddit / related 补 raw candidates；命令后端不可用或显式切到插件后端时，入队 OpenBiliClaw 插件任务。Bangumi 低于目标且 `[sources.bangumi].enabled=true` 时，后台 `BangumiDiscoveryProducer` 直连官方匿名 API，按分支预算写 raw candidates，并遵循持久化限流冷却。Linux.do 低于目标且 `[sources.linuxdo].enabled=true` 时，后台 `LinuxdoDiscoveryProducer` 入队同源扩展任务，以五种只读模式写 raw candidates。
+运行时会拆分两套 quota：前端可换来源目标用于补货和 `reactivate_under_quota_pool_sources()` 的缺口判断；raw ceiling 来源目标用于 `trim_pool_source_overflow()` / `trim_pool_to_target_count()` 的硬成本边界。小平台低于可换目标时，会优先保护 / 复活它们的候选，但不会超过 raw headroom；任一平台族 raw material 高于 raw ceiling 配额时，才会先压回配额内。B 站低于后台低水位且 `[sources.bilibili].enabled=true` 时，才由 B 站 discovery 补货；小缺口优先 `search + related_chain`，更深缺口再跑 `trending/explore`。抖音、YouTube、X、知乎与 Reddit 分别由既有正式 producer 补 raw candidates；GitHub 低于目标且 `[sources.github].enabled=true` 时，`GitHubDiscoveryProducer` 通过官方 REST API 执行 `search / ranked / latest`，按 canonical 去重与最终保留数扣预算，并遵守持久 cooldown。Bangumi 继续直连官方匿名 API；Linux.do 继续入队同源扩展任务。所有来源都只把 raw candidates 交给共享 evaluator/admission。
 
-`openbiliclaw init` 会按用户选择写回可参与画像初始化的来源开关：知乎、Reddit、Linux.do、V2EX 与微博可通过扩展任务导入个人事件，Bangumi 仅在提供公开用户名时读取公开收藏；没有个人身份时，这些来源仍可按各自匿名能力参与 discovery。微博公开 discovery 不需要登录，但作为唯一画像来源时必须先收到已登录微博扩展 heartbeat；混合来源若微博未就绪会明确降级，不会把公开热搜冒充个人行为。Bilibili 默认启用，也可手动关闭。交互式初始化会按事件量给出十一平台候选池比例建议；插件设置页与桌面 Web 均可编辑开关和比例，并通过 `/api/config/source-share-suggestion` 重新生成建议值。
+`openbiliclaw init` 会按用户选择写回可参与画像初始化的来源开关：知乎、Reddit、Linux.do、V2EX 与微博可通过扩展任务导入个人事件，Bangumi 按其账号解析规则读取收藏，GitHub 则用公开用户名或 verified PAT identity 读取 **公开** starred repositories。没有个人身份时，GitHub 仍可匿名 discovery，但不能单独提供画像信号。微博公开 discovery 不需要登录，但作为唯一画像来源时必须先收到已登录微博扩展 heartbeat。Bilibili 默认启用，也可手动关闭。交互式初始化会按事件量给出十二平台候选池比例建议；插件设置页与桌面 Web 均可编辑开关和比例，并通过 `/api/config/source-share-suggestion` 重新生成建议值。
 
 ### `[discovery]`
 
@@ -1195,8 +1223,8 @@ Awareness seam 固定为 `legacy`。未发布的聚合字段
 
 - 基础：`language`、`data_dir`、`storage.db_path`
 - LLM：展示实例、全局调用链与四个模块链摘要，允许调整全局并发 / 超时、测试默认链，并跳转桌面 Web 完整编辑；插件保存其他字段时不会回写或压扁实例路由
-- B 站与多源：`bilibili.browser.*`、`sources.bilibili.enabled`、`sources.browser.*`，以及小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Linux.do / Bangumi / V2EX / 微博的来源配置
-- 调度：`scheduler.enabled`、`pause_on_extension_disconnect`、`extension_disconnect_grace_seconds`、`pool_target_count`、`account_sync_interval_hours`、eval drain 凑批参数、refresh / signal / trending / explore / discovery limit / proactive push / speculator idle 等 runtime 频率参数、十一个平台的 `pool_source_shares`、猜测兴趣参数、不喜欢领域探针参数、自动更新参数；设置页可调用 `/api/config/source-share-suggestion` 按已有事件和当前表单开关填入建议比例
+- B 站与多源：`bilibili.browser.*`、`sources.bilibili.enabled`、`sources.browser.*`，以及小红书 / 抖音 / YouTube / X / 知乎 / Reddit / Linux.do / Bangumi / V2EX / 微博 / GitHub 的来源配置
+- 调度：`scheduler.enabled`、`pause_on_extension_disconnect`、`extension_disconnect_grace_seconds`、`pool_target_count`、`account_sync_interval_hours`、eval drain 凑批参数、refresh / signal / trending / explore / discovery limit / proactive push / speculator idle 等 runtime 频率参数、十二个平台的 `pool_source_shares`、猜测兴趣参数、不喜欢领域探针参数、自动更新参数；设置页可调用 `/api/config/source-share-suggestion` 按已有事件和当前表单开关填入建议比例
 - 高级功能（桌面 Web 与插件设置页均有「认知循环预算」区块）：`soul.awareness_event_batch_size`、`soul.insight_note_batch_size`、`soul.cognition_max_tokens`（issue #169）
 - 日志：控制台 / 文件级别、完整日志路径（保存时拆回 `directory` / `filename`）、轮转与非托管日志清理参数
 
