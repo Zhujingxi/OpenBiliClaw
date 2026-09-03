@@ -469,7 +469,9 @@ def test_formal_discover_accepts_github_alias(monkeypatch: pytest.MonkeyPatch) -
     assert calls == [(7, True)]
 
 
-def test_init_help_exposes_github_opt_in_and_identity_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_init_help_exposes_github_opt_in_and_identity_flags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("COLUMNS", "200")
     monkeypatch.setenv("TERM", "xterm-256color")
     result = CliRunner().invoke(app, ["init", "--help"])
