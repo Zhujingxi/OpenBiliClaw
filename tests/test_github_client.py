@@ -299,6 +299,46 @@ async def test_starred_endpoint_requests_timestamp_wrapper_and_uses_link_evidenc
     assert page.scope_complete is False
 
 
+@pytest.mark.asyncio
+async def test_starred_endpoint_accepts_authenticated_user_link_path() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/users/octocat/starred"
+        return httpx.Response(
+            200,
+            json=_fixture("starred_repositories_page.json"),
+            headers={
+                "Link": (
+                    "<https://api.github.com/user/123/starred?page=2&per_page=5>; "
+                    'rel="next", '
+                    "<https://api.github.com/user/123/starred?page=3&per_page=5>; "
+                    'rel="last"'
+                )
+            },
+        )
+
+    async with httpx.AsyncClient(
+        base_url="https://api.github.com", transport=httpx.MockTransport(handler)
+    ) as http_client:
+        page = await GitHubClient(
+            http_client=http_client, request_interval_seconds=0
+        ).get_starred_repositories("octocat")
+
+    assert len(page.items) == 1
+    assert page.next_page == 2
+    assert page.last_page == 3
+    assert page.scope_complete is False
+
+
+def test_link_parser_accepts_authenticated_starred_canonical_path_variant() -> None:
+    links = parse_github_link_header(
+        '<https://api.github.com/user/3350171/starred?page=2&per_page=5>; rel="next", '
+        '<https://api.github.com/user/3350171/starred?page=3&per_page=5>; rel="last"',
+        expected_path="/users/whiteguo233/starred",
+    )
+    assert "page=2" in links["next"]
+    assert "page=3" in links["last"]
+
+
 def test_link_parser_rejects_cross_host_path_drift_and_ambiguity() -> None:
     valid = parse_github_link_header(
         '<https://api.github.com/search/repositories?q=ai&page=2>; rel="next"',

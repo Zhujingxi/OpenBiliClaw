@@ -51,6 +51,8 @@
 
 - **新增 Recommendation Director 完整设计规格（尚未实现）**：新增 `docs/plans/2026-08-31-recommendation-director-spec.md`，定义“LLM 低频编排三-slot 内容路径、现有推荐器高频选片”的目标架构，以及 FeedSession/BatchInstance 生命周期、受控 Proposal→Plan→CompiledPolicy 信任边界、Candidate/Constraint refs、反馈 Gate、并发 fencing、shadow/A-B 评估和分阶段落地顺序。该条仅记录设计与研究结论，默认配置和当前推荐行为均未改变。
 
+- **修复 GitHub PAT 模式下 starred 分页 Link 路径校验**：使用 PAT 时，GitHub 分页 Link 可能返回 `/user/<id>/starred`，而原始请求路径是 `/users/<username>/starred`，之前会被误判为不安全路径并导致 `fetch-github` 失败；现已允许这两种安全的 canonical 路径，并补充回归测试。
+
 ## v0.3.213：推荐供给与时效判断修复（2026-08-27）
 
 - **推荐池供给修复（issue #220）**：同质高分内容不再把普通推荐池误判成不可服务，补货和惊喜推荐在池内内容质量集中时仍能正常提供；新增回归测试覆盖该边界。

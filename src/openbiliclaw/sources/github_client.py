@@ -234,6 +234,17 @@ def parse_github_link_header(
             raise GitHubAPIError(
                 "schema_changed", "GitHub pagination Link target is malformed"
             ) from exc
+        target_path = parsed.path.rstrip("/") or "/"
+        path_allowed = not expected_path or target_path == normalized_expected_path
+        if not path_allowed and normalized_expected_path.endswith("/starred"):
+            # GitHub's authenticated starred endpoint may emit pagination links
+            # under the canonical /user/<id>/starred path even when the original
+            # request used /users/<username>/starred. Both are safe public
+            # GitHub API resource paths; keep rejecting every other drift.
+            path_allowed = bool(
+                re.fullmatch(r"/(?:user|users)/[^/]+/starred", target_path)
+                and re.fullmatch(r"/(?:user|users)/[^/]+/starred", normalized_expected_path)
+            )
         if (
             parsed.scheme.casefold() != "https"
             or (parsed.hostname or "").casefold() != "api.github.com"
@@ -241,7 +252,7 @@ def parse_github_link_header(
             or parsed.password is not None
             or port not in (None, 443)
             or parsed.fragment
-            or (expected_path and (parsed.path.rstrip("/") or "/") != normalized_expected_path)
+            or not path_allowed
         ):
             raise GitHubAPIError(
                 "schema_changed", "GitHub API returned an unsafe pagination Link target"
