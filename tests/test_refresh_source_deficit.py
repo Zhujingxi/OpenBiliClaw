@@ -37,6 +37,10 @@ class _FakeBangumiProducer:
         return {"discovered": 3, "reason": "ok"}
 
 
+class _FakeGitHubProducer(_FakeBangumiProducer):
+    pass
+
+
 def _controller(**kwargs: object) -> ContinuousRefreshController:
     base: dict[str, object] = {
         "memory_manager": _FakeMemoryManager(),
@@ -81,6 +85,26 @@ async def test_bangumi_producer_runs_when_under_share_and_global_pool_full() -> 
     )
 
     await controller._tick_bangumi_producer()
+
+    assert producer.calls == [30]
+
+
+async def test_github_producer_runs_when_under_share_and_global_pool_full() -> None:
+    producer = _FakeGitHubProducer()
+    controller = _controller(
+        database=_FakeDatabase(
+            [],
+            pool_count=300,
+            source_available_counts={"bilibili": 288, "github": 12},
+            source_raw_counts={"bilibili": 288, "github": 12},
+        ),
+        github_producer=producer,
+        pool_target_count=300,
+        pool_source_shares={"bilibili": 5, "github": 1},
+        discovery_limit=30,
+    )
+
+    await controller._tick_github_producer()
 
     assert producer.calls == [30]
 

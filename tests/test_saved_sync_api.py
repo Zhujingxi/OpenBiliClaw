@@ -234,6 +234,72 @@ def test_weibo_save_is_terminal_local_only_without_native_task(
     assert adapter.calls == []
 
 
+def test_github_repository_save_is_terminal_local_only_without_native_task(
+    saved_sync_client: tuple[TestClient, Database, _FakeBilibiliAdapter],
+) -> None:
+    client, database, adapter = saved_sync_client
+    content_id = "repository:1296269"
+    item_key = f"github:{content_id}"
+
+    saved = client.post(
+        "/api/saved/favorite",
+        json=_saved_item(
+            content_id,
+            source_platform="github",
+            content_url="https://github.com/octocat/Hello-World",
+            content_type="repository",
+            cover_url="",
+        ),
+    )
+
+    assert saved.status_code == 200
+    assert saved.json()["item_key"] == item_key
+    assert saved.json()["sync_status"] == "unsupported"
+    assert saved.json()["sync_task_id"] == ""
+    assert saved.json()["error_code"] == "local_only_source"
+    membership = database.get_saved_membership("favorite", item_key)
+    assert membership is not None
+    assert membership["sync_status"] == "unsupported"
+    assert membership["last_error_code"] == "local_only_source"
+
+    created = client.post(
+        "/api/saved/favorite/sync",
+        json={"item_keys": [item_key]},
+    )
+    assert created.status_code == 422
+    assert created.json()["detail"] == "invalid sync selection"
+    task_count = database.conn.execute("SELECT COUNT(*) FROM native_save_tasks").fetchone()
+    assert task_count is not None
+    assert task_count[0] == 0
+    assert adapter.calls == []
+
+
+@pytest.mark.parametrize(
+    "content_id",
+    ["repository:0", "repository:-1", "repo:1", "repository:1:extra"],
+)
+def test_github_repository_save_rejects_noncanonical_typed_ids(
+    saved_sync_client: tuple[TestClient, Database, _FakeBilibiliAdapter],
+    content_id: str,
+) -> None:
+    client, database, adapter = saved_sync_client
+
+    response = client.post(
+        "/api/saved/favorite",
+        json=_saved_item(
+            content_id,
+            source_platform="github",
+            content_url="https://github.com/octocat/Hello-World",
+            content_type="repository",
+            cover_url="",
+        ),
+    )
+
+    assert response.status_code == 422
+    assert database.conn.execute("SELECT COUNT(*) FROM saved_memberships").fetchone()[0] == 0
+    assert adapter.calls == []
+
+
 def test_auto_sync_returns_pending_task_without_waiting_for_platform_io(
     saved_sync_client: tuple[TestClient, Database, _FakeBilibiliAdapter],
 ) -> None:

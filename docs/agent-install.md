@@ -54,7 +54,7 @@ Either command:
 1. Clones the OpenBiliClaw repo (default `~/OpenBiliClaw` on Unix, `%USERPROFILE%\OpenBiliClaw` on Windows; override with the `INSTALL_DIR` env var)
    - Desktop installers use this same directory for `config.toml` / `data/` / `logs/`. If the desktop package created the directory first, the one-line installer clones source files into it without touching existing user data.
 2. Auto-detects any existing OpenBiliClaw install under the standard candidate paths (`~/workspace/OpenBiliClaw`, `~/OpenBiliClaw`, `~/projects/OpenBiliClaw`, `~/code/OpenBiliClaw` — same set on both platforms, rooted at `$HOME` / `%USERPROFILE%`) and **reuses the full LLM instance registry, ordered chains, API keys, and Bilibili cookie** so same-type relay endpoints are not collapsed and the user never has to retype them
-3. In a human terminal, opens the full installer wizard **before dependency install or backend start**: human one-line installer asks LLM provider first, then provider credentials/model, embedding, Bilibili init limits, XHS / Douyin / YouTube opt-ins, and Bilibili cookie source. Bangumi remains default-off here; after startup it can be enabled in `/setup/` or settings without login, and an optional public username controls whether public collections seed init.
+3. In a human terminal, opens the full installer wizard **before dependency install or backend start**: human one-line installer asks LLM provider first, then provider credentials/model, embedding, Bilibili init limits, XHS / Douyin / YouTube opt-ins, and Bilibili cookie source. Bangumi and GitHub remain default-off in this installer wizard; after startup they can be enabled in `/setup/` or settings. GitHub anonymous repository discovery needs no login; a public username enables public starred bootstrap, and an optional PAT may be supplied only through its source credential form/config or `OPENBILICLAW_GITHUB_TOKEN`. Do not invent `agent_bootstrap.py` GitHub flags—the installer does not expose them.
 4. Installs Python dependencies for local mode, or builds / starts Docker Compose when `MODE=docker`; X/Twitter discovery's `twitter-cli` and Reddit discovery's `rdt-cli` packages are part of the default dependency set, so AI one-line installs do not need an extra flag for either one
 5. Starts the backend and runs a health check against `/api/health`. One-line installs default to `--host 0.0.0.0 --port 8420` so the Mobile Web `/m/` is reachable from phones on the same LAN over available IPv4 or IPv6; the backend creates separate `0.0.0.0` and `[::]` listeners while the status block's `Health URL` still uses a concrete local URL such as `http://127.0.0.1:8420/api/health` for curl verification
    - **Optional LAN password gate**: exposing `0.0.0.0` makes the UI reachable by any device on the network. To require a login for LAN/remote devices (the local machine and the browser extension stay password-free), run `openbiliclaw set-password` (or answer "yes" to the init prompt), or set `OPENBILICLAW_API_AUTH_ENABLED=true` + `OPENBILICLAW_API_AUTH_PASSWORD=…` for unattended/Docker installs. See [`docs/modules/api-auth.md`](modules/api-auth.md). Behind a same-host reverse proxy, also set `[api.auth].trusted_proxies` or have the proxy enforce auth.
@@ -125,7 +125,7 @@ re-run the printed `agent_bootstrap.py` command with explicit
 ### After init succeeds — relay the per-source signal counts
 
 When `openbiliclaw init` finishes, the CLI prints a "初始化摘要" key-
-value table with explicit B 站 + 小红书 + 抖音 + YouTube breakdowns. The
+value table with explicit per-source breakdowns. The
 agent **must summarise these numbers in the user-facing reply** so
 the user knows what fed their soul profile. Render approximately:
 
@@ -135,6 +135,7 @@ the user knows what fed their soul profile. Render approximately:
 >   - 🎵 抖音:发布 A 条 / 收藏 B 条 / 点赞 C 条 / 关注 D 人 → **入库 E 条事件**
 >   - 🌐 YouTube:观看历史 H 条 / 订阅 S 个 / 点赞 L 条 → **入库 T 条事件**
 >   - 📚 Bangumi:想看/想读/想玩 W 条 / 看过/读过/玩过 D 条 / 在看/在读/在玩 G 条 → **入库 U 条事件**（仅在本轮选择并填写公开用户名时）
+>   - 🐙 GitHub:公开 starred repositories V 条 → **入库 J 条 favorite 事件**（仅在本轮选择并解析出公开用户名时；PAT 可选）
 >   - 📊 画像建模总事件:Z 条
 >   - 🔍 首轮发现内容池:D 条
 > 现在可以打开扩展 popup 看推荐了。」

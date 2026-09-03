@@ -103,6 +103,10 @@
       initBangumiUsernameTouched: false,
       initBangumiUsernamePrefilled: false,
       initBangumiToken: "",
+      initGitHubUsername: "",
+      initGitHubUsernameTouched: false,
+      initGitHubUsernamePrefilled: false,
+      initGitHubToken: "",
       initLlmConcurrency: 3,
       activity: null,
       activityItems: [],
@@ -198,6 +202,7 @@
       { key: "weibo", label: "微博" },
       { key: "youtube", label: "YouTube" },
       { key: "twitter", label: "X (Twitter)" },
+      { key: "github", label: "GitHub" },
       { key: "zhihu", label: "知乎" },
       { key: "reddit", label: "Reddit" },
       { key: "bangumi", label: "Bangumi" },
@@ -208,9 +213,9 @@
     // 首次成功读到库存快照之前是"未知"，不能把还没读到伪装成 0。
     const PLATFORM_COUNT_UNKNOWN_TEXT = "—";
     const PLATFORM_COUNT_UNKNOWN_LABEL = "库存待读取";
-    const platformLabel = { bilibili: "B 站", youtube: "YouTube", douyin: "抖音", xiaohongshu: "小红书", xhs: "小红书", weibo: "微博", wb: "微博", twitter: "X (Twitter)", x: "X (Twitter)", zhihu: "知乎", reddit: "Reddit", rd: "Reddit", bangumi: "Bangumi", bgm: "Bangumi", linuxdo: "Linux.do", "linux.do": "Linux.do", v2ex: "V2EX", v2: "V2EX" };
-    const platformAliases = { bili: "bilibili", bilibili: "bilibili", xhs: "xiaohongshu", xiaohongshu: "xiaohongshu", rednote: "xiaohongshu", dy: "douyin", douyin: "douyin", tiktok: "douyin", wb: "weibo", weibo: "weibo", yt: "youtube", youtube: "youtube", x: "twitter", twitter: "twitter", zh: "zhihu", zhihu: "zhihu", rd: "reddit", reddit: "reddit", bgm: "bangumi", bangumi: "bangumi", linuxdo: "linuxdo", "linux.do": "linuxdo", v2: "v2ex", v2ex: "v2ex" };
-    const textCardContentTypes = new Set(["tweet", "thread", "answer", "article", "question", "post", "comment"]);
+    const platformLabel = { bilibili: "B 站", youtube: "YouTube", douyin: "抖音", xiaohongshu: "小红书", xhs: "小红书", weibo: "微博", wb: "微博", twitter: "X (Twitter)", x: "X (Twitter)", github: "GitHub", gh: "GitHub", zhihu: "知乎", reddit: "Reddit", rd: "Reddit", bangumi: "Bangumi", bgm: "Bangumi", linuxdo: "Linux.do", "linux.do": "Linux.do", v2ex: "V2EX", v2: "V2EX" };
+    const platformAliases = { bili: "bilibili", bilibili: "bilibili", xhs: "xiaohongshu", xiaohongshu: "xiaohongshu", rednote: "xiaohongshu", dy: "douyin", douyin: "douyin", tiktok: "douyin", wb: "weibo", weibo: "weibo", yt: "youtube", youtube: "youtube", x: "twitter", twitter: "twitter", gh: "github", github: "github", zh: "zhihu", zhihu: "zhihu", rd: "reddit", reddit: "reddit", bgm: "bangumi", bangumi: "bangumi", linuxdo: "linuxdo", "linux.do": "linuxdo", v2: "v2ex", v2ex: "v2ex" };
+    const textCardContentTypes = new Set(["tweet", "thread", "answer", "article", "question", "post", "comment", "repository"]);
     // v0.3.118+: bilibili is selectable like every other source — default
     // checked (recommended) but no longer forced. At least one source must
     // stay checked to start.
@@ -223,7 +228,7 @@
     // local first-run policy (the backend mirrors it in providers._ENABLED_BY_DEFAULT).
     const INIT_SOURCE_LABEL_FALLBACK = {
       bilibili: "B 站", xiaohongshu: "小红书", douyin: "抖音", youtube: "YouTube",
-      twitter: "X", zhihu: "知乎", reddit: "Reddit", bangumi: "Bangumi",
+      twitter: "X", github: "GitHub", zhihu: "知乎", reddit: "Reddit", bangumi: "Bangumi",
       linuxdo: "Linux.do", v2ex: "V2EX"
     };
     const INIT_SOURCE_DEFAULT_CHECKED = new Set(["bilibili"]);
@@ -236,7 +241,7 @@
       label: _initSourceStatus?.sourceLabel?.(key) || INIT_SOURCE_LABEL_FALLBACK[key] || key,
       ...(INIT_SOURCE_DEFAULT_CHECKED.has(key) ? { defaultChecked: true } : {})
     }));
-    const INIT_SOURCE_LOGIN_HINT = "勾选要纳入初始化的平台（至少一个）。需要登录的平台请先在当前浏览器登录；Bangumi 与 Linux.do 的公开发现无需登录，Linux.do 浏览器登录可增强个人信号。勾选会同时开启该来源。";
+    const INIT_SOURCE_LOGIN_HINT = "勾选要纳入初始化的平台（至少一个）。需要登录的平台请先在当前浏览器登录；Bangumi、GitHub 与 Linux.do 的公开发现无需登录。GitHub 初始化需公开用户名或可选 PAT。勾选会同时开启该来源。";
     const INIT_REASON_TEXT = {
       unsupported_runtime: "Docker / 容器环境不支持在网页里启动初始化。请在宿主机运行：docker exec -it openbiliclaw-backend openbiliclaw init",
       already_running: "初始化正在进行中。",
@@ -247,9 +252,19 @@
       local_only: "只能在本机发起初始化。",
       no_sources_selected: "至少勾选一个数据来源。",
       invalid_llm_concurrency: "初始化 LLM 并发必须是 1-16 的整数。",
-      no_profile_signal_sources: "只选择 Bangumi 时，请填写个人令牌（推荐）或公开用户名，或先在浏览器登录 bgm.tv 让扩展自动识别账号。",
+      no_profile_signal_sources: "所选来源暂时没有可用的个人画像信号；请按该来源提示补充个人令牌、公开用户名，或先在对应网站登录并连接扩展（如 bgm.tv）。",
       invalid_bangumi_access_token: "Bangumi 个人令牌被拒绝（缺失、错误或已过期）。请到 next.bgm.tv/demo/access-token 重新生成后重试。",
       bangumi_token_check_failed: "校验 Bangumi 令牌时无法连接 Bangumi，请稍后重试。",
+      github_bootstrap_not_ready: "GitHub 初始化需要公开用户名或可选 PAT；公开 repository 发现仍可匿名使用。",
+      github_identity_required: "GitHub 画像初始化需要公开用户名或可选 PAT；公开 repository 发现仍可匿名使用。",
+      github_identity_not_found: "没有找到填写的 GitHub 公开用户，请检查用户名后重试。",
+      invalid_github_access_token: "GitHub PAT 被拒绝（可能过期或无效）；请更新或清除 PAT。",
+      github_token_rejected: "GitHub PAT 被拒绝（可能过期或无效）；请更新或清除 PAT。",
+      github_token_check_failed: "校验 GitHub PAT 时无法连接 GitHub，请稍后重试。",
+      github_identity_mismatch: "GitHub PAT 与公开用户名指向不同账号；已停止个人初始化，请确认账号后重试。",
+      github_bootstrap_timeout: "GitHub starred repositories 导入超时；已保留此前完整取得的页面（如有），可稍后重试。",
+      github_bootstrap_failed: "GitHub starred repositories 导入失败；请检查网络、用户名与 API 状态后重试。",
+      github_partial: "GitHub starred repositories 仅完成部分导入；成功取得的数据已用于画像。",
       analyze_failed: "偏好分析未完成。",
       profile_failed: "画像生成未完成。",
       discovery_timeout: "画像已生成，但首轮内容池整理超时。",
@@ -1261,6 +1276,7 @@
         if (url.includes("douyin.com")) return "douyin";
         if (url.includes("youtube.com") || url.includes("youtu.be")) return "youtube";
         if (urlHostMatches(url, ["x.com", "twitter.com"])) return "twitter";
+        if (urlHostMatches(url, ["github.com"])) return "github";
         if (urlHostMatches(url, ["zhihu.com", "zhuanlan.zhihu.com"])) return "zhihu";
         if (urlHostMatches(url, ["reddit.com", "redd.it"])) return "reddit";
         if (urlHostMatches(url, ["linux.do"])) return "linuxdo";
@@ -2397,7 +2413,14 @@
       // reads private collections; when set, the username above is auto-resolved.
       const bangumiTokenInput = `<label class="init-source-row"><span>Bangumi 个人令牌（可留空，推荐：自动识别当前用户，可读私密收藏）</span><input id="initBangumiToken" type="password" maxlength="512" autocomplete="off" value="${escapeHtml(state.initBangumiToken || "")}"${bangumiDisabled}></label>`;
       const bangumiTokenHint = `<p class="init-sources-hint">Bangumi 账号三选一：个人令牌最完整（自动识别当前登录账号，可读私密收藏）；公开用户名次之（只读公开收藏）；两者都留空时，只要浏览器已登录 bgm.tv，扩展会自动识别账号（只拿到账号名，可能未经校验）。<a href="https://next.bgm.tv/demo/access-token" target="_blank" rel="noopener noreferrer">生成个人令牌</a>（约 1 年有效，视同密码保管）·<a href="https://github.com/whiteguo233/OpenBiliClaw/blob/main/docs/modules/bangumi.md#获取-bangumi-个人令牌" target="_blank" rel="noopener noreferrer">取令牌步骤</a></p>`;
-      return `<div class="init-sources"><p class="init-sources-title">选择初始化数据来源（至少一个）</p>${rows}${llmConcurrencyRow}${bangumiInput}${bangumiTokenInput}${bangumiTokenHint}<p class="init-sources-hint">${escapeHtml(INIT_SOURCE_LOGIN_HINT)}</p></div>`;
+      const githubDisabled = selected.has("github") ? "" : " disabled";
+      const githubUsername = state.initGitHubUsernameTouched
+        ? state.initGitHubUsername
+        : state.config?.sources?.github?.username || state.initGitHubUsername || "";
+      const githubInput = `<label class="init-source-row"><span>GitHub 公开用户名（可留空，仅启用公开仓库发现）</span><input id="initGitHubUsername" maxlength="39" autocomplete="off" autocapitalize="off" spellcheck="false" value="${escapeHtml(githubUsername)}"${githubDisabled}></label>`;
+      const githubTokenInput = `<label class="init-source-row"><span>GitHub Personal Access Token（可选）</span><input id="initGitHubToken" type="password" maxlength="512" autocomplete="off" value="${escapeHtml(state.initGitHubToken || "")}"${githubDisabled}></label>`;
+      const githubTokenHint = `<p class="init-sources-hint">GitHub 仅导入公开 starred repositories。公开用户名可直接使用；PAT 只用于确认账号身份和提高官方 API 限额，不读取私有仓库。两者都留空时仍可启用公开仓库发现。<a href="https://github.com/whiteguo233/OpenBiliClaw/blob/main/docs/modules/github.md#pat-获取与安全" target="_blank" rel="noopener noreferrer">PAT 与安全说明</a></p>`;
+      return `<div class="init-sources"><p class="init-sources-title">选择初始化数据来源（至少一个）</p>${rows}${llmConcurrencyRow}${bangumiInput}${bangumiTokenInput}${bangumiTokenHint}${githubInput}${githubTokenInput}${githubTokenHint}<p class="init-sources-hint">${escapeHtml(INIT_SOURCE_LOGIN_HINT)}</p></div>`;
     }
 
     function initOnboardingPhase(status, progress) {
@@ -2555,6 +2578,11 @@
           if (bangumiUsername) bangumiUsername.disabled = !bangumiChecked;
           const bangumiToken = grid.querySelector("#initBangumiToken");
           if (bangumiToken) bangumiToken.disabled = !bangumiChecked;
+          const githubChecked = state.initSelectedSources.includes("github");
+          const githubUsername = grid.querySelector("#initGitHubUsername");
+          if (githubUsername) githubUsername.disabled = !githubChecked;
+          const githubToken = grid.querySelector("#initGitHubToken");
+          if (githubToken) githubToken.disabled = !githubChecked;
           // Refresh just the checklist so the B 站 row flips between hard
           // prerequisite and skippable hint as the checkbox changes.
           const checklist = grid.querySelector(".init-onboarding .init-checklist");
@@ -2569,6 +2597,13 @@
       });
       grid.querySelector("#initBangumiToken")?.addEventListener("input", (event) => {
         state.initBangumiToken = event.currentTarget.value || "";
+      });
+      grid.querySelector("#initGitHubUsername")?.addEventListener("input", (event) => {
+        state.initGitHubUsername = event.currentTarget.value || "";
+        state.initGitHubUsernameTouched = true;
+      });
+      grid.querySelector("#initGitHubToken")?.addEventListener("input", (event) => {
+        state.initGitHubToken = event.currentTarget.value || "";
       });
       grid.querySelector("#initLlmConcurrency")?.addEventListener("input", (event) => {
         const value = Number(event.currentTarget.value);
@@ -2715,6 +2750,15 @@
       const bangumiToken = String(
         $("#initBangumiToken")?.value || state.initBangumiToken || ""
       ).trim();
+      const githubUsername = String(
+        $("#initGitHubUsername")?.value || state.initGitHubUsername || ""
+      ).trim();
+      const sendGitHubUsername =
+        state.initGitHubUsernameTouched &&
+        (githubUsername !== "" || state.initGitHubUsernamePrefilled);
+      const githubToken = String(
+        $("#initGitHubToken")?.value || state.initGitHubToken || ""
+      ).trim();
       // No client-side Bangumi-only admission check here on purpose. The
       // backend owns a THREE-tier account ladder (token → explicit username →
       // browser-extension-reported identity); a local "username or token
@@ -2740,14 +2784,24 @@
         if (Number.isFinite(initLlmConcurrency) && initLlmConcurrency >= 1 && initLlmConcurrency <= 16) {
           payload.llm_concurrency = initLlmConcurrency;
         }
+        const sourceOptions = {};
         if (selected.includes("bangumi") && (sendBangumiUsername || bangumiToken)) {
           const bangumi = {};
           if (sendBangumiUsername) bangumi.username = bangumiUsername;
           // Only send a token the user actually typed; omit otherwise so the
           // backend keeps any configured token.
           if (bangumiToken) bangumi.access_token = bangumiToken;
-          payload.source_options = { bangumi };
+          sourceOptions.bangumi = bangumi;
         }
+        if (selected.includes("github") && (sendGitHubUsername || githubToken)) {
+          const github = {};
+          if (sendGitHubUsername) github.username = githubUsername;
+          // PAT is write-only: omit an untouched empty field so an existing
+          // config or OPENBILICLAW_GITHUB_TOKEN credential remains active.
+          if (githubToken) github.access_token = githubToken;
+          sourceOptions.github = github;
+        }
+        if (Object.keys(sourceOptions).length > 0) payload.source_options = sourceOptions;
         const started = await requestJsonStrict(ENDPOINTS.startInit, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -2768,7 +2822,7 @@
         scheduleInitStatusRefresh(INIT_STATUS_START_POLL_MS);
       } catch (error) {
         const code = error?.details?.error || error?.details?.reason;
-        state.initReason = describeInitReason(code) || error?.message || "初始化没能启动，请稍后重试。";
+        state.initReason = error?.details?.detail || describeInitReason(code) || error?.message || "初始化没能启动，请稍后重试。";
         state.initBusy = false;
         renderAll();
       }
@@ -7984,6 +8038,11 @@ ${cardFeedbackBarHtml()}`;
       ["ranked", "bangumiModeRanked"],
       ["latest", "bangumiModeLatest"],
     ];
+    const GITHUB_SOURCE_MODE_FIELDS = [
+      ["search", "githubModeSearch"],
+      ["ranked", "githubModeRanked"],
+      ["latest", "githubModeLatest"],
+    ];
     const LINUXDO_SOURCE_MODE_FIELDS = [
       ["search", "linuxdoModeSearch"],
       ["hot", "linuxdoModeHot"],
@@ -8112,6 +8171,7 @@ ${cardFeedbackBarHtml()}`;
       zhihu: "zhihuEnabled",
       reddit: "redditEnabled",
       bangumi: "bangumiEnabled",
+      github: "githubEnabled",
       linuxdo: "linuxdoEnabled",
       v2ex: "v2exEnabled"
     };
@@ -8408,6 +8468,7 @@ ${cardFeedbackBarHtml()}`;
       zhihu: "shareZhihu",
       reddit: "shareReddit",
       bangumi: "shareBangumi",
+      github: "shareGitHub",
       linuxdo: "shareLinuxdo",
       v2ex: "shareV2EX",
       weibo: "shareWeibo"
@@ -8422,6 +8483,7 @@ ${cardFeedbackBarHtml()}`;
       zhihu: "知乎",
       reddit: "Reddit",
       bangumi: "Bangumi",
+      github: "GitHub",
       linuxdo: "Linux.do",
       v2ex: "V2EX"
     };
@@ -9309,6 +9371,7 @@ ${cardFeedbackBarHtml()}`;
       setInput("shareZhihu", scheduler.pool_source_shares?.zhihu);
       setInput("shareReddit", scheduler.pool_source_shares?.reddit);
       setInput("shareBangumi", scheduler.pool_source_shares?.bangumi);
+      setInput("shareGitHub", scheduler.pool_source_shares?.github);
       setInput("shareLinuxdo", scheduler.pool_source_shares?.linuxdo);
       setInput("shareV2EX", scheduler.pool_source_shares?.v2ex);
       setInput("shareWeibo", scheduler.pool_source_shares?.weibo);
@@ -9529,6 +9592,30 @@ ${cardFeedbackBarHtml()}`;
       setInput("bangumiRequestInterval", config.sources?.bangumi?.request_interval_seconds);
       setInput("bangumiMinInterval", config.sources?.bangumi?.min_interval_minutes);
       setInput("bangumiBootstrapLimit", config.sources?.bangumi?.bootstrap_limit);
+      setSelect("githubEnabled", config.sources?.github?.enabled === true ? "on" : "off");
+      setInput("githubUsername", config.sources?.github?.username);
+      {
+        const githubToken = document.getElementById("githubAccessToken");
+        if (githubToken) {
+          githubToken.value = "";
+          githubToken.placeholder = config.sources?.github?.access_token_set
+            ? "已配置（留空保持不变；填写新 PAT 以替换）"
+            : "可留空；匿名公开仓库发现可直接使用";
+        }
+        const githubClearToken = document.getElementById("githubClearToken");
+        if (githubClearToken) {
+          githubClearToken.checked = false;
+          githubClearToken.disabled = config.sources?.github?.access_token_set !== true;
+        }
+      }
+      setCheckedValues(GITHUB_SOURCE_MODE_FIELDS, config.sources?.github?.source_modes);
+      setInput("githubDailySearchBudget", config.sources?.github?.daily_search_budget);
+      setInput("githubDailyRankedBudget", config.sources?.github?.daily_ranked_budget);
+      setInput("githubDailyLatestBudget", config.sources?.github?.daily_latest_budget);
+      setInput("githubRequestInterval", config.sources?.github?.request_interval_seconds);
+      setInput("githubMinInterval", config.sources?.github?.min_interval_minutes);
+      setInput("githubBootstrapLimit", config.sources?.github?.bootstrap_limit);
+      setInput("githubBootstrapMaxPages", config.sources?.github?.bootstrap_max_pages);
       setSelect("linuxdoEnabled", config.sources?.linuxdo?.enabled === true ? "on" : "off");
       const linuxdoIncremental = document.getElementById("linuxdoIncremental");
       if (linuxdoIncremental) linuxdoIncremental.checked = config.sources?.linuxdo?.incremental_enabled === true;
@@ -9573,6 +9660,10 @@ ${cardFeedbackBarHtml()}`;
         // then a deliberate reset (sends ""), while an untouched or config-failed
         // empty field omits the username to keep the configured value.
         state.initBangumiUsernamePrefilled = true;
+      }
+      if (!state.initGitHubUsernameTouched) {
+        state.initGitHubUsername = config.sources?.github?.username || "";
+        state.initGitHubUsernamePrefilled = true;
       }
       // The enable selects and share weights were just repopulated from the
       // snapshot, so the cards' collapsed/disabled state and the share bar have
@@ -10609,7 +10700,7 @@ ${cardFeedbackBarHtml()}`;
       if (weightField) weightField.hidden = mode !== "custom";
     }
 
-    const DESKTOP_SOURCE_DATE_SLUGS = ["bilibili", "xiaohongshu", "douyin", "weibo", "youtube", "twitter", "zhihu", "reddit", "bangumi", "linuxdo", "v2ex"];
+    const DESKTOP_SOURCE_DATE_SLUGS = ["bilibili", "xiaohongshu", "douyin", "weibo", "youtube", "twitter", "github", "zhihu", "reddit", "bangumi", "linuxdo", "v2ex"];
 
     function ensureSourceDateFields() {
       for (const slug of DESKTOP_SOURCE_DATE_SLUGS) {
@@ -10842,6 +10933,26 @@ ${cardFeedbackBarHtml()}`;
             bootstrap_limit: getIntInput("bangumiBootstrapLimit", 300),
             ...sourceDateFieldsForUpdate("bangumi")
           },
+          github: {
+            enabled: $("#githubEnabled").value === "on",
+            username: getInput("githubUsername"),
+            // GitHub PATs are write-only. An explicit clear wins; otherwise an
+            // untouched empty field preserves config/env credential state.
+            ...(document.getElementById("githubClearToken")?.checked
+              ? { access_token: "" }
+              : (getInput("githubAccessToken") || "") !== ""
+                ? { access_token: getInput("githubAccessToken") }
+                : {}),
+            source_modes: collectCheckedValues(GITHUB_SOURCE_MODE_FIELDS, ["search"]),
+            daily_search_budget: getIntInput("githubDailySearchBudget", 120),
+            daily_ranked_budget: getIntInput("githubDailyRankedBudget", 60),
+            daily_latest_budget: getIntInput("githubDailyLatestBudget", 60),
+            request_interval_seconds: getIntInput("githubRequestInterval", 6),
+            min_interval_minutes: getIntInput("githubMinInterval", 10),
+            bootstrap_limit: getIntInput("githubBootstrapLimit", 300),
+            bootstrap_max_pages: getIntInput("githubBootstrapMaxPages", 10),
+            ...sourceDateFieldsForUpdate("github")
+          },
           linuxdo: {
             enabled: $("#linuxdoEnabled").value === "on",
             incremental_enabled: Boolean(document.getElementById("linuxdoIncremental")?.checked),
@@ -10901,6 +11012,7 @@ ${cardFeedbackBarHtml()}`;
             zhihu: getIntInput("shareZhihu", 1),
             reddit: getIntInput("shareReddit", 1),
             bangumi: getIntInput("shareBangumi", 1),
+            github: getIntInput("shareGitHub", 1),
             linuxdo: getIntInput("shareLinuxdo", 1),
             v2ex: getIntInput("shareV2EX", 1),
             weibo: getIntInput("shareWeibo", 1)
@@ -11801,7 +11913,7 @@ ${cardFeedbackBarHtml()}`;
       safeBind(`#${id}`, "change", () => renderSourcesStatusRows(state.sourceStatus));
     });
     safeBind("#suggestSharesBtn", "click", async () => {
-      const result = await requestJson(ENDPOINTS.sourceShareSuggestion, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled_sources: { bilibili: $("#bilibiliEnabled").value === "on", xiaohongshu: $("#xhsEnabled").value === "on", douyin: $("#douyinEnabled").value === "on", youtube: $("#youtubeEnabled").value === "on", twitter: $("#twitterEnabled").value === "on", zhihu: $("#zhihuEnabled").value === "on", reddit: $("#redditEnabled").value === "on", bangumi: $("#bangumiEnabled").value === "on", linuxdo: $("#linuxdoEnabled").value === "on", v2ex: $("#v2exEnabled").value === "on", weibo: $("#weiboEnabled").value === "on" }, configured_shares: buildConfigUpdate().scheduler.pool_source_shares }) });
+      const result = await requestJson(ENDPOINTS.sourceShareSuggestion, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled_sources: { bilibili: $("#bilibiliEnabled").value === "on", xiaohongshu: $("#xhsEnabled").value === "on", douyin: $("#douyinEnabled").value === "on", youtube: $("#youtubeEnabled").value === "on", twitter: $("#twitterEnabled").value === "on", github: $("#githubEnabled").value === "on", zhihu: $("#zhihuEnabled").value === "on", reddit: $("#redditEnabled").value === "on", bangumi: $("#bangumiEnabled").value === "on", linuxdo: $("#linuxdoEnabled").value === "on", v2ex: $("#v2exEnabled").value === "on", weibo: $("#weiboEnabled").value === "on" }, configured_shares: buildConfigUpdate().scheduler.pool_source_shares }) });
       const shares = result?.pool_source_shares || result?.shares || result?.suggested_shares;
       if (shares) {
         setInput("shareBilibili", shares.bilibili);
@@ -11812,6 +11924,7 @@ ${cardFeedbackBarHtml()}`;
         if (shares.zhihu !== undefined) setInput("shareZhihu", shares.zhihu);
         if (shares.reddit !== undefined) setInput("shareReddit", shares.reddit);
         if (shares.bangumi !== undefined) setInput("shareBangumi", shares.bangumi);
+        if (shares.github !== undefined) setInput("shareGitHub", shares.github);
         if (shares.linuxdo !== undefined) setInput("shareLinuxdo", shares.linuxdo);
         if (shares.v2ex !== undefined) setInput("shareV2EX", shares.v2ex);
         if (shares.weibo !== undefined) setInput("shareWeibo", shares.weibo);

@@ -405,7 +405,7 @@ _KEYWORD_INSPIRATION_PLATFORMS_OPTION = typer.Option(
     "-p",
     help=(
         "目标平台，可重复传或逗号分隔。默认 bilibili；可选 bilibili/xiaohongshu/"
-        "douyin/youtube/twitter/zhihu/reddit/bangumi/linuxdo/v2ex/weibo。"
+        "douyin/youtube/twitter/github/zhihu/reddit/bangumi/linuxdo/v2ex/weibo。"
     ),
 )
 _KEYWORD_INSPIRATION_KIND_OPTION = typer.Option(
@@ -5189,6 +5189,28 @@ def _bangumi_events_to_history_items(events: list[dict[str, Any]]) -> list[dict[
     return [row for row in rows if row.get("title") or row.get("url")]
 
 
+def _github_events_to_history_items(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convert GitHub public-star events into profile history rows."""
+
+    rows: list[dict[str, Any]] = []
+    for event in events:
+        metadata = event.get("metadata", {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        rows.append(
+            {
+                "title": str(event.get("title", "")).strip(),
+                "url": str(event.get("url", "")).strip(),
+                "author": str(event.get("author", "") or metadata.get("author_name", "")).strip(),
+                "event_type": str(event.get("event_type", "")).strip(),
+                "context": str(event.get("context", "")).strip(),
+                "metadata": metadata,
+                "source_platform": "github",
+            }
+        )
+    return [row for row in rows if row.get("title") or row.get("url")]
+
+
 def _v2ex_events_to_history_items(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Convert V2EX topic/node bootstrap events into profile rows."""
     rows: list[dict[str, Any]] = []
@@ -7539,6 +7561,31 @@ def _ask_bangumi_inclusion() -> bool:
     return True
 
 
+def _ask_github_inclusion() -> bool:
+    """Decide whether to enable GitHub public-repository discovery/bootstrap."""
+
+    if os.environ.get("OPENBILICLAW_NO_GITHUB", "").strip() == "1":
+        console.print("[dim]  跳过 GitHub 来源(OPENBILICLAW_NO_GITHUB=1)。[/dim]")
+        return False
+    if not _is_interactive_terminal():
+        return False
+    console.print()
+    console.print("[bold]GitHub 数据接入(可选)[/bold]")
+    console.print(
+        "匿名启用公开仓库的 search / ranked / latest 内容发现；"
+        "填写公开用户名或专用 PAT 后，还会把你的[bold cyan]公开 Star 仓库[/bold cyan]"
+        "混入首轮画像。"
+    )
+    console.print(
+        "[dim]只调用 GitHub 官方只读 API，服务端强制 public-only；"
+        "不会读取私有仓库，也不会 Star、Fork、关注或写入 GitHub。[/dim]"
+    )
+    if not typer.confirm("启用 GitHub 数据接入?", default=False):
+        console.print("[dim]  已选择跳过，本次 init 不会启用 GitHub。[/dim]")
+        return False
+    return True
+
+
 def _ask_network_binding() -> bool:
     """Ask whether the backend should listen on all interfaces (0.0.0.0).
 
@@ -7627,11 +7674,14 @@ def _persist_init_source_enabled_flags(
     include_zhihu: bool = False,
     include_reddit: bool = False,
     include_bangumi: bool = False,
+    include_github: bool = False,
     include_linuxdo: bool = False,
     include_v2ex: bool = False,
     include_weibo: bool = False,
     bangumi_username: str = "",
     bangumi_token: str = "",
+    github_username: str = "",
+    github_token: str = "",
     v2ex_username: str = "",
 ) -> None:
     """Persist init source choices so background discovery obeys them."""
@@ -7696,6 +7746,24 @@ def _persist_init_source_enabled_flags(
             and str(getattr(bangumi_cfg, "access_token", "")) != bangumi_token
         ):
             bangumi_cfg.access_token = bangumi_token
+            changed = True
+        github_cfg = getattr(cfg.sources, "github", None)
+        if github_cfg is not None and bool(getattr(github_cfg, "enabled", False)) != include_github:
+            github_cfg.enabled = include_github
+            changed = True
+        if (
+            github_cfg is not None
+            and github_username
+            and str(getattr(github_cfg, "username", "")) != github_username
+        ):
+            github_cfg.username = github_username
+            changed = True
+        if (
+            github_cfg is not None
+            and github_token
+            and str(getattr(github_cfg, "access_token", "")) != github_token
+        ):
+            github_cfg.access_token = github_token
             changed = True
         v2ex_cfg = getattr(cfg.sources, "v2ex", None)
         if v2ex_cfg is not None and bool(getattr(v2ex_cfg, "enabled", False)) != include_v2ex:
@@ -7955,6 +8023,9 @@ class InitResult:
     bangumi_events: list[dict[str, Any]] = field(default_factory=list)
     bangumi_scope_counts: dict[str, Any] = field(default_factory=dict)
     bangumi_status: str = "skipped"
+    github_events: list[dict[str, Any]] = field(default_factory=list)
+    github_scope_counts: dict[str, Any] = field(default_factory=dict)
+    github_status: str = "skipped"
     linuxdo_events: list[dict[str, Any]] = field(default_factory=list)
     linuxdo_scope_counts: dict[str, Any] = field(default_factory=dict)
     linuxdo_status: str = "skipped"
@@ -8375,6 +8446,99 @@ async def _fetch_bangumi_init_data(
     return events, counts, status
 
 
+async def _fetch_github_init_data(
+    *,
+    username: str,
+    token: str = "",
+    timeout_seconds: float | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any], str]:
+    """Fetch a bounded, public-only GitHub starred-repository bootstrap.
+
+    A PAT is optional and only proves identity / raises the public API rate
+    limit. The shared identity resolver compares durable numeric ids whenever
+    both PAT and username are present, so an account mismatch cannot silently
+    mix profile evidence. Successful terminal statuses are ``complete`` and
+    ``partial``; an affirmative empty collection is still complete.
+    """
+
+    from openbiliclaw.config import load_config
+    from openbiliclaw.sources.github import fetch_github_public_starred_events
+    from openbiliclaw.sources.github_client import (
+        GitHubAPIError,
+        GitHubClient,
+        resolve_github_access_token,
+        resolve_github_bootstrap_identity,
+        validate_github_access_token,
+        validate_github_username,
+    )
+
+    config = load_config()
+    github_cfg = config.sources.github
+    explicit_token = validate_github_access_token(token)
+    effective_token = explicit_token
+    if not effective_token:
+        effective_token, _origin = resolve_github_access_token(github_cfg.access_token)
+    selected_username = validate_github_username(username or github_cfg.username)
+    if not effective_token and not selected_username:
+        return [], {}, "skipped"
+
+    deadline = (
+        asyncio.get_running_loop().time() + max(0.001, float(timeout_seconds))
+        if timeout_seconds is not None
+        else None
+    )
+    async with GitHubClient(
+        token=effective_token or None,
+        request_interval_seconds=float(github_cfg.request_interval_seconds),
+    ) as github_client:
+        if deadline is None:
+            identity = await resolve_github_bootstrap_identity(
+                github_client,
+                username=selected_username,
+            )
+        else:
+            identity_remaining = deadline - asyncio.get_running_loop().time()
+            if identity_remaining <= 0:
+                raise GitHubAPIError("timeout", "GitHub identity check timed out")
+            try:
+                identity = await asyncio.wait_for(
+                    resolve_github_bootstrap_identity(
+                        github_client,
+                        username=selected_username,
+                    ),
+                    timeout=identity_remaining,
+                )
+            except TimeoutError as exc:
+                raise GitHubAPIError("timeout", "GitHub identity check timed out") from exc
+        fetch_remaining = (
+            max(0.001, deadline - asyncio.get_running_loop().time())
+            if deadline is not None
+            else None
+        )
+        result = await fetch_github_public_starred_events(
+            github_client,
+            username=identity.login,
+            limit=int(github_cfg.bootstrap_limit),
+            max_pages=int(github_cfg.bootstrap_max_pages),
+            timeout_seconds=fetch_remaining,
+        )
+    counts: dict[str, Any] = {
+        "repositories": len(result.events),
+        "pages_fetched": result.pages_fetched,
+        "rows_seen": result.rows_seen,
+        "duplicates": result.duplicates,
+        "rejected_private": result.rejected_private,
+        "rejected_malformed": result.rejected_malformed,
+        "scope_complete": result.scope_complete,
+        "affirmative_empty": result.affirmative_empty,
+        "terminal_evidence": result.terminal_evidence,
+        "identity_login": identity.login,
+        "identity_id": identity.user_id,
+        "identity_evidence": identity.evidence,
+    }
+    return result.events, counts, "complete" if result.scope_complete else "partial"
+
+
 async def run_guided_init(
     *,
     client: Any,
@@ -8391,11 +8555,14 @@ async def run_guided_init(
     include_zhihu: bool = False,
     include_reddit: bool = False,
     include_bangumi: bool = False,
+    include_github: bool = False,
     include_linuxdo: bool = False,
     include_v2ex: bool = False,
     include_weibo: bool = False,
     bangumi_username: str = "",
     bangumi_token: str = "",
+    github_username: str = "",
+    github_token: str = "",
     v2ex_username: str = "",
     target_pool_count: int,
     discover_backfill: Callable[..., Coroutine[Any, Any, int]],
@@ -8528,6 +8695,7 @@ async def run_guided_init(
             include_zhihu,
             include_reddit,
             include_bangumi,
+            include_github,
             include_linuxdo,
             include_v2ex,
             include_weibo,
@@ -8802,6 +8970,136 @@ async def run_guided_init(
             console.print("  [yellow]Bangumi 用户存在，但没有读到公开收藏。[/yellow]")
         elif bangumi_status == "timeout":
             console.print("  [yellow]Bangumi 公开收藏读取超时，已跳过并继续初始化。[/yellow]")
+
+    github_events: list[dict[str, Any]] = []
+    github_scope_counts: dict[str, Any] = {}
+    github_status = "skipped"
+    if include_github:
+        from openbiliclaw.sources.github_client import GitHubAPIError
+
+        can_isolate_github_failure = any(
+            (
+                include_bili,
+                include_xhs,
+                include_dy,
+                include_yt,
+                include_x,
+                include_zhihu,
+                include_reddit,
+                include_bangumi,
+                include_linuxdo,
+                include_v2ex,
+                include_weibo,
+            )
+        )
+        await _stage1_begin_source("GitHub", wait_hint="只读拉取公开 Star 仓库")
+        github_wait_seconds = min(
+            _INIT_BILIBILI_COLLECTION_TIMEOUT_SECONDS,
+            _stage1_remaining_seconds(),
+        )
+        try:
+            github_result, github_timed_out = await _await_stage1_operation(
+                lambda: _fetch_github_init_data(
+                    username=github_username,
+                    token=github_token,
+                    # Return one beat before the outer source deadline so the
+                    # page collector can report accepted rows as partial
+                    # instead of being cancelled with its accumulator lost.
+                    timeout_seconds=max(0.001, github_wait_seconds - 1.0),
+                ),
+                label="GitHub",
+                max_wait_seconds=github_wait_seconds,
+            )
+            if github_timed_out or github_result is None:
+                raise GuidedInitError(
+                    "github_bootstrap_timeout",
+                    "GitHub 公开 Star 仓库读取超时，且未取得可保留的完整页面；请稍后重试。",
+                )
+            github_events, github_scope_counts, github_status = cast(
+                "tuple[list[dict[str, Any]], dict[str, Any], str]",
+                github_result,
+            )
+        except GuidedInitError as exc:
+            if not can_isolate_github_failure:
+                raise
+            github_status = "partial"
+            github_scope_counts = {
+                "scope_complete": False,
+                "terminal_evidence": "isolated_source_failure",
+                "error_code": exc.reason,
+            }
+            console.print(f"  [yellow]{exc.message} 已隔离 GitHub，本次继续处理其他来源。[/yellow]")
+        except GitHubAPIError as exc:
+            reason_messages = {
+                "identity_mismatch": (
+                    "github_identity_mismatch",
+                    "GitHub PAT 与配置用户名对应的 numeric user id 不一致，"
+                    "已停止初始化以避免混合账号证据。",
+                ),
+                "unauthorized": (
+                    "github_token_rejected",
+                    "GitHub PAT 被官方 API 拒绝；请更新专用令牌后重试。",
+                ),
+                "identity_required": (
+                    "github_identity_required",
+                    "GitHub 画像初始化需要公开用户名或专用 PAT。",
+                ),
+                "not_found": (
+                    "github_identity_not_found",
+                    "GitHub 用户不存在或无法通过公开 API 读取。",
+                ),
+            }
+            reason, message = reason_messages.get(
+                exc.code,
+                (
+                    "github_bootstrap_failed",
+                    f"GitHub 公开 Star 仓库读取失败（{exc.code}）；请稍后重试。",
+                ),
+            )
+            guided_error = GuidedInitError(reason, message)
+            if not can_isolate_github_failure:
+                raise guided_error from exc
+            github_status = "partial"
+            github_scope_counts = {
+                "scope_complete": False,
+                "terminal_evidence": "isolated_source_failure",
+                "error_code": reason,
+            }
+            console.print(f"  [yellow]{message} 已隔离 GitHub，本次继续处理其他来源。[/yellow]")
+        except (TypeError, ValueError) as exc:
+            guided_error = GuidedInitError(
+                "github_bootstrap_failed",
+                f"GitHub 初始化配置无效：{exc}",
+            )
+            if not can_isolate_github_failure:
+                raise guided_error from exc
+            github_status = "partial"
+            github_scope_counts = {
+                "scope_complete": False,
+                "terminal_evidence": "isolated_source_failure",
+                "error_code": guided_error.reason,
+            }
+            console.print(
+                f"  [yellow]{guided_error.message} 已隔离 GitHub，本次继续处理其他来源。[/yellow]"
+            )
+        finally:
+            _stage1_finish_source()
+
+        if github_status == "complete":
+            console.print(
+                f"  GitHub 公开 Star 仓库 [green]{len(github_events)}[/green] 条（完整范围）"
+            )
+        elif github_status == "partial":
+            console.print(
+                "  [yellow]GitHub 公开 Star 仓库部分完成："
+                f"已保留 {len(github_events)} 条；"
+                f"终止证据={github_scope_counts.get('terminal_evidence', 'unknown')}。[/yellow]"
+            )
+        else:
+            console.print(
+                "  [dim]GitHub 未配置公开用户名或专用 PAT；"
+                "本次仅启用后续公开仓库发现，不导入画像信号。[/dim]"
+            )
 
     # Bootstrap collectors poll a DB task queue with a blocking sleep —
     # run them in a worker thread (Database is check_same_thread=False) so
@@ -9278,6 +9576,7 @@ async def run_guided_init(
     events_to_persist.extend(zhihu_events)
     events_to_persist.extend(reddit_events)
     events_to_persist.extend(bangumi_events)
+    events_to_persist.extend(github_events)
     events_to_persist.extend(linuxdo_events)
     events_to_persist.extend(v2ex_events)
     events_to_persist.extend(weibo_events)
@@ -9287,6 +9586,7 @@ async def run_guided_init(
     events.extend(zhihu_events)
     events.extend(reddit_events)
     events.extend(bangumi_events)
+    events.extend(github_events)
     events.extend(linuxdo_events)
     events.extend(v2ex_events)
     events.extend(weibo_events)
@@ -9326,6 +9626,7 @@ async def run_guided_init(
                 "zhihu": len(zhihu_events),
                 "reddit": len(reddit_events),
                 "bangumi": len(bangumi_events),
+                "github": len(github_events),
                 "linuxdo": len(linuxdo_events),
                 "v2ex": len(v2ex_events),
                 "weibo": len(weibo_events),
@@ -9348,7 +9649,9 @@ async def run_guided_init(
     else:
         for event in events_to_persist:
             await memory.propagate_event(event)
-    stage1_degraded = dy_status == "degraded" or linuxdo_status == "degraded"
+    stage1_degraded = (
+        dy_status == "degraded" or linuxdo_status == "degraded" or github_status == "partial"
+    )
     await _stage_done(
         1,
         status="warning" if stage1_degraded or v2ex_status == "partial" else "ok",
@@ -9357,6 +9660,8 @@ async def run_guided_init(
             if dy_status == "degraded"
             else "linuxdo_degraded"
             if linuxdo_status == "degraded"
+            else "github_partial"
+            if github_status == "partial"
             else "v2ex_partial"
             if v2ex_status == "partial"
             else None
@@ -9577,6 +9882,8 @@ async def run_guided_init(
         combined_history.extend(_reddit_events_to_history_items(reddit_events))
     if bangumi_events:
         combined_history.extend(_bangumi_events_to_history_items(bangumi_events))
+    if github_events:
+        combined_history.extend(_github_events_to_history_items(github_events))
     if linuxdo_events:
         combined_history.extend(_linuxdo_events_to_history_items(linuxdo_events))
     if v2ex_events:
@@ -9797,6 +10104,9 @@ async def run_guided_init(
         bangumi_events=bangumi_events,
         bangumi_scope_counts=bangumi_scope_counts,
         bangumi_status=bangumi_status,
+        github_events=github_events,
+        github_scope_counts=github_scope_counts,
+        github_status=github_status,
         v2ex_events=v2ex_events,
         v2ex_scope_counts=v2ex_scope_counts,
         v2ex_status=v2ex_status,
@@ -9930,6 +10240,29 @@ def init(
             "Bangumi 个人令牌（推荐，自动识别当前用户并可读私密收藏）；"
             "留空则读 [sources.bangumi].access_token。生成: "
             "https://next.bgm.tv/demo/access-token"
+        ),
+    ),
+    no_github: bool = typer.Option(
+        False,
+        "--no-github",
+        help="跳过 GitHub 数据接入（默认非交互模式下就是跳过）。",
+    ),
+    skip_github_prompt: bool = typer.Option(
+        False,
+        "--yes-github",
+        help="跳过 GitHub 的 y/n 提问，直接启用公开仓库来源。",
+    ),
+    github_username: str = typer.Option(
+        "",
+        "--github-username",
+        help="用于公开 Star 初始化的 GitHub 用户名；留空则读配置或由 PAT 识别。",
+    ),
+    github_token: str = typer.Option(
+        "",
+        "--github-token",
+        help=(
+            "GitHub 专用 PAT（只用于身份校验、公开 Star 与提高公开 API 限额）；"
+            "留空则只读取 OPENBILICLAW_GITHUB_TOKEN 或 [sources.github].access_token。"
         ),
     ),
     bilibili_history_limit: int | None = typer.Option(
@@ -10304,12 +10637,146 @@ def init(
             except ValueError as exc:
                 raise typer.BadParameter(str(exc), param_hint="--bangumi-username") from exc
 
+    if no_github:
+        include_github = False
+        console.print("[dim]  跳过 GitHub 数据接入（命令行 --no-github）。[/dim]")
+    elif os.environ.get("OPENBILICLAW_NO_GITHUB", "").strip() == "1":
+        include_github = False
+        console.print("[dim]  跳过 GitHub 数据接入（OPENBILICLAW_NO_GITHUB=1）。[/dim]")
+    elif skip_github_prompt:
+        include_github = True
+    else:
+        include_github = _ask_github_inclusion()
+
+    selected_github_username = ""
+    selected_github_token = ""
+    github_token_to_persist = ""
+    # Source enablement and profile bootstrap are separate axes.  GitHub can
+    # remain enabled for anonymous public-repository discovery even when its
+    # optional identity preflight fails during a mixed-source init.
+    github_bootstrap_enabled = False
+    if include_github:
+        from openbiliclaw.config import load_config
+        from openbiliclaw.sources.github_client import (
+            GitHubAPIError,
+            GitHubClient,
+            resolve_github_access_token,
+            resolve_github_bootstrap_identity,
+            validate_github_access_token,
+            validate_github_username,
+        )
+
+        github_cfg = load_config().sources.github
+        configured_username = str(github_cfg.username or "").strip()
+        try:
+            github_token_to_persist = validate_github_access_token(github_token)
+            if github_token_to_persist:
+                selected_github_token = github_token_to_persist
+            else:
+                selected_github_token, _credential_origin = resolve_github_access_token(
+                    github_cfg.access_token
+                )
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc), param_hint="--github-token") from exc
+        raw_github_username = str(github_username or configured_username).strip()
+        if not selected_github_token and not raw_github_username and _is_interactive_terminal():
+            raw_github_username = str(
+                typer.prompt(
+                    "公开 GitHub 用户名（留空则只启用仓库发现）",
+                    default="",
+                    show_default=False,
+                )
+                or ""
+            ).strip()
+        try:
+            validated_github_username = validate_github_username(raw_github_username)
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc), param_hint="--github-username") from exc
+
+        if selected_github_token or validated_github_username:
+
+            async def _resolve_github_identity() -> Any:
+                async with GitHubClient(
+                    token=selected_github_token or None,
+                    request_interval_seconds=float(github_cfg.request_interval_seconds),
+                ) as github_client:
+                    return await resolve_github_bootstrap_identity(
+                        github_client,
+                        username=validated_github_username,
+                    )
+
+            try:
+                github_identity = asyncio.run(_resolve_github_identity())
+            except GitHubAPIError as exc:
+                if exc.code == "identity_mismatch":
+                    title = "GitHub 身份不一致"
+                    body = (
+                        "PAT 所属账号与 --github-username / 配置用户名的 numeric user id 不一致；"
+                        "为避免混合账号画像，本次未保存也未开始初始化。"
+                    )
+                elif exc.code == "unauthorized":
+                    title = "GitHub PAT 无效"
+                    body = (
+                        "GitHub 官方 API 拒绝了专用 PAT。请更新 --github-token、"
+                        "OPENBILICLAW_GITHUB_TOKEN 或配置中的令牌后重试。"
+                    )
+                elif exc.code == "not_found":
+                    title = "GitHub 用户不存在"
+                    body = "公开用户名无法通过 GitHub 官方 API 确认，请检查拼写。"
+                else:
+                    title = "GitHub 身份校验失败"
+                    body = f"GitHub 官方 API 返回 {exc.code}；未保存来源选择，请稍后重试。"
+                has_other_init_source = any(
+                    (
+                        include_bili,
+                        include_xhs,
+                        include_dy,
+                        include_yt,
+                        include_x,
+                        include_zhihu,
+                        include_reddit,
+                        include_bangumi,
+                        include_linuxdo,
+                        include_v2ex,
+                        include_weibo,
+                    )
+                )
+                if not has_other_init_source:
+                    _print_status_panel("error", title, body)
+                    raise typer.Exit(code=1) from exc
+                console.print(
+                    f"[yellow]  {title}：{body} 已隔离 GitHub 画像导入，"
+                    "其他来源继续初始化；公开仓库发现保持启用。[/yellow]"
+                )
+                # A request-scoped or configured credential which failed its
+                # official read-only preflight must not reach persistence or
+                # the shared bootstrap pipeline.
+                selected_github_username = ""
+                selected_github_token = ""
+                github_token_to_persist = ""
+            else:
+                selected_github_username = github_identity.login
+                github_bootstrap_enabled = True
+                evidence_label = (
+                    "PAT 已验证" if github_identity.evidence == "verified" else "公开范围已确认"
+                )
+                console.print(
+                    f"[dim]  GitHub 初始化账号：{selected_github_username} "
+                    f"(numeric id {github_identity.user_id}，{evidence_label})。[/dim]"
+                )
+        else:
+            console.print(
+                "[yellow]  GitHub 未填公开用户名或专用 PAT：本次仅启用公开仓库发现，"
+                "画像由其他已选来源提供。[/yellow]"
+            )
+
     selected_sources = (
         include_bili,
         include_xhs,
         include_dy,
         include_yt,
         include_x,
+        include_github,
         include_zhihu,
         include_reddit,
         include_v2ex,
@@ -10323,9 +10790,8 @@ def init(
             "没有可用的数据来源",
             "已跳过 B 站且未启用任何其他平台——init 至少需要一个数据来源。"
             "去掉 --no-bilibili，或配合 --yes-xhs / --yes-douyin / "
-            "--yes-youtube / --yes-x / --yes-zhihu "
-            "/ --yes-reddit / --yes-linuxdo / --yes-v2ex / --yes-weibo / --yes-bangumi "
-            "启用其他来源。",
+            "--yes-youtube / --yes-x / --yes-github / --yes-zhihu / --yes-reddit / "
+            "--yes-linuxdo / --yes-v2ex / --yes-weibo / --yes-bangumi 启用其他来源。",
         )
         raise typer.Exit(code=1)
 
@@ -10338,9 +10804,15 @@ def init(
         include_zhihu,
         include_reddit,
         include_linuxdo,
+        include_v2ex,
         include_weibo,
     )
-    if include_bangumi and not selected_bangumi_username and not any(profile_signal_sources):
+    if (
+        include_bangumi
+        and not selected_bangumi_username
+        and not selected_github_username
+        and not any(profile_signal_sources)
+    ):
         _print_status_panel(
             "error",
             "Bangumi 缺少令牌或用户名",
@@ -10354,6 +10826,20 @@ def init(
             "[yellow]  Bangumi 未填公开用户名：本次仅启用条目发现，"
             "画像由其他已选来源提供。[/yellow]"
         )
+    if (
+        include_github
+        and not selected_github_username
+        and not selected_bangumi_username
+        and not any(profile_signal_sources)
+    ):
+        _print_status_panel(
+            "error",
+            "GitHub 缺少 PAT 或用户名",
+            "只选择 GitHub 初始化时，需提供 --github-token / "
+            "OPENBILICLAW_GITHUB_TOKEN，或 --github-username（公开用户名）。"
+            "如果只想启用匿名仓库发现，请先保存来源配置而不是运行 init。",
+        )
+        raise typer.Exit(code=1)
 
     _persist_init_source_enabled_flags(
         include_bili=include_bili,
@@ -10363,11 +10849,14 @@ def init(
         include_x=include_x,
         include_zhihu=include_zhihu,
         include_reddit=include_reddit,
+        include_github=include_github,
         include_v2ex=include_v2ex,
         include_bangumi=include_bangumi,
         include_linuxdo=include_linuxdo,
         bangumi_username=selected_bangumi_username,
         bangumi_token=selected_bangumi_token,
+        github_username=selected_github_username,
+        github_token=github_token_to_persist,
         v2ex_username=selected_v2ex_username,
         include_weibo=include_weibo,
     )
@@ -10403,11 +10892,14 @@ def init(
                 include_x=include_x,
                 include_zhihu=include_zhihu,
                 include_reddit=include_reddit,
+                include_github=github_bootstrap_enabled,
                 include_v2ex=include_v2ex,
                 include_bangumi=include_bangumi,
                 include_linuxdo=include_linuxdo,
                 bangumi_username=selected_bangumi_username,
                 bangumi_token=selected_bangumi_token,
+                github_username=selected_github_username,
+                github_token=selected_github_token,
                 v2ex_username=selected_v2ex_username,
                 include_weibo=include_weibo,
                 target_pool_count=_INIT_POOL_TARGET_COUNT,
@@ -10452,6 +10944,9 @@ def init(
     bangumi_events = list(getattr(result, "bangumi_events", []))
     bangumi_scope_counts = dict(getattr(result, "bangumi_scope_counts", {}))
     bangumi_status = str(getattr(result, "bangumi_status", "skipped"))
+    github_events = list(getattr(result, "github_events", []))
+    github_scope_counts = dict(getattr(result, "github_scope_counts", {}))
+    github_status = str(getattr(result, "github_status", "skipped"))
     linuxdo_events = list(getattr(result, "linuxdo_events", []))
     linuxdo_scope_counts = dict(getattr(result, "linuxdo_scope_counts", {}))
     linuxdo_status = str(getattr(result, "linuxdo_status", "skipped"))
@@ -10469,6 +10964,7 @@ def init(
         discovery_error
         or dy_degraded
         or linuxdo_degraded
+        or github_status == "partial"
         or v2ex_status == "partial"
         or weibo_status in {"failed", "timeout", "login_required"}
     )
@@ -10492,6 +10988,13 @@ def init(
             "Linux.do 采集部分完成",
             "已采到的 Linux.do 个人信号仍已用于画像建模，"
             "但至少一个范围未完成；请检查扩展日志后重试补齐。",
+        )
+    if github_status == "partial":
+        _print_status_panel(
+            "warning",
+            "GitHub 采集部分完成",
+            "已采到的公开 Star 仓库仍已用于画像建模，但分页、条目上限或上游响应"
+            "未能证明完整；可稍后用 `openbiliclaw fetch-github` 只读复核。",
         )
     if v2ex_status == "partial":
         _print_status_panel(
@@ -10548,6 +11051,8 @@ def init(
     bangumi_wish_count = int(bangumi_scope_counts.get("wish", 0))
     bangumi_done_count = int(bangumi_scope_counts.get("done", 0))
     bangumi_doing_count = int(bangumi_scope_counts.get("doing", 0))
+    github_repository_count = int(github_scope_counts.get("repositories", 0))
+    github_pages_fetched = int(github_scope_counts.get("pages_fetched", 0))
     linuxdo_bookmark_count = int(linuxdo_scope_counts.get("linuxdo_bookmarks", 0))
     linuxdo_like_count = int(linuxdo_scope_counts.get("linuxdo_likes", 0))
     linuxdo_read_count = int(linuxdo_scope_counts.get("linuxdo_read_history", 0))
@@ -10592,6 +11097,9 @@ def init(
         ("Bangumi 看过/读过/玩过", f"{bangumi_done_count} 条"),
         ("Bangumi 在看/在读/在玩", f"{bangumi_doing_count} 条"),
         ("🌐 Bangumi 入库事件", f"{len(bangumi_events)} 条"),
+        ("GitHub 公开 Star 仓库", f"{github_repository_count} 条"),
+        ("GitHub 读取页数 / 状态", f"{github_pages_fetched} / {github_status}"),
+        ("🌐 GitHub 入库事件", f"{len(github_events)} 条"),
         ("Linux.do 书签", f"{linuxdo_bookmark_count} 条"),
         ("Linux.do 点赞", f"{linuxdo_like_count} 条"),
         ("Linux.do 阅读", f"{linuxdo_read_count} 条"),
@@ -10649,6 +11157,11 @@ def init(
             "[dim]ℹ️  Bangumi 0 条信号入库。请确认用户名存在，且收藏已设为公开。"
             "可用 [cyan]openbiliclaw fetch-bangumi --username <name>[/cyan] 只读验证。[/dim]"
         )
+    if not github_events and github_status == "complete":
+        console.print(
+            "[dim]ℹ️  GitHub 公开 Star 列表已完整读取但为 0 条。"
+            "可用 [cyan]openbiliclaw fetch-github --username <name>[/cyan] 只读复核。[/dim]"
+        )
     if (
         linuxdo_bookmark_count + linuxdo_like_count + linuxdo_read_count
     ) == 0 and linuxdo_status != "skipped":
@@ -10688,6 +11201,8 @@ def init(
         source_parts.append(f"[green]{len(reddit_events)}[/green] 条 Reddit 信号")
     if len(bangumi_events) > 0:
         source_parts.append(f"[green]{len(bangumi_events)}[/green] 条 Bangumi 信号")
+    if len(github_events) > 0:
+        source_parts.append(f"[green]{len(github_events)}[/green] 条 GitHub 信号")
     if len(linuxdo_events) > 0:
         source_parts.append(f"[green]{len(linuxdo_events)}[/green] 条 Linux.do 信号")
     if len(v2ex_events) > 0:
@@ -10698,7 +11213,8 @@ def init(
         console.print(
             "[dim]ℹ️  本次画像综合了 "
             + " + ".join(source_parts)
-            + "。后续 daemon 会持续从这些来源增量补充。[/dim]"
+            + "。支持增量刷新的来源会由 daemon 继续补充；"
+            "GitHub 公开 Star 为 init / 按需刷新。[/dim]"
         )
 
     # Phase E (v0.3.28+): print cost breakdown for THIS init only,
@@ -11807,6 +12323,176 @@ def fetch_bangumi(
             )
         )
         _print_status_panel("success", "完成", "Bangumi 事件已写入并完成画像重建")
+
+
+@app.command("fetch-github")
+def fetch_github(
+    username: str = typer.Option(
+        "",
+        "--username",
+        "-u",
+        help="公开 GitHub 用户名；不提供时读取 [sources.github].username 或由 PAT 识别。",
+    ),
+    token: str = typer.Option(
+        "",
+        "--token",
+        help=(
+            "GitHub 专用 PAT；不提供时只读取 OPENBILICLAW_GITHUB_TOKEN 或 "
+            "[sources.github].access_token。"
+        ),
+    ),
+    limit: int = typer.Option(
+        0,
+        "--limit",
+        "-n",
+        min=0,
+        help="最多读取的公开 Star 仓库数；0 使用配置的 bootstrap_limit。",
+    ),
+    write_memory: bool = typer.Option(
+        False,
+        "--write-memory",
+        help="将转换后的公开 Star 事件写入 memory；默认只读预览。",
+    ),
+    rebuild_profile: bool = typer.Option(
+        False,
+        "--rebuild-profile",
+        help="写入 memory 后用本次 GitHub 事件重建画像（会触发真实 LLM 调用）。",
+    ),
+) -> None:
+    """只读拉取 GitHub 公开 Star 仓库；默认不写本地数据或调用 LLM。"""
+
+    from openbiliclaw.config import load_config
+    from openbiliclaw.sources.github import fetch_github_public_starred_events
+    from openbiliclaw.sources.github_client import (
+        GitHubAPIError,
+        GitHubClient,
+        resolve_github_access_token,
+        resolve_github_bootstrap_identity,
+        validate_github_access_token,
+        validate_github_username,
+    )
+
+    config = load_config()
+    github_cfg = config.sources.github
+    try:
+        explicit_token = validate_github_access_token(token)
+        selected_token = explicit_token
+        credential_origin: str
+        if not selected_token:
+            selected_token, credential_origin = resolve_github_access_token(github_cfg.access_token)
+        else:
+            credential_origin = "flag"
+        selected_username = validate_github_username(username or github_cfg.username)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    if not selected_token and not selected_username:
+        raise typer.BadParameter(
+            "请通过 --username / [sources.github].username，或 --token / "
+            "OPENBILICLAW_GITHUB_TOKEN / [sources.github].access_token 提供公开账号范围。",
+            param_hint="--username",
+        )
+    selected_limit = limit or int(github_cfg.bootstrap_limit)
+    write_memory = write_memory or rebuild_profile
+
+    async def _fetch() -> tuple[Any, Any]:
+        async with GitHubClient(
+            token=selected_token or None,
+            request_interval_seconds=float(github_cfg.request_interval_seconds),
+        ) as client:
+            identity = await resolve_github_bootstrap_identity(
+                client,
+                username=selected_username,
+            )
+            result = await fetch_github_public_starred_events(
+                client,
+                username=identity.login,
+                limit=selected_limit,
+                max_pages=int(github_cfg.bootstrap_max_pages),
+            )
+            return identity, result
+
+    _print_page_title("GitHub 公开 Star 仓库", "官方只读 REST API · public-only")
+    try:
+        identity, fetch_result = asyncio.run(_fetch())
+    except GitHubAPIError as exc:
+        messages = {
+            "identity_mismatch": "PAT 与配置用户名的 numeric user id 不一致，已拒绝混合账号证据。",
+            "unauthorized": "专用 PAT 被 GitHub 拒绝；请更新或移除令牌后重试。",
+            "not_found": "GitHub 用户不存在或无法通过公开 API 读取。",
+            "rate_limited": "GitHub API 正在限流，请在冷却后重试。",
+        }
+        _print_status_panel(
+            "warning",
+            "GitHub 读取失败",
+            messages.get(exc.code, f"GitHub 官方 API 返回 {exc.code}。"),
+        )
+        raise typer.Exit(code=1) from exc
+
+    status = "complete" if fetch_result.scope_complete else "partial"
+    _print_key_value_table(
+        "抓取摘要",
+        [
+            ("用户名", identity.login),
+            ("numeric user id", str(identity.user_id)),
+            ("身份证据", identity.evidence),
+            ("凭据来源", str(credential_origin)),
+            ("公开 Star 事件", str(len(fetch_result.events))),
+            ("读取页数", str(fetch_result.pages_fetched)),
+            ("完整性", status),
+            ("终止证据", fetch_result.terminal_evidence),
+            (
+                "拒绝私有 / 异常行",
+                f"{fetch_result.rejected_private} / {fetch_result.rejected_malformed}",
+            ),
+            ("本地写入", "将写入" if write_memory else "0（只读预览）"),
+            ("画像生成", "将重建" if rebuild_profile else "0"),
+            ("上游状态", "upstream-state-unchanged"),
+        ],
+    )
+    for index, event in enumerate(fetch_result.events[:5], start=1):
+        console.print(
+            f"  {index}. [{event.get('event_type', '')}] {event.get('title') or '（无标题）'}"
+        )
+        console.print(f"     [dim]{event.get('url', '')}[/dim]")
+
+    if write_memory:
+        written, skipped = _write_events_to_memory(fetch_result.events, source="github")
+        console.print(
+            f"  [green]已写入 memory: {written} 条 GitHub 事件[/green]"
+            f"{f'，跳过重复 {skipped} 条。' if skipped else '。'}"
+        )
+    if rebuild_profile:
+        if not fetch_result.events:
+            _print_status_panel("warning", "没有可建模信号", "公开 Star 列表为空，未调用 LLM。")
+            raise typer.Exit(code=1)
+        _prepare_init_runtime(require_bili_auth=False)
+        soul_engine = _build_soul_engine()
+        _print_section_title("1/2 分析 GitHub 偏好")
+        asyncio.run(
+            _run_with_progress(
+                soul_engine.analyze_events(fetch_result.events, event_chunk_size=200),
+                label="分析 GitHub 偏好",
+                eta_seconds=180,
+            )
+        )
+        _print_section_title("2/2 生成画像")
+        asyncio.run(
+            _run_with_progress(
+                soul_engine.build_initial_profile(
+                    _github_events_to_history_items(fetch_result.events)
+                ),
+                label="生成灵魂画像",
+                eta_seconds=70,
+            )
+        )
+        _print_status_panel("success", "完成", "GitHub 事件已写入并完成画像重建")
+    if status == "partial":
+        _print_status_panel(
+            "warning",
+            "GitHub 公开 Star 读取部分完成",
+            "已保留可验证的公开仓库行，但分页或上游响应未能证明完整。",
+        )
+        raise typer.Exit(code=1)
 
 
 @app.command("fetch-reddit")
@@ -13170,6 +13856,7 @@ def keyword_inspiration_dry_run(
         "douyin",
         "youtube",
         "twitter",
+        "github",
         "zhihu",
         "reddit",
         "bangumi",
@@ -13252,6 +13939,23 @@ def keyword_inspiration_dry_run(
             v2ex_client = V2EXClient(
                 request_interval_seconds=float(getattr(v2ex_cfg, "request_interval_seconds", 2.0))
             )
+        github_client: object | None = None
+        github_cfg = getattr(getattr(config, "sources", None), "github", None)
+        if bool(getattr(github_cfg, "enabled", False)):
+            from openbiliclaw.sources.github_client import (
+                GitHubClient,
+                resolve_github_access_token,
+            )
+
+            github_token, _github_token_origin = resolve_github_access_token(
+                config_token=str(getattr(github_cfg, "access_token", "") or ""),
+            )
+            github_client = GitHubClient(
+                token=github_token or None,
+                request_interval_seconds=float(
+                    getattr(github_cfg, "request_interval_seconds", 6.0)
+                ),
+            )
         try:
             planner = KeywordPlanner(
                 llm_service=llm_service,
@@ -13268,6 +13972,7 @@ def keyword_inspiration_dry_run(
                     serply_api_key=str(getattr(config.discovery, "serply_api_key", "") or ""),
                     platform_backends=build_platform_source_backends(
                         config,
+                        database=database,
                         bilibili_client=(
                             _build_bilibili_client()
                             if bool(
@@ -13280,6 +13985,7 @@ def keyword_inspiration_dry_run(
                             else None
                         ),
                         x_client=x_client,
+                        github_client=github_client,
                         v2ex_client=v2ex_client,
                     ),
                     platforms_per_probe=int(inspiration_params.platforms_per_probe),
@@ -13295,9 +14001,10 @@ def keyword_inspiration_dry_run(
                 persist_axes=persist_axes,
             )
         finally:
-            close = getattr(v2ex_client, "aclose", None)
-            if callable(close):
-                await close()
+            for client in (github_client, v2ex_client):
+                close = getattr(client, "aclose", None)
+                if callable(close):
+                    await close()
 
     report = asyncio.run(_preview())
     sys.stdout.write(json.dumps(report, ensure_ascii=False, indent=2))
@@ -14223,6 +14930,104 @@ def _run_reddit_discovery(*, limit: int) -> None:
     _print_status_panel(kind, title, body)
 
 
+def _run_github_discovery_smoke(*, mode: str, keyword: str = "", limit: int) -> None:
+    """Run one read-only GitHub repository branch without local or LLM writes."""
+
+    from datetime import UTC, datetime, timedelta
+
+    from openbiliclaw.config import load_config
+    from openbiliclaw.sources.github import (
+        github_public_repository_query,
+        github_repository_to_content,
+    )
+    from openbiliclaw.sources.github_client import (
+        GitHubAPIError,
+        GitHubClient,
+        resolve_github_access_token,
+    )
+
+    config = load_config()
+    github_cfg = config.sources.github
+    selected_token, _origin = resolve_github_access_token(github_cfg.access_token)
+    if mode == "search":
+        query = github_public_repository_query(keyword)
+        sort = ""
+    elif mode == "ranked":
+        query = "stars:>=1 is:public fork:false"
+        sort = "stars"
+    else:
+        cutoff = (datetime.now(UTC) - timedelta(days=30)).date().isoformat()
+        query = f"created:>={cutoff} is:public fork:false"
+        sort = "updated"
+
+    async def _fetch() -> tuple[list[Any], Any, int]:
+        async with GitHubClient(
+            token=selected_token or None,
+            request_interval_seconds=float(github_cfg.request_interval_seconds),
+        ) as client:
+            page = await client.search_repositories(
+                query,
+                sort=sort,
+                order="desc",
+                page=1,
+                per_page=limit,
+            )
+        items: list[Any] = []
+        rejected_rows = 0
+        for row in page.items:
+            item = github_repository_to_content(
+                row,
+                strategy=f"github-{mode}",
+            )
+            if item is None:
+                rejected_rows += 1
+            else:
+                items.append(item)
+        return items, page, rejected_rows
+
+    subtitle = {
+        "search": f"关键词搜索 · {keyword}",
+        "ranked": "公开仓库 Star 排名",
+        "latest": "最近创建的公开仓库",
+    }[mode]
+    _print_page_title("GitHub 仓库发现 smoke", subtitle)
+    try:
+        items, page, rejected_rows = asyncio.run(_fetch())
+    except (GitHubAPIError, ValueError) as exc:
+        _print_status_panel("warning", "GitHub API 读取失败", str(exc))
+        raise typer.Exit(code=1) from exc
+    completeness = (
+        "partial"
+        if (
+            page.incomplete_results
+            or page.search_capped
+            or page.next_page is not None
+            or rejected_rows > 0
+        )
+        else "complete"
+    )
+    _print_key_value_table(
+        "只读召回摘要",
+        [
+            ("模式", mode),
+            ("仓库数", str(len(items))),
+            ("拒绝私有 / 异常行", str(rejected_rows)),
+            ("完整性", completeness),
+            ("本地写入", "0"),
+            ("LLM 调用", "0"),
+            ("上游写操作", "0"),
+            ("上游状态", "upstream-state-unchanged"),
+        ],
+    )
+    for index, item in enumerate(items[:5], start=1):
+        _print_discovered_content_preview(item, index)
+    if completeness == "partial":
+        console.print(
+            "[dim]本命令只预览一页；next/incomplete/1000-result cap 均按 partial 报告，"
+            "不会伪装成完整空集合。[/dim]"
+        )
+
+
 def _run_bangumi_discovery_smoke(*, mode: str, keyword: str = "", limit: int) -> None:
     """Run one read-only Bangumi API branch without cache, memory, or LLM writes."""
     from openbiliclaw.config import load_config
@@ -14526,6 +15331,137 @@ def discover_bangumi_latest(
 ) -> None:
     """只读验证 Bangumi 按日期浏览（可能含未播条目）。"""
     _run_bangumi_discovery_smoke(mode="latest", limit=limit)
+
+
+@app.command("discover-github")
+def discover_github(
+    keyword: str = typer.Argument(..., help="GitHub 公开仓库搜索关键词。"),
+    limit: int = typer.Option(10, "--limit", "-n", min=1, max=100),
+) -> None:
+    """只读验证 GitHub 公开仓库关键词搜索。"""
+
+    if not keyword.strip():
+        raise typer.BadParameter("搜索关键词不能为空。", param_hint="keyword")
+    _run_github_discovery_smoke(mode="search", keyword=keyword.strip(), limit=limit)
+
+
+@app.command("discover-github-ranked")
+def discover_github_ranked(
+    limit: int = typer.Option(10, "--limit", "-n", min=1, max=100),
+) -> None:
+    """只读验证 GitHub 公开仓库 Star 排名。"""
+
+    _run_github_discovery_smoke(mode="ranked", limit=limit)
+
+
+@app.command("discover-github-latest")
+def discover_github_latest(
+    limit: int = typer.Option(10, "--limit", "-n", min=1, max=100),
+) -> None:
+    """只读验证 GitHub 最近创建的公开仓库。"""
+
+    _run_github_discovery_smoke(mode="latest", limit=limit)
+
+
+def _run_github_discovery(*, limit: int, force: bool = False) -> None:
+    """Run one formal GitHub cycle through the shared candidate pipeline."""
+
+    from openbiliclaw.config import load_config
+    from openbiliclaw.runtime.github_producer import GitHubDiscoveryProducer
+    from openbiliclaw.runtime.keyword_fetch import KeywordFetchCoordinator
+    from openbiliclaw.soul.engine import SoulProfileNotInitializedError
+    from openbiliclaw.sources.github_client import (
+        GitHubClient,
+        resolve_github_access_token,
+    )
+
+    _require_runtime_config()
+    config = load_config()
+    github_cfg = config.sources.github
+    if not github_cfg.enabled:
+        _print_status_panel(
+            "warning",
+            "GitHub discovery 未启用",
+            "请在配置页或 config.toml 中启用 [sources.github].enabled。",
+        )
+        raise typer.Exit(code=1)
+    database = _get_runtime_database()
+    soul_engine = _build_soul_engine()
+    try:
+        asyncio.run(soul_engine.get_profile())
+    except SoulProfileNotInitializedError as exc:
+        _print_status_panel("warning", "尚未初始化用户画像", "请先执行 `openbiliclaw init`。")
+        raise typer.Exit(code=1) from exc
+    discovery_engine = _build_discovery_engine()
+    candidate_pipeline = _build_discovery_candidate_pipeline(
+        config=config,
+        database=database,
+        discovery_engine=discovery_engine,
+    )
+    keyword_fetch = KeywordFetchCoordinator(
+        database=database,
+        discovery_config=config.discovery,
+    )
+    selected_token, _credential_origin = resolve_github_access_token(github_cfg.access_token)
+
+    async def _produce() -> dict[str, object]:
+        async with GitHubClient(
+            token=selected_token or None,
+            request_interval_seconds=float(github_cfg.request_interval_seconds),
+        ) as client:
+            producer = GitHubDiscoveryProducer(
+                database=database,
+                soul_engine=soul_engine,
+                client=client,
+                access_token=selected_token,
+                enabled=bool(github_cfg.enabled),
+                source_modes=tuple(github_cfg.source_modes),
+                daily_search_budget=int(github_cfg.daily_search_budget),
+                daily_ranked_budget=int(github_cfg.daily_ranked_budget),
+                daily_latest_budget=int(github_cfg.daily_latest_budget),
+                min_interval_minutes=int(github_cfg.min_interval_minutes),
+                candidate_pipeline=candidate_pipeline,
+                keyword_fetch=keyword_fetch,
+            )
+            return await producer.produce_if_due(limit=limit, force=force)
+
+    result = asyncio.run(_produce())
+    reason = str(result.get("reason") or "")
+    discovered = int(cast("Any", result.get("discovered") or 0))
+    enqueued = int(cast("Any", result.get("enqueued") or 0))
+    modes = ", ".join(github_cfg.source_modes)
+    _print_page_title("GitHub 内容发现", f"正式 discover · {modes}")
+    if reason in {"ok", "partial"}:
+        _print_key_value_table(
+            "发现摘要",
+            [
+                ("发现条数", str(discovered)),
+                ("入池候选", str(enqueued)),
+                ("来源", "github"),
+                ("内容类型", "repository"),
+                ("分支", modes),
+                ("状态", reason),
+            ],
+        )
+        for index, item in enumerate(candidate_pipeline.last_admitted_items[:5], start=1):
+            _print_discovered_content_preview(item, index)
+        return
+    messages = {
+        "disabled": ("warning", "GitHub discovery 已禁用", "请启用 GitHub 来源后重试。"),
+        "no_profile": ("warning", "尚未初始化用户画像", "请先执行 `openbiliclaw init`。"),
+        "throttled": ("info", "GitHub discovery 尚未到期", "可使用 --force 手动验证。"),
+        "rate_limited": ("warning", "GitHub API 正在冷却", "到期后会自动重试。"),
+        "pool_full": ("info", "候选池已满", "当前无需补充 GitHub 候选。"),
+        "budget_exhausted": ("info", "GitHub 今日预算已用完", "可调整各分支每日预算。"),
+        "mode_disabled": ("info", "GitHub 分支均已关闭", "请配置 source_modes。"),
+        "empty": ("info", "GitHub discovery 返回为空", "官方 API 可达，但本轮无可转换公开仓库。"),
+        "error": ("warning", "GitHub discovery 执行失败", str(result.get("mode_results") or "")),
+    }
+    kind, title, body = messages.get(
+        reason,
+        ("info", "GitHub discovery 未产出内容", reason or "无详细信息"),
+    )
+    _print_status_panel(kind, title, body)
 
 
 def _run_bangumi_discovery(*, limit: int, force: bool = False) -> None:
@@ -14894,9 +15830,8 @@ def discover(
         "--source",
         "-s",
         help=(
-            "触发发现的内容源：bilibili、xiaohongshu、douyin、zhihu、reddit、bangumi 或 linuxdo。"
             "触发发现的内容源：bilibili、xiaohongshu、douyin、zhihu、reddit、"
-            "bangumi、v2ex 或 weibo。"
+            "bangumi、github（别名 gh）、linuxdo、v2ex 或 weibo。"
         ),
         case_sensitive=False,
     ),
@@ -14905,7 +15840,7 @@ def discover(
     force: bool = typer.Option(
         False,
         "--force",
-        help="xiaohongshu / bangumi / v2ex / weibo：忽略最小调度间隔强制执行一次。",
+        help="xiaohongshu / bangumi / github / v2ex / weibo：忽略最小调度间隔强制执行一次。",
     ),
 ) -> None:
     """手动触发内容发现（按来源选择渠道）."""
@@ -14963,6 +15898,16 @@ def discover(
         _run_bangumi_discovery(limit=limit, force=force)
         return
 
+    if source_normalized in {"github", "gh"}:
+        if strategies:
+            _print_status_panel(
+                "info",
+                "--strategy 仅对 Bilibili 生效",
+                "github 渠道走 source_modes 配置的官方公开仓库 API 分支，已忽略策略过滤。",
+            )
+        _run_github_discovery(limit=limit, force=force)
+        return
+
     if source_normalized == "linuxdo":
         if strategies:
             _print_status_panel(
@@ -14996,7 +15941,8 @@ def discover(
     if source_normalized != "bilibili":
         raise typer.BadParameter(
             f"未知的内容源 `{source}`，当前支持："
-            "bilibili、xiaohongshu、douyin、zhihu、reddit、bangumi、linuxdo、v2ex、weibo。"
+            "bilibili、xiaohongshu、douyin、zhihu、reddit、bangumi、github（gh）、"
+            "linuxdo、v2ex、weibo。"
         )
 
     active_strategies = _normalize_strategy_names(strategies)

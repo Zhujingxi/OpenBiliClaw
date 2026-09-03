@@ -165,6 +165,44 @@ test("startInit sends both Bangumi username and access token when supplied", asy
   });
 });
 
+test("startInit merges GitHub and Bangumi write-only source options", async () => {
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, options });
+    return { ok: true, async json() { return { run_id: "run-1" }; } };
+  };
+
+  await startInit({
+    sources: ["bangumi", "github"],
+    bangumiUsername: "sai",
+    githubUsername: " octocat ",
+    githubToken: " github-pat ",
+  });
+
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    force: false,
+    sources: ["bangumi", "github"],
+    source_options: {
+      bangumi: { username: "sai" },
+      github: { username: "octocat", access_token: "github-pat" },
+    },
+  });
+});
+
+test("startInit omits untouched GitHub credentials so stored values are kept", async () => {
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, options });
+    return { ok: true, async json() { return { run_id: "run-1" }; } };
+  };
+
+  await startInit({ sources: ["github"] });
+  await startInit({ sources: ["github"], githubUsername: null, githubToken: null });
+
+  assert.deepEqual(JSON.parse(calls[0].options.body), { force: false, sources: ["github"] });
+  assert.deepEqual(JSON.parse(calls[1].options.body), { force: false, sources: ["github"] });
+});
+
 test("startInit omits the token when none is supplied (keep configured)", async () => {
   const calls = [];
   globalThis.fetch = async (url, options) => {
@@ -246,6 +284,16 @@ test("popup resolves the Bangumi username omit-vs-clear before sending guided in
   assert.match(source, /resolveInitBangumiUsername\(\{/);
   assert.match(source, /bangumiUsername:\s*bangumiUsernameOption/);
   assert.match(source, /state\.initBangumiUsernamePrefilled = true/);
+});
+
+test("popup resolves GitHub username omit-vs-clear and keeps PAT write-only", () => {
+  const source = readFileSync(resolve("popup/popup.js"), "utf8");
+
+  assert.match(source, /resolveInitGitHubUsername\(\{/);
+  assert.match(source, /githubUsername:\s*githubUsernameOption/);
+  assert.match(source, /githubToken:\s*githubTokenOption/);
+  assert.match(source, /state\.initGitHubUsernamePrefilled = true/);
+  assert.doesNotMatch(source, /state\.initGitHubTokenPrefilled/);
 });
 
 test("popup surfaces guided-init 202 warnings via the hint banner", () => {

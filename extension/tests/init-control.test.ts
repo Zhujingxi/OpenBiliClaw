@@ -317,7 +317,8 @@ test("idle status is not terminal", () => {
 test("reason + start-error text mapping", () => {
   assert.ok(describeInitReason("bilibili_not_logged_in").includes("B 站"));
   assert.equal(describeInitReason("none"), "");
-  assert.ok(describeInitReason("no_profile_signal_sources").includes("Bangumi"));
+  assert.ok(describeInitReason("no_profile_signal_sources").includes("账号信号"));
+  assert.ok(!describeInitReason("no_profile_signal_sources").includes("Bangumi"));
   assert.equal(describeInitReason("totally_unknown"), "");
   const err = Object.assign(new Error("boom"), {
     status: 409,
@@ -335,7 +336,8 @@ test("a Bangumi-only 409 names all three account tiers", () => {
     status: 409,
     details: {
       error: "no_profile_signal_sources",
-      detail: "只选择 Bangumi 初始化时，需提供个人令牌…",
+      detail:
+        "只选择 Bangumi 初始化时，需提供个人令牌、公开用户名，或先在浏览器登录 bgm.tv。",
     },
   });
   const text = describeInitStartError(rejected);
@@ -344,6 +346,18 @@ test("a Bangumi-only 409 names all three account tiers", () => {
   // The tier that needs no typing at all must be named, otherwise the copy
   // still tells a logged-in bgm.tv user to go fetch a token.
   assert.ok(text.includes("bgm.tv"));
+});
+
+test("guided-init start failures prefer source-specific backend detail", () => {
+  const detail =
+    "只选择 GitHub 初始化时，请填写公开用户名或可用 PAT；公开 repository 发现仍可匿名使用。";
+  const rejected = Object.assign(new Error("/api/init request failed: 409"), {
+    status: 409,
+    details: { error: "no_profile_signal_sources", detail },
+  });
+
+  assert.equal(describeInitStartError(rejected), detail);
+  assert.ok(!describeInitStartError(rejected).includes("Bangumi"));
 });
 
 test("failure text appends backend detail so internal_error is diagnosable", () => {
@@ -430,6 +444,7 @@ test("init source options: bilibili is default-checked but deselectable, others 
     "weibo",
     "youtube",
     "twitter",
+    "github",
     "zhihu",
     "reddit",
     "bangumi",
@@ -487,6 +502,23 @@ test("init source options: Bangumi is anonymous and opt-in", () => {
   assert.ok(INIT_SOURCE_LOGIN_HINT.includes("无需登录"));
 });
 
+test("init source options: GitHub public repositories are anonymous and opt-in", () => {
+  const github = INIT_SOURCE_OPTIONS.find((o) => o.key === "github");
+  assert.ok(github, "github option must exist");
+  assert.ok(!github?.defaultChecked);
+  assert.equal(github?.label, "GitHub");
+  assert.ok(INIT_SOURCE_LOGIN_HINT.includes("GitHub"));
+  assert.ok(describeInitReason("github_bootstrap_not_ready").includes("starred repositories"));
+  assert.ok(describeInitReason("github_identity_required").includes("用户名"));
+  assert.ok(describeInitReason("github_identity_not_found").includes("没有找到"));
+  assert.ok(describeInitReason("invalid_github_access_token").includes("PAT"));
+  assert.ok(describeInitReason("github_token_rejected").includes("PAT"));
+  assert.ok(describeInitReason("github_identity_mismatch").includes("不一致"));
+  assert.ok(describeInitReason("github_bootstrap_timeout").includes("超时"));
+  assert.ok(describeInitReason("github_bootstrap_failed").includes("失败"));
+  assert.ok(describeInitReason("github_partial").includes("部分"));
+});
+
 test("init source options: Linux.do is public, optional-login and opt-in", () => {
   const linuxdo = INIT_SOURCE_OPTIONS.find((o) => o.key === "linuxdo");
   assert.ok(linuxdo, "linuxdo option must exist");
@@ -515,9 +547,10 @@ test("start button allows Reddit as the only profile signal source", () => {
 });
 
 test("initSourceLabels maps known keys and passes unknowns through", () => {
-  assert.deepEqual(initSourceLabels(["bilibili", "xiaohongshu", "zhihu", "reddit", "bangumi", "linuxdo", "weibo"]), [
+  assert.deepEqual(initSourceLabels(["bilibili", "xiaohongshu", "github", "zhihu", "reddit", "bangumi", "linuxdo", "weibo"]), [
     "B 站",
     "小红书",
+    "GitHub",
     "知乎",
     "Reddit",
     "Bangumi",

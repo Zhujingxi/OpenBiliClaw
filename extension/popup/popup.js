@@ -34,6 +34,7 @@ import {
   probeMessageKey,
   reconcileRecommendationReplacement,
   resolveInitBangumiUsername,
+  resolveInitGitHubUsername,
   shouldDisplayProbeFromWebSocket,
   shouldHydrateProbe,
   shouldAutoLoadRecommendations,
@@ -211,6 +212,10 @@ const state = {
   initBangumiUsernameTouched: false,
   initBangumiUsernamePrefilled: false,
   initBangumiToken: "",
+  initGitHubUsername: "",
+  initGitHubUsernameTouched: false,
+  initGitHubUsernamePrefilled: false,
+  initGitHubToken: "",
   initLlmConcurrency: 3,
   backendUpdateStatus: null,
   activityFeed: null,
@@ -700,6 +705,14 @@ function applyRuntimeConfig(config) {
     const input = document.getElementById("initBangumiUsername");
     if (input instanceof HTMLInputElement) {
       input.value = state.initBangumiUsername;
+    }
+  }
+  if (!state.initGitHubUsernameTouched) {
+    state.initGitHubUsername = String(config.sources?.github?.username || "").trim();
+    state.initGitHubUsernamePrefilled = true;
+    const input = document.getElementById("initGitHubUsername");
+    if (input instanceof HTMLInputElement) {
+      input.value = state.initGitHubUsername;
     }
   }
   renderRuntimeToggles(config);
@@ -2139,6 +2152,66 @@ function _renderInitSources() {
     bangumiInput.disabled = !checked;
     bangumiTokenInput.disabled = !checked;
   });
+
+  const githubRow = document.createElement("label");
+  githubRow.className = "init-source-row";
+  const githubLabel = document.createElement("span");
+  githubLabel.textContent = "GitHub 公开用户名（可留空，仅启用公开仓库发现）";
+  const githubInput = document.createElement("input");
+  githubInput.id = "initGitHubUsername";
+  githubInput.maxLength = 39;
+  githubInput.autocomplete = "off";
+  githubInput.autocapitalize = "off";
+  githubInput.spellcheck = false;
+  githubInput.disabled = true;
+  githubInput.value = state.initGitHubUsername;
+  githubInput.addEventListener("input", () => {
+    state.initGitHubUsername = githubInput.value;
+    state.initGitHubUsernameTouched = true;
+  });
+  githubRow.append(githubLabel, githubInput);
+  elements.initSources.append(githubRow);
+
+  const githubTokenRow = document.createElement("label");
+  githubTokenRow.className = "init-source-row";
+  const githubTokenLabel = document.createElement("span");
+  githubTokenLabel.textContent = "GitHub Personal Access Token（可选）";
+  const githubTokenInput = document.createElement("input");
+  githubTokenInput.id = "initGitHubToken";
+  githubTokenInput.type = "password";
+  githubTokenInput.maxLength = 512;
+  githubTokenInput.autocomplete = "off";
+  githubTokenInput.disabled = true;
+  githubTokenInput.value = state.initGitHubToken;
+  githubTokenInput.addEventListener("input", () => {
+    state.initGitHubToken = githubTokenInput.value;
+  });
+  githubTokenRow.append(githubTokenLabel, githubTokenInput);
+  elements.initSources.append(githubTokenRow);
+
+  const githubTokenHint = document.createElement("p");
+  githubTokenHint.className = "init-sources-hint";
+  const githubTokenDocLink = document.createElement("a");
+  githubTokenDocLink.href =
+    "https://github.com/whiteguo233/OpenBiliClaw/blob/main/docs/modules/github.md#pat-获取与安全";
+  githubTokenDocLink.target = "_blank";
+  githubTokenDocLink.rel = "noopener noreferrer";
+  githubTokenDocLink.textContent = "PAT 与安全说明";
+  githubTokenHint.append(
+    document.createTextNode(
+      "GitHub 仅导入公开 starred repositories。公开用户名可直接使用；PAT 只用于确认账号身份和提高官方 API 限额，不读取私有仓库。两者都留空时仍可启用公开仓库发现。",
+    ),
+    document.createTextNode(" "),
+    githubTokenDocLink,
+    document.createTextNode("。"),
+  );
+  elements.initSources.append(githubTokenHint);
+
+  elements.initSources.querySelector('input[data-init-source="github"]')?.addEventListener("change", (event) => {
+    const checked = Boolean(event.currentTarget.checked);
+    githubInput.disabled = !checked;
+    githubTokenInput.disabled = !checked;
+  });
   const hint = document.createElement("p");
   hint.className = "init-sources-hint";
   hint.textContent = INIT_SOURCE_LOGIN_HINT.replace(
@@ -2176,6 +2249,20 @@ function _readInitBangumiToken() {
   return state.initBangumiToken;
 }
 
+function _readInitGitHubUsername() {
+  state.initGitHubUsername = String(
+    document.getElementById("initGitHubUsername")?.value || "",
+  ).trim();
+  return state.initGitHubUsername;
+}
+
+function _readInitGitHubToken() {
+  state.initGitHubToken = String(
+    document.getElementById("initGitHubToken")?.value || "",
+  ).trim();
+  return state.initGitHubToken;
+}
+
 function _readInitLlmConcurrency() {
   const input = document.getElementById("initLlmConcurrency");
   const value = Number(input ? input.value : state.initLlmConcurrency);
@@ -2190,6 +2277,14 @@ function _resolveInitBangumiUsernameForSubmit(value) {
   return resolveInitBangumiUsername({
     touched: state.initBangumiUsernameTouched,
     prefilled: state.initBangumiUsernamePrefilled,
+    value,
+  });
+}
+
+function _resolveInitGitHubUsernameForSubmit(value) {
+  return resolveInitGitHubUsername({
+    touched: state.initGitHubUsernameTouched,
+    prefilled: state.initGitHubUsernamePrefilled,
     value,
   });
 }
@@ -2449,6 +2544,10 @@ async function handleStartInitClick() {
   // Only send a token when the user typed one; omit otherwise so the backend
   // keeps any configured token (empty string would clear a stored token).
   const bangumiTokenOption = bangumiToken ? bangumiToken : null;
+  const githubUsername = _readInitGitHubUsername();
+  const githubUsernameOption = _resolveInitGitHubUsernameForSubmit(githubUsername);
+  const githubToken = _readInitGitHubToken();
+  const githubTokenOption = githubToken ? githubToken : null;
   if (selectedSources.length === 0) {
     _setInitStartButton("开始初始化", true);
     _setInitReason("至少勾选一个数据来源。");
@@ -2527,6 +2626,8 @@ async function handleStartInitClick() {
       sources: selectedSources,
       bangumiUsername: bangumiUsernameOption,
       bangumiToken: bangumiTokenOption,
+      githubUsername: githubUsernameOption,
+      githubToken: githubTokenOption,
       llmConcurrency: _readInitLlmConcurrency(),
     });
   } catch (error) {
@@ -6937,7 +7038,7 @@ function renderRecommendations(items, { append = false } = {}) {
     }
     const platformKey = (item.source_platform || "bilibili").toLowerCase();
     const platformLabel =
-      { bilibili: "B 站", xiaohongshu: "小红书", douyin: "抖音", weibo: "微博", youtube: "YouTube", twitter: "X", zhihu: "知乎", reddit: "Reddit", bangumi: "Bangumi", linuxdo: "Linux.do", v2ex: "V2EX" }[
+      { bilibili: "B 站", xiaohongshu: "小红书", douyin: "抖音", weibo: "微博", youtube: "YouTube", twitter: "X", github: "GitHub", zhihu: "知乎", reddit: "Reddit", bangumi: "Bangumi", linuxdo: "Linux.do", v2ex: "V2EX" }[
         platformKey
       ] || item.source_platform;
     const sourceCorner = document.createElement("span");
@@ -8595,6 +8696,11 @@ function bindSettings() {
     ["ranked", "cfgBangumiModeRanked"],
     ["latest", "cfgBangumiModeLatest"],
   ];
+  const GITHUB_SOURCE_MODE_FIELDS = [
+    ["search", "cfgGithubModeSearch"],
+    ["ranked", "cfgGithubModeRanked"],
+    ["latest", "cfgGithubModeLatest"],
+  ];
   const LINUXDO_SOURCE_MODE_FIELDS = [
     ["search", "cfgLinuxdoModeSearch"],
     ["hot", "cfgLinuxdoModeHot"],
@@ -8674,10 +8780,13 @@ function bindSettings() {
   // MV3's CSP forbids pulling it from the backend over HTTP.
   const SourceStatus = globalThis.OpenBiliClawSourceStatus;
   const SOURCE_STATUS_KEYS = SourceStatus.SOURCE_KEYS;
-  const BANGUMI_SAVE_ERROR_MESSAGES = {
+  const SOURCE_SAVE_ERROR_MESSAGES = {
     invalid_bangumi_access_token:
       "Bangumi 个人令牌被拒绝（缺失、错误或已过期）。请到 next.bgm.tv/demo/access-token 重新生成后重试。",
     bangumi_token_check_failed: "校验 Bangumi 令牌时无法连接 Bangumi，请稍后重试。",
+    invalid_github_access_token: "GitHub PAT 被拒绝（可能无效或已过期）。请更新或清除 PAT 后重试。",
+    github_token_check_failed: "校验 GitHub PAT 时无法连接 GitHub，请稍后重试。",
+    github_identity_mismatch: "GitHub PAT 所属账号与公开用户名不一致，请确认账号后重试。",
   };
 
   // The overseas-egress advisory is authored by the backend
@@ -9525,6 +9634,7 @@ function bindSettings() {
     "weibo",
     "youtube",
     "twitter",
+    "github",
     "zhihu",
     "reddit",
     "bangumi",
@@ -9724,6 +9834,33 @@ function bindSettings() {
     setVal("cfgTwitterDailyCreatorBudget", cfg.sources?.twitter?.daily_creator_budget);
     setVal("cfgTwitterRequestInterval", cfg.sources?.twitter?.request_interval_seconds);
     setVal("cfgTwitterMinInterval", cfg.sources?.twitter?.min_interval_minutes);
+    const githubEnabled = document.getElementById("cfgGithubEnabled");
+    if (githubEnabled) githubEnabled.checked = cfg.sources?.github?.enabled === true;
+    setVal("cfgGithubUsername", cfg.sources?.github?.username);
+    {
+      // GitHub PAT is write-only: GET /api/config returns only presence.
+      // Never populate a masked value that could be resubmitted as a secret.
+      const githubToken = document.getElementById("cfgGithubAccessToken");
+      if (githubToken) {
+        githubToken.value = "";
+        githubToken.placeholder = cfg.sources?.github?.access_token_set
+          ? "已配置（留空保持不变；填写新 PAT 以替换）"
+          : "可留空；不会回显已保存的 PAT";
+      }
+      const githubClearToken = document.getElementById("cfgGithubClearToken");
+      if (githubClearToken) {
+        githubClearToken.checked = false;
+        githubClearToken.disabled = cfg.sources?.github?.access_token_set !== true;
+      }
+    }
+    setCheckedValues(GITHUB_SOURCE_MODE_FIELDS, cfg.sources?.github?.source_modes);
+    setVal("cfgGithubDailySearchBudget", cfg.sources?.github?.daily_search_budget);
+    setVal("cfgGithubDailyRankedBudget", cfg.sources?.github?.daily_ranked_budget);
+    setVal("cfgGithubDailyLatestBudget", cfg.sources?.github?.daily_latest_budget);
+    setVal("cfgGithubRequestInterval", cfg.sources?.github?.request_interval_seconds);
+    setVal("cfgGithubMinInterval", cfg.sources?.github?.min_interval_minutes);
+    setVal("cfgGithubBootstrapLimit", cfg.sources?.github?.bootstrap_limit);
+    setVal("cfgGithubBootstrapMaxPages", cfg.sources?.github?.bootstrap_max_pages);
     const zhihuEnabled = document.getElementById("cfgZhihuEnabled");
     if (zhihuEnabled) zhihuEnabled.checked = cfg.sources?.zhihu?.enabled === true;
     const zhihuIncremental = document.getElementById("cfgZhihuIncremental");
@@ -9922,6 +10059,7 @@ function bindSettings() {
     setVal("cfgPoolShareDouyin", cfg.scheduler?.pool_source_shares?.douyin);
     setVal("cfgPoolShareYoutube", cfg.scheduler?.pool_source_shares?.youtube);
     setVal("cfgPoolShareTwitter", cfg.scheduler?.pool_source_shares?.twitter);
+    setVal("cfgPoolShareGithub", cfg.scheduler?.pool_source_shares?.github);
     setVal("cfgPoolShareZhihu", cfg.scheduler?.pool_source_shares?.zhihu);
     setVal("cfgPoolShareReddit", cfg.scheduler?.pool_source_shares?.reddit);
     setVal("cfgPoolShareBangumi", cfg.scheduler?.pool_source_shares?.bangumi);
@@ -10077,6 +10215,26 @@ function bindSettings() {
           min_interval_minutes: getInt("cfgTwitterMinInterval", 3),
           ...popupSourceDateFieldsForUpdate("twitter")
         },
+        github: {
+          enabled: checked("cfgGithubEnabled"),
+          username: getVal("cfgGithubUsername"),
+          // Write-only secret contract: empty means keep; only an explicit
+          // clear action sends "". A newly typed PAT replaces the stored one.
+          ...(checked("cfgGithubClearToken")
+            ? { access_token: "" }
+            : (getVal("cfgGithubAccessToken") || "") !== ""
+              ? { access_token: getVal("cfgGithubAccessToken") }
+              : {}),
+          source_modes: collectCheckedValues(GITHUB_SOURCE_MODE_FIELDS, ["search"]),
+          daily_search_budget: getInt("cfgGithubDailySearchBudget", 120),
+          daily_ranked_budget: getInt("cfgGithubDailyRankedBudget", 60),
+          daily_latest_budget: getInt("cfgGithubDailyLatestBudget", 60),
+          request_interval_seconds: getInt("cfgGithubRequestInterval", 6),
+          min_interval_minutes: getInt("cfgGithubMinInterval", 10),
+          bootstrap_limit: getInt("cfgGithubBootstrapLimit", 300),
+          bootstrap_max_pages: getInt("cfgGithubBootstrapMaxPages", 10),
+          ...popupSourceDateFieldsForUpdate("github")
+        },
         zhihu: {
           enabled: checked("cfgZhihuEnabled"),
           incremental_enabled: checked("cfgZhihuIncremental"),
@@ -10199,6 +10357,7 @@ function bindSettings() {
           douyin: getInt("cfgPoolShareDouyin", 1),
           youtube: getInt("cfgPoolShareYoutube", 1),
           twitter: getInt("cfgPoolShareTwitter", 1),
+          github: getInt("cfgPoolShareGithub", 1),
           zhihu: getInt("cfgPoolShareZhihu", 1),
           reddit: getInt("cfgPoolShareReddit", 1),
           bangumi: getInt("cfgPoolShareBangumi", 1),
@@ -10313,6 +10472,7 @@ function bindSettings() {
     weibo: "cfgWeiboEnabled",
     youtube: "cfgYoutubeEnabled",
     twitter: "cfgTwitterEnabled",
+    github: "cfgGithubEnabled",
     zhihu: "cfgZhihuEnabled",
     reddit: "cfgRedditEnabled",
     bangumi: "cfgBangumiEnabled",
@@ -10809,6 +10969,7 @@ function bindSettings() {
             weibo: checked("cfgWeiboEnabled"),
             youtube: checked("cfgYoutubeEnabled"),
             twitter: checked("cfgTwitterEnabled"),
+            github: checked("cfgGithubEnabled"),
             zhihu: checked("cfgZhihuEnabled"),
             reddit: checked("cfgRedditEnabled"),
             bangumi: checked("cfgBangumiEnabled"),
@@ -10822,6 +10983,7 @@ function bindSettings() {
             weibo: getInt("cfgPoolShareWeibo", 1),
             youtube: getInt("cfgPoolShareYoutube", 1),
             twitter: getInt("cfgPoolShareTwitter", 1),
+            github: getInt("cfgPoolShareGithub", 1),
             zhihu: getInt("cfgPoolShareZhihu", 1),
             reddit: getInt("cfgPoolShareReddit", 1),
             bangumi: getInt("cfgPoolShareBangumi", 1),
@@ -10836,6 +10998,7 @@ function bindSettings() {
         if (shares.weibo !== undefined) setVal("cfgPoolShareWeibo", shares.weibo);
         if (shares.youtube !== undefined) setVal("cfgPoolShareYoutube", shares.youtube);
         if (shares.twitter !== undefined) setVal("cfgPoolShareTwitter", shares.twitter);
+        if (shares.github !== undefined) setVal("cfgPoolShareGithub", shares.github);
         if (shares.zhihu !== undefined) setVal("cfgPoolShareZhihu", shares.zhihu);
         if (shares.reddit !== undefined) setVal("cfgPoolShareReddit", shares.reddit);
         if (shares.bangumi !== undefined) setVal("cfgPoolShareBangumi", shares.bangumi);
@@ -11023,10 +11186,10 @@ function bindSettings() {
         showToast("未授予该后端地址的访问权限，地址未保存。", "error");
       } else if (err?.message === "invalid_backend_scheme") {
         showToast("后端协议无效。", "error");
-      } else if (BANGUMI_SAVE_ERROR_MESSAGES[err?.details?.error]) {
-        // Config PUT rejects a bad/expired Bangumi token live via /v0/me.
+      } else if (SOURCE_SAVE_ERROR_MESSAGES[err?.details?.error]) {
+        // Config PUT validates write-only platform tokens before persisting.
         showToast(
-          err.details.message || BANGUMI_SAVE_ERROR_MESSAGES[err.details.error],
+          err.details.message || SOURCE_SAVE_ERROR_MESSAGES[err.details.error],
           "error",
         );
       } else if (!renderStructuredConfigError(err)) {

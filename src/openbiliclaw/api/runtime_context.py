@@ -450,6 +450,7 @@ class RuntimeContext:
     llm_service: Any = None
     bilibili_client: Any = None
     bangumi_client: Any = None
+    github_client: Any = None
     v2ex_client: Any = None
     weibo_client: Any = None
     saved_sync_service: Any = None
@@ -792,6 +793,27 @@ class RuntimeContext:
                 access_token=str(getattr(bangumi_cfg, "access_token", "") or "") or None,
                 request_interval_seconds=float(
                     getattr(bangumi_cfg, "request_interval_seconds", 1.0)
+                ),
+            )
+        github_cfg = getattr(getattr(new_config, "sources", None), "github", None)
+        new_github_client: Any = None
+        github_access_token = ""
+        if bool(getattr(github_cfg, "enabled", False)):
+            from openbiliclaw.sources.github_client import (
+                GitHubClient,
+                resolve_github_access_token,
+            )
+
+            github_access_token, _token_origin = resolve_github_access_token(
+                config_token=str(getattr(github_cfg, "access_token", "") or ""),
+                # This is a fixed security boundary. Do not honor arbitrary
+                # renamed variables, GITHUB_TOKEN, or GH_TOKEN here.
+                token_env="OPENBILICLAW_GITHUB_TOKEN",
+            )
+            new_github_client = GitHubClient(
+                token=github_access_token or None,
+                request_interval_seconds=float(
+                    getattr(github_cfg, "request_interval_seconds", 6.0)
                 ),
             )
         v2ex_cfg = getattr(getattr(new_config, "sources", None), "v2ex", None)
@@ -1161,6 +1183,7 @@ class RuntimeContext:
         new_zhihu_producer: Any = None
         new_reddit_producer: Any = None
         new_bangumi_producer: Any = None
+        new_github_producer: Any = None
         new_linuxdo_producer: Any = None
         new_v2ex_producer: Any = None
         new_weibo_producer: Any = None
@@ -1320,6 +1343,26 @@ class RuntimeContext:
                     candidate_pipeline=new_candidate_pipeline,
                     keyword_fetch=new_keyword_fetch,
                 )
+            if new_github_client is not None:
+                from openbiliclaw.runtime.github_producer import GitHubDiscoveryProducer
+
+                new_github_producer = GitHubDiscoveryProducer(
+                    database=self.database,
+                    soul_engine=new_soul_engine,
+                    client=new_github_client,
+                    access_token=github_access_token,
+                    enabled=bool(getattr(github_cfg, "enabled", False))
+                    and bool(getattr(sched_cfg, "enabled", True)),
+                    source_modes=tuple(
+                        getattr(github_cfg, "source_modes", ("search", "ranked", "latest"))
+                    ),
+                    daily_search_budget=int(getattr(github_cfg, "daily_search_budget", 120)),
+                    daily_ranked_budget=int(getattr(github_cfg, "daily_ranked_budget", 60)),
+                    daily_latest_budget=int(getattr(github_cfg, "daily_latest_budget", 60)),
+                    min_interval_minutes=int(getattr(github_cfg, "min_interval_minutes", 10)),
+                    candidate_pipeline=new_candidate_pipeline,
+                    keyword_fetch=new_keyword_fetch,
+                )
             if new_v2ex_client is not None:
                 from openbiliclaw.api.source_auth.probe_cache import LIVE_PROBES
                 from openbiliclaw.runtime.v2ex_producer import (
@@ -1412,9 +1455,11 @@ class RuntimeContext:
                 serply_api_key=str(getattr(discovery_cfg, "serply_api_key", "") or ""),
                 platform_backends=build_platform_source_backends(
                     new_config,
+                    database=self.database,
                     bilibili_client=new_bilibili_client,
                     x_client=new_x_client,
                     bangumi_client=new_bangumi_client,
+                    github_client=new_github_client,
                     v2ex_client=new_v2ex_client,
                     weibo_client=new_weibo_client,
                 ),
@@ -1500,6 +1545,7 @@ class RuntimeContext:
             zhihu_producer=new_zhihu_producer,
             reddit_producer=new_reddit_producer,
             bangumi_producer=new_bangumi_producer,
+            github_producer=new_github_producer,
             linuxdo_producer=new_linuxdo_producer,
             v2ex_producer=new_v2ex_producer,
             weibo_producer=new_weibo_producer,
@@ -1621,6 +1667,7 @@ class RuntimeContext:
             new_youtube_producer,
             new_zhihu_producer,
             new_bangumi_producer,
+            new_github_producer,
             new_linuxdo_producer,
             new_v2ex_producer,
             new_weibo_producer,
@@ -1725,9 +1772,11 @@ class RuntimeContext:
         self.llm_service = new_llm_service
         self.bilibili_client = new_bilibili_client
         old_bangumi_client = self.bangumi_client
+        old_github_client = self.github_client
         old_v2ex_client = self.v2ex_client
         old_weibo_client = self.weibo_client
         self.bangumi_client = new_bangumi_client
+        self.github_client = new_github_client
         self.v2ex_client = new_v2ex_client
         self.weibo_client = new_weibo_client
         self.saved_sync_service = new_saved_sync_service
@@ -1744,6 +1793,11 @@ class RuntimeContext:
             if callable(close):
                 with suppress(RuntimeError):
                     self.task_registry.track("close_old_bangumi_client", close())
+        if old_github_client is not None and old_github_client is not new_github_client:
+            close = getattr(old_github_client, "aclose", None)
+            if callable(close):
+                with suppress(RuntimeError):
+                    self.task_registry.track("close_old_github_client", close())
         if old_v2ex_client is not None and old_v2ex_client is not new_v2ex_client:
             close = getattr(old_v2ex_client, "aclose", None)
             if callable(close):

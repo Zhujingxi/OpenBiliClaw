@@ -15,6 +15,7 @@ PLATFORM_XIAOHONGSHU = "xiaohongshu"
 PLATFORM_DOUYIN = "douyin"
 PLATFORM_YOUTUBE = "youtube"
 PLATFORM_TWITTER = "twitter"
+PLATFORM_GITHUB = "github"
 PLATFORM_ZHIHU = "zhihu"
 PLATFORM_REDDIT = "reddit"
 PLATFORM_BANGUMI = "bangumi"
@@ -58,6 +59,7 @@ CONTENT_ID_METADATA_KEYS = (
     "post_id",
     "tweet_id",
     "status_id",
+    "repository_id",
     "question_id",
     "answer_id",
     "topic_id",
@@ -142,6 +144,14 @@ SOURCE_FAMILY_RULES = (
         platform_aliases=frozenset({"twitter", "x"}),
         source_prefixes=("x-", "x_", "twitter"),
         url_hosts=("x.com", "twitter.com"),
+        requires_overseas_network=True,
+        routed_by_network_mode=True,
+    ),
+    SourceFamilyRule(
+        family=PLATFORM_GITHUB,
+        platform_aliases=frozenset({"github", "gh"}),
+        source_prefixes=("github-", "github_", "gh-"),
+        url_hosts=("github.com",),
         requires_overseas_network=True,
         routed_by_network_mode=True,
     ),

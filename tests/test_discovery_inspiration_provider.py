@@ -21,6 +21,7 @@ from openbiliclaw.discovery.inspiration_provider import (
     DouyinPlatformSearchBackend,
     ExaInspirationProvider,
     FallbackInspirationSearchProvider,
+    GitHubPlatformSearchBackend,
     LocalInspirationProvider,
     McporterExaInspirationProvider,
     McporterYouInspirationProvider,
@@ -40,6 +41,8 @@ from openbiliclaw.discovery.inspiration_provider import (
     parse_serply_search_payload,
     parse_you_search_payload,
 )
+from openbiliclaw.sources.github_client import GitHubAPIError
+from openbiliclaw.storage.database import Database
 
 
 def test_parse_exa_search_payload_accepts_result_objects() -> None:
@@ -1362,6 +1365,197 @@ async def test_bangumi_platform_backend_maps_official_rows_to_previews() -> None
     ]
 
 
+async def test_github_platform_backend_maps_only_public_repositories_to_previews() -> None:
+    class Client:
+        async def search_repositories(self, query: str, **kwargs: object) -> SimpleNamespace:
+            assert query == "local agent in:name,description,readme is:public fork:false"
+            assert kwargs == {"page": 1, "per_page": 3}
+            return SimpleNamespace(
+                items=[
+                    {
+                        "id": 101,
+                        "node_id": "R_101",
+                        "name": "local-agent",
+                        "full_name": "alice/local-agent",
+                        "html_url": "https://github.com/alice/local-agent",
+                        "description": "Run an agent locally",
+                        "private": False,
+                        "visibility": "public",
+                        "created_at": "2026-08-01T00:00:00Z",
+                        "language": "Python",
+                        "topics": ["agent"],
+                        "stargazers_count": 42,
+                        "owner": {"id": 7, "node_id": "U_7", "login": "alice"},
+                    },
+                    {
+                        "full_name": "alice/private-agent",
+                        "html_url": "https://github.com/alice/private-agent",
+                        "private": True,
+                    },
+                    {
+                        "full_name": "alice/schema-drift",
+                        "html_url": "https://evil.example/internal",
+                        "description": "must fail closed without private/id/time evidence",
+                        "stargazers_count": 999,
+                        "owner": {"login": "alice"},
+                    },
+                ],
+                next_page=None,
+            )
+
+    backend = GitHubPlatformSearchBackend(Client())
+
+    assert await backend.search("local agent", limit=3) == [
+        ExaPreviewItem(
+            title="alice/local-agent",
+            url="https://github.com/alice/local-agent",
+            highlights=("Run an agent locally", "agent, Python", "stars: 42", "alice"),
+        )
+    ]
+
+
+def _github_inspiration_repository() -> dict[str, object]:
+    return {
+        "id": 101,
+        "node_id": "R_101",
+        "name": "local-agent",
+        "full_name": "alice/local-agent",
+        "html_url": "https://github.com/alice/local-agent",
+        "description": "Run an agent locally",
+        "private": False,
+        "visibility": "public",
+        "created_at": "2026-08-01T00:00:00Z",
+        "language": "Python",
+        "topics": ["agent"],
+        "stargazers_count": 42,
+        "owner": {"id": 7, "node_id": "U_7", "login": "alice"},
+    }
+
+
+async def test_github_rejected_only_terminal_is_degraded_not_affirmative_empty() -> None:
+    class Client:
+        async def search_repositories(self, query: str, **kwargs: object) -> SimpleNamespace:
+            del query, kwargs
+            private = _github_inspiration_repository()
+            private["private"] = True
+            private["visibility"] = "private"
+            return SimpleNamespace(
+                items=[private],
+                next_page=None,
+                incomplete_results=False,
+                search_capped=False,
+                scope_complete=True,
+            )
+
+    platform = PlatformSourceInspirationProvider(
+        [GitHubPlatformSearchBackend(Client())],
+        platforms_per_query=1,
+    )
+    provider = FallbackInspirationSearchProvider([platform], error_cooldown_seconds=0)
+
+    assert await provider.search("private agent", limit=2) == []
+    ledger = provider.grounding_ledger()
+    assert ledger["platform_degraded"] == {"github": 1}
+    assert ledger["platform_partial"] == {}
+    assert ledger["platform_complete"] == {}
+    assert ledger["platform_affirmative_empty"] == {}
+    assert ledger["platform_terminal_evidence"] == {"github": {"rejected_rows": 1}}
+    assert ledger["provider_degraded"] == {"PlatformSourceInspirationProvider": 1}
+    assert ledger["provider_empty"] == {}
+
+
+async def test_github_incomplete_search_keeps_accepted_preview_and_marks_partial() -> None:
+    class Client:
+        async def search_repositories(self, query: str, **kwargs: object) -> SimpleNamespace:
+            del query, kwargs
+            return SimpleNamespace(
+                items=[_github_inspiration_repository()],
+                next_page=None,
+                incomplete_results=True,
+                search_capped=False,
+                scope_complete=False,
+            )
+
+    platform = PlatformSourceInspirationProvider(
+        [GitHubPlatformSearchBackend(Client())],
+        platforms_per_query=1,
+    )
+    provider = FallbackInspirationSearchProvider([platform], error_cooldown_seconds=0)
+
+    results = await provider.search("local agent", limit=2)
+
+    assert [item.url for item in results] == ["https://github.com/alice/local-agent"]
+    ledger = provider.grounding_ledger()
+    assert ledger["platform_partial"] == {"github": 1}
+    assert ledger["platform_degraded"] == {"github": 1}
+    assert ledger["platform_complete"] == {}
+    assert ledger["platform_affirmative_empty"] == {}
+    assert ledger["platform_terminal_evidence"] == {"github": {"incomplete_results": 1}}
+    assert ledger["provider_successes"] == {"PlatformSourceInspirationProvider": 1}
+    assert ledger["provider_degraded"] == {"PlatformSourceInspirationProvider": 1}
+
+
+async def test_github_search_cap_is_degraded_not_affirmative_empty() -> None:
+    class Client:
+        async def search_repositories(self, query: str, **kwargs: object) -> SimpleNamespace:
+            del query, kwargs
+            return SimpleNamespace(
+                items=[],
+                next_page=None,
+                incomplete_results=False,
+                search_capped=True,
+                scope_complete=False,
+            )
+
+    platform = PlatformSourceInspirationProvider(
+        [GitHubPlatformSearchBackend(Client())],
+        platforms_per_query=1,
+    )
+    provider = FallbackInspirationSearchProvider([platform], error_cooldown_seconds=0)
+
+    assert await provider.search("popular agent", limit=2) == []
+    ledger = provider.grounding_ledger()
+    assert ledger["platform_degraded"] == {"github": 1}
+    assert ledger["platform_complete"] == {}
+    assert ledger["platform_affirmative_empty"] == {}
+    assert ledger["platform_terminal_evidence"] == {"github": {"search_capped": 1}}
+    assert ledger["provider_degraded"] == {"PlatformSourceInspirationProvider": 1}
+    assert ledger["provider_empty"] == {}
+
+
+async def test_github_platform_backend_persists_and_obeys_shared_rate_limit(
+    tmp_path,
+) -> None:
+    database = Database(tmp_path / "github-inspiration.db")
+    database.initialize()
+
+    class Client:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def search_repositories(self, query: str, **kwargs: object) -> object:
+            del query, kwargs
+            self.calls += 1
+            raise GitHubAPIError(
+                "rate_limited",
+                "slow down",
+                status_code=429,
+                retry_after_seconds=120,
+            )
+
+    client = Client()
+    backend = GitHubPlatformSearchBackend(client, database=database)
+
+    with pytest.raises(GitHubAPIError, match="slow down"):
+        await backend.search("local agent", limit=1)
+
+    assert backend.cooldown_remaining() > 0
+    provider = PlatformSourceInspirationProvider([backend], platforms_per_query=1)
+    assert await provider.search("another query", limit=1) == []
+    assert client.calls == 1
+    assert provider.grounding_ledger()["skipped_cooldown"] == 1
+
+
 async def test_v2ex_platform_backend_maps_public_topics_to_previews() -> None:
     class Client:
         async def search_topics(self, query: str, *, limit: int) -> SimpleNamespace:
@@ -1425,6 +1619,7 @@ def test_build_platform_source_backends_uses_only_enabled_sources() -> None:
             douyin=SimpleNamespace(enabled=True),
             youtube=SimpleNamespace(enabled=True),
             twitter=SimpleNamespace(enabled=True),
+            github=SimpleNamespace(enabled=True),
             zhihu=SimpleNamespace(enabled=True),
             reddit=SimpleNamespace(enabled=False, backend="rdt"),
             bangumi=SimpleNamespace(enabled=True, subject_types=("anime", "book")),
@@ -1446,6 +1641,7 @@ def test_build_platform_source_backends_uses_only_enabled_sources() -> None:
         douyin_client=object(),
         youtube_client=youtube_client,
         x_client=object(),
+        github_client=object(),
         zhihu_search=zhihu_search,
         bangumi_client=object(),
         v2ex_client=object(),
@@ -1457,10 +1653,31 @@ def test_build_platform_source_backends_uses_only_enabled_sources() -> None:
         "douyin",
         "youtube",
         "twitter",
+        "github",
         "zhihu",
         "bangumi",
         "v2ex",
     ]
+
+
+def test_build_platform_source_backends_requires_enabled_github_and_client() -> None:
+    disabled = SimpleNamespace(
+        sources=SimpleNamespace(
+            bilibili=SimpleNamespace(enabled=False),
+            github=SimpleNamespace(enabled=False),
+        )
+    )
+    enabled = SimpleNamespace(
+        sources=SimpleNamespace(
+            bilibili=SimpleNamespace(enabled=False),
+            github=SimpleNamespace(enabled=True),
+        )
+    )
+
+    assert build_platform_source_backends(disabled, github_client=object()) == []
+    assert build_platform_source_backends(enabled, github_client=None) == []
+    backends = build_platform_source_backends(enabled, github_client=object())
+    assert [backend.platform for backend in backends] == ["github"]
 
 
 # ── Overseas search backends follow the [network] routing policy ─────────

@@ -39,6 +39,7 @@ NativeSaveActionOut = Literal["favorite", "watch_later"]
 _SAVED_PLATFORM_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 _URL_FALLBACK_ID_RE = re.compile(r"[0-9a-f]{24}")
 _ZHIHU_TYPED_CONTENT_ID_RE = re.compile(r"(?:question|answer|article):[0-9]+")
+_GITHUB_TYPED_CONTENT_ID_RE = re.compile(r"repository:[1-9][0-9]*")
 IdempotencyKey = Annotated[
     StrictStr,
     StringConstraints(strip_whitespace=True, min_length=1, max_length=400),
@@ -262,6 +263,9 @@ class RecommendationOut(BaseModel):
     # cover_url is empty.
     content_type: str = "video"
     body_text: str = ""
+    # Bounded, source-normalizer-owned provenance/card metadata. Clients must
+    # treat unknown keys as optional; raw upstream responses are never exposed.
+    source_metadata: dict[str, object] = Field(default_factory=dict)
     # Desktop card metadata (additive for issue #75; extension popup ignores unknown keys).
     duration: int = 0
     view_count: int = 0
@@ -845,9 +849,10 @@ class SourceStatusItem(BaseModel):
     # ``| None`` is kept for the three surfaces' older-backend fallback path, not
     # because any provider emits it today.
     auth: SourceAuthContract | None = None
-    # Optional personal-token dimension (currently Bangumi only): ``"ok"`` when a
-    # token is configured and not rejected, ``"rejected"`` when Bangumi denied it
-    # and discovery degraded to anonymous, ``""`` when no token is configured.
+    # Optional personal-token dimension (Bangumi / GitHub): ``"ok"`` when a
+    # token is configured and not rejected, ``"rejected"`` when the source
+    # denied it and discovery degraded to anonymous, ``""`` when no token is
+    # configured.
     token_state: str = ""
     # Overseas-egress advisory, authored entirely by the backend so no settings
     # surface has to keep its own platform list or re-read ``[network].mode``
@@ -877,6 +882,7 @@ class SourcesStatusResponse(BaseModel):
     zhihu: SourceStatusItem = Field(default_factory=SourceStatusItem)
     reddit: SourceStatusItem = Field(default_factory=SourceStatusItem)
     bangumi: SourceStatusItem = Field(default_factory=SourceStatusItem)
+    github: SourceStatusItem = Field(default_factory=SourceStatusItem)
     linuxdo: SourceStatusItem = Field(default_factory=SourceStatusItem)
     v2ex: SourceStatusItem = Field(default_factory=SourceStatusItem)
     weibo: SourceStatusItem = Field(default_factory=SourceStatusItem)
@@ -1050,6 +1056,7 @@ class SourcesCredentialsResponse(BaseModel):
     zhihu: SourceCredentialItem = Field(default_factory=SourceCredentialItem)
     reddit: SourceCredentialItem = Field(default_factory=SourceCredentialItem)
     bangumi: SourceCredentialItem = Field(default_factory=SourceCredentialItem)
+    github: SourceCredentialItem = Field(default_factory=SourceCredentialItem)
     linuxdo: SourceCredentialItem = Field(default_factory=SourceCredentialItem)
     v2ex: SourceCredentialItem = Field(default_factory=SourceCredentialItem)
     weibo: SourceCredentialItem = Field(default_factory=SourceCredentialItem)
@@ -1660,6 +1667,11 @@ def validate_saved_item_key(value: str) -> str:
         and platform == "zhihu"
         and _ZHIHU_TYPED_CONTENT_ID_RE.fullmatch(":".join(parts[1:])) is not None
     )
+    github_typed_key = (
+        len(parts) == 3
+        and platform == "github"
+        and _GITHUB_TYPED_CONTENT_ID_RE.fullmatch(":".join(parts[1:])) is not None
+    )
     url_fallback_key = (
         len(parts) == 3
         and parts[1] == "url"
@@ -1667,7 +1679,7 @@ def validate_saved_item_key(value: str) -> str:
     )
     if (
         not platform
-        or not (stable_key or zhihu_typed_key or url_fallback_key)
+        or not (stable_key or zhihu_typed_key or github_typed_key or url_fallback_key)
         or canonical_source_platform(platform) != platform
         or _SAVED_PLATFORM_RE.fullmatch(platform) is None
     ):
@@ -1748,8 +1760,11 @@ class SavedItemIn(BaseModel):
         typed_zhihu_id = (
             platform == "zhihu" and _ZHIHU_TYPED_CONTENT_ID_RE.fullmatch(value) is not None
         )
+        typed_github_id = (
+            platform == "github" and _GITHUB_TYPED_CONTENT_ID_RE.fullmatch(value) is not None
+        )
         if (
-            (":" in value and not typed_zhihu_id)
+            (":" in value and not (typed_zhihu_id or typed_github_id))
             or _has_identity_whitespace(value)
             or _has_unicode_control(value)
         ):
@@ -2200,6 +2215,23 @@ class BangumiSourceConfigOut(SourceDatePreferenceOut):
     bootstrap_limit: int = 300
 
 
+class GitHubSourceConfigOut(SourceDatePreferenceOut):
+    enabled: bool = False
+    username: str = ""
+    # Secrets are write-only. This flag covers either the fixed env credential
+    # or config.toml without revealing even a masked token fragment.
+    access_token_set: bool = False
+    token_env: str = "OPENBILICLAW_GITHUB_TOKEN"
+    source_modes: list[str] = Field(default_factory=lambda: ["search", "ranked", "latest"])
+    daily_search_budget: int = 120
+    daily_ranked_budget: int = 60
+    daily_latest_budget: int = 60
+    request_interval_seconds: int = 6
+    min_interval_minutes: int = 10
+    bootstrap_limit: int = 300
+    bootstrap_max_pages: int = 10
+
+
 class LinuxdoSourceConfigOut(SourceDatePreferenceOut):
     enabled: bool = False
     incremental_enabled: bool = False
@@ -2267,6 +2299,7 @@ class SourcesConfigOut(BaseModel):
     zhihu: ZhihuSourceConfigOut = Field(default_factory=ZhihuSourceConfigOut)
     reddit: RedditSourceConfigOut = Field(default_factory=RedditSourceConfigOut)
     bangumi: BangumiSourceConfigOut = Field(default_factory=BangumiSourceConfigOut)
+    github: GitHubSourceConfigOut = Field(default_factory=GitHubSourceConfigOut)
     linuxdo: LinuxdoSourceConfigOut = Field(default_factory=LinuxdoSourceConfigOut)
     v2ex: V2EXSourceConfigOut = Field(default_factory=V2EXSourceConfigOut)
     weibo: WeiboSourceConfigOut = Field(default_factory=WeiboSourceConfigOut)

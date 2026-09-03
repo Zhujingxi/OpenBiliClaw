@@ -24,8 +24,8 @@ def test_docs_homepage_mentions_current_platform_sources() -> None:
     assert "sourceLinuxdoText" in html
     assert "sourceWeiboTitle" in html
     assert "sourceWeiboText" in html
-    assert "十一类平台来源与开放 Web" in html
-    assert "Eleven platform sources and the open web" in html
+    assert "十二类平台来源与开放 Web" in html
+    assert "Twelve platform sources and the open web" in html
     source_cards = re.findall(r'data-source="([a-z0-9_-]+)"', html)
     assert source_cards == [
         "bilibili",
@@ -39,12 +39,15 @@ def test_docs_homepage_mentions_current_platform_sources() -> None:
         "bangumi",
         "v2ex",
         "weibo",
+        "github",
         "web",
     ]
     assert "sourceYoutubeTitle" in html
     assert "sourceYoutubeText" in html
     assert "sourceXTitle" in html
     assert "sourceXText" in html
+    assert "sourceGithubTitle" in html
+    assert "sourceGithubText" in html
     assert "Linux.do、V2EX、微博等十一类来源" not in html
     assert "Weibo, and eight other platform sources" not in html
     assert "登录微博后可在初始化时通过同源只读任务导入收藏、关注和互动" in html

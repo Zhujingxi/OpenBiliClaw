@@ -498,6 +498,7 @@ SOURCE_DOUYIN = "douyin"
 SOURCE_WEB = "web"
 SOURCE_YOUTUBE = "youtube"
 SOURCE_TWITTER = "twitter"
+SOURCE_GITHUB = "github"
 SOURCE_ZHIHU = "zhihu"
 SOURCE_REDDIT = "reddit"
 SOURCE_BANGUMI = "bangumi"
@@ -514,6 +515,7 @@ _PLATFORM_LABELS: dict[str, str] = {
     SOURCE_WEB: "网页",
     SOURCE_YOUTUBE: "YouTube",
     SOURCE_TWITTER: "X",
+    SOURCE_GITHUB: "GitHub",
     SOURCE_ZHIHU: "知乎",
     SOURCE_REDDIT: "Reddit",
     SOURCE_BANGUMI: "Bangumi",

@@ -1503,6 +1503,17 @@
       color: #d93f00;
     }
 
+    .recommendation-source-corner.source-platform-github {
+      background: rgba(36, 41, 47, 0.82);
+      color: #fff;
+    }
+
+    .recommendation-cover.is-fallback .recommendation-source-corner.source-platform-github,
+    .recommendation-cover.is-text-card .recommendation-source-corner.source-platform-github {
+      background: rgba(36, 41, 47, 0.12);
+      color: #24292f;
+    }
+
     .recommendation-source-corner.source-platform-weibo {
       background: rgba(230, 22, 45, 0.82);
       color: #fff;
@@ -5040,7 +5051,7 @@
     }
 
     /* 平台源卡片：卡面常驻（标题 / 启用 / 接入状态），配置按需展开。
-       侧栏宽度有限，9 个来源全展开会让这一页长到无法浏览。 */
+       侧栏宽度有限，全部来源同时展开会让这一页长到无法浏览。 */
     .settings-source-card[data-open] {
       padding-bottom: 0;
     }
@@ -6911,6 +6922,52 @@
       </div>
       </div>
 
+      <div class="settings-section settings-source-card" data-source-card="github" data-open="0">
+        <div class="source-card-face" role="button" tabindex="0" aria-expanded="false" aria-controls="sourceCardBody-github">
+        <h3><span class="section-icon" aria-hidden="true">GH</span> GitHub</h3>
+        <div class="settings-field-row">
+          <input id="cfgGithubEnabled" type="checkbox">
+          <label for="cfgGithubEnabled">启用 GitHub 来源</label>
+        </div>
+        <p class="settings-hint source-status-row" id="cfgGithubStatus" data-source-status="github"><span class="src-dot">●</span> <span class="src-detail">GitHub 来源状态加载中…</span></p>
+          <span class="source-card-chev" aria-hidden="true">&#x25BE;</span>
+        </div>
+        <div class="source-card-body" id="sourceCardBody-github">
+        <div class="settings-probe-row source-verify-row">
+          <button class="settings-secondary-btn source-verify-btn" type="button">测试连接</button>
+          <span class="settings-probe-status source-verify-status" aria-live="polite"></span>
+        </div>
+        <div class="settings-field">
+          <label for="cfgGithubUsername">公开用户名（可留空）</label>
+          <input id="cfgGithubUsername" type="text" maxlength="39" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="例如 octocat">
+        </div>
+        <div class="settings-field">
+          <label for="cfgGithubAccessToken">Personal Access Token（可选）</label>
+          <input id="cfgGithubAccessToken" type="password" maxlength="512" autocomplete="off" placeholder="可留空；不会回显已保存的 PAT">
+          <div class="settings-field-row">
+            <input id="cfgGithubClearToken" type="checkbox">
+            <label for="cfgGithubClearToken">清除已保存的 PAT</label>
+          </div>
+          <p class="settings-hint">仅使用 GitHub 官方 REST API 读取公开 repository。公开用户名用于导入该账号公开的 starred repositories；PAT 只用于 <code>GET /user</code> 身份确认和提高 API 限额，不会开放私有仓库。PAT 留空保持已有值，勾选清除才会删除。<a href="https://github.com/whiteguo233/OpenBiliClaw/blob/main/docs/modules/github.md#pat-获取与安全" target="_blank" rel="noopener noreferrer">PAT 与安全说明</a>。</p>
+        </div>
+        <div class="settings-field">
+          <label>内容发现分支</label>
+          <div class="settings-field-row"><input id="cfgGithubModeSearch" type="checkbox"><label for="cfgGithubModeSearch">搜索</label></div>
+          <div class="settings-field-row"><input id="cfgGithubModeRanked" type="checkbox"><label for="cfgGithubModeRanked">排名（按 stars）</label></div>
+          <div class="settings-field-row"><input id="cfgGithubModeLatest" type="checkbox"><label for="cfgGithubModeLatest">最新（近 30 天创建，按最近更新）</label></div>
+        </div>
+        <div class="settings-field"><label for="cfgGithubDailySearchBudget">每日搜索条目</label><input id="cfgGithubDailySearchBudget" type="number" min="0" step="1" placeholder="120"></div>
+        <div class="settings-field"><label for="cfgGithubDailyRankedBudget">每日排名条目</label><input id="cfgGithubDailyRankedBudget" type="number" min="0" step="1" placeholder="60"></div>
+        <div class="settings-field"><label for="cfgGithubDailyLatestBudget">每日最新条目</label><input id="cfgGithubDailyLatestBudget" type="number" min="0" step="1" placeholder="60"></div>
+        <p class="settings-hint" data-budget-note>预算 = 每日条目上限，不是开关；GitHub 匿名 Search API 有严格限额，请保留合理请求间隔。</p>
+        <div class="settings-field"><label for="cfgGithubRequestInterval">请求间隔秒数</label><input id="cfgGithubRequestInterval" type="number" min="0" max="60" step="1" placeholder="6"></div>
+        <div class="settings-field"><label for="cfgGithubMinInterval">最小调度间隔分钟</label><input id="cfgGithubMinInterval" type="number" min="0" max="1440" step="1" placeholder="10"></div>
+        <div class="settings-field"><label for="cfgGithubBootstrapLimit">初始化 starred repository 上限</label><input id="cfgGithubBootstrapLimit" type="number" min="1" max="1000" step="1" placeholder="300"></div>
+        <div class="settings-field"><label for="cfgGithubBootstrapMaxPages">初始化最多页数</label><input id="cfgGithubBootstrapMaxPages" type="number" min="1" max="100" step="1" placeholder="10"></div>
+        <p class="settings-hint">匿名即可使用 search / ranked / latest。GitHub 来源始终只读、只处理公开仓库；扩展不会申请 GitHub host permission，也不会打开任务页或同步 Cookie。</p>
+      </div>
+      </div>
+
       <div class="settings-section settings-source-card" data-source-card="zhihu" data-open="0">
         <div class="source-card-face" role="button" tabindex="0" aria-expanded="false" aria-controls="sourceCardBody-zhihu">
         <h3><span class="section-icon">&#x77E5;</span> 知乎</h3>
@@ -7246,6 +7303,10 @@
         <div class="settings-field">
           <label for="cfgPoolShareTwitter">候选池 X 占比</label>
           <input id="cfgPoolShareTwitter" type="number" min="1" step="1" placeholder="1">
+        </div>
+        <div class="settings-field">
+          <label for="cfgPoolShareGithub">候选池 GitHub 占比</label>
+          <input id="cfgPoolShareGithub" type="number" min="1" step="1" placeholder="1">
         </div>
         <div class="settings-field">
           <label for="cfgPoolShareZhihu">候选池知乎占比</label>

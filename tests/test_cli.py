@@ -3936,7 +3936,7 @@ def test_init_guides_missing_runtime_config_interactively(
     #   7-9. "" — accept Bili history/favorite/follow init limits
     #   10+. "n" — skip optional source prompts
     #               (xhs / douyin / youtube / X / zhihu / reddit /
-    #                Linux.do / v2ex / weibo / bangumi)
+    #                Linux.do / v2ex / weibo / bangumi / GitHub)
     wizard_input = (
         "\n".join(
             [
@@ -3949,6 +3949,7 @@ def test_init_guides_missing_runtime_config_interactively(
                 "",
                 "",
                 "",
+                "n",
                 "n",
                 "n",
                 "n",
@@ -4040,11 +4041,12 @@ def test_init_guides_missing_auth_interactively(
     # v0.3.89+: init asks whether to allow LAN access before the source
     # prompts. Answer yes, accept Bili signal-limit defaults, then send "n"
     # to XHS / Douyin / YouTube / X / Zhihu / Reddit / Linux.do / V2EX /
-    # Weibo / Bangumi so this test stays focused on the cookie-prompt path.
+    # Weibo / Bangumi / GitHub so this test stays focused on the cookie-prompt
+    # path.
     result = runner.invoke(
         app,
         ["init"],
-        input="2\nSESSDATA=valid\ny\n\n\n\nn\nn\nn\nn\nn\nn\nn\nn\nn\nn\n",
+        input="2\nSESSDATA=valid\ny\n\n\n\nn\nn\nn\nn\nn\nn\nn\nn\nn\nn\nn\n",
     )
 
     assert result.exit_code == 1
@@ -5268,6 +5270,7 @@ def test_select_init_source_shares_accepts_suggested_ratios(
         "zhihu": 1,
         "reddit": 1,
         "bangumi": 1,
+        "github": 1,
         "linuxdo": 1,
         "weibo": 1,
         "v2ex": 1,
@@ -5314,6 +5317,7 @@ def test_select_init_source_shares_accepts_manual_ratios(
         "zhihu": 1,
         "reddit": 1,
         "bangumi": 1,
+        "github": 1,
         "linuxdo": 1,
         "weibo": 1,
         "v2ex": 1,

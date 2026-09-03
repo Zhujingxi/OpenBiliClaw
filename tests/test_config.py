@@ -208,6 +208,7 @@ class TestConfigDefaults:
             "zhihu": 1,
             "reddit": 1,
             "bangumi": 1,
+            "github": 1,
             "linuxdo": 1,
             "weibo": 1,
             "v2ex": 1,
@@ -1663,6 +1664,7 @@ youtube = 3
         "zhihu": 1,
         "reddit": 1,
         "bangumi": 1,
+        "github": 1,
         "linuxdo": 1,
         "weibo": 1,
         "v2ex": 1,
@@ -1774,6 +1776,84 @@ def test_sources_bangumi_defaults() -> None:
     assert config.sources.bangumi.request_interval_seconds == 1
     assert config.sources.bangumi.min_interval_minutes == 3
     assert config.sources.bangumi.bootstrap_limit == 300
+
+
+def test_sources_github_defaults() -> None:
+    config = Config()
+
+    assert config.sources.github.enabled is False
+    assert config.sources.github.username == ""
+    assert config.sources.github.access_token == ""
+    assert config.sources.github.token_env == "OPENBILICLAW_GITHUB_TOKEN"
+    assert config.sources.github.source_modes == ("search", "ranked", "latest")
+    assert config.sources.github.daily_search_budget == 120
+    assert config.sources.github.daily_ranked_budget == 60
+    assert config.sources.github.daily_latest_budget == 60
+    assert config.sources.github.request_interval_seconds == 6
+    assert config.sources.github.min_interval_minutes == 10
+    assert config.sources.github.bootstrap_limit == 300
+    assert config.sources.github.bootstrap_max_pages == 10
+
+
+def test_save_config_round_trips_sources_github(tmp_path: Path) -> None:
+    config = Config()
+    config.sources.github.enabled = True
+    config.sources.github.username = "octocat"
+    config.sources.github.access_token = "github-pat-value"
+    config.sources.github.source_modes = ("search", "ranked")
+    config.sources.github.daily_search_budget = 42
+    config.sources.github.daily_ranked_budget = 21
+    config.sources.github.daily_latest_budget = 11
+    config.sources.github.request_interval_seconds = 7
+    config.sources.github.min_interval_minutes = 20
+    config.sources.github.bootstrap_limit = 123
+    config.sources.github.bootstrap_max_pages = 7
+    config.scheduler.pool_source_shares["github"] = 2
+
+    target = tmp_path / "config.toml"
+    save_config(config, target)
+    loaded = load_config(target)
+
+    assert loaded.sources.github == config.sources.github
+    assert loaded.scheduler.pool_source_shares["github"] == 2
+
+
+def test_save_config_rejects_unsafe_github_credentials_and_token_env(
+    tmp_path: Path,
+) -> None:
+    from openbiliclaw.config import _collect_config_issues
+
+    config = Config()
+    config.sources.github.username = "bad/name"
+    config.sources.github.access_token = "bad token\nwith newline"
+    config.sources.github.token_env = "GITHUB_TOKEN"
+    target = tmp_path / "config.toml"
+
+    issues = _collect_config_issues(config)
+    assert any(issue.field == "sources.github.username" for issue in issues)
+    assert any(issue.field == "sources.github.access_token" for issue in issues)
+    assert any(issue.field == "sources.github" for issue in issues)
+    with pytest.raises(ValueError):
+        save_config(config, target)
+    assert not target.exists()
+
+
+def test_legacy_github_config_is_bounded_and_pins_token_env() -> None:
+    from openbiliclaw.config import GitHubSourceConfig, normalize_github_source_config
+
+    source = GitHubSourceConfig(
+        token_env="GITHUB_TOKEN",
+        source_modes=("SEARCH", "unknown", "search"),
+        request_interval_seconds=999,
+        bootstrap_max_pages=0,
+    )
+
+    normalize_github_source_config(source, strict=False)
+
+    assert source.token_env == "OPENBILICLAW_GITHUB_TOKEN"
+    assert source.source_modes == ("search",)
+    assert source.request_interval_seconds == 60
+    assert source.bootstrap_max_pages == 1
 
 
 def test_load_config_clamps_linuxdo_browser_task_limits(tmp_path: Path) -> None:
@@ -2157,6 +2237,7 @@ def test_save_config_round_trips_pool_source_shares(tmp_path: Path) -> None:
         "zhihu": 1,
         "reddit": 2,
         "bangumi": 1,
+        "github": 1,
         "linuxdo": 1,
         "weibo": 1,
         "v2ex": 1,
@@ -2174,6 +2255,7 @@ def test_save_config_round_trips_pool_source_shares(tmp_path: Path) -> None:
         "zhihu": 1,
         "reddit": 2,
         "bangumi": 1,
+        "github": 1,
         "linuxdo": 1,
         "weibo": 1,
         "v2ex": 1,

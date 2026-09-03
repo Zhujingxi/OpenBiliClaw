@@ -447,6 +447,8 @@ export async function startInit({
   sources,
   bangumiUsername = null,
   bangumiToken = null,
+  githubUsername = null,
+  githubToken = null,
   llmConcurrency = null,
 } = {}) {
   const payload = { force };
@@ -458,10 +460,11 @@ export async function startInit({
   if (Array.isArray(sources)) {
     payload.sources = sources;
   }
-  // Send explicit Bangumi options only when the caller has one to send.
+  // Send source-scoped options only when the caller has one to send.
   // `null`/`undefined` means "leave the configured value untouched" (the backend
-  // treats an omitted field as keep-existing); an empty string is a deliberate
-  // clear the user asked for. A token, when present, auto-resolves the account.
+  // treats an omitted field as keep-existing); an empty username is a deliberate
+  // clear. Tokens remain write-only and are only sent when explicitly typed.
+  const sourceOptions = {};
   if (Array.isArray(sources) && sources.includes("bangumi")) {
     const bangumi = {};
     if (bangumiUsername != null) {
@@ -471,9 +474,22 @@ export async function startInit({
       bangumi.access_token = String(bangumiToken).trim();
     }
     if (Object.keys(bangumi).length > 0) {
-      payload.source_options = { bangumi };
+      sourceOptions.bangumi = bangumi;
     }
   }
+  if (Array.isArray(sources) && sources.includes("github")) {
+    const github = {};
+    if (githubUsername != null) {
+      github.username = String(githubUsername).trim();
+    }
+    if (githubToken != null) {
+      github.access_token = String(githubToken).trim();
+    }
+    if (Object.keys(github).length > 0) {
+      sourceOptions.github = github;
+    }
+  }
+  if (Object.keys(sourceOptions).length > 0) payload.source_options = sourceOptions;
   return requestJson("/init", {
     method: "POST",
     headers: { "Content-Type": "application/json" },

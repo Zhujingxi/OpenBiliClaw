@@ -1857,6 +1857,8 @@ def test_merged_keywords_system_prompt_carries_supply_advantage_table() -> None:
     assert "热点" in sys_prompt and "搞笑" in sys_prompt  # douyin
     assert "英文长内容" in sys_prompt and "纪录片" in sys_prompt  # youtube
     assert "实时讨论" in sys_prompt and "英文技术" in sys_prompt  # twitter
+    assert "公开代码仓库" in sys_prompt and "开源工具" in sys_prompt  # github
+    assert "github" in sys_prompt
     assert "知乎" in sys_prompt and "回答" in sys_prompt  # zhihu
     assert "zhihu" in sys_prompt
     assert "subreddit" in sys_prompt and "经验讨论" in sys_prompt  # reddit
