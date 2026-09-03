@@ -7557,6 +7557,12 @@ class TestBackendAPI:
                 }
             ]
         }
+        import time
+
+        deadline = time.monotonic() + 1.0
+        while not hub.events and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert hub.events
         assert hub.events[-1]["type"] == "refresh.pool_updated"
         assert hub.events[-1]["message"] == "推荐池已同步"
         assert hub.events[-1]["pool_available_count"] == 1
