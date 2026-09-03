@@ -6767,6 +6767,233 @@ def create_app(
             ),
         )
 
+    def _qr_cookie_header(url: str) -> str:
+        """Extract a browser-style Cookie header from Bilibili's QR success URL."""
+        if not url:
+            return ""
+        qs = dict(parse_qsl(urlsplit(url).query))
+        session = qs.get("session", "")
+        if session:
+            return session
+        pairs = {
+            key: qs[key]
+            for key in ("SESSDATA", "bili_jct", "DedeUserID", "DedeUserID__ckMd5", "sid")
+            if key in qs
+        }
+        if pairs:
+            return "; ".join(f"{key}={value}" for key, value in pairs.items())
+        return ""
+
+    @app.post("/api/bilibili/auth/qrcode")
+    async def bilibili_qrcode_create() -> dict[str, Any]:
+        """Create a Bilibili web QR login session for the mobile app."""
+        from openbiliclaw.bilibili.api import BilibiliAPIClient
+        from openbiliclaw.config import load_config
+
+        cfg = _pin_active_runtime_config(load_config())
+        client = BilibiliAPIClient(
+            cookie="",
+            proxy=(getattr(cfg.bilibili, "proxy", None) or None),
+        )
+        try:
+            data = await client.generate_qrcode()
+            return {
+                "ok": True,
+                "qrcode_key": str(data.get("qrcode_key", "") or ""),
+                "qrcode_url": str(data.get("url", "") or ""),
+                "expires_in": 180,
+                "expires_at": "",
+            }
+        finally:
+            await client.close()
+
+    @app.get("/api/bilibili/auth/qrcode/poll")
+    async def bilibili_qrcode_poll(qrcode_key: str = Query(...)) -> dict[str, Any]:
+        """Poll a Bilibili web QR login session."""
+        from openbiliclaw.bilibili.api import BilibiliAPIClient
+        from openbiliclaw.config import load_config
+
+        cfg = _pin_active_runtime_config(load_config())
+        client = BilibiliAPIClient(
+            cookie="",
+            proxy=(getattr(cfg.bilibili, "proxy", None) or None),
+        )
+        try:
+            data = await client.poll_qrcode(qrcode_key)
+        finally:
+            await client.close()
+
+        status = str(data.get("status", "pending"))
+        user = None
+        if status == "confirmed":
+            cookie_header = _qr_cookie_header(str(data.get("url", "") or ""))
+            if cookie_header:
+                result = await _write_source_credential(
+                    "bilibili",
+                    kind="cookie",
+                    value=cookie_header,
+                    source="mobile_qrcode",
+                )
+                if result.accepted:
+                    status = "logged_in"
+                    user = {
+                        "mid": result.user_id or 0,
+                        "name": result.username or "",
+                        "face": "",
+                        "vip": False,
+                    }
+        return {
+            "ok": True,
+            "status": status,
+            "user": user,
+            "message": str(data.get("message", "") or ""),
+        }
+
+    @app.get("/api/bilibili/auth/status")
+    async def bilibili_auth_status() -> dict[str, Any]:
+        """Return Bilibili login state for the mobile native player."""
+        from openbiliclaw.bilibili.api import BilibiliAPIClient
+        from openbiliclaw.bilibili.auth import resolve_runtime_cookie
+        from openbiliclaw.config import load_config
+
+        cfg = _pin_active_runtime_config(load_config())
+        cookie = resolve_runtime_cookie(
+            data_dir=cfg.data_path,
+            configured_cookie=str(getattr(cfg.bilibili, "cookie", "") or ""),
+        )
+        if not cookie:
+            return {
+                "ok": True,
+                "platform": "bilibili",
+                "status": "anonymous",
+                "user": None,
+                "scopes": ["video", "danmaku", "comment"],
+                "expires_at": "",
+            }
+
+        client = BilibiliAPIClient(
+            cookie=cookie,
+            proxy=(getattr(cfg.bilibili, "proxy", None) or None),
+        )
+        try:
+            nav = await client.get_nav_info()
+        except Exception:
+            return {
+                "ok": True,
+                "platform": "bilibili",
+                "status": "expired",
+                "user": None,
+                "scopes": ["video", "danmaku", "comment"],
+                "expires_at": "",
+            }
+        finally:
+            await client.close()
+
+        if not nav.is_login:
+            return {
+                "ok": True,
+                "platform": "bilibili",
+                "status": "expired",
+                "user": None,
+                "scopes": ["video", "danmaku", "comment"],
+                "expires_at": "",
+            }
+        return {
+            "ok": True,
+            "platform": "bilibili",
+            "status": "logged_in",
+            "user": {
+                "mid": nav.mid,
+                "name": nav.uname,
+                "face": "",
+                "vip": False,
+            },
+            "scopes": ["video", "danmaku", "comment", "fav", "later"],
+            "expires_at": "",
+        }
+
+    @app.post("/api/bilibili/player/play-url")
+    async def bilibili_play_url(payload: Annotated[dict[str, Any], Body()]) -> dict[str, Any]:
+        """Resolve Bilibili playback URLs for the mobile native player."""
+        from openbiliclaw.bilibili.api import BilibiliAPIClient
+        from openbiliclaw.bilibili.auth import resolve_runtime_cookie
+        from openbiliclaw.config import load_config
+
+        bvid = str(payload.get("bvid", "") or "").strip()
+        if not bvid:
+            raise HTTPException(status_code=400, detail="missing bvid")
+        cid = payload.get("cid")
+        qn = payload.get("qn", 80)
+        preferred_codec = str(payload.get("preferred_codec", "avc") or "avc")
+
+        cfg = _pin_active_runtime_config(load_config())
+        cookie = resolve_runtime_cookie(
+            data_dir=cfg.data_path,
+            configured_cookie=str(getattr(cfg.bilibili, "cookie", "") or ""),
+        )
+        if not cookie:
+            raise HTTPException(status_code=401, detail="B站 Cookie 未配置或已失效")
+
+        client = BilibiliAPIClient(
+            cookie=cookie,
+            proxy=(getattr(cfg.bilibili, "proxy", None) or None),
+        )
+        try:
+            info = await client.get_play_info(
+                bvid=bvid,
+                cid=int(cid) if cid is not None else None,
+                qn=int(qn) if qn else 80,
+                preferred_codec=preferred_codec,
+            )
+            return {"ok": True, **info}
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        finally:
+            await client.close()
+
+    @app.post("/api/bilibili/auth/import")
+    async def bilibili_auth_import(payload: Annotated[dict[str, Any], Body()]) -> dict[str, Any]:
+        """Import a Bilibili cookie from the mobile WebView login."""
+        cookies = payload.get("cookies") or {}
+        if not isinstance(cookies, dict):
+            raise HTTPException(status_code=400, detail="cookies must be an object")
+        cookie_header = "; ".join(
+            f"{str(key).strip()}={str(value).strip()}" for key, value in cookies.items()
+        )
+        result = await _write_source_credential(
+            "bilibili",
+            kind="cookie",
+            value=cookie_header,
+            source=str(payload.get("source", "mobile_webview")),
+        )
+        if not result.accepted:
+            raise HTTPException(
+                status_code=400,
+                detail=result.message or "Cookie 校验失败",
+            )
+        return {
+            "ok": True,
+            "status": "logged_in" if result.authenticated else "anonymous",
+            "user": {
+                "mid": result.user_id or 0,
+                "name": result.username or "",
+                "face": "",
+                "vip": False,
+            },
+        }
+
+    @app.delete("/api/bilibili/auth/session")
+    async def bilibili_auth_clear() -> dict[str, Any]:
+        """Clear the backend's stored Bilibili cookie/session."""
+        from openbiliclaw.bilibili.auth import AuthManager
+        from openbiliclaw.config import load_config
+
+        cfg = _pin_active_runtime_config(load_config())
+        AuthManager(cfg.data_path).clear_cookie()
+        return {"ok": True}
+
     @app.post("/api/sources/dy/cookie", response_model=DouyinCookieResponse, deprecated=True)
     async def sync_douyin_cookie(payload: DouyinCookieIn) -> DouyinCookieResponse:
         """Receive a Douyin cookie from the browser extension.

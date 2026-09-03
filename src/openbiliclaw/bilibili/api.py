@@ -599,6 +599,259 @@ class BilibiliAPIClient:
             cid=int(data.get("cid", 0) or 0),
         )
 
+    async def get_play_info(
+        self,
+        bvid: str,
+        cid: int | None = None,
+        qn: int = 80,
+        preferred_codec: str = "avc",
+    ) -> dict[str, Any]:
+        """Fetch a flattened Bilibili playback payload for native players.
+
+        The backend owns Cookie/WBI concerns; the returned dict matches the
+        mobile client's ``/api/bilibili/player/play-url`` contract.
+        """
+        if cid is None:
+            cid = (await self.get_video_info(bvid)).cid
+        if not cid:
+            raise BilibiliAPIError("missing cid", code=-404)
+
+        img_key, sub_key = await self._get_wbi_keys()
+        params: dict[str, object] = {
+            "bvid": bvid,
+            "cid": cid,
+            "qn": qn,
+            "fnval": 4048,
+            "fnver": 0,
+            "fourk": 1,
+            "platform": "html5",
+            "high_quality": 1,
+            "gaia_source": "pre-load",
+            "web_location": 1315873,
+        }
+        data = await self._get_json(
+            "/x/player/wbi/playurl",
+            params=self._sign_wbi_params(
+                params,
+                img_key=img_key,
+                sub_key=sub_key,
+            ),
+        )
+
+        pages_data: list[dict[str, Any]] = []
+        try:
+            pages_raw = await self._get_json(
+                "/x/player/pagelist",
+                params={"bvid": bvid},
+            )
+            if isinstance(pages_raw, list):
+                pages_data = [dict(item) for item in pages_raw]
+        except BilibiliAPIError:
+            logger.debug("pagelist fetch failed for bvid=%s", bvid, exc_info=True)
+
+        qualities: list[dict[str, Any]] = []
+        for item in data.get("support_formats", []) or []:
+            if not isinstance(item, dict):
+                continue
+            if qn and int(item.get("quality", 0) or 0) != qn:
+                continue
+            qualities.append(
+                {
+                    "qn": int(item.get("quality", 0) or 0),
+                    "label": item.get("new_description")
+                    or item.get("display_desc")
+                    or item.get("quality", ""),
+                    "width": int(item.get("width", 0) or 0),
+                    "height": int(item.get("height", 0) or 0),
+                }
+            )
+
+        # Fallback: B 站 sometimes returns no video/audio objects when the
+        # request was made with an invalid fnval/quality combination.
+        if not qualities:
+            for item in data.get("support_formats", []) or []:
+                if not isinstance(item, dict):
+                    continue
+                qualities.append(
+                    {
+                        "qn": int(item.get("quality", 0) or 0),
+                        "label": item.get("new_description")
+                        or item.get("display_desc")
+                        or str(item.get("quality", "")),
+                        "width": int(item.get("width", 0) or 0),
+                        "height": int(item.get("height", 0) or 0),
+                    }
+                )
+
+        video = None
+        audio = None
+        dash = data.get("dash")
+        if isinstance(dash, dict):
+            video_items = dash.get("video", []) or []
+            audio_items = dash.get("audio", []) or []
+            if isinstance(video_items, list) and video_items:
+                preferred = []
+                for item in video_items:
+                    if not isinstance(item, dict):
+                        continue
+                    codec = str(item.get("codecs", "") or "")
+                    if codec.lower().startswith(preferred_codec.lower()):
+                        preferred.append(item)
+                chosen = preferred[0] if preferred else video_items[0]
+                if isinstance(chosen, dict):
+                    video = {
+                        "qn": int(chosen.get("id", 0) or 0),
+                        "label": "",
+                        "codec": str(chosen.get("codecs", "") or ""),
+                        "url": str(chosen.get("baseUrl") or chosen.get("base_url") or ""),
+                        "backup_urls": list(
+                            chosen.get("backupUrl") or chosen.get("backup_url") or []
+                        ),
+                        "width": int(chosen.get("width", 0) or 0),
+                        "height": int(chosen.get("height", 0) or 0),
+                        "bandwidth": int(chosen.get("bandwidth", 0) or 0),
+                        "mime_type": str(chosen.get("mimeType") or chosen.get("mime_type") or ""),
+                    }
+            if isinstance(audio_items, list) and audio_items:
+                chosen_audio = audio_items[0]
+                if isinstance(chosen_audio, dict):
+                    audio = {
+                        "qn": int(chosen_audio.get("id", 0) or 0),
+                        "codec": str(chosen_audio.get("codecs", "") or ""),
+                        "url": str(
+                            chosen_audio.get("baseUrl") or chosen_audio.get("base_url") or ""
+                        ),
+                        "backup_urls": list(
+                            chosen_audio.get("backupUrl") or chosen_audio.get("backup_url") or []
+                        ),
+                        "width": 0,
+                        "height": 0,
+                        "bandwidth": int(chosen_audio.get("bandwidth", 0) or 0),
+                        "mime_type": str(
+                            chosen_audio.get("mimeType") or chosen_audio.get("mime_type") or ""
+                        ),
+                    }
+
+        durl = data.get("durl")
+        if video is None and isinstance(durl, list) and durl:
+            first = durl[0]
+            if isinstance(first, dict):
+                video = {
+                    "qn": int(data.get("quality", 0) or 0),
+                    "label": "",
+                    "codec": "mp4",
+                    "url": str(first.get("url", "") or ""),
+                    "backup_urls": list(first.get("backup_url", []) or []),
+                    "width": 0,
+                    "height": 0,
+                    "bandwidth": 0,
+                    "mime_type": "video/mp4",
+                }
+
+        duration = int(data.get("timelength", 0) or 0)
+        if duration and duration > 1000:
+            duration = duration // 1000
+
+        return {
+            "bvid": bvid,
+            "cid": cid,
+            "duration": duration,
+            "pages": [
+                {
+                    "cid": int(page.get("cid", 0) or 0),
+                    "page": int(page.get("page", 0) or 0),
+                    "part": str(page.get("part", "") or ""),
+                    "duration": int(page.get("duration", 0) or 0),
+                    "dimension": {
+                        "width": int(page.get("dimension", {}).get("width", 0) or 0)
+                        if isinstance(page.get("dimension"), dict)
+                        else 0,
+                        "height": int(page.get("dimension", {}).get("height", 0) or 0)
+                        if isinstance(page.get("dimension"), dict)
+                        else 0,
+                    },
+                }
+                for page in pages_data
+            ],
+            "qualities": qualities,
+            "video": video,
+            "audio": audio,
+            "subtitles": [],
+            "danmaku": {
+                "url": f"https://api.bilibili.com/x/v1/dm/list.so?oid={cid}",
+                "headers": {
+                    "referer": "https://www.bilibili.com",
+                    "user-agent": str(self._client.headers.get("User-Agent", "")),
+                },
+            },
+            "headers": {
+                "referer": "https://www.bilibili.com",
+                "user-agent": str(self._client.headers.get("User-Agent", "")),
+                **({"cookie": self._cookie} if self._cookie else {}),
+            },
+            "expires_at": "",
+        }
+
+    async def generate_qrcode(self) -> dict[str, Any]:
+        """Generate a Bilibili web QR login link."""
+        await self._respect_rate_limit()
+        try:
+            resp = await self._client.get(
+                "https://passport.bilibili.com/x/passport-login/web/qrcode/generate"
+            )
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise self._sanitized_http_error("GET", "passport/qrcode/generate", exc) from exc
+        payload = _json_object(resp.json())
+        if int(payload.get("code", 0) or 0) != 0:
+            raise BilibiliAPIError(
+                str(payload.get("message", "generate qrcode failed")),
+                code=int(payload.get("code", 0) or 0),
+            )
+        return cast("dict[str, Any]", payload.get("data", {}) or {})
+
+    async def poll_qrcode(self, qrcode_key: str) -> dict[str, Any]:
+        """Poll a Bilibili web QR login key and return a normalized status."""
+        await self._respect_rate_limit()
+        try:
+            resp = await self._client.get(
+                "https://passport.bilibili.com/x/passport-login/web/qrcode/poll",
+                params={"qrcode_key": qrcode_key},
+            )
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise self._sanitized_http_error("GET", "passport/qrcode/poll", exc) from exc
+        payload = _json_object(resp.json())
+        if int(payload.get("code", 0) or 0) != 0:
+            raise BilibiliAPIError(
+                str(payload.get("message", "poll qrcode failed")),
+                code=int(payload.get("code", 0) or 0),
+            )
+        data = _json_object(payload.get("data", {}))
+        inner_code = int(data.get("code", 86101) or 86101)
+        message = str(data.get("message", "") or "")
+        if inner_code in {0, 86101}:
+            status = "pending"
+            if inner_code == 0:
+                status = "confirmed"
+            elif data.get("url"):
+                # Some clients use 86101 as "not scanned yet"; the URL only
+                # appears once the scan is confirmed.
+                status = "confirmed"
+        elif inner_code == 86090:
+            status = "scanned"
+        elif inner_code == 86038:
+            status = "expired"
+        else:
+            status = "pending"
+        return {
+            "status": status,
+            "message": message,
+            "url": str(data.get("url", "") or ""),
+            "qrcode_key": qrcode_key,
+            "raw_code": inner_code,
+        }
+
     async def search(
         self,
         keyword: str,
