@@ -1277,6 +1277,94 @@ class BilibiliAPIClient:
         ]
         return comments[:limit]
 
+    async def get_video_relation_state(self, bvid: str) -> dict[str, Any]:
+        """Get the logged-in user's like/coin/favorite/watch-later state."""
+        aid = await self._resolve_aid(bvid)
+        data = await self._get_json(
+            "/x/web-interface/archive/relation",
+            params={"aid": aid, "bvid": bvid},
+        )
+        return {
+            "like": bool(data.get("like", False) or data.get("is_like", False)),
+            "coin": int(data.get("coin", 0) or 0),
+            "favorite": bool(data.get("favorite", False) or data.get("is_fav", False)),
+            "watch_later": bool(
+                data.get("watch_later", False) or data.get("is_watch_later", False)
+            ),
+        }
+
+    async def like_video(self, bvid: str, *, like: bool) -> None:
+        aid = await self._resolve_aid(bvid)
+        await self._post_json(
+            "/x/web-interface/archive/like",
+            data={
+                "aid": aid,
+                "like": "1" if like else "2",
+                "csrf": self._csrf_token(),
+            },
+        )
+
+    async def coin_video(
+        self,
+        bvid: str,
+        *,
+        multiply: int = 1,
+        select_like: bool = False,
+    ) -> None:
+        aid = await self._resolve_aid(bvid)
+        await self._post_json(
+            "/x/web-interface/coin/add",
+            data={
+                "aid": aid,
+                "multiply": str(max(1, min(2, int(multiply)))),
+                "select_like": "1" if select_like else "0",
+                "csrf": self._csrf_token(),
+            },
+        )
+
+    async def triple_video(self, bvid: str) -> None:
+        aid = await self._resolve_aid(bvid)
+        await self._post_json(
+            "/x/web-interface/archive/like/triple",
+            data={
+                "aid": aid,
+                "csrf": self._csrf_token(),
+            },
+        )
+
+    async def favorite_video(
+        self, bvid: str, *, media_id: int | None = None, favorite: bool
+    ) -> None:
+        if favorite:
+            if media_id is None:
+                folders = await self.get_favorite_folders()
+                if not folders:
+                    raise BilibiliAPIError("B站没有可用的收藏夹")
+                media_id = folders[0].media_id
+            await self.add_video_to_favorite(bvid, media_id)
+        else:
+            aid = await self._resolve_aid(bvid)
+            await self._post_json(
+                "/x/v3/fav/resource/deal",
+                data={
+                    "rid": aid,
+                    "type": 2,
+                    "add_media_ids": "",
+                    "del_media_ids": str(media_id or ""),
+                    "csrf": self._csrf_token(),
+                },
+            )
+
+    async def watch_later_video(self, bvid: str, *, add: bool) -> None:
+        if add:
+            await self.add_video_to_watch_later(bvid)
+        else:
+            aid = await self._resolve_aid(bvid)
+            await self._post_json(
+                "/x/v2/history/toview/del",
+                data={"aid": aid, "csrf": self._csrf_token()},
+            )
+
     async def get_danmaku_texts(self, cid: int, *, limit: int = 3000) -> list[str]:
         """Fetch raw danmaku strings for one video part.
 

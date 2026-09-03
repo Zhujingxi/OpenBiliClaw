@@ -6953,6 +6953,216 @@ def create_app(
         finally:
             await client.close()
 
+    @app.get("/api/bilibili/video/relation")
+    async def bilibili_video_relation(bvid: str = Query(...)) -> dict[str, Any]:
+        """Get the logged-in user's Bilibili video interaction state."""
+        from openbiliclaw.bilibili.api import BilibiliAPIClient
+        from openbiliclaw.bilibili.auth import resolve_runtime_cookie
+        from openbiliclaw.config import load_config
+
+        cfg = _pin_active_runtime_config(load_config())
+        cookie = resolve_runtime_cookie(
+            data_dir=cfg.data_path,
+            configured_cookie=str(getattr(cfg.bilibili, "cookie", "") or ""),
+        )
+        if not cookie:
+            raise HTTPException(status_code=401, detail="B站 Cookie 未配置或已失效")
+        client = BilibiliAPIClient(
+            cookie=cookie,
+            proxy=(getattr(cfg.bilibili, "proxy", None) or None),
+        )
+        try:
+            return {"ok": True, **await client.get_video_relation_state(bvid)}
+        finally:
+            await client.close()
+
+    @app.post("/api/bilibili/video/like")
+    async def bilibili_video_like(payload: Annotated[dict[str, Any], Body()]) -> dict[str, Any]:
+        from openbiliclaw.bilibili.api import BilibiliAPIClient
+        from openbiliclaw.bilibili.auth import resolve_runtime_cookie
+        from openbiliclaw.config import load_config
+
+        bvid = str(payload.get("bvid", "") or "").strip()
+        like = bool(payload.get("like", True))
+        cfg = _pin_active_runtime_config(load_config())
+        cookie = resolve_runtime_cookie(
+            data_dir=cfg.data_path,
+            configured_cookie=str(getattr(cfg.bilibili, "cookie", "") or ""),
+        )
+        if not cookie:
+            raise HTTPException(status_code=401, detail="B站 Cookie 未配置或已失效")
+        client = BilibiliAPIClient(
+            cookie=cookie,
+            proxy=(getattr(cfg.bilibili, "proxy", None) or None),
+        )
+        try:
+            await client.like_video(bvid, like=like)
+            return {"ok": True}
+        finally:
+            await client.close()
+
+    @app.post("/api/bilibili/video/coin")
+    async def bilibili_video_coin(payload: Annotated[dict[str, Any], Body()]) -> dict[str, Any]:
+        from openbiliclaw.bilibili.api import BilibiliAPIClient
+        from openbiliclaw.bilibili.auth import resolve_runtime_cookie
+        from openbiliclaw.config import load_config
+
+        bvid = str(payload.get("bvid", "") or "").strip()
+        multiply = int(payload.get("multiply", 1) or 1)
+        select_like = bool(payload.get("select_like", False))
+        cfg = _pin_active_runtime_config(load_config())
+        cookie = resolve_runtime_cookie(
+            data_dir=cfg.data_path,
+            configured_cookie=str(getattr(cfg.bilibili, "cookie", "") or ""),
+        )
+        if not cookie:
+            raise HTTPException(status_code=401, detail="B站 Cookie 未配置或已失效")
+        client = BilibiliAPIClient(
+            cookie=cookie,
+            proxy=(getattr(cfg.bilibili, "proxy", None) or None),
+        )
+        try:
+            await client.coin_video(bvid, multiply=multiply, select_like=select_like)
+            return {"ok": True}
+        finally:
+            await client.close()
+
+    @app.post("/api/bilibili/video/triple")
+    async def bilibili_video_triple(payload: Annotated[dict[str, Any], Body()]) -> dict[str, Any]:
+        from openbiliclaw.bilibili.api import BilibiliAPIClient
+        from openbiliclaw.bilibili.auth import resolve_runtime_cookie
+        from openbiliclaw.config import load_config
+
+        bvid = str(payload.get("bvid", "") or "").strip()
+        cfg = _pin_active_runtime_config(load_config())
+        cookie = resolve_runtime_cookie(
+            data_dir=cfg.data_path,
+            configured_cookie=str(getattr(cfg.bilibili, "cookie", "") or ""),
+        )
+        if not cookie:
+            raise HTTPException(status_code=401, detail="B站 Cookie 未配置或已失效")
+        client = BilibiliAPIClient(
+            cookie=cookie,
+            proxy=(getattr(cfg.bilibili, "proxy", None) or None),
+        )
+        try:
+            await client.triple_video(bvid)
+            return {"ok": True, "state": await client.get_video_relation_state(bvid)}
+        finally:
+            await client.close()
+
+    @app.post("/api/bilibili/video/favorite")
+    async def bilibili_video_favorite(payload: Annotated[dict[str, Any], Body()]) -> dict[str, Any]:
+        from openbiliclaw.bilibili.api import BilibiliAPIClient
+        from openbiliclaw.bilibili.auth import resolve_runtime_cookie
+        from openbiliclaw.config import load_config
+
+        bvid = str(payload.get("bvid", "") or "").strip()
+        favorite = bool(payload.get("favorite", True))
+        media_id = payload.get("media_id")
+        cfg = _pin_active_runtime_config(load_config())
+        cookie = resolve_runtime_cookie(
+            data_dir=cfg.data_path,
+            configured_cookie=str(getattr(cfg.bilibili, "cookie", "") or ""),
+        )
+        if not cookie:
+            raise HTTPException(status_code=401, detail="B站 Cookie 未配置或已失效")
+        client = BilibiliAPIClient(
+            cookie=cookie,
+            proxy=(getattr(cfg.bilibili, "proxy", None) or None),
+        )
+        try:
+            await client.favorite_video(
+                bvid,
+                media_id=int(media_id) if media_id is not None else None,
+                favorite=favorite,
+            )
+            return {"ok": True, "state": await client.get_video_relation_state(bvid)}
+        finally:
+            await client.close()
+
+    @app.post("/api/bilibili/video/watch-later")
+    async def bilibili_video_watch_later(
+        payload: Annotated[dict[str, Any], Body()],
+    ) -> dict[str, Any]:
+        from openbiliclaw.bilibili.api import BilibiliAPIClient
+        from openbiliclaw.bilibili.auth import resolve_runtime_cookie
+        from openbiliclaw.config import load_config
+
+        bvid = str(payload.get("bvid", "") or "").strip()
+        add = bool(payload.get("add", True))
+        cfg = _pin_active_runtime_config(load_config())
+        cookie = resolve_runtime_cookie(
+            data_dir=cfg.data_path,
+            configured_cookie=str(getattr(cfg.bilibili, "cookie", "") or ""),
+        )
+        if not cookie:
+            raise HTTPException(status_code=401, detail="B站 Cookie 未配置或已失效")
+        client = BilibiliAPIClient(
+            cookie=cookie,
+            proxy=(getattr(cfg.bilibili, "proxy", None) or None),
+        )
+        try:
+            await client.watch_later_video(bvid, add=add)
+            return {"ok": True, "state": await client.get_video_relation_state(bvid)}
+        finally:
+            await client.close()
+
+    @app.get("/api/bilibili/video/related")
+    async def bilibili_video_related(bvid: str = Query(...)) -> dict[str, Any]:
+        from openbiliclaw.bilibili.api import BilibiliAPIClient
+        from openbiliclaw.bilibili.auth import resolve_runtime_cookie
+        from openbiliclaw.config import load_config
+
+        cfg = _pin_active_runtime_config(load_config())
+        cookie = resolve_runtime_cookie(
+            data_dir=cfg.data_path,
+            configured_cookie=str(getattr(cfg.bilibili, "cookie", "") or ""),
+        )
+        client = BilibiliAPIClient(
+            cookie=cookie,
+            proxy=(getattr(cfg.bilibili, "proxy", None) or None),
+        )
+        try:
+            return {"ok": True, "items": await client.get_related_videos(bvid)}
+        finally:
+            await client.close()
+
+    @app.get("/api/bilibili/video/comments")
+    async def bilibili_video_comments(
+        bvid: str = Query(...),
+        limit: int = Query(20, ge=1, le=50),
+    ) -> dict[str, Any]:
+        from openbiliclaw.bilibili.api import BilibiliAPIClient
+        from openbiliclaw.bilibili.auth import resolve_runtime_cookie
+        from openbiliclaw.config import load_config
+
+        cfg = _pin_active_runtime_config(load_config())
+        cookie = resolve_runtime_cookie(
+            data_dir=cfg.data_path,
+            configured_cookie=str(getattr(cfg.bilibili, "cookie", "") or ""),
+        )
+        client = BilibiliAPIClient(
+            cookie=cookie,
+            proxy=(getattr(cfg.bilibili, "proxy", None) or None),
+        )
+        try:
+            comments = await client.get_video_comments(bvid, limit=limit)
+            return {
+                "ok": True,
+                "items": [
+                    {
+                        "mid": item.mid,
+                        "uname": item.uname,
+                        "message": item.message,
+                        "like_count": item.like_count,
+                    }
+                    for item in comments
+                ],
+            }
+        finally:
+            await client.close()
+
     @app.post("/api/bilibili/auth/import")
     async def bilibili_auth_import(payload: Annotated[dict[str, Any], Body()]) -> dict[str, Any]:
         """Import a Bilibili cookie from the mobile WebView login."""
