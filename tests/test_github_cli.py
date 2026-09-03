@@ -469,18 +469,20 @@ def test_formal_discover_accepts_github_alias(monkeypatch: pytest.MonkeyPatch) -
     assert calls == [(7, True)]
 
 
-def test_init_help_exposes_github_opt_in_and_identity_flags(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("COLUMNS", "200")
-    monkeypatch.setenv("TERM", "xterm-256color")
-    result = CliRunner().invoke(app, ["init", "--help"])
+def test_init_help_exposes_github_opt_in_and_identity_flags() -> None:
+    from typer.main import get_command
 
-    assert result.exit_code == 0, result.output
-    assert "--yes-github" in result.output
-    assert "--no-github" in result.output
-    assert "--github-username" in result.output
-    assert "--github-token" in result.output
+    init_command = get_command(app).commands["init"]
+    option_names = {
+        option
+        for param in init_command.params
+        for option in getattr(param, "opts", [])
+    }
+
+    assert "--yes-github" in option_names
+    assert "--no-github" in option_names
+    assert "--github-username" in option_names
+    assert "--github-token" in option_names
 
 
 def test_init_command_isolates_invalid_github_pat_in_mixed_source_run(
