@@ -748,6 +748,31 @@ class BilibiliAPIClient:
                     "mime_type": "video/mp4",
                 }
 
+        subtitles: list[dict[str, Any]] = []
+        try:
+            player_data = await self._get_json(
+                "/x/player/wbi/v2",
+                params={"bvid": bvid, "cid": cid},
+            )
+            raw_subtitle = player_data.get("subtitle", {})
+            if isinstance(raw_subtitle, dict):
+                for item in raw_subtitle.get("subtitles", []) or []:
+                    if not isinstance(item, dict):
+                        continue
+                    raw_url = str(item.get("subtitle_url", "") or "")
+                    if raw_url.startswith("//"):
+                        raw_url = f"https:{raw_url}"
+                    if raw_url:
+                        subtitles.append(
+                            {
+                                "lan": str(item.get("lan", "") or ""),
+                                "name": str(item.get("lan_doc", "") or item.get("lan", "")),
+                                "url": raw_url,
+                            }
+                        )
+        except BilibiliAPIError:
+            logger.debug("subtitle fetch failed for bvid=%s cid=%s", bvid, cid, exc_info=True)
+
         duration = int(data.get("timelength", 0) or 0)
         if duration and duration > 1000:
             duration = duration // 1000
@@ -776,7 +801,7 @@ class BilibiliAPIClient:
             "qualities": qualities,
             "video": video,
             "audio": audio,
-            "subtitles": [],
+            "subtitles": subtitles,
             "danmaku": {
                 "url": f"https://api.bilibili.com/x/v1/dm/list.so?oid={cid}",
                 "headers": {
