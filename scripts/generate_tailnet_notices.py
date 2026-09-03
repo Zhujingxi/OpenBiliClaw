@@ -511,7 +511,13 @@ def write_or_check(output: Path, expected: bytes, *, check: bool) -> None:
             actual = output.read_bytes()
         except OSError as exc:
             raise NoticeGenerationError(f"cannot read notice output for --check: {output}") from exc
-        if actual != expected:
+        # Git for Windows may check the committed file out with CRLF; compare
+        # logically rather than byte-for-byte so generated LF notices still pass
+        # on Windows runners.
+        def _normalize_newlines(data: bytes) -> bytes:
+            return data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+
+        if _normalize_newlines(actual) != _normalize_newlines(expected):
             raise NoticeGenerationError(
                 f"notice output is stale: {output}; run scripts/generate_tailnet_notices.py"
             )
