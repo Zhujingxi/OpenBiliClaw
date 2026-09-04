@@ -44,6 +44,7 @@ HTTP endpoint 另有权限与安全限制；本模块首版只支持上述 Andro
 | 私网限定 | ✅ | 无 Funnel、无 Serve、无公网监听或自动端口映射 |
 | 状态诊断 | ✅ | 最近一个脱敏 JSONL 事件原子写入 `data/tailnet/status.json`；CLI 分开显示配置端口与最近监听端口，MagicDNS URL 使用最近端口 |
 | 最小化 helper 构建 | ✅ | 固定使用 `ts_omit_logtail,ts_omit_webclient`，移除自动诊断日志上传与未使用的 Tailscale 管理 Web UI |
+| 系统代理感知 | ✅ | macOS 上启动 helper 时把系统 HTTP/HTTPS 代理物化为子进程环境变量，并保持 `localhost` / `127.0.0.1` / `::1` 在 `NO_PROXY`，避免 TUN / 系统代理下 control plane 被假 IP 劫持而卡在 `starting` |
 
 ## 启用
 
@@ -93,8 +94,9 @@ OAuth 方式需要在 Tailscale 管理后台创建专用 OAuth Client，授予 `
 
 设置页提交的凭据是 API **write-only** 字段，只允许真实 loopback 连接上的桌面 Web 或扩展来源
 写入。它原子暂存为 `{data_dir}/tailnet/.bootstrap-credential.json`；POSIX 权限为 `0600`，
-目录为 `0700`，不写 `config.toml`，`GET /api/config` 只返回是否已暂存。下一次启动成功把
-bootstrap JSON 刷入 helper stdin 后立刻删除文件；如果 helper 尚未接受 stdin，文件保留供重试。
+目录为 `0700`，不写 `config.toml`，`GET /api/config` 只返回是否已暂存。下一次启动把
+bootstrap JSON 刷入 helper stdin 后，**仅当 helper 进入 `ready`（入网成功）才删除该文件**；
+若 helper 卡在 `starting`、失败或尚未接受 stdin，文件会保留供下次重试，避免一次性凭据被提前消耗。
 禁用 Tailnet 或在设置页勾选清除，也会删除待用凭据，但不会删除已建立的节点身份。
 
 ### 源码 / 一句话安装
@@ -142,8 +144,9 @@ Supervisor 从父环境取出该值后，通过 stdin 的一次性 bootstrap JSO
 ## 生命周期与协议
 
 `TailnetSupervisor` 与 API server 同生共死：启动时发现 helper、创建权限收紧的状态目录、
-优先读取环境输入，否则读取设置页暂存凭据，发送 protocol v1 bootstrap 并消费删除暂存文件，
-然后持续读取 stdout JSONL。关闭时先关闭 stdin，让 helper 正常
+优先读取环境输入，否则读取设置页暂存凭据，发送 protocol v1 bootstrap，并在 helper 进入
+`ready` 后消费删除暂存文件（未 ready 时保留供下次重试），然后持续读取 stdout JSONL。
+关闭时先关闭 stdin，让 helper 正常
 退出；超时后才 terminate / kill，避免留下孤儿节点进程。主要事件为：
 
 | 事件 | 含义 |

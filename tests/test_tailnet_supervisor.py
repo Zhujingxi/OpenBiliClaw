@@ -82,6 +82,9 @@ ready_event = {
 }
 if os.environ.get("FAKE_EVENT_MESSAGE"):
     ready_event["message"] = os.environ["FAKE_EVENT_MESSAGE"]
+ready_delay = float(os.environ.get("FAKE_READY_DELAY", "0"))
+if ready_delay > 0:
+    time.sleep(ready_delay)
 print(json.dumps(ready_event), flush=True)
 if mode == "exit":
     print(json.dumps({"protocol": 1, "event": "stopped"}), flush=True)
@@ -464,6 +467,93 @@ def test_staged_auth_key_does_not_require_tags(tmp_path: Path) -> None:
     assert supervisor_module.tailnet_bootstrap_staged(config)
     supervisor_module.clear_tailnet_bootstrap(config)
     assert not staged.exists()
+
+
+def test_private_child_environment_materializes_system_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in (
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+        "NO_PROXY",
+        "no_proxy",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(
+        supervisor_module,
+        "getproxies",
+        lambda: {
+            "http": "http://127.0.0.1:7897",
+            "https": "http://127.0.0.1:7897",
+            "no": "internal.example",
+        },
+    )
+
+    environment, _, _ = supervisor_module._private_child_environment()
+
+    assert environment["HTTP_PROXY"] == "http://127.0.0.1:7897"
+    assert environment["HTTPS_PROXY"] == "http://127.0.0.1:7897"
+    assert environment["http_proxy"] == "http://127.0.0.1:7897"
+    assert environment["https_proxy"] == "http://127.0.0.1:7897"
+    no_proxy = environment["NO_PROXY"].split(",")
+    assert "internal.example" in no_proxy
+    assert "localhost" in no_proxy
+    assert "127.0.0.1" in no_proxy
+    assert "::1" in no_proxy
+    assert environment["no_proxy"] == environment["NO_PROXY"]
+
+
+def test_private_child_environment_preserves_explicit_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HTTPS_PROXY", "http://explicit:8080")
+    monkeypatch.setenv("NO_PROXY", "corp.internal")
+    monkeypatch.setattr(
+        supervisor_module,
+        "getproxies",
+        lambda: {
+            "http": "http://system-http:8080",
+            "https": "http://system-https:8080",
+        },
+    )
+
+    environment, _, _ = supervisor_module._private_child_environment()
+
+    assert environment["HTTPS_PROXY"] == "http://explicit:8080"
+    assert "corp.internal" in environment["NO_PROXY"]
+    assert "localhost" in environment["NO_PROXY"]
+
+
+def test_staged_bootstrap_is_deleted_only_after_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, capture_path = _configure_fake_helper(monkeypatch, tmp_path)
+    monkeypatch.setenv("FAKE_READY_DELAY", "0.3")
+    staged = supervisor_module.stage_tailnet_bootstrap(
+        config, _TEST_OAUTH_CREDENTIAL, ["tag:openbiliclaw"]
+    )
+    ready = threading.Event()
+
+    supervisor = supervisor_module.TailnetSupervisor(
+        config,
+        8420,
+        event_callback=lambda event: ready.set() if event.get("event") == "ready" else None,
+    ).start()
+
+    _wait_for(lambda: (supervisor.last_event or {}).get("event") == "starting")
+    assert staged.exists()
+    assert supervisor_module.tailnet_bootstrap_staged(config)
+
+    assert ready.wait(3.0)
+    assert not staged.exists()
+    assert not supervisor_module.tailnet_bootstrap_staged(config)
+    captured = json.loads(capture_path.read_text(encoding="utf-8"))
+    assert captured["bootstrap"]["auth_key"] == _TEST_OAUTH_CREDENTIAL
+    supervisor.stop()
 
 
 def test_events_are_persisted_atomically_with_private_permissions(

@@ -19,6 +19,7 @@ from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Protocol, cast
+from urllib.request import getproxies
 
 from openbiliclaw.proc import no_window_kwargs
 
@@ -381,6 +382,96 @@ def _is_auth_key_environment_name(name: str) -> bool:
     )
 
 
+def _no_proxy_value(*values: object) -> str:
+    """Merge proxy bypass entries and always keep loopback local."""
+    entries: list[str] = []
+    for raw in values:
+        if raw is None:
+            continue
+        raw_items = (
+            raw
+            if isinstance(raw, (list, tuple, set, frozenset))
+            else re.split(r"[,\s]+", str(raw))
+        )
+        for item in raw_items:
+            if item is None:
+                continue
+            item = str(item).strip()
+            if item and item not in entries:
+                entries.append(item)
+    for required in ("localhost", "127.0.0.1", "::1"):
+        if required not in entries:
+            entries.append(required)
+    return ",".join(entries)
+
+
+def _apply_system_proxy_environment(environment: dict[str, str]) -> None:
+    """Materialize OS proxy settings for helper subprocesses.
+
+    The Go helper only reads HTTP_PROXY / HTTPS_PROXY / NO_PROXY from its
+    environment.  GUI-launched macOS apps do not inherit shell proxy
+    variables, so copy the system proxy configuration into the child
+    environment when the caller did not already provide explicit proxy vars.
+    Keeping loopback entries in NO_PROXY prevents a local proxy from
+    intercepting the helper's own loopback listeners/upstream.
+    """
+    try:
+        system_proxies = getproxies()
+    except Exception:
+        logger.warning("Unable to read system proxy settings", exc_info=True)
+        system_proxies = {}
+    if not isinstance(system_proxies, Mapping):
+        system_proxies = {}
+    for scheme, upper, lower in (
+        ("http", "HTTP_PROXY", "http_proxy"),
+        ("https", "HTTPS_PROXY", "https_proxy"),
+        ("all", "ALL_PROXY", "all_proxy"),
+    ):
+        value = str(system_proxies.get(scheme, "") or "").strip()
+        if value:
+            upper_value = (environment.get(upper) or "").strip()
+            lower_value = (environment.get(lower) or "").strip()
+            if not upper_value and not lower_value:
+                environment[upper] = value
+                environment[lower] = value
+            else:
+                if not upper_value:
+                    environment[upper] = environment.get(lower, "")
+                if not lower_value:
+                    environment[lower] = environment.get(upper, "")
+
+    for upper, lower in (
+        ("HTTP_PROXY", "http_proxy"),
+        ("HTTPS_PROXY", "https_proxy"),
+        ("ALL_PROXY", "all_proxy"),
+    ):
+        upper_value = (environment.get(upper) or "").strip()
+        lower_value = (environment.get(lower) or "").strip()
+        if upper_value and not lower_value:
+            environment[lower] = environment[upper]
+        elif lower_value and not upper_value:
+            environment[upper] = environment[lower]
+
+    if any(
+        (environment.get(name) or "").strip()
+        for name in (
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+        )
+    ):
+        no_proxy = _no_proxy_value(
+            environment.get("NO_PROXY", ""),
+            environment.get("no_proxy", ""),
+            system_proxies.get("no", "") or "",
+        )
+        environment["NO_PROXY"] = no_proxy
+        environment["no_proxy"] = no_proxy
+
+
 def _private_child_environment() -> tuple[dict[str, str], TailnetBootstrap, tuple[str, ...]]:
     environment = dict(os.environ)
     auth_key = normalize_tailnet_bootstrap_credential(environment.get(_AUTH_KEY_ENV, ""))
@@ -400,6 +491,7 @@ def _private_child_environment() -> tuple[dict[str, str], TailnetBootstrap, tupl
         if _is_auth_key_environment_name(name):
             environment.pop(name, None)
     environment.pop(_ADVERTISE_TAGS_ENV, None)
+    _apply_system_proxy_environment(environment)
     return (
         environment,
         TailnetBootstrap(credential=auth_key, advertise_tags=advertise_tags),
@@ -587,6 +679,7 @@ class TailnetSupervisor:
         self._failure: TailnetHelperExitedError | None = None
         self._stderr_tail: deque[str] = deque(maxlen=_STDERR_TAIL_LINES)
         self._secrets: tuple[str, ...] = ()
+        self._staged_bootstrap_path: Path | None = None
         self._lock = threading.RLock()
         self._stopping = threading.Event()
         self._finished = threading.Event()
@@ -691,6 +784,7 @@ class TailnetSupervisor:
         with self._lock:
             self._process = process
             self._helper_path = helper_path
+            self._staged_bootstrap_path = staged_path
 
         self._start_background_threads(process)
         bootstrap_message = {
@@ -701,9 +795,6 @@ class TailnetSupervisor:
         try:
             process.stdin.write(json.dumps(bootstrap_message, separators=(",", ":")) + "\n")
             process.stdin.flush()
-            if staged_path is not None:
-                with suppress(FileNotFoundError):
-                    staged_path.unlink()
         except (BrokenPipeError, OSError) as exc:
             self._finished.wait(_DRAIN_JOIN_TIMEOUT)
             failure = self.failure
@@ -875,6 +966,25 @@ class TailnetSupervisor:
                 )
         self._finished.set()
 
+    def _consume_staged_bootstrap(self) -> None:
+        """Delete the one-shot bootstrap file only after the helper is ready."""
+        with self._lock:
+            staged_path = self._staged_bootstrap_path
+            if staged_path is None:
+                return
+        try:
+            staged_path.unlink()
+        except FileNotFoundError:
+            with self._lock:
+                if self._staged_bootstrap_path is staged_path:
+                    self._staged_bootstrap_path = None
+        except OSError:
+            logger.warning("Unable to remove consumed Tailnet bootstrap", exc_info=True)
+        else:
+            with self._lock:
+                if self._staged_bootstrap_path is staged_path:
+                    self._staged_bootstrap_path = None
+
     def _record_event(self, event: Mapping[str, object]) -> None:
         sanitized_value = _sanitize_event_value(dict(event), self._secrets)
         sanitized = cast("TailnetEvent", sanitized_value)
@@ -884,6 +994,8 @@ class TailnetSupervisor:
                 self._write_status(sanitized)
             except OSError:
                 logger.warning("Unable to persist Tailnet helper status", exc_info=True)
+        if sanitized.get("event") == "ready":
+            self._consume_staged_bootstrap()
         callback = self._event_callback
         if callback is not None:
             try:
