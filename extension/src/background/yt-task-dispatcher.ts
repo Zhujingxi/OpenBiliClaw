@@ -21,8 +21,11 @@ import { YT_SCOPE_URLS } from "../content/yt/task-executor.ts";
 import { apiUrl } from "../shared/backend-endpoint.ts";
 import { authenticatedFetch } from "../shared/auth.ts";
 import { isNativeSaveTask, type NativeSaveResult, type NativeSaveTask } from "../shared/native-save.ts";
+import { withTaskTabMarker } from "../shared/task-tab.ts";
 import { ensureNativeSaveTaskRecovery, runNativeSaveTask } from "./native-save-task-runner.ts";
 import { createTaskTab } from "./task-tab.ts";
+
+const YT_TASK_MARKER = "openbiliclaw_yt_task";
 
 // Cross-source mutex — same field as xhs/dy dispatchers so all three
 // cooperate on a single long-running task slot.
@@ -424,7 +427,7 @@ function navigateToCurrentScope(): void {
   if (!progress || taskTabId === null) return;
   const scope = progress.scopes[progress.current_scope_idx];
   if (!scope) return;
-  const url = YT_SCOPE_URLS[scope];
+  const url = withTaskTabMarker(YT_SCOPE_URLS[scope], YT_TASK_MARKER);
   chrome.tabs.update(taskTabId, { url }, () => {
     onTabReady(taskTabId!, sendScopeExecuteMessage, { fallbackMs: 10_000 });
   });
@@ -463,7 +466,7 @@ export async function executeTask(task: YtTask): Promise<void> {
     max_scroll_rounds: task.max_scroll_rounds ?? 10,
   };
 
-  const firstUrl = YT_SCOPE_URLS[scopes[0]];
+  const firstUrl = withTaskTabMarker(YT_SCOPE_URLS[scopes[0]], YT_TASK_MARKER);
   let tab: chrome.tabs.Tab;
   try {
     tab = await createTaskTab({ url: firstUrl, active: true });

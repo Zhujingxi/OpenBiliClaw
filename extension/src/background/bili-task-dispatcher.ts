@@ -8,7 +8,10 @@
 
 import { apiUrl } from "../shared/backend-endpoint.ts";
 import { authenticatedFetch } from "../shared/auth.ts";
+import { withTaskTabMarker } from "../shared/task-tab.ts";
 import { createTaskTab } from "./task-tab.ts";
+
+const BILI_TASK_MARKER = "openbiliclaw_bili_task";
 
 const _MUTEX_STALE_MS = 6 * 60 * 1000;
 function tryAcquireDispatcherMutex(label: string): boolean {
@@ -98,7 +101,10 @@ export function buildBiliTaskUrl(task: BiliTask): string | null {
   if (typeof task.pubtime_end === "number") {
     params.push(`pubtime_end=${Math.floor(task.pubtime_end)}`);
   }
-  return `https://search.bilibili.com/all?${params.join("&")}`;
+  return withTaskTabMarker(
+    `https://search.bilibili.com/all?${params.join("&")}`,
+    BILI_TASK_MARKER,
+  );
 }
 
 export function isValidBiliTask(task: unknown): task is BiliTask {

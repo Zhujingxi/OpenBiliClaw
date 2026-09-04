@@ -58,8 +58,11 @@ function releaseDispatcherMutex(label: string): void {
 import { apiUrl } from "../shared/backend-endpoint.ts";
 import { authenticatedFetch } from "../shared/auth.ts";
 import { isNativeSaveTask, type NativeSaveResult, type NativeSaveTask } from "../shared/native-save.ts";
+import { withTaskTabMarker } from "../shared/task-tab.ts";
 import { ensureNativeSaveTaskRecovery, runNativeSaveTask } from "./native-save-task-runner.ts";
 import { createTaskTab } from "./task-tab.ts";
+
+const XHS_TASK_MARKER = "openbiliclaw_xhs_task";
 
 const DEFAULT_POLL_INTERVAL_MS = 45_000;
 const TASK_TIMEOUT_MS = 30_000;
@@ -118,13 +121,16 @@ let taskNavigationFallbackId: ReturnType<typeof setTimeout> | null = null;
 export function buildTaskUrl(task: XhsTask): string | null {
   if (task.type === "native_save") return task.content_url;
   if (task.type === "search" && task.keyword) {
-    return `https://www.xiaohongshu.com/search_result?keyword=${encodeURIComponent(task.keyword)}`;
+    return withTaskTabMarker(
+      `https://www.xiaohongshu.com/search_result?keyword=${encodeURIComponent(task.keyword)}`,
+      XHS_TASK_MARKER,
+    );
   }
   if (task.type === "creator" && task.creator_url) {
-    return task.creator_url;
+    return withTaskTabMarker(task.creator_url, XHS_TASK_MARKER);
   }
   if (task.type === "bootstrap_profile") {
-    return "https://www.xiaohongshu.com/explore";
+    return withTaskTabMarker("https://www.xiaohongshu.com/explore", XHS_TASK_MARKER);
   }
   return null;
 }
@@ -557,7 +563,7 @@ export async function handleTaskResult(result: XhsTaskResult): Promise<void> {
       armClickedNavigationFallback(task, tabId);
       return;
     }
-    chrome.tabs.update(tabId, { url: result.next_url }).catch(() => {
+    chrome.tabs.update(tabId, { url: withTaskTabMarker(result.next_url, XHS_TASK_MARKER) }).catch(() => {
       if (currentTaskId !== task.id) return;
       void reportTaskResult({
         task_id: task.id,

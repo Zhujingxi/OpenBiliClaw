@@ -29,7 +29,7 @@ test("buildBiliTaskUrl encodes keyword search URL with page metadata", () => {
 
   assert.equal(
     buildBiliTaskUrl(task),
-    "https://search.bilibili.com/all?keyword=%E6%9C%BA%E6%A2%B0%E9%94%AE%E7%9B%98%20%E5%A3%B0%E9%9F%B3&page=2",
+    "https://search.bilibili.com/all?keyword=%E6%9C%BA%E6%A2%B0%E9%94%AE%E7%9B%98%20%E5%A3%B0%E9%9F%B3&page=2&openbiliclaw_bili_task=1",
   );
 });
 
@@ -47,7 +47,7 @@ test("buildBiliTaskUrl carries the bounded recent-lane sort", () => {
       order: "pubdate",
       discovery_lane: "recent",
     }),
-    "https://search.bilibili.com/all?keyword=%E5%A4%A7%E6%A8%A1%E5%9E%8B&order=pubdate",
+    "https://search.bilibili.com/all?keyword=%E5%A4%A7%E6%A8%A1%E5%9E%8B&order=pubdate&openbiliclaw_bili_task=1",
   );
 });
 
@@ -60,7 +60,7 @@ test("buildBiliTaskUrl carries strict publication timestamp bounds", () => {
       pubtime_begin: 1704067200,
       pubtime_end: 1735689599,
     }),
-    "https://search.bilibili.com/all?keyword=%E7%8C%AB&pubtime_begin=1704067200&pubtime_end=1735689599",
+    "https://search.bilibili.com/all?keyword=%E7%8C%AB&pubtime_begin=1704067200&pubtime_end=1735689599&openbiliclaw_bili_task=1",
   );
 });
 

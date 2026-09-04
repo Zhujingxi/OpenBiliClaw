@@ -33,13 +33,16 @@ import { attachCoverData } from "./xhs/cover-harvest.js";
 import { registerTaskExecutor } from "./xhs/task-executor.js";
 import { NOTE_ANCHOR_SELECTOR } from "./xhs/selectors.ts";
 import { installNativeSaveExecutor } from "./native-save/runtime.ts";
+import { shouldStartPassiveCollector } from "./native-save/task-mode.ts";
 import { saveXiaohongshu, verifyXiaohongshu } from "./native-save/xiaohongshu.ts";
 import { buildEventFromXhsAction, isXhsAction } from "./xhs/action-event.ts";
 import type { BehaviorEvent } from "../shared/types.js";
 import type { XhsSearchResponseNote } from "../shared/xhs-search-response.js";
 import { recordXhsSearchResponseNotes } from "./xhs/search-response-buffer.js";
 
-startCollector(xiaohongshuAdapter);
+void shouldStartPassiveCollector().then((shouldStart) => {
+  if (shouldStart) startCollector(xiaohongshuAdapter);
+});
 registerTaskExecutor();
 registerE2EExecutor("xiaohongshu");
 installNativeSaveExecutor("xiaohongshu", saveXiaohongshu, verifyXiaohongshu);

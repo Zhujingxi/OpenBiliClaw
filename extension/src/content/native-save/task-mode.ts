@@ -4,7 +4,7 @@ interface NativeSaveTaskTabResponse {
 
 export type NativeSaveTaskTabQuery = () => Promise<unknown>;
 
-/** Keep passive behavior collection out of runner-owned mutation/verification tabs. */
+/** Keep passive behavior collection out of runner-owned and background-task tabs. */
 export async function shouldStartPassiveCollector(
   query: NativeSaveTaskTabQuery = () => chrome.runtime.sendMessage({
     type: "NATIVE_SAVE_TASK_TAB_QUERY",

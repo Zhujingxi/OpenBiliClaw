@@ -128,6 +128,7 @@ import {
   clearSession,
   ensureSession,
 } from "../shared/auth.ts";
+import { isTaskTabUrl } from "../shared/task-tab.ts";
 import type { BehaviorEvent } from "../shared/types.js";
 
 // The event buffer + its chrome.storage.local persistence live in ./buffer.ts
@@ -683,9 +684,11 @@ async function postBangumiIdentity(payload: { uid: number; username: string }): 
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "NATIVE_SAVE_TASK_TAB_QUERY") {
-    void isNativeSaveTaskTabId(sender.tab?.id).then((nativeSaveTaskTab) => {
-      sendResponse({ native_save_task_tab: nativeSaveTaskTab });
-    });
+    void (async () => {
+      const nativeSaveTaskTab = await isNativeSaveTaskTabId(sender.tab?.id);
+      const taskTab = nativeSaveTaskTab || isTaskTabUrl(sender.tab?.url ?? "");
+      sendResponse({ native_save_task_tab: taskTab });
+    })();
     return true;
   }
   if (message.action === "BGM_IDENTITY_OBSERVED") {
@@ -834,15 +837,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   if (message.action !== "BEHAVIOR_EVENT") return;
 
-  const event = message.data as BehaviorEvent;
-  // Keep the message port (and therefore the MV3 worker turn) alive until the
-  // chrome.storage mirror commits. HTTP flush is only a wake after that durable
-  // ACK and is allowed to fail/retry independently.
-  return enqueueEventWithDurableAck(event, sendResponse, (length) => {
-    if (length >= BUFFER_MAX_SIZE || shouldFlushImmediately(event)) {
-      void flushEvents();
+  void (async () => {
+    let nativeTaskTab = false;
+    try {
+      nativeTaskTab = await isNativeSaveTaskTabId(sender.tab?.id);
+    } catch {
+      // If task-tab identification is unavailable, keep user events flowing.
     }
-  });
+    if (nativeTaskTab || isTaskTabUrl(sender.tab?.url ?? "")) {
+      // Task tabs are not user browsing; drop their behavior events.
+      sendResponse({ ok: true, dropped: true });
+      return;
+    }
+    const event = message.data as BehaviorEvent;
+    return enqueueEventWithDurableAck(event, sendResponse, (length) => {
+      if (length >= BUFFER_MAX_SIZE || shouldFlushImmediately(event)) {
+        void flushEvents();
+      }
+    });
+  })();
+  return true;
 });
 
 if (typeof chrome !== "undefined" && chrome.alarms?.onAlarm) {

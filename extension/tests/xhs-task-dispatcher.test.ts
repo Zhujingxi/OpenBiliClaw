@@ -76,7 +76,7 @@ test("buildTaskUrl encodes keyword search URL", () => {
   const url = buildTaskUrl(task);
   assert.equal(
     url,
-    "https://www.xiaohongshu.com/search_result?keyword=%E6%9C%BA%E6%A2%B0%E9%94%AE%E7%9B%98",
+    "https://www.xiaohongshu.com/search_result?keyword=%E6%9C%BA%E6%A2%B0%E9%94%AE%E7%9B%98&openbiliclaw_xhs_task=1",
   );
 });
 
@@ -88,13 +88,13 @@ test("buildTaskUrl returns creator URL directly", () => {
   };
   assert.equal(
     buildTaskUrl(task),
-    "https://www.xiaohongshu.com/user/profile/abc",
+    "https://www.xiaohongshu.com/user/profile/abc?openbiliclaw_xhs_task=1",
   );
 });
 
 test("buildTaskUrl routes bootstrap profile tasks to explore", () => {
   const task: XhsTask = { id: "t-bootstrap", type: "bootstrap_profile" };
-  assert.equal(buildTaskUrl(task), "https://www.xiaohongshu.com/explore");
+  assert.equal(buildTaskUrl(task), "https://www.xiaohongshu.com/explore?openbiliclaw_xhs_task=1");
 });
 
 test("buildTaskUrl returns null for search without keyword", () => {
@@ -383,7 +383,7 @@ test("executeTask opens bootstrap_profile in a foreground tab regardless of scro
   await executeTask(task);
 
   assert.deepEqual(state.createdTabs, [
-    { url: "https://www.xiaohongshu.com/explore", active: true },
+    { url: "https://www.xiaohongshu.com/explore?openbiliclaw_xhs_task=1", active: true },
   ]);
 
   await handleTaskResult({ task_id: "t-bootstrap-no-scroll", urls: [], status: "ok" });
@@ -398,7 +398,7 @@ test("executeTask keeps search discovery in a background tab", async () => {
 
   assert.deepEqual(state.createdTabs, [
     {
-      url: "https://www.xiaohongshu.com/search_result?keyword=demo",
+      url: "https://www.xiaohongshu.com/search_result?keyword=demo&openbiliclaw_xhs_task=1",
       active: false,
     },
   ]);
@@ -465,7 +465,7 @@ test("executeTask opens explore active and waits after clicked profile navigatio
 
   assert.deepEqual(state.createdTabs, [
     {
-      url: "https://www.xiaohongshu.com/explore",
+      url: "https://www.xiaohongshu.com/explore?openbiliclaw_xhs_task=1",
       active: true,
     },
   ]);
@@ -579,7 +579,7 @@ test("bootstrap task follows a discovered profile URL before reporting the resul
     { tabId: 42, muted: true },
     {
       tabId: 42,
-      url: "https://www.xiaohongshu.com/user/profile/current-user",
+      url: "https://www.xiaohongshu.com/user/profile/current-user?openbiliclaw_xhs_task=1",
     },
   ]);
   assert.equal(

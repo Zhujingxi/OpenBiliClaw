@@ -31,9 +31,12 @@ import type {
 import { apiUrl } from "../shared/backend-endpoint.ts";
 import { authenticatedFetch } from "../shared/auth.ts";
 import { isNativeSaveTask, type NativeSaveResult, type NativeSaveTask } from "../shared/native-save.ts";
+import { withTaskTabMarker } from "../shared/task-tab.ts";
 import { ensureNativeSaveTaskRecovery, runNativeSaveTask } from "./native-save-task-runner.ts";
 import { runtimeAssetCandidates } from "../shared/asset-prefix.ts";
 import { createTaskTab } from "./task-tab.ts";
+
+const DY_TASK_MARKER = "openbiliclaw_dy_task";
 // Cross-source mutex via globalThis. Mirror of the helper inlined
 // in xhs-task-dispatcher; both dispatchers coordinate by writing to
 // the same field on globalThis. See dispatcher-mutex.ts for the
@@ -202,16 +205,16 @@ let feedProgress: FeedProgress | null = null;
 export function buildDyTaskUrl(task: DyTask): string | null {
   if (task.type === "native_save") return task.content_url;
   if (task.type === "bootstrap_profile") {
-    return "https://www.douyin.com/";
+    return withTaskTabMarker("https://www.douyin.com/", DY_TASK_MARKER);
   }
   if (task.type === "search") {
-    return "https://www.douyin.com/";
+    return withTaskTabMarker("https://www.douyin.com/", DY_TASK_MARKER);
   }
   if (task.type === "hot") {
-    return "https://www.douyin.com/";
+    return withTaskTabMarker("https://www.douyin.com/", DY_TASK_MARKER);
   }
   if (task.type === "feed") {
-    return "https://www.douyin.com/";
+    return withTaskTabMarker("https://www.douyin.com/", DY_TASK_MARKER);
   }
   return null;
 }
@@ -220,7 +223,7 @@ export function buildDyDiscoveryPageUrl(
   _type: "search" | "hot" | "feed",
   _target?: string,
 ): string {
-  return "https://www.douyin.com/";
+  return withTaskTabMarker("https://www.douyin.com/", DY_TASK_MARKER);
 }
 
 export function isValidDyTask(task: unknown): task is DyTask {
@@ -871,7 +874,7 @@ async function replaceSearchTabForNextKeyword(): Promise<void> {
 
   let tab: chrome.tabs.Tab;
   try {
-    tab = await createTaskTab({ url: "https://www.douyin.com/", active: false });
+    tab = await createTaskTab({ url: withTaskTabMarker("https://www.douyin.com/", DY_TASK_MARKER), active: false });
   } catch (err) {
     await postTaskResult({
       task_id: searchProgress.task_id,
@@ -1054,7 +1057,7 @@ export async function executeTask(
     let tab: chrome.tabs.Tab;
     try {
       tab = await createTaskTab({
-        url: "https://www.douyin.com/",
+        url: withTaskTabMarker("https://www.douyin.com/", DY_TASK_MARKER),
         active: shouldOpenDyTaskActive(task),
       });
     } catch (err) {
@@ -1104,7 +1107,7 @@ export async function executeTask(
     let tab: chrome.tabs.Tab;
     try {
       tab = await createTaskTab({
-        url: "https://www.douyin.com/",
+        url: withTaskTabMarker("https://www.douyin.com/", DY_TASK_MARKER),
         active: shouldOpenDyTaskActive(task),
       });
     } catch (err) {
@@ -1147,7 +1150,7 @@ export async function executeTask(
     let tab: chrome.tabs.Tab;
     try {
       tab = await createTaskTab({
-        url: "https://www.douyin.com/",
+        url: withTaskTabMarker("https://www.douyin.com/", DY_TASK_MARKER),
         active: shouldOpenDyTaskActive(task),
       });
     } catch (err) {
@@ -1206,7 +1209,7 @@ export async function executeTask(
   let tab: chrome.tabs.Tab;
   try {
     tab = await createTaskTab({
-      url: "https://www.douyin.com/",
+      url: withTaskTabMarker("https://www.douyin.com/", DY_TASK_MARKER),
       active: shouldOpenDyTaskActive(task),
     });
   } catch (err) {
