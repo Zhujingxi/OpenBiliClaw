@@ -532,6 +532,7 @@
       }
       clearDesktopRecommendationRecovery(desktopRecommendationLoadState);
       if (!replace && state.videos.length > 0) return;
+      recommendationListVersion += 1;
       state.videos = normalized;
     }
 
@@ -906,6 +907,11 @@
     let autoLoadCheckFallbackTimer = 0;
     let autoLoadCooldownTimer = 0;
     let appendMoreInFlight = false;
+    // Incremented whenever the user-visible recommendation list is replaced
+    // (reshuffle / hydration-replace). In-flight append responses started
+    // before a replacement must be discarded, otherwise a slow 加载更多 may
+    // append an old batch below the newly reshuffled batch.
+    let recommendationListVersion = 0;
     let lastAutoLoadAt = 0;
     let sentinelInView = false;
     let _cachedLanIp = "";
@@ -7677,6 +7683,7 @@ ${cardFeedbackBarHtml()}`;
         const fresh = returned.filter((item) => !visibleKeys.has(recommendationKey(item)));
         // 后端返回空数组时保留现有卡片，不制造空屏。
         if (fresh.length) {
+          recommendationListVersion += 1;
           state.videos = requestPlatform ? replacePlatformCards(state.videos, requestPlatform, fresh) : fresh;
           renderAll();
           showToast("已换一批推荐");
@@ -7697,10 +7704,12 @@ ${cardFeedbackBarHtml()}`;
       // 与换一批同理：捕获请求开始时的平台，响应到达时不再读 state.filter。
       const requestPlatform = activePlatformSlug();
       showAppendSkeletons();
+      const listVersionAtRequest = recommendationListVersion;
       try {
         const requestBody = { excluded_bvids: state.videos.map((v) => v.bvid) };
         if (requestPlatform) requestBody.source_platform = requestPlatform;
         const payload = await requestJson(ENDPOINTS.append, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(requestBody) });
+        if (listVersionAtRequest !== recommendationListVersion) return;
         const retryHint = state.autoLoadOnScroll ? "补上后会自动加载" : "稍后可再点一次";
         if (payload?.items?.length) {
           const returned = normalizeRecommendationList(payload.items);
