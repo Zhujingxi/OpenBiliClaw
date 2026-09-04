@@ -213,7 +213,7 @@ After starting the backend, open `http://127.0.0.1:8420/web` (or just `http://12
 
 ## Recent Updates
 
-📌 Latest: **v0.3.217 (2026-08-27)**
+📌 Latest: **v0.3.218 (2026-08-27)**
 
 - **More reliable recommendation supply** — homogeneous high-score pools remain servable, so refill and serendipity recommendations no longer dry up unnecessarily.
 - **Sharper freshness classification** — actively evolving software, products, models, and tools are reviewed on a shorter cadence, with an explicit admission TTL for legacy `versioned` rows.
