@@ -13,6 +13,7 @@ name: Release Desktop Installers
 # release on it would stall the whole publish. Build the Intel .dmg on demand via
 # the manual build-installers.yml and attach it to the release if needed.
 on:
+  workflow_dispatch:
   push:
     tags:
       - "desktop-v*"

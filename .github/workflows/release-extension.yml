@@ -1,6 +1,7 @@
 name: Release Extension Package
 
 on:
+  workflow_dispatch:
   push:
     tags:
       - "extension-v*"
