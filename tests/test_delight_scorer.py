@@ -98,6 +98,7 @@ def test_database_delight_columns_exist_after_init(tmp_path: Path) -> None:
     assert "delight_hook" in columns
     assert "delight_notified" in columns
     assert "delight_notified_at" in columns
+    assert "delight_seen" in columns
 
 
 def test_database_update_and_get_delight_candidate(tmp_path: Path) -> None:
@@ -257,6 +258,75 @@ def test_database_mark_delight_notified(tmp_path: Path) -> None:
     # Should not appear since it's already notified
     candidate = database.get_delight_candidate(min_delight_score=0.85)
     assert candidate is None
+
+
+def test_database_delivered_but_unseen_delight_still_rehydrates(tmp_path: Path) -> None:
+    """A delivered-only delight (background /delight/sent ack) must remain
+    visible to popup re-hydration until the user actually views/dismisses it.
+
+    Regression: the extension service worker ACKs every WebSocket
+    ``delight.candidate`` through ``/api/delight/sent``, which used to set
+    ``delight_notified=1`` and made ``pending-batch`` return nothing even
+    though the user never saw the card.
+    """
+    database = _make_database(tmp_path)
+    bvid = "BV1SENTBUTUNSEEN"
+    database.cache_content(bvid, title="已推送未看", relevance_score=0.9)
+    _mark_delight_ready(
+        database,
+        bvid,
+        delight_score=0.95,
+        reason="reason",
+        hook="hook",
+    )
+
+    # Initial state: visible to both proactive push and re-hydration.
+    assert database.get_delight_candidates(min_delight_score=0.85)[0]["bvid"] == bvid
+    assert (
+        database.get_delight_candidates(min_delight_score=0.85, include_delivered=True)[0]["bvid"]
+        == bvid
+    )
+
+    # /api/delight/sent: only marks delivered, not seen.
+    database.mark_delight_notified(bvid)
+    assert database.get_delight_candidates(min_delight_score=0.85, include_delivered=True) != []
+    # Proactive push/CLI still excludes delivered items.
+    assert database.get_delight_candidates(min_delight_score=0.85) == []
+
+    # User actually views the candidate -> it leaves re-hydration as well.
+    database.mark_delight_viewed(bvid)
+    assert database.get_delight_candidates(min_delight_score=0.85, include_delivered=True) == []
+
+
+def test_mark_delight_viewed_and_seen_set_delight_seen(tmp_path: Path) -> None:
+    database = _make_database(tmp_path)
+    bvid = "BV1VIEWSEEN"
+    database.cache_content(bvid, title="查看/关闭", relevance_score=0.9)
+    _mark_delight_ready(
+        database,
+        bvid,
+        delight_score=0.95,
+        reason="reason",
+        hook="hook",
+    )
+
+    database.mark_delight_viewed(bvid)
+    row = database.conn.execute(
+        "SELECT delight_notified, delight_seen FROM content_cache WHERE bvid = ?",
+        (bvid,),
+    ).fetchone()
+    assert row is not None
+    assert row["delight_notified"] == 1
+    assert row["delight_seen"] == 1
+
+    database.mark_delight_seen(bvid)
+    row = database.conn.execute(
+        "SELECT delight_notified, delight_seen FROM content_cache WHERE bvid = ?",
+        (bvid,),
+    ).fetchone()
+    assert row is not None
+    assert row["delight_notified"] == 1
+    assert row["delight_seen"] == 1
 
 
 def test_database_delight_candidates_skip_feedbacked_items(tmp_path: Path) -> None:

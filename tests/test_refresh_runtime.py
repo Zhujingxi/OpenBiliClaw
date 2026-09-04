@@ -332,6 +332,7 @@ class _FakeDatabase:
         *,
         min_delight_score: float = 0.85,
         limit: int = 20,
+        **kwargs: object,
     ) -> list[dict[str, object]]:
         self.get_delight_thresholds.append(min_delight_score)
         if self.delight_candidate is None:

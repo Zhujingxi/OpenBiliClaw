@@ -158,8 +158,8 @@ result，再经过后端身份门禁转换统一事件和账号分区 Node affin
 
 | 方法与路径 | 状态 | 契约 |
 |---|---|---|
-| `POST /api/delight/respond` | ✅ | `response="dismiss"` 是三端“× / 看过了，不再推荐”的永久消费动作：服务端按 `bvid` 解析 `content_cache` 中的 canonical `source_platform/content_id`，先写 `seen_items`，再置 `delight_notified=1`；后续普通推荐与惊喜推荐均硬排除。`view` 只置惊喜已读，`dislike` 另记录负偏好，`like/chat` 继续保留当前候选。 |
-| `POST /api/delight/sent` | ✅ | 仅确认主动通知已送达并维护推送冷却，不代表用户已看，不写 `seen_items`；UI 叉号不得把它作为消费路径。 |
+| `POST /api/delight/respond` | ✅ | `response="dismiss"` 是三端“× / 看过了，不再推荐”的永久消费动作：服务端按 `bvid` 解析 `content_cache` 中的 canonical `source_platform/content_id`，先写 `seen_items`，再置 `delight_seen=1`；后续普通推荐与惊喜推荐均硬排除。`view` 只置用户已看（`delight_seen=1`），`dislike` 另记录负偏好，`like/chat` 继续保留当前候选。 |
+| `POST /api/delight/sent` | ✅ | 仅确认主动通知已送达并维护推送冷却，不代表用户已看，不写 `seen_items`，也不置 `delight_seen`；该候选仍会被 `GET /api/delight/pending-batch` 返回用于 popup 重灌。UI 叉号不得把它作为消费路径。 |
 
 ## 推荐反馈端点
 

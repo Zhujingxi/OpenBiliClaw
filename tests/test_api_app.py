@@ -11999,12 +11999,14 @@ class TestBackendAPI:
                 min_delight_score: float,
                 limit: int,
                 include_liked: bool = False,
+                **kwargs: object,
             ) -> list[dict[str, object]]:
                 self.calls.append(
                     {
                         "min_delight_score": min_delight_score,
                         "limit": limit,
                         "include_liked": include_liked,
+                        "include_delivered": bool(kwargs.get("include_delivered", False)),
                     }
                 )
                 return [
@@ -12040,6 +12042,7 @@ class TestBackendAPI:
             ("BV1FRESH", "pending"),
         ]
         assert database.calls and database.calls[0]["include_liked"] is True
+        assert database.calls[0]["include_delivered"] is True
 
     def test_delight_pending_surfaces_publication_fields(self) -> None:
         from fastapi.testclient import TestClient
@@ -12075,6 +12078,7 @@ class TestBackendAPI:
                 *,
                 min_delight_score: float,
                 limit: int,
+                **kwargs: object,
             ) -> list[dict[str, object]]:
                 return [
                     {
@@ -12124,6 +12128,7 @@ class TestBackendAPI:
                 min_delight_score: float,
                 limit: int,
                 include_liked: bool = False,
+                **kwargs: object,
             ) -> list[dict[str, object]]:
                 return [
                     {
@@ -12160,6 +12165,7 @@ class TestBackendAPI:
                 min_delight_score: float,
                 limit: int,
                 include_liked: bool = False,
+                **kwargs: object,
             ) -> list[dict[str, object]]:
                 return [
                     {
@@ -12202,6 +12208,7 @@ class TestBackendAPI:
                 min_delight_score: float,
                 limit: int,
                 include_liked: bool = False,
+                **kwargs: object,
             ) -> list[dict[str, object]]:
                 return [
                     {
@@ -12238,6 +12245,7 @@ class TestBackendAPI:
                 min_delight_score: float,
                 limit: int,
                 include_liked: bool = False,
+                **kwargs: object,
             ) -> list[dict[str, object]]:
                 self.calls.append(
                     {
@@ -12277,6 +12285,7 @@ class TestBackendAPI:
                 min_delight_score: float,
                 limit: int,
                 include_liked: bool = False,
+                **kwargs: object,
             ) -> list[dict[str, object]]:
                 self.calls.append(limit)
                 return []

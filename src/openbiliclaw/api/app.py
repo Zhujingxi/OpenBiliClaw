@@ -9932,6 +9932,7 @@ def create_app(
             min_delight_score=threshold,
             limit=max(1, min(100, int(requested_limit))),
             include_liked=True,
+            include_delivered=True,
         )
         # Reuse the same disliked-topic filter as get_pending_delight by
         # going through the runtime controller's loader if possible.
@@ -10099,7 +10100,13 @@ def create_app(
             # bump the 4h proactive-push cooldown — engaging with one
             # surprise shouldn't delay discovery of the next.
             try:
-                ctx.database.mark_delight_notified(bvid)
+                mark_viewed = getattr(ctx.database, "mark_delight_viewed", None)
+                if callable(mark_viewed):
+                    mark_viewed(bvid)
+                else:
+                    # Backward-compatible fallback for fakes/adapters that
+                    # only expose the older delivered-only marker.
+                    ctx.database.mark_delight_notified(bvid)
             except Exception:
                 logger.debug("Failed to mark viewed delight bvid %s", bvid)
             return JSONResponse(content={"ok": True, "action": "viewed", "bvid": bvid})

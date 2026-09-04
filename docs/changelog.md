@@ -8,6 +8,8 @@
 
 - **新增 Bilibili 移动端原生播放器与视频互动接口**：后端新增移动端播放器所需的登录态、播放地址、cookie 导入接口，并扩展视频关系查询、点赞、投币、三连、收藏、稍后再看、相关推荐和评论等接口，配套补充 `BilibiliAPIClient` 方法，供移动端原生客户端接入。
 
+- **修复惊喜推荐“后台 ACK 后 popup 重灌为空”**：扩展后台收到 `delight.candidate` 后会调 `/api/delight/sent` 确认送达，旧逻辑把该确认直接写成 `delight_notified=1`，导致 `pending-batch` 重灌时过滤掉所有已推送但用户实际还没看过的惊喜候选。现将“已送达”和“用户已看”拆开：新增 `delight_seen`，`/delight/sent` 只标记已送达并保留重灌可见性，`view / dismiss / dislike` 才真正标记已看/消费。`/api/delight/pending-batch` 改用 `include_delivered=True` 返回未看过候选，插件重开或 `delight.refreshed` 后不会再出现空队列。
+
 - **修复 GitHub PAT 模式下 starred 分页 Link 路径校验**：使用 PAT 时 GitHub 分页 Link 会返回 `/user/<id>/starred`，而原始请求路径是 `/users/<username>/starred`，此前会误判为不安全路径导致 `fetch-github` 失败；现已允许这两种安全的 canonical 路径，并补充回归测试。
 
 - **桌面 Release Tailnet 构建修复**：桌面发布流程先按目标矩阵预取 Tailnet helper 模块，并修复生成的三方许可文件在 Windows CRLF 检出下的校验误报，避免安装包发布被构建期 notices 检查卡住。

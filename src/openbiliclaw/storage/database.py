@@ -925,6 +925,25 @@ def _delight_unseen_guard_sql() -> str:
     """
 
 
+def _delight_visibility_sql(*, include_delivered: bool) -> str:
+    """Return the SQL predicate for which delight rows are queue-visible.
+
+    Default (``include_delivered=False``) is the proactive push / CLI /
+    manual-trigger view: only candidates that have not yet been delivered
+    to any client (``delight_notified=0``).
+
+    ``include_delivered=True`` is the popup re-hydration view: a candidate
+    that was pushed to a background client but has not been seen/read by
+    the user (``delight_seen=0``) must still be returned so the popup can
+    re-show it after a reload.  ``mark_delight_viewed`` / user dismissal
+    set ``delight_seen=1`` and are the actions that remove it from this
+    queue.
+    """
+    if include_delivered:
+        return "AND COALESCE(delight_seen, 0) = 0"
+    return "AND COALESCE(delight_notified, 0) = 0"
+
+
 # Rows claimed by the surprise (delight) channel: already delivered as a
 # delight, or scored above the current threshold with its formal pool copy
 # synchronized into the delight snapshot. Requiring the exact snapshot keeps
@@ -12799,6 +12818,7 @@ class Database:
             "delight_hook": "TEXT DEFAULT ''",
             "delight_notified": "INTEGER DEFAULT 0",
             "delight_notified_at": "TIMESTAMP",
+            "delight_seen": "INTEGER DEFAULT 0",
         }
         for column_name, column_type in required_columns.items():
             if column_name in existing_columns:
@@ -19988,8 +20008,14 @@ class Database:
         min_delight_score: float = 0.85,
         limit: int = 20,
         include_liked: bool = False,
+        include_delivered: bool = False,
     ) -> list[dict[str, Any]]:
-        """Return up to ``limit`` un-notified delight candidates ordered by score.
+        """Return up to ``limit`` queue-visible delight candidates ordered by score.
+
+        By default this returns only not-yet-delivered candidates
+        (``delight_notified=0``).  When ``include_delivered=True`` it returns
+        delivered-but-not-yet-seen candidates too (``delight_seen=0``), which
+        is what popup re-hydration uses.
 
         Queue readiness is stricter than merely having a score and arbitrary
         non-empty metadata: ``pool_expression`` / ``pool_topic_label`` must be
@@ -20025,7 +20051,7 @@ class Database:
             FROM content_cache
             WHERE COALESCE(delight_score, 0.0) >= ?
               AND {admission_sql}
-              AND COALESCE(delight_notified, 0) = 0
+              {_delight_visibility_sql(include_delivered=include_delivered)}
               {_delight_ready_copy_sql()}
               AND TRIM(COALESCE(delight_reason, '')) =
                   TRIM(COALESCE(pool_expression, ''))
@@ -20053,6 +20079,26 @@ class Database:
             UPDATE content_cache
             SET delight_notified = 1,
                 delight_notified_at = CURRENT_TIMESTAMP
+            WHERE bvid = ?
+            """,
+            (bvid,),
+        )
+
+    def mark_delight_viewed(self, bvid: str) -> None:
+        """Mark a delight as read/viewed by the user.
+
+        Unlike ``mark_delight_notified``, this sets the ``delight_seen``
+        flag so the candidate leaves popup re-hydration while remaining
+        visible in the in-session queue. It does not write the permanent
+        ``seen_items`` ledger; a later dismiss is still the action that
+        removes the content from both normal and surprise channels.
+        """
+        self._execute_write(
+            """
+            UPDATE content_cache
+            SET delight_notified = 1,
+                delight_notified_at = CURRENT_TIMESTAMP,
+                delight_seen = 1
             WHERE bvid = ?
             """,
             (bvid,),
@@ -20087,7 +20133,7 @@ class Database:
             if platform and platform != "unknown" and content_id:
                 self.mark_items_seen(platform, [content_id])
                 recorded = True
-        self.mark_delight_notified(bvid)
+        self.mark_delight_viewed(bvid)
         return recorded
 
     def update_delight_score(

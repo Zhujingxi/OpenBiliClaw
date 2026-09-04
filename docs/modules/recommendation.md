@@ -408,9 +408,9 @@ Content-Type: application/json
 
 ### Delight Feedback
 
-`POST /api/delight/respond` 支持 `view / like / dislike / chat / dismiss`。`like / chat` 只记录喜欢或对话学习信号，候选保留在队列里；`view`（看看/点开浏览）保留当场卡片的「已打开」展示，但会把候选标记为已读（`delight_notified=1`，不重置 4 小时主动推送冷却）——语义对齐推荐池的 `pool_status='shown'`：浏览过的惊喜在下次队列重灌时不再出现；`dislike` 立即移除并记录负偏好；`dismiss` 对应移动、桌面和扩展统一的“× / 看过了，不再推荐”，先把内容 canonical identity 写入 `seen_items`，再置 `delight_notified=1`，因此后续普通推荐与惊喜推荐都硬排除。
+`POST /api/delight/respond` 支持 `view / like / dislike / chat / dismiss`。`like / chat` 只记录喜欢或对话学习信号，候选保留在队列里；`view`（看看/点开浏览）保留当场卡片的「已打开」展示，但会把候选标记为用户已看（`delight_seen=1`，不重置 4 小时主动推送冷却）——语义对齐推荐池的 `pool_status='shown'`：浏览过的惊喜在下次队列重灌时不再出现；`dislike` 立即移除并记录负偏好；`dismiss` 对应移动、桌面和扩展统一的“× / 看过了，不再推荐”，先把内容 canonical identity 写入 `seen_items`，再置 `delight_seen=1`，因此后续普通推荐与惊喜推荐都硬排除。
 
-正向保留跨重灌生效：`GET /api/delight/pending-batch` 以 `include_liked=True` 调用 `get_delight_candidates`，已点喜欢（`feedback_type='like'`）的候选在 popup 重开 / `delight.refreshed` 重灌后仍保留队列位置，并以 `state="liked"` 下发供三端恢复「已喜欢」展示；`view` / `dismiss` / `dislike`（置 `delight_notified=1`）会让候选退出重灌队列。所有 delight scoring、动态阈值、计数与 pending 查询还统一叠加 `seen_items` guard，外部浏览、点赞、收藏或投币已经进入已看账本的内容不会占据惊喜栏位。WS 主动推送（`get_pending_delight`）、候选计数与 CLI 仍排除已喜欢项，避免把喜欢过的内容当新惊喜重复推送。
+正向保留跨重灌生效：`GET /api/delight/pending-batch` 以 `include_liked=True` 和 `include_delivered=True` 调用 `get_delight_candidates`，已点喜欢（`feedback_type='like'`）以及“已推送但用户尚未看过”的候选在 popup 重开 / `delight.refreshed` 重灌后仍保留队列位置，并以 `state="liked"` / `pending` 下发；`view` / `dismiss` / `dislike`（置 `delight_seen=1` 或写 `seen_items`）会让候选退出重灌队列。所有 delight scoring、动态阈值、计数与 pending 查询还统一叠加 `seen_items` guard，外部浏览、点赞、收藏或投币已经进入已看账本的内容不会占据惊喜栏位。WS 主动推送（`get_pending_delight`）、候选计数与 CLI 仍排除已喜欢项，避免把喜欢过的内容当新惊喜重复推送。
 
 图形端把结果提示、动作组和 like 的可访问状态分开投影；`handled` 只保留为 `viewed / rejected` 的兼容终态标记，不再用来隐藏 liked 的动作组：
 
